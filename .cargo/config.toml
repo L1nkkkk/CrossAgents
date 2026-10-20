@@ -1,0 +1,3 @@
+[env]
+# ts-rs writes TypeScript bindings here (see crates/api-types).
+TS_RS_EXPORT_DIR = { value = "bindings", relative = true }
