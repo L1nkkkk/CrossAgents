@@ -268,7 +268,7 @@ crates/
 ├── cli/               crossagents 命令（含隐藏的 `crossagents mcp` stdio MCP 代理）
 └── mock-agent/        可编程 ACP mock agent + 全部端到端测试（无需 LLM）
 apps/
-└── gui/               v2：Tauri 2 GUI
+└── gui/               v2：Tauri 2 + React GUI，纯 API 客户端（独立 Cargo workspace）
 ```
 
 与最初设想的差异：没有独立的 `plugin-protocol`（协议就是 ACP）、`mcp`（MCP server 只是 CLI 里的薄代理，
@@ -284,7 +284,8 @@ apps/
 | M1 | ACP 驱动、claude/codex 插件、agent 会话、send/attach | ✅ [任务书](tasks/M1.md) |
 | M2–M3 | 协作工具（MCP）、任务规格、hub 验收、固定 Pipeline：审批、worktree 并行、重试/升级、Reviewer、合并 | ✅ [任务书](tasks/M2.md) |
 | M4 | 插件目录（外部插件）、成本统计、收尾 | ✅ [任务书](tasks/M4.md) |
-| v2 | Tauri GUI（任务树、实时输出、计划审批、diff、成本面板）；自由编排 Pipeline | 待做 |
+| v2 | Tauri GUI：run 列表、计划审批、任务详情（验收输出、diff stat）、agent 实时输出与对话、成本面板 | ✅ [任务书](tasks/V2-GUI.md) |
+| v2 后续 | 审批时编辑规格、完整 diff 查看、自由编排 Pipeline | 待做 |
 
 v1 的自动化测试全部用 mock agent 完成；与真实 Claude Code / Codex 的联调需要用户本人登录后进行。
 
