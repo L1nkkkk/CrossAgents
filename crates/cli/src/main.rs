@@ -40,6 +40,11 @@ pub enum Command {
     /// List available agent plugins.
     #[command(subcommand)]
     Plugin(cmd::plugin::PluginCommand),
+    /// Plan, approve and follow orchestrated runs.
+    Run(cmd::run::RunArgs),
+    /// Serve the collaboration tools over MCP on stdio (started by the hub for agents).
+    #[command(hide = true)]
+    Mcp,
 }
 
 fn main() -> ExitCode {

@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 pub use crossagents_core::{
-    Agent, AgentId, AgentStatus, Capabilities, Event, EventKind, MessageId, OutputStream, Role,
-    StopReason, ToolStatus,
+    Agent, AgentId, AgentStatus, Capabilities, CheckResult, Event, EventKind, MessageId,
+    OutputStream, PlannedTask, Role, Run, RunId, RunStatus, StopReason, Task, TaskId, TaskStatus,
+    ToolInfo, ToolStatus,
 };
 
 pub const API_VERSION: &str = "v1";
@@ -83,6 +84,53 @@ pub struct PluginInfo {
 #[ts(export)]
 pub struct ListPluginsResponse {
     pub plugins: Vec<PluginInfo>,
+}
+
+/// Starts a run. Agents are given by name or id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateRunRequest {
+    pub request: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    pub planner: String,
+    /// Template for workers.
+    pub worker: String,
+    #[serde(default)]
+    pub escalate: Option<String>,
+    #[serde(default)]
+    pub reviewer: Option<String>,
+    #[serde(default)]
+    pub auto_approve: bool,
+    #[serde(default)]
+    pub max_parallel: Option<u32>,
+    #[serde(default)]
+    pub max_attempts: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListRunsResponse {
+    pub runs: Vec<crossagents_core::Run>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RunDetail {
+    pub run: crossagents_core::Run,
+    pub tasks: Vec<crossagents_core::Task>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RejectRunRequest {
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListToolsResponse {
+    pub tools: Vec<crossagents_core::ToolInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

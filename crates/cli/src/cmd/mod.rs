@@ -1,7 +1,9 @@
 pub mod agent;
 pub mod events;
 pub mod hub;
+pub mod mcp;
 pub mod plugin;
+pub mod run;
 pub mod session;
 
 use anyhow::Result;
@@ -11,6 +13,9 @@ use crate::client::Client;
 use crate::{Cli, Command};
 
 pub async fn run(cli: Cli) -> Result<()> {
+    if let Command::Mcp = cli.command {
+        return mcp::run().await;
+    }
     let paths = Paths::from_env()?;
     let ctx = Context {
         paths,
@@ -23,6 +28,8 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Send(args) => session::send(&ctx, args).await,
         Command::Attach(args) => session::attach(&ctx, args).await,
         Command::Plugin(cmd) => plugin::run(&ctx, cmd).await,
+        Command::Run(args) => run::run(&ctx, args).await,
+        Command::Mcp => unreachable!("handled above"),
     }
 }
 

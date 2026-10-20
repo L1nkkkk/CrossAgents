@@ -1,17 +1,21 @@
 //! The CrossAgents hub: owns all state and serves the local API.
 
 pub mod api;
+pub mod collab;
 pub mod paths;
 pub mod runtime;
 
 use std::fs::{File, TryLockError};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use crossagents_core::{EventBus, EventKind, Store};
+use crossagents_orchestrator::{GitWorkspaces, Orchestrator, OrchestratorConfig, ShellVerifier};
 use crossagents_store_sqlite::SqliteStore;
+
+use crate::collab::{AgentTokens, CollabSetup, HubHost};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -26,6 +30,7 @@ pub struct RunningHub {
     pub token: String,
     pub bus: Arc<EventBus>,
     pub runtime: Arc<Runtime>,
+    pub orchestrator: Arc<Orchestrator>,
     shutdown: CancellationToken,
     task: JoinHandle<Result<()>>,
 }
@@ -49,14 +54,6 @@ impl RunningHub {
 /// Starts the hub: takes the single-instance lock, opens the store, binds the API and
 /// writes `hub.json`. Returns once the hub is accepting connections.
 pub async fn start(config: HubConfig) -> Result<RunningHub> {
-    start_with(config, None).await
-}
-
-/// [`start`] with extra per-session setup from higher layers.
-pub async fn start_with(
-    config: HubConfig,
-    setup: Option<Arc<dyn SessionSetup>>,
-) -> Result<RunningHub> {
     let paths = config.paths.clone();
     std::fs::create_dir_all(&paths.home)
         .with_context(|| format!("cannot create {}", paths.home.display()))?;
@@ -65,17 +62,44 @@ pub async fn start_with(
     let token = ensure_token(&paths)?;
     let store = Arc::new(SqliteStore::open(&paths.db()).await?);
     let bus = Arc::new(EventBus::new(store.clone() as Arc<dyn Store>));
-    let mut runtime = Runtime::new(bus.clone(), PluginRegistry::with_config(&config.plugins));
-    if let Some(setup) = setup {
-        runtime = runtime.with_setup(setup);
-    }
-    let runtime = Arc::new(runtime);
+
+    let tokens = Arc::new(AgentTokens::default());
+    let setup = Arc::new(CollabSetup {
+        tokens: tokens.clone(),
+        mcp_command: match &config.mcp_command {
+            Some(command) => command.clone(),
+            None => default_mcp_command()?,
+        },
+        url: OnceLock::new(),
+    });
+    let runtime = Arc::new(
+        Runtime::new(bus.clone(), PluginRegistry::with_config(&config.plugins))
+            .with_setup(setup.clone()),
+    );
     runtime.reset_statuses().await?;
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.port))
         .await
         .with_context(|| format!("cannot bind 127.0.0.1:{}", config.port))?;
     let addr = listener.local_addr()?;
+    let _ = setup.url.set(format!("http://{addr}"));
+
+    let orchestrator = Orchestrator::new(
+        store.clone() as Arc<dyn Store>,
+        bus.clone(),
+        Arc::new(HubHost {
+            runtime: runtime.clone(),
+            bus: bus.clone(),
+        }),
+        Arc::new(GitWorkspaces),
+        Arc::new(ShellVerifier::default()),
+        OrchestratorConfig {
+            worktrees: paths.home.join("worktrees"),
+            max_nudges: 2,
+        },
+    );
+    orchestrator.watch();
+    orchestrator.resume().await?;
 
     let started_at = Utc::now();
     let hub_file = HubFile {
@@ -91,6 +115,8 @@ pub async fn start_with(
     let state = Arc::new(api::AppState {
         bus: bus.clone(),
         runtime: runtime.clone(),
+        orchestrator: orchestrator.clone(),
+        tokens,
         token: token.clone(),
         home: paths.home.clone(),
         started_at,
@@ -131,9 +157,16 @@ pub async fn start_with(
         token,
         bus,
         runtime,
+        orchestrator,
         shutdown,
         task,
     })
+}
+
+/// `<this executable> mcp`.
+fn default_mcp_command() -> Result<Vec<String>> {
+    let exe = std::env::current_exe().context("cannot locate the crossagents executable")?;
+    Ok(vec![exe.display().to_string(), "mcp".into()])
 }
 
 /// Runs the hub until `stop` resolves or a client calls `POST /v1/shutdown`.

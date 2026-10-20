@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Extension;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
@@ -15,15 +16,18 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use crossagents_api_types::{
-    API_VERSION, ApiError, CreateAgentRequest, ErrorCode, HealthResponse, HubInfo,
-    ListAgentsResponse, ListPluginsResponse, PluginInfo, SendMessageRequest, SendMessageResponse,
+    API_VERSION, ApiError, CreateAgentRequest, CreateRunRequest, ErrorCode, HealthResponse,
+    HubInfo, ListAgentsResponse, ListPluginsResponse, ListRunsResponse, ListToolsResponse,
+    PluginInfo, RejectRunRequest, RunDetail, SendMessageRequest, SendMessageResponse,
 };
-
-use crate::runtime::Runtime;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, AgentStatus, CoreError, Event, EventBus, EventKind, Store,
-    validate_agent_name,
+    Agent, AgentId, AgentKey, AgentStatus, CoreError, Event, EventBus, EventKind, Run, RunConfig,
+    RunId, Store, validate_agent_name,
 };
+use crossagents_orchestrator::{NewRun, Orchestrator};
+
+use crate::collab::AgentTokens;
+use crate::runtime::Runtime;
 use futures::Stream;
 use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc};
@@ -38,6 +42,8 @@ const EVENT_PAGE: u32 = 500;
 pub struct AppState {
     pub bus: Arc<EventBus>,
     pub runtime: Arc<Runtime>,
+    pub orchestrator: Arc<Orchestrator>,
+    pub tokens: Arc<AgentTokens>,
     pub token: String,
     pub home: PathBuf,
     pub started_at: DateTime<Utc>,
@@ -60,12 +66,27 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/agents/{key}/cancel", post(cancel_agent))
         .route("/v1/agents/{key}/messages", post(send_message))
         .route("/v1/plugins", get(list_plugins))
+        .route("/v1/runs", get(list_runs).post(create_run))
+        .route("/v1/runs/{key}", get(get_run))
+        .route("/v1/runs/{key}/approve", post(approve_run))
+        .route("/v1/runs/{key}/reject", post(reject_run))
+        .route("/v1/runs/{key}/cancel", post(cancel_run))
         .route("/v1/events", get(events))
         .route("/v1/shutdown", post(shutdown))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
+    // Routes for agents, authenticated with their per-session token.
+    let me = Router::new()
+        .route("/v1/me", get(me))
+        .route("/v1/me/tools", get(my_tools))
+        .route("/v1/me/tools/{name}", post(call_tool))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_agent_token,
+        ));
     Router::new()
         .route("/v1/health", get(health))
         .merge(authed)
+        .merge(me)
         .with_state(state)
 }
 
@@ -132,6 +153,38 @@ async fn require_token(
             "missing or invalid bearer token",
         )
         .into_response()
+    }
+}
+
+/// Resolves the agent behind a per-session token and passes it on as an extension.
+async fn require_agent_token(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let presented = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let agent = match presented {
+        Some(token) => match state.tokens.agent(token).await {
+            Some(id) => state.store().get_agent(&AgentKey::Id(id)).await.ok(),
+            None => None,
+        },
+        None => None,
+    };
+    match agent {
+        Some(agent) => {
+            request.extensions_mut().insert(agent);
+            next.run(request).await
+        }
+        None => AppError::new(
+            StatusCode::UNAUTHORIZED,
+            ErrorCode::Unauthorized,
+            "missing or invalid agent token",
+        )
+        .into_response(),
     }
 }
 
@@ -286,6 +339,161 @@ async fn list_plugins(State(state): State<Arc<AppState>>) -> Json<ListPluginsRes
         })
         .collect();
     Json(ListPluginsResponse { plugins })
+}
+
+// ---------------------------------------------------------------------------------------
+// Runs
+
+/// A run by full id, or by a unique prefix or suffix of it (the suffix appears in branch
+/// names).
+async fn resolve_run(state: &AppState, key: &str) -> ApiResult<RunId> {
+    if let Ok(id) = key.parse::<RunId>() {
+        return Ok(id);
+    }
+    let key = key.trim().to_lowercase().replace('-', "");
+    if key.len() < 4 {
+        return Err(AppError::bad_request(
+            "give at least 4 characters of the run id",
+        ));
+    }
+    let matches: Vec<RunId> = state
+        .store()
+        .list_runs()
+        .await?
+        .into_iter()
+        .map(|r| r.id)
+        .filter(|id| {
+            let hex = id.to_string().replace('-', "");
+            hex.starts_with(&key) || hex.ends_with(&key)
+        })
+        .collect();
+    match matches.as_slice() {
+        [id] => Ok(*id),
+        [] => Err(CoreError::NotFound {
+            kind: "run",
+            id: key,
+        }
+        .into()),
+        _ => Err(AppError::bad_request(format!(
+            "{key:?} matches several runs"
+        ))),
+    }
+}
+
+async fn agent_id(state: &AppState, key: &str) -> ApiResult<AgentId> {
+    Ok(state.store().get_agent(&AgentKey::parse(key)).await?.id)
+}
+
+async fn create_run(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateRunRequest>,
+) -> ApiResult<(StatusCode, Json<Run>)> {
+    let escalate = match &req.escalate {
+        Some(key) => Some(agent_id(&state, key).await?),
+        None => None,
+    };
+    let reviewer = match &req.reviewer {
+        Some(key) => Some(agent_id(&state, key).await?),
+        None => None,
+    };
+    let new = NewRun {
+        request: req.request,
+        title: req.title,
+        planner: agent_id(&state, &req.planner).await?,
+        config: RunConfig {
+            worker: agent_id(&state, &req.worker).await?,
+            escalate,
+            reviewer,
+            auto_approve: req.auto_approve,
+            max_parallel: req.max_parallel.unwrap_or(RunConfig::DEFAULT_MAX_PARALLEL),
+            max_attempts: req.max_attempts.unwrap_or(RunConfig::DEFAULT_MAX_ATTEMPTS),
+        },
+    };
+    let run = state.orchestrator.create_run(new).await?;
+    Ok((StatusCode::CREATED, Json(run)))
+}
+
+async fn list_runs(State(state): State<Arc<AppState>>) -> ApiResult<Json<ListRunsResponse>> {
+    Ok(Json(ListRunsResponse {
+        runs: state.store().list_runs().await?,
+    }))
+}
+
+async fn run_detail(state: &AppState, id: RunId) -> ApiResult<Json<RunDetail>> {
+    Ok(Json(RunDetail {
+        run: state.store().get_run(id).await?,
+        tasks: state.store().list_tasks(id).await?,
+    }))
+}
+
+async fn get_run(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<RunDetail>> {
+    let id = resolve_run(&state, &key).await?;
+    run_detail(&state, id).await
+}
+
+async fn approve_run(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<RunDetail>> {
+    let id = resolve_run(&state, &key).await?;
+    state.orchestrator.approve(id).await?;
+    run_detail(&state, id).await
+}
+
+async fn reject_run(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(req): Json<RejectRunRequest>,
+) -> ApiResult<Json<RunDetail>> {
+    let id = resolve_run(&state, &key).await?;
+    state.orchestrator.reject(id, req.reason).await?;
+    run_detail(&state, id).await
+}
+
+async fn cancel_run(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<RunDetail>> {
+    let id = resolve_run(&state, &key).await?;
+    state.orchestrator.cancel(id).await?;
+    run_detail(&state, id).await
+}
+
+// ---------------------------------------------------------------------------------------
+// Agent-facing routes
+
+async fn me(Extension(agent): Extension<Agent>) -> Json<Agent> {
+    Json(agent)
+}
+
+async fn my_tools(
+    State(state): State<Arc<AppState>>,
+    Extension(agent): Extension<Agent>,
+) -> Json<ListToolsResponse> {
+    Json(ListToolsResponse {
+        tools: state.orchestrator.tools_for(agent.role),
+    })
+}
+
+async fn call_tool(
+    State(state): State<Arc<AppState>>,
+    Extension(agent): Extension<Agent>,
+    Path(name): Path<String>,
+    body: Option<Json<serde_json::Value>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let input = body.map(|Json(v)| v).unwrap_or(serde_json::Value::Null);
+    tracing::info!(agent = %agent.name, tool = %name, "tool call");
+    // Detached: a tool may end the caller's own session (e.g. a reviewer's verdict removes
+    // the reviewer), which drops this request. The state change must still finish.
+    let orchestrator = state.orchestrator.clone();
+    let call = tokio::spawn(async move { orchestrator.call_tool(&agent, &name, input).await });
+    let result = call
+        .await
+        .map_err(|e| AppError::from(CoreError::Agent(format!("tool call panicked: {e}"))))?;
+    Ok(Json(result?))
 }
 
 async fn shutdown(State(state): State<Arc<AppState>>) -> StatusCode {

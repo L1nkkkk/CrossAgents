@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::agent::{OutputStream, StopReason, ToolStatus};
-use crate::ids::{AgentId, MessageId};
-use crate::model::{Agent, AgentStatus};
+use crate::ids::{AgentId, MessageId, RunId, TaskId};
+use crate::model::{Agent, AgentStatus, CheckResult, Run, RunStatus};
+use crate::state::TaskStatus;
 
 pub const EVENT_SCHEMA_VERSION: u32 = 1;
 
@@ -94,6 +95,36 @@ pub enum EventKind {
     },
     #[serde(rename = "agent.error")]
     AgentError { id: AgentId, message: String },
+    #[serde(rename = "run.created")]
+    RunCreated { run: Run },
+    #[serde(rename = "run.status_changed")]
+    RunStatusChanged {
+        id: RunId,
+        from: RunStatus,
+        to: RunStatus,
+        note: Option<String>,
+    },
+    /// The planner submitted a plan; `tasks` are the task keys in plan order.
+    #[serde(rename = "run.plan_submitted")]
+    RunPlanSubmitted { id: RunId, tasks: Vec<String> },
+    #[serde(rename = "task.status_changed")]
+    TaskStatusChanged {
+        run_id: RunId,
+        id: TaskId,
+        key: String,
+        from: TaskStatus,
+        to: TaskStatus,
+        assignee: Option<AgentId>,
+    },
+    /// Acceptance commands ran.
+    #[serde(rename = "task.checked")]
+    TaskChecked {
+        run_id: RunId,
+        id: TaskId,
+        key: String,
+        passed: bool,
+        checks: Vec<CheckResult>,
+    },
 }
 
 impl EventKind {
@@ -113,13 +144,36 @@ impl EventKind {
             Self::AgentTurnCompleted { .. } => "agent.turn_completed",
             Self::AgentUsage { .. } => "agent.usage",
             Self::AgentError { .. } => "agent.error",
+            Self::RunCreated { .. } => "run.created",
+            Self::RunStatusChanged { .. } => "run.status_changed",
+            Self::RunPlanSubmitted { .. } => "run.plan_submitted",
+            Self::TaskStatusChanged { .. } => "task.status_changed",
+            Self::TaskChecked { .. } => "task.checked",
+        }
+    }
+
+    /// The run this event is about, if any.
+    pub fn run_id(&self) -> Option<RunId> {
+        match self {
+            Self::RunCreated { run } => Some(run.id),
+            Self::RunStatusChanged { id, .. } | Self::RunPlanSubmitted { id, .. } => Some(*id),
+            Self::TaskStatusChanged { run_id, .. } | Self::TaskChecked { run_id, .. } => {
+                Some(*run_id)
+            }
+            _ => None,
         }
     }
 
     /// The agent this event is about, if any.
     pub fn agent_id(&self) -> Option<AgentId> {
         match self {
-            Self::HubStarted { .. } | Self::HubStopping => None,
+            Self::HubStarted { .. }
+            | Self::HubStopping
+            | Self::RunCreated { .. }
+            | Self::RunStatusChanged { .. }
+            | Self::RunPlanSubmitted { .. }
+            | Self::TaskChecked { .. } => None,
+            Self::TaskStatusChanged { assignee, .. } => *assignee,
             Self::AgentCreated { agent } => Some(agent.id),
             Self::AgentRemoved { id, .. }
             | Self::AgentStatusChanged { id, .. }

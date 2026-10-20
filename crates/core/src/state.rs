@@ -51,13 +51,13 @@ impl TaskStatus {
         matches!(
             (self, next),
             (Pending, Running)
-                | (Running, WaitingAnswer | Verifying)
+                | (Running, WaitingAnswer | Verifying | Retrying | Escalated)
                 | (WaitingAnswer, Running)
                 | (Verifying, Passed | Retrying | Escalated)
                 | (Retrying, Running)
                 | (Escalated, Running)
                 | (Passed, Reviewing | Merged)
-                | (Reviewing, Passed | Retrying)
+                | (Reviewing, Passed | Retrying | Escalated)
         )
     }
 
@@ -82,6 +82,8 @@ mod tests {
         (Pending, Running),
         (Running, WaitingAnswer),
         (Running, Verifying),
+        (Running, Retrying),
+        (Running, Escalated),
         (WaitingAnswer, Running),
         (Verifying, Passed),
         (Verifying, Retrying),
@@ -92,6 +94,7 @@ mod tests {
         (Passed, Merged),
         (Reviewing, Passed),
         (Reviewing, Retrying),
+        (Reviewing, Escalated),
     ];
 
     #[test]

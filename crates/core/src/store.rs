@@ -4,8 +4,8 @@ use async_trait::async_trait;
 
 use crate::error::CoreError;
 use crate::event::{Event, EventKind};
-use crate::ids::AgentId;
-use crate::model::{Agent, AgentStatus};
+use crate::ids::{AgentId, RunId, TaskId};
+use crate::model::{Agent, AgentStatus, Run, Task};
 
 /// Look an agent up by id or by its unique name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,4 +37,17 @@ pub trait Store: Send + Sync {
     async fn events_since(&self, after: u64, limit: u32) -> Result<Vec<Event>, CoreError>;
     /// The highest `seq` stored, or 0.
     async fn latest_event_seq(&self) -> Result<u64, CoreError>;
+
+    async fn insert_run(&self, run: &Run) -> Result<(), CoreError>;
+    async fn get_run(&self, id: RunId) -> Result<Run, CoreError>;
+    /// Newest first.
+    async fn list_runs(&self) -> Result<Vec<Run>, CoreError>;
+    /// Replaces the stored run with `run` (matched by id).
+    async fn update_run(&self, run: &Run) -> Result<(), CoreError>;
+
+    async fn insert_task(&self, task: &Task) -> Result<(), CoreError>;
+    async fn get_task(&self, id: TaskId) -> Result<Task, CoreError>;
+    /// In creation order.
+    async fn list_tasks(&self, run_id: RunId) -> Result<Vec<Task>, CoreError>;
+    async fn update_task(&self, task: &Task) -> Result<(), CoreError>;
 }

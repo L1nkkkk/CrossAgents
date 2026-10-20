@@ -15,6 +15,7 @@ crossagents-store-sqlite = { path = "crates/store-sqlite" }
 crossagents-hub = { path = "crates/hub" }
 crossagents-drivers = { path = "crates/drivers" }
 crossagents-plugins = { path = "crates/plugins" }
+crossagents-orchestrator = { path = "crates/orchestrator" }
 
 anyhow = "1.0.104"
 async-trait = "0.1.92"

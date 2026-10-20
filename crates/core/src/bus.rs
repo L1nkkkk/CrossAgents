@@ -68,8 +68,8 @@ mod tests {
 
     use super::*;
     use crate::event::EVENT_SCHEMA_VERSION;
-    use crate::ids::AgentId;
-    use crate::model::{Agent, AgentStatus};
+    use crate::ids::{AgentId, RunId, TaskId};
+    use crate::model::{Agent, AgentStatus, Run, Task};
     use crate::store::AgentKey;
 
     #[derive(Default)]
@@ -112,6 +112,30 @@ mod tests {
         }
         async fn latest_event_seq(&self) -> Result<u64, CoreError> {
             Ok(self.events.lock().unwrap().len() as u64)
+        }
+        async fn insert_run(&self, _: &Run) -> Result<(), CoreError> {
+            unimplemented!()
+        }
+        async fn get_run(&self, _: RunId) -> Result<Run, CoreError> {
+            unimplemented!()
+        }
+        async fn list_runs(&self) -> Result<Vec<Run>, CoreError> {
+            unimplemented!()
+        }
+        async fn update_run(&self, _: &Run) -> Result<(), CoreError> {
+            unimplemented!()
+        }
+        async fn insert_task(&self, _: &Task) -> Result<(), CoreError> {
+            unimplemented!()
+        }
+        async fn get_task(&self, _: TaskId) -> Result<Task, CoreError> {
+            unimplemented!()
+        }
+        async fn list_tasks(&self, _: RunId) -> Result<Vec<Task>, CoreError> {
+            unimplemented!()
+        }
+        async fn update_task(&self, _: &Task) -> Result<(), CoreError> {
+            unimplemented!()
         }
     }
 

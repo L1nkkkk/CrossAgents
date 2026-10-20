@@ -36,12 +36,63 @@ pub fn mock_plugins() -> BTreeMap<String, PluginConfig> {
     plugins
 }
 
+/// The `crossagents` binary (it serves `crossagents mcp`).
+pub fn crossagents_bin() -> std::path::PathBuf {
+    static BUILT: std::sync::Once = std::sync::Once::new();
+    let path = std::path::Path::new(MOCK_AGENT)
+        .with_file_name(format!("crossagents{}", std::env::consts::EXE_SUFFIX));
+    // Always build: a stale binary would serve outdated tools. Cheap when up to date.
+    BUILT.call_once(|| {
+        let status = std::process::Command::new(env!("CARGO"))
+            .args(["build", "-q", "-p", "crossagents-cli"])
+            .status()
+            .unwrap();
+        assert!(status.success(), "cannot build crossagents");
+    });
+    path
+}
+
+/// A git repository with one commit.
+pub fn git_repo() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(dir.path().join("README.md"), "test repo\n").unwrap();
+    git(&["add", "-A"]);
+    git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+    ]);
+    dir
+}
+
 impl TestHub {
     pub async fn start() -> Self {
         let home = tempfile::tempdir().unwrap();
         let paths = Paths::new(home.path());
         let mut config = HubConfig::new(paths.clone(), 0);
         config.plugins = mock_plugins();
+        config.mcp_command = Some(vec![
+            crossagents_bin().display().to_string(),
+            "mcp".to_owned(),
+        ]);
         let hub = crossagents_hub::start(config).await.unwrap();
         let base = format!("http://{}", hub.addr);
         Self {
@@ -73,12 +124,23 @@ impl TestHub {
     }
 
     pub async fn add_agent(&self, name: &str, model: Option<&str>) -> Agent {
+        let cwd = self.home.path().to_path_buf();
+        self.add_agent_in(name, model, "worker", &cwd).await
+    }
+
+    pub async fn add_agent_in(
+        &self,
+        name: &str,
+        model: Option<&str>,
+        role: &str,
+        cwd: &std::path::Path,
+    ) -> Agent {
         let resp = self
             .post(
                 "/v1/agents",
                 json!({
-                    "name": name, "plugin": "mock", "model": model, "role": "worker",
-                    "cwd": self.home.path().display().to_string(),
+                    "name": name, "plugin": "mock", "model": model, "role": role,
+                    "cwd": cwd.display().to_string(),
                 }),
             )
             .await;
@@ -144,7 +206,11 @@ impl Watcher {
             let event = tokio::time::timeout_at(deadline, self.rx.recv())
                 .await
                 .unwrap_or_else(|_| {
-                    panic!("timed out waiting for {what}; saw {:#?}", types(&self.seen))
+                    panic!(
+                        "timed out waiting for {what}; saw {:#?}\noutput:\n{}",
+                        types(&self.seen),
+                        self.output()
+                    )
                 })
                 .expect("event stream ended");
             self.seen.push(event.clone());

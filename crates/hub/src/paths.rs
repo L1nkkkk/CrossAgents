@@ -91,6 +91,7 @@ struct ConfigFile {
 #[derive(Debug, Default, Deserialize)]
 struct HubSection {
     port: Option<u16>,
+    mcp_command: Option<Vec<String>>,
 }
 
 /// Hub settings. `port = 0` binds a random free port.
@@ -100,6 +101,8 @@ pub struct HubConfig {
     pub port: u16,
     /// `[plugins.<name>]` entries: launch overrides and extra ACP plugins.
     pub plugins: BTreeMap<String, PluginConfig>,
+    /// Command for the collaboration MCP server; defaults to `<this executable> mcp`.
+    pub mcp_command: Option<Vec<String>>,
 }
 
 impl HubConfig {
@@ -109,6 +112,7 @@ impl HubConfig {
             paths,
             port,
             plugins: BTreeMap::new(),
+            mcp_command: None,
         }
     }
 }
@@ -126,6 +130,7 @@ impl HubConfig {
             paths,
             port: config.hub.port.unwrap_or(DEFAULT_PORT),
             plugins: config.plugins,
+            mcp_command: config.hub.mcp_command,
         })
     }
 }

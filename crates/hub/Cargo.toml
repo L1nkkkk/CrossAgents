@@ -13,6 +13,7 @@ chrono.workspace = true
 crossagents-api-types.workspace = true
 crossagents-core.workspace = true
 crossagents-store-sqlite.workspace = true
+crossagents-orchestrator.workspace = true
 crossagents-plugins.workspace = true
 dirs.workspace = true
 dunce.workspace = true

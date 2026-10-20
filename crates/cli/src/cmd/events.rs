@@ -90,7 +90,57 @@ pub fn summary(kind: &EventKind) -> String {
             format!("{} context {used}/{size}", short(id))
         }
         EventKind::AgentError { id, message } => format!("{} {}", short(id), one_line(message)),
+        EventKind::RunCreated { run } => {
+            format!("{} {}", short_tail(&run.id), one_line(&run.title))
+        }
+        EventKind::RunStatusChanged { id, from, to, note } => format!(
+            "{} {} -> {}{}",
+            short_tail(id),
+            enum_name(from),
+            enum_name(to),
+            note.as_deref()
+                .map(|n| format!(" ({})", one_line(n)))
+                .unwrap_or_default()
+        ),
+        EventKind::RunPlanSubmitted { id, tasks } => {
+            format!(
+                "{} {} task(s): {}",
+                short_tail(id),
+                tasks.len(),
+                tasks.join(", ")
+            )
+        }
+        EventKind::TaskStatusChanged {
+            run_id,
+            key,
+            from,
+            to,
+            ..
+        } => format!(
+            "{}/{key} {} -> {}",
+            short_tail(run_id),
+            enum_name(from),
+            enum_name(to)
+        ),
+        EventKind::TaskChecked {
+            run_id,
+            key,
+            passed,
+            checks,
+            ..
+        } => format!(
+            "{}/{key} {} ({} check(s))",
+            short_tail(run_id),
+            if *passed { "passed" } else { "FAILED" },
+            checks.len()
+        ),
     }
+}
+
+/// The last 8 hex digits of an id, as used in branch names.
+pub fn short_tail(id: &impl ToString) -> String {
+    let hex = id.to_string().replace('-', "");
+    hex[hex.len().saturating_sub(8)..].to_owned()
 }
 
 /// The first 8 characters of an id: enough to tell agents apart in a log.

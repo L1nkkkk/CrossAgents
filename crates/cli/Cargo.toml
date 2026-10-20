@@ -11,9 +11,11 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 chrono.workspace = true
 clap.workspace = true
 crossagents-api-types.workspace = true
+crossagents-drivers.workspace = true
 crossagents-hub.workspace = true
 futures.workspace = true
 reqwest.workspace = true

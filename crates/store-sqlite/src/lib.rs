@@ -6,7 +6,8 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use crossagents_core::{
-    Agent, AgentId, AgentKey, AgentStatus, CoreError, EVENT_SCHEMA_VERSION, Event, EventKind, Store,
+    Agent, AgentId, AgentKey, AgentStatus, CoreError, EVENT_SCHEMA_VERSION, Event, EventKind, Run,
+    RunId, Store, Task, TaskId,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -252,11 +253,200 @@ impl Store for SqliteStore {
             .map(event_from_row)
             .collect()
     }
+
+    async fn insert_run(&self, run: &Run) -> Result<(), CoreError> {
+        sqlx::query(
+            "INSERT INTO runs (id, status, created_at, updated_at, data) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(run.id.to_string())
+        .bind(enum_str(&run.status)?)
+        .bind(run.created_at.to_rfc3339())
+        .bind(run.updated_at.to_rfc3339())
+        .bind(serde_json::to_string(run).map_err(storage)?)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    async fn get_run(&self, id: RunId) -> Result<Run, CoreError> {
+        let data: Option<String> = sqlx::query_scalar("SELECT data FROM runs WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?;
+        let data = data.ok_or_else(|| CoreError::NotFound {
+            kind: "run",
+            id: id.to_string(),
+        })?;
+        serde_json::from_str(&data).map_err(storage)
+    }
+
+    async fn list_runs(&self) -> Result<Vec<Run>, CoreError> {
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT data FROM runs ORDER BY created_at DESC, id DESC")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(storage)?;
+        rows.iter()
+            .map(|d| serde_json::from_str(d).map_err(storage))
+            .collect()
+    }
+
+    async fn update_run(&self, run: &Run) -> Result<(), CoreError> {
+        let result =
+            sqlx::query("UPDATE runs SET status = ?, updated_at = ?, data = ? WHERE id = ?")
+                .bind(enum_str(&run.status)?)
+                .bind(run.updated_at.to_rfc3339())
+                .bind(serde_json::to_string(run).map_err(storage)?)
+                .bind(run.id.to_string())
+                .execute(&self.pool)
+                .await
+                .map_err(storage)?;
+        if result.rows_affected() == 0 {
+            return Err(CoreError::NotFound {
+                kind: "run",
+                id: run.id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn insert_task(&self, task: &Task) -> Result<(), CoreError> {
+        sqlx::query(
+            "INSERT INTO tasks (id, run_id, status, created_at, updated_at, data)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(task.id.to_string())
+        .bind(task.run_id.to_string())
+        .bind(enum_str(&task.status)?)
+        .bind(task.created_at.to_rfc3339())
+        .bind(task.updated_at.to_rfc3339())
+        .bind(serde_json::to_string(task).map_err(storage)?)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    async fn get_task(&self, id: TaskId) -> Result<Task, CoreError> {
+        let data: Option<String> = sqlx::query_scalar("SELECT data FROM tasks WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?;
+        let data = data.ok_or_else(|| CoreError::NotFound {
+            kind: "task",
+            id: id.to_string(),
+        })?;
+        serde_json::from_str(&data).map_err(storage)
+    }
+
+    async fn list_tasks(&self, run_id: RunId) -> Result<Vec<Task>, CoreError> {
+        // Ids are UUID v7, so ordering by id is creation order.
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT data FROM tasks WHERE run_id = ? ORDER BY id")
+                .bind(run_id.to_string())
+                .fetch_all(&self.pool)
+                .await
+                .map_err(storage)?;
+        rows.iter()
+            .map(|d| serde_json::from_str(d).map_err(storage))
+            .collect()
+    }
+
+    async fn update_task(&self, task: &Task) -> Result<(), CoreError> {
+        let result =
+            sqlx::query("UPDATE tasks SET status = ?, updated_at = ?, data = ? WHERE id = ?")
+                .bind(enum_str(&task.status)?)
+                .bind(task.updated_at.to_rfc3339())
+                .bind(serde_json::to_string(task).map_err(storage)?)
+                .bind(task.id.to_string())
+                .execute(&self.pool)
+                .await
+                .map_err(storage)?;
+        if result.rows_affected() == 0 {
+            return Err(CoreError::NotFound {
+                kind: "task",
+                id: task.id.to_string(),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crossagents_core::Role;
+    use crossagents_core::{Role, RunConfig, RunStatus, TaskId, TaskReport, TaskSpec, TaskStatus};
+
+    #[tokio::test]
+    async fn runs_and_tasks_round_trip() {
+        let store = SqliteStore::open_in_memory().await.unwrap();
+        let now = time_from(&Utc::now().to_rfc3339()).unwrap();
+        let mut run = Run {
+            id: RunId::new(),
+            title: "t".into(),
+            request: "do things".into(),
+            planner: AgentId::new(),
+            status: RunStatus::Planning,
+            config: RunConfig {
+                worker: AgentId::new(),
+                escalate: None,
+                reviewer: None,
+                auto_approve: false,
+                max_parallel: 3,
+                max_attempts: 3,
+            },
+            repo: PathBuf::from("/repo"),
+            base_branch: "main".into(),
+            branch: "crossagents/x".into(),
+            note: None,
+            plan: vec![],
+            created_at: now,
+            updated_at: now,
+        };
+        store.insert_run(&run).await.unwrap();
+        run.status = RunStatus::Running;
+        store.update_run(&run).await.unwrap();
+        assert_eq!(store.get_run(run.id).await.unwrap(), run);
+        assert_eq!(store.list_runs().await.unwrap(), vec![run.clone()]);
+
+        let mut tasks = Vec::new();
+        for key in ["a", "b"] {
+            let task = Task {
+                id: TaskId::new(),
+                run_id: run.id,
+                key: key.into(),
+                title: key.into(),
+                spec: TaskSpec {
+                    goal: "g".into(),
+                    ..Default::default()
+                },
+                depends_on: vec![],
+                assignee: None,
+                reviewer: None,
+                status: TaskStatus::Pending,
+                attempts: 0,
+                escalated: false,
+                nudges: 0,
+                branch: None,
+                worktree: None,
+                report: TaskReport::default(),
+                created_at: now,
+                updated_at: now,
+            };
+            store.insert_task(&task).await.unwrap();
+            tasks.push(task);
+        }
+        tasks[1].status = TaskStatus::Running;
+        store.update_task(&tasks[1]).await.unwrap();
+        assert_eq!(store.list_tasks(run.id).await.unwrap(), tasks);
+        assert_eq!(store.get_task(tasks[1].id).await.unwrap(), tasks[1]);
+        assert!(matches!(
+            store.get_task(TaskId::new()).await,
+            Err(CoreError::NotFound { .. })
+        ));
+    }
 
     use super::*;
 

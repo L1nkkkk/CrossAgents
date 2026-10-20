@@ -2,7 +2,28 @@
 import type { AgentId } from "./AgentId";
 import type { RunId } from "./RunId";
 import type { TaskId } from "./TaskId";
+import type { TaskReport } from "./TaskReport";
 import type { TaskSpec } from "./TaskSpec";
 import type { TaskStatus } from "./TaskStatus";
 
-export type Task = { id: TaskId, run_id: RunId, parent: TaskId | null, title: string, spec: TaskSpec, assignee: AgentId | null, status: TaskStatus, attempts: number, created_at: string, updated_at: string, };
+export type Task = { id: TaskId, run_id: RunId, key: string, title: string, spec: TaskSpec, depends_on: Array<string>, 
+/**
+ * The worker agent currently on the task.
+ */
+assignee: AgentId | null, 
+/**
+ * The reviewer agent while the task is in review.
+ */
+reviewer: AgentId | null, status: TaskStatus, 
+/**
+ * Attempts by the current worker.
+ */
+attempts: number, 
+/**
+ * Whether the task moved to the escalation template.
+ */
+escalated: boolean, 
+/**
+ * Reminders sent because the worker ended a turn without reporting.
+ */
+nudges: number, branch: string | null, worktree: string | null, report: TaskReport, created_at: string, updated_at: string, };
