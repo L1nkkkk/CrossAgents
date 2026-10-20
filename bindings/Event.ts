@@ -2,9 +2,13 @@
 import type { Agent } from "./Agent";
 import type { AgentId } from "./AgentId";
 import type { AgentStatus } from "./AgentStatus";
+import type { MessageId } from "./MessageId";
+import type { OutputStream } from "./OutputStream";
+import type { StopReason } from "./StopReason";
+import type { ToolStatus } from "./ToolStatus";
 
 export type Event = { 
 /**
  * Assigned by the store; strictly increasing. Used as the SSE event id.
  */
-seq: number, id: string, ts: string, schema: number, } & ({ "type": "hub.started", "data": { version: string, } } | { "type": "hub.stopping" } | { "type": "agent.created", "data": { agent: Agent, } } | { "type": "agent.removed", "data": { id: AgentId, name: string, } } | { "type": "agent.status_changed", "data": { id: AgentId, from: AgentStatus, to: AgentStatus, } });
+seq: number, id: string, ts: string, schema: number, } & ({ "type": "hub.started", "data": { version: string, } } | { "type": "hub.stopping" } | { "type": "agent.created", "data": { agent: Agent, } } | { "type": "agent.removed", "data": { id: AgentId, name: string, } } | { "type": "agent.status_changed", "data": { id: AgentId, from: AgentStatus, to: AgentStatus, } } | { "type": "agent.input", "data": { id: AgentId, message_id: MessageId, text: string, queued: boolean, } } | { "type": "agent.turn_started", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.output", "data": { id: AgentId, stream: OutputStream, text: string, } } | { "type": "agent.tool_call", "data": { id: AgentId, tool_call_id: string, title: string, kind: string | null, status: ToolStatus, } } | { "type": "agent.tool_call_updated", "data": { id: AgentId, tool_call_id: string, title: string | null, status: ToolStatus | null, } } | { "type": "agent.turn_completed", "data": { id: AgentId, message_id: MessageId, stop_reason: StopReason, } } | { "type": "agent.usage", "data": { id: AgentId, used: number, size: number, cost_usd: number | null, } } | { "type": "agent.error", "data": { id: AgentId, message: string, } });

@@ -430,14 +430,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossagents-drivers"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "crossagents-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "crossagents-hub"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "chrono",
  "crossagents-api-types",
  "crossagents-core",
+ "crossagents-plugins",
  "crossagents-store-sqlite",
  "dirs",
  "dunce",
@@ -452,6 +466,34 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "crossagents-mock-agent"
+version = "0.1.0"
+dependencies = [
+ "assert_cmd",
+ "async-trait",
+ "crossagents-api-types",
+ "crossagents-core",
+ "crossagents-drivers",
+ "crossagents-hub",
+ "crossagents-plugins",
+ "futures",
+ "reqwest",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "crossagents-plugins"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "crossagents-core",
+ "crossagents-drivers",
+ "serde",
 ]
 
 [[package]]

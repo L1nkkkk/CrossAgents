@@ -1,6 +1,8 @@
 pub mod agent;
 pub mod events;
 pub mod hub;
+pub mod plugin;
+pub mod session;
 
 use anyhow::Result;
 use crossagents_hub::Paths;
@@ -18,6 +20,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Hub(cmd) => hub::run(&ctx, cmd).await,
         Command::Agent(cmd) => agent::run(&ctx, cmd).await,
         Command::Events(args) => events::run(&ctx, args).await,
+        Command::Send(args) => session::send(&ctx, args).await,
+        Command::Attach(args) => session::attach(&ctx, args).await,
+        Command::Plugin(cmd) => plugin::run(&ctx, cmd).await,
     }
 }
 

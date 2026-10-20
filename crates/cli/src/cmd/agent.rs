@@ -15,8 +15,14 @@ pub enum AgentCommand {
     Ls,
     /// Show one agent.
     Show { name: String },
-    /// Remove an agent.
+    /// Remove an agent (stops it first).
     Rm { name: String },
+    /// Start the agent's session.
+    Start { name: String },
+    /// Stop the agent's session.
+    Stop { name: String },
+    /// Interrupt the agent's current turn.
+    Cancel { name: String },
 }
 
 #[derive(Debug, Args)]
@@ -117,6 +123,31 @@ pub async fn run(ctx: &Context, cmd: AgentCommand) -> Result<()> {
             println!("status:  {}", enum_name(&agent.status));
             println!("cwd:     {}", agent.cwd.display());
             println!("created: {}", local_time(agent.created_at));
+        }
+        AgentCommand::Start { name } => {
+            let agent: Agent = client
+                .post(&format!("/v1/agents/{name}/start"), &serde_json::json!({}))
+                .await?;
+            if ctx.json {
+                return print_json(&agent);
+            }
+            println!("{} is {}", agent.name, enum_name(&agent.status));
+        }
+        AgentCommand::Stop { name } => {
+            client
+                .post_empty(&format!("/v1/agents/{name}/stop"))
+                .await?;
+            if !ctx.json {
+                println!("stopped {name}");
+            }
+        }
+        AgentCommand::Cancel { name } => {
+            client
+                .post_empty(&format!("/v1/agents/{name}/cancel"))
+                .await?;
+            if !ctx.json {
+                println!("cancelled the current turn of {name}");
+            }
         }
         AgentCommand::Rm { name } => {
             client.delete(&format!("/v1/agents/{name}")).await?;

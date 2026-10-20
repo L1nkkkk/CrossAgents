@@ -31,8 +31,15 @@ pub enum Command {
     /// Manage agents.
     #[command(subcommand)]
     Agent(cmd::agent::AgentCommand),
+    /// Send a message to an agent (starts it if needed).
+    Send(cmd::session::SendArgs),
+    /// Watch an agent live and talk to it from the terminal.
+    Attach(cmd::session::AttachArgs),
     /// Print the event log.
     Events(cmd::events::EventsArgs),
+    /// List available agent plugins.
+    #[command(subcommand)]
+    Plugin(cmd::plugin::PluginCommand),
 }
 
 fn main() -> ExitCode {

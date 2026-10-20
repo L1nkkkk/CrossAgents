@@ -1,0 +1,32 @@
+[package]
+name = "crossagents-mock-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "A scriptable ACP agent for tests; no LLM involved."
+
+[[bin]]
+name = "crossagents-mock-agent"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+crossagents-drivers.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+crossagents-core.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+crossagents-api-types.workspace = true
+crossagents-hub.workspace = true
+assert_cmd.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
+crossagents-plugins.workspace = true

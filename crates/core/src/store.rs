@@ -35,4 +35,6 @@ pub trait Store: Send + Sync {
     async fn append_event(&self, kind: EventKind) -> Result<Event, CoreError>;
     /// Events with `seq > after`, oldest first.
     async fn events_since(&self, after: u64, limit: u32) -> Result<Vec<Event>, CoreError>;
+    /// The highest `seq` stored, or 0.
+    async fn latest_event_seq(&self) -> Result<u64, CoreError>;
 }

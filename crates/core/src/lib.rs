@@ -2,6 +2,7 @@
 //!
 //! This crate has no dependency on any other CrossAgents crate.
 
+pub mod agent;
 pub mod bus;
 pub mod error;
 pub mod event;
@@ -10,6 +11,10 @@ pub mod model;
 pub mod state;
 pub mod store;
 
+pub use agent::{
+    AgentPlugin, AgentSession, Capabilities, McpServerSpec, OutputStream, PermissionPolicy,
+    SessionEvent, SessionSpec, StopReason, ToolStatus,
+};
 pub use bus::EventBus;
 pub use error::CoreError;
 pub use event::{EVENT_SCHEMA_VERSION, Event, EventKind, EventSink};

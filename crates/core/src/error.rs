@@ -16,4 +16,8 @@ pub enum CoreError {
 
     #[error("storage error: {0}")]
     Storage(String),
+
+    /// The agent process or its protocol failed.
+    #[error("agent error: {0}")]
+    Agent(String),
 }

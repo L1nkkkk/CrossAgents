@@ -140,7 +140,7 @@ Codex 用 `-c mcp_servers.*`；不支持 MCP 的走 §6.2 的提示词降级。
 
 ### 6.6 v1 驱动与内置插件：ACP 优先
 
-v1 只实现一个 **ACP 驱动**（基于 Rust crate `agent-client-protocol`），通过现成的 ACP 适配器同时接入两家：
+v1 只实现一个 **ACP 驱动**（自写 ACP v1 最小线上类型 + 通用 JSON-RPC 层，见 [M1 任务书](tasks/M1.md)），通过现成的 ACP 适配器同时接入两家：
 
 | 插件 | v1 driver | 以后可加的原生驱动 |
 |---|---|---|
@@ -250,9 +250,9 @@ crates/
 ├── core/              领域模型、Agent 统一接口、事件、所有 trait（无内部依赖）
 ├── api-types/         本地 API 的请求/响应/事件类型（生成 TS 类型给 GUI）
 ├── plugin-protocol/   插件协议定义 + ExternalPlugin 代理
-├── drivers/           可复用接入方式：acp（以后 stdio-jsonl、json-rpc）
-├── plugins/claude/    内置 claude 插件
-├── plugins/codex/     内置 codex 插件
+├── drivers/           可复用接入方式：jsonrpc（通用）、acp（以后 stdio-jsonl）
+├── plugins/           插件注册表 + 内置 claude、codex（均走 ACP；config.toml 可注册任意 ACP agent）
+├── mock-agent/        可编程的 ACP mock agent，用于不依赖 LLM 的端到端测试
 ├── orchestrator/      Pipeline / Stage / Policy、任务调度（只依赖 core）
 ├── mcp/               MCP server 与工具注册表（rmcp）
 ├── store-sqlite/      Store 实现
@@ -263,7 +263,7 @@ apps/
 └── gui/               v2：Tauri 2 GUI
 ```
 
-主要依赖：tokio、serde、axum、agent-client-protocol、rmcp、sqlx（sqlite）、clap、ts-rs。
+主要依赖：tokio、serde、axum、rmcp、sqlx（sqlite）、clap、ts-rs。ACP 不依赖 SDK，见 M1 任务书。
 
 ## 14. 里程碑
 

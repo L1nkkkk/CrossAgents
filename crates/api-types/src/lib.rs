@@ -7,7 +7,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-pub use crossagents_core::{Agent, AgentStatus, Event, EventKind, Role};
+pub use crossagents_core::{
+    Agent, AgentId, AgentStatus, Capabilities, Event, EventKind, MessageId, OutputStream, Role,
+    StopReason, ToolStatus,
+};
 
 pub const API_VERSION: &str = "v1";
 
@@ -53,6 +56,35 @@ pub struct ListAgentsResponse {
     pub agents: Vec<Agent>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SendMessageRequest {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SendMessageResponse {
+    /// Identifies the turn that answers this message in `agent.turn_*` events.
+    pub message_id: crossagents_core::MessageId,
+    /// `true` if the message waits behind the agent's current work.
+    pub queued: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PluginInfo {
+    pub name: String,
+    pub models: Vec<String>,
+    pub capabilities: crossagents_core::Capabilities,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListPluginsResponse {
+    pub plugins: Vec<PluginInfo>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "snake_case")]
@@ -61,6 +93,8 @@ pub enum ErrorCode {
     Unauthorized,
     NotFound,
     Conflict,
+    /// The agent process or its protocol failed.
+    AgentError,
     Internal,
 }
 

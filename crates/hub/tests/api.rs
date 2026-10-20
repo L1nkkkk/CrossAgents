@@ -20,12 +20,9 @@ impl TestHub {
     async fn start() -> Self {
         let home = tempfile::tempdir().unwrap();
         let paths = Paths::new(home.path());
-        let hub = crossagents_hub::start(HubConfig {
-            paths: paths.clone(),
-            port: 0,
-        })
-        .await
-        .unwrap();
+        let hub = crossagents_hub::start(HubConfig::new(paths.clone(), 0))
+            .await
+            .unwrap();
         let base = format!("http://{}", hub.addr);
         Self {
             hub,
@@ -215,11 +212,7 @@ async fn events_replay_history_then_follow_live() {
 #[tokio::test]
 async fn second_hub_on_same_home_fails() {
     let t = TestHub::start().await;
-    let second = crossagents_hub::start(HubConfig {
-        paths: t.paths.clone(),
-        port: 0,
-    })
-    .await;
+    let second = crossagents_hub::start(HubConfig::new(t.paths.clone(), 0)).await;
     let err = second.err().expect("second hub must not start");
     assert!(err.to_string().contains("already running"), "{err}");
 }

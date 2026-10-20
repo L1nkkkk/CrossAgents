@@ -110,6 +110,9 @@ mod tests {
             let events = self.events.lock().unwrap();
             Ok(events.iter().filter(|e| e.seq > after).cloned().collect())
         }
+        async fn latest_event_seq(&self) -> Result<u64, CoreError> {
+            Ok(self.events.lock().unwrap().len() as u64)
+        }
     }
 
     #[derive(Default)]

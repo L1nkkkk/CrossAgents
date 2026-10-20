@@ -16,8 +16,10 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use crossagents_api_types::{
     API_VERSION, ApiError, CreateAgentRequest, ErrorCode, HealthResponse, HubInfo,
-    ListAgentsResponse,
+    ListAgentsResponse, ListPluginsResponse, PluginInfo, SendMessageRequest, SendMessageResponse,
 };
+
+use crate::runtime::Runtime;
 use crossagents_core::{
     Agent, AgentId, AgentKey, AgentStatus, CoreError, Event, EventBus, EventKind, Store,
     validate_agent_name,
@@ -35,6 +37,7 @@ const EVENT_PAGE: u32 = 500;
 
 pub struct AppState {
     pub bus: Arc<EventBus>,
+    pub runtime: Arc<Runtime>,
     pub token: String,
     pub home: PathBuf,
     pub started_at: DateTime<Utc>,
@@ -52,6 +55,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/info", get(info))
         .route("/v1/agents", get(list_agents).post(create_agent))
         .route("/v1/agents/{key}", get(get_agent).delete(delete_agent))
+        .route("/v1/agents/{key}/start", post(start_agent))
+        .route("/v1/agents/{key}/stop", post(stop_agent))
+        .route("/v1/agents/{key}/cancel", post(cancel_agent))
+        .route("/v1/agents/{key}/messages", post(send_message))
+        .route("/v1/plugins", get(list_plugins))
         .route("/v1/events", get(events))
         .route("/v1/shutdown", post(shutdown))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
@@ -84,6 +92,7 @@ impl From<CoreError> for AppError {
             CoreError::InvalidName(_) | CoreError::InvalidTransition { .. } => {
                 (StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
             }
+            CoreError::Agent(_) => (StatusCode::BAD_GATEWAY, ErrorCode::AgentError),
             CoreError::Storage(_) => {
                 tracing::error!(error = %err, "storage error");
                 (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal)
@@ -163,8 +172,12 @@ async fn create_agent(
     Json(req): Json<CreateAgentRequest>,
 ) -> ApiResult<(StatusCode, Json<Agent>)> {
     validate_agent_name(&req.name)?;
-    if req.plugin.trim().is_empty() {
-        return Err(AppError::bad_request("plugin must not be empty"));
+    if state.runtime.plugins().get(&req.plugin).is_none() {
+        return Err(AppError::bad_request(format!(
+            "unknown plugin {:?} (available: {})",
+            req.plugin,
+            state.runtime.plugins().names().join(", ")
+        )));
     }
     let cwd = dunce::canonicalize(&req.cwd)
         .map_err(|e| AppError::bad_request(format!("cwd {:?}: {e}", req.cwd)))?;
@@ -208,6 +221,7 @@ async fn delete_agent(
     Path(key): Path<String>,
 ) -> ApiResult<StatusCode> {
     let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    state.runtime.stop(&AgentKey::Id(agent.id)).await?;
     state.store().delete_agent(agent.id).await?;
     state
         .bus
@@ -217,6 +231,61 @@ async fn delete_agent(
         })
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn start_agent(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<Agent>> {
+    let agent = state.runtime.start(&AgentKey::parse(&key)).await?;
+    Ok(Json(
+        state.store().get_agent(&AgentKey::Id(agent.id)).await?,
+    ))
+}
+
+async fn stop_agent(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<StatusCode> {
+    state.runtime.stop(&AgentKey::parse(&key)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn cancel_agent(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<StatusCode> {
+    state.runtime.cancel(&AgentKey::parse(&key)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn send_message(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(req): Json<SendMessageRequest>,
+) -> ApiResult<(StatusCode, Json<SendMessageResponse>)> {
+    if req.text.trim().is_empty() {
+        return Err(AppError::bad_request("text must not be empty"));
+    }
+    let (message_id, queued) = state.runtime.send(&AgentKey::parse(&key), req.text).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(SendMessageResponse { message_id, queued }),
+    ))
+}
+
+async fn list_plugins(State(state): State<Arc<AppState>>) -> Json<ListPluginsResponse> {
+    let plugins = state
+        .runtime
+        .plugins()
+        .iter()
+        .map(|p| PluginInfo {
+            name: p.name().to_owned(),
+            models: p.models(),
+            capabilities: p.capabilities(),
+        })
+        .collect();
+    Json(ListPluginsResponse { plugins })
 }
 
 async fn shutdown(State(state): State<Arc<AppState>>) -> StatusCode {
@@ -233,6 +302,8 @@ struct EventsQuery {
     since: Option<u64>,
     /// `false` ends the stream once history has been sent. Defaults to `true`.
     follow: Option<bool>,
+    /// `true` skips history and sends only events published after the response starts.
+    live: Option<bool>,
 }
 
 async fn events(
@@ -246,9 +317,23 @@ async fn events(
         .and_then(|v| v.parse().ok());
     let since = last_event_id.or(query.since).unwrap_or(0);
 
+    // Subscribe before responding: once the client sees the response headers, every
+    // later event is guaranteed to reach it.
+    let live = state.bus.subscribe();
     let (tx, rx) = mpsc::channel(256);
     let follow = query.follow.unwrap_or(true);
-    tokio::spawn(stream_events(state, since, follow, tx));
+    if query.live.unwrap_or(false) {
+        let latest = match state.store().latest_event_seq().await {
+            Ok(seq) => seq,
+            Err(err) => {
+                tracing::error!(error = %err, "cannot read latest event");
+                0
+            }
+        };
+        tokio::spawn(stream_live(state, live, latest, tx));
+    } else {
+        tokio::spawn(stream_events(state, live, since, follow, tx));
+    }
     let stream = ReceiverStream::new(rx).map(|event| Ok(to_sse(&event)));
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
@@ -263,15 +348,27 @@ fn to_sse(event: &Event) -> SseEvent {
 /// Sends every event with `seq > since`, then follows live events, without gaps or
 /// duplicates: subscribe first, replay history from the store, then skip broadcast events
 /// already sent. If the subscriber lags behind, catch up from the store again.
-async fn stream_events(state: Arc<AppState>, since: u64, follow: bool, tx: mpsc::Sender<Event>) {
-    let mut live = state.bus.subscribe();
+async fn stream_events(
+    state: Arc<AppState>,
+    live: broadcast::Receiver<Event>,
+    since: u64,
+    follow: bool,
+    tx: mpsc::Sender<Event>,
+) {
     let mut last = since;
-    if !replay(&state, &mut last, &tx).await {
+    if !replay(&state, &mut last, &tx).await || !follow {
         return;
     }
-    if !follow {
-        return;
-    }
+    stream_live(state, live, last, tx).await;
+}
+
+/// Forwards live events with `seq > last`, catching up from the store after lagging.
+async fn stream_live(
+    state: Arc<AppState>,
+    mut live: broadcast::Receiver<Event>,
+    mut last: u64,
+    tx: mpsc::Sender<Event>,
+) {
     loop {
         tokio::select! {
             _ = state.shutdown.cancelled() => return,

@@ -87,8 +87,17 @@ impl Client {
         since: u64,
         follow: bool,
     ) -> Result<impl Stream<Item = Result<Event>> + use<>> {
-        let path = format!("/v1/events?since={since}&follow={follow}");
-        let resp = self.send(self.request(Method::GET, &path)).await?;
+        self.event_stream(&format!("/v1/events?since={since}&follow={follow}"))
+            .await
+    }
+
+    /// Streams only events published from now on. Once this returns, nothing is missed.
+    pub async fn live_events(&self) -> Result<impl Stream<Item = Result<Event>> + use<>> {
+        self.event_stream("/v1/events?live=true").await
+    }
+
+    async fn event_stream(&self, path: &str) -> Result<impl Stream<Item = Result<Event>> + use<>> {
+        let resp = self.send(self.request(Method::GET, path)).await?;
         Ok(sse_events(resp.bytes_stream()))
     }
 }

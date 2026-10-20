@@ -1,0 +1,171 @@
+//! A hub with the mock agent registered as plugin `mock`, plus an event watcher.
+
+#![allow(dead_code)]
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use crossagents_api_types::{Agent, Event};
+use crossagents_hub::{HubConfig, Paths, RunningHub};
+use crossagents_plugins::PluginConfig;
+use futures::StreamExt;
+use reqwest::{Client, Response};
+use serde_json::{Value, json};
+use tokio::sync::mpsc;
+
+pub const MOCK_AGENT: &str = env!("CARGO_BIN_EXE_crossagents-mock-agent");
+
+pub struct TestHub {
+    pub hub: RunningHub,
+    pub client: Client,
+    pub base: String,
+    pub paths: Paths,
+    pub home: tempfile::TempDir,
+}
+
+pub fn mock_plugins() -> BTreeMap<String, PluginConfig> {
+    let mut plugins = BTreeMap::new();
+    plugins.insert(
+        "mock".to_owned(),
+        PluginConfig {
+            command: vec![MOCK_AGENT.to_owned()],
+            models: vec!["mock-opus".into(), "mock-haiku".into()],
+            model_env: None,
+        },
+    );
+    plugins
+}
+
+impl TestHub {
+    pub async fn start() -> Self {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::new(home.path());
+        let mut config = HubConfig::new(paths.clone(), 0);
+        config.plugins = mock_plugins();
+        let hub = crossagents_hub::start(config).await.unwrap();
+        let base = format!("http://{}", hub.addr);
+        Self {
+            hub,
+            client: Client::new(),
+            base,
+            paths,
+            home,
+        }
+    }
+
+    pub async fn get(&self, path: &str) -> Response {
+        self.client
+            .get(format!("{}{path}", self.base))
+            .bearer_auth(&self.hub.token)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    pub async fn post(&self, path: &str, body: Value) -> Response {
+        self.client
+            .post(format!("{}{path}", self.base))
+            .bearer_auth(&self.hub.token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+    }
+
+    pub async fn add_agent(&self, name: &str, model: Option<&str>) -> Agent {
+        let resp = self
+            .post(
+                "/v1/agents",
+                json!({
+                    "name": name, "plugin": "mock", "model": model, "role": "worker",
+                    "cwd": self.home.path().display().to_string(),
+                }),
+            )
+            .await;
+        assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+        resp.json().await.unwrap()
+    }
+
+    pub async fn send(&self, agent: &str, text: &str) -> Value {
+        let resp = self
+            .post(
+                &format!("/v1/agents/{agent}/messages"),
+                json!({ "text": text }),
+            )
+            .await;
+        assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+        resp.json().await.unwrap()
+    }
+
+    /// Starts collecting events published from now on.
+    pub async fn watch(&self) -> Watcher {
+        let resp = self
+            .client
+            .get(format!("{}/v1/events?live=true", self.base))
+            .bearer_auth(&self.hub.token)
+            .send()
+            .await
+            .unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut bytes = resp.bytes_stream();
+            let mut buf = String::new();
+            while let Some(Ok(chunk)) = bytes.next().await {
+                buf.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(end) = buf.find("\n\n") {
+                    let block: String = buf.drain(..end + 2).collect();
+                    for line in block.lines() {
+                        if let Some(data) = line.strip_prefix("data:")
+                            && let Ok(event) = serde_json::from_str::<Event>(data.trim_start())
+                        {
+                            let _ = tx.send(event);
+                        }
+                    }
+                }
+            }
+        });
+        Watcher {
+            rx,
+            seen: Vec::new(),
+        }
+    }
+}
+
+pub struct Watcher {
+    rx: mpsc::UnboundedReceiver<Event>,
+    pub seen: Vec<Event>,
+}
+
+impl Watcher {
+    /// Waits for the first event matching `pred`, keeping everything seen.
+    pub async fn until(&mut self, what: &str, pred: impl Fn(&Event) -> bool) -> Event {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let event = tokio::time::timeout_at(deadline, self.rx.recv())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("timed out waiting for {what}; saw {:#?}", types(&self.seen))
+                })
+                .expect("event stream ended");
+            self.seen.push(event.clone());
+            if pred(&event) {
+                return event;
+            }
+        }
+    }
+
+    /// Concatenated `agent.output` text seen so far.
+    pub fn output(&self) -> String {
+        self.seen
+            .iter()
+            .filter_map(|e| match &e.kind {
+                crossagents_api_types::EventKind::AgentOutput { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+pub fn types(events: &[Event]) -> Vec<&'static str> {
+    events.iter().map(|e| e.kind.type_name()).collect()
+}

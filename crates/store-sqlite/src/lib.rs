@@ -233,6 +233,14 @@ impl Store for SqliteStore {
         })
     }
 
+    async fn latest_event_seq(&self) -> Result<u64, CoreError> {
+        let seq: Option<i64> = sqlx::query_scalar("SELECT MAX(seq) FROM events")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(storage)?;
+        Ok(seq.unwrap_or(0) as u64)
+    }
+
     async fn events_since(&self, after: u64, limit: u32) -> Result<Vec<Event>, CoreError> {
         sqlx::query("SELECT * FROM events WHERE seq > ? ORDER BY seq LIMIT ?")
             .bind(after as i64)
@@ -337,6 +345,7 @@ mod tests {
             seqs.push(store.append_event(kind).await.unwrap().seq);
         }
         assert!(seqs.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(store.latest_event_seq().await.unwrap(), seqs[4]);
 
         let page = store.events_since(seqs[1], 2).await.unwrap();
         assert_eq!(page.iter().map(|e| e.seq).collect::<Vec<_>>(), &seqs[2..4]);

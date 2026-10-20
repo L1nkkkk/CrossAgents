@@ -1,9 +1,11 @@
 //! Runtime files under the CrossAgents home. See docs/tasks/M0.md §3.2.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use crossagents_plugins::PluginConfig;
 use serde::{Deserialize, Serialize};
 
 pub const HOME_ENV: &str = "CROSSAGENTS_HOME";
@@ -82,6 +84,8 @@ pub struct HubFile {
 struct ConfigFile {
     #[serde(default)]
     hub: HubSection,
+    #[serde(default)]
+    plugins: BTreeMap<String, PluginConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -94,6 +98,19 @@ struct HubSection {
 pub struct HubConfig {
     pub paths: Paths,
     pub port: u16,
+    /// `[plugins.<name>]` entries: launch overrides and extra ACP plugins.
+    pub plugins: BTreeMap<String, PluginConfig>,
+}
+
+impl HubConfig {
+    /// Defaults for `paths`, without reading `config.toml`.
+    pub fn new(paths: Paths, port: u16) -> Self {
+        Self {
+            paths,
+            port,
+            plugins: BTreeMap::new(),
+        }
+    }
 }
 
 impl HubConfig {
@@ -108,6 +125,7 @@ impl HubConfig {
         Ok(Self {
             paths,
             port: config.hub.port.unwrap_or(DEFAULT_PORT),
+            plugins: config.plugins,
         })
     }
 }

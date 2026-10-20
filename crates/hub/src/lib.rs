@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod paths;
+pub mod runtime;
 
 use std::fs::{File, TryLockError};
 use std::net::SocketAddr;
@@ -15,13 +16,16 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 pub use api::VERSION;
+use crossagents_plugins::PluginRegistry;
 pub use paths::{DEFAULT_PORT, HOME_ENV, HubConfig, HubFile, Paths};
+pub use runtime::{Runtime, SessionExtras, SessionSetup};
 
 /// A hub serving in the background of the current process.
 pub struct RunningHub {
     pub addr: SocketAddr,
     pub token: String,
     pub bus: Arc<EventBus>,
+    pub runtime: Arc<Runtime>,
     shutdown: CancellationToken,
     task: JoinHandle<Result<()>>,
 }
@@ -45,6 +49,14 @@ impl RunningHub {
 /// Starts the hub: takes the single-instance lock, opens the store, binds the API and
 /// writes `hub.json`. Returns once the hub is accepting connections.
 pub async fn start(config: HubConfig) -> Result<RunningHub> {
+    start_with(config, None).await
+}
+
+/// [`start`] with extra per-session setup from higher layers.
+pub async fn start_with(
+    config: HubConfig,
+    setup: Option<Arc<dyn SessionSetup>>,
+) -> Result<RunningHub> {
     let paths = config.paths.clone();
     std::fs::create_dir_all(&paths.home)
         .with_context(|| format!("cannot create {}", paths.home.display()))?;
@@ -53,6 +65,12 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     let token = ensure_token(&paths)?;
     let store = Arc::new(SqliteStore::open(&paths.db()).await?);
     let bus = Arc::new(EventBus::new(store.clone() as Arc<dyn Store>));
+    let mut runtime = Runtime::new(bus.clone(), PluginRegistry::with_config(&config.plugins));
+    if let Some(setup) = setup {
+        runtime = runtime.with_setup(setup);
+    }
+    let runtime = Arc::new(runtime);
+    runtime.reset_statuses().await?;
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.port))
         .await
@@ -72,6 +90,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     let shutdown = CancellationToken::new();
     let state = Arc::new(api::AppState {
         bus: bus.clone(),
+        runtime: runtime.clone(),
         token: token.clone(),
         home: paths.home.clone(),
         started_at,
@@ -86,12 +105,14 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     let task = tokio::spawn({
         let shutdown = shutdown.clone();
         let bus = bus.clone();
+        let runtime = runtime.clone();
         async move {
             let served = axum::serve(listener, api::router(state))
                 .with_graceful_shutdown(shutdown.clone().cancelled_owned())
                 .await;
             // Make sure SSE streams end even if serve failed.
             shutdown.cancel();
+            runtime.stop_all().await;
             if let Err(err) = bus.publish(EventKind::HubStopping).await {
                 tracing::warn!(error = %err, "cannot record hub.stopping");
             }
@@ -109,6 +130,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         addr,
         token,
         bus,
+        runtime,
         shutdown,
         task,
     })
