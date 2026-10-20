@@ -42,6 +42,8 @@ pub enum Command {
     Plugin(cmd::plugin::PluginCommand),
     /// Plan, approve and follow orchestrated runs.
     Run(cmd::run::RunArgs),
+    /// Reported cost and context use, grouped by role, model, run or agent.
+    Usage(cmd::usage::UsageArgs),
     /// Serve the collaboration tools over MCP on stdio (started by the hub for agents).
     #[command(hide = true)]
     Mcp,

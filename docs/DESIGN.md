@@ -110,27 +110,30 @@ usage_report = true
 
 core 根据能力调整行为。例如不支持 MCP 时，协作指令写进提示词，从输出中解析结构化结果。
 
-### 6.3 两种形态
+### 6.3 三种来源（插件协议 = ACP）
 
-- **内置插件**：Rust crate，编译进 core。
-- **外部插件**：独立可执行程序，经 stdio 用 JSON-RPC 讲 Plugin Protocol，任何语言都能写
-  （例如用 TS 直接调用官方 Claude Agent SDK）。
+M1 证明 ACP 足以表达统一 Agent 接口，因此**不再另定义 CrossAgents Plugin Protocol：插件协议就是 ACP**。
+任何讲 ACP 的可执行程序（任何语言写的，例如用 TS 调官方 Claude Agent SDK）都能成为插件。
 
-core 中的 `ExternalPlugin` 实现同一个 `AgentPlugin` trait 并转发给子进程，编排层不区分两者。
+| 来源 | 说明 | 优先级 |
+|---|---|---|
+| 内置 | claude、codex，编译进 hub | 最低 |
+| 插件目录 | `~/.crossagents/plugins/<name>/plugin.toml` | 中 |
+| `config.toml` | `[plugins.<name>] command = [...]`，可覆盖内置的启动命令 | 最高 |
 
-### 6.4 清单与发现
+需要 ACP 表达不了的能力时，仍可为某个插件写原生驱动（`AgentPlugin` trait 不变），编排层不受影响。
 
-插件放在 `~/.crossagents/plugins/<name>/plugin.toml`：
+### 6.4 插件清单
 
 ```toml
-name = "claude"
-version = "0.1.0"
-protocol = "1"
-kind = "external"                  # builtin | external
-command = ["node", "dist/index.js"]
-drivers = ["acp", "stdio-jsonl"]
-models = ["opus", "sonnet", "haiku"]
+name = "gemini"
+protocol = "acp"                        # 目前唯一支持的协议
+command = ["gemini", "--experimental-acp"]   # 相对路径（含 / 或 \）相对插件目录解析
+models = ["gemini-3-pro", "gemini-3-flash"]  # 展示与提示用
+model_env = "GEMINI_MODEL"              # 可选：把 agent 的模型写入该环境变量
 ```
+
+清单有误时跳过并记录警告，不影响 hub 启动。
 
 ### 6.5 协作工具的挂载
 
@@ -198,11 +201,14 @@ retrying(超限) → escalated → running         # 换更强模型或交回 Pl
 |---|---|---|
 | `agent_list` | 全部 | 列出可见 agent 及状态 |
 | `agent_send(to, text)` | 全部 | 发消息；目标空闲则作为新一轮输入，忙则排队到本轮结束 |
-| `plan_submit(plan)` | planner | 提交计划（进入 Approve 阶段） |
-| `task_status(id)` / `task_wait(id)` | planner | 查询 / 等待任务 |
-| `task_read(id, part)` | planner | 按需读取任务的完整 diff / 日志 |
-| `task_ask(id, q)` / `task_answer(id, a)` | worker / planner | 执行中的提问与回答 |
-| `task_complete(id, summary)` / `task_fail(id, reason)` | worker | 交回结果或报告失败 |
+| `plan_submit(tasks)` | planner | 提交计划（进入 Approve 阶段） |
+| `task_list()` / `task_status(task_id)` | planner | 查询任务（结果以消息推送，无需轮询等待） |
+| `task_read(task_id)` | planner | 完整报告：规格、总结、验收输出、diff 统计、失败原因 |
+| `task_ask(task_id, question)` / `task_answer(task_id, answer)` | worker / planner | 执行中的提问与回答 |
+| `task_complete(task_id, summary)` / `task_fail(task_id, reason)` | worker | 交回结果或放弃 |
+| `review_submit(task_id, approve, notes)` | reviewer | 审查结论；驳回意见转给 Worker |
+
+工具定义与逻辑都在 hub（`GET /v1/me/tools`、`POST /v1/me/tools/{name}`），`crossagents mcp` 只是代理。
 
 固定流程下，Planner 不直接调 `task_delegate`，而是通过 `plan_submit` 交给 Pipeline 调度；
 `task_delegate` 留给以后的自由编排 Pipeline。
@@ -210,17 +216,19 @@ retrying(超限) → escalated → running         # 换更强模型或交回 Pl
 ## 10. CLI
 
 ```
-crossagents hub start|stop|status
-crossagents plugin ls|info <name>
-crossagents agent add <name> --plugin claude --model haiku --role worker
-crossagents agent start|stop|rm|ls
-crossagents run "<需求>" [--planner <name>] [--no-approve]
-crossagents run ls|show <id>|approve <id>|cancel <id>
-crossagents task ls|show <id>|cancel <id>
-crossagents send <agent> "<text>"
+crossagents hub start|stop|status|run
+crossagents plugin ls
+crossagents agent add <name> --plugin claude --model haiku --role worker [--cwd <dir>]
+crossagents agent ls|show|start|stop|cancel|rm <name>
+crossagents run "<需求>" --planner <agent> --worker <agent> [--escalate <agent>] [--reviewer <agent>] [--no-approve]
+crossagents run ls | show <id> [-v] | approve <id> | reject <id> "<原因>" | cancel <id>
+crossagents send <agent> "<text>" [--wait]
 crossagents attach <agent>
-crossagents usage [--by role|model|run]
+crossagents events [--since N] [--follow]
+crossagents usage [--by role|model|run|agent]
 ```
+
+所有命令支持 `--json`。Run id 可以用完整 id，也可以用分支名里的 8 位短 id。
 
 ## 11. 本地 API 与客户端
 
@@ -239,42 +247,46 @@ hub 对外只有一套本地 API，CLI 与 GUI 是平等的客户端，**所有�
 
 ## 12. 存储、安全与成本
 
-- 状态存于 `~/.crossagents/state.db`（SQLite）：agents、runs、tasks、messages、events、usage。
-- hub 只监听本机；每个 agent 一个独立令牌，MCP 调用可可靠识别调用者。
-- 用量按 run / role / model / task 记录，只存计数，不存提示词与回复。
+- 状态存于 `~/.crossagents/state.db`（SQLite）：agents、runs、tasks、events（runs/tasks 为「索引列 + JSON」）。
+- hub 只监听本机。人用 `~/.crossagents/token`；每个 agent 会话一个独立令牌，只能访问 `/v1/me/*`，
+  工具调用可可靠识别调用者，并按角色限制可用工具。
+- 成本与上下文用量从事件日志按需聚合（`GET /v1/usage`），只存数值，不存提示词与回复。
+- 工作区：`~/.crossagents/worktrees/<run>/integration` 与 `.../<task>`；结果在 `crossagents/<run>` 分支，
+  不碰用户当前工作区。
 
-## 13. Crate 划分
+## 13. Crate 划分（实际）
 
 ```
 crates/
-├── core/              领域模型、Agent 统一接口、事件、所有 trait（无内部依赖）
-├── api-types/         本地 API 的请求/响应/事件类型（生成 TS 类型给 GUI）
-├── plugin-protocol/   插件协议定义 + ExternalPlugin 代理
-├── drivers/           可复用接入方式：jsonrpc（通用）、acp（以后 stdio-jsonl）
-├── plugins/           插件注册表 + 内置 claude、codex（均走 ACP；config.toml 可注册任意 ACP agent）
-├── mock-agent/        可编程的 ACP mock agent，用于不依赖 LLM 的端到端测试
-├── orchestrator/      Pipeline / Stage / Policy、任务调度（只依赖 core）
-├── mcp/               MCP server 与工具注册表（rmcp）
-├── store-sqlite/      Store 实现
-├── workspace-git/     WorkspaceProvider：git worktree
-├── hub/               组装：读配置 → 实例化实现 → 启动；提供本地 API（axum）
-└── cli/               CLI（clap），只调用本地 API
+├── core/              领域模型、统一 Agent 接口（AgentPlugin/AgentSession）、事件、Store、状态机
+├── api-types/         本地 API 的请求/响应类型；生成 TS 类型到 bindings/
+├── store-sqlite/      Store 实现（sqlx + 内嵌迁移）
+├── drivers/           jsonrpc（通用 NDJSON JSON-RPC）、acp（ACP v1 client）
+├── plugins/           插件注册表、内置 claude/codex、插件目录清单
+├── orchestrator/      固定流程引擎、协作工具、计划校验与调度、git worktree、验收（只依赖 core）
+├── hub/               组装与本地 API（axum）：runtime、agent 令牌、MCP 挂载、用量统计
+├── cli/               crossagents 命令（含隐藏的 `crossagents mcp` stdio MCP 代理）
+└── mock-agent/        可编程 ACP mock agent + 全部端到端测试（无需 LLM）
 apps/
 └── gui/               v2：Tauri 2 GUI
 ```
 
-主要依赖：tokio、serde、axum、rmcp、sqlx（sqlite）、clap、ts-rs。ACP 不依赖 SDK，见 M1 任务书。
+与最初设想的差异：没有独立的 `plugin-protocol`（协议就是 ACP）、`mcp`（MCP server 只是 CLI 里的薄代理，
+工具逻辑在 orchestrator）、`workspace-git`（在 `orchestrator::workspace`，`WorkspaceProvider` trait 不变）。
+
+主要依赖：tokio、serde、axum、sqlx（sqlite）、clap、reqwest、ts-rs。ACP 与 MCP 都自写最小实现，不依赖 SDK。
 
 ## 14. 里程碑
 
-| 阶段 | 内容 | 演示 |
+| 阶段 | 内容 | 状态 |
 |---|---|---|
-| M0 | workspace 骨架、core 的 trait 与事件、hub 空壳 + 本地 API 骨架（HTTP + SSE）、SQLite 建表 | `hub start/status` |
-| M1 | ACP 驱动、claude 插件（经 `claude-agent-acp`，支持选模型）、agent 命令 | 用 CLI 和 Haiku 对话 |
-| M2 | MCP 协作层、任务规格、hub 执行验收 | Opus 规划 → Haiku 做一个任务 → 测试通过交回 |
-| M3 | 固定 Pipeline 完整版：审批、worktree 并行、重试/升级、合并 | 一个 Planner 带 3 个 Worker |
-| M4 | codex 插件（经 `codex-acp`）、一个最小外部插件跑通 `ExternalPlugin`、Reviewer | 跨厂商：Opus 规划、Codex mini 编码；完整 v1 |
-| v2 | Tauri GUI（任务树、实时输出、计划审批、diff、成本面板） | 图形界面 |
+| M0 | workspace 骨架、core、hub + 本地 API（HTTP + SSE）、SQLite | ✅ [任务书](tasks/M0.md) |
+| M1 | ACP 驱动、claude/codex 插件、agent 会话、send/attach | ✅ [任务书](tasks/M1.md) |
+| M2–M3 | 协作工具（MCP）、任务规格、hub 验收、固定 Pipeline：审批、worktree 并行、重试/升级、Reviewer、合并 | ✅ [任务书](tasks/M2.md) |
+| M4 | 插件目录（外部插件）、成本统计、收尾 | ✅ [任务书](tasks/M4.md) |
+| v2 | Tauri GUI（任务树、实时输出、计划审批、diff、成本面板）；自由编排 Pipeline | 待做 |
+
+v1 的自动化测试全部用 mock agent 完成；与真实 Claude Code / Codex 的联调需要用户本人登录后进行。
 
 ## 15. 已定决策
 
@@ -291,9 +303,10 @@ apps/
 
 ## 16. 待研究
 
-- `agent-client-protocol` crate 的 API，以及 `claude-agent-acp` / `codex-acp` 对模型选择、MCP 注入、
-  权限放行、用量上报的支持程度（M1 前调研）。
-- 计划审批在 CLI 下的交互形式（导出为文件编辑后再提交）。
+- 真实联调：`claude-agent-acp` / `codex-acp` 实际提供的模型选项名、bypass 模式名、`usage_update` 是否带成本。
+  驱动对这些都做了降级处理（找不到就发 `agent.error` 警告并用默认值）。
+- 计划审批在 CLI 下的编辑形式（目前只能批准或带理由驳回）。
+- 合并冲突目前直接判任务失败；可以改为让 Worker 在新基线上重做。
 
 ## 17. 参考项目
 

@@ -18,7 +18,8 @@ use chrono::{DateTime, Utc};
 use crossagents_api_types::{
     API_VERSION, ApiError, CreateAgentRequest, CreateRunRequest, ErrorCode, HealthResponse,
     HubInfo, ListAgentsResponse, ListPluginsResponse, ListRunsResponse, ListToolsResponse,
-    PluginInfo, RejectRunRequest, RunDetail, SendMessageRequest, SendMessageResponse,
+    PluginInfo, RejectRunRequest, RunDetail, SendMessageRequest, SendMessageResponse, UsageGroup,
+    UsageResponse,
 };
 use crossagents_core::{
     Agent, AgentId, AgentKey, AgentStatus, CoreError, Event, EventBus, EventKind, Run, RunConfig,
@@ -66,6 +67,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/agents/{key}/cancel", post(cancel_agent))
         .route("/v1/agents/{key}/messages", post(send_message))
         .route("/v1/plugins", get(list_plugins))
+        .route("/v1/usage", get(usage))
         .route("/v1/runs", get(list_runs).post(create_run))
         .route("/v1/runs/{key}", get(get_run))
         .route("/v1/runs/{key}/approve", post(approve_run))
@@ -494,6 +496,21 @@ async fn call_tool(
         .await
         .map_err(|e| AppError::from(CoreError::Agent(format!("tool call panicked: {e}"))))?;
     Ok(Json(result?))
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageQuery {
+    #[serde(default)]
+    by: UsageGroup,
+}
+
+async fn usage(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<UsageQuery>,
+) -> ApiResult<Json<UsageResponse>> {
+    Ok(Json(
+        crate::usage::compute(state.store().as_ref(), query.by).await?,
+    ))
 }
 
 async fn shutdown(State(state): State<Arc<AppState>>) -> StatusCode {

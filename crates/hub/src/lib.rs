@@ -4,6 +4,7 @@ pub mod api;
 pub mod collab;
 pub mod paths;
 pub mod runtime;
+pub mod usage;
 
 use std::fs::{File, TryLockError};
 use std::net::SocketAddr;
@@ -72,10 +73,11 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         },
         url: OnceLock::new(),
     });
-    let runtime = Arc::new(
-        Runtime::new(bus.clone(), PluginRegistry::with_config(&config.plugins))
-            .with_setup(setup.clone()),
-    );
+    let (plugins, plugin_warnings) = PluginRegistry::load(&config.plugins, &paths.plugins());
+    for warning in &plugin_warnings {
+        tracing::warn!("skipping plugin: {warning}");
+    }
+    let runtime = Arc::new(Runtime::new(bus.clone(), plugins).with_setup(setup.clone()));
     runtime.reset_statuses().await?;
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.port))

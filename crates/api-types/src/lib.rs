@@ -127,6 +127,42 @@ pub struct RejectRunRequest {
     pub reason: String,
 }
 
+/// How `GET /v1/usage` groups agents.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageGroup {
+    #[default]
+    Role,
+    Model,
+    Run,
+    Agent,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UsageRow {
+    /// The role, model, run id or agent name.
+    pub key: String,
+    pub agents: u32,
+    pub sessions: u32,
+    /// Sum of the cost agents reported; 0 when none reported any.
+    pub cost_usd: f64,
+    /// Whether any agent in the group reported a cost.
+    pub cost_reported: bool,
+    /// Largest context (tokens) any session in the group reached.
+    #[ts(type = "number")]
+    pub peak_context: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UsageResponse {
+    pub by: UsageGroup,
+    pub rows: Vec<UsageRow>,
+    pub total_cost_usd: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ListToolsResponse {

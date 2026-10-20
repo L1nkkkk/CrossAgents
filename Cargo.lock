@@ -511,6 +511,8 @@ dependencies = [
  "crossagents-core",
  "crossagents-drivers",
  "serde",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]

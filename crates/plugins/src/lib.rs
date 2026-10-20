@@ -8,8 +8,13 @@
 //! [plugins.gemini]
 //! command = ["gemini", "--experimental-acp"]
 //! ```
+//!
+//! or dropped in as a directory with a manifest, see [`manifest`].
+
+pub mod manifest;
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -147,6 +152,25 @@ impl PluginRegistry {
             }
         }
         registry
+    }
+
+    /// Built-ins, then plugin directories under `plugins_dir`, then `config.toml` entries;
+    /// later sources win. Returns warnings for plugin manifests that were skipped.
+    pub fn load(
+        configs: &BTreeMap<String, PluginConfig>,
+        plugins_dir: &Path,
+    ) -> (Self, Vec<String>) {
+        let (found, warnings) = manifest::load_dir(plugins_dir);
+        let mut merged: BTreeMap<String, PluginConfig> = found.into_iter().collect();
+        merged.extend(configs.iter().map(|(k, v)| (k.clone(), v.clone())));
+        let mut registry = Self::with_config(configs);
+        for (name, config) in merged {
+            // Directory plugins replace built-ins unless config.toml says otherwise.
+            if !configs.contains_key(&name) {
+                registry.register(Arc::new(AcpPlugin::new(name, config)));
+            }
+        }
+        (registry, warnings)
     }
 
     pub fn register(&mut self, plugin: Arc<dyn AgentPlugin>) {

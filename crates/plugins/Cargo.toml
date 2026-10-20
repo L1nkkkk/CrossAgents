@@ -10,6 +10,10 @@ async-trait.workspace = true
 crossagents-core.workspace = true
 crossagents-drivers.workspace = true
 serde.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

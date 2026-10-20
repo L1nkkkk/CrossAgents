@@ -30,6 +30,7 @@ struct MockAgent {
     mcp_servers: Mutex<Vec<Value>>,
     mcp: Mutex<Option<(RpcPeer, tokio::process::Child)>>,
     last_directives: Mutex<Vec<Directive>>,
+    turns: Mutex<u32>,
 }
 
 /// A client side that ignores whatever an MCP server sends unprompted.
@@ -243,9 +244,19 @@ impl MockAgent {
         self.say(&session_id, &format!("echo(model={model},mode={mode}): "))
             .await;
         self.say(&session_id, &text).await;
+        // Cumulative session cost, as ACP agents report it: opus costs 10x haiku per turn.
+        let turns = {
+            let mut turns = self.turns.lock().await;
+            *turns += 1;
+            *turns
+        };
+        let rate = if model.contains("haiku") { 0.001 } else { 0.01 };
         self.update(
             &session_id,
-            json!({ "sessionUpdate": "usage_update", "used": 42, "size": 1000 }),
+            json!({
+                "sessionUpdate": "usage_update", "used": 42, "size": 1000,
+                "cost": { "amount": rate * f64::from(turns), "currency": "USD" }
+            }),
         )
         .await;
         Ok(json!({ "stopReason": "end_turn" }))
@@ -309,6 +320,7 @@ async fn main() {
         mcp_servers: Mutex::default(),
         mcp: Mutex::default(),
         last_directives: Mutex::default(),
+        turns: Mutex::default(),
     });
     let (peer, reader) = RpcPeer::spawn(tokio::io::stdin(), tokio::io::stdout(), agent.clone());
     *agent.peer.lock().await = Some(peer);

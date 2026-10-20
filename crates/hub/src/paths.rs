@@ -48,6 +48,10 @@ impl Paths {
     pub fn logs(&self) -> PathBuf {
         self.home.join("logs")
     }
+    /// External plugins: one directory with a `plugin.toml` each.
+    pub fn plugins(&self) -> PathBuf {
+        self.home.join("plugins")
+    }
 
     pub fn read_token(&self) -> Result<String> {
         let token = std::fs::read_to_string(self.token())

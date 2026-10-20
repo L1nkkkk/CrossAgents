@@ -5,6 +5,7 @@ pub mod mcp;
 pub mod plugin;
 pub mod run;
 pub mod session;
+pub mod usage;
 
 use anyhow::Result;
 use crossagents_hub::Paths;
@@ -29,6 +30,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Attach(args) => session::attach(&ctx, args).await,
         Command::Plugin(cmd) => plugin::run(&ctx, cmd).await,
         Command::Run(args) => run::run(&ctx, args).await,
+        Command::Usage(args) => usage::run(&ctx, args).await,
         Command::Mcp => unreachable!("handled above"),
     }
 }

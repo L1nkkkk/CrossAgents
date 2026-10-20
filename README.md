@@ -1,56 +1,128 @@
 # CrossAgents
 
-CrossAgents orchestrates coding agents from different vendors. A strong model (Opus /
-GPT-5 class) plans and reviews; cheap models (Haiku / mini class) write the code in parallel,
-each in its own git worktree, and the hub verifies every result before it is merged.
-Agents plug in through a plugin layer (Claude Code and Codex first, over ACP).
+CrossAgents 是一个分层的多 agent 编码编排器：**强模型（Opus / GPT-5 级）负责设计、拆解和验收，
+便宜模型（Haiku / mini 级）并行写代码**。每个任务在独立的 git worktree 里完成，由 hub 亲自跑验收命令，
+失败自动打回重试、必要时升级到更强的模型，通过后合并到一个集成分支，最终是否合入由你决定。
 
-See [docs/DESIGN.md](docs/DESIGN.md) for the design and [docs/tasks/](docs/tasks/) for the
-milestone task books.
+各家 agent 以插件形式接入（插件协议就是 [ACP](https://agentclientprotocol.com)）：内置 Claude Code 和 Codex，
+任何讲 ACP 的 agent 都能通过配置或插件目录接入，不用改代码。
 
-## Build
+- 设计：[docs/DESIGN.md](docs/DESIGN.md)
+- 各里程碑任务书：[docs/tasks/](docs/tasks/)
 
-Requires Rust 1.99 (pinned in `rust-toolchain.toml`).
+## 准备
+
+| 需要 | 用途 |
+|---|---|
+| Rust 1.99（见 `rust-toolchain.toml`） | 构建 |
+| git | 工作区与合并 |
+| Node.js（`npx`） | 运行 Claude / Codex 的 ACP 适配器 |
+| 已登录的 Claude Code 和/或 Codex | 真正干活的 agent；在终端里各自登录一次 |
 
 ```sh
 cargo build --release
-./target/release/crossagents --help
+# 把 target/release/crossagents 放进 PATH
 ```
 
-## Quick start
+内置插件第一次启动 agent 时会通过 `npx` 下载适配器：
+`@agentclientprotocol/claude-agent-acp`、`@agentclientprotocol/codex-acp`。
+
+## 快速开始
 
 ```sh
-crossagents hub start                 # start the hub in the background
-crossagents hub status
-crossagents events --follow           # in another terminal: watch events live
-crossagents agent add alice --plugin claude --model haiku --role worker --cwd .
-crossagents agent ls
-crossagents agent rm alice
-crossagents hub stop
+crossagents hub start
+
+# 在你的项目（git 仓库，至少一次提交）里登记 agent
+crossagents agent add arch  --plugin claude --model opus  --role planner --cwd ~/proj
+crossagents agent add coder --plugin claude --model haiku --role worker  --cwd ~/proj
+
+# 发起一次编排
+crossagents run "给项目加用户登录" --planner arch --worker coder
+crossagents run show <id>          # Planner 提交计划后在这里查看
+crossagents run approve <id>       # 批准后自动派发、验收、合并
+crossagents run show <id> -v       # 跟踪任务；-v 显示验收输出与 diff
+git merge crossagents/<id>         # 结果在集成分支上
 ```
 
-Add `--json` to any command for machine-readable output.
+常用选项：
 
-State lives in `~/.crossagents/` (override with `CROSSAGENTS_HOME`). Set the API port in
-`~/.crossagents/config.toml`:
+| 选项 | 作用 |
+|---|---|
+| `--escalate <agent>` | 某任务连续失败 `--max-attempts` 次后，换这个更强的 agent 在同一 worktree 重做 |
+| `--reviewer <agent>` | 每个通过验收的改动先交给它审查，驳回意见转给 Worker |
+| `--no-approve` | 不等你审批计划，直接开工 |
+| `--max-parallel N` | 同时进行的任务数（默认 3；修改范围重叠的任务自动串行） |
+
+其他命令：
+
+```sh
+crossagents send coder "解释一下 src/main.rs" --wait   # 直接和某个 agent 对话
+crossagents attach coder                              # 实时查看输出并交互
+crossagents events --follow                           # 全部事件流
+crossagents usage --by role                           # 强/弱模型各花了多少
+crossagents run reject <id> "任务拆得再小一点"          # 驳回计划
+crossagents run cancel <id>
+```
+
+所有命令都支持 `--json`。
+
+## 配置
+
+数据在 `~/.crossagents/`（可用环境变量 `CROSSAGENTS_HOME` 改）。`config.toml`：
 
 ```toml
 [hub]
-port = 7420   # 0 = pick a free port
+port = 7420
+
+# 覆盖内置插件的启动命令，或注册任意 ACP agent
+[plugins.claude]
+command = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
+
+[plugins.gemini]
+command = ["gemini", "--experimental-acp"]
 ```
 
-## Local API
+也可以把插件放成目录：`~/.crossagents/plugins/<name>/plugin.toml`
 
-The hub listens on `127.0.0.1` only. Every route except `GET /v1/health` needs
-`Authorization: Bearer <token>`, where the token is in `~/.crossagents/token`.
-`GET /v1/events?since=<seq>` is a server-sent event stream that replays history and then
-follows live events. TypeScript types for GUI clients are generated into `bindings/` by
-`cargo test -p crossagents-api-types`.
+```toml
+name = "my-agent"
+protocol = "acp"
+command = ["./bin/my-agent", "--acp"]   # 相对路径相对插件目录
+models = ["fast", "smart"]
+```
 
-## Development
+## 工作方式
+
+```
+你 ──run──▶ Planner（强模型）──plan_submit──▶ 你审批
+                                              │
+        ┌─────────────── hub ─────────────────┘
+        ▼
+  每个任务：新 worktree + 新 Worker 会话（弱模型）
+        │ task_complete
+        ▼
+  hub 提交并跑验收命令 ──失败──▶ 打回重试 ──多次失败──▶ 升级 / 失败
+        │ 通过
+        ▼
+  （可选）Reviewer 审查 ──▶ 合并到 crossagents/<run> ──▶ 通知 Planner
+```
+
+Agent 通过 hub 挂载的 MCP 工具协作（`plan_submit`、`task_complete`、`task_ask` 等），
+每个会话有独立令牌，只能使用自己角色的工具。
+
+## 本地 API
+
+hub 只监听 `127.0.0.1`。除 `GET /v1/health` 外都要 `Authorization: Bearer <~/.crossagents/token>`。
+`GET /v1/events` 是 SSE 事件流（支持断点续传）。GUI 用的 TypeScript 类型由
+`cargo test -p crossagents-api-types` 生成到 `bindings/`。
+
+## 开发
 
 ```sh
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+端到端测试用 `crates/mock-agent`：一个可编程的 ACP agent，按提示里的 `[write …]`、`[call …]` 指令行事，
+不需要任何 LLM 或账号就能跑通完整流水线。
