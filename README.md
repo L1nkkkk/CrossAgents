@@ -27,6 +27,10 @@ cargo build --release
 内置插件第一次启动 agent 时会通过 `npx` 下载适配器：
 `@agentclientprotocol/claude-agent-acp`、`@agentclientprotocol/codex-acp`。
 
+**Codex 提示**：建议给 agent 显式指定 `--model`。不指定时用 `~/.codex/config.toml` 里的默认模型，
+它不一定支持你的登录方式（例如 ChatGPT 账号）。不知道有哪些模型时，随便填一个，
+`crossagents events` 里的 `agent.error` 会列出可选值。
+
 ## 快速开始
 
 ```sh

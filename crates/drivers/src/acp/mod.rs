@@ -201,22 +201,34 @@ impl AcpSession {
 
         if permission == PermissionPolicy::Bypass
             && let Some(modes) = &session.modes
-            && let Some(mode) = modes
-                .available_modes
-                .iter()
-                .find(|m| m.id.to_lowercase().contains("bypass"))
-            && mode.id != modes.current_mode_id
         {
-            let request = SetSessionModeRequest {
-                session_id: self.session_id.clone(),
-                mode_id: mode.id.clone(),
-            };
-            if let Err(err) = self
-                .peer
-                .request::<_, Value>(method::SESSION_SET_MODE, request)
-                .await
-            {
-                warn(format!("cannot switch to mode {}: {err}", mode.id));
+            match bypass_mode(&modes.available_modes) {
+                Some(mode) if mode.id == modes.current_mode_id => {}
+                Some(mode) => {
+                    let request = SetSessionModeRequest {
+                        session_id: self.session_id.clone(),
+                        mode_id: mode.id.clone(),
+                    };
+                    if let Err(err) = self
+                        .peer
+                        .request::<_, Value>(method::SESSION_SET_MODE, request)
+                        .await
+                    {
+                        warn(format!("cannot switch to mode {}: {err}", mode.id));
+                    }
+                }
+                None if !modes.available_modes.is_empty() => warn(format!(
+                    "no unrestricted mode among {}; staying in {:?}, so the agent may be \
+                     sandboxed or ask for approvals",
+                    modes
+                        .available_modes
+                        .iter()
+                        .map(|m| m.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    modes.current_mode_id
+                )),
+                None => {}
             }
         }
 
@@ -295,6 +307,15 @@ impl AgentSession for AcpSession {
         let _ = child.start_kill();
         let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
     }
+}
+
+/// The mode that lets the agent act without approvals or sandbox, by the names agents use:
+/// Claude Code `bypassPermissions`, Codex `agent-full-access`, others `yolo`.
+fn bypass_mode(modes: &[SessionMode]) -> Option<&SessionMode> {
+    const KEYWORDS: [&str; 4] = ["bypass", "full-access", "full_access", "yolo"];
+    KEYWORDS
+        .iter()
+        .find_map(|keyword| modes.iter().find(|m| m.id.to_lowercase().contains(keyword)))
 }
 
 fn stop_reason(raw: &str) -> StopReason {
@@ -498,6 +519,23 @@ mod tests {
             choose_permission(PermissionPolicy::Deny, &options[..2]),
             PermissionOutcome::Cancelled
         );
+    }
+
+    #[test]
+    fn finds_the_unrestricted_mode() {
+        let modes = |ids: &[&str]| -> Vec<SessionMode> {
+            ids.iter()
+                .map(|id| SessionMode {
+                    id: (*id).into(),
+                    name: String::new(),
+                })
+                .collect()
+        };
+        let codex = modes(&["read-only", "workspace-write", "agent", "agent-full-access"]);
+        assert_eq!(bypass_mode(&codex).unwrap().id, "agent-full-access");
+        let claude = modes(&["default", "acceptEdits", "plan", "bypassPermissions"]);
+        assert_eq!(bypass_mode(&claude).unwrap().id, "bypassPermissions");
+        assert!(bypass_mode(&modes(&["default", "plan"])).is_none());
     }
 
     #[test]
