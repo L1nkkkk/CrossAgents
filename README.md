@@ -66,6 +66,21 @@ crossagents run cancel <id>
 
 所有命令都支持 `--json`。
 
+## GUI
+
+`apps/gui/` 是桌面 GUI（Tauri 2 + React），和 CLI 一样只是 hub 的客户端：先 `crossagents hub start`，
+GUI 读取 `~/.crossagents/hub.json` 与 `token` 连接（同样遵循 `CROSSAGENTS_HOME`）。
+可以登记 agent、发起 run、审批/驳回计划、跟踪任务与验收结果、看 agent 实时输出并对话、查看成本。
+
+```sh
+cd apps/gui
+npm install
+npm run tauri dev                       # 开发
+npm run tauri build -- --no-bundle      # 产出 src-tauri/target/release/crossagents-gui(.exe)
+```
+
+Windows 需要 WebView2（Windows 11 自带）。详见 [任务书](docs/tasks/V2-GUI.md)。
+
 ## 配置
 
 数据在 `~/.crossagents/`（可用环境变量 `CROSSAGENTS_HOME` 改）。`config.toml`：

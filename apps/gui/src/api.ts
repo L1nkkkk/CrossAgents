@@ -1,0 +1,103 @@
+// Typed client for the hub's local API (docs/DESIGN.md §11). Inside Tauri requests go
+// through the `hub_request` command, which adds the bearer token; in a plain browser they
+// go to the same origin (the Vite dev server forwards them, see vite.config.ts).
+
+import { invoke } from "@tauri-apps/api/core";
+import type { Agent } from "@bindings/Agent";
+import type { ApiError as ApiErrorJson } from "@bindings/ApiError";
+import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
+import type { CreateRunRequest } from "@bindings/CreateRunRequest";
+import type { HubInfo } from "@bindings/HubInfo";
+import type { ListAgentsResponse } from "@bindings/ListAgentsResponse";
+import type { ListPluginsResponse } from "@bindings/ListPluginsResponse";
+import type { ListRunsResponse } from "@bindings/ListRunsResponse";
+import type { RejectRunRequest } from "@bindings/RejectRunRequest";
+import type { Run } from "@bindings/Run";
+import type { RunDetail } from "@bindings/RunDetail";
+import type { SendMessageRequest } from "@bindings/SendMessageRequest";
+import type { SendMessageResponse } from "@bindings/SendMessageResponse";
+import type { UsageGroup } from "@bindings/UsageGroup";
+import type { UsageResponse } from "@bindings/UsageResponse";
+
+export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+export class ApiError extends Error {
+  /** HTTP status; 0 when the hub could not be reached. */
+  status: number;
+  code: string;
+  constructor(status: number, code: string, message: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
+type Method = "GET" | "POST" | "DELETE";
+
+async function send(method: Method, path: string, body?: unknown): Promise<{ status: number; body: string }> {
+  const json = body === undefined ? null : JSON.stringify(body);
+  if (inTauri) {
+    try {
+      return await invoke<{ status: number; body: string }>("hub_request", { method, path, body: json });
+    } catch (err) {
+      throw new ApiError(0, "unreachable", String(err));
+    }
+  }
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      method,
+      headers: json === null ? {} : { "content-type": "application/json" },
+      body: json,
+    });
+  } catch (err) {
+    throw new ApiError(0, "unreachable", String(err));
+  }
+  return { status: response.status, body: await response.text() };
+}
+
+async function request<T>(method: Method, path: string, body?: unknown): Promise<T> {
+  const response = await send(method, path, body);
+  if (response.status >= 400) {
+    let parsed: ApiErrorJson | undefined;
+    try {
+      parsed = JSON.parse(response.body);
+    } catch {
+      // Not an API error body.
+    }
+    throw new ApiError(
+      response.status,
+      parsed?.error.code ?? "http",
+      parsed?.error.message ?? (response.body || `HTTP ${response.status}`),
+    );
+  }
+  return (response.body ? JSON.parse(response.body) : undefined) as T;
+}
+
+const enc = encodeURIComponent;
+
+export const api = {
+  info: () => request<HubInfo>("GET", "/v1/info"),
+
+  listAgents: () => request<ListAgentsResponse>("GET", "/v1/agents"),
+  createAgent: (req: CreateAgentRequest) => request<Agent>("POST", "/v1/agents", req),
+  sendMessage: (key: string, req: SendMessageRequest) =>
+    request<SendMessageResponse>("POST", `/v1/agents/${enc(key)}/messages`, req),
+  cancelAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/cancel`),
+  stopAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/stop`),
+  listPlugins: () => request<ListPluginsResponse>("GET", "/v1/plugins"),
+
+  listRuns: () => request<ListRunsResponse>("GET", "/v1/runs"),
+  getRun: (key: string) => request<RunDetail>("GET", `/v1/runs/${enc(key)}`),
+  createRun: (req: CreateRunRequest) => request<Run>("POST", "/v1/runs", req),
+  approveRun: (key: string) => request<RunDetail>("POST", `/v1/runs/${enc(key)}/approve`),
+  rejectRun: (key: string, req: RejectRunRequest) =>
+    request<RunDetail>("POST", `/v1/runs/${enc(key)}/reject`, req),
+  cancelRun: (key: string) => request<RunDetail>("POST", `/v1/runs/${enc(key)}/cancel`),
+
+  usage: (by: UsageGroup) => request<UsageResponse>("GET", `/v1/usage?by=${by}`),
+};
+
+export function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
