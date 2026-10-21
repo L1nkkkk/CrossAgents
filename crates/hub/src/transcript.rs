@@ -31,6 +31,7 @@ impl Fold {
                 completed_at: None,
                 stop_reason: None,
                 items: Vec::new(),
+                diff: None,
             }),
             EventKind::AgentInputWithdrawn { message_id, .. } => {
                 self.turns
@@ -82,6 +83,54 @@ impl Fold {
                         title: title.clone(),
                         kind: kind.clone(),
                         status: *status,
+                        output: None,
+                        detail: None,
+                    });
+                }
+            }
+            EventKind::AgentToolOutput {
+                tool_call_id, text, ..
+            } => {
+                if let Some(TranscriptItem::ToolCall { output, .. }) = self.call_mut(tool_call_id) {
+                    output.get_or_insert_with(String::new).push_str(text);
+                }
+            }
+            EventKind::AgentToolDetail {
+                tool_call_id,
+                detail: new,
+                ..
+            } => {
+                if let Some(TranscriptItem::ToolCall { detail, .. }) = self.call_mut(tool_call_id) {
+                    *detail = Some(Box::new(new.clone()));
+                }
+            }
+            EventKind::AgentTurnDiff { diff, .. } => {
+                let index = match self.current {
+                    Some(id) => self.turns.iter().rposition(|t| t.message_id == id),
+                    None => self.turns.iter().rposition(|t| t.started_at.is_some()),
+                };
+                if let Some(index) = index {
+                    self.turns[index].diff = Some(diff.clone());
+                }
+            }
+            EventKind::AgentPermission {
+                kind,
+                title,
+                decision,
+                ..
+            } => {
+                if let Some(items) = self.active_items() {
+                    items.push(TranscriptItem::Permission {
+                        kind: kind.clone(),
+                        title: title.clone(),
+                        decision: *decision,
+                    });
+                }
+            }
+            EventKind::AgentWarning { message, .. } => {
+                if let Some(items) = self.active_items() {
+                    items.push(TranscriptItem::Warning {
+                        message: message.clone(),
                     });
                 }
             }
@@ -91,11 +140,9 @@ impl Fold {
                 status: new_status,
                 ..
             } => {
-                // Updates usually land in the current turn; search back from the newest.
-                let call = self.turns.iter_mut().rev().flat_map(|t| t.items.iter_mut()).find(
-                    |item| matches!(item, TranscriptItem::ToolCall { tool_call_id: id, .. } if id == tool_call_id),
-                );
-                if let Some(TranscriptItem::ToolCall { title, status, .. }) = call {
+                if let Some(TranscriptItem::ToolCall { title, status, .. }) =
+                    self.call_mut(tool_call_id)
+                {
                     if let Some(new_title) = new_title {
                         title.clone_from(new_title);
                     }
@@ -115,16 +162,28 @@ impl Fold {
                 used,
                 size,
                 cost_usd,
+                tokens,
                 ..
             } => {
                 self.usage = Some(TranscriptUsage {
                     used: *used,
                     size: *size,
                     cost_usd: *cost_usd,
+                    tokens: tokens.clone(),
                 });
             }
             _ => {}
         }
+    }
+
+    /// A tool call by id. Updates usually land in the current turn, so search back from the
+    /// newest.
+    fn call_mut(&mut self, tool_call_id: &str) -> Option<&mut TranscriptItem> {
+        self.turns
+            .iter_mut()
+            .rev()
+            .flat_map(|t| t.items.iter_mut())
+            .find(|item| matches!(item, TranscriptItem::ToolCall { tool_call_id: id, .. } if id == tool_call_id))
     }
 
     fn turn_mut(&mut self, id: MessageId) -> Option<&mut TranscriptTurn> {
@@ -145,7 +204,8 @@ impl Fold {
 mod tests {
     use chrono::Utc;
     use crossagents_core::{
-        AgentId, EVENT_SCHEMA_VERSION, MessageSource, OutputStream, StopReason, ToolStatus,
+        AgentId, EVENT_SCHEMA_VERSION, MessageSource, OutputStream, StopReason, ToolDetail,
+        ToolStatus,
     };
     use uuid::Uuid;
 
@@ -212,12 +272,36 @@ mod tests {
                 title: Some("Read a.rs".into()),
                 status: Some(ToolStatus::Completed),
             },
+            EventKind::AgentToolOutput {
+                id,
+                tool_call_id: "t1".into(),
+                text: "fn main".into(),
+            },
+            EventKind::AgentToolDetail {
+                id,
+                tool_call_id: "t1".into(),
+                detail: ToolDetail {
+                    exit_code: Some(0),
+                    ..ToolDetail::default()
+                },
+            },
+            EventKind::AgentWarning {
+                id,
+                message: "retrying".into(),
+            },
+            EventKind::AgentTurnDiff {
+                id,
+                diff: "diff --git a/a.rs b/a.rs
+"
+                .into(),
+            },
             out("done", OutputStream::Text),
             EventKind::AgentUsage {
                 id,
                 used: 10,
                 size: 100,
                 cost_usd: None,
+                tokens: None,
             },
             EventKind::AgentTurnCompleted {
                 id,
@@ -230,7 +314,7 @@ mod tests {
             fold.push(&ev(i as u64 + 1, kind));
         }
 
-        assert_eq!(fold.last_seq, 13);
+        assert_eq!(fold.last_seq, 17);
         assert_eq!(fold.turns.len(), 2);
         let first = &fold.turns[0];
         assert_eq!(first.stop_reason, Some(StopReason::EndTurn));
@@ -251,12 +335,27 @@ mod tests {
                     title: "Read a.rs".into(),
                     kind: Some("read".into()),
                     status: ToolStatus::Completed,
+                    output: Some("fn main".into()),
+                    detail: Some(Box::new(ToolDetail {
+                        exit_code: Some(0),
+                        ..ToolDetail::default()
+                    })),
+                },
+                TranscriptItem::Warning {
+                    message: "retrying".into()
                 },
                 TranscriptItem::Output {
                     stream: OutputStream::Text,
                     text: "done".into()
                 },
             ]
+        );
+        assert_eq!(
+            first.diff.as_deref(),
+            Some(
+                "diff --git a/a.rs b/a.rs
+"
+            )
         );
         let second = &fold.turns[1];
         assert_eq!(second.input, "next");

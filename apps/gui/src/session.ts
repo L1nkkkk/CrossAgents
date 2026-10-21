@@ -132,6 +132,34 @@ function apply(t: Transcript, event: HubEvent): Transcript {
           : item;
       return { ...t, turns: turns.map((x) => ({ ...x, items: x.items.map(update) })), last_seq: seq };
     }
+    case "agent.tool_output": {
+      if (event.data.id !== id) return t;
+      const { tool_call_id, text } = event.data;
+      return withCall(t, seq, tool_call_id, (item) => ({ ...item, output: (item.output ?? "") + text }));
+    }
+    case "agent.tool_detail": {
+      if (event.data.id !== id) return t;
+      const { tool_call_id, detail } = event.data;
+      return withCall(t, seq, tool_call_id, (item) => ({ ...item, detail }));
+    }
+    case "agent.turn_diff": {
+      if (event.data.id !== id) return t;
+      const index = activeIndex(t);
+      if (index < 0) return { ...t, last_seq: seq };
+      const turns = t.turns.slice();
+      turns[index] = { ...turns[index], diff: event.data.diff };
+      return { ...t, turns, last_seq: seq };
+    }
+    case "agent.permission": {
+      if (event.data.id !== id) return t;
+      const { kind, title, decision } = event.data;
+      return withActive(t, seq, (items) => [...items, { type: "permission", kind, title, decision }]);
+    }
+    case "agent.warning": {
+      if (event.data.id !== id) return t;
+      const message = event.data.message;
+      return withActive(t, seq, (items) => [...items, { type: "warning", message }]);
+    }
     case "agent.error": {
       if (event.data.id !== id) return t;
       const message = event.data.message;
@@ -139,25 +167,44 @@ function apply(t: Transcript, event: HubEvent): Transcript {
     }
     case "agent.usage": {
       if (event.data.id !== id) return t;
-      const { used, size, cost_usd } = event.data;
-      return { ...t, usage: { used, size, cost_usd }, last_seq: seq };
+      const { used, size, cost_usd, tokens } = event.data;
+      return { ...t, usage: { used, size, cost_usd, tokens }, last_seq: seq };
     }
     default:
       return t;
   }
 }
 
-/** Changes the items of the running turn, else of the last turn that started. */
-function withActive(t: Transcript, seq: number, change: (items: TranscriptItem[]) => TranscriptItem[]): Transcript {
+type ToolCall = Extract<TranscriptItem, { type: "tool_call" }>;
+
+/** Changes one tool call, searching back from the newest turn. */
+function withCall(t: Transcript, seq: number, callId: string, change: (item: ToolCall) => ToolCall): Transcript {
+  for (let i = t.turns.length - 1; i >= 0; i--) {
+    const at = t.turns[i].items.findIndex((x) => x.type === "tool_call" && x.tool_call_id === callId);
+    if (at < 0) continue;
+    const items = t.turns[i].items.slice();
+    items[at] = change(items[at] as ToolCall);
+    const turns = t.turns.slice();
+    turns[i] = { ...turns[i], items };
+    return { ...t, turns, last_seq: seq };
+  }
+  return { ...t, last_seq: seq };
+}
+
+/** The running turn, else the last turn that started; -1 if none. */
+function activeIndex(t: Transcript): number {
   let index = -1;
   for (let i = t.turns.length - 1; i >= 0; i--) {
     const turn = t.turns[i];
-    if (turn.started_at && !turn.completed_at) {
-      index = i;
-      break;
-    }
+    if (turn.started_at && !turn.completed_at) return i;
     if (index < 0 && turn.started_at) index = i;
   }
+  return index;
+}
+
+/** Changes the items of the running turn, else of the last turn that started. */
+function withActive(t: Transcript, seq: number, change: (items: TranscriptItem[]) => TranscriptItem[]): Transcript {
+  const index = activeIndex(t);
   if (index < 0) return { ...t, last_seq: seq };
   const turns = t.turns.slice();
   turns[index] = { ...turns[index], items: change(turns[index].items) };

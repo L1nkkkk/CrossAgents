@@ -8,8 +8,8 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use crossagents_core::{
-    Credits, McpServerSpec, OutputStream, PermissionDecision, PermissionRequest, RateLimits,
-    RateWindow, SessionEventKind, StopReason, TokenUsage, ToolStatus,
+    Credits, FileChange, McpServerSpec, OutputStream, PermissionDecision, PermissionRequest,
+    RateLimits, RateWindow, SessionEventKind, StopReason, TokenUsage, ToolDetail, ToolStatus,
 };
 use serde_json::{Map, Value, json};
 
@@ -38,6 +38,7 @@ pub mod method {
     pub const REASONING_TEXT_DELTA: &str = "item/reasoning/textDelta";
     pub const TOKEN_USAGE: &str = "thread/tokenUsage/updated";
     pub const RATE_LIMITS: &str = "account/rateLimits/updated";
+    pub const COMMAND_OUTPUT_DELTA: &str = "item/commandExecution/outputDelta";
     pub const ERROR: &str = "error";
     pub const WARNING: &str = "warning";
 
@@ -241,6 +242,15 @@ pub fn translate(method: &str, params: &Value) -> Vec<SessionEventKind> {
             turn_id: turn_id(),
             diff: str_at("/diff").unwrap_or_default().to_owned(),
         },
+        method::COMMAND_OUTPUT_DELTA => {
+            let (Some(id), Some(text)) = (str_at("/itemId"), str_at("/delta")) else {
+                return Vec::new();
+            };
+            SessionEventKind::ToolOutput {
+                tool_call_id: id.to_owned(),
+                text: text.to_owned(),
+            }
+        }
         method::ITEM_STARTED => {
             let Some(item) = params.get("item") else {
                 return Vec::new();
@@ -248,12 +258,20 @@ pub fn translate(method: &str, params: &Value) -> Vec<SessionEventKind> {
             let Some((id, title, kind)) = tool_call(item) else {
                 return Vec::new();
             };
-            SessionEventKind::ToolCall {
-                tool_call_id: id,
+            let mut events = vec![SessionEventKind::ToolCall {
+                tool_call_id: id.clone(),
                 title,
                 kind: Some(kind.to_owned()),
                 status: item_status(item).unwrap_or(ToolStatus::InProgress),
+            }];
+            // File changes carry their diffs before they are applied.
+            if let Some(detail) = tool_detail(item).filter(|d| !d.changes.is_empty()) {
+                events.push(SessionEventKind::ToolDetail {
+                    tool_call_id: id,
+                    detail,
+                });
             }
+            return events;
         }
         method::ITEM_COMPLETED => {
             let Some(item) = params.get("item") else {
@@ -262,11 +280,19 @@ pub fn translate(method: &str, params: &Value) -> Vec<SessionEventKind> {
             let Some((id, _, _)) = tool_call(item) else {
                 return Vec::new();
             };
-            SessionEventKind::ToolCallUpdated {
+            let mut events = Vec::new();
+            if let Some(detail) = tool_detail(item) {
+                events.push(SessionEventKind::ToolDetail {
+                    tool_call_id: id.clone(),
+                    detail,
+                });
+            }
+            events.push(SessionEventKind::ToolCallUpdated {
                 tool_call_id: id,
                 title: None,
                 status: Some(item_status(item).unwrap_or(ToolStatus::Completed)),
-            }
+            });
+            return events;
         }
         method::TOKEN_USAGE => {
             let usage = params.get("tokenUsage").unwrap_or(&Value::Null);
@@ -315,7 +341,23 @@ fn tool_call(item: &Value) -> Option<(String, String, &'static str)> {
     let id = item.get("id")?.as_str()?.to_owned();
     let str_of = |key: &str| item.get(key).and_then(Value::as_str).unwrap_or_default();
     let (title, kind) = match item.get("type")?.as_str()? {
-        "commandExecution" => (str_of("command").to_owned(), "execute"),
+        // `commandActions` holds what the model asked for, without the shell wrapper
+        // (`powershell.exe -Command '...'`) that `command` carries.
+        "commandExecution" => {
+            let actions: Vec<&str> = item
+                .get("commandActions")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|a| a.get("command")?.as_str())
+                .collect();
+            let title = if actions.is_empty() {
+                str_of("command").to_owned()
+            } else {
+                actions.join(" && ")
+            };
+            (title, "execute")
+        }
         "fileChange" => {
             let paths: Vec<&str> = item
                 .get("changes")
@@ -335,6 +377,78 @@ fn tool_call(item: &Value) -> Option<(String, String, &'static str)> {
         _ => return None,
     };
     Some((id, title.trim().to_owned(), kind))
+}
+
+/// What an item did, for the item types that say more than their title.
+fn tool_detail(item: &Value) -> Option<ToolDetail> {
+    let text = |key: &str| item.get(key).and_then(Value::as_str).map(str::to_owned);
+    let json_text = |key: &str| {
+        item.get(key)
+            .filter(|v| !v.is_null())
+            .map(|v| match v.as_str() {
+                Some(s) => s.to_owned(),
+                None => serde_json::to_string_pretty(v).unwrap_or_default(),
+            })
+    };
+    let detail = match item.get("type")?.as_str()? {
+        "commandExecution" => ToolDetail {
+            command: text("command"),
+            cwd: text("cwd"),
+            exit_code: item
+                .get("exitCode")
+                .and_then(Value::as_i64)
+                .map(|c| c as i32),
+            duration_ms: item.get("durationMs").and_then(Value::as_u64),
+            output: text("aggregatedOutput"),
+            ..ToolDetail::default()
+        },
+        "fileChange" => ToolDetail {
+            changes: item
+                .get("changes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|c| {
+                    Some(FileChange {
+                        path: c.get("path")?.as_str()?.to_owned(),
+                        kind: change_kind(c.get("kind")),
+                        diff: c
+                            .get("diff")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                    })
+                })
+                .collect(),
+            ..ToolDetail::default()
+        },
+        "mcpToolCall" | "dynamicToolCall" | "collabAgentToolCall" => ToolDetail {
+            arguments: json_text("arguments"),
+            result: json_text("result"),
+            error: item
+                .get("error")
+                .and_then(|e| e.get("message").or(Some(e)))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            duration_ms: item.get("durationMs").and_then(Value::as_u64),
+            ..ToolDetail::default()
+        },
+        _ => return None,
+    };
+    (detail != ToolDetail::default()).then_some(detail)
+}
+
+/// `{"type": "update", ...}` or a plain string -> `update`.
+fn change_kind(kind: Option<&Value>) -> String {
+    match kind {
+        Some(Value::String(s)) => s.clone(),
+        Some(v) => v
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("update")
+            .to_owned(),
+        None => "update".to_owned(),
+    }
 }
 
 fn item_status(item: &Value) -> Option<ToolStatus> {
@@ -629,13 +743,29 @@ mod tests {
         let edit = json!({ "threadId": "t", "turnId": "u", "item": {
             "type": "fileChange", "id": "exec-2", "status": "declined",
             "changes": [{ "path": "/w/a.txt", "kind": { "type": "add" }, "diff": "x\n" }] } });
+        let change = FileChange {
+            path: "/w/a.txt".into(),
+            kind: "add".into(),
+            diff: "x
+"
+            .into(),
+        };
         assert_eq!(
             translate(method::ITEM_COMPLETED, &edit),
-            [SessionEventKind::ToolCallUpdated {
-                tool_call_id: "exec-2".into(),
-                title: None,
-                status: Some(ToolStatus::Failed)
-            }]
+            [
+                SessionEventKind::ToolDetail {
+                    tool_call_id: "exec-2".into(),
+                    detail: ToolDetail {
+                        changes: vec![change],
+                        ..ToolDetail::default()
+                    }
+                },
+                SessionEventKind::ToolCallUpdated {
+                    tool_call_id: "exec-2".into(),
+                    title: None,
+                    status: Some(ToolStatus::Failed)
+                }
+            ]
         );
         let message = json!({ "threadId": "t", "turnId": "u", "item": { "type": "agentMessage", "id": "m", "text": "hi" } });
         assert!(translate(method::ITEM_COMPLETED, &message).is_empty());
@@ -647,6 +777,49 @@ mod tests {
                 diff: "diff --git a/x b/x\n".into()
             }]
         );
+    }
+
+    #[test]
+    fn translates_command_output_and_result() {
+        // As codex-cli 0.163 sends them.
+        let delta = json!({ "threadId": "t", "turnId": "u", "itemId": "exec-9", "delta": "On branch master
+" });
+        assert_eq!(
+            translate(method::COMMAND_OUTPUT_DELTA, &delta),
+            [SessionEventKind::ToolOutput {
+                tool_call_id: "exec-9".into(),
+                text: "On branch master
+"
+                .into()
+            }]
+        );
+        let done = json!({ "threadId": "t", "turnId": "u", "item": {
+            "type": "commandExecution", "id": "exec-9", "command": "git status", "cwd": "/w",
+            "status": "completed", "aggregatedOutput": "On branch master
+", "exitCode": 0, "durationMs": 25 } });
+        let events = translate(method::ITEM_COMPLETED, &done);
+        let SessionEventKind::ToolDetail { detail, .. } = &events[0] else {
+            panic!("no detail: {events:?}")
+        };
+        assert_eq!(detail.command.as_deref(), Some("git status"));
+        assert_eq!(detail.exit_code, Some(0));
+        assert_eq!(detail.duration_ms, Some(25));
+        assert_eq!(
+            detail.output.as_deref(),
+            Some(
+                "On branch master
+"
+            )
+        );
+        let mcp = json!({ "threadId": "t", "turnId": "u", "item": {
+            "type": "mcpToolCall", "id": "m1", "server": "crossagents", "tool": "agent_list", "status": "completed",
+            "arguments": { "x": 1 }, "result": { "content": [] } } });
+        let events = translate(method::ITEM_COMPLETED, &mcp);
+        let SessionEventKind::ToolDetail { detail, .. } = &events[0] else {
+            panic!("no detail: {events:?}")
+        };
+        assert!(detail.arguments.as_deref().unwrap().contains("\"x\": 1"));
+        assert!(detail.result.is_some());
     }
 
     #[test]

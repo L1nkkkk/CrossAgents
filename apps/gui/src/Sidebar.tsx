@@ -9,7 +9,9 @@ import { api } from "./api";
 import { ACTIVE_RUN, runAgents } from "./App";
 import { Avatar, BrandMark, Icon, Mark, ago, agentTitle, displayName, runTone, sessionHref, taskTone } from "./components";
 import { useConnectionStatus } from "./hub";
+import { level, tightest, windowLabel } from "./lib/quota";
 import { openBeside } from "./panes";
+import { useQuota } from "./views/Quota";
 import { liveRuns, selectWorkspace, useSelectedWorkspace, useWorkspaces, wsHref, type Workspace } from "./workspace";
 
 export function Sidebar({ route }: { route: string[] }) {
@@ -102,6 +104,7 @@ export function Sidebar({ route }: { route: string[] }) {
             用量
           </a>
         </div>
+        <QuotaMini />
         <Connection />
       </div>
     </nav>
@@ -376,6 +379,23 @@ function WorkspaceSwitcher({ workspaces, current, onPage }: { workspaces: Worksp
         </div>
       )}
     </div>
+  );
+}
+
+/** The most used quota window of all accounts, e.g. "额度 8% · 30 天". */
+function QuotaMini() {
+  const quota = useQuota();
+  const found = tightest((quota.data?.accounts ?? []).map((a) => ({ ...a, windows: a.status.rate_limits })));
+  if (!found) return null;
+  const pct = Math.round(found.window.used_percent);
+  const name = found.account.account.label || found.account.account.id;
+  return (
+    <a className="quota-mini" href="#/usage" title={`${name} · ${windowLabel(found.window)}已用 ${pct}%`}>
+      <span className={`quota-bar ${level(pct, found.account.status.limit_reached)}`}>
+        <span style={{ width: `${Math.min(100, pct)}%` }} />
+      </span>
+      额度 {pct}% · {windowLabel(found.window).replace(/限额$/, "")}
+    </a>
   );
 }
 

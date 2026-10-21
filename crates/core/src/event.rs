@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::account::Account;
-use crate::driver::{OutputStream, StopReason, ToolStatus};
+use crate::driver::{
+    OutputStream, PermissionDecision, RateLimits, StopReason, TokenUsage, ToolDetail, ToolStatus,
+};
 use crate::ids::{AgentId, MessageId, RunId, TaskId};
 use crate::model::{Agent, AgentStatus, CheckResult, Run, RunStatus};
 use crate::state::TaskStatus;
@@ -89,6 +91,37 @@ pub enum EventKind {
         title: Option<String>,
         status: Option<ToolStatus>,
     },
+    /// Coalesced output of a running tool call (e.g. a command's stdout).
+    #[serde(rename = "agent.tool_output")]
+    AgentToolOutput {
+        id: AgentId,
+        tool_call_id: String,
+        text: String,
+    },
+    /// What a tool call did: command result, changed files, MCP arguments and result.
+    #[serde(rename = "agent.tool_detail")]
+    AgentToolDetail {
+        id: AgentId,
+        tool_call_id: String,
+        detail: ToolDetail,
+    },
+    /// Everything the current turn changed so far, as a unified diff; replaces the last one.
+    #[serde(rename = "agent.turn_diff")]
+    AgentTurnDiff { id: AgentId, diff: String },
+    /// The agent asked before acting and was answered by the permission policy.
+    #[serde(rename = "agent.permission")]
+    AgentPermission {
+        id: AgentId,
+        kind: String,
+        title: String,
+        decision: PermissionDecision,
+    },
+    /// The account quota as the agent saw it on its last model call.
+    #[serde(rename = "agent.rate_limits")]
+    AgentRateLimits { id: AgentId, limits: RateLimits },
+    /// A problem worth showing that did not fail anything (e.g. a retried request).
+    #[serde(rename = "agent.warning")]
+    AgentWarning { id: AgentId, message: String },
     #[serde(rename = "agent.turn_completed")]
     AgentTurnCompleted {
         id: AgentId,
@@ -103,6 +136,10 @@ pub enum EventKind {
         #[cfg_attr(feature = "ts", ts(type = "number"))]
         size: u64,
         cost_usd: Option<f64>,
+        /// Cumulative token counts, when the agent reports them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        tokens: Option<TokenUsage>,
     },
     #[serde(rename = "agent.error")]
     AgentError { id: AgentId, message: String },
@@ -114,6 +151,9 @@ pub enum EventKind {
     #[serde(rename = "account.removed")]
     AccountRemoved { id: String },
     /// A login started with `POST /v1/accounts/{id}/login` finished.
+    /// New quota figures for the account (from an agent's model call); re-read its status.
+    #[serde(rename = "account.quota_updated")]
+    AccountQuotaUpdated { id: String },
     #[serde(rename = "account.login_finished")]
     AccountLoginFinished {
         id: String,
@@ -205,12 +245,19 @@ impl EventKind {
             Self::AgentOutput { .. } => "agent.output",
             Self::AgentToolCall { .. } => "agent.tool_call",
             Self::AgentToolCallUpdated { .. } => "agent.tool_call_updated",
+            Self::AgentToolOutput { .. } => "agent.tool_output",
+            Self::AgentToolDetail { .. } => "agent.tool_detail",
+            Self::AgentTurnDiff { .. } => "agent.turn_diff",
+            Self::AgentPermission { .. } => "agent.permission",
+            Self::AgentRateLimits { .. } => "agent.rate_limits",
+            Self::AgentWarning { .. } => "agent.warning",
             Self::AgentTurnCompleted { .. } => "agent.turn_completed",
             Self::AgentUsage { .. } => "agent.usage",
             Self::AgentError { .. } => "agent.error",
             Self::AgentSessionStarted { .. } => "agent.session_started",
             Self::AccountCreated { .. } => "account.created",
             Self::AccountRemoved { .. } => "account.removed",
+            Self::AccountQuotaUpdated { .. } => "account.quota_updated",
             Self::AccountLoginFinished { .. } => "account.login_finished",
             Self::AccountLoginPending { .. } => "account.login_pending",
             Self::RunCreated { .. } => "run.created",
@@ -244,6 +291,7 @@ impl EventKind {
             | Self::TaskChecked { .. }
             | Self::AccountCreated { .. }
             | Self::AccountRemoved { .. }
+            | Self::AccountQuotaUpdated { .. }
             | Self::AccountLoginFinished { .. }
             | Self::AccountLoginPending { .. } => None,
             Self::AgentSessionStarted { id, .. } => Some(*id),
@@ -257,6 +305,12 @@ impl EventKind {
             | Self::AgentOutput { id, .. }
             | Self::AgentToolCall { id, .. }
             | Self::AgentToolCallUpdated { id, .. }
+            | Self::AgentToolOutput { id, .. }
+            | Self::AgentToolDetail { id, .. }
+            | Self::AgentTurnDiff { id, .. }
+            | Self::AgentPermission { id, .. }
+            | Self::AgentRateLimits { id, .. }
+            | Self::AgentWarning { id, .. }
             | Self::AgentTurnCompleted { id, .. }
             | Self::AgentUsage { id, .. }
             | Self::AgentError { id, .. } => Some(*id),

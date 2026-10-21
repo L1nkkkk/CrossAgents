@@ -6,13 +6,13 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{Local, Utc};
+use chrono::{DateTime, Local, Utc};
 use crossagents_api_types::{
     AccountUsageGroup, AccountUsageResponse, AccountUsageRow, CreateAccountRequest, LoginStarted,
 };
 use crossagents_core::{
-    Account, AccountProvider, AccountStatus, Agent, AgentId, CoreError, EventBus, EventKind, Role,
-    RunId, Store, TokenTotals, validate_agent_name,
+    Account, AccountProvider, AccountStatus, Agent, AgentId, AgentKey, CoreError, DataSource,
+    Event, EventBus, EventKind, RateLimits, Role, RunId, Store, TokenTotals, validate_agent_name,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, mpsc};
@@ -27,6 +27,8 @@ pub struct Accounts {
     root: PathBuf,
     /// Running login processes by account id.
     logins: Arc<Mutex<HashMap<String, tokio::process::Child>>>,
+    /// The quota agents last reported per account, with when.
+    observed: std::sync::Mutex<HashMap<String, (DateTime<Utc>, RateLimits)>>,
 }
 
 impl Accounts {
@@ -43,7 +45,71 @@ impl Accounts {
                 .collect(),
             root,
             logins: Arc::default(),
+            observed: std::sync::Mutex::default(),
         }
+    }
+
+    /// Registers each provider's own login (e.g. `~/.codex`) as an account, if it is
+    /// logged in and no account uses that home yet. Agents without an account run there.
+    pub async fn detect_defaults(&self) -> Result<(), CoreError> {
+        let existing = self.store().list_accounts().await?;
+        for (name, provider) in &self.providers {
+            let Some(home) = provider.default_home() else {
+                continue;
+            };
+            if existing.iter().any(|a| same_path(&a.home, &home)) {
+                continue;
+            }
+            let probe = Account {
+                id: name.clone(),
+                provider: name.clone(),
+                label: String::new(),
+                home: home.clone(),
+                created_at: Utc::now(),
+            };
+            if !provider.status(&probe).await.logged_in {
+                continue;
+            }
+            let id = if existing.iter().any(|a| a.id == *name) {
+                format!("{name}-local")
+            } else {
+                name.clone()
+            };
+            let account = Account {
+                id,
+                label: format!("本机 {} 登录", capitalize(name)),
+                ..probe
+            };
+            self.store().insert_account(&account).await?;
+            self.bus
+                .publish(EventKind::AccountCreated { account })
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The account an agent runs on: the one it names, else its provider's own login.
+    pub async fn account_for(&self, agent: &Agent) -> Option<String> {
+        if let Some(id) = account_of(agent) {
+            return Some(id);
+        }
+        let home = self.providers.get(&agent.plugin)?.default_home()?;
+        let accounts = self.store().list_accounts().await.ok()?;
+        accounts
+            .into_iter()
+            .find(|a| a.provider == agent.plugin && same_path(&a.home, &home))
+            .map(|a| a.id)
+    }
+
+    /// Records the quota an agent saw. Returns the account it belongs to when the figures
+    /// changed.
+    async fn observe(&self, agent: AgentId, limits: &RateLimits) -> Option<String> {
+        let agent = self.store().get_agent(&AgentKey::Id(agent)).await.ok()?;
+        let id = self.account_for(&agent).await?;
+        let mut observed = self.observed.lock().unwrap();
+        let changed = observed.get(&id).is_none_or(|(_, old)| old != limits);
+        observed.insert(id.clone(), (Utc::now(), limits.clone()));
+        changed.then_some(id)
     }
 
     fn store(&self) -> &Arc<dyn Store> {
@@ -103,9 +169,28 @@ impl Accounts {
         Ok(())
     }
 
+    /// The provider's view of the account, with the quota agents reported since if that is
+    /// newer.
     pub async fn status(&self, id: &str) -> Result<AccountStatus, CoreError> {
         let account = self.store().get_account(id).await?;
-        Ok(self.provider(&account.provider)?.status(&account).await)
+        let mut status = self.provider(&account.provider)?.status(&account).await;
+        let observed = self.observed.lock().unwrap().get(id).cloned();
+        if let Some((at, limits)) = observed
+            && status.as_of.is_none_or(|as_of| at > as_of)
+        {
+            status.rate_limits = limits.windows;
+            if limits.credits.is_some() {
+                status.credits = limits.credits;
+            }
+            if limits.plan.is_some() {
+                status.plan = limits.plan;
+            }
+            status.limit_reached = limits.reached.is_some();
+            status.source = Some(DataSource::Live);
+            status.as_of = Some(at);
+            status.note = None;
+        }
+        Ok(status)
     }
 
     pub async fn models(&self, id: &str) -> Result<Vec<crossagents_core::ModelInfo>, CoreError> {
@@ -308,6 +393,49 @@ impl Accounts {
             command: display,
         })
     }
+}
+
+impl Accounts {
+    /// Follows agents' quota reports and announces changes per account.
+    pub fn watch(self: &Arc<Self>) {
+        let mut events = self.bus.subscribe();
+        let accounts = self.clone();
+        tokio::spawn(async move {
+            loop {
+                let event = match events.recv().await {
+                    Ok(event) => event,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => break,
+                };
+                accounts.on_event(&event).await;
+            }
+        });
+    }
+
+    async fn on_event(&self, event: &Event) {
+        if let EventKind::AgentRateLimits { id, limits } = &event.kind
+            && let Some(account) = self.observe(*id, limits).await
+        {
+            let _ = self
+                .bus
+                .publish(EventKind::AccountQuotaUpdated { id: account })
+                .await;
+        }
+    }
+}
+
+/// `codex` -> `Codex`.
+fn capitalize(word: &str) -> String {
+    let mut chars = word.chars();
+    chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canon(a) == canon(b)
 }
 
 pub fn account_of(agent: &Agent) -> Option<String> {

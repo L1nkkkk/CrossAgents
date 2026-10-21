@@ -19,9 +19,10 @@ pub use account::{
 };
 pub use bus::EventBus;
 pub use driver::{
-    Capabilities, Driver, DriverKind, DriverSession, McpServerSpec, OutputStream,
+    Capabilities, Driver, DriverKind, DriverSession, FileChange, McpServerSpec, OutputStream,
     PermissionDecision, PermissionHandler, PermissionPolicy, PermissionRequest, RateLimits,
-    SessionEvent, SessionEventKind, SessionSpec, StopReason, TokenUsage, ToolStatus, TurnOutcome,
+    SessionEvent, SessionEventKind, SessionSpec, StopReason, TokenUsage, ToolDetail, ToolStatus,
+    TurnOutcome,
 };
 pub use error::CoreError;
 pub use event::{EVENT_SCHEMA_VERSION, Event, EventKind, EventSink, MessageSource};

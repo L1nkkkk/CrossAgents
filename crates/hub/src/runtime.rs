@@ -210,17 +210,46 @@ impl Runtime {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let generation = self.generation.fetch_add(1, Ordering::Relaxed);
 
-        let spec = SessionSpec {
+        let spec = || SessionSpec {
             agent: agent.clone(),
-            mcp_servers: extras.mcp_servers,
+            mcp_servers: extras.mcp_servers.clone(),
             permission: permission_of(&agent),
             permissions: None,
             command: command_of(&agent),
-            instructions: extras.instructions,
-            env: extras.env,
-            events: events_tx,
+            instructions: extras.instructions.clone(),
+            env: extras.env.clone(),
+            events: events_tx.clone(),
         };
-        let session: Arc<dyn DriverSession> = match resolved.driver.open(spec).await {
+        // Carry on the agent's last conversation when the driver can.
+        let previous = if resolved.driver.capabilities().resume {
+            self.store()
+                .last_session_id(agent.id)
+                .await
+                .unwrap_or_default()
+        } else {
+            None
+        };
+        let opened = match previous {
+            Some(previous) => match resolved.driver.resume(&previous, spec()).await {
+                Ok(session) => Ok(session),
+                Err(err) => {
+                    publish(
+                        &self.bus,
+                        EventKind::AgentWarning {
+                            id: agent.id,
+                            message: format!(
+                                "cannot resume the previous session ({err}); started a new one"
+                            ),
+                        },
+                    )
+                    .await;
+                    resolved.driver.open(spec()).await
+                }
+            },
+            None => resolved.driver.open(spec()).await,
+        };
+        drop(events_tx);
+        let session: Arc<dyn DriverSession> = match opened {
             Ok(session) => Arc::from(session),
             Err(err) => {
                 publish(
@@ -344,6 +373,19 @@ impl Runtime {
         let live = self.live.lock().await.get(&agent.id).cloned();
         match live {
             Some(live) => live.session.interrupt().await,
+            None => Err(CoreError::Conflict(format!(
+                "agent {} is not running",
+                agent.name
+            ))),
+        }
+    }
+
+    /// Summarises the running session's history to free context.
+    pub async fn compact(&self, key: &AgentKey) -> Result<(), CoreError> {
+        let agent = self.store().get_agent(key).await?;
+        let live = self.live.lock().await.get(&agent.id).cloned();
+        match live {
+            Some(live) => live.session.compact().await,
             None => Err(CoreError::Conflict(format!(
                 "agent {} is not running",
                 agent.name
@@ -549,13 +591,20 @@ async fn handle_session_event(
     generation: u64,
 ) -> bool {
     let SessionEvent { kind: event, .. } = event;
-    if let SessionEventKind::Output { stream, text } = event {
-        out.push(bus, id, stream, text).await;
-        return false;
+    match event {
+        SessionEventKind::Output { stream, text } => {
+            out.push(bus, id, Stream::Output(stream), text).await;
+            return false;
+        }
+        SessionEventKind::ToolOutput { tool_call_id, text } => {
+            out.push(bus, id, Stream::Tool(tool_call_id), text).await;
+            return false;
+        }
+        _ => {}
     }
     out.flush(bus, id).await;
     let kind = match event {
-        SessionEventKind::Output { .. } => unreachable!(),
+        SessionEventKind::Output { .. } | SessionEventKind::ToolOutput { .. } => unreachable!(),
         SessionEventKind::Started { session_id } => {
             EventKind::AgentSessionStarted { id, session_id }
         }
@@ -581,28 +630,41 @@ async fn handle_session_event(
             title,
             status,
         },
+        SessionEventKind::ToolDetail {
+            tool_call_id,
+            mut detail,
+        } => {
+            detail.output = detail.output.map(|o| tail(o, DETAIL_OUTPUT_LIMIT));
+            EventKind::AgentToolDetail {
+                id,
+                tool_call_id,
+                detail,
+            }
+        }
         SessionEventKind::Usage {
             used,
             size,
             cost_usd,
-            ..
+            tokens,
         } => EventKind::AgentUsage {
             id,
             used,
             size,
             cost_usd,
+            tokens,
         },
-        SessionEventKind::Warning { message } | SessionEventKind::Error { message } => {
-            EventKind::AgentError { id, message }
-        }
-        // Turn boundaries come from the runtime's own control messages. Diffs, quotas and
-        // permission answers have no hub event yet (docs/tasks/N1.md §6).
-        other @ (SessionEventKind::TurnStarted { .. }
-        | SessionEventKind::TurnCompleted { .. }
-        | SessionEventKind::TurnDiff { .. }
-        | SessionEventKind::RateLimits { .. }
-        | SessionEventKind::PermissionRequested { .. }) => {
-            tracing::debug!(%id, event = ?other, "session event not published");
+        SessionEventKind::TurnDiff { diff, .. } => EventKind::AgentTurnDiff { id, diff },
+        SessionEventKind::RateLimits { limits } => EventKind::AgentRateLimits { id, limits },
+        SessionEventKind::PermissionRequested { request, decision } => EventKind::AgentPermission {
+            id,
+            kind: request.kind,
+            title: request.title,
+            decision,
+        },
+        SessionEventKind::Warning { message } => EventKind::AgentWarning { id, message },
+        SessionEventKind::Error { message } => EventKind::AgentError { id, message },
+        // Turn boundaries come from the runtime's own control messages.
+        SessionEventKind::TurnStarted { .. } | SessionEventKind::TurnCompleted { .. } => {
             return false;
         }
         SessionEventKind::Exited { message } => {
@@ -621,13 +683,41 @@ async fn handle_session_event(
     false
 }
 
+/// Live output of one tool call kept in the event log; the rest is dropped (the call's
+/// detail still carries the tail of it).
+const TOOL_OUTPUT_LIMIT: usize = 64 * 1024;
+/// Output kept in a tool call's detail.
+const DETAIL_OUTPUT_LIMIT: usize = 32 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Stream {
+    Output(OutputStream),
+    Tool(String),
+}
+
+/// Joins streamed text into fewer events.
 #[derive(Default)]
 struct Coalescer {
-    buffer: Option<(OutputStream, String)>,
+    buffer: Option<(Stream, String)>,
+    /// Bytes of live output published per tool call.
+    tool_bytes: HashMap<String, usize>,
 }
 
 impl Coalescer {
-    async fn push(&mut self, bus: &EventBus, id: AgentId, stream: OutputStream, text: String) {
+    async fn push(&mut self, bus: &EventBus, id: AgentId, stream: Stream, text: String) {
+        let text = match &stream {
+            Stream::Tool(call) => {
+                let used = self.tool_bytes.entry(call.clone()).or_default();
+                let room = TOOL_OUTPUT_LIMIT.saturating_sub(*used);
+                if room == 0 {
+                    return;
+                }
+                let text = head(text, room);
+                *used += text.len();
+                text
+            }
+            Stream::Output(_) => text,
+        };
         match &mut self.buffer {
             Some((current, buf)) if *current == stream => buf.push_str(&text),
             _ => {
@@ -638,10 +728,48 @@ impl Coalescer {
     }
 
     async fn flush(&mut self, bus: &EventBus, id: AgentId) {
-        if let Some((stream, text)) = self.buffer.take()
-            && !text.is_empty()
-        {
-            publish(bus, EventKind::AgentOutput { id, stream, text }).await;
+        let Some((stream, text)) = self.buffer.take() else {
+            return;
+        };
+        if text.is_empty() {
+            return;
         }
+        let kind = match stream {
+            Stream::Output(stream) => EventKind::AgentOutput { id, stream, text },
+            Stream::Tool(tool_call_id) => EventKind::AgentToolOutput {
+                id,
+                tool_call_id,
+                text,
+            },
+        };
+        publish(bus, kind).await;
     }
+}
+
+/// At most `limit` bytes from the start of `text`, cut at a character boundary.
+fn head(mut text: String, limit: usize) -> String {
+    if text.len() > limit {
+        let mut end = limit;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
+}
+
+/// At most `limit` bytes from the end of `text`, marked when something was cut.
+fn tail(text: String, limit: usize) -> String {
+    if text.len() <= limit {
+        return text;
+    }
+    let mut start = text.len() - limit;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!(
+        "…（前面省略 {start} 字节）
+{}",
+        &text[start..]
+    )
 }

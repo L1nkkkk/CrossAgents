@@ -286,6 +286,19 @@ impl Store for SqliteStore {
             .collect()
     }
 
+    async fn last_session_id(&self, agent: AgentId) -> Result<Option<String>, CoreError> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT json_extract(data, '$.session_id') FROM events
+             WHERE type = 'agent.session_started' AND json_extract(data, '$.id') = ?1
+             ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(agent.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(row.map(|(id,)| id))
+    }
+
     async fn agent_events(
         &self,
         agent: AgentId,

@@ -19,4 +19,8 @@ stop_reason: StopReason | null,
 /**
  * In arrival order. Consecutive output of the same stream is merged into one item.
  */
-items: Array<TranscriptItem>, };
+items: Array<TranscriptItem>, 
+/**
+ * Everything the turn changed, as a unified diff, when the agent reports it.
+ */
+diff?: string, };

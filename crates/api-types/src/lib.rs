@@ -121,6 +121,10 @@ pub struct TranscriptTurn {
     pub stop_reason: Option<StopReason>,
     /// In arrival order. Consecutive output of the same stream is merged into one item.
     pub items: Vec<TranscriptItem>,
+    /// Everything the turn changed, as a unified diff, when the agent reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub diff: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -136,6 +140,24 @@ pub enum TranscriptItem {
         title: String,
         kind: Option<String>,
         status: ToolStatus,
+        /// Live output while it runs (e.g. a command's stdout).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        output: Option<String>,
+        /// What it did, once the agent reports it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        detail: Option<Box<crossagents_core::ToolDetail>>,
+    },
+    /// Asked before acting; `decision` is what the permission policy answered.
+    Permission {
+        kind: String,
+        title: String,
+        decision: crossagents_core::PermissionDecision,
+    },
+    /// Worth showing, but nothing failed.
+    Warning {
+        message: String,
     },
     Error {
         message: String,
@@ -152,6 +174,10 @@ pub struct TranscriptUsage {
     #[ts(type = "number")]
     pub size: u64,
     pub cost_usd: Option<f64>,
+    /// Cumulative token counts of the session, when the agent reports them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub tokens: Option<crossagents_core::TokenUsage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -270,6 +296,26 @@ pub struct CreateAccountRequest {
 #[ts(export)]
 pub struct ListAccountsResponse {
     pub accounts: Vec<crossagents_core::Account>,
+}
+
+/// One account with its live status and models. `GET /v1/quota` lists every account.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AccountQuota {
+    pub account: crossagents_core::Account,
+    pub status: crossagents_core::AccountStatus,
+    pub models: Vec<crossagents_core::ModelInfo>,
+    /// Agents that run on this account (named in their config, or using the provider's
+    /// own login).
+    pub agents: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct QuotaResponse {
+    pub accounts: Vec<AccountQuota>,
+    /// Account providers the hub supports, for adding accounts.
+    pub providers: Vec<String>,
 }
 
 /// How account token usage is grouped.

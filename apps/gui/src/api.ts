@@ -2,7 +2,13 @@
 // through the preload bridge to the main process, which adds the bearer token; in a plain
 // browser they go to the same origin (the Vite dev server forwards them, see vite.config.ts).
 
+import type { Account } from "@bindings/Account";
+import type { AccountUsageGroup } from "@bindings/AccountUsageGroup";
+import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
 import type { Agent } from "@bindings/Agent";
+import type { CreateAccountRequest } from "@bindings/CreateAccountRequest";
+import type { LoginStarted } from "@bindings/LoginStarted";
+import type { QuotaResponse } from "@bindings/QuotaResponse";
 import type { AgentProfile } from "@bindings/AgentProfile";
 import type { ApiError as ApiErrorJson } from "@bindings/ApiError";
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
@@ -88,6 +94,7 @@ export const api = {
   withdrawMessage: (key: string, messageId: string) =>
     request<void>("DELETE", `/v1/agents/${enc(key)}/messages/${enc(messageId)}`),
   cancelAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/cancel`),
+  compactAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/compact`),
   stopAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/stop`),
   setModel: (key: string, model: string | null) => request<Agent>("POST", `/v1/agents/${enc(key)}/model`, { model }),
   deleteAgent: (key: string) => request<void>("DELETE", `/v1/agents/${enc(key)}`),
@@ -104,6 +111,13 @@ export const api = {
   cancelRun: (key: string) => request<RunDetail>("POST", `/v1/runs/${enc(key)}/cancel`),
 
   usage: (by: UsageGroup) => request<UsageResponse>("GET", `/v1/usage?by=${by}`),
+
+  quota: () => request<QuotaResponse>("GET", "/v1/quota"),
+  createAccount: (req: CreateAccountRequest) => request<Account>("POST", "/v1/accounts", req),
+  deleteAccount: (id: string) => request<void>("DELETE", `/v1/accounts/${enc(id)}`),
+  accountUsage: (id: string, by: AccountUsageGroup) =>
+    request<AccountUsageResponse>("GET", `/v1/accounts/${enc(id)}/usage?by=${by}`),
+  login: (id: string) => request<LoginStarted>("POST", `/v1/accounts/${enc(id)}/login`),
 };
 
 export function errorText(err: unknown): string {
