@@ -7,6 +7,8 @@ import type { AccountUsageGroup } from "@bindings/AccountUsageGroup";
 import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
 import type { Agent } from "@bindings/Agent";
 import type { CreateAccountRequest } from "@bindings/CreateAccountRequest";
+import type { HumanItem } from "@bindings/HumanItem";
+import type { ListQuestionsResponse } from "@bindings/ListQuestionsResponse";
 import type { LoginStarted } from "@bindings/LoginStarted";
 import type { QuotaResponse } from "@bindings/QuotaResponse";
 import type { AgentProfile } from "@bindings/AgentProfile";
@@ -111,6 +113,10 @@ export const api = {
   cancelRun: (key: string) => request<RunDetail>("POST", `/v1/runs/${enc(key)}/cancel`),
 
   usage: (by: UsageGroup) => request<UsageResponse>("GET", `/v1/usage?by=${by}`),
+
+  questions: (all = false) => request<ListQuestionsResponse>("GET", `/v1/questions${all ? "?all=true" : ""}`),
+  answer: (id: string, answer: string) => request<HumanItem>("POST", `/v1/questions/${enc(id)}/answer`, { answer }),
+  dismiss: (id: string) => request<void>("POST", `/v1/questions/${enc(id)}/dismiss`),
 
   quota: () => request<QuotaResponse>("GET", "/v1/quota"),
   createAccount: (req: CreateAccountRequest) => request<Account>("POST", "/v1/accounts", req),

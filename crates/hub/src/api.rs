@@ -16,17 +16,17 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use crossagents_api_types::{
-    API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, ApiError,
+    API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AnswerRequest, ApiError,
     CreateAccountRequest, CreateAgentRequest, CreateRunRequest, ErrorCode, HealthResponse, HubInfo,
-    ListAccountsResponse, ListAgentsResponse, ListPluginsResponse, ListRunsResponse,
-    ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest, RunDetail,
-    SendMessageRequest, SendMessageResponse, SetModelRequest, Transcript, UsageGroup,
+    ListAccountsResponse, ListAgentsResponse, ListPluginsResponse, ListQuestionsResponse,
+    ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
+    RunDetail, SendMessageRequest, SendMessageResponse, SetModelRequest, Transcript, UsageGroup,
     UsageResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError,
-    DriverKind, Event, EventBus, EventKind, MessageId, MessageSource, Run, RunConfig, RunId, Store,
-    validate_agent_name,
+    DriverKind, Event, EventBus, EventKind, HumanItem, MessageId, MessageSource, Run, RunConfig,
+    RunId, Store, validate_agent_name,
 };
 use crossagents_orchestrator::{NewRun, Orchestrator};
 
@@ -83,6 +83,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/usage", get(usage))
         .route("/v1/accounts", get(list_accounts).post(create_account))
         .route("/v1/quota", get(quota))
+        .route("/v1/questions", get(list_questions))
+        .route("/v1/questions/{id}/answer", post(answer_question))
+        .route("/v1/questions/{id}/dismiss", post(dismiss_question))
         .route(
             "/v1/accounts/{id}",
             get(get_account).delete(delete_account_route),
@@ -556,6 +559,7 @@ async fn create_run(
             max_parallel: req.max_parallel.unwrap_or(RunConfig::DEFAULT_MAX_PARALLEL),
             max_attempts: req.max_attempts.unwrap_or(RunConfig::DEFAULT_MAX_ATTEMPTS),
             team,
+            policy: req.policy.unwrap_or_default(),
         },
     };
     let run = state.orchestrator.create_run(new).await?;
@@ -654,6 +658,43 @@ async fn list_accounts(
     Ok(Json(ListAccountsResponse {
         accounts: state.store().list_accounts().await?,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct QuestionsQuery {
+    /// Only what still waits for the person (default true).
+    #[serde(default)]
+    all: bool,
+}
+
+/// What agents put in front of the person: questions and notices.
+async fn list_questions(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<QuestionsQuery>,
+) -> ApiResult<Json<ListQuestionsResponse>> {
+    Ok(Json(ListQuestionsResponse {
+        items: state.store().list_human_items(!query.all).await?,
+    }))
+}
+
+async fn answer_question(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<AnswerRequest>,
+) -> ApiResult<Json<HumanItem>> {
+    let answer = req.answer.trim().to_owned();
+    if answer.is_empty() {
+        return Err(AppError::bad_request("the answer is empty"));
+    }
+    Ok(Json(state.orchestrator.answer_human(&id, answer).await?))
+}
+
+async fn dismiss_question(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    state.orchestrator.dismiss_human(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Every account with its status, models and agents, read concurrently.

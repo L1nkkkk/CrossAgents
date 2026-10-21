@@ -37,7 +37,7 @@ export function navigate(...parts: string[]) {
 /** Runs shown in the sidebar, newest first. */
 const SIDEBAR_RUNS = 12;
 /** Runs whose sessions stay listed under them; finished runs fold theirs away. */
-export const ACTIVE_RUN = ["planning", "awaiting_approval", "running"];
+export const ACTIVE_RUN = ["planning", "awaiting_approval", "running", "paused"];
 
 /** Recent runs with their tasks, for grouping sessions by run. */
 export function useRunTree() {

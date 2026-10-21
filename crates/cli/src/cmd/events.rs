@@ -76,6 +76,20 @@ pub fn summary(kind: &EventKind) -> String {
         EventKind::AgentInputUpdated { id, text, .. } => {
             format!("{} digest {}", short(id), one_line(text))
         }
+        EventKind::HumanAsked { item } | EventKind::HumanAnswered { item } => format!(
+            "{} {} {}{}",
+            item.id,
+            enum_name(&item.status),
+            one_line(&item.text),
+            item.answer
+                .as_deref()
+                .map(|a| format!(" -> {}", one_line(a)))
+                .unwrap_or_default()
+        ),
+        EventKind::HumanDismissed { id } => id.clone(),
+        EventKind::RunBudget { id, what, percent } => {
+            format!("{} {what} {percent}%", short_tail(id))
+        }
         EventKind::ReminderFired { owner, note, .. } => {
             format!("{} {}", short(owner), one_line(note))
         }

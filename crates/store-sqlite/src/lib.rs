@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use crossagents_core::{
     Account, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError, EVENT_SCHEMA_VERSION,
-    Event, EventKind, MessageId, Reminder, Run, RunId, Store, Task, TaskId, Watch,
+    Event, EventKind, HumanItem, MessageId, Reminder, Run, RunId, Store, Task, TaskId, Watch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -365,6 +365,55 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    async fn put_human_item(&self, item: &HumanItem) -> Result<(), CoreError> {
+        sqlx::query(
+            "INSERT INTO human_items (id, status, created_at, data) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET status = ?2, data = ?4",
+        )
+        .bind(&item.id)
+        .bind(
+            serde_json::to_value(item.status)
+                .map_err(storage)?
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        )
+        .bind(item.created_at.to_rfc3339())
+        .bind(serde_json::to_string(item).map_err(storage)?)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    async fn get_human_item(&self, id: &str) -> Result<HumanItem, CoreError> {
+        let data: Option<String> = sqlx::query_scalar("SELECT data FROM human_items WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?;
+        match data {
+            Some(d) => serde_json::from_str(&d).map_err(storage),
+            None => Err(CoreError::NotFound {
+                kind: "question",
+                id: id.to_owned(),
+            }),
+        }
+    }
+
+    async fn list_human_items(&self, open_only: bool) -> Result<Vec<HumanItem>, CoreError> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT data FROM human_items WHERE ?1 = 0 OR status = 'open' ORDER BY created_at DESC LIMIT 500",
+        )
+        .bind(open_only)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        rows.iter()
+            .map(|d| serde_json::from_str(d).map_err(storage))
+            .collect()
+    }
+
     async fn find_message(
         &self,
         id: MessageId,
@@ -643,6 +692,7 @@ mod tests {
                 max_parallel: 3,
                 max_attempts: 3,
                 team: vec![],
+                policy: Default::default(),
             },
             repo: PathBuf::from("/repo"),
             base_branch: "main".into(),

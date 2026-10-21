@@ -97,7 +97,7 @@ impl Orchestrator {
         worktree_path(&self.config.worktrees, &short(run.id), "integration")
     }
 
-    async fn publish(&self, kind: EventKind) {
+    pub(crate) async fn publish(&self, kind: EventKind) {
         if let Err(err) = self.bus.publish(kind).await {
             tracing::error!(error = %err, "cannot publish event");
         }
@@ -113,7 +113,7 @@ impl Orchestrator {
         });
     }
 
-    async fn set_run_status(
+    pub(crate) async fn set_run_status(
         &self,
         run: &mut Run,
         to: RunStatus,
@@ -355,7 +355,7 @@ impl Orchestrator {
             tasks: keys,
         })
         .await;
-        if run.config.auto_approve {
+        if run.config.auto_approves() {
             self.approve_locked(&mut run).await?;
         }
         Ok(run)
@@ -458,7 +458,7 @@ impl Orchestrator {
     // Scheduling
 
     /// Starts every task that can start; finishes the run when nothing is left.
-    async fn schedule(&self, run: &mut Run) -> Result<(), CoreError> {
+    pub(crate) async fn schedule(&self, run: &mut Run) -> Result<(), CoreError> {
         if run.status != RunStatus::Running {
             return Ok(());
         }

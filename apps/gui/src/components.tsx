@@ -21,6 +21,7 @@ const RUN_TONE: Record<RunStatus, Tone> = {
   planning: { color: "accent", live: true },
   awaiting_approval: { color: "warn" },
   running: { color: "accent", live: true },
+  paused: { color: "warn" },
   completed: { color: "ok" },
   failed: { color: "danger" },
   cancelled: { color: "off" },
@@ -47,6 +48,7 @@ export const taskTone = (s: TaskStatus) => TASK_TONE[s] ?? { color: "" };
 const LABELS: Record<string, string> = {
   awaiting_approval: "待审批",
   waiting_answer: "等回答",
+  paused: "已暂停",
 };
 
 export const statusLabel = (s: string) => LABELS[s] ?? s.replace(/_/g, " ");

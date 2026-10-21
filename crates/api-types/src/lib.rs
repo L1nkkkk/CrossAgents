@@ -231,6 +231,24 @@ pub struct CreateRunRequest {
     /// reviewer registered in the planner's repository.
     #[serde(default)]
     pub team: Option<Vec<String>>,
+    /// How much the run may do without a person; the hub's defaults when omitted.
+    /// `auto_approve: true` still means `plan_approval: auto`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub policy: Option<crossagents_core::RunPolicy>,
+}
+
+/// `POST /v1/questions/{id}/answer`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AnswerRequest {
+    pub answer: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListQuestionsResponse {
+    pub items: Vec<crossagents_core::HumanItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
