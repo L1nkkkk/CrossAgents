@@ -19,8 +19,8 @@ use crossagents_api_types::{
     API_VERSION, AccountUsageGroup, AccountUsageResponse, ApiError, CreateAccountRequest,
     CreateAgentRequest, CreateRunRequest, ErrorCode, HealthResponse, HubInfo, ListAccountsResponse,
     ListAgentsResponse, ListPluginsResponse, ListRunsResponse, ListToolsResponse, LoginStarted,
-    PluginInfo, RejectRunRequest, RunDetail, SendMessageRequest, SendMessageResponse, Transcript,
-    UsageGroup, UsageResponse,
+    PluginInfo, RejectRunRequest, RunDetail, SendMessageRequest, SendMessageResponse,
+    SetModelRequest, Transcript, UsageGroup, UsageResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError,
@@ -76,6 +76,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/agents/{key}/transcript", get(transcript))
         .route("/v1/agents/{key}/profile", post(update_profile))
+        .route("/v1/agents/{key}/model", post(set_model))
         .route("/v1/plugins", get(list_plugins))
         .route("/v1/usage", get(usage))
         .route("/v1/accounts", get(list_accounts).post(create_account))
@@ -379,6 +380,23 @@ async fn start_agent(
     let agent = state.runtime.start(&AgentKey::parse(&key)).await?;
     Ok(Json(
         state.store().get_agent(&AgentKey::Id(agent.id)).await?,
+    ))
+}
+
+async fn set_model(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(req): Json<SetModelRequest>,
+) -> ApiResult<Json<Agent>> {
+    let model = req
+        .model
+        .map(|m| m.trim().to_owned())
+        .filter(|m| !m.is_empty());
+    Ok(Json(
+        state
+            .runtime
+            .set_model(&AgentKey::parse(&key), model)
+            .await?,
     ))
 }
 

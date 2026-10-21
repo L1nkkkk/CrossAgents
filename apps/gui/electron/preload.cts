@@ -1,4 +1,4 @@
-// Runs sandboxed, with context isolation. Exposes only the four calls of
+// Runs sandboxed, with context isolation. Exposes only the calls of
 // `CrossAgentsBridge`; no Electron or Node API reaches the page.
 
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
@@ -23,6 +23,7 @@ const bridge: CrossAgentsBridge = {
   startEvents: () => ipcRenderer.send("hub:events-start"),
   onEvent: (listener) => subscribe("hub:event", listener),
   onStatus: (listener) => subscribe("hub:status", listener),
+  pickFolder: () => ipcRenderer.invoke("dialog:pick-folder"),
 };
 
 contextBridge.exposeInMainWorld("crossagents", bridge);

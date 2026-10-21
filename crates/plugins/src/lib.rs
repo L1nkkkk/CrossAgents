@@ -10,7 +10,7 @@
 //! command = ["gemini", "--experimental-acp"]
 //!
 //! [plugins.codex]
-//! driver = "codex-native"   # use `codex app-server` instead of the codex-acp adapter
+//! driver = "acp-generic"    # use the codex-acp adapter instead of `codex app-server`
 //! ```
 //!
 //! or dropped in as a directory with a manifest, see [`manifest`]. An agent can pick
@@ -64,11 +64,12 @@ impl PluginConfig {
         }
     }
 
-    /// OpenAI Codex: the codex-acp adapter by default, `codex app-server` with
-    /// `driver = "codex-native"`.
+    /// OpenAI Codex: `codex app-server` by default; the codex-acp adapter with
+    /// `driver = "acp-generic"`.
     pub fn codex() -> Self {
         Self {
             command: npx("@agentclientprotocol/codex-acp"),
+            driver: Some(DriverKind::CodexNative),
             ..Self::default()
         }
     }
@@ -77,6 +78,10 @@ impl PluginConfig {
     fn overlay(mut self, over: &PluginConfig) -> Self {
         if !over.command.is_empty() {
             self.command = over.command.clone();
+            // An ACP command alone means the entry is about ACP, as before drivers existed.
+            if over.native_command.is_empty() {
+                self.driver = None;
+            }
         }
         if over.driver.is_some() {
             self.driver = over.driver;
@@ -305,9 +310,22 @@ mod tests {
         let again = registry.driver("codex", Some("codex-native")).unwrap();
         assert!(Arc::ptr_eq(&codex.driver, &again.driver));
 
-        // Without config the built-in codex stays on ACP.
+        // Without config the built-in codex is native; config can move it back to ACP.
         let plain = PluginRegistry::with_config(&BTreeMap::new());
-        assert_eq!(plain.get("codex").unwrap().kind(), DriverKind::AcpGeneric);
+        assert_eq!(plain.get("codex").unwrap().kind(), DriverKind::CodexNative);
+        configs.insert(
+            "codex".to_owned(),
+            toml::from_str::<PluginConfig>("driver = \"acp-generic\"").unwrap(),
+        );
+        let acp = PluginRegistry::with_config(&configs);
+        assert_eq!(acp.get("codex").unwrap().kind(), DriverKind::AcpGeneric);
+        // So does an entry that only replaces the ACP command.
+        configs.insert(
+            "codex".to_owned(),
+            toml::from_str::<PluginConfig>("command = [\"my-codex-acp\"]").unwrap(),
+        );
+        let custom = PluginRegistry::with_config(&configs);
+        assert_eq!(custom.get("codex").unwrap().kind(), DriverKind::AcpGeneric);
     }
 
     #[test]

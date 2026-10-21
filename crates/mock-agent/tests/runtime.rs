@@ -213,6 +213,25 @@ async fn stop_and_delete() {
 }
 
 #[tokio::test]
+async fn model_can_be_changed_while_running() {
+    let t = TestHub::start().await;
+    t.add_agent("gail", Some("mock-opus")).await;
+    t.post("/v1/agents/gail/start", json!({})).await;
+    let resp = t
+        .post("/v1/agents/gail/model", json!({ "model": "mock-haiku" }))
+        .await;
+    assert_eq!(resp.status(), 200);
+    let agent: Value = t.get("/v1/agents/gail").await.json().await.unwrap();
+    assert_eq!(agent["model"], "mock-haiku");
+    assert_eq!(agent["status"], "idle");
+    // A blank model goes back to the agent's own default.
+    t.post("/v1/agents/gail/model", json!({ "model": " " }))
+        .await;
+    let agent: Value = t.get("/v1/agents/gail").await.json().await.unwrap();
+    assert_eq!(agent["model"], Value::Null);
+}
+
+#[tokio::test]
 async fn unknown_plugin_is_rejected_and_plugins_are_listed() {
     let t = TestHub::start().await;
     let resp = t

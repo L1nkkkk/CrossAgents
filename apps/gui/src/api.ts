@@ -89,6 +89,8 @@ export const api = {
     request<void>("DELETE", `/v1/agents/${enc(key)}/messages/${enc(messageId)}`),
   cancelAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/cancel`),
   stopAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/stop`),
+  setModel: (key: string, model: string | null) => request<Agent>("POST", `/v1/agents/${enc(key)}/model`, { model }),
+  deleteAgent: (key: string) => request<void>("DELETE", `/v1/agents/${enc(key)}`),
   updateProfile: (key: string, profile: AgentProfile) => request<Agent>("POST", `/v1/agents/${enc(key)}/profile`, profile),
   transcript: (key: string) => request<Transcript>("GET", `/v1/agents/${enc(key)}/transcript`),
   listPlugins: () => request<ListPluginsResponse>("GET", "/v1/plugins"),

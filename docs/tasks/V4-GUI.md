@@ -87,3 +87,15 @@ run：拆解中（进行中）、**待审批（需要你）**、进行中、已�
 - 提问卡片停靠：hub 目前没有直接问人的工具，Worker 的提问发给 Planner。
 - `useRunTree` / `useAgents` 在每个视图里各自请求，事件一多会重复拉取，应合成一个共享的存储。
 - 多主机、设备权限、内置浏览器、插件沙箱、完整的输入框（拆解 §8）。
+
+## 9. 真实 Codex 走通（2026-10-22）
+
+用本机 Codex 登录（codex-cli 0.162.0-alpha.2，Codex 桌面版自带）在 GUI 里走通：添加队友 → 单聊（流式输出、命令步骤、回答）→ Planner + Worker 的 run（计划 → 批准 → 完成 → 合并）。为此改了：
+
+- 内置 `codex` 插件默认驱动改为 `codex-native`；`[plugins.codex] driver = "acp-generic"` 可改回。
+- PATH 上没有 `codex` 时，用 Codex 桌面版自带的 `%LOCALAPPDATA%\OpenAI\Codex\bin\<build>\codex.exe`（取最新的）。
+- `codex-native` 没配置模型时，从 `$CODEX_HOME`（缺省 `~/.codex`）的 `models_cache.json` 列出选择器里的模型。
+- 新增 `POST /v1/agents/{key}/model`（`SetModelRequest`）：改存储里的模型，运行中的会话从下一轮起换。GUI「编辑」里可以改模型，也可以移出团队（点两次）。
+- 新建队友默认选插件列出的第一个模型。原因是 `~/.codex/config.toml` 里的默认模型可能不支持当前登录，实测 `gpt-6-astra` 对 ChatGPT 账号报错。
+- Electron 版的工作目录可以用系统对话框选（`pickFolder`）。
+- 修复：对已结束的 turn 发 `turn/interrupt`，codex 不会回应，停掉 Worker 要等 120 秒请求超时才能合并；现在中断和退订最多等 5 秒。

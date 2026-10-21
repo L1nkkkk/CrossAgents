@@ -18,6 +18,7 @@ import {
   useAgents,
 } from "../components";
 import { useHubData } from "../hub";
+import { useArmed } from "../parts";
 
 /** The team: every agent as a colleague with a face, a title and a persona. */
 export function AgentsView() {
@@ -106,13 +107,17 @@ function Editor({ agent, onDone }: { agent?: Agent; onDone: (created?: Agent) =>
   const [preset, setPreset] = useState<string>();
   const [name, setName] = useState("");
   const [plugin, setPlugin] = useState("");
-  const [model, setModel] = useState("");
+  const [model, setModel] = useState<string>();
   const [role, setRole] = useState<Role>("worker");
   const [cwd, setCwd] = useState("");
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
-  const pluginValue = plugin || plugins.data?.[0]?.name || "";
+  const remove = useArmed();
+  const pluginValue = agent?.plugin ?? (plugin || plugins.data?.[0]?.name || "");
   const models = plugins.data?.find((p) => p.name === pluginValue)?.models ?? [];
+  // Until it is touched: the agent's model, or for a new agent the plugin's first one, so
+  // a new agent never falls back to a default the account may not have.
+  const modelValue = model ?? (agent ? agent.model ?? "" : models[0] ?? "");
   const set = (patch: Partial<AgentProfile>) => setProfile((p) => ({ ...p, ...patch }));
 
   function applyPreset(key: string) {
@@ -131,7 +136,7 @@ function Editor({ agent, onDone }: { agent?: Agent; onDone: (created?: Agent) =>
       name: name || "new",
       plugin: pluginValue,
       driver: null,
-      model: model || null,
+      model: modelValue || null,
       role,
       cwd,
       config: null,
@@ -148,13 +153,14 @@ function Editor({ agent, onDone }: { agent?: Agent; onDone: (created?: Agent) =>
     try {
       if (agent) {
         await api.updateProfile(agent.name, profile);
+        if ((modelValue.trim() || null) !== agent.model) await api.setModel(agent.name, modelValue.trim() || null);
         onDone();
       } else {
         const created = await api.createAgent({
           name: name.trim(),
           plugin: pluginValue,
           driver: null,
-          model: model.trim() || null,
+          model: modelValue.trim() || null,
           role,
           cwd: cwd.trim(),
           config: {},
@@ -245,24 +251,27 @@ function Editor({ agent, onDone }: { agent?: Agent; onDone: (created?: Agent) =>
                 ))}
               </select>
             </Field>
-            <Field label="模型（背后的大脑）">
-              <input list="models" value={model} onChange={(e) => setModel(e.target.value)} placeholder={models[0] ?? ""} />
-              <datalist id="models">
-                {models.map((m) => (
-                  <option key={m} value={m} />
-                ))}
-              </datalist>
-            </Field>
+            <ModelField value={modelValue} models={models} onChange={setModel} />
           </div>
           <Field label="工作目录（git 仓库）">
-            <input value={cwd} onChange={(e) => setCwd(e.target.value)} required placeholder="C:\path\to\repo" />
+            <div className="row" style={{ gap: 6 }}>
+              <input value={cwd} onChange={(e) => setCwd(e.target.value)} required placeholder="C:\path\to\repo" style={{ flex: 1 }} />
+              {window.crossagents?.pickFolder && (
+                <button type="button" className="ghost" onClick={async () => setCwd((await window.crossagents!.pickFolder!()) ?? cwd)}>
+                  选择…
+                </button>
+              )}
+            </div>
           </Field>
         </>
       ) : (
-        <p className="muted small" style={{ margin: 0 }}>
-          @{agent.name} · {agent.role} · {agent.plugin}
-          {agent.model ? ` · ${agent.model}` : ""} · 新的人设在它下次开会话时生效。
-        </p>
+        <>
+          <ModelField value={modelValue} models={models} onChange={setModel} />
+          <p className="muted small" style={{ margin: 0 }}>
+            @{agent.name} · {agent.role} · {agent.plugin}
+            {agent.driver ? ` · ${agent.driver}` : ""} · 新的人设在它下次开会话时生效；模型从下一轮起生效。
+          </p>
+        </>
       )}
 
       <ErrorBox error={error ?? plugins.error} />
@@ -273,7 +282,48 @@ function Editor({ agent, onDone }: { agent?: Agent; onDone: (created?: Agent) =>
         <button type="button" className="ghost" onClick={() => onDone()}>
           取消
         </button>
+        {agent && (
+          <>
+            <div className="spacer" />
+            <button
+              type="button"
+              className={`danger ${remove.armed ? "armed" : ""}`}
+              disabled={busy}
+              onClick={() =>
+                remove.click(() =>
+                  api.deleteAgent(agent.name).then(
+                    () => onDone(),
+                    (err) => setError(errorText(err)),
+                  ),
+                )
+              }
+            >
+              {remove.armed ? `再点一次移除 @${agent.name}` : "移出团队"}
+            </button>
+          </>
+        )}
       </div>
     </form>
+  );
+}
+
+/** The plugin's models as a list; free text when it lists none or the value is not one of them. */
+function ModelField({ value, models, onChange }: { value: string; models: string[]; onChange: (m: string) => void }) {
+  const listed = !value || models.includes(value);
+  return (
+    <Field label="模型（背后的大脑）">
+      {models.length && listed ? (
+        <select value={value} onChange={(e) => onChange(e.target.value)}>
+          {models.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+          <option value="">插件默认</option>
+        </select>
+      ) : (
+        <input value={value} onChange={(e) => onChange(e.target.value)} placeholder="插件默认" />
+      )}
+    </Field>
   );
 }
