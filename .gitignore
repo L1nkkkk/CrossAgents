@@ -2,3 +2,6 @@
 *.db
 *.db-shm
 *.db-wal
+
+# Local Claude Code state (previews, worktrees)
+/.claude/
