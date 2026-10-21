@@ -101,6 +101,8 @@ struct ConfigFile {
 #[derive(Debug, Default, Deserialize)]
 struct AccountsSection {
     codex_usage_url: Option<String>,
+    /// Register the vendors' own logins (e.g. `~/.codex`) as accounts at startup.
+    detect: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -120,6 +122,10 @@ pub struct HubConfig {
     pub mcp_command: Option<Vec<String>>,
     /// Override of the Codex usage endpoint (`[accounts] codex_usage_url`), for tests.
     pub codex_usage_url: Option<String>,
+    /// Register logged-in vendor homes (e.g. `~/.codex`) as accounts at startup
+    /// (`[accounts] detect`, on by default; off in [`HubConfig::new`] so tests never touch
+    /// the user's own logins).
+    pub detect_accounts: bool,
 }
 
 impl HubConfig {
@@ -131,6 +137,7 @@ impl HubConfig {
             plugins: BTreeMap::new(),
             mcp_command: None,
             codex_usage_url: None,
+            detect_accounts: false,
         }
     }
 }
@@ -150,6 +157,7 @@ impl HubConfig {
             plugins: config.plugins,
             mcp_command: config.hub.mcp_command,
             codex_usage_url: config.accounts.codex_usage_url,
+            detect_accounts: config.accounts.detect.unwrap_or(true),
         })
     }
 }

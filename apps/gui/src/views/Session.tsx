@@ -8,6 +8,7 @@ import { view } from "../activity";
 import { api, errorText } from "../api";
 import { ACTIVE_RUN, useRunTree } from "../App";
 import { Avatar, ErrorBox, Icon, Mark, Prose, StatusChip, agentTitle, agentTone, displayName, roleShape, time, useAgents } from "../components";
+import { diffStat, parseDiff, tailLines, type DiffFile } from "../lib/diff";
 import { taskState } from "../lib/taskState";
 import { duration, failed, liveActivity, stepLine, summarize, workGroups, type Step } from "../lib/workGroups";
 import { PeerMessage, StateWord, useArmed } from "../parts";
@@ -132,6 +133,11 @@ function Header({
         ))}
         <div className="spacer" />
         {usage && usage.size > 0 && <Meter usage={usage} />}
+        {agent.status === "idle" && usage && usage.size > 0 && usage.used / usage.size >= 0.5 && (
+          <button className="ghost small" disabled={busy} onClick={() => run(() => api.compactAgent(agent.name))} title="让 agent 把历史压缩成摘要，腾出上下文">
+            压缩上下文
+          </button>
+        )}
         {agent.status === "running" && capabilities?.interrupt !== false && (
           <button disabled={busy} onClick={() => run(() => api.cancelAgent(agent.name))} title="中断本轮（Esc）">
             <span className="row" style={{ gap: 5 }}>
@@ -167,8 +173,20 @@ function Header({
 
 function Meter({ usage }: { usage: TranscriptUsage }) {
   const pct = Math.min(100, Math.round((usage.used / usage.size) * 100));
+  const t = usage.tokens;
+  const lines = [
+    `上下文 ${usage.used.toLocaleString()} / ${usage.size.toLocaleString()} tokens`,
+    ...(t
+      ? [
+          `本会话累计 ${t.total.toLocaleString()} tokens`,
+          `  输入 ${t.input.toLocaleString()}（缓存命中 ${t.input ? Math.round((t.cached_input / t.input) * 100) : 0}%）`,
+          `  输出 ${t.output.toLocaleString()}（推理 ${t.reasoning_output.toLocaleString()}）`,
+        ]
+      : []),
+    ...(usage.cost_usd != null ? [`花费 $${usage.cost_usd.toFixed(4)}`] : []),
+  ];
   return (
-    <span className="meter" title={`上下文 ${usage.used.toLocaleString()} / ${usage.size.toLocaleString()} tokens${usage.cost_usd != null ? ` · $${usage.cost_usd.toFixed(4)}` : ""}`}>
+    <span className="meter" title={lines.join("\n")}>
       <span className="track">
         <span className={`fill ${pct >= 80 ? "warn" : ""}`} style={{ width: `${pct}%`, display: "block" }} />
       </span>
@@ -261,6 +279,8 @@ function Item({ item }: { item: TranscriptItem }) {
       return <Prose text={item.text} />;
     case "error":
       return <div className="item-error">{item.message}</div>;
+    case "warning":
+      return <div className="item-warn">{item.message}</div>;
     default:
       return null;
   }
@@ -327,11 +347,128 @@ function StepRow({ step }: { step: Step }) {
       </details>
     );
   }
-  const tone = step.status === "completed" ? "ok" : step.status === "failed" ? "danger" : "accent live";
+  if (step.type === "permission") {
+    const allowed = step.decision === "allow" || step.decision === "allow_for_session";
+    return (
+      <div className="tool" title={`${step.kind} · ${step.decision}`}>
+        <span className={allowed ? "pass" : "fail"}>{allowed ? "✓" : "✕"}</span>
+        <span className="title muted">
+          {allowed ? "已授权" : "已拒绝"} · {step.title}
+        </span>
+      </div>
+    );
+  }
+  return <ToolStep step={step} />;
+}
+
+type ToolCall = Extract<TranscriptItem, { type: "tool_call" }>;
+
+/** Output lines shown under a running command. */
+const LIVE_LINES = 4;
+/** Output lines shown when a step is opened. */
+const OPEN_LINES = 400;
+
+/** One tool call; a click opens what it did (output, exit code, diffs, arguments). */
+function ToolStep({ step }: { step: ToolCall }) {
+  const [open, setOpen] = useState(false);
+  const d = step.detail;
+  const running = step.status === "in_progress" || step.status === "pending";
+  const tone = step.status === "completed" ? "ok" : step.status === "failed" ? "danger" : "accent pulse";
+  const code = d?.exit_code;
+  const live = running && step.output ? tailLines(step.output, LIVE_LINES) : undefined;
+  const more = !!(d || step.output);
+  const changes = d ? d.changes.flatMap((c) => parseDiff(c.diff, c.path)) : [];
   return (
-    <div className="tool" title={`${step.title} · ${step.status}`}>
-      <span className={`dot ${tone.replace("live", "pulse")}`} />
-      <span className="title">{stepLine(step)}</span>
+    <div className="tool-step">
+      <button className="tool" onClick={() => more && setOpen(!open)} aria-expanded={more ? open : undefined} disabled={!more} title={step.title}>
+        <span className={`dot ${tone}`} />
+        <span className="title">{stepLine(step)}</span>
+        {code != null && code !== 0 && <span className="chip danger tiny">退出 {code}</span>}
+        {d?.duration_ms != null && <span className="muted tiny">{took(d.duration_ms)}</span>}
+        {changes.length > 0 && <ChangeStat files={changes} />}
+        {more && (
+          <span className="disclosure muted" aria-hidden="true">
+            {open ? "▾" : "▸"}
+          </span>
+        )}
+      </button>
+      {live && !open && <pre className="out live">{live.text}</pre>}
+      {open && <ToolDetailView step={step} changes={changes} />}
+    </div>
+  );
+}
+
+function ToolDetailView({ step, changes }: { step: ToolCall; changes: DiffFile[] }) {
+  const d = step.detail;
+  const output = d?.output ?? step.output;
+  const shown = output != null ? tailLines(output, OPEN_LINES) : undefined;
+  return (
+    <div className="tool-detail">
+      {d?.command && <pre className="cmd">$ {d.command}</pre>}
+      {d?.cwd && <div className="muted tiny mono">{d.cwd}</div>}
+      {shown && (
+        <>
+          {shown.hidden > 0 && <div className="muted tiny">… 前面还有 {shown.hidden} 行</div>}
+          <pre className="out">{shown.text || "（没有输出）"}</pre>
+        </>
+      )}
+      {d?.exit_code != null && (
+        <div className={`tiny ${d.exit_code === 0 ? "muted" : "fail"}`}>
+          退出码 {d.exit_code}
+          {d.duration_ms != null ? ` · ${took(d.duration_ms)}` : ""}
+        </div>
+      )}
+      {changes.length > 0 && <DiffView files={changes} />}
+      {d?.arguments && (
+        <>
+          <div className="muted tiny">参数</div>
+          <pre className="out">{d.arguments}</pre>
+        </>
+      )}
+      {d?.result && (
+        <>
+          <div className="muted tiny">结果</div>
+          <pre className="out">{tailLines(d.result, OPEN_LINES).text}</pre>
+        </>
+      )}
+      {d?.error && <div className="item-error">{d.error}</div>}
+    </div>
+  );
+}
+
+/** "70ms" under a second, else like `duration`. */
+const took = (ms: number) => (ms < 1000 ? `${ms}ms` : duration(ms));
+
+function ChangeStat({ files }: { files: DiffFile[] }) {
+  const { added, removed } = diffStat(files);
+  if (!added && !removed) return null;
+  return (
+    <span className="tiny mono">
+      <span className="add">+{added}</span> <span className="del">−{removed}</span>
+    </span>
+  );
+}
+
+/** Unified diffs, one block per file. */
+function DiffView({ files }: { files: DiffFile[] }) {
+  return (
+    <div className="diff">
+      {files.map((file, i) => (
+        <div key={i} className="diff-file">
+          <div className="diff-head">
+            <span className="mono">{file.path || "（未命名）"}</span>
+            <ChangeStat files={[file]} />
+          </div>
+          <pre className="diff-body">
+            {file.lines.map((line, j) => (
+              <div key={j} className={`dl ${line.kind}`}>
+                <span className="sign">{line.kind === "add" ? "+" : line.kind === "del" ? "−" : " "}</span>
+                {line.text}
+              </div>
+            ))}
+          </pre>
+        </div>
+      ))}
     </div>
   );
 }
@@ -366,13 +503,23 @@ const STOP_TEXT: Record<string, string> = {
 
 /** After a finished turn: how long it worked, when, and why it stopped if not normally. */
 function TurnFoot({ turn }: { turn: TranscriptTurn }) {
+  const [open, setOpen] = useState(false);
   const start = turn.started_at ?? turn.sent_at;
   const worked = duration(new Date(turn.completed_at!).getTime() - new Date(start).getTime());
   const reason = turn.stop_reason && turn.stop_reason !== "end_turn" ? turn.stop_reason : null;
+  const files = turn.diff ? parseDiff(turn.diff) : [];
   return (
-    <div className={`turn-note ${reason === "error" ? "danger" : ""}`} title={`${time(start)} → ${time(turn.completed_at!)}`}>
-      {reason ? `— ${STOP_TEXT[reason] ?? reason} · ` : ""}已工作 {worked} · {clock(turn.completed_at!)}
-    </div>
+    <>
+      <div className={`turn-note ${reason === "error" ? "danger" : ""}`} title={`${time(start)} → ${time(turn.completed_at!)}`}>
+        {reason ? `— ${STOP_TEXT[reason] ?? reason} · ` : ""}已工作 {worked} · {clock(turn.completed_at!)}
+        {files.length > 0 && (
+          <button className="turn-diff" onClick={() => setOpen(!open)} aria-expanded={open}>
+            · 改动 {files.length} 个文件 <ChangeStat files={files} /> {open ? "▾" : "▸"}
+          </button>
+        )}
+      </div>
+      {open && <DiffView files={files} />}
+    </>
   );
 }
 

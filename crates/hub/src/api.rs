@@ -16,11 +16,12 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use crossagents_api_types::{
-    API_VERSION, AccountUsageGroup, AccountUsageResponse, ApiError, CreateAccountRequest,
-    CreateAgentRequest, CreateRunRequest, ErrorCode, HealthResponse, HubInfo, ListAccountsResponse,
-    ListAgentsResponse, ListPluginsResponse, ListRunsResponse, ListToolsResponse, LoginStarted,
-    PluginInfo, RejectRunRequest, RunDetail, SendMessageRequest, SendMessageResponse,
-    SetModelRequest, Transcript, UsageGroup, UsageResponse,
+    API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, ApiError,
+    CreateAccountRequest, CreateAgentRequest, CreateRunRequest, ErrorCode, HealthResponse, HubInfo,
+    ListAccountsResponse, ListAgentsResponse, ListPluginsResponse, ListRunsResponse,
+    ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest, RunDetail,
+    SendMessageRequest, SendMessageResponse, SetModelRequest, Transcript, UsageGroup,
+    UsageResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError,
@@ -69,6 +70,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/agents/{key}/start", post(start_agent))
         .route("/v1/agents/{key}/stop", post(stop_agent))
         .route("/v1/agents/{key}/cancel", post(cancel_agent))
+        .route("/v1/agents/{key}/compact", post(compact_agent))
         .route("/v1/agents/{key}/messages", post(send_message))
         .route(
             "/v1/agents/{key}/messages/{message_id}",
@@ -80,6 +82,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/plugins", get(list_plugins))
         .route("/v1/usage", get(usage))
         .route("/v1/accounts", get(list_accounts).post(create_account))
+        .route("/v1/quota", get(quota))
         .route(
             "/v1/accounts/{id}",
             get(get_account).delete(delete_account_route),
@@ -416,6 +419,15 @@ async fn cancel_agent(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Has the agent summarise its history to free context.
+async fn compact_agent(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<StatusCode> {
+    state.runtime.compact(&AgentKey::parse(&key)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Takes back a message that is still waiting for its turn.
 async fn withdraw_message(
     State(state): State<Arc<AppState>>,
@@ -641,6 +653,41 @@ async fn list_accounts(
 ) -> ApiResult<Json<ListAccountsResponse>> {
     Ok(Json(ListAccountsResponse {
         accounts: state.store().list_accounts().await?,
+    }))
+}
+
+/// Every account with its status, models and agents, read concurrently.
+async fn quota(State(state): State<Arc<AppState>>) -> ApiResult<Json<QuotaResponse>> {
+    let accounts = state.store().list_accounts().await?;
+    let agents = state.store().list_agents().await?;
+    let mut owners: Vec<(String, Option<String>)> = Vec::new();
+    for agent in &agents {
+        owners.push((agent.name.clone(), state.accounts.account_for(agent).await));
+    }
+    let views = futures::future::join_all(accounts.into_iter().map(|account| {
+        let state = state.clone();
+        let users: Vec<String> = owners
+            .iter()
+            .filter(|(_, id)| id.as_deref() == Some(account.id.as_str()))
+            .map(|(name, _)| name.clone())
+            .collect();
+        async move {
+            let status = state.accounts.status(&account.id).await?;
+            let models = state.accounts.models(&account.id).await?;
+            Ok::<_, CoreError>(AccountQuota {
+                account,
+                status,
+                models,
+                agents: users,
+            })
+        }
+    }))
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(QuotaResponse {
+        accounts: views,
+        providers: state.accounts.provider_names(),
     }))
 }
 

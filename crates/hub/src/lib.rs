@@ -77,6 +77,12 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         vec![Arc::new(codex_accounts)],
         paths.accounts(),
     ));
+    accounts.watch();
+    if config.detect_accounts
+        && let Err(err) = accounts.detect_defaults().await
+    {
+        tracing::warn!(error = %err, "cannot register local logins as accounts");
+    }
     let tokens = Arc::new(AgentTokens::default());
     let setup = Arc::new(CollabSetup {
         tokens: tokens.clone(),

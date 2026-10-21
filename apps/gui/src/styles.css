@@ -724,3 +724,70 @@ button.need { padding: 2px 10px; line-height: 18px; color: var(--text-2); }
 /* Run board grouped by bucket. */
 .board-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
 .board-key { background: none; padding: 0; color: var(--text-2); font-size: 12px; }
+
+/* ---- Tool steps: output, exit code, diffs (N2) --------------------------------------- */
+.tiny { font-size: 11px; }
+.add { color: var(--add); }
+.del { color: var(--del); }
+.tool-step { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+button.tool { border: none; background: none; padding: 1px 0; text-align: left; border-radius: 4px; width: 100%; }
+button.tool:hover:not(:disabled) { background: none; color: var(--text); }
+button.tool:disabled { opacity: 1; cursor: default; }
+button.tool .chip.tiny { padding: 0 6px; line-height: 16px; font-family: var(--font-sans); }
+.tool-step .out { font-size: 11.5px; max-height: 360px; padding: 8px 10px; color: var(--text-2); }
+.tool-step .out.live { max-height: none; margin-left: 16px; opacity: 0.85; }
+.tool-detail { display: flex; flex-direction: column; gap: 6px; margin: 2px 0 6px 16px; padding-left: 10px; border-left: 2px solid var(--border); }
+.tool-detail .cmd { font-size: 11.5px; background: none; padding: 0; color: var(--text); }
+.item-warn { color: var(--warn); background: var(--warn-bg); border-radius: var(--radius); padding: 7px 11px; font-size: 13px; white-space: pre-wrap; }
+.turn-diff { border: none; background: none; padding: 0; font-size: 12px; color: var(--muted); display: inline-flex; gap: 5px; align-items: center; }
+.turn-diff:hover:not(:disabled) { background: none; color: var(--text); }
+.diff { display: flex; flex-direction: column; gap: 8px; }
+.diff-file { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
+.diff-head { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 5px 10px; background: var(--surface-sunk); font-size: 12px; }
+.diff-body { background: none; padding: 4px 0; border-radius: 0; font-size: 11.5px; line-height: 1.55; max-height: 480px; white-space: pre; overflow: auto; }
+.dl { padding: 0 10px; min-width: max-content; }
+.dl .sign { display: inline-block; width: 14px; color: var(--muted); user-select: none; }
+.dl.add { background: color-mix(in srgb, var(--add) 12%, transparent); color: var(--text); }
+.dl.add .sign { color: var(--add); }
+.dl.del { background: color-mix(in srgb, var(--del) 12%, transparent); color: var(--text); }
+.dl.del .sign { color: var(--del); }
+.dl.hunk { color: var(--accent-text); background: var(--accent-bg); }
+.dl.meta { color: var(--muted); }
+
+/* ---- Usage settings: subscriptions and quota, after Claude Code's usage page ---------- */
+.page-inner.settings { display: flex; flex-direction: column; gap: 28px; max-width: 760px; }
+.settings-section { display: flex; flex-direction: column; gap: 12px; }
+.settings-head { display: flex; align-items: center; gap: 10px; }
+.settings-head h2 { margin: 0; }
+button.small, .segmented.small button { font-size: 12px; padding: 3px 10px; }
+.account { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px 18px; display: flex; flex-direction: column; gap: 14px; }
+.account-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.account-head .provider { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); border: 1px solid var(--border); border-radius: 5px; padding: 0 6px; line-height: 18px; }
+.account-name { font-weight: 600; }
+.notice { font-size: 13px; background: var(--accent-bg); color: var(--accent-text); border-radius: var(--radius); padding: 8px 12px; }
+.quota { display: flex; flex-direction: column; gap: 12px; }
+.quota-title { font-size: 12px; color: var(--muted); }
+.quota-row { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(120px, 2fr) 74px; gap: 16px; align-items: center; }
+.quota-label { font-size: 13.5px; }
+.quota-sub { font-size: 12px; color: var(--muted); margin-top: 1px; }
+.quota-bar { height: 8px; border-radius: 4px; background: var(--surface-sunk); overflow: hidden; box-shadow: inset 0 0 0 1px var(--border); }
+.quota-bar span { display: block; height: 100%; border-radius: 4px; background: var(--accent); transition: width 0.3s; }
+.quota-bar.warn span { background: var(--warn); }
+.quota-bar.danger span { background: var(--danger); }
+.quota-value { font-size: 12.5px; color: var(--text-2); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.quota-row.plain .quota-value { grid-column: 2 / -1; }
+.account-foot { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); padding-top: 10px; }
+.token-usage { display: flex; flex-direction: column; gap: 8px; }
+.table.compact th, .table.compact td { padding: 6px 10px; font-size: 12.5px; }
+.models { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 12px; color: var(--muted); }
+.choice { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.choice label { display: flex; gap: 6px; align-items: center; }
+@media (max-width: 640px) {
+  .quota-row { grid-template-columns: 1fr 64px; }
+  .quota-row .quota-bar { grid-column: 1 / -1; grid-row: 2; }
+}
+
+/* Sidebar: the tightest quota window. */
+.quota-mini { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); padding: 2px 4px; border-radius: 6px; }
+.quota-mini:hover { background: var(--hover); text-decoration: none; color: var(--text-2); }
+.quota-mini .quota-bar { width: 40px; height: 4px; box-shadow: none; }

@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { app, BrowserWindow, dialog, ipcMain, session, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell, session, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
 
 const METHODS = new Set(["GET", "POST", "DELETE"]);
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -191,8 +191,12 @@ function parseSse(block: string): { id?: string; data?: string } {
 }
 
 // No new windows, no navigation away from the app, no permissions (camera, notifications…).
+// Web links (e.g. an account login page) open in the system browser instead.
 app.on("web-contents-created", (_event, contents) => {
-  contents.setWindowOpenHandler(() => ({ action: "deny" }));
+  contents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith("https://") || url.startsWith("http://")) void shell.openExternal(url);
+    return { action: "deny" };
+  });
   contents.on("will-navigate", (event, url) => {
     if (!url.startsWith(appUrl)) event.preventDefault();
   });

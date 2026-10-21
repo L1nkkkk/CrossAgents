@@ -91,6 +91,54 @@ pub fn summary(kind: &EventKind) -> String {
             tool_call_id,
             status.map(|s| enum_name(&s)).unwrap_or_default()
         ),
+        EventKind::AgentToolOutput {
+            id,
+            tool_call_id,
+            text,
+        } => format!("{} {tool_call_id} {}", short(id), one_line(text)),
+        EventKind::AgentToolDetail {
+            id,
+            tool_call_id,
+            detail,
+        } => {
+            let mut parts = Vec::new();
+            if let Some(code) = detail.exit_code {
+                parts.push(format!("exit {code}"));
+            }
+            if let Some(ms) = detail.duration_ms {
+                parts.push(format!("{ms}ms"));
+            }
+            if !detail.changes.is_empty() {
+                parts.push(format!("{} file(s)", detail.changes.len()));
+            }
+            if let Some(error) = &detail.error {
+                parts.push(one_line(error));
+            }
+            format!("{} {tool_call_id} {}", short(id), parts.join(", "))
+        }
+        EventKind::AgentTurnDiff { id, diff } => {
+            format!("{} diff, {} line(s)", short(id), diff.lines().count())
+        }
+        EventKind::AgentPermission {
+            id,
+            title,
+            decision,
+            ..
+        } => format!(
+            "{} {} -> {}",
+            short(id),
+            one_line(title),
+            enum_name(decision)
+        ),
+        EventKind::AgentRateLimits { id, limits } => {
+            let windows: Vec<String> = limits
+                .windows
+                .iter()
+                .map(|w| format!("{} {:.0}%", w.name, w.used_percent))
+                .collect();
+            format!("{} {}", short(id), windows.join(", "))
+        }
+        EventKind::AgentWarning { id, message } => format!("{} {}", short(id), one_line(message)),
         EventKind::AgentTurnCompleted {
             id, stop_reason, ..
         } => format!("{} {}", short(id), enum_name(stop_reason)),
@@ -109,7 +157,7 @@ pub fn summary(kind: &EventKind) -> String {
                 account.home.display()
             )
         }
-        EventKind::AccountRemoved { id } => id.clone(),
+        EventKind::AccountRemoved { id } | EventKind::AccountQuotaUpdated { id } => id.clone(),
         EventKind::AccountLoginPending { id, url } => {
             format!(
                 "{id} {}",

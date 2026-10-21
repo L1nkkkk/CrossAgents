@@ -8,7 +8,10 @@
 
 import type { TranscriptItem } from "@bindings/TranscriptItem";
 
-export type Step = Extract<TranscriptItem, { type: "tool_call" }> | Extract<TranscriptItem, { type: "output" }>;
+export type Step =
+  | Extract<TranscriptItem, { type: "tool_call" }>
+  | Extract<TranscriptItem, { type: "output" }>
+  | Extract<TranscriptItem, { type: "permission" }>;
 
 export type Block =
   | { kind: "item"; item: TranscriptItem }
@@ -16,7 +19,7 @@ export type Block =
   | { kind: "steps"; steps: Step[]; closed: boolean };
 
 export const isStep = (item: TranscriptItem): item is Step =>
-  item.type === "tool_call" || (item.type === "output" && item.stream === "thought");
+  item.type === "tool_call" || item.type === "permission" || (item.type === "output" && item.stream === "thought");
 
 export function workGroups(items: TranscriptItem[]): Block[] {
   const blocks: Block[] = [];
@@ -37,10 +40,11 @@ export function workGroups(items: TranscriptItem[]): Block[] {
   return blocks;
 }
 
-type Category = "command" | "edit" | "read" | "search" | "thought" | "tool";
+type Category = "command" | "edit" | "read" | "search" | "thought" | "tool" | "permission";
 
 function category(step: Step): Category {
   if (step.type === "output") return "thought";
+  if (step.type === "permission") return "permission";
   switch (step.kind) {
     case "execute":
       return "command";
@@ -67,6 +71,7 @@ const PHRASE: Record<Category, (n: number) => string> = {
   search: (n) => `${n} 次搜索`,
   tool: (n) => `${n} 次工具调用`,
   thought: (n) => `推理 ${n} 段`,
+  permission: (n) => `${n} 次授权`,
 };
 const ORDER: Category[] = ["command", "edit", "read", "search", "tool"];
 
@@ -88,7 +93,7 @@ export function liveActivity(items: TranscriptItem[]): string {
   const last = items[items.length - 1];
   if (!last) return "思考中";
   if (last.type === "output") return last.stream === "thought" ? "推理中" : "回复中";
-  if (last.type === "error") return "工作中";
+  if (last.type === "error" || last.type === "warning" || last.type === "permission") return "工作中";
   if (last.status === "completed" || last.status === "failed") return "工作中";
   switch (category(last)) {
     case "command":

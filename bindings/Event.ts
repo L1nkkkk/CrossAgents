@@ -7,12 +7,16 @@ import type { CheckResult } from "./CheckResult";
 import type { MessageId } from "./MessageId";
 import type { MessageSource } from "./MessageSource";
 import type { OutputStream } from "./OutputStream";
+import type { PermissionDecision } from "./PermissionDecision";
+import type { RateLimits } from "./RateLimits";
 import type { Run } from "./Run";
 import type { RunId } from "./RunId";
 import type { RunStatus } from "./RunStatus";
 import type { StopReason } from "./StopReason";
 import type { TaskId } from "./TaskId";
 import type { TaskStatus } from "./TaskStatus";
+import type { TokenUsage } from "./TokenUsage";
+import type { ToolDetail } from "./ToolDetail";
 import type { ToolStatus } from "./ToolStatus";
 
 export type Event = { 
@@ -23,4 +27,8 @@ seq: number, id: string, ts: string, schema: number, } & ({ "type": "hub.started
 /**
  * Who sent it; absent in events written before the field existed (a person).
  */
-from?: MessageSource, } } | { "type": "agent.input_withdrawn", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.turn_started", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.output", "data": { id: AgentId, stream: OutputStream, text: string, } } | { "type": "agent.tool_call", "data": { id: AgentId, tool_call_id: string, title: string, kind: string | null, status: ToolStatus, } } | { "type": "agent.tool_call_updated", "data": { id: AgentId, tool_call_id: string, title: string | null, status: ToolStatus | null, } } | { "type": "agent.turn_completed", "data": { id: AgentId, message_id: MessageId, stop_reason: StopReason, } } | { "type": "agent.usage", "data": { id: AgentId, used: number, size: number, cost_usd: number | null, } } | { "type": "agent.error", "data": { id: AgentId, message: string, } } | { "type": "agent.session_started", "data": { id: AgentId, session_id: string, } } | { "type": "account.created", "data": { account: Account, } } | { "type": "account.removed", "data": { id: string, } } | { "type": "account.login_finished", "data": { id: string, ok: boolean, message: string | null, } } | { "type": "account.login_pending", "data": { id: string, url: string | null, } } | { "type": "run.created", "data": { run: Run, } } | { "type": "run.status_changed", "data": { id: RunId, from: RunStatus, to: RunStatus, note: string | null, } } | { "type": "run.plan_submitted", "data": { id: RunId, tasks: Array<string>, } } | { "type": "task.status_changed", "data": { run_id: RunId, id: TaskId, key: string, from: TaskStatus, to: TaskStatus, assignee: AgentId | null, } } | { "type": "task.checked", "data": { run_id: RunId, id: TaskId, key: string, passed: boolean, checks: Array<CheckResult>, } });
+from?: MessageSource, } } | { "type": "agent.input_withdrawn", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.turn_started", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.output", "data": { id: AgentId, stream: OutputStream, text: string, } } | { "type": "agent.tool_call", "data": { id: AgentId, tool_call_id: string, title: string, kind: string | null, status: ToolStatus, } } | { "type": "agent.tool_call_updated", "data": { id: AgentId, tool_call_id: string, title: string | null, status: ToolStatus | null, } } | { "type": "agent.tool_output", "data": { id: AgentId, tool_call_id: string, text: string, } } | { "type": "agent.tool_detail", "data": { id: AgentId, tool_call_id: string, detail: ToolDetail, } } | { "type": "agent.turn_diff", "data": { id: AgentId, diff: string, } } | { "type": "agent.permission", "data": { id: AgentId, kind: string, title: string, decision: PermissionDecision, } } | { "type": "agent.rate_limits", "data": { id: AgentId, limits: RateLimits, } } | { "type": "agent.warning", "data": { id: AgentId, message: string, } } | { "type": "agent.turn_completed", "data": { id: AgentId, message_id: MessageId, stop_reason: StopReason, } } | { "type": "agent.usage", "data": { id: AgentId, used: number, size: number, cost_usd: number | null, 
+/**
+ * Cumulative token counts, when the agent reports them.
+ */
+tokens?: TokenUsage, } } | { "type": "agent.error", "data": { id: AgentId, message: string, } } | { "type": "agent.session_started", "data": { id: AgentId, session_id: string, } } | { "type": "account.created", "data": { account: Account, } } | { "type": "account.removed", "data": { id: string, } } | { "type": "account.quota_updated", "data": { id: string, } } | { "type": "account.login_finished", "data": { id: string, ok: boolean, message: string | null, } } | { "type": "account.login_pending", "data": { id: string, url: string | null, } } | { "type": "run.created", "data": { run: Run, } } | { "type": "run.status_changed", "data": { id: RunId, from: RunStatus, to: RunStatus, note: string | null, } } | { "type": "run.plan_submitted", "data": { id: RunId, tasks: Array<string>, } } | { "type": "task.status_changed", "data": { run_id: RunId, id: TaskId, key: string, from: TaskStatus, to: TaskStatus, assignee: AgentId | null, } } | { "type": "task.checked", "data": { run_id: RunId, id: TaskId, key: string, passed: boolean, checks: Array<CheckResult>, } });

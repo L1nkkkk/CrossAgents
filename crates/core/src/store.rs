@@ -52,6 +52,25 @@ pub trait Store: Send + Sync {
     async fn events_since(&self, after: u64, limit: u32) -> Result<Vec<Event>, CoreError>;
     /// The highest `seq` stored, or 0.
     async fn latest_event_seq(&self) -> Result<u64, CoreError>;
+    /// The vendor session id the agent's last session reported (`agent.session_started`).
+    /// The default scans the agent's events; stores should override it.
+    async fn last_session_id(&self, agent: AgentId) -> Result<Option<String>, CoreError> {
+        let mut last = None;
+        let mut after = 0;
+        loop {
+            let page = self.agent_events(agent, after, 500).await?;
+            let Some(end) = page.last().map(|e| e.seq) else {
+                return Ok(last);
+            };
+            after = end;
+            for event in page {
+                if let EventKind::AgentSessionStarted { session_id, .. } = event.kind {
+                    last = Some(session_id);
+                }
+            }
+        }
+    }
+
     /// Events about `agent` (see [`EventKind::agent_id`]) with `seq > after`, oldest first.
     /// The default scans every event; stores should override it with an indexed lookup.
     async fn agent_events(

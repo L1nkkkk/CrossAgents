@@ -138,6 +138,7 @@ pub struct PermissionRequest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionDecision {
     Allow,
@@ -223,19 +224,73 @@ pub struct TurnOutcome {
 }
 
 /// Cumulative token counts of a session.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TokenUsage {
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub input: u64,
     /// Part of `input` served from the prompt cache.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub cached_input: u64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub output: u64,
     /// Part of `output` spent on reasoning.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub reasoning_output: u64,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub total: u64,
 }
 
+/// What a tool call did, as far as the agent tells: the command and its result, the files
+/// it changed, or an MCP call's arguments and result. Fields the agent does not report
+/// stay empty.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ToolDetail {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional, type = "number"))]
+    pub duration_ms: Option<u64>,
+    /// The command's output (the tail, if it was long).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub output: Option<String>,
+    #[serde(default)]
+    pub changes: Vec<FileChange>,
+    /// Arguments and result of an MCP or other tool call, as JSON text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub arguments: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub error: Option<String>,
+}
+
+/// One file a tool call changed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct FileChange {
+    pub path: String,
+    /// `add`, `delete`, `update` or the vendor's word.
+    pub kind: String,
+    /// Unified diff of the change; empty when unknown.
+    pub diff: String,
+}
+
 /// The account's quota as the agent last saw it.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct RateLimits {
     pub windows: Vec<RateWindow>,
     pub credits: Option<Credits>,
@@ -292,6 +347,16 @@ pub enum SessionEventKind {
         tool_call_id: String,
         title: Option<String>,
         status: Option<ToolStatus>,
+    },
+    /// More of a running tool call's output (e.g. a command's stdout).
+    ToolOutput {
+        tool_call_id: String,
+        text: String,
+    },
+    /// What a tool call did; sent when the agent reports it, usually as the call ends.
+    ToolDetail {
+        tool_call_id: String,
+        detail: ToolDetail,
     },
     /// Everything the turn changed so far, as a unified diff. Each event replaces the
     /// previous one for the same turn.

@@ -188,6 +188,7 @@ mod tests {
             used,
             size: 1000,
             cost_usd: Some(c),
+            tokens: None,
         };
         push(start(planner.id)).await;
         push(cost(planner.id, 100, 0.50)).await;
