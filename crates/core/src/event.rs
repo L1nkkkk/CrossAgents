@@ -15,6 +15,7 @@ use crate::driver::{
 use crate::human::HumanItem;
 use crate::ids::{AgentId, MessageId, RunId, TaskId};
 use crate::model::{Agent, AgentStatus, CheckResult, Landing, Run, RunStatus};
+use crate::note::NoteScope;
 use crate::state::TaskStatus;
 
 pub const EVENT_SCHEMA_VERSION: u32 = 1;
@@ -187,6 +188,15 @@ pub enum EventKind {
         what: String,
         percent: u32,
     },
+    /// A shared note was written (`text`) or deleted (`None`).
+    #[serde(rename = "note.written")]
+    NoteWritten {
+        scope: NoteScope,
+        run_id: Option<RunId>,
+        key: String,
+        author: AgentId,
+        text: Option<String>,
+    },
     /// A reminder an agent set came due.
     #[serde(rename = "reminder.fired")]
     ReminderFired {
@@ -344,6 +354,7 @@ impl EventKind {
             Self::AgentInputUpdated { .. } => "agent.input_updated",
             Self::ReminderFired { .. } => "reminder.fired",
             Self::HumanAsked { .. } => "human.asked",
+            Self::NoteWritten { .. } => "note.written",
             Self::HumanAnswered { .. } => "human.answered",
             Self::HumanDismissed { .. } => "human.dismissed",
             Self::RunBudget { .. } => "run.budget",
@@ -386,6 +397,7 @@ impl EventKind {
             | Self::RunPlanSubmitted { id, .. }
             | Self::RunBudget { id, .. }
             | Self::RunLanded { id, .. } => Some(*id),
+            Self::NoteWritten { run_id, .. } => *run_id,
             Self::HumanAsked { item } | Self::HumanAnswered { item } => item.run_id,
             Self::TaskStatusChanged { run_id, .. }
             | Self::TaskChecked { run_id, .. }
@@ -415,6 +427,7 @@ impl EventKind {
             | Self::AccountLoginPending { .. } => None,
             Self::AgentSessionStarted { id, .. } => Some(*id),
             Self::ReminderFired { owner, .. } | Self::WatchTriggered { owner, .. } => Some(*owner),
+            Self::NoteWritten { author, .. } => Some(*author),
             Self::HumanAsked { item } | Self::HumanAnswered { item } => Some(item.from),
             Self::TaskStatusChanged { assignee, .. } => *assignee,
             Self::TaskCommand { by, .. } => Some(*by),

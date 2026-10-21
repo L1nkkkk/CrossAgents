@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use crossagents_core::{
     Account, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError, EVENT_SCHEMA_VERSION,
-    Event, EventKind, HumanItem, MessageId, Reminder, Run, RunId, Store, Task, TaskId, Watch,
+    Event, EventKind, HumanItem, MessageId, Note, NoteScope, Reminder, Run, RunId, Store, Task,
+    TaskId, Watch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -365,6 +366,76 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    async fn put_note(&self, note: &Note) -> Result<(), CoreError> {
+        sqlx::query(
+            "INSERT INTO notes (scope, run_id, key, data) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(scope, run_id, key) DO UPDATE SET data = ?4",
+        )
+        .bind(scope_name(note.scope))
+        .bind(note.run_id.map(|r| r.to_string()).unwrap_or_default())
+        .bind(&note.key)
+        .bind(serde_json::to_string(note).map_err(storage)?)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    async fn get_note(
+        &self,
+        scope: NoteScope,
+        run_id: Option<RunId>,
+        key: &str,
+    ) -> Result<Option<Note>, CoreError> {
+        let data: Option<String> = sqlx::query_scalar(
+            "SELECT data FROM notes WHERE scope = ?1 AND run_id = ?2 AND key = ?3",
+        )
+        .bind(scope_name(scope))
+        .bind(run_id.map(|r| r.to_string()).unwrap_or_default())
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?;
+        data.map(|d| serde_json::from_str(&d).map_err(storage))
+            .transpose()
+    }
+
+    async fn list_notes(
+        &self,
+        scope: NoteScope,
+        run_id: Option<RunId>,
+        prefix: &str,
+    ) -> Result<Vec<Note>, CoreError> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT data FROM notes WHERE scope = ?1 AND run_id = ?2 AND substr(key, 1, length(?3)) = ?3 ORDER BY key",
+        )
+        .bind(scope_name(scope))
+        .bind(run_id.map(|r| r.to_string()).unwrap_or_default())
+        .bind(prefix)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        rows.iter()
+            .map(|d| serde_json::from_str(d).map_err(storage))
+            .collect()
+    }
+
+    async fn delete_note(
+        &self,
+        scope: NoteScope,
+        run_id: Option<RunId>,
+        key: &str,
+    ) -> Result<(), CoreError> {
+        sqlx::query("DELETE FROM notes WHERE scope = ?1 AND run_id = ?2 AND key = ?3")
+            .bind(scope_name(scope))
+            .bind(run_id.map(|r| r.to_string()).unwrap_or_default())
+            .bind(key)
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        Ok(())
+    }
+
     async fn put_human_item(&self, item: &HumanItem) -> Result<(), CoreError> {
         sqlx::query(
             "INSERT INTO human_items (id, status, created_at, data) VALUES (?1, ?2, ?3, ?4)
@@ -643,6 +714,13 @@ impl Store for SqliteStore {
             });
         }
         Ok(())
+    }
+}
+
+fn scope_name(scope: NoteScope) -> &'static str {
+    match scope {
+        NoteScope::Run => "run",
+        NoteScope::Team => "team",
     }
 }
 

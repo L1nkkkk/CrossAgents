@@ -256,6 +256,27 @@ pub struct FinishRequest {
     pub summary: Option<String>,
 }
 
+/// `POST /v1/agents/{key}/connect`: how an external agent reaches the hub.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ConnectInfo {
+    pub agent: String,
+    /// Valid until the hub restarts or the agent connects again.
+    pub token: String,
+    /// For clients configured with `mcpServers` JSON (Claude Code, Cursor, …).
+    pub json_config: String,
+    /// For Codex's `config.toml`.
+    pub toml_config: String,
+    /// The role's way of working, to give the agent as instructions.
+    pub instructions: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListNotesResponse {
+    pub notes: Vec<crossagents_core::Note>,
+}
+
 /// `POST /v1/questions/{id}/answer`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]

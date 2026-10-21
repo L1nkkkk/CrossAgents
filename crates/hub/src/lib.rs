@@ -114,6 +114,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         Arc::new(HubHost {
             runtime: runtime.clone(),
             bus: bus.clone(),
+            accounts: accounts.clone(),
         }),
         Arc::new(GitWorkspaces),
         Arc::new(ShellVerifier::default()),
@@ -160,6 +161,8 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         home: paths.home.clone(),
         started_at,
         shutdown: shutdown.clone(),
+        mcp_command: setup.mcp_command.clone(),
+        url: format!("http://{addr}"),
     });
     bus.publish(EventKind::HubStarted {
         version: VERSION.into(),

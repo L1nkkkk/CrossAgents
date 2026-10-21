@@ -17,11 +17,12 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use crossagents_api_types::{
     API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AnswerRequest, ApiError,
-    CreateAccountRequest, CreateAgentRequest, CreateRunRequest, ErrorCode, FinishRequest,
-    HealthResponse, HubInfo, LandRequest, ListAccountsResponse, ListAgentsResponse,
-    ListPluginsResponse, ListQuestionsResponse, ListRunsResponse, ListToolsResponse, LoginStarted,
-    PluginInfo, QuotaResponse, RejectRunRequest, RunDetail, SendMessageRequest,
-    SendMessageResponse, SetModelRequest, Transcript, UsageGroup, UsageResponse,
+    ConnectInfo, CreateAccountRequest, CreateAgentRequest, CreateRunRequest, ErrorCode,
+    FinishRequest, HealthResponse, HubInfo, LandRequest, ListAccountsResponse, ListAgentsResponse,
+    ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
+    ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest, RunDetail,
+    SendMessageRequest, SendMessageResponse, SetModelRequest, Transcript, UsageGroup,
+    UsageResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError,
@@ -54,6 +55,9 @@ pub struct AppState {
     pub home: PathBuf,
     pub started_at: DateTime<Utc>,
     pub shutdown: CancellationToken,
+    /// How agents reach the hub's tools: the MCP command and the API base URL.
+    pub mcp_command: Vec<String>,
+    pub url: String,
 }
 
 impl AppState {
@@ -79,6 +83,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/agents/{key}/transcript", get(transcript))
         .route("/v1/agents/{key}/profile", post(update_profile))
         .route("/v1/agents/{key}/model", post(set_model))
+        .route("/v1/agents/{key}/connect", post(connect_agent))
+        .route("/v1/notes", get(list_notes))
         .route("/v1/plugins", get(list_plugins))
         .route("/v1/usage", get(usage))
         .route("/v1/accounts", get(list_accounts).post(create_account))
@@ -255,7 +261,9 @@ async fn create_agent(
     Json(req): Json<CreateAgentRequest>,
 ) -> ApiResult<(StatusCode, Json<Agent>)> {
     validate_agent_name(&req.name)?;
-    if !state.runtime.plugins().contains(&req.plugin) {
+    if req.plugin != crossagents_core::EXTERNAL_PLUGIN
+        && !state.runtime.plugins().contains(&req.plugin)
+    {
         return Err(AppError::bad_request(format!(
             "unknown plugin {:?} (available: {})",
             req.plugin,
@@ -406,6 +414,75 @@ async fn set_model(
             .set_model(&AgentKey::parse(&key), model)
             .await?,
     ))
+}
+
+/// Lets an agent that runs outside the hub join: a fresh token (the previous one stops
+/// working) and the MCP configuration to paste into it.
+async fn connect_agent(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<ConnectInfo>> {
+    let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    if agent.plugin != crossagents_core::EXTERNAL_PLUGIN {
+        return Err(AppError::bad_request(format!(
+            "{} is run by the hub; only external agents connect themselves",
+            agent.name
+        )));
+    }
+    let token = state.tokens.issue(agent.id).await;
+    let (command, args) = state
+        .mcp_command
+        .split_first()
+        .map(|(c, a)| (c.clone(), a.to_vec()))
+        .unwrap_or_default();
+    let env = serde_json::json!({
+        crate::collab::URL_ENV: state.url,
+        crate::collab::TOKEN_ENV: token,
+    });
+    let json_config = serde_json::to_string_pretty(&serde_json::json!({
+        "mcpServers": { "crossagents": { "command": command, "args": args, "env": env } }
+    }))
+    .unwrap_or_default();
+    let toml_args = args
+        .iter()
+        .map(|a| format!("{a:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let toml_config = format!(
+        "[mcp_servers.crossagents]\ncommand = {command:?}\nargs = [{toml_args}]\nenv = {{ {} = {:?}, {} = {:?} }}\n",
+        crate::collab::URL_ENV,
+        state.url,
+        crate::collab::TOKEN_ENV,
+        token
+    );
+    Ok(Json(ConnectInfo {
+        agent: agent.name,
+        token,
+        json_config,
+        toml_config,
+        instructions: crossagents_orchestrator::protocol::guide(agent.role),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct NotesQuery {
+    #[serde(default)]
+    scope: crossagents_core::NoteScope,
+    #[serde(default)]
+    run: Option<String>,
+}
+
+async fn list_notes(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<NotesQuery>,
+) -> ApiResult<Json<ListNotesResponse>> {
+    let run_id = match (&query.scope, &query.run) {
+        (crossagents_core::NoteScope::Run, Some(key)) => Some(resolve_run(&state, key).await?),
+        _ => None,
+    };
+    Ok(Json(ListNotesResponse {
+        notes: state.store().list_notes(query.scope, run_id, "").await?,
+    }))
 }
 
 async fn stop_agent(

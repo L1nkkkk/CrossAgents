@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use crossagents_core::{
     Agent, AgentId, AgentKey, AgentStatus, CoreError, Envelope, EventBus, EventKind, McpServerSpec,
-    MessageId, MessageSource, Role,
+    MessageId, MessageSource, Role, RunId,
 };
 use crossagents_orchestrator::AgentHost;
 use tokio::sync::RwLock;
@@ -99,6 +99,7 @@ fn instructions(agent: &Agent) -> String {
 pub struct HubHost {
     pub runtime: Arc<Runtime>,
     pub bus: Arc<EventBus>,
+    pub accounts: Arc<crate::accounts::Accounts>,
 }
 
 #[async_trait]
@@ -200,6 +201,49 @@ impl AgentHost for HubHost {
 
     async fn set_model(&self, agent: AgentId, model: Option<String>) -> Result<Agent, CoreError> {
         self.runtime.set_model(&AgentKey::Id(agent), model).await
+    }
+
+    async fn usage_report(&self, run: Option<RunId>) -> Result<serde_json::Value, CoreError> {
+        use crossagents_api_types::UsageGroup;
+        let store = self.bus.store().as_ref();
+        let by_run = crate::usage::compute(store, UsageGroup::Run).await?;
+        let by_agent = crate::usage::compute(store, UsageGroup::Agent).await?;
+        let spent = match run {
+            Some(run) => {
+                serde_json::to_value(by_run.rows.iter().find(|r| r.key == run.to_string()))
+                    .unwrap_or_default()
+            }
+            None => serde_json::json!({ "total_cost_usd": by_run.total_cost_usd }),
+        };
+        let mut quota = Vec::new();
+        for account in store.list_accounts().await? {
+            if let Ok(status) = self.accounts.status(&account.id).await {
+                quota.push(serde_json::json!({
+                    "account": account.id,
+                    "plan": status.plan,
+                    "windows": status.rate_limits,
+                    "limit_reached": status.limit_reached,
+                    "credits": status.credits,
+                }));
+            }
+        }
+        Ok(serde_json::json!({
+            "run": run,
+            "spent": spent,
+            "by_agent": by_agent.rows,
+            "accounts": quota,
+            "note": "Costs are what agents report; Codex reports quota windows rather than dollars.",
+        }))
+    }
+
+    async fn take_inbox(&self, agent: AgentId) -> Result<Vec<serde_json::Value>, CoreError> {
+        Ok(self
+            .runtime
+            .take_external(agent)
+            .await
+            .into_iter()
+            .map(|(id, from, text)| serde_json::json!({ "message_id": id, "from": from, "text": text }))
+            .collect())
     }
 
     async fn remove_agent(&self, agent: AgentId) -> Result<(), CoreError> {
