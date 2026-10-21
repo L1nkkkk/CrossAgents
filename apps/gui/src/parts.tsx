@@ -91,7 +91,8 @@ export function TaskCard({ task, run, agents, siblings, open: initial = false }:
   const owner = taskOwner(task, run, agents);
   const doing = useActivity(task.assignee ?? "");
   const now = useNow(state.live);
-  const line = state.live && doing ? doing : task.title;
+  // What the worker does right now, else its own progress line, else the title.
+  const line = (state.live && doing) || task.progress || task.title;
 
   return (
     <div className={`task-card ${open ? "open" : ""}`}>
@@ -99,7 +100,7 @@ export function TaskCard({ task, run, agents, siblings, open: initial = false }:
         {owner ? <Avatar agent={owner} size={18} /> : <span className="tc-noone" />}
         <span className="tc-who">{owner ? displayName(owner) : "—"}</span>
         <code className="tc-key">#{task.key}</code>
-        <span className={`tc-title ${state.live && doing ? "doing" : ""}`}>{line}</span>
+        <span className={`tc-title ${line !== task.title ? "doing" : ""}`}>{line}</span>
         <StateWord state={state} />
         <span className="tc-time">{taskTime(task, state.live, now)}</span>
         <span className="disclosure" aria-hidden="true">
@@ -128,7 +129,7 @@ function TaskBody({ task, run, owner, agents }: { task: Task; run: Run; owner?: 
         </TcSection>
       )}
       {report.failure && (
-        <TcSection title="失败原因" tone="danger">
+        <TcSection title={task.status === "stalled" ? "做不下去的原因" : "失败原因"} tone="danger">
           <div className="pre small">{report.failure}</div>
         </TcSection>
       )}

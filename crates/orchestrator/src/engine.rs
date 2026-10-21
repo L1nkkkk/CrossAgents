@@ -1,5 +1,6 @@
-//! The fixed pipeline (docs/DESIGN.md §8): plan → approve → dispatch → verify → retry /
-//! escalate → review → merge → summarize.
+//! Runs and their tasks (docs/tasks/H1.md): the hub keeps the mechanics — plans, worktrees,
+//! dispatch once dependencies are merged, state, records — and the agents decide. A task's
+//! issuer checks, accepts, reworks or drops it with the task tools (`tasks.rs`).
 //!
 //! Every state change of a run happens under that run's lock. Long work (agent turns,
 //! acceptance commands) happens outside it; messages to agents are delivered in the
@@ -11,22 +12,22 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, AgentStatus, CheckResult, CoreError, EventBus, EventKind,
-    MessageSource, PlannedTask, Role, Run, RunConfig, RunId, RunStatus, Store, Task, TaskId,
-    TaskReport, TaskStatus,
+    Agent, AgentId, AgentKey, AgentStatus, CoreError, Envelope, EventBus, EventKind, MessageSource,
+    PlannedTask, Role, Run, RunConfig, RunId, RunStatus, Store, Task, TaskId, TaskReport,
+    TaskStatus,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
+use crate::brief;
 use crate::host::AgentHost;
 use crate::plan;
-use crate::prompts;
-use crate::verify::{Verifier, all_passed};
+use crate::verify::Verifier;
 use crate::workspace::{WorkspaceProvider, worktree_path};
 
 pub struct OrchestratorConfig {
     /// Root for run and task worktrees.
     pub worktrees: PathBuf,
-    /// Reminders before a silent turn counts as a failed attempt.
+    /// No longer used: the hub does not nudge (H1). Kept so configurations still load.
     pub max_nudges: u32,
 }
 
@@ -40,25 +41,17 @@ pub struct NewRun {
 }
 
 pub struct Orchestrator {
-    store: Arc<dyn Store>,
-    bus: Arc<EventBus>,
+    pub(crate) store: Arc<dyn Store>,
+    pub(crate) bus: Arc<EventBus>,
     pub(crate) host: Arc<dyn AgentHost>,
-    workspaces: Arc<dyn WorkspaceProvider>,
-    verifier: Arc<dyn Verifier>,
-    config: OrchestratorConfig,
+    pub(crate) workspaces: Arc<dyn WorkspaceProvider>,
+    pub(crate) verifier: Arc<dyn Verifier>,
+    pub(crate) config: OrchestratorConfig,
     locks: Mutex<HashMap<RunId, Arc<Mutex<()>>>>,
     pub(crate) messaging: Mutex<crate::messaging::MessagingState>,
 }
 
-/// Why a worker's attempt did not produce an acceptable result.
-enum Failure {
-    Checks(Vec<CheckResult>),
-    Rejected(String),
-    Silent,
-    GaveUp(String),
-}
-
-fn short(id: impl ToString) -> String {
+pub(crate) fn short(id: impl ToString) -> String {
     let s = id.to_string().replace('-', "");
     s[s.len().saturating_sub(8)..].to_owned()
 }
@@ -93,7 +86,7 @@ impl Orchestrator {
         lock.lock_owned().await
     }
 
-    fn integration_path(&self, run: &Run) -> PathBuf {
+    pub(crate) fn integration_path(&self, run: &Run) -> PathBuf {
         worktree_path(&self.config.worktrees, &short(run.id), "integration")
     }
 
@@ -101,6 +94,28 @@ impl Orchestrator {
         if let Err(err) = self.bus.publish(kind).await {
             tracing::error!(error = %err, "cannot publish event");
         }
+    }
+
+    /// Relays what `from` wrote to `to`, in the background; returns the message id.
+    pub(crate) fn relay(
+        &self,
+        to: AgentId,
+        from: AgentId,
+        text: String,
+        reply_to: Option<crossagents_core::MessageId>,
+    ) -> crossagents_core::MessageId {
+        let envelope = Envelope {
+            reply_to,
+            ..Envelope::new(MessageSource::Agent { agent_id: from }, text)
+        };
+        let id = envelope.id;
+        let host = self.host.clone();
+        tokio::spawn(async move {
+            if let Err(err) = host.send_envelope(to, envelope, false).await {
+                tracing::warn!(agent = %to, error = %err, "cannot deliver message");
+            }
+        });
+        id
     }
 
     /// Sends in the background: starting an agent can take minutes.
@@ -138,7 +153,11 @@ impl Orchestrator {
         Ok(())
     }
 
-    async fn transition(&self, task: &mut Task, to: TaskStatus) -> Result<(), CoreError> {
+    pub(crate) async fn transition(
+        &self,
+        task: &mut Task,
+        to: TaskStatus,
+    ) -> Result<(), CoreError> {
         let from = task.status;
         task.status = from.transition(to)?;
         task.updated_at = Utc::now();
@@ -207,10 +226,11 @@ impl Orchestrator {
         self.store.insert_run(&run).await?;
         self.publish(EventKind::RunCreated { run: run.clone() })
             .await;
+        // The request is the person's; the roster and ids are facts the lead needs.
         self.deliver(
             planner.id,
-            MessageSource::run(run.id),
-            prompts::planner_kickoff(&run, &team, run.config.worker),
+            MessageSource::Human,
+            brief::kickoff(&run, &team, run.config.worker),
         );
         Ok(run)
     }
@@ -251,7 +271,7 @@ impl Orchestrator {
 
     /// The run's teammates. Runs created before teams existed have just their worker and
     /// reviewer.
-    async fn team_of(&self, run: &Run) -> Result<Vec<Agent>, CoreError> {
+    pub(crate) async fn team_of(&self, run: &Run) -> Result<Vec<Agent>, CoreError> {
         let ids: Vec<AgentId> = if run.config.team.is_empty() {
             [Some(run.config.worker), run.config.reviewer]
                 .into_iter()
@@ -271,7 +291,7 @@ impl Orchestrator {
     }
 
     /// Resolves each planned task's `assignee` and `reviewer` to teammates of the right role.
-    async fn resolve_assignments(
+    pub(crate) async fn resolve_assignments(
         &self,
         run: &Run,
         tasks: &[PlannedTask],
@@ -396,17 +416,24 @@ impl Orchestrator {
                 branch: None,
                 worktree: None,
                 report: TaskReport::default(),
+                issuer: Some(run.planner),
+                progress: None,
                 created_at: now,
                 updated_at: now,
             };
             self.store.insert_task(&task).await?;
         }
         self.set_run_status(run, RunStatus::Running, None).await?;
-        self.deliver(
+        self.notice(
             run.planner,
-            MessageSource::run(run.id),
-            prompts::plan_approved(run.plan.len()),
-        );
+            &format!("run:{}", run.id),
+            &format!(
+                "The plan of run {} was approved: {} task(s) start as their dependencies allow.",
+                run.id,
+                run.plan.len()
+            ),
+        )
+        .await;
         self.schedule(run).await
     }
 
@@ -422,10 +449,16 @@ impl Orchestrator {
         run.plan.clear();
         self.set_run_status(&mut run, RunStatus::Planning, Some(reason.clone()))
             .await?;
+        // The person's words, as they wrote them.
         self.deliver(
             run.planner,
-            MessageSource::run(run.id),
-            prompts::plan_rejected(&reason),
+            MessageSource::Human,
+            format!(
+                "The plan of run {} was not approved:
+{}",
+                run.id,
+                reason.trim()
+            ),
         );
         Ok(run)
     }
@@ -488,7 +521,7 @@ impl Orchestrator {
         Ok(())
     }
 
-    async fn dispatch(&self, run: &Run, task: &mut Task) -> Result<(), CoreError> {
+    pub(crate) async fn dispatch(&self, run: &Run, task: &mut Task) -> Result<(), CoreError> {
         if task.worktree.is_none() {
             let path = worktree_path(&self.config.worktrees, &short(run.id), &task.key);
             let branch = format!("{}-{}", run.branch, task.key);
@@ -514,16 +547,14 @@ impl Orchestrator {
         task.attempts = 1;
         task.nudges = 0;
         self.transition(task, TaskStatus::Running).await?;
-        self.deliver(
-            worker.id,
-            MessageSource::task(task.run_id, task.id),
-            prompts::worker_task(task),
-        );
+        // The task as its issuer wrote it, from the issuer.
+        let issuer = task.issuer_or(run.planner);
+        self.relay(worker.id, issuer, brief::task(task), None);
         Ok(())
     }
 
     /// Clones `template`, replacing a leftover agent of the same name.
-    async fn fresh_agent(
+    pub(crate) async fn fresh_agent(
         &self,
         template: AgentId,
         name: &str,
@@ -536,7 +567,7 @@ impl Orchestrator {
         self.host.clone_agent(template, name, role, cwd).await
     }
 
-    async fn release_agents(&self, task: &mut Task) {
+    pub(crate) async fn release_agents(&self, task: &mut Task) {
         for agent in [task.assignee.take(), task.reviewer.take()]
             .into_iter()
             .flatten()
@@ -547,7 +578,7 @@ impl Orchestrator {
         }
     }
 
-    async fn cleanup_worktree(&self, run: &Run, task: &Task, delete_branch: bool) {
+    pub(crate) async fn cleanup_worktree(&self, run: &Run, task: &Task, delete_branch: bool) {
         if let Some(path) = &task.worktree {
             let branch = task.branch.as_deref().filter(|_| delete_branch);
             if let Err(err) = self.workspaces.remove(&run.repo, path, branch).await {
@@ -584,328 +615,57 @@ impl Orchestrator {
             )
         };
         self.remove_integration(run).await;
-        self.set_run_status(run, status, note).await?;
-        self.deliver(
+        self.set_run_status(run, status, note.clone()).await?;
+        self.notice(
             run.planner,
-            MessageSource::run(run.id),
-            prompts::run_finished(run, tasks),
-        );
+            &format!("run:{}", run.id),
+            &format!(
+                "Run {} ended: {merged}/{} task(s) merged into {}{}.",
+                run.id,
+                tasks.len(),
+                run.branch,
+                note.map(|n| format!(" ({n})")).unwrap_or_default()
+            ),
+        )
+        .await;
         Ok(())
     }
 
     // -----------------------------------------------------------------------------------
     // Task outcomes
 
-    async fn fail_task(
+    /// The task cannot go on (e.g. its worker could not start). Its issuer hears about it.
+    pub(crate) async fn fail_task(
         &self,
         run: &mut Run,
         task: &mut Task,
         reason: String,
     ) -> Result<(), CoreError> {
         self.release_agents(task).await;
-        // Keep the branch so a human can inspect what the worker did.
+        // Keep the branch so the issuer or a person can inspect what was done.
         self.cleanup_worktree(run, task, false).await;
-        task.report.failure = Some(reason);
+        task.report.failure = Some(reason.clone());
         self.transition(task, TaskStatus::Failed).await?;
-        self.deliver(
-            run.planner,
-            MessageSource::task(task.run_id, task.id),
-            prompts::task_failed(task),
-        );
+        self.notice(
+            task.issuer_or(run.planner),
+            &format!("task:{}", task.id),
+            &format!("Task {} failed: {reason}", brief::task_ref(task)),
+        )
+        .await;
         Box::pin(self.schedule(run)).await
     }
 
-    /// Another attempt, a stronger worker, or failure.
-    async fn handle_failure(
-        &self,
-        run: &mut Run,
-        task: &mut Task,
-        failure: Failure,
-    ) -> Result<(), CoreError> {
-        let gave_up = matches!(failure, Failure::GaveUp(_));
-        if !gave_up && task.attempts < run.config.max_attempts {
-            self.transition(task, TaskStatus::Retrying).await?;
-            task.attempts += 1;
-            task.nudges = 0;
-            let message = match &failure {
-                Failure::Checks(checks) => {
-                    prompts::checks_failed(task, checks, run.config.max_attempts)
-                }
-                Failure::Rejected(notes) => format!(
-                    "The reviewer rejected your change:\n{}\n\nAddress the review and call \
-                     `task_complete` again.\n\ntask_id: {}\nattempt: {}",
-                    notes.trim(),
-                    task.id,
-                    task.attempts
-                ),
-                Failure::Silent => prompts::nudge(task),
-                Failure::GaveUp(_) => unreachable!(),
-            };
-            self.transition(task, TaskStatus::Running).await?;
-            if let Some(worker) = task.assignee {
-                self.deliver(worker, MessageSource::task(task.run_id, task.id), message);
-            }
-            return Ok(());
-        }
-        let reason = match failure {
-            Failure::Checks(checks) => format!(
-                "acceptance still failing after {} attempt(s): {}",
-                task.attempts,
-                checks
-                    .iter()
-                    .find(|c| !c.passed)
-                    .map_or("no checks ran".to_owned(), |c| c.command.clone())
-            ),
-            Failure::Rejected(notes) => format!("review rejected: {notes}"),
-            Failure::Silent => "the worker stopped reporting".to_owned(),
-            Failure::GaveUp(reason) => format!("the worker gave up: {reason}"),
-        };
-        if run.config.escalate.is_some() && !task.escalated {
-            self.release_agents(task).await;
-            task.escalated = true;
-            task.report.failure = Some(reason);
-            self.transition(task, TaskStatus::Escalated).await?;
-            if let Err(err) = self.dispatch(run, task).await {
-                return self
-                    .fail_task(run, task, format!("cannot escalate: {err}"))
-                    .await;
-            }
-            return Ok(());
-        }
-        self.fail_task(run, task, reason).await
-    }
-
-    async fn merge_task(&self, run: &mut Run, task: &mut Task) -> Result<(), CoreError> {
-        let branch = task.branch.clone().unwrap_or_default();
-        let message = format!("crossagents: {} ({})", task.title, task.key);
-        if let Err(err) = self
-            .workspaces
-            .merge(&self.integration_path(run), &branch, &message)
-            .await
-        {
-            return self.fail_task(run, task, err.to_string()).await;
-        }
-        self.release_agents(task).await;
-        self.cleanup_worktree(run, task, true).await;
-        task.report.failure = None;
-        self.transition(task, TaskStatus::Merged).await?;
-        self.deliver(
-            run.planner,
-            MessageSource::task(task.run_id, task.id),
-            prompts::task_merged(task),
-        );
-        self.schedule(run).await
-    }
-
-    /// Commits the worker's changes and runs acceptance. Runs without the run lock.
-    async fn verify(self: Arc<Self>, run_id: RunId, task_id: TaskId) {
-        let task = match self.store.get_task(task_id).await {
-            Ok(task) => task,
-            Err(err) => return tracing::error!(error = %err, "cannot load task"),
-        };
-        let run = match self.store.get_run(run_id).await {
-            Ok(run) => run,
-            Err(err) => return tracing::error!(error = %err, "cannot load run"),
-        };
-        let dir = task.worktree.clone().unwrap_or_default();
-        let message = format!("{}: {}", task.key, task.title);
-        let committed = self.workspaces.commit_all(&dir, &message).await;
-        let checks = self.verifier.check(&dir, &task.spec.acceptance).await;
-        let diff_stat = self.workspaces.diff_stat(&dir, &run.branch).await.ok();
-
-        let _guard = self.lock(run_id).await;
-        let result = async {
-            let mut run = self.store.get_run(run_id).await?;
-            let mut task = self.store.get_task(task_id).await?;
-            if task.status != TaskStatus::Verifying {
-                return Ok(()); // cancelled meanwhile
-            }
-            if let Err(err) = committed {
-                return self
-                    .fail_task(&mut run, &mut task, format!("cannot commit: {err}"))
-                    .await;
-            }
-            let passed = all_passed(&checks);
-            task.report.checks = checks.clone();
-            task.report.diff_stat = diff_stat;
-            self.publish(EventKind::TaskChecked {
-                run_id,
-                id: task_id,
-                key: task.key.clone(),
-                passed,
-                checks: checks.clone(),
-            })
-            .await;
-            if !passed {
-                return self
-                    .handle_failure(&mut run, &mut task, Failure::Checks(checks))
-                    .await;
-            }
-            self.transition(&mut task, TaskStatus::Passed).await?;
-            match task.reviewer_template.or(run.config.reviewer) {
-                Some(reviewer) => self.start_review(&run, &mut task, reviewer).await,
-                None => self.merge_task(&mut run, &mut task).await,
-            }
-        }
-        .await;
-        if let Err(err) = result {
-            tracing::error!(task = %task_id, error = %err, "verification step failed");
-        }
-    }
-
-    async fn start_review(
-        &self,
-        run: &Run,
-        task: &mut Task,
-        template: AgentId,
-    ) -> Result<(), CoreError> {
-        let cwd = task.worktree.clone().unwrap_or_default();
-        let reviewer = self
-            .fresh_agent(template, &agent_name("r", run, task), Role::Reviewer, &cwd)
-            .await?;
-        task.reviewer = Some(reviewer.id);
-        self.transition(task, TaskStatus::Reviewing).await?;
-        self.deliver(
-            reviewer.id,
-            MessageSource::task(task.run_id, task.id),
-            prompts::review_request(task, &run.branch),
-        );
-        Ok(())
-    }
-
-    // -----------------------------------------------------------------------------------
-    // Tool entry points (callers are checked by the tools layer)
-
-    pub(crate) async fn task_of(&self, id: TaskId) -> Result<(Run, Task), CoreError> {
-        let task = self.store.get_task(id).await?;
-        let run = self.store.get_run(task.run_id).await?;
-        Ok((run, task))
-    }
-
-    pub(crate) async fn complete(
-        self: &Arc<Self>,
-        caller: &Agent,
-        id: TaskId,
-        summary: String,
-    ) -> Result<(), CoreError> {
-        let (run, _) = self.task_of(id).await?;
-        let _guard = self.lock(run.id).await;
-        let mut task = self.store.get_task(id).await?;
-        require_assignee(&task, caller)?;
-        if task.status != TaskStatus::Running {
-            return Err(CoreError::Conflict(format!(
-                "task is {:?}; only a running task can be completed",
-                task.status
-            )));
-        }
-        task.report.summary = Some(summary);
-        self.transition(&mut task, TaskStatus::Verifying).await?;
-        tokio::spawn(self.clone().verify(run.id, id));
-        Ok(())
-    }
-
-    pub(crate) async fn give_up(
-        &self,
-        caller: &Agent,
-        id: TaskId,
-        reason: String,
-    ) -> Result<(), CoreError> {
-        let (run, _) = self.task_of(id).await?;
-        let _guard = self.lock(run.id).await;
-        let mut run = self.store.get_run(run.id).await?;
-        let mut task = self.store.get_task(id).await?;
-        require_assignee(&task, caller)?;
-        if task.status != TaskStatus::Running {
-            return Err(CoreError::Conflict(format!("task is {:?}", task.status)));
-        }
-        self.handle_failure(&mut run, &mut task, Failure::GaveUp(reason))
-            .await
-    }
-
-    pub(crate) async fn ask(
-        &self,
-        caller: &Agent,
-        id: TaskId,
-        question: String,
-    ) -> Result<(), CoreError> {
-        let (run, _) = self.task_of(id).await?;
-        let _guard = self.lock(run.id).await;
-        let mut task = self.store.get_task(id).await?;
-        require_assignee(&task, caller)?;
-        task.report.question = Some(question.clone());
-        self.transition(&mut task, TaskStatus::WaitingAnswer)
-            .await?;
-        self.deliver(
-            run.planner,
-            MessageSource::task(task.run_id, task.id),
-            prompts::worker_question(&task, &question),
-        );
-        Ok(())
-    }
-
-    pub(crate) async fn answer(
-        &self,
-        caller: &Agent,
-        id: TaskId,
-        answer: String,
-    ) -> Result<(), CoreError> {
-        let (run, _) = self.task_of(id).await?;
-        if run.planner != caller.id {
-            return Err(CoreError::Conflict(
-                "only the run's planner can answer".into(),
-            ));
-        }
-        let _guard = self.lock(run.id).await;
-        let mut task = self.store.get_task(id).await?;
-        if task.status != TaskStatus::WaitingAnswer {
-            return Err(CoreError::Conflict("the task has no open question".into()));
-        }
-        task.report.question = None;
-        self.transition(&mut task, TaskStatus::Running).await?;
-        if let Some(worker) = task.assignee {
-            self.deliver(
-                worker,
-                MessageSource::task(task.run_id, task.id),
-                prompts::planner_answer(&task, &answer),
-            );
-        }
-        Ok(())
-    }
-
-    pub(crate) async fn review(
-        &self,
-        caller: &Agent,
-        id: TaskId,
-        approve: bool,
-        notes: String,
-    ) -> Result<(), CoreError> {
-        let (run, _) = self.task_of(id).await?;
-        let _guard = self.lock(run.id).await;
-        let mut run = self.store.get_run(run.id).await?;
-        let mut task = self.store.get_task(id).await?;
-        if task.reviewer != Some(caller.id) || task.status != TaskStatus::Reviewing {
-            return Err(CoreError::Conflict(
-                "you are not reviewing this task".into(),
-            ));
-        }
-        if let Some(reviewer) = task.reviewer.take() {
-            let _ = self.host.remove_agent(reviewer).await;
-        }
-        task.report.review = Some(notes.clone());
-        if approve {
-            self.transition(&mut task, TaskStatus::Passed).await?;
-            self.merge_task(&mut run, &mut task).await
-        } else {
-            // Reviewing -> Retrying is allowed; handle_failure expects to move to Retrying.
-            self.handle_failure(&mut run, &mut task, Failure::Rejected(notes))
-                .await
+    /// A line in an agent's notification digest.
+    pub(crate) async fn notice(&self, agent: AgentId, topic: &str, line: &str) {
+        if let Err(err) = self.host.notify(agent, topic, line).await {
+            tracing::warn!(%agent, error = %err, "cannot deliver a notice");
         }
     }
 
     // -----------------------------------------------------------------------------------
     // Reacting to agents
 
-    /// Follows agent events to remind silent workers and reviewers.
+    /// Follows agent events to notice assignees and reviewers that stop without reporting.
     pub fn watch(self: &Arc<Self>) {
         let this = self.clone();
         let mut events = self.bus.subscribe();
@@ -913,12 +673,12 @@ impl Orchestrator {
             loop {
                 match events.recv().await {
                     Ok(event) => match event.kind {
-                        EventKind::AgentTurnCompleted { id, .. } => this.on_idle(id, false).await,
+                        EventKind::AgentTurnCompleted { id, .. } => this.on_idle(id).await,
                         EventKind::AgentStatusChanged {
                             id,
                             to: AgentStatus::Error,
                             ..
-                        } => this.on_idle(id, true).await,
+                        } => this.on_idle(id).await,
                         _ => {}
                     },
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -931,7 +691,7 @@ impl Orchestrator {
     }
 
     /// The task an agent is working on or reviewing, if any.
-    async fn task_for_agent(&self, agent: AgentId) -> Option<(Run, Task)> {
+    pub(crate) async fn task_for_agent(&self, agent: AgentId) -> Option<(Run, Task)> {
         let runs = self.store.list_runs().await.ok()?;
         for run in runs.into_iter().filter(|r| r.status == RunStatus::Running) {
             let tasks = self.store.list_tasks(run.id).await.ok()?;
@@ -945,118 +705,105 @@ impl Orchestrator {
         None
     }
 
-    /// An agent's turn ended (or it crashed) while its task still needs a report.
-    async fn on_idle(&self, agent: AgentId, crashed: bool) {
+    /// An agent's turn ended (or it crashed) while its task still waits for its report. The
+    /// hub does not nudge: the task shows as stalled and its issuer decides.
+    async fn on_idle(&self, agent: AgentId) {
         let Some((run, task)) = self.task_for_agent(agent).await else {
             return;
         };
         let _guard = self.lock(run.id).await;
-        let (Ok(mut run), Ok(mut task)) = (
-            self.store.get_run(run.id).await,
-            self.store.get_task(task.id).await,
-        ) else {
+        let Ok(mut task) = self.store.get_task(task.id).await else {
             return;
         };
-        let reviewing = task.reviewer == Some(agent) && task.status == TaskStatus::Reviewing;
-        let working = task.assignee == Some(agent) && task.status == TaskStatus::Running;
-        if !reviewing && !working {
+        let issuer = task.issuer_or(run.planner);
+        let name = self
+            .store
+            .get_agent(&AgentKey::Id(agent))
+            .await
+            .map(|a| a.name)
+            .unwrap_or_else(|_| agent.to_string());
+        if task.reviewer == Some(agent) && task.status == TaskStatus::Reviewing {
+            self.notice(
+                issuer,
+                &format!("task:{}", task.id),
+                &format!(
+                    "{name} ended its turn without a verdict on {} (still reviewing).",
+                    brief::task_ref(&task)
+                ),
+            )
+            .await;
             return;
         }
-        if task.nudges < self.config.max_nudges {
-            task.nudges += 1;
-            task.updated_at = Utc::now();
-            if let Err(err) = self.store.update_task(&task).await {
-                return tracing::error!(error = %err, "cannot update task");
-            }
-            // A crashed agent restarts with an empty session: resend the whole brief.
-            let message = match (reviewing, crashed) {
-                (true, _) => prompts::review_request(&task, &run.branch),
-                (false, true) => prompts::worker_task(&task),
-                (false, false) => prompts::nudge(&task),
-            };
-            self.deliver(agent, MessageSource::task(task.run_id, task.id), message);
+        if task.assignee != Some(agent) || task.status != TaskStatus::Running {
             return;
         }
-        let result = if reviewing {
-            // A reviewer that never answers does not block the merge forever.
-            if let Some(reviewer) = task.reviewer.take() {
-                let _ = self.host.remove_agent(reviewer).await;
-            }
-            task.report.review = Some("the reviewer did not answer; merged without review".into());
-            match self.transition(&mut task, TaskStatus::Passed).await {
-                Ok(()) => self.merge_task(&mut run, &mut task).await,
-                Err(err) => Err(err),
-            }
-        } else {
-            self.handle_failure(&mut run, &mut task, Failure::Silent)
-                .await
-        };
-        if let Err(err) = result {
-            tracing::error!(task = %task.id, error = %err, "cannot handle a silent agent");
+        if let Err(err) = self.transition(&mut task, TaskStatus::Stalled).await {
+            return tracing::error!(error = %err, "cannot mark a task stalled");
         }
+        self.notice(
+            issuer,
+            &format!("task:{}", task.id),
+            &format!(
+                "Task {} is stalled: {name} ended a turn without reporting.",
+                brief::task_ref(&task)
+            ),
+        )
+        .await;
     }
 
-    /// After a hub restart no agent session survives: re-brief active workers and redo
-    /// interrupted verifications.
+    /// After a hub restart sessions resume where the driver can, but nothing is running:
+    /// working tasks count as stalled until their issuer looks at them.
     pub async fn resume(self: &Arc<Self>) -> Result<(), CoreError> {
         for run in self.store.list_runs().await? {
             if run.status != RunStatus::Running {
                 continue;
             }
-            for task in self.store.list_tasks(run.id).await? {
-                match task.status {
-                    TaskStatus::Running | TaskStatus::WaitingAnswer => {
-                        if let Some(worker) = task.assignee {
-                            self.deliver(
-                                worker,
-                                MessageSource::task(task.run_id, task.id),
-                                prompts::worker_task(&task),
-                            );
-                        }
-                    }
-                    TaskStatus::Verifying => {
-                        tokio::spawn(self.clone().verify(run.id, task.id));
-                    }
-                    TaskStatus::Reviewing => {
-                        if let Some(reviewer) = task.reviewer {
-                            self.deliver(
-                                reviewer,
-                                MessageSource::task(task.run_id, task.id),
-                                prompts::review_request(&task, &run.branch),
-                            );
-                        }
-                    }
-                    _ => {}
+            for mut task in self.store.list_tasks(run.id).await? {
+                if !matches!(
+                    task.status,
+                    TaskStatus::Running
+                        | TaskStatus::Verifying
+                        | TaskStatus::Retrying
+                        | TaskStatus::Escalated
+                ) {
+                    continue;
                 }
+                if task.status == TaskStatus::Running {
+                    self.transition(&mut task, TaskStatus::Stalled).await?;
+                } else {
+                    // Left over from the fixed pipeline: hand it to the issuer as done.
+                    task.status = TaskStatus::Stalled;
+                    task.updated_at = Utc::now();
+                    self.store.update_task(&task).await?;
+                }
+                self.notice(
+                    task.issuer_or(run.planner),
+                    &format!("task:{}", task.id),
+                    &format!(
+                        "The hub restarted; task {} is stalled until you decide.",
+                        brief::task_ref(&task)
+                    ),
+                )
+                .await;
             }
         }
         Ok(())
     }
 }
 
-fn require_assignee(task: &Task, caller: &Agent) -> Result<(), CoreError> {
-    if task.assignee == Some(caller.id) {
-        Ok(())
-    } else {
-        Err(CoreError::Conflict(
-            "this task is not assigned to you".into(),
-        ))
-    }
+/// `w-<run>-<task key>`, within the 32-character agent name limit.
+pub(crate) fn agent_name(prefix: &str, run: &Run, task: &Task) -> String {
+    let mut name = format!("{prefix}-{}-{}", &short(run.id)[..6], task.key);
+    name.truncate(32);
+    name.trim_end_matches('-').to_owned()
 }
 
-/// `w-<run>-<task key>`, within the 32-character agent name limit.
 fn role_word(role: Role) -> &'static str {
     match role {
         Role::Planner => "planner",
         Role::Worker => "worker",
         Role::Reviewer => "reviewer",
     }
-}
-
-fn agent_name(prefix: &str, run: &Run, task: &Task) -> String {
-    let mut name = format!("{prefix}-{}-{}", &short(run.id)[..6], task.key);
-    name.truncate(32);
-    name.trim_end_matches('-').to_owned()
 }
 
 fn first_line(text: &str, max: usize) -> String {

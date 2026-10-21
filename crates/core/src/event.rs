@@ -236,6 +236,26 @@ pub enum EventKind {
         to: TaskStatus,
         assignee: Option<AgentId>,
     },
+    /// The assignee's one-line progress (`task_progress`).
+    #[serde(rename = "task.progress")]
+    TaskProgress {
+        run_id: RunId,
+        id: TaskId,
+        key: String,
+        text: String,
+    },
+    /// A command ran in the task's worktree (`workspace_run`), on behalf of `by`.
+    #[serde(rename = "task.command")]
+    TaskCommand {
+        run_id: RunId,
+        id: TaskId,
+        key: String,
+        by: AgentId,
+        command: String,
+        exit_code: Option<i32>,
+        #[cfg_attr(feature = "ts", ts(type = "number"))]
+        duration_ms: u64,
+    },
     /// Acceptance commands ran.
     #[serde(rename = "task.checked")]
     TaskChecked {
@@ -349,6 +369,8 @@ impl EventKind {
             Self::RunPlanSubmitted { .. } => "run.plan_submitted",
             Self::TaskStatusChanged { .. } => "task.status_changed",
             Self::TaskChecked { .. } => "task.checked",
+            Self::TaskProgress { .. } => "task.progress",
+            Self::TaskCommand { .. } => "task.command",
         }
     }
 
@@ -360,9 +382,10 @@ impl EventKind {
             | Self::RunPlanSubmitted { id, .. }
             | Self::RunBudget { id, .. } => Some(*id),
             Self::HumanAsked { item } | Self::HumanAnswered { item } => item.run_id,
-            Self::TaskStatusChanged { run_id, .. } | Self::TaskChecked { run_id, .. } => {
-                Some(*run_id)
-            }
+            Self::TaskStatusChanged { run_id, .. }
+            | Self::TaskChecked { run_id, .. }
+            | Self::TaskProgress { run_id, .. }
+            | Self::TaskCommand { run_id, .. } => Some(*run_id),
             _ => None,
         }
     }
@@ -376,6 +399,7 @@ impl EventKind {
             | Self::RunStatusChanged { .. }
             | Self::RunPlanSubmitted { .. }
             | Self::TaskChecked { .. }
+            | Self::TaskProgress { .. }
             | Self::AccountCreated { .. }
             | Self::AccountRemoved { .. }
             | Self::AccountQuotaUpdated { .. }
@@ -387,6 +411,7 @@ impl EventKind {
             Self::ReminderFired { owner, .. } | Self::WatchTriggered { owner, .. } => Some(*owner),
             Self::HumanAsked { item } | Self::HumanAnswered { item } => Some(item.from),
             Self::TaskStatusChanged { assignee, .. } => *assignee,
+            Self::TaskCommand { by, .. } => Some(*by),
             Self::AgentCreated { agent } | Self::AgentUpdated { agent } => Some(agent.id),
             Self::AgentRemoved { id, .. }
             | Self::AgentStatusChanged { id, .. }

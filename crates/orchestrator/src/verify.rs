@@ -110,6 +110,27 @@ impl Verifier for ShellVerifier {
     }
 }
 
+/// One command in `dir` with its own time limit (`workspace_run`). Never fails: problems
+/// are in the result.
+pub async fn run_command(
+    dir: &Path,
+    command: &str,
+    timeout: Duration,
+    max_output: usize,
+) -> CheckResult {
+    let verifier = ShellVerifier {
+        timeout,
+        max_output,
+    };
+    let mut results = verifier.check(dir, &[command.to_owned()]).await;
+    results.pop().unwrap_or(CheckResult {
+        command: command.to_owned(),
+        exit_code: None,
+        passed: false,
+        output: "empty command".into(),
+    })
+}
+
 pub fn all_passed(results: &[CheckResult]) -> bool {
     !results.is_empty() && results.iter().all(|r| r.passed)
 }

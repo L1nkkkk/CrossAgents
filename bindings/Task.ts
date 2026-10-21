@@ -8,6 +8,11 @@ import type { TaskStatus } from "./TaskStatus";
 
 export type Task = { id: TaskId, run_id: RunId, key: string, title: string, spec: TaskSpec, depends_on: Array<string>, 
 /**
+ * Who created the task and decides on its result (docs/tasks/H1.md §2); the run's
+ * planner for tasks from a plan. `None` in tasks recorded before issuers existed.
+ */
+issuer: AgentId | null, 
+/**
  * The worker agent currently on the task.
  */
 assignee: AgentId | null, 
@@ -34,4 +39,8 @@ escalated: boolean,
 /**
  * Reminders sent because the worker ended a turn without reporting.
  */
-nudges: number, branch: string | null, worktree: string | null, report: TaskReport, created_at: string, updated_at: string, };
+nudges: number, branch: string | null, worktree: string | null, report: TaskReport, 
+/**
+ * The assignee's latest one-line progress (`task_progress`).
+ */
+progress: string | null, created_at: string, updated_at: string, };

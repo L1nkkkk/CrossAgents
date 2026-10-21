@@ -313,6 +313,9 @@ pub struct TaskReport {
     /// Open question from the worker.
     #[serde(default)]
     pub question: Option<String>,
+    /// The message that carried the open question to the issuer; a reply to it answers.
+    #[serde(default)]
+    pub question_message: Option<crate::ids::MessageId>,
     /// The reviewer's verdict notes.
     #[serde(default)]
     pub review: Option<String>,
@@ -328,6 +331,10 @@ pub struct Task {
     pub spec: TaskSpec,
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// Who created the task and decides on its result (docs/tasks/H1.md §2); the run's
+    /// planner for tasks from a plan. `None` in tasks recorded before issuers existed.
+    #[serde(default)]
+    pub issuer: Option<AgentId>,
     /// The worker agent currently on the task.
     #[serde(default)]
     pub assignee: Option<AgentId>,
@@ -355,8 +362,18 @@ pub struct Task {
     pub worktree: Option<PathBuf>,
     #[serde(default)]
     pub report: TaskReport,
+    /// The assignee's latest one-line progress (`task_progress`).
+    #[serde(default)]
+    pub progress: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl Task {
+    /// The agent that decides on the task: its issuer, else (older tasks) the run's planner.
+    pub fn issuer_or(&self, planner: AgentId) -> AgentId {
+        self.issuer.unwrap_or(planner)
+    }
 }
 
 #[cfg(test)]

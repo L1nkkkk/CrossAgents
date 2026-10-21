@@ -15,14 +15,17 @@ pub enum TaskStatus {
     Retrying,
     Escalated,
     Reviewing,
+    /// Reported done; waits for its issuer to check it.
     Passed,
     Merged,
     Failed,
     Cancelled,
+    /// The assignee ended a turn without reporting, or gave up; its issuer decides.
+    Stalled,
 }
 
 impl TaskStatus {
-    pub const ALL: [TaskStatus; 11] = [
+    pub const ALL: [TaskStatus; 12] = [
         Self::Pending,
         Self::Running,
         Self::WaitingAnswer,
@@ -34,6 +37,7 @@ impl TaskStatus {
         Self::Merged,
         Self::Failed,
         Self::Cancelled,
+        Self::Stalled,
     ];
 
     pub fn is_terminal(self) -> bool {
@@ -45,12 +49,20 @@ impl TaskStatus {
         if self.is_terminal() {
             return false;
         }
-        if matches!(next, Failed | Cancelled) {
+        // Failing, cancelling and putting back in the queue work from anywhere.
+        if matches!(next, Failed | Cancelled | Pending) {
             return true;
         }
         matches!(
             (self, next),
-            (Pending, Running)
+            // The issuer-driven flow (docs/tasks/H1.md §5.7–5.10).
+            (Running, Passed | Stalled)
+                | (WaitingAnswer, Stalled | Passed)
+                | (Stalled, Running | Passed | WaitingAnswer)
+                | (Passed, Running)
+                | (Reviewing, Running)
+                // Earlier pipeline states, still found in older runs.
+                | (Pending, Running)
                 | (Running, WaitingAnswer | Verifying | Retrying | Escalated)
                 | (WaitingAnswer, Running)
                 | (Verifying, Passed | Retrying | Escalated)
@@ -79,6 +91,15 @@ mod tests {
     use super::TaskStatus::{self, *};
 
     const ALLOWED: &[(TaskStatus, TaskStatus)] = &[
+        (Running, Passed),
+        (Running, Stalled),
+        (WaitingAnswer, Stalled),
+        (WaitingAnswer, Passed),
+        (Stalled, Running),
+        (Stalled, Passed),
+        (Stalled, WaitingAnswer),
+        (Passed, Running),
+        (Reviewing, Running),
         (Pending, Running),
         (Running, WaitingAnswer),
         (Running, Verifying),
@@ -102,7 +123,8 @@ mod tests {
         for from in TaskStatus::ALL {
             for to in TaskStatus::ALL {
                 let expected = !from.is_terminal()
-                    && (matches!(to, Failed | Cancelled) || ALLOWED.contains(&(from, to)));
+                    && (matches!(to, Failed | Cancelled | Pending)
+                        || ALLOWED.contains(&(from, to)));
                 assert_eq!(from.can_transition_to(to), expected, "{from:?} -> {to:?}");
             }
         }
@@ -112,6 +134,7 @@ mod tests {
     fn rejects_shortcuts() {
         assert!(!Pending.can_transition_to(Passed));
         assert!(!Running.can_transition_to(Merged));
+        assert!(!Stalled.can_transition_to(Merged));
         assert!(!Verifying.can_transition_to(Merged));
         assert!(Pending.transition(Merged).is_err());
     }
