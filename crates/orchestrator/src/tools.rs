@@ -1,26 +1,30 @@
-//! Collaboration tools (docs/DESIGN.md §9): definitions by role and dispatch.
+//! Collaboration tools (docs/DESIGN.md §9, docs/tasks/H1.md §5): definitions by permission
+//! group and dispatch.
 
 use std::sync::Arc;
 
-use crossagents_core::{
-    Agent, AgentKey, CoreError, MessageSource, PlannedTask, Role, RunStatus, Task, TaskId, ToolInfo,
-};
+use crossagents_core::{Agent, CoreError, PlannedTask, RunStatus, Task, TaskId, ToolInfo};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::engine::Orchestrator;
+use crate::messaging::{Group, groups_of};
 
-const ALL: &[Role] = &[Role::Planner, Role::Worker, Role::Reviewer];
-const PLANNER: &[Role] = &[Role::Planner];
-const WORKER: &[Role] = &[Role::Worker];
-const REVIEWER: &[Role] = &[Role::Reviewer];
+const ALL: &[Group] = &[Group::Everyone];
+const PLANNER: &[Group] = &[Group::Lead];
+const WORKER: &[Group] = &[Group::Assignee];
+const REVIEWER: &[Group] = &[Group::Reviewer];
 
 struct ToolDef {
     name: &'static str,
     description: &'static str,
-    roles: &'static [Role],
+    groups: &'static [Group],
     schema: fn() -> Value,
+}
+
+fn object(properties: Value, required: &[&str]) -> Value {
+    json!({ "type": "object", "properties": properties, "required": required })
 }
 
 fn task_id_schema(extra: Value) -> Value {
@@ -56,27 +60,112 @@ fn spec_schema() -> Value {
 
 const TOOLS: &[ToolDef] = &[
     ToolDef {
+        name: "whoami",
+        description: "Who you are here: role, permission groups, your run, the tasks you work on or issued, and the tools you can use.",
+        groups: ALL,
+        schema: || object(json!({}), &[]),
+    },
+    ToolDef {
         name: "agent_list",
-        description: "List the agents in this CrossAgents hub with their role and status.",
-        roles: ALL,
-        schema: || json!({ "type": "object", "properties": {} }),
+        description: "Your teammates: name, title, specialty, role, status, model and current tasks.",
+        groups: ALL,
+        schema: || object(json!({}), &[]),
+    },
+    ToolDef {
+        name: "agent_get",
+        description: "One teammate in detail: full persona, model, working directory, status and current tasks.",
+        groups: ALL,
+        schema: || object(json!({ "name": { "type": "string" } }), &["name"]),
     },
     ToolDef {
         name: "agent_send",
-        description: "Send a message to another agent by name. It arrives as a new turn, or after the agent's current turn.",
-        roles: ALL,
+        description: "Send a message. `to` is a name, a list of names, or \"@team\" (everyone in your run). It arrives as a new turn, or after the recipient's current turn (`now: true` interrupts it instead). Use `reply_to` with a message id to answer a message; `task` names the task it is about. Returns the message ids. Retrying the same call is safe: identical messages within a minute, or the same idempotency_key, are sent once.",
+        groups: ALL,
         schema: || {
-            json!({
-                "type": "object",
-                "properties": { "to": { "type": "string" }, "text": { "type": "string" } },
-                "required": ["to", "text"]
-            })
+            object(
+                json!({
+                    "to": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }] },
+                    "text": { "type": "string" },
+                    "reply_to": { "type": "string", "description": "Id of the message this answers." },
+                    "task": { "type": "string", "description": "Task key or id this is about." },
+                    "now": { "type": "boolean" },
+                    "idempotency_key": { "type": "string" }
+                }),
+                &["to", "text"],
+            )
         },
+    },
+    ToolDef {
+        name: "message_withdraw",
+        description: "Take back a message you sent that the recipient has not started on yet.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({ "message_id": { "type": "string" } }),
+                &["message_id"],
+            )
+        },
+    },
+    ToolDef {
+        name: "remind_set",
+        description: "Wake yourself later with a note: after_minutes, or at (RFC 3339). With task and only_if_open, it fires only if that task has not ended by then. The reminder arrives in your notices. At most 20 at a time.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({
+                    "after_minutes": { "type": "number" },
+                    "at": { "type": "string" },
+                    "note": { "type": "string" },
+                    "task": { "type": "string" },
+                    "only_if_open": { "type": "boolean" }
+                }),
+                &["note"],
+            )
+        },
+    },
+    ToolDef {
+        name: "remind_list",
+        description: "Your pending reminders.",
+        groups: ALL,
+        schema: || object(json!({}), &[]),
+    },
+    ToolDef {
+        name: "remind_cancel",
+        description: "Cancel one of your reminders by id.",
+        groups: ALL,
+        schema: || object(json!({ "id": { "type": "string" } }), &["id"]),
+    },
+    ToolDef {
+        name: "watch",
+        description: "Hear about a task (by key or id) or a teammate (by name) when something happens: on = done, failed, asked, stalled, idle or any (default any). News arrives in your notices, merged while you are busy. At most 20 at a time.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({
+                    "task": { "type": "string" },
+                    "agent": { "type": "string" },
+                    "on": { "type": "array", "items": { "type": "string", "enum": ["done", "failed", "asked", "stalled", "idle", "any"] } }
+                }),
+                &[],
+            )
+        },
+    },
+    ToolDef {
+        name: "watch_list",
+        description: "What you are watching.",
+        groups: ALL,
+        schema: || object(json!({}), &[]),
+    },
+    ToolDef {
+        name: "watch_cancel",
+        description: "Stop a watch by id.",
+        groups: ALL,
+        schema: || object(json!({ "id": { "type": "string" } }), &["id"]),
     },
     ToolDef {
         name: "plan_submit",
         description: "Submit the plan for your current run: the full list of tasks for workers. The human approves it before work starts.",
-        roles: PLANNER,
+        groups: PLANNER,
         schema: || {
             json!({
                 "type": "object",
@@ -104,31 +193,31 @@ const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "task_list",
         description: "List the tasks of your current run with their status.",
-        roles: PLANNER,
+        groups: PLANNER,
         schema: || json!({ "type": "object", "properties": {} }),
     },
     ToolDef {
         name: "task_status",
         description: "Status, attempts and assignee of one task.",
-        roles: PLANNER,
+        groups: PLANNER,
         schema: || task_id_schema(json!({})),
     },
     ToolDef {
         name: "task_read",
         description: "Full report of a task: spec, worker summary, acceptance output, diff stat, failure reason.",
-        roles: PLANNER,
+        groups: PLANNER,
         schema: || task_id_schema(json!({})),
     },
     ToolDef {
         name: "task_answer",
         description: "Answer a worker's question about a task.",
-        roles: PLANNER,
+        groups: PLANNER,
         schema: || task_id_schema(json!({ "answer": { "type": "string" } })),
     },
     ToolDef {
         name: "task_complete",
         description: "Report that your task is done. CrossAgents then commits your changes and runs the acceptance commands; you get a message if they fail.",
-        roles: WORKER,
+        groups: WORKER,
         schema: || {
             task_id_schema(
                 json!({ "summary": { "type": "string", "description": "What you changed." } }),
@@ -138,19 +227,19 @@ const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "task_fail",
         description: "Give up on your task because it is impossible or the spec is wrong.",
-        roles: WORKER,
+        groups: WORKER,
         schema: || task_id_schema(json!({ "reason": { "type": "string" } })),
     },
     ToolDef {
         name: "task_ask",
         description: "Ask the planner a question about your task; the answer arrives as a message. End your turn after asking.",
-        roles: WORKER,
+        groups: WORKER,
         schema: || task_id_schema(json!({ "question": { "type": "string" } })),
     },
     ToolDef {
         name: "review_submit",
         description: "Approve or reject the change you are reviewing.",
-        roles: REVIEWER,
+        groups: REVIEWER,
         schema: || {
             task_id_schema(json!({
                 "approve": { "type": "boolean" },
@@ -160,7 +249,7 @@ const TOOLS: &[ToolDef] = &[
     },
 ];
 
-fn args<T: DeserializeOwned>(value: Value) -> Result<T, CoreError> {
+pub(crate) fn args<T: DeserializeOwned>(value: Value) -> Result<T, CoreError> {
     serde_json::from_value(if value.is_null() { json!({}) } else { value })
         .map_err(|e| CoreError::Conflict(format!("invalid arguments: {e}")))
 }
@@ -190,10 +279,12 @@ fn task_json(task: &Task) -> Value {
 }
 
 impl Orchestrator {
-    pub fn tools_for(&self, role: Role) -> Vec<ToolInfo> {
+    /// The tools `agent` may call, by its permission groups.
+    pub fn tools_for(&self, agent: &Agent) -> Vec<ToolInfo> {
+        let groups = groups_of(agent);
         TOOLS
             .iter()
-            .filter(|t| t.roles.contains(&role))
+            .filter(|t| t.groups.iter().any(|g| groups.contains(g)))
             .map(|t| ToolInfo {
                 name: t.name.to_owned(),
                 description: t.description.to_owned(),
@@ -215,40 +306,39 @@ impl Orchestrator {
                 kind: "tool",
                 id: name.to_owned(),
             })?;
-        if !tool.roles.contains(&caller.role) {
+        let groups = groups_of(caller);
+        if !tool.groups.iter().any(|g| groups.contains(g)) {
             return Err(CoreError::Conflict(format!(
-                "{name} is not available to the {:?} role",
-                caller.role
+                "{name} is not available to you (your groups: {})",
+                groups
+                    .iter()
+                    .map(|g| g.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )));
         }
         match name {
-            "agent_list" => {
-                let agents: Vec<Value> = self
-                    .store()
-                    .list_agents()
-                    .await?
-                    .into_iter()
-                    .map(|a| json!({ "name": a.name, "role": a.role, "status": a.status, "plugin": a.plugin, "model": a.model }))
-                    .collect();
-                Ok(json!({ "agents": agents }))
+            "whoami" => {
+                let tools = self.tools_for(caller).into_iter().map(|t| t.name).collect();
+                self.whoami(caller, tools).await
             }
-            "agent_send" => {
+            "agent_list" => self.agent_list().await,
+            "agent_get" => {
                 #[derive(Deserialize)]
                 struct A {
-                    to: String,
-                    text: String,
+                    name: String,
                 }
                 let a: A = args(input)?;
-                let target = self.store().get_agent(&AgentKey::Name(a.to)).await?;
-                self.deliver(
-                    target.id,
-                    MessageSource::Agent {
-                        agent_id: caller.id,
-                    },
-                    format!("Message from {}:\n{}", caller.name, a.text),
-                );
-                Ok(json!({ "sent": true }))
+                self.agent_get(&a.name).await
             }
+            "agent_send" => self.agent_send(caller, input).await,
+            "message_withdraw" => self.message_withdraw(caller, input).await,
+            "remind_set" => self.remind_set(caller, input).await,
+            "remind_list" => self.remind_list(caller).await,
+            "remind_cancel" => self.remind_cancel(caller, input).await,
+            "watch" => self.watch_add(caller, input).await,
+            "watch_list" => self.watch_list(caller).await,
+            "watch_cancel" => self.watch_cancel(caller, input).await,
             "plan_submit" => {
                 #[derive(Deserialize)]
                 struct A {
@@ -366,21 +456,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tools_are_filtered_by_role() {
-        let names = |role: Role| -> Vec<&str> {
+    fn tools_are_filtered_by_group() {
+        let names = |group: Group| -> Vec<&str> {
             TOOLS
                 .iter()
-                .filter(|t| t.roles.contains(&role))
+                .filter(|t| t.groups.contains(&Group::Everyone) || t.groups.contains(&group))
                 .map(|t| t.name)
                 .collect()
         };
-        assert!(names(Role::Planner).contains(&"plan_submit"));
-        assert!(!names(Role::Worker).contains(&"plan_submit"));
-        assert!(names(Role::Worker).contains(&"task_complete"));
-        assert_eq!(
-            names(Role::Reviewer),
-            ["agent_list", "agent_send", "review_submit"]
-        );
+        assert!(names(Group::Lead).contains(&"plan_submit"));
+        assert!(!names(Group::Assignee).contains(&"plan_submit"));
+        assert!(names(Group::Assignee).contains(&"task_complete"));
+        let reviewer = names(Group::Reviewer);
+        assert!(reviewer.contains(&"review_submit") && reviewer.contains(&"whoami"));
+        assert!(!reviewer.contains(&"task_complete"));
         for tool in TOOLS {
             let schema = (tool.schema)();
             assert_eq!(schema["type"], "object", "{}", tool.name);

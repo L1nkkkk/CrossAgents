@@ -236,6 +236,14 @@ impl Watcher {
         }
     }
 
+    /// Like [`Self::until`], but an event already seen counts too.
+    pub async fn find(&mut self, what: &str, pred: impl Fn(&Event) -> bool) -> Event {
+        if let Some(event) = self.seen.iter().find(|e| pred(e)) {
+            return event.clone();
+        }
+        self.until(what, pred).await
+    }
+
     /// Concatenated `agent.output` text seen so far.
     pub fn output(&self) -> String {
         self.seen

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use crossagents_core::{
     Account, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError, EVENT_SCHEMA_VERSION,
-    Event, EventKind, Run, RunId, Store, Task, TaskId,
+    Event, EventKind, MessageId, Reminder, Run, RunId, Store, Task, TaskId, Watch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -284,6 +284,101 @@ impl Store for SqliteStore {
             .iter()
             .map(event_from_row)
             .collect()
+    }
+
+    async fn insert_reminder(&self, reminder: &Reminder) -> Result<(), CoreError> {
+        sqlx::query("INSERT INTO reminders (id, owner, due_at, data) VALUES (?, ?, ?, ?)")
+            .bind(&reminder.id)
+            .bind(reminder.owner.to_string())
+            .bind(reminder.due_at.to_rfc3339())
+            .bind(serde_json::to_string(reminder).map_err(storage)?)
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        Ok(())
+    }
+
+    async fn list_reminders(&self, owner: Option<AgentId>) -> Result<Vec<Reminder>, CoreError> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT data FROM reminders WHERE ?1 IS NULL OR owner = ?1 ORDER BY due_at",
+        )
+        .bind(owner.map(|o| o.to_string()))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        rows.iter()
+            .map(|d| serde_json::from_str(d).map_err(storage))
+            .collect()
+    }
+
+    async fn delete_reminder(&self, id: &str) -> Result<(), CoreError> {
+        let result = sqlx::query("DELETE FROM reminders WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        if result.rows_affected() == 0 {
+            return Err(CoreError::NotFound {
+                kind: "reminder",
+                id: id.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn insert_watch(&self, watch: &Watch) -> Result<(), CoreError> {
+        sqlx::query("INSERT INTO watches (id, owner, data) VALUES (?, ?, ?)")
+            .bind(&watch.id)
+            .bind(watch.owner.to_string())
+            .bind(serde_json::to_string(watch).map_err(storage)?)
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        Ok(())
+    }
+
+    async fn list_watches(&self, owner: Option<AgentId>) -> Result<Vec<Watch>, CoreError> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT data FROM watches WHERE ?1 IS NULL OR owner = ?1 ORDER BY id",
+        )
+        .bind(owner.map(|o| o.to_string()))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        rows.iter()
+            .map(|d| serde_json::from_str(d).map_err(storage))
+            .collect()
+    }
+
+    async fn delete_watch(&self, id: &str) -> Result<(), CoreError> {
+        let result = sqlx::query("DELETE FROM watches WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        if result.rows_affected() == 0 {
+            return Err(CoreError::NotFound {
+                kind: "watch",
+                id: id.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn find_message(
+        &self,
+        id: MessageId,
+    ) -> Result<Option<(Option<MessageId>, String)>, CoreError> {
+        let row: Option<(Option<String>, String)> = sqlx::query_as(
+            "SELECT json_extract(data, '$.thread'), json_extract(data, '$.text') FROM events
+             WHERE type = 'agent.input' AND json_extract(data, '$.message_id') = ?1
+             ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(row.map(|(thread, text)| (thread.and_then(|t| t.parse().ok()), text)))
     }
 
     async fn last_session_id(&self, agent: AgentId) -> Result<Option<String>, CoreError> {

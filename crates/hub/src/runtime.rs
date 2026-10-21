@@ -1,14 +1,14 @@
 //! Live agent sessions: start, deliver messages one turn at a time, cancel, stop, and turn
 //! what happens inside a session into events.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, AgentStatus, CoreError, DriverSession, EventBus, EventKind,
+    Agent, AgentId, AgentKey, AgentStatus, CoreError, DriverSession, Envelope, EventBus, EventKind,
     McpServerSpec, MessageId, MessageSource, OutputStream, PermissionPolicy, SessionEvent,
     SessionEventKind, SessionSpec, StopReason, Store,
 };
@@ -69,6 +69,18 @@ impl Inbox {
         self.notify.notify_one();
     }
 
+    /// Replaces a waiting message's text; `false` if it is not waiting any more.
+    fn update(&self, id: MessageId, text: &str) -> bool {
+        let mut waiting = self.waiting.lock().unwrap();
+        match waiting.iter_mut().find(|(m, _)| *m == id) {
+            Some((_, old)) => {
+                text.clone_into(old);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Takes a waiting message out; `false` if it is not waiting (started or unknown).
     fn withdraw(&self, id: MessageId) -> bool {
         let mut waiting = self.waiting.lock().unwrap();
@@ -121,6 +133,9 @@ pub struct Runtime {
     live: LiveMap,
     /// Serializes start/stop per agent without blocking other agents.
     locks: Mutex<HashMap<AgentId, Arc<Mutex<()>>>>,
+    /// Each agent's notification digest still waiting for its turn: the message and its
+    /// lines by topic (a newer line on a topic replaces the older one).
+    digests: Mutex<HashMap<AgentId, Digest>>,
     generation: AtomicU64,
 }
 
@@ -139,6 +154,7 @@ impl Runtime {
             setup: None,
             live: LiveMap::default(),
             locks: Mutex::default(),
+            digests: Mutex::default(),
             generation: AtomicU64::new(0),
         }
     }
@@ -294,7 +310,68 @@ impl Runtime {
         text: String,
         from: MessageSource,
     ) -> Result<(MessageId, bool), CoreError> {
-        self.deliver(key, text, from, false).await
+        self.deliver(key, Envelope::new(from, text), false).await
+    }
+
+    /// Delivers a prepared message (its id fixed by the sender, possibly a reply).
+    pub async fn send_envelope(
+        &self,
+        key: &AgentKey,
+        envelope: Envelope,
+    ) -> Result<(MessageId, bool), CoreError> {
+        self.deliver(key, envelope, false).await
+    }
+
+    /// Like [`Self::send_envelope`], ahead of everything waiting, interrupting the running
+    /// turn.
+    pub async fn send_now_envelope(
+        &self,
+        key: &AgentKey,
+        envelope: Envelope,
+    ) -> Result<(MessageId, bool), CoreError> {
+        self.deliver(key, envelope, true).await
+    }
+
+    /// Adds a line to the agent's notification digest: one waiting message that gathers
+    /// news while the agent is busy, so notices never pile up as separate turns. A line on
+    /// a `topic` already in the digest replaces it. Starts the agent if needed.
+    pub async fn notify(&self, key: &AgentKey, topic: &str, line: &str) -> Result<(), CoreError> {
+        let agent = self.start(key).await?;
+        let live = self.live.lock().await.get(&agent.id).cloned();
+        let mut digests = self.digests.lock().await;
+        if let (Some(live), Some(digest)) = (&live, digests.get_mut(&agent.id)) {
+            digest.lines.insert(topic.to_owned(), line.to_owned());
+            let text = digest.text();
+            if live.inbox.update(digest.message, &text) {
+                publish(
+                    &self.bus,
+                    EventKind::AgentInputUpdated {
+                        id: agent.id,
+                        message_id: digest.message,
+                        text,
+                    },
+                )
+                .await;
+                return Ok(());
+            }
+        }
+        // No digest waiting (none yet, or the last one already started): begin a new one.
+        let mut digest = Digest {
+            message: MessageId::new(),
+            lines: BTreeMap::new(),
+        };
+        digest.lines.insert(topic.to_owned(), line.to_owned());
+        let envelope = Envelope {
+            id: digest.message,
+            from: MessageSource::Notice,
+            text: digest.text(),
+            reply_to: None,
+        };
+        digests.insert(agent.id, digest);
+        drop(digests);
+        self.deliver(&AgentKey::Id(agent.id), envelope, false)
+            .await
+            .map(|_| ())
     }
 
     /// Delivers a message ahead of everything waiting and interrupts the running turn, so it
@@ -305,16 +382,29 @@ impl Runtime {
         text: String,
         from: MessageSource,
     ) -> Result<(MessageId, bool), CoreError> {
-        self.deliver(key, text, from, true).await
+        self.deliver(key, Envelope::new(from, text), true).await
     }
 
     async fn deliver(
         &self,
         key: &AgentKey,
-        text: String,
-        from: MessageSource,
+        envelope: Envelope,
         first: bool,
     ) -> Result<(MessageId, bool), CoreError> {
+        let Envelope {
+            id: message_id,
+            from,
+            text,
+            reply_to,
+        } = envelope;
+        // A reply joins the thread of the message it answers.
+        let (thread, reply_excerpt) = match reply_to {
+            Some(parent) => match self.store().find_message(parent).await? {
+                Some((thread, text)) => (thread.or(Some(parent)), Some(excerpt(&text))),
+                None => (Some(parent), None),
+            },
+            None => (None, None),
+        };
         let agent = self.start(key).await?;
         let live = self
             .live
@@ -324,7 +414,6 @@ impl Runtime {
             .cloned()
             .filter(|l| !l.inbox.is_closed())
             .ok_or_else(|| CoreError::Agent(format!("agent {} stopped", agent.name)))?;
-        let message_id = MessageId::new();
         let queued = !live.inbox.is_idle();
         // Published before the message can start a turn, so clients see the input first.
         publish(
@@ -335,6 +424,9 @@ impl Runtime {
                 text: text.clone(),
                 queued,
                 from: Some(from),
+                reply_to,
+                thread,
+                reply_excerpt,
             },
         )
         .await;
@@ -681,6 +773,40 @@ async fn handle_session_event(
     };
     publish(bus, kind).await;
     false
+}
+
+/// A notification digest waiting for its turn.
+struct Digest {
+    message: MessageId,
+    lines: BTreeMap<String, String>,
+}
+
+impl Digest {
+    fn text(&self) -> String {
+        let mut text = String::from("CrossAgents notices (things you asked to hear about):\n");
+        for line in self.lines.values() {
+            text.push_str("- ");
+            text.push_str(line);
+            text.push('\n');
+        }
+        text
+    }
+}
+
+/// The first line of what was said (skipping the `Message from …:` header `agent_send`
+/// adds), at most 80 characters.
+fn excerpt(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !(l.starts_with("Message from ") && l.ends_with(':')))
+        .unwrap_or_default()
+        .trim();
+    let mut out: String = line.chars().take(80).collect();
+    if out.len() < line.len() {
+        out.push('…');
+    }
+    out
 }
 
 /// Live output of one tool call kept in the event log; the rest is dropped (the call's

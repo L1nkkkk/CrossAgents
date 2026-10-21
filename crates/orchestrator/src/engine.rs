@@ -42,11 +42,12 @@ pub struct NewRun {
 pub struct Orchestrator {
     store: Arc<dyn Store>,
     bus: Arc<EventBus>,
-    host: Arc<dyn AgentHost>,
+    pub(crate) host: Arc<dyn AgentHost>,
     workspaces: Arc<dyn WorkspaceProvider>,
     verifier: Arc<dyn Verifier>,
     config: OrchestratorConfig,
     locks: Mutex<HashMap<RunId, Arc<Mutex<()>>>>,
+    pub(crate) messaging: Mutex<crate::messaging::MessagingState>,
 }
 
 /// Why a worker's attempt did not produce an acceptable result.
@@ -79,6 +80,7 @@ impl Orchestrator {
             verifier,
             config,
             locks: Mutex::default(),
+            messaging: Mutex::default(),
         })
     }
 

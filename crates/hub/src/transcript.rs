@@ -21,11 +21,17 @@ impl Fold {
                 message_id,
                 text,
                 from,
+                reply_to,
+                thread,
+                reply_excerpt,
                 ..
             } => self.turns.push(TranscriptTurn {
                 message_id: *message_id,
                 input: text.clone(),
                 from: *from,
+                reply_to: *reply_to,
+                thread: *thread,
+                reply_excerpt: reply_excerpt.clone(),
                 sent_at: event.ts,
                 started_at: None,
                 completed_at: None,
@@ -33,6 +39,15 @@ impl Fold {
                 items: Vec::new(),
                 diff: None,
             }),
+            EventKind::AgentInputUpdated {
+                message_id, text, ..
+            } => {
+                if let Some(turn) = self.turn_mut(*message_id)
+                    && turn.started_at.is_none()
+                {
+                    turn.input.clone_from(text);
+                }
+            }
             EventKind::AgentInputWithdrawn { message_id, .. } => {
                 self.turns
                     .retain(|t| t.message_id != *message_id || t.started_at.is_some());
@@ -237,6 +252,9 @@ mod tests {
                 text: "hi".into(),
                 queued: false,
                 from: Some(MessageSource::Human),
+                reply_to: None,
+                thread: None,
+                reply_excerpt: None,
             },
             EventKind::AgentTurnStarted { id, message_id: m1 },
             out("thinking", OutputStream::Thought),
@@ -256,6 +274,9 @@ mod tests {
                 text: "next".into(),
                 queued: true,
                 from: None,
+                reply_to: None,
+                thread: None,
+                reply_excerpt: None,
             },
             // One taken back before it started.
             EventKind::AgentInput {
@@ -264,6 +285,9 @@ mod tests {
                 text: "never mind".into(),
                 queued: true,
                 from: Some(MessageSource::Human),
+                reply_to: None,
+                thread: None,
+                reply_excerpt: None,
             },
             EventKind::AgentInputWithdrawn { id, message_id: m3 },
             EventKind::AgentToolCallUpdated {

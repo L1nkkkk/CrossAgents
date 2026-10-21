@@ -63,6 +63,26 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "ts", ts(optional))]
         from: Option<MessageSource>,
+        /// The message this one answers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        reply_to: Option<MessageId>,
+        /// The first message of the conversation this one belongs to.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        thread: Option<MessageId>,
+        /// The start of the message replied to, for showing "回复「…」".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        reply_excerpt: Option<String>,
+    },
+    /// A waiting message got new text (the hub's notification digest gathers news while
+    /// the agent is busy).
+    #[serde(rename = "agent.input_updated")]
+    AgentInputUpdated {
+        id: AgentId,
+        message_id: MessageId,
+        text: String,
     },
     /// A queued message was taken back before its turn started.
     #[serde(rename = "agent.input_withdrawn")]
@@ -146,6 +166,20 @@ pub enum EventKind {
     /// The agent's vendor session id, for joining with the vendor's usage logs.
     #[serde(rename = "agent.session_started")]
     AgentSessionStarted { id: AgentId, session_id: String },
+    /// A reminder an agent set came due.
+    #[serde(rename = "reminder.fired")]
+    ReminderFired {
+        owner: AgentId,
+        reminder_id: String,
+        note: String,
+    },
+    /// Something an agent watches happened.
+    #[serde(rename = "watch.triggered")]
+    WatchTriggered {
+        owner: AgentId,
+        watch_id: String,
+        line: String,
+    },
     #[serde(rename = "account.created")]
     AccountCreated { account: Account },
     #[serde(rename = "account.removed")]
@@ -195,6 +229,28 @@ pub enum EventKind {
     },
 }
 
+/// A message on its way to an agent. The id is fixed before delivery, so a sender can
+/// refer to the message (and others reply to it) before the agent has even started.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Envelope {
+    pub id: MessageId,
+    pub from: MessageSource,
+    pub text: String,
+    /// The message this one answers.
+    pub reply_to: Option<MessageId>,
+}
+
+impl Envelope {
+    pub fn new(from: MessageSource, text: String) -> Self {
+        Self {
+            id: MessageId::new(),
+            from,
+            text,
+            reply_to: None,
+        }
+    }
+}
+
 /// Who sent a message to an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -211,6 +267,9 @@ pub enum MessageSource {
     },
     /// Another agent (`agent_send`).
     Agent { agent_id: AgentId },
+    /// The hub's digest of things the agent asked to hear about (reminders, watches,
+    /// task events).
+    Notice,
 }
 
 impl MessageSource {
@@ -241,6 +300,9 @@ impl EventKind {
             Self::AgentStatusChanged { .. } => "agent.status_changed",
             Self::AgentInput { .. } => "agent.input",
             Self::AgentInputWithdrawn { .. } => "agent.input_withdrawn",
+            Self::AgentInputUpdated { .. } => "agent.input_updated",
+            Self::ReminderFired { .. } => "reminder.fired",
+            Self::WatchTriggered { .. } => "watch.triggered",
             Self::AgentTurnStarted { .. } => "agent.turn_started",
             Self::AgentOutput { .. } => "agent.output",
             Self::AgentToolCall { .. } => "agent.tool_call",
@@ -295,12 +357,14 @@ impl EventKind {
             | Self::AccountLoginFinished { .. }
             | Self::AccountLoginPending { .. } => None,
             Self::AgentSessionStarted { id, .. } => Some(*id),
+            Self::ReminderFired { owner, .. } | Self::WatchTriggered { owner, .. } => Some(*owner),
             Self::TaskStatusChanged { assignee, .. } => *assignee,
             Self::AgentCreated { agent } | Self::AgentUpdated { agent } => Some(agent.id),
             Self::AgentRemoved { id, .. }
             | Self::AgentStatusChanged { id, .. }
             | Self::AgentInput { id, .. }
             | Self::AgentInputWithdrawn { id, .. }
+            | Self::AgentInputUpdated { id, .. }
             | Self::AgentTurnStarted { id, .. }
             | Self::AgentOutput { id, .. }
             | Self::AgentToolCall { id, .. }

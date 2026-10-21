@@ -791,3 +791,4 @@ button.small, .segmented.small button { font-size: 12px; padding: 3px 10px; }
 .quota-mini { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); padding: 2px 4px; border-radius: 6px; }
 .quota-mini:hover { background: var(--hover); text-decoration: none; color: var(--text-2); }
 .quota-mini .quota-bar { width: 40px; height: 4px; box-shadow: none; }
+.peer-reply { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
