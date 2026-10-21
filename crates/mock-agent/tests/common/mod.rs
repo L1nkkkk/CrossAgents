@@ -85,6 +85,11 @@ pub fn git_repo() -> tempfile::TempDir {
 
 impl TestHub {
     pub async fn start() -> Self {
+        Self::start_with(|_| {}).await
+    }
+
+    /// Starts a hub after `adjust` has changed its config.
+    pub async fn start_with(adjust: impl FnOnce(&mut HubConfig)) -> Self {
         let home = tempfile::tempdir().unwrap();
         let paths = Paths::new(home.path());
         let mut config = HubConfig::new(paths.clone(), 0);
@@ -93,6 +98,7 @@ impl TestHub {
             crossagents_bin().display().to_string(),
             "mcp".to_owned(),
         ]);
+        adjust(&mut config);
         let hub = crossagents_hub::start(config).await.unwrap();
         let base = format!("http://{}", hub.addr);
         Self {

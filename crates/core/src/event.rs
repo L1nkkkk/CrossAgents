@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::account::Account;
 use crate::agent::{OutputStream, StopReason, ToolStatus};
 use crate::ids::{AgentId, MessageId, RunId, TaskId};
 use crate::model::{Agent, AgentStatus, CheckResult, Run, RunStatus};
@@ -95,6 +96,23 @@ pub enum EventKind {
     },
     #[serde(rename = "agent.error")]
     AgentError { id: AgentId, message: String },
+    /// The agent's vendor session id, for joining with the vendor's usage logs.
+    #[serde(rename = "agent.session_started")]
+    AgentSessionStarted { id: AgentId, session_id: String },
+    #[serde(rename = "account.created")]
+    AccountCreated { account: Account },
+    #[serde(rename = "account.removed")]
+    AccountRemoved { id: String },
+    /// A login started with `POST /v1/accounts/{id}/login` finished.
+    #[serde(rename = "account.login_finished")]
+    AccountLoginFinished {
+        id: String,
+        ok: bool,
+        message: Option<String>,
+    },
+    /// A login is waiting for the human to open `url`.
+    #[serde(rename = "account.login_pending")]
+    AccountLoginPending { id: String, url: Option<String> },
     #[serde(rename = "run.created")]
     RunCreated { run: Run },
     #[serde(rename = "run.status_changed")]
@@ -144,6 +162,11 @@ impl EventKind {
             Self::AgentTurnCompleted { .. } => "agent.turn_completed",
             Self::AgentUsage { .. } => "agent.usage",
             Self::AgentError { .. } => "agent.error",
+            Self::AgentSessionStarted { .. } => "agent.session_started",
+            Self::AccountCreated { .. } => "account.created",
+            Self::AccountRemoved { .. } => "account.removed",
+            Self::AccountLoginFinished { .. } => "account.login_finished",
+            Self::AccountLoginPending { .. } => "account.login_pending",
             Self::RunCreated { .. } => "run.created",
             Self::RunStatusChanged { .. } => "run.status_changed",
             Self::RunPlanSubmitted { .. } => "run.plan_submitted",
@@ -172,7 +195,12 @@ impl EventKind {
             | Self::RunCreated { .. }
             | Self::RunStatusChanged { .. }
             | Self::RunPlanSubmitted { .. }
-            | Self::TaskChecked { .. } => None,
+            | Self::TaskChecked { .. }
+            | Self::AccountCreated { .. }
+            | Self::AccountRemoved { .. }
+            | Self::AccountLoginFinished { .. }
+            | Self::AccountLoginPending { .. } => None,
+            Self::AgentSessionStarted { id, .. } => Some(*id),
             Self::TaskStatusChanged { assignee, .. } => *assignee,
             Self::AgentCreated { agent } => Some(agent.id),
             Self::AgentRemoved { id, .. }

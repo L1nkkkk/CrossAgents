@@ -6,8 +6,8 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use crossagents_core::{
-    Agent, AgentId, AgentKey, AgentStatus, CoreError, EVENT_SCHEMA_VERSION, Event, EventKind, Run,
-    RunId, Store, Task, TaskId,
+    Account, Agent, AgentId, AgentKey, AgentStatus, CoreError, EVENT_SCHEMA_VERSION, Event,
+    EventKind, Run, RunId, Store, Task, TaskId,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -373,11 +373,92 @@ impl Store for SqliteStore {
         }
         Ok(())
     }
+
+    async fn insert_account(&self, account: &Account) -> Result<(), CoreError> {
+        let result = sqlx::query(
+            "INSERT INTO accounts (id, provider, created_at, data) VALUES (?, ?, ?, ?)",
+        )
+        .bind(account.id.clone())
+        .bind(account.provider.clone())
+        .bind(account.created_at.to_rfc3339())
+        .bind(serde_json::to_string(account).map_err(storage)?)
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Err(CoreError::Conflict(
+                format!("account {:?} already exists", account.id),
+            )),
+            Err(e) => Err(storage(e)),
+        }
+    }
+
+    async fn get_account(&self, id: &str) -> Result<Account, CoreError> {
+        let data: Option<String> = sqlx::query_scalar("SELECT data FROM accounts WHERE id = ?")
+            .bind(id.to_owned())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?;
+        let data = data.ok_or_else(|| CoreError::NotFound {
+            kind: "account",
+            id: id.to_owned(),
+        })?;
+        serde_json::from_str(&data).map_err(storage)
+    }
+
+    async fn list_accounts(&self) -> Result<Vec<Account>, CoreError> {
+        let rows: Vec<String> = sqlx::query_scalar("SELECT data FROM accounts ORDER BY id")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage)?;
+        rows.iter()
+            .map(|d| serde_json::from_str(d).map_err(storage))
+            .collect()
+    }
+
+    async fn delete_account(&self, id: &str) -> Result<(), CoreError> {
+        let result = sqlx::query("DELETE FROM accounts WHERE id = ?")
+            .bind(id.to_owned())
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        if result.rows_affected() == 0 {
+            return Err(CoreError::NotFound {
+                kind: "account",
+                id: id.to_owned(),
+            });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crossagents_core::{Role, RunConfig, RunStatus, TaskId, TaskReport, TaskSpec, TaskStatus};
+
+    #[tokio::test]
+    async fn accounts_round_trip() {
+        let store = SqliteStore::open_in_memory().await.unwrap();
+        let account = Account {
+            id: "codex-main".into(),
+            provider: "codex".into(),
+            label: "main".into(),
+            home: PathBuf::from("/home/u/.codex"),
+            created_at: time_from(&Utc::now().to_rfc3339()).unwrap(),
+        };
+        store.insert_account(&account).await.unwrap();
+        assert!(matches!(
+            store.insert_account(&account).await,
+            Err(CoreError::Conflict(_))
+        ));
+        assert_eq!(store.get_account("codex-main").await.unwrap(), account);
+        assert_eq!(store.list_accounts().await.unwrap(), vec![account]);
+        store.delete_account("codex-main").await.unwrap();
+        assert!(matches!(
+            store.get_account("codex-main").await,
+            Err(CoreError::NotFound { .. })
+        ));
+    }
 
     #[tokio::test]
     async fn runs_and_tasks_round_trip() {

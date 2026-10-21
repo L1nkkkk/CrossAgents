@@ -52,6 +52,8 @@ pub struct SessionSpec {
     pub command: Option<Vec<String>>,
     /// Extra instructions to prepend to the first prompt (role, project memory, ...).
     pub instructions: Option<String>,
+    /// Extra environment for the agent process (e.g. the bound account's `CODEX_HOME`).
+    pub env: Vec<(String, String)>,
     /// Where the session reports what happens.
     pub events: mpsc::UnboundedSender<SessionEvent>,
 }
@@ -90,6 +92,10 @@ pub enum ToolStatus {
 /// Something that happened inside a running session.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
+    /// The vendor's id for this session (joins CrossAgents agents to vendor usage logs).
+    Started {
+        session_id: String,
+    },
     Output {
         stream: OutputStream,
         text: String,

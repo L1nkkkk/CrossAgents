@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "gui",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "apps/gui", "run", "dev"],
+      "port": 1420,
+      "env": { "CROSSAGENTS_HOME": "C:/Users/Link/AppData/Local/Temp/claude/C--Users-Link-Dev-CrossAgents/98017602-09fe-4e2a-a3fe-21a82eac0576/scratchpad/ca-home" }
+    }
+  ]
+}

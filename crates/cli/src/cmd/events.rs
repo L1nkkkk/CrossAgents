@@ -90,6 +90,32 @@ pub fn summary(kind: &EventKind) -> String {
             format!("{} context {used}/{size}", short(id))
         }
         EventKind::AgentError { id, message } => format!("{} {}", short(id), one_line(message)),
+        EventKind::AgentSessionStarted { id, session_id } => {
+            format!("{} vendor session {session_id}", short(id))
+        }
+        EventKind::AccountCreated { account } => {
+            format!(
+                "{} ({}, {})",
+                account.id,
+                account.provider,
+                account.home.display()
+            )
+        }
+        EventKind::AccountRemoved { id } => id.clone(),
+        EventKind::AccountLoginPending { id, url } => {
+            format!(
+                "{id} {}",
+                url.as_deref().unwrap_or("(waiting for the browser)")
+            )
+        }
+        EventKind::AccountLoginFinished { id, ok, message } => format!(
+            "{id} {}{}",
+            if *ok { "logged in" } else { "FAILED" },
+            message
+                .as_deref()
+                .map(|m| format!(": {}", one_line(m)))
+                .unwrap_or_default()
+        ),
         EventKind::RunCreated { run } => {
             format!("{} {}", short_tail(&run.id), one_line(&run.title))
         }

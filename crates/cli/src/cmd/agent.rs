@@ -42,6 +42,9 @@ pub struct AddArgs {
     /// Working directory; defaults to the current directory.
     #[arg(long)]
     pub cwd: Option<PathBuf>,
+    /// Account the agent runs under (see `crossagents account ls`).
+    #[arg(long)]
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -76,7 +79,10 @@ pub async fn run(ctx: &Context, cmd: AgentCommand) -> Result<()> {
                 model: args.model,
                 role: args.role.into(),
                 cwd: cwd.display().to_string(),
-                config: serde_json::Value::Null,
+                config: match &args.account {
+                    Some(account) => serde_json::json!({ "account": account }),
+                    None => serde_json::Value::Null,
+                },
             };
             let agent: Agent = client.post("/v1/agents", &req).await?;
             if ctx.json {

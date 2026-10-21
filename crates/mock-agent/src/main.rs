@@ -231,6 +231,14 @@ impl MockAgent {
                 .await;
         }
 
+        // `[env NAME]` reports an environment variable (tests check account binding).
+        if let Some(rest) = text.split("[env ").nth(1)
+            && let Some(name) = rest.split(']').next()
+        {
+            let value = std::env::var(name).unwrap_or_default();
+            self.say(&session_id, &format!("env {name}={value}\n"))
+                .await;
+        }
         let all_text: Vec<&str> = blocks.iter().filter_map(|b| b["text"].as_str()).collect();
         for line in self.run_directives(&all_text.join("\n")).await {
             self.say(&session_id, &format!("{line}\n")).await;

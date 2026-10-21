@@ -16,17 +16,19 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use crossagents_api_types::{
-    API_VERSION, ApiError, CreateAgentRequest, CreateRunRequest, ErrorCode, HealthResponse,
-    HubInfo, ListAgentsResponse, ListPluginsResponse, ListRunsResponse, ListToolsResponse,
+    API_VERSION, AccountUsageGroup, AccountUsageResponse, ApiError, CreateAccountRequest,
+    CreateAgentRequest, CreateRunRequest, ErrorCode, HealthResponse, HubInfo, ListAccountsResponse,
+    ListAgentsResponse, ListPluginsResponse, ListRunsResponse, ListToolsResponse, LoginStarted,
     PluginInfo, RejectRunRequest, RunDetail, SendMessageRequest, SendMessageResponse, UsageGroup,
     UsageResponse,
 };
 use crossagents_core::{
-    Agent, AgentId, AgentKey, AgentStatus, CoreError, Event, EventBus, EventKind, Run, RunConfig,
-    RunId, Store, validate_agent_name,
+    Account, AccountStatus, Agent, AgentId, AgentKey, AgentStatus, CoreError, Event, EventBus,
+    EventKind, Run, RunConfig, RunId, Store, validate_agent_name,
 };
 use crossagents_orchestrator::{NewRun, Orchestrator};
 
+use crate::accounts::Accounts;
 use crate::collab::AgentTokens;
 use crate::runtime::Runtime;
 use futures::Stream;
@@ -44,6 +46,7 @@ pub struct AppState {
     pub bus: Arc<EventBus>,
     pub runtime: Arc<Runtime>,
     pub orchestrator: Arc<Orchestrator>,
+    pub accounts: Arc<Accounts>,
     pub tokens: Arc<AgentTokens>,
     pub token: String,
     pub home: PathBuf,
@@ -68,6 +71,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/agents/{key}/messages", post(send_message))
         .route("/v1/plugins", get(list_plugins))
         .route("/v1/usage", get(usage))
+        .route("/v1/accounts", get(list_accounts).post(create_account))
+        .route(
+            "/v1/accounts/{id}",
+            get(get_account).delete(delete_account_route),
+        )
+        .route("/v1/accounts/{id}/status", get(account_status))
+        .route("/v1/accounts/{id}/usage", get(account_usage))
+        .route("/v1/accounts/{id}/models", get(account_models))
+        .route("/v1/accounts/{id}/login", post(account_login))
         .route("/v1/runs", get(list_runs).post(create_run))
         .route("/v1/runs/{key}", get(get_run))
         .route("/v1/runs/{key}/approve", post(approve_run))
@@ -233,6 +245,9 @@ async fn create_agent(
             req.plugin,
             state.runtime.plugins().names().join(", ")
         )));
+    }
+    if let Some(account) = req.config.get("account").and_then(|v| v.as_str()) {
+        state.accounts.check_binding(&req.plugin, account).await?;
     }
     let cwd = dunce::canonicalize(&req.cwd)
         .map_err(|e| AppError::bad_request(format!("cwd {:?}: {e}", req.cwd)))?;
@@ -496,6 +511,74 @@ async fn call_tool(
         .await
         .map_err(|e| AppError::from(CoreError::Agent(format!("tool call panicked: {e}"))))?;
     Ok(Json(result?))
+}
+
+// ---------------------------------------------------------------------------------------
+// Accounts
+
+async fn list_accounts(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<ListAccountsResponse>> {
+    Ok(Json(ListAccountsResponse {
+        accounts: state.store().list_accounts().await?,
+    }))
+}
+
+async fn create_account(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateAccountRequest>,
+) -> ApiResult<(StatusCode, Json<Account>)> {
+    Ok((StatusCode::CREATED, Json(state.accounts.create(req).await?)))
+}
+
+async fn get_account(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Account>> {
+    Ok(Json(state.store().get_account(&id).await?))
+}
+
+async fn delete_account_route(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    state.accounts.remove(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn account_status(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<AccountStatus>> {
+    Ok(Json(state.accounts.status(&id).await?))
+}
+
+#[derive(Debug, Deserialize)]
+struct AccountUsageQuery {
+    #[serde(default)]
+    by: AccountUsageGroup,
+}
+
+async fn account_usage(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<AccountUsageQuery>,
+) -> ApiResult<Json<AccountUsageResponse>> {
+    Ok(Json(state.accounts.usage(&id, query.by).await?))
+}
+
+async fn account_models(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Vec<crossagents_core::ModelInfo>>> {
+    Ok(Json(state.accounts.models(&id).await?))
+}
+
+async fn account_login(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<LoginStarted>> {
+    Ok(Json(state.accounts.login(&id).await?))
 }
 
 #[derive(Debug, Deserialize)]

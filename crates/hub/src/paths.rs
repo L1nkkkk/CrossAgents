@@ -48,6 +48,10 @@ impl Paths {
     pub fn logs(&self) -> PathBuf {
         self.home.join("logs")
     }
+    /// Homes of accounts created by CrossAgents.
+    pub fn accounts(&self) -> PathBuf {
+        self.home.join("accounts")
+    }
     /// External plugins: one directory with a `plugin.toml` each.
     pub fn plugins(&self) -> PathBuf {
         self.home.join("plugins")
@@ -89,7 +93,14 @@ struct ConfigFile {
     #[serde(default)]
     hub: HubSection,
     #[serde(default)]
+    accounts: AccountsSection,
+    #[serde(default)]
     plugins: BTreeMap<String, PluginConfig>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AccountsSection {
+    codex_usage_url: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -107,6 +118,8 @@ pub struct HubConfig {
     pub plugins: BTreeMap<String, PluginConfig>,
     /// Command for the collaboration MCP server; defaults to `<this executable> mcp`.
     pub mcp_command: Option<Vec<String>>,
+    /// Override of the Codex usage endpoint (`[accounts] codex_usage_url`), for tests.
+    pub codex_usage_url: Option<String>,
 }
 
 impl HubConfig {
@@ -117,6 +130,7 @@ impl HubConfig {
             port,
             plugins: BTreeMap::new(),
             mcp_command: None,
+            codex_usage_url: None,
         }
     }
 }
@@ -135,6 +149,7 @@ impl HubConfig {
             port: config.hub.port.unwrap_or(DEFAULT_PORT),
             plugins: config.plugins,
             mcp_command: config.hub.mcp_command,
+            codex_usage_url: config.accounts.codex_usage_url,
         })
     }
 }

@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 
+use crate::account::Account;
 use crate::error::CoreError;
 use crate::event::{Event, EventKind};
 use crate::ids::{AgentId, RunId, TaskId};
@@ -50,4 +51,10 @@ pub trait Store: Send + Sync {
     /// In creation order.
     async fn list_tasks(&self, run_id: RunId) -> Result<Vec<Task>, CoreError>;
     async fn update_task(&self, task: &Task) -> Result<(), CoreError>;
+
+    /// Fails with [`CoreError::Conflict`] if the id is taken.
+    async fn insert_account(&self, account: &Account) -> Result<(), CoreError>;
+    async fn get_account(&self, id: &str) -> Result<Account, CoreError>;
+    async fn list_accounts(&self) -> Result<Vec<Account>, CoreError>;
+    async fn delete_account(&self, id: &str) -> Result<(), CoreError>;
 }

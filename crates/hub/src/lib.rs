@@ -1,5 +1,6 @@
 //! The CrossAgents hub: owns all state and serves the local API.
 
+pub mod accounts;
 pub mod api;
 pub mod collab;
 pub mod paths;
@@ -16,7 +17,9 @@ use crossagents_core::{EventBus, EventKind, Store};
 use crossagents_orchestrator::{GitWorkspaces, Orchestrator, OrchestratorConfig, ShellVerifier};
 use crossagents_store_sqlite::SqliteStore;
 
+use crate::accounts::Accounts;
 use crate::collab::{AgentTokens, CollabSetup, HubHost};
+use crossagents_plugins::codex_account::CodexAccounts;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -64,9 +67,19 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     let store = Arc::new(SqliteStore::open(&paths.db()).await?);
     let bus = Arc::new(EventBus::new(store.clone() as Arc<dyn Store>));
 
+    let codex_accounts = match &config.codex_usage_url {
+        Some(url) => CodexAccounts::with_usage_url(url.clone()),
+        None => CodexAccounts::default(),
+    };
+    let accounts = Arc::new(Accounts::new(
+        bus.clone(),
+        vec![Arc::new(codex_accounts)],
+        paths.accounts(),
+    ));
     let tokens = Arc::new(AgentTokens::default());
     let setup = Arc::new(CollabSetup {
         tokens: tokens.clone(),
+        accounts: accounts.clone(),
         mcp_command: match &config.mcp_command {
             Some(command) => command.clone(),
             None => default_mcp_command()?,
@@ -118,6 +131,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         bus: bus.clone(),
         runtime: runtime.clone(),
         orchestrator: orchestrator.clone(),
+        accounts: accounts.clone(),
         tokens,
         token: token.clone(),
         home: paths.home.clone(),

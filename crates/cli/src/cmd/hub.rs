@@ -79,6 +79,14 @@ async fn running_hub(paths: &Paths) -> Result<Option<(HubFile, HealthResponse)>>
     }
 }
 
+/// Starts the hub unless it is already running.
+pub async fn ensure_running(ctx: &Context) -> Result<()> {
+    if running_hub(&ctx.paths).await?.is_some() {
+        return Ok(());
+    }
+    start(ctx).await
+}
+
 async fn start(ctx: &Context) -> Result<()> {
     if let Some((hub, _)) = running_hub(&ctx.paths).await? {
         return report_started(ctx, &hub, true);

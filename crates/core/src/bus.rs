@@ -137,6 +137,18 @@ mod tests {
         async fn update_task(&self, _: &Task) -> Result<(), CoreError> {
             unimplemented!()
         }
+        async fn insert_account(&self, _: &crate::Account) -> Result<(), CoreError> {
+            unimplemented!()
+        }
+        async fn get_account(&self, _: &str) -> Result<crate::Account, CoreError> {
+            unimplemented!()
+        }
+        async fn list_accounts(&self) -> Result<Vec<crate::Account>, CoreError> {
+            unimplemented!()
+        }
+        async fn delete_account(&self, _: &str) -> Result<(), CoreError> {
+            unimplemented!()
+        }
     }
 
     #[derive(Default)]

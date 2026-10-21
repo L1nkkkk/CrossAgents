@@ -11,6 +11,7 @@
 //!
 //! or dropped in as a directory with a manifest, see [`manifest`].
 
+pub mod codex_account;
 pub mod manifest;
 
 use std::collections::BTreeMap;
@@ -115,6 +116,7 @@ impl AgentPlugin for AcpPlugin {
         if let (Some(var), Some(model)) = (&self.model_env, &spec.agent.model) {
             launch.env.push((var.clone(), model.clone()));
         }
+        launch.env.extend(spec.env);
         let session = AcpSession::start(AcpOptions {
             launch,
             mcp_servers: spec.mcp_servers,

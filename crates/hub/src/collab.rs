@@ -47,6 +47,7 @@ impl AgentTokens {
 /// Mounts the collaboration MCP server into each agent session.
 pub struct CollabSetup {
     pub tokens: Arc<AgentTokens>,
+    pub accounts: Arc<crate::accounts::Accounts>,
     /// Command that runs the MCP server, e.g. `["/path/crossagents", "mcp"]`.
     pub mcp_command: Vec<String>,
     /// The hub's API base URL, known once the listener is bound.
@@ -56,8 +57,12 @@ pub struct CollabSetup {
 #[async_trait]
 impl SessionSetup for CollabSetup {
     async fn prepare(&self, agent: &Agent) -> Result<SessionExtras, CoreError> {
+        let agent_env = self.accounts.agent_env(agent).await?;
         let Some((program, args)) = self.mcp_command.split_first() else {
-            return Ok(SessionExtras::default());
+            return Ok(SessionExtras {
+                env: agent_env,
+                ..SessionExtras::default()
+            });
         };
         let url = self
             .url
@@ -74,6 +79,7 @@ impl SessionSetup for CollabSetup {
                 env,
             }],
             instructions: None,
+            env: agent_env,
         })
     }
 }

@@ -28,6 +28,8 @@ pub trait SessionSetup: Send + Sync {
 pub struct SessionExtras {
     pub mcp_servers: Vec<McpServerSpec>,
     pub instructions: Option<String>,
+    /// Extra environment for the agent process (e.g. its account's home).
+    pub env: Vec<(String, String)>,
 }
 
 struct Live {
@@ -127,6 +129,7 @@ impl Runtime {
             permission: permission_of(&agent),
             command: command_of(&agent),
             instructions: extras.instructions,
+            env: extras.env,
             events: events_tx,
         };
         let session: Arc<dyn AgentSession> = match plugin.start(spec).await {
@@ -385,6 +388,7 @@ async fn handle_session_event(
     out.flush(bus, id).await;
     let kind = match event {
         SessionEvent::Output { .. } => unreachable!(),
+        SessionEvent::Started { session_id } => EventKind::AgentSessionStarted { id, session_id },
         SessionEvent::ToolCall {
             tool_call_id,
             title,

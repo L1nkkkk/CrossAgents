@@ -21,6 +21,8 @@ tokio.workspace = true
 workspace = true
 
 [dev-dependencies]
+base64 = "0.23.1"
+chrono.workspace = true
 crossagents-core.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 crossagents-api-types.workspace = true

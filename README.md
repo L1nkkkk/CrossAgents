@@ -33,6 +33,15 @@ cargo build --release
 
 ## 快速开始
 
+最省事的方式是用引导接入（目前支持 Codex）：
+
+```sh
+crossagents setup codex      # 检查环境 → 选/导入账号 → 登录 → 显示套餐与额度 → 选模型 → 建好 planner 和 worker
+```
+
+也可以手动来：
+
+
 ```sh
 crossagents hub start
 
@@ -84,6 +93,23 @@ npm run tauri build -- --no-bundle      # 产出 src-tauri/target/release/crossa
 ```
 
 Windows 需要 WebView2（Windows 11 自带）。详见 [任务书](docs/tasks/V2-GUI.md)。
+
+## 账号管理
+
+每个 agent 可以绑定一个账号（`agent add --account <id>`），同一家可以有多个账号。
+
+```sh
+crossagents account ls
+crossagents account add codex-main --import-default   # 用现有的 ~/.codex 登录
+crossagents account add codex-work                    # 新账号，独立目录
+crossagents account login codex-work                  # 打开浏览器登录
+crossagents account status codex-main                 # 套餐、额度窗口与重置时间、余额（实时）
+crossagents account usage codex-main --by model       # token、缓存命中；还可按 day/origin/agent/role/run
+crossagents account models codex-main                 # 这个账号能用的模型
+```
+
+令牌只在 hub 进程内用于查询额度，任何 API 和日志都不会输出令牌，邮箱打码显示。
+实时查询失败（没网、登录过期）时，回退到 Codex 会话日志里最近一次记录的额度，并标明时间。
 
 ## 配置
 

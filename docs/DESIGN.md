@@ -85,6 +85,7 @@ CrossAgents 本身是一个 **core**；各家 agent（Claude Code、Codex……�
 | `Pipeline` / `Stage` | 编排流程 | 固定流程（§8） | 自由编排、TDD、多轮审查 |
 | `Tool` | 暴露给 agent 的 MCP 工具 | §9 列出的工具 | 任意新协作能力 |
 | `Store` | 持久化 | SQLite | Postgres |
+| `AccountProvider` | 一家的账号：登录、套餐、额度、token 用量、可用模型（见 [M5](tasks/M5.md)） | Codex | Claude 等 |
 | `EventSink` | 事件订阅者 | API 事件流（CLI / GUI）、成本统计、日志 | Webhook、Slack |
 
 ## 6. 插件系统

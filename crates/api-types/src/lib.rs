@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 pub use crossagents_core::{
-    Agent, AgentId, AgentStatus, Capabilities, CheckResult, Event, EventKind, MessageId,
-    OutputStream, PlannedTask, Role, Run, RunId, RunStatus, StopReason, Task, TaskId, TaskStatus,
-    ToolInfo, ToolStatus,
+    Account, AccountStatus, Agent, AgentId, AgentStatus, Capabilities, CheckResult, DataSource,
+    Event, EventKind, MessageId, ModelInfo, OutputStream, PlannedTask, Role, Run, RunId, RunStatus,
+    StopReason, Task, TaskId, TaskStatus, TokenTotals, ToolInfo, ToolStatus,
 };
 
 pub const API_VERSION: &str = "v1";
@@ -161,6 +161,69 @@ pub struct UsageResponse {
     pub by: UsageGroup,
     pub rows: Vec<UsageRow>,
     pub total_cost_usd: f64,
+}
+
+/// Adds an account. Without `home`, a fresh home under the CrossAgents directory is used;
+/// with `import_default`, the provider's existing default home (e.g. `~/.codex`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateAccountRequest {
+    pub id: String,
+    pub provider: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub home: Option<String>,
+    #[serde(default)]
+    pub import_default: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListAccountsResponse {
+    pub accounts: Vec<crossagents_core::Account>,
+}
+
+/// How account token usage is grouped.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountUsageGroup {
+    #[default]
+    Day,
+    Model,
+    /// CrossAgents sessions vs. the vendor's own tools.
+    Origin,
+    Agent,
+    Role,
+    Run,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AccountUsageRow {
+    pub key: String,
+    pub totals: crossagents_core::TokenTotals,
+    pub cache_hit_rate: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AccountUsageResponse {
+    pub by: AccountUsageGroup,
+    pub rows: Vec<AccountUsageRow>,
+    pub total: crossagents_core::TokenTotals,
+    pub total_cache_hit_rate: f64,
+}
+
+/// A login was started; the human finishes it in the browser.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LoginStarted {
+    /// The page to open, when the login tool printed one.
+    pub url: Option<String>,
+    /// What runs, for display.
+    pub command: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

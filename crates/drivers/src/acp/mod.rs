@@ -175,6 +175,9 @@ impl AcpSession {
             );
         }
 
+        let _ = events.send(SessionEvent::Started {
+            session_id: session.session_id.clone(),
+        });
         let this = Self {
             peer,
             session_id: session.session_id.clone(),

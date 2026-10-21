@@ -2,6 +2,7 @@
 //!
 //! This crate has no dependency on any other CrossAgents crate.
 
+pub mod account;
 pub mod agent;
 pub mod bus;
 pub mod error;
@@ -12,6 +13,10 @@ pub mod state;
 pub mod store;
 pub mod tool;
 
+pub use account::{
+    Account, AccountProvider, AccountStatus, Credits, DataSource, LoginCommand, ModelInfo,
+    RateWindow, SessionUsage, TokenTotals, mask_email,
+};
 pub use agent::{
     AgentPlugin, AgentSession, Capabilities, McpServerSpec, OutputStream, PermissionPolicy,
     SessionEvent, SessionSpec, StopReason, ToolStatus,

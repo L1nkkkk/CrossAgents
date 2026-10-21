@@ -44,6 +44,11 @@ pub enum Command {
     Run(cmd::run::RunArgs),
     /// Reported cost and context use, grouped by role, model, run or agent.
     Usage(cmd::usage::UsageArgs),
+    /// Vendor accounts: login, plan, quota, token use.
+    #[command(subcommand)]
+    Account(cmd::account::AccountCommand),
+    /// Guided setup of a vendor: account, login, models and agents.
+    Setup(cmd::setup::SetupArgs),
     /// Serve the collaboration tools over MCP on stdio (started by the hub for agents).
     #[command(hide = true)]
     Mcp,
