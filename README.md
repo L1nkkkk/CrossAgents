@@ -72,18 +72,18 @@ crossagents run cancel <id>
 
 ## GUI
 
-`apps/gui/` 是桌面 GUI（Tauri 2 + React），和 CLI 一样只是 hub 的客户端：先 `crossagents hub start`，
+`apps/gui/` 是桌面 GUI（Electron + React），和 CLI 一样只是 hub 的客户端：先 `crossagents hub start`，
 GUI 读取 `~/.crossagents/hub.json` 与 `token` 连接（同样遵循 `CROSSAGENTS_HOME`）。
 可以登记 agent、发起 run、审批/驳回计划、跟踪任务与验收结果、看 agent 实时输出并对话、查看成本。
 
 ```sh
 cd apps/gui
 npm install
-npm run tauri dev                       # 开发
-npm run tauri build -- --no-bundle      # 产出 src-tauri/target/release/crossagents-gui(.exe)
+npm run electron:dev       # 开发（页面热重载）
+npm run electron:build     # 产出 release/win-unpacked/CrossAgents.exe（免安装，未签名）
 ```
 
-Windows 需要 WebView2（Windows 11 自带）。详见 [任务书](docs/tasks/V2-GUI.md)。
+令牌只在 Electron 主进程里使用，不会进入页面。详见 [任务书](docs/tasks/V2-GUI.md)。
 
 ## 配置
 

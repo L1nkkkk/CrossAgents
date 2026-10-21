@@ -19,7 +19,7 @@ async function readBody(req: IncomingMessage): Promise<string | undefined> {
 }
 
 /// Dev-server only: lets the frontend run in a plain browser (`npm run dev`) by forwarding
-/// `/v1/*` to the hub with the bearer token, like the Tauri side does in the app.
+/// `/v1/*` to the hub with the bearer token, like the Electron main process does in the app.
 function hubProxy(): Plugin {
   return {
     name: "crossagents-hub-proxy",
@@ -58,10 +58,25 @@ function hubProxy(): Plugin {
   };
 }
 
+/// Dev-server only: the React refresh preamble is an inline script and HMR uses a WebSocket,
+/// which the strict CSP in index.html forbids. Builds keep the strict policy.
+function devCsp(): Plugin {
+  return {
+    name: "crossagents-dev-csp",
+    apply: "serve",
+    transformIndexHtml: (html) =>
+      html
+        .replace("script-src 'self'", "script-src 'self' 'unsafe-inline'")
+        .replace("connect-src 'self'", "connect-src 'self' ws://localhost:1420"),
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), hubProxy()],
+  // Relative asset URLs: the packaged app loads dist/index.html from a file:// URL.
+  base: "./",
+  plugins: [react(), hubProxy(), devCsp()],
   resolve: { alias: { "@bindings": fileURLToPath(new URL("../../bindings", import.meta.url)) } },
   clearScreen: false,
-  server: { port: 1420, strictPort: true, watch: { ignored: ["**/src-tauri/**"] } },
+  server: { port: 1420, strictPort: true, watch: { ignored: ["**/electron/**", "**/dist-electron/**", "**/release/**"] } },
   build: { target: "es2022" },
 });

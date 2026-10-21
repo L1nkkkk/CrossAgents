@@ -3,10 +3,8 @@
 // source of truth. Unknown event types are ignored.
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import type { Event as HubEvent } from "@bindings/Event";
-import { errorText, inTauri } from "./api";
+import { bridge, errorText } from "./api";
 
 export type { HubEvent };
 
@@ -112,13 +110,11 @@ function record(event: HubEvent) {
 export function startEvents() {
   if (started) return;
   started = true;
-  if (inTauri) {
-    void (async () => {
-      // Subscribe before starting the relay so no event is missed.
-      await listen<string>("hub://status", (e) => setStatus(e.payload));
-      await listen<string>("hub://event", (e) => dispatch(e.payload));
-      await invoke("hub_events_start");
-    })();
+  if (bridge) {
+    // Subscribe before starting the relay so no event is missed.
+    bridge.onStatus(setStatus);
+    bridge.onEvent(dispatch);
+    bridge.startEvents();
   } else {
     void webEvents();
   }

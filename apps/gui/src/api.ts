@@ -1,8 +1,7 @@
-// Typed client for the hub's local API (docs/DESIGN.md §11). Inside Tauri requests go
-// through the `hub_request` command, which adds the bearer token; in a plain browser they
-// go to the same origin (the Vite dev server forwards them, see vite.config.ts).
+// Typed client for the hub's local API (docs/DESIGN.md §11). Inside Electron requests go
+// through the preload bridge to the main process, which adds the bearer token; in a plain
+// browser they go to the same origin (the Vite dev server forwards them, see vite.config.ts).
 
-import { invoke } from "@tauri-apps/api/core";
 import type { Agent } from "@bindings/Agent";
 import type { ApiError as ApiErrorJson } from "@bindings/ApiError";
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
@@ -19,7 +18,8 @@ import type { SendMessageResponse } from "@bindings/SendMessageResponse";
 import type { UsageGroup } from "@bindings/UsageGroup";
 import type { UsageResponse } from "@bindings/UsageResponse";
 
-export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+/** The Electron preload bridge (electron/preload.cts); absent in a plain browser. */
+export const bridge = typeof window !== "undefined" ? window.crossagents : undefined;
 
 export class ApiError extends Error {
   /** HTTP status; 0 when the hub could not be reached. */
@@ -36,11 +36,11 @@ type Method = "GET" | "POST" | "DELETE";
 
 async function send(method: Method, path: string, body?: unknown): Promise<{ status: number; body: string }> {
   const json = body === undefined ? null : JSON.stringify(body);
-  if (inTauri) {
+  if (bridge) {
     try {
-      return await invoke<{ status: number; body: string }>("hub_request", { method, path, body: json });
+      return await bridge.request(method, path, json);
     } catch (err) {
-      throw new ApiError(0, "unreachable", String(err));
+      throw new ApiError(0, "unreachable", err instanceof Error ? err.message : String(err));
     }
   }
   let response: Response;

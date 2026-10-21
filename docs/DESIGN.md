@@ -15,7 +15,7 @@ CrossAgents 本身是一个 **core**；各家 agent（Claude Code、Codex……�
 - 强模型规划、弱模型编码的分层协作，自动验收、失败重试与升级。
 - 不同厂商的 agent 通过统一协议互相发消息、委派任务、回传结果。
 - 新 agent 只需写一个插件即可接入；新需求通过扩展点加入，不改核心。
-- 本地单机运行。v1 用 CLI 操作；v2 提供 GUI（Tauri）。本地 API 从 v1 起就按 GUI 客户端的标准设计。
+- 本地单机运行。v1 用 CLI 操作；v2 提供 GUI（Electron）。本地 API 从 v1 起就按 GUI 客户端的标准设计。
 
 ### 1.2 非目标（v1 不做）
 
@@ -241,7 +241,9 @@ hub 对外只有一套本地 API，CLI 与 GUI 是平等的客户端，**所有�
 
 ### 11.1 GUI（v2）
 
-- **技术**：Tauri 2（Rust 后端 + Web 前端），参考 vibe-kanban 的 `tauri-app`。
+- **技术**：Electron + React（TypeScript）。主进程只做传输（读令牌、转发 HTTP、中继 SSE），令牌不进页面；
+  页面开启 `contextIsolation`、`sandbox`，关闭 `nodeIntegration`，有 CSP。最初用 Tauri 2 实现，后改为 Electron，
+  理由见 [V2 任务书](tasks/V2-GUI.md) §2。
 - **形态**：GUI 作为 API 客户端连接 hub，不内嵌业务逻辑；前端为网页技术，以后可复用于远程/手机查看。
 - **主要视图**：Run 列表与任务树、agent 实时输出、计划审批（可编辑规格）、diff 查看、成本面板。
 
@@ -268,7 +270,7 @@ crates/
 ├── cli/               crossagents 命令（含隐藏的 `crossagents mcp` stdio MCP 代理）
 └── mock-agent/        可编程 ACP mock agent + 全部端到端测试（无需 LLM）
 apps/
-└── gui/               v2：Tauri 2 + React GUI，纯 API 客户端（独立 Cargo workspace）
+└── gui/               v2：Electron + React GUI，纯 API 客户端（Node 工程，不在 Cargo workspace 里）
 ```
 
 与最初设想的差异：没有独立的 `plugin-protocol`（协议就是 ACP）、`mcp`（MCP server 只是 CLI 里的薄代理，
@@ -284,7 +286,7 @@ apps/
 | M1 | ACP 驱动、claude/codex 插件、agent 会话、send/attach | ✅ [任务书](tasks/M1.md) |
 | M2–M3 | 协作工具（MCP）、任务规格、hub 验收、固定 Pipeline：审批、worktree 并行、重试/升级、Reviewer、合并 | ✅ [任务书](tasks/M2.md) |
 | M4 | 插件目录（外部插件）、成本统计、收尾 | ✅ [任务书](tasks/M4.md) |
-| v2 | Tauri GUI：run 列表、计划审批、任务详情（验收输出、diff stat）、agent 实时输出与对话、成本面板 | ✅ [任务书](tasks/V2-GUI.md) |
+| v2 | 桌面 GUI（Electron）：run 列表、计划审批、任务详情（验收输出、diff stat）、agent 实时输出与对话、成本面板 | ✅ [任务书](tasks/V2-GUI.md) |
 | v2 后续 | 审批时编辑规格、完整 diff 查看、自由编排 Pipeline | 待做 |
 
 v1 的自动化测试全部用 mock agent 完成；与真实 Claude Code / Codex 的联调需要用户本人登录后进行。
@@ -296,7 +298,7 @@ v1 的自动化测试全部用 mock agent 完成；与真实 Claude Code / Codex
 | 实现语言 | Rust |
 | v1 接入的 agent | Claude Code、Codex |
 | 接入方式 | v1 ACP 优先，一个驱动接两家；原生驱动按需补充 |
-| 界面 | v1 CLI；v2 Tauri GUI；不做 TUI。API 从 v1 起按 GUI 标准设计 |
+| 界面 | v1 CLI；v2 Electron GUI；不做 TUI。API 从 v1 起按 GUI 标准设计 |
 | 计划是否需人审批 | 默认需要，可关闭 |
 | Worker 权限 | 全部放行 + worktree 隔离 + 验收后合并 |
 | 编排方式 | v1 固定流程；自由编排作为后续 `Pipeline` 实现 |
