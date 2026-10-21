@@ -125,7 +125,14 @@ command = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
 
 [plugins.gemini]
 command = ["gemini", "--experimental-acp"]
+
+# Codex 改走原生驱动（codex app-server，需本机已装 codex）；不写 driver 则仍走 codex-acp
+[plugins.codex]
+driver = "codex-native"
 ```
+
+单个 agent 也可以用 `crossagents agent add … --driver codex-native|acp-generic` 覆盖插件的默认驱动。
+驱动与能力见 [N1 任务书](docs/tasks/N1.md)。
 
 也可以把插件放成目录：`~/.crossagents/plugins/<name>/plugin.toml`
 

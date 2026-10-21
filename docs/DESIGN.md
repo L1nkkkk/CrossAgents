@@ -150,7 +150,7 @@ hub
 
 - Worker：`.crossagents/local/workers/<name>/`；Planner：集成分支目录。
 - 跨项目通信时，被询问的 Worker 仍在自己项目的目录里干活，改动进自己项目的集成分支；它可以回答问题、按请求在本项目里改代码，但碰不到发送方项目的文件。
-- 这条边界由各家 agent 的权限机制执行，强度不同：Codex 的 `workspace-write` 沙箱真正限制写入范围；Claude Code 的放行模式只以 cwd 为工作目录，并不阻止访问目录外的路径。需要硬隔离的 Profile 应选用带沙箱的模式，或以后用 Docker 类 `WorkspaceProvider`。
+- 这条边界由各家 agent 的权限机制执行，强度不同：Codex 的 `workspace-write` 沙箱真正限制写入范围（Windows 上要先装好 Codex 的 Windows 沙箱，否则连 cwd 内都写不了）；Claude Code 的放行模式只以 cwd 为工作目录，并不阻止访问目录外的路径。需要硬隔离的 Profile 应选用带沙箱的模式，或以后用 Docker 类 `WorkspaceProvider`。
 - 任何改动最终只经集成分支、由人合并进主分支，这是不依赖 agent 自觉的最后一道。
 
 ### 4.5 邮箱与投递
@@ -281,18 +281,23 @@ Claude 侧走侧车还是 stream-json 由实测决定（§14）：侧车能拿�
 ### 9.2 Driver trait 与能力
 
 ```
-open(profile, cwd, mcp, instructions) -> SessionRef
-prompt(session, input) / interrupt(session)
-resume(session) / suspend(session)
-fork(session, at_turn?) / rollback(session, to_turn, revert_files)
-set_model(session, model, effort)
-capabilities() -> { resume, fork, rollback, revert_files, set_model,
-                    structured_diff, usage, rate_limits, permission_callback, compaction }
+Driver（一个 Profile 一个实例）
+  open(spec) -> Session                    spec：会话记录（模型、cwd、config）、MCP 列表、开场说明、权限策略或回调、环境变量、事件通道
+  resume(session_id, spec) -> Session      session_id 即会话开启时上报的厂商 id（Codex 线程 id）
+  capabilities() -> { streaming, interrupt, mcp, multi_session, resume, fork, rollback, revert_files,
+                      set_model, structured_diff, usage, rate_limits, permission_callback, compaction }
+Session（一个会话）
+  prompt(text) -> { stop_reason, turn_id } / interrupt()
+  suspend() / shutdown()
+  fork(at_turn?, spec) -> Session / rollback(before_turn, revert_files)
+  set_model(model?, effort?) / compact()
 ```
 
-- 驱动启动时上报能力；hub 和 GUI 按能力开放功能（如没有 `rollback` 就不显示回退按钮），缺能力降级而不报错。
-- 驱动把各家事件翻译成 hub 的统一事件：文本流、思考、工具调用、文件改动（按轮）、轮次开始 / 结束、用量、限额、权限请求、错误。原生驱动拿到的细节不在这一层丢掉，统一事件留有 `raw` 扩展字段。
+- 驱动启动时上报能力；hub 和 GUI 按能力开放功能（如没有 `rollback` 就不显示回退按钮），缺能力降级而不报错；驱动对不具备的操作返回「不支持」。
+- 驱动把各家事件翻译成 hub 的统一事件：文本流、思考、工具调用、文件改动（按轮）、轮次开始 / 结束、用量、限额、权限请求、错误、进程退出。原生驱动拿到的细节不在这一层丢掉，统一事件留有 `raw` 扩展字段。
 - 权限：Worker 默认放行；需要审批的操作经驱动的权限回调交给 hub，hub 按规则自动决定或转给 Planner / 人。
+- 相对最初草稿的调整（依据 [codex app-server 实测](research/codex-app-server.md)，见 [N1 任务书](tasks/N1.md) §4）：拆成 Profile 级与会话级两层，进程池归 Profile；
+  `resume` 以会话 id 为参数；`rollback` 去掉「指定轮及之后」，与上游一致；能力表补 `streaming`、`interrupt`、`mcp`、`multi_session`；会话多 `compact`。
 
 ### 9.3 配置与挂载
 
@@ -369,17 +374,17 @@ crossagents events [--follow] | usage [--by ...]
 沿用 v1：`core`、`api-types`、`store-sqlite`、`plugins`、`hub`、`cli`、`mock-agent`；`apps/gui`。变化：
 
 - `core`：新增 `Driver` trait、能力表、统一会话事件。
-- `drivers`：拆为 `codex-native`、`claude-native`、`acp`（现有 ACP 驱动改为一进程多会话）三个模块；Claude 侧车代码放 `components/claude-sidecar/`。
+- `drivers`：拆为 `codex_native`（已完成，见 [N1](tasks/N1.md)）、`claude_native`、`acp`（即 `acp-generic`，以后改为一进程多会话）三个模块；Claude 侧车代码放 `components/claude-sidecar/`。
 - `orchestrator`：固定 Pipeline 改为工具驱动的编排 + 停止条件。
 - `mock-agent`：同时模拟 ACP 与 Codex app-server 两种协议，供测试使用。
 
 ## 14. 待实测
 
-- `codex app-server` 的实际方法与事件：线程的开启、恢复、分叉、回退，按轮文件改动，用量与限额上报；一个进程能稳定承载多少线程。
+- ~~`codex app-server` 的实际方法与事件~~：已实测（codex-cli 0.158.0），见 [codex-app-server.md](research/codex-app-server.md)。线程开启、恢复、分叉、回退历史、按轮 diff、用量与限额都支持；回退不撤销文件；单进程承载上限未压测。
 - Claude 侧：Agent SDK 侧车与 stream-json 两条路各自能拿到哪些能力（恢复、分叉、文件检查点与回退、权限回调、用量），据此选定 `claude-native` 的实现。
-- Codex 线程、Claude 会话是否与目录绑定。
+- Claude 会话是否与目录绑定（Codex 线程不绑定：恢复和每一轮都能改 cwd）。
 - DeepSeek 的 Anthropic 兼容接口能否直接被 Claude Code 使用。
-- 各驱动在放行模式下对 cwd 外文件的实际限制（决定 §4.4 的边界强度）。
+- 各驱动在放行模式下对 cwd 外文件的实际限制（决定 §4.4 的边界强度）。Codex 已测：`danger-full-access` 不限制，`workspace-write` 限制在 cwd 内。
 - ACP 兜底：`claude-agent-acp`、`codex-acp`、with-cli `acp` 是否支持 `session/load`。
 
 ## 15. v1 到 v2 的差异
