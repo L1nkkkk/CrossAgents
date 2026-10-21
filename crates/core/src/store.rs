@@ -8,6 +8,7 @@ use crate::event::{Event, EventKind};
 use crate::human::HumanItem;
 use crate::ids::{AgentId, MessageId, RunId, TaskId};
 use crate::model::{Agent, AgentProfile, AgentStatus, Run, Task};
+use crate::note::{Note, NoteScope};
 use crate::notify::{Reminder, Watch};
 
 /// Look an agent up by id or by its unique name.
@@ -148,6 +149,39 @@ pub trait Store: Send + Sync {
             kind: "watch",
             id: id.to_owned(),
         })
+    }
+    /// Inserts or replaces a note (by scope, run and key).
+    async fn put_note(&self, note: &Note) -> Result<(), CoreError> {
+        let _ = note;
+        Err(CoreError::Unsupported("notes".into()))
+    }
+    async fn get_note(
+        &self,
+        scope: NoteScope,
+        run_id: Option<RunId>,
+        key: &str,
+    ) -> Result<Option<Note>, CoreError> {
+        let _ = (scope, run_id, key);
+        Ok(None)
+    }
+    /// Notes of a scope (and run), with keys starting with `prefix`, by key.
+    async fn list_notes(
+        &self,
+        scope: NoteScope,
+        run_id: Option<RunId>,
+        prefix: &str,
+    ) -> Result<Vec<Note>, CoreError> {
+        let _ = (scope, run_id, prefix);
+        Ok(Vec::new())
+    }
+    async fn delete_note(
+        &self,
+        scope: NoteScope,
+        run_id: Option<RunId>,
+        key: &str,
+    ) -> Result<(), CoreError> {
+        let _ = (scope, run_id, key);
+        Ok(())
     }
     /// Inserts or replaces (by id) an item for the person.
     async fn put_human_item(&self, item: &HumanItem) -> Result<(), CoreError> {

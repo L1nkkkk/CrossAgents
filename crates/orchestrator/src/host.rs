@@ -3,7 +3,10 @@
 use std::path::Path;
 
 use async_trait::async_trait;
-use crossagents_core::{Agent, AgentId, CoreError, Envelope, MessageId, MessageSource, Role};
+use crossagents_core::{
+    Agent, AgentId, CoreError, Envelope, MessageId, MessageSource, Role, RunId,
+};
+use serde_json::Value;
 
 #[async_trait]
 pub trait AgentHost: Send + Sync {
@@ -41,6 +44,10 @@ pub trait AgentHost: Send + Sync {
     async fn spawn_agent(&self, agent: Agent) -> Result<Agent, CoreError>;
     /// Changes an agent's model, from its next turn when it is running.
     async fn set_model(&self, agent: AgentId, model: Option<String>) -> Result<Agent, CoreError>;
+    /// Spend of a run (or of everything) and the accounts' quota, for `usage_get`.
+    async fn usage_report(&self, run: Option<RunId>) -> Result<Value, CoreError>;
+    /// Takes the messages waiting for an agent that runs outside the hub.
+    async fn take_inbox(&self, agent: AgentId) -> Result<Vec<Value>, CoreError>;
     /// Stops and deletes an agent created with [`Self::clone_agent`].
     async fn remove_agent(&self, agent: AgentId) -> Result<(), CoreError>;
 }

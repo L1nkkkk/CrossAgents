@@ -206,6 +206,55 @@ const TOOLS: &[ToolDef] = &[
         },
     },
     ToolDef {
+        name: "note_write",
+        description: "Write a shared note under a key (replacing what was there): conventions, decisions, interfaces, pitfalls. scope \"run\" (default, this run) or \"team\" (lasts across runs). text null deletes it (author or a lead only).",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({
+                    "key": { "type": "string" },
+                    "text": { "type": ["string", "null"] },
+                    "scope": { "type": "string", "enum": ["run", "team"] }
+                }),
+                &["key", "text"],
+            )
+        },
+    },
+    ToolDef {
+        name: "note_read",
+        description: "Read a shared note by key (run notes first, then team notes, unless scope is given).",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({ "key": { "type": "string" }, "scope": { "type": "string", "enum": ["run", "team"] } }),
+                &["key"],
+            )
+        },
+    },
+    ToolDef {
+        name: "note_list",
+        description: "List shared notes, optionally by key prefix and scope, with the start of each.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({ "prefix": { "type": "string" }, "scope": { "type": "string", "enum": ["run", "team"] } }),
+                &[],
+            )
+        },
+    },
+    ToolDef {
+        name: "usage_get",
+        description: "What your run has spent (cost, sessions, by agent), its budget and time used, and each account's quota windows.",
+        groups: ALL,
+        schema: || object(json!({}), &[]),
+    },
+    ToolDef {
+        name: "inbox_read",
+        description: "For agents running outside the hub: take the messages waiting for you (teammates' messages, task briefs, notices). Call it at the start of each turn of work.",
+        groups: ALL,
+        schema: || object(json!({}), &[]),
+    },
+    ToolDef {
         name: "watch_list",
         description: "What you are watching.",
         groups: ALL,
@@ -530,6 +579,11 @@ impl Orchestrator {
             "watch" => self.watch_add(caller, input).await,
             "watch_list" => self.watch_list(caller).await,
             "watch_cancel" => self.watch_cancel(caller, input).await,
+            "note_write" => self.note_write(caller, input).await,
+            "note_read" => self.note_read(caller, input).await,
+            "note_list" => self.note_list(caller, input).await,
+            "usage_get" => self.usage_get(caller).await,
+            "inbox_read" => self.inbox_read(caller).await,
             "human_ask" => self.human_ask(caller, input).await,
             "human_notify" => self.human_notify(caller, input).await,
             "plan_submit" => {

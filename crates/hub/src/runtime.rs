@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, AgentStatus, CoreError, DriverSession, Envelope, EventBus, EventKind,
-    McpServerSpec, MessageId, MessageSource, OutputStream, PermissionPolicy, SessionEvent,
-    SessionEventKind, SessionSpec, StopReason, Store,
+    Agent, AgentId, AgentKey, AgentStatus, CoreError, DriverSession, EXTERNAL_PLUGIN, Envelope,
+    EventBus, EventKind, McpServerSpec, MessageId, MessageSource, OutputStream, PermissionPolicy,
+    SessionEvent, SessionEventKind, SessionSpec, StopReason, Store,
 };
 use crossagents_plugins::PluginRegistry;
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -124,6 +124,9 @@ impl Inbox {
     }
 }
 
+/// A message waiting for an agent outside the hub: id, sender, text.
+pub type Waiting = (MessageId, MessageSource, String);
+
 type LiveMap = Arc<Mutex<HashMap<AgentId, Arc<Live>>>>;
 
 pub struct Runtime {
@@ -136,6 +139,8 @@ pub struct Runtime {
     /// Each agent's notification digest still waiting for its turn: the message and its
     /// lines by topic (a newer line on a topic replaces the older one).
     digests: Mutex<HashMap<AgentId, Digest>>,
+    /// Messages for agents outside the hub, until they read them (`inbox_read`).
+    external: Mutex<HashMap<AgentId, Vec<Waiting>>>,
     generation: AtomicU64,
 }
 
@@ -155,6 +160,7 @@ impl Runtime {
             live: LiveMap::default(),
             locks: Mutex::default(),
             digests: Mutex::default(),
+            external: Mutex::default(),
             generation: AtomicU64::new(0),
         }
     }
@@ -191,6 +197,12 @@ impl Runtime {
     /// Starts the agent's session if it is not running. Idempotent.
     pub async fn start(&self, key: &AgentKey) -> Result<Agent, CoreError> {
         let agent = self.store().get_agent(key).await?;
+        if agent.plugin == EXTERNAL_PLUGIN {
+            return Err(CoreError::Conflict(format!(
+                "{} runs outside the hub; it reads its messages with inbox_read",
+                agent.name
+            )));
+        }
         let lock = self.agent_lock(agent.id).await;
         let _guard = lock.lock().await;
         if self.is_live(agent.id).await {
@@ -336,6 +348,11 @@ impl Runtime {
     /// news while the agent is busy, so notices never pile up as separate turns. A line on
     /// a `topic` already in the digest replaces it. Starts the agent if needed.
     pub async fn notify(&self, key: &AgentKey, topic: &str, line: &str) -> Result<(), CoreError> {
+        let stored = self.store().get_agent(key).await?;
+        if stored.plugin == EXTERNAL_PLUGIN {
+            let envelope = Envelope::new(MessageSource::Notice, line.to_owned());
+            return self.deliver(key, envelope, false).await.map(|_| ());
+        }
         let agent = self.start(key).await?;
         let live = self.live.lock().await.get(&agent.id).cloned();
         let mut digests = self.digests.lock().await;
@@ -405,6 +422,31 @@ impl Runtime {
             },
             None => (None, None),
         };
+        // Agents outside the hub get their messages when they ask for them.
+        let stored = self.store().get_agent(key).await?;
+        if stored.plugin == EXTERNAL_PLUGIN {
+            publish(
+                &self.bus,
+                EventKind::AgentInput {
+                    id: stored.id,
+                    message_id,
+                    text: text.clone(),
+                    queued: true,
+                    from: Some(from),
+                    reply_to,
+                    thread,
+                    reply_excerpt,
+                },
+            )
+            .await;
+            self.external
+                .lock()
+                .await
+                .entry(stored.id)
+                .or_default()
+                .push((message_id, from, text));
+            return Ok((message_id, true));
+        }
         let agent = self.start(key).await?;
         let live = self
             .live
@@ -512,6 +554,32 @@ impl Runtime {
         )
         .await;
         Ok(agent)
+    }
+
+    /// Hands an agent outside the hub its waiting messages; each counts as read (a turn
+    /// that started and ended).
+    pub async fn take_external(&self, id: AgentId) -> Vec<Waiting> {
+        let messages = self.external.lock().await.remove(&id).unwrap_or_default();
+        for (message_id, _, _) in &messages {
+            publish(
+                &self.bus,
+                EventKind::AgentTurnStarted {
+                    id,
+                    message_id: *message_id,
+                },
+            )
+            .await;
+            publish(
+                &self.bus,
+                EventKind::AgentTurnCompleted {
+                    id,
+                    message_id: *message_id,
+                    stop_reason: StopReason::EndTurn,
+                },
+            )
+            .await;
+        }
+        messages
     }
 
     /// Stops the agent's session. Stopping a stopped agent is fine.

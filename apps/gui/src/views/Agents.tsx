@@ -10,6 +10,7 @@ import {
   ErrorBox,
   Field,
   PERSONA_PRESETS,
+  Prose,
   StatusChip,
   agentTitle,
   agentTone,
@@ -19,11 +20,14 @@ import {
 } from "../components";
 import { useHubData } from "../hub";
 import { useArmed } from "../parts";
+import { ConnectExternal, ConnectInstructions } from "./External";
+import type { ConnectInfo } from "@bindings/ConnectInfo";
 
 /** The team: every agent as a colleague with a face, a title and a persona. */
 export function AgentsView() {
   const agents = useAgents();
-  const [editing, setEditing] = useState<"new" | Agent>();
+  const [editing, setEditing] = useState<"new" | "external" | Agent>();
+  const [connect, setConnect] = useState<ConnectInfo>();
   const list = agents.data ?? [];
 
   return (
@@ -32,16 +36,24 @@ export function AgentsView() {
         <span className="title">团队</span>
         <span className="chip">{list.length}</span>
         <div className="spacer" />
-        {editing !== "new" && (
-          <button className="primary" onClick={() => setEditing("new")}>
-            添加队友
-          </button>
+        {editing !== "new" && editing !== "external" && (
+          <>
+            <button className="ghost" onClick={() => setEditing("external")} title="让别处运行的 agent 通过 MCP 加入团队">
+              接入外部 agent
+            </button>
+            <button className="primary" onClick={() => setEditing("new")}>
+              添加队友
+            </button>
+          </>
         )}
       </div>
       <div className="page">
         <div className="page-inner team-page">
           {editing === "new" && <Editor onDone={(a) => (setEditing(undefined), a && navigate("s", a.name))} />}
+          {editing === "external" && <ConnectExternal onDone={() => setEditing(undefined)} />}
+          {connect && <ConnectInstructions info={connect} onDone={() => setConnect(undefined)} />}
           <ErrorBox error={agents.error} />
+          <TeamNotes />
           {agents.data && !list.length && editing !== "new" && (
             <div className="empty">
               <h1>组建你的团队</h1>
@@ -50,12 +62,17 @@ export function AgentsView() {
           )}
           <div className="team-grid">
             {list.map((agent) =>
-              editing !== "new" && editing?.id === agent.id ? (
+              typeof editing === "object" && editing.id === agent.id ? (
                 <div key={agent.id} className="team-wide">
                   <Editor agent={agent} onDone={() => setEditing(undefined)} />
                 </div>
               ) : (
-                <MemberCard key={agent.id} agent={agent} onEdit={() => setEditing(agent)} />
+                <MemberCard
+                  key={agent.id}
+                  agent={agent}
+                  onEdit={() => setEditing(agent)}
+                  onConnect={() => api.connectAgent(agent.name).then(setConnect)}
+                />
               ),
             )}
           </div>
@@ -65,7 +82,25 @@ export function AgentsView() {
   );
 }
 
-function MemberCard({ agent, onEdit }: { agent: Agent; onEdit: () => void }) {
+/** Notes the team keeps across runs (note_write with scope "team"). */
+function TeamNotes() {
+  const notes = useHubData(() => api.notes("team"), [], (e) => e.type === "note.written");
+  const list = notes.data?.notes ?? [];
+  if (!list.length) return null;
+  return (
+    <details className="notes-panel">
+      <summary>团队笔记 · {list.length}</summary>
+      {list.map((n) => (
+        <div key={n.key} className="note">
+          <code>{n.key}</code>
+          <Prose text={n.text} />
+        </div>
+      ))}
+    </details>
+  );
+}
+
+function MemberCard({ agent, onEdit, onConnect }: { agent: Agent; onEdit: () => void; onConnect: () => void }) {
   return (
     <div className="member">
       <div className="member-head">
@@ -94,6 +129,11 @@ function MemberCard({ agent, onEdit }: { agent: Agent; onEdit: () => void }) {
           @{agent.name}
         </span>
         <div className="spacer" />
+        {agent.plugin === "external" && (
+          <button className="ghost" onClick={onConnect} title="重新生成令牌和 MCP 配置">
+            连接配置
+          </button>
+        )}
         <button className="ghost" onClick={onEdit}>
           编辑
         </button>

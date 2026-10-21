@@ -8,6 +8,7 @@ pub mod host;
 pub mod human;
 pub mod landing;
 pub mod messaging;
+pub mod notes;
 pub mod plan;
 pub mod protocol;
 pub mod tasks;

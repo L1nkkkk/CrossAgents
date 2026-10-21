@@ -6,9 +6,11 @@ import type { Account } from "@bindings/Account";
 import type { AccountUsageGroup } from "@bindings/AccountUsageGroup";
 import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
 import type { Agent } from "@bindings/Agent";
+import type { ConnectInfo } from "@bindings/ConnectInfo";
 import type { CreateAccountRequest } from "@bindings/CreateAccountRequest";
 import type { HumanItem } from "@bindings/HumanItem";
 import type { LandMode } from "@bindings/LandMode";
+import type { ListNotesResponse } from "@bindings/ListNotesResponse";
 import type { ListQuestionsResponse } from "@bindings/ListQuestionsResponse";
 import type { LoginStarted } from "@bindings/LoginStarted";
 import type { QuotaResponse } from "@bindings/QuotaResponse";
@@ -101,6 +103,9 @@ export const api = {
   stopAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/stop`),
   setModel: (key: string, model: string | null) => request<Agent>("POST", `/v1/agents/${enc(key)}/model`, { model }),
   deleteAgent: (key: string) => request<void>("DELETE", `/v1/agents/${enc(key)}`),
+  connectAgent: (key: string) => request<ConnectInfo>("POST", `/v1/agents/${enc(key)}/connect`),
+  notes: (scope: "run" | "team", run?: string) =>
+    request<ListNotesResponse>("GET", `/v1/notes?scope=${scope}${run ? `&run=${enc(run)}` : ""}`),
   updateProfile: (key: string, profile: AgentProfile) => request<Agent>("POST", `/v1/agents/${enc(key)}/profile`, profile),
   transcript: (key: string) => request<Transcript>("GET", `/v1/agents/${enc(key)}/transcript`),
   listPlugins: () => request<ListPluginsResponse>("GET", "/v1/plugins"),

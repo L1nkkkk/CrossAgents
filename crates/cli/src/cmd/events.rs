@@ -87,6 +87,12 @@ pub fn summary(kind: &EventKind) -> String {
                 .unwrap_or_default()
         ),
         EventKind::HumanDismissed { id } => id.clone(),
+        EventKind::NoteWritten { key, text, .. } => format!(
+            "{key} {}",
+            text.as_deref()
+                .map(one_line)
+                .unwrap_or_else(|| "(deleted)".into())
+        ),
         EventKind::TaskProgress { key, text, .. } => format!("#{key} {}", one_line(text)),
         EventKind::TaskCommand {
             key,

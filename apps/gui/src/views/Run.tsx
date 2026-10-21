@@ -118,6 +118,7 @@ export function RunView({ runId, selectedTask }: { runId: string; selectedTask?:
           )}
           {run.note && run.status !== "awaiting_approval" && run.status !== "paused" && <div className="item-error">{run.note}</div>}
 
+          <RunNotes runId={run.id} />
           {tasks.length > 0 && (
             <section>
               <h2>
@@ -247,6 +248,24 @@ function Ending({ run, closing, onDone }: { run: Run; closing: boolean; onDone: 
         )}
       </div>
     </div>
+  );
+}
+
+/** Notes the run's agents keep for each other (note_write, scope "run"). */
+function RunNotes({ runId }: { runId: string }) {
+  const notes = useHubData(() => api.notes("run", runId), [runId], (e) => e.type === "note.written");
+  const list = notes.data?.notes ?? [];
+  if (!list.length) return null;
+  return (
+    <details className="notes-panel">
+      <summary>这个 run 的笔记 · {list.length}</summary>
+      {list.map((n) => (
+        <div key={n.key} className="note">
+          <code>{n.key}</code>
+          <Prose text={n.text} />
+        </div>
+      ))}
+    </details>
   );
 }
 
