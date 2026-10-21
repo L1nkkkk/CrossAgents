@@ -6,21 +6,43 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "typecheck": "tsc --noEmit",
-    "tauri": "tauri"
-  },
-  "dependencies": {
-    "@tauri-apps/api": "^2.12.4",
-    "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "typecheck": "tsc --noEmit && tsc -p electron --noEmit",
+    "electron:compile": "tsc -p electron",
+    "electron:dev": "npm run electron:compile && concurrently -k -n vite,electron \"vite\" \"electron . --dev-server-url=http://localhost:1420\"",
+    "electron:build": "npm run build && npm run electron:compile && electron-builder --win dir"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.12.3",
     "@types/node": "^24.0.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
+    "concurrently": "10.0.5",
+    "electron": "44.6.0",
+    "electron-builder": "26.15.3",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "typescript": "~5.9.3",
     "vite": "^8.3.4"
+  },
+  "description": "CrossAgents desktop GUI, a pure client of the hub API",
+  "main": "dist-electron/main.cjs",
+  "build": {
+    "appId": "dev.crossagents.gui",
+    "productName": "CrossAgents",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "dir"
+      ],
+      "icon": "build/icon.ico"
+    }
   }
 }
