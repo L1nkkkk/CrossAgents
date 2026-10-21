@@ -9,8 +9,8 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use chrono::Utc;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, AgentStatus, CoreError, EventBus, EventKind, McpServerSpec,
-    MessageSource, Role,
+    Agent, AgentId, AgentKey, AgentStatus, CoreError, Envelope, EventBus, EventKind, McpServerSpec,
+    MessageId, MessageSource, Role,
 };
 use crossagents_orchestrator::AgentHost;
 use tokio::sync::RwLock;
@@ -104,6 +104,29 @@ impl AgentHost for HubHost {
             .send(&AgentKey::Id(agent), text, from)
             .await
             .map(|_| ())
+    }
+
+    async fn send_envelope(
+        &self,
+        agent: AgentId,
+        envelope: Envelope,
+        now: bool,
+    ) -> Result<(), CoreError> {
+        let key = AgentKey::Id(agent);
+        if now {
+            self.runtime.send_now_envelope(&key, envelope).await
+        } else {
+            self.runtime.send_envelope(&key, envelope).await
+        }
+        .map(|_| ())
+    }
+
+    async fn withdraw(&self, agent: AgentId, message: MessageId) -> Result<(), CoreError> {
+        self.runtime.withdraw(&AgentKey::Id(agent), message).await
+    }
+
+    async fn notify(&self, agent: AgentId, topic: &str, line: &str) -> Result<(), CoreError> {
+        self.runtime.notify(&AgentKey::Id(agent), topic, line).await
     }
 
     async fn clone_agent(

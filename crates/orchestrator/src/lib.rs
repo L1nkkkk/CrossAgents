@@ -4,6 +4,7 @@
 
 pub mod engine;
 pub mod host;
+pub mod messaging;
 pub mod plan;
 pub mod prompts;
 pub mod tools;

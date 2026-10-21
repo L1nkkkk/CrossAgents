@@ -3,6 +3,7 @@
 pub mod accounts;
 pub mod api;
 pub mod collab;
+pub mod notices;
 pub mod paths;
 pub mod runtime;
 pub mod transcript;
@@ -134,6 +135,11 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         .context("cannot write hub.json")?;
 
     let shutdown = CancellationToken::new();
+    Arc::new(notices::Notices {
+        bus: bus.clone(),
+        runtime: runtime.clone(),
+    })
+    .start(shutdown.clone());
     let state = Arc::new(api::AppState {
         bus: bus.clone(),
         runtime: runtime.clone(),

@@ -6,4 +6,4 @@ import type { TaskId } from "./TaskId";
 /**
  * Who sent a message to an agent.
  */
-export type MessageSource = { "kind": "human" } | { "kind": "orchestrator", run_id: RunId, task_id?: TaskId, } | { "kind": "agent", agent_id: AgentId, };
+export type MessageSource = { "kind": "human" } | { "kind": "orchestrator", run_id: RunId, task_id?: TaskId, } | { "kind": "agent", agent_id: AgentId, } | { "kind": "notice" };

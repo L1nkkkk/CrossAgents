@@ -623,7 +623,7 @@ async fn my_tools(
     Extension(agent): Extension<Agent>,
 ) -> Json<ListToolsResponse> {
     Json(ListToolsResponse {
-        tools: state.orchestrator.tools_for(agent.role),
+        tools: state.orchestrator.tools_for(&agent),
     })
 }
 

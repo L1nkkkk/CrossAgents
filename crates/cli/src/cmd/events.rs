@@ -73,6 +73,15 @@ pub fn summary(kind: &EventKind) -> String {
         EventKind::AgentInputWithdrawn { id, message_id } => {
             format!("{} withdrew {}", short(id), short(message_id))
         }
+        EventKind::AgentInputUpdated { id, text, .. } => {
+            format!("{} digest {}", short(id), one_line(text))
+        }
+        EventKind::ReminderFired { owner, note, .. } => {
+            format!("{} {}", short(owner), one_line(note))
+        }
+        EventKind::WatchTriggered { owner, line, .. } => {
+            format!("{} {}", short(owner), one_line(line))
+        }
         EventKind::AgentTurnStarted { id, .. } => short(id),
         EventKind::AgentOutput { id, stream, text } => {
             format!("{} [{}] {}", short(id), enum_name(stream), one_line(text))

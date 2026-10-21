@@ -9,6 +9,7 @@ pub mod error;
 pub mod event;
 pub mod ids;
 pub mod model;
+pub mod notify;
 pub mod state;
 pub mod store;
 pub mod tool;
@@ -25,12 +26,13 @@ pub use driver::{
     TurnOutcome,
 };
 pub use error::CoreError;
-pub use event::{EVENT_SCHEMA_VERSION, Event, EventKind, EventSink, MessageSource};
+pub use event::{EVENT_SCHEMA_VERSION, Envelope, Event, EventKind, EventSink, MessageSource};
 pub use ids::{AgentId, MessageId, RunId, SessionId, TaskId};
 pub use model::{
     Agent, AgentProfile, AgentStatus, CheckResult, PlannedTask, Role, Run, RunConfig, RunStatus,
     Scope, Task, TaskReport, TaskSpec, validate_agent_name,
 };
+pub use notify::{Reminder, Watch, WatchOn, WatchTarget};
 pub use state::TaskStatus;
 pub use store::{AgentKey, Store};
 pub use tool::ToolInfo;

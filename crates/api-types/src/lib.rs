@@ -114,6 +114,17 @@ pub struct TranscriptTurn {
     pub input: String,
     /// Who sent the message; `None` for messages recorded before senders were.
     pub from: Option<MessageSource>,
+    /// The message this one answers, the conversation it belongs to, and the start of the
+    /// message it answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reply_to: Option<MessageId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub thread: Option<MessageId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reply_excerpt: Option<String>,
     pub sent_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,

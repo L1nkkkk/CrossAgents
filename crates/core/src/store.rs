@@ -5,8 +5,9 @@ use async_trait::async_trait;
 use crate::account::Account;
 use crate::error::CoreError;
 use crate::event::{Event, EventKind};
-use crate::ids::{AgentId, RunId, TaskId};
+use crate::ids::{AgentId, MessageId, RunId, TaskId};
 use crate::model::{Agent, AgentProfile, AgentStatus, Run, Task};
+use crate::notify::{Reminder, Watch};
 
 /// Look an agent up by id or by its unique name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,4 +117,43 @@ pub trait Store: Send + Sync {
     async fn get_account(&self, id: &str) -> Result<Account, CoreError>;
     async fn list_accounts(&self) -> Result<Vec<Account>, CoreError>;
     async fn delete_account(&self, id: &str) -> Result<(), CoreError>;
+
+    async fn insert_reminder(&self, reminder: &Reminder) -> Result<(), CoreError> {
+        let _ = reminder;
+        Err(CoreError::Unsupported("reminders".into()))
+    }
+    /// `owner`'s reminders, or everyone's; soonest first.
+    async fn list_reminders(&self, owner: Option<AgentId>) -> Result<Vec<Reminder>, CoreError> {
+        let _ = owner;
+        Ok(Vec::new())
+    }
+    /// Fails with [`CoreError::NotFound`] if there is no such reminder.
+    async fn delete_reminder(&self, id: &str) -> Result<(), CoreError> {
+        Err(CoreError::NotFound {
+            kind: "reminder",
+            id: id.to_owned(),
+        })
+    }
+    async fn insert_watch(&self, watch: &Watch) -> Result<(), CoreError> {
+        let _ = watch;
+        Err(CoreError::Unsupported("watches".into()))
+    }
+    async fn list_watches(&self, owner: Option<AgentId>) -> Result<Vec<Watch>, CoreError> {
+        let _ = owner;
+        Ok(Vec::new())
+    }
+    async fn delete_watch(&self, id: &str) -> Result<(), CoreError> {
+        Err(CoreError::NotFound {
+            kind: "watch",
+            id: id.to_owned(),
+        })
+    }
+    /// The thread and text of a message delivered earlier, if it is known.
+    async fn find_message(
+        &self,
+        id: MessageId,
+    ) -> Result<Option<(Option<MessageId>, String)>, CoreError> {
+        let _ = id;
+        Ok(None)
+    }
 }

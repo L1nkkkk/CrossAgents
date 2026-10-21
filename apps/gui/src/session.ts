@@ -80,6 +80,9 @@ function apply(t: Transcript, event: HubEvent): Transcript {
         message_id: event.data.message_id,
         input: event.data.text,
         from: event.data.from ?? null,
+        reply_to: event.data.reply_to,
+        thread: event.data.thread,
+        reply_excerpt: event.data.reply_excerpt,
         sent_at: event.ts,
         started_at: null,
         completed_at: null,
@@ -87,6 +90,11 @@ function apply(t: Transcript, event: HubEvent): Transcript {
         items: [],
       };
       return { ...t, turns: [...turns, turn], last_seq: seq };
+    }
+    case "agent.input_updated": {
+      if (event.data.id !== id) return t;
+      const { message_id, text } = event.data;
+      return { ...t, turns: turns.map((x) => (x.message_id === message_id && !x.started_at ? { ...x, input: text } : x)), last_seq: seq };
     }
     case "agent.input_withdrawn": {
       if (event.data.id !== id) return t;

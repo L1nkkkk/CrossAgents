@@ -11,7 +11,12 @@ export type TranscriptTurn = { message_id: MessageId, input: string,
 /**
  * Who sent the message; `None` for messages recorded before senders were.
  */
-from: MessageSource | null, sent_at: string, started_at: string | null, completed_at: string | null, 
+from: MessageSource | null, 
+/**
+ * The message this one answers, the conversation it belongs to, and the start of the
+ * message it answers.
+ */
+reply_to?: MessageId, thread?: MessageId, reply_excerpt?: string, sent_at: string, started_at: string | null, completed_at: string | null, 
 /**
  * Set once the turn has ended.
  */

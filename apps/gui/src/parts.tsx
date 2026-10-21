@@ -192,7 +192,12 @@ function TcSection({ title, tone, children }: { title: string; tone?: "warn" | "
 }
 
 function preview(text: string): string {
-  const line = text.trim().split("\n").find((l) => l.trim()) ?? "";
+  // Skip the "Message from alice:" header agent_send adds; the sender is shown already.
+  const line =
+    text
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l && !/^Message from .*:$/.test(l)) ?? "";
   return line.length > 120 ? line.slice(0, 120) + "…" : line;
 }
 
@@ -219,8 +224,15 @@ export function PeerMessage({ turn, agents, tree }: { turn: TranscriptTurn; agen
             来自 {sender && <Avatar agent={sender} size={16} />}
             {sender ? displayName(sender) : "另一个 agent"}
           </span>
+        ) : from.kind === "notice" ? (
+          <span className="peer-from">通知</span>
         ) : (
           <span className="peer-from">编排</span>
+        )}
+        {turn.reply_excerpt && (
+          <span className="peer-reply" title="回复的消息">
+            ↩ 回复「{turn.reply_excerpt}」
+          </span>
         )}
         {found && (
           <span className="peer-task">
