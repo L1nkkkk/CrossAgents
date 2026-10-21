@@ -23,13 +23,19 @@ pub trait WorkspaceProvider: Send + Sync {
     async fn commit_all(&self, path: &Path, message: &str) -> Result<bool, CoreError>;
     /// Summary of what `path` changed relative to `base`.
     async fn diff_stat(&self, path: &Path, base: &str) -> Result<String, CoreError>;
+    /// What `path` changed relative to `base`, committed or not (new files included),
+    /// limited to `paths` when given. A unified diff.
+    async fn diff(&self, path: &Path, base: &str, paths: &[String]) -> Result<String, CoreError>;
     /// Merges `branch` into the branch checked out at `into`. On conflict the merge is
-    /// aborted and the error describes it.
+    /// aborted and the error describes it: the conflicting files and their conflict hunks.
     async fn merge(&self, into: &Path, branch: &str, message: &str) -> Result<(), CoreError>;
     /// Removes the working copy at `path`; with `delete_branch`, also `branch`.
     async fn remove(&self, repo: &Path, path: &Path, branch: Option<&str>)
     -> Result<(), CoreError>;
 }
+
+/// Bytes of conflict hunks a failed merge reports.
+const CONFLICT_DETAIL: usize = 4_000;
 
 /// [`WorkspaceProvider`] using `git worktree`.
 #[derive(Debug, Clone, Default)]
@@ -120,6 +126,18 @@ impl WorkspaceProvider for GitWorkspaces {
         git(path, &["diff", "--stat", &format!("{base}...HEAD")]).await
     }
 
+    async fn diff(&self, path: &Path, base: &str, paths: &[String]) -> Result<String, CoreError> {
+        // Record new files as "intended to add" so they show up; nothing is staged.
+        git(path, &["add", "-A", "--intent-to-add"]).await?;
+        let merge_base = git(path, &["merge-base", base, "HEAD"]).await?;
+        let mut args = vec!["diff", merge_base.as_str()];
+        if !paths.is_empty() {
+            args.push("--");
+            args.extend(paths.iter().map(String::as_str));
+        }
+        git(path, &args).await
+    }
+
     async fn merge(&self, into: &Path, branch: &str, message: &str) -> Result<(), CoreError> {
         let mut args: Vec<&str> = AUTHOR.to_vec();
         args.extend([
@@ -132,10 +150,25 @@ impl WorkspaceProvider for GitWorkspaces {
             branch,
         ]);
         if let Err(err) = git(into, &args).await {
+            // Say what conflicts before putting the tree back.
+            let files = git(into, &["diff", "--name-only", "--diff-filter=U"])
+                .await
+                .unwrap_or_default();
+            let mut hunks = git(into, &["diff"]).await.unwrap_or_default();
+            if hunks.len() > CONFLICT_DETAIL {
+                let mut end = CONFLICT_DETAIL;
+                while !hunks.is_char_boundary(end) {
+                    end -= 1;
+                }
+                hunks.truncate(end);
+                hunks.push_str("\n…");
+            }
             let _ = git(into, &["merge", "--abort"]).await;
-            return Err(CoreError::Conflict(format!(
-                "merge of {branch} failed: {err}"
-            )));
+            return Err(CoreError::Conflict(if files.is_empty() {
+                format!("merge of {branch} failed: {err}")
+            } else {
+                format!("merge of {branch} conflicts in:\n{files}\n\n{hunks}")
+            }));
         }
         Ok(())
     }
@@ -197,6 +230,13 @@ mod tests {
         assert!(ws.commit_all(&task, "task a").await.unwrap());
         let stat = ws.diff_stat(&task, "ca/run").await.unwrap();
         assert!(stat.contains("a.txt"), "{stat}");
+        // Uncommitted and new files show in the full diff.
+        std::fs::write(task.join("b.txt"), "b\n").unwrap();
+        let diff = ws.diff(&task, "ca/run", &[]).await.unwrap();
+        assert!(diff.contains("+a") && diff.contains("b.txt"), "{diff}");
+        let only_b = ws.diff(&task, "ca/run", &["b.txt".into()]).await.unwrap();
+        assert!(!only_b.contains("a.txt"), "{only_b}");
+        std::fs::remove_file(task.join("b.txt")).unwrap();
 
         ws.merge(&integration, "ca/run-a", "merge a").await.unwrap();
         assert!(integration.join("a.txt").exists());
@@ -227,6 +267,7 @@ mod tests {
         ws.merge(&integration, "ca/r-x", "x").await.unwrap();
         let err = ws.merge(&integration, "ca/r-y", "y").await.unwrap_err();
         assert!(matches!(err, CoreError::Conflict(_)), "{err}");
+        assert!(err.to_string().contains("conflicts in:\nREADME"), "{err}");
         // The integration tree is clean again.
         let status = git(&integration, &["status", "--porcelain"]).await.unwrap();
         assert!(status.is_empty(), "{status}");

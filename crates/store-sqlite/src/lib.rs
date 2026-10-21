@@ -711,6 +711,8 @@ mod tests {
         let mut tasks = Vec::new();
         for key in ["a", "b"] {
             let task = Task {
+                issuer: None,
+                progress: None,
                 id: TaskId::new(),
                 run_id: run.id,
                 key: key.into(),

@@ -30,11 +30,6 @@ pub fn validate(tasks: &[PlannedTask]) -> Result<(), String> {
         if task.spec.goal.trim().is_empty() {
             problems.push(format!("task {key:?} needs spec.goal"));
         }
-        if task.spec.acceptance.iter().all(|c| c.trim().is_empty()) {
-            problems.push(format!(
-                "task {key:?} needs at least one spec.acceptance command"
-            ));
-        }
     }
     for task in tasks {
         for dep in &task.depends_on {
@@ -200,6 +195,8 @@ mod tests {
 
     fn task(key: &str, status: TaskStatus, allow: &[&str], deps: &[&str]) -> Task {
         Task {
+            issuer: None,
+            progress: None,
             id: TaskId::new(),
             run_id: RunId::new(),
             key: key.into(),
@@ -238,9 +235,10 @@ mod tests {
         assert!(err.contains("unknown task \"x\""), "{err}");
         assert!(err.contains("duplicate task key"), "{err}");
         assert!(err.contains("\"Bad\""), "{err}");
+        // Acceptance commands are optional: the issuer checks the result (H1).
         let mut no_check = planned("c", &[]);
         no_check.spec.acceptance.clear();
-        assert!(validate(&[no_check]).unwrap_err().contains("acceptance"));
+        assert!(validate(&[no_check]).is_ok());
     }
 
     #[test]

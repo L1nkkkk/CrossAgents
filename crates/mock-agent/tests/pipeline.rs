@@ -1,29 +1,51 @@
-//! The fixed pipeline end to end, with mock agents driven by directives (no LLM):
-//! plan → approve → dispatch → verify → retry / escalate → merge → finish.
+//! Runs driven by their agents (docs/tasks/H1.md H1-3), with mock agents driven by
+//! directives: plan → approve → dispatch → the issuer checks → accept / rework / drop.
+//!
+//! Mock agents act only on directives in what they receive, so each test writes the next
+//! agent's step into the message that agent will get: a worker's summary carries the
+//! planner's `task_accept`, a question carries the `task_answer`.
 
 mod common;
 
 use std::path::Path;
 
 use common::{TestHub, git_repo, types};
-use crossagents_api_types::{EventKind, RunStatus};
+use crossagents_api_types::{EventKind, RunStatus, TaskStatus};
 use serde_json::{Value, json};
 
-/// A worker goal: run `directives`, then report completion.
-fn goal(directives: &str) -> String {
-    format!(r#"{directives} [call task_complete {{"task_id":"{{task_id}}","summary":"done"}}]"#)
+fn call(tool: &str, args: Value) -> String {
+    format!("[call {tool} {args}]")
+}
+
+/// The planner's step after a task is reported: accept it.
+fn accept(key: &str) -> String {
+    call("task_accept", json!({ "task": key }))
+}
+
+/// A worker goal: run `directives`, then report done with `summary` (which the issuer reads).
+fn goal(directives: &str, summary: &str) -> String {
+    format!(
+        "{directives} {}",
+        call(
+            "task_complete",
+            json!({ "task_id": "{task_id}", "summary": summary })
+        )
+    )
 }
 
 /// The planner's request: submit `tasks` as the plan.
 fn request(tasks: Value) -> String {
-    format!("Build it. [call plan_submit {}]", json!({ "tasks": tasks }))
+    format!(
+        "Build it. {}",
+        call("plan_submit", json!({ "tasks": tasks }))
+    )
 }
 
-fn task(key: &str, goal: String, check: &str, deps: &[&str]) -> Value {
+fn task(key: &str, goal: String, deps: &[&str]) -> Value {
     json!({
         "key": key,
         "title": format!("task {key}"),
-        "spec": { "goal": goal, "acceptance": [check] },
+        "spec": { "goal": goal },
         "depends_on": deps,
     })
 }
@@ -59,6 +81,10 @@ fn run_status_is(id: &str, want: RunStatus) -> impl Fn(&crossagents_api_types::E
     }
 }
 
+fn task_is(key: &'static str, want: TaskStatus) -> impl Fn(&crossagents_api_types::Event) -> bool {
+    move |e| matches!(&e.kind, EventKind::TaskStatusChanged { key: k, to, .. } if k == key && *to == want)
+}
+
 fn git_show(repo: &Path, spec: &str) -> String {
     let out = std::process::Command::new("git")
         .args(["show", spec])
@@ -68,44 +94,39 @@ fn git_show(repo: &Path, spec: &str) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
+async fn detail(t: &TestHub, id: &str) -> Value {
+    t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap()
+}
+
 #[tokio::test]
-async fn plan_approve_retry_and_merge() {
+async fn the_planner_accepts_what_workers_report() {
     let repo = git_repo();
     let t = setup(repo.path()).await;
     let mut w = t.watch().await;
 
-    let plan = json!([
-        task(
-            "a",
-            goal("[write a.txt=alpha]"),
-            &has("a.txt", "alpha"),
-            &[]
-        ),
-        task(
-            "b",
-            goal("[write@1 b.txt=wrong] [write@2 b.txt=beta]"),
-            &has("b.txt", "beta"),
-            &["a"],
-        ),
-    ]);
-    let id = start_run(&t, request(plan), json!({})).await;
+    let mut a = task(
+        "a",
+        goal("[write a.txt=alpha]", &format!("wrote a {}", accept("a"))),
+        &[],
+    );
+    a["spec"]["acceptance"] = json!([has("a.txt", "alpha")]);
+    let b = task(
+        "b",
+        goal("[write b.txt=beta]", &format!("wrote b {}", accept("b"))),
+        &["a"],
+    );
+    let id = start_run(&t, request(json!([a, b])), json!({})).await;
     w.until(
-        "plan awaiting approval",
+        "awaiting approval",
         run_status_is(&id, RunStatus::AwaitingApproval),
     )
     .await;
-
-    let detail: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
-    assert_eq!(detail["run"]["plan"].as_array().unwrap().len(), 2);
-    assert!(detail["tasks"].as_array().unwrap().is_empty());
-
     let resp = t.post(&format!("/v1/runs/{id}/approve"), json!({})).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
-
     w.until("run completed", run_status_is(&id, RunStatus::Completed))
         .await;
 
-    // b failed its first check, then passed.
+    // a's optional check ran when its worker reported; b had none.
     let checks: Vec<(String, bool)> = w
         .seen
         .iter()
@@ -114,24 +135,44 @@ async fn plan_approve_retry_and_merge() {
             _ => None,
         })
         .collect();
-    assert_eq!(
-        checks,
-        [("a".into(), true), ("b".into(), false), ("b".into(), true)],
-        "{:?}",
-        types(&w.seen)
-    );
+    assert_eq!(checks, [("a".into(), true)], "{:?}", types(&w.seen));
 
-    let detail: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
+    let detail = detail(&t, &id).await;
     let branch = detail["run"]["branch"].as_str().unwrap();
     for task in detail["tasks"].as_array().unwrap() {
         assert_eq!(task["status"], "merged", "{task}");
+        assert_eq!(task["issuer"], detail["run"]["planner"]);
     }
     assert_eq!(git_show(repo.path(), &format!("{branch}:a.txt")), "alpha");
     assert_eq!(git_show(repo.path(), &format!("{branch}:b.txt")), "beta");
-    // The human's checkout is untouched.
-    assert!(!repo.path().join("a.txt").exists());
+    assert!(
+        !repo.path().join("a.txt").exists(),
+        "the person's checkout is untouched"
+    );
 
-    // Temporary workers are gone; only the two templates remain.
+    // The worker's own words reached the planner, from the worker.
+    let planner: Value = t
+        .get("/v1/agents/boss/transcript")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let report = planner["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|turn| turn["input"].as_str().unwrap().starts_with("wrote a"))
+        .expect("a's report");
+    assert_eq!(report["from"]["kind"], "agent");
+    assert!(
+        report["input"]
+            .as_str()
+            .unwrap()
+            .contains("checks: 1/1 passed"),
+        "{report}"
+    );
+
+    // Temporary workers are gone; only the two teammates remain.
     let agents: Value = t.get("/v1/agents").await.json().await.unwrap();
     let names: Vec<&str> = agents["agents"]
         .as_array()
@@ -143,67 +184,206 @@ async fn plan_approve_retry_and_merge() {
 }
 
 #[tokio::test]
-async fn failing_task_escalates_to_stronger_worker() {
+async fn rework_sends_the_task_back_with_notes() {
     let repo = git_repo();
     let t = setup(repo.path()).await;
-    t.add_agent_in("senior", Some("opus"), "worker", repo.path())
-        .await;
     let mut w = t.watch().await;
 
-    // Only the opus model writes the right content.
-    let plan = json!([task(
-        "c",
-        goal("[write#mock-haiku c.txt=bad] [write#mock-opus c.txt=good]"),
-        &has("c.txt", "good"),
-        &[]
-    )]);
+    let rework = call(
+        "task_rework",
+        json!({ "task": "b", "notes": "it should say beta" }),
+    );
+    let worker = format!(
+        "[write@1 b.txt=wrong] [write@2 b.txt=beta] {} {}",
+        call(
+            "task_complete",
+            json!({ "task_id": "{task_id}", "summary": format!("v1 {rework}") })
+        )
+        .replacen("[call ", "[call@1 ", 1),
+        call(
+            "task_complete",
+            json!({ "task_id": "{task_id}", "summary": format!("v2 {}", accept("b")) })
+        )
+        .replacen("[call ", "[call@2 ", 1),
+    );
     let id = start_run(
         &t,
-        request(plan),
-        json!({ "escalate": "senior", "auto_approve": true, "max_attempts": 1 }),
+        request(json!([task("b", worker, &[])])),
+        json!({ "policy": { "plan_approval": "auto" } }),
     )
     .await;
     w.until("run completed", run_status_is(&id, RunStatus::Completed))
         .await;
-
-    let detail: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
+    let detail = detail(&t, &id).await;
     let task = &detail["tasks"][0];
-    assert_eq!(task["status"], "merged");
-    assert_eq!(task["escalated"], true);
+    assert_eq!(task["attempts"], 2, "{task}");
     let branch = detail["run"]["branch"].as_str().unwrap();
-    assert_eq!(git_show(repo.path(), &format!("{branch}:c.txt")), "good");
+    assert_eq!(git_show(repo.path(), &format!("{branch}:b.txt")), "beta");
 }
 
 #[tokio::test]
-async fn silent_worker_is_nudged_then_fails_the_run() {
+async fn a_silent_worker_stalls_and_its_issuer_hears_it() {
     let repo = git_repo();
     let t = setup(repo.path()).await;
     let mut w = t.watch().await;
 
-    // The worker never reports; a dependent task must not start.
+    // The worker never reports; the dependent task must not start.
     let plan = json!([
-        task("d", "[write d.txt=x]".into(), &has("d.txt", "x"), &[]),
-        task("e", goal("[write e.txt=y]"), &has("e.txt", "y"), &["d"]),
+        task("d", "[write d.txt=x]".into(), &[]),
+        task("e", goal("[write e.txt=y]", "done"), &["d"]),
     ]);
+    let id = start_run(&t, request(plan), json!({ "auto_approve": true })).await;
+    w.until("d stalled", task_is("d", TaskStatus::Stalled))
+        .await;
+    let boss: Value = t.get("/v1/agents/boss").await.json().await.unwrap();
+    let boss_id = boss["id"].as_str().unwrap().to_owned();
+    w.until("issuer told", |e| {
+        matches!(&e.kind, EventKind::AgentInput { id, text, .. } | EventKind::AgentInputUpdated { id, text, .. }
+            if id.to_string() == boss_id && text.contains("#d") && text.contains("stalled"))
+    })
+    .await;
+
+    let detail = detail(&t, &id).await;
+    assert_eq!(detail["run"]["status"], "running");
+    assert_eq!(detail["tasks"][0]["status"], "stalled");
+    assert_eq!(detail["tasks"][1]["status"], "pending");
+    // Nobody nudged the worker: it got its task once.
+    let worker_inputs = w
+        .seen
+        .iter()
+        .filter(|e| matches!(&e.kind, EventKind::AgentInput { text, .. } if text.starts_with("Task #d")))
+        .count();
+    assert_eq!(worker_inputs, 1);
+}
+
+#[tokio::test]
+async fn questions_go_to_the_issuer_and_answers_come_back() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+
+    // The planner's answer carries the worker's next steps; the question carries the answer.
+    let complete = call(
+        "task_complete",
+        json!({ "task_id": "{task_id}", "summary": format!("blue {}", accept("h")) }),
+    );
+    let answer = call(
+        "task_answer",
+        json!({ "task": "h", "answer": format!("[write color.txt=blue] {complete}") }),
+    );
+    let ask = call(
+        "task_ask",
+        json!({ "task_id": "{task_id}", "question": format!("which color? {answer}") }),
+    );
     let id = start_run(
         &t,
-        request(plan),
-        json!({ "auto_approve": true, "max_attempts": 1 }),
+        request(json!([task("h", ask, &[])])),
+        json!({ "auto_approve": true }),
     )
     .await;
-    w.until("run failed", run_status_is(&id, RunStatus::Failed))
+    w.until("run completed", run_status_is(&id, RunStatus::Completed))
         .await;
+    assert!(w.seen.iter().any(task_is("h", TaskStatus::WaitingAnswer)));
+    let detail = detail(&t, &id).await;
+    let branch = detail["run"]["branch"].as_str().unwrap();
+    assert_eq!(
+        git_show(repo.path(), &format!("{branch}:color.txt")),
+        "blue"
+    );
+}
 
-    let detail: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
-    assert_eq!(detail["tasks"][0]["status"], "failed");
-    assert_eq!(detail["tasks"][0]["nudges"], 2);
-    assert_eq!(detail["tasks"][1]["status"], "cancelled");
-    assert!(
-        detail["tasks"][0]["report"]["failure"]
+#[tokio::test]
+async fn a_reviewer_judges_and_the_issuer_decides() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    t.add_agent_in("critic", Some("opus"), "reviewer", repo.path())
+        .await;
+    let mut w = t.watch().await;
+
+    // Haiku directives are the worker's, opus ones the reviewer's (the planner only ever
+    // sees the goal inside its plan, where directives are not run).
+    let request_review = call(
+        "review_request",
+        json!({ "task": "g", "reviewer": "critic" }),
+    );
+    let verdict = call(
+        "review_submit",
+        json!({ "task_id": "{task_id}", "approve": true, "notes": format!("lgtm {}", accept("g")) }),
+    )
+    .replacen("[call ", "[call#mock-opus ", 1);
+    let worker = format!(
+        "[write#mock-haiku g.txt=v1] {} {verdict}",
+        call(
+            "task_complete",
+            json!({ "task_id": "{task_id}", "summary": format!("wrote g {request_review}") })
+        )
+        .replacen("[call ", "[call#mock-haiku ", 1),
+    );
+    let id = start_run(
+        &t,
+        request(json!([task("g", worker, &[])])),
+        json!({ "auto_approve": true }),
+    )
+    .await;
+    w.until("run completed", run_status_is(&id, RunStatus::Completed))
+        .await;
+    assert!(w.seen.iter().any(task_is("g", TaskStatus::Reviewing)));
+    let detail = detail(&t, &id).await;
+    assert_eq!(
+        detail["tasks"][0]["report"]["review"]
             .as_str()
             .unwrap()
-            .contains("stopped reporting")
+            .split(' ')
+            .next(),
+        Some("lgtm")
     );
+}
+
+#[tokio::test]
+async fn a_conflict_is_reported_and_nothing_merges() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+
+    // Both tasks rewrite README although their scopes say otherwise, so they run side by
+    // side and the second accept conflicts.
+    let mut x = task(
+        "x",
+        goal("[write README=one]", &format!("x {}", accept("x"))),
+        &[],
+    );
+    x["spec"]["scope"] = json!({ "allow": ["x/**"] });
+    let mut y = task(
+        "y",
+        goal("[write README=two]", &format!("y {}", accept("y"))),
+        &[],
+    );
+    y["spec"]["scope"] = json!({ "allow": ["y/**"] });
+    let id = start_run(&t, request(json!([x, y])), json!({ "auto_approve": true })).await;
+    let boss: Value = t.get("/v1/agents/boss").await.json().await.unwrap();
+    let boss_id = boss["id"].as_str().unwrap().to_owned();
+    // Wait until the planner has tried both accepts.
+    let mut turns = 0;
+    while !w.output().contains("conflicts in") {
+        w.until("planner turn", |e| {
+            matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if id.to_string() == boss_id)
+        })
+        .await;
+        turns += 1;
+        assert!(turns < 8, "no conflict reported: {}", w.output());
+    }
+    let detail = detail(&t, &id).await;
+    let statuses: Vec<&str> = detail["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["status"].as_str().unwrap())
+        .collect();
+    assert!(
+        statuses.contains(&"merged") && statuses.contains(&"passed"),
+        "{statuses:?}"
+    );
+    assert_eq!(detail["run"]["status"], "running");
 }
 
 #[tokio::test]
@@ -212,7 +392,7 @@ async fn reject_then_cancel() {
     let t = setup(repo.path()).await;
     let mut w = t.watch().await;
 
-    let plan = json!([task("f", goal("[write f.txt=1]"), &has("f.txt", "1"), &[])]);
+    let plan = json!([task("f", goal("[write f.txt=1]", "done"), &[])]);
     let id = start_run(&t, request(plan), json!({})).await;
     w.until(
         "awaiting approval",
@@ -270,86 +450,6 @@ async fn run_needs_a_git_repository() {
     assert_eq!(resp.status(), 409, "{}", resp.text().await.unwrap());
 }
 
-#[tokio::test]
-async fn reviewer_rejects_once_then_approves() {
-    let repo = git_repo();
-    let t = setup(repo.path()).await;
-    t.add_agent_in("critic", Some("opus"), "reviewer", repo.path())
-        .await;
-    let mut w = t.watch().await;
-
-    // Haiku directives are the worker's, opus directives the reviewer's.
-    let goal = r#"[write@1#mock-haiku g.txt=v1] [write@2#mock-haiku g.txt=v2]
-        [call#mock-haiku task_complete {"task_id":"{task_id}","summary":"wrote g"}]
-        [call@1#mock-opus review_submit {"task_id":"{task_id}","approve":false,"notes":"needs v2"}]
-        [call@2#mock-opus review_submit {"task_id":"{task_id}","approve":true,"notes":"lgtm"}]"#;
-    let plan = json!([task("g", goal.into(), &has("g.txt", "v"), &[])]);
-    let id = start_run(
-        &t,
-        request(plan),
-        json!({ "reviewer": "critic", "auto_approve": true }),
-    )
-    .await;
-    w.until("run completed", run_status_is(&id, RunStatus::Completed))
-        .await;
-
-    let detail: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
-    let task = &detail["tasks"][0];
-    assert_eq!(task["status"], "merged");
-    let errors: Vec<String> = w
-        .seen
-        .iter()
-        .filter_map(|e| match &e.kind {
-            EventKind::AgentError { message, .. } => Some(message.clone()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(task["attempts"], 2, "{errors:#?}");
-    assert_eq!(task["report"]["review"], "lgtm");
-    let branch = detail["run"]["branch"].as_str().unwrap();
-    assert_eq!(git_show(repo.path(), &format!("{branch}:g.txt")), "v2");
-    let reviews = w
-        .seen
-        .iter()
-        .filter(|e| matches!(&e.kind, EventKind::TaskStatusChanged { to, .. } if *to == crossagents_api_types::TaskStatus::Reviewing))
-        .count();
-    assert_eq!(reviews, 2);
-}
-
-#[tokio::test]
-async fn worker_asks_and_planner_answers() {
-    let repo = git_repo();
-    let t = setup(repo.path()).await;
-    let mut w = t.watch().await;
-
-    let answer =
-        r#"[write color.txt=blue] [call task_complete {"task_id":"{task_id}","summary":"blue"}]"#;
-    let worker_goal =
-        r#"[call task_ask {"task_id":"{task_id}","question":"which color?"}]"#.to_owned();
-    let plan = json!([task("h", worker_goal, &has("color.txt", "blue"), &[])]);
-    // The planner's directives are replayed when the question (with a task_id) arrives.
-    let req = format!(
-        "{} [call task_answer {}]",
-        request(plan),
-        json!({ "task_id": "{task_id}", "answer": answer })
-    );
-    let id = start_run(&t, req, json!({ "auto_approve": true })).await;
-    w.until("run completed", run_status_is(&id, RunStatus::Completed))
-        .await;
-
-    let saw_question = w.seen.iter().any(|e| {
-        matches!(&e.kind, EventKind::TaskStatusChanged { to, .. }
-            if *to == crossagents_api_types::TaskStatus::WaitingAnswer)
-    });
-    assert!(saw_question);
-    let detail: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
-    let branch = detail["run"]["branch"].as_str().unwrap();
-    assert_eq!(
-        git_show(repo.path(), &format!("{branch}:color.txt")),
-        "blue"
-    );
-}
-
 /// Models of the worker clones created for each task key.
 fn clone_models(seen: &[crossagents_api_types::Event]) -> Vec<(String, Option<String>)> {
     let mut out: Vec<(String, Option<String>)> = seen
@@ -385,30 +485,27 @@ async fn planner_assigns_tasks_by_specialty() {
     assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
     let mut w = t.watch().await;
 
-    let mut a = task(
-        "a",
-        goal("[write a.txt=alpha]"),
-        &has("a.txt", "alpha"),
-        &[],
-    );
+    let mut a = task("a", goal("[write a.txt=alpha]", &accept("a")), &[]);
     a["assignee"] = json!("sec");
-    let b = task("b", goal("[write b.txt=beta]"), &has("b.txt", "beta"), &[]);
+    let b = task("b", goal("[write b.txt=beta]", &accept("b")), &[]);
     let id = start_run(&t, request(json!([a, b])), json!({})).await;
     w.until(
-        "plan awaiting approval",
+        "awaiting approval",
         run_status_is(&id, RunStatus::AwaitingApproval),
     )
     .await;
 
-    // The planner was told who is on the team and what they are good at.
+    // The planner got the person's request as theirs, then the roster.
     let planner: Value = t
         .get("/v1/agents/boss/transcript")
         .await
         .json()
         .await
         .unwrap();
-    let kickoff = planner["turns"][0]["input"].as_str().unwrap();
-    assert!(kickoff.contains("Your team"), "{kickoff}");
+    let first = &planner["turns"][0];
+    assert_eq!(first["from"]["kind"], "human", "{first}");
+    let kickoff = first["input"].as_str().unwrap();
+    assert!(kickoff.starts_with("Build it."), "{kickoff}");
     assert!(
         kickoff.contains("- sec — Rex, Security engineer · opus. You harden code."),
         "{kickoff}"
@@ -435,45 +532,17 @@ async fn planner_assigns_tasks_by_specialty() {
             ("b".into(), Some("haiku".into()))
         ]
     );
-    let sec: Value = t.get("/v1/agents/sec").await.json().await.unwrap();
-    let detail: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
-    let template = |key: &str| {
-        detail["tasks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|t| t["key"] == key)
-            .unwrap()["worker_template"]
-            .clone()
-    };
-    assert_eq!(template("a"), sec["id"]);
-    assert!(template("b").is_null());
-
-    // Orchestration messages say which run and task they are about; the planner's merge
-    // notices are tagged with the task that merged.
-    let first = &planner["turns"][0]["from"];
-    assert_eq!(first["kind"], "orchestrator", "{first}");
-    assert_eq!(first["run_id"], json!(id));
-    assert!(first.get("task_id").is_none(), "{first}");
-    let planner: Value = t
-        .get("/v1/agents/boss/transcript")
-        .await
-        .json()
-        .await
-        .unwrap();
-    let task_ids: Vec<&Value> = detail["tasks"]
-        .as_array()
-        .unwrap()
+    // Each worker got its task from the planner, as the planner wrote it.
+    let planner_id = planner["agent"]["id"].as_str().unwrap().to_owned();
+    let briefs = w
+        .seen
         .iter()
-        .map(|t| &t["id"])
-        .collect();
-    let tagged = planner["turns"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|turn| task_ids.contains(&&turn["from"]["task_id"]))
+        .filter(|e| {
+            matches!(&e.kind, EventKind::AgentInput { text, from: Some(crossagents_core::MessageSource::Agent { agent_id }), .. }
+                if text.starts_with("Task #") && agent_id.to_string() == planner_id)
+        })
         .count();
-    assert_eq!(tagged, 2, "one merge notice per task: {planner}");
+    assert_eq!(briefs, 2);
 }
 
 #[tokio::test]
@@ -481,12 +550,7 @@ async fn unknown_assignee_rejects_the_plan() {
     let repo = git_repo();
     let t = setup(repo.path()).await;
     let mut w = t.watch().await;
-    let mut a = task(
-        "a",
-        goal("[write a.txt=alpha]"),
-        &has("a.txt", "alpha"),
-        &[],
-    );
+    let mut a = task("a", goal("[write a.txt=alpha]", "done"), &[]);
     a["assignee"] = json!("nobody");
     let id = start_run(&t, request(json!([a])), json!({})).await;
     w.until("planner's turn", |e| {
@@ -494,12 +558,54 @@ async fn unknown_assignee_rejects_the_plan() {
     })
     .await;
 
-    let detail: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
+    let detail = detail(&t, &id).await;
     assert_eq!(detail["run"]["status"], "planning");
     assert!(detail["run"]["plan"].as_array().unwrap().is_empty());
     assert!(
         !types(&w.seen).contains(&"run.plan_submitted"),
         "{:?}",
         types(&w.seen)
+    );
+}
+
+#[tokio::test]
+async fn the_lead_adds_tasks_while_the_run_runs() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+
+    // When a is reported, the planner adds a follow-up task and accepts a. The follow-up
+    // names its task by key: a's worker would fill a `{task_id}` placeholder with a's id.
+    let extra = task(
+        "extra",
+        format!(
+            "[write extra.txt=more] {}",
+            call(
+                "task_complete",
+                json!({ "task": "extra", "summary": accept("extra") })
+            )
+        ),
+        &["a"],
+    );
+    let follow_up = format!(
+        "{} {}",
+        call("task_create", json!({ "tasks": [extra] })),
+        accept("a")
+    );
+    let a = task(
+        "a",
+        goal("[write a.txt=alpha]", &format!("a done {follow_up}")),
+        &[],
+    );
+    let id = start_run(&t, request(json!([a])), json!({ "auto_approve": true })).await;
+    w.until("extra merged", task_is("extra", TaskStatus::Merged))
+        .await;
+    w.find("run completed", run_status_is(&id, RunStatus::Completed))
+        .await;
+    let detail = detail(&t, &id).await;
+    let branch = detail["run"]["branch"].as_str().unwrap();
+    assert_eq!(
+        git_show(repo.path(), &format!("{branch}:extra.txt")),
+        "more"
     );
 }

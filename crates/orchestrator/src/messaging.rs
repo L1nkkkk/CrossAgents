@@ -276,6 +276,10 @@ impl Orchestrator {
             ));
         }
         let reply_to = a.reply_to.as_deref().map(parse_message_id).transpose()?;
+        // A reply to the message that carried a task question answers it.
+        if let Some(parent) = reply_to {
+            self.reply_closes_question(caller, parent).await;
+        }
         let task = match &a.task {
             Some(key) => Some(self.find_task(caller, key).await?),
             None => None,

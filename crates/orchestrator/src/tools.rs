@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use crossagents_core::{Agent, CoreError, PlannedTask, RunStatus, Task, TaskId, ToolInfo};
+use crossagents_core::{Agent, CoreError, PlannedTask, RunStatus, ToolInfo};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -40,6 +40,34 @@ fn task_id_schema(extra: Value) -> Value {
     json!({ "type": "object", "properties": properties, "required": required })
 }
 
+/// A task by key (`auth`, `#auth`) or id, plus `extra` fields (all required).
+fn task_schema(extra: Value) -> Value {
+    let mut properties = json!({ "task": { "type": "string", "description": "Task key (e.g. \"auth\") or task id." } });
+    let mut required = vec![json!("task")];
+    if let Value::Object(fields) = extra {
+        for (name, schema) in fields {
+            properties[&name] = schema;
+        }
+    }
+    required.dedup();
+    json!({ "type": "object", "properties": properties, "required": required })
+}
+
+fn planned_task_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "key": { "type": "string", "description": "Short unique id: a-z, 0-9, -" },
+            "title": { "type": "string" },
+            "spec": spec_schema(),
+            "depends_on": { "type": "array", "items": { "type": "string" } },
+            "assignee": { "type": "string", "description": "Name of the worker on your team whose specialty fits this task; omit for the default worker" },
+            "reviewer": { "type": "string", "description": "Name of a reviewer on your team (e.g. a security reviewer)" }
+        },
+        "required": ["key", "title", "spec"]
+    })
+}
+
 fn spec_schema() -> Value {
     let strings = json!({ "type": "array", "items": { "type": "string" } });
     json!({
@@ -51,10 +79,10 @@ fn spec_schema() -> Value {
                 "properties": { "allow": strings, "deny": strings }
             },
             "interfaces": strings,
-            "acceptance": strings,
+            "acceptance": { "type": "array", "items": { "type": "string" }, "description": "Optional shell commands the hub runs when the worker reports done." },
             "references": strings
         },
-        "required": ["goal", "acceptance"]
+        "required": ["goal"]
     })
 }
 
@@ -191,59 +219,155 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "plan_submit",
-        description: "Submit the plan for your current run: the full list of tasks for workers. The human approves it before work starts.",
+        description: "Submit the plan for your current run: the full list of tasks for workers. Depending on the run's policy the person approves it first, or it starts at once.",
         groups: PLANNER,
         schema: || {
             json!({
                 "type": "object",
                 "properties": {
-                    "tasks": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "key": { "type": "string", "description": "Short unique id: a-z, 0-9, -" },
-                                "title": { "type": "string" },
-                                "spec": spec_schema(),
-                                "depends_on": { "type": "array", "items": { "type": "string" } },
-                                "assignee": { "type": "string", "description": "Name of the worker on your team whose specialty fits this task; omit for the default worker" },
-                                "reviewer": { "type": "string", "description": "Name of a reviewer on your team to review this task (e.g. a security reviewer); omit for the run's reviewer" }
-                            },
-                            "required": ["key", "title", "spec"]
-                        }
-                    }
+                    "tasks": { "type": "array", "items": planned_task_schema() }
                 },
                 "required": ["tasks"]
             })
         },
     },
     ToolDef {
+        name: "task_create",
+        description: "Add tasks to your running run (same fields as plan_submit's tasks). They start once their dependencies are merged. Keys already in the run are left as they are.",
+        groups: PLANNER,
+        schema: || {
+            object(
+                json!({ "tasks": { "type": "array", "items": planned_task_schema() } }),
+                &["tasks"],
+            )
+        },
+    },
+    ToolDef {
         name: "task_list",
-        description: "List the tasks of your current run with their status.",
-        groups: PLANNER,
-        schema: || json!({ "type": "object", "properties": {} }),
+        description: "Tasks of your run: key, title, status, issuer, assignee, progress, open question. Filter with status, or mine (tasks you issued or work on).",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({ "status": { "type": "string" }, "mine": { "type": "boolean" } }),
+                &[],
+            )
+        },
     },
     ToolDef {
-        name: "task_status",
-        description: "Status, attempts and assignee of one task.",
-        groups: PLANNER,
-        schema: || task_id_schema(json!({})),
+        name: "task_get",
+        description: "One task in full: spec, report (worker summary, checks, diff stat, failure, question, review), branch, worktree, run branch.",
+        groups: ALL,
+        schema: || task_schema(json!({})),
     },
     ToolDef {
-        name: "task_read",
-        description: "Full report of a task: spec, worker summary, acceptance output, diff stat, failure reason.",
-        groups: PLANNER,
-        schema: || task_id_schema(json!({})),
+        name: "task_update",
+        description: "Change a task you issued: title, spec, depends_on. Its worker gets the new version.",
+        groups: ALL,
+        schema: || {
+            task_schema(json!({
+                "title": { "type": "string" },
+                "spec": spec_schema(),
+                "depends_on": { "type": "array", "items": { "type": "string" } }
+            }))
+        },
+    },
+    ToolDef {
+        name: "task_assign",
+        description: "Give a task you issued to another worker on the team (by name). A started task keeps its worktree; the new worker continues from it.",
+        groups: ALL,
+        schema: || task_schema(json!({ "to": { "type": "string" } })),
+    },
+    ToolDef {
+        name: "task_cancel",
+        description: "Cancel a task you issued. keep_branch keeps its branch for inspection.",
+        groups: ALL,
+        schema: || task_schema(json!({ "keep_branch": { "type": "boolean" } })),
     },
     ToolDef {
         name: "task_answer",
-        description: "Answer a worker's question about a task.",
-        groups: PLANNER,
-        schema: || task_id_schema(json!({ "answer": { "type": "string" } })),
+        description: "Answer the open question on a task you issued (replying to the question message with agent_send works too).",
+        groups: ALL,
+        schema: || task_schema(json!({ "answer": { "type": "string" } })),
+    },
+    ToolDef {
+        name: "workspace_diff",
+        description: "What a task changed against the run branch, committed or not: a unified diff (paths to narrow it; stat_only for a summary).",
+        groups: ALL,
+        schema: || {
+            task_schema(
+                json!({ "paths": { "type": "array", "items": { "type": "string" } }, "stat_only": { "type": "boolean" } }),
+            )
+        },
+    },
+    ToolDef {
+        name: "workspace_read",
+        description: "Read a file in a task's worktree (path relative to it), optionally a line range.",
+        groups: ALL,
+        schema: || {
+            task_schema(
+                json!({ "path": { "type": "string" }, "from_line": { "type": "integer" }, "to_line": { "type": "integer" } }),
+            )
+        },
+    },
+    ToolDef {
+        name: "workspace_run",
+        description: "Run a shell command in a task's worktree (tests, builds) and get exit code and output. Default limit 300 s, at most 1800.",
+        groups: ALL,
+        schema: || {
+            task_schema(
+                json!({ "command": { "type": "string" }, "timeout_secs": { "type": "integer" } }),
+            )
+        },
+    },
+    ToolDef {
+        name: "checks_run",
+        description: "Run a task's spec.acceptance commands and get the results.",
+        groups: ALL,
+        schema: || task_schema(json!({})),
+    },
+    ToolDef {
+        name: "review_request",
+        description: "Ask a reviewer (by name, else the task's or run's reviewer) for a verdict on a task reported done; its verdict comes back to you.",
+        groups: ALL,
+        schema: || {
+            task_schema(json!({ "reviewer": { "type": "string" }, "focus": { "type": "string" } }))
+        },
+    },
+    ToolDef {
+        name: "task_accept",
+        description: "Merge a task you issued into the run branch. On a conflict nothing changes and you get the conflicting files and hunks.",
+        groups: ALL,
+        schema: || task_schema(json!({})),
+    },
+    ToolDef {
+        name: "task_rework",
+        description: "Send a task you issued back to its worker with notes on what to fix.",
+        groups: ALL,
+        schema: || task_schema(json!({ "notes": { "type": "string" } })),
+    },
+    ToolDef {
+        name: "task_drop",
+        description: "Discard a task's result and branch. requeue starts it over (task_assign first for another worker); otherwise it is cancelled.",
+        groups: ALL,
+        schema: || {
+            task_schema(json!({ "requeue": { "type": "boolean" }, "reason": { "type": "string" } }))
+        },
+    },
+    ToolDef {
+        name: "branch_sync",
+        description: "Merge the run branch (work merged since the task started) into a task's worktree; returns conflicts if any.",
+        groups: ALL,
+        schema: || task_schema(json!({})),
+    },
+    ToolDef {
+        name: "task_progress",
+        description: "One line on how your task is going; shown on the task card.",
+        groups: WORKER,
+        schema: || task_schema(json!({ "text": { "type": "string" } })),
     },
     ToolDef {
         name: "task_complete",
-        description: "Report that your task is done. CrossAgents then commits your changes and runs the acceptance commands; you get a message if they fail.",
+        description: "Report your task done with a summary of what you changed. The hub commits your work and passes your summary to the task's issuer, who checks it.",
         groups: WORKER,
         schema: || {
             task_id_schema(
@@ -253,19 +377,19 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_fail",
-        description: "Give up on your task because it is impossible or the spec is wrong.",
+        description: "Say you cannot finish your task, and why; the issuer decides what happens next.",
         groups: WORKER,
         schema: || task_id_schema(json!({ "reason": { "type": "string" } })),
     },
     ToolDef {
         name: "task_ask",
-        description: "Ask the planner a question about your task; the answer arrives as a message. End your turn after asking.",
+        description: "Ask the task's issuer a question; then end your turn, the answer arrives as a message.",
         groups: WORKER,
         schema: || task_id_schema(json!({ "question": { "type": "string" } })),
     },
     ToolDef {
         name: "review_submit",
-        description: "Approve or reject the change you are reviewing.",
+        description: "Give your verdict on the change you are reviewing; it goes to whoever asked for the review.",
         groups: REVIEWER,
         schema: || {
             task_id_schema(json!({
@@ -279,30 +403,6 @@ const TOOLS: &[ToolDef] = &[
 pub(crate) fn args<T: DeserializeOwned>(value: Value) -> Result<T, CoreError> {
     serde_json::from_value(if value.is_null() { json!({}) } else { value })
         .map_err(|e| CoreError::Conflict(format!("invalid arguments: {e}")))
-}
-
-fn task_id(raw: &str) -> Result<TaskId, CoreError> {
-    raw.trim()
-        .parse()
-        .map_err(|_| CoreError::Conflict(format!("invalid task_id {raw:?}")))
-}
-
-#[derive(Deserialize)]
-struct TaskArgs {
-    task_id: String,
-}
-
-fn task_json(task: &Task) -> Value {
-    json!({
-        "task_id": task.id,
-        "key": task.key,
-        "title": task.title,
-        "status": task.status,
-        "attempts": task.attempts,
-        "escalated": task.escalated,
-        "depends_on": task.depends_on,
-        "open_question": task.report.question,
-    })
 }
 
 impl Orchestrator {
@@ -376,103 +476,83 @@ impl Orchestrator {
                 let a: A = args(input)?;
                 let run = self.submit_plan(caller, a.tasks).await?;
                 let next = if run.status == RunStatus::AwaitingApproval {
-                    "The plan is waiting for the human's approval. End your turn now."
+                    "The plan waits for the person's approval. End your turn now."
                 } else {
-                    "The plan was approved automatically and tasks are being dispatched. End your turn now."
+                    "The plan started at once (the run's policy). End your turn now."
                 };
                 Ok(
                     json!({ "run_id": run.id, "status": run.status, "tasks": run.plan.len(), "next": next }),
                 )
             }
-            "task_list" => {
-                let runs = self.store().list_runs().await?;
-                let run = runs
-                    .into_iter()
-                    .find(|r| r.planner == caller.id)
-                    .ok_or_else(|| CoreError::Conflict("you lead no run".into()))?;
-                let tasks: Vec<Value> = self
-                    .store()
-                    .list_tasks(run.id)
-                    .await?
-                    .iter()
-                    .map(task_json)
-                    .collect();
-                Ok(json!({ "run_id": run.id, "run_status": run.status, "tasks": tasks }))
-            }
-            "task_status" | "task_read" => {
-                let a: TaskArgs = args(input)?;
-                let (run, task) = self.task_of(task_id(&a.task_id)?).await?;
-                if run.planner != caller.id {
-                    return Err(CoreError::Conflict(
-                        "this task belongs to another planner's run".into(),
-                    ));
-                }
-                if name == "task_status" {
-                    Ok(task_json(&task))
-                } else {
-                    Ok(
-                        json!({ "task": task_json(&task), "spec": task.spec, "report": task.report, "branch": task.branch }),
-                    )
-                }
-            }
+            "task_create" => self.task_create(caller, input).await,
+            "task_list" => self.task_list(caller, input).await,
+            "task_get" => self.task_get(caller, input).await,
+            "task_update" => self.task_update(caller, input).await,
+            "task_assign" => self.task_assign(caller, input).await,
+            "task_cancel" => self.task_cancel(caller, input).await,
             "task_answer" => {
                 #[derive(Deserialize)]
                 struct A {
-                    task_id: String,
                     answer: String,
                 }
+                let task = self.task_ref(caller, &input).await?;
                 let a: A = args(input)?;
-                self.answer(caller, task_id(&a.task_id)?, a.answer).await?;
+                self.answer(caller, task, a.answer).await?;
                 Ok(json!({ "delivered": true }))
             }
+            "workspace_diff" => self.workspace_diff(caller, input).await,
+            "workspace_read" => self.workspace_read(caller, input).await,
+            "workspace_run" => self.workspace_run(caller, input).await,
+            "checks_run" => self.checks_run(caller, input).await,
+            "review_request" => self.review_request(caller, input).await,
+            "task_accept" => self.task_accept(caller, input).await,
+            "task_rework" => self.task_rework(caller, input).await,
+            "task_drop" => self.task_drop(caller, input).await,
+            "branch_sync" => self.branch_sync(caller, input).await,
+            "task_progress" => self.task_progress(caller, input).await,
             "task_complete" => {
                 #[derive(Deserialize)]
                 struct A {
-                    task_id: String,
                     #[serde(default)]
                     summary: String,
                 }
+                let task = self.task_ref(caller, &input).await?;
                 let a: A = args(input)?;
-                self.complete(caller, task_id(&a.task_id)?, a.summary)
-                    .await?;
+                self.complete(caller, task, a.summary).await?;
                 Ok(json!({
-                    "status": "verifying",
-                    "next": "CrossAgents is running the acceptance commands. End your turn; if they fail you will get a message with the output."
+                    "status": "passed",
+                    "next": "Your summary goes to the task's issuer, who checks the work. End your turn; if it comes back with notes, continue and report again."
                 }))
             }
             "task_fail" => {
                 #[derive(Deserialize)]
                 struct A {
-                    task_id: String,
                     reason: String,
                 }
+                let task = self.task_ref(caller, &input).await?;
                 let a: A = args(input)?;
-                self.give_up(caller, task_id(&a.task_id)?, a.reason).await?;
-                Ok(json!({ "status": "reported", "next": "End your turn." }))
+                self.give_up(caller, task, a.reason).await?;
+                Ok(json!({ "status": "stalled", "next": "End your turn." }))
             }
             "task_ask" => {
                 #[derive(Deserialize)]
                 struct A {
-                    task_id: String,
                     question: String,
                 }
+                let task = self.task_ref(caller, &input).await?;
                 let a: A = args(input)?;
-                self.ask(caller, task_id(&a.task_id)?, a.question).await?;
-                Ok(
-                    json!({ "status": "waiting_answer", "next": "End your turn; the answer will arrive as a message." }),
-                )
+                self.ask(caller, task, a.question).await
             }
             "review_submit" => {
                 #[derive(Deserialize)]
                 struct A {
-                    task_id: String,
                     approve: bool,
                     #[serde(default)]
                     notes: String,
                 }
+                let task = self.task_ref(caller, &input).await?;
                 let a: A = args(input)?;
-                self.review(caller, task_id(&a.task_id)?, a.approve, a.notes)
-                    .await?;
+                self.review(caller, task, a.approve, a.notes).await?;
                 Ok(json!({ "recorded": true, "next": "End your turn." }))
             }
             _ => unreachable!("every tool in TOOLS is handled"),

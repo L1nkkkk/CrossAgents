@@ -32,7 +32,7 @@ export function taskState(task: Pick<Task, "status" | "attempts" | "depends_on">
     case "running":
       return s("●", task.attempts > 1 ? `第 ${task.attempts} 次尝试` : "运行中", "accent", "active", true);
     case "waiting_answer":
-      return s("○", "等 Planner 回答", "warn", "waiting");
+      return s("○", "等回答", "warn", "waiting");
     case "verifying":
       return s("●", "验收中", "accent", "active", true);
     case "retrying":
@@ -42,7 +42,9 @@ export function taskState(task: Pick<Task, "status" | "attempts" | "depends_on">
     case "reviewing":
       return s("●", "审查中", "accent", "active", true);
     case "passed":
-      return s("○", "待合并", "ok", "waiting");
+      return s("○", "待检查", "ok", "waiting");
+    case "stalled":
+      return s("○", "停了 · 未上报", "warn", "waiting");
     case "merged":
       return s("✓", "已合并", "ok", "ended");
     case "failed":

@@ -17,7 +17,9 @@ test("every state is a glyph and a word, and says what it waits for", () => {
   assert.equal(taskState(task("pending", { depends_on: ["db", "api"] }), run).word, "等 api");
   assert.equal(taskState(task("pending", { depends_on: ["db"] }), run).word, "排队中");
   assert.equal(taskState(task("running", { attempts: 2 })).word, "第 2 次尝试");
-  assert.equal(taskState(task("waiting_answer")).word, "等 Planner 回答");
+  assert.equal(taskState(task("waiting_answer")).word, "等回答");
+  assert.equal(taskState(task("stalled")).word, "停了 · 未上报");
+  assert.equal(taskState(task("passed")).word, "待检查");
   assert.deepEqual([taskState(task("merged")).glyph, taskState(task("failed")).glyph], ["✓", "✕"]);
 });
 

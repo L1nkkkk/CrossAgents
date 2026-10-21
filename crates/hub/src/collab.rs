@@ -61,7 +61,7 @@ impl SessionSetup for CollabSetup {
         let agent_env = self.accounts.agent_env(agent).await?;
         let Some((program, args)) = self.mcp_command.split_first() else {
             return Ok(SessionExtras {
-                instructions: agent.profile.instructions(&agent.name),
+                instructions: Some(instructions(agent)),
                 env: agent_env,
                 ..SessionExtras::default()
             });
@@ -80,9 +80,18 @@ impl SessionSetup for CollabSetup {
                 args: args.to_vec(),
                 env,
             }],
-            instructions: agent.profile.instructions(&agent.name),
+            instructions: Some(instructions(agent)),
             env: agent_env,
         })
+    }
+}
+
+/// How the agent works with the hub (its role's guide), then who it is (its card).
+fn instructions(agent: &Agent) -> String {
+    let guide = crossagents_orchestrator::protocol::guide(agent.role);
+    match agent.profile.instructions(&agent.name) {
+        Some(card) => format!("{card}\n\n{guide}"),
+        None => guide,
     }
 }
 

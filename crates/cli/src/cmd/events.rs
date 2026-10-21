@@ -87,6 +87,18 @@ pub fn summary(kind: &EventKind) -> String {
                 .unwrap_or_default()
         ),
         EventKind::HumanDismissed { id } => id.clone(),
+        EventKind::TaskProgress { key, text, .. } => format!("#{key} {}", one_line(text)),
+        EventKind::TaskCommand {
+            key,
+            command,
+            exit_code,
+            duration_ms,
+            ..
+        } => format!(
+            "#{key} $ {} -> {} ({duration_ms}ms)",
+            one_line(command),
+            exit_code.map_or("none".into(), |c| c.to_string())
+        ),
         EventKind::RunBudget { id, what, percent } => {
             format!("{} {what} {percent}%", short_tail(id))
         }
