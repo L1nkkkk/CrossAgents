@@ -31,7 +31,8 @@ pub struct AddArgs {
     /// Plugin that runs the agent, e.g. `claude` or `codex`.
     #[arg(long)]
     pub plugin: String,
-    /// Driver to use; defaults to the plugin's default.
+    /// Driver to use: `codex-native`, `claude-native` or `acp-generic`; defaults to the
+    /// plugin's `driver` (which defaults to `acp-generic`).
     #[arg(long)]
     pub driver: Option<String>,
     /// Model, e.g. `opus` or `haiku`.

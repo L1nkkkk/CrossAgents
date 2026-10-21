@@ -4,5 +4,6 @@
 //! - [`acp`]: `acp-generic`, any ACP agent, one process per session.
 
 pub mod acp;
+pub mod codex_native;
 pub mod jsonrpc;
 pub mod process;

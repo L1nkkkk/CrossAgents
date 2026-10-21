@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
-description = "A scriptable ACP agent for tests; no LLM involved."
+description = "A scriptable ACP agent and Codex app-server for tests; no LLM involved."
 
 [[bin]]
 name = "crossagents-mock-agent"

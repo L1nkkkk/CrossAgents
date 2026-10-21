@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 
 use crossagents_core::{CoreError, Driver, DriverKind};
 use crossagents_drivers::acp::AcpDriver;
+use crossagents_drivers::codex_native::CodexNativeDriver;
 use serde::Deserialize;
 
 /// A plugin entry in `config.toml`. For a built-in plugin it overrides the launch commands
@@ -147,11 +148,11 @@ impl Profile {
                     self.config.model_env.clone(),
                 ))
             }
-            DriverKind::CodexNative => {
-                return Err(CoreError::Unsupported(
-                    "the codex-native driver is not available yet".into(),
-                ));
-            }
+            DriverKind::CodexNative => Arc::new(CodexNativeDriver::new(
+                &self.name,
+                self.config.native_command.clone(),
+                self.config.models.clone(),
+            )),
             DriverKind::ClaudeNative => unreachable!("mapped to acp-generic above"),
         };
         drivers.insert(kind, driver.clone());
@@ -294,12 +295,15 @@ mod tests {
             toml::from_str::<PluginConfig>("driver = \"codex-native\"").unwrap(),
         );
         let registry = PluginRegistry::with_config(&configs);
-        // Not built yet in this step; the built-in keeps its ACP command.
-        assert!(registry.driver("codex", None).is_err());
+        // The built-in keeps its ACP command, so agents can still pick acp-generic.
+        let codex = registry.driver("codex", None).unwrap();
+        assert_eq!(codex.driver.kind(), DriverKind::CodexNative);
+        assert!(codex.driver.capabilities().resume);
         let acp = registry.driver("codex", Some("acp-generic")).unwrap();
         assert_eq!(acp.driver.kind(), DriverKind::AcpGeneric);
-        let again = registry.driver("codex", Some("acp-generic")).unwrap();
-        assert!(Arc::ptr_eq(&acp.driver, &again.driver));
+        // The same driver instance is handed out each time (it owns the app-server pool).
+        let again = registry.driver("codex", Some("codex-native")).unwrap();
+        assert!(Arc::ptr_eq(&codex.driver, &again.driver));
 
         // Without config the built-in codex stays on ACP.
         let plain = PluginRegistry::with_config(&BTreeMap::new());

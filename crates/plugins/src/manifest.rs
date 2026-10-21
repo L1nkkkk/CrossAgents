@@ -154,4 +154,22 @@ mod tests {
         let (plugins, warnings) = load_dir(Path::new("/definitely/not/here"));
         assert!(plugins.is_empty() && warnings.is_empty());
     }
+
+    #[test]
+    fn native_plugins_need_no_acp_command() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "cx",
+            "name = \"cx\"\ndriver = \"codex-native\"\nnative_command = [\"./bin/codex\", \"app-server\"]\n",
+        );
+        write(dir.path(), "acp", "name = \"acp\"\n");
+        let (plugins, warnings) = load_dir(dir.path());
+        assert_eq!(plugins.len(), 1, "{warnings:?}");
+        let (name, config) = &plugins[0];
+        assert_eq!(name, "cx");
+        assert_eq!(config.driver, Some(DriverKind::CodexNative));
+        assert!(Path::new(&config.native_command[0]).is_absolute());
+        assert!(warnings[0].contains("command is empty"), "{warnings:?}");
+    }
 }
