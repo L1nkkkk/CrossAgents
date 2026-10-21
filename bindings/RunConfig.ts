@@ -24,4 +24,9 @@ auto_approve: boolean, max_parallel: number,
 /**
  * Attempts per worker before escalating.
  */
-max_attempts: number, };
+max_attempts: number, 
+/**
+ * Teammates the planner may assign tasks to (workers) or have them reviewed by
+ * (reviewers), by specialty. Always includes `worker` and `reviewer`.
+ */
+team: Array<AgentId>, };

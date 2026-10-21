@@ -12,19 +12,20 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use crossagents_api_types::{
     API_VERSION, AccountUsageGroup, AccountUsageResponse, ApiError, CreateAccountRequest,
     CreateAgentRequest, CreateRunRequest, ErrorCode, HealthResponse, HubInfo, ListAccountsResponse,
     ListAgentsResponse, ListPluginsResponse, ListRunsResponse, ListToolsResponse, LoginStarted,
-    PluginInfo, RejectRunRequest, RunDetail, SendMessageRequest, SendMessageResponse, UsageGroup,
-    UsageResponse,
+    PluginInfo, RejectRunRequest, RunDetail, SendMessageRequest, SendMessageResponse, Transcript,
+    UsageGroup, UsageResponse,
 };
 use crossagents_core::{
-    Account, AccountStatus, Agent, AgentId, AgentKey, AgentStatus, CoreError, DriverKind, Event,
-    EventBus, EventKind, Run, RunConfig, RunId, Store, validate_agent_name,
+    Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError,
+    DriverKind, Event, EventBus, EventKind, MessageId, MessageSource, Run, RunConfig, RunId, Store,
+    validate_agent_name,
 };
 use crossagents_orchestrator::{NewRun, Orchestrator};
 
@@ -69,6 +70,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/agents/{key}/stop", post(stop_agent))
         .route("/v1/agents/{key}/cancel", post(cancel_agent))
         .route("/v1/agents/{key}/messages", post(send_message))
+        .route(
+            "/v1/agents/{key}/messages/{message_id}",
+            delete(withdraw_message),
+        )
+        .route("/v1/agents/{key}/transcript", get(transcript))
+        .route("/v1/agents/{key}/profile", post(update_profile))
         .route("/v1/plugins", get(list_plugins))
         .route("/v1/usage", get(usage))
         .route("/v1/accounts", get(list_accounts).post(create_account))
@@ -249,6 +256,7 @@ async fn create_agent(
     if let Some(driver) = &req.driver {
         driver.parse::<DriverKind>()?;
     }
+    let profile = req.profile.normalized()?;
     if let Some(account) = req.config.get("account").and_then(|v| v.as_str()) {
         state.accounts.check_binding(&req.plugin, account).await?;
     }
@@ -271,6 +279,7 @@ async fn create_agent(
         config: req.config,
         status: AgentStatus::Stopped,
         created_at: Utc::now(),
+        profile,
     };
     state.store().insert_agent(&agent).await?;
     state
@@ -287,6 +296,63 @@ async fn get_agent(
     Path(key): Path<String>,
 ) -> ApiResult<Json<Agent>> {
     Ok(Json(state.store().get_agent(&AgentKey::parse(&key)).await?))
+}
+
+/// Replaces the agent's card. A new persona reaches the agent when its next session opens.
+async fn update_profile(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(profile): Json<AgentProfile>,
+) -> ApiResult<Json<Agent>> {
+    let profile = profile.normalized()?;
+    let mut agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    state
+        .store()
+        .update_agent_profile(agent.id, &profile)
+        .await?;
+    agent.profile = profile;
+    state
+        .bus
+        .publish(EventKind::AgentUpdated {
+            agent: agent.clone(),
+        })
+        .await?;
+    Ok(Json(agent))
+}
+
+/// Rebuilds the agent's conversation from its stored events.
+async fn transcript(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<Transcript>> {
+    let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    let resolved = state
+        .runtime
+        .plugins()
+        .driver(&agent.plugin, agent.driver.as_deref())
+        .ok();
+    // Clients follow the global stream from `last_seq`. Read the head first: every event
+    // of this agent up to it is then folded in, and later ones arrive on the stream.
+    let head = state.store().latest_event_seq().await?;
+    let mut fold = crate::transcript::Fold::default();
+    loop {
+        let page = state
+            .store()
+            .agent_events(agent.id, fold.last_seq, EVENT_PAGE)
+            .await?;
+        if page.is_empty() {
+            break;
+        }
+        page.iter().for_each(|e| fold.push(e));
+    }
+    Ok(Json(Transcript {
+        agent,
+        driver: resolved.as_ref().map(|r| r.driver.kind()),
+        capabilities: resolved.as_ref().map(|r| r.driver.capabilities()),
+        turns: fold.turns,
+        usage: fold.usage,
+        last_seq: head.max(fold.last_seq),
+    }))
 }
 
 async fn delete_agent(
@@ -332,6 +398,21 @@ async fn cancel_agent(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Takes back a message that is still waiting for its turn.
+async fn withdraw_message(
+    State(state): State<Arc<AppState>>,
+    Path((key, message_id)): Path<(String, String)>,
+) -> ApiResult<StatusCode> {
+    let message_id: MessageId = message_id
+        .parse()
+        .map_err(|_| AppError::bad_request("invalid message id"))?;
+    state
+        .runtime
+        .withdraw(&AgentKey::parse(&key), message_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn send_message(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
@@ -340,7 +421,18 @@ async fn send_message(
     if req.text.trim().is_empty() {
         return Err(AppError::bad_request("text must not be empty"));
     }
-    let (message_id, queued) = state.runtime.send(&AgentKey::parse(&key), req.text).await?;
+    let key = AgentKey::parse(&key);
+    let (message_id, queued) = if req.now == Some(true) {
+        state
+            .runtime
+            .send_now(&key, req.text, MessageSource::Human)
+            .await?
+    } else {
+        state
+            .runtime
+            .send(&key, req.text, MessageSource::Human)
+            .await?
+    };
     Ok((
         StatusCode::ACCEPTED,
         Json(SendMessageResponse { message_id, queued }),
@@ -418,6 +510,10 @@ async fn create_run(
         Some(key) => Some(agent_id(&state, key).await?),
         None => None,
     };
+    let mut team = Vec::new();
+    for name in req.team.iter().flatten() {
+        team.push(agent_id(&state, name).await?);
+    }
     let new = NewRun {
         request: req.request,
         title: req.title,
@@ -429,6 +525,7 @@ async fn create_run(
             auto_approve: req.auto_approve,
             max_parallel: req.max_parallel.unwrap_or(RunConfig::DEFAULT_MAX_PARALLEL),
             max_attempts: req.max_attempts.unwrap_or(RunConfig::DEFAULT_MAX_ATTEMPTS),
+            team,
         },
     };
     let run = state.orchestrator.create_run(new).await?;
@@ -617,18 +714,24 @@ struct EventsQuery {
     follow: Option<bool>,
     /// `true` skips history and sends only events published after the response starts.
     live: Option<bool>,
+    /// Only events about this agent (name or id), see `EventKind::agent_id`.
+    agent: Option<String>,
 }
 
 async fn events(
     State(state): State<Arc<AppState>>,
     Query(query): Query<EventsQuery>,
     headers: HeaderMap,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+) -> ApiResult<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>> {
     let last_event_id = headers
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok());
     let since = last_event_id.or(query.since).unwrap_or(0);
+    let agent = match &query.agent {
+        Some(key) => Some(state.store().get_agent(&AgentKey::parse(key)).await?.id),
+        None => None,
+    };
 
     // Subscribe before responding: once the client sees the response headers, every
     // later event is guaranteed to reach it.
@@ -647,8 +750,10 @@ async fn events(
     } else {
         tokio::spawn(stream_events(state, live, since, follow, tx));
     }
-    let stream = ReceiverStream::new(rx).map(|event| Ok(to_sse(&event)));
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+    let stream = ReceiverStream::new(rx)
+        .filter(move |event| agent.is_none() || event.kind.agent_id() == agent)
+        .map(|event| Ok(to_sse(&event)));
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
 fn to_sse(event: &Event) -> SseEvent {

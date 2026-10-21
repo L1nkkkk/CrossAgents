@@ -53,6 +53,11 @@ pub fn summary(kind: &EventKind) -> String {
             or_dash(agent.model.as_deref()),
             enum_name(&agent.role)
         ),
+        EventKind::AgentUpdated { agent } => format!(
+            "{} ({})",
+            agent.name,
+            or_dash(agent.profile.title.as_deref())
+        ),
         EventKind::AgentRemoved { name, .. } => name.clone(),
         EventKind::AgentStatusChanged { id, from, to } => {
             format!("{} {} -> {}", short(id), enum_name(from), enum_name(to))
@@ -65,6 +70,9 @@ pub fn summary(kind: &EventKind) -> String {
             if *queued { " (queued)" } else { "" },
             one_line(text)
         ),
+        EventKind::AgentInputWithdrawn { id, message_id } => {
+            format!("{} withdrew {}", short(id), short(message_id))
+        }
         EventKind::AgentTurnStarted { id, .. } => short(id),
         EventKind::AgentOutput { id, stream, text } => {
             format!("{} [{}] {}", short(id), enum_name(stream), one_line(text))

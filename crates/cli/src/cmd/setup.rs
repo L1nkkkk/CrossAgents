@@ -200,6 +200,7 @@ pub async fn run(ctx: &Context, args: SetupArgs) -> Result<()> {
                     role,
                     cwd: repo.clone(),
                     config: serde_json::json!({ "account": account.id }),
+                    profile: Default::default(),
                 },
             )
             .await?;
@@ -222,6 +223,7 @@ pub async fn run(ctx: &Context, args: SetupArgs) -> Result<()> {
                 &format!("/v1/agents/{worker}/messages"),
                 &SendMessageRequest {
                     text: "Reply with exactly: READY. Do not run any tools.".into(),
+                    now: None,
                 },
             )
             .await?;

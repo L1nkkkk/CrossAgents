@@ -7,4 +7,9 @@ export type CreateRunRequest = { request: string, title: string | null, planner:
 /**
  * Template for workers.
  */
-worker: string, escalate: string | null, reviewer: string | null, auto_approve: boolean, max_parallel: number | null, max_attempts: number | null, };
+worker: string, escalate: string | null, reviewer: string | null, auto_approve: boolean, max_parallel: number | null, max_attempts: number | null, 
+/**
+ * Teammates the planner may assign tasks to, by name. Omitted: every worker and
+ * reviewer registered in the planner's repository.
+ */
+team: Array<string> | null, };

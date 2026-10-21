@@ -14,7 +14,15 @@ assignee: AgentId | null,
 /**
  * The reviewer agent while the task is in review.
  */
-reviewer: AgentId | null, status: TaskStatus, 
+reviewer: AgentId | null, 
+/**
+ * The teammate workers on this task are cloned from (the plan's `assignee`).
+ */
+worker_template: AgentId | null, 
+/**
+ * The teammate reviewers on this task are cloned from (the plan's `reviewer`).
+ */
+reviewer_template: AgentId | null, status: TaskStatus, 
 /**
  * Attempts by the current worker.
  */

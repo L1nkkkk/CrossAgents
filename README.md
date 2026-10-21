@@ -83,7 +83,8 @@ crossagents run cancel <id>
 
 `apps/gui/` 是桌面 GUI（Electron + React），和 CLI 一样只是 hub 的客户端：先 `crossagents hub start`，
 GUI 读取 `~/.crossagents/hub.json` 与 `token` 连接（同样遵循 `CROSSAGENTS_HOME`）。
-可以登记 agent、发起 run、审批/驳回计划、跟踪任务与验收结果、看 agent 实时输出并对话、查看成本。
+界面以对话为中心：侧边栏按 run 列出各个会话，点进去就是和它的对话；Planner 的计划卡片直接出现在对话里，
+批准后任务实时推进，任务详情（总结、diff stat、验收）在右侧抽屉打开。也可以登记 agent、查看成本。
 
 ```sh
 cd apps/gui
@@ -92,7 +93,7 @@ npm run electron:dev       # 开发（页面热重载）
 npm run electron:build     # 产出 release/win-unpacked/CrossAgents.exe（免安装，未签名）
 ```
 
-令牌只在 Electron 主进程里使用，不会进入页面。详见 [任务书](docs/tasks/V2-GUI.md)。
+令牌只在 Electron 主进程里使用，不会进入页面。详见 [V2 任务书](docs/tasks/V2-GUI.md)（外壳与安全）和 [V3 任务书](docs/tasks/V3-GUI.md)（对话式界面）。
 
 ## 账号管理
 
@@ -165,7 +166,7 @@ Agent 通过 hub 挂载的 MCP 工具协作（`plan_submit`、`task_complete`、
 ## 本地 API
 
 hub 只监听 `127.0.0.1`。除 `GET /v1/health` 外都要 `Authorization: Bearer <~/.crossagents/token>`。
-`GET /v1/events` 是 SSE 事件流（支持断点续传）。GUI 用的 TypeScript 类型由
+`GET /v1/events` 是 SSE 事件流（支持断点续传，`?agent=` 只看某个会话）；`GET /v1/agents/{key}/transcript` 返回按轮分组的对话历史。GUI 用的 TypeScript 类型由
 `cargo test -p crossagents-api-types` 生成到 `bindings/`。
 
 ## 开发

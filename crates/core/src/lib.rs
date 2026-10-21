@@ -24,11 +24,11 @@ pub use driver::{
     SessionEvent, SessionEventKind, SessionSpec, StopReason, TokenUsage, ToolStatus, TurnOutcome,
 };
 pub use error::CoreError;
-pub use event::{EVENT_SCHEMA_VERSION, Event, EventKind, EventSink};
+pub use event::{EVENT_SCHEMA_VERSION, Event, EventKind, EventSink, MessageSource};
 pub use ids::{AgentId, MessageId, RunId, SessionId, TaskId};
 pub use model::{
-    Agent, AgentStatus, CheckResult, PlannedTask, Role, Run, RunConfig, RunStatus, Scope, Task,
-    TaskReport, TaskSpec, validate_agent_name,
+    Agent, AgentProfile, AgentStatus, CheckResult, PlannedTask, Role, Run, RunConfig, RunStatus,
+    Scope, Task, TaskReport, TaskSpec, validate_agent_name,
 };
 pub use state::TaskStatus;
 pub use store::{AgentKey, Store};

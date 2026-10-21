@@ -1,141 +1,109 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useState, type FormEvent } from "react";
 import type { Agent } from "@bindings/Agent";
+import type { AgentProfile } from "@bindings/AgentProfile";
 import type { Role } from "@bindings/Role";
 import { api, errorText } from "../api";
 import { navigate } from "../App";
-import { Badge, ErrorBox, Field, useAgents } from "../components";
-import { useHubData, useTranscript } from "../hub";
+import {
+  AVATAR_COLORS,
+  Avatar,
+  ErrorBox,
+  Field,
+  PERSONA_PRESETS,
+  StatusChip,
+  agentTitle,
+  agentTone,
+  displayName,
+  sessionHref,
+  useAgents,
+} from "../components";
+import { useHubData } from "../hub";
 
-export function AgentsView({ selected }: { selected?: string }) {
+/** The team: every agent as a colleague with a face, a title and a persona. */
+export function AgentsView() {
   const agents = useAgents();
-  const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<"new" | Agent>();
   const list = agents.data ?? [];
-  const agent = list.find((a) => a.name === selected || a.id === selected);
 
   return (
-    <div className="split">
-      <aside className="agent-list">
-        <header className="page-header">
-          <h1>Agents</h1>
-          <button onClick={() => setAdding(!adding)}>{adding ? "收起" : "登记"}</button>
-        </header>
-        {adding && <NewAgentForm onCreated={(a) => (setAdding(false), navigate("agents", a.name))} />}
-        <ErrorBox error={agents.error} />
-        {agents.data && !list.length && <p className="muted">还没有 agent。</p>}
-        {list.map((a) => (
-          <a key={a.id} className={`agent-item ${a === agent ? "active" : ""}`} href={`#/agents/${encodeURIComponent(a.name)}`}>
-            <div>
-              <strong>{a.name}</strong> <Badge status={a.status} />
+    <>
+      <div className="topbar">
+        <span className="title">团队</span>
+        <span className="chip">{list.length}</span>
+        <div className="spacer" />
+        {editing !== "new" && (
+          <button className="primary" onClick={() => setEditing("new")}>
+            添加队友
+          </button>
+        )}
+      </div>
+      <div className="page">
+        <div className="page-inner team-page">
+          {editing === "new" && <Editor onDone={(a) => (setEditing(undefined), a && navigate("s", a.name))} />}
+          <ErrorBox error={agents.error} />
+          {agents.data && !list.length && editing !== "new" && (
+            <div className="empty">
+              <h1>组建你的团队</h1>
+              <p>一个负责拆计划的架构师，再加几个写代码、做设计、做审查的队友。</p>
             </div>
-            <div className="muted small">
-              {a.role} · {a.plugin}
-              {a.model ? `/${a.model}` : ""}
-            </div>
-          </a>
-        ))}
-      </aside>
-      <section className="agent-pane">
-        {agent ? <AgentConsole agent={agent} /> : <p className="muted">选择一个 agent 查看实时输出。</p>}
-      </section>
-    </div>
+          )}
+          <div className="team-grid">
+            {list.map((agent) =>
+              editing !== "new" && editing?.id === agent.id ? (
+                <div key={agent.id} className="team-wide">
+                  <Editor agent={agent} onDone={() => setEditing(undefined)} />
+                </div>
+              ) : (
+                <MemberCard key={agent.id} agent={agent} onEdit={() => setEditing(agent)} />
+              ),
+            )}
+          </div>
+        </div>
+      </div>
+    </>
   );
 }
 
-function AgentConsole({ agent }: { agent: Agent }) {
-  const lines = useTranscript(agent.id);
-  const [text, setText] = useState("");
-  const [error, setError] = useState<string>();
-  const [busy, setBusy] = useState(false);
-  const outputRef = useRef<HTMLDivElement>(null);
-  const stick = useRef(true);
-
-  useEffect(() => {
-    const el = outputRef.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
-  }, [lines]);
-
-  async function run(action: () => Promise<unknown>) {
-    setBusy(true);
-    setError(undefined);
-    try {
-      await action();
-      return true;
-    } catch (err) {
-      setError(errorText(err));
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function send(e?: FormEvent) {
-    e?.preventDefault();
-    if (!text.trim()) return;
-    if (await run(() => api.sendMessage(agent.name, { text }))) setText("");
-  }
-
-  function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-      e.preventDefault();
-      void send();
-    }
-  }
-
+function MemberCard({ agent, onEdit }: { agent: Agent; onEdit: () => void }) {
   return (
-    <div className="console">
-      <header className="page-header">
-        <h2>{agent.name}</h2>
-        <Badge status={agent.status} />
-        <span className="muted small">
-          {agent.role} · {agent.plugin}
-          {agent.model ? `/${agent.model}` : ""} · <code>{agent.cwd}</code>
+    <div className="member">
+      <div className="member-head">
+        <Avatar agent={agent} size={40} status />
+        <div className="member-who">
+          <a className="member-name" href={sessionHref(agent.name)}>
+            {displayName(agent)}
+          </a>
+          <span className="member-title">{agentTitle(agent)}</span>
+        </div>
+        <StatusChip status={agent.status} tone={agentTone(agent.status)} />
+      </div>
+      <p className={`member-persona ${agent.profile.persona ? "" : "muted"}`}>{agent.profile.persona || "还没有设定人设。"}</p>
+      <div className="member-foot">
+        <span className="chip">{agent.role}</span>
+        <span className="chip" title={agent.driver ?? undefined}>
+          {agent.plugin}
+          {agent.model ? ` · ${agent.model}` : ""}
+        </span>
+        <span className="mono small muted member-addr" title={agent.cwd}>
+          @{agent.name}
         </span>
         <div className="spacer" />
-        {agent.status === "running" && (
-          <button disabled={busy} onClick={() => run(() => api.cancelAgent(agent.name))}>
-            中断本轮
-          </button>
-        )}
-        {agent.status !== "stopped" && (
-          <button disabled={busy} onClick={() => run(() => api.stopAgent(agent.name))}>
-            停止
-          </button>
-        )}
-      </header>
-      <div
-        className="output"
-        ref={outputRef}
-        onScroll={(e) => {
-          const el = e.currentTarget;
-          stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-        }}
-      >
-        {lines.length === 0 && <p className="muted">还没有输出。</p>}
-        {lines.map((line, i) => (
-          <div key={i} className={`line ${line.kind}`}>
-            {line.text}
-          </div>
-        ))}
-      </div>
-      <ErrorBox error={error} />
-      <form className="composer" onSubmit={send}>
-        <textarea
-          rows={3}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={onKey}
-          placeholder="发消息（Enter 发送，Shift+Enter 换行）；agent 离线时会自动启动"
-        />
-        <button type="submit" className="primary" disabled={busy || !text.trim()}>
-          发送
+        <button className="ghost" onClick={onEdit}>
+          编辑
         </button>
-      </form>
+      </div>
     </div>
   );
 }
 
-function NewAgentForm({ onCreated }: { onCreated: (agent: Agent) => void }) {
+const EMPTY: AgentProfile = { display_name: null, title: null, avatar: null, color: null, persona: null };
+
+/** Adds a teammate (`agent` absent) or edits one's card. */
+function Editor({ agent, onDone }: { agent?: Agent; onDone: (created?: Agent) => void }) {
+  const creating = !agent;
   const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
+  const [profile, setProfile] = useState<AgentProfile>(agent?.profile ?? EMPTY);
+  const [preset, setPreset] = useState<string>();
   const [name, setName] = useState("");
   const [plugin, setPlugin] = useState("");
   const [model, setModel] = useState("");
@@ -145,22 +113,55 @@ function NewAgentForm({ onCreated }: { onCreated: (agent: Agent) => void }) {
   const [busy, setBusy] = useState(false);
   const pluginValue = plugin || plugins.data?.[0]?.name || "";
   const models = plugins.data?.find((p) => p.name === pluginValue)?.models ?? [];
+  const set = (patch: Partial<AgentProfile>) => setProfile((p) => ({ ...p, ...patch }));
+
+  function applyPreset(key: string) {
+    const p = PERSONA_PRESETS.find((x) => x.key === key);
+    if (!p) return;
+    setPreset(key);
+    setRole(p.role);
+    set({ title: p.title, avatar: p.avatar, color: p.color, persona: p.persona });
+    if (!name) setName(p.key);
+  }
+
+  // What the preview shows: the card being edited, on a stand-in agent.
+  const preview: Agent = {
+    ...(agent ?? {
+      id: "preview",
+      name: name || "new",
+      plugin: pluginValue,
+      driver: null,
+      model: model || null,
+      role,
+      cwd,
+      config: null,
+      status: "idle",
+      created_at: new Date().toISOString(),
+    }),
+    profile,
+  } as Agent;
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(undefined);
     try {
-      const agent = await api.createAgent({
-        name: name.trim(),
-        plugin: pluginValue,
-        driver: null,
-        model: model.trim() || null,
-        role,
-        cwd: cwd.trim(),
-        config: {},
-      });
-      onCreated(agent);
+      if (agent) {
+        await api.updateProfile(agent.name, profile);
+        onDone();
+      } else {
+        const created = await api.createAgent({
+          name: name.trim(),
+          plugin: pluginValue,
+          driver: null,
+          model: model.trim() || null,
+          role,
+          cwd: cwd.trim(),
+          config: {},
+          profile,
+        });
+        onDone(created);
+      }
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -169,41 +170,110 @@ function NewAgentForm({ onCreated }: { onCreated: (agent: Agent) => void }) {
   }
 
   return (
-    <form className="card form" onSubmit={submit}>
-      <Field label="名字">
-        <input value={name} onChange={(e) => setName(e.target.value)} required />
-      </Field>
-      <div className="row">
-        <Field label="插件">
-          <select value={pluginValue} onChange={(e) => setPlugin(e.target.value)}>
-            {plugins.data?.map((p) => (
-              <option key={p.name}>{p.name}</option>
-            ))}
-          </select>
-        </Field>
-        <Field label="角色">
-          <select value={role} onChange={(e) => setRole(e.target.value as Role)}>
-            <option value="planner">planner</option>
-            <option value="worker">worker</option>
-            <option value="reviewer">reviewer</option>
-          </select>
-        </Field>
-      </div>
-      <Field label="模型（可选）">
-        <input list="models" value={model} onChange={(e) => setModel(e.target.value)} />
-        <datalist id="models">
-          {models.map((m) => (
-            <option key={m} value={m} />
+    <form className="card form editor" onSubmit={submit}>
+      {creating && (
+        <div className="presets">
+          {PERSONA_PRESETS.map((p) => (
+            <button type="button" key={p.key} className={`preset ${preset === p.key ? "on" : ""}`} onClick={() => applyPreset(p.key)}>
+              <span className="preset-emoji">{p.avatar}</span>
+              {p.label}
+            </button>
           ))}
-        </datalist>
+        </div>
+      )}
+
+      <div className="editor-who">
+        <Avatar agent={preview} size={56} />
+        <div className="editor-face">
+          <div className="row" style={{ gap: 8, alignItems: "flex-start" }}>
+            <Field label="显示名">
+              <input value={profile.display_name ?? ""} onChange={(e) => set({ display_name: e.target.value })} placeholder="Ada" />
+            </Field>
+            <Field label="头衔">
+              <input value={profile.title ?? ""} onChange={(e) => set({ title: e.target.value })} placeholder="设计师" />
+            </Field>
+            <Field label="头像（emoji 或两个字母）">
+              <input value={profile.avatar ?? ""} onChange={(e) => set({ avatar: e.target.value })} placeholder="🎨" maxLength={8} />
+            </Field>
+          </div>
+          <div className="swatches" role="radiogroup" aria-label="头像颜色">
+            {AVATAR_COLORS.map((c) => (
+              <button
+                type="button"
+                key={c}
+                className={`swatch av-${c} ${profile.color === c ? "on" : ""}`}
+                onClick={() => set({ color: profile.color === c ? null : c })}
+                aria-label={c}
+                aria-checked={profile.color === c}
+                role="radio"
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <Field label="人设（专长与工作方式，会加入它的开场说明）">
+        <textarea
+          rows={4}
+          value={profile.persona ?? ""}
+          onChange={(e) => set({ persona: e.target.value })}
+          placeholder="You review diffs for security: injection, auth checks, secrets in code…"
+        />
       </Field>
-      <Field label="工作目录（git 仓库）">
-        <input value={cwd} onChange={(e) => setCwd(e.target.value)} required placeholder="C:\path\to\repo" />
-      </Field>
+
+      {creating ? (
+        <>
+          <div className="row" style={{ alignItems: "flex-start" }}>
+            <Field label="地址名（小写，用来互相发消息）">
+              <input value={name} onChange={(e) => setName(e.target.value)} required placeholder="ada" />
+            </Field>
+            <Field label="角色（决定能用哪些工具）">
+              <select value={role} onChange={(e) => setRole(e.target.value as Role)}>
+                <option value="planner">planner · 拆计划、派活</option>
+                <option value="worker">worker · 按规格干活</option>
+                <option value="reviewer">reviewer · 审查 diff</option>
+              </select>
+            </Field>
+          </div>
+          <div className="row" style={{ alignItems: "flex-start" }}>
+            <Field label="插件">
+              <select value={pluginValue} onChange={(e) => setPlugin(e.target.value)}>
+                {plugins.data?.map((p) => (
+                  <option key={p.name} value={p.name}>
+                    {p.name} · {p.driver}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="模型（背后的大脑）">
+              <input list="models" value={model} onChange={(e) => setModel(e.target.value)} placeholder={models[0] ?? ""} />
+              <datalist id="models">
+                {models.map((m) => (
+                  <option key={m} value={m} />
+                ))}
+              </datalist>
+            </Field>
+          </div>
+          <Field label="工作目录（git 仓库）">
+            <input value={cwd} onChange={(e) => setCwd(e.target.value)} required placeholder="C:\path\to\repo" />
+          </Field>
+        </>
+      ) : (
+        <p className="muted small" style={{ margin: 0 }}>
+          @{agent.name} · {agent.role} · {agent.plugin}
+          {agent.model ? ` · ${agent.model}` : ""} · 新的人设在它下次开会话时生效。
+        </p>
+      )}
+
       <ErrorBox error={error ?? plugins.error} />
-      <button type="submit" className="primary" disabled={busy || !name.trim() || !pluginValue || !cwd.trim()}>
-        登记
-      </button>
+      <div className="row">
+        <button type="submit" className="primary" disabled={busy || (creating && (!name.trim() || !pluginValue || !cwd.trim()))}>
+          {creating ? "添加到团队" : "保存"}
+        </button>
+        <button type="button" className="ghost" onClick={() => onDone()}>
+          取消
+        </button>
+      </div>
     </form>
   );
 }

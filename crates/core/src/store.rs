@@ -6,7 +6,7 @@ use crate::account::Account;
 use crate::error::CoreError;
 use crate::event::{Event, EventKind};
 use crate::ids::{AgentId, RunId, TaskId};
-use crate::model::{Agent, AgentStatus, Run, Task};
+use crate::model::{Agent, AgentProfile, AgentStatus, Run, Task};
 
 /// Look an agent up by id or by its unique name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +31,15 @@ pub trait Store: Send + Sync {
     async fn list_agents(&self) -> Result<Vec<Agent>, CoreError>;
     async fn delete_agent(&self, id: AgentId) -> Result<(), CoreError>;
     async fn update_agent_status(&self, id: AgentId, status: AgentStatus) -> Result<(), CoreError>;
+    /// Replaces the agent's profile.
+    async fn update_agent_profile(
+        &self,
+        id: AgentId,
+        profile: &AgentProfile,
+    ) -> Result<(), CoreError> {
+        let _ = (id, profile);
+        Err(CoreError::Unsupported("updating agent profiles".into()))
+    }
 
     /// Persists the event, assigning its `seq`, `id` and `ts`.
     async fn append_event(&self, kind: EventKind) -> Result<Event, CoreError>;
@@ -38,6 +47,32 @@ pub trait Store: Send + Sync {
     async fn events_since(&self, after: u64, limit: u32) -> Result<Vec<Event>, CoreError>;
     /// The highest `seq` stored, or 0.
     async fn latest_event_seq(&self) -> Result<u64, CoreError>;
+    /// Events about `agent` (see [`EventKind::agent_id`]) with `seq > after`, oldest first.
+    /// The default scans every event; stores should override it with an indexed lookup.
+    async fn agent_events(
+        &self,
+        agent: AgentId,
+        after: u64,
+        limit: u32,
+    ) -> Result<Vec<Event>, CoreError> {
+        let mut found = Vec::new();
+        let mut last = after;
+        loop {
+            let page = self.events_since(last, 500).await?;
+            let Some(end) = page.last().map(|e| e.seq) else {
+                return Ok(found);
+            };
+            last = end;
+            for event in page {
+                if event.kind.agent_id() == Some(agent) {
+                    found.push(event);
+                    if found.len() >= limit as usize {
+                        return Ok(found);
+                    }
+                }
+            }
+        }
+    }
 
     async fn insert_run(&self, run: &Run) -> Result<(), CoreError>;
     async fn get_run(&self, id: RunId) -> Result<Run, CoreError>;

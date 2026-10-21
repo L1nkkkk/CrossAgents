@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit && tsc -p electron --noEmit",
+    "test": "node --test \"src/lib/*.test.ts\"",
     "electron:compile": "tsc -p electron",
     "electron:dev": "npm run electron:compile && concurrently -k -n vite,electron \"vite\" \"electron . --dev-server-url=http://localhost:1420\"",
     "electron:build": "npm run build && npm run electron:compile && electron-builder --win dir"

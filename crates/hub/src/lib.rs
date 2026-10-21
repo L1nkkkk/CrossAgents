@@ -5,6 +5,7 @@ pub mod api;
 pub mod collab;
 pub mod paths;
 pub mod runtime;
+pub mod transcript;
 pub mod usage;
 
 use std::fs::{File, TryLockError};

@@ -1,19 +1,19 @@
 //! Live agent sessions: start, deliver messages one turn at a time, cancel, stop, and turn
 //! what happens inside a session into events.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
     Agent, AgentId, AgentKey, AgentStatus, CoreError, DriverSession, EventBus, EventKind,
-    McpServerSpec, MessageId, OutputStream, PermissionPolicy, SessionEvent, SessionEventKind,
-    SessionSpec, StopReason, Store,
+    McpServerSpec, MessageId, MessageSource, OutputStream, PermissionPolicy, SessionEvent,
+    SessionEventKind, SessionSpec, StopReason, Store,
 };
 use crossagents_plugins::PluginRegistry;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc};
 
 const FLUSH_INTERVAL: Duration = Duration::from_millis(150);
 
@@ -35,10 +35,81 @@ pub struct SessionExtras {
 struct Live {
     generation: u64,
     session: Arc<dyn DriverSession>,
-    inbox: mpsc::UnboundedSender<(MessageId, String)>,
+    inbox: Arc<Inbox>,
     control: mpsc::UnboundedSender<Control>,
-    /// Messages accepted and not yet finished (including the running one).
-    pending: Arc<AtomicUsize>,
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        // Ends the session's turn loop once nobody can deliver to it any more.
+        self.inbox.close();
+    }
+}
+
+/// Messages waiting for their turn. Unlike a channel, a waiting message can be taken back
+/// or jump the line.
+#[derive(Default)]
+struct Inbox {
+    waiting: std::sync::Mutex<VecDeque<(MessageId, String)>>,
+    /// A turn is running.
+    busy: AtomicBool,
+    closed: AtomicBool,
+    notify: Notify,
+}
+
+impl Inbox {
+    fn push(&self, message: (MessageId, String), first: bool) {
+        let mut waiting = self.waiting.lock().unwrap();
+        if first {
+            waiting.push_front(message);
+        } else {
+            waiting.push_back(message);
+        }
+        drop(waiting);
+        self.notify.notify_one();
+    }
+
+    /// Takes a waiting message out; `false` if it is not waiting (started or unknown).
+    fn withdraw(&self, id: MessageId) -> bool {
+        let mut waiting = self.waiting.lock().unwrap();
+        let Some(index) = waiting.iter().position(|(m, _)| *m == id) else {
+            return false;
+        };
+        waiting.remove(index);
+        true
+    }
+
+    /// The next message, marking a turn as running; `None` once closed.
+    async fn next(&self) -> Option<(MessageId, String)> {
+        loop {
+            if self.closed.load(Ordering::SeqCst) {
+                return None;
+            }
+            if let Some(message) = self.waiting.lock().unwrap().pop_front() {
+                self.busy.store(true, Ordering::SeqCst);
+                return Some(message);
+            }
+            self.notify.notified().await;
+        }
+    }
+
+    fn finish_turn(&self) {
+        self.busy.store(false, Ordering::SeqCst);
+    }
+
+    fn is_idle(&self) -> bool {
+        let waiting = self.waiting.lock().unwrap();
+        waiting.is_empty() && !self.busy.load(Ordering::SeqCst)
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.notify.notify_one();
+    }
 }
 
 type LiveMap = Arc<Mutex<HashMap<AgentId, Arc<Live>>>>;
@@ -165,13 +236,12 @@ impl Runtime {
             }
         };
 
-        let (inbox_tx, inbox_rx) = mpsc::unbounded_channel();
+        let inbox = Arc::new(Inbox::default());
         let live = Arc::new(Live {
             generation,
             session: session.clone(),
-            inbox: inbox_tx,
+            inbox: inbox.clone(),
             control: control_tx.clone(),
-            pending: Arc::default(),
         });
         tokio::spawn(forward_events(
             self.bus.clone(),
@@ -181,12 +251,7 @@ impl Runtime {
             self.live.clone(),
             generation,
         ));
-        tokio::spawn(run_turns(
-            session,
-            inbox_rx,
-            control_tx,
-            live.pending.clone(),
-        ));
+        tokio::spawn(run_turns(session, inbox, control_tx));
         self.live.lock().await.insert(agent.id, live);
         set_status(&self.bus, agent.id, AgentStatus::Idle).await;
         Ok(agent)
@@ -194,7 +259,33 @@ impl Runtime {
 
     /// Delivers a message, starting the agent if needed. Returns the message id and whether
     /// it was queued behind other work.
-    pub async fn send(&self, key: &AgentKey, text: String) -> Result<(MessageId, bool), CoreError> {
+    pub async fn send(
+        &self,
+        key: &AgentKey,
+        text: String,
+        from: MessageSource,
+    ) -> Result<(MessageId, bool), CoreError> {
+        self.deliver(key, text, from, false).await
+    }
+
+    /// Delivers a message ahead of everything waiting and interrupts the running turn, so it
+    /// is the next thing the agent reads.
+    pub async fn send_now(
+        &self,
+        key: &AgentKey,
+        text: String,
+        from: MessageSource,
+    ) -> Result<(MessageId, bool), CoreError> {
+        self.deliver(key, text, from, true).await
+    }
+
+    async fn deliver(
+        &self,
+        key: &AgentKey,
+        text: String,
+        from: MessageSource,
+        first: bool,
+    ) -> Result<(MessageId, bool), CoreError> {
         let agent = self.start(key).await?;
         let live = self
             .live
@@ -202,9 +293,11 @@ impl Runtime {
             .await
             .get(&agent.id)
             .cloned()
+            .filter(|l| !l.inbox.is_closed())
             .ok_or_else(|| CoreError::Agent(format!("agent {} stopped", agent.name)))?;
         let message_id = MessageId::new();
-        let queued = live.pending.fetch_add(1, Ordering::SeqCst) > 0;
+        let queued = !live.inbox.is_idle();
+        // Published before the message can start a turn, so clients see the input first.
         publish(
             &self.bus,
             EventKind::AgentInput {
@@ -212,13 +305,38 @@ impl Runtime {
                 message_id,
                 text: text.clone(),
                 queued,
+                from: Some(from),
             },
         )
         .await;
-        live.inbox
-            .send((message_id, text))
-            .map_err(|_| CoreError::Agent(format!("agent {} stopped", agent.name)))?;
+        live.inbox.push((message_id, text), first);
+        if first && queued {
+            let _ = live.session.interrupt().await;
+        }
         Ok((message_id, queued))
+    }
+
+    /// Takes back a message that is still waiting for its turn.
+    pub async fn withdraw(&self, key: &AgentKey, message_id: MessageId) -> Result<(), CoreError> {
+        let agent = self.store().get_agent(key).await?;
+        let withdrawn = match self.live.lock().await.get(&agent.id) {
+            Some(live) => live.inbox.withdraw(message_id),
+            None => false,
+        };
+        if !withdrawn {
+            return Err(CoreError::Conflict(
+                "the message is not waiting: it already started, or is unknown".into(),
+            ));
+        }
+        publish(
+            &self.bus,
+            EventKind::AgentInputWithdrawn {
+                id: agent.id,
+                message_id,
+            },
+        )
+        .await;
+        Ok(())
     }
 
     pub async fn cancel(&self, key: &AgentKey) -> Result<(), CoreError> {
@@ -300,18 +418,17 @@ async fn set_status(bus: &EventBus, id: AgentId, to: AgentStatus) {
 /// Runs one prompt at a time from the inbox.
 async fn run_turns(
     session: Arc<dyn DriverSession>,
-    mut inbox: mpsc::UnboundedReceiver<(MessageId, String)>,
+    inbox: Arc<Inbox>,
     control: mpsc::UnboundedSender<Control>,
-    pending: Arc<AtomicUsize>,
 ) {
-    while let Some((message_id, text)) = inbox.recv().await {
+    while let Some((message_id, text)) = inbox.next().await {
         let _ = control.send(Control::TurnStarted(message_id));
         let result = session
             .prompt(&text)
             .await
             .map(|outcome| outcome.stop_reason)
             .map_err(|e| e.to_string());
-        pending.fetch_sub(1, Ordering::SeqCst);
+        inbox.finish_turn();
         if control
             .send(Control::TurnFinished(message_id, result))
             .is_err()
@@ -380,7 +497,7 @@ async fn forward_events(
                             .await
                             .get(&id)
                             .filter(|l| l.generation == generation)
-                            .map(|l| l.pending.load(Ordering::SeqCst) == 0);
+                            .map(|l| l.inbox.is_idle());
                         if idle == Some(true) {
                             set_status(&bus, id, AgentStatus::Idle).await;
                         }

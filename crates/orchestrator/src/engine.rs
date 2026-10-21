@@ -12,8 +12,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use crossagents_core::{
     Agent, AgentId, AgentKey, AgentStatus, CheckResult, CoreError, EventBus, EventKind,
-    PlannedTask, Role, Run, RunConfig, RunId, RunStatus, Store, Task, TaskId, TaskReport,
-    TaskStatus,
+    MessageSource, PlannedTask, Role, Run, RunConfig, RunId, RunStatus, Store, Task, TaskId,
+    TaskReport, TaskStatus,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -102,10 +102,10 @@ impl Orchestrator {
     }
 
     /// Sends in the background: starting an agent can take minutes.
-    pub(crate) fn deliver(&self, agent: AgentId, text: String) {
+    pub(crate) fn deliver(&self, agent: AgentId, from: MessageSource, text: String) {
         let host = self.host.clone();
         tokio::spawn(async move {
-            if let Err(err) = host.send(agent, text).await {
+            if let Err(err) = host.send(agent, from, text).await {
                 tracing::warn!(%agent, error = %err, "cannot deliver message");
             }
         });
@@ -171,6 +171,9 @@ impl Orchestrator {
             return Err(CoreError::Conflict("the request is empty".into()));
         }
         let repo = planner.cwd.clone();
+        let mut new = new;
+        let team = self.gather_team(&new.config, &repo).await?;
+        new.config.team = team.iter().map(|a| a.id).collect();
         let base_branch = self.workspaces.current_branch(&repo).await?;
         let id = RunId::new();
         let now = Utc::now();
@@ -202,8 +205,116 @@ impl Orchestrator {
         self.store.insert_run(&run).await?;
         self.publish(EventKind::RunCreated { run: run.clone() })
             .await;
-        self.deliver(planner.id, prompts::planner_kickoff(&run));
+        self.deliver(
+            planner.id,
+            MessageSource::run(run.id),
+            prompts::planner_kickoff(&run, &team, run.config.worker),
+        );
         Ok(run)
+    }
+
+    /// The run's team: the given teammates, or every worker and reviewer registered in the
+    /// repository (clones live in worktrees, so they are not picked up). The run's worker and
+    /// reviewer always belong to it, first.
+    async fn gather_team(&self, config: &RunConfig, repo: &Path) -> Result<Vec<Agent>, CoreError> {
+        let mut team: Vec<Agent> = Vec::new();
+        let mut add = |agent: Agent| {
+            if !team.iter().any(|a| a.id == agent.id) {
+                team.push(agent);
+            }
+        };
+        for id in [Some(config.worker), config.reviewer].into_iter().flatten() {
+            add(self.store.get_agent(&AgentKey::Id(id)).await?);
+        }
+        if config.team.is_empty() {
+            for agent in self.store.list_agents().await? {
+                if agent.role != Role::Planner && agent.cwd == repo {
+                    add(agent);
+                }
+            }
+        } else {
+            for id in &config.team {
+                let agent = self.store.get_agent(&AgentKey::Id(*id)).await?;
+                if agent.role == Role::Planner {
+                    return Err(CoreError::Conflict(format!(
+                        "{} is a planner and cannot be on a run's team",
+                        agent.name
+                    )));
+                }
+                add(agent);
+            }
+        }
+        Ok(team)
+    }
+
+    /// The run's teammates. Runs created before teams existed have just their worker and
+    /// reviewer.
+    async fn team_of(&self, run: &Run) -> Result<Vec<Agent>, CoreError> {
+        let ids: Vec<AgentId> = if run.config.team.is_empty() {
+            [Some(run.config.worker), run.config.reviewer]
+                .into_iter()
+                .flatten()
+                .collect()
+        } else {
+            run.config.team.clone()
+        };
+        let mut team = Vec::new();
+        for id in ids {
+            // A teammate removed since the run started is simply no longer assignable.
+            if let Ok(agent) = self.store.get_agent(&AgentKey::Id(id)).await {
+                team.push(agent);
+            }
+        }
+        Ok(team)
+    }
+
+    /// Resolves each planned task's `assignee` and `reviewer` to teammates of the right role.
+    async fn resolve_assignments(
+        &self,
+        run: &Run,
+        tasks: &[PlannedTask],
+    ) -> Result<Vec<(Option<AgentId>, Option<AgentId>)>, CoreError> {
+        let team = self.team_of(run).await?;
+        let names = |role: Role| {
+            team.iter()
+                .filter(|a| a.role == role)
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut problems = Vec::new();
+        let mut pick = |task: &str, name: &Option<String>, role: Role, field: &str| {
+            let name = name.as_deref()?;
+            match team.iter().find(|a| a.name == name && a.role == role) {
+                Some(agent) => Some(agent.id),
+                None => {
+                    let known = names(role);
+                    problems.push(format!(
+                        "task {task:?}: {field} {name:?} is not a {} on the team (available: {})",
+                        role_word(role),
+                        if known.is_empty() { "none" } else { &known }
+                    ));
+                    None
+                }
+            }
+        };
+        let resolved = tasks
+            .iter()
+            .map(|t| {
+                (
+                    pick(&t.key, &t.assignee, Role::Worker, "assignee"),
+                    pick(&t.key, &t.reviewer, Role::Reviewer, "reviewer"),
+                )
+            })
+            .collect();
+        if problems.is_empty() {
+            Ok(resolved)
+        } else {
+            Err(CoreError::Conflict(format!(
+                "the plan is invalid:\n{}",
+                problems.join("\n")
+            )))
+        }
     }
 
     /// The newest run in `Planning` led by `planner`.
@@ -231,6 +342,7 @@ impl Orchestrator {
         }
         plan::validate(&tasks)
             .map_err(|problems| CoreError::Conflict(format!("the plan is invalid:\n{problems}")))?;
+        self.resolve_assignments(&run, &tasks).await?;
         let keys = tasks.iter().map(|t| t.key.clone()).collect();
         run.plan = tasks;
         run.note = None;
@@ -262,7 +374,8 @@ impl Orchestrator {
             )));
         }
         let now = Utc::now();
-        for planned in &run.plan {
+        let assignments = self.resolve_assignments(run, &run.plan).await?;
+        for (planned, (worker_template, reviewer_template)) in run.plan.iter().zip(assignments) {
             let task = Task {
                 id: TaskId::new(),
                 run_id: run.id,
@@ -272,6 +385,8 @@ impl Orchestrator {
                 depends_on: planned.depends_on.clone(),
                 assignee: None,
                 reviewer: None,
+                worker_template,
+                reviewer_template,
                 status: TaskStatus::Pending,
                 attempts: 0,
                 escalated: false,
@@ -285,7 +400,11 @@ impl Orchestrator {
             self.store.insert_task(&task).await?;
         }
         self.set_run_status(run, RunStatus::Running, None).await?;
-        self.deliver(run.planner, prompts::plan_approved(run.plan.len()));
+        self.deliver(
+            run.planner,
+            MessageSource::run(run.id),
+            prompts::plan_approved(run.plan.len()),
+        );
         self.schedule(run).await
     }
 
@@ -301,7 +420,11 @@ impl Orchestrator {
         run.plan.clear();
         self.set_run_status(&mut run, RunStatus::Planning, Some(reason.clone()))
             .await?;
-        self.deliver(run.planner, prompts::plan_rejected(&reason));
+        self.deliver(
+            run.planner,
+            MessageSource::run(run.id),
+            prompts::plan_rejected(&reason),
+        );
         Ok(run)
     }
 
@@ -373,10 +496,12 @@ impl Orchestrator {
             task.worktree = Some(path);
             task.branch = Some(branch);
         }
+        // The teammate the planner picked, else the run's worker; escalation overrides both.
+        let assigned = task.worker_template.unwrap_or(run.config.worker);
         let template = if task.escalated {
-            run.config.escalate.unwrap_or(run.config.worker)
+            run.config.escalate.unwrap_or(assigned)
         } else {
-            run.config.worker
+            assigned
         };
         let name = agent_name(if task.escalated { "e" } else { "w" }, run, task);
         let cwd = task.worktree.clone().unwrap_or_default();
@@ -387,7 +512,11 @@ impl Orchestrator {
         task.attempts = 1;
         task.nudges = 0;
         self.transition(task, TaskStatus::Running).await?;
-        self.deliver(worker.id, prompts::worker_task(task));
+        self.deliver(
+            worker.id,
+            MessageSource::task(task.run_id, task.id),
+            prompts::worker_task(task),
+        );
         Ok(())
     }
 
@@ -454,7 +583,11 @@ impl Orchestrator {
         };
         self.remove_integration(run).await;
         self.set_run_status(run, status, note).await?;
-        self.deliver(run.planner, prompts::run_finished(run, tasks));
+        self.deliver(
+            run.planner,
+            MessageSource::run(run.id),
+            prompts::run_finished(run, tasks),
+        );
         Ok(())
     }
 
@@ -472,7 +605,11 @@ impl Orchestrator {
         self.cleanup_worktree(run, task, false).await;
         task.report.failure = Some(reason);
         self.transition(task, TaskStatus::Failed).await?;
-        self.deliver(run.planner, prompts::task_failed(task));
+        self.deliver(
+            run.planner,
+            MessageSource::task(task.run_id, task.id),
+            prompts::task_failed(task),
+        );
         Box::pin(self.schedule(run)).await
     }
 
@@ -504,7 +641,7 @@ impl Orchestrator {
             };
             self.transition(task, TaskStatus::Running).await?;
             if let Some(worker) = task.assignee {
-                self.deliver(worker, message);
+                self.deliver(worker, MessageSource::task(task.run_id, task.id), message);
             }
             return Ok(());
         }
@@ -550,7 +687,11 @@ impl Orchestrator {
         self.cleanup_worktree(run, task, true).await;
         task.report.failure = None;
         self.transition(task, TaskStatus::Merged).await?;
-        self.deliver(run.planner, prompts::task_merged(task));
+        self.deliver(
+            run.planner,
+            MessageSource::task(task.run_id, task.id),
+            prompts::task_merged(task),
+        );
         self.schedule(run).await
     }
 
@@ -599,7 +740,7 @@ impl Orchestrator {
                     .await;
             }
             self.transition(&mut task, TaskStatus::Passed).await?;
-            match run.config.reviewer {
+            match task.reviewer_template.or(run.config.reviewer) {
                 Some(reviewer) => self.start_review(&run, &mut task, reviewer).await,
                 None => self.merge_task(&mut run, &mut task).await,
             }
@@ -622,7 +763,11 @@ impl Orchestrator {
             .await?;
         task.reviewer = Some(reviewer.id);
         self.transition(task, TaskStatus::Reviewing).await?;
-        self.deliver(reviewer.id, prompts::review_request(task, &run.branch));
+        self.deliver(
+            reviewer.id,
+            MessageSource::task(task.run_id, task.id),
+            prompts::review_request(task, &run.branch),
+        );
         Ok(())
     }
 
@@ -688,7 +833,11 @@ impl Orchestrator {
         task.report.question = Some(question.clone());
         self.transition(&mut task, TaskStatus::WaitingAnswer)
             .await?;
-        self.deliver(run.planner, prompts::worker_question(&task, &question));
+        self.deliver(
+            run.planner,
+            MessageSource::task(task.run_id, task.id),
+            prompts::worker_question(&task, &question),
+        );
         Ok(())
     }
 
@@ -712,7 +861,11 @@ impl Orchestrator {
         task.report.question = None;
         self.transition(&mut task, TaskStatus::Running).await?;
         if let Some(worker) = task.assignee {
-            self.deliver(worker, prompts::planner_answer(&task, &answer));
+            self.deliver(
+                worker,
+                MessageSource::task(task.run_id, task.id),
+                prompts::planner_answer(&task, &answer),
+            );
         }
         Ok(())
     }
@@ -819,7 +972,7 @@ impl Orchestrator {
                 (false, true) => prompts::worker_task(&task),
                 (false, false) => prompts::nudge(&task),
             };
-            self.deliver(agent, message);
+            self.deliver(agent, MessageSource::task(task.run_id, task.id), message);
             return;
         }
         let result = if reviewing {
@@ -852,7 +1005,11 @@ impl Orchestrator {
                 match task.status {
                     TaskStatus::Running | TaskStatus::WaitingAnswer => {
                         if let Some(worker) = task.assignee {
-                            self.deliver(worker, prompts::worker_task(&task));
+                            self.deliver(
+                                worker,
+                                MessageSource::task(task.run_id, task.id),
+                                prompts::worker_task(&task),
+                            );
                         }
                     }
                     TaskStatus::Verifying => {
@@ -860,7 +1017,11 @@ impl Orchestrator {
                     }
                     TaskStatus::Reviewing => {
                         if let Some(reviewer) = task.reviewer {
-                            self.deliver(reviewer, prompts::review_request(&task, &run.branch));
+                            self.deliver(
+                                reviewer,
+                                MessageSource::task(task.run_id, task.id),
+                                prompts::review_request(&task, &run.branch),
+                            );
                         }
                     }
                     _ => {}
@@ -882,6 +1043,14 @@ fn require_assignee(task: &Task, caller: &Agent) -> Result<(), CoreError> {
 }
 
 /// `w-<run>-<task key>`, within the 32-character agent name limit.
+fn role_word(role: Role) -> &'static str {
+    match role {
+        Role::Planner => "planner",
+        Role::Worker => "worker",
+        Role::Reviewer => "reviewer",
+    }
+}
+
 fn agent_name(prefix: &str, run: &Run, task: &Task) -> String {
     let mut name = format!("{prefix}-{}-{}", &short(run.id)[..6], task.key);
     name.truncate(32);

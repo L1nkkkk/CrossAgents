@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 use clap::{Args, Subcommand, ValueEnum};
-use crossagents_api_types::{Agent, CreateAgentRequest, ListAgentsResponse, Role};
+use crossagents_api_types::{Agent, AgentProfile, CreateAgentRequest, ListAgentsResponse, Role};
 
 use super::Context;
 use crate::output::{local_time, or_dash, print_json, print_table};
@@ -10,7 +10,7 @@ use crate::output::{local_time, or_dash, print_json, print_table};
 #[derive(Debug, Subcommand)]
 pub enum AgentCommand {
     /// Register a new agent.
-    Add(AddArgs),
+    Add(Box<AddArgs>),
     /// List agents.
     Ls,
     /// Show one agent.
@@ -46,6 +46,21 @@ pub struct AddArgs {
     /// Account the agent runs under (see `crossagents account ls`).
     #[arg(long)]
     pub account: Option<String>,
+    /// Name shown instead of `name`, e.g. "Ada".
+    #[arg(long)]
+    pub display_name: Option<String>,
+    /// What it does, e.g. "设计师" or "Security reviewer".
+    #[arg(long)]
+    pub title: Option<String>,
+    /// An emoji or up to two letters.
+    #[arg(long)]
+    pub avatar: Option<String>,
+    /// Avatar colour: indigo, violet, rose, amber, emerald, teal, sky or slate.
+    #[arg(long)]
+    pub color: Option<String>,
+    /// Expertise and working style, added to its opening instructions.
+    #[arg(long)]
+    pub persona: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -69,6 +84,7 @@ pub async fn run(ctx: &Context, cmd: AgentCommand) -> Result<()> {
     let client = ctx.client()?;
     match cmd {
         AgentCommand::Add(args) => {
+            let args = *args;
             let cwd = match args.cwd {
                 Some(cwd) => cwd,
                 None => std::env::current_dir().context("cannot read current directory")?,
@@ -83,6 +99,13 @@ pub async fn run(ctx: &Context, cmd: AgentCommand) -> Result<()> {
                 config: match &args.account {
                     Some(account) => serde_json::json!({ "account": account }),
                     None => serde_json::Value::Null,
+                },
+                profile: AgentProfile {
+                    display_name: args.display_name,
+                    title: args.title,
+                    avatar: args.avatar,
+                    color: args.color,
+                    persona: args.persona,
                 },
             };
             let agent: Agent = client.post("/v1/agents", &req).await?;

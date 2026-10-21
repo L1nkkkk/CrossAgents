@@ -4,4 +4,12 @@ import type { TaskSpec } from "./TaskSpec";
 /**
  * One task in a submitted plan. `key` is the planner's own short name for it.
  */
-export type PlannedTask = { key: string, title: string, spec: TaskSpec, depends_on: Array<string>, };
+export type PlannedTask = { key: string, title: string, spec: TaskSpec, depends_on: Array<string>, 
+/**
+ * Teammate (worker, by name) whose specialty fits; `None` means the run's worker.
+ */
+assignee: string | null, 
+/**
+ * Teammate (reviewer, by name) to review this task instead of the run's reviewer.
+ */
+reviewer: string | null, };

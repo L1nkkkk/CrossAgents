@@ -128,6 +128,10 @@ hub
 
 每个会话在 hub 有一张名片：名字、角色、Profile、所属项目与 Run、状态、用途说明（Planner 开 Worker 时填写）、当前任务。
 
+名片还带一份人设（`AgentProfile`，可选）：显示名（如 Ada）、头衔（设计师、安全审核专员、Coder…）、头像（emoji 或字母）、颜色、人设说明。
+角色（planner / worker / reviewer）仍只决定工具集；头衔和人设让同一角色下分出不同的「人」。人设说明写进该会话的开场说明（`You are Ada, the team's 设计师.` 加人设正文），
+改动在下次开会话时生效；Worker 克隆继承模板的整张名片。接口：`POST /v1/agents` 的 `profile`、`POST /v1/agents/{key}/profile`（整体替换，发 `agent.updated`）；CLI `agent add --display-name/--title/--avatar/--color/--persona`。
+
 - 启动时注入：开场说明里写清自己是谁、Planner 是谁、同组还有谁、怎么通信。
 - 随时可查：`agent_list` 返回可见范围内的名片。
 - 变化通知：有会话加入或删除时，hub 给相关会话发系统消息。
@@ -235,6 +239,11 @@ hub 是内核，不是对话对象。它做的都是让会话「能活、能通�
 | `interfaces` | 需遵守的签名、数据结构、可调用的已有代码 |
 | `acceptance` | 可选：初筛命令 |
 | `references` | 开工前应阅读的文件 |
+| `assignee` / `reviewer` | 可选：按专长指定的队友（名字）。hub 校验 assignee 是团队里的 worker、reviewer 是团队里的 reviewer；不写则用 run 的默认 Worker / Reviewer |
+
+**按专长派活**：每个 run 有一个团队（`RunConfig.team`）——默认是 Planner 仓库里登记的全部 worker 和 reviewer（Worker 克隆在 worktree 里，自然不算），也可在发起时指定。
+Planner 的开场说明列出团队：名字、显示名与头衔、模型、人设的第一句，并标出默认 Worker；它在 `plan_submit` 里给每个任务写 `assignee`（和可选的 `reviewer`）。
+派活时 Worker 从被指定的队友克隆（继承它的模型和名片），失败升级仍走 `escalate`。
 
 任务状态机：
 
@@ -345,10 +354,19 @@ hub 对外只有一套本地 API（HTTP + SSE，`/v1/`，本机令牌），CLI �
 ### 11.1 GUI（主入口）
 
 - 主区域：与某个会话的对话窗口（默认 Planner）；计划审批、提问回答都在对话里。
-- 侧边：会话列表与状态、任务进度、diff 查看、用量、事件。
+- 侧边：按 Run 分组的会话列表与状态（Run 下是它的 Planner、Worker、Reviewer），其下是独立会话；任务进度、diff、用量从侧边进入。
+- 右侧抽屉按需打开：任务详情（规格、总结、验收、diff stat），以后加完整 diff 与事件流。
 - 会话操作按驱动能力显示：回退到某一轮（可选撤销文件）、从某一轮分叉、按轮查看改动、中途换模型。
 - 设置页：Profile、账号、项目配置。
-- 技术与安全设定沿用 [V2 任务书](tasks/V2-GUI.md)（Electron + React，令牌只在主进程）。
+- 视觉：暖灰中性色 + 唯一强调色靛蓝（indigo），颜色只表达状态、diff 和警告；agent 正文用衬线体（中文回落到 UI 字体），界面用无衬线体；
+  工具调用折叠成单行等宽条目；深浅色跟随系统。界面文字中英混排（术语保留英文：run、Planner、Worker、Approve 等）。
+- 对话数据：`GET /v1/agents/{key}/transcript` 返回按轮分组的历史（hub 由事件折叠而成）和驱动能力，客户端再折叠之后的实时事件；
+  `GET /v1/events` 可加 `agent=<名字或 id>` 只看某个会话。
+- 消息来源：`agent.input` 和每一轮都带 `from`：`human`、`orchestrator { run_id, task_id? }`、`agent { agent_id }`。只有人的消息显示为右侧气泡，其余是一行可展开的消息。
+- 排队：忙时到达的消息排在会话的收件箱里，可以撤回（`DELETE /v1/agents/{key}/messages/{message_id}`，事件 `agent.input_withdrawn`）；
+  `POST .../messages` 带 `now: true` 时插到最前面并中断正在进行的一轮。
+- 状态统一写成「符号 + 一个词」，并归到 需要你 / 等待 / 进行中 / 已结束 四组（`apps/gui/src/lib/taskState.ts`）。
+- 技术与安全设定沿用 [V2 任务书](tasks/V2-GUI.md)（Electron + React，令牌只在主进程）；改版见 [V3](tasks/V3-GUI.md)、[V4](tasks/V4-GUI.md) 任务书。
 
 ### 11.2 CLI
 

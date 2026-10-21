@@ -8,9 +8,10 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 pub use crossagents_core::{
-    Account, AccountStatus, Agent, AgentId, AgentStatus, Capabilities, CheckResult, DataSource,
-    DriverKind, Event, EventKind, MessageId, ModelInfo, OutputStream, PlannedTask, Role, Run,
-    RunId, RunStatus, StopReason, Task, TaskId, TaskStatus, TokenTotals, ToolInfo, ToolStatus,
+    Account, AccountStatus, Agent, AgentId, AgentProfile, AgentStatus, Capabilities, CheckResult,
+    DataSource, DriverKind, Event, EventKind, MessageId, MessageSource, ModelInfo, OutputStream,
+    PlannedTask, Role, Run, RunId, RunStatus, StopReason, Task, TaskId, TaskStatus, TokenTotals,
+    ToolInfo, ToolStatus,
 };
 
 pub const API_VERSION: &str = "v1";
@@ -49,6 +50,9 @@ pub struct CreateAgentRequest {
     pub cwd: String,
     #[serde(default)]
     pub config: serde_json::Value,
+    /// Display name, title, avatar and persona; all optional.
+    #[serde(default)]
+    pub profile: crossagents_core::AgentProfile,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -61,6 +65,10 @@ pub struct ListAgentsResponse {
 #[ts(export)]
 pub struct SendMessageRequest {
     pub text: String,
+    /// Put the message ahead of everything waiting and interrupt the running turn.
+    #[serde(default)]
+    #[ts(optional)]
+    pub now: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -70,6 +78,73 @@ pub struct SendMessageResponse {
     pub message_id: crossagents_core::MessageId,
     /// `true` if the message waits behind the agent's current work.
     pub queued: bool,
+}
+
+/// A session's conversation, rebuilt from its events and grouped by turn.
+/// `GET /v1/agents/{key}/transcript`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Transcript {
+    pub agent: Agent,
+    /// The driver the agent runs on; `None` if its plugin is no longer configured.
+    pub driver: Option<DriverKind>,
+    /// What that driver can do; clients show operations by these flags.
+    pub capabilities: Option<Capabilities>,
+    /// Oldest first. A message still waiting for its turn is the last turn, not started.
+    pub turns: Vec<TranscriptTurn>,
+    /// Latest context usage the agent reported.
+    pub usage: Option<TranscriptUsage>,
+    /// The last event folded in; follow `GET /v1/events?agent=…&since=<last_seq>` from here.
+    #[ts(type = "number")]
+    pub last_seq: u64,
+}
+
+/// One message to the session and everything the agent did in answer to it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TranscriptTurn {
+    pub message_id: MessageId,
+    pub input: String,
+    /// Who sent the message; `None` for messages recorded before senders were.
+    pub from: Option<MessageSource>,
+    pub sent_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Set once the turn has ended.
+    pub stop_reason: Option<StopReason>,
+    /// In arrival order. Consecutive output of the same stream is merged into one item.
+    pub items: Vec<TranscriptItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TranscriptItem {
+    Output {
+        stream: OutputStream,
+        text: String,
+    },
+    ToolCall {
+        tool_call_id: String,
+        title: String,
+        kind: Option<String>,
+        status: ToolStatus,
+    },
+    Error {
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TranscriptUsage {
+    /// Tokens in the context window.
+    #[ts(type = "number")]
+    pub used: u64,
+    /// Size of the context window.
+    #[ts(type = "number")]
+    pub size: u64,
+    pub cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -108,6 +183,10 @@ pub struct CreateRunRequest {
     pub max_parallel: Option<u32>,
     #[serde(default)]
     pub max_attempts: Option<u32>,
+    /// Teammates the planner may assign tasks to, by name. Omitted: every worker and
+    /// reviewer registered in the planner's repository.
+    #[serde(default)]
+    pub team: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

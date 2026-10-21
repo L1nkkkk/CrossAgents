@@ -130,6 +130,15 @@ impl TestHub {
             .unwrap()
     }
 
+    pub async fn delete(&self, path: &str) -> Response {
+        self.client
+            .delete(format!("{}{path}", self.base))
+            .bearer_auth(&self.hub.token)
+            .send()
+            .await
+            .unwrap()
+    }
+
     pub async fn add_agent(&self, name: &str, model: Option<&str>) -> Agent {
         let cwd = self.home.path().to_path_buf();
         self.add_agent_in(name, model, "worker", &cwd).await
