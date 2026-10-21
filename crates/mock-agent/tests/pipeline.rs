@@ -22,6 +22,15 @@ fn accept(key: &str) -> String {
     call("task_accept", json!({ "task": key }))
 }
 
+/// After the last task: accept it, then close the run.
+fn accept_last(key: &str) -> String {
+    format!(
+        "{} {}",
+        accept(key),
+        call("run_finish", json!({ "summary": "all done" }))
+    )
+}
+
 /// A worker goal: run `directives`, then report done with `summary` (which the issuer reads).
 fn goal(directives: &str, summary: &str) -> String {
     format!(
@@ -112,7 +121,10 @@ async fn the_planner_accepts_what_workers_report() {
     a["spec"]["acceptance"] = json!([has("a.txt", "alpha")]);
     let b = task(
         "b",
-        goal("[write b.txt=beta]", &format!("wrote b {}", accept("b"))),
+        goal(
+            "[write b.txt=beta]",
+            &format!("wrote b {}", accept_last("b")),
+        ),
         &["a"],
     );
     let id = start_run(&t, request(json!([a, b])), json!({})).await;
@@ -202,7 +214,7 @@ async fn rework_sends_the_task_back_with_notes() {
         .replacen("[call ", "[call@1 ", 1),
         call(
             "task_complete",
-            json!({ "task_id": "{task_id}", "summary": format!("v2 {}", accept("b")) })
+            json!({ "task_id": "{task_id}", "summary": format!("v2 {}", accept_last("b")) })
         )
         .replacen("[call ", "[call@2 ", 1),
     );
@@ -265,7 +277,7 @@ async fn questions_go_to_the_issuer_and_answers_come_back() {
     // The planner's answer carries the worker's next steps; the question carries the answer.
     let complete = call(
         "task_complete",
-        json!({ "task_id": "{task_id}", "summary": format!("blue {}", accept("h")) }),
+        json!({ "task_id": "{task_id}", "summary": format!("blue {}", accept_last("h")) }),
     );
     let answer = call(
         "task_answer",
@@ -308,7 +320,7 @@ async fn a_reviewer_judges_and_the_issuer_decides() {
     );
     let verdict = call(
         "review_submit",
-        json!({ "task_id": "{task_id}", "approve": true, "notes": format!("lgtm {}", accept("g")) }),
+        json!({ "task_id": "{task_id}", "approve": true, "notes": format!("lgtm {}", accept_last("g")) }),
     )
     .replacen("[call ", "[call#mock-opus ", 1);
     let worker = format!(
@@ -487,7 +499,7 @@ async fn planner_assigns_tasks_by_specialty() {
 
     let mut a = task("a", goal("[write a.txt=alpha]", &accept("a")), &[]);
     a["assignee"] = json!("sec");
-    let b = task("b", goal("[write b.txt=beta]", &accept("b")), &[]);
+    let b = task("b", goal("[write b.txt=beta]", &accept_last("b")), &[]);
     let id = start_run(&t, request(json!([a, b])), json!({})).await;
     w.until(
         "awaiting approval",
@@ -582,7 +594,7 @@ async fn the_lead_adds_tasks_while_the_run_runs() {
             "[write extra.txt=more] {}",
             call(
                 "task_complete",
-                json!({ "task": "extra", "summary": accept("extra") })
+                json!({ "task": "extra", "summary": accept_last("extra") })
             )
         ),
         &["a"],
@@ -608,4 +620,94 @@ async fn the_lead_adds_tasks_while_the_run_runs() {
         git_show(repo.path(), &format!("{branch}:extra.txt")),
         "more"
     );
+}
+
+#[tokio::test]
+async fn a_hands_off_run_lands_on_main_and_reports_to_the_person() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+
+    let close = format!(
+        "{} {} {}",
+        accept("z"),
+        call("run_land", json!({ "mode": "merge" })),
+        call("run_finish", json!({ "summary": "Added z.txt." }))
+    );
+    let z = task(
+        "z",
+        goal("[write z.txt=zed]", &format!("z done {close}")),
+        &[],
+    );
+    let id = start_run(
+        &t,
+        request(json!([z])),
+        json!({ "policy": { "plan_approval": "auto", "land": "auto", "human_ask": "timeout" } }),
+    )
+    .await;
+    w.until("run completed", run_status_is(&id, RunStatus::Completed))
+        .await;
+    assert!(
+        types(&w.seen).contains(&"run.landed"),
+        "{:?}",
+        types(&w.seen)
+    );
+    // On main, in the person's (clean) checkout.
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("z.txt"))
+            .unwrap()
+            .trim(),
+        "zed"
+    );
+    let detail = detail(&t, &id).await;
+    assert_eq!(detail["run"]["landed"]["mode"], "merge");
+    assert_eq!(detail["run"]["summary"], "Added z.txt.");
+    // The person gets the lead's summary with the facts.
+    let questions: Value = t.get("/v1/questions").await.json().await.unwrap();
+    let note = questions["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["kind"] == "notice")
+        .expect("closing note");
+    let text = note["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("Added z.txt.") && text.contains("已落地到 main"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn a_manual_run_leaves_landing_to_the_person() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+
+    let close = format!("{} {}", accept("m"), call("run_land", json!({})));
+    let m = task(
+        "m",
+        goal("[write m.txt=em]", &format!("m done {close}")),
+        &[],
+    );
+    let id = start_run(&t, request(json!([m])), json!({ "auto_approve": true })).await;
+    w.until("m merged", task_is("m", TaskStatus::Merged)).await;
+    let boss: Value = t.get("/v1/agents/boss").await.json().await.unwrap();
+    let boss_id = boss["id"].as_str().unwrap().to_owned();
+    while !w.output().contains("leaves landing to the person") {
+        w.until("planner turn", |e| {
+            matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if id.to_string() == boss_id)
+        })
+        .await;
+    }
+    // The person lands it, then closes the run.
+    let resp = t
+        .post(&format!("/v1/runs/{id}/land"), json!({ "mode": "squash" }))
+        .await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    assert!(repo.path().join("m.txt").exists());
+    let resp = t.post(&format!("/v1/runs/{id}/finish"), json!({})).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let detail: Value = resp.json().await.unwrap();
+    assert_eq!(detail["run"]["status"], "completed");
+    assert_eq!(detail["run"]["landed"]["by"], "person");
 }

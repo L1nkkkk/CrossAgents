@@ -14,7 +14,7 @@ use crate::driver::{
 };
 use crate::human::HumanItem;
 use crate::ids::{AgentId, MessageId, RunId, TaskId};
-use crate::model::{Agent, AgentStatus, CheckResult, Run, RunStatus};
+use crate::model::{Agent, AgentStatus, CheckResult, Landing, Run, RunStatus};
 use crate::state::TaskStatus;
 
 pub const EVENT_SCHEMA_VERSION: u32 = 1;
@@ -177,6 +177,9 @@ pub enum EventKind {
     /// A notice was read, or a question dropped.
     #[serde(rename = "human.dismissed")]
     HumanDismissed { id: String },
+    /// The run's branch reached its base branch (or a pull request was opened).
+    #[serde(rename = "run.landed")]
+    RunLanded { id: RunId, landing: Landing },
     /// A run used `percent` of a budget cap (`what`: tokens, usd or minutes).
     #[serde(rename = "run.budget")]
     RunBudget {
@@ -344,6 +347,7 @@ impl EventKind {
             Self::HumanAnswered { .. } => "human.answered",
             Self::HumanDismissed { .. } => "human.dismissed",
             Self::RunBudget { .. } => "run.budget",
+            Self::RunLanded { .. } => "run.landed",
             Self::WatchTriggered { .. } => "watch.triggered",
             Self::AgentTurnStarted { .. } => "agent.turn_started",
             Self::AgentOutput { .. } => "agent.output",
@@ -380,7 +384,8 @@ impl EventKind {
             Self::RunCreated { run } => Some(run.id),
             Self::RunStatusChanged { id, .. }
             | Self::RunPlanSubmitted { id, .. }
-            | Self::RunBudget { id, .. } => Some(*id),
+            | Self::RunBudget { id, .. }
+            | Self::RunLanded { id, .. } => Some(*id),
             Self::HumanAsked { item } | Self::HumanAnswered { item } => item.run_id,
             Self::TaskStatusChanged { run_id, .. }
             | Self::TaskChecked { run_id, .. }
@@ -405,6 +410,7 @@ impl EventKind {
             | Self::AccountQuotaUpdated { .. }
             | Self::HumanDismissed { .. }
             | Self::RunBudget { .. }
+            | Self::RunLanded { .. }
             | Self::AccountLoginFinished { .. }
             | Self::AccountLoginPending { .. } => None,
             Self::AgentSessionStarted { id, .. } => Some(*id),

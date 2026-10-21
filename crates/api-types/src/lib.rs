@@ -238,6 +238,24 @@ pub struct CreateRunRequest {
     pub policy: Option<crossagents_core::RunPolicy>,
 }
 
+/// `POST /v1/runs/{key}/land`; merge when `mode` is omitted.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LandRequest {
+    #[serde(default)]
+    #[ts(optional)]
+    pub mode: Option<crossagents_core::LandMode>,
+}
+
+/// `POST /v1/runs/{key}/finish`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FinishRequest {
+    #[serde(default)]
+    #[ts(optional)]
+    pub summary: Option<String>,
+}
+
 /// `POST /v1/questions/{id}/answer`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]

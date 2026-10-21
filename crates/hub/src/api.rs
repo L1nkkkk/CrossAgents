@@ -17,16 +17,16 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use crossagents_api_types::{
     API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AnswerRequest, ApiError,
-    CreateAccountRequest, CreateAgentRequest, CreateRunRequest, ErrorCode, HealthResponse, HubInfo,
-    ListAccountsResponse, ListAgentsResponse, ListPluginsResponse, ListQuestionsResponse,
-    ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
-    RunDetail, SendMessageRequest, SendMessageResponse, SetModelRequest, Transcript, UsageGroup,
-    UsageResponse,
+    CreateAccountRequest, CreateAgentRequest, CreateRunRequest, ErrorCode, FinishRequest,
+    HealthResponse, HubInfo, LandRequest, ListAccountsResponse, ListAgentsResponse,
+    ListPluginsResponse, ListQuestionsResponse, ListRunsResponse, ListToolsResponse, LoginStarted,
+    PluginInfo, QuotaResponse, RejectRunRequest, RunDetail, SendMessageRequest,
+    SendMessageResponse, SetModelRequest, Transcript, UsageGroup, UsageResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError,
-    DriverKind, Event, EventBus, EventKind, HumanItem, MessageId, MessageSource, Run, RunConfig,
-    RunId, Store, validate_agent_name,
+    DriverKind, Event, EventBus, EventKind, HumanItem, LandMode, MessageId, MessageSource, Run,
+    RunConfig, RunId, Store, validate_agent_name,
 };
 use crossagents_orchestrator::{NewRun, Orchestrator};
 
@@ -99,6 +99,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{key}/approve", post(approve_run))
         .route("/v1/runs/{key}/reject", post(reject_run))
         .route("/v1/runs/{key}/cancel", post(cancel_run))
+        .route("/v1/runs/{key}/land", post(land_run))
+        .route("/v1/runs/{key}/finish", post(finish_run))
         .route("/v1/events", get(events))
         .route("/v1/shutdown", post(shutdown))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
@@ -612,6 +614,31 @@ async fn cancel_run(
 ) -> ApiResult<Json<RunDetail>> {
     let id = resolve_run(&state, &key).await?;
     state.orchestrator.cancel(id).await?;
+    run_detail(&state, id).await
+}
+
+/// The person lands a run (whatever the run's policy says about the lead).
+async fn land_run(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(req): Json<LandRequest>,
+) -> ApiResult<Json<RunDetail>> {
+    let id = resolve_run(&state, &key).await?;
+    state
+        .orchestrator
+        .land(id, req.mode.unwrap_or(LandMode::Merge), "person")
+        .await?;
+    run_detail(&state, id).await
+}
+
+/// The person closes a run; open tasks are cancelled.
+async fn finish_run(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(req): Json<FinishRequest>,
+) -> ApiResult<Json<RunDetail>> {
+    let id = resolve_run(&state, &key).await?;
+    state.orchestrator.finish(id, req.summary, true).await?;
     run_detail(&state, id).await
 }
 

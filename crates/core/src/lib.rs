@@ -32,8 +32,8 @@ pub use event::{EVENT_SCHEMA_VERSION, Envelope, Event, EventKind, EventSink, Mes
 pub use human::{HumanAction, HumanItem, HumanItemKind, HumanItemStatus};
 pub use ids::{AgentId, MessageId, RunId, SessionId, TaskId};
 pub use model::{
-    Agent, AgentProfile, AgentStatus, CheckResult, PlannedTask, Role, Run, RunConfig, RunStatus,
-    Scope, Task, TaskReport, TaskSpec, validate_agent_name,
+    Agent, AgentProfile, AgentStatus, CheckResult, LandMode, Landing, PlannedTask, Role, Run,
+    RunConfig, RunStatus, Scope, Task, TaskReport, TaskSpec, validate_agent_name,
 };
 pub use notify::{Reminder, Watch, WatchOn, WatchTarget};
 pub use policy::{AskPolicy, Budget, LandPolicy, PlanApproval, RunPolicy};

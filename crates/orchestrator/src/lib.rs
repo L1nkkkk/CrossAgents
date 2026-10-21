@@ -6,6 +6,7 @@ pub mod brief;
 pub mod engine;
 pub mod host;
 pub mod human;
+pub mod landing;
 pub mod messaging;
 pub mod plan;
 pub mod protocol;

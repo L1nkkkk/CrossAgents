@@ -128,7 +128,7 @@ fn full_run_with_a_directory_plugin() {
         "title": "write hello",
         "spec": {
             // The summary carries the planner's next step: accept the task.
-            "goal": r#"[write hello.txt=hi] [call task_complete {"task_id":"{task_id}","summary":"hello [call task_accept {\"task\":\"hello\"}]"}]"#,
+            "goal": r#"[write hello.txt=hi] [call task_complete {"task_id":"{task_id}","summary":"hello [call task_accept {\"task\":\"hello\"}] [call run_finish {\"summary\":\"done\"}]"}]"#,
             "acceptance": ["git grep -q hi -- hello.txt"]
         }
     }]});

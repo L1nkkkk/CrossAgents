@@ -99,6 +99,13 @@ pub fn summary(kind: &EventKind) -> String {
             one_line(command),
             exit_code.map_or("none".into(), |c| c.to_string())
         ),
+        EventKind::RunLanded { id, landing } => format!(
+            "{} {} by {} -> {}",
+            short_tail(id),
+            enum_name(&landing.mode),
+            landing.by,
+            landing.reference
+        ),
         EventKind::RunBudget { id, what, percent } => {
             format!("{} {what} {percent}%", short_tail(id))
         }
