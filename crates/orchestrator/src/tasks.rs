@@ -191,13 +191,26 @@ impl Orchestrator {
         }
         let a: A = args(input)?;
         let Some((run, existing)) = self.run_of(caller.id).await? else {
-            return Err(CoreError::Conflict("you lead no run".into()));
+            return Err(CoreError::Conflict("you are in no run".into()));
         };
-        if run.planner != caller.id {
+        // The lead adds tasks to the run; with the delegate policy an assignee splits off
+        // parts of its own task, which branch from it and merge back into it.
+        let parent = if run.planner == caller.id {
+            None
+        } else if !run.config.policy.delegate {
             return Err(CoreError::Conflict(
-                "only the run's lead creates tasks".into(),
+                "only the run's lead creates tasks (this run does not let workers delegate)".into(),
             ));
-        }
+        } else {
+            let own = existing
+                .iter()
+                .find(|t| t.assignee == Some(caller.id) && !t.status.is_terminal())
+                .ok_or_else(|| CoreError::Conflict("you have no open task to split".into()))?;
+            if own.worktree.is_none() {
+                return Err(CoreError::Conflict("your task has not started".into()));
+            }
+            Some(own.id)
+        };
         if run.status != RunStatus::Running {
             return Err(CoreError::Conflict(format!(
                 "the run is {:?}; before it runs, put tasks in the plan (plan_submit)",
@@ -243,6 +256,7 @@ impl Orchestrator {
                 spec: planned.spec,
                 depends_on: planned.depends_on,
                 issuer: Some(caller.id),
+                parent,
                 assignee: None,
                 reviewer: None,
                 worker_template,
@@ -480,7 +494,8 @@ impl Orchestrator {
         self.workspaces
             .commit_all(&dir, &format!("{}: {}", task.key, task.title))
             .await?;
-        let diff_stat = self.workspaces.diff_stat(&dir, &run.branch).await.ok();
+        let (base, _) = self.base_of(&run, &task).await?;
+        let diff_stat = self.workspaces.diff_stat(&dir, &base).await.ok();
         let checks = if task.spec.acceptance.is_empty() {
             Vec::new()
         } else {
@@ -666,12 +681,13 @@ impl Orchestrator {
         Self::require_insider(&run, &task, caller)?;
         let a: A = args(input)?;
         let dir = Self::worktree(&task)?;
+        let (base, _) = self.base_of(&run, &task).await?;
         if a.stat_only {
-            let committed = self.workspaces.diff_stat(&dir, &run.branch).await?;
-            return Ok(json!({ "stat": committed }));
+            let committed = self.workspaces.diff_stat(&dir, &base).await?;
+            return Ok(json!({ "base": base, "stat": committed }));
         }
-        let diff = self.workspaces.diff(&dir, &run.branch, &a.paths).await?;
-        Ok(json!({ "base": run.branch, "diff": clip(diff, READ_LIMIT) }))
+        let diff = self.workspaces.diff(&dir, &base, &a.paths).await?;
+        Ok(json!({ "base": base, "diff": clip(diff, READ_LIMIT) }))
     }
 
     pub(crate) async fn workspace_read(
@@ -928,11 +944,8 @@ impl Orchestrator {
             .await?;
         let branch = task.branch.clone().unwrap_or_default();
         let message = format!("crossagents: {} ({})", task.title, task.key);
-        if let Err(err) = self
-            .workspaces
-            .merge(&self.integration_path(&run), &branch, &message)
-            .await
-        {
+        let (base, into) = self.base_of(&run, &task).await?;
+        if let Err(err) = self.workspaces.merge(&into, &branch, &message).await {
             return Ok(json!({
                 "merged": false,
                 "conflict": err.to_string(),
@@ -944,7 +957,7 @@ impl Orchestrator {
         task.report.failure = None;
         self.transition(&mut task, TaskStatus::Merged).await?;
         self.schedule(&mut run).await?;
-        Ok(json!({ "merged": true, "task": task_json(&task), "run_branch": run.branch }))
+        Ok(json!({ "merged": true, "task": task_json(&task), "into": base }))
     }
 
     pub(crate) async fn task_rework(
@@ -1052,16 +1065,17 @@ impl Orchestrator {
         self.workspaces
             .commit_all(&dir, &format!("{}: work in progress", task.key))
             .await?;
+        let (base, _) = self.base_of(&run, &task).await?;
         match self
             .workspaces
             .merge(
                 &dir,
-                &run.branch,
-                &format!("crossagents: sync {} with {}", task.key, run.branch),
+                &base,
+                &format!("crossagents: sync {} with {base}", task.key),
             )
             .await
         {
-            Ok(()) => Ok(json!({ "synced": true, "from": run.branch })),
+            Ok(()) => Ok(json!({ "synced": true, "from": base })),
             Err(err) => Ok(json!({ "synced": false, "conflict": err.to_string() })),
         }
     }

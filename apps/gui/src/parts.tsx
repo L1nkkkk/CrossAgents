@@ -100,6 +100,7 @@ export function TaskCard({ task, run, agents, siblings, open: initial = false }:
         {owner ? <Avatar agent={owner} size={18} /> : <span className="tc-noone" />}
         <span className="tc-who">{owner ? displayName(owner) : "—"}</span>
         <code className="tc-key">#{task.key}</code>
+        {task.parent && siblings && <span className="muted small">↳ #{siblings.find((t) => t.id === task.parent)?.key ?? "?"}</span>}
         <span className={`tc-title ${line !== task.title ? "doing" : ""}`}>{line}</span>
         <StateWord state={state} />
         <span className="tc-time">{taskTime(task, state.live, now)}</span>

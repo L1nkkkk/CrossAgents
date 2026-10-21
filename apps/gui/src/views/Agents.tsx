@@ -81,6 +81,11 @@ function MemberCard({ agent, onEdit }: { agent: Agent; onEdit: () => void }) {
       <p className={`member-persona ${agent.profile.persona ? "" : "muted"}`}>{agent.profile.persona || "还没有设定人设。"}</p>
       <div className="member-foot">
         <span className="chip">{agent.role}</span>
+        {typeof (agent.config as Record<string, unknown> | null)?.spawned_by_run === "string" && (
+          <a className="chip accent" href={`#/runs/${(agent.config as Record<string, string>).spawned_by_run}`} title="由 run 的 lead 招来的队友">
+            run 招募
+          </a>
+        )}
         <span className="chip" title={agent.driver ?? undefined}>
           {agent.plugin}
           {agent.model ? ` · ${agent.model}` : ""}

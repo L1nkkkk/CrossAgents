@@ -36,6 +36,11 @@ pub trait AgentHost: Send + Sync {
         role: Role,
         cwd: &Path,
     ) -> Result<Agent, CoreError>;
+    /// Registers a new agent (`agent_spawn`); fails if its plugin is unknown or the name
+    /// is taken.
+    async fn spawn_agent(&self, agent: Agent) -> Result<Agent, CoreError>;
+    /// Changes an agent's model, from its next turn when it is running.
+    async fn set_model(&self, agent: AgentId, model: Option<String>) -> Result<Agent, CoreError>;
     /// Stops and deletes an agent created with [`Self::clone_agent`].
     async fn remove_agent(&self, agent: AgentId) -> Result<(), CoreError>;
 }

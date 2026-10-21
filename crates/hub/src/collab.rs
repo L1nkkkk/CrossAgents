@@ -176,6 +176,32 @@ impl AgentHost for HubHost {
         Ok(agent)
     }
 
+    async fn spawn_agent(&self, agent: Agent) -> Result<Agent, CoreError> {
+        if !self.runtime.plugins().contains(&agent.plugin) {
+            return Err(CoreError::Conflict(format!(
+                "unknown plugin {:?} (available: {})",
+                agent.plugin,
+                self.runtime.plugins().names().join(", ")
+            )));
+        }
+        crossagents_core::validate_agent_name(&agent.name)?;
+        let agent = Agent {
+            profile: agent.profile.normalized()?,
+            ..agent
+        };
+        self.bus.store().insert_agent(&agent).await?;
+        self.bus
+            .publish(EventKind::AgentCreated {
+                agent: agent.clone(),
+            })
+            .await?;
+        Ok(agent)
+    }
+
+    async fn set_model(&self, agent: AgentId, model: Option<String>) -> Result<Agent, CoreError> {
+        self.runtime.set_model(&AgentKey::Id(agent), model).await
+    }
+
     async fn remove_agent(&self, agent: AgentId) -> Result<(), CoreError> {
         let record = self.bus.store().get_agent(&AgentKey::Id(agent)).await?;
         self.runtime.stop(&AgentKey::Id(agent)).await?;

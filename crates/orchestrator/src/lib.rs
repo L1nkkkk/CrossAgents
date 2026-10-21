@@ -11,6 +11,7 @@ pub mod messaging;
 pub mod plan;
 pub mod protocol;
 pub mod tasks;
+pub mod team;
 pub mod tools;
 pub mod verify;
 pub mod workspace;

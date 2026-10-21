@@ -392,6 +392,10 @@ pub struct Task {
     pub worktree: Option<PathBuf>,
     #[serde(default)]
     pub report: TaskReport,
+    /// The task this one was split from (`delegate` policy): it branches from the parent's
+    /// branch and merges back into it.
+    #[serde(default)]
+    pub parent: Option<TaskId>,
     /// The assignee's latest one-line progress (`task_progress`).
     #[serde(default)]
     pub progress: Option<String>,
