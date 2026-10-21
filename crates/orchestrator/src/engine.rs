@@ -86,6 +86,26 @@ impl Orchestrator {
         lock.lock_owned().await
     }
 
+    /// Where a task's work goes: the branch it starts from and is compared with, and the
+    /// working copy it merges into — its parent task's, else the run's.
+    pub(crate) async fn base_of(
+        &self,
+        run: &Run,
+        task: &Task,
+    ) -> Result<(String, PathBuf), CoreError> {
+        if let Some(parent) = task.parent {
+            let parent = self.store.get_task(parent).await?;
+            if let (Some(branch), Some(dir)) = (parent.branch, parent.worktree) {
+                return Ok((branch, dir));
+            }
+            return Err(CoreError::Conflict(format!(
+                "the parent task #{} has no worktree any more",
+                parent.key
+            )));
+        }
+        Ok((run.branch.clone(), self.integration_path(run)))
+    }
+
     pub(crate) fn integration_path(&self, run: &Run) -> PathBuf {
         worktree_path(&self.config.worktrees, &short(run.id), "integration")
     }
@@ -420,6 +440,7 @@ impl Orchestrator {
                 report: TaskReport::default(),
                 issuer: Some(run.planner),
                 progress: None,
+                parent: None,
                 created_at: now,
                 updated_at: now,
             };
@@ -542,8 +563,9 @@ impl Orchestrator {
         if task.worktree.is_none() {
             let path = worktree_path(&self.config.worktrees, &short(run.id), &task.key);
             let branch = format!("{}-{}", run.branch, task.key);
+            let (base, _) = self.base_of(run, task).await?;
             self.workspaces
-                .create(&run.repo, &branch, &run.branch, &path)
+                .create(&run.repo, &branch, &base, &path)
                 .await?;
             task.worktree = Some(path);
             task.branch = Some(branch);

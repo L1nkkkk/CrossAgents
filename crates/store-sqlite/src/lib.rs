@@ -715,6 +715,7 @@ mod tests {
             let task = Task {
                 issuer: None,
                 progress: None,
+                parent: None,
                 id: TaskId::new(),
                 run_id: run.id,
                 key: key.into(),

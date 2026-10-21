@@ -41,6 +41,11 @@ escalated: boolean,
  */
 nudges: number, branch: string | null, worktree: string | null, report: TaskReport, 
 /**
+ * The task this one was split from (`delegate` policy): it branches from the parent's
+ * branch and merges back into it.
+ */
+parent: TaskId | null, 
+/**
  * The assignee's latest one-line progress (`task_progress`).
  */
 progress: string | null, created_at: string, updated_at: string, };

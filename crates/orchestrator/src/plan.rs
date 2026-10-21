@@ -142,11 +142,17 @@ pub fn ready_tasks(tasks: &[Task], max_parallel: u32) -> Vec<&Task> {
         .collect();
     let mut ready = Vec::new();
     for task in tasks.iter().filter(|t| t.status == TaskStatus::Pending) {
-        if active.len() >= max_parallel.max(1) as usize {
-            break;
+        // A task split off another works in its own worktree and merges back into it: the
+        // tasks it came from neither block it nor count against the limit (they wait for it).
+        let others: Vec<&&Task> = active
+            .iter()
+            .filter(|other| !is_ancestor(tasks, other, task))
+            .collect();
+        if others.len() >= max_parallel.max(1) as usize {
+            continue;
         }
         let deps_done = task.depends_on.iter().all(|d| merged.contains(d.as_str()));
-        let clashes = active
+        let clashes = others
             .iter()
             .any(|other| scopes_overlap(&task.spec.scope, &other.spec.scope));
         if deps_done && !clashes {
@@ -155,6 +161,23 @@ pub fn ready_tasks(tasks: &[Task], max_parallel: u32) -> Vec<&Task> {
         }
     }
     ready
+}
+
+/// Whether `ancestor` is `task`'s parent, or its parent's, and so on.
+fn is_ancestor(tasks: &[Task], ancestor: &Task, task: &Task) -> bool {
+    let mut current = task.parent;
+    let mut steps = 0;
+    while let Some(id) = current {
+        if id == ancestor.id {
+            return true;
+        }
+        current = tasks.iter().find(|t| t.id == id).and_then(|t| t.parent);
+        steps += 1;
+        if steps > tasks.len() {
+            return false;
+        }
+    }
+    false
 }
 
 /// Pending tasks that can never run because a dependency failed or was cancelled.
@@ -195,6 +218,7 @@ mod tests {
 
     fn task(key: &str, status: TaskStatus, allow: &[&str], deps: &[&str]) -> Task {
         Task {
+            parent: None,
             issuer: None,
             progress: None,
             id: TaskId::new(),

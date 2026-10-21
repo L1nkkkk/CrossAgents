@@ -233,8 +233,8 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_create",
-        description: "Add tasks to your running run (same fields as plan_submit's tasks). They start once their dependencies are merged. Keys already in the run are left as they are.",
-        groups: PLANNER,
+        description: "Add tasks to your running run (same fields as plan_submit's tasks). They start once their dependencies are merged. Keys already in the run are left as they are. If the run lets workers delegate, a worker can split parts off its own task this way: they branch from it and merge back into it, and the worker accepts them.",
+        groups: ALL,
         schema: || {
             object(
                 json!({ "tasks": { "type": "array", "items": planned_task_schema() } }),
@@ -358,6 +358,48 @@ const TOOLS: &[ToolDef] = &[
         description: "Merge the run branch (work merged since the task started) into a task's worktree; returns conflicts if any.",
         groups: ALL,
         schema: || task_schema(json!({})),
+    },
+    ToolDef {
+        name: "agent_spawn",
+        description: "Recruit a teammate for your run: name (unique), role (worker or reviewer), plugin and model (default: the run's default worker's), and optionally display_name, title, persona. Assign tasks to it by name. The run's policy caps how many you may recruit.",
+        groups: PLANNER,
+        schema: || {
+            object(
+                json!({
+                    "name": { "type": "string" },
+                    "role": { "type": "string", "enum": ["worker", "reviewer"] },
+                    "plugin": { "type": "string" },
+                    "model": { "type": "string" },
+                    "display_name": { "type": "string" },
+                    "title": { "type": "string" },
+                    "persona": { "type": "string" }
+                }),
+                &["name"],
+            )
+        },
+    },
+    ToolDef {
+        name: "agent_retire",
+        description: "Remove a teammate you recruited (its conversation stays on record). It must have no open tasks.",
+        groups: PLANNER,
+        schema: || object(json!({ "name": { "type": "string" } }), &["name"]),
+    },
+    ToolDef {
+        name: "agent_set_model",
+        description: "Change the model of a teammate in your run, e.g. move a stuck task's worker to a stronger model. Applies from its next turn.",
+        groups: PLANNER,
+        schema: || {
+            object(
+                json!({ "name": { "type": "string" }, "model": { "type": "string" } }),
+                &["name", "model"],
+            )
+        },
+    },
+    ToolDef {
+        name: "agent_interrupt",
+        description: "Stop a teammate's current turn.",
+        groups: PLANNER,
+        schema: || object(json!({ "name": { "type": "string" } }), &["name"]),
     },
     ToolDef {
         name: "run_land",
@@ -533,6 +575,10 @@ impl Orchestrator {
             "branch_sync" => self.branch_sync(caller, input).await,
             "task_progress" => self.task_progress(caller, input).await,
             "run_land" => self.run_land_tool(caller, input).await,
+            "agent_spawn" => self.agent_spawn(caller, input).await,
+            "agent_retire" => self.agent_retire(caller, input).await,
+            "agent_set_model" => self.agent_set_model(caller, input).await,
+            "agent_interrupt" => self.agent_interrupt(caller, input).await,
             "run_finish" => self.run_finish_tool(caller, input).await,
             "task_complete" => {
                 #[derive(Deserialize)]
