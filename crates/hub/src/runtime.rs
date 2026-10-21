@@ -351,6 +351,35 @@ impl Runtime {
         }
     }
 
+    /// Changes the agent's model. A running session switches from its next turn when the
+    /// driver can; otherwise the model applies when the session next starts.
+    pub async fn set_model(
+        &self,
+        key: &AgentKey,
+        model: Option<String>,
+    ) -> Result<Agent, CoreError> {
+        let mut agent = self.store().get_agent(key).await?;
+        self.store()
+            .update_agent_model(agent.id, model.as_deref())
+            .await?;
+        agent.model = model;
+        let live = self.live.lock().await.get(&agent.id).cloned();
+        if let (Some(live), Some(model)) = (live, agent.model.as_deref()) {
+            match live.session.set_model(Some(model), None).await {
+                Ok(()) | Err(CoreError::Unsupported(_)) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        publish(
+            &self.bus,
+            EventKind::AgentUpdated {
+                agent: agent.clone(),
+            },
+        )
+        .await;
+        Ok(agent)
+    }
+
     /// Stops the agent's session. Stopping a stopped agent is fine.
     pub async fn stop(&self, key: &AgentKey) -> Result<(), CoreError> {
         let agent = self.store().get_agent(key).await?;

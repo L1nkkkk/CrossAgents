@@ -24,12 +24,12 @@ cargo build --release
 # 把 target/release/crossagents 放进 PATH
 ```
 
-内置插件第一次启动 agent 时会通过 `npx` 下载适配器：
-`@agentclientprotocol/claude-agent-acp`、`@agentclientprotocol/codex-acp`。
+Claude 插件第一次启动 agent 时会通过 `npx` 下载适配器 `@agentclientprotocol/claude-agent-acp`。
+Codex 插件默认走原生驱动（`codex app-server`）：先找 PATH 上的 `codex`，找不到就用 Codex 桌面版自带的那份。
 
-**Codex 提示**：建议给 agent 显式指定 `--model`。不指定时用 `~/.codex/config.toml` 里的默认模型，
-它不一定支持你的登录方式（例如 ChatGPT 账号）。不知道有哪些模型时，随便填一个，
-`crossagents events` 里的 `agent.error` 会列出可选值。
+**Codex 提示**：建议给 agent 显式指定模型。不指定时用 `~/.codex/config.toml` 里的默认模型，
+它不一定支持你的登录方式（例如 ChatGPT 账号）。GUI 的模型下拉框列的是 Codex 为当前登录给出的模型
+（`~/.codex/models_cache.json`），新建队友默认选第一个；已有队友可以在「编辑」里改，从下一轮起生效。
 
 ## 快速开始
 
@@ -127,9 +127,9 @@ command = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
 [plugins.gemini]
 command = ["gemini", "--experimental-acp"]
 
-# Codex 改走原生驱动（codex app-server，需本机已装 codex）；不写 driver 则仍走 codex-acp
+# Codex 默认走原生驱动（codex app-server）；要改回 codex-acp 适配器：
 [plugins.codex]
-driver = "codex-native"
+driver = "acp-generic"
 ```
 
 单个 agent 也可以用 `crossagents agent add … --driver codex-native|acp-generic` 覆盖插件的默认驱动。

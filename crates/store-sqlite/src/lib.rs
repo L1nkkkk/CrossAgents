@@ -212,6 +212,19 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    async fn update_agent_model(&self, id: AgentId, model: Option<&str>) -> Result<(), CoreError> {
+        let result = sqlx::query("UPDATE agents SET model = ? WHERE id = ?")
+            .bind(model)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        if result.rows_affected() == 0 {
+            return Err(not_found(&AgentKey::Id(id)));
+        }
+        Ok(())
+    }
+
     async fn update_agent_status(&self, id: AgentId, status: AgentStatus) -> Result<(), CoreError> {
         let result = sqlx::query("UPDATE agents SET status = ? WHERE id = ?")
             .bind(enum_str(&status)?)

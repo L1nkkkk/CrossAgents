@@ -40,6 +40,11 @@ pub trait Store: Send + Sync {
         let _ = (id, profile);
         Err(CoreError::Unsupported("updating agent profiles".into()))
     }
+    /// Replaces the agent's model; `None` leaves it to the agent's own default.
+    async fn update_agent_model(&self, id: AgentId, model: Option<&str>) -> Result<(), CoreError> {
+        let _ = (id, model);
+        Err(CoreError::Unsupported("updating agent models".into()))
+    }
 
     /// Persists the event, assigning its `seq`, `id` and `ts`.
     async fn append_event(&self, kind: EventKind) -> Result<Event, CoreError>;

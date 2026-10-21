@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { app, BrowserWindow, ipcMain, session, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, session, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
 
 const METHODS = new Set(["GET", "POST", "DELETE"]);
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -97,6 +97,15 @@ ipcMain.handle("hub:request", async (event, method: unknown, path: unknown, body
   } catch (err) {
     return { ok: false, error: message(err) };
   }
+});
+
+/** A folder chosen in the system dialog, or null when cancelled. */
+ipcMain.handle("dialog:pick-folder", async (event) => {
+  if (!fromApp(event)) return null;
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const options = { properties: ["openDirectory" as const] };
+  const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+  return result.canceled ? null : (result.filePaths[0] ?? null);
 });
 
 /** One event relay per page; a reload starts a new one. */

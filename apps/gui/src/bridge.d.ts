@@ -12,6 +12,8 @@ export interface CrossAgentsBridge {
   onEvent(listener: (data: string) => void): () => void;
   /** "connecting", "connected" or "offline: <reason>". Returns an unsubscribe function. */
   onStatus(listener: (status: string) => void): () => void;
+  /** Asks for a folder in the system dialog; null when cancelled. */
+  pickFolder?(): Promise<string | null>;
 }
 
 declare global {

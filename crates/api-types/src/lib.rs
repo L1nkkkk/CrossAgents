@@ -61,6 +61,13 @@ pub struct ListAgentsResponse {
     pub agents: Vec<Agent>,
 }
 
+/// `POST /v1/agents/{key}/model`. `None` leaves the model to the agent's own default.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetModelRequest {
+    pub model: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct SendMessageRequest {

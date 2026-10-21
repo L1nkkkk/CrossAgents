@@ -31,6 +31,9 @@ use crate::process::{StderrTail, hide_console};
 const INIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Control requests answer quickly; turns are awaited separately.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// For interrupting and unsubscribing. Codex never answers an interrupt of a turn that has
+/// already ended, which a stop racing the turn's end can send.
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The `codex-native` driver for one Profile.
 pub struct CodexNativeDriver {
@@ -135,7 +138,13 @@ impl Driver for CodexNativeDriver {
         }
     }
 
+    /// The configured models, else the ones Codex lists for the default login.
     fn models(&self) -> Vec<String> {
+        if self.models.is_empty() {
+            return default_codex_home()
+                .map(|home| cached_models(&home))
+                .unwrap_or_default();
+        }
         self.models.clone()
     }
 
@@ -515,13 +524,14 @@ impl CodexSession {
     }
 
     async fn send_interrupt(&self, turn_id: &str) -> Result<(), CoreError> {
-        self.server
-            .request(
-                method::TURN_INTERRUPT,
-                json!({ "threadId": self.thread_id, "turnId": turn_id }),
-            )
-            .await
-            .map(|_| ())
+        let request = self.server.request(
+            method::TURN_INTERRUPT,
+            json!({ "threadId": self.thread_id, "turnId": turn_id }),
+        );
+        match tokio::time::timeout(CLEANUP_TIMEOUT, request).await {
+            Ok(result) => result.map(|_| ()),
+            Err(_) => Ok(()), // the turn ended meanwhile
+        }
     }
 
     /// Stops listening to the thread; it stays in Codex's store.
@@ -530,13 +540,11 @@ impl CodexSession {
             return;
         }
         if !self.server.router.exited.load(Ordering::SeqCst) {
-            let _ = self
-                .server
-                .request(
-                    method::THREAD_UNSUBSCRIBE,
-                    json!({ "threadId": self.thread_id }),
-                )
-                .await;
+            let request = self.server.request(
+                method::THREAD_UNSUBSCRIBE,
+                json!({ "threadId": self.thread_id }),
+            );
+            let _ = tokio::time::timeout(CLEANUP_TIMEOUT, request).await;
         }
         self.sink.end_turn();
         self.server.router.remove(&self.thread_id, &self.sink);
@@ -717,9 +725,75 @@ impl CodexSession {
 /// The native `codex` executable behind `program`. npm installs `codex` as a Node script
 /// (`codex.cmd` / `codex.ps1` on Windows) that starts the real binary as a child; killing
 /// the script would leave that child running, so we start the binary ourselves.
+/// Without a `codex` on `PATH`, the binary bundled with the Codex desktop app is used.
 pub fn locate_codex(program: &str) -> PathBuf {
     let found = find_in_path(program);
+    if found.components().count() == 1
+        && program == "codex"
+        && let Some(bundled) = bundled_codex()
+    {
+        return bundled;
+    }
     native_behind_shim(&found).unwrap_or(found)
+}
+
+/// `$CODEX_HOME`, else `~/.codex`.
+fn default_codex_home() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("CODEX_HOME") {
+        return Some(PathBuf::from(home));
+    }
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
+    Some(PathBuf::from(home).join(".codex"))
+}
+
+/// The models Codex offers in its picker, from the `models_cache.json` it keeps in `home`,
+/// in its priority order.
+pub fn cached_models(home: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(home.join("models_cache.json")) else {
+        return Vec::new();
+    };
+    let Ok(cache) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let mut models: Vec<(i64, String)> = cache["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["visibility"].as_str() == Some("list"))
+        .filter_map(|m| {
+            Some((
+                m["priority"].as_i64().unwrap_or(i64::MAX),
+                m["slug"].as_str()?.to_owned(),
+            ))
+        })
+        .collect();
+    models.sort();
+    models.into_iter().map(|(_, slug)| slug).collect()
+}
+
+/// The newest `codex` the Codex desktop app keeps for itself.
+fn bundled_codex() -> Option<PathBuf> {
+    let candidates: Vec<PathBuf> = if cfg!(windows) {
+        // %LOCALAPPDATA%\OpenAI\Codex\bin\<build>\codex.exe
+        let bin = PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
+            .join("OpenAI")
+            .join("Codex")
+            .join("bin");
+        std::fs::read_dir(bin)
+            .ok()?
+            .flatten()
+            .map(|e| e.path().join("codex.exe"))
+            .collect()
+    } else {
+        vec![PathBuf::from(
+            "/Applications/Codex.app/Contents/Resources/codex",
+        )]
+    };
+    candidates
+        .into_iter()
+        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
+        .max()
+        .map(|(_, p)| p)
 }
 
 fn find_in_path(program: &str) -> PathBuf {
@@ -803,6 +877,19 @@ fn native_behind_shim(found: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lists_picker_models_from_the_cache() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(cached_models(home.path()).is_empty());
+        let cache = serde_json::json!({ "models": [
+            { "slug": "later", "visibility": "list", "priority": 9 },
+            { "slug": "hidden", "visibility": "hide", "priority": 1 },
+            { "slug": "first", "visibility": "list", "priority": 5 },
+        ]});
+        std::fs::write(home.path().join("models_cache.json"), cache.to_string()).unwrap();
+        assert_eq!(cached_models(home.path()), ["first", "later"]);
+    }
 
     #[test]
     fn finds_the_binary_behind_an_npm_shim() {
