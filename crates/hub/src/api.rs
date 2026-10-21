@@ -23,8 +23,8 @@ use crossagents_api_types::{
     UsageResponse,
 };
 use crossagents_core::{
-    Account, AccountStatus, Agent, AgentId, AgentKey, AgentStatus, CoreError, Event, EventBus,
-    EventKind, Run, RunConfig, RunId, Store, validate_agent_name,
+    Account, AccountStatus, Agent, AgentId, AgentKey, AgentStatus, CoreError, DriverKind, Event,
+    EventBus, EventKind, Run, RunConfig, RunId, Store, validate_agent_name,
 };
 use crossagents_orchestrator::{NewRun, Orchestrator};
 
@@ -124,9 +124,9 @@ impl From<CoreError> for AppError {
         let (status, code) = match &err {
             CoreError::NotFound { .. } => (StatusCode::NOT_FOUND, ErrorCode::NotFound),
             CoreError::Conflict(_) => (StatusCode::CONFLICT, ErrorCode::Conflict),
-            CoreError::InvalidName(_) | CoreError::InvalidTransition { .. } => {
-                (StatusCode::BAD_REQUEST, ErrorCode::BadRequest)
-            }
+            CoreError::InvalidName(_)
+            | CoreError::InvalidTransition { .. }
+            | CoreError::Unsupported(_) => (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
             CoreError::Agent(_) => (StatusCode::BAD_GATEWAY, ErrorCode::AgentError),
             CoreError::Storage(_) => {
                 tracing::error!(error = %err, "storage error");
@@ -239,12 +239,15 @@ async fn create_agent(
     Json(req): Json<CreateAgentRequest>,
 ) -> ApiResult<(StatusCode, Json<Agent>)> {
     validate_agent_name(&req.name)?;
-    if state.runtime.plugins().get(&req.plugin).is_none() {
+    if !state.runtime.plugins().contains(&req.plugin) {
         return Err(AppError::bad_request(format!(
             "unknown plugin {:?} (available: {})",
             req.plugin,
             state.runtime.plugins().names().join(", ")
         )));
+    }
+    if let Some(driver) = &req.driver {
+        driver.parse::<DriverKind>()?;
     }
     if let Some(account) = req.config.get("account").and_then(|v| v.as_str()) {
         state.accounts.check_binding(&req.plugin, account).await?;
@@ -348,11 +351,13 @@ async fn list_plugins(State(state): State<Arc<AppState>>) -> Json<ListPluginsRes
     let plugins = state
         .runtime
         .plugins()
+        .defaults()
         .iter()
-        .map(|p| PluginInfo {
-            name: p.name().to_owned(),
-            models: p.models(),
-            capabilities: p.capabilities(),
+        .map(|d| PluginInfo {
+            name: d.name().to_owned(),
+            models: d.models(),
+            driver: d.kind(),
+            capabilities: d.capabilities(),
         })
         .collect();
     Json(ListPluginsResponse { plugins })

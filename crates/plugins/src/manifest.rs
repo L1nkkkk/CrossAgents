@@ -1,16 +1,20 @@
-//! External plugins: `<home>/plugins/<name>/plugin.toml` (docs/DESIGN.md §6.4).
+//! External plugins: `<home>/plugins/<name>/plugin.toml` (docs/DESIGN.md §9.3).
 //!
 //! ```toml
 //! name = "gemini"
 //! protocol = "acp"
 //! command = ["gemini", "--experimental-acp"]
 //! models = ["gemini-3-pro", "gemini-3-flash"]
+//! # driver = "acp-generic"          # the default
+//! # native_command = [...]          # launch command for a native driver
 //! ```
 //!
-//! The plugin protocol is ACP: any executable that speaks it can be a plugin.
+//! Without a `driver` the plugin protocol is ACP: any executable that speaks it can be a
+//! plugin.
 
 use std::path::{Path, PathBuf};
 
+use crossagents_core::DriverKind;
 use serde::Deserialize;
 
 use crate::PluginConfig;
@@ -22,11 +26,16 @@ struct Manifest {
     name: String,
     #[serde(default = "default_protocol")]
     protocol: String,
+    #[serde(default)]
     command: Vec<String>,
     #[serde(default)]
     models: Vec<String>,
     #[serde(default)]
     model_env: Option<String>,
+    #[serde(default)]
+    driver: Option<DriverKind>,
+    #[serde(default)]
+    native_command: Vec<String>,
 }
 
 fn default_protocol() -> String {
@@ -68,13 +77,20 @@ fn load_one(plugin_dir: &Path, path: &Path) -> Result<(String, PluginConfig), St
     if crossagents_core::validate_agent_name(&manifest.name).is_err() {
         return Err(format!("invalid plugin name {:?}", manifest.name));
     }
-    let mut command = manifest.command;
-    let Some(program) = command.first_mut() else {
+    let driver = manifest.driver.unwrap_or_default();
+    if driver == DriverKind::AcpGeneric && manifest.command.is_empty() {
         return Err("command is empty".into());
-    };
-    // A relative path with a directory part points inside the plugin.
-    if (program.contains('/') || program.contains('\\')) && Path::new(program).is_relative() {
-        *program = plugin_dir.join(&*program).display().to_string();
+    }
+    let mut command = manifest.command;
+    let mut native_command = manifest.native_command;
+    for program in [command.first_mut(), native_command.first_mut()]
+        .into_iter()
+        .flatten()
+    {
+        // A relative path with a directory part points inside the plugin.
+        if (program.contains('/') || program.contains('\\')) && Path::new(program).is_relative() {
+            *program = plugin_dir.join(&*program).display().to_string();
+        }
     }
     Ok((
         manifest.name,
@@ -82,6 +98,8 @@ fn load_one(plugin_dir: &Path, path: &Path) -> Result<(String, PluginConfig), St
             command,
             models: manifest.models,
             model_env: manifest.model_env,
+            driver: manifest.driver,
+            native_command,
         },
     ))
 }
@@ -135,5 +153,23 @@ mod tests {
     fn missing_directory_is_empty() {
         let (plugins, warnings) = load_dir(Path::new("/definitely/not/here"));
         assert!(plugins.is_empty() && warnings.is_empty());
+    }
+
+    #[test]
+    fn native_plugins_need_no_acp_command() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "cx",
+            "name = \"cx\"\ndriver = \"codex-native\"\nnative_command = [\"./bin/codex\", \"app-server\"]\n",
+        );
+        write(dir.path(), "acp", "name = \"acp\"\n");
+        let (plugins, warnings) = load_dir(dir.path());
+        assert_eq!(plugins.len(), 1, "{warnings:?}");
+        let (name, config) = &plugins[0];
+        assert_eq!(name, "cx");
+        assert_eq!(config.driver, Some(DriverKind::CodexNative));
+        assert!(Path::new(&config.native_command[0]).is_absolute());
+        assert!(warnings[0].contains("command is empty"), "{warnings:?}");
     }
 }

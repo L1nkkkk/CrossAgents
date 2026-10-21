@@ -9,8 +9,8 @@ use ts_rs::TS;
 
 pub use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentStatus, Capabilities, CheckResult, DataSource,
-    Event, EventKind, MessageId, ModelInfo, OutputStream, PlannedTask, Role, Run, RunId, RunStatus,
-    StopReason, Task, TaskId, TaskStatus, TokenTotals, ToolInfo, ToolStatus,
+    DriverKind, Event, EventKind, MessageId, ModelInfo, OutputStream, PlannedTask, Role, Run,
+    RunId, RunStatus, StopReason, Task, TaskId, TaskStatus, TokenTotals, ToolInfo, ToolStatus,
 };
 
 pub const API_VERSION: &str = "v1";
@@ -77,6 +77,8 @@ pub struct SendMessageResponse {
 pub struct PluginInfo {
     pub name: String,
     pub models: Vec<String>,
+    /// The driver its agents use unless they name another.
+    pub driver: crossagents_core::DriverKind,
     pub capabilities: crossagents_core::Capabilities,
 }
 

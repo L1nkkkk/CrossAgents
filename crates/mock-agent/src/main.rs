@@ -6,7 +6,11 @@
 //! - `[crash]` exit the process immediately
 //! - `[write ...]` / `[call ...]` directives, see [`script`]. A prompt without directives
 //!   that carries a `task_id:` line repeats the session's last directives (for retries).
+//!
+//! `crossagents-mock-agent app-server` speaks the `codex app-server` protocol instead, see
+//! [`app_server`].
 
+mod app_server;
 mod script;
 
 use std::path::PathBuf;
@@ -319,6 +323,10 @@ impl RpcHandler for MockAgent {
 
 #[tokio::main]
 async fn main() {
+    if std::env::args().nth(1).as_deref() == Some("app-server") {
+        app_server::run().await;
+        return;
+    }
     let agent = Arc::new(MockAgent {
         peer: Mutex::new(None),
         model: Mutex::new("mock-opus".into()),

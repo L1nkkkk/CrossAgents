@@ -1,86 +1,88 @@
-//! Built-in agent plugins and the plugin registry (docs/DESIGN.md §6).
+//! Profiles (still called plugins in the API and config) and the drivers that run them
+//! (docs/DESIGN.md §9).
 //!
-//! Both built-in plugins reach their agent over ACP, so a plugin is little more than a
-//! launch command and a model mapping. Any other ACP agent can be registered from
-//! `config.toml` without code:
+//! A plugin entry names an agent and how to reach it. Without a `driver` it is an ACP
+//! agent (`acp-generic`), which is what every configuration written before drivers existed
+//! means. Any ACP agent can be registered from `config.toml` without code:
 //!
 //! ```toml
 //! [plugins.gemini]
 //! command = ["gemini", "--experimental-acp"]
+//!
+//! [plugins.codex]
+//! driver = "codex-native"   # use `codex app-server` instead of the codex-acp adapter
 //! ```
 //!
-//! or dropped in as a directory with a manifest, see [`manifest`].
+//! or dropped in as a directory with a manifest, see [`manifest`]. An agent can pick
+//! another driver than its plugin's default through its own `driver` field.
 
 pub mod codex_account;
 pub mod manifest;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
-use crossagents_core::{AgentPlugin, AgentSession, Capabilities, CoreError, SessionSpec};
-use crossagents_drivers::acp::{AcpLaunch, AcpOptions, AcpSession};
+use crossagents_core::{CoreError, Driver, DriverKind};
+use crossagents_drivers::acp::AcpDriver;
+use crossagents_drivers::codex_native::CodexNativeDriver;
 use serde::Deserialize;
 
-/// A plugin entry in `config.toml`. For a built-in plugin it overrides the launch command;
-/// otherwise it defines a new ACP plugin.
+/// A plugin entry in `config.toml`. For a built-in plugin it overrides the launch commands
+/// and the default driver; otherwise it defines a new plugin.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct PluginConfig {
+    /// ACP launch command (`acp-generic`).
+    #[serde(default)]
     pub command: Vec<String>,
     #[serde(default)]
     pub models: Vec<String>,
     /// Environment variable that receives the agent's model, e.g. `ANTHROPIC_MODEL`.
     #[serde(default)]
     pub model_env: Option<String>,
+    /// Default driver for this plugin's agents; `acp-generic` when absent.
+    #[serde(default)]
+    pub driver: Option<DriverKind>,
+    /// Launch command for the native driver; `codex app-server` for `codex-native`.
+    #[serde(default)]
+    pub native_command: Vec<String>,
 }
 
-/// An agent reached over ACP.
-pub struct AcpPlugin {
-    name: String,
-    command: Vec<String>,
-    models: Vec<String>,
-    model_env: Option<String>,
-}
-
-impl AcpPlugin {
-    pub fn new(name: impl Into<String>, config: PluginConfig) -> Self {
-        Self {
-            name: name.into(),
-            command: config.command,
-            models: config.models,
-            model_env: config.model_env,
-        }
+impl PluginConfig {
+    pub fn default_driver(&self) -> DriverKind {
+        self.driver.unwrap_or_default()
     }
 
     /// Claude Code through Anthropic's Agent SDK ACP adapter (needs Node.js).
     pub fn claude() -> Self {
-        Self::new(
-            "claude",
-            PluginConfig {
-                command: npx("@agentclientprotocol/claude-agent-acp"),
-                models: vec!["opus".into(), "sonnet".into(), "haiku".into()],
-                // Claude Code reads its model from here; the ACP model option is the other half.
-                model_env: Some("ANTHROPIC_MODEL".into()),
-            },
-        )
+        Self {
+            command: npx("@agentclientprotocol/claude-agent-acp"),
+            models: vec!["opus".into(), "sonnet".into(), "haiku".into()],
+            // Claude Code reads its model from here; the ACP model option is the other half.
+            model_env: Some("ANTHROPIC_MODEL".into()),
+            ..Self::default()
+        }
     }
 
-    /// OpenAI Codex through the codex-acp adapter.
+    /// OpenAI Codex: the codex-acp adapter by default, `codex app-server` with
+    /// `driver = "codex-native"`.
     pub fn codex() -> Self {
-        Self::new(
-            "codex",
-            PluginConfig {
-                command: npx("@agentclientprotocol/codex-acp"),
-                models: Vec::new(),
-                model_env: None,
-            },
-        )
+        Self {
+            command: npx("@agentclientprotocol/codex-acp"),
+            ..Self::default()
+        }
     }
 
-    fn with_command(mut self, command: Vec<String>) -> Self {
-        if !command.is_empty() {
-            self.command = command;
+    /// A built-in adjusted by its `config.toml` entry: launch commands and driver.
+    fn overlay(mut self, over: &PluginConfig) -> Self {
+        if !over.command.is_empty() {
+            self.command = over.command.clone();
+        }
+        if over.driver.is_some() {
+            self.driver = over.driver;
+        }
+        if !over.native_command.is_empty() {
+            self.native_command = over.native_command.clone();
         }
         self
     }
@@ -90,67 +92,97 @@ fn npx(package: &str) -> Vec<String> {
     vec!["npx".into(), "-y".into(), package.into()]
 }
 
-#[async_trait]
-impl AgentPlugin for AcpPlugin {
-    fn name(&self) -> &str {
-        &self.name
-    }
+/// A driver for an agent, with a note when it is not the one asked for.
+pub struct Resolved {
+    pub driver: Arc<dyn Driver>,
+    pub warning: Option<String>,
+}
 
-    fn capabilities(&self) -> Capabilities {
-        Capabilities {
-            streaming: true,
-            interrupt: true,
-            model_switch: true,
-            mcp: true,
-            usage_report: true,
+/// One plugin and the drivers built for it so far. Drivers are kept: `codex-native`
+/// shares one app-server process between the plugin's sessions.
+struct Profile {
+    name: String,
+    config: PluginConfig,
+    drivers: Mutex<HashMap<DriverKind, Arc<dyn Driver>>>,
+}
+
+impl Profile {
+    fn new(name: &str, config: PluginConfig) -> Self {
+        Self {
+            name: name.to_owned(),
+            config,
+            drivers: Mutex::default(),
         }
     }
 
-    fn models(&self) -> Vec<String> {
-        self.models.clone()
-    }
-
-    async fn start(&self, spec: SessionSpec) -> Result<Box<dyn AgentSession>, CoreError> {
-        let command = spec.command.clone().unwrap_or_else(|| self.command.clone());
-        let mut launch = AcpLaunch::from_command(&command, spec.agent.cwd.clone())?;
-        if let (Some(var), Some(model)) = (&self.model_env, &spec.agent.model) {
-            launch.env.push((var.clone(), model.clone()));
+    fn resolve(&self, wanted: DriverKind) -> Result<Resolved, CoreError> {
+        let (kind, warning) = match wanted {
+            DriverKind::ClaudeNative => (
+                DriverKind::AcpGeneric,
+                Some(format!(
+                    "{}: the claude-native driver is not available yet; using acp-generic",
+                    self.name
+                )),
+            ),
+            kind => (kind, None),
+        };
+        let mut drivers = self.drivers.lock().expect("driver cache poisoned");
+        if let Some(driver) = drivers.get(&kind) {
+            return Ok(Resolved {
+                driver: driver.clone(),
+                warning,
+            });
         }
-        launch.env.extend(spec.env);
-        let session = AcpSession::start(AcpOptions {
-            launch,
-            mcp_servers: spec.mcp_servers,
-            permission: spec.permission,
-            model: spec.agent.model,
-            instructions: spec.instructions,
-            events: spec.events,
-        })
-        .await?;
-        Ok(Box::new(session))
+        let driver: Arc<dyn Driver> = match kind {
+            DriverKind::AcpGeneric => {
+                if self.config.command.is_empty() {
+                    return Err(CoreError::Unsupported(format!(
+                        "plugin {:?} has no ACP command for the acp-generic driver",
+                        self.name
+                    )));
+                }
+                Arc::new(AcpDriver::new(
+                    &self.name,
+                    self.config.command.clone(),
+                    self.config.models.clone(),
+                    self.config.model_env.clone(),
+                ))
+            }
+            DriverKind::CodexNative => Arc::new(CodexNativeDriver::new(
+                &self.name,
+                self.config.native_command.clone(),
+                self.config.models.clone(),
+            )),
+            DriverKind::ClaudeNative => unreachable!("mapped to acp-generic above"),
+        };
+        drivers.insert(kind, driver.clone());
+        Ok(Resolved { driver, warning })
     }
 }
 
-/// Plugins by name.
+/// Plugins by name. Cheap to clone; clones share drivers.
 #[derive(Clone, Default)]
 pub struct PluginRegistry {
-    plugins: BTreeMap<String, Arc<dyn AgentPlugin>>,
+    profiles: BTreeMap<String, Arc<Profile>>,
 }
 
 impl PluginRegistry {
     /// The built-in plugins, adjusted and extended by `config.toml` entries.
     pub fn with_config(configs: &BTreeMap<String, PluginConfig>) -> Self {
         let mut registry = Self::default();
-        let builtins = [AcpPlugin::claude(), AcpPlugin::codex()];
-        for plugin in builtins {
-            let plugin = match configs.get(plugin.name()) {
-                Some(config) => plugin.with_command(config.command.clone()),
-                None => plugin,
+        for (name, builtin) in [
+            ("claude", PluginConfig::claude()),
+            ("codex", PluginConfig::codex()),
+        ] {
+            let config = match configs.get(name) {
+                Some(over) => builtin.overlay(over),
+                None => builtin,
             };
-            registry.register(Arc::new(plugin));
+            registry.insert(name, config);
         }
         for (name, config) in configs {
-            if !registry.plugins.contains_key(name) {
-                registry.register(Arc::new(AcpPlugin::new(name, config.clone())));
+            if !registry.profiles.contains_key(name) {
+                registry.insert(name, config.clone());
             }
         }
         registry
@@ -163,32 +195,60 @@ impl PluginRegistry {
         plugins_dir: &Path,
     ) -> (Self, Vec<String>) {
         let (found, warnings) = manifest::load_dir(plugins_dir);
-        let mut merged: BTreeMap<String, PluginConfig> = found.into_iter().collect();
-        merged.extend(configs.iter().map(|(k, v)| (k.clone(), v.clone())));
         let mut registry = Self::with_config(configs);
-        for (name, config) in merged {
+        for (name, config) in found {
             // Directory plugins replace built-ins unless config.toml says otherwise.
             if !configs.contains_key(&name) {
-                registry.register(Arc::new(AcpPlugin::new(name, config)));
+                registry.insert(&name, config);
             }
         }
         (registry, warnings)
     }
 
-    pub fn register(&mut self, plugin: Arc<dyn AgentPlugin>) {
-        self.plugins.insert(plugin.name().to_owned(), plugin);
+    fn insert(&mut self, name: &str, config: PluginConfig) {
+        self.profiles
+            .insert(name.to_owned(), Arc::new(Profile::new(name, config)));
     }
 
-    pub fn get(&self, name: &str) -> Option<Arc<dyn AgentPlugin>> {
-        self.plugins.get(name).cloned()
+    pub fn contains(&self, name: &str) -> bool {
+        self.profiles.contains_key(name)
+    }
+
+    pub fn config(&self, name: &str) -> Option<&PluginConfig> {
+        self.profiles.get(name).map(|p| &p.config)
+    }
+
+    /// The driver for an agent of plugin `name`: `driver` if the agent names one, else the
+    /// plugin's default.
+    pub fn driver(&self, name: &str, driver: Option<&str>) -> Result<Resolved, CoreError> {
+        let profile = self.profiles.get(name).ok_or_else(|| CoreError::NotFound {
+            kind: "plugin",
+            id: name.to_owned(),
+        })?;
+        let kind = match driver {
+            Some(driver) => driver.parse()?,
+            None => profile.config.default_driver(),
+        };
+        profile.resolve(kind)
+    }
+
+    /// The plugin's default driver.
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Driver>> {
+        self.driver(name, None).ok().map(|r| r.driver)
     }
 
     pub fn names(&self) -> Vec<String> {
-        self.plugins.keys().cloned().collect()
+        self.profiles.keys().cloned().collect()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &Arc<dyn AgentPlugin>> {
-        self.plugins.values()
+    /// Every plugin's default driver, in name order (plugins whose driver cannot be built
+    /// are skipped).
+    pub fn defaults(&self) -> Vec<Arc<dyn Driver>> {
+        self.profiles
+            .values()
+            .filter_map(|p| p.resolve(p.config.default_driver()).ok())
+            .map(|r| r.driver)
+            .collect()
     }
 }
 
@@ -219,6 +279,47 @@ mod tests {
             registry.get("claude").unwrap().models(),
             ["opus", "sonnet", "haiku"]
         );
+        assert_eq!(registry.config("claude").unwrap().command, ["my-claude"]);
         assert!(registry.get("nope").is_none());
+    }
+
+    #[test]
+    fn drivers_default_to_acp_and_can_be_chosen() {
+        let config: PluginConfig = toml::from_str("command = [\"x\"]").unwrap();
+        assert_eq!(config.driver, None);
+        assert_eq!(config.default_driver(), DriverKind::AcpGeneric);
+
+        let mut configs = BTreeMap::new();
+        configs.insert(
+            "codex".to_owned(),
+            toml::from_str::<PluginConfig>("driver = \"codex-native\"").unwrap(),
+        );
+        let registry = PluginRegistry::with_config(&configs);
+        // The built-in keeps its ACP command, so agents can still pick acp-generic.
+        let codex = registry.driver("codex", None).unwrap();
+        assert_eq!(codex.driver.kind(), DriverKind::CodexNative);
+        assert!(codex.driver.capabilities().resume);
+        let acp = registry.driver("codex", Some("acp-generic")).unwrap();
+        assert_eq!(acp.driver.kind(), DriverKind::AcpGeneric);
+        // The same driver instance is handed out each time (it owns the app-server pool).
+        let again = registry.driver("codex", Some("codex-native")).unwrap();
+        assert!(Arc::ptr_eq(&codex.driver, &again.driver));
+
+        // Without config the built-in codex stays on ACP.
+        let plain = PluginRegistry::with_config(&BTreeMap::new());
+        assert_eq!(plain.get("codex").unwrap().kind(), DriverKind::AcpGeneric);
+    }
+
+    #[test]
+    fn claude_native_falls_back_with_a_warning_and_unknown_drivers_fail() {
+        let registry = PluginRegistry::with_config(&BTreeMap::new());
+        let resolved = registry.driver("claude", Some("claude-native")).unwrap();
+        assert_eq!(resolved.driver.kind(), DriverKind::AcpGeneric);
+        assert!(resolved.warning.unwrap().contains("claude-native"));
+        assert!(matches!(
+            registry.driver("claude", Some("nope")),
+            Err(CoreError::Unsupported(_))
+        ));
+        assert!(toml::from_str::<PluginConfig>("driver = \"nope\"").is_err());
     }
 }

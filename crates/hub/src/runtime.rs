@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, AgentSession, AgentStatus, CoreError, EventBus, EventKind,
-    McpServerSpec, MessageId, OutputStream, PermissionPolicy, SessionEvent, SessionSpec,
-    StopReason, Store,
+    Agent, AgentId, AgentKey, AgentStatus, CoreError, DriverSession, EventBus, EventKind,
+    McpServerSpec, MessageId, OutputStream, PermissionPolicy, SessionEvent, SessionEventKind,
+    SessionSpec, StopReason, Store,
 };
 use crossagents_plugins::PluginRegistry;
 use tokio::sync::{Mutex, mpsc};
@@ -34,7 +34,7 @@ pub struct SessionExtras {
 
 struct Live {
     generation: u64,
-    session: Arc<dyn AgentSession>,
+    session: Arc<dyn DriverSession>,
     inbox: mpsc::UnboundedSender<(MessageId, String)>,
     control: mpsc::UnboundedSender<Control>,
     /// Messages accepted and not yet finished (including the running one).
@@ -109,12 +109,28 @@ impl Runtime {
         if self.is_live(agent.id).await {
             return Ok(agent);
         }
-        let plugin = self
-            .plugins
-            .get(&agent.plugin)
-            .ok_or_else(|| CoreError::Agent(format!("unknown plugin {:?}", agent.plugin)))?;
+        let resolved = match self.plugins.driver(&agent.plugin, agent.driver.as_deref()) {
+            Ok(resolved) => resolved,
+            Err(CoreError::NotFound { .. }) => {
+                return Err(CoreError::Agent(format!(
+                    "unknown plugin {:?}",
+                    agent.plugin
+                )));
+            }
+            Err(err) => return Err(err),
+        };
 
         set_status(&self.bus, agent.id, AgentStatus::Starting).await;
+        if let Some(message) = resolved.warning {
+            publish(
+                &self.bus,
+                EventKind::AgentError {
+                    id: agent.id,
+                    message,
+                },
+            )
+            .await;
+        }
         let extras = match &self.setup {
             Some(setup) => setup.prepare(&agent).await?,
             None => SessionExtras::default(),
@@ -127,12 +143,13 @@ impl Runtime {
             agent: agent.clone(),
             mcp_servers: extras.mcp_servers,
             permission: permission_of(&agent),
+            permissions: None,
             command: command_of(&agent),
             instructions: extras.instructions,
             env: extras.env,
             events: events_tx,
         };
-        let session: Arc<dyn AgentSession> = match plugin.start(spec).await {
+        let session: Arc<dyn DriverSession> = match resolved.driver.open(spec).await {
             Ok(session) => Arc::from(session),
             Err(err) => {
                 publish(
@@ -208,7 +225,7 @@ impl Runtime {
         let agent = self.store().get_agent(key).await?;
         let live = self.live.lock().await.get(&agent.id).cloned();
         match live {
-            Some(live) => live.session.cancel().await,
+            Some(live) => live.session.interrupt().await,
             None => Err(CoreError::Conflict(format!(
                 "agent {} is not running",
                 agent.name
@@ -225,7 +242,7 @@ impl Runtime {
             set_status(&self.bus, agent.id, AgentStatus::Stopped).await;
             return Ok(());
         };
-        let _ = live.session.cancel().await;
+        let _ = live.session.interrupt().await;
         live.session.shutdown().await;
         let _ = live.control.send(Control::Stopped);
         set_status(&self.bus, agent.id, AgentStatus::Stopped).await;
@@ -282,14 +299,18 @@ async fn set_status(bus: &EventBus, id: AgentId, to: AgentStatus) {
 
 /// Runs one prompt at a time from the inbox.
 async fn run_turns(
-    session: Arc<dyn AgentSession>,
+    session: Arc<dyn DriverSession>,
     mut inbox: mpsc::UnboundedReceiver<(MessageId, String)>,
     control: mpsc::UnboundedSender<Control>,
     pending: Arc<AtomicUsize>,
 ) {
     while let Some((message_id, text)) = inbox.recv().await {
         let _ = control.send(Control::TurnStarted(message_id));
-        let result = session.prompt(&text).await.map_err(|e| e.to_string());
+        let result = session
+            .prompt(&text)
+            .await
+            .map(|outcome| outcome.stop_reason)
+            .map_err(|e| e.to_string());
         pending.fetch_sub(1, Ordering::SeqCst);
         if control
             .send(Control::TurnFinished(message_id, result))
@@ -381,15 +402,18 @@ async fn handle_session_event(
     live: &LiveMap,
     generation: u64,
 ) -> bool {
-    if let SessionEvent::Output { stream, text } = event {
+    let SessionEvent { kind: event, .. } = event;
+    if let SessionEventKind::Output { stream, text } = event {
         out.push(bus, id, stream, text).await;
         return false;
     }
     out.flush(bus, id).await;
     let kind = match event {
-        SessionEvent::Output { .. } => unreachable!(),
-        SessionEvent::Started { session_id } => EventKind::AgentSessionStarted { id, session_id },
-        SessionEvent::ToolCall {
+        SessionEventKind::Output { .. } => unreachable!(),
+        SessionEventKind::Started { session_id } => {
+            EventKind::AgentSessionStarted { id, session_id }
+        }
+        SessionEventKind::ToolCall {
             tool_call_id,
             title,
             kind,
@@ -401,7 +425,7 @@ async fn handle_session_event(
             kind,
             status,
         },
-        SessionEvent::ToolCallUpdated {
+        SessionEventKind::ToolCallUpdated {
             tool_call_id,
             title,
             status,
@@ -411,18 +435,31 @@ async fn handle_session_event(
             title,
             status,
         },
-        SessionEvent::Usage {
+        SessionEventKind::Usage {
             used,
             size,
             cost_usd,
+            ..
         } => EventKind::AgentUsage {
             id,
             used,
             size,
             cost_usd,
         },
-        SessionEvent::Warning { message } => EventKind::AgentError { id, message },
-        SessionEvent::Exited { message } => {
+        SessionEventKind::Warning { message } | SessionEventKind::Error { message } => {
+            EventKind::AgentError { id, message }
+        }
+        // Turn boundaries come from the runtime's own control messages. Diffs, quotas and
+        // permission answers have no hub event yet (docs/tasks/N1.md §6).
+        other @ (SessionEventKind::TurnStarted { .. }
+        | SessionEventKind::TurnCompleted { .. }
+        | SessionEventKind::TurnDiff { .. }
+        | SessionEventKind::RateLimits { .. }
+        | SessionEventKind::PermissionRequested { .. }) => {
+            tracing::debug!(%id, event = ?other, "session event not published");
+            return false;
+        }
+        SessionEventKind::Exited { message } => {
             // The process died on its own: forget the session if it is still ours.
             let mut map = live.lock().await;
             if map.get(&id).is_some_and(|l| l.generation == generation) {

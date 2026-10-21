@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::account::Account;
-use crate::agent::{OutputStream, StopReason, ToolStatus};
+use crate::driver::{OutputStream, StopReason, ToolStatus};
 use crate::ids::{AgentId, MessageId, RunId, TaskId};
 use crate::model::{Agent, AgentStatus, CheckResult, Run, RunStatus};
 use crate::state::TaskStatus;

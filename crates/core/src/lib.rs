@@ -3,8 +3,8 @@
 //! This crate has no dependency on any other CrossAgents crate.
 
 pub mod account;
-pub mod agent;
 pub mod bus;
+pub mod driver;
 pub mod error;
 pub mod event;
 pub mod ids;
@@ -17,11 +17,12 @@ pub use account::{
     Account, AccountProvider, AccountStatus, Credits, DataSource, LoginCommand, ModelInfo,
     RateWindow, SessionUsage, TokenTotals, mask_email,
 };
-pub use agent::{
-    AgentPlugin, AgentSession, Capabilities, McpServerSpec, OutputStream, PermissionPolicy,
-    SessionEvent, SessionSpec, StopReason, ToolStatus,
-};
 pub use bus::EventBus;
+pub use driver::{
+    Capabilities, Driver, DriverKind, DriverSession, McpServerSpec, OutputStream,
+    PermissionDecision, PermissionHandler, PermissionPolicy, PermissionRequest, RateLimits,
+    SessionEvent, SessionEventKind, SessionSpec, StopReason, TokenUsage, ToolStatus, TurnOutcome,
+};
 pub use error::CoreError;
 pub use event::{EVENT_SCHEMA_VERSION, Event, EventKind, EventSink};
 pub use ids::{AgentId, MessageId, RunId, SessionId, TaskId};

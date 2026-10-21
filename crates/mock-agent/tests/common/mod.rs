@@ -31,6 +31,7 @@ pub fn mock_plugins() -> BTreeMap<String, PluginConfig> {
             command: vec![MOCK_AGENT.to_owned()],
             models: vec!["mock-opus".into(), "mock-haiku".into()],
             model_env: None,
+            ..PluginConfig::default()
         },
     );
     plugins
