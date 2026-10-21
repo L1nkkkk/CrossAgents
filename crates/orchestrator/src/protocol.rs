@@ -27,7 +27,9 @@ run branch (on a conflict you get the conflicting hunks: resolve with `task_rewo
 `branch_sync`), `task_rework` sends it back with what to fix, `task_drop` discards it.\n\
 4. Answer worker questions with `task_answer`. A task that is \"stalled\" means its worker \
 stopped without reporting: message it, `task_assign` it to someone else, or drop it.\n\
-5. The run ends when every task is merged, dropped or cancelled.";
+5. When every task has ended, land the run branch with `run_land` if the run's policy lets you \
+(otherwise the person lands it), then close the run with `run_finish` and a short summary for \
+the person: what changed, what did not, anything they should check.";
 
 const WORKER: &str = "As a WORKER on a task: do exactly what the task's spec asks, in your \
 working directory (the task's own git worktree). Do not commit; the hub does. Report with the \

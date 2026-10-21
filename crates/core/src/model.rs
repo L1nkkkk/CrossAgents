@@ -236,8 +236,38 @@ pub struct Run {
     /// The submitted plan; tasks are created from it on approval.
     #[serde(default)]
     pub plan: Vec<PlannedTask>,
+    /// How the run's result reached the base branch, once it did.
+    #[serde(default)]
+    pub landed: Option<Landing>,
+    /// The lead's closing summary (`run_finish`).
+    #[serde(default)]
+    pub summary: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// How a run's branch is brought into its base branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum LandMode {
+    /// A merge commit on the base branch.
+    Merge,
+    /// One commit with all of the run's changes.
+    Squash,
+    /// A pull request from the run branch (needs a remote and the `gh` CLI).
+    Pr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Landing {
+    pub mode: LandMode,
+    /// Who landed it: the lead's name, or "person".
+    pub by: String,
+    /// The commit on the base branch (merge, squash) or the pull request's URL (pr).
+    pub reference: String,
+    pub at: DateTime<Utc>,
 }
 
 /// Files a task may or may not touch, as glob patterns relative to the workspace root.

@@ -199,6 +199,8 @@ impl Orchestrator {
         let id = RunId::new();
         let now = Utc::now();
         let mut run = Run {
+            landed: None,
+            summary: None,
             id,
             title: new.title.unwrap_or_else(|| first_line(&new.request, 60)),
             request: new.request,
@@ -514,9 +516,24 @@ impl Orchestrator {
                 return Ok(());
             }
         }
+        // Every task ended: the lead lands and closes the run (run_land, run_finish).
         let tasks = self.store.list_tasks(run.id).await?;
         if !tasks.is_empty() && tasks.iter().all(|t| t.status.is_terminal()) {
-            self.finish_run(run, &tasks).await?;
+            let merged = tasks
+                .iter()
+                .filter(|t| t.status == TaskStatus::Merged)
+                .count();
+            self.notice(
+                run.planner,
+                &format!("run:{}:ended", run.id),
+                &format!(
+                    "All {} task(s) of run {} have ended: {merged} merged into {}.",
+                    tasks.len(),
+                    run.id,
+                    run.branch
+                ),
+            )
+            .await;
         }
         Ok(())
     }
@@ -597,7 +614,7 @@ impl Orchestrator {
         }
     }
 
-    async fn finish_run(&self, run: &mut Run, tasks: &[Task]) -> Result<(), CoreError> {
+    pub(crate) async fn finish_run(&self, run: &mut Run, tasks: &[Task]) -> Result<(), CoreError> {
         let merged = tasks
             .iter()
             .filter(|t| t.status == TaskStatus::Merged)
@@ -615,19 +632,7 @@ impl Orchestrator {
             )
         };
         self.remove_integration(run).await;
-        self.set_run_status(run, status, note.clone()).await?;
-        self.notice(
-            run.planner,
-            &format!("run:{}", run.id),
-            &format!(
-                "Run {} ended: {merged}/{} task(s) merged into {}{}.",
-                run.id,
-                tasks.len(),
-                run.branch,
-                note.map(|n| format!(" ({n})")).unwrap_or_default()
-            ),
-        )
-        .await;
+        self.set_run_status(run, status, note).await?;
         Ok(())
     }
 

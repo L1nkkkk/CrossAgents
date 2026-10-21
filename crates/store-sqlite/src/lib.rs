@@ -679,6 +679,8 @@ mod tests {
         let store = SqliteStore::open_in_memory().await.unwrap();
         let now = time_from(&Utc::now().to_rfc3339()).unwrap();
         let mut run = Run {
+            landed: None,
+            summary: None,
             id: RunId::new(),
             title: "t".into(),
             request: "do things".into(),

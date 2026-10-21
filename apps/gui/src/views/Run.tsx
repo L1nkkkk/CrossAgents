@@ -7,7 +7,6 @@ import type { TaskSpec } from "@bindings/TaskSpec";
 import { api, errorText } from "../api";
 import {
   Avatar,
-  CopyCommand,
   DiffStat,
   Dot,
   ErrorBox,
@@ -47,7 +46,7 @@ export function useRun(runId: string) {
   return useHubData(() => api.getRun(runId), [runId], (e) => concerns(runId, e));
 }
 
-const ACTIVE = ["planning", "awaiting_approval", "running"];
+const ACTIVE = ["planning", "awaiting_approval", "running", "paused"];
 
 export function RunView({ runId, selectedTask }: { runId: string; selectedTask?: string }) {
   const detail = useRun(runId);
@@ -63,6 +62,7 @@ export function RunView({ runId, selectedTask }: { runId: string; selectedTask?:
   const planner = agentName(agents.data, run.planner);
   const plannerAgent = agents.data?.find((a) => a.id === run.planner);
   const done = tasks.filter((t) => t.status === "merged").length;
+  const allEnded = tasks.length > 0 && tasks.every((t) => ["merged", "failed", "cancelled"].includes(t.status));
 
   async function cancel() {
     setBusy(true);
@@ -110,14 +110,8 @@ export function RunView({ runId, selectedTask }: { runId: string; selectedTask?:
             </div>
           )}
           {run.status === "awaiting_approval" && <PlanCard run={run} onDone={detail.reload} />}
-          {run.status === "completed" && (
-            <div className="done-card">
-              <span className="done-check">✓</span>
-              <div className="done-text">
-                <strong>完成</strong> · 结果在集成分支 <code>{run.branch}</code>，确认后合并进 <code>{run.base_branch}</code>
-              </div>
-              <CopyCommand command={`git merge ${run.branch}`} />
-            </div>
+          {(run.status === "completed" || (run.status === "running" && allEnded)) && (
+            <Ending run={run} closing={run.status === "running"} onDone={detail.reload} />
           )}
           {run.status === "paused" && (
             <div className="item-warn">已暂停：{run.note ?? "等你决定"}。在「问你」里选择加预算继续，或取消这个 run。</div>
@@ -188,6 +182,70 @@ function RunMeta({ run, agents }: { run: Run; agents?: Parameters<typeof agentNa
       </span>
       <PolicyChip run={run} />
       <span title={time(run.created_at)}>{ago(run.created_at)}</span>
+    </div>
+  );
+}
+
+/**
+ * The end of a run: while the lead wraps up (every task ended), or once it is done. Shows the
+ * lead's summary and where the result landed; lands or closes it for the person.
+ */
+function Ending({ run, closing, onDone }: { run: Run; closing: boolean; onDone: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  async function act(action: () => Promise<unknown>) {
+    setBusy(true);
+    setError(undefined);
+    try {
+      await action();
+      onDone();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+  const landed = run.landed;
+  return (
+    <div className="done-card">
+      <span className="done-check">{closing ? "○" : "✓"}</span>
+      <div className="done-text" style={{ flex: 1 }}>
+        <strong>{closing ? "收尾中" : "完成"}</strong>
+        {closing ? " · 所有任务都已结束，等 Planner 落地和写总结" : ""}
+        {landed ? (
+          <div className="small">
+            已落地到 <code>{run.base_branch}</code>：{landed.mode === "pr" ? <a href={landed.reference} target="_blank" rel="noreferrer">{landed.reference}</a> : <code>{landed.reference}</code>}
+            <span className="muted"> · {landed.by === "person" ? "你" : landed.by} · {ago(landed.at)}</span>
+          </div>
+        ) : (
+          <div className="small muted">
+            结果在 <code>{run.branch}</code>，还没进 <code>{run.base_branch}</code>
+          </div>
+        )}
+        {run.summary && (
+          <div className="run-summary">
+            <Prose text={run.summary} />
+          </div>
+        )}
+        <ErrorBox error={error} />
+      </div>
+      <div className="row" style={{ gap: 6, alignSelf: "flex-start" }}>
+        {!landed && (
+          <>
+            <button className="primary small" disabled={busy} onClick={() => act(() => api.landRun(run.id, "merge"))} title={`在 ${run.base_branch} 上生成一个合并提交`}>
+              合并进 {run.base_branch}
+            </button>
+            <button className="ghost small" disabled={busy} onClick={() => act(() => api.landRun(run.id, "squash"))} title="所有改动压成一个提交">
+              压缩合并
+            </button>
+          </>
+        )}
+        {closing && (
+          <button className="ghost small" disabled={busy} onClick={() => act(() => api.finishRun(run.id))}>
+            结束 run
+          </button>
+        )}
+      </div>
     </div>
   );
 }

@@ -360,6 +360,28 @@ const TOOLS: &[ToolDef] = &[
         schema: || task_schema(json!({})),
     },
     ToolDef {
+        name: "run_land",
+        description: "Bring your run's branch into its base branch once every task has ended: mode merge (default), squash, or pr (opens a pull request). The run's policy decides whether you may; a dirty checkout of the base branch is never touched.",
+        groups: PLANNER,
+        schema: || {
+            object(
+                json!({ "mode": { "type": "string", "enum": ["merge", "squash", "pr"] } }),
+                &[],
+            )
+        },
+    },
+    ToolDef {
+        name: "run_finish",
+        description: "Close your run with a summary for the person. Tasks still open are refused unless cancel_open. The person also sees every decision taken by default.",
+        groups: PLANNER,
+        schema: || {
+            object(
+                json!({ "summary": { "type": "string" }, "cancel_open": { "type": "boolean" } }),
+                &["summary"],
+            )
+        },
+    },
+    ToolDef {
         name: "task_progress",
         description: "One line on how your task is going; shown on the task card.",
         groups: WORKER,
@@ -510,6 +532,8 @@ impl Orchestrator {
             "task_drop" => self.task_drop(caller, input).await,
             "branch_sync" => self.branch_sync(caller, input).await,
             "task_progress" => self.task_progress(caller, input).await,
+            "run_land" => self.run_land_tool(caller, input).await,
+            "run_finish" => self.run_finish_tool(caller, input).await,
             "task_complete" => {
                 #[derive(Deserialize)]
                 struct A {

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use crossagents_core::CoreError;
+use crossagents_core::{CoreError, LandMode};
 use tokio::process::Command;
 
 /// Isolated working copies for a run and its tasks.
@@ -29,6 +29,17 @@ pub trait WorkspaceProvider: Send + Sync {
     /// Merges `branch` into the branch checked out at `into`. On conflict the merge is
     /// aborted and the error describes it: the conflicting files and their conflict hunks.
     async fn merge(&self, into: &Path, branch: &str, message: &str) -> Result<(), CoreError>;
+    /// Brings `branch` into `base` in `repo` (merge or squash), or opens a pull request.
+    /// Merging never touches a checkout with uncommitted changes. Returns the commit or the
+    /// pull request's URL.
+    async fn land(
+        &self,
+        repo: &Path,
+        base: &str,
+        branch: &str,
+        mode: LandMode,
+        message: &str,
+    ) -> Result<String, CoreError>;
     /// Removes the working copy at `path`; with `delete_branch`, also `branch`.
     async fn remove(&self, repo: &Path, path: &Path, branch: Option<&str>)
     -> Result<(), CoreError>;
@@ -173,6 +184,91 @@ impl WorkspaceProvider for GitWorkspaces {
         Ok(())
     }
 
+    async fn land(
+        &self,
+        repo: &Path,
+        base: &str,
+        branch: &str,
+        mode: LandMode,
+        message: &str,
+    ) -> Result<String, CoreError> {
+        if mode == LandMode::Pr {
+            git(repo, &["push", "-u", "origin", branch]).await?;
+            let output = Command::new("gh")
+                .args([
+                    "pr", "create", "--base", base, "--head", branch, "--title", message, "--body",
+                    message,
+                ])
+                .current_dir(repo)
+                .output()
+                .await
+                .map_err(|e| CoreError::Agent(format!("cannot run gh: {e}")))?;
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            if !output.status.success() {
+                return Err(CoreError::Agent(format!(
+                    "gh pr create failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                )));
+            }
+            return Ok(text.lines().last().unwrap_or_default().to_owned());
+        }
+        // Merge where base is checked out (if that checkout is clean), else in a temporary
+        // worktree of base.
+        let here = git(repo, &["rev-parse", "--abbrev-ref", "HEAD"]).await? == base;
+        let temp = if here {
+            let dirty = git(repo, &["status", "--porcelain", "--untracked-files=no"]).await?;
+            if !dirty.is_empty() {
+                return Err(CoreError::Conflict(format!(
+                    "{} has uncommitted changes on {base}; commit or stash them first:\n{dirty}",
+                    repo.display()
+                )));
+            }
+            None
+        } else {
+            let dir = tempfile_dir(repo)?;
+            git(repo, &["worktree", "add", &path_arg(&dir), base])
+                .await
+                .map_err(|e| {
+                    CoreError::Conflict(format!("cannot check out {base} to land on it: {e}"))
+                })?;
+            Some(dir)
+        };
+        let dir = temp.clone().unwrap_or_else(|| repo.to_path_buf());
+        let result = async {
+            let mut args: Vec<&str> = AUTHOR.to_vec();
+            match mode {
+                LandMode::Merge => args.extend([
+                    "merge",
+                    "--no-ff",
+                    "--no-verify",
+                    "-q",
+                    "-m",
+                    message,
+                    branch,
+                ]),
+                _ => args.extend(["merge", "--squash", "-q", branch]),
+            }
+            if let Err(err) = git(&dir, &args).await {
+                let _ = git(&dir, &["merge", "--abort"]).await;
+                let _ = git(&dir, &["reset", "--merge"]).await;
+                return Err(CoreError::Conflict(format!(
+                    "cannot land {branch} on {base}: {err}"
+                )));
+            }
+            if mode == LandMode::Squash {
+                let mut args: Vec<&str> = AUTHOR.to_vec();
+                args.extend(["commit", "--no-verify", "-q", "-m", message]);
+                git(&dir, &args).await?;
+            }
+            git(&dir, &["rev-parse", "--short", "HEAD"]).await
+        }
+        .await;
+        if let Some(dir) = temp {
+            let _ = git(repo, &["worktree", "remove", "--force", &path_arg(&dir)]).await;
+        }
+        result
+    }
+
     async fn remove(
         &self,
         repo: &Path,
@@ -187,6 +283,24 @@ impl WorkspaceProvider for GitWorkspaces {
         }
         Ok(())
     }
+}
+
+/// A fresh directory next to the repository's git dir for a temporary worktree.
+fn tempfile_dir(repo: &Path) -> Result<PathBuf, CoreError> {
+    let base = std::env::temp_dir().join("crossagents-land");
+    std::fs::create_dir_all(&base).map_err(|e| CoreError::Storage(e.to_string()))?;
+    let name = format!(
+        "{}-{}",
+        repo.file_name().and_then(|n| n.to_str()).unwrap_or("repo"),
+        std::process::id()
+    );
+    let mut dir = base.join(&name);
+    let mut n = 0;
+    while dir.exists() {
+        n += 1;
+        dir = base.join(format!("{name}-{n}"));
+    }
+    Ok(dir)
 }
 
 /// `<home>/worktrees/<run>/<name>`.
@@ -271,6 +385,64 @@ mod tests {
         // The integration tree is clean again.
         let status = git(&integration, &["status", "--porcelain"]).await.unwrap();
         assert!(status.is_empty(), "{status}");
+    }
+
+    #[tokio::test]
+    async fn landing_merges_or_squashes_and_respects_dirty_checkouts() {
+        let repo = repo().await;
+        let trees = tempfile::tempdir().unwrap();
+        let ws = GitWorkspaces;
+        let run = trees.path().join("run");
+        ws.create(repo.path(), "ca/run", "main", &run)
+            .await
+            .unwrap();
+        std::fs::write(run.join("new.txt"), "x\n").unwrap();
+        ws.commit_all(&run, "work").await.unwrap();
+
+        // A dirty checkout of main is left alone.
+        std::fs::write(repo.path().join("README"), "edited\n").unwrap();
+        let err = ws
+            .land(repo.path(), "main", "ca/run", LandMode::Merge, "land")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("uncommitted"), "{err}");
+        git(repo.path(), &["checkout", "--", "README"])
+            .await
+            .unwrap();
+
+        let commit = ws
+            .land(repo.path(), "main", "ca/run", LandMode::Squash, "land it")
+            .await
+            .unwrap();
+        assert!(!commit.is_empty());
+        assert!(repo.path().join("new.txt").exists());
+        let log = git(repo.path(), &["log", "-1", "--format=%s"])
+            .await
+            .unwrap();
+        assert_eq!(log, "land it");
+    }
+
+    #[tokio::test]
+    async fn landing_on_a_branch_that_is_not_checked_out() {
+        let repo = repo().await;
+        let trees = tempfile::tempdir().unwrap();
+        let ws = GitWorkspaces;
+        git(repo.path(), &["branch", "release"]).await.unwrap();
+        let run = trees.path().join("run");
+        ws.create(repo.path(), "ca/run", "release", &run)
+            .await
+            .unwrap();
+        std::fs::write(run.join("r.txt"), "r\n").unwrap();
+        ws.commit_all(&run, "work").await.unwrap();
+        ws.land(repo.path(), "release", "ca/run", LandMode::Merge, "land")
+            .await
+            .unwrap();
+        let files = git(repo.path(), &["ls-tree", "--name-only", "release"])
+            .await
+            .unwrap();
+        assert!(files.contains("r.txt"), "{files}");
+        // main's checkout did not move.
+        assert!(!repo.path().join("r.txt").exists());
     }
 
     #[tokio::test]

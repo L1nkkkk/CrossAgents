@@ -812,3 +812,4 @@ button.small, .segmented.small button { font-size: 12px; padding: 3px 10px; }
 .ask-options button.default { border-color: var(--accent); }
 .ask-reply { display: flex; gap: 6px; }
 .ask-reply input { flex: 1; min-width: 0; }
+.run-summary { margin-top: 6px; font-size: 13.5px; }
