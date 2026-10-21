@@ -193,6 +193,8 @@ mod tests {
                 ..Default::default()
             },
             depends_on: deps.iter().map(|d| d.to_string()).collect(),
+            assignee: None,
+            reviewer: None,
         }
     }
 
@@ -213,6 +215,8 @@ mod tests {
             depends_on: deps.iter().map(|d| d.to_string()).collect(),
             assignee: None,
             reviewer: None,
+            worker_template: None,
+            reviewer_template: None,
             status,
             attempts: 0,
             escalated: false,

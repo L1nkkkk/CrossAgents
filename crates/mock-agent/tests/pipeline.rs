@@ -349,3 +349,157 @@ async fn worker_asks_and_planner_answers() {
         "blue"
     );
 }
+
+/// Models of the worker clones created for each task key.
+fn clone_models(seen: &[crossagents_api_types::Event]) -> Vec<(String, Option<String>)> {
+    let mut out: Vec<(String, Option<String>)> = seen
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::AgentCreated { agent } if agent.name.starts_with("w-") => {
+                let key = agent.name.rsplit('-').next().unwrap().to_owned();
+                Some((key, agent.model.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[tokio::test]
+async fn planner_assigns_tasks_by_specialty() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    // Registered in the same repository, so it joins the run's team.
+    let resp = t
+        .post(
+            "/v1/agents",
+            json!({
+                "name": "sec", "plugin": "mock", "model": "opus", "role": "worker",
+                "cwd": repo.path().display().to_string(),
+                "profile": { "display_name": "Rex", "title": "Security engineer",
+                             "persona": "You harden code. Nothing else matters." },
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let mut w = t.watch().await;
+
+    let mut a = task(
+        "a",
+        goal("[write a.txt=alpha]"),
+        &has("a.txt", "alpha"),
+        &[],
+    );
+    a["assignee"] = json!("sec");
+    let b = task("b", goal("[write b.txt=beta]"), &has("b.txt", "beta"), &[]);
+    let id = start_run(&t, request(json!([a, b])), json!({})).await;
+    w.until(
+        "plan awaiting approval",
+        run_status_is(&id, RunStatus::AwaitingApproval),
+    )
+    .await;
+
+    // The planner was told who is on the team and what they are good at.
+    let planner: Value = t
+        .get("/v1/agents/boss/transcript")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let kickoff = planner["turns"][0]["input"].as_str().unwrap();
+    assert!(kickoff.contains("Your team"), "{kickoff}");
+    assert!(
+        kickoff.contains("- sec — Rex, Security engineer · opus. You harden code."),
+        "{kickoff}"
+    );
+    assert!(
+        kickoff.contains("- coder — no title · haiku (default)"),
+        "{kickoff}"
+    );
+    assert!(
+        !kickoff.contains("- boss"),
+        "planners are not teammates: {kickoff}"
+    );
+
+    let resp = t.post(&format!("/v1/runs/{id}/approve"), json!({})).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    w.until("run completed", run_status_is(&id, RunStatus::Completed))
+        .await;
+
+    // Task a went to the specialist (cloned with its model), b to the default worker.
+    assert_eq!(
+        clone_models(&w.seen),
+        [
+            ("a".into(), Some("opus".into())),
+            ("b".into(), Some("haiku".into()))
+        ]
+    );
+    let sec: Value = t.get("/v1/agents/sec").await.json().await.unwrap();
+    let detail: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
+    let template = |key: &str| {
+        detail["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["key"] == key)
+            .unwrap()["worker_template"]
+            .clone()
+    };
+    assert_eq!(template("a"), sec["id"]);
+    assert!(template("b").is_null());
+
+    // Orchestration messages say which run and task they are about; the planner's merge
+    // notices are tagged with the task that merged.
+    let first = &planner["turns"][0]["from"];
+    assert_eq!(first["kind"], "orchestrator", "{first}");
+    assert_eq!(first["run_id"], json!(id));
+    assert!(first.get("task_id").is_none(), "{first}");
+    let planner: Value = t
+        .get("/v1/agents/boss/transcript")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let task_ids: Vec<&Value> = detail["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| &t["id"])
+        .collect();
+    let tagged = planner["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|turn| task_ids.contains(&&turn["from"]["task_id"]))
+        .count();
+    assert_eq!(tagged, 2, "one merge notice per task: {planner}");
+}
+
+#[tokio::test]
+async fn unknown_assignee_rejects_the_plan() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    let mut a = task(
+        "a",
+        goal("[write a.txt=alpha]"),
+        &has("a.txt", "alpha"),
+        &[],
+    );
+    a["assignee"] = json!("nobody");
+    let id = start_run(&t, request(json!([a])), json!({})).await;
+    w.until("planner's turn", |e| {
+        matches!(e.kind, EventKind::AgentTurnCompleted { .. })
+    })
+    .await;
+
+    let detail: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
+    assert_eq!(detail["run"]["status"], "planning");
+    assert!(detail["run"]["plan"].as_array().unwrap().is_empty());
+    assert!(
+        !types(&w.seen).contains(&"run.plan_submitted"),
+        "{:?}",
+        types(&w.seen)
+    );
+}

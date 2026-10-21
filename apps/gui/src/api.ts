@@ -3,6 +3,7 @@
 // browser they go to the same origin (the Vite dev server forwards them, see vite.config.ts).
 
 import type { Agent } from "@bindings/Agent";
+import type { AgentProfile } from "@bindings/AgentProfile";
 import type { ApiError as ApiErrorJson } from "@bindings/ApiError";
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
 import type { CreateRunRequest } from "@bindings/CreateRunRequest";
@@ -15,6 +16,7 @@ import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
 import type { SendMessageRequest } from "@bindings/SendMessageRequest";
 import type { SendMessageResponse } from "@bindings/SendMessageResponse";
+import type { Transcript } from "@bindings/Transcript";
 import type { UsageGroup } from "@bindings/UsageGroup";
 import type { UsageResponse } from "@bindings/UsageResponse";
 
@@ -83,8 +85,12 @@ export const api = {
   createAgent: (req: CreateAgentRequest) => request<Agent>("POST", "/v1/agents", req),
   sendMessage: (key: string, req: SendMessageRequest) =>
     request<SendMessageResponse>("POST", `/v1/agents/${enc(key)}/messages`, req),
+  withdrawMessage: (key: string, messageId: string) =>
+    request<void>("DELETE", `/v1/agents/${enc(key)}/messages/${enc(messageId)}`),
   cancelAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/cancel`),
   stopAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/stop`),
+  updateProfile: (key: string, profile: AgentProfile) => request<Agent>("POST", `/v1/agents/${enc(key)}/profile`, profile),
+  transcript: (key: string) => request<Transcript>("GET", `/v1/agents/${enc(key)}/transcript`),
   listPlugins: () => request<ListPluginsResponse>("GET", "/v1/plugins"),
 
   listRuns: () => request<ListRunsResponse>("GET", "/v1/runs"),

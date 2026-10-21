@@ -123,7 +123,10 @@ async fn post_message(client: &Client, agent: &Agent, text: &str) -> Result<Send
     client
         .post(
             &format!("/v1/agents/{}/messages", agent.id),
-            &SendMessageRequest { text: text.into() },
+            &SendMessageRequest {
+                text: text.into(),
+                now: None,
+            },
         )
         .await
 }

@@ -143,7 +143,9 @@ async function streamOnce(emit: (channel: string, value: string) => void, last: 
   const { base, token } = await connection();
   const headers: Record<string, string> = { authorization: `Bearer ${token}`, accept: "text/event-stream" };
   if (last.id !== undefined) headers["last-event-id"] = last.id;
-  const response = await fetch(`${base}/v1/events`, { headers, signal });
+  // First connection: live events only (views load state over REST); reconnects resume.
+  const query = last.id === undefined ? "?live=true" : "";
+  const response = await fetch(`${base}/v1/events${query}`, { headers, signal });
   if (!response.ok || !response.body) throw new Error(`hub answered ${response.status}`);
   emit("hub:status", "connected");
 

@@ -39,6 +39,9 @@ pub enum EventKind {
     HubStopping,
     #[serde(rename = "agent.created")]
     AgentCreated { agent: Agent },
+    /// The agent's profile changed; `agent` is the new record.
+    #[serde(rename = "agent.updated")]
+    AgentUpdated { agent: Agent },
     #[serde(rename = "agent.removed")]
     AgentRemoved { id: AgentId, name: String },
     #[serde(rename = "agent.status_changed")]
@@ -54,7 +57,14 @@ pub enum EventKind {
         message_id: MessageId,
         text: String,
         queued: bool,
+        /// Who sent it; absent in events written before the field existed (a person).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        from: Option<MessageSource>,
     },
+    /// A queued message was taken back before its turn started.
+    #[serde(rename = "agent.input_withdrawn")]
+    AgentInputWithdrawn { id: AgentId, message_id: MessageId },
     #[serde(rename = "agent.turn_started")]
     AgentTurnStarted { id: AgentId, message_id: MessageId },
     /// Coalesced output text.
@@ -145,6 +155,40 @@ pub enum EventKind {
     },
 }
 
+/// Who sent a message to an agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MessageSource {
+    /// A person, through the API.
+    Human,
+    /// The orchestrator, about a run and possibly one of its tasks.
+    Orchestrator {
+        run_id: RunId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        task_id: Option<TaskId>,
+    },
+    /// Another agent (`agent_send`).
+    Agent { agent_id: AgentId },
+}
+
+impl MessageSource {
+    pub fn run(run_id: RunId) -> Self {
+        Self::Orchestrator {
+            run_id,
+            task_id: None,
+        }
+    }
+
+    pub fn task(run_id: RunId, task_id: TaskId) -> Self {
+        Self::Orchestrator {
+            run_id,
+            task_id: Some(task_id),
+        }
+    }
+}
+
 impl EventKind {
     /// The wire name, identical to the serialized `type` field.
     pub fn type_name(&self) -> &'static str {
@@ -152,9 +196,11 @@ impl EventKind {
             Self::HubStarted { .. } => "hub.started",
             Self::HubStopping => "hub.stopping",
             Self::AgentCreated { .. } => "agent.created",
+            Self::AgentUpdated { .. } => "agent.updated",
             Self::AgentRemoved { .. } => "agent.removed",
             Self::AgentStatusChanged { .. } => "agent.status_changed",
             Self::AgentInput { .. } => "agent.input",
+            Self::AgentInputWithdrawn { .. } => "agent.input_withdrawn",
             Self::AgentTurnStarted { .. } => "agent.turn_started",
             Self::AgentOutput { .. } => "agent.output",
             Self::AgentToolCall { .. } => "agent.tool_call",
@@ -202,10 +248,11 @@ impl EventKind {
             | Self::AccountLoginPending { .. } => None,
             Self::AgentSessionStarted { id, .. } => Some(*id),
             Self::TaskStatusChanged { assignee, .. } => *assignee,
-            Self::AgentCreated { agent } => Some(agent.id),
+            Self::AgentCreated { agent } | Self::AgentUpdated { agent } => Some(agent.id),
             Self::AgentRemoved { id, .. }
             | Self::AgentStatusChanged { id, .. }
             | Self::AgentInput { id, .. }
+            | Self::AgentInputWithdrawn { id, .. }
             | Self::AgentTurnStarted { id, .. }
             | Self::AgentOutput { id, .. }
             | Self::AgentToolCall { id, .. }

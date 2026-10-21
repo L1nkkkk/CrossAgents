@@ -61,6 +61,7 @@ fn spec(
             config,
             status: AgentStatus::Stopped,
             created_at: Utc::now(),
+            profile: Default::default(),
         },
         mcp_servers: vec![],
         permission,

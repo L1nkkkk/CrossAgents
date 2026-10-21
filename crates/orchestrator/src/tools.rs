@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crossagents_core::{
-    Agent, AgentKey, CoreError, PlannedTask, Role, RunStatus, Task, TaskId, ToolInfo,
+    Agent, AgentKey, CoreError, MessageSource, PlannedTask, Role, RunStatus, Task, TaskId, ToolInfo,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -89,7 +89,9 @@ const TOOLS: &[ToolDef] = &[
                                 "key": { "type": "string", "description": "Short unique id: a-z, 0-9, -" },
                                 "title": { "type": "string" },
                                 "spec": spec_schema(),
-                                "depends_on": { "type": "array", "items": { "type": "string" } }
+                                "depends_on": { "type": "array", "items": { "type": "string" } },
+                                "assignee": { "type": "string", "description": "Name of the worker on your team whose specialty fits this task; omit for the default worker" },
+                                "reviewer": { "type": "string", "description": "Name of a reviewer on your team to review this task (e.g. a security reviewer); omit for the run's reviewer" }
                             },
                             "required": ["key", "title", "spec"]
                         }
@@ -240,6 +242,9 @@ impl Orchestrator {
                 let target = self.store().get_agent(&AgentKey::Name(a.to)).await?;
                 self.deliver(
                     target.id,
+                    MessageSource::Agent {
+                        agent_id: caller.id,
+                    },
                     format!("Message from {}:\n{}", caller.name, a.text),
                 );
                 Ok(json!({ "sent": true }))

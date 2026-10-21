@@ -46,8 +46,16 @@ function hubProxy(): Plugin {
             "content-type": upstream.headers.get("content-type") ?? "application/octet-stream",
             "cache-control": "no-cache",
           });
-          if (upstream.body) Readable.fromWeb(upstream.body as never).pipe(res);
-          else res.end();
+          // Send headers now: a live event stream may have nothing to write for a while.
+          res.flushHeaders();
+          if (upstream.body) {
+            const body = Readable.fromWeb(upstream.body as never);
+            // Aborting a stream (the page reloads mid-SSE) errors it; unhandled, that kills Vite.
+            body.on("error", () => res.destroy());
+            body.pipe(res);
+          } else {
+            res.end();
+          }
         } catch (err) {
           if (abort.signal.aborted) return;
           res.writeHead(502, { "content-type": "application/json" });

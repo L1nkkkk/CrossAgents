@@ -9,7 +9,8 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use chrono::Utc;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, AgentStatus, CoreError, EventBus, EventKind, McpServerSpec, Role,
+    Agent, AgentId, AgentKey, AgentStatus, CoreError, EventBus, EventKind, McpServerSpec,
+    MessageSource, Role,
 };
 use crossagents_orchestrator::AgentHost;
 use tokio::sync::RwLock;
@@ -60,6 +61,7 @@ impl SessionSetup for CollabSetup {
         let agent_env = self.accounts.agent_env(agent).await?;
         let Some((program, args)) = self.mcp_command.split_first() else {
             return Ok(SessionExtras {
+                instructions: agent.profile.instructions(&agent.name),
                 env: agent_env,
                 ..SessionExtras::default()
             });
@@ -78,7 +80,7 @@ impl SessionSetup for CollabSetup {
                 args: args.to_vec(),
                 env,
             }],
-            instructions: None,
+            instructions: agent.profile.instructions(&agent.name),
             env: agent_env,
         })
     }
@@ -92,9 +94,14 @@ pub struct HubHost {
 
 #[async_trait]
 impl AgentHost for HubHost {
-    async fn send(&self, agent: AgentId, text: String) -> Result<(), CoreError> {
+    async fn send(
+        &self,
+        agent: AgentId,
+        from: MessageSource,
+        text: String,
+    ) -> Result<(), CoreError> {
         self.runtime
-            .send(&AgentKey::Id(agent), text)
+            .send(&AgentKey::Id(agent), text, from)
             .await
             .map(|_| ())
     }
@@ -118,6 +125,8 @@ impl AgentHost for HubHost {
             config: template.config,
             status: AgentStatus::Stopped,
             created_at: Utc::now(),
+            // Every clone of "Ada the designer" is Ada the designer.
+            profile: template.profile,
         };
         self.bus.store().insert_agent(&agent).await?;
         self.bus

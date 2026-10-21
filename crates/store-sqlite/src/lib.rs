@@ -6,8 +6,8 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use crossagents_core::{
-    Account, Agent, AgentId, AgentKey, AgentStatus, CoreError, EVENT_SCHEMA_VERSION, Event,
-    EventKind, Run, RunId, Store, Task, TaskId,
+    Account, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError, EVENT_SCHEMA_VERSION,
+    Event, EventKind, Run, RunId, Store, Task, TaskId,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -101,6 +101,7 @@ fn agent_from_row(row: &SqliteRow) -> Result<Agent, CoreError> {
         config: serde_json::from_str(&get("config")?).map_err(storage)?,
         status: enum_from(&get("status")?)?,
         created_at: time_from(&get("created_at")?)?,
+        profile: serde_json::from_str(&get("profile")?).map_err(storage)?,
     })
 }
 
@@ -132,8 +133,8 @@ fn not_found(key: &AgentKey) -> CoreError {
 impl Store for SqliteStore {
     async fn insert_agent(&self, agent: &Agent) -> Result<(), CoreError> {
         let result = sqlx::query(
-            "INSERT INTO agents (id, name, plugin, driver, model, role, cwd, config, status, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO agents (id, name, plugin, driver, model, role, cwd, config, status, created_at, profile)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(agent.id.to_string())
         .bind(&agent.name)
@@ -145,6 +146,7 @@ impl Store for SqliteStore {
         .bind(serde_json::to_string(&agent.config).map_err(storage)?)
         .bind(enum_str(&agent.status)?)
         .bind(agent.created_at.to_rfc3339())
+        .bind(serde_json::to_string(&agent.profile).map_err(storage)?)
         .execute(&self.pool)
         .await;
         match result {
@@ -183,6 +185,23 @@ impl Store for SqliteStore {
 
     async fn delete_agent(&self, id: AgentId) -> Result<(), CoreError> {
         let result = sqlx::query("DELETE FROM agents WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        if result.rows_affected() == 0 {
+            return Err(not_found(&AgentKey::Id(id)));
+        }
+        Ok(())
+    }
+
+    async fn update_agent_profile(
+        &self,
+        id: AgentId,
+        profile: &AgentProfile,
+    ) -> Result<(), CoreError> {
+        let result = sqlx::query("UPDATE agents SET profile = ? WHERE id = ?")
+            .bind(serde_json::to_string(profile).map_err(storage)?)
             .bind(id.to_string())
             .execute(&self.pool)
             .await
@@ -252,6 +271,31 @@ impl Store for SqliteStore {
             .iter()
             .map(event_from_row)
             .collect()
+    }
+
+    async fn agent_events(
+        &self,
+        agent: AgentId,
+        after: u64,
+        limit: u32,
+    ) -> Result<Vec<Event>, CoreError> {
+        // Mirrors `EventKind::agent_id`.
+        sqlx::query(
+            "SELECT * FROM events WHERE seq > ?1 AND (
+                (type LIKE 'agent.%' AND type NOT IN ('agent.created', 'agent.updated') AND json_extract(data, '$.id') = ?2)
+                OR (type IN ('agent.created', 'agent.updated') AND json_extract(data, '$.agent.id') = ?2)
+                OR (type = 'task.status_changed' AND json_extract(data, '$.assignee') = ?2)
+            ) ORDER BY seq LIMIT ?3",
+        )
+        .bind(after as i64)
+        .bind(agent.to_string())
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?
+        .iter()
+        .map(event_from_row)
+        .collect()
     }
 
     async fn insert_run(&self, run: &Run) -> Result<(), CoreError> {
@@ -477,6 +521,7 @@ mod tests {
                 auto_approve: false,
                 max_parallel: 3,
                 max_attempts: 3,
+                team: vec![],
             },
             repo: PathBuf::from("/repo"),
             base_branch: "main".into(),
@@ -506,6 +551,8 @@ mod tests {
                 depends_on: vec![],
                 assignee: None,
                 reviewer: None,
+                worker_template: None,
+                reviewer_template: None,
                 status: TaskStatus::Pending,
                 attempts: 0,
                 escalated: false,
@@ -543,6 +590,11 @@ mod tests {
             config: serde_json::json!({ "k": 1 }),
             status: AgentStatus::Stopped,
             created_at: time_from(&Utc::now().to_rfc3339()).unwrap(),
+            profile: AgentProfile {
+                display_name: Some("Ada".into()),
+                title: Some("设计师".into()),
+                ..AgentProfile::default()
+            },
         }
     }
 
@@ -572,6 +624,20 @@ mod tests {
             .map(|a| a.name)
             .collect();
         assert_eq!(names, ["alice", "bob"]);
+
+        let card = AgentProfile {
+            avatar: Some("🎨".into()),
+            color: Some("rose".into()),
+            persona: Some("Loves whitespace.".into()),
+            ..alice.profile.clone()
+        };
+        store.update_agent_profile(alice.id, &card).await.unwrap();
+        let carded = store.get_agent(&AgentKey::Id(alice.id)).await.unwrap();
+        assert_eq!(carded.profile, card);
+        assert!(matches!(
+            store.update_agent_profile(AgentId::new(), &card).await,
+            Err(CoreError::NotFound { .. })
+        ));
 
         store
             .update_agent_status(alice.id, AgentStatus::Idle)

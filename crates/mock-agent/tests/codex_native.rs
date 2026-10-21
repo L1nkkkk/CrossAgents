@@ -56,6 +56,7 @@ fn spec(opts: Opts<'_>) -> (SessionSpec, mpsc::UnboundedReceiver<SessionEvent>) 
         config: opts.config,
         status: AgentStatus::Stopped,
         created_at: Utc::now(),
+        profile: Default::default(),
     };
     let spec = SessionSpec {
         agent,

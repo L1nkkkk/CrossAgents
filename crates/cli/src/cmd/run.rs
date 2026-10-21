@@ -45,6 +45,10 @@ pub struct StartArgs {
     pub max_parallel: Option<u32>,
     #[arg(long)]
     pub max_attempts: Option<u32>,
+    /// Teammates the planner may assign tasks to (repeat or comma-separate); default:
+    /// every worker and reviewer registered in the planner's repository.
+    #[arg(long, value_delimiter = ',')]
+    pub team: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -88,6 +92,7 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
             auto_approve: start.no_approve,
             max_parallel: start.max_parallel,
             max_attempts: start.max_attempts,
+            team: (!start.team.is_empty()).then_some(start.team),
         };
         let run: Run = client.post("/v1/runs", &req).await?;
         if ctx.json {

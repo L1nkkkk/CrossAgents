@@ -3,12 +3,17 @@
 use std::path::Path;
 
 use async_trait::async_trait;
-use crossagents_core::{Agent, AgentId, CoreError, Role};
+use crossagents_core::{Agent, AgentId, CoreError, MessageSource, Role};
 
 #[async_trait]
 pub trait AgentHost: Send + Sync {
     /// Delivers a message to an agent, starting it if needed.
-    async fn send(&self, agent: AgentId, text: String) -> Result<(), CoreError>;
+    async fn send(
+        &self,
+        agent: AgentId,
+        from: MessageSource,
+        text: String,
+    ) -> Result<(), CoreError>;
     /// Creates a new agent with `template`'s plugin, model and settings, working in `cwd`.
     async fn clone_agent(
         &self,

@@ -162,6 +162,7 @@ mod tests {
             config: serde_json::Value::Null,
             status: AgentStatus::Stopped,
             created_at: Utc::now(),
+            profile: Default::default(),
         }
     }
 

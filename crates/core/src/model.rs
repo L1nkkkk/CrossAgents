@@ -46,6 +46,100 @@ pub struct Agent {
     pub config: serde_json::Value,
     pub status: AgentStatus,
     pub created_at: DateTime<Utc>,
+    /// Who the agent is to people and to itself (docs/DESIGN.md §4.3).
+    #[serde(default)]
+    pub profile: AgentProfile,
+}
+
+/// The agent's card: how it is shown, and the persona it is given. `role` still decides its
+/// tools; the profile makes it a particular colleague (a designer, a security reviewer, …).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct AgentProfile {
+    /// Shown instead of the name, e.g. "Ada". The name stays the address.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// What it does, e.g. "设计师" or "Security reviewer".
+    #[serde(default)]
+    pub title: Option<String>,
+    /// An emoji or up to two letters; clients fall back to initials.
+    #[serde(default)]
+    pub avatar: Option<String>,
+    /// Avatar colour, one of [`AgentProfile::COLORS`].
+    #[serde(default)]
+    pub color: Option<String>,
+    /// Expertise and working style, added to the agent's opening instructions.
+    #[serde(default)]
+    pub persona: Option<String>,
+}
+
+impl AgentProfile {
+    pub const COLORS: [&'static str; 8] = [
+        "indigo", "violet", "rose", "amber", "emerald", "teal", "sky", "slate",
+    ];
+    const MAX_TEXT: usize = 64;
+    const MAX_AVATAR: usize = 8;
+    const MAX_PERSONA: usize = 4000;
+
+    /// Trims fields, turns empty ones into `None` and checks lengths and the colour.
+    pub fn normalized(self) -> Result<Self, CoreError> {
+        let clean = |v: Option<String>| v.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
+        let profile = Self {
+            display_name: clean(self.display_name),
+            title: clean(self.title),
+            avatar: clean(self.avatar),
+            color: clean(self.color),
+            persona: clean(self.persona),
+        };
+        let too_long =
+            |v: &Option<String>, max: usize| v.as_ref().is_some_and(|s| s.chars().count() > max);
+        if too_long(&profile.display_name, Self::MAX_TEXT)
+            || too_long(&profile.title, Self::MAX_TEXT)
+        {
+            return Err(CoreError::Unsupported(format!(
+                "display name and title are at most {} characters",
+                Self::MAX_TEXT
+            )));
+        }
+        if too_long(&profile.avatar, Self::MAX_AVATAR) {
+            return Err(CoreError::Unsupported(format!(
+                "avatar is at most {} characters (an emoji or initials)",
+                Self::MAX_AVATAR
+            )));
+        }
+        if too_long(&profile.persona, Self::MAX_PERSONA) {
+            return Err(CoreError::Unsupported(format!(
+                "persona is at most {} characters",
+                Self::MAX_PERSONA
+            )));
+        }
+        if let Some(color) = &profile.color
+            && !Self::COLORS.contains(&color.as_str())
+        {
+            return Err(CoreError::Unsupported(format!(
+                "color {color:?} (known: {})",
+                Self::COLORS.join(", ")
+            )));
+        }
+        Ok(profile)
+    }
+
+    /// The opening instructions this profile adds, if it says anything about the agent.
+    pub fn instructions(&self, name: &str) -> Option<String> {
+        if self.title.is_none() && self.persona.is_none() && self.display_name.is_none() {
+            return None;
+        }
+        let who = self.display_name.as_deref().unwrap_or(name);
+        let mut text = match &self.title {
+            Some(title) => format!("You are {who}, the team's {title}."),
+            None => format!("You are {who}."),
+        };
+        if let Some(persona) = &self.persona {
+            text.push_str("\n\n");
+            text.push_str(persona);
+        }
+        Some(text)
+    }
 }
 
 /// Agent names are used as addresses (`agent_send(to = "alice")`), so keep them simple.
@@ -97,6 +191,10 @@ pub struct RunConfig {
     pub max_parallel: u32,
     /// Attempts per worker before escalating.
     pub max_attempts: u32,
+    /// Teammates the planner may assign tasks to (workers) or have them reviewed by
+    /// (reviewers), by specialty. Always includes `worker` and `reviewer`.
+    #[serde(default)]
+    pub team: Vec<AgentId>,
 }
 
 impl RunConfig {
@@ -165,6 +263,12 @@ pub struct PlannedTask {
     pub spec: TaskSpec,
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// Teammate (worker, by name) whose specialty fits; `None` means the run's worker.
+    #[serde(default)]
+    pub assignee: Option<String>,
+    /// Teammate (reviewer, by name) to review this task instead of the run's reviewer.
+    #[serde(default)]
+    pub reviewer: Option<String>,
 }
 
 /// The result of one acceptance command.
@@ -218,6 +322,12 @@ pub struct Task {
     /// The reviewer agent while the task is in review.
     #[serde(default)]
     pub reviewer: Option<AgentId>,
+    /// The teammate workers on this task are cloned from (the plan's `assignee`).
+    #[serde(default)]
+    pub worker_template: Option<AgentId>,
+    /// The teammate reviewers on this task are cloned from (the plan's `reviewer`).
+    #[serde(default)]
+    pub reviewer_template: Option<AgentId>,
     pub status: TaskStatus,
     /// Attempts by the current worker.
     pub attempts: u32,
