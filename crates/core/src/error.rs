@@ -20,4 +20,8 @@ pub enum CoreError {
     /// The agent process or its protocol failed.
     #[error("agent error: {0}")]
     Agent(String),
+
+    /// The driver cannot do this (check its capabilities first).
+    #[error("unsupported: {0}")]
+    Unsupported(String),
 }

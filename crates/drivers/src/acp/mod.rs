@@ -1,8 +1,9 @@
-//! ACP driver: runs an ACP agent as a child process and drives it as the client.
+//! `acp-generic`: runs any ACP agent as a child process and drives it as the client.
+//!
+//! One process per session. The fallback driver for every agent without a native one.
 
 pub mod wire;
 
-use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -11,19 +12,92 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
-    AgentSession, CoreError, McpServerSpec, OutputStream, PermissionPolicy, SessionEvent,
-    StopReason, ToolStatus,
+    Capabilities, CoreError, Driver, DriverKind, DriverSession, McpServerSpec, OutputStream,
+    PermissionPolicy, SessionEvent, SessionEventKind, SessionSpec, StopReason, ToolStatus,
+    TurnOutcome,
 };
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc};
 
 use self::wire::{method, *};
 use crate::jsonrpc::{RpcError, RpcHandler, RpcPeer};
+use crate::process::{StderrTail, hide_console, resolve_program};
 
 const INIT_TIMEOUT: Duration = Duration::from_secs(180);
-const STDERR_TAIL: usize = 40;
+
+/// A Profile whose agent speaks ACP.
+pub struct AcpDriver {
+    name: String,
+    command: Vec<String>,
+    models: Vec<String>,
+    /// Environment variable that receives the session's model, e.g. `ANTHROPIC_MODEL`.
+    model_env: Option<String>,
+}
+
+impl AcpDriver {
+    pub fn new(
+        name: impl Into<String>,
+        command: Vec<String>,
+        models: Vec<String>,
+        model_env: Option<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            command,
+            models,
+            model_env,
+        }
+    }
+
+    pub fn command(&self) -> &[String] {
+        &self.command
+    }
+}
+
+#[async_trait]
+impl Driver for AcpDriver {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> DriverKind {
+        DriverKind::AcpGeneric
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            streaming: true,
+            interrupt: true,
+            mcp: true,
+            usage: true,
+            ..Capabilities::default()
+        }
+    }
+
+    fn models(&self) -> Vec<String> {
+        self.models.clone()
+    }
+
+    async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError> {
+        let command = spec.command.clone().unwrap_or_else(|| self.command.clone());
+        let mut launch = AcpLaunch::from_command(&command, spec.agent.cwd.clone())?;
+        if let (Some(var), Some(model)) = (&self.model_env, &spec.agent.model) {
+            launch.env.push((var.clone(), model.clone()));
+        }
+        launch.env.extend(spec.env);
+        let session = AcpSession::start(AcpOptions {
+            launch,
+            mcp_servers: spec.mcp_servers,
+            permission: spec.permission,
+            model: spec.agent.model,
+            instructions: spec.instructions,
+            events: spec.events,
+        })
+        .await?;
+        Ok(Box::new(session))
+    }
+}
 
 /// How to launch the agent process.
 #[derive(Debug, Clone)]
@@ -65,9 +139,14 @@ pub struct AcpSession {
     session_id: String,
     child: Mutex<Child>,
     pending_instructions: Mutex<Option<String>>,
+    events: mpsc::UnboundedSender<SessionEvent>,
     /// Set before we kill the process, so its exit is not reported as a failure.
     shutting_down: Arc<AtomicBool>,
     pub agent_info: Option<Implementation>,
+}
+
+fn emit(events: &mpsc::UnboundedSender<SessionEvent>, kind: SessionEventKind) {
+    let _ = events.send(kind.into());
 }
 
 impl AcpSession {
@@ -99,9 +178,7 @@ impl AcpSession {
 
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
-        let tail = Arc::new(Mutex::new(VecDeque::new()));
-        tokio::spawn(collect_stderr(stderr, tail.clone()));
+        let tail = StderrTail::spawn(child.stderr.take().expect("piped stderr"));
 
         let handler = Arc::new(ClientHandler {
             events: events.clone(),
@@ -117,13 +194,8 @@ impl AcpSession {
             async move {
                 let _ = reader.await;
                 if !shutting_down.load(Ordering::SeqCst) {
-                    let tail: Vec<String> = tail.lock().await.iter().cloned().collect();
-                    let message = if tail.is_empty() {
-                        "agent process exited".to_owned()
-                    } else {
-                        format!("agent process exited:\n{}", tail.join("\n"))
-                    };
-                    let _ = events.send(SessionEvent::Exited { message });
+                    let message = tail.describe("agent process exited").await;
+                    emit(&events, SessionEventKind::Exited { message });
                 }
             }
         });
@@ -156,15 +228,9 @@ impl AcpSession {
         let (init, session) = match tokio::time::timeout(INIT_TIMEOUT, handshake).await {
             Ok(Ok(result)) => result,
             Ok(Err(err)) => {
-                let tail: Vec<String> = tail.lock().await.iter().cloned().collect();
-                return Err(CoreError::Agent(format!(
-                    "ACP handshake failed: {err}{}",
-                    if tail.is_empty() {
-                        String::new()
-                    } else {
-                        format!("\n{}", tail.join("\n"))
-                    }
-                )));
+                return Err(CoreError::Agent(
+                    tail.describe(&format!("ACP handshake failed: {err}")).await,
+                ));
             }
             Err(_) => return Err(CoreError::Agent("ACP handshake timed out".into())),
         };
@@ -175,19 +241,22 @@ impl AcpSession {
             );
         }
 
-        let _ = events.send(SessionEvent::Started {
-            session_id: session.session_id.clone(),
-        });
+        emit(
+            &events,
+            SessionEventKind::Started {
+                session_id: session.session_id.clone(),
+            },
+        );
         let this = Self {
             peer,
             session_id: session.session_id.clone(),
             child: Mutex::new(child),
             pending_instructions: Mutex::new(instructions),
+            events: events.clone(),
             shutting_down,
             agent_info: init.agent_info,
         };
-        this.configure(&session, permission, model.as_deref(), &events)
-            .await;
+        this.configure(&session, permission, model.as_deref()).await;
         Ok(this)
     }
 
@@ -196,11 +265,8 @@ impl AcpSession {
         session: &NewSessionResponse,
         permission: PermissionPolicy,
         model: Option<&str>,
-        events: &mpsc::UnboundedSender<SessionEvent>,
     ) {
-        let warn = |message: String| {
-            let _ = events.send(SessionEvent::Warning { message });
-        };
+        let warn = |message: String| emit(&self.events, SessionEventKind::Warning { message });
 
         if permission == PermissionPolicy::Bypass
             && let Some(modes) = &session.modes
@@ -272,13 +338,21 @@ impl AcpSession {
 }
 
 #[async_trait]
-impl AgentSession for AcpSession {
-    async fn prompt(&self, text: &str) -> Result<StopReason, CoreError> {
+impl DriverSession for AcpSession {
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    async fn prompt(&self, text: &str) -> Result<TurnOutcome, CoreError> {
         let mut prompt = Vec::new();
         if let Some(instructions) = self.pending_instructions.lock().await.take() {
             prompt.push(ContentBlock::Text { text: instructions });
         }
         prompt.push(ContentBlock::Text { text: text.into() });
+        emit(
+            &self.events,
+            SessionEventKind::TurnStarted { turn_id: None },
+        );
         let response: PromptResponse = self
             .peer
             .request(
@@ -290,10 +364,21 @@ impl AgentSession for AcpSession {
             )
             .await
             .map_err(|e| CoreError::Agent(e.to_string()))?;
-        Ok(stop_reason(&response.stop_reason))
+        let stop_reason = stop_reason(&response.stop_reason);
+        emit(
+            &self.events,
+            SessionEventKind::TurnCompleted {
+                turn_id: None,
+                stop_reason,
+            },
+        );
+        Ok(TurnOutcome {
+            stop_reason,
+            turn_id: None,
+        })
     }
 
-    async fn cancel(&self) -> Result<(), CoreError> {
+    async fn interrupt(&self) -> Result<(), CoreError> {
         self.peer
             .notify(
                 method::SESSION_CANCEL,
@@ -348,18 +433,6 @@ fn to_wire_mcp(spec: &McpServerSpec) -> McpServerStdio {
     }
 }
 
-async fn collect_stderr(stderr: tokio::process::ChildStderr, tail: Arc<Mutex<VecDeque<String>>>) {
-    let mut lines = BufReader::new(stderr).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        tracing::debug!(target: "crossagents::agent_stderr", "{line}");
-        let mut tail = tail.lock().await;
-        if tail.len() == STDERR_TAIL {
-            tail.pop_front();
-        }
-        tail.push_back(line);
-    }
-}
-
 /// Answers the agent's requests and turns its updates into [`SessionEvent`]s.
 struct ClientHandler {
     events: mpsc::UnboundedSender<SessionEvent>,
@@ -388,8 +461,8 @@ impl RpcHandler for ClientHandler {
         let Ok(note) = serde_json::from_value::<SessionNotification>(params) else {
             return;
         };
-        if let Some(event) = parse_update(&note.update) {
-            let _ = self.events.send(event);
+        if let Some(kind) = parse_update(&note.update) {
+            let _ = self.events.send(SessionEvent::with_raw(kind, note.update));
         }
     }
 }
@@ -420,7 +493,7 @@ fn tool_status(value: Option<&Value>) -> Option<ToolStatus> {
     }
 }
 
-fn parse_update(update: &Value) -> Option<SessionEvent> {
+fn parse_update(update: &Value) -> Option<SessionEventKind> {
     let str_of = |key: &str| update.get(key).and_then(Value::as_str);
     match str_of("sessionUpdate")? {
         kind @ ("agent_message_chunk" | "agent_thought_chunk") => {
@@ -428,7 +501,7 @@ fn parse_update(update: &Value) -> Option<SessionEvent> {
             if content.get("type")?.as_str()? != "text" {
                 return None;
             }
-            Some(SessionEvent::Output {
+            Some(SessionEventKind::Output {
                 stream: if kind == "agent_message_chunk" {
                     OutputStream::Text
                 } else {
@@ -437,13 +510,13 @@ fn parse_update(update: &Value) -> Option<SessionEvent> {
                 text: content.get("text")?.as_str()?.to_owned(),
             })
         }
-        "tool_call" => Some(SessionEvent::ToolCall {
+        "tool_call" => Some(SessionEventKind::ToolCall {
             tool_call_id: str_of("toolCallId")?.to_owned(),
             title: str_of("title").unwrap_or_default().to_owned(),
             kind: str_of("kind").map(str::to_owned),
             status: tool_status(update.get("status")).unwrap_or(ToolStatus::Pending),
         }),
-        "tool_call_update" => Some(SessionEvent::ToolCallUpdated {
+        "tool_call_update" => Some(SessionEventKind::ToolCallUpdated {
             tool_call_id: str_of("toolCallId")?.to_owned(),
             title: str_of("title").map(str::to_owned),
             status: tool_status(update.get("status")),
@@ -453,44 +526,16 @@ fn parse_update(update: &Value) -> Option<SessionEvent> {
             let cost_usd = cost
                 .filter(|c| c.get("currency").and_then(Value::as_str) == Some("USD"))
                 .and_then(|c| c.get("amount")?.as_f64());
-            Some(SessionEvent::Usage {
+            Some(SessionEventKind::Usage {
                 used: update.get("used")?.as_u64()?,
                 size: update.get("size")?.as_u64()?,
                 cost_usd,
+                tokens: None,
             })
         }
         _ => None,
     }
 }
-
-/// On Windows a bare program name does not find `npx.cmd` and friends; search `PATH`.
-fn resolve_program(program: &str) -> PathBuf {
-    let path = PathBuf::from(program);
-    if !cfg!(windows) || path.extension().is_some() || path.components().count() > 1 {
-        return path;
-    }
-    let Some(dirs) = std::env::var_os("PATH") else {
-        return path;
-    };
-    for dir in std::env::split_paths(&dirs) {
-        for ext in ["exe", "cmd", "bat"] {
-            let candidate = dir.join(program).with_extension(ext);
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-    }
-    path
-}
-
-#[cfg(windows)]
-fn hide_console(command: &mut Command) {
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn hide_console(_: &mut Command) {}
 
 #[cfg(test)]
 mod tests {
@@ -546,7 +591,7 @@ mod tests {
         let chunk = json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "hi" } });
         assert_eq!(
             parse_update(&chunk),
-            Some(SessionEvent::Output {
+            Some(SessionEventKind::Output {
                 stream: OutputStream::Text,
                 text: "hi".into()
             })
@@ -554,7 +599,7 @@ mod tests {
         let tool = json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Read x", "kind": "read", "status": "in_progress" });
         assert!(matches!(
             parse_update(&tool),
-            Some(SessionEvent::ToolCall {
+            Some(SessionEventKind::ToolCall {
                 status: ToolStatus::InProgress,
                 ..
             })
@@ -562,10 +607,11 @@ mod tests {
         let usage = json!({ "sessionUpdate": "usage_update", "used": 10, "size": 100, "cost": { "amount": 0.5, "currency": "USD" } });
         assert_eq!(
             parse_update(&usage),
-            Some(SessionEvent::Usage {
+            Some(SessionEventKind::Usage {
                 used: 10,
                 size: 100,
-                cost_usd: Some(0.5)
+                cost_usd: Some(0.5),
+                tokens: None,
             })
         );
         assert_eq!(

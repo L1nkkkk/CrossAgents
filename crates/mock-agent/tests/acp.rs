@@ -3,7 +3,8 @@
 use std::time::Duration;
 
 use crossagents_core::{
-    AgentSession, OutputStream, PermissionPolicy, SessionEvent, StopReason, ToolStatus,
+    DriverSession, OutputStream, PermissionPolicy, SessionEvent, SessionEventKind, StopReason,
+    ToolStatus,
 };
 use crossagents_drivers::acp::{AcpLaunch, AcpOptions, AcpSession};
 use tokio::sync::mpsc;
@@ -36,12 +37,12 @@ async fn start(
     (session, rx)
 }
 
-fn drain_text(rx: &mut mpsc::UnboundedReceiver<SessionEvent>) -> (String, Vec<SessionEvent>) {
+fn drain_text(rx: &mut mpsc::UnboundedReceiver<SessionEvent>) -> (String, Vec<SessionEventKind>) {
     let mut text = String::new();
     let mut others = Vec::new();
     while let Ok(event) = rx.try_recv() {
-        match event {
-            SessionEvent::Output {
+        match event.kind {
+            SessionEventKind::Output {
                 stream: OutputStream::Text,
                 text: t,
             } => text.push_str(&t),
@@ -63,9 +64,11 @@ async fn prompt_selects_model_and_mode_and_streams_output() {
         session.agent_info.as_ref().unwrap().name,
         "crossagents-mock-agent"
     );
+    assert_eq!(session.session_id(), "mock-session");
 
-    let stop = session.prompt("hello").await.unwrap();
-    assert_eq!(stop, StopReason::EndTurn);
+    let outcome = session.prompt("hello").await.unwrap();
+    assert_eq!(outcome.stop_reason, StopReason::EndTurn);
+    assert_eq!(outcome.turn_id, None);
     let (text, others) = drain_text(&mut rx);
     assert_eq!(
         text,
@@ -74,8 +77,15 @@ async fn prompt_selects_model_and_mode_and_streams_output() {
     assert!(
         others
             .iter()
-            .any(|e| matches!(e, SessionEvent::Usage { used: 42, .. }))
+            .any(|e| matches!(e, SessionEventKind::Usage { used: 42, .. }))
     );
+    assert!(others.iter().any(|e| matches!(
+        e,
+        SessionEventKind::TurnCompleted {
+            stop_reason: StopReason::EndTurn,
+            ..
+        }
+    )));
 
     // Instructions are only sent once.
     session.prompt("again").await.unwrap();
@@ -89,9 +99,9 @@ async fn unknown_model_is_a_warning() {
     let (session, mut rx) = start(PermissionPolicy::Bypass, Some("gpt-9"), None).await;
     let (_, others) = drain_text(&mut rx);
     assert!(
-        others
-            .iter()
-            .any(|e| matches!(e, SessionEvent::Warning { message } if message.contains("gpt-9"))),
+        others.iter().any(
+            |e| matches!(e, SessionEventKind::Warning { message } if message.contains("gpt-9"))
+        ),
         "{others:?}"
     );
     session.shutdown().await;
@@ -105,7 +115,7 @@ async fn permissions_follow_policy() {
     assert!(text.starts_with("permission=yes"), "{text}");
     assert!(others.iter().any(|e| matches!(
         e,
-        SessionEvent::ToolCallUpdated {
+        SessionEventKind::ToolCallUpdated {
             status: Some(ToolStatus::Completed),
             ..
         }
@@ -120,7 +130,7 @@ async fn permissions_follow_policy() {
 }
 
 #[tokio::test]
-async fn cancel_stops_a_running_turn() {
+async fn interrupt_stops_a_running_turn() {
     let (session, _rx) = start(PermissionPolicy::Bypass, None, None).await;
     let session = std::sync::Arc::new(session);
     let turn = tokio::spawn({
@@ -128,13 +138,13 @@ async fn cancel_stops_a_running_turn() {
         async move { session.prompt("[slow]").await }
     });
     tokio::time::sleep(Duration::from_millis(200)).await;
-    session.cancel().await.unwrap();
-    let stop = tokio::time::timeout(Duration::from_secs(5), turn)
+    session.interrupt().await.unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), turn)
         .await
         .unwrap()
         .unwrap()
         .unwrap();
-    assert_eq!(stop, StopReason::Cancelled);
+    assert_eq!(outcome.stop_reason, StopReason::Cancelled);
     session.shutdown().await;
 }
 
@@ -144,7 +154,11 @@ async fn crash_is_reported() {
     assert!(session.prompt("[crash]").await.is_err());
     let exited = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(SessionEvent::Exited { .. }) = rx.recv().await {
+            if let Some(SessionEvent {
+                kind: SessionEventKind::Exited { .. },
+                ..
+            }) = rx.recv().await
+            {
                 return;
             }
         }
@@ -162,7 +176,24 @@ async fn shutdown_is_not_reported_as_exit() {
     assert!(
         !others
             .iter()
-            .any(|e| matches!(e, SessionEvent::Exited { .. })),
+            .any(|e| matches!(e, SessionEventKind::Exited { .. })),
         "{others:?}"
     );
+}
+
+#[tokio::test]
+async fn optional_operations_are_unsupported() {
+    let (session, _rx) = start(PermissionPolicy::Bypass, None, None).await;
+    for result in [
+        session.suspend().await,
+        session.rollback("t", false).await,
+        session.set_model(Some("m"), None).await,
+        session.compact().await,
+    ] {
+        assert!(
+            matches!(result, Err(crossagents_core::CoreError::Unsupported(_))),
+            "{result:?}"
+        );
+    }
+    session.shutdown().await;
 }

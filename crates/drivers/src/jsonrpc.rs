@@ -118,6 +118,12 @@ impl RpcPeer {
         self.out.send(message.to_string()).map_err(|_| closed())
     }
 
+    /// A notification with no `params` member, for methods that take none.
+    pub fn notify_without_params(&self, method: &str) -> Result<(), RpcError> {
+        let message = json!({ "jsonrpc": "2.0", "method": method });
+        self.out.send(message.to_string()).map_err(|_| closed())
+    }
+
     fn respond(&self, id: Value, result: Result<Value, RpcError>) {
         let message = match result {
             Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
