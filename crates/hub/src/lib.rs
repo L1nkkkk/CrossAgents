@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod api;
+pub mod budget;
 pub mod collab;
 pub mod notices;
 pub mod paths;
@@ -135,9 +136,18 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         .context("cannot write hub.json")?;
 
     let shutdown = CancellationToken::new();
+    let budgets = Arc::new(
+        budget::Budgets::load(
+            store.as_ref() as &dyn crossagents_core::Store,
+            orchestrator.clone(),
+        )
+        .await?,
+    );
     Arc::new(notices::Notices {
         bus: bus.clone(),
         runtime: runtime.clone(),
+        orchestrator: orchestrator.clone(),
+        budgets,
     })
     .start(shutdown.clone());
     let state = Arc::new(api::AppState {

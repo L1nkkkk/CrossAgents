@@ -121,6 +121,13 @@ impl AgentHost for HubHost {
         .map(|_| ())
     }
 
+    async fn interrupt(&self, agent: AgentId) -> Result<(), CoreError> {
+        match self.runtime.cancel(&AgentKey::Id(agent)).await {
+            Err(CoreError::Conflict(_)) => Ok(()), // not running: nothing to stop
+            other => other,
+        }
+    }
+
     async fn withdraw(&self, agent: AgentId, message: MessageId) -> Result<(), CoreError> {
         self.runtime.withdraw(&AgentKey::Id(agent), message).await
     }

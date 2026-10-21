@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::policy::{PlanApproval, RunPolicy};
+
 use crate::error::CoreError;
 use crate::ids::{AgentId, RunId, TaskId};
 use crate::state::TaskStatus;
@@ -162,6 +164,8 @@ pub enum RunStatus {
     Planning,
     AwaitingApproval,
     Running,
+    /// Stopped for a person's decision (e.g. the budget ran out); resumes or is cancelled.
+    Paused,
     Completed,
     Failed,
     Cancelled,
@@ -174,7 +178,7 @@ impl RunStatus {
 }
 
 /// How a run is carried out. See docs/DESIGN.md §8.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct RunConfig {
     /// Template for worker agents: each task gets a fresh clone of it.
@@ -195,9 +199,17 @@ pub struct RunConfig {
     /// (reviewers), by specialty. Always includes `worker` and `reviewer`.
     #[serde(default)]
     pub team: Vec<AgentId>,
+    /// How much the run may do without a person (docs/tasks/H1.md §4).
+    #[serde(default)]
+    pub policy: RunPolicy,
 }
 
 impl RunConfig {
+    /// Whether the plan starts without a person's approval.
+    pub fn auto_approves(&self) -> bool {
+        self.auto_approve || self.policy.plan_approval == PlanApproval::Auto
+    }
+
     pub const DEFAULT_MAX_PARALLEL: u32 = 3;
     pub const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 }

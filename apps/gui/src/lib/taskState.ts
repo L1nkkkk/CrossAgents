@@ -60,6 +60,8 @@ export function runState(status: RunStatus): State {
       return s("○", "待审批", "warn", "needs_you");
     case "running":
       return s("●", "进行中", "accent", "active", true);
+    case "paused":
+      return s("○", "已暂停", "warn", "needs_you");
     case "completed":
       return s("✓", "已完成", "ok", "ended");
     case "failed":

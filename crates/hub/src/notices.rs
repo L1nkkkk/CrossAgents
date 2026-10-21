@@ -19,7 +19,12 @@ const TICK: Duration = Duration::from_secs(1);
 pub struct Notices {
     pub bus: Arc<EventBus>,
     pub runtime: Arc<Runtime>,
+    pub orchestrator: Arc<crossagents_orchestrator::Orchestrator>,
+    pub budgets: Arc<crate::budget::Budgets>,
 }
+
+/// Budgets are checked every this many ticks.
+const BUDGET_EVERY: u32 = 5;
 
 impl Notices {
     /// Starts the reminder clock and the watch matcher; both end with `shutdown`.
@@ -28,13 +33,23 @@ impl Notices {
         let stop = shutdown.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(TICK);
+            let mut ticks = 0u32;
             loop {
                 tokio::select! {
                     _ = tick.tick() => {}
                     _ = stop.cancelled() => break,
                 }
+                ticks = ticks.wrapping_add(1);
                 if let Err(err) = clock.fire_due().await {
                     tracing::warn!(error = %err, "cannot check reminders");
+                }
+                if let Err(err) = clock.orchestrator.expire_questions().await {
+                    tracing::warn!(error = %err, "cannot time out questions");
+                }
+                if ticks.is_multiple_of(BUDGET_EVERY)
+                    && let Err(err) = clock.budgets.check(clock.bus.store().as_ref()).await
+                {
+                    tracing::warn!(error = %err, "cannot check budgets");
                 }
             }
         });
@@ -48,6 +63,7 @@ impl Notices {
                 };
                 match received {
                     Ok(event) => {
+                        matcher.budgets.apply(&event).await;
                         if let Err(err) = matcher.on_event(&event).await {
                             tracing::warn!(error = %err, "cannot match watches");
                         }

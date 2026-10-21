@@ -22,6 +22,8 @@ pub trait AgentHost: Send + Sync {
         envelope: Envelope,
         now: bool,
     ) -> Result<(), CoreError>;
+    /// Stops the agent's running turn, if any.
+    async fn interrupt(&self, agent: AgentId) -> Result<(), CoreError>;
     /// Takes back a message that has not started yet.
     async fn withdraw(&self, agent: AgentId, message: MessageId) -> Result<(), CoreError>;
     /// Adds a line to the agent's notification digest (see `Runtime::notify`).

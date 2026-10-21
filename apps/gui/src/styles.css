@@ -792,3 +792,23 @@ button.small, .segmented.small button { font-size: 12px; padding: 3px 10px; }
 .quota-mini:hover { background: var(--hover); text-decoration: none; color: var(--text-2); }
 .quota-mini .quota-bar { width: 40px; height: 4px; box-shadow: none; }
 .peer-reply { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
+
+/* Delegation level on the start page (H1-2). */
+.preset-pick { display: flex; width: fit-content; gap: 2px; background: var(--surface-sunk); border-radius: var(--radius); padding: 2px; margin: 12px auto 0; }
+.preset-pick button { border: none; padding: 4px 14px; border-radius: 6px; color: var(--text-2); font-size: 13px; }
+.preset-pick button.on { background: var(--surface); color: var(--text); box-shadow: 0 0 0 1px var(--border); }
+
+/* Questions and notices for the person (H1-2). */
+.asks { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+.ask { background: var(--surface); border: 1px solid var(--border-strong); border-left: 3px solid var(--accent); border-radius: var(--radius-lg); padding: 10px 14px; display: flex; flex-direction: column; gap: 8px; }
+.ask.ask-notice { border-left-color: var(--border-strong); }
+.ask.defaulted { border-left-color: var(--warn); padding: 8px 14px; }
+.ask.urgent { border-left-color: var(--danger); }
+.ask-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ask-who { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; color: var(--text); }
+.ask-text { white-space: pre-wrap; font-size: 14px; }
+.ask-options { display: flex; gap: 6px; flex-wrap: wrap; }
+.ask-options button { padding: 4px 12px; }
+.ask-options button.default { border-color: var(--accent); }
+.ask-reply { display: flex; gap: 6px; }
+.ask-reply input { flex: 1; min-width: 0; }

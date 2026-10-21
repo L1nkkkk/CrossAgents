@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use crate::account::Account;
 use crate::error::CoreError;
 use crate::event::{Event, EventKind};
+use crate::human::HumanItem;
 use crate::ids::{AgentId, MessageId, RunId, TaskId};
 use crate::model::{Agent, AgentProfile, AgentStatus, Run, Task};
 use crate::notify::{Reminder, Watch};
@@ -147,6 +148,22 @@ pub trait Store: Send + Sync {
             kind: "watch",
             id: id.to_owned(),
         })
+    }
+    /// Inserts or replaces (by id) an item for the person.
+    async fn put_human_item(&self, item: &HumanItem) -> Result<(), CoreError> {
+        let _ = item;
+        Err(CoreError::Unsupported("human items".into()))
+    }
+    async fn get_human_item(&self, id: &str) -> Result<HumanItem, CoreError> {
+        Err(CoreError::NotFound {
+            kind: "question",
+            id: id.to_owned(),
+        })
+    }
+    /// Newest first; only open ones with `open_only`.
+    async fn list_human_items(&self, open_only: bool) -> Result<Vec<HumanItem>, CoreError> {
+        let _ = open_only;
+        Ok(Vec::new())
     }
     /// The thread and text of a message delivered earlier, if it is known.
     async fn find_message(

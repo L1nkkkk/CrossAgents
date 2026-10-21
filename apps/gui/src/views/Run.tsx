@@ -27,6 +27,7 @@ import {
 } from "../components";
 import { useHubData, type HubEvent } from "../hub";
 import { BUCKET_LABEL, groupTasks, progress, taskState } from "../lib/taskState";
+import { PRESETS, budgetText, presetOf } from "../lib/policy";
 import { StateWord, useArmed } from "../parts";
 
 function concerns(runId: string, e: HubEvent): boolean {
@@ -118,7 +119,10 @@ export function RunView({ runId, selectedTask }: { runId: string; selectedTask?:
               <CopyCommand command={`git merge ${run.branch}`} />
             </div>
           )}
-          {run.note && run.status !== "awaiting_approval" && <div className="item-error">{run.note}</div>}
+          {run.status === "paused" && (
+            <div className="item-warn">已暂停：{run.note ?? "等你决定"}。在「问你」里选择加预算继续，或取消这个 run。</div>
+          )}
+          {run.note && run.status !== "awaiting_approval" && run.status !== "paused" && <div className="item-error">{run.note}</div>}
 
           {tasks.length > 0 && (
             <section>
@@ -182,8 +186,22 @@ function RunMeta({ run, agents }: { run: Run; agents?: Parameters<typeof agentNa
         默认 {agentName(agents, run.config.worker)}
         {run.config.escalate && ` → 升级 ${agentName(agents, run.config.escalate)}`} · 并行 {run.config.max_parallel}
       </span>
+      <PolicyChip run={run} />
       <span title={time(run.created_at)}>{ago(run.created_at)}</span>
     </div>
+  );
+}
+
+/** "全托管 · 上限 $5 · 2 小时". */
+function PolicyChip({ run }: { run: Run }) {
+  const policy = run.config.policy;
+  const preset = PRESETS.find((p) => p.key === presetOf(policy));
+  const budget = budgetText(policy.budget);
+  return (
+    <span className="chip" title={preset?.hint}>
+      {preset?.label ?? "自定义托管"}
+      {budget && ` · 上限 ${budget}`}
+    </span>
   );
 }
 

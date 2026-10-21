@@ -3,7 +3,21 @@ import type { Agent } from "@bindings/Agent";
 import { api, errorText } from "../api";
 import { navigate, useRunTree } from "../App";
 import { Avatar, ErrorBox, Field, Icon, agentTitle, displayName, useAgents } from "../components";
+import { PRESETS, presetPolicy, type Preset } from "../lib/policy";
+import { QuestionCards } from "../questions";
 import { useSelectedWorkspace, useWorkspaces, wsHref, wsKey } from "../workspace";
+
+const PRESET_KEY = "crossagents.preset";
+
+function savedPreset(): Preset {
+  try {
+    const v = localStorage.getItem(PRESET_KEY);
+    if (v === "manual" || v === "semi" || v === "full") return v;
+  } catch {
+    // Storage may be unavailable; the default is fine.
+  }
+  return "manual";
+}
 
 /** Start page: say what you want, pick who plans, and who is on the team. */
 export function HomeView() {
@@ -21,7 +35,18 @@ export function HomeView() {
   const [reviewer, setReviewer] = useState("");
   const [benched, setBenched] = useState<string[]>([]);
   const [maxParallel, setMaxParallel] = useState("");
-  const [autoApprove, setAutoApprove] = useState(false);
+  const [preset, setPresetState] = useState<Preset>(savedPreset);
+  const [maxUsd, setMaxUsd] = useState("");
+  const [maxMinutes, setMaxMinutes] = useState("");
+  const [maxTokens, setMaxTokens] = useState("");
+  const setPreset = (p: Preset) => {
+    setPresetState(p);
+    try {
+      localStorage.setItem(PRESET_KEY, p);
+    } catch {
+      // Not remembered; fine.
+    }
+  };
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const ref = useRef<HTMLTextAreaElement>(null);
@@ -58,11 +83,19 @@ export function HomeView() {
         worker: workerAgent.name,
         escalate: escalate || null,
         reviewer: reviewer || null,
-        auto_approve: autoApprove,
+        auto_approve: false,
         max_parallel: maxParallel ? Number(maxParallel) : null,
         max_attempts: null,
         // Everyone in the repository is the hub's default; send a list only when trimmed.
         team: benched.length ? team.map((a) => a.name) : null,
+        policy: {
+          ...presetPolicy(preset),
+          budget: {
+            max_usd: maxUsd ? Number(maxUsd) : null,
+            max_minutes: maxMinutes ? Number(maxMinutes) : null,
+            max_tokens: maxTokens ? Math.round(Number(maxTokens) * 1000) : null,
+          },
+        },
       });
       navigate("runs", run.id);
     } catch (err) {
@@ -90,10 +123,11 @@ export function HomeView() {
                 在 <a href={wsHref(current.key)}>{current.name}</a> 里 ·{" "}
               </>
             ) : null}
-            Planner 拆计划、按专长派活，你批准后才开工。
+            Planner 拆计划、按专长派活；{PRESETS.find((p) => p.key === preset)!.hint}。
           </p>
         </div>
 
+        <QuestionCards agents={agents.data ?? []} />
         <div className="composer" style={{ maxWidth: "none" }}>
           <textarea
             ref={ref}
@@ -113,6 +147,14 @@ export function HomeView() {
               <Icon name="send" size={16} />
             </button>
           </div>
+        </div>
+
+        <div className="preset-pick" role="radiogroup" aria-label="托管程度">
+          {PRESETS.map((p) => (
+            <button key={p.key} type="button" role="radio" aria-checked={preset === p.key} className={preset === p.key ? "on" : ""} onClick={() => setPreset(p.key)} title={p.hint}>
+              {p.label}
+            </button>
+          ))}
         </div>
 
         {candidates.length > 0 && (
@@ -169,10 +211,20 @@ export function HomeView() {
                 <input type="number" min={1} value={maxParallel} onChange={(e) => setMaxParallel(e.target.value)} placeholder="3" />
               </Field>
             </div>
-            <label className="check">
-              <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} />
-              不等审批，直接开工
-            </label>
+            <div className="row" style={{ alignItems: "flex-start" }}>
+              <Field label="预算上限（美元）">
+                <input type="number" min={0} step="0.5" value={maxUsd} onChange={(e) => setMaxUsd(e.target.value)} placeholder="不限" />
+              </Field>
+              <Field label="时间上限（分钟）">
+                <input type="number" min={1} value={maxMinutes} onChange={(e) => setMaxMinutes(e.target.value)} placeholder="不限" />
+              </Field>
+              <Field label="Token 上限（千）">
+                <input type="number" min={1} value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} placeholder="不限" />
+              </Field>
+            </div>
+            <p className="muted small" style={{ margin: 0 }}>
+              用到 80% 时 Planner 会收到提醒；用完时 run 暂停，等你决定加预算还是取消。
+            </p>
           </div>
         </details>
         {error && (

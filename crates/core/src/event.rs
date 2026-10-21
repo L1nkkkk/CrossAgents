@@ -12,6 +12,7 @@ use crate::account::Account;
 use crate::driver::{
     OutputStream, PermissionDecision, RateLimits, StopReason, TokenUsage, ToolDetail, ToolStatus,
 };
+use crate::human::HumanItem;
 use crate::ids::{AgentId, MessageId, RunId, TaskId};
 use crate::model::{Agent, AgentStatus, CheckResult, Run, RunStatus};
 use crate::state::TaskStatus;
@@ -166,6 +167,23 @@ pub enum EventKind {
     /// The agent's vendor session id, for joining with the vendor's usage logs.
     #[serde(rename = "agent.session_started")]
     AgentSessionStarted { id: AgentId, session_id: String },
+    /// An agent asked the person something (`human_ask`) or told them something
+    /// (`human_notify`); also the hub's own questions (budget).
+    #[serde(rename = "human.asked")]
+    HumanAsked { item: HumanItem },
+    /// The person answered, or the default was taken (`item.status` says which).
+    #[serde(rename = "human.answered")]
+    HumanAnswered { item: HumanItem },
+    /// A notice was read, or a question dropped.
+    #[serde(rename = "human.dismissed")]
+    HumanDismissed { id: String },
+    /// A run used `percent` of a budget cap (`what`: tokens, usd or minutes).
+    #[serde(rename = "run.budget")]
+    RunBudget {
+        id: RunId,
+        what: String,
+        percent: u32,
+    },
     /// A reminder an agent set came due.
     #[serde(rename = "reminder.fired")]
     ReminderFired {
@@ -302,6 +320,10 @@ impl EventKind {
             Self::AgentInputWithdrawn { .. } => "agent.input_withdrawn",
             Self::AgentInputUpdated { .. } => "agent.input_updated",
             Self::ReminderFired { .. } => "reminder.fired",
+            Self::HumanAsked { .. } => "human.asked",
+            Self::HumanAnswered { .. } => "human.answered",
+            Self::HumanDismissed { .. } => "human.dismissed",
+            Self::RunBudget { .. } => "run.budget",
             Self::WatchTriggered { .. } => "watch.triggered",
             Self::AgentTurnStarted { .. } => "agent.turn_started",
             Self::AgentOutput { .. } => "agent.output",
@@ -334,7 +356,10 @@ impl EventKind {
     pub fn run_id(&self) -> Option<RunId> {
         match self {
             Self::RunCreated { run } => Some(run.id),
-            Self::RunStatusChanged { id, .. } | Self::RunPlanSubmitted { id, .. } => Some(*id),
+            Self::RunStatusChanged { id, .. }
+            | Self::RunPlanSubmitted { id, .. }
+            | Self::RunBudget { id, .. } => Some(*id),
+            Self::HumanAsked { item } | Self::HumanAnswered { item } => item.run_id,
             Self::TaskStatusChanged { run_id, .. } | Self::TaskChecked { run_id, .. } => {
                 Some(*run_id)
             }
@@ -354,10 +379,13 @@ impl EventKind {
             | Self::AccountCreated { .. }
             | Self::AccountRemoved { .. }
             | Self::AccountQuotaUpdated { .. }
+            | Self::HumanDismissed { .. }
+            | Self::RunBudget { .. }
             | Self::AccountLoginFinished { .. }
             | Self::AccountLoginPending { .. } => None,
             Self::AgentSessionStarted { id, .. } => Some(*id),
             Self::ReminderFired { owner, .. } | Self::WatchTriggered { owner, .. } => Some(*owner),
+            Self::HumanAsked { item } | Self::HumanAnswered { item } => Some(item.from),
             Self::TaskStatusChanged { assignee, .. } => *assignee,
             Self::AgentCreated { agent } | Self::AgentUpdated { agent } => Some(agent.id),
             Self::AgentRemoved { id, .. }

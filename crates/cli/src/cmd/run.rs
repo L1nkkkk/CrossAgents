@@ -93,6 +93,7 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
             max_parallel: start.max_parallel,
             max_attempts: start.max_attempts,
             team: (!start.team.is_empty()).then_some(start.team),
+            policy: None,
         };
         let run: Run = client.post("/v1/runs", &req).await?;
         if ctx.json {

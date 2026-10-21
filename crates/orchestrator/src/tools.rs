@@ -151,6 +151,33 @@ const TOOLS: &[ToolDef] = &[
         },
     },
     ToolDef {
+        name: "human_ask",
+        description: "Ask the person a question and end your turn; the answer arrives as a message. Give options (and a default) when you can: depending on the run's policy, an unanswered question falls back to its default after a while (you are told when that happens), or asking is not allowed and you must decide yourself.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({
+                    "text": { "type": "string" },
+                    "options": { "type": "array", "items": { "type": "string" } },
+                    "default": { "type": "string", "description": "Used if nobody answers in time; defaults to the first option." },
+                    "task": { "type": "string" }
+                }),
+                &["text"],
+            )
+        },
+    },
+    ToolDef {
+        name: "human_notify",
+        description: "Tell the person something that needs no answer: a milestone, a finished report, a risk.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({ "text": { "type": "string" }, "task": { "type": "string" } }),
+                &["text"],
+            )
+        },
+    },
+    ToolDef {
         name: "watch_list",
         description: "What you are watching.",
         groups: ALL,
@@ -339,6 +366,8 @@ impl Orchestrator {
             "watch" => self.watch_add(caller, input).await,
             "watch_list" => self.watch_list(caller).await,
             "watch_cancel" => self.watch_cancel(caller, input).await,
+            "human_ask" => self.human_ask(caller, input).await,
+            "human_notify" => self.human_notify(caller, input).await,
             "plan_submit" => {
                 #[derive(Deserialize)]
                 struct A {

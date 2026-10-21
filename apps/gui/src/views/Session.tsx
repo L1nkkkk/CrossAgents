@@ -13,6 +13,7 @@ import { taskState } from "../lib/taskState";
 import { duration, failed, liveActivity, stepLine, summarize, workGroups, type Step } from "../lib/workGroups";
 import { PeerMessage, StateWord, useArmed } from "../parts";
 import { useSession, type TranscriptItem, type TranscriptTurn } from "../session";
+import { QuestionCards } from "../questions";
 import { NeedsYouStrip, RunStrip } from "../strips";
 import { PlanTasks } from "./Run";
 
@@ -66,6 +67,7 @@ export function SessionView({ name, onClose }: { name: string; onClose?: () => v
       <Conversation agent={agent} turns={turns.filter(started)} agents={everyone} tree={runs} />
       <div className="dock">
         {/* One strip is enough: the pane beside leaves it to the main one. */}
+        {!onClose && <QuestionCards agents={everyone} />}
         {!onClose && <NeedsYouStrip agents={everyone} tree={runs} />}
         <RunStrip runs={liveRuns} agents={everyone} />
         <QueuePanel agent={agent} queued={queued} onEdit={setDraft} />
