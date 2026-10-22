@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { UsageGroup } from "@bindings/UsageGroup";
 import { api } from "../api";
+import { RankBars } from "../charts";
 import { ErrorBox } from "../components";
 import { useHubData } from "../hub";
 import { QuotaSection } from "./Quota";
@@ -42,6 +43,9 @@ export function UsageView() {
             </div>
             <ErrorBox error={usage.error} />
             {rows && !rows.length && <div className="empty">还没有用量记录。</div>}
+            {rows && rows.some((r) => r.cost_reported && r.cost_usd > 0) && (
+              <RankBars rows={rows.filter((r) => r.cost_reported).map((r) => ({ key: r.key, label: r.key, value: r.cost_usd }))} format={(n) => `$${n.toFixed(n >= 10 ? 1 : 2)}`} />
+            )}
             {rows && rows.length > 0 && (
               <table className="table">
                 <thead>

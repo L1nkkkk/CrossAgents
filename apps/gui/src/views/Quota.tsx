@@ -7,10 +7,12 @@ import type { AccountQuota } from "@bindings/AccountQuota";
 import type { AccountUsageGroup } from "@bindings/AccountUsageGroup";
 import type { RateWindow } from "@bindings/RateWindow";
 import type { ResetCredit } from "@bindings/ResetCredit";
+import type { TokenTotals } from "@bindings/TokenTotals";
 import { api, errorText } from "../api";
-import { ErrorBox, Field, VendorMark, ago, vendorName } from "../components";
+import { DayColumns, RankBars, compact, dailySeries } from "../charts";
+import { ErrorBox, Field, Icon, VendorMark, ago, vendorName } from "../components";
 import { useHubData } from "../hub";
-import { creditText, level, planLabel, resetText, windowLabel } from "../lib/quota";
+import { creditText, level, planLabel, resetText, windowLabel, type Level } from "../lib/quota";
 import { useArmed } from "../parts";
 
 /** Live figures are cached by the hub for a minute; re-read about as often. */
@@ -28,12 +30,14 @@ export function useQuota() {
 export function QuotaSection() {
   const quota = useQuota();
   const [adding, setAdding] = useState(false);
+  const [open, setOpen] = useState<string>();
   const accounts = quota.data?.accounts ?? [];
 
   return (
     <section className="settings-section">
       <div className="settings-head">
         <h2>订阅与额度</h2>
+        {accounts.length > 0 && <span className="chip">{accounts.length} 个账号</span>}
         <div className="spacer" />
         {!adding && (
           <button className="ghost" onClick={() => setAdding(true)}>
@@ -46,21 +50,44 @@ export function QuotaSection() {
       {quota.data && !accounts.length && !adding && (
         <p className="muted">还没有账号。登录过 Codex 的话，hub 启动时会自动把本机登录加进来；也可以手动添加。</p>
       )}
-      {accounts.map((a) => (
-        <AccountBlock key={a.account.id} quota={a} onChange={quota.reload} />
-      ))}
+      {accounts.length > 0 && (
+        <div className="accounts">
+          {accounts.map((a, i) => (
+            <AccountRow
+              key={a.account.id}
+              quota={a}
+              color={seriesColor(i)}
+              open={open === a.account.id}
+              onToggle={() => setOpen(open === a.account.id ? undefined : a.account.id)}
+              onChange={quota.reload}
+            />
+          ))}
+        </div>
+      )}
+      {accounts.length > 0 && <AllUsage accounts={accounts} />}
     </section>
   );
 }
 
-function AccountBlock({ quota, onChange }: { quota: AccountQuota; onChange: () => void }) {
+/** Account i's colour in every chart: categorical slot i, in list order. */
+const seriesColor = (i: number) => `var(--series-${(i % 8) + 1})`;
+
+const shortWindow = (w: RateWindow) => windowLabel(w).replace(/限额$/, "");
+
+/**
+ * One account on one line: who it is, a short meter per rate-limit window, its worst health,
+ * and its actions. Clicking the line opens the details (other limits, credits, token usage).
+ */
+function AccountRow({ quota, color, open, onToggle, onChange }: { quota: AccountQuota; color: string; open: boolean; onToggle: () => void; onChange: () => void }) {
   const { account, status } = quota;
   const [login, setLogin] = useState<{ url: string | null; command: string }>();
   const [error, setError] = useState<string>();
-  const [showUsage, setShowUsage] = useState(false);
   const remove = useArmed();
   const plan = planLabel(status.plan);
   const credits = status.credits;
+  const windows = status.rate_limits;
+  const levels = windows.map((w) => level(w.used_percent, status.limit_reached && w.used_percent >= 100));
+  const worst: Level | undefined = levels.includes("danger") ? "danger" : levels.includes("warn") ? "warn" : levels.length ? "ok" : undefined;
 
   async function startLogin() {
     setError(undefined);
@@ -72,27 +99,57 @@ function AccountBlock({ quota, onChange }: { quota: AccountQuota; onChange: () =
   }
 
   return (
-    <div className="account">
-      <div className="account-head">
-        <span className="provider">
-          <VendorMark plugin={account.provider} size={13} />
-          {vendorName(account.provider)}
-        </span>
-        <span className="account-name">{account.label || account.id}</span>
-        {plan && <span className="chip">{plan}</span>}
-        {status.email && <span className="muted small">{status.email}</span>}
-        <div className="spacer" />
-        {!status.logged_in && <span className="chip warn">未登录</span>}
-        <button className="ghost small" onClick={startLogin}>
-          {status.logged_in ? "重新登录" : "登录"}
+    <div className={`account-row ${open ? "open" : ""}`}>
+      <div className="account-line">
+        <button className="account-who" onClick={onToggle} aria-expanded={open} title={status.email ?? undefined}>
+          <span className="series-key" style={{ background: color }} />
+          <VendorMark plugin={account.provider} size={14} />
+          <span className="account-name">{account.label || account.id}</span>
+          {plan && <span className="chip">{plan}</span>}
         </button>
-        <button
-          className={`ghost small ${remove.armed ? "danger armed" : ""}`}
-          onClick={() => remove.click(() => api.deleteAccount(account.id).then(onChange, (err) => setError(errorText(err))))}
-          title="只是不再管理它；账号目录里的文件不会删除"
-        >
-          {remove.armed ? "再点一次移除" : "移除"}
-        </button>
+        <div className="account-meters">
+          {!status.logged_in ? (
+            <span className="chip warn">未登录</span>
+          ) : windows.length ? (
+            windows.map((w, i) => {
+              const pct = Math.max(0, Math.min(100, Math.round(w.used_percent)));
+              return (
+                <span key={w.name} className="meter" title={`${windowLabel(w)} · ${pct}% 已用${w.resets_at ? ` · ${resetText(w.resets_at)}` : ""}`}>
+                  <span className="meter-label">{shortWindow(w)}</span>
+                  <span className={`quota-bar ${levels[i]}`}>
+                    <span style={{ width: `${pct}%` }} />
+                  </span>
+                  <span className="meter-pct">{pct}%</span>
+                </span>
+              );
+            })
+          ) : (
+            <span className="muted small">暂无额度数据</span>
+          )}
+        </div>
+        {worst && (
+          <span className={`health ${worst}`}>
+            <span aria-hidden="true">{HEALTH[worst].glyph}</span>
+            {HEALTH[worst].label}
+          </span>
+        )}
+        <div className="account-actions">
+          <button className="ghost small" onClick={startLogin}>
+            {status.logged_in ? "重新登录" : "登录"}
+          </button>
+          <button
+            className={`ghost small danger ${remove.armed ? "armed" : ""}`}
+            onClick={() => remove.click(() => api.deleteAccount(account.id).then(onChange, (err) => setError(errorText(err))))}
+            title="只是不再管理它；账号目录里的文件不会删除"
+          >
+            {remove.armed ? "再点一次移除" : "移除"}
+          </button>
+          <button className="icon-btn" onClick={onToggle} aria-label={open ? "收起详情" : "展开详情"} title={open ? "收起详情" : "详情"}>
+            <span className={`disclose ${open ? "open" : ""}`}>
+              <Icon name="chevron" size={14} />
+            </span>
+          </button>
+        </div>
       </div>
 
       {login && (
@@ -111,61 +168,90 @@ function AccountBlock({ quota, onChange }: { quota: AccountQuota; onChange: () =
       )}
       <ErrorBox error={error} />
 
-      {status.rate_limits.length > 0 && (
-        <div className="quota">
-          <div className="quota-title">用量限额</div>
-          {status.rate_limits.map((w) => (
-            <WindowRow key={w.name} window={w} reached={status.limit_reached} />
+      {open && (
+        <div className="account-detail">
+          {windows.length > 0 && (
+            <div className="quota">
+              <div className="quota-title">用量限额{status.email ? ` · ${status.email}` : ""}</div>
+              {windows.map((w) => (
+                <WindowRow key={w.name} window={w} reached={status.limit_reached} />
+              ))}
+            </div>
+          )}
+          {/* Separate limits beyond the main one, e.g. one per model. */}
+          {status.limits.slice(1).map((group) => (
+            <div key={group.id} className="quota">
+              <div className="quota-title">
+                {group.name ?? group.model ?? group.id} 的限额
+                {group.model && group.name && <span className="muted"> · {group.model}</span>}
+              </div>
+              {group.windows.map((w) => (
+                <WindowRow key={w.name} window={w} reached={group.reached} />
+              ))}
+            </div>
           ))}
-        </div>
-      )}
-      {/* Separate limits beyond the main one, e.g. one per model. */}
-      {status.limits.slice(1).map((group) => (
-        <div key={group.id} className="quota">
-          <div className="quota-title">
-            {group.name ?? group.model ?? group.id} 的限额
-            {group.model && group.name && <span className="muted"> · {group.model}</span>}
-          </div>
-          {group.windows.map((w) => (
-            <WindowRow key={w.name} window={w} reached={group.reached} />
-          ))}
-        </div>
-      ))}
-      <ResetCredits credits={status.reset_credits} />
-      {credits && (credits.has_credits || credits.unlimited) && (
-        <div className="quota-row plain">
-          <div className="quota-label">
-            额外额度
-            <div className="quota-sub">限额用完后从这里扣</div>
-          </div>
-          <div className="quota-value">{credits.unlimited ? "不限" : `余额 ${creditText(credits.balance) ?? "—"}`}</div>
-        </div>
-      )}
-
-      <div className="account-foot">
-        <span>
-          {status.source === "live" ? "实时" : status.source === "snapshot" ? "来自本地会话记录" : "暂无额度数据"}
-          {status.as_of ? ` · ${ago(status.as_of)}更新` : ""}
-        </span>
-        {status.note && <span title={status.note}>· {status.note}</span>}
-        {quota.agents.length > 0 && <span>· 使用中：{quota.agents.map((n) => `@${n}`).join(" ")}</span>}
-        <div className="spacer" />
-        <button className="ghost small" onClick={() => setShowUsage(!showUsage)} aria-expanded={showUsage}>
-          Token 用量 {showUsage ? "▾" : "▸"}
-        </button>
-      </div>
-      {showUsage && <TokenUsage id={account.id} />}
-      {quota.models.length > 0 && showUsage && (
-        <div className="models">
-          可用模型：
-          {quota.models.map((m) => (
-            <span key={m.id} className="chip" title={m.description ?? undefined}>
-              {m.name || m.id}
-              {m.context_window ? ` · ${Math.round(m.context_window / 1000)}k` : ""}
+          <ResetCredits credits={status.reset_credits} />
+          {credits && (credits.has_credits || credits.unlimited) && (
+            <div className="quota-row plain">
+              <div className="quota-label">
+                额外额度
+                <div className="quota-sub">限额用完后从这里扣</div>
+              </div>
+              <div className="quota-value">{credits.unlimited ? "不限" : `余额 ${creditText(credits.balance) ?? "—"}`}</div>
+            </div>
+          )}
+          <TokenUsage id={account.id} />
+          {quota.models.length > 0 && (
+            <div className="models">
+              可用模型：
+              {quota.models.map((m) => (
+                <span key={m.id} className="chip" title={m.description ?? undefined}>
+                  {m.name || m.id}
+                  {m.context_window ? ` · ${Math.round(m.context_window / 1000)}k` : ""}
+                </span>
+              ))}
+            </div>
+          )}
+          <div className="account-foot">
+            <span>
+              {status.source === "live" ? "实时" : status.source === "snapshot" ? "来自本地会话记录" : "暂无额度数据"}
+              {status.as_of ? ` · ${ago(status.as_of)}更新` : ""}
             </span>
-          ))}
+            {status.note && <span title={status.note}>· {status.note}</span>}
+            {quota.agents.length > 0 && <span>· 使用中：{quota.agents.map((n) => `@${n}`).join(" ")}</span>}
+          </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Every account's tokens per day in one chart, stacked by account in the accounts' colours. */
+function AllUsage({ accounts }: { accounts: AccountQuota[] }) {
+  const [metric, setMetric] = useState<Metric>("output");
+  const ids = accounts.map((a) => a.account.id);
+  const usage = useHubData(() => Promise.all(ids.map((id) => api.accountUsage(id, "day"))), [ids.join(",")], (e) => e.type === "agent.usage");
+  const m = METRICS.find((x) => x.key === metric)!;
+  const series = accounts.map((a, i) => ({ key: a.account.id, label: `${vendorName(a.account.provider)} · ${a.account.label || a.account.id}`, color: seriesColor(i) }));
+  const data = usage.data ? dailySeries(usage.data.map((u) => u.rows.map((r) => ({ day: r.key, value: m.of(r.totals) })))) : [];
+  const total = usage.data?.reduce((s, u) => s + m.of(u.total), 0) ?? 0;
+  return (
+    <div className="all-usage">
+      <div className="token-usage-bar">
+        <h3>全部账号 · Token 用量</h3>
+        {usage.data && <span className="chip">{compact(total)}</span>}
+        <div className="spacer" />
+        <div className="segmented small" aria-label="图上显示">
+          {METRICS.map((x) => (
+            <button key={x.key} className={x.key === metric ? "active" : ""} onClick={() => setMetric(x.key)}>
+              {x.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <ErrorBox error={usage.error} />
+      {usage.data && !data.length && <p className="muted small">没有会话记录。</p>}
+      {data.length > 0 && <DayColumns data={data} series={series} format={(n) => n.toLocaleString()} label={`每天的${m.label}`} />}
     </div>
   );
 }
@@ -192,6 +278,13 @@ function ResetCredits({ credits }: { credits: ResetCredit[] }) {
   );
 }
 
+/** Quota health in words and a glyph, never colour alone. */
+const HEALTH = {
+  ok: { label: "充足", glyph: "✓" },
+  warn: { label: "偏紧", glyph: "!" },
+  danger: { label: "快用完", glyph: "✕" },
+} as const;
+
 function WindowRow({ window: w, reached }: { window: RateWindow; reached: boolean }) {
   const pct = Math.max(0, Math.min(100, Math.round(w.used_percent)));
   const tone = level(w.used_percent, reached && pct >= 100);
@@ -204,7 +297,13 @@ function WindowRow({ window: w, reached }: { window: RateWindow; reached: boolea
       <div className={`quota-bar ${tone}`} role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
         <span style={{ width: `${pct}%` }} />
       </div>
-      <div className="quota-value">{pct}% 已用</div>
+      <div className="quota-value">
+        <span className={`health ${tone}`}>
+          <span aria-hidden="true">{HEALTH[tone].glyph}</span>
+          {pct >= 100 ? "已用完" : HEALTH[tone].label}
+        </span>
+        {pct}% 已用
+      </div>
     </div>
   );
 }
@@ -216,24 +315,61 @@ const USAGE_GROUPS: { by: AccountUsageGroup; label: string }[] = [
   { by: "origin", label: "按来源" },
 ];
 
+type Metric = "input" | "output" | "reasoning" | "sessions";
+const METRICS: { key: Metric; label: string; of: (t: TokenTotals) => number }[] = [
+  { key: "output", label: "输出", of: (t) => t.output_tokens },
+  { key: "input", label: "输入", of: (t) => t.input_tokens },
+  { key: "reasoning", label: "推理", of: (t) => t.reasoning_output_tokens },
+  { key: "sessions", label: "会话", of: (t) => t.sessions },
+];
+
 /** Tokens this login spent, from the vendor's own session logs (also outside CrossAgents). */
 function TokenUsage({ id }: { id: string }) {
   const [by, setBy] = useState<AccountUsageGroup>("day");
+  const [metric, setMetric] = useState<Metric>("output");
+  const [table, setTable] = useState(false);
   const usage = useHubData(() => api.accountUsage(id, by), [id, by], (e) => e.type === "agent.usage");
   const rows = usage.data?.by === by ? usage.data.rows : undefined;
   const n = (x: number) => x.toLocaleString();
+  const m = METRICS.find((x) => x.key === metric)!;
   return (
     <div className="token-usage">
-      <div className="segmented small">
-        {USAGE_GROUPS.map((g) => (
-          <button key={g.by} className={g.by === by ? "active" : ""} onClick={() => setBy(g.by)}>
-            {g.label}
-          </button>
-        ))}
+      <div className="token-usage-bar">
+        <div className="segmented small">
+          {USAGE_GROUPS.map((g) => (
+            <button key={g.by} className={g.by === by ? "active" : ""} onClick={() => setBy(g.by)}>
+              {g.label}
+            </button>
+          ))}
+        </div>
+        <div className="spacer" />
+        <div className="segmented small" aria-label="图上显示">
+          {METRICS.map((x) => (
+            <button key={x.key} className={x.key === metric ? "active" : ""} onClick={() => setMetric(x.key)}>
+              {x.label}
+            </button>
+          ))}
+        </div>
       </div>
       <ErrorBox error={usage.error} />
       {rows && !rows.length && <p className="muted small">没有会话记录。</p>}
+      {rows && rows.length > 0 &&
+        (by === "day" ? (
+          <DayColumns
+            data={dailySeries([rows.map((r) => ({ day: r.key, value: m.of(r.totals) }))])}
+            series={[{ key: id, label: m.label, color: "var(--accent)" }]}
+            format={n}
+            label={`每天的${m.label}`}
+          />
+        ) : (
+          <RankBars rows={rows.map((r) => ({ key: r.key, label: r.key, value: m.of(r.totals) }))} format={compact} />
+        ))}
       {rows && rows.length > 0 && (
+        <button className="ghost small table-toggle" onClick={() => setTable(!table)} aria-expanded={table}>
+          {table ? "收起明细" : "查看明细"}
+        </button>
+      )}
+      {rows && rows.length > 0 && table && (
         <table className="table compact">
           <thead>
             <tr>

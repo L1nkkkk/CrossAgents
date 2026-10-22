@@ -982,3 +982,97 @@ a.button.small { font-size: 12.5px; padding: 4px 10px; background: var(--surface
 .side-nav .nav-new.active svg { color: var(--accent-text); }
 .row-lead { display: inline-grid; place-items: center; width: 18px; flex-shrink: 0; margin-right: 6px; }
 .group-name .ws-dot { margin-right: 5px; }
+
+/* Buttons that look like buttons: secondary ("ghost") actions get a soft fill and an edge
+   instead of bare text; icon-only ghosts stay bare. */
+button.ghost { border-color: var(--border); background: color-mix(in srgb, var(--text) 5%, transparent); color: var(--text); }
+button.ghost:hover:not(:disabled) { background: color-mix(in srgb, var(--text) 10%, transparent); }
+button.ghost.on { background: var(--accent-bg); border-color: color-mix(in srgb, var(--accent) 35%, transparent); color: var(--accent-text); }
+button.ghost.danger { color: var(--danger-text); }
+button.ghost.danger:hover:not(:disabled) { background: var(--danger-bg); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
+button.ghost.icon, .icon-btn { background: transparent; border-color: transparent; }
+.segmented button.active { background: var(--accent-bg); color: var(--accent-text); font-weight: 500; }
+
+/* Quota health: green while there is room, amber from 75%, red from 90%. The track is a light
+   step of the same colour, and a label with a glyph says it in words. */
+.quota-bar { height: 8px; border-radius: 4px; }
+.quota-bar span { border-radius: 4px; }
+.quota-bar.ok { background: color-mix(in srgb, var(--ok) 16%, transparent); }
+.quota-bar.ok span { background: var(--ok); }
+.quota-bar.warn { background: color-mix(in srgb, var(--warn) 18%, transparent); }
+.quota-bar.danger { background: color-mix(in srgb, var(--danger) 18%, transparent); }
+.quota-row { grid-template-columns: minmax(130px, 1fr) minmax(120px, 2fr) 150px; }
+.quota-value { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.health { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; font-weight: 500; border-radius: 999px; padding: 0 8px; line-height: 20px; }
+.health.ok { background: var(--ok-bg); color: var(--ok-text); }
+.health.warn { background: var(--warn-bg); color: var(--warn-text); }
+.health.danger { background: var(--danger-bg); color: var(--danger-text); }
+
+/* Charts (src/charts.tsx). */
+.token-usage-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.table-toggle { align-self: flex-start; }
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; overflow: visible; }
+.chart-grid { stroke: var(--border); stroke-width: 1; shape-rendering: crispEdges; }
+.chart-tick { fill: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.chart-bar { fill: var(--accent); transition: fill 0.1s; }
+.chart-tip {
+  position: absolute; top: 0; min-width: 140px; pointer-events: none; z-index: 5;
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow-float);
+  padding: 6px 10px; font-size: 12px;
+}
+.chart-tip-head { color: var(--muted); margin-bottom: 2px; font-variant-numeric: tabular-nums; }
+.chart-tip-row { display: flex; align-items: center; gap: 6px; color: var(--text-2); }
+.chart-tip-row b { margin-left: auto; color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.chart-key { width: 8px; height: 8px; border-radius: 2px; background: var(--accent); }
+.rank { display: flex; flex-direction: column; gap: 6px; }
+.rank-row { display: grid; grid-template-columns: minmax(90px, 180px) 1fr 64px; align-items: center; gap: 10px; font-size: 12.5px; }
+.rank-label { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rank-track { height: 12px; display: flex; }
+.rank-bar { display: block; height: 100%; min-width: 2px; background: var(--accent); border-radius: 0 4px 4px 0; }
+.rank-bar.other { background: var(--muted); }
+.rank-value { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* Categorical series colours (dataviz reference palette, validated for both modes). Assigned in
+   this order to entities that keep their slot (accounts in list order), never cycled. */
+:root {
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+  --series-5: #e87ba4; --series-6: #008300; --series-7: #6250d6; --series-8: #e34948;
+}
+:root[data-theme="dark"] {
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+  --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+}
+
+/* All accounts in one list (views/Quota.tsx): a line each, details open underneath. */
+.accounts { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
+.account-row + .account-row { border-top: 1px solid var(--border); }
+.account-line { display: grid; grid-template-columns: minmax(170px, 1.1fr) minmax(200px, 2fr) 76px auto; align-items: center; gap: 14px; padding: 10px 12px 10px 14px; }
+.account-row.open .account-line { background: color-mix(in srgb, var(--text) 3%, transparent); }
+.account-who { display: inline-flex; align-items: center; gap: 8px; min-width: 0; border: none; background: none; padding: 0; text-align: left; color: var(--text); }
+.account-who:hover:not(:disabled) { background: none; }
+.account-who .account-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.series-key { width: 4px; height: 18px; border-radius: 2px; flex-shrink: 0; }
+.account-meters { display: flex; gap: 16px; min-width: 0; flex-wrap: wrap; }
+.meter { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-2); }
+.meter .quota-bar { width: 72px; height: 6px; }
+.meter-label { color: var(--muted); white-space: nowrap; }
+.meter-pct { font-variant-numeric: tabular-nums; min-width: 32px; }
+.account-line .health { justify-self: start; }
+.account-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+.account-row > .notice, .account-row > .error { margin: 0 14px 10px; }
+.account-detail { padding: 6px 16px 14px; display: flex; flex-direction: column; gap: 14px; border-top: 1px dashed var(--border); }
+@media (max-width: 1100px) {
+  .account-line { grid-template-columns: 1fr auto; }
+  .account-meters { grid-column: 1 / -1; grid-row: 2; }
+  .account-line .health { grid-row: 1; grid-column: 2; justify-self: end; }
+  .account-actions { grid-column: 1 / -1; justify-content: flex-start; }
+}
+
+.all-usage { display: flex; flex-direction: column; gap: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px 16px; }
+.all-usage h3 { margin: 0; font-size: 13.5px; font-weight: 600; }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--text-2); margin-bottom: 6px; }
+.chart-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.chart-legend i { width: 10px; height: 10px; border-radius: 2px; }
+.chart g.on .chart-bar { filter: brightness(1.15); }
+.chart-tip-row.total { border-top: 1px solid var(--border); margin-top: 3px; padding-top: 3px; }
