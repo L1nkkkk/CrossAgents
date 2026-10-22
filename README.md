@@ -96,7 +96,8 @@ npm run electron:dev       # 开发（页面热重载）
 npm run electron:build     # 产出 release/win-unpacked/CrossAgents.exe（免安装，未签名）
 ```
 
-令牌只在 Electron 主进程里使用，不会进入页面。详见 [V2 任务书](docs/tasks/V2-GUI.md)（外壳与安全）和 [V3 任务书](docs/tasks/V3-GUI.md)（对话式界面）。
+令牌只在 Electron 主进程里使用，不会进入页面。详见 [V2 任务书](docs/tasks/V2-GUI.md)（外壳与安全）和 [V3 任务书](docs/tasks/V3-GUI.md)（对话式界面）；
+下一步见 [V6 任务书](docs/tasks/V6-GUI.md)（mock 预览、视觉层次、按轮 diff）。
 
 ## 账号管理
 

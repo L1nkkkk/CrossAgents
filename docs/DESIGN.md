@@ -366,7 +366,8 @@ hub 对外只有一套本地 API（HTTP + SSE，`/v1/`，本机令牌），CLI �
 - 排队：忙时到达的消息排在会话的收件箱里，可以撤回（`DELETE /v1/agents/{key}/messages/{message_id}`，事件 `agent.input_withdrawn`）；
   `POST .../messages` 带 `now: true` 时插到最前面并中断正在进行的一轮。
 - 状态统一写成「符号 + 一个词」，并归到 需要你 / 等待 / 进行中 / 已结束 四组（`apps/gui/src/lib/taskState.ts`）。
-- 技术与安全设定沿用 [V2 任务书](tasks/V2-GUI.md)（Electron + React，令牌只在主进程）；改版见 [V3](tasks/V3-GUI.md)、[V4](tasks/V4-GUI.md) 任务书。
+- 技术与安全设定沿用 [V2 任务书](tasks/V2-GUI.md)（Electron + React，令牌只在主进程）；改版见 [V3](tasks/V3-GUI.md)、[V4](tasks/V4-GUI.md)、[V5](tasks/V5-GUI.md) 任务书；
+  mock 预览、视觉层次、按轮 diff 与右侧工具列见 [V6](tasks/V6-GUI.md)。
 
 ### 11.2 CLI
 
