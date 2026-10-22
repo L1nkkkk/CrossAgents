@@ -1,0 +1,730 @@
+//! `claude-native`: drives Claude Code through its stream-json control protocol, the one the
+//! Agent SDK speaks (`claude -p --input-format stream-json --output-format stream-json`).
+//!
+//! One process per session. Sessions persist in Claude Code's own transcripts (under the
+//! account's `CLAUDE_CONFIG_DIR`), so a suspended session resumes by id in a new process,
+//! from any directory. We choose the session id (`--session-id`) and every user message's
+//! uuid, so turns can be named for forks without asking Claude Code. Protocol notes:
+//! docs/research/claude-stream-json.md.
+
+pub mod wire;
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+use crossagents_core::{
+    Capabilities, CoreError, Driver, DriverKind, DriverSession, PermissionHandler,
+    PermissionPolicy, SessionEvent, SessionEventKind, SessionSpec, StopReason, TurnOutcome,
+};
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::{mpsc, oneshot};
+
+use self::wire::{Launch, Start, Translator};
+use crate::process::{StderrTail, find_in_path, hide_console, system_proxy_env};
+
+/// `entrypoint` of the sessions CrossAgents starts, in Claude Code's transcripts.
+pub const ENTRYPOINT: &str = "crossagents";
+
+const INIT_TIMEOUT: Duration = Duration::from_secs(60);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// For interrupting and reading the quota after a turn.
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
+/// `get_usage` asks claude.ai; once a minute is plenty.
+const LIMITS_EVERY: Duration = Duration::from_secs(60);
+
+/// The `claude-native` driver for one Profile.
+pub struct ClaudeNativeDriver {
+    name: String,
+    command: Vec<String>,
+    models: Vec<String>,
+}
+
+impl ClaudeNativeDriver {
+    /// `command` launches Claude Code; empty means `claude` (on `PATH`, else the one the
+    /// Claude desktop app bundles). The stream-json arguments are added to it.
+    pub fn new(name: impl Into<String>, command: Vec<String>, models: Vec<String>) -> Self {
+        Self {
+            name: name.into(),
+            command: if command.is_empty() {
+                vec!["claude".into()]
+            } else {
+                command
+            },
+            models,
+        }
+    }
+
+    async fn start(&self, spec: SessionSpec, start: Start) -> Result<ClaudeSession, CoreError> {
+        let command = spec.command.clone().unwrap_or_else(|| self.command.clone());
+        ClaudeSession::spawn(command, launch_for(&spec), start, spec).await
+    }
+}
+
+fn launch_for(spec: &SessionSpec) -> Launch {
+    let config = &spec.agent.config;
+    let text = |key: &str| config.get(key).and_then(Value::as_str).map(str::to_owned);
+    let permission_mode = text("permission_mode");
+    Launch {
+        model: spec.agent.model.clone(),
+        effort: text("effort"),
+        // An explicit permission mode replaces the bypass.
+        bypass: spec.permission == PermissionPolicy::Bypass && permission_mode.is_none(),
+        permission_mode,
+        mcp_servers: spec.mcp_servers.clone(),
+        instructions: spec.instructions.clone(),
+        setting_sources: text("setting_sources")
+            .unwrap_or_else(|| wire::DEFAULT_SETTING_SOURCES.into()),
+    }
+}
+
+fn new_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+#[async_trait]
+impl Driver for ClaudeNativeDriver {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn kind(&self) -> DriverKind {
+        DriverKind::ClaudeNative
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            streaming: true,
+            interrupt: true,
+            mcp: true,
+            multi_session: false,
+            resume: true,
+            fork: true,
+            // `rewind_files` undoes files but the history rewind needs a new session id;
+            // not wired yet.
+            rollback: false,
+            revert_files: false,
+            set_model: true,
+            structured_diff: false,
+            usage: true,
+            rate_limits: true,
+            permission_callback: true,
+            compaction: true,
+        }
+    }
+
+    fn models(&self) -> Vec<String> {
+        self.models.clone()
+    }
+
+    async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError> {
+        Ok(Box::new(self.start(spec, Start::New(new_id())).await?))
+    }
+
+    async fn resume(
+        &self,
+        session_id: &str,
+        spec: SessionSpec,
+    ) -> Result<Box<dyn DriverSession>, CoreError> {
+        Ok(Box::new(
+            self.start(spec, Start::Resume(session_id.to_owned()))
+                .await?,
+        ))
+    }
+}
+
+/// What the reader task and the session share.
+struct Shared {
+    session_id: String,
+    stdin: tokio::sync::Mutex<Option<ChildStdin>>,
+    pending: Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>,
+    turn: Mutex<Turn>,
+    translator: Mutex<Translator>,
+    /// The last assistant message of each finished turn, by the turn's user message uuid:
+    /// where a fork "up to and including this turn" cuts.
+    turn_ends: Mutex<HashMap<String, String>>,
+    events: mpsc::UnboundedSender<SessionEvent>,
+    permission: PermissionPolicy,
+    permissions: Option<Arc<dyn PermissionHandler>>,
+    exited: AtomicBool,
+    /// We are stopping the process: its exit is not a failure.
+    closing: AtomicBool,
+}
+
+#[derive(Default)]
+struct Turn {
+    /// The running turn's user message uuid.
+    id: Option<String>,
+    waiter: Option<oneshot::Sender<StopReason>>,
+    interrupted: bool,
+    last_assistant: Option<String>,
+}
+
+impl Shared {
+    fn emit(&self, kind: SessionEventKind, raw: Option<&Value>) {
+        let _ = self.events.send(SessionEvent {
+            kind,
+            raw: raw.cloned(),
+        });
+    }
+
+    async fn write(&self, message: &Value) -> Result<(), CoreError> {
+        let mut stdin = self.stdin.lock().await;
+        let stdin = stdin
+            .as_mut()
+            .ok_or_else(|| CoreError::Agent("claude is not running".into()))?;
+        let mut line = message.to_string();
+        line.push('\n');
+        let result = async {
+            stdin.write_all(line.as_bytes()).await?;
+            stdin.flush().await
+        }
+        .await;
+        result.map_err(|e| CoreError::Agent(format!("cannot write to claude: {e}")))
+    }
+
+    async fn control(&self, request: Value, timeout: Duration) -> Result<Value, CoreError> {
+        let subtype = request["subtype"].as_str().unwrap_or("request").to_owned();
+        let id = new_id();
+        let (tx, rx) = oneshot::channel();
+        self.pending
+            .lock()
+            .expect("pending lock")
+            .insert(id.clone(), tx);
+        if let Err(err) = self.write(&wire::control_request(&id, request)).await {
+            self.pending.lock().expect("pending lock").remove(&id);
+            return Err(err);
+        }
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Ok(value))) => Ok(value),
+            Ok(Ok(Err(error))) => Err(CoreError::Agent(format!("{subtype}: {error}"))),
+            Ok(Err(_)) => Err(CoreError::Agent(format!("{subtype}: claude exited"))),
+            Err(_) => {
+                self.pending.lock().expect("pending lock").remove(&id);
+                Err(CoreError::Agent(format!("{subtype}: no answer")))
+            }
+        }
+    }
+
+    fn handle(self: &Arc<Self>, message: Value) {
+        match message.get("type").and_then(Value::as_str) {
+            Some("control_response") => {
+                if let Some((id, answer)) = wire::control_answer(&message)
+                    && let Some(tx) = self.pending.lock().expect("pending lock").remove(&id)
+                {
+                    let _ = tx.send(answer);
+                }
+            }
+            Some("control_request") => {
+                let this = self.clone();
+                tokio::spawn(async move { this.answer(message).await });
+            }
+            Some("result") => {
+                let mut turn = self.turn.lock().expect("turn lock");
+                let (stop, events) = self
+                    .translator
+                    .lock()
+                    .expect("translator lock")
+                    .turn_end(&message, turn.interrupted);
+                for kind in events {
+                    self.emit(kind, Some(&message));
+                }
+                if let (Some(id), Some(last)) = (turn.id.take(), turn.last_assistant.take()) {
+                    self.turn_ends
+                        .lock()
+                        .expect("turn_ends lock")
+                        .insert(id, last);
+                }
+                if let Some(waiter) = turn.waiter.take() {
+                    let _ = waiter.send(stop);
+                }
+                *turn = Turn::default();
+            }
+            Some(kind) => {
+                if kind == "assistant"
+                    && message.get("parent_tool_use_id").is_none_or(Value::is_null)
+                    && let Some(uuid) = message.get("uuid").and_then(Value::as_str)
+                {
+                    self.turn.lock().expect("turn lock").last_assistant = Some(uuid.to_owned());
+                }
+                let events = self
+                    .translator
+                    .lock()
+                    .expect("translator lock")
+                    .translate(&message);
+                for kind in events {
+                    self.emit(kind, Some(&message));
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Answers a request from Claude Code: permission asks go to the hub; nothing else is
+    /// offered (no SDK hooks, in-process MCP servers or forms).
+    async fn answer(&self, message: Value) {
+        let id = message
+            .get("request_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let request = message.get("request").cloned().unwrap_or(Value::Null);
+        if request.get("subtype").and_then(Value::as_str) != Some("can_use_tool") {
+            let _ = self
+                .write(&wire::control_error(&id, "not supported by CrossAgents"))
+                .await;
+            return;
+        }
+        let asked = wire::permission_request(&id, &request);
+        let decision = match &self.permissions {
+            Some(handler) => handler.decide(&asked).await,
+            None => self.permission.decide(),
+        };
+        let answer = wire::permission_response(decision, &request);
+        let _ = self.write(&wire::control_success(&id, answer)).await;
+        self.emit(
+            SessionEventKind::PermissionRequested {
+                request: asked,
+                decision,
+            },
+            Some(&message),
+        );
+    }
+
+    /// The process ended: wake everyone waiting on it.
+    fn ended(&self) -> bool {
+        self.exited.store(true, Ordering::SeqCst);
+        self.pending.lock().expect("pending lock").clear();
+        *self.turn.lock().expect("turn lock") = Turn::default();
+        !self.closing.load(Ordering::SeqCst)
+    }
+}
+
+async fn read(shared: Arc<Shared>, stdout: ChildStdout, tail: StderrTail) {
+    let mut lines = BufReader::new(stdout).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        match serde_json::from_str::<Value>(&line) {
+            Ok(message) => shared.handle(message),
+            Err(_) => tracing::debug!(target: "crossagents::agent_stdout", "{line}"),
+        }
+    }
+    if shared.ended() {
+        let message = tail.describe("claude exited").await;
+        shared.emit(SessionEventKind::Exited { message }, None);
+    }
+}
+
+/// A Claude Code session in its own `claude -p` process.
+pub struct ClaudeSession {
+    shared: Arc<Shared>,
+    child: tokio::sync::Mutex<Option<Child>>,
+    command: Vec<String>,
+    last_limits: Mutex<Option<Instant>>,
+}
+
+impl ClaudeSession {
+    async fn spawn(
+        command: Vec<String>,
+        launch: Launch,
+        start: Start,
+        spec: SessionSpec,
+    ) -> Result<Self, CoreError> {
+        let (program, extra) = command
+            .split_first()
+            .ok_or_else(|| CoreError::Agent("empty claude launch command".into()))?;
+        let program = locate_claude(program);
+        let mut child = Command::new(&program);
+        child
+            .args(extra)
+            .args(wire::args(&launch, &start))
+            // Claude Code works in its own working directory.
+            .current_dir(&spec.agent.cwd)
+            .env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "1")
+            // Names the sessions' origin in Claude Code's transcripts (usage by origin).
+            .env("CLAUDE_CODE_ENTRYPOINT", ENTRYPOINT)
+            .envs(system_proxy_env())
+            .envs(spec.env.iter().cloned())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        hide_console(&mut child);
+        let mut child = child
+            .spawn()
+            .map_err(|e| CoreError::Agent(format!("cannot start {}: {e}", program.display())))?;
+        let session_id = match &start {
+            Start::New(id) | Start::Resume(id) | Start::Fork { id, .. } => id.clone(),
+        };
+        let shared = Arc::new(Shared {
+            session_id: session_id.clone(),
+            stdin: tokio::sync::Mutex::new(child.stdin.take()),
+            pending: Mutex::default(),
+            turn: Mutex::default(),
+            translator: Mutex::default(),
+            turn_ends: Mutex::default(),
+            events: spec.events.clone(),
+            permission: spec.permission,
+            permissions: spec.permissions.clone(),
+            exited: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
+        });
+        let tail = StderrTail::spawn(child.stderr.take().expect("piped stderr"));
+        tokio::spawn(read(
+            shared.clone(),
+            child.stdout.take().expect("piped stdout"),
+            tail.clone(),
+        ));
+        if let Err(err) = shared
+            .control(json!({ "subtype": "initialize" }), INIT_TIMEOUT)
+            .await
+        {
+            shared.closing.store(true, Ordering::SeqCst);
+            let _ = child.start_kill();
+            return Err(CoreError::Agent(
+                tail.describe(&format!("claude did not start ({err})"))
+                    .await,
+            ));
+        }
+        shared.emit(SessionEventKind::Started { session_id }, None);
+        Ok(Self {
+            shared,
+            child: tokio::sync::Mutex::new(Some(child)),
+            command,
+            last_limits: Mutex::new(None),
+        })
+    }
+
+    fn check_open(&self) -> Result<(), CoreError> {
+        if self.shared.closing.load(Ordering::SeqCst) {
+            return Err(CoreError::Conflict(format!(
+                "session {} is closed",
+                self.shared.session_id
+            )));
+        }
+        if self.shared.exited.load(Ordering::SeqCst) {
+            return Err(CoreError::Agent("claude exited".into()));
+        }
+        Ok(())
+    }
+
+    fn turn_running(&self) -> bool {
+        self.shared.turn.lock().expect("turn lock").waiter.is_some()
+    }
+
+    async fn close(&self) {
+        self.shared.closing.store(true, Ordering::SeqCst);
+        // Closing stdin lets Claude Code finish writing its transcript.
+        self.shared.stdin.lock().await.take();
+        if let Some(mut child) = self.child.lock().await.take()
+            && tokio::time::timeout(CLEANUP_TIMEOUT, child.wait())
+                .await
+                .is_err()
+        {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+    }
+
+    /// Reads every limit and the plan, at most once a minute. Best effort.
+    async fn refresh_limits(&self) {
+        {
+            let mut last = self.last_limits.lock().expect("limits lock");
+            if last.is_some_and(|at| at.elapsed() < LIMITS_EVERY) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+        let request = json!({ "subtype": "get_usage", "skip_behaviors": true });
+        if let Ok(usage) = self.shared.control(request, CLEANUP_TIMEOUT).await
+            && let Some(limits) = wire::usage_limits(&usage)
+        {
+            self.shared
+                .emit(SessionEventKind::RateLimits { limits }, Some(&usage));
+        }
+    }
+}
+
+#[async_trait]
+impl DriverSession for ClaudeSession {
+    fn session_id(&self) -> &str {
+        &self.shared.session_id
+    }
+
+    async fn prompt(&self, text: &str) -> Result<TurnOutcome, CoreError> {
+        self.check_open()?;
+        let uuid = new_id();
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut turn = self.shared.turn.lock().expect("turn lock");
+            if turn.waiter.is_some() {
+                return Err(CoreError::Conflict("a turn is already running".into()));
+            }
+            *turn = Turn {
+                id: Some(uuid.clone()),
+                waiter: Some(tx),
+                ..Turn::default()
+            };
+        }
+        self.shared.emit(
+            SessionEventKind::TurnStarted {
+                turn_id: Some(uuid.clone()),
+            },
+            None,
+        );
+        let message = wire::user_message(&self.shared.session_id, &uuid, text);
+        if let Err(err) = self.shared.write(&message).await {
+            *self.shared.turn.lock().expect("turn lock") = Turn::default();
+            return Err(err);
+        }
+        let stop_reason = rx.await.map_err(|_| {
+            CoreError::Agent(
+                "the turn ended without a result (session closed or claude exited)".into(),
+            )
+        })?;
+        self.refresh_limits().await;
+        Ok(TurnOutcome {
+            stop_reason,
+            turn_id: Some(uuid),
+        })
+    }
+
+    async fn interrupt(&self) -> Result<(), CoreError> {
+        {
+            let mut turn = self.shared.turn.lock().expect("turn lock");
+            if turn.waiter.is_none() {
+                return Ok(());
+            }
+            turn.interrupted = true;
+        }
+        match self
+            .shared
+            .control(json!({ "subtype": "interrupt" }), CLEANUP_TIMEOUT)
+            .await
+        {
+            // The turn may have ended meanwhile, or the process is gone.
+            Ok(_) | Err(_) => Ok(()),
+        }
+    }
+
+    async fn suspend(&self) -> Result<(), CoreError> {
+        if self.turn_running() {
+            return Err(CoreError::Conflict(
+                "cannot suspend while a turn runs".into(),
+            ));
+        }
+        self.close().await;
+        Ok(())
+    }
+
+    async fn fork(
+        &self,
+        at_turn: Option<&str>,
+        spec: SessionSpec,
+    ) -> Result<Box<dyn DriverSession>, CoreError> {
+        let at = match at_turn {
+            None => None,
+            Some(turn) => Some(
+                self.shared
+                    .turn_ends
+                    .lock()
+                    .expect("turn_ends lock")
+                    .get(turn)
+                    .cloned()
+                    // Turns are known only from this process's own output.
+                    .ok_or_else(|| CoreError::NotFound {
+                        kind: "turn",
+                        id: turn.to_owned(),
+                    })?,
+            ),
+        };
+        let start = Start::Fork {
+            from: self.shared.session_id.clone(),
+            id: new_id(),
+            at,
+        };
+        let command = spec.command.clone().unwrap_or_else(|| self.command.clone());
+        let session = ClaudeSession::spawn(command, launch_for(&spec), start, spec).await?;
+        Ok(Box::new(session))
+    }
+
+    async fn set_model(&self, model: Option<&str>, effort: Option<&str>) -> Result<(), CoreError> {
+        self.check_open()?;
+        if let Some(model) = model {
+            self.shared
+                .control(
+                    json!({ "subtype": "set_model", "model": model }),
+                    REQUEST_TIMEOUT,
+                )
+                .await?;
+        }
+        if let Some(effort) = effort {
+            self.shared
+                .control(
+                    json!({ "subtype": "apply_flag_settings", "settings": { "effortLevel": effort } }),
+                    REQUEST_TIMEOUT,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn compact(&self) -> Result<(), CoreError> {
+        match self.prompt("/compact").await?.stop_reason {
+            StopReason::Error => Err(CoreError::Agent("compaction failed".into())),
+            _ => Ok(()),
+        }
+    }
+
+    async fn shutdown(&self) {
+        let _ = self.interrupt().await;
+        self.close().await;
+    }
+}
+
+impl Drop for ClaudeSession {
+    fn drop(&mut self) {
+        self.shared.closing.store(true, Ordering::SeqCst);
+    }
+}
+
+/// The `claude` to run: as given when it is a path; else from `PATH`; else Claude Code's
+/// native install (`~/.local/bin`), else the newest one the Claude desktop app keeps.
+pub fn locate_claude(program: &str) -> PathBuf {
+    let found = find_in_path(program);
+    if found.components().count() > 1 || program != "claude" {
+        return found;
+    }
+    let exe = if cfg!(windows) {
+        "claude.exe"
+    } else {
+        "claude"
+    };
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
+    if let Some(native) = home
+        .map(|h| PathBuf::from(h).join(".local").join("bin").join(exe))
+        .filter(|p| p.is_file())
+    {
+        return native;
+    }
+    bundled_claude().unwrap_or(found)
+}
+
+/// `%LOCALAPPDATA%\Claude-Data\<app>\claude-code\<version>\<build>\claude.exe`, the newest.
+fn bundled_claude() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let data = PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Claude-Data");
+    let children = |dir: PathBuf| -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .map(|entries| entries.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default()
+    };
+    children(data)
+        .into_iter()
+        .flat_map(|app| children(app.join("claude-code")))
+        .flat_map(children)
+        .map(|build| build.join("claude.exe"))
+        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
+        .max()
+        .map(|(_, p)| p)
+}
+
+/// `claude auth status` for a config directory (`env` carries its `CLAUDE_CONFIG_DIR`):
+/// logged in or not, how, the email and the plan. `None` when `claude` cannot run.
+pub async fn auth_status(program: &str, env: &[(String, String)]) -> Option<Value> {
+    let program = locate_claude(program);
+    let mut command = Command::new(&program);
+    command
+        .args(["auth", "status"])
+        .envs(system_proxy_env())
+        .envs(env.iter().cloned())
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    hide_console(&mut command);
+    let output = tokio::time::timeout(CLEANUP_TIMEOUT, command.output())
+        .await
+        .ok()?
+        .ok()?;
+    serde_json::from_slice(&output.stdout).ok()
+}
+
+/// Asks Claude Code about an account without starting a session: the `initialize` answer
+/// (account, models) and `get_usage` (plan and limits).
+pub async fn probe_account(
+    program: &str,
+    env: &[(String, String)],
+) -> Result<(Value, Value), CoreError> {
+    let program = locate_claude(program);
+    let mut command = Command::new(&program);
+    command
+        .args([
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--strict-mcp-config",
+            "--setting-sources",
+            wire::DEFAULT_SETTING_SOURCES,
+        ])
+        .envs(system_proxy_env())
+        .envs(env.iter().cloned())
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    hide_console(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|e| CoreError::Agent(format!("cannot start {}: {e}", program.display())))?;
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let ask = async {
+        for (id, request) in [
+            ("init", json!({ "subtype": "initialize" })),
+            (
+                "usage",
+                json!({ "subtype": "get_usage", "skip_behaviors": true }),
+            ),
+        ] {
+            let mut line = wire::control_request(id, request).to_string();
+            line.push('\n');
+            stdin.write_all(line.as_bytes()).await?;
+        }
+        stdin.flush().await?;
+        let mut lines = BufReader::new(stdout).lines();
+        let (mut init, mut usage) = (None, None);
+        while let Some(line) = lines.next_line().await? {
+            let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            match wire::control_answer(&message) {
+                Some((id, answer)) if id == "init" => init = Some(answer),
+                Some((id, answer)) if id == "usage" => usage = Some(answer),
+                _ => {}
+            }
+            if let (Some(init), Some(usage)) = (&init, &usage) {
+                return Ok::<_, std::io::Error>((init.clone(), usage.clone()));
+            }
+        }
+        Err(std::io::Error::other("claude exited before answering"))
+    };
+    let answers = tokio::time::timeout(INIT_TIMEOUT, ask).await;
+    let _ = child.start_kill();
+    match answers {
+        Ok(Ok((Ok(init), Ok(usage)))) => Ok((init, usage)),
+        Ok(Ok((Err(e), _) | (_, Err(e)))) => Err(CoreError::Agent(e)),
+        Ok(Err(e)) => Err(CoreError::Agent(e.to_string())),
+        Err(_) => Err(CoreError::Agent("claude did not answer".into())),
+    }
+}

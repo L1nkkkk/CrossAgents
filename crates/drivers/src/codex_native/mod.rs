@@ -26,7 +26,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use self::wire::{ThreadSettings, TurnEnd, method};
 use crate::jsonrpc::{RpcError, RpcHandler, RpcPeer};
-use crate::process::{StderrTail, hide_console};
+use crate::process::{StderrTail, find_in_path, hide_console};
 
 const INIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Control requests answer quickly; turns are awaited separately.
@@ -807,34 +807,6 @@ fn bundled_codex() -> Option<PathBuf> {
         .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
         .max()
         .map(|(_, p)| p)
-}
-
-fn find_in_path(program: &str) -> PathBuf {
-    let path = PathBuf::from(program);
-    if path.components().count() > 1 {
-        return path;
-    }
-    let Some(dirs) = std::env::var_os("PATH") else {
-        return path;
-    };
-    let exts: &[&str] = if cfg!(windows) {
-        &["exe", "cmd", "bat"]
-    } else {
-        &[""]
-    };
-    for dir in std::env::split_paths(&dirs) {
-        for ext in exts {
-            let candidate = if ext.is_empty() {
-                dir.join(program)
-            } else {
-                dir.join(program).with_extension(ext)
-            };
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-    }
-    path
 }
 
 fn native_behind_shim(found: &Path) -> Option<PathBuf> {

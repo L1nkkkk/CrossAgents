@@ -61,7 +61,7 @@ Planner 通过 hub 提供的工具开出若干便宜模型的会话（Worker）�
 ┌───────────────────────────────▼────────────────────────────────────┐
 │ 驱动                                                                │
 │   codex-native   → codex app-server（JSON-RPC over stdio，一进程多线程）│
-│   claude-native  → Claude Agent SDK 侧车 / claude stream-json         │
+│   claude-native  → claude -p stream-json 控制协议（一进程一会话）     │
 │   acp-generic    → 任意 ACP agent（Gemini CLI、with-cli、Goose …）     │
 │   每个会话 = 一个 Worker / Planner，各自的 cwd 与 MCP 列表            │
 └────────────────────────────────────────────────────────────────────┘
@@ -392,7 +392,7 @@ crossagents events [--follow] | usage [--by ...]
 沿用 v1：`core`、`api-types`、`store-sqlite`、`plugins`、`hub`、`cli`、`mock-agent`；`apps/gui`。变化：
 
 - `core`：新增 `Driver` trait、能力表、统一会话事件。
-- `drivers`：拆为 `codex_native`（已完成，见 [N1](tasks/N1.md)）、`claude_native`、`acp`（即 `acp-generic`，以后改为一进程多会话）三个模块；`claude_native` 直接说 stream-json 控制协议，不需要侧车。
+- `drivers`：拆为 `codex_native`（已完成，见 [N1](tasks/N1.md)）、`claude_native`（已完成，见 [N3](tasks/N3.md)）、`acp`（即 `acp-generic`，以后改为一进程多会话）三个模块；`claude_native` 直接说 stream-json 控制协议，不需要侧车。
 - `orchestrator`：固定 Pipeline 改为工具驱动的编排 + 停止条件。
 - `mock-agent`：同时模拟 ACP 与 Codex app-server 两种协议，供测试使用。
 
