@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::account::{Credits, RateWindow};
+use crate::account::{Credits, LimitGroup, RateWindow, ResetCredit};
 use crate::error::CoreError;
 use crate::model::Agent;
 
@@ -297,6 +297,13 @@ pub struct RateLimits {
     pub plan: Option<String>,
     /// Why the account is blocked, if it is (vendor wording).
     pub reached: Option<String>,
+    /// The separate limits this report covers (a full read lists every one; a per-call
+    /// update only the one in use).
+    #[serde(default)]
+    pub by_limit: Vec<LimitGroup>,
+    /// Reset credits, when the report includes them (full reads do).
+    #[serde(default)]
+    pub reset_credits: Option<Vec<ResetCredit>>,
 }
 
 /// Something that happened inside a session, in the hub's own terms.

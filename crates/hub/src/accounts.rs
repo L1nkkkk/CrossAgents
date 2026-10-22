@@ -107,8 +107,28 @@ impl Accounts {
         let agent = self.store().get_agent(&AgentKey::Id(agent)).await.ok()?;
         let id = self.account_for(&agent).await?;
         let mut observed = self.observed.lock().unwrap();
-        let changed = observed.get(&id).is_none_or(|(_, old)| old != limits);
-        observed.insert(id.clone(), (Utc::now(), limits.clone()));
+        // A per-call update names only the limit in use: merge it into what a full read
+        // reported, by limit id; reset credits stay until a read brings new ones.
+        let merged = match observed.get(&id) {
+            Some((_, old)) => {
+                let mut merged = limits.clone();
+                let mut groups = old.by_limit.clone();
+                for group in &limits.by_limit {
+                    match groups.iter_mut().find(|g| g.id == group.id) {
+                        Some(slot) => *slot = group.clone(),
+                        None => groups.push(group.clone()),
+                    }
+                }
+                merged.by_limit = groups;
+                if merged.reset_credits.is_none() {
+                    merged.reset_credits = old.reset_credits.clone();
+                }
+                merged
+            }
+            None => limits.clone(),
+        };
+        let changed = observed.get(&id).is_none_or(|(_, old)| *old != merged);
+        observed.insert(id.clone(), (Utc::now(), merged));
         changed.then_some(id)
     }
 
@@ -186,6 +206,8 @@ impl Accounts {
                 status.plan = limits.plan;
             }
             status.limit_reached = limits.reached.is_some();
+            status.limits = limits.by_limit;
+            status.reset_credits = limits.reset_credits.unwrap_or_default();
             status.source = Some(DataSource::Live);
             status.as_of = Some(at);
             status.note = None;

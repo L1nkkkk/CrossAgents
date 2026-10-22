@@ -397,6 +397,8 @@ impl AccountProvider for CodexAccounts {
             rate_limits: Vec::new(),
             limit_reached: false,
             credits: None,
+            limits: Vec::new(),
+            reset_credits: Vec::new(),
             source: None,
             as_of: None,
             note: None,

@@ -604,6 +604,7 @@ impl DriverSession for CodexSession {
                 "the turn ended without a result (session closed or app-server exited)".into(),
             )
         })?;
+        self.refresh_limits().await;
         Ok(TurnOutcome {
             stop_reason: wire::stop_reason(&end.status),
             turn_id: Some(end.turn_id),
@@ -716,6 +717,18 @@ impl DriverSession for CodexSession {
 }
 
 impl CodexSession {
+    /// Reads every limit and the reset credits (per-call updates carry only the limit in
+    /// use) and reports them. Best effort: an older Codex without the call is fine.
+    async fn refresh_limits(&self) {
+        let request = self.server.request(method::RATE_LIMITS_READ, json!({}));
+        if let Ok(Ok(result)) = tokio::time::timeout(CLEANUP_TIMEOUT, request).await
+            && let Some(limits) = wire::rate_limits_read(&result)
+        {
+            self.sink
+                .emit(SessionEventKind::RateLimits { limits }, Some(&result));
+        }
+    }
+
     /// The settings the thread was opened with (cwd, sandbox, approvals, MCP servers).
     pub fn settings(&self) -> &ThreadSettings {
         &self.settings

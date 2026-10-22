@@ -48,6 +48,34 @@ pub struct RateWindow {
     pub resets_at: Option<DateTime<Utc>>,
 }
 
+/// One of an account's separate limits, e.g. the general Codex limit and one for a
+/// particular model, each with its own windows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct LimitGroup {
+    /// The vendor's id, e.g. `codex`.
+    pub id: String,
+    /// The vendor's name for it, when it has one.
+    pub name: Option<String>,
+    /// The model it applies to, when it is model-specific.
+    pub model: Option<String>,
+    pub windows: Vec<RateWindow>,
+    /// The vendor says this limit is used up.
+    pub reached: bool,
+}
+
+/// A credit that resets the limits once (Codex grants these, e.g. monthly).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ResetCredit {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+    /// `available`, or the vendor's word for used / expired.
+    pub status: String,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Credits {
@@ -72,6 +100,13 @@ pub struct AccountStatus {
     pub rate_limits: Vec<RateWindow>,
     pub limit_reached: bool,
     pub credits: Option<Credits>,
+    /// Every separate limit with its windows (when the vendor has several, e.g. one per
+    /// model); `rate_limits` is the main one.
+    #[serde(default)]
+    pub limits: Vec<LimitGroup>,
+    /// Credits that reset the limits once.
+    #[serde(default)]
+    pub reset_credits: Vec<ResetCredit>,
     /// Where the quota figures came from, and when.
     pub source: Option<DataSource>,
     pub as_of: Option<DateTime<Utc>>,

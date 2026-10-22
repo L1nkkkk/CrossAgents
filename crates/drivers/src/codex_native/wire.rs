@@ -8,8 +8,9 @@ use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use crossagents_core::{
-    Credits, FileChange, McpServerSpec, OutputStream, PermissionDecision, PermissionRequest,
-    RateLimits, RateWindow, SessionEventKind, StopReason, TokenUsage, ToolDetail, ToolStatus,
+    Credits, FileChange, LimitGroup, McpServerSpec, OutputStream, PermissionDecision,
+    PermissionRequest, RateLimits, RateWindow, ResetCredit, SessionEventKind, StopReason,
+    TokenUsage, ToolDetail, ToolStatus,
 };
 use serde_json::{Map, Value, json};
 
@@ -38,6 +39,7 @@ pub mod method {
     pub const REASONING_TEXT_DELTA: &str = "item/reasoning/textDelta";
     pub const TOKEN_USAGE: &str = "thread/tokenUsage/updated";
     pub const RATE_LIMITS: &str = "account/rateLimits/updated";
+    pub const RATE_LIMITS_READ: &str = "account/rateLimits/read";
     pub const COMMAND_OUTPUT_DELTA: &str = "item/commandExecution/outputDelta";
     pub const ERROR: &str = "error";
     pub const WARNING: &str = "warning";
@@ -477,8 +479,8 @@ pub fn error_message(error: &Value) -> String {
         .unwrap_or_else(|| raw.to_owned())
 }
 
-fn rate_limits(snapshot: &Value) -> RateLimits {
-    let windows = ["primary", "secondary"]
+fn windows_of(snapshot: &Value) -> Vec<RateWindow> {
+    ["primary", "secondary"]
         .into_iter()
         .filter_map(|name| {
             let w = snapshot.get(name).filter(|w| w.is_object())?;
@@ -495,7 +497,25 @@ fn rate_limits(snapshot: &Value) -> RateLimits {
                     .and_then(|s| DateTime::<Utc>::from_timestamp(s, 0)),
             })
         })
-        .collect();
+        .collect()
+}
+
+/// One limit of a snapshot: its id, name, model and windows.
+fn limit_group(snapshot: &Value) -> LimitGroup {
+    let text = |key: &str| snapshot.get(key).and_then(Value::as_str).map(str::to_owned);
+    LimitGroup {
+        id: text("limitId").unwrap_or_else(|| "default".into()),
+        name: text("limitName"),
+        model: text("normalModelSlug"),
+        windows: windows_of(snapshot),
+        reached: text("rateLimitReachedType").is_some()
+            || snapshot.get("spendControlReached").and_then(Value::as_bool) == Some(true),
+    }
+}
+
+/// The per-call quota update (`account/rateLimits/updated`): the limit in use.
+fn rate_limits(snapshot: &Value) -> RateLimits {
+    let windows = windows_of(snapshot);
     let credits = snapshot
         .get("credits")
         .filter(|c| c.is_object())
@@ -513,7 +533,60 @@ fn rate_limits(snapshot: &Value) -> RateLimits {
         credits,
         plan: text("planType"),
         reached: text("rateLimitReachedType"),
+        by_limit: vec![limit_group(snapshot)],
+        reset_credits: None,
     }
+}
+
+/// A full read (`account/rateLimits/read`): every limit, and the reset credits.
+pub fn rate_limits_read(result: &Value) -> Option<RateLimits> {
+    let main = result.get("rateLimits").filter(|v| v.is_object())?;
+    let mut limits = rate_limits(main);
+    if let Some(by_id) = result.get("rateLimitsByLimitId").and_then(Value::as_object) {
+        limits.by_limit = by_id.values().map(limit_group).collect();
+        // The main limit first, the rest by id.
+        let main_id = main
+            .get("limitId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        limits
+            .by_limit
+            .sort_by_key(|g| (g.id != main_id, g.id.clone()));
+    }
+    let credits = result
+        .pointer("/rateLimitResetCredits/credits")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|c| {
+                    Some(ResetCredit {
+                        id: c.get("id")?.as_str()?.to_owned(),
+                        title: c
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or("reset")
+                            .to_owned(),
+                        description: c
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        status: c
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("available")
+                            .to_owned(),
+                        expires_at: c
+                            .get("expiresAt")
+                            .and_then(Value::as_i64)
+                            .and_then(|s| DateTime::<Utc>::from_timestamp(s, 0)),
+                    })
+                })
+                .collect()
+        });
+    limits.reset_credits = Some(credits.unwrap_or_default());
+    Some(limits)
 }
 
 /// The request as the hub sees it, or `None` for requests that are not permission asks.
@@ -917,5 +990,44 @@ mod tests {
             ),
             ("read-only".into(), "untrusted".into())
         );
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    #[test]
+    fn full_reads_list_every_limit_and_the_reset_credits() {
+        // As codex-cli 0.163 answers account/rateLimits/read, with a second, model-specific limit.
+        let window = |used: u32| json!({ "usedPercent": used, "windowDurationMins": 300, "resetsAt": 1795131666 });
+        let limit = |id: &str, name: Value, model: Value, used| {
+            json!({ "limitId": id, "limitName": name, "normalModelSlug": model,
+                    "primary": window(used), "secondary": null, "planType": "plus",
+                    "rateLimitReachedType": null, "spendControlReached": false })
+        };
+        let result = json!({
+            "rateLimits": limit("codex", Value::Null, Value::Null, 8),
+            "rateLimitsByLimitId": {
+                "zz-luna": limit("zz-luna", json!("GPT-6-Luna"), json!("gpt-6-luna"), 40),
+                "codex": limit("codex", Value::Null, Value::Null, 8)
+            },
+            "rateLimitResetCredits": { "availableCount": 1, "credits": [
+                { "id": "R1", "title": "Full reset (Monthly)", "status": "available", "expiresAt": 1792700868 }
+            ]}
+        });
+        let limits = rate_limits_read(&result).unwrap();
+        let ids: Vec<&str> = limits.by_limit.iter().map(|g| g.id.as_str()).collect();
+        assert_eq!(ids, ["codex", "zz-luna"], "the main limit first");
+        assert_eq!(limits.by_limit[1].model.as_deref(), Some("gpt-6-luna"));
+        assert_eq!(limits.by_limit[1].windows[0].used_percent, 40.0);
+        let credits = limits.reset_credits.unwrap();
+        assert_eq!(credits.len(), 1);
+        assert_eq!(credits[0].title, "Full reset (Monthly)");
+        assert!(credits[0].expires_at.is_some());
+        // A per-call update carries only the limit in use, and no credits.
+        let update = rate_limits(&limit("codex", Value::Null, Value::Null, 9));
+        assert_eq!(update.by_limit.len(), 1);
+        assert!(update.reset_credits.is_none());
     }
 }
