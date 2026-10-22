@@ -49,7 +49,23 @@
 - [ ] 空闲线程是否会被服务端自动卸载，确认后更新挂起策略
 - [ ] 每个线程的 MCP 子进程开销统计，超过阈值时提示
 
-## 七、远期
+## 七、多模态输入
+
+现状：`SendMessageRequest` 只有 `text` 字段（`bindings/SendMessageRequest.ts`），driver 层也没有附件类型，发不了图片和文件。
+
+- [ ] 消息结构从纯文本改为内容块（text / image / file），`SendMessageRequest` 增加 `attachments`，重新生成 ts-rs 绑定
+- [ ] 附件落盘到 hub 数据目录，按会话归档并记录 sha256，不把 base64 直接存进 SQLite
+- [ ] 大小与类型限制：单文件上限、类型白名单，超限时 GUI 和 CLI 同时报错
+- [ ] GUI：拖拽、粘贴截图、选择文件；输入框显示缩略图，发送前可删除
+- [ ] `claude-native`：映射到 stream-json 的图片内容块，实测图片与文件的支持范围
+- [ ] `codex-native`：映射到 app-server 的图片输入，实测后确认字段
+- [ ] `acp-generic`：读取 agent 声明的 prompt 能力，未声明图片则不允许发图
+- [ ] 按能力降级：驱动不支持的附件类型，GUI 禁用入口并说明原因，不静默丢弃
+- [ ] 历史展示：时间线渲染图片和文件卡片，transcript 导出时包含附件引用
+- [ ] 跨 agent 转发：Worker 之间传附件时明确是复制还是引用，避免路径跨工作目录失效
+- [ ] 安全：附件路径不能让 agent 读到工作目录之外的文件，除非用户显式选择
+
+## 八、远期
 
 - [ ] 多主机：每台机器一个 hub，GUI 同时连多个 hub（以本地守护为前提）
 - [ ] 远程 hub 经 SSH 端口转发接入
