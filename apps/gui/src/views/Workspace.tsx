@@ -1,6 +1,6 @@
 import type { RunDetail } from "@bindings/RunDetail";
 import { ACTIVE_RUN } from "../App";
-import { Avatar, CopyCommand, Icon, Mark, StatusChip, agentTitle, agentTone, ago, displayName, runTone, sessionHref, taskTone } from "../components";
+import { Avatar, CopyCommand, Icon, Mark, StatusChip, Vendor, agentTitle, agentTone, ago, displayName, runTone, sessionHref, taskTone } from "../components";
 import { selectWorkspace, useWorkspaces, type Workspace } from "../workspace";
 
 export function WorkspaceView({ wsKey }: { wsKey: string }) {
@@ -88,8 +88,7 @@ function Overview({ ws }: { ws: Workspace }) {
                         {displayName(a)} <span className="muted small">{agentTitle(a)}</span>
                       </div>
                       <div className="sub">
-                        @{a.name} · {a.role} · {a.plugin}
-                        {a.model ? ` · ${a.model}` : ""}
+                        @{a.name} · {a.role} · <Vendor plugin={a.plugin} model={a.model} />
                       </div>
                     </div>
                     <StatusChip status={a.status} tone={agentTone(a.status)} />

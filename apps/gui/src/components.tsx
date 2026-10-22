@@ -270,6 +270,55 @@ function colorOf(agent: Agent): string {
   return AVATAR_COLORS[h % AVATAR_COLORS.length];
 }
 
+type Vendor = "claude" | "codex" | "other";
+
+/** Which vendor runs a plugin (or account provider). */
+export function vendorOf(plugin: string): Vendor {
+  const p = plugin.toLowerCase();
+  if (p.startsWith("claude")) return "claude";
+  if (p.startsWith("codex")) return "codex";
+  return "other";
+}
+
+/** "Claude", "Codex", or the plugin's own name. */
+export function vendorName(plugin: string): string {
+  const v = vendorOf(plugin);
+  return v === "claude" ? "Claude" : v === "codex" ? "Codex" : plugin;
+}
+
+/** The vendor's mark: a clay asterisk for Claude, an ink prompt for Codex, a ring otherwise. */
+export function VendorMark({ plugin, size = 12 }: { plugin: string; size?: number }) {
+  const vendor = vendorOf(plugin);
+  return (
+    <svg className={`vendor-mark ${vendor}`} width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
+      {vendor === "claude" && (
+        <g stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          {[0, 30, 60, 90, 120, 150].map((a) => (
+            <line key={a} x1="8" y1="1.6" x2="8" y2="14.4" transform={`rotate(${a} 8 8)`} />
+          ))}
+        </g>
+      )}
+      {vendor === "codex" && (
+        <g fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="1.5" y="1.5" width="13" height="13" rx="3.5" />
+          <path d="M5 6l2.2 2L5 10M8.8 10.5h2.4" />
+        </g>
+      )}
+      {vendor === "other" && <circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.5" />}
+    </svg>
+  );
+}
+
+/** Who runs an agent: the vendor's mark, then the model (or the vendor's name). */
+export function Vendor({ plugin, model, title }: { plugin: string; model?: string | null; title?: string }) {
+  return (
+    <span className="vendor" title={title ?? `${vendorName(plugin)}${model ? " · " + model : ""}`}>
+      <VendorMark plugin={plugin} />
+      <span className="model">{model || vendorName(plugin)}</span>
+    </span>
+  );
+}
+
 /** What people call the agent: its display name, else its address. */
 export const displayName = (agent: Agent) => agent.profile?.display_name || agent.name;
 
@@ -312,7 +361,7 @@ export const PERSONA_PRESETS: {
     label: "架构师",
     role: "planner",
     title: "架构师",
-    avatar: "🧭",
+    avatar: "",
     color: "indigo",
     persona:
       "You design before anyone codes. Read the codebase, find the smallest change that does the job, and split it into tasks with precise specs, clear file scopes and acceptance commands. Prefer boring, proven solutions.",
@@ -322,7 +371,7 @@ export const PERSONA_PRESETS: {
     label: "Coder",
     role: "worker",
     title: "Coder",
-    avatar: "⌨️",
+    avatar: "",
     color: "sky",
     persona:
       "You implement exactly what the spec asks, in the style of the surrounding code. Stay inside the allowed files, run the acceptance commands before reporting, and ask instead of guessing when the spec is unclear.",
@@ -332,7 +381,7 @@ export const PERSONA_PRESETS: {
     label: "设计师",
     role: "worker",
     title: "设计师",
-    avatar: "🎨",
+    avatar: "",
     color: "rose",
     persona:
       "You own the UI: layout, spacing, typography, colour and states (empty, loading, error). Keep to the existing design tokens, make every screen work in light and dark mode, and explain visual choices briefly.",
@@ -342,7 +391,7 @@ export const PERSONA_PRESETS: {
     label: "安全审核专员",
     role: "reviewer",
     title: "安全审核专员",
-    avatar: "🛡️",
+    avatar: "",
     color: "amber",
     persona:
       "You review diffs for security: injection, auth and permission checks, secrets in code or logs, unsafe deserialization, path traversal, and risky dependencies. Point to the exact line, explain the attack, and suggest the fix. Do not nitpick style.",
@@ -352,7 +401,7 @@ export const PERSONA_PRESETS: {
     label: "测试工程师",
     role: "worker",
     title: "测试工程师",
-    avatar: "🧪",
+    avatar: "",
     color: "emerald",
     persona:
       "You write tests that pin down behaviour: the happy path, edge cases and the failure modes the spec mentions. Tests must be deterministic and fast; never weaken an assertion to make it pass.",
@@ -362,7 +411,7 @@ export const PERSONA_PRESETS: {
     label: "文档写手",
     role: "worker",
     title: "文档写手",
-    avatar: "✍️",
+    avatar: "",
     color: "violet",
     persona: "You write docs people can follow: short sentences, real commands, and examples that run. Update docs in the same change as the code they describe.",
   },

@@ -7,7 +7,7 @@ import type { RunDetail } from "@bindings/RunDetail";
 import { useActivity, useUnread } from "./activity";
 import { api } from "./api";
 import { ACTIVE_RUN, runAgents } from "./App";
-import { Avatar, BrandMark, Icon, Mark, ago, agentTitle, displayName, runTone, sessionHref, taskTone } from "./components";
+import { Avatar, BrandMark, Icon, Mark, VendorMark, ago, agentTitle, displayName, runTone, sessionHref, taskTone, vendorName } from "./components";
 import { useConnectionStatus } from "./hub";
 import { level, tightest, windowLabel } from "./lib/quota";
 import { openBeside } from "./panes";
@@ -243,7 +243,12 @@ function SessionLink({ agent, active }: { agent: Agent; active: boolean }) {
       </span>
     );
   else if (unread) tail = <span className="tail-done">完成</span>;
-  else tail = <span className="meta">{agent.profile?.title || agent.model || agent.plugin}</span>;
+  else
+    tail = (
+      <span className="meta">
+        <VendorMark plugin={agent.plugin} size={10} /> {agent.profile?.title || agent.model || vendorName(agent.plugin)}
+      </span>
+    );
 
   return (
     <div className="nav-row">

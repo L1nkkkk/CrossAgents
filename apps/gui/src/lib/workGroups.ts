@@ -111,15 +111,30 @@ export function liveActivity(items: TranscriptItem[]): string {
   }
 }
 
-/** A tool step as one short line: `$ cmd`, `✎ file`, else its title. */
-export function stepLine(step: Extract<TranscriptItem, { type: "tool_call" }>): string {
+/** `text` with the working directory left out of the paths in it: `C:\w\src\a.rs` → `src\a.rs`,
+ * and the directory itself as `.`. */
+export function relativeTo(text: string, cwd?: string): string {
+  const dir = cwd?.replace(/[\\/]+$/, "");
+  if (!dir) return text;
+  // Either slash, any case on Windows paths; then a separator, or the end of the path.
+  const pattern = dir
+    .split(/[\\/]/)
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("[\\\\/]");
+  const flags = /^[a-z]:/i.test(dir) ? "gi" : "g";
+  return text.replace(new RegExp(`${pattern}(?:[\\\\/]|(?=["'\\s]|$))`, flags), (m) => (/[\\/]$/.test(m) ? "" : "."));
+}
+
+/** A tool step as one short line: `$ cmd`, `✎ file`, else its title; paths inside `cwd` are shortened. */
+export function stepLine(step: Extract<TranscriptItem, { type: "tool_call" }>, cwd?: string): string {
+  const title = relativeTo(step.title, cwd);
   switch (category(step)) {
     case "command":
-      return `$ ${step.title}`;
+      return `$ ${title}`;
     case "edit":
-      return `✎ ${step.title.replace(/^Edit /, "")}`;
+      return `✎ ${title.replace(/^(Edit|Write) /, "")}`;
     default:
-      return step.title;
+      return title;
   }
 }
 
