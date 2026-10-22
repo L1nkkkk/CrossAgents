@@ -4,12 +4,14 @@ import type { RunDetail } from "@bindings/RunDetail";
 import { api } from "./api";
 
 import { useHubData } from "./hub";
-import { closeBeside, setRatio, usePanes } from "./panes";
+import { closeBeside, closeTools, focusedOf, setRatio, useLayout, usePanes } from "./panes";
 import { Sidebar } from "./Sidebar";
+import { ToolColumn } from "./ToolColumn";
 import { AgentsView } from "./views/Agents";
 import { HomeView } from "./views/Home";
-import { RunView, TaskDrawer } from "./views/Run";
+import { RunView } from "./views/Run";
 import { SessionView } from "./views/Session";
+import { SettingsView } from "./views/Settings";
 import { UsageView } from "./views/Usage";
 import { WorkspaceView } from "./views/Workspace";
 
@@ -97,6 +99,7 @@ function Sessions({ primary }: { primary: string }) {
 export function App() {
   const route = useRoute();
   const [section, a, b, c] = route;
+  const { state, focus } = useLayout();
 
   // Ctrl+N (Cmd+N): new run, as the sidebar button advertises.
   useEffect(() => {
@@ -115,10 +118,21 @@ export function App() {
   switch (section) {
     case "runs":
       main = a ? <RunView runId={a} selectedTask={b === "tasks" ? c : undefined} /> : <HomeView />;
-      if (a && b === "tasks" && c) drawer = <TaskDrawer runId={a} taskId={c} onClose={() => navigate("runs", a)} />;
+      if (a && b === "tasks" && c)
+        drawer = (
+          <ToolColumn
+            task={{ run: a, task: c }}
+            onClose={() => {
+              closeTools();
+              navigate("runs", a);
+            }}
+          />
+        );
+      else if (a && state.tools.open) drawer = <ToolColumn onClose={closeTools} />;
       break;
     case "s":
       main = a ? <Sessions primary={a} /> : <HomeView />;
+      if (a && state.tools.open) drawer = <ToolColumn follow={focusedOf(a, state.beside, focus)} onClose={closeTools} />;
       break;
     case "w":
       main = a ? <WorkspaceView key={a} wsKey={a} /> : <HomeView />;
@@ -128,6 +142,9 @@ export function App() {
       break;
     case "usage":
       main = <UsageView />;
+      break;
+    case "settings":
+      main = <SettingsView />;
       break;
     default:
       main = <HomeView />;

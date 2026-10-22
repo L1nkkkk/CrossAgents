@@ -134,3 +134,21 @@ GUI 侧：
 - `useRunTree` / `useAgents` 合成一个共享存储（V4 §8 遗留），mock 模式做完后更容易改。
 - 终端窗格：PTY 放 hub 进程里、关面板只断开、再开回放（拆解 §4）。
 - 多主机、设备权限、内置浏览器、插件沙箱（拆解 §8）。
+
+## 11. 实现记录（2026-10-22）
+
+和本书原文的出入，以这里为准：
+
+- mock 数据按视图放在 `views/*.mock.ts`（views 现在是单文件，不拆目录）；共用实体在 `dev/fixtures.ts`，场景在 `dev/scenarios.ts`，桥在 `dev/MockBridge.ts`。
+  `main.tsx` 在 `__MOCK__`（vite `define`，只有 `--mode mock` 为真）分支里动态 import `dev/mock`，其余构建整个分支被删掉；`api.ts` 的 `bridge` 改成 `getBridge()` 惰性读取，好让 mock 先装上。
+  窄窗口场景是把应用放进 900px 的 iframe（`?narrow=1`），这样媒体查询看到的是真窄。
+- `agent.turn_diff` 加了两个可选字段：`message_id`（所属轮次）和 `source`（`driver` / `hub`）。没有单独建 `turn_diffs` 表：
+  diff 全文已经在事件里，transcript 折叠时只算 stat（`TurnDiffStat`），`GET /v1/agents/{key}/turns/{message_id}/diff` 再折叠一遍取全文。
+  驱动没有 `structured_diff` 时，hub 在每轮前后各写一个 git tree（用私有 index，不碰 agent 的 index 和 refs，尊重 `.gitignore`），两棵树的 diff 就是这一轮的改动；
+  这比 `git status --porcelain` 准：轮前已有的未提交改动不算进这一轮。只读轮次不发事件。
+- `TranscriptTurn.diff` 从 diff 文本改成 `TurnDiffStat`（不兼容的类型变化，GUI 已同步）。
+- 右侧工具列在会话页由会话顶栏的按钮开关；任务路由（`#/runs/<id>/tasks/<task>`）总在第一个窗格显示任务。并排两栏时窗格跟最后点击的那栏。
+- 设置页 `#/settings`（侧栏底部齿轮）放主题。
+- i18n 测试会扫 `Sidebar.tsx`、`Home.tsx`、`strips.tsx` 里所有 `t("…")` 的 key，字典缺一个就失败。
+- 截图在 `docs/screens/v6/`。真 Codex 的 Planner + Worker 全流程还没有跑（需要账号），留到合并前手动验收。
+- `crates/mock-agent/tests/cli.rs` 的 `full_run_with_a_directory_plugin` 在本机 HEAD 上就失败（run 停在 running、任务 passed 后 Planner 不接手），与 V6 无关，另查。

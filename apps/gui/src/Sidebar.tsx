@@ -9,7 +9,9 @@ import { api } from "./api";
 import { ACTIVE_RUN, runAgents } from "./App";
 import { Avatar, BrandMark, Icon, Mark, VendorMark, ago, agentTitle, displayName, runTone, sessionHref, taskTone, vendorName } from "./components";
 import { useConnectionStatus } from "./hub";
+import { t } from "./lib/i18n";
 import { level, tightest, windowLabel } from "./lib/quota";
+import { day } from "./lib/time";
 import { openBeside } from "./panes";
 import { useQuota } from "./views/Quota";
 import { liveRuns, selectWorkspace, useSelectedWorkspace, useWorkspaces, wsHref, type Workspace } from "./workspace";
@@ -44,64 +46,68 @@ export function Sidebar({ route }: { route: string[] }) {
       </div>
 
       <label className="search">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-          <circle cx="11" cy="11" r="7" />
-          <path d="m20 20-3.5-3.5" />
-        </svg>
-        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search" aria-label="搜索 run、会话和队友" />
+        <Icon name="search" size={14} />
+        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t("sidebar.search")} aria-label={t("sidebar.searchLabel")} />
         {query && (
-          <button className="icon-btn" onClick={() => setQuery("")} aria-label="清除">
+          <button className="icon-btn" onClick={() => setQuery("")} aria-label={t("common.clear")}>
             <Icon name="close" size={12} />
           </button>
         )}
       </label>
 
       <a className={`new-run ${!section ? "active" : ""}`} href="#/">
-        <Icon name="plus" size={14} />
-        <span>新建 run</span>
+        <Icon name="plus" size={16} />
+        <span>{t("sidebar.newRun")}</span>
         <kbd>Ctrl N</kbd>
       </a>
 
       <div className="scroll">
-        {active.length > 0 && <Label text="进行中" count={active.length} />}
+        {active.length > 0 && <Label text={t("sidebar.live")} count={active.length} />}
         {active.map((d) => (
           <RunGroup key={d.run.id} detail={d} agents={everyone} selected={isRun(d)} isSession={isSession} />
         ))}
 
-        {standalone.length > 0 && <Label text="Sessions" count={standalone.length} />}
+        {standalone.length > 0 && <Label text={t("sidebar.sessions")} count={standalone.length} />}
         <Capped items={standalone} keep={isSession} searching={!!q}>
           {(agent) => <SessionLink key={agent.id} agent={agent} active={isSession(agent)} />}
         </Capped>
 
-        {ended.length > 0 && <Label text="最近" count={ended.length} />}
+        {ended.length > 0 && <Label text={t("sidebar.recent")} count={ended.length} />}
         <Capped items={ended} keep={isRun} searching={!!q}>
           {(d, i, shown) => (
             <div key={d.run.id}>
-              {(i === 0 || dayOf(shown[i - 1].run.updated_at) !== dayOf(d.run.updated_at)) && (
-                <div className="day-label">{dayOf(d.run.updated_at)}</div>
+              {(i === 0 || day(shown[i - 1].run.updated_at) !== day(d.run.updated_at)) && (
+                <div className="day-label">{day(d.run.updated_at)}</div>
               )}
               <HistoryItem detail={d} agents={everyone} selected={isRun(d)} isSession={isSession} />
             </div>
           )}
         </Capped>
 
-        {q && !runs.length && !standalone.length && <p className="sidebar-empty">没有匹配「{query}」的 run、会话或队友。</p>}
+        {q && !runs.length && !standalone.length && <p className="sidebar-empty">{t("sidebar.noMatch", { query })}</p>}
         {!q && tree.data && agents.data && !runs.length && !pool.length && (
-          <p className="sidebar-empty">
-            {current ? `${current.name} 里还没有 run 和会话。` : "还没有 run 和会话。"}先到「团队」添加一个 Planner 和一个 Worker。
-          </p>
+          <div className="sidebar-empty">
+            <p>{current ? t("sidebar.emptyIn", { name: current.name }) : t("sidebar.empty")}</p>
+            <a className="button small" href="#/agents">
+              <Icon name="addMate" size={14} />
+              {t("sidebar.addMate")}
+            </a>
+          </div>
         )}
       </div>
 
       <div className="foot">
         <div className="foot-nav">
           <a className={section === "agents" ? "active" : ""} href="#/agents">
-            <Icon name="cpu" size={15} />
-            团队
+            <Icon name="team" size={15} />
+            {t("nav.team")}
           </a>
           <a className={section === "usage" ? "active" : ""} href="#/usage">
             <Icon name="chart" size={15} />
-            用量
+            {t("nav.usage")}
+          </a>
+          <a className={section === "settings" ? "active" : ""} href="#/settings" title={t("nav.settings")} aria-label={t("nav.settings")}>
+            <Icon name="settings" size={15} />
           </a>
         </div>
         <QuotaMini />
@@ -145,12 +151,12 @@ function Capped<T>({
       {shown.map((item, i) => children(item, i, shown))}
       {hidden > 0 && (
         <button className="more" onClick={() => setAll(true)}>
-          更多 ({hidden})
+          {t("common.more", { n: hidden })}
         </button>
       )}
       {all && items.length > CAP && !searching && (
         <button className="more" onClick={() => setAll(false)}>
-          收起
+          {t("common.less")}
         </button>
       )}
     </div>
@@ -180,15 +186,15 @@ function RunGroup({
         <span className="run-main">
           <span className="name">{run.title}</span>
           {tasks.length > 0 && (
-            <span className="segments" aria-label={`${merged}/${tasks.length} merged`}>
-              {tasks.map((t) => (
-                <span key={t.id} className={`seg ${taskTone(t.status).color} ${taskTone(t.status).live ? "live" : ""}`} title={`${t.key} · ${t.status}`} />
+            <span className="segments" aria-label={t("sidebar.merged", { merged, total: tasks.length })}>
+              {tasks.map((task) => (
+                <span key={task.id} className={`seg ${taskTone(task.status).color} ${taskTone(task.status).live ? "live" : ""}`} title={`${task.key} · ${task.status}`} />
               ))}
             </span>
           )}
         </span>
         {run.status === "awaiting_approval" ? (
-          <span className="flag">待审批</span>
+          <span className="flag">{t("state.awaitingApproval")}</span>
         ) : tasks.length > 0 ? (
           <span className="meta">
             {merged}/{tasks.length}
@@ -234,15 +240,15 @@ function SessionLink({ agent, active }: { agent: Agent; active: boolean }) {
   };
 
   let tail: ReactNode;
-  if (agent.status === "error" || unread?.kind === "error") tail = <span className="pill danger">出错</span>;
-  else if (planWaiting) tail = <span className="pill warn">待审批</span>;
+  if (agent.status === "error" || unread?.kind === "error") tail = <span className="pill danger">{t("state.error")}</span>;
+  else if (planWaiting) tail = <span className="pill warn">{t("state.awaitingApproval")}</span>;
   else if (running)
     tail = (
       <span className="working-tag">
-        <span className="spark">✻</span> working
+        <span className="spark">✻</span> {t("sidebar.working")}
       </span>
     );
-  else if (unread) tail = <span className="tail-done">完成</span>;
+  else if (unread) tail = <span className="tail-done">{t("state.done")}</span>;
   else
     tail = (
       <span className="meta">
@@ -255,7 +261,7 @@ function SessionLink({ agent, active }: { agent: Agent; active: boolean }) {
       <a
         className={`nav-item ${active ? "active" : ""} ${agent.status === "stopped" ? "dim" : ""} ${running && doing ? "two" : ""}`}
         href={sessionHref(agent.name)}
-        title={`${displayName(agent)} · ${agentTitle(agent)} · ${agent.plugin}${agent.model ? " · " + agent.model : ""} · ${agent.status}\nCtrl+单击或中键：在旁边打开`}
+        title={`${displayName(agent)} · ${agentTitle(agent)} · ${agent.plugin}${agent.model ? " · " + agent.model : ""} · ${agent.status}\n${t("sidebar.besideHint")}`}
         onClick={(e) => (e.ctrlKey || e.metaKey) && beside(e)}
         onMouseDown={(e) => e.button === 1 && e.preventDefault()}
         onAuxClick={(e) => e.button === 1 && beside(e)}
@@ -270,25 +276,19 @@ function SessionLink({ agent, active }: { agent: Agent; active: boolean }) {
         </span>
       </a>
       {!active && (
-        <button className="beside-btn" onClick={beside} title="在旁边打开" aria-label={`在旁边打开 ${displayName(agent)}`}>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-            <rect x="3" y="4" width="18" height="16" rx="2" />
-            <path d="M12 4v16" />
-          </svg>
+        <button className="beside-btn" onClick={beside} title={t("sidebar.openBeside")} aria-label={t("sidebar.openBesideName", { name: displayName(agent) })}>
+          <Icon name="beside" size={14} />
         </button>
       )}
     </div>
   );
 }
 
-/** "今天", "昨天", else the date. */
-function dayOf(iso: string): string {
-  const d = new Date(iso);
-  const days = Math.round((new Date(new Date().toDateString()).getTime() - new Date(d.toDateString()).getTime()) / 86_400_000);
-  return days <= 0 ? "今天" : days === 1 ? "昨天" : d.toLocaleDateString();
-}
-
-const OUTCOME: Record<string, string> = { completed: "完成", failed: "失败", cancelled: "已取消" };
+const OUTCOME: Record<string, Parameters<typeof t>[0]> = {
+  completed: "outcome.completed",
+  failed: "outcome.failed",
+  cancelled: "outcome.cancelled",
+};
 
 /** An ended run: title and time, then how it ended on a `⎿` result line. */
 function HistoryItem({
@@ -308,7 +308,8 @@ function HistoryItem({
   const open = selected || members.some((m) => m.id !== run.planner && isSession(m));
   const merged = tasks.filter((t) => t.status === "merged").length;
   const tone = runTone(run.status);
-  const result = tasks.length > 0 ? `${merged}/${tasks.length} merged` : (OUTCOME[run.status] ?? run.status);
+  const outcome = OUTCOME[run.status];
+  const result = tasks.length > 0 ? t("sidebar.merged", { merged, total: tasks.length }) : outcome ? t(outcome) : run.status;
 
   return (
     <div className="history">
@@ -354,19 +355,19 @@ function WorkspaceSwitcher({ workspaces, current, onPage }: { workspaces: Worksp
 
   return (
     <div className="ws" ref={ref}>
-      <button className={`ws-button ${open || onPage ? "open" : ""}`} onClick={() => setOpen(!open)} title={current?.path ?? "全部工作区"} aria-expanded={open}>
+      <button className={`ws-button ${open || onPage ? "open" : ""}`} onClick={() => setOpen(!open)} title={current?.path ?? t("ws.all")} aria-expanded={open}>
         <span className="ws-name">{current?.name ?? "CrossAgents"}</span>
-        <span className="ws-scope">{current ? "" : "全部工作区"}</span>
-        <svg className="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <path d="M7 10l5 5 5-5" />
-        </svg>
+        <span className="ws-scope">{current ? "" : t("ws.all")}</span>
+        <span className="chev">
+          <Icon name="chevron" size={14} />
+        </span>
       </button>
       {open && (
         <div className="ws-menu" role="menu">
           <button className={`ws-item ${!current ? "on" : ""}`} onClick={() => pick("")} role="menuitem">
             <span className="ws-item-main">
-              <span className="ws-item-name">全部工作区</span>
-              <span className="ws-item-sub">{workspaces.length} 个仓库</span>
+              <span className="ws-item-name">{t("ws.all")}</span>
+              <span className="ws-item-sub">{t("ws.repos", { n: workspaces.length })}</span>
             </span>
             {total > 0 && <span className="ws-live">{total}</span>}
           </button>
@@ -380,7 +381,7 @@ function WorkspaceSwitcher({ workspaces, current, onPage }: { workspaces: Worksp
               {liveRuns(w) > 0 && <span className="ws-live">{liveRuns(w)}</span>}
             </button>
           ))}
-          {!workspaces.length && <div className="ws-empty">添加队友时填写的工作目录会出现在这里。</div>}
+          {!workspaces.length && <div className="ws-empty">{t("ws.empty")}</div>}
         </div>
       )}
     </div>
@@ -395,11 +396,11 @@ function QuotaMini() {
   const pct = Math.round(found.window.used_percent);
   const name = found.account.account.label || found.account.account.id;
   return (
-    <a className="quota-mini" href="#/usage" title={`${name} · ${windowLabel(found.window)}已用 ${pct}%`}>
+    <a className="quota-mini" href="#/usage" title={t("quota.miniTitle", { name, window: windowLabel(found.window), pct })}>
       <span className={`quota-bar ${level(pct, found.account.status.limit_reached)}`}>
         <span style={{ width: `${Math.min(100, pct)}%` }} />
       </span>
-      额度 {pct}% · {windowLabel(found.window).replace(/限额$/, "")}
+      {t("quota.mini", { pct, window: windowLabel(found.window).replace(/限额$/, "") })}
     </a>
   );
 }
@@ -411,7 +412,8 @@ function Connection() {
     if (status === "connected") api.info().then(setInfo, () => {});
   }, [status]);
   const color = status === "connected" ? "ok" : status === "connecting" ? "warn" : "danger";
-  const text = status === "connected" ? "hub 已连接" : status === "connecting" ? "连接中…" : status.replace(/^offline: /, "未连接：");
+  const text =
+    status === "connected" ? t("hub.connected") : status === "connecting" ? t("hub.connecting") : t("hub.offline", { reason: status.replace(/^offline: /, "") });
   return (
     <div className="connection" title={info?.home}>
       <span className={`dot ${color} ${status === "connecting" ? "pulse" : ""}`} />

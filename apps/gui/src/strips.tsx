@@ -7,6 +7,7 @@ import type { RunDetail } from "@bindings/RunDetail";
 import { markSeen, useUnread, useViewing } from "./activity";
 import { Avatar, displayName, sessionHref } from "./components";
 import { BUCKET_LABEL, groupTasks, progress, runState } from "./lib/taskState";
+import { t } from "./lib/i18n";
 import { StateWord, TaskCard } from "./parts";
 
 type Tone = "warn" | "danger" | "quiet";
@@ -24,15 +25,15 @@ function attention(agents: Agent[], tree: RunDetail[], unread: ReturnType<typeof
   const byId = (id: string) => agents.find((a) => a.id === id);
   for (const d of tree) {
     const planner = d.run.status === "awaiting_approval" ? byId(d.run.planner) : undefined;
-    if (planner) add({ agent: planner, word: "待审批", tone: "warn", key: `plan:${d.run.id}:${d.run.updated_at}`, done: false, href: sessionHref(planner.name) });
+    if (planner) add({ agent: planner, word: t("state.awaitingApproval"), tone: "warn", key: `plan:${d.run.id}:${d.run.updated_at}`, done: false, href: sessionHref(planner.name) });
   }
   for (const agent of agents) {
-    if (agent.status === "error") add({ agent, word: "出错", tone: "danger", key: `error:${agent.id}`, done: false, href: sessionHref(agent.name) });
+    if (agent.status === "error") add({ agent, word: t("state.error"), tone: "danger", key: `error:${agent.id}`, done: false, href: sessionHref(agent.name) });
   }
   for (const [id, mark] of Object.entries(unread)) {
     const agent = byId(id);
     if (!agent) continue;
-    add({ agent, word: mark.kind === "error" ? "出错" : "完成", tone: mark.kind === "error" ? "danger" : "quiet", key: `unread:${id}:${mark.at}`, done: mark.kind === "done", href: sessionHref(agent.name) });
+    add({ agent, word: mark.kind === "error" ? t("state.error") : t("state.done"), tone: mark.kind === "error" ? "danger" : "quiet", key: `unread:${id}:${mark.at}`, done: mark.kind === "done", href: sessionHref(agent.name) });
   }
   const rank = (c: Chip) => (c.tone === "danger" ? 0 : c.tone === "warn" ? 1 : 2);
   return [...chips.values()].sort((a, b) => rank(a) - rank(b));
@@ -64,17 +65,17 @@ export function NeedsYouStrip({ agents, tree }: { agents: Agent[]; tree: RunDeta
   };
 
   return (
-    <div className="needs-you" role="region" aria-label="需要你">
+    <div className="needs-you" role="region" aria-label={t("strip.needsYou")}>
       {shown.map((c) => (
         <NeedChip key={c.agent.id} chip={c} onDismiss={() => dismiss(c)} />
       ))}
       {merged && (
-        <Popover open={menu === "done"} onToggle={(o) => setMenu(o ? "done" : null)} label={`${done.length} 个已完成`} className="need quiet">
+        <Popover open={menu === "done"} onToggle={(o) => setMenu(o ? "done" : null)} label={t("strip.doneCount", { n: done.length })} className="need quiet">
           {done.map((c) => (
             <a key={c.agent.id} className="pop-item" href={c.href} onClick={() => setMenu(null)}>
               <Avatar agent={c.agent} size={18} />
               {displayName(c.agent)}
-              <span className="muted">完成</span>
+              <span className="muted">{t("state.done")}</span>
             </a>
           ))}
           <button
@@ -84,7 +85,7 @@ export function NeedsYouStrip({ agents, tree }: { agents: Agent[]; tree: RunDeta
               setMenu(null);
             }}
           >
-            全部清除
+            {t("strip.clearAll")}
           </button>
         </Popover>
       )}
@@ -116,7 +117,7 @@ function NeedChip({ chip, onDismiss }: { chip: Chip; onDismiss: () => void }) {
         <span className="need-name">{displayName(chip.agent)}</span>
         <span className="need-word">{chip.word}</span>
       </a>
-      <button className="need-x" onClick={onDismiss} aria-label={`不再提示 ${displayName(chip.agent)}`}>
+      <button className="need-x" onClick={onDismiss} aria-label={t("strip.dismiss", { name: displayName(chip.agent) })}>
         ×
       </button>
     </span>
@@ -199,11 +200,11 @@ export function RunStrip({ runs, agents }: { runs: RunDetail[]; agents: Agent[] 
                   {open ? "▴" : "▸"}
                 </span>
                 <span className="rs-title">{run.title}</span>
-                <span className="rs-progress">{tasks.length ? progress(tasks) : "还没有任务"}</span>
+                <span className="rs-progress">{tasks.length ? progress(tasks) : t("strip.noTasks")}</span>
               </button>
               <StateWord state={runState(run.status)} />
               <a className="rs-link" href={`#/runs/${run.id}`}>
-                run
+                {t("strip.openRun")}
               </a>
             </div>
           </div>

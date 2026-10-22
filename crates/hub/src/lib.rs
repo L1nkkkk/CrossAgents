@@ -7,6 +7,7 @@ pub mod collab;
 pub mod notices;
 pub mod paths;
 pub mod runtime;
+pub mod snapshot;
 pub mod transcript;
 pub mod usage;
 

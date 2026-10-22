@@ -2,14 +2,29 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { startActivity } from "./activity";
+import { startEventLog } from "./eventlog";
 import { startEvents } from "./hub";
+import { startTheme } from "./lib/theme";
+import "./fonts.css";
 import "./styles.css";
 
-startEvents();
-startActivity();
+// `npm run preview:mock`: answer from made-up data before anything talks to the hub. The
+// branch (and the dynamic import with it) is dropped from other builds.
+let start = true;
+if (__MOCK__) {
+  const mock = await import("./dev/mock");
+  start = mock.install();
+}
 
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-);
+if (start) {
+  startTheme();
+  startEvents();
+  startActivity();
+  startEventLog();
+
+  createRoot(document.getElementById("root")!).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  );
+}

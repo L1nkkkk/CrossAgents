@@ -1,0 +1,26 @@
+/* Fonts shipped with the app (docs/tasks/V6-GUI.md §4.2). Latin text is Inter, code is JetBrains
+   Mono; both come as woff2 in the bundle (the CSP allows only local resources) and swap in
+   once loaded. Neither has Chinese glyphs: Chinese falls back to the system's Chinese face,
+   through "CA CJK" below, scaled so 「团队」 and "Planner" side by side are the same height. */
+@import "@fontsource-variable/inter/wght.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+
+@font-face {
+  font-family: "CA CJK";
+  font-weight: 100 549;
+  size-adjust: 94%;
+  src: local("PingFang SC"), local("PingFangSC-Regular"), local("Microsoft YaHei UI"), local("Microsoft YaHei"),
+    local("Noto Sans CJK SC"), local("Source Han Sans SC");
+  unicode-range: U+2E80-2FDF, U+3000-303F, U+3040-30FF, U+3100-312F, U+3190-31FF, U+3400-4DBF, U+4E00-9FFF,
+    U+F900-FAFF, U+FE30-FE4F, U+FF00-FFEF;
+}
+@font-face {
+  font-family: "CA CJK";
+  font-weight: 550 900;
+  size-adjust: 94%;
+  src: local("PingFang SC Semibold"), local("PingFangSC-Semibold"), local("Microsoft YaHei UI Bold"),
+    local("Microsoft YaHei Bold"), local("Noto Sans CJK SC Bold"), local("Source Han Sans SC Bold");
+  unicode-range: U+2E80-2FDF, U+3000-303F, U+3040-30FF, U+3100-312F, U+3190-31FF, U+3400-4DBF, U+4E00-9FFF,
+    U+F900-FAFF, U+FE30-FE4F, U+FF00-FFEF;
+}

@@ -3,6 +3,7 @@ import type { MessageId } from "./MessageId";
 import type { MessageSource } from "./MessageSource";
 import type { StopReason } from "./StopReason";
 import type { TranscriptItem } from "./TranscriptItem";
+import type { TurnDiffStat } from "./TurnDiffStat";
 
 /**
  * One message to the session and everything the agent did in answer to it.
@@ -26,6 +27,8 @@ stop_reason: StopReason | null,
  */
 items: Array<TranscriptItem>, 
 /**
- * Everything the turn changed, as a unified diff, when the agent reports it.
+ * What the turn changed, file by file; the diff itself is at
+ * `GET /v1/agents/{key}/turns/{message_id}/diff`. Absent for turns that changed nothing
+ * (or whose changes no one could see).
  */
-diff?: string, };
+diff?: TurnDiffStat, };

@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { app, BrowserWindow, dialog, ipcMain, shell, session, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell, session, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
 
 const METHODS = new Set(["GET", "POST", "DELETE"]);
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -110,6 +110,21 @@ ipcMain.handle("dialog:pick-folder", async (event) => {
 
 /** One event relay per page; a reload starts a new one. */
 const relays = new Map<number, AbortController>();
+
+const COLOR = /^#[0-9a-f]{3,8}$/i;
+
+/**
+ * The page's theme changed (src/lib/theme.ts). The native title bar follows light or dark, and
+ * the window's own background (seen while resizing or loading) takes the page colour.
+ */
+ipcMain.on("theme:changed", (event, theme: unknown) => {
+  if (!fromApp(event) || !theme || typeof theme !== "object") return;
+  const { dark, background } = theme as { dark?: unknown; background?: unknown };
+  if (typeof dark !== "boolean") return;
+  nativeTheme.themeSource = dark ? "dark" : "light";
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win && typeof background === "string" && COLOR.test(background)) win.setBackgroundColor(background);
+});
 
 ipcMain.on("hub:events-start", (event) => {
   if (!fromApp(event)) return;

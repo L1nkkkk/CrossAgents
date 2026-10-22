@@ -35,6 +35,9 @@ pub enum Command {
     Send(cmd::session::SendArgs),
     /// Watch an agent live and talk to it from the terminal.
     Attach(cmd::session::AttachArgs),
+    /// Look into a session: what its turns changed.
+    #[command(subcommand)]
+    Session(cmd::session::SessionCommand),
     /// Print the event log.
     Events(cmd::events::EventsArgs),
     /// List available agent plugins.

@@ -8,10 +8,15 @@ import type { Run } from "@bindings/Run";
 import type { Task } from "@bindings/Task";
 import type { TranscriptTurn } from "@bindings/TranscriptTurn";
 import { useActivity } from "./activity";
+import { api } from "./api";
 import { Avatar, DiffStat, Prose, agentTitle, ago, displayName, sessionHref } from "./components";
+import { ChangeStat } from "./diffview";
+import { useHubData } from "./hub";
+import { sumStats } from "./lib/diff";
 import { taskState, type State } from "./lib/taskState";
+import { clock } from "./lib/time";
 import { duration } from "./lib/workGroups";
-import { openBeside } from "./panes";
+import { openBeside, openTool } from "./panes";
 
 /** A state as glyph + word; a moving one breathes. */
 export function StateWord({ state, children }: { state: State; children?: ReactNode }) {
@@ -144,11 +149,7 @@ function TaskBody({ task, run, owner, agents }: { task: Task; run: Run; owner?: 
           <Prose text={report.summary} />
         </TcSection>
       )}
-      {report.diff_stat && (
-        <TcSection title="改动">
-          <DiffStat text={report.diff_stat} />
-        </TcSection>
-      )}
+      <TaskChanges task={task} agents={agents} title={(children) => <TcSection title="改动">{children}</TcSection>} />
       {report.checks.length > 0 && (
         <TcSection title="验收">
           {failedChecks.length ? (
@@ -190,6 +191,53 @@ function TcSection({ title, tone, children }: { title: string; tone?: "warn" | "
       <h4>{title}</h4>
       {children}
     </section>
+  );
+}
+
+/**
+ * What a task changed: every turn of its worker that changed files, summed, each one opening
+ * its diff in the tool column; then the task's diff stat against the integration branch.
+ * Worker clones are removed once a task ends, and with them their turns: only the stat stays.
+ */
+export function TaskChanges({ task, agents, title }: { task: Task; agents: Agent[]; title: (children: ReactNode) => ReactNode }) {
+  const worker = task.assignee ? agents.find((a) => a.id === task.assignee) : undefined;
+  const transcript = useHubData(
+    () => (worker ? api.transcript(worker.name) : Promise.resolve(undefined)),
+    [worker?.name],
+    (e) => !!worker && (e.type === "agent.turn_diff" || e.type === "agent.turn_completed") && e.data.id === worker.id,
+  );
+  const turns = (transcript.data?.turns ?? []).filter((t) => !!t.started_at).map((turn, i) => ({ turn, n: i + 1 }));
+  const changed = turns.filter((x) => x.turn.diff);
+  const diffStat = task.report.diff_stat;
+  if (!changed.length && !diffStat) return null;
+  const total = sumStats(changed.map((x) => x.turn.diff!));
+  return title(
+    <div className="task-turns">
+      {worker && changed.length > 0 && (
+        <>
+          <div className="tt-total small">
+            ✎ {changed.length} 轮改了 {total.files.length} 个文件 <ChangeStat files={[total]} />
+          </div>
+          {changed.map(({ turn, n }) => (
+            <button key={turn.message_id} className="tt-row" onClick={() => openTool("changes", { agent: worker.name, turn: turn.message_id })} title="在右侧查看这一轮的改动">
+              <span className="tt-n">第 {n} 轮</span>
+              <span className="muted">{clock(turn.completed_at ?? turn.started_at!)}</span>
+              <span className="tt-files">{turn.diff!.files.map((f) => f.path.split("/").pop()).join(" · ")}</span>
+              <ChangeStat files={[turn.diff!]} />
+              <span className="disclosure" aria-hidden="true">
+                ▸
+              </span>
+            </button>
+          ))}
+        </>
+      )}
+      {diffStat && (
+        <details className="tt-stat" open={!changed.length}>
+          <summary className="small muted">对集成分支的 diff stat</summary>
+          <DiffStat text={diffStat} />
+        </details>
+      )}
+    </div>,
   );
 }
 

@@ -30,6 +30,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Events(args) => events::run(&ctx, args).await,
         Command::Send(args) => session::send(&ctx, args).await,
         Command::Attach(args) => session::attach(&ctx, args).await,
+        Command::Session(cmd) => session::run(&ctx, cmd).await,
         Command::Plugin(cmd) => plugin::run(&ctx, cmd).await,
         Command::Run(args) => run::run(&ctx, args).await,
         Command::Usage(args) => usage::run(&ctx, args).await,

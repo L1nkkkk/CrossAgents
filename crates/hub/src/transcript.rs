@@ -1,6 +1,8 @@
 //! A session's conversation, rebuilt from its events (`GET /v1/agents/{key}/transcript`).
 
-use crossagents_api_types::{TranscriptItem, TranscriptTurn, TranscriptUsage};
+use std::collections::HashMap;
+
+use crossagents_api_types::{TranscriptItem, TranscriptTurn, TranscriptUsage, TurnDiffStat};
 use crossagents_core::{Event, EventKind, MessageId};
 
 /// Folds an agent's events, oldest first, into turns.
@@ -9,6 +11,8 @@ pub struct Fold {
     pub turns: Vec<TranscriptTurn>,
     pub usage: Option<TranscriptUsage>,
     pub last_seq: u64,
+    /// Each turn's latest unified diff; the transcript carries only its stat.
+    pub diffs: HashMap<MessageId, String>,
     /// The turn the agent is working on.
     current: Option<MessageId>,
 }
@@ -119,13 +123,23 @@ impl Fold {
                     *detail = Some(Box::new(new.clone()));
                 }
             }
-            EventKind::AgentTurnDiff { diff, .. } => {
-                let index = match self.current {
-                    Some(id) => self.turns.iter().rposition(|t| t.message_id == id),
-                    None => self.turns.iter().rposition(|t| t.started_at.is_some()),
+            EventKind::AgentTurnDiff {
+                diff,
+                message_id,
+                source,
+                ..
+            } => {
+                let index = match (*message_id, self.current) {
+                    (Some(id), _) | (None, Some(id)) => {
+                        self.turns.iter().rposition(|t| t.message_id == id)
+                    }
+                    (None, None) => self.turns.iter().rposition(|t| t.started_at.is_some()),
                 };
                 if let Some(index) = index {
-                    self.turns[index].diff = Some(diff.clone());
+                    let turn = &mut self.turns[index];
+                    let stat = TurnDiffStat::from_diff(diff, source.unwrap_or_default());
+                    turn.diff = (!stat.files.is_empty()).then_some(stat);
+                    self.diffs.insert(turn.message_id, diff.clone());
                 }
             }
             EventKind::AgentPermission {
@@ -315,9 +329,10 @@ mod tests {
             },
             EventKind::AgentTurnDiff {
                 id,
-                diff: "diff --git a/a.rs b/a.rs
-"
-                .into(),
+                diff: "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+y\n"
+                    .into(),
+                message_id: None,
+                source: None,
             },
             out("done", OutputStream::Text),
             EventKind::AgentUsage {
@@ -374,13 +389,12 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(
-            first.diff.as_deref(),
-            Some(
-                "diff --git a/a.rs b/a.rs
-"
-            )
-        );
+        let stat = first.diff.as_ref().expect("turn diff");
+        assert_eq!(stat.files.len(), 1);
+        assert_eq!(stat.files[0].path, "a.rs");
+        assert_eq!((stat.added, stat.removed), (1, 1));
+        assert_eq!(stat.source, crossagents_core::DiffSource::Driver);
+        assert!(fold.diffs[&m1].contains("+y"));
         let second = &fold.turns[1];
         assert_eq!(second.input, "next");
         assert!(second.started_at.is_none() && second.items.is_empty());

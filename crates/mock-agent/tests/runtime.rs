@@ -324,6 +324,62 @@ async fn transcript_groups_the_conversation_by_turn() {
     assert_eq!(resp.status(), 404);
 }
 
+/// The mock agent's driver reports no diffs; the hub works out what each turn changed.
+#[tokio::test]
+async fn hub_works_out_each_turns_diff() {
+    let t = TestHub::start().await;
+    let repo = common::git_repo();
+    t.add_agent_in("fay", None, "worker", repo.path()).await;
+    let mut w = t.watch().await;
+
+    let first = t.send("fay", "[write notes.txt=one\\ntwo] done").await;
+    w.until("first turn", turn_completed).await;
+    let second = t.send("fay", "just reading").await;
+    w.until("second turn", turn_completed).await;
+
+    let diff_event = w
+        .seen
+        .iter()
+        .find_map(|e| match &e.kind {
+            EventKind::AgentTurnDiff {
+                message_id, source, ..
+            } => Some((*message_id, *source)),
+            _ => None,
+        })
+        .expect("a turn_diff event");
+    assert_eq!(
+        diff_event.0.map(|m| m.to_string()).as_deref(),
+        first["message_id"].as_str()
+    );
+    assert_eq!(diff_event.1, Some(crossagents_api_types::DiffSource::Hub));
+
+    let transcript: Value = t
+        .get("/v1/agents/fay/transcript")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let turns = transcript["turns"].as_array().unwrap();
+    assert_eq!(turns[0]["diff"]["source"], "hub", "{transcript}");
+    assert_eq!(turns[0]["diff"]["files"][0]["path"], "notes.txt");
+    assert_eq!(turns[0]["diff"]["added"], 2);
+    // A read-only turn shows nothing.
+    assert!(turns[1].get("diff").is_none(), "{transcript}");
+
+    let path = format!(
+        "/v1/agents/fay/turns/{}/diff",
+        first["message_id"].as_str().unwrap()
+    );
+    let body: Value = t.get(&path).await.json().await.unwrap();
+    assert!(body["diff"].as_str().unwrap().contains("+two"), "{body}");
+    assert_eq!(body["stat"]["files"][0]["path"], "notes.txt");
+    let none = format!(
+        "/v1/agents/fay/turns/{}/diff",
+        second["message_id"].as_str().unwrap()
+    );
+    assert_eq!(t.get(&none).await.status(), 404);
+}
+
 #[tokio::test]
 async fn events_can_be_filtered_by_agent() {
     let t = TestHub::start().await;

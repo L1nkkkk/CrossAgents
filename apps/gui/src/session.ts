@@ -8,6 +8,7 @@ import type { TranscriptItem } from "@bindings/TranscriptItem";
 import type { TranscriptTurn } from "@bindings/TranscriptTurn";
 import { api, errorText } from "./api";
 import { onHubEvent, useConnectionStatus, type HubEvent } from "./hub";
+import { turnStat } from "./lib/diff";
 
 export type { Transcript, TranscriptItem, TranscriptTurn };
 
@@ -47,7 +48,7 @@ export function useSession(key: string): SessionState {
     const off = onHubEvent((event) => {
       const t = current.current;
       if (!t || event.seq <= t.last_seq) return;
-      const next = apply(t, event);
+      const next = applyEvent(t, event);
       if (next !== t) {
         current.current = next;
         setTranscript(next);
@@ -66,7 +67,7 @@ export function useSession(key: string): SessionState {
 }
 
 /** Returns a new transcript with `event` folded in, or `t` itself if it is unrelated. */
-function apply(t: Transcript, event: HubEvent): Transcript {
+export function applyEvent(t: Transcript, event: HubEvent): Transcript {
   const id = t.agent.id;
   const seq = event.seq;
   const turns = t.turns;
@@ -152,10 +153,11 @@ function apply(t: Transcript, event: HubEvent): Transcript {
     }
     case "agent.turn_diff": {
       if (event.data.id !== id) return t;
-      const index = activeIndex(t);
+      const { message_id, diff, source } = event.data;
+      const index = message_id ? t.turns.findIndex((x) => x.message_id === message_id) : activeIndex(t);
       if (index < 0) return { ...t, last_seq: seq };
       const turns = t.turns.slice();
-      turns[index] = { ...turns[index], diff: event.data.diff };
+      turns[index] = { ...turns[index], diff: turnStat(diff, source) };
       return { ...t, turns, last_seq: seq };
     }
     case "agent.permission": {

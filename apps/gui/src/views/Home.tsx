@@ -3,6 +3,7 @@ import type { Agent } from "@bindings/Agent";
 import { api, errorText } from "../api";
 import { navigate, useRunTree } from "../App";
 import { Avatar, ErrorBox, Field, Icon, Vendor, agentTitle, displayName, useAgents } from "../components";
+import { t } from "../lib/i18n";
 import { PRESETS, presetPolicy, type Preset } from "../lib/policy";
 import { QuestionCards } from "../questions";
 import { useSelectedWorkspace, useWorkspaces, wsHref, wsKey } from "../workspace";
@@ -22,6 +23,7 @@ function savedPreset(): Preset {
 /** Start page: say what you want, pick who plans, and who is on the team. */
 export function HomeView() {
   const agents = useAgents();
+  const tree = useRunTree();
   const scope = useSelectedWorkspace();
   const { list } = useWorkspaces();
   const current = list.find((w) => w.key === scope);
@@ -58,7 +60,7 @@ export function HomeView() {
   const team = candidates.filter((a) => !benched.includes(a.name));
   const workers = team.filter((a) => a.role === "worker");
   // Default to whoever was the default worker last time, not a specialist that sorts first.
-  const lastDefault = useRunTree().data?.find((d) => workers.some((w) => w.id === d.run.config.worker))?.run.config.worker;
+  const lastDefault = tree.data?.find((d) => workers.some((w) => w.id === d.run.config.worker))?.run.config.worker;
   const workerAgent = workers.find((a) => a.name === worker) ?? workers.find((a) => a.id === lastDefault) ?? workers[0];
   const ready = !busy && !!request.trim() && !!plannerAgent && !!workerAgent;
 
@@ -112,20 +114,29 @@ export function HomeView() {
     }
   }
 
+  // Getting started: shown until there is a teammate, a planner and a first run.
+  const steps = agents.data && tree.data && {
+    mates: all.some((a) => a.role !== "planner"),
+    planner: planners.length > 0,
+    run: tree.data.length > 0,
+  };
+
   return (
     <div className="page">
       <div className="page-inner home">
         <div className="empty" style={{ padding: "0 0 24px" }}>
-          <h1>今天让团队做什么？</h1>
+          <h1>{t("home.title")}</h1>
           <p>
             {current ? (
               <>
-                在 <a href={wsHref(current.key)}>{current.name}</a> 里 ·{" "}
+                {t("home.in")} <a href={wsHref(current.key)}>{current.name}</a> ·{" "}
               </>
             ) : null}
-            Planner 拆计划、按专长派活；{PRESETS.find((p) => p.key === preset)!.hint}。
+            {t("home.subtitle", { hint: PRESETS.find((p) => p.key === preset)!.hint })}
           </p>
         </div>
+
+        {steps && !(steps.mates && steps.planner && steps.run) && <GettingStarted steps={steps} onCompose={() => ref.current?.focus()} />}
 
         <QuestionCards agents={agents.data ?? []} />
         <div className="composer" style={{ maxWidth: "none" }}>
@@ -135,21 +146,21 @@ export function HomeView() {
             value={request}
             onChange={(e) => setRequest(e.target.value)}
             onKeyDown={onKey}
-            placeholder="把登录页改成 OAuth，旧的密码登录保留"
+            placeholder={t("home.placeholder")}
             autoFocus
           />
           <div className="bar">
-            <PersonPick label="Planner" agents={planners} value={plannerAgent} onChange={setPlanner} />
-            <PersonPick label="默认 Worker" agents={workers} value={workerAgent} onChange={setWorker} />
+            <PersonPick label={t("home.planner")} agents={planners} value={plannerAgent} onChange={setPlanner} />
+            <PersonPick label={t("home.worker")} agents={workers} value={workerAgent} onChange={setWorker} />
             <div className="spacer" />
             <span className="muted small hide-narrow">Ctrl+Enter</span>
-            <button className="primary send" disabled={!ready} onClick={submit} aria-label="发起 run" title="发起（Ctrl+Enter）">
+            <button className="primary send" disabled={!ready} onClick={submit} aria-label={t("home.start")} title={t("home.startHint")}>
               <Icon name="send" size={16} />
             </button>
           </div>
         </div>
 
-        <div className="preset-pick" role="radiogroup" aria-label="托管程度">
+        <div className="preset-pick" role="radiogroup" aria-label={t("home.preset")}>
           {PRESETS.map((p) => (
             <button key={p.key} type="button" role="radio" aria-checked={preset === p.key} className={preset === p.key ? "on" : ""} onClick={() => setPreset(p.key)} title={p.hint}>
               {p.label}
@@ -160,7 +171,7 @@ export function HomeView() {
         {candidates.length > 0 && (
           <div className="team-pick">
             <div className="team-pick-label">
-              团队 <span className="muted">· Planner 会按专长把任务派给他们，点一下可以让某人这次不参加</span>
+              {t("home.team")} <span className="muted">· {t("home.teamHint")}</span>
             </div>
             <div className="team-pick-list">
               {candidates.map((a) => {
@@ -188,42 +199,36 @@ export function HomeView() {
           </div>
         )}
 
-        {agents.data && !planners.length && (
-          <p className="muted small" style={{ textAlign: "center", marginTop: 16 }}>
-            {current ? `${current.name} 里还没有 Planner，` : "还没有 Planner，"}先到 <a href="#/agents">团队</a> 添加一位架构师和几个队友。
-          </p>
-        )}
-
         <details className="more-options">
-          <summary className="muted small">更多选项</summary>
+          <summary className="muted small">{t("home.more")}</summary>
           <div className="card form" style={{ marginTop: 10 }}>
-            <Field label="标题（可选）">
-              <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="不填则由需求生成" />
+            <Field label={t("home.titleField")}>
+              <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t("home.titlePlaceholder")} />
             </Field>
             <div className="row" style={{ alignItems: "flex-start" }}>
-              <Field label="失败后升级到">
+              <Field label={t("home.escalate")}>
                 <AgentSelect agents={workers} value={escalate} onChange={setEscalate} />
               </Field>
-              <Field label="默认 Reviewer">
+              <Field label={t("home.reviewer")}>
                 <AgentSelect agents={team.filter((a) => a.role === "reviewer")} value={reviewer} onChange={setReviewer} />
               </Field>
-              <Field label="并行数">
+              <Field label={t("home.parallel")}>
                 <input type="number" min={1} value={maxParallel} onChange={(e) => setMaxParallel(e.target.value)} placeholder="3" />
               </Field>
             </div>
             <div className="row" style={{ alignItems: "flex-start" }}>
-              <Field label="预算上限（美元）">
-                <input type="number" min={0} step="0.5" value={maxUsd} onChange={(e) => setMaxUsd(e.target.value)} placeholder="不限" />
+              <Field label={t("home.maxUsd")}>
+                <input type="number" min={0} step="0.5" value={maxUsd} onChange={(e) => setMaxUsd(e.target.value)} placeholder={t("home.unlimited")} />
               </Field>
-              <Field label="时间上限（分钟）">
-                <input type="number" min={1} value={maxMinutes} onChange={(e) => setMaxMinutes(e.target.value)} placeholder="不限" />
+              <Field label={t("home.maxMinutes")}>
+                <input type="number" min={1} value={maxMinutes} onChange={(e) => setMaxMinutes(e.target.value)} placeholder={t("home.unlimited")} />
               </Field>
-              <Field label="Token 上限（千）">
-                <input type="number" min={1} value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} placeholder="不限" />
+              <Field label={t("home.maxTokens")}>
+                <input type="number" min={1} value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} placeholder={t("home.unlimited")} />
               </Field>
             </div>
             <p className="muted small" style={{ margin: 0 }}>
-              用到 80% 时 Planner 会收到提醒；用完时 run 暂停，等你决定加预算还是取消。
+              {t("home.budgetHint")}
             </p>
           </div>
         </details>
@@ -237,6 +242,51 @@ export function HomeView() {
   );
 }
 
+/** Three steps to a first run; each one opens where it is done, done ones are ticked. */
+function GettingStarted({ steps, onCompose }: { steps: { mates: boolean; planner: boolean; run: boolean }; onCompose: () => void }) {
+  const items = [
+    { done: steps.mates, icon: "addMate" as const, title: t("onboard.mates"), hint: t("onboard.matesHint"), href: "#/agents" },
+    { done: steps.planner, icon: "planner" as const, title: t("onboard.planner"), hint: t("onboard.plannerHint"), href: "#/agents" },
+    { done: steps.run, icon: "rocket" as const, title: t("onboard.run"), hint: t("onboard.runHint") },
+  ];
+  // The first step not done yet is the one to do now.
+  const next = items.findIndex((s) => !s.done);
+  return (
+    <ol className="onboard" aria-label={t("onboard.label")}>
+      {items.map((s, i) => {
+        const body = (
+          <>
+            <span className={`onboard-mark ${s.done ? "done" : ""}`} aria-hidden="true">
+              {s.done ? <Icon name="check" size={14} /> : i + 1}
+            </span>
+            <span className="onboard-text">
+              <span className="onboard-title">
+                <Icon name={s.icon} size={15} />
+                {s.title}
+              </span>
+              <span className="onboard-hint">{s.hint}</span>
+            </span>
+          </>
+        );
+        const cls = `onboard-step ${s.done ? "done" : ""} ${i === next ? "next" : ""}`;
+        return (
+          <li key={i}>
+            {s.href ? (
+              <a className={cls} href={s.href} aria-current={i === next ? "step" : undefined}>
+                {body}
+              </a>
+            ) : (
+              <button type="button" className={cls} onClick={onCompose} aria-current={i === next ? "step" : undefined}>
+                {body}
+              </button>
+            )}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
 /** A person picker inside the composer: avatar, then a borderless select. */
 function PersonPick({ label, agents, value, onChange }: { label: string; agents: Agent[]; value?: Agent; onChange: (v: string) => void }) {
   return (
@@ -244,7 +294,7 @@ function PersonPick({ label, agents, value, onChange }: { label: string; agents:
       <span className="pp-label">{label}</span>
       {value && <Avatar agent={value} size={18} />}
       <select value={value?.name ?? ""} onChange={(e) => onChange(e.target.value)}>
-        {!value && <option value="">无</option>}
+        {!value && <option value="">{t("common.none")}</option>}
         {agents.map((a) => (
           <option key={a.id} value={a.name}>
             {displayName(a)} · {agentTitle(a)}
@@ -258,7 +308,7 @@ function PersonPick({ label, agents, value, onChange }: { label: string; agents:
 function AgentSelect({ agents, value, onChange }: { agents: Agent[]; value: string; onChange: (v: string) => void }) {
   return (
     <select value={value} onChange={(e) => onChange(e.target.value)}>
-      <option value="">（不用）</option>
+      <option value="">{t("home.notUsed")}</option>
       {agents.map((a) => (
         <option key={a.id} value={a.name}>
           {displayName(a)} · {agentTitle(a)} · {a.model ?? a.plugin}

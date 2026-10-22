@@ -4,6 +4,7 @@ import type { Agent } from "./Agent";
 import type { AgentId } from "./AgentId";
 import type { AgentStatus } from "./AgentStatus";
 import type { CheckResult } from "./CheckResult";
+import type { DiffSource } from "./DiffSource";
 import type { HumanItem } from "./HumanItem";
 import type { Landing } from "./Landing";
 import type { MessageId } from "./MessageId";
@@ -42,7 +43,16 @@ thread?: MessageId,
 /**
  * The start of the message replied to, for showing "回复「…」".
  */
-reply_excerpt?: string, } } | { "type": "agent.input_updated", "data": { id: AgentId, message_id: MessageId, text: string, } } | { "type": "agent.input_withdrawn", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.turn_started", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.output", "data": { id: AgentId, stream: OutputStream, text: string, } } | { "type": "agent.tool_call", "data": { id: AgentId, tool_call_id: string, title: string, kind: string | null, status: ToolStatus, } } | { "type": "agent.tool_call_updated", "data": { id: AgentId, tool_call_id: string, title: string | null, status: ToolStatus | null, } } | { "type": "agent.tool_output", "data": { id: AgentId, tool_call_id: string, text: string, } } | { "type": "agent.tool_detail", "data": { id: AgentId, tool_call_id: string, detail: ToolDetail, } } | { "type": "agent.turn_diff", "data": { id: AgentId, diff: string, } } | { "type": "agent.permission", "data": { id: AgentId, kind: string, title: string, decision: PermissionDecision, } } | { "type": "agent.rate_limits", "data": { id: AgentId, limits: RateLimits, } } | { "type": "agent.warning", "data": { id: AgentId, message: string, } } | { "type": "agent.turn_completed", "data": { id: AgentId, message_id: MessageId, stop_reason: StopReason, } } | { "type": "agent.usage", "data": { id: AgentId, used: number, size: number, cost_usd: number | null, 
+reply_excerpt?: string, } } | { "type": "agent.input_updated", "data": { id: AgentId, message_id: MessageId, text: string, } } | { "type": "agent.input_withdrawn", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.turn_started", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.output", "data": { id: AgentId, stream: OutputStream, text: string, } } | { "type": "agent.tool_call", "data": { id: AgentId, tool_call_id: string, title: string, kind: string | null, status: ToolStatus, } } | { "type": "agent.tool_call_updated", "data": { id: AgentId, tool_call_id: string, title: string | null, status: ToolStatus | null, } } | { "type": "agent.tool_output", "data": { id: AgentId, tool_call_id: string, text: string, } } | { "type": "agent.tool_detail", "data": { id: AgentId, tool_call_id: string, detail: ToolDetail, } } | { "type": "agent.turn_diff", "data": { id: AgentId, diff: string, 
+/**
+ * The turn it belongs to; absent in events written before the field existed (the
+ * running turn, else the last one that started).
+ */
+message_id?: MessageId, 
+/**
+ * Who worked it out; absent means the driver.
+ */
+source?: DiffSource, } } | { "type": "agent.permission", "data": { id: AgentId, kind: string, title: string, decision: PermissionDecision, } } | { "type": "agent.rate_limits", "data": { id: AgentId, limits: RateLimits, } } | { "type": "agent.warning", "data": { id: AgentId, message: string, } } | { "type": "agent.turn_completed", "data": { id: AgentId, message_id: MessageId, stop_reason: StopReason, } } | { "type": "agent.usage", "data": { id: AgentId, used: number, size: number, cost_usd: number | null, 
 /**
  * Cumulative token counts, when the agent reports them.
  */

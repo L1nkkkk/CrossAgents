@@ -29,7 +29,9 @@ pub use driver::{
     TurnOutcome,
 };
 pub use error::CoreError;
-pub use event::{EVENT_SCHEMA_VERSION, Envelope, Event, EventKind, EventSink, MessageSource};
+pub use event::{
+    DiffSource, EVENT_SCHEMA_VERSION, Envelope, Event, EventKind, EventSink, MessageSource,
+};
 pub use human::{HumanAction, HumanItem, HumanItemKind, HumanItemStatus};
 pub use ids::{AgentId, MessageId, RunId, SessionId, TaskId};
 pub use model::{

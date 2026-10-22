@@ -4,7 +4,7 @@
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { Event as HubEvent } from "@bindings/Event";
-import { bridge, errorText } from "./api";
+import { errorText, getBridge } from "./api";
 
 export type { HubEvent };
 
@@ -36,6 +36,7 @@ function dispatch(data: string) {
 export function startEvents() {
   if (started) return;
   started = true;
+  const bridge = getBridge();
   if (bridge) {
     // Subscribe before starting the relay so no event is missed.
     bridge.onStatus(setStatus);

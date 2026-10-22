@@ -1,5 +1,8 @@
 // Unified diffs as files and lines, for the diff view. Pure, tested in diff.test.ts.
 
+import type { DiffSource } from "@bindings/DiffSource";
+import type { TurnDiffStat } from "@bindings/TurnDiffStat";
+
 export type DiffLine = { kind: "add" | "del" | "ctx" | "hunk" | "meta"; text: string };
 export type DiffFile = { path: string; added: number; removed: number; lines: DiffLine[] };
 
@@ -7,6 +10,8 @@ export type DiffFile = { path: string; added: number; removed: number; lines: Di
 export function parseDiff(text: string, fallback = ""): DiffFile[] {
   const files: DiffFile[] = [];
   let file: DiffFile | undefined;
+  // In a file's header (before its first hunk), `---` / `+++` name files rather than lines.
+  let header = true;
   const start = (path: string) => {
     file = { path, added: 0, removed: 0, lines: [] };
     files.push(file);
@@ -15,23 +20,20 @@ export function parseDiff(text: string, fallback = ""): DiffFile[] {
     if (raw.startsWith("diff --git ")) {
       const m = / b\/(.+)$/.exec(raw);
       start(m ? m[1] : raw.slice(11));
+      header = true;
       continue;
     }
     if (!file) start(fallback);
     const f = file!;
-    if (raw.startsWith("+++ ")) {
-      const path = raw.slice(4).replace(/^b\//, "");
+    if (header && (raw.startsWith("+++ ") || raw.startsWith("--- "))) {
+      const path = raw.slice(4).replace(/^[ab]\//, "");
       if (path !== "/dev/null" && !f.path) f.path = path;
       continue;
     }
-    if (raw.startsWith("--- ")) {
-      const path = raw.slice(4).replace(/^a\//, "");
-      if (path !== "/dev/null" && !f.path) f.path = path;
-      continue;
-    }
-    if (/^(index |new file mode|deleted file mode|similarity index|rename (from|to) |old mode|new mode)/.test(raw)) {
+    if (/^(index |new file mode|deleted file mode|similarity index|rename (from|to) |old mode|new mode|Binary files )/.test(raw) && header) {
       f.lines.push({ kind: "meta", text: raw });
     } else if (raw.startsWith("@@")) {
+      header = false;
       f.lines.push({ kind: "hunk", text: raw });
     } else if (raw.startsWith("+")) {
       f.added++;
@@ -54,12 +56,35 @@ export function parseDiff(text: string, fallback = ""): DiffFile[] {
 }
 
 /** "+12 −4" over all files. */
-export function diffStat(files: DiffFile[]): { files: number; added: number; removed: number } {
+export function diffStat(files: { added: number; removed: number }[]): { files: number; added: number; removed: number } {
   return {
     files: files.length,
     added: files.reduce((n, f) => n + f.added, 0),
     removed: files.reduce((n, f) => n + f.removed, 0),
   };
+}
+
+/** What the hub puts in a transcript turn (TurnDiffStat), worked out here from a live event. */
+export function turnStat(diff: string, source: DiffSource = "driver"): TurnDiffStat | undefined {
+  const files = parseDiff(diff)
+    .filter((f) => f.path)
+    .map(({ path, added, removed }) => ({ path, added, removed }));
+  if (!files.length) return undefined;
+  const { added, removed } = diffStat(files);
+  return { files, added, removed, source };
+}
+
+/** Totals over several turns: each file once, its lines summed. */
+export function sumStats(stats: TurnDiffStat[]): { files: string[]; added: number; removed: number } {
+  const files = new Set<string>();
+  let added = 0;
+  let removed = 0;
+  for (const s of stats) {
+    s.files.forEach((f) => files.add(f.path));
+    added += s.added;
+    removed += s.removed;
+  }
+  return { files: [...files], added, removed };
 }
 
 /** The last `max` lines of `text`, and how many were left out. */

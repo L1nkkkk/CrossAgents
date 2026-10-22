@@ -2,15 +2,16 @@
 //! what happens inside a session into events.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, AgentStatus, CoreError, DriverSession, EXTERNAL_PLUGIN, Envelope,
-    EventBus, EventKind, McpServerSpec, MessageId, MessageSource, OutputStream, PermissionPolicy,
-    SessionEvent, SessionEventKind, SessionSpec, StopReason, Store,
+    Agent, AgentId, AgentKey, AgentStatus, CoreError, DiffSource, DriverSession, EXTERNAL_PLUGIN,
+    Envelope, EventBus, EventKind, McpServerSpec, MessageId, MessageSource, OutputStream,
+    PermissionPolicy, SessionEvent, SessionEventKind, SessionSpec, StopReason, Store,
 };
 use crossagents_plugins::PluginRegistry;
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -147,7 +148,8 @@ pub struct Runtime {
 /// Messages to an agent's event forwarder, kept in order with the session's own events.
 enum Control {
     TurnStarted(MessageId),
-    TurnFinished(MessageId, Result<StopReason, String>),
+    /// The turn's outcome, and what it changed when the hub works that out itself.
+    TurnFinished(MessageId, Result<StopReason, String>, Option<String>),
     Stopped,
 }
 
@@ -308,7 +310,9 @@ impl Runtime {
             self.live.clone(),
             generation,
         ));
-        tokio::spawn(run_turns(session, inbox, control_tx));
+        // Drivers that do not report what a turn changed get it worked out by the hub.
+        let diff_dir = (!resolved.driver.capabilities().structured_diff).then(|| agent.cwd.clone());
+        tokio::spawn(run_turns(session, inbox, control_tx, diff_dir));
         self.live.lock().await.insert(agent.id, live);
         set_status(&self.bus, agent.id, AgentStatus::Idle).await;
         Ok(agent)
@@ -646,22 +650,37 @@ async fn set_status(bus: &EventBus, id: AgentId, to: AgentStatus) {
     publish(bus, EventKind::AgentStatusChanged { id, from, to }).await;
 }
 
-/// Runs one prompt at a time from the inbox.
+/// Runs one prompt at a time from the inbox. With `diff_dir` (drivers without
+/// `structured_diff`), snapshots that directory around each turn to tell what it changed.
 async fn run_turns(
     session: Arc<dyn DriverSession>,
     inbox: Arc<Inbox>,
     control: mpsc::UnboundedSender<Control>,
+    diff_dir: Option<PathBuf>,
 ) {
     while let Some((message_id, text)) = inbox.next().await {
+        // Before the turn is announced: an interrupt that follows the announcement must find
+        // the prompt already running.
+        let base = match &diff_dir {
+            Some(dir) => crate::snapshot::take(dir).await,
+            None => None,
+        };
         let _ = control.send(Control::TurnStarted(message_id));
         let result = session
             .prompt(&text)
             .await
             .map(|outcome| outcome.stop_reason)
             .map_err(|e| e.to_string());
+        let diff = match (&diff_dir, base) {
+            (Some(dir), Some(base)) => match crate::snapshot::take(dir).await {
+                Some(head) => crate::snapshot::diff(dir, &base, &head).await,
+                None => None,
+            },
+            _ => None,
+        };
         inbox.finish_turn();
         if control
-            .send(Control::TurnFinished(message_id, result))
+            .send(Control::TurnFinished(message_id, result, diff))
             .is_err()
         {
             return;
@@ -704,7 +723,7 @@ async fn forward_events(
                         set_status(&bus, id, AgentStatus::Running).await;
                         publish(&bus, EventKind::AgentTurnStarted { id, message_id }).await;
                     }
-                    Some(Control::TurnFinished(message_id, result)) => {
+                    Some(Control::TurnFinished(message_id, result, diff)) => {
                         let stop_reason = match result {
                             Ok(reason) => reason,
                             Err(message) => {
@@ -712,6 +731,19 @@ async fn forward_events(
                                 StopReason::Error
                             }
                         };
+                        // Read-only turns have nothing to show.
+                        if let Some(diff) = diff.filter(|d| !d.is_empty()) {
+                            publish(
+                                &bus,
+                                EventKind::AgentTurnDiff {
+                                    id,
+                                    diff,
+                                    message_id: Some(message_id),
+                                    source: Some(DiffSource::Hub),
+                                },
+                            )
+                            .await;
+                        }
                         publish(
                             &bus,
                             EventKind::AgentTurnCompleted {
@@ -813,7 +845,12 @@ async fn handle_session_event(
             cost_usd,
             tokens,
         },
-        SessionEventKind::TurnDiff { diff, .. } => EventKind::AgentTurnDiff { id, diff },
+        SessionEventKind::TurnDiff { diff, .. } => EventKind::AgentTurnDiff {
+            id,
+            diff,
+            message_id: None,
+            source: None,
+        },
         SessionEventKind::RateLimits { limits } => EventKind::AgentRateLimits { id, limits },
         SessionEventKind::PermissionRequested { request, decision } => EventKind::AgentPermission {
             id,

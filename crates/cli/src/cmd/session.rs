@@ -1,11 +1,12 @@
-//! Talking to agents: `send` and `attach`.
+//! Talking to agents: `send`, `attach`, and looking into a session (`session diff`).
 
 use std::io::Write;
 
 use anyhow::{Result, bail};
-use clap::Args;
+use clap::{Args, Subcommand};
 use crossagents_api_types::{
-    Agent, AgentStatus, Event, EventKind, SendMessageRequest, SendMessageResponse,
+    Agent, AgentStatus, DiffSource, Event, EventKind, SendMessageRequest, SendMessageResponse,
+    Transcript, TurnDiffResponse,
 };
 use futures::{Stream, StreamExt};
 use tokio::io::AsyncBufReadExt;
@@ -30,6 +31,108 @@ pub struct SendArgs {
 pub struct AttachArgs {
     /// Agent name or id.
     pub agent: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SessionCommand {
+    /// Print what a turn changed, as a unified diff (the latest turn that changed files).
+    Diff(DiffArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DiffArgs {
+    /// Agent name or id.
+    pub agent: String,
+    /// The turn, counting from 1 among the turns that started; negative counts from the end.
+    #[arg(long, allow_hyphen_values = true)]
+    pub turn: Option<i64>,
+    /// Only the files and line counts.
+    #[arg(long)]
+    pub stat: bool,
+}
+
+pub async fn run(ctx: &Context, cmd: SessionCommand) -> Result<()> {
+    match cmd {
+        SessionCommand::Diff(args) => diff(ctx, args).await,
+    }
+}
+
+async fn diff(ctx: &Context, args: DiffArgs) -> Result<()> {
+    let client = ctx.client()?;
+    let transcript: Transcript = client
+        .get(&format!("/v1/agents/{}/transcript", args.agent))
+        .await?;
+    let started: Vec<_> = transcript
+        .turns
+        .iter()
+        .filter(|t| t.started_at.is_some())
+        .collect();
+    let (number, turn) = match args.turn {
+        Some(n) => {
+            let index = if n < 0 {
+                started.len() as i64 + n
+            } else {
+                n - 1
+            };
+            let Some(turn) = usize::try_from(index).ok().and_then(|i| started.get(i)) else {
+                bail!(
+                    "{} has {} turn(s); there is no turn {n}",
+                    transcript.agent.name,
+                    started.len()
+                );
+            };
+            (index as usize + 1, *turn)
+        }
+        None => match started
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, t)| t.diff.is_some())
+        {
+            Some((i, turn)) => (i + 1, *turn),
+            None => bail!("no turn of {} changed files", transcript.agent.name),
+        },
+    };
+    if turn.diff.is_none() {
+        bail!(
+            "turn {number} of {} changed no files",
+            transcript.agent.name
+        );
+    }
+    let response: TurnDiffResponse = client
+        .get(&format!(
+            "/v1/agents/{}/turns/{}/diff",
+            transcript.agent.id, turn.message_id
+        ))
+        .await?;
+    if ctx.json {
+        return print_json(&response);
+    }
+    if args.stat {
+        let stat = &response.stat;
+        for file in &stat.files {
+            println!(
+                "{:>5} {:>5}  {}",
+                format!("+{}", file.added),
+                format!("-{}", file.removed),
+                file.path
+            );
+        }
+        println!(
+            "turn {number}: {} file(s), +{} -{}{}",
+            stat.files.len(),
+            stat.added,
+            stat.removed,
+            if stat.source == DiffSource::Hub {
+                " (worked out by the hub)"
+            } else {
+                ""
+            }
+        );
+    } else {
+        print!("{}", response.diff);
+    }
+    Ok(())
 }
 
 pub async fn send(ctx: &Context, args: SendArgs) -> Result<()> {

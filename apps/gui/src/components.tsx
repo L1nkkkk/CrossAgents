@@ -1,10 +1,36 @@
 import { useState, type ReactNode } from "react";
+import {
+  Activity,
+  ArrowUp,
+  ChartNoAxesColumn,
+  Check,
+  ChevronDown,
+  Columns2,
+  Copy,
+  Crown,
+  ExternalLink,
+  FileDiff,
+  Folder,
+  GitBranch,
+  ListChecks,
+  PanelRight,
+  Plus,
+  Rocket,
+  Search,
+  Settings,
+  Square,
+  UserPlus,
+  Users,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 import type { Agent } from "@bindings/Agent";
 import type { AgentStatus } from "@bindings/AgentStatus";
 import type { RunStatus } from "@bindings/RunStatus";
 import type { TaskStatus } from "@bindings/TaskStatus";
 import { api } from "./api";
 import { useHubData } from "./hub";
+import { full, when } from "./lib/time";
 
 /** How a status reads at a glance: a colour, and whether it is still moving. */
 export type Tone = { color: "accent" | "ok" | "warn" | "danger" | "off" | ""; live?: boolean };
@@ -96,21 +122,11 @@ export function List({ items, empty = "—" }: { items: string[]; empty?: string
   );
 }
 
-export function time(iso: string): string {
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
-}
+/** Full time, for tooltips. */
+export const time = full;
 
-/** "刚刚", "5 分钟前", … then a date. */
-export function ago(iso: string): string {
-  const d = new Date(iso).getTime();
-  if (Number.isNaN(d)) return iso;
-  const s = Math.max(0, (Date.now() - d) / 1000);
-  if (s < 60) return "刚刚";
-  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
-  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
-  return new Date(d).toLocaleDateString();
-}
+/** "刚刚", "12 分钟前", then the clock (lib/time.ts). */
+export const ago = when;
 
 /** All agents, kept fresh by agent events; for showing names instead of ids. */
 export function useAgents() {
@@ -176,35 +192,37 @@ export function DiffStat({ text }: { text: string }) {
   );
 }
 
-/** Small inline icons (no icon font: the CSP allows only local resources). */
-export function Icon({ name, size = 16 }: { name: "plus" | "send" | "stop" | "chart" | "cpu" | "close" | "branch" | "folder"; size?: number }) {
-  const paths: Record<string, ReactNode> = {
-    plus: <path d="M12 5v14M5 12h14" />,
-    send: <path d="M12 19V5M5 12l7-7 7 7" />,
-    stop: <rect x="7" y="7" width="10" height="10" rx="1.5" />,
-    chart: <path d="M4 20h16M7 16v-5M12 16V8M17 16v-8" />,
-    cpu: (
-      <>
-        <rect x="6" y="6" width="12" height="12" rx="2" />
-        <path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3" />
-      </>
-    ),
-    close: <path d="M6 6l12 12M18 6L6 18" />,
-    branch: (
-      <>
-        <circle cx="6" cy="5" r="2" />
-        <circle cx="6" cy="19" r="2" />
-        <circle cx="18" cy="7" r="2" />
-        <path d="M6 7v10M18 9c0 5-6 4-11 8" />
-      </>
-    ),
-    folder: <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />,
-  };
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      {paths[name]}
-    </svg>
-  );
+const ICONS = {
+  plus: Plus,
+  send: ArrowUp,
+  stop: Square,
+  chart: ChartNoAxesColumn,
+  team: Users,
+  close: X,
+  branch: GitBranch,
+  folder: Folder,
+  search: Search,
+  chevron: ChevronDown,
+  beside: Columns2,
+  panel: PanelRight,
+  diff: FileDiff,
+  tasks: ListChecks,
+  events: Activity,
+  copy: Copy,
+  settings: Settings,
+  check: Check,
+  addMate: UserPlus,
+  planner: Crown,
+  rocket: Rocket,
+  open: ExternalLink,
+} satisfies Record<string, LucideIcon>;
+
+export type IconName = keyof typeof ICONS;
+
+/** Line icons (lucide), one size and stroke everywhere; bundled, as the CSP allows only local resources. */
+export function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
+  const Glyph = ICONS[name];
+  return <Glyph size={size} strokeWidth={1.75} absoluteStrokeWidth aria-hidden="true" className="icon" />;
 }
 
 /**

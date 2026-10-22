@@ -28,11 +28,15 @@ import type { RunDetail } from "@bindings/RunDetail";
 import type { SendMessageRequest } from "@bindings/SendMessageRequest";
 import type { SendMessageResponse } from "@bindings/SendMessageResponse";
 import type { Transcript } from "@bindings/Transcript";
+import type { TurnDiffResponse } from "@bindings/TurnDiffResponse";
 import type { UsageGroup } from "@bindings/UsageGroup";
 import type { UsageResponse } from "@bindings/UsageResponse";
 
-/** The Electron preload bridge (electron/preload.cts); absent in a plain browser. */
-export const bridge = typeof window !== "undefined" ? window.crossagents : undefined;
+/**
+ * The Electron preload bridge (electron/preload.cts), or the mock one in `preview:mock`;
+ * absent in a plain browser. Read on use: the mock installs itself before the app starts.
+ */
+export const getBridge = () => (typeof window !== "undefined" ? window.crossagents : undefined);
 
 export class ApiError extends Error {
   /** HTTP status; 0 when the hub could not be reached. */
@@ -49,6 +53,7 @@ type Method = "GET" | "POST" | "DELETE";
 
 async function send(method: Method, path: string, body?: unknown): Promise<{ status: number; body: string }> {
   const json = body === undefined ? null : JSON.stringify(body);
+  const bridge = getBridge();
   if (bridge) {
     try {
       return await bridge.request(method, path, json);
@@ -108,6 +113,8 @@ export const api = {
     request<ListNotesResponse>("GET", `/v1/notes?scope=${scope}${run ? `&run=${enc(run)}` : ""}`),
   updateProfile: (key: string, profile: AgentProfile) => request<Agent>("POST", `/v1/agents/${enc(key)}/profile`, profile),
   transcript: (key: string) => request<Transcript>("GET", `/v1/agents/${enc(key)}/transcript`),
+  turnDiff: (key: string, messageId: string) =>
+    request<TurnDiffResponse>("GET", `/v1/agents/${enc(key)}/turns/${enc(messageId)}/diff`),
   listPlugins: () => request<ListPluginsResponse>("GET", "/v1/plugins"),
 
   listRuns: () => request<ListRunsResponse>("GET", "/v1/runs"),

@@ -14,6 +14,8 @@ export interface CrossAgentsBridge {
   onStatus(listener: (status: string) => void): () => void;
   /** Asks for a folder in the system dialog; null when cancelled. */
   pickFolder?(): Promise<string | null>;
+  /** The page's theme changed: the window frame follows it. */
+  setTheme?(theme: { dark: boolean; background: string; foreground: string }): void;
 }
 
 declare global {

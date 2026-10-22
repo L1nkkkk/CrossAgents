@@ -20,6 +20,18 @@ use crate::state::TaskStatus;
 
 pub const EVENT_SCHEMA_VERSION: u32 = 1;
 
+/// Who worked out what a turn changed (docs/tasks/V6-GUI.md §5).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum DiffSource {
+    /// The driver reported it (`structured_diff`).
+    #[default]
+    Driver,
+    /// The hub compared snapshots of the working directory taken before and after the turn.
+    Hub,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Event {
@@ -129,7 +141,19 @@ pub enum EventKind {
     },
     /// Everything the current turn changed so far, as a unified diff; replaces the last one.
     #[serde(rename = "agent.turn_diff")]
-    AgentTurnDiff { id: AgentId, diff: String },
+    AgentTurnDiff {
+        id: AgentId,
+        diff: String,
+        /// The turn it belongs to; absent in events written before the field existed (the
+        /// running turn, else the last one that started).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        message_id: Option<MessageId>,
+        /// Who worked it out; absent means the driver.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        source: Option<DiffSource>,
+    },
     /// The agent asked before acting and was answered by the permission policy.
     #[serde(rename = "agent.permission")]
     AgentPermission {

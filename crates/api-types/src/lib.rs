@@ -9,9 +9,9 @@ use ts_rs::TS;
 
 pub use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentProfile, AgentStatus, Capabilities, CheckResult,
-    DataSource, DriverKind, Event, EventKind, MessageId, MessageSource, ModelInfo, OutputStream,
-    PlannedTask, Role, Run, RunId, RunStatus, StopReason, Task, TaskId, TaskStatus, TokenTotals,
-    ToolInfo, ToolStatus,
+    DataSource, DiffSource, DriverKind, Event, EventKind, MessageId, MessageSource, ModelInfo,
+    OutputStream, PlannedTask, Role, Run, RunId, RunStatus, StopReason, Task, TaskId, TaskStatus,
+    TokenTotals, ToolInfo, ToolStatus,
 };
 
 pub const API_VERSION: &str = "v1";
@@ -132,10 +132,101 @@ pub struct TranscriptTurn {
     pub stop_reason: Option<StopReason>,
     /// In arrival order. Consecutive output of the same stream is merged into one item.
     pub items: Vec<TranscriptItem>,
-    /// Everything the turn changed, as a unified diff, when the agent reports it.
+    /// What the turn changed, file by file; the diff itself is at
+    /// `GET /v1/agents/{key}/turns/{message_id}/diff`. Absent for turns that changed nothing
+    /// (or whose changes no one could see).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub diff: Option<String>,
+    pub diff: Option<TurnDiffStat>,
+}
+
+/// Files a turn changed, with added and removed lines.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TurnDiffStat {
+    pub files: Vec<FileStat>,
+    pub added: u32,
+    pub removed: u32,
+    pub source: DiffSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FileStat {
+    pub path: String,
+    pub added: u32,
+    pub removed: u32,
+}
+
+impl TurnDiffStat {
+    /// Counts a unified diff (`git diff` output, one or more files). A bare hunk list without
+    /// `diff --git` headers counts as one file named after its `+++`/`---` lines.
+    pub fn from_diff(diff: &str, source: DiffSource) -> Self {
+        let mut files: Vec<FileStat> = Vec::new();
+        // In a file's header (before its first hunk), `---`/`+++` name files, not lines.
+        let mut header = true;
+        let new_file = |files: &mut Vec<FileStat>, path: String| {
+            files.push(FileStat {
+                path,
+                added: 0,
+                removed: 0,
+            })
+        };
+        for line in diff.lines() {
+            if let Some(rest) = line.strip_prefix("diff --git ") {
+                let path = rest.rsplit_once(" b/").map_or(rest, |(_, b)| b).to_owned();
+                new_file(&mut files, path);
+                header = true;
+                continue;
+            }
+            if header && (line.starts_with("+++ ") || line.starts_with("--- ")) {
+                let path = line[4..].trim_start_matches("a/").trim_start_matches("b/");
+                if files.is_empty() {
+                    new_file(&mut files, String::new());
+                }
+                let file = files.last_mut().expect("just pushed");
+                if file.path.is_empty() && path != "/dev/null" {
+                    file.path = path.to_owned();
+                }
+                continue;
+            }
+            if line.starts_with("@@") {
+                header = false;
+                if files.is_empty() {
+                    new_file(&mut files, String::new());
+                }
+                continue;
+            }
+            if header {
+                continue;
+            }
+            let Some(file) = files.last_mut() else {
+                continue;
+            };
+            if line.starts_with('+') {
+                file.added += 1;
+            } else if line.starts_with('-') {
+                file.removed += 1;
+            }
+        }
+        files.retain(|f| !f.path.is_empty() || f.added + f.removed > 0);
+        Self {
+            added: files.iter().map(|f| f.added).sum(),
+            removed: files.iter().map(|f| f.removed).sum(),
+            files,
+            source,
+        }
+    }
+}
+
+/// `GET /v1/agents/{key}/turns/{message_id}/diff`: everything one turn changed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TurnDiffResponse {
+    pub message_id: MessageId,
+    /// Unified diff.
+    pub diff: String,
+    pub stat: TurnDiffStat,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -498,5 +589,44 @@ mod tests {
     fn api_error_shape() {
         let json = serde_json::to_value(ApiError::new(ErrorCode::NotFound, "nope")).unwrap();
         assert_eq!(json["error"]["code"], "not_found");
+    }
+
+    #[test]
+    fn turn_diff_stat_counts_files_and_lines() {
+        let diff = "diff --git a/src/auth.rs b/src/auth.rs\n\
+                    index 1..2 100644\n\
+                    --- a/src/auth.rs\n\
+                    +++ b/src/auth.rs\n\
+                    @@ -1,3 +1,4 @@\n \
+                    fn a() {}\n\
+                    -fn b() {}\n\
+                    +fn b() -> u8 { 1 }\n\
+                    +--- not a header\n\
+                    diff --git a/new.txt b/new.txt\n\
+                    new file mode 100644\n\
+                    --- /dev/null\n\
+                    +++ b/new.txt\n\
+                    @@ -0,0 +1 @@\n\
+                    +hi\n";
+        let stat = TurnDiffStat::from_diff(diff, DiffSource::Hub);
+        assert_eq!(stat.files.len(), 2);
+        assert_eq!(stat.files[0].path, "src/auth.rs");
+        assert_eq!((stat.files[0].added, stat.files[0].removed), (2, 1));
+        assert_eq!(stat.files[1].path, "new.txt");
+        assert_eq!((stat.added, stat.removed), (3, 1));
+        assert_eq!(stat.source, DiffSource::Hub);
+
+        // Codex sometimes sends a bare hunk list for one file.
+        let bare = TurnDiffStat::from_diff(
+            "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n",
+            DiffSource::Driver,
+        );
+        assert_eq!(bare.files.len(), 1);
+        assert_eq!(bare.files[0].path, "x");
+        assert!(
+            TurnDiffStat::from_diff("", DiffSource::Driver)
+                .files
+                .is_empty()
+        );
     }
 }

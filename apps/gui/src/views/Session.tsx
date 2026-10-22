@@ -8,7 +8,10 @@ import { view } from "../activity";
 import { api, errorText } from "../api";
 import { ACTIVE_RUN, useRunTree } from "../App";
 import { Avatar, ErrorBox, Icon, Mark, Prose, StatusChip, Vendor, agentTitle, agentTone, displayName, roleShape, time, useAgents, vendorName } from "../components";
-import { diffStat, parseDiff, tailLines, type DiffFile } from "../lib/diff";
+import { ChangeStat, DiffView } from "../diffview";
+import { parseDiff, tailLines, type DiffFile } from "../lib/diff";
+import { clock, range } from "../lib/time";
+import { focusSession, openTool, toggleTools, useLayout } from "../panes";
 import { taskState } from "../lib/taskState";
 import { duration, failed, liveActivity, stepLine, summarize, workGroups, type Step } from "../lib/workGroups";
 import { PeerMessage, StateWord, useArmed } from "../parts";
@@ -62,7 +65,7 @@ export function SessionView({ name, onClose }: { name: string; onClose?: () => v
   const queued = turns.filter((t) => !started(t));
 
   return (
-    <section className="pane">
+    <section className="pane" onPointerDownCapture={() => focusSession(name)}>
       <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} onClose={onClose} />
       <Conversation agent={agent} turns={turns.filter(started)} agents={everyone} tree={runs} />
       <div className="dock">
@@ -157,6 +160,7 @@ function Header({
             {stop.armed ? "再点一次停止" : "停止"}
           </button>
         )}
+        <ToolsToggle />
         {onClose && (
           <button className="ghost icon" onClick={onClose} title="关闭这一栏" aria-label="关闭这一栏">
             <Icon name="close" size={15} />
@@ -272,6 +276,7 @@ function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agen
       )}
       {running && <LiveLine since={turn.started_at!} items={turn.items} />}
       {turn.completed_at && <TurnFoot turn={turn} />}
+      {turn.completed_at && turn.diff && <TurnChanges turn={turn} agent={agent} />}
     </div>
   );
 }
@@ -446,37 +451,13 @@ function ToolDetailView({ step, changes }: { step: ToolCall; changes: DiffFile[]
 /** "70ms" under a second, else like `duration`. */
 const took = (ms: number) => (ms < 1000 ? `${ms}ms` : duration(ms));
 
-function ChangeStat({ files }: { files: DiffFile[] }) {
-  const { added, removed } = diffStat(files);
-  if (!added && !removed) return null;
+/** The tool column's switch, in each conversation's header. */
+function ToolsToggle() {
+  const { state } = useLayout();
   return (
-    <span className="tiny mono">
-      <span className="add">+{added}</span> <span className="del">−{removed}</span>
-    </span>
-  );
-}
-
-/** Unified diffs, one block per file. */
-function DiffView({ files }: { files: DiffFile[] }) {
-  return (
-    <div className="diff">
-      {files.map((file, i) => (
-        <div key={i} className="diff-file">
-          <div className="diff-head">
-            <span className="mono">{file.path || "（未命名）"}</span>
-            <ChangeStat files={[file]} />
-          </div>
-          <pre className="diff-body">
-            {file.lines.map((line, j) => (
-              <div key={j} className={`dl ${line.kind}`}>
-                <span className="sign">{line.kind === "add" ? "+" : line.kind === "del" ? "−" : " "}</span>
-                {line.text}
-              </div>
-            ))}
-          </pre>
-        </div>
-      ))}
-    </div>
+    <button className={`ghost icon ${state.tools.open ? "on" : ""}`} onClick={toggleTools} title="工具列：改动、任务、事件流" aria-label="工具列" aria-pressed={state.tools.open}>
+      <Icon name="panel" size={16} />
+    </button>
   );
 }
 
@@ -510,34 +491,79 @@ const STOP_TEXT: Record<string, string> = {
 
 /** After a finished turn: how long it worked, when, and why it stopped if not normally. */
 function TurnFoot({ turn }: { turn: TranscriptTurn }) {
-  const [open, setOpen] = useState(false);
   const start = turn.started_at ?? turn.sent_at;
   const worked = duration(new Date(turn.completed_at!).getTime() - new Date(start).getTime());
   const reason = turn.stop_reason && turn.stop_reason !== "end_turn" ? turn.stop_reason : null;
-  const files = turn.diff ? parseDiff(turn.diff) : [];
   return (
-    <>
-      <div className={`turn-note ${reason === "error" ? "danger" : ""}`} title={`${time(start)} → ${time(turn.completed_at!)}`}>
-        {reason ? `— ${STOP_TEXT[reason] ?? reason} · ` : ""}已工作 {worked} · {clock(turn.completed_at!)}
-        {files.length > 0 && (
-          <button className="turn-diff" onClick={() => setOpen(!open)} aria-expanded={open}>
-            · 改动 {files.length} 个文件 <ChangeStat files={files} /> {open ? "▾" : "▸"}
-          </button>
-        )}
-      </div>
-      {open && <DiffView files={files} />}
-    </>
+    <div className={`turn-note ${reason === "error" ? "danger" : ""}`} title={range(start, turn.completed_at)}>
+      {reason ? `— ${STOP_TEXT[reason] ?? reason} · ` : ""}已工作 {worked} · {clock(turn.completed_at!)}
+    </div>
   );
 }
 
-/** "11:02", "昨天 18:40", "10-03 18:40". */
-function clock(iso: string): string {
-  const d = new Date(iso);
-  const hm = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const days = Math.round((new Date(new Date().toDateString()).getTime() - new Date(d.toDateString()).getTime()) / 86_400_000);
-  if (days <= 0) return hm;
-  if (days === 1) return `昨天 ${hm}`;
-  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${hm}`;
+/** Files named on the summary line before the rest become "+N". */
+const NAMED_FILES = 2;
+
+/**
+ * What a turn changed, under its reply: `✎ 改了 3 个文件 +12 −4 · src/auth.rs · src/login.tsx · +1 ▸`.
+ * Opens to one row per file: its stat, "查看变更" (this turn's diff in the tool column) and
+ * "复制路径". Read-only turns have no line.
+ */
+function TurnChanges({ turn, agent }: { turn: TranscriptTurn; agent: Agent }) {
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState<string>();
+  const stat = turn.diff!;
+  const named = stat.files.slice(0, NAMED_FILES);
+  const rest = stat.files.length - named.length;
+  const view = (file?: string) => openTool("changes", { agent: agent.name, turn: turn.message_id, file });
+  const copy = async (path: string) => {
+    try {
+      await navigator.clipboard.writeText(path);
+      setCopied(path);
+      setTimeout(() => setCopied(undefined), 1500);
+    } catch {
+      // The path is on screen to copy by hand.
+    }
+  };
+  return (
+    <div className={`turn-changes ${open ? "open" : ""}`}>
+      <button className="tch-line" onClick={() => setOpen(!open)} aria-expanded={open} title={stat.source === "hub" ? "由 hub 比较本轮前后的工作区得出" : undefined}>
+        <span className="tch-pen" aria-hidden="true">
+          <Icon name="diff" size={13} />
+        </span>
+        改了 {stat.files.length} 个文件 <ChangeStat files={[stat]} />
+        {named.map((f) => (
+          <span key={f.path} className="tch-file">
+            · {f.path}
+          </span>
+        ))}
+        {rest > 0 && <span className="tch-file">· +{rest}</span>}
+        <span className="disclosure" aria-hidden="true">
+          {open ? "▾" : "▸"}
+        </span>
+      </button>
+      {open && (
+        <div className="tch-rows">
+          {stat.files.map((f) => (
+            <div key={f.path} className="tch-row">
+              <span className="tch-path mono" title={f.path}>
+                {f.path}
+              </span>
+              <ChangeStat files={[f]} />
+              <span className="tch-actions">
+                <button className="link" onClick={() => view(f.path)}>
+                  查看变更
+                </button>
+                <button className="link" onClick={() => copy(f.path)}>
+                  {copied === f.path ? "已复制" : "复制路径"}
+                </button>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 const QUEUE_OPEN = "crossagents.queueOpen";

@@ -75,16 +75,22 @@ function devCsp(): Plugin {
     transformIndexHtml: (html) =>
       html
         .replace("script-src 'self'", "script-src 'self' 'unsafe-inline'")
-        .replace("connect-src 'self'", "connect-src 'self' ws://localhost:1420"),
+        .replace("connect-src 'self'", "connect-src 'self' ws://localhost:* ws://127.0.0.1:*"),
   };
 }
 
-export default defineConfig({
-  // Relative asset URLs: the packaged app loads dist/index.html from a file:// URL.
-  base: "./",
-  plugins: [react(), hubProxy(), devCsp()],
-  resolve: { alias: { "@bindings": fileURLToPath(new URL("../../bindings", import.meta.url)) } },
-  clearScreen: false,
-  server: { port: 1420, strictPort: true, watch: { ignored: ["**/electron/**", "**/dist-electron/**", "**/release/**"] } },
-  build: { target: "es2022" },
+export default defineConfig(({ mode }) => {
+  // `npm run preview:mock` (or VITE_MOCK=1): the page answers itself with made-up data, no hub
+  // needed (src/dev/). Everything behind `__MOCK__` is dropped from other builds.
+  const mock = mode === "mock" || process.env.VITE_MOCK === "1";
+  return {
+    // Relative asset URLs: the packaged app loads dist/index.html from a file:// URL.
+    base: "./",
+    plugins: [react(), ...(mock ? [] : [hubProxy()]), devCsp()],
+    define: { __MOCK__: JSON.stringify(mock) },
+    resolve: { alias: { "@bindings": fileURLToPath(new URL("../../bindings", import.meta.url)) } },
+    clearScreen: false,
+    server: { port: 1420, strictPort: !mock, watch: { ignored: ["**/electron/**", "**/dist-electron/**", "**/release/**"] } },
+    build: { target: "es2022" },
+  };
 });

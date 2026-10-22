@@ -7,7 +7,6 @@ import type { TaskSpec } from "@bindings/TaskSpec";
 import { api, errorText } from "../api";
 import {
   Avatar,
-  DiffStat,
   Dot,
   ErrorBox,
   Icon,
@@ -27,7 +26,7 @@ import {
 import { useHubData, type HubEvent } from "../hub";
 import { BUCKET_LABEL, groupTasks, progress, taskState } from "../lib/taskState";
 import { PRESETS, budgetText, presetOf } from "../lib/policy";
-import { StateWord, useArmed } from "../parts";
+import { StateWord, TaskChanges, useArmed } from "../parts";
 
 function concerns(runId: string, e: HubEvent): boolean {
   switch (e.type) {
@@ -485,110 +484,99 @@ export function SpecView({ spec }: { spec: TaskSpec }) {
   );
 }
 
-export function TaskDrawer({ runId, taskId, onClose }: { runId: string; taskId: string; onClose: () => void }) {
+/** A task's details: who, attempts, failure, question, review, summary, changes, checks, spec. */
+export function TaskDetail({ runId, taskId }: { runId: string; taskId: string }) {
   const detail = useRun(runId);
   const agents = useAgents();
   const task = detail.data?.tasks.find((t) => t.id === taskId || t.key === taskId);
 
   return (
-    <>
-      <div className="topbar">
-        {task ? (
-          <>
-            <code>{task.key}</code>
+    <div className="task-detail">
+      {!detail.data && (detail.error ? <ErrorBox error={detail.error} /> : <p className="muted">加载中…</p>)}
+      {detail.data && !task && <ErrorBox error={`这个 run 里没有任务 ${taskId}`} />}
+      {task && (
+        <>
+          <div className="row" style={{ gap: 8 }}>
+            <code>#{task.key}</code>
             <StatusChip status={task.status} tone={taskTone(task.status)} />
-          </>
-        ) : (
-          <span className="muted">任务</span>
-        )}
-        <div className="spacer" />
-        <button className="ghost icon" onClick={onClose} aria-label="关闭">
-          <Icon name="close" size={16} />
-        </button>
-      </div>
-      <div className="body">
-        {!detail.data && (detail.error ? <ErrorBox error={detail.error} /> : <p className="muted">加载中…</p>)}
-        {detail.data && !task && <ErrorBox error={`这个 run 里没有任务 ${taskId}`} />}
-        {task && (
-          <>
-            <h3>{task.title}</h3>
-            <dl className="kv small">
-              <dt>Worker</dt>
-              <dd>
-                {task.assignee ? <a href={sessionHref(agentName(agents.data, task.assignee))}>{agentName(agents.data, task.assignee)}</a> : "—"}
-                {task.escalated && <span className="chip warn" style={{ marginLeft: 6 }}>已升级</span>}
-              </dd>
-              {task.reviewer && (
-                <>
-                  <dt>Reviewer</dt>
-                  <dd>
-                    <a href={sessionHref(agentName(agents.data, task.reviewer))}>{agentName(agents.data, task.reviewer)}</a>
-                  </dd>
-                </>
-              )}
-              <dt>尝试</dt>
-              <dd>
-                {task.attempts}
-                {task.nudges > 0 && <span className="muted"> · 提醒 {task.nudges} 次</span>}
-              </dd>
-              <dt>分支</dt>
-              <dd>{task.branch ? <code>{task.branch}</code> : "—"}</dd>
-              <dt>更新</dt>
-              <dd>{ago(task.updated_at)}</dd>
-            </dl>
+            <span className="spacer" />
+            <a className="small" href={`#/runs/${detail.data!.run.id}/tasks/${task.id}`}>
+              {detail.data!.run.title}
+            </a>
+          </div>
+          <h3 style={{ marginTop: 10 }}>{task.title}</h3>
+          <dl className="kv small">
+            <dt>Worker</dt>
+            <dd>
+              {task.assignee ? <a href={sessionHref(agentName(agents.data, task.assignee))}>{agentName(agents.data, task.assignee)}</a> : "—"}
+              {task.escalated && <span className="chip warn" style={{ marginLeft: 6 }}>已升级</span>}
+            </dd>
+            {task.reviewer && (
+              <>
+                <dt>Reviewer</dt>
+                <dd>
+                  <a href={sessionHref(agentName(agents.data, task.reviewer))}>{agentName(agents.data, task.reviewer)}</a>
+                </dd>
+              </>
+            )}
+            <dt>尝试</dt>
+            <dd>
+              {task.attempts}
+              {task.nudges > 0 && <span className="muted"> · 提醒 {task.nudges} 次</span>}
+            </dd>
+            <dt>分支</dt>
+            <dd>{task.branch ? <code>{task.branch}</code> : "—"}</dd>
+            <dt>更新</dt>
+            <dd title={time(task.updated_at)}>{ago(task.updated_at)}</dd>
+          </dl>
 
-            {task.report.failure && <Section title="失败原因">{<div className="item-error">{task.report.failure}</div>}</Section>}
-            {task.report.question && (
-              <Section title="Worker 的问题">
-                <div className="msg-card">
-                  <Prose text={task.report.question} />
-                </div>
-              </Section>
-            )}
-            {task.report.review && (
-              <Section title="审查意见">
-                <div className="msg-card">
-                  <Prose text={task.report.review} />
-                </div>
-              </Section>
-            )}
-            <Section title="Worker 总结">
-              {task.report.summary ? (
-                <div className="msg-card">
-                  <Prose text={task.report.summary} />
-                </div>
-              ) : (
-                <p className="muted small">还没有提交。</p>
-              )}
+          {task.report.failure && <Section title="失败原因">{<div className="item-error">{task.report.failure}</div>}</Section>}
+          {task.report.question && (
+            <Section title="Worker 的问题">
+              <div className="msg-card">
+                <Prose text={task.report.question} />
+              </div>
             </Section>
-            {task.report.diff_stat && (
-              <Section title="改动">
-                <DiffStat text={task.report.diff_stat} />
-              </Section>
+          )}
+          {task.report.review && (
+            <Section title="审查意见">
+              <div className="msg-card">
+                <Prose text={task.report.review} />
+              </div>
+            </Section>
+          )}
+          <Section title="Worker 总结">
+            {task.report.summary ? (
+              <div className="msg-card">
+                <Prose text={task.report.summary} />
+              </div>
+            ) : (
+              <p className="muted small">还没有提交。</p>
             )}
-            <Section title="验收">
-              {task.report.checks.length ? (
-                task.report.checks.map((check, i) => (
-                  <details className="check-result" key={i} open={!check.passed}>
-                    <summary>
-                      <span className={check.passed ? "pass" : "fail"}>{check.passed ? "✓" : "✗"}</span>
-                      <code>{check.command}</code>
-                      <span className="muted small">exit {check.exit_code ?? "—"}</span>
-                    </summary>
-                    <pre>{check.output || "（无输出）"}</pre>
-                  </details>
-                ))
-              ) : (
-                <p className="muted small">还没有运行验收。</p>
-              )}
-            </Section>
-            <Section title="规格">
-              <SpecView spec={task.spec} />
-            </Section>
-          </>
-        )}
-      </div>
-    </>
+          </Section>
+          <TaskChanges task={task} agents={agents.data ?? []} title={(children) => <Section title="改动">{children}</Section>} />
+          <Section title="验收">
+            {task.report.checks.length ? (
+              task.report.checks.map((check, i) => (
+                <details className="check-result" key={i} open={!check.passed}>
+                  <summary>
+                    <span className={check.passed ? "pass" : "fail"}>{check.passed ? "✓" : "✗"}</span>
+                    <code>{check.command}</code>
+                    <span className="muted small">exit {check.exit_code ?? "—"}</span>
+                  </summary>
+                  <pre>{check.output || "（无输出）"}</pre>
+                </details>
+              ))
+            ) : (
+              <p className="muted small">还没有运行验收。</p>
+            )}
+          </Section>
+          <Section title="规格">
+            <SpecView spec={task.spec} />
+          </Section>
+        </>
+      )}
+    </div>
   );
 }
 

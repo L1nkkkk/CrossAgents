@@ -21,8 +21,8 @@ use crossagents_api_types::{
     FinishRequest, HealthResponse, HubInfo, LandRequest, ListAccountsResponse, ListAgentsResponse,
     ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
     ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest, RunDetail,
-    SendMessageRequest, SendMessageResponse, SetModelRequest, Transcript, UsageGroup,
-    UsageResponse,
+    SendMessageRequest, SendMessageResponse, SetModelRequest, Transcript, TurnDiffResponse,
+    UsageGroup, UsageResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError,
@@ -81,6 +81,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             delete(withdraw_message),
         )
         .route("/v1/agents/{key}/transcript", get(transcript))
+        .route("/v1/agents/{key}/turns/{message_id}/diff", get(turn_diff))
         .route("/v1/agents/{key}/profile", post(update_profile))
         .route("/v1/agents/{key}/model", post(set_model))
         .route("/v1/agents/{key}/connect", post(connect_agent))
@@ -337,6 +338,22 @@ async fn update_profile(
     Ok(Json(agent))
 }
 
+/// Folds every stored event of `agent` up to now.
+async fn fold_agent(state: &AppState, agent: AgentId) -> Result<crate::transcript::Fold, AppError> {
+    let mut fold = crate::transcript::Fold::default();
+    loop {
+        let page = state
+            .store()
+            .agent_events(agent, fold.last_seq, EVENT_PAGE)
+            .await?;
+        if page.is_empty() {
+            break;
+        }
+        page.iter().for_each(|e| fold.push(e));
+    }
+    Ok(fold)
+}
+
 /// Rebuilds the agent's conversation from its stored events.
 async fn transcript(
     State(state): State<Arc<AppState>>,
@@ -351,17 +368,7 @@ async fn transcript(
     // Clients follow the global stream from `last_seq`. Read the head first: every event
     // of this agent up to it is then folded in, and later ones arrive on the stream.
     let head = state.store().latest_event_seq().await?;
-    let mut fold = crate::transcript::Fold::default();
-    loop {
-        let page = state
-            .store()
-            .agent_events(agent.id, fold.last_seq, EVENT_PAGE)
-            .await?;
-        if page.is_empty() {
-            break;
-        }
-        page.iter().for_each(|e| fold.push(e));
-    }
+    let fold = fold_agent(&state, agent.id).await?;
     Ok(Json(Transcript {
         agent,
         driver: resolved.as_ref().map(|r| r.driver.kind()),
@@ -369,6 +376,37 @@ async fn transcript(
         turns: fold.turns,
         usage: fold.usage,
         last_seq: head.max(fold.last_seq),
+    }))
+}
+
+/// What one turn changed, as a unified diff.
+async fn turn_diff(
+    State(state): State<Arc<AppState>>,
+    Path((key, message_id)): Path<(String, String)>,
+) -> ApiResult<Json<TurnDiffResponse>> {
+    let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    let message_id: MessageId = message_id
+        .parse()
+        .map_err(|_| AppError::bad_request(format!("invalid message id: {message_id}")))?;
+    let mut fold = fold_agent(&state, agent.id).await?;
+    let not_found = || {
+        AppError::new(
+            StatusCode::NOT_FOUND,
+            ErrorCode::NotFound,
+            format!("turn {message_id} of {} changed nothing", agent.name),
+        )
+    };
+    let stat = fold
+        .turns
+        .iter()
+        .find(|t| t.message_id == message_id)
+        .and_then(|t| t.diff.clone())
+        .ok_or_else(not_found)?;
+    let diff = fold.diffs.remove(&message_id).ok_or_else(not_found)?;
+    Ok(Json(TurnDiffResponse {
+        message_id,
+        diff,
+        stat,
     }))
 }
 

@@ -164,8 +164,14 @@ pub fn summary(kind: &EventKind) -> String {
             }
             format!("{} {tool_call_id} {}", short(id), parts.join(", "))
         }
-        EventKind::AgentTurnDiff { id, diff } => {
-            format!("{} diff, {} line(s)", short(id), diff.lines().count())
+        EventKind::AgentTurnDiff {
+            id, diff, source, ..
+        } => {
+            let by = match source {
+                Some(crossagents_api_types::DiffSource::Hub) => " (hub)",
+                _ => "",
+            };
+            format!("{} diff, {} line(s){by}", short(id), diff.lines().count())
         }
         EventKind::AgentPermission {
             id,
