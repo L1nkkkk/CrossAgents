@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::CheckResult;
+use crossagents_core::process::NoWindow;
 use tokio::process::Command;
 
 /// Decides whether a task's result is acceptable.
@@ -34,7 +35,7 @@ impl Default for ShellVerifier {
 fn shell(command: &str) -> Command {
     if cfg!(windows) {
         let mut cmd = Command::new("cmd");
-        cmd.arg("/C").arg(command);
+        cmd.arg("/C").arg(command).no_window();
         cmd
     } else {
         let mut cmd = Command::new("sh");

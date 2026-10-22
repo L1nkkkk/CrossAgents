@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { app, BrowserWindow, dialog, ipcMain, nativeTheme, shell, session, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell, session, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
 
 const METHODS = new Set(["GET", "POST", "DELETE"]);
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -237,6 +237,18 @@ async function createWindow() {
   });
   win.once("ready-to-show", () => win.show());
   if (devServerUrl) {
+    // No menu bar, so the dev shortcuts it carried are wired here: F12 / Ctrl+Shift+I, Ctrl+R.
+    win.webContents.on("before-input-event", (event, input) => {
+      if (input.type !== "keyDown") return;
+      const key = input.key.toLowerCase();
+      if (input.key === "F12" || (input.control && input.shift && key === "i")) {
+        win.webContents.toggleDevTools();
+        event.preventDefault();
+      } else if (input.control && !input.shift && key === "r") {
+        win.webContents.reload();
+        event.preventDefault();
+      }
+    });
     // The dev server may still be starting.
     for (;;) {
       try {
@@ -255,6 +267,8 @@ async function createWindow() {
 app.whenReady().then(() => {
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   session.defaultSession.setPermissionCheckHandler(() => false);
+  // No File / Edit / View / Window bar: everything lives in the page. Copy and paste still work.
+  Menu.setApplicationMenu(null);
   void createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) void createWindow();

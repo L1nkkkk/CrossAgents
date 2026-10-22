@@ -5,6 +5,7 @@ import {
   ChartNoAxesColumn,
   Check,
   ChevronDown,
+  ChevronRight,
   Columns2,
   Copy,
   Crown,
@@ -13,11 +14,14 @@ import {
   Folder,
   GitBranch,
   ListChecks,
+  MessageCircle,
   PanelRight,
+  Pin,
   Plus,
   Rocket,
   Search,
   Settings,
+  SlidersHorizontal,
   Square,
   UserPlus,
   Users,
@@ -30,6 +34,7 @@ import type { RunStatus } from "@bindings/RunStatus";
 import type { TaskStatus } from "@bindings/TaskStatus";
 import { api } from "./api";
 import { useHubData } from "./hub";
+import { parseBlocks, parseInline, type Block, type Inline } from "./lib/markdown";
 import { full, when } from "./lib/time";
 
 /** How a status reads at a glance: a colour, and whether it is still moving. */
@@ -149,23 +154,93 @@ export const sessionHref = (name: string) => `#/s/${encodeURIComponent(name)}`;
  * split paragraphs. Deliberately small; no HTML is ever interpreted.
  */
 export function Prose({ text }: { text: string }) {
-  const blocks: ReactNode[] = [];
-  const parts = text.split(/^```[^\n]*\n?/m);
-  parts.forEach((part, i) => {
-    if (i % 2 === 1) {
-      blocks.push(<pre key={i}>{part.replace(/\n$/, "")}</pre>);
-      return;
-    }
-    part
-      .split(/\n{2,}/)
-      .filter((p) => p.trim())
-      .forEach((p, j) => blocks.push(<p key={`${i}-${j}`}>{inline(p.replace(/^\n+|\n+$/g, ""))}</p>));
-  });
-  return <div className="prose">{blocks}</div>;
+  return <div className="prose">{renderBlocks(parseBlocks(text))}</div>;
 }
 
-function inline(text: string): ReactNode[] {
-  return text.split(/(`[^`\n]+`)/).map((s, i) => (s.startsWith("`") && s.endsWith("`") && s.length > 2 ? <code key={i}>{s.slice(1, -1)}</code> : s));
+function renderBlocks(blocks: Block[]): ReactNode[] {
+  return blocks.map((b, i) => {
+    switch (b.t) {
+      case "p":
+        return <p key={i}>{renderInline(parseInline(b.text))}</p>;
+      case "h": {
+        const H = (["h3", "h3", "h4", "h5", "h6", "h6"] as const)[b.level - 1];
+        return <H key={i}>{renderInline(parseInline(b.text))}</H>;
+      }
+      case "code":
+        return <pre key={i}>{b.text}</pre>;
+      case "list": {
+        const items = b.items.map((item, j) => (
+          <li key={j}>
+            {renderInline(parseInline(item.text))}
+            {item.children.length > 0 && renderBlocks(item.children)}
+          </li>
+        ));
+        return b.ordered ? (
+          <ol key={i} start={b.start}>
+            {items}
+          </ol>
+        ) : (
+          <ul key={i}>{items}</ul>
+        );
+      }
+      case "quote":
+        return <blockquote key={i}>{renderBlocks(b.blocks)}</blockquote>;
+      case "hr":
+        return <hr key={i} />;
+      case "table":
+        return (
+          <div key={i} className="prose-table">
+            <table>
+              <thead>
+                <tr>
+                  {b.head.map((c, j) => (
+                    <th key={j} style={{ textAlign: b.align[j] }}>
+                      {renderInline(parseInline(c))}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {b.rows.map((row, r) => (
+                  <tr key={r}>
+                    {row.map((c, j) => (
+                      <td key={j} style={{ textAlign: b.align[j] }}>
+                        {renderInline(parseInline(c))}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        );
+    }
+  });
+}
+
+function renderInline(spans: Inline[]): ReactNode[] {
+  return spans.map((s, i) => {
+    switch (s.t) {
+      case "text":
+        return s.text;
+      case "code":
+        return <code key={i}>{s.text}</code>;
+      case "strong":
+        return <strong key={i}>{renderInline(s.children)}</strong>;
+      case "em":
+        return <em key={i}>{renderInline(s.children)}</em>;
+      case "del":
+        return <del key={i}>{renderInline(s.children)}</del>;
+      case "link":
+        return (
+          <a key={i} href={s.href} target="_blank" rel="noreferrer">
+            {renderInline(s.children)}
+          </a>
+        );
+      case "br":
+        return <br key={i} />;
+    }
+  });
 }
 
 /** `git diff --stat` with the +/- bars coloured. */
@@ -203,6 +278,8 @@ const ICONS = {
   folder: Folder,
   search: Search,
   chevron: ChevronDown,
+  chevronRight: ChevronRight,
+  pin: Pin,
   beside: Columns2,
   panel: PanelRight,
   diff: FileDiff,
@@ -210,7 +287,9 @@ const ICONS = {
   events: Activity,
   copy: Copy,
   settings: Settings,
+  sliders: SlidersHorizontal,
   check: Check,
+  chat: MessageCircle,
   addMate: UserPlus,
   planner: Crown,
   rocket: Rocket,
@@ -279,13 +358,22 @@ export function BrandMark({ size = 22 }: { size?: number }) {
 /** Avatar colours, matching `AgentProfile::COLORS` in the hub. */
 export const AVATAR_COLORS = ["indigo", "violet", "rose", "amber", "emerald", "teal", "sky", "slate"] as const;
 
+/** Each role in its own colour, wherever a role is shown. */
+export const ROLE_HUE: Record<string, (typeof AVATAR_COLORS)[number]> = { planner: "violet", worker: "sky", reviewer: "amber" };
+
+/** A stable colour from the palette for any text (a workspace path, an agent name). */
+export function hueOf(text: string): (typeof AVATAR_COLORS)[number] {
+  let h = 0;
+  for (const c of text) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  // Slate is for "no colour"; generated colours skip it.
+  return AVATAR_COLORS[h % (AVATAR_COLORS.length - 1)];
+}
+
 /** A stable colour for agents that did not pick one. */
-function colorOf(agent: Agent): string {
+export function colorOf(agent: Agent): string {
   const picked = agent.profile?.color;
   if (picked && (AVATAR_COLORS as readonly string[]).includes(picked)) return picked;
-  let h = 0;
-  for (const c of agent.name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  return AVATAR_COLORS[h % AVATAR_COLORS.length];
+  return hueOf(agent.name);
 }
 
 type Vendor = "claude" | "codex" | "other";
@@ -363,77 +451,6 @@ export function Avatar({ agent, size = 20, status = false }: { agent: Agent; siz
     </span>
   );
 }
-
-/** Starting points for a new teammate; everything stays editable. */
-export const PERSONA_PRESETS: {
-  key: string;
-  label: string;
-  role: "planner" | "worker" | "reviewer";
-  title: string;
-  avatar: string;
-  color: string;
-  persona: string;
-}[] = [
-  {
-    key: "architect",
-    label: "架构师",
-    role: "planner",
-    title: "架构师",
-    avatar: "",
-    color: "indigo",
-    persona:
-      "You design before anyone codes. Read the codebase, find the smallest change that does the job, and split it into tasks with precise specs, clear file scopes and acceptance commands. Prefer boring, proven solutions.",
-  },
-  {
-    key: "coder",
-    label: "Coder",
-    role: "worker",
-    title: "Coder",
-    avatar: "",
-    color: "sky",
-    persona:
-      "You implement exactly what the spec asks, in the style of the surrounding code. Stay inside the allowed files, run the acceptance commands before reporting, and ask instead of guessing when the spec is unclear.",
-  },
-  {
-    key: "designer",
-    label: "设计师",
-    role: "worker",
-    title: "设计师",
-    avatar: "",
-    color: "rose",
-    persona:
-      "You own the UI: layout, spacing, typography, colour and states (empty, loading, error). Keep to the existing design tokens, make every screen work in light and dark mode, and explain visual choices briefly.",
-  },
-  {
-    key: "security",
-    label: "安全审核专员",
-    role: "reviewer",
-    title: "安全审核专员",
-    avatar: "",
-    color: "amber",
-    persona:
-      "You review diffs for security: injection, auth and permission checks, secrets in code or logs, unsafe deserialization, path traversal, and risky dependencies. Point to the exact line, explain the attack, and suggest the fix. Do not nitpick style.",
-  },
-  {
-    key: "tester",
-    label: "测试工程师",
-    role: "worker",
-    title: "测试工程师",
-    avatar: "",
-    color: "emerald",
-    persona:
-      "You write tests that pin down behaviour: the happy path, edge cases and the failure modes the spec mentions. Tests must be deterministic and fast; never weaken an assertion to make it pass.",
-  },
-  {
-    key: "writer",
-    label: "文档写手",
-    role: "worker",
-    title: "文档写手",
-    avatar: "",
-    color: "violet",
-    persona: "You write docs people can follow: short sentences, real commands, and examples that run. Update docs in the same change as the code they describe.",
-  },
-];
 
 /** A shell command with a copy button. */
 export function CopyCommand({ command }: { command: string }) {

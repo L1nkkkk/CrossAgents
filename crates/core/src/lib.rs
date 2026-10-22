@@ -13,6 +13,7 @@ pub mod model;
 pub mod note;
 pub mod notify;
 pub mod policy;
+pub mod process;
 pub mod state;
 pub mod store;
 pub mod tool;

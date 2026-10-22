@@ -3,7 +3,12 @@ import type { AgentProfile } from "./AgentProfile";
 import type { Role } from "./Role";
 import type { JsonValue } from "./serde_json/JsonValue";
 
-export type CreateAgentRequest = { name: string, plugin: string, driver: string | null, model: string | null, role: Role, cwd: string, config: JsonValue, 
+export type CreateAgentRequest = { name: string, plugin: string, driver: string | null, model: string | null, role: Role, 
+/**
+ * The agent's working directory. Empty: a new one under the hub home (`chats/<name>`),
+ * for a chat outside any project.
+ */
+cwd: string, config: JsonValue, 
 /**
  * Display name, title, avatar and persona; all optional.
  */

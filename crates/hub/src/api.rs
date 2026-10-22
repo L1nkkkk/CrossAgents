@@ -278,7 +278,21 @@ async fn create_agent(
     if let Some(account) = req.config.get("account").and_then(|v| v.as_str()) {
         state.accounts.check_binding(&req.plugin, account).await?;
     }
-    let cwd = dunce::canonicalize(&req.cwd)
+    // No directory: a chat outside any project gets its own under the hub home.
+    let dir = if req.cwd.trim().is_empty() {
+        let dir = state.home.join("chats").join(&req.name);
+        std::fs::create_dir_all(&dir).map_err(|e| {
+            AppError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ErrorCode::Internal,
+                format!("creating {}: {e}", dir.display()),
+            )
+        })?;
+        dir
+    } else {
+        req.cwd.clone().into()
+    };
+    let cwd = dunce::canonicalize(&dir)
         .map_err(|e| AppError::bad_request(format!("cwd {:?}: {e}", req.cwd)))?;
     if !cwd.is_dir() {
         return Err(AppError::bad_request(format!(

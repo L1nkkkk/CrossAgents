@@ -15,7 +15,7 @@ chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "process"] }
 tracing.workspace = true
 ts-rs = { workspace = true, optional = true }
 uuid.workspace = true

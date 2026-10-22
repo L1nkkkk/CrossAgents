@@ -47,6 +47,9 @@ pub struct CreateAgentRequest {
     #[serde(default)]
     pub model: Option<String>,
     pub role: Role,
+    /// The agent's working directory. Empty: a new one under the hub home (`chats/<name>`),
+    /// for a chat outside any project.
+    #[serde(default)]
     pub cwd: String,
     #[serde(default)]
     pub config: serde_json::Value,

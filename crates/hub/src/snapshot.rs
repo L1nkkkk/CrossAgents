@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crossagents_core::process::NoWindow;
 use tokio::process::Command;
 
 /// A snapshot (or the diff) taking longer than this is given up.
@@ -60,6 +61,7 @@ async fn write_tree(dir: &Path) -> Option<String> {
 
 async fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Option<String> {
     let mut cmd = Command::new("git");
+    cmd.no_window();
     cmd.args(args)
         .current_dir(dir)
         .env("GIT_OPTIONAL_LOCKS", "0")
