@@ -40,7 +40,15 @@ pub struct HubInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct CreateAgentRequest {
-    pub name: String,
+    /// What people and teammates call it (e.g. "Luna"); a taken name gets an ordinal
+    /// ("Luna 2"). Absent: the hub makes one up (`name_source: generated`).
+    #[serde(default)]
+    #[ts(optional)]
+    pub name: Option<String>,
+    /// A conversation's title (chat mode), e.g. its first message.
+    #[serde(default)]
+    #[ts(optional)]
+    pub topic: Option<String>,
     pub plugin: String,
     #[serde(default)]
     pub driver: Option<String>,
@@ -64,11 +72,38 @@ pub struct ListAgentsResponse {
     pub agents: Vec<Agent>,
 }
 
+/// `POST /v1/agents/{key}/name`: a person renames the agent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RenameAgentRequest {
+    pub name: String,
+}
+
+/// `POST /v1/agents/{key}/topic`: the conversation's title; empty or absent clears it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetTopicRequest {
+    #[serde(default)]
+    pub topic: Option<String>,
+}
+
+/// `POST /v1/agents/{key}/archive`: archive the conversation (and its recruits) or restore it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ArchiveAgentRequest {
+    pub archived: bool,
+}
+
 /// `POST /v1/agents/{key}/model`. `None` leaves the model to the agent's own default.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct SetModelRequest {
     pub model: Option<String>,
+    /// Reasoning effort for the following turns (e.g. "low", "high"); absent keeps the
+    /// current one, empty goes back to the model's default. Kept in `config.effort`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub effort: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -104,9 +139,30 @@ pub struct Transcript {
     pub turns: Vec<TranscriptTurn>,
     /// Latest context usage the agent reported.
     pub usage: Option<TranscriptUsage>,
+    /// Each switch of model or reasoning effort, oldest first; clients show them between the
+    /// turns by time.
+    #[serde(default)]
+    pub switches: Vec<ModelSwitch>,
+    /// What the conversation has spent: this agent and every teammate it recruited (chat
+    /// mode), as far as they report cost. `None` when none of them reports any.
+    #[serde(default)]
+    #[ts(optional)]
+    pub conversation_cost_usd: Option<f64>,
     /// The last event folded in; follow `GET /v1/events?agent=…&since=<last_seq>` from here.
     #[ts(type = "number")]
     pub last_seq: u64,
+}
+
+/// The model or reasoning effort an agent runs on was switched (`agent.model_changed`);
+/// `None` is the plugin's or model's default.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ModelSwitch {
+    pub at: DateTime<Utc>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub from_model: Option<String>,
+    pub from_effort: Option<String>,
 }
 
 /// One message to the session and everything the agent did in answer to it.

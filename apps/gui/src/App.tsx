@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { RunDetail } from "@bindings/RunDetail";
-import { api } from "./api";
-
+import { api, getBridge } from "./api";
 import { useHubData } from "./hub";
 import { closeBeside, closeTools, focusedOf, setRatio, useLayout, usePanes } from "./panes";
+import { startNew } from "./menubar";
+import { toggleRail } from "./rail";
 import { Sidebar } from "./Sidebar";
-import { ToolColumn } from "./ToolColumn";
+import { Titlebar, closeSidebarPeek, hoverSidebar, inDesktop, toggleSidebar, unhoverSidebar, useSidebar } from "./titlebar";
+import { ToolColumn, useToolsFloat } from "./ToolColumn";
 import { AgentsView } from "./views/Agents";
 import { HomeView } from "./views/Home";
 import { RunView } from "./views/Run";
@@ -101,12 +103,42 @@ export function App() {
   const [section, a, b, c] = route;
   const { state, focus } = useLayout();
 
-  // Ctrl+N (Cmd+N): new run, as the sidebar button advertises.
+  const sidebar = useSidebar();
+  const floatTools = useToolsFloat();
+
+  // Picking something in the floating sidebar puts it away.
+  const where = window.location.hash;
+  useEffect(closeSidebarPeek, [where]);
+
+  // Ctrl+N (Cmd+N): new, as the sidebar advertises; Ctrl+B: the sidebar; Ctrl+I: the info rail;
+  // Alt+←/→: history.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "n") {
+      const mod = (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey;
+      if (mod && e.key.toLowerCase() === "n") {
         e.preventDefault();
-        window.location.hash = "/";
+        startNew("chat");
+      } else if (mod && e.key === ",") {
+        e.preventDefault();
+        window.location.hash = "/settings";
+      } else if (mod && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        const search = document.querySelector<HTMLInputElement>(".sidebar .search input");
+        search?.focus();
+        search?.select();
+      } else if (e.key === "F11") {
+        e.preventDefault();
+        getBridge()?.command?.("fullscreen");
+      } else if (mod && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        toggleSidebar();
+      } else if (mod && e.key.toLowerCase() === "i") {
+        e.preventDefault();
+        toggleRail();
+      } else if (e.altKey && !e.ctrlKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
+        e.preventDefault();
+        if (e.key === "ArrowLeft") history.back();
+        else history.forward();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -150,11 +182,32 @@ export function App() {
       main = <HomeView />;
   }
 
-  return (
-    <div className={`app ${drawer ? "with-drawer" : ""}`}>
-      <Sidebar route={route} />
+  const app = (
+    <div className={`app ${drawer ? (floatTools ? "drawer-float" : "with-drawer") : ""} ${sidebar.docked ? "" : "no-sidebar"}`}>
+      {sidebar.docked && <Sidebar route={route} />}
+      {sidebar.floating && (
+        <>
+          {/* Opened by a click: a click anywhere else puts it away. */}
+          {sidebar.pinned && <div className="scrim" onClick={closeSidebarPeek} />}
+          <div className="sidebar-float" onMouseEnter={hoverSidebar} onMouseLeave={unhoverSidebar}>
+            <Sidebar route={route} />
+          </div>
+        </>
+      )}
       <main className="main">{main}</main>
-      {drawer && <aside className="drawer">{drawer}</aside>}
+      {drawer && (
+        <aside className="drawer">
+          {drawer}
+        </aside>
+      )}
+    </div>
+  );
+  if (!inDesktop) return app;
+  return (
+    <div className="window">
+      <Titlebar />
+      {app}
     </div>
   );
 }
+

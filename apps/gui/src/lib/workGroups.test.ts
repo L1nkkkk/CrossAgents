@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { TranscriptItem } from "@bindings/TranscriptItem";
-import { duration, liveActivity, relativeTo, stepLine, summarize, workGroups, type Step } from "./workGroups.ts";
+import { actionOf, duration, liveActivity, relativeTo, stepLine, summarize, workGroups, type Step } from "./workGroups.ts";
 
 const tool = (kind: string, status: "in_progress" | "completed" | "failed" = "completed", title = kind): TranscriptItem => ({
   type: "tool_call",
@@ -63,4 +63,18 @@ test("paths inside the working directory are shortened", () => {
   assert.equal(relativeTo("Read /w/ab/c.rs", "/w/a"), "Read /w/ab/c.rs");
   assert.equal(relativeTo('git -C "C:/Users/x/repo" diff', cwd), 'git -C "." diff');
   assert.equal(stepLine(tool("edit", "completed", "Write /w/a/n.txt") as never, "/w/a"), "✎ n.txt");
+});
+
+test("calls that change the team or the code are cards, not folded steps", () => {
+  const spawn = tool("mcp", "completed", "crossagents.agent_spawn");
+  const claudeSpawn = tool("mcp", "completed", "mcp__crossagents__agent_spawn");
+  assert.equal(actionOf(spawn), "agent_spawn");
+  assert.equal(actionOf(claudeSpawn), "agent_spawn");
+  assert.equal(actionOf(tool("mcp", "completed", "crossagents.agent_list")), undefined);
+  assert.equal(actionOf(tool("mcp", "completed", "agent_spawn")), undefined, "only the hub tool");
+  const blocks = workGroups([tool("read"), spawn, tool("read")]);
+  assert.deepEqual(
+    blocks.map((b) => b.kind),
+    ["steps", "item", "steps"],
+  );
 });

@@ -153,6 +153,9 @@ mod tests {
     fn agent(name: &str, role: Role, model: &str) -> Agent {
         Agent {
             id: AgentId::new(),
+            name_source: crossagents_core::NameSource::Chosen,
+            topic: None,
+            archived_at: None,
             name: name.into(),
             plugin: "mock".into(),
             driver: None,

@@ -39,15 +39,25 @@ pub trait AgentHost: Send + Sync {
         role: Role,
         cwd: &Path,
     ) -> Result<Agent, CoreError>;
-    /// Registers a new agent (`agent_spawn`); fails if its plugin is unknown or the name
-    /// is taken.
+    /// Registers a new agent (`agent_spawn`); fails if its plugin is unknown. An empty name
+    /// gets a made-up one, a taken one an ordinal ("Nova 2").
     async fn spawn_agent(&self, agent: Agent) -> Result<Agent, CoreError>;
+    /// The models an account that is logged in can run for `plugin` (empty: no such account).
+    async fn available_models(&self, plugin: &str) -> Result<Vec<String>, CoreError>;
+    /// The plugins agents can run on.
+    fn plugin_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Words no agent name may contain: vendors' and every known model's.
+    fn denied_name_words(&self) -> Vec<String>;
     /// Changes an agent's model, from its next turn when it is running.
     async fn set_model(&self, agent: AgentId, model: Option<String>) -> Result<Agent, CoreError>;
     /// Spend of a run (or of everything) and the accounts' quota, for `usage_get`.
     async fn usage_report(&self, run: Option<RunId>) -> Result<Value, CoreError>;
     /// Takes the messages waiting for an agent that runs outside the hub.
     async fn take_inbox(&self, agent: AgentId) -> Result<Vec<Value>, CoreError>;
+    /// Archives a conversation's recruit: stopped and out of the lists, its transcript kept.
+    async fn archive_agent(&self, agent: AgentId) -> Result<(), CoreError>;
     /// Stops and deletes an agent created with [`Self::clone_agent`].
     async fn remove_agent(&self, agent: AgentId) -> Result<(), CoreError>;
 }

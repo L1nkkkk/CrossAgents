@@ -76,6 +76,14 @@ pub fn summary(kind: &EventKind) -> String {
         EventKind::AgentInputUpdated { id, text, .. } => {
             format!("{} digest {}", short(id), one_line(text))
         }
+        EventKind::AgentModelChanged {
+            id, model, effort, ..
+        } => format!(
+            "{} model {} effort {}",
+            short(id),
+            model.as_deref().unwrap_or("default"),
+            effort.as_deref().unwrap_or("default")
+        ),
         EventKind::HumanAsked { item } | EventKind::HumanAnswered { item } => format!(
             "{} {} {}{}",
             item.id,

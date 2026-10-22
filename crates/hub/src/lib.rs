@@ -4,6 +4,7 @@ pub mod accounts;
 pub mod api;
 pub mod budget;
 pub mod collab;
+pub mod identity;
 pub mod notices;
 pub mod paths;
 pub mod runtime;
@@ -106,6 +107,16 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     }
     let runtime = Arc::new(Runtime::new(bus.clone(), plugins).with_setup(setup.clone()));
     runtime.reset_statuses().await?;
+    // Agents from before names were for people get a name and (chats) a title.
+    if let Err(err) = identity::fix_up(
+        store.as_ref(),
+        &paths.home.join("chats"),
+        &identity::denied_words(runtime.plugins()),
+    )
+    .await
+    {
+        tracing::warn!(error = %err, "cannot bring agent names up to date");
+    }
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.port))
         .await

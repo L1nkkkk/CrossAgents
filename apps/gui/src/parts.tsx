@@ -171,7 +171,7 @@ function TaskBody({ task, run, owner, agents }: { task: Task; run: Run; owner?: 
       <div className="tc-actions">
         {owner && (
           <>
-            <a href={sessionHref(owner.name)}>打开 {displayName(owner)}</a>
+            <a href={sessionHref(owner)}>打开 {displayName(owner)}</a>
             <button className="link" onClick={() => openBeside(owner.name)}>
               在旁边打开
             </button>
@@ -302,7 +302,7 @@ export function PeerMessage({ turn, agents, tree }: { turn: TranscriptTurn; agen
           <div className="peer-text">{turn.input}</div>
           {sender && (
             <div className="small muted">
-              {displayName(sender)} · {agentTitle(sender)} · <a href={sessionHref(sender.name)}>打开</a>
+              {displayName(sender)} · {agentTitle(sender)} · <a href={sessionHref(sender)}>打开</a>
             </div>
           )}
         </div>

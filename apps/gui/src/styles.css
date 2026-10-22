@@ -342,7 +342,7 @@ a.chip:hover { text-decoration: none; background: var(--selected); }
 .topbar { display: flex; align-items: center; gap: 10px; padding: 10px 20px; border-bottom: 1px solid var(--border); min-height: 49px; flex-wrap: wrap; }
 .topbar .title { font-weight: 600; font-size: 15px; }
 .page { flex: 1; overflow: auto; }
-.page-inner { max-width: 860px; margin: 0 auto; padding: 24px 24px 48px; }
+.page-inner { max-width: 860px; margin: 0 auto; padding: 24px; }
 
 .drawer { border-left: 1px solid var(--border); background: var(--surface); display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .drawer .topbar { padding: 10px 16px; }
@@ -948,12 +948,10 @@ a.button.small { font-size: 12.5px; padding: 4px 10px; background: var(--surface
 .ev-type { color: var(--text); white-space: nowrap; }
 .ev-sum { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .ev-json { font-size: 11px; max-height: 320px; margin: 2px 0 6px; }
-@media (max-width: 1100px) {
-  .app.with-drawer { grid-template-columns: 264px minmax(0, 1fr); }
-  .drawer {
-    position: fixed; z-index: 40; top: var(--panel-gap); right: var(--panel-gap); bottom: var(--panel-gap);
-    width: min(420px, 92vw); box-shadow: var(--shadow-float); border-radius: var(--radius-lg) 0 0 var(--radius-lg);
-  }
+/* Floating (App adds .drawer-float when docking would squeeze the conversation). */
+.app.drawer-float .drawer {
+  position: fixed; z-index: 40; top: var(--panel-gap); right: var(--panel-gap); bottom: var(--panel-gap);
+  width: min(420px, calc(100vw - 2 * var(--panel-gap) - 24px)); box-shadow: var(--shadow-float); border-radius: var(--radius-lg);
 }
 
 /* Settings. */
@@ -1047,7 +1045,8 @@ button.ghost.icon, .icon-btn { background: transparent; border-color: transparen
 /* All accounts in one list (views/Quota.tsx): a line each, details open underneath. */
 .accounts { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
 .account-row + .account-row { border-top: 1px solid var(--border); }
-.account-line { display: grid; grid-template-columns: minmax(170px, 1.1fr) minmax(200px, 2fr) 76px auto; align-items: center; gap: 14px; padding: 10px 12px 10px 14px; }
+.account-line { display: grid; grid-template-columns: minmax(180px, 1.3fr) minmax(180px, 2fr) 84px max-content; align-items: center; gap: 14px; padding: 10px 12px 10px 14px; }
+.account-actions button { white-space: nowrap; }
 .account-row.open .account-line { background: color-mix(in srgb, var(--text) 3%, transparent); }
 .account-who { display: inline-flex; align-items: center; gap: 8px; min-width: 0; border: none; background: none; padding: 0; text-align: left; color: var(--text); }
 .account-who:hover:not(:disabled) { background: none; }
@@ -1058,14 +1057,14 @@ button.ghost.icon, .icon-btn { background: transparent; border-color: transparen
 .meter .quota-bar { width: 72px; height: 6px; }
 .meter-label { color: var(--muted); white-space: nowrap; }
 .meter-pct { font-variant-numeric: tabular-nums; min-width: 32px; }
-.account-line .health { justify-self: start; }
+.account-health { display: flex; }
 .account-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
 .account-row > .notice, .account-row > .error { margin: 0 14px 10px; }
 .account-detail { padding: 6px 16px 14px; display: flex; flex-direction: column; gap: 14px; border-top: 1px dashed var(--border); }
 @media (max-width: 1100px) {
   .account-line { grid-template-columns: 1fr auto; }
   .account-meters { grid-column: 1 / -1; grid-row: 2; }
-  .account-line .health { grid-row: 1; grid-column: 2; justify-self: end; }
+  .account-health { grid-row: 1; grid-column: 2; justify-self: end; }
   .account-actions { grid-column: 1 / -1; justify-content: flex-start; }
 }
 
@@ -1102,3 +1101,191 @@ button.ghost.icon, .icon-btn { background: transparent; border-color: transparen
 .prose-table table { border-collapse: collapse; font-size: 13px; }
 .prose-table th, .prose-table td { border: 1px solid var(--border); padding: 4px 10px; }
 .prose-table th { background: color-mix(in srgb, var(--text) 4%, transparent); font-weight: 600; }
+
+/* The window's own title bar (src/titlebar.tsx), desktop app only: one strip with the page,
+   dragging the window; the system's window buttons sit on it (overlay on the right, macOS
+   traffic lights on the left), so it leaves their room. */
+.window { display: flex; flex-direction: column; height: 100%; background: var(--page); }
+.window > .app { flex: 1; min-height: 0; height: auto; padding-top: 0; }
+.titlebar {
+  height: 40px; flex-shrink: 0; display: flex; align-items: center; gap: 10px; background: var(--page);
+  /* The room the window buttons take on the right. */
+  --tb-right: max(12px, calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)));
+  padding: 0 var(--tb-right) 0 8px;
+  -webkit-app-region: drag; user-select: none;
+  /* Its menus open over the panels below. */
+  position: relative; z-index: 50;
+}
+.titlebar.mac { padding-left: 80px; }
+.titlebar button { -webkit-app-region: no-drag; }
+.titlebar-nav { display: flex; align-items: center; gap: 2px; }
+.tb-btn { display: grid; place-items: center; width: 30px; height: 28px; padding: 0; border: none; border-radius: 6px; background: transparent; color: var(--text-2); }
+.tb-btn:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.tb-btn:disabled { opacity: 0.3; }
+.tb-btn.on { color: var(--text); }
+.titlebar-title { min-width: 0; font-size: 12.5px; font-weight: 500; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.titlebar.blurred .titlebar-nav, .titlebar.blurred .titlebar-title { opacity: 0.55; }
+
+/* Sidebar hidden from the title bar (Ctrl+B). */
+.app.no-sidebar { grid-template-columns: minmax(0, 1fr); }
+.app.no-sidebar.with-drawer { grid-template-columns: minmax(0, 1fr) var(--tools-width, minmax(360px, 440px)); }
+.window .app.drawer-float .drawer { top: calc(40px + var(--panel-gap)); }
+
+/* The sidebar in a small window: over the page from the left (hovered, or opened by a click with
+   an invisible scrim to click away). */
+.scrim { position: fixed; inset: 0; z-index: 44; background: transparent; }
+.sidebar-float {
+  position: fixed; z-index: 45; top: var(--panel-gap); left: var(--panel-gap); bottom: var(--panel-gap);
+  width: min(280px, calc(100vw - 48px)); display: flex; box-shadow: var(--shadow-float); border-radius: var(--radius-lg); overflow: hidden;
+}
+.sidebar-float > .sidebar { flex: 1; min-width: 0; border-right: none; }
+.window .sidebar-float, .window .scrim { top: calc(40px + var(--panel-gap)); }
+
+/* 文件 / 编辑 / 视图 / 帮助 in the title bar (src/menubar.tsx). */
+.menubar { display: flex; align-items: center; gap: 1px; margin-left: 4px; }
+.menubar-item { position: relative; }
+.menubar-title { -webkit-app-region: no-drag; height: 28px; padding: 0 10px; border: none; border-radius: 6px; background: transparent; color: var(--text-2); font-size: 13px; }
+.menubar-title:hover:not(:disabled), .menubar-title.open { background: var(--hover); color: var(--text); }
+.menubar-menu { top: calc(100% + 4px); left: 0; min-width: 230px; max-height: none; }
+.menu-sep { height: 1px; background: var(--border); margin: 4px 6px; }
+.menu-check { width: 16px; display: grid; place-items: center; color: var(--accent); flex-shrink: 0; }
+.menu-keys { margin-left: auto; padding-left: 18px; font-family: var(--font-sans); font-size: 11.5px; color: var(--muted); border: none; background: none; }
+.menubar-menu .menu-item { padding: 5px 10px 5px 6px; }
+.menubar-menu .menu-item:hover:not(:disabled) { background: var(--hover); }
+.titlebar.blurred .menubar { opacity: 0.55; }
+
+/* Dialogs from the menu: shortcuts, about. */
+.dialog-backdrop { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: rgba(0, 0, 0, 0.35); -webkit-app-region: no-drag; }
+.dialog { width: min(440px, 92vw); max-height: 80vh; overflow: auto; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-xl); box-shadow: var(--shadow-float); padding: 18px 20px; display: flex; flex-direction: column; gap: 10px; }
+.dialog h2 { margin: 0; font-size: 15px; }
+.dialog p { margin: 0; }
+.keys-table { border-collapse: collapse; font-size: 13px; }
+.keys-table td { padding: 5px 0; border-bottom: 1px solid var(--border); }
+.keys-table td:first-child { padding-right: 16px; white-space: nowrap; }
+.keys-table kbd { font-family: var(--font-sans); font-size: 11.5px; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 4px; padding: 1px 6px; color: var(--text-2); }
+
+
+
+/* The info rail floating on the right of a conversation (src/rail.tsx): the conversation and
+   its composer keep left of it. */
+.pane { position: relative; }
+.pane.with-rail .convo, .pane.with-rail .dock { padding-right: 280px; }
+.rail { position: absolute; top: 14px; right: 14px; width: 250px; max-height: calc(100% - 28px); overflow: auto; display: flex; flex-direction: column; gap: 10px; z-index: 2; }
+.pane > .topbar ~ .rail { top: 64px; max-height: calc(100% - 78px); }
+.rail-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 6px 8px 8px; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04); }
+.rail-head { display: flex; align-items: center; gap: 4px; width: 100%; border: none; background: none; padding: 3px 4px 5px; font-size: 12px; font-weight: 600; color: var(--text-2); }
+.rail-head:hover:not(:disabled) { background: none; color: var(--text); }
+.rail-body { display: flex; flex-direction: column; gap: 1px; }
+.rail-line { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 4px; border: none; border-radius: 6px; background: none; font-size: 12.5px; color: var(--text); text-align: left; text-decoration: none; }
+.rail-line > .icon, .rail-line > svg { color: var(--text-2); flex-shrink: 0; }
+.rail-line.link:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.rail-main { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rail-dim { max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--muted); display: inline-flex; align-items: center; gap: 4px; }
+.rail-line .add, .rail-line .del { font-size: 12px; font-variant-numeric: tabular-nums; }
+.rail-empty { margin: 0; padding: 2px 4px 4px; font-size: 12px; color: var(--muted); }
+.rail-context { display: flex; align-items: baseline; gap: 8px; padding: 0 4px 6px; font-size: 12.5px; }
+.rail-bar { display: flex; height: 6px; margin: 0 4px; border-radius: 3px; overflow: hidden; }
+.rail-bar span { display: block; height: 100%; border-radius: 3px; }
+.rail-bar.warn span { background: var(--warn); }
+.rail-bar.danger span { background: var(--danger); }
+.rail-rows { display: grid; gap: 2px; margin: 8px 0 0; padding: 0 4px; font-size: 12px; }
+.rail-rows div { display: flex; justify-content: space-between; gap: 8px; }
+.rail-rows dt { color: var(--muted); }
+.rail-rows dd { margin: 0; font-variant-numeric: tabular-nums; color: var(--text-2); }
+.tool-head .segmented { flex-shrink: 0; }
+.tool-head .segmented button { white-space: nowrap; }
+
+/* Each panel's first row (a page's header, the tool column's tabs) is the same height, so the
+   rows line up across the window like Codex's; they keep to one line. */
+.topbar, .tool-head { box-sizing: border-box; height: 48px; min-height: 48px; flex-wrap: nowrap; }
+.topbar { padding: 0 16px; }
+.topbar .who-block { min-width: 0; }
+.topbar .title, .topbar .who-sub { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topbar > * { flex-shrink: 0; }
+.topbar > .who-block, .topbar > .spacer, .topbar > h1, .topbar > .title { flex-shrink: 1; min-width: 0; }
+
+/* Small windows: tab strips keep each label on one line, and a section head wraps its controls
+   below the title rather than squeezing them. */
+.segmented button { white-space: nowrap; }
+.settings-head { flex-wrap: wrap; row-gap: 8px; }
+.settings-head h2 { white-space: nowrap; }
+
+/* Scrollbars: thin, no arrows, a fixed-size thumb that darkens while the pointer is over the
+   area (the standard scrollbar-width would bring back Windows' arrow buttons). Scrolling stops at
+   the end of each area instead of carrying on into the one around it or bouncing. */
+html, body { overflow: hidden; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-button { display: none; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--text) 14%, transparent); border-radius: 999px; border: 3px solid transparent; background-clip: padding-box; min-height: 32px; }
+:hover::-webkit-scrollbar-thumb { background-color: color-mix(in srgb, var(--text) 26%, transparent); }
+::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--text) 40%, transparent); }
+/* No elastic bounce at the ends either (Chromium stretches the page and squashes the thumb). */
+*, html, body { overscroll-behavior: none; }
+.menubar-title.folded { width: 30px; padding: 0; display: grid; place-items: center; }
+.menu-heading { padding: 6px 10px 2px 28px; font-size: 11px; font-weight: 600; color: var(--muted); }
+.menubar-menu { max-height: calc(100vh - 56px); overflow: auto; }
+
+/* Where you are in a conversation (src/turnmap.tsx): a mark per message from a person at the
+   right edge, the one being read longer; hovering lists them (text right-aligned beside its
+   mark, like Claude's), a click scrolls there. Left of the info rail when that shows. */
+.convo-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.turn { scroll-margin-top: 16px; }
+.turn-map { position: absolute; right: 14px; top: 50%; transform: translateY(-50%); z-index: 3; display: flex; align-items: center; }
+.pane.with-rail .turn-map { right: 270px; }
+.turn-ticks { display: flex; flex-direction: column; align-items: flex-end; gap: 7px; padding: 8px 4px; max-height: 60vh; overflow: hidden; }
+.turn-map .tick { display: block; width: 10px; height: 2px; padding: 0; border: none; border-radius: 1px; background: color-mix(in srgb, var(--text) 28%, transparent); flex-shrink: 0; }
+.turn-map .tick.on { width: 16px; background: var(--text); }
+.turn-ticks .tick { position: relative; }
+.turn-ticks .tick::after { content: ""; position: absolute; inset: -4px -6px; }
+.turn-ticks .tick:hover:not(:disabled) { background: var(--text-2); }
+.turn-list { position: absolute; right: 100%; top: 50%; transform: translateY(-50%); padding-right: 2px; }
+.turn-list-inner {
+  width: min(320px, 60vw); max-height: 60vh; overflow: auto; padding: 6px; display: flex; flex-direction: column; gap: 1px;
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg); box-shadow: var(--shadow-float);
+}
+.turn-entry { display: flex; align-items: center; justify-content: flex-end; gap: 10px; width: 100%; padding: 4px 6px 4px 10px; border: none; border-radius: 6px; background: none; font-size: 12.5px; color: var(--muted); text-align: right; }
+.turn-entry:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.turn-entry.on { color: var(--text); font-weight: 600; }
+.turn-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The conversation's own scrollbar (src/scrollthumb.tsx) replaces the native one there. */
+.convo { scrollbar-width: none; }
+.scroll-track { position: absolute; top: 4px; bottom: 4px; right: 2px; width: 10px; z-index: 2; }
+.scroll-track.off { visibility: hidden; }
+.scroll-thumb { position: absolute; left: 3px; right: 3px; top: 0; border-radius: 999px; background: color-mix(in srgb, var(--text) 16%, transparent); transition: background 0.15s, left 0.15s, right 0.15s; }
+.convo-wrap:hover .scroll-thumb { background: color-mix(in srgb, var(--text) 26%, transparent); }
+.scroll-track:hover .scroll-thumb, .scroll-track.dragging .scroll-thumb { left: 2px; right: 2px; background: color-mix(in srgb, var(--text) 40%, transparent); }
+
+/* A switch of model or reasoning effort, between the turns (SwitchNote in views/Session.tsx). */
+.switch-note { display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.switch-note::before, .switch-note::after { content: ""; flex: 1; max-width: 120px; height: 1px; background: var(--border); }
+.switch-note .icon { color: var(--accent); }
+.switch-at { color: var(--muted); opacity: 0.8; }
+
+/* The agent's name in a conversation header: a button that turns into a field to rename it. */
+.name-button { border: none; background: none; padding: 0; font: inherit; font-weight: 600; font-size: 15px; color: var(--text); display: inline-flex; align-items: baseline; gap: 6px; cursor: text; text-align: left; }
+.name-button:hover:not(:disabled) { background: none; text-decoration: underline dotted; text-underline-offset: 3px; }
+.name-auto { font-size: 10.5px; font-weight: 500; color: var(--muted); border: 1px dashed var(--border-strong); border-radius: 4px; padding: 0 4px; }
+.name-edit { font: inherit; font-weight: 600; font-size: 14px; padding: 1px 6px; width: 14em; }
+.name-edit.bad { border-color: var(--danger); }
+
+/* A call that changed the team or the code (ActionCard in views/Session.tsx): its own card with
+   the outcome, green when done, red with the hub's reason when refused. */
+.action-card { border: 1px solid var(--border); border-left: 3px solid var(--ok); border-radius: var(--radius); background: var(--surface); padding: 7px 12px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.action-card.refused { border-left-color: var(--danger); background: color-mix(in srgb, var(--danger) 6%, var(--surface)); }
+.action-card.running { border-left-color: var(--warn); }
+.action-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.action-head .icon { color: var(--ok); flex-shrink: 0; }
+.action-card.refused .action-head .icon { color: var(--danger); }
+.action-name { font-weight: 600; white-space: nowrap; }
+.action-what { color: var(--text-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; }
+.action-state { margin-left: auto; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.action-card.refused .action-state { color: var(--danger-text); font-weight: 600; }
+.action-reason { color: var(--danger-text); font-size: 12.5px; line-height: 1.5; }
+.rail-spend { display: flex; justify-content: space-between; gap: 8px; margin: 8px 4px 0; padding-top: 6px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+.rail-spend-v { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 500; }
+
+/* An archived conversation: no composer, a bar to restore it. */
+.archived-bar { display: flex; align-items: center; gap: 10px; max-width: 780px; width: calc(100% - 48px); margin: 0 auto 16px; padding: 10px 14px; border: 1px dashed var(--border-strong); border-radius: var(--radius-lg); color: var(--text-2); font-size: 13px; }
+.archived-bar button { margin-left: auto; }

@@ -2,13 +2,29 @@
 //! never repeated in its conversations (docs/tasks/H1.md §2). Tool descriptions carry the
 //! details of each call.
 
-use crossagents_core::Role;
+use crossagents_core::{Agent, Role};
+
+use crate::messaging::{Group, groups_of};
 
 const COMMON: &str = "You work in CrossAgents, a hub where agents from different vendors \
 collaborate. Use the `crossagents` tools to see your teammates (whoami, agent_list), message \
 them (agent_send), ask the person (human_ask, only when you truly need a decision) and set \
 reminders or watches for yourself. Messages from teammates start with \"Message from …\"; \
-\"CrossAgents notices\" are things you asked to hear about. Retrying a tool call is safe.";
+\"CrossAgents notices\" are things you asked to hear about. Retrying a tool call is safe.\n\
+Say what really happened. When something you were asked to do is unavailable or refused (a \
+tool error, a policy limit, a model you cannot use), say so plainly in your reply: what you \
+tried, what was refused and why, and what you did instead. Never report a substitute as the \
+thing that was asked for: another agent, or another model, is not the one requested. Call \
+teammates by their names; the model a teammate runs on is an attribute that can change.";
+
+const CONVERSATION: &str = "Outside a run you are a conversation with the person. When the \
+person asks for another agent or model to do something (\"use Haiku\", \"ask a Sonnet to \
+review this\"), do not do it yourself: message a fitting teammate from `agent_list` with \
+`agent_send`, or recruit one with `agent_spawn` (the model asked for goes in model; give it a \
+person's name, or none to get one), wait for its answer and pass it on, saying who answered. \
+Retire recruits with `agent_retire` when they are done. This conversation's policy limits how \
+many you may recruit and which models; if it refuses, tell the person rather than working \
+around it.";
 
 const LEAD: &str = "As the LEAD (planner) of a run: understand the code, split the person's \
 request into small tasks for cheaper worker models, and own the result. Do not implement the \
@@ -41,6 +57,16 @@ checks your work and may send it back with notes; then continue and report again
 const REVIEWER: &str = "As a REVIEWER: read the change you are asked to review (the diff of \
 its branch against the run branch, in your working directory) and judge it against the task. \
 Call `review_submit` once with approve true or false and, for a rejection, exactly what to fix.";
+
+/// The guide for `agent`: its role's, and what a conversation outside any run may do.
+pub fn guide_for(agent: &Agent) -> String {
+    let mut text = guide(agent.role);
+    if groups_of(agent).contains(&Group::Conversation) {
+        text.push_str("\n\n");
+        text.push_str(CONVERSATION);
+    }
+    text
+}
 
 /// The guide for an agent of `role`.
 pub fn guide(role: Role) -> String {

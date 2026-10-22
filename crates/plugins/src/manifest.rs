@@ -74,7 +74,7 @@ fn load_one(plugin_dir: &Path, path: &Path) -> Result<(String, PluginConfig), St
             manifest.protocol
         ));
     }
-    if crossagents_core::validate_agent_name(&manifest.name).is_err() {
+    if crossagents_core::validate_slug(&manifest.name).is_err() {
         return Err(format!("invalid plugin name {:?}", manifest.name));
     }
     let driver = manifest.driver.unwrap_or_default();

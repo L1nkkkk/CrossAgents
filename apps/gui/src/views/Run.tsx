@@ -17,6 +17,7 @@ import {
   agentTitle,
   ago,
   displayName,
+  isAgent,
   runTone,
   sessionHref,
   taskTone,
@@ -87,7 +88,7 @@ export function RunView({ runId, selectedTask }: { runId: string; selectedTask?:
           </span>
         )}
         <div className="spacer" />
-        {plannerAgent ? <Who agent={plannerAgent} label="Planner" /> : <a className="chip" href={sessionHref(planner)}>Planner · {planner}</a>}
+        {plannerAgent ? <Who agent={plannerAgent} label="Planner" /> : <a className="chip" href={sessionHref(run.planner)}>Planner · {planner}</a>}
         {ACTIVE.includes(run.status) && (
           <button className={`danger ${cancelArm.armed ? "armed" : ""}`} disabled={busy} onClick={() => cancelArm.click(cancel)}>
             {cancelArm.armed ? "再点一次取消" : "取消 run"}
@@ -104,7 +105,7 @@ export function RunView({ runId, selectedTask }: { runId: string; selectedTask?:
             <div className="working">
               <span className="spark">✻</span>
               <span>
-                Planner 正在拆解任务 · <a href={sessionHref(planner)}>看它在做什么</a>
+                Planner 正在拆解任务 · <a href={sessionHref(run.planner)}>看它在做什么</a>
               </span>
             </div>
           )}
@@ -284,7 +285,7 @@ function PolicyChip({ run }: { run: Run }) {
 /** The planned tasks, each with the teammate it is assigned to; specs folded away. */
 export function PlanTasks({ run }: { run: Run }) {
   const agents = useAgents();
-  const byName = (name: string | null) => (name ? agents.data?.find((a) => a.name === name) : undefined);
+  const byName = (name: string | null) => (name ? agents.data?.find((a) => isAgent(a, name)) : undefined);
   const fallback = agents.data?.find((a) => a.id === run.config.worker);
   return (
     <div className="tasks">
@@ -324,7 +325,7 @@ export function PlanTasks({ run }: { run: Run }) {
 /** A teammate as a small chip: avatar, name, title. */
 function Who({ agent, label }: { agent: Agent; label?: string }) {
   return (
-    <a className="who-chip" href={sessionHref(agent.name)} title={`${displayName(agent)} · ${agentTitle(agent)} · ${agent.model ?? agent.plugin}`}>
+    <a className="who-chip" href={sessionHref(agent)} title={`${displayName(agent)} · ${agentTitle(agent)} · ${agent.model ?? agent.plugin}`}>
       {label && <span className="who-label">{label}</span>}
       <Avatar agent={agent} size={18} />
       {displayName(agent)}
@@ -508,14 +509,14 @@ export function TaskDetail({ runId, taskId }: { runId: string; taskId: string })
           <dl className="kv small">
             <dt>Worker</dt>
             <dd>
-              {task.assignee ? <a href={sessionHref(agentName(agents.data, task.assignee))}>{agentName(agents.data, task.assignee)}</a> : "—"}
+              {task.assignee ? <a href={sessionHref(task.assignee)}>{agentName(agents.data, task.assignee)}</a> : "—"}
               {task.escalated && <span className="chip warn" style={{ marginLeft: 6 }}>已升级</span>}
             </dd>
             {task.reviewer && (
               <>
                 <dt>Reviewer</dt>
                 <dd>
-                  <a href={sessionHref(agentName(agents.data, task.reviewer))}>{agentName(agents.data, task.reviewer)}</a>
+                  <a href={sessionHref(task.reviewer)}>{agentName(agents.data, task.reviewer)}</a>
                 </dd>
               </>
             )}

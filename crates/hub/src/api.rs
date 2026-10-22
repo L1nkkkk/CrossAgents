@@ -17,17 +17,17 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use crossagents_api_types::{
     API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AnswerRequest, ApiError,
-    ConnectInfo, CreateAccountRequest, CreateAgentRequest, CreateRunRequest, ErrorCode,
-    FinishRequest, HealthResponse, HubInfo, LandRequest, ListAccountsResponse, ListAgentsResponse,
-    ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
-    ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest, RunDetail,
-    SendMessageRequest, SendMessageResponse, SetModelRequest, Transcript, TurnDiffResponse,
-    UsageGroup, UsageResponse,
+    ArchiveAgentRequest, ConnectInfo, CreateAccountRequest, CreateAgentRequest, CreateRunRequest,
+    ErrorCode, FinishRequest, HealthResponse, HubInfo, LandRequest, ListAccountsResponse,
+    ListAgentsResponse, ListNotesResponse, ListPluginsResponse, ListQuestionsResponse,
+    ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
+    RenameAgentRequest, RunDetail, SendMessageRequest, SendMessageResponse, SetModelRequest,
+    SetTopicRequest, Transcript, TurnDiffResponse, UsageGroup, UsageResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError,
     DriverKind, Event, EventBus, EventKind, HumanItem, LandMode, MessageId, MessageSource, Run,
-    RunConfig, RunId, Store, validate_agent_name,
+    RunConfig, RunId, Store,
 };
 use crossagents_orchestrator::{NewRun, Orchestrator};
 
@@ -84,6 +84,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/agents/{key}/turns/{message_id}/diff", get(turn_diff))
         .route("/v1/agents/{key}/profile", post(update_profile))
         .route("/v1/agents/{key}/model", post(set_model))
+        .route("/v1/agents/{key}/name", post(rename_agent))
+        .route("/v1/agents/{key}/topic", post(set_topic))
+        .route("/v1/agents/{key}/archive", post(archive_agent))
         .route("/v1/agents/{key}/connect", post(connect_agent))
         .route("/v1/notes", get(list_notes))
         .route("/v1/plugins", get(list_plugins))
@@ -261,7 +264,13 @@ async fn create_agent(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateAgentRequest>,
 ) -> ApiResult<(StatusCode, Json<Agent>)> {
-    validate_agent_name(&req.name)?;
+    let (name, name_source) = crate::identity::free_name(
+        state.store().as_ref(),
+        req.name.as_deref(),
+        false,
+        &crate::identity::denied_words(state.runtime.plugins()),
+    )
+    .await?;
     if req.plugin != crossagents_core::EXTERNAL_PLUGIN
         && !state.runtime.plugins().contains(&req.plugin)
     {
@@ -278,9 +287,11 @@ async fn create_agent(
     if let Some(account) = req.config.get("account").and_then(|v| v.as_str()) {
         state.accounts.check_binding(&req.plugin, account).await?;
     }
-    // No directory: a chat outside any project gets its own under the hub home.
+    let id = AgentId::new();
+    // No directory: a chat outside any project gets its own under the hub home (by id: the
+    // name can change).
     let dir = if req.cwd.trim().is_empty() {
-        let dir = state.home.join("chats").join(&req.name);
+        let dir = state.home.join("chats").join(id.to_string());
         std::fs::create_dir_all(&dir).map_err(|e| {
             AppError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -300,9 +311,16 @@ async fn create_agent(
             req.cwd
         )));
     }
+    let topic = req
+        .topic
+        .map(|t| t.trim().chars().take(120).collect::<String>())
+        .filter(|t| !t.is_empty());
     let agent = Agent {
-        id: AgentId::new(),
-        name: req.name,
+        id,
+        name_source,
+        topic,
+        archived_at: None,
+        name,
         plugin: req.plugin,
         driver: req.driver,
         model: req.model,
@@ -383,12 +401,30 @@ async fn transcript(
     // of this agent up to it is then folded in, and later ones arrive on the stream.
     let head = state.store().latest_event_seq().await?;
     let fold = fold_agent(&state, agent.id).await?;
+    // The conversation's spend includes its recruits': nothing is spent out of sight.
+    let mut costs = vec![fold.usage.as_ref().and_then(|u| u.cost_usd)];
+    for recruit in state.store().list_agents().await? {
+        if recruit.recruiter() == Some(agent.id) {
+            costs.push(
+                fold_agent(&state, recruit.id)
+                    .await?
+                    .usage
+                    .and_then(|u| u.cost_usd),
+            );
+        }
+    }
+    let conversation_cost_usd = costs
+        .iter()
+        .any(Option::is_some)
+        .then(|| costs.iter().flatten().sum());
     Ok(Json(Transcript {
         agent,
         driver: resolved.as_ref().map(|r| r.driver.kind()),
         capabilities: resolved.as_ref().map(|r| r.driver.capabilities()),
         turns: fold.turns,
         usage: fold.usage,
+        switches: fold.switches,
+        conversation_cost_usd,
         last_seq: head.max(fold.last_seq),
     }))
 }
@@ -451,6 +487,45 @@ async fn start_agent(
     ))
 }
 
+async fn rename_agent(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(req): Json<RenameAgentRequest>,
+) -> ApiResult<Json<Agent>> {
+    Ok(Json(
+        state
+            .runtime
+            .rename(&AgentKey::parse(&key), &req.name)
+            .await?,
+    ))
+}
+
+async fn set_topic(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(req): Json<SetTopicRequest>,
+) -> ApiResult<Json<Agent>> {
+    Ok(Json(
+        state
+            .runtime
+            .set_topic(&AgentKey::parse(&key), req.topic)
+            .await?,
+    ))
+}
+
+async fn archive_agent(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(req): Json<ArchiveAgentRequest>,
+) -> ApiResult<Json<Agent>> {
+    Ok(Json(
+        state
+            .runtime
+            .archive(&AgentKey::parse(&key), req.archived)
+            .await?,
+    ))
+}
+
 async fn set_model(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
@@ -460,10 +535,11 @@ async fn set_model(
         .model
         .map(|m| m.trim().to_owned())
         .filter(|m| !m.is_empty());
+    let effort = req.effort.map(|e| e.trim().to_owned());
     Ok(Json(
         state
             .runtime
-            .set_model(&AgentKey::parse(&key), model)
+            .set_model(&AgentKey::parse(&key), model, effort)
             .await?,
     ))
 }

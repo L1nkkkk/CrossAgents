@@ -4,6 +4,7 @@
 use chrono::Utc;
 use crossagents_core::{
     Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError, Role, Run, RunConfig,
+    RunPolicy, model::SPAWNED_BY_AGENT,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -20,6 +21,38 @@ fn spawned_by(agent: &Agent) -> Option<String> {
         .get(SPAWNED_BY)
         .and_then(Value::as_str)
         .map(str::to_owned)
+}
+
+/// What `agent_spawn` takes, in a run or in a conversation.
+#[derive(Deserialize)]
+struct SpawnArgs {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    plugin: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    role: Option<Role>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    persona: Option<String>,
+}
+
+/// A conversation's recruiting policy: its `config.policy`, else up to 3 recruits, any model
+/// a logged-in account can run, no spend cap.
+pub fn chat_policy(agent: &Agent) -> RunPolicy {
+    agent
+        .config
+        .get("policy")
+        .and_then(|p| serde_json::from_value(p.clone()).ok())
+        .unwrap_or(RunPolicy {
+            max_agents: 3,
+            ..RunPolicy::default()
+        })
 }
 
 impl Orchestrator {
@@ -52,29 +85,29 @@ impl Orchestrator {
         }
     }
 
+    /// `agent_spawn`: a run's lead recruits for the run; a conversation outside any run
+    /// recruits for itself (chat mode). Both within their policy; a refusal says why.
     pub(crate) async fn agent_spawn(
         &self,
         caller: &Agent,
         input: Value,
     ) -> Result<Value, CoreError> {
-        #[derive(Deserialize)]
-        struct A {
-            name: String,
-            #[serde(default)]
-            plugin: Option<String>,
-            #[serde(default)]
-            model: Option<String>,
-            #[serde(default)]
-            role: Option<Role>,
-            #[serde(default)]
-            display_name: Option<String>,
-            #[serde(default)]
-            title: Option<String>,
-            #[serde(default)]
-            persona: Option<String>,
+        let a: SpawnArgs = args(input)?;
+        match self.run_of(caller.id).await? {
+            Some((run, _)) if !run.status.is_terminal() => {
+                if run.planner != caller.id {
+                    return Err(CoreError::Conflict(format!(
+                        "not recruited: you work in the run \"{}\", and only its lead recruits; ask the lead with agent_send if the team needs someone",
+                        run.title
+                    )));
+                }
+                self.run_spawn(run, a).await
+            }
+            _ => self.chat_spawn(caller, a).await,
         }
-        let a: A = args(input)?;
-        let run = self.lead_run(caller).await?;
+    }
+
+    async fn run_spawn(&self, run: Run, a: SpawnArgs) -> Result<Value, CoreError> {
         let policy = &run.config.policy;
         if !policy.spawn {
             return Err(CoreError::Conflict(
@@ -82,11 +115,15 @@ impl Orchestrator {
             ));
         }
         // The same name asked again (a retried call) is the same teammate.
-        if let Ok(existing) = self.store.get_agent(&AgentKey::Name(a.name.clone())).await {
+        if let Some(name) = &a.name
+            && let Ok(existing) = self.store.get_agent(&AgentKey::Name(name.clone())).await
+        {
             if spawned_by(&existing).as_deref() == Some(run.id.to_string().as_str()) {
                 return Ok(json!({ "agent": existing.name, "repeated": true }));
             }
-            return Err(CoreError::Conflict(format!("the name {} is taken", a.name)));
+            return Err(CoreError::Conflict(format!(
+                "not recruited: the name {name} is taken; choose another, or leave name out to get one"
+            )));
         }
         let recruited = self
             .store
@@ -122,7 +159,10 @@ impl Orchestrator {
         config.insert(SPAWNED_BY.into(), json!(run.id));
         let agent = Agent {
             id: AgentId::new(),
-            name: a.name,
+            name_source: crossagents_core::NameSource::Chosen,
+            topic: None,
+            archived_at: None,
+            name: a.name.unwrap_or_default(),
             plugin,
             driver: None,
             model,
@@ -154,6 +194,167 @@ impl Orchestrator {
         )
     }
 
+    /// Recruiting by a conversation outside any run: bounded by the conversation's policy
+    /// (on/off, at most `max_agents` recruits, an optional model list) and by the models a
+    /// logged-in account can run. Recruits work in the conversation's folder, are listed under
+    /// it and archived with it.
+    /// The plugin and model a recruit runs on. A model asked for without a plugin picks the
+    /// plugin whose logged-in account runs it ("haiku" from a Codex chat is a Claude agent);
+    /// nothing asked for is the caller's own.
+    async fn recruit_target(
+        &self,
+        caller: &Agent,
+        a: &SpawnArgs,
+    ) -> Result<(String, Option<String>), CoreError> {
+        let Some(wanted) = &a.model else {
+            let plugin = a.plugin.clone().unwrap_or_else(|| caller.plugin.clone());
+            if self.host.available_models(&plugin).await?.is_empty() {
+                return Err(CoreError::Conflict(format!(
+                    "not recruited: there is no logged-in {plugin} account, so no {plugin} agent can run; tell the person, or recruit with a plugin that has one"
+                )));
+            }
+            let model = (plugin == caller.plugin)
+                .then(|| caller.model.clone())
+                .flatten();
+            return Ok((plugin, model));
+        };
+        let mut plugins = match &a.plugin {
+            Some(plugin) => vec![plugin.clone()],
+            None => self.host.plugin_names(),
+        };
+        // The caller's own plugin first: a model both offer stays with it.
+        plugins.sort_by_key(|p| *p != caller.plugin);
+        if !plugins.contains(&caller.plugin) && a.plugin.is_none() {
+            plugins.insert(0, caller.plugin.clone());
+        }
+        let mut offered = Vec::new();
+        for plugin in plugins {
+            let available = self.host.available_models(&plugin).await?;
+            if let Some(model) = available.iter().find(|m| m.eq_ignore_ascii_case(wanted)) {
+                return Ok((plugin, Some(model.clone())));
+            }
+            if !available.is_empty() {
+                offered.push(format!("{plugin}: {}", available.join(", ")));
+            }
+        }
+        Err(CoreError::Conflict(format!(
+            "not recruited: no logged-in account runs model {wanted} (available: {})",
+            if offered.is_empty() {
+                "none".to_owned()
+            } else {
+                offered.join("; ")
+            }
+        )))
+    }
+
+    async fn chat_spawn(&self, caller: &Agent, a: SpawnArgs) -> Result<Value, CoreError> {
+        if let Some(recruiter) = caller.recruiter() {
+            let by = self
+                .store
+                .get_agent(&AgentKey::Id(recruiter))
+                .await
+                .map_or_else(|_| recruiter.to_string(), |r| r.name);
+            return Err(CoreError::Conflict(format!(
+                "not recruited: you were recruited by {by}, and recruits do not recruit; tell {by} (agent_send) if more help is needed"
+            )));
+        }
+        let policy = chat_policy(caller);
+        if !policy.spawn {
+            return Err(CoreError::Conflict(
+                "not recruited: recruiting is turned off for this conversation; tell the person, or do the work yourself".into(),
+            ));
+        }
+        let recruits: Vec<Agent> = self
+            .store
+            .list_agents()
+            .await?
+            .into_iter()
+            .filter(|ag| ag.recruiter() == Some(caller.id) && ag.archived_at.is_none())
+            .collect();
+        // The same name asked again (a retried call) is the same teammate.
+        if let Some(name) = &a.name
+            && let Some(existing) = recruits
+                .iter()
+                .find(|r| r.name.to_lowercase() == name.to_lowercase())
+        {
+            return Ok(
+                json!({ "agent": existing.name, "id": existing.id, "model": existing.model, "repeated": true }),
+            );
+        }
+        if recruits.len() as u32 >= policy.max_agents {
+            let names: Vec<&str> = recruits.iter().map(|r| r.name.as_str()).collect();
+            return Err(CoreError::Conflict(format!(
+                "not recruited: this conversation may have at most {} teammates and has {} ({}); retire one with agent_retire, or ask the person to raise the limit",
+                policy.max_agents,
+                recruits.len(),
+                names.join(", ")
+            )));
+        }
+        let role = a.role.unwrap_or(Role::Worker);
+        if role == Role::Planner {
+            return Err(CoreError::Conflict(
+                "not recruited: recruit a worker or a reviewer; planners lead runs".into(),
+            ));
+        }
+        let (plugin, model) = self.recruit_target(caller, &a).await?;
+        if let Some(model) = &model {
+            if let Some(allowed) = &policy.spawn_models
+                && !allowed.contains(model)
+            {
+                return Err(CoreError::Conflict(format!(
+                    "not recruited: model {model} is not on this conversation's list of models to recruit ({})",
+                    allowed.join(", ")
+                )));
+            }
+        }
+        if let Some(name) = &a.name
+            && crossagents_core::names::is_vendor_word(name, &self.host.denied_name_words())
+        {
+            return Err(CoreError::Conflict(format!(
+                "not recruited: \"{name}\" is a vendor or model word, and names are for people; choose another name, or leave name out to get one (the model goes in model, not in the name)"
+            )));
+        }
+        let mut config = serde_json::Map::new();
+        config.insert(SPAWNED_BY_AGENT.into(), json!(caller.id));
+        if plugin == caller.plugin
+            && let Some(account) = caller.config.get("account")
+        {
+            config.insert("account".into(), account.clone());
+        }
+        let agent = Agent {
+            id: AgentId::new(),
+            name: a.name.unwrap_or_default(),
+            name_source: crossagents_core::NameSource::Chosen,
+            topic: None,
+            archived_at: None,
+            plugin,
+            driver: None,
+            model,
+            role,
+            cwd: caller.cwd.clone(),
+            config: Value::Object(config),
+            status: AgentStatus::Stopped,
+            created_at: Utc::now(),
+            profile: AgentProfile {
+                display_name: None,
+                title: a.title,
+                avatar: None,
+                color: None,
+                persona: a.persona,
+            },
+        };
+        let agent = self.host.spawn_agent(agent).await?;
+        Ok(json!({
+            "agent": agent.name,
+            "id": agent.id,
+            "role": agent.role,
+            "plugin": agent.plugin,
+            "model": agent.model,
+            "name_source": agent.name_source,
+            "next": format!("{} works in this conversation's folder; give it the work with agent_send(to = \"{}\")", agent.name, agent.name),
+        }))
+    }
+
     pub(crate) async fn agent_retire(
         &self,
         caller: &Agent,
@@ -164,7 +365,6 @@ impl Orchestrator {
             name: String,
         }
         let a: A = args(input)?;
-        let run = self.lead_run(caller).await?;
         let agent = match self.store.get_agent(&AgentKey::parse(&a.name)).await {
             Ok(agent) => agent,
             Err(CoreError::NotFound { .. }) => {
@@ -172,6 +372,15 @@ impl Orchestrator {
             }
             Err(err) => return Err(err),
         };
+        // A conversation's recruit is archived with its transcript.
+        if agent.recruiter() == Some(caller.id) {
+            if agent.archived_at.is_some() {
+                return Ok(json!({ "retired": true, "repeated": true }));
+            }
+            self.host.archive_agent(agent.id).await?;
+            return Ok(json!({ "retired": true, "archived": true }));
+        }
+        let run = self.lead_run(caller).await?;
         if spawned_by(&agent).as_deref() != Some(run.id.to_string().as_str()) {
             return Err(CoreError::Conflict(format!(
                 "{} was not recruited by this run; only recruits can be retired",

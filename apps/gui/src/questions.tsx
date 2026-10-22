@@ -76,7 +76,7 @@ function AskCard({ item, agent }: { item: HumanItem; agent?: Agent }) {
     if (text.trim()) void answer(text.trim());
   };
   const who = agent ? (
-    <a className="ask-who" href={sessionHref(agent.name)}>
+    <a className="ask-who" href={sessionHref(agent)}>
       <Avatar agent={agent} size={18} />
       {displayName(agent)}
     </a>

@@ -72,6 +72,16 @@ export function applyEvent(t: Transcript, event: HubEvent): Transcript {
   const seq = event.seq;
   const turns = t.turns;
   switch (event.type) {
+    case "agent.updated":
+      // Profile, model or effort changed: the conversation shows the new card.
+      if (event.data.agent.id !== id) return t;
+      return { ...t, agent: { ...event.data.agent, status: t.agent.status }, last_seq: seq };
+    case "agent.model_changed": {
+      // Shown as a note between the turns.
+      if (event.data.id !== id) return t;
+      const { model, effort, from_model, from_effort } = event.data;
+      return { ...t, switches: [...(t.switches ?? []), { at: event.ts, model, effort, from_model, from_effort }], last_seq: seq };
+    }
     case "agent.status_changed":
       if (event.data.id !== id) return t;
       return { ...t, agent: { ...t.agent, status: event.data.to }, last_seq: seq };

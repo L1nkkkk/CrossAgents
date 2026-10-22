@@ -47,6 +47,9 @@ fn spec(opts: Opts<'_>) -> (SessionSpec, mpsc::UnboundedReceiver<SessionEvent>) 
     let (tx, rx) = mpsc::unbounded_channel();
     let agent = Agent {
         id: AgentId::new(),
+        name_source: crossagents_core::NameSource::Chosen,
+        topic: None,
+        archived_at: None,
         name: "w1".into(),
         plugin: "codex".into(),
         driver: Some("codex-native".into()),

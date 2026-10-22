@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use crossagents_core::{
     Account, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError, EVENT_SCHEMA_VERSION,
-    Event, EventKind, HumanItem, MessageId, Note, NoteScope, Reminder, Run, RunId, Store, Task,
-    TaskId, Watch,
+    Event, EventKind, HumanItem, MessageId, NameSource, Note, NoteScope, Reminder, Run, RunId,
+    Store, Task, TaskId, Watch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -23,6 +23,25 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    /// Runs `sql` (`UPDATE agents SET <column> = ? WHERE id = ?`) for one agent.
+    async fn update_column(
+        &self,
+        id: AgentId,
+        sql: &'static str,
+        value: Option<String>,
+    ) -> Result<(), CoreError> {
+        let result = sqlx::query(sql)
+            .bind(value)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        if result.rows_affected() == 0 {
+            return Err(not_found(&AgentKey::Id(id)));
+        }
+        Ok(())
+    }
+
     /// Opens (creating if needed) the database file and applies pending migrations.
     pub async fn open(path: &Path) -> Result<Self, CoreError> {
         let options = SqliteConnectOptions::new()
@@ -94,6 +113,7 @@ fn agent_from_row(row: &SqliteRow) -> Result<Agent, CoreError> {
     Ok(Agent {
         id: get("id")?.parse().map_err(storage)?,
         name: get("name")?,
+        name_source: enum_from(&get("name_source")?)?,
         plugin: get("plugin")?,
         driver: get_opt("driver")?,
         model: get_opt("model")?,
@@ -103,6 +123,11 @@ fn agent_from_row(row: &SqliteRow) -> Result<Agent, CoreError> {
         status: enum_from(&get("status")?)?,
         created_at: time_from(&get("created_at")?)?,
         profile: serde_json::from_str(&get("profile")?).map_err(storage)?,
+        topic: get_opt("topic")?,
+        archived_at: get_opt("archived_at")?
+            .as_deref()
+            .map(time_from)
+            .transpose()?,
     })
 }
 
@@ -134,8 +159,8 @@ fn not_found(key: &AgentKey) -> CoreError {
 impl Store for SqliteStore {
     async fn insert_agent(&self, agent: &Agent) -> Result<(), CoreError> {
         let result = sqlx::query(
-            "INSERT INTO agents (id, name, plugin, driver, model, role, cwd, config, status, created_at, profile)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO agents (id, name, plugin, driver, model, role, cwd, config, status, created_at, profile, name_source, topic, archived_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(agent.id.to_string())
         .bind(&agent.name)
@@ -148,6 +173,9 @@ impl Store for SqliteStore {
         .bind(enum_str(&agent.status)?)
         .bind(agent.created_at.to_rfc3339())
         .bind(serde_json::to_string(&agent.profile).map_err(storage)?)
+        .bind(enum_str(&agent.name_source)?)
+        .bind(&agent.topic)
+        .bind(agent.archived_at.map(|t| t.to_rfc3339()))
         .execute(&self.pool)
         .await;
         match result {
@@ -165,7 +193,7 @@ impl Store for SqliteStore {
                 sqlx::query("SELECT * FROM agents WHERE id = ?").bind(id.to_string())
             }
             AgentKey::Name(name) => {
-                sqlx::query("SELECT * FROM agents WHERE name = ?").bind(name.clone())
+                sqlx::query("SELECT * FROM agents WHERE name = ? COLLATE NOCASE").bind(name.clone())
             }
         };
         let row = query.fetch_optional(&self.pool).await.map_err(storage)?;
@@ -196,6 +224,50 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    async fn rename_agent(
+        &self,
+        id: AgentId,
+        name: &str,
+        source: NameSource,
+    ) -> Result<(), CoreError> {
+        let result = sqlx::query("UPDATE agents SET name = ?, name_source = ? WHERE id = ?")
+            .bind(name)
+            .bind(enum_str(&source)?)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await;
+        match result {
+            Ok(r) if r.rows_affected() == 0 => Err(not_found(&AgentKey::Id(id))),
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Err(CoreError::Conflict(
+                format!("agent name {name:?} is already taken"),
+            )),
+            Err(e) => Err(storage(e)),
+        }
+    }
+
+    async fn update_agent_topic(&self, id: AgentId, topic: Option<&str>) -> Result<(), CoreError> {
+        self.update_column(
+            id,
+            "UPDATE agents SET topic = ? WHERE id = ?",
+            topic.map(str::to_owned),
+        )
+        .await
+    }
+
+    async fn set_agent_archived(
+        &self,
+        id: AgentId,
+        at: Option<DateTime<Utc>>,
+    ) -> Result<(), CoreError> {
+        self.update_column(
+            id,
+            "UPDATE agents SET archived_at = ? WHERE id = ?",
+            at.map(|t| t.to_rfc3339()),
+        )
+        .await
+    }
+
     async fn update_agent_profile(
         &self,
         id: AgentId,
@@ -216,6 +288,23 @@ impl Store for SqliteStore {
     async fn update_agent_model(&self, id: AgentId, model: Option<&str>) -> Result<(), CoreError> {
         let result = sqlx::query("UPDATE agents SET model = ? WHERE id = ?")
             .bind(model)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        if result.rows_affected() == 0 {
+            return Err(not_found(&AgentKey::Id(id)));
+        }
+        Ok(())
+    }
+
+    async fn update_agent_config(
+        &self,
+        id: AgentId,
+        config: &serde_json::Value,
+    ) -> Result<(), CoreError> {
+        let result = sqlx::query("UPDATE agents SET config = ? WHERE id = ?")
+            .bind(serde_json::to_string(config).map_err(storage)?)
             .bind(id.to_string())
             .execute(&self.pool)
             .await
@@ -835,6 +924,9 @@ mod tests {
     fn agent(name: &str) -> Agent {
         Agent {
             id: AgentId::new(),
+            name_source: crossagents_core::NameSource::Chosen,
+            topic: None,
+            archived_at: None,
             name: name.into(),
             plugin: "claude".into(),
             driver: None,

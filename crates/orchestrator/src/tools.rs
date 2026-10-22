@@ -15,6 +15,7 @@ const ALL: &[Group] = &[Group::Everyone];
 const PLANNER: &[Group] = &[Group::Lead];
 const WORKER: &[Group] = &[Group::Assignee];
 const REVIEWER: &[Group] = &[Group::Reviewer];
+const RECRUITERS: &[Group] = &[Group::Lead, Group::Conversation];
 
 struct ToolDef {
     name: &'static str,
@@ -410,8 +411,8 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "agent_spawn",
-        description: "Recruit a teammate for your run: name (unique), role (worker or reviewer), plugin and model (default: the run's default worker's), and optionally display_name, title, persona. Assign tasks to it by name. The run's policy caps how many you may recruit.",
-        groups: PLANNER,
+        description: "Recruit a teammate: a new agent you can then give work. As a run's lead, for the run (default plugin and model: the run's default worker's); in a conversation outside any run, for this conversation (default: your own plugin and model; it works in your folder and is archived with the conversation). Give a model (as agent_list or the person names it: haiku, sonnet, gpt-6-luna) to choose what it runs on; the plugin follows from the model, whichever vendor it is; name is what it is called (a person's name, not a model's; leave it out to get one). Optional: role (worker or reviewer), title, persona. The policy caps how many you may recruit and which models; when it refuses, the error says why: tell the person, do not substitute another agent and report it as done.",
+        groups: RECRUITERS,
         schema: || {
             object(
                 json!({
@@ -423,14 +424,14 @@ const TOOLS: &[ToolDef] = &[
                     "title": { "type": "string" },
                     "persona": { "type": "string" }
                 }),
-                &["name"],
+                &[],
             )
         },
     },
     ToolDef {
         name: "agent_retire",
-        description: "Remove a teammate you recruited (its conversation stays on record). It must have no open tasks.",
-        groups: PLANNER,
+        description: "Retire a teammate you recruited (its conversation stays on record). In a run it must have no open tasks; in a conversation it is archived.",
+        groups: RECRUITERS,
         schema: || object(json!({ "name": { "type": "string" } }), &["name"]),
     },
     ToolDef {

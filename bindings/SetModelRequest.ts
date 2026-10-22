@@ -3,4 +3,9 @@
 /**
  * `POST /v1/agents/{key}/model`. `None` leaves the model to the agent's own default.
  */
-export type SetModelRequest = { model: string | null, };
+export type SetModelRequest = { model: string | null, 
+/**
+ * Reasoning effort for the following turns (e.g. "low", "high"); absent keeps the
+ * current one, empty goes back to the model's default. Kept in `config.effort`.
+ */
+effort?: string, };

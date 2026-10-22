@@ -86,12 +86,13 @@ impl ThreadSettings {
         params.insert("cwd".into(), self.cwd.clone().into());
         params.insert("approvalPolicy".into(), self.approval_policy.clone().into());
         params.insert("sandbox".into(), self.sandbox.clone().into());
+        // The person's ChatGPT apps (Linear, GitHub, …) stay out of hub agents: their tool
+        // list is tens of thousands of tokens and buries the hub's own tools.
+        let mut config = json!({ "features": { "apps": false } });
         if !self.mcp_servers.is_empty() {
-            params.insert(
-                "config".into(),
-                json!({ "mcp_servers": mcp_config(&self.mcp_servers) }),
-            );
+            config["mcp_servers"] = mcp_config(&self.mcp_servers);
         }
+        params.insert("config".into(), config);
         params
     }
 }
@@ -741,6 +742,7 @@ mod tests {
         assert_eq!(server["command"], "/bin/crossagents");
         assert_eq!(server["env"]["CROSSAGENTS_AGENT_TOKEN"], "t");
         assert_eq!(server["default_tools_approval_mode"], "approve");
+        assert_eq!(start["config"]["features"]["apps"], false);
 
         let fork = thread_fork("t1", Some("turn-1"), &settings, None);
         assert_eq!(fork["lastTurnId"], "turn-1");

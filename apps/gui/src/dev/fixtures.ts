@@ -70,21 +70,29 @@ type AgentInit = {
   cwd?: string;
   profile?: Partial<AgentProfile>;
   createdMinutesAgo?: number;
+  /** A conversation title (chat mode). */
+  topic?: string;
+  /** The conversation that recruited it (chat mode). */
+  recruitedBy?: string;
 };
 
 export function agent(init: AgentInit): Agent {
   return {
     id: uid(),
-    name: init.name,
+    // The name is what people read ("Ada"); routes and lookups go by id or by name, any case.
+    name: init.profile?.display_name ?? init.name,
+    name_source: "chosen",
+    topic: init.topic ?? null,
+    archived_at: null,
     plugin: init.plugin,
     driver: null,
     model: init.model ?? null,
     role: init.role,
     cwd: init.cwd ?? REPO,
-    config: {},
+    config: init.recruitedBy ? { spawned_by_agent: init.recruitedBy } : {},
     status: init.status ?? "idle",
     created_at: ago(init.createdMinutesAgo ?? 60 * 24 * 3),
-    profile: { display_name: null, title: null, avatar: null, color: null, persona: null, ...init.profile },
+    profile: { title: null, avatar: null, color: null, persona: null, ...init.profile, display_name: null },
   };
 }
 
@@ -139,6 +147,7 @@ export function run(init: { title: string; request: string; planner: Agent; work
         budget: { max_tokens: null, max_usd: 8, max_minutes: 120 },
         spawn: false,
         max_agents: 6,
+        spawn_models: null,
         delegate: false,
       },
     },
@@ -239,6 +248,7 @@ export function transcript(a: Agent, turns: { turn: TranscriptTurn }[], used = 3
     driver: driverOf(a.plugin),
     capabilities: capabilitiesOf(a.plugin),
     turns: turns.map((t) => t.turn),
+    switches: [],
     usage: {
       used,
       size: 200_000,

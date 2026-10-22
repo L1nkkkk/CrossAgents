@@ -10,6 +10,7 @@ pub mod event;
 pub mod human;
 pub mod ids;
 pub mod model;
+pub mod names;
 pub mod note;
 pub mod notify;
 pub mod policy;
@@ -36,8 +37,9 @@ pub use event::{
 pub use human::{HumanAction, HumanItem, HumanItemKind, HumanItemStatus};
 pub use ids::{AgentId, MessageId, RunId, SessionId, TaskId};
 pub use model::{
-    Agent, AgentProfile, AgentStatus, CheckResult, LandMode, Landing, PlannedTask, Role, Run,
-    RunConfig, RunStatus, Scope, Task, TaskReport, TaskSpec, validate_agent_name,
+    Agent, AgentProfile, AgentStatus, CheckResult, LandMode, Landing, NameSource, PlannedTask,
+    Role, Run, RunConfig, RunStatus, Scope, Task, TaskReport, TaskSpec, validate_agent_name,
+    validate_slug,
 };
 pub use note::{EXTERNAL_PLUGIN, Note, NoteScope};
 pub use notify::{Reminder, Watch, WatchOn, WatchTarget};

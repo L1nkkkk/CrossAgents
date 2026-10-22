@@ -14,7 +14,7 @@ use crossagents_api_types::{
 };
 use crossagents_core::{
     Account, AccountProvider, AccountStatus, Agent, AgentId, AgentKey, CoreError, DataSource,
-    Event, EventBus, EventKind, RateLimits, Role, RunId, Store, TokenTotals, validate_agent_name,
+    Event, EventBus, EventKind, RateLimits, Role, RunId, Store, TokenTotals, validate_slug,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, mpsc};
@@ -142,6 +142,11 @@ impl Accounts {
         self.providers.keys().cloned().collect()
     }
 
+    /// Whether `plugin` runs on accounts the hub manages (Claude, Codex); others need none.
+    pub fn manages(&self, plugin: &str) -> bool {
+        self.providers.contains_key(plugin)
+    }
+
     fn provider(&self, name: &str) -> Result<&Arc<dyn AccountProvider>, CoreError> {
         self.providers.get(name).ok_or_else(|| {
             CoreError::Conflict(format!(
@@ -152,7 +157,7 @@ impl Accounts {
     }
 
     pub async fn create(&self, req: CreateAccountRequest) -> Result<Account, CoreError> {
-        validate_agent_name(&req.id)?;
+        validate_slug(&req.id)?;
         let provider = self.provider(&req.provider)?;
         let home = match (req.home, req.import_default) {
             (Some(home), _) => PathBuf::from(home),

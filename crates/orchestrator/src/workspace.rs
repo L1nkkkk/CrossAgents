@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use crossagents_core::{CoreError, LandMode};
 use crossagents_core::process::NoWindow;
+use crossagents_core::{CoreError, LandMode};
 use tokio::process::Command;
 
 /// Isolated working copies for a run and its tasks.

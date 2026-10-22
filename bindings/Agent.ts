@@ -2,14 +2,24 @@
 import type { AgentId } from "./AgentId";
 import type { AgentProfile } from "./AgentProfile";
 import type { AgentStatus } from "./AgentStatus";
+import type { NameSource } from "./NameSource";
 import type { Role } from "./Role";
 import type { JsonValue } from "./serde_json/JsonValue";
 
-export type Agent = { id: AgentId, 
+export type Agent = { 
 /**
- * Unique, see [`validate_agent_name`].
+ * Stable and opaque: everything the hub stores or routes refers to the agent by it.
+ */
+id: AgentId, 
+/**
+ * What people and teammates call it, e.g. "Luna"; unique (ignoring case) and renamable,
+ * see [`validate_agent_name`]. Tools take it and resolve it to the id at once.
  */
 name: string, 
+/**
+ * Whether a person chose the name or the hub made it up (and it is there to be renamed).
+ */
+name_source: NameSource, 
 /**
  * Plugin that runs this agent, e.g. `"claude"`.
  */
@@ -25,4 +35,13 @@ config: JsonValue, status: AgentStatus, created_at: string,
 /**
  * Who the agent is to people and to itself (docs/DESIGN.md §4.3).
  */
-profile: AgentProfile, };
+profile: AgentProfile, 
+/**
+ * A conversation's title (chat mode), what lists show it by; not the agent's name.
+ */
+topic: string | null, 
+/**
+ * Set while the conversation is archived: out of the lists and stopped, every
+ * transcript kept; restoring clears it.
+ */
+archived_at: string | null, };

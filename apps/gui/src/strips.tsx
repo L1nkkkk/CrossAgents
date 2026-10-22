@@ -25,15 +25,15 @@ function attention(agents: Agent[], tree: RunDetail[], unread: ReturnType<typeof
   const byId = (id: string) => agents.find((a) => a.id === id);
   for (const d of tree) {
     const planner = d.run.status === "awaiting_approval" ? byId(d.run.planner) : undefined;
-    if (planner) add({ agent: planner, word: t("state.awaitingApproval"), tone: "warn", key: `plan:${d.run.id}:${d.run.updated_at}`, done: false, href: sessionHref(planner.name) });
+    if (planner) add({ agent: planner, word: t("state.awaitingApproval"), tone: "warn", key: `plan:${d.run.id}:${d.run.updated_at}`, done: false, href: sessionHref(planner) });
   }
   for (const agent of agents) {
-    if (agent.status === "error") add({ agent, word: t("state.error"), tone: "danger", key: `error:${agent.id}`, done: false, href: sessionHref(agent.name) });
+    if (agent.status === "error") add({ agent, word: t("state.error"), tone: "danger", key: `error:${agent.id}`, done: false, href: sessionHref(agent) });
   }
   for (const [id, mark] of Object.entries(unread)) {
     const agent = byId(id);
     if (!agent) continue;
-    add({ agent, word: mark.kind === "error" ? t("state.error") : t("state.done"), tone: mark.kind === "error" ? "danger" : "quiet", key: `unread:${id}:${mark.at}`, done: mark.kind === "done", href: sessionHref(agent.name) });
+    add({ agent, word: mark.kind === "error" ? t("state.error") : t("state.done"), tone: mark.kind === "error" ? "danger" : "quiet", key: `unread:${id}:${mark.at}`, done: mark.kind === "done", href: sessionHref(agent) });
   }
   const rank = (c: Chip) => (c.tone === "danger" ? 0 : c.tone === "warn" ? 1 : 2);
   return [...chips.values()].sort((a, b) => rank(a) - rank(b));

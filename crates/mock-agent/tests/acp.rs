@@ -57,7 +57,11 @@ async fn prompt_selects_model_and_mode_and_streams_output() {
     let (session, mut rx) = start(
         PermissionPolicy::Bypass,
         Some("haiku"),
-        Some("You are a worker."),
+        Some(
+            "You are w1.
+
+About you: careful with tests.",
+        ),
     )
     .await;
     assert_eq!(

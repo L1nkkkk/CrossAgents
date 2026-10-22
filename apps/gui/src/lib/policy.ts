@@ -19,6 +19,7 @@ export const DEFAULT_POLICY: RunPolicy = {
   budget: { max_tokens: null, max_usd: null, max_minutes: null },
   spawn: true,
   max_agents: 8,
+  spawn_models: null,
   delegate: false,
 };
 

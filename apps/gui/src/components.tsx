@@ -1,6 +1,12 @@
 import { useState, type ReactNode } from "react";
 import {
   Activity,
+  Archive,
+  ArchiveRestore,
+  Brain,
+  CircleUserRound,
+  ArrowLeft,
+  ArrowRight,
   ArrowUp,
   ChartNoAxesColumn,
   Check,
@@ -14,7 +20,9 @@ import {
   Folder,
   GitBranch,
   ListChecks,
+  Menu,
   MessageCircle,
+  PanelLeft,
   PanelRight,
   Pin,
   Plus,
@@ -35,6 +43,7 @@ import type { TaskStatus } from "@bindings/TaskStatus";
 import { api } from "./api";
 import { useHubData } from "./hub";
 import { parseBlocks, parseInline, type Block, type Inline } from "./lib/markdown";
+import { prettyModel } from "./lib/models";
 import { full, when } from "./lib/time";
 
 /** How a status reads at a glance: a colour, and whether it is still moving. */
@@ -138,7 +147,7 @@ export function useAgents() {
   return useHubData(
     () => api.listAgents().then((r) => r.agents),
     [],
-    (e) => e.type === "agent.created" || e.type === "agent.removed" || e.type === "agent.status_changed",
+    (e) => e.type === "agent.created" || e.type === "agent.updated" || e.type === "agent.removed" || e.type === "agent.status_changed",
   );
 }
 
@@ -147,7 +156,8 @@ export function agentName(agents: Agent[] | undefined, id: string | null): strin
   return agents?.find((a) => a.id === id)?.name ?? id.slice(0, 8);
 }
 
-export const sessionHref = (name: string) => `#/s/${encodeURIComponent(name)}`;
+/** A conversation's link, by id so a rename does not break it (a name still opens it). */
+export const sessionHref = (agent: Agent | string) => `#/s/${encodeURIComponent(typeof agent === "string" ? agent : agent.id)}`;
 
 /**
  * Agent prose: fenced code blocks become `<pre>`, inline backticks `<code>`, blank lines
@@ -270,6 +280,9 @@ export function DiffStat({ text }: { text: string }) {
 const ICONS = {
   plus: Plus,
   send: ArrowUp,
+  back: ArrowLeft,
+  forward: ArrowRight,
+  sidebar: PanelLeft,
   stop: Square,
   chart: ChartNoAxesColumn,
   team: Users,
@@ -284,12 +297,17 @@ const ICONS = {
   panel: PanelRight,
   diff: FileDiff,
   tasks: ListChecks,
+  menu: Menu,
   events: Activity,
   copy: Copy,
   settings: Settings,
   sliders: SlidersHorizontal,
   check: Check,
   chat: MessageCircle,
+  brain: Brain,
+  archive: Archive,
+  restore: ArchiveRestore,
+  account: CircleUserRound,
   addMate: UserPlus,
   planner: Crown,
   rocket: Rocket,
@@ -425,11 +443,16 @@ export function Vendor({ plugin, model, title }: { plugin: string; model?: strin
   );
 }
 
-/** What people call the agent: its display name, else its address. */
-export const displayName = (agent: Agent) => agent.profile?.display_name || agent.name;
+/** What people and teammates call the agent ("Luna"); renamable, separate from its id and model. */
+export const displayName = (agent: Agent) => agent.name;
+
+/** Whether `key` (from a link or a pane) names this agent: its id, or its name ignoring case. */
+export const isAgent = (agent: Agent, key: string | null | undefined) =>
+  !!key && (agent.id === key || agent.name.toLowerCase() === key.toLowerCase());
 
 /** Title if it has one, else the role. */
-export const agentTitle = (agent: Agent) => agent.profile?.title || agent.role;
+/** What sits under an agent's name: its title, else the model it runs on (a chat has no role to speak of). */
+export const agentTitle = (agent: Agent) => agent.profile?.title || (agent.model ? prettyModel(agent.model) : agent.role);
 
 /**
  * The agent's face: its emoji or initials on its colour. With `status`, a small dot at the

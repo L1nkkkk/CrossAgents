@@ -79,6 +79,9 @@ pub struct RunPolicy {
     pub spawn: bool,
     #[serde(default = "default_max_agents")]
     pub max_agents: u32,
+    /// Models a recruit may run (exact ids); absent: any model a logged-in account can run.
+    #[serde(default)]
+    pub spawn_models: Option<Vec<String>>,
     /// Whether assignees may split their tasks and hand parts on (H1-5).
     #[serde(default)]
     pub delegate: bool,
@@ -104,6 +107,7 @@ impl Default for RunPolicy {
             budget: Budget::default(),
             spawn: yes(),
             max_agents: default_max_agents(),
+            spawn_models: None,
             delegate: false,
         }
     }

@@ -34,9 +34,14 @@ pub enum AgentStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Agent {
+    /// Stable and opaque: everything the hub stores or routes refers to the agent by it.
     pub id: AgentId,
-    /// Unique, see [`validate_agent_name`].
+    /// What people and teammates call it, e.g. "Luna"; unique (ignoring case) and renamable,
+    /// see [`validate_agent_name`]. Tools take it and resolve it to the id at once.
     pub name: String,
+    /// Whether a person chose the name or the hub made it up (and it is there to be renamed).
+    #[serde(default)]
+    pub name_source: NameSource,
     /// Plugin that runs this agent, e.g. `"claude"`.
     pub plugin: String,
     /// `None` means the plugin's default driver.
@@ -51,6 +56,57 @@ pub struct Agent {
     /// Who the agent is to people and to itself (docs/DESIGN.md §4.3).
     #[serde(default)]
     pub profile: AgentProfile,
+    /// A conversation's title (chat mode), what lists show it by; not the agent's name.
+    #[serde(default)]
+    pub topic: Option<String>,
+    /// Set while the conversation is archived: out of the lists and stopped, every
+    /// transcript kept; restoring clears it.
+    #[serde(default)]
+    pub archived_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum NameSource {
+    /// Given by a person or the agent that recruited it.
+    #[default]
+    Chosen,
+    /// Made up by the hub (see [`crate::names`]); clients offer to rename it.
+    Generated,
+}
+
+/// `config` key naming the conversation that recruited an agent (chat mode); a run's
+/// recruits carry `spawned_by_run` instead.
+pub const SPAWNED_BY_AGENT: &str = "spawned_by_agent";
+
+impl Agent {
+    /// The agent whose conversation recruited this one, if any.
+    pub fn recruiter(&self) -> Option<AgentId> {
+        self.config
+            .get(SPAWNED_BY_AGENT)
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+    }
+
+    /// Who the agent is, said at the top of its instructions: its name (so it does not
+    /// introduce itself as the vendor's assistant), the model it runs on, then its card.
+    pub fn identity(&self) -> String {
+        let model = self.model.as_deref().unwrap_or("its default model");
+        let mut text = format!(
+            "You are {name}, an agent in CrossAgents running on {model} ({plugin}). People and teammates call you {name}; refer to teammates by their names, not by their models.",
+            name = self.name,
+            plugin = self.plugin,
+        );
+        if let Some(title) = &self.profile.title {
+            text.push_str(&format!(" Your role on the team: {title}."));
+        }
+        if let Some(persona) = &self.profile.persona {
+            text.push_str("\n\nAbout you: ");
+            text.push_str(persona);
+        }
+        text
+    }
 }
 
 /// The agent's card: how it is shown, and the persona it is given. `role` still decides its
@@ -58,7 +114,8 @@ pub struct Agent {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct AgentProfile {
-    /// Shown instead of the name, e.g. "Ada". The name stays the address.
+    /// From before names were for people: what was shown instead of the name. The hub folds
+    /// it into the name (or a chat's topic) when it starts; kept to read old records.
     #[serde(default)]
     pub display_name: Option<String>,
     /// What it does, e.g. "设计师" or "Security reviewer".
@@ -125,35 +182,43 @@ impl AgentProfile {
         }
         Ok(profile)
     }
-
-    /// The opening instructions this profile adds, if it says anything about the agent.
-    pub fn instructions(&self, name: &str) -> Option<String> {
-        if self.title.is_none() && self.persona.is_none() && self.display_name.is_none() {
-            return None;
-        }
-        let who = self.display_name.as_deref().unwrap_or(name);
-        let mut text = match &self.title {
-            Some(title) => format!("You are {who}, the team's {title}."),
-            None => format!("You are {who}."),
-        };
-        if let Some(persona) = &self.persona {
-            text.push_str("\n\n");
-            text.push_str(persona);
-        }
-        Some(text)
-    }
 }
 
-/// Agent names are used as addresses (`agent_send(to = "alice")`), so keep them simple.
-pub fn validate_agent_name(name: &str) -> Result<(), CoreError> {
-    let mut chars = name.chars();
-    let valid = name.len() <= 32
+/// Ids people type that end up in paths and environment variables (account ids, plugin
+/// names): lowercase ASCII letters, digits, `_` and `-`, starting with a letter, at most 32.
+pub fn validate_slug(slug: &str) -> Result<(), CoreError> {
+    let mut chars = slug.chars();
+    let valid = slug.len() <= 32
         && chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
     if valid {
         Ok(())
     } else {
-        Err(CoreError::InvalidName(name.to_owned()))
+        Err(CoreError::InvalidName(format!(
+            "{slug:?}: use lowercase letters, digits, - and _, starting with a letter (at most 32)"
+        )))
+    }
+}
+
+/// Agent names are what people read and what teammates address (`agent_send(to = "Luna")`):
+/// 1–32 characters of letters (any script), digits, spaces, `-`, `_` and `.`, starting with a
+/// letter, no doubled or outer spaces, and never something that reads as an id.
+pub fn validate_agent_name(name: &str) -> Result<(), CoreError> {
+    let count = name.chars().count();
+    let valid = (1..=32).contains(&count)
+        && name.trim() == name
+        && !name.contains("  ")
+        && name.chars().next().is_some_and(char::is_alphabetic)
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
+        && name.parse::<uuid::Uuid>().is_err();
+    if valid {
+        Ok(())
+    } else {
+        Err(CoreError::InvalidName(format!(
+            "{name:?}: use 1–32 letters, digits, spaces, - _ or ., starting with a letter"
+        )))
     }
 }
 
@@ -415,8 +480,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn identity_names_the_agent_and_its_model() {
+        let agent = Agent {
+            id: AgentId::new(),
+            name: "Luna".into(),
+            name_source: NameSource::Generated,
+            plugin: "codex".into(),
+            driver: None,
+            model: Some("gpt-6-luna".into()),
+            role: Role::Worker,
+            cwd: PathBuf::from("."),
+            config: serde_json::Value::Null,
+            status: AgentStatus::Stopped,
+            created_at: Utc::now(),
+            profile: AgentProfile::default(),
+            topic: Some("写个冒泡排序".into()),
+            archived_at: None,
+        };
+        let text = agent.identity();
+        assert!(
+            text.starts_with(
+                "You are Luna, an agent in CrossAgents running on gpt-6-luna (codex)."
+            ),
+            "{text}"
+        );
+        assert!(
+            !text.contains("写个冒泡排序"),
+            "the title is not the name: {text}"
+        );
+    }
+
+    #[test]
     fn accepts_valid_names() {
-        for name in ["a", "alice", "worker-1", "plan_2", &"a".repeat(32)] {
+        for name in [
+            "a",
+            "alice",
+            "Luna",
+            "Nova 2",
+            "worker-1",
+            "plan_2",
+            "émile",
+            "a.b",
+            "露娜",
+            &"z".repeat(32),
+        ] {
             assert!(validate_agent_name(name).is_ok(), "{name}");
         }
     }
@@ -425,13 +532,16 @@ mod tests {
     fn rejects_invalid_names() {
         for name in [
             "",
-            "Alice",
             "1worker",
             "-x",
-            "has space",
-            "émile",
-            "a.b",
-            &"a".repeat(33),
+            " x",
+            "x ",
+            "a  b",
+            "a/b",
+            "01a163ee-3727-75d0-ab0f-e2fb5e88ffdf",
+            // 32 hex digits read as an id too.
+            &"a".repeat(32),
+            &"z".repeat(33),
         ] {
             assert!(validate_agent_name(name).is_err(), "{name}");
         }

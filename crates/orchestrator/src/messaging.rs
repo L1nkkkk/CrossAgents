@@ -27,6 +27,9 @@ pub enum Group {
     Lead,
     Assignee,
     Reviewer,
+    /// A conversation of its own (not a run's lead, not anyone's recruit): may recruit
+    /// teammates for itself, within its policy.
+    Conversation,
 }
 
 impl Group {
@@ -36,6 +39,7 @@ impl Group {
             Self::Lead => "lead",
             Self::Assignee => "assignee",
             Self::Reviewer => "reviewer",
+            Self::Conversation => "conversation",
         }
     }
 }
@@ -47,6 +51,13 @@ pub fn groups_of(agent: &Agent) -> Vec<Group> {
         Role::Worker => Group::Assignee,
         Role::Reviewer => Group::Reviewer,
     });
+    // Whether it is in a run right now is checked when it recruits.
+    if agent.role != Role::Planner
+        && agent.recruiter().is_none()
+        && agent.config.get("spawned_by_run").is_none()
+    {
+        groups.push(Group::Conversation);
+    }
     groups
 }
 
@@ -213,10 +224,11 @@ impl Orchestrator {
             .list_agents()
             .await?
             .into_iter()
+            .filter(|a| a.archived_at.is_none())
             .map(|a| {
                 json!({
                     "name": a.name,
-                    "display_name": a.profile.display_name,
+                    "id": a.id,
                     "title": a.profile.title,
                     "specialty": a.profile.persona.as_deref().map(|p| first_line(p, 160)),
                     "role": a.role,
@@ -228,6 +240,35 @@ impl Orchestrator {
             })
             .collect();
         Ok(json!({ "agents": agents }))
+    }
+
+    /// The agent `name` (or id) addresses. An unknown name says who is there now: names
+    /// change, and an agent may still use one it learned earlier in its conversation.
+    async fn recipient(&self, caller: &Agent, name: &str) -> Result<Agent, CoreError> {
+        match self.store().get_agent(&AgentKey::parse(name)).await {
+            Err(CoreError::NotFound { .. }) => {
+                let names: Vec<String> = self
+                    .store()
+                    .list_agents()
+                    .await?
+                    .into_iter()
+                    .filter(|a| a.archived_at.is_none() && a.id != caller.id)
+                    .map(|a| a.name)
+                    .collect();
+                Err(CoreError::NotFound {
+                    kind: "agent",
+                    id: format!(
+                        "{name} (names can change; teammates now: {}. Call agent_list for details, or agent_spawn to recruit one)",
+                        if names.is_empty() {
+                            "none".to_owned()
+                        } else {
+                            names.join(", ")
+                        }
+                    ),
+                })
+            }
+            other => other,
+        }
     }
 
     pub(crate) async fn agent_get(&self, name: &str) -> Result<Value, CoreError> {

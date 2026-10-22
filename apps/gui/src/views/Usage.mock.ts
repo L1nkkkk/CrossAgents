@@ -59,6 +59,8 @@ export function quota(): QuotaResponse {
         },
         ["ada", "mia", "sam"],
       ),
+      // A second Claude login with no quota figures yet: model menus then group by login.
+      account("claude-pro", "claude", "本机 Claude 登录", { plan: "pro", note: "no plan limits (API key or another provider)" }, []),
       account(
         "codex-plus",
         "codex",
