@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use crossagents_core::{CoreError, LandMode};
+use crossagents_core::process::NoWindow;
 use tokio::process::Command;
 
 /// Isolated working copies for a run and its tasks.
@@ -61,6 +62,7 @@ const AUTHOR: [&str; 4] = [
 
 async fn git(dir: &Path, args: &[&str]) -> Result<String, CoreError> {
     let output = Command::new("git")
+        .no_window()
         .args(args)
         .current_dir(dir)
         .output()
@@ -195,6 +197,7 @@ impl WorkspaceProvider for GitWorkspaces {
         if mode == LandMode::Pr {
             git(repo, &["push", "-u", "origin", branch]).await?;
             let output = Command::new("gh")
+                .no_window()
                 .args([
                     "pr", "create", "--base", base, "--head", branch, "--title", message, "--body",
                     message,

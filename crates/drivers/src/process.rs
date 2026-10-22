@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
+use crossagents_core::process::NoWindow;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
@@ -136,6 +137,7 @@ fn windows_proxy() -> Option<String> {
         return None;
     }
     let output = std::process::Command::new("reg")
+        .no_window()
         .args([
             "query",
             r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",

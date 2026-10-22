@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+
+use crossagents_core::process::NoWindow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -325,6 +327,7 @@ impl Accounts {
         }
         let mut child = tokio::process::Command::new(resolve_program(program))
             .args(args)
+            .no_window()
             .envs(&login.env)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
