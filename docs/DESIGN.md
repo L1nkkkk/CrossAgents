@@ -282,7 +282,7 @@ delivered → rejected → running          # 同一 Worker 返工
 | 驱动 | 对接 | 进程模型 | 用途 |
 |---|---|---|---|
 | `codex-native` | `codex app-server`（JSON-RPC over stdio） | 每个 Profile 一个进程，进程内多个线程（会话） | Codex 主力 |
-| `claude-native` | Claude Agent SDK 侧车（Node / Python 小进程，stdio 与 hub 通信）；备选 `claude -p --input-format stream-json --output-format stream-json` | 侧车一进程多会话；stream-json 一进程一会话 | Claude Code 主力，含经兼容接口接入的 DeepSeek 等 |
+| `claude-native` | `claude -p --input-format stream-json --output-format stream-json --permission-prompt-tool stdio`，hub 直接说控制协议（即 Agent SDK 所用的协议，见 [实测](research/claude-stream-json.md)） | 一进程一会话 | Claude Code 主力，含经兼容接口接入的 DeepSeek 等 |
 | `acp-generic` | 任意 ACP agent | 一进程多会话 | Gemini CLI、with-cli（`acp` 子命令）、Goose 等长尾 |
 
 Claude 侧走侧车还是 stream-json 由实测决定（§14）：侧车能拿到 SDK 的全部能力（权限回调、hooks、文件检查点），stream-json 少一个进程但能力受 CLI 参数限制。
@@ -392,15 +392,15 @@ crossagents events [--follow] | usage [--by ...]
 沿用 v1：`core`、`api-types`、`store-sqlite`、`plugins`、`hub`、`cli`、`mock-agent`；`apps/gui`。变化：
 
 - `core`：新增 `Driver` trait、能力表、统一会话事件。
-- `drivers`：拆为 `codex_native`（已完成，见 [N1](tasks/N1.md)）、`claude_native`、`acp`（即 `acp-generic`，以后改为一进程多会话）三个模块；Claude 侧车代码放 `components/claude-sidecar/`。
+- `drivers`：拆为 `codex_native`（已完成，见 [N1](tasks/N1.md)）、`claude_native`、`acp`（即 `acp-generic`，以后改为一进程多会话）三个模块；`claude_native` 直接说 stream-json 控制协议，不需要侧车。
 - `orchestrator`：固定 Pipeline 改为工具驱动的编排 + 停止条件。
 - `mock-agent`：同时模拟 ACP 与 Codex app-server 两种协议，供测试使用。
 
 ## 14. 待实测
 
 - ~~`codex app-server` 的实际方法与事件~~：已实测（codex-cli 0.158.0），见 [codex-app-server.md](research/codex-app-server.md)。线程开启、恢复、分叉、回退历史、按轮 diff、用量与限额都支持；回退不撤销文件；单进程承载上限未压测。
-- Claude 侧：Agent SDK 侧车与 stream-json 两条路各自能拿到哪些能力（恢复、分叉、文件检查点与回退、权限回调、用量），据此选定 `claude-native` 的实现。
-- Claude 会话是否与目录绑定（Codex 线程不绑定：恢复和每一轮都能改 cwd）。
+- ~~Claude 侧：Agent SDK 侧车与 stream-json 两条路各自能拿到哪些能力~~：已实测（Claude Code 2.1.304），见 [claude-stream-json.md](research/claude-stream-json.md)。SDK 就是 stream-json 控制协议的封装，`claude-native` 由 Rust 直接说这套协议，不用侧车；恢复、分叉、文件检查点与回退、权限回调、额度都支持。
+- ~~Claude 会话是否与目录绑定~~：不绑定，换目录 `--resume` 照样记得对话。
 - DeepSeek 的 Anthropic 兼容接口能否直接被 Claude Code 使用。
 - 各驱动在放行模式下对 cwd 外文件的实际限制（决定 §4.4 的边界强度）。Codex 已测：`danger-full-access` 不限制，`workspace-write` 限制在 cwd 内。
 - ACP 兜底：`claude-agent-acp`、`codex-acp`、with-cli `acp` 是否支持 `session/load`。
