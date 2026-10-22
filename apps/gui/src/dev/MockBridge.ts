@@ -18,8 +18,12 @@ import type { UsageResponse } from "@bindings/UsageResponse";
 import type { CrossAgentsBridge, HubResponse } from "../bridge";
 import type { HubEvent } from "../hub";
 import { turnStat } from "../lib/diff";
+import { effortOf } from "../lib/models";
 import { applyEvent } from "../session";
 import { transcript, uid } from "./fixtures";
+
+/** Names the mock hub makes up, like the real one (see crates/core/src/names.rs). */
+const MOCK_NAMES = ["Nova", "Iris", "Atlas", "Orion", "Vega", "Lyra", "Mira", "Sage"];
 
 export type MockState = {
   agents: Agent[];
@@ -181,7 +185,7 @@ export class MockBridge implements CrossAgentsBridge {
 
   private agent(key: string): Agent | undefined {
     const k = decodeURIComponent(key);
-    return this.state.agents.find((a) => a.name === k || a.id === k);
+    return this.state.agents.find((a) => a.id === k || a.name.toLowerCase() === k.toLowerCase());
   }
 
   private route(method: string, path: string, body: unknown): HubResponse {
@@ -198,7 +202,7 @@ export class MockBridge implements CrossAgentsBridge {
         const a = this.agent(m[1]);
         const t = a && s.transcripts.get(a.id);
         if (!a) return notFound(`agent ${decodeURIComponent(m[1])}`);
-        const base: Transcript = t ?? { agent: a, driver: null, capabilities: null, turns: [], usage: null, last_seq: 0 };
+        const base: Transcript = t ?? { agent: a, driver: null, capabilities: null, turns: [], usage: null, switches: [], last_seq: 0 };
         return json(200, { ...base, agent: a, last_seq: this.seq });
       }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/turns\/([^/]+)\/diff$/))) {
@@ -230,9 +234,23 @@ export class MockBridge implements CrossAgentsBridge {
     if (method === "POST") {
       if (p === "/v1/agents") {
         const req = body as CreateAgentRequest;
-        if (s.agents.some((a) => a.name === req.name)) return json(409, { error: { code: "conflict", message: `${req.name} exists` } });
-        const cwd = req.cwd || `C:/Users/me/.crossagents/chats/${req.name}`;
-        const agent: Agent = { id: uid(), ...req, cwd, status: "idle", created_at: new Date().toISOString() };
+        const taken = (n: string) => s.agents.some((a) => a.name.toLowerCase() === n.toLowerCase());
+        if (req.name && taken(req.name)) return json(409, { error: { code: "conflict", message: `agent name "${req.name}" is already taken` } });
+        // Like the hub: no name, a made-up person's name (never a model's).
+        const name = req.name || MOCK_NAMES.find((n) => !taken(n)) || `Nova ${s.agents.length}`;
+        const id = uid();
+        const cwd = req.cwd || `C:/Users/me/.crossagents/chats/${id}`;
+        const agent: Agent = {
+          id,
+          ...req,
+          name,
+          name_source: req.name ? "chosen" : "generated",
+          topic: req.topic ?? null,
+          archived_at: null,
+          cwd,
+          status: "idle",
+          created_at: new Date().toISOString(),
+        };
         s.agents.push(agent);
         s.transcripts.set(agent.id, transcript(agent, [], 0));
         this.emit({ type: "agent.created", data: { agent } });
@@ -240,6 +258,56 @@ export class MockBridge implements CrossAgentsBridge {
       }
       // Starting a run needs a real planner; the preview stops here with the hub's own error shape.
       if (p === "/v1/runs") return json(400, { error: { code: "bad_request", message: "mock 预览不能真的发起 run（agent 已经建好了）" } });
+      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/name$/))) {
+        const a = this.agent(m[1]);
+        if (!a) return notFound("agent");
+        const name = (body as { name: string }).name.trim();
+        if (s.agents.some((x) => x !== a && x.name.toLowerCase() === name.toLowerCase()))
+          return json(409, { error: { code: "conflict", message: `agent name "${name}" is already taken` } });
+        a.name = name;
+        a.name_source = "chosen";
+        this.emit({ type: "agent.updated", data: { agent: { ...a } } });
+        return json(200, a);
+      }
+      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/topic$/))) {
+        const a = this.agent(m[1]);
+        if (!a) return notFound("agent");
+        a.topic = (body as { topic: string | null }).topic?.trim() || null;
+        this.emit({ type: "agent.updated", data: { agent: { ...a } } });
+        return json(200, a);
+      }
+      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/archive$/))) {
+        const root = this.agent(m[1]);
+        if (!root) return notFound("agent");
+        const archived = (body as { archived: boolean }).archived;
+        const recruitedBy = (a: Agent) => (a.config as Record<string, unknown> | null)?.spawned_by_agent;
+        for (const a of [root, ...s.agents.filter((x) => recruitedBy(x) === root.id)]) {
+          a.archived_at = archived ? new Date().toISOString() : null;
+          if (archived) a.status = "stopped";
+          this.emit({ type: "agent.updated", data: { agent: { ...a } } });
+        }
+        return json(200, root);
+      }
+      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/model$/))) {
+        const a = this.agent(m[1]);
+        if (!a) return notFound("agent");
+        const req = body as { model: string | null; effort?: string };
+        const from = { model: a.model, effort: effortOf(a.config) ?? null };
+        a.model = req.model;
+        if (req.effort !== undefined) {
+          const config = { ...((a.config as Record<string, unknown>) ?? {}) };
+          if (req.effort) config.effort = req.effort;
+          else delete config.effort;
+          a.config = config as Agent["config"];
+        }
+        this.emit({ type: "agent.updated", data: { agent: { ...a } } });
+        const to = { model: a.model, effort: effortOf(a.config) ?? null };
+        if (to.model !== from.model || to.effort !== from.effort) {
+          s.transcripts.get(a.id)?.switches.push({ at: new Date().toISOString(), ...to, from_model: from.model, from_effort: from.effort });
+          this.emit({ type: "agent.model_changed", data: { id: a.id, ...to, from_model: from.model, from_effort: from.effort } });
+        }
+        return json(200, a);
+      }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/messages$/))) return this.send(m[1], body as { text: string; now?: boolean });
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/cancel$/))) return this.cancel(m[1]);
       if ((m = p.match(/^\/v1\/runs\/([^/]+)\/(approve|reject|cancel)$/))) {

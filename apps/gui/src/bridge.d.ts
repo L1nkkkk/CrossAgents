@@ -16,6 +16,8 @@ export interface CrossAgentsBridge {
   pickFolder?(): Promise<string | null>;
   /** The page's theme changed: the window frame follows it. */
   setTheme?(theme: { dark: boolean; background: string; foreground: string }): void;
+  /** A window command from the page's menu (electron/main.cts `COMMANDS`). */
+  command?(name: "zoomIn" | "zoomOut" | "zoomReset" | "reload" | "devtools" | "fullscreen" | "quit"): void;
 }
 
 declare global {

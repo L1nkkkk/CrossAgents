@@ -2,6 +2,7 @@
 import type { Agent } from "./Agent";
 import type { Capabilities } from "./Capabilities";
 import type { DriverKind } from "./DriverKind";
+import type { ModelSwitch } from "./ModelSwitch";
 import type { TranscriptTurn } from "./TranscriptTurn";
 import type { TranscriptUsage } from "./TranscriptUsage";
 
@@ -26,6 +27,16 @@ turns: Array<TranscriptTurn>,
  * Latest context usage the agent reported.
  */
 usage: TranscriptUsage | null, 
+/**
+ * Each switch of model or reasoning effort, oldest first; clients show them between the
+ * turns by time.
+ */
+switches: Array<ModelSwitch>, 
+/**
+ * What the conversation has spent: this agent and every teammate it recruited (chat
+ * mode), as far as they report cost. `None` when none of them reports any.
+ */
+conversation_cost_usd?: number, 
 /**
  * The last event folded in; follow `GET /v1/events?agent=…&since=<last_seq>` from here.
  */

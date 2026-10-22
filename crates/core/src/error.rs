@@ -2,7 +2,8 @@ use crate::state::TaskStatus;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
-    #[error("invalid name {0:?}: must match ^[a-z][a-z0-9_-]{{0,31}}$")]
+    /// The bad name and what a valid one looks like.
+    #[error("invalid name {0}")]
     InvalidName(String),
 
     #[error("invalid task transition {from:?} -> {to:?}")]

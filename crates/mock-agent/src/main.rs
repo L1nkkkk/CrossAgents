@@ -250,12 +250,13 @@ impl MockAgent {
 
         let model = self.model.lock().await.clone();
         let mode = self.mode.lock().await.clone();
-        // Every session gets its role's guide; only a profile card ("You are …") is noted, so
-        // tests can see a persona arrive.
+        // Every session gets who it is and its role's guide; only a profile card (a role on
+        // the team, or a persona) is noted, so tests can see a persona arrive.
         let card = blocks.len() > 1
-            && blocks[0]["text"]
-                .as_str()
-                .is_some_and(|t| t.starts_with("You are "));
+            && blocks[0]["text"].as_str().is_some_and(|t| {
+                t.starts_with("You are ")
+                    && (t.contains("Your role on the team") || t.contains("About you: "))
+            });
         if card {
             self.say(&session_id, "[instructions received] ").await;
         }

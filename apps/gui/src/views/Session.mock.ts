@@ -81,3 +81,34 @@ function soloScript(id: string, message_id: string, readId: string, next: string
     { at: 8300, event: { type: "agent.tool_call", data: { id, tool_call_id: uid(), title: "npx markdownlint-cli2 \"**/*.md\"", kind: "execute", status: "in_progress" } } },
   ];
 }
+
+/**
+ * A chat that recruits (chat mode): Luna is asked to "summon a luna". Its first try names the
+ * recruit after the model and is refused (the card says why); the second recruits Iris on that
+ * model, who nests under the chat in the sidebar. Luna's reply says what was refused.
+ */
+export function chatWithRecruit(): { state: MockState; script: Step[]; route: string } {
+  const chats = "C:/Users/me/.crossagents/chats";
+  const luna = agent({ name: "Luna", plugin: "codex", model: "gpt-6-luna", role: "worker", cwd: `${chats}/luna`, topic: "帮我唤起一个 luna 写冒泡排序" });
+  luna.name_source = "generated";
+  const iris = agent({ name: "Iris", plugin: "codex", model: "gpt-6-luna", role: "worker", cwd: `${chats}/luna`, recruitedBy: luna.id, createdMinutesAgo: 3 });
+  const state: MockState = { ...emptyState(), agents: [luna, iris], plugins: plugins(), quota: quota() };
+  const refused =
+    'conflict: not recruited: "Luna" is a vendor or model word, and names are for people; choose another name, or leave name out to get one (the model goes in model, not in the name)';
+  const t1 = turn({
+    input: "你能帮我唤起一个luna做一个写冒泡排序的任务吗？",
+    minutesAgo: 4,
+    took: 1,
+    items: [
+      tool("crossagents.agent_spawn", "mcp", "failed", { arguments: JSON.stringify({ name: "Luna", model: "gpt-6-luna" }), error: refused, changes: [] }),
+      tool("crossagents.agent_spawn", "mcp", "completed", { arguments: JSON.stringify({ model: "gpt-6-luna" }), result: JSON.stringify({ agent: "Iris", id: iris.id, model: "gpt-6-luna", plugin: "codex" }), changes: [] }),
+      tool("crossagents.agent_send", "mcp", "completed", { arguments: JSON.stringify({ to: "Iris", text: "请用 Python 写一个冒泡排序，附简短的输入输出示例。" }), changes: [] }),
+      say(
+        "用「Luna」这个名字招人被 hub 拒绝了：那是模型名，名字要像人名。我改成不指定名字，hub 给新队友起名 **Iris**，跑在 gpt-6-luna 上（就是你要的模型）。冒泡排序的任务已经发给 Iris，它写完会回给我。",
+      ),
+    ],
+  });
+  state.transcripts.set(luna.id, { ...transcript(luna, [t1], 12_000), conversation_cost_usd: 0.04 });
+  state.transcripts.set(iris.id, transcript(iris, [], 2_000));
+  return { state, script: [], route: `#/s/${luna.id}` };
+}

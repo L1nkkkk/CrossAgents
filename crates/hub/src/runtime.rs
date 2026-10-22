@@ -10,8 +10,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use crossagents_core::{
     Agent, AgentId, AgentKey, AgentStatus, CoreError, DiffSource, DriverSession, EXTERNAL_PLUGIN,
-    Envelope, EventBus, EventKind, McpServerSpec, MessageId, MessageSource, OutputStream,
-    PermissionPolicy, SessionEvent, SessionEventKind, SessionSpec, StopReason, Store,
+    Envelope, EventBus, EventKind, McpServerSpec, MessageId, MessageSource, NameSource,
+    OutputStream, PermissionPolicy, SessionEvent, SessionEventKind, SessionSpec, StopReason, Store,
+    validate_agent_name,
 };
 use crossagents_plugins::PluginRegistry;
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -142,6 +143,9 @@ pub struct Runtime {
     digests: Mutex<HashMap<AgentId, Digest>>,
     /// Messages for agents outside the hub, until they read them (`inbox_read`).
     external: Mutex<HashMap<AgentId, Vec<Waiting>>>,
+    /// What changed about the agent that it has not been told yet (its model or effort, its
+    /// name), by topic: said at the top of the next message it gets.
+    notices: Mutex<HashMap<AgentId, BTreeMap<&'static str, String>>>,
     generation: AtomicU64,
 }
 
@@ -162,6 +166,7 @@ impl Runtime {
             live: LiveMap::default(),
             locks: Mutex::default(),
             digests: Mutex::default(),
+            notices: Mutex::default(),
             external: Mutex::default(),
             generation: AtomicU64::new(0),
         }
@@ -428,6 +433,12 @@ impl Runtime {
         };
         // Agents outside the hub get their messages when they ask for them.
         let stored = self.store().get_agent(key).await?;
+        if stored.archived_at.is_some() {
+            return Err(CoreError::Conflict(format!(
+                "{} is archived; its conversation has to be restored before it gets messages",
+                stored.name
+            )));
+        }
         if stored.plugin == EXTERNAL_PLUGIN {
             publish(
                 &self.bus,
@@ -476,6 +487,15 @@ impl Runtime {
             },
         )
         .await;
+        // What changed since the last message (model, effort, name) is told before it; the
+        // conversation shows it as a note of its own (e.g. `agent.model_changed`).
+        let text = match self.notices.lock().await.remove(&agent.id) {
+            Some(notes) => {
+                let notes: Vec<String> = notes.into_values().collect();
+                format!("{}\n\n{text}", notes.join("\n"))
+            }
+            None => text,
+        };
         live.inbox.push((message_id, text), first);
         if first && queued {
             let _ = live.session.interrupt().await;
@@ -531,21 +551,46 @@ impl Runtime {
         }
     }
 
-    /// Changes the agent's model. A running session switches from its next turn when the
-    /// driver can; otherwise the model applies when the session next starts.
+    /// Changes the agent's model and, when `effort` is given, its reasoning effort (empty:
+    /// the model's default; kept in `config.effort`, which drivers read at launch). A running
+    /// session switches from its next turn when the driver can; otherwise both apply when the
+    /// session next starts.
     pub async fn set_model(
         &self,
         key: &AgentKey,
         model: Option<String>,
+        effort: Option<String>,
     ) -> Result<Agent, CoreError> {
         let mut agent = self.store().get_agent(key).await?;
+        let (from_model, from_effort) = (agent.model.clone(), effort_of(&agent));
         self.store()
             .update_agent_model(agent.id, model.as_deref())
             .await?;
         agent.model = model;
+        if let Some(effort) = &effort {
+            if !agent.config.is_object() {
+                agent.config = serde_json::json!({});
+            }
+            let config = agent.config.as_object_mut().expect("config is an object");
+            if effort.is_empty() {
+                config.remove("effort");
+            } else {
+                config.insert("effort".into(), effort.clone().into());
+            }
+            self.store()
+                .update_agent_config(agent.id, &agent.config)
+                .await?;
+        }
+        let effort = effort.filter(|e| !e.is_empty());
         let live = self.live.lock().await.get(&agent.id).cloned();
-        if let (Some(live), Some(model)) = (live, agent.model.as_deref()) {
-            match live.session.set_model(Some(model), None).await {
+        if let Some(live) = live
+            && (agent.model.is_some() || effort.is_some())
+        {
+            match live
+                .session
+                .set_model(agent.model.as_deref(), effort.as_deref())
+                .await
+            {
                 Ok(()) | Err(CoreError::Unsupported(_)) => {}
                 Err(err) => return Err(err),
             }
@@ -557,6 +602,24 @@ impl Runtime {
             },
         )
         .await;
+        let to_effort = effort_of(&agent);
+        if (&agent.model, &to_effort) != (&from_model, &from_effort) {
+            if agent.plugin != EXTERNAL_PLUGIN {
+                let note = switch_note(&from_model, &from_effort, &agent.model, &to_effort);
+                self.tell_later(agent.id, "model", note).await;
+            }
+            publish(
+                &self.bus,
+                EventKind::AgentModelChanged {
+                    id: agent.id,
+                    model: agent.model.clone(),
+                    effort: to_effort,
+                    from_model,
+                    from_effort,
+                },
+            )
+            .await;
+        }
         Ok(agent)
     }
 
@@ -586,6 +649,109 @@ impl Runtime {
         messages
     }
 
+    /// Keeps `note` for the agent's next message (a newer note on the same topic replaces it).
+    async fn tell_later(&self, id: AgentId, topic: &'static str, note: String) {
+        self.notices
+            .lock()
+            .await
+            .entry(id)
+            .or_default()
+            .insert(topic, note);
+    }
+
+    /// Renames the agent (people chose the name). It hears its new name with its next message;
+    /// its instructions carry it from its next session.
+    pub async fn rename(&self, key: &AgentKey, name: &str) -> Result<Agent, CoreError> {
+        let name = name.trim();
+        validate_agent_name(name)?;
+        let mut agent = self.store().get_agent(key).await?;
+        if agent.name == name && agent.name_source == NameSource::Chosen {
+            return Ok(agent);
+        }
+        self.store()
+            .rename_agent(agent.id, name, NameSource::Chosen)
+            .await?;
+        let from = std::mem::replace(&mut agent.name, name.to_owned());
+        agent.name_source = NameSource::Chosen;
+        if agent.plugin != EXTERNAL_PLUGIN && from != agent.name {
+            let note = format!(
+                "[CrossAgents] You have been renamed: you are {} now (was {from}). People and teammates call you {}.",
+                agent.name, agent.name
+            );
+            self.tell_later(agent.id, "name", note).await;
+        }
+        publish(
+            &self.bus,
+            EventKind::AgentUpdated {
+                agent: agent.clone(),
+            },
+        )
+        .await;
+        Ok(agent)
+    }
+
+    /// Sets or clears a conversation's title.
+    pub async fn set_topic(
+        &self,
+        key: &AgentKey,
+        topic: Option<String>,
+    ) -> Result<Agent, CoreError> {
+        let topic = topic
+            .map(|t| t.trim().chars().take(120).collect::<String>())
+            .filter(|t| !t.is_empty());
+        let mut agent = self.store().get_agent(key).await?;
+        self.store()
+            .update_agent_topic(agent.id, topic.as_deref())
+            .await?;
+        agent.topic = topic;
+        publish(
+            &self.bus,
+            EventKind::AgentUpdated {
+                agent: agent.clone(),
+            },
+        )
+        .await;
+        Ok(agent)
+    }
+
+    /// Archives a conversation (stopping it) or restores it, together with the teammates it
+    /// recruited: archived, they are out of the lists and stopped; every transcript stays.
+    pub async fn archive(&self, key: &AgentKey, archived: bool) -> Result<Agent, CoreError> {
+        let root = self.store().get_agent(key).await?;
+        let mut ids = vec![root.id];
+        let all = self.store().list_agents().await?;
+        let mut i = 0;
+        while i < ids.len() {
+            let parent = ids[i];
+            ids.extend(
+                all.iter()
+                    .filter(|a| a.recruiter() == Some(parent))
+                    .map(|a| a.id),
+            );
+            i += 1;
+        }
+        let at = archived.then(chrono::Utc::now);
+        let mut result = root;
+        for id in ids {
+            if archived {
+                self.stop(&AgentKey::Id(id)).await?;
+            }
+            self.store().set_agent_archived(id, at).await?;
+            let agent = self.store().get_agent(&AgentKey::Id(id)).await?;
+            publish(
+                &self.bus,
+                EventKind::AgentUpdated {
+                    agent: agent.clone(),
+                },
+            )
+            .await;
+            if id == result.id {
+                result = agent;
+            }
+        }
+        Ok(result)
+    }
+
     /// Stops the agent's session. Stopping a stopped agent is fine.
     pub async fn stop(&self, key: &AgentKey) -> Result<(), CoreError> {
         let agent = self.store().get_agent(key).await?;
@@ -611,6 +777,34 @@ impl Runtime {
             }
         }
     }
+}
+
+/// The reasoning effort the agent's config asks for; `None` is the model's default.
+fn effort_of(agent: &Agent) -> Option<String> {
+    agent
+        .config
+        .get("effort")
+        .and_then(|v| v.as_str())
+        .filter(|e| !e.is_empty())
+        .map(str::to_owned)
+}
+
+/// What the agent is told about a switch, so it does not guess from replies by another model
+/// earlier in the conversation.
+fn switch_note(
+    from_model: &Option<String>,
+    from_effort: &Option<String>,
+    model: &Option<String>,
+    effort: &Option<String>,
+) -> String {
+    let name = |v: &Option<String>| v.clone().unwrap_or_else(|| "default".into());
+    format!(
+        "[CrossAgents] From this message on you run on model {} (was {}) with reasoning effort {} (was {}). Earlier replies in this conversation may come from the previous setting.",
+        name(model),
+        name(from_model),
+        name(effort),
+        name(from_effort),
+    )
 }
 
 fn permission_of(agent: &Agent) -> PermissionPolicy {

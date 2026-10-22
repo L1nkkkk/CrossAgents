@@ -127,12 +127,15 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
             <span className="muted small">暂无额度数据</span>
           )}
         </div>
-        {worst && (
-          <span className={`health ${worst}`}>
-            <span aria-hidden="true">{HEALTH[worst].glyph}</span>
-            {HEALTH[worst].label}
-          </span>
-        )}
+        {/* Always a cell, so the actions keep their column when there is no quota data. */}
+        <span className="account-health">
+          {worst && (
+            <span className={`health ${worst}`}>
+              <span aria-hidden="true">{HEALTH[worst].glyph}</span>
+              {HEALTH[worst].label}
+            </span>
+          )}
+        </span>
         <div className="account-actions">
           <button className="ghost small" onClick={startLogin}>
             {status.logged_in ? "重新登录" : "登录"}

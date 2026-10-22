@@ -55,3 +55,19 @@ export function chatTitle(text: string, max = 24): string {
   const line = text.trim().split(/\r?\n/)[0].trim();
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
+
+/** Reasoning effort a vendor's CLI accepts, lowest first; empty when it has none. */
+export function effortLevels(plugin: string): { value: string; label: string }[] {
+  const low = { value: "low", label: "低" };
+  const medium = { value: "medium", label: "中" };
+  const high = { value: "high", label: "高" };
+  if (/claude/i.test(plugin)) return [low, medium, high, { value: "xhigh", label: "超高" }, { value: "max", label: "最高" }];
+  if (/codex/i.test(plugin)) return [low, medium, high];
+  return [];
+}
+
+/** The effort an agent's config asks for, if any. */
+export function effortOf(config: unknown): string | undefined {
+  const e = config && typeof config === "object" ? (config as Record<string, unknown>).effort : undefined;
+  return typeof e === "string" && e ? e : undefined;
+}

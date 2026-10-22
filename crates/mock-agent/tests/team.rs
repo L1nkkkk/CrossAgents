@@ -219,3 +219,96 @@ async fn the_lead_moves_a_teammate_to_a_stronger_model() {
     let coder: Value = t.get("/v1/agents/coder").await.json().await.unwrap();
     assert_eq!(coder["model"], "opus");
 }
+
+/// A conversation outside any run recruits for itself, within its policy; every refusal says
+/// why, and archiving the conversation archives its recruit.
+#[tokio::test]
+async fn a_conversation_recruits_within_its_policy() {
+    let t = TestHub::start().await;
+    let resp = t
+        .post(
+            "/v1/agents",
+            json!({
+                "name": "Chatty", "plugin": "mock", "role": "worker",
+                "cwd": t.home.path().display().to_string(),
+                "config": { "policy": { "max_agents": 1 } },
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let chatty: Value = resp.json().await.unwrap();
+    let mut w = t.watch().await;
+
+    let text = [
+        call(
+            "agent_spawn",
+            json!({ "name": "Haiku", "model": "mock-opus" }),
+        ),
+        call("agent_spawn", json!({ "model": "gpt-6-luna" })),
+        call("agent_spawn", json!({ "model": "mock-opus" })),
+        call(
+            "agent_spawn",
+            json!({ "model": "mock-opus", "name": "Second" }),
+        ),
+    ]
+    .join(" ");
+    t.send("Chatty", &text).await;
+    w.until("turn completed", |e| {
+        matches!(e.kind, EventKind::AgentTurnCompleted { .. })
+    })
+    .await;
+    let out = w.output();
+    assert!(out.contains("vendor or model word"), "{out}");
+    assert!(
+        out.contains("no logged-in account runs model gpt-6-luna"),
+        "{out}"
+    );
+    assert!(out.contains("at most 1 teammates"), "{out}");
+
+    let agents: Value = t.get("/v1/agents").await.json().await.unwrap();
+    let recruits: Vec<&Value> = agents["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["config"]["spawned_by_agent"] == chatty["id"])
+        .collect();
+    assert_eq!(recruits.len(), 1, "{agents}");
+    let recruit = recruits[0];
+    assert_eq!(recruit["model"], "mock-opus");
+    assert_eq!(recruit["name_source"], "generated");
+    assert!(
+        !crossagents_core::names::is_vendor_word(recruit["name"].as_str().unwrap(), &[]),
+        "{recruit}"
+    );
+
+    // Archiving the conversation archives its recruit; restoring brings both back.
+    let resp = t
+        .post("/v1/agents/Chatty/archive", json!({ "archived": true }))
+        .await;
+    assert_eq!(resp.status(), 200);
+    let id = recruit["id"].as_str().unwrap();
+    let archived: Value = t
+        .get(&format!("/v1/agents/{id}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(archived["archived_at"].is_string(), "{archived}");
+    let resp = t
+        .post("/v1/agents/Chatty/messages", json!({ "text": "hi" }))
+        .await;
+    assert_eq!(
+        resp.status(),
+        409,
+        "an archived conversation takes no messages"
+    );
+    t.post("/v1/agents/Chatty/archive", json!({ "archived": false }))
+        .await;
+    let restored: Value = t
+        .get(&format!("/v1/agents/{id}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(restored["archived_at"].is_null(), "{restored}");
+}

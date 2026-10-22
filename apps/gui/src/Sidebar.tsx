@@ -1,6 +1,7 @@
 // The sidebar, managed like Claude Code's: search, a short nav, pinned rows, then one group per
-// workspace. In a group, runs and standalone sessions are plain rows, newest first; a run's
-// teammates (the ones it started with and the ones its lead recruited) nest under it.
+// workspace. In a group, runs and conversations are plain rows, newest first; a run's teammates
+// (the ones it started with and the ones its lead recruited) nest under it, and so do the
+// teammates a conversation recruited. Archived conversations wait at the bottom to be restored.
 
 import { createContext, useContext, useEffect, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import type { Agent } from "@bindings/Agent";
@@ -8,9 +9,10 @@ import type { RunDetail } from "@bindings/RunDetail";
 import { useActivity, useUnread } from "./activity";
 import { api } from "./api";
 import { ACTIVE_RUN, runAgents } from "./App";
-import { Avatar, BrandMark, Icon, Mark, agentTitle, displayName, hueOf, runTone, sessionHref } from "./components";
+import { Avatar, BrandMark, Icon, Mark, agentTitle, displayName, hueOf, isAgent, runTone, sessionHref } from "./components";
 import { useConnectionStatus } from "./hub";
 import { t } from "./lib/i18n";
+import { prettyModel } from "./lib/models";
 import { level, tightest, windowLabel } from "./lib/quota";
 import { openBeside } from "./panes";
 import { useQuota } from "./views/Quota";
@@ -20,7 +22,16 @@ import { CHATS, selectWorkspace, useWorkspaces, type Workspace } from "./workspa
 type Item = { kind: "run"; key: string; at: string; detail: RunDetail } | { kind: "session"; key: string; at: string; agent: Agent };
 
 const runKey = (d: RunDetail) => `run:${d.run.id}`;
-const sessionKey = (a: Agent) => `s:${a.name}`;
+const sessionKey = (a: Agent) => `s:${a.id}`;
+
+/** The conversation that recruited `agent` (chat mode), if any. */
+const recruiterOf = (agent: Agent) => {
+  const by = (agent.config as Record<string, unknown> | null)?.spawned_by_agent;
+  return typeof by === "string" ? by : undefined;
+};
+
+/** What a conversation is listed by: its title, else its agent's name. */
+const labelOf = (agent: Agent) => agent.topic || displayName(agent);
 
 export function Sidebar({ route }: { route: string[] }) {
   const { list: workspaces, tree, agents } = useWorkspaces();
@@ -29,7 +40,10 @@ export function Sidebar({ route }: { route: string[] }) {
   const [section, selected] = route;
   const everyone = agents.data ?? [];
   const q = query.trim().toLowerCase();
-  const matchesAgent = (a: Agent) => !q || a.name.toLowerCase().includes(q) || displayName(a).toLowerCase().includes(q);
+  const matchesAgent = (a: Agent) => !q || a.name.toLowerCase().includes(q) || (a.topic ?? "").toLowerCase().includes(q);
+  const live = everyone.filter((a) => !a.archived_at);
+  const recruitsOf = (a: Agent) => live.filter((r) => recruiterOf(r) === a.id);
+  const archived = everyone.filter((a) => a.archived_at && !recruiterOf(a));
   const matchesRun = (d: RunDetail) => !q || d.run.title.toLowerCase().includes(q) || runAgents(d, everyone).some(matchesAgent);
 
   const inRuns = new Set((tree.data ?? []).flatMap((d) => runAgents(d, everyone).map((a) => a.id)));
@@ -37,7 +51,7 @@ export function Sidebar({ route }: { route: string[] }) {
     [
       ...w.runs.filter(matchesRun).map((detail): Item => ({ kind: "run", key: runKey(detail), at: detail.run.updated_at, detail })),
       ...w.agents
-        .filter((a) => !inRuns.has(a.id) && matchesAgent(a))
+        .filter((a) => !inRuns.has(a.id) && !a.archived_at && !recruiterOf(a) && (matchesAgent(a) || recruitsOf(a).some(matchesAgent)))
         .map((agent): Item => ({ kind: "session", key: sessionKey(agent), at: agent.created_at, agent })),
     ].sort((a, b) => b.at.localeCompare(a.at));
 
@@ -45,7 +59,7 @@ export function Sidebar({ route }: { route: string[] }) {
   const pins = groups.flatMap((g) => g.items).filter((i) => pinned.has(i.key));
   const shown = groups.map((g) => ({ ...g, items: g.items.filter((i) => !pinned.has(i.key)) })).filter((g) => g.items.length || (!q && g.w.agents.length));
   const isRun = (d: RunDetail) => section === "runs" && selected === d.run.id;
-  const isSession = (a: Agent) => section === "s" && selected === a.name;
+  const isSession = (a: Agent) => section === "s" && isAgent(a, selected);
   const pendingPlans = new Set((tree.data ?? []).filter((d) => d.run.status === "awaiting_approval").map((d) => d.run.planner));
   const loaded = !!tree.data && !!agents.data;
 
@@ -53,7 +67,7 @@ export function Sidebar({ route }: { route: string[] }) {
     item.kind === "run" ? (
       <RunRow key={item.key} detail={item.detail} agents={everyone} selected={isRun(item.detail)} isSession={isSession} searching={!!q} />
     ) : (
-      <SessionRow key={item.key} agent={item.agent} active={isSession(item.agent)} pinKey={item.key} />
+      <SessionRow key={item.key} agent={item.agent} active={isSession(item.agent)} pinKey={item.key} recruits={recruitsOf(item.agent)} isSession={isSession} searching={!!q} />
     );
 
   return (
@@ -102,11 +116,13 @@ export function Sidebar({ route }: { route: string[] }) {
 
           {shown.map(({ w, items }) => (
             <Group key={w.key} workspace={w} searching={!!q}>
-              <Capped items={items} keep={(i) => (i.kind === "run" ? isRun(i.detail) || runAgents(i.detail, everyone).some(isSession) : isSession(i.agent))} searching={!!q}>
+              <Capped items={items} keep={(i) => (i.kind === "run" ? isRun(i.detail) || runAgents(i.detail, everyone).some(isSession) : isSession(i.agent) || recruitsOf(i.agent).some(isSession))} searching={!!q}>
                 {row}
               </Capped>
             </Group>
           ))}
+
+          {!q && archived.length > 0 && <Archived agents={archived} isSession={isSession} />}
 
           {q && !pins.length && !shown.length && <p className="sidebar-empty">{t("sidebar.noMatch", { query })}</p>}
           {!q && loaded && !workspaces.length && <p className="sidebar-empty">{t("sidebar.empty")}</p>}
@@ -264,33 +280,115 @@ function workingOn(detail: RunDetail, agent: Agent): string {
 }
 
 /**
- * A conversation: the agent's name, with a dot when it needs you (出错, 待审批), is working, or
- * finished while you were away. Ctrl/⌘-click or middle-click opens it beside the current one.
+ * A conversation: its title (else its agent's name), with a dot when it needs you (出错, 待审批),
+ * is working, or finished while you were away; the teammates it recruited nest under it.
+ * Ctrl/⌘-click or middle-click opens it beside the current one.
  */
-function SessionRow({ agent, active, note, pinKey }: { agent: Agent; active: boolean; note?: string; pinKey?: string }) {
+function SessionRow({
+  agent,
+  active,
+  note,
+  pinKey,
+  recruits = [],
+  isSession,
+  searching,
+}: {
+  agent: Agent;
+  active: boolean;
+  note?: string;
+  pinKey?: string;
+  recruits?: Agent[];
+  isSession?: (a: Agent) => boolean;
+  searching?: boolean;
+}) {
+  const [toggled, setToggled] = useState<boolean>();
+  const recruitActive = !!isSession && recruits.some(isSession);
+  const open = !!searching || (toggled ?? (active || recruitActive || recruits.some((r) => r.status === "running")));
   const doing = useActivity(agent.id);
   const unread = useUnread()[agent.id];
   const planWaiting = useContext(PendingPlans).has(agent.id);
   const dot: Dot =
     agent.status === "error" || unread?.kind === "error" ? "danger" : planWaiting ? "warn" : agent.status === "running" ? "live" : unread ? "unread" : undefined;
   const role = agent.profile?.title || agentTitle(agent);
-  return (
+  const row = (
     <Row
-      href={sessionHref(agent.name)}
+      href={sessionHref(agent)}
       active={active}
       dim={agent.status === "stopped"}
-      title={`${displayName(agent)} · ${role} · ${agent.plugin}${agent.model ? " · " + agent.model : ""} · ${agent.status}${doing ? "\n" + doing : ""}\n${t("sidebar.besideHint")}`}
+      title={`${agent.topic ? agent.topic + "\n" : ""}${displayName(agent)} · ${role} · ${agent.plugin}${agent.model ? " · " + agent.model : ""} · ${agent.status}${doing ? "\n" + doing : ""}\n${t("sidebar.besideHint")}`}
       dot={dot}
       pinKey={pinKey}
-      beside={agent.name}
+      beside={agent.id}
+      archive={note ? undefined : agent}
       lead={<Avatar agent={agent} size={note ? 16 : 18} />}
       label={
         <>
-          {displayName(agent)}
+          {note ? displayName(agent) : labelOf(agent)}
           {note && <span className="role">{note}</span>}
         </>
       }
+      after={
+        recruits.length > 0 && (
+          <button
+            className={`disclose ${open ? "open" : ""}`}
+            onClick={(e) => {
+              e.preventDefault();
+              setToggled(!open);
+            }}
+            aria-label={t(open ? "sidebar.hideTeam" : "sidebar.showTeam")}
+            aria-expanded={open}
+          >
+            <Icon name="chevron" size={13} />
+          </button>
+        )
+      }
     />
+  );
+  if (!recruits.length) return row;
+  return (
+    <div className="tree">
+      {row}
+      {open && (
+        <div className="children">
+          {recruits.map((r) => (
+            <SessionRow key={r.id} agent={r} active={!!isSession?.(r)} note={r.profile?.title || (r.model ? prettyModel(r.model) : r.plugin)} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Archived conversations, folded at the bottom; each can be restored (with its recruits). */
+function Archived({ agents, isSession }: { agents: Agent[]; isSession: (a: Agent) => boolean }) {
+  const [open, setOpen] = useState(false);
+  const sorted = agents.slice().sort((a, b) => (b.archived_at ?? "").localeCompare(a.archived_at ?? ""));
+  return (
+    <section className="group archived-group">
+      <div className="group-head">
+        <button className="group-name" onClick={() => setOpen(!open)} aria-expanded={open}>
+          <Icon name="archive" size={12} />
+          {t("sidebar.archived", { n: agents.length })}
+          <Icon name={open ? "chevron" : "chevronRight"} size={13} />
+        </button>
+      </div>
+      {open &&
+        sorted.map((a) => (
+          <div key={a.id} className={`row dim ${isSession(a) ? "active" : ""}`}>
+            <a className="row-link" href={sessionHref(a)} title={`${labelOf(a)} · ${displayName(a)}`}>
+              <span className="row-lead">
+                <Avatar agent={a} size={16} />
+              </span>
+              <span className="row-label">{labelOf(a)}</span>
+            </a>
+            <span className="row-actions">
+              <button className="icon-btn" onClick={() => void api.archiveAgent(a.id, false)} title={t("sidebar.restore")} aria-label={t("sidebar.restore")}>
+                <Icon name="restore" size={13} />
+              </button>
+            </span>
+          </div>
+        ))}
+    </section>
   );
 }
 
@@ -306,6 +404,7 @@ function Row({
   dot,
   pinKey,
   beside,
+  archive,
 }: {
   href: string;
   active: boolean;
@@ -317,6 +416,8 @@ function Row({
   dot: Dot;
   pinKey?: string;
   beside?: string;
+  /** The conversation this row archives from its hover actions. */
+  archive?: Agent;
 }) {
   const pinned = usePinned();
   const isPinned = !!pinKey && pinned.has(pinKey);
@@ -344,6 +445,19 @@ function Row({
         {beside && !active && (
           <button className="icon-btn" onClick={openAside} title={t("sidebar.openBeside")} aria-label={t("sidebar.openBeside")}>
             <Icon name="beside" size={13} />
+          </button>
+        )}
+        {archive && (
+          <button
+            className="icon-btn"
+            onClick={(e) => {
+              e.preventDefault();
+              void api.archiveAgent(archive.id, true);
+            }}
+            title={t("sidebar.archive")}
+            aria-label={t("sidebar.archive")}
+          >
+            <Icon name="archive" size={13} />
           </button>
         )}
         {pinKey && (

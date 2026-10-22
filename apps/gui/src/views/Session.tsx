@@ -1,8 +1,9 @@
-import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { Capabilities } from "@bindings/Capabilities";
 import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
+import type { ModelSwitch } from "@bindings/ModelSwitch";
 import type { TranscriptUsage } from "@bindings/TranscriptUsage";
 import { view } from "../activity";
 import { api, errorText } from "../api";
@@ -10,10 +11,15 @@ import { ACTIVE_RUN, useRunTree } from "../App";
 import { Avatar, ErrorBox, Icon, Mark, Prose, StatusChip, Vendor, agentTitle, agentTone, displayName, roleShape, time, useAgents, vendorName } from "../components";
 import { ChangeStat, DiffView } from "../diffview";
 import { parseDiff, tailLines, type DiffFile } from "../lib/diff";
+import { effortLevels, prettyModel } from "../lib/models";
 import { clock, range } from "../lib/time";
+import { ModelEffortPicks } from "../modelPick";
+import { InfoRail, RAIL_ROOM, useRail } from "../rail";
+import { ScrollThumb } from "../scrollthumb";
+import { TurnMap, type MapEntry } from "../turnmap";
 import { focusSession, openTool, toggleTools, useLayout } from "../panes";
 import { taskState } from "../lib/taskState";
-import { duration, failed, liveActivity, stepLine, summarize, workGroups, type Step } from "../lib/workGroups";
+import { actionOf, duration, failed, liveActivity, stepLine, summarize, workGroups, type ActionTool, type Step } from "../lib/workGroups";
 import { PeerMessage, StateWord, useArmed } from "../parts";
 import { useSession, type TranscriptItem, type TranscriptTurn } from "../session";
 import { QuestionCards } from "../questions";
@@ -30,6 +36,17 @@ export function SessionView({ name, onClose }: { name: string; onClose?: () => v
   const agents = useAgents();
   const [draft, setDraft] = useState("");
   const agentId = transcript?.agent.id;
+  const { hidden: railOff } = useRail();
+  const [width, setWidth] = useState(0);
+  const ro = useRef<ResizeObserver | null>(null);
+  // A callback ref: the section mounts once the transcript has loaded.
+  const measure = useCallback((el: HTMLElement | null) => {
+    ro.current?.disconnect();
+    if (!el) return;
+    setWidth(el.clientWidth);
+    ro.current = new ResizeObserver(() => setWidth(el.clientWidth));
+    ro.current.observe(el);
+  }, []);
 
   useEffect(() => (agentId ? view(agentId) : undefined), [agentId]);
 
@@ -63,18 +80,30 @@ export function SessionView({ name, onClose }: { name: string; onClose?: () => v
   const liveRuns = runs.filter((d) => d.run.planner === agent.id && ACTIVE_RUN.includes(d.run.status) && d.run.status !== "awaiting_approval");
   const tasks = runs.flatMap((d) => d.tasks.filter((t) => t.assignee === agent.id || t.reviewer === agent.id).map((t) => ({ run: d.run, task: t })));
   const queued = turns.filter((t) => !started(t));
+  const rail = !railOff && width >= RAIL_ROOM;
+  const led = runs.filter((d) => d.run.planner === agent.id);
+  const recruits = everyone.filter((a) => (a.config as Record<string, unknown> | null)?.spawned_by_agent === agent.id && !a.archived_at);
 
   return (
-    <section className="pane" onPointerDownCapture={() => focusSession(name)}>
-      <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} onClose={onClose} />
-      <Conversation agent={agent} turns={turns.filter(started)} agents={everyone} tree={runs} />
+    <section className={`pane ${rail ? "with-rail" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)}>
+      <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onClose={onClose} />
+      <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} agents={everyone} tree={runs} />
+      {rail && <InfoRail agent={agent} usage={usage} turns={turns} tasks={tasks} led={led} agents={everyone} recruits={recruits} spend={transcript.conversation_cost_usd} />}
       <div className="dock">
         {/* One strip is enough: the pane beside leaves it to the main one. */}
         {!onClose && <QuestionCards agents={everyone} />}
         {!onClose && <NeedsYouStrip agents={everyone} tree={runs} />}
         <RunStrip runs={liveRuns} agents={everyone} />
         <QueuePanel agent={agent} queued={queued} onEdit={setDraft} />
-        <Composer agent={agent} capabilities={capabilities} draft={draft} setDraft={setDraft} plans={pendingPlans} onPlanDone={reload} />
+        {agent.archived_at ? (
+          <div className="archived-bar">
+            <Icon name="archive" size={14} />
+            <span>这个对话已归档，它招来的队友也一起停下了。恢复后可以继续。</span>
+            <button onClick={() => void api.archiveAgent(agent.id, false)}>恢复对话</button>
+          </div>
+        ) : (
+          <Composer agent={agent} capabilities={capabilities} draft={draft} setDraft={setDraft} plans={pendingPlans} onPlanDone={reload} />
+        )}
       </div>
     </section>
   );
@@ -86,6 +115,7 @@ function Header({
   usage,
   driver,
   tasks,
+  rail,
   onClose,
 }: {
   agent: Agent;
@@ -93,6 +123,8 @@ function Header({
   usage: TranscriptUsage | null;
   driver: string | null;
   tasks: { run: Run; task: RunDetail["tasks"][number] }[];
+  /** The info rail is showing the model, context and tasks: the header leaves them out. */
+  rail: boolean;
   onClose?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -116,34 +148,36 @@ function Header({
       <div className="topbar">
         <Avatar agent={agent} size={26} />
         <span className="who-block">
-          <span className="title">{displayName(agent)}</span>
-          <span className="who-sub">
-            {agentTitle(agent)} · @{agent.name}
-          </span>
+          <AgentName agent={agent} />
+          <span className="who-sub">{agent.topic ?? agentTitle(agent)}</span>
         </span>
         <StatusChip status={agent.status} tone={agentTone(agent.status)} />
-        <span className="chip hide-narrow">
-          <Mark shape={roleShape(agent.role)} tone={agentTone(agent.status)} size={9} />
-          {agent.role}
-        </span>
-        <span className="chip hide-narrow">
-          <Vendor plugin={agent.plugin} model={agent.model} title={driver ? `${vendorName(agent.plugin)} · driver: ${driver}` : undefined} />
-        </span>
-        {tasks.map(({ run, task }) => (
-          <a key={task.id} className="chip" href={`#/runs/${run.id}/tasks/${task.id}`} title={`${task.title} · ${run.title}`}>
-            <code className="bare">#{task.key}</code>
-            <StateWord state={taskState(task)} />
-          </a>
-        ))}
+        {!rail && (
+          <>
+            <span className="chip hide-narrow">
+              <Mark shape={roleShape(agent.role)} tone={agentTone(agent.status)} size={9} />
+              {agent.role}
+            </span>
+            <span className="chip hide-narrow">
+              <Vendor plugin={agent.plugin} model={agent.model} title={driver ? `${vendorName(agent.plugin)} · driver: ${driver}` : undefined} />
+            </span>
+            {tasks.map(({ run, task }) => (
+              <a key={task.id} className="chip" href={`#/runs/${run.id}/tasks/${task.id}`} title={`${task.title} · ${run.title}`}>
+                <code className="bare">#{task.key}</code>
+                <StateWord state={taskState(task)} />
+              </a>
+            ))}
+          </>
+        )}
         <div className="spacer" />
-        {usage && usage.size > 0 && <Meter usage={usage} />}
+        {!rail && usage && usage.size > 0 && <Meter usage={usage} />}
         {agent.status === "idle" && usage && usage.size > 0 && usage.used / usage.size >= 0.5 && (
-          <button className="ghost small" disabled={busy} onClick={() => run(() => api.compactAgent(agent.name))} title="让 agent 把历史压缩成摘要，腾出上下文">
+          <button className="ghost small" disabled={busy} onClick={() => run(() => api.compactAgent(agent.id))} title="让 agent 把历史压缩成摘要，腾出上下文">
             压缩上下文
           </button>
         )}
         {agent.status === "running" && capabilities?.interrupt !== false && (
-          <button disabled={busy} onClick={() => run(() => api.cancelAgent(agent.name))} title="中断本轮（Esc）">
+          <button disabled={busy} onClick={() => run(() => api.cancelAgent(agent.id))} title="中断本轮（Esc）">
             <span className="row" style={{ gap: 5 }}>
               <Icon name="stop" size={13} />
               中断
@@ -154,7 +188,7 @@ function Header({
           <button
             className={stop.armed ? "danger armed" : "ghost"}
             disabled={busy}
-            onClick={() => stop.click(() => run(() => api.stopAgent(agent.name)))}
+            onClick={() => stop.click(() => run(() => api.stopAgent(agent.id)))}
             title="停止进程；下次发消息会重新启动"
           >
             {stop.armed ? "再点一次停止" : "停止"}
@@ -173,6 +207,61 @@ function Header({
         </div>
       )}
     </>
+  );
+}
+
+/**
+ * The agent's name; click to rename. A name the hub made up says so, as an invitation to give
+ * it one. The agent hears its new name with its next message.
+ */
+function AgentName({ agent }: { agent: Agent }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(agent.name);
+  const [error, setError] = useState<string>();
+  async function save() {
+    const name = value.trim();
+    if (!name || name === agent.name) return setEditing(false);
+    try {
+      await api.renameAgent(agent.id, name);
+      setEditing(false);
+      setError(undefined);
+    } catch (err) {
+      setError(errorText(err));
+    }
+  }
+  if (editing)
+    return (
+      <input
+        className={`name-edit ${error ? "bad" : ""}`}
+        autoFocus
+        value={value}
+        maxLength={32}
+        title={error ?? "Enter 保存 · Esc 取消"}
+        aria-label="新名字"
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={() => void save()}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") void save();
+          if (e.key === "Escape") {
+            setEditing(false);
+            setError(undefined);
+          }
+        }}
+      />
+    );
+  const generated = agent.name_source === "generated";
+  return (
+    <button
+      className="title name-button"
+      onClick={() => {
+        setValue(agent.name);
+        setEditing(true);
+      }}
+      title={generated ? "名字是自动起的，点一下改名" : "点一下改名"}
+    >
+      {displayName(agent)}
+      {generated && <span className="name-auto">自动命名</span>}
+    </button>
   );
 }
 
@@ -200,9 +289,27 @@ function Meter({ usage }: { usage: TranscriptUsage }) {
   );
 }
 
-function Conversation({ agent, turns, agents, tree, children }: { agent: Agent; turns: TranscriptTurn[]; agents: Agent[]; tree: RunDetail[]; children?: ReactNode }) {
+function Conversation({
+  agent,
+  turns,
+  switches,
+  agents,
+  tree,
+  children,
+}: {
+  agent: Agent;
+  turns: TranscriptTurn[];
+  switches: ModelSwitch[];
+  agents: Agent[];
+  tree: RunDetail[];
+  children?: ReactNode;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  // One mark per message from a person; recomputed only when those change.
+  const asked = turns.filter(fromPerson);
+  const key = asked.map((t) => t.message_id).join(",");
+  const entries = useMemo<MapEntry[]>(() => asked.map((t) => ({ id: t.message_id, text: t.input })), [key]);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -210,31 +317,66 @@ function Conversation({ agent, turns, agents, tree, children }: { agent: Agent; 
   });
 
   return (
-    <div
-      className="convo"
-      ref={ref}
-      onScroll={(e) => {
-        const el = e.currentTarget;
-        stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-      }}
-    >
-      <div className="convo-inner">
-        {turns.length === 0 && (
-          <div className="empty">
-            <h1>和 {displayName(agent)} 开始对话</h1>
-            <p>
-              {agent.role} · {agent.plugin}
-              {agent.model ? `/${agent.model}` : ""} · <code>{agent.cwd}</code>
-            </p>
-          </div>
-        )}
-        <CwdContext.Provider value={agent.cwd}>
-          {turns.map((turn) => (
-            <Turn key={turn.message_id} turn={turn} agent={agent} agents={agents} tree={tree} />
-          ))}
-        </CwdContext.Provider>
-        {children}
+    <div className="convo-wrap">
+      <div
+        className="convo"
+        ref={ref}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+        }}
+      >
+        <div className="convo-inner">
+          {turns.length === 0 && (
+            <div className="empty">
+              <h1>和 {displayName(agent)} 开始对话</h1>
+              <p>
+                {agent.role} · {agent.plugin}
+                {agent.model ? `/${agent.model}` : ""} · <code>{agent.cwd}</code>
+              </p>
+            </div>
+          )}
+          <CwdContext.Provider value={agent.cwd}>
+            {byTime(turns, switches).map((x) =>
+              "message_id" in x ? (
+                <Turn key={x.message_id} turn={x} agent={agent} agents={agents} tree={tree} />
+              ) : (
+                <SwitchNote key={x.at} change={x} plugin={agent.plugin} />
+              ),
+            )}
+          </CwdContext.Provider>
+          {children}
+        </div>
       </div>
+      <ScrollThumb scroller={ref} />
+      <TurnMap scroller={ref} entries={entries} />
+    </div>
+  );
+}
+
+/** Turns and model switches in the order they happened (a switch before the message it applies to). */
+function byTime(turns: TranscriptTurn[], switches: ModelSwitch[]): (TranscriptTurn | ModelSwitch)[] {
+  const out: (TranscriptTurn | ModelSwitch)[] = [];
+  let i = 0;
+  for (const turn of turns) {
+    while (i < switches.length && switches[i].at <= turn.sent_at) out.push(switches[i++]);
+    out.push(turn);
+  }
+  return out.concat(switches.slice(i));
+}
+
+/** "模型 Haiku → Sonnet · 推理 默认 → 低": only what changed. The agent is told the same with its next message. */
+function SwitchNote({ change, plugin }: { change: ModelSwitch; plugin: string }) {
+  const model = (m: string | null) => (m ? prettyModel(m) : "默认模型");
+  const effort = (e: string | null) => (e ? (effortLevels(plugin).find((l) => l.value === e)?.label ?? e) : "默认");
+  const parts: string[] = [];
+  if (change.model !== change.from_model) parts.push(`模型 ${model(change.from_model)} → ${model(change.model)}`);
+  if (change.effort !== change.from_effort) parts.push(`推理 ${effort(change.from_effort)} → ${effort(change.effort)}`);
+  return (
+    <div className="switch-note" title={`${time(change.at)} · 下一条消息会告诉 agent 这次切换`}>
+      <Icon name="brain" size={13} />
+      <span>{parts.join(" · ")}</span>
+      <span className="switch-at">{clock(change.at)}</span>
     </div>
   );
 }
@@ -262,7 +404,7 @@ function Bubble({ turn }: { turn: TranscriptTurn }) {
 function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agent; agents: Agent[]; tree: RunDetail[] }) {
   const running = !!turn.started_at && !turn.completed_at;
   return (
-    <div className="turn">
+    <div className="turn" data-turn={turn.message_id}>
       {fromPerson(turn) ? <Bubble turn={turn} /> : <PeerMessage turn={turn} agents={agents} tree={tree} />}
       {turn.items.length > 0 && (
         <div className="author">
@@ -282,6 +424,8 @@ function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agen
 }
 
 function Item({ item }: { item: TranscriptItem }) {
+  const action = actionOf(item);
+  if (action && item.type === "tool_call") return <ActionCard action={action} call={item} />;
   switch (item.type) {
     case "output":
       return <Prose text={item.text} />;
@@ -292,6 +436,76 @@ function Item({ item }: { item: TranscriptItem }) {
     default:
       return null;
   }
+}
+
+const ACTION_LABEL: Record<ActionTool, string> = {
+  agent_spawn: "招队友",
+  agent_retire: "让队友退出",
+  agent_set_model: "换模型",
+  task_accept: "合并任务",
+  task_drop: "丢弃任务",
+  run_land: "落地 run",
+  run_finish: "结束 run",
+  plan_submit: "提交计划",
+};
+
+/** The fields of a tool's JSON arguments or result, or nothing when it is not JSON. */
+/** A tool result as words: the text inside an MCP `content` wrapper (Codex reports it as is), or the result itself. */
+function plainText(text?: string): string | undefined {
+  try {
+    const content = JSON.parse(text ?? "")?.content;
+    if (Array.isArray(content)) return content.map((c: { text?: unknown }) => (typeof c?.text === "string" ? c.text : "")).join("\n");
+  } catch {
+    // Not JSON: already plain.
+  }
+  return text;
+}
+
+function fields(text?: string): Record<string, unknown> {
+  if (!text) return {};
+  try {
+    const value = JSON.parse(text);
+    // MCP results wrap the payload as content[0].text.
+    const inner = value?.content?.[0]?.text;
+    if (typeof inner === "string") return fields(inner) ?? {};
+    return value && typeof value === "object" ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * A call that changed (or tried to change) the team or the code, as a card: what was asked, and
+ * what the hub did — refused calls say why, in the hub's words. This is the record to trust
+ * over the agent's summary.
+ */
+function ActionCard({ action, call }: { action: ActionTool; call: Extract<TranscriptItem, { type: "tool_call" }> }) {
+  const args = fields(call.detail?.arguments);
+  const result = fields(call.detail?.result);
+  const raw = call.detail?.error ?? (typeof result === "object" && !Object.keys(result).length ? plainText(call.detail?.result) : undefined);
+  const refused = call.status === "failed" || !!call.detail?.error || /^(conflict|not found|invalid|unsupported)|not recruited/i.test(raw ?? "");
+  const running = call.status === "pending" || call.status === "in_progress";
+  const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
+  let what = "";
+  if (action === "agent_spawn") {
+    const name = str(result.agent) ?? str(args.name) ?? "（未命名）";
+    const model = str(result.model) ?? str(args.model);
+    what = refused ? `想招 ${str(args.name) ?? "一位队友"}${str(args.model) ? `（${str(args.model)}）` : ""}` : `${name}${model ? ` · ${model}` : ""}`;
+  } else if (action === "agent_retire") what = str(args.name) ?? "";
+  else if (action === "agent_set_model") what = `${str(args.name) ?? ""} → ${str(args.model) ?? "默认"}`;
+  else what = str(args.task_id) ?? str(args.task) ?? str(args.summary)?.slice(0, 80) ?? "";
+  const state = running ? "进行中" : refused ? "被拒绝" : "完成";
+  return (
+    <div className={`action-card ${refused ? "refused" : running ? "running" : "done"}`}>
+      <div className="action-head">
+        <Icon name={refused ? "close" : action === "agent_spawn" ? "addMate" : "check"} size={14} />
+        <span className="action-name">{ACTION_LABEL[action]}</span>
+        {what && <span className="action-what">{what}</span>}
+        <span className="action-state">{state}</span>
+      </div>
+      {refused && raw && <div className="action-reason">{raw.replace(/^(conflict|not found|invalid|unsupported)\s*:\s*/i, "")}</div>}
+    </div>
+  );
 }
 
 /** Steps shown while a run is open: the newest few, the rest behind "N 个更早的步骤". */
@@ -454,8 +668,10 @@ const took = (ms: number) => (ms < 1000 ? `${ms}ms` : duration(ms));
 /** The tool column's switch, in each conversation's header. */
 function ToolsToggle() {
   const { state } = useLayout();
+  // Open, the column's own header has the button that folds it away: one place, like Codex.
+  if (state.tools.open) return null;
   return (
-    <button className={`ghost icon ${state.tools.open ? "on" : ""}`} onClick={toggleTools} title="工具列：改动、任务、事件流" aria-label="工具列" aria-pressed={state.tools.open}>
+    <button className="ghost icon" onClick={toggleTools} title="工具列：改动、任务、事件流" aria-label="工具列">
       <Icon name="panel" size={16} />
     </button>
   );
@@ -600,7 +816,7 @@ function QueuePanel({ agent, queued, onEdit }: { agent: Agent; queued: Transcrip
       setError(errorText(err));
     }
   };
-  const withdraw = (turn: TranscriptTurn) => api.withdrawMessage(agent.name, turn.message_id);
+  const withdraw = (turn: TranscriptTurn) => api.withdrawMessage(agent.id, turn.message_id);
 
   return (
     <div className="queue">
@@ -628,7 +844,7 @@ function QueuePanel({ agent, queued, onEdit }: { agent: Agent; queued: Transcrip
                     onClick={() =>
                       act(async () => {
                         await withdraw(turn);
-                        await api.sendMessage(agent.name, { text: turn.input, now: true });
+                        await api.sendMessage(agent.id, { text: turn.input, now: true });
                       })
                     }
                   >
@@ -698,7 +914,7 @@ function Composer({
     setBusy(true);
     setError(undefined);
     try {
-      await api.sendMessage(agent.name, { text, now: now || undefined });
+      await api.sendMessage(agent.id, { text, now: now || undefined });
       setDraft("");
     } catch (err) {
       setError(errorText(err));
@@ -709,7 +925,7 @@ function Composer({
 
   async function interrupt() {
     try {
-      await api.cancelAgent(agent.name);
+      await api.cancelAgent(agent.id);
     } catch (err) {
       setError(errorText(err));
     }
@@ -752,9 +968,13 @@ function Composer({
           placeholder={running ? `${displayName(agent)} 正在工作，新消息会排在本轮之后` : `给 ${displayName(agent)} 发消息`}
         />
         <div className="bar">
-          <span className="chip">
-            <Vendor plugin={agent.plugin} model={agent.model} />
-          </span>
+          {agent.plugin === "external" ? (
+            <span className="chip">
+              <Vendor plugin={agent.plugin} model={agent.model} />
+            </span>
+          ) : (
+            <ModelEffortPicks agent={agent} />
+          )}
           {capabilities?.resume && <span className="chip" title="会话可挂起后恢复">resumable</span>}
           <div className="spacer" />
           {canInterrupt && (

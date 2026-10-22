@@ -90,7 +90,8 @@ pub async fn run(ctx: &Context, cmd: AgentCommand) -> Result<()> {
                 None => std::env::current_dir().context("cannot read current directory")?,
             };
             let req = CreateAgentRequest {
-                name: args.name,
+                name: Some(args.name),
+                topic: None,
                 plugin: args.plugin,
                 driver: args.driver,
                 model: args.model,

@@ -1,38 +1,35 @@
 // The tool column (docs/tasks/V6-GUI.md §6): up to two panes stacked on the right — 改动 (what
 // each turn changed), 任务 (a task's details), 事件流 (raw hub events, for debugging). Panes
 // show the focused conversation, or what was opened on purpose (panes.ts `target`); nothing
-// from another conversation mixes in. Narrower than 1100px it is a one-pane drawer.
+// from another conversation mixes in. When docking it would squeeze the conversation it is a
+// one-pane drawer over the page.
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { TurnDiffResponse } from "@bindings/TurnDiffResponse";
 import { api, errorText } from "./api";
 import { useRunTree } from "./App";
-import { Avatar, ErrorBox, Icon, displayName, useAgents } from "./components";
+import { Avatar, ErrorBox, Icon, displayName, isAgent, useAgents } from "./components";
 import { ChangeStat, DiffView } from "./diffview";
 import { useEventLog } from "./eventlog";
 import type { HubEvent } from "./hub";
 import { parseDiff } from "./lib/diff";
 import { clock, full } from "./lib/time";
 import { PANE_KINDS, addPane, clearTarget, removePane, setPane, setSplit, useLayout, type PaneKind, type Target } from "./panes";
+import { useMedia } from "./lib/media";
 import { useSession, type TranscriptTurn } from "./session";
+import { useSidebar } from "./titlebar";
 import { TaskDetail } from "./views/Run";
 
-const NARROW = "(max-width: 1100px)";
-
-export function useMedia(query: string): boolean {
-  return useSyncExternalStore(
-    (l) => {
-      const m = matchMedia(query);
-      m.addEventListener("change", l);
-      return () => m.removeEventListener("change", l);
-    },
-    () => matchMedia(query).matches,
-  );
-}
-
-export function useNarrow() {
-  return useMedia(NARROW);
+/**
+ * Whether the tool column floats over the page as a drawer: when docking it would leave the
+ * conversation too narrow (about 500px), so the threshold depends on the sidebar.
+ */
+export function useToolsFloat() {
+  const { docked } = useSidebar();
+  const besideSidebar = useMedia("(max-width: 1199px)");
+  const alone = useMedia("(max-width: 939px)");
+  return docked ? besideSidebar : alone;
 }
 
 /**
@@ -41,7 +38,7 @@ export function useNarrow() {
  */
 export function ToolColumn({ follow, task, onClose }: { follow?: string; task?: { run: string; task: string }; onClose: () => void }) {
   const { state, target } = useLayout();
-  const narrow = useNarrow();
+  const narrow = useToolsFloat();
   const ref = useRef<HTMLDivElement>(null);
   const tools = state.tools;
   let panes: PaneKind[] = task ? [...new Set<PaneKind>(["task", ...(tools.open ? tools.panes : [])])] : tools.panes;
@@ -105,40 +102,43 @@ function PaneSlot({
   // An agent opened on purpose wins over the focused conversation.
   const agent = target?.agent ?? follow;
   const pinned = !!target?.agent && target.agent !== follow;
+  const head = (
+    <>
+      <div className="segmented small" role="tablist">
+        {PANE_KINDS.map((p) => (
+          <button key={p.kind} role="tab" aria-selected={p.kind === kind} className={p.kind === kind ? "active" : ""} onClick={() => setPane(index, p.kind)}>
+            {p.label}
+          </button>
+        ))}
+      </div>
+      <span className="spacer" />
+      {pinned && kind !== "task" && (
+        <button className="ghost small" onClick={clearTarget} title="回到当前对话">
+          跟随对话
+        </button>
+      )}
+      {!narrow && count === 1 && (
+        <button className="ghost icon" onClick={addPane} title="再加一个窗格" aria-label="再加一个窗格">
+          <Icon name="plus" size={15} />
+        </button>
+      )}
+      {count === 2 && (
+        <button className="ghost icon" onClick={() => removePane(index)} title="关闭这个窗格" aria-label="关闭这个窗格">
+          <Icon name="close" size={15} />
+        </button>
+      )}
+      {index === 0 && (
+        <button className="ghost icon" onClick={onCloseColumn} title="收起工具列" aria-label="收起工具列">
+          <Icon name="panel" size={15} />
+        </button>
+      )}
+    </>
+  );
   return (
     <>
       {divider}
       <section className="tool-pane" aria-label={PANE_KINDS.find((p) => p.kind === kind)!.label}>
-        <header className="tool-head">
-          <div className="segmented small" role="tablist">
-            {PANE_KINDS.map((p) => (
-              <button key={p.kind} role="tab" aria-selected={p.kind === kind} className={p.kind === kind ? "active" : ""} onClick={() => setPane(index, p.kind)}>
-                {p.label}
-              </button>
-            ))}
-          </div>
-          <span className="spacer" />
-          {pinned && kind !== "task" && (
-            <button className="ghost small" onClick={clearTarget} title="回到当前对话">
-              跟随对话
-            </button>
-          )}
-          {!narrow && count === 1 && (
-            <button className="ghost icon" onClick={addPane} title="再加一个窗格" aria-label="再加一个窗格">
-              <Icon name="plus" size={15} />
-            </button>
-          )}
-          {count === 2 && (
-            <button className="ghost icon" onClick={() => removePane(index)} title="关闭这个窗格" aria-label="关闭这个窗格">
-              <Icon name="close" size={15} />
-            </button>
-          )}
-          {index === 0 && (
-            <button className="ghost icon" onClick={onCloseColumn} title="收起工具列" aria-label="收起工具列">
-              <Icon name="panel" size={15} />
-            </button>
-          )}
-        </header>
+        <header className="tool-head">{head}</header>
         <div className="tool-body">
           {kind === "changes" && (agent ? <ChangesPane key={agent} agent={agent} target={target?.agent === agent ? target : null} /> : <Blank text="打开一个会话，这里显示它每一轮改了什么。" />)}
           {kind === "task" && <TaskPane follow={follow} target={target} routeTask={routeTask} />}
@@ -234,7 +234,7 @@ function TaskPane({ follow, target, routeTask }: { follow?: string; target: Targ
   const agents = useAgents();
   let found = routeTask ?? (target?.run && target.task ? { run: target.run, task: target.task } : undefined);
   if (!found && follow) {
-    const agent = agents.data?.find((a) => a.name === follow);
+    const agent = agents.data?.find((a) => isAgent(a, follow));
     const tasks = (tree.data ?? []).flatMap((d) => d.tasks.filter((t) => agent && (t.assignee === agent.id || t.reviewer === agent.id)));
     const latest = tasks.sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
     if (latest) found = { run: latest.run_id, task: latest.id };
@@ -246,7 +246,7 @@ function TaskPane({ follow, target, routeTask }: { follow?: string; target: Targ
 /** The agent's raw events since the page loaded, newest first, with a filter. */
 function EventsPane({ agent }: { agent: string }) {
   const agents = useAgents();
-  const who = agents.data?.find((a) => a.name === agent);
+  const who = agents.data?.find((a) => isAgent(a, agent));
   const events = useEventLog(who?.id);
   const [filter, setFilter] = useState("");
   const [open, setOpen] = useState<number>();

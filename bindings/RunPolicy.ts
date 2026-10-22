@@ -14,6 +14,10 @@ ask_timeout_minutes: number, budget: Budget,
  */
 spawn: boolean, max_agents: number, 
 /**
+ * Models a recruit may run (exact ids); absent: any model a logged-in account can run.
+ */
+spawn_models: Array<string> | null, 
+/**
  * Whether assignees may split their tasks and hand parts on (H1-5).
  */
 delegate: boolean, };

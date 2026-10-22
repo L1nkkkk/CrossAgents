@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import { api, errorText } from "../api";
@@ -6,7 +6,8 @@ import { navigate, useRunTree } from "../App";
 import { Avatar, BrandMark, ErrorBox, Field, Icon, VendorMark, agentTitle, displayName, hueOf, useAgents } from "../components";
 import { useHubData } from "../hub";
 import { t } from "../lib/i18n";
-import { agentNameFor, chatNameFor, chatTitle, prettyModel, vendorLabel, workerModelFor } from "../lib/models";
+import { chatTitle, effortLevels, prettyModel, vendorLabel, workerModelFor } from "../lib/models";
+import { useQuota } from "./Quota";
 import { PRESETS, presetPolicy, type Preset } from "../lib/policy";
 import { ChipMenu, type MenuItem } from "../menu";
 import { QuestionCards } from "../questions";
@@ -16,9 +17,21 @@ const PRESET_KEY = "crossagents.preset";
 const LEAD_KEY = "crossagents.lead";
 const MODE_KEY = "crossagents.mode";
 const CHAT_MODEL_KEY = "crossagents.chatModel";
+const EFFORT_KEY = "crossagents.chatEffort";
 
 /** Who leads a new run: an agent that exists, or a model to make one for. */
-type Lead = { kind: "agent"; name: string } | { kind: "model"; plugin: string; model: string };
+type Lead = { kind: "agent"; name: string } | ({ kind: "model" } & Choice);
+
+/** A model to run on, and which login of its vendor pays for it (absent: the default one). */
+type Choice = { plugin: string; model: string; account?: string };
+
+/** The config a new agent on `choice` starts with: its account and reasoning effort. */
+const configFor = (choice: Choice, effort?: string) => ({ ...(choice.account ? { account: choice.account } : {}), ...(effort ? { effort } : {}) });
+
+const accountOf = (a: Agent) => {
+  const v = a.config && typeof a.config === "object" ? (a.config as Record<string, unknown>).account : undefined;
+  return typeof v === "string" ? v : undefined;
+};
 
 /** A chat with one agent, or a run a lead plans and a team carries out. */
 type Mode = "chat" | "run";
@@ -62,10 +75,30 @@ export function HomeView() {
     setModeState(m);
     save(MODE_KEY, m);
   };
-  const [chatPick, setChatPick] = useState<{ plugin: string; model: string } | undefined>(() =>
-    load(CHAT_MODEL_KEY, undefined, (v) => !!v && typeof v === "object"),
-  );
-  const everyone = agents.data ?? [];
+  // 文件 → 新建对话 / 新建团队 run while this page is open (menubar.tsx `startNew`).
+  useEffect(() => {
+    const onMode = (e: Event) => {
+      const m = (e as CustomEvent<unknown>).detail;
+      if (m === "chat" || m === "run") setModeState(m);
+    };
+    window.addEventListener("crossagents:mode", onMode);
+    return () => window.removeEventListener("crossagents:mode", onMode);
+  }, []);
+  const [chatPick, setChatPick] = useState<Choice | undefined>(() => load(CHAT_MODEL_KEY, undefined, (v) => !!v && typeof v === "object"));
+  const [chatEffort, setChatEffortState] = useState<string>(() => load(EFFORT_KEY, "", (v) => typeof v === "string"));
+  const setChatEffort = (e: string) => {
+    setChatEffortState(e);
+    save(EFFORT_KEY, e);
+  };
+  // Logins per vendor: with more than one, the model menus also say which login pays.
+  const quota = useQuota();
+  const accountsOf = (plugin: string) => (quota.data?.accounts ?? []).filter((a) => a.account.provider === plugin);
+  const accountLabel = (id?: string) => {
+    const a = quota.data?.accounts.find((x) => x.account.id === id);
+    return a ? a.account.label || a.account.id : undefined;
+  };
+  // Archived conversations are not picked again.
+  const everyone = (agents.data ?? []).filter((a) => !a.archived_at);
   // In a workspace, offer only its agents (a run works in its planner's directory).
   const here = everyone.filter((a) => !cwd || wsKey(a.cwd) === wsKey(cwd));
   const [request, setRequest] = useState("");
@@ -131,23 +164,23 @@ export function HomeView() {
     el.style.height = `${Math.min(el.scrollHeight, 320)}px`;
   }, [request]);
 
-  /** An agent with this plugin, model and role in `dir`, or a new one named after the model. */
-  async function agentFor(role: "planner" | "worker", plugin: string, model: string, dir: string): Promise<Agent> {
-    const found = everyone.find((a) => a.role === role && a.plugin === plugin && a.model === model && wsKey(a.cwd) === wsKey(dir));
+  /** An agent with this role, model and login in `dir`, or a new one (the hub names it: a person's name, never the model's). */
+  async function agentFor(role: "planner" | "worker", choice: Choice, dir: string): Promise<Agent> {
+    const { plugin, model, account } = choice;
+    const found = everyone.find((a) => a.role === role && a.plugin === plugin && a.model === model && accountOf(a) === account && wsKey(a.cwd) === wsKey(dir));
     if (found) return found;
     return api.createAgent({
-      name: agentNameFor(role, model, new Set(everyone.map((a) => a.name))),
       plugin,
       driver: null,
       model,
       role,
       cwd: dir,
-      config: {},
-      profile: { display_name: prettyModel(model), title: role === "planner" ? t("home.leadTitle") : "Worker", avatar: null, color: null, persona: null },
+      config: configFor(choice),
+      profile: { display_name: null, title: role === "planner" ? t("home.leadTitle") : "Worker", avatar: null, color: null, persona: null },
     });
   }
 
-  /** A chat is a new agent (named after the model, titled by the message) and its first message. */
+  /** A chat is a new agent (named by the hub, the conversation titled by the message) and its first message. */
   async function startChat() {
     if (!ready || !chatModel) return;
     setBusy(true);
@@ -155,18 +188,18 @@ export function HomeView() {
     try {
       const text = request.trim();
       const agent = await api.createAgent({
-        name: chatNameFor(chatModel.model, new Set(everyone.map((a) => a.name))),
+        topic: chatTitle(text, 60),
         plugin: chatModel.plugin,
         driver: null,
         model: chatModel.model,
         role: "worker",
         // No project: the hub gives the chat its own directory.
         cwd: cwd ?? "",
-        config: {},
-        profile: { display_name: chatTitle(text), title: prettyModel(chatModel.model), avatar: null, color: null, persona: null },
+        config: configFor(chatModel, chatEffort),
+        profile: { display_name: null, title: null, avatar: null, color: null, persona: null },
       });
-      await api.sendMessage(agent.name, { text });
-      navigate("s", agent.name);
+      await api.sendMessage(agent.id, { text });
+      navigate("s", agent.id);
     } catch (err) {
       setError(errorText(err));
     } finally {
@@ -180,14 +213,17 @@ export function HomeView() {
     setBusy(true);
     setError(undefined);
     try {
-      const planner = leadAgent ?? (await agentFor("planner", leadPlugin!, leadModel!, where));
+      const leadChoice: Choice = lead.kind === "model" ? lead : { plugin: leadPlugin!, model: leadModel!, account: leadAgent && accountOf(leadAgent) };
+      const planner = leadAgent ?? (await agentFor("planner", leadChoice, where));
       const models = plugins.data?.find((p) => p.name === planner.plugin)?.models ?? [];
-      const workerAgent = chosenWorker ?? (await agentFor("worker", planner.plugin, workerModelFor(models, planner.model ?? leadModel ?? models[0] ?? ""), where));
+      // Workers run on the lead's login, on the cheaper sibling of its model.
+      const workerChoice: Choice = { plugin: planner.plugin, model: workerModelFor(models, planner.model ?? leadModel ?? models[0] ?? ""), account: accountOf(planner) };
+      const workerAgent = chosenWorker ?? (await agentFor("worker", workerChoice, where));
       const run = await api.createRun({
         request: request.trim(),
         title: title.trim() || null,
-        planner: planner.name,
-        worker: workerAgent.name,
+        planner: planner.id,
+        worker: workerAgent.id,
         escalate: escalate || null,
         reviewer: reviewer || null,
         auto_approve: false,
@@ -272,21 +308,29 @@ export function HomeView() {
       : []),
   ];
 
-  const leadItems: MenuItem[] = [
-    ...offered.flatMap((p: PluginInfo): MenuItem[] => [
-      { kind: "header", key: `h-${p.name}`, label: vendorLabel(p.name) },
-      ...p.models.map(
-        (m): MenuItem => ({
-          kind: "item",
-          key: `${p.name}/${m}`,
-          label: prettyModel(m),
-          sub: m,
-          icon: <VendorMark plugin={p.name} size={14} />,
-          on: lead?.kind === "model" && lead.plugin === p.name && lead.model === m,
-          onPick: () => choose({ kind: "model", plugin: p.name, model: m }),
+  /**
+   * Models by vendor; a vendor with several logins gets a group per login, so picking a model
+   * also picks who pays for it.
+   */
+  const modelMenu = (isOn: (c: Choice) => boolean, onPick: (c: Choice) => void): MenuItem[] =>
+    offered.flatMap((p: PluginInfo): MenuItem[] => {
+      const logins = accountsOf(p.name);
+      const groups = logins.length > 1 ? logins.map((a) => ({ account: a.account.id, title: `${vendorLabel(p.name)} · ${a.account.label || a.account.id}` })) : [{ account: undefined, title: vendorLabel(p.name) }];
+      return groups.flatMap(({ account, title }): MenuItem[] => [
+        { kind: "header", key: `h-${p.name}-${account ?? ""}`, label: title },
+        ...p.models.map((m): MenuItem => {
+          const choice: Choice = { plugin: p.name, model: m, ...(account ? { account } : {}) };
+          return { kind: "item", key: `${p.name}/${account ?? ""}/${m}`, label: prettyModel(m), sub: m, icon: <VendorMark plugin={p.name} size={14} />, on: isOn(choice), onPick: () => onPick(choice) };
         }),
-      ),
-    ]),
+      ]);
+    });
+  const same = (a: Choice | undefined, b: Choice) => !!a && a.plugin === b.plugin && a.model === b.model && (a.account ?? "") === (b.account ?? "");
+
+  const leadItems: MenuItem[] = [
+    ...modelMenu(
+      (c) => lead?.kind === "model" && same(lead, c),
+      (c) => choose({ kind: "model", ...c }),
+    ),
     ...(planners.length ? [{ kind: "header", key: "h-agents", label: t("home.existing") } satisfies MenuItem] : []),
     ...planners.map(
       (a): MenuItem => ({
@@ -301,23 +345,25 @@ export function HomeView() {
     ),
   ];
 
-  const chatItems: MenuItem[] = offered.flatMap((p: PluginInfo): MenuItem[] => [
-    { kind: "header", key: `h-${p.name}`, label: vendorLabel(p.name) },
-    ...p.models.map(
-      (m): MenuItem => ({
-        kind: "item",
-        key: `${p.name}/${m}`,
-        label: prettyModel(m),
-        sub: m,
-        icon: <VendorMark plugin={p.name} size={14} />,
-        on: chatModel?.plugin === p.name && chatModel.model === m,
-        onPick: () => {
-          setChatPick({ plugin: p.name, model: m });
-          save(CHAT_MODEL_KEY, { plugin: p.name, model: m });
-        },
-      }),
-    ),
-  ]);
+  const chatItems = modelMenu(
+    (c) => same(chatModel, c),
+    (c) => {
+      setChatPick(c);
+      save(CHAT_MODEL_KEY, c);
+    },
+  );
+  const chatLevels = chatModel ? effortLevels(chatModel.plugin) : [];
+  const chatEffortOn = chatLevels.some((l) => l.value === chatEffort) ? chatEffort : "";
+  const effortItems: MenuItem[] = [
+    { kind: "header", key: "h", label: t("home.effort") },
+    { kind: "item", key: "", label: t("home.effortDefault"), on: !chatEffortOn, onPick: () => setChatEffort("") },
+    ...chatLevels.map((l): MenuItem => ({ kind: "item", key: l.value, label: l.label, sub: l.value, on: chatEffortOn === l.value, onPick: () => setChatEffort(l.value) })),
+  ];
+  /** "Claude Opus 5.5", plus the login when the vendor has more than one. */
+  const choiceLabel = (c: Choice) => {
+    const login = accountsOf(c.plugin).length > 1 ? accountLabel(c.account) ?? t("home.defaultLogin") : undefined;
+    return `${vendorLabel(c.plugin)} ${prettyModel(c.model)}${login ? ` · ${login}` : ""}`;
+  };
 
   const wsLabel = folder ? wsName(folder) : current?.name;
   const missing =
@@ -369,16 +415,25 @@ export function HomeView() {
             {mode === "chat" && chatModel && (
               <ChipMenu
                 icon={<VendorMark plugin={chatModel.plugin} size={14} />}
-                label={`${vendorLabel(chatModel.plugin)} ${prettyModel(chatModel.model)}`}
+                label={choiceLabel(chatModel)}
                 title={t("home.model")}
                 items={chatItems}
+                up
+              />
+            )}
+            {mode === "chat" && chatLevels.length > 0 && (
+              <ChipMenu
+                icon={<Icon name="brain" size={13} />}
+                label={`${t("home.effortShort")} ${chatLevels.find((l) => l.value === chatEffortOn)?.label ?? t("home.effortDefault")}`}
+                title={t("home.effort")}
+                items={effortItems}
                 up
               />
             )}
             {mode === "run" && lead && (
               <ChipMenu
                 icon={leadAgent ? <Avatar agent={leadAgent} size={16} /> : <VendorMark plugin={leadPlugin!} size={14} />}
-                label={leadAgent ? displayName(leadAgent) : `${vendorLabel(leadPlugin!)} ${prettyModel(leadModel!)}`}
+                label={leadAgent ? displayName(leadAgent) : lead.kind === "model" ? choiceLabel(lead) : ""}
                 title={t("home.lead")}
                 items={leadItems}
                 up

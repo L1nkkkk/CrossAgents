@@ -2,7 +2,9 @@
 
 use std::collections::HashMap;
 
-use crossagents_api_types::{TranscriptItem, TranscriptTurn, TranscriptUsage, TurnDiffStat};
+use crossagents_api_types::{
+    ModelSwitch, TranscriptItem, TranscriptTurn, TranscriptUsage, TurnDiffStat,
+};
 use crossagents_core::{Event, EventKind, MessageId};
 
 /// Folds an agent's events, oldest first, into turns.
@@ -10,6 +12,7 @@ use crossagents_core::{Event, EventKind, MessageId};
 pub struct Fold {
     pub turns: Vec<TranscriptTurn>,
     pub usage: Option<TranscriptUsage>,
+    pub switches: Vec<ModelSwitch>,
     pub last_seq: u64,
     /// Each turn's latest unified diff; the transcript carries only its stat.
     pub diffs: HashMap<MessageId, String>,
@@ -52,6 +55,19 @@ impl Fold {
                     turn.input.clone_from(text);
                 }
             }
+            EventKind::AgentModelChanged {
+                model,
+                effort,
+                from_model,
+                from_effort,
+                ..
+            } => self.switches.push(ModelSwitch {
+                at: event.ts,
+                model: model.clone(),
+                effort: effort.clone(),
+                from_model: from_model.clone(),
+                from_effort: from_effort.clone(),
+            }),
             EventKind::AgentInputWithdrawn { message_id, .. } => {
                 self.turns
                     .retain(|t| t.message_id != *message_id || t.started_at.is_some());

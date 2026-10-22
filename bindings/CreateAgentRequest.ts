@@ -3,7 +3,16 @@ import type { AgentProfile } from "./AgentProfile";
 import type { Role } from "./Role";
 import type { JsonValue } from "./serde_json/JsonValue";
 
-export type CreateAgentRequest = { name: string, plugin: string, driver: string | null, model: string | null, role: Role, 
+export type CreateAgentRequest = { 
+/**
+ * What people and teammates call it (e.g. "Luna"); a taken name gets an ordinal
+ * ("Luna 2"). Absent: the hub makes one up (`name_source: generated`).
+ */
+name?: string, 
+/**
+ * A conversation's title (chat mode), e.g. its first message.
+ */
+topic?: string, plugin: string, driver: string | null, model: string | null, role: Role, 
 /**
  * The agent's working directory. Empty: a new one under the hub home (`chats/<name>`),
  * for a chat outside any project.

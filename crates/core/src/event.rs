@@ -98,6 +98,16 @@ pub enum EventKind {
         message_id: MessageId,
         text: String,
     },
+    /// The model or reasoning effort the agent runs on was switched; `None` is the plugin's
+    /// default. The agent hears about it with its next message.
+    #[serde(rename = "agent.model_changed")]
+    AgentModelChanged {
+        id: AgentId,
+        model: Option<String>,
+        effort: Option<String>,
+        from_model: Option<String>,
+        from_effort: Option<String>,
+    },
     /// A queued message was taken back before its turn started.
     #[serde(rename = "agent.input_withdrawn")]
     AgentInputWithdrawn { id: AgentId, message_id: MessageId },
@@ -376,6 +386,7 @@ impl EventKind {
             Self::AgentInput { .. } => "agent.input",
             Self::AgentInputWithdrawn { .. } => "agent.input_withdrawn",
             Self::AgentInputUpdated { .. } => "agent.input_updated",
+            Self::AgentModelChanged { .. } => "agent.model_changed",
             Self::ReminderFired { .. } => "reminder.fired",
             Self::HumanAsked { .. } => "human.asked",
             Self::NoteWritten { .. } => "note.written",
@@ -461,6 +472,7 @@ impl EventKind {
             | Self::AgentInput { id, .. }
             | Self::AgentInputWithdrawn { id, .. }
             | Self::AgentInputUpdated { id, .. }
+            | Self::AgentModelChanged { id, .. }
             | Self::AgentTurnStarted { id, .. }
             | Self::AgentOutput { id, .. }
             | Self::AgentToolCall { id, .. }

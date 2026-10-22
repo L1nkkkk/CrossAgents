@@ -6,7 +6,8 @@
  */
 export type AgentProfile = { 
 /**
- * Shown instead of the name, e.g. "Ada". The name stays the address.
+ * From before names were for people: what was shown instead of the name. The hub folds
+ * it into the name (or a chat's topic) when it starts; kept to read old records.
  */
 display_name: string | null, 
 /**

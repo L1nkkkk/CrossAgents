@@ -27,7 +27,7 @@ export function AgentsView() {
   const agents = useAgents();
   const [editing, setEditing] = useState<"external" | Agent>();
   const [connect, setConnect] = useState<ConnectInfo>();
-  const list = agents.data ?? [];
+  const list = (agents.data ?? []).filter((a) => !a.archived_at);
 
   return (
     <>
@@ -66,7 +66,7 @@ export function AgentsView() {
                   key={agent.id}
                   agent={agent}
                   onEdit={() => setEditing(agent)}
-                  onConnect={() => api.connectAgent(agent.name).then(setConnect)}
+                  onConnect={() => api.connectAgent(agent.id).then(setConnect)}
                 />
               ),
             )}
@@ -101,7 +101,7 @@ function MemberCard({ agent, onEdit, onConnect }: { agent: Agent; onEdit: () => 
       <div className="member-head">
         <Avatar agent={agent} size={40} status />
         <div className="member-who">
-          <a className="member-name" href={sessionHref(agent.name)}>
+          <a className="member-name" href={sessionHref(agent)}>
             {displayName(agent)}
           </a>
           <span className="member-title">{agentTitle(agent)}</span>
@@ -139,21 +139,24 @@ function Editor({ agent, onDone }: { agent: Agent; onDone: () => void }) {
   const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
   const [profile, setProfile] = useState<AgentProfile>(agent.profile);
   const [model, setModel] = useState<string>();
+  const [name, setName] = useState(agent.name);
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const remove = useArmed();
   const models = plugins.data?.find((p) => p.name === agent.plugin)?.models ?? [];
   const modelValue = model ?? agent.model ?? "";
   const set = (patch: Partial<AgentProfile>) => setProfile((p) => ({ ...p, ...patch }));
-  const preview = { ...agent, profile } as Agent;
+  const preview = { ...agent, name: name.trim() || agent.name, profile } as Agent;
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(undefined);
     try {
-      await api.updateProfile(agent.name, profile);
-      if ((modelValue.trim() || null) !== agent.model) await api.setModel(agent.name, modelValue.trim() || null);
+      // By id: a rename in the same save must not lose the agent.
+      if (name.trim() && name.trim() !== agent.name) await api.renameAgent(agent.id, name.trim());
+      await api.updateProfile(agent.id, { ...profile, display_name: null });
+      if ((modelValue.trim() || null) !== agent.model) await api.setModel(agent.id, modelValue.trim() || null);
       onDone();
     } catch (err) {
       setError(errorText(err));
@@ -168,8 +171,8 @@ function Editor({ agent, onDone }: { agent: Agent; onDone: () => void }) {
         <Avatar agent={preview} size={56} />
         <div className="editor-face">
           <div className="row" style={{ gap: 8, alignItems: "flex-start" }}>
-            <Field label="显示名">
-              <input value={profile.display_name ?? ""} onChange={(e) => set({ display_name: e.target.value })} placeholder={agent.name} />
+            <Field label={agent.name_source === "generated" ? "名字（自动起的，可以改）" : "名字"}>
+              <input value={name} onChange={(e) => setName(e.target.value)} maxLength={32} placeholder="Luna" />
             </Field>
             <Field label="头衔">
               <input value={profile.title ?? ""} onChange={(e) => set({ title: e.target.value })} placeholder="设计师" />
@@ -219,7 +222,7 @@ function Editor({ agent, onDone }: { agent: Agent; onDone: () => void }) {
           disabled={busy}
           onClick={() =>
             remove.click(() =>
-              api.deleteAgent(agent.name).then(
+              api.deleteAgent(agent.id).then(
                 () => onDone(),
                 (err) => setError(errorText(err)),
               ),

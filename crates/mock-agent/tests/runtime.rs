@@ -231,6 +231,60 @@ async fn model_can_be_changed_while_running() {
     assert_eq!(agent["model"], Value::Null);
 }
 
+/// A switch of model is a note in the conversation, and the agent hears about it with its
+/// next message (the conversation still shows that message as it was sent).
+#[tokio::test]
+async fn a_model_switch_is_noted_and_told_to_the_agent() {
+    let t = TestHub::start().await;
+    t.add_agent("hank", Some("mock-opus")).await;
+    let mut w = t.watch().await;
+    t.send("hank", "first").await;
+    w.until("first turn", turn_completed).await;
+
+    t.post("/v1/agents/hank/model", json!({ "model": "mock-haiku" }))
+        .await;
+    // The same setting again is not a switch.
+    t.post("/v1/agents/hank/model", json!({ "model": "mock-haiku" }))
+        .await;
+    t.send("hank", "second").await;
+    w.until("second turn", turn_completed).await;
+    t.send("hank", "third").await;
+    w.until("third turn", turn_completed).await;
+
+    let transcript: Value = t
+        .get("/v1/agents/hank/transcript")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let switches = transcript["switches"].as_array().unwrap();
+    assert_eq!(switches.len(), 1, "{transcript}");
+    assert_eq!(switches[0]["model"], "mock-haiku");
+    assert_eq!(switches[0]["from_model"], "mock-opus");
+
+    let turns = transcript["turns"].as_array().unwrap();
+    let said = |i: usize| -> String {
+        turns[i]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["type"] == "output" && i["stream"] == "text")
+            .map(|i| i["text"].as_str().unwrap())
+            .collect()
+    };
+    assert_eq!(turns[1]["input"], "second");
+    assert!(
+        said(1).contains(
+            "[CrossAgents] From this message on you run on model mock-haiku (was mock-opus)"
+        ),
+        "{}",
+        said(1)
+    );
+    assert!(said(1).ends_with("second"), "{}", said(1));
+    // Told once.
+    assert!(!said(2).contains("[CrossAgents]"), "{}", said(2));
+}
+
 #[tokio::test]
 async fn unknown_plugin_is_rejected_and_plugins_are_listed() {
     let t = TestHub::start().await;

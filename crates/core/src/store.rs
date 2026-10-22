@@ -34,6 +34,31 @@ pub trait Store: Send + Sync {
     async fn list_agents(&self) -> Result<Vec<Agent>, CoreError>;
     async fn delete_agent(&self, id: AgentId) -> Result<(), CoreError>;
     async fn update_agent_status(&self, id: AgentId, status: AgentStatus) -> Result<(), CoreError>;
+    /// Renames the agent; fails with [`CoreError::Conflict`] if another has the name
+    /// (ignoring case).
+    async fn rename_agent(
+        &self,
+        id: AgentId,
+        name: &str,
+        source: crate::NameSource,
+    ) -> Result<(), CoreError> {
+        let _ = (id, name, source);
+        Err(CoreError::Unsupported("renaming agents".into()))
+    }
+    /// Sets or clears a conversation's title.
+    async fn update_agent_topic(&self, id: AgentId, topic: Option<&str>) -> Result<(), CoreError> {
+        let _ = (id, topic);
+        Err(CoreError::Unsupported("conversation titles".into()))
+    }
+    /// Archives the conversation (`Some`) or restores it (`None`).
+    async fn set_agent_archived(
+        &self,
+        id: AgentId,
+        at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<(), CoreError> {
+        let _ = (id, at);
+        Err(CoreError::Unsupported("archiving agents".into()))
+    }
     /// Replaces the agent's profile.
     async fn update_agent_profile(
         &self,
@@ -47,6 +72,16 @@ pub trait Store: Send + Sync {
     async fn update_agent_model(&self, id: AgentId, model: Option<&str>) -> Result<(), CoreError> {
         let _ = (id, model);
         Err(CoreError::Unsupported("updating agent models".into()))
+    }
+
+    /// Replaces the agent's plugin-private config (e.g. its reasoning `effort`).
+    async fn update_agent_config(
+        &self,
+        id: AgentId,
+        config: &serde_json::Value,
+    ) -> Result<(), CoreError> {
+        let _ = (id, config);
+        Err(CoreError::Unsupported("updating agent config".into()))
     }
 
     /// Persists the event, assigning its `seq`, `id` and `ts`.

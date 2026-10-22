@@ -86,13 +86,10 @@ impl SessionSetup for CollabSetup {
     }
 }
 
-/// How the agent works with the hub (its role's guide), then who it is (its card).
+/// Who the agent is (name, model, card), then how it works with the hub (its role's guide).
 fn instructions(agent: &Agent) -> String {
-    let guide = crossagents_orchestrator::protocol::guide(agent.role);
-    match agent.profile.instructions(&agent.name) {
-        Some(card) => format!("{card}\n\n{guide}"),
-        None => guide,
-    }
+    let guide = crossagents_orchestrator::protocol::guide_for(agent);
+    format!("{}\n\n{guide}", agent.identity())
 }
 
 /// The hub as seen by the orchestrator.
@@ -156,6 +153,9 @@ impl AgentHost for HubHost {
         let template = self.bus.store().get_agent(&AgentKey::Id(template)).await?;
         let agent = Agent {
             id: AgentId::new(),
+            name_source: crossagents_core::NameSource::Chosen,
+            topic: None,
+            archived_at: None,
             name: name.to_owned(),
             plugin: template.plugin,
             driver: template.driver,
@@ -185,9 +185,17 @@ impl AgentHost for HubHost {
                 self.runtime.plugins().names().join(", ")
             )));
         }
-        crossagents_core::validate_agent_name(&agent.name)?;
+        let (name, name_source) = crate::identity::free_name(
+            self.bus.store().as_ref(),
+            Some(agent.name.as_str()),
+            true,
+            &self.denied_name_words(),
+        )
+        .await?;
         let agent = Agent {
             profile: agent.profile.normalized()?,
+            name,
+            name_source,
             ..agent
         };
         self.bus.store().insert_agent(&agent).await?;
@@ -199,8 +207,70 @@ impl AgentHost for HubHost {
         Ok(agent)
     }
 
+    async fn available_models(&self, plugin: &str) -> Result<Vec<String>, CoreError> {
+        let Some(driver) = self
+            .runtime
+            .plugins()
+            .defaults()
+            .into_iter()
+            .find(|d| d.name() == plugin)
+        else {
+            return Ok(Vec::new());
+        };
+        // A plugin without accounts (an ACP agent) runs whatever it lists.
+        if !self.accounts.manages(plugin) {
+            return Ok(driver.models());
+        }
+        let accounts: Vec<_> = self
+            .bus
+            .store()
+            .list_accounts()
+            .await?
+            .into_iter()
+            .filter(|a| a.provider == plugin)
+            .collect();
+        if accounts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut models = Vec::new();
+        for account in &accounts {
+            if let Ok(list) = self.accounts.models(&account.id).await {
+                models.extend(list.into_iter().map(|m| m.id));
+            }
+        }
+        // An account that has not reported its models yet: the plugin's own list.
+        if models.is_empty() {
+            models = driver.models();
+        }
+        models.sort();
+        models.dedup();
+        Ok(models)
+    }
+
+    async fn archive_agent(&self, agent: AgentId) -> Result<(), CoreError> {
+        self.runtime
+            .archive(&AgentKey::Id(agent), true)
+            .await
+            .map(|_| ())
+    }
+
+    fn plugin_names(&self) -> Vec<String> {
+        self.runtime
+            .plugins()
+            .defaults()
+            .into_iter()
+            .map(|d| d.name().to_owned())
+            .collect()
+    }
+
+    fn denied_name_words(&self) -> Vec<String> {
+        crate::identity::denied_words(self.runtime.plugins())
+    }
+
     async fn set_model(&self, agent: AgentId, model: Option<String>) -> Result<Agent, CoreError> {
-        self.runtime.set_model(&AgentKey::Id(agent), model).await
+        self.runtime
+            .set_model(&AgentKey::Id(agent), model, None)
+            .await
     }
 
     async fn usage_report(&self, run: Option<RunId>) -> Result<serde_json::Value, CoreError> {

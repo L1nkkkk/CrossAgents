@@ -52,6 +52,9 @@ fn spec(
     let spec = SessionSpec {
         agent: Agent {
             id: AgentId::new(),
+            name_source: crossagents_core::NameSource::Chosen,
+            topic: None,
+            archived_at: None,
             name: "smoke".into(),
             plugin: "codex".into(),
             driver: Some("codex-native".into()),

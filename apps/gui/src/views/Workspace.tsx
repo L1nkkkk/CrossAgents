@@ -81,7 +81,7 @@ function Overview({ ws }: { ws: Workspace }) {
             {ws.agents.length ? (
               <div className="board">
                 {ws.agents.map((a) => (
-                  <a key={a.id} className="board-row" href={sessionHref(a.name)}>
+                  <a key={a.id} className="board-row" href={sessionHref(a)}>
                     <Avatar agent={a} size={22} />
                     <div style={{ minWidth: 0 }}>
                       <div className="t">

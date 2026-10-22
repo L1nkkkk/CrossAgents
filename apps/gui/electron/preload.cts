@@ -25,6 +25,7 @@ const bridge: CrossAgentsBridge = {
   onStatus: (listener) => subscribe("hub:status", listener),
   pickFolder: () => ipcRenderer.invoke("dialog:pick-folder"),
   setTheme: (theme) => ipcRenderer.send("theme:changed", theme),
+  command: (name) => ipcRenderer.send("window:command", name),
 };
 
 contextBridge.exposeInMainWorld("crossagents", bridge);

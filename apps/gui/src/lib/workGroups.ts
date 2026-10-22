@@ -5,6 +5,10 @@
 // stays open (newest few shown) until something that does not fold follows it; then it folds
 // to one summary line, e.g. "4 个命令 · 2 次编辑". Failed steps stay visible under the line.
 // A run of a single step is never folded.
+//
+// Calls that change the team or the code (recruit, retire, switch a model, merge, land, finish)
+// are not steps: each is a card of its own with its outcome, so what really happened is never
+// folded away under a summary line (the agent's prose may say otherwise).
 
 import type { TranscriptItem } from "@bindings/TranscriptItem";
 
@@ -18,8 +22,19 @@ export type Block =
   /** `closed`: something that does not fold came after, so the run folds to its summary. */
   | { kind: "steps"; steps: Step[]; closed: boolean };
 
+/** The CrossAgents tools whose calls change something: shown as cards, never folded. */
+export const ACTION_TOOLS = ["agent_spawn", "agent_retire", "agent_set_model", "task_accept", "task_drop", "run_land", "run_finish", "plan_submit"] as const;
+export type ActionTool = (typeof ACTION_TOOLS)[number];
+
+/** "crossagents.agent_spawn" or "mcp__crossagents__agent_spawn" → "agent_spawn"; other tools → undefined. */
+export function actionOf(item: TranscriptItem): ActionTool | undefined {
+  if (item.type !== "tool_call" || !/crossagents/i.test(item.title)) return undefined;
+  const name = item.title.split(/\.|__/).pop() ?? "";
+  return (ACTION_TOOLS as readonly string[]).includes(name) ? (name as ActionTool) : undefined;
+}
+
 export const isStep = (item: TranscriptItem): item is Step =>
-  item.type === "tool_call" || item.type === "permission" || (item.type === "output" && item.stream === "thought");
+  (item.type === "tool_call" && !actionOf(item)) || item.type === "permission" || (item.type === "output" && item.stream === "thought");
 
 export function workGroups(items: TranscriptItem[]): Block[] {
   const blocks: Block[] = [];

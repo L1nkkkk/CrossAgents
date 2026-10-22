@@ -105,8 +105,10 @@ async fn agent_lifecycle() {
     let alice: Agent = created.json().await.unwrap();
     assert_eq!(alice.name, "alice");
 
+    // A name a person typed is theirs: taken (ignoring case) is a conflict, not "alice 2".
     assert_eq!(t.create("alice").await.status(), StatusCode::CONFLICT);
-    assert_eq!(t.create("Bad Name").await.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(t.create("Alice").await.status(), StatusCode::CONFLICT);
+    assert_eq!(t.create("Bad/Name").await.status(), StatusCode::BAD_REQUEST);
 
     let list: ListAgentsResponse = t
         .get("/v1/agents")
@@ -144,6 +146,29 @@ async fn agent_lifecycle() {
 }
 
 #[tokio::test]
+async fn names_are_for_people() {
+    let t = TestHub::start().await;
+    assert_eq!(t.create("alice").await.status(), StatusCode::CREATED);
+    // Names are for people: spaces and any script are fine; the address is the id.
+    assert_eq!(t.create("Nova 2").await.status(), StatusCode::CREATED);
+    // No name: the hub makes one up, and says so.
+    let made: Value = t
+        .post("/v1/agents")
+        .json(&json!({ "plugin": "claude", "role": "worker", "cwd": "" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(made["name_source"], "generated", "{made}");
+    assert!(
+        !crossagents_core::names::is_vendor_word(made["name"].as_str().unwrap(), &[]),
+        "{made}"
+    );
+}
+
+#[tokio::test]
 async fn bad_cwd_is_rejected() {
     let t = TestHub::start().await;
     let resp = t
@@ -160,7 +185,7 @@ async fn an_agent_without_cwd_gets_a_chat_directory() {
     let t = TestHub::start().await;
     let resp = t
         .post("/v1/agents")
-        .json(&json!({ "name": "chat-1", "plugin": "claude", "role": "worker", "cwd": "" }))
+        .json(&json!({ "name": "Kai", "topic": "写个冒泡排序", "plugin": "claude", "role": "worker", "cwd": "" }))
         .send()
         .await
         .unwrap();
@@ -168,7 +193,54 @@ async fn an_agent_without_cwd_gets_a_chat_directory() {
     let agent: Value = resp.json().await.unwrap();
     let cwd = std::path::PathBuf::from(agent["cwd"].as_str().unwrap());
     assert!(cwd.is_dir());
-    assert!(cwd.ends_with("chats/chat-1"), "{}", cwd.display());
+    // By id: the name can change.
+    let id = agent["id"].as_str().unwrap();
+    assert!(cwd.ends_with(format!("chats/{id}")), "{}", cwd.display());
+    assert_eq!(agent["topic"], "写个冒泡排序");
+}
+
+#[tokio::test]
+async fn model_and_effort_are_set_together_and_effort_can_be_cleared() {
+    let t = TestHub::start().await;
+    assert_eq!(t.create("a").await.status(), StatusCode::CREATED);
+    let set = |body: Value| t.post("/v1/agents/a/model").json(&body).send();
+
+    let agent: Value = set(json!({ "model": "opus", "effort": "high" }))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(agent["model"], "opus");
+    assert_eq!(agent["config"]["effort"], "high");
+
+    // No effort: the model changes, the effort stays.
+    let agent: Value = set(json!({ "model": "sonnet" }))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(agent["model"], "sonnet");
+    assert_eq!(agent["config"]["effort"], "high");
+
+    // Empty effort: back to the model's default, also after a reload.
+    set(json!({ "model": "sonnet", "effort": "" }))
+        .await
+        .unwrap();
+    let agent: Value = t
+        .get("/v1/agents/a")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        agent["config"].get("effort").is_none(),
+        "{}",
+        agent["config"]
+    );
 }
 
 /// Reads SSE `data:` payloads until `n` events have arrived.

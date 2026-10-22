@@ -113,17 +113,57 @@ const relays = new Map<number, AbortController>();
 
 const COLOR = /^#[0-9a-f]{3,8}$/i;
 
+const isMac = process.platform === "darwin";
+
+/** What the page's menu (src/menubar.tsx) may ask the window to do. */
+const COMMANDS = ["zoomIn", "zoomOut", "zoomReset", "reload", "devtools", "fullscreen", "quit"] as const;
+type Command = (typeof COMMANDS)[number];
+const ZOOM_KEYS: Record<string, Command> = { "=": "zoomIn", "+": "zoomIn", "-": "zoomOut", "0": "zoomReset" };
+
+function runCommand(win: BrowserWindow, command: Command) {
+  const contents = win.webContents;
+  const zoom = contents.getZoomLevel();
+  switch (command) {
+    case "zoomIn":
+      return contents.setZoomLevel(Math.min(zoom + 0.5, 4));
+    case "zoomOut":
+      return contents.setZoomLevel(Math.max(zoom - 0.5, -3));
+    case "zoomReset":
+      return contents.setZoomLevel(0);
+    case "reload":
+      return contents.reload();
+    case "devtools":
+      return contents.toggleDevTools();
+    case "fullscreen":
+      return win.setFullScreen(!win.isFullScreen());
+    case "quit":
+      return win.close();
+  }
+}
+
+ipcMain.on("window:command", (event, command: unknown) => {
+  if (!fromApp(event) || !COMMANDS.includes(command as Command)) return;
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win) runCommand(win, command as Command);
+});
+/** Height of the page's title bar (src/styles.css `--titlebar-h`). */
+const TITLEBAR_HEIGHT = 40;
+
 /**
  * The page's theme changed (src/lib/theme.ts). The native title bar follows light or dark, and
  * the window's own background (seen while resizing or loading) takes the page colour.
  */
 ipcMain.on("theme:changed", (event, theme: unknown) => {
   if (!fromApp(event) || !theme || typeof theme !== "object") return;
-  const { dark, background } = theme as { dark?: unknown; background?: unknown };
+  const { dark, background, foreground } = theme as { dark?: unknown; background?: unknown; foreground?: unknown };
   if (typeof dark !== "boolean") return;
   nativeTheme.themeSource = dark ? "dark" : "light";
   const win = BrowserWindow.fromWebContents(event.sender);
   if (win && typeof background === "string" && COLOR.test(background)) win.setBackgroundColor(background);
+  // The window buttons sit on the page's title bar: transparent, with symbols in its ink.
+  if (win && !isMac && typeof foreground === "string" && COLOR.test(foreground)) {
+    win.setTitleBarOverlay({ color: "#00000000", symbolColor: foreground, height: TITLEBAR_HEIGHT });
+  }
 });
 
 ipcMain.on("hub:events-start", (event) => {
@@ -226,6 +266,11 @@ async function createWindow() {
     minWidth: 720,
     minHeight: 480,
     show: false,
+    // No native title bar: the page draws its own (src/titlebar.tsx). The window buttons stay
+    // the system's: macOS traffic lights inset into it, elsewhere an overlay on its right (so
+    // Windows snap layouts keep working), recoloured with the theme.
+    titleBarStyle: isMac ? "hiddenInset" : "hidden",
+    ...(isMac ? { trafficLightPosition: { x: 14, y: 13 } } : { titleBarOverlay: { color: "#00000000", symbolColor: "#a6a6ad", height: TITLEBAR_HEIGHT } }),
     webPreferences: {
       preload: join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -236,8 +281,17 @@ async function createWindow() {
     },
   });
   win.once("ready-to-show", () => win.show());
+  // No native menu, so the shortcuts it carried are wired here: zoom always (the page's own
+  // menu, src/menubar.tsx, lists them); reload and dev tools only in development.
+  win.webContents.on("before-input-event", (event, input) => {
+    if (input.type !== "keyDown" || !input.control || input.alt) return;
+    const command = ZOOM_KEYS[input.key];
+    if (command) {
+      runCommand(win, command);
+      event.preventDefault();
+    }
+  });
   if (devServerUrl) {
-    // No menu bar, so the dev shortcuts it carried are wired here: F12 / Ctrl+Shift+I, Ctrl+R.
     win.webContents.on("before-input-event", (event, input) => {
       if (input.type !== "keyDown") return;
       const key = input.key.toLowerCase();

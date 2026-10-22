@@ -193,7 +193,8 @@ pub async fn run(ctx: &Context, args: SetupArgs) -> Result<()> {
             .post(
                 "/v1/agents",
                 &CreateAgentRequest {
-                    name: name.clone(),
+                    name: Some(name.clone()),
+                    topic: None,
                     plugin: "codex".into(),
                     driver: None,
                     model: (!model.is_empty()).then_some(model.clone()),
