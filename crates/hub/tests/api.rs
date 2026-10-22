@@ -155,6 +155,22 @@ async fn bad_cwd_is_rejected() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+#[tokio::test]
+async fn an_agent_without_cwd_gets_a_chat_directory() {
+    let t = TestHub::start().await;
+    let resp = t
+        .post("/v1/agents")
+        .json(&json!({ "name": "chat-1", "plugin": "claude", "role": "worker", "cwd": "" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let agent: Value = resp.json().await.unwrap();
+    let cwd = std::path::PathBuf::from(agent["cwd"].as_str().unwrap());
+    assert!(cwd.is_dir());
+    assert!(cwd.ends_with("chats/chat-1"), "{}", cwd.display());
+}
+
 /// Reads SSE `data:` payloads until `n` events have arrived.
 async fn read_events(resp: reqwest::Response, n: usize) -> Vec<Value> {
     let mut stream = resp.bytes_stream();

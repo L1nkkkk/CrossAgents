@@ -6,17 +6,22 @@ import { navigate, useRunTree } from "../App";
 import { Avatar, BrandMark, ErrorBox, Field, Icon, VendorMark, agentTitle, displayName, hueOf, useAgents } from "../components";
 import { useHubData } from "../hub";
 import { t } from "../lib/i18n";
-import { agentNameFor, prettyModel, vendorLabel, workerModelFor } from "../lib/models";
+import { agentNameFor, chatNameFor, chatTitle, prettyModel, vendorLabel, workerModelFor } from "../lib/models";
 import { PRESETS, presetPolicy, type Preset } from "../lib/policy";
 import { ChipMenu, type MenuItem } from "../menu";
 import { QuestionCards } from "../questions";
-import { selectWorkspace, useSelectedWorkspace, useWorkspaces, wsKey, wsName } from "../workspace";
+import { CHATS, selectWorkspace, useSelectedWorkspace, useWorkspaces, wsKey, wsName } from "../workspace";
 
 const PRESET_KEY = "crossagents.preset";
 const LEAD_KEY = "crossagents.lead";
+const MODE_KEY = "crossagents.mode";
+const CHAT_MODEL_KEY = "crossagents.chatModel";
 
 /** Who leads a new run: an agent that exists, or a model to make one for. */
 type Lead = { kind: "agent"; name: string } | { kind: "model"; plugin: string; model: string };
+
+/** A chat with one agent, or a run a lead plans and a team carries out. */
+type Mode = "chat" | "run";
 
 function load<T>(key: string, fallback: T, ok: (v: unknown) => boolean): T {
   try {
@@ -46,10 +51,20 @@ export function HomeView() {
   const tree = useRunTree();
   const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
   const scope = useSelectedWorkspace();
-  const { list } = useWorkspaces();
+  const { list: all } = useWorkspaces();
+  // Projects only: the chats group is not a directory to work in.
+  const list = all.filter((w) => w.key !== CHATS);
   const current = list.find((w) => w.key === scope);
   const [folder, setFolder] = useState<string>();
   const cwd = folder ?? current?.path;
+  const [mode, setModeState] = useState<Mode>(() => load<Mode>(MODE_KEY, "chat", (v) => v === "chat" || v === "run"));
+  const setMode = (m: Mode) => {
+    setModeState(m);
+    save(MODE_KEY, m);
+  };
+  const [chatPick, setChatPick] = useState<{ plugin: string; model: string } | undefined>(() =>
+    load(CHAT_MODEL_KEY, undefined, (v) => !!v && typeof v === "object"),
+  );
   const everyone = agents.data ?? [];
   // In a workspace, offer only its agents (a run works in its planner's directory).
   const here = everyone.filter((a) => !cwd || wsKey(a.cwd) === wsKey(cwd));
@@ -100,7 +115,14 @@ export function HomeView() {
   const workers = team.filter((a) => a.role === "worker");
   const lastDefault = tree.data?.find((d) => workers.some((w) => w.id === d.run.config.worker))?.run.config.worker;
   const chosenWorker = workers.find((a) => a.name === worker) ?? workers.find((a) => a.id === lastDefault) ?? workers[0];
-  const ready = !busy && !!request.trim() && !!lead && !!where;
+  // A chat needs only a model: the remembered one if the hub still offers it, else the first.
+  const chatModel =
+    chatPick && offered.some((p) => p.name === chatPick.plugin && p.models.includes(chatPick.model))
+      ? chatPick
+      : offered[0]
+        ? { plugin: offered[0].name, model: offered[0].models[0] }
+        : undefined;
+  const ready = !busy && !!request.trim() && (mode === "chat" ? !!chatModel : !!lead && !!where);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -125,7 +147,35 @@ export function HomeView() {
     });
   }
 
+  /** A chat is a new agent (named after the model, titled by the message) and its first message. */
+  async function startChat() {
+    if (!ready || !chatModel) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      const text = request.trim();
+      const agent = await api.createAgent({
+        name: chatNameFor(chatModel.model, new Set(everyone.map((a) => a.name))),
+        plugin: chatModel.plugin,
+        driver: null,
+        model: chatModel.model,
+        role: "worker",
+        // No project: the hub gives the chat its own directory.
+        cwd: cwd ?? "",
+        config: {},
+        profile: { display_name: chatTitle(text), title: prettyModel(chatModel.model), avatar: null, color: null, persona: null },
+      });
+      await api.sendMessage(agent.name, { text });
+      navigate("s", agent.name);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function submit() {
+    if (mode === "chat") return startChat();
     if (!ready || !lead || !where) return;
     setBusy(true);
     setError(undefined);
@@ -170,6 +220,23 @@ export function HomeView() {
 
   const pickFolder = window.crossagents?.pickFolder;
   const wsItems: MenuItem[] = [
+    // A chat may live outside any project; a run always works in one.
+    ...(mode === "chat"
+      ? [
+          {
+            kind: "item",
+            key: "none",
+            label: t("home.noProject"),
+            sub: t("home.noProjectHint"),
+            icon: <Icon name="chat" size={14} />,
+            on: !folder && !current,
+            onPick: () => {
+              setFolder(undefined);
+              selectWorkspace("");
+            },
+          } satisfies MenuItem,
+        ]
+      : []),
     ...list.map(
       (w): MenuItem => ({
         kind: "item",
@@ -234,8 +301,33 @@ export function HomeView() {
     ),
   ];
 
+  const chatItems: MenuItem[] = offered.flatMap((p: PluginInfo): MenuItem[] => [
+    { kind: "header", key: `h-${p.name}`, label: vendorLabel(p.name) },
+    ...p.models.map(
+      (m): MenuItem => ({
+        kind: "item",
+        key: `${p.name}/${m}`,
+        label: prettyModel(m),
+        sub: m,
+        icon: <VendorMark plugin={p.name} size={14} />,
+        on: chatModel?.plugin === p.name && chatModel.model === m,
+        onPick: () => {
+          setChatPick({ plugin: p.name, model: m });
+          save(CHAT_MODEL_KEY, { plugin: p.name, model: m });
+        },
+      }),
+    ),
+  ]);
+
   const wsLabel = folder ? wsName(folder) : current?.name;
-  const missing = !agents.data || !plugins.data ? undefined : !lead ? t("home.noModels") : !where ? t("home.needWorkspace") : undefined;
+  const missing =
+    !agents.data || !plugins.data
+      ? undefined
+      : !offered.length
+        ? t("home.noModels")
+        : mode === "run" && !where
+          ? t("home.needWorkspace")
+          : undefined;
 
   return (
     <div className="page">
@@ -243,6 +335,16 @@ export function HomeView() {
         <div className="hero">
           <BrandMark size={30} />
           <h1>{t("home.title")}</h1>
+          <div className="segmented mode-pick" role="radiogroup" aria-label={t("home.mode")}>
+            <button className={mode === "chat" ? "active" : ""} role="radio" aria-checked={mode === "chat"} onClick={() => setMode("chat")} title={t("home.chatHint")}>
+              <Icon name="chat" size={14} />
+              {t("home.chat")}
+            </button>
+            <button className={mode === "run" ? "active" : ""} role="radio" aria-checked={mode === "run"} onClick={() => setMode("run")} title={t("home.runHint")}>
+              <Icon name="team" size={14} />
+              {t("home.run")}
+            </button>
+          </div>
         </div>
 
         <QuestionCards agents={everyone} />
@@ -253,18 +355,27 @@ export function HomeView() {
             value={request}
             onChange={(e) => setRequest(e.target.value)}
             onKeyDown={onKey}
-            placeholder={t("home.placeholder")}
+            placeholder={t(mode === "chat" ? "home.chatPlaceholder" : "home.placeholder")}
             autoFocus
           />
           <div className="bar">
             <ChipMenu
-              icon={wsLabel ? <span className={`ws-dot av-${hueOf(wsKey(folder ?? current!.path))}`} /> : <Icon name="folder" size={14} />}
-              label={wsLabel ?? t("home.chooseWorkspace")}
+              icon={wsLabel ? <span className={`ws-dot av-${hueOf(wsKey(folder ?? current!.path))}`} /> : <Icon name={mode === "chat" ? "chat" : "folder"} size={14} />}
+              label={wsLabel ?? t(mode === "chat" ? "home.noProject" : "home.chooseWorkspace")}
               title={folder ?? current?.path}
               items={wsItems}
               up
             />
-            {lead && (
+            {mode === "chat" && chatModel && (
+              <ChipMenu
+                icon={<VendorMark plugin={chatModel.plugin} size={14} />}
+                label={`${vendorLabel(chatModel.plugin)} ${prettyModel(chatModel.model)}`}
+                title={t("home.model")}
+                items={chatItems}
+                up
+              />
+            )}
+            {mode === "run" && lead && (
               <ChipMenu
                 icon={leadAgent ? <Avatar agent={leadAgent} size={16} /> : <VendorMark plugin={leadPlugin!} size={14} />}
                 label={leadAgent ? displayName(leadAgent) : `${vendorLabel(leadPlugin!)} ${prettyModel(leadModel!)}`}
@@ -274,17 +385,25 @@ export function HomeView() {
               />
             )}
             <div className="spacer" />
+            {mode === "run" && (
+              <button
+                type="button"
+                className={`icon-btn options-btn ${options ? "on" : ""}`}
+                onClick={() => setOptions(!options)}
+                aria-expanded={options}
+                title={t("home.options")}
+                aria-label={t("home.options")}
+              >
+                <Icon name="sliders" size={15} />
+              </button>
+            )}
             <button
-              type="button"
-              className={`icon-btn options-btn ${options ? "on" : ""}`}
-              onClick={() => setOptions(!options)}
-              aria-expanded={options}
-              title={t("home.options")}
-              aria-label={t("home.options")}
+              className="primary send"
+              disabled={!ready}
+              onClick={submit}
+              aria-label={t(mode === "chat" ? "home.send" : "home.start")}
+              title={t(mode === "chat" ? "home.sendHint" : "home.startHint")}
             >
-              <Icon name="sliders" size={15} />
-            </button>
-            <button className="primary send" disabled={!ready} onClick={submit} aria-label={t("home.start")} title={t("home.startHint")}>
               <Icon name="send" size={16} />
             </button>
           </div>
@@ -292,7 +411,7 @@ export function HomeView() {
 
         {missing && <p className="home-note">{missing}</p>}
 
-        {options && (
+        {mode === "run" && options && (
           <div className="card form home-options">
             <div className="row" style={{ alignItems: "flex-start" }}>
               <Field label={t("home.preset")}>

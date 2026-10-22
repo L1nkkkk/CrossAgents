@@ -1076,3 +1076,8 @@ button.ghost.icon, .icon-btn { background: transparent; border-color: transparen
 .chart-legend i { width: 10px; height: 10px; border-radius: 2px; }
 .chart g.on .chart-bar { filter: brightness(1.15); }
 .chart-tip-row.total { border-top: 1px solid var(--border); margin-top: 3px; padding-top: 3px; }
+
+/* 对话 | 团队 run on the start page. */
+.mode-pick { margin-top: 2px; }
+.mode-pick button { display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 13px; }
+.group-name svg { margin-right: 5px; color: var(--accent); }

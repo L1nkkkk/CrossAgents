@@ -28,13 +28,30 @@ export function workerModelFor(models: string[], lead: string): string {
   return models.find((m) => /haiku|mini|flash|lite/i.test(m)) ?? lead;
 }
 
-/** A free agent name for `role` on `model`, e.g. "lead-opus-4-1", then "lead-opus-4-1-2". */
-export function agentNameFor(role: "planner" | "worker", model: string, taken: Set<string>): string {
-  const slug = prettyModel(model)
+const slugOf = (model: string) =>
+  prettyModel(model)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  const base = `${role === "planner" ? "lead" : "worker"}-${slug || "agent"}`.slice(0, 28);
+    .replace(/^-+|-+$/g, "") || "agent";
+
+/** `base`, else `base-2`, `base-3`…, whichever is free. */
+function free(base: string, taken: Set<string>): string {
   if (!taken.has(base)) return base;
   for (let n = 2; ; n++) if (!taken.has(`${base}-${n}`)) return `${base}-${n}`;
+}
+
+/** A free agent name for `role` on `model`, e.g. "lead-opus-4-1", then "lead-opus-4-1-2". */
+export function agentNameFor(role: "planner" | "worker", model: string, taken: Set<string>): string {
+  return free(`${role === "planner" ? "lead" : "worker"}-${slugOf(model)}`.slice(0, 28), taken);
+}
+
+/** A free name for a new chat on `model`: "chat-sonnet-4-5", "chat-sonnet-4-5-2"… */
+export function chatNameFor(model: string, taken: Set<string>): string {
+  return free(`chat-${slugOf(model)}`.slice(0, 28), taken);
+}
+
+/** A chat's title from its first message: the first line, at most `max` characters. */
+export function chatTitle(text: string, max = 24): string {
+  const line = text.trim().split(/\r?\n/)[0].trim();
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }

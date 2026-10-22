@@ -19,7 +19,7 @@ import type { CrossAgentsBridge, HubResponse } from "../bridge";
 import type { HubEvent } from "../hub";
 import { turnStat } from "../lib/diff";
 import { applyEvent } from "../session";
-import { uid } from "./fixtures";
+import { transcript, uid } from "./fixtures";
 
 export type MockState = {
   agents: Agent[];
@@ -231,8 +231,10 @@ export class MockBridge implements CrossAgentsBridge {
       if (p === "/v1/agents") {
         const req = body as CreateAgentRequest;
         if (s.agents.some((a) => a.name === req.name)) return json(409, { error: { code: "conflict", message: `${req.name} exists` } });
-        const agent: Agent = { id: uid(), ...req, status: "idle", created_at: new Date().toISOString() };
+        const cwd = req.cwd || `C:/Users/me/.crossagents/chats/${req.name}`;
+        const agent: Agent = { id: uid(), ...req, cwd, status: "idle", created_at: new Date().toISOString() };
         s.agents.push(agent);
+        s.transcripts.set(agent.id, transcript(agent, [], 0));
         this.emit({ type: "agent.created", data: { agent } });
         return json(201, agent);
       }

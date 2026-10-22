@@ -50,16 +50,29 @@ export function useWorkspaces() {
       ws.agents.push(agent);
     }
   }
+  const chats: Workspace = { key: CHATS, path: "", name: "对话", runs: [], agents: [] };
   for (const agent of all) {
-    if (!placed.has(agent.id)) get(agent.cwd).agents.push(agent);
+    if (placed.has(agent.id)) continue;
+    if (isChat(agent)) chats.agents.push(agent);
+    else get(agent.cwd).agents.push(agent);
   }
 
-  // Busiest first, then by name.
+  // Busiest first, then by name; chats outside any project come first, like Claude Code's.
   const list = [...map.values()].sort((a, b) => liveRuns(b) - liveRuns(a) || a.name.localeCompare(b.name));
+  if (chats.agents.length) list.unshift(chats);
   return { list, loaded: !!tree.data && !!agents.data, tree, agents };
 }
 
-export const liveRuns = (ws: Workspace) => ws.runs.filter((d) => ACTIVE_RUN.includes(d.run.status)).length;
+/** The group of chats outside any project; not a repository, so never offered as a workspace. */
+export const CHATS = "__chats";
+
+/** A chat outside any project: the hub made its directory, `<home>/chats/<name>`. */
+export function isChat(agent: Agent): boolean {
+  const parts = agent.cwd.replace(/\\/g, "/").replace(/\/+$/, "").split("/");
+  return parts[parts.length - 1] === agent.name && parts[parts.length - 2] === "chats";
+}
+
+export const liveRuns =(ws: Workspace) => ws.runs.filter((d) => ACTIVE_RUN.includes(d.run.status)).length;
 
 // ---- The selected workspace ("" = all), remembered per browser. -------------------------
 

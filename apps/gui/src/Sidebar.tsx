@@ -14,7 +14,7 @@ import { t } from "./lib/i18n";
 import { level, tightest, windowLabel } from "./lib/quota";
 import { openBeside } from "./panes";
 import { useQuota } from "./views/Quota";
-import { selectWorkspace, useWorkspaces, type Workspace } from "./workspace";
+import { CHATS, selectWorkspace, useWorkspaces, type Workspace } from "./workspace";
 
 /** A row in a group: a run (with its team) or a session outside any run. */
 type Item = { kind: "run"; key: string; at: string; detail: RunDetail } | { kind: "session"; key: string; at: string; agent: Agent };
@@ -134,14 +134,24 @@ function Group({ workspace, searching, children }: { workspace: Workspace; searc
     <section className="group">
       <div className="group-head">
         <button className="group-name" onClick={() => toggleCollapsed(workspace.key)} title={workspace.path} aria-expanded={!closed}>
-          <span className={`ws-dot av-${hueOf(workspace.key)}`} />
+          {workspace.key === CHATS ? <Icon name="chat" size={12} /> : <span className={`ws-dot av-${hueOf(workspace.key)}`} />}
           {workspace.name}
           {closed && <Icon name="chevronRight" size={13} />}
         </button>
         <a
           className="icon-btn group-add"
           href="#/"
-          onClick={() => selectWorkspace(workspace.key)}
+          onClick={() => {
+            // + on the chats group starts a chat outside any project.
+            if (workspace.key === CHATS) {
+              try {
+                localStorage.setItem("crossagents.mode", JSON.stringify("chat"));
+              } catch {
+                // The start page then opens in whatever mode it had.
+              }
+            }
+            selectWorkspace(workspace.key === CHATS ? "" : workspace.key);
+          }}
           title={t("sidebar.newIn", { name: workspace.name })}
           aria-label={t("sidebar.newIn", { name: workspace.name })}
         >
