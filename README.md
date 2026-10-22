@@ -24,8 +24,11 @@ cargo build --release
 # 把 target/release/crossagents 放进 PATH
 ```
 
-Claude 插件第一次启动 agent 时会通过 `npx` 下载适配器 `@agentclientprotocol/claude-agent-acp`。
-Codex 插件默认走原生驱动（`codex app-server`）：先找 PATH 上的 `codex`，找不到就用 Codex 桌面版自带的那份。
+两个插件都默认走原生驱动：
+- Claude 走 `claude -p` 的 stream-json 控制协议：先找 PATH 上的 `claude`，再找 `~/.local/bin/claude`，最后用 Claude 桌面版自带的那份。桌面版的登录 `claude` 用不上，要在终端里 `claude auth login` 登录一次。
+- Codex 走 `codex app-server`：先找 PATH 上的 `codex`，找不到就用 Codex 桌面版自带的那份。
+
+**代理**：Claude Code 不读 Windows 的系统代理。hub 环境里没有 `HTTPS_PROXY` 时，会把系统代理设置传给它（本机地址除外）。
 
 **Codex 提示**：建议给 agent 显式指定模型。不指定时用 `~/.codex/config.toml` 里的默认模型，
 它不一定支持你的登录方式（例如 ChatGPT 账号）。GUI 的模型下拉框列的是 Codex 为当前登录给出的模型
@@ -107,6 +110,7 @@ crossagents account login codex-work                  # 打开浏览器登录
 crossagents account status codex-main                 # 套餐、额度窗口与重置时间、余额（实时）
 crossagents account usage codex-main --by model       # token、缓存命中；还可按 day/origin/agent/role/run
 crossagents account models codex-main                 # 这个账号能用的模型
+crossagents account add claude-work --provider claude # Claude 账号同样管理（独立的 CLAUDE_CONFIG_DIR）
 ```
 
 令牌只在 hub 进程内用于查询额度，任何 API 和日志都不会输出令牌，邮箱打码显示。
@@ -122,17 +126,20 @@ port = 7420
 
 # 覆盖内置插件的启动命令，或注册任意 ACP agent
 [plugins.claude]
-command = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
+native_command = ["C:/tools/claude.exe"]   # 不写就自动找
+
 
 [plugins.gemini]
 command = ["gemini", "--experimental-acp"]
 
-# Codex 默认走原生驱动（codex app-server）；要改回 codex-acp 适配器：
+# 要改回 ACP 适配器（codex-acp、claude-agent-acp，需要 Node.js）：
 [plugins.codex]
 driver = "acp-generic"
 ```
 
-单个 agent 也可以用 `crossagents agent add … --driver codex-native|acp-generic` 覆盖插件的默认驱动。
+单个 agent 也可以用 `crossagents agent add … --driver codex-native|claude-native|acp-generic` 覆盖插件的默认驱动。
+Claude agent 的 `config` 里还可以写 `permission_mode`（如 `acceptEdits`）、`effort`、`setting_sources`
+（默认 `project,local`，不带你自己的 Claude Code 插件、hook 和连接器）。
 驱动与能力见 [N1 任务书](docs/tasks/N1.md)。
 
 也可以把插件放成目录：`~/.crossagents/plugins/<name>/plugin.toml`

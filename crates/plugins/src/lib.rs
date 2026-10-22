@@ -16,6 +16,7 @@
 //! or dropped in as a directory with a manifest, see [`manifest`]. An agent can pick
 //! another driver than its plugin's default through its own `driver` field.
 
+pub mod claude_account;
 pub mod codex_account;
 pub mod manifest;
 
@@ -25,6 +26,7 @@ use std::sync::{Arc, Mutex};
 
 use crossagents_core::{CoreError, Driver, DriverKind};
 use crossagents_drivers::acp::AcpDriver;
+use crossagents_drivers::claude_native::ClaudeNativeDriver;
 use crossagents_drivers::codex_native::CodexNativeDriver;
 use serde::Deserialize;
 
@@ -43,7 +45,8 @@ pub struct PluginConfig {
     /// Default driver for this plugin's agents; `acp-generic` when absent.
     #[serde(default)]
     pub driver: Option<DriverKind>,
-    /// Launch command for the native driver; `codex app-server` for `codex-native`.
+    /// Launch command for the native driver: `codex app-server` for `codex-native`,
+    /// `claude` for `claude-native`.
     #[serde(default)]
     pub native_command: Vec<String>,
 }
@@ -53,10 +56,12 @@ impl PluginConfig {
         self.driver.unwrap_or_default()
     }
 
-    /// Claude Code through Anthropic's Agent SDK ACP adapter (needs Node.js).
+    /// Claude Code: its stream-json protocol by default; Anthropic's ACP adapter (needs
+    /// Node.js) with `driver = "acp-generic"`.
     pub fn claude() -> Self {
         Self {
             command: npx("@agentclientprotocol/claude-agent-acp"),
+            driver: Some(DriverKind::ClaudeNative),
             models: vec!["opus".into(), "sonnet".into(), "haiku".into()],
             // Claude Code reads its model from here; the ACP model option is the other half.
             model_env: Some("ANTHROPIC_MODEL".into()),
@@ -120,17 +125,8 @@ impl Profile {
         }
     }
 
-    fn resolve(&self, wanted: DriverKind) -> Result<Resolved, CoreError> {
-        let (kind, warning) = match wanted {
-            DriverKind::ClaudeNative => (
-                DriverKind::AcpGeneric,
-                Some(format!(
-                    "{}: the claude-native driver is not available yet; using acp-generic",
-                    self.name
-                )),
-            ),
-            kind => (kind, None),
-        };
+    fn resolve(&self, kind: DriverKind) -> Result<Resolved, CoreError> {
+        let warning = None;
         let mut drivers = self.drivers.lock().expect("driver cache poisoned");
         if let Some(driver) = drivers.get(&kind) {
             return Ok(Resolved {
@@ -158,7 +154,11 @@ impl Profile {
                 self.config.native_command.clone(),
                 self.config.models.clone(),
             )),
-            DriverKind::ClaudeNative => unreachable!("mapped to acp-generic above"),
+            DriverKind::ClaudeNative => Arc::new(ClaudeNativeDriver::new(
+                &self.name,
+                self.config.native_command.clone(),
+                self.config.models.clone(),
+            )),
         };
         drivers.insert(kind, driver.clone());
         Ok(Resolved { driver, warning })
@@ -329,11 +329,15 @@ mod tests {
     }
 
     #[test]
-    fn claude_native_falls_back_with_a_warning_and_unknown_drivers_fail() {
+    fn claude_defaults_to_its_native_driver_and_unknown_drivers_fail() {
         let registry = PluginRegistry::with_config(&BTreeMap::new());
-        let resolved = registry.driver("claude", Some("claude-native")).unwrap();
-        assert_eq!(resolved.driver.kind(), DriverKind::AcpGeneric);
-        assert!(resolved.warning.unwrap().contains("claude-native"));
+        assert_eq!(
+            registry.get("claude").unwrap().kind(),
+            DriverKind::ClaudeNative
+        );
+        let acp = registry.driver("claude", Some("acp-generic")).unwrap();
+        assert_eq!(acp.driver.kind(), DriverKind::AcpGeneric);
+        assert!(acp.warning.is_none());
         assert!(matches!(
             registry.driver("claude", Some("nope")),
             Err(CoreError::Unsupported(_))

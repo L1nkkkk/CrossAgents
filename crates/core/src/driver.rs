@@ -29,7 +29,7 @@ use crate::model::Agent;
 pub enum DriverKind {
     /// `codex app-server`: one process per Profile, one thread per session.
     CodexNative,
-    /// Claude Agent SDK sidecar or `claude` stream-json (not implemented yet).
+    /// `claude -p` with its stream-json control protocol: one process per session.
     ClaudeNative,
     /// Any ACP agent; the fallback for everything else. The default, so configurations
     /// written before drivers existed keep their behaviour.

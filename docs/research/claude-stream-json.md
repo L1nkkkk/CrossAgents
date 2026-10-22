@@ -52,7 +52,7 @@ Agent SDK 不是另一套接口。它（`sdk.mjs` / `core.mjs`）做的就是启
 - **代理**：`claude.exe` 不读 Windows 系统代理，本机（系统代理 `127.0.0.1:7890`）直连 claude.com 超时，设 `HTTPS_PROXY` 后正常。hub 启动 Claude（以及 Codex）时要传代理：默认读系统代理设置，账号上可以单独配置。
 - **花费按进程累计**：hub 记录每轮花费时要用前后差值。
 
-## 4. 下一步：`claude_native` 驱动
+## 4. `claude_native` 驱动（已完成，见 [N3](../tasks/N3.md)）
 
 照 `codex_native` 的结构：
 

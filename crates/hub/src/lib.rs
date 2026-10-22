@@ -22,6 +22,7 @@ use crossagents_store_sqlite::SqliteStore;
 
 use crate::accounts::Accounts;
 use crate::collab::{AgentTokens, CollabSetup, HubHost};
+use crossagents_plugins::claude_account::ClaudeAccounts;
 use crossagents_plugins::codex_account::CodexAccounts;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -76,7 +77,10 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     };
     let accounts = Arc::new(Accounts::new(
         bus.clone(),
-        vec![Arc::new(codex_accounts)],
+        vec![
+            Arc::new(codex_accounts),
+            Arc::new(ClaudeAccounts::default()),
+        ],
         paths.accounts(),
     ));
     accounts.watch();

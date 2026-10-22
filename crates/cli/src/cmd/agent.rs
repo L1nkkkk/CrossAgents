@@ -32,7 +32,7 @@ pub struct AddArgs {
     #[arg(long)]
     pub plugin: String,
     /// Driver to use: `codex-native`, `claude-native` or `acp-generic`; defaults to the
-    /// plugin's `driver` (which defaults to `acp-generic`).
+    /// plugin's `driver` (native for `claude` and `codex`, `acp-generic` otherwise).
     #[arg(long)]
     pub driver: Option<String>,
     /// Model, e.g. `opus` or `haiku`.
