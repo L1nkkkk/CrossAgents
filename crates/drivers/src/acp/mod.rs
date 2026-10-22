@@ -12,9 +12,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
-    Capabilities, CoreError, Driver, DriverKind, DriverSession, McpServerSpec, OutputStream,
-    PermissionPolicy, SessionEvent, SessionEventKind, SessionSpec, StopReason, ToolStatus,
-    TurnOutcome,
+    Capabilities, CoreError, Driver, DriverKind, DriverSession, FileChange, McpServerSpec,
+    OutputStream, PermissionPolicy, SessionEvent, SessionEventKind, SessionSpec, StopReason,
+    ToolDetail, ToolStatus, TurnOutcome,
 };
 use serde_json::Value;
 use tokio::process::{Child, Command};
@@ -461,7 +461,13 @@ impl RpcHandler for ClientHandler {
         let Ok(note) = serde_json::from_value::<SessionNotification>(params) else {
             return;
         };
+        let detail = parse_detail(&note.update);
         if let Some(kind) = parse_update(&note.update) {
+            let _ = self
+                .events
+                .send(SessionEvent::with_raw(kind, note.update.clone()));
+        }
+        if let Some(kind) = detail {
             let _ = self.events.send(SessionEvent::with_raw(kind, note.update));
         }
     }
@@ -491,6 +497,124 @@ fn tool_status(value: Option<&Value>) -> Option<ToolStatus> {
         "failed" => Some(ToolStatus::Failed),
         _ => None,
     }
+}
+
+/// What a tool call did, from an ACP `tool_call` / `tool_call_update`: its text content
+/// as output, its diffs as file changes, `rawInput` / `rawOutput` as arguments and result.
+fn parse_detail(update: &Value) -> Option<SessionEventKind> {
+    let kind = update.get("sessionUpdate")?.as_str()?;
+    if kind != "tool_call" && kind != "tool_call_update" {
+        return None;
+    }
+    let id = update.get("toolCallId")?.as_str()?.to_owned();
+    let mut detail = ToolDetail::default();
+    let mut texts = Vec::new();
+    for item in update
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        match item.get("type").and_then(Value::as_str) {
+            Some("content") => {
+                if let Some(text) = item.pointer("/content/text").and_then(Value::as_str) {
+                    texts.push(text.to_owned());
+                }
+            }
+            Some("diff") => {
+                let Some(path) = item.get("path").and_then(Value::as_str) else {
+                    continue;
+                };
+                let old = item.get("oldText").and_then(Value::as_str);
+                let new = item
+                    .get("newText")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                detail.changes.push(FileChange {
+                    path: path.to_owned(),
+                    kind: if old.is_none() { "add" } else { "update" }.to_owned(),
+                    diff: unified_diff(old.unwrap_or_default(), new),
+                });
+            }
+            _ => {}
+        }
+    }
+    if !texts.is_empty() {
+        detail.output = Some(texts.join("\n"));
+    }
+    let raw_input = update.get("rawInput").filter(|v| !v.is_null());
+    if let Some(input) = raw_input {
+        // Shell tools put the command in their input.
+        detail.command = match input.get("command") {
+            Some(Value::String(c)) => Some(c.clone()),
+            Some(Value::Array(parts)) => Some(
+                parts
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
+            _ => None,
+        };
+        detail.arguments = Some(serde_json::to_string_pretty(input).unwrap_or_default());
+    }
+    if let Some(output) = update.get("rawOutput").filter(|v| !v.is_null()) {
+        detail.result = Some(match output.as_str() {
+            Some(s) => s.to_owned(),
+            None => serde_json::to_string_pretty(output).unwrap_or_default(),
+        });
+    }
+    (detail != ToolDetail::default()).then_some(SessionEventKind::ToolDetail {
+        tool_call_id: id,
+        detail,
+    })
+}
+
+/// Lines compared up to this many cells; bigger files are shown as replaced whole.
+const DIFF_CELLS: usize = 4_000_000;
+
+/// A one-hunk unified diff of `old` → `new` (longest common subsequence of lines).
+fn unified_diff(old: &str, new: &str) -> String {
+    let a: Vec<&str> = old.lines().collect();
+    let b: Vec<&str> = new.lines().collect();
+    let mut lines: Vec<(char, &str)> = Vec::new();
+    if a.len() * b.len() <= DIFF_CELLS {
+        // lcs[i][j]: common lines of a[i..] and b[j..].
+        let mut lcs = vec![vec![0u32; b.len() + 1]; a.len() + 1];
+        for i in (0..a.len()).rev() {
+            for j in (0..b.len()).rev() {
+                lcs[i][j] = if a[i] == b[j] {
+                    lcs[i + 1][j + 1] + 1
+                } else {
+                    lcs[i + 1][j].max(lcs[i][j + 1])
+                };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < a.len() || j < b.len() {
+            if i < a.len() && j < b.len() && a[i] == b[j] {
+                lines.push((' ', a[i]));
+                i += 1;
+                j += 1;
+            } else if j < b.len() && (i == a.len() || lcs[i][j + 1] > lcs[i + 1][j]) {
+                lines.push(('+', b[j]));
+                j += 1;
+            } else {
+                lines.push(('-', a[i]));
+                i += 1;
+            }
+        }
+    } else {
+        lines.extend(a.iter().map(|l| ('-', *l)));
+        lines.extend(b.iter().map(|l| ('+', *l)));
+    }
+    let mut out = format!("@@ -1,{} +1,{} @@\n", a.len(), b.len());
+    for (sign, line) in lines {
+        out.push(sign);
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 fn parse_update(update: &Value) -> Option<SessionEventKind> {
@@ -617,6 +741,32 @@ mod tests {
         assert_eq!(
             parse_update(&json!({ "sessionUpdate": "plan", "entries": [] })),
             None
+        );
+    }
+
+    #[test]
+    fn tool_details_from_content_and_raw_io() {
+        // As Claude Code's ACP adapter reports an edit and a shell command.
+        let edit = json!({ "sessionUpdate": "tool_call_update", "toolCallId": "e1", "status": "completed",
+            "content": [{ "type": "diff", "path": "/w/a.txt", "oldText": "one\ntwo\n", "newText": "one\nthree\n" }] });
+        let Some(SessionEventKind::ToolDetail { detail, .. }) = parse_detail(&edit) else {
+            panic!("no detail")
+        };
+        assert_eq!(detail.changes[0].kind, "update");
+        assert_eq!(
+            detail.changes[0].diff,
+            "@@ -1,2 +1,2 @@\n one\n-two\n+three\n"
+        );
+        let shell = json!({ "sessionUpdate": "tool_call", "toolCallId": "s1", "title": "ls", "kind": "execute",
+            "rawInput": { "command": "ls -la" },
+            "content": [{ "type": "content", "content": { "type": "text", "text": "a.txt" } }] });
+        let Some(SessionEventKind::ToolDetail { detail, .. }) = parse_detail(&shell) else {
+            panic!("no detail")
+        };
+        assert_eq!(detail.command.as_deref(), Some("ls -la"));
+        assert_eq!(detail.output.as_deref(), Some("a.txt"));
+        assert!(
+            parse_detail(&json!({ "sessionUpdate": "tool_call", "toolCallId": "x" })).is_none()
         );
     }
 }

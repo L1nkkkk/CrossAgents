@@ -6,6 +6,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import type { AccountQuota } from "@bindings/AccountQuota";
 import type { AccountUsageGroup } from "@bindings/AccountUsageGroup";
 import type { RateWindow } from "@bindings/RateWindow";
+import type { ResetCredit } from "@bindings/ResetCredit";
 import { api, errorText } from "../api";
 import { ErrorBox, Field, ago } from "../components";
 import { useHubData } from "../hub";
@@ -115,6 +116,19 @@ function AccountBlock({ quota, onChange }: { quota: AccountQuota; onChange: () =
           ))}
         </div>
       )}
+      {/* Separate limits beyond the main one, e.g. one per model. */}
+      {status.limits.slice(1).map((group) => (
+        <div key={group.id} className="quota">
+          <div className="quota-title">
+            {group.name ?? group.model ?? group.id} 的限额
+            {group.model && group.name && <span className="muted"> · {group.model}</span>}
+          </div>
+          {group.windows.map((w) => (
+            <WindowRow key={w.name} window={w} reached={group.reached} />
+          ))}
+        </div>
+      ))}
+      <ResetCredits credits={status.reset_credits} />
       {credits && (credits.has_credits || credits.unlimited) && (
         <div className="quota-row plain">
           <div className="quota-label">
@@ -149,6 +163,28 @@ function AccountBlock({ quota, onChange }: { quota: AccountQuota; onChange: () =
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/** "额度重置券 · 3 张可用 · 最早 11月21日 过期", the titles on hover. */
+function ResetCredits({ credits }: { credits: ResetCredit[] }) {
+  const available = credits.filter((c) => c.status === "available");
+  if (!available.length) return null;
+  const soonest = available
+    .map((c) => c.expires_at)
+    .filter((d): d is string => !!d)
+    .sort()[0];
+  const date = soonest ? new Date(soonest) : undefined;
+  return (
+    <div className="quota-row plain" title={available.map((c) => `${c.title}${c.description ? ` — ${c.description}` : ""}`).join("\n")}>
+      <div className="quota-label">
+        额度重置券
+        <div className="quota-sub">用一张可以把限额清零，在 Codex 里使用</div>
+      </div>
+      <div className="quota-value">
+        {available.length} 张可用{date ? ` · 最早 ${date.getMonth() + 1}月${date.getDate()}日过期` : ""}
+      </div>
     </div>
   );
 }
