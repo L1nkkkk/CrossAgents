@@ -34,6 +34,7 @@ import type { RunStatus } from "@bindings/RunStatus";
 import type { TaskStatus } from "@bindings/TaskStatus";
 import { api } from "./api";
 import { useHubData } from "./hub";
+import { parseBlocks, parseInline, type Block, type Inline } from "./lib/markdown";
 import { full, when } from "./lib/time";
 
 /** How a status reads at a glance: a colour, and whether it is still moving. */
@@ -153,23 +154,93 @@ export const sessionHref = (name: string) => `#/s/${encodeURIComponent(name)}`;
  * split paragraphs. Deliberately small; no HTML is ever interpreted.
  */
 export function Prose({ text }: { text: string }) {
-  const blocks: ReactNode[] = [];
-  const parts = text.split(/^```[^\n]*\n?/m);
-  parts.forEach((part, i) => {
-    if (i % 2 === 1) {
-      blocks.push(<pre key={i}>{part.replace(/\n$/, "")}</pre>);
-      return;
-    }
-    part
-      .split(/\n{2,}/)
-      .filter((p) => p.trim())
-      .forEach((p, j) => blocks.push(<p key={`${i}-${j}`}>{inline(p.replace(/^\n+|\n+$/g, ""))}</p>));
-  });
-  return <div className="prose">{blocks}</div>;
+  return <div className="prose">{renderBlocks(parseBlocks(text))}</div>;
 }
 
-function inline(text: string): ReactNode[] {
-  return text.split(/(`[^`\n]+`)/).map((s, i) => (s.startsWith("`") && s.endsWith("`") && s.length > 2 ? <code key={i}>{s.slice(1, -1)}</code> : s));
+function renderBlocks(blocks: Block[]): ReactNode[] {
+  return blocks.map((b, i) => {
+    switch (b.t) {
+      case "p":
+        return <p key={i}>{renderInline(parseInline(b.text))}</p>;
+      case "h": {
+        const H = (["h3", "h3", "h4", "h5", "h6", "h6"] as const)[b.level - 1];
+        return <H key={i}>{renderInline(parseInline(b.text))}</H>;
+      }
+      case "code":
+        return <pre key={i}>{b.text}</pre>;
+      case "list": {
+        const items = b.items.map((item, j) => (
+          <li key={j}>
+            {renderInline(parseInline(item.text))}
+            {item.children.length > 0 && renderBlocks(item.children)}
+          </li>
+        ));
+        return b.ordered ? (
+          <ol key={i} start={b.start}>
+            {items}
+          </ol>
+        ) : (
+          <ul key={i}>{items}</ul>
+        );
+      }
+      case "quote":
+        return <blockquote key={i}>{renderBlocks(b.blocks)}</blockquote>;
+      case "hr":
+        return <hr key={i} />;
+      case "table":
+        return (
+          <div key={i} className="prose-table">
+            <table>
+              <thead>
+                <tr>
+                  {b.head.map((c, j) => (
+                    <th key={j} style={{ textAlign: b.align[j] }}>
+                      {renderInline(parseInline(c))}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {b.rows.map((row, r) => (
+                  <tr key={r}>
+                    {row.map((c, j) => (
+                      <td key={j} style={{ textAlign: b.align[j] }}>
+                        {renderInline(parseInline(c))}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        );
+    }
+  });
+}
+
+function renderInline(spans: Inline[]): ReactNode[] {
+  return spans.map((s, i) => {
+    switch (s.t) {
+      case "text":
+        return s.text;
+      case "code":
+        return <code key={i}>{s.text}</code>;
+      case "strong":
+        return <strong key={i}>{renderInline(s.children)}</strong>;
+      case "em":
+        return <em key={i}>{renderInline(s.children)}</em>;
+      case "del":
+        return <del key={i}>{renderInline(s.children)}</del>;
+      case "link":
+        return (
+          <a key={i} href={s.href} target="_blank" rel="noreferrer">
+            {renderInline(s.children)}
+          </a>
+        );
+      case "br":
+        return <br key={i} />;
+    }
+  });
 }
 
 /** `git diff --stat` with the +/- bars coloured. */

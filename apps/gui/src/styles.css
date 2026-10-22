@@ -1081,3 +1081,24 @@ button.ghost.icon, .icon-btn { background: transparent; border-color: transparen
 .mode-pick { margin-top: 2px; }
 .mode-pick button { display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 13px; }
 .group-name svg { margin-right: 5px; color: var(--accent); }
+
+/* Markdown in replies (lib/markdown.ts). */
+.prose ul, .prose ol { margin: 0.2em 0 0.7em; padding-left: 1.5em; }
+.prose li { margin: 0.15em 0; }
+.prose li > ul, .prose li > ol { margin: 0.15em 0 0.2em; }
+.prose li::marker { color: var(--muted); }
+.prose ol > li::marker { font-variant-numeric: tabular-nums; }
+.prose strong { font-weight: 600; color: var(--text); }
+.prose del { color: var(--muted); }
+.prose h3, .prose h4, .prose h5, .prose h6 { margin: 0.9em 0 0.35em; line-height: 1.35; font-weight: 600; }
+.prose h3 { font-size: 1.12em; }
+.prose h4 { font-size: 1.02em; }
+.prose h5, .prose h6 { font-size: 0.95em; color: var(--text-2); }
+.prose > :first-child { margin-top: 0; }
+.prose blockquote { margin: 0.4em 0 0.8em; padding: 0.1em 0 0.1em 0.9em; border-left: 3px solid var(--border-strong); color: var(--text-2); }
+.prose hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
+.prose a { color: var(--link); }
+.prose-table { overflow-x: auto; margin: 0.4em 0 0.8em; }
+.prose-table table { border-collapse: collapse; font-size: 13px; }
+.prose-table th, .prose-table td { border: 1px solid var(--border); padding: 4px 10px; }
+.prose-table th { background: color-mix(in srgb, var(--text) 4%, transparent); font-weight: 600; }
