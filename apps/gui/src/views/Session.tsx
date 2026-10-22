@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { Capabilities } from "@bindings/Capabilities";
 import type { Run } from "@bindings/Run";
@@ -7,7 +7,7 @@ import type { TranscriptUsage } from "@bindings/TranscriptUsage";
 import { view } from "../activity";
 import { api, errorText } from "../api";
 import { ACTIVE_RUN, useRunTree } from "../App";
-import { Avatar, ErrorBox, Icon, Mark, Prose, StatusChip, agentTitle, agentTone, displayName, roleShape, time, useAgents } from "../components";
+import { Avatar, ErrorBox, Icon, Mark, Prose, StatusChip, Vendor, agentTitle, agentTone, displayName, roleShape, time, useAgents, vendorName } from "../components";
 import { diffStat, parseDiff, tailLines, type DiffFile } from "../lib/diff";
 import { taskState } from "../lib/taskState";
 import { duration, failed, liveActivity, stepLine, summarize, workGroups, type Step } from "../lib/workGroups";
@@ -123,9 +123,8 @@ function Header({
           <Mark shape={roleShape(agent.role)} tone={agentTone(agent.status)} size={9} />
           {agent.role}
         </span>
-        <span className="chip hide-narrow" title={driver ? `driver: ${driver}` : undefined}>
-          {agent.plugin}
-          {agent.model ? ` · ${agent.model}` : ""}
+        <span className="chip hide-narrow">
+          <Vendor plugin={agent.plugin} model={agent.model} title={driver ? `${vendorName(agent.plugin)} · driver: ${driver}` : undefined} />
         </span>
         {tasks.map(({ run, task }) => (
           <a key={task.id} className="chip" href={`#/runs/${run.id}/tasks/${task.id}`} title={`${task.title} · ${run.title}`}>
@@ -225,9 +224,11 @@ function Conversation({ agent, turns, agents, tree, children }: { agent: Agent; 
             </p>
           </div>
         )}
-        {turns.map((turn) => (
-          <Turn key={turn.message_id} turn={turn} agent={agent} agents={agents} tree={tree} />
-        ))}
+        <CwdContext.Provider value={agent.cwd}>
+          {turns.map((turn) => (
+            <Turn key={turn.message_id} turn={turn} agent={agent} agents={agents} tree={tree} />
+          ))}
+        </CwdContext.Provider>
         {children}
       </div>
     </div>
@@ -370,6 +371,9 @@ const LIVE_LINES = 4;
 /** Output lines shown when a step is opened. */
 const OPEN_LINES = 400;
 
+/** The session's working directory, for shortening paths in tool lines. */
+const CwdContext = createContext<string | undefined>(undefined);
+
 /** One tool call; a click opens what it did (output, exit code, diffs, arguments). */
 function ToolStep({ step }: { step: ToolCall }) {
   const [open, setOpen] = useState(false);
@@ -380,11 +384,12 @@ function ToolStep({ step }: { step: ToolCall }) {
   const live = running && step.output ? tailLines(step.output, LIVE_LINES) : undefined;
   const more = !!(d || step.output);
   const changes = d ? d.changes.flatMap((c) => parseDiff(c.diff, c.path)) : [];
+  const cwd = useContext(CwdContext);
   return (
     <div className="tool-step">
       <button className="tool" onClick={() => more && setOpen(!open)} aria-expanded={more ? open : undefined} disabled={!more} title={step.title}>
         <span className={`dot ${tone}`} />
-        <span className="title">{stepLine(step)}</span>
+        <span className="title">{stepLine(step, cwd)}</span>
         {code != null && code !== 0 && <span className="chip danger tiny">退出 {code}</span>}
         {d?.duration_ms != null && <span className="muted tiny">{took(d.duration_ms)}</span>}
         {changes.length > 0 && <ChangeStat files={changes} />}
@@ -721,7 +726,9 @@ function Composer({
           placeholder={running ? `${displayName(agent)} 正在工作，新消息会排在本轮之后` : `给 ${displayName(agent)} 发消息`}
         />
         <div className="bar">
-          <span className="chip">{agent.model ?? agent.plugin}</span>
+          <span className="chip">
+            <Vendor plugin={agent.plugin} model={agent.model} />
+          </span>
           {capabilities?.resume && <span className="chip" title="会话可挂起后恢复">resumable</span>}
           <div className="spacer" />
           {canInterrupt && (

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { TranscriptItem } from "@bindings/TranscriptItem";
-import { duration, liveActivity, stepLine, summarize, workGroups, type Step } from "./workGroups.ts";
+import { duration, liveActivity, relativeTo, stepLine, summarize, workGroups, type Step } from "./workGroups.ts";
 
 const tool = (kind: string, status: "in_progress" | "completed" | "failed" = "completed", title = kind): TranscriptItem => ({
   type: "tool_call",
@@ -53,4 +53,14 @@ test("step lines and durations", () => {
   assert.equal(duration(42_000), "42s");
   assert.equal(duration(185_000), "3m 05s");
   assert.equal(duration(3_720_000), "1h 02m");
+});
+
+test("paths inside the working directory are shortened", () => {
+  const cwd = "C:\\Users\\x\\repo";
+  assert.equal(relativeTo("Read C:\\Users\\x\\repo\\README.md", cwd), "Read README.md");
+  assert.equal(relativeTo('git -C "c:/users/x/repo/sub" diff', cwd), 'git -C "sub" diff');
+  assert.equal(relativeTo("Read /w/a/b.rs", "/w/a/"), "Read b.rs");
+  assert.equal(relativeTo("Read /w/ab/c.rs", "/w/a"), "Read /w/ab/c.rs");
+  assert.equal(relativeTo('git -C "C:/Users/x/repo" diff', cwd), 'git -C "." diff');
+  assert.equal(stepLine(tool("edit", "completed", "Write /w/a/n.txt") as never, "/w/a"), "✎ n.txt");
 });

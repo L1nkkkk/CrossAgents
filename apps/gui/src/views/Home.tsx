@@ -2,7 +2,7 @@ import { useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { Agent } from "@bindings/Agent";
 import { api, errorText } from "../api";
 import { navigate, useRunTree } from "../App";
-import { Avatar, ErrorBox, Field, Icon, agentTitle, displayName, useAgents } from "../components";
+import { Avatar, ErrorBox, Field, Icon, Vendor, agentTitle, displayName, useAgents } from "../components";
 import { PRESETS, presetPolicy, type Preset } from "../lib/policy";
 import { QuestionCards } from "../questions";
 import { useSelectedWorkspace, useWorkspaces, wsHref, wsKey } from "../workspace";
@@ -178,7 +178,7 @@ export function HomeView() {
                     <span className="mate-who">
                       <span className="mate-name">{displayName(a)}</span>
                       <span className="mate-title">
-                        {agentTitle(a)} · {a.model ?? a.plugin}
+                        {agentTitle(a)} · <Vendor plugin={a.plugin} model={a.model} />
                       </span>
                     </span>
                   </button>

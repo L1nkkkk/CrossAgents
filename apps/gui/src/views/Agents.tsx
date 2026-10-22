@@ -12,6 +12,7 @@ import {
   PERSONA_PRESETS,
   Prose,
   StatusChip,
+  Vendor,
   agentTitle,
   agentTone,
   displayName,
@@ -121,10 +122,7 @@ function MemberCard({ agent, onEdit, onConnect }: { agent: Agent; onEdit: () => 
             run 招募
           </a>
         )}
-        <span className="chip" title={agent.driver ?? undefined}>
-          {agent.plugin}
-          {agent.model ? ` · ${agent.model}` : ""}
-        </span>
+        <Vendor plugin={agent.plugin} model={agent.model} title={agent.driver ?? undefined} />
         <span className="mono small muted member-addr" title={agent.cwd}>
           @{agent.name}
         </span>
@@ -226,7 +224,7 @@ function Editor({ agent, onDone }: { agent?: Agent; onDone: (created?: Agent) =>
         <div className="presets">
           {PERSONA_PRESETS.map((p) => (
             <button type="button" key={p.key} className={`preset ${preset === p.key ? "on" : ""}`} onClick={() => applyPreset(p.key)}>
-              <span className="preset-emoji">{p.avatar}</span>
+              <span className={`preset-dot av-${p.color}`} />
               {p.label}
             </button>
           ))}

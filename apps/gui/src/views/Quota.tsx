@@ -8,7 +8,7 @@ import type { AccountUsageGroup } from "@bindings/AccountUsageGroup";
 import type { RateWindow } from "@bindings/RateWindow";
 import type { ResetCredit } from "@bindings/ResetCredit";
 import { api, errorText } from "../api";
-import { ErrorBox, Field, ago } from "../components";
+import { ErrorBox, Field, VendorMark, ago, vendorName } from "../components";
 import { useHubData } from "../hub";
 import { creditText, level, planLabel, resetText, windowLabel } from "../lib/quota";
 import { useArmed } from "../parts";
@@ -74,7 +74,10 @@ function AccountBlock({ quota, onChange }: { quota: AccountQuota; onChange: () =
   return (
     <div className="account">
       <div className="account-head">
-        <span className="provider">{account.provider}</span>
+        <span className="provider">
+          <VendorMark plugin={account.provider} size={13} />
+          {vendorName(account.provider)}
+        </span>
         <span className="account-name">{account.label || account.id}</span>
         {plan && <span className="chip">{plan}</span>}
         {status.email && <span className="muted small">{status.email}</span>}
