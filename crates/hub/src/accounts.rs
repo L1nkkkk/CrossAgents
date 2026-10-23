@@ -1,6 +1,6 @@
 //! Account management (docs/tasks/M5.md): accounts, live status, token usage and login.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -21,6 +21,12 @@ use tokio::sync::{Mutex, mpsc};
 
 const ORIGIN_CROSSAGENTS: &str = "crossagents";
 const LOGIN_URL_WAIT: Duration = Duration::from_secs(20);
+/// How long a login served as a local page may take to start answering.
+const SERVE_READY_WAIT: Duration = Duration::from_secs(30);
+/// How often the account is read while its login page is up.
+const SERVE_LOGIN_POLL: Duration = Duration::from_secs(3);
+/// When a login page nobody finishes is closed.
+const SERVE_LOGIN_LIMIT: Duration = Duration::from_secs(15 * 60);
 /// A status older than this is refreshed in the background while it is still served.
 const STATUS_TTL: Duration = Duration::from_secs(60);
 
@@ -386,9 +392,12 @@ impl Accounts {
         if let Some(mut old) = self.logins.lock().await.remove(id) {
             let _ = old.start_kill();
         }
-        let mut child = tokio::process::Command::new(resolve_program(program))
-            .args(args)
-            .no_window()
+        let mut command = tokio::process::Command::new(resolve_program(program));
+        command.args(args).no_window();
+        for key in &login.env_remove {
+            command.env_remove(key);
+        }
+        let mut child = command
             .envs(&login.env)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -396,33 +405,12 @@ impl Accounts {
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| CoreError::Agent(format!("cannot start `{display}`: {e}")))?;
-
-        // Scan both streams for the first URL; keep the tail for error reports.
-        let (lines_tx, mut lines_rx) = mpsc::unbounded_channel::<String>();
-        for stream in [
-            child
-                .stdout
-                .take()
-                .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
-            child
-                .stderr
-                .take()
-                .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let tx = lines_tx.clone();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stream).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    if tx.send(line).is_err() {
-                        break;
-                    }
-                }
-            });
+        let mut lines_rx = output_lines(&mut child);
+        if let Some(page) = login.serves {
+            return self
+                .serve_login(account, provider.clone(), child, lines_rx, page, display)
+                .await;
         }
-        drop(lines_tx);
         self.logins.lock().await.insert(id.to_owned(), child);
 
         let mut url = None;
@@ -478,6 +466,118 @@ impl Accounts {
         });
         Ok(LoginStarted {
             url,
+            command: display,
+            manual: None,
+        })
+    }
+
+    /// A login whose tool serves its page locally ([`LoginCommand::serves`]): waits until
+    /// the page answers and returns it, then watches the account in the background and
+    /// stops the server once it reports the login, the server stops, or
+    /// [`SERVE_LOGIN_LIMIT`] passes. Logging in again an account that already is logged in
+    /// counts as done once a read sees it logged out and then in, else at the limit.
+    async fn serve_login(
+        &self,
+        account: Account,
+        provider: Arc<dyn AccountProvider>,
+        mut child: tokio::process::Child,
+        lines: mpsc::UnboundedReceiver<String>,
+        page: String,
+        display: String,
+    ) -> Result<LoginStarted, CoreError> {
+        let id = account.id.clone();
+        let tail = keep_tail(lines);
+        let address = page_address(&page);
+        let deadline = Instant::now() + SERVE_READY_WAIT;
+        loop {
+            match &address {
+                Some(at) if tokio::net::TcpStream::connect(at.as_str()).await.is_ok() => break,
+                None => break,
+                Some(_) => {}
+            }
+            if let Ok(Some(exit)) = child.try_wait() {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                return Err(CoreError::Agent(format!(
+                    "`{display}` stopped ({exit}) before serving its login page{}",
+                    tail_text(&tail)
+                )));
+            }
+            if Instant::now() >= deadline {
+                let _ = child.start_kill();
+                return Err(CoreError::Agent(format!(
+                    "`{display}` did not serve its login page within {} s{}",
+                    SERVE_READY_WAIT.as_secs(),
+                    tail_text(&tail)
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        let was_logged_in = self
+            .statuses
+            .lock()
+            .unwrap()
+            .get(&id)
+            .is_some_and(|(_, status)| status.logged_in);
+        let pid = child.id();
+        self.logins.lock().await.insert(id.clone(), child);
+        self.bus
+            .publish(EventKind::AccountLoginPending {
+                id: id.clone(),
+                url: Some(page.clone()),
+            })
+            .await?;
+
+        let bus = self.bus.clone();
+        let logins = self.logins.clone();
+        let statuses = self.statuses.clone();
+        let shown = display.clone();
+        tokio::spawn(async move {
+            let started = Instant::now();
+            let mut seen_logged_out = !was_logged_in;
+            let (status, stopped) = loop {
+                tokio::time::sleep(SERVE_LOGIN_POLL).await;
+                let stopped = {
+                    let mut logins = logins.lock().await;
+                    let Some(child) = logins.get_mut(&id).filter(|child| child.id() == pid) else {
+                        return; // replaced or cancelled
+                    };
+                    let stopped = child.try_wait().ok().flatten();
+                    if stopped.is_some() {
+                        logins.remove(&id);
+                    }
+                    stopped
+                };
+                provider.forget_status(&account);
+                let status = provider.status(&account).await;
+                seen_logged_out |= !status.logged_in;
+                let done = status.logged_in && seen_logged_out;
+                if done || stopped.is_some() || started.elapsed() >= SERVE_LOGIN_LIMIT {
+                    break (status, stopped);
+                }
+            };
+            {
+                let mut logins = logins.lock().await;
+                if logins.get(&id).is_some_and(|child| child.id() == pid)
+                    && let Some(mut child) = logins.remove(&id)
+                {
+                    let _ = child.start_kill();
+                }
+            }
+            record_status(&statuses, &id, status.clone());
+            let ok = status.logged_in;
+            let message = (!ok).then(|| match stopped {
+                Some(exit) => format!("`{shown}` stopped ({exit}){}", tail_text(&tail)),
+                None => format!(
+                    "not logged in after {} minutes; the login page was closed",
+                    SERVE_LOGIN_LIMIT.as_secs() / 60
+                ),
+            });
+            let _ = bus
+                .publish(EventKind::AccountLoginFinished { id, ok, message })
+                .await;
+        });
+        Ok(LoginStarted {
+            url: Some(page),
             command: display,
             manual: None,
         })
@@ -668,6 +768,71 @@ async fn session_owners(store: &dyn Store) -> Result<HashMap<String, Owner>, Cor
         .collect())
 }
 
+/// The lines a login tool writes to either stream, in arrival order.
+fn output_lines(child: &mut tokio::process::Child) -> mpsc::UnboundedReceiver<String> {
+    let (lines_tx, lines_rx) = mpsc::unbounded_channel::<String>();
+    for stream in [
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let tx = lines_tx.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stream).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    lines_rx
+}
+
+type Tail = Arc<std::sync::Mutex<VecDeque<String>>>;
+
+/// Reads `lines` to the end in the background (so the tool never blocks on a full pipe),
+/// keeping the last few for error reports.
+fn keep_tail(mut lines: mpsc::UnboundedReceiver<String>) -> Tail {
+    let tail = Tail::default();
+    let kept = tail.clone();
+    tokio::spawn(async move {
+        while let Some(line) = lines.recv().await {
+            let mut kept = kept.lock().unwrap();
+            if kept.len() == 5 {
+                kept.pop_front();
+            }
+            kept.push_back(line);
+        }
+    });
+    tail
+}
+
+/// `:\n<last lines>`, or nothing when the tool said nothing.
+fn tail_text(tail: &Tail) -> String {
+    let tail = tail.lock().unwrap();
+    if tail.is_empty() {
+        String::new()
+    } else {
+        format!(":\n{}", tail.iter().cloned().collect::<Vec<_>>().join("\n"))
+    }
+}
+
+/// `host:port` of an `http://` page, to see whether it answers yet.
+fn page_address(page: &str) -> Option<String> {
+    let rest = page.strip_prefix("http://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    authority.contains(':').then(|| authority.to_owned())
+}
+
 /// The first https URL in a line of tool output. Plain http links are local callback
 /// servers (e.g. `http://localhost:1455`), not the page to open.
 fn find_url(line: &str) -> Option<String> {
@@ -772,5 +937,19 @@ mod tests {
             Some("https://x.test/a")
         );
         assert!(find_url("no link here").is_none());
+    }
+
+    #[test]
+    fn a_served_login_page_is_reached_at_its_host_and_port() {
+        assert_eq!(
+            page_address("http://localhost:8322/").as_deref(),
+            Some("localhost:8322")
+        );
+        assert_eq!(
+            page_address("http://127.0.0.1:9000/login?x=1").as_deref(),
+            Some("127.0.0.1:9000")
+        );
+        assert!(page_address("https://x.test/").is_none());
+        assert!(page_address("http://localhost/").is_none());
     }
 }

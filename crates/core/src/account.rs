@@ -178,6 +178,14 @@ pub struct ModelInfo {
 pub struct LoginCommand {
     pub command: Vec<String>,
     pub env: BTreeMap<String, String>,
+    /// Inherited variables the login tool must not see.
+    #[serde(default)]
+    pub env_remove: Vec<String>,
+    /// Set when the command is a local server whose page carries the login, known before
+    /// it starts. Such a server does not exit on its own: the hub opens this page, watches
+    /// the account and stops the server once the login is done.
+    #[serde(default)]
+    pub serves: Option<String>,
 }
 
 /// One vendor's accounts (docs/tasks/M5.md §3).
@@ -201,6 +209,9 @@ pub trait AccountProvider: Send + Sync {
     fn manual_login(&self, _account: &Account) -> Option<Vec<String>> {
         None
     }
+    /// Drops any status kept for this account, so the next [`Self::status`] asks the
+    /// vendor (used while a login is being watched).
+    fn forget_status(&self, _account: &Account) {}
     /// Environment for an agent process that uses this account.
     fn agent_env(&self, account: &Account) -> Vec<(String, String)>;
 }

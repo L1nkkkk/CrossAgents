@@ -318,6 +318,8 @@ impl AccountProvider for ClaudeAccounts {
                 .into_iter()
                 .chain(self.env_for(account))
                 .collect::<BTreeMap<_, _>>(),
+            env_remove: Vec::new(),
+            serves: None,
         }
     }
 

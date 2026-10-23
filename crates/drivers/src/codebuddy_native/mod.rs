@@ -259,6 +259,27 @@ pub fn default_home() -> Option<PathBuf> {
     Some(PathBuf::from(user).join(".codebuddy"))
 }
 
+/// The inherited variables a CodeBuddy process is started without (see
+/// [`Flavor::withholds`]), for processes this module does not start itself.
+pub fn withheld_env() -> Vec<String> {
+    std::env::vars_os()
+        .map(|(key, _)| key.to_string_lossy().into_owned())
+        .filter(|key| Flavor::Codebuddy.withholds(key))
+        .collect()
+}
+
+/// The arguments that make the CLI serve its web UI on `port` of this machine without a
+/// password. The UI carries the login (the CLI itself logs in only inside its TUI).
+pub fn serve_args(port: u16) -> Vec<String> {
+    vec![
+        "--serve".into(),
+        "--port".into(),
+        port.to_string(),
+        "--auth".into(),
+        "none".into(),
+    ]
+}
+
 /// Asks the CLI who is signed in, without starting a session: its `initialize` answer,
 /// which carries `account` (null when signed out) and `models`. `command` launches the CLI;
 /// `env` is added to what it inherits, of which the enclosing session's `CODEBUDDY_*` is

@@ -2,8 +2,9 @@
 //! `AppData`, shared with the CodeBuddy IDE extension), so the account is that login;
 //! `CODEBUDDY_CONFIG_DIR` (the default is `~/.codebuddy`) only moves settings and
 //! transcripts. Login state and models come from the CLI's `initialize` answer, token use
-//! from its transcripts under `projects/`. CodeBuddy reports no plan or quota, and logs in
-//! only from inside its interactive CLI (`/login`), so the login is shown, not run.
+//! from its transcripts under `projects/`. CodeBuddy reports no plan or quota. Its CLI logs
+//! in only inside its TUI, so a login serves the CLI's web UI locally (`--serve`) and the
+//! login is done on that page.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader};
@@ -18,6 +19,7 @@ use crossagents_core::{
     SessionUsage, TokenTotals,
 };
 use crossagents_drivers::codebuddy_native;
+use crossagents_drivers::process::system_proxy_env;
 use serde_json::Value;
 
 /// The CLI is asked at most this often per account.
@@ -156,6 +158,12 @@ fn models_of(init: &Value) -> Vec<ModelInfo> {
 fn same_path(a: &Path, b: &Path) -> bool {
     let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     canon(a) == canon(b)
+}
+
+/// A port of this machine nobody listens on right now.
+fn free_port() -> Option<u16> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
+    Some(listener.local_addr().ok()?.port())
 }
 
 /// Transcripts: `projects/<directory>/<session id>.jsonl`.
@@ -306,22 +314,29 @@ impl AccountProvider for CodebuddyAccounts {
             .unwrap_or_default()
     }
 
-    /// The interactive CLI, where `/login` is typed; [`Self::manual_login`] says so.
+    /// The CLI's web UI, served on a free local port: the CLI itself logs in only inside
+    /// its TUI, whose menu and login link do not survive being driven through a pipe. The
+    /// hub stops the server once the account reports the login.
     fn login_command(&self, account: &Account) -> LoginCommand {
+        let port = free_port().unwrap_or(8322);
+        let mut command = self
+            .command
+            .clone()
+            .unwrap_or_else(|| vec!["codebuddy".into()]);
+        command.extend(codebuddy_native::serve_args(port));
         LoginCommand {
-            command: self
-                .command
-                .clone()
-                .unwrap_or_else(|| vec!["codebuddy".into()]),
-            env: self
-                .env_for(account)
+            command,
+            env: system_proxy_env()
                 .into_iter()
+                .chain(self.env_for(account))
                 .collect::<BTreeMap<_, _>>(),
+            env_remove: codebuddy_native::withheld_env(),
+            serves: Some(format!("http://localhost:{port}/")),
         }
     }
 
-    fn manual_login(&self, _account: &Account) -> Option<Vec<String>> {
-        Some(vec!["codebuddy".into(), "/login".into()])
+    fn forget_status(&self, account: &Account) {
+        self.live.lock().unwrap().remove(&account.home);
     }
 
     fn agent_env(&self, account: &Account) -> Vec<(String, String)> {
@@ -433,9 +448,20 @@ mod tests {
                 other.home.display().to_string()
             )]
         );
+        assert!(accounts.manual_login(&other).is_none());
+        let login = accounts.login_command(&other);
+        let page = login.serves.expect("a login page");
+        let port = login
+            .command
+            .iter()
+            .skip_while(|a| *a != "--port")
+            .nth(1)
+            .expect("a port");
+        assert_eq!(page, format!("http://localhost:{port}/"));
+        assert!(login.command.starts_with(&["codebuddy".to_owned(), "--serve".to_owned()]));
         assert_eq!(
-            accounts.manual_login(&other).unwrap(),
-            ["codebuddy", "/login"]
+            login.env.get("CODEBUDDY_CONFIG_DIR"),
+            Some(&other.home.display().to_string())
         );
     }
 }

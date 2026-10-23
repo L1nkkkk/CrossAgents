@@ -2,7 +2,7 @@
 // account, a bar per rate-limit window with "N% 已用" and when it resets. Vendor-neutral: every
 // provider's AccountStatus renders the same way.
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { AccountQuota } from "@bindings/AccountQuota";
 import type { AccountUsageGroup } from "@bindings/AccountUsageGroup";
 import type { LoginStarted } from "@bindings/LoginStarted";
@@ -90,6 +90,12 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
   const levels = windows.map((w) => level(w.used_percent, status.limit_reached && w.used_percent >= 100));
   const worst: Level | undefined = levels.includes("danger") ? "danger" : levels.includes("warn") ? "warn" : levels.length ? "ok" : undefined;
 
+  // The login notice goes once the account turns logged in.
+  const wasLoggedIn = useRef(status.logged_in);
+  useEffect(() => {
+    if (status.logged_in && !wasLoggedIn.current) setLogin(undefined);
+    wasLoggedIn.current = status.logged_in;
+  }, [status.logged_in]);
   async function startLogin() {
     setError(undefined);
     try {
@@ -175,6 +181,7 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
               <a href={login.url} target="_blank" rel="noreferrer">
                 打开登录页
               </a>
+              ，登录好后这里会自动变成已登录。
             </>
           ) : (
             <>登录工具已启动（{login.command}），按它的提示完成。</>
