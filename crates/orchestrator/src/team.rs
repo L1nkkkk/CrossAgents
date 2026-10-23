@@ -210,7 +210,7 @@ impl Orchestrator {
             let plugin = a.plugin.clone().unwrap_or_else(|| caller.plugin.clone());
             if self.host.available_models(&plugin).await?.is_empty() {
                 return Err(CoreError::Conflict(format!(
-                    "not recruited: there is no logged-in {plugin} account, so no {plugin} agent can run; tell the person, or recruit with a plugin that has one"
+                    "not recruited: no {plugin} agent can run here (its CLI is not installed, or no {plugin} account is logged in); tell the person, or recruit with a plugin that has one"
                 )));
             }
             let model = (plugin == caller.plugin)

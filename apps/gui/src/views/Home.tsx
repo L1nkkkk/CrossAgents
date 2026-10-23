@@ -204,22 +204,44 @@ export function HomeView() {
     });
   }
 
+  /**
+   * A message starting with `@<model>` (a model a login offers) is a chat on that model, the
+   * name taken off the message: "@hy4-preview 你好" talks to Hy4 Preview, it does not ask
+   * another model to recruit it.
+   */
+  function leadingModel(text: string): { choice: Choice; rest: string } | undefined {
+    const m = /^@(\S+)\s*/.exec(text);
+    if (!m) return undefined;
+    const wanted = m[1].toLowerCase();
+    for (const p of offered) {
+      const model = p.models.find((x) => x.toLowerCase() === wanted);
+      if (!model) continue;
+      // The login picked in the composer when it is the same vendor, else the default one.
+      const account = chatModel?.plugin === p.name ? chatModel.account : undefined;
+      return { choice: { plugin: p.name, model, ...(account ? { account } : {}) }, rest: text.slice(m[0].length).trim() };
+    }
+    return undefined;
+  }
+
   /** A chat is a new agent (named by the hub, the conversation titled by the message) and its first message. */
   async function startChat() {
     if (!ready || !chatModel) return;
     setBusy(true);
     setError(undefined);
     try {
-      const text = request.trim();
+      const typed = request.trim();
+      const lead = leadingModel(typed);
+      const choice = lead?.choice ?? chatModel;
+      const text = lead?.rest || typed;
       const agent = await api.createAgent({
         topic: chatTitle(text, 60),
-        plugin: chatModel.plugin,
+        plugin: choice.plugin,
         driver: null,
-        model: chatModel.model,
+        model: choice.model,
         role: "worker",
         // No project: the hub gives the chat its own directory.
         cwd: cwd ?? "",
-        config: configFor(chatModel, effort),
+        config: configFor(choice, lead && lead.choice.plugin !== chatModel.plugin ? undefined : effort),
         profile: { display_name: null, title: null, avatar: null, color: null, persona: null },
       });
       await api.sendMessage(agent.id, { text });

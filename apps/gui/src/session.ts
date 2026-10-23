@@ -183,7 +183,7 @@ export function applyEvent(t: Transcript, event: HubEvent): Transcript {
     case "agent.error": {
       if (event.data.id !== id) return t;
       const message = event.data.message;
-      return withActive(t, seq, (items) => [...items, { type: "error", message }]);
+      return { ...withActive(t, seq, (items) => [...items, { type: "error", message }]), error: message };
     }
     case "agent.usage": {
       if (event.data.id !== id) return t;

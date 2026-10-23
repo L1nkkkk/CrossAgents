@@ -89,6 +89,10 @@ impl Driver for CodebuddyNativeDriver {
         self.inner.models()
     }
 
+    fn installed(&self) -> bool {
+        !self.missing
+    }
+
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError> {
         self.check(&spec)?;
         self.inner.open(spec).await

@@ -38,6 +38,11 @@ switches: Array<ModelSwitch>,
  */
 conversation_cost_usd?: number, 
 /**
+ * Why the agent is in error (its latest `agent.error`), while it is; also when it failed
+ * before any turn, e.g. because its CLI could not be started.
+ */
+error?: string, 
+/**
  * The last event folded in; follow `GET /v1/events?agent=…&since=<last_seq>` from here.
  */
 last_seq: number, };

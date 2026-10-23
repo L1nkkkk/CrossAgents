@@ -148,6 +148,11 @@ pub struct Transcript {
     #[serde(default)]
     #[ts(optional)]
     pub conversation_cost_usd: Option<f64>,
+    /// Why the agent is in error (its latest `agent.error`), while it is; also when it failed
+    /// before any turn, e.g. because its CLI could not be started.
+    #[serde(default)]
+    #[ts(optional)]
+    pub error: Option<String>,
     /// The last event folded in; follow `GET /v1/events?agent=…&since=<last_seq>` from here.
     #[ts(type = "number")]
     pub last_seq: u64,

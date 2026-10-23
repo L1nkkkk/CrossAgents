@@ -477,6 +477,11 @@ pub trait Driver: Send + Sync {
     fn capabilities(&self) -> Capabilities;
     /// Models this Profile knows about, for display and validation hints.
     fn models(&self) -> Vec<String>;
+    /// Whether the program it launches can be found on this machine. A Profile that is not
+    /// installed offers no models, so nothing is started on it only to fail.
+    fn installed(&self) -> bool {
+        true
+    }
     /// Opens a new session.
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError>;
     /// Reopens a suspended session by the id it reported in

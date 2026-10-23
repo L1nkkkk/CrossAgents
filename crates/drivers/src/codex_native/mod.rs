@@ -148,6 +148,10 @@ impl Driver for CodexNativeDriver {
         self.models.clone()
     }
 
+    fn installed(&self) -> bool {
+        locate_codex(&self.command[0]).is_file()
+    }
+
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError> {
         let server = self.server_for(&spec).await?;
         let settings = settings_for(&spec);

@@ -11,6 +11,7 @@ import { ACTIVE_RUN, useRunTree } from "../App";
 import { Avatar, ErrorBox, Icon, Mark, Prose, StatusChip, Vendor, agentTitle, agentTone, displayName, roleShape, time, useAgents, vendorName } from "../components";
 import { ChangeStat, DiffView } from "../diffview";
 import { parseDiff, tailLines, type DiffFile } from "../lib/diff";
+import { errorHint } from "../lib/errors";
 import { effortLabel, prettyModel } from "../lib/models";
 import { clock, range } from "../lib/time";
 import { ModelEffortPicks } from "../modelPick";
@@ -104,6 +105,12 @@ export function SessionView({ name, onClose }: { name: string; onClose?: () => v
         {!onClose && <NeedsYouStrip agents={everyone} tree={runs} />}
         <RunStrip runs={liveRuns} agents={everyone} />
         <QueuePanel agent={agent} queued={queued} onEdit={setDraft} />
+        {agent.status === "error" && transcript.error && (
+          <div className="error-bar" role="alert" title={transcript.error}>
+            <strong>{errorHint(transcript.error)}</strong>
+            <span className="mono small">{transcript.error}</span>
+          </div>
+        )}
         {agent.archived_at ? (
           <div className="archived-bar">
             <Icon name="archive" size={14} />

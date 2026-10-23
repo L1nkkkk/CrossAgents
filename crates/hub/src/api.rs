@@ -420,6 +420,7 @@ async fn transcript(
         .iter()
         .any(Option::is_some)
         .then(|| costs.iter().flatten().sum());
+    let error = (agent.status == crossagents_core::AgentStatus::Error).then_some(fold.last_error).flatten();
     Ok(Json(Transcript {
         agent,
         driver: resolved.as_ref().map(|r| r.driver.kind()),
@@ -428,6 +429,7 @@ async fn transcript(
         usage: fold.usage,
         switches: fold.switches,
         conversation_cost_usd,
+        error,
         last_seq: head.max(fold.last_seq),
     }))
 }
@@ -695,9 +697,11 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
     let registry = state.runtime.plugins();
     let name = d.name();
     let all = crate::models::available(registry, &state.accounts, name).await;
+    // A CLI this machine does not have runs nothing: offer none of its models.
+    let models = if d.installed() { state.models.filter(name, all.clone()) } else { Vec::new() };
     PluginInfo {
         name: name.to_owned(),
-        models: state.models.filter(name, all.clone()),
+        models,
         all_models: all,
         shown: state.models.shown(name),
         models_pinned: registry.models_pinned(name),

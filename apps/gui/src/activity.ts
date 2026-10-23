@@ -17,6 +17,8 @@ export type Unread = { kind: "done" | "error"; at: string };
 const UNREAD_KEY = "crossagents.unread";
 const listeners = new Set<() => void>();
 const activity = new Map<string, string>();
+/** Each agent's latest `agent.error` since the page loaded. */
+const errors = new Map<string, string>();
 const fromHuman = new Set<string>(); // message ids of messages a person sent
 let unread: Record<string, Unread> = load();
 let viewing: string[] = [];
@@ -73,6 +75,9 @@ export function startActivity() {
         save();
         return changed();
       }
+      case "agent.error":
+        errors.set(e.data.id, e.data.message);
+        return changed();
       case "agent.removed":
         activity.delete(e.data.id);
         if (unread[e.data.id]) markSeen(e.data.id);
@@ -107,5 +112,7 @@ function subscribe(l: () => void) {
 }
 
 export const useActivity = (agentId: string) => useSyncExternalStore(subscribe, () => activity.get(agentId));
+/** The agent's latest error seen on the stream, if any. */
+export const lastError = (agentId: string) => errors.get(agentId);
 export const useUnread = () => useSyncExternalStore(subscribe, () => unread);
 export const useViewing = () => useSyncExternalStore(subscribe, () => viewing);

@@ -16,6 +16,8 @@ pub struct Fold {
     pub last_seq: u64,
     /// Each turn's latest unified diff; the transcript carries only its stat.
     pub diffs: HashMap<MessageId, String>,
+    /// The latest `agent.error`, inside a turn or not.
+    pub last_error: Option<String>,
     /// The turn the agent is working on.
     current: Option<MessageId>,
 }
@@ -197,6 +199,7 @@ impl Fold {
                 }
             }
             EventKind::AgentError { message, .. } => {
+                self.last_error = Some(message.clone());
                 if let Some(items) = self.active_items() {
                     items.push(TranscriptItem::Error {
                         message: message.clone(),

@@ -137,6 +137,12 @@ impl Driver for ClaudeNativeDriver {
         self.models.clone()
     }
 
+    fn installed(&self) -> bool {
+        let program = &self.command[0];
+        let found = if self.flavor == Flavor::Claude { locate_claude(program) } else { find_in_path(program) };
+        found.is_file()
+    }
+
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError> {
         Ok(Box::new(self.start(spec, Start::New(new_id())).await?))
     }

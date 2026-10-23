@@ -417,6 +417,14 @@ a.chip:hover { text-decoration: none; background: var(--selected); }
 .composer-hint { max-width: 780px; margin: 6px auto 0; font-size: 11.5px; color: var(--muted); text-align: center; }
 /* @ in a composer (src/mention.tsx): the menu opens above the box, from its left edge. */
 .mention-menu { left: 10px; min-width: 280px; }
+/* Why a conversation is in error, above its composer. */
+.error-bar {
+  max-width: 780px; margin: 0 auto 8px; padding: 8px 12px; border-radius: var(--radius-lg);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent); background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--text);
+}
+.error-bar .mono { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.need-why { margin-left: 4px; font-size: 11.5px; opacity: 0.85; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The avatar in a conversation header opens its card for editing. */
 .avatar-btn { border: none; background: none; padding: 0; border-radius: 999px; display: inline-grid; place-items: center; cursor: pointer; }
 .avatar-btn:hover, .avatar-btn.on { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent); }

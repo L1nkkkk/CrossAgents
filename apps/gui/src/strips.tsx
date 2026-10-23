@@ -4,8 +4,10 @@
 import { useEffect, useRef, useState } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { RunDetail } from "@bindings/RunDetail";
-import { markSeen, useUnread, useViewing } from "./activity";
+import { lastError, markSeen, useUnread, useViewing } from "./activity";
+import { api } from "./api";
 import { Avatar, displayName, sessionHref } from "./components";
+import { errorHint } from "./lib/errors";
 import { BUCKET_LABEL, groupTasks, progress, runState } from "./lib/taskState";
 import { t } from "./lib/i18n";
 import { StateWord, TaskCard } from "./parts";
@@ -105,6 +107,8 @@ export function NeedsYouStrip({ agents, tree }: { agents: Agent[]; tree: RunDeta
 }
 
 function NeedChip({ chip, onDismiss }: { chip: Chip; onDismiss: () => void }) {
+  const reason = useErrorReason(chip.tone === "danger" ? chip.agent : undefined);
+  const hint = reason ? errorHint(reason) : undefined;
   return (
     <span
       className={`need ${chip.tone}`}
@@ -112,16 +116,36 @@ function NeedChip({ chip, onDismiss }: { chip: Chip; onDismiss: () => void }) {
         if (e.button === 1) onDismiss();
       }}
     >
-      <a href={chip.href} title={`${displayName(chip.agent)} · ${chip.word}`}>
+      <a href={chip.href} title={`${displayName(chip.agent)} · ${chip.word}${reason ? `\n${reason}` : ""}`}>
         <Avatar agent={chip.agent} size={16} />
         <span className="need-name">{displayName(chip.agent)}</span>
         <span className="need-word">{chip.word}</span>
+        {hint && <span className="need-why">{hint}</span>}
       </a>
       <button className="need-x" onClick={onDismiss} aria-label={t("strip.dismiss", { name: displayName(chip.agent) })}>
         ×
       </button>
     </span>
   );
+}
+
+/** Why `agent` is in error: the latest error on the stream, else asked of the hub once. */
+function useErrorReason(agent: Agent | undefined): string | undefined {
+  const live = agent ? lastError(agent.id) : undefined;
+  const [fetched, setFetched] = useState<string>();
+  const id = agent?.id;
+  useEffect(() => {
+    if (!id || live) return;
+    let on = true;
+    api.transcript(id).then(
+      (t) => on && setFetched(t.error ?? undefined),
+      () => {},
+    );
+    return () => {
+      on = false;
+    };
+  }, [id, live]);
+  return live ?? fetched;
 }
 
 /** A label that opens a small menu above it; Esc or a click outside closes it. */

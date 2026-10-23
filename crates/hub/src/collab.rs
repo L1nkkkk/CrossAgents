@@ -218,6 +218,9 @@ impl AgentHost for HubHost {
         else {
             return Ok(Vec::new());
         };
+        if !driver.installed() {
+            return Ok(Vec::new());
+        }
         // A plugin without accounts (an ACP agent) runs whatever it lists.
         if !self.accounts.manages(plugin) {
             return Ok(self.models.filter(plugin, driver.models()));
