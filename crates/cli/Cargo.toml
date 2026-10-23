@@ -26,9 +26,6 @@ tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console"] }
-
 [dev-dependencies]
 assert_cmd.workspace = true
 tempfile.workspace = true

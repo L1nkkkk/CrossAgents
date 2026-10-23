@@ -25,6 +25,22 @@ fn config(paths: &Paths) -> HubConfig {
             ..PluginConfig::default()
         },
     );
+    // Claude Code and CodeBuddy speak the same stream-json protocol; the drivers differ in
+    // flags, environment and how they hand the process over.
+    for (plugin, driver) in [
+        ("claude", DriverKind::ClaudeNative),
+        ("codebuddy", DriverKind::CodebuddyNative),
+    ] {
+        config.plugins.insert(
+            plugin.into(),
+            PluginConfig {
+                driver: Some(driver),
+                native_command: vec![MOCK_AGENT.into(), "stream-json".into()],
+                models: vec![format!("mock-{plugin}")],
+                ..PluginConfig::default()
+            },
+        );
+    }
     // No collaboration tools: nothing here calls them.
     config.mcp_command = Some(Vec::new());
     config.runtime_host = Some(vec![
@@ -73,10 +89,14 @@ fn pid_in(output: &str) -> String {
 }
 
 async fn add_codex(t: &TestHub) {
+    add(t, "cx", "codex", "mock-codex").await;
+}
+
+async fn add(t: &TestHub, name: &str, plugin: &str, model: &str) {
     let resp = t
         .post(
             "/v1/agents",
-            json!({ "name": "cx", "plugin": "codex", "model": "mock-codex", "role": "worker",
+            json!({ "name": name, "plugin": plugin, "model": model, "role": "worker",
                     "cwd": t.home.path().display().to_string() }),
         )
         .await;
@@ -88,18 +108,37 @@ static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
 async fn a_restarted_hub_takes_over_running_agents() {
+    takes_over("codex", "mock-codex", "echo(model=mock-codex,effort=medium): [sleep 6000] long")
+        .await;
+}
+
+#[tokio::test]
+async fn a_restarted_hub_takes_over_claude_code() {
+    takes_over("claude", "mock-claude", "echo(model=mock-claude): [sleep 6000] long").await;
+}
+
+#[tokio::test]
+async fn a_restarted_hub_takes_over_codebuddy() {
+    takes_over("codebuddy", "mock-codebuddy", "echo(model=mock-codebuddy): [sleep 6000] long")
+        .await;
+}
+
+/// A hub stops while the agent's long turn runs; the next hub takes the process over, the
+/// turn ends there with the answer `echo`, and the same process serves the next turn.
+async fn takes_over(plugin: &str, model: &str, echo: &str) {
     let _serial = SERIAL.lock().await;
     let t = start(tempfile::tempdir().unwrap()).await;
-    add_codex(&t).await;
+    let name = "worker";
+    add(&t, name, plugin, model).await;
 
     let mut w = t.watch().await;
-    t.send("cx", "[pid]").await;
+    t.send(name, "[pid]").await;
     w.until("first turn", |e| matches!(e.kind, EventKind::AgentTurnCompleted { .. }))
         .await;
     let pid = pid_in(&w.output());
 
     // A long turn is running when the hub goes.
-    let sent = t.send("cx", "[sleep 6000] long").await;
+    let sent = t.send(name, "[sleep 6000] long").await;
     let long: crossagents_api_types::MessageId =
         serde_json::from_value(sent["message_id"].clone()).unwrap();
     w.until("long turn started", |e| {
@@ -111,12 +150,12 @@ async fn a_restarted_hub_takes_over_running_agents() {
     assert_eq!(
         crossagents_drivers::host::records(&runtimes).len(),
         1,
-        "the app-server's host keeps running"
+        "the {plugin} process's host keeps running"
     );
 
     // The next hub takes it over; the long turn ends there.
     let t = start(home).await;
-    let agent: Value = t.get("/v1/agents/cx").await.json().await.unwrap();
+    let agent: Value = t.get(&format!("/v1/agents/{name}")).await.json().await.unwrap();
     assert_eq!(agent["status"], "running", "{agent}");
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let (events, completed) = loop {
@@ -148,11 +187,11 @@ async fn a_restarted_hub_takes_over_running_agents() {
             _ => None,
         })
         .collect();
-    assert!(output.contains("echo(model=mock-codex,effort=medium): [sleep 6000] long"), "{output}");
+    assert!(output.contains(echo), "{output}");
 
     // Same process for the next turn.
     let mut w = t.watch().await;
-    t.send("cx", "[pid]").await;
+    t.send(name, "[pid]").await;
     w.until("turn after takeover", |e| matches!(e.kind, EventKind::AgentTurnCompleted { .. }))
         .await;
     assert_eq!(pid_in(&w.output()), pid);

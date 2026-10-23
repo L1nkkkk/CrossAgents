@@ -8,10 +8,12 @@
 //!   that carries a `task_id:` line repeats the session's last directives (for retries).
 //!
 //! `crossagents-mock-agent app-server` speaks the `codex app-server` protocol instead, see
-//! [`app_server`].
+//! [`app_server`]; `crossagents-mock-agent stream-json` Claude Code's (and CodeBuddy's)
+//! stream-json protocol, see [`stream_json`].
 
 mod app_server;
 mod script;
+mod stream_json;
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -332,6 +334,10 @@ impl RpcHandler for MockAgent {
 async fn main() {
     if std::env::args().nth(1).as_deref() == Some("app-server") {
         app_server::run().await;
+        return;
+    }
+    if std::env::args().nth(1).as_deref() == Some("stream-json") {
+        stream_json::run(std::env::args().skip(2).collect()).await;
         return;
     }
     let agent = Arc::new(MockAgent {

@@ -108,6 +108,44 @@ pub fn hide_console(command: &mut Command) {
 #[cfg(not(windows))]
 pub fn hide_console(_: &mut Command) {}
 
+/// Windows children inherit every inheritable handle of their parent, not just the ones
+/// given as their stdio, and this process's own stdin, stdout and stderr are inheritable
+/// when it was started with them. A long-lived child (the hub started by `hub start`, a
+/// runtime host started by the hub) would then hold this process's output open: whoever
+/// reads it (`hub run | tee`, a GUI, `$(crossagents hub start)`) sees no end until that
+/// child exits, long after this process did.
+///
+/// Clears the inherit flag on this process's std handles, once. Children started with
+/// [`std::process::Stdio::inherit`] still get them: the standard library duplicates the
+/// handles it passes. Does nothing elsewhere: Unix descriptors are close-on-exec and a
+/// child's 0, 1 and 2 are the ones it was given.
+pub fn stop_inheriting_std_handles() {
+    #[cfg(windows)]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(windows_no_inherit);
+    }
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn windows_no_inherit() {
+    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        // SAFETY: plain Win32 calls on handles owned by this process; failures (no such
+        // handle, a console pseudo handle) are harmless and ignored.
+        unsafe {
+            let handle = GetStdHandle(which);
+            if !handle.is_null() && handle as isize != -1 {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+}
+
 /// Proxy settings for vendor CLIs that do not read the system proxy themselves (Claude
 /// Code): the Windows system proxy as `HTTPS_PROXY` / `HTTP_PROXY`, with local addresses
 /// exempt so agents still reach the hub. Empty when the hub's own environment already names

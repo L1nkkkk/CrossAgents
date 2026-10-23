@@ -153,30 +153,8 @@ fn detach(command: &mut std::process::Command) {
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    stop_inheriting_std_handles();
-}
-
-/// Windows children inherit every inheritable handle, not just the ones passed as their
-/// stdio. If our stdout is a pipe (e.g. `$(crossagents hub start)`), the long-lived hub
-/// would keep it open and the reader would never see EOF. We exit right after spawning,
-/// so it is fine to clear the inherit flag on our own std handles.
-#[cfg(windows)]
-#[allow(unsafe_code)]
-fn stop_inheriting_std_handles() {
-    use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
-    use windows_sys::Win32::System::Console::{
-        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
-    };
-    for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
-        // SAFETY: plain Win32 calls on handles owned by this process; failures (e.g. no
-        // such handle) are harmless and ignored.
-        unsafe {
-            let handle = GetStdHandle(which);
-            if !handle.is_null() {
-                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
-            }
-        }
-    }
+    // Else the hub would hold our stdout open (e.g. `$(crossagents hub start)`).
+    crossagents_drivers::process::stop_inheriting_std_handles();
 }
 
 #[cfg(unix)]

@@ -80,6 +80,8 @@ fn spawn_detached(command: &mut std::process::Command) -> std::io::Result<std::p
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    // The host outlives the hub: it must not hold the hub's stdout and stderr open.
+    crate::process::stop_inheriting_std_handles();
     // Out of the hub's own job if it is in one (a terminal's, say), so closing that does
     // not take the agents along. A job that forbids leaving refuses; then stay in it.
     command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB);
