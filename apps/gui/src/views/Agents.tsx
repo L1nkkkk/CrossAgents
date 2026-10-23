@@ -22,62 +22,65 @@ import { useArmed } from "../parts";
 import { ConnectExternal, ConnectInstructions } from "./External";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
 
-/** The team: every agent as a colleague with a face, a title and a persona. */
-export function AgentsView() {
+/**
+ * 设置 → 智能体: every agent the hub knows, external ones connected here. There is no team to
+ * manage by hand: a Chat's agent brings in helpers itself (or the ones named with @), a Work's
+ * lead recruits its own; this page is for looking them over, editing a card and connecting
+ * agents that run elsewhere.
+ */
+export function AgentsPage() {
   const agents = useAgents();
   const [editing, setEditing] = useState<"external" | Agent>();
   const [connect, setConnect] = useState<ConnectInfo>();
   const list = (agents.data ?? []).filter((a) => !a.archived_at);
 
   return (
-    <>
-      <div className="topbar">
-        <span className="title">队友</span>
-        <span className="chip">{list.length}</span>
+    <div className="team-page">
+      <p className="settings-lead">
+        这里列出 hub 里所有的 agent。不用手动组队：Chat 里的 agent 会按需要自己找帮手，也可以在消息里用 @ 点名；Work 的主导 agent 会自己招人。改名、换头像和人设也可以在会话里点头像。
+      </p>
+      <div className="row">
+        <span className="chip">{list.length} 个</span>
         <div className="spacer" />
         {editing !== "external" && (
-          <button className="ghost" onClick={() => setEditing("external")} title="让别处运行的 agent 通过 MCP 加入团队">
+          <button className="ghost" onClick={() => setEditing("external")} title="让别处运行的 agent 通过 MCP 接入 hub">
             接入外部 agent
           </button>
         )}
       </div>
-      <div className="page">
-        <div className="page-inner team-page">
-          {editing === "external" && <ConnectExternal onDone={() => setEditing(undefined)} />}
-          {connect && <ConnectInstructions info={connect} onDone={() => setConnect(undefined)} />}
-          <ErrorBox error={agents.error} />
-          <TeamNotes />
-          {agents.data && !list.length && (
-            <div className="empty">
-              <h1>还没有队友</h1>
-              <p>
-                在 <a href="#/">首页</a> 选一个模型发起 run，主导的 agent 会按需要自己招人；招来的都会出现在这里。
-              </p>
-            </div>
-          )}
-          <div className="team-grid">
-            {list.map((agent) =>
-              typeof editing === "object" && editing.id === agent.id ? (
-                <div key={agent.id} className="team-wide">
-                  <Editor agent={agent} onDone={() => setEditing(undefined)} />
-                </div>
-              ) : (
-                <MemberCard
-                  key={agent.id}
-                  agent={agent}
-                  onEdit={() => setEditing(agent)}
-                  onConnect={() => api.connectAgent(agent.id).then(setConnect)}
-                />
-              ),
-            )}
-          </div>
+      {editing === "external" && <ConnectExternal onDone={() => setEditing(undefined)} />}
+      {connect && <ConnectInstructions info={connect} onDone={() => setConnect(undefined)} />}
+      <ErrorBox error={agents.error} />
+      <TeamNotes />
+      {agents.data && !list.length && (
+        <div className="empty">
+          <h1>还没有 agent</h1>
+          <p>
+            在 <a href="#/">首页</a> 发起一个 Chat 或 Work，用到的 agent 都会出现在这里。
+          </p>
         </div>
+      )}
+      <div className="team-grid">
+        {list.map((agent) =>
+          typeof editing === "object" && editing.id === agent.id ? (
+            <div key={agent.id} className="team-wide">
+              <ProfileEditor agent={agent} onDone={() => setEditing(undefined)} />
+            </div>
+          ) : (
+            <MemberCard
+              key={agent.id}
+              agent={agent}
+              onEdit={() => setEditing(agent)}
+              onConnect={() => api.connectAgent(agent.id).then(setConnect)}
+            />
+          ),
+        )}
       </div>
-    </>
+    </div>
   );
 }
 
-/** Notes the team keeps across runs (note_write with scope "team"). */
+/** Notes the agents keep across runs (note_write with scope "team"). */
 function TeamNotes() {
   const notes = useHubData(() => api.notes("team"), [], (e) => e.type === "note.written");
   const list = notes.data?.notes ?? [];
@@ -134,8 +137,8 @@ function MemberCard({ agent, onEdit, onConnect }: { agent: Agent; onEdit: () => 
   );
 }
 
-/** Edits a teammate's card. Teammates are made by picking a model on the start page, or by a lead. */
-function Editor({ agent, onDone }: { agent: Agent; onDone: () => void }) {
+/** Edits an agent's card: name, face, persona, model. Agents are made by the start page or by a lead. */
+export function ProfileEditor({ agent, onDone }: { agent: Agent; onDone: () => void }) {
   const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
   const [profile, setProfile] = useState<AgentProfile>(agent.profile);
   const [model, setModel] = useState<string>();
@@ -229,7 +232,7 @@ function Editor({ agent, onDone }: { agent: Agent; onDone: () => void }) {
             )
           }
         >
-          {remove.armed ? `再点一次移除 @${agent.name}` : "移出团队"}
+          {remove.armed ? `再点一次移除 @${agent.name}` : "移除"}
         </button>
       </div>
     </form>

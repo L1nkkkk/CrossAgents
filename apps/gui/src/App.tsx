@@ -9,7 +9,6 @@ import { toggleRail } from "./rail";
 import { Sidebar } from "./Sidebar";
 import { Titlebar, closeSidebarPeek, hoverSidebar, inDesktop, toggleSidebar, unhoverSidebar, useSidebar } from "./titlebar";
 import { ToolColumn, useToolsFloat } from "./ToolColumn";
-import { AgentsView } from "./views/Agents";
 import { HomeView } from "./views/Home";
 import { RunView } from "./views/Run";
 import { SessionView } from "./views/Session";
@@ -170,7 +169,8 @@ export function App() {
       main = a ? <WorkspaceView key={a} wsKey={a} /> : <HomeView />;
       break;
     case "agents":
-      main = <AgentsView />;
+      // The old 队友 page lives on as 设置 → 智能体.
+      main = <SettingsView page="agents" />;
       break;
     case "usage":
       main = <UsageView />;

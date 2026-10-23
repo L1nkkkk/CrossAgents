@@ -97,7 +97,7 @@ function Overview({ ws }: { ws: Workspace }) {
               </div>
             ) : (
               <p className="muted small">
-                还没有 agent 在这个工作区。到 <a href="#/agents">Agents</a> 登记时把工作目录填成 <code>{ws.path}</code>。
+还没有 agent 在这个工作区。到 <a href="#/">首页</a> 选这个工作区发起 Chat 或 Work，或在 <a href="#/settings/agents">设置 → 智能体</a> 接入外部 agent 时把工作目录填成 <code>{ws.path}</code>。
               </p>
             )}
           </section>

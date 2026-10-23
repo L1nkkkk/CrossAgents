@@ -10,6 +10,7 @@ import { chatTitle, effortLabel, effortLevels, effortOf, prettyModel, vendorLabe
 import { useQuota } from "./Quota";
 import { PRESETS, presetPolicy, type Preset } from "../lib/policy";
 import { ChipMenu, type MenuItem } from "../menu";
+import { mentionsFor, useMention } from "../mention";
 import { QuestionCards } from "../questions";
 import { CHATS, selectWorkspace, useSelectedWorkspace, useWorkspaces, wsKey, wsName } from "../workspace";
 
@@ -75,7 +76,7 @@ export function HomeView() {
     setModeState(m);
     save(MODE_KEY, m);
   };
-  // 文件 → 新建对话 / 新建团队 run while this page is open (menubar.tsx `startNew`).
+  // 文件 → 新建 Chat / 新建 Work while this page is open (menubar.tsx `startNew`).
   useEffect(() => {
     const onMode = (e: Event) => {
       const m = (e as CustomEvent<unknown>).detail;
@@ -387,6 +388,8 @@ export function HomeView() {
   };
 
   const wsLabel = folder ? wsName(folder) : current?.name;
+  // @ names a helper: an agent already in this project, or a model to recruit one on.
+  const mention = useMention(ref, setRequest, mentionsFor(cwd ? here.filter((a) => !a.config || !(a.config as Record<string, unknown>).spawned_by_agent) : [], offered));
   const missing =
     !agents.data || !plugins.data
       ? undefined
@@ -408,7 +411,7 @@ export function HomeView() {
               {t("home.chat")}
             </button>
             <button className={mode === "run" ? "active" : ""} role="radio" aria-checked={mode === "run"} onClick={() => setMode("run")} title={t("home.runHint")}>
-              <Icon name="team" size={14} />
+              <Icon name="tasks" size={14} />
               {t("home.run")}
             </button>
           </div>
@@ -416,12 +419,17 @@ export function HomeView() {
 
         <QuestionCards agents={everyone} />
         <div className="composer home-composer">
+          {mention.menu}
           <textarea
             ref={ref}
             rows={3}
             value={request}
-            onChange={(e) => setRequest(e.target.value)}
-            onKeyDown={onKey}
+            onChange={(e) => {
+              setRequest(e.target.value);
+              mention.sync();
+            }}
+            onClick={mention.sync}
+            onKeyDown={(e) => mention.onKeyDown(e) || onKey(e)}
             placeholder={t(mode === "chat" ? "home.chatPlaceholder" : "home.placeholder")}
             autoFocus
           />

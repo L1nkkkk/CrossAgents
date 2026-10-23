@@ -65,8 +65,8 @@ export function MenuBar() {
     {
       title: "文件",
       entries: [
-        { label: "新建对话", keys: "Ctrl+N", run: () => startNew("chat") },
-        { label: "新建团队 run", run: () => startNew("run") },
+        { label: "新建 Chat", keys: "Ctrl+N", run: () => startNew("chat") },
+        { label: "新建 Work", run: () => startNew("run") },
         "-",
         { label: "设置", keys: "Ctrl+,", run: () => (window.location.hash = "/settings") },
         "-",

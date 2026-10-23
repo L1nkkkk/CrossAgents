@@ -24,6 +24,10 @@ import { PeerMessage, StateWord, useArmed } from "../parts";
 import { useSession, type TranscriptItem, type TranscriptTurn } from "../session";
 import { QuestionCards } from "../questions";
 import { NeedsYouStrip, RunStrip } from "../strips";
+import { useHubData } from "../hub";
+import { mentionsFor, useMention } from "../mention";
+import { isChat, wsKey } from "../workspace";
+import { ProfileEditor } from "./Agents";
 import { PlanTasks } from "./Run";
 
 /** A person's message, or one recorded before senders were. */
@@ -83,6 +87,11 @@ export function SessionView({ name, onClose }: { name: string; onClose?: () => v
   const rail = !railOff && width >= RAIL_ROOM;
   const led = runs.filter((d) => d.run.planner === agent.id);
   const recruits = everyone.filter((a) => (a.config as Record<string, unknown> | null)?.spawned_by_agent === agent.id && !a.archived_at);
+  // Who @ offers: this conversation's recruits, then the other agents working in its project.
+  const mates = [
+    ...recruits,
+    ...(isChat(agent) ? [] : everyone.filter((a) => a.id !== agent.id && !a.archived_at && !recruits.includes(a) && wsKey(a.cwd) === wsKey(agent.cwd))),
+  ];
 
   return (
     <section className={`pane ${rail ? "with-rail" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)}>
@@ -102,7 +111,7 @@ export function SessionView({ name, onClose }: { name: string; onClose?: () => v
             <button onClick={() => void api.archiveAgent(agent.id, false)}>恢复对话</button>
           </div>
         ) : (
-          <Composer agent={agent} capabilities={capabilities} draft={draft} setDraft={setDraft} plans={pendingPlans} onPlanDone={reload} />
+          <Composer agent={agent} capabilities={capabilities} draft={draft} setDraft={setDraft} plans={pendingPlans} onPlanDone={reload} mates={mates} />
         )}
       </div>
     </section>
@@ -129,6 +138,7 @@ function Header({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  const [profile, setProfile] = useState(false);
   const stop = useArmed();
 
   async function run(action: () => Promise<unknown>) {
@@ -146,7 +156,13 @@ function Header({
   return (
     <>
       <div className="topbar">
-        <Avatar agent={agent} size={26} />
+        {agent.plugin === "external" ? (
+          <Avatar agent={agent} size={26} />
+        ) : (
+          <button className={`avatar-btn ${profile ? "on" : ""}`} onClick={() => setProfile(!profile)} title="编辑名片：名字、头像、人设和模型" aria-expanded={profile}>
+            <Avatar agent={agent} size={26} />
+          </button>
+        )}
         <span className="who-block">
           <AgentName agent={agent} />
           <span className="who-sub">{agent.topic ?? agentTitle(agent)}</span>
@@ -201,6 +217,11 @@ function Header({
           </button>
         )}
       </div>
+      {profile && (
+        <div className="profile-pop">
+          <ProfileEditor agent={agent} onDone={() => setProfile(false)} />
+        </div>
+      )}
       {error && (
         <div style={{ padding: "8px 20px 0" }}>
           <ErrorBox error={error} />
@@ -881,6 +902,7 @@ function Composer({
   setDraft,
   plans,
   onPlanDone,
+  mates,
 }: {
   agent: Agent;
   capabilities: Capabilities | null;
@@ -888,11 +910,15 @@ function Composer({
   setDraft: (text: string) => void;
   plans: RunDetail[];
   onPlanDone: () => void;
+  /** Agents @ offers, besides the models. */
+  mates: Agent[];
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [deferred, setDeferred] = useState<string[]>([]);
   const ref = useRef<HTMLTextAreaElement>(null);
+  const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
+  const mention = useMention(ref, setDraft, mentionsFor(mates, (plugins.data ?? []).filter((p) => p.models.length > 0)));
   const running = agent.status === "running";
   const canInterrupt = running && capabilities?.interrupt !== false;
   const plan = plans.find((d) => !deferred.includes(d.run.id));
@@ -959,13 +985,18 @@ function Composer({
         </button>
       )}
       <div className="composer">
+        {mention.menu}
         <textarea
           ref={ref}
           rows={1}
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={onKey}
-          placeholder={running ? `${displayName(agent)} 正在工作，新消息会排在本轮之后` : `给 ${displayName(agent)} 发消息`}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            mention.sync();
+          }}
+          onClick={mention.sync}
+          onKeyDown={(e) => mention.onKeyDown(e) || onKey(e)}
+          placeholder={running ? `${displayName(agent)} 正在工作，新消息会排在本轮之后` : `给 ${displayName(agent)} 发消息，@ 点名协作者或模型`}
         />
         <div className="bar">
           {agent.plugin === "external" ? (

@@ -10,10 +10,12 @@ import { ErrorBox, Icon, VendorMark, type IconName } from "../components";
 import { useHubData } from "../hub";
 import { prettyModel, vendorLabel } from "../lib/models";
 import { MODES, PAPERS, resolve, setTheme, useTheme } from "../lib/theme";
+import { AgentsPage } from "./Agents";
 
 const PAGES: { key: string; label: string; icon: IconName }[] = [
   { key: "appearance", label: "外观", icon: "settings" },
   { key: "models", label: "模型", icon: "brain" },
+  { key: "agents", label: "智能体", icon: "team" },
 ];
 
 export function SettingsView({ page }: { page?: string }) {
@@ -35,7 +37,7 @@ export function SettingsView({ page }: { page?: string }) {
           </nav>
           <div className="settings">
             <h1 className="settings-title">{current.label}</h1>
-            {current.key === "models" ? <ModelsPage /> : <AppearancePage />}
+            {current.key === "models" ? <ModelsPage /> : current.key === "agents" ? <AgentsPage /> : <AppearancePage />}
           </div>
         </div>
       </div>
@@ -90,7 +92,7 @@ function ModelsPage() {
   const list = (plugins.data ?? []).filter((p) => p.all_models.length > 0);
   return (
     <>
-      <p className="settings-lead">新建对话、团队和切换模型时，只列这里打开的模型；队长给队员挑模型也只在这里面选。列表来自各账号登录后报告的模型，新登录的账号会自动补进来。</p>
+      <p className="settings-lead">新建 Chat、Work 和切换模型时，只列这里打开的模型；agent 找帮手、主导 agent 招人也只在这里面选。列表来自各账号登录后报告的模型，新登录的账号会自动补进来。</p>
       <label className="settings-search">
         <Icon name="search" size={14} />
         <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索模型" aria-label="搜索模型" />

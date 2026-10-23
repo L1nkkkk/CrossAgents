@@ -32,7 +32,7 @@ test("placeholders are filled, unknown ones are left alone", () => {
   assert.equal(t("common.more", { n: 3 }), "更多 (3)");
   assert.equal(t("sidebar.merged", { merged: 1, total: 4 }), "1/4 已合并");
   assert.equal(t("hub.offline", {}), "未连接：{reason}");
-  assert.equal(t("nav.team"), "队友");
+  assert.equal(t("home.run"), "Work");
 });
 
 test("an unknown locale falls back to zh-CN", () => {

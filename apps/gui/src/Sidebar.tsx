@@ -94,10 +94,6 @@ export function Sidebar({ route }: { route: string[] }) {
             <span>{t("sidebar.new")}</span>
             <kbd>Ctrl N</kbd>
           </a>
-          <a className={`nav-team ${section === "agents" ? "active" : ""}`} href="#/agents">
-            <Icon name="team" size={16} />
-            <span>{t("nav.team")}</span>
-          </a>
           <a className={`nav-usage ${section === "usage" ? "active" : ""}`} href="#/usage">
             <Icon name="chart" size={16} />
             <span>{t("nav.usage")}</span>

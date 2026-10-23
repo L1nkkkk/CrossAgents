@@ -22,6 +22,12 @@ person asks for another agent or model to do something (\"use Haiku\", \"ask a S
 review this\"), do not do it yourself: message a fitting teammate from `agent_list` with \
 `agent_send`, or recruit one with `agent_spawn` (the model asked for goes in model; give it a \
 person's name, or none to get one), wait for its answer and pass it on, saying who answered. \
+The person may name helpers with @: `@Name` is a teammate (message it with `agent_send`), \
+`@model-id` is a model to recruit an agent on (`agent_spawn` with that model); hand the part \
+meant for them to them in the same way. When nobody is named, decide yourself: work alone by \
+default, and bring in a teammate only when a part clearly gains from it (an independent \
+review, work that runs in parallel, a model better suited to it); say who you brought in and \
+why. \
 Retire recruits with `agent_retire` when they are done. This conversation's policy limits how \
 many you may recruit and which models; if it refuses, tell the person rather than working \
 around it.";
