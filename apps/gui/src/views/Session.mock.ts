@@ -57,6 +57,21 @@ export function soloSession(): { state: MockState; script: Step[]; route: string
   return { state, script: soloScript(nova.id, t2.turn.message_id, readId, q1.turn.message_id), route: `#/s/${nova.name}` };
 }
 
+/** Nova's CLI crashes mid-turn: the session shows how its process ended. */
+export function crashedSession(): { state: MockState; script: Step[]; route: string } {
+  const solo = soloSession();
+  const id = solo.state.agents[0].id;
+  const message = "claude crashed (exit code 3)\nstderr: Error: connect ECONNRESET 127.0.0.1:7890";
+  return {
+    ...solo,
+    script: [
+      { at: 1200, event: { type: "agent.exited", data: { id, cause: "crashed", code: 3, message } } },
+      { at: 1250, event: { type: "agent.error", data: { id, message } } },
+      { at: 1300, event: { type: "agent.status_changed", data: { id, from: "running", to: "error" } } },
+    ],
+  };
+}
+
 /** Nova's running turn: the read finishes, two edits, a lint run streams output, the reply arrives. */
 function soloScript(id: string, message_id: string, readId: string, next: string): Step[] {
   const edit = uid();

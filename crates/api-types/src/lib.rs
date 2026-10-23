@@ -153,9 +153,22 @@ pub struct Transcript {
     #[serde(default)]
     #[ts(optional)]
     pub error: Option<String>,
+    /// How its process ended, when that is the `error` (its `agent.exited`).
+    #[serde(default)]
+    #[ts(optional)]
+    pub exit: Option<AgentExit>,
     /// The last event folded in; follow `GET /v1/events?agent=…&since=<last_seq>` from here.
     #[ts(type = "number")]
     pub last_seq: u64,
+}
+
+/// How an agent's process ended (`agent.exited`); either part is missing when the driver
+/// cannot tell.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AgentExit {
+    pub cause: Option<crossagents_core::ExitCause>,
+    pub code: Option<i32>,
 }
 
 /// The model or reasoning effort an agent runs on was switched (`agent.model_changed`);

@@ -535,7 +535,7 @@ function Connection() {
   return (
     <div className="connection" title={info?.home}>
       <span className={`dot ${color} ${status === "connecting" ? "pulse" : ""}`} />
-      <span className="text">{text}</span>
+      <span className="text" title={text}>{text}</span>
       {info && status === "connected" && <span className="ver">v{info.version}</span>}
     </div>
   );

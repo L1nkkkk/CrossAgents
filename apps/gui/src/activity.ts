@@ -9,6 +9,7 @@
 // - Viewing: the agents open in a pane right now (one, or two side by side).
 
 import { useSyncExternalStore } from "react";
+import type { AgentExit } from "@bindings/AgentExit";
 import { onHubEvent } from "./hub";
 import { stepLine } from "./lib/workGroups";
 
@@ -19,6 +20,8 @@ const listeners = new Set<() => void>();
 const activity = new Map<string, string>();
 /** Each agent's latest `agent.error` since the page loaded. */
 const errors = new Map<string, string>();
+/** How its process ended, while that is its latest error (`agent.exited`). */
+const exits = new Map<string, AgentExit & { message: string }>();
 const fromHuman = new Set<string>(); // message ids of messages a person sent
 let unread: Record<string, Unread> = load();
 let viewing: string[] = [];
@@ -77,8 +80,13 @@ export function startActivity() {
         save();
         return changed();
       }
+      case "agent.exited":
+        // The `agent.error` that follows carries the same message.
+        exits.set(e.data.id, { cause: e.data.cause, code: e.data.code, message: e.data.message });
+        return;
       case "agent.error":
         errors.set(e.data.id, e.data.message);
+        if (exits.get(e.data.id)?.message !== e.data.message) exits.delete(e.data.id);
         return changed();
       case "agent.removed":
         activity.delete(e.data.id);
@@ -116,5 +124,7 @@ function subscribe(l: () => void) {
 export const useActivity = (agentId: string) => useSyncExternalStore(subscribe, () => activity.get(agentId));
 /** The agent's latest error seen on the stream, if any. */
 export const lastError = (agentId: string) => errors.get(agentId);
+/** How the agent's process ended, when that is its latest error on the stream. */
+export const lastExit = (agentId: string): AgentExit | undefined => exits.get(agentId);
 export const useUnread = () => useSyncExternalStore(subscribe, () => unread);
 export const useViewing = () => useSyncExternalStore(subscribe, () => viewing);

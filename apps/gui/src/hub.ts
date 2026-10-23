@@ -4,24 +4,69 @@
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { Event as HubEvent } from "@bindings/Event";
-import { errorText, getBridge } from "./api";
+import { api, errorText, getBridge, refuseRequests } from "./api";
 
 export type { HubEvent };
+
+/** The hub API this GUI speaks: `API_VERSION` in crates/api-types. */
+export const API_VERSION = "v1";
 
 /** "connecting", "connected" or "offline: <reason>". */
 export type ConnectionStatus = string;
 
+/** The hub speaks another API version: nothing is asked of it or taken from it. */
+export type VersionMismatch = { hub: string; gui: string };
+
 const eventListeners = new Set<(event: HubEvent) => void>();
 const statusListeners = new Set<() => void>();
 let status: ConnectionStatus = "connecting";
+let mismatch: VersionMismatch | undefined;
 let started = false;
+/** What the event stream says, before the hub's version is checked. */
+let transport: ConnectionStatus = "connecting";
+/** Numbers each check, so one for a stream that has since dropped is ignored. */
+let checks = 0;
 
 function setStatus(next: ConnectionStatus) {
   status = next;
   statusListeners.forEach((l) => l());
 }
 
+/**
+ * The event stream's own status. "connected" becomes ours only once the hub's API version
+ * matches; a hub that speaks another one is refused, never half-used.
+ */
+function setTransport(next: ConnectionStatus) {
+  transport = next;
+  const mine = ++checks;
+  if (next !== "connected") return setStatus(next);
+  setStatus("connecting");
+  const check = () =>
+    api.info().then(
+      (info) => {
+        if (mine !== checks) return;
+        if (info.api === API_VERSION) {
+          mismatch = undefined;
+          refuseRequests(undefined);
+          return setStatus("connected");
+        }
+        mismatch = { hub: info.api, gui: API_VERSION };
+        const reason = `hub API ${info.api}, GUI API ${API_VERSION}: update both to the same version`;
+        refuseRequests(reason);
+        setStatus(`offline: ${reason}`);
+      },
+      (err) => {
+        if (mine !== checks) return;
+        // The stream is up but the hub did not answer: try again while it stays up.
+        setStatus(`offline: ${errorText(err)}`);
+        setTimeout(() => mine === checks && transport === "connected" && void check(), 2000);
+      },
+    );
+  void check();
+}
+
 function dispatch(data: string) {
+  if (mismatch) return;
   let event: HubEvent;
   try {
     event = JSON.parse(data);
@@ -39,7 +84,7 @@ export function startEvents() {
   const bridge = getBridge();
   if (bridge) {
     // Subscribe before starting the relay so no event is missed.
-    bridge.onStatus(setStatus);
+    bridge.onStatus(setTransport);
     bridge.onEvent(dispatch);
     bridge.startEvents();
   } else {
@@ -51,14 +96,14 @@ export function startEvents() {
 async function webEvents() {
   let last: string | undefined;
   for (;;) {
-    setStatus("connecting");
+    setTransport("connecting");
     try {
       // First connection: live events only (views load state over REST); reconnects resume.
       const response = await fetch(last ? "/v1/events" : "/v1/events?live=true", {
         headers: last ? { "last-event-id": last, accept: "text/event-stream" } : { accept: "text/event-stream" },
       });
       if (!response.ok || !response.body) throw new Error(`hub answered ${response.status}`);
-      setStatus("connected");
+      setTransport("connected");
       const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
       let buf = "";
       for (;;) {
@@ -80,9 +125,9 @@ async function webEvents() {
           if (data.length) dispatch(data.join("\n"));
         }
       }
-      setStatus("offline: event stream ended");
+      setTransport("offline: event stream ended");
     } catch (err) {
-      setStatus(`offline: ${errorText(err)}`);
+      setTransport(`offline: ${errorText(err)}`);
     }
     await new Promise((r) => setTimeout(r, 2000));
   }
@@ -100,6 +145,17 @@ export function useConnectionStatus(): ConnectionStatus {
       return () => statusListeners.delete(l);
     },
     () => status,
+  );
+}
+
+/** Set while the hub speaks another API version than this GUI. */
+export function useVersionMismatch(): VersionMismatch | undefined {
+  return useSyncExternalStore(
+    (l) => {
+      statusListeners.add(l);
+      return () => statusListeners.delete(l);
+    },
+    () => mismatch,
   );
 }
 

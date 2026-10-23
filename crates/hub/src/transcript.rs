@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crossagents_api_types::{
-    ModelSwitch, TranscriptItem, TranscriptTurn, TranscriptUsage, TurnDiffStat,
+    AgentExit, ModelSwitch, TranscriptItem, TranscriptTurn, TranscriptUsage, TurnDiffStat,
 };
 use crossagents_core::{Event, EventKind, MessageId};
 
@@ -18,6 +18,11 @@ pub struct Fold {
     pub diffs: HashMap<MessageId, String>,
     /// The latest `agent.error`, inside a turn or not.
     pub last_error: Option<String>,
+    /// How its process ended, while `last_error` is that it did.
+    pub last_exit: Option<AgentExit>,
+    /// `agent.exited` was just folded; the `agent.error` the runtime sends after it says the
+    /// same thing.
+    exit_pending: bool,
     /// The turn the agent is working on.
     current: Option<MessageId>,
 }
@@ -209,8 +214,18 @@ impl Fold {
                     }
                 }
             }
+            EventKind::AgentExited { cause, code, .. } => {
+                self.last_exit = Some(AgentExit {
+                    cause: *cause,
+                    code: *code,
+                });
+                self.exit_pending = true;
+            }
             EventKind::AgentError { message, .. } => {
                 self.last_error = Some(message.clone());
+                if !std::mem::take(&mut self.exit_pending) {
+                    self.last_exit = None;
+                }
                 if let Some(items) = self.active_items() {
                     items.push(TranscriptItem::Error {
                         message: message.clone(),
@@ -429,5 +444,32 @@ mod tests {
         assert_eq!(second.input, "next");
         assert!(second.started_at.is_none() && second.items.is_empty());
         assert_eq!(fold.usage.as_ref().map(|u| u.used), Some(10));
+    }
+
+    #[test]
+    fn keeps_how_the_process_ended_until_another_error() {
+        let id = AgentId::new();
+        let error = |message: &str| EventKind::AgentError {
+            id,
+            message: message.into(),
+        };
+        let mut fold = Fold::default();
+        fold.push(&ev(
+            1,
+            EventKind::AgentExited {
+                id,
+                cause: Some(crossagents_core::ExitCause::Crashed),
+                code: Some(3),
+                message: "claude crashed (exit code 3)".into(),
+            },
+        ));
+        fold.push(&ev(2, error("claude crashed (exit code 3)")));
+        let exit = fold.last_exit.clone().unwrap();
+        assert_eq!(exit.cause, Some(crossagents_core::ExitCause::Crashed));
+        assert_eq!(exit.code, Some(3));
+
+        // A later error is about something else: the exit no longer explains it.
+        fold.push(&ev(3, error("not logged in")));
+        assert!(fold.last_exit.is_none());
     }
 }

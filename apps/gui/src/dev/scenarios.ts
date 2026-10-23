@@ -3,7 +3,7 @@
 
 import { emptyHub } from "../views/Home.mock";
 import { oauthRun } from "../views/Run.mock";
-import { chatWithRecruit, soloSession } from "../views/Session.mock";
+import { chatWithRecruit, crashedSession, soloSession } from "../views/Session.mock";
 import { usageScene } from "../views/Usage.mock";
 import type { MockState, Step } from "./MockBridge";
 
@@ -20,6 +20,8 @@ export const SCENARIOS: Scenario[] = [
   { key: "running", label: "run 进行中", hint: "两个任务在跑、一个待检查、一个失败；Planner 对话里有编排消息和任务卡片", build: () => oauthRun("running") },
   { key: "solo", label: "单聊", hint: "Claude 会话：折叠的工具步骤、一轮进行中、两条排队", build: () => soloSession() },
   { key: "recruit", label: "对话招队友", hint: "对话里招人：一次因为用模型名当名字被拒绝（卡片写明原因），一次招到 Iris，挂在对话下面", build: () => chatWithRecruit() },
+  { key: "crash", label: "进程崩溃", hint: "单聊里 Claude CLI 崩溃退出：错误条和「需要你」写明怎么退出的", build: () => crashedSession() },
+  { key: "mismatch", label: "版本不匹配", hint: "hub 的接口是 v2：GUI 拒绝连接并说明原因", build: () => ({ state: { ...emptyHub(), api: "v2" }, script: [], route: "#/" }) },
   { key: "usage", label: "用量", hint: "两个账号，一个快到 5 小时限额，一个每周限额用完", build: () => ({ state: usageScene(), script: [], route: "#/usage" }) },
 ];
 

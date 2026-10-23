@@ -186,10 +186,18 @@ export function applyEvent(t: Transcript, event: HubEvent): Transcript {
       const message = "hub 已重启，这一轮由新的 hub 接管，继续运行";
       return withActive(t, seq, (items) => [...items, { type: "warning", message }]);
     }
+    case "agent.exited": {
+      // The `agent.error` the hub sends next carries the same message; `error` is set now so
+      // that one keeps `exit` (crates/hub/src/transcript.rs does the same).
+      if (event.data.id !== id) return t;
+      const { cause, code, message } = event.data;
+      return { ...t, exit: { cause, code }, error: message, last_seq: seq };
+    }
     case "agent.error": {
       if (event.data.id !== id) return t;
       const message = event.data.message;
-      return { ...withActive(t, seq, (items) => [...items, { type: "error", message }]), error: message };
+      const exit = message === t.error ? t.exit : undefined;
+      return { ...withActive(t, seq, (items) => [...items, { type: "error", message }]), error: message, exit };
     }
     case "agent.usage": {
       if (event.data.id !== id) return t;

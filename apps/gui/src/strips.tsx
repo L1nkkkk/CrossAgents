@@ -3,8 +3,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { Agent } from "@bindings/Agent";
+import type { AgentExit } from "@bindings/AgentExit";
 import type { RunDetail } from "@bindings/RunDetail";
-import { lastError, markSeen, useUnread, useViewing } from "./activity";
+import { lastError, lastExit, markSeen, useUnread, useViewing } from "./activity";
 import { api } from "./api";
 import { Avatar, displayName, sessionHref } from "./components";
 import { errorHint } from "./lib/errors";
@@ -108,7 +109,7 @@ export function NeedsYouStrip({ agents, tree }: { agents: Agent[]; tree: RunDeta
 
 function NeedChip({ chip, onDismiss }: { chip: Chip; onDismiss: () => void }) {
   const reason = useErrorReason(chip.tone === "danger" ? chip.agent : undefined);
-  const hint = reason ? errorHint(reason) : undefined;
+  const hint = reason ? errorHint(reason.message, reason.exit) : undefined;
   return (
     <span
       className={`need ${chip.tone}`}
@@ -129,23 +130,28 @@ function NeedChip({ chip, onDismiss }: { chip: Chip; onDismiss: () => void }) {
   );
 }
 
-/** Why `agent` is in error: the latest error on the stream, else asked of the hub once. */
-function useErrorReason(agent: Agent | undefined): string | undefined {
+type Reason = { message: string; exit?: AgentExit };
+
+/**
+ * Why `agent` is in error, and how its process ended when that is why: the latest error on
+ * the stream, else asked of the hub once.
+ */
+function useErrorReason(agent: Agent | undefined): Reason | undefined {
   const live = agent ? lastError(agent.id) : undefined;
-  const [fetched, setFetched] = useState<string>();
+  const [fetched, setFetched] = useState<Reason>();
   const id = agent?.id;
   useEffect(() => {
     if (!id || live) return;
     let on = true;
     api.transcript(id).then(
-      (t) => on && setFetched(t.error ?? undefined),
+      (t) => on && setFetched(t.error ? { message: t.error, exit: t.exit } : undefined),
       () => {},
     );
     return () => {
       on = false;
     };
   }, [id, live]);
-  return live ?? fetched;
+  return agent && live ? { message: live, exit: lastExit(agent.id) } : fetched;
 }
 
 /** A label that opens a small menu above it; Esc or a click outside closes it. */

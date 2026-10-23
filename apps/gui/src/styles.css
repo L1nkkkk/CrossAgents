@@ -423,6 +423,14 @@ a.chip:hover { text-decoration: none; background: var(--selected); }
   border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent); background: color-mix(in srgb, var(--danger) 8%, var(--surface));
   display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--text);
 }
+.version-mismatch {
+  max-width: 560px; margin: 15vh auto 0; padding: 20px 24px; border-radius: var(--radius-lg);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent); background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  font-size: 13.5px; color: var(--text); line-height: 1.6;
+}
+.version-mismatch h2 { margin: 0 0 8px; font-size: 16px; }
+.version-mismatch p { margin: 6px 0 0; }
+@media (max-width: 640px) { .version-mismatch { margin: 24px 16px 0; } }
 .error-bar .mono { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .need-why { margin-left: 4px; font-size: 11.5px; opacity: 0.85; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The avatar in a conversation header opens its card for editing. */

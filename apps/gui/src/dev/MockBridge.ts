@@ -38,6 +38,8 @@ export type MockState = {
   usage: Partial<Record<UsageGroup, UsageResponse>>;
   accountUsage?: AccountUsageResponse;
   plugins: PluginInfo[];
+  /** The API version `/v1/info` reports; `v1` when unset. */
+  api?: string;
 };
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
@@ -195,7 +197,7 @@ export class MockBridge implements CrossAgentsBridge {
     let m: RegExpMatchArray | null;
 
     if (method === "GET") {
-      if (p === "/v1/info") return json(200, { version: "0.6.0-mock", api: "v1", pid: 0, home: "（mock 模式，无 hub）", started_at: new Date().toISOString() });
+      if (p === "/v1/info") return json(200, { version: "0.6.0-mock", api: s.api ?? "v1", pid: 0, home: "（mock 模式，无 hub）", started_at: new Date().toISOString() });
       if (p === "/v1/agents") return json(200, { agents: s.agents });
       if ((m = p.match(/^\/v1\/agents\/([^/]+)$/))) return this.agent(m[1]) ? json(200, this.agent(m[1])) : notFound("agent");
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/transcript$/))) {

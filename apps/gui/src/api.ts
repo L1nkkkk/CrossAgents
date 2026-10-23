@@ -75,7 +75,15 @@ async function send(method: Method, path: string, body?: unknown): Promise<{ sta
   return { status: response.status, body: await response.text() };
 }
 
+/** Why requests are refused (the hub speaks another API version, see hub.ts); `/v1/info` still goes, to check again. */
+let refusal: string | undefined;
+
+export function refuseRequests(reason: string | undefined) {
+  refusal = reason;
+}
+
 async function request<T>(method: Method, path: string, body?: unknown): Promise<T> {
+  if (refusal && path !== "/v1/info") throw new ApiError(0, "version_mismatch", refusal);
   const response = await send(method, path, body);
   if (response.status >= 400) {
     let parsed: ApiErrorJson | undefined;

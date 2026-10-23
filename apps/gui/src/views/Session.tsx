@@ -107,7 +107,7 @@ export function SessionView({ name, onClose }: { name: string; onClose?: () => v
         <QueuePanel agent={agent} queued={queued} onEdit={setDraft} />
         {agent.status === "error" && transcript.error && (
           <div className="error-bar" role="alert" title={transcript.error}>
-            <strong>{errorHint(transcript.error)}</strong>
+            <strong>{errorHint(transcript.error, transcript.exit)}</strong>
             <span className="mono small">{transcript.error}</span>
           </div>
         )}

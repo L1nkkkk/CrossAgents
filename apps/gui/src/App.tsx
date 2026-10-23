@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import type { Agent } from "@bindings/Agent";
 import type { RunDetail } from "@bindings/RunDetail";
 import { api, getBridge } from "./api";
-import { useHubData } from "./hub";
+import { useHubData, useVersionMismatch, type VersionMismatch } from "./hub";
 import { closeBeside, closeTools, focusedOf, setRatio, useLayout, usePanes } from "./panes";
 import { startNew } from "./menubar";
 import { toggleRail } from "./rail";
@@ -97,6 +97,19 @@ function Sessions({ primary }: { primary: string }) {
   );
 }
 
+/** In place of every page while the hub speaks another API version: nothing else is safe to show. */
+function VersionMismatchView({ hub, gui }: VersionMismatch) {
+  return (
+    <div className="version-mismatch" role="alert">
+      <h2>hub 与 GUI 版本不匹配</h2>
+      <p>
+        hub 的接口版本是 <code>{hub}</code>，这个 GUI 用的是 <code>{gui}</code>。为免读错或写坏数据，GUI 不会连接这个 hub。
+      </p>
+      <p>请把 hub 和 GUI 更新到同一版本，再重启 hub（<code>crossagents hub start</code>）。hub 重启后这里会自动重新连接。</p>
+    </div>
+  );
+}
+
 export function App() {
   const route = useRoute();
   const [section, a, b, c] = route;
@@ -104,6 +117,7 @@ export function App() {
 
   const sidebar = useSidebar();
   const floatTools = useToolsFloat();
+  const mismatch = useVersionMismatch();
 
   // Picking something in the floating sidebar puts it away.
   const where = window.location.hash;
@@ -194,7 +208,7 @@ export function App() {
           </div>
         </>
       )}
-      <main className="main">{main}</main>
+      <main className="main">{mismatch ? <VersionMismatchView {...mismatch} /> : main}</main>
       {drawer && (
         <aside className="drawer">
           {drawer}

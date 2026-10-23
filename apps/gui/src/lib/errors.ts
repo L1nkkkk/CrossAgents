@@ -1,15 +1,44 @@
 // Agent errors as a person reads them: the hub's messages are for logs, these say what to do.
 
-/** A short Chinese hint for a known error, else its first line. */
-export function errorHint(message: string): string {
+import type { AgentExit } from "@bindings/AgentExit";
+
+/**
+ * A short Chinese hint for a known error, else its first line. `exit` is how the agent's
+ * process ended, when that is the error (`agent.exited`): it leads the hint.
+ */
+export function errorHint(message: string, exit?: AgentExit | null): string {
   const text = message.replace(/^agent error:\s*/i, "").trim();
+  const known = knownHint(text);
+  if (exit) {
+    const how = exitHint(exit);
+    return known ? `${how}：${known}` : how;
+  }
+  if (known) return known;
+  const first = text.split("\n")[0];
+  return first.length > 60 ? first.slice(0, 60) + "…" : first;
+}
+
+/** How the process ended, in words: "进程崩溃了（退出码 3）". */
+export function exitHint({ cause, code }: AgentExit): string {
+  const how =
+    cause === "crashed" ? "进程崩溃了"
+    : cause === "killed" ? "进程被停止了"
+    : cause === "lost" ? "进程失联了：它所在的运行宿主断开了"
+    : cause === "exited" ? "进程自己退出了"
+    : "进程退出了";
+  return code != null && code !== 0 ? `${how}（退出码 ${code}）` : how;
+}
+
+function knownHint(text: string): string | undefined {
   const missing = /cannot start (.+?): (?:program not found|.*cannot find the file|.*No such file)/i.exec(text);
   if (missing) {
     const program = missing[1].split(/[\\/]/).pop() ?? missing[1];
     return `找不到 ${program} 命令：这台电脑没装它的 CLI`;
   }
   if (/CLI is not installed/i.test(text)) return "这台电脑没装它的 CLI";
+  // The driver probes the proxy before starting a CLI (crates/drivers/src/process.rs `check_proxy`).
+  const proxy = /the proxy (\S+) is not usable/i.exec(text);
+  if (proxy) return `代理 ${proxy[1]} 连不上：先打开代理软件，或改 HTTPS_PROXY / 系统代理`;
   if (/not logged in|login required|please (run )?\/?login|unauthorized|401/i.test(text)) return "账号没登录或登录已失效";
-  const first = text.split("\n")[0];
-  return first.length > 60 ? first.slice(0, 60) + "…" : first;
+  return undefined;
 }

@@ -5,3 +5,6 @@
 
 # Local Claude Code state (previews, worktrees)
 /.claude/
+
+# WorkBuddy agent notes
+.workbuddy-ai/

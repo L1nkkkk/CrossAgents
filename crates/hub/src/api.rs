@@ -420,7 +420,9 @@ async fn transcript(
         .iter()
         .any(Option::is_some)
         .then(|| costs.iter().flatten().sum());
-    let error = (agent.status == crossagents_core::AgentStatus::Error).then_some(fold.last_error).flatten();
+    let in_error = agent.status == crossagents_core::AgentStatus::Error;
+    let error = in_error.then_some(fold.last_error).flatten();
+    let exit = in_error.then_some(fold.last_exit).flatten();
     Ok(Json(Transcript {
         agent,
         driver: resolved.as_ref().map(|r| r.driver.kind()),
@@ -430,6 +432,7 @@ async fn transcript(
         switches: fold.switches,
         conversation_cost_usd,
         error,
+        exit,
         last_seq: head.max(fold.last_seq),
     }))
 }
