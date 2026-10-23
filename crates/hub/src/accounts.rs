@@ -281,6 +281,26 @@ impl Accounts {
         Ok(self.provider(&account.provider)?.models(&account).await)
     }
 
+    /// The model ids `plugin`'s logins report, each once, in the order the first login to
+    /// report it lists them. Empty when the plugin has no accounts or none reported yet.
+    pub async fn offered_models(&self, plugin: &str) -> Vec<String> {
+        let Ok(provider) = self.provider(plugin) else {
+            return Vec::new();
+        };
+        let Ok(accounts) = self.store().list_accounts().await else {
+            return Vec::new();
+        };
+        let mut models: Vec<String> = Vec::new();
+        for account in accounts.iter().filter(|a| a.provider == plugin) {
+            for model in provider.models(account).await {
+                if !models.contains(&model.id) {
+                    models.push(model.id);
+                }
+            }
+        }
+        models
+    }
+
     /// Environment for an agent bound to an account through `config.account`.
     pub async fn agent_env(&self, agent: &Agent) -> Result<Vec<(String, String)>, CoreError> {
         let Some(id) = account_of(agent) else {

@@ -345,7 +345,12 @@ pub struct TranscriptUsage {
 #[ts(export)]
 pub struct PluginInfo {
     pub name: String,
+    /// The models offered: what its logins report, else its configured or built-in list.
     pub models: Vec<String>,
+    /// `models` is the list set in `config.toml`, not what the logins report; each login is
+    /// then offered this list too.
+    #[serde(default)]
+    pub models_pinned: bool,
     /// The driver its agents use unless they name another.
     pub driver: crossagents_core::DriverKind,
     pub capabilities: crossagents_core::Capabilities,

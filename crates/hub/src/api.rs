@@ -681,12 +681,24 @@ async fn send_message(
 
 async fn list_plugins(State(state): State<Arc<AppState>>) -> Json<ListPluginsResponse> {
     let registry = state.runtime.plugins();
-    let plugins = registry
-        .defaults()
-        .iter()
-        .map(|d| PluginInfo {
+    let mut plugins = Vec::new();
+    for d in registry.defaults() {
+        let pinned = registry.models_pinned(d.name());
+        // What the logins can use, unless config.toml lists the models; the built-in list
+        // until a login has reported.
+        let reported = if pinned {
+            Vec::new()
+        } else {
+            state.accounts.offered_models(d.name()).await
+        };
+        plugins.push(PluginInfo {
             name: d.name().to_owned(),
-            models: d.models(),
+            models: if reported.is_empty() {
+                d.models()
+            } else {
+                reported
+            },
+            models_pinned: pinned,
             driver: d.kind(),
             capabilities: d.capabilities(),
             // The ACP driver does not pass an effort on, so none is offered there.
@@ -697,8 +709,8 @@ async fn list_plugins(State(state): State<Arc<AppState>>) -> Json<ListPluginsRes
                     .map(|c| c.efforts.clone())
                     .unwrap_or_default(),
             },
-        })
-        .collect();
+        });
+    }
     Json(ListPluginsResponse { plugins })
 }
 

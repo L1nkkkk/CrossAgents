@@ -121,8 +121,8 @@ impl PluginConfig {
         }
     }
 
-    /// A built-in adjusted by its `config.toml` entry: launch commands, driver and effort
-    /// levels.
+    /// A built-in adjusted by its `config.toml` entry: launch commands, driver, models and
+    /// effort levels.
     fn overlay(mut self, over: &PluginConfig) -> Self {
         if !over.command.is_empty() {
             self.command = over.command.clone();
@@ -139,6 +139,9 @@ impl PluginConfig {
         }
         if !over.efforts.is_empty() {
             self.efforts = over.efforts.clone();
+        }
+        if !over.models.is_empty() {
+            self.models = over.models.clone();
         }
         self
     }
@@ -159,14 +162,18 @@ pub struct Resolved {
 struct Profile {
     name: String,
     config: PluginConfig,
+    /// The model list was written by hand (`models` in `config.toml` or a manifest), so it
+    /// is offered as it is rather than replaced by what the accounts report.
+    pinned_models: bool,
     drivers: Mutex<HashMap<DriverKind, Arc<dyn Driver>>>,
 }
 
 impl Profile {
-    fn new(name: &str, config: PluginConfig) -> Self {
+    fn new(name: &str, config: PluginConfig, pinned_models: bool) -> Self {
         Self {
             name: name.to_owned(),
             config,
+            pinned_models,
             drivers: Mutex::default(),
         }
     }
@@ -235,11 +242,12 @@ impl PluginRegistry {
                 Some(over) => builtin.overlay(over),
                 None => builtin,
             };
-            registry.insert(name, config);
+            let pinned = configs.get(name).is_some_and(|c| !c.models.is_empty());
+            registry.insert(name, config, pinned);
         }
         for (name, config) in configs {
             if !registry.profiles.contains_key(name) {
-                registry.insert(name, config.clone());
+                registry.insert(name, config.clone(), !config.models.is_empty());
             }
         }
         registry
@@ -256,15 +264,18 @@ impl PluginRegistry {
         for (name, config) in found {
             // Directory plugins replace built-ins unless config.toml says otherwise.
             if !configs.contains_key(&name) {
-                registry.insert(&name, config);
+                let pinned = !config.models.is_empty();
+                registry.insert(&name, config, pinned);
             }
         }
         (registry, warnings)
     }
 
-    fn insert(&mut self, name: &str, config: PluginConfig) {
-        self.profiles
-            .insert(name.to_owned(), Arc::new(Profile::new(name, config)));
+    fn insert(&mut self, name: &str, config: PluginConfig, pinned_models: bool) {
+        self.profiles.insert(
+            name.to_owned(),
+            Arc::new(Profile::new(name, config, pinned_models)),
+        );
     }
 
     pub fn contains(&self, name: &str) -> bool {
@@ -273,6 +284,12 @@ impl PluginRegistry {
 
     pub fn config(&self, name: &str) -> Option<&PluginConfig> {
         self.profiles.get(name).map(|p| &p.config)
+    }
+
+    /// Whether the plugin's models were listed by hand (`models` in its `config.toml` entry
+    /// or its manifest): then they are what is offered, not what its accounts report.
+    pub fn models_pinned(&self, name: &str) -> bool {
+        self.profiles.get(name).is_some_and(|p| p.pinned_models)
     }
 
     /// The driver for an agent of plugin `name`: `driver` if the agent names one, else the
@@ -413,6 +430,18 @@ mod tests {
             registry.config("codex").unwrap().efforts,
             ["minimal", "low", "high"]
         );
+    }
+
+    #[test]
+    fn config_can_replace_a_built_in_model_list() {
+        let plain = PluginRegistry::with_config(&BTreeMap::new());
+        assert!(!plain.models_pinned("codebuddy"));
+        let over: PluginConfig = toml::from_str(r#"models = ["hy3", "glm-5.3"]"#).unwrap();
+        let registry =
+            PluginRegistry::with_config(&BTreeMap::from([("codebuddy".to_owned(), over)]));
+        assert_eq!(registry.get("codebuddy").unwrap().models(), ["hy3", "glm-5.3"]);
+        assert!(registry.models_pinned("codebuddy"));
+        assert!(!registry.models_pinned("codex"));
     }
 
     #[test]

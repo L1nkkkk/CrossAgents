@@ -94,6 +94,12 @@ export function HomeView() {
   // Logins per vendor: with more than one, the model menus also say which login pays.
   const quota = useQuota();
   const accountsOf = (plugin: string) => (quota.data?.accounts ?? []).filter((a) => a.account.provider === plugin);
+  /** One login's models (what it reported), else the vendor's; a list set in config.toml wins. */
+  const modelsFor = (p: PluginInfo, account?: string): string[] => {
+    if (p.models_pinned || !account) return p.models;
+    const own = quota.data?.accounts.find((a) => a.account.id === account)?.models.map((m) => m.id) ?? [];
+    return own.length ? own : p.models;
+  };
   const accountLabel = (id?: string) => {
     const a = quota.data?.accounts.find((x) => x.account.id === id);
     return a ? a.account.label || a.account.id : undefined;
@@ -331,7 +337,7 @@ export function HomeView() {
       const groups = logins.length > 1 ? logins.map((a) => ({ account: a.account.id, title: `${vendorLabel(p.name)} · ${a.account.label || a.account.id}` })) : [{ account: undefined, title: vendorLabel(p.name) }];
       return groups.flatMap(({ account, title }): MenuItem[] => [
         { kind: "header", key: `h-${p.name}-${account ?? ""}`, label: title },
-        ...p.models.map((m): MenuItem => {
+        ...modelsFor(p, account).map((m): MenuItem => {
           const choice: Choice = { plugin: p.name, model: m, ...(account ? { account } : {}) };
           return { kind: "item", key: `${p.name}/${account ?? ""}/${m}`, label: prettyModel(m), sub: m, icon: <VendorMark plugin={p.name} size={14} />, on: isOn(choice), onPick: () => onPick(choice) };
         }),

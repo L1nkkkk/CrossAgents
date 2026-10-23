@@ -2,7 +2,16 @@
 import type { Capabilities } from "./Capabilities";
 import type { DriverKind } from "./DriverKind";
 
-export type PluginInfo = { name: string, models: Array<string>, 
+export type PluginInfo = { name: string, 
+/**
+ * The models offered: what its logins report, else its configured or built-in list.
+ */
+models: Array<string>, 
+/**
+ * `models` is the list set in `config.toml`, not what the logins report; each login is
+ * then offered this list too.
+ */
+models_pinned: boolean, 
 /**
  * The driver its agents use unless they name another.
  */
