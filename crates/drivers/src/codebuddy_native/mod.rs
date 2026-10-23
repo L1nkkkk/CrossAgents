@@ -26,7 +26,7 @@ use tokio::process::Command;
 
 use crate::claude_native::ClaudeNativeDriver;
 use crate::claude_native::wire::{self, Flavor};
-use crate::process::{find_in_path, hide_console, system_proxy_env};
+use crate::process::{check_proxy, find_in_path, hide_console, system_proxy_env};
 
 /// How long [`probe`] waits for the CLI to answer `initialize`.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -301,6 +301,8 @@ pub async fn probe(command: &[String], env: &[(String, String)]) -> Result<Value
     let (program, extra) = command
         .split_first()
         .ok_or_else(|| CoreError::Agent("empty codebuddy launch command".into()))?;
+    // The CLI cannot answer `initialize` without reaching its API through the proxy.
+    check_proxy(env).await?;
     let mut child = Command::new(program);
     for (key, _) in std::env::vars_os() {
         if Flavor::Codebuddy.withholds(&key.to_string_lossy()) {

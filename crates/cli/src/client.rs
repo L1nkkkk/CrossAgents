@@ -29,6 +29,9 @@ impl Client {
         Ok(Self {
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(2))
+                // The hub is on loopback: a system proxy must not sit in front of it, and a
+                // dead proxy would otherwise be reported as "hub is not running".
+                .no_proxy()
                 .build()?,
             base: format!("http://127.0.0.1:{}", hub.port),
             token: paths.read_token()?,

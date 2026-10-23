@@ -28,7 +28,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use self::wire::{Flavor, Launch, Start, Translator};
 use crate::launch::{self, BoxRead, BoxWrite, ExitWatch, LaunchSpec, Launched, ProcessHandle};
-use crate::process::{StderrTail, find_in_path, hide_console, system_proxy_env};
+use crate::process::{StderrTail, check_proxy, find_in_path, hide_console, system_proxy_env};
 
 /// `entrypoint` of the sessions CrossAgents starts, in Claude Code's transcripts.
 pub const ENTRYPOINT: &str = "crossagents";
@@ -513,6 +513,9 @@ impl ClaudeSession {
         ];
         env.extend(system_proxy_env());
         env.extend(spec.env.iter().cloned());
+        // A CLI pointed at a dead proxy starts fine and then cannot reach its API; the
+        // turn would stall instead of saying why. Fail here, where the proxy can be named.
+        check_proxy(&spec.env).await?;
         let launched = launch::launch(LaunchSpec {
             program,
             args,
