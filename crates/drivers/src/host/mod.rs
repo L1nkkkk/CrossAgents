@@ -12,8 +12,8 @@
 //! carries on ([`claim`], [`crate::launch::adopt`]). Nothing is ever killed by pid: a host
 //! is told to stop over its own connection, which proves who it is.
 
-pub mod job;
 mod client;
+pub mod job;
 mod serve;
 pub mod wire;
 

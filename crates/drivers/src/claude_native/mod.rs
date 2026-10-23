@@ -515,7 +515,9 @@ impl ClaudeSession {
         env.extend(spec.env.iter().cloned());
         // A CLI pointed at a dead proxy starts fine and then cannot reach its API; the
         // turn would stall instead of saying why. Fail here, where the proxy can be named.
-        check_proxy(&spec.env).await?;
+        let api_host = flavor.api_host(&spec.env);
+        // A host the proxy cannot reach but a direct connection can is exempted instead.
+        env.extend(check_proxy(&spec.env, Some(&api_host)).await?);
         let launched = launch::launch(LaunchSpec {
             program,
             args,

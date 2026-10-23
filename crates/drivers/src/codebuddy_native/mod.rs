@@ -302,7 +302,8 @@ pub async fn probe(command: &[String], env: &[(String, String)]) -> Result<Value
         .split_first()
         .ok_or_else(|| CoreError::Agent("empty codebuddy launch command".into()))?;
     // The CLI cannot answer `initialize` without reaching its API through the proxy.
-    check_proxy(env).await?;
+    let api_host = Flavor::Codebuddy.api_host(env);
+    let direct = check_proxy(env, Some(&api_host)).await?;
     let mut child = Command::new(program);
     for (key, _) in std::env::vars_os() {
         if Flavor::Codebuddy.withholds(&key.to_string_lossy()) {
@@ -322,6 +323,7 @@ pub async fn probe(command: &[String], env: &[(String, String)]) -> Result<Value
         ])
         .envs(system_proxy_env())
         .envs(env.iter().cloned())
+        .envs(direct)
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

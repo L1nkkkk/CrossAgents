@@ -72,7 +72,12 @@ async fn leave(t: TestHub) -> tempfile::TempDir {
 
 /// Every event so far.
 async fn history(t: &TestHub) -> Vec<Event> {
-    let text = t.get("/v1/events?since=0&follow=false").await.text().await.unwrap();
+    let text = t
+        .get("/v1/events?since=0&follow=false")
+        .await
+        .text()
+        .await
+        .unwrap();
     text.lines()
         .filter_map(|l| l.strip_prefix("data:"))
         .filter_map(|d| serde_json::from_str(d.trim_start()).ok())
@@ -108,19 +113,32 @@ static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
 async fn a_restarted_hub_takes_over_running_agents() {
-    takes_over("codex", "mock-codex", "echo(model=mock-codex,effort=medium): [sleep 6000] long")
-        .await;
+    takes_over(
+        "codex",
+        "mock-codex",
+        "echo(model=mock-codex,effort=medium): [sleep 6000] long",
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn a_restarted_hub_takes_over_claude_code() {
-    takes_over("claude", "mock-claude", "echo(model=mock-claude): [sleep 6000] long").await;
+    takes_over(
+        "claude",
+        "mock-claude",
+        "echo(model=mock-claude): [sleep 6000] long",
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn a_restarted_hub_takes_over_codebuddy() {
-    takes_over("codebuddy", "mock-codebuddy", "echo(model=mock-codebuddy): [sleep 6000] long")
-        .await;
+    takes_over(
+        "codebuddy",
+        "mock-codebuddy",
+        "echo(model=mock-codebuddy): [sleep 6000] long",
+    )
+    .await;
 }
 
 /// A hub stops while the agent's long turn runs; the next hub takes the process over, the
@@ -133,8 +151,10 @@ async fn takes_over(plugin: &str, model: &str, echo: &str) {
 
     let mut w = t.watch().await;
     t.send(name, "[pid]").await;
-    w.until("first turn", |e| matches!(e.kind, EventKind::AgentTurnCompleted { .. }))
-        .await;
+    w.until("first turn", |e| {
+        matches!(e.kind, EventKind::AgentTurnCompleted { .. })
+    })
+    .await;
     let pid = pid_in(&w.output());
 
     // A long turn is running when the hub goes.
@@ -155,7 +175,12 @@ async fn takes_over(plugin: &str, model: &str, echo: &str) {
 
     // The next hub takes it over; the long turn ends there.
     let t = start(home).await;
-    let agent: Value = t.get(&format!("/v1/agents/{name}")).await.json().await.unwrap();
+    let agent: Value = t
+        .get(&format!("/v1/agents/{name}"))
+        .await
+        .json()
+        .await
+        .unwrap();
     assert_eq!(agent["status"], "running", "{agent}");
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let (events, completed) = loop {
@@ -171,7 +196,10 @@ async fn takes_over(plugin: &str, model: &str, echo: &str) {
         if completed.is_some() {
             break (events, completed);
         }
-        assert!(std::time::Instant::now() < deadline, "the long turn did not end");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the long turn did not end"
+        );
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
     assert_eq!(completed, Some(StopReason::EndTurn));
@@ -192,8 +220,10 @@ async fn takes_over(plugin: &str, model: &str, echo: &str) {
     // Same process for the next turn.
     let mut w = t.watch().await;
     t.send(name, "[pid]").await;
-    w.until("turn after takeover", |e| matches!(e.kind, EventKind::AgentTurnCompleted { .. }))
-        .await;
+    w.until("turn after takeover", |e| {
+        matches!(e.kind, EventKind::AgentTurnCompleted { .. })
+    })
+    .await;
     assert_eq!(pid_in(&w.output()), pid);
 
     // Stopping with the agents ends the host too.
@@ -252,7 +282,9 @@ async fn a_turn_whose_host_died_is_interrupted() {
     let mut w = t.watch().await;
     t.send("cx", "again").await;
     let done = w
-        .until("turn after the loss", |e| matches!(e.kind, EventKind::AgentTurnCompleted { .. }))
+        .until("turn after the loss", |e| {
+            matches!(e.kind, EventKind::AgentTurnCompleted { .. })
+        })
         .await;
     assert!(matches!(
         done.kind,

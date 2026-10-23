@@ -87,6 +87,48 @@ impl Flavor {
                 .iter()
                 .any(|kept| kept.eq_ignore_ascii_case(key))
     }
+
+    /// The host this CLI reaches through the proxy, which
+    /// [`crate::process::check_proxy`] checks before a session starts.
+    ///
+    /// `ANTHROPIC_BASE_URL` wins when the agent's environment sets it: a Profile may point
+    /// Claude Code at a gateway instead (see `docs/DESIGN.md`), and the CLI then never
+    /// calls the vendor at all. Otherwise Claude Code calls `api.anthropic.com`, and a
+    /// CodeBuddy login sits on one of two API origins decided by
+    /// `CODEBUDDY_INTERNET_ENVIRONMENT` and the account: a mainland login talks to
+    /// `www.workbuddy.cn`, everything else to `www.codebuddy.ai` (the default when the
+    /// variable is unset). Only the default is named here — a mainland login behind a
+    /// proxy that cannot reach `www.codebuddy.ai` would be reported as broken when it is
+    /// not, which is why the check says which host it could not reach.
+    pub fn api_host(self, env: &[(String, String)]) -> String {
+        if let Some(host) = base_url_host(env) {
+            return host;
+        }
+        match self {
+            Self::Claude => "api.anthropic.com".to_owned(),
+            Self::Codebuddy => "www.codebuddy.ai".to_owned(),
+        }
+    }
+}
+
+/// The host of `ANTHROPIC_BASE_URL`, taken from the agent's own environment first and the
+/// hub's second: a child inherits both.
+fn base_url_host(env: &[(String, String)]) -> Option<String> {
+    let value = env
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("ANTHROPIC_BASE_URL"))
+        .map(|(_, value)| value.clone())
+        .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok())?;
+    let rest = value.trim();
+    let rest = rest.split_once("://").map_or(rest, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority.rsplit('@').next()?;
+    // `host:port`, and `[::1]:port` for the rare IPv6 gateway.
+    let host = match authority.strip_prefix('[') {
+        Some(rest) => rest.split_once(']').map_or(rest, |(host, _)| host),
+        None => authority.split(':').next()?,
+    };
+    (!host.is_empty()).then(|| host.to_owned())
 }
 
 pub const DEFAULT_SETTING_SOURCES: &str = "project,local";
@@ -1107,6 +1149,25 @@ mod tests {
             assert!(!Flavor::Codebuddy.withholds(key), "{key}");
         }
         assert!(!Flavor::Claude.withholds("CODEBUDDY_MCP_CONFIG"));
+    }
+
+    #[test]
+    fn the_api_host_follows_the_gateway_an_agent_points_the_cli_at() {
+        // An empty value keeps the process environment out of these: it means "unset".
+        let unset = vec![("ANTHROPIC_BASE_URL".to_owned(), String::new())];
+        assert_eq!(Flavor::Claude.api_host(&unset), "api.anthropic.com");
+        assert_eq!(Flavor::Codebuddy.api_host(&unset), "www.codebuddy.ai");
+
+        let gateway = |url: &str| {
+            Flavor::Claude.api_host(&[("ANTHROPIC_BASE_URL".to_owned(), url.to_owned())])
+        };
+        assert_eq!(
+            gateway("https://api.deepseek.com/anthropic"),
+            "api.deepseek.com"
+        );
+        assert_eq!(gateway("http://gateway.corp:8443/v1"), "gateway.corp");
+        assert_eq!(gateway("api.deepseek.com"), "api.deepseek.com");
+        assert_eq!(gateway("http://user:pass@10.0.0.9:8080"), "10.0.0.9");
     }
 
     fn stream(event: Value) -> Value {

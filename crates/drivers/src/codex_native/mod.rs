@@ -107,7 +107,10 @@ impl CodexNativeDriver {
 
     /// The process a previous hub left for `spec`'s command and environment, taken over
     /// (or already taken over for another session).
-    async fn adopted_server(&self, spec: &SessionSpec) -> Result<Option<Arc<AppServer>>, CoreError> {
+    async fn adopted_server(
+        &self,
+        spec: &SessionSpec,
+    ) -> Result<Option<Arc<AppServer>>, CoreError> {
         let key = self.key_for(spec);
         let mut pool = self.pool.lock().await;
         if let Some(server) = pool.get(&key).and_then(Weak::upgrade)
@@ -235,9 +238,7 @@ impl Driver for CodexNativeDriver {
         };
         // The thread may have been released (or never loaded) in that process; then the
         // hub resumes it there like any other.
-        if let Ok(loaded) = server
-            .request(method::THREAD_LOADED_LIST, json!({}))
-            .await
+        if let Ok(loaded) = server.request(method::THREAD_LOADED_LIST, json!({})).await
             && let Some(ids) = loaded["data"].as_array()
             && !ids.iter().any(|id| id.as_str() == Some(session_id))
         {

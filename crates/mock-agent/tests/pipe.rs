@@ -29,7 +29,11 @@ fn cli(home: &Path, args: &[&str]) -> String {
 }
 
 /// Reads `pipe` to its end in the background; says on `done` when it got there.
-fn drain(mut pipe: impl Read + Send + 'static, done: mpsc::Sender<&'static str>, what: &'static str) {
+fn drain(
+    mut pipe: impl Read + Send + 'static,
+    done: mpsc::Sender<&'static str>,
+    what: &'static str,
+) {
     std::thread::spawn(move || {
         let mut sink = Vec::new();
         let _ = pipe.read_to_end(&mut sink);
@@ -68,8 +72,17 @@ fn piped_output_ends_with_the_hub_while_agents_keep_running() {
     cli(
         home.path(),
         &[
-            "agent", "add", "cx", "--plugin", "codex", "--model", "mock-codex", "--role",
-            "worker", "--cwd", &cwd,
+            "agent",
+            "add",
+            "cx",
+            "--plugin",
+            "codex",
+            "--model",
+            "mock-codex",
+            "--role",
+            "worker",
+            "--cwd",
+            &cwd,
         ],
     );
     cli(home.path(), &["send", "cx", "hello", "--wait"]);
@@ -111,6 +124,8 @@ fn kill(pid: u32) {
             .stderr(Stdio::null())
             .status()
     } else {
-        Command::new("kill").args(["-KILL", &pid.to_string()]).status()
+        Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()
     };
 }

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crossagents_core::CoreError;
 use crossagents_core::process::NoWindow;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::process::Command;
 use tokio::sync::Mutex;
@@ -191,14 +191,12 @@ const LOCAL_BYPASS: &str = "localhost,127.0.0.1,::1";
 /// The key keeps the case the hub's environment used, so a client that reads only one of
 /// `NO_PROXY` / `no_proxy` still sees the merged value.
 fn no_proxy_env() -> Vec<(String, String)> {
-    let inherited = ["NO_PROXY", "no_proxy"]
-        .iter()
-        .find_map(|key| {
-            std::env::var(key)
-                .ok()
-                .filter(|value| !value.is_empty())
-                .map(|value| (*key, value))
-        });
+    let inherited = ["NO_PROXY", "no_proxy"].iter().find_map(|key| {
+        std::env::var(key)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(|value| (*key, value))
+    });
     match inherited {
         Some((key, value)) => vec![(key.to_owned(), no_proxy_value(Some(&value)))],
         None => vec![("NO_PROXY".to_owned(), no_proxy_value(None))],
@@ -218,20 +216,119 @@ fn no_proxy_value(inherited: Option<&str>) -> String {
 /// How long a proxy gets to accept a connection before it counts as down.
 const PROXY_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Fails when the proxy a vendor CLI would be pointed at is not accepting connections.
+/// How long the proxy gets to carry a TLS handshake to the vendor's API.
+///
+/// Generous on purpose: a working node took 6.6s for one API host on this machine. The
+/// check only separates "the tunnel carries bytes" from "it carries none", so waiting is
+/// cheaper than calling a working proxy dead.
+const REACH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How much of the proxy's `CONNECT` answer is read before giving up on it.
+const CONNECT_ANSWER_LIMIT: usize = 8 * 1024;
+
+/// Fails when the proxy a vendor CLI would be pointed at cannot carry the CLI's traffic.
 ///
 /// A CLI started against a dead proxy runs fine and then cannot reach its API: the turn
 /// stalls, or fails much later with something that never mentions the proxy. A connection
 /// test at launch is the check that is unambiguous — a refused port is a dead proxy,
 /// whatever the CLI would have made of it.
 ///
+/// An open port is not enough on its own: a proxy can accept `CONNECT`, answer `200
+/// Connection established`, and still carry nothing because its route to that one host is
+/// dead. The CLI then fails minutes into a turn with a TLS error that names no proxy (seen:
+/// a rule that sent the vendor's API through a node that could not reach it). `reach` is
+/// the host the CLI has to get to, which [`reach_through`] checks with a real handshake;
+/// `None` when the caller cannot name it, and only the port is checked.
+///
 /// `env` is what the caller adds to the CLI's environment after [`system_proxy_env`]: if it
 /// names a proxy, that is the one the CLI ends up using.
-pub async fn check_proxy(env: &[(String, String)]) -> Result<(), CoreError> {
-    match effective_proxy(env) {
-        Some(proxy) => probe(&proxy).await,
-        None => Ok(()),
+///
+/// When the proxy's route to `reach` is dead but the host answers directly (seen: a proxy
+/// rule sending a vendor that needs no proxy through a node that cannot reach it), the CLI
+/// is not failed: the returned variables exempt that host from the proxy, and the caller
+/// adds them to the CLI's environment last. Empty when the proxy carries the traffic.
+pub async fn check_proxy(
+    env: &[(String, String)],
+    reach: Option<&str>,
+) -> Result<Vec<(String, String)>, CoreError> {
+    let Some(proxy) = effective_proxy(env) else {
+        return Ok(Vec::new());
+    };
+    probe(&proxy).await?;
+    // A SOCKS proxy needs its own handshake before TLS; the port test is all there is.
+    let Some(host) = reach.filter(|_| proxy.scheme == "http") else {
+        return Ok(Vec::new());
+    };
+    if goes_direct(host) {
+        return Ok(bypass_env(env, host));
     }
+    let Err(err) = reach_through(&proxy, host).await else {
+        return Ok(Vec::new());
+    };
+    if reach_directly(host).await {
+        DIRECT_HOSTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(host.to_owned(), std::time::Instant::now());
+        return Ok(bypass_env(env, host));
+    }
+    Err(err)
+}
+
+/// Hosts the proxy could not reach but a direct connection could, with when that was
+/// found: later launches go direct at once instead of waiting out [`REACH_TIMEOUT`] again.
+static DIRECT_HOSTS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// How long a host found reachable only directly keeps skipping the proxy check: the proxy
+/// may be fixed (a rule added, a node switched) in the meantime.
+const DIRECT_TTL: Duration = Duration::from_secs(10 * 60);
+
+fn goes_direct(host: &str) -> bool {
+    DIRECT_HOSTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(host)
+        .is_some_and(|found| found.elapsed() < DIRECT_TTL)
+}
+
+/// `NO_PROXY` for a CLI that has to reach `host` directly: what it would have had anyway
+/// (the caller's own value first, else the hub's merged with loopback), plus the host's
+/// domain, so its sibling hosts (`api.` next to `www.`) go direct as well.
+fn bypass_env(overrides: &[(String, String)], host: &str) -> Vec<(String, String)> {
+    let domain = host.strip_prefix("www.").unwrap_or(host);
+    let own = overrides
+        .iter()
+        .find(|(key, value)| key.eq_ignore_ascii_case("NO_PROXY") && !value.is_empty())
+        .cloned();
+    let (key, value) = own.unwrap_or_else(|| {
+        no_proxy_env()
+            .into_iter()
+            .next()
+            .expect("no_proxy_env names one variable")
+    });
+    if value.split(',').any(|entry| entry.trim() == domain) {
+        return vec![(key, value)];
+    }
+    vec![(key, format!("{value},{domain}"))]
+}
+
+/// Whether `host` answers a TLS hello on port 443 without any proxy.
+async fn reach_directly(host: &str) -> bool {
+    let Ok(Ok(mut stream)) =
+        tokio::time::timeout(PROXY_CONNECT_TIMEOUT, TcpStream::connect((host, 443))).await
+    else {
+        return false;
+    };
+    if stream.write_all(&client_hello(host)).await.is_err() {
+        return false;
+    }
+    let mut byte = [0u8; 1];
+    matches!(
+        tokio::time::timeout(REACH_TIMEOUT, stream.read(&mut byte)).await,
+        Ok(Ok(n)) if n > 0
+    )
 }
 
 /// The proxy a vendor CLI would use: `env` first, then the hub's own `HTTPS_PROXY` /
@@ -273,11 +370,135 @@ async fn probe(proxy: &ProxyUrl) -> Result<(), CoreError> {
     }
 }
 
+/// Fails when the proxy cannot carry a TLS handshake to `host`.
+///
+/// `CONNECT` is answered before the proxy has its upstream: a `200` only means the request
+/// was understood, not that anything is behind it. The first byte the far end sends is the
+/// first proof the tunnel reaches it, so a `ClientHello` goes in and a byte has to come
+/// back.
+async fn reach_through(proxy: &ProxyUrl, host: &str) -> Result<(), CoreError> {
+    let failed = |detail: String| {
+        CoreError::Agent(format!(
+            "the proxy {} is up but cannot reach {host} ({detail}); its route to that host \
+             looks dead — give the proxy a direct rule for it, switch its node, or set \
+             HTTPS_PROXY to a working proxy",
+            proxy.url
+        ))
+    };
+    let mut stream = match tokio::time::timeout(
+        PROXY_CONNECT_TIMEOUT,
+        TcpStream::connect((proxy.host.as_str(), proxy.port)),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(err)) => return Err(failed(err.to_string())),
+        Err(_) => {
+            return Err(failed(format!(
+                "no connection within {}s",
+                PROXY_CONNECT_TIMEOUT.as_secs()
+            )));
+        }
+    };
+    let connect = format!("CONNECT {host}:443 HTTP/1.1\r\nHost: {host}:443\r\n\r\n");
+    if let Err(err) = stream.write_all(connect.as_bytes()).await {
+        return Err(failed(err.to_string()));
+    }
+    let answer = match tokio::time::timeout(PROXY_CONNECT_TIMEOUT, read_answer(&mut stream)).await {
+        Ok(Ok(answer)) => answer,
+        Ok(Err(err)) => return Err(failed(err.to_string())),
+        Err(_) => {
+            return Err(failed(format!(
+                "no answer to CONNECT within {}s",
+                PROXY_CONNECT_TIMEOUT.as_secs()
+            )));
+        }
+    };
+    let status = answer.lines().next().unwrap_or_default();
+    if !status.contains(" 200") {
+        return Err(failed(format!("CONNECT was answered `{status}`")));
+    }
+    if let Err(err) = stream.write_all(&client_hello(host)).await {
+        return Err(failed(err.to_string()));
+    }
+    let mut byte = [0u8; 1];
+    match tokio::time::timeout(REACH_TIMEOUT, stream.read(&mut byte)).await {
+        Ok(Ok(0)) => Err(failed("the tunnel closed without a byte of TLS".to_owned())),
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(err)) => Err(failed(err.to_string())),
+        Err(_) => Err(failed(format!(
+            "no TLS answer within {}s",
+            REACH_TIMEOUT.as_secs()
+        ))),
+    }
+}
+
+/// The proxy's `CONNECT` answer, up to and including its blank line: a header left in the
+/// socket would be read back as if the far end had sent it.
+async fn read_answer(stream: &mut TcpStream) -> std::io::Result<String> {
+    let mut answer = Vec::new();
+    let mut byte = [0u8; 1];
+    while answer.len() < CONNECT_ANSWER_LIMIT {
+        if stream.read(&mut byte).await? == 0 {
+            break;
+        }
+        answer.push(byte[0]);
+        if answer.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    Ok(String::from_utf8_lossy(&answer).into_owned())
+}
+
+/// A minimal TLS 1.2 `ClientHello` for `host`.
+///
+/// Nothing is verified and nothing is derived from it: the only question is whether the far
+/// end answers at all, and any server answers a well-formed hello with a `ServerHello` or an
+/// alert. Written out by hand to keep a TLS stack out of the dependency tree of a health
+/// check — a server that got this far is reachable, which is all [`reach_through`] reports.
+fn client_hello(host: &str) -> Vec<u8> {
+    let name = host.as_bytes();
+    let mut server_name = Vec::new();
+    server_name.extend_from_slice(&((name.len() + 3) as u16).to_be_bytes());
+    server_name.push(0); // host_name
+    server_name.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    server_name.extend_from_slice(name);
+
+    let mut extensions = Vec::new();
+    extensions.extend_from_slice(&[0x00, 0x00]); // server_name
+    extensions.extend_from_slice(&(server_name.len() as u16).to_be_bytes());
+    extensions.extend_from_slice(&server_name);
+
+    let suites: [u16; 6] = [0xc02b, 0xc02f, 0x009c, 0x009d, 0x002f, 0x0035];
+    let mut body = Vec::new();
+    body.extend_from_slice(&[0x03, 0x03]); // TLS 1.2
+    body.extend_from_slice(&[0x5a; 32]); // random: fixed, nothing is derived from it
+    body.push(0); // no session id
+    body.extend_from_slice(&((suites.len() * 2) as u16).to_be_bytes());
+    for suite in suites {
+        body.extend_from_slice(&suite.to_be_bytes());
+    }
+    body.extend_from_slice(&[0x01, 0x00]); // one compression method: none
+    body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+    body.extend_from_slice(&extensions);
+
+    let mut handshake = vec![0x01];
+    handshake.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]); // 3-byte length
+    handshake.extend_from_slice(&body);
+
+    let mut record = vec![0x16, 0x03, 0x01]; // handshake, TLS 1.0 record version
+    record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+    record.extend_from_slice(&handshake);
+    record
+}
+
 /// A proxy URL as the CLIs are given it, split up so it can be probed.
 #[derive(Debug)]
 struct ProxyUrl {
     /// As the environment or the registry wrote it, for error messages.
     url: String,
+    /// Lowercased: `http` can be asked to `CONNECT`, the others need their own handshake.
+    scheme: String,
     host: String,
     port: u16,
 }
@@ -286,10 +507,11 @@ impl ProxyUrl {
     fn parse(raw: &str) -> Option<Self> {
         let raw = raw.trim();
         let (scheme, rest) = raw.split_once("://").unwrap_or(("http", raw));
+        let scheme = scheme.to_ascii_lowercase();
         // `user:pass@host:port/path` → `host:port`
         let authority = rest.split(['/', '?', '#']).next()?;
         let authority = authority.rsplit('@').next()?;
-        let default_port = match scheme.to_ascii_lowercase().as_str() {
+        let default_port = match scheme.as_str() {
             "https" => 443,
             "socks" | "socks4" | "socks4a" | "socks5" | "socks5h" => 1080,
             _ => 80,
@@ -313,6 +535,7 @@ impl ProxyUrl {
         };
         (!host.is_empty()).then(|| Self {
             url: raw.to_owned(),
+            scheme,
             host,
             port,
         })
@@ -444,5 +667,120 @@ mod tests {
         drop(listener);
         let err = probe(&proxy).await.expect_err("nothing listens there now");
         assert!(err.to_string().contains(&proxy.url), "{err}");
+    }
+
+    /// The length the TLS record at the front of `hello` announces, once its five-byte
+    /// header is there.
+    fn hello_record_len(hello: &[u8]) -> usize {
+        match hello {
+            [_, _, _, hi, lo, ..] => u16::from_be_bytes([*hi, *lo]) as usize,
+            _ => 0,
+        }
+    }
+
+    /// A listener standing in for a proxy: `answer` goes back once the `CONNECT` line has
+    /// been read, then `payload` once the client's hello arrives. Without a payload the
+    /// connection is dropped where a proxy with a dead route would leave it.
+    async fn fake_proxy(answer: &'static str, payload: Option<&'static [u8]>) -> ProxyUrl {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bound");
+        let port = listener.local_addr().expect("address").port();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accepted");
+            let mut seen = Vec::new();
+            let mut byte = [0u8; 1];
+            while !seen.ends_with(b"\r\n\r\n") {
+                if socket.read(&mut byte).await.unwrap_or(0) == 0 {
+                    return;
+                }
+                seen.push(byte[0]);
+            }
+            socket.write_all(answer.as_bytes()).await.expect("answered");
+            let Some(payload) = payload else {
+                return;
+            };
+            // Drain the whole hello first: closing with bytes still unread resets the
+            // connection on Windows, and the payload would be lost with it.
+            let mut hello = Vec::new();
+            let mut buffer = [0u8; 256];
+            while hello.len() < 5 || hello.len() < 5 + hello_record_len(&hello) {
+                let read = socket.read(&mut buffer).await.unwrap_or(0);
+                if read == 0 {
+                    return;
+                }
+                hello.extend_from_slice(&buffer[..read]);
+            }
+            socket.write_all(payload).await.expect("payload");
+            let _ = socket.shutdown().await;
+        });
+        ProxyUrl::parse(&format!("http://127.0.0.1:{port}")).expect("parsed")
+    }
+
+    #[tokio::test]
+    async fn a_proxy_that_carries_tls_to_the_api_is_accepted() {
+        let proxy = fake_proxy("HTTP/1.1 200 Connection established\r\n\r\n", Some(&[0x16])).await;
+        let result = reach_through(&proxy, "api.example.test").await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn a_proxy_that_answers_connect_but_carries_nothing_is_reported() {
+        // The failure that started this: `200 Connection established`, then silence.
+        let proxy = fake_proxy("HTTP/1.1 200 Connection established\r\n\r\n", None).await;
+        let err = reach_through(&proxy, "api.example.test")
+            .await
+            .expect_err("nothing came back");
+        let message = err.to_string();
+        assert!(message.contains("api.example.test"), "{message}");
+        assert!(message.contains(&proxy.url), "{message}");
+    }
+
+    #[tokio::test]
+    async fn a_proxy_that_refuses_connect_is_reported() {
+        let proxy = fake_proxy("HTTP/1.1 403 Forbidden\r\n\r\n", None).await;
+        let err = reach_through(&proxy, "api.example.test")
+            .await
+            .expect_err("refused");
+        assert!(err.to_string().contains("403"), "{err}");
+    }
+
+    #[test]
+    fn a_host_reached_directly_is_added_to_no_proxy() {
+        let env = [("NO_PROXY".to_owned(), "localhost,127.0.0.1".to_owned())];
+        assert_eq!(
+            bypass_env(&env, "www.codebuddy.ai"),
+            [("NO_PROXY".to_owned(), "localhost,127.0.0.1,codebuddy.ai".to_owned())]
+        );
+        let env = [("NO_PROXY".to_owned(), "localhost,codebuddy.ai".to_owned())];
+        assert_eq!(bypass_env(&env, "www.codebuddy.ai")[0].1, "localhost,codebuddy.ai");
+    }
+
+    /// Live: a proxy at 127.0.0.1:7890 whose route to the host is dead, and a host that
+    /// answers directly. Run by hand with `--ignored` on a machine set up that way.
+    #[tokio::test]
+    #[ignore]
+    async fn a_dead_proxy_route_falls_back_to_direct() {
+        let env = [("HTTPS_PROXY".to_owned(), "http://127.0.0.1:7890".to_owned())];
+        let extra = check_proxy(&env, Some("www.codebuddy.ai"))
+            .await
+            .expect("falls back to direct");
+        assert!(extra.iter().any(|(_, value)| value.contains("codebuddy.ai")), "{extra:?}");
+    }
+
+    #[test]
+    fn the_hello_names_the_host_and_is_well_formed() {
+        let hello = client_hello("api.example.test");
+        assert_eq!(&hello[..3], &[0x16, 0x03, 0x01]);
+        let record = u16::from_be_bytes([hello[3], hello[4]]) as usize;
+        assert_eq!(record, hello.len() - 5);
+        assert_eq!(hello[5], 0x01); // ClientHello
+        let handshake = u32::from_be_bytes([0, hello[6], hello[7], hello[8]]) as usize;
+        assert_eq!(handshake, record - 4);
+        assert!(
+            hello
+                .windows(16)
+                .any(|window| window == b"api.example.test")
+        );
     }
 }
