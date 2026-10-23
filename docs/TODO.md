@@ -18,7 +18,12 @@
 - [x] 运行时宿主登记在 `<home>/runtimes/`，hub 启动时握手确认后接管，不按 pid 杀进程（防 pid 复用误杀）；无人认领的宿主经连接停掉
 - [x] Windows 上每个 agent 放进独立 Job Object（KILL_ON_JOB_CLOSE），宿主一退整棵树清掉；`acp-generic` 的 job 由 hub 持有
 - [x] hub 退出默认把宿主里的会话留给下一个 hub（不 suspend，也就不会留下半截会话文件）；`hub stop --agents` 才停掉全部 agent
-- [ ] 在真实 codex / claude 上验证一次“hub stop → hub start 后轮次继续”（目前只在 mock app-server 上有端到端测试）
+- [~] 真实 agent 上验证"轮次跑到一半 hub stop → hub start 后轮次继续"（2026-10-23）：codex、codebuddy 已通过（轮次跑完、上下文和进程不变，新版本 hub 也能接管旧版本留下的进程）；claude 本机未装，未验证
+- [x] 修复：`codebuddy-native` 包装层没转发 `adopt`，导致 CodeBuddy 无法接管（实测发现，mock 测试只覆盖 codex 所以没测出）
+- [ ] 给 claude-native / codebuddy-native 补一个接管的自动化测试（mock 目前只模拟 codex app-server）
+- [ ] 宿主会继承拉起者的可继承句柄：前台 `hub run | …` 的管道要等 agent 结束才关闭，考虑拉起宿主时显式只传需要的句柄
+- [ ] 接管 codex 时，如果正在跑的那一轮的 id 一直没出现，就没法向 Codex 发 interrupt，只能本地放弃等待
+- [ ] Linux / macOS 上实测宿主（用进程组代替 Job Object，目前未验证）
 
 ## 二、hub 与 GUI 边界
 
@@ -28,14 +33,16 @@
 
 ## 三、常驻守护（等第一步稳定后再做）
 
+> §一 完成后，hub 停了 agent 照常跑，下一个 hub 接管。这一节剩下的是让 hub 本身常驻、开机自启。
+
 - [ ] 设计 hub 常驻模式：关闭窗口后 hub 继续运行，窗口重开时重新连接并拉取快照
-- [ ] Windows 自启方案：计划任务或服务，二选一并写明理由（权限、登录前运行、崩溃重拉的节流）
-- [ ] hub 的停止命令：优雅停止，等待会话 suspend 完成后再退出
-- [ ] 无窗口时的额度与预算上限：默认"空闲即挂起"，超过预算自动暂停并通知
+- [ ] Windows 自启方案：计划任务或服务，二选一并写明理由（权限、登录前运行、崩溃重拉的节流）；Cutex 用的是按用户的计划任务 + 内置 supervisor
+- [x] hub 的停止命令：`hub stop` 只停 hub，agent 留给下一个 hub；`hub stop --agents` 停掉全部 agent（取代原来的"等待会话 suspend 后再退出"）
+- [ ] 无窗口时的额度与预算上限：默认"空闲即挂起"，超过预算自动暂停并通知；agent 在没有 hub 时也会继续跑，这条更要紧
 
 ## 四、可观测性
 
-- [ ] `cli` 增加状态命令：hub 是否运行、各会话状态、子进程 pid、最近退出原因
+- [~] `cli` 增加状态命令：`hub status` 已列出后台 agent 进程（pid、启动时间、隔离方式）；各会话状态与最近退出原因还没汇总进来
 - [ ] 事件日志落盘，便于无窗口时排查问题
 - [ ] GUI 显示"hub 离线"时的诊断信息，而不是空白
 
@@ -96,7 +103,7 @@ B1 node 代理：
 
 - [ ] core：`crossagents node join`、配对码、hub 与 node 的双向通道（WSS 还是 gRPC 流待定）
 - [ ] core：驱动拆成两半，调度留在 hub，拉起 CLI 与协议翻译挪到 node；单机模式也走内置节点，只保留一套执行路径
-- [ ] core：节点上报已装插件、登录状态、可用模型；掉线时事件写本地日志，重连补发
+- [ ] core：节点上报已装插件、登录状态、可用模型；掉线时事件写本地日志，重连补发（可复用运行时宿主的 seq 编号 + 确认 + 补发机制，见 PROCESS-SUPERVISION §2）
 - [ ] core：协作工具 MCP 走 node 转发还是直连中心（待定）
 - [ ] GUI：配对确认弹窗、节点列表与在线状态
 
