@@ -93,6 +93,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     {
         tracing::warn!(error = %err, "cannot register local logins as accounts");
     }
+    accounts.warm();
     let tokens = Arc::new(AgentTokens::default());
     let setup = Arc::new(CollabSetup {
         tokens: tokens.clone(),
