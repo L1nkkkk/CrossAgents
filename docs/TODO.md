@@ -4,7 +4,7 @@
 > [codex-app-server 实测](research/codex-app-server.md)，[claude-stream-json 实测](research/claude-stream-json.md)，
 > [Cutex 前端拆解](research/cutex-gui-teardown.md)。
 >
-> 状态：`[ ]` 未开始 · `[~]` 进行中 · `[x]` 完成
+> 状态：`[ ]` 未开始 · `[~]` 进行中 · `[x]` 完成 · `[-]` 不做（已决策，理由留在条目里） · `[>]` 推迟到后续阶段
 
 ## 一、进程监督（优先）
 
@@ -13,23 +13,52 @@
 按 Cutex 的做法改为“agent 进程比 hub 活得久，新 hub 接管”，设计见 [PROCESS-SUPERVISION.md](PROCESS-SUPERVISION.md)。
 
 - [x] 子进程退出时记录原因（exited / crashed / killed / lost），`Exited` 带 `cause` 与退出码，另发 `agent.exited` 事件（超时类原因未单独区分）
-- [ ] 子进程崩溃后自动拉起：未做。决定：中断的那一轮不自动重放（可能重复执行命令、重复改文件），只标 `interrupted` 交给人或 Planner
+- [-] 子进程崩溃后不自动拉起（2026-10-23 已决定）：中断的那一轮不自动重放（可能重复执行命令、重复改文件），只标 `interrupted` 交给人或 Planner
 - [x] 中断的那一轮给出明确状态：hub 重启时无法接管的轮次记为 `stop_reason: "interrupted"` 并附说明；能接管的轮次照常跑完
 - [x] 运行时宿主登记在 `<home>/runtimes/`，hub 启动时握手确认后接管，不按 pid 杀进程（防 pid 复用误杀）；无人认领的宿主经连接停掉
 - [x] Windows 上每个 agent 放进独立 Job Object（KILL_ON_JOB_CLOSE），宿主一退整棵树清掉；`acp-generic` 的 job 由 hub 持有
 - [x] hub 退出默认把宿主里的会话留给下一个 hub（不 suspend，也就不会留下半截会话文件）；`hub stop --agents` 才停掉全部 agent
-- [~] 真实 agent 上验证"轮次跑到一半 hub stop → hub start 后轮次继续"（2026-10-23）：codex、codebuddy 已通过（轮次跑完、上下文和进程不变，新版本 hub 也能接管旧版本留下的进程）；claude 本机未装，未验证（协议层已由 mock 自动化测试覆盖，只差真实 Claude Code）
+- [~] 真实 agent 上验证"轮次跑到一半 hub stop → hub start 后轮次继续"（2026-10-23）：codex、codebuddy 已通过（轮次跑完、上下文和进程不变，新版本 hub 也能接管旧版本留下的进程）；claude 本机未装，未验证（协议层已由 mock 自动化测试覆盖，只差真实 Claude Code）。**等环境**：本机没有 `claude` 命令，装上即可补测
 - [x] 修复：`codebuddy-native` 包装层没转发 `adopt`，导致 CodeBuddy 无法接管（实测发现，mock 测试只覆盖 codex 所以没测出）
 - [x] 给 claude-native / codebuddy-native 补接管的自动化测试：mock 新增 `stream-json` 模式（`crates/mock-agent/src/stream_json.rs`），`tests/adopt.rs` 对 codex、claude、codebuddy 各跑一遍"轮次跑到一半 hub 停 → 新 hub 接管 → 轮次跑完、进程不变"；已验证能抓到 codebuddy 漏转发 `adopt` 那类 bug
 - [x] 宿主会继承拉起者的可继承句柄（Windows）：hub 拉起宿主前清掉自身 std 句柄的继承标志（`drivers::process::stop_inheriting_std_handles`，`hub start` 复用同一函数），`hub run | …` 在 hub 退出时立即结束；回归测试 `tests/pipe.rs`。hub 直接拉起的子进程（acp-generic）之间的管道句柄泄漏未处理，它们随 hub 一起结束，影响不大
-- [ ] 接管 codex 时，如果正在跑的那一轮的 id 一直没出现，就没法向 Codex 发 interrupt，只能本地放弃等待
-- [ ] Linux / macOS 上实测宿主（用进程组代替 Job Object，目前未验证）
+- [-] 接管 codex 时，如果正在跑的那一轮的 id 一直没出现，就没法向 Codex 发 interrupt，只能本地放弃等待（已知边界：只影响中断是否及时，不影响接管正确性，该轮仍会按 `interrupted` 收尾）
+- [>] Linux / macOS 上实测宿主（用进程组代替 Job Object，目前未验证）：推迟到 B1 节点阶段，那时驱动本就要拆到节点上跑，一并测
 
 ## 二、hub 与 GUI 边界
 
-- [ ] 梳理 hub 的本地 API：列出 GUI、CLI 实际调用的接口，确认哪些需要鉴权
-- [ ] 本地 API 增加 token 与权限边界（参考 cutex：令牌只留在 Electron 主进程）
-- [ ] GUI 与 hub 版本不一致时的处理策略（拒绝连接并提示，或只读降级）
+> 2026-10-23 复核现状：本地 API 已有两层凭据——总 token（`require_token`，常数时间比较）与每会话 agent token（`require_agent_token`），见 [api.rs](../crates/hub/src/api.rs)；
+> GUI 的令牌只在 Electron 主进程按需读取（[main.cts](../apps/gui/electron/main.cts)），页面拿不到，所以"令牌只留在主进程"这条已经成立。
+> 真正缺的是权限梯度与版本比对：同一把总 token 既能读，也能删账号、停 hub。
+
+接口清单（先做）：
+
+- [ ] 产出 `docs/API-AUTH.md`：从路由表导出全部接口，按读 / 写 / 管理三级分类，作为后续改造的对照表
+- [ ] 记清现有三档入口：`/v1/health` 免鉴权；`authed` 组共用总 token；`/v1/me`、`/v1/me/tools*` 只认每会话 agent token
+- [ ] GUI 侧对账：从 `apps/gui/src/api.ts` 与 Electron 主进程的转发逻辑反查实际调用，清掉路由表里没人用的接口
+- [ ] CLI 侧对账：`crates/cli/src/client.rs` 与 `cmd/*.rs`，注明 `hub status` 读的是免鉴权 `/v1/health`、`hub stop` 打 `/v1/shutdown`
+
+权限分级：
+
+- [ ] 把校验从 `require_token` 抽成可替换的策略点，分 read / write / admin 三级；A1 接 users/devices 时换实现，不动路由
+- [ ] 管理级：`/v1/shutdown`；账号增删与登录（`/v1/accounts*` 的写接口）；插件模型表 `/v1/plugins/{name}/models`
+- [ ] 写级：agent 增删启停取消压缩、改名改话题归档、发消息与撤回；run 的 approve / reject / cancel / land / finish；question 的 answer / dismiss
+- [ ] 读级：`/v1/info`、agents 列表与详情、transcript、turn diff、plugins、usage、quota、accounts 读接口、runs 读接口、events、notes
+- [ ] `ErrorCode` 增 `Forbidden`（现在只有 `Unauthorized`，见 [api-types](../crates/api-types/src/lib.rs)）；越权返 403 而不是 401，GUI 据此置灰入口并说明原因
+- [ ] 验收：只读凭据打写接口得 403，会话 token 打管理接口得 403，错误信息能看出缺哪一级
+
+令牌与免鉴权面：
+
+- [ ] token 文件加固：`write_private` 只在 Unix 分支设 `0o600`，Windows 分支是裸 `fs::write`（[lib.rs](../crates/hub/src/lib.rs)），补一次 ACL 收紧与启动校验
+- [ ] 令牌轮换确认：hub 重启换 token 后 GUI 每次调用重读已成立，CLI 的读取时机要一起确认
+- [ ] 收敛免鉴权面：`/v1/health` 只回 `status` 与 `api`，`version`、`uptime_secs` 挪进需鉴权的 `/v1/info`（A2 放开 `listen` 后这些就是白送的情报）
+
+版本不一致：
+
+- [ ] `api` 不等（GUI 期望 v2、hub 还是 v1）→ 拒绝连接，提示 hub 与 GUI 版本不匹配、请一起更新，不静默降级
+- [ ] `version` 不等但 `api` 相同 → 允许连接，在侧栏版本号旁标不一致，并隐藏该版本没有的功能入口
+- [ ] 给 `API_VERSION` 定升版规则（现在是 [api-types](../crates/api-types/src/lib.rs) 里写死的 `v1`，没约定何时加一）
+- [ ] 验收：旧 hub + 新 GUI、新 hub + 旧 GUI 各跑一次，提示可见、界面不崩、能重置连接
 
 ## 三、常驻守护（等第一步稳定后再做）
 
