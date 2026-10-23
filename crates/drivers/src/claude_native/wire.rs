@@ -47,9 +47,51 @@ pub enum Start {
     },
 }
 
+/// Which CLI is driven: Claude Code, or a fork that keeps the protocol but not every flag.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Flavor {
+    #[default]
+    Claude,
+    /// WorkBuddy's CodeBuddy CLI: it routes permission asks over the stream-json channel by
+    /// itself and rejects `--permission-prompt-tool`.
+    Codebuddy,
+}
+
+/// `CODEBUDDY_*` variables a session keeps when started from inside another CodeBuddy or
+/// WorkBuddy session: the ones that say how to sign in.
+const CODEBUDDY_KEPT_ENV: [&str; 3] = [
+    "CODEBUDDY_API_KEY",
+    "CODEBUDDY_AUTH_TOKEN",
+    "CODEBUDDY_INTERNET_ENVIRONMENT",
+];
+
+impl Flavor {
+    /// The CLI's name, for messages.
+    pub fn program(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codebuddy => "codebuddy",
+        }
+    }
+
+    /// Whether an inherited variable is withheld from the CLI. A hub started from a
+    /// WorkBuddy terminal inherits that session's `CODEBUDDY_*` (its MCP config with the
+    /// connector proxy's token, its session id, host, service proxy and `CONFIG_DIR`, the
+    /// folder WorkBuddy keeps its own login in), which would tie the worker to WorkBuddy;
+    /// everything but the sign-in is dropped. An agent's own `env` is applied after this
+    /// and can set any of them again.
+    pub fn withholds(self, key: &str) -> bool {
+        self == Self::Codebuddy
+            && key.to_ascii_uppercase().starts_with("CODEBUDDY_")
+            && !CODEBUDDY_KEPT_ENV
+                .iter()
+                .any(|kept| kept.eq_ignore_ascii_case(key))
+    }
+}
+
 pub const DEFAULT_SETTING_SOURCES: &str = "project,local";
 
-pub fn args(launch: &Launch, start: &Start) -> Vec<String> {
+pub fn args(launch: &Launch, start: &Start, flavor: Flavor) -> Vec<String> {
     let mut args: Vec<String> = [
         "-p",
         "--input-format",
@@ -58,14 +100,15 @@ pub fn args(launch: &Launch, start: &Start) -> Vec<String> {
         "stream-json",
         "--verbose",
         "--include-partial-messages",
-        "--permission-prompt-tool",
-        "stdio",
         "--strict-mcp-config",
         "--setting-sources",
     ]
     .map(String::from)
     .to_vec();
     args.push(launch.setting_sources.clone());
+    if flavor == Flavor::Claude {
+        args.extend(["--permission-prompt-tool".into(), "stdio".into()]);
+    }
     if !launch.mcp_servers.is_empty() {
         args.push("--mcp-config".into());
         args.push(mcp_config(&launch.mcp_servers).to_string());
@@ -240,7 +283,11 @@ pub fn tool_detail(
             detail
         }
         "edit" => ToolDetail {
-            changes: result.and_then(file_change).into_iter().collect(),
+            changes: result
+                .and_then(file_change)
+                .or_else(|| (!is_error).then(|| input_change(name, input, text))?)
+                .into_iter()
+                .collect(),
             error: error(),
             ..ToolDetail::default()
         },
@@ -291,6 +338,56 @@ fn file_change(result: &Value) -> Option<FileChange> {
     Some(FileChange {
         path,
         kind: if created { "add" } else { "update" }.to_owned(),
+        diff,
+    })
+}
+
+/// The change a Write / Edit / MultiEdit asked for, when no structured result says what it
+/// did (CodeBuddy sends only the text). Hunks carry no line numbers, and a Write over an
+/// existing file shows only the new content.
+fn input_change(name: &str, input: &Value, text: &str) -> Option<FileChange> {
+    let path = input.get("file_path")?.as_str()?.to_owned();
+    let str_of = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).map(str::to_owned);
+    let lines = |prefix: char, s: &str| -> String {
+        s.lines().map(|line| format!("{prefix}{line}\n")).collect()
+    };
+    let (kind, diff) = match name {
+        "Write" => {
+            let content = str_of(input, "content")?;
+            let created = text.to_ascii_lowercase().contains("created");
+            let header = if created {
+                format!("@@ -0,0 +1,{} @@\n", content.lines().count())
+            } else {
+                "@@ @@\n".to_owned()
+            };
+            (
+                if created { "add" } else { "update" },
+                header + &lines('+', &content),
+            )
+        }
+        "Edit" | "MultiEdit" => {
+            let edits = match input.get("edits").and_then(Value::as_array) {
+                Some(edits) => edits.iter().collect(),
+                None => vec![input],
+            };
+            let diff: String = edits
+                .into_iter()
+                .filter_map(|edit| {
+                    let old = str_of(edit, "old_string")?;
+                    let new = str_of(edit, "new_string")?;
+                    Some(format!("@@ @@\n{}{}", lines('-', &old), lines('+', &new)))
+                })
+                .collect();
+            if diff.is_empty() {
+                return None;
+            }
+            ("update", diff)
+        }
+        _ => return None,
+    };
+    Some(FileChange {
+        path,
+        kind: kind.to_owned(),
         diff,
     })
 }
@@ -865,7 +962,7 @@ mod tests {
             instructions: Some("You are w1.".into()),
             setting_sources: DEFAULT_SETTING_SOURCES.into(),
         };
-        let new = args(&launch, &Start::New("s1".into()));
+        let new = args(&launch, &Start::New("s1".into()), Flavor::Claude);
         let after = |flag: &str| {
             let i = new.iter().position(|a| a == flag).expect(flag);
             new[i + 1].clone()
@@ -881,7 +978,11 @@ mod tests {
         let mcp: Value = serde_json::from_str(&after("--mcp-config")).unwrap();
         assert_eq!(mcp["mcpServers"]["crossagents"]["env"]["TOKEN"], "t");
 
-        let resumed = args(&Launch::default(), &Start::Resume("s1".into()));
+        let resumed = args(
+            &Launch::default(),
+            &Start::Resume("s1".into()),
+            Flavor::Claude,
+        );
         assert!(resumed.windows(2).any(|w| w == ["--resume", "s1"]));
         assert!(!resumed.contains(&"--mcp-config".to_owned()));
         assert!(!resumed.contains(&"--dangerously-skip-permissions".to_owned()));
@@ -893,6 +994,7 @@ mod tests {
                 id: "s2".into(),
                 at: Some("m9".into()),
             },
+            Flavor::Claude,
         );
         for pair in [
             ["--resume", "s1"],
@@ -902,6 +1004,81 @@ mod tests {
             assert!(fork.windows(2).any(|w| w == pair), "{pair:?}");
         }
         assert!(fork.contains(&"--fork-session".to_owned()));
+    }
+
+    #[test]
+    fn codebuddy_gets_the_protocol_without_claude_only_flags() {
+        let args = args(
+            &Launch::default(),
+            &Start::New("s1".into()),
+            Flavor::Codebuddy,
+        );
+        assert!(!args.contains(&"--permission-prompt-tool".to_owned()));
+        for flag in [
+            "--input-format",
+            "--output-format",
+            "--include-partial-messages",
+            "--strict-mcp-config",
+            "--setting-sources",
+            "--session-id",
+        ] {
+            assert!(args.contains(&flag.to_owned()), "{flag}");
+        }
+    }
+
+    #[test]
+    fn edits_without_a_structured_result_are_read_from_their_input() {
+        let write = tool_detail(
+            "Write",
+            &json!({ "file_path": "/w/note.txt", "content": "v1\nv2" }),
+            None,
+            "Successfully created and wrote to new file: /w/note.txt",
+            false,
+        );
+        assert_eq!(write.changes[0].kind, "add");
+        assert_eq!(write.changes[0].diff, "@@ -0,0 +1,2 @@\n+v1\n+v2\n");
+        let edit = tool_detail(
+            "MultiEdit",
+            &json!({ "file_path": "/w/a.rs", "edits": [
+                { "old_string": "a", "new_string": "b" },
+                { "old_string": "c", "new_string": "d\ne" },
+            ] }),
+            None,
+            "ok",
+            false,
+        );
+        assert_eq!(edit.changes[0].kind, "update");
+        assert_eq!(edit.changes[0].diff, "@@ @@\n-a\n+b\n@@ @@\n-c\n+d\n+e\n");
+        // A failed edit changed nothing.
+        let failed = tool_detail(
+            "Edit",
+            &json!({ "file_path": "/w/a.rs", "old_string": "x", "new_string": "y" }),
+            None,
+            "String not found",
+            true,
+        );
+        assert!(failed.changes.is_empty());
+    }
+
+    #[test]
+    fn codebuddy_withholds_an_enclosing_session_but_keeps_sign_in() {
+        for key in [
+            "CODEBUDDY_MCP_CONFIG",
+            "CODEBUDDY_SESSION_ID",
+            "CODEBUDDY_HOST",
+            "CODEBUDDY_SERVICE_PROXY_URL",
+            "codebuddy_force_lite_wb_bundle",
+        ] {
+            assert!(Flavor::Codebuddy.withholds(key), "{key}");
+        }
+        for key in [
+            "CODEBUDDY_API_KEY",
+            "CODEBUDDY_INTERNET_ENVIRONMENT",
+            "HTTPS_PROXY",
+        ] {
+            assert!(!Flavor::Codebuddy.withholds(key), "{key}");
+        }
+        assert!(!Flavor::Claude.withholds("CODEBUDDY_MCP_CONFIG"));
     }
 
     fn stream(event: Value) -> Value {

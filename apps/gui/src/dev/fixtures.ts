@@ -52,6 +52,10 @@ const CAPS: Record<DriverKind, Capabilities> = {
     streaming: true, interrupt: true, mcp: true, multi_session: false, resume: true, fork: true, rollback: false,
     revert_files: false, set_model: true, structured_diff: false, usage: true, rate_limits: true, permission_callback: true, compaction: true,
   },
+  "codebuddy-native": {
+    streaming: true, interrupt: true, mcp: true, multi_session: false, resume: true, fork: true, rollback: false,
+    revert_files: false, set_model: true, structured_diff: false, usage: true, rate_limits: true, permission_callback: true, compaction: true,
+  },
   "acp-generic": {
     streaming: true, interrupt: true, mcp: true, multi_session: false, resume: false, fork: false, rollback: false,
     revert_files: false, set_model: false, structured_diff: false, usage: true, rate_limits: false, permission_callback: true, compaction: false,
@@ -59,7 +63,8 @@ const CAPS: Record<DriverKind, Capabilities> = {
 };
 
 export const capabilitiesOf = (plugin: string): Capabilities => CAPS[driverOf(plugin)];
-export const driverOf = (plugin: string): DriverKind => (plugin === "codex" ? "codex-native" : plugin === "claude" ? "claude-native" : "acp-generic");
+export const driverOf = (plugin: string): DriverKind =>
+  plugin === "codex" ? "codex-native" : plugin === "claude" ? "claude-native" : plugin === "codebuddy" ? "codebuddy-native" : "acp-generic";
 
 type AgentInit = {
   name: string;

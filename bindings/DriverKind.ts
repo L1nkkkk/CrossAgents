@@ -3,4 +3,4 @@
 /**
  * Which driver runs a Profile (`driver = "..."` in its configuration).
  */
-export type DriverKind = "codex-native" | "claude-native" | "acp-generic";
+export type DriverKind = "codex-native" | "claude-native" | "codebuddy-native" | "acp-generic";

@@ -302,7 +302,7 @@ async fn unknown_plugin_is_rejected_and_plugins_are_listed() {
         .iter()
         .map(|p| p["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["claude", "codex", "mock"]);
+    assert_eq!(names, ["claude", "codebuddy", "codex", "mock"]);
 }
 
 #[tokio::test]
