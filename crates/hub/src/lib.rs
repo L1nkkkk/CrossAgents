@@ -25,6 +25,7 @@ use crossagents_store_sqlite::SqliteStore;
 use crate::accounts::Accounts;
 use crate::collab::{AgentTokens, CollabSetup, HubHost};
 use crossagents_plugins::claude_account::ClaudeAccounts;
+use crossagents_plugins::codebuddy_account::CodebuddyAccounts;
 use crossagents_plugins::codex_account::CodexAccounts;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -82,6 +83,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         vec![
             Arc::new(codex_accounts),
             Arc::new(ClaudeAccounts::default()),
+            Arc::new(CodebuddyAccounts::default()),
         ],
         paths.accounts(),
     ));
@@ -91,6 +93,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     {
         tracing::warn!(error = %err, "cannot register local logins as accounts");
     }
+    accounts.warm();
     let tokens = Arc::new(AgentTokens::default());
     let setup = Arc::new(CollabSetup {
         tokens: tokens.clone(),

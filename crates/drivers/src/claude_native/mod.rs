@@ -26,7 +26,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
 
-use self::wire::{Launch, Start, Translator};
+use self::wire::{Flavor, Launch, Start, Translator};
 use crate::process::{StderrTail, find_in_path, hide_console, system_proxy_env};
 
 /// `entrypoint` of the sessions CrossAgents starts, in Claude Code's transcripts.
@@ -36,6 +36,8 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// For interrupting and reading the quota after a turn.
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
+/// For a resumed CodeBuddy session to replay its history (read from disk, so quick).
+const REPLAY_TIMEOUT: Duration = Duration::from_secs(15);
 /// `get_usage` asks claude.ai; once a minute is plenty.
 const LIMITS_EVERY: Duration = Duration::from_secs(60);
 
@@ -44,12 +46,23 @@ pub struct ClaudeNativeDriver {
     name: String,
     command: Vec<String>,
     models: Vec<String>,
+    flavor: Flavor,
 }
 
 impl ClaudeNativeDriver {
     /// `command` launches Claude Code; empty means `claude` (on `PATH`, else the one the
     /// Claude desktop app bundles). The stream-json arguments are added to it.
     pub fn new(name: impl Into<String>, command: Vec<String>, models: Vec<String>) -> Self {
+        Self::with_flavor(name, command, models, Flavor::Claude)
+    }
+
+    /// The same protocol, launched with the flags `flavor` accepts.
+    pub fn with_flavor(
+        name: impl Into<String>,
+        command: Vec<String>,
+        models: Vec<String>,
+        flavor: Flavor,
+    ) -> Self {
         Self {
             name: name.into(),
             command: if command.is_empty() {
@@ -58,12 +71,13 @@ impl ClaudeNativeDriver {
                 command
             },
             models,
+            flavor,
         }
     }
 
     async fn start(&self, spec: SessionSpec, start: Start) -> Result<ClaudeSession, CoreError> {
         let command = spec.command.clone().unwrap_or_else(|| self.command.clone());
-        ClaudeSession::spawn(command, launch_for(&spec), start, spec).await
+        ClaudeSession::spawn(command, launch_for(&spec), start, spec, self.flavor).await
     }
 }
 
@@ -155,6 +169,12 @@ struct Shared {
     exited: AtomicBool,
     /// We are stopping the process: its exit is not a failure.
     closing: AtomicBool,
+    /// The CLI's name, for messages.
+    program: &'static str,
+    /// Set while a resumed CodeBuddy session replays its history, which it does after
+    /// `initialize`: old messages and a `result` closing them, which would otherwise end
+    /// the first real turn. Taken (and sent) at that `result`.
+    replay: Mutex<Option<oneshot::Sender<()>>>,
 }
 
 #[derive(Default)]
@@ -178,7 +198,7 @@ impl Shared {
         let mut stdin = self.stdin.lock().await;
         let stdin = stdin
             .as_mut()
-            .ok_or_else(|| CoreError::Agent("claude is not running".into()))?;
+            .ok_or_else(|| CoreError::Agent(format!("{} is not running", self.program)))?;
         let mut line = message.to_string();
         line.push('\n');
         let result = async {
@@ -204,7 +224,10 @@ impl Shared {
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(value))) => Ok(value),
             Ok(Ok(Err(error))) => Err(CoreError::Agent(format!("{subtype}: {error}"))),
-            Ok(Err(_)) => Err(CoreError::Agent(format!("{subtype}: claude exited"))),
+            Ok(Err(_)) => Err(CoreError::Agent(format!(
+                "{subtype}: {} exited",
+                self.program
+            ))),
             Err(_) => {
                 self.pending.lock().expect("pending lock").remove(&id);
                 Err(CoreError::Agent(format!("{subtype}: no answer")))
@@ -213,7 +236,20 @@ impl Shared {
     }
 
     fn handle(self: &Arc<Self>, message: Value) {
-        match message.get("type").and_then(Value::as_str) {
+        let kind = message.get("type").and_then(Value::as_str);
+        if !matches!(kind, Some("control_response" | "control_request")) {
+            let mut replay = self.replay.lock().expect("replay lock");
+            if replay.is_some() {
+                // History the hub already has.
+                if kind == Some("result")
+                    && let Some(done) = replay.take()
+                {
+                    let _ = done.send(());
+                }
+                return;
+            }
+        }
+        match kind {
             Some("control_response") => {
                 if let Some((id, answer)) = wire::control_answer(&message)
                     && let Some(tx) = self.pending.lock().expect("pending lock").remove(&id)
@@ -243,6 +279,29 @@ impl Shared {
                 }
                 if let Some(waiter) = turn.waiter.take() {
                     let _ = waiter.send(stop);
+                }
+                *turn = Turn::default();
+            }
+            // CodeBuddy reports a turn it cannot run at all (a session it cannot find, say)
+            // as a bare `error` message and then waits: no `result` follows, so this ends
+            // the turn.
+            Some("error") => {
+                let error = match message.get("error") {
+                    Some(Value::String(text)) => text.clone(),
+                    Some(other) => other.to_string(),
+                    None => "error".into(),
+                };
+                self.emit(SessionEventKind::Error { message: error }, Some(&message));
+                let mut turn = self.turn.lock().expect("turn lock");
+                if let Some(waiter) = turn.waiter.take() {
+                    self.emit(
+                        SessionEventKind::TurnCompleted {
+                            turn_id: turn.id.clone(),
+                            stop_reason: StopReason::Error,
+                        },
+                        Some(&message),
+                    );
+                    let _ = waiter.send(StopReason::Error);
                 }
                 *turn = Turn::default();
             }
@@ -315,7 +374,7 @@ async fn read(shared: Arc<Shared>, stdout: ChildStdout, tail: StderrTail) {
         }
     }
     if shared.ended() {
-        let message = tail.describe("claude exited").await;
+        let message = tail.describe(&format!("{} exited", shared.program)).await;
         shared.emit(SessionEventKind::Exited { message }, None);
     }
 }
@@ -325,6 +384,7 @@ pub struct ClaudeSession {
     shared: Arc<Shared>,
     child: tokio::sync::Mutex<Option<Child>>,
     command: Vec<String>,
+    flavor: Flavor,
     last_limits: Mutex<Option<Instant>>,
 }
 
@@ -334,15 +394,26 @@ impl ClaudeSession {
         launch: Launch,
         start: Start,
         spec: SessionSpec,
+        flavor: Flavor,
     ) -> Result<Self, CoreError> {
-        let (program, extra) = command
-            .split_first()
-            .ok_or_else(|| CoreError::Agent("empty claude launch command".into()))?;
+        let (program, extra) = command.split_first().ok_or_else(|| {
+            CoreError::Agent(format!("empty {} launch command", flavor.program()))
+        })?;
         let program = locate_claude(program);
+        if flavor == Flavor::Codebuddy
+            && let Start::Resume(from) | Start::Fork { from, .. } = &start
+        {
+            crate::codebuddy_native::adopt_transcript(from, &spec.agent.cwd, &spec.env);
+        }
         let mut child = Command::new(&program);
+        for (key, _) in std::env::vars_os() {
+            if flavor.withholds(&key.to_string_lossy()) {
+                child.env_remove(key);
+            }
+        }
         child
             .args(extra)
-            .args(wire::args(&launch, &start))
+            .args(wire::args(&launch, &start, flavor))
             // Claude Code works in its own working directory.
             .current_dir(&spec.agent.cwd)
             .env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "1")
@@ -373,7 +444,15 @@ impl ClaudeSession {
             permissions: spec.permissions.clone(),
             exited: AtomicBool::new(false),
             closing: AtomicBool::new(false),
+            program: flavor.program(),
+            replay: Mutex::default(),
         });
+        let replayed =
+            (flavor == Flavor::Codebuddy && matches!(start, Start::Resume(_))).then(|| {
+                let (tx, rx) = oneshot::channel();
+                *shared.replay.lock().expect("replay lock") = Some(tx);
+                rx
+            });
         let tail = StderrTail::spawn(child.stderr.take().expect("piped stderr"));
         tokio::spawn(read(
             shared.clone(),
@@ -387,15 +466,25 @@ impl ClaudeSession {
             shared.closing.store(true, Ordering::SeqCst);
             let _ = child.start_kill();
             return Err(CoreError::Agent(
-                tail.describe(&format!("claude did not start ({err})"))
+                tail.describe(&format!("{} did not start ({err})", flavor.program()))
                     .await,
             ));
+        }
+        if let Some(replayed) = replayed
+            && tokio::time::timeout(REPLAY_TIMEOUT, replayed)
+                .await
+                .is_err()
+        {
+            // Nothing to replay, or no `result` after it: go on without waiting.
+            shared.replay.lock().expect("replay lock").take();
+            tracing::debug!("{session_id}: no history replay seen after initialize");
         }
         shared.emit(SessionEventKind::Started { session_id }, None);
         Ok(Self {
             shared,
             child: tokio::sync::Mutex::new(Some(child)),
             command,
+            flavor,
             last_limits: Mutex::new(None),
         })
     }
@@ -408,7 +497,7 @@ impl ClaudeSession {
             )));
         }
         if self.shared.exited.load(Ordering::SeqCst) {
-            return Err(CoreError::Agent("claude exited".into()));
+            return Err(CoreError::Agent(format!("{} exited", self.shared.program)));
         }
         Ok(())
     }
@@ -543,13 +632,28 @@ impl DriverSession for ClaudeSession {
                     })?,
             ),
         };
-        let start = Start::Fork {
-            from: self.shared.session_id.clone(),
-            id: new_id(),
-            at,
+        let id = new_id();
+        let start = if self.flavor == Flavor::Codebuddy {
+            // CodeBuddy's `--fork-session` ignores `--session-id` and names the fork itself,
+            // so the fork is written here, under our id, and resumed.
+            crate::codebuddy_native::fork_transcript(
+                &self.shared.session_id,
+                &id,
+                at.as_deref(),
+                &spec.agent.cwd,
+                &spec.env,
+            )?;
+            Start::Resume(id)
+        } else {
+            Start::Fork {
+                from: self.shared.session_id.clone(),
+                id,
+                at,
+            }
         };
         let command = spec.command.clone().unwrap_or_else(|| self.command.clone());
-        let session = ClaudeSession::spawn(command, launch_for(&spec), start, spec).await?;
+        let session =
+            ClaudeSession::spawn(command, launch_for(&spec), start, spec, self.flavor).await?;
         Ok(Box::new(session))
     }
 
@@ -565,10 +669,7 @@ impl DriverSession for ClaudeSession {
         }
         if let Some(effort) = effort {
             self.shared
-                .control(
-                    json!({ "subtype": "apply_flag_settings", "settings": { "effortLevel": effort } }),
-                    REQUEST_TIMEOUT,
-                )
+                .control(wire::set_effort(self.flavor, effort), REQUEST_TIMEOUT)
                 .await?;
         }
         Ok(())

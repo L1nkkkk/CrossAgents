@@ -17,6 +17,7 @@
 //! another driver than its plugin's default through its own `driver` field.
 
 pub mod claude_account;
+pub mod codebuddy_account;
 pub mod codex_account;
 pub mod manifest;
 
@@ -27,6 +28,7 @@ use std::sync::{Arc, Mutex};
 use crossagents_core::{CoreError, Driver, DriverKind};
 use crossagents_drivers::acp::AcpDriver;
 use crossagents_drivers::claude_native::ClaudeNativeDriver;
+use crossagents_drivers::codebuddy_native::CodebuddyNativeDriver;
 use crossagents_drivers::codex_native::CodexNativeDriver;
 use serde::Deserialize;
 
@@ -46,9 +48,14 @@ pub struct PluginConfig {
     #[serde(default)]
     pub driver: Option<DriverKind>,
     /// Launch command for the native driver: `codex app-server` for `codex-native`,
-    /// `claude` for `claude-native`.
+    /// `claude` for `claude-native`, `codebuddy` (or `node <script>`) for
+    /// `codebuddy-native`.
     #[serde(default)]
     pub native_command: Vec<String>,
+    /// Reasoning effort levels the CLI accepts (`effort` in an agent's config), lowest
+    /// first; empty when it has none. Composers offer exactly these.
+    #[serde(default)]
+    pub efforts: Vec<String>,
 }
 
 impl PluginConfig {
@@ -63,6 +70,13 @@ impl PluginConfig {
             command: npx("@agentclientprotocol/claude-agent-acp"),
             driver: Some(DriverKind::ClaudeNative),
             models: vec!["opus".into(), "sonnet".into(), "haiku".into()],
+            efforts: vec![
+                "low".into(),
+                "medium".into(),
+                "high".into(),
+                "xhigh".into(),
+                "max".into(),
+            ],
             // Claude Code reads its model from here; the ACP model option is the other half.
             model_env: Some("ANTHROPIC_MODEL".into()),
             ..Self::default()
@@ -75,11 +89,40 @@ impl PluginConfig {
         Self {
             command: npx("@agentclientprotocol/codex-acp"),
             driver: Some(DriverKind::CodexNative),
+            efforts: vec!["low".into(), "medium".into(), "high".into()],
             ..Self::default()
         }
     }
 
-    /// A built-in adjusted by its `config.toml` entry: launch commands and driver.
+    /// WorkBuddy's CodeBuddy CLI: its stream-json protocol by default (the same one Claude
+    /// Code speaks), the standalone CLI found on `PATH` when no command is given. Models are
+    /// the ids `codebuddy --model` accepts; any id the installed CLI knows can be used.
+    pub fn codebuddy() -> Self {
+        Self {
+            driver: Some(DriverKind::CodebuddyNative),
+            models: vec![
+                "default-model".into(),
+                "hy4-preview".into(),
+                "hy3".into(),
+                "deepseek-v4.1-flash".into(),
+                "glm-5.3".into(),
+                "kimi-k3-1".into(),
+            ],
+            // `codebuddy --effort`.
+            efforts: vec![
+                "minimal".into(),
+                "low".into(),
+                "medium".into(),
+                "high".into(),
+                "xhigh".into(),
+                "max".into(),
+            ],
+            ..Self::default()
+        }
+    }
+
+    /// A built-in adjusted by its `config.toml` entry: launch commands, driver and effort
+    /// levels.
     fn overlay(mut self, over: &PluginConfig) -> Self {
         if !over.command.is_empty() {
             self.command = over.command.clone();
@@ -93,6 +136,9 @@ impl PluginConfig {
         }
         if !over.native_command.is_empty() {
             self.native_command = over.native_command.clone();
+        }
+        if !over.efforts.is_empty() {
+            self.efforts = over.efforts.clone();
         }
         self
     }
@@ -159,6 +205,11 @@ impl Profile {
                 self.config.native_command.clone(),
                 self.config.models.clone(),
             )),
+            DriverKind::CodebuddyNative => Arc::new(CodebuddyNativeDriver::new(
+                &self.name,
+                self.config.native_command.clone(),
+                self.config.models.clone(),
+            )),
         };
         drivers.insert(kind, driver.clone());
         Ok(Resolved { driver, warning })
@@ -178,6 +229,7 @@ impl PluginRegistry {
         for (name, builtin) in [
             ("claude", PluginConfig::claude()),
             ("codex", PluginConfig::codex()),
+            ("codebuddy", PluginConfig::codebuddy()),
         ] {
             let config = match configs.get(name) {
                 Some(over) => builtin.overlay(over),
@@ -279,7 +331,7 @@ mod tests {
             },
         );
         let registry = PluginRegistry::with_config(&configs);
-        assert_eq!(registry.names(), ["claude", "codex", "mock"]);
+        assert_eq!(registry.names(), ["claude", "codebuddy", "codex", "mock"]);
         assert_eq!(
             registry.get("claude").unwrap().models(),
             ["opus", "sonnet", "haiku"]
@@ -343,5 +395,43 @@ mod tests {
             Err(CoreError::Unsupported(_))
         ));
         assert!(toml::from_str::<PluginConfig>("driver = \"nope\"").is_err());
+    }
+
+    #[test]
+    fn built_ins_declare_their_effort_levels_and_config_can_replace_them() {
+        let registry = PluginRegistry::with_config(&BTreeMap::new());
+        let efforts = |name: &str| registry.config(name).unwrap().efforts.clone();
+        assert_eq!(efforts("claude"), ["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(efforts("codex"), ["low", "medium", "high"]);
+        assert_eq!(
+            efforts("codebuddy"),
+            ["minimal", "low", "medium", "high", "xhigh", "max"]
+        );
+        let over: PluginConfig = toml::from_str(r#"efforts = ["minimal", "low", "high"]"#).unwrap();
+        let registry = PluginRegistry::with_config(&BTreeMap::from([("codex".to_owned(), over)]));
+        assert_eq!(
+            registry.config("codex").unwrap().efforts,
+            ["minimal", "low", "high"]
+        );
+    }
+
+    #[test]
+    fn codebuddy_is_built_in_and_runs_on_its_native_driver() {
+        let registry = PluginRegistry::with_config(&BTreeMap::new());
+        let driver = registry.get("codebuddy").unwrap();
+        assert_eq!(driver.kind(), DriverKind::CodebuddyNative);
+        // The same protocol as Claude Code: sessions stream, resume, fork and ask.
+        let capabilities = driver.capabilities();
+        assert!(capabilities.streaming && capabilities.resume && capabilities.fork);
+        assert!(capabilities.permission_callback && capabilities.mcp);
+        assert!(!driver.models().is_empty());
+        // Without a native command it finds the CLI itself.
+        assert!(
+            registry
+                .config("codebuddy")
+                .unwrap()
+                .native_command
+                .is_empty()
+        );
     }
 }

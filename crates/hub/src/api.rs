@@ -680,9 +680,8 @@ async fn send_message(
 }
 
 async fn list_plugins(State(state): State<Arc<AppState>>) -> Json<ListPluginsResponse> {
-    let plugins = state
-        .runtime
-        .plugins()
+    let registry = state.runtime.plugins();
+    let plugins = registry
         .defaults()
         .iter()
         .map(|d| PluginInfo {
@@ -690,6 +689,14 @@ async fn list_plugins(State(state): State<Arc<AppState>>) -> Json<ListPluginsRes
             models: d.models(),
             driver: d.kind(),
             capabilities: d.capabilities(),
+            // The ACP driver does not pass an effort on, so none is offered there.
+            efforts: match d.kind() {
+                DriverKind::AcpGeneric => Vec::new(),
+                _ => registry
+                    .config(d.name())
+                    .map(|c| c.efforts.clone())
+                    .unwrap_or_default(),
+            },
         })
         .collect();
     Json(ListPluginsResponse { plugins })

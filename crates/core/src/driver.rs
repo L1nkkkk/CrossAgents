@@ -31,6 +31,9 @@ pub enum DriverKind {
     CodexNative,
     /// `claude -p` with its stream-json control protocol: one process per session.
     ClaudeNative,
+    /// WorkBuddy's CodeBuddy CLI, which speaks the same stream-json control protocol as
+    /// Claude Code: one process per session.
+    CodebuddyNative,
     /// Any ACP agent; the fallback for everything else. The default, so configurations
     /// written before drivers existed keep their behaviour.
     #[default]
@@ -38,12 +41,18 @@ pub enum DriverKind {
 }
 
 impl DriverKind {
-    pub const ALL: [DriverKind; 3] = [Self::CodexNative, Self::ClaudeNative, Self::AcpGeneric];
+    pub const ALL: [DriverKind; 4] = [
+        Self::CodexNative,
+        Self::ClaudeNative,
+        Self::CodebuddyNative,
+        Self::AcpGeneric,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::CodexNative => "codex-native",
             Self::ClaudeNative => "claude-native",
+            Self::CodebuddyNative => "codebuddy-native",
             Self::AcpGeneric => "acp-generic",
         }
     }
@@ -64,7 +73,7 @@ impl FromStr for DriverKind {
             .find(|k| k.as_str() == s)
             .ok_or_else(|| {
                 CoreError::Unsupported(format!(
-                    "driver {s:?} (known: codex-native, claude-native, acp-generic)"
+                    "driver {s:?} (known: codex-native, claude-native, codebuddy-native, acp-generic)"
                 ))
             })
     }

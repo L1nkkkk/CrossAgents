@@ -28,11 +28,12 @@ pub enum AgentCommand {
 #[derive(Debug, Args)]
 pub struct AddArgs {
     pub name: String,
-    /// Plugin that runs the agent, e.g. `claude` or `codex`.
+    /// Plugin that runs the agent, e.g. `claude`, `codex` or `codebuddy`.
     #[arg(long)]
     pub plugin: String,
-    /// Driver to use: `codex-native`, `claude-native` or `acp-generic`; defaults to the
-    /// plugin's `driver` (native for `claude` and `codex`, `acp-generic` otherwise).
+    /// Driver to use: `codex-native`, `claude-native`, `codebuddy-native` or `acp-generic`;
+    /// defaults to the plugin's `driver` (native for `claude`, `codex` and `codebuddy`,
+    /// `acp-generic` otherwise).
     #[arg(long)]
     pub driver: Option<String>,
     /// Model, e.g. `opus` or `haiku`.

@@ -11,4 +11,9 @@ url: string | null,
 /**
  * What runs, for display.
  */
-command: string, };
+command: string, 
+/**
+ * Set when the hub cannot run the login for you (it happens inside the vendor's
+ * interactive CLI): what to type in a terminal, in order. Nothing was started.
+ */
+manual?: Array<string>, };

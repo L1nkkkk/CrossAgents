@@ -6,4 +6,8 @@ export type PluginInfo = { name: string, models: Array<string>,
 /**
  * The driver its agents use unless they name another.
  */
-driver: DriverKind, capabilities: Capabilities, };
+driver: DriverKind, capabilities: Capabilities, 
+/**
+ * Reasoning effort levels its agents may ask for, lowest first; empty when none.
+ */
+efforts: Array<string>, };

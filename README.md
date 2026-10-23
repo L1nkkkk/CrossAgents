@@ -4,8 +4,9 @@ CrossAgents 是一个分层的多 agent 编码编排器：**强模型（Opus / G
 便宜模型（Haiku / mini 级）并行写代码**。每个任务在独立的 git worktree 里完成，由 hub 亲自跑验收命令，
 失败自动打回重试、必要时升级到更强的模型，通过后合并到一个集成分支，最终是否合入由你决定。
 
-各家 agent 以插件形式接入（插件协议就是 [ACP](https://agentclientprotocol.com)）：内置 Claude Code 和 Codex，
-任何讲 ACP 的 agent 都能通过配置或插件目录接入，不用改代码。
+各家 agent 以插件形式接入：内置 Claude Code、Codex 和 WorkBuddy（CodeBuddy CLI），
+三者默认走各自的原生接口；其余 agent 走 [ACP](https://agentclientprotocol.com)，任何讲 ACP 的 agent
+都能通过配置或插件目录接入，不用改代码。
 
 - 设计：[docs/DESIGN.md](docs/DESIGN.md)
 - 各里程碑任务书：[docs/tasks/](docs/tasks/)
@@ -138,9 +139,15 @@ command = ["gemini", "--experimental-acp"]
 # 要改回 ACP 适配器（codex-acp、claude-agent-acp，需要 Node.js）：
 [plugins.codex]
 driver = "acp-generic"
+
+# WorkBuddy 的 CodeBuddy CLI：需要独立安装 `npm install -g @tencent-ai/codebuddy-code`，
+# 用 `codebuddy` 里的 /login 登录一次（或设 CODEBUDDY_API_KEY）。WorkBuddy 自带的那份离开桌面版跑不了。
+# 不写 native_command 就按 CODEBUDDY_CLI、PATH 的顺序找。
+[plugins.codebuddy]
+native_command = ["node", "C:/tools/codebuddy/bin/codebuddy"]
 ```
 
-单个 agent 也可以用 `crossagents agent add … --driver codex-native|claude-native|acp-generic` 覆盖插件的默认驱动。
+单个 agent 也可以用 `crossagents agent add … --driver codex-native|claude-native|codebuddy-native|acp-generic` 覆盖插件的默认驱动。
 Claude agent 的 `config` 里还可以写 `permission_mode`（如 `acceptEdits`）、`effort`、`setting_sources`
 （默认 `project,local`，不带你自己的 Claude Code 插件、hook 和连接器）。
 驱动与能力见 [N1 任务书](docs/tasks/N1.md)。

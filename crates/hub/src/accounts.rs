@@ -1,12 +1,12 @@
 //! Account management (docs/tasks/M5.md): accounts, live status, token usage and login.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use crossagents_core::process::NoWindow;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, Utc};
 use crossagents_api_types::{
@@ -21,6 +21,11 @@ use tokio::sync::{Mutex, mpsc};
 
 const ORIGIN_CROSSAGENTS: &str = "crossagents";
 const LOGIN_URL_WAIT: Duration = Duration::from_secs(20);
+/// A status older than this is refreshed in the background while it is still served.
+const STATUS_TTL: Duration = Duration::from_secs(60);
+
+/// The last status read per account, with when.
+type Statuses = Arc<std::sync::Mutex<HashMap<String, (Instant, AccountStatus)>>>;
 
 pub struct Accounts {
     bus: Arc<EventBus>,
@@ -31,6 +36,11 @@ pub struct Accounts {
     logins: Arc<Mutex<HashMap<String, tokio::process::Child>>>,
     /// The quota agents last reported per account, with when.
     observed: std::sync::Mutex<HashMap<String, (DateTime<Utc>, RateLimits)>>,
+    /// Status reads, served at once: a provider read can take seconds (it may start the
+    /// vendor's CLI), so only an account's first one is waited for.
+    statuses: Statuses,
+    /// Accounts whose status is being read in the background.
+    refreshing: Arc<std::sync::Mutex<HashSet<String>>>,
 }
 
 impl Accounts {
@@ -48,6 +58,8 @@ impl Accounts {
             root,
             logins: Arc::default(),
             observed: std::sync::Mutex::default(),
+            statuses: Arc::default(),
+            refreshing: Arc::default(),
         }
     }
 
@@ -187,6 +199,7 @@ impl Accounts {
     /// Forgets the account. Its files stay on disk (they may be the user's own `~/.codex`).
     pub async fn remove(&self, id: &str) -> Result<(), CoreError> {
         self.store().delete_account(id).await?;
+        self.statuses.lock().unwrap().remove(id);
         if let Some(mut child) = self.logins.lock().await.remove(id) {
             let _ = child.start_kill();
         }
@@ -197,10 +210,25 @@ impl Accounts {
     }
 
     /// The provider's view of the account, with the quota agents reported since if that is
-    /// newer.
+    /// newer. The last read is served at once; when it is older than [`STATUS_TTL`] a new one
+    /// starts in the background (one per account) and `account.quota_updated` says when it
+    /// changed something. Only an account's first read is waited for.
     pub async fn status(&self, id: &str) -> Result<AccountStatus, CoreError> {
         let account = self.store().get_account(id).await?;
-        let mut status = self.provider(&account.provider)?.status(&account).await;
+        let provider = self.provider(&account.provider)?.clone();
+        let cached = self.statuses.lock().unwrap().get(id).cloned();
+        let mut status = match cached {
+            Some((read_at, status)) => {
+                if read_at.elapsed() >= STATUS_TTL {
+                    self.refresh_status(account, provider);
+                }
+                status
+            }
+            None => {
+                let fresh = provider.status(&account).await;
+                record_status(&self.statuses, id, fresh).0
+            }
+        };
         let observed = self.observed.lock().unwrap().get(id).cloned();
         if let Some((at, limits)) = observed
             && status.as_of.is_none_or(|as_of| at > as_of)
@@ -220,6 +248,26 @@ impl Accounts {
             status.note = None;
         }
         Ok(status)
+    }
+
+    /// Reads `account`'s status in the background, unless a read is already running.
+    fn refresh_status(&self, account: Account, provider: Arc<dyn AccountProvider>) {
+        if !self.refreshing.lock().unwrap().insert(account.id.clone()) {
+            return;
+        }
+        let statuses = self.statuses.clone();
+        let refreshing = self.refreshing.clone();
+        let bus = self.bus.clone();
+        tokio::spawn(async move {
+            let fresh = provider.status(&account).await;
+            let (_, changed) = record_status(&statuses, &account.id, fresh);
+            refreshing.lock().unwrap().remove(&account.id);
+            if changed {
+                let _ = bus
+                    .publish(EventKind::AccountQuotaUpdated { id: account.id })
+                    .await;
+            }
+        });
     }
 
     pub async fn models(&self, id: &str) -> Result<Vec<crossagents_core::ModelInfo>, CoreError> {
@@ -321,7 +369,15 @@ impl Accounts {
     /// The outcome arrives later as `account.login_finished`.
     pub async fn login(&self, id: &str) -> Result<LoginStarted, CoreError> {
         let account = self.store().get_account(id).await?;
-        let login = self.provider(&account.provider)?.login_command(&account);
+        let provider = self.provider(&account.provider)?;
+        if let Some(steps) = provider.manual_login(&account) {
+            return Ok(LoginStarted {
+                url: None,
+                command: steps.join(" → "),
+                manual: Some(steps),
+            });
+        }
+        let login = provider.login_command(&account);
         let (program, args) = login
             .command
             .split_first()
@@ -393,6 +449,7 @@ impl Accounts {
         let id_owned = id.to_owned();
         let provider = self.provider(&account.provider)?.clone();
         let logins = self.logins.clone();
+        let statuses = self.statuses.clone();
         tokio::spawn(async move {
             let mut rest = Vec::new();
             while let Some(line) = lines_rx.recv().await {
@@ -403,6 +460,7 @@ impl Accounts {
                 None => None, // replaced or cancelled
             };
             let status = provider.status(&account).await;
+            record_status(&statuses, &id_owned, status.clone());
             let ok = exit.is_some_and(|e| e.success()) && status.logged_in;
             let message = if ok {
                 None
@@ -421,11 +479,28 @@ impl Accounts {
         Ok(LoginStarted {
             url,
             command: display,
+            manual: None,
         })
     }
 }
 
 impl Accounts {
+    /// Reads every account's status in the background, so the first page to ask does not
+    /// wait for the vendors' CLIs.
+    pub fn warm(self: &Arc<Self>) {
+        let accounts = self.clone();
+        tokio::spawn(async move {
+            let Ok(list) = accounts.store().list_accounts().await else {
+                return;
+            };
+            for account in list {
+                if let Ok(provider) = accounts.provider(&account.provider) {
+                    accounts.refresh_status(account, provider.clone());
+                }
+            }
+        });
+    }
+
     /// Follows agents' quota reports and announces changes per account.
     pub fn watch(self: &Arc<Self>) {
         let mut events = self.bus.subscribe();
@@ -454,8 +529,54 @@ impl Accounts {
     }
 }
 
-/// `codex` -> `Codex`.
+/// Stores a fresh read of account `id` (see [`keep_last_quota`]). Returns what is now
+/// served, and whether it differs from what was (apart from when it was read).
+fn record_status(statuses: &Statuses, id: &str, fresh: AccountStatus) -> (AccountStatus, bool) {
+    let mut statuses = statuses.lock().unwrap();
+    let previous = statuses.get(id).map(|(_, status)| status.clone());
+    let status = keep_last_quota(previous.as_ref(), fresh);
+    let changed = previous.is_none_or(|old| {
+        let undated = |s: &AccountStatus| AccountStatus {
+            as_of: None,
+            ..s.clone()
+        };
+        undated(&old) != undated(&status)
+    });
+    statuses.insert(id.to_owned(), (Instant::now(), status.clone()));
+    (status, changed)
+}
+
+/// A read that comes back logged in but without the quota (the vendor's usage call failed
+/// or was refused this time) keeps the quota the last read had, marked as that read's
+/// figures, instead of wiping it until the next good read. A logged-out read is taken as
+/// it is.
+fn keep_last_quota(previous: Option<&AccountStatus>, fresh: AccountStatus) -> AccountStatus {
+    let has_quota = |s: &AccountStatus| !s.rate_limits.is_empty() || !s.limits.is_empty();
+    match previous {
+        Some(last) if fresh.logged_in && !has_quota(&fresh) && has_quota(last) => AccountStatus {
+            rate_limits: last.rate_limits.clone(),
+            limits: last.limits.clone(),
+            limit_reached: last.limit_reached,
+            credits: fresh.credits.or_else(|| last.credits.clone()),
+            reset_credits: last.reset_credits.clone(),
+            plan: fresh.plan.or_else(|| last.plan.clone()),
+            source: Some(DataSource::Snapshot),
+            as_of: last.as_of,
+            note: Some(match fresh.note {
+                Some(why) => format!("{why}; showing the last read quota"),
+                None => "showing the last read quota".into(),
+            }),
+            ..fresh
+        },
+        _ => fresh,
+    }
+}
+
+/// `codex` -> `Codex`, `codebuddy` -> `CodeBuddy`.
 fn capitalize(word: &str) -> String {
+    if word == "codebuddy" {
+        return "CodeBuddy".into();
+    }
     let mut chars = word.chars();
     chars
         .next()
@@ -581,6 +702,62 @@ fn resolve_program(program: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossagents_core::RateWindow;
+
+    fn status(logged_in: bool, used: Option<f64>, note: Option<&str>) -> AccountStatus {
+        AccountStatus {
+            logged_in,
+            auth_mode: None,
+            email: None,
+            plan: Some("pro".into()),
+            subscription_until: None,
+            rate_limits: used
+                .map(|used_percent| RateWindow {
+                    name: "five_hour".into(),
+                    used_percent,
+                    window_seconds: Some(5 * 3600),
+                    resets_at: None,
+                })
+                .into_iter()
+                .collect(),
+            limit_reached: false,
+            credits: None,
+            limits: Vec::new(),
+            reset_credits: Vec::new(),
+            source: Some(DataSource::Live),
+            as_of: Some(Utc::now()),
+            note: note.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_read_without_the_quota_keeps_the_last_one() {
+        let statuses = Statuses::default();
+        let (first, changed) = record_status(&statuses, "claude", status(true, Some(52.0), None));
+        assert!(changed && first.rate_limits.len() == 1);
+
+        // The usage call failed this time: the 52% stays, marked as the earlier read's.
+        let (kept, changed) = record_status(
+            &statuses,
+            "claude",
+            status(true, None, Some("no plan limits")),
+        );
+        assert_eq!(kept.rate_limits[0].used_percent, 52.0);
+        assert_eq!(kept.source, Some(DataSource::Snapshot));
+        assert_eq!(kept.as_of, first.as_of);
+        assert!(kept.note.unwrap().contains("last read"));
+        assert!(changed);
+
+        // A new good read replaces it; the same figures again change nothing.
+        let (newer, _) = record_status(&statuses, "claude", status(true, Some(60.0), None));
+        assert_eq!(newer.rate_limits[0].used_percent, 60.0);
+        let (_, changed) = record_status(&statuses, "claude", status(true, Some(60.0), None));
+        assert!(!changed);
+
+        // Logged out is believed.
+        let (out, _) = record_status(&statuses, "claude", status(false, None, None));
+        assert!(!out.logged_in && out.rate_limits.is_empty());
+    }
 
     #[test]
     fn finds_urls_in_tool_output() {

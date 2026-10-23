@@ -11,7 +11,7 @@ import { ACTIVE_RUN, useRunTree } from "../App";
 import { Avatar, ErrorBox, Icon, Mark, Prose, StatusChip, Vendor, agentTitle, agentTone, displayName, roleShape, time, useAgents, vendorName } from "../components";
 import { ChangeStat, DiffView } from "../diffview";
 import { parseDiff, tailLines, type DiffFile } from "../lib/diff";
-import { effortLevels, prettyModel } from "../lib/models";
+import { effortLabel, prettyModel } from "../lib/models";
 import { clock, range } from "../lib/time";
 import { ModelEffortPicks } from "../modelPick";
 import { InfoRail, RAIL_ROOM, useRail } from "../rail";
@@ -341,7 +341,7 @@ function Conversation({
               "message_id" in x ? (
                 <Turn key={x.message_id} turn={x} agent={agent} agents={agents} tree={tree} />
               ) : (
-                <SwitchNote key={x.at} change={x} plugin={agent.plugin} />
+                <SwitchNote key={x.at} change={x} />
               ),
             )}
           </CwdContext.Provider>
@@ -366,9 +366,9 @@ function byTime(turns: TranscriptTurn[], switches: ModelSwitch[]): (TranscriptTu
 }
 
 /** "模型 Haiku → Sonnet · 推理 默认 → 低": only what changed. The agent is told the same with its next message. */
-function SwitchNote({ change, plugin }: { change: ModelSwitch; plugin: string }) {
+function SwitchNote({ change }: { change: ModelSwitch }) {
   const model = (m: string | null) => (m ? prettyModel(m) : "默认模型");
-  const effort = (e: string | null) => (e ? (effortLevels(plugin).find((l) => l.value === e)?.label ?? e) : "默认");
+  const effort = (e: string | null) => (e ? effortLabel(e) : "默认");
   const parts: string[] = [];
   if (change.model !== change.from_model) parts.push(`模型 ${model(change.from_model)} → ${model(change.model)}`);
   if (change.effort !== change.from_effort) parts.push(`推理 ${effort(change.from_effort)} → ${effort(change.effort)}`);

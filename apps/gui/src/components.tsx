@@ -394,23 +394,24 @@ export function colorOf(agent: Agent): string {
   return hueOf(agent.name);
 }
 
-type Vendor = "claude" | "codex" | "other";
+type Vendor = "claude" | "codex" | "codebuddy" | "other";
 
 /** Which vendor runs a plugin (or account provider). */
 export function vendorOf(plugin: string): Vendor {
   const p = plugin.toLowerCase();
   if (p.startsWith("claude")) return "claude";
   if (p.startsWith("codex")) return "codex";
+  if (p.startsWith("codebuddy")) return "codebuddy";
   return "other";
 }
 
-/** "Claude", "Codex", or the plugin's own name. */
+/** "Claude", "Codex", "CodeBuddy", or the plugin's own name. */
 export function vendorName(plugin: string): string {
   const v = vendorOf(plugin);
-  return v === "claude" ? "Claude" : v === "codex" ? "Codex" : plugin;
+  return v === "claude" ? "Claude" : v === "codex" ? "Codex" : v === "codebuddy" ? "CodeBuddy" : plugin;
 }
 
-/** The vendor's mark: a clay asterisk for Claude, an ink prompt for Codex, a ring otherwise. */
+/** The vendor's mark: a clay asterisk for Claude, an ink prompt for Codex, blue braces for CodeBuddy, a ring otherwise. */
 export function VendorMark({ plugin, size = 12 }: { plugin: string; size?: number }) {
   const vendor = vendorOf(plugin);
   return (
@@ -427,6 +428,16 @@ export function VendorMark({ plugin, size = 12 }: { plugin: string; size?: numbe
           <rect x="1.5" y="1.5" width="13" height="13" rx="3.5" />
           <path d="M5 6l2.2 2L5 10M8.8 10.5h2.4" />
         </g>
+      )}
+      {vendor === "codebuddy" && (
+        <path
+          d="M6 2.5C4.4 2.5 4.6 4.6 4.6 6S4 8 2.8 8c1.2 0 1.8.6 1.8 2s-.2 3.5 1.4 3.5M10 2.5c1.6 0 1.4 2.1 1.4 3.5s.6 2 1.8 2c-1.2 0-1.8.6-1.8 2s.2 3.5-1.4 3.5"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
       )}
       {vendor === "other" && <circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.5" />}
     </svg>
