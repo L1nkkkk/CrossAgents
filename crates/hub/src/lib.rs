@@ -4,6 +4,7 @@ pub mod accounts;
 pub mod api;
 pub mod budget;
 pub mod collab;
+pub mod event_log;
 pub mod identity;
 pub mod models;
 pub mod notices;
@@ -20,7 +21,7 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use crossagents_core::{EventBus, EventKind, Store};
+use crossagents_core::{EventBus, EventKind, EventSink, Store};
 use crossagents_orchestrator::{GitWorkspaces, Orchestrator, OrchestratorConfig, ShellVerifier};
 use crossagents_store_sqlite::SqliteStore;
 
@@ -74,7 +75,13 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     let lock = acquire_lock(&paths)?;
     let token = ensure_token(&paths)?;
     let store = Arc::new(SqliteStore::open(&paths.db()).await?);
-    let bus = Arc::new(EventBus::new(store.clone() as Arc<dyn Store>));
+    // Every event goes to a JSON-lines file per day as well: that history can be read with no
+    // window open (docs/TODO.md §四). The sink holds the writer, so it lives as long as the bus.
+    let mut bus = EventBus::new(store.clone() as Arc<dyn Store>);
+    if config.event_log {
+        bus = bus.with_sink(event_log::EventLog::spawn(paths.logs()) as Arc<dyn EventSink>);
+    }
+    let bus = Arc::new(bus);
     // Where this hub's events begin; the previous hub's are before.
     let start_seq = store.latest_event_seq().await?;
     let hosted = config.runtime_host.is_some();

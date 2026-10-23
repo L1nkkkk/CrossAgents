@@ -1,4 +1,5 @@
-use anyhow::Result;
+use anyhow::{Context as _, Result, bail};
+use chrono::{NaiveDate, Utc};
 use clap::Args;
 use crossagents_api_types::{Event, EventKind};
 use futures::StreamExt;
@@ -15,17 +16,59 @@ pub struct EventsArgs {
     /// Keep printing new events as they happen.
     #[arg(long, short)]
     pub follow: bool,
+    /// Read the log the hub wrote instead of asking the hub: today's, or the given date
+    /// (`--log 2026-10-23`). Works when the hub is not running.
+    #[arg(long, value_name = "DATE", num_args = 0..=1, default_missing_value = "today")]
+    pub log: Option<String>,
 }
 
 pub async fn run(ctx: &Context, args: EventsArgs) -> Result<()> {
+    if let Some(date) = &args.log {
+        if args.follow {
+            bail!("--log reads what is already on disk; it cannot follow");
+        }
+        return replay(ctx, date, args.since);
+    }
     let stream = ctx.client()?.events(args.since, args.follow).await?;
     let mut stream = std::pin::pin!(stream);
     while let Some(event) = stream.next().await {
         let event = event?;
-        if ctx.json {
-            println!("{}", serde_json::to_string(&event)?);
-        } else {
-            println!("{}", format_event(&event));
+        print(ctx, &event)?;
+    }
+    Ok(())
+}
+
+fn print(ctx: &Context, event: &Event) -> Result<()> {
+    if ctx.json {
+        println!("{}", serde_json::to_string(event)?);
+    } else {
+        println!("{}", format_event(event));
+    }
+    Ok(())
+}
+
+/// Prints events the hub already wrote to `logs/events-<date>.jsonl`. A hub that is still
+/// writing may leave the last line half-written, so an unparsable line is skipped, not fatal.
+fn replay(ctx: &Context, date: &str, since: u64) -> Result<()> {
+    let date = if date.eq_ignore_ascii_case("today") {
+        Utc::now().date_naive()
+    } else {
+        NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .with_context(|| format!("expected a date like 2026-10-23, got `{date}`"))?
+    };
+    let path = crossagents_hub::event_log::file(&ctx.paths.logs(), date);
+    let text = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "cannot read {}; is event logging on (`[hub] event_log`)?",
+            path.display()
+        )
+    })?;
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let Ok(event) = serde_json::from_str::<Event>(line) else {
+            continue;
+        };
+        if event.seq > since {
+            print(ctx, &event)?;
         }
     }
     Ok(())

@@ -71,7 +71,7 @@
 ## 四、可观测性
 
 - [x] `cli` 增加状态命令：`hub status` 除后台 agent 进程（pid、启动时间、隔离方式）外，汇总各会话——总数、归档数、各状态计数、正在干活的名单；处于 error 的会话逐个读 transcript 的 `error`，截成一行显示（最多 20 个）。`--json` 同步给出 `sessions` 与 `errors`
-- [ ] 事件日志落盘，便于无窗口时排查问题
+- [x] 事件日志落盘：每条事件一行 JSON 写进 `logs/events-<date>.jsonl`，与 `GET /v1/events` 同格式；独立线程无缓冲写入（读方立即可见，`Get-Content -Wait` 可跟），队列满时丢弃并计数、不拖慢 hub；按天滚动，启动时删 14 天前的文件（只认 `events-*.jsonl`，不动别人的文件）。可关：`[hub] event_log = false`。读：`crossagents events --log [--since N]`，hub 没在跑也能读
 - [x] GUI 显示"hub 离线"时的诊断信息：侧栏未连接时显示 `offline: <原因>`，原因来自 Electron 主进程且带修复指引（如 `hub is not running (…); start it with crossagents hub start`）
 
 ## 五、Claude 运行时（对照 Cutex 的借鉴项）

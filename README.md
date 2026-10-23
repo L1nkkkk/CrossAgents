@@ -76,6 +76,8 @@ git merge crossagents/<id>         # 结果在集成分支上
 crossagents send coder "解释一下 src/main.rs" --wait   # 直接和某个 agent 对话
 crossagents attach coder                              # 实时查看输出并交互
 crossagents events --follow                           # 全部事件流
+crossagents events --log                              # 读今天的事件日志，hub 没在跑也能用
+crossagents events --log 2026-10-23                   # 读某一天
 crossagents usage --by role                           # 强/弱模型各花了多少
 crossagents run reject <id> "任务拆得再小一点"          # 驳回计划
 crossagents run cancel <id>

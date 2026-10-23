@@ -369,7 +369,7 @@ Session（一个会话）
 ```
 ~/.crossagents/                      用户级
 ├── config.toml                      端口、Profile 定义（含驱动）、插件覆盖
-├── state.db  token  hub.json  logs/
+├── state.db  token  hub.json  logs/（hub.log.<date>、events-<date>.jsonl）
 ├── hub-state.json                   上一个 hub 处理到的事件位置，供重启时 recover
 ├── agent-tokens.json                会话令牌，被接管的 agent 重启 hub 后仍能用
 ├── runtimes/                        运行时宿主登记 <id>.json（pid、端口、令牌、owner）

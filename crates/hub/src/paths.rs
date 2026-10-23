@@ -128,6 +128,8 @@ struct HubSection {
     mcp_command: Option<Vec<String>>,
     /// Run Codex and Claude Code in runtime hosts that outlive the hub (default on).
     runtime_hosts: Option<bool>,
+    /// Write every event to a JSON-lines file per day under `logs/` (default on).
+    event_log: Option<bool>,
 }
 
 /// Hub settings. `port = 0` binds a random free port.
@@ -149,6 +151,9 @@ pub struct HubConfig {
     /// Code then run in hosts that outlive the hub, and the next hub takes them over. `None`
     /// starts them as direct children (they end with the hub). Off in [`HubConfig::new`].
     pub runtime_host: Option<Vec<String>>,
+    /// Write every event to `logs/events-YYYY-MM-DD.jsonl` (`[hub] event_log`, on by default;
+    /// off in [`HubConfig::new`] so tests never write to the user's log directory).
+    pub event_log: bool,
 }
 
 impl HubConfig {
@@ -162,6 +167,7 @@ impl HubConfig {
             codex_usage_url: None,
             detect_accounts: false,
             runtime_host: None,
+            event_log: false,
         }
     }
 }
@@ -190,6 +196,7 @@ impl HubConfig {
             codex_usage_url: config.accounts.codex_usage_url,
             detect_accounts: config.accounts.detect.unwrap_or(true),
             runtime_host,
+            event_log: config.hub.event_log.unwrap_or(true),
         })
     }
 }
