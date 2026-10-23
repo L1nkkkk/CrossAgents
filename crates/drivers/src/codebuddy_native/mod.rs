@@ -106,6 +106,15 @@ impl Driver for CodebuddyNativeDriver {
         self.check(&spec)?;
         self.inner.resume(session_id, spec).await
     }
+
+    async fn adopt(
+        &self,
+        session_id: &str,
+        turn_running: bool,
+        spec: SessionSpec,
+    ) -> Result<Option<Box<dyn DriverSession>>, CoreError> {
+        self.inner.adopt(session_id, turn_running, spec).await
+    }
 }
 
 /// The CodeBuddy CLI to run: `CODEBUDDY_CLI`, else `codebuddy` on `PATH`; `None` when
