@@ -178,6 +178,20 @@ pub fn user_message(session_id: &str, uuid: &str, text: &str) -> Value {
     })
 }
 
+/// The control request that changes a running session's reasoning effort: Claude Code's
+/// `apply_flag_settings`; CodeBuddy has none and takes `set_config` (for this session only,
+/// its settings file is left alone).
+pub fn set_effort(flavor: Flavor, effort: &str) -> Value {
+    match flavor {
+        Flavor::Claude => {
+            json!({ "subtype": "apply_flag_settings", "settings": { "effortLevel": effort } })
+        }
+        Flavor::Codebuddy => {
+            json!({ "subtype": "set_config", "config": { "reasoningEffort": effort } })
+        }
+    }
+}
+
 pub fn control_request(id: &str, request: Value) -> Value {
     json!({ "type": "control_request", "request_id": id, "request": request })
 }
@@ -1058,6 +1072,18 @@ mod tests {
             true,
         );
         assert!(failed.changes.is_empty());
+    }
+
+    #[test]
+    fn effort_changes_use_each_cli_s_own_request() {
+        assert_eq!(
+            set_effort(Flavor::Claude, "high"),
+            json!({ "subtype": "apply_flag_settings", "settings": { "effortLevel": "high" } })
+        );
+        assert_eq!(
+            set_effort(Flavor::Codebuddy, "minimal"),
+            json!({ "subtype": "set_config", "config": { "reasoningEffort": "minimal" } })
+        );
     }
 
     #[test]

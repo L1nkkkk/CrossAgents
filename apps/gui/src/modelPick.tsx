@@ -7,16 +7,17 @@ import type { Agent } from "@bindings/Agent";
 import { api, errorText } from "./api";
 import { Icon, VendorMark } from "./components";
 import { useHubData } from "./hub";
-import { effortLevels, effortOf, prettyModel } from "./lib/models";
+import { effortLabel, effortLevels, effortOf, prettyModel } from "./lib/models";
 import { ChipMenu, type MenuItem } from "./menu";
 
 export function ModelEffortPicks({ agent }: { agent: Agent }) {
   const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
   const [error, setError] = useState<string>();
-  const models = plugins.data?.find((p) => p.name === agent.plugin)?.models ?? [];
-  const levels = effortLevels(agent.plugin);
+  const info = plugins.data?.find((p) => p.name === agent.plugin);
+  const models = info?.models ?? [];
+  const levels = effortLevels(info?.efforts);
   const effort = effortOf(agent.config);
-  const label = levels.find((l) => l.value === effort)?.label;
+  const label = effort ? effortLabel(effort) : undefined;
 
   const apply = (model: string | null, next?: string) =>
     api.setModel(agent.id, model, next).then(

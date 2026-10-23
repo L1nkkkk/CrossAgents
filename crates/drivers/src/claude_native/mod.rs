@@ -669,10 +669,7 @@ impl DriverSession for ClaudeSession {
         }
         if let Some(effort) = effort {
             self.shared
-                .control(
-                    json!({ "subtype": "apply_flag_settings", "settings": { "effortLevel": effort } }),
-                    REQUEST_TIMEOUT,
-                )
+                .control(wire::set_effort(self.flavor, effort), REQUEST_TIMEOUT)
                 .await?;
         }
         Ok(())

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { agentNameFor, chatNameFor, chatTitle, effortLevels, effortOf, prettyModel, vendorLabel, workerModelFor } from "./models.ts";
+import { agentNameFor, chatNameFor, chatTitle, effortLabel, effortLevels, effortOf, prettyModel, vendorLabel, workerModelFor } from "./models.ts";
 
 test("model ids read like names", () => {
   assert.equal(prettyModel("claude-opus-4-1"), "Opus 4.1");
@@ -28,10 +28,15 @@ test("chats are named after the model and titled by their first line", () => {
   assert.equal(chatTitle("a".repeat(30), 10), "aaaaaaaaa…");
 });
 
-test("effort levels per vendor and from an agent's config", () => {
-  assert.deepEqual(effortLevels("claude").map((e) => e.value), ["low", "medium", "high", "xhigh", "max"]);
-  assert.deepEqual(effortLevels("codex").map((e) => e.value), ["low", "medium", "high"]);
-  assert.deepEqual(effortLevels("mock"), []);
+test("effort levels come from the plugin, and from an agent's config", () => {
+  assert.deepEqual(effortLevels(["minimal", "low", "turbo"]), [
+    { value: "minimal", label: "最低" },
+    { value: "low", label: "低" },
+    { value: "turbo", label: "turbo" },
+  ]);
+  assert.deepEqual(effortLevels([]), []);
+  assert.deepEqual(effortLevels(undefined), []);
+  assert.equal(effortLabel("xhigh"), "超高");
   assert.equal(effortOf({ effort: "high", account: "a" }), "high");
   assert.equal(effortOf(null), undefined);
   assert.equal(effortOf({ effort: "" }), undefined);

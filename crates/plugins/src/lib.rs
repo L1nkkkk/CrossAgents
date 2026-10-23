@@ -52,6 +52,10 @@ pub struct PluginConfig {
     /// `codebuddy-native`.
     #[serde(default)]
     pub native_command: Vec<String>,
+    /// Reasoning effort levels the CLI accepts (`effort` in an agent's config), lowest
+    /// first; empty when it has none. Composers offer exactly these.
+    #[serde(default)]
+    pub efforts: Vec<String>,
 }
 
 impl PluginConfig {
@@ -66,6 +70,13 @@ impl PluginConfig {
             command: npx("@agentclientprotocol/claude-agent-acp"),
             driver: Some(DriverKind::ClaudeNative),
             models: vec!["opus".into(), "sonnet".into(), "haiku".into()],
+            efforts: vec![
+                "low".into(),
+                "medium".into(),
+                "high".into(),
+                "xhigh".into(),
+                "max".into(),
+            ],
             // Claude Code reads its model from here; the ACP model option is the other half.
             model_env: Some("ANTHROPIC_MODEL".into()),
             ..Self::default()
@@ -78,6 +89,7 @@ impl PluginConfig {
         Self {
             command: npx("@agentclientprotocol/codex-acp"),
             driver: Some(DriverKind::CodexNative),
+            efforts: vec!["low".into(), "medium".into(), "high".into()],
             ..Self::default()
         }
     }
@@ -96,11 +108,21 @@ impl PluginConfig {
                 "glm-5.3".into(),
                 "kimi-k3-1".into(),
             ],
+            // `codebuddy --effort`.
+            efforts: vec![
+                "minimal".into(),
+                "low".into(),
+                "medium".into(),
+                "high".into(),
+                "xhigh".into(),
+                "max".into(),
+            ],
             ..Self::default()
         }
     }
 
-    /// A built-in adjusted by its `config.toml` entry: launch commands and driver.
+    /// A built-in adjusted by its `config.toml` entry: launch commands, driver and effort
+    /// levels.
     fn overlay(mut self, over: &PluginConfig) -> Self {
         if !over.command.is_empty() {
             self.command = over.command.clone();
@@ -114,6 +136,9 @@ impl PluginConfig {
         }
         if !over.native_command.is_empty() {
             self.native_command = over.native_command.clone();
+        }
+        if !over.efforts.is_empty() {
+            self.efforts = over.efforts.clone();
         }
         self
     }
@@ -370,6 +395,24 @@ mod tests {
             Err(CoreError::Unsupported(_))
         ));
         assert!(toml::from_str::<PluginConfig>("driver = \"nope\"").is_err());
+    }
+
+    #[test]
+    fn built_ins_declare_their_effort_levels_and_config_can_replace_them() {
+        let registry = PluginRegistry::with_config(&BTreeMap::new());
+        let efforts = |name: &str| registry.config(name).unwrap().efforts.clone();
+        assert_eq!(efforts("claude"), ["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(efforts("codex"), ["low", "medium", "high"]);
+        assert_eq!(
+            efforts("codebuddy"),
+            ["minimal", "low", "medium", "high", "xhigh", "max"]
+        );
+        let over: PluginConfig = toml::from_str(r#"efforts = ["minimal", "low", "high"]"#).unwrap();
+        let registry = PluginRegistry::with_config(&BTreeMap::from([("codex".to_owned(), over)]));
+        assert_eq!(
+            registry.config("codex").unwrap().efforts,
+            ["minimal", "low", "high"]
+        );
     }
 
     #[test]

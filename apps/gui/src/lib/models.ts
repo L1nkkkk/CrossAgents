@@ -59,14 +59,20 @@ export function chatTitle(text: string, max = 24): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
-/** Reasoning effort a vendor's CLI accepts, lowest first; empty when it has none. */
-export function effortLevels(plugin: string): { value: string; label: string }[] {
-  const low = { value: "low", label: "低" };
-  const medium = { value: "medium", label: "中" };
-  const high = { value: "high", label: "高" };
-  if (/claude/i.test(plugin)) return [low, medium, high, { value: "xhigh", label: "超高" }, { value: "max", label: "最高" }];
-  if (/codex/i.test(plugin)) return [low, medium, high];
-  return [];
+/** Names for the effort levels CLIs use; any other level shows as itself. */
+const EFFORT_LABELS: Record<string, string> = { minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "超高", max: "最高" };
+
+/** "high" → "高"; a level no CLI here uses yet keeps its own name. */
+export function effortLabel(value: string): string {
+  return EFFORT_LABELS[value] ?? value;
+}
+
+/**
+ * A plugin's reasoning effort levels (`PluginInfo.efforts`, lowest first) with their names;
+ * empty when it has none. The plugin declares them, so a new vendor needs no change here.
+ */
+export function effortLevels(efforts: readonly string[] | undefined): { value: string; label: string }[] {
+  return (efforts ?? []).map((value) => ({ value, label: effortLabel(value) }));
 }
 
 /** The effort an agent's config asks for, if any. */

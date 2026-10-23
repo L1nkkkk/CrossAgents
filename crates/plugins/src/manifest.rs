@@ -7,6 +7,7 @@
 //! models = ["gemini-3-pro", "gemini-3-flash"]
 //! # driver = "acp-generic"          # the default
 //! # native_command = [...]          # launch command for a native driver
+//! # efforts = ["low", "high"]      # reasoning effort levels (native drivers pass them on)
 //! ```
 //!
 //! Without a `driver` the plugin protocol is ACP: any executable that speaks it can be a
@@ -36,6 +37,8 @@ struct Manifest {
     driver: Option<DriverKind>,
     #[serde(default)]
     native_command: Vec<String>,
+    #[serde(default)]
+    efforts: Vec<String>,
 }
 
 fn default_protocol() -> String {
@@ -100,6 +103,7 @@ fn load_one(plugin_dir: &Path, path: &Path) -> Result<(String, PluginConfig), St
             model_env: manifest.model_env,
             driver: manifest.driver,
             native_command,
+            efforts: manifest.efforts,
         },
     ))
 }
@@ -161,7 +165,7 @@ mod tests {
         write(
             dir.path(),
             "cx",
-            "name = \"cx\"\ndriver = \"codex-native\"\nnative_command = [\"./bin/codex\", \"app-server\"]\n",
+            "name = \"cx\"\ndriver = \"codex-native\"\nnative_command = [\"./bin/codex\", \"app-server\"]\nefforts = [\"low\", \"high\"]\n",
         );
         write(dir.path(), "acp", "name = \"acp\"\n");
         let (plugins, warnings) = load_dir(dir.path());
@@ -170,6 +174,7 @@ mod tests {
         assert_eq!(name, "cx");
         assert_eq!(config.driver, Some(DriverKind::CodexNative));
         assert!(Path::new(&config.native_command[0]).is_absolute());
+        assert_eq!(config.efforts, ["low", "high"]);
         assert!(warnings[0].contains("command is empty"), "{warnings:?}");
     }
 }

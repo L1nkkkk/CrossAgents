@@ -6,7 +6,7 @@ import { navigate, useRunTree } from "../App";
 import { Avatar, BrandMark, ErrorBox, Field, Icon, VendorMark, agentTitle, displayName, hueOf, useAgents } from "../components";
 import { useHubData } from "../hub";
 import { t } from "../lib/i18n";
-import { chatTitle, effortLevels, prettyModel, vendorLabel, workerModelFor } from "../lib/models";
+import { chatTitle, effortLabel, effortLevels, effortOf, prettyModel, vendorLabel, workerModelFor } from "../lib/models";
 import { useQuota } from "./Quota";
 import { PRESETS, presetPolicy, type Preset } from "../lib/policy";
 import { ChipMenu, type MenuItem } from "../menu";
@@ -85,9 +85,10 @@ export function HomeView() {
     return () => window.removeEventListener("crossagents:mode", onMode);
   }, []);
   const [chatPick, setChatPick] = useState<Choice | undefined>(() => load(CHAT_MODEL_KEY, undefined, (v) => !!v && typeof v === "object"));
-  const [chatEffort, setChatEffortState] = useState<string>(() => load(EFFORT_KEY, "", (v) => typeof v === "string"));
-  const setChatEffort = (e: string) => {
-    setChatEffortState(e);
+  // The reasoning effort picked in the composer, for a chat's agent or a run's lead.
+  const [effortPick, setEffortState] = useState<string>(() => load(EFFORT_KEY, "", (v) => typeof v === "string"));
+  const setEffort = (e: string) => {
+    setEffortState(e);
     save(EFFORT_KEY, e);
   };
   // Logins per vendor: with more than one, the model menus also say which login pays.
@@ -156,6 +157,18 @@ export function HomeView() {
         ? { plugin: offered[0].name, model: offered[0].models[0] }
         : undefined;
   const ready = !busy && !!request.trim() && (mode === "chat" ? !!chatModel : !!lead && !!where);
+  // Effort levels of the vendor picked: the chat's model, or the run's lead. A pick the
+  // vendor does not offer falls back to its default; an existing lead shows its own.
+  const levels = effortLevels(plugins.data?.find((p) => p.name === (mode === "chat" ? chatModel?.plugin : leadPlugin))?.efforts);
+  const effortWanted = effortPick || (mode === "run" && leadAgent ? effortOf(leadAgent.config) ?? "" : "");
+  const effortOn = levels.some((l) => l.value === effortWanted) ? effortWanted : "";
+  const effort = effortOn || undefined;
+
+  /** `agent` on `effort`: switched to it first when it asks for another (none means as it is). */
+  async function withEffort(agent: Agent, effort: string | undefined): Promise<Agent> {
+    if (!effort || effortOf(agent.config) === effort) return agent;
+    return api.setModel(agent.id, agent.model, effort);
+  }
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -165,17 +178,17 @@ export function HomeView() {
   }, [request]);
 
   /** An agent with this role, model and login in `dir`, or a new one (the hub names it: a person's name, never the model's). */
-  async function agentFor(role: "planner" | "worker", choice: Choice, dir: string): Promise<Agent> {
+  async function agentFor(role: "planner" | "worker", choice: Choice, dir: string, effort?: string): Promise<Agent> {
     const { plugin, model, account } = choice;
     const found = everyone.find((a) => a.role === role && a.plugin === plugin && a.model === model && accountOf(a) === account && wsKey(a.cwd) === wsKey(dir));
-    if (found) return found;
+    if (found) return withEffort(found, effort);
     return api.createAgent({
       plugin,
       driver: null,
       model,
       role,
       cwd: dir,
-      config: configFor(choice),
+      config: configFor(choice, effort),
       profile: { display_name: null, title: role === "planner" ? t("home.leadTitle") : "Worker", avatar: null, color: null, persona: null },
     });
   }
@@ -195,7 +208,7 @@ export function HomeView() {
         role: "worker",
         // No project: the hub gives the chat its own directory.
         cwd: cwd ?? "",
-        config: configFor(chatModel, chatEffort),
+        config: configFor(chatModel, effort),
         profile: { display_name: null, title: null, avatar: null, color: null, persona: null },
       });
       await api.sendMessage(agent.id, { text });
@@ -214,7 +227,7 @@ export function HomeView() {
     setError(undefined);
     try {
       const leadChoice: Choice = lead.kind === "model" ? lead : { plugin: leadPlugin!, model: leadModel!, account: leadAgent && accountOf(leadAgent) };
-      const planner = leadAgent ?? (await agentFor("planner", leadChoice, where));
+      const planner = leadAgent ? await withEffort(leadAgent, effort) : await agentFor("planner", leadChoice, where, effort);
       const models = plugins.data?.find((p) => p.name === planner.plugin)?.models ?? [];
       // Workers run on the lead's login, on the cheaper sibling of its model.
       const workerChoice: Choice = { plugin: planner.plugin, model: workerModelFor(models, planner.model ?? leadModel ?? models[0] ?? ""), account: accountOf(planner) };
@@ -352,12 +365,10 @@ export function HomeView() {
       save(CHAT_MODEL_KEY, c);
     },
   );
-  const chatLevels = chatModel ? effortLevels(chatModel.plugin) : [];
-  const chatEffortOn = chatLevels.some((l) => l.value === chatEffort) ? chatEffort : "";
   const effortItems: MenuItem[] = [
     { kind: "header", key: "h", label: t("home.effort") },
-    { kind: "item", key: "", label: t("home.effortDefault"), on: !chatEffortOn, onPick: () => setChatEffort("") },
-    ...chatLevels.map((l): MenuItem => ({ kind: "item", key: l.value, label: l.label, sub: l.value, on: chatEffortOn === l.value, onPick: () => setChatEffort(l.value) })),
+    { kind: "item", key: "", label: t("home.effortDefault"), on: !effortOn, onPick: () => setEffort("") },
+    ...levels.map((l): MenuItem => ({ kind: "item", key: l.value, label: l.label, sub: l.value, on: effortOn === l.value, onPick: () => setEffort(l.value) })),
   ];
   /** "Claude Opus 5.5", plus the login when the vendor has more than one. */
   const choiceLabel = (c: Choice) => {
@@ -421,21 +432,22 @@ export function HomeView() {
                 up
               />
             )}
-            {mode === "chat" && chatLevels.length > 0 && (
-              <ChipMenu
-                icon={<Icon name="brain" size={13} />}
-                label={`${t("home.effortShort")} ${chatLevels.find((l) => l.value === chatEffortOn)?.label ?? t("home.effortDefault")}`}
-                title={t("home.effort")}
-                items={effortItems}
-                up
-              />
-            )}
             {mode === "run" && lead && (
               <ChipMenu
                 icon={leadAgent ? <Avatar agent={leadAgent} size={16} /> : <VendorMark plugin={leadPlugin!} size={14} />}
                 label={leadAgent ? displayName(leadAgent) : lead.kind === "model" ? choiceLabel(lead) : ""}
                 title={t("home.lead")}
                 items={leadItems}
+                up
+              />
+            )}
+            {/* After the model it applies to: the chat's, or the run lead's. */}
+            {levels.length > 0 && (
+              <ChipMenu
+                icon={<Icon name="brain" size={13} />}
+                label={`${t("home.effortShort")} ${effortOn ? effortLabel(effortOn) : t("home.effortDefault")}`}
+                title={t("home.effort")}
+                items={effortItems}
                 up
               />
             )}

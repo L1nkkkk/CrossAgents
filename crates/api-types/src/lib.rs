@@ -349,6 +349,9 @@ pub struct PluginInfo {
     /// The driver its agents use unless they name another.
     pub driver: crossagents_core::DriverKind,
     pub capabilities: crossagents_core::Capabilities,
+    /// Reasoning effort levels its agents may ask for, lowest first; empty when none.
+    #[serde(default)]
+    pub efforts: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

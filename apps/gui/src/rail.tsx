@@ -9,7 +9,7 @@ import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
 import type { TranscriptUsage } from "@bindings/TranscriptUsage";
 import { Avatar, Dot, Icon, VendorMark, agentTone, displayName, sessionHref, statusLabel } from "./components";
-import { effortLevels, effortOf } from "./lib/models";
+import { effortLabel, effortOf } from "./lib/models";
 import { taskState } from "./lib/taskState";
 import { openTool } from "./panes";
 import { StateWord } from "./parts";
@@ -98,7 +98,7 @@ export function InfoRail({
   spend?: number | null;
 }) {
   const effort = effortOf(agent.config);
-  const effortLabel = effort ? (effortLevels(agent.plugin).find((l) => l.value === effort)?.label ?? effort) : undefined;
+  const effortName = effort ? effortLabel(effort) : undefined;
   const account = (agent.config as Record<string, unknown> | null)?.account;
 
   // Everything the session changed, over all its turns.
@@ -133,7 +133,7 @@ export function InfoRail({
           </a>
         )}
         <Line icon={<VendorMark plugin={agent.plugin} size={14} />}>{agent.model ?? "插件默认模型"}</Line>
-        <Line icon={<Icon name="brain" size={14} />}>推理：{effortLabel ?? "默认"}</Line>
+        <Line icon={<Icon name="brain" size={14} />}>推理：{effortName ?? "默认"}</Line>
         {typeof account === "string" && account && <Line icon={<Icon name="account" size={14} />}>{account}</Line>}
       </Card>
 

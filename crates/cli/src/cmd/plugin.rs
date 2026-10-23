@@ -27,10 +27,15 @@ pub async fn run(ctx: &Context, cmd: PluginCommand) -> Result<()> {
                     } else {
                         p.models.join(", ")
                     };
-                    vec![p.name.clone(), models]
+                    let efforts = if p.efforts.is_empty() {
+                        "-".to_owned()
+                    } else {
+                        p.efforts.join(", ")
+                    };
+                    vec![p.name.clone(), models, efforts]
                 })
                 .collect();
-            print_table(&["PLUGIN", "MODELS"], &rows);
+            print_table(&["PLUGIN", "MODELS", "EFFORTS"], &rows);
         }
     }
     Ok(())
