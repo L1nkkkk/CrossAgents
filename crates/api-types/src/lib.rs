@@ -576,6 +576,11 @@ pub struct LoginStarted {
     pub url: Option<String>,
     /// What runs, for display.
     pub command: String,
+    /// Set when the hub cannot run the login for you (it happens inside the vendor's
+    /// interactive CLI): what to type in a terminal, in order. Nothing was started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub manual: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

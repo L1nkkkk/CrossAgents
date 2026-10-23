@@ -5,6 +5,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { AccountQuota } from "@bindings/AccountQuota";
 import type { AccountUsageGroup } from "@bindings/AccountUsageGroup";
+import type { LoginStarted } from "@bindings/LoginStarted";
 import type { RateWindow } from "@bindings/RateWindow";
 import type { ResetCredit } from "@bindings/ResetCredit";
 import type { TokenTotals } from "@bindings/TokenTotals";
@@ -48,7 +49,7 @@ export function QuotaSection() {
       <ErrorBox error={quota.error} />
       {adding && <AddAccount providers={quota.data?.providers ?? []} onDone={() => (setAdding(false), quota.reload())} />}
       {quota.data && !accounts.length && !adding && (
-        <p className="muted">还没有账号。登录过 Codex 的话，hub 启动时会自动把本机登录加进来；也可以手动添加。</p>
+        <p className="muted">还没有账号。登录过 Claude Code、Codex 或 CodeBuddy 的话，hub 启动时会自动把本机登录加进来；也可以手动添加。</p>
       )}
       {accounts.length > 0 && (
         <div className="accounts">
@@ -80,7 +81,7 @@ const shortWindow = (w: RateWindow) => windowLabel(w).replace(/限额$/, "");
  */
 function AccountRow({ quota, color, open, onToggle, onChange }: { quota: AccountQuota; color: string; open: boolean; onToggle: () => void; onChange: () => void }) {
   const { account, status } = quota;
-  const [login, setLogin] = useState<{ url: string | null; command: string }>();
+  const [login, setLogin] = useState<LoginStarted>();
   const [error, setError] = useState<string>();
   const remove = useArmed();
   const plan = planLabel(status.plan);
@@ -157,7 +158,18 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
 
       {login && (
         <div className="notice">
-          {login.url ? (
+          {login.manual ? (
+            <>
+              这个账号要在终端里登录：
+              {login.manual.map((step, i) => (
+                <span key={step}>
+                  {i === 0 ? "运行 " : "，再输入 "}
+                  <code>{step}</code>
+                </span>
+              ))}
+              。登录好后这里会在一分钟内变成已登录。
+            </>
+          ) : login.url ? (
             <>
               在浏览器里完成登录：
               <a href={login.url} target="_blank" rel="noreferrer">

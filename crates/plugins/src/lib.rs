@@ -17,6 +17,7 @@
 //! another driver than its plugin's default through its own `driver` field.
 
 pub mod claude_account;
+pub mod codebuddy_account;
 pub mod codex_account;
 pub mod manifest;
 

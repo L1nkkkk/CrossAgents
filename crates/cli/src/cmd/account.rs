@@ -155,12 +155,42 @@ pub async fn run(ctx: &Context, cmd: AccountCommand) -> Result<()> {
     Ok(())
 }
 
+/// A login the hub cannot run: shows what to type in another terminal, then waits until the
+/// account reports itself logged in.
+async fn manual_login(client: &Client, id: &str, steps: &[String]) -> Result<bool> {
+    println!("log in from another terminal:");
+    for (n, step) in steps.iter().enumerate() {
+        println!("  {}. {step}", n + 1);
+    }
+    println!("waiting for the login…");
+    let wait = tokio::time::timeout(Duration::from_secs(15 * 60), async {
+        loop {
+            let status: AccountStatus = client.get(&format!("/v1/accounts/{id}/status")).await?;
+            if status.logged_in {
+                return Ok::<_, anyhow::Error>(());
+            }
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        }
+    });
+    match wait.await {
+        Ok(Ok(())) => {
+            println!("logged in");
+            Ok(true)
+        }
+        Ok(Err(err)) => Err(err),
+        Err(_) => bail!("timed out waiting for the login to finish"),
+    }
+}
+
 /// Starts a login, shows the link and waits until it finishes. Returns whether it worked.
 pub async fn login(client: &Client, id: &str) -> Result<bool> {
     let events = client.live_events().await?;
     let started: LoginStarted = client
         .post(&format!("/v1/accounts/{id}/login"), &serde_json::json!({}))
         .await?;
+    if let Some(steps) = &started.manual {
+        return manual_login(client, id, steps).await;
+    }
     println!("running `{}`", started.command);
     match &started.url {
         Some(url) => {

@@ -18,9 +18,12 @@ export function prettyModel(model: string): string {
   return out.join(" ") || model;
 }
 
-/** "claude" → "Claude"; unknown plugins are capitalised. */
+/** Vendors whose name is not just their plugin capitalised. */
+const VENDOR_LABELS: Record<string, string> = { codebuddy: "CodeBuddy" };
+
+/** "claude" → "Claude", "codebuddy" → "CodeBuddy"; unknown plugins are capitalised. */
 export function vendorLabel(plugin: string): string {
-  return plugin ? plugin[0].toUpperCase() + plugin.slice(1) : plugin;
+  return VENDOR_LABELS[plugin] ?? (plugin ? plugin[0].toUpperCase() + plugin.slice(1) : plugin);
 }
 
 /** The cheaper sibling a lead's workers use: a haiku / mini / flash model, else the lead's own. */

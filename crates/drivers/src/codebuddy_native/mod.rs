@@ -15,13 +15,21 @@
 //! required", which the session reports as the turn's error.
 
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{Capabilities, CoreError, Driver, DriverKind, DriverSession, SessionSpec};
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
 
 use crate::claude_native::ClaudeNativeDriver;
-use crate::claude_native::wire::Flavor;
-use crate::process::find_in_path;
+use crate::claude_native::wire::{self, Flavor};
+use crate::process::{find_in_path, hide_console, system_proxy_env};
+
+/// How long [`probe`] waits for the CLI to answer `initialize`.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The `codebuddy-native` driver for one Profile.
 pub struct CodebuddyNativeDriver {
@@ -184,15 +192,15 @@ pub(crate) fn fork_transcript(
     let mut lines = Vec::new();
     let mut found = at.is_none();
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        let Ok(mut entry) = serde_json::from_str::<serde_json::Value>(line) else {
+        let Ok(mut entry) = serde_json::from_str::<Value>(line) else {
             lines.push(line.to_owned());
             continue;
         };
-        if entry.get("sessionId").and_then(|v| v.as_str()) == Some(from) {
+        if entry.get("sessionId").and_then(Value::as_str) == Some(from) {
             entry["sessionId"] = id.into();
         }
         lines.push(entry.to_string());
-        if at.is_some() && entry.get("id").and_then(|v| v.as_str()) == at {
+        if at.is_some() && entry.get("id").and_then(Value::as_str) == at {
             found = true;
             break;
         }
@@ -224,21 +232,96 @@ fn find_transcript(projects: &Path, session_id: &str) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// CodeBuddy's home: `CODEBUDDY_CONFIG_DIR`, else `.codebuddy` in the user's home.
+/// CodeBuddy's home for a session with environment `env`: its `CODEBUDDY_CONFIG_DIR`, else
+/// [`default_home`] (of its user's home, when `env` moves that). An inherited
+/// `CODEBUDDY_CONFIG_DIR` does not count: sessions are started without it.
 fn home(env: &[(String, String)]) -> Option<PathBuf> {
-    let var = |key: &str| {
+    let set = |key: &str| {
         env.iter()
             .rev()
             .find(|(k, _)| k.eq_ignore_ascii_case(key))
-            .map(|(_, v)| v.into())
-            .or_else(|| std::env::var_os(key))
-            .filter(|v: &std::ffi::OsString| !v.is_empty())
+            .map(|(_, v)| PathBuf::from(v))
+            .filter(|v| !v.as_os_str().is_empty())
     };
-    if let Some(dir) = var("CODEBUDDY_CONFIG_DIR") {
-        return Some(dir.into());
+    if let Some(dir) = set("CODEBUDDY_CONFIG_DIR") {
+        return Some(dir);
     }
-    let user = var(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
+    match set(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
+        Some(user) => Some(user.join(".codebuddy")),
+        None => default_home(),
+    }
+}
+
+/// `.codebuddy` in the user's home: where the CLI keeps its settings and transcripts when
+/// nothing moves it.
+pub fn default_home() -> Option<PathBuf> {
+    let user = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
     Some(PathBuf::from(user).join(".codebuddy"))
+}
+
+/// Asks the CLI who is signed in, without starting a session: its `initialize` answer,
+/// which carries `account` (null when signed out) and `models`. `command` launches the CLI;
+/// `env` is added to what it inherits, of which the enclosing session's `CODEBUDDY_*` is
+/// withheld as for sessions.
+pub async fn probe(command: &[String], env: &[(String, String)]) -> Result<Value, CoreError> {
+    let (program, extra) = command
+        .split_first()
+        .ok_or_else(|| CoreError::Agent("empty codebuddy launch command".into()))?;
+    let mut child = Command::new(program);
+    for (key, _) in std::env::vars_os() {
+        if Flavor::Codebuddy.withholds(&key.to_string_lossy()) {
+            child.env_remove(key);
+        }
+    }
+    child
+        .args(extra)
+        .args([
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--strict-mcp-config",
+        ])
+        .envs(system_proxy_env())
+        .envs(env.iter().cloned())
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    hide_console(&mut child);
+    let mut child = child
+        .spawn()
+        .map_err(|e| CoreError::Agent(format!("cannot start {program}: {e}")))?;
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let stdout = child.stdout.take().expect("piped stdout");
+    let ask = async {
+        let mut line =
+            wire::control_request("init", json!({ "subtype": "initialize" })).to_string();
+        line.push('\n');
+        stdin.write_all(line.as_bytes()).await?;
+        stdin.flush().await?;
+        let mut lines = BufReader::new(stdout).lines();
+        while let Some(line) = lines.next_line().await? {
+            if let Ok(message) = serde_json::from_str::<Value>(&line)
+                && let Some((id, answer)) = wire::control_answer(&message)
+                && id == "init"
+            {
+                return Ok(answer);
+            }
+        }
+        Err(std::io::Error::other("codebuddy exited before answering"))
+    };
+    let answer = tokio::time::timeout(PROBE_TIMEOUT, ask).await;
+    let _ = child.start_kill();
+    match answer {
+        Ok(Ok(Ok(init))) => Ok(init),
+        Ok(Ok(Err(e))) => Err(CoreError::Agent(e)),
+        Ok(Err(e)) => Err(CoreError::Agent(e.to_string())),
+        Err(_) => Err(CoreError::Agent("codebuddy did not answer".into())),
+    }
 }
 
 /// The folder CodeBuddy files a working directory's sessions under: the path with its
@@ -349,7 +432,7 @@ mod tests {
                 .join("f1.jsonl"),
         )
         .unwrap();
-        let ids: Vec<serde_json::Value> = fork
+        let ids: Vec<Value> = fork
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();

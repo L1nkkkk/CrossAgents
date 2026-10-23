@@ -52,6 +52,7 @@
   /* The vendor behind an agent. */
   --claude: #c96442;
   --codex: #0f8f6f;
+  --codebuddy: #4f63e0;
 
   /* Panels raised on the window (dark mode). */
   --panel-gap: 0px;
@@ -146,6 +147,7 @@
 
   --claude: #d97757;
   --codex: #2bc394;
+  --codebuddy: #8a9bff;
 
   --panel-gap: 6px;
   --panel-edge: rgba(255, 255, 255, 0.06);
@@ -501,6 +503,7 @@ a.button.primary:hover { background: var(--accent-hover); }
 .vendor-mark { flex-shrink: 0; display: block; }
 .vendor-mark.claude { color: var(--claude); }
 .vendor-mark.codex { color: var(--codex); }
+.vendor-mark.codebuddy { color: var(--codebuddy); }
 .vendor-mark.other { color: var(--muted); }
 .vendor .model { color: var(--text-2); }
 .vendor .sep { color: var(--muted); }

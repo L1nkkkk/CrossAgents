@@ -195,6 +195,12 @@ pub trait AccountProvider: Send + Sync {
     async fn models(&self, account: &Account) -> Vec<ModelInfo>;
     /// The command that logs this account in (interactive, usually opens a browser).
     fn login_command(&self, account: &Account) -> LoginCommand;
+    /// For a login no command can carry out for the user (it happens inside the vendor's
+    /// interactive CLI): what to type in a terminal, step by step. The hub then shows these
+    /// instead of running [`Self::login_command`].
+    fn manual_login(&self, _account: &Account) -> Option<Vec<String>> {
+        None
+    }
     /// Environment for an agent process that uses this account.
     fn agent_env(&self, account: &Account) -> Vec<(String, String)>;
 }

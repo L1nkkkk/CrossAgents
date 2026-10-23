@@ -321,7 +321,15 @@ impl Accounts {
     /// The outcome arrives later as `account.login_finished`.
     pub async fn login(&self, id: &str) -> Result<LoginStarted, CoreError> {
         let account = self.store().get_account(id).await?;
-        let login = self.provider(&account.provider)?.login_command(&account);
+        let provider = self.provider(&account.provider)?;
+        if let Some(steps) = provider.manual_login(&account) {
+            return Ok(LoginStarted {
+                url: None,
+                command: steps.join(" → "),
+                manual: Some(steps),
+            });
+        }
+        let login = provider.login_command(&account);
         let (program, args) = login
             .command
             .split_first()
@@ -421,6 +429,7 @@ impl Accounts {
         Ok(LoginStarted {
             url,
             command: display,
+            manual: None,
         })
     }
 }
@@ -454,8 +463,11 @@ impl Accounts {
     }
 }
 
-/// `codex` -> `Codex`.
+/// `codex` -> `Codex`, `codebuddy` -> `CodeBuddy`.
 fn capitalize(word: &str) -> String {
+    if word == "codebuddy" {
+        return "CodeBuddy".into();
+    }
     let mut chars = word.chars();
     chars
         .next()
