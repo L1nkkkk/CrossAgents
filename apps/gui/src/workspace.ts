@@ -50,11 +50,16 @@ export function useWorkspaces() {
       ws.agents.push(agent);
     }
   }
+  // Every conversation is listed under 对话, in a project or not; a project group holds only
+  // its Work (runs, and the planners and workers they use). The project still counts as one
+  // the hub works in, so it is offered when starting something.
   const chats: Workspace = { key: CHATS, path: "", name: "对话", runs: [], agents: [] };
+  const byId = new Map(all.map((a) => [a.id, a]));
   for (const agent of all) {
     if (placed.has(agent.id)) continue;
-    if (isChat(agent)) chats.agents.push(agent);
-    else get(agent.cwd).agents.push(agent);
+    const group = isConversation(agent, byId) ? chats : get(agent.cwd);
+    if (!isChat(agent)) get(agent.cwd);
+    group.agents.push(agent);
   }
 
   // Busiest first, then by name; chats outside any project come first, like Claude Code's.
@@ -66,11 +71,36 @@ export function useWorkspaces() {
 /** The group of chats outside any project; not a repository, so never offered as a workspace. */
 export const CHATS = "__chats";
 
-/** A chat outside any project: the hub made its directory, `<home>/chats/<name>`. */
+/**
+ * A chat outside any project: the hub made its directory, `<home>/chats/<id>`. Older chats were
+ * named by the agent's name, which may since have changed; under the default home
+ * (`.crossagents`) any directory there is one.
+ */
 export function isChat(agent: Agent): boolean {
   const parts = agent.cwd.replace(/\\/g, "/").replace(/\/+$/, "").split("/");
-  return parts[parts.length - 1] === agent.name && parts[parts.length - 2] === "chats";
+  const [home, chats, last] = parts.slice(-3);
+  if (chats !== "chats") return false;
+  return home === ".crossagents" || last === agent.id || last.toLowerCase() === agent.name.toLowerCase();
 }
+
+/**
+ * A conversation rather than Work: a chat outside any project, one started in a project (chats
+ * are titled by their topic; the planners and workers Work starts are not), or a teammate a
+ * conversation recruited.
+ */
+export function isConversation(agent: Agent, byId: Map<string, Agent>): boolean {
+  const seen = new Set<string>();
+  for (let a: Agent | undefined = agent; a && !seen.has(a.id); ) {
+    if (isChat(a) || a.topic) return true;
+    seen.add(a.id);
+    const by: unknown = (a.config as Record<string, unknown> | null)?.spawned_by_agent;
+    a = typeof by === "string" ? byId.get(by) : undefined;
+  }
+  return false;
+}
+
+/** The project a conversation works in, if it has one. */
+export const projectOf = (agent: Agent) => (isChat(agent) ? undefined : wsName(agent.cwd));
 
 export const liveRuns =(ws: Workspace) => ws.runs.filter((d) => ACTIVE_RUN.includes(d.run.status)).length;
 

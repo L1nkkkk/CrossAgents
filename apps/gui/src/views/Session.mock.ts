@@ -21,7 +21,7 @@ const README_DIFF =
   fileDiff("docs/cli.md", 30, ["`--json` 输出 JSON。"], ["`--json`：所有命令都支持，输出一行一个 JSON 对象，适合脚本处理。", "", "例如 `crossagents events --json | jq .type`。"]);
 
 export function soloSession(): { state: MockState; script: Step[]; route: string } {
-  const nova = agent({ name: "nova", plugin: "claude", model: "claude-sonnet-4-5", role: "worker", status: "running", cwd: NOTES_REPO, profile: { display_name: "Nova", title: "文档", color: "violet" } });
+  const nova = agent({ name: "nova", plugin: "claude", model: "claude-sonnet-4-5", role: "worker", status: "running", cwd: NOTES_REPO, topic: "README 快速开始与 --json 说明", profile: { display_name: "Nova", title: "文档", color: "violet" } });
   const state: MockState = { ...emptyState(), agents: [nova], plugins: plugins(), quota: quota() };
 
   const t1 = turn({

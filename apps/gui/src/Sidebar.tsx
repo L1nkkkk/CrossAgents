@@ -1,5 +1,6 @@
-// The sidebar, managed like Claude Code's: search, a short nav, pinned rows, then one group per
-// workspace. In a group, runs and conversations are plain rows, newest first; a run's teammates
+// The sidebar, managed like Claude Code's: search, a short nav, pinned rows, then 对话 (every
+// conversation, in a project or not, tagged with its project) and one group per project holding
+// its Work. In a group, runs and conversations are plain rows, newest first; a run's teammates
 // (the ones it started with and the ones its lead recruited) nest under it, and so do the
 // teammates a conversation recruited. Archived conversations wait at the bottom to be restored.
 
@@ -13,10 +14,11 @@ import { Avatar, BrandMark, Icon, Mark, agentTitle, displayName, hueOf, isAgent,
 import { useConnectionStatus } from "./hub";
 import { t } from "./lib/i18n";
 import { prettyModel } from "./lib/models";
+import { startNew } from "./menubar";
 import { level, tightest, windowLabel } from "./lib/quota";
 import { openBeside } from "./panes";
 import { useQuota } from "./views/Quota";
-import { CHATS, selectWorkspace, useWorkspaces, type Workspace } from "./workspace";
+import { CHATS, projectOf, selectWorkspace, useWorkspaces, type Workspace } from "./workspace";
 
 /** A row in a group: a run (with its team) or a session outside any run. */
 type Item = { kind: "run"; key: string; at: string; detail: RunDetail } | { kind: "session"; key: string; at: string; agent: Agent };
@@ -40,7 +42,8 @@ export function Sidebar({ route }: { route: string[] }) {
   const [section, selected] = route;
   const everyone = agents.data ?? [];
   const q = query.trim().toLowerCase();
-  const matchesAgent = (a: Agent) => !q || a.name.toLowerCase().includes(q) || (a.topic ?? "").toLowerCase().includes(q);
+  const matchesAgent = (a: Agent) =>
+    !q || a.name.toLowerCase().includes(q) || (a.topic ?? "").toLowerCase().includes(q) || (projectOf(a) ?? "").toLowerCase().includes(q);
   const live = everyone.filter((a) => !a.archived_at);
   const recruitsOf = (a: Agent) => live.filter((r) => recruiterOf(r) === a.id);
   const archived = everyone.filter((a) => a.archived_at && !recruiterOf(a));
@@ -106,15 +109,17 @@ export function Sidebar({ route }: { route: string[] }) {
               <div className="group-head static">
                 <span className="group-name">{t("sidebar.pinned")}</span>
               </div>
-              {pins.map(row)}
+              <InChats.Provider value={true}>{pins.map(row)}</InChats.Provider>
             </section>
           )}
 
           {shown.map(({ w, items }) => (
             <Group key={w.key} workspace={w} searching={!!q}>
-              <Capped items={items} keep={(i) => (i.kind === "run" ? isRun(i.detail) || runAgents(i.detail, everyone).some(isSession) : isSession(i.agent) || recruitsOf(i.agent).some(isSession))} searching={!!q}>
-                {row}
-              </Capped>
+              <InChats.Provider value={w.key === CHATS}>
+                <Capped items={items} keep={(i) => (i.kind === "run" ? isRun(i.detail) || runAgents(i.detail, everyone).some(isSession) : isSession(i.agent) || recruitsOf(i.agent).some(isSession))} searching={!!q}>
+                  {row}
+                </Capped>
+              </InChats.Provider>
             </Group>
           ))}
 
@@ -154,15 +159,9 @@ function Group({ workspace, searching, children }: { workspace: Workspace; searc
           className="icon-btn group-add"
           href="#/"
           onClick={() => {
-            // + on the chats group starts a chat outside any project.
-            if (workspace.key === CHATS) {
-              try {
-                localStorage.setItem("crossagents.mode", JSON.stringify("chat"));
-              } catch {
-                // The start page then opens in whatever mode it had.
-              }
-            }
+            // + on the chats group starts a chat outside any project; on a project, Work in it.
             selectWorkspace(workspace.key === CHATS ? "" : workspace.key);
+            startNew(workspace.key === CHATS ? "chat" : "run");
           }}
           title={t("sidebar.newIn", { name: workspace.name })}
           aria-label={t("sidebar.newIn", { name: workspace.name })}
@@ -203,6 +202,8 @@ function Capped<T>({ items, keep, searching, children }: { items: T[]; keep: (it
 
 /** Planners whose plan waits for approval; provided once by the sidebar for every row. */
 const PendingPlans = createContext<Set<string>>(new Set());
+/** Rows in the 对话 group (or pinned): conversations from any project, so each names its own. */
+const InChats = createContext(false);
 
 type Dot = "live" | "warn" | "danger" | "unread" | undefined;
 
@@ -306,6 +307,8 @@ function SessionRow({
   const dot: Dot =
     agent.status === "error" || unread?.kind === "error" ? "danger" : planWaiting ? "warn" : agent.status === "running" ? "live" : unread ? "unread" : undefined;
   const role = agent.profile?.title || agentTitle(agent);
+  // Conversations from every project share one list: each says which project it works in.
+  const project = useContext(InChats) ? projectOf(agent) : undefined;
   const row = (
     <Row
       href={sessionHref(agent)}
@@ -323,6 +326,7 @@ function SessionRow({
           {note && <span className="role">{note}</span>}
         </>
       }
+      tag={!note && project ? <span className="row-tag" title={agent.cwd}>{project}</span> : undefined}
       after={
         recruits.length > 0 && (
           <button
@@ -396,6 +400,7 @@ function Row({
   title,
   lead,
   label,
+  tag,
   after,
   dot,
   pinKey,
@@ -408,6 +413,8 @@ function Row({
   title: string;
   lead?: ReactNode;
   label: ReactNode;
+  /** A short label kept visible after `label`, which truncates first (a conversation's project). */
+  tag?: ReactNode;
   after?: ReactNode;
   dot: Dot;
   pinKey?: string;
@@ -434,6 +441,7 @@ function Row({
       >
         {lead && <span className="row-lead">{lead}</span>}
         <span className="row-label">{label}</span>
+        {tag}
         {after}
       </a>
       {dot && <span className={`row-dot ${dot}`} aria-hidden="true" />}
