@@ -2,8 +2,9 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
+use chrono::Utc;
 use clap::Subcommand;
-use crossagents_api_types::HealthResponse;
+use crossagents_api_types::{HealthResponse, HubInfo};
 use crossagents_hub::{HubConfig, HubFile, Paths};
 use serde_json::json;
 use tracing_subscriber::EnvFilter;
@@ -202,6 +203,15 @@ async fn stop(ctx: &Context, agents: bool) -> Result<()> {
 async fn status(ctx: &Context) -> Result<()> {
     let running = running_hub(&ctx.paths).await?;
     let runtimes = crossagents_drivers::host::records(&ctx.paths.runtimes());
+    // `/v1/health` says the hub answers and nothing more; the version, pid and start time
+    // are behind the token, in `/v1/info`.
+    let info = match &running {
+        Some(_) => ctx.client()?.get::<HubInfo>("/v1/info").await.ok(),
+        None => None,
+    };
+    let uptime = info
+        .as_ref()
+        .map(|i| (Utc::now() - i.started_at).num_seconds().max(0) as u64);
     if ctx.json {
         let runtimes: Vec<_> = runtimes
             .iter()
@@ -214,9 +224,9 @@ async fn status(ctx: &Context) -> Result<()> {
             })
             .collect();
         let value = match &running {
-            Some((hub, health)) => json!({
+            Some((hub, _)) => json!({
                 "running": true, "port": hub.port, "pid": hub.pid,
-                "version": health.version, "uptime_secs": health.uptime_secs,
+                "version": info.as_ref().map(|i| i.version.clone()), "uptime_secs": uptime,
                 "home": ctx.paths.home, "runtimes": runtimes,
             }),
             None => json!({ "running": false, "home": ctx.paths.home, "runtimes": runtimes }),
@@ -224,12 +234,18 @@ async fn status(ctx: &Context) -> Result<()> {
         return print_json(&value);
     }
     match running {
-        Some((hub, health)) => {
+        Some((hub, _)) => {
             println!("hub:     running");
             println!("port:    {}", hub.port);
             println!("pid:     {}", hub.pid);
-            println!("version: {}", health.version);
-            println!("uptime:  {}", duration(health.uptime_secs));
+            match (&info, uptime) {
+                (Some(i), Some(secs)) => {
+                    println!("version: {}", i.version);
+                    println!("uptime:  {}", duration(secs));
+                }
+                // The token is not the one this hub issued, so `/v1/info` refused.
+                _ => println!("version: unknown (cannot read /v1/info)"),
+            }
             println!("home:    {}", ctx.paths.home.display());
         }
         None => {

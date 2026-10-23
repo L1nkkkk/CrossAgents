@@ -27,37 +27,36 @@
 
 ## 二、hub 与 GUI 边界
 
-> 2026-10-23 复核现状：本地 API 已有两层凭据——总 token（`require_token`，常数时间比较）与每会话 agent token（`require_agent_token`），见 [api.rs](../crates/hub/src/api.rs)；
-> GUI 的令牌只在 Electron 主进程按需读取（[main.cts](../apps/gui/electron/main.cts)），页面拿不到，所以"令牌只留在主进程"这条已经成立。
-> 真正缺的是权限梯度与版本比对：同一把总 token 既能读，也能删账号、停 hub。
+> 2026-10-23 复核：清单与分级已整理成 [API-AUTH.md](API-AUTH.md)，含全部接口、调用方与三级划分。
 
-接口清单（先做）：
+接口清单：
 
-- [ ] 产出 `docs/API-AUTH.md`：从路由表导出全部接口，按读 / 写 / 管理三级分类，作为后续改造的对照表
-- [ ] 记清现有三档入口：`/v1/health` 免鉴权；`authed` 组共用总 token；`/v1/me`、`/v1/me/tools*` 只认每会话 agent token
-- [ ] GUI 侧对账：从 `apps/gui/src/api.ts` 与 Electron 主进程的转发逻辑反查实际调用，清掉路由表里没人用的接口
-- [ ] CLI 侧对账：`crates/cli/src/client.rs` 与 `cmd/*.rs`，注明 `hub status` 读的是免鉴权 `/v1/health`、`hub stop` 打 `/v1/shutdown`
+- [x] 产出 [API-AUTH.md](API-AUTH.md)：从路由表导出全部接口，按读 / 写 / 管理三级分类，作为后续改造的对照表
+- [x] 记清现有三档入口：`/v1/health` 免鉴权；`authed` 组共用总 token；`/v1/me`、`/v1/me/tools*` 只认每会话 agent token
+- [x] GUI 侧对账：`apps/gui/src/api.ts` 的方法逐条对过路由表，没找到孤儿接口，无需删除；调用方已记入 API-AUTH.md
+- [x] CLI 侧对账：`crates/cli/src/client.rs` 与 `cmd/*.rs`，`hub status` 读免鉴权 `/v1/health` 加鉴权 `/v1/info`、`hub stop` 打 `/v1/shutdown`
 
 权限分级：
 
 - [ ] 把校验从 `require_token` 抽成可替换的策略点，分 read / write / admin 三级；A1 接 users/devices 时换实现，不动路由
-- [ ] 管理级：`/v1/shutdown`；账号增删与登录（`/v1/accounts*` 的写接口）；插件模型表 `/v1/plugins/{name}/models`
-- [ ] 写级：agent 增删启停取消压缩、改名改话题归档、发消息与撤回；run 的 approve / reject / cancel / land / finish；question 的 answer / dismiss
+- [ ] 管理级：`/v1/shutdown`；账号增删与登录（`/v1/accounts*` 的写接口）。插件模型表归写级：只影响界面显示哪些模型
+- [ ] 写级：agent 增删启停取消压缩、改名改话题归档改档案连接、发消息与撤回；run 的 approve / reject / cancel / land / finish；question 的 answer / dismiss；插件模型表
 - [ ] 读级：`/v1/info`、agents 列表与详情、transcript、turn diff、plugins、usage、quota、accounts 读接口、runs 读接口、events、notes
 - [ ] `ErrorCode` 增 `Forbidden`（现在只有 `Unauthorized`，见 [api-types](../crates/api-types/src/lib.rs)）；越权返 403 而不是 401，GUI 据此置灰入口并说明原因
 - [ ] 验收：只读凭据打写接口得 403，会话 token 打管理接口得 403，错误信息能看出缺哪一级
 
 令牌与免鉴权面：
 
-- [ ] token 文件加固：`write_private` 只在 Unix 分支设 `0o600`，Windows 分支是裸 `fs::write`（[lib.rs](../crates/hub/src/lib.rs)），补一次 ACL 收紧与启动校验
-- [ ] 令牌轮换确认：hub 重启换 token 后 GUI 每次调用重读已成立，CLI 的读取时机要一起确认
-- [ ] 收敛免鉴权面：`/v1/health` 只回 `status` 与 `api`，`version`、`uptime_secs` 挪进需鉴权的 `/v1/info`（A2 放开 `listen` 后这些就是白送的情报）
+- [x] Electron 主进程加「方法 + 路径」白名单：只放行 GUI 实际调用的接口，页面无法触达 `/v1/shutdown` 与 `/v1/me*`；新增调用要同步改 `ALLOWED`（[main.cts](../apps/gui/electron/main.cts)），拒绝信息会点明这一点
+- [x] 收敛免鉴权面：`/v1/health` 只回 `status` 与 `api`，`version`、`uptime_secs` 收进需鉴权的 `/v1/info`；CLI `hub status` 改读 `/v1/info`（A2 放开 `listen` 后这些就是白送的情报）
+- [x] 令牌轮换确认：GUI 每次调用重读 `token`；CLI 每次构造 `Client` 时重读（`for_hub` 内 `read_token`），都是短命进程，hub 重启换 token 不需要重启客户端
+- [-] token 文件 Windows ACL：`write_private` 只在 Unix 分支设 `0o600`，Windows 是裸 `fs::write`。核查后不加：`~/.crossagents` 不在云同步目录内，NTFS 默认 ACL 已限制到本用户、SYSTEM 与 Administrators，同机其他用户读不到。home 若被移到同步目录再处理
 
 版本不一致：
 
 - [ ] `api` 不等（GUI 期望 v2、hub 还是 v1）→ 拒绝连接，提示 hub 与 GUI 版本不匹配、请一起更新，不静默降级
 - [ ] `version` 不等但 `api` 相同 → 允许连接，在侧栏版本号旁标不一致，并隐藏该版本没有的功能入口
-- [ ] 给 `API_VERSION` 定升版规则（现在是 [api-types](../crates/api-types/src/lib.rs) 里写死的 `v1`，没约定何时加一）
+- [x] 给 `API_VERSION` 定升版规则：写进 [API-AUTH.md](API-AUTH.md) §5，分「必须升版」（删字段、改语义或单位、改路径方法、新增必填、收紧校验）与「不必升版」（新增可选字段、新接口、新错误码取值）两类
 - [ ] 验收：旧 hub + 新 GUI、新 hub + 旧 GUI 各跑一次，提示可见、界面不崩、能重置连接
 
 ## 三、常驻守护（等第一步稳定后再做）

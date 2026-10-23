@@ -18,13 +18,13 @@ pub const API_VERSION: &str = "v1";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
+/// `GET /v1/health`: answers without a token, so it says as little as possible. Version,
+/// uptime and pid are behind the token, in `HubInfo` (`GET /v1/info`).
 pub struct HealthResponse {
     /// Always `"ok"` when the hub answers.
     pub status: String,
-    pub version: String,
+    /// The API version, so a client can tell an incompatible hub apart from a silent one.
     pub api: String,
-    #[ts(type = "number")]
-    pub uptime_secs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

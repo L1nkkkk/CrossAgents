@@ -12,6 +12,57 @@ const METHODS = new Set(["GET", "POST", "DELETE"]);
 const REQUEST_TIMEOUT_MS = 30_000;
 const RECONNECT_MS = 2_000;
 
+/**
+ * What the page may ask the hub for. It mirrors `src/api.ts`: endpoints the GUI does not
+ * call are refused here, so a page that got script injected cannot reach `/v1/shutdown`,
+ * delete an account it never shows, or touch the agent-token routes. Adding a call to
+ * `src/api.ts` means adding a row here; the refusal says so.
+ *
+ * `level` is not enforced yet — the hub issues one token for everything. It marks where the
+ * read / write / admin split will land (docs/API-AUTH.md §3).
+ */
+const ALLOWED: readonly { method: string; path: RegExp; level: "read" | "write" | "admin" }[] = [
+  { method: "GET", path: /^\/v1\/info$/, level: "read" },
+  { method: "GET", path: /^\/v1\/agents$/, level: "read" },
+  { method: "POST", path: /^\/v1\/agents$/, level: "write" },
+  { method: "DELETE", path: /^\/v1\/agents\/[^/]+$/, level: "write" },
+  {
+    method: "POST",
+    path: /^\/v1\/agents\/[^/]+\/(start|stop|cancel|compact|model|name|topic|archive|profile|connect)$/,
+    level: "write",
+  },
+  { method: "POST", path: /^\/v1\/agents\/[^/]+\/messages$/, level: "write" },
+  { method: "DELETE", path: /^\/v1\/agents\/[^/]+\/messages\/[^/]+$/, level: "write" },
+  { method: "GET", path: /^\/v1\/agents\/[^/]+\/transcript$/, level: "read" },
+  { method: "GET", path: /^\/v1\/agents\/[^/]+\/turns\/[^/]+\/diff$/, level: "read" },
+  { method: "GET", path: /^\/v1\/notes$/, level: "read" },
+  { method: "GET", path: /^\/v1\/plugins$/, level: "read" },
+  { method: "POST", path: /^\/v1\/plugins\/[^/]+\/models$/, level: "write" },
+  { method: "GET", path: /^\/v1\/runs$/, level: "read" },
+  { method: "POST", path: /^\/v1\/runs$/, level: "write" },
+  { method: "GET", path: /^\/v1\/runs\/[^/]+$/, level: "read" },
+  { method: "POST", path: /^\/v1\/runs\/[^/]+\/(approve|reject|cancel|land|finish)$/, level: "write" },
+  { method: "GET", path: /^\/v1\/usage$/, level: "read" },
+  { method: "GET", path: /^\/v1\/questions$/, level: "read" },
+  { method: "POST", path: /^\/v1\/questions\/[^/]+\/(answer|dismiss)$/, level: "write" },
+  { method: "GET", path: /^\/v1\/quota$/, level: "read" },
+  { method: "POST", path: /^\/v1\/accounts$/, level: "admin" },
+  { method: "DELETE", path: /^\/v1\/accounts\/[^/]+$/, level: "admin" },
+  { method: "GET", path: /^\/v1\/accounts\/[^/]+\/usage$/, level: "read" },
+  { method: "POST", path: /^\/v1\/accounts\/[^/]+\/login$/, level: "admin" },
+];
+
+/** The path without its query string: `/v1/notes?scope=run` matches `/v1/notes`. */
+function route(path: string): string {
+  const i = path.indexOf("?");
+  return i < 0 ? path : path.slice(0, i);
+}
+
+function allowed(method: string, path: string): boolean {
+  const only = route(path);
+  return ALLOWED.some((r) => r.method === method && r.path.test(only));
+}
+
 /** Vite dev server, only in an unpackaged run (`npm run electron:dev`). */
 const devServerUrl = app.isPackaged
   ? undefined
@@ -78,6 +129,11 @@ ipcMain.handle("hub:request", async (event, method: unknown, path: unknown, body
     if (!fromApp(event)) throw new Error("request from an unknown page");
     if (typeof method !== "string" || !METHODS.has(method)) throw new Error(`unsupported method: ${method}`);
     if (typeof path !== "string" || !path.startsWith("/v1/")) throw new Error(`not an API path: ${path}`);
+    if (!allowed(method, path)) {
+      throw new Error(
+        `the GUI does not call ${method} ${route(path)}; add it to ALLOWED in electron/main.cts if it now does`,
+      );
+    }
     if (body !== null && typeof body !== "string") throw new Error("body must be a string");
     const { base, token } = await connection();
     const headers: Record<string, string> = { authorization: `Bearer ${token}` };

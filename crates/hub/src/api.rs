@@ -241,13 +241,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 // ---------------------------------------------------------------------------------------
 // Handlers
 
-async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
-    let uptime = (Utc::now() - state.started_at).num_seconds().max(0) as u64;
+async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".into(),
-        version: VERSION.into(),
         api: API_VERSION.into(),
-        uptime_secs: uptime,
     })
 }
 

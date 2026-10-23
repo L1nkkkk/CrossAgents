@@ -183,6 +183,8 @@ Agent 通过 hub 挂载的 MCP 工具协作（`plan_submit`、`task_complete`、
 ## 本地 API
 
 hub 只监听 `127.0.0.1`。除 `GET /v1/health` 外都要 `Authorization: Bearer <~/.crossagents/token>`。
+`/v1/health` 免鉴权，所以只说最少的话：`status` 与 `api`；版本、pid、启动时间在需鉴权的 `GET /v1/info`。
+接口的读写分级与调用方见 [docs/API-AUTH.md](docs/API-AUTH.md)。
 `GET /v1/events` 是 SSE 事件流（支持断点续传，`?agent=` 只看某个会话）；`GET /v1/agents/{key}/transcript` 返回按轮分组的对话历史（每轮带改动 stat），`GET /v1/agents/{key}/turns/{message_id}/diff` 返回某一轮的完整 diff（CLI：`crossagents session diff <agent> [--turn N] [--stat]`）。GUI 用的 TypeScript 类型由
 `cargo test -p crossagents-api-types` 生成到 `bindings/`。
 
