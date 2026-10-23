@@ -147,6 +147,8 @@ fn live_windows(rate_limit: &Value) -> Vec<RateWindow> {
             used_percent: w["used_percent"].as_f64().unwrap_or(0.0),
             window_seconds: w["limit_window_seconds"].as_u64(),
             resets_at: epoch(w["reset_at"].as_i64()),
+            remaining: None,
+            total: None,
         })
     })
     .collect()
@@ -163,6 +165,8 @@ fn snapshot_windows(rate_limits: &Value) -> Vec<RateWindow> {
                 used_percent: w["used_percent"].as_f64().unwrap_or(0.0),
                 window_seconds: w["window_minutes"].as_u64().map(|m| m * 60),
                 resets_at: epoch(w["resets_at"].as_i64()),
+                remaining: None,
+                total: None,
             })
         })
         .collect()
@@ -220,6 +224,7 @@ impl Fields {
                         cached_input_tokens: t["cached_input_tokens"].as_u64().unwrap_or(0),
                         output_tokens: t["output_tokens"].as_u64().unwrap_or(0),
                         reasoning_output_tokens: t["reasoning_output_tokens"].as_u64().unwrap_or(0),
+                        credits: 0.0,
                     });
                 }
                 if payload["rate_limits"].is_object()
@@ -538,6 +543,7 @@ impl AccountProvider for CodexAccounts {
                         name: m["display_name"].as_str().unwrap_or(&id).to_owned(),
                         description: m["description"].as_str().map(str::to_owned),
                         context_window: m["context_window"].as_u64(),
+                        credit_multiplier: None,
                         id,
                     },
                 ))

@@ -121,7 +121,7 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
             windows.map((w, i) => {
               const pct = Math.max(0, Math.min(100, Math.round(w.used_percent)));
               return (
-                <span key={w.name} className="meter" title={`${windowLabel(w)} · ${pct}% 已用${w.resets_at ? ` · ${resetText(w.resets_at)}` : ""}`}>
+                <span key={w.name} className="meter" title={`${windowLabel(w)} · ${poolText(w) ?? `${pct}% 已用`}${w.resets_at ? ` · ${resetText(w.resets_at)}` : ""}`}>
                   <span className="meter-label">{shortWindow(w)}</span>
                   <span className={`quota-bar ${levels[i]}`}>
                     <span style={{ width: `${pct}%` }} />
@@ -194,7 +194,10 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
         <div className="account-detail">
           {windows.length > 0 && (
             <div className="quota">
-              <div className="quota-title">用量限额{status.email ? ` · ${status.email}` : ""}</div>
+              <div className="quota-title">
+                {windows.some((w) => w.total != null) ? `积分 · 剩 ${creditNumber(windows.reduce((s, w) => s + (w.remaining ?? 0), 0))}` : "用量限额"}
+                {status.email ? ` · ${status.email}` : ""}
+              </div>
               {windows.map((w) => (
                 <WindowRow key={w.name} window={w} reached={status.limit_reached} />
               ))}
@@ -230,6 +233,7 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
                 <span key={m.id} className="chip" title={m.description ?? undefined}>
                   {m.name || m.id}
                   {m.context_window ? ` · ${Math.round(m.context_window / 1000)}k` : ""}
+                  {m.credit_multiplier != null && <span className="muted"> · ×{m.credit_multiplier}</span>}
                 </span>
               ))}
             </div>
@@ -253,7 +257,8 @@ function AllUsage({ accounts }: { accounts: AccountQuota[] }) {
   const [metric, setMetric] = useState<Metric>("output");
   const ids = accounts.map((a) => a.account.id);
   const usage = useHubData(() => Promise.all(ids.map((id) => api.accountUsage(id, "day"))), [ids.join(",")], (e) => e.type === "agent.usage");
-  const m = METRICS.find((x) => x.key === metric)!;
+  const metrics = metricsFor(usage.data?.map((u) => u.total) ?? []);
+  const m = metrics.find((x) => x.key === metric) ?? metrics[0];
   const series = accounts.map((a, i) => ({ key: a.account.id, label: `${vendorName(a.account.provider)} · ${a.account.label || a.account.id}`, color: seriesColor(i) }));
   const data = usage.data ? dailySeries(usage.data.map((u) => u.rows.map((r) => ({ day: r.key, value: m.of(r.totals) })))) : [];
   const total = usage.data?.reduce((s, u) => s + m.of(u.total), 0) ?? 0;
@@ -264,8 +269,8 @@ function AllUsage({ accounts }: { accounts: AccountQuota[] }) {
         {usage.data && <span className="chip">{compact(total)}</span>}
         <div className="spacer" />
         <div className="segmented small" aria-label="图上显示">
-          {METRICS.map((x) => (
-            <button key={x.key} className={x.key === metric ? "active" : ""} onClick={() => setMetric(x.key)}>
+          {metrics.map((x) => (
+            <button key={x.key} className={x.key === m.key ? "active" : ""} onClick={() => setMetric(x.key)}>
               {x.label}
             </button>
           ))}
@@ -307,6 +312,11 @@ const HEALTH = {
   danger: { label: "快用完", glyph: "✕" },
 } as const;
 
+/** "剩 466 / 500" for a pool of credits (CodeBuddy); undefined for a time window. */
+function poolText(w: RateWindow): string | undefined {
+  return w.total != null ? `剩 ${creditNumber(w.remaining ?? 0)} / ${creditNumber(w.total)}` : undefined;
+}
+
 function WindowRow({ window: w, reached }: { window: RateWindow; reached: boolean }) {
   const pct = Math.max(0, Math.min(100, Math.round(w.used_percent)));
   const tone = level(w.used_percent, reached && pct >= 100);
@@ -324,7 +334,7 @@ function WindowRow({ window: w, reached }: { window: RateWindow; reached: boolea
           <span aria-hidden="true">{HEALTH[tone].glyph}</span>
           {pct >= 100 ? "已用完" : HEALTH[tone].label}
         </span>
-        {pct}% 已用
+        {poolText(w) ?? `${pct}% 已用`}
       </div>
     </div>
   );
@@ -337,13 +347,20 @@ const USAGE_GROUPS: { by: AccountUsageGroup; label: string }[] = [
   { by: "origin", label: "按来源" },
 ];
 
-type Metric = "input" | "output" | "reasoning" | "sessions";
+type Metric = "input" | "output" | "reasoning" | "sessions" | "credits";
 const METRICS: { key: Metric; label: string; of: (t: TokenTotals) => number }[] = [
   { key: "output", label: "输出", of: (t) => t.output_tokens },
   { key: "input", label: "输入", of: (t) => t.input_tokens },
   { key: "reasoning", label: "推理", of: (t) => t.reasoning_output_tokens },
   { key: "sessions", label: "会话", of: (t) => t.sessions },
+  { key: "credits", label: "积分", of: (t) => t.credits ?? 0 },
 ];
+
+/** The metrics worth offering: 积分 only where some vendor billed in credits (CodeBuddy). */
+const metricsFor = (totals: TokenTotals[]) => (totals.some((t) => (t.credits ?? 0) > 0) ? METRICS : METRICS.filter((m) => m.key !== "credits"));
+
+/** "466", "1,234.5": credits as people read them. */
+const creditNumber = (x: number) => x.toLocaleString(undefined, { maximumFractionDigits: 2 });
 
 /** Tokens this login spent, from the vendor's own session logs (also outside CrossAgents). */
 function TokenUsage({ id }: { id: string }) {
@@ -353,7 +370,9 @@ function TokenUsage({ id }: { id: string }) {
   const usage = useHubData(() => api.accountUsage(id, by), [id, by], (e) => e.type === "agent.usage");
   const rows = usage.data?.by === by ? usage.data.rows : undefined;
   const n = (x: number) => x.toLocaleString();
-  const m = METRICS.find((x) => x.key === metric)!;
+  const metrics = metricsFor(rows?.map((r) => r.totals) ?? []);
+  const credits = metrics.length === METRICS.length;
+  const m = metrics.find((x) => x.key === metric) ?? metrics[0];
   return (
     <div className="token-usage">
       <div className="token-usage-bar">
@@ -366,8 +385,8 @@ function TokenUsage({ id }: { id: string }) {
         </div>
         <div className="spacer" />
         <div className="segmented small" aria-label="图上显示">
-          {METRICS.map((x) => (
-            <button key={x.key} className={x.key === metric ? "active" : ""} onClick={() => setMetric(x.key)}>
+          {metrics.map((x) => (
+            <button key={x.key} className={x.key === m.key ? "active" : ""} onClick={() => setMetric(x.key)}>
               {x.label}
             </button>
           ))}
@@ -401,6 +420,7 @@ function TokenUsage({ id }: { id: string }) {
               <th className="num">缓存命中</th>
               <th className="num">输出</th>
               <th className="num">推理</th>
+              {credits && <th className="num">积分</th>}
             </tr>
           </thead>
           <tbody>
@@ -412,6 +432,7 @@ function TokenUsage({ id }: { id: string }) {
                 <td className="num">{Math.round(row.cache_hit_rate * 100)}%</td>
                 <td className="num">{n(row.totals.output_tokens)}</td>
                 <td className="num">{n(row.totals.reasoning_output_tokens)}</td>
+                {credits && <td className="num">{creditNumber(row.totals.credits ?? 0)}</td>}
               </tr>
             ))}
           </tbody>
@@ -423,6 +444,7 @@ function TokenUsage({ id }: { id: string }) {
               <td className="num">{Math.round(usage.data!.total_cache_hit_rate * 100)}%</td>
               <td className="num">{n(usage.data!.total.output_tokens)}</td>
               <td className="num">{n(usage.data!.total.reasoning_output_tokens)}</td>
+              {credits && <td className="num">{creditNumber(usage.data!.total.credits ?? 0)}</td>}
             </tr>
           </tfoot>
         </table>

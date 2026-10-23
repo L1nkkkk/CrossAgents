@@ -497,6 +497,8 @@ fn windows_of(snapshot: &Value) -> Vec<RateWindow> {
                     .get("resetsAt")
                     .and_then(Value::as_i64)
                     .and_then(|s| DateTime::<Utc>::from_timestamp(s, 0)),
+                remaining: None,
+                total: None,
             })
         })
         .collect()

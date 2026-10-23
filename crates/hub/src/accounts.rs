@@ -902,6 +902,8 @@ mod tests {
                     used_percent,
                     window_seconds: Some(5 * 3600),
                     resets_at: None,
+                    remaining: None,
+                    total: None,
                 })
                 .into_iter()
                 .collect(),

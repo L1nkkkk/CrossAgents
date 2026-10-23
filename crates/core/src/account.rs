@@ -46,6 +46,14 @@ pub struct RateWindow {
     #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub window_seconds: Option<u64>,
     pub resets_at: Option<DateTime<Utc>>,
+    /// What is left and what there was, for a pool of credits rather than a time window
+    /// (e.g. CodeBuddy's "套餐基础积分": 466 of 500).
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub remaining: Option<f64>,
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub total: Option<f64>,
 }
 
 /// One of an account's separate limits, e.g. the general Codex limit and one for a
@@ -129,6 +137,9 @@ pub struct TokenTotals {
     /// Part of `output_tokens` spent on reasoning.
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub reasoning_output_tokens: u64,
+    /// Credits spent, for vendors that bill in credits (CodeBuddy); 0 elsewhere.
+    #[serde(default)]
+    pub credits: f64,
 }
 
 impl TokenTotals {
@@ -138,6 +149,7 @@ impl TokenTotals {
         self.cached_input_tokens += other.cached_input_tokens;
         self.output_tokens += other.output_tokens;
         self.reasoning_output_tokens += other.reasoning_output_tokens;
+        self.credits += other.credits;
     }
 
     /// Share of input served from cache, 0..=1.
@@ -171,6 +183,11 @@ pub struct ModelInfo {
     pub description: Option<String>,
     #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub context_window: Option<u64>,
+    /// What a call costs relative to the vendor's base rate, for vendors that bill in
+    /// credits (CodeBuddy's "x0.69 credits").
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub credit_multiplier: Option<f64>,
 }
 
 /// How a login is carried out.

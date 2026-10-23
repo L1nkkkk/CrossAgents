@@ -796,6 +796,8 @@ fn window(name: &str, seconds: u64, percent: f64, resets_at: Option<DateTime<Utc
         used_percent: percent,
         window_seconds: Some(seconds),
         resets_at,
+        remaining: None,
+        total: None,
     }
 }
 

@@ -3,4 +3,9 @@
 /**
  * A model the account may use.
  */
-export type ModelInfo = { id: string, name: string, description: string | null, context_window: number | null, };
+export type ModelInfo = { id: string, name: string, description: string | null, context_window: number | null, 
+/**
+ * What a call costs relative to the vendor's base rate, for vendors that bill in
+ * credits (CodeBuddy's "x0.69 credits").
+ */
+credit_multiplier?: number, };

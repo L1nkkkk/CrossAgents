@@ -1,5 +1,6 @@
 // Mock data for the usage page (preview:mock): two subscriptions, one close to its 5-hour
-// limit and one that hit its weekly limit; spend grouped four ways.
+// limit and one that hit its weekly limit, and a CodeBuddy login billed in credits; spend
+// grouped four ways.
 
 import type { AccountQuota } from "@bindings/AccountQuota";
 import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
@@ -39,7 +40,7 @@ function account(id: string, provider: string, label: string, status: Partial<Ac
 
 export function quota(): QuotaResponse {
   return {
-    providers: ["claude", "codex"],
+    providers: ["claude", "codex", "codebuddy"],
     accounts: [
       account(
         "claude-max",
@@ -77,6 +78,28 @@ export function quota(): QuotaResponse {
         },
         ["rex"],
       ),
+      // Billed in credits: one pool per credit group, each with what is left.
+      {
+        ...account(
+          "codebuddy",
+          "codebuddy",
+          "本机 CodeBuddy 登录",
+          {
+            auth_mode: "personal",
+            plan: "体验版",
+            rate_limits: [
+              { name: "套餐基础积分", used_percent: 6.8, window_seconds: null, resets_at: null, remaining: 466, total: 500 },
+              { name: "平台奖励积分", used_percent: 0, window_seconds: null, resets_at: null, remaining: 2400, total: 2400 },
+            ],
+          },
+          ["iris"],
+        ),
+        models: [
+          { id: "glm-5.3", name: "GLM-5.3", description: null, context_window: null, credit_multiplier: 0.69 },
+          { id: "hy4-preview", name: "Hy4 preview", description: null, context_window: null, credit_multiplier: 0.29 },
+          { id: "hy3", name: "Hy3", description: null, context_window: null, credit_multiplier: 0 },
+        ],
+      },
     ],
   };
 }
@@ -115,15 +138,15 @@ export function usage(): Partial<Record<UsageGroup, UsageResponse>> {
 }
 
 export function accountUsage(): AccountUsageResponse {
-  const day = (key: string, input: number, output: number) => ({
+  const day = (key: string, input: number, output: number, credits: number) => ({
     key,
-    totals: { sessions: 3, input_tokens: input, cached_input_tokens: Math.round(input * 0.7), output_tokens: output, reasoning_output_tokens: Math.round(output / 3) },
+    totals: { sessions: 3, input_tokens: input, cached_input_tokens: Math.round(input * 0.7), output_tokens: output, reasoning_output_tokens: Math.round(output / 3), credits },
     cache_hit_rate: 0.7,
   });
   return {
     by: "day",
-    rows: [day("2026-10-22", 1_840_000, 92_000), day("2026-10-21", 2_310_000, 120_400), day("2026-10-20", 960_000, 51_000)],
-    total: { sessions: 9, input_tokens: 5_110_000, cached_input_tokens: 3_577_000, output_tokens: 263_400, reasoning_output_tokens: 87_800 },
+    rows: [day("2026-10-22", 1_840_000, 92_000, 11.6), day("2026-10-21", 2_310_000, 120_400, 15.4), day("2026-10-20", 960_000, 51_000, 7)],
+    total: { sessions: 9, input_tokens: 5_110_000, cached_input_tokens: 3_577_000, output_tokens: 263_400, reasoning_output_tokens: 87_800, credits: 34 },
     total_cache_hit_rate: 0.7,
   };
 }

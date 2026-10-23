@@ -3,4 +3,9 @@
 /**
  * One rate-limit window, e.g. "5% of the 30-day allowance used".
  */
-export type RateWindow = { name: string, used_percent: number, window_seconds: number | null, resets_at: string | null, };
+export type RateWindow = { name: string, used_percent: number, window_seconds: number | null, resets_at: string | null, 
+/**
+ * What is left and what there was, for a pool of credits rather than a time window
+ * (e.g. CodeBuddy's "套餐基础积分": 466 of 500).
+ */
+remaining?: number, total?: number, };

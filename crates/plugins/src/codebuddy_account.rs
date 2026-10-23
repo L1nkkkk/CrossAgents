@@ -2,9 +2,11 @@
 //! `AppData`, shared with the CodeBuddy IDE extension), so the account is that login;
 //! `CODEBUDDY_CONFIG_DIR` (the default is `~/.codebuddy`) only moves settings and
 //! transcripts. Login state and models come from the CLI's `initialize` answer, token use
-//! from its transcripts under `projects/`. CodeBuddy reports no plan or quota. Its CLI logs
-//! in only inside its TUI, so a login serves the CLI's web UI locally (`--serve`) and the
-//! login is done on that page.
+//! and the credits each call cost from its transcripts under `projects/`. CodeBuddy bills in
+//! credits: the plan and what is left come from the billing summary WorkBuddy shows (asked
+//! with the login's token, which goes nowhere else), each model's multiplier from the model
+//! list the CLI caches. Its CLI logs in only inside its TUI, so a login serves the CLI's web
+//! UI locally (`--serve`) and the login is done on that page.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader};
@@ -16,7 +18,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use crossagents_core::{
     Account, AccountProvider, AccountStatus, CoreError, DataSource, LoginCommand, ModelInfo,
-    SessionUsage, TokenTotals,
+    RateWindow, SessionUsage, TokenTotals,
 };
 use crossagents_drivers::codebuddy_native;
 use crossagents_drivers::process::system_proxy_env;
@@ -24,6 +26,13 @@ use serde_json::Value;
 
 /// The CLI is asked at most this often per account.
 const LIVE_TTL: Duration = Duration::from_secs(60);
+
+/// Where the billing summary is asked, in order: the API of CodeBuddy logins in mainland
+/// China and its fallback (the CLI's `CN_SAAS_CORE_API_*` origins). WorkBuddy calls the same
+/// path with the same login.
+const BILLING_ORIGINS: [&str; 2] = ["https://www.workbuddy.cn", "https://copilot.tencent.com"];
+const BILLING_PATH: &str = "/billing/meter/get-user-resource-summary";
+const BILLING_TIMEOUT: Duration = Duration::from_secs(15);
 
 type ScanEntry = (SystemTime, u64, Option<SessionUsage>);
 /// A status read, with when and the models listed alongside.
@@ -96,12 +105,181 @@ impl CodebuddyAccounts {
             }
         };
         read_initialize(&mut status, &init, !self.env_for(account).is_empty());
-        (status, models_of(&init))
+        let mut models = models_of(&init);
+        let login = init.get("account").filter(|a| a.is_object());
+        if let Some(uid) = login.and_then(|a| a.get("uid")).and_then(Value::as_str) {
+            let home = account.home.clone();
+            let uid = uid.to_owned();
+            let rates = tokio::task::spawn_blocking(move || multipliers(&home, &uid))
+                .await
+                .unwrap_or_default();
+            for model in &mut models {
+                model.credit_multiplier = rates.get(&model.id).copied();
+            }
+        }
+        if let Some((token, uid)) =
+            login.and_then(|a| Some((a.get("token")?.as_str()?, a.get("uid")?.as_str()?)))
+        {
+            match billing_summary(token, uid).await {
+                Ok(summary) => read_summary(&mut status, &summary),
+                Err(err) => status.note = Some(format!("cannot read credits: {err}")),
+            }
+        }
+        (status, models)
     }
 }
 
+/// The login's billing summary (`data` of the answer). The token goes into this request's
+/// header and nowhere else; errors name the origin, never the token.
+async fn billing_summary(token: &str, uid: &str) -> Result<Value, String> {
+    let http = reqwest::Client::builder()
+        .timeout(BILLING_TIMEOUT)
+        // Without one the API answers "请求不合法" (code 10085).
+        .user_agent(concat!("CrossAgents/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut failures = Vec::new();
+    for origin in BILLING_ORIGINS {
+        let answer = http
+            .post(format!("{origin}{BILLING_PATH}"))
+            .bearer_auth(token)
+            .header("X-User-Id", uid)
+            .header("Accept-Language", "zh")
+            .json(&serde_json::json!({}))
+            .send()
+            .await;
+        let body = match answer {
+            Ok(response) => response
+                .json::<Value>()
+                .await
+                .map_err(|e| e.without_url().to_string()),
+            Err(e) => Err(e.without_url().to_string()),
+        };
+        match body {
+            Ok(body) if body.get("code").and_then(Value::as_i64) == Some(0) => {
+                if let Some(data) = body.get("data").filter(|d| d.is_object()) {
+                    return Ok(data.clone());
+                }
+                failures.push(format!("{origin}: no data"));
+            }
+            Ok(body) => failures.push(format!(
+                "{origin}: code {} {}",
+                body.get("code").map(Value::to_string).unwrap_or_default(),
+                body.get("msg").and_then(Value::as_str).unwrap_or_default()
+            )),
+            Err(e) => failures.push(format!("{origin}: {e}")),
+        }
+    }
+    Err(failures.join("; "))
+}
+
+/// Plan and credits from a billing summary: one window per credit group that has any
+/// (`CreditGroups`, e.g. "套餐基础积分" 466 of 500), else per package.
+fn read_summary(status: &mut AccountStatus, summary: &Value) {
+    let number = |v: Option<&Value>| match v {
+        Some(Value::String(s)) => s.trim().parse::<f64>().ok(),
+        Some(v) => v.as_f64(),
+        None => None,
+    };
+    let windows_of = |key: &str, name_key: &str| -> Vec<RateWindow> {
+        summary
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|group| {
+                let total = number(group.get("CycleTotalCapacity"))?;
+                if total <= 0.0 {
+                    return None;
+                }
+                let remaining = number(group.get("CycleRemainCapacity"))
+                    .unwrap_or(0.0)
+                    .max(0.0);
+                let used = number(group.get("CycleUsedCapacity")).unwrap_or(total - remaining);
+                Some(RateWindow {
+                    name: group.get(name_key)?.as_str()?.to_owned(),
+                    used_percent: (used / total * 100.0).clamp(0.0, 100.0),
+                    window_seconds: None,
+                    resets_at: None,
+                    remaining: Some(round2(remaining)),
+                    total: Some(round2(total)),
+                })
+            })
+            .collect()
+    };
+    let mut windows = windows_of("CreditGroups", "Name");
+    if windows.is_empty() {
+        windows = windows_of("Packages", "PackageCode");
+    }
+    let left = number(summary.get("TotalCredits"))
+        .unwrap_or_else(|| windows.iter().filter_map(|w| w.remaining).sum());
+    status.plan = summary
+        .get("SubscriptionPackageName")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    status.limit_reached = !windows.is_empty() && left <= 0.0;
+    status.rate_limits = windows;
+    status.source = Some(DataSource::Live);
+    status.as_of = Some(Utc::now());
+    // Said only when the login is shared; otherwise the figures speak for themselves.
+    if status.note.as_deref() == Some(NO_QUOTA) {
+        status.note = None;
+    }
+}
+
+fn round2(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
+}
+
+/// Each model's credit multiplier for the user `uid` (`"x0.69 credits"` → 0.69), from the
+/// model list the CLI caches under `local_storage/` (one JSON file per cached request, named
+/// by a hash, holding `[{ userId, data: { models } }]`). Undocumented: anything that does not
+/// fit is skipped, and no multipliers is a fine answer.
+fn multipliers(home: &Path, uid: &str) -> HashMap<String, f64> {
+    let mut rates = HashMap::new();
+    let Ok(files) = std::fs::read_dir(home.join("local_storage")) else {
+        return rates;
+    };
+    for file in files.flatten() {
+        let Ok(text) = std::fs::read_to_string(file.path()) else {
+            continue;
+        };
+        let Ok(Value::Array(entries)) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let models = entries
+            .iter()
+            .filter(|e| e.get("userId").and_then(Value::as_str) == Some(uid))
+            .filter_map(|e| e.pointer("/data/models")?.as_array())
+            .flatten();
+        for model in models {
+            let (Some(id), Some(credits)) = (
+                model.get("id").and_then(Value::as_str),
+                model.get("credits").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            let rate = credits
+                .trim()
+                .trim_start_matches(['x', 'X', '×'])
+                .split_whitespace()
+                .next()
+                .and_then(|n| n.parse::<f64>().ok());
+            if let Some(rate) = rate {
+                rates.insert(id.to_owned(), rate);
+            }
+        }
+    }
+    rates
+}
+
+/// The note when nothing says what is left; cleared once the billing summary does.
+const NO_QUOTA: &str = "CodeBuddy reports no plan or quota";
+
 /// Login state from an `initialize` answer: `account` is null when signed out. Only
-/// harmless fields are read; the answer also carries the login's token.
+/// harmless fields are read here; the login's token in it is used only to ask for the
+/// billing summary.
 fn read_initialize(status: &mut AccountStatus, init: &Value, shares_login: bool) {
     let account = init.get("account").filter(|a| a.is_object());
     status.logged_in = account.is_some();
@@ -117,7 +295,7 @@ fn read_initialize(status: &mut AccountStatus, init: &Value, shares_login: bool)
         } else if shares_login {
             "CodeBuddy keeps one login per user of this machine; this account uses it too"
         } else {
-            "CodeBuddy reports no plan or quota"
+            NO_QUOTA
         }
         .into(),
     );
@@ -144,6 +322,7 @@ fn models_of(init: &Value) -> Vec<ModelInfo> {
                     .and_then(Value::as_str)
                     .map(str::to_owned),
                 context_window: None,
+                credit_multiplier: None,
                 id,
             })
         })
@@ -180,8 +359,8 @@ fn transcript_files(home: &Path) -> Vec<PathBuf> {
 }
 
 /// Token use of one transcript. Each model call's usage (`providerData.rawUsage`, in the
-/// OpenAI shape) is repeated on every line the call produced, so it counts once per
-/// `providerData.messageId`.
+/// OpenAI shape, plus the `credit` it cost) is repeated on every line the call produced, so
+/// it counts once per `providerData.messageId`.
 fn scan_transcript(path: &Path) -> Option<SessionUsage> {
     let file = std::fs::File::open(path).ok()?;
     let mut started_at: Option<DateTime<Utc>> = None;
@@ -226,6 +405,7 @@ fn scan_transcript(path: &Path) -> Option<SessionUsage> {
         totals.cached_input_tokens += num("/prompt_tokens_details/cached_tokens");
         totals.output_tokens += num("/completion_tokens");
         totals.reasoning_output_tokens += num("/completion_tokens_details/reasoning_tokens");
+        totals.credits += usage.get("credit").and_then(Value::as_f64).unwrap_or(0.0);
     }
     Some(SessionUsage {
         session_id: path.file_stem()?.to_string_lossy().into_owned(),
@@ -357,7 +537,7 @@ mod tests {
         let line = |kind: &str, call: &str, prompt: u64, out: u64| {
             json!({ "type": kind, "timestamp": 1792711297756_i64, "providerData": {
                 "model": "hy4-preview", "messageId": call, "agent": "cli", "rawUsage": {
-                    "prompt_tokens": prompt, "completion_tokens": out,
+                    "prompt_tokens": prompt, "completion_tokens": out, "credit": 1.25,
                     "prompt_tokens_details": { "cached_tokens": 100 },
                     "completion_tokens_details": { "reasoning_tokens": 2 } } } })
             .to_string()
@@ -384,7 +564,90 @@ mod tests {
         assert_eq!(usage.totals.cached_input_tokens, 200);
         assert_eq!(usage.totals.output_tokens, 35);
         assert_eq!(usage.totals.reasoning_output_tokens, 4);
+        // Two calls, each counted once.
+        assert!((usage.totals.credits - 2.5).abs() < 1e-9);
         assert!(scan_transcript(&dir.join("empty.jsonl")).is_none());
+    }
+
+    #[test]
+    fn credits_left_come_from_the_billing_summary() {
+        let summary = json!({
+            "SubscriptionPackageName": "体验版",
+            "IsPaidUser": false,
+            "TotalCredits": "2866.00000000999999999999",
+            "Packages": [ { "PackageCode": "TCACA_code_008", "CycleTotalCapacity": "500",
+                "CycleRemainCapacity": "466.00000001", "CycleUsedCapacity": "33.99999999" } ],
+            "CreditGroups": [
+                { "Kind": "plan_base", "Name": "套餐基础积分", "CycleTotalCapacity": "500",
+                  "CycleRemainCapacity": "466.00000001", "CycleUsedCapacity": "33.99999999" },
+                { "Kind": "addon", "Name": "购买积分", "CycleTotalCapacity": "0",
+                  "CycleRemainCapacity": "0", "CycleUsedCapacity": "0" },
+                { "Kind": "benefit", "Name": "平台奖励积分", "CycleTotalCapacity": "2400",
+                  "CycleRemainCapacity": "2400", "CycleUsedCapacity": "0" },
+            ],
+        });
+        let mut status = AccountStatus {
+            logged_in: true,
+            auth_mode: Some("personal".into()),
+            email: None,
+            plan: None,
+            subscription_until: None,
+            rate_limits: Vec::new(),
+            limit_reached: false,
+            credits: None,
+            limits: Vec::new(),
+            reset_credits: Vec::new(),
+            source: None,
+            as_of: None,
+            note: Some(NO_QUOTA.into()),
+        };
+        read_summary(&mut status, &summary);
+        assert_eq!(status.plan.as_deref(), Some("体验版"));
+        assert!(status.note.is_none());
+        assert!(!status.limit_reached);
+        // Groups with nothing in them are left out.
+        let names: Vec<_> = status.rate_limits.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, ["套餐基础积分", "平台奖励积分"]);
+        let base = &status.rate_limits[0];
+        assert_eq!((base.remaining, base.total), (Some(466.0), Some(500.0)));
+        assert!((base.used_percent - 6.8).abs() < 0.01);
+
+        // Without groups, each package is its own window.
+        let mut packages_only = status.clone();
+        read_summary(
+            &mut packages_only,
+            &json!({ "Packages": summary["Packages"], "TotalCredits": "0" }),
+        );
+        assert_eq!(packages_only.rate_limits[0].name, "TCACA_code_008");
+        assert!(packages_only.limit_reached);
+    }
+
+    #[test]
+    fn multipliers_come_from_the_cached_model_list_of_the_user() {
+        let home = tempfile::tempdir().unwrap();
+        let cache = home.path().join("local_storage");
+        std::fs::create_dir_all(&cache).unwrap();
+        let entry = |user: &str, rate: &str| {
+            json!({ "userId": user, "data": { "models": [
+                { "id": "glm-5.3", "credits": rate },
+                { "id": "hunyuan-image-alpha", "credits": "" },
+            ] } })
+        };
+        std::fs::write(
+            cache.join("entry_a.info"),
+            json!([entry("me", "x0.69 credits"), entry("other", "x9 credits")]).to_string(),
+        )
+        .unwrap();
+        std::fs::write(cache.join("entry_b.info"), "not json").unwrap();
+        std::fs::write(
+            cache.join("entry_c.info"),
+            json!({ "productFeatures": {} }).to_string(),
+        )
+        .unwrap();
+        let rates = multipliers(home.path(), "me");
+        assert_eq!(rates.get("glm-5.3"), Some(&0.69));
+        assert!(!rates.contains_key("hunyuan-image-alpha"));
+        assert!(multipliers(home.path(), "nobody").is_empty());
     }
 
     #[test]

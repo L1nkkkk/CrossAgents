@@ -11,4 +11,8 @@ cached_input_tokens: number, output_tokens: number,
 /**
  * Part of `output_tokens` spent on reasoning.
  */
-reasoning_output_tokens: number, };
+reasoning_output_tokens: number, 
+/**
+ * Credits spent, for vendors that bill in credits (CodeBuddy); 0 elsewhere.
+ */
+credits: number, };

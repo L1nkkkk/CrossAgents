@@ -137,6 +137,7 @@ fn models_of(init: &Value) -> Vec<ModelInfo> {
                     .and_then(Value::as_str)
                     .map(str::to_owned),
                 context_window: None,
+                credit_multiplier: None,
                 id,
             })
         })
