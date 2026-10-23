@@ -48,6 +48,10 @@ impl Paths {
     pub fn logs(&self) -> PathBuf {
         self.home.join("logs")
     }
+    /// Models picked on the settings page, per plugin.
+    pub fn models(&self) -> PathBuf {
+        self.home.join("models.json")
+    }
     /// Homes of accounts created by CrossAgents.
     pub fn accounts(&self) -> PathBuf {
         self.home.join("accounts")

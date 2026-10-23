@@ -458,7 +458,11 @@ mod tests {
             .nth(1)
             .expect("a port");
         assert_eq!(page, format!("http://localhost:{port}/"));
-        assert!(login.command.starts_with(&["codebuddy".to_owned(), "--serve".to_owned()]));
+        assert!(
+            login
+                .command
+                .starts_with(&["codebuddy".to_owned(), "--serve".to_owned()])
+        );
         assert_eq!(
             login.env.get("CODEBUDDY_CONFIG_DIR"),
             Some(&other.home.display().to_string())

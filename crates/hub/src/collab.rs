@@ -97,6 +97,7 @@ pub struct HubHost {
     pub runtime: Arc<Runtime>,
     pub bus: Arc<EventBus>,
     pub accounts: Arc<crate::accounts::Accounts>,
+    pub models: Arc<crate::models::ModelChoice>,
 }
 
 #[async_trait]
@@ -219,7 +220,7 @@ impl AgentHost for HubHost {
         };
         // A plugin without accounts (an ACP agent) runs whatever it lists.
         if !self.accounts.manages(plugin) {
-            return Ok(driver.models());
+            return Ok(self.models.filter(plugin, driver.models()));
         }
         let accounts: Vec<_> = self
             .bus
@@ -244,7 +245,7 @@ impl AgentHost for HubHost {
         }
         models.sort();
         models.dedup();
-        Ok(models)
+        Ok(self.models.filter(plugin, models))
     }
 
     async fn archive_agent(&self, agent: AgentId) -> Result<(), CoreError> {

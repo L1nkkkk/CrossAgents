@@ -176,7 +176,7 @@ export function App() {
       main = <UsageView />;
       break;
     case "settings":
-      main = <SettingsView />;
+      main = <SettingsView page={a} />;
       break;
     default:
       main = <HomeView />;

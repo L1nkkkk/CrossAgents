@@ -5,6 +5,7 @@ pub mod api;
 pub mod budget;
 pub mod collab;
 pub mod identity;
+pub mod models;
 pub mod notices;
 pub mod paths;
 pub mod runtime;
@@ -110,6 +111,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     }
     let runtime = Arc::new(Runtime::new(bus.clone(), plugins).with_setup(setup.clone()));
     runtime.reset_statuses().await?;
+    let model_choice = Arc::new(models::ModelChoice::load(paths.models()));
     // Agents from before names were for people get a name and (chats) a title.
     if let Err(err) = identity::fix_up(
         store.as_ref(),
@@ -134,6 +136,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
             runtime: runtime.clone(),
             bus: bus.clone(),
             accounts: accounts.clone(),
+            models: model_choice.clone(),
         }),
         Arc::new(GitWorkspaces),
         Arc::new(ShellVerifier::default()),
@@ -175,6 +178,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         runtime: runtime.clone(),
         orchestrator: orchestrator.clone(),
         accounts: accounts.clone(),
+        models: model_choice,
         tokens,
         token: token.clone(),
         home: paths.home.clone(),

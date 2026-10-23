@@ -4,12 +4,22 @@ import type { DriverKind } from "./DriverKind";
 
 export type PluginInfo = { name: string, 
 /**
- * The models offered: what its logins report, else its configured or built-in list.
+ * The models offered: [`Self::all_models`] narrowed to those picked on the settings
+ * page (all of them when none are).
  */
 models: Array<string>, 
 /**
- * `models` is the list set in `config.toml`, not what the logins report; each login is
- * then offered this list too.
+ * Every model it can run: what its logins report, else its configured or built-in
+ * list.
+ */
+all_models: Array<string>, 
+/**
+ * The models picked on the settings page; `None` when all are offered.
+ */
+shown: Array<string> | null, 
+/**
+ * `all_models` is the list set in `config.toml`, not what the logins report; each
+ * login is then offered this list too.
  */
 models_pinned: boolean, 
 /**

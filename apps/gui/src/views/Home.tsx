@@ -94,11 +94,15 @@ export function HomeView() {
   // Logins per vendor: with more than one, the model menus also say which login pays.
   const quota = useQuota();
   const accountsOf = (plugin: string) => (quota.data?.accounts ?? []).filter((a) => a.account.provider === plugin);
-  /** One login's models (what it reported), else the vendor's; a list set in config.toml wins. */
+  /**
+   * One login's models (what it reported), else the vendor's; a list set in config.toml
+   * wins. Narrowed to the models picked in settings, unless that leaves this login none.
+   */
   const modelsFor = (p: PluginInfo, account?: string): string[] => {
     if (p.models_pinned || !account) return p.models;
     const own = quota.data?.accounts.find((a) => a.account.id === account)?.models.map((m) => m.id) ?? [];
-    return own.length ? own : p.models;
+    const picked = p.shown ? own.filter((m) => p.shown!.includes(m)) : own;
+    return picked.length ? picked : p.models;
   };
   const accountLabel = (id?: string) => {
     const a = quota.data?.accounts.find((x) => x.account.id === id);

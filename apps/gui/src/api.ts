@@ -21,6 +21,7 @@ import type { CreateRunRequest } from "@bindings/CreateRunRequest";
 import type { HubInfo } from "@bindings/HubInfo";
 import type { ListAgentsResponse } from "@bindings/ListAgentsResponse";
 import type { ListPluginsResponse } from "@bindings/ListPluginsResponse";
+import type { PluginInfo } from "@bindings/PluginInfo";
 import type { ListRunsResponse } from "@bindings/ListRunsResponse";
 import type { RejectRunRequest } from "@bindings/RejectRunRequest";
 import type { Run } from "@bindings/Run";
@@ -119,6 +120,7 @@ export const api = {
   turnDiff: (key: string, messageId: string) =>
     request<TurnDiffResponse>("GET", `/v1/agents/${enc(key)}/turns/${enc(messageId)}/diff`),
   listPlugins: () => request<ListPluginsResponse>("GET", "/v1/plugins"),
+  setPluginModels: (name: string, shown: string[] | null) => request<PluginInfo>("POST", `/v1/plugins/${enc(name)}/models`, { shown }),
 
   listRuns: () => request<ListRunsResponse>("GET", "/v1/runs"),
   getRun: (key: string) => request<RunDetail>("GET", `/v1/runs/${enc(key)}`),

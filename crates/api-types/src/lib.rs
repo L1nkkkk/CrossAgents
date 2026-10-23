@@ -345,10 +345,18 @@ pub struct TranscriptUsage {
 #[ts(export)]
 pub struct PluginInfo {
     pub name: String,
-    /// The models offered: what its logins report, else its configured or built-in list.
+    /// The models offered: [`Self::all_models`] narrowed to those picked on the settings
+    /// page (all of them when none are).
     pub models: Vec<String>,
-    /// `models` is the list set in `config.toml`, not what the logins report; each login is
-    /// then offered this list too.
+    /// Every model it can run: what its logins report, else its configured or built-in
+    /// list.
+    #[serde(default)]
+    pub all_models: Vec<String>,
+    /// The models picked on the settings page; `None` when all are offered.
+    #[serde(default)]
+    pub shown: Option<Vec<String>>,
+    /// `all_models` is the list set in `config.toml`, not what the logins report; each
+    /// login is then offered this list too.
     #[serde(default)]
     pub models_pinned: bool,
     /// The driver its agents use unless they name another.
@@ -363,6 +371,13 @@ pub struct PluginInfo {
 #[ts(export)]
 pub struct ListPluginsResponse {
     pub plugins: Vec<PluginInfo>,
+}
+
+/// `POST /v1/plugins/{name}/models`: the models to offer; `null` offers them all.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetPluginModelsRequest {
+    pub shown: Option<Vec<String>>,
 }
 
 /// Starts a run. Agents are given by name or id.

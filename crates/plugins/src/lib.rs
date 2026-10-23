@@ -439,7 +439,10 @@ mod tests {
         let over: PluginConfig = toml::from_str(r#"models = ["hy3", "glm-5.3"]"#).unwrap();
         let registry =
             PluginRegistry::with_config(&BTreeMap::from([("codebuddy".to_owned(), over)]));
-        assert_eq!(registry.get("codebuddy").unwrap().models(), ["hy3", "glm-5.3"]);
+        assert_eq!(
+            registry.get("codebuddy").unwrap().models(),
+            ["hy3", "glm-5.3"]
+        );
         assert!(registry.models_pinned("codebuddy"));
         assert!(!registry.models_pinned("codex"));
     }

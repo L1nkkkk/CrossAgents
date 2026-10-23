@@ -22,7 +22,8 @@ use crossagents_api_types::{
     ListAgentsResponse, ListNotesResponse, ListPluginsResponse, ListQuestionsResponse,
     ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
     RenameAgentRequest, RunDetail, SendMessageRequest, SendMessageResponse, SetModelRequest,
-    SetTopicRequest, Transcript, TurnDiffResponse, UsageGroup, UsageResponse,
+    SetPluginModelsRequest, SetTopicRequest, Transcript, TurnDiffResponse, UsageGroup,
+    UsageResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError,
@@ -50,6 +51,7 @@ pub struct AppState {
     pub runtime: Arc<Runtime>,
     pub orchestrator: Arc<Orchestrator>,
     pub accounts: Arc<Accounts>,
+    pub models: Arc<crate::models::ModelChoice>,
     pub tokens: Arc<AgentTokens>,
     pub token: String,
     pub home: PathBuf,
@@ -90,6 +92,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/agents/{key}/connect", post(connect_agent))
         .route("/v1/notes", get(list_notes))
         .route("/v1/plugins", get(list_plugins))
+        .route("/v1/plugins/{name}/models", post(set_plugin_models))
         .route("/v1/usage", get(usage))
         .route("/v1/accounts", get(list_accounts).post(create_account))
         .route("/v1/quota", get(quota))
@@ -683,35 +686,50 @@ async fn list_plugins(State(state): State<Arc<AppState>>) -> Json<ListPluginsRes
     let registry = state.runtime.plugins();
     let mut plugins = Vec::new();
     for d in registry.defaults() {
-        let pinned = registry.models_pinned(d.name());
-        // What the logins can use, unless config.toml lists the models; the built-in list
-        // until a login has reported.
-        let reported = if pinned {
-            Vec::new()
-        } else {
-            state.accounts.offered_models(d.name()).await
-        };
-        plugins.push(PluginInfo {
-            name: d.name().to_owned(),
-            models: if reported.is_empty() {
-                d.models()
-            } else {
-                reported
-            },
-            models_pinned: pinned,
-            driver: d.kind(),
-            capabilities: d.capabilities(),
-            // The ACP driver does not pass an effort on, so none is offered there.
-            efforts: match d.kind() {
-                DriverKind::AcpGeneric => Vec::new(),
-                _ => registry
-                    .config(d.name())
-                    .map(|c| c.efforts.clone())
-                    .unwrap_or_default(),
-            },
-        });
+        plugins.push(plugin_info(&state, d.as_ref()).await);
     }
     Json(ListPluginsResponse { plugins })
+}
+
+async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> PluginInfo {
+    let registry = state.runtime.plugins();
+    let name = d.name();
+    let all = crate::models::available(registry, &state.accounts, name).await;
+    PluginInfo {
+        name: name.to_owned(),
+        models: state.models.filter(name, all.clone()),
+        all_models: all,
+        shown: state.models.shown(name),
+        models_pinned: registry.models_pinned(name),
+        driver: d.kind(),
+        capabilities: d.capabilities(),
+        // The ACP driver does not pass an effort on, so none is offered there.
+        efforts: match d.kind() {
+            DriverKind::AcpGeneric => Vec::new(),
+            _ => registry
+                .config(name)
+                .map(|c| c.efforts.clone())
+                .unwrap_or_default(),
+        },
+    }
+}
+
+/// Picks the models a plugin offers (the settings page); `null` offers them all.
+async fn set_plugin_models(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(req): Json<SetPluginModelsRequest>,
+) -> ApiResult<Json<PluginInfo>> {
+    let driver = state
+        .runtime
+        .plugins()
+        .get(&name)
+        .ok_or_else(|| CoreError::NotFound {
+            kind: "plugin",
+            id: name.clone(),
+        })?;
+    state.models.set(&name, req.shown)?;
+    Ok(Json(plugin_info(&state, driver.as_ref()).await))
 }
 
 // ---------------------------------------------------------------------------------------
