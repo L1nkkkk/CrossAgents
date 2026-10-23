@@ -70,13 +70,13 @@
 
 ## 四、可观测性
 
-- [~] `cli` 增加状态命令：`hub status` 已列出后台 agent 进程（pid、启动时间、隔离方式）；各会话状态与最近退出原因还没汇总进来
+- [x] `cli` 增加状态命令：`hub status` 除后台 agent 进程（pid、启动时间、隔离方式）外，汇总各会话——总数、归档数、各状态计数、正在干活的名单；处于 error 的会话逐个读 transcript 的 `error`，截成一行显示（最多 20 个）。`--json` 同步给出 `sessions` 与 `errors`
 - [ ] 事件日志落盘，便于无窗口时排查问题
-- [ ] GUI 显示"hub 离线"时的诊断信息，而不是空白
+- [x] GUI 显示"hub 离线"时的诊断信息：侧栏未连接时显示 `offline: <原因>`，原因来自 Electron 主进程且带修复指引（如 `hub is not running (…); start it with crossagents hub start`）
 
 ## 五、Claude 运行时（对照 Cutex 的借鉴项）
 
-- [ ] 设置源开关：Profile 级别选择是否读取项目的 CLAUDE.md、`.claude/` 规则、hooks、权限（`--setting-sources` 目前是固定值，见 `crates/drivers/src/claude_native/wire.rs`）
+- [ ] 设置源开关：Profile 级别选择是否读取项目的 CLAUDE.md、`.claude/` 规则、hooks、权限。驱动层已能读——`setting_sources` 从 agent config 取，默认 `project,local`（`crates/drivers/src/claude_native/mod.rs`，透传给 `--setting-sources`）；缺的是 GUI 开关与几个预设组合
 - [ ] hooks 默认关闭，需显式开启（参考 cutex 的 "Allow commands" 开关）
 - [ ] 运行时版本钉住：每个 agent 记录所用的 Claude Code 版本，升级后单独 repin，而不是全局切换
 - [ ] 每次升级 Claude Code 后跑 `claude_native` 冒烟测试（DESIGN.md §测试）

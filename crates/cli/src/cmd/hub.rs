@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail};
 use chrono::Utc;
 use clap::Subcommand;
-use crossagents_api_types::{HealthResponse, HubInfo};
+use crossagents_api_types::{
+    Agent, AgentStatus, HealthResponse, HubInfo, ListAgentsResponse, Transcript,
+};
 use crossagents_hub::{HubConfig, HubFile, Paths};
 use serde_json::json;
 use tracing_subscriber::EnvFilter;
@@ -202,12 +204,30 @@ async fn stop(ctx: &Context, agents: bool) -> Result<()> {
 
 async fn status(ctx: &Context) -> Result<()> {
     let running = running_hub(&ctx.paths).await?;
+    let hub_running = running.is_some();
     let runtimes = crossagents_drivers::host::records(&ctx.paths.runtimes());
-    // `/v1/health` says the hub answers and nothing more; the version, pid and start time
-    // are behind the token, in `/v1/info`.
-    let info = match &running {
-        Some(_) => ctx.client()?.get::<HubInfo>("/v1/info").await.ok(),
+    // `/v1/health` only says the hub answers. The version, its start time and the sessions
+    // are behind the token, so each may come back empty on its own.
+    let client = match &running {
+        Some(_) => ctx.client().ok(),
         None => None,
+    };
+    let info = match &client {
+        Some(client) => client.get::<HubInfo>("/v1/info").await.ok(),
+        None => None,
+    };
+    let agents = match &client {
+        Some(client) => client
+            .get::<ListAgentsResponse>("/v1/agents")
+            .await
+            .map(|list| list.agents)
+            .ok(),
+        None => None,
+    };
+    // One request per session in error; there are rarely any.
+    let errors = match (&client, &agents) {
+        (Some(client), Some(list)) => error_reasons(client, list).await,
+        _ => Vec::new(),
     };
     let uptime = info
         .as_ref()
@@ -223,11 +243,24 @@ async fn status(ctx: &Context) -> Result<()> {
                 })
             })
             .collect();
+        let sessions = agents.as_deref().map(|list| {
+            let t = Tally::of(list);
+            json!({
+                "total": t.total, "archived": t.archived,
+                "running": t.running, "starting": t.starting,
+                "idle": t.idle, "error": t.error, "stopped": t.stopped,
+            })
+        });
+        let errors: Vec<_> = errors
+            .iter()
+            .map(|e| json!({ "agent": e.name, "error": e.reason }))
+            .collect();
         let value = match &running {
             Some((hub, _)) => json!({
                 "running": true, "port": hub.port, "pid": hub.pid,
                 "version": info.as_ref().map(|i| i.version.clone()), "uptime_secs": uptime,
-                "home": ctx.paths.home, "runtimes": runtimes,
+                "home": ctx.paths.home, "sessions": sessions, "errors": errors,
+                "runtimes": runtimes,
             }),
             None => json!({ "running": false, "home": ctx.paths.home, "runtimes": runtimes }),
         };
@@ -253,7 +286,53 @@ async fn status(ctx: &Context) -> Result<()> {
             println!("home:    {}", ctx.paths.home.display());
         }
     }
+    match &agents {
+        Some(list) => {
+            println!();
+            let t = Tally::of(list);
+            let archived = if t.archived > 0 {
+                format!(", {} archived", t.archived)
+            } else {
+                String::new()
+            };
+            println!("sessions: {}{archived}", t.total);
+            let counts: Vec<String> = [
+                (t.running, "running"),
+                (t.starting, "starting"),
+                (t.idle, "idle"),
+                (t.error, "error"),
+                (t.stopped, "stopped"),
+            ]
+            .into_iter()
+            .filter(|(n, _)| *n > 0)
+            .map(|(n, label)| format!("{n} {label}"))
+            .collect();
+            if !counts.is_empty() {
+                println!("  {}", counts.join(" · "));
+            }
+            let busy: Vec<&str> = list
+                .iter()
+                .filter(|a| matches!(a.status, AgentStatus::Running | AgentStatus::Starting))
+                .map(|a| a.name.as_str())
+                .collect();
+            if !busy.is_empty() {
+                println!("working: {}", brief(&busy));
+            }
+            if !errors.is_empty() {
+                println!("in error:");
+                for e in &errors {
+                    println!("  {}: {}", e.name, e.reason);
+                }
+            }
+        }
+        None if hub_running => {
+            println!();
+            println!("sessions: unknown (cannot read /v1/agents)");
+        }
+        None => {}
+    }
     if !runtimes.is_empty() {
+        println!();
         println!("agent processes ({}):", runtimes.len());
         for r in &runtimes {
             let pid = r.child_pid.map_or_else(|| "-".to_owned(), |p| p.to_string());
@@ -267,4 +346,147 @@ async fn status(ctx: &Context) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// How many sessions are in each state, and how many are archived. Archived ones are out of
+/// the lists and always stopped, so they are counted apart rather than as a state.
+#[derive(Default)]
+struct Tally {
+    total: usize,
+    archived: usize,
+    running: usize,
+    starting: usize,
+    idle: usize,
+    error: usize,
+    stopped: usize,
+}
+
+impl Tally {
+    fn of(agents: &[Agent]) -> Self {
+        let mut tally = Self::default();
+        for agent in agents {
+            tally.total += 1;
+            if agent.archived_at.is_some() {
+                tally.archived += 1;
+                continue;
+            }
+            match agent.status {
+                AgentStatus::Running => tally.running += 1,
+                AgentStatus::Starting => tally.starting += 1,
+                AgentStatus::Idle => tally.idle += 1,
+                AgentStatus::Error => tally.error += 1,
+                AgentStatus::Stopped => tally.stopped += 1,
+            }
+        }
+        tally
+    }
+}
+
+/// Why each session in error is: its transcript's `error`, which also covers a failure before
+/// the first turn (a CLI that could not be started).
+struct Reason {
+    name: String,
+    reason: String,
+}
+
+async fn error_reasons(client: &Client, agents: &[Agent]) -> Vec<Reason> {
+    /// A stuck hub should not turn one command into an endless wait.
+    const MAX: usize = 20;
+    let mut reasons = Vec::new();
+    for agent in agents
+        .iter()
+        .filter(|a| a.status == AgentStatus::Error)
+        .take(MAX)
+    {
+        let reason = client
+            .get::<Transcript>(&format!("/v1/agents/{}/transcript", agent.name))
+            .await
+            .ok()
+            .and_then(|t| t.error)
+            .unwrap_or_else(|| "no reason recorded".to_owned());
+        reasons.push(Reason {
+            name: agent.name.clone(),
+            reason: first_line(&reason),
+        });
+    }
+    reasons
+}
+
+/// One line, cut short: status is read in a terminal.
+fn first_line(text: &str) -> String {
+    const WIDTH: usize = 120;
+    let line = text.lines().next().unwrap_or("").trim();
+    if line.chars().count() <= WIDTH {
+        return line.to_owned();
+    }
+    let head: String = line.chars().take(WIDTH - 1).collect();
+    format!("{head}…")
+}
+
+/// Names in one line, ten at most.
+fn brief(names: &[&str]) -> String {
+    const MAX: usize = 10;
+    if names.len() <= MAX {
+        return names.join(", ");
+    }
+    format!("{}, and {} more", names[..MAX].join(", "), names.len() - MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reason_is_one_line_and_cut_short() {
+        assert_eq!(first_line("boom\nsecond line"), "boom");
+        assert_eq!(first_line("  spaced  "), "spaced");
+        let long = "x".repeat(200);
+        let cut = first_line(&long);
+        assert_eq!(cut.chars().count(), 120);
+        assert!(cut.ends_with('…'));
+    }
+
+    #[test]
+    fn many_names_are_summarised() {
+        assert_eq!(brief(&["a", "b", "c"]), "a, b, c");
+        let many = vec!["n"; 12];
+        assert_eq!(
+            brief(&many),
+            "n, n, n, n, n, n, n, n, n, n, and 2 more"
+        );
+    }
+
+    #[test]
+    fn archived_sessions_are_counted_apart() {
+        let agents = vec![
+            agent("live", AgentStatus::Running, false),
+            agent("asleep", AgentStatus::Stopped, false),
+            agent("put away", AgentStatus::Stopped, true),
+        ];
+        let tally = Tally::of(&agents);
+        assert_eq!(tally.total, 3);
+        assert_eq!(tally.archived, 1);
+        // The archived one is stopped too, but is not counted as a state.
+        assert_eq!(tally.running, 1);
+        assert_eq!(tally.stopped, 1);
+    }
+
+    fn agent(name: &str, status: AgentStatus, archived: bool) -> Agent {
+        Agent {
+            id: crossagents_api_types::AgentId::new(),
+            name: name.to_owned(),
+            name_source: Default::default(),
+            plugin: "claude".into(),
+            driver: None,
+            model: None,
+            role: crossagents_api_types::Role::Worker,
+            cwd: std::path::PathBuf::from("."),
+            config: serde_json::Value::Null,
+            status,
+            created_at: Utc::now(),
+            profile: Default::default(),
+            topic: None,
+            archived_at: archived.then(Utc::now),
+        }
+    }
 }
