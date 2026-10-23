@@ -19,6 +19,11 @@ pub async fn run(cli: Cli) -> Result<()> {
     if let Command::Mcp = cli.command {
         return mcp::run().await;
     }
+    if let Command::RuntimeHost(args) = cli.command {
+        return crossagents_drivers::host::serve(args.dir, args.id)
+            .await
+            .map_err(anyhow::Error::msg);
+    }
     let paths = Paths::from_env()?;
     let ctx = Context {
         paths,
@@ -36,7 +41,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Usage(args) => usage::run(&ctx, args).await,
         Command::Account(cmd) => account::run(&ctx, cmd).await,
         Command::Setup(args) => setup::run(&ctx, args).await,
-        Command::Mcp => unreachable!("handled above"),
+        Command::Mcp | Command::RuntimeHost(_) => unreachable!("handled above"),
     }
 }
 

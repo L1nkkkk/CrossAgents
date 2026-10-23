@@ -24,9 +24,14 @@ pub enum HubCommand {
     Run,
     /// Start the hub in the background.
     Start,
-    /// Stop the background hub.
-    Stop,
-    /// Show whether the hub is running.
+    /// Stop the background hub. Agents in runtime hosts keep working; the next hub takes
+    /// them over.
+    Stop {
+        /// Stop every agent too.
+        #[arg(long)]
+        agents: bool,
+    },
+    /// Show whether the hub is running, and the agent processes that outlive it.
     Status,
 }
 
@@ -34,7 +39,7 @@ pub async fn run(ctx: &Context, cmd: HubCommand) -> Result<()> {
     match cmd {
         HubCommand::Run => run_foreground(&ctx.paths).await,
         HubCommand::Start => start(ctx).await,
-        HubCommand::Stop => stop(ctx).await,
+        HubCommand::Stop { agents } => stop(ctx, agents).await,
         HubCommand::Status => status(ctx).await,
     }
 }
@@ -181,7 +186,7 @@ fn detach(command: &mut std::process::Command) {
     command.process_group(0);
 }
 
-async fn stop(ctx: &Context) -> Result<()> {
+async fn stop(ctx: &Context, agents: bool) -> Result<()> {
     if running_hub(&ctx.paths).await?.is_none() {
         if ctx.json {
             return print_json(&json!({ "running": false }));
@@ -189,31 +194,54 @@ async fn stop(ctx: &Context) -> Result<()> {
         println!("hub is not running");
         return Ok(());
     }
-    ctx.client()?.post_empty("/v1/shutdown").await?;
-    let deadline = Instant::now() + STOP_TIMEOUT;
+    let path = if agents {
+        "/v1/shutdown?stop_agents=true"
+    } else {
+        "/v1/shutdown"
+    };
+    ctx.client()?.post_empty(path).await?;
+    // Stopping agents waits for their sessions to close.
+    let timeout = if agents { STOP_TIMEOUT * 6 } else { STOP_TIMEOUT };
+    let deadline = Instant::now() + timeout;
     while ctx.paths.hub_file().exists() {
         if Instant::now() > deadline {
-            bail!("hub did not stop within {}s", STOP_TIMEOUT.as_secs());
+            bail!("hub did not stop within {}s", timeout.as_secs());
         }
         tokio::time::sleep(POLL).await;
     }
+    let left = crossagents_drivers::host::records(&ctx.paths.runtimes()).len();
     if ctx.json {
-        return print_json(&json!({ "running": false }));
+        return print_json(&json!({ "running": false, "runtimes_left": left }));
     }
-    println!("hub stopped");
+    if left > 0 {
+        println!("hub stopped; {left} agent process(es) keep running for the next hub");
+    } else {
+        println!("hub stopped");
+    }
     Ok(())
 }
 
 async fn status(ctx: &Context) -> Result<()> {
     let running = running_hub(&ctx.paths).await?;
+    let runtimes = crossagents_drivers::host::records(&ctx.paths.runtimes());
     if ctx.json {
+        let runtimes: Vec<_> = runtimes
+            .iter()
+            .map(|r| {
+                json!({
+                    "id": r.id, "label": r.label, "owner": r.owner, "host_pid": r.host_pid,
+                    "pid": r.child_pid, "started_at": r.started_at, "isolation": r.isolation,
+                    "exited": r.exited,
+                })
+            })
+            .collect();
         let value = match &running {
             Some((hub, health)) => json!({
                 "running": true, "port": hub.port, "pid": hub.pid,
                 "version": health.version, "uptime_secs": health.uptime_secs,
-                "home": ctx.paths.home,
+                "home": ctx.paths.home, "runtimes": runtimes,
             }),
-            None => json!({ "running": false, "home": ctx.paths.home }),
+            None => json!({ "running": false, "home": ctx.paths.home, "runtimes": runtimes }),
         };
         return print_json(&value);
     }
@@ -229,6 +257,19 @@ async fn status(ctx: &Context) -> Result<()> {
         None => {
             println!("hub:     stopped");
             println!("home:    {}", ctx.paths.home.display());
+        }
+    }
+    if !runtimes.is_empty() {
+        println!("agent processes ({}):", runtimes.len());
+        for r in &runtimes {
+            let pid = r.child_pid.map_or_else(|| "-".to_owned(), |p| p.to_string());
+            let state = if r.exited { "ended, waiting for the hub" } else { "running" };
+            println!(
+                "  pid {pid:<7} {}  since {}  {state}  [{}]",
+                r.label,
+                r.started_at.format("%Y-%m-%d %H:%M"),
+                r.isolation
+            );
         }
     }
     Ok(())

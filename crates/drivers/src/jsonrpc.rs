@@ -84,11 +84,27 @@ impl RpcPeer {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
+        Self::spawn_from(reader, writer, handler, 1)
+    }
+
+    /// Like [`Self::spawn`], numbering requests from `first_id`: a connection taken over
+    /// from another client may still carry answers to that client's requests, which must
+    /// not be mistaken for answers to ours.
+    pub fn spawn_from<R, W>(
+        reader: R,
+        writer: W,
+        handler: Arc<dyn RpcHandler>,
+        first_id: i64,
+    ) -> (Self, JoinHandle<()>)
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
         let (out, out_rx) = mpsc::unbounded_channel();
         let peer = Self {
             out,
             pending: Arc::default(),
-            next_id: Arc::new(AtomicI64::new(1)),
+            next_id: Arc::new(AtomicI64::new(first_id)),
         };
         tokio::spawn(write_loop(writer, out_rx));
         let task = tokio::spawn(read_loop(reader, handler, peer.clone()));

@@ -20,13 +20,35 @@ use crate::runtime::{Runtime, SessionExtras, SessionSetup};
 pub const URL_ENV: &str = "CROSSAGENTS_URL";
 pub const TOKEN_ENV: &str = "CROSSAGENTS_AGENT_TOKEN";
 
-/// Tokens identifying agents to the `/v1/me` API. One per live session.
+/// Tokens identifying agents to the `/v1/me` API. One per live session. Kept in a file
+/// when given one: the tools of an agent taken over by the next hub keep their token.
 #[derive(Default)]
 pub struct AgentTokens {
     by_token: RwLock<HashMap<String, AgentId>>,
+    file: Option<PathBuf>,
 }
 
 impl AgentTokens {
+    /// Tokens kept in `file`, starting with the ones a previous hub left there.
+    pub fn load(file: PathBuf) -> Self {
+        let by_token = std::fs::read(&file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        Self {
+            by_token: RwLock::new(by_token),
+            file: Some(file),
+        }
+    }
+
+    fn save(&self, map: &HashMap<String, AgentId>) {
+        if let Some(file) = &self.file
+            && let Err(err) = crate::write_private(file, &serde_json::to_string(map).unwrap_or_default())
+        {
+            tracing::warn!(error = %err, "cannot save agent tokens");
+        }
+    }
+
     /// Issues a fresh token for `agent`, revoking its previous one.
     pub async fn issue(&self, agent: AgentId) -> String {
         let token = format!(
@@ -37,7 +59,15 @@ impl AgentTokens {
         let mut map = self.by_token.write().await;
         map.retain(|_, id| *id != agent);
         map.insert(token.clone(), agent);
+        self.save(&map);
         token
+    }
+
+    /// Keeps only the tokens of `agents` (the ones still running).
+    pub async fn retain(&self, agents: &std::collections::HashSet<AgentId>) {
+        let mut map = self.by_token.write().await;
+        map.retain(|_, id| agents.contains(id));
+        self.save(&map);
     }
 
     pub async fn agent(&self, token: &str) -> Option<AgentId> {
@@ -57,6 +87,10 @@ pub struct CollabSetup {
 
 #[async_trait]
 impl SessionSetup for CollabSetup {
+    async fn environment(&self, agent: &Agent) -> Result<Vec<(String, String)>, CoreError> {
+        self.accounts.agent_env(agent).await
+    }
+
     async fn prepare(&self, agent: &Agent) -> Result<SessionExtras, CoreError> {
         let agent_env = self.accounts.agent_env(agent).await?;
         let Some((program, args)) = self.mcp_command.split_first() else {

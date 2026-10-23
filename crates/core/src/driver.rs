@@ -211,6 +211,40 @@ pub enum StopReason {
     Cancelled,
     /// The turn failed (the agent reported an error, or its process died).
     Error,
+    /// The turn's outcome is unknown: its process went away with the hub that ran it (a hub
+    /// restart that could not take the process over). Never retried by itself.
+    Interrupted,
+}
+
+/// Why an agent process ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum ExitCause {
+    /// It exited by itself with code 0 (e.g. its input was closed).
+    Exited,
+    /// It exited by itself with another code.
+    Crashed,
+    /// CrossAgents stopped it (stop, archive, a failed start).
+    Killed,
+    /// Its runtime host went away without saying how it ended (killed from outside, say).
+    Lost,
+}
+
+impl ExitCause {
+    /// `"exited"`, `"crashed (exit code 3)"`, ...: for messages.
+    pub fn describe(self, code: Option<i32>) -> String {
+        let word = match self {
+            Self::Exited => "exited",
+            Self::Crashed => "crashed",
+            Self::Killed => "was stopped",
+            Self::Lost => "was lost",
+        };
+        match code {
+            Some(code) if self != Self::Killed => format!("{word} (exit code {code})"),
+            _ => word.to_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -411,6 +445,9 @@ pub enum SessionEventKind {
     /// The agent process ended. The session is gone (until resumed, if it can be).
     Exited {
         message: String,
+        /// How it ended, when the driver knows.
+        cause: Option<ExitCause>,
+        code: Option<i32>,
     },
 }
 
@@ -466,6 +503,18 @@ pub trait DriverSession: Send + Sync {
 
     /// Ends the session for good, stopping a running turn first.
     async fn shutdown(&self);
+
+    /// The process runs in a runtime host and survives the hub: when the hub leaves, the
+    /// session is left running for the next hub to [`Driver::adopt`].
+    fn outlives_hub(&self) -> bool {
+        false
+    }
+
+    /// For a session from [`Driver::adopt`] with `turn_running`: waits for the turn the
+    /// previous hub started. `None` when there is no such turn.
+    async fn adopted_turn(&self) -> Option<Result<TurnOutcome, CoreError>> {
+        None
+    }
 }
 
 /// One Profile's way of running sessions (docs/DESIGN.md §9).
@@ -492,6 +541,18 @@ pub trait Driver: Send + Sync {
         _spec: SessionSpec,
     ) -> Result<Box<dyn DriverSession>, CoreError> {
         Err(unsupported("resume"))
+    }
+    /// Takes over the session's process left running by a previous hub (it runs in a
+    /// runtime host, see [`DriverSession::outlives_hub`]). `turn_running`: the previous hub
+    /// saw a turn start and not end; [`DriverSession::adopted_turn`] then waits for it.
+    /// `Ok(None)` when no such process is left.
+    async fn adopt(
+        &self,
+        _session_id: &str,
+        _turn_running: bool,
+        _spec: SessionSpec,
+    ) -> Result<Option<Box<dyn DriverSession>>, CoreError> {
+        Ok(None)
     }
 }
 

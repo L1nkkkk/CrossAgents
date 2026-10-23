@@ -23,10 +23,11 @@ use crossagents_core::{
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
 use self::wire::{Flavor, Launch, Start, Translator};
+use crate::launch::{self, BoxRead, BoxWrite, ExitWatch, LaunchSpec, Launched, ProcessHandle};
 use crate::process::{StderrTail, find_in_path, hide_console, system_proxy_env};
 
 /// `entrypoint` of the sessions CrossAgents starts, in Claude Code's transcripts.
@@ -157,12 +158,37 @@ impl Driver for ClaudeNativeDriver {
                 .await?,
         ))
     }
+
+    async fn adopt(
+        &self,
+        session_id: &str,
+        turn_running: bool,
+        spec: SessionSpec,
+    ) -> Result<Option<Box<dyn DriverSession>>, CoreError> {
+        let Some(launched) = launch::adopt(&owner_of(self.flavor, session_id)).await else {
+            return Ok(None);
+        };
+        let command = spec.command.clone().unwrap_or_else(|| self.command.clone());
+        Ok(Some(Box::new(ClaudeSession::adopt(
+            launched?,
+            session_id.to_owned(),
+            command,
+            spec,
+            self.flavor,
+            turn_running,
+        ))))
+    }
+}
+
+/// Who may take a session's process over: the session itself.
+fn owner_of(flavor: Flavor, session_id: &str) -> String {
+    format!("claude-native:{}:{session_id}", flavor.program())
 }
 
 /// What the reader task and the session share.
 struct Shared {
     session_id: String,
-    stdin: tokio::sync::Mutex<Option<ChildStdin>>,
+    stdin: tokio::sync::Mutex<Option<BoxWrite>>,
     pending: Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>,
     turn: Mutex<Turn>,
     translator: Mutex<Translator>,
@@ -193,6 +219,24 @@ struct Turn {
 }
 
 impl Shared {
+    fn new(session_id: String, stdin: BoxWrite, spec: &SessionSpec, flavor: Flavor) -> Self {
+        Self {
+            session_id,
+            stdin: tokio::sync::Mutex::new(Some(stdin)),
+            pending: Mutex::default(),
+            turn: Mutex::default(),
+            translator: Mutex::default(),
+            turn_ends: Mutex::default(),
+            events: spec.events.clone(),
+            permission: spec.permission,
+            permissions: spec.permissions.clone(),
+            exited: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
+            program: flavor.program(),
+            replay: Mutex::default(),
+        }
+    }
+
     fn emit(&self, kind: SessionEventKind, raw: Option<&Value>) {
         let _ = self.events.send(SessionEvent {
             kind,
@@ -371,7 +415,7 @@ impl Shared {
     }
 }
 
-async fn read(shared: Arc<Shared>, stdout: ChildStdout, tail: StderrTail) {
+async fn read(shared: Arc<Shared>, stdout: BoxRead, tail: StderrTail, exit: ExitWatch) {
     let mut lines = BufReader::new(stdout).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         match serde_json::from_str::<Value>(&line) {
@@ -380,21 +424,67 @@ async fn read(shared: Arc<Shared>, stdout: ChildStdout, tail: StderrTail) {
         }
     }
     if shared.ended() {
-        let message = tail.describe(&format!("{} exited", shared.program)).await;
-        shared.emit(SessionEventKind::Exited { message }, None);
+        let info = exit.within(Duration::from_secs(2)).await;
+        let what = match info {
+            Some(info) => info.describe(shared.program),
+            None => format!("{} exited", shared.program),
+        };
+        let message = tail.describe(&what).await;
+        shared.emit(
+            SessionEventKind::Exited {
+                message,
+                cause: info.map(|i| i.cause),
+                code: info.and_then(|i| i.code),
+            },
+            None,
+        );
     }
 }
 
 /// A Claude Code session in its own `claude -p` process.
 pub struct ClaudeSession {
     shared: Arc<Shared>,
-    child: tokio::sync::Mutex<Option<Child>>,
+    process: ProcessHandle,
     command: Vec<String>,
     flavor: Flavor,
     last_limits: Mutex<Option<Instant>>,
+    /// The turn a previous hub started, taken over with the process.
+    adopted: Mutex<Option<oneshot::Receiver<StopReason>>>,
 }
 
 impl ClaudeSession {
+    /// The session of a process taken over from a previous hub: past its handshake, with
+    /// `turn_running` the turn it is in.
+    fn adopt(
+        launched: Launched,
+        session_id: String,
+        command: Vec<String>,
+        spec: SessionSpec,
+        flavor: Flavor,
+        turn_running: bool,
+    ) -> Self {
+        let Launched {
+            stdin,
+            stdout,
+            stderr: tail,
+            process,
+        } = launched;
+        let shared = Arc::new(Shared::new(session_id, stdin, &spec, flavor));
+        let adopted = turn_running.then(|| {
+            let (tx, rx) = oneshot::channel();
+            shared.turn.lock().expect("turn lock").waiter = Some(tx);
+            rx
+        });
+        tokio::spawn(read(shared.clone(), stdout, tail, process.watch()));
+        Self {
+            shared,
+            process,
+            command,
+            flavor,
+            last_limits: Mutex::new(None),
+            adopted: Mutex::new(adopted),
+        }
+    }
     async fn spawn(
         command: Vec<String>,
         launch: Launch,
@@ -411,66 +501,52 @@ impl ClaudeSession {
         {
             crate::codebuddy_native::adopt_transcript(from, &spec.agent.cwd, &spec.env);
         }
-        let mut child = Command::new(&program);
-        for (key, _) in std::env::vars_os() {
-            if flavor.withholds(&key.to_string_lossy()) {
-                child.env_remove(key);
-            }
-        }
-        child
-            .args(extra)
-            .args(wire::args(&launch, &start, flavor))
-            // Claude Code works in its own working directory.
-            .current_dir(&spec.agent.cwd)
-            .env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "1")
-            // Names the sessions' origin in Claude Code's transcripts (usage by origin).
-            .env("CLAUDE_CODE_ENTRYPOINT", ENTRYPOINT)
-            .envs(system_proxy_env())
-            .envs(spec.env.iter().cloned())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        hide_console(&mut child);
-        let mut child = child
-            .spawn()
-            .map_err(|e| CoreError::Agent(format!("cannot start {}: {e}", program.display())))?;
         let session_id = match &start {
             Start::New(id) | Start::Resume(id) | Start::Fork { id, .. } => id.clone(),
         };
-        let shared = Arc::new(Shared {
-            session_id: session_id.clone(),
-            stdin: tokio::sync::Mutex::new(child.stdin.take()),
-            pending: Mutex::default(),
-            turn: Mutex::default(),
-            translator: Mutex::default(),
-            turn_ends: Mutex::default(),
-            events: spec.events.clone(),
-            permission: spec.permission,
-            permissions: spec.permissions.clone(),
-            exited: AtomicBool::new(false),
-            closing: AtomicBool::new(false),
-            program: flavor.program(),
-            replay: Mutex::default(),
-        });
+        let mut args = extra.to_vec();
+        args.extend(wire::args(&launch, &start, flavor));
+        let mut env = vec![
+            ("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING".to_owned(), "1".to_owned()),
+            // Names the sessions' origin in Claude Code's transcripts (usage by origin).
+            ("CLAUDE_CODE_ENTRYPOINT".to_owned(), ENTRYPOINT.to_owned()),
+        ];
+        env.extend(system_proxy_env());
+        env.extend(spec.env.iter().cloned());
+        let launched = launch::launch(LaunchSpec {
+            program,
+            args,
+            // Claude Code works in its own working directory.
+            cwd: spec.agent.cwd.clone(),
+            env,
+            env_remove: std::env::vars_os()
+                .map(|(key, _)| key.to_string_lossy().into_owned())
+                .filter(|key| flavor.withholds(key))
+                .collect(),
+            owner: Some(owner_of(flavor, &session_id)),
+            label: format!("{} session {session_id}", flavor.program()),
+        })
+        .await?;
+        let Launched {
+            stdin,
+            stdout,
+            stderr: tail,
+            process,
+        } = launched;
+        let shared = Arc::new(Shared::new(session_id.clone(), stdin, &spec, flavor));
         let replayed =
             (flavor == Flavor::Codebuddy && matches!(start, Start::Resume(_))).then(|| {
                 let (tx, rx) = oneshot::channel();
                 *shared.replay.lock().expect("replay lock") = Some(tx);
                 rx
             });
-        let tail = StderrTail::spawn(child.stderr.take().expect("piped stderr"));
-        tokio::spawn(read(
-            shared.clone(),
-            child.stdout.take().expect("piped stdout"),
-            tail.clone(),
-        ));
+        tokio::spawn(read(shared.clone(), stdout, tail.clone(), process.watch()));
         if let Err(err) = shared
             .control(json!({ "subtype": "initialize" }), INIT_TIMEOUT)
             .await
         {
             shared.closing.store(true, Ordering::SeqCst);
-            let _ = child.start_kill();
+            process.start_kill();
             return Err(CoreError::Agent(
                 tail.describe(&format!("{} did not start ({err})", flavor.program()))
                     .await,
@@ -488,10 +564,11 @@ impl ClaudeSession {
         shared.emit(SessionEventKind::Started { session_id }, None);
         Ok(Self {
             shared,
-            child: tokio::sync::Mutex::new(Some(child)),
+            process,
             command,
             flavor,
             last_limits: Mutex::new(None),
+            adopted: Mutex::new(None),
         })
     }
 
@@ -516,13 +593,9 @@ impl ClaudeSession {
         self.shared.closing.store(true, Ordering::SeqCst);
         // Closing stdin lets Claude Code finish writing its transcript.
         self.shared.stdin.lock().await.take();
-        if let Some(mut child) = self.child.lock().await.take()
-            && tokio::time::timeout(CLEANUP_TIMEOUT, child.wait())
-                .await
-                .is_err()
-        {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+        if self.process.exit_within(CLEANUP_TIMEOUT).await.is_none() {
+            self.process.start_kill();
+            let _ = self.process.exit_within(CLEANUP_TIMEOUT).await;
         }
     }
 
@@ -691,6 +764,27 @@ impl DriverSession for ClaudeSession {
     async fn shutdown(&self) {
         let _ = self.interrupt().await;
         self.close().await;
+    }
+
+    fn outlives_hub(&self) -> bool {
+        self.process.outlives_hub()
+    }
+
+    async fn adopted_turn(&self) -> Option<Result<TurnOutcome, CoreError>> {
+        let rx = self.adopted.lock().expect("adopted lock").take()?;
+        let result = rx.await.map_err(|_| {
+            CoreError::Agent(format!(
+                "the turn ended without a result ({} exited)",
+                self.shared.program
+            ))
+        });
+        if result.is_ok() {
+            self.refresh_limits().await;
+        }
+        Some(result.map(|stop_reason| TurnOutcome {
+            stop_reason,
+            turn_id: None,
+        }))
     }
 }
 

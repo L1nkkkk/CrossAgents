@@ -5,7 +5,6 @@
 pub mod wire;
 
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -17,12 +16,11 @@ use crossagents_core::{
     ToolDetail, ToolStatus, TurnOutcome,
 };
 use serde_json::Value;
-use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, mpsc};
 
 use self::wire::{method, *};
 use crate::jsonrpc::{RpcError, RpcHandler, RpcPeer};
-use crate::process::{StderrTail, hide_console, resolve_program};
+use crate::process::resolve_program;
 
 const INIT_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -137,7 +135,7 @@ pub struct AcpOptions {
 pub struct AcpSession {
     peer: RpcPeer,
     session_id: String,
-    child: Mutex<Child>,
+    process: crate::launch::ProcessHandle,
     pending_instructions: Mutex<Option<String>>,
     events: mpsc::UnboundedSender<SessionEvent>,
     /// Set before we kill the process, so its exit is not reported as a failure.
@@ -161,24 +159,22 @@ impl AcpSession {
             events,
         } = opts;
 
-        let program = resolve_program(&launch.program);
-        let mut command = Command::new(&program);
-        command
-            .args(&launch.args)
-            .envs(launch.env.iter().cloned())
-            .current_dir(&launch.cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        hide_console(&mut command);
-        let mut child = command
-            .spawn()
-            .map_err(|e| CoreError::Agent(format!("cannot start {}: {e}", program.display())))?;
-
-        let stdin = child.stdin.take().expect("piped stdin");
-        let stdout = child.stdout.take().expect("piped stdout");
-        let tail = StderrTail::spawn(child.stderr.take().expect("piped stderr"));
+        let launched = crate::launch::launch(crate::launch::LaunchSpec {
+            program: resolve_program(&launch.program),
+            args: launch.args.clone(),
+            env: launch.env.clone(),
+            cwd: launch.cwd.clone(),
+            owner: None,
+            label: launch.program.clone(),
+            ..crate::launch::LaunchSpec::default()
+        })
+        .await?;
+        let crate::launch::Launched {
+            stdin,
+            stdout,
+            stderr: tail,
+            process,
+        } = launched;
 
         let handler = Arc::new(ClientHandler {
             events: events.clone(),
@@ -191,11 +187,24 @@ impl AcpSession {
             let events = events.clone();
             let tail = tail.clone();
             let shutting_down = shutting_down.clone();
+            let exit = process.watch();
             async move {
                 let _ = reader.await;
                 if !shutting_down.load(Ordering::SeqCst) {
-                    let message = tail.describe("agent process exited").await;
-                    emit(&events, SessionEventKind::Exited { message });
+                    let info = exit.within(Duration::from_secs(2)).await;
+                    let what = match info {
+                        Some(info) => info.describe("agent process"),
+                        None => "agent process exited".to_owned(),
+                    };
+                    let message = tail.describe(&what).await;
+                    emit(
+                        &events,
+                        SessionEventKind::Exited {
+                            message,
+                            cause: info.map(|i| i.cause),
+                            code: info.and_then(|i| i.code),
+                        },
+                    );
                 }
             }
         });
@@ -250,7 +259,7 @@ impl AcpSession {
         let this = Self {
             peer,
             session_id: session.session_id.clone(),
-            child: Mutex::new(child),
+            process,
             pending_instructions: Mutex::new(instructions),
             events: events.clone(),
             shutting_down,
@@ -391,9 +400,8 @@ impl DriverSession for AcpSession {
 
     async fn shutdown(&self) {
         self.shutting_down.store(true, Ordering::SeqCst);
-        let mut child = self.child.lock().await;
-        let _ = child.start_kill();
-        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+        self.process.start_kill();
+        let _ = self.process.exit_within(Duration::from_secs(5)).await;
     }
 }
 

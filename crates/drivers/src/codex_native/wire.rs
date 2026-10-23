@@ -25,6 +25,7 @@ pub mod method {
     pub const THREAD_FORK: &str = "thread/fork";
     pub const THREAD_REVERT: &str = "thread/revert";
     pub const THREAD_UNSUBSCRIBE: &str = "thread/unsubscribe";
+    pub const THREAD_LOADED_LIST: &str = "thread/loaded/list";
     pub const THREAD_COMPACT: &str = "thread/compact/start";
     pub const TURN_START: &str = "turn/start";
     pub const TURN_INTERRUPT: &str = "turn/interrupt";

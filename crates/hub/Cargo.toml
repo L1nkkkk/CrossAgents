@@ -12,6 +12,7 @@ axum.workspace = true
 chrono.workspace = true
 crossagents-api-types.workspace = true
 crossagents-core.workspace = true
+crossagents-drivers.workspace = true
 crossagents-store-sqlite.workspace = true
 crossagents-orchestrator.workspace = true
 crossagents-plugins.workspace = true

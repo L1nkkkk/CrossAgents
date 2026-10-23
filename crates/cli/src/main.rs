@@ -55,6 +55,18 @@ pub enum Command {
     /// Serve the collaboration tools over MCP on stdio (started by the hub for agents).
     #[command(hide = true)]
     Mcp,
+    /// Run one agent process so it outlives the hub (started by the hub).
+    #[command(hide = true)]
+    RuntimeHost(RuntimeHostArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct RuntimeHostArgs {
+    /// Where hosts keep their records; the spec is `<dir>/<id>.spec.json`.
+    #[arg(long)]
+    pub dir: std::path::PathBuf,
+    #[arg(long)]
+    pub id: String,
 }
 
 fn main() -> ExitCode {

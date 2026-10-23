@@ -24,6 +24,12 @@ const FLUSH_INTERVAL: Duration = Duration::from_millis(150);
 #[async_trait]
 pub trait SessionSetup: Send + Sync {
     async fn prepare(&self, agent: &Agent) -> Result<SessionExtras, CoreError>;
+
+    /// Only the environment of [`Self::prepare`], for taking a running session over
+    /// (nothing new is issued for it).
+    async fn environment(&self, agent: &Agent) -> Result<Vec<(String, String)>, CoreError> {
+        Ok(self.prepare(agent).await?.env)
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -157,6 +163,36 @@ enum Control {
     Stopped,
 }
 
+/// A session's event and control channels.
+struct Channels {
+    events: mpsc::UnboundedReceiver<SessionEvent>,
+    control_tx: mpsc::UnboundedSender<Control>,
+    control_rx: mpsc::UnboundedReceiver<Control>,
+    generation: u64,
+}
+
+/// What a hub start found of the previous hub's agents (see [`Runtime::recover`]).
+#[derive(Debug, Default)]
+pub struct Recovery {
+    /// Taken over with their processes.
+    pub adopted: Vec<AgentId>,
+    /// Their running turn was lost and closed as `interrupted`.
+    pub interrupted: Vec<AgentId>,
+    /// Messages that had not started and were queued again.
+    pub requeued: usize,
+    /// Runtime hosts nobody claimed, stopped.
+    pub released: usize,
+}
+
+/// One agent's unfinished business in the event log.
+#[derive(Debug, Default)]
+struct Unfinished {
+    /// The turn that started and did not end.
+    running: Option<MessageId>,
+    /// Messages delivered that never started, in order.
+    waiting: Vec<(MessageId, String)>,
+}
+
 impl Runtime {
     pub fn new(bus: Arc<EventBus>, plugins: PluginRegistry) -> Self {
         Self {
@@ -191,6 +227,263 @@ impl Runtime {
             set_status(&self.bus, agent.id, AgentStatus::Stopped).await;
         }
         Ok(())
+    }
+
+    /// Picks up where the previous hub left off, at hub start before anything else runs
+    /// (docs/PROCESS-SUPERVISION.md): takes over the agent processes it left running in
+    /// runtime hosts, closes the turns lost with it as `interrupted`, queues again the
+    /// messages that never started, and marks every other agent stopped. `since`: the
+    /// event seq to look back from (`None`: nothing to pick up but processes).
+    pub async fn recover(self: &Arc<Self>, since: Option<u64>) -> Result<Recovery, CoreError> {
+        let discovery = crossagents_drivers::host::discover().await;
+        let unfinished = match since {
+            Some(since) => self.unfinished(since).await?,
+            None => HashMap::new(),
+        };
+        let mut recovery = Recovery::default();
+        for agent in self.store().list_agents().await? {
+            let running = unfinished.get(&agent.id).and_then(|u| u.running);
+            let was_live = matches!(
+                agent.status,
+                AgentStatus::Idle | AgentStatus::Running | AgentStatus::Starting
+            );
+            let adopt = was_live
+                && !discovery.live.is_empty()
+                && agent.plugin != EXTERNAL_PLUGIN
+                && agent.archived_at.is_none();
+            if adopt {
+                match self.adopt(&agent, running).await {
+                    Ok(true) => {
+                        recovery.adopted.push(agent.id);
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        tracing::warn!(agent = %agent.name, error = %err, "cannot take the agent over");
+                    }
+                }
+            }
+            set_status(&self.bus, agent.id, AgentStatus::Stopped).await;
+            if let Some(message_id) = running {
+                publish(
+                    &self.bus,
+                    EventKind::AgentWarning {
+                        id: agent.id,
+                        message: "the turn was interrupted: its process ended with the previous hub; it is not run again".into(),
+                    },
+                )
+                .await;
+                publish(
+                    &self.bus,
+                    EventKind::AgentTurnCompleted {
+                        id: agent.id,
+                        message_id,
+                        stop_reason: StopReason::Interrupted,
+                    },
+                )
+                .await;
+                recovery.interrupted.push(agent.id);
+            }
+        }
+        recovery.released = crossagents_drivers::host::release_unclaimed().await.len();
+        // Messages that never started go back in line, in the background: their agents
+        // start (or resume) as for any message.
+        for (id, work) in unfinished {
+            if work.waiting.is_empty() {
+                continue;
+            }
+            let Ok(agent) = self.store().get_agent(&AgentKey::Id(id)).await else {
+                continue;
+            };
+            if agent.plugin == EXTERNAL_PLUGIN || agent.archived_at.is_some() {
+                continue;
+            }
+            recovery.requeued += work.waiting.len();
+            let this = self.clone();
+            tokio::spawn(async move {
+                if let Err(err) = this.requeue(id, work.waiting).await {
+                    tracing::warn!(agent = %agent.name, error = %err, "cannot queue the agent's waiting messages again");
+                }
+            });
+        }
+        Ok(recovery)
+    }
+
+    /// What every agent left unfinished in the events after `since`: a turn that started
+    /// and did not end, messages that never started.
+    async fn unfinished(&self, since: u64) -> Result<HashMap<AgentId, Unfinished>, CoreError> {
+        let mut out: HashMap<AgentId, Unfinished> = HashMap::new();
+        let mut after = since;
+        loop {
+            let page = self.store().events_since(after, 500).await?;
+            let Some(last) = page.last().map(|e| e.seq) else {
+                return Ok(out);
+            };
+            after = last;
+            for event in page {
+                match event.kind {
+                    EventKind::AgentInput {
+                        id,
+                        message_id,
+                        text,
+                        ..
+                    } => out.entry(id).or_default().waiting.push((message_id, text)),
+                    EventKind::AgentInputUpdated {
+                        id,
+                        message_id,
+                        text,
+                    } => {
+                        if let Some(waiting) = out
+                            .get_mut(&id)
+                            .and_then(|u| u.waiting.iter_mut().find(|(m, _)| *m == message_id))
+                        {
+                            waiting.1 = text;
+                        }
+                    }
+                    EventKind::AgentInputWithdrawn { id, message_id } => {
+                        if let Some(u) = out.get_mut(&id) {
+                            u.waiting.retain(|(m, _)| *m != message_id);
+                        }
+                    }
+                    EventKind::AgentTurnStarted { id, message_id } => {
+                        let u = out.entry(id).or_default();
+                        u.waiting.retain(|(m, _)| *m != message_id);
+                        u.running = Some(message_id);
+                    }
+                    EventKind::AgentTurnCompleted { id, message_id, .. } => {
+                        if let Some(u) = out.get_mut(&id)
+                            && u.running == Some(message_id)
+                        {
+                            u.running = None;
+                        }
+                    }
+                    EventKind::AgentRemoved { id, .. } => {
+                        out.remove(&id);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Takes over the agent's process left running by the previous hub; `false` when there
+    /// is none to take over.
+    async fn adopt(&self, agent: &Agent, running: Option<MessageId>) -> Result<bool, CoreError> {
+        let Ok(resolved) = self.plugins.driver(&agent.plugin, agent.driver.as_deref()) else {
+            return Ok(false);
+        };
+        let Some(session_id) = self.store().last_session_id(agent.id).await? else {
+            return Ok(false);
+        };
+        // The same environment as at its start: it names the process to take over.
+        let env = match &self.setup {
+            Some(setup) => setup.environment(agent).await?,
+            None => Vec::new(),
+        };
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed);
+        let spec = SessionSpec {
+            agent: agent.clone(),
+            mcp_servers: Vec::new(),
+            permission: permission_of(agent),
+            permissions: None,
+            command: command_of(agent),
+            instructions: None,
+            env,
+            events: events_tx,
+        };
+        let Some(session) = resolved
+            .driver
+            .adopt(&session_id, running.is_some(), spec)
+            .await?
+        else {
+            return Ok(false);
+        };
+        let diff_dir = (!resolved.driver.capabilities().structured_diff).then(|| agent.cwd.clone());
+        self.install(
+            agent.id,
+            Arc::from(session),
+            Channels {
+                events: events_rx,
+                control_tx,
+                control_rx,
+                generation,
+            },
+            diff_dir,
+            running,
+        )
+        .await;
+        let status = if running.is_some() {
+            AgentStatus::Running
+        } else {
+            AgentStatus::Idle
+        };
+        set_status(&self.bus, agent.id, status).await;
+        publish(
+            &self.bus,
+            EventKind::AgentAdopted {
+                id: agent.id,
+                message_id: running,
+            },
+        )
+        .await;
+        Ok(true)
+    }
+
+    /// Puts messages delivered before the hub restarted back in the agent's line (they
+    /// were announced then; they are not announced again).
+    async fn requeue(&self, id: AgentId, waiting: Vec<(MessageId, String)>) -> Result<(), CoreError> {
+        let agent = self.start(&AgentKey::Id(id)).await?;
+        let live = self
+            .live
+            .lock()
+            .await
+            .get(&agent.id)
+            .cloned()
+            .filter(|l| !l.inbox.is_closed())
+            .ok_or_else(|| CoreError::Agent(format!("agent {} stopped", agent.name)))?;
+        for message in waiting {
+            live.inbox.push(message, false);
+        }
+        Ok(())
+    }
+
+    /// The hub is going away: agents running in runtime hosts are left running for the
+    /// next hub to take over (their waiting messages with them); the others are stopped.
+    pub async fn leave(&self) {
+        crossagents_drivers::host::leave();
+        let lives: Vec<(AgentId, Arc<Live>)> = self.live.lock().await.drain().collect();
+        for (id, live) in lives {
+            if live.session.outlives_hub() {
+                let _ = live.control.send(Control::Stopped);
+                continue;
+            }
+            self.withdraw_waiting(id, &live).await;
+            let _ = live.session.interrupt().await;
+            live.session.shutdown().await;
+            let _ = live.control.send(Control::Stopped);
+            set_status(&self.bus, id, AgentStatus::Stopped).await;
+        }
+    }
+
+    /// Takes back every message still waiting in a session that goes away.
+    async fn withdraw_waiting(&self, id: AgentId, live: &Live) {
+        let waiting: Vec<MessageId> = live
+            .inbox
+            .waiting
+            .lock()
+            .unwrap()
+            .drain(..)
+            .map(|(m, _)| m)
+            .collect();
+        for message_id in waiting {
+            publish(
+                &self.bus,
+                EventKind::AgentInputWithdrawn { id, message_id },
+            )
+            .await;
+        }
     }
 
     async fn agent_lock(&self, id: AgentId) -> Arc<Mutex<()>> {
@@ -300,6 +593,41 @@ impl Runtime {
             }
         };
 
+        // Drivers that do not report what a turn changed get it worked out by the hub.
+        let diff_dir = (!resolved.driver.capabilities().structured_diff).then(|| agent.cwd.clone());
+        self.install(
+            agent.id,
+            session,
+            Channels {
+                events: events_rx,
+                control_tx,
+                control_rx,
+                generation,
+            },
+            diff_dir,
+            None,
+        )
+        .await;
+        set_status(&self.bus, agent.id, AgentStatus::Idle).await;
+        Ok(agent)
+    }
+
+    /// Makes `session` the agent's live one: its events are published, its inbox served.
+    /// `adopted`: the message whose turn was running when the session was taken over.
+    async fn install(
+        &self,
+        id: AgentId,
+        session: Arc<dyn DriverSession>,
+        channels: Channels,
+        diff_dir: Option<PathBuf>,
+        adopted: Option<MessageId>,
+    ) -> Arc<Inbox> {
+        let Channels {
+            events,
+            control_tx,
+            control_rx,
+            generation,
+        } = channels;
         let inbox = Arc::new(Inbox::default());
         let live = Arc::new(Live {
             generation,
@@ -309,18 +637,24 @@ impl Runtime {
         });
         tokio::spawn(forward_events(
             self.bus.clone(),
-            agent.id,
-            events_rx,
+            id,
+            events,
             control_rx,
             self.live.clone(),
             generation,
         ));
-        // Drivers that do not report what a turn changed get it worked out by the hub.
-        let diff_dir = (!resolved.driver.capabilities().structured_diff).then(|| agent.cwd.clone());
-        tokio::spawn(run_turns(session, inbox, control_tx, diff_dir));
-        self.live.lock().await.insert(agent.id, live);
-        set_status(&self.bus, agent.id, AgentStatus::Idle).await;
-        Ok(agent)
+        if adopted.is_some() {
+            inbox.busy.store(true, Ordering::SeqCst);
+        }
+        tokio::spawn(run_turns(
+            session,
+            inbox.clone(),
+            control_tx,
+            diff_dir,
+            adopted,
+        ));
+        self.live.lock().await.insert(id, live);
+        inbox
     }
 
     /// Delivers a message, starting the agent if needed. Returns the message id and whether
@@ -761,6 +1095,7 @@ impl Runtime {
             set_status(&self.bus, agent.id, AgentStatus::Stopped).await;
             return Ok(());
         };
+        self.withdraw_waiting(agent.id, &live).await;
         let _ = live.session.interrupt().await;
         live.session.shutdown().await;
         let _ = live.control.send(Control::Stopped);
@@ -851,7 +1186,24 @@ async fn run_turns(
     inbox: Arc<Inbox>,
     control: mpsc::UnboundedSender<Control>,
     diff_dir: Option<PathBuf>,
+    adopted: Option<MessageId>,
 ) {
+    // The turn a previous hub started goes on in the process taken over; it ends first.
+    if let Some(message_id) = adopted {
+        let result = match session.adopted_turn().await {
+            Some(result) => result
+                .map(|outcome| outcome.stop_reason)
+                .map_err(|e| e.to_string()),
+            None => Ok(StopReason::Interrupted),
+        };
+        inbox.finish_turn();
+        if control
+            .send(Control::TurnFinished(message_id, result, None))
+            .is_err()
+        {
+            return;
+        }
+    }
     while let Some((message_id, text)) = inbox.next().await {
         // Before the turn is announced: an interrupt that follows the announcement must find
         // the prompt already running.
@@ -1058,13 +1410,42 @@ async fn handle_session_event(
         SessionEventKind::TurnStarted { .. } | SessionEventKind::TurnCompleted { .. } => {
             return false;
         }
-        SessionEventKind::Exited { message } => {
-            // The process died on its own: forget the session if it is still ours.
+        SessionEventKind::Exited {
+            message,
+            cause,
+            code,
+        } => {
+            // The process died on its own: forget the session if it is still ours, and take
+            // back what was waiting for it (it would never run).
             let mut map = live.lock().await;
-            if map.get(&id).is_some_and(|l| l.generation == generation) {
-                map.remove(&id);
-            }
+            let gone = match map.get(&id) {
+                Some(l) if l.generation == generation => map.remove(&id),
+                _ => None,
+            };
             drop(map);
+            if let Some(gone) = gone {
+                let waiting: Vec<MessageId> = gone
+                    .inbox
+                    .waiting
+                    .lock()
+                    .unwrap()
+                    .drain(..)
+                    .map(|(m, _)| m)
+                    .collect();
+                for message_id in waiting {
+                    publish(bus, EventKind::AgentInputWithdrawn { id, message_id }).await;
+                }
+            }
+            publish(
+                bus,
+                EventKind::AgentExited {
+                    id,
+                    cause,
+                    code,
+                    message: message.clone(),
+                },
+            )
+            .await;
             publish(bus, EventKind::AgentError { id, message }).await;
             set_status(bus, id, AgentStatus::Error).await;
             return true;

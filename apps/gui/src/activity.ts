@@ -70,8 +70,10 @@ export function startActivity() {
       case "agent.turn_completed": {
         const { id, message_id, stop_reason } = e.data;
         const mine = fromHuman.delete(message_id);
-        if (viewing.includes(id) || (!mine && stop_reason !== "error")) return;
-        unread = { ...unread, [id]: { kind: stop_reason === "error" ? "error" : "done", at: e.ts } };
+        // An interrupted turn needs someone to decide whether to run it again.
+        const bad = stop_reason === "error" || stop_reason === "interrupted";
+        if (viewing.includes(id) || (!mine && !bad)) return;
+        unread = { ...unread, [id]: { kind: bad ? "error" : "done", at: e.ts } };
         save();
         return changed();
       }

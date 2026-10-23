@@ -5,6 +5,7 @@
 //! Each turn answers `echo(model=<m>,effort=<e>): <text>` after acting on these markers:
 //!
 //! - `[slow]`      keep the turn running until interrupted
+//! - `[sleep MS]`  keep the turn running for MS milliseconds
 //! - `[tool]`      ask for command approval, then say `permission=<decision>`
 //! - `[write P=C]` write file P (relative to the thread's cwd), report a file change and diff
 //! - `[history]`   say `history=<earlier inputs joined by |>`
@@ -283,6 +284,18 @@ impl MockAppServer {
                 _ = tokio::time::sleep(Duration::from_secs(600)) => {}
             }
         }
+        if let Some(ms) = text
+            .split("[sleep ")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .and_then(|ms| ms.trim().parse::<u64>().ok())
+        {
+            self.say(tid, uid, "sleeping ").await;
+            tokio::select! {
+                _ = interrupt.notified() => status = "interrupted",
+                _ = tokio::time::sleep(Duration::from_millis(ms)) => {}
+            }
+        }
         if status == "completed" && text.contains("[tool]") {
             let item = json!({ "type": "commandExecution", "id": format!("exec-{uid}"), "command": "mock-tool --go",
                 "cwd": thread["cwd"], "status": "inProgress" });
@@ -475,6 +488,10 @@ impl RpcHandler for Handler {
             "thread/fork" => server.thread_fork(params).await,
             "thread/revert" => server.thread_revert(params).await,
             "thread/unsubscribe" => Ok(json!({ "status": "unsubscribed" })),
+            "thread/loaded/list" => {
+                let ids: Vec<String> = server.threads.lock().await.keys().cloned().collect();
+                Ok(json!({ "data": ids }))
+            }
             "thread/compact/start" => Ok(json!({})),
             "turn/start" => server.turn_start(params).await,
             "turn/interrupt" => {

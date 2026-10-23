@@ -208,6 +208,13 @@ pub fn summary(kind: &EventKind) -> String {
             format!("{} context {used}/{size}", short(id))
         }
         EventKind::AgentError { id, message } => format!("{} {}", short(id), one_line(message)),
+        EventKind::AgentExited { id, message, .. } => {
+            format!("{} {}", short(id), one_line(message))
+        }
+        EventKind::AgentAdopted { id, message_id } => match message_id {
+            Some(message_id) => format!("{} taken over, turn {} goes on", short(id), message_id),
+            None => format!("{} taken over", short(id)),
+        },
         EventKind::AgentSessionStarted { id, session_id } => {
             format!("{} vendor session {session_id}", short(id))
         }

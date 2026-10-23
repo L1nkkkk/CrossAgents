@@ -10,7 +10,8 @@ use uuid::Uuid;
 
 use crate::account::Account;
 use crate::driver::{
-    OutputStream, PermissionDecision, RateLimits, StopReason, TokenUsage, ToolDetail, ToolStatus,
+    ExitCause, OutputStream, PermissionDecision, RateLimits, StopReason, TokenUsage, ToolDetail,
+    ToolStatus,
 };
 use crate::human::HumanItem;
 use crate::ids::{AgentId, MessageId, RunId, TaskId};
@@ -199,6 +200,22 @@ pub enum EventKind {
     },
     #[serde(rename = "agent.error")]
     AgentError { id: AgentId, message: String },
+    /// The agent's process ended without being asked to (it crashed, exited, or its runtime
+    /// host was lost). `cause` is missing when the driver cannot tell.
+    #[serde(rename = "agent.exited")]
+    AgentExited {
+        id: AgentId,
+        cause: Option<ExitCause>,
+        code: Option<i32>,
+        message: String,
+    },
+    /// A new hub took over the agent's process, left running by the previous hub.
+    #[serde(rename = "agent.adopted")]
+    AgentAdopted {
+        id: AgentId,
+        /// The turn that was running and goes on.
+        message_id: Option<MessageId>,
+    },
     /// The agent's vendor session id, for joining with the vendor's usage logs.
     #[serde(rename = "agent.session_started")]
     AgentSessionStarted { id: AgentId, session_id: String },
@@ -408,6 +425,8 @@ impl EventKind {
             Self::AgentTurnCompleted { .. } => "agent.turn_completed",
             Self::AgentUsage { .. } => "agent.usage",
             Self::AgentError { .. } => "agent.error",
+            Self::AgentExited { .. } => "agent.exited",
+            Self::AgentAdopted { .. } => "agent.adopted",
             Self::AgentSessionStarted { .. } => "agent.session_started",
             Self::AccountCreated { .. } => "account.created",
             Self::AccountRemoved { .. } => "account.removed",
@@ -485,6 +504,8 @@ impl EventKind {
             | Self::AgentWarning { id, .. }
             | Self::AgentTurnCompleted { id, .. }
             | Self::AgentUsage { id, .. }
+            | Self::AgentExited { id, .. }
+            | Self::AgentAdopted { id, .. }
             | Self::AgentError { id, .. } => Some(*id),
         }
     }

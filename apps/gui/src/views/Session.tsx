@@ -731,6 +731,7 @@ const STOP_TEXT: Record<string, string> = {
   max_tokens: "达到输出上限",
   max_turn_requests: "达到单轮请求上限",
   refusal: "agent 拒绝了这次请求",
+  interrupted: "本轮随上一个 hub 中断，结果未知，未自动重跑",
 };
 
 /** After a finished turn: how long it worked, when, and why it stopped if not normally. */
@@ -739,7 +740,7 @@ function TurnFoot({ turn }: { turn: TranscriptTurn }) {
   const worked = duration(new Date(turn.completed_at!).getTime() - new Date(start).getTime());
   const reason = turn.stop_reason && turn.stop_reason !== "end_turn" ? turn.stop_reason : null;
   return (
-    <div className={`turn-note ${reason === "error" ? "danger" : ""}`} title={range(start, turn.completed_at)}>
+    <div className={`turn-note ${reason === "error" || reason === "interrupted" ? "danger" : ""}`} title={range(start, turn.completed_at)}>
       {reason ? `— ${STOP_TEXT[reason] ?? reason} · ` : ""}已工作 {worked} · {clock(turn.completed_at!)}
     </div>
   );

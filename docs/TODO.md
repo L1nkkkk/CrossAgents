@@ -10,12 +10,15 @@
 
 目标：hub 或子进程挂了，不再整体停摆；一轮中断有明确状态；能自动 resume。
 
-- [ ] 子进程退出时记录原因（正常退出 / 崩溃 / 被杀 / 超时），写入会话事件（`Exited` 事件已有，补上原因分类）
-- [ ] 子进程崩溃后自动 resume，限制重试次数并退避，超过上限转 `blocked`，等人处理
-- [ ] 中断的那一轮给出明确状态（`interrupted`，附原因），不要静默丢失
-- [ ] 每个子进程写 pid 记录（hub 数据目录下），hub 启动时先清理上次遗留的子进程
-- [ ] Windows 上子进程用 `codex.exe` / `claude` 直接启动，验证杀 hub 后无孤儿（参见 codex-app-server 研究 §启动）
-- [ ] hub 退出时优雅地 suspend 所有会话，避免留下半截的 Claude 会话文件
+按 Cutex 的做法改为“agent 进程比 hub 活得久，新 hub 接管”，设计见 [PROCESS-SUPERVISION.md](PROCESS-SUPERVISION.md)。
+
+- [x] 子进程退出时记录原因（exited / crashed / killed / lost），`Exited` 带 `cause` 与退出码，另发 `agent.exited` 事件（超时类原因未单独区分）
+- [ ] 子进程崩溃后自动拉起：未做。决定：中断的那一轮不自动重放（可能重复执行命令、重复改文件），只标 `interrupted` 交给人或 Planner
+- [x] 中断的那一轮给出明确状态：hub 重启时无法接管的轮次记为 `stop_reason: "interrupted"` 并附说明；能接管的轮次照常跑完
+- [x] 运行时宿主登记在 `<home>/runtimes/`，hub 启动时握手确认后接管，不按 pid 杀进程（防 pid 复用误杀）；无人认领的宿主经连接停掉
+- [x] Windows 上每个 agent 放进独立 Job Object（KILL_ON_JOB_CLOSE），宿主一退整棵树清掉；`acp-generic` 的 job 由 hub 持有
+- [x] hub 退出默认把宿主里的会话留给下一个 hub（不 suspend，也就不会留下半截会话文件）；`hub stop --agents` 才停掉全部 agent
+- [ ] 在真实 codex / claude 上验证一次“hub stop → hub start 后轮次继续”（目前只在 mock app-server 上有端到端测试）
 
 ## 二、hub 与 GUI 边界
 

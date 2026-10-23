@@ -10,7 +10,6 @@ pub mod wire;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -21,12 +20,12 @@ use crossagents_core::{
     PermissionHandler, PermissionPolicy, SessionEvent, SessionEventKind, SessionSpec, TurnOutcome,
 };
 use serde_json::{Value, json};
-use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 use self::wire::{ThreadSettings, TurnEnd, method};
 use crate::jsonrpc::{RpcError, RpcHandler, RpcPeer};
-use crate::process::{StderrTail, find_in_path, hide_console};
+use crate::launch::{self, LaunchSpec, Launched, ProcessHandle};
+use crate::process::find_in_path;
 
 const INIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Control requests answer quickly; turns are awaited separately.
@@ -80,10 +79,7 @@ impl CodexNativeDriver {
     }
 
     async fn server_for(&self, spec: &SessionSpec) -> Result<Arc<AppServer>, CoreError> {
-        let key = ProcessKey {
-            command: spec.command.clone().unwrap_or_else(|| self.command.clone()),
-            env: wire::sorted_env(&spec.env),
-        };
+        let key = self.key_for(spec);
         let mut pool = self.pool.lock().await;
         pool.retain(|_, server| server.strong_count() > 0);
         if let Some(server) = pool.get(&key).and_then(Weak::upgrade)
@@ -91,10 +87,48 @@ impl CodexNativeDriver {
         {
             return Ok(server);
         }
-        let server = AppServer::spawn(&key).await?;
+        let server = AppServer::spawn(&key, self.owner_of(&key)).await?;
         pool.insert(key, Arc::downgrade(&server));
         Ok(server)
     }
+
+    fn key_for(&self, spec: &SessionSpec) -> ProcessKey {
+        ProcessKey {
+            command: spec.command.clone().unwrap_or_else(|| self.command.clone()),
+            env: wire::sorted_env(&spec.env),
+        }
+    }
+
+    /// Who may take the process over: this Profile, for the same command and environment.
+    fn owner_of(&self, key: &ProcessKey) -> String {
+        let text = serde_json::to_string(&(&key.command, &key.env)).expect("key serializes");
+        format!("codex-native:{}:{:016x}", self.name, fnv1a(text.as_bytes()))
+    }
+
+    /// The process a previous hub left for `spec`'s command and environment, taken over
+    /// (or already taken over for another session).
+    async fn adopted_server(&self, spec: &SessionSpec) -> Result<Option<Arc<AppServer>>, CoreError> {
+        let key = self.key_for(spec);
+        let mut pool = self.pool.lock().await;
+        if let Some(server) = pool.get(&key).and_then(Weak::upgrade)
+            && !server.router.exited.load(Ordering::SeqCst)
+        {
+            return Ok(server.router.adopted.then_some(server));
+        }
+        let Some(launched) = launch::adopt(&self.owner_of(&key)).await else {
+            return Ok(None);
+        };
+        let server = AppServer::start(launched?, true);
+        pool.insert(key, Arc::downgrade(&server));
+        Ok(Some(server))
+    }
+}
+
+/// FNV-1a: a stable hash for naming processes across hub restarts.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, b| {
+        (hash ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 fn settings_for(spec: &SessionSpec) -> ThreadSettings {
@@ -189,76 +223,64 @@ impl Driver for CodexNativeDriver {
             server, thread_id, &spec, settings, &response,
         )))
     }
+
+    async fn adopt(
+        &self,
+        session_id: &str,
+        turn_running: bool,
+        spec: SessionSpec,
+    ) -> Result<Option<Box<dyn DriverSession>>, CoreError> {
+        let Some(server) = self.adopted_server(&spec).await? else {
+            return Ok(None);
+        };
+        // The thread may have been released (or never loaded) in that process; then the
+        // hub resumes it there like any other.
+        if let Ok(loaded) = server
+            .request(method::THREAD_LOADED_LIST, json!({}))
+            .await
+            && let Some(ids) = loaded["data"].as_array()
+            && !ids.iter().any(|id| id.as_str() == Some(session_id))
+        {
+            return Ok(None);
+        }
+        let settings = settings_for(&spec);
+        Ok(Some(Box::new(CodexSession::adopt(
+            server,
+            session_id.to_owned(),
+            &spec,
+            settings,
+            turn_running,
+        ))))
+    }
 }
 
 /// One running `codex app-server`.
 struct AppServer {
     peer: RpcPeer,
-    child: Mutex<Option<Child>>,
+    process: ProcessHandle,
     router: Arc<Router>,
 }
 
 impl AppServer {
-    async fn spawn(key: &ProcessKey) -> Result<Arc<Self>, CoreError> {
+    async fn spawn(key: &ProcessKey, owner: String) -> Result<Arc<Self>, CoreError> {
         let (program, args) = key
             .command
             .split_first()
             .ok_or_else(|| CoreError::Agent("empty codex launch command".into()))?;
-        let program = locate_codex(program);
-        let mut command = Command::new(&program);
-        command
-            .args(args)
-            .envs(key.env.iter().cloned())
+        let launched = launch::launch(LaunchSpec {
+            program: locate_codex(program),
+            args: args.to_vec(),
+            env: key.env.clone(),
             // Not a session directory: on Windows a process's working directory cannot be
             // deleted, and worker directories come and go. Threads carry their own cwd.
-            .current_dir(std::env::temp_dir())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        hide_console(&mut command);
-        let mut child = command
-            .spawn()
-            .map_err(|e| CoreError::Agent(format!("cannot start {}: {e}", program.display())))?;
-        let stdin = child.stdin.take().expect("piped stdin");
-        let stdout = child.stdout.take().expect("piped stdout");
-        let tail = StderrTail::spawn(child.stderr.take().expect("piped stderr"));
-
-        let router = Arc::new(Router::default());
-        let (peer, reader) = RpcPeer::spawn(
-            stdout,
-            stdin,
-            Arc::new(ServerHandler {
-                router: router.clone(),
-            }),
-        );
-        tokio::spawn({
-            let router = router.clone();
-            let tail = tail.clone();
-            async move {
-                let _ = reader.await;
-                router.exited.store(true, Ordering::SeqCst);
-                if router.closing.load(Ordering::SeqCst) {
-                    return;
-                }
-                let message = tail.describe("codex app-server exited").await;
-                for sink in router.drain() {
-                    sink.end_turn();
-                    sink.emit(
-                        SessionEventKind::Exited {
-                            message: message.clone(),
-                        },
-                        None,
-                    );
-                }
-            }
-        });
-
-        let server = Arc::new(Self {
-            peer,
-            child: Mutex::new(Some(child)),
-            router,
-        });
+            cwd: std::env::temp_dir(),
+            owner: Some(owner),
+            label: "codex app-server".into(),
+            ..LaunchSpec::default()
+        })
+        .await?;
+        let tail = launched.stderr.clone();
+        let server = Self::start(launched, false);
         let init = tokio::time::timeout(
             INIT_TIMEOUT,
             server
@@ -293,6 +315,64 @@ impl AppServer {
         Ok(server)
     }
 
+    /// Talks to a started process. An `adopted` one is past its handshake, and what it
+    /// sent the previous hub (answers to that hub's requests among it) arrives first.
+    fn start(launched: Launched, adopted: bool) -> Arc<Self> {
+        let Launched {
+            stdin,
+            stdout,
+            stderr: tail,
+            process,
+        } = launched;
+        let router = Arc::new(Router {
+            adopted,
+            ..Router::default()
+        });
+        let handler = Arc::new(ServerHandler {
+            router: router.clone(),
+        });
+        // Request ids no previous hub used.
+        let first_id = if adopted {
+            chrono::Utc::now().timestamp_millis() * 100
+        } else {
+            1
+        };
+        let (peer, reader) = RpcPeer::spawn_from(stdout, stdin, handler, first_id);
+        tokio::spawn({
+            let router = router.clone();
+            let exit = process.watch();
+            async move {
+                let _ = reader.await;
+                router.exited.store(true, Ordering::SeqCst);
+                if router.closing.load(Ordering::SeqCst) {
+                    return;
+                }
+                let info = exit.within(Duration::from_secs(2)).await;
+                let what = match info {
+                    Some(info) => info.describe("codex app-server"),
+                    None => "codex app-server exited".to_owned(),
+                };
+                let message = tail.describe(&what).await;
+                for sink in router.drain() {
+                    sink.end_turn();
+                    sink.emit(
+                        SessionEventKind::Exited {
+                            message: message.clone(),
+                            cause: info.map(|i| i.cause),
+                            code: info.and_then(|i| i.code),
+                        },
+                        None,
+                    );
+                }
+            }
+        });
+        Arc::new(Self {
+            peer,
+            process,
+            router,
+        })
+    }
+
     async fn request(&self, method: &str, params: Value) -> Result<Value, CoreError> {
         match tokio::time::timeout(
             REQUEST_TIMEOUT,
@@ -309,12 +389,16 @@ impl AppServer {
 
 impl Drop for AppServer {
     fn drop(&mut self) {
+        // Its exit is ours, not a failure; dropping `process` stops it (unless the hub is
+        // leaving it running for the next one).
         self.router.closing.store(true, Ordering::SeqCst);
-        if let Some(mut child) = self.child.lock().expect("child lock").take() {
-            let _ = child.start_kill();
-        }
     }
 }
+
+/// Messages for a thread no session has claimed yet, kept for it (adopted processes only).
+const ORPHANS_KEPT: usize = 5_000;
+/// How long a permission request for an unclaimed thread waits for its session.
+const CLAIM_WAIT: Duration = Duration::from_secs(30);
 
 /// Routes the process's messages to the sessions, by thread id.
 #[derive(Default)]
@@ -323,6 +407,11 @@ struct Router {
     /// We are stopping the process: its exit is not a failure.
     closing: AtomicBool,
     exited: AtomicBool,
+    /// Taken over from a previous hub: messages for threads whose sessions have not been
+    /// taken over yet wait in `orphans`.
+    adopted: bool,
+    orphans: Mutex<HashMap<String, Vec<(String, Value)>>>,
+    claimed: Notify,
 }
 
 impl Router {
@@ -330,8 +419,49 @@ impl Router {
         self.lock().get(thread_id).cloned()
     }
 
+    /// Adds the thread's session and hands it what arrived for it before.
     fn insert(&self, thread_id: &str, sink: Arc<ThreadSink>) {
-        self.lock().insert(thread_id.to_owned(), sink);
+        self.lock().insert(thread_id.to_owned(), sink.clone());
+        let waiting = self
+            .orphans
+            .lock()
+            .expect("orphans lock")
+            .remove(thread_id)
+            .unwrap_or_default();
+        for (method, params) in waiting {
+            route(self, &sink, &method, &params);
+        }
+        self.claimed.notify_waiters();
+    }
+
+    /// Keeps a message for a thread without a session; `false` if it is not kept.
+    fn keep(&self, thread_id: &str, method: &str, params: &Value) -> bool {
+        if !self.adopted {
+            return false;
+        }
+        let mut orphans = self.orphans.lock().expect("orphans lock");
+        let kept = orphans.entry(thread_id.to_owned()).or_default();
+        if kept.len() < ORPHANS_KEPT {
+            kept.push((method.to_owned(), params.clone()));
+        }
+        true
+    }
+
+    /// The thread's session, waiting for it to be taken over in an adopted process.
+    async fn claimed(&self, thread_id: &str) -> Option<Arc<ThreadSink>> {
+        if !self.adopted {
+            return self.get(thread_id);
+        }
+        let deadline = tokio::time::Instant::now() + CLAIM_WAIT;
+        loop {
+            let notified = self.claimed.notified();
+            if let Some(sink) = self.get(thread_id) {
+                return Some(sink);
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return None;
+            }
+        }
     }
 
     /// Removes the thread's sink if it is still `sink` (a resumed copy may have replaced it).
@@ -404,7 +534,10 @@ impl RpcHandler for ServerHandler {
         let Some(request) = wire::permission_request(method, &params) else {
             return Err(RpcError::method_not_found(method));
         };
-        let sink = wire::thread_of(&params).and_then(|id| self.router.get(id));
+        let sink = match wire::thread_of(&params) {
+            Some(id) => self.router.claimed(id).await,
+            None => None,
+        };
         let decision = match &sink {
             Some(sink) => match &sink.permissions {
                 Some(handler) => handler.decide(&request).await,
@@ -439,24 +572,41 @@ impl RpcHandler for ServerHandler {
             return;
         };
         let Some(sink) = self.router.get(thread_id) else {
+            self.router.keep(thread_id, method, &params);
             return;
         };
+        route(&self.router, &sink, method, &params);
+    }
+}
+
+/// Hands one notification to the thread's session.
+fn route(router: &Router, sink: &ThreadSink, method: &str, params: &Value) {
+    {
+        let mut turn = sink.turn();
         if method == method::TURN_STARTED
-            && let Some(id) = wire::turn_started_id(&params)
+            && let Some(id) = wire::turn_started_id(params)
         {
-            sink.turn().active = Some(id.to_owned());
-        }
-        for kind in wire::translate(method, &params) {
-            sink.emit(kind, Some(&params));
-        }
-        if method == method::TURN_COMPLETED
-            && let Some(end) = wire::turn_end(&params)
+            turn.active = Some(id.to_owned());
+        } else if router.adopted
+            && turn.active.is_none()
+            && turn.waiter.is_some()
+            && method != method::TURN_COMPLETED
+            && let Some(id) = params.get("turnId").and_then(Value::as_str)
         {
-            let mut turn = sink.turn();
-            turn.active = None;
-            if let Some(waiter) = turn.waiter.take() {
-                let _ = waiter.send(end);
-            }
+            // A turn taken over mid-way: its id comes with its next item.
+            turn.active = Some(id.to_owned());
+        }
+    }
+    for kind in wire::translate(method, params) {
+        sink.emit(kind, Some(params));
+    }
+    if method == method::TURN_COMPLETED
+        && let Some(end) = wire::turn_end(params)
+    {
+        let mut turn = sink.turn();
+        turn.active = None;
+        if let Some(waiter) = turn.waiter.take() {
+            let _ = waiter.send(end);
         }
     }
 }
@@ -470,6 +620,10 @@ pub struct CodexSession {
     /// Model and effort for the next turns, from `set_model` (and `config.effort`).
     next: Mutex<(Option<String>, Option<String>)>,
     closed: AtomicBool,
+    /// The turn a previous hub started, taken over with the process.
+    adopted: Mutex<Option<oneshot::Receiver<TurnEnd>>>,
+    /// `adopted_turn` is waiting for that turn.
+    adopted_waiting: AtomicBool,
 }
 
 impl CodexSession {
@@ -480,19 +634,51 @@ impl CodexSession {
         settings: ThreadSettings,
         response: &Value,
     ) -> Self {
+        let session = Self::new(server, thread_id, spec, settings, None);
+        session.sink.emit(
+            SessionEventKind::Started {
+                session_id: session.thread_id.clone(),
+            },
+            response.get("thread"),
+        );
+        session
+    }
+
+    /// The session of a thread in a process taken over from a previous hub.
+    fn adopt(
+        server: Arc<AppServer>,
+        thread_id: String,
+        spec: &SessionSpec,
+        settings: ThreadSettings,
+        turn_running: bool,
+    ) -> Self {
+        let (tx, rx) = oneshot::channel();
+        let waiter = turn_running.then_some(tx);
+        let session = Self::new(server, thread_id, spec, settings, waiter);
+        if turn_running {
+            *session.adopted.lock().expect("adopted lock") = Some(rx);
+        }
+        session
+    }
+
+    fn new(
+        server: Arc<AppServer>,
+        thread_id: String,
+        spec: &SessionSpec,
+        settings: ThreadSettings,
+        waiter: Option<oneshot::Sender<TurnEnd>>,
+    ) -> Self {
         let sink = Arc::new(ThreadSink {
             events: spec.events.clone(),
             permission: spec.permission,
             permissions: spec.permissions.clone(),
-            turn: Mutex::default(),
+            turn: Mutex::new(TurnState {
+                waiter,
+                ..TurnState::default()
+            }),
         });
+        // After the waiter is in place: what arrived for the thread meanwhile may end it.
         server.router.insert(&thread_id, sink.clone());
-        sink.emit(
-            SessionEventKind::Started {
-                session_id: thread_id.clone(),
-            },
-            response.get("thread"),
-        );
         let effort = spec
             .agent
             .config
@@ -506,6 +692,8 @@ impl CodexSession {
             settings,
             next: Mutex::new((None, effort)),
             closed: AtomicBool::new(false),
+            adopted: Mutex::new(None),
+            adopted_waiting: AtomicBool::new(false),
         }
     }
 
@@ -625,7 +813,20 @@ impl DriverSession for CodexSession {
         };
         match active {
             Some(turn_id) => self.send_interrupt(&turn_id).await,
-            None => Ok(()),
+            None => {
+                // A turn taken over from a previous hub whose id never showed: Codex cannot
+                // be asked to stop it, so stop waiting for it.
+                if self.adopted_waiting.load(Ordering::SeqCst) {
+                    let waiter = self.sink.turn().waiter.take();
+                    if let Some(waiter) = waiter {
+                        let _ = waiter.send(TurnEnd {
+                            turn_id: String::new(),
+                            status: "interrupted".into(),
+                        });
+                    }
+                }
+                Ok(())
+            }
         }
     }
 
@@ -717,6 +918,29 @@ impl DriverSession for CodexSession {
     async fn shutdown(&self) {
         let _ = self.interrupt().await;
         self.release().await;
+    }
+
+    fn outlives_hub(&self) -> bool {
+        self.server.process.outlives_hub()
+    }
+
+    async fn adopted_turn(&self) -> Option<Result<TurnOutcome, CoreError>> {
+        let rx = self.adopted.lock().expect("adopted lock").take()?;
+        self.adopted_waiting.store(true, Ordering::SeqCst);
+        let result = match rx.await {
+            Ok(end) => {
+                self.refresh_limits().await;
+                Ok(TurnOutcome {
+                    stop_reason: wire::stop_reason(&end.status),
+                    turn_id: (!end.turn_id.is_empty()).then_some(end.turn_id),
+                })
+            }
+            Err(_) => Err(CoreError::Agent(
+                "the turn ended without a result (codex app-server exited)".into(),
+            )),
+        };
+        self.adopted_waiting.store(false, Ordering::SeqCst);
+        Some(result)
     }
 }
 

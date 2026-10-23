@@ -180,6 +180,12 @@ export function applyEvent(t: Transcript, event: HubEvent): Transcript {
       const message = event.data.message;
       return withActive(t, seq, (items) => [...items, { type: "warning", message }]);
     }
+    case "agent.adopted": {
+      if (event.data.id !== id) return t;
+      if (!event.data.message_id) return { ...t, last_seq: seq };
+      const message = "hub 已重启，这一轮由新的 hub 接管，继续运行";
+      return withActive(t, seq, (items) => [...items, { type: "warning", message }]);
+    }
     case "agent.error": {
       if (event.data.id !== id) return t;
       const message = event.data.message;

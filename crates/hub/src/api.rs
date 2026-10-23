@@ -57,6 +57,9 @@ pub struct AppState {
     pub home: PathBuf,
     pub started_at: DateTime<Utc>,
     pub shutdown: CancellationToken,
+    /// Set: stopping the hub stops every agent too. Clear: agents in runtime hosts are
+    /// left running for the next hub.
+    pub stop_agents: Arc<std::sync::atomic::AtomicBool>,
     /// How agents reach the hub's tools: the MCP command and the API base URL.
     pub mcp_command: Vec<String>,
     pub url: String,
@@ -1077,8 +1080,23 @@ async fn usage(
     ))
 }
 
-async fn shutdown(State(state): State<Arc<AppState>>) -> StatusCode {
-    tracing::info!("shutdown requested over the API");
+#[derive(Debug, Default, serde::Deserialize)]
+struct ShutdownQuery {
+    /// Stop the agents too, instead of leaving those in runtime hosts running.
+    #[serde(default)]
+    stop_agents: bool,
+}
+
+async fn shutdown(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ShutdownQuery>,
+) -> StatusCode {
+    tracing::info!(stop_agents = query.stop_agents, "shutdown requested over the API");
+    if query.stop_agents {
+        state
+            .stop_agents
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
     state.shutdown.cancel();
     StatusCode::ACCEPTED
 }

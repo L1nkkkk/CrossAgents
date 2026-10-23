@@ -60,6 +60,19 @@ impl Paths {
     pub fn plugins(&self) -> PathBuf {
         self.home.join("plugins")
     }
+    /// Records of runtime hosts: agent processes that outlive the hub.
+    pub fn runtimes(&self) -> PathBuf {
+        self.home.join("runtimes")
+    }
+    /// Agents' tokens for the hub's tools, kept so agents taken over after a restart still
+    /// reach them.
+    pub fn agent_tokens(&self) -> PathBuf {
+        self.home.join("agent-tokens.json")
+    }
+    /// Where the hub notes how far the event log was when it started.
+    pub fn hub_state(&self) -> PathBuf {
+        self.home.join("hub-state.json")
+    }
 
     pub fn read_token(&self) -> Result<String> {
         let token = std::fs::read_to_string(self.token())
@@ -113,6 +126,8 @@ struct AccountsSection {
 struct HubSection {
     port: Option<u16>,
     mcp_command: Option<Vec<String>>,
+    /// Run Codex and Claude Code in runtime hosts that outlive the hub (default on).
+    runtime_hosts: Option<bool>,
 }
 
 /// Hub settings. `port = 0` binds a random free port.
@@ -130,6 +145,10 @@ pub struct HubConfig {
     /// (`[accounts] detect`, on by default; off in [`HubConfig::new`] so tests never touch
     /// the user's own logins).
     pub detect_accounts: bool,
+    /// Command that runs a runtime host (`<this executable> runtime-host`): Codex and Claude
+    /// Code then run in hosts that outlive the hub, and the next hub takes them over. `None`
+    /// starts them as direct children (they end with the hub). Off in [`HubConfig::new`].
+    pub runtime_host: Option<Vec<String>>,
 }
 
 impl HubConfig {
@@ -142,6 +161,7 @@ impl HubConfig {
             mcp_command: None,
             codex_usage_url: None,
             detect_accounts: false,
+            runtime_host: None,
         }
     }
 }
@@ -155,6 +175,13 @@ impl HubConfig {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => ConfigFile::default(),
             Err(e) => return Err(e).context("cannot read config.toml"),
         };
+        let runtime_host = if config.hub.runtime_hosts.unwrap_or(true) {
+            let exe =
+                std::env::current_exe().context("cannot locate the crossagents executable")?;
+            Some(vec![exe.display().to_string(), "runtime-host".into()])
+        } else {
+            None
+        };
         Ok(Self {
             paths,
             port: config.hub.port.unwrap_or(DEFAULT_PORT),
@@ -162,6 +189,7 @@ impl HubConfig {
             mcp_command: config.hub.mcp_command,
             codex_usage_url: config.accounts.codex_usage_url,
             detect_accounts: config.accounts.detect.unwrap_or(true),
+            runtime_host,
         })
     }
 }

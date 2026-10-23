@@ -181,6 +181,17 @@ impl Fold {
                     });
                 }
             }
+            EventKind::AgentAdopted {
+                message_id: Some(_),
+                ..
+            } => {
+                // Same words as the GUI's live view (apps/gui/src/session.ts).
+                if let Some(items) = self.active_items() {
+                    items.push(TranscriptItem::Warning {
+                        message: "hub 已重启，这一轮由新的 hub 接管，继续运行".into(),
+                    });
+                }
+            }
             EventKind::AgentToolCallUpdated {
                 tool_call_id,
                 title: new_title,

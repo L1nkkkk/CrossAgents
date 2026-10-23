@@ -15,6 +15,7 @@ pub mod usage;
 
 use std::fs::{File, TryLockError};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, bail};
@@ -74,6 +75,16 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     let token = ensure_token(&paths)?;
     let store = Arc::new(SqliteStore::open(&paths.db()).await?);
     let bus = Arc::new(EventBus::new(store.clone() as Arc<dyn Store>));
+    // Where this hub's events begin; the previous hub's are before.
+    let start_seq = store.latest_event_seq().await?;
+    let hosted = config.runtime_host.is_some();
+    match &config.runtime_host {
+        Some(command) => crossagents_drivers::host::enable(crossagents_drivers::host::Settings {
+            command: command.clone(),
+            dir: paths.runtimes(),
+        }),
+        None => crossagents_drivers::host::disable(),
+    }
 
     let codex_accounts = match &config.codex_usage_url {
         Some(url) => CodexAccounts::with_usage_url(url.clone()),
@@ -95,7 +106,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         tracing::warn!(error = %err, "cannot register local logins as accounts");
     }
     accounts.warm();
-    let tokens = Arc::new(AgentTokens::default());
+    let tokens = Arc::new(AgentTokens::load(paths.agent_tokens()));
     let setup = Arc::new(CollabSetup {
         tokens: tokens.clone(),
         accounts: accounts.clone(),
@@ -110,7 +121,6 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         tracing::warn!("skipping plugin: {warning}");
     }
     let runtime = Arc::new(Runtime::new(bus.clone(), plugins).with_setup(setup.clone()));
-    runtime.reset_statuses().await?;
     let model_choice = Arc::new(models::ModelChoice::load(paths.models()));
     // Agents from before names were for people get a name and (chats) a title.
     if let Err(err) = identity::fix_up(
@@ -128,6 +138,31 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         .with_context(|| format!("cannot bind 127.0.0.1:{}", config.port))?;
     let addr = listener.local_addr()?;
     let _ = setup.url.set(format!("http://{addr}"));
+
+    // What the previous hub left: processes to take over, turns lost, messages waiting.
+    let hub_state = HubState::load(&paths);
+    let recovery = runtime.recover(hub_state.since).await?;
+    tokens
+        .retain(&recovery.adopted.iter().copied().collect())
+        .await;
+    if !recovery.adopted.is_empty() || !recovery.interrupted.is_empty() || recovery.requeued > 0 {
+        tracing::info!(
+            adopted = recovery.adopted.len(),
+            interrupted = recovery.interrupted.len(),
+            requeued = recovery.requeued,
+            released = recovery.released,
+            "picked up after the previous hub"
+        );
+    }
+    // Look back from here next time, or from as far back as something is still unfinished.
+    let keep_window = recovery.requeued > 0 || !recovery.adopted.is_empty();
+    HubState {
+        since: Some(match hub_state.since {
+            Some(since) if keep_window => since,
+            _ => start_seq,
+        }),
+    }
+    .save(&paths);
 
     let orchestrator = Orchestrator::new(
         store.clone() as Arc<dyn Store>,
@@ -159,6 +194,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         .context("cannot write hub.json")?;
 
     let shutdown = CancellationToken::new();
+    let stop_agents = Arc::new(AtomicBool::new(!hosted));
     let budgets = Arc::new(
         budget::Budgets::load(
             store.as_ref() as &dyn crossagents_core::Store,
@@ -184,6 +220,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         home: paths.home.clone(),
         started_at,
         shutdown: shutdown.clone(),
+        stop_agents: stop_agents.clone(),
         mcp_command: setup.mcp_command.clone(),
         url: format!("http://{addr}"),
     });
@@ -197,13 +234,19 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         let shutdown = shutdown.clone();
         let bus = bus.clone();
         let runtime = runtime.clone();
+        let stop_agents = stop_agents.clone();
         async move {
             let served = axum::serve(listener, api::router(state))
                 .with_graceful_shutdown(shutdown.clone().cancelled_owned())
                 .await;
             // Make sure SSE streams end even if serve failed.
             shutdown.cancel();
-            runtime.stop_all().await;
+            if stop_agents.load(Ordering::SeqCst) {
+                runtime.stop_all().await;
+            } else {
+                // Agents in runtime hosts go on; the next hub takes them over.
+                runtime.leave().await;
+            }
             if let Err(err) = bus.publish(EventKind::HubStopping).await {
                 tracing::warn!(error = %err, "cannot record hub.stopping");
             }
@@ -226,6 +269,28 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         shutdown,
         task,
     })
+}
+
+/// `hub-state.json`: where the next hub looks back from for unfinished work.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct HubState {
+    since: Option<u64>,
+}
+
+impl HubState {
+    fn load(paths: &Paths) -> Self {
+        std::fs::read(paths.hub_state())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, paths: &Paths) {
+        let text = serde_json::to_string(self).unwrap_or_default();
+        if let Err(err) = std::fs::write(paths.hub_state(), text) {
+            tracing::warn!(error = %err, "cannot write hub-state.json");
+        }
+    }
 }
 
 /// `<this executable> mcp`.
@@ -279,7 +344,7 @@ fn ensure_token(paths: &Paths) -> Result<String> {
 }
 
 #[cfg(unix)]
-fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     File::options()
@@ -292,6 +357,6 @@ fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<()> 
 }
 
 #[cfg(not(unix))]
-fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
     std::fs::write(path, contents)
 }

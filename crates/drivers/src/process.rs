@@ -17,21 +17,26 @@ pub struct StderrTail(Arc<Mutex<VecDeque<String>>>);
 
 impl StderrTail {
     /// Collects `stderr` in the background.
-    pub fn spawn(stderr: tokio::process::ChildStderr) -> Self {
+    pub fn spawn(stderr: impl tokio::io::AsyncRead + Unpin + Send + 'static) -> Self {
         let tail = Self::default();
-        let lines = tail.0.clone();
+        let this = tail.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = reader.next_line().await {
-                tracing::debug!(target: "crossagents::agent_stderr", "{line}");
-                let mut lines = lines.lock().await;
-                if lines.len() == STDERR_TAIL {
-                    lines.pop_front();
-                }
-                lines.push_back(line);
+                this.push(line).await;
             }
         });
         tail
+    }
+
+    /// Records one line the agent wrote to stderr.
+    pub async fn push(&self, line: String) {
+        tracing::debug!(target: "crossagents::agent_stderr", "{line}");
+        let mut lines = self.0.lock().await;
+        if lines.len() == STDERR_TAIL {
+            lines.pop_front();
+        }
+        lines.push_back(line);
     }
 
     /// `"<what>"`, or `"<what>:\n<tail>"` when stderr said something.
