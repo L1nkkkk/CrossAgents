@@ -750,10 +750,16 @@ mod tests {
         let env = [("NO_PROXY".to_owned(), "localhost,127.0.0.1".to_owned())];
         assert_eq!(
             bypass_env(&env, "www.codebuddy.ai"),
-            [("NO_PROXY".to_owned(), "localhost,127.0.0.1,codebuddy.ai".to_owned())]
+            [(
+                "NO_PROXY".to_owned(),
+                "localhost,127.0.0.1,codebuddy.ai".to_owned()
+            )]
         );
         let env = [("NO_PROXY".to_owned(), "localhost,codebuddy.ai".to_owned())];
-        assert_eq!(bypass_env(&env, "www.codebuddy.ai")[0].1, "localhost,codebuddy.ai");
+        assert_eq!(
+            bypass_env(&env, "www.codebuddy.ai")[0].1,
+            "localhost,codebuddy.ai"
+        );
     }
 
     /// Live: a proxy at 127.0.0.1:7890 whose route to the host is dead, and a host that
@@ -765,7 +771,12 @@ mod tests {
         let extra = check_proxy(&env, Some("www.codebuddy.ai"))
             .await
             .expect("falls back to direct");
-        assert!(extra.iter().any(|(_, value)| value.contains("codebuddy.ai")), "{extra:?}");
+        assert!(
+            extra
+                .iter()
+                .any(|(_, value)| value.contains("codebuddy.ai")),
+            "{extra:?}"
+        );
     }
 
     #[test]

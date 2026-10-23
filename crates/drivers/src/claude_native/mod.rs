@@ -140,7 +140,11 @@ impl Driver for ClaudeNativeDriver {
 
     fn installed(&self) -> bool {
         let program = &self.command[0];
-        let found = if self.flavor == Flavor::Claude { locate_claude(program) } else { find_in_path(program) };
+        let found = if self.flavor == Flavor::Claude {
+            locate_claude(program)
+        } else {
+            find_in_path(program)
+        };
         found.is_file()
     }
 
@@ -507,7 +511,10 @@ impl ClaudeSession {
         let mut args = extra.to_vec();
         args.extend(wire::args(&launch, &start, flavor));
         let mut env = vec![
-            ("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING".to_owned(), "1".to_owned()),
+            (
+                "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING".to_owned(),
+                "1".to_owned(),
+            ),
             // Names the sessions' origin in Claude Code's transcripts (usage by origin).
             ("CLAUDE_CODE_ENTRYPOINT".to_owned(), ENTRYPOINT.to_owned()),
         ];
