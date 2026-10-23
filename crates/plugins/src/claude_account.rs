@@ -19,8 +19,11 @@ use crossagents_drivers::claude_native::{self, wire};
 use crossagents_drivers::process::system_proxy_env;
 use serde_json::Value;
 
-/// Live figures are asked of Claude Code at most this often per account.
-const LIVE_TTL: Duration = Duration::from_secs(60);
+/// Live figures are asked of Claude Code at most this often per account: its usage
+/// endpoint answers 429 when asked often, and the Claude app asks it too.
+const LIVE_TTL: Duration = Duration::from_secs(300);
+/// How soon to ask again after a read that brought no quota.
+const RETRY_TTL: Duration = Duration::from_secs(60);
 
 type ScanEntry = (SystemTime, u64, Option<SessionUsage>);
 /// A status read, with when and the models listed alongside.
@@ -103,6 +106,10 @@ impl ClaudeAccounts {
                     status.credits = limits.credits;
                     status.limits = limits.by_limit;
                     status.plan = limits.plan.or(status.plan);
+                } else if usage.get("rate_limits_available").and_then(Value::as_bool) == Some(true)
+                {
+                    status.note =
+                        Some("Claude's usage service did not answer (often rate-limited)".into());
                 } else {
                     status.note = Some("no plan limits (API key or another provider)".into());
                 }
@@ -142,6 +149,10 @@ fn models_of(init: &Value) -> Vec<ModelInfo> {
             })
         })
         .collect()
+}
+
+fn has_quota(status: &AccountStatus) -> bool {
+    !status.rate_limits.is_empty() || !status.limits.is_empty()
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -248,12 +259,33 @@ impl AccountProvider for ClaudeAccounts {
 
     async fn status(&self, account: &Account) -> AccountStatus {
         if let Some((at, status, _)) = self.live.lock().unwrap().get(&account.home)
-            && at.elapsed() < LIVE_TTL
+            && at.elapsed()
+                < if has_quota(status) {
+                    LIVE_TTL
+                } else {
+                    RETRY_TTL
+                }
         {
             return status.clone();
         }
-        let (status, models) = self.read_status(account).await;
-        self.live.lock().unwrap().insert(
+        let (mut status, mut models) = self.read_status(account).await;
+        let mut live = self.live.lock().unwrap();
+        // A refused read keeps the last quota seen, with its time, rather than blanking it.
+        if status.logged_in
+            && !has_quota(&status)
+            && let Some((_, last, last_models)) = live.get(&account.home)
+            && has_quota(last)
+        {
+            let note = status.note.take();
+            status = AccountStatus {
+                note: note.map(|n| format!("{n}; showing the last reading")),
+                ..last.clone()
+            };
+            if models.is_empty() {
+                models = last_models.clone();
+            }
+        }
+        live.insert(
             account.home.clone(),
             (Instant::now(), status.clone(), models),
         );
