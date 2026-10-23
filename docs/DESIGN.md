@@ -52,35 +52,69 @@ Planner 通过 hub 提供的工具开出若干便宜模型的会话（Worker）�
 
 ## 3. 总体结构
 
+分两层：hub 是控制面，可以随时停止、升级、重启；agent 进程是执行面，跑在各自的运行时宿主里，比 hub 活得久。两层之间只有一条可断开、可重连的本机 TCP 连接。
+
 ```
-┌──────────────────────── hub（内核，无模型） ────────────────────────┐
-│ 本地 API（HTTP + SSE） │ 消息总线 │ 调度器 │ Worker 表 │ 工作区管理     │
-│ 协作工具（MCP）        │ Store（SQLite）+ 事件流 │ 账号与用量         │
-└───────────────────────────────┬────────────────────────────────────┘
-                                │ Driver trait：open · prompt · interrupt · resume · fork · rollback
-┌───────────────────────────────▼────────────────────────────────────┐
-│ 驱动                                                                │
-│   codex-native   → codex app-server（JSON-RPC over stdio，一进程多线程）│
-│   claude-native  → claude -p stream-json 控制协议（一进程一会话）     │
-│   acp-generic    → 任意 ACP agent（Gemini CLI、with-cli、Goose …）     │
-│   每个会话 = 一个 Worker / Planner，各自的 cwd 与 MCP 列表            │
-└────────────────────────────────────────────────────────────────────┘
-      ▲ GUI / CLI 只通过本地 API 与 hub 交互；对话对象是会话，不是 hub
+   GUI（apps/gui）            CLI（crossagents）           crossagents mcp（协作工具，跑在 agent 里）
+        └────────────────────────────┼──────────────────────────────┘
+                                     │ 本地 API（HTTP + SSE，/v1/，本机令牌 / 会话令牌）
+┌──────────────────────── hub（控制面，无模型） ─────────────────────────────┐
+│ Runtime：会话表 · 投递队列 · 启动时 recover（接管 / 标 interrupted / 重排队）│
+│ orchestrator（工具驱动编排） │ 协作工具后端（agent-tokens.json）            │
+│ store-sqlite + 事件流 + hub-state.json │ plugins · 账号与用量               │
+└──────────────────────────────────┬────────────────────────────────────────┘
+                                   │ Driver trait：open · resume · adopt · prompt · interrupt · fork · rollback
+┌──────────────────────────────────▼────────────────────────────────────────┐
+│ drivers                                                                    │
+│   codex-native      ─┐                                                     │
+│   claude-native     ─┼─ host 客户端：discover · adopt · leave              │
+│   codebuddy-native  ─┘  （codebuddy-native 包装 claude-native）           │
+│   acp-generic       ── hub 的直接子进程，Job Object 由 hub 持有            │
+└──────────────┬──────────────────────────────────────┬─────────────────────┘
+               │ TCP 127.0.0.1 + 令牌握手              │ stdio（hub 退则整棵树清掉）
+               │ 登记：<home>/runtimes/<id>.json       ▼
+┌──────────────▼───────────── 运行时宿主（每个 agent 一个） ┐   ACP agent（Gemini CLI、with-cli、Goose …）
+│ crossagents runtime-host：输出按 seq 编号缓存，断线补发     │
+│ ┌──────────── Windows Job Object（KILL_ON_JOB_CLOSE）───┐ │
+│ │ codex app-server（一进程多线程）                       │ │
+│ │ 或 claude / codebuddy -p stream-json（一进程一会话）   │ │
+│ │   └─ shell · dev server · 构建 · crossagents mcp …     │ │
+│ └────────────────────────────────────────────────────────┘ │
+└────────────────────────────────────────────────────────────┘
+```
+
+- GUI / CLI 只通过本地 API 与 hub 交互；对话对象是会话，不是 hub。
+- hub 停止（`hub stop`）或崩溃：连接断开，宿主和 agent 继续跑，输出缓存在宿主里。新 hub 启动后读登记、握手接管、补发输出，正在进行的一轮照常跑完。
+- 宿主不在了（被外部杀掉）：登记作废，那一轮记为 `interrupted`，不自动重跑。agent 退出或宿主退出时，Job Object 把整棵进程树清掉，不留孤儿。
+- `hub stop --agents` 连 agent 一起停。细节见 [PROCESS-SUPERVISION.md](PROCESS-SUPERVISION.md)。
+
+hub 重启时序：
+
+```
+旧 hub ── leave（不发 Kill）──> 宿主            agent 继续运行，宿主缓存未确认的输出
+旧 hub 退出
+新 hub ── 读 <home>/runtimes/ ── 令牌握手 ──> 宿主
+宿主  ── 补发缓存，转为实时 ──> 新 hub          新 hub 发布 agent.adopted，等这一轮结束
+握不上的登记删掉；没人认领的宿主经连接停掉
 ```
 
 运行时示例：
 
 ```
-hub
+hub（控制面，可重启）
+├── codex-native（Profile: codex）
+│   └── 宿主 → codex app-server（Job Object）
+│       └── 线程 worker-c     cwd = .../workers/c/     （空闲）
 ├── claude-native（Profile: opus）
-│   └── 会话 planner      cwd = <项目>/.crossagents/local/integration/
+│   └── 宿主 → claude -p（Job Object）
+│       └── 会话 planner      cwd = <项目>/.crossagents/local/integration/
 ├── claude-native（Profile: deepseek，经 Anthropic 兼容接口）
-│   ├── 会话 worker-a     cwd = .../workers/a/     （挂起）
-│   └── 会话 worker-b     cwd = .../workers/b/     （运行中，做 t5）
-├── codex-native：一个 app-server 进程（Profile: codex）
-│   └── 线程 worker-c     cwd = .../workers/c/     （空闲）
-└── acp-generic（Profile: gemini）
-    └── 会话 worker-d     cwd = .../workers/d/     （空闲）
+│   ├── 会话 worker-a         cwd = .../workers/a/     （挂起，无进程）
+│   └── 宿主 → claude -p      会话 worker-b，cwd = .../workers/b/（运行中，做 t5）
+├── codebuddy-native（Profile: codebuddy）
+│   └── 宿主 → codebuddy -p   会话 worker-e，cwd = .../workers/e/（空闲）
+└── acp-generic（Profile: gemini，hub 子进程）
+    └── 会话 worker-d         cwd = .../workers/d/     （空闲）
 ```
 
 ## 4. 核心概念
@@ -275,15 +309,20 @@ delivered → rejected → running          # 同一 Worker 返工
 
 ## 9. 驱动
 
-体验优先：主力 agent 走原生接口，其余走 ACP。三个驱动实现同一个 `Driver` trait，hub 只认这个 trait 和自己的事件模型。
+体验优先：主力 agent 走原生接口，其余走 ACP。四个驱动实现同一个 `Driver` trait，hub 只认这个 trait 和自己的事件模型。
 
 ### 9.1 驱动一览
 
-| 驱动 | 对接 | 进程模型 | 用途 |
-|---|---|---|---|
-| `codex-native` | `codex app-server`（JSON-RPC over stdio） | 每个 Profile 一个进程，进程内多个线程（会话） | Codex 主力 |
-| `claude-native` | `claude -p --input-format stream-json --output-format stream-json --permission-prompt-tool stdio`，hub 直接说控制协议（即 Agent SDK 所用的协议，见 [实测](research/claude-stream-json.md)） | 一进程一会话 | Claude Code 主力，含经兼容接口接入的 DeepSeek 等 |
-| `acp-generic` | 任意 ACP agent | 一进程多会话 | Gemini CLI、with-cli（`acp` 子命令）、Goose 等长尾 |
+| 驱动 | 对接 | 进程模型 | 进程归属 | 用途 |
+|---|---|---|---|---|
+| `codex-native` | `codex app-server`（JSON-RPC over stdio） | 每个 Profile 一个进程，进程内多个线程（会话） | 运行时宿主，可接管（按 Profile + 环境认领） | Codex 主力 |
+| `claude-native` | `claude -p --input-format stream-json --output-format stream-json --permission-prompt-tool stdio`，hub 直接说控制协议（即 Agent SDK 所用的协议，见 [实测](research/claude-stream-json.md)） | 一进程一会话 | 运行时宿主，可接管（按会话 id 认领） | Claude Code 主力，含经兼容接口接入的 DeepSeek 等 |
+| `codebuddy-native` | `codebuddy -p`，同一套 stream-json 协议；包装 `claude-native`，补上 CodeBuddy 的模型表、安装检查和会话文件位置 | 一进程一会话 | 同 `claude-native` | CodeBuddy |
+| `acp-generic` | 任意 ACP agent | 一进程多会话 | hub 子进程，Job Object 由 hub 持有，hub 退出即清掉 | Gemini CLI、with-cli（`acp` 子命令）、Goose 等长尾 |
+
+包装型驱动（如 `codebuddy-native`）必须把 trait 的每个方法都转发给内层，包括有默认实现的 `adopt`；漏转发不会编译报错，只会让接管静默失效。
+
+`[hub] runtime_hosts = false` 可以关掉运行时宿主，原生驱动回到 hub 直接子进程（测试默认关闭）。
 
 Claude 侧走侧车还是 stream-json 由实测决定（§14）：侧车能拿到 SDK 的全部能力（权限回调、hooks、文件检查点），stream-json 少一个进程但能力受 CLI 参数限制。
 
@@ -293,6 +332,7 @@ Claude 侧走侧车还是 stream-json 由实测决定（§14）：侧车能拿�
 Driver（一个 Profile 一个实例）
   open(spec) -> Session                    spec：会话记录（模型、cwd、config）、MCP 列表、开场说明、权限策略或回调、环境变量、事件通道
   resume(session_id, spec) -> Session      session_id 即会话开启时上报的厂商 id（Codex 线程 id）
+  adopt(session_id, turn_running, spec) -> Session?   接管上一个 hub 留下的进程；没有可接管的返回 None
   capabilities() -> { streaming, interrupt, mcp, multi_session, resume, fork, rollback, revert_files,
                       set_model, structured_diff, usage, rate_limits, permission_callback, compaction }
 Session（一个会话）
@@ -302,6 +342,7 @@ Session（一个会话）
   set_model(model?, effort?) / compact()
 ```
 
+- 一轮的结束原因 `stop_reason` 多了 `interrupted`：上一个 hub 停止时正在跑、新 hub 又接管不了的那一轮。进程退出事件 `Exited` / `agent.exited` 带 `cause`：`exited`、`crashed`、`killed`、`lost`。
 - 驱动启动时上报能力；hub 和 GUI 按能力开放功能（如没有 `rollback` 就不显示回退按钮），缺能力降级而不报错；驱动对不具备的操作返回「不支持」。
 - 驱动把各家事件翻译成 hub 的统一事件：文本流、思考、工具调用、文件改动（按轮）、轮次开始 / 结束、用量、限额、权限请求、错误、进程退出。原生驱动拿到的细节不在这一层丢掉，统一事件留有 `raw` 扩展字段。
 - 权限：Worker 默认放行；需要审批的操作经驱动的权限回调交给 hub，hub 按规则自动决定或转给 Planner / 人。
@@ -310,7 +351,7 @@ Session（一个会话）
 
 ### 9.3 配置与挂载
 
-- Profile 指定驱动：`driver = "codex-native" | "claude-native" | "acp-generic"`，再加模型、账号、`env`（如 Claude Code 经 `ANTHROPIC_BASE_URL` 接 DeepSeek）。
+- Profile 指定驱动：`driver = "codex-native" | "claude-native" | "codebuddy-native" | "acp-generic"`，再加模型、账号、`env`（如 Claude Code 经 `ANTHROPIC_BASE_URL` 接 DeepSeek）。
 - ACP 插件来源与优先级不变：内置 < 插件目录 `~/.crossagents/plugins/<name>/plugin.toml` < `config.toml` 覆盖。
 - 协作工具挂载：开会话时把 `crossagents mcp`（带该会话的令牌）加入它的 MCP 列表；原生驱动用各家的 MCP 配置方式传入。
 - 账号隔离沿用 M5：每个账号一个独立的 `CODEX_HOME` / Claude 配置目录，凭据不出 hub 所在机器。
@@ -329,6 +370,9 @@ Session（一个会话）
 ~/.crossagents/                      用户级
 ├── config.toml                      端口、Profile 定义（含驱动）、插件覆盖
 ├── state.db  token  hub.json  logs/
+├── hub-state.json                   上一个 hub 处理到的事件位置，供重启时 recover
+├── agent-tokens.json                会话令牌，被接管的 agent 重启 hub 后仍能用
+├── runtimes/                        运行时宿主登记 <id>.json（pid、端口、令牌、owner）
 ├── accounts/                        各家账号目录
 └── plugins/                         acp-generic 用的外部 ACP 插件
 
@@ -372,7 +416,7 @@ hub 对外只有一套本地 API（HTTP + SSE，`/v1/`，本机令牌），CLI �
 ### 11.2 CLI
 
 ```
-crossagents hub start|stop|status
+crossagents hub start|stop [--agents]|status   # stop 默认让 agent 留给下一个 hub；status 列出后台 agent 进程
 crossagents profile add|ls|rm
 crossagents account ...                       # 沿用 M5
 crossagents session ls|spawn|rm|attach
@@ -392,10 +436,12 @@ crossagents events [--follow] | usage [--by ...]
 
 沿用 v1：`core`、`api-types`、`store-sqlite`、`plugins`、`hub`、`cli`、`mock-agent`；`apps/gui`。变化：
 
-- `core`：新增 `Driver` trait、能力表、统一会话事件。
-- `drivers`：拆为 `codex_native`（已完成，见 [N1](tasks/N1.md)）、`claude_native`（已完成，见 [N3](tasks/N3.md)）、`acp`（即 `acp-generic`，以后改为一进程多会话）三个模块；`claude_native` 直接说 stream-json 控制协议，不需要侧车。
+- `core`：新增 `Driver` trait（含 `adopt`）、能力表、统一会话事件、退出原因 `ExitCause`。
+- `drivers`：`codex_native`（见 [N1](tasks/N1.md)）、`claude_native`（见 [N3](tasks/N3.md)）、`codebuddy_native`（包装 `claude_native`）、`acp`（即 `acp-generic`，以后改为一进程多会话）；`claude_native` 直接说 stream-json 控制协议，不需要侧车。
+  `host` 是运行时宿主（宿主进程本体 `serve`、帧协议 `wire`、Windows Job Object `job`、hub 侧的 `client`：discover / adopt / leave），`launch` 负责脱离 hub 拉起宿主。
+- `hub`：`runtime` 里的 `recover` 负责重启接管；`cli` 多一个隐藏子命令 `crossagents runtime-host`。
 - `orchestrator`：固定 Pipeline 改为工具驱动的编排 + 停止条件。
-- `mock-agent`：同时模拟 ACP 与 Codex app-server 两种协议，供测试使用。
+- `mock-agent`：同时模拟 ACP 与 Codex app-server 两种协议，供测试使用；`tests/adopt.rs` 覆盖 hub 重启接管与宿主被杀后的 `interrupted`。
 
 ## 14. 待实测
 
