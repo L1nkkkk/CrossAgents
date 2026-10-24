@@ -167,3 +167,4 @@ B3 远程开发：
 > 来源：2026-10-24 自举清单，设计与取舍见 [tasks/DOGFOOD.md](tasks/DOGFOOD.md)，每项一个提交。
 
 - [x] P0-1 自举隔离：长寿进程（运行时宿主、`mcp`）与 `hub start` 起的后台 hub 都从 `<home>/shadow/<hash>/` 的副本跑，`cargo build` 不再撞上被锁的 `crossagents.exe`；worktree 里的 agent 各有绝对路径的 `CARGO_TARGET_DIR`；`hub sandbox start|stop|status` 起临时 dev hub（独立 home、随机端口）；agent 的 shell 继承 `CROSSAGENTS_HUB_HOME`，`hub stop` 停自己所在的 hub 时拒绝（`--force` 例外）
+- [x] P0-2 GUI 审查闭环：`GET /v1/runs/{key}/tasks/{task}/diff`（任务全量 diff）、`GET /v1/runs/{key}/diff`（run 对 base 的总 diff）、`POST /v1/runs/{key}/tasks/{task}/review`（逐行 / 逐文件意见以人的身份进 worker 收件箱，`rework` 时打回）；任务详情「审查」节带行号可评论，落地卡片「查看全部改动」；mock 场景「审查任务」「落地前总 diff」

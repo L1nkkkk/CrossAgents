@@ -3,7 +3,8 @@
 import type { DiffSource } from "@bindings/DiffSource";
 import type { TurnDiffStat } from "@bindings/TurnDiffStat";
 
-export type DiffLine = { kind: "add" | "del" | "ctx" | "hunk" | "meta"; text: string };
+/** `old` / `new`: the line's number in the old and the new file, where it has one. */
+export type DiffLine = { kind: "add" | "del" | "ctx" | "hunk" | "meta"; text: string; old?: number; new?: number };
 export type DiffFile = { path: string; added: number; removed: number; lines: DiffLine[] };
 
 /** Splits `git diff` output (one or more files) into files. A bare hunk list becomes one file named `fallback`. */
@@ -12,6 +13,9 @@ export function parseDiff(text: string, fallback = ""): DiffFile[] {
   let file: DiffFile | undefined;
   // In a file's header (before its first hunk), `---` / `+++` name files rather than lines.
   let header = true;
+  // Next line numbers in the old and the new file, from the last hunk header.
+  let oldNo = 0;
+  let newNo = 0;
   const start = (path: string) => {
     file = { path, added: 0, removed: 0, lines: [] };
     files.push(file);
@@ -34,17 +38,20 @@ export function parseDiff(text: string, fallback = ""): DiffFile[] {
       f.lines.push({ kind: "meta", text: raw });
     } else if (raw.startsWith("@@")) {
       header = false;
+      const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(raw);
+      oldNo = m ? Number(m[1]) : 0;
+      newNo = m ? Number(m[2]) : 0;
       f.lines.push({ kind: "hunk", text: raw });
     } else if (raw.startsWith("+")) {
       f.added++;
-      f.lines.push({ kind: "add", text: raw.slice(1) });
+      f.lines.push({ kind: "add", text: raw.slice(1), new: newNo++ });
     } else if (raw.startsWith("-")) {
       f.removed++;
-      f.lines.push({ kind: "del", text: raw.slice(1) });
+      f.lines.push({ kind: "del", text: raw.slice(1), old: oldNo++ });
     } else if (raw.startsWith("\\")) {
       f.lines.push({ kind: "meta", text: raw });
     } else if (raw.length || f.lines.length) {
-      f.lines.push({ kind: "ctx", text: raw.startsWith(" ") ? raw.slice(1) : raw });
+      f.lines.push({ kind: "ctx", text: raw.startsWith(" ") ? raw.slice(1) : raw, old: oldNo++, new: newNo++ });
     }
   }
   // Drop the trailing empty context line a final newline leaves.

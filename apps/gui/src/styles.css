@@ -1350,3 +1350,28 @@ html, body { overflow: hidden; }
 /* An archived conversation: no composer, a bar to restore it. */
 .archived-bar { display: flex; align-items: center; gap: 10px; max-width: 780px; width: calc(100% - 48px); margin: 0 auto 16px; padding: 10px 14px; border: 1px dashed var(--border-strong); border-radius: var(--radius-lg); color: var(--text-2); font-size: 13px; }
 .archived-bar button { margin-left: auto; }
+
+/* Review (docs/tasks/DOGFOOD.md §2): line numbers that open a comment, drafts under lines. */
+.review { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.review-files { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.review-file { display: flex; justify-content: space-between; gap: 10px; align-items: center; border: none; border-radius: 0; background: none; padding: 4px 10px; font-size: 12px; text-align: left; min-width: 0; }
+.review-file .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.review-file + .review-file { border-top: 1px solid var(--border); }
+.diff.reviewing .dl { padding-left: 0; }
+.dl .ln { display: inline-block; width: 44px; padding: 0 8px 0 0; margin-right: 4px; text-align: right; color: var(--muted); border: none; border-radius: 0; background: none; font: inherit; user-select: none; }
+.dl button.ln { cursor: pointer; }
+.dl button.ln:hover { color: var(--accent-text); background: var(--surface-sunk); }
+.review-edit, .review-draft { white-space: normal; font-family: var(--font-sans); margin: 4px 10px 6px 58px; display: flex; gap: 6px; }
+.review-edit { flex-direction: column; }
+.review-edit textarea { width: 100%; min-width: 0; }
+.review-draft { align-items: baseline; padding: 4px 8px; border-left: 2px solid var(--accent-text); background: var(--surface-sunk); border-radius: 0 var(--radius) var(--radius) 0; }
+.review-draft .small { flex: 1; }
+.review-send { display: flex; flex-direction: column; gap: 6px; position: sticky; bottom: 0; background: var(--canvas); padding: 8px 0 2px; border-top: 1px solid var(--border); }
+.review-send textarea { width: 100%; }
+.run-changes { margin-top: 8px; }
+.run-changes > summary { cursor: pointer; color: var(--text-2); }
+.run-changes .review { margin-top: 8px; }
+@media (max-width: 600px) {
+  .review-edit, .review-draft { margin-left: 10px; }
+  .dl .ln { width: 34px; }
+}

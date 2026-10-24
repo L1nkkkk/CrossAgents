@@ -11,6 +11,7 @@ pub mod messaging;
 pub mod notes;
 pub mod plan;
 pub mod protocol;
+pub mod review;
 pub mod tasks;
 pub mod team;
 pub mod tools;
@@ -19,5 +20,6 @@ pub mod workspace;
 
 pub use engine::{NewRun, Orchestrator, OrchestratorConfig};
 pub use host::AgentHost;
+pub use review::{Changes, Remark};
 pub use verify::{ShellVerifier, Verifier};
 pub use workspace::{GitWorkspaces, InPlaceWorkspaces, WorkspaceProvider};

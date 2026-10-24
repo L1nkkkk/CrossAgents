@@ -17,18 +17,18 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use crossagents_api_types::{
     API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AnswerRequest, ApiError,
-    ArchiveAgentRequest, ConnectInfo, CreateAccountRequest, CreateAgentRequest, CreateRunRequest,
-    ErrorCode, FinishRequest, HealthResponse, HubInfo, InitRepoRequest, LandRequest,
-    ListAccountsResponse, ListAgentsResponse, ListNotesResponse, ListPluginsResponse,
+    ArchiveAgentRequest, ChangesResponse, ConnectInfo, CreateAccountRequest, CreateAgentRequest,
+    CreateRunRequest, DiffSide, ErrorCode, FinishRequest, HealthResponse, HubInfo, InitRepoRequest,
+    LandRequest, ListAccountsResponse, ListAgentsResponse, ListNotesResponse, ListPluginsResponse,
     ListQuestionsResponse, ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo,
     QuotaResponse, RejectRunRequest, RenameAgentRequest, RunDetail, SendMessageRequest,
-    SendMessageResponse, SetModelRequest, SetPluginModelsRequest, SetTopicRequest, Transcript,
-    TurnDiffResponse, UsageGroup, UsageResponse,
+    SendMessageResponse, SetModelRequest, SetPluginModelsRequest, SetTopicRequest,
+    TaskReviewRequest, Transcript, TurnDiffResponse, UsageGroup, UsageResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError,
     DriverKind, Event, EventBus, EventKind, HumanItem, LandMode, MessageId, MessageSource, Run,
-    RunConfig, RunId, Store,
+    RunConfig, RunId, Store, Task, TaskId,
 };
 use crossagents_orchestrator::{GitWorkspaces, NewRun, Orchestrator};
 
@@ -117,6 +117,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{key}/cancel", post(cancel_run))
         .route("/v1/runs/{key}/land", post(land_run))
         .route("/v1/runs/{key}/finish", post(finish_run))
+        .route("/v1/runs/{key}/diff", get(run_diff))
+        .route("/v1/runs/{key}/tasks/{task}/diff", get(task_diff))
+        .route("/v1/runs/{key}/tasks/{task}/review", post(review_task))
         .route("/v1/repos/init", post(init_repo))
         .route("/v1/events", get(events))
         .route("/v1/shutdown", post(shutdown))
@@ -702,7 +705,11 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
     let name = d.name();
     let all = crate::models::available(registry, &state.accounts, name).await;
     // A CLI this machine does not have runs nothing: offer none of its models.
-    let models = if d.installed() { state.models.filter(name, all.clone()) } else { Vec::new() };
+    let models = if d.installed() {
+        state.models.filter(name, all.clone())
+    } else {
+        Vec::new()
+    };
     PluginInfo {
         name: name.to_owned(),
         models,
@@ -879,6 +886,84 @@ async fn land_run(
         .land(id, req.mode.unwrap_or(LandMode::Merge), "person")
         .await?;
     run_detail(&state, id).await
+}
+
+/// A task of `run` by id or key (`auth` or `#auth`).
+async fn resolve_task(state: &AppState, run: RunId, key: &str) -> ApiResult<TaskId> {
+    if let Ok(id) = key.parse::<TaskId>() {
+        return Ok(id);
+    }
+    let key = key.trim().trim_start_matches('#');
+    state
+        .store()
+        .list_tasks(run)
+        .await?
+        .into_iter()
+        .find(|t| t.key == key)
+        .map(|t| t.id)
+        .ok_or_else(|| {
+            CoreError::NotFound {
+                kind: "task",
+                id: key.to_owned(),
+            }
+            .into()
+        })
+}
+
+fn changes_response(changes: crossagents_orchestrator::Changes) -> Json<ChangesResponse> {
+    Json(ChangesResponse {
+        base: changes.base,
+        head: changes.head,
+        diff: changes.diff,
+        truncated: changes.truncated,
+    })
+}
+
+/// Everything a task changed, for the person's review (docs/tasks/DOGFOOD.md §2).
+async fn task_diff(
+    State(state): State<Arc<AppState>>,
+    Path((key, task)): Path<(String, String)>,
+) -> ApiResult<Json<ChangesResponse>> {
+    let run = resolve_run(&state, &key).await?;
+    let task = resolve_task(&state, run, &task).await?;
+    Ok(changes_response(
+        state.orchestrator.task_changes(run, task).await?,
+    ))
+}
+
+/// What landing the run would bring into its base branch.
+async fn run_diff(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<ChangesResponse>> {
+    let run = resolve_run(&state, &key).await?;
+    Ok(changes_response(state.orchestrator.run_changes(run).await?))
+}
+
+/// The person's comments on a task, to its worker; optionally sends the task back.
+async fn review_task(
+    State(state): State<Arc<AppState>>,
+    Path((key, task)): Path<(String, String)>,
+    Json(req): Json<TaskReviewRequest>,
+) -> ApiResult<Json<Task>> {
+    let run = resolve_run(&state, &key).await?;
+    let task = resolve_task(&state, run, &task).await?;
+    let remarks = req
+        .comments
+        .into_iter()
+        .map(|c| crossagents_orchestrator::Remark {
+            path: c.path,
+            line: c.line,
+            old_side: c.side == Some(DiffSide::Old),
+            text: c.text,
+        })
+        .collect();
+    Ok(Json(
+        state
+            .orchestrator
+            .review_task(run, task, remarks, req.note, req.rework)
+            .await?,
+    ))
 }
 
 /// The person puts a run's directory under git, for the runs after it.
@@ -1098,7 +1183,10 @@ async fn shutdown(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ShutdownQuery>,
 ) -> StatusCode {
-    tracing::info!(stop_agents = query.stop_agents, "shutdown requested over the API");
+    tracing::info!(
+        stop_agents = query.stop_agents,
+        "shutdown requested over the API"
+    );
     if query.stop_agents {
         state
             .stop_agents

@@ -12,6 +12,7 @@ import type { Note } from "@bindings/Note";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import type { QuotaResponse } from "@bindings/QuotaResponse";
 import type { RunDetail } from "@bindings/RunDetail";
+import type { TaskReviewRequest } from "@bindings/TaskReviewRequest";
 import type { Transcript } from "@bindings/Transcript";
 import type { UsageGroup } from "@bindings/UsageGroup";
 import type { UsageResponse } from "@bindings/UsageResponse";
@@ -32,6 +33,10 @@ export type MockState = {
   transcripts: Map<string, Transcript>;
   /** Unified diff of each turn that changed files, by message id. */
   diffs: Map<string, string>;
+  /** Each task's whole diff against its base (review), by task id. */
+  taskDiffs: Map<string, string>;
+  /** Each run's branch against its base (before landing), by run id. */
+  runDiffs: Map<string, string>;
   questions: HumanItem[];
   notes: Note[];
   quota: QuotaResponse;
@@ -54,6 +59,8 @@ export function emptyState(): MockState {
     runs: [],
     transcripts: new Map(),
     diffs: new Map(),
+    taskDiffs: new Map(),
+    runDiffs: new Map(),
     questions: [],
     notes: [],
     quota: { accounts: [], providers: ["claude", "codex"] },
@@ -224,6 +231,19 @@ export class MockBridge implements CrossAgentsBridge {
         if (!turn?.diff || !diff) return notFound("turn diff");
         return json(200, { message_id: mid, diff, stat: turn.diff });
       }
+      if ((m = p.match(/^\/v1\/runs\/([^/]+)\/tasks\/([^/]+)\/diff$/))) {
+        const found = this.task(m[1], m[2]);
+        const diff = found && s.taskDiffs.get(found.task.id);
+        if (!found) return notFound("task");
+        if (diff === undefined) return json(409, { error: { code: "conflict", message: `#${found.task.key} has no worktree (not started, or ended)` } });
+        return json(200, { base: found.run.run.branch, head: found.task.branch ?? "", diff, truncated: false });
+      }
+      if ((m = p.match(/^\/v1\/runs\/([^/]+)\/diff$/))) {
+        const d = s.runs.find((x) => x.run.id === m![1]);
+        if (!d) return notFound("run");
+        if (d.run.in_place) return json(409, { error: { code: "conflict", message: "this directory is not under version control, so there is no diff" } });
+        return json(200, { base: d.run.base_branch, head: d.run.branch, diff: s.runDiffs.get(d.run.id) ?? "", truncated: false });
+      }
       if (p === "/v1/runs") return json(200, { runs: s.runs.map((d) => d.run) });
       if ((m = p.match(/^\/v1\/runs\/([^/]+)$/))) {
         const d = s.runs.find((x) => x.run.id === m![1]);
@@ -328,6 +348,7 @@ export class MockBridge implements CrossAgentsBridge {
         this.emit({ type: "run.status_changed", data: { id: d.run.id, from: d.run.status, to, note: m[2] === "reject" ? ((body as { reason?: string })?.reason ?? null) : null } });
         return json(200, d);
       }
+      if ((m = p.match(/^\/v1\/runs\/([^/]+)\/tasks\/([^/]+)\/review$/))) return this.review(m[1], m[2], body as TaskReviewRequest);
       if (p === "/v1/repos/init") return json(200, body);
       if ((m = p.match(/^\/v1\/questions\/([^/]+)\/(answer|dismiss)$/))) {
         const q = s.questions.find((x) => x.id === m![1]);
@@ -385,6 +406,31 @@ export class MockBridge implements CrossAgentsBridge {
       { type: "agent.turn_completed", data: { id, message_id, stop_reason: "end_turn" } },
       { type: "agent.status_changed", data: { id, from: "running", to: "idle" } },
     ]);
+  }
+
+  private task(run: string, key: string) {
+    const d = this.state.runs.find((x) => x.run.id === decodeURIComponent(run));
+    const k = decodeURIComponent(key).replace(/^#/, "");
+    const task = d?.tasks.find((t) => t.id === k || t.key === k);
+    return d && task ? { run: d, task } : undefined;
+  }
+
+  /** Like the hub: the person's comments reach the worker as a message; `rework` reopens the task. */
+  private review(run: string, key: string, req: TaskReviewRequest): HubResponse {
+    const found = this.task(run, key);
+    if (!found) return notFound("task");
+    const { task } = found;
+    if (!task.assignee || !["running", "waiting_answer", "passed", "stalled", "reviewing"].includes(task.status))
+      return json(409, { error: { code: "conflict", message: `#${task.key} is ${task.status}` } });
+    if (req.rework && ["passed", "stalled", "reviewing"].includes(task.status)) {
+      task.attempts += 1;
+      this.emit({ type: "task.status_changed", data: { run_id: task.run_id, id: task.id, key: task.key, from: task.status, to: "running", assignee: task.assignee } });
+    }
+    const place = (c: TaskReviewRequest["comments"][number]) => (c.line ? (c.side === "old" ? `${c.path} (old line ${c.line})` : `${c.path}:${c.line}`) : c.path);
+    const lines = req.comments.map((c) => `- ${place(c)} — ${c.text}`);
+    const parts = [req.note ?? "", lines.length ? `Review comments on #${task.key}:\n${lines.join("\n")}` : "", `---\nfrom: the person, reviewing task #${task.key}`];
+    this.emit({ type: "agent.input", data: { id: task.assignee, message_id: uid(), text: parts.filter(Boolean).join("\n\n"), queued: true, from: { kind: "human" } } });
+    return json(200, task);
   }
 
   private cancel(key: string): HubResponse {

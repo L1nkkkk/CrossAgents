@@ -28,6 +28,7 @@ import { useHubData, type HubEvent } from "../hub";
 import { BUCKET_LABEL, groupTasks, progress, taskState } from "../lib/taskState";
 import { PRESETS, budgetText, presetOf } from "../lib/policy";
 import { StateWord, TaskChanges, useArmed } from "../parts";
+import { RunChanges, TaskReview } from "../review";
 
 function concerns(runId: string, e: HubEvent): boolean {
   switch (e.type) {
@@ -231,6 +232,7 @@ function Ending({ run, closing, onDone }: { run: Run; closing: boolean; onDone: 
             结果在 <code>{run.branch}</code>，还没进 <code>{run.base_branch}</code>
           </div>
         )}
+        {!landed && !run.in_place && <RunChanges run={run} />}
         {run.summary && (
           <div className="run-summary">
             <Prose text={run.summary} />
@@ -596,6 +598,11 @@ export function TaskDetail({ runId, taskId }: { runId: string; taskId: string })
             )}
           </Section>
           <TaskChanges task={task} agents={agents.data ?? []} title={(children) => <Section title="改动">{children}</Section>} />
+          {task.worktree && !detail.data!.run.in_place && (
+            <Section title="审查">
+              <TaskReview run={detail.data!.run} task={task} />
+            </Section>
+          )}
           <Section title="验收">
             {task.report.checks.length ? (
               task.report.checks.map((check, i) => (

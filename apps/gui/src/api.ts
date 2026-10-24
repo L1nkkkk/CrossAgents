@@ -5,6 +5,9 @@
 import type { Account } from "@bindings/Account";
 import type { AccountUsageGroup } from "@bindings/AccountUsageGroup";
 import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
+import type { ChangesResponse } from "@bindings/ChangesResponse";
+import type { Task } from "@bindings/Task";
+import type { TaskReviewRequest } from "@bindings/TaskReviewRequest";
 import type { Agent } from "@bindings/Agent";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
 import type { CreateAccountRequest } from "@bindings/CreateAccountRequest";
@@ -140,6 +143,12 @@ export const api = {
   cancelRun: (key: string) => request<RunDetail>("POST", `/v1/runs/${enc(key)}/cancel`),
   landRun: (key: string, mode: LandMode) => request<RunDetail>("POST", `/v1/runs/${enc(key)}/land`, { mode }),
   finishRun: (key: string) => request<RunDetail>("POST", `/v1/runs/${enc(key)}/finish`, {}),
+  /** Everything a task changed (its worktree against its base), for review. */
+  taskDiff: (run: string, task: string) => request<ChangesResponse>("GET", `/v1/runs/${enc(run)}/tasks/${enc(task)}/diff`),
+  /** What landing the run would bring into its base branch. */
+  runDiff: (run: string) => request<ChangesResponse>("GET", `/v1/runs/${enc(run)}/diff`),
+  /** The person's comments, to the task's worker as its next turn; `rework` sends the task back. */
+  reviewTask: (run: string, task: string, req: TaskReviewRequest) => request<Task>("POST", `/v1/runs/${enc(run)}/tasks/${enc(task)}/review`, req),
   /** `git init` and a first commit in `path`, so later runs there get worktrees. */
   initRepo: (path: string) => request<InitRepoRequest>("POST", "/v1/repos/init", { path } satisfies InitRepoRequest),
 

@@ -31,6 +31,10 @@ pub trait WorkspaceProvider: Send + Sync {
     /// What `path` changed relative to `base`, committed or not (new files included),
     /// limited to `paths` when given. A unified diff.
     async fn diff(&self, path: &Path, base: &str, paths: &[String]) -> Result<String, CoreError>;
+    /// What `branch` adds on top of `base` in `repo` (`git diff base...branch`): what landing
+    /// it would bring into `base`.
+    async fn branch_diff(&self, repo: &Path, base: &str, branch: &str)
+    -> Result<String, CoreError>;
     /// Merges `branch` into the branch checked out at `into`. On conflict the merge is
     /// aborted and the error describes it: the conflicting files and their conflict hunks.
     async fn merge(&self, into: &Path, branch: &str, message: &str) -> Result<(), CoreError>;
@@ -159,6 +163,15 @@ impl WorkspaceProvider for GitWorkspaces {
             args.extend(paths.iter().map(String::as_str));
         }
         git(path, &args).await
+    }
+
+    async fn branch_diff(
+        &self,
+        repo: &Path,
+        base: &str,
+        branch: &str,
+    ) -> Result<String, CoreError> {
+        git(repo, &["diff", &format!("{base}...{branch}")]).await
     }
 
     async fn merge(&self, into: &Path, branch: &str, message: &str) -> Result<(), CoreError> {
@@ -364,6 +377,10 @@ impl WorkspaceProvider for InPlaceWorkspaces {
     }
 
     async fn diff(&self, _: &Path, _: &str, _: &[String]) -> Result<String, CoreError> {
+        Err(CoreError::Conflict(NOT_VERSIONED.into()))
+    }
+
+    async fn branch_diff(&self, _: &Path, _: &str, _: &str) -> Result<String, CoreError> {
         Err(CoreError::Conflict(NOT_VERSIONED.into()))
     }
 

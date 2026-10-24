@@ -26,8 +26,8 @@ function go(scenario: string, narrow: boolean) {
   } catch {
     // Not remembered; the URL still says.
   }
-  const route = SCENARIOS.find((s) => s.key === scenario)?.build().route ?? "#/";
-  window.location.assign(`${window.location.pathname}?scenario=${scenario}${narrow ? "&narrow=1" : ""}${route}`);
+  // No route here: ids are made up on every build, so the page takes the route from its own.
+  window.location.assign(`${window.location.pathname}?scenario=${scenario}${narrow ? "&narrow=1" : ""}`);
 }
 
 function panel(current: string, narrow: boolean) {
@@ -67,7 +67,7 @@ export function install(): boolean {
 
   const built = scenario.build();
   window.crossagents = new MockBridge(built.state, built.script);
-  if (!params.get("scenario") && !window.location.hash) window.location.hash = built.route;
+  if (!window.location.hash) window.location.hash = built.route;
   if (!embedded) panel(scenario.key, false);
   return true;
 }

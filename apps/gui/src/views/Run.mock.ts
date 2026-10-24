@@ -278,3 +278,30 @@ function runningScript(rex: string, message_id: string, editId: string, taskId: 
     { at: 3500, event: { type: "agent.tool_call", data: { id: mia, tool_call_id: uid(), title: "npx playwright screenshot --color-scheme=dark /login", kind: "execute", status: "in_progress" } } },
   ];
 }
+
+/**
+ * Reviewing (docs/tasks/DOGFOOD.md §2): the run under way, opened on #c — reported done and
+ * waiting to be checked — with its whole diff; comments on lines go to Rex, or send it back.
+ */
+export function reviewRun(): { state: MockState; script: Step[]; route: string } {
+  const scene = oauthRun("running");
+  const d = scene.state.runs[0];
+  const byKey = (k: string) => d.tasks.find((t) => t.key === k)!;
+  scene.state.taskDiffs.set(byKey("a").id, OAUTH_DIFF);
+  scene.state.taskDiffs.set(byKey("b").id, LOGIN_DIFF);
+  scene.state.taskDiffs.set(byKey("c").id, SESSION_DIFF);
+  return { ...scene, script: [], route: `#/runs/${d.run.id}/tasks/${byKey("c").id}` };
+}
+
+/** Before landing: every task merged, the lead wrapping up; the run's total diff can be opened. */
+export function landingRun(): { state: MockState; script: Step[]; route: string } {
+  const scene = oauthRun("running");
+  const d = scene.state.runs[0];
+  for (const t of d.tasks) {
+    t.status = "merged";
+    t.assignee = null;
+  }
+  d.run = { ...d.run, summary: null };
+  scene.state.runDiffs.set(d.run.id, OAUTH_DIFF + LOGIN_DIFF + SESSION_DIFF);
+  return { ...scene, script: [], route: `#/runs/${d.run.id}` };
+}

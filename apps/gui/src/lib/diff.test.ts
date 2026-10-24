@@ -60,3 +60,33 @@ test("turnStat and sumStats", () => {
   const b = turnStat("diff --git a/b b/b\n--- a/b\n+++ b/b\n@@ -1 +1 @@\n-1\n+2\n")!;
   assert.deepEqual(sumStats([stat!, b, stat!]), { files: ["a", "b"], added: 5, removed: 3 });
 });
+
+test("numbers lines from the hunk headers, for comments on a line", () => {
+  const text = [
+    "diff --git a/a.rs b/a.rs",
+    "--- a/a.rs",
+    "+++ b/a.rs",
+    "@@ -10,3 +10,4 @@ fn main() {",
+    " keep",
+    "-old",
+    "+new one",
+    "+new two",
+    " tail",
+    "@@ -40 +41 @@",
+    "-x",
+    "+y",
+  ].join("\n");
+  const [file] = parseDiff(text);
+  const nums = file.lines.map((l) => [l.kind, l.old ?? null, l.new ?? null]);
+  assert.deepEqual(nums, [
+    ["hunk", null, null],
+    ["ctx", 10, 10],
+    ["del", 11, null],
+    ["add", null, 11],
+    ["add", null, 12],
+    ["ctx", 12, 13],
+    ["hunk", null, null],
+    ["del", 40, null],
+    ["add", null, 41],
+  ]);
+});

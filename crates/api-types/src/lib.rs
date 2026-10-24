@@ -437,6 +437,59 @@ pub struct InitRepoRequest {
     pub path: String,
 }
 
+/// `GET /v1/runs/{key}/tasks/{task}/diff` and `GET /v1/runs/{key}/diff`: a unified diff
+/// and what it compares (docs/tasks/DOGFOOD.md §2).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ChangesResponse {
+    /// What the changes are compared with: the task's base branch, or the run's base.
+    pub base: String,
+    /// The task's or the run's branch.
+    pub head: String,
+    pub diff: String,
+    /// The diff was longer than the hub hands out at once and was cut.
+    pub truncated: bool,
+}
+
+/// Which side of a diff a line number counts on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffSide {
+    #[default]
+    New,
+    Old,
+}
+
+/// One remark on a task's changes: a line of a file, or the whole file without `line`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ReviewComment {
+    pub path: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub line: Option<u32>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub side: Option<DiffSide>,
+    pub text: String,
+}
+
+/// `POST /v1/runs/{key}/tasks/{task}/review`: the person's comments, delivered to the task's
+/// worker as its next turn; with `rework`, the task also goes back to running.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TaskReviewRequest {
+    #[serde(default)]
+    pub comments: Vec<ReviewComment>,
+    /// A general remark, put before the line comments.
+    #[serde(default)]
+    #[ts(optional)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub rework: bool,
+}
+
 /// `POST /v1/runs/{key}/land`; merge when `mode` is omitted.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
