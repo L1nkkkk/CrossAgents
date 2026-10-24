@@ -63,6 +63,8 @@ export function emptyState(): MockState {
 }
 
 const LATENCY = 40;
+/** How long a stopped agent takes to come up, as a real CLI does. */
+const STARTUP = 2_500;
 const json = (status: number, body?: unknown): HubResponse => ({ status, body: body === undefined ? "" : JSON.stringify(body) });
 const notFound = (what: string) => json(404, { error: { code: "not_found", message: `${what} not found` } });
 
@@ -82,6 +84,13 @@ export class MockBridge implements CrossAgentsBridge {
 
   async request(method: string, path: string, body: string | null): Promise<HubResponse> {
     await new Promise((r) => setTimeout(r, LATENCY));
+    // Like the hub: a message to a stopped agent is answered once its process is up.
+    const to = method === "POST" ? /^\/v1\/agents\/([^/]+)\/messages$/.exec(path) : null;
+    const asleep = to && this.agent(to[1]);
+    if (asleep && (asleep.status === "stopped" || asleep.status === "error")) {
+      this.emit({ type: "agent.status_changed", data: { id: asleep.id, from: asleep.status, to: "starting" } });
+      await new Promise((r) => setTimeout(r, STARTUP));
+    }
     try {
       return this.route(method, path, body ? JSON.parse(body) : undefined);
     } catch (err) {
@@ -250,7 +259,7 @@ export class MockBridge implements CrossAgentsBridge {
           topic: req.topic ?? null,
           archived_at: null,
           cwd,
-          status: "idle",
+          status: "stopped", // as the hub makes them: started by their first message
           created_at: new Date().toISOString(),
         };
         s.agents.push(agent);
@@ -319,6 +328,7 @@ export class MockBridge implements CrossAgentsBridge {
         this.emit({ type: "run.status_changed", data: { id: d.run.id, from: d.run.status, to, note: m[2] === "reject" ? ((body as { reason?: string })?.reason ?? null) : null } });
         return json(200, d);
       }
+      if (p === "/v1/repos/init") return json(200, body);
       if ((m = p.match(/^\/v1\/questions\/([^/]+)\/(answer|dismiss)$/))) {
         const q = s.questions.find((x) => x.id === m![1]);
         if (q) {

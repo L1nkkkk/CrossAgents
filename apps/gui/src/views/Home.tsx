@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from
 import type { Agent } from "@bindings/Agent";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import { api, errorText } from "../api";
+import { sendMessage } from "../outbox";
 import { navigate, useRunTree } from "../App";
 import { Avatar, BrandMark, ErrorBox, Field, Icon, VendorMark, agentTitle, displayName, hueOf, useAgents } from "../components";
 import { useHubData } from "../hub";
@@ -244,7 +245,8 @@ export function HomeView() {
         config: configFor(choice, lead && lead.choice.plugin !== chatModel.plugin ? undefined : effort),
         profile: { display_name: null, title: null, avatar: null, color: null, persona: null },
       });
-      await api.sendMessage(agent.id, { text });
+      // Into the conversation at once; the message shows there while the agent starts.
+      void sendMessage(agent.id, text).catch(() => {});
       navigate("s", agent.id);
     } catch (err) {
       setError(errorText(err));

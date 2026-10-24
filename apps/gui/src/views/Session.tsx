@@ -7,6 +7,7 @@ import type { ModelSwitch } from "@bindings/ModelSwitch";
 import type { TranscriptUsage } from "@bindings/TranscriptUsage";
 import { view } from "../activity";
 import { api, errorText } from "../api";
+import { dismiss as dismissMessage, retry as retryMessage, sendMessage, useOutbox, type Outgoing } from "../outbox";
 import { ACTIVE_RUN, useRunTree } from "../App";
 import { Avatar, ErrorBox, Icon, Mark, Prose, StatusChip, Vendor, agentTitle, agentTone, displayName, roleShape, time, useAgents, vendorName } from "../components";
 import { ChangeStat, DiffView } from "../diffview";
@@ -41,6 +42,7 @@ export function SessionView({ name, onClose }: { name: string; onClose?: () => v
   const agents = useAgents();
   const [draft, setDraft] = useState("");
   const agentId = transcript?.agent.id;
+  const outgoing = useOutbox(agentId, transcript?.turns);
   const { hidden: railOff } = useRail();
   const [width, setWidth] = useState(0);
   const ro = useRef<ResizeObserver | null>(null);
@@ -97,7 +99,11 @@ export function SessionView({ name, onClose }: { name: string; onClose?: () => v
   return (
     <section className={`pane ${rail ? "with-rail" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)}>
       <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onClose={onClose} />
-      <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} agents={everyone} tree={runs} />
+      <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} agents={everyone} tree={runs}>
+        {outgoing.map((m) => (
+          <Sending key={m.key} message={m} agent={agent} />
+        ))}
+      </Conversation>
       {rail && <InfoRail agent={agent} usage={usage} turns={turns} tasks={tasks} led={led} agents={everyone} recruits={recruits} spend={transcript.conversation_cost_usd} />}
       <div className="dock">
         {/* One strip is enough: the pane beside leaves it to the main one. */}
@@ -314,6 +320,36 @@ function Meter({ usage }: { usage: TranscriptUsage }) {
       </span>
       {pct}%
     </span>
+  );
+}
+
+/** A message sent from here, while the hub wakes the agent up and takes it (or why it did not). */
+function Sending({ message, agent }: { message: Outgoing; agent: Agent }) {
+  const waking = agent.status === "stopped" || agent.status === "starting" || agent.status === "error";
+  return (
+    <div className="turn sending">
+      <div className="bubble">{message.text}</div>
+      {message.error ? (
+        <div className="turn-note danger row" style={{ gap: 8 }} title={message.error}>
+          <span>没发出去：{message.error}</span>
+          <button className="ghost small" onClick={() => retryMessage(message.key)}>
+            重试
+          </button>
+          <button className="ghost small" onClick={() => dismissMessage(message.key)}>
+            删除
+          </button>
+        </div>
+      ) : (
+        <div className="working">
+          <span className="busy-dots" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+          <span className="muted small">{waking ? `正在唤起 ${displayName(agent)}…` : "发送中…"}</span>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -947,10 +983,12 @@ function Composer({
     if (!text || busy) return;
     setBusy(true);
     setError(undefined);
+    // Shown at once (outbox.ts); a failure puts the text back here.
+    setDraft("");
     try {
-      await api.sendMessage(agent.id, { text, now: now || undefined });
-      setDraft("");
+      await sendMessage(agent.id, text, { now, takeBack: true });
     } catch (err) {
+      setDraft(text);
       setError(errorText(err));
     } finally {
       setBusy(false);
@@ -1016,14 +1054,16 @@ function Composer({
           )}
           {capabilities?.resume && <span className="chip" title="会话可挂起后恢复">resumable</span>}
           <div className="spacer" />
-          {canInterrupt && (
-            <button className="stop-btn" onClick={interrupt} title="中断本轮（Esc）" aria-label="中断本轮">
+          {/* One button: stop while it works and nothing is typed, else send (which queues). */}
+          {canInterrupt && !draft.trim() ? (
+            <button className="primary send" onClick={interrupt} title="中断本轮（Esc）" aria-label="中断本轮">
               <Icon name="stop" size={14} />
             </button>
+          ) : (
+            <button className="primary send" disabled={busy || !draft.trim()} onClick={() => send()} aria-label="发送">
+              <Icon name="send" size={16} />
+            </button>
           )}
-          <button className="primary send" disabled={busy || !draft.trim()} onClick={() => send()} aria-label="发送">
-            <Icon name="send" size={16} />
-          </button>
         </div>
       </div>
       <div className="composer-hint">
