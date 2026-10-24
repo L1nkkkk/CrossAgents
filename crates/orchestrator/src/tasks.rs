@@ -939,22 +939,30 @@ impl Orchestrator {
             )));
         }
         let dir = Self::worktree(&task)?;
-        self.ws_for(&run)
-            .commit_all(&dir, &format!("{}: {}", task.key, task.title))
-            .await?;
-        let branch = task.branch.clone().unwrap_or_default();
-        let message = format!("crossagents: {} ({})", task.title, task.key);
         let (base, into) = self.base_of(&run, &task).await?;
-        if let Err(err) = self.ws_for(&run).merge(&into, &branch, &message).await {
-            return Ok(json!({
-                "merged": false,
-                "conflict": err.to_string(),
-                "next": "Resolve it: task_rework (the worker can branch_sync and fix it) or task_drop.",
-            }));
+        // No worktree left: an earlier accept merged it and cleaned up, then failed before
+        // recording that; this one only records it.
+        if dir.exists() {
+            self.ws_for(&run)
+                .commit_all(&dir, &format!("{}: {}", task.key, task.title))
+                .await?;
+            let branch = task.branch.clone().unwrap_or_default();
+            let message = format!("crossagents: {} ({})", task.title, task.key);
+            if let Err(err) = self.ws_for(&run).merge(&into, &branch, &message).await {
+                return Ok(json!({
+                    "merged": false,
+                    "conflict": err.to_string(),
+                    "next": "Resolve it: task_rework (the worker can branch_sync and fix it) or task_drop.",
+                }));
+            }
         }
         self.release_agents(&mut task).await;
         self.cleanup_worktree(&run, &task, true).await;
         task.report.failure = None;
+        // Accepting a stalled task stands in for the report its worker never sent.
+        if task.status == TaskStatus::Stalled {
+            self.transition(&mut task, TaskStatus::Passed).await?;
+        }
         self.transition(&mut task, TaskStatus::Merged).await?;
         self.schedule(&mut run).await?;
         Ok(json!({ "merged": true, "task": task_json(&task), "into": base }))

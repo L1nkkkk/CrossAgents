@@ -269,6 +269,27 @@ async fn a_silent_worker_stalls_and_its_issuer_hears_it() {
 }
 
 #[tokio::test]
+async fn the_issuer_can_accept_a_stalled_task() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+
+    // The worker does the work but never reports; the issuer checks it and takes it anyway.
+    let plan = json!([task("d", "[write d.txt=x]".into(), &[])]);
+    let id = start_run(&t, request(plan), json!({ "auto_approve": true })).await;
+    w.until("d stalled", task_is("d", TaskStatus::Stalled))
+        .await;
+    t.send("boss", &accept_last("d")).await;
+    w.until("run completed", run_status_is(&id, RunStatus::Completed))
+        .await;
+
+    let detail = detail(&t, &id).await;
+    assert_eq!(detail["tasks"][0]["status"], "merged");
+    let branch = detail["run"]["branch"].as_str().unwrap();
+    assert_eq!(git_show(repo.path(), &format!("{branch}:d.txt")), "x");
+}
+
+#[tokio::test]
 async fn questions_go_to_the_issuer_and_answers_come_back() {
     let repo = git_repo();
     let t = setup(repo.path()).await;
