@@ -155,13 +155,15 @@ pub fn thread_fork(
     Value::Object(params)
 }
 
-pub fn turn_start(thread_id: &str, text: &str, model: Option<&str>, effort: Option<&str>) -> Value {
+pub fn turn_start(
+    thread_id: &str,
+    prompt: &crossagents_core::Prompt,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Value {
     let mut params = Map::new();
     params.insert("threadId".into(), thread_id.into());
-    params.insert(
-        "input".into(),
-        json!([{ "type": "text", "text": text, "text_elements": [] }]),
-    );
+    params.insert("input".into(), user_input(prompt));
     if let Some(model) = model {
         params.insert("model".into(), model.into());
     }
@@ -169,6 +171,24 @@ pub fn turn_start(thread_id: &str, text: &str, model: Option<&str>, effort: Opti
         params.insert("effort".into(), effort.into());
     }
     Value::Object(params)
+}
+
+/// `turn/start` input items (docs/tasks/DOGFOOD.md §3): the text, images by path
+/// (`localImage`, which Codex reads itself), small text files inline, the rest by path.
+pub fn user_input(prompt: &crossagents_core::Prompt) -> Value {
+    let text = |text: String| json!({ "type": "text", "text": text, "text_elements": [] });
+    let mut items = vec![text(prompt.text.clone())];
+    for a in &prompt.attachments {
+        items.push(if a.is_image() {
+            json!({ "type": "localImage", "path": a.path })
+        } else {
+            match a.inline_text() {
+                Some(body) => text(a.as_file_block(&body)),
+                None => text(a.reference()),
+            }
+        });
+    }
+    Value::Array(items)
 }
 
 /// The thread id in a start / resume / fork response.
@@ -1034,5 +1054,49 @@ mod limit_tests {
         let update = rate_limits(&limit("codex", Value::Null, Value::Null, 9));
         assert_eq!(update.by_limit.len(), 1);
         assert!(update.reset_credits.is_none());
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+    use crossagents_core::{Attachment, Prompt};
+
+    #[test]
+    fn images_go_by_path_and_text_inline() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("a.png");
+        std::fs::write(&png, b"img").unwrap();
+        let pdf = dir.path().join("b.pdf");
+        std::fs::write(&pdf, b"%PDF").unwrap();
+        let prompt = Prompt {
+            text: "see".into(),
+            attachments: vec![
+                Attachment {
+                    id: "1".into(),
+                    name: "a.png".into(),
+                    mime: "image/png".into(),
+                    size: 3,
+                    path: png.clone(),
+                },
+                Attachment {
+                    id: "2".into(),
+                    name: "b.pdf".into(),
+                    mime: "application/pdf".into(),
+                    size: 4,
+                    path: pdf,
+                },
+            ],
+        };
+        let params = turn_start("t", &prompt, None, None);
+        let input = params["input"].as_array().unwrap();
+        assert_eq!(input[0]["text"], "see");
+        assert_eq!(input[1], json!({ "type": "localImage", "path": png }));
+        assert!(
+            input[2]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("[attached file: b.pdf")
+        );
     }
 }

@@ -7,6 +7,7 @@ import type { ModelSwitch } from "@bindings/ModelSwitch";
 import type { TranscriptUsage } from "@bindings/TranscriptUsage";
 import { view } from "../activity";
 import { api, errorText } from "../api";
+import { HeldFiles, TurnFiles, useHeld } from "../attach";
 import { dismiss as dismissMessage, retry as retryMessage, sendMessage, useOutbox, type Outgoing } from "../outbox";
 import { ACTIVE_RUN, useRunTree } from "../App";
 import { Avatar, ErrorBox, Icon, Mark, Prose, StatusChip, Vendor, agentTitle, agentTone, displayName, roleShape, time, useAgents, vendorName } from "../components";
@@ -328,7 +329,8 @@ function Sending({ message, agent }: { message: Outgoing; agent: Agent }) {
   const waking = agent.status === "stopped" || agent.status === "starting" || agent.status === "error";
   return (
     <div className="turn sending">
-      <div className="bubble">{message.text}</div>
+      {(message.text || !message.attachments?.length) && <div className="bubble">{message.text}</div>}
+      {!!message.attachments?.length && <div className="turn-note small muted">附件：{message.attachments.map((a) => a.name).join("、")}</div>}
       {message.error ? (
         <div className="turn-note danger row" style={{ gap: 8 }} title={message.error}>
           <span>没发出去：{message.error}</span>
@@ -469,7 +471,14 @@ function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agen
   const running = !!turn.started_at && !turn.completed_at;
   return (
     <div className="turn" data-turn={turn.message_id}>
-      {fromPerson(turn) ? <Bubble turn={turn} /> : <PeerMessage turn={turn} agents={agents} tree={tree} />}
+      {fromPerson(turn) ? (
+        <>
+          {(turn.input || !turn.attachments?.length) && <Bubble turn={turn} />}
+          <TurnFiles agent={agent.id} files={turn.attachments ?? []} />
+        </>
+      ) : (
+        <PeerMessage turn={turn} agents={agents} tree={tree} />
+      )}
       {turn.items.length > 0 && (
         <div className="author">
           <Avatar agent={agent} size={22} />
@@ -966,6 +975,7 @@ function Composer({
   const running = agent.status === "running";
   const canInterrupt = running && capabilities?.interrupt !== false;
   const plan = plans.find((d) => !deferred.includes(d.run.id));
+  const files = useHeld(setError);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -980,15 +990,19 @@ function Composer({
 
   async function send(now = false) {
     const text = draft.trim();
-    if (!text || busy) return;
+    const held = files.held;
+    if ((!text && !held.length) || busy) return;
     setBusy(true);
     setError(undefined);
-    // Shown at once (outbox.ts); a failure puts the text back here.
+    // Shown at once (outbox.ts); a failure puts the text and files back here.
     setDraft("");
+    files.clear();
     try {
-      await sendMessage(agent.id, text, { now, takeBack: true });
+      const attachments = held.map(({ name, mime, data }) => ({ name, mime, data }));
+      await sendMessage(agent.id, text, { now, takeBack: true, attachments });
     } catch (err) {
       setDraft(text);
+      files.restore(held);
       setError(errorText(err));
     } finally {
       setBusy(false);
@@ -1030,9 +1044,11 @@ function Composer({
           Plan 待审批 · {plans[0].run.plan.length} 个任务 · 展开审批
         </button>
       )}
-      <div className="composer">
+      <div className="composer" onDrop={files.onDrop} onDragOver={files.onDragOver}>
         {mention.menu}
+        <HeldFiles files={files.held} onRemove={files.remove} />
         <textarea
+          onPaste={files.onPaste}
           ref={ref}
           rows={1}
           value={draft}
@@ -1054,13 +1070,14 @@ function Composer({
           )}
           {capabilities?.resume && <span className="chip" title="会话可挂起后恢复">resumable</span>}
           <div className="spacer" />
+          {agent.plugin !== "external" && files.picker}
           {/* One button: stop while it works and nothing is typed, else send (which queues). */}
-          {canInterrupt && !draft.trim() ? (
+          {canInterrupt && !draft.trim() && !files.held.length ? (
             <button className="primary send" onClick={interrupt} title="中断本轮（Esc）" aria-label="中断本轮">
               <Icon name="stop" size={14} />
             </button>
           ) : (
-            <button className="primary send" disabled={busy || !draft.trim()} onClick={() => send()} aria-label="发送">
+            <button className="primary send" disabled={busy || (!draft.trim() && !files.held.length)} onClick={() => send()} aria-label="发送">
               <Icon name="send" size={16} />
             </button>
           )}

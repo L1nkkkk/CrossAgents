@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use crossagents_core::{
     Agent, AgentId, AgentKey, AgentStatus, CoreError, DiffSource, DriverSession, EXTERNAL_PLUGIN,
     Envelope, EventBus, EventKind, McpServerSpec, MessageId, MessageSource, NameSource,
-    OutputStream, PermissionPolicy, SessionEvent, SessionEventKind, SessionSpec, StopReason, Store,
-    validate_agent_name,
+    OutputStream, PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec,
+    StopReason, Store, validate_agent_name,
 };
 use crossagents_plugins::PluginRegistry;
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -58,7 +58,7 @@ impl Drop for Live {
 /// or jump the line.
 #[derive(Default)]
 struct Inbox {
-    waiting: std::sync::Mutex<VecDeque<(MessageId, String)>>,
+    waiting: std::sync::Mutex<VecDeque<(MessageId, Prompt)>>,
     /// A turn is running.
     busy: AtomicBool,
     closed: AtomicBool,
@@ -66,7 +66,7 @@ struct Inbox {
 }
 
 impl Inbox {
-    fn push(&self, message: (MessageId, String), first: bool) {
+    fn push(&self, message: (MessageId, Prompt), first: bool) {
         let mut waiting = self.waiting.lock().unwrap();
         if first {
             waiting.push_front(message);
@@ -82,7 +82,7 @@ impl Inbox {
         let mut waiting = self.waiting.lock().unwrap();
         match waiting.iter_mut().find(|(m, _)| *m == id) {
             Some((_, old)) => {
-                text.clone_into(old);
+                text.clone_into(&mut old.text);
                 true
             }
             None => false,
@@ -100,7 +100,7 @@ impl Inbox {
     }
 
     /// The next message, marking a turn as running; `None` once closed.
-    async fn next(&self) -> Option<(MessageId, String)> {
+    async fn next(&self) -> Option<(MessageId, Prompt)> {
         loop {
             if self.closed.load(Ordering::SeqCst) {
                 return None;
@@ -190,7 +190,7 @@ struct Unfinished {
     /// The turn that started and did not end.
     running: Option<MessageId>,
     /// Messages delivered that never started, in order.
-    waiting: Vec<(MessageId, String)>,
+    waiting: Vec<(MessageId, Prompt)>,
 }
 
 impl Runtime {
@@ -326,8 +326,13 @@ impl Runtime {
                         id,
                         message_id,
                         text,
+                        attachments,
                         ..
-                    } => out.entry(id).or_default().waiting.push((message_id, text)),
+                    } => out
+                        .entry(id)
+                        .or_default()
+                        .waiting
+                        .push((message_id, Prompt { text, attachments })),
                     EventKind::AgentInputUpdated {
                         id,
                         message_id,
@@ -337,7 +342,7 @@ impl Runtime {
                             .get_mut(&id)
                             .and_then(|u| u.waiting.iter_mut().find(|(m, _)| *m == message_id))
                         {
-                            waiting.1 = text;
+                            waiting.1.text = text;
                         }
                     }
                     EventKind::AgentInputWithdrawn { id, message_id } => {
@@ -433,7 +438,11 @@ impl Runtime {
 
     /// Puts messages delivered before the hub restarted back in the agent's line (they
     /// were announced then; they are not announced again).
-    async fn requeue(&self, id: AgentId, waiting: Vec<(MessageId, String)>) -> Result<(), CoreError> {
+    async fn requeue(
+        &self,
+        id: AgentId,
+        waiting: Vec<(MessageId, Prompt)>,
+    ) -> Result<(), CoreError> {
         let agent = self.start(&AgentKey::Id(id)).await?;
         let live = self
             .live
@@ -478,11 +487,7 @@ impl Runtime {
             .map(|(m, _)| m)
             .collect();
         for message_id in waiting {
-            publish(
-                &self.bus,
-                EventKind::AgentInputWithdrawn { id, message_id },
-            )
-            .await;
+            publish(&self.bus, EventKind::AgentInputWithdrawn { id, message_id }).await;
         }
     }
 
@@ -726,6 +731,7 @@ impl Runtime {
             from: MessageSource::Notice,
             text: digest.text(),
             reply_to: None,
+            attachments: Vec::new(),
         };
         digests.insert(agent.id, digest);
         drop(digests);
@@ -756,6 +762,7 @@ impl Runtime {
             from,
             text,
             reply_to,
+            attachments,
         } = envelope;
         // A reply joins the thread of the message it answers.
         let (thread, reply_excerpt) = match reply_to {
@@ -785,6 +792,7 @@ impl Runtime {
                     reply_to,
                     thread,
                     reply_excerpt,
+                    attachments: attachments.clone(),
                 },
             )
             .await;
@@ -793,7 +801,11 @@ impl Runtime {
                 .await
                 .entry(stored.id)
                 .or_default()
-                .push((message_id, from, text));
+                .push((
+                    message_id,
+                    from,
+                    Prompt { text, attachments }.with_references(),
+                ));
             return Ok((message_id, true));
         }
         let agent = self.start(key).await?;
@@ -818,6 +830,7 @@ impl Runtime {
                 reply_to,
                 thread,
                 reply_excerpt,
+                attachments: attachments.clone(),
             },
         )
         .await;
@@ -830,7 +843,8 @@ impl Runtime {
             }
             None => text,
         };
-        live.inbox.push((message_id, text), first);
+        live.inbox
+            .push((message_id, Prompt { text, attachments }), first);
         if first && queued {
             let _ = live.session.interrupt().await;
         }
@@ -1204,7 +1218,7 @@ async fn run_turns(
             return;
         }
     }
-    while let Some((message_id, text)) = inbox.next().await {
+    while let Some((message_id, prompt)) = inbox.next().await {
         // Before the turn is announced: an interrupt that follows the announcement must find
         // the prompt already running.
         let base = match &diff_dir {
@@ -1213,7 +1227,7 @@ async fn run_turns(
         };
         let _ = control.send(Control::TurnStarted(message_id));
         let result = session
-            .prompt(&text)
+            .prompt_with(&prompt)
             .await
             .map(|outcome| outcome.stop_reason)
             .map_err(|e| e.to_string());

@@ -355,6 +355,7 @@ impl Orchestrator {
                 from,
                 text: format!("{header}\n{}", a.text),
                 reply_to,
+                attachments: Vec::new(),
             };
             let id = envelope.id;
             state.recent.insert(dedup, (Instant::now(), id));

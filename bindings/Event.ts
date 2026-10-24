@@ -3,6 +3,7 @@ import type { Account } from "./Account";
 import type { Agent } from "./Agent";
 import type { AgentId } from "./AgentId";
 import type { AgentStatus } from "./AgentStatus";
+import type { Attachment } from "./Attachment";
 import type { CheckResult } from "./CheckResult";
 import type { DiffSource } from "./DiffSource";
 import type { ExitCause } from "./ExitCause";
@@ -44,7 +45,11 @@ thread?: MessageId,
 /**
  * The start of the message replied to, for showing "回复「…」".
  */
-reply_excerpt?: string, } } | { "type": "agent.input_updated", "data": { id: AgentId, message_id: MessageId, text: string, } } | { "type": "agent.model_changed", "data": { id: AgentId, model: string | null, effort: string | null, from_model: string | null, from_effort: string | null, } } | { "type": "agent.input_withdrawn", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.turn_started", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.output", "data": { id: AgentId, stream: OutputStream, text: string, } } | { "type": "agent.tool_call", "data": { id: AgentId, tool_call_id: string, title: string, kind: string | null, status: ToolStatus, } } | { "type": "agent.tool_call_updated", "data": { id: AgentId, tool_call_id: string, title: string | null, status: ToolStatus | null, } } | { "type": "agent.tool_output", "data": { id: AgentId, tool_call_id: string, text: string, } } | { "type": "agent.tool_detail", "data": { id: AgentId, tool_call_id: string, detail: ToolDetail, } } | { "type": "agent.turn_diff", "data": { id: AgentId, diff: string, 
+reply_excerpt?: string, 
+/**
+ * Files sent with it (docs/tasks/DOGFOOD.md §3).
+ */
+attachments?: Array<Attachment>, } } | { "type": "agent.input_updated", "data": { id: AgentId, message_id: MessageId, text: string, } } | { "type": "agent.model_changed", "data": { id: AgentId, model: string | null, effort: string | null, from_model: string | null, from_effort: string | null, } } | { "type": "agent.input_withdrawn", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.turn_started", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.output", "data": { id: AgentId, stream: OutputStream, text: string, } } | { "type": "agent.tool_call", "data": { id: AgentId, tool_call_id: string, title: string, kind: string | null, status: ToolStatus, } } | { "type": "agent.tool_call_updated", "data": { id: AgentId, tool_call_id: string, title: string | null, status: ToolStatus | null, } } | { "type": "agent.tool_output", "data": { id: AgentId, tool_call_id: string, text: string, } } | { "type": "agent.tool_detail", "data": { id: AgentId, tool_call_id: string, detail: ToolDetail, } } | { "type": "agent.turn_diff", "data": { id: AgentId, diff: string, 
 /**
  * The turn it belongs to; absent in events written before the field existed (the
  * running turn, else the last one that started).

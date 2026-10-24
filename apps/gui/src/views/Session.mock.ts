@@ -127,3 +127,33 @@ export function chatWithRecruit(): { state: MockState; script: Step[]; route: st
   state.transcripts.set(iris.id, transcript(iris, [], 2_000));
   return { state, script: [], route: `#/s/${luna.id}` };
 }
+
+/** A mock screenshot (an SVG, which the preview may show; the hub takes PNG, JPEG, GIF, WebP). */
+const SHOT_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="300"><rect width="480" height="300" fill="#1c1c1f"/><rect x="0" y="0" width="120" height="300" fill="#141416"/><rect x="140" y="24" width="300" height="36" rx="8" fill="#2a2a30"/><rect x="140" y="80" width="220" height="14" rx="4" fill="#3a3a44"/><rect x="140" y="104" width="260" height="14" rx="4" fill="#3a3a44"/><rect x="140" y="240" width="320" height="40" rx="10" fill="none" stroke="#5b5bd6"/><text x="150" y="47" fill="#e5e5e5" font-family="sans-serif" font-size="14">登录页 · 深色</text></svg>`;
+
+/**
+ * Files with a message (docs/tasks/DOGFOOD.md §3): the person sent a screenshot and a log
+ * with their question; paste or drop more into the composer, or use the paperclip.
+ */
+export function attachmentSession(): { state: MockState; script: Step[]; route: string } {
+  const solo = soloSession();
+  const nova = solo.state.agents[0];
+  nova.status = "idle";
+  const t = solo.state.transcripts.get(nova.id)!;
+  const shot = uid().replace(/-/g, "");
+  const log = uid().replace(/-/g, "");
+  const base = `C:/Users/me/.crossagents/attachments/${nova.id}`;
+  solo.state.files.set(shot, { mime: "image/svg+xml", data: btoa(unescape(encodeURIComponent(SHOT_SVG))) });
+  const asked = turn({
+    input: "深色模式下登录页的按钮看不清，截图和控制台日志附上了，看看是哪里的样式。",
+    minutesAgo: 4,
+    took: 2,
+    items: [think("截图里按钮描边和背景几乎同色；日志里有一条 CSS 变量没定义的警告。"), say("是 `--accent-border` 在深色主题里没定义，回落成了背景色。我在 `login.css` 里补上深色的值。")],
+  });
+  asked.turn.attachments = [
+    { id: shot, name: "login-dark.png", mime: "image/png", size: 48_213, path: `${base}/${shot}` },
+    { id: log, name: "console.log", mime: "text/plain", size: 1_380, path: `${base}/${log}` },
+  ];
+  t.turns = [t.turns[0], asked.turn];
+  return { ...solo, script: [], route: `#/s/${nova.name}` };
+}

@@ -370,6 +370,24 @@ const TOOLS: &[ToolDef] = &[
         },
     },
     ToolDef {
+        name: "gui_screenshot",
+        description: "See the CrossAgents GUI as it looks in your working directory: renders a scenario of the GUI's mock preview (apps/gui/src/dev/scenarios.ts, e.g. \"running\", \"review\", \"solo\") in a hidden window and returns a PNG. For checking GUI changes; add a scenario for a new screen first. Needs `npm --prefix apps/gui ci` once.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({
+                    "scenario": { "type": "string", "description": "Scenario key; default \"running\"." },
+                    "route": { "type": "string", "description": "Page to open instead of the scenario's own, e.g. \"#/usage\"." },
+                    "width": { "type": "integer", "description": "Default 1280." },
+                    "height": { "type": "integer", "description": "Default 800." },
+                    "theme": { "type": "string", "enum": ["light", "dark"] },
+                    "wait_ms": { "type": "integer", "description": "How long the page runs before the picture (its script plays meanwhile). Default 1500." }
+                }),
+                &[],
+            )
+        },
+    },
+    ToolDef {
         name: "checks_run",
         description: "Run a task's spec.acceptance commands and get the results.",
         groups: ALL,
@@ -623,6 +641,7 @@ impl Orchestrator {
             "workspace_read" => self.workspace_read(caller, input).await,
             "workspace_run" => self.workspace_run(caller, input).await,
             "checks_run" => self.checks_run(caller, input).await,
+            "gui_screenshot" => self.gui_screenshot(caller, input).await,
             "review_request" => self.review_request(caller, input).await,
             "task_accept" => self.task_accept(caller, input).await,
             "task_rework" => self.task_rework(caller, input).await,

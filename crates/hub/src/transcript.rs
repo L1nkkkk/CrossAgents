@@ -38,6 +38,7 @@ impl Fold {
                 reply_to,
                 thread,
                 reply_excerpt,
+                attachments,
                 ..
             } => self.turns.push(TranscriptTurn {
                 message_id: *message_id,
@@ -52,6 +53,7 @@ impl Fold {
                 stop_reason: None,
                 items: Vec::new(),
                 diff: None,
+                attachments: attachments.clone(),
             }),
             EventKind::AgentInputUpdated {
                 message_id, text, ..
@@ -314,6 +316,7 @@ mod tests {
                 reply_to: None,
                 thread: None,
                 reply_excerpt: None,
+                attachments: Vec::new(),
             },
             EventKind::AgentTurnStarted { id, message_id: m1 },
             out("thinking", OutputStream::Thought),
@@ -336,6 +339,7 @@ mod tests {
                 reply_to: None,
                 thread: None,
                 reply_excerpt: None,
+                attachments: Vec::new(),
             },
             // One taken back before it started.
             EventKind::AgentInput {
@@ -347,6 +351,7 @@ mod tests {
                 reply_to: None,
                 thread: None,
                 reply_excerpt: None,
+                attachments: Vec::new(),
             },
             EventKind::AgentInputWithdrawn { id, message_id: m3 },
             EventKind::AgentToolCallUpdated {

@@ -210,14 +210,44 @@ fn mcp_config(servers: &[McpServerSpec]) -> Value {
 }
 
 /// A user message; `uuid` names it for rewinding and forking.
-pub fn user_message(session_id: &str, uuid: &str, text: &str) -> Value {
+/// A user message; `content` is the text, or an array of content blocks.
+pub fn user_message(session_id: &str, uuid: &str, content: Value) -> Value {
     json!({
         "type": "user",
         "uuid": uuid,
         "session_id": session_id,
         "parent_tool_use_id": null,
-        "message": { "role": "user", "content": text },
+        "message": { "role": "user", "content": content },
     })
+}
+
+/// A message with its files as Anthropic content blocks (docs/tasks/DOGFOOD.md §3): images
+/// and PDFs as base64 blocks, small text files as text, the rest by path. Just the text when
+/// there are no files.
+pub fn user_content(prompt: &crossagents_core::Prompt) -> Value {
+    use base64::Engine as _;
+    if prompt.attachments.is_empty() {
+        return Value::String(prompt.text.clone());
+    }
+    let mut blocks = vec![json!({ "type": "text", "text": prompt.text })];
+    for a in &prompt.attachments {
+        let bytes = (a.is_image() || a.is_pdf())
+            .then(|| std::fs::read(&a.path).ok())
+            .flatten();
+        let block = match bytes {
+            Some(bytes) => {
+                let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+                let kind = if a.is_image() { "image" } else { "document" };
+                json!({ "type": kind, "source": { "type": "base64", "media_type": a.mime, "data": data } })
+            }
+            None => match a.inline_text() {
+                Some(text) => json!({ "type": "text", "text": a.as_file_block(&text) }),
+                None => json!({ "type": "text", "text": a.reference() }),
+            },
+        };
+        blocks.push(block);
+    }
+    Value::Array(blocks)
 }
 
 /// The control request that changes a running session's reasoning effort: Claude Code's
@@ -1428,6 +1458,50 @@ mod tests {
             control_success("r3", json!(1))["response"]["request_id"],
             "r3"
         );
-        assert_eq!(user_message("s", "u", "hi")["message"]["content"], "hi");
+        assert_eq!(
+            user_message("s", "u", json!("hi"))["message"]["content"],
+            "hi"
+        );
+    }
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+    use crossagents_core::{Attachment, Prompt};
+
+    fn attach(dir: &std::path::Path, name: &str, mime: &str, body: &[u8]) -> Attachment {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        Attachment {
+            id: "h".into(),
+            name: name.into(),
+            mime: mime.into(),
+            size: body.len() as u64,
+            path,
+        }
+    }
+
+    #[test]
+    fn files_become_content_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(user_content(&Prompt::text("hi")), json!("hi"));
+        let prompt = Prompt {
+            text: "see".into(),
+            attachments: vec![
+                attach(dir.path(), "a.png", "image/png", b"img"),
+                attach(dir.path(), "b.pdf", "application/pdf", b"%PDF"),
+                attach(dir.path(), "c.txt", "text/plain", b"note"),
+            ],
+        };
+        let blocks = user_content(&prompt);
+        assert_eq!(blocks[0], json!({ "type": "text", "text": "see" }));
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(
+            blocks[1]["source"],
+            json!({ "type": "base64", "media_type": "image/png", "data": "aW1n" })
+        );
+        assert_eq!(blocks[2]["type"], "document");
+        assert_eq!(blocks[3]["text"], "<file name=\"c.txt\">\nnote\n</file>");
     }
 }

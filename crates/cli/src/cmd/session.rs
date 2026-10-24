@@ -229,6 +229,7 @@ async fn post_message(client: &Client, agent: &Agent, text: &str) -> Result<Send
             &SendMessageRequest {
                 text: text.into(),
                 now: None,
+                attachments: None,
             },
         )
         .await

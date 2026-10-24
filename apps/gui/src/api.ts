@@ -6,6 +6,7 @@ import type { Account } from "@bindings/Account";
 import type { AccountUsageGroup } from "@bindings/AccountUsageGroup";
 import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
 import type { ChangesResponse } from "@bindings/ChangesResponse";
+import type { AttachmentContent } from "@bindings/AttachmentContent";
 import type { Task } from "@bindings/Task";
 import type { TaskReviewRequest } from "@bindings/TaskReviewRequest";
 import type { Agent } from "@bindings/Agent";
@@ -129,6 +130,8 @@ export const api = {
     request<ListNotesResponse>("GET", `/v1/notes?scope=${scope}${run ? `&run=${enc(run)}` : ""}`),
   updateProfile: (key: string, profile: AgentProfile) => request<Agent>("POST", `/v1/agents/${enc(key)}/profile`, profile),
   transcript: (key: string) => request<Transcript>("GET", `/v1/agents/${enc(key)}/transcript`),
+  /** One file sent to the agent, base64. */
+  attachment: (key: string, id: string) => request<AttachmentContent>("GET", `/v1/agents/${enc(key)}/attachments/${enc(id)}`),
   turnDiff: (key: string, messageId: string) =>
     request<TurnDiffResponse>("GET", `/v1/agents/${enc(key)}/turns/${enc(messageId)}/diff`),
   listPlugins: () => request<ListPluginsResponse>("GET", "/v1/plugins"),

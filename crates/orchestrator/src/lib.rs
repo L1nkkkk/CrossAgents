@@ -12,6 +12,7 @@ pub mod notes;
 pub mod plan;
 pub mod protocol;
 pub mod review;
+pub mod screenshot;
 pub mod tasks;
 pub mod team;
 pub mod tools;

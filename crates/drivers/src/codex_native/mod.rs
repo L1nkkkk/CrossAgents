@@ -17,7 +17,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use crossagents_core::{
     Capabilities, CoreError, Driver, DriverKind, DriverSession, PermissionDecision,
-    PermissionHandler, PermissionPolicy, SessionEvent, SessionEventKind, SessionSpec, TurnOutcome,
+    PermissionHandler, PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec,
+    TurnOutcome,
 };
 use serde_json::{Value, json};
 use tokio::sync::{Notify, mpsc, oneshot};
@@ -757,6 +758,11 @@ impl DriverSession for CodexSession {
     }
 
     async fn prompt(&self, text: &str) -> Result<TurnOutcome, CoreError> {
+        self.prompt_with(&Prompt::text(text)).await
+    }
+
+    /// Images go as `localImage` input items (docs/tasks/DOGFOOD.md §3).
+    async fn prompt_with(&self, prompt: &Prompt) -> Result<TurnOutcome, CoreError> {
         self.check_open()?;
         let (tx, rx) = oneshot::channel();
         {
@@ -771,7 +777,7 @@ impl DriverSession for CodexSession {
             };
         }
         let (model, effort) = self.next.lock().expect("next lock").clone();
-        let params = wire::turn_start(&self.thread_id, text, model.as_deref(), effort.as_deref());
+        let params = wire::turn_start(&self.thread_id, prompt, model.as_deref(), effort.as_deref());
         let response = match self.server.request(method::TURN_START, params).await {
             Ok(response) => response,
             Err(err) => {

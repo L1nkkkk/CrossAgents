@@ -99,6 +99,7 @@ export function applyEvent(t: Transcript, event: HubEvent): Transcript {
         completed_at: null,
         stop_reason: null,
         items: [],
+        ...(event.data.attachments?.length ? { attachments: event.data.attachments } : {}),
       };
       return { ...t, turns: [...turns, turn], last_seq: seq };
     }

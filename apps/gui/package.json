@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "preview:mock": "vite --mode mock",
+    "screenshot": "node scripts/screenshot.mjs",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit && tsc -p electron --noEmit",
     "test": "node --test \"src/lib/*.test.ts\" && tsc -p electron && node --test \"dist-electron/*.test.cjs\"",

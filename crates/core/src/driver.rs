@@ -461,6 +461,16 @@ pub trait DriverSession: Send + Sync {
     /// Runs one turn to completion. Output arrives as [`SessionEvent`]s meanwhile.
     async fn prompt(&self, text: &str) -> Result<TurnOutcome, CoreError>;
 
+    /// Like [`Self::prompt`], with the message's files. Drivers that cannot pass files on
+    /// natively get them written into the text (inline or by path), never dropped.
+    async fn prompt_with(&self, prompt: &crate::Prompt) -> Result<TurnOutcome, CoreError> {
+        if prompt.attachments.is_empty() {
+            self.prompt(&prompt.text).await
+        } else {
+            self.prompt(&prompt.with_references()).await
+        }
+    }
+
     /// Stops the running turn; `prompt` then returns [`StopReason::Cancelled`]. Does
     /// nothing when no turn runs.
     async fn interrupt(&self) -> Result<(), CoreError>;

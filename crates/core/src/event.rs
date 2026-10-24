@@ -90,6 +90,10 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "ts", ts(optional))]
         reply_excerpt: Option<String>,
+        /// Files sent with it (docs/tasks/DOGFOOD.md §3).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[cfg_attr(feature = "ts", ts(as = "Option<Vec<crate::Attachment>>", optional))]
+        attachments: Vec<crate::Attachment>,
     },
     /// A waiting message got new text (the hub's notification digest gathers news while
     /// the agent is busy).
@@ -340,6 +344,8 @@ pub struct Envelope {
     pub text: String,
     /// The message this one answers.
     pub reply_to: Option<MessageId>,
+    /// Files sent with it.
+    pub attachments: Vec<crate::Attachment>,
 }
 
 impl Envelope {
@@ -349,6 +355,7 @@ impl Envelope {
             from,
             text,
             reply_to: None,
+            attachments: Vec::new(),
         }
     }
 }

@@ -3,6 +3,7 @@
 //! This crate has no dependency on any other CrossAgents crate.
 
 pub mod account;
+pub mod attachment;
 pub mod bus;
 pub mod driver;
 pub mod error;
@@ -23,6 +24,7 @@ pub use account::{
     Account, AccountProvider, AccountStatus, Credits, DataSource, LimitGroup, LoginCommand,
     ModelInfo, RateWindow, ResetCredit, SessionUsage, TokenTotals, mask_email,
 };
+pub use attachment::{Attachment, Prompt};
 pub use bus::EventBus;
 pub use driver::{
     Capabilities, Driver, DriverKind, DriverSession, ExitCause, FileChange, McpServerSpec,

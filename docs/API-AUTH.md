@@ -54,6 +54,7 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 | DELETE | `/v1/agents/{key}/messages/{id}` | write | GUI |
 | GET | `/v1/agents/{key}/transcript` | read | GUI、CLI |
 | GET | `/v1/agents/{key}/turns/{id}/diff` | read | GUI、CLI |
+| GET | `/v1/agents/{key}/attachments/{id}` | read | GUI |
 | POST | `/v1/agents/{key}/profile` | write | GUI |
 | POST | `/v1/agents/{key}/model` | write | GUI |
 | POST | `/v1/agents/{key}/name` | write | GUI |

@@ -12,6 +12,7 @@ import type { Note } from "@bindings/Note";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import type { QuotaResponse } from "@bindings/QuotaResponse";
 import type { RunDetail } from "@bindings/RunDetail";
+import type { SendMessageRequest } from "@bindings/SendMessageRequest";
 import type { TaskReviewRequest } from "@bindings/TaskReviewRequest";
 import type { Transcript } from "@bindings/Transcript";
 import type { UsageGroup } from "@bindings/UsageGroup";
@@ -37,6 +38,8 @@ export type MockState = {
   taskDiffs: Map<string, string>;
   /** Each run's branch against its base (before landing), by run id. */
   runDiffs: Map<string, string>;
+  /** Files sent with messages, by id: type and base64 bytes. */
+  files: Map<string, { mime: string; data: string }>;
   questions: HumanItem[];
   notes: Note[];
   quota: QuotaResponse;
@@ -61,6 +64,7 @@ export function emptyState(): MockState {
     diffs: new Map(),
     taskDiffs: new Map(),
     runDiffs: new Map(),
+    files: new Map(),
     questions: [],
     notes: [],
     quota: { accounts: [], providers: ["claude", "codex"] },
@@ -244,6 +248,10 @@ export class MockBridge implements CrossAgentsBridge {
         if (d.run.in_place) return json(409, { error: { code: "conflict", message: "this directory is not under version control, so there is no diff" } });
         return json(200, { base: d.run.base_branch, head: d.run.branch, diff: s.runDiffs.get(d.run.id) ?? "", truncated: false });
       }
+      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/attachments\/([^/]+)$/))) {
+        const file = s.files.get(decodeURIComponent(m[2]));
+        return file ? json(200, { id: m[2], mime: file.mime, size: file.data.length, data: file.data }) : notFound("attachment");
+      }
       if (p === "/v1/runs") return json(200, { runs: s.runs.map((d) => d.run) });
       if ((m = p.match(/^\/v1\/runs\/([^/]+)$/))) {
         const d = s.runs.find((x) => x.run.id === m![1]);
@@ -339,7 +347,7 @@ export class MockBridge implements CrossAgentsBridge {
         }
         return json(200, a);
       }
-      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/messages$/))) return this.send(m[1], body as { text: string; now?: boolean });
+      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/messages$/))) return this.send(m[1], body as SendMessageRequest);
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/cancel$/))) return this.cancel(m[1]);
       if ((m = p.match(/^\/v1\/runs\/([^/]+)\/(approve|reject|cancel)$/))) {
         const d = s.runs.find((x) => x.run.id === m![1]);
@@ -379,12 +387,18 @@ export class MockBridge implements CrossAgentsBridge {
   }
 
   /** A message: queued behind a running turn, else answered by a short made-up turn. */
-  private send(key: string, req: { text: string; now?: boolean }): HubResponse {
+  private send(key: string, req: SendMessageRequest): HubResponse {
     const a = this.agent(key);
     if (!a) return notFound("agent");
     const message_id = uid();
     const busy = a.status === "running";
-    this.emit({ type: "agent.input", data: { id: a.id, message_id, text: req.text, queued: busy, from: { kind: "human" } } });
+    // Like the hub: files are kept apart and the message carries what they are.
+    const attachments = (req.attachments ?? []).map((f) => {
+      const id = uid().replace(/-/g, "");
+      this.state.files.set(id, { mime: f.mime, data: f.data });
+      return { id, name: f.name, mime: f.mime, size: Math.floor((f.data.length * 3) / 4), path: `C:/Users/me/.crossagents/attachments/${a.id}/${id}` };
+    });
+    this.emit({ type: "agent.input", data: { id: a.id, message_id, text: req.text, queued: busy, from: { kind: "human" }, ...(attachments.length ? { attachments } : {}) } });
     if (!busy) this.answer(a, message_id, req.text);
     return json(202, { message_id, queued: busy });
   }

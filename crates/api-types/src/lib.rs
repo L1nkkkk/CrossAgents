@@ -114,6 +114,52 @@ pub struct SendMessageRequest {
     #[serde(default)]
     #[ts(optional)]
     pub now: Option<bool>,
+    /// Files sent with the message (docs/tasks/DOGFOOD.md §3): at most
+    /// [`MAX_ATTACHMENTS`], each at most [`MAX_ATTACHMENT_BYTES`], of [`attachment_mime_ok`]
+    /// types.
+    #[serde(default)]
+    #[ts(optional)]
+    pub attachments: Option<Vec<AttachmentUpload>>,
+}
+
+/// Limits on a message's files, the same in the hub and the GUI.
+pub const MAX_ATTACHMENTS: usize = 8;
+pub const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+pub const MAX_ATTACHMENTS_TOTAL: usize = 20 * 1024 * 1024;
+
+/// Whether a file of this type can be sent with a message.
+pub fn attachment_mime_ok(mime: &str) -> bool {
+    matches!(
+        mime,
+        "image/png"
+            | "image/jpeg"
+            | "image/gif"
+            | "image/webp"
+            | "application/pdf"
+            | "application/json"
+    ) || mime.starts_with("text/")
+}
+
+/// A file as the client sends it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AttachmentUpload {
+    pub name: String,
+    pub mime: String,
+    /// The bytes, base64 (standard alphabet, padded).
+    pub data: String,
+}
+
+/// `GET /v1/agents/{key}/attachments/{id}`: one file sent to the agent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AttachmentContent {
+    pub id: String,
+    pub mime: String,
+    #[ts(type = "number")]
+    pub size: u64,
+    /// The bytes, base64.
+    pub data: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -215,6 +261,11 @@ pub struct TranscriptTurn {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub diff: Option<TurnDiffStat>,
+    /// Files sent with the message; their contents at
+    /// `GET /v1/agents/{key}/attachments/{id}`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<crossagents_core::Attachment>>", optional)]
+    pub attachments: Vec<crossagents_core::Attachment>,
 }
 
 /// Files a turn changed, with added and removed lines.

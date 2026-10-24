@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use crossagents_core::{
     Capabilities, CoreError, Driver, DriverKind, DriverSession, PermissionHandler,
-    PermissionPolicy, SessionEvent, SessionEventKind, SessionSpec, StopReason, TurnOutcome,
+    PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec, StopReason, TurnOutcome,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -637,6 +637,11 @@ impl DriverSession for ClaudeSession {
     }
 
     async fn prompt(&self, text: &str) -> Result<TurnOutcome, CoreError> {
+        self.prompt_with(&Prompt::text(text)).await
+    }
+
+    /// Files go as content blocks (docs/tasks/DOGFOOD.md §3).
+    async fn prompt_with(&self, prompt: &Prompt) -> Result<TurnOutcome, CoreError> {
         self.check_open()?;
         let uuid = new_id();
         let (tx, rx) = oneshot::channel();
@@ -657,7 +662,8 @@ impl DriverSession for ClaudeSession {
             },
             None,
         );
-        let message = wire::user_message(&self.shared.session_id, &uuid, text);
+        let message =
+            wire::user_message(&self.shared.session_id, &uuid, wire::user_content(prompt));
         if let Err(err) = self.shared.write(&message).await {
             *self.shared.turn.lock().expect("turn lock") = Turn::default();
             return Err(err);

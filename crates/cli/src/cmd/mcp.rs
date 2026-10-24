@@ -60,10 +60,7 @@ impl McpProxy {
             Err(err) => (format!("cannot reach the CrossAgents hub: {err}"), true),
             Ok(resp) if resp.status().is_success() => {
                 let value: Value = resp.json().await.unwrap_or(Value::Null);
-                (
-                    serde_json::to_string_pretty(&value).unwrap_or_default(),
-                    false,
-                )
+                return Ok(json!({ "content": tool_content(value), "isError": false }));
             }
             Ok(resp) => {
                 let status = resp.status();
@@ -75,6 +72,23 @@ impl McpProxy {
         };
         Ok(json!({ "content": [{ "type": "text", "text": text }], "isError": is_error }))
     }
+}
+
+/// A tool's result as MCP content: the JSON as text, and its `images` (`{ mime, data }`,
+/// base64) as image blocks the model sees (docs/tasks/DOGFOOD.md §3).
+fn tool_content(mut value: Value) -> Vec<Value> {
+    let images = value
+        .as_object_mut()
+        .and_then(|o| o.remove("images"))
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    let mut content = vec![
+        json!({ "type": "text", "text": serde_json::to_string_pretty(&value).unwrap_or_default() }),
+    ];
+    content.extend(images.iter().filter_map(|image| {
+        Some(json!({ "type": "image", "mimeType": image["mime"].as_str()?, "data": image["data"].as_str()? }))
+    }));
+    content
 }
 
 fn internal(err: impl std::fmt::Display) -> RpcError {
@@ -112,4 +126,24 @@ pub async fn run() -> Result<()> {
     let (_peer, reader) = RpcPeer::spawn(tokio::io::stdin(), tokio::io::stdout(), proxy);
     let _ = reader.await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn images_in_a_result_become_image_blocks() {
+        let content = tool_content(json!({
+            "path": "shot.png",
+            "images": [{ "mime": "image/png", "data": "aW1n" }],
+        }));
+        assert_eq!(content.len(), 2);
+        assert!(!content[0]["text"].as_str().unwrap().contains("aW1n"));
+        assert_eq!(
+            content[1],
+            json!({ "type": "image", "mimeType": "image/png", "data": "aW1n" })
+        );
+        assert_eq!(tool_content(json!({ "ok": true })).len(), 1);
+    }
 }

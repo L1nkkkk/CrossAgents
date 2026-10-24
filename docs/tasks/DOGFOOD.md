@@ -67,3 +67,38 @@ GUI：
 ### 待实测
 
 - 真实 worker 收到带行号的意见后能按位置改；打回后任务卡片状态与尝试次数正确。
+
+## 3. agent 能验证自己的工作（P0）
+
+### 问题
+
+消息只有纯文本（TODO §七）：人发不了截图，agent 改了 GUI 也看不到改成了什么样，只能靠人肉眼验收。
+
+### 设计
+
+**消息带附件**（落实 TODO §七 的前几条）
+
+| 层 | 做法 |
+|---|---|
+| 接口 | `SendMessageRequest` 增可选 `attachments: [{ name, mime, data }]`（`data` 为 base64），不升 API 版本（新增可选字段）。限制：每条最多 8 个、单个 10 MB、合计 20 MB；类型白名单 `image/png|jpeg|gif|webp`、`application/pdf`、`application/json`、`text/*`。超限或类型不符返回 400，GUI 发送前先按同一规则检查 |
+| 存储 | 解码后算 sha256，落盘到 `<home>/attachments/<agent id>/<sha256>`（同一会话同内容只存一份），SQLite 里只有事件中的元数据 `Attachment { id: sha256, name, mime, size, path }`，不存 base64 |
+| 事件与历史 | `agent.input` 增可选 `attachments`，transcript 的轮次随之带上；`GET /v1/agents/{key}/attachments/{id}` 返回 base64 内容（只读该会话目录下、id 为 64 位十六进制的文件），供时间线显示缩略图 |
+| 投递 | 收件箱里的消息从纯文本改为 `Prompt { text, attachments }`。`DriverSession` 增 `prompt_with(&Prompt)`，缺省实现把附件写成文字引用（文件名、类型、绝对路径）追加在正文后，任何驱动都不会静默丢附件 |
+| claude-native | stream-json 的 user 消息改为内容块数组：图片 → `image`（base64），PDF → `document`（base64），文本类 → `text` 块（`<file name=…>` 包住内容，单个 256 KB 内），其余 → 路径引用 |
+| codex-native | `turn/start` 的 `input`：图片 → `{ type: "localImage", path }`，文本类 → 追加 `text` 项，其余 → 路径引用 |
+| GUI | 输入框支持粘贴截图、拖入文件、点回形针选文件；发送前显示缩略图 / 文件卡片，可删；时间线里人的消息下显示附件（图片缩略图，点开看大图） |
+
+**agent 自己截 GUI 的图**
+
+- `apps/gui/scripts/screenshot.mjs`：用 Vite 以 mock 模式起一个临时预览（随机端口），再用项目里已有的 Electron 起一个隐藏窗口打开 `?scenario=<场景>`（可带路由、宽高、主题），等页面稳定后 `capturePage()` 存 PNG，然后关掉两者。不依赖 hub、不碰人的 GUI。命令行：`npm --prefix apps/gui run screenshot -- --scenario review --out shot.png [--width 1280 --height 800 --theme dark --route '#/…' --wait 1500]`。
+- 协作工具 `gui_screenshot`（所有人可用）：hub 在调用者的工作目录里跑上面的脚本（工作目录里得有 `apps/gui` 并装好依赖），超时 3 分钟，把 PNG 作为图片返回；`crossagents mcp` 把结果里的 `images` 转成 MCP 的 `image` 内容块，模型直接看得到。工作目录不对、依赖没装时返回能照着做的错误信息。
+
+### 不做
+
+- 附件只做到人 → agent。agent 之间转发附件（TODO §七 “跨 agent 转发”）、`acp-generic` 按能力限制、transcript 导出带附件，留在 TODO §七。
+- 截图只截 mock 预览，不截连真 hub 的 GUI：mock 场景可重放、不依赖状态，适合验收；需要新界面时 agent 照规矩加 mock 场景。
+
+### 待实测
+
+- Claude Code 对 `document`（PDF）块与大图的实际支持范围；Codex `localImage` 字段名以实测为准（目前按 app-server v2 的 `UserInput` 写）。
+- 真实 agent 调 `gui_screenshot` 后能“看见”图片（Claude Code 与 Codex 对 MCP 图片结果的支持）。

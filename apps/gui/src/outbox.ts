@@ -3,6 +3,7 @@
 // arrives in the transcript, the conversation shows the message from here.
 
 import { useEffect, useSyncExternalStore } from "react";
+import type { AttachmentUpload } from "@bindings/AttachmentUpload";
 import type { TranscriptTurn } from "@bindings/TranscriptTurn";
 import { api, errorText } from "./api";
 
@@ -11,6 +12,8 @@ export type Outgoing = {
   agent: string;
   text: string;
   now?: boolean;
+  /** Files sent with it. */
+  attachments?: AttachmentUpload[];
   /** The hub's id for it, once it took it. */
   id?: string;
   /** Why it was not sent. */
@@ -33,7 +36,8 @@ function subscribe(listener: () => void) {
 
 async function deliver(item: Outgoing): Promise<void> {
   try {
-    const sent = await api.sendMessage(item.agent, { text: item.text, now: item.now || undefined });
+    const attachments = item.attachments?.length ? item.attachments : undefined;
+    const sent = await api.sendMessage(item.agent, { text: item.text, now: item.now || undefined, attachments });
     set((xs) => xs.map((x) => (x.key === item.key ? { ...x, id: sent.message_id, error: undefined } : x)));
   } catch (err) {
     set((xs) => xs.map((x) => (x.key === item.key ? { ...x, error: errorText(err) } : x)));
@@ -45,8 +49,8 @@ async function deliver(item: Outgoing): Promise<void> {
  * Sends `text` to `agent`, showing it in that conversation right away. A failure stays there
  * with a retry, unless `takeBack` (the caller puts the text back where it was typed).
  */
-export async function sendMessage(agent: string, text: string, opts: { now?: boolean; takeBack?: boolean } = {}): Promise<void> {
-  const item: Outgoing = { key: ++next, agent, text, now: opts.now };
+export async function sendMessage(agent: string, text: string, opts: { now?: boolean; takeBack?: boolean; attachments?: AttachmentUpload[] } = {}): Promise<void> {
+  const item: Outgoing = { key: ++next, agent, text, now: opts.now, attachments: opts.attachments };
   set((xs) => [...xs, item]);
   try {
     await deliver(item);

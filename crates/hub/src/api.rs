@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Extension;
+use axum::extract::DefaultBodyLimit;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
@@ -17,18 +18,19 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use crossagents_api_types::{
     API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AnswerRequest, ApiError,
-    ArchiveAgentRequest, ChangesResponse, ConnectInfo, CreateAccountRequest, CreateAgentRequest,
-    CreateRunRequest, DiffSide, ErrorCode, FinishRequest, HealthResponse, HubInfo, InitRepoRequest,
-    LandRequest, ListAccountsResponse, ListAgentsResponse, ListNotesResponse, ListPluginsResponse,
-    ListQuestionsResponse, ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo,
-    QuotaResponse, RejectRunRequest, RenameAgentRequest, RunDetail, SendMessageRequest,
-    SendMessageResponse, SetModelRequest, SetPluginModelsRequest, SetTopicRequest,
-    TaskReviewRequest, Transcript, TurnDiffResponse, UsageGroup, UsageResponse,
+    ArchiveAgentRequest, AttachmentContent, ChangesResponse, ConnectInfo, CreateAccountRequest,
+    CreateAgentRequest, CreateRunRequest, DiffSide, ErrorCode, FinishRequest, HealthResponse,
+    HubInfo, InitRepoRequest, LandRequest, ListAccountsResponse, ListAgentsResponse,
+    ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
+    ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
+    RenameAgentRequest, RunDetail, SendMessageRequest, SendMessageResponse, SetModelRequest,
+    SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, Transcript, TurnDiffResponse,
+    UsageGroup, UsageResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError,
-    DriverKind, Event, EventBus, EventKind, HumanItem, LandMode, MessageId, MessageSource, Run,
-    RunConfig, RunId, Store, Task, TaskId,
+    DriverKind, Envelope, Event, EventBus, EventKind, HumanItem, LandMode, MessageId,
+    MessageSource, Run, RunConfig, RunId, Store, Task, TaskId,
 };
 use crossagents_orchestrator::{GitWorkspaces, NewRun, Orchestrator};
 
@@ -45,6 +47,9 @@ use tokio_util::sync::CancellationToken;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const EVENT_PAGE: u32 = 500;
+/// A message with its files, base64 (a third larger than the files themselves).
+const MESSAGE_BODY_LIMIT: usize =
+    crossagents_api_types::MAX_ATTACHMENTS_TOTAL / 3 * 4 + 1024 * 1024;
 
 pub struct AppState {
     pub bus: Arc<EventBus>,
@@ -80,7 +85,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/agents/{key}/stop", post(stop_agent))
         .route("/v1/agents/{key}/cancel", post(cancel_agent))
         .route("/v1/agents/{key}/compact", post(compact_agent))
-        .route("/v1/agents/{key}/messages", post(send_message))
+        .route(
+            "/v1/agents/{key}/messages",
+            post(send_message).layer(DefaultBodyLimit::max(MESSAGE_BODY_LIMIT)),
+        )
+        .route("/v1/agents/{key}/attachments/{id}", get(get_attachment))
         .route(
             "/v1/agents/{key}/messages/{message_id}",
             delete(withdraw_message),
@@ -670,25 +679,48 @@ async fn send_message(
     Path(key): Path<String>,
     Json(req): Json<SendMessageRequest>,
 ) -> ApiResult<(StatusCode, Json<SendMessageResponse>)> {
-    if req.text.trim().is_empty() {
+    let uploads = req.attachments.unwrap_or_default();
+    if req.text.trim().is_empty() && uploads.is_empty() {
         return Err(AppError::bad_request("text must not be empty"));
     }
     let key = AgentKey::parse(&key);
-    let (message_id, queued) = if req.now == Some(true) {
-        state
-            .runtime
-            .send_now(&key, req.text, MessageSource::Human)
-            .await?
+    let attachments = if uploads.is_empty() {
+        Vec::new()
     } else {
-        state
-            .runtime
-            .send(&key, req.text, MessageSource::Human)
-            .await?
+        let agent = state.store().get_agent(&key).await?;
+        crate::attachments::store(&state.home, agent.id, uploads)
+            .map_err(|refused| AppError::bad_request(refused.0))?
+    };
+    let envelope = Envelope {
+        attachments,
+        ..Envelope::new(MessageSource::Human, req.text)
+    };
+    let (message_id, queued) = if req.now == Some(true) {
+        state.runtime.send_now_envelope(&key, envelope).await?
+    } else {
+        state.runtime.send_envelope(&key, envelope).await?
     };
     Ok((
         StatusCode::ACCEPTED,
         Json(SendMessageResponse { message_id, queued }),
     ))
+}
+
+/// One file sent to the agent, for clients to show.
+async fn get_attachment(
+    State(state): State<Arc<AppState>>,
+    Path((key, id)): Path<(String, String)>,
+) -> ApiResult<Json<AttachmentContent>> {
+    let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    crate::attachments::read(&state.home, agent.id, &id)
+        .map(Json)
+        .ok_or_else(|| {
+            CoreError::NotFound {
+                kind: "attachment",
+                id,
+            }
+            .into()
+        })
 }
 
 async fn list_plugins(State(state): State<Arc<AppState>>) -> Json<ListPluginsResponse> {

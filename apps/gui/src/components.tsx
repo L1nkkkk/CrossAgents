@@ -23,6 +23,7 @@ import {
   Menu,
   MessageCircle,
   PanelLeft,
+  Paperclip,
   PanelRight,
   Pin,
   Plus,
@@ -312,6 +313,7 @@ const ICONS = {
   planner: Crown,
   rocket: Rocket,
   open: ExternalLink,
+  attach: Paperclip,
 } satisfies Record<string, LucideIcon>;
 
 export type IconName = keyof typeof ICONS;
