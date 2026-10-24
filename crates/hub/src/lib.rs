@@ -10,6 +10,7 @@ pub mod models;
 pub mod notices;
 pub mod paths;
 pub mod runtime;
+pub mod shadow;
 pub mod snapshot;
 pub mod transcript;
 pub mod usage;
@@ -35,7 +36,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use api::VERSION;
 use crossagents_plugins::PluginRegistry;
-pub use paths::{DEFAULT_PORT, HOME_ENV, HubConfig, HubFile, Paths};
+pub use paths::{DEFAULT_PORT, HOME_ENV, HUB_HOME_ENV, HubConfig, HubFile, Paths};
 pub use runtime::{Runtime, SessionExtras, SessionSetup};
 
 /// A hub serving in the background of the current process.
@@ -122,6 +123,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
             None => default_mcp_command()?,
         },
         url: OnceLock::new(),
+        worktrees: paths.home.join("worktrees"),
     });
     let (plugins, plugin_warnings) = PluginRegistry::load(&config.plugins, &paths.plugins());
     for warning in &plugin_warnings {

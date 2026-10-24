@@ -9,6 +9,9 @@ use crossagents_plugins::PluginConfig;
 use serde::{Deserialize, Serialize};
 
 pub const HOME_ENV: &str = "CROSSAGENTS_HOME";
+/// Set by `hub run` in its own environment, so every process under it (runtime hosts,
+/// agents, their shells) knows which hub runs it and does not stop it by mistake.
+pub const HUB_HOME_ENV: &str = "CROSSAGENTS_HUB_HOME";
 pub const DEFAULT_PORT: u16 = 7420;
 
 #[derive(Debug, Clone)]
@@ -185,18 +188,27 @@ impl HubConfig {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => ConfigFile::default(),
             Err(e) => return Err(e).context("cannot read config.toml"),
         };
-        let runtime_host = if config.hub.runtime_hosts.unwrap_or(true) {
-            let exe =
-                std::env::current_exe().context("cannot locate the crossagents executable")?;
-            Some(vec![exe.display().to_string(), "runtime-host".into()])
-        } else {
-            None
-        };
+        // Hosts and `mcp` outlive whoever started them: they run from a copy, so a build
+        // can replace the executable meanwhile (docs/tasks/DOGFOOD.md §1).
+        let exe = std::env::current_exe().context("cannot locate the crossagents executable")?;
+        let exe = crate::shadow::stable_exe(&paths, &exe).unwrap_or_else(|err| {
+            tracing::warn!(error = %err, "cannot copy the executable; running it in place");
+            exe
+        });
+        let runtime_host = config
+            .hub
+            .runtime_hosts
+            .unwrap_or(true)
+            .then(|| vec![exe.display().to_string(), "runtime-host".into()]);
+        let mcp_command = config
+            .hub
+            .mcp_command
+            .or_else(|| Some(vec![exe.display().to_string(), "mcp".into()]));
         Ok(Self {
             paths,
             port: config.hub.port.unwrap_or(DEFAULT_PORT),
             plugins: config.plugins,
-            mcp_command: config.hub.mcp_command,
+            mcp_command,
             codex_usage_url: config.accounts.codex_usage_url,
             detect_accounts: config.accounts.detect.unwrap_or(true),
             runtime_host,

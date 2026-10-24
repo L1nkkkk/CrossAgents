@@ -17,6 +17,7 @@ clap.workspace = true
 crossagents-api-types.workspace = true
 crossagents-drivers.workspace = true
 crossagents-hub.workspace = true
+dunce.workspace = true
 futures.workspace = true
 reqwest.workspace = true
 serde.workspace = true

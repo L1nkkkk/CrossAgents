@@ -464,6 +464,7 @@ dependencies = [
  "crossagents-api-types",
  "crossagents-drivers",
  "crossagents-hub",
+ "dunce",
  "futures",
  "reqwest",
  "serde",

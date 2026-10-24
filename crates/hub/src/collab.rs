@@ -43,7 +43,8 @@ impl AgentTokens {
 
     fn save(&self, map: &HashMap<String, AgentId>) {
         if let Some(file) = &self.file
-            && let Err(err) = crate::write_private(file, &serde_json::to_string(map).unwrap_or_default())
+            && let Err(err) =
+                crate::write_private(file, &serde_json::to_string(map).unwrap_or_default())
         {
             tracing::warn!(error = %err, "cannot save agent tokens");
         }
@@ -83,16 +84,42 @@ pub struct CollabSetup {
     pub mcp_command: Vec<String>,
     /// The hub's API base URL, known once the listener is bound.
     pub url: OnceLock<String>,
+    /// Root of run and task worktrees: agents working there build into their own target
+    /// directory (docs/tasks/DOGFOOD.md §1).
+    pub worktrees: PathBuf,
+}
+
+impl CollabSetup {
+    /// The account's environment, plus `CARGO_TARGET_DIR` for an agent in a worktree.
+    async fn agent_env(&self, agent: &Agent) -> Result<Vec<(String, String)>, CoreError> {
+        let mut env = self.accounts.agent_env(agent).await?;
+        env.extend(worktree_env(&self.worktrees, &agent.cwd));
+        Ok(env)
+    }
+}
+
+/// `CARGO_TARGET_DIR=<cwd>/target` when `cwd` is a run or task worktree under `root`, so
+/// tasks never share (and lock) one build directory. Absolute: a relative one would follow
+/// every `cd`.
+pub fn worktree_env(root: &Path, cwd: &Path) -> Option<(String, String)> {
+    let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (root, cwd) = (canon(root), canon(cwd));
+    (cwd != root && cwd.starts_with(&root)).then(|| {
+        (
+            "CARGO_TARGET_DIR".to_owned(),
+            cwd.join("target").display().to_string(),
+        )
+    })
 }
 
 #[async_trait]
 impl SessionSetup for CollabSetup {
     async fn environment(&self, agent: &Agent) -> Result<Vec<(String, String)>, CoreError> {
-        self.accounts.agent_env(agent).await
+        self.agent_env(agent).await
     }
 
     async fn prepare(&self, agent: &Agent) -> Result<SessionExtras, CoreError> {
-        let agent_env = self.accounts.agent_env(agent).await?;
+        let agent_env = self.agent_env(agent).await?;
         let Some((program, args)) = self.mcp_command.split_first() else {
             return Ok(SessionExtras {
                 instructions: Some(instructions(agent)),
@@ -365,5 +392,26 @@ impl AgentHost for HubHost {
             })
             .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worktrees_get_their_own_target_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("worktrees");
+        let task = root.join("ab12cd34").join("auth");
+        std::fs::create_dir_all(&task).unwrap();
+        let (key, value) = worktree_env(&root, &task).unwrap();
+        assert_eq!(key, "CARGO_TARGET_DIR");
+        let value = PathBuf::from(value);
+        assert!(value.is_absolute());
+        assert!(value.ends_with("auth/target") || value.ends_with("auth\target"));
+        // Chats in a person's checkout, and the root itself, keep the inherited setting.
+        assert_eq!(worktree_env(&root, dir.path()), None);
+        assert_eq!(worktree_env(&root, &root), None);
     }
 }

@@ -71,6 +71,9 @@ pub struct RuntimeHostArgs {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Command::Hub(cmd::hub::HubCommand::Run) = &cli.command {
+        mark_hub_home();
+    }
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(err) => {
@@ -85,6 +88,18 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `hub run` notes its home in its own environment for every process it starts (runtime
+/// hosts, agents, their shells), so they can tell which hub runs them (docs/tasks/DOGFOOD.md
+/// §1). Done before any other thread exists.
+#[allow(unsafe_code)]
+fn mark_hub_home() {
+    let Ok(paths) = crossagents_hub::Paths::from_env() else {
+        return;
+    };
+    // SAFETY: called first thing in `main`, before the runtime or any thread starts.
+    unsafe { std::env::set_var(crossagents_hub::HUB_HOME_ENV, &paths.home) };
 }
 
 #[cfg(test)]

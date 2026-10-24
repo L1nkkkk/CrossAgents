@@ -7,7 +7,7 @@ use clap::Subcommand;
 use crossagents_api_types::{
     Agent, AgentStatus, HealthResponse, HubInfo, ListAgentsResponse, Transcript,
 };
-use crossagents_hub::{HubConfig, HubFile, Paths};
+use crossagents_hub::{HOME_ENV, HUB_HOME_ENV, HubConfig, HubFile, Paths};
 use serde_json::json;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -35,7 +35,14 @@ pub enum HubCommand {
         /// Stop every agent too.
         #[arg(long)]
         agents: bool,
+        /// Stop it even from inside one of its own agents.
+        #[arg(long)]
+        force: bool,
     },
+    /// A throwaway dev hub with its own home and port, for checking a build of the hub
+    /// without touching the one that runs you (docs/tasks/DOGFOOD.md §1).
+    #[command(subcommand)]
+    Sandbox(SandboxCommand),
     /// Show whether the hub is running, and the agent processes that outlive it.
     Status,
 }
@@ -44,7 +51,11 @@ pub async fn run(ctx: &Context, cmd: HubCommand) -> Result<()> {
     match cmd {
         HubCommand::Run => run_foreground(&ctx.paths).await,
         HubCommand::Start => start(ctx).await,
-        HubCommand::Stop { agents } => stop(ctx, agents).await,
+        HubCommand::Stop { agents, force } => {
+            refuse_own_hub(&ctx.paths, force)?;
+            stop(ctx, agents).await
+        }
+        HubCommand::Sandbox(cmd) => sandbox(ctx, cmd).await,
         HubCommand::Status => status(ctx).await,
     }
 }
@@ -103,9 +114,12 @@ async fn start(ctx: &Context) -> Result<()> {
     }
 
     let exe = std::env::current_exe().context("cannot locate the crossagents executable")?;
+    // Run from a copy, so the build output stays free for the next build.
+    let exe = crossagents_hub::shadow::stable_exe(&ctx.paths, &exe).unwrap_or(exe);
     let mut command = std::process::Command::new(exe);
     command
         .args(["hub", "run"])
+        .env(HOME_ENV, &ctx.paths.home)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -137,9 +151,10 @@ async fn start(ctx: &Context) -> Result<()> {
 
 fn report_started(ctx: &Context, hub: &HubFile, already: bool) -> Result<()> {
     if ctx.json {
-        return print_json(
-            &json!({ "running": true, "already_running": already, "port": hub.port, "pid": hub.pid }),
-        );
+        return print_json(&json!({
+            "running": true, "already_running": already, "port": hub.port, "pid": hub.pid,
+            "home": ctx.paths.home,
+        }));
     }
     if already {
         println!(
@@ -184,7 +199,11 @@ async fn stop(ctx: &Context, agents: bool) -> Result<()> {
     };
     ctx.client()?.post_empty(path).await?;
     // Stopping agents waits for their sessions to close.
-    let timeout = if agents { STOP_TIMEOUT * 6 } else { STOP_TIMEOUT };
+    let timeout = if agents {
+        STOP_TIMEOUT * 6
+    } else {
+        STOP_TIMEOUT
+    };
     let deadline = Instant::now() + timeout;
     while ctx.paths.hub_file().exists() {
         if Instant::now() > deadline {
@@ -200,6 +219,124 @@ async fn stop(ctx: &Context, agents: bool) -> Result<()> {
         println!("hub stopped; {left} agent process(es) keep running for the next hub");
     } else {
         println!("hub stopped");
+    }
+    Ok(())
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SandboxCommand {
+    /// Start a dev hub from this executable (a copy of it, so rebuilding stays possible).
+    Start {
+        /// Its home; defaults to `$CARGO_TARGET_DIR/dev-hub`, else `./target/dev-hub`.
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+        /// Register this machine's vendor logins as accounts (off: mock and API checks only).
+        #[arg(long)]
+        detect: bool,
+    },
+    /// Stop the dev hub and its agents.
+    Stop {
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+    },
+    /// Show whether the dev hub is running.
+    Status {
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+    },
+}
+
+/// Refuses to stop the hub this process runs under (an agent's shell inherits
+/// `CROSSAGENTS_HUB_HOME` from it), unless `force`.
+fn refuse_own_hub(paths: &Paths, force: bool) -> Result<()> {
+    if force {
+        return Ok(());
+    }
+    if let Some(own) = std::env::var_os(HUB_HOME_ENV).filter(|v| !v.is_empty())
+        && same_dir(std::path::Path::new(&own), &paths.home)
+    {
+        bail!(
+            "this process runs under the hub at {}; stopping it would stop you too. \
+             Check a hub build with `crossagents hub sandbox start` instead, or pass --force",
+            paths.home.display()
+        );
+    }
+    Ok(())
+}
+
+fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let canon = |p: &std::path::Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canon(a) == canon(b)
+}
+
+/// Where a dev hub lives unless told: next to the build that runs it.
+pub fn sandbox_dir(dir: Option<std::path::PathBuf>) -> Result<std::path::PathBuf> {
+    let dir = match dir {
+        Some(dir) => dir,
+        None => match std::env::var_os("CARGO_TARGET_DIR").filter(|v| !v.is_empty()) {
+            Some(target) => std::path::PathBuf::from(target).join("dev-hub"),
+            None => std::path::PathBuf::from("target").join("dev-hub"),
+        },
+    };
+    Ok(if dir.is_absolute() {
+        dir
+    } else {
+        std::env::current_dir()?.join(dir)
+    })
+}
+
+/// A dev hub's `config.toml`: any free port, agents end with it, no vendor logins unless
+/// `detect`. Written once; later edits are kept.
+pub fn sandbox_config(detect: bool) -> String {
+    format!(
+        "# A dev hub (crossagents hub sandbox): its own port, nothing outlives it.\n\
+         [hub]\nport = 0\nruntime_hosts = false\n\n[accounts]\ndetect = {detect}\n"
+    )
+}
+
+async fn sandbox(ctx: &Context, cmd: SandboxCommand) -> Result<()> {
+    let (dir, action) = match cmd {
+        SandboxCommand::Start { dir, detect } => (dir, Some(detect)),
+        SandboxCommand::Stop { dir } => (dir, None),
+        SandboxCommand::Status { dir } => {
+            let dev = Context {
+                paths: Paths::new(sandbox_dir(dir)?),
+                json: ctx.json,
+            };
+            return status(&dev).await;
+        }
+    };
+    let home = sandbox_dir(dir)?;
+    if same_dir(&home, &ctx.paths.home) {
+        bail!(
+            "{} is the hub's own home; give the dev hub another --dir",
+            home.display()
+        );
+    }
+    let dev = Context {
+        paths: Paths::new(&home),
+        json: ctx.json,
+    };
+    let Some(detect) = action else {
+        return stop(&dev, true).await;
+    };
+    std::fs::create_dir_all(&home).with_context(|| format!("cannot create {}", home.display()))?;
+    let config = dev.paths.config();
+    if !config.exists() {
+        std::fs::write(&config, sandbox_config(detect))
+            .with_context(|| format!("cannot write {}", config.display()))?;
+    }
+    start(&dev).await?;
+    if !ctx.json {
+        println!("home:    {}", home.display());
+        println!(
+            "use it:  set CROSSAGENTS_HOME={} for later commands",
+            home.display()
+        );
+        println!(
+            "stop it: crossagents hub sandbox stop --dir {}",
+            home.display()
+        );
     }
     Ok(())
 }
@@ -337,8 +474,14 @@ async fn status(ctx: &Context) -> Result<()> {
         println!();
         println!("agent processes ({}):", runtimes.len());
         for r in &runtimes {
-            let pid = r.child_pid.map_or_else(|| "-".to_owned(), |p| p.to_string());
-            let state = if r.exited { "ended, waiting for the hub" } else { "running" };
+            let pid = r
+                .child_pid
+                .map_or_else(|| "-".to_owned(), |p| p.to_string());
+            let state = if r.exited {
+                "ended, waiting for the hub"
+            } else {
+                "running"
+            };
             println!(
                 "  pid {pid:<7} {}  since {}  {state}  [{}]",
                 r.label,
@@ -431,7 +574,11 @@ fn brief(names: &[&str]) -> String {
     if names.len() <= MAX {
         return names.join(", ");
     }
-    format!("{}, and {} more", names[..MAX].join(", "), names.len() - MAX)
+    format!(
+        "{}, and {} more",
+        names[..MAX].join(", "),
+        names.len() - MAX
+    )
 }
 
 #[cfg(test)]
@@ -452,10 +599,7 @@ mod tests {
     fn many_names_are_summarised() {
         assert_eq!(brief(&["a", "b", "c"]), "a, b, c");
         let many = vec!["n"; 12];
-        assert_eq!(
-            brief(&many),
-            "n, n, n, n, n, n, n, n, n, n, and 2 more"
-        );
+        assert_eq!(brief(&many), "n, n, n, n, n, n, n, n, n, n, and 2 more");
     }
 
     #[test]

@@ -95,3 +95,48 @@ fn hub_and_agent_round_trip() {
     let list = home.json(&["agent", "ls"]);
     assert_eq!(list["agents"][0]["name"], "alice");
 }
+
+/// docs/tasks/DOGFOOD.md §1: a dev hub beside the one that runs the agent, and the agent
+/// cannot stop its own hub by mistake.
+#[test]
+fn sandbox_hub_runs_beside_the_stable_one() {
+    let home = Home::new();
+    let stable = home.json(&["hub", "start"]);
+    let dev_dir = home.0.path().join("dev");
+    let dev = dev_dir.display().to_string();
+    let started = home.json(&["hub", "sandbox", "start", "--dir", &dev]);
+    assert_eq!(started["running"], true);
+    assert_ne!(started["port"], stable["port"]);
+    assert!(dev_dir.join("config.toml").exists());
+    // Launched from a copy: the build output stays replaceable.
+    let hub_file: Value =
+        serde_json::from_slice(&std::fs::read(dev_dir.join("hub.json")).unwrap()).unwrap();
+    let exe = hub_file["exe"].as_str().unwrap();
+    assert!(exe.contains("shadow"), "{exe}");
+
+    // A shell under the stable hub may not stop it, but may stop the dev hub.
+    let refused = home
+        .cmd(&["hub", "stop"])
+        .env("CROSSAGENTS_HUB_HOME", home.0.path())
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    assert!(String::from_utf8_lossy(&refused).contains("sandbox"));
+    assert_eq!(home.json(&["hub", "status"])["running"], true);
+    home.cmd(&["hub", "sandbox", "stop", "--dir", &dev])
+        .env("CROSSAGENTS_HUB_HOME", home.0.path())
+        .assert()
+        .success();
+    assert_eq!(
+        home.json(&["hub", "sandbox", "status", "--dir", &dev])["running"],
+        false
+    );
+    // A dev hub never takes the stable home.
+    let own = home.0.path().display().to_string();
+    assert!(
+        home.failure(&["hub", "sandbox", "start", "--dir", &own])
+            .contains("own home")
+    );
+}
