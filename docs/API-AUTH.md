@@ -88,6 +88,7 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 | POST | `/v1/repos/init` | write | GUI |
 | POST | `/v1/runs/{key}/finish` | write | GUI |
 | GET | `/v1/runs/{key}/diff` | read | GUI |
+| GET | `/v1/runs/{key}/trace` | read | GUI、CLI |
 | GET | `/v1/runs/{key}/tasks/{task}/diff` | read | GUI |
 | POST | `/v1/runs/{key}/tasks/{task}/review` | write | GUI |
 | GET | `/v1/events` | read | GUI（SSE）、CLI |

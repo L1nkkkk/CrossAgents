@@ -29,6 +29,7 @@ import { BUCKET_LABEL, groupTasks, progress, taskState } from "../lib/taskState"
 import { PRESETS, budgetText, presetOf } from "../lib/policy";
 import { StateWord, TaskChanges, useArmed } from "../parts";
 import { RunChanges, TaskReview } from "../review";
+import { RunTraceView } from "../trace";
 
 function concerns(runId: string, e: HubEvent): boolean {
   switch (e.type) {
@@ -157,6 +158,13 @@ export function RunView({ runId, selectedTask }: { runId: string; selectedTask?:
                   </div>
                 </div>
               ))}
+            </section>
+          )}
+
+          {tasks.length > 0 && (
+            <section>
+              <h2>追溯</h2>
+              <RunTraceView runId={run.id} />
             </section>
           )}
 

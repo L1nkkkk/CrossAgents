@@ -23,9 +23,9 @@ use crossagents_api_types::{
     HealthResponse, HubInfo, InitRepoRequest, LandRequest, ListAccountsResponse,
     ListAgentsResponse, ListNotesResponse, ListPluginsResponse, ListQuestionsResponse,
     ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
-    RenameAgentRequest, RunDetail, SendMessageRequest, SendMessageResponse, SetModelRequest,
-    SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, Transcript, TurnDiffResponse,
-    UsageGroup, UsageResponse,
+    RenameAgentRequest, RunDetail, RunTrace, SendMessageRequest, SendMessageResponse,
+    SetModelRequest, SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace,
+    Transcript, TurnDiffResponse, UsageGroup, UsageResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError,
@@ -130,6 +130,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{key}/land", post(land_run))
         .route("/v1/runs/{key}/finish", post(finish_run))
         .route("/v1/runs/{key}/diff", get(run_diff))
+        .route("/v1/runs/{key}/trace", get(run_trace))
         .route("/v1/runs/{key}/tasks/{task}/diff", get(task_diff))
         .route("/v1/runs/{key}/tasks/{task}/review", post(review_task))
         .route("/v1/repos/init", post(init_repo))
@@ -999,6 +1000,46 @@ async fn land_run(
         .land(id, req.mode.unwrap_or(LandMode::Merge), "person")
         .await?;
     run_detail(&state, id).await
+}
+
+/// What happened in a run, by task, from its events (docs/tasks/DOGFOOD.md §8).
+async fn run_trace(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<RunTrace>> {
+    let id = resolve_run(&state, &key).await?;
+    let mut tracer = crate::trace::Tracer::new(id);
+    let mut after = 0;
+    loop {
+        let page = state.store().events_since(after, EVENT_PAGE).await?;
+        let Some(last) = page.last().map(|e| e.seq) else {
+            break;
+        };
+        after = last;
+        for event in &page {
+            tracer.push(event);
+        }
+    }
+    let mut trace = tracer.finish();
+    // The tasks as stored: titles, the latest status, failures; and tasks with no events.
+    for task in state.store().list_tasks(id).await? {
+        let found = trace.tasks.iter_mut().find(|t| t.task_id == Some(task.id));
+        let entry = match found {
+            Some(entry) => entry,
+            None => {
+                trace.tasks.push(TaskTrace {
+                    task_id: Some(task.id),
+                    key: task.key.clone(),
+                    ..TaskTrace::default()
+                });
+                trace.tasks.last_mut().unwrap()
+            }
+        };
+        entry.title = Some(task.title.clone());
+        entry.status = Some(task.status);
+        entry.failure = task.report.failure.clone();
+    }
+    Ok(Json(trace))
 }
 
 /// A task of `run` by id or key (`auth` or `#auth`).

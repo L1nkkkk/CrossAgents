@@ -4,6 +4,7 @@
 
 import type { HumanItem } from "@bindings/HumanItem";
 import type { RunDetail } from "@bindings/RunDetail";
+import type { RunTrace } from "@bindings/RunTrace";
 import { emptyState, type MockState, type Step } from "../dev/MockBridge";
 import { REPO, ago, clone, fileDiff, planned, run, say, task, team, think, tool, transcript, turn, uid } from "../dev/fixtures";
 import { plugins } from "./Agents.mock";
@@ -368,4 +369,38 @@ export function approvalRun(): { state: MockState; script: Step[]; route: string
     created_at: ago(1),
   });
   return { ...scene, route: "#/" };
+}
+
+/**
+ * Tracing a failure (docs/tasks/DOGFOOD.md §8): the run page's 追溯 shows #d's first failure
+ * (its tests exited 101), every turn and command, and what each task cost.
+ */
+export function traceRun(): { state: MockState; script: Step[]; route: string } {
+  const scene = oauthRun("running");
+  const d = scene.state.runs[0];
+  const byKey = (k: string) => d.tasks.find((t) => t.key === k)!;
+  const lane = (agent: string, turns: number, usd: number, commands: RunTrace["lead"]["commands"] = []): RunTrace["lead"] => ({
+    agents: [agent],
+    turns: Array.from({ length: turns }, (_, i) => ({ agent, message_id: uid(), started_at: ago(40 - i * 10), completed_at: ago(38 - i * 10), stop_reason: "end_turn", error: null })),
+    commands,
+    spent: { tokens: Math.round(usd * 90_000), cost_usd: usd },
+  });
+  const cmd = (agent: string, command: string, exit: number, minutesAgo: number, output_tail: string | null = null, checker = false) => ({ agent, command, exit_code: exit, duration_ms: 8400, at: ago(minutesAgo), checker, output_tail });
+  const td = byKey("d");
+  const rexD = td.assignee!;
+  const failedLane = lane(rexD, 1, 0.21, [cmd(rexD, "cargo build -p auth", 0, 29), cmd(rexD, "cargo test -p auth", 101, 28, "failures:\n    migrate::tests::idempotent\n    migrate::tests::expired\n\ntest result: FAILED. 12 passed; 2 failed")]);
+  failedLane.turns[0] = { ...failedLane.turns[0], stop_reason: "error", error: "agent process exited unexpectedly (code 1)" };
+  const tasks: RunTrace["tasks"] = d.tasks.map((t) => ({
+    task_id: t.id,
+    key: t.key,
+    title: t.title,
+    status: t.status,
+    failure: t.report.failure,
+    lane: t.key === "d" ? failedLane : lane(t.assignee!, t.key === "a" ? 2 : 1, t.key === "a" ? 0.34 : 0.12, [cmd(t.assignee!, "cargo test -p auth", 0, 30)]),
+    checks: t.report.checks.length ? [{ at: ago(27), passed: t.report.checks.every((c) => c.passed), checks: t.report.checks }] : [],
+    rerouted: [],
+    first_failure: t.key === "d" ? "`cargo test -p auth` exited 101" : null,
+  }));
+  scene.state.traces.set(d.run.id, { run_id: d.run.id, lead: lane(d.run.planner, 3, 0.41), tasks, spent: { tokens: 120_000, cost_usd: 1.32 } });
+  return { ...scene, script: [], route: `#/runs/${d.run.id}` };
 }

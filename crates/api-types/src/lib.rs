@@ -550,6 +550,91 @@ pub struct TaskReviewRequest {
     pub rework: bool,
 }
 
+/// `GET /v1/runs/{key}/trace` (docs/tasks/DOGFOOD.md §8): what happened in a run, by task,
+/// folded from the events (so it outlives the workers).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RunTrace {
+    pub run_id: Option<crossagents_core::RunId>,
+    /// The lead's own turns and commands.
+    pub lead: LaneTrace,
+    pub tasks: Vec<TaskTrace>,
+    pub spent: Spent,
+}
+
+/// Tokens and dollars the agents reported.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Spent {
+    #[ts(type = "number")]
+    pub tokens: u64,
+    pub cost_usd: f64,
+}
+
+/// One task's story.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TaskTrace {
+    pub task_id: Option<crossagents_core::TaskId>,
+    pub key: String,
+    pub title: Option<String>,
+    pub status: Option<crossagents_core::TaskStatus>,
+    /// Why the task failed, as recorded on it.
+    pub failure: Option<String>,
+    pub lane: LaneTrace,
+    pub checks: Vec<CheckTrace>,
+    /// Each time quota moved it (`task.rerouted`).
+    pub rerouted: Vec<String>,
+    /// The earliest thing that went wrong: a failed check, a failed command, a failed turn.
+    pub first_failure: Option<String>,
+}
+
+/// The agents that worked on something, and what they did.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LaneTrace {
+    pub agents: Vec<AgentId>,
+    pub turns: Vec<TurnTrace>,
+    pub commands: Vec<CommandTrace>,
+    pub spent: Spent,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TurnTrace {
+    pub agent: AgentId,
+    pub message_id: MessageId,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub stop_reason: Option<StopReason>,
+    /// An error or a process exit during the turn.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CommandTrace {
+    /// Who ran it: the agent itself, or a checker through `workspace_run`.
+    pub agent: AgentId,
+    pub command: String,
+    pub exit_code: Option<i32>,
+    #[ts(type = "number | null")]
+    pub duration_ms: Option<u64>,
+    pub at: DateTime<Utc>,
+    /// `true` for `workspace_run`.
+    pub checker: bool,
+    /// The end of its output, when it failed.
+    pub output_tail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CheckTrace {
+    pub at: DateTime<Utc>,
+    pub passed: bool,
+    pub checks: Vec<crossagents_core::CheckResult>,
+}
+
 /// `POST /v1/runs/{key}/land`; merge when `mode` is omitted.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]

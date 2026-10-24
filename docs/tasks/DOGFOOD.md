@@ -234,3 +234,27 @@ hub 在开会话时把一份项目规则写进开场说明（`SessionSpec.instru
 ### 待实测
 
 - Claude Code 在非放行模式下每个 Bash / Edit 都走 `can_use_tool` 时的流畅度；Codex `untrusted` 下的审批请求形状。
+
+## 8. 可追溯的失败（P1）
+
+### 问题
+
+一个任务失败或卡住，要回答“哪一轮出的事、跑过哪些命令、哪条验收没过、花了多少”，现在得翻多个 worker 的对话（任务合并后 worker 被删，对话就看不到了）、事件流和用量页，拼起来。
+
+### 设计
+
+一个按 run、按任务聚合的“追溯”视图，数据只来自事件（店里的 `events` 表与磁盘上同格式的 `logs/events-*.jsonl`），所以 worker 删了也能查、hub 没跑也能查：
+
+- 折叠逻辑在 hub 的 `trace.rs`（纯函数，单元测试）：吃一串事件，按 run 归到 lead 与各任务——`task.status_changed` 告诉哪个 agent 在做哪个任务（改派、返工都记得）；每个 agent 的轮次（开始、结束、停止原因、报错 / 进程退出）、它跑的命令（`agent.tool_call` 里 `execute` 类的标题加 `agent.tool_detail` 的退出码与耗时）、`workspace_run`（`task.command`）、验收（`task.checked` 的每条命令与结果）、用量（`agent.usage` 按会话累计，同 `budget.rs` 的口径）、改派（`task.rerouted`）。每个任务给出一行“首个失败”：最早的失败验收、非零退出的命令，或出错的那一轮。
+- 接口 `GET /v1/runs/{key}/trace` → `RunTrace`（读级）。
+- CLI `crossagents run trace <id>`：hub 在时走接口；`--log` 时直接读 `logs/events-*.jsonl`，hub 不在也能查。
+- GUI：run 页加「追溯」一节，按任务列出状态、首个失败、花费，展开看每一轮、每条命令（失败的标红、带输出尾巴）、每条验收。
+
+### 不做
+
+- 不存新的数据：全靠已有事件。一个 run 的事件从 store 全量读一遍；事件很多时会慢（目前每个 run 几千条，可接受）。
+- 不做跨 run 的统计。
+
+### 待实测
+
+- 长 run（上万条事件）时接口耗时；磁盘日志被 14 天清理后，更早的 run 只剩 store 里的事件。

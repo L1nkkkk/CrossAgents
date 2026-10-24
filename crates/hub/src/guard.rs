@@ -28,7 +28,7 @@ impl PermissionHandler for Guard {
             return PermissionDecision::Allow;
         }
         if orchestrator
-            .ask_approval(&self.agent, &request.kind, &request.title, why)
+            .ask_approval(&self.agent, &request.title, why)
             .await
         {
             PermissionDecision::Allow

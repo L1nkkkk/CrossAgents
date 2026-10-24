@@ -32,6 +32,7 @@ import type { ListRunsResponse } from "@bindings/ListRunsResponse";
 import type { RejectRunRequest } from "@bindings/RejectRunRequest";
 import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
+import type { RunTrace } from "@bindings/RunTrace";
 import type { SendMessageRequest } from "@bindings/SendMessageRequest";
 import type { SendMessageResponse } from "@bindings/SendMessageResponse";
 import type { Transcript } from "@bindings/Transcript";
@@ -153,6 +154,8 @@ export const api = {
   taskDiff: (run: string, task: string) => request<ChangesResponse>("GET", `/v1/runs/${enc(run)}/tasks/${enc(task)}/diff`),
   /** What landing the run would bring into its base branch. */
   runDiff: (run: string) => request<ChangesResponse>("GET", `/v1/runs/${enc(run)}/diff`),
+  /** What happened in a run, by task, from its events. */
+  runTrace: (run: string) => request<RunTrace>("GET", `/v1/runs/${enc(run)}/trace`),
   /** The person's comments, to the task's worker as its next turn; `rework` sends the task back. */
   reviewTask: (run: string, task: string, req: TaskReviewRequest) => request<Task>("POST", `/v1/runs/${enc(run)}/tasks/${enc(task)}/review`, req),
   /** `git init` and a first commit in `path`, so later runs there get worktrees. */

@@ -3,7 +3,8 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use crossagents_api_types::{
-    CreateRunRequest, ListRunsResponse, RejectRunRequest, Run, RunDetail, Task, TaskStatus,
+    CreateRunRequest, Event, EventKind, ListRunsResponse, RejectRunRequest, Run, RunDetail,
+    RunTrace, Task, TaskStatus,
 };
 
 use super::Context;
@@ -68,9 +69,21 @@ pub enum RunCommand {
     Reject { run: String, reason: String },
     /// Stop all work on a run.
     Cancel { run: String },
+    /// What happened, by task: turns, commands, checks, spend, the first failure.
+    Trace {
+        run: String,
+        /// Read the event log on disk (`logs/events-*.jsonl`) instead of asking the hub,
+        /// which then need not be running.
+        #[arg(long)]
+        log: bool,
+    },
 }
 
 pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
+    if let Some(RunCommand::Trace { run, log: true }) = &args.command {
+        let trace = trace_from_log(ctx, run)?;
+        return print_trace(ctx, &trace);
+    }
     let client = ctx.client()?;
     let Some(command) = args.command else {
         let start = args.start;
@@ -111,6 +124,10 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
         return Ok(());
     };
     match command {
+        RunCommand::Trace { run, .. } => {
+            let trace: RunTrace = client.get(&format!("/v1/runs/{run}/trace")).await?;
+            print_trace(ctx, &trace)?;
+        }
         RunCommand::Ls => {
             let list: ListRunsResponse = client.get("/v1/runs").await?;
             if ctx.json {
@@ -283,4 +300,95 @@ fn print_task_report(task: &Task) {
     if let Some(failure) = &task.report.failure {
         println!("failure: {failure}");
     }
+}
+
+/// A run's trace from the event log on disk (docs/tasks/DOGFOOD.md §8); `run` is its id or
+/// the start or end of it.
+fn trace_from_log(ctx: &Context, run: &str) -> Result<RunTrace> {
+    let events: Vec<Event> = crossagents_hub::trace::read_log(&ctx.paths.logs()).map_err(|e| {
+        anyhow::anyhow!(
+            "cannot read {}: {e}; is event logging on (`[hub] event_log`)?",
+            ctx.paths.logs().display()
+        )
+    })?;
+    let wanted = run.trim().to_lowercase().replace('-', "");
+    let ids: Vec<_> = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::RunCreated { run } => Some(run.id),
+            _ => None,
+        })
+        .filter(|id| {
+            let hex = id.to_string().replace('-', "");
+            hex.starts_with(&wanted) || hex.ends_with(&wanted)
+        })
+        .collect();
+    let id = match ids.as_slice() {
+        [id] => *id,
+        [] => anyhow::bail!("no run {run} in the event log"),
+        _ => anyhow::bail!("{run} matches several runs; give more of its id"),
+    };
+    let mut tracer = crossagents_hub::trace::Tracer::new(id);
+    for event in &events {
+        tracer.push(event);
+    }
+    Ok(tracer.finish())
+}
+
+fn print_trace(ctx: &Context, trace: &RunTrace) -> Result<()> {
+    if ctx.json {
+        return print_json(trace);
+    }
+    let spent =
+        |s: &crossagents_api_types::Spent| format!("{} tokens, ${:.2}", s.tokens, s.cost_usd);
+    println!("spent: {}", spent(&trace.spent));
+    let lane = |l: &crossagents_api_types::LaneTrace| {
+        let failed = l
+            .commands
+            .iter()
+            .filter(|c| c.exit_code.is_some_and(|x| x != 0))
+            .count();
+        format!(
+            "{} turn(s), {} command(s) ({failed} failed), {}",
+            l.turns.len(),
+            l.commands.len(),
+            spent(&l.spent)
+        )
+    };
+    println!("lead: {}", lane(&trace.lead));
+    for task in &trace.tasks {
+        let status = task
+            .status
+            .map(|s| enum_name(&s))
+            .unwrap_or_else(|| "?".into());
+        println!(
+            "#{} {status} — {}",
+            task.key,
+            task.title.as_deref().unwrap_or_default()
+        );
+        println!("  {}", lane(&task.lane));
+        if let Some(first) = &task.first_failure {
+            println!("  first failure: {first}");
+        }
+        if let Some(failure) = &task.failure {
+            println!("  failed: {failure}");
+        }
+        for reason in &task.rerouted {
+            println!("  rerouted: {reason}");
+        }
+        for c in task
+            .lane
+            .commands
+            .iter()
+            .filter(|c| c.exit_code.is_some_and(|x| x != 0))
+        {
+            println!(
+                "  ✗ {} (exit {}) {}",
+                c.command,
+                c.exit_code.unwrap_or_default(),
+                local_time(c.at)
+            );
+        }
+    }
+    Ok(())
 }

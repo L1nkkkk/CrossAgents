@@ -17,6 +17,7 @@ pub mod rules;
 pub mod runtime;
 pub mod shadow;
 pub mod snapshot;
+pub mod trace;
 pub mod transcript;
 pub mod usage;
 

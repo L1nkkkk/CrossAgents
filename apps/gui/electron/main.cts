@@ -46,6 +46,7 @@ const ALLOWED: readonly { method: string; path: RegExp; level: "read" | "write" 
   { method: "GET", path: /^\/v1\/runs\/[^/]+$/, level: "read" },
   { method: "POST", path: /^\/v1\/runs\/[^/]+\/(approve|reject|cancel|land|finish)$/, level: "write" },
   { method: "GET", path: /^\/v1\/runs\/[^/]+\/diff$/, level: "read" },
+  { method: "GET", path: /^\/v1\/runs\/[^/]+\/trace$/, level: "read" },
   { method: "GET", path: /^\/v1\/runs\/[^/]+\/tasks\/[^/]+\/diff$/, level: "read" },
   { method: "POST", path: /^\/v1\/runs\/[^/]+\/tasks\/[^/]+\/review$/, level: "write" },
   { method: "POST", path: /^\/v1\/repos\/init$/, level: "write" },

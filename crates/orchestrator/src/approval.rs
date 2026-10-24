@@ -115,7 +115,7 @@ impl Orchestrator {
     /// Puts `agent`'s dangerous request to the person and waits for the answer: `true` to
     /// go ahead. A run that may not ask the person declines at once; an unanswered question
     /// declines when it times out.
-    pub async fn ask_approval(&self, agent: &Agent, kind: &str, title: &str, why: &str) -> bool {
+    pub async fn ask_approval(&self, agent: &Agent, title: &str, why: &str) -> bool {
         let found = self.task_for_agent(agent.id).await;
         let policy: RunPolicy = match &found {
             Some((run, _)) => run.config.policy.clone(),

@@ -12,6 +12,7 @@ import type { Note } from "@bindings/Note";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import type { QuotaResponse } from "@bindings/QuotaResponse";
 import type { RunDetail } from "@bindings/RunDetail";
+import type { RunTrace } from "@bindings/RunTrace";
 import type { SendMessageRequest } from "@bindings/SendMessageRequest";
 import type { TaskReviewRequest } from "@bindings/TaskReviewRequest";
 import type { Transcript } from "@bindings/Transcript";
@@ -38,6 +39,8 @@ export type MockState = {
   taskDiffs: Map<string, string>;
   /** Each run's branch against its base (before landing), by run id. */
   runDiffs: Map<string, string>;
+  /** Run traces (docs/tasks/DOGFOOD.md §8), by run id; absent: tasks only. */
+  traces: Map<string, RunTrace>;
   /** Files sent with messages, by id: type and base64 bytes. */
   files: Map<string, { mime: string; data: string }>;
   questions: HumanItem[];
@@ -65,6 +68,7 @@ export function emptyState(): MockState {
     taskDiffs: new Map(),
     runDiffs: new Map(),
     files: new Map(),
+    traces: new Map(),
     questions: [],
     notes: [],
     quota: { accounts: [], providers: ["claude", "codex"] },
@@ -246,6 +250,15 @@ export class MockBridge implements CrossAgentsBridge {
         if (!found) return notFound("task");
         if (diff === undefined) return json(409, { error: { code: "conflict", message: `#${found.task.key} has no worktree (not started, or ended)` } });
         return json(200, { base: found.run.run.branch, head: found.task.branch ?? "", diff, truncated: false });
+      }
+      if ((m = p.match(/^\/v1\/runs\/([^/]+)\/trace$/))) {
+        const trace = s.traces.get(m[1]);
+        const d = s.runs.find((x) => x.run.id === m![1]);
+        if (!d) return notFound("run");
+        const empty = { agents: [], turns: [], commands: [], spent: { tokens: 0, cost_usd: 0 } };
+        // Without a scripted trace, each task as stored and nothing more.
+        const tasks = d.tasks.map((t) => ({ task_id: t.id, key: t.key, title: t.title, status: t.status, failure: t.report.failure, lane: empty, checks: [], rerouted: [], first_failure: null }));
+        return json(200, trace ?? { run_id: d.run.id, lead: empty, tasks, spent: { tokens: 0, cost_usd: 0 } });
       }
       if ((m = p.match(/^\/v1\/runs\/([^/]+)\/diff$/))) {
         const d = s.runs.find((x) => x.run.id === m![1]);
