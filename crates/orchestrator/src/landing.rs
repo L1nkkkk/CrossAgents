@@ -162,6 +162,20 @@ impl Orchestrator {
         Ok(LandOutcome::Landed(landing))
     }
 
+    /// `task` was merged: if it was the one resolving the base branch's conflict, the run's
+    /// "land again once it is merged" note is done with (it would read as still blocked).
+    pub(crate) async fn sync_resolved(&self, run: &mut Run, task: &Task) -> Result<(), CoreError> {
+        let resolved = run.note.as_deref().is_some_and(|n| {
+            n.ends_with(SYNC_NOTE_END) && n.contains(&format!("task #{} ", task.key))
+        });
+        if resolved {
+            run.note = None;
+            run.updated_at = Utc::now();
+            self.store.update_run(run).await?;
+        }
+        Ok(())
+    }
+
     /// A task for the run's worker: merge the base branch into the run branch and resolve
     /// `files`. Reopens a finished run so it gets done. Returns the task's key.
     async fn sync_task(

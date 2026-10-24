@@ -963,6 +963,8 @@ impl Orchestrator {
         if task.status == TaskStatus::Stalled {
             self.transition(&mut task, TaskStatus::Passed).await?;
         }
+        // Before the merge is announced, so whoever reads the run on that event sees it.
+        self.sync_resolved(&mut run, &task).await?;
         self.transition(&mut task, TaskStatus::Merged).await?;
         self.schedule(&mut run).await?;
         Ok(json!({ "merged": true, "task": task_json(&task), "into": base }))

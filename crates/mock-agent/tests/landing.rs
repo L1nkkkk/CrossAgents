@@ -161,6 +161,9 @@ async fn a_conflict_with_main_becomes_a_task_and_lands_after_it() {
     assert_eq!(resp.status(), 202);
     w.until("sync merged", task_is("sync-main", TaskStatus::Merged))
         .await;
+    // Resolved: the run no longer says it waits for #sync-main.
+    let before: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
+    assert!(before["run"]["note"].is_null(), "{before}");
 
     let resp = t
         .post(&format!("/v1/runs/{id}/land"), json!({ "mode": "merge" }))
