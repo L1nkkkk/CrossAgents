@@ -328,6 +328,7 @@ export class MockBridge implements CrossAgentsBridge {
         }
         return json(m[2] === "answer" ? 200 : 204, q);
       }
+      if (p === "/v1/repos/init") return json(200, body);
       return json(204);
     }
 

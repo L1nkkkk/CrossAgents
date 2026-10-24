@@ -866,6 +866,7 @@ mod tests {
             repo: PathBuf::from("/repo"),
             base_branch: "main".into(),
             branch: "crossagents/x".into(),
+            in_place: false,
             note: None,
             plan: vec![],
             created_at: now,

@@ -429,6 +429,14 @@ pub struct CreateRunRequest {
     pub policy: Option<crossagents_core::RunPolicy>,
 }
 
+/// `POST /v1/repos/init`: put a directory under version control (`git init` and a first
+/// commit), so runs there get worktrees instead of working in place. Answered with itself.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct InitRepoRequest {
+    pub path: String,
+}
+
 /// `POST /v1/runs/{key}/land`; merge when `mode` is omitted.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]

@@ -9,6 +9,7 @@ import type { Agent } from "@bindings/Agent";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
 import type { CreateAccountRequest } from "@bindings/CreateAccountRequest";
 import type { HumanItem } from "@bindings/HumanItem";
+import type { InitRepoRequest } from "@bindings/InitRepoRequest";
 import type { LandMode } from "@bindings/LandMode";
 import type { ListNotesResponse } from "@bindings/ListNotesResponse";
 import type { ListQuestionsResponse } from "@bindings/ListQuestionsResponse";
@@ -139,6 +140,8 @@ export const api = {
   cancelRun: (key: string) => request<RunDetail>("POST", `/v1/runs/${enc(key)}/cancel`),
   landRun: (key: string, mode: LandMode) => request<RunDetail>("POST", `/v1/runs/${enc(key)}/land`, { mode }),
   finishRun: (key: string) => request<RunDetail>("POST", `/v1/runs/${enc(key)}/finish`, {}),
+  /** `git init` and a first commit in `path`, so later runs there get worktrees. */
+  initRepo: (path: string) => request<InitRepoRequest>("POST", "/v1/repos/init", { path } satisfies InitRepoRequest),
 
   usage: (by: UsageGroup) => request<UsageResponse>("GET", `/v1/usage?by=${by}`),
 

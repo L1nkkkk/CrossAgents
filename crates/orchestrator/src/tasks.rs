@@ -491,11 +491,11 @@ impl Orchestrator {
         let task = self.store.get_task(id).await?;
         let run = self.store.get_run(task.run_id).await?;
         let dir = Self::worktree(&task)?;
-        self.workspaces
+        self.ws_for(&run)
             .commit_all(&dir, &format!("{}: {}", task.key, task.title))
             .await?;
         let (base, _) = self.base_of(&run, &task).await?;
-        let diff_stat = self.workspaces.diff_stat(&dir, &base).await.ok();
+        let diff_stat = self.ws_for(&run).diff_stat(&dir, &base).await.ok();
         let checks = if task.spec.acceptance.is_empty() {
             Vec::new()
         } else {
@@ -683,10 +683,10 @@ impl Orchestrator {
         let dir = Self::worktree(&task)?;
         let (base, _) = self.base_of(&run, &task).await?;
         if a.stat_only {
-            let committed = self.workspaces.diff_stat(&dir, &base).await?;
+            let committed = self.ws_for(&run).diff_stat(&dir, &base).await?;
             return Ok(json!({ "base": base, "stat": committed }));
         }
-        let diff = self.workspaces.diff(&dir, &base, &a.paths).await?;
+        let diff = self.ws_for(&run).diff(&dir, &base, &a.paths).await?;
         Ok(json!({ "base": base, "diff": clip(diff, READ_LIMIT) }))
     }
 
@@ -844,7 +844,7 @@ impl Orchestrator {
             )));
         }
         let cwd = Self::worktree(&task)?;
-        self.workspaces
+        self.ws_for(&run)
             .commit_all(&cwd, &format!("{}: {}", task.key, task.title))
             .await?;
         let reviewer = self
@@ -939,13 +939,13 @@ impl Orchestrator {
             )));
         }
         let dir = Self::worktree(&task)?;
-        self.workspaces
+        self.ws_for(&run)
             .commit_all(&dir, &format!("{}: {}", task.key, task.title))
             .await?;
         let branch = task.branch.clone().unwrap_or_default();
         let message = format!("crossagents: {} ({})", task.title, task.key);
         let (base, into) = self.base_of(&run, &task).await?;
-        if let Err(err) = self.workspaces.merge(&into, &branch, &message).await {
+        if let Err(err) = self.ws_for(&run).merge(&into, &branch, &message).await {
             return Ok(json!({
                 "merged": false,
                 "conflict": err.to_string(),
@@ -1062,12 +1062,12 @@ impl Orchestrator {
             Self::require_issuer(&run, &task, caller)?;
         }
         let dir = Self::worktree(&task)?;
-        self.workspaces
+        self.ws_for(&run)
             .commit_all(&dir, &format!("{}: work in progress", task.key))
             .await?;
         let (base, _) = self.base_of(&run, &task).await?;
         match self
-            .workspaces
+            .ws_for(&run)
             .merge(
                 &dir,
                 &base,

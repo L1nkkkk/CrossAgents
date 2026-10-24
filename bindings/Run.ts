@@ -24,6 +24,11 @@ base_branch: string,
  */
 branch: string, 
 /**
+ * The directory is not under version control: tasks run one at a time in it directly,
+ * with no branches, worktrees, diffs or merges (and nothing to roll back to).
+ */
+in_place: boolean, 
+/**
  * Why the run failed or was cancelled, or the last plan rejection.
  */
 note: string | null, 

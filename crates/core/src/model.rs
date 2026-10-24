@@ -295,6 +295,10 @@ pub struct Run {
     pub base_branch: String,
     /// Integration branch that collects every merged task.
     pub branch: String,
+    /// The directory is not under version control: tasks run one at a time in it directly,
+    /// with no branches, worktrees, diffs or merges (and nothing to roll back to).
+    #[serde(default)]
+    pub in_place: bool,
     /// Why the run failed or was cancelled, or the last plan rejection.
     #[serde(default)]
     pub note: Option<String>,

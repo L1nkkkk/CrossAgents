@@ -22,7 +22,7 @@ use crate::brief;
 use crate::host::AgentHost;
 use crate::plan;
 use crate::verify::Verifier;
-use crate::workspace::{WorkspaceProvider, worktree_path};
+use crate::workspace::{InPlaceWorkspaces, WorkspaceProvider, worktree_path};
 
 pub struct OrchestratorConfig {
     /// Root for run and task worktrees.
@@ -93,6 +93,9 @@ impl Orchestrator {
         run: &Run,
         task: &Task,
     ) -> Result<(String, PathBuf), CoreError> {
+        if run.in_place {
+            return Ok((String::new(), run.repo.clone()));
+        }
         if let Some(parent) = task.parent {
             let parent = self.store.get_task(parent).await?;
             if let (Some(branch), Some(dir)) = (parent.branch, parent.worktree) {
@@ -107,7 +110,19 @@ impl Orchestrator {
     }
 
     pub(crate) fn integration_path(&self, run: &Run) -> PathBuf {
+        if run.in_place {
+            return run.repo.clone();
+        }
         worktree_path(&self.config.worktrees, &short(run.id), "integration")
+    }
+
+    /// Where `run`'s tasks work: git worktrees, or the directory itself.
+    pub(crate) fn ws_for(&self, run: &Run) -> &dyn WorkspaceProvider {
+        if run.in_place {
+            &InPlaceWorkspaces
+        } else {
+            self.workspaces.as_ref()
+        }
     }
 
     pub(crate) async fn publish(&self, kind: EventKind) {
@@ -215,7 +230,12 @@ impl Orchestrator {
         let mut new = new;
         let team = self.gather_team(&new.config, &repo).await?;
         new.config.team = team.iter().map(|a| a.id).collect();
-        let base_branch = self.workspaces.current_branch(&repo).await?;
+        let in_place = !self.workspaces.versioned(&repo).await;
+        let base_branch = if in_place {
+            String::new()
+        } else {
+            self.workspaces.current_branch(&repo).await?
+        };
         let id = RunId::new();
         let now = Utc::now();
         let mut run = Run {
@@ -229,15 +249,25 @@ impl Orchestrator {
             config: new.config,
             repo: repo.clone(),
             base_branch: base_branch.clone(),
-            branch: format!("crossagents/{}", short(id)),
+            branch: if in_place {
+                String::new()
+            } else {
+                format!("crossagents/{}", short(id))
+            },
+            in_place,
             note: None,
             plan: Vec::new(),
             created_at: now,
             updated_at: now,
         };
-        run.config.max_parallel = run.config.max_parallel.max(1);
+        // One directory, so one task at a time.
+        run.config.max_parallel = if in_place {
+            1
+        } else {
+            run.config.max_parallel.max(1)
+        };
         run.config.max_attempts = run.config.max_attempts.max(1);
-        self.workspaces
+        self.ws_for(&run)
             .create(
                 &repo,
                 &run.branch,
@@ -560,11 +590,13 @@ impl Orchestrator {
     }
 
     pub(crate) async fn dispatch(&self, run: &Run, task: &mut Task) -> Result<(), CoreError> {
-        if task.worktree.is_none() {
+        if task.worktree.is_none() && run.in_place {
+            task.worktree = Some(run.repo.clone());
+        } else if task.worktree.is_none() {
             let path = worktree_path(&self.config.worktrees, &short(run.id), &task.key);
             let branch = format!("{}-{}", run.branch, task.key);
             let (base, _) = self.base_of(run, task).await?;
-            self.workspaces
+            self.ws_for(&run)
                 .create(&run.repo, &branch, &base, &path)
                 .await?;
             task.worktree = Some(path);
@@ -620,7 +652,7 @@ impl Orchestrator {
     pub(crate) async fn cleanup_worktree(&self, run: &Run, task: &Task, delete_branch: bool) {
         if let Some(path) = &task.worktree {
             let branch = task.branch.as_deref().filter(|_| delete_branch);
-            if let Err(err) = self.workspaces.remove(&run.repo, path, branch).await {
+            if let Err(err) = self.ws_for(&run).remove(&run.repo, path, branch).await {
                 tracing::warn!(task = %task.key, error = %err, "cannot remove worktree");
             }
         }
@@ -628,7 +660,7 @@ impl Orchestrator {
 
     async fn remove_integration(&self, run: &Run) {
         if let Err(err) = self
-            .workspaces
+            .ws_for(&run)
             .remove(&run.repo, &self.integration_path(run), None)
             .await
         {

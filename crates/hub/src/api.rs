@@ -18,19 +18,19 @@ use chrono::{DateTime, Utc};
 use crossagents_api_types::{
     API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AnswerRequest, ApiError,
     ArchiveAgentRequest, ConnectInfo, CreateAccountRequest, CreateAgentRequest, CreateRunRequest,
-    ErrorCode, FinishRequest, HealthResponse, HubInfo, LandRequest, ListAccountsResponse,
-    ListAgentsResponse, ListNotesResponse, ListPluginsResponse, ListQuestionsResponse,
-    ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
-    RenameAgentRequest, RunDetail, SendMessageRequest, SendMessageResponse, SetModelRequest,
-    SetPluginModelsRequest, SetTopicRequest, Transcript, TurnDiffResponse, UsageGroup,
-    UsageResponse,
+    ErrorCode, FinishRequest, HealthResponse, HubInfo, InitRepoRequest, LandRequest,
+    ListAccountsResponse, ListAgentsResponse, ListNotesResponse, ListPluginsResponse,
+    ListQuestionsResponse, ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo,
+    QuotaResponse, RejectRunRequest, RenameAgentRequest, RunDetail, SendMessageRequest,
+    SendMessageResponse, SetModelRequest, SetPluginModelsRequest, SetTopicRequest, Transcript,
+    TurnDiffResponse, UsageGroup, UsageResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError,
     DriverKind, Event, EventBus, EventKind, HumanItem, LandMode, MessageId, MessageSource, Run,
     RunConfig, RunId, Store,
 };
-use crossagents_orchestrator::{NewRun, Orchestrator};
+use crossagents_orchestrator::{GitWorkspaces, NewRun, Orchestrator};
 
 use crate::accounts::Accounts;
 use crate::collab::AgentTokens;
@@ -117,6 +117,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{key}/cancel", post(cancel_run))
         .route("/v1/runs/{key}/land", post(land_run))
         .route("/v1/runs/{key}/finish", post(finish_run))
+        .route("/v1/repos/init", post(init_repo))
         .route("/v1/events", get(events))
         .route("/v1/shutdown", post(shutdown))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
@@ -878,6 +879,12 @@ async fn land_run(
         .land(id, req.mode.unwrap_or(LandMode::Merge), "person")
         .await?;
     run_detail(&state, id).await
+}
+
+/// The person puts a run's directory under git, for the runs after it.
+async fn init_repo(Json(req): Json<InitRepoRequest>) -> ApiResult<Json<InitRepoRequest>> {
+    GitWorkspaces.init(std::path::Path::new(&req.path)).await?;
+    Ok(Json(req))
 }
 
 /// The person closes a run; open tasks are cancelled.

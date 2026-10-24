@@ -159,6 +159,7 @@ export function run(init: { title: string; request: string; planner: Agent; work
     repo: REPO,
     base_branch: "main",
     branch: "crossagents/oauth-login",
+    in_place: false,
     note: null,
     plan: init.plan,
     landed: null,

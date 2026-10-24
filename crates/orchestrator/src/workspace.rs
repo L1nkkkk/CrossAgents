@@ -1,4 +1,5 @@
-//! Where tasks run and how their results are merged: git worktrees (docs/DESIGN.md §8).
+//! Where tasks run and how their results are merged: git worktrees (docs/DESIGN.md §8), or,
+//! for a directory outside version control, the directory itself.
 
 use std::path::{Path, PathBuf};
 
@@ -10,6 +11,9 @@ use tokio::process::Command;
 /// Isolated working copies for a run and its tasks.
 #[async_trait]
 pub trait WorkspaceProvider: Send + Sync {
+    /// Whether `dir` is in a git repository with at least one commit. Runs elsewhere
+    /// work in place.
+    async fn versioned(&self, dir: &Path) -> bool;
     /// The branch `repo` currently has checked out.
     async fn current_branch(&self, repo: &Path) -> Result<String, CoreError>;
     /// Creates `branch` from `base` in a new working copy at `path`.
@@ -87,6 +91,12 @@ fn path_arg(path: &Path) -> String {
 
 #[async_trait]
 impl WorkspaceProvider for GitWorkspaces {
+    async fn versioned(&self, dir: &Path) -> bool {
+        git(dir, &["rev-parse", "--verify", "-q", "HEAD"])
+            .await
+            .is_ok()
+    }
+
     async fn current_branch(&self, repo: &Path) -> Result<String, CoreError> {
         let branch = git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])
             .await
@@ -288,6 +298,95 @@ impl WorkspaceProvider for GitWorkspaces {
     }
 }
 
+impl GitWorkspaces {
+    /// Puts `dir` under version control: `git init` and a first commit of what it holds,
+    /// as the person's git identity when one is set. Refuses a directory already versioned.
+    pub async fn init(&self, dir: &Path) -> Result<(), CoreError> {
+        if !dir.is_dir() {
+            return Err(CoreError::Conflict(format!(
+                "{} is not a directory",
+                dir.display()
+            )));
+        }
+        if self.versioned(dir).await {
+            return Err(CoreError::Conflict(format!(
+                "{} is already a git repository",
+                dir.display()
+            )));
+        }
+        git(dir, &["init", "-q"]).await?;
+        git(dir, &["add", "-A"]).await?;
+        let commit = [
+            "commit",
+            "--no-verify",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "Initial commit",
+        ];
+        if git(dir, &commit).await.is_err() {
+            let mut args: Vec<&str> = AUTHOR.to_vec();
+            args.extend(commit);
+            git(dir, &args).await?;
+        }
+        Ok(())
+    }
+}
+
+/// [`WorkspaceProvider`] for a directory outside version control: every task works in the
+/// directory itself, so there is nothing to create, commit, merge, land or remove.
+#[derive(Debug, Clone, Default)]
+pub struct InPlaceWorkspaces;
+
+const NOT_VERSIONED: &str =
+    "this directory is not under version control, so there is no diff; read the files instead";
+
+#[async_trait]
+impl WorkspaceProvider for InPlaceWorkspaces {
+    async fn versioned(&self, _: &Path) -> bool {
+        false
+    }
+
+    async fn current_branch(&self, _: &Path) -> Result<String, CoreError> {
+        Ok(String::new())
+    }
+
+    async fn create(&self, _: &Path, _: &str, _: &str, _: &Path) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    async fn commit_all(&self, _: &Path, _: &str) -> Result<bool, CoreError> {
+        Ok(false)
+    }
+
+    async fn diff_stat(&self, _: &Path, _: &str) -> Result<String, CoreError> {
+        Err(CoreError::Conflict(NOT_VERSIONED.into()))
+    }
+
+    async fn diff(&self, _: &Path, _: &str, _: &[String]) -> Result<String, CoreError> {
+        Err(CoreError::Conflict(NOT_VERSIONED.into()))
+    }
+
+    async fn merge(&self, _: &Path, _: &str, _: &str) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    async fn land(
+        &self,
+        repo: &Path,
+        _: &str,
+        _: &str,
+        _: LandMode,
+        _: &str,
+    ) -> Result<String, CoreError> {
+        Ok(repo.display().to_string())
+    }
+
+    async fn remove(&self, _: &Path, _: &Path, _: Option<&str>) -> Result<(), CoreError> {
+        Ok(())
+    }
+}
+
 /// A fresh directory next to the repository's git dir for a temporary worktree.
 fn tempfile_dir(repo: &Path) -> Result<PathBuf, CoreError> {
     let base = std::env::temp_dir().join("crossagents-land");
@@ -452,5 +551,44 @@ mod tests {
     async fn non_repo_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         assert!(GitWorkspaces.current_branch(dir.path()).await.is_err());
+        assert!(!GitWorkspaces.versioned(dir.path()).await);
+        // A repository without a commit is not one to branch from either.
+        git(dir.path(), &["init", "-q"]).await.unwrap();
+        assert!(!GitWorkspaces.versioned(dir.path()).await);
+        assert!(GitWorkspaces.versioned(repo().await.path()).await);
+    }
+
+    #[tokio::test]
+    async fn init_versions_a_plain_directory_once() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("cv.md"),
+            "me
+",
+        )
+        .unwrap();
+        GitWorkspaces.init(dir.path()).await.unwrap();
+        assert!(GitWorkspaces.versioned(dir.path()).await);
+        let files = git(dir.path(), &["ls-files"]).await.unwrap();
+        assert_eq!(files, "cv.md");
+        assert!(GitWorkspaces.init(dir.path()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn in_place_never_touches_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("cv.md"),
+            "me
+",
+        )
+        .unwrap();
+        let ws = InPlaceWorkspaces;
+        ws.create(dir.path(), "b", "", dir.path()).await.unwrap();
+        assert!(!ws.commit_all(dir.path(), "x").await.unwrap());
+        assert!(ws.diff(dir.path(), "", &[]).await.is_err());
+        ws.merge(dir.path(), "b", "m").await.unwrap();
+        ws.remove(dir.path(), dir.path(), Some("b")).await.unwrap();
+        assert!(dir.path().join("cv.md").exists());
     }
 }

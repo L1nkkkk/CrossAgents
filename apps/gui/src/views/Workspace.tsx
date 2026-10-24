@@ -17,7 +17,7 @@ function Overview({ ws }: { ws: Workspace }) {
   const live = ws.runs.filter((d) => ACTIVE_RUN.includes(d.run.status));
   const awaiting = live.filter((d) => d.run.status === "awaiting_approval");
   // Completed runs leave their result on the integration branch for a human to merge.
-  const toMerge = ws.runs.filter((d) => d.run.status === "completed");
+  const toMerge = ws.runs.filter((d) => d.run.status === "completed" && !d.run.in_place);
   const ended = ws.runs.filter((d) => !ACTIVE_RUN.includes(d.run.status) && d.run.status !== "completed");
   const working = ws.agents.filter((a) => a.status === "running").length;
 

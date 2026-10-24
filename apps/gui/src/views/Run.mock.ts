@@ -237,6 +237,14 @@ export function oauthRun(phase: "plan" | "running"): { state: MockState; script:
   return { state, script: [], route: `#/s/${ada.name}` };
 }
 
+/** The plan of a run in a folder without git: it works in place, one task at a time. */
+export function inPlaceRun(): { state: MockState; script: Step[]; route: string } {
+  const scene = oauthRun("plan");
+  const d = scene.state.runs[0];
+  d.run = { ...d.run, title: "简历润色", repo: "C:/Users/me/CV_Resume", in_place: true, base_branch: "", branch: "", config: { ...d.run.config, max_parallel: 1 } };
+  return { ...scene, route: `#/runs/${d.run.id}` };
+}
+
 /** Rex's second turn on a goes on: the edit lands, tests run with output, the diff arrives. */
 function runningScript(rex: string, message_id: string, editId: string, taskId: string, runId: string, mia: string): Step[] {
   const testId = uid();

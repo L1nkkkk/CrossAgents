@@ -20,4 +20,4 @@ pub mod workspace;
 pub use engine::{NewRun, Orchestrator, OrchestratorConfig};
 pub use host::AgentHost;
 pub use verify::{ShellVerifier, Verifier};
-pub use workspace::{GitWorkspaces, WorkspaceProvider};
+pub use workspace::{GitWorkspaces, InPlaceWorkspaces, WorkspaceProvider};

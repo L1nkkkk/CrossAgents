@@ -81,7 +81,7 @@ impl Orchestrator {
             ));
         }
         let reference = self
-            .workspaces
+            .ws_for(&run)
             .land(
                 &run.repo,
                 &run.base_branch,
@@ -175,6 +175,9 @@ impl Orchestrator {
             .count();
         text.push_str(&format!("\n\n— {merged}/{} 个任务已合并", tasks.len()));
         match &run.landed {
+            _ if run.in_place && merged > 0 => {
+                text.push_str(&format!("，改动已直接写在 {}", run.repo.display()))
+            }
             Some(l) => text.push_str(&format!(
                 "，已落地到 {}（{}）",
                 run.base_branch, l.reference

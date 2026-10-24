@@ -168,10 +168,14 @@ export function RunView({ runId, selectedTask }: { runId: string; selectedTask?:
 function RunMeta({ run, agents }: { run: Run; agents?: Parameters<typeof agentName>[0] }) {
   return (
     <div className="row small secondary" style={{ gap: 14 }}>
-      <span className="row" style={{ gap: 5 }}>
-        <Icon name="branch" size={14} />
-        <code>{run.base_branch}</code> → <code>{run.branch}</code>
-      </span>
+      {run.in_place ? (
+        <InPlaceNote run={run} />
+      ) : (
+        <span className="row" style={{ gap: 5 }}>
+          <Icon name="branch" size={14} />
+          <code>{run.base_branch}</code> → <code>{run.branch}</code>
+        </span>
+      )}
       <span className="row" style={{ gap: 5 }} title={run.repo}>
         <Icon name="folder" size={14} />
         <span style={{ maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{run.repo}</span>
@@ -213,7 +217,11 @@ function Ending({ run, closing, onDone }: { run: Run; closing: boolean; onDone: 
       <div className="done-text" style={{ flex: 1 }}>
         <strong>{closing ? "收尾中" : "完成"}</strong>
         {closing ? " · 所有任务都已结束，等 Planner 落地和写总结" : ""}
-        {landed ? (
+        {run.in_place ? (
+          <div className="small muted">
+            改动已直接写在 <code>{run.repo}</code>
+          </div>
+        ) : landed ? (
           <div className="small">
             已落地到 <code>{run.base_branch}</code>：{landed.mode === "pr" ? <a href={landed.reference} target="_blank" rel="noreferrer">{landed.reference}</a> : <code>{landed.reference}</code>}
             <span className="muted"> · {landed.by === "person" ? "你" : landed.by} · {ago(landed.at)}</span>
@@ -231,7 +239,7 @@ function Ending({ run, closing, onDone }: { run: Run; closing: boolean; onDone: 
         <ErrorBox error={error} />
       </div>
       <div className="row" style={{ gap: 6, alignSelf: "flex-start" }}>
-        {!landed && (
+        {!landed && !run.in_place && (
           <>
             <button className="primary small" disabled={busy} onClick={() => act(() => api.landRun(run.id, "merge"))} title={`在 ${run.base_branch} 上生成一个合并提交`}>
               合并进 {run.base_branch}
@@ -270,6 +278,38 @@ function RunNotes({ runId }: { runId: string }) {
 }
 
 /** "全托管 · 上限 $5 · 2 小时". */
+/** A run outside git works in the folder itself; git can be set up for the runs after it. */
+function InPlaceNote({ run }: { run: Run }) {
+  const [state, setState] = useState<"idle" | "busy" | "done">("idle");
+  const [error, setError] = useState<string>();
+  async function init() {
+    setState("busy");
+    setError(undefined);
+    try {
+      await api.initRepo(run.repo);
+      setState("done");
+    } catch (err) {
+      setError(errorText(err));
+      setState("idle");
+    }
+  }
+  return (
+    <span className="row" style={{ gap: 6 }}>
+      <span className="chip warn" title="这个文件夹没有 git：任务一次一个、直接改文件，没有分支、对比和合并，改坏了也无法自动撤销。">
+        无版本控制 · 直接改文件
+      </span>
+      {state === "done" ? (
+        <span>已初始化 git，之后的 Work 会用独立工作树</span>
+      ) : (
+        <button className="ghost small" disabled={state === "busy"} onClick={init} title={`在 ${run.repo} 里 git init，并把现有文件提交为第一个版本`}>
+          初始化 git
+        </button>
+      )}
+      {error && <span className="chip danger" title={error}>初始化失败</span>}
+    </span>
+  );
+}
+
 function PolicyChip({ run }: { run: Run }) {
   const policy = run.config.policy;
   const preset = PRESETS.find((p) => p.key === presetOf(policy));

@@ -446,20 +446,61 @@ async fn tools_are_scoped_by_token_and_role() {
 }
 
 #[tokio::test]
-async fn run_needs_a_git_repository() {
-    let t = TestHub::start().await;
-    let not_repo = tempfile::tempdir().unwrap();
-    t.add_agent_in("boss", None, "planner", not_repo.path())
+async fn a_run_outside_git_works_in_place_one_task_at_a_time() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("cv.md"), "me\n").unwrap();
+    let t = setup(dir.path()).await;
+    let mut w = t.watch().await;
+    // Independent tasks, which a repository would run side by side.
+    let a = task(
+        "a",
+        goal("[write a.txt=alpha]", &format!("wrote a {}", accept("a"))),
+        &[],
+    );
+    let b = task(
+        "b",
+        goal(
+            "[write b.txt=beta]",
+            &format!("wrote b {}", accept_last("b")),
+        ),
+        &[],
+    );
+    let id = start_run(&t, request(json!([a, b])), json!({ "max_parallel": 3 })).await;
+    let run = detail(&t, &id).await["run"].clone();
+    assert_eq!(run["in_place"], true, "{run}");
+    assert_eq!(run["config"]["max_parallel"], 1, "{run}");
+    w.until(
+        "awaiting approval",
+        run_status_is(&id, RunStatus::AwaitingApproval),
+    )
+    .await;
+    t.post(&format!("/v1/runs/{id}/approve"), json!({})).await;
+    w.until("run completed", run_status_is(&id, RunStatus::Completed))
         .await;
-    t.add_agent_in("coder", None, "worker", not_repo.path())
-        .await;
-    let resp = t
-        .post(
-            "/v1/runs",
-            json!({ "request": "x", "planner": "boss", "worker": "coder" }),
-        )
-        .await;
-    assert_eq!(resp.status(), 409, "{}", resp.text().await.unwrap());
+
+    // Never two tasks running at once.
+    let mut running = 0;
+    for e in &w.seen {
+        if let EventKind::TaskStatusChanged { from, to, .. } = &e.kind {
+            if *to == TaskStatus::Running && *from != TaskStatus::Running {
+                running += 1;
+            } else if *from == TaskStatus::Running && *to != TaskStatus::Running {
+                running -= 1;
+            }
+            assert!(running <= 1, "{:?}", types(&w.seen));
+        }
+    }
+    // The work is in the directory itself, which is still there with what it had.
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "alpha"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
+        "beta"
+    );
+    assert!(dir.path().join("cv.md").exists());
+    assert!(!dir.path().join(".git").exists());
 }
 
 /// Models of the worker clones created for each task key.

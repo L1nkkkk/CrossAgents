@@ -10,11 +10,22 @@ use crossagents_core::{Agent, AgentId, CheckResult, Role, Run, Task};
 /// The run's request as the person wrote it, then the facts the lead needs.
 pub fn kickoff(run: &Run, team: &[Agent], default_worker: AgentId) -> String {
     let mut out = run.request.trim().to_owned();
-    let _ = write!(
-        out,
-        "\n\n---\nrun: {} (run_id: {}) · base branch {} · run branch {}",
-        run.title, run.id, run.base_branch, run.branch
-    );
+    if run.in_place {
+        let _ = write!(
+            out,
+            "\n\n---\nrun: {} (run_id: {}) · {} is not under version control: tasks run one at a \
+             time directly in it, with no branches, diffs or merges, and nothing can be rolled back",
+            run.title,
+            run.id,
+            run.repo.display()
+        );
+    } else {
+        let _ = write!(
+            out,
+            "\n\n---\nrun: {} (run_id: {}) · base branch {} · run branch {}",
+            run.title, run.id, run.base_branch, run.branch
+        );
+    }
     out.push_str(&roster(team, default_worker));
     out
 }
