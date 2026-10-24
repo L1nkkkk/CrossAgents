@@ -105,6 +105,22 @@ async fn git(dir: &Path, args: &[&str]) -> Result<String, CoreError> {
     }
 }
 
+/// Like [`git`], waiting (up to two seconds) while another git process holds the
+/// checkout's index: the hub commits a reported task in the background while others may
+/// look at its diff.
+async fn git_locked(dir: &Path, args: &[&str]) -> Result<String, CoreError> {
+    let mut tries = 0;
+    loop {
+        match git(dir, args).await {
+            Err(err) if err.to_string().contains("index.lock") && tries < 20 => {
+                tries += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            other => return other,
+        }
+    }
+}
+
 fn path_arg(path: &Path) -> String {
     path.display().to_string()
 }
@@ -199,14 +215,14 @@ impl WorkspaceProvider for GitWorkspaces {
     }
 
     async fn commit_all(&self, path: &Path, message: &str) -> Result<bool, CoreError> {
-        git(path, &["add", "-A"]).await?;
+        git_locked(path, &["add", "-A"]).await?;
         let staged = git(path, &["diff", "--cached", "--name-only"]).await?;
         if staged.is_empty() {
             return Ok(false);
         }
         let mut args: Vec<&str> = AUTHOR.to_vec();
         args.extend(["commit", "--no-verify", "-q", "-m", message]);
-        git(path, &args).await?;
+        git_locked(path, &args).await?;
         Ok(true)
     }
 
@@ -215,8 +231,10 @@ impl WorkspaceProvider for GitWorkspaces {
     }
 
     async fn diff(&self, path: &Path, base: &str, paths: &[String]) -> Result<String, CoreError> {
-        // Record new files as "intended to add" so they show up; nothing is staged.
-        git(path, &["add", "-A", "--intent-to-add"]).await?;
+        // Record new files as "intended to add" so they show up; nothing is staged. The
+        // worktree's index may be busy for a moment (the hub commits a reported task in the
+        // background): wait for it rather than fail.
+        git_locked(path, &["add", "-A", "--intent-to-add"]).await?;
         let merge_base = git(path, &["merge-base", base, "HEAD"]).await?;
         let mut args = vec!["diff", merge_base.as_str()];
         if !paths.is_empty() {

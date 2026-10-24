@@ -45,7 +45,10 @@ impl Orchestrator {
             .clone_agent_on(template, name, Role::Worker, &cwd, account.as_deref())
             .await?;
         if let Some(reason) = reason {
+            // Stored before it is announced: whoever reads the task on the event sees why.
             task.progress = Some(reason.clone());
+            task.updated_at = chrono::Utc::now();
+            self.store.update_task(task).await?;
             self.publish(EventKind::TaskRerouted {
                 run_id: run.id,
                 id: task.id,
