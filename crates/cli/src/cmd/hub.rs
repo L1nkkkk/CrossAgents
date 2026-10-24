@@ -17,7 +17,9 @@ use super::Context;
 use crate::client::Client;
 use crate::output::{duration, print_json};
 
-const START_TIMEOUT: Duration = Duration::from_secs(5);
+/// Startup detects the vendors' logins (their CLIs, proxy probes) before the hub answers,
+/// which takes several seconds on some machines.
+const START_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(100);
 

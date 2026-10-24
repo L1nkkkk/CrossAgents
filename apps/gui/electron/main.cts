@@ -2,11 +2,13 @@
 // adds the bearer token, forwards HTTP requests and relays the SSE event stream. All
 // business logic stays in the hub. The page talks to it through electron/preload.cts.
 
-import { readFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell, session, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
+import { autoUpdater } from "electron-updater";
+import { manageLocalHub, type LocalHub } from "./localHub.cjs";
 
 const METHODS = new Set(["GET", "POST", "DELETE"]);
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -110,6 +112,12 @@ async function connection(): Promise<{ base: string; token: string }> {
   return { base: `http://127.0.0.1:${port}`, token };
 }
 
+/**
+ * The hub this GUI ships and keeps running (electron/localHub.cts). Only in a packaged build:
+ * a dev run (`npm run electron:dev`) talks to whatever hub is running, as before.
+ */
+let localHub: LocalHub | undefined;
+
 function message(err: unknown): string {
   if (err instanceof Error) {
     // fetch wraps the socket error ("ECONNREFUSED ...") in `cause`.
@@ -135,6 +143,7 @@ ipcMain.handle("hub:request", async (event, method: unknown, path: unknown, body
       );
     }
     if (body !== null && typeof body !== "string") throw new Error("body must be a string");
+    await localHub?.ready();
     const { base, token } = await connection();
     const headers: Record<string, string> = { authorization: `Bearer ${token}` };
     if (body !== null) headers["content-type"] = "application/json";
@@ -245,6 +254,7 @@ async function relayEvents(contents: WebContents, signal: AbortSignal) {
   const last: { id?: string } = {};
   while (!signal.aborted) {
     emit("hub:status", "connecting");
+    await localHub?.ready();
     let reason: string;
     try {
       await streamOnce(emit, last, signal);
@@ -253,6 +263,9 @@ async function relayEvents(contents: WebContents, signal: AbortSignal) {
       reason = message(err);
     }
     if (signal.aborted) return;
+    // The local hub went away (or never came up): start it again; say why if it cannot be.
+    localHub?.recheck();
+    reason = localHub?.problem() ?? reason;
     emit("hub:status", `offline: ${reason}`);
     await new Promise((r) => setTimeout(r, RECONNECT_MS));
   }
@@ -374,7 +387,39 @@ async function createWindow() {
   }
 }
 
+/** A packaged GUI has no console: what it does to the local hub goes to `<home>/logs/gui.log`. */
+function logLine(line: string) {
+  const dir = join(hubHome(), "logs");
+  void mkdir(dir, { recursive: true })
+    .then(() => appendFile(join(dir, "gui.log"), `${new Date().toISOString()} ${line}
+`))
+    .catch(() => {});
+}
+
+// One GUI per user: two would race to start and upgrade the same local hub.
+const single = app.requestSingleInstanceLock();
+if (!single) app.quit();
+app.on("second-instance", () => {
+  const win = BrowserWindow.getAllWindows()[0];
+  if (!win) return;
+  if (win.isMinimized()) win.restore();
+  win.focus();
+});
+
 app.whenReady().then(() => {
+  if (!single) return;
+  if (app.isPackaged) {
+    const exe = process.platform === "win32" ? "crossagents.exe" : "crossagents";
+    localHub = manageLocalHub(join(process.resourcesPath, "bin", exe), hubHome(), logLine);
+    // Downloads a newer release in the background and installs it when the GUI quits; the
+    // next launch then upgrades the local hub (package.json `build.publish`).
+    const updaterLog = (m: unknown) => logLine(`updater: ${String(m)}`);
+    autoUpdater.logger = { info: updaterLog, warn: updaterLog, error: updaterLog };
+    // The logger above already has the details; one line is enough here.
+    autoUpdater
+      .checkForUpdatesAndNotify()
+      .catch((err: unknown) => logLine(`update check failed: ${message(err).split("\n")[0]}`));
+  }
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   session.defaultSession.setPermissionCheckHandler(() => false);
   // No File / Edit / View / Window bar: everything lives in the page. Copy and paste still work.

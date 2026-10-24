@@ -196,6 +196,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         port: addr.port(),
         version: VERSION.into(),
         started_at,
+        exe: std::env::current_exe().ok(),
     };
     std::fs::write(paths.hub_file(), serde_json::to_vec_pretty(&hub_file)?)
         .context("cannot write hub.json")?;

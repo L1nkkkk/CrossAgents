@@ -103,6 +103,10 @@ pub struct HubFile {
     pub port: u16,
     pub version: String,
     pub started_at: DateTime<Utc>,
+    /// The executable the hub runs from. The GUI manages (starts, upgrades) only a hub that
+    /// runs from its own install under `<home>/bin/`; absent in files of older hubs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exe: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
