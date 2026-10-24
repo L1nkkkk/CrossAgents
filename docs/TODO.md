@@ -90,6 +90,7 @@
 - [ ] 单进程线程数上限压测（codex-app-server 研究里标为"未确认"）
 - [ ] 空闲线程是否会被服务端自动卸载，确认后更新挂起策略
 - [ ] 每个线程的 MCP 子进程开销统计，超过阈值时提示
+- [x] code-mode 模型（模型目录里 `tool_mode: code_mode_only`，如 gpt-6-luna）只看得到 `exec`，MCP 工具藏在 `tools.mcp__crossagents__<tool>` 里：只被告知「调用 task_complete」的 worker 找不到它，每轮都不上报、任务停住（2026-10-25 真实 run 里发现）。Codex agent 的开场说明写明工具名与 `exec` 里的调法；派给 worker 的任务末尾都提醒用 `task_complete` 收尾
 
 ## 七、多模态输入
 

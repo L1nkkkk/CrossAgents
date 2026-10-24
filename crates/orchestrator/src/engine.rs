@@ -621,7 +621,7 @@ impl Orchestrator {
         self.transition(task, TaskStatus::Running).await?;
         // The task as its issuer wrote it, from the issuer.
         let issuer = task.issuer_or(run.planner);
-        self.relay(worker.id, issuer, brief::task(task), None);
+        self.relay(worker.id, issuer, brief::assignment(task), None);
         Ok(())
     }
 

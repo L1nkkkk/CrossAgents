@@ -64,12 +64,24 @@ const REVIEWER: &str = "As a REVIEWER: read the change you are asked to review (
 its branch against the run branch, in your working directory) and judge it against the task. \
 Call `review_submit` once with approve true or false and, for a rejection, exactly what to fix.";
 
+/// Codex names MCP tools `mcp__<server>__<tool>`, and its code-mode models (`tool_mode:
+/// code_mode_only`, e.g. gpt-6-luna) see no tool but `exec`: told only "call task_complete",
+/// they find nothing by that name and end the turn without reporting.
+const CODEX_TOOLS: &str = "In Codex the `crossagents` tools are named \
+`mcp__crossagents__<tool>`, e.g. `mcp__crossagents__task_complete`. If your only tool is \
+`exec`, call them from it: `text(await tools.mcp__crossagents__task_complete({task_id, \
+summary}))`.";
+
 /// The guide for `agent`: its role's, and what a conversation outside any run may do.
 pub fn guide_for(agent: &Agent) -> String {
     let mut text = guide(agent.role);
     if groups_of(agent).contains(&Group::Conversation) {
         text.push_str("\n\n");
         text.push_str(CONVERSATION);
+    }
+    if agent.plugin == "codex" {
+        text.push_str("\n\n");
+        text.push_str(CODEX_TOOLS);
     }
     text
 }
@@ -82,4 +94,42 @@ pub fn guide(role: Role) -> String {
         Role::Reviewer => REVIEWER,
     };
     format!("{COMMON}\n\n{specific}")
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use crossagents_core::{AgentId, AgentProfile, AgentStatus, NameSource};
+
+    use super::*;
+
+    fn worker(plugin: &str) -> Agent {
+        Agent {
+            id: AgentId::new(),
+            name_source: NameSource::Chosen,
+            topic: None,
+            archived_at: None,
+            name: "w".into(),
+            plugin: plugin.into(),
+            driver: None,
+            model: None,
+            role: Role::Worker,
+            cwd: ".".into(),
+            config: serde_json::Value::Null,
+            status: AgentStatus::Stopped,
+            created_at: Utc::now(),
+            profile: AgentProfile::default(),
+        }
+    }
+
+    #[test]
+    fn codex_agents_learn_how_their_tools_are_named() {
+        let codex = guide_for(&worker("codex"));
+        assert!(
+            codex.contains("tools.mcp__crossagents__task_complete"),
+            "{codex}"
+        );
+        let claude = guide_for(&worker("claude"));
+        assert!(!claude.contains("mcp__crossagents__"), "{claude}");
+    }
 }

@@ -106,6 +106,17 @@ pub fn task(task: &Task) -> String {
     out.trim_end().to_owned()
 }
 
+/// A task as its worker gets it: the spec, and how the work ends. Said here too because a
+/// worker that learned it only from its session instructions may forget it after a long
+/// turn.
+pub fn assignment(task: &Task) -> String {
+    format!(
+        "{}\n\nWhen done, report with `task_complete` (this task_id and a summary); a turn that \
+         ends without a report leaves the task stalled.",
+        self::task(task)
+    )
+}
+
 /// `#key (task id …)`, how task messages to an issuer name the task.
 pub fn task_ref(task: &Task) -> String {
     format!("#{} ({})", task.key, task.id)

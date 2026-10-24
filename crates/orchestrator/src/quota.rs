@@ -122,7 +122,7 @@ impl Orchestrator {
             issuer,
             format!(
                 "{}\n\nThe previous worker stopped when its account hit its quota ({why}); its changes are in your working directory.",
-                brief::task(&task)
+                brief::assignment(&task)
             ),
             None,
         );

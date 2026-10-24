@@ -325,7 +325,7 @@ impl Orchestrator {
             self.relay(
                 worker,
                 caller.id,
-                format!("#{} was changed:\n\n{}", task.key, brief::task(&task)),
+                format!("#{} was changed:\n\n{}", task.key, brief::assignment(&task)),
                 None,
             );
         }
@@ -381,7 +381,7 @@ impl Orchestrator {
             caller.id,
             format!(
                 "{}\n\nSomeone already worked on this; their changes are in your working directory.",
-                brief::task(&task)
+                brief::assignment(&task)
             ),
             None,
         );
