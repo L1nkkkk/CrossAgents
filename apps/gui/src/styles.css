@@ -1399,6 +1399,7 @@ html, body { overflow: hidden; }
 .trace-head { display: flex; align-items: center; gap: 8px; width: 100%; border: none; border-radius: 0; background: none; padding: 7px 10px; text-align: left; min-width: 0; flex-wrap: wrap; }
 .trace-title { flex: 1; min-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .trace-first { padding: 0 10px 7px; font-size: 12.5px; color: var(--danger); }
+.trace-first.recovered { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .trace-body { border-top: 1px solid var(--border); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
 .trace-list { margin: 0; padding-left: 16px; font-size: 12.5px; display: flex; flex-direction: column; gap: 3px; }
 .trace-list li.bad, .trace-body .bad { color: var(--danger); }

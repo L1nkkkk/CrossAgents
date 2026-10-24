@@ -390,16 +390,19 @@ export function traceRun(): { state: MockState; script: Step[]; route: string } 
   const rexD = td.assignee!;
   const failedLane = lane(rexD, 1, 0.21, [cmd(rexD, "cargo build -p auth", 0, 29), cmd(rexD, "cargo test -p auth", 101, 28, "failures:\n    migrate::tests::idempotent\n    migrate::tests::expired\n\ntest result: FAILED. 12 passed; 2 failed")]);
   failedLane.turns[0] = { ...failedLane.turns[0], stop_reason: "error", error: "agent process exited unexpectedly (code 1)" };
+  // #c failed once on the way, then passed: its first failure stays, in grey.
+  const tc = byKey("c");
+  const recoveredLane = lane(tc.assignee!, 2, 0.18, [cmd(tc.assignee!, "cargo test -p auth", 101, 33, "error[E0433]: failed to resolve: use of undeclared crate `redis`"), cmd(tc.assignee!, "cargo test -p auth", 0, 30)]);
   const tasks: RunTrace["tasks"] = d.tasks.map((t) => ({
     task_id: t.id,
     key: t.key,
     title: t.title,
     status: t.status,
     failure: t.report.failure,
-    lane: t.key === "d" ? failedLane : lane(t.assignee!, t.key === "a" ? 2 : 1, t.key === "a" ? 0.34 : 0.12, [cmd(t.assignee!, "cargo test -p auth", 0, 30)]),
+    lane: t.key === "d" ? failedLane : t.key === "c" ? recoveredLane : lane(t.assignee!, t.key === "a" ? 2 : 1, t.key === "a" ? 0.34 : 0.12, [cmd(t.assignee!, "cargo test -p auth", 0, 30)]),
     checks: t.report.checks.length ? [{ at: ago(27), passed: t.report.checks.every((c) => c.passed), checks: t.report.checks }] : [],
     rerouted: [],
-    first_failure: t.key === "d" ? "`cargo test -p auth` exited 101" : null,
+    first_failure: t.key === "d" || t.key === "c" ? "`cargo test -p auth` exited 101" : null,
   }));
   scene.state.traces.set(d.run.id, { run_id: d.run.id, lead: lane(d.run.planner, 3, 0.41), tasks, spent: { tokens: 120_000, cost_usd: 1.32 } });
   return { ...scene, script: [], route: `#/runs/${d.run.id}` };

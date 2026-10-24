@@ -40,12 +40,17 @@ function laneLine(lane: LaneTrace): string {
   return `${lane.turns.length} 轮 · ${lane.commands.length} 条命令${bad ? `（${bad} 条失败）` : ""} · ${money(lane.spent.cost_usd)}`;
 }
 
+/** Only a task that ended badly is flagged; one that failed on the way and was then merged
+ * keeps its first failure in grey, folded, so a finished run does not read as broken. */
+const endedBadly = (task: TaskTrace) => task.status === "failed" || task.status === "stalled";
+
 function TaskRow({ task }: { task: TaskTrace }) {
   const agents = useAgents();
-  const [open, setOpen] = useState(!!task.first_failure);
+  const bad = !!task.first_failure && endedBadly(task);
+  const [open, setOpen] = useState(bad);
   const lane = task.lane;
   return (
-    <div className={`trace-task ${task.first_failure ? "bad" : ""}`}>
+    <div className={`trace-task ${bad ? "bad" : ""}`}>
       <button className="trace-head" onClick={() => setOpen(!open)} aria-expanded={open}>
         <code>#{task.key}</code>
         <span className="trace-title">{task.title ?? ""}</span>
@@ -55,7 +60,12 @@ function TaskRow({ task }: { task: TaskTrace }) {
           {open ? "▾" : "▸"}
         </span>
       </button>
-      {task.first_failure && <div className="trace-first">首个失败：{task.first_failure}</div>}
+      {task.first_failure &&
+        (bad ? (
+          <div className="trace-first">首个失败：{task.first_failure}</div>
+        ) : (
+          <div className="trace-first recovered">途中出过错：{task.first_failure}</div>
+        ))}
       {open && (
         <div className="trace-body">
           {task.failure && <div className="small">任务失败原因：{task.failure}</div>}
