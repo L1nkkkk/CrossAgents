@@ -102,3 +102,36 @@ GUI：
 
 - Claude Code 对 `document`（PDF）块与大图的实际支持范围；Codex `localImage` 字段名以实测为准（目前按 app-server v2 的 `UserInput` 写）。
 - 真实 agent 调 `gui_screenshot` 后能“看见”图片（Claude Code 与 Codex 对 MCP 图片结果的支持）。
+
+## 4. main 动过之后的落地（P0）
+
+### 问题
+
+一个 run 跑几个小时，期间人在 main 上提交了别的东西（自举时几乎必然：人和 agent 同时改 CrossAgents）。现在 `run_land` 直接把 run 分支合进 base：干净时没事，冲突时报错退出，run 卡在“收尾中”，只能人手工处理。
+
+### 设计
+
+落地前先把 base 的最新内容带进 run 分支，在集成 worktree 里做（run 已结束、集成目录已清掉时临时重新检出）：
+
+| 情况 | 做法 |
+|---|---|
+| base 没动 | 照常落地 |
+| base 动了、能自动合并 | 在集成 worktree 里 `git merge --no-ff <base>`（提交信息写明是同步 base），然后照常落地 |
+| 有冲突 | 中止这次合并，不落地；在 run 里建任务 `sync-<base>`（已有同名且已结束时加序号），发起人是 lead，负责人是 run 的默认 worker，正文写明要在任务 worktree 里 `git merge <base>`、解决哪些文件的冲突、跑测试再 `task_complete`，冲突片段附在规格的参考里。run 已结束（completed）时重新打开为 running。`run.note` 写明为什么没落地、建了哪个任务；lead 收到一行通知。任务被 `task_accept` 合进 run 分支后，lead（或人）再落地一次，这时 base 已在 run 分支里，直接落地 |
+
+为什么用 merge 而不是 rebase：
+
+- run 分支上是一串 `task_accept` 的合并提交，任务 worktree（含委派出去的子任务）都从它分出来。rebase 改写这段历史，还开着的 worktree 和分支就对不上了，合并提交还会被拍平。
+- rebase 要逐个提交重放，冲突可能出现多次、出现在中间状态；merge 只在最终状态上解决一次，正好交给一个 worker 一次做完。
+- 落地方式本身可选 squash：在乎线性历史的人用压缩合并，run 分支里多一个同步提交无所谓。
+
+接口变化：`Orchestrator::land` 返回 `LandOutcome`（`Landed` 或 `Deferred { task, files }`）；`run_land` 工具在推迟时返回 `{ "landed": null, "deferred": { "task": "sync-main", "conflicts": [...] } }`；`POST /v1/runs/{key}/land` 照旧返回 `RunDetail`，原因在 `run.note`、新任务在任务列表里。
+
+### 不做
+
+- 不自动解决冲突（例如按“保留双方”机械合并）：冲突需要读懂两边意图，交给 worker。
+- 不在 run 进行中持续同步 base（`branch_sync` 已能把 run 分支带进任务；base 只在落地时同步一次）。
+
+### 待实测
+
+- 真实 worker 拿到 `sync-main` 任务后能在 worktree 里完成合并并报告；冲突很大时一个 worker 是否够用。

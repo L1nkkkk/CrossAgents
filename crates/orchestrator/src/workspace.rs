@@ -49,6 +49,11 @@ pub trait WorkspaceProvider: Send + Sync {
         mode: LandMode,
         message: &str,
     ) -> Result<String, CoreError>;
+    /// A working copy of the existing `branch` at `path`.
+    async fn checkout(&self, repo: &Path, branch: &str, path: &Path) -> Result<(), CoreError>;
+    /// Merges what `base` gained into the branch checked out at `into`, before landing
+    /// (docs/tasks/DOGFOOD.md §4). On conflict nothing changes and the conflicts are told.
+    async fn sync_base(&self, into: &Path, base: &str) -> Result<Synced, CoreError>;
     /// Removes the working copy at `path`; with `delete_branch`, also `branch`.
     async fn remove(&self, repo: &Path, path: &Path, branch: Option<&str>)
     -> Result<(), CoreError>;
@@ -56,6 +61,17 @@ pub trait WorkspaceProvider: Send + Sync {
 
 /// Bytes of conflict hunks a failed merge reports.
 const CONFLICT_DETAIL: usize = 4_000;
+
+/// What bringing the base branch into a run branch did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Synced {
+    /// The base gained nothing the branch lacks.
+    UpToDate,
+    /// Merged in cleanly (a merge commit on the branch).
+    Merged,
+    /// It conflicts; the merge was undone. The conflicting files and their hunks.
+    Conflicts { files: Vec<String>, detail: String },
+}
 
 /// [`WorkspaceProvider`] using `git worktree`.
 #[derive(Debug, Clone, Default)]
@@ -91,6 +107,51 @@ async fn git(dir: &Path, args: &[&str]) -> Result<String, CoreError> {
 
 fn path_arg(path: &Path) -> String {
     path.display().to_string()
+}
+
+/// Merges `branch` into the checkout at `into`. A conflict is undone and comes back as the
+/// conflicting files and their hunks (cut to [`CONFLICT_DETAIL`]); other failures are errors.
+async fn merge_or_undo(
+    into: &Path,
+    branch: &str,
+    message: &str,
+) -> Result<Result<(), (Vec<String>, String)>, CoreError> {
+    let mut args: Vec<&str> = AUTHOR.to_vec();
+    args.extend([
+        "merge",
+        "--no-ff",
+        "--no-verify",
+        "-q",
+        "-m",
+        message,
+        branch,
+    ]);
+    let Err(err) = git(into, &args).await else {
+        return Ok(Ok(()));
+    };
+    // Say what conflicts before putting the tree back.
+    let files: Vec<String> = git(into, &["diff", "--name-only", "--diff-filter=U"])
+        .await
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let mut hunks = git(into, &["diff"]).await.unwrap_or_default();
+    if hunks.len() > CONFLICT_DETAIL {
+        let mut end = CONFLICT_DETAIL;
+        while !hunks.is_char_boundary(end) {
+            end -= 1;
+        }
+        hunks.truncate(end);
+        hunks.push_str("\n…");
+    }
+    let _ = git(into, &["merge", "--abort"]).await;
+    if files.is_empty() {
+        return Err(CoreError::Conflict(format!(
+            "merge of {branch} failed: {err}"
+        )));
+    }
+    Ok(Err((files, hunks)))
 }
 
 #[async_trait]
@@ -175,38 +236,33 @@ impl WorkspaceProvider for GitWorkspaces {
     }
 
     async fn merge(&self, into: &Path, branch: &str, message: &str) -> Result<(), CoreError> {
-        let mut args: Vec<&str> = AUTHOR.to_vec();
-        args.extend([
-            "merge",
-            "--no-ff",
-            "--no-verify",
-            "-q",
-            "-m",
-            message,
-            branch,
-        ]);
-        if let Err(err) = git(into, &args).await {
-            // Say what conflicts before putting the tree back.
-            let files = git(into, &["diff", "--name-only", "--diff-filter=U"])
-                .await
-                .unwrap_or_default();
-            let mut hunks = git(into, &["diff"]).await.unwrap_or_default();
-            if hunks.len() > CONFLICT_DETAIL {
-                let mut end = CONFLICT_DETAIL;
-                while !hunks.is_char_boundary(end) {
-                    end -= 1;
-                }
-                hunks.truncate(end);
-                hunks.push_str("\n…");
-            }
-            let _ = git(into, &["merge", "--abort"]).await;
-            return Err(CoreError::Conflict(if files.is_empty() {
-                format!("merge of {branch} failed: {err}")
-            } else {
-                format!("merge of {branch} conflicts in:\n{files}\n\n{hunks}")
-            }));
+        match merge_or_undo(into, branch, message).await? {
+            Ok(()) => Ok(()),
+            Err((files, hunks)) => Err(CoreError::Conflict(format!(
+                "merge of {branch} conflicts in:\n{}\n\n{hunks}",
+                files.join("\n")
+            ))),
         }
+    }
+
+    async fn checkout(&self, repo: &Path, branch: &str, path: &Path) -> Result<(), CoreError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| CoreError::Storage(e.to_string()))?;
+        }
+        git(repo, &["worktree", "add", &path_arg(path), branch]).await?;
         Ok(())
+    }
+
+    async fn sync_base(&self, into: &Path, base: &str) -> Result<Synced, CoreError> {
+        let behind = git(into, &["rev-list", "--count", &format!("HEAD..{base}")]).await?;
+        if behind.trim() == "0" {
+            return Ok(Synced::UpToDate);
+        }
+        let message = format!("crossagents: bring {base} into the run before landing");
+        Ok(match merge_or_undo(into, base, &message).await? {
+            Ok(()) => Synced::Merged,
+            Err((files, detail)) => Synced::Conflicts { files, detail },
+        })
     }
 
     async fn land(
@@ -397,6 +453,14 @@ impl WorkspaceProvider for InPlaceWorkspaces {
         _: &str,
     ) -> Result<String, CoreError> {
         Ok(repo.display().to_string())
+    }
+
+    async fn checkout(&self, _: &Path, _: &str, _: &Path) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    async fn sync_base(&self, _: &Path, _: &str) -> Result<Synced, CoreError> {
+        Ok(Synced::UpToDate)
     }
 
     async fn remove(&self, _: &Path, _: &Path, _: Option<&str>) -> Result<(), CoreError> {

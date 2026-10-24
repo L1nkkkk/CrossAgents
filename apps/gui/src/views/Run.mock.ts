@@ -305,3 +305,23 @@ export function landingRun(): { state: MockState; script: Step[]; route: string 
   scene.state.runDiffs.set(d.run.id, OAUTH_DIFF + LOGIN_DIFF + SESSION_DIFF);
   return { ...scene, script: [], route: `#/runs/${d.run.id}` };
 }
+
+/**
+ * Landing waits (docs/tasks/DOGFOOD.md §4): main moved and conflicts with the run, so the hub
+ * made #sync-main for Rex; the note says why, the run lands once it is merged.
+ */
+export function syncRun(): { state: MockState; script: Step[]; route: string } {
+  const scene = landingRun();
+  const d = scene.state.runs[0];
+  const rex = scene.state.agents.find((a) => a.name === "Rex")!;
+  const rexSync = clone(rex, "sync-main", "running", `${REPO}/.crossagents/worktrees/sync-main`);
+  scene.state.agents.push(rexSync);
+  const sync = task(
+    d.run,
+    planned("sync-main", "Resolve conflicts with main", "main gained commits after this run started, and they conflict with the run's changes, so the run cannot land. In your worktree, run `git merge main`, resolve the conflicts so that both sides' changes survive, run the tests, commit, and task_complete.\n\nConflicting files:\n- src/auth/session.rs", "rex", [], []),
+    { status: "running", assignee: rexSync, template: rex, minutesAgo: 1, progress: "合并 main，在解决 session.rs 的冲突" },
+  );
+  d.tasks.push(sync);
+  d.run = { ...d.run, note: "main moved and conflicts with the run in src/auth/session.rs; task #sync-main resolves it, land again once it is merged" };
+  return { ...scene, route: `#/runs/${d.run.id}` };
+}
