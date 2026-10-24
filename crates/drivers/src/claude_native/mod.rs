@@ -457,6 +457,14 @@ pub struct ClaudeSession {
 }
 
 impl ClaudeSession {
+    fn set_compacting(&self, on: bool) {
+        self.shared
+            .translator
+            .lock()
+            .expect("translator lock")
+            .compacting = on;
+    }
+
     /// The session of a process taken over from a previous hub: past its handshake, with
     /// `turn_running` the turn it is in.
     fn adopt(
@@ -773,7 +781,11 @@ impl DriverSession for ClaudeSession {
     }
 
     async fn compact(&self) -> Result<(), CoreError> {
-        match self.prompt("/compact").await?.stop_reason {
+        // CodeBuddy streams the summary like a reply; it is not one.
+        self.set_compacting(true);
+        let outcome = self.prompt("/compact").await;
+        self.set_compacting(false);
+        match outcome?.stop_reason {
             StopReason::Error => Err(CoreError::Agent("compaction failed".into())),
             _ => Ok(()),
         }

@@ -210,7 +210,7 @@ export function ProfileEditor({ agent, onDone }: { agent: Agent; onDone: () => v
 
       <ModelField value={modelValue} models={models} onChange={setModel} />
       {claudeLike && (
-        <Field label="读取 Claude 设置（CLAUDE.md、.claude/ 规则、hooks、权限）">
+        <Field label="读取 Claude 设置（CLAUDE.md、.claude/ 规则、hooks、权限；保存后空闲的会话会重启并续上原对话，忙时等这轮结束后下次启动）">
           <select value={sources ?? "default"} onChange={(e) => setSources(e.target.value === "default" ? null : e.target.value)}>
             {SETTING_SOURCES.map((s) => (
               <option key={s.value} value={s.value}>

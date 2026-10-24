@@ -420,7 +420,9 @@ async fn update_profile(
 }
 
 /// `POST /v1/agents/{key}/settings`: which of Claude Code's settings the agent loads
-/// (docs/tasks/DOGFOOD.md §6), from its next session.
+/// (docs/tasks/DOGFOOD.md §6). The CLI reads them only at launch, so an idle session is
+/// stopped and resumes with them on the next message; a busy one keeps the old ones until it
+/// next starts.
 async fn agent_settings(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
@@ -430,6 +432,7 @@ async fn agent_settings(
     if !agent.config.is_object() {
         agent.config = serde_json::json!({});
     }
+    let before = agent.config.get("setting_sources").cloned();
     match req.setting_sources {
         None => {
             agent
@@ -459,6 +462,10 @@ async fn agent_settings(
         .store()
         .update_agent_config(agent.id, &agent.config)
         .await?;
+    if agent.config.get("setting_sources").cloned() != before && agent.status == AgentStatus::Idle {
+        state.runtime.stop(&AgentKey::Id(agent.id)).await?;
+        agent.status = AgentStatus::Stopped;
+    }
     state
         .bus
         .publish(EventKind::AgentUpdated {

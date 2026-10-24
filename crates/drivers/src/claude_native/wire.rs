@@ -550,6 +550,12 @@ pub struct Translator {
     tokens: TokenUsage,
     /// `total_cost_usd` counts from the start of the process.
     cost_so_far: f64,
+    /// The context the turn's latest request used, from its `message_delta`: the result's
+    /// `usage` sums every request of the turn, which overstates it.
+    last_request: Option<u64>,
+    /// A `/compact` turn is running: its summary is the session's own bookkeeping, not a
+    /// reply, so its text and thinking are not shown.
+    pub compacting: bool,
 }
 
 impl Translator {
@@ -560,6 +566,13 @@ impl Translator {
             .get("parent_tool_use_id")
             .is_some_and(|p| !p.is_null())
         {
+            return Vec::new();
+        }
+        if self.compacting {
+            // Only the usage of the summarising request is kept.
+            if let Some(event) = message.get("event") {
+                self.stream_event(event);
+            }
             return Vec::new();
         }
         match message.get("type").and_then(Value::as_str) {
@@ -599,6 +612,19 @@ impl Translator {
                     .pointer("/message/id")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
+                Vec::new()
+            }
+            Some("message_delta") => {
+                if let Some(usage) = event.get("usage") {
+                    let num = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+                    let used = num("input_tokens")
+                        + num("cache_read_input_tokens")
+                        + num("cache_creation_input_tokens")
+                        + num("output_tokens");
+                    if used > 0 {
+                        self.last_request = Some(used);
+                    }
+                }
                 Vec::new()
             }
             Some("content_block_delta") => {
@@ -732,16 +758,26 @@ impl Translator {
             .and_then(Value::as_u64)
             .unwrap_or(0);
         self.tokens.total += input + output;
-        // The context in use: what the last request of the turn sent and got back.
-        let last = usage
-            .get("iterations")
-            .and_then(Value::as_array)
-            .and_then(|i| i.last())
-            .unwrap_or(usage);
-        let used = num(last, "input_tokens")
-            + num(last, "cache_read_input_tokens")
-            + num(last, "cache_creation_input_tokens")
-            + num(last, "output_tokens");
+        // The context in use: what the CLI says (CodeBuddy), else what the last request of
+        // the turn sent and got back. `usage` itself sums all of the turn's requests.
+        let last_request = self.last_request.take();
+        let used = result
+            .pointer("/_meta/codebuddy.ai~1contextUsed")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                let last = usage
+                    .get("iterations")
+                    .and_then(Value::as_array)
+                    .and_then(|i| i.last())?;
+                Some(
+                    num(last, "input_tokens")
+                        + num(last, "cache_read_input_tokens")
+                        + num(last, "cache_creation_input_tokens")
+                        + num(last, "output_tokens"),
+                )
+            })
+            .or(last_request)
+            .unwrap_or(input + output);
         let size = result
             .get("modelUsage")
             .and_then(Value::as_object)
@@ -1319,6 +1355,42 @@ mod tests {
         );
         assert_eq!(mcp.result.as_deref(), Some("[]"));
         assert!(mcp.arguments.unwrap().contains("\"all\": true"));
+    }
+
+    /// CodeBuddy's `usage` sums the turn's requests (three of ~400k made "1.2M of 1M"); the
+    /// context in use is its `_meta` figure, else the last request's.
+    #[test]
+    fn context_used_is_the_last_request_not_the_turn_sum() {
+        let used = |t: &mut Translator, result: Value| match &t.turn_end(&result, false).1[0] {
+            SessionEventKind::Usage { used, .. } => *used,
+            other => panic!("{other:?}"),
+        };
+        let summed = json!({ "type": "result", "subtype": "success", "is_error": false,
+            "usage": { "input_tokens": 1_200_000, "output_tokens": 300 } });
+        let mut t = Translator::default();
+        let mut with_meta = summed.clone();
+        with_meta["_meta"] = json!({ "codebuddy.ai/contextUsed": 410_000 });
+        assert_eq!(used(&mut t, with_meta), 410_000);
+
+        t.translate(&json!({ "type": "stream_event", "event": { "type": "message_delta",
+            "usage": { "input_tokens": 400_000, "cache_read_input_tokens": 0, "output_tokens": 120 } } }));
+        assert_eq!(used(&mut t, summed.clone()), 400_120);
+        // Taken once: a turn without deltas falls back to the result's own figure.
+        assert_eq!(used(&mut t, summed), 1_200_300);
+    }
+
+    #[test]
+    fn a_compaction_summary_is_not_shown_as_a_reply() {
+        let mut t = Translator::default();
+        let delta = json!({ "type": "stream_event", "event": { "type": "content_block_delta",
+            "delta": { "type": "text_delta", "text": "<summary>…" } } });
+        t.compacting = true;
+        assert!(t.translate(&delta).is_empty());
+        assert!(t
+            .translate(&json!({ "type": "assistant", "message": { "id": "m", "content": [{ "type": "text", "text": "<summary>…" }] } }))
+            .is_empty());
+        t.compacting = false;
+        assert_eq!(t.translate(&delta).len(), 1);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 mod common;
 
 use common::{MOCK_AGENT, TestHub, git_repo};
-use crossagents_api_types::EventKind;
+use crossagents_api_types::{AgentStatus, EventKind};
 use crossagents_core::DriverKind;
 use crossagents_plugins::PluginConfig;
 use serde_json::{Value, json};
@@ -71,4 +71,53 @@ async fn setting_sources_are_switched_per_agent() {
     let agent: Value = set(Value::Null).await.json().await.unwrap();
     assert!(agent["config"].get("setting_sources").is_none(), "{agent}");
     assert_eq!(set(json!("everything")).await.status(), 400);
+}
+
+/// The CLI reads its settings at launch: changing them stops an idle session, and the next
+/// message resumes it with the new ones.
+#[tokio::test]
+async fn switching_setting_sources_restarts_an_idle_session() {
+    let t = TestHub::start().await;
+    t.add_agent("ada", Some("haiku")).await;
+    let mut w = t.watch().await;
+    t.send("ada", "hello").await;
+    w.until("idle", |e| {
+        matches!(
+            e.kind,
+            EventKind::AgentStatusChanged {
+                to: AgentStatus::Idle,
+                ..
+            }
+        )
+    })
+    .await;
+    let agent: Value = t.get("/v1/agents/ada").await.json().await.unwrap();
+    assert_eq!(agent["status"], "idle", "{agent}");
+
+    let agent: Value = t
+        .post("/v1/agents/ada/settings", json!({ "setting_sources": "" }))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(agent["status"], "stopped", "{agent}");
+    // The same setting again changes nothing and stops nothing.
+    t.send("ada", "again").await;
+    w.until("running again", |e| {
+        matches!(
+            e.kind,
+            EventKind::AgentStatusChanged {
+                to: AgentStatus::Idle,
+                ..
+            }
+        )
+    })
+    .await;
+    let agent: Value = t
+        .post("/v1/agents/ada/settings", json!({ "setting_sources": "" }))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_ne!(agent["status"], "stopped", "{agent}");
 }
