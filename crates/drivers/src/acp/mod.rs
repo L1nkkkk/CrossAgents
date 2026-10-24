@@ -491,7 +491,8 @@ fn choose_permission(policy: PermissionPolicy, options: &[PermissionOption]) -> 
             })
     };
     let choice = match policy {
-        PermissionPolicy::Bypass => pick(&["allow_always", "allow_once"]),
+        // ACP agents do not reach the hub's guard yet: guarded ones are let through.
+        PermissionPolicy::Bypass | PermissionPolicy::Guard => pick(&["allow_always", "allow_once"]),
         PermissionPolicy::Deny => pick(&["reject_once", "reject_always"]),
     };
     choice.unwrap_or(PermissionOutcome::Cancelled)

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use axum::Extension;
 use axum::extract::DefaultBodyLimit;
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{MatchedPath, Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -59,6 +59,8 @@ pub struct AppState {
     pub models: Arc<crate::models::ModelChoice>,
     pub tokens: Arc<AgentTokens>,
     pub token: String,
+    /// The read-only token (`<home>/token-read`).
+    pub read_token: String,
     pub home: PathBuf,
     pub started_at: DateTime<Utc>,
     pub shutdown: CancellationToken,
@@ -204,15 +206,44 @@ async fn require_token(
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
-    if presented.is_some_and(|t| constant_time_eq(t.as_bytes(), state.token.as_bytes())) {
-        next.run(request).await
-    } else {
-        AppError::new(
+    let grant = match presented {
+        Some(token) => grant_of(&state, token).await,
+        None => None,
+    };
+    let Some(grant) = grant else {
+        return AppError::new(
             StatusCode::UNAUTHORIZED,
             ErrorCode::Unauthorized,
             "missing or invalid bearer token",
         )
-        .into_response()
+        .into_response();
+    };
+    // The policy point (docs/tasks/DOGFOOD.md §7): the route's level against the grant's.
+    let pattern = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|p| p.as_str().to_owned())
+        .unwrap_or_else(|| request.uri().path().to_owned());
+    match crate::access::refusal(grant, request.method(), &pattern) {
+        None => next.run(request).await,
+        Some(why) => {
+            AppError::new(StatusCode::FORBIDDEN, ErrorCode::Forbidden, why).into_response()
+        }
+    }
+}
+
+/// What a presented token may do: the hub's token everything, the read-only token read,
+/// an agent's session token nothing here.
+async fn grant_of(state: &AppState, token: &str) -> Option<crate::access::Grant> {
+    use crate::access::{Grant, Level};
+    if constant_time_eq(token.as_bytes(), state.token.as_bytes()) {
+        Some(Grant::Level(Level::Admin))
+    } else if constant_time_eq(token.as_bytes(), state.read_token.as_bytes()) {
+        Some(Grant::Level(Level::Read))
+    } else if state.tokens.agent(token).await.is_some() {
+        Some(Grant::Agent)
+    } else {
+        None
     }
 }
 

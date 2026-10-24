@@ -14,6 +14,18 @@ pub enum PlanApproval {
     Auto,
 }
 
+/// Whether a run's workers ask the person before dangerous actions (docs/tasks/DOGFOOD.md §7).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalPolicy {
+    /// Pushes, publishing, CI changes and the like wait for the person's yes.
+    #[default]
+    Guard,
+    /// Workers act without asking; the worktree is the only boundary.
+    Off,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
@@ -85,6 +97,9 @@ pub struct RunPolicy {
     /// Whether assignees may split their tasks and hand parts on (H1-5).
     #[serde(default)]
     pub delegate: bool,
+    /// Whether workers ask before dangerous actions.
+    #[serde(default)]
+    pub approvals: ApprovalPolicy,
 }
 
 fn default_ask_timeout() -> f64 {
@@ -109,6 +124,7 @@ impl Default for RunPolicy {
             max_agents: default_max_agents(),
             spawn_models: None,
             delegate: false,
+            approvals: ApprovalPolicy::default(),
         }
     }
 }

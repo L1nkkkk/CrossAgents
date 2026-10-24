@@ -45,7 +45,7 @@ pub use model::{
 };
 pub use note::{EXTERNAL_PLUGIN, Note, NoteScope};
 pub use notify::{Reminder, Watch, WatchOn, WatchTarget};
-pub use policy::{AskPolicy, Budget, LandPolicy, PlanApproval, RunPolicy};
+pub use policy::{ApprovalPolicy, AskPolicy, Budget, LandPolicy, PlanApproval, RunPolicy};
 pub use state::TaskStatus;
 pub use store::{AgentKey, Store};
 pub use tool::ToolInfo;

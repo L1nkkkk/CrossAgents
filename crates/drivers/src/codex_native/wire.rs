@@ -727,6 +727,8 @@ pub fn policies(
     let (sandbox, approval) = match permission {
         crossagents_core::PermissionPolicy::Bypass => ("danger-full-access", "never"),
         crossagents_core::PermissionPolicy::Deny => ("workspace-write", "on-request"),
+        // Every command not known to be safe is asked about; the hub decides.
+        crossagents_core::PermissionPolicy::Guard => ("danger-full-access", "untrusted"),
     };
     (
         pick("sandbox").unwrap_or_else(|| sandbox.into()),

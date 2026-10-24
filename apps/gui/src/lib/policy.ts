@@ -21,6 +21,8 @@ export const DEFAULT_POLICY: RunPolicy = {
   max_agents: 8,
   spawn_models: null,
   delegate: false,
+  // Workers ask before pushing, publishing or changing CI (docs/tasks/DOGFOOD.md §7).
+  approvals: "guard",
 };
 
 export function presetPolicy(preset: Preset, base: RunPolicy = DEFAULT_POLICY): RunPolicy {

@@ -49,6 +49,8 @@ pub struct Orchestrator {
     pub(crate) config: OrchestratorConfig,
     locks: Mutex<HashMap<RunId, Arc<Mutex<()>>>>,
     pub(crate) messaging: Mutex<crate::messaging::MessagingState>,
+    /// Approvals waiting for the person, by question id (docs/tasks/DOGFOOD.md §7).
+    pub(crate) approvals: std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
 }
 
 pub(crate) fn short(id: impl ToString) -> String {
@@ -74,6 +76,7 @@ impl Orchestrator {
             config,
             locks: Mutex::default(),
             messaging: Mutex::default(),
+            approvals: std::sync::Mutex::default(),
         })
     }
 

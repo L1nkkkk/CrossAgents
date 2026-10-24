@@ -2,6 +2,7 @@
 //! verification (docs/DESIGN.md §7–§9). Depends only on `crossagents-core`; the hub plugs
 //! in agents through [`AgentHost`].
 
+pub mod approval;
 pub mod brief;
 pub mod engine;
 pub mod host;

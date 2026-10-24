@@ -154,6 +154,7 @@ export function run(init: { title: string; request: string; planner: Agent; work
         max_agents: 6,
         spawn_models: null,
         delegate: false,
+        approvals: "guard",
       },
     },
     repo: REPO,

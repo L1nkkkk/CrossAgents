@@ -118,10 +118,10 @@ function AskCard({ item, agent }: { item: HumanItem; agent?: Agent }) {
   }
 
   return (
-    <form className={`ask ${item.action === "budget" ? "urgent" : ""}`} onSubmit={submit}>
+    <form className={`ask `} onSubmit={submit}>
       <div className="ask-head">
         {who}
-        <span className="muted small">{item.action === "budget" ? "预算用完了" : "问你"}</span>
+        <span className="muted small">{item.action === "budget" ? "预算用完了" : item.action === "approval" ? "等你批准" : "问你"}</span>
         <div className="spacer" />
         {item.timeout_at && item.status === "open" && (
           <span className="muted small" title={new Date(item.timeout_at).toLocaleString()}>
@@ -129,7 +129,7 @@ function AskCard({ item, agent }: { item: HumanItem; agent?: Agent }) {
           </span>
         )}
       </div>
-      <div className="ask-text">{item.text}</div>
+      {item.action === "approval" ? <ApprovalText text={item.text} /> : <div className="ask-text">{item.text}</div>}
       {item.options.length > 0 && (
         <div className="ask-options">
           {item.options.map((o) => (
@@ -139,7 +139,7 @@ function AskCard({ item, agent }: { item: HumanItem; agent?: Agent }) {
           ))}
         </div>
       )}
-      {item.action !== "budget" && (
+      {!item.action && (
         <div className="ask-reply">
           <input value={text} onChange={(e) => setText(e.target.value)} placeholder={item.options.length ? "或者写你自己的回答…" : "你的回答…"} />
           <button type="submit" className="primary small" disabled={busy || !text.trim()}>
@@ -149,5 +149,16 @@ function AskCard({ item, agent }: { item: HumanItem; agent?: Agent }) {
       )}
       <ErrorBox error={error} />
     </form>
+  );
+}
+
+/** An approval (docs/tasks/DOGFOOD.md §7): who wants to do what and why, then the exact command. */
+function ApprovalText({ text }: { text: string }) {
+  const [what, ...rest] = text.split("\n");
+  return (
+    <div className="ask-text">
+      {what}
+      {rest.length > 0 && <pre className="approval-command">{rest.join("\n")}</pre>}
+    </div>
   );
 }

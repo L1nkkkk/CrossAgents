@@ -30,14 +30,30 @@ pub trait SessionSetup: Send + Sync {
     async fn environment(&self, agent: &Agent) -> Result<Vec<(String, String)>, CoreError> {
         Ok(self.prepare(agent).await?.env)
     }
+
+    /// How the agent's permission requests are decided: an override of its policy and a
+    /// handler (docs/tasks/DOGFOOD.md §7). Also for sessions taken over.
+    async fn permissions(
+        &self,
+        _agent: &Agent,
+    ) -> (
+        Option<PermissionPolicy>,
+        Option<Arc<dyn crossagents_core::PermissionHandler>>,
+    ) {
+        (None, None)
+    }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct SessionExtras {
     pub mcp_servers: Vec<McpServerSpec>,
     pub instructions: Option<String>,
     /// Extra environment for the agent process (e.g. its account's home).
     pub env: Vec<(String, String)>,
+    /// Overrides the agent's own permission policy (`config.permission`).
+    pub permission: Option<PermissionPolicy>,
+    /// Decides the session's permission requests (docs/tasks/DOGFOOD.md §7).
+    pub permissions: Option<Arc<dyn crossagents_core::PermissionHandler>>,
 }
 
 struct Live {
@@ -385,14 +401,18 @@ impl Runtime {
             Some(setup) => setup.environment(agent).await?,
             None => Vec::new(),
         };
+        let (permission, permissions) = match &self.setup {
+            Some(setup) => setup.permissions(agent).await,
+            None => (None, None),
+        };
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let generation = self.generation.fetch_add(1, Ordering::Relaxed);
         let spec = SessionSpec {
             agent: agent.clone(),
             mcp_servers: Vec::new(),
-            permission: permission_of(agent),
-            permissions: None,
+            permission: permission.unwrap_or_else(|| permission_of(agent)),
+            permissions,
             command: command_of(agent),
             instructions: None,
             env,
@@ -546,8 +566,8 @@ impl Runtime {
         let spec = || SessionSpec {
             agent: agent.clone(),
             mcp_servers: extras.mcp_servers.clone(),
-            permission: permission_of(&agent),
-            permissions: None,
+            permission: extras.permission.unwrap_or_else(|| permission_of(&agent)),
+            permissions: extras.permissions.clone(),
             command: command_of(&agent),
             instructions: extras.instructions.clone(),
             env: extras.env.clone(),

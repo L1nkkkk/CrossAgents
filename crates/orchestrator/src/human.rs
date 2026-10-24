@@ -170,6 +170,11 @@ impl Orchestrator {
             self.budget_decided(&item, &answer).await?;
             return Ok(item);
         }
+        // The agent waits on its own request; the answer goes there, not as a message.
+        if item.action == Some(HumanAction::Approval) {
+            self.approval_decided(&item.id, Some(&answer));
+            return Ok(item);
+        }
         let text = if previous == HumanItemStatus::Defaulted {
             format!(
                 "The person has now answered your question {id} (you went ahead with the default \"{}\"): {answer}",
@@ -192,6 +197,9 @@ impl Orchestrator {
         }
         item.status = HumanItemStatus::Dismissed;
         self.store().put_human_item(&item).await?;
+        if item.action == Some(HumanAction::Approval) {
+            self.approval_decided(&item.id, None);
+        }
         self.publish(EventKind::HumanDismissed { id: id.to_owned() })
             .await;
         Ok(())
@@ -211,6 +219,10 @@ impl Orchestrator {
             self.store().put_human_item(&item).await?;
             self.publish(EventKind::HumanAnswered { item: item.clone() })
                 .await;
+            if item.action == Some(HumanAction::Approval) {
+                self.approval_decided(&item.id, item.default.as_deref());
+                continue;
+            }
             let text = format!(
                 "No answer to your question {} in time; go ahead with the default: {}",
                 item.id,

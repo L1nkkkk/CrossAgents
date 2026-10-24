@@ -320,3 +320,94 @@ async fn shutdown_over_api_stops_hub_and_removes_hub_file() {
         .unwrap();
     assert!(!t.paths.hub_file().exists());
 }
+
+/// docs/API-AUTH.md §3, docs/tasks/DOGFOOD.md §7: a valid credential below the route's level
+/// gets 403 naming the level it lacks; an invalid one still 401.
+#[tokio::test]
+async fn credentials_have_levels() {
+    let t = TestHub::start().await;
+    let read = &t.hub.read_token;
+    assert_eq!(
+        std::fs::read_to_string(t.paths.token_read())
+            .unwrap()
+            .trim(),
+        read
+    );
+    let as_read = |method: reqwest::Method, path: &str| {
+        t.client.request(method, t.url(path)).bearer_auth(read)
+    };
+    assert_eq!(
+        as_read(reqwest::Method::GET, "/v1/agents")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    let resp = as_read(reqwest::Method::POST, "/v1/runs")
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "forbidden");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("needs write")
+    );
+    let resp = as_read(reqwest::Method::POST, "/v1/shutdown")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let body: Value = resp.json().await.unwrap();
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("needs admin")
+    );
+
+    // An agent's session token reaches /v1/me only.
+    let cwd = t.paths.home.display().to_string();
+    let resp = t
+        .post("/v1/agents")
+        .json(&json!({ "name": "outside", "plugin": "external", "role": "worker", "cwd": cwd }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let info: Value = t
+        .post("/v1/agents/outside/connect")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let session = info["token"].as_str().unwrap();
+    let as_agent = |path: &str| t.client.get(t.url(path)).bearer_auth(session).send();
+    assert_eq!(as_agent("/v1/me").await.unwrap().status(), 200);
+    assert_eq!(
+        as_agent("/v1/agents").await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+    let resp = t
+        .client
+        .get(t.url("/v1/agents"))
+        .bearer_auth(format!("ca-agent-{}", "0".repeat(64)))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "unknown tokens are not valid"
+    );
+
+    // The full token still does everything.
+    assert_eq!(t.get("/v1/agents").send().await.unwrap().status(), 200);
+}

@@ -123,12 +123,15 @@ pub enum PermissionPolicy {
     Bypass,
     /// Reject everything that asks.
     Deny,
+    /// Ask about everything, and let a [`PermissionHandler`] pass what is safe and put the
+    /// dangerous to the person (docs/tasks/DOGFOOD.md §7). Without a handler: allow.
+    Guard,
 }
 
 impl PermissionPolicy {
     pub fn decide(self) -> PermissionDecision {
         match self {
-            Self::Bypass => PermissionDecision::Allow,
+            Self::Bypass | Self::Guard => PermissionDecision::Allow,
             Self::Deny => PermissionDecision::Deny,
         }
     }

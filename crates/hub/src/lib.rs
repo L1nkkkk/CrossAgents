@@ -1,11 +1,13 @@
 //! The CrossAgents hub: owns all state and serves the local API.
 
+pub mod access;
 pub mod accounts;
 pub mod api;
 pub mod attachments;
 pub mod budget;
 pub mod collab;
 pub mod event_log;
+pub mod guard;
 pub mod identity;
 pub mod models;
 pub mod notices;
@@ -46,6 +48,8 @@ pub use runtime::{Runtime, SessionExtras, SessionSetup};
 pub struct RunningHub {
     pub addr: SocketAddr,
     pub token: String,
+    /// The read-only token (docs/API-AUTH.md §3).
+    pub read_token: String,
     pub bus: Arc<EventBus>,
     pub runtime: Arc<Runtime>,
     pub orchestrator: Arc<Orchestrator>,
@@ -78,6 +82,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
 
     let lock = acquire_lock(&paths)?;
     let token = ensure_token(&paths)?;
+    let read_token = ensure_token_at(&paths.token_read())?;
     let store = Arc::new(SqliteStore::open(&paths.db()).await?);
     // Every event goes to a JSON-lines file per day as well: that history can be read with no
     // window open (docs/TODO.md §四). The sink holds the writer, so it lives as long as the bus.
@@ -127,6 +132,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         },
         url: OnceLock::new(),
         worktrees: paths.home.join("worktrees"),
+        orchestrator: Arc::new(OnceLock::new()),
     });
     let (plugins, plugin_warnings) = PluginRegistry::load(&config.plugins, &paths.plugins());
     for warning in &plugin_warnings {
@@ -192,6 +198,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
             max_nudges: 2,
         },
     );
+    let _ = setup.orchestrator.set(orchestrator.clone());
     orchestrator.watch();
     // Settle what runs spent while no hub was there (agents' replayed usage included) before
     // anything is dispatched: an over-budget run pauses first (docs/tasks/DOGFOOD.md §5).
@@ -238,6 +245,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         models: model_choice,
         tokens,
         token: token.clone(),
+        read_token: read_token.clone(),
         home: paths.home.clone(),
         started_at,
         shutdown: shutdown.clone(),
@@ -284,6 +292,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     Ok(RunningHub {
         addr,
         token,
+        read_token,
         bus,
         runtime,
         orchestrator,
@@ -350,17 +359,22 @@ fn acquire_lock(paths: &Paths) -> Result<File> {
 
 /// Reads the API token, generating one on first start.
 fn ensure_token(paths: &Paths) -> Result<String> {
-    if let Ok(token) = paths.read_token()
-        && !token.is_empty()
+    ensure_token_at(&paths.token())
+}
+
+/// Reads the token in `path`, generating one when there is none.
+fn ensure_token_at(path: &std::path::Path) -> Result<String> {
+    if let Ok(token) = std::fs::read_to_string(path)
+        && !token.trim().is_empty()
     {
-        return Ok(token);
+        return Ok(token.trim().to_owned());
     }
     let token = format!(
         "{}{}",
         uuid::Uuid::new_v4().simple(),
         uuid::Uuid::new_v4().simple()
     );
-    write_private(&paths.token(), &token).context("cannot write token")?;
+    write_private(path, &token).with_context(|| format!("cannot write {}", path.display()))?;
     Ok(token)
 }
 

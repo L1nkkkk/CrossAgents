@@ -22,7 +22,7 @@ hub 只监听 `127.0.0.1`（`[hub] listen` 尚未可配，A2 才放开），鉴�
 - hub 重启会换新 token，GUI 每次调用重读，所以无需重启 GUI。
 - 会话 token 落盘（`agent-tokens.json`）是为了 hub 重启接管后，已接管的 agent 仍能调工具；加入时签发新 token，旧的立即失效。
 
-现在的缺口不是"没鉴权"，而是**没有梯度**：同一把总 token 既能读列表，也能删账号、停 hub。
+2026-10-24 起有了梯度（[tasks/DOGFOOD.md](tasks/DOGFOOD.md) §7）：`require_token` 先认凭据——总 token 为 admin、`<home>/token-read` 为 read、会话 token 只到 `/v1/me*`——再由 `crates/hub/src/access.rs` 的策略点按下表的级别放行，级别不够返回 403 `forbidden` 并写明缺哪一级。
 
 ## 2. 接口清单
 

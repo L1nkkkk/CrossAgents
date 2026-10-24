@@ -42,6 +42,10 @@ impl Paths {
     pub fn token(&self) -> PathBuf {
         self.home.join("token")
     }
+    /// A token that only reads (docs/API-AUTH.md §3), for dashboards and remote viewers.
+    pub fn token_read(&self) -> PathBuf {
+        self.home.join("token-read")
+    }
     pub fn hub_file(&self) -> PathBuf {
         self.home.join("hub.json")
     }

@@ -38,12 +38,12 @@
 
 权限分级：
 
-- [ ] 把校验从 `require_token` 抽成可替换的策略点，分 read / write / admin 三级；A1 接 users/devices 时换实现，不动路由
-- [ ] 管理级：`/v1/shutdown`；账号增删与登录（`/v1/accounts*` 的写接口）。插件模型表归写级：只影响界面显示哪些模型
-- [ ] 写级：agent 增删启停取消压缩、改名改话题归档改档案连接、发消息与撤回；run 的 approve / reject / cancel / land / finish；question 的 answer / dismiss；插件模型表
-- [ ] 读级：`/v1/info`、agents 列表与详情、transcript、turn diff、plugins、usage、quota、accounts 读接口、runs 读接口、events、notes
-- [ ] `ErrorCode` 增 `Forbidden`（现在只有 `Unauthorized`，见 [api-types](../crates/api-types/src/lib.rs)）；越权返 403 而不是 401，GUI 据此置灰入口并说明原因
-- [ ] 验收：只读凭据打写接口得 403，会话 token 打管理接口得 403，错误信息能看出缺哪一级
+- [x] 把校验从 `require_token` 抽成可替换的策略点，分 read / write / admin 三级；A1 接 users/devices 时换实现，不动路由（`crates/hub/src/access.rs`；总 token = admin，新增 `<home>/token-read` = read，会话 token 只到 `/v1/me*`；DOGFOOD §7）
+- [x] 管理级：`/v1/shutdown`；账号增删与登录（`/v1/accounts*` 的写接口）。插件模型表归写级：只影响界面显示哪些模型
+- [x] 写级：agent 增删启停取消压缩、改名改话题归档改档案连接、发消息与撤回；run 的 approve / reject / cancel / land / finish；question 的 answer / dismiss；插件模型表
+- [x] 读级：`/v1/info`、agents 列表与详情、transcript、turn diff、plugins、usage、quota、accounts 读接口、runs 读接口、events、notes
+- [~] `ErrorCode` 增 `Forbidden`（现在只有 `Unauthorized`，见 [api-types](../crates/api-types/src/lib.rs)）；越权返 403 而不是 401（已做）；GUI 据此置灰入口并说明原因（未做：GUI 总用总 token）
+- [x] 验收：只读凭据打写接口得 403，会话 token 打管理接口得 403，错误信息能看出缺哪一级（`crates/hub/tests/api.rs` `credentials_have_levels`）
 
 令牌与免鉴权面：
 
@@ -172,3 +172,4 @@ B3 远程开发：
 - [x] P0-4 main 动过之后的落地：落地前在集成 worktree 里 `git merge <base>`（选 merge 不选 rebase，理由见 DOGFOOD §4）；冲突时建 `sync-<base>` 任务交给 run 的默认 worker、写 `run.note`、通知 lead，任务合并后再落地；`land` 返回 `LandOutcome`；mock 场景「落地等冲突解决」
 - [x] P1-5 看额度派活：`AgentHost::route` 按账号健康度（窗口 ≥ 90% 快用完、100% / `reached` / credits ≤ 0 已用完）在派活时换同厂商账号或换别家队友；worker 撞限时由新克隆在同一 worktree 接手；任务卡片进度行、`task.rerouted` 事件、lead 通知三处说明；预算在 hub 回来时先结算再调度；mock 场景「额度改派」
 - [x] P1-6 统一项目规则：`CROSSAGENTS.md` → `AGENTS.md` → `CLAUDE.md`（从工作目录找到仓库根），注入给不会自己读该文件的 agent 的开场说明，各驱动按自家格式（Claude `--append-system-prompt`、Codex `developerInstructions`、ACP 首条消息）；Claude 设置源三档开关；mock 场景「Claude 设置源」
+- [x] P1-7 分级审批与权限：`PermissionPolicy::Guard`（Claude 走 `can_use_tool`、Codex `untrusted`），hub 判断危险动作（push、发布、改 CI、`rm -rf` 到工作目录外等）后以 `HumanAction::Approval` 问人，超时 / `human_ask=deny` 时拒绝；Work worker 默认守卫（run 策略 `approvals`），Chat 可在 `config.permission` 打开；API 三级权限与 403 `forbidden`；mock 场景「危险操作待批准」

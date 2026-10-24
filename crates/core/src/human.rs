@@ -36,6 +36,9 @@ pub enum HumanAction {
     /// The run hit its budget: the first option raises it by half and resumes, the second
     /// cancels the run.
     Budget,
+    /// An agent asks to do something dangerous (docs/tasks/DOGFOOD.md §7): the first option
+    /// allows it, anything else declines.
+    Approval,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

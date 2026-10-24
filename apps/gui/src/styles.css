@@ -1390,3 +1390,4 @@ html, body { overflow: hidden; }
 .lightbox { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 24px; background: rgba(0, 0, 0, 0.72); cursor: zoom-out; }
 .lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: var(--radius); }
 .board-progress { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.approval-command { margin: 6px 0 0; padding: 6px 10px; border-radius: var(--radius); background: var(--surface-sunk); white-space: pre-wrap; word-break: break-all; font-size: var(--mono-size); }

@@ -757,6 +757,8 @@ pub struct ListToolsResponse {
 pub enum ErrorCode {
     BadRequest,
     Unauthorized,
+    /// The credential is valid but its level is too low (docs/API-AUTH.md §3).
+    Forbidden,
     NotFound,
     Conflict,
     /// The agent process or its protocol failed.

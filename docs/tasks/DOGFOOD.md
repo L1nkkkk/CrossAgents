@@ -200,3 +200,37 @@ hub 在开会话时把一份项目规则写进开场说明（`SessionSpec.instru
 ### 待实测
 
 - `--setting-sources ""` 在当前 Claude Code 版本上是否等于“都不读”；CodeBuddy 是否自己读 `CLAUDE.md`（目前按不读处理，会注入，至多重复一次）。
+
+## 7. 分级审批与权限（P1）
+
+### 问题
+
+两件事：
+
+- agent 以放行模式运行，`git push`、改 `.github/` 里的 CI、`rm -rf ~` 这类动作不经过任何人。自举时 worker 改的就是 CrossAgents 自己，推错了或改坏了 CI，代价落在人身上。
+- 本地 API 只有一把总 token，能读的就能停 hub、删账号（TODO §二）。
+
+### 设计
+
+**审批（守卫模式）**
+
+- 新的权限策略 `PermissionPolicy::Guard`：安全的照常放行，危险的问人。驱动侧：Claude 不加 `--dangerously-skip-permissions`，每次 `can_use_tool` 都交给 hub 判断（安全的立即放行，不打扰人）；Codex 用 `danger-full-access` 沙箱加 `untrusted` 审批，命令请求交给 hub；ACP 的权限请求同样交给 hub。
+- 谁用守卫：Work 任务的 worker 默认用（run 策略新字段 `approvals`，缺省 `guard`，可设 `off` 回到放行）；Chat 会话不变（人就在旁边看着），单个 agent 可以在 `config.permission` 里设 `guard`。**这是一个产品取舍，用户可改：** 只对无人看守的 worker 默认打开。
+- 什么算危险（hub 里的纯函数，有单元测试）：命令里有 `git push`、`gh pr merge` / `gh release`、`npm publish` / `cargo publish` / `docker push`、`curl … | sh`、`sudo`、`crossagents hub stop`，或 `rm -rf` 指向 `/`、`~`、`..`、盘符根；改动的文件在 `.github/`、`.gitlab-ci.yml`、`.circleci/`、`azure-pipelines.yml`、`Jenkinsfile`。
+- 怎么问：沿用「需要你」的 `HumanItem`，新动作类型 `HumanAction::Approval`，选项「允许」「拒绝」，缺省「拒绝」。超时跟 run 的 `human_ask` 策略（`timeout` 用它的时长，否则 30 分钟）；`human_ask = deny` 的全托管 run 直接拒绝并告诉 agent 原因。agent 那一轮在等待期间挂着（就像在等终端确认），回答后继续；拒绝时 agent 收到“被人拒绝”。
+
+**权限分级**（TODO §二）
+
+- `require_token` 拆成“认证 + 策略点”：认证得出凭据的级别（总 token = admin；新增只读 token `<home>/token-read` = read；会话 token = 只认 `/v1/me*`），策略点按路由表查该路由要求的级别（与 API-AUTH 表一致），不够返回 **403** `forbidden`，信息写明缺哪一级。401 仍只表示凭据缺失或无效。
+- `ErrorCode` 增 `Forbidden`（不升 API 版本：新增错误码取值）。
+- A1 引入用户与设备时只换“凭据 → 级别”这一步，路由表不动。
+
+### 不做
+
+- 不解析 shell 语法做精确判断（如变量展开后的路径）：按文本匹配，宁可多问。
+- 不给 Chat 默认开守卫；不做“记住这次允许”的长期规则。
+- GUI 还没有据 403 置灰入口（GUI 总是用总 token，碰不到 403）。
+
+### 待实测
+
+- Claude Code 在非放行模式下每个 Bash / Edit 都走 `can_use_tool` 时的流畅度；Codex `untrusted` 下的审批请求形状。

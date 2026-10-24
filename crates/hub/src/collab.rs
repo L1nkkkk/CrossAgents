@@ -87,6 +87,8 @@ pub struct CollabSetup {
     /// Root of run and task worktrees: agents working there build into their own target
     /// directory (docs/tasks/DOGFOOD.md §1).
     pub worktrees: PathBuf,
+    /// Decides guarded agents' permission requests; set once the orchestrator exists.
+    pub orchestrator: Arc<OnceLock<Arc<crossagents_orchestrator::Orchestrator>>>,
 }
 
 impl CollabSetup {
@@ -120,10 +122,13 @@ impl SessionSetup for CollabSetup {
 
     async fn prepare(&self, agent: &Agent) -> Result<SessionExtras, CoreError> {
         let agent_env = self.agent_env(agent).await?;
+        let (permission, permissions) = self.permissions(agent).await;
         let Some((program, args)) = self.mcp_command.split_first() else {
             return Ok(SessionExtras {
                 instructions: Some(instructions(agent)),
                 env: agent_env,
+                permission,
+                permissions,
                 ..SessionExtras::default()
             });
         };
@@ -143,7 +148,31 @@ impl SessionSetup for CollabSetup {
             }],
             instructions: Some(instructions(agent)),
             env: agent_env,
+            permission,
+            permissions,
         })
+    }
+
+    async fn permissions(
+        &self,
+        agent: &Agent,
+    ) -> (
+        Option<crossagents_core::PermissionPolicy>,
+        Option<Arc<dyn crossagents_core::PermissionHandler>>,
+    ) {
+        let guard = Arc::new(crate::guard::Guard {
+            orchestrator: self.orchestrator.clone(),
+            agent: agent.clone(),
+        });
+        // Before the orchestrator exists (sessions taken over at startup) the policy cannot
+        // be told yet; the guard itself checks once it asks.
+        let Some(orchestrator) = self.orchestrator.get() else {
+            return (None, Some(guard));
+        };
+        if !orchestrator.guards(agent).await {
+            return (None, None);
+        }
+        (Some(crossagents_core::PermissionPolicy::Guard), Some(guard))
     }
 }
 

@@ -341,3 +341,31 @@ export function rerouteRun(): { state: MockState; script: Step[]; route: string 
     route: `#/runs/${d.run.id}`,
   };
 }
+
+/**
+ * Approvals (docs/tasks/DOGFOOD.md §7): Rex, working on #a under the run's guard, wants to
+ * push; the request waits in 需要你 with 允许 / 拒绝, declining by itself in 30 minutes.
+ */
+export function approvalRun(): { state: MockState; script: Step[]; route: string } {
+  const scene = oauthRun("running");
+  const d = scene.state.runs[0];
+  const a = d.tasks.find((t) => t.key === "a")!;
+  const rexA = scene.state.agents.find((x) => x.id === a.assignee)!;
+  scene.state.questions.push({
+    id: `a-${uid().slice(0, 10)}`,
+    kind: "question",
+    from: rexA.id,
+    run_id: d.run.id,
+    task_id: a.id,
+    text: `${rexA.name} 想要执行（pushes to a remote）：\ngit push origin crossagents/oauth-login/a`,
+    options: ["允许", "拒绝"],
+    default: "拒绝",
+    timeout_at: ago(-29),
+    status: "open",
+    answer: null,
+    answered_at: null,
+    action: "approval",
+    created_at: ago(1),
+  });
+  return { ...scene, route: "#/" };
+}

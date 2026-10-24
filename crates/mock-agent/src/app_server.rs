@@ -6,7 +6,8 @@
 //!
 //! - `[slow]`      keep the turn running until interrupted
 //! - `[sleep MS]`  keep the turn running for MS milliseconds
-//! - `[tool]`      ask for command approval, then say `permission=<decision>`
+//! - `[tool]`      ask for command approval, then say `permission=<decision>`; `[tool CMD]`
+//!   asks about the command CMD
 //! - `[write P=C]` write file P (relative to the thread's cwd), report a file change and diff
 //! - `[history]`   say `history=<earlier inputs joined by |>`
 //! - `[mcp]`       say the MCP servers the thread was given and their approval mode
@@ -297,8 +298,22 @@ impl MockAppServer {
                 _ = tokio::time::sleep(Duration::from_millis(ms)) => {}
             }
         }
-        if status == "completed" && text.contains("[tool]") {
-            let item = json!({ "type": "commandExecution", "id": format!("exec-{uid}"), "command": "mock-tool --go",
+        let tool = text
+            .split("[tool")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .map(|c| {
+                let c = c.trim();
+                if c.is_empty() {
+                    "mock-tool --go".to_owned()
+                } else {
+                    c.to_owned()
+                }
+            });
+        if status == "completed"
+            && let Some(command) = tool
+        {
+            let item = json!({ "type": "commandExecution", "id": format!("exec-{uid}"), "command": command,
                 "cwd": thread["cwd"], "status": "inProgress" });
             self.notify(
                 "item/started",
@@ -311,7 +326,7 @@ impl MockAppServer {
                 .request(
                     "item/commandExecution/requestApproval",
                     json!({ "kind": "command", "threadId": tid, "turnId": uid, "itemId": format!("exec-{uid}"),
-                        "command": "mock-tool --go", "cwd": thread["cwd"], "startedAtMs": 0,
+                        "command": command, "cwd": thread["cwd"], "startedAtMs": 0,
                         "availableDecisions": ["accept", "acceptForSession", "decline", "cancel"] }),
                 )
                 .await;
