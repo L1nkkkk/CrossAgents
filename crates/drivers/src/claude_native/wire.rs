@@ -848,9 +848,14 @@ pub fn permission_response(decision: PermissionDecision, request: &Value) -> Val
             }
             answer
         }
-        PermissionDecision::Deny => {
-            json!({ "behavior": "deny", "message": "Declined by CrossAgents." })
-        }
+        // Said in full: told only "declined", models split the command and try the refused
+        // part again on its own.
+        PermissionDecision::Deny => json!({
+            "behavior": "deny",
+            "message": "Declined by CrossAgents: the person or the hub's rules refused this action. \
+                        Do not retry it, in this or another form; carry on without it and say in \
+                        your reply or report that it was refused.",
+        }),
         PermissionDecision::Cancel => json!({
             "behavior": "deny",
             "message": "Declined by CrossAgents; the turn is stopped.",

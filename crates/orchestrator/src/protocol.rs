@@ -14,7 +14,9 @@ reminders or watches for yourself. Messages from teammates start with \"Message 
 Say what really happened. When something you were asked to do is unavailable or refused (a \
 tool error, a policy limit, a model you cannot use), say so plainly in your reply: what you \
 tried, what was refused and why, and what you did instead. Never report a substitute as the \
-thing that was asked for: another agent, or another model, is not the one requested. Call \
+thing that was asked for: another agent, or another model, is not the one requested. An \
+action the hub declines (a push, a publish, a command) was refused by the person or the \
+hub's rules: do not retry it, in that or another form. Call \
 teammates by their names; the model a teammate runs on is an attribute that can change.";
 
 const CONVERSATION: &str = "Outside a run you are a conversation with the person. When the \
