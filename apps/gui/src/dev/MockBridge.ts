@@ -313,6 +313,17 @@ export class MockBridge implements CrossAgentsBridge {
         this.emit({ type: "agent.updated", data: { agent: { ...a } } });
         return json(200, a);
       }
+      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/settings$/))) {
+        const a = this.agent(m[1]);
+        if (!a) return notFound("agent");
+        const config = { ...((a.config as Record<string, unknown>) ?? {}) };
+        const sources = (body as { setting_sources: string | null }).setting_sources;
+        if (sources === null) delete config.setting_sources;
+        else config.setting_sources = sources;
+        a.config = config as Agent["config"];
+        this.emit({ type: "agent.updated", data: { agent: { ...a } } });
+        return json(200, a);
+      }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/topic$/))) {
         const a = this.agent(m[1]);
         if (!a) return notFound("agent");

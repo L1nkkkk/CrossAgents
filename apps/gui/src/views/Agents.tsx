@@ -148,6 +148,9 @@ export function ProfileEditor({ agent, onDone }: { agent: Agent; onDone: () => v
   const remove = useArmed();
   const models = plugins.data?.find((p) => p.name === agent.plugin)?.models ?? [];
   const modelValue = model ?? agent.model ?? "";
+  const claudeLike = agent.plugin === "claude" || agent.plugin === "codebuddy";
+  const savedSources = settingSourcesOf(agent);
+  const [sources, setSources] = useState<string | null>(savedSources);
   const set = (patch: Partial<AgentProfile>) => setProfile((p) => ({ ...p, ...patch }));
   const preview = { ...agent, name: name.trim() || agent.name, profile } as Agent;
 
@@ -160,6 +163,7 @@ export function ProfileEditor({ agent, onDone }: { agent: Agent; onDone: () => v
       if (name.trim() && name.trim() !== agent.name) await api.renameAgent(agent.id, name.trim());
       await api.updateProfile(agent.id, { ...profile, display_name: null });
       if ((modelValue.trim() || null) !== agent.model) await api.setModel(agent.id, modelValue.trim() || null);
+      if (claudeLike && sources !== savedSources) await api.agentSettings(agent.id, { setting_sources: sources });
       onDone();
     } catch (err) {
       setError(errorText(err));
@@ -205,6 +209,17 @@ export function ProfileEditor({ agent, onDone }: { agent: Agent; onDone: () => v
       </Field>
 
       <ModelField value={modelValue} models={models} onChange={setModel} />
+      {claudeLike && (
+        <Field label="读取 Claude 设置（CLAUDE.md、.claude/ 规则、hooks、权限）">
+          <select value={sources ?? "default"} onChange={(e) => setSources(e.target.value === "default" ? null : e.target.value)}>
+            {SETTING_SOURCES.map((s) => (
+              <option key={s.value} value={s.value}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        </Field>
+      )}
       <p className="muted small" style={{ margin: 0 }}>
         @{agent.name} · {agent.role} · {agent.plugin}
         {agent.driver ? ` · ${agent.driver}` : ""} · 新的人设在它下次开会话时生效；模型从下一轮起生效。
@@ -237,6 +252,21 @@ export function ProfileEditor({ agent, onDone }: { agent: Agent; onDone: () => v
       </div>
     </form>
   );
+}
+
+/**
+ * Which of Claude Code's settings an agent loads (docs/tasks/DOGFOOD.md §6): presets of
+ * `config.setting_sources`. With none, the hub still gives it the project's rules.
+ */
+const SETTING_SOURCES = [
+  { value: "default", label: "项目与本地（缺省）：仓库的 CLAUDE.md 与 .claude/" },
+  { value: "user,project,local", label: "全部：再加本机 ~/.claude 的个人设置与 hooks" },
+  { value: "", label: "都不读：只用 CrossAgents 注入的项目规则（最可控）" },
+];
+
+function settingSourcesOf(agent: Agent): string | null {
+  const value = (agent.config as Record<string, unknown> | null)?.setting_sources;
+  return typeof value === "string" ? value : null;
 }
 
 /** The plugin's models as a list; free text when it lists none or the value is not one of them. */

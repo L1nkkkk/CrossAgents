@@ -17,12 +17,12 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use crossagents_api_types::{
-    API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AnswerRequest, ApiError,
-    ArchiveAgentRequest, AttachmentContent, ChangesResponse, ConnectInfo, CreateAccountRequest,
-    CreateAgentRequest, CreateRunRequest, DiffSide, ErrorCode, FinishRequest, HealthResponse,
-    HubInfo, InitRepoRequest, LandRequest, ListAccountsResponse, ListAgentsResponse,
-    ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
-    ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
+    API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentSettingsRequest,
+    AnswerRequest, ApiError, ArchiveAgentRequest, AttachmentContent, ChangesResponse, ConnectInfo,
+    CreateAccountRequest, CreateAgentRequest, CreateRunRequest, DiffSide, ErrorCode, FinishRequest,
+    HealthResponse, HubInfo, InitRepoRequest, LandRequest, ListAccountsResponse,
+    ListAgentsResponse, ListNotesResponse, ListPluginsResponse, ListQuestionsResponse,
+    ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
     RenameAgentRequest, RunDetail, SendMessageRequest, SendMessageResponse, SetModelRequest,
     SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, Transcript, TurnDiffResponse,
     UsageGroup, UsageResponse,
@@ -97,6 +97,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/agents/{key}/transcript", get(transcript))
         .route("/v1/agents/{key}/turns/{message_id}/diff", get(turn_diff))
         .route("/v1/agents/{key}/profile", post(update_profile))
+        .route("/v1/agents/{key}/settings", post(agent_settings))
         .route("/v1/agents/{key}/model", post(set_model))
         .route("/v1/agents/{key}/name", post(rename_agent))
         .route("/v1/agents/{key}/topic", post(set_topic))
@@ -377,6 +378,55 @@ async fn update_profile(
         .update_agent_profile(agent.id, &profile)
         .await?;
     agent.profile = profile;
+    state
+        .bus
+        .publish(EventKind::AgentUpdated {
+            agent: agent.clone(),
+        })
+        .await?;
+    Ok(Json(agent))
+}
+
+/// `POST /v1/agents/{key}/settings`: which of Claude Code's settings the agent loads
+/// (docs/tasks/DOGFOOD.md §6), from its next session.
+async fn agent_settings(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(req): Json<AgentSettingsRequest>,
+) -> ApiResult<Json<Agent>> {
+    let mut agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    if !agent.config.is_object() {
+        agent.config = serde_json::json!({});
+    }
+    match req.setting_sources {
+        None => {
+            agent
+                .config
+                .as_object_mut()
+                .unwrap()
+                .remove("setting_sources");
+        }
+        Some(sources) => {
+            let sources: Vec<&str> = sources
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
+            if let Some(bad) = sources
+                .iter()
+                .find(|s| !["user", "project", "local"].contains(s))
+            {
+                return Err(AppError::bad_request(format!(
+                    "unknown setting source {bad:?} (user, project, local)"
+                )));
+            }
+            agent.config["setting_sources"] = sources.join(",").into();
+        }
+    }
+    state
+        .store()
+        .update_agent_config(agent.id, &agent.config)
+        .await?;
     state
         .bus
         .publish(EventKind::AgentUpdated {

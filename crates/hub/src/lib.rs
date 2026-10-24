@@ -11,6 +11,7 @@ pub mod models;
 pub mod notices;
 pub mod paths;
 pub mod routing;
+pub mod rules;
 pub mod runtime;
 pub mod shadow;
 pub mod snapshot;

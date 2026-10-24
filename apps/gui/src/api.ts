@@ -10,6 +10,7 @@ import type { AttachmentContent } from "@bindings/AttachmentContent";
 import type { Task } from "@bindings/Task";
 import type { TaskReviewRequest } from "@bindings/TaskReviewRequest";
 import type { Agent } from "@bindings/Agent";
+import type { AgentSettingsRequest } from "@bindings/AgentSettingsRequest";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
 import type { CreateAccountRequest } from "@bindings/CreateAccountRequest";
 import type { HumanItem } from "@bindings/HumanItem";
@@ -129,6 +130,8 @@ export const api = {
   notes: (scope: "run" | "team", run?: string) =>
     request<ListNotesResponse>("GET", `/v1/notes?scope=${scope}${run ? `&run=${enc(run)}` : ""}`),
   updateProfile: (key: string, profile: AgentProfile) => request<Agent>("POST", `/v1/agents/${enc(key)}/profile`, profile),
+  /** Which Claude settings the agent loads, from its next session. */
+  agentSettings: (key: string, req: AgentSettingsRequest) => request<Agent>("POST", `/v1/agents/${enc(key)}/settings`, req),
   transcript: (key: string) => request<Transcript>("GET", `/v1/agents/${enc(key)}/transcript`),
   /** One file sent to the agent, base64. */
   attachment: (key: string, id: string) => request<AttachmentContent>("GET", `/v1/agents/${enc(key)}/attachments/${enc(id)}`),

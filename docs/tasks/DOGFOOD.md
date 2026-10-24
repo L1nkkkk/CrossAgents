@@ -170,3 +170,33 @@ hub 已经知道每个账号的额度（`/v1/quota`：5 小时 / 每周窗口用
 ### 待实测
 
 - 真实 Codex / Claude 撞限时 `reached` 的报法与恢复时间；CodeBuddy credits 余额字段的格式。
+
+## 6. 统一的项目规则（P1）
+
+### 问题
+
+每家 agent 只读自己的规则文件：Claude Code 读 `CLAUDE.md`（`--setting-sources` 含 `project` 时），Codex 读 `AGENTS.md`，其余（CodeBuddy、ACP agent）什么都不读。同一个仓库里混用几家时，规则要么写几份、要么有人看不到。CrossAgents 自己的仓库就是这样：约定写在 `CLAUDE.md` 和任务书里，Codex worker 看不到。
+
+### 设计
+
+hub 在开会话时把一份项目规则写进开场说明（`SessionSpec.instructions`，各驱动按自家格式注入：Claude 的 `--append-system-prompt`、Codex 的 `developerInstructions`、ACP 的首条消息前缀），按以下顺序找规则文件，从 agent 的工作目录往上找到仓库根（有 `.git` 的目录）为止：
+
+| 文件 | 注入给谁 |
+|---|---|
+| `CROSSAGENTS.md` | 所有 agent（没有哪家会自己读它，它就是给 CrossAgents 用的统一规则） |
+| 否则 `AGENTS.md` | 除 Codex 外的 agent（Codex 自己读） |
+| 否则 `CLAUDE.md` | 除“会自己读 CLAUDE.md 的 Claude”外的 agent；Claude 的 `setting_sources` 不含 `project` 时也注入 |
+
+只取一份，单个文件最多 64 KB（超出截断并注明）；注入时标明来源文件，正文原样。规则在会话开启时读，改了规则从下一个会话起生效（worker 每个任务都是新会话）。
+
+**设置源开关**（TODO §五）：编辑队友的面板里给 Claude 系（claude、codebuddy）加「读取 Claude 设置」三档预设：项目与本地（缺省，`project,local`）、全部（`user,project,local`，会带上本机 `~/.claude` 的个人设置和 hooks）、都不读（空，只用 CrossAgents 注入的规则，最可控）。新接口 `POST /v1/agents/{key}/settings { setting_sources }`（写级），写进 `config.setting_sources`，下个会话生效。
+
+### 不做
+
+- 不合并多份规则文件（三份都在时只取 `CROSSAGENTS.md`）：合并的语义（覆盖还是叠加）说不清，交给人在 `CROSSAGENTS.md` 里写全。
+- 不把规则写进 worktree 的文件里（会被提交）。
+- hooks 默认关闭（TODO §五 下一条）没做：“都不读”一档已能关掉 hooks。
+
+### 待实测
+
+- `--setting-sources ""` 在当前 Claude Code 版本上是否等于“都不读”；CodeBuddy 是否自己读 `CLAUDE.md`（目前按不读处理，会注入，至多重复一次）。

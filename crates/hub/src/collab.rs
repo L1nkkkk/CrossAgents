@@ -147,10 +147,14 @@ impl SessionSetup for CollabSetup {
     }
 }
 
-/// Who the agent is (name, model, card), then how it works with the hub (its role's guide).
+/// Who the agent is (name, model, card), then how it works with the hub (its role's guide),
+/// then the project's rules when its own CLI would not read them (docs/tasks/DOGFOOD.md §6).
 fn instructions(agent: &Agent) -> String {
     let guide = crossagents_orchestrator::protocol::guide_for(agent);
-    format!("{}\n\n{guide}", agent.identity())
+    match crate::rules::for_agent(agent) {
+        Some(rules) => format!("{}\n\n{guide}\n\n{rules}", agent.identity()),
+        None => format!("{}\n\n{guide}", agent.identity()),
+    }
 }
 
 /// The hub as seen by the orchestrator.

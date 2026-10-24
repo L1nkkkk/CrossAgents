@@ -30,7 +30,7 @@ const ALLOWED: readonly { method: string; path: RegExp; level: "read" | "write" 
   { method: "DELETE", path: /^\/v1\/agents\/[^/]+$/, level: "write" },
   {
     method: "POST",
-    path: /^\/v1\/agents\/[^/]+\/(start|stop|cancel|compact|model|name|topic|archive|profile|connect)$/,
+    path: /^\/v1\/agents\/[^/]+\/(start|stop|cancel|compact|model|name|topic|archive|profile|settings|connect)$/,
     level: "write",
   },
   { method: "POST", path: /^\/v1\/agents\/[^/]+\/messages$/, level: "write" },

@@ -94,6 +94,15 @@ pub struct ArchiveAgentRequest {
     pub archived: bool,
 }
 
+/// `POST /v1/agents/{key}/settings` (docs/tasks/DOGFOOD.md §6). `setting_sources`: which
+/// of Claude Code's settings it loads, comma-separated from `user`, `project`, `local`
+/// (empty: none); `None` goes back to the default (`project,local`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AgentSettingsRequest {
+    pub setting_sources: Option<String>,
+}
+
 /// `POST /v1/agents/{key}/model`. `None` leaves the model to the agent's own default.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
