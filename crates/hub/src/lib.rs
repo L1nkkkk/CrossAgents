@@ -10,6 +10,7 @@ pub mod identity;
 pub mod models;
 pub mod notices;
 pub mod paths;
+pub mod routing;
 pub mod runtime;
 pub mod shadow;
 pub mod snapshot;
@@ -191,6 +192,21 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         },
     );
     orchestrator.watch();
+    // Settle what runs spent while no hub was there (agents' replayed usage included) before
+    // anything is dispatched: an over-budget run pauses first (docs/tasks/DOGFOOD.md §5).
+    let budgets = Arc::new(
+        budget::Budgets::load(
+            store.as_ref() as &dyn crossagents_core::Store,
+            orchestrator.clone(),
+        )
+        .await?,
+    );
+    if let Err(err) = budgets
+        .check(store.as_ref() as &dyn crossagents_core::Store)
+        .await
+    {
+        tracing::warn!(error = %err, "cannot settle budgets at startup");
+    }
     orchestrator.resume().await?;
 
     let started_at = Utc::now();
@@ -206,13 +222,6 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
 
     let shutdown = CancellationToken::new();
     let stop_agents = Arc::new(AtomicBool::new(!hosted));
-    let budgets = Arc::new(
-        budget::Budgets::load(
-            store.as_ref() as &dyn crossagents_core::Store,
-            orchestrator.clone(),
-        )
-        .await?,
-    );
     Arc::new(notices::Notices {
         bus: bus.clone(),
         runtime: runtime.clone(),

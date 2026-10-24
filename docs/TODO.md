@@ -70,7 +70,7 @@
 - [x] GUI 自动更新：electron-builder 改出 NSIS 安装包（按用户安装），electron-updater 从 GitHub Releases 后台下载、退出时安装；打包前检查 GUI 与 Cargo 版本一致
 - [ ] 建公开的发布仓库 `L1nkkkk/CrossAgents-releases`（主仓库私有，见 MULTI-NODE §13.5），跑一次 `npm run electron:release` 走通真实的在线更新
 - [ ] 安装包与 exe 代码签名（未签名时 SmartScreen 首次运行会拦）
-- [ ] 无窗口时的额度与预算上限：暂缓（2026-10-23 决定）。现状：Work run 的 `policy.budget` 只在 hub 在时检查（`crates/hub/src/budget.rs`），hub 不在时宿主里的 agent 不受限，Chat 会话没有上限。开工前要定：hub 不在时超限是宿主停在轮次之间，还是只记账等 hub 回来处理；Chat 要不要默认上限
+- [x] 无窗口时的额度与预算上限（2026-10-24 决定，见 [tasks/DOGFOOD.md](tasks/DOGFOOD.md) §5）：hub 不在时只记账、hub 回来时结算——宿主缓存并补发用量事件，新 hub 启动时先读账并立即检查一次预算，再恢复调度；不在宿主里强制。Chat 默认上限仍未做。原记录：暂缓（2026-10-23 决定）。现状：Work run 的 `policy.budget` 只在 hub 在时检查（`crates/hub/src/budget.rs`），hub 不在时宿主里的 agent 不受限，Chat 会话没有上限。开工前要定：hub 不在时超限是宿主停在轮次之间，还是只记账等 hub 回来处理；Chat 要不要默认上限
 
 ## 四、可观测性
 
@@ -170,3 +170,4 @@ B3 远程开发：
 - [x] P0-2 GUI 审查闭环：`GET /v1/runs/{key}/tasks/{task}/diff`（任务全量 diff）、`GET /v1/runs/{key}/diff`（run 对 base 的总 diff）、`POST /v1/runs/{key}/tasks/{task}/review`（逐行 / 逐文件意见以人的身份进 worker 收件箱，`rework` 时打回）；任务详情「审查」节带行号可评论，落地卡片「查看全部改动」；mock 场景「审查任务」「落地前总 diff」
 - [x] P0-3 agent 自己验证：消息带附件（hub 落盘、事件与 transcript 带元数据、claude / codex 原生映射、其余驱动写成引用）；GUI 粘贴 / 拖入 / 选文件、时间线缩略图；`npm --prefix apps/gui run screenshot` 截 mock 预览，协作工具 `gui_screenshot` 把 PNG 作为 MCP 图片返回；mock 场景「消息带附件」
 - [x] P0-4 main 动过之后的落地：落地前在集成 worktree 里 `git merge <base>`（选 merge 不选 rebase，理由见 DOGFOOD §4）；冲突时建 `sync-<base>` 任务交给 run 的默认 worker、写 `run.note`、通知 lead，任务合并后再落地；`land` 返回 `LandOutcome`；mock 场景「落地等冲突解决」
+- [x] P1-5 看额度派活：`AgentHost::route` 按账号健康度（窗口 ≥ 90% 快用完、100% / `reached` / credits ≤ 0 已用完）在派活时换同厂商账号或换别家队友；worker 撞限时由新克隆在同一 worktree 接手；任务卡片进度行、`task.rerouted` 事件、lead 通知三处说明；预算在 hub 回来时先结算再调度；mock 场景「额度改派」

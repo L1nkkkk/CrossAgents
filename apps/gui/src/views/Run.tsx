@@ -37,6 +37,7 @@ function concerns(runId: string, e: HubEvent): boolean {
       return e.data.id === runId;
     case "task.status_changed":
     case "task.checked":
+    case "task.rerouted":
       return e.data.run_id === runId;
     default:
       return false;
@@ -143,6 +144,11 @@ export function RunView({ runId, selectedTask }: { runId: string; selectedTask?:
                           <div className="sub row" style={{ gap: 6, flexWrap: "nowrap" }}>
                             <TaskOwner task={task} agents={agents.data} fallback={run.config.worker} />
                             {task.escalated && " · 已升级"}
+                            {task.progress && !task.status.match(/merged|failed|cancelled/) && (
+                              <span className="board-progress" title={task.progress}>
+                                · {task.progress}
+                              </span>
+                            )}
                           </div>
                         </div>
                         <StateWord state={taskState(task, tasks)} />

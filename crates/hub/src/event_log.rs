@@ -226,7 +226,10 @@ mod tests {
     #[tokio::test]
     async fn old_files_go_and_other_files_stay() {
         let home = tempfile::tempdir().unwrap();
-        let old = file(home.path(), Utc::now().date_naive() - Duration::days(KEEP_DAYS + 1));
+        let old = file(
+            home.path(),
+            Utc::now().date_naive() - Duration::days(KEEP_DAYS + 1),
+        );
         let recent = file(home.path(), Utc::now().date_naive() - Duration::days(1));
         let foreign = home.path().join("notes.txt");
         for path in [&old, &recent, &foreign] {

@@ -12,7 +12,7 @@ use crossagents_core::{
     Agent, AgentId, AgentKey, AgentStatus, CoreError, Envelope, EventBus, EventKind, McpServerSpec,
     MessageId, MessageSource, Role, RunId,
 };
-use crossagents_orchestrator::AgentHost;
+use crossagents_orchestrator::{AgentHost, Route};
 use tokio::sync::RwLock;
 
 use crate::runtime::{Runtime, SessionExtras, SessionSetup};
@@ -212,7 +212,24 @@ impl AgentHost for HubHost {
         role: Role,
         cwd: &Path,
     ) -> Result<Agent, CoreError> {
-        let template = self.bus.store().get_agent(&AgentKey::Id(template)).await?;
+        self.clone_agent_on(template, name, role, cwd, None).await
+    }
+
+    async fn clone_agent_on(
+        &self,
+        template: AgentId,
+        name: &str,
+        role: Role,
+        cwd: &Path,
+        account: Option<&str>,
+    ) -> Result<Agent, CoreError> {
+        let mut template = self.bus.store().get_agent(&AgentKey::Id(template)).await?;
+        if let Some(account) = account {
+            if !template.config.is_object() {
+                template.config = serde_json::json!({});
+            }
+            template.config["account"] = account.into();
+        }
         let agent = Agent {
             id: AgentId::new(),
             name_source: crossagents_core::NameSource::Chosen,
@@ -237,6 +254,12 @@ impl AgentHost for HubHost {
             })
             .await?;
         Ok(agent)
+    }
+
+    async fn route(&self, template: AgentId, team: &[AgentId], limited: Option<AgentId>) -> Route {
+        crate::routing::route(self, template, team, limited)
+            .await
+            .unwrap_or(Route::Same)
     }
 
     async fn spawn_agent(&self, agent: Agent) -> Result<Agent, CoreError> {

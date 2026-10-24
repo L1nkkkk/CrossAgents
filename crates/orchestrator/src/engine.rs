@@ -610,10 +610,8 @@ impl Orchestrator {
             assigned
         };
         let name = agent_name(if task.escalated { "e" } else { "w" }, run, task);
-        let cwd = task.worktree.clone().unwrap_or_default();
-        let worker = self
-            .fresh_agent(template, &name, Role::Worker, &cwd)
-            .await?;
+        // On an account with quota left (docs/tasks/DOGFOOD.md §5).
+        let worker = self.routed_worker(run, task, template, &name, None).await?;
         task.assignee = Some(worker.id);
         task.attempts = 1;
         task.nudges = 0;

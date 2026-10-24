@@ -256,6 +256,62 @@ impl Accounts {
         Ok(status)
     }
 
+    /// Whether the account has quota left (docs/tasks/DOGFOOD.md §5), from what is already
+    /// known: the cached status and what agents reported since. Never waits for a provider;
+    /// an account read for the first time is `Unknown` and a read starts in the background.
+    pub async fn health(&self, id: &str) -> Health {
+        let Ok(account) = self.store().get_account(id).await else {
+            return Health::Unknown;
+        };
+        let cached = self.statuses.lock().unwrap().get(id).cloned();
+        let observed = self.observed.lock().unwrap().get(id).cloned();
+        if cached.is_none()
+            && let Ok(provider) = self.provider(&account.provider)
+        {
+            self.refresh_status(account, provider.clone());
+        }
+        let mut windows = Vec::new();
+        let mut reached = None;
+        let mut credits = None;
+        if let Some((_, status)) = &cached {
+            windows.extend(status.rate_limits.iter().cloned());
+            for group in &status.limits {
+                windows.extend(group.windows.iter().cloned());
+            }
+            if status.limit_reached {
+                reached = Some("limit reached".to_owned());
+            }
+            credits = status.credits.clone();
+        }
+        // What an agent saw last wins over an older read.
+        if let Some((at, limits)) = &observed
+            && cached
+                .as_ref()
+                .is_none_or(|(_, s)| s.as_of.is_none_or(|as_of| *at > as_of))
+        {
+            windows = limits.windows.clone();
+            for group in &limits.by_limit {
+                windows.extend(group.windows.iter().cloned());
+            }
+            reached = limits.reached.clone();
+            if limits.credits.is_some() {
+                credits = limits.credits.clone();
+            }
+        }
+        if cached.is_none() && observed.is_none() {
+            return Health::Unknown;
+        }
+        judge(&windows, reached.as_deref(), credits.as_ref())
+    }
+
+    /// Marks the account as out of quota now (an agent on it was refused).
+    pub fn mark_reached(&self, id: &str, why: &str) {
+        let mut observed = self.observed.lock().unwrap();
+        let mut limits = observed.get(id).map(|(_, l)| l.clone()).unwrap_or_default();
+        limits.reached = Some(why.to_owned());
+        observed.insert(id.to_owned(), (Utc::now(), limits));
+    }
+
     /// Reads `account`'s status in the background, unless a read is already running.
     fn refresh_status(&self, account: Account, provider: Arc<dyn AccountProvider>) {
         if !self.refreshing.lock().unwrap().insert(account.id.clone()) {
@@ -973,5 +1029,113 @@ mod tests {
         );
         assert!(page_address("https://x.test/").is_none());
         assert!(page_address("http://localhost/").is_none());
+    }
+}
+
+/// Whether an account has quota left.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Health {
+    /// Nothing known yet (first read still running): treated as usable.
+    Unknown,
+    Ok,
+    /// About to run out: a window at [`LOW_PERCENT`] or more.
+    Low(String),
+    /// Out: a window at 100%, the vendor says the limit is reached, or no credits left.
+    Exhausted(String),
+}
+
+impl Health {
+    pub fn usable(&self) -> bool {
+        matches!(self, Self::Unknown | Self::Ok)
+    }
+
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Low(why) | Self::Exhausted(why) => Some(why),
+            _ => None,
+        }
+    }
+}
+
+/// A window this full counts as about to run out.
+pub const LOW_PERCENT: f64 = 90.0;
+
+fn judge(
+    windows: &[crossagents_core::RateWindow],
+    reached: Option<&str>,
+    credits: Option<&crossagents_core::Credits>,
+) -> Health {
+    if let Some(why) = reached {
+        return Health::Exhausted(format!("its limit is reached ({why})"));
+    }
+    if let Some(credits) = credits
+        && !credits.unlimited
+        && let Some(balance) = credits
+            .balance
+            .as_deref()
+            .and_then(|b| b.trim().parse::<f64>().ok())
+        && balance <= 0.0
+    {
+        return Health::Exhausted("no credits left".into());
+    }
+    let fullest = windows
+        .iter()
+        .max_by(|a, b| a.used_percent.total_cmp(&b.used_percent));
+    match fullest {
+        Some(w) if w.used_percent >= 100.0 => {
+            Health::Exhausted(format!("its {} window is used up", w.name))
+        }
+        Some(w) if w.used_percent >= LOW_PERCENT => Health::Low(format!(
+            "its {} window is {:.0}% used",
+            w.name, w.used_percent
+        )),
+        _ => Health::Ok,
+    }
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::*;
+    use crossagents_core::{Credits, RateWindow};
+
+    fn window(name: &str, used: f64) -> RateWindow {
+        RateWindow {
+            name: name.into(),
+            used_percent: used,
+            window_seconds: None,
+            resets_at: None,
+            remaining: None,
+            total: None,
+        }
+    }
+
+    #[test]
+    fn judges_windows_limits_and_credits() {
+        assert_eq!(judge(&[window("5h", 40.0)], None, None), Health::Ok);
+        assert!(
+            matches!(judge(&[window("5h", 40.0), window("weekly", 93.0)], None, None), Health::Low(why) if why.contains("weekly"))
+        );
+        assert!(matches!(
+            judge(&[window("5h", 100.0)], None, None),
+            Health::Exhausted(_)
+        ));
+        assert!(matches!(
+            judge(&[], Some("rate_limited"), None),
+            Health::Exhausted(_)
+        ));
+        let empty = Credits {
+            has_credits: false,
+            unlimited: false,
+            balance: Some("0".into()),
+        };
+        assert!(matches!(
+            judge(&[], None, Some(&empty)),
+            Health::Exhausted(_)
+        ));
+        let unlimited = Credits {
+            unlimited: true,
+            ..empty
+        };
+        assert_eq!(judge(&[], None, Some(&unlimited)), Health::Ok);
     }
 }

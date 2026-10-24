@@ -8,6 +8,19 @@ use crossagents_core::{
 };
 use serde_json::Value;
 
+/// Where a task's worker runs, by quota.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route {
+    /// As planned: the template, on its own account.
+    Same,
+    /// The template on another account of the same vendor.
+    Account { account: String, reason: String },
+    /// Another teammate (another vendor, or an account of its own) instead of the template.
+    Teammate { agent: AgentId, reason: String },
+    /// Nothing better is left; it runs as planned. Why, to say so.
+    Exhausted { reason: String },
+}
+
 #[async_trait]
 pub trait AgentHost: Send + Sync {
     /// Delivers a message to an agent, starting it if needed.
@@ -39,6 +52,25 @@ pub trait AgentHost: Send + Sync {
         role: Role,
         cwd: &Path,
     ) -> Result<Agent, CoreError>;
+    /// Like [`Self::clone_agent`], on `account` instead of the template's when given.
+    async fn clone_agent_on(
+        &self,
+        template: AgentId,
+        name: &str,
+        role: Role,
+        cwd: &Path,
+        account: Option<&str>,
+    ) -> Result<Agent, CoreError> {
+        let _ = account;
+        self.clone_agent(template, name, role, cwd).await
+    }
+    /// Where a clone of `template` should run, given what the accounts have left
+    /// (docs/tasks/DOGFOOD.md §5). `team` are the run's teammates to fall back on; `limited`
+    /// is an agent whose account just hit its limit.
+    async fn route(&self, template: AgentId, team: &[AgentId], limited: Option<AgentId>) -> Route {
+        let _ = (template, team, limited);
+        Route::Same
+    }
     /// Registers a new agent (`agent_spawn`); fails if its plugin is unknown. An empty name
     /// gets a made-up one, a taken one an ordinal ("Nova 2").
     async fn spawn_agent(&self, agent: Agent) -> Result<Agent, CoreError>;

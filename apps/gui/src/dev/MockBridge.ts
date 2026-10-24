@@ -178,6 +178,11 @@ export class MockBridge implements CrossAgentsBridge {
         if (task) task.updated_at = e.ts;
         break;
       }
+      case "task.rerouted": {
+        const task = s.runs.flatMap((d) => d.tasks).find((x) => x.id === e.data.id);
+        if (task) task.progress = e.data.reason;
+        break;
+      }
       case "run.status_changed": {
         const r = s.runs.find((d) => d.run.id === e.data.id);
         if (r) {

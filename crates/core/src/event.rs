@@ -312,6 +312,16 @@ pub enum EventKind {
         key: String,
         text: String,
     },
+    /// The task went to another account or teammate than planned, because of quota
+    /// (docs/tasks/DOGFOOD.md §5). `to` is the worker that now has it.
+    #[serde(rename = "task.rerouted")]
+    TaskRerouted {
+        run_id: RunId,
+        id: TaskId,
+        key: String,
+        to: AgentId,
+        reason: String,
+    },
     /// A command ran in the task's worktree (`workspace_run`), on behalf of `by`.
     #[serde(rename = "task.command")]
     TaskCommand {
@@ -446,6 +456,7 @@ impl EventKind {
             Self::TaskStatusChanged { .. } => "task.status_changed",
             Self::TaskChecked { .. } => "task.checked",
             Self::TaskProgress { .. } => "task.progress",
+            Self::TaskRerouted { .. } => "task.rerouted",
             Self::TaskCommand { .. } => "task.command",
         }
     }
@@ -463,6 +474,7 @@ impl EventKind {
             Self::TaskStatusChanged { run_id, .. }
             | Self::TaskChecked { run_id, .. }
             | Self::TaskProgress { run_id, .. }
+            | Self::TaskRerouted { run_id, .. }
             | Self::TaskCommand { run_id, .. } => Some(*run_id),
             _ => None,
         }
@@ -492,6 +504,7 @@ impl EventKind {
             Self::HumanAsked { item } | Self::HumanAnswered { item } => Some(item.from),
             Self::TaskStatusChanged { assignee, .. } => *assignee,
             Self::TaskCommand { by, .. } => Some(*by),
+            Self::TaskRerouted { to, .. } => Some(*to),
             Self::AgentCreated { agent } | Self::AgentUpdated { agent } => Some(agent.id),
             Self::AgentRemoved { id, .. }
             | Self::AgentStatusChanged { id, .. }

@@ -15,6 +15,7 @@
 //! - `[pid]`       say this process's id
 //! - `[fail]`      fail the turn with an error
 //! - `[crash]`     exit the process
+//! - `[limit N]`   report the account's quota as N% used (at 100, the limit as reached)
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -368,9 +369,16 @@ impl MockAppServer {
         self.notify("thread/tokenUsage/updated", json!({ "threadId": tid, "turnId": uid, "tokenUsage": {
             "total": total, "last": { "totalTokens": 1100, "inputTokens": 1000, "cachedInputTokens": 400,
             "cacheWriteInputTokens": 0, "outputTokens": 100, "reasoningOutputTokens": 10 }, "modelContextWindow": 200000 } })).await;
+        let used = text
+            .split("[limit ")
+            .nth(1)
+            .and_then(|rest| rest.split(']').next())
+            .and_then(|n| n.trim().parse::<u64>().ok())
+            .unwrap_or(7);
+        let reached = (used >= 100).then_some("rate_limit_reached");
         self.notify("account/rateLimits/updated", json!({ "rateLimits": { "limitId": "codex", "primary": {
-            "usedPercent": 7, "windowDurationMins": 300, "resetsAt": 1795131666 }, "secondary": null,
-            "credits": null, "planType": "pro", "rateLimitReachedType": null } })).await;
+            "usedPercent": used, "windowDurationMins": 300, "resetsAt": 1795131666 }, "secondary": null,
+            "credits": null, "planType": "pro", "rateLimitReachedType": reached } })).await;
 
         {
             let mut threads = self.threads.lock().await;

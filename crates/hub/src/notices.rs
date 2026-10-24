@@ -64,6 +64,18 @@ impl Notices {
                 match received {
                     Ok(event) => {
                         matcher.budgets.apply(&event).await;
+                        // A worker refused for quota hands its task on (docs/tasks/DOGFOOD.md §5).
+                        if let EventKind::AgentRateLimits { id, limits } = &event.kind
+                            && let Some(why) = &limits.reached
+                        {
+                            let orchestrator = matcher.orchestrator.clone();
+                            let (id, why) = (*id, why.clone());
+                            tokio::spawn(async move {
+                                if let Err(err) = orchestrator.rate_limited(id, &why).await {
+                                    tracing::warn!(%id, error = %err, "cannot hand on a rate-limited task");
+                                }
+                            });
+                        }
                         if let Err(err) = matcher.on_event(&event).await {
                             tracing::warn!(error = %err, "cannot match watches");
                         }

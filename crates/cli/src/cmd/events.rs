@@ -145,6 +145,7 @@ pub fn summary(kind: &EventKind) -> String {
                 .unwrap_or_else(|| "(deleted)".into())
         ),
         EventKind::TaskProgress { key, text, .. } => format!("#{key} {}", one_line(text)),
+        EventKind::TaskRerouted { key, reason, .. } => format!("#{key} {}", one_line(reason)),
         EventKind::TaskCommand {
             key,
             command,

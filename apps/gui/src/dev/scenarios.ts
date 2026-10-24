@@ -2,7 +2,7 @@
 // an event script to replay, and the page to open.
 
 import { emptyHub } from "../views/Home.mock";
-import { inPlaceRun, landingRun, oauthRun, reviewRun, syncRun } from "../views/Run.mock";
+import { inPlaceRun, landingRun, oauthRun, rerouteRun, reviewRun, syncRun } from "../views/Run.mock";
 import { attachmentSession, chatWithRecruit, crashedSession, soloSession } from "../views/Session.mock";
 import { usageScene } from "../views/Usage.mock";
 import type { MockState, Step } from "./MockBridge";
@@ -21,6 +21,7 @@ export const SCENARIOS: Scenario[] = [
   { key: "review", label: "审查任务", hint: "#c 已报告完成：整个任务的 diff 带行号，点行号写意见，可发给 worker 或打回重做", build: () => reviewRun() },
   { key: "landing", label: "落地前总 diff", hint: "所有任务都已合并、等落地：展开「查看全部改动」看 run 分支对 main 的总 diff", build: () => landingRun() },
   { key: "sync", label: "落地等冲突解决", hint: "main 动过且和 run 冲突：hub 建了 #sync-main 交给 Rex，run 页写明原因，合并后再落地", build: () => syncRun() },
+  { key: "reroute", label: "额度改派", hint: "Mia 的账号额度用完，#b 改到另一个账号；任务卡片写明原因", build: () => rerouteRun() },
   { key: "inplace", label: "无 git 的 run", hint: "文件夹没有 git：run 直接改文件、一次一个任务，可一键初始化 git", build: () => inPlaceRun() },
   { key: "solo", label: "单聊", hint: "Claude 会话：折叠的工具步骤、一轮进行中、两条排队", build: () => soloSession() },
   { key: "attach", label: "消息带附件", hint: "人发的消息带了截图和日志（点缩略图看大图）；输入框可粘贴截图、拖文件或点回形针，发送前能删", build: () => attachmentSession() },

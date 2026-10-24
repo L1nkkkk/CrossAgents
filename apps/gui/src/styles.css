@@ -1389,3 +1389,4 @@ html, body { overflow: hidden; }
 .thumb img { max-width: min(260px, 60vw); max-height: 180px; object-fit: contain; }
 .lightbox { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 24px; background: rgba(0, 0, 0, 0.72); cursor: zoom-out; }
 .lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: var(--radius); }
+.board-progress { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

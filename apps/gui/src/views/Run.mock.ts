@@ -325,3 +325,19 @@ export function syncRun(): { state: MockState; script: Step[]; route: string } {
   d.run = { ...d.run, note: "main moved and conflicts with the run in src/auth/session.rs; task #sync-main resolves it, land again once it is merged" };
   return { ...scene, route: `#/runs/${d.run.id}` };
 }
+
+/**
+ * Quota (docs/tasks/DOGFOOD.md §5): Mia's account ran out mid-task, so #b went to a worker
+ * on another account; the card says so (a few seconds in).
+ */
+export function rerouteRun(): { state: MockState; script: Step[]; route: string } {
+  const scene = oauthRun("running");
+  const d = scene.state.runs[0];
+  const b = d.tasks.find((t) => t.key === "b")!;
+  const reason = "runs on account claude-work instead: account claude-main (its 5h window is used up)";
+  return {
+    ...scene,
+    script: [{ at: 1500, event: { type: "task.rerouted", data: { run_id: d.run.id, id: b.id, key: "b", to: b.assignee!, reason } } }],
+    route: `#/runs/${d.run.id}`,
+  };
+}
