@@ -7,7 +7,7 @@ import { navigate } from "../App";
 import { Avatar, BrandMark, ErrorBox, Field, Icon, VendorMark, agentTitle, displayName, hueOf, useAgents } from "../components";
 import { useHubData } from "../hub";
 import { t } from "../lib/i18n";
-import { chatTitle, effortLabel, effortLevels, effortOf, prettyModel, vendorLabel, workerModelFor } from "../lib/models";
+import { chatTitle, effortLabel, effortLevels, effortOf, prettyModel, vendorLabel, workerModelFor, accountOf } from "../lib/models";
 import { useQuota } from "./Quota";
 import { PRESETS, presetPolicy, type Preset } from "../lib/policy";
 import { ChipMenu, type MenuItem } from "../menu";
@@ -29,11 +29,6 @@ type Choice = { plugin: string; model: string; account?: string };
 
 /** The config a new agent on `choice` starts with: its account and reasoning effort. */
 const configFor = (choice: Choice, effort?: string) => ({ ...(choice.account ? { account: choice.account } : {}), ...(effort ? { effort } : {}) });
-
-const accountOf = (a: Agent) => {
-  const v = a.config && typeof a.config === "object" ? (a.config as Record<string, unknown>).account : undefined;
-  return typeof v === "string" ? v : undefined;
-};
 
 /** A chat with one agent, or a run a lead plans and a team carries out. */
 type Mode = "chat" | "run";

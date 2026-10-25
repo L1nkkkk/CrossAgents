@@ -21,9 +21,9 @@ pub mod tools;
 pub mod verify;
 pub mod workspace;
 
-pub use engine::{NewRun, Orchestrator, OrchestratorConfig};
-pub use landing::LandOutcome;
+pub use engine::{Approval, NewRun, Orchestrator, OrchestratorConfig};
 pub use host::{AgentHost, Route};
+pub use landing::LandOutcome;
 pub use review::{Changes, Remark};
 pub use verify::{ShellVerifier, Verifier};
 pub use workspace::{GitWorkspaces, InPlaceWorkspaces, WorkspaceProvider};

@@ -709,6 +709,23 @@ pub struct RunDetail {
     pub tasks: Vec<crossagents_core::Task>,
 }
 
+/// What the person settles with the approval (docs/tasks/W1.md §5.2). Every field is
+/// optional; an empty body approves the plan as it is.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ApproveRunRequest {
+    /// Replaces the run's policy from here on (how much it does without you, its caps).
+    #[serde(default)]
+    pub policy: Option<crossagents_core::RunPolicy>,
+    #[serde(default)]
+    pub max_parallel: Option<u32>,
+    /// Who works on each task, by task key: a worker's name or id, or `null` for the run's
+    /// default worker. Tasks left out keep the plan's choice.
+    #[serde(default)]
+    #[ts(type = "Record<string, string | null> | null")]
+    pub assignees: Option<std::collections::BTreeMap<String, Option<String>>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct RejectRunRequest {

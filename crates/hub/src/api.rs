@@ -18,21 +18,21 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use crossagents_api_types::{
     API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentSettingsRequest,
-    AnswerRequest, ApiError, ArchiveAgentRequest, AttachmentContent, ChangesResponse, ConnectInfo,
-    CreateAccountRequest, CreateAgentRequest, CreateRunRequest, DiffSide, ErrorCode, FinishRequest,
-    HealthResponse, HubInfo, InitRepoRequest, LandRequest, ListAccountsResponse,
-    ListAgentsResponse, ListNotesResponse, ListPluginsResponse, ListQuestionsResponse,
-    ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
-    RenameAgentRequest, RunDetail, RunTrace, SendMessageRequest, SendMessageResponse,
-    SetModelRequest, SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace,
-    Transcript, TurnDiffResponse, UsageGroup, UsageResponse,
+    AnswerRequest, ApiError, ApproveRunRequest, ArchiveAgentRequest, AttachmentContent,
+    ChangesResponse, ConnectInfo, CreateAccountRequest, CreateAgentRequest, CreateRunRequest,
+    DiffSide, ErrorCode, FinishRequest, HealthResponse, HubInfo, InitRepoRequest, LandRequest,
+    ListAccountsResponse, ListAgentsResponse, ListNotesResponse, ListPluginsResponse,
+    ListQuestionsResponse, ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo,
+    QuotaResponse, RejectRunRequest, RenameAgentRequest, RunDetail, RunTrace, SendMessageRequest,
+    SendMessageResponse, SetModelRequest, SetPluginModelsRequest, SetTopicRequest,
+    TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse, UsageGroup, UsageResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError,
     DriverKind, Envelope, Event, EventBus, EventKind, HumanItem, LandMode, MessageId,
     MessageSource, Run, RunConfig, RunId, Store, Task, TaskId,
 };
-use crossagents_orchestrator::{GitWorkspaces, NewRun, Orchestrator};
+use crossagents_orchestrator::{Approval, GitWorkspaces, NewRun, Orchestrator};
 
 use crate::accounts::Accounts;
 use crate::collab::AgentTokens;
@@ -977,9 +977,24 @@ async fn get_run(
 async fn approve_run(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
+    req: Option<Json<ApproveRunRequest>>,
 ) -> ApiResult<Json<RunDetail>> {
     let id = resolve_run(&state, &key).await?;
-    state.orchestrator.approve(id).await?;
+    let req = req.map(|Json(r)| r).unwrap_or_default();
+    let mut assignees = Vec::new();
+    for (task, worker) in req.assignees.into_iter().flatten() {
+        let worker = match worker {
+            Some(key) => Some(agent_id(&state, &key).await?),
+            None => None,
+        };
+        assignees.push((task, worker));
+    }
+    let approval = Approval {
+        policy: req.policy,
+        max_parallel: req.max_parallel,
+        assignees,
+    };
+    state.orchestrator.approve(id, approval).await?;
     run_detail(&state, id).await
 }
 

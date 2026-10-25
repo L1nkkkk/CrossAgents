@@ -26,6 +26,12 @@ export function vendorLabel(plugin: string): string {
   return VENDOR_LABELS[plugin] ?? (plugin ? plugin[0].toUpperCase() + plugin.slice(1) : plugin);
 }
 
+/** The login an agent runs on (its config `account`); absent: the vendor's default one. */
+export function accountOf(agent: { config: unknown }): string | undefined {
+  const v = agent.config && typeof agent.config === "object" ? (agent.config as Record<string, unknown>).account : undefined;
+  return typeof v === "string" ? v : undefined;
+}
+
 /** The cheaper sibling a lead's workers use: a haiku / mini / flash model, else the lead's own. */
 export function workerModelFor(models: string[], lead: string): string {
   return models.find((m) => /haiku|mini|flash|lite/i.test(m)) ?? lead;

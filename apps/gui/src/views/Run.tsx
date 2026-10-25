@@ -4,6 +4,8 @@ import type { Task } from "@bindings/Task";
 import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
 import type { TaskSpec } from "@bindings/TaskSpec";
+import type { PlannedTask } from "@bindings/PlannedTask";
+import type { RunPolicy } from "@bindings/RunPolicy";
 import { api, errorText } from "../api";
 import {
   Avatar,
@@ -26,10 +28,12 @@ import {
 } from "../components";
 import { useHubData, type HubEvent } from "../hub";
 import { BUCKET_LABEL, groupTasks, progress, taskState } from "../lib/taskState";
-import { PRESETS, budgetText, presetOf } from "../lib/policy";
+import { PRESETS, budgetText, presetOf, presetPolicy, type Preset } from "../lib/policy";
+import { accountOf, prettyModel } from "../lib/models";
 import { StateWord, TaskChanges, useArmed } from "../parts";
 import { RunChanges, TaskReview } from "../review";
 import { RunTraceView } from "../trace";
+import { wsKey } from "../workspace";
 
 function concerns(runId: string, e: HubEvent): boolean {
   switch (e.type) {
@@ -348,7 +352,7 @@ function PolicyChip({ run }: { run: Run }) {
 }
 
 /** The planned tasks, each with the teammate it is assigned to; specs folded away. */
-export function PlanTasks({ run }: { run: Run }) {
+export function PlanTasks({ run, pick }: { run: Run; pick?: (task: PlannedTask) => ReactNode }) {
   const agents = useAgents();
   const byName = (name: string | null) => (name ? agents.data?.find((a) => isAgent(a, name)) : undefined);
   const fallback = agents.data?.find((a) => a.id === run.config.worker);
@@ -365,7 +369,9 @@ export function PlanTasks({ run }: { run: Run }) {
               <span className="plan-title">{task.title}</span>
               {task.depends_on.length > 0 && <span className="chip">等 {task.depends_on.join(", ")}</span>}
               <span className="spacer" />
-              {worker ? (
+              {pick ? (
+                pick(task)
+              ) : worker ? (
                 <Who agent={worker} />
               ) : (
                 <span className="who-chip default" title="未指定，交给默认 Worker">
@@ -439,12 +445,163 @@ function PlanList({ run }: { run: Run }) {
   );
 }
 
-/** Plan approval, shown in the run view and in the planner's conversation. */
+/** A number typed into a cap field; empty means no cap. */
+const capOf = (text: string) => (text.trim() ? Number(text) : null);
+
+/**
+ * What the person settles when approving a plan: how much the run does without them, who
+ * does each task, and its caps (docs/tasks/W1.md §5.2). Shared by the run page's card and the
+ * dock in the lead's conversation. Nothing chosen here is remembered for the next run.
+ */
+export function usePlanApproval(run: Run, busy: boolean) {
+  const agents = useAgents();
+  const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
+  const policy = run.config.policy;
+  const [preset, setPreset] = useState<Preset>(presetOf(policy) ?? "manual");
+  // Per task: "" is the run's default worker, `agent:<id>` a teammate, `model:<m>` a new
+  // worker on the lead's login.
+  const [picks, setPicks] = useState<Record<string, string>>({});
+  const [maxUsd, setMaxUsd] = useState(policy.budget.max_usd?.toString() ?? "");
+  const [maxMinutes, setMaxMinutes] = useState(policy.budget.max_minutes?.toString() ?? "");
+  const [maxTokens, setMaxTokens] = useState(policy.budget.max_tokens != null ? String(policy.budget.max_tokens / 1000) : "");
+  const [maxParallel, setMaxParallel] = useState(String(run.config.max_parallel));
+
+  const everyone = agents.data ?? [];
+  const lead = everyone.find((a) => a.id === run.planner);
+  const fallback = everyone.find((a) => a.id === run.config.worker);
+  const teammates = everyone.filter((a) => a.role === "worker" && run.config.team.includes(a.id));
+  const models = plugins.data?.find((p) => p.name === lead?.plugin)?.models ?? [];
+  const planned = (task: PlannedTask) => {
+    const agent = task.assignee ? everyone.find((a) => isAgent(a, task.assignee!)) : undefined;
+    return agent ? `agent:${agent.id}` : "";
+  };
+  const pickOf = (task: PlannedTask) => picks[task.key] ?? planned(task);
+
+  /** The worker a pick stands for, made on the lead's login when it is a model. */
+  async function workerOf(pick: string, made: Map<string, string>): Promise<string | null> {
+    if (!pick) return null;
+    if (pick.startsWith("agent:")) return pick.slice("agent:".length);
+    const model = pick.slice("model:".length);
+    const known = made.get(model);
+    if (known) return known;
+    const account = lead && accountOf(lead);
+    const found = everyone.find(
+      (a) => a.role === "worker" && a.plugin === lead?.plugin && a.model === model && accountOf(a) === account && wsKey(a.cwd) === wsKey(run.repo),
+    );
+    const id =
+      found?.id ??
+      (
+        await api.createAgent({
+          plugin: lead!.plugin,
+          driver: null,
+          model,
+          role: "worker",
+          cwd: run.repo,
+          config: account ? { account } : {},
+          profile: { display_name: null, title: "Worker", avatar: null, color: null, persona: null },
+        })
+      ).id;
+    made.set(model, id);
+    return id;
+  }
+
+  async function approve(): Promise<RunDetail> {
+    const made = new Map<string, string>();
+    const assignees: Record<string, string | null> = {};
+    for (const task of run.plan) assignees[task.key] = await workerOf(pickOf(task), made);
+    const settled: RunPolicy = {
+      ...presetPolicy(preset, policy),
+      budget: {
+        max_usd: capOf(maxUsd),
+        max_minutes: capOf(maxMinutes),
+        max_tokens: maxTokens.trim() ? Math.round(Number(maxTokens) * 1000) : null,
+      },
+    };
+    return api.approveRun(run.id, {
+      policy: settled,
+      max_parallel: run.in_place ? null : capOf(maxParallel),
+      assignees,
+    });
+  }
+
+  const pick = (task: PlannedTask) => (
+    <select className="who-pick" value={pickOf(task)} disabled={busy} onChange={(e) => setPicks({ ...picks, [task.key]: e.target.value })}>
+      <option value="">自动{fallback ? ` · ${displayName(fallback)}` : ""}</option>
+      {teammates.length > 0 && (
+        <optgroup label="队友">
+          {teammates.map((a) => (
+            <option key={a.id} value={`agent:${a.id}`}>
+              {displayName(a)} · {prettyModel(a.model ?? a.plugin)}
+            </option>
+          ))}
+        </optgroup>
+      )}
+      {models.length > 0 && (
+        <optgroup label="新建（用主导的登录）">
+          {models.map((m) => (
+            <option key={m} value={`model:${m}`}>
+              {prettyModel(m)}
+            </option>
+          ))}
+        </optgroup>
+      )}
+    </select>
+  );
+  const capsText = budgetText({ max_usd: capOf(maxUsd), max_minutes: capOf(maxMinutes), max_tokens: maxTokens.trim() ? Number(maxTokens) * 1000 : null });
+
+  const settings = (
+      <div className="plan-settings">
+        <div className="row">
+          <span className="muted small">托管</span>
+          <div className="segmented">
+            {PRESETS.map((p) => (
+              <button key={p.key} className={preset === p.key ? "active" : ""} title={p.hint} disabled={busy} onClick={() => setPreset(p.key)}>
+                {p.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="small muted">
+          {PRESETS.find((p) => p.key === preset)?.hint}
+          {preset === "full" && "。只对这一次生效"}
+          {preset === "full" && !capsText && "，没有设上限"}
+        </div>
+        <details>
+          <summary className="small muted">更多{capsText ? ` · ${capsText}` : ""}</summary>
+          <div className="caps">
+            <label>
+              <span className="small muted">预算 $</span>
+              <input type="number" min={0} step="0.5" value={maxUsd} onChange={(e) => setMaxUsd(e.target.value)} placeholder="不限" />
+            </label>
+            <label>
+              <span className="small muted">时间（分钟）</span>
+              <input type="number" min={1} value={maxMinutes} onChange={(e) => setMaxMinutes(e.target.value)} placeholder="不限" />
+            </label>
+            <label>
+              <span className="small muted">Token（千）</span>
+              <input type="number" min={1} value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} placeholder="不限" />
+            </label>
+            {!run.in_place && (
+              <label>
+                <span className="small muted">并行数</span>
+                <input type="number" min={1} value={maxParallel} onChange={(e) => setMaxParallel(e.target.value)} />
+              </label>
+            )}
+          </div>
+        </details>
+      </div>
+  );
+
+  return { pick, settings, approve, ready: !!agents.data };
+}
+
+/** Plan approval on the run page. */
 export function PlanCard({ run, onDone }: { run: Run; onDone?: () => void }) {
   const [rejecting, setRejecting] = useState(false);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  const choices = usePlanApproval(run, busy);
 
   async function act(action: () => Promise<RunDetail>) {
     setBusy(true);
@@ -472,12 +629,13 @@ export function PlanCard({ run, onDone }: { run: Run; onDone?: () => void }) {
           {run.title}
         </a>
       </header>
-      <PlanTasks run={run} />
+      <PlanTasks run={run} pick={choices.pick} />
       {run.note && (
         <div style={{ padding: "0 16px 10px" }} className="small muted">
           上次驳回：{run.note}
         </div>
       )}
+      {choices.settings}
       <footer>
         {rejecting ? (
           <>
@@ -491,7 +649,7 @@ export function PlanCard({ run, onDone }: { run: Run; onDone?: () => void }) {
           </>
         ) : (
           <>
-            <button className="primary" disabled={busy} onClick={() => act(() => api.approveRun(run.id))}>
+            <button className="primary" disabled={busy || !choices.ready} onClick={() => act(choices.approve)}>
               Approve · 开工
             </button>
             <button disabled={busy} onClick={() => setRejecting(true)}>

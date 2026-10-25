@@ -31,7 +31,7 @@ import { useHubData } from "../hub";
 import { mentionsFor, useMention } from "../mention";
 import { isChat, wsKey } from "../workspace";
 import { ProfileEditor } from "./Agents";
-import { PlanTasks } from "./Run";
+import { PlanTasks, usePlanApproval } from "./Run";
 
 /** A person's message, or one recorded before senders were. */
 const fromPerson = (turn: TranscriptTurn) => !turn.from || turn.from.kind === "human";
@@ -1100,6 +1100,7 @@ function PlanDock({ run, onDone, onReply }: { run: Run; onDone: () => void; onRe
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const ref = useRef<HTMLDivElement>(null);
+  const choices = usePlanApproval(run, busy);
 
   useEffect(() => ref.current?.focus(), []);
 
@@ -1115,7 +1116,7 @@ function PlanDock({ run, onDone, onReply }: { run: Run; onDone: () => void; onRe
       setBusy(false);
     }
   }
-  const approve = () => act(() => api.approveRun(run.id));
+  const approve = () => choices.ready && act(choices.approve);
 
   function onKey(e: KeyboardEvent<HTMLDivElement>) {
     if (rejecting || busy || e.target !== e.currentTarget) return;
@@ -1138,8 +1139,9 @@ function PlanDock({ run, onDone, onReply }: { run: Run; onDone: () => void; onRe
           </a>
         </header>
         <div className="plan-dock-body">
-          <PlanTasks run={run} />
+          <PlanTasks run={run} pick={choices.pick} />
           {run.note && <div className="small muted plan-dock-note">上次驳回：{run.note}</div>}
+          {choices.settings}
         </div>
         <footer>
           {rejecting ? (
@@ -1154,7 +1156,7 @@ function PlanDock({ run, onDone, onReply }: { run: Run; onDone: () => void; onRe
             </>
           ) : (
             <>
-              <button className="primary" disabled={busy} onClick={approve}>
+              <button className="primary" disabled={busy || !choices.ready} onClick={approve}>
                 <kbd>1</kbd> Approve · 开工
               </button>
               <button disabled={busy} onClick={() => setRejecting(true)}>

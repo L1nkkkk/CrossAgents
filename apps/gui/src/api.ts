@@ -29,6 +29,7 @@ import type { ListAgentsResponse } from "@bindings/ListAgentsResponse";
 import type { ListPluginsResponse } from "@bindings/ListPluginsResponse";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import type { ListRunsResponse } from "@bindings/ListRunsResponse";
+import type { ApproveRunRequest } from "@bindings/ApproveRunRequest";
 import type { RejectRunRequest } from "@bindings/RejectRunRequest";
 import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
@@ -144,7 +145,8 @@ export const api = {
   listRuns: () => request<ListRunsResponse>("GET", "/v1/runs"),
   getRun: (key: string) => request<RunDetail>("GET", `/v1/runs/${enc(key)}`),
   createRun: (req: CreateRunRequest) => request<Run>("POST", "/v1/runs", req),
-  approveRun: (key: string) => request<RunDetail>("POST", `/v1/runs/${enc(key)}/approve`),
+  approveRun: (key: string, req: ApproveRunRequest = { policy: null, max_parallel: null, assignees: null }) =>
+    request<RunDetail>("POST", `/v1/runs/${enc(key)}/approve`, req),
   rejectRun: (key: string, req: RejectRunRequest) =>
     request<RunDetail>("POST", `/v1/runs/${enc(key)}/reject`, req),
   cancelRun: (key: string) => request<RunDetail>("POST", `/v1/runs/${enc(key)}/cancel`),

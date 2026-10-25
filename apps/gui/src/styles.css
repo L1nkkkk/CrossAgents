@@ -404,6 +404,13 @@ a.chip:hover { text-decoration: none; background: var(--selected); }
 .plan-task + .plan-task { border-top: 1px solid var(--border); }
 .plan-task .head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .plan-task details summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.plan-settings { padding: 10px 16px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
+.plan-settings .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.plan-settings details summary { cursor: pointer; }
+.plan-settings .caps { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin-top: 8px; }
+.plan-settings .caps label { display: flex; flex-direction: column; gap: 2px; }
+.plan-settings .caps input { width: 100%; }
+.who-pick { max-width: 220px; font-size: 12px; padding: 2px 6px; }
 .plan-card footer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); flex-wrap: wrap; align-items: flex-start; }
 .plan-card footer textarea { flex: 1; min-width: 220px; }
 

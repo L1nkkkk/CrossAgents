@@ -13,8 +13,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use crossagents_core::{
     Agent, AgentId, AgentKey, AgentStatus, CoreError, Envelope, EventBus, EventKind, MessageSource,
-    PlannedTask, Role, Run, RunConfig, RunId, RunStatus, Store, Task, TaskId, TaskReport,
-    TaskStatus,
+    PlannedTask, Role, Run, RunConfig, RunId, RunPolicy, RunStatus, Store, Task, TaskId,
+    TaskReport, TaskStatus,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -38,6 +38,16 @@ pub struct NewRun {
     pub title: Option<String>,
     pub planner: AgentId,
     pub config: RunConfig,
+}
+
+/// What the person settles when approving a plan (docs/tasks/W1.md §5.2); absent fields
+/// keep what the run started with.
+#[derive(Debug, Clone, Default)]
+pub struct Approval {
+    pub policy: Option<RunPolicy>,
+    pub max_parallel: Option<u32>,
+    /// Who works on each task, by task key: a worker, or `None` for the run's default.
+    pub assignees: Vec<(String, Option<AgentId>)>,
 }
 
 pub struct Orchestrator {
@@ -497,11 +507,59 @@ impl Orchestrator {
         Ok(run)
     }
 
-    pub async fn approve(&self, id: RunId) -> Result<Run, CoreError> {
+    pub async fn approve(&self, id: RunId, approval: Approval) -> Result<Run, CoreError> {
         let _guard = self.lock(id).await;
         let mut run = self.store.get_run(id).await?;
+        if run.status != RunStatus::AwaitingApproval {
+            return Err(CoreError::Conflict(format!(
+                "run is {:?}, not awaiting approval",
+                run.status
+            )));
+        }
+        self.settle(&mut run, approval).await?;
         self.approve_locked(&mut run).await?;
         Ok(run)
+    }
+
+    /// Applies the person's choices to the run before its tasks are created. A worker picked
+    /// for a task joins the team, so it is assignable like the plan's own picks.
+    async fn settle(&self, run: &mut Run, approval: Approval) -> Result<(), CoreError> {
+        if let Some(policy) = approval.policy {
+            run.config.policy = policy;
+        }
+        if let Some(n) = approval.max_parallel {
+            run.config.max_parallel = if run.in_place { 1 } else { n.max(1) };
+        }
+        for (key, worker) in approval.assignees {
+            let Some(index) = run.plan.iter().position(|t| t.key == key) else {
+                return Err(CoreError::Conflict(format!("the plan has no task {key:?}")));
+            };
+            let name = match worker {
+                None => None,
+                Some(id) => {
+                    let agent = self.store.get_agent(&AgentKey::Id(id)).await?;
+                    if agent.role != Role::Worker {
+                        return Err(CoreError::Conflict(format!(
+                            "{} is not a worker and cannot take task {key:?}",
+                            agent.name
+                        )));
+                    }
+                    if run.config.team.is_empty() {
+                        // Runs created before teams existed: make the implicit team explicit.
+                        run.config.team = [Some(run.config.worker), run.config.reviewer]
+                            .into_iter()
+                            .flatten()
+                            .collect();
+                    }
+                    if !run.config.team.contains(&agent.id) {
+                        run.config.team.push(agent.id);
+                    }
+                    Some(agent.name)
+                }
+            };
+            run.plan[index].assignee = name;
+        }
+        Ok(())
     }
 
     async fn approve_locked(&self, run: &mut Run) -> Result<(), CoreError> {

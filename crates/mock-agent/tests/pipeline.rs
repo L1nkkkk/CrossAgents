@@ -792,3 +792,61 @@ async fn a_manual_run_leaves_landing_to_the_person() {
     assert_eq!(detail["run"]["status"], "completed");
     assert_eq!(detail["run"]["landed"]["by"], "person");
 }
+
+#[tokio::test]
+async fn the_approval_settles_policy_caps_and_who_does_each_task() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    // Not in the repository, so not on the run's team until the person picks it.
+    let helper = t.add_agent("helper", Some("sonnet")).await;
+    let mut w = t.watch().await;
+
+    let a = task("a", goal("[write a.txt=alpha]", "wrote a"), &[]);
+    let b = task("b", goal("[write b.txt=beta]", "wrote b"), &[]);
+    let id = start_run(&t, request(json!([a, b])), json!({})).await;
+    w.until(
+        "awaiting approval",
+        run_status_is(&id, RunStatus::AwaitingApproval),
+    )
+    .await;
+
+    let resp = t
+        .post(
+            &format!("/v1/runs/{id}/approve"),
+            json!({ "assignees": { "nope": "helper" } }),
+        )
+        .await;
+    assert_eq!(resp.status(), 409, "{}", resp.text().await.unwrap());
+
+    let mut policy = detail(&t, &id).await["run"]["config"]["policy"].clone();
+    policy["land"] = json!("auto");
+    policy["budget"]["max_usd"] = json!(5.0);
+    let resp = t
+        .post(
+            &format!("/v1/runs/{id}/approve"),
+            json!({ "policy": policy, "max_parallel": 1, "assignees": { "a": "helper", "b": null } }),
+        )
+        .await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    let d = detail(&t, &id).await;
+    let config = &d["run"]["config"];
+    assert_eq!(config["max_parallel"], 1);
+    assert_eq!(config["policy"]["land"], "auto");
+    assert_eq!(config["policy"]["budget"]["max_usd"], 5.0);
+    assert!(
+        config["team"]
+            .as_array()
+            .unwrap()
+            .contains(&helper.id.to_string().into()),
+        "{config}"
+    );
+    let tasks = d["tasks"].as_array().unwrap();
+    let template =
+        |key: &str| tasks.iter().find(|t| t["key"] == key).unwrap()["worker_template"].clone();
+    assert_eq!(template("a"), json!(helper.id));
+    assert_eq!(template("b"), Value::Null);
+    // One at a time: b waits while a runs.
+    let running = tasks.iter().filter(|t| t["status"] == "running").count();
+    assert_eq!(running, 1, "{tasks:?}");
+}
