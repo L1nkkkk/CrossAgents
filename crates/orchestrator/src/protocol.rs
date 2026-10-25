@@ -47,7 +47,8 @@ git worktree and branch.\n\
 3. When a worker reports done you get its summary and the facts (branch, changes, check \
 results). Check the work: `workspace_diff`, `workspace_read`, `workspace_run` (tests, builds), \
 `checks_run`, or `review_request` for a reviewer. Then decide: `task_accept` merges it into the \
-run branch (on a conflict you get the conflicting hunks: resolve with `task_rework` or \
+run branch (its message is the commit message: write it the way the project's rules ask, as \
+for `run_land`; on a conflict you get the conflicting hunks: resolve with `task_rework` or \
 `branch_sync`), `task_rework` sends it back with what to fix, `task_drop` discards it.\n\
 4. Answer worker questions with `task_answer`. A task that is \"stalled\" means its worker \
 stopped without reporting: message it, `task_assign` it to someone else, or drop it.\n\

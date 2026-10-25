@@ -3,7 +3,7 @@ import type { Agent } from "@bindings/Agent";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import { api, errorText } from "../api";
 import { sendMessage } from "../outbox";
-import { navigate, useRunTree } from "../App";
+import { navigate } from "../App";
 import { Avatar, BrandMark, ErrorBox, Field, Icon, VendorMark, agentTitle, displayName, hueOf, useAgents } from "../components";
 import { useHubData } from "../hub";
 import { t } from "../lib/i18n";
@@ -63,7 +63,6 @@ function save(key: string, value: unknown) {
  */
 export function HomeView() {
   const agents = useAgents();
-  const tree = useRunTree();
   const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
   const scope = useSelectedWorkspace();
   const { list: all } = useWorkspaces();
@@ -159,8 +158,8 @@ export function HomeView() {
 
   const team = here.filter((a) => a.role !== "planner" && (!where || wsKey(a.cwd) === wsKey(where)));
   const workers = team.filter((a) => a.role === "worker");
-  const lastDefault = tree.data?.find((d) => workers.some((w) => w.id === d.run.config.worker))?.run.config.worker;
-  const chosenWorker = workers.find((a) => a.name === worker) ?? workers.find((a) => a.id === lastDefault) ?? workers[0];
+  // 自动 (none picked) is a worker on the lead's login and the cheaper sibling of its model, not whoever worked last.
+  const chosenWorker = worker ? workers.find((a) => a.name === worker) : undefined;
   // A chat needs only a model: the remembered one if the hub still offers it, else the first.
   const chatModel =
     chatPick && offered.some((p) => p.name === chatPick.plugin && p.models.includes(chatPick.model))

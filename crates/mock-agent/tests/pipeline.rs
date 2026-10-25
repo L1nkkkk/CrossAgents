@@ -692,8 +692,15 @@ async fn a_hands_off_run_lands_on_main_and_reports_to_the_person() {
 
     let close = format!(
         "{} {} {}",
-        accept("z"),
-        call("run_land", json!({ "mode": "merge" })),
+        // Commit messages written to the project's rules.
+        call(
+            "task_accept",
+            json!({ "task": "z", "message": "ledger: add z" })
+        ),
+        call(
+            "run_land",
+            json!({ "mode": "merge", "message": "ledger: land z" })
+        ),
         call("run_finish", json!({ "summary": "Added z.txt." }))
     );
     let z = task(
@@ -723,6 +730,18 @@ async fn a_hands_off_run_lands_on_main_and_reports_to_the_person() {
     );
     let detail = detail(&t, &id).await;
     assert_eq!(detail["run"]["landed"]["mode"], "merge");
+    let log = std::process::Command::new("git")
+        .args(["log", "--format=%s", "main"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    let log = String::from_utf8_lossy(&log.stdout);
+    assert!(
+        log.contains("ledger: add z")
+            && log.contains("ledger: land z")
+            && !log.contains("crossagents:"),
+        "{log}"
+    );
     assert_eq!(detail["run"]["summary"], "Added z.txt.");
     // The person gets the lead's summary with the facts.
     let questions: Value = t.get("/v1/questions").await.json().await.unwrap();

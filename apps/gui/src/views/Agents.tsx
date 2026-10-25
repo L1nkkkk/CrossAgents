@@ -210,9 +210,9 @@ export function ProfileEditor({ agent, onDone }: { agent: Agent; onDone: () => v
 
       <ModelField value={modelValue} models={models} onChange={setModel} />
       {claudeLike && (
-        <Field label="读取 Claude 设置（CLAUDE.md、.claude/ 规则、hooks、权限；保存后空闲的会话会重启并续上原对话，忙时等这轮结束后下次启动）">
+        <Field label={`${agent.plugin === "codebuddy" ? SOURCES_LABEL.codebuddy : SOURCES_LABEL.claude}；保存后空闲的会话会重启并续上原对话，忙时等这轮结束后下次启动`}>
           <select value={sources ?? "default"} onChange={(e) => setSources(e.target.value === "default" ? null : e.target.value)}>
-            {SETTING_SOURCES.map((s) => (
+            {(agent.plugin === "codebuddy" ? CODEBUDDY_SOURCES : SETTING_SOURCES).map((s) => (
               <option key={s.value} value={s.value}>
                 {s.label}
               </option>
@@ -263,6 +263,18 @@ const SETTING_SOURCES = [
   { value: "user,project,local", label: "全部：再加本机 ~/.claude 的个人设置与 hooks" },
   { value: "", label: "都不读：只用 CrossAgents 注入的项目规则（最可控）" },
 ];
+
+/** CodeBuddy never reads CLAUDE.md, whichever it loads: the project's rules reach it from the hub. */
+const CODEBUDDY_SOURCES = [
+  { value: "default", label: "项目与本地（缺省）：仓库里 CodeBuddy 自己的设置" },
+  { value: "user,project,local", label: "全部：再加本机 ~/.codebuddy 的个人设置与 hooks" },
+  { value: "", label: "都不读：只用 CrossAgents 注入的项目规则（最可控）" },
+];
+
+const SOURCES_LABEL = {
+  claude: "读取 Claude 设置（CLAUDE.md、.claude/ 规则、hooks、权限）",
+  codebuddy: "读取 CodeBuddy 设置（hooks、权限等；它不读 CLAUDE.md，项目规则总由 CrossAgents 注入）",
+};
 
 function settingSourcesOf(agent: Agent): string | null {
   const value = (agent.config as Record<string, unknown> | null)?.setting_sources;

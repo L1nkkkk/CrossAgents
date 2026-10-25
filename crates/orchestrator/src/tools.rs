@@ -403,9 +403,9 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_accept",
-        description: "Merge a task you issued into the run branch. On a conflict nothing changes and you get the conflicting files and hunks.",
+        description: "Merge a task you issued into the run branch. On a conflict nothing changes and you get the conflicting files and hunks. message is the commit message, written the way the project's rules ask (default: \"<key>: <title>\").",
         groups: ALL,
-        schema: || task_schema(json!({})),
+        schema: || task_schema(json!({ "message": { "type": "string" } })),
     },
     ToolDef {
         name: "task_rework",
@@ -471,11 +471,14 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "run_land",
-        description: "Bring your run's branch into its base branch once every task has ended: mode merge (default), squash, or pr (opens a pull request). The run's policy decides whether you may; a dirty checkout of the base branch is never touched.",
+        description: "Bring your run's branch into its base branch once every task has ended: mode merge (default), squash, or pr (opens a pull request). The run's policy decides whether you may; a dirty checkout of the base branch is never touched. message is the landing commit's message (or the pull request's title), written the way the project's rules ask (default: \"crossagents: <run title>\").",
         groups: PLANNER,
         schema: || {
             object(
-                json!({ "mode": { "type": "string", "enum": ["merge", "squash", "pr"] } }),
+                json!({
+                    "mode": { "type": "string", "enum": ["merge", "squash", "pr"] },
+                    "message": { "type": "string" }
+                }),
                 &[],
             )
         },

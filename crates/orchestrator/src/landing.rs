@@ -46,6 +46,8 @@ impl Orchestrator {
         struct A {
             #[serde(default)]
             mode: Option<LandMode>,
+            #[serde(default)]
+            message: Option<String>,
         }
         let a: A = args(input)?;
         let run = self.led_run(caller).await?;
@@ -64,24 +66,33 @@ impl Orchestrator {
             (LandPolicy::Pr, _) => LandMode::Pr,
             (LandPolicy::Auto, mode) => mode.unwrap_or(LandMode::Merge),
         };
-        Ok(match self.land(run.id, mode, &caller.name).await? {
-            LandOutcome::Landed(landing) => json!({ "landed": landing }),
-            LandOutcome::Deferred { task, conflicts } => json!({
-                "landed": null,
-                "deferred": { "task": task, "conflicts": conflicts },
-            }),
-        })
+        let message = a
+            .message
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty());
+        Ok(
+            match self.land(run.id, mode, &caller.name, message).await? {
+                LandOutcome::Landed(landing) => json!({ "landed": landing }),
+                LandOutcome::Deferred { task, conflicts } => json!({
+                    "landed": null,
+                    "deferred": { "task": task, "conflicts": conflicts },
+                }),
+            },
+        )
     }
 
     /// Lands the run branch on its base branch. Every task must have ended and at least one
     /// merged. Landing twice returns the first landing. What the base gained meanwhile is
     /// merged into the run branch first; when that conflicts, a task to resolve it goes to
-    /// the run's worker and landing waits for it (docs/tasks/DOGFOOD.md §4).
+    /// the run's worker and landing waits for it (docs/tasks/DOGFOOD.md §4). `message` is the
+    /// landing commit's, as the lead wrote it to the project's rules; none gets the hub's.
     pub async fn land(
         &self,
         id: RunId,
         mode: LandMode,
         by: &str,
+        message: Option<&str>,
     ) -> Result<LandOutcome, CoreError> {
         let _guard = self.lock(id).await;
         let mut run = self.store.get_run(id).await?;
@@ -135,7 +146,9 @@ impl Orchestrator {
                 &run.base_branch,
                 &run.branch,
                 mode,
-                &format!("crossagents: {}", run.title),
+                &message
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("crossagents: {}", run.title)),
             )
             .await?;
         let landing = Landing {

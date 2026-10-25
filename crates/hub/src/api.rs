@@ -1004,7 +1004,7 @@ async fn land_run(
     let id = resolve_run(&state, &key).await?;
     state
         .orchestrator
-        .land(id, req.mode.unwrap_or(LandMode::Merge), "person")
+        .land(id, req.mode.unwrap_or(LandMode::Merge), "person", None)
         .await?;
     run_detail(&state, id).await
 }

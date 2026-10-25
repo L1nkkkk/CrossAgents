@@ -3,8 +3,8 @@
 
 use chrono::Utc;
 use crossagents_core::{
-    Agent, ApprovalPolicy, AskPolicy, HumanAction, HumanItem, HumanItemKind, HumanItemStatus,
-    PermissionPolicy, RunPolicy,
+    Agent, AgentKey, ApprovalPolicy, AskPolicy, HumanAction, HumanItem, HumanItemKind,
+    HumanItemStatus, PermissionPolicy, Run, RunPolicy, Task,
 };
 
 use crate::engine::Orchestrator;
@@ -129,13 +129,14 @@ impl Orchestrator {
         } else {
             DEFAULT_WAIT_MINUTES
         };
+        let who = self.person_name(agent, found.as_ref()).await;
         let item = HumanItem {
             id: format!("a-{}", &uuid::Uuid::new_v4().simple().to_string()[..10]),
             kind: HumanItemKind::Question,
             from: agent.id,
             run_id: found.as_ref().map(|(run, _)| run.id),
             task_id: found.as_ref().map(|(_, task)| task.id),
-            text: format!("{} 想要执行（{why}）：\n{title}", agent.name),
+            text: format!("{who} 想要执行（{why}）：\n{title}"),
             options: vec![ALLOW.into(), DENY.into()],
             default: Some(DENY.into()),
             timeout_at: Some(Utc::now() + chrono::Duration::seconds((minutes * 60.0) as i64)),
@@ -155,6 +156,26 @@ impl Orchestrator {
             .await;
         // A hub going away drops the sender: declined.
         rx.await.unwrap_or(false)
+    }
+
+    /// Who the person knows `agent` as: a task's worker is a clone named after the run and
+    /// task (`w-1a2b3c-a`), so it goes by the teammate it was cloned from, with its task.
+    async fn person_name(&self, agent: &Agent, found: Option<&(Run, Task)>) -> String {
+        let Some((run, task)) = found.filter(|(_, task)| task.assignee == Some(agent.id)) else {
+            return agent.name.clone();
+        };
+        let assigned = task.worker_template.unwrap_or(run.config.worker);
+        let template = if task.escalated {
+            run.config.escalate.unwrap_or(assigned)
+        } else {
+            assigned
+        };
+        match self.store.get_agent(&AgentKey::Id(template)).await {
+            Ok(teammate) if teammate.id != agent.id => {
+                format!("{}（任务 #{}）", teammate.name, task.key)
+            }
+            _ => agent.name.clone(),
+        }
     }
 
     /// The person (or the timeout) decided approval `id`. `false` if nobody waits for it.

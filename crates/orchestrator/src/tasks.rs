@@ -943,11 +943,16 @@ impl Orchestrator {
         // No worktree left: an earlier accept merged it and cleaned up, then failed before
         // recording that; this one only records it.
         if dir.exists() {
-            self.ws_for(&run)
-                .commit_all(&dir, &format!("{}: {}", task.key, task.title))
-                .await?;
+            // The issuer's, written to the project's rules; the hub cannot read those.
+            let message = input
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{}: {}", task.key, task.title));
+            self.ws_for(&run).commit_all(&dir, &message).await?;
             let branch = task.branch.clone().unwrap_or_default();
-            let message = format!("crossagents: {} ({})", task.title, task.key);
             if let Err(err) = self.ws_for(&run).merge(&into, &branch, &message).await {
                 return Ok(json!({
                     "merged": false,
