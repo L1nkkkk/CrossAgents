@@ -77,6 +77,34 @@ pub enum Synced {
 #[derive(Debug, Clone, Default)]
 pub struct GitWorkspaces;
 
+/// Untracked files the hub never adds: caches and build output an agent's commands leave
+/// behind, which a repository without a .gitignore would otherwise take into its history.
+/// Tracked files are committed as they are.
+const NEVER_ADDED: [&str; 8] = [
+    ":(exclude,glob)**/__pycache__/**",
+    ":(exclude,glob)**/*.py[co]",
+    ":(exclude,glob)**/.pytest_cache/**",
+    ":(exclude,glob)**/.mypy_cache/**",
+    ":(exclude,glob)**/.ruff_cache/**",
+    ":(exclude,glob)**/node_modules/**",
+    ":(exclude,glob)**/.DS_Store",
+    ":(exclude,glob)**/Thumbs.db",
+];
+
+/// `git add` for every change in `path`: tracked files as they are, new files but for
+/// [`NEVER_ADDED`]. `extra` goes before the pathspec (`--intent-to-add`).
+async fn add_changes(path: &Path, extra: &[&str]) -> Result<(), CoreError> {
+    let mut tracked = vec!["add", "-u"];
+    tracked.extend(extra);
+    git_locked(path, &tracked).await?;
+    let mut args = vec!["add", "-A"];
+    args.extend(extra);
+    args.extend(["--", "."]);
+    args.extend(NEVER_ADDED);
+    git_locked(path, &args).await?;
+    Ok(())
+}
+
 const AUTHOR: [&str; 4] = [
     "-c",
     "user.name=CrossAgents",
@@ -215,7 +243,7 @@ impl WorkspaceProvider for GitWorkspaces {
     }
 
     async fn commit_all(&self, path: &Path, message: &str) -> Result<bool, CoreError> {
-        git_locked(path, &["add", "-A"]).await?;
+        add_changes(path, &[]).await?;
         let staged = git(path, &["diff", "--cached", "--name-only"]).await?;
         if staged.is_empty() {
             return Ok(false);
@@ -234,7 +262,7 @@ impl WorkspaceProvider for GitWorkspaces {
         // Record new files as "intended to add" so they show up; nothing is staged. The
         // worktree's index may be busy for a moment (the hub commits a reported task in the
         // background): wait for it rather than fail.
-        git_locked(path, &["add", "-A", "--intent-to-add"]).await?;
+        add_changes(path, &["--intent-to-add"]).await?;
         let merge_base = git(path, &["merge-base", base, "HEAD"]).await?;
         let mut args = vec!["diff", merge_base.as_str()];
         if !paths.is_empty() {
@@ -402,7 +430,7 @@ impl GitWorkspaces {
             )));
         }
         git(dir, &["init", "-q"]).await?;
-        git(dir, &["add", "-A"]).await?;
+        add_changes(dir, &[]).await?;
         let commit = [
             "commit",
             "--no-verify",
@@ -542,7 +570,15 @@ mod tests {
 
         assert!(!ws.commit_all(&task, "nothing").await.unwrap());
         std::fs::write(task.join("a.txt"), "a\n").unwrap();
+        // What running the code left behind stays out of the commit.
+        std::fs::create_dir_all(task.join("pkg/__pycache__")).unwrap();
+        std::fs::write(task.join("pkg/__pycache__/a.cpython-314.pyc"), "x").unwrap();
+        std::fs::write(task.join("b.pyc"), "x").unwrap();
         assert!(ws.commit_all(&task, "task a").await.unwrap());
+        let files = git(&task, &["ls-files"]).await.unwrap();
+        assert!(files.contains("a.txt") && !files.contains("pyc"), "{files}");
+        std::fs::remove_dir_all(task.join("pkg")).unwrap();
+        std::fs::remove_file(task.join("b.pyc")).unwrap();
         let stat = ws.diff_stat(&task, "ca/run").await.unwrap();
         assert!(stat.contains("a.txt"), "{stat}");
         // Uncommitted and new files show in the full diff.

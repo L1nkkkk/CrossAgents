@@ -502,7 +502,7 @@ impl Orchestrator {
         })
         .await;
         if run.config.auto_approves() {
-            self.approve_locked(&mut run).await?;
+            self.approve_locked(&mut run, &[]).await?;
         }
         Ok(run)
     }
@@ -516,19 +516,26 @@ impl Orchestrator {
                 run.status
             )));
         }
-        self.settle(&mut run, approval).await?;
-        self.approve_locked(&mut run).await?;
+        let changes = self.settle(&mut run, approval).await?;
+        self.approve_locked(&mut run, &changes).await?;
         Ok(run)
     }
 
-    /// Applies the person's choices to the run before its tasks are created. A worker picked
-    /// for a task joins the team, so it is assignable like the plan's own picks.
-    async fn settle(&self, run: &mut Run, approval: Approval) -> Result<(), CoreError> {
+    /// Applies the person's choices to the run before its tasks are created; returns what
+    /// differs from the plan and the run's settings, for the lead. A worker picked for a task
+    /// joins the team, so it is assignable like the plan's own picks.
+    async fn settle(&self, run: &mut Run, approval: Approval) -> Result<Vec<String>, CoreError> {
+        let mut changes = Vec::new();
         if let Some(policy) = approval.policy {
+            changes.extend(policy_changes(&run.config.policy, &policy));
             run.config.policy = policy;
         }
         if let Some(n) = approval.max_parallel {
-            run.config.max_parallel = if run.in_place { 1 } else { n.max(1) };
+            let n = if run.in_place { 1 } else { n.max(1) };
+            if n != run.config.max_parallel {
+                changes.push(format!("at most {n} task(s) run at a time"));
+            }
+            run.config.max_parallel = n;
         }
         for (key, worker) in approval.assignees {
             let Some(index) = run.plan.iter().position(|t| t.key == key) else {
@@ -557,12 +564,23 @@ impl Orchestrator {
                     Some(agent.name)
                 }
             };
+            if run.plan[index].assignee != name {
+                let who =
+                    |n: &Option<String>| n.clone().unwrap_or_else(|| "the default worker".into());
+                changes.push(format!(
+                    "#{key} goes to {} (your plan said {})",
+                    who(&name),
+                    who(&run.plan[index].assignee)
+                ));
+            }
             run.plan[index].assignee = name;
         }
-        Ok(())
+        Ok(changes)
     }
 
-    async fn approve_locked(&self, run: &mut Run) -> Result<(), CoreError> {
+    /// Creates the plan's tasks and starts them. The lead hears who does each task, and
+    /// `changes`: what the person changed when approving.
+    async fn approve_locked(&self, run: &mut Run, changes: &[String]) -> Result<(), CoreError> {
         if run.status != RunStatus::AwaitingApproval {
             return Err(CoreError::Conflict(format!(
                 "run is {:?}, not awaiting approval",
@@ -571,6 +589,19 @@ impl Orchestrator {
         }
         let now = Utc::now();
         let assignments = self.resolve_assignments(run, &run.plan).await?;
+        let mut who = Vec::new();
+        for (planned, (worker_template, _)) in run.plan.iter().zip(&assignments) {
+            let template = worker_template.unwrap_or(run.config.worker);
+            let name = match self.store.get_agent(&AgentKey::Id(template)).await {
+                Ok(agent) => format!(
+                    "{} ({})",
+                    agent.name,
+                    agent.model.as_deref().unwrap_or(&agent.plugin)
+                ),
+                Err(_) => "the default worker".into(),
+            };
+            who.push(format!("#{} → {name}", planned.key));
+        }
         for (planned, (worker_template, reviewer_template)) in run.plan.iter().zip(assignments) {
             let task = Task {
                 id: TaskId::new(),
@@ -599,16 +630,22 @@ impl Orchestrator {
             self.store.insert_task(&task).await?;
         }
         self.set_run_status(run, RunStatus::Running, None).await?;
-        self.notice(
-            run.planner,
-            &format!("run:{}", run.id),
-            &format!(
-                "The plan of run {} was approved: {} task(s) start as their dependencies allow.",
-                run.id,
-                run.plan.len()
-            ),
-        )
-        .await;
+        let mut text = format!(
+            "The plan of run {} was approved: {} task(s) start as their dependencies allow.
+Who does each task: {}",
+            run.id,
+            run.plan.len(),
+            who.join(", ")
+        );
+        if !changes.is_empty() {
+            text.push_str(&format!(
+                "
+The person changed: {}",
+                changes.join("; ")
+            ));
+        }
+        self.notice(run.planner, &format!("run:{}", run.id), &text)
+            .await;
         self.schedule(run).await
     }
 
@@ -1027,6 +1064,49 @@ fn role_word(role: Role) -> &'static str {
         Role::Worker => "worker",
         Role::Reviewer => "reviewer",
     }
+}
+
+/// What a person's new policy changes, in words the lead acts on.
+fn policy_changes(old: &RunPolicy, new: &RunPolicy) -> Vec<String> {
+    use crossagents_core::{AskPolicy, LandPolicy};
+    let mut out = Vec::new();
+    if old.land != new.land {
+        out.push(
+            match new.land {
+                LandPolicy::Manual => "the person lands the result; do not land it yourself",
+                LandPolicy::Auto => "you may land the result yourself (run_land)",
+                LandPolicy::Pr => "you may open a pull request for the result (run_land)",
+            }
+            .to_owned(),
+        );
+    }
+    if old.human_ask != new.human_ask {
+        out.push(match new.human_ask {
+            AskPolicy::Allow => "questions to the person wait for the answer".to_owned(),
+            AskPolicy::Timeout => format!(
+                "questions to the person fall back to their default after {} minutes",
+                new.ask_timeout_minutes
+            ),
+            AskPolicy::Deny => "do not ask the person; decide yourself".to_owned(),
+        });
+    }
+    if old.budget != new.budget {
+        let b = &new.budget;
+        let caps: Vec<String> = [
+            b.max_usd.map(|v| format!("${v}")),
+            b.max_tokens.map(|v| format!("{v} tokens")),
+            b.max_minutes.map(|v| format!("{v} minutes")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        out.push(if caps.is_empty() {
+            "the run has no budget cap".to_owned()
+        } else {
+            format!("budget: {}", caps.join(", "))
+        });
+    }
+    out
 }
 
 pub(crate) fn first_line(text: &str, max: usize) -> String {

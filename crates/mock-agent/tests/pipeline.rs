@@ -829,6 +829,24 @@ async fn the_approval_settles_policy_caps_and_who_does_each_task() {
         .await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
 
+    // The lead hears who does what, and what the person changed.
+    let told = w
+        .until("the lead hears the approval", |e| {
+            matches!(&e.kind, EventKind::AgentInput { text, .. } if text.contains("was approved"))
+        })
+        .await;
+    let EventKind::AgentInput { text, .. } = &told.kind else {
+        unreachable!()
+    };
+    assert!(text.contains("#a → helper (sonnet)"), "{text}");
+    assert!(
+        text.contains("#a goes to helper (your plan said the default worker)"),
+        "{text}"
+    );
+    assert!(text.contains("you may land the result yourself"), "{text}");
+    assert!(text.contains("budget: $5"), "{text}");
+    assert!(text.contains("at most 1 task(s)"), "{text}");
+
     let d = detail(&t, &id).await;
     let config = &d["run"]["config"];
     assert_eq!(config["max_parallel"], 1);
