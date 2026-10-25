@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
-    Capabilities, CoreError, Driver, DriverKind, DriverSession, PermissionDecision,
+    AttachmentSupport, Capabilities, CoreError, Driver, DriverKind, DriverSession, PermissionDecision,
     PermissionHandler, PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec,
     TurnOutcome,
 };
@@ -173,6 +173,13 @@ impl Driver for CodexNativeDriver {
             rate_limits: true,
             permission_callback: true,
             compaction: true,
+            // Images go as `localImage`; text is inlined or named by path. Codex has no
+            // document input, so a PDF would only be a path it cannot read as one.
+            attachments: Some(AttachmentSupport {
+                image: true,
+                pdf: false,
+                text: true,
+            }),
         }
     }
 

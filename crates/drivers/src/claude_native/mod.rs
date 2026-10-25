@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use crossagents_core::{
-    Capabilities, CoreError, Driver, DriverKind, DriverSession, PermissionHandler,
+    AttachmentSupport, Capabilities, CoreError, Driver, DriverKind, DriverSession, PermissionHandler,
     PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec, StopReason, TurnOutcome,
 };
 use serde_json::{Value, json};
@@ -131,6 +131,9 @@ impl Driver for ClaudeNativeDriver {
             rate_limits: true,
             permission_callback: true,
             compaction: true,
+            // stream-json content blocks: images and PDFs as such, text inlined
+            // (docs/tasks/DOGFOOD.md §3).
+            attachments: Some(AttachmentSupport::ALL),
         }
     }
 

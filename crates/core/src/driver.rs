@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use crate::account::{Credits, LimitGroup, RateWindow, ResetCredit};
+use crate::attachment::AttachmentSupport;
 use crate::error::CoreError;
 use crate::model::Agent;
 
@@ -112,6 +113,10 @@ pub struct Capabilities {
     pub permission_callback: bool,
     /// [`DriverSession::compact`].
     pub compaction: bool,
+    /// Which kinds of file the agent takes with a message (docs/TODO.md §7). `None` while
+    /// it has not said: ACP agents declare this when their session starts, so a client
+    /// allows the entries it knows nothing about and lets the hub decide.
+    pub attachments: Option<AttachmentSupport>,
 }
 
 /// How to answer permission requests when no [`PermissionHandler`] is given.
@@ -493,6 +498,12 @@ pub trait DriverSession: Send + Sync {
         } else {
             self.prompt(&prompt.with_references()).await
         }
+    }
+
+    /// What this session's agent takes as files, when it declared it at start (ACP agents
+    /// do). `None`: whatever its driver's [`Capabilities::attachments`] says.
+    fn attachment_support(&self) -> Option<AttachmentSupport> {
+        None
     }
 
     /// Stops the running turn; `prompt` then returns [`StopReason::Cancelled`]. Does

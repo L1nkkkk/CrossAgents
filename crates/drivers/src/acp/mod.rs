@@ -69,6 +69,9 @@ impl Driver for AcpDriver {
             interrupt: true,
             mcp: true,
             usage: true,
+            // Unknown until a session says: the agent declares `promptCapabilities` at
+            // `initialize` (docs/TODO.md §7).
+            attachments: None,
             ..Capabilities::default()
         }
     }

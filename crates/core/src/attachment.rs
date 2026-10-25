@@ -9,6 +9,90 @@ use serde::{Deserialize, Serialize};
 /// by path instead.
 pub const INLINE_TEXT_LIMIT: u64 = 256 * 1024;
 
+/// A kind of file, as drivers treat them (docs/TODO.md §7): an image goes as an image to
+/// drivers that take them, a PDF as a document, text goes into the prompt itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentKind {
+    Image,
+    Pdf,
+    /// Text and JSON: small ones are inlined, longer ones named by path.
+    Text,
+}
+
+impl AttachmentKind {
+    /// The kind of an allowed `mime` (`api_types::attachment_mime_ok`); `None` for others.
+    pub fn of_mime(mime: &str) -> Option<Self> {
+        match mime {
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp" => Some(Self::Image),
+            "application/pdf" => Some(Self::Pdf),
+            "application/json" => Some(Self::Text),
+            _ if mime.starts_with("text/") => Some(Self::Text),
+            _ => None,
+        }
+    }
+
+    /// How a person names it in a message ("image", "PDF", "text").
+    pub fn noun(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Pdf => "PDF",
+            Self::Text => "text",
+        }
+    }
+}
+
+/// Which kinds of file an agent takes (docs/TODO.md §7). Other kinds are refused rather
+/// than passed as a reference the agent cannot use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct AttachmentSupport {
+    pub image: bool,
+    pub pdf: bool,
+    pub text: bool,
+}
+
+impl AttachmentSupport {
+    pub const ALL: Self = Self {
+        image: true,
+        pdf: true,
+        text: true,
+    };
+    /// Every driver can put text in the prompt; not all take images or documents.
+    pub const TEXT_ONLY: Self = Self {
+        image: false,
+        pdf: false,
+        text: true,
+    };
+
+    pub fn allows(self, kind: AttachmentKind) -> bool {
+        match kind {
+            AttachmentKind::Image => self.image,
+            AttachmentKind::Pdf => self.pdf,
+            AttachmentKind::Text => self.text,
+        }
+    }
+
+    /// The kinds it takes, in the order messages name them.
+    pub fn kinds(self) -> Vec<AttachmentKind> {
+        [
+            (self.image, AttachmentKind::Image),
+            (self.pdf, AttachmentKind::Pdf),
+            (self.text, AttachmentKind::Text),
+        ]
+        .into_iter()
+        .filter_map(|(takes, kind)| takes.then_some(kind))
+        .collect()
+    }
+}
+
+impl Default for AttachmentSupport {
+    fn default() -> Self {
+        Self::TEXT_ONLY
+    }
+}
+
 /// A file sent with a message, as kept on disk by the hub.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -39,6 +123,11 @@ impl Attachment {
     /// Text a driver can put in the prompt as it is.
     pub fn is_text(&self) -> bool {
         self.mime.starts_with("text/") || self.mime == "application/json"
+    }
+
+    /// The kind drivers think in (docs/TODO.md §7).
+    pub fn kind(&self) -> Option<AttachmentKind> {
+        AttachmentKind::of_mime(&self.mime)
     }
 
     /// The file's contents as text, when it is text and small enough to inline.
@@ -143,5 +232,43 @@ mod tests {
         );
         assert!(prompt.attachments[1].is_image());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn kinds_and_what_an_agent_takes() {
+        assert_eq!(
+            AttachmentKind::of_mime("image/webp"),
+            Some(AttachmentKind::Image)
+        );
+        assert_eq!(
+            AttachmentKind::of_mime("application/pdf"),
+            Some(AttachmentKind::Pdf)
+        );
+        assert_eq!(
+            AttachmentKind::of_mime("text/markdown"),
+            Some(AttachmentKind::Text)
+        );
+        assert_eq!(
+            AttachmentKind::of_mime("application/json"),
+            Some(AttachmentKind::Text)
+        );
+        assert_eq!(AttachmentKind::of_mime("application/zip"), None);
+        assert_eq!(AttachmentKind::of_mime("image/bmp"), None);
+
+        assert!(AttachmentSupport::ALL.allows(AttachmentKind::Pdf));
+        assert!(!AttachmentSupport::TEXT_ONLY.allows(AttachmentKind::Image));
+        assert!(AttachmentSupport::TEXT_ONLY.allows(AttachmentKind::Text));
+        assert_eq!(
+            AttachmentSupport::TEXT_ONLY.kinds(),
+            vec![AttachmentKind::Text]
+        );
+        assert_eq!(
+            AttachmentSupport::ALL.kinds(),
+            vec![
+                AttachmentKind::Image,
+                AttachmentKind::Pdf,
+                AttachmentKind::Text
+            ]
+        );
     }
 }
