@@ -47,18 +47,22 @@ const CAPS: Record<DriverKind, Capabilities> = {
   "codex-native": {
     streaming: true, interrupt: true, mcp: true, multi_session: true, resume: true, fork: true, rollback: true,
     revert_files: false, set_model: true, structured_diff: true, usage: true, rate_limits: true, permission_callback: true, compaction: true,
+    attachments: { image: true, pdf: false, text: true },
   },
   "claude-native": {
     streaming: true, interrupt: true, mcp: true, multi_session: false, resume: true, fork: true, rollback: false,
     revert_files: false, set_model: true, structured_diff: false, usage: true, rate_limits: true, permission_callback: true, compaction: true,
+    attachments: { image: true, pdf: true, text: true },
   },
   "codebuddy-native": {
     streaming: true, interrupt: true, mcp: true, multi_session: false, resume: true, fork: true, rollback: false,
     revert_files: false, set_model: true, structured_diff: false, usage: true, rate_limits: true, permission_callback: true, compaction: true,
+    attachments: { image: true, pdf: true, text: true },
   },
   "acp-generic": {
     streaming: true, interrupt: true, mcp: true, multi_session: false, resume: false, fork: false, rollback: false,
     revert_files: false, set_model: false, structured_diff: false, usage: true, rate_limits: false, permission_callback: true, compaction: false,
+    attachments: null,
   },
 };
 

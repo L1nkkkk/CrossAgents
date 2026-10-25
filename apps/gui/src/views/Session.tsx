@@ -14,6 +14,7 @@ import { Avatar, ErrorBox, Icon, Mark, Prose, StatusChip, Vendor, agentTitle, ag
 import { ChangeStat, DiffView } from "../diffview";
 import { parseDiff, tailLines, type DiffFile } from "../lib/diff";
 import { errorHint } from "../lib/errors";
+import { supportNote } from "../lib/attachments";
 import { effortLabel, prettyModel } from "../lib/models";
 import { clock, range } from "../lib/time";
 import { ModelEffortPicks } from "../modelPick";
@@ -150,7 +151,7 @@ export function SessionView({
             <button onClick={() => void api.archiveAgent(agent.id, false)}>恢复对话</button>
           </div>
         ) : (
-          <Composer agent={agent} capabilities={capabilities} draft={draft} setDraft={setDraft} plans={pendingPlans} onPlanDone={reload} mates={mates} />
+          <Composer agent={agent} capabilities={capabilities} driver={transcript.driver} draft={draft} setDraft={setDraft} plans={pendingPlans} onPlanDone={reload} mates={mates} />
         )}
       </div>
     </section>
@@ -979,6 +980,7 @@ function QueuePanel({ agent, queued, onEdit }: { agent: Agent; queued: Transcrip
 function Composer({
   agent,
   capabilities,
+  driver,
   draft,
   setDraft,
   plans,
@@ -987,6 +989,7 @@ function Composer({
 }: {
   agent: Agent;
   capabilities: Capabilities | null;
+  driver: string | null;
   draft: string;
   setDraft: (text: string) => void;
   plans: RunDetail[];
@@ -1003,7 +1006,9 @@ function Composer({
   const running = agent.status === "running";
   const canInterrupt = running && capabilities?.interrupt !== false;
   const plan = plans.find((d) => !deferred.includes(d.run.id));
-  const files = useHeld(setError);
+  const support = capabilities?.attachments ?? null;
+  const files = useHeld(setError, support, driver);
+  const note = supportNote(support, driver);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -1112,6 +1117,7 @@ function Composer({
         </div>
       </div>
       <div className="composer-hint">
+        {note && <span>{note} · </span>}
         {running ? "Enter 排队 · Ctrl+Shift+Enter 打断并发送 · Esc 中断" : "Enter 发送 · Shift+Enter 换行 · agent 离线时会自动启动"}
       </div>
     </div>
