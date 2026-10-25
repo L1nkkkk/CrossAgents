@@ -12,7 +12,9 @@ use serde_json::{Value, json};
 
 use crate::engine::{Orchestrator, first_line};
 use crate::tools::args;
+use crate::verify::all_passed;
 use crate::workspace::Synced;
+use crate::{brief, project};
 
 /// What landing did: landed, or waits for a task that resolves conflicts with the base.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -38,6 +40,47 @@ impl Orchestrator {
             Some((run, _)) if run.planner == caller.id => Ok(run),
             _ => Err(CoreError::Conflict("you lead no run".into())),
         }
+    }
+
+    /// The project's run checks (`crossagents.toml`) in the run's checkout, before the lead
+    /// lands or finishes a run that changed something (docs/tasks/DOGFOOD.md §9). The results
+    /// stay on the run; a failure refuses `tool` with the output, for the lead to fix. The
+    /// person is not held to them: they land or end the run from the run page.
+    async fn require_run_checks(&self, run: &Run, tool: &str) -> Result<(), CoreError> {
+        let dir = self.integration_path(run);
+        if run.landed.is_some() || !dir.exists() {
+            return Ok(());
+        }
+        let tasks = self.store.list_tasks(run.id).await?;
+        if !self.has_changes(run, &tasks).await? {
+            return Ok(());
+        }
+        let checks = project::run_checks(&dir)
+            .map_err(|e| CoreError::Conflict(format!("{e}; fix it, then call {tool} again")))?;
+        if checks.commands.is_empty() {
+            return Ok(());
+        }
+        let results = self
+            .verifier
+            .check_within(&dir, &checks.commands, checks.timeout)
+            .await;
+        {
+            let _guard = self.lock(run.id).await;
+            let mut stored = self.store.get_run(run.id).await?;
+            stored.checks = results.clone();
+            stored.updated_at = Utc::now();
+            self.store.update_run(&stored).await?;
+        }
+        if all_passed(&results) {
+            return Ok(());
+        }
+        Err(CoreError::Conflict(format!(
+            "the project's checks ({}) failed: {}\nFix it in your checkout and call {tool} again. \
+             If a check itself is wrong, tell the person: they can still land or end the run \
+             from the run page.",
+            project::FILE,
+            brief::checks(&results)
+        )))
     }
 
     pub(crate) async fn run_land_tool(
@@ -69,6 +112,9 @@ impl Orchestrator {
             (LandPolicy::Pr, _) => LandMode::Pr,
             (LandPolicy::Auto, mode) => mode.unwrap_or(LandMode::Merge),
         };
+        self.commit_lead(&run, &format!("crossagents: {}", run.title))
+            .await?;
+        self.require_run_checks(&run, "run_land").await?;
         let message = a
             .message
             .as_deref()
@@ -333,6 +379,7 @@ impl Orchestrator {
             .map(str::to_owned)
             .unwrap_or_else(|| first_line(&a.summary, 72));
         self.commit_lead(&run, &message).await?;
+        self.require_run_checks(&run, "run_finish").await?;
         let run = self.finish(run.id, Some(a.summary), a.cancel_open).await?;
         Ok(json!({ "status": run.status, "landed": run.landed }))
     }
@@ -402,6 +449,17 @@ impl Orchestrator {
             Some(l) => text.push_str(&format!("已落地到 {}（{}）", run.base_branch, l.reference)),
             None if changed => text.push_str(&format!("结果在 {}，{AWAITING_LAND}", run.branch)),
             None => text.push_str("没有改动"),
+        }
+        if !run.checks.is_empty() {
+            let passed = run.checks.iter().filter(|c| c.passed).count();
+            text.push_str(&format!(
+                "\n验收（{}）：{passed}/{} 通过",
+                project::FILE,
+                run.checks.len()
+            ));
+            if let Some(bad) = run.checks.iter().find(|c| !c.passed) {
+                text.push_str(&format!("，没通过的是 `{}`", bad.command));
+            }
         }
         let defaults = self.defaulted_decisions(id).await?;
         if !defaults.is_empty() {

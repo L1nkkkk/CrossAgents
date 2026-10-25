@@ -12,6 +12,7 @@ use crossagents_core::{
     Agent, AgentId, AgentKey, AgentStatus, CoreError, Envelope, EventBus, EventKind, McpServerSpec,
     MessageId, MessageSource, Role, RunId,
 };
+use crossagents_orchestrator::workspace::worktree_env;
 use crossagents_orchestrator::{AgentHost, Route};
 use tokio::sync::RwLock;
 
@@ -98,22 +99,6 @@ impl CollabSetup {
         env.extend(worktree_env(&self.worktrees, &agent.cwd));
         Ok(env)
     }
-}
-
-/// `CARGO_TARGET_DIR=<root>/<run>/target` when `cwd` is one of a run's worktrees under
-/// `root` (its integration checkout or a task's): the run's worktrees share one build
-/// directory, so dependencies compile once per run rather than once per task, and it lies
-/// outside every checkout, so nothing commits it (DOGFOOD.md §9). Builds running at the same
-/// time wait for each other on cargo's lock. It goes when the run's checkout does. Absolute:
-/// a relative one would follow every `cd`.
-pub fn worktree_env(root: &Path, cwd: &Path) -> Option<(String, String)> {
-    let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    let (root, cwd) = (canon(root), canon(cwd));
-    let run = cwd.strip_prefix(&root).ok()?.components().next()?;
-    Some((
-        "CARGO_TARGET_DIR".to_owned(),
-        root.join(run).join("target").display().to_string(),
-    ))
 }
 
 #[async_trait]

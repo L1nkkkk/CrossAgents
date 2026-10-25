@@ -311,6 +311,10 @@ pub struct Run {
     /// The lead's closing summary (`run_finish`).
     #[serde(default)]
     pub summary: Option<String>,
+    /// The project's run checks (`crossagents.toml`), as they last ran before the lead
+    /// landed or finished the run.
+    #[serde(default)]
+    pub checks: Vec<CheckResult>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

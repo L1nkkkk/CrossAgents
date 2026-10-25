@@ -95,6 +95,58 @@ async fn the_lead_changes_the_run_branch_and_it_lands() {
 }
 
 #[tokio::test]
+async fn the_projects_checks_hold_back_run_finish() {
+    let repo = git_repo();
+    std::fs::write(
+        repo.path().join("crossagents.toml"),
+        "[run]\nchecks = [\"git ls-files --error-unmatch ok.txt\"]\n",
+    )
+    .unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    };
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "checks"]);
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+
+    // The first close is refused (no ok.txt yet); after the fix the second goes through.
+    let finish = call(
+        "run_finish",
+        json!({ "summary": "added notes", "message": "docs: add notes" }),
+    );
+    let request = format!("Add notes. [write notes.txt=x] {finish} [write ok.txt=yes] {finish}");
+    let id = start(&t, request).await["id"].as_str().unwrap().to_owned();
+    w.until("run completed", run_status_is(&id, RunStatus::Completed))
+        .await;
+    w.until("turn completed", |e| {
+        matches!(e.kind, EventKind::AgentTurnCompleted { .. })
+    })
+    .await;
+    let output = w.output();
+    // The lead was told up front, and the refusal carried the failing command.
+    assert!(output.contains("checks (crossagents.toml)"), "{output}");
+    assert!(
+        output.contains("checks (crossagents.toml) failed"),
+        "{output}"
+    );
+    assert!(output.contains("ok.txt"), "{output}");
+    let run: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
+    assert_eq!(run["run"]["checks"][0]["passed"], true, "{run}");
+    let human = t.get("/v1/questions").await.text().await.unwrap();
+    assert!(
+        human.contains("验收（crossagents.toml）：1/1 通过"),
+        "{human}"
+    );
+}
+
+#[tokio::test]
 async fn a_run_that_only_answered_has_nothing_to_land() {
     let repo = git_repo();
     let t = setup(repo.path()).await;

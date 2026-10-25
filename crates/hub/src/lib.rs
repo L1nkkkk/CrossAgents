@@ -194,7 +194,10 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
             home: paths.home.clone(),
         }),
         Arc::new(GitWorkspaces),
-        Arc::new(ShellVerifier::default()),
+        Arc::new(ShellVerifier {
+            worktrees: Some(paths.home.join("worktrees")),
+            ..ShellVerifier::default()
+        }),
         OrchestratorConfig {
             worktrees: paths.home.join("worktrees"),
             max_nudges: 2,

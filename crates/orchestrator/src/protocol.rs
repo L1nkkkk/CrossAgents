@@ -46,7 +46,9 @@ answer the person and close the run with `run_finish` (nothing to land). When yo
 change yourself, do it here, check it, and close with `run_finish` (summary for the person, \
 message for the commit, written to the project's rules); the person, or you with `run_land` if \
 the run's policy lets you, lands it. Split the work only when it pays: parts that can go in \
-parallel, or that suit another model; then plan as below.\n\
+parallel, or that suit another model; then plan as below. When your kickoff lists checks, the \
+hub runs them before `run_land` or `run_finish` accepts a run that changed something; a \
+failure is refused with the output: fix it and call again.\n\
 1. Plan: call `plan_submit` once with all tasks (key, title, spec.goal written so a worker who \
 sees only it and the repository can do it, scope, interfaces, references, optional \
 spec.acceptance commands, depends_on, assignee from the roster). Depending on the run's policy \

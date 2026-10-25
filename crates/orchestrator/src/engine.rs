@@ -254,6 +254,7 @@ impl Orchestrator {
         let mut run = Run {
             landed: None,
             summary: None,
+            checks: Vec::new(),
             id,
             title: new.title.unwrap_or_else(|| first_line(&new.request, 60)),
             request: new.request,
@@ -303,7 +304,12 @@ impl Orchestrator {
         self.deliver(
             run.planner,
             MessageSource::Human,
-            brief::kickoff(&run, &team, run.config.worker),
+            brief::kickoff(
+                &run,
+                &team,
+                run.config.worker,
+                &crate::project::run_checks(&self.integration_path(&run)),
+            ),
         );
         Ok(run)
     }
@@ -843,7 +849,7 @@ The person changed: {}",
     }
 
     /// Removes the build directory the run's worktrees share (`<worktrees>/<run>/target`,
-    /// see the hub's `worktree_env`), and the run's directory once nothing else is in it.
+    /// see `workspace::worktree_env`), and the run's directory once nothing else is in it.
     /// Called when the run's checkout goes: nothing builds there any more.
     pub(crate) fn remove_run_build(&self, run: &Run) {
         let dir = self.config.worktrees.join(short(run.id));

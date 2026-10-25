@@ -279,7 +279,7 @@ hub 在开会话时把一份项目规则写进开场说明（`SessionSpec.instru
 | # | 现象 | 影响 | 方向 |
 |---|---|---|---|
 | 1 | 每个 run / 任务的 worktree 各有一份 `CARGO_TARGET_DIR`：这次一个集成目录就 2.3 GB，第一次 `cargo test -p crossagents-cli` 约 1.5 分钟 | 多任务的 run 是 N 份全量编译、N × 2.3 GB；改到 hub 这类大 crate 时编译会成为主要耗时 | **已改**（2026-10-26）：同一 run 共享 `<worktrees>/<run>/target`，run 的集成目录删除时一起删；sccache 没做 |
-| 2 | 轻量 Work 没有任何 hub 跑的验收：对错全凭主导自述 | 自动化时没人复核；这次是我手动重跑测试才确认 | 项目级的默认验收命令（如 `CROSSAGENTS.md` 里声明），`run_finish` 前由 hub 跑；失败就退回主导 |
+| 2 | 轻量 Work 没有任何 hub 跑的验收：对错全凭主导自述 | 自动化时没人复核；这次是我手动重跑测试才确认 | **已改**（2026-10-26）：项目根目录的 `crossagents.toml` 声明 `[run] checks = [...]`（可选 `timeout_secs`，缺省 600）。run 有改动时，主导调 `run_land` 或 `run_finish` 之前，hub 在 run 的集成目录里跑这些命令，用 run 共享的 cargo target；没全过就拒绝这次调用，把失败的命令和输出交给主导，修好再调。结果存在 `run.checks`，收尾通知里写「验收：N/N 通过」。主导开场就会看到要跑哪些检查。文件写错了也算失败，免得一个拼写错误悄悄关掉验收。人从 run 页落地或结束不受这个限制。本仓库声明的是 `cargo test --workspace`，超时 1800 秒 |
 | 3 | 主导试图 `python - <<EOF` 跑脚本，本机只有 Store 占位 python | 白费一步，它自己绕过去了 | 开场说明里带上本机可用的工具链（或在第一次找不到命令时提示） |
 | 4 | run 页底部堆满别的 run 的「告诉你」通知 | 看这个 run 时被无关卡片挤占 | run 页只显示本 run 的通知，其余留给首页 |
 | 5 | 提交作者是 `CrossAgents`，不是人 | 落地后 main 的历史里是 hub 的身份 | 落地时可选用人的 git 身份，或加 `Co-authored-by` |

@@ -7,8 +7,15 @@ use std::fmt::Write;
 
 use crossagents_core::{Agent, AgentId, CheckResult, Role, Run, Task};
 
+use crate::project::{self, RunChecks};
+
 /// The run's request as the person wrote it, then the facts the lead needs.
-pub fn kickoff(run: &Run, team: &[Agent], default_worker: AgentId) -> String {
+pub fn kickoff(
+    run: &Run,
+    team: &[Agent],
+    default_worker: AgentId,
+    checks: &Result<RunChecks, String>,
+) -> String {
     let mut out = run.request.trim().to_owned();
     if run.in_place {
         let _ = write!(
@@ -25,6 +32,25 @@ pub fn kickoff(run: &Run, team: &[Agent], default_worker: AgentId) -> String {
             "\n\n---\nrun: {} (run_id: {}) · base branch {} · run branch {}",
             run.title, run.id, run.base_branch, run.branch
         );
+        match checks {
+            Ok(c) if c.commands.is_empty() => {}
+            Ok(c) => {
+                let list: Vec<String> = c.commands.iter().map(|c| format!("`{c}`")).collect();
+                let _ = write!(
+                    out,
+                    "\nchecks ({}): before you land or finish with changes, the hub runs {} in \
+                     your checkout; they must pass",
+                    project::FILE,
+                    list.join(", ")
+                );
+            }
+            Err(e) => {
+                let _ = write!(
+                    out,
+                    "\nchecks: {e}; landing and finishing are refused until it is fixed"
+                );
+            }
+        }
     }
     out.push_str(&roster(team, default_worker));
     if !team.iter().any(|a| a.role == Role::Worker) {

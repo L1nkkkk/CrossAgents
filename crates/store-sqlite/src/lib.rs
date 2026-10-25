@@ -861,6 +861,7 @@ mod tests {
         let mut run = Run {
             landed: None,
             summary: None,
+            checks: Vec::new(),
             id: RunId::new(),
             title: "t".into(),
             request: "do things".into(),

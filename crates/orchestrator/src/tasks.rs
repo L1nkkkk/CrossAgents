@@ -749,7 +749,7 @@ impl Orchestrator {
             .map_or(RUN_DEFAULT, Duration::from_secs)
             .min(RUN_MAX);
         let started = Instant::now();
-        let result = run_command(&dir, &a.command, limit, RUN_OUTPUT).await;
+        let result = run_command(&dir, &a.command, limit, RUN_OUTPUT, &self.config.worktrees).await;
         let duration_ms = started.elapsed().as_millis() as u64;
         self.publish(EventKind::TaskCommand {
             run_id: run.id,

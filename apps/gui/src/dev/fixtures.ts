@@ -165,6 +165,7 @@ export function run(init: { title: string; request: string; planner: Agent; work
     plan: init.plan,
     landed: null,
     summary: null,
+    checks: [],
     created_at: ago(init.minutesAgo),
     updated_at: ago(Math.max(0, init.minutesAgo - 30)),
   };

@@ -1,6 +1,6 @@
 //! Acceptance checks, run by the hub itself (docs/DESIGN.md §8 Verify).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -9,10 +9,22 @@ use crossagents_core::CheckResult;
 use crossagents_core::process::NoWindow;
 use tokio::process::Command;
 
+use crate::workspace::worktree_env;
+
 /// Decides whether a task's result is acceptable.
 #[async_trait]
 pub trait Verifier: Send + Sync {
     async fn check(&self, dir: &Path, commands: &[String]) -> Vec<CheckResult>;
+
+    /// `check` with each command's time limit given (the project's run checks).
+    async fn check_within(
+        &self,
+        dir: &Path,
+        commands: &[String],
+        _timeout: Duration,
+    ) -> Vec<CheckResult> {
+        self.check(dir, commands).await
+    }
 }
 
 /// Runs each acceptance command in the system shell; all must exit 0. Stops at the first
@@ -21,6 +33,9 @@ pub trait Verifier: Send + Sync {
 pub struct ShellVerifier {
     pub timeout: Duration,
     pub max_output: usize,
+    /// Where runs' worktrees live: checks in one build in the run's shared target, as its
+    /// agents do (`workspace::worktree_env`).
+    pub worktrees: Option<PathBuf>,
 }
 
 impl Default for ShellVerifier {
@@ -28,6 +43,7 @@ impl Default for ShellVerifier {
         Self {
             timeout: Duration::from_secs(600),
             max_output: 8_000,
+            worktrees: None,
         }
     }
 }
@@ -80,9 +96,25 @@ fn tail(text: &str, max: usize) -> String {
 #[async_trait]
 impl Verifier for ShellVerifier {
     async fn check(&self, dir: &Path, commands: &[String]) -> Vec<CheckResult> {
+        self.check_within(dir, commands, self.timeout).await
+    }
+
+    async fn check_within(
+        &self,
+        dir: &Path,
+        commands: &[String],
+        timeout: Duration,
+    ) -> Vec<CheckResult> {
         let mut results = Vec::new();
         for command in commands.iter().filter(|c| !c.trim().is_empty()) {
             let mut cmd = shell(command);
+            if let Some((key, value)) = self
+                .worktrees
+                .as_deref()
+                .and_then(|root| worktree_env(root, dir))
+            {
+                cmd.env(key, value);
+            }
             cmd.current_dir(dir)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -95,37 +127,35 @@ impl Verifier for ShellVerifier {
                     passed: false,
                     output: format!("cannot start: {e}"),
                 },
-                Ok(child) => {
-                    match tokio::time::timeout(self.timeout, child.wait_with_output()).await {
-                        Err(_) => CheckResult {
+                Ok(child) => match tokio::time::timeout(timeout, child.wait_with_output()).await {
+                    Err(_) => CheckResult {
+                        command: command.clone(),
+                        exit_code: None,
+                        passed: false,
+                        output: format!("timed out after {}s", timeout.as_secs()),
+                    },
+                    Ok(Err(e)) => CheckResult {
+                        command: command.clone(),
+                        exit_code: None,
+                        passed: false,
+                        output: format!("failed to run: {e}"),
+                    },
+                    Ok(Ok(out)) => {
+                        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+                        text.push_str(&String::from_utf8_lossy(&out.stderr));
+                        let code = out.status.code();
+                        let mut output = tail(text.trim(), self.max_output);
+                        if !out.status.success() {
+                            output = explain(code, output);
+                        }
+                        CheckResult {
                             command: command.clone(),
-                            exit_code: None,
-                            passed: false,
-                            output: format!("timed out after {}s", self.timeout.as_secs()),
-                        },
-                        Ok(Err(e)) => CheckResult {
-                            command: command.clone(),
-                            exit_code: None,
-                            passed: false,
-                            output: format!("failed to run: {e}"),
-                        },
-                        Ok(Ok(out)) => {
-                            let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-                            text.push_str(&String::from_utf8_lossy(&out.stderr));
-                            let code = out.status.code();
-                            let mut output = tail(text.trim(), self.max_output);
-                            if !out.status.success() {
-                                output = explain(code, output);
-                            }
-                            CheckResult {
-                                command: command.clone(),
-                                exit_code: code,
-                                passed: out.status.success(),
-                                output,
-                            }
+                            exit_code: code,
+                            passed: out.status.success(),
+                            output,
                         }
                     }
-                }
+                },
             };
             let passed = result.passed;
             results.push(result);
@@ -137,17 +167,19 @@ impl Verifier for ShellVerifier {
     }
 }
 
-/// One command in `dir` with its own time limit (`workspace_run`). Never fails: problems
-/// are in the result.
+/// One command in `dir` with its own time limit (`workspace_run`), building in the run's
+/// shared target when `dir` is under `worktrees`. Never fails: problems are in the result.
 pub async fn run_command(
     dir: &Path,
     command: &str,
     timeout: Duration,
     max_output: usize,
+    worktrees: &Path,
 ) -> CheckResult {
     let verifier = ShellVerifier {
         timeout,
         max_output,
+        worktrees: Some(worktrees.to_path_buf()),
     };
     let mut results = verifier.check(dir, &[command.to_owned()]).await;
     results.pop().unwrap_or(CheckResult {
@@ -186,10 +218,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn checks_in_a_run_build_in_its_shared_target() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("worktrees");
+        let dir = root.join("ab12cd34").join("integration");
+        std::fs::create_dir_all(&dir).unwrap();
+        let verifier = ShellVerifier {
+            worktrees: Some(root.clone()),
+            ..ShellVerifier::default()
+        };
+        let echo = if cfg!(windows) {
+            "echo %CARGO_TARGET_DIR%"
+        } else {
+            "echo $CARGO_TARGET_DIR"
+        };
+        let out = verifier.check(&dir, &[echo.into()]).await;
+        let want = dunce::canonicalize(&root)
+            .unwrap()
+            .join("ab12cd34")
+            .join("target");
+        assert_eq!(out[0].output, want.display().to_string());
+    }
+
+    #[tokio::test]
     async fn timeout_fails() {
         let verifier = ShellVerifier {
             timeout: Duration::from_millis(200),
             max_output: 100,
+            worktrees: None,
         };
         let sleep = if cfg!(windows) {
             "ping -n 5 127.0.0.1"

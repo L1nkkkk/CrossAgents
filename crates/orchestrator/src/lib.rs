@@ -11,6 +11,7 @@ pub mod landing;
 pub mod messaging;
 pub mod notes;
 pub mod plan;
+pub mod project;
 pub mod protocol;
 pub mod quota;
 pub mod review;

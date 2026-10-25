@@ -500,7 +500,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "run_finish",
-        description: "Close your run with a summary for the person. What you changed yourself and did not commit is committed on the run branch with message (written the way the project's rules ask; default: the summary's first line). Tasks still open are refused unless cancel_open. The person also sees every decision taken by default. A run that changed something can then be landed (`run_land`).",
+        description: "Close your run with a summary for the person. What you changed yourself and did not commit is committed on the run branch with message (written the way the project's rules ask; default: the summary's first line). Tasks still open are refused unless cancel_open. A run that changed something must first pass the project's checks (crossagents.toml), run by the hub in your checkout; a failure is refused with their output. The person also sees every decision taken by default. A run that changed something can then be landed (`run_land`).",
         groups: PLANNER,
         schema: || {
             object(
