@@ -3,10 +3,11 @@
 
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent } from "react";
 import type { Attachment } from "@bindings/Attachment";
+import type { AttachmentSupport } from "@bindings/AttachmentSupport";
 import type { AttachmentUpload } from "@bindings/AttachmentUpload";
 import { api } from "./api";
 import { Icon } from "./components";
-import { bytes, isImage, mimeOf, refusal } from "./lib/attachments";
+import { acceptFor, bytes, isImage, mimeOf, refusal, supportNote } from "./lib/attachments";
 
 /** A file in the composer: what goes to the hub, and a preview for images. */
 export type Held = AttachmentUpload & { key: number; size: number; preview?: string };
@@ -26,14 +27,21 @@ function read(file: File): Promise<Held> {
   });
 }
 
-/** The composer's files: add (checked against the hub's limits), remove, clear. */
-export function useHeld(onError: (why: string | undefined) => void) {
+/** The composer's files: add (checked against the hub's limits and the agent's kinds), remove, clear. */
+export function useHeld(onError: (why: string | undefined) => void, support?: AttachmentSupport | null, driver?: string | null) {
   const [held, setHeld] = useState<Held[]>([]);
   const input = useRef<HTMLInputElement>(null);
+  const canAttach = !support || support.image || support.pdf || support.text;
+  const note = supportNote(support, driver);
 
   async function add(files: File[]) {
     if (!files.length) return;
-    const why = refusal(held, files.map((f) => ({ name: f.name, mime: mimeOf(f.name, f.type), size: f.size })));
+    const why = refusal(
+      held,
+      files.map((f) => ({ name: f.name, mime: mimeOf(f.name, f.type), size: f.size })),
+      support,
+      driver,
+    );
     onError(why);
     if (why) return;
     try {
@@ -67,7 +75,13 @@ export function useHeld(onError: (why: string | undefined) => void) {
     /** The paperclip and its hidden file input. */
     picker: (
       <>
-        <button className="ghost icon" onClick={() => input.current?.click()} title="附加图片或文件（也可以粘贴截图、拖进来）" aria-label="附加文件">
+        <button
+          className="ghost icon"
+          onClick={() => input.current?.click()}
+          disabled={!canAttach}
+          title={canAttach ? (note ?? "附加图片或文件（也可以粘贴截图、拖进来）") : (note ?? "这个 agent 不收文件")}
+          aria-label={canAttach ? "附加文件" : "附加文件（不可用）"}
+        >
           <Icon name="attach" size={15} />
         </button>
         <input
@@ -75,7 +89,7 @@ export function useHeld(onError: (why: string | undefined) => void) {
           type="file"
           multiple
           hidden
-          accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,application/json,text/*,.md,.rs,.ts,.tsx,.py,.toml,.yaml,.yml,.log"
+          accept={acceptFor(support)}
           onChange={(e) => {
             void add([...(e.target.files ?? [])]);
             e.target.value = "";
