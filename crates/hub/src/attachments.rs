@@ -84,6 +84,14 @@ pub fn store(
         .collect()
 }
 
+/// Drops everything stored for `agent` (its session is gone); nothing stored is fine.
+pub fn remove(home: &Path, agent: AgentId) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(dir(home, agent)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        done => done,
+    }
+}
+
 /// One stored file of `agent`'s; `None` for anything else (bad id, another session's file).
 pub fn read(home: &Path, agent: AgentId, id: &str) -> Option<AttachmentContent> {
     if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -180,6 +188,14 @@ mod tests {
         // Another session cannot read it, nor a path in disguise.
         assert!(read(home.path(), AgentId::new(), &stored[0].id).is_none());
         assert!(read(home.path(), agent, "../token").is_none());
+        // Removing the agent takes its files, and only its files.
+        let other = AgentId::new();
+        store(home.path(), other, vec![upload("b.png", "image/png", PNG)]).unwrap();
+        remove(home.path(), agent).unwrap();
+        assert!(read(home.path(), agent, &stored[0].id).is_none());
+        assert!(!dir(home.path(), agent).exists());
+        assert!(read(home.path(), other, &stored[0].id).is_some());
+        remove(home.path(), agent).unwrap();
     }
 
     #[test]

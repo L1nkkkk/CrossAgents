@@ -191,6 +191,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
             bus: bus.clone(),
             accounts: accounts.clone(),
             models: model_choice.clone(),
+            home: paths.home.clone(),
         }),
         Arc::new(GitWorkspaces),
         Arc::new(ShellVerifier::default()),

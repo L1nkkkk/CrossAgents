@@ -1,6 +1,6 @@
 //! Messages with files (docs/tasks/DOGFOOD.md §3): stored by hash, described in events and
-//! the transcript, readable back, and passed on to the agent (here an ACP mock, which takes
-//! text only: the files arrive written into the prompt).
+//! the transcript, readable back, passed on to the agent (here an ACP mock, which takes
+//! text only: the files arrive written into the prompt), and removed with the agent.
 
 mod common;
 
@@ -86,4 +86,9 @@ async fn files_travel_with_a_message() {
         .await;
     assert_eq!(resp.status(), 400);
     assert!(resp.text().await.unwrap().contains("cannot be sent"));
+
+    // Removing the agent takes its files with it.
+    assert!(path.exists());
+    assert_eq!(t.delete("/v1/agents/alice").await.status(), 204);
+    assert!(!path.parent().unwrap().exists(), "{path:?}");
 }

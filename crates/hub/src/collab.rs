@@ -194,6 +194,8 @@ pub struct HubHost {
     pub bus: Arc<EventBus>,
     pub accounts: Arc<crate::accounts::Accounts>,
     pub models: Arc<crate::models::ModelChoice>,
+    /// The hub's home, for files kept per agent (attachments).
+    pub home: PathBuf,
 }
 
 #[async_trait]
@@ -443,6 +445,9 @@ impl AgentHost for HubHost {
         let record = self.bus.store().get_agent(&AgentKey::Id(agent)).await?;
         self.runtime.stop(&AgentKey::Id(agent)).await?;
         self.bus.store().delete_agent(agent).await?;
+        if let Err(err) = crate::attachments::remove(&self.home, agent) {
+            tracing::warn!(agent = %record.name, error = %err, "cannot remove the agent's attachments");
+        }
         self.bus
             .publish(EventKind::AgentRemoved {
                 id: agent,

@@ -583,6 +583,9 @@ async fn delete_agent(
         tracing::warn!(agent = %agent.name, error = %err, "cannot remove the run checkout");
     }
     state.store().delete_agent(agent.id).await?;
+    if let Err(err) = crate::attachments::remove(&state.home, agent.id) {
+        tracing::warn!(agent = %agent.name, error = %err, "cannot remove the agent's attachments");
+    }
     state
         .bus
         .publish(EventKind::AgentRemoved {
