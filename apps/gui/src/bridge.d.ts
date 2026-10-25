@@ -3,6 +3,9 @@
 
 export type HubResponse = { status: number; body: string };
 
+/** A development build of the hub running where the GUI's own would (electron/localHub.cts). */
+export type DevHub = { exe: string; running: string; shipped: string };
+
 export interface CrossAgentsBridge {
   /** Forwards one API request to the hub. Rejects when the hub cannot be reached. */
   request(method: string, path: string, body: string | null): Promise<HubResponse>;
@@ -12,6 +15,10 @@ export interface CrossAgentsBridge {
   onEvent(listener: (data: string) => void): () => void;
   /** "connecting", "connected" or "offline: <reason>". Returns an unsubscribe function. */
   onStatus(listener: (status: string) => void): () => void;
+  /** The development hub running instead of the shipped one; null when it is ours. Packaged GUI only. */
+  devHub?(): Promise<DevHub | null>;
+  /** Stops the development hub and starts the shipped one. Rejects with the reason it could not. */
+  useShippedHub?(): Promise<void>;
   /** Asks for a folder in the system dialog; null when cancelled. */
   pickFolder?(): Promise<string | null>;
   /** The page's theme changed: the window frame follows it. */

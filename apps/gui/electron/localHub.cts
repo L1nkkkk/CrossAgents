@@ -24,7 +24,12 @@ export type Plan =
   | { action: "start" }
   | { action: "keep" }
   | { action: "replace"; from: string }
-  /** Not ours (remote, dev build, an older hub without `exe`): never touched. */
+  /**
+   * A development build (`hub start` from `target/`, copied under `<home>/shadow/`): left
+   * running, but the page says so and offers to switch to the shipped hub (`useShipped`).
+   */
+  | { action: "dev"; exe: string; running: string }
+  /** Not ours (remote, an older hub without `exe`): never touched. */
   | { action: "foreign" }
   /** Ours but newer than this GUI (a downgrade): kept; the GUI is the one to update. */
   | { action: "newer"; running: string };
@@ -32,6 +37,11 @@ export type Plan =
 /** `<home>/bin`: one directory per installed version, `<home>/bin/<version>/crossagents(.exe)`. */
 export function binRoot(home: string): string {
   return join(home, "bin");
+}
+
+/** `<home>/shadow`: where development builds run from (crates/hub/src/shadow.rs). */
+export function shadowRoot(home: string): string {
+  return join(home, "shadow");
 }
 
 const fold = (p: string) => (process.platform === "win32" ? resolve(p).toLowerCase() : resolve(p));
@@ -70,6 +80,7 @@ export function compareVersions(a: string, b: string): number | undefined {
 export function plan(running: { file: HubFile; version: string } | undefined, ours: string, home: string): Plan {
   if (!running) return { action: "start" };
   const exe = running.file.exe;
+  if (exe && isInside(exe, shadowRoot(home))) return { action: "dev", exe, running: running.version };
   if (!exe || !isInside(exe, binRoot(home))) return { action: "foreign" };
   const order = compareVersions(running.version, ours);
   if (order === 0) return { action: "keep" };
@@ -210,7 +221,14 @@ export type LocalHub = {
   recheck(): void;
   /** Why the local hub could not be started, for the offline reason; undefined when fine. */
   problem(): string | undefined;
+  /** The running hub is a development build rather than the one this GUI ships. */
+  devHub(): DevHub | undefined;
+  /** Stops the development hub and starts the shipped one; agents keep running. */
+  useShipped(): Promise<void>;
 };
+
+/** What the page shows about a development hub (src/bridge.d.ts `DevHub`). */
+export type DevHub = { exe: string; running: string; shipped: string };
 
 /**
  * Keeps the local hub of `home` running the version shipped at `shipped`. `log` gets one
@@ -222,21 +240,26 @@ export function manageLocalHub(shipped: string, home: string, log: (line: string
   let failedAt = 0;
   let checkedAt = 0;
   let problem: string | undefined;
+  let dev: DevHub | undefined;
 
   // The shipped file does not change while the GUI runs: version and copy are done once.
   let installed: Promise<{ version: string; exe: string }> | undefined;
-  const once = async () => {
+  const ensureInstalled = async () => {
     installed ??= (async () => {
       const version = await exeVersion(shipped);
       return { version, exe: await install(shipped, home, version) };
     })();
-    const { version, exe } = await installed.catch((err: unknown) => {
+    return installed.catch((err: unknown) => {
       installed = undefined;
       throw err;
     });
+  };
+  const once = async () => {
+    const { version, exe } = await ensureInstalled();
     const hub = await probe(home);
     const decision = plan(hub, version, home);
     log(`local hub: ${decision.action}${hub ? ` (running ${hub.version} from ${hub.file.exe ?? "unknown"})` : ""}, shipped ${version}`);
+    dev = decision.action === "dev" ? { exe: decision.exe, running: decision.running, shipped: version } : undefined;
     if (decision.action === "replace") {
       // Agents in runtime hosts keep running; the new hub adopts them (docs/PROCESS-SUPERVISION.md).
       await run(exe, ["hub", "stop"]);
@@ -274,5 +297,18 @@ export function manageLocalHub(shipped: string, home: string, log: (line: string
       if (now - failedAt >= RETRY_MS && now - checkedAt >= RECHECK_MS) check();
     },
     problem: () => problem,
+    devHub: () => dev,
+    useShipped: async () => {
+      await current;
+      const { exe } = await ensureInstalled();
+      log(`local hub: switching from the development hub ${dev?.exe ?? "unknown"} to the shipped one`);
+      // Like `replace`: agents in runtime hosts keep running and the new hub adopts them.
+      await run(exe, ["hub", "stop"]);
+      failedAt = 0;
+      checkedAt = 0;
+      check();
+      await current;
+      if (problem) throw new Error(problem);
+    },
   };
 }

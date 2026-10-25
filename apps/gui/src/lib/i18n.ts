@@ -45,6 +45,10 @@ const zhCN = {
   "hub.connected": "hub 已连接",
   "hub.connecting": "连接中…",
   "hub.offline": "未连接：{reason}",
+  "hub.dev": "正在用开发构建的 hub，不是自带的 v{shipped}",
+  "hub.devTitle": "{exe}\n换成自带的会重启 hub，正在跑的 agent 不受影响",
+  "hub.useShipped": "换成自带的",
+  "hub.switching": "切换中…",
 
   "strip.needsYou": "需要你",
   "strip.doneCount": "{n} 个已完成",

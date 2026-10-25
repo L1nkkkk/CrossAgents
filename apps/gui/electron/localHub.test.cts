@@ -6,7 +6,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { binRoot, cleanup, compareVersions, install, isInside, plan } from "./localHub.cjs";
+import { binRoot, cleanup, compareVersions, install, isInside, plan, shadowRoot } from "./localHub.cjs";
 
 const EXE = process.platform === "win32" ? "crossagents.exe" : "crossagents";
 
@@ -47,6 +47,14 @@ test("the plan starts, keeps, replaces or leaves the hub alone", () => {
   assert.deepEqual(plan({ file: file("0.3.0", at("0.3.0")), version: "0.3.0" }, "0.2.0", home), {
     action: "newer",
     running: "0.3.0",
+  });
+  // A development build runs from its copy under <home>/shadow: kept, but called out, even at
+  // the same version string as the shipped hub.
+  const shadow = join(shadowRoot(home), "881aadafed8a0740", EXE);
+  assert.deepEqual(plan({ file: file("0.1.0", shadow), version: "0.1.0" }, "0.1.0", home), {
+    action: "dev",
+    exe: shadow,
+    running: "0.1.0",
   });
   // Started by hand, or by a hub too old to say where it runs from: never touched.
   const dev = join(home, "Dev", "CrossAgents", "target", "debug", EXE);

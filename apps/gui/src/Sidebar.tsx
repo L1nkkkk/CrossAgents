@@ -8,7 +8,8 @@ import { createContext, useContext, useEffect, useState, useSyncExternalStore, t
 import type { Agent } from "@bindings/Agent";
 import type { RunDetail } from "@bindings/RunDetail";
 import { useActivity, useUnread } from "./activity";
-import { api } from "./api";
+import { api, errorText } from "./api";
+import type { DevHub } from "./bridge";
 import { ACTIVE_RUN, runAgents } from "./App";
 import { Avatar, BrandMark, Icon, Mark, agentTitle, displayName, hueOf, isAgent, runTone, sessionHref } from "./components";
 import { useConnectionStatus } from "./hub";
@@ -130,6 +131,7 @@ export function Sidebar({ route }: { route: string[] }) {
         </div>
 
         <div className="foot">
+          <DevHubNotice />
           <QuotaMini />
           <div className="foot-row">
             <Connection />
@@ -528,6 +530,42 @@ function QuotaMini() {
       </span>
       {t("quota.mini", { pct, window: windowLabel(found.window).replace(/限额$/, "") })}
     </a>
+  );
+}
+
+/**
+ * The installed GUI found a development hub (`hub start` from `target/`) where its own should
+ * run: it leaves it alone, so say so, or the page and the backend quietly disagree on version.
+ */
+function DevHubNotice() {
+  const status = useConnectionStatus();
+  const [dev, setDev] = useState<DevHub | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  useEffect(() => {
+    if (status === "connected") window.crossagents?.devHub?.().then(setDev, () => {});
+  }, [status]);
+  if (!dev) return null;
+  const switchHub = async () => {
+    setBusy(true);
+    setError(undefined);
+    try {
+      await window.crossagents?.useShippedHub?.();
+      setDev((await window.crossagents?.devHub?.()) ?? null);
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="dev-hub" title={t("hub.devTitle", { exe: dev.exe })}>
+      <span>{t("hub.dev", { shipped: dev.shipped })}</span>
+      {error && <span className="err">{error}</span>}
+      <button className="link" disabled={busy} onClick={switchHub}>
+        {busy ? t("hub.switching") : t("hub.useShipped")}
+      </button>
+    </div>
   );
 }
 

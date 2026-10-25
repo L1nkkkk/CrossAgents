@@ -133,6 +133,18 @@ export class MockBridge implements CrossAgentsBridge {
     return () => this.statuses.delete(listener);
   }
 
+  /** `?devhub` in the page URL: pretend a development hub runs instead of the shipped one. */
+  private devHubOn = new URLSearchParams(location.search).has("devhub");
+
+  async devHub() {
+    return this.devHubOn ? { exe: "C:/Users/me/.crossagents/shadow/881aadafed8a0740/crossagents.exe", running: "0.1.0", shipped: "0.1.0" } : null;
+  }
+
+  async useShippedHub() {
+    await new Promise((r) => setTimeout(r, 800));
+    this.devHubOn = false;
+  }
+
   async pickFolder() {
     return "C:/work/new-project";
   }

@@ -170,6 +170,24 @@ ipcMain.handle("hub:request", async (event, method: unknown, path: unknown, body
   }
 });
 
+/** The development hub this GUI is talking to instead of its own, or null. */
+ipcMain.handle("hub:dev", async (event) => {
+  if (!fromApp(event)) return null;
+  await localHub?.ready();
+  return localHub?.devHub() ?? null;
+});
+
+/** Swaps the development hub for the shipped one; resolves to an error message or null. */
+ipcMain.handle("hub:use-shipped", async (event) => {
+  if (!fromApp(event) || !localHub) return "no local hub to manage";
+  try {
+    await localHub.useShipped();
+    return null;
+  } catch (err) {
+    return message(err);
+  }
+});
+
 /** A folder chosen in the system dialog, or null when cancelled. */
 ipcMain.handle("dialog:pick-folder", async (event) => {
   if (!fromApp(event)) return null;

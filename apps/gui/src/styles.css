@@ -321,6 +321,9 @@ a.chip:hover { text-decoration: none; background: var(--selected); }
 .connection { flex: 1; display: flex; gap: 7px; align-items: center; font-size: 11.5px; color: var(--muted); padding: 2px 4px 0; min-width: 0; }
 .connection .text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .connection .ver { margin-left: auto; font-variant-numeric: tabular-nums; }
+.dev-hub { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline; font-size: 11.5px; padding: 6px 8px; border-radius: 6px; background: var(--warn-bg); color: var(--warn-text); }
+.dev-hub .err { flex-basis: 100%; color: var(--danger); overflow-wrap: anywhere; }
+.dev-hub button.link { margin-left: auto; }
 .spark { display: inline-block; animation: spin 2.4s linear infinite; }
 
 /* Shape marks (role ◆ ● ■, run ◯) used in headers and the workspace page. */

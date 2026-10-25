@@ -23,6 +23,11 @@ const bridge: CrossAgentsBridge = {
   startEvents: () => ipcRenderer.send("hub:events-start"),
   onEvent: (listener) => subscribe("hub:event", listener),
   onStatus: (listener) => subscribe("hub:status", listener),
+  devHub: () => ipcRenderer.invoke("hub:dev"),
+  async useShippedHub() {
+    const error: string | null = await ipcRenderer.invoke("hub:use-shipped");
+    if (error) throw new Error(error);
+  },
   pickFolder: () => ipcRenderer.invoke("dialog:pick-folder"),
   setTheme: (theme) => ipcRenderer.send("theme:changed", theme),
   command: (name) => ipcRenderer.send("window:command", name),
