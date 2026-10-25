@@ -140,3 +140,17 @@ fn sandbox_hub_runs_beside_the_stable_one() {
             .contains("own home")
     );
 }
+
+/// `send --file` refuses a file the hub would refuse, before it starts or reaches a hub.
+#[test]
+fn send_refuses_bad_files_before_sending() {
+    let home = Home::new();
+    let exe = home.0.path().join("tool.exe");
+    std::fs::write(&exe, b"MZ").unwrap();
+    let err = home.failure(&["send", "alice", "hi", "--file", &exe.display().to_string()]);
+    assert!(
+        err.contains("tool.exe: files of this type cannot be sent"),
+        "{err}"
+    );
+    assert_eq!(home.json(&["hub", "status"])["running"], false);
+}

@@ -99,7 +99,7 @@
 
 - [x] 消息结构从纯文本改为内容块（text / image / file），`SendMessageRequest` 增加 `attachments`，重新生成 ts-rs 绑定（收件箱里是 `Prompt { text, attachments }`，`DriverSession::prompt_with`；见 [tasks/DOGFOOD.md](tasks/DOGFOOD.md) §3）
 - [x] 附件落盘到 hub 数据目录，按会话归档并记录 sha256，不把 base64 直接存进 SQLite（`<home>/attachments/<agent id>/<sha256>`）
-- [~] 大小与类型限制：单文件 10 MB、每条 8 个、合计 20 MB，图片 / PDF / JSON / 文本；hub 返回 400，GUI 发送前同规则检查。CLI 还不能发附件
+- [x] 大小与类型限制：单文件 10 MB、每条 8 个、合计 20 MB，图片 / PDF / JSON / 文本；hub 返回 400，GUI 和 CLI（`crossagents send --file <path>`，可给多次）发送前同规则检查
 - [x] GUI：拖拽、粘贴截图、选择文件；输入框显示缩略图，发送前可删除
 - [~] `claude-native`：映射到 stream-json 的图片内容块（PDF 为 `document`，小文本内联），实测图片与文件的支持范围还没做
 - [~] `codex-native`：映射到 app-server 的图片输入（`localImage`），实测后确认字段

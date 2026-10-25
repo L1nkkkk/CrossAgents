@@ -421,7 +421,7 @@ crossagents profile add|ls|rm
 crossagents account ...                       # 沿用 M5
 crossagents session ls|spawn|rm|attach
 crossagents session attach-token --name <n> --role <r>   # 登记接入会话，给外部 agent 用
-crossagents send <session> "<text>" [--wait]  # run "目标" 是 send planner 的快捷方式
+crossagents send <session> "<text>" [--wait] [--file <path>]...  # run "目标" 是 send planner 的快捷方式
 crossagents task ls|show|accept|reject        # 人当 Planner 时用
 crossagents events [--follow] | usage [--by ...]
 ```
