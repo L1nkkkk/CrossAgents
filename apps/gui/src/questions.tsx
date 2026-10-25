@@ -8,6 +8,7 @@ import { api, errorText } from "./api";
 import { Avatar, ErrorBox, displayName, sessionHref } from "./components";
 import { useHubData } from "./hub";
 import { remaining } from "./lib/policy";
+import { navigate } from "./App";
 
 /** Defaults taken within this long stay visible, so you can still decide otherwise. */
 const RECENT_MS = 24 * 3600 * 1000;
@@ -70,7 +71,12 @@ function AskCard({ item, agent }: { item: HumanItem; agent?: Agent }) {
       setBusy(false);
     }
   }
-  const answer = (value: string) => run(() => api.answer(item.id, value));
+  const answer = (value: string) =>
+    run(async () => {
+      const done = await api.answer(item.id, value);
+      // A Work the person just started: go where it happens.
+      if (done.action === "work" && done.run_id) navigate("runs", done.run_id);
+    });
   const submit = (e: FormEvent) => {
     e.preventDefault();
     if (text.trim()) void answer(text.trim());
@@ -121,7 +127,7 @@ function AskCard({ item, agent }: { item: HumanItem; agent?: Agent }) {
     <form className={`ask `} onSubmit={submit}>
       <div className="ask-head">
         {who}
-        <span className="muted small">{item.action === "budget" ? "预算用完了" : item.action === "approval" ? "等你批准" : "问你"}</span>
+        <span className="muted small">{item.action === "budget" ? "预算用完了" : item.action === "approval" ? "等你批准" : item.action === "work" ? "想在独立分支上动手" : "问你"}</span>
         <div className="spacer" />
         {item.timeout_at && item.status === "open" && (
           <span className="muted small" title={new Date(item.timeout_at).toLocaleString()}>
@@ -130,6 +136,12 @@ function AskCard({ item, agent }: { item: HumanItem; agent?: Agent }) {
         )}
       </div>
       {item.action === "approval" ? <ApprovalText text={item.text} /> : <div className="ask-text">{item.text}</div>}
+      {item.detail && (
+        <details className="ask-detail">
+          <summary className="small muted">交给 Work 的说明</summary>
+          <div className="pre small">{item.detail}</div>
+        </details>
+      )}
       {item.options.length > 0 && (
         <div className="ask-options">
           {item.options.map((o) => (

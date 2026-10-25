@@ -466,7 +466,7 @@ impl Orchestrator {
         if led.is_empty() {
             // A planner the person talks to in a chat.
             return Err(CoreError::Conflict(
-                "you lead no run: this is a conversation with the person. A run starts when the person starts a Work from the home page; here, do the work yourself or bring in teammates (agent_spawn, agent_send), or tell the person to start a Work with this request"
+                "you lead no run: this is a conversation with the person. Do the work here yourself or bring in teammates (agent_spawn, agent_send), or propose a Work on a branch of its own with work_start"
                     .into(),
             ));
         }

@@ -3,4 +3,4 @@
 /**
  * A hub action an answer triggers, for questions the hub itself asks.
  */
-export type HumanAction = "budget" | "approval";
+export type HumanAction = "budget" | "approval" | "work";

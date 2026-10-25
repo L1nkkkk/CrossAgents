@@ -19,6 +19,7 @@ pub mod tasks;
 pub mod team;
 pub mod tools;
 pub mod verify;
+pub mod work;
 pub mod workspace;
 
 pub use engine::{Approval, NewRun, Orchestrator, OrchestratorConfig};

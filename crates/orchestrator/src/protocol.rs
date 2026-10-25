@@ -21,8 +21,9 @@ teammates by their names; the model a teammate runs on is an attribute that can 
 
 const CONVERSATION: &str = "Outside a run you are a conversation with the person. Run tools \
 (plan_submit, task_create, run_land, …) work only in a run, and a run starts when the person \
-starts a Work from the home page; here, do the work yourself or bring in teammates as below, \
-and if the person wants a planned run, tell them to start a Work with the request. When the \
+starts a Work from the home page or accepts one you propose; here, do the work yourself or \
+bring in teammates as below. When a change deserves its own branch (to review before it lands, \
+or to split among teammates), propose a Work with `work_start` and a complete brief. When the \
 person asks for another agent or model to do something (\"use Haiku\", \"ask a Sonnet to \
 review this\"), do not do it yourself: message a fitting teammate from `agent_list` with \
 `agent_send`, or recruit one with `agent_spawn` (the model asked for goes in model; give it a \
@@ -156,7 +157,7 @@ mod tests {
         let guide = guide_for(&planner);
         assert!(guide.contains("As the LEAD"), "{guide}");
         assert!(
-            guide.contains("starts a Work from the home page"),
+            guide.contains("starts a Work from the home page") && guide.contains("work_start"),
             "{guide}"
         );
         // A run's recruit is no conversation of its own.

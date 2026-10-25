@@ -214,6 +214,7 @@ export function oauthRun(phase: "plan" | "running"): { state: MockState; script:
     const ask: HumanItem = {
       id: uid(),
       kind: "question",
+      detail: null,
       from: ada.id,
       run_id: r.id,
       task_id: null,
@@ -355,6 +356,7 @@ export function approvalRun(): { state: MockState; script: Step[]; route: string
   scene.state.questions.push({
     id: `a-${uid().slice(0, 10)}`,
     kind: "question",
+    detail: null,
     from: rexA.id,
     run_id: d.run.id,
     task_id: a.id,

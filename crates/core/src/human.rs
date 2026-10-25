@@ -39,6 +39,9 @@ pub enum HumanAction {
     /// An agent asks to do something dangerous (docs/tasks/DOGFOOD.md §7): the first option
     /// allows it, anything else declines.
     Approval,
+    /// A conversation proposes doing the work on a branch of its own (docs/tasks/W1.md §6):
+    /// the first option starts a Work with `detail` as its request and `text` as its title.
+    Work,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,6 +56,9 @@ pub struct HumanItem {
     #[serde(default)]
     pub task_id: Option<TaskId>,
     pub text: String,
+    /// More than fits in `text`: a proposed Work's request.
+    #[serde(default)]
+    pub detail: Option<String>,
     /// Suggested answers; the person may also write their own.
     #[serde(default)]
     pub options: Vec<String>,

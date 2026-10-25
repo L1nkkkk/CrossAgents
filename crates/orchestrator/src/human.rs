@@ -78,6 +78,7 @@ impl Orchestrator {
         }
         let item = HumanItem {
             id: item_id("q"),
+            detail: None,
             kind: HumanItemKind::Question,
             from: caller.id,
             run_id: run.as_ref().map(|r| r.id),
@@ -125,6 +126,7 @@ impl Orchestrator {
         };
         let item = HumanItem {
             id: item_id("n"),
+            detail: None,
             kind: HumanItemKind::Notice,
             from: caller.id,
             run_id: run.map(|r| r.id),
@@ -158,6 +160,10 @@ impl Orchestrator {
         if !matches!(previous, HumanItemStatus::Open | HumanItemStatus::Defaulted) {
             return Err(CoreError::Conflict(format!("{id} is already answered")));
         }
+        // Started before the card closes: if the Work cannot start, the card stays.
+        if item.action == Some(HumanAction::Work) {
+            self.work_decided(&mut item, Some(&answer)).await?;
+        }
         let default = item.answer.clone();
         item.status = HumanItemStatus::Answered;
         item.answer = Some(answer.clone());
@@ -168,6 +174,9 @@ impl Orchestrator {
 
         if item.action == Some(HumanAction::Budget) {
             self.budget_decided(&item, &answer).await?;
+            return Ok(item);
+        }
+        if item.action == Some(HumanAction::Work) {
             return Ok(item);
         }
         // The agent waits on its own request; the answer goes there, not as a message.
@@ -199,6 +208,9 @@ impl Orchestrator {
         self.store().put_human_item(&item).await?;
         if item.action == Some(HumanAction::Approval) {
             self.approval_decided(&item.id, None);
+        }
+        if item.action == Some(HumanAction::Work) {
+            self.work_decided(&mut item, None).await?;
         }
         self.publish(EventKind::HumanDismissed { id: id.to_owned() })
             .await;
@@ -296,6 +308,7 @@ impl Orchestrator {
         }
         let item = HumanItem {
             id: item_id("q"),
+            detail: None,
             kind: HumanItemKind::Question,
             from: run.planner,
             run_id: Some(run_id),

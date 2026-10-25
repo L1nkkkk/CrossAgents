@@ -12,6 +12,10 @@ export type HumanItem = { id: string, kind: HumanItemKind,
  */
 from: AgentId, run_id: RunId | null, task_id: TaskId | null, text: string, 
 /**
+ * More than fits in `text`: a proposed Work's request.
+ */
+detail: string | null, 
+/**
  * Suggested answers; the person may also write their own.
  */
 options: Array<string>, 

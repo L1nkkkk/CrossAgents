@@ -132,6 +132,7 @@ impl Orchestrator {
         let who = self.person_name(agent, found.as_ref()).await;
         let item = HumanItem {
             id: format!("a-{}", &uuid::Uuid::new_v4().simple().to_string()[..10]),
+            detail: None,
             kind: HumanItemKind::Question,
             from: agent.id,
             run_id: found.as_ref().map(|(run, _)| run.id),

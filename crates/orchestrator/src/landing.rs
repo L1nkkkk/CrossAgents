@@ -404,6 +404,7 @@ impl Orchestrator {
         }
         let note = HumanItem {
             id: format!("n-{}", &uuid::Uuid::new_v4().simple().to_string()[..10]),
+            detail: None,
             kind: HumanItemKind::Notice,
             from: run.planner,
             run_id: Some(id),

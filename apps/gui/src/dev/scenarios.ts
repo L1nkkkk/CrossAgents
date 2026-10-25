@@ -26,6 +26,7 @@ export const SCENARIOS: Scenario[] = [
   { key: "approval", label: "危险操作待批准", hint: "Rex 想 git push：需要你里出现「等你批准」，允许 / 拒绝，30 分钟没回答就拒绝", build: () => approvalRun() },
   { key: "trace", label: "失败追溯", hint: "run 页「追溯」：#d 失败、首个失败标红展开；#c 途中出错后通过，灰色折叠；每一轮、每条命令和花费", build: () => traceRun() },
   { key: "inplace", label: "无 git 的 run", hint: "文件夹没有 git：run 直接改文件、一次一个任务，可一键初始化 git", build: () => inPlaceRun() },
+  { key: "workcard", label: "会话提议 Work", hint: "Nova 在单聊里用 work_start 提议到独立分支上做：卡片可展开交给 Work 的说明，开始 / 不用", build: () => workProposal() },
   { key: "solo", label: "单聊", hint: "Claude 会话：折叠的工具步骤、一轮进行中、两条排队", build: () => soloSession() },
   { key: "attach", label: "消息带附件", hint: "人发的消息带了截图和日志（点缩略图看大图）；输入框可粘贴截图、拖文件或点回形针，发送前能删", build: () => attachmentSession() },
   { key: "settings-src", label: "Claude 设置源", hint: "设置 → 智能体：点 Nova 编辑，「读取 Claude 设置」三档预设（缺省 / 全部 / 都不读）；点 Vega（CodeBuddy）编辑，标签说明它不读 CLAUDE.md", build: settingSources },
@@ -36,6 +37,30 @@ export const SCENARIOS: Scenario[] = [
 ];
 
 export const DEFAULT_SCENARIO = "running";
+
+/** The solo chat, where Nova proposes doing the rest on a branch of its own. */
+function workProposal() {
+  const solo = soloSession();
+  const nova = solo.state.agents[0];
+  const item = {
+    id: "w-0a1b2c3d4e",
+    kind: "question" as const,
+    from: nova.id,
+    run_id: null,
+    task_id: null,
+    text: "README 快速开始与 --json 说明",
+    detail: "给 README 加「快速开始」一节（安装、hub start、第一条 run），并把 CLI 所有子命令的 --json 输出格式补进 docs/cli.md。我们已经商定：示例用 PowerShell 写法，--json 的字段名照 api-types 原样列出。",
+    options: ["开始", "不用"],
+    default: null,
+    timeout_at: null,
+    status: "open" as const,
+    answer: null,
+    answered_at: null,
+    action: "work" as const,
+    created_at: new Date().toISOString(),
+  };
+  return { ...solo, state: { ...solo.state, questions: [...solo.state.questions, item] }, script: [] };
+}
 
 /** A Claude agent and a CodeBuddy one: the setting-sources switch reads differently for each. */
 function settingSources() {

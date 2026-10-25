@@ -16,6 +16,7 @@ const PLANNER: &[Group] = &[Group::Lead];
 const WORKER: &[Group] = &[Group::Assignee];
 const REVIEWER: &[Group] = &[Group::Reviewer];
 const RECRUITERS: &[Group] = &[Group::Lead, Group::Conversation];
+const CONVERSATION: &[Group] = &[Group::Conversation];
 
 struct ToolDef {
     name: &'static str,
@@ -266,6 +267,20 @@ const TOOLS: &[ToolDef] = &[
         description: "Stop a watch by id.",
         groups: ALL,
         schema: || object(json!({ "id": { "type": "string" } }), &["id"]),
+    },
+    ToolDef {
+        name: "work_start",
+        description: "Propose doing this on a branch of its own (a Work) instead of here: for a change worth reviewing before it lands, or one to split among teammates. The person sees a card and starts it or declines; nothing starts without them. The Work is led by a copy of you in a fresh checkout that cannot see this conversation, so write the request as a complete brief: the goal and everything agreed here.",
+        groups: CONVERSATION,
+        schema: || {
+            object(
+                json!({
+                    "request": { "type": "string", "description": "The brief for the Work: what to do, and what was agreed in this conversation." },
+                    "title": { "type": "string", "description": "A short title for the card and the run." }
+                }),
+                &["request"],
+            )
+        },
     },
     ToolDef {
         name: "plan_submit",
@@ -612,6 +627,7 @@ impl Orchestrator {
             "inbox_read" => self.inbox_read(caller).await,
             "human_ask" => self.human_ask(caller, input).await,
             "human_notify" => self.human_notify(caller, input).await,
+            "work_start" => self.work_start(caller, input).await,
             "plan_submit" => {
                 #[derive(Deserialize)]
                 struct A {
