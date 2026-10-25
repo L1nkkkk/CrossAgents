@@ -104,14 +104,23 @@ export function RunView({ runId, selectedTask }: { runId: string; selectedTask?:
           <Request text={run.request} />
           <RunMeta run={run} agents={agents.data} />
 
-          {run.status === "planning" && (
-            <div className="working">
-              <span className="spark">✻</span>
-              <span>
-                Planner 正在拆解任务 · <a href={sessionHref(run.planner)}>看它在做什么</a>
-              </span>
-            </div>
-          )}
+          {run.status === "planning" &&
+            // The planner may answer without a plan (a question, an overview) and wait for you:
+            // the run stays in planning, but nothing is being worked out any more.
+            (plannerAgent && !["starting", "running"].includes(plannerAgent.status) ? (
+              <div className="working">
+                <span>
+                  {planner} 回复了你，还没提交计划 · <a href={sessionHref(run.planner)}>去看看并回复</a>
+                </span>
+              </div>
+            ) : (
+              <div className="working">
+                <span className="spark">✻</span>
+                <span>
+                  Planner 正在拆解任务 · <a href={sessionHref(run.planner)}>看它在做什么</a>
+                </span>
+              </div>
+            ))}
           {run.status === "awaiting_approval" && <PlanCard run={run} onDone={detail.reload} />}
           {(run.status === "completed" || (run.status === "running" && allEnded)) && (
             <Ending run={run} closing={run.status === "running"} onDone={detail.reload} />
