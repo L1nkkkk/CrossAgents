@@ -100,18 +100,20 @@ impl CollabSetup {
     }
 }
 
-/// `CARGO_TARGET_DIR=<cwd>/target` when `cwd` is a run or task worktree under `root`, so
-/// tasks never share (and lock) one build directory. Absolute: a relative one would follow
-/// every `cd`.
+/// `CARGO_TARGET_DIR=<root>/<run>/target` when `cwd` is one of a run's worktrees under
+/// `root` (its integration checkout or a task's): the run's worktrees share one build
+/// directory, so dependencies compile once per run rather than once per task, and it lies
+/// outside every checkout, so nothing commits it (DOGFOOD.md §9). Builds running at the same
+/// time wait for each other on cargo's lock. It goes when the run's checkout does. Absolute:
+/// a relative one would follow every `cd`.
 pub fn worktree_env(root: &Path, cwd: &Path) -> Option<(String, String)> {
     let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let (root, cwd) = (canon(root), canon(cwd));
-    (cwd != root && cwd.starts_with(&root)).then(|| {
-        (
-            "CARGO_TARGET_DIR".to_owned(),
-            cwd.join("target").display().to_string(),
-        )
-    })
+    let run = cwd.strip_prefix(&root).ok()?.components().next()?;
+    Some((
+        "CARGO_TARGET_DIR".to_owned(),
+        root.join(run).join("target").display().to_string(),
+    ))
 }
 
 #[async_trait]
@@ -456,16 +458,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn worktrees_get_their_own_target_dir() {
+    fn a_runs_worktrees_share_one_target_dir() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("worktrees");
         let task = root.join("ab12cd34").join("auth");
-        std::fs::create_dir_all(&task).unwrap();
+        let integration = root.join("ab12cd34").join("integration");
+        let other = root.join("ff00ee11").join("integration");
+        for d in [&task, &integration, &other] {
+            std::fs::create_dir_all(d).unwrap();
+        }
         let (key, value) = worktree_env(&root, &task).unwrap();
         assert_eq!(key, "CARGO_TARGET_DIR");
-        let value = PathBuf::from(value);
-        assert!(value.is_absolute());
-        assert!(value.ends_with("auth/target") || value.ends_with("auth\target"));
+        let target = PathBuf::from(&value);
+        assert!(target.is_absolute());
+        assert!(
+            target.ends_with(Path::new("ab12cd34").join("target")),
+            "{value}"
+        );
+        // The run's checkout builds into the same place; another run does not.
+        assert_eq!(worktree_env(&root, &integration).unwrap().1, value);
+        assert_ne!(worktree_env(&root, &other).unwrap().1, value);
         // Chats in a person's checkout, and the root itself, keep the inherited setting.
         assert_eq!(worktree_env(&root, dir.path()), None);
         assert_eq!(worktree_env(&root, &root), None);

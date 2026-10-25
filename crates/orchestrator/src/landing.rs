@@ -468,6 +468,7 @@ impl Orchestrator {
             let waiting = after || (run.landed.is_none() && self.has_changes(&run, &tasks).await?);
             let branch = (!waiting).then_some(run.branch.as_str());
             self.ws_for(&run).remove(&run.repo, &dir, branch).await?;
+            self.remove_run_build(&run);
         }
         Ok(())
     }

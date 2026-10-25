@@ -20,7 +20,7 @@
 |---|---|
 | 不锁构建产物 | hub 不再从构建目录直接拉起长寿进程。`HubConfig::load` 算出“稳定副本”：当前 exe 不在 `<home>/bin/`（安装版）或 `<home>/shadow/` 下时，按文件内容哈希复制到 `<home>/shadow/<hash>/crossagents.exe`，运行时宿主与 `mcp` 都从副本起。`hub start` 也从副本拉起后台 hub，于是 `target/` 下的 exe 只在 `hub start` 那一瞬间被占用。`hub run`（前台）本身仍占着自己的 exe，但它退出后不留锁。旧副本在启动时尝试删除（Windows 上正被使用的删不掉，自然保留；超过 1 天才删） |
 | 副本不进 `bin/` | `<home>/bin/` 是安装版 GUI 的地盘，GUI 会升级、停掉从那里跑的 hub；开发副本放 `shadow/`，GUI 不碰 |
-| 任务独立 target | 工作目录在 `<home>/worktrees/` 下的 agent（run 的集成目录、每个任务的 worktree），环境里加 `CARGO_TARGET_DIR=<worktree>/target`（绝对路径）。Codex 一个 app-server 进程共享一份环境，所以不同 worktree 的 Codex 任务各占一个进程：这是有意的代价（并行上限缺省 3） |
+| 一个 run 一份 target | 工作目录在 `<home>/worktrees/<run>/` 下的 agent（run 的集成目录、每个任务的 worktree），环境里加 `CARGO_TARGET_DIR=<home>/worktrees/<run>/target`（绝对路径）：同一 run 共用，依赖只编一次，同时编译时在 cargo 的锁上排队；不在任何 checkout 里，不会被提交；run 的集成目录删掉时一起删（结束、取消、主导归档或删除时）。工作区自己的 crate 按源码路径区分，每个 worktree 仍各编一份。最初是每个 worktree 一份，2026-10-26 改成按 run 共享，见 §9。Codex 一个 app-server 进程共享一份环境，现在同一 run 的 Codex 任务环境相同，可以共用一个进程 |
 | 不误停自己的 hub | `hub run` 启动时把 `CROSSAGENTS_HUB_HOME=<home>` 写进自身环境，子进程（宿主、agent、agent 的 shell）都继承。CLI 的 `hub stop` 发现目标 home 就是 `CROSSAGENTS_HUB_HOME` 时拒绝执行，提示改用 `hub sandbox`；确有需要加 `--force`。不改每个 agent 的启动环境，也就不影响 Codex 进程按环境分组与接管 |
 | 临时 dev hub | `crossagents hub sandbox start [--dir DIR] [--detect]`：home 缺省是 `$CARGO_TARGET_DIR/dev-hub`，没有就 `./target/dev-hub`；写一份 `config.toml`（`port = 0`、`runtime_hosts = false`、`[accounts] detect = false`，`--detect` 才读本机厂商登录），用当前 exe（即 worktree 里刚编出来的那个）的稳定副本起后台 hub，打印 home、端口和 `CROSSAGENTS_HOME=…`。后续命令带上这个环境变量，就都打到 dev hub（不加全局 `--home` 参数：`account add` 已有同名参数）。`hub sandbox stop` 停掉它连同它的 agent，`hub sandbox status` 查看 |
 | 测试隔离 | 已有：`TestHub` 用临时目录和 `port = 0`，CLI 测试设 `CROSSAGENTS_HOME` 与 `port = 0`，`HubConfig::new` 不读本机登录、不写事件日志。worker 在 worktree 里跑 `cargo test` 时，测试起的 hub 都在临时 home 上，碰不到稳定 hub；`CROSSAGENTS_HUB_HOME` 只拦“目标就是稳定 home”的 `hub stop`，不影响测试 |
@@ -278,7 +278,7 @@ hub 在开会话时把一份项目规则写进开场说明（`SessionSpec.instru
 
 | # | 现象 | 影响 | 方向 |
 |---|---|---|---|
-| 1 | 每个 run / 任务的 worktree 各有一份 `CARGO_TARGET_DIR`：这次一个集成目录就 2.3 GB，第一次 `cargo test -p crossagents-cli` 约 1.5 分钟 | 多任务的 run 是 N 份全量编译、N × 2.3 GB；改到 hub 这类大 crate 时编译会成为主要耗时 | 同一 run 内共享一份 target（任务串行编译时不会互锁），或 sccache；结束后清 target |
+| 1 | 每个 run / 任务的 worktree 各有一份 `CARGO_TARGET_DIR`：这次一个集成目录就 2.3 GB，第一次 `cargo test -p crossagents-cli` 约 1.5 分钟 | 多任务的 run 是 N 份全量编译、N × 2.3 GB；改到 hub 这类大 crate 时编译会成为主要耗时 | **已改**（2026-10-26）：同一 run 共享 `<worktrees>/<run>/target`，run 的集成目录删除时一起删；sccache 没做 |
 | 2 | 轻量 Work 没有任何 hub 跑的验收：对错全凭主导自述 | 自动化时没人复核；这次是我手动重跑测试才确认 | 项目级的默认验收命令（如 `CROSSAGENTS.md` 里声明），`run_finish` 前由 hub 跑；失败就退回主导 |
 | 3 | 主导试图 `python - <<EOF` 跑脚本，本机只有 Store 占位 python | 白费一步，它自己绕过去了 | 开场说明里带上本机可用的工具链（或在第一次找不到命令时提示） |
 | 4 | run 页底部堆满别的 run 的「告诉你」通知 | 看这个 run 时被无关卡片挤占 | run 页只显示本 run 的通知，其余留给首页 |

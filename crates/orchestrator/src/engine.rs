@@ -839,6 +839,22 @@ The person changed: {}",
         {
             tracing::warn!(run = %run.id, error = %err, "cannot remove integration worktree");
         }
+        self.remove_run_build(run);
+    }
+
+    /// Removes the build directory the run's worktrees share (`<worktrees>/<run>/target`,
+    /// see the hub's `worktree_env`), and the run's directory once nothing else is in it.
+    /// Called when the run's checkout goes: nothing builds there any more.
+    pub(crate) fn remove_run_build(&self, run: &Run) {
+        let dir = self.config.worktrees.join(short(run.id));
+        let target = dir.join("target");
+        if target.exists()
+            && let Err(err) = std::fs::remove_dir_all(&target)
+        {
+            tracing::warn!(run = %run.id, error = %err, "cannot remove the run's build directory");
+        }
+        // Fails while task worktrees remain: those are cleaned up on their own.
+        let _ = std::fs::remove_dir(&dir);
     }
 
     pub(crate) async fn finish_run(&self, run: &mut Run, tasks: &[Task]) -> Result<(), CoreError> {

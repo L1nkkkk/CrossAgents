@@ -189,12 +189,16 @@ async fn archiving_the_lead_clears_its_checkout_and_restoring_brings_it_back() {
     let dir = std::path::PathBuf::from(lead["cwd"].as_str().unwrap());
     let branch = landed["branch"].as_str().unwrap().to_owned();
     assert!(dir.exists());
+    // What a cargo build there left in the run's shared build directory.
+    let target = dir.parent().unwrap().join("target");
+    std::fs::create_dir_all(target.join("debug")).unwrap();
 
     let archive_path = format!("/v1/agents/{}/archive", lead["id"].as_str().unwrap());
     let archive = |on: bool| t.post(&archive_path, json!({ "archived": on }));
     assert_eq!(archive(true).await.status(), 200);
     // Landed: nothing waits on the branch, so it goes with the checkout.
     assert!(!dir.exists());
+    assert!(!target.exists(), "the run's build directory goes too");
     assert!(
         !branches(repo.path()).contains(&branch),
         "{}",
