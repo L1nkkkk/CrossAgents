@@ -396,12 +396,26 @@ impl Orchestrator {
 
     /// The newest run in `Planning` led by `planner`.
     async fn planning_run_of(&self, planner: AgentId) -> Result<Run, CoreError> {
-        self.store
+        let led: Vec<Run> = self
+            .store
             .list_runs()
             .await?
             .into_iter()
-            .find(|r| r.planner == planner && r.status == RunStatus::Planning)
-            .ok_or_else(|| CoreError::Conflict("you have no run waiting for a plan".into()))
+            .filter(|r| r.planner == planner && !r.status.is_terminal())
+            .collect();
+        if let Some(run) = led.iter().find(|r| r.status == RunStatus::Planning) {
+            return Ok(run.clone());
+        }
+        if led.is_empty() {
+            // A planner the person talks to in a chat.
+            return Err(CoreError::Conflict(
+                "you lead no run: this is a conversation with the person. A run starts when the person starts a Work from the home page; here, do the work yourself or bring in teammates (agent_spawn, agent_send), or tell the person to start a Work with this request"
+                    .into(),
+            ));
+        }
+        Err(CoreError::Conflict(
+            "you have no run waiting for a plan".into(),
+        ))
     }
 
     pub(crate) async fn submit_plan(

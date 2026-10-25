@@ -51,11 +51,9 @@ pub fn groups_of(agent: &Agent) -> Vec<Group> {
         Role::Worker => Group::Assignee,
         Role::Reviewer => Group::Reviewer,
     });
-    // Whether it is in a run right now is checked when it recruits.
-    if agent.role != Role::Planner
-        && agent.recruiter().is_none()
-        && agent.config.get("spawned_by_run").is_none()
-    {
+    // Whether it is in a run right now is checked when it recruits. A planner the person
+    // talks to in a chat leads no run there: it is a conversation too.
+    if agent.recruiter().is_none() && agent.config.get("spawned_by_run").is_none() {
         groups.push(Group::Conversation);
     }
     groups

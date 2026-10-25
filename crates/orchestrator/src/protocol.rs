@@ -19,7 +19,10 @@ action the hub declines (a push, a publish, a command) was refused by the person
 hub's rules: do not retry it, in that or another form. Call \
 teammates by their names; the model a teammate runs on is an attribute that can change.";
 
-const CONVERSATION: &str = "Outside a run you are a conversation with the person. When the \
+const CONVERSATION: &str = "Outside a run you are a conversation with the person. Run tools \
+(plan_submit, task_create, run_land, …) work only in a run, and a run starts when the person \
+starts a Work from the home page; here, do the work yourself or bring in teammates as below, \
+and if the person wants a planned run, tell them to start a Work with the request. When the \
 person asks for another agent or model to do something (\"use Haiku\", \"ask a Sonnet to \
 review this\"), do not do it yourself: message a fitting teammate from `agent_list` with \
 `agent_send`, or recruit one with `agent_spawn` (the model asked for goes in model; give it a \
@@ -134,5 +137,25 @@ mod tests {
         );
         let claude = guide_for(&worker("claude"));
         assert!(!claude.contains("mcp__crossagents__"), "{claude}");
+    }
+
+    #[test]
+    fn a_planner_in_a_chat_learns_runs_start_from_a_work() {
+        let planner = Agent {
+            role: Role::Planner,
+            ..worker("claude")
+        };
+        let guide = guide_for(&planner);
+        assert!(guide.contains("As the LEAD"), "{guide}");
+        assert!(
+            guide.contains("starts a Work from the home page"),
+            "{guide}"
+        );
+        // A run's recruit is no conversation of its own.
+        let recruit = Agent {
+            config: serde_json::json!({ "spawned_by_run": "r1" }),
+            ..worker("claude")
+        };
+        assert!(!guide_for(&recruit).contains("Outside a run"));
     }
 }
