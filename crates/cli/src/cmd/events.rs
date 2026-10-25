@@ -251,6 +251,18 @@ pub fn summary(kind: &EventKind) -> String {
         EventKind::AgentUsage { id, used, size, .. } => {
             format!("{} context {used}/{size}", short(id))
         }
+        EventKind::AgentContext { id, parts } => {
+            let used: u64 = parts
+                .iter()
+                .filter(|p| p.kind == "used")
+                .map(|p| p.tokens)
+                .sum();
+            format!(
+                "{} context by kind: {used} used in {} parts",
+                short(id),
+                parts.len()
+            )
+        }
         EventKind::AgentError { id, message } => format!("{} {}", short(id), one_line(message)),
         EventKind::AgentExited { id, message, .. } => {
             format!("{} {}", short(id), one_line(message))

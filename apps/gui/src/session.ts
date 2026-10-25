@@ -203,7 +203,12 @@ export function applyEvent(t: Transcript, event: HubEvent): Transcript {
     case "agent.usage": {
       if (event.data.id !== id) return t;
       const { used, size, cost_usd, tokens } = event.data;
-      return { ...t, usage: { used, size, cost_usd, tokens }, last_seq: seq };
+      // The breakdown arrives after the turn; keep the last one until then.
+      return { ...t, usage: { used, size, cost_usd, tokens, parts: t.usage?.parts }, last_seq: seq };
+    }
+    case "agent.context": {
+      if (event.data.id !== id || !t.usage) return t;
+      return { ...t, usage: { ...t.usage, parts: event.data.parts }, last_seq: seq };
     }
     default:
       return t;

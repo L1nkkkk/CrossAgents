@@ -5,6 +5,7 @@ import type { AgentId } from "./AgentId";
 import type { AgentStatus } from "./AgentStatus";
 import type { Attachment } from "./Attachment";
 import type { CheckResult } from "./CheckResult";
+import type { ContextPart } from "./ContextPart";
 import type { DiffSource } from "./DiffSource";
 import type { ExitCause } from "./ExitCause";
 import type { HumanItem } from "./HumanItem";
@@ -62,7 +63,7 @@ source?: DiffSource, } } | { "type": "agent.permission", "data": { id: AgentId, 
 /**
  * Cumulative token counts, when the agent reports them.
  */
-tokens?: TokenUsage, } } | { "type": "agent.error", "data": { id: AgentId, message: string, } } | { "type": "agent.exited", "data": { id: AgentId, cause: ExitCause | null, code: number | null, message: string, } } | { "type": "agent.adopted", "data": { id: AgentId, 
+tokens?: TokenUsage, } } | { "type": "agent.context", "data": { id: AgentId, parts: Array<ContextPart>, } } | { "type": "agent.error", "data": { id: AgentId, message: string, } } | { "type": "agent.exited", "data": { id: AgentId, cause: ExitCause | null, code: number | null, message: string, } } | { "type": "agent.adopted", "data": { id: AgentId, 
 /**
  * The turn that was running and goes on.
  */

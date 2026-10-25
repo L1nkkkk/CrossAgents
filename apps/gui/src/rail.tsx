@@ -120,6 +120,11 @@ export function InfoRail({
     }),
   );
 
+  // A lead works in its run's checkout (worktrees/<run>/integration), on the run branch.
+  const checkout = led
+    .map((d) => d.run)
+    .find((r) => !r.in_place && r.branch && wsKey(agent.cwd).includes(`/${r.branch.split("/").pop()}/integration`));
+
   return (
     <aside className="rail" aria-label="会话信息">
       <Card id="env" title="环境">
@@ -131,6 +136,11 @@ export function InfoRail({
             <span className="rail-main">{wsName(agent.cwd)}</span>
             <span className="rail-dim">{parentOf(agent.cwd)}</span>
           </a>
+        )}
+        {checkout && (
+          <Line icon={<Icon name="branch" size={14} />}>
+            <code>{checkout.branch}</code>
+          </Line>
         )}
         <Line icon={<VendorMark plugin={agent.plugin} size={14} />}>{agent.model ?? "插件默认模型"}</Line>
         <Line icon={<Icon name="brain" size={14} />}>推理：{effortName ?? "默认"}</Line>
@@ -226,7 +236,31 @@ function Line({ icon, children }: { icon: ReactNode; children: ReactNode }) {
   );
 }
 
-/** How full the context is: green while there is room, amber from 60%, red from 85%. */
+/** Context kinds as Claude Code names them, in the words this app uses. */
+const PART_NAMES: Record<string, string> = {
+  system_prompt: "系统提示",
+  system_tools: "系统工具",
+  mcp_tools: "MCP 工具",
+  mcp_instructions: "MCP 说明",
+  custom_agents: "自定义 agent",
+  memory_files: "记忆文件",
+  skills: "技能",
+  messages: "消息",
+  autocompact_buffer: "压缩预留",
+  free_space: "空闲",
+};
+const partName = (id: string, name: string) => {
+  const base = id.replace(/_deferred$/, "");
+  const known = PART_NAMES[base];
+  if (!known) return name;
+  return base === id ? known : `${known}（按需）`;
+};
+/** One colour per kind that matters; the rest share a grey. */
+const partTone = (id: string, kind: string) =>
+  kind === "buffer" ? "buffer" : ["messages", "system_tools", "mcp_tools", "system_prompt", "skills"].includes(id) ? id : "other";
+
+/** How full the context is: green while there is room, amber from 60%, red from 85%. With
+ * the agent's breakdown (Claude Code), what fills it, by kind, as /context shows. */
 function Context({ usage }: { usage: TranscriptUsage }) {
   const pct = Math.min(100, Math.round((usage.used / usage.size) * 100));
   const tone = pct >= 85 ? "danger" : pct >= 60 ? "warn" : "ok";
@@ -240,6 +274,12 @@ function Context({ usage }: { usage: TranscriptUsage }) {
       ]
     : [];
   if (usage.cost_usd != null) rows.push(["花费", `$${usage.cost_usd.toFixed(2)}`]);
+  const parts = usage.parts ?? [];
+  const inWindow = parts
+    .filter((x) => x.kind !== "deferred")
+    .sort((a, b) => (a.kind === b.kind ? b.tokens - a.tokens : order(a.kind) - order(b.kind)));
+  const deferred = parts.filter((x) => x.kind === "deferred");
+  const share = (n: number) => `${((n / usage.size) * 100).toFixed(1)}%`;
   return (
     <>
       <div className="rail-context">
@@ -248,9 +288,35 @@ function Context({ usage }: { usage: TranscriptUsage }) {
           {short(usage.used)} / {short(usage.size)}
         </span>
       </div>
-      <div className={`quota-bar rail-bar ${tone}`} role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label="上下文已用">
-        <span style={{ width: `${pct}%` }} />
-      </div>
+      {inWindow.length > 0 ? (
+        <>
+          <div className="rail-bar ctx-bar" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label="上下文已用">
+            {inWindow
+              .filter((x) => x.kind !== "free")
+              .map((x) => (
+                <span key={x.id} className={`ctx-${partTone(x.id, x.kind)}`} style={{ width: `${(x.tokens / usage.size) * 100}%` }} title={partName(x.id, x.name)} />
+              ))}
+          </div>
+          <dl className="rail-rows ctx-parts">
+            {[...inWindow, ...deferred].map((x) => (
+              <div key={x.id} className={x.kind === "deferred" ? "deferred" : ""}>
+                <dt>
+                  <i className={`ctx-dot ctx-${partTone(x.id, x.kind)}`} />
+                  {partName(x.id, x.name)}
+                </dt>
+                <dd>
+                  {short(x.tokens)}
+                  <span className="ctx-share">{x.kind === "deferred" ? "—" : share(x.tokens)}</span>
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </>
+      ) : (
+        <div className={`quota-bar rail-bar ${tone}`} role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label="上下文已用">
+          <span style={{ width: `${pct}%` }} />
+        </div>
+      )}
       {rows.length > 0 && (
         <dl className="rail-rows">
           {rows.map(([k, v]) => (
@@ -264,3 +330,6 @@ function Context({ usage }: { usage: TranscriptUsage }) {
     </>
   );
 }
+
+/** Used shares first, then the buffer, then free space. */
+const order = (kind: string) => ["used", "buffer", "free"].indexOf(kind);

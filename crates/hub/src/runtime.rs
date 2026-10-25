@@ -1432,6 +1432,7 @@ async fn handle_session_event(
             source: None,
         },
         SessionEventKind::RateLimits { limits } => EventKind::AgentRateLimits { id, limits },
+        SessionEventKind::ContextBreakdown { parts } => EventKind::AgentContext { id, parts },
         SessionEventKind::PermissionRequested { request, decision } => EventKind::AgentPermission {
             id,
             kind: request.kind,

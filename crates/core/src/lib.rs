@@ -27,10 +27,10 @@ pub use account::{
 pub use attachment::{Attachment, Prompt};
 pub use bus::EventBus;
 pub use driver::{
-    Capabilities, Driver, DriverKind, DriverSession, ExitCause, FileChange, McpServerSpec,
-    OutputStream, PermissionDecision, PermissionHandler, PermissionPolicy, PermissionRequest,
-    RateLimits, SessionEvent, SessionEventKind, SessionSpec, StopReason, TokenUsage, ToolDetail,
-    ToolStatus, TurnOutcome,
+    Capabilities, ContextPart, Driver, DriverKind, DriverSession, ExitCause, FileChange,
+    McpServerSpec, OutputStream, PermissionDecision, PermissionHandler, PermissionPolicy,
+    PermissionRequest, RateLimits, SessionEvent, SessionEventKind, SessionSpec, StopReason,
+    TokenUsage, ToolDetail, ToolStatus, TurnOutcome,
 };
 pub use error::CoreError;
 pub use event::{

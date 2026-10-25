@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use crossagents_core::{
-    Credits, FileChange, LimitGroup, McpServerSpec, OutputStream, PermissionDecision,
+    ContextPart, Credits, FileChange, LimitGroup, McpServerSpec, OutputStream, PermissionDecision,
     PermissionRequest, RateLimits, RateWindow, SessionEventKind, StopReason, TokenUsage,
     ToolDetail, ToolStatus,
 };
@@ -970,6 +970,28 @@ pub fn rate_limit_event(info: &Value) -> RateLimits {
     }
 }
 
+/// The categories of a `get_context_usage` answer; `None` without any.
+pub fn context_parts(answer: &Value) -> Option<Vec<ContextPart>> {
+    let parts: Vec<ContextPart> = answer
+        .get("categories")?
+        .as_array()?
+        .iter()
+        .filter_map(|c| {
+            Some(ContextPart {
+                id: c.get("id")?.as_str()?.to_owned(),
+                name: c.get("name")?.as_str()?.to_owned(),
+                tokens: c.get("tokens")?.as_u64()?,
+                kind: c
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("used")
+                    .to_owned(),
+            })
+        })
+        .collect();
+    (!parts.is_empty()).then_some(parts)
+}
+
 /// A full read (`get_usage`): the plan, the five-hour and weekly windows, the per-model weekly
 /// limits and extra usage. `None` when the account has no plan limits (an API key).
 pub fn usage_limits(usage: &Value) -> Option<RateLimits> {
@@ -1377,6 +1399,25 @@ mod tests {
         assert_eq!(used(&mut t, summed.clone()), 400_120);
         // Taken once: a turn without deltas falls back to the result's own figure.
         assert_eq!(used(&mut t, summed), 1_200_300);
+    }
+
+    #[test]
+    fn context_usage_reads_its_categories() {
+        // As Claude Code 2.1.308 answers get_context_usage (trimmed).
+        let answer = json!({
+            "categories": [
+                { "id": "system_prompt", "name": "System prompt", "tokens": 2848, "color": "promptBorder", "kind": "used" },
+                { "id": "system_tools_deferred", "name": "System tools (deferred)", "tokens": 20034, "isDeferred": true, "kind": "deferred" },
+                { "id": "free_space", "name": "Free space", "tokens": 938952, "kind": "free" }
+            ],
+            "totalTokens": 28048,
+            "maxTokens": 1000000
+        });
+        let parts = context_parts(&answer).unwrap();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[1].kind, "deferred");
+        assert_eq!(parts[2].tokens, 938_952);
+        assert!(context_parts(&json!({})).is_none());
     }
 
     #[test]

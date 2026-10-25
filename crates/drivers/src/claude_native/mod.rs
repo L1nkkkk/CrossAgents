@@ -457,6 +457,21 @@ pub struct ClaudeSession {
 }
 
 impl ClaudeSession {
+    /// What fills the context window, by kind (`get_context_usage`, as `/context` shows
+    /// it). Claude Code only: CodeBuddy does not know the request. Best effort.
+    async fn refresh_context(&self) {
+        if self.flavor != Flavor::Claude {
+            return;
+        }
+        let request = json!({ "subtype": "get_context_usage" });
+        if let Ok(answer) = self.shared.control(request, CLEANUP_TIMEOUT).await
+            && let Some(parts) = wire::context_parts(&answer)
+        {
+            self.shared
+                .emit(SessionEventKind::ContextBreakdown { parts }, Some(&answer));
+        }
+    }
+
     fn set_compacting(&self, on: bool) {
         self.shared
             .translator
@@ -682,6 +697,7 @@ impl DriverSession for ClaudeSession {
             )
         })?;
         self.refresh_limits().await;
+        self.refresh_context().await;
         Ok(TurnOutcome {
             stop_reason,
             turn_id: Some(uuid),
@@ -810,6 +826,7 @@ impl DriverSession for ClaudeSession {
         });
         if result.is_ok() {
             self.refresh_limits().await;
+            self.refresh_context().await;
         }
         Some(result.map(|stop_reason| TurnOutcome {
             stop_reason,

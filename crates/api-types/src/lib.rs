@@ -424,6 +424,10 @@ pub struct TranscriptUsage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub tokens: Option<crossagents_core::TokenUsage>,
+    /// What fills the window, by kind, as of the agent's last turn (Claude Code only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub parts: Option<Vec<crossagents_core::ContextPart>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

@@ -249,6 +249,23 @@ export function turn(init: {
   };
 }
 
+/** A /context-like breakdown of `used` tokens, shaped like Claude Code 2.1.308 answers it. */
+function contextParts(used: number, size: number) {
+  const fixed = { system_prompt: 2_848, system_tools: 14_200, mcp_tools: 3_100, skills: 2_505 };
+  const messages = Math.max(0, used - Object.values(fixed).reduce((a, b) => a + b, 0));
+  const buffer = 33_000;
+  return [
+    { id: "system_prompt", name: "System prompt", tokens: fixed.system_prompt, kind: "used" },
+    { id: "system_tools", name: "System tools", tokens: fixed.system_tools, kind: "used" },
+    { id: "system_tools_deferred", name: "System tools (deferred)", tokens: 20_034, kind: "deferred" },
+    { id: "mcp_tools", name: "MCP tools", tokens: fixed.mcp_tools, kind: "used" },
+    { id: "skills", name: "Skills", tokens: fixed.skills, kind: "used" },
+    { id: "messages", name: "Messages", tokens: messages, kind: "used" },
+    { id: "autocompact_buffer", name: "Autocompact buffer", tokens: buffer, kind: "buffer" },
+    { id: "free_space", name: "Free space", tokens: size - used - buffer, kind: "free" },
+  ];
+}
+
 export function transcript(a: Agent, turns: { turn: TranscriptTurn }[], used = 38_000): Transcript {
   return {
     agent: a,
@@ -261,6 +278,8 @@ export function transcript(a: Agent, turns: { turn: TranscriptTurn }[], used = 3
       size: 200_000,
       cost_usd: a.plugin === "claude" ? 0.4213 : null,
       tokens: { input: used * 3, cached_input: used * 2, output: Math.round(used / 4), reasoning_output: Math.round(used / 10), total: used * 3 + Math.round(used / 4) },
+      // Claude Code says what fills the window (get_context_usage); the others do not.
+      ...(a.plugin === "claude" ? { parts: contextParts(used, 200_000) } : {}),
     },
     last_seq: 0,
   };

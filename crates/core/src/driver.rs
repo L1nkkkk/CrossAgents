@@ -269,6 +269,23 @@ pub struct TurnOutcome {
     pub turn_id: Option<String>,
 }
 
+/// One share of the context window, as the agent accounts for it (Claude Code's `/context`):
+/// the system prompt, tools, MCP tools, skills, messages, the buffer kept for compaction,
+/// free space.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ContextPart {
+    /// Stable key (`system_prompt`, `messages`, `free_space`…).
+    pub id: String,
+    /// As the agent names it.
+    pub name: String,
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub tokens: u64,
+    /// `used` (in the window), `deferred` (loaded only when needed), `buffer` (kept free
+    /// for compaction) or `free`.
+    pub kind: String,
+}
+
 /// Cumulative token counts of a session.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -427,6 +444,10 @@ pub enum SessionEventKind {
     },
     RateLimits {
         limits: RateLimits,
+    },
+    /// What fills the context window, by kind, when the agent can tell.
+    ContextBreakdown {
+        parts: Vec<ContextPart>,
     },
     /// The agent asked before acting; `decision` is what the driver answered.
     PermissionRequested {

@@ -1270,6 +1270,20 @@ button.ghost.icon, .icon-btn { background: transparent; border-color: transparen
 .rail-bar span { display: block; height: 100%; border-radius: 3px; }
 .rail-bar.warn span { background: var(--warn); }
 .rail-bar.danger span { background: var(--danger); }
+.ctx-bar { background: var(--surface-sunk); gap: 1px; }
+.ctx-bar span { border-radius: 0; min-width: 2px; }
+.ctx-messages { background: var(--accent); }
+.ctx-system_tools { background: var(--claude); }
+.ctx-mcp_tools { background: #2fa68c; }
+.ctx-system_prompt { background: #8b7cf6; }
+.ctx-skills { background: var(--warn); }
+.ctx-other { background: var(--muted); }
+.ctx-buffer { background: repeating-linear-gradient(135deg, var(--border-strong) 0 3px, transparent 3px 6px); }
+.ctx-parts dt { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctx-parts .deferred { opacity: 0.6; }
+.ctx-dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
+.ctx-dot.ctx-other { background: var(--muted); }
+.ctx-share { display: inline-block; min-width: 42px; text-align: right; margin-left: 8px; color: var(--muted); }
 .rail-rows { display: grid; gap: 2px; margin: 8px 0 0; padding: 0 4px; font-size: 12px; }
 .rail-rows div { display: flex; justify-content: space-between; gap: 8px; }
 .rail-rows dt { color: var(--muted); }

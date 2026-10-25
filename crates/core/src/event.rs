@@ -202,6 +202,11 @@ pub enum EventKind {
         #[cfg_attr(feature = "ts", ts(optional))]
         tokens: Option<TokenUsage>,
     },
+    #[serde(rename = "agent.context")]
+    AgentContext {
+        id: AgentId,
+        parts: Vec<crate::ContextPart>,
+    },
     #[serde(rename = "agent.error")]
     AgentError { id: AgentId, message: String },
     /// The agent's process ended without being asked to (it crashed, exited, or its runtime
@@ -441,6 +446,7 @@ impl EventKind {
             Self::AgentWarning { .. } => "agent.warning",
             Self::AgentTurnCompleted { .. } => "agent.turn_completed",
             Self::AgentUsage { .. } => "agent.usage",
+            Self::AgentContext { .. } => "agent.context",
             Self::AgentError { .. } => "agent.error",
             Self::AgentExited { .. } => "agent.exited",
             Self::AgentAdopted { .. } => "agent.adopted",
@@ -524,6 +530,7 @@ impl EventKind {
             | Self::AgentWarning { id, .. }
             | Self::AgentTurnCompleted { id, .. }
             | Self::AgentUsage { id, .. }
+            | Self::AgentContext { id, .. }
             | Self::AgentExited { id, .. }
             | Self::AgentAdopted { id, .. }
             | Self::AgentError { id, .. } => Some(*id),

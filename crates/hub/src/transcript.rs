@@ -241,12 +241,20 @@ impl Fold {
                 tokens,
                 ..
             } => {
+                // The breakdown arrives after the turn; keep the last one until then.
+                let parts = self.usage.as_mut().and_then(|u| u.parts.take());
                 self.usage = Some(TranscriptUsage {
                     used: *used,
                     size: *size,
                     cost_usd: *cost_usd,
                     tokens: tokens.clone(),
+                    parts,
                 });
+            }
+            EventKind::AgentContext { parts, .. } => {
+                if let Some(usage) = self.usage.as_mut() {
+                    usage.parts = Some(parts.clone());
+                }
             }
             _ => {}
         }
