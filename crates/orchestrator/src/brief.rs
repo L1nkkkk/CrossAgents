@@ -27,6 +27,12 @@ pub fn kickoff(run: &Run, team: &[Agent], default_worker: AgentId) -> String {
         );
     }
     out.push_str(&roster(team, default_worker));
+    if !team.iter().any(|a| a.role == Role::Worker) {
+        // No worker was picked: tasks, if any, run on the lead's model.
+        out.push_str(
+            "\nworkers: none on the team; a task you assign to nobody goes to a copy of you",
+        );
+    }
     out
 }
 

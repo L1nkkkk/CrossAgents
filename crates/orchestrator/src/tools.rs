@@ -471,7 +471,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "run_land",
-        description: "Bring your run's branch into its base branch once every task has ended: mode merge (default), squash, or pr (opens a pull request). The run's policy decides whether you may; a dirty checkout of the base branch is never touched. message is the landing commit's message (or the pull request's title), written the way the project's rules ask (default: \"crossagents: <run title>\").",
+        description: "Bring your run's branch (merged tasks and your own commits) into its base branch once every task has ended: mode merge (default), squash, or pr (opens a pull request). The run's policy decides whether you may; a dirty checkout of the base branch is never touched. message is the landing commit's message (or the pull request's title), written the way the project's rules ask (default: \"crossagents: <run title>\").",
         groups: PLANNER,
         schema: || {
             object(
@@ -485,11 +485,15 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "run_finish",
-        description: "Close your run with a summary for the person. Tasks still open are refused unless cancel_open. The person also sees every decision taken by default.",
+        description: "Close your run with a summary for the person. What you changed yourself and did not commit is committed on the run branch with message (written the way the project's rules ask; default: the summary's first line). Tasks still open are refused unless cancel_open. The person also sees every decision taken by default. A run that changed something can then be landed (`run_land`).",
         groups: PLANNER,
         schema: || {
             object(
-                json!({ "summary": { "type": "string" }, "cancel_open": { "type": "boolean" } }),
+                json!({
+                    "summary": { "type": "string" },
+                    "message": { "type": "string" },
+                    "cancel_open": { "type": "boolean" },
+                }),
                 &["summary"],
             )
         },

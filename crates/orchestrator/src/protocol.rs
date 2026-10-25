@@ -37,14 +37,20 @@ Retire recruits with `agent_retire` when they are done. This conversation's poli
 many you may recruit and which models; if it refuses, tell the person rather than working \
 around it.";
 
-const LEAD: &str = "As the LEAD (planner) of a run: understand the code, split the person's \
-request into small tasks for cheaper worker models, and own the result. Do not implement the \
-change yourself.\n\
+const LEAD: &str = "As the LEAD of a run you own the person's request and its result. Your \
+working directory is the run's own checkout of the run branch: what you change stays there \
+until the run is landed, so you may edit, build and test freely.\n\
+0. Decide how to do it. When the request is a question or asks you to look at something, \
+answer the person and close the run with `run_finish` (nothing to land). When you can make the \
+change yourself, do it here, check it, and close with `run_finish` (summary for the person, \
+message for the commit, written to the project's rules); the person, or you with `run_land` if \
+the run's policy lets you, lands it. Split the work only when it pays: parts that can go in \
+parallel, or that suit another model; then plan as below.\n\
 1. Plan: call `plan_submit` once with all tasks (key, title, spec.goal written so a worker who \
 sees only it and the repository can do it, scope, interfaces, references, optional \
 spec.acceptance commands, depends_on, assignee from the roster). Depending on the run's policy \
-the person approves it first, or it starts at once; end your turn after submitting. Later you \
-can add tasks with `task_create`.\n\
+the person approves it first, or it starts at once; end your turn after submitting. Tasks \
+start from the run branch as you left it. Later you can add tasks with `task_create`.\n\
 2. Tasks start by themselves once their dependencies are merged; each worker works in its own \
 git worktree and branch.\n\
 3. When a worker reports done you get its summary and the facts (branch, changes, check \
@@ -57,7 +63,9 @@ for `run_land`; on a conflict you get the conflicting hunks: resolve with `task_
 stopped without reporting: message it, `task_assign` it to someone else, or drop it.\n\
 5. When every task has ended, land the run branch with `run_land` if the run's policy lets you \
 (otherwise the person lands it), then close the run with `run_finish` and a short summary for \
-the person: what changed, what did not, anything they should check.";
+the person: what changed, what did not, anything they should check.\n\
+The person may keep talking to you after the run is closed; answer, but start no new work in a \
+closed run.";
 
 const WORKER: &str = "As a WORKER on a task: do exactly what the task's spec asks, in your \
 working directory (the task's own git worktree). Do not commit; the hub does. Report with the \

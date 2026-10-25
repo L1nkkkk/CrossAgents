@@ -278,16 +278,63 @@ impl Orchestrator {
                 &self.integration_path(&run),
             )
             .await?;
+        // The lead works in the run's own checkout: what it changes stays on the run branch
+        // until it is landed (docs/tasks/W1.md §4.1).
+        if !in_place {
+            run.planner = self
+                .lead_in(&planner, &self.integration_path(&run))
+                .await?
+                .id;
+        }
         self.store.insert_run(&run).await?;
         self.publish(EventKind::RunCreated { run: run.clone() })
             .await;
         // The request is the person's; the roster and ids are facts the lead needs.
         self.deliver(
-            planner.id,
+            run.planner,
             MessageSource::Human,
             brief::kickoff(&run, &team, run.config.worker),
         );
         Ok(run)
+    }
+
+    /// The run's lead, working in `dir`: `planner` itself when its session never started
+    /// (a lead made for this run), else a copy of it, so a conversation keeps its directory
+    /// (a vendor session cannot move).
+    async fn lead_in(&self, planner: &Agent, dir: &Path) -> Result<Agent, CoreError> {
+        let fresh = planner.status == AgentStatus::Stopped
+            && self.store.last_session_id(planner.id).await?.is_none();
+        if fresh {
+            self.store.update_agent_cwd(planner.id, dir).await?;
+            let lead = self.store.get_agent(&AgentKey::Id(planner.id)).await?;
+            self.publish(EventKind::AgentUpdated {
+                agent: lead.clone(),
+            })
+            .await;
+            return Ok(lead);
+        }
+        let mut config = planner.config.clone();
+        // The copy leads the run; it is nobody's recruit.
+        if let Some(map) = config.as_object_mut() {
+            map.remove("spawned_by_agent");
+            map.remove("spawned_by_run");
+        }
+        self.host
+            .spawn_agent(Agent {
+                id: AgentId::new(),
+                // A made-up person's name.
+                name: String::new(),
+                name_source: crossagents_core::NameSource::Generated,
+                role: Role::Planner,
+                cwd: dir.to_path_buf(),
+                config,
+                status: AgentStatus::Stopped,
+                created_at: Utc::now(),
+                topic: None,
+                archived_at: None,
+                ..planner.clone()
+            })
+            .await
     }
 
     /// The run's team: the given teammates, or every worker and reviewer registered in the
@@ -613,6 +660,11 @@ impl Orchestrator {
             let path = worktree_path(&self.config.worktrees, &short(run.id), &task.key);
             let branch = format!("{}-{}", run.branch, task.key);
             let (base, _) = self.base_of(run, task).await?;
+            if base == run.branch {
+                // The task starts from what the lead has done so far.
+                self.commit_lead(run, &format!("crossagents: {}", run.title))
+                    .await?;
+            }
             self.ws_for(&run)
                 .create(&run.repo, &branch, &base, &path)
                 .await?;
@@ -700,9 +752,48 @@ impl Orchestrator {
                 )),
             )
         };
-        self.remove_integration(run).await;
+        // A lead working in the checkout keeps it: the person may still talk to it.
+        if !self.lead_lives_in_integration(run).await {
+            self.remove_integration(run).await;
+        }
         self.set_run_status(run, status, note).await?;
         Ok(())
+    }
+
+    async fn lead_lives_in_integration(&self, run: &Run) -> bool {
+        !run.in_place
+            && self
+                .store
+                .get_agent(&AgentKey::Id(run.planner))
+                .await
+                .is_ok_and(|lead| lead.cwd == self.integration_path(run))
+    }
+
+    /// Commits what the lead left uncommitted in the run's checkout, so that branching off
+    /// the run branch, merging into it and landing it see the lead's work. `false` when there
+    /// was nothing (or no checkout).
+    pub(crate) async fn commit_lead(&self, run: &Run, message: &str) -> Result<bool, CoreError> {
+        let dir = self.integration_path(run);
+        if run.in_place || !dir.exists() {
+            return Ok(false);
+        }
+        self.ws_for(run).commit_all(&dir, message).await
+    }
+
+    /// Whether the run branch brings anything into its base: a merged task, or the lead's
+    /// own commits.
+    pub(crate) async fn has_changes(&self, run: &Run, tasks: &[Task]) -> Result<bool, CoreError> {
+        if tasks.iter().any(|t| t.status == TaskStatus::Merged) {
+            return Ok(true);
+        }
+        if run.in_place {
+            return Ok(false);
+        }
+        let diff = self
+            .ws_for(run)
+            .branch_diff(&run.repo, &run.base_branch, &run.branch)
+            .await?;
+        Ok(!diff.trim().is_empty())
     }
 
     // -----------------------------------------------------------------------------------
@@ -880,7 +971,7 @@ fn role_word(role: Role) -> &'static str {
     }
 }
 
-fn first_line(text: &str, max: usize) -> String {
+pub(crate) fn first_line(text: &str, max: usize) -> String {
     let line = text
         .lines()
         .find(|l| !l.trim().is_empty())

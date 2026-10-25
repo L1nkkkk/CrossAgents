@@ -6,9 +6,9 @@ import type { RunPolicy } from "./RunPolicy";
  */
 export type CreateRunRequest = { request: string, title: string | null, planner: string, 
 /**
- * Template for workers.
+ * Template for workers. Omitted: the lead's own model, cloned (docs/tasks/W1.md).
  */
-worker: string, escalate: string | null, reviewer: string | null, auto_approve: boolean, max_parallel: number | null, max_attempts: number | null, 
+worker?: string, escalate: string | null, reviewer: string | null, auto_approve: boolean, max_parallel: number | null, max_attempts: number | null, 
 /**
  * Teammates the planner may assign tasks to, by name. Omitted: every worker and
  * reviewer registered in the planner's repository.

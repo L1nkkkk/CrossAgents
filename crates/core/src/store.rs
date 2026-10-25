@@ -74,6 +74,13 @@ pub trait Store: Send + Sync {
         Err(CoreError::Unsupported("updating agent models".into()))
     }
 
+    /// Moves the agent to another working directory. Only for an agent whose session has
+    /// never started: a vendor session belongs to the directory it began in.
+    async fn update_agent_cwd(&self, id: AgentId, cwd: &std::path::Path) -> Result<(), CoreError> {
+        let _ = (id, cwd);
+        Err(CoreError::Unsupported("moving agents".into()))
+    }
+
     /// Replaces the agent's plugin-private config (e.g. its reasoning `effort`).
     async fn update_agent_config(
         &self,

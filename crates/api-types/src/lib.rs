@@ -473,8 +473,10 @@ pub struct CreateRunRequest {
     #[serde(default)]
     pub title: Option<String>,
     pub planner: String,
-    /// Template for workers.
-    pub worker: String,
+    /// Template for workers. Omitted: the lead's own model, cloned (docs/tasks/W1.md).
+    #[serde(default)]
+    #[ts(optional)]
+    pub worker: Option<String>,
     #[serde(default)]
     pub escalate: Option<String>,
     #[serde(default)]

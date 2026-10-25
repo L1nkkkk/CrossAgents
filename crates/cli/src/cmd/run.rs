@@ -25,10 +25,11 @@ pub struct RunArgs {
 pub struct StartArgs {
     /// What you want done.
     pub request: Option<String>,
-    /// Agent that plans the work (a strong model).
+    /// Agent that leads the run: works on the run branch, and splits the work when it pays.
     #[arg(long)]
     pub planner: Option<String>,
-    /// Agent used as the template for workers (a fast, cheap model).
+    /// Template for workers when the lead splits the work (a fast, cheap model); the lead's
+    /// own model when omitted.
     #[arg(long)]
     pub worker: Option<String>,
     /// Stronger template a task moves to after repeated failures.
@@ -87,11 +88,9 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
     let client = ctx.client()?;
     let Some(command) = args.command else {
         let start = args.start;
-        let (Some(request), Some(planner), Some(worker)) =
-            (start.request, start.planner, start.worker)
-        else {
+        let (Some(request), Some(planner)) = (start.request, start.planner) else {
             anyhow::bail!(
-                "usage: crossagents run \"<request>\" --planner <agent> --worker <agent> \
+                "usage: crossagents run \"<request>\" --planner <agent> [--worker <agent>] \
                  (or a subcommand: ls, show, approve, reject, cancel)"
             );
         };
@@ -99,7 +98,7 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
             request,
             title: start.title,
             planner,
-            worker,
+            worker: start.worker,
             escalate: start.escalate,
             reviewer: start.reviewer,
             auto_approve: start.no_approve,
@@ -118,7 +117,7 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
             run.branch
         );
         println!(
-            "the planner is working on a plan; follow with `crossagents run show {}`",
+            "the lead is on it; follow with `crossagents run show {}`",
             short_tail(&run.id)
         );
         return Ok(());

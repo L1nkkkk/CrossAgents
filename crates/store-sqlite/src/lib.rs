@@ -298,6 +298,19 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    async fn update_agent_cwd(&self, id: AgentId, cwd: &std::path::Path) -> Result<(), CoreError> {
+        let result = sqlx::query("UPDATE agents SET cwd = ? WHERE id = ?")
+            .bind(cwd.to_string_lossy().into_owned())
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        if result.rows_affected() == 0 {
+            return Err(not_found(&AgentKey::Id(id)));
+        }
+        Ok(())
+    }
+
     async fn update_agent_config(
         &self,
         id: AgentId,

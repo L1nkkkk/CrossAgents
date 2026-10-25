@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::engine::Orchestrator;
+use crate::engine::{Orchestrator, first_line};
 use crate::tools::args;
 use crate::workspace::Synced;
 
@@ -114,9 +114,11 @@ impl Orchestrator {
                 open.join(", ")
             )));
         }
-        if !tasks.iter().any(|t| t.status == TaskStatus::Merged) {
+        self.commit_lead(&run, &format!("crossagents: {}", run.title))
+            .await?;
+        if !self.has_changes(&run, &tasks).await? {
             return Err(CoreError::Conflict(
-                "nothing was merged, so there is nothing to land".into(),
+                "the run branch changes nothing, so there is nothing to land".into(),
             ));
         }
         if !run.in_place {
@@ -305,9 +307,20 @@ impl Orchestrator {
             summary: String,
             #[serde(default)]
             cancel_open: bool,
+            #[serde(default)]
+            message: Option<String>,
         }
         let a: A = args(input)?;
         let run = self.led_run(caller).await?;
+        // What the lead changed itself and did not commit, under its message.
+        let message = a
+            .message
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| first_line(&a.summary, 72));
+        self.commit_lead(&run, &message).await?;
         let run = self.finish(run.id, Some(a.summary), a.cancel_open).await?;
         Ok(json!({ "status": run.status, "landed": run.landed }))
     }
@@ -352,7 +365,11 @@ impl Orchestrator {
         let _guard = self.lock(id).await;
         run = self.store.get_run(id).await?;
         run.summary = summary.clone();
+        // Ended by the person (or with no message from the lead): keep the lead's edits.
+        self.commit_lead(&run, &format!("crossagents: {}", run.title))
+            .await?;
         let tasks = self.store.list_tasks(id).await?;
+        let changed = self.has_changes(&run, &tasks).await?;
         self.finish_run(&mut run, &tasks).await?;
 
         // The closing note for the person: the lead's words, then what the hub knows.
@@ -361,17 +378,18 @@ impl Orchestrator {
             .iter()
             .filter(|t| t.status == TaskStatus::Merged)
             .count();
-        text.push_str(&format!("\n\n— {merged}/{} 个任务已合并", tasks.len()));
+        // A lead that did the work itself has no tasks to count.
+        text.push_str("\n\n— ");
+        if !tasks.is_empty() {
+            text.push_str(&format!("{merged}/{} 个任务已合并，", tasks.len()));
+        }
         match &run.landed {
-            _ if run.in_place && merged > 0 => {
-                text.push_str(&format!("，改动已直接写在 {}", run.repo.display()))
+            _ if run.in_place && changed => {
+                text.push_str(&format!("改动已直接写在 {}", run.repo.display()))
             }
-            Some(l) => text.push_str(&format!(
-                "，已落地到 {}（{}）",
-                run.base_branch, l.reference
-            )),
-            None if merged > 0 => text.push_str(&format!("，结果在 {}，等你落地", run.branch)),
-            None => {}
+            Some(l) => text.push_str(&format!("已落地到 {}（{}）", run.base_branch, l.reference)),
+            None if changed => text.push_str(&format!("结果在 {}，等你落地", run.branch)),
+            None => text.push_str("没有改动"),
         }
         let defaults = self.defaulted_decisions(id).await?;
         if !defaults.is_empty() {

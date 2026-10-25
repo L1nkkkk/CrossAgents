@@ -952,6 +952,11 @@ impl Orchestrator {
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("{}: {}", task.key, task.title));
             self.ws_for(&run).commit_all(&dir, &message).await?;
+            if base == run.branch {
+                // The lead's own edits in the run's checkout would block the merge.
+                self.commit_lead(&run, &format!("crossagents: {}", run.title))
+                    .await?;
+            }
             let branch = task.branch.clone().unwrap_or_default();
             if let Err(err) = self.ws_for(&run).merge(&into, &branch, &message).await {
                 return Ok(json!({

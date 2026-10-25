@@ -929,12 +929,17 @@ async fn create_run(
     for name in req.team.iter().flatten() {
         team.push(agent_id(&state, name).await?);
     }
+    let planner = agent_id(&state, &req.planner).await?;
+    let worker = match &req.worker {
+        Some(key) => agent_id(&state, key).await?,
+        None => planner,
+    };
     let new = NewRun {
         request: req.request,
         title: req.title,
-        planner: agent_id(&state, &req.planner).await?,
+        planner,
         config: RunConfig {
-            worker: agent_id(&state, &req.worker).await?,
+            worker,
             escalate,
             reviewer,
             auto_approve: req.auto_approve,
