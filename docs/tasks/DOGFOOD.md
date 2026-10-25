@@ -258,3 +258,34 @@ hub 在开会话时把一份项目规则写进开场说明（`SessionSpec.instru
 ### 待实测
 
 - 长 run（上万条事件）时接口耗时；磁盘日志被 14 天清理后，更早的 run 只剩 store 里的事件。
+
+## 9. 第一次自举实测（2026-10-26）
+
+第一次用 Work 在 CrossAgents 本身上做一件真事：TODO §七「CLI 还不能发附件」。
+
+### 怎么跑的
+
+- 独立的测试 hub（scratch home），主导 Claude Opus，项目是本仓库，另有一个 Sonnet worker 在团队里。托管「我审批」。
+- 请求原文：给 `crossagents send` 加 `--file <path>`（可多次），按 hub 的规则（单文件 10 MB、每条 8 个、合计 20 MB，图片 / PDF / JSON / 文本）先检查再发，加测试，更新 TODO。
+
+### 结果
+
+- 4 分钟跑完，没有交计划、没有派任务：主导判断够小，自己在集成目录里做完，`run_finish` 收尾（W1 的轻量 Work 路径）。
+- 质量可用：复用 `api-types` 里 hub 的上限常量和类型判断，不是抄数字；先查类型和大小再读文件；2 个单元测试 + 1 个 e2e；跑了 fmt 和 clippy；顺手改了 TODO.md 和 DESIGN.md 里 send 的用法。我在它的 worktree 里重跑 `cargo test -p crossagents-cli`，13 个全过。
+- 一个提交（作者 CrossAgents，消息用主导在 `run_finish` 给的），等人落地。
+
+### 卡住或别扭的地方
+
+| # | 现象 | 影响 | 方向 |
+|---|---|---|---|
+| 1 | 每个 run / 任务的 worktree 各有一份 `CARGO_TARGET_DIR`：这次一个集成目录就 2.3 GB，第一次 `cargo test -p crossagents-cli` 约 1.5 分钟 | 多任务的 run 是 N 份全量编译、N × 2.3 GB；改到 hub 这类大 crate 时编译会成为主要耗时 | 同一 run 内共享一份 target（任务串行编译时不会互锁），或 sccache；结束后清 target |
+| 2 | 轻量 Work 没有任何 hub 跑的验收：对错全凭主导自述 | 自动化时没人复核；这次是我手动重跑测试才确认 | 项目级的默认验收命令（如 `CROSSAGENTS.md` 里声明），`run_finish` 前由 hub 跑；失败就退回主导 |
+| 3 | 主导试图 `python - <<EOF` 跑脚本，本机只有 Store 占位 python | 白费一步，它自己绕过去了 | 开场说明里带上本机可用的工具链（或在第一次找不到命令时提示） |
+| 4 | run 页底部堆满别的 run 的「告诉你」通知 | 看这个 run 时被无关卡片挤占 | run 页只显示本 run 的通知，其余留给首页 |
+| 5 | 提交作者是 `CrossAgents`，不是人 | 落地后 main 的历史里是 hub 的身份 | 落地时可选用人的 git 身份，或加 `Co-authored-by` |
+
+### 这次没覆盖到
+
+- 交计划、多个 worker 并行改同一仓库（冲突、合并、各自编译）。
+- Codex worker（code-mode 工具名）在真实仓库里的表现。
+- 改动涉及 GUI 时的验证（截图、mock 预览）。
