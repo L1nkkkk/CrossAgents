@@ -207,6 +207,7 @@ struct Shared {
     closing: AtomicBool,
     /// The CLI's name, for messages.
     program: &'static str,
+    flavor: Flavor,
     /// Set while a resumed CodeBuddy session replays its history, which it does after
     /// `initialize`: old messages and a `result` closing them, which would otherwise end
     /// the first real turn. Taken (and sent) at that `result`.
@@ -237,6 +238,7 @@ impl Shared {
             exited: AtomicBool::new(false),
             closing: AtomicBool::new(false),
             program: flavor.program(),
+            flavor,
             replay: Mutex::default(),
         }
     }
@@ -399,7 +401,7 @@ impl Shared {
             Some(handler) => handler.decide(&asked).await,
             None => self.permission.decide(),
         };
-        let answer = wire::permission_response(decision, &request);
+        let answer = wire::permission_response(decision, &request, self.flavor);
         let _ = self.write(&wire::control_success(&id, answer)).await;
         self.emit(
             SessionEventKind::PermissionRequested {

@@ -868,8 +868,20 @@ pub fn permission_request(request_id: &str, request: &Value) -> PermissionReques
     }
 }
 
-/// The answer to `can_use_tool`.
-pub fn permission_response(decision: PermissionDecision, request: &Value) -> Value {
+/// The answer to `can_use_tool`. CodeBuddy reads `allowed` and `reason` instead of
+/// `behavior` and `message` (2.174): without them it takes every answer for a denial.
+pub fn permission_response(decision: PermissionDecision, request: &Value, flavor: Flavor) -> Value {
+    let mut answer = claude_permission_response(decision, request);
+    if flavor == Flavor::Codebuddy {
+        answer["allowed"] = json!(answer["behavior"] == "allow");
+        if let Some(message) = answer.get("message").cloned() {
+            answer["reason"] = message;
+        }
+    }
+    answer
+}
+
+fn claude_permission_response(decision: PermissionDecision, request: &Value) -> Value {
     let input = request.get("input").cloned().unwrap_or(json!({}));
     match decision {
         PermissionDecision::Allow => json!({ "behavior": "allow", "updatedInput": input }),
@@ -1497,17 +1509,44 @@ mod tests {
             (asked.id.as_str(), asked.kind.as_str(), asked.title.as_str()),
             ("t1", "command", "Remove-Item x")
         );
-        let allow = permission_response(PermissionDecision::Allow, &request);
+        let allow = permission_response(PermissionDecision::Allow, &request, Flavor::Claude);
         assert_eq!(allow["updatedInput"]["command"], "Remove-Item x");
         assert!(allow.get("updatedPermissions").is_none());
-        assert!(permission_response(PermissionDecision::AllowForSession, &request)["updatedPermissions"].is_array());
+        assert!(
+            permission_response(
+                PermissionDecision::AllowForSession,
+                &request,
+                Flavor::Claude
+            )["updatedPermissions"]
+                .is_array()
+        );
         assert_eq!(
-            permission_response(PermissionDecision::Deny, &request)["behavior"],
+            permission_response(PermissionDecision::Deny, &request, Flavor::Claude)["behavior"],
             "deny"
         );
         assert_eq!(
-            permission_response(PermissionDecision::Cancel, &request)["interrupt"],
+            permission_response(PermissionDecision::Cancel, &request, Flavor::Claude)["interrupt"],
             true
+        );
+        // CodeBuddy reads `allowed` / `reason`; Claude Code's own fields stay.
+        let allow = permission_response(PermissionDecision::Allow, &request, Flavor::Codebuddy);
+        assert_eq!(
+            (allow["allowed"].clone(), allow["behavior"].clone()),
+            (json!(true), json!("allow"))
+        );
+        assert_eq!(allow["updatedInput"]["command"], "Remove-Item x");
+        let deny = permission_response(PermissionDecision::Deny, &request, Flavor::Codebuddy);
+        assert_eq!(deny["allowed"], false);
+        assert!(
+            deny["reason"]
+                .as_str()
+                .unwrap()
+                .contains("Declined by CrossAgents")
+        );
+        assert!(
+            permission_response(PermissionDecision::Allow, &request, Flavor::Claude)
+                .get("allowed")
+                .is_none()
         );
     }
 

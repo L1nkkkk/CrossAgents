@@ -170,6 +170,40 @@ async fn smoke_permission_request_denied() {
 
 #[tokio::test]
 #[ignore = "needs a signed-in Claude Code"]
+async fn smoke_permission_request_allowed() {
+    // Asked and allowed, the write goes through: an answer the CLI misreads fails here,
+    // where the denied case cannot tell (CodeBuddy once read every answer as a denial).
+    let dir = tempfile::tempdir().unwrap();
+    let (spec, mut rx) = spec(dir.path(), PermissionPolicy::Guard);
+    let session = driver().open(spec).await.unwrap();
+    let (_, _, events) = turn(
+        &*session,
+        &mut rx,
+        "Create the file made.txt containing smoke in the current directory with your file          writing tool, then reply DONE.",
+    )
+    .await;
+    assert!(
+        events.iter().any(|k| matches!(
+            k,
+            SessionEventKind::PermissionRequested {
+                decision: PermissionDecision::Allow,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("made.txt"))
+            .unwrap_or_default()
+            .trim(),
+        "smoke",
+        "{events:?}"
+    );
+    session.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "needs a signed-in Claude Code"]
 async fn smoke_interrupt() {
     let dir = tempfile::tempdir().unwrap();
     let (spec, mut rx) = spec(dir.path(), PermissionPolicy::Bypass);

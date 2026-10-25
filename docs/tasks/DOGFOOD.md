@@ -290,3 +290,36 @@ hub 在开会话时把一份项目规则写进开场说明（`SessionSpec.instru
 - 交计划、多个 worker 并行改同一仓库（冲突、合并、各自编译）。
 - Codex worker（code-mode 工具名）在真实仓库里的表现。
 - 改动涉及 GUI 时的验证（截图、mock 预览）。
+
+## 10. 第二次自举实测：多 agent，全用 DeepSeek（2026-10-26）
+
+做 TODO §七的两条：`acp-generic` 按 agent 声明的 prompt 能力收附件，以及「按能力降级」（hub 对不支持的类型返回 400，GUI 禁用入口并说明原因）。
+
+### 怎么跑的
+
+- 用真实的 hub（`~/.crossagents`）。主导 Lyra、worker 模板 Sage 都是 CodeBuddy 上的 DeepSeek v4.1 Flash；策略是计划要人批、人来落地，worker 走守卫审批。
+- 请求里要求后端和 GUI 分成任务并行做，接口先定好。
+- 第一次带上 §9 第 2 条的验收：本仓库 `crossagents.toml` 声明 `cargo test --workspace`。
+
+### 结果
+
+- 约 33 分钟收尾。主导先在 run 分支上提交接口（`768eb56`：`AttachmentSupport`、`Capabilities.attachments`、各驱动的固定能力），再交计划：后端给 Sage，GUI 给它自己招的 Rune（也是 DeepSeek）。两个任务的 spec 很细：要改的文件、接口不许动、范围、验收命令都写了；GUI 任务的验收自带 `npm ci`。
+- 两个 worker 都卡在权限上（见下表第 1 条）。Rune 在主导催过一次后写完了 GUI，但上报被拒，只好发消息给主导；主导自己看 diff、跑类型检查和测试，在它的 worktree 里提交并合并。Sage 两次停下、没有改动，主导取消了后端任务，自己在集成目录里写完。
+- `run_finish` 前 hub 跑了 `cargo test --workspace`，通过；收尾通知里写了「验收（crossagents.toml）：1/1 通过」。
+- 我复核：GUI 的 typecheck 和 54 个单测通过；在 mock 预览里截图，codex 的输入框下面显示「这个 agent 只收图片和文本，PDF 发不了（codex-native）」。
+- run 分支 22 个文件，+865 −62，还没落地。
+
+### 卡住或别扭的地方
+
+| # | 现象 | 影响 | 方向 |
+|---|---|---|---|
+| 1 | CodeBuddy 的 worker 改文件、跑 Bash、调协作工具（含 `task_complete`）全被 "Permission denied by SDK" 拒，hub 那边每次都判了允许 | 守卫审批下的 CodeBuddy agent 基本只能读；worker 白跑、上报不了 | **已改**（2026-10-26）：CodeBuddy 2.174 读权限回复里的 `allowed` / `reason`，不认 Claude Code 的 `behavior` / `message`，缺了就当拒绝。驱动对 CodeBuddy 额外带上这两个字段。三家原生驱动都补了真实 CLI 的「允许后真能写」冒烟测试（以前只测拒绝，读不懂的回复恰好也是拒绝，所以一直没暴露） |
+| 2 | run 状态是 failed（「1 of 2 tasks did not merge」），其实主导把取消的任务自己做完了，验收也过了 | 看状态会以为没做成 | 有任务没合并、但 run 分支有改动且验收通过时算 completed，备注里说明哪些任务是主导接手的 |
+| 3 | 任务合并或取消后，worker 的克隆连同对话记录一起删了 | 事后查不到 worker 当时卡在哪（这次是在它还在时读到的） | 克隆归档而不删，或在 run 的追溯里留下它的最后几轮 |
+| 4 | 验收只有 cargo；GUI 的类型检查和单测要 `npm ci`，没放进 `crossagents.toml` | GUI 改动的对错靠 worker 自述加人复核 | run 共享一份 `node_modules`（像共享 cargo target 那样），再把 GUI 检查加进验收 |
+| 5 | mock 预览里没有对话的 agent，transcript 的 `capabilities` 是 null | 截图看不到这类 agent 的能力提示，要换一个有对话的 | mock 也按插件给出能力 |
+
+### 这次没覆盖到
+
+- 真实 Claude / CodeBuddy 收图片和 PDF 的实际效果（§七的实测项）。
+- 修好权限之后 CodeBuddy worker 完整走一遍「改、测、上报」。

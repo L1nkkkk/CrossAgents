@@ -163,6 +163,43 @@ async fn smoke_permission_request() {
 
 #[tokio::test]
 #[ignore = "needs a logged-in Codex"]
+async fn smoke_permission_request_allowed() {
+    // Asked and allowed, the command runs: an answer Codex misreads fails here, where the
+    // denied case cannot tell.
+    let dir = tempfile::tempdir().unwrap();
+    let (spec, mut rx) = spec(dir.path(), PermissionPolicy::Guard, json!({}));
+    let session = driver().open(spec).await.unwrap();
+    let (_, _, events) = turn(
+        &*session,
+        &mut rx,
+        "Run the shell command `echo smoke > made.txt` in the current directory, then reply DONE.",
+    )
+    .await;
+    assert!(
+        events.iter().any(|k| matches!(
+            k,
+            SessionEventKind::PermissionRequested {
+                decision: PermissionDecision::Allow,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+    // Windows PowerShell 5.1 writes `>` as UTF-16: drop the zero bytes before reading.
+    let bytes: Vec<u8> = std::fs::read(dir.path().join("made.txt"))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|b| *b != 0)
+        .collect();
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("smoke"),
+        "{events:?}"
+    );
+    session.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "needs a logged-in Codex"]
 async fn smoke_interrupt() {
     let dir = tempfile::tempdir().unwrap();
     let driver = driver();
