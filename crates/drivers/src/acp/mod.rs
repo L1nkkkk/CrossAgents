@@ -10,10 +10,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use crossagents_core::{
-    Capabilities, CoreError, Driver, DriverKind, DriverSession, FileChange, McpServerSpec,
-    OutputStream, PermissionPolicy, SessionEvent, SessionEventKind, SessionSpec, StopReason,
-    ToolDetail, ToolStatus, TurnOutcome,
+    AttachmentKind, AttachmentSupport, Capabilities, CoreError, Driver, DriverKind, DriverSession,
+    FileChange, McpServerSpec, OutputStream, PermissionPolicy, Prompt, SessionEvent,
+    SessionEventKind, SessionSpec, StopReason, ToolDetail, ToolStatus, TurnOutcome,
 };
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc};
@@ -143,6 +145,8 @@ pub struct AcpSession {
     events: mpsc::UnboundedSender<SessionEvent>,
     /// Set before we kill the process, so its exit is not reported as a failure.
     shutting_down: Arc<AtomicBool>,
+    /// What the agent said it takes at `initialize` (docs/TODO.md §7).
+    attachments: AttachmentSupport,
     pub agent_info: Option<Implementation>,
 }
 
@@ -266,6 +270,13 @@ impl AcpSession {
             pending_instructions: Mutex::new(instructions),
             events: events.clone(),
             shutting_down,
+            // PDFs would need `embeddedContext` and a resource block, which is not wired;
+            // only images are sent as such.
+            attachments: AttachmentSupport {
+                image: init.agent_capabilities.prompt_capabilities.image,
+                pdf: false,
+                text: true,
+            },
             agent_info: init.agent_info,
         };
         this.configure(&session, permission, model.as_deref()).await;
@@ -349,18 +360,51 @@ impl AcpSession {
     }
 }
 
-#[async_trait]
-impl DriverSession for AcpSession {
-    fn session_id(&self) -> &str {
-        &self.session_id
+impl AcpSession {
+    /// The prompt blocks for one turn: instructions once, the message, then each file as
+    /// what the agent takes (docs/TODO.md §7).
+    async fn prompt_blocks(&self, prompt: &Prompt) -> Vec<ContentBlock> {
+        let mut blocks = Vec::new();
+        if let Some(instructions) = self.pending_instructions.lock().await.take() {
+            blocks.push(ContentBlock::Text { text: instructions });
+        }
+        blocks.push(ContentBlock::Text {
+            text: prompt.text.clone(),
+        });
+        for attachment in &prompt.attachments {
+            blocks.push(match attachment.kind() {
+                Some(AttachmentKind::Image) if self.attachments.image => {
+                    match std::fs::read(&attachment.path) {
+                        Ok(bytes) => ContentBlock::Image {
+                            data: STANDARD.encode(bytes),
+                            mime_type: attachment.mime.clone(),
+                        },
+                        // Unreadable now: named, so the agent still hears about it.
+                        Err(_) => ContentBlock::Text {
+                            text: attachment.reference(),
+                        },
+                    }
+                }
+                Some(AttachmentKind::Text) => match attachment.inline_text() {
+                    Some(text) => ContentBlock::Text {
+                        text: attachment.as_file_block(&text),
+                    },
+                    None => ContentBlock::Text {
+                        text: attachment.reference(),
+                    },
+                },
+                // A kind this agent did not say it takes (or one this client does not
+                // send as such): named, never dropped.
+                _ => ContentBlock::Text {
+                    text: attachment.reference(),
+                },
+            });
+        }
+        blocks
     }
 
-    async fn prompt(&self, text: &str) -> Result<TurnOutcome, CoreError> {
-        let mut prompt = Vec::new();
-        if let Some(instructions) = self.pending_instructions.lock().await.take() {
-            prompt.push(ContentBlock::Text { text: instructions });
-        }
-        prompt.push(ContentBlock::Text { text: text.into() });
+    /// Sends one turn's blocks and waits for it to end.
+    async fn run_prompt(&self, prompt: Vec<ContentBlock>) -> Result<TurnOutcome, CoreError> {
         emit(
             &self.events,
             SessionEventKind::TurnStarted { turn_id: None },
@@ -388,6 +432,28 @@ impl DriverSession for AcpSession {
             stop_reason,
             turn_id: None,
         })
+    }
+}
+
+#[async_trait]
+impl DriverSession for AcpSession {
+    fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    async fn prompt(&self, text: &str) -> Result<TurnOutcome, CoreError> {
+        self.run_prompt(self.prompt_blocks(&Prompt::text(text)).await)
+            .await
+    }
+
+    /// Images go as ACP image blocks when the agent declared them; text is inlined or
+    /// named by path (docs/TODO.md §7).
+    async fn prompt_with(&self, prompt: &Prompt) -> Result<TurnOutcome, CoreError> {
+        self.run_prompt(self.prompt_blocks(prompt).await).await
+    }
+
+    fn attachment_support(&self) -> Option<AttachmentSupport> {
+        Some(self.attachments)
     }
 
     async fn interrupt(&self) -> Result<(), CoreError> {

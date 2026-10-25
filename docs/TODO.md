@@ -103,8 +103,8 @@
 - [x] GUI：拖拽、粘贴截图、选择文件；输入框显示缩略图，发送前可删除
 - [~] `claude-native`：映射到 stream-json 的图片内容块（PDF 为 `document`，小文本内联），实测图片与文件的支持范围还没做
 - [~] `codex-native`：映射到 app-server 的图片输入（`localImage`），实测后确认字段
-- [ ] `acp-generic`：读取 agent 声明的 prompt 能力，未声明图片则不允许发图
-- [ ] 按能力降级：驱动不支持的附件类型，GUI 禁用入口并说明原因，不静默丢弃
+- [x] `acp-generic`：读取 agent 声明的 prompt 能力，未声明图片则不允许发图（`initialize` 的 `agentCapabilities.promptCapabilities` 记在会话上，图片按 ACP image block 发送；没声明就由 hub 返回 400，不再退化成路径引用）
+- [x] 按能力降级：驱动不支持的附件类型，GUI 禁用入口并说明原因，不静默丢弃（`Capabilities.attachments`：claude-native / codebuddy-native 收图片、PDF、文本，codex-native 不收 PDF，acp-generic 启动前为 `null`、会话启动后按声明；transcript 把它给 GUI，`POST /v1/agents/{key}/messages` 遇到不收的类型返回 400 并说明原因；GUI 收窄文件选择器的 accept，粘贴/拖入不支持的类型时报出原因）
 - [~] 历史展示：时间线渲染图片和文件卡片（已做）；transcript 导出时包含附件引用（未做）
 - [ ] 跨 agent 转发：Worker 之间传附件时明确是复制还是引用，避免路径跨工作目录失效
 - [ ] 安全：附件路径不能让 agent 读到工作目录之外的文件，除非用户显式选择

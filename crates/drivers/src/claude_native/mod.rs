@@ -18,8 +18,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use crossagents_core::{
-    AttachmentSupport, Capabilities, CoreError, Driver, DriverKind, DriverSession, PermissionHandler,
-    PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec, StopReason, TurnOutcome,
+    AttachmentSupport, Capabilities, CoreError, Driver, DriverKind, DriverSession,
+    PermissionHandler, PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec,
+    StopReason, TurnOutcome,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};

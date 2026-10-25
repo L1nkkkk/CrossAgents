@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
-    AttachmentSupport, Capabilities, CoreError, Driver, DriverKind, DriverSession, PermissionDecision,
-    PermissionHandler, PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec,
-    TurnOutcome,
+    AttachmentSupport, Capabilities, CoreError, Driver, DriverKind, DriverSession,
+    PermissionDecision, PermissionHandler, PermissionPolicy, Prompt, SessionEvent,
+    SessionEventKind, SessionSpec, TurnOutcome,
 };
 use serde_json::{Value, json};
 use tokio::sync::{Notify, mpsc, oneshot};

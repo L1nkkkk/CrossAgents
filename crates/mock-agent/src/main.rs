@@ -21,6 +21,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use crossagents_drivers::jsonrpc::{RpcError, RpcHandler, RpcPeer};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify};
@@ -37,6 +39,8 @@ struct MockAgent {
     mcp: Mutex<Option<(RpcPeer, tokio::process::Child)>>,
     last_directives: Mutex<Vec<Directive>>,
     turns: Mutex<u32>,
+    /// What `initialize` declares in `promptCapabilities`; `--no-images` clears it.
+    images: bool,
 }
 
 /// A client side that ignores whatever an MCP server sends unprompted.
@@ -183,11 +187,41 @@ impl MockAgent {
     async fn prompt(&self, params: Value) -> Result<Value, RpcError> {
         let session_id = params["sessionId"].as_str().unwrap_or_default().to_owned();
         let blocks = params["prompt"].as_array().cloned().unwrap_or_default();
-        let text = blocks
-            .last()
-            .and_then(|b| b["text"].as_str())
+        // A profile card goes ahead of the first message; it is not part of it. The
+        // message is the last text block that is not a file the driver inlined; file
+        // blocks are echoed after it.
+        let is_file =
+            |text: &str| text.starts_with("<file name=\"") || text.starts_with("[attached file: ");
+        let text: String = blocks
+            .iter()
+            .rev()
+            .filter_map(|b| b["text"].as_str())
+            .find(|text| !is_file(text))
             .unwrap_or_default()
             .to_owned();
+        let files: Vec<&str> = blocks
+            .iter()
+            .filter_map(|b| b["text"].as_str())
+            .filter(|text| is_file(text))
+            .collect();
+        // Images travel as image blocks when the agent declared them (docs/TODO.md §7).
+        let images: Vec<String> = blocks
+            .iter()
+            .filter(|b| b["type"] == "image")
+            .map(|b| {
+                let mime = b["mimeType"].as_str().unwrap_or("image/*");
+                let bytes = b["data"]
+                    .as_str()
+                    .and_then(|data| STANDARD.decode(data).ok())
+                    .map_or(0, |bytes| bytes.len());
+                format!("[image {mime} {bytes} bytes]")
+            })
+            .collect();
+        let card = blocks.len() > 1
+            && blocks[0]["text"].as_str().is_some_and(|t| {
+                t.starts_with("You are ")
+                    && (t.contains("Your role on the team") || t.contains("About you: "))
+            });
 
         if text.contains("[crash]") {
             std::process::exit(3);
@@ -254,17 +288,18 @@ impl MockAgent {
         let mode = self.mode.lock().await.clone();
         // Every session gets who it is and its role's guide; only a profile card (a role on
         // the team, or a persona) is noted, so tests can see a persona arrive.
-        let card = blocks.len() > 1
-            && blocks[0]["text"].as_str().is_some_and(|t| {
-                t.starts_with("You are ")
-                    && (t.contains("Your role on the team") || t.contains("About you: "))
-            });
         if card {
             self.say(&session_id, "[instructions received] ").await;
         }
         self.say(&session_id, &format!("echo(model={model},mode={mode}): "))
             .await;
         self.say(&session_id, &text).await;
+        for file in &files {
+            self.say(&session_id, &format!("\n{file}")).await;
+        }
+        for image in &images {
+            self.say(&session_id, &format!("\n{image}")).await;
+        }
         // Cumulative session cost, as ACP agents report it: opus costs 10x haiku per turn.
         let turns = {
             let mut turns = self.turns.lock().await;
@@ -290,7 +325,11 @@ impl RpcHandler for MockAgent {
         match method {
             "initialize" => Ok(json!({
                 "protocolVersion": 1,
-                "agentCapabilities": { "loadSession": false, "mcpCapabilities": { "http": false, "sse": false } },
+                "agentCapabilities": {
+                    "loadSession": false,
+                    "mcpCapabilities": { "http": false, "sse": false },
+                    "promptCapabilities": { "image": self.images, "audio": false, "embeddedContext": false }
+                },
                 "agentInfo": { "name": "crossagents-mock-agent", "version": "0" }
             })),
             "session/new" => {
@@ -350,6 +389,7 @@ async fn main() {
         mcp: Mutex::default(),
         last_directives: Mutex::default(),
         turns: Mutex::default(),
+        images: !std::env::args().any(|arg| arg == "--no-images"),
     });
     let (peer, reader) = RpcPeer::spawn(tokio::io::stdin(), tokio::io::stdout(), agent.clone());
     *agent.peer.lock().await = Some(peer);
