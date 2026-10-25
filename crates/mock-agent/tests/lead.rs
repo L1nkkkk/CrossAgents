@@ -149,3 +149,88 @@ async fn a_lead_with_a_session_leads_through_a_copy() {
     assert_ne!(lead["cwd"], boss["cwd"], "{lead}");
     assert_eq!(lead["model"], "opus");
 }
+
+fn branches(repo: &Path) -> String {
+    let out = std::process::Command::new("git")
+        .args(["branch", "--list"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[tokio::test]
+async fn archiving_the_lead_clears_its_checkout_and_restoring_brings_it_back() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+
+    // Run 1 lands; run 2 changes something but is never landed.
+    let landed = start(
+        &t,
+        format!(
+            "One. [write one.txt=1] {}",
+            call("run_finish", json!({ "summary": "ok" }))
+        ),
+    )
+    .await;
+    let id = landed["id"].as_str().unwrap().to_owned();
+    w.until(
+        "landed run completed",
+        run_status_is(&id, RunStatus::Completed),
+    )
+    .await;
+    let resp = t
+        .post(&format!("/v1/runs/{id}/land"), json!({ "mode": "merge" }))
+        .await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    let lead = agent(&t, landed["planner"].as_str().unwrap()).await;
+    let dir = std::path::PathBuf::from(lead["cwd"].as_str().unwrap());
+    let branch = landed["branch"].as_str().unwrap().to_owned();
+    assert!(dir.exists());
+
+    let archive_path = format!("/v1/agents/{}/archive", lead["id"].as_str().unwrap());
+    let archive = |on: bool| t.post(&archive_path, json!({ "archived": on }));
+    assert_eq!(archive(true).await.status(), 200);
+    // Landed: nothing waits on the branch, so it goes with the checkout.
+    assert!(!dir.exists());
+    assert!(
+        !branches(repo.path()).contains(&branch),
+        "{}",
+        branches(repo.path())
+    );
+
+    assert_eq!(archive(false).await.status(), 200);
+    assert!(dir.join("one.txt").exists(), "restored from the base");
+}
+
+#[tokio::test]
+async fn an_unlanded_branch_outlives_the_checkout() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+
+    let run = start(
+        &t,
+        format!(
+            "Two. [write two.txt=2] {}",
+            call("run_finish", json!({ "summary": "ok" }))
+        ),
+    )
+    .await;
+    let id = run["id"].as_str().unwrap().to_owned();
+    w.until("run completed", run_status_is(&id, RunStatus::Completed))
+        .await;
+    let lead = agent(&t, run["planner"].as_str().unwrap()).await;
+    let dir = std::path::PathBuf::from(lead["cwd"].as_str().unwrap());
+    let branch = run["branch"].as_str().unwrap().to_owned();
+
+    let resp = t
+        .delete(&format!("/v1/agents/{}", lead["id"].as_str().unwrap()))
+        .await;
+    assert_eq!(resp.status(), 204);
+    assert!(!dir.exists());
+    // Still waiting to be landed.
+    assert!(branches(repo.path()).contains(&branch));
+}

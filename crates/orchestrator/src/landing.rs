@@ -435,4 +435,57 @@ impl Orchestrator {
         self.publish(EventKind::HumanAsked { item: note }).await;
         Ok(run)
     }
+
+    /// Ended runs whose checkout `lead` lives in.
+    async fn runs_lived_in(&self, lead: &Agent) -> Result<Vec<Run>, CoreError> {
+        Ok(self
+            .store
+            .list_runs()
+            .await?
+            .into_iter()
+            .filter(|r| {
+                r.planner == lead.id
+                    && r.status.is_terminal()
+                    && !r.in_place
+                    && lead.cwd == self.integration_path(r)
+            })
+            .collect())
+    }
+
+    /// `lead` was archived or is being removed (docs/tasks/W1.md §11): the checkout it kept
+    /// after its run ended goes. What it changed since is committed first; the run branch
+    /// goes too when nothing on it waits for the person (landed, or nothing changed).
+    pub async fn lead_left(&self, lead: &Agent) -> Result<(), CoreError> {
+        for run in self.runs_lived_in(lead).await? {
+            let dir = self.integration_path(&run);
+            if !dir.exists() {
+                continue;
+            }
+            let after = self
+                .commit_lead(&run, &format!("crossagents: {} (after the run)", run.title))
+                .await?;
+            let tasks = self.store.list_tasks(run.id).await?;
+            let waiting = after || (run.landed.is_none() && self.has_changes(&run, &tasks).await?);
+            let branch = (!waiting).then_some(run.branch.as_str());
+            self.ws_for(&run).remove(&run.repo, &dir, branch).await?;
+        }
+        Ok(())
+    }
+
+    /// An archived lead was restored: it gets a checkout of its run branch back, or of a
+    /// fresh one from the base when that branch was removed.
+    pub async fn lead_returned(&self, lead: &Agent) -> Result<(), CoreError> {
+        for run in self.runs_lived_in(lead).await? {
+            let dir = self.integration_path(&run);
+            if dir.exists() {
+                continue;
+            }
+            let ws = self.ws_for(&run);
+            if ws.checkout(&run.repo, &run.branch, &dir).await.is_err() {
+                ws.create(&run.repo, &run.branch, &run.base_branch, &dir)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
 }

@@ -578,6 +578,10 @@ async fn delete_agent(
 ) -> ApiResult<StatusCode> {
     let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
     state.runtime.stop(&AgentKey::Id(agent.id)).await?;
+    // A lead keeping an ended run's checkout: the checkout goes with it.
+    if let Err(err) = state.orchestrator.lead_left(&agent).await {
+        tracing::warn!(agent = %agent.name, error = %err, "cannot remove the run checkout");
+    }
     state.store().delete_agent(agent.id).await?;
     state
         .bus
@@ -630,12 +634,20 @@ async fn archive_agent(
     Path(key): Path<String>,
     Json(req): Json<ArchiveAgentRequest>,
 ) -> ApiResult<Json<Agent>> {
-    Ok(Json(
-        state
-            .runtime
-            .archive(&AgentKey::parse(&key), req.archived)
-            .await?,
-    ))
+    let agent = state
+        .runtime
+        .archive(&AgentKey::parse(&key), req.archived)
+        .await?;
+    // A lead keeping an ended run's checkout gives it up while archived (docs/tasks/W1.md §11).
+    let checkout = if req.archived {
+        state.orchestrator.lead_left(&agent).await
+    } else {
+        state.orchestrator.lead_returned(&agent).await
+    };
+    if let Err(err) = checkout {
+        tracing::warn!(agent = %agent.name, error = %err, "cannot update the run checkout");
+    }
+    Ok(Json(agent))
 }
 
 async fn set_model(
