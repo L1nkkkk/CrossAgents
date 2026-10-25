@@ -37,7 +37,27 @@ import { PlanTasks, usePlanApproval } from "./Run";
 const fromPerson = (turn: TranscriptTurn) => !turn.from || turn.from.kind === "human";
 const started = (turn: TranscriptTurn) => !!turn.started_at || !!turn.completed_at;
 
-export function SessionView({ name, onClose }: { name: string; onClose?: () => void }) {
+/**
+ * A conversation with one agent. The run page shows its lead's conversation through this
+ * view (docs/tasks/W1.md §8): `header` replaces the agent's header, `top` comes before the
+ * messages, `bottom` after them, and `side` takes the rail (or follows the messages when the
+ * window is too narrow for one).
+ */
+export function SessionView({
+  name,
+  onClose,
+  header,
+  top,
+  bottom,
+  side,
+}: {
+  name: string;
+  onClose?: () => void;
+  header?: ReactNode;
+  top?: ReactNode;
+  bottom?: ReactNode;
+  side?: ReactNode;
+}) {
   const { transcript, error, reload } = useSession(name);
   const tree = useRunTree();
   const agents = useAgents();
@@ -99,13 +119,16 @@ export function SessionView({ name, onClose }: { name: string; onClose?: () => v
 
   return (
     <section className={`pane ${rail ? "with-rail" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)}>
-      <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onClose={onClose} />
-      <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} agents={everyone} tree={runs}>
+      {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onClose={onClose} />}
+      <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} agents={everyone} tree={runs} top={top}>
         {outgoing.map((m) => (
           <Sending key={m.key} message={m} agent={agent} />
         ))}
+        {bottom}
+        {!rail && side}
       </Conversation>
-      {rail && <InfoRail agent={agent} usage={usage} turns={turns} tasks={tasks} led={led} agents={everyone} recruits={recruits} spend={transcript.conversation_cost_usd} />}
+      {rail && side && <aside className="rail" aria-label="run">{side}</aside>}
+      {rail && !side && <InfoRail agent={agent} usage={usage} turns={turns} tasks={tasks} led={led} agents={everyone} recruits={recruits} spend={transcript.conversation_cost_usd} />}
       <div className="dock">
         {/* One strip is enough: the pane beside leaves it to the main one. */}
         {!onClose && <QuestionCards agents={everyone} />}
@@ -361,6 +384,7 @@ function Conversation({
   switches,
   agents,
   tree,
+  top,
   children,
 }: {
   agent: Agent;
@@ -368,6 +392,7 @@ function Conversation({
   switches: ModelSwitch[];
   agents: Agent[];
   tree: RunDetail[];
+  top?: ReactNode;
   children?: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -393,7 +418,8 @@ function Conversation({
         }}
       >
         <div className="convo-inner">
-          {turns.length === 0 && (
+          {top}
+          {turns.length === 0 && !top && (
             <div className="empty">
               <h1>和 {displayName(agent)} 开始对话</h1>
               <p>

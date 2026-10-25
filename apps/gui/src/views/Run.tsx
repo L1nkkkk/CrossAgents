@@ -9,7 +9,6 @@ import type { RunPolicy } from "@bindings/RunPolicy";
 import { api, errorText } from "../api";
 import {
   Avatar,
-  Dot,
   ErrorBox,
   Icon,
   List,
@@ -34,6 +33,7 @@ import { StateWord, TaskChanges, useArmed } from "../parts";
 import { RunChanges, TaskReview } from "../review";
 import { RunTraceView } from "../trace";
 import { wsKey } from "../workspace";
+import { SessionView } from "./Session";
 
 function concerns(runId: string, e: HubEvent): boolean {
   switch (e.type) {
@@ -55,6 +55,11 @@ export function useRun(runId: string) {
 
 const ACTIVE = ["planning", "awaiting_approval", "running", "paused"];
 
+/**
+ * A run is its lead's conversation (docs/tasks/W1.md §8): the run's header, its facts above
+ * the messages, how it ended after them, and the task board beside them. The plan waits
+ * for approval in the dock above the composer, as in the lead's own conversation.
+ */
 export function RunView({ runId, selectedTask }: { runId: string; selectedTask?: string }) {
   const detail = useRun(runId);
   const agents = useAgents();
@@ -84,112 +89,88 @@ export function RunView({ runId, selectedTask }: { runId: string; selectedTask?:
     }
   }
 
+  const header = (
+    <div className="topbar">
+      <span className="title">{run.title}</span>
+      <StatusChip status={run.status} tone={runTone(run.status)} />
+      {tasks.length > 0 && (
+        <span className="chip">
+          {done}/{tasks.length} merged
+        </span>
+      )}
+      <div className="spacer" />
+      {plannerAgent ? <Who agent={plannerAgent} label="主导" /> : <a className="chip" href={sessionHref(run.planner)}>主导 · {planner}</a>}
+      {ACTIVE.includes(run.status) && (
+        <button className={`danger ${cancelArm.armed ? "armed" : ""}`} disabled={busy} onClick={() => cancelArm.click(cancel)}>
+          {cancelArm.armed ? "再点一次取消" : "取消 run"}
+        </button>
+      )}
+    </div>
+  );
+
+  const top = (
+    <div className="run-head">
+      <RunMeta run={run} agents={agents.data} />
+      <ErrorBox error={error ?? detail.error} />
+      {run.status === "paused" && <div className="item-warn">已暂停：{run.note ?? "等你决定"}。在「问你」里选择加预算继续，或取消这个 run。</div>}
+      {run.note && !["awaiting_approval", "paused", "planning"].includes(run.status) && <div className="item-error">{run.note}</div>}
+    </div>
+  );
+
+  const bottom = (
+    <div className="run-foot">
+      {run.status !== "awaiting_approval" && tasks.length === 0 && run.plan.length > 0 && <PlanList run={run} />}
+      {(run.status === "completed" || (run.status === "running" && allEnded)) && <Ending run={run} closing={run.status === "running"} onDone={detail.reload} />}
+      <RunNotes runId={run.id} />
+      {tasks.length > 0 && (
+        <details className="notes-panel">
+          <summary>追溯</summary>
+          <RunTraceView runId={run.id} />
+        </details>
+      )}
+    </div>
+  );
+
+  const side = tasks.length ? <TaskBoard run={run} tasks={tasks} agents={agents.data} selectedTask={selectedTask} /> : undefined;
+
+  return <SessionView key={run.planner} name={run.planner} header={header} top={top} bottom={bottom} side={side} />;
+}
+
+/** The run's tasks by what they need, each opening its details beside. */
+function TaskBoard({ run, tasks, agents, selectedTask }: { run: Run; tasks: Task[]; agents?: Agent[]; selectedTask?: string }) {
   return (
-    <>
-      <div className="topbar">
-        <span className="title">{run.title}</span>
-        <StatusChip status={run.status} tone={runTone(run.status)} />
-        {tasks.length > 0 && (
-          <span className="chip">
-            {done}/{tasks.length} merged
-          </span>
-        )}
-        <div className="spacer" />
-        {plannerAgent ? <Who agent={plannerAgent} label="Planner" /> : <a className="chip" href={sessionHref(run.planner)}>Planner · {planner}</a>}
-        {ACTIVE.includes(run.status) && (
-          <button className={`danger ${cancelArm.armed ? "armed" : ""}`} disabled={busy} onClick={() => cancelArm.click(cancel)}>
-            {cancelArm.armed ? "再点一次取消" : "取消 run"}
-          </button>
-        )}
+    <section className="task-board">
+      <div className="task-board-head">
+        任务 <span className="muted small">{progress(tasks)}</span>
       </div>
-      <div className="page">
-        <div className="page-inner" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          <ErrorBox error={error ?? detail.error} />
-          <Request text={run.request} />
-          <RunMeta run={run} agents={agents.data} />
-
-          {run.status === "planning" &&
-            // The planner may answer without a plan (a question, an overview) and wait for you:
-            // the run stays in planning, but nothing is being worked out any more.
-            (plannerAgent && !["starting", "running"].includes(plannerAgent.status) ? (
-              <div className="working">
-                <span>
-                  {planner} 回复了你，还没提交计划 · <a href={sessionHref(run.planner)}>去看看并回复</a>
-                </span>
-              </div>
-            ) : (
-              <div className="working">
-                <span className="spark">✻</span>
-                <span>
-                  Planner 正在拆解任务 · <a href={sessionHref(run.planner)}>看它在做什么</a>
-                </span>
-              </div>
-            ))}
-          {run.status === "awaiting_approval" && <PlanCard run={run} onDone={detail.reload} />}
-          {(run.status === "completed" || (run.status === "running" && allEnded)) && (
-            <Ending run={run} closing={run.status === "running"} onDone={detail.reload} />
-          )}
-          {run.status === "paused" && (
-            <div className="item-warn">已暂停：{run.note ?? "等你决定"}。在「问你」里选择加预算继续，或取消这个 run。</div>
-          )}
-          {run.note && run.status !== "awaiting_approval" && run.status !== "paused" && <div className="item-error">{run.note}</div>}
-
-          <RunNotes runId={run.id} />
-          {tasks.length > 0 && (
-            <section>
-              <h2>
-                任务 <span className="muted small" style={{ fontWeight: 400 }}>{progress(tasks)}</span>
-              </h2>
-              {groupTasks(tasks).map((group) => (
-                <div key={group.bucket} className="board-group">
-                  <div className="board-label">
-                    {BUCKET_LABEL[group.bucket]} · {group.tasks.length}
-                  </div>
-                  <div className="board">
-                    {group.tasks.map((task) => (
-                      <a
-                        key={task.id}
-                        className={`board-row ${selectedTask === task.id || selectedTask === task.key ? "active" : ""}`}
-                        href={`#/runs/${run.id}/tasks/${task.id}`}
-                      >
-                        <code className="board-key">#{task.key}</code>
-                        <div style={{ minWidth: 0 }}>
-                          <div className="t">{task.title}</div>
-                          <div className="sub row" style={{ gap: 6, flexWrap: "nowrap" }}>
-                            <TaskOwner task={task} agents={agents.data} fallback={run.config.worker} />
-                            {task.escalated && " · 已升级"}
-                            {task.progress && !task.status.match(/merged|failed|cancelled/) && (
-                              <span className="board-progress" title={task.progress}>
-                                · {task.progress}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <StateWord state={taskState(task, tasks)} />
-                      </a>
-                    ))}
+      {groupTasks(tasks).map((group) => (
+        <div key={group.bucket} className="board-group">
+          <div className="board-label">
+            {BUCKET_LABEL[group.bucket]} · {group.tasks.length}
+          </div>
+          <div className="board">
+            {group.tasks.map((task) => (
+              <a key={task.id} className={`board-row ${selectedTask === task.id || selectedTask === task.key ? "active" : ""}`} href={`#/runs/${run.id}/tasks/${task.id}`}>
+                <code className="board-key">#{task.key}</code>
+                <div style={{ minWidth: 0 }}>
+                  <div className="t">{task.title}</div>
+                  <div className="sub row" style={{ gap: 6, flexWrap: "nowrap" }}>
+                    <TaskOwner task={task} agents={agents} fallback={run.config.worker} />
+                    {task.escalated && " · 已升级"}
+                    {task.progress && !task.status.match(/merged|failed|cancelled/) && (
+                      <span className="board-progress" title={task.progress}>
+                        · {task.progress}
+                      </span>
+                    )}
                   </div>
                 </div>
-              ))}
-            </section>
-          )}
-
-          {tasks.length > 0 && (
-            <section>
-              <h2>追溯</h2>
-              <RunTraceView runId={run.id} />
-            </section>
-          )}
-
-          {run.status !== "awaiting_approval" && tasks.length === 0 && run.plan.length > 0 && (
-            <section>
-              <h2>计划</h2>
-              <PlanList run={run} />
-            </section>
-          )}
+                <StateWord state={taskState(task, tasks)} />
+              </a>
+            ))}
+          </div>
         </div>
-      </div>
-    </>
+      ))}
+    </section>
   );
 }
 
@@ -239,16 +220,22 @@ function Ending({ run, closing, onDone }: { run: Run; closing: boolean; onDone: 
     }
   }
   const landed = run.landed;
+  // A run that only answered has nothing to land (docs/tasks/W1.md §4).
+  const diff = useHubData(() => (landed || run.in_place ? Promise.resolve(undefined) : api.runDiff(run.id)), [run.id, !!landed], () => false);
+  const empty = !!diff.data && !diff.data.diff.trim();
+  const landable = !landed && !run.in_place && !empty;
   return (
     <div className="done-card">
       <span className="done-check">{closing ? "○" : "✓"}</span>
       <div className="done-text" style={{ flex: 1 }}>
         <strong>{closing ? "收尾中" : "完成"}</strong>
-        {closing ? " · 所有任务都已结束，等 Planner 落地和写总结" : ""}
+        {closing ? " · 所有任务都已结束，等主导落地和写总结" : ""}
         {run.in_place ? (
           <div className="small muted">
             改动已直接写在 <code>{run.repo}</code>
           </div>
+        ) : empty ? (
+          <div className="small muted">没有改动，不用落地</div>
         ) : landed ? (
           <div className="small">
             已落地到 <code>{run.base_branch}</code>：{landed.mode === "pr" ? <a href={landed.reference} target="_blank" rel="noreferrer">{landed.reference}</a> : <code>{landed.reference}</code>}
@@ -259,7 +246,7 @@ function Ending({ run, closing, onDone }: { run: Run; closing: boolean; onDone: 
             结果在 <code>{run.branch}</code>，还没进 <code>{run.base_branch}</code>
           </div>
         )}
-        {!landed && !run.in_place && <RunChanges run={run} />}
+        {landable && <RunChanges run={run} />}
         {run.summary && (
           <div className="run-summary">
             <Prose text={run.summary} />
@@ -268,7 +255,7 @@ function Ending({ run, closing, onDone }: { run: Run; closing: boolean; onDone: 
         <ErrorBox error={error} />
       </div>
       <div className="row" style={{ gap: 6, alignSelf: "flex-start" }}>
-        {!landed && !run.in_place && (
+        {landable && (
           <>
             <button className="primary small" disabled={busy} onClick={() => act(() => api.landRun(run.id, "merge"))} title={`在 ${run.base_branch} 上生成一个合并提交`}>
               合并进 {run.base_branch}
@@ -595,78 +582,6 @@ export function usePlanApproval(run: Run, busy: boolean) {
   return { pick, settings, approve, ready: !!agents.data };
 }
 
-/** Plan approval on the run page. */
-export function PlanCard({ run, onDone }: { run: Run; onDone?: () => void }) {
-  const [rejecting, setRejecting] = useState(false);
-  const [reason, setReason] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-  const choices = usePlanApproval(run, busy);
-
-  async function act(action: () => Promise<RunDetail>) {
-    setBusy(true);
-    setError(undefined);
-    try {
-      await action();
-      onDone?.();
-    } catch (err) {
-      setError(errorText(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="plan-card">
-      <header>
-        <Dot tone={{ color: "warn" }} />
-        Plan · 待审批
-        <span className="muted small" style={{ fontWeight: 400 }}>
-          {run.plan.length} 个任务
-        </span>
-        <div className="spacer" />
-        <a className="small" href={`#/runs/${run.id}`} style={{ fontWeight: 400 }}>
-          {run.title}
-        </a>
-      </header>
-      <PlanTasks run={run} pick={choices.pick} />
-      {run.note && (
-        <div style={{ padding: "0 16px 10px" }} className="small muted">
-          上次驳回：{run.note}
-        </div>
-      )}
-      {choices.settings}
-      <footer>
-        {rejecting ? (
-          <>
-            <textarea rows={2} autoFocus placeholder="驳回理由（必填），会转给 Planner" value={reason} onChange={(e) => setReason(e.target.value)} />
-            <button className="danger" disabled={busy || !reason.trim()} onClick={() => act(() => api.rejectRun(run.id, { reason: reason.trim() }))}>
-              驳回
-            </button>
-            <button className="ghost" onClick={() => setRejecting(false)}>
-              取消
-            </button>
-          </>
-        ) : (
-          <>
-            <button className="primary" disabled={busy || !choices.ready} onClick={() => act(choices.approve)}>
-              Approve · 开工
-            </button>
-            <button disabled={busy} onClick={() => setRejecting(true)}>
-              驳回并说明
-            </button>
-          </>
-        )}
-        {error && (
-          <div style={{ flexBasis: "100%" }}>
-            <ErrorBox error={error} />
-          </div>
-        )}
-      </footer>
-    </div>
-  );
-}
-
 export function SpecView({ spec }: { spec: TaskSpec }) {
   return (
     <dl className="kv" style={{ marginTop: 8 }}>
@@ -820,17 +735,3 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 
 
 /** The human's request; long ones start folded to a few lines. */
-function Request({ text }: { text: string }) {
-  const [open, setOpen] = useState(false);
-  const long = text.length > 280 || text.split("\n").length > 5;
-  return (
-    <div className={`request ${long && !open ? "folded" : ""}`}>
-      <div className="request-text">{text}</div>
-      {long && (
-        <button className="tools-more" style={{ padding: 0 }} onClick={() => setOpen(!open)}>
-          {open ? "收起" : "展开全部"}
-        </button>
-      )}
-    </div>
-  );
-}

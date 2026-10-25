@@ -826,6 +826,14 @@ button.need { padding: 2px 10px; line-height: 18px; color: var(--text-2); }
 .beside-btn:hover:not(:disabled) { color: var(--text); background: var(--selected); }
 
 /* Run board grouped by bucket. */
+.run-head { display: flex; flex-direction: column; gap: 10px; padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
+.run-foot { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+.run-foot:empty { display: none; }
+.task-board { margin-top: 12px; }
+.task-board-head { font-size: 12px; font-weight: 600; color: var(--text-2); padding: 0 2px 8px; }
+.rail .task-board { margin-top: 0; }
+.rail .board-row { grid-template-columns: auto minmax(0, 1fr); padding: 8px 10px; gap: 4px 8px; }
+.rail .board-row > :last-child { grid-column: 2; }
 .board-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
 .board-key { background: none; padding: 0; color: var(--text-2); font-size: 12px; }
 
