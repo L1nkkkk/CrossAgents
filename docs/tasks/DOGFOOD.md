@@ -272,7 +272,7 @@ hub 在开会话时把一份项目规则写进开场说明（`SessionSpec.instru
 
 - 4 分钟跑完，没有交计划、没有派任务：主导判断够小，自己在集成目录里做完，`run_finish` 收尾（W1 的轻量 Work 路径）。
 - 质量可用：复用 `api-types` 里 hub 的上限常量和类型判断，不是抄数字；先查类型和大小再读文件；2 个单元测试 + 1 个 e2e；跑了 fmt 和 clippy；顺手改了 TODO.md 和 DESIGN.md 里 send 的用法。我在它的 worktree 里重跑 `cargo test -p crossagents-cli`，13 个全过。
-- 一个提交（作者 CrossAgents，消息用主导在 `run_finish` 给的），等人落地。
+- 一个提交（作者 CrossAgents，消息用主导在 `run_finish` 给的），压缩合并进 main 成为 `a5128dc`；main 上 `cargo test -p crossagents-cli` 通过。
 
 ### 卡住或别扭的地方
 
@@ -283,6 +283,7 @@ hub 在开会话时把一份项目规则写进开场说明（`SessionSpec.instru
 | 3 | 主导试图 `python - <<EOF` 跑脚本，本机只有 Store 占位 python | 白费一步，它自己绕过去了 | 开场说明里带上本机可用的工具链（或在第一次找不到命令时提示） |
 | 4 | run 页底部堆满别的 run 的「告诉你」通知 | 看这个 run 时被无关卡片挤占 | run 页只显示本 run 的通知，其余留给首页 |
 | 5 | 提交作者是 `CrossAgents`，不是人 | 落地后 main 的历史里是 hub 的身份 | 落地时可选用人的 git 身份，或加 `Co-authored-by` |
+| 6 | 压缩合并的提交消息是 `crossagents: <run 标题>`，主导在 `run_finish` 写的 `feat(cli): …` 丢了 | main 上的提交消息不像人写的，也不合约定格式 | squash 时用 run 分支上最后一个主导提交的消息（或 `run_finish` 的 `message`） |
 
 ### 这次没覆盖到
 
