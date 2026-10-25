@@ -31,6 +31,13 @@ pub struct HealthResponse {
 #[ts(export)]
 pub struct HubInfo {
     pub version: String,
+    /// The commit the hub was built from (`d5011e4`), when it was built in a git checkout.
+    #[serde(default)]
+    #[ts(optional)]
+    pub commit: Option<String>,
+    /// Built without optimizations (`cargo build`), i.e. a development build.
+    #[serde(default)]
+    pub debug: bool,
     pub api: String,
     pub pid: u32,
     pub home: String,

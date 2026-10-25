@@ -238,7 +238,11 @@ export class MockBridge implements CrossAgentsBridge {
     let m: RegExpMatchArray | null;
 
     if (method === "GET") {
-      if (p === "/v1/info") return json(200, { version: "0.6.0-mock", api: s.api ?? "v1", pid: 0, home: "（mock 模式，无 hub）", started_at: new Date().toISOString() });
+      if (p === "/v1/info") {
+        // `?hubcommit=abc1234`: a hub built from another commit than the page.
+        const commit = new URLSearchParams(location.search).get("hubcommit") ?? __BUILD__.commit;
+        return json(200, { version: __BUILD__.version, commit, debug: false, api: s.api ?? "v1", pid: 0, home: "（mock 模式，无 hub）", started_at: new Date().toISOString() });
+      }
       if (p === "/v1/agents") return json(200, { agents: s.agents });
       if ((m = p.match(/^\/v1\/agents\/([^/]+)$/))) return this.agent(m[1]) ? json(200, this.agent(m[1])) : notFound("agent");
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/transcript$/))) {

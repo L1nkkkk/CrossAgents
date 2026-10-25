@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -79,7 +80,17 @@ function devCsp(): Plugin {
   };
 }
 
-export default defineConfig(({ mode }) => {
+/** The commit this page is built from (`__BUILD__.commit`); undefined outside a git checkout. */
+function gitCommit(): string | undefined {
+  if (process.env.CROSSAGENTS_COMMIT) return process.env.CROSSAGENTS_COMMIT;
+  try {
+    return execFileSync("git", ["rev-parse", "--short=7", "HEAD"], { encoding: "utf8" }).trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export default defineConfig(({ command, mode }) => {
   // `npm run preview:mock` (or VITE_MOCK=1): the page answers itself with made-up data, no hub
   // needed (src/dev/). Everything behind `__MOCK__` is dropped from other builds.
   const mock = mode === "mock" || process.env.VITE_MOCK === "1";
@@ -87,7 +98,14 @@ export default defineConfig(({ mode }) => {
     // Relative asset URLs: the packaged app loads dist/index.html from a file:// URL.
     base: "./",
     plugins: [react(), ...(mock ? [] : [hubProxy()]), devCsp()],
-    define: { __MOCK__: JSON.stringify(mock) },
+    define: {
+      __MOCK__: JSON.stringify(mock),
+      __BUILD__: JSON.stringify({
+        version: JSON.parse(readFileSync(new URL("package.json", import.meta.url), "utf8")).version,
+        commit: gitCommit(),
+        dev: command === "serve",
+      }),
+    },
     resolve: { alias: { "@bindings": fileURLToPath(new URL("../../bindings", import.meta.url)) } },
     clearScreen: false,
     server: { port: 1420, strictPort: !mock, watch: { ignored: ["**/electron/**", "**/dist-electron/**", "**/release/**"] } },

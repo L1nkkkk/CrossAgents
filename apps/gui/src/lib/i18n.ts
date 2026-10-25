@@ -48,6 +48,10 @@ const zhCN = {
   "hub.dev": "正在用开发构建的 hub，不是自带的 v{shipped}",
   "hub.devTitle": "{exe}\n换成自带的会重启 hub，正在跑的 agent 不受影响",
   "hub.useShipped": "换成自带的",
+  "build.page": "界面 {tag}{dev}",
+  "build.hub": "hub {tag}{dev}",
+  "build.dev": "（开发构建）",
+  "build.differs": "界面 {page} · hub {hub}",
   "hub.switching": "切换中…",
 
   "strip.needsYou": "需要你",

@@ -10,6 +10,8 @@ import type { RunDetail } from "@bindings/RunDetail";
 import { useActivity, useUnread } from "./activity";
 import { api, errorText } from "./api";
 import type { DevHub } from "./bridge";
+import type { HubInfo } from "@bindings/HubInfo";
+import { buildTag, compareBuilds } from "./lib/build";
 import { ACTIVE_RUN, runAgents } from "./App";
 import { Avatar, BrandMark, Icon, Mark, agentTitle, displayName, hueOf, isAgent, runTone, sessionHref } from "./components";
 import { useConnectionStatus } from "./hub";
@@ -571,7 +573,7 @@ function DevHubNotice() {
 
 function Connection() {
   const status = useConnectionStatus();
-  const [info, setInfo] = useState<{ home: string; version: string }>();
+  const [info, setInfo] = useState<HubInfo>();
   useEffect(() => {
     if (status === "connected") api.info().then(setInfo, () => {});
   }, [status]);
@@ -582,7 +584,28 @@ function Connection() {
     <div className="connection" title={info?.home}>
       <span className={`dot ${color} ${status === "connecting" ? "pulse" : ""}`} />
       <span className="text" title={text}>{text}</span>
-      {info && status === "connected" && <span className="ver">v{info.version}</span>}
+      {info && status === "connected" && <Versions hub={info} />}
     </div>
+  );
+}
+
+/**
+ * One version when page and hub come from the same build; both, in warning colour, when not
+ * (an installed page on a hub built from another commit). The tooltip has the details.
+ */
+function Versions({ hub }: { hub: HubInfo }) {
+  const page = __BUILD__;
+  const cmp = compareBuilds(page, hub);
+  const dev = page.dev || hub.debug;
+  const title = [
+    t("build.page", { tag: buildTag(page), dev: page.dev ? t("build.dev") : "" }),
+    t("build.hub", { tag: buildTag(hub), dev: hub.debug ? t("build.dev") : "" }),
+    hub.home,
+  ].join("\n");
+  return (
+    <span className={`ver ${cmp.same ? "" : "differs"}`} title={title}>
+      {cmp.same ? `v${hub.version}` : t("build.differs", { page: cmp.page, hub: cmp.hub })}
+      {dev && <span className="dev">dev</span>}
+    </span>
   );
 }

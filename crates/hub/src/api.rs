@@ -297,6 +297,8 @@ async fn health() -> Json<HealthResponse> {
 async fn info(State(state): State<Arc<AppState>>) -> Json<HubInfo> {
     Json(HubInfo {
         version: VERSION.into(),
+        commit: option_env!("CROSSAGENTS_COMMIT").map(str::to_owned),
+        debug: cfg!(debug_assertions),
         api: API_VERSION.into(),
         pid: std::process::id(),
         home: state.home.display().to_string(),

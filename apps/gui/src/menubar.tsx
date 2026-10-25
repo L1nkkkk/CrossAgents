@@ -5,8 +5,10 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api, getBridge } from "./api";
+import type { HubInfo } from "@bindings/HubInfo";
 import type { CrossAgentsBridge } from "./bridge";
 import { Icon } from "./components";
+import { buildTag } from "./lib/build";
 import { useMedia } from "./lib/media";
 import { MODES, setTheme, useTheme } from "./lib/theme";
 import { toggleRail, useRail } from "./rail";
@@ -215,7 +217,7 @@ const SHORTCUTS: [string, string][] = [
 ];
 
 function Dialog({ kind, onClose }: { kind: "keys" | "about"; onClose: () => void }) {
-  const [info, setInfo] = useState<{ home: string; version: string }>();
+  const [info, setInfo] = useState<HubInfo>();
   useEffect(() => {
     if (kind === "about") api.info().then(setInfo, () => {});
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -248,7 +250,11 @@ function Dialog({ kind, onClose }: { kind: "keys" | "about"; onClose: () => void
         <h2>CrossAgents</h2>
         <p className="muted">跨厂商的多 agent 协作：Claude、Codex 等在同一个 hub 里对话、分工、合并。</p>
         <p className="small">
-          hub {info ? `v${info.version}` : "未连接"}
+          界面 {buildTag(__BUILD__)}
+          {__BUILD__.dev && "（开发构建）"}
+          <br />
+          hub {info ? buildTag(info) : "未连接"}
+          {info?.debug && "（开发构建）"}
           {info && (
             <>
               <br />
