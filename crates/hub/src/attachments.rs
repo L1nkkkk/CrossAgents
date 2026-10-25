@@ -9,7 +9,7 @@ use crossagents_api_types::{
     AttachmentContent, AttachmentUpload, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS,
     MAX_ATTACHMENTS_TOTAL, attachment_mime_ok,
 };
-use crossagents_core::{AgentId, Attachment};
+use crossagents_core::{AgentId, Attachment, AttachmentKind, AttachmentSupport};
 use sha2::{Digest, Sha256};
 
 /// Why files were refused, for the client to show as it is.
@@ -18,6 +18,48 @@ pub struct Refused(pub String);
 
 fn dir(home: &Path, agent: AgentId) -> PathBuf {
     home.join("attachments").join(agent.to_string())
+}
+
+/// Checks the files against what the agent takes (docs/TODO.md §7). Types that messages
+/// do not allow at all are left to [`store`], which says why.
+pub fn check_support(
+    uploads: &[AttachmentUpload],
+    support: AttachmentSupport,
+    agent: &str,
+    driver: &str,
+) -> Result<(), Refused> {
+    for upload in uploads {
+        let Some(kind) = AttachmentKind::of_mime(&upload.mime) else {
+            continue;
+        };
+        if support.allows(kind) {
+            continue;
+        }
+        let name = clean_name(&upload.name);
+        let takes: Vec<&str> = support
+            .kinds()
+            .iter()
+            .map(|kind| match kind {
+                AttachmentKind::Image => "images",
+                AttachmentKind::Pdf => "PDFs",
+                AttachmentKind::Text => "text",
+            })
+            .collect();
+        let takes = if takes.is_empty() {
+            "no files".to_owned()
+        } else {
+            takes.join(", ")
+        };
+        let refused = match kind {
+            AttachmentKind::Image => "images",
+            AttachmentKind::Pdf => "PDFs",
+            AttachmentKind::Text => "text files",
+        };
+        return Err(Refused(format!(
+            "{name}: {agent} cannot take {refused} (its {driver} driver takes {takes})"
+        )));
+    }
+    Ok(())
 }
 
 /// Checks `uploads` against the limits and stores them for `agent`.
@@ -196,6 +238,70 @@ mod tests {
         assert!(!dir(home.path(), agent).exists());
         assert!(read(home.path(), other, &stored[0].id).is_some());
         remove(home.path(), agent).unwrap();
+    }
+
+    #[test]
+    fn refuses_kinds_the_agent_does_not_take() {
+        let codex = AttachmentSupport {
+            image: true,
+            pdf: false,
+            text: true,
+        };
+        let refused = check_support(
+            &[upload("notes.pdf", "application/pdf", b"%PDF")],
+            codex,
+            "alice",
+            "codex-native",
+        )
+        .unwrap_err();
+        assert!(refused.0.contains("notes.pdf"), "{}", refused.0);
+        assert!(refused.0.contains("PDFs"), "{}", refused.0);
+        assert!(refused.0.contains("codex-native"), "{}", refused.0);
+        assert!(refused.0.contains("images, text"), "{}", refused.0);
+        assert!(
+            check_support(
+                &[upload("shot.png", "image/png", b"png")],
+                codex,
+                "alice",
+                "codex-native"
+            )
+            .is_ok()
+        );
+        assert!(
+            check_support(
+                &[upload("notes.txt", "text/plain", b"x")],
+                AttachmentSupport::TEXT_ONLY,
+                "alice",
+                "acp-generic"
+            )
+            .is_ok()
+        );
+        // Types the hub does not take at all are `store`'s business, with its own message.
+        assert!(
+            check_support(
+                &[upload("a.exe", "application/x-msdownload", b"MZ")],
+                AttachmentSupport::TEXT_ONLY,
+                "alice",
+                "acp-generic"
+            )
+            .is_ok()
+        );
+        let none = AttachmentSupport {
+            image: false,
+            pdf: false,
+            text: false,
+        };
+        assert!(
+            check_support(
+                &[upload("a.txt", "text/plain", b"x")],
+                none,
+                "alice",
+                "acp-generic"
+            )
+            .unwrap_err()
+            .0
+            .contains("no files")
+        );
     }
 
     #[test]

@@ -28,8 +28,8 @@ use crossagents_api_types::{
     TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse, UsageGroup, UsageResponse,
 };
 use crossagents_core::{
-    Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError,
-    DriverKind, Envelope, Event, EventBus, EventKind, HumanItem, LandMode, MessageId,
+    Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, AttachmentSupport,
+    CoreError, DriverKind, Envelope, Event, EventBus, EventKind, HumanItem, LandMode, MessageId,
     MessageSource, Run, RunConfig, RunId, Store, Task, TaskId,
 };
 use crossagents_orchestrator::{Approval, GitWorkspaces, NewRun, Orchestrator};
@@ -527,10 +527,11 @@ async fn transcript(
     let in_error = agent.status == crossagents_core::AgentStatus::Error;
     let error = in_error.then_some(fold.last_error).flatten();
     let exit = in_error.then_some(fold.last_exit).flatten();
+    let capabilities = state.runtime.capabilities(&agent).await;
     Ok(Json(Transcript {
         agent,
         driver: resolved.as_ref().map(|r| r.driver.kind()),
-        capabilities: resolved.as_ref().map(|r| r.driver.capabilities()),
+        capabilities,
         turns: fold.turns,
         usage: fold.usage,
         switches: fold.switches,
@@ -794,6 +795,21 @@ async fn send_message(
         Vec::new()
     } else {
         let agent = state.store().get_agent(&key).await?;
+        // Refuse a kind the agent does not take, before storing anything (docs/TODO.md
+        // §7); an ACP agent declares its kinds when its session starts.
+        let support = state
+            .runtime
+            .attachment_support(&agent)
+            .await?
+            .unwrap_or(AttachmentSupport::TEXT_ONLY);
+        let driver = state
+            .runtime
+            .plugins()
+            .driver(&agent.plugin, agent.driver.as_deref())
+            .map(|resolved| resolved.driver.kind().as_str())
+            .unwrap_or("unknown");
+        crate::attachments::check_support(&uploads, support, &agent.name, driver)
+            .map_err(|refused| AppError::bad_request(refused.0))?;
         crate::attachments::store(&state.home, agent.id, uploads)
             .map_err(|refused| AppError::bad_request(refused.0))?
     };

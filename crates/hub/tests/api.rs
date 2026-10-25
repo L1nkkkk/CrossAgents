@@ -411,3 +411,95 @@ async fn credentials_have_levels() {
     // The full token still does everything.
     assert_eq!(t.get("/v1/agents").send().await.unwrap().status(), 200);
 }
+
+/// What each driver takes as files is part of the agent's transcript, and a kind it does
+/// not take is refused before the agent is started (docs/TODO.md §7).
+#[tokio::test]
+async fn drivers_say_which_files_they_take() {
+    let t = TestHub::start().await;
+    let cwd = t._home.path().display().to_string();
+    let create = |name: &str, plugin: &str, driver: &str| {
+        t.post("/v1/agents").json(&json!({
+            "name": name, "plugin": plugin, "driver": driver, "role": "worker", "cwd": cwd,
+        }))
+    };
+    assert_eq!(
+        create("codexer", "codex", "codex-native")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        201
+    );
+    assert_eq!(
+        create("clauder", "claude", "claude-native")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        201
+    );
+    assert_eq!(
+        create("buddy", "codebuddy", "codebuddy-native")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        201
+    );
+
+    let codex: Value = t
+        .get("/v1/agents/codexer/transcript")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(codex["driver"], "codex-native");
+    assert_eq!(
+        codex["capabilities"]["attachments"],
+        json!({ "image": true, "pdf": false, "text": true })
+    );
+    let claude: Value = t
+        .get("/v1/agents/clauder/transcript")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        claude["capabilities"]["attachments"],
+        json!({ "image": true, "pdf": true, "text": true })
+    );
+    let buddy: Value = t
+        .get("/v1/agents/buddy/transcript")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        buddy["capabilities"]["attachments"],
+        json!({ "image": true, "pdf": true, "text": true })
+    );
+
+    // No `codex` process is needed: the driver's answer is known without one.
+    let resp = t
+        .post("/v1/agents/codexer/messages")
+        .json(&json!({
+            "text": "read this",
+            "attachments": [{ "name": "spec.pdf", "mime": "application/pdf", "data": "JVBERg==" }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let offered = resp.text().await.unwrap();
+    assert!(offered.contains("spec.pdf"), "{offered}");
+    assert!(offered.contains("PDFs"), "{offered}");
+    assert!(offered.contains("codex-native"), "{offered}");
+    assert!(offered.contains("images, text"), "{offered}");
+}

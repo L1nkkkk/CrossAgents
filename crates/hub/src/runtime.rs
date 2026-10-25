@@ -9,10 +9,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, AgentStatus, CoreError, DiffSource, DriverSession, EXTERNAL_PLUGIN,
-    Envelope, EventBus, EventKind, McpServerSpec, MessageId, MessageSource, NameSource,
-    OutputStream, PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec,
-    StopReason, Store, validate_agent_name,
+    Agent, AgentId, AgentKey, AgentStatus, AttachmentSupport, Capabilities, CoreError, DiffSource,
+    DriverSession, EXTERNAL_PLUGIN, Envelope, EventBus, EventKind, McpServerSpec, MessageId,
+    MessageSource, NameSource, OutputStream, PermissionPolicy, Prompt, SessionEvent,
+    SessionEventKind, SessionSpec, StopReason, Store, validate_agent_name,
 };
 use crossagents_plugins::PluginRegistry;
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -61,6 +61,9 @@ struct Live {
     session: Arc<dyn DriverSession>,
     inbox: Arc<Inbox>,
     control: mpsc::UnboundedSender<Control>,
+    /// What the session's agent declared it takes as files (ACP `promptCapabilities`);
+    /// `None` when only its driver's static answer is known.
+    attachments: Option<AttachmentSupport>,
 }
 
 impl Drop for Live {
@@ -519,6 +522,65 @@ impl Runtime {
         self.live.lock().await.contains_key(&id)
     }
 
+    /// What the agent's driver can do now (docs/TODO.md §7): a live session's own
+    /// declaration of the files it takes (ACP `promptCapabilities`) overrides the
+    /// driver's static answer.
+    pub async fn capabilities(&self, agent: &Agent) -> Option<Capabilities> {
+        let resolved = self
+            .plugins
+            .driver(&agent.plugin, agent.driver.as_deref())
+            .ok()?;
+        let mut capabilities = resolved.driver.capabilities();
+        let declared = self
+            .live
+            .lock()
+            .await
+            .get(&agent.id)
+            .and_then(|live| live.attachments);
+        if let Some(declared) = declared {
+            capabilities.attachments = Some(declared);
+        }
+        Some(capabilities)
+    }
+
+    /// What the agent takes as files now: its live session's declaration, else its
+    /// driver's static answer. `None`: not known until the agent starts. Upstreams refuse
+    /// the kinds it does not take instead of passing a reference the agent cannot use.
+    /// Starting an agent whose answer is still unknown (an ACP agent) is what a message
+    /// with files would do anyway.
+    pub async fn attachment_support(
+        &self,
+        agent: &Agent,
+    ) -> Result<Option<AttachmentSupport>, CoreError> {
+        // Agents outside the hub read the files themselves, by path.
+        if agent.plugin == EXTERNAL_PLUGIN {
+            return Ok(Some(AttachmentSupport::ALL));
+        }
+        let declared = self
+            .live
+            .lock()
+            .await
+            .get(&agent.id)
+            .and_then(|live| live.attachments);
+        if declared.is_some() {
+            return Ok(declared);
+        }
+        let Ok(resolved) = self.plugins.driver(&agent.plugin, agent.driver.as_deref()) else {
+            return Ok(None);
+        };
+        if let Some(support) = resolved.driver.capabilities().attachments {
+            return Ok(Some(support));
+        }
+        // An ACP agent declares its kinds at `initialize`, once its session starts.
+        self.start(&AgentKey::Id(agent.id)).await?;
+        Ok(self
+            .live
+            .lock()
+            .await
+            .get(&agent.id)
+            .and_then(|live| live.attachments))
+    }
+
     /// Starts the agent's session if it is not running. Idempotent.
     pub async fn start(&self, key: &AgentKey) -> Result<Agent, CoreError> {
         let agent = self.store().get_agent(key).await?;
@@ -659,6 +721,7 @@ impl Runtime {
             session: session.clone(),
             inbox: inbox.clone(),
             control: control_tx.clone(),
+            attachments: session.attachment_support(),
         });
         tokio::spawn(forward_events(
             self.bus.clone(),

@@ -54,6 +54,20 @@ pub struct McpCapabilities {
     pub sse: bool,
 }
 
+/// The prompt content kinds an agent says it takes (`agentCapabilities.promptCapabilities`
+/// at `initialize`). All default to false, as in the protocol: an agent that says nothing
+/// takes text only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptCapabilities {
+    #[serde(default)]
+    pub image: bool,
+    #[serde(default)]
+    pub audio: bool,
+    #[serde(default)]
+    pub embedded_context: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentCapabilities {
@@ -61,6 +75,8 @@ pub struct AgentCapabilities {
     pub load_session: bool,
     #[serde(default)]
     pub mcp_capabilities: McpCapabilities,
+    #[serde(default)]
+    pub prompt_capabilities: PromptCapabilities,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,7 +156,15 @@ pub struct SetSessionConfigOptionRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
+    Image {
+        /// The bytes, base64 (standard alphabet, padded).
+        data: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
