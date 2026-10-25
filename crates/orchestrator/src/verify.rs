@@ -44,6 +44,27 @@ fn shell(command: &str) -> Command {
     }
 }
 
+/// A failed check's output, with a word on what the exit code means when the command said
+/// nothing useful: a program that is not there fails silently on Windows (9009, also what
+/// the Microsoft Store's `python` placeholder returns).
+fn explain(code: Option<i32>, output: String) -> String {
+    let note = match code {
+        Some(9009) => {
+            "the program was not found (exit 9009): it is not installed or not on PATH; on Windows, `python` may be only the Microsoft Store placeholder"
+        }
+        Some(127) if output.is_empty() => {
+            "the program was not found (exit 127): it is not installed or not on PATH"
+        }
+        _ if output.is_empty() => "the command printed nothing",
+        _ => return output,
+    };
+    if output.is_empty() {
+        format!("({note})")
+    } else {
+        format!("{output}\n({note})")
+    }
+}
+
 /// Keeps the end of long output, where errors usually are.
 fn tail(text: &str, max: usize) -> String {
     if text.len() <= max {
@@ -91,11 +112,16 @@ impl Verifier for ShellVerifier {
                         Ok(Ok(out)) => {
                             let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
                             text.push_str(&String::from_utf8_lossy(&out.stderr));
+                            let code = out.status.code();
+                            let mut output = tail(text.trim(), self.max_output);
+                            if !out.status.success() {
+                                output = explain(code, output);
+                            }
                             CheckResult {
                                 command: command.clone(),
-                                exit_code: out.status.code(),
+                                exit_code: code,
                                 passed: out.status.success(),
-                                output: tail(text.trim(), self.max_output),
+                                output,
                             }
                         }
                     }
@@ -180,6 +206,17 @@ mod tests {
         let t = tail("abcdefghij", 4);
         assert!(t.ends_with("ghij"));
         assert_eq!(tail("abc", 4), "abc");
+    }
+
+    #[test]
+    fn a_missing_program_is_named() {
+        assert!(explain(Some(9009), String::new()).contains("not found"));
+        assert!(explain(Some(127), String::new()).contains("not found"));
+        assert_eq!(
+            explain(Some(1), String::new()),
+            "(the command printed nothing)"
+        );
+        assert_eq!(explain(Some(1), "boom".into()), "boom");
     }
 
     #[test]

@@ -358,7 +358,12 @@ impl Orchestrator {
             }
         };
         for id in [Some(config.worker), config.reviewer].into_iter().flatten() {
-            add(self.store.get_agent(&AgentKey::Id(id)).await?);
+            let agent = self.store.get_agent(&AgentKey::Id(id)).await?;
+            // No worker was given, so tasks default to copies of the lead: it is not a
+            // teammate the lead assigns to.
+            if agent.role != Role::Planner {
+                add(agent);
+            }
         }
         if config.team.is_empty() {
             for agent in self.store.list_agents().await? {
@@ -552,11 +557,17 @@ impl Orchestrator {
                         )));
                     }
                     if run.config.team.is_empty() {
-                        // Runs created before teams existed: make the implicit team explicit.
-                        run.config.team = [Some(run.config.worker), run.config.reviewer]
+                        // Runs created before teams existed: make the implicit team explicit
+                        // (a lead standing in as the default worker is no teammate).
+                        for id in [Some(run.config.worker), run.config.reviewer]
                             .into_iter()
                             .flatten()
-                            .collect();
+                        {
+                            let mate = self.store.get_agent(&AgentKey::Id(id)).await;
+                            if mate.is_ok_and(|m| m.role != Role::Planner) {
+                                run.config.team.push(id);
+                            }
+                        }
                     }
                     if !run.config.team.contains(&agent.id) {
                         run.config.team.push(agent.id);

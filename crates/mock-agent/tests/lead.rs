@@ -66,12 +66,18 @@ async fn the_lead_changes_the_run_branch_and_it_lands() {
     let lead = agent(&t, run["planner"].as_str().unwrap()).await;
     let cwd = lead["cwd"].as_str().unwrap();
     assert!(cwd.contains("integration"), "{lead}");
+    // With no worker given, tasks would go to copies of the lead: no teammates listed.
+    assert_eq!(run["config"]["team"], json!([]), "{run}");
     assert!(!repo.path().join("notes.txt").exists());
 
+    let open = || async { t.get("/v1/questions").await.text().await.unwrap() };
+    assert!(open().await.contains("等你落地"));
     let resp = t
         .post(&format!("/v1/runs/{id}/land"), json!({ "mode": "merge" }))
         .await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    // Landed: the note asking for it is cleared.
+    assert!(!open().await.contains("等你落地"));
     assert_eq!(
         std::fs::read_to_string(repo.path().join("notes.txt")).unwrap(),
         "from the lead"

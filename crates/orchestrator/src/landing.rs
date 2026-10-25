@@ -28,6 +28,9 @@ pub enum LandOutcome {
 /// Why a run did not land yet, while its sync task runs; cleared once it lands.
 const SYNC_NOTE_END: &str = "land again once it is merged";
 
+/// How a closing note says the result waits for the person; cleared once it lands.
+const AWAITING_LAND: &str = "等你落地";
+
 impl Orchestrator {
     /// The run the caller leads and is still open.
     async fn led_run(&self, caller: &Agent) -> Result<Run, CoreError> {
@@ -174,6 +177,15 @@ impl Orchestrator {
             landing: landing.clone(),
         })
         .await;
+        // The closing note asked the person to land; that is done now.
+        for item in self.store.list_human_items(true).await? {
+            if item.run_id == Some(id)
+                && item.kind == HumanItemKind::Notice
+                && item.text.contains(AWAITING_LAND)
+            {
+                self.dismiss_human(&item.id).await?;
+            }
+        }
         Ok(LandOutcome::Landed(landing))
     }
 
@@ -388,7 +400,7 @@ impl Orchestrator {
                 text.push_str(&format!("改动已直接写在 {}", run.repo.display()))
             }
             Some(l) => text.push_str(&format!("已落地到 {}（{}）", run.base_branch, l.reference)),
-            None if changed => text.push_str(&format!("结果在 {}，等你落地", run.branch)),
+            None if changed => text.push_str(&format!("结果在 {}，{AWAITING_LAND}", run.branch)),
             None => text.push_str("没有改动"),
         }
         let defaults = self.defaulted_decisions(id).await?;

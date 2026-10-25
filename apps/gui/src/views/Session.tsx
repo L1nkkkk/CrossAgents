@@ -83,6 +83,8 @@ export function SessionView({
     const gone = !!error && /not found/i.test(error);
     return (
       <section className="pane">
+        {/* The run page's header does not wait for the lead's conversation. */}
+        {header}
         <div className="page-inner">
           {gone ? (
             <div className="empty">
