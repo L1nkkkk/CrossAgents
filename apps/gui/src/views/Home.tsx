@@ -115,7 +115,7 @@ export function HomeView() {
   const [escalate, setEscalate] = useState("");
   const [reviewer, setReviewer] = useState("");
   const [maxParallel, setMaxParallel] = useState("");
-  const [preset, setPresetState] = useState<Preset>(() => load<Preset>(PRESET_KEY, "manual", (v) => v === "manual" || v === "semi" || v === "full"));
+  const [preset, setPresetState] = useState<Preset>(() => load<Preset>(PRESET_KEY, "manual", (v) => v === "manual" || v === "semi"));
   const [maxUsd, setMaxUsd] = useState("");
   const [maxMinutes, setMaxMinutes] = useState("");
   const [maxTokens, setMaxTokens] = useState("");
@@ -124,9 +124,10 @@ export function HomeView() {
   const [error, setError] = useState<string>();
   const ref = useRef<HTMLTextAreaElement>(null);
 
+  // 全托管 is picked anew each time: a risky choice never carries over (docs/tasks/W1.md §7).
   const setPreset = (p: Preset) => {
     setPresetState(p);
-    save(PRESET_KEY, p);
+    if (p !== "full") save(PRESET_KEY, p);
   };
   const choose = (lead: Lead) => {
     setPicked(lead);
@@ -512,7 +513,22 @@ export function HomeView() {
           </div>
         </div>
 
-        {missing && <p className="home-note">{missing}</p>}
+        {missing ? (
+          <p className="home-note">{missing}</p>
+        ) : (
+          mode === "run" && (
+            <p className="home-note">
+              {t(preset === "full" ? "home.whereFull" : "home.where")}
+              {preset !== "manual" && (
+                <button type="button" className="link" onClick={() => setOptions(true)}>
+                  {" · "}
+                  {PRESETS.find((p) => p.key === preset)?.label}
+                </button>
+              )}
+              {preset === "full" && !maxUsd && !maxMinutes && !maxTokens && <span className="warn-text"> · {t("home.noCaps")}</span>}
+            </p>
+          )
+        )}
 
         {mode === "run" && options && (
           <div className="card form home-options">
@@ -521,7 +537,7 @@ export function HomeView() {
                 <select value={preset} onChange={(e) => setPreset(e.target.value as Preset)} title={PRESETS.find((p) => p.key === preset)?.hint}>
                   {PRESETS.map((p) => (
                     <option key={p.key} value={p.key} title={p.hint}>
-                      {p.label}
+                      {p.key === "full" ? t("home.fullOnce") : p.label}
                     </option>
                   ))}
                 </select>
