@@ -217,9 +217,9 @@ fn direct(spec: LaunchSpec) -> Result<Launched, CoreError> {
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     hide_console(&mut command);
-    let mut child = command.spawn().map_err(|e| {
-        CoreError::Agent(format!("cannot start {}: {e}", spec.program.display()))
-    })?;
+    let mut child = command
+        .spawn()
+        .map_err(|e| CoreError::Agent(format!("cannot start {}: {e}", spec.program.display())))?;
     let pid = child.id();
     // The tree goes with the hub. Assigned right after the start: an agent does not start
     // children before reading its first input.

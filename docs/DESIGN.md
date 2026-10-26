@@ -352,9 +352,39 @@ Session（一个会话）
 ### 9.3 配置与挂载
 
 - Profile 指定驱动：`driver = "codex-native" | "claude-native" | "codebuddy-native" | "acp-generic"`，再加模型、账号、`env`（如 Claude Code 经 `ANTHROPIC_BASE_URL` 接 DeepSeek）。
-- ACP 插件来源与优先级不变：内置 < 插件目录 `~/.crossagents/plugins/<name>/plugin.toml` < `config.toml` 覆盖。
+- 协议留在代码里，协议以外的东西（去哪找 CLI、怎么装、模型与 effort 档位）写在 **agent 描述文件**里：内置三家在 `crates/plugins/agents/{claude,codex,codebuddy}.toml`（`include_str!` 编进 hub），外部 agent 放 `~/.crossagents/plugins/<name>/plugin.toml`，两者同一种格式。加一家 agent 不用改代码。
+- 来源与优先级：内置描述 < 插件目录 `plugin.toml` < `config.toml` 的 `[plugins.<name>]`。`locate` 与 `install` 按字段合并（只改其中一项也行），`command` / `models` / `driver` 等仍整体替换。
 - 协作工具挂载：开会话时把 `crossagents mcp`（带该会话的令牌）加入它的 MCP 列表；原生驱动用各家的 MCP 配置方式传入。
 - 账号隔离沿用 M5：每个账号一个独立的 `CODEX_HOME` / Claude 配置目录，凭据不出 hub 所在机器。
+
+描述文件里与协议无关的部分：
+
+```toml
+[locate]
+env = "CODEBUDDY_CLI"          # 可选：先看这个环境变量
+commands = ["codebuddy"]       # 在 PATH 里找
+paths = ["~/.local/bin/claude"]                 # 按顺序试
+bundled = ["%LOCALAPPDATA%/Claude-Data/*/claude-code/*/*/claude.exe"]
+shim = "node-script"           # codex-vendor | node-script
+version = ["--version"]
+
+[install]                      # 只用来显示，不执行
+hint = "npm install -g @tencent-ai/codebuddy-code"
+docs = "https://..."
+login = "then sign in once with `codebuddy` and `/login`"   # 拼进"没装"的报错
+notes = "The copy inside WorkBuddy cannot run outside the WorkBuddy app."
+label = "CodeBuddy"
+
+[models]
+fallback = ["opus", "sonnet", "haiku"]   # 就是原来的 models
+efforts = ["low", "medium", "high"]
+```
+
+`paths` / `bundled` / `commands` / `version` / `env` 都可以按系统给（`[locate.paths] windows = [...] macos = [...] linux = [...]`）。`paths` 支持 `~`、`%VAR%`、`$VAR` 和 `*`（一段目录），无扩展名的项在 Windows 上也会试 `.exe`；`bundled` 多个命中取修改时间最新的。
+
+**查找优先级**：`config.toml` 的 `native_command` > `locate.env` > `locate.commands`（PATH）> `locate.paths` > `locate.bundled`。命中后再过一次 `locate.shim`，因为有两件事路径表达不了：npm 的 `.cmd` / `.ps1` 外壳必须解到 vendor 里的真实二进制（`codex-vendor`，杀外壳会留下子进程），以及 npm 的 CodeBuddy 外壳要改成 `node <script>` 直接跑（`node-script`，否则 `--mcp-config` 的 JSON 过不了 `cmd.exe` 的引号）。shim 的名字写在描述里，逻辑留在代码里（`crates/drivers/src/locate.rs`）。
+
+**结果**统一成 `Located { argv, path, source, version }`（`crates/core/src/cli.rs`）：`source` 是 `config | env | path | native | bundled`；`Driver::installed()` 由它推出，三家驱动不再各自写查找逻辑。`GET /v1/plugins` 的 `PluginInfo.cli` 把它交给客户端（`installed`、`path`、`source`、`version`、`install_hint`、`docs`；新增可选字段，不升 `API_VERSION`）。版本用 `locate.version` 的命令取，5 秒超时，取到就缓存，取不到时 `version` 为空但仍算已安装——版本不该挡住 hub 启动和开会话。
 
 ### 9.4 跟上游
 

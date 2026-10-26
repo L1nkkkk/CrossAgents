@@ -75,19 +75,33 @@ pub fn resolve_program(program: &str) -> PathBuf {
 
 /// `program` as found on `PATH` (with the Windows executable extensions), else as given.
 pub fn find_in_path(program: &str) -> PathBuf {
+    find_in_path_in(program, None)
+}
+
+/// [`find_in_path`], looking in `dirs` instead of this process's `PATH` when one is given
+/// (tests run in parallel and must not touch the real environment).
+pub fn find_in_path_in(program: &str, dirs: Option<&[PathBuf]>) -> PathBuf {
     let path = PathBuf::from(program);
     if path.components().count() > 1 {
         return path;
     }
-    let Some(dirs) = std::env::var_os("PATH") else {
-        return path;
+    let inherited;
+    let dirs: &[PathBuf] = match dirs {
+        Some(dirs) => dirs,
+        None => {
+            let Some(value) = std::env::var_os("PATH") else {
+                return path;
+            };
+            inherited = std::env::split_paths(&value).collect::<Vec<_>>();
+            &inherited
+        }
     };
     let exts: &[&str] = if cfg!(windows) {
         &["exe", "cmd", "bat"]
     } else {
         &[""]
     };
-    for dir in std::env::split_paths(&dirs) {
+    for dir in dirs {
         for ext in exts {
             let candidate = if ext.is_empty() {
                 dir.join(program)

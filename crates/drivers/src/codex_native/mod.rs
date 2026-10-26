@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
-    AttachmentSupport, Capabilities, CoreError, Driver, DriverKind, DriverSession,
+    AttachmentSupport, Capabilities, CliStatus, CoreError, Driver, DriverKind, DriverSession,
     PermissionDecision, PermissionHandler, PermissionPolicy, Prompt, SessionEvent,
     SessionEventKind, SessionSpec, TurnOutcome,
 };
@@ -26,7 +26,7 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use self::wire::{ThreadSettings, TurnEnd, method};
 use crate::jsonrpc::{RpcError, RpcHandler, RpcPeer};
 use crate::launch::{self, LaunchSpec, Launched, ProcessHandle};
-use crate::process::find_in_path;
+use crate::locate::Cli;
 
 const INIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Control requests answer quickly; turns are awaited separately.
@@ -38,9 +38,13 @@ const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// The `codex-native` driver for one Profile.
 pub struct CodexNativeDriver {
     name: String,
+    /// The launch command as configured (`codex app-server` by default): `app-server` waits
+    /// for a program, which the description finds when a session starts.
     command: Vec<String>,
     models: Vec<String>,
     pool: tokio::sync::Mutex<HashMap<ProcessKey, Weak<AppServer>>>,
+    /// The CLI the description names, found once (docs/DESIGN.md §9.3).
+    cli: Cli,
 }
 
 /// Sessions with the same launch command and environment share a process.
@@ -51,21 +55,30 @@ struct ProcessKey {
 }
 
 impl CodexNativeDriver {
-    pub const DEFAULT_COMMAND: [&str; 2] = ["codex", "app-server"];
-
-    /// `command` launches the app-server; empty means `codex app-server`.
-    pub fn new(name: impl Into<String>, command: Vec<String>, models: Vec<String>) -> Self {
-        let command = if command.is_empty() {
-            Self::DEFAULT_COMMAND.map(String::from).to_vec()
+    /// `cli` is the description's CLI: `native_command` when it gives one, else the `codex`
+    /// it describes. `app-server` is added to the program.
+    pub fn new(name: impl Into<String>, cli: Cli, models: Vec<String>) -> Self {
+        let command = if cli.configured().is_empty() {
+            let program = cli
+                .default_name()
+                .or_else(|| cli.command().and_then(|argv| argv.into_iter().next()))
+                .unwrap_or_default();
+            vec![program, "app-server".into()]
         } else {
-            command
+            cli.configured().to_vec()
         };
         Self {
             name: name.into(),
             command,
             models,
             pool: tokio::sync::Mutex::default(),
+            cli,
         }
+    }
+
+    /// The CLI behind this driver, as this machine has it.
+    pub async fn status(&self) -> CliStatus {
+        self.cli.status().await
     }
 
     /// App-server processes currently running for this Profile.
@@ -88,7 +101,8 @@ impl CodexNativeDriver {
         {
             return Ok(server);
         }
-        let server = AppServer::spawn(&key, self.owner_of(&key)).await?;
+        let server =
+            AppServer::spawn(&key, self.cli.launch(&key.command), self.owner_of(&key)).await?;
         pool.insert(key, Arc::downgrade(&server));
         Ok(server)
     }
@@ -194,7 +208,11 @@ impl Driver for CodexNativeDriver {
     }
 
     fn installed(&self) -> bool {
-        locate_codex(&self.command[0]).is_file()
+        self.cli.installed()
+    }
+
+    async fn cli_status(&self) -> Option<CliStatus> {
+        Some(self.status().await)
     }
 
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError> {
@@ -271,13 +289,16 @@ struct AppServer {
 }
 
 impl AppServer {
-    async fn spawn(key: &ProcessKey, owner: String) -> Result<Arc<Self>, CoreError> {
-        let (program, args) = key
-            .command
+    async fn spawn(
+        key: &ProcessKey,
+        command: Vec<String>,
+        owner: String,
+    ) -> Result<Arc<Self>, CoreError> {
+        let (program, args) = command
             .split_first()
             .ok_or_else(|| CoreError::Agent("empty codex launch command".into()))?;
         let launched = launch::launch(LaunchSpec {
-            program: locate_codex(program),
+            program: PathBuf::from(program),
             args: args.to_vec(),
             env: key.env.clone(),
             // Not a session directory: on Windows a process's working directory cannot be
@@ -977,21 +998,6 @@ impl CodexSession {
     }
 }
 
-/// The native `codex` executable behind `program`. npm installs `codex` as a Node script
-/// (`codex.cmd` / `codex.ps1` on Windows) that starts the real binary as a child; killing
-/// the script would leave that child running, so we start the binary ourselves.
-/// Without a `codex` on `PATH`, the binary bundled with the Codex desktop app is used.
-pub fn locate_codex(program: &str) -> PathBuf {
-    let found = find_in_path(program);
-    if found.components().count() == 1
-        && program == "codex"
-        && let Some(bundled) = bundled_codex()
-    {
-        return bundled;
-    }
-    native_behind_shim(&found).unwrap_or(found)
-}
-
 /// `$CODEX_HOME`, else `~/.codex`.
 fn default_codex_home() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("CODEX_HOME") {
@@ -1026,81 +1032,6 @@ pub fn cached_models(home: &Path) -> Vec<String> {
     models.into_iter().map(|(_, slug)| slug).collect()
 }
 
-/// The newest `codex` the Codex desktop app keeps for itself.
-fn bundled_codex() -> Option<PathBuf> {
-    let candidates: Vec<PathBuf> = if cfg!(windows) {
-        // %LOCALAPPDATA%\OpenAI\Codex\bin\<build>\codex.exe
-        let bin = PathBuf::from(std::env::var_os("LOCALAPPDATA")?)
-            .join("OpenAI")
-            .join("Codex")
-            .join("bin");
-        std::fs::read_dir(bin)
-            .ok()?
-            .flatten()
-            .map(|e| e.path().join("codex.exe"))
-            .collect()
-    } else {
-        vec![PathBuf::from(
-            "/Applications/Codex.app/Contents/Resources/codex",
-        )]
-    };
-    candidates
-        .into_iter()
-        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
-        .max()
-        .map(|(_, p)| p)
-}
-
-fn native_behind_shim(found: &Path) -> Option<PathBuf> {
-    let ext = found
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_lowercase);
-    let package = if matches!(ext.as_deref(), Some("cmd" | "ps1" | "bat")) {
-        found
-            .parent()?
-            .join("node_modules")
-            .join("@openai")
-            .join("codex")
-    } else {
-        let real = std::fs::canonicalize(found).ok()?;
-        if real.file_name()? != "codex.js" {
-            return None;
-        }
-        real.parent()?.parent()?.to_path_buf()
-    };
-    let exe = if cfg!(windows) { "codex.exe" } else { "codex" };
-    let mut vendors = vec![package.join("vendor")];
-    // Platform packages: nested under the package, or hoisted next to it.
-    for scope in [
-        package.join("node_modules").join("@openai"),
-        package.parent()?.to_path_buf(),
-    ] {
-        let Ok(entries) = std::fs::read_dir(&scope) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().starts_with("codex-") {
-                vendors.push(entry.path().join("vendor"));
-            }
-        }
-    }
-    for vendor in vendors {
-        let Ok(triples) = std::fs::read_dir(&vendor) else {
-            continue;
-        };
-        for triple in triples.flatten() {
-            for dir in ["bin", "codex"] {
-                let candidate = triple.path().join(dir).join(exe);
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1116,25 +1047,5 @@ mod tests {
         ]});
         std::fs::write(home.path().join("models_cache.json"), cache.to_string()).unwrap();
         assert_eq!(cached_models(home.path()), ["first", "later"]);
-    }
-
-    #[test]
-    fn finds_the_binary_behind_an_npm_shim() {
-        let dir = tempfile::tempdir().unwrap();
-        let exe = if cfg!(windows) { "codex.exe" } else { "codex" };
-        let native = dir.path().join(
-            "node_modules/@openai/codex/node_modules/@openai/codex-test-x64/vendor/triple/bin",
-        );
-        std::fs::create_dir_all(&native).unwrap();
-        std::fs::write(native.join(exe), "").unwrap();
-        let shim = dir.path().join("codex.cmd");
-        std::fs::write(&shim, "").unwrap();
-        assert_eq!(native_behind_shim(&shim).unwrap(), native.join(exe));
-        // A real binary is used as is.
-        assert!(native_behind_shim(&native.join(exe)).is_none());
-        assert_eq!(
-            locate_codex(&native.join(exe).display().to_string()),
-            native.join(exe)
-        );
     }
 }

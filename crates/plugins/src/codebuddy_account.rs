@@ -47,7 +47,7 @@ pub struct CodebuddyAccounts {
 
 impl Default for CodebuddyAccounts {
     fn default() -> Self {
-        Self::new(codebuddy_native::default_command())
+        Self::new(crate::builtin::cli("codebuddy").and_then(|cli| cli.command()))
     }
 }
 

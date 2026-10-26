@@ -454,6 +454,39 @@ pub struct PluginInfo {
     /// Reasoning effort levels its agents may ask for, lowest first; empty when none.
     #[serde(default)]
     pub efforts: Vec<String>,
+    /// Where its CLI is on this machine, for native drivers; `None` for ACP agents
+    /// (docs/DESIGN.md §9.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cli: Option<CliInfo>,
+}
+
+/// Where a native driver's CLI is on this machine, and how to install it when it is not.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CliInfo {
+    pub installed: bool,
+    /// The file that was found: the CLI's own entry point, even when it is run through
+    /// `node`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub path: Option<String>,
+    /// Where it came from: `config`, `env`, `path`, `native` or `bundled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source: Option<String>,
+    /// What the CLI printed for its version; `None` when it did not answer in time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub version: Option<String>,
+    /// The command that installs it (shown, never run).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub install_hint: Option<String>,
+    /// Where to read more about installing and signing in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub docs: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

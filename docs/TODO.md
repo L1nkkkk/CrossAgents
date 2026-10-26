@@ -176,3 +176,16 @@ B3 远程开发：
 - [x] P1-6 统一项目规则：`CROSSAGENTS.md` → `AGENTS.md` → `CLAUDE.md`（从工作目录找到仓库根），注入给不会自己读该文件的 agent 的开场说明，各驱动按自家格式（Claude `--append-system-prompt`、Codex `developerInstructions`、ACP 首条消息）；Claude 设置源三档开关；mock 场景「Claude 设置源」
 - [x] P1-7 分级审批与权限：`PermissionPolicy::Guard`（Claude 走 `can_use_tool`、Codex `untrusted`），hub 判断危险动作（push、发布、改 CI、`rm -rf` 到工作目录外等）后以 `HumanAction::Approval` 问人，超时 / `human_ask=deny` 时拒绝；Work worker 默认守卫（run 策略 `approvals`），Chat 可在 `config.permission` 打开；API 三级权限与 403 `forbidden`；mock 场景「危险操作待批准」
 - [x] P1-8 可追溯的失败：`trace.rs` 从事件折叠出 run 的追溯（按 lead / 任务：轮次与出错、命令与退出码和输出尾巴、`workspace_run`、验收、改派、用量、首个失败）；`GET /v1/runs/{key}/trace`；`crossagents run trace <id> [--log]`（`--log` 读磁盘事件日志，hub 不在也能查）；run 页「追溯」节；mock 场景「失败追溯」
+
+## 十、agent 描述文件
+
+> 2026-10-26 第一轮：内置三家的硬编码迁到描述文件，hub 按描述扫描本机、Agents 页显示结果。格式与优先级见 [DESIGN.md](DESIGN.md) §9.3。
+
+- [x] 协议留在代码里，协议以外的写进 `plugin.toml`：内置三家在 `crates/plugins/agents/*.toml`（`include_str!` 编进 hub），外部 agent 同一种格式；`locate`（env / commands / paths / bundled / shim / version）、`install`（hint / docs / login / notes / label）、`[models]`（fallback / efforts）；每项都能按系统给。`manifest.rs` 不再只认 `protocol = "acp"`
+- [x] 查找统一成 `Located { argv, path, source, version }`（`crates/core/src/cli.rs`），三家驱动不再各写一套：`native_command` > `env` > `PATH` > 自家安装路径 > 桌面版自带，命中后按名字过 shim（`codex-vendor` 解 npm 外壳、`node-script` 改用 `node <script>`）；版本 5 秒超时、取到就缓存
+- [x] `PluginInfo.cli`（`installed` / `path` / `source` / `version` / `install_hint` / `docs`；新增可选字段，不升 `API_VERSION`），`bindings/` 已重新生成；设置 → 智能体页顶部「本机的 CLI」，显示 `2.1.304 · 原生安装`，悬停看完整路径，没装的给可复制的安装命令
+- [x] 迁移有据可查：描述文件与旧 `PluginConfig::claude()/codex()/codebuddy()` 逐字段相等的对照测试（迁完改成固定期望值）；本机三家迁移前后的 argv 逐字节相同
+- [ ] 安装按钮：按 `install.hint` 执行并把进度显示在 GUI（这一轮只显示、不执行）
+- [ ] 从 CLI 读模型列表：Codex 仍读 `models_cache.json`，其余家各自有列表接口后接进来
+- [ ] 描述文件里的账号段：登录方式、配置目录与环境变量也写进描述，加一家账号不用改 `*_account.rs`
+- [ ] 版本钉住与自下载 CLI（DESIGN §9.4 的"已验证范围"要靠它）

@@ -115,7 +115,10 @@ impl State {
 fn write_record(dir: &Path, record: &HostRecord) -> std::io::Result<()> {
     let path = record_path(dir, &record.id);
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(record).expect("record serializes"))?;
+    std::fs::write(
+        &tmp,
+        serde_json::to_vec_pretty(record).expect("record serializes"),
+    )?;
     std::fs::rename(tmp, path)
 }
 

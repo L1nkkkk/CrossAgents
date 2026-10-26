@@ -504,6 +504,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
  "uuid",
  "windows-sys 0.61.2",

@@ -1,0 +1,30 @@
+# Claude Code, the built-in agent (docs/DESIGN.md §9.3).
+#
+# `driver = "claude-native"` is its stream-json protocol (the one the Agent SDK speaks);
+# `acp-generic` goes through Anthropic's ACP adapter (`command` below, needs Node.js).
+# Everything outside the protocol is here: where the CLI is, how it is installed, its models
+# and effort levels.
+
+name = "claude"
+driver = "claude-native"
+model_env = "ANTHROPIC_MODEL"
+command = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
+
+[models]
+# `claude --model` takes these names.
+fallback = ["opus", "sonnet", "haiku"]
+efforts = ["low", "medium", "high", "xhigh", "max"]
+
+[locate]
+# `native_command` in `config.toml` wins over all of this.
+commands = ["claude"]
+# The native installer (`claude.ai/install.sh`) puts it beside the user's own programs.
+paths = ["~/.local/bin/claude"]
+# The Claude desktop app keeps a copy per build; the newest one is used.
+bundled = ["%LOCALAPPDATA%/Claude-Data/*/claude-code/*/*/claude.exe"]
+version = ["--version"]
+
+[install]
+label = "Claude Code"
+hint = "npm install -g @anthropic-ai/claude-code"
+docs = "https://docs.claude.com/en/docs/claude-code/setup"

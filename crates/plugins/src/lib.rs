@@ -1,9 +1,14 @@
 //! Profiles (still called plugins in the API and config) and the drivers that run them
 //! (docs/DESIGN.md §9).
 //!
-//! A plugin entry names an agent and how to reach it. Without a `driver` it is an ACP
-//! agent (`acp-generic`), which is what every configuration written before drivers existed
-//! means. Any ACP agent can be registered from `config.toml` without code:
+//! A plugin entry names an agent and how to reach it. The built-in agents are description
+//! files under `agents/`, compiled in ([`builtin`]): where their CLI is, how it is installed,
+//! its models. An agent of your own uses the same format, dropped in as a directory with a
+//! manifest ([`manifest`]) or added in `config.toml`; no code changes.
+//!
+//! Without a `driver` a plugin is an ACP agent (`acp-generic`), which is what every
+//! configuration written before drivers existed means. Any ACP agent can be registered from
+//! `config.toml` without code:
 //!
 //! ```toml
 //! [plugins.gemini]
@@ -13,9 +18,9 @@
 //! driver = "acp-generic"    # use the codex-acp adapter instead of `codex app-server`
 //! ```
 //!
-//! or dropped in as a directory with a manifest, see [`manifest`]. An agent can pick
-//! another driver than its plugin's default through its own `driver` field.
+//! An agent can pick another driver than its plugin's default through its own `driver` field.
 
+pub mod builtin;
 pub mod claude_account;
 pub mod codebuddy_account;
 pub mod codex_account;
@@ -30,6 +35,7 @@ use crossagents_drivers::acp::AcpDriver;
 use crossagents_drivers::claude_native::ClaudeNativeDriver;
 use crossagents_drivers::codebuddy_native::CodebuddyNativeDriver;
 use crossagents_drivers::codex_native::CodexNativeDriver;
+use crossagents_drivers::locate::{Cli, Install, Locator};
 use serde::Deserialize;
 
 /// A plugin entry in `config.toml`. For a built-in plugin it overrides the launch commands
@@ -56,6 +62,12 @@ pub struct PluginConfig {
     /// first; empty when it has none. Composers offer exactly these.
     #[serde(default)]
     pub efforts: Vec<String>,
+    /// Where the CLI is, for the native drivers (docs/DESIGN.md §9.3).
+    #[serde(default)]
+    pub locate: Locator,
+    /// What installing it takes; shown, never run.
+    #[serde(default)]
+    pub install: Install,
 }
 
 impl PluginConfig {
@@ -63,62 +75,13 @@ impl PluginConfig {
         self.driver.unwrap_or_default()
     }
 
-    /// Claude Code: its stream-json protocol by default; Anthropic's ACP adapter (needs
-    /// Node.js) with `driver = "acp-generic"`.
-    pub fn claude() -> Self {
-        Self {
-            command: npx("@agentclientprotocol/claude-agent-acp"),
-            driver: Some(DriverKind::ClaudeNative),
-            models: vec!["opus".into(), "sonnet".into(), "haiku".into()],
-            efforts: vec![
-                "low".into(),
-                "medium".into(),
-                "high".into(),
-                "xhigh".into(),
-                "max".into(),
-            ],
-            // Claude Code reads its model from here; the ACP model option is the other half.
-            model_env: Some("ANTHROPIC_MODEL".into()),
-            ..Self::default()
-        }
-    }
-
-    /// OpenAI Codex: `codex app-server` by default; the codex-acp adapter with
-    /// `driver = "acp-generic"`.
-    pub fn codex() -> Self {
-        Self {
-            command: npx("@agentclientprotocol/codex-acp"),
-            driver: Some(DriverKind::CodexNative),
-            efforts: vec!["low".into(), "medium".into(), "high".into()],
-            ..Self::default()
-        }
-    }
-
-    /// WorkBuddy's CodeBuddy CLI: its stream-json protocol by default (the same one Claude
-    /// Code speaks), the standalone CLI found on `PATH` when no command is given. Models are
-    /// the ids `codebuddy --model` accepts; any id the installed CLI knows can be used.
-    pub fn codebuddy() -> Self {
-        Self {
-            driver: Some(DriverKind::CodebuddyNative),
-            models: vec![
-                "default-model".into(),
-                "hy4-preview".into(),
-                "hy3".into(),
-                "deepseek-v4.1-flash".into(),
-                "glm-5.3".into(),
-                "kimi-k3-1".into(),
-            ],
-            // `codebuddy --effort`.
-            efforts: vec![
-                "minimal".into(),
-                "low".into(),
-                "medium".into(),
-                "high".into(),
-                "xhigh".into(),
-                "max".into(),
-            ],
-            ..Self::default()
-        }
+    /// The CLI this entry launches, found once it is first asked for.
+    pub fn cli(&self) -> Cli {
+        Cli::new(
+            self.native_command.clone(),
+            self.locate.clone(),
+            self.install.clone(),
+        )
     }
 
     /// A built-in adjusted by its `config.toml` entry: launch commands, driver, models and
@@ -143,12 +106,14 @@ impl PluginConfig {
         if !over.models.is_empty() {
             self.models = over.models.clone();
         }
+        if !over.locate.is_empty() {
+            self.locate.merge(&over.locate);
+        }
+        if !over.install.is_empty() {
+            self.install.merge(&over.install);
+        }
         self
     }
-}
-
-fn npx(package: &str) -> Vec<String> {
-    vec!["npx".into(), "-y".into(), package.into()]
 }
 
 /// A driver for an agent, with a note when it is not the one asked for.
@@ -204,17 +169,17 @@ impl Profile {
             }
             DriverKind::CodexNative => Arc::new(CodexNativeDriver::new(
                 &self.name,
-                self.config.native_command.clone(),
+                self.config.cli(),
                 self.config.models.clone(),
             )),
             DriverKind::ClaudeNative => Arc::new(ClaudeNativeDriver::new(
                 &self.name,
-                self.config.native_command.clone(),
+                self.config.cli(),
                 self.config.models.clone(),
             )),
             DriverKind::CodebuddyNative => Arc::new(CodebuddyNativeDriver::new(
                 &self.name,
-                self.config.native_command.clone(),
+                self.config.cli(),
                 self.config.models.clone(),
             )),
         };
@@ -233,14 +198,10 @@ impl PluginRegistry {
     /// The built-in plugins, adjusted and extended by `config.toml` entries.
     pub fn with_config(configs: &BTreeMap<String, PluginConfig>) -> Self {
         let mut registry = Self::default();
-        for (name, builtin) in [
-            ("claude", PluginConfig::claude()),
-            ("codex", PluginConfig::codex()),
-            ("codebuddy", PluginConfig::codebuddy()),
-        ] {
+        for (name, built_in) in builtin::all() {
             let config = match configs.get(name) {
-                Some(over) => builtin.overlay(over),
-                None => builtin,
+                Some(over) => built_in.clone().overlay(over),
+                None => built_in.clone(),
             };
             let pinned = configs.get(name).is_some_and(|c| !c.models.is_empty());
             registry.insert(name, config, pinned);
@@ -329,6 +290,73 @@ impl PluginRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fixed point of the migration (2026-10-26): field by field, what
+    /// `PluginConfig::claude()/codex()/codebuddy()` returned before they went away. A change
+    /// here changes behaviour, not formatting.
+    #[test]
+    fn the_built_in_descriptions_say_what_the_functions_said() {
+        assert_eq!(builtin::all().len(), 3);
+
+        let claude = builtin::config("claude").unwrap();
+        assert_eq!(
+            claude.command,
+            ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
+        );
+        assert_eq!(claude.models, ["opus", "sonnet", "haiku"]);
+        assert_eq!(claude.efforts, ["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(claude.model_env.as_deref(), Some("ANTHROPIC_MODEL"));
+        assert_eq!(claude.driver, Some(DriverKind::ClaudeNative));
+        assert!(claude.native_command.is_empty());
+
+        let codex = builtin::config("codex").unwrap();
+        assert_eq!(
+            codex.command,
+            ["npx", "-y", "@agentclientprotocol/codex-acp"]
+        );
+        assert!(codex.models.is_empty());
+        assert_eq!(codex.efforts, ["low", "medium", "high"]);
+        assert_eq!(codex.model_env, None);
+        assert_eq!(codex.driver, Some(DriverKind::CodexNative));
+        assert!(codex.native_command.is_empty());
+
+        let codebuddy = builtin::config("codebuddy").unwrap();
+        assert!(codebuddy.command.is_empty());
+        assert_eq!(
+            codebuddy.models,
+            [
+                "default-model",
+                "hy4-preview",
+                "hy3",
+                "deepseek-v4.1-flash",
+                "glm-5.3",
+                "kimi-k3-1"
+            ]
+        );
+        assert_eq!(
+            codebuddy.efforts,
+            ["minimal", "low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(codebuddy.driver, Some(DriverKind::CodebuddyNative));
+        assert!(codebuddy.native_command.is_empty());
+        // The copy inside WorkBuddy is never looked for: nowhere to point at.
+        assert!(codebuddy.locate.paths.is_empty());
+        assert!(codebuddy.locate.bundled.is_empty());
+    }
+
+    /// What a session gets from a CodeBuddy that is not installed: the description's install
+    /// hint, how to sign in, and why not WorkBuddy's copy -- the sentence the driver used to
+    /// hard-code, word for word.
+    #[test]
+    fn codebuddy_says_how_to_install_itself() {
+        let cli = builtin::cli("codebuddy").unwrap();
+        assert_eq!(
+            cli.missing_message("codebuddy").unwrap(),
+            "the CodeBuddy CLI is not installed: run `npm install -g @tencent-ai/codebuddy-code`, \
+             then sign in once with `codebuddy` and `/login` (or set CODEBUDDY_API_KEY). \
+             The copy inside WorkBuddy cannot run outside the WorkBuddy app."
+        );
+    }
 
     #[test]
     fn config_overrides_builtins_and_adds_plugins() {

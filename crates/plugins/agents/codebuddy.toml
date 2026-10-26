@@ -1,0 +1,40 @@
+# WorkBuddy's CodeBuddy CLI, the built-in agent (docs/DESIGN.md §9.3).
+#
+# It speaks the same stream-json control protocol as Claude Code, so `codebuddy-native` runs
+# on `claude-native`'s implementation; what this description adds is the program to launch,
+# the models it accepts, and what installing it takes.
+#
+# The standalone CLI is required (`npm install -g @tencent-ai/codebuddy-code`), signed in once
+# with `/login` or given `CODEBUDDY_API_KEY`. The copy inside WorkBuddy is deliberately not
+# listed anywhere: it is a build without the interactive CLI or `/login`, and it only gets
+# credentials from the WorkBuddy app that launches it, so on its own it waits forever.
+
+name = "codebuddy"
+driver = "codebuddy-native"
+
+[models]
+# The ids `codebuddy --model` accepts; any id the installed CLI knows can be used.
+fallback = [
+    "default-model",
+    "hy4-preview",
+    "hy3",
+    "deepseek-v4.1-flash",
+    "glm-5.3",
+    "kimi-k3-1",
+]
+efforts = ["minimal", "low", "medium", "high", "xhigh", "max"]
+
+[locate]
+env = "CODEBUDDY_CLI"
+commands = ["codebuddy"]
+# npm's `codebuddy.cmd` runs the CLI through `node`; so do we, which keeps the JSON of
+# `--mcp-config` away from `cmd.exe`'s quoting.
+shim = "node-script"
+version = ["--version"]
+
+[install]
+label = "CodeBuddy"
+hint = "npm install -g @tencent-ai/codebuddy-code"
+login = "then sign in once with `codebuddy` and `/login` (or set CODEBUDDY_API_KEY)"
+notes = "The copy inside WorkBuddy cannot run outside the WorkBuddy app."
+docs = "https://www.codebuddy.ai/"

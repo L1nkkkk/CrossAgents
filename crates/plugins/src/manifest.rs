@@ -1,21 +1,44 @@
-//! External plugins: `<home>/plugins/<name>/plugin.toml` (docs/DESIGN.md §9.3).
+//! Agents as description files: `<home>/plugins/<name>/plugin.toml`, and the built-ins in
+//! `agents/*.toml` (docs/DESIGN.md §9.3).
 //!
 //! ```toml
 //! name = "gemini"
-//! protocol = "acp"
-//! command = ["gemini", "--experimental-acp"]
-//! models = ["gemini-3-pro", "gemini-3-flash"]
+//! protocol = "acp"                  # or "native"
+//! command = ["gemini", "--experimental-acp"]     # ACP launch command
 //! # driver = "acp-generic"          # the default
-//! # native_command = [...]          # launch command for a native driver
-//! # efforts = ["low", "high"]      # reasoning effort levels (native drivers pass them on)
+//! # native_command = [...]           # launch command, overriding everything below
+//! # models = ["gemini-3-pro"]        # or the [models] section
+//! # efforts = ["low", "high"]        # reasoning effort levels
+//!
+//! [models]
+//! fallback = ["gemini-3-pro", "gemini-3-flash"]
+//! efforts = ["low", "high"]
+//!
+//! [locate]
+//! env = "GEMINI_CLI"                # checked first, after native_command
+//! commands = ["gemini"]             # then PATH
+//! paths = ["~/.local/bin/gemini"]   # then the vendor's own install locations
+//! bundled = ["%LOCALAPPDATA%/Gemini/bin/*/gemini.exe"]   # then another app's copy
+//! shim = "node-script"              # how to see through an npm wrapper
+//! version = ["--version"]
+//!
+//! [locate.paths]                    # any of them per system
+//! windows = ["%LOCALAPPDATA%/Gemini/bin/gemini.exe"]
+//! macos = ["/usr/local/bin/gemini"]
+//!
+//! [install]
+//! hint = "npm install -g @google/gemini-cli"
+//! docs = "https://..."
 //! ```
 //!
 //! Without a `driver` the plugin protocol is ACP: any executable that speaks it can be a
-//! plugin.
+//! plugin. A native driver needs no ACP command, but its `locate` section then says where its
+//! CLI is.
 
 use std::path::{Path, PathBuf};
 
 use crossagents_core::DriverKind;
+use crossagents_drivers::locate::{Install, Locator};
 use serde::Deserialize;
 
 use crate::PluginConfig;
@@ -29,15 +52,42 @@ struct Manifest {
     protocol: String,
     #[serde(default)]
     command: Vec<String>,
+    /// The model list: `models = [...]`, or the `[models]` section below.
     #[serde(default)]
-    models: Vec<String>,
+    models: Models,
     #[serde(default)]
     model_env: Option<String>,
     #[serde(default)]
     driver: Option<DriverKind>,
     #[serde(default)]
     native_command: Vec<String>,
+    /// Effort levels, when they are given beside `models` rather than in its section.
     #[serde(default)]
+    efforts: Vec<String>,
+    #[serde(default)]
+    locate: Locator,
+    #[serde(default)]
+    install: Install,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Models {
+    List(Vec<String>),
+    Section(ModelSection),
+}
+
+impl Default for Models {
+    fn default() -> Self {
+        Self::List(Vec::new())
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ModelSection {
+    /// What the CLI accepts; the same as the flat `models` list.
+    fallback: Vec<String>,
     efforts: Vec<String>,
 }
 
@@ -60,7 +110,14 @@ pub fn load_dir(dir: &Path) -> (Vec<(String, PluginConfig)>, Vec<String>) {
     dirs.sort();
     for plugin_dir in dirs {
         let path = plugin_dir.join(MANIFEST);
-        match load_one(&plugin_dir, &path) {
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) => {
+                warnings.push(format!("{}: {err}", path.display()));
+                continue;
+            }
+        };
+        match parse_in(&text, &path.display().to_string(), Some(&plugin_dir)) {
             Ok(entry) => plugins.push(entry),
             Err(err) => warnings.push(format!("{}: {err}", path.display())),
         }
@@ -68,12 +125,20 @@ pub fn load_dir(dir: &Path) -> (Vec<(String, PluginConfig)>, Vec<String>) {
     (plugins, warnings)
 }
 
-fn load_one(plugin_dir: &Path, path: &Path) -> Result<(String, PluginConfig), String> {
-    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let manifest: Manifest = toml::from_str(&text).map_err(|e| e.to_string())?;
-    if manifest.protocol != "acp" {
+/// One manifest, without a directory of its own (the built-in descriptions).
+pub(crate) fn parse(text: &str, origin: &str) -> Result<(String, PluginConfig), String> {
+    parse_in(text, origin, None)
+}
+
+fn parse_in(
+    text: &str,
+    origin: &str,
+    plugin_dir: Option<&Path>,
+) -> Result<(String, PluginConfig), String> {
+    let manifest: Manifest = toml::from_str(text).map_err(|e| e.to_string())?;
+    if !matches!(manifest.protocol.as_str(), "acp" | "native") {
         return Err(format!(
-            "unsupported protocol {:?} (only \"acp\")",
+            "unsupported protocol {:?} (only \"acp\" and \"native\")",
             manifest.protocol
         ));
     }
@@ -84,6 +149,17 @@ fn load_one(plugin_dir: &Path, path: &Path) -> Result<(String, PluginConfig), St
     if driver == DriverKind::AcpGeneric && manifest.command.is_empty() {
         return Err("command is empty".into());
     }
+    let (models, efforts) = match manifest.models {
+        Models::List(models) => (models, manifest.efforts),
+        Models::Section(section) => {
+            let efforts = if section.efforts.is_empty() {
+                manifest.efforts
+            } else {
+                section.efforts
+            };
+            (section.fallback, efforts)
+        }
+    };
     let mut command = manifest.command;
     let mut native_command = manifest.native_command;
     for program in [command.first_mut(), native_command.first_mut()]
@@ -91,19 +167,25 @@ fn load_one(plugin_dir: &Path, path: &Path) -> Result<(String, PluginConfig), St
         .flatten()
     {
         // A relative path with a directory part points inside the plugin.
-        if (program.contains('/') || program.contains('\\')) && Path::new(program).is_relative() {
-            *program = plugin_dir.join(&*program).display().to_string();
+        if (program.contains('/') || program.contains('\\'))
+            && Path::new(program).is_relative()
+            && let Some(dir) = plugin_dir
+        {
+            *program = dir.join(&*program).display().to_string();
         }
     }
+    tracing::debug!(origin, name = manifest.name, "agent description");
     Ok((
         manifest.name,
         PluginConfig {
             command,
-            models: manifest.models,
+            models,
             model_env: manifest.model_env,
             driver: manifest.driver,
             native_command,
-            efforts: manifest.efforts,
+            efforts,
+            locate: manifest.locate,
+            install: manifest.install,
         },
     ))
 }
@@ -165,7 +247,7 @@ mod tests {
         write(
             dir.path(),
             "cx",
-            "name = \"cx\"\ndriver = \"codex-native\"\nnative_command = [\"./bin/codex\", \"app-server\"]\nefforts = [\"low\", \"high\"]\n",
+            "name = \"cx\"\nprotocol = \"native\"\ndriver = \"codex-native\"\nnative_command = [\"./bin/codex\", \"app-server\"]\nefforts = [\"low\", \"high\"]\n",
         );
         write(dir.path(), "acp", "name = \"acp\"\n");
         let (plugins, warnings) = load_dir(dir.path());
@@ -176,5 +258,55 @@ mod tests {
         assert!(Path::new(&config.native_command[0]).is_absolute());
         assert_eq!(config.efforts, ["low", "high"]);
         assert!(warnings[0].contains("command is empty"), "{warnings:?}");
+    }
+
+    #[test]
+    fn the_models_section_holds_the_list_and_the_efforts() {
+        let config: Manifest = toml::from_str(
+            "name = \"m\"\n[models]\nfallback = [\"a\", \"b\"]\nefforts = [\"low\"]\n",
+        )
+        .unwrap();
+        let (models, efforts) = match config.models {
+            Models::Section(section) => (section.fallback, section.efforts),
+            Models::List(_) => panic!("a section"),
+        };
+        assert_eq!(models, ["a", "b"]);
+        assert_eq!(efforts, ["low"]);
+        // The flat list still works, and so do efforts beside it.
+        let flat: Manifest =
+            toml::from_str("name = \"m\"\nmodels = [\"a\"]\nefforts = [\"high\"]\n").unwrap();
+        assert!(matches!(flat.models, Models::List(_)));
+        assert_eq!(flat.efforts, ["high"]);
+    }
+
+    #[test]
+    fn a_description_can_say_where_its_cli_is() {
+        let (name, config) = parse(
+            r#"
+            name = "demo"
+            driver = "codebuddy-native"
+            [locate]
+            env = "DEMO_CLI"
+            commands = ["demo"]
+            shim = "node-script"
+            version = ["--version"]
+            [locate.paths]
+            windows = ["%LOCALAPPDATA%/demo/demo.exe"]
+            macos = ["/usr/local/bin/demo"]
+            [install]
+            hint = "npm install -g demo"
+            "#,
+            "test",
+        )
+        .unwrap();
+        assert_eq!(name, "demo");
+        assert_eq!(config.locate.shim.as_deref(), Some("node-script"));
+        assert_eq!(
+            config.locate.env.get().map(String::as_str),
+            Some("DEMO_CLI")
+        );
+        assert!(config.locate.paths.get_for("windows").is_some());
+        assert!(config.locate.paths.get_for("linux").is_none());
+        assert_eq!(config.install.hint.as_deref(), Some("npm install -g demo"));
     }
 }

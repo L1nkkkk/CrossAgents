@@ -30,8 +30,8 @@ type ScanEntry = (SystemTime, u64, Option<SessionUsage>);
 type LiveEntry = (Instant, AccountStatus, Vec<ModelInfo>);
 
 pub struct ClaudeAccounts {
-    /// How to run Claude Code (`claude`, found like the driver finds it).
-    program: String,
+    /// The Claude Code program, resolved where the description says to look for it.
+    program: PathBuf,
     live: Mutex<HashMap<PathBuf, LiveEntry>>,
     scanned: Mutex<HashMap<PathBuf, ScanEntry>>,
 }
@@ -44,8 +44,12 @@ impl Default for ClaudeAccounts {
 
 impl ClaudeAccounts {
     pub fn new(program: impl Into<String>) -> Self {
+        let program = program.into();
+        let program = crate::builtin::locator("claude")
+            .map(|locator| locator.locate_program(&program))
+            .unwrap_or_else(|| PathBuf::from(&program));
         Self {
-            program: program.into(),
+            program,
             live: Mutex::default(),
             scanned: Mutex::default(),
         }
@@ -344,9 +348,12 @@ impl AccountProvider for ClaudeAccounts {
     }
 
     fn login_command(&self, account: &Account) -> LoginCommand {
-        let program = claude_native::locate_claude(&self.program);
         LoginCommand {
-            command: vec![program.display().to_string(), "auth".into(), "login".into()],
+            command: vec![
+                self.program.display().to_string(),
+                "auth".into(),
+                "login".into(),
+            ],
             env: system_proxy_env()
                 .into_iter()
                 .chain(self.env_for(account))

@@ -5,6 +5,7 @@
 pub mod account;
 pub mod attachment;
 pub mod bus;
+pub mod cli;
 pub mod driver;
 pub mod error;
 pub mod event;
@@ -26,6 +27,7 @@ pub use account::{
 };
 pub use attachment::{Attachment, AttachmentKind, AttachmentSupport, Prompt};
 pub use bus::EventBus;
+pub use cli::{CliSource, CliStatus, Located};
 pub use driver::{
     Capabilities, ContextPart, Driver, DriverKind, DriverSession, ExitCause, FileChange,
     McpServerSpec, OutputStream, PermissionDecision, PermissionHandler, PermissionPolicy,

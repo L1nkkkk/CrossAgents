@@ -15,4 +15,5 @@ pub mod codex_native;
 pub mod host;
 pub mod jsonrpc;
 pub mod launch;
+pub mod locate;
 pub mod process;

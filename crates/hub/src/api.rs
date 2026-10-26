@@ -19,9 +19,9 @@ use chrono::{DateTime, Utc};
 use crossagents_api_types::{
     API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentSettingsRequest,
     AnswerRequest, ApiError, ApproveRunRequest, ArchiveAgentRequest, AttachmentContent,
-    ChangesResponse, ConnectInfo, CreateAccountRequest, CreateAgentRequest, CreateRunRequest,
-    DiffSide, ErrorCode, FinishRequest, HealthResponse, HubInfo, InitRepoRequest, LandRequest,
-    ListAccountsResponse, ListAgentsResponse, ListNotesResponse, ListPluginsResponse,
+    ChangesResponse, CliInfo, ConnectInfo, CreateAccountRequest, CreateAgentRequest,
+    CreateRunRequest, DiffSide, ErrorCode, FinishRequest, HealthResponse, HubInfo, InitRepoRequest,
+    LandRequest, ListAccountsResponse, ListAgentsResponse, ListNotesResponse, ListPluginsResponse,
     ListQuestionsResponse, ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo,
     QuotaResponse, RejectRunRequest, RenameAgentRequest, RunDetail, RunTrace, SendMessageRequest,
     SendMessageResponse, SetModelRequest, SetPluginModelsRequest, SetTopicRequest,
@@ -864,6 +864,23 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
     } else {
         Vec::new()
     };
+    let cli = d.cli_status().await.map(|status| CliInfo {
+        installed: status.located.is_some(),
+        path: status
+            .located
+            .as_ref()
+            .map(|located| located.path.display().to_string()),
+        source: status
+            .located
+            .as_ref()
+            .map(|located| located.source.as_str().to_owned()),
+        version: status
+            .located
+            .as_ref()
+            .and_then(|located| located.version.clone()),
+        install_hint: status.install_hint,
+        docs: status.docs,
+    });
     PluginInfo {
         name: name.to_owned(),
         models,
@@ -880,6 +897,7 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
                 .map(|c| c.efforts.clone())
                 .unwrap_or_default(),
         },
+        cli,
     }
 }
 

@@ -5,12 +5,14 @@ import { api, errorText } from "../api";
 import {
   AVATAR_COLORS,
   Avatar,
+  CopyCommand,
   ErrorBox,
   Field,
   Prose,
   ROLE_HUE,
   StatusChip,
   Vendor,
+  VendorMark,
   agentTitle,
   agentTone,
   displayName,
@@ -20,6 +22,7 @@ import {
 import { useHubData } from "../hub";
 import { useArmed } from "../parts";
 import { ConnectExternal, ConnectInstructions } from "./External";
+import { vendorLabel } from "../lib/models";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
 
 /**
@@ -39,6 +42,7 @@ export function AgentsPage() {
       <p className="settings-lead">
         这里列出 hub 里所有的 agent。不用手动组队：Chat 里的 agent 会按需要自己找帮手，也可以在消息里用 @ 点名；Work 的主导 agent 会自己招人。改名、换头像和人设也可以在会话里点头像。
       </p>
+      <VendorClis />
       <div className="row">
         <span className="chip">{list.length} 个</span>
         <div className="spacer" />
@@ -77,6 +81,65 @@ export function AgentsPage() {
         )}
       </div>
     </div>
+  );
+}
+
+/** Where a CLI came from, as `PluginInfo.cli.source` names it. */
+const CLI_SOURCE: Record<string, string> = {
+  config: "配置指定",
+  env: "环境变量",
+  path: "PATH",
+  native: "原生安装",
+  bundled: "桌面版自带",
+};
+
+/**
+ * The agent CLIs this machine has (docs/DESIGN.md §9.3): each vendor's version and where its
+ * program came from, or the command that installs it. A CLI the hub cannot find is why an
+ * agent fails to start, so it is said here rather than at the first message.
+ */
+function VendorClis() {
+  const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], (e) => e.type.startsWith("account."));
+  const list = (plugins.data ?? []).filter((p) => p.cli);
+  if (!list.length) return null;
+  const installed = list.filter((p) => p.cli?.installed).length;
+  return (
+    <section className="settings-section">
+      <div className="settings-head">
+        <h2>本机的 CLI</h2>
+        <span className="chip">
+          {installed} / {list.length} 已安装
+        </span>
+      </div>
+      <ErrorBox error={plugins.error} />
+      <div className="setting-card">
+        {list.map((p) => {
+          const cli = p.cli!;
+          return (
+            <div className="setting-line" key={p.name}>
+              <div className="model-name">
+                <div className="setting-label">
+                  <VendorMark plugin={p.name} size={16} />
+                  {vendorLabel(p.name)}
+                </div>
+                <div className="setting-hint" title={cli.path ?? undefined}>
+                  {cli.installed
+                    ? `${cli.version ?? "版本未知"} · ${CLI_SOURCE[cli.source ?? ""] ?? cli.source ?? "来源未知"}`
+                    : "没装"}
+                </div>
+              </div>
+              {cli.installed
+                ? cli.docs && (
+                    <a href={cli.docs} target="_blank" rel="noreferrer" className="small">
+                      文档
+                    </a>
+                  )
+                : cli.install_hint && <CopyCommand command={cli.install_hint} />}
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 

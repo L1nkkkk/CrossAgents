@@ -19,14 +19,17 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use crossagents_core::{Capabilities, CoreError, Driver, DriverKind, DriverSession, SessionSpec};
+use crossagents_core::{
+    Capabilities, CliStatus, CoreError, Driver, DriverKind, DriverSession, SessionSpec,
+};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 use crate::claude_native::ClaudeNativeDriver;
 use crate::claude_native::wire::{self, Flavor};
-use crate::process::{check_proxy, find_in_path, hide_console, system_proxy_env};
+use crate::locate::Cli;
+use crate::process::{check_proxy, hide_console, system_proxy_env};
 
 /// How long [`probe`] waits for the CLI to answer `initialize`.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -34,24 +37,23 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 /// The `codebuddy-native` driver for one Profile.
 pub struct CodebuddyNativeDriver {
     inner: ClaudeNativeDriver,
-    /// No command was configured and no CLI was found: sessions cannot start.
-    missing: bool,
+    /// What to say when a session is asked of a CLI this machine does not have.
+    missing: Option<String>,
 }
 
 impl CodebuddyNativeDriver {
-    /// `command` launches the CLI — `codebuddy`, or `node <script>`. Empty means
-    /// [`default_command`]. The stream-json arguments are added to it.
-    pub fn new(name: impl Into<String>, command: Vec<String>, models: Vec<String>) -> Self {
-        let (command, missing) = if command.is_empty() {
-            match default_command() {
-                Some(found) => (found, false),
-                None => (vec!["codebuddy".into()], true),
-            }
+    /// `cli` is the description's CLI: `CODEBUDDY_CLI` when it is set, else `codebuddy` on
+    /// `PATH` (run through `node` when npm installed it as a `.cmd` wrapper). The
+    /// stream-json arguments are added to it.
+    pub fn new(name: impl Into<String>, cli: Cli, models: Vec<String>) -> Self {
+        let name = name.into();
+        let missing = if cli.installed() {
+            None
         } else {
-            (command, false)
+            cli.missing_message(&name)
         };
         Self {
-            inner: ClaudeNativeDriver::with_flavor(name, command, models, Flavor::Codebuddy),
+            inner: ClaudeNativeDriver::with_flavor(name, cli, models, Flavor::Codebuddy),
             missing,
         }
     }
@@ -59,13 +61,12 @@ impl CodebuddyNativeDriver {
     /// Refuses a session no CLI can run, saying what to install, instead of failing to
     /// spawn `codebuddy`.
     fn check(&self, spec: &SessionSpec) -> Result<(), CoreError> {
-        if self.missing && spec.command.is_none() {
-            return Err(CoreError::Agent(
-                "the CodeBuddy CLI is not installed: run `npm install -g @tencent-ai/codebuddy-code`, \
-                 then sign in once with `codebuddy` and `/login` (or set CODEBUDDY_API_KEY). \
-                 The copy inside WorkBuddy cannot run outside the WorkBuddy app."
-                    .into(),
-            ));
+        if self.missing.is_some() && spec.command.is_none() {
+            let message = self
+                .missing
+                .clone()
+                .unwrap_or_else(|| format!("the {} CLI is not installed", self.inner.name()));
+            return Err(CoreError::Agent(message));
         }
         Ok(())
     }
@@ -90,7 +91,11 @@ impl Driver for CodebuddyNativeDriver {
     }
 
     fn installed(&self) -> bool {
-        !self.missing
+        self.inner.installed()
+    }
+
+    async fn cli_status(&self) -> Option<CliStatus> {
+        Some(self.inner.status().await)
     }
 
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError> {
@@ -115,41 +120,6 @@ impl Driver for CodebuddyNativeDriver {
     ) -> Result<Option<Box<dyn DriverSession>>, CoreError> {
         self.inner.adopt(session_id, turn_running, spec).await
     }
-}
-
-/// The CodeBuddy CLI to run: `CODEBUDDY_CLI`, else `codebuddy` on `PATH`; `None` when
-/// there is neither.
-pub fn default_command() -> Option<Vec<String>> {
-    if let Some(cli) = std::env::var_os("CODEBUDDY_CLI").filter(|v| !v.is_empty()) {
-        return Some(vec![cli.to_string_lossy().into_owned()]);
-    }
-    let on_path = find_in_path("codebuddy");
-    if !on_path.is_file() {
-        return None;
-    }
-    Some(match npm_script(&on_path) {
-        Some(script) => vec![
-            find_in_path("node").display().to_string(),
-            script.display().to_string(),
-        ],
-        None => vec![on_path.display().to_string()],
-    })
-}
-
-/// The script behind npm's `codebuddy.cmd` shim. Run through `node` directly, the
-/// arguments skip `cmd.exe`'s quoting, which the JSON of `--mcp-config` does not survive.
-fn npm_script(shim: &Path) -> Option<PathBuf> {
-    let is_cmd = shim
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd"));
-    let script = shim
-        .parent()?
-        .join("node_modules")
-        .join("@tencent-ai")
-        .join("codebuddy-code")
-        .join("bin")
-        .join("codebuddy");
-    (is_cmd && script.is_file()).then_some(script)
 }
 
 /// Makes session `session_id` resumable from `cwd`. CodeBuddy keeps each session under
@@ -385,25 +355,46 @@ mod tests {
 
     #[test]
     fn runs_on_the_codebuddy_driver_and_has_a_command() {
-        let configured =
-            CodebuddyNativeDriver::new("codebuddy", vec!["my-cbc".into()], vec!["hy3".into()]);
+        let configured = CodebuddyNativeDriver::new(
+            "codebuddy",
+            Cli::at(vec!["my-cbc".into()]),
+            vec!["hy3".into()],
+        );
         assert_eq!(configured.kind(), DriverKind::CodebuddyNative);
         assert_eq!(configured.name(), "codebuddy");
         assert_eq!(configured.models(), ["hy3"]);
-        assert!(!configured.missing);
+        assert!(configured.missing.is_none());
     }
 
+    /// A session asked of a CLI this machine does not have says what the description says:
+    /// what to install, how to sign in, and why not WorkBuddy's copy.
     #[test]
-    fn npm_shims_run_their_script_on_node() {
-        let dir = std::env::temp_dir().join(format!("cbc-shim-{}", std::process::id()));
-        let bin = dir.join("node_modules/@tencent-ai/codebuddy-code/bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(bin.join("codebuddy"), "").unwrap();
-        let shim = dir.join("codebuddy.cmd");
-        assert_eq!(npm_script(&shim), Some(bin.join("codebuddy")));
-        // Anything but the cmd shim is run as it is.
-        assert_eq!(npm_script(&dir.join("codebuddy.exe")), None);
-        let _ = std::fs::remove_dir_all(&dir);
+    fn a_missing_cli_says_how_to_install_itself() {
+        let install: crate::locate::Install = toml::from_str(
+            r#"
+            label = "CodeBuddy"
+            hint = "npm install -g @tencent-ai/codebuddy-code"
+            login = "then sign in once with `codebuddy` and `/login` (or set CODEBUDDY_API_KEY)"
+            notes = "The copy inside WorkBuddy cannot run outside the WorkBuddy app."
+            "#,
+        )
+        .unwrap();
+        let locator: crate::locate::Locator =
+            toml::from_str(r#"commands = ["crossagents-no-such-codebuddy"]"#).unwrap();
+        let driver = CodebuddyNativeDriver::new(
+            "codebuddy",
+            Cli::new(Vec::new(), locator, install),
+            Vec::new(),
+        );
+        assert!(!driver.installed());
+        assert_eq!(
+            driver.missing.as_deref(),
+            Some(
+                "the CodeBuddy CLI is not installed: run `npm install -g @tencent-ai/codebuddy-code`, \
+                 then sign in once with `codebuddy` and `/login` (or set CODEBUDDY_API_KEY). \
+                 The copy inside WorkBuddy cannot run outside the WorkBuddy app."
+            )
+        );
     }
 
     #[test]

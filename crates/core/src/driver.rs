@@ -576,6 +576,12 @@ pub trait Driver: Send + Sync {
     fn installed(&self) -> bool {
         true
     }
+    /// Where that program was found, and how to install it when it was not: what
+    /// `PluginInfo::cli` reports (docs/DESIGN.md §9.3). `None` for drivers that launch
+    /// whatever they are configured with (ACP).
+    async fn cli_status(&self) -> Option<crate::CliStatus> {
+        None
+    }
     /// Opens a new session.
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError>;
     /// Reopens a suspended session by the id it reported in

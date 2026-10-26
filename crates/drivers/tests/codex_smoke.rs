@@ -22,6 +22,7 @@ use crossagents_core::{
     PermissionPolicy, Role, SessionEvent, SessionEventKind, SessionSpec, StopReason, TurnOutcome,
 };
 use crossagents_drivers::codex_native::CodexNativeDriver;
+use crossagents_drivers::locate::Cli;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
@@ -38,7 +39,7 @@ fn driver() -> CodexNativeDriver {
     let command = std::env::var("CROSSAGENTS_SMOKE_CODEX")
         .map(|c| c.split_whitespace().map(str::to_owned).collect())
         .unwrap_or_default();
-    CodexNativeDriver::new("codex", command, vec![])
+    CodexNativeDriver::new("codex", Cli::at(command), vec![])
 }
 
 fn spec(

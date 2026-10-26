@@ -20,6 +20,7 @@ use crossagents_core::{
     PermissionPolicy, Role, SessionEvent, SessionEventKind, SessionSpec, StopReason, TurnOutcome,
 };
 use crossagents_drivers::claude_native::ClaudeNativeDriver;
+use crossagents_drivers::locate::Cli;
 use serde_json::json;
 use tokio::sync::mpsc;
 
@@ -29,7 +30,7 @@ fn driver() -> ClaudeNativeDriver {
     let command = std::env::var("CROSSAGENTS_SMOKE_CLAUDE")
         .map(|c| c.split_whitespace().map(str::to_owned).collect())
         .unwrap_or_default();
-    ClaudeNativeDriver::new("claude", command, vec![])
+    ClaudeNativeDriver::new("claude", Cli::at(command), vec![])
 }
 
 fn spec(

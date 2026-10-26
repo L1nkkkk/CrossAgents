@@ -26,8 +26,11 @@ pub(crate) async fn spawn(settings: &Settings, spec: HostSpec) -> Result<Launche
     let dir = &settings.dir;
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let spec_path = dir.join(format!("{}.spec.json", spec.id));
-    write_private(&spec_path, &serde_json::to_vec(&spec).expect("spec serializes"))
-        .map_err(|e| format!("cannot write {}: {e}", spec_path.display()))?;
+    write_private(
+        &spec_path,
+        &serde_json::to_vec(&spec).expect("spec serializes"),
+    )
+    .map_err(|e| format!("cannot write {}: {e}", spec_path.display()))?;
     let (program, args) = settings
         .command
         .split_first()

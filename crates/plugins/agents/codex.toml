@@ -1,0 +1,29 @@
+# OpenAI Codex, the built-in agent (docs/DESIGN.md §9.3).
+#
+# `driver = "codex-native"` is `codex app-server` (JSON-RPC over stdio); `acp-generic` goes
+# through the codex-acp adapter (`command` below, needs Node.js).
+
+name = "codex"
+driver = "codex-native"
+command = ["npx", "-y", "@agentclientprotocol/codex-acp"]
+
+[models]
+# No list of its own: Codex reads the models it offers from its own `models_cache.json`.
+efforts = ["low", "medium", "high"]
+
+[locate]
+commands = ["codex"]
+# npm installs `codex` as a Node wrapper; the vendor binary behind it is started directly
+# (killing the wrapper would leave the child running).
+shim = "codex-vendor"
+version = ["--version"]
+
+# The Codex desktop app keeps its own copy; used when `PATH` has no `codex`.
+[locate.bundled]
+windows = ["%LOCALAPPDATA%/OpenAI/Codex/bin/*/codex.exe"]
+macos = ["/Applications/Codex.app/Contents/Resources/codex"]
+
+[install]
+label = "Codex"
+hint = "npm install -g @openai/codex"
+docs = "https://github.com/openai/codex"

@@ -14,13 +14,18 @@ use crossagents_core::{
     SessionEventKind, SessionSpec, StopReason, ToolStatus, TurnOutcome,
 };
 use crossagents_drivers::codex_native::CodexNativeDriver;
+use crossagents_drivers::locate::Cli;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 const MOCK: &str = env!("CARGO_BIN_EXE_crossagents-mock-agent");
 
 fn driver() -> CodexNativeDriver {
-    CodexNativeDriver::new("codex", vec![MOCK.into(), "app-server".into()], vec![])
+    CodexNativeDriver::new(
+        "codex",
+        Cli::at(vec![MOCK.into(), "app-server".into()]),
+        vec![],
+    )
 }
 
 struct Opts<'a> {

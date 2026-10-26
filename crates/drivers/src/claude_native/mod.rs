@@ -10,7 +10,7 @@
 pub mod wire;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use crossagents_core::{
-    AttachmentSupport, Capabilities, CoreError, Driver, DriverKind, DriverSession,
+    AttachmentSupport, Capabilities, CliStatus, CoreError, Driver, DriverKind, DriverSession,
     PermissionHandler, PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec,
     StopReason, TurnOutcome,
 };
@@ -29,7 +29,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use self::wire::{Flavor, Launch, Start, Translator};
 use crate::launch::{self, BoxRead, BoxWrite, ExitWatch, LaunchSpec, Launched, ProcessHandle};
-use crate::process::{StderrTail, check_proxy, find_in_path, hide_console, system_proxy_env};
+use crate::locate::Cli;
+use crate::process::{StderrTail, check_proxy, hide_console, system_proxy_env};
 
 /// `entrypoint` of the sessions CrossAgents starts, in Claude Code's transcripts.
 pub const ENTRYPOINT: &str = "crossagents";
@@ -49,36 +50,53 @@ pub struct ClaudeNativeDriver {
     command: Vec<String>,
     models: Vec<String>,
     flavor: Flavor,
+    /// The CLI the description names, found once (docs/DESIGN.md §9.3).
+    cli: Cli,
 }
 
 impl ClaudeNativeDriver {
-    /// `command` launches Claude Code; empty means `claude` (on `PATH`, else the one the
-    /// Claude desktop app bundles). The stream-json arguments are added to it.
-    pub fn new(name: impl Into<String>, command: Vec<String>, models: Vec<String>) -> Self {
-        Self::with_flavor(name, command, models, Flavor::Claude)
+    /// `cli` is the description's CLI: `native_command` when it gives one, else whatever the
+    /// description finds. The stream-json arguments are added to it.
+    pub fn new(name: impl Into<String>, cli: Cli, models: Vec<String>) -> Self {
+        Self::with_flavor(name, cli, models, Flavor::Claude)
     }
 
     /// The same protocol, launched with the flags `flavor` accepts.
     pub fn with_flavor(
         name: impl Into<String>,
-        command: Vec<String>,
+        cli: Cli,
         models: Vec<String>,
         flavor: Flavor,
     ) -> Self {
+        let command = cli.command().unwrap_or_else(|| {
+            cli.default_name()
+                .map(|name| vec![name])
+                .unwrap_or_default()
+        });
         Self {
             name: name.into(),
-            command: if command.is_empty() {
-                vec!["claude".into()]
-            } else {
-                command
-            },
+            command,
             models,
             flavor,
+            cli,
+        }
+    }
+
+    /// The CLI behind this driver, as this machine has it.
+    pub async fn status(&self) -> CliStatus {
+        self.cli.status().await
+    }
+
+    /// The command a session runs: the agent's own when it names one, else this Profile's.
+    fn command_for(&self, spec: &SessionSpec) -> Vec<String> {
+        match &spec.command {
+            Some(command) => self.cli.launch(command),
+            None => self.command.clone(),
         }
     }
 
     async fn start(&self, spec: SessionSpec, start: Start) -> Result<ClaudeSession, CoreError> {
-        let command = spec.command.clone().unwrap_or_else(|| self.command.clone());
+        let command = self.command_for(&spec);
         ClaudeSession::spawn(command, launch_for(&spec), start, spec, self.flavor).await
     }
 }
@@ -143,13 +161,11 @@ impl Driver for ClaudeNativeDriver {
     }
 
     fn installed(&self) -> bool {
-        let program = &self.command[0];
-        let found = if self.flavor == Flavor::Claude {
-            locate_claude(program)
-        } else {
-            find_in_path(program)
-        };
-        found.is_file()
+        self.cli.installed()
+    }
+
+    async fn cli_status(&self) -> Option<CliStatus> {
+        Some(self.status().await)
     }
 
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError> {
@@ -176,7 +192,7 @@ impl Driver for ClaudeNativeDriver {
         let Some(launched) = launch::adopt(&owner_of(self.flavor, session_id)).await else {
             return Ok(None);
         };
-        let command = spec.command.clone().unwrap_or_else(|| self.command.clone());
+        let command = self.command_for(&spec);
         Ok(Some(Box::new(ClaudeSession::adopt(
             launched?,
             session_id.to_owned(),
@@ -528,7 +544,7 @@ impl ClaudeSession {
         let (program, extra) = command.split_first().ok_or_else(|| {
             CoreError::Agent(format!("empty {} launch command", flavor.program()))
         })?;
-        let program = locate_claude(program);
+        let program = PathBuf::from(program);
         if flavor == Flavor::Codebuddy
             && let Start::Resume(from) | Start::Fork { from, .. } = &start
         {
@@ -847,54 +863,10 @@ impl Drop for ClaudeSession {
     }
 }
 
-/// The `claude` to run: as given when it is a path; else from `PATH`; else Claude Code's
-/// native install (`~/.local/bin`), else the newest one the Claude desktop app keeps.
-pub fn locate_claude(program: &str) -> PathBuf {
-    let found = find_in_path(program);
-    if found.components().count() > 1 || program != "claude" {
-        return found;
-    }
-    let exe = if cfg!(windows) {
-        "claude.exe"
-    } else {
-        "claude"
-    };
-    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
-    if let Some(native) = home
-        .map(|h| PathBuf::from(h).join(".local").join("bin").join(exe))
-        .filter(|p| p.is_file())
-    {
-        return native;
-    }
-    bundled_claude().unwrap_or(found)
-}
-
-/// `%LOCALAPPDATA%\Claude-Data\<app>\claude-code\<version>\<build>\claude.exe`, the newest.
-fn bundled_claude() -> Option<PathBuf> {
-    if !cfg!(windows) {
-        return None;
-    }
-    let data = PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Claude-Data");
-    let children = |dir: PathBuf| -> Vec<PathBuf> {
-        std::fs::read_dir(dir)
-            .map(|entries| entries.flatten().map(|e| e.path()).collect())
-            .unwrap_or_default()
-    };
-    children(data)
-        .into_iter()
-        .flat_map(|app| children(app.join("claude-code")))
-        .flat_map(children)
-        .map(|build| build.join("claude.exe"))
-        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
-        .max()
-        .map(|(_, p)| p)
-}
-
 /// `claude auth status` for a config directory (`env` carries its `CLAUDE_CONFIG_DIR`):
 /// logged in or not, how, the email and the plan. `None` when `claude` cannot run.
-pub async fn auth_status(program: &str, env: &[(String, String)]) -> Option<Value> {
-    let program = locate_claude(program);
-    let mut command = Command::new(&program);
+pub async fn auth_status(program: &Path, env: &[(String, String)]) -> Option<Value> {
+    let mut command = Command::new(program);
     command
         .args(["auth", "status"])
         .envs(system_proxy_env())
@@ -913,11 +885,10 @@ pub async fn auth_status(program: &str, env: &[(String, String)]) -> Option<Valu
 /// Asks Claude Code about an account without starting a session: the `initialize` answer
 /// (account, models) and `get_usage` (plan and limits).
 pub async fn probe_account(
-    program: &str,
+    program: &Path,
     env: &[(String, String)],
 ) -> Result<(Value, Value), CoreError> {
-    let program = locate_claude(program);
-    let mut command = Command::new(&program);
+    let mut command = Command::new(program);
     command
         .args([
             "-p",

@@ -73,8 +73,11 @@ impl Mock {
         match request["subtype"].as_str().unwrap_or_default() {
             "initialize" => {
                 let model = self.model.lock().await.clone();
-                self.answer(id, json!({ "commands": [], "models": [{ "value": model }] }))
-                    .await;
+                self.answer(
+                    id,
+                    json!({ "commands": [], "models": [{ "value": model }] }),
+                )
+                .await;
             }
             "interrupt" => {
                 self.interrupt.notify_waiters();
