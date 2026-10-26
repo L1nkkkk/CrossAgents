@@ -68,6 +68,11 @@ pub trait WorkspaceProvider: Send + Sync {
         let _ = (path, base);
         Ok(Vec::new())
     }
+    /// The commit checked out at `path`; empty where there are no commits.
+    async fn head(&self, path: &Path) -> Result<String, CoreError> {
+        let _ = path;
+        Ok(String::new())
+    }
     /// Forgets working copies of `repo` whose directory is gone (deleted by hand when
     /// removing them failed), so their branches can be checked out again.
     async fn prune(&self, repo: &Path) -> Result<(), CoreError> {
@@ -538,6 +543,10 @@ impl WorkspaceProvider for GitWorkspaces {
             }
         }
         Ok(files)
+    }
+
+    async fn head(&self, path: &Path) -> Result<String, CoreError> {
+        git(path, &["rev-parse", "HEAD"]).await
     }
 }
 

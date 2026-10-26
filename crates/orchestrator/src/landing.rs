@@ -33,6 +33,9 @@ const SYNC_NOTE_END: &str = "land again once it is merged";
 /// How a closing note says the result waits for the person; cleared once it lands.
 const AWAITING_LAND: &str = "等你落地";
 
+/// How many times the lead's landing checks again when the checkout moved during its checks.
+const LAND_ATTEMPTS: usize = 3;
+
 impl Orchestrator {
     /// The run the caller leads and is still open.
     async fn led_run(&self, caller: &Agent) -> Result<Run, CoreError> {
@@ -112,23 +115,55 @@ impl Orchestrator {
             (LandPolicy::Pr, _) => LandMode::Pr,
             (LandPolicy::Auto, mode) => mode.unwrap_or(LandMode::Merge),
         };
-        self.commit_lead(&run, &format!("crossagents: {}", run.title))
-            .await?;
-        self.require_run_checks(&run, "run_land").await?;
         let message = a
             .message
             .as_deref()
             .map(str::trim)
             .filter(|m| !m.is_empty());
-        Ok(
-            match self.land(run.id, mode, &caller.name, message).await? {
-                LandOutcome::Landed(landing) => json!({ "landed": landing }),
-                LandOutcome::Deferred { task, conflicts } => json!({
-                    "landed": null,
-                    "deferred": { "task": task, "conflicts": conflicts },
-                }),
-            },
-        )
+        let json = |outcome| match outcome {
+            LandOutcome::Landed(landing) => json!({ "landed": landing }),
+            LandOutcome::Deferred { task, conflicts } => json!({
+                "landed": null,
+                "deferred": { "task": task, "conflicts": conflicts },
+            }),
+        };
+        // What lands is what was checked: the base comes into the run branch first, then
+        // the checks run on the result, then it merges. The checks can take minutes, so they
+        // run outside the run's lock; should the checkout move meanwhile (the base gained
+        // more, the lead committed), it is brought in and checked again.
+        for _ in 0..LAND_ATTEMPTS {
+            let (run, checked) = {
+                let _guard = self.lock(run.id).await;
+                let mut run = self.store.get_run(run.id).await?;
+                if let Some(outcome) = self.ready_to_land(&mut run).await? {
+                    return Ok(json(outcome));
+                }
+                let head = self.head_of(&run).await?;
+                (run, head)
+            };
+            self.require_run_checks(&run, "run_land").await?;
+            let _guard = self.lock(run.id).await;
+            let mut run = self.store.get_run(run.id).await?;
+            if let Some(outcome) = self.ready_to_land(&mut run).await? {
+                return Ok(json(outcome));
+            }
+            if self.head_of(&run).await? != checked {
+                continue;
+            }
+            return Ok(json(
+                self.merge_run(run, mode, &caller.name, message).await?,
+            ));
+        }
+        Err(CoreError::Conflict(format!(
+            "{} kept changing while the project's checks ran, so what would land was never \
+             checked; call run_land again",
+            run.base_branch
+        )))
+    }
+
+    /// The commit the run's checkout has, to tell whether it moved.
+    async fn head_of(&self, run: &Run) -> Result<String, CoreError> {
+        self.ws_for(run).head(&self.integration_path(run)).await
     }
 
     /// Lands the run branch on its base branch. Every task must have ended and at least one
@@ -136,6 +171,7 @@ impl Orchestrator {
     /// merged into the run branch first; when that conflicts, a task to resolve it goes to
     /// the run's worker and landing waits for it (docs/tasks/DOGFOOD.md §4). `message` is the
     /// landing commit's, as the lead wrote it to the project's rules; none gets the hub's.
+    /// The project's checks are not run: the person lands from the run page regardless.
     pub async fn land(
         &self,
         id: RunId,
@@ -145,8 +181,19 @@ impl Orchestrator {
     ) -> Result<LandOutcome, CoreError> {
         let _guard = self.lock(id).await;
         let mut run = self.store.get_run(id).await?;
+        if let Some(outcome) = self.ready_to_land(&mut run).await? {
+            return Ok(outcome);
+        }
+        self.merge_run(run, mode, by, message).await
+    }
+
+    /// Everything before merging, under the run's lock: refuses a run that cannot land,
+    /// commits the lead's edits and brings in what the base gained. `Some` when that settles
+    /// it: landed already, or waiting for a task that resolves conflicts with the base.
+    async fn ready_to_land(&self, run: &mut Run) -> Result<Option<LandOutcome>, CoreError> {
+        let id = run.id;
         if let Some(landing) = &run.landed {
-            return Ok(LandOutcome::Landed(landing.clone()));
+            return Ok(Some(LandOutcome::Landed(landing.clone())));
         }
         // A failed run may still carry work worth keeping (a task that did not merge, the
         // rest done by the lead): the person decides; below, an empty branch is refused.
@@ -168,16 +215,16 @@ impl Orchestrator {
                 open.join(", ")
             )));
         }
-        self.commit_lead(&run, &format!("crossagents: {}", run.title))
+        self.commit_lead(run, &format!("crossagents: {}", run.title))
             .await?;
-        if !self.has_changes(&run, &tasks).await? {
+        if !self.has_changes(run, &tasks).await? {
             return Err(CoreError::Conflict(
                 "the run branch changes nothing, so there is nothing to land".into(),
             ));
         }
         if !run.in_place {
             // A finished run has no integration worktree any more; check the branch out again.
-            let integration = self.integration_path(&run);
+            let integration = self.integration_path(run);
             if !integration.exists() {
                 self.workspaces
                     .checkout(&run.repo, &run.branch, &integration)
@@ -188,13 +235,25 @@ impl Orchestrator {
                 .sync_base(&integration, &run.base_branch)
                 .await?
             {
-                let key = self.sync_task(&mut run, &tasks, &files, &detail).await?;
-                return Ok(LandOutcome::Deferred {
+                let key = self.sync_task(run, &tasks, &files, &detail).await?;
+                return Ok(Some(LandOutcome::Deferred {
                     task: key,
                     conflicts: files,
-                });
+                }));
             }
         }
+        Ok(None)
+    }
+
+    /// Merges the run branch, made [`Self::ready_to_land`], into its base, under the run's lock.
+    async fn merge_run(
+        &self,
+        mut run: Run,
+        mode: LandMode,
+        by: &str,
+        message: Option<&str>,
+    ) -> Result<LandOutcome, CoreError> {
+        let id = run.id;
         let reference = self
             .ws_for(&run)
             .land(

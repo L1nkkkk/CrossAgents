@@ -821,6 +821,113 @@ async fn a_lead_that_takes_over_a_dropped_task_completes_the_run() {
     assert!(repo.path().join("rest.txt").exists());
 }
 
+/// Commits everything in the person's checkout of `repo`.
+fn commit_all(repo: &Path, message: &str) {
+    for args in [
+        &["add", "-A"][..],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+}
+
+/// A run whose project check fails once `bad.txt` exists; task `z` is merged into it, then
+/// `before_land` runs on the person's checkout and the lead calls `run_land`. Returns the
+/// run's detail once the lead heard back.
+async fn land_after(before_land: impl FnOnce(&Path)) -> (tempfile::TempDir, Value) {
+    let repo = git_repo();
+    let check = if cfg!(windows) {
+        "if exist bad.txt exit 1"
+    } else {
+        "test ! -e bad.txt"
+    };
+    std::fs::write(
+        repo.path().join("crossagents.toml"),
+        format!("[run]\nchecks = [\"{check}\"]\n"),
+    )
+    .unwrap();
+    commit_all(repo.path(), "checks");
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+
+    let z = task(
+        "z",
+        goal("[write z.txt=zed]", &format!("z done {}", accept("z"))),
+        &[],
+    );
+    let id = start_run(
+        &t,
+        request(json!([z])),
+        json!({ "policy": { "plan_approval": "auto", "land": "auto", "human_ask": "timeout" } }),
+    )
+    .await;
+    w.until("z merged", task_is("z", TaskStatus::Merged)).await;
+    before_land(repo.path());
+    let boss: Value = t.get("/v1/agents/boss").await.json().await.unwrap();
+    let boss_id = boss["id"].as_str().unwrap().to_owned();
+    t.send("boss", &call("run_land", json!({ "mode": "merge" })))
+        .await;
+    while !w.output().contains("\"landed\"") && !w.output().contains("project's checks") {
+        w.until("planner turn", |e| {
+            matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if id.to_string() == boss_id)
+        })
+        .await;
+    }
+    let output = w.output();
+    let mut detail = detail(&t, &id).await;
+    detail["lead_output"] = output.into();
+    (repo, detail)
+}
+
+#[tokio::test]
+async fn the_lead_lands_only_what_passed_the_checks_after_the_base_came_in() {
+    // main gains a file that breaks the check while the run is open.
+    let (repo, detail) = land_after(|repo| {
+        std::fs::write(repo.join("bad.txt"), "breaks the check").unwrap();
+        commit_all(repo, "break the check");
+    })
+    .await;
+    let output = detail["lead_output"].as_str().unwrap();
+    assert!(
+        output.contains("the project's checks (crossagents.toml) failed"),
+        "{output}"
+    );
+    assert!(detail["run"]["landed"].is_null(), "{detail}");
+    assert!(!repo.path().join("z.txt").exists());
+    assert!(!git_show(repo.path(), "main:z.txt").contains("zed"));
+    let checks = detail["run"]["checks"].as_array().unwrap();
+    assert_eq!(checks.len(), 1, "{detail}");
+    assert_eq!(checks[0]["passed"], false);
+    assert_eq!(checks[0]["exit_code"], 1);
+}
+
+#[tokio::test]
+async fn the_lead_lands_when_the_base_keeps_the_checks_passing() {
+    let (repo, detail) = land_after(|repo| {
+        std::fs::write(repo.join("fine.txt"), "harmless").unwrap();
+        commit_all(repo, "harmless change");
+    })
+    .await;
+    assert_eq!(detail["run"]["landed"]["mode"], "merge", "{detail}");
+    assert_eq!(git_show(repo.path(), "main:z.txt"), "zed");
+    assert_eq!(git_show(repo.path(), "main:fine.txt"), "harmless");
+    assert_eq!(detail["run"]["checks"][0]["passed"], true, "{detail}");
+}
+
 #[tokio::test]
 async fn a_manual_run_leaves_landing_to_the_person() {
     let repo = git_repo();
