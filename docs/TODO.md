@@ -190,3 +190,20 @@ B3 远程开发：
 - [ ] 从 CLI 读模型列表：Codex 仍读 `models_cache.json`，其余家各自有列表接口后接进来
 - [ ] 描述文件里的账号段：登录方式、配置目录与环境变量也写进描述，加一家账号不用改 `*_account.rs`
 - [ ] 版本钉住与自下载 CLI（DESIGN §9.4 的"已验证范围"要靠它）
+
+## 十一、交给 CrossAgents 自己改自己
+
+> 2026-10-26，任务书见 [tasks/SELF.md](tasks/SELF.md)。按 A → B → C 顺序，A 做完再放开后面。
+
+- [ ] A1 run 共享 `node_modules`，GUI 的 `tsc --noEmit` 与 `node --test` 进 `crossagents.toml` checks
+- [ ] A2 mock 里无对话的 agent 也按插件给出能力
+- [ ] A3 worker 克隆合并 / 取消后归档，run 追溯保留它最后几轮
+- [ ] B1 压缩合并用 `run_finish` 的 `message`
+- [ ] B2 落地提交加 `Co-authored-by` 或可选人的 git 身份
+- [ ] B3 run 页只显示本 run 的通知
+- [ ] B4 开场说明带本机可用工具链
+- [ ] B5 hooks 默认关闭（同 §四）
+- [ ] B6 附件路径不能越出工作目录（同 §七；计划由人批）
+- [ ] C1 run 复盘：从 trace 产出「现象 / 影响 / 方向」表到 `docs/tasks/RETRO-<run>.md`
+- [ ] C2 主导从复盘里挑一条开新 run 去修（计划仍要人批）
+- [ ] C3 改 hub 的任务在 `hub sandbox` 里跑冒烟再收尾
