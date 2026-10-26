@@ -291,7 +291,9 @@ export function HomeView() {
   }
 
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    if (e.nativeEvent.isComposing) return;
+    // Enter sends (Ctrl/Cmd+Enter too); Shift+Enter is a newline, as in a conversation.
+    if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       void submit();
     }
