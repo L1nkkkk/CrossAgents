@@ -20,10 +20,10 @@ use crossagents_api_types::{
     API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentSettingsRequest,
     AnswerRequest, ApiError, ApproveRunRequest, ArchiveAgentRequest, AttachmentContent,
     ChangesResponse, CliInfo, CliInstallAccepted, ConnectInfo, CreateAccountRequest,
-    CreateAgentRequest, CreateRunRequest, DiffSide, ErrorCode, FinishRequest, HealthResponse,
-    HubInfo, InitRepoRequest, LandRequest, ListAccountsResponse, ListAgentsResponse,
-    ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
-    ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
+    CreateAgentRequest, CreateRunRequest, DeleteRunResponse, DiffSide, ErrorCode, FinishRequest,
+    HealthResponse, HubInfo, InitRepoRequest, LandRequest, ListAccountsResponse,
+    ListAgentsResponse, ListNotesResponse, ListPluginsResponse, ListQuestionsResponse,
+    ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
     RenameAgentRequest, RunDetail, RunTrace, SendMessageRequest, SendMessageResponse,
     SetModelRequest, SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace,
     Transcript, TurnDiffResponse, UsageGroup, UsageResponse,
@@ -33,7 +33,7 @@ use crossagents_core::{
     CoreError, DriverKind, Envelope, Event, EventBus, EventKind, HumanItem, LandMode, MessageId,
     MessageSource, Run, RunConfig, RunId, Store, Task, TaskId,
 };
-use crossagents_orchestrator::{Approval, GitWorkspaces, NewRun, Orchestrator};
+use crossagents_orchestrator::{Approval, DeleteRun, GitWorkspaces, NewRun, Orchestrator};
 
 use crate::accounts::Accounts;
 use crate::collab::AgentTokens;
@@ -128,7 +128,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/accounts/{id}/models", get(account_models))
         .route("/v1/accounts/{id}/login", post(account_login))
         .route("/v1/runs", get(list_runs).post(create_run))
-        .route("/v1/runs/{key}", get(get_run))
+        .route("/v1/runs/{key}", get(get_run).delete(delete_run))
         .route("/v1/runs/{key}/approve", post(approve_run))
         .route("/v1/runs/{key}/reject", post(reject_run))
         .route("/v1/runs/{key}/cancel", post(cancel_run))
@@ -177,7 +177,9 @@ impl From<CoreError> for AppError {
     fn from(err: CoreError) -> Self {
         let (status, code) = match &err {
             CoreError::NotFound { .. } => (StatusCode::NOT_FOUND, ErrorCode::NotFound),
-            CoreError::Conflict(_) => (StatusCode::CONFLICT, ErrorCode::Conflict),
+            CoreError::Conflict(_) | CoreError::ConflictFiles { .. } => {
+                (StatusCode::CONFLICT, ErrorCode::Conflict)
+            }
             CoreError::InvalidName(_)
             | CoreError::InvalidTransition { .. }
             | CoreError::Unsupported(_) => (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
@@ -187,7 +189,12 @@ impl From<CoreError> for AppError {
                 (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal)
             }
         };
-        Self::new(status, code, err.to_string())
+        let mut body = ApiError::new(code, err.to_string());
+        // What is in the way, for a client that lists it (a run's checkout with changes).
+        if let CoreError::ConflictFiles { files, .. } = &err {
+            body.error.files = Some(files.clone());
+        }
+        Self(status, body)
     }
 }
 
@@ -1161,6 +1168,42 @@ async fn cancel_run(
     let id = resolve_run(&state, &key).await?;
     state.orchestrator.cancel(id).await?;
     run_detail(&state, id).await
+}
+
+/// What `DELETE /v1/runs/{key}` takes: delete the run's branches too, and delete it even with
+/// uncommitted work in its checkout (docs/tasks/R1.md §3.2).
+#[derive(Debug, Default, Deserialize)]
+struct DeleteRunQuery {
+    #[serde(default)]
+    branches: bool,
+    #[serde(default)]
+    force: bool,
+}
+
+/// Deletes a run that ended: its row, its tasks, the agents it started, its working copies
+/// and, by choice, its branches. A checkout with unlanded work answers 409 with the files.
+async fn delete_run(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Query(q): Query<DeleteRunQuery>,
+) -> ApiResult<Json<DeleteRunResponse>> {
+    let id = resolve_run(&state, &key).await?;
+    let done = state
+        .orchestrator
+        .delete_run(
+            id,
+            DeleteRun {
+                branches: q.branches,
+                force: q.force,
+            },
+        )
+        .await?;
+    Ok(Json(DeleteRunResponse {
+        agents: done.agents,
+        worktrees: done.worktrees,
+        branches: done.branches,
+        warnings: done.warnings,
+    }))
 }
 
 /// The person lands a run (whatever the run's policy says about the lead).

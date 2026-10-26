@@ -84,6 +84,12 @@ impl Client {
         Ok(())
     }
 
+    /// A delete whose answer says what it did (deleting a run lists what it cleaned up).
+    pub async fn delete_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let resp = self.send(self.request(Method::DELETE, path)).await?;
+        resp.json().await.context("invalid response from hub")
+    }
+
     /// Streams events with `seq > since`; with `follow`, keeps streaming live events.
     pub async fn events(
         &self,

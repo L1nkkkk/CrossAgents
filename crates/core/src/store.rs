@@ -149,6 +149,13 @@ pub trait Store: Send + Sync {
     async fn list_runs(&self) -> Result<Vec<Run>, CoreError>;
     /// Replaces the stored run with `run` (matched by id).
     async fn update_run(&self, run: &Run) -> Result<(), CoreError>;
+    /// Deletes the run and everything the store keeps for it: its tasks, the human items and
+    /// notes that name it (docs/tasks/R1.md §3.3). Events stay. Fails with
+    /// [`CoreError::NotFound`] when there is no such run.
+    async fn delete_run(&self, id: RunId) -> Result<(), CoreError> {
+        let _ = id;
+        Err(CoreError::Unsupported("deleting runs".into()))
+    }
 
     async fn insert_task(&self, task: &Task) -> Result<(), CoreError>;
     async fn get_task(&self, id: TaskId) -> Result<Task, CoreError>;

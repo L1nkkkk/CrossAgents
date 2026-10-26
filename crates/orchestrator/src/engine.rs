@@ -928,7 +928,7 @@ The person changed: {}",
         Ok(())
     }
 
-    async fn lead_lives_in_integration(&self, run: &Run) -> bool {
+    pub(crate) async fn lead_lives_in_integration(&self, run: &Run) -> bool {
         !run.in_place
             && self
                 .store

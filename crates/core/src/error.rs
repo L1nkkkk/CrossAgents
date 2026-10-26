@@ -15,6 +15,11 @@ pub enum CoreError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    /// A conflict that names what is in the way: the files a run's checkout changed and
+    /// deleting the run would throw away (docs/tasks/R1.md §3.2). Clients list them.
+    #[error("conflict: {message}")]
+    ConflictFiles { message: String, files: Vec<String> },
+
     #[error("storage error: {0}")]
     Storage(String),
 

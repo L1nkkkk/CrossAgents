@@ -3,8 +3,8 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use crossagents_api_types::{
-    CreateRunRequest, Event, EventKind, ListRunsResponse, RejectRunRequest, Run, RunDetail,
-    RunTrace, Task, TaskStatus,
+    CreateRunRequest, DeleteRunResponse, Event, EventKind, ListRunsResponse, RejectRunRequest, Run,
+    RunDetail, RunTrace, Task, TaskStatus,
 };
 
 use super::Context;
@@ -70,6 +70,17 @@ pub enum RunCommand {
     Reject { run: String, reason: String },
     /// Stop all work on a run.
     Cancel { run: String },
+    /// Delete a run that ended, with its tasks and the agents it started.
+    Rm {
+        run: String,
+        /// Delete its branches too. A landed run's go by default; an unlanded run's stay,
+        /// since its changes are nowhere else.
+        #[arg(long)]
+        branches: bool,
+        /// Delete even when the run's checkout has uncommitted changes.
+        #[arg(long)]
+        force: bool,
+    },
     /// What happened, by task: turns, commands, checks, spend, the first failure.
     Trace {
         run: String,
@@ -91,7 +102,7 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
         let (Some(request), Some(planner)) = (start.request, start.planner) else {
             anyhow::bail!(
                 "usage: crossagents run \"<request>\" --planner <agent> [--worker <agent>] \
-                 (or a subcommand: ls, show, approve, reject, cancel)"
+                 (or a subcommand: ls, show, approve, reject, cancel, rm)"
             );
         };
         let req = CreateRunRequest {
@@ -190,8 +201,44 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
             }
             println!("run {} cancelled", short_tail(&detail.run.id));
         }
+        RunCommand::Rm {
+            run,
+            branches,
+            force,
+        } => {
+            let done: DeleteRunResponse = client
+                .delete_json(&format!("/v1/runs/{run}?branches={branches}&force={force}"))
+                .await?;
+            if ctx.json {
+                return print_json(&done);
+            }
+            println!("run {run} deleted");
+            print_cleanup(&done);
+        }
     }
     Ok(())
+}
+
+/// What deleting a run removed, and what it could not (docs/tasks/R1.md §3.3).
+fn print_cleanup(done: &DeleteRunResponse) {
+    let list = |what: &str, items: &[String]| {
+        if items.is_empty() {
+            return;
+        }
+        println!("{what}:");
+        for item in items {
+            println!("  {item}");
+        }
+    };
+    list("agents", &done.agents);
+    list("worktrees", &done.worktrees);
+    list("branches", &done.branches);
+    if !done.warnings.is_empty() {
+        println!("not cleaned up:");
+        for warning in &done.warnings {
+            println!("  {warning}");
+        }
+    }
 }
 
 fn print_detail(detail: &RunDetail, verbose: bool) {

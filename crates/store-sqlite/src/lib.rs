@@ -699,6 +699,48 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    /// Deletes the run, its tasks, and the human items and notes that name it, in one
+    /// transaction (docs/tasks/R1.md §3.3). `tasks` are deleted explicitly rather than by
+    /// `ON DELETE CASCADE`: a connection need not have `foreign_keys` on. Events stay.
+    async fn delete_run(&self, id: RunId) -> Result<(), CoreError> {
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let exists: Option<String> = sqlx::query_scalar("SELECT id FROM runs WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage)?;
+        if exists.is_none() {
+            return Err(CoreError::NotFound {
+                kind: "run",
+                id: id.to_string(),
+            });
+        }
+        // human_items has no run column; the record is JSON.
+        sqlx::query("DELETE FROM human_items WHERE json_extract(data, '$.run_id') = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        // '' is a team note, so it never matches a run id.
+        sqlx::query("DELETE FROM notes WHERE run_id = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        sqlx::query("DELETE FROM tasks WHERE run_id = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        sqlx::query("DELETE FROM runs WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        tx.commit().await.map_err(storage)?;
+        Ok(())
+    }
+
     async fn insert_task(&self, task: &Task) -> Result<(), CoreError> {
         sqlx::query(
             "INSERT INTO tasks (id, run_id, status, created_at, updated_at, data)
@@ -930,6 +972,147 @@ mod tests {
         assert_eq!(store.get_task(tasks[1].id).await.unwrap(), tasks[1]);
         assert!(matches!(
             store.get_task(TaskId::new()).await,
+            Err(CoreError::NotFound { .. })
+        ));
+    }
+
+    /// docs/tasks/R1.md §3.4: what the run owned goes with it; the log and other runs' things
+    /// stay; deleting it again says it is not there.
+    #[tokio::test]
+    async fn deleting_a_run_takes_its_tasks_items_and_notes() {
+        let store = SqliteStore::open_in_memory().await.unwrap();
+        let now = time_from(&Utc::now().to_rfc3339()).unwrap();
+        let run = Run {
+            landed: None,
+            summary: None,
+            checks: Vec::new(),
+            id: RunId::new(),
+            title: "t".into(),
+            request: "do things".into(),
+            planner: AgentId::new(),
+            status: RunStatus::Completed,
+            config: RunConfig {
+                worker: AgentId::new(),
+                escalate: None,
+                reviewer: None,
+                auto_approve: false,
+                max_parallel: 3,
+                max_attempts: 3,
+                team: vec![],
+                policy: Default::default(),
+            },
+            repo: PathBuf::from("/repo"),
+            base_branch: "main".into(),
+            branch: "crossagents/x".into(),
+            in_place: false,
+            note: None,
+            plan: vec![],
+            created_at: now,
+            updated_at: now,
+        };
+        store.insert_run(&run).await.unwrap();
+        let task = Task {
+            issuer: None,
+            progress: None,
+            parent: None,
+            id: TaskId::new(),
+            run_id: run.id,
+            key: "a".into(),
+            title: "a".into(),
+            spec: TaskSpec {
+                goal: "g".into(),
+                ..Default::default()
+            },
+            depends_on: vec![],
+            assignee: None,
+            reviewer: None,
+            worker_template: None,
+            reviewer_template: None,
+            status: TaskStatus::Merged,
+            attempts: 0,
+            escalated: false,
+            nudges: 0,
+            branch: None,
+            worktree: None,
+            report: TaskReport::default(),
+            created_at: now,
+            updated_at: now,
+        };
+        store.insert_task(&task).await.unwrap();
+        let item = |id: &str, run_id: Option<RunId>| HumanItem {
+            id: id.into(),
+            kind: crossagents_core::HumanItemKind::Notice,
+            from: run.planner,
+            run_id,
+            task_id: None,
+            text: id.into(),
+            detail: None,
+            options: vec![],
+            default: None,
+            timeout_at: None,
+            status: crossagents_core::HumanItemStatus::Open,
+            answer: None,
+            answered_at: None,
+            action: None,
+            created_at: now,
+        };
+        store
+            .put_human_item(&item("about-the-run", Some(run.id)))
+            .await
+            .unwrap();
+        store
+            .put_human_item(&item("about-something-else", None))
+            .await
+            .unwrap();
+        let note = |scope: NoteScope, run_id: Option<RunId>, key: &str| Note {
+            scope,
+            run_id,
+            key: key.into(),
+            text: key.into(),
+            author: run.planner,
+            updated_at: now,
+        };
+        store
+            .put_note(&note(NoteScope::Run, Some(run.id), "progress"))
+            .await
+            .unwrap();
+        store
+            .put_note(&note(NoteScope::Team, None, "conventions"))
+            .await
+            .unwrap();
+
+        store.delete_run(run.id).await.unwrap();
+
+        assert!(matches!(
+            store.get_run(run.id).await,
+            Err(CoreError::NotFound { .. })
+        ));
+        assert!(store.list_tasks(run.id).await.unwrap().is_empty());
+        let items = store.list_human_items(true).await.unwrap();
+        assert_eq!(
+            items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            vec!["about-something-else"],
+            "{items:?}"
+        );
+        assert!(
+            store
+                .list_notes(NoteScope::Run, Some(run.id), "")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .list_notes(NoteScope::Team, None, "")
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "a team note is not the run's"
+        );
+        // A run that is not there any more: NotFound, not a silent success.
+        assert!(matches!(
+            store.delete_run(run.id).await,
             Err(CoreError::NotFound { .. })
         ));
     }

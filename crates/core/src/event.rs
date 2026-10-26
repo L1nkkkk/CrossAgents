@@ -241,6 +241,10 @@ pub enum EventKind {
     /// The run's branch reached its base branch (or a pull request was opened).
     #[serde(rename = "run.landed")]
     RunLanded { id: RunId, landing: Landing },
+    /// The run was deleted (docs/tasks/R1.md §3): its row, its tasks and its agents are gone.
+    /// The event stays: the log only grows, and the trace outlives the run.
+    #[serde(rename = "run.deleted")]
+    RunDeleted { run_id: RunId },
     /// A run used `percent` of a budget cap (`what`: tokens, usd or minutes).
     #[serde(rename = "run.budget")]
     RunBudget {
@@ -480,6 +484,7 @@ impl EventKind {
             Self::HumanDismissed { .. } => "human.dismissed",
             Self::RunBudget { .. } => "run.budget",
             Self::RunLanded { .. } => "run.landed",
+            Self::RunDeleted { .. } => "run.deleted",
             Self::WatchTriggered { .. } => "watch.triggered",
             Self::AgentTurnStarted { .. } => "agent.turn_started",
             Self::AgentOutput { .. } => "agent.output",
@@ -526,6 +531,7 @@ impl EventKind {
             | Self::RunPlanSubmitted { id, .. }
             | Self::RunBudget { id, .. }
             | Self::RunLanded { id, .. } => Some(*id),
+            Self::RunDeleted { run_id } => Some(*run_id),
             Self::NoteWritten { run_id, .. } => *run_id,
             Self::HumanAsked { item } | Self::HumanAnswered { item } => item.run_id,
             Self::TaskStatusChanged { run_id, .. }
@@ -553,6 +559,7 @@ impl EventKind {
             | Self::HumanDismissed { .. }
             | Self::RunBudget { .. }
             | Self::RunLanded { .. }
+            | Self::RunDeleted { .. }
             | Self::AccountLoginFinished { .. }
             | Self::AccountLoginPending { .. }
             | Self::CliInstallStarted { .. }

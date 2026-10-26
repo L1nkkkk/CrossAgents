@@ -734,6 +734,21 @@ pub struct FinishRequest {
     pub summary: Option<String>,
 }
 
+/// `DELETE /v1/runs/{key}?branches=&force=` (docs/tasks/R1.md §3.3): what the delete cleaned
+/// up, and what it could not. The run itself is gone either way.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DeleteRunResponse {
+    /// The agents removed, by name: the lead's copy and the ones the run recruited.
+    pub agents: Vec<String>,
+    /// The directories that went: the run's checkout, its tasks', and the build directory
+    /// they shared.
+    pub worktrees: Vec<String>,
+    pub branches: Vec<String>,
+    /// What could not be cleaned up, and why.
+    pub warnings: Vec<String>,
+}
+
 /// `POST /v1/agents/{key}/connect`: how an external agent reaches the hub.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -954,6 +969,11 @@ pub enum ErrorCode {
 pub struct ApiErrorBody {
     pub code: ErrorCode,
     pub message: String,
+    /// The files in the way, when the conflict is about a directory's changes (deleting a
+    /// run whose checkout has uncommitted work, docs/tasks/R1.md §3.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub files: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -968,6 +988,7 @@ impl ApiError {
             error: ApiErrorBody {
                 code,
                 message: message.into(),
+                files: None,
             },
         }
     }

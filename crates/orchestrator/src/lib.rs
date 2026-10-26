@@ -4,6 +4,7 @@
 
 pub mod approval;
 pub mod brief;
+pub mod delete;
 pub mod engine;
 pub mod host;
 pub mod human;
@@ -23,6 +24,7 @@ pub mod verify;
 pub mod work;
 pub mod workspace;
 
+pub use delete::{DeleteRun, DeletedRun};
 pub use engine::{Approval, NewRun, Orchestrator, OrchestratorConfig};
 pub use host::{AgentHost, Route};
 pub use landing::LandOutcome;

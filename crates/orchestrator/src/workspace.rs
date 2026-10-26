@@ -58,6 +58,11 @@ pub trait WorkspaceProvider: Send + Sync {
     /// Removes the working copy at `path`; with `delete_branch`, also `branch`.
     async fn remove(&self, repo: &Path, path: &Path, branch: Option<&str>)
     -> Result<(), CoreError>;
+    /// Deletes `branch` in `repo`, whether or not a working copy has it (a merged task's
+    /// branch outlives its worktree). A branch that is already gone is not an error.
+    async fn delete_branch(&self, repo: &Path, branch: &str) -> Result<(), CoreError>;
+    /// The files `path` changed and did not commit: edits and untracked files, by path.
+    async fn uncommitted(&self, path: &Path) -> Result<Vec<String>, CoreError>;
 }
 
 /// Bytes of conflict hunks a failed merge reports.
@@ -459,6 +464,41 @@ impl WorkspaceProvider for GitWorkspaces {
         }
         Ok(())
     }
+
+    async fn delete_branch(&self, repo: &Path, branch: &str) -> Result<(), CoreError> {
+        if git(
+            repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "-q",
+                &format!("refs/heads/{branch}"),
+            ],
+        )
+        .await
+        .is_err()
+        {
+            return Ok(());
+        }
+        git(repo, &["branch", "-D", branch]).await?;
+        Ok(())
+    }
+
+    async fn uncommitted(&self, path: &Path) -> Result<Vec<String>, CoreError> {
+        // `XY <path>`, a rename as `<old> -> <new>`; unquoted so a path is readable.
+        let out = git(
+            path,
+            &["-c", "core.quotePath=false", "status", "--porcelain"],
+        )
+        .await?;
+        Ok(out
+            .lines()
+            .filter_map(|line| line.get(3..))
+            .map(|rest| rest.rsplit(" -> ").next().unwrap_or(rest).trim())
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
 }
 
 impl GitWorkspaces {
@@ -559,6 +599,14 @@ impl WorkspaceProvider for InPlaceWorkspaces {
 
     async fn remove(&self, _: &Path, _: &Path, _: Option<&str>) -> Result<(), CoreError> {
         Ok(())
+    }
+
+    async fn delete_branch(&self, _: &Path, _: &str) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    async fn uncommitted(&self, _: &Path) -> Result<Vec<String>, CoreError> {
+        Ok(Vec::new())
     }
 }
 
