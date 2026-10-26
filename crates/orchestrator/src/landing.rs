@@ -148,7 +148,12 @@ impl Orchestrator {
         if let Some(landing) = &run.landed {
             return Ok(LandOutcome::Landed(landing.clone()));
         }
-        if !matches!(run.status, RunStatus::Running | RunStatus::Completed) {
+        // A failed run may still carry work worth keeping (a task that did not merge, the
+        // rest done by the lead): the person decides; below, an empty branch is refused.
+        if !matches!(
+            run.status,
+            RunStatus::Running | RunStatus::Completed | RunStatus::Failed
+        ) {
             return Err(CoreError::Conflict(format!("the run is {:?}", run.status)));
         }
         let tasks = self.store.list_tasks(id).await?;
@@ -429,7 +434,7 @@ impl Orchestrator {
             .await?;
         let tasks = self.store.list_tasks(id).await?;
         let changed = self.has_changes(&run, &tasks).await?;
-        self.finish_run(&mut run, &tasks).await?;
+        self.finish_run(&mut run, &tasks, changed).await?;
 
         // The closing note for the person: the lead's words, then what the hub knows.
         let mut text = summary.unwrap_or_else(|| format!("「{}」已结束。", run.title));

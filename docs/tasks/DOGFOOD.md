@@ -314,7 +314,7 @@ hub 在开会话时把一份项目规则写进开场说明（`SessionSpec.instru
 | # | 现象 | 影响 | 方向 |
 |---|---|---|---|
 | 1 | CodeBuddy 的 worker 改文件、跑 Bash、调协作工具（含 `task_complete`）全被 "Permission denied by SDK" 拒，hub 那边每次都判了允许 | 守卫审批下的 CodeBuddy agent 基本只能读；worker 白跑、上报不了 | **已改**（2026-10-26）：CodeBuddy 2.174 读权限回复里的 `allowed` / `reason`，不认 Claude Code 的 `behavior` / `message`，缺了就当拒绝。驱动对 CodeBuddy 额外带上这两个字段。三家原生驱动都补了真实 CLI 的「允许后真能写」冒烟测试（以前只测拒绝，读不懂的回复恰好也是拒绝，所以一直没暴露） |
-| 2 | run 状态是 failed（「1 of 2 tasks did not merge」），其实主导把取消的任务自己做完了，验收也过了 | 看状态会以为没做成 | 有任务没合并、但 run 分支有改动且验收通过时算 completed，备注里说明哪些任务是主导接手的 |
+| 2 | run 状态是 failed（「1 of 2 tasks did not merge」），其实主导把取消的任务自己做完了，验收也过了 | 看状态会以为没做成；更糟的是 failed 的 run 不让落地（这次只好用 git 手动压缩合并，hub 不知道已落地），收尾通知却写着「等你落地」 | **已改**（2026-10-26）：有任务没合并、但 run 分支有改动且项目验收全过时算 completed，备注写「N of M tasks did not merge; the run branch has the rest and passed the checks」。failed 的 run 也能落地，由人决定（没声明验收的项目，主导接手后仍是 failed）；分支没改动照样拒绝 |
 | 3 | 任务合并或取消后，worker 的克隆连同对话记录一起删了 | 事后查不到 worker 当时卡在哪（这次是在它还在时读到的） | 克隆归档而不删，或在 run 的追溯里留下它的最后几轮 |
 | 4 | 验收只有 cargo；GUI 的类型检查和单测要 `npm ci`，没放进 `crossagents.toml` | GUI 改动的对错靠 worker 自述加人复核 | run 共享一份 `node_modules`（像共享 cargo target 那样），再把 GUI 检查加进验收 |
 | 5 | mock 预览里没有对话的 agent，transcript 的 `capabilities` 是 null | 截图看不到这类 agent 的能力提示，要换一个有对话的 | mock 也按插件给出能力 |

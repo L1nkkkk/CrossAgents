@@ -863,22 +863,34 @@ The person changed: {}",
         let _ = std::fs::remove_dir(&dir);
     }
 
-    pub(crate) async fn finish_run(&self, run: &mut Run, tasks: &[Task]) -> Result<(), CoreError> {
+    /// Completed when every task merged, or when some did not but the run branch changes
+    /// something and the project's checks passed on it: the lead took over what the tasks
+    /// left (DOGFOOD.md §10). Otherwise failed. `changed` is `has_changes`.
+    pub(crate) async fn finish_run(
+        &self,
+        run: &mut Run,
+        tasks: &[Task],
+        changed: bool,
+    ) -> Result<(), CoreError> {
         let merged = tasks
             .iter()
             .filter(|t| t.status == TaskStatus::Merged)
             .count();
-        let (status, note) = if merged == tasks.len() {
-            (RunStatus::Completed, None)
-        } else {
-            (
-                RunStatus::Failed,
+        let missed = tasks.len() - merged;
+        let checked = changed && crate::verify::all_passed(&run.checks);
+        let (status, note) = match missed {
+            0 => (RunStatus::Completed, None),
+            _ if checked => (
+                RunStatus::Completed,
                 Some(format!(
-                    "{} of {} tasks did not merge",
-                    tasks.len() - merged,
+                    "{missed} of {} tasks did not merge; the run branch has the rest and passed the checks",
                     tasks.len()
                 )),
-            )
+            ),
+            _ => (
+                RunStatus::Failed,
+                Some(format!("{missed} of {} tasks did not merge", tasks.len())),
+            ),
         };
         // A lead working in the checkout keeps it: the person may still talk to it.
         if !self.lead_lives_in_integration(run).await {

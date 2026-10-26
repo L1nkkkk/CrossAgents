@@ -759,6 +759,69 @@ async fn a_hands_off_run_lands_on_main_and_reports_to_the_person() {
 }
 
 #[tokio::test]
+async fn a_lead_that_takes_over_a_dropped_task_completes_the_run() {
+    let repo = git_repo();
+    // The project's checks look for the lead's part.
+    std::fs::write(
+        repo.path().join("crossagents.toml"),
+        format!("[run]\nchecks = [\"{}\"]\n", has("rest.txt", "rest")),
+    )
+    .unwrap();
+    for args in [
+        &["add", "-A"][..],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "checks",
+        ],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+
+    // The worker never reports; the lead drops its task and does the rest itself.
+    let plan = json!([task("d", "[write d.txt=x]".into(), &[])]);
+    let id = start_run(&t, request(plan), json!({ "auto_approve": true })).await;
+    w.until("d stalled", task_is("d", TaskStatus::Stalled))
+        .await;
+    let take_over = format!(
+        "{} [write rest.txt=rest] {}",
+        call("task_drop", json!({ "task": "d", "reason": "silent" })),
+        call("run_finish", json!({ "summary": "did it myself" }))
+    );
+    t.send("boss", &take_over).await;
+    w.until("run completed", run_status_is(&id, RunStatus::Completed))
+        .await;
+
+    let detail = detail(&t, &id).await;
+    assert_eq!(detail["tasks"][0]["status"], "cancelled");
+    assert!(
+        detail["run"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("passed the checks"),
+        "{detail}"
+    );
+    // And the person can land it.
+    let resp = t
+        .post(&format!("/v1/runs/{id}/land"), json!({ "mode": "squash" }))
+        .await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    assert!(repo.path().join("rest.txt").exists());
+}
+
+#[tokio::test]
 async fn a_manual_run_leaves_landing_to_the_person() {
     let repo = git_repo();
     let t = setup(repo.path()).await;
