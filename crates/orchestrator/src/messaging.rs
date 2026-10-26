@@ -334,10 +334,7 @@ impl Orchestrator {
         let mut sent = Vec::new();
         let mut repeated = true;
         for name in names {
-            let target = self
-                .store()
-                .get_agent(&AgentKey::Name(name.clone()))
-                .await?;
+            let target = self.recipient(caller, &name).await?;
             if target.id == caller.id {
                 return Err(CoreError::Conflict("you cannot message yourself".into()));
             }

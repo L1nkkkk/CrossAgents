@@ -297,15 +297,14 @@ impl Orchestrator {
             ));
         }
         let (plugin, model) = self.recruit_target(caller, &a).await?;
-        if let Some(model) = &model {
-            if let Some(allowed) = &policy.spawn_models
-                && !allowed.contains(model)
-            {
-                return Err(CoreError::Conflict(format!(
-                    "not recruited: model {model} is not on this conversation's list of models to recruit ({})",
-                    allowed.join(", ")
-                )));
-            }
+        if let Some(model) = &model
+            && let Some(allowed) = &policy.spawn_models
+            && !allowed.contains(model)
+        {
+            return Err(CoreError::Conflict(format!(
+                "not recruited: model {model} is not on this conversation's list of models to recruit ({})",
+                allowed.join(", ")
+            )));
         }
         if let Some(name) = &a.name
             && crossagents_core::names::is_vendor_word(name, &self.host.denied_name_words())

@@ -777,7 +777,7 @@ The person changed: {}",
                 self.commit_lead(run, &format!("crossagents: {}", run.title))
                     .await?;
             }
-            self.ws_for(&run)
+            self.ws_for(run)
                 .create(&run.repo, &branch, &base, &path)
                 .await?;
             task.worktree = Some(path);
@@ -831,7 +831,7 @@ The person changed: {}",
     pub(crate) async fn cleanup_worktree(&self, run: &Run, task: &Task, delete_branch: bool) {
         if let Some(path) = &task.worktree {
             let branch = task.branch.as_deref().filter(|_| delete_branch);
-            if let Err(err) = self.ws_for(&run).remove(&run.repo, path, branch).await {
+            if let Err(err) = self.ws_for(run).remove(&run.repo, path, branch).await {
                 tracing::warn!(task = %task.key, error = %err, "cannot remove worktree");
             }
         }
@@ -839,7 +839,7 @@ The person changed: {}",
 
     async fn remove_integration(&self, run: &Run) {
         if let Err(err) = self
-            .ws_for(&run)
+            .ws_for(run)
             .remove(&run.repo, &self.integration_path(run), None)
             .await
         {

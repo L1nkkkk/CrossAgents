@@ -135,12 +135,12 @@ where
 
     // The command has exited (or was killed): read what is still in the pipes, but not for
     // long — a grandchild may hold a write end open long after the installer is done.
-    if !timed_out {
+    if !timed_out && readers {
         let drain = tokio::time::sleep(DRAIN_GRACE);
         tokio::pin!(drain);
-        while readers {
+        loop {
             tokio::select! {
-                line = rx.recv(), if readers => {
+                line = rx.recv() => {
                     match line {
                         Some(line) => {
                             if lines < limit {
