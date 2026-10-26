@@ -211,8 +211,8 @@ B3 远程开发：
 
 ## 十二、run 的收尾：再开 Work 与删除
 
-> 2026-10-26，方案见 [tasks/R1.md](tasks/R1.md)。起因：Pia 主导的 run 已 `completed`，再开 Work 被拒；停在 `planning` 的旧 run 删不掉。先做 A。
-> 待定：硬删除不做归档、未落地的分支默认保留（R1 §3.2），开工前确认。
+> 2026-10-26，方案见 [tasks/R1.md](tasks/R1.md)。起因：Pia 主导的 run 已 `completed`，再开 Work 被拒；停在 `planning` 的旧 run 删不掉。A、B 都已完成。
+> 已定：硬删除不做归档、未落地的分支默认保留（R1 §3.2）。
 
 A 已结束 run 的主导再开 Work：
 
@@ -227,7 +227,7 @@ B 删除 run：
 - [x] store-sqlite：一个事务删 `human_items`、`notes`、`tasks`、`runs`（不依赖 CASCADE）（2026-10-26，`human_items` 没有 run 列，按 JSON 里的 `run_id` 删；删不存在的 run 返回 NotFound）
 - [x] orchestrator：`delete_run(id, { branches, force })`，只删已结束的；按序移除主导副本与招募的 agent、任务工作区、集成工作区与构建目录、按需删分支，最后删库并发事件；单步失败只记 warn（2026-10-26，`delete.rs`；返回 `DeletedRun` 清单）
 - [x] 分支：已落地默认删，未落地默认留（`branches=true` 才删）；集成工作区有未提交改动且未落地时，不带 `force` 返回 409 并列出文件（2026-10-26，`workspace::delete_branch` / `uncommitted`）
-- [ ] 事件不删，GUI 对已删 run 的事件不显示链接
+- [x] 事件不删，GUI 对已删 run 的事件不显示链接（2026-10-26，事件保留在日志；Agents 页的「run 招募」只在 run 还在时显示链接）
 - [x] hub：`DELETE /v1/runs/{key}?branches=&force=`，`DeleteRunResponse` 与 bindings；cli：`crossagents run rm`（2026-10-26，`ApiErrorBody.files` 供 GUI 列文件）
-- [ ] GUI：Run 页「删除 / 取消并删除」、侧栏右键删除、确认框列清理项与分支选项、收到 `RunDeleted` 移出列表、正在看的被删就回首页；MockBridge 补数据
+- [x] GUI：Run 页「删除 / 取消并删除」、侧栏右键删除、确认框列清理项与分支选项、收到 `RunDeleted` 移出列表、正在看的被删就回首页；MockBridge 补数据（2026-10-26，`deleteRun.tsx`；确认框三种见 `docs/screens/r1/`）
 - [x] 测试：store 级联；`tests/delete_run.rs` 覆盖未结束 409、已落地全清、未落地保留分支、脏工作区要 force、原对话不受影响（2026-10-26，`store-sqlite` 一条 + `mock-agent/tests/delete_run.rs` 五条）

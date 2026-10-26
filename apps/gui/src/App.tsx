@@ -162,7 +162,7 @@ export function App() {
   let drawer = null;
   switch (section) {
     case "runs":
-      main = a ? <RunView runId={a} selectedTask={b === "tasks" ? c : undefined} /> : <HomeView />;
+      main = a ? <RunView runId={a} selectedTask={b === "tasks" ? c : undefined} confirmDelete={b === "delete"} /> : <HomeView />;
       if (a && b === "tasks" && c)
         drawer = (
           <ToolColumn

@@ -34,9 +34,16 @@ import type { CliInfo } from "@bindings/CliInfo";
  */
 export function AgentsPage() {
   const agents = useAgents();
+  const runs = useHubData(
+    () => api.listRuns().then((r) => new Set(r.runs.map((x) => x.id))),
+    [],
+    (e) => e.type.startsWith("run."),
+  );
   const [editing, setEditing] = useState<"external" | Agent>();
   const [connect, setConnect] = useState<ConnectInfo>();
   const list = (agents.data ?? []).filter((a) => !a.archived_at);
+  // A run that was deleted no longer exists to link to (docs/tasks/R1.md §3.2).
+  const runIds = runs.data ?? new Set<string>();
 
   return (
     <div className="team-page">
@@ -75,6 +82,7 @@ export function AgentsPage() {
             <MemberCard
               key={agent.id}
               agent={agent}
+              runIds={runIds}
               onEdit={() => setEditing(agent)}
               onConnect={() => api.connectAgent(agent.id).then(setConnect)}
             />
@@ -347,7 +355,20 @@ function TeamNotes() {
   );
 }
 
-function MemberCard({ agent, onEdit, onConnect }: { agent: Agent; onEdit: () => void; onConnect: () => void }) {
+function MemberCard({
+  agent,
+  runIds,
+  onEdit,
+  onConnect,
+}: {
+  agent: Agent;
+  /** The runs that still exist; a chip links to one of those only. */
+  runIds: Set<string>;
+  onEdit: () => void;
+  onConnect: () => void;
+}) {
+  const spawnedBy = (agent.config as Record<string, unknown> | null)?.spawned_by_run;
+  const runId = typeof spawnedBy === "string" ? spawnedBy : undefined;
   return (
     <div className="member">
       <div className="member-head">
@@ -363,8 +384,8 @@ function MemberCard({ agent, onEdit, onConnect }: { agent: Agent; onEdit: () => 
       <p className={`member-persona ${agent.profile.persona ? "" : "muted"}`}>{agent.profile.persona || "还没有设定人设。"}</p>
       <div className="member-foot">
         <span className={`chip hue av-${ROLE_HUE[agent.role] ?? "slate"}`}>{agent.role}</span>
-        {typeof (agent.config as Record<string, unknown> | null)?.spawned_by_run === "string" && (
-          <a className="chip accent" href={`#/runs/${(agent.config as Record<string, string>).spawned_by_run}`} title="由 run 的 lead 招来的队友">
+        {runId && runIds.has(runId) && (
+          <a className="chip accent" href={`#/runs/${runId}`} title="由 run 的 lead 招来的队友">
             run 招募
           </a>
         )}

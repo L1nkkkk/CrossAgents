@@ -374,6 +374,29 @@ export function approvalRun(): { state: MockState; script: Step[]; route: string
 }
 
 /**
+ * Deleting a run (docs/tasks/R1.md §3): the confirmation as it looks for a run that landed, one
+ * that did not, and one whose checkout still has changes — the last answers 409 with the files
+ * when the person clicks 删除 (the screenshot script does).
+ */
+export function deleteRun(kind: "landed" | "unlanded" | "dirty"): { state: MockState; script: Step[]; route: string } {
+  const scene = oauthRun("running");
+  const d = scene.state.runs[0];
+  for (const t of d.tasks) {
+    t.status = "merged";
+    t.assignee = null;
+  }
+  const landed = kind === "landed";
+  d.run = {
+    ...d.run,
+    status: "completed",
+    summary: "四个任务都合了：OAuth 回调、登录页按钮、Redis 会话存储。迁移脚本留给下一个 run。",
+    landed: landed ? { mode: "merge", by: "person", reference: "9f2c1ab", at: ago(20) } : null,
+  };
+  if (kind === "dirty") scene.state.dirty = { [d.run.id]: ["src/auth/session.rs", "web/src/pages/Login.tsx"] };
+  return { ...scene, script: [], route: `#/runs/${d.run.id}/delete` };
+}
+
+/**
  * Tracing a failure (docs/tasks/DOGFOOD.md §8): the run page's 追溯 shows #d's first failure
  * (its tests exited 101), every turn and command, and what each task cost.
  */

@@ -14,6 +14,7 @@ import type { HubInfo } from "@bindings/HubInfo";
 import { buildTag, compareBuilds } from "./lib/build";
 import { ACTIVE_RUN, runAgents } from "./App";
 import { Avatar, BrandMark, Icon, Mark, agentTitle, displayName, hueOf, isAgent, runTone, sessionHref } from "./components";
+import { DeleteRunDialog } from "./deleteRun";
 import { useConnectionStatus } from "./hub";
 import { t } from "./lib/i18n";
 import { prettyModel } from "./lib/models";
@@ -43,6 +44,9 @@ export function Sidebar({ route }: { route: string[] }) {
   const pinned = usePinned();
   const [query, setQuery] = useState("");
   const [section, selected] = route;
+  // A right-click on a run: its menu, and the delete confirmation it opens.
+  const [menu, setMenu] = useState<{ detail: RunDetail; x: number; y: number }>();
+  const [deleting, setDeleting] = useState<RunDetail>();
   const everyone = agents.data ?? [];
   const q = query.trim().toLowerCase();
   const matchesAgent = (a: Agent) =>
@@ -71,7 +75,18 @@ export function Sidebar({ route }: { route: string[] }) {
 
   const row = (item: Item) =>
     item.kind === "run" ? (
-      <RunRow key={item.key} detail={item.detail} agents={everyone} selected={isRun(item.detail)} isSession={isSession} searching={!!q} />
+      <RunRow
+        key={item.key}
+        detail={item.detail}
+        agents={everyone}
+        selected={isRun(item.detail)}
+        isSession={isSession}
+        searching={!!q}
+        onMenu={(e) => {
+          e.preventDefault();
+          setMenu({ detail: item.detail, x: e.clientX, y: e.clientY });
+        }}
+      />
     ) : (
       <SessionRow key={item.key} agent={item.agent} active={isSession(item.agent)} pinKey={item.key} recruits={recruitsOf(item.agent)} isSession={isSession} searching={!!q} />
     );
@@ -143,7 +158,32 @@ export function Sidebar({ route }: { route: string[] }) {
           </div>
         </div>
       </nav>
+      {menu && (
+        <RunMenu
+          at={menu}
+          onDelete={() => {
+            setDeleting(menu.detail);
+            setMenu(undefined);
+          }}
+          onClose={() => setMenu(undefined)}
+        />
+      )}
+      {deleting && <DeleteRunDialog detail={deleting} onClose={() => setDeleting(undefined)} />}
     </PendingPlans.Provider>
+  );
+}
+
+/** The right-click menu on a run: delete it, and everything it owns (docs/tasks/R1.md §3). */
+function RunMenu({ at, onDelete, onClose }: { at: { x: number; y: number }; onDelete: () => void; onClose: () => void }) {
+  return (
+    <>
+      <div className="menu-scrim" onMouseDown={onClose} onContextMenu={(e) => e.preventDefault()} />
+      <div className="context-menu" style={{ left: at.x, top: at.y }} role="menu">
+        <button role="menuitem" onClick={onDelete}>
+          删除
+        </button>
+      </div>
+    </>
   );
 }
 
@@ -212,7 +252,21 @@ const InChats = createContext(false);
 type Dot = "live" | "warn" | "danger" | "unread" | undefined;
 
 /** A run: its title, a chevron when it has a team, a status dot; the team nests under it. */
-function RunRow({ detail, agents, selected, isSession, searching }: { detail: RunDetail; agents: Agent[]; selected: boolean; isSession: (a: Agent) => boolean; searching: boolean }) {
+function RunRow({
+  detail,
+  agents,
+  selected,
+  isSession,
+  searching,
+  onMenu,
+}: {
+  detail: RunDetail;
+  agents: Agent[];
+  selected: boolean;
+  isSession: (a: Agent) => boolean;
+  searching: boolean;
+  onMenu?: (e: ReactMouseEvent) => void;
+}) {
   const { run } = detail;
   const members = runAgents(detail, agents);
   const unread = useUnread();
@@ -245,6 +299,7 @@ function RunRow({ detail, agents, selected, isSession, searching }: { detail: Ru
         title={`${run.title}\n${run.request}`}
         dot={dot}
         pinKey={runKey(detail)}
+        onMenu={onMenu}
         lead={<Mark shape="run" tone={runTone(run.status)} size={11} title={run.status} />}
         label={run.title}
         after={
@@ -410,6 +465,7 @@ function Row({
   pinKey,
   beside,
   archive,
+  onMenu,
 }: {
   href: string;
   active: boolean;
@@ -425,6 +481,8 @@ function Row({
   beside?: string;
   /** The conversation this row archives from its hover actions. */
   archive?: Agent;
+  /** The right-click menu of this row. */
+  onMenu?: (e: ReactMouseEvent) => void;
 }) {
   const pinned = usePinned();
   const isPinned = !!pinKey && pinned.has(pinKey);
@@ -442,6 +500,7 @@ function Row({
         onClick={(e) => beside && (e.ctrlKey || e.metaKey) && openAside(e)}
         onMouseDown={(e) => e.button === 1 && beside && e.preventDefault()}
         onAuxClick={(e) => e.button === 1 && beside && openAside(e)}
+        onContextMenu={onMenu}
       >
         {lead && <span className="row-lead">{lead}</span>}
         <span className="row-label">{label}</span>

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { Task } from "@bindings/Task";
 import type { Run } from "@bindings/Run";
@@ -6,7 +6,9 @@ import type { RunDetail } from "@bindings/RunDetail";
 import type { TaskSpec } from "@bindings/TaskSpec";
 import type { PlannedTask } from "@bindings/PlannedTask";
 import type { RunPolicy } from "@bindings/RunPolicy";
+import { navigate } from "../App";
 import { api, errorText } from "../api";
+import { DeleteRunDialog } from "../deleteRun";
 import {
   Avatar,
   ErrorBox,
@@ -25,11 +27,11 @@ import {
   time,
   useAgents,
 } from "../components";
-import { useHubData, type HubEvent } from "../hub";
+import { onHubEvent, useHubData, type HubEvent } from "../hub";
 import { BUCKET_LABEL, groupTasks, progress, taskState } from "../lib/taskState";
 import { PRESETS, budgetText, presetOf, presetPolicy, type Preset } from "../lib/policy";
 import { accountOf, prettyModel } from "../lib/models";
-import { StateWord, TaskChanges, useArmed } from "../parts";
+import { StateWord, TaskChanges } from "../parts";
 import { RunChanges, TaskReview } from "../review";
 import { RunTraceView } from "../trace";
 import { wsKey } from "../workspace";
@@ -60,12 +62,24 @@ const ACTIVE = ["planning", "awaiting_approval", "running", "paused"];
  * the messages, how it ended after them, and the task board beside them. The plan waits
  * for approval in the dock above the composer, as in the lead's own conversation.
  */
-export function RunView({ runId, selectedTask }: { runId: string; selectedTask?: string }) {
+export function RunView({ runId, selectedTask, confirmDelete }: { runId: string; selectedTask?: string; confirmDelete?: boolean }) {
   const detail = useRun(runId);
   const agents = useAgents();
-  const [error, setError] = useState<string>();
-  const [busy, setBusy] = useState(false);
-  const cancelArm = useArmed();
+  const [deleting, setDeleting] = useState(false);
+
+  // `#/runs/<id>/delete` opens the confirmation (a link the person can be sent; also how the
+  // mock previews show the dialog).
+  useEffect(() => {
+    if (confirmDelete) setDeleting(true);
+  }, [confirmDelete]);
+  // The run this page shows was deleted (here or from another window): there is nothing left
+  // to look at.
+  useEffect(() => {
+    const off = onHubEvent((e) => {
+      if (e.type === "run.deleted" && e.data.run_id === runId) navigate("");
+    });
+    return off;
+  }, [runId]);
 
   if (!detail.data) {
     return <div className="page-inner">{detail.error ? <ErrorBox error={detail.error} /> : <p className="muted">加载中…</p>}</div>;
@@ -75,19 +89,6 @@ export function RunView({ runId, selectedTask }: { runId: string; selectedTask?:
   const plannerAgent = agents.data?.find((a) => a.id === run.planner);
   const done = tasks.filter((t) => t.status === "merged").length;
   const allEnded = tasks.length > 0 && tasks.every((t) => ["merged", "failed", "cancelled"].includes(t.status));
-
-  async function cancel() {
-    setBusy(true);
-    setError(undefined);
-    try {
-      await api.cancelRun(run.id);
-      detail.reload();
-    } catch (err) {
-      setError(errorText(err));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   const header = (
     <div className="topbar">
@@ -100,18 +101,20 @@ export function RunView({ runId, selectedTask }: { runId: string; selectedTask?:
       )}
       <div className="spacer" />
       {plannerAgent ? <Who agent={plannerAgent} label="主导" /> : <a className="chip" href={sessionHref(run.planner)}>主导 · {planner}</a>}
-      {ACTIVE.includes(run.status) && (
-        <button className={`danger ${cancelArm.armed ? "armed" : ""}`} disabled={busy} onClick={() => cancelArm.click(cancel)}>
-          {cancelArm.armed ? "再点一次取消" : "取消 run"}
-        </button>
-      )}
+      <button
+        className="danger"
+        title={ACTIVE.includes(run.status) ? "先取消，再删除它的一切" : "删除这个 run、它的任务、agent 和工作区"}
+        onClick={() => setDeleting(true)}
+      >
+        {ACTIVE.includes(run.status) ? "取消并删除" : "删除"}
+      </button>
     </div>
   );
 
   const top = (
     <div className="run-head">
       <RunMeta run={run} agents={agents.data} />
-      <ErrorBox error={error ?? detail.error} />
+      <ErrorBox error={detail.error} />
       {run.status === "paused" && <div className="item-warn">已暂停：{run.note ?? "等你决定"}。在「问你」里选择加预算继续，或取消这个 run。</div>}
       {run.note && !["awaiting_approval", "paused", "planning"].includes(run.status) && <div className="item-error">{run.note}</div>}
     </div>
@@ -133,7 +136,20 @@ export function RunView({ runId, selectedTask }: { runId: string; selectedTask?:
 
   const side = tasks.length ? <TaskBoard run={run} tasks={tasks} agents={agents.data} selectedTask={selectedTask} /> : undefined;
 
-  return <SessionView key={run.planner} name={run.planner} header={header} top={top} bottom={bottom} side={side} />;
+  return (
+    <>
+      <SessionView key={run.planner} name={run.planner} header={header} top={top} bottom={bottom} side={side} />
+      {deleting && (
+        <DeleteRunDialog
+          detail={detail.data}
+          onClose={() => {
+            setDeleting(false);
+            if (confirmDelete) navigate("runs", runId);
+          }}
+        />
+      )}
+    </>
+  );
 }
 
 /** The run's tasks by what they need, each opening its details beside. */

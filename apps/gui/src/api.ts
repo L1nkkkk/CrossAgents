@@ -25,6 +25,7 @@ import type { AgentProfile } from "@bindings/AgentProfile";
 import type { ApiError as ApiErrorJson } from "@bindings/ApiError";
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
 import type { CreateRunRequest } from "@bindings/CreateRunRequest";
+import type { DeleteRunResponse } from "@bindings/DeleteRunResponse";
 import type { HubInfo } from "@bindings/HubInfo";
 import type { ListAgentsResponse } from "@bindings/ListAgentsResponse";
 import type { ListPluginsResponse } from "@bindings/ListPluginsResponse";
@@ -52,10 +53,14 @@ export class ApiError extends Error {
   /** HTTP status; 0 when the hub could not be reached. */
   status: number;
   code: string;
-  constructor(status: number, code: string, message: string) {
+  /** The files in the way, when the conflict is about a directory's changes (deleting a run
+   * whose checkout has uncommitted work). */
+  files: string[];
+  constructor(status: number, code: string, message: string, files: string[] = []) {
     super(message);
     this.status = status;
     this.code = code;
+    this.files = files;
   }
 }
 
@@ -105,6 +110,7 @@ async function request<T>(method: Method, path: string, body?: unknown): Promise
       response.status,
       parsed?.error.code ?? "http",
       parsed?.error.message ?? (response.body || `HTTP ${response.status}`),
+      parsed?.error.files ?? [],
     );
   }
   return (response.body ? JSON.parse(response.body) : undefined) as T;
@@ -155,6 +161,10 @@ export const api = {
   rejectRun: (key: string, req: RejectRunRequest) =>
     request<RunDetail>("POST", `/v1/runs/${enc(key)}/reject`, req),
   cancelRun: (key: string) => request<RunDetail>("POST", `/v1/runs/${enc(key)}/cancel`),
+  /** Deletes a run that ended; `branches` also deletes its branches, `force` goes past a
+   * checkout with uncommitted work. Answers with what it cleaned up. */
+  deleteRun: (key: string, opts: { branches?: boolean; force?: boolean } = {}) =>
+    request<DeleteRunResponse>("DELETE", `/v1/runs/${enc(key)}?branches=${!!opts.branches}&force=${!!opts.force}`),
   landRun: (key: string, mode: LandMode) => request<RunDetail>("POST", `/v1/runs/${enc(key)}/land`, { mode }),
   finishRun: (key: string) => request<RunDetail>("POST", `/v1/runs/${enc(key)}/finish`, {}),
   /** Everything a task changed (its worktree against its base), for review. */

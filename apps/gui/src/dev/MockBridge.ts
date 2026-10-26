@@ -51,6 +51,8 @@ export type MockState = {
   plugins: PluginInfo[];
   /** What a mock install or upgrade does: succeed, exit non-zero, or leave nothing behind. */
   install?: "ok" | "fail" | "missing";
+  /** Uncommitted files in a run's checkout, by run id: deleting it asks for force. */
+  dirty?: Record<string, string[]>;
   /** The API version `/v1/info` reports; `v1` when unset. */
   api?: string;
 };
@@ -209,6 +211,9 @@ export class MockBridge implements CrossAgentsBridge {
         }
         break;
       }
+      case "run.deleted":
+        s.runs = s.runs.filter((d) => d.run.id !== e.data.run_id);
+        break;
       case "human.asked":
         s.questions.push(e.data.item);
         break;
@@ -439,6 +444,7 @@ export class MockBridge implements CrossAgentsBridge {
         this.emit({ type: "agent.input_withdrawn", data: { id: a.id, message_id: mid } });
         return json(204);
       }
+      if ((m = p.match(/^\/v1\/runs\/([^/]+)$/))) return this.deleteRun(m[1], url);
       return json(204);
     }
     return json(405, { error: { code: "bad_request", message: `${method} ${p}` } });
@@ -568,8 +574,38 @@ export class MockBridge implements CrossAgentsBridge {
     return json(204);
   }
 
+  /**
+   * Deleting a run (docs/tasks/R1.md §3): only one that ended, a dirty checkout asking for
+   * force, and then the run and everything the mock keeps for it go.
+   */
+  private deleteRun(key: string, url: URL): HubResponse {
+    const s = this.state;
+    const d = s.runs.find((x) => x.run.id === decodeURIComponent(key));
+    if (!d) return notFound("run");
+    const { run } = d;
+    if (!["completed", "failed", "cancelled"].includes(run.status))
+      return json(409, { error: { code: "conflict", message: `the run is ${run.status}: cancel it first` } });
+    const dirty = s.dirty?.[run.id] ?? [];
+    const force = url.searchParams.get("force") === "true";
+    if (dirty.length && !run.landed && !force)
+      return json(409, {
+        error: { code: "conflict", message: `uncommitted changes, and the run never landed:\n${dirty.join("\n")}\nCommit them, or delete it with force.`, files: dirty },
+      });
+    const deleteBranches = url.searchParams.get("branches") === "true" || !!run.landed;
+    const lead = s.agents.find((a) => a.id === run.planner);
+    const spawned = s.agents.filter((a) => (a.config as Record<string, unknown> | null)?.spawned_by_run === run.id);
+    s.agents = s.agents.filter((a) => !spawned.includes(a) && a.id !== run.planner);
+    s.runs = s.runs.filter((x) => x.run.id !== run.id);
+    this.emit({ type: "run.deleted", data: { run_id: run.id } });
+    return json(200, {
+      agents: [lead, ...spawned].filter((a): a is Agent => !!a).map((a) => a.name),
+      worktrees: run.in_place ? [] : [`${run.repo}/.crossagents/worktrees/${run.id.slice(0, 8)}/integration`],
+      branches: deleteBranches && !run.in_place ? [run.branch] : [],
+      warnings: [],
+    });
+  }
+
   /** Attaches a finished turn's diff (fixtures build transcripts with stats already in). */
   static withDiff(s: MockState, messageId: string, diff: string | undefined) {
     if (diff && turnStat(diff)) s.diffs.set(messageId, diff);
-  }
-}
+  }}

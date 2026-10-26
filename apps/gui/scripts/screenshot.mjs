@@ -4,6 +4,7 @@
 //
 //   node scripts/screenshot.mjs --scenario review --out shot.png
 //     [--route '#/runs/…'] [--width 1280] [--height 800] [--theme light|dark] [--wait 1500]
+//     [--click '<css selector>']
 //
 // Prints the PNG's path as JSON on stdout: {"path": "…", "url": "…"}.
 
@@ -15,7 +16,7 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 function parse(argv) {
-  const out = { scenario: "running", width: 1280, height: 800, wait: 1500, theme: "", route: "", out: "screenshot.png" };
+  const out = { scenario: "running", width: 1280, height: 800, wait: 1500, theme: "", route: "", click: "", out: "screenshot.png" };
   for (let i = 0; i < argv.length; i += 2) {
     const key = argv[i]?.replace(/^--/, "");
     if (!(key in out) || argv[i + 1] === undefined) throw new Error(`unknown or incomplete option ${argv[i]}`);
@@ -65,6 +66,7 @@ async function main() {
           CA_SHOT_HEIGHT: String(opts.height),
           CA_SHOT_WAIT: String(opts.wait),
           CA_SHOT_THEME: opts.theme,
+          CA_SHOT_CLICK: opts.click,
         },
       });
       child.on("error", fail);
