@@ -5,21 +5,26 @@
 //! process still in it. Children inherit their parent's job, so putting an agent in one
 //! takes its whole tree along: shells, MCP servers, dev servers, builds.
 //!
-//! Elsewhere [`Job::new`] fails and callers go on without one.
+//! Elsewhere [`Job::new`] fails and callers go on without one; on Unix [`kill_group`] ends a
+//! process group instead.
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod imp {
     use std::io;
 
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
         SetInformationJobObject,
     };
     use windows_sys::Win32::System::Threading::{
-        GetCurrentProcess, OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+        GetCurrentProcess, OpenProcess, OpenThread, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+        ResumeThread, THREAD_SUSPEND_RESUME,
     };
 
     /// An owned job handle (kept as an integer so the type is `Send`).
@@ -89,6 +94,55 @@ mod imp {
                 CloseHandle(self.handle());
             }
         }
+    }
+
+    /// Lets process `pid`, started with `CREATE_SUSPENDED`, run: resumes its threads (a
+    /// suspended process has only its first one).
+    pub fn resume(pid: u32) -> io::Result<()> {
+        // SAFETY: the snapshot and thread handles are checked and closed before returning;
+        // `entry` is sized as Thread32First requires.
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if snapshot == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+            let mut entry: THREADENTRY32 = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            let mut resumed = 0;
+            let mut more = Thread32First(snapshot, &mut entry);
+            while more != 0 {
+                if entry.th32OwnerProcessID == pid {
+                    let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                    if !thread.is_null() {
+                        if ResumeThread(thread) != u32::MAX {
+                            resumed += 1;
+                        }
+                        CloseHandle(thread);
+                    }
+                }
+                more = Thread32Next(snapshot, &mut entry);
+            }
+            CloseHandle(snapshot);
+            if resumed == 0 {
+                return Err(io::Error::other(format!(
+                    "no thread of process {pid} could be resumed"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+pub(super) use imp::resume;
+
+/// Kills process group `group` (SIGKILL); a group that is already gone is fine.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub(super) fn kill_group(group: u32) {
+    // SAFETY: killpg only sends a signal; it touches no memory of ours.
+    unsafe {
+        libc::killpg(group as libc::pid_t, libc::SIGKILL);
     }
 }
 

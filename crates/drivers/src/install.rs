@@ -9,11 +9,11 @@
 use std::process::Stdio;
 use std::time::Duration;
 
+use crossagents_core::process::Job;
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use crate::host::job::Job;
 use crate::process::{hide_console, resolve_program};
 
 /// How long an install or upgrade may take.

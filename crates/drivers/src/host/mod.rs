@@ -13,7 +13,6 @@
 //! is told to stop over its own connection, which proves who it is.
 
 mod client;
-pub mod job;
 mod serve;
 pub mod wire;
 

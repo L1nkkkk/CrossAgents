@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::CheckResult;
-use crossagents_core::process::NoWindow;
+use crossagents_core::process::{self, NoWindow};
 use tokio::process::Command;
 
 use crate::workspace::worktree_env;
@@ -126,42 +126,46 @@ impl Verifier for ShellVerifier {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
-            let result = match cmd.spawn() {
+            // The whole tree goes when the check ends, times out or fails: killing the shell
+            // alone left what it started still writing to the worktree.
+            let result = match process::spawn_tree(&mut cmd) {
                 Err(e) => CheckResult {
                     command: command.clone(),
                     exit_code: None,
                     passed: false,
                     output: format!("cannot start: {e}"),
                 },
-                Ok(child) => match tokio::time::timeout(timeout, child.wait_with_output()).await {
-                    Err(_) => CheckResult {
-                        command: command.clone(),
-                        exit_code: None,
-                        passed: false,
-                        output: format!("timed out after {}s", timeout.as_secs()),
-                    },
-                    Ok(Err(e)) => CheckResult {
-                        command: command.clone(),
-                        exit_code: None,
-                        passed: false,
-                        output: format!("failed to run: {e}"),
-                    },
-                    Ok(Ok(out)) => {
-                        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-                        text.push_str(&String::from_utf8_lossy(&out.stderr));
-                        let code = out.status.code();
-                        let mut output = tail(text.trim(), self.max_output);
-                        if !out.status.success() {
-                            output = explain(code, output);
-                        }
-                        CheckResult {
+                Ok((child, _tree)) => {
+                    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+                        Err(_) => CheckResult {
                             command: command.clone(),
-                            exit_code: code,
-                            passed: out.status.success(),
-                            output,
+                            exit_code: None,
+                            passed: false,
+                            output: format!("timed out after {}s", timeout.as_secs()),
+                        },
+                        Ok(Err(e)) => CheckResult {
+                            command: command.clone(),
+                            exit_code: None,
+                            passed: false,
+                            output: format!("failed to run: {e}"),
+                        },
+                        Ok(Ok(out)) => {
+                            let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+                            text.push_str(&String::from_utf8_lossy(&out.stderr));
+                            let code = out.status.code();
+                            let mut output = tail(text.trim(), self.max_output);
+                            if !out.status.success() {
+                                output = explain(code, output);
+                            }
+                            CheckResult {
+                                command: command.clone(),
+                                exit_code: code,
+                                passed: out.status.success(),
+                                output,
+                            }
                         }
                     }
-                },
+                }
             };
             let passed = result.passed;
             results.push(result);
@@ -261,6 +265,28 @@ mod tests {
         let res = verifier.check(Path::new("."), &[sleep.into()]).await;
         assert!(!res[0].passed);
         assert!(res[0].output.contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_check_takes_what_it_started_along() {
+        let dir = tempfile::tempdir().unwrap();
+        let verifier = ShellVerifier {
+            timeout: Duration::from_millis(500),
+            ..ShellVerifier::default()
+        };
+        // The shell's child writes the file 3s in, long after the check gave up on it.
+        let late = if cfg!(windows) {
+            r#"powershell -NoProfile -Command "Start-Sleep 3; Set-Content -Path late.txt -Value x""#
+        } else {
+            "sh -c 'sleep 3; echo x > late.txt' & wait"
+        };
+        let res = verifier.check(dir.path(), &[late.into()]).await;
+        assert!(res[0].output.contains("timed out"), "{res:?}");
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert!(
+            !dir.path().join("late.txt").exists(),
+            "the check's child kept running"
+        );
     }
 
     #[cfg(windows)]

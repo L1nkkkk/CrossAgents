@@ -11,12 +11,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crossagents_core::process::Job;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::{Notify, mpsc};
 
-use super::job::Job;
 use super::record_path;
 use super::wire::{FromHost, HostRecord, HostSpec, ToHost, encode};
 use crate::process::hide_console;

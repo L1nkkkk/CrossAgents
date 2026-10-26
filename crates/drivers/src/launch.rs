@@ -10,12 +10,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crossagents_core::process::Job;
 use crossagents_core::{CoreError, ExitCause};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::process::Command;
 use tokio::sync::{Notify, watch};
 
-use crate::host::{self, HostSpec, job::Job};
+use crate::host::{self, HostSpec};
 use crate::process::{StderrTail, hide_console};
 
 pub type BoxRead = Box<dyn AsyncRead + Send + Unpin>;
