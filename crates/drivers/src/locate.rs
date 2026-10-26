@@ -373,19 +373,36 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// How long what the registry says `PATH` is stays good: lookups come in bursts (every
+/// plugin, several times per `GET /v1/plugins`), and each read starts two `reg` processes.
+#[cfg(windows)]
+const REGISTRY_PATH_TTL: Duration = Duration::from_secs(30);
+
 /// `PATH` as Windows now has it (the user's, then the machine's), or `None` where there is
 /// no registry to read.
 fn registry_path() -> Option<Vec<PathBuf>> {
     #[cfg(windows)]
     {
+        type Cached = Option<(Instant, Option<Vec<PathBuf>>)>;
+        static CACHE: std::sync::Mutex<Cached> = std::sync::Mutex::new(None);
+        let mut cache = CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((at, dirs)) = cache.as_ref()
+            && at.elapsed() < REGISTRY_PATH_TTL
+        {
+            return dirs.clone();
+        }
         let user = reg_path(r"HKCU\Environment");
         let machine =
             reg_path(r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment");
-        (user.is_some() || machine.is_some()).then(|| {
+        let dirs = (user.is_some() || machine.is_some()).then(|| {
             registry_dirs(user.as_deref(), machine.as_deref(), &|name| {
                 std::env::var(name).ok()
             })
-        })
+        });
+        *cache = Some((Instant::now(), dirs.clone()));
+        dirs
     }
     #[cfg(not(windows))]
     {
@@ -396,7 +413,10 @@ fn registry_path() -> Option<Vec<PathBuf>> {
 /// `Path` under `key` as `reg query` prints it.
 #[cfg(windows)]
 fn reg_path(key: &str) -> Option<String> {
+    use crossagents_core::process::NoWindow;
+    // The hub runs without a console: without this every lookup flashes a window.
     let output = std::process::Command::new("reg")
+        .no_window()
         .args(["query", key, "/v", "Path"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
