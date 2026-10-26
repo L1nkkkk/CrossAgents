@@ -592,13 +592,17 @@ export class MockBridge implements CrossAgentsBridge {
         error: { code: "conflict", message: `uncommitted changes, and the run never landed:\n${dirty.join("\n")}\nCommit them, or delete it with force.`, files: dirty },
       });
     const deleteBranches = url.searchParams.get("branches") === "true" || !!run.landed;
-    const lead = s.agents.find((a) => a.id === run.planner);
+    const found = s.agents.find((a) => a.id === run.planner);
+    const home = (found?.config as Record<string, unknown> | null)?.lead_home;
+    const lead = typeof home === "string" ? undefined : found;
     const spawned = s.agents.filter((a) => (a.config as Record<string, unknown> | null)?.spawned_by_run === run.id);
-    s.agents = s.agents.filter((a) => !spawned.includes(a) && a.id !== run.planner);
+    s.agents = s.agents.filter((a) => !spawned.includes(a) && a !== lead);
+    if (found && typeof home === "string") found.cwd = home;
     s.runs = s.runs.filter((x) => x.run.id !== run.id);
     this.emit({ type: "run.deleted", data: { run_id: run.id } });
     return json(200, {
       agents: [lead, ...spawned].filter((a): a is Agent => !!a).map((a) => a.name),
+      returned: found && typeof home === "string" ? [found.name] : [],
       worktrees: run.in_place ? [] : [`${run.repo}/.crossagents/worktrees/${run.id.slice(0, 8)}/integration`],
       branches: deleteBranches && !run.in_place ? [run.branch] : [],
       warnings: [],

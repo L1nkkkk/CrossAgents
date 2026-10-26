@@ -231,6 +231,7 @@ fn print_cleanup(done: &DeleteRunResponse) {
         }
     };
     list("agents", &done.agents);
+    list("back where they came from", &done.returned);
     list("worktrees", &done.worktrees);
     list("branches", &done.branches);
     if !done.warnings.is_empty() {

@@ -441,6 +441,10 @@ impl AgentHost for HubHost {
             .await?;
         Ok(())
     }
+
+    async fn stop_agent(&self, agent: AgentId) -> Result<(), CoreError> {
+        self.runtime.stop(&AgentKey::Id(agent)).await
+    }
 }
 
 #[cfg(test)]

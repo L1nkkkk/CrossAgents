@@ -92,4 +92,7 @@ pub trait AgentHost: Send + Sync {
     async fn archive_agent(&self, agent: AgentId) -> Result<(), CoreError>;
     /// Stops and deletes an agent created with [`Self::clone_agent`].
     async fn remove_agent(&self, agent: AgentId) -> Result<(), CoreError>;
+    /// Stops the agent's session and process, keeping the agent; its next message starts it
+    /// again.
+    async fn stop_agent(&self, agent: AgentId) -> Result<(), CoreError>;
 }

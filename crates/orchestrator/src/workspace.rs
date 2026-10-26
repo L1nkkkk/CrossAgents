@@ -63,6 +63,12 @@ pub trait WorkspaceProvider: Send + Sync {
     async fn delete_branch(&self, repo: &Path, branch: &str) -> Result<(), CoreError>;
     /// The files `path` changed and did not commit: edits and untracked files, by path.
     async fn uncommitted(&self, path: &Path) -> Result<Vec<String>, CoreError>;
+    /// Forgets working copies of `repo` whose directory is gone (deleted by hand when
+    /// removing them failed), so their branches can be checked out again.
+    async fn prune(&self, repo: &Path) -> Result<(), CoreError> {
+        let _ = repo;
+        Ok(())
+    }
 }
 
 /// Bytes of conflict hunks a failed merge reports.
@@ -462,6 +468,11 @@ impl WorkspaceProvider for GitWorkspaces {
         if let Some(branch) = branch {
             git(repo, &["branch", "-D", branch]).await?;
         }
+        Ok(())
+    }
+
+    async fn prune(&self, repo: &Path) -> Result<(), CoreError> {
+        git(repo, &["worktree", "prune"]).await?;
         Ok(())
     }
 

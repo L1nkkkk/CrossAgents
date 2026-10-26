@@ -3,12 +3,12 @@
 //! not come back — so only a run that ended can go, and a checkout with work that never landed
 //! asks first. Events stay: the log only grows, and the trace outlives the run.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crossagents_core::{Agent, AgentKey, CoreError, EventKind, Run, RunId};
 use serde::Serialize;
 
-use crate::engine::{Orchestrator, short};
+use crate::engine::{LEAD_HOME, Orchestrator, short};
 
 /// What to clean up along with a run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -26,6 +26,9 @@ pub struct DeleteRun {
 pub struct DeletedRun {
     /// The agents removed, by name: the lead's copy and the ones the run recruited.
     pub agents: Vec<String>,
+    /// Leads the run moved into its checkout instead of copying, by name: stopped and back in
+    /// the directory they came from, not removed.
+    pub returned: Vec<String>,
     /// The directories that went: the run's checkout, its tasks', and the build directory
     /// they shared.
     pub worktrees: Vec<String>,
@@ -61,8 +64,21 @@ impl Orchestrator {
 
         let mut done = DeletedRun::default();
         // b. The lead's copy and the run's recruits: their turn stopped, then removed. The
-        // conversation that proposed the Work is another agent, and stays as it is.
-        for agent in self.owned_agents(&run).await? {
+        // conversation that proposed the Work is another agent, and stays as it is. A lead
+        // the run moved in rather than copied is someone the person may have picked from the
+        // roster: it is stopped and goes back to where it lived.
+        let (owned, moved) = self.owned_agents(&run).await?;
+        if let Some((lead, home)) = moved {
+            match self.send_home(&lead, &home).await {
+                Ok(()) => done.returned.push(lead.name.clone()),
+                Err(err) => done.warnings.push(format!(
+                    "{}: cannot go back to {}: {err}",
+                    lead.name,
+                    home.display()
+                )),
+            }
+        }
+        for agent in owned {
             if let Err(err) = self.host.interrupt(agent.id).await {
                 done.warnings.push(format!(
                     "{}: cannot stop its running turn: {err}",
@@ -128,13 +144,25 @@ impl Orchestrator {
         Ok(done)
     }
 
-    /// The agents a run owns: the lead living in its checkout, and the ones it recruited.
-    async fn owned_agents(&self, run: &Run) -> Result<Vec<Agent>, CoreError> {
+    /// The agents a run owns: the lead's copy living in its checkout, and the ones it
+    /// recruited; and apart, a lead that was moved in, with the directory it came from.
+    async fn owned_agents(
+        &self,
+        run: &Run,
+    ) -> Result<(Vec<Agent>, Option<(Agent, PathBuf)>), CoreError> {
         let mut agents = Vec::new();
+        let mut moved = None;
         if self.lead_lives_in_integration(run).await
             && let Ok(lead) = self.store.get_agent(&AgentKey::Id(run.planner)).await
         {
-            agents.push(lead);
+            match lead
+                .config
+                .get(LEAD_HOME)
+                .and_then(serde_json::Value::as_str)
+            {
+                Some(home) => moved = Some((lead.clone(), PathBuf::from(home))),
+                None => agents.push(lead),
+            }
         }
         let id = run.id.to_string();
         for agent in self.store.list_agents().await? {
@@ -142,12 +170,27 @@ impl Orchestrator {
                 .config
                 .get("spawned_by_run")
                 .and_then(serde_json::Value::as_str);
-            if spawned == Some(id.as_str()) {
+            if spawned == Some(id.as_str()) && !agents.iter().any(|a| a.id == agent.id) {
                 agents.push(agent);
             }
         }
-        agents.dedup_by_key(|a| a.id);
-        Ok(agents)
+        Ok((agents, moved))
+    }
+
+    /// Stops a lead the run moved into its checkout and puts it back in `home`, without the
+    /// mark. Its session was in the checkout, so its next turn starts a new one when resuming
+    /// fails there.
+    async fn send_home(&self, lead: &Agent, home: &Path) -> Result<(), CoreError> {
+        self.host.stop_agent(lead.id).await?;
+        let mut config = lead.config.clone();
+        if let Some(map) = config.as_object_mut() {
+            map.remove(LEAD_HOME);
+        }
+        self.store.update_agent_config(lead.id, &config).await?;
+        self.store.update_agent_cwd(lead.id, home).await?;
+        let agent = self.store.get_agent(&AgentKey::Id(lead.id)).await?;
+        self.publish(EventKind::AgentUpdated { agent }).await;
+        Ok(())
     }
 
     /// The branches a run left behind: its own, and each task's.
@@ -201,6 +244,11 @@ impl Orchestrator {
             }
         }
         if std::fs::remove_dir_all(path).is_ok() {
+            // Git still lists the working copy (`.git/worktrees/<name>`), which would keep its
+            // branch from being deleted or checked out again.
+            if let Err(err) = self.ws_for(run).prune(&run.repo).await {
+                tracing::warn!(repo = %run.repo.display(), error = %err, "cannot prune worktrees");
+            }
             return Ok(());
         }
         Err(last.unwrap_or_else(|| CoreError::Storage("cannot remove the working copy".into())))

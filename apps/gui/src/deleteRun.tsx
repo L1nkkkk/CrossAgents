@@ -12,6 +12,8 @@ export function DeleteRunDialog({ detail, onClose }: { detail: RunDetail; onClos
   const { run } = detail;
   const agents = useAgents();
   const lead = agentName(agents.data, run.planner);
+  // A lead the run moved in (not a copy) goes back to its own directory instead of away.
+  const leadHome = (agents.data?.find((a) => a.id === run.planner)?.config as Record<string, unknown> | null)?.lead_home;
   const live = ACTIVE_RUN.includes(run.status);
   const landed = !!run.landed;
   // A landed run's branches carry nothing the base branch lacks; an unlanded one's carry
@@ -52,7 +54,12 @@ export function DeleteRunDialog({ detail, onClose }: { detail: RunDetail; onClos
           <dt>主导</dt>
           <dd>
             {lead}
-            {!run.in_place && <span className="muted"> · 和 {lead} 的对话会一起删除</span>}
+            {!run.in_place &&
+              (typeof leadHome === "string" ? (
+                <span className="muted"> · {lead} 会保留，回到 <code>{leadHome}</code>，这个 run 里的对话不再接着</span>
+              ) : (
+                <span className="muted"> · 和 {lead} 的对话会一起删除</span>
+              ))}
           </dd>
           <dt>工作区</dt>
           <dd className="mono" style={{ overflowWrap: "anywhere" }}>

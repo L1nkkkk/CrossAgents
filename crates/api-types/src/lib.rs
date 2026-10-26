@@ -741,6 +741,9 @@ pub struct FinishRequest {
 pub struct DeleteRunResponse {
     /// The agents removed, by name: the lead's copy and the ones the run recruited.
     pub agents: Vec<String>,
+    /// Leads the run moved into its checkout instead of copying, by name: stopped and back in
+    /// the directory they came from, not removed.
+    pub returned: Vec<String>,
     /// The directories that went: the run's checkout, its tasks', and the build directory
     /// they shared.
     pub worktrees: Vec<String>,

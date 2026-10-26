@@ -1200,6 +1200,7 @@ async fn delete_run(
         .await?;
     Ok(Json(DeleteRunResponse {
         agents: done.agents,
+        returned: done.returned,
         worktrees: done.worktrees,
         branches: done.branches,
         warnings: done.warnings,

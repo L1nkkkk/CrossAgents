@@ -10,6 +10,11 @@ export type DeleteRunResponse = {
  */
 agents: Array<string>, 
 /**
+ * Leads the run moved into its checkout instead of copying, by name: stopped and back in
+ * the directory they came from, not removed.
+ */
+returned: Array<string>, 
+/**
  * The directories that went: the run's checkout, its tasks', and the build directory
  * they shared.
  */

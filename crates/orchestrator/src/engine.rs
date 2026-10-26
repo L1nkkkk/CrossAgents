@@ -68,6 +68,10 @@ pub struct Orchestrator {
     pub(crate) approvals: std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
 }
 
+/// Agent config key: the directory a lead lived in before the run moved it into its checkout
+/// (a lead that never started a session moves rather than being copied).
+pub(crate) const LEAD_HOME: &str = "lead_home";
+
 pub(crate) fn short(id: impl ToString) -> String {
     let s = id.to_string().replace('-', "");
     s[s.len().saturating_sub(8)..].to_owned()
@@ -349,6 +353,19 @@ impl Orchestrator {
         let fresh = planner.status == AgentStatus::Stopped
             && self.store.last_session_id(planner.id).await?.is_none();
         if fresh {
+            // The agent itself moves, so deleting the run sends it back rather than removing
+            // it (`delete.rs`): it may be one the person picked from the roster.
+            let mut config = planner.config.clone();
+            if !config.is_object() {
+                config = serde_json::json!({});
+            }
+            if let Some(map) = config.as_object_mut() {
+                map.insert(
+                    LEAD_HOME.into(),
+                    planner.cwd.display().to_string().into(),
+                );
+            }
+            self.store.update_agent_config(planner.id, &config).await?;
             self.store.update_agent_cwd(planner.id, dir).await?;
             let lead = self.store.get_agent(&AgentKey::Id(planner.id)).await?;
             self.publish(EventKind::AgentUpdated {
@@ -362,6 +379,7 @@ impl Orchestrator {
         if let Some(map) = config.as_object_mut() {
             map.remove("spawned_by_agent");
             map.remove("spawned_by_run");
+            map.remove(LEAD_HOME);
         }
         self.host
             .spawn_agent(Agent {

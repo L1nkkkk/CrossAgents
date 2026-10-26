@@ -231,3 +231,45 @@ B 删除 run：
 - [x] hub：`DELETE /v1/runs/{key}?branches=&force=`，`DeleteRunResponse` 与 bindings；cli：`crossagents run rm`（2026-10-26，`ApiErrorBody.files` 供 GUI 列文件）
 - [x] GUI：Run 页「删除 / 取消并删除」、侧栏右键删除、确认框列清理项与分支选项、收到 `RunDeleted` 移出列表、正在看的被删就回首页；MockBridge 补数据（2026-10-26，`deleteRun.tsx`；确认框三种见 `docs/screens/r1/`）
 - [x] 测试：store 级联；`tests/delete_run.rs` 覆盖未结束 409、已落地全清、未落地保留分支、脏工作区要 force、原对话不受影响（2026-10-26，`store-sqlite` 一条 + `mock-agent/tests/delete_run.rs` 五条）
+- [x] 搬进来的主导不删：从没开过会话的主导是被挪进集成工作区而不是复制的，可能是人从名单里选的；删 run 时停掉它、cwd 改回原目录，清单里列在 `returned`，确认框写明「会保留」（2026-10-27，`lead_in` 记下 `lead_home`，`delete.rs::send_home`，`AgentHost::stop_agent`；测试 `a_lead_moved_into_the_run_goes_back_home`）
+- [x] 工作区删不掉、靠 `remove_dir_all` 兜底删掉目录后补 `git worktree prune`，不在 `.git/worktrees/` 留残留记录（2026-10-27，`WorkspaceProvider::prune`；没有测试，Windows 占用文件的场景不好造）
+
+## 十三、借鉴 Multica、magpie、Lancer
+
+> 2026-10-27 整理，依据 [Multica 调研](research/multica.md) 与 [magpie 与 Lancer 调研](research/magpie-lancer.md)（都是 2026-10-26）。
+> 顺序按两份调研 §4：先交接卡和选账号，再做 Multica 的三条唤醒规则；心跳与排队超时随 §八 B1 一起做。「不学的」见各自 §3，这里不再列。
+
+第一批（P0）：
+
+- [ ] 交接卡（Lancer）：`task_assign`、改派（`task.rerouted`）、克隆接手时生成「发起方 → 接手方、文件、摘要、决策、待解问题、交接时上下文大小」，`api-types` 先定结构，事件带字段，对话里显示成卡片（magpie-lancer §2.1）
+- [ ] 选账号（magpie）：`routing.rs` 默认先用最早续期的账号；新克隆的 Worker 到 90% 让号、返工中的到 98% 才换；失败的账号排到队尾不剔除；额度未知的先试一次读出余量（magpie-lancer §2.2）
+
+第二批（P0，agent 间通信里空着的那块）：
+
+- [ ] 唤醒规则（Multica）：agent 挂「等某事」的规则后结束本轮，条件满足再起一轮并说明被什么唤醒；自己的消息不唤醒自己、排队去重、同一规则无人参与连环触发 3 次或 1 小时超过 12 次自动暂停、等待默认最多 7 天；任务结束时规则全关（multica §2.1）
+- [ ] 分阶段唤醒（Multica）：子任务带 stage，一批全部结束就唤醒 lead 放行下一批，全部结束再唤醒一次做汇总；内置规则，不用手建（multica §2.2）
+- [ ] Planner 唤醒表（Multica）：成员发进展但没 @ 人才唤醒 Planner，@ 了别人不唤醒，Planner 自己的消息不唤醒；派活协议和花名册作为固定段落追加在 Planner 指令后（multica §2.3，对应 DESIGN §4.5、§6）
+
+第三批（P1）：
+
+- [ ] Run 泳道图（Lancer）：一个 Worker 一根线，节点有提交、交接、测试、重试、改派、落地、上下文压缩、模型切换、等你；带聚焦模式；依赖交接卡（magpie-lancer §2.3）
+- [ ] 接力链条（Lancer）：Run 页顶部每条任务线一行 `Rex ✓ → Ada → 你`（magpie-lancer §2.4）
+- [ ] 额度快作废时提醒 Planner 多派活（magpie）（magpie-lancer §2.5）
+- [ ] 「需要你」内嵌在事件流和泳道节点上，选项可行内点选（Lancer）（magpie-lancer §2.6）
+- [ ] 工具步骤按产出命名，产物在折叠行下给缩略图（Lancer）（magpie-lancer §2.7）
+- [ ] 运行与任务分开：一次运行结束不等于任务完成（Multica）（multica §2.4）
+- [ ] 失败分两类，只自动重试基础设施故障（离线、超时、目录准备失败、网络），`agent_error` 直接停并说明原因；会污染会话的故障在原目录开新会话（Multica）（multica §2.5）
+- [ ] 本地目录锁：同一目录同时只跑一个运行，后来的显示 `waiting_local_directory`（Multica）（multica §2.6）
+- [>] 心跳 15 秒、约 3 分钟判离线；排队超时要「心跳缺席超过宽限期」与「这条运行排了这么久」同时满足（Multica）：随 §八 B1 做（multica §2.7、§2.8）
+
+第四批（P2）：
+
+- [ ] 描述文件加 `min_version`，低于最低版本不注册，GUI 显示「版本过低」（Multica）（multica §2.9）
+- [ ] 核对注入 hub MCP 时有没有丢掉用户级 MCP 配置、有没有重复起同一服务器（Claude 的 `--strict-mcp-config`、CodeBuddy）（Multica）（multica §2.10）
+- [ ] `run trace` 给出候选账号的排序和理由（magpie）（magpie-lancer §2.8）
+- [>] 设备级日 / 周 / 月 token 与成本上限（magpie）：随 §八 A1 建 `devices` 表时加（magpie-lancer §2.9）
+- [~] CLI 版本：Agents 页已显示版本与来源（2026-10-26，4425631）；不在已验证范围时标出还没做（magpie）（magpie-lancer §2.10）
+- [ ] 从 `~/.codex/auth.json`、`~/.claude/.credentials.json` 导入账号，落到 M5 的独立目录；导入前提示刷新 ChatGPT 令牌会让原工具登出（magpie）（magpie-lancer §2.11）
+- [ ] 工作流交接：每一步设交给谁、完成后去哪、打回退到哪，交接前能预览说明（Multica）（multica §2.12）
+- [ ] 费用条：每次运行一根，按 agent、模型拆分，与额度管理一起做（Multica）（multica §2.13）
+- [ ] 自动化熔断：7 天内至少 50 次运行且失败率 90% 时自动暂停（Multica）（multica §2.14）

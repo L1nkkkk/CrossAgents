@@ -315,3 +315,55 @@ async fn the_conversation_that_proposed_the_work_stays() {
         "{transcript}"
     );
 }
+
+/// A lead that never had a session is moved into the run's checkout, not copied: it may be
+/// someone the person picked from the roster, so deleting the run sends it back to where it
+/// lived instead of removing it.
+#[tokio::test]
+async fn a_lead_moved_into_the_run_goes_back_home() {
+    let (repo, t) = setup().await;
+    let pia = t
+        .add_agent_in("pia", Some("opus"), "planner", repo.path())
+        .await;
+    let resp = t
+        .post(
+            "/v1/runs",
+            json!({ "request": "Add notes.txt.", "planner": "pia" }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let run: Value = resp.json().await.unwrap();
+    let id = run["id"].as_str().unwrap().to_owned();
+    // Moved, not copied: the run's lead is pia itself, living in the run's checkout.
+    assert_eq!(run["planner"], json!(pia.id.to_string()), "{run}");
+    let moved = agent(&t, "pia").await;
+    assert_ne!(
+        moved["cwd"],
+        json!(repo.path().display().to_string()),
+        "{moved}"
+    );
+
+    let resp = t.post(&format!("/v1/runs/{id}/finish"), json!({})).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let resp = t.delete(&format!("/v1/runs/{id}")).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let done: Value = resp.json().await.unwrap();
+    assert_eq!(done["returned"], json!(["pia"]), "{done}");
+    assert!(
+        !done["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a == "pia"),
+        "{done}"
+    );
+
+    let back = agent(&t, "pia").await;
+    assert_eq!(
+        back["cwd"],
+        json!(repo.path().display().to_string()),
+        "{back}"
+    );
+    assert!(back["config"].get("lead_home").is_none(), "{back}");
+    assert!(!Path::new(moved["cwd"].as_str().unwrap()).exists(), "{moved}");
+}
