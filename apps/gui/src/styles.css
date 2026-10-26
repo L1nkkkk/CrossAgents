@@ -1439,3 +1439,13 @@ html, body { overflow: hidden; }
 .trace-list { margin: 0; padding-left: 16px; font-size: 12.5px; display: flex; flex-direction: column; gap: 3px; }
 .trace-list li.bad, .trace-body .bad { color: var(--danger); }
 .trace-output { margin: 4px 0 0; padding: 6px 8px; max-height: 160px; overflow: auto; background: var(--surface-sunk); border-radius: var(--radius); font-size: var(--mono-size); white-space: pre-wrap; color: var(--text-2); }
+
+/* 本机的 CLI（docs/DESIGN.md §9.3）：确认框里的命令，和正在跑的安装的输出。 */
+.cli-line { flex-wrap: wrap; }
+.cli-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cli-job { flex-basis: 100%; display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.cli-job-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cli-out { margin: 0; padding: 6px 8px; max-height: 180px; overflow: auto; background: var(--surface-sunk); border: 1px solid var(--border); border-radius: var(--radius); font-size: var(--mono-size); white-space: pre-wrap; word-break: break-all; color: var(--text-2); }
+.cli-done { flex-basis: 100%; font-size: 12px; }
+.cli-done.ok { color: var(--text-2); }
+.cli-done.bad { color: var(--danger); }

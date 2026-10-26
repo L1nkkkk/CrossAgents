@@ -38,6 +38,11 @@ use crossagents_drivers::codex_native::CodexNativeDriver;
 use crossagents_drivers::locate::{Cli, Install, Locator};
 use serde::Deserialize;
 
+/// What `CliInfo.described_by` says for one of the built-in descriptions, and for an entry
+/// in `config.toml` (a plugin directory's manifest reports its own path).
+pub const BUILT_IN_ORIGIN: &str = "built-in";
+pub const CONFIG_ORIGIN: &str = "config.toml";
+
 /// A plugin entry in `config.toml`. For a built-in plugin it overrides the launch commands
 /// and the default driver; otherwise it defines a new plugin.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -68,6 +73,10 @@ pub struct PluginConfig {
     /// What installing it takes; shown, never run.
     #[serde(default)]
     pub install: Install,
+    /// Where this description came from (`built-in`, a manifest's path, `config.toml`),
+    /// filled by [`PluginRegistry`]: what the install confirmation shows.
+    #[serde(skip)]
+    pub described_by: Option<String>,
 }
 
 impl PluginConfig {
@@ -82,6 +91,7 @@ impl PluginConfig {
             self.locate.clone(),
             self.install.clone(),
         )
+        .with_description(self.described_by.clone())
     }
 
     /// A built-in adjusted by its `config.toml` entry: launch commands, driver, models and
@@ -199,16 +209,23 @@ impl PluginRegistry {
     pub fn with_config(configs: &BTreeMap<String, PluginConfig>) -> Self {
         let mut registry = Self::default();
         for (name, built_in) in builtin::all() {
-            let config = match configs.get(name) {
+            let mut config = match configs.get(name) {
                 Some(over) => built_in.clone().overlay(over),
                 None => built_in.clone(),
             };
+            config.described_by = Some(match configs.contains_key(name) {
+                true => CONFIG_ORIGIN.to_owned(),
+                false => BUILT_IN_ORIGIN.to_owned(),
+            });
             let pinned = configs.get(name).is_some_and(|c| !c.models.is_empty());
             registry.insert(name, config, pinned);
         }
         for (name, config) in configs {
             if !registry.profiles.contains_key(name) {
-                registry.insert(name, config.clone(), !config.models.is_empty());
+                let mut config = config.clone();
+                config.described_by = Some(CONFIG_ORIGIN.to_owned());
+                let pinned = !config.models.is_empty();
+                registry.insert(name, config, pinned);
             }
         }
         registry
@@ -222,9 +239,10 @@ impl PluginRegistry {
     ) -> (Self, Vec<String>) {
         let (found, warnings) = manifest::load_dir(plugins_dir);
         let mut registry = Self::with_config(configs);
-        for (name, config) in found {
+        for (name, mut config, path) in found {
             // Directory plugins replace built-ins unless config.toml says otherwise.
             if !configs.contains_key(&name) {
+                config.described_by = Some(path.display().to_string());
                 let pinned = !config.models.is_empty();
                 registry.insert(&name, config, pinned);
             }

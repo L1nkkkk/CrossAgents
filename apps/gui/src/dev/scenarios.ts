@@ -34,6 +34,11 @@ export const SCENARIOS: Scenario[] = [
   { key: "crash", label: "进程崩溃", hint: "单聊里 Claude CLI 崩溃退出：错误条和「需要你」写明怎么退出的", build: () => crashedSession() },
   { key: "mismatch", label: "版本不匹配", hint: "hub 的接口是 v2：GUI 拒绝连接并说明原因", build: () => ({ state: { ...emptyHub(), api: "v2" }, script: [], route: "#/" }) },
   { key: "usage", label: "用量", hint: "两个账号，一个快到 5 小时限额，一个每周限额用完", build: () => ({ state: usageScene(), script: [], route: "#/usage" }) },
+  { key: "cli-install-ok", label: "安装 CLI 成功", hint: "设置 → 智能体：CodeBuddy 没装，点「安装」先看确认框里的命令和来源；执行后输出滚动，装完提示去登录账号", build: () => cliScene("ok") },
+  { key: "cli-install-fail", label: "安装 CLI 失败", hint: "安装命令以非 0 退出：滚动的输出和写明退出码的原因", build: () => cliScene("fail") },
+  { key: "cli-install-missing", label: "装完但找不到", hint: "命令成功，但这台机器上找不到装好的程序：原因里列出找过的位置", build: () => cliScene("missing") },
+  { key: "cli-upgrade", label: "升级 CLI", hint: "Codex 是 npm 装的：点「升级」，完成后版本号变化", build: () => cliScene("ok", "upgrade") },
+  { key: "cli-bundled", label: "桌面版自带不可升级", hint: "Claude 来自桌面版：显示「随桌面版更新」，没有升级按钮", build: () => cliScene("ok", "install", false) },
 ];
 
 export const DEFAULT_SCENARIO = "running";
@@ -60,6 +65,56 @@ function workProposal() {
     created_at: new Date().toISOString(),
   };
   return { ...solo, state: { ...solo.state, questions: [...solo.state.questions, item] }, script: [] };
+}
+
+/** The settings → agents page with the CLI section: what an install or upgrade did is the scenario. */
+function cliScene(install: "ok" | "fail" | "missing", action: "install" | "upgrade" = "install", play = true) {
+  const state: MockState = { ...emptyHub(), install };
+  const plugin = action === "install" ? "codebuddy" : "codex";
+  const argv =
+    action === "install"
+      ? ["npm", "install", "-g", "@tencent-ai/codebuddy-code"]
+      : ["npm", "install", "-g", "@openai/codex@latest"];
+  const ok = install === "ok";
+  const reason =
+    install === "fail"
+      ? "it exited with code 1"
+      : install === "missing"
+        ? "the command succeeded, but the hub cannot find the installed program afterwards; it looked in: PATH: codebuddy (codebuddy.cmd); C:/Users/me/.local/bin/codebuddy (not there)"
+        : undefined;
+  // The events the hub would send, played without a click: a screenshot shows the result,
+  // not just the button that starts it. They end well inside the screenshot's default wait,
+  // so `npm run screenshot` needs no timeout of its own to catch the finished state.
+  const steps: Step[] = [
+    { at: 200, event: { type: "cli.install.started", data: { plugin, action, argv, described_by: "built-in" } } },
+    { at: 400, event: { type: "cli.install.output", data: { plugin, action, line: `$ ${argv.join(" ")}`, dropped: 0 } } },
+    {
+      at: 600,
+      event: {
+        type: "cli.install.output",
+        data: { plugin, action, line: install === "fail" ? "npm error code EACCES" : "added 1 package in 3s", dropped: 0 },
+      },
+    },
+    {
+      at: 800,
+      act: (s) => {
+        if (!ok) return;
+        const p = s.plugins.find((x) => x.name === plugin);
+        if (!p?.cli) return;
+        p.cli.installed = true;
+        p.cli.version = action === "install" ? "1.0.6" : "0.159.0";
+        p.cli.source = "path";
+        p.cli.installed_via = "npm";
+        p.cli.can_upgrade = true;
+        p.cli.upgrade_command = ["npm", "install", "-g", action === "install" ? "@tencent-ai/codebuddy-code@latest" : "@openai/codex@latest"];
+      },
+    },
+    {
+      at: 900,
+      event: { type: "cli.install.finished", data: { plugin, action, ok, code: install === "fail" ? 1 : 0, duration_ms: 2400, reason, dropped: 0 } },
+    },
+  ];
+  return { state, script: play ? steps : [], route: "#/agents" };
 }
 
 /** A Claude agent and a CodeBuddy one: the setting-sources switch reads differently for each. */

@@ -40,6 +40,9 @@ pub fn required(method: &Method, pattern: &str) -> Level {
             | ("POST", "/v1/accounts")
             | ("DELETE", "/v1/accounts/{id}")
             | ("POST", "/v1/accounts/{id}/login")
+            // They run a program on this machine (docs/DESIGN.md §9.3).
+            | ("POST", "/v1/plugins/{name}/install")
+            | ("POST", "/v1/plugins/{name}/upgrade")
     );
     if admin {
         Level::Admin
@@ -86,6 +89,14 @@ mod tests {
             Level::Admin
         );
         assert_eq!(required(&Method::DELETE, "/v1/accounts/{id}"), Level::Admin);
+        assert_eq!(
+            required(&Method::POST, "/v1/plugins/{name}/install"),
+            Level::Admin
+        );
+        assert_eq!(
+            required(&Method::POST, "/v1/plugins/{name}/upgrade"),
+            Level::Admin
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crossagents_core::{CliSource, CliStatus, Located};
 use serde::{Deserialize, Deserializer};
@@ -19,6 +19,11 @@ use crate::process::{find_in_path_in, hide_console};
 
 /// How long a CLI gets to print its version.
 const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a failed version probe stands before it is tried again. A CLI that could not
+/// answer just now (it was being installed, or its runtime was busy) may answer later; a
+/// successful answer is kept with the file it came from and needs no retry.
+const VERSION_RETRY: Duration = Duration::from_secs(60);
 
 /// The key a setting is given under (`windows`, `macos`, `linux`).
 pub fn os_name() -> &'static str {
@@ -83,11 +88,75 @@ impl<T> PerOs<T> {
     }
 }
 
-/// What `[install]` says: shown to the person, never executed.
+/// One way to install a CLI (docs/DESIGN.md §9.3): `[[install.methods]]`.
+///
+/// `run` and `upgrade` are argv, never a shell line: the hub starts the program itself.
+/// When a pipe is needed, the interpreter that reads it is written out (`bash -c`,
+/// `powershell -Command`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct InstallMethod {
+    /// Names the way it installs (`native`, `npm`); also what `installed_via` reports.
+    pub id: String,
+    /// Systems it is for (`windows`, `macos`, `linux`); empty means all of them.
+    pub os: Vec<String>,
+    /// Programs that have to be on `PATH` for this method to be usable (`npm`).
+    pub requires: Vec<String>,
+    /// The command that installs the CLI, as argv.
+    pub run: Vec<String>,
+    /// The command that upgrades what this method installed; without one, `run` again.
+    pub upgrade: Option<Vec<String>>,
+}
+
+impl InstallMethod {
+    /// Whether this method is for this system and has what it needs.
+    pub fn usable(&self, machine: &Machine) -> bool {
+        let this_os = self.os.is_empty() || self.os.iter().any(|os| os == os_name());
+        if !this_os {
+            return false;
+        }
+        if self.requires.is_empty() {
+            return true;
+        }
+        let dirs = machine.path_dirs();
+        self.requires
+            .iter()
+            .all(|name| find_in_path_in(name, Some(&dirs)).is_file())
+    }
+
+    /// The command that upgrades a CLI this method installed.
+    pub fn upgrade_command(&self) -> Vec<String> {
+        self.upgrade.clone().unwrap_or_else(|| self.run.clone())
+    }
+
+    /// The command as one line to copy, quoting what has spaces in it.
+    pub fn line(&self) -> String {
+        argv_line(&self.run)
+    }
+}
+
+/// `argv` as a line a person can paste into a terminal.
+pub fn argv_line(argv: &[String]) -> String {
+    argv.iter()
+        .map(|arg| {
+            if arg.chars().any(char::is_whitespace) {
+                format!("\"{arg}\"")
+            } else {
+                arg.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// What `[install]` says: shown to the person, and run by the hub only when the person
+/// presses install or upgrade (docs/DESIGN.md §9.3).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct Install {
     /// The command that installs the CLI, e.g. `npm install -g @tencent-ai/codebuddy-code`.
+    /// Kept as a fallback for descriptions written before `methods`: what one of those says
+    /// is shown, never run.
     pub hint: Option<String>,
     pub docs: Option<String>,
     /// What to do after installing (sign in), part of the "not installed" message.
@@ -96,6 +165,8 @@ pub struct Install {
     pub notes: Option<String>,
     /// What the CLI is called in that message (`CodeBuddy`); the plugin's name by default.
     pub label: Option<String>,
+    /// How to install it, in the order to try them: the first one this machine can use wins.
+    pub methods: Vec<InstallMethod>,
 }
 
 impl Install {
@@ -105,6 +176,7 @@ impl Install {
             && self.login.is_none()
             && self.notes.is_none()
             && self.label.is_none()
+            && self.methods.is_empty()
     }
 
     /// What `other` says wins; what it leaves out stays.
@@ -120,12 +192,71 @@ impl Install {
                 *mine = theirs.clone();
             }
         }
+        if !other.methods.is_empty() {
+            self.methods = other.methods.clone();
+        }
+    }
+
+    /// The first method this machine can use.
+    pub fn method_for(&self, machine: &Machine) -> Option<&InstallMethod> {
+        self.methods.iter().find(|method| method.usable(machine))
+    }
+
+    /// The method that put the file at `path` there, when its path says which one did: npm
+    /// installs under `node_modules` (or a `.cmd` shell), the vendors' own installers beside
+    /// the user's programs. The table is here, keyed by method id, rather than regular
+    /// expressions in the description: a path is a fact about npm, not about one vendor.
+    ///
+    /// A description with one usable method needs no guessing: that is the method.
+    pub fn method_of(&self, path: &Path, machine: &Machine) -> Option<&InstallMethod> {
+        let mut usable = self.methods.iter().filter(|method| method.usable(machine));
+        let first = usable.next()?;
+        let mut rest = usable.peekable();
+        if rest.peek().is_none() {
+            return Some(first);
+        }
+        std::iter::once(first)
+            .chain(rest)
+            .find(|method| path_says(&method.id, path))
+    }
+
+    /// The command that installs it here, as one line; the old `hint` when the description
+    /// names no usable method, so a "not installed" message still says something.
+    pub fn hint_for(&self, machine: &Machine) -> Option<String> {
+        self.method_for(machine)
+            .map(InstallMethod::line)
+            .or_else(|| self.hint.clone())
+            .or_else(|| self.methods.first().map(InstallMethod::line))
+    }
+
+    /// The command that installs it here, as argv.
+    pub fn install_command(&self, machine: &Machine) -> Option<Vec<String>> {
+        self.method_for(machine).map(|method| method.run.clone())
+    }
+
+    /// The command that upgrades it here, and whether upgrading is this description's to do.
+    ///
+    /// A copy another app keeps is the desktop app's to update, and a program the person
+    /// named themselves (`config` / `env`) is theirs: neither is touched. What an install
+    /// method put there is upgraded by that method.
+    pub fn upgrade_for(
+        &self,
+        source: CliSource,
+        path: &Path,
+        machine: &Machine,
+    ) -> Option<Vec<String>> {
+        match source {
+            CliSource::Config | CliSource::Env | CliSource::Bundled => None,
+            CliSource::Path | CliSource::Native => self
+                .method_of(path, machine)
+                .map(InstallMethod::upgrade_command),
+        }
     }
 
     /// What to say when a session is asked of a CLI this machine does not have: what to
     /// install, how to sign in, and why another app's copy is not used.
-    pub fn missing_message(&self, name: &str) -> Option<String> {
-        let hint = self.hint.as_deref()?;
+    pub fn missing_message(&self, name: &str, machine: &Machine) -> Option<String> {
+        let hint = self.hint_for(machine)?;
         let label = self.label.as_deref().unwrap_or(name);
         let mut text = format!("the {label} CLI is not installed: run `{hint}`");
         if let Some(login) = self.login.as_deref().filter(|l| !l.is_empty()) {
@@ -138,6 +269,21 @@ impl Install {
             text.push_str(notes);
         }
         Some(text)
+    }
+}
+
+/// Whether a file at `path` was put there by the method called `id`.
+fn path_says(id: &str, path: &Path) -> bool {
+    let text = path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_ascii_lowercase();
+    match id {
+        // `npm install -g` writes into <prefix>/node_modules/<scope>/<package>.
+        "npm" => text.contains("/node_modules/"),
+        // The vendors' own installers write beside the user's programs.
+        "native" => !text.contains("/node_modules/"),
+        _ => false,
     }
 }
 
@@ -168,6 +314,9 @@ pub struct Machine {
     pub vars: Option<BTreeMap<String, String>>,
     /// What `~` means.
     pub home: Option<PathBuf>,
+    /// The directories the registry adds beyond `path`; `None` reads them on Windows, and a
+    /// test that must not touch the real registry gives `Some(Vec::new())`.
+    pub registry_path: Option<Vec<PathBuf>>,
 }
 
 impl Machine {
@@ -185,6 +334,147 @@ impl Machine {
         let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
         std::env::var_os(key).map(PathBuf::from)
     }
+
+    /// Where a program is looked up: this process's `PATH`, then what the registry says the
+    /// `PATH` is now.
+    ///
+    /// A hub runs for a long time. A CLI installed while it runs lands in a directory that
+    /// was not in the `PATH` the hub inherited at start (the installer adds it to the user's
+    /// environment, which this process never sees again), so the registry is read as well.
+    /// Only the lookup is affected: the hub's own environment is left alone, and sessions
+    /// start the program by the absolute path that was found.
+    fn path_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> = match &self.path {
+            Some(dirs) => dirs.clone(),
+            None => std::env::var_os("PATH")
+                .map(|path| std::env::split_paths(&path).collect())
+                .unwrap_or_default(),
+        };
+        let extra = match &self.registry_path {
+            Some(dirs) => dirs.clone(),
+            None => registry_path().unwrap_or_default(),
+        };
+        for dir in extra {
+            if !dirs.iter().any(|have| same_dir(have, &dir)) {
+                dirs.push(dir);
+            }
+        }
+        dirs
+    }
+}
+
+/// Whether two directories name the same place, for the merge above (Windows ignores case).
+fn same_dir(a: &Path, b: &Path) -> bool {
+    if cfg!(windows) {
+        a.to_string_lossy()
+            .eq_ignore_ascii_case(&b.to_string_lossy())
+    } else {
+        a == b
+    }
+}
+
+/// `PATH` as Windows now has it (the user's, then the machine's), or `None` where there is
+/// no registry to read.
+fn registry_path() -> Option<Vec<PathBuf>> {
+    #[cfg(windows)]
+    {
+        let user = reg_path(r"HKCU\Environment");
+        let machine =
+            reg_path(r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment");
+        (user.is_some() || machine.is_some()).then(|| {
+            registry_dirs(user.as_deref(), machine.as_deref(), &|name| {
+                std::env::var(name).ok()
+            })
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// `Path` under `key` as `reg query` prints it.
+#[cfg(windows)]
+fn reg_path(key: &str) -> Option<String> {
+    let output = std::process::Command::new("reg")
+        .args(["query", key, "/v", "Path"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_reg_path(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The value in `reg query`'s output: `    Path    REG_EXPAND_SZ    C:\a;%USERPROFILE%\b`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_reg_path(reg: &str) -> Option<String> {
+    reg.lines().find_map(|line| {
+        let mut words = line.split_whitespace();
+        if !words.next()?.eq_ignore_ascii_case("Path") {
+            return None;
+        }
+        let kind = words.next()?;
+        if !kind.starts_with("REG_") {
+            return None;
+        }
+        // Everything after the type, which may hold spaces of its own.
+        let at = line.find(kind)? + kind.len();
+        Some(line[at..].trim().to_owned())
+    })
+}
+
+/// The directories the user's and the machine's `PATH` name: `%VAR%` expanded (a name that
+/// is not set contributes nothing, as Windows does), in order, without repeats.
+fn registry_dirs(
+    user: Option<&str>,
+    machine: Option<&str>,
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for value in [user, machine].into_iter().flatten() {
+        for part in expand_path_text(value, lookup).split(';') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let dir = PathBuf::from(part.trim_matches('"'));
+            if !dirs.iter().any(|have| same_dir(have, &dir)) {
+                dirs.push(dir);
+            }
+        }
+    }
+    dirs
+}
+
+/// `text` with `%VAR%` replaced; a variable that is not set becomes nothing.
+fn expand_path_text(text: &str, lookup: &dyn Fn(&str) -> Option<String>) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        let mut name = String::new();
+        let mut closed = false;
+        for c in chars.by_ref() {
+            if c == '%' {
+                closed = true;
+                break;
+            }
+            name.push(c);
+        }
+        if !closed {
+            out.push('%');
+            out.push_str(&name);
+            break;
+        }
+        out.push_str(&lookup(&name).unwrap_or_default());
+    }
+    out
 }
 
 impl Locator {
@@ -232,8 +522,9 @@ impl Locator {
             let path = self.resolve_in(&value, machine);
             return Some(self.launch(vec![display(&path)], path, CliSource::Env, machine));
         }
+        let dirs = machine.path_dirs();
         for name in self.commands.get().into_iter().flatten() {
-            let path = find_in_path_in(name, machine.path.as_deref());
+            let path = find_in_path_in(name, Some(&dirs));
             if path.is_file() {
                 return Some(self.launch(vec![display(&path)], path, CliSource::Path, machine));
             }
@@ -263,7 +554,7 @@ impl Locator {
         if given.components().count() > 1 {
             return given.to_path_buf();
         }
-        let on_path = find_in_path_in(program, machine.path.as_deref());
+        let on_path = find_in_path_in(program, Some(&machine.path_dirs()));
         if on_path.is_file() {
             return on_path;
         }
@@ -298,6 +589,30 @@ impl Locator {
     /// machine.
     pub fn locate_program(&self, program: &str) -> PathBuf {
         self.resolve_in(program, &Machine::default())
+    }
+
+    /// Everywhere this description looked on `machine`, in the order it looked: what a
+    /// failure report lists when a successful command left no usable program behind.
+    pub fn searched(&self, machine: &Machine) -> Vec<String> {
+        let mut places = Vec::new();
+        if let Some(var) = self.env.get() {
+            places.push(format!("${var}"));
+        }
+        let dirs = machine.path_dirs();
+        for name in self.commands.get().into_iter().flatten() {
+            let found = find_in_path_in(name, Some(&dirs));
+            places.push(format!("PATH: {name} ({})", found.display()));
+        }
+        for pattern in self.paths.get().into_iter().flatten() {
+            places.push(match first_file(pattern, machine) {
+                Some(path) => path.display().to_string(),
+                None => format!("{} (not there)", pattern),
+            });
+        }
+        for pattern in self.bundled.get().into_iter().flatten() {
+            places.push(format!("{pattern} (a copy another app keeps)"));
+        }
+        places
     }
 
     /// The first of `paths` that exists.
@@ -362,12 +677,15 @@ struct CliInner {
     configured: Vec<String>,
     locator: Locator,
     install: Install,
+    /// Where the description came from, reported with the status.
+    described_by: Option<String>,
     cache: std::sync::Mutex<Cache>,
 }
 
 #[derive(Default)]
 struct Cache {
-    /// The last hit, reused while `path` is still a file.
+    /// The last hit, reused while `path` is still a file (never for a copy another app
+    /// keeps: a desktop app that updates leaves the old build in place).
     found: Option<Located>,
     /// What the version probe last answered, for one (path, modification time).
     version: Option<VersionEntry>,
@@ -379,6 +697,8 @@ struct VersionEntry {
     path: PathBuf,
     modified: SystemTime,
     value: Option<String>,
+    /// When a failed probe was made; `None` when it answered.
+    failed_at: Option<Instant>,
 }
 
 impl Cli {
@@ -388,9 +708,18 @@ impl Cli {
                 configured,
                 locator,
                 install,
+                described_by: None,
                 cache: std::sync::Mutex::default(),
             }),
         }
+    }
+
+    /// Where the description that says all this came from (`built-in`, a manifest's path).
+    pub fn with_description(mut self, described_by: Option<String>) -> Self {
+        std::sync::Arc::get_mut(&mut self.inner)
+            .expect("a fresh Cli has no other owner")
+            .described_by = described_by;
+        self
     }
 
     /// A CLI at `argv`, as a configuration names it (tests, and callers without a
@@ -425,6 +754,10 @@ impl Cli {
         let mut cache = self.cache();
         if let Some(found) = &cache.found
             && found.path.is_file()
+            // A copy another app keeps is scanned again every time: a desktop app that
+            // updates brings a newer build than the one remembered, and a CLI installed on
+            // `PATH` afterwards should win over it.
+            && found.source != CliSource::Bundled
         {
             return Some(found.clone());
         }
@@ -432,6 +765,32 @@ impl Cli {
         let found = self.find_in(machine);
         cache.found = found.clone();
         found
+    }
+
+    /// Drops what the last lookup and the version cache remember: after an install or an
+    /// upgrade the next lookup looks again, and the version is asked for the new file.
+    pub fn forget(&self) {
+        let mut cache = self.cache();
+        cache.found = None;
+        cache.version = None;
+        cache.probing = None;
+    }
+
+    /// Looks again, cache aside (after an install or an upgrade).
+    pub fn relocate(&self) -> Option<Located> {
+        self.forget();
+        self.found()
+    }
+
+    /// Where the description would look on this machine, for a failure report: the
+    /// variable, the names on `PATH`, the paths tried, the copies another app keeps.
+    pub fn searched(&self) -> Vec<String> {
+        self.inner.locator.searched(&Machine::default())
+    }
+
+    /// Whether the description can install its CLI on this machine, and with what.
+    pub fn install_command(&self) -> Option<Vec<String>> {
+        self.inner.install.install_command(&Machine::default())
     }
 
     fn find_in(&self, machine: &Machine) -> Option<Located> {
@@ -479,7 +838,9 @@ impl Cli {
 
     /// What to say when a session is asked of a CLI that is not installed.
     pub fn missing_message(&self, name: &str) -> Option<String> {
-        self.inner.install.missing_message(name)
+        self.inner
+            .install
+            .missing_message(name, &Machine::default())
     }
 
     /// Where the CLI is, and what installing it takes.
@@ -503,10 +864,24 @@ impl Cli {
                 }
             }
         }
+        let install = &self.inner.install;
+        // What upgrading would run, or nothing when it is not this description's to do.
+        let upgrade_command = located
+            .as_ref()
+            .and_then(|found| install.upgrade_for(found.source, &found.path, machine));
         CliStatus {
+            installed_via: located.as_ref().and_then(|found| {
+                install
+                    .method_of(&found.path, machine)
+                    .map(|method| method.id.clone())
+            }),
+            install_command: install.install_command(machine),
+            can_upgrade: upgrade_command.is_some(),
+            upgrade_command,
+            described_by: self.inner.described_by.clone(),
             located,
-            install_hint: self.inner.install.hint.clone(),
-            docs: self.inner.install.docs.clone(),
+            install_hint: install.hint_for(machine),
+            docs: install.docs.clone(),
         }
     }
 
@@ -526,12 +901,22 @@ impl Cli {
     }
 
     /// The version last asked for this very file: `None` when it has not been asked for this
-    /// (path, modification time) yet.
+    /// (path, modification time) yet, or when a failed answer is old enough to ask again.
+    ///
+    /// A success is kept. A failure is not kept for good: a CLI that could not answer while
+    /// it was being installed, or whose runtime was busy, may answer a minute later.
     fn known_version(&self, found: &Located) -> Option<Option<String>> {
         let cache = self.cache();
         let entry = cache.version.as_ref()?;
         let modified = modified(&found.path)?;
-        (entry.path == found.path && entry.modified == modified).then(|| entry.value.clone())
+        if entry.path != found.path || entry.modified != modified {
+            return None;
+        }
+        if entry.value.is_some() {
+            return Some(entry.value.clone());
+        }
+        let failed_at = entry.failed_at?;
+        (failed_at.elapsed() < VERSION_RETRY).then_some(None)
     }
 
     /// Asks the version without waiting for it: `/v1/plugins` reports it once it answers.
@@ -567,6 +952,7 @@ impl Cli {
             cache.version = Some(VersionEntry {
                 path: found.path,
                 modified,
+                failed_at: value.is_none().then(Instant::now),
                 value: value.clone(),
             });
         }
@@ -610,7 +996,7 @@ fn shim(name: &str, path: &Path, machine: &Machine) -> Option<Vec<String>> {
     match name {
         "codex-vendor" => codex_vendor(path).map(|real| vec![display(&real)]),
         "node-script" => npm_script(path).map(|script| {
-            let node = find_in_path_in("node", machine.path.as_deref());
+            let node = find_in_path_in("node", Some(&machine.path_dirs()));
             vec![display(&node), display(&script)]
         }),
         _ => None,
@@ -824,6 +1210,8 @@ mod tests {
             path: Some(vec![dir.to_path_buf()]),
             vars: Some(BTreeMap::new()),
             home: Some(dir.to_path_buf()),
+            // The real registry is never read in a test.
+            registry_path: Some(Vec::new()),
         }
     }
 
@@ -900,6 +1288,7 @@ mod tests {
             path: Some(vec![dir.path().join("empty")]),
             vars: Some(BTreeMap::new()),
             home: Some(dir.path().to_path_buf()),
+            registry_path: Some(Vec::new()),
         };
         let found = locator.locate_in(&machine).unwrap();
         assert_eq!(found.source, CliSource::Native);
@@ -938,6 +1327,7 @@ mod tests {
                 dir.path().display().to_string(),
             )])),
             home: Some(dir.path().to_path_buf()),
+            registry_path: Some(Vec::new()),
         };
         let found = locator.locate_in(&machine).unwrap();
         assert_eq!(found.source, CliSource::Bundled);
@@ -1073,6 +1463,7 @@ mod tests {
             path: Some(Vec::new()),
             vars: Some(BTreeMap::new()),
             home: Some(dir.path().to_path_buf()),
+            registry_path: Some(Vec::new()),
         };
         assert!(locator.locate_in(&machine).is_none());
         let cli = Cli::new(Vec::new(), locator, Install::default());
@@ -1129,6 +1520,7 @@ mod tests {
                 dir.path().display().to_string(),
             )])),
             home: Some(dir.path().to_path_buf()),
+            registry_path: Some(Vec::new()),
         };
         let cli = Cli::new(Vec::new(), locator, Install::default());
         assert_eq!(cli.found_in(&machine).unwrap().path, older);
@@ -1197,12 +1589,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            install.missing_message("codebuddy").unwrap(),
+            install
+                .missing_message("codebuddy", &machine(Path::new("/no/such/dir")))
+                .unwrap(),
             "the CodeBuddy CLI is not installed: run `npm install -g @tencent-ai/codebuddy-code`, \
              then sign in once with `codebuddy` and `/login` (or set CODEBUDDY_API_KEY). \
              The copy inside WorkBuddy cannot run outside the WorkBuddy app."
         );
-        assert_eq!(Install::default().missing_message("codex"), None);
+        assert_eq!(
+            Install::default().missing_message("codex", &Machine::default()),
+            None
+        );
     }
 
     #[test]
@@ -1218,5 +1615,229 @@ mod tests {
         assert_eq!(parse_version("v1.2.3").as_deref(), Some("1.2.3"));
         assert_eq!(parse_version("no version here"), None);
         assert_eq!(parse_version(""), None);
+    }
+
+    /// The first method this machine can use wins: its `os` has to match and everything it
+    /// `requires` has to be on `PATH`.
+    #[test]
+    fn the_first_usable_install_method_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let install: Install = toml::from_str(
+            r#"
+            [[methods]]
+            id = "npm"
+            requires = ["crossagents-no-such-tool"]
+            run = ["npm", "install", "-g", "demo"]
+
+            [[methods]]
+            id = "native"
+            run = ["demo-install"]
+            "#,
+        )
+        .unwrap();
+        let m = machine(dir.path());
+        // The first needs something this machine does not have.
+        assert_eq!(
+            install.method_for(&m).map(|method| method.id.as_str()),
+            Some("native")
+        );
+
+        // Nothing usable: the old hint still says what to copy.
+        let mut only_missing: Install = toml::from_str(
+            r#"
+            [[methods]]
+            id = "npm"
+            requires = ["crossagents-no-such-tool"]
+            run = ["npm", "install", "-g", "demo"]
+            "#,
+        )
+        .unwrap();
+        assert!(only_missing.method_for(&m).is_none());
+        only_missing.hint = Some("npm install -g demo".into());
+        assert_eq!(
+            only_missing.hint_for(&m).as_deref(),
+            Some("npm install -g demo")
+        );
+    }
+
+    #[test]
+    fn a_method_for_another_system_is_not_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = if cfg!(windows) { "macos" } else { "windows" };
+        let install: Install = toml::from_str(&format!(
+            "[[methods]]\nid = \"native\"\nos = [\"{other}\"]\nrun = [\"demo-install\"]\n"
+        ))
+        .unwrap();
+        assert!(install.method_for(&machine(dir.path())).is_none());
+    }
+
+    /// Where a file is says which method put it there: npm writes under `node_modules`,
+    /// the vendors' own installers beside the user's programs.
+    #[test]
+    fn only_what_a_method_installed_can_be_upgraded() {
+        let dir = tempfile::tempdir().unwrap();
+        let install: Install = toml::from_str(
+            r#"
+            [[methods]]
+            id = "npm"
+            run = ["npm", "install", "-g", "demo"]
+            upgrade = ["npm", "install", "-g", "demo@latest"]
+
+            [[methods]]
+            id = "native"
+            run = ["demo-install"]
+            upgrade = ["demo", "update"]
+            "#,
+        )
+        .unwrap();
+        let m = machine(dir.path());
+        let npm = dir.path().join("node_modules").join("@demo").join("cli");
+        let native = dir.path().join(".local").join("bin").join("demo");
+
+        assert_eq!(
+            install.upgrade_for(CliSource::Path, &npm, &m),
+            Some(vec![
+                "npm".into(),
+                "install".into(),
+                "-g".into(),
+                "demo@latest".into()
+            ])
+        );
+        assert_eq!(
+            install.upgrade_for(CliSource::Path, &native, &m),
+            Some(vec!["demo".into(), "update".into()])
+        );
+        // A copy another app keeps is that app's to update; a configured program is the
+        // person's. Neither is touched.
+        assert_eq!(install.upgrade_for(CliSource::Bundled, &npm, &m), None);
+        assert_eq!(install.upgrade_for(CliSource::Config, &npm, &m), None);
+        assert_eq!(install.upgrade_for(CliSource::Env, &npm, &m), None);
+    }
+
+    /// A desktop app that updates brings a newer build while the old one stays: the copy is
+    /// scanned again every time, so the newest one is used without a restart.
+    #[test]
+    fn a_bundled_copy_is_scanned_again_every_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let build = |app: &str| {
+            dir.path()
+                .join("Claude-Data")
+                .join(app)
+                .join("claude-code")
+                .join("1.0.0")
+                .join("build")
+                .join("claude.exe")
+        };
+        let older = build("app-1.0.0");
+        touch(&older);
+        let locator: Locator = toml::from_str(
+            r#"
+            commands = ["claude"]
+            bundled = ["%LOCALAPPDATA%/Claude-Data/*/claude-code/*/*/claude.exe"]
+            "#,
+        )
+        .unwrap();
+        let m = Machine {
+            path: Some(Vec::new()),
+            vars: Some(BTreeMap::from([(
+                "LOCALAPPDATA".to_owned(),
+                dir.path().display().to_string(),
+            )])),
+            home: Some(dir.path().to_path_buf()),
+            registry_path: Some(Vec::new()),
+        };
+        let cli = Cli::new(Vec::new(), locator, Install::default());
+        assert_eq!(cli.found_in(&m).unwrap().path, older);
+        // The old build is still there, but a newer one arrived.
+        std::thread::sleep(Duration::from_millis(20));
+        let newer = build("app-2.0.0");
+        touch(&newer);
+        assert_eq!(cli.found_in(&m).unwrap().path, newer);
+    }
+
+    /// A failed version probe is not remembered for good: a CLI that could not answer while
+    /// it was being installed is asked again a minute later.
+    #[test]
+    fn a_failed_version_probe_is_tried_again_after_a_minute() {
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join(if cfg!(windows) {
+            "claude.cmd"
+        } else {
+            "claude"
+        });
+        touch(&shim);
+        let locator: Locator = toml::from_str(r#"commands = ["claude"]"#).unwrap();
+        let cli = Cli::new(Vec::new(), locator, Install::default());
+        let found = cli.found_in(&machine(dir.path())).unwrap();
+        let modified = modified(&found.path).unwrap();
+
+        let fail_at = |when: Instant| VersionEntry {
+            path: found.path.clone(),
+            modified,
+            value: None,
+            failed_at: Some(when),
+        };
+        cli.cache().version = Some(fail_at(Instant::now()));
+        assert_eq!(cli.known_version(&found), Some(None), "asked, no answer");
+        cli.cache().version = Some(fail_at(
+            Instant::now() - VERSION_RETRY - Duration::from_secs(1),
+        ));
+        assert_eq!(cli.known_version(&found), None, "time to ask again");
+        // A success is kept with the file it came from.
+        cli.cache().version = Some(VersionEntry {
+            path: found.path.clone(),
+            modified,
+            value: Some("1.2.3".into()),
+            failed_at: None,
+        });
+        assert_eq!(cli.known_version(&found), Some(Some("1.2.3".into())));
+    }
+
+    /// The registry's `PATH` is merged with the process's: a CLI installed while the hub
+    /// runs lands in a directory the hub's own `PATH` never had.
+    #[test]
+    fn the_lookup_sees_the_registry_path_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = dir.path().join("fresh");
+        std::fs::create_dir_all(&fresh).unwrap();
+        let cli = fresh.join(if cfg!(windows) { "demo.exe" } else { "demo" });
+        touch(&cli);
+        let locator: Locator = toml::from_str(r#"commands = ["demo"]"#).unwrap();
+        let m = Machine {
+            path: Some(vec![dir.path().join("empty")]),
+            vars: Some(BTreeMap::new()),
+            home: Some(dir.path().to_path_buf()),
+            registry_path: Some(vec![fresh]),
+        };
+        assert_eq!(locator.locate_in(&m).unwrap().path, cli);
+    }
+
+    #[test]
+    fn the_registry_path_is_merged_and_expanded() {
+        let vars = BTreeMap::from([("USERPROFILE".to_owned(), r"C:\Users\me".to_owned())]);
+        let lookup = |name: &str| vars.get(name).cloned();
+        let dirs = registry_dirs(
+            Some(r"C:\one;%USERPROFILE%\bin;C:\one"),
+            Some(r"C:\two;%NOT_SET%\x"),
+            &lookup,
+        );
+        let names: Vec<String> = dirs.iter().map(|dir| dir.display().to_string()).collect();
+        // User first, then machine; repeats dropped; an unset name contributes nothing.
+        assert_eq!(names.len(), 4, "{names:?}");
+        assert_eq!(names[0], r"C:\one");
+        assert_eq!(names[1], r"C:\Users\me\bin");
+        assert_eq!(names[2], r"C:\two");
+        assert_eq!(names[3], r"\x");
+    }
+
+    #[test]
+    fn a_registry_value_is_read_from_reg_query_output() {
+        let out = "\r\nHKEY_CURRENT_USER\\Environment\r\n    \
+                   Path    REG_EXPAND_SZ    %USERPROFILE%\\bin;C:\\tools\r\n\r\n";
+        assert_eq!(
+            parse_reg_path(out).as_deref(),
+            Some("%USERPROFILE%\\bin;C:\\tools")
+        );
+        assert_eq!(parse_reg_path("no value here"), None);
     }
 }

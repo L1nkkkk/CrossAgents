@@ -95,8 +95,9 @@ fn default_protocol() -> String {
     "acp".into()
 }
 
-/// Plugins found in `dir`, plus a warning for every manifest that could not be used.
-pub fn load_dir(dir: &Path) -> (Vec<(String, PluginConfig)>, Vec<String>) {
+/// Plugins found in `dir` (with the manifest each came from), plus a warning for every
+/// manifest that could not be used.
+pub fn load_dir(dir: &Path) -> (Vec<(String, PluginConfig, PathBuf)>, Vec<String>) {
     let mut plugins = Vec::new();
     let mut warnings = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -118,7 +119,7 @@ pub fn load_dir(dir: &Path) -> (Vec<(String, PluginConfig)>, Vec<String>) {
             }
         };
         match parse_in(&text, &path.display().to_string(), Some(&plugin_dir)) {
-            Ok(entry) => plugins.push(entry),
+            Ok(entry) => plugins.push((entry.0, entry.1, path)),
             Err(err) => warnings.push(format!("{}: {err}", path.display())),
         }
     }
@@ -186,6 +187,7 @@ fn parse_in(
             efforts,
             locate: manifest.locate,
             install: manifest.install,
+            described_by: None,
         },
     ))
 }
@@ -222,7 +224,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("no-manifest")).unwrap();
 
         let (plugins, warnings) = load_dir(dir.path());
-        let names: Vec<&str> = plugins.iter().map(|(n, _)| n.as_str()).collect();
+        let names: Vec<&str> = plugins.iter().map(|(n, _, _)| n.as_str()).collect();
         assert_eq!(names, ["global", "good"]);
         let good = &plugins[1].1;
         assert!(
@@ -252,9 +254,10 @@ mod tests {
         write(dir.path(), "acp", "name = \"acp\"\n");
         let (plugins, warnings) = load_dir(dir.path());
         assert_eq!(plugins.len(), 1, "{warnings:?}");
-        let (name, config) = &plugins[0];
+        let (name, config, manifest_path) = &plugins[0];
         assert_eq!(name, "cx");
         assert_eq!(config.driver, Some(DriverKind::CodexNative));
+        assert!(manifest_path.ends_with("plugin.toml"), "{manifest_path:?}");
         assert!(Path::new(&config.native_command[0]).is_absolute());
         assert_eq!(config.efforts, ["low", "high"]);
         assert!(warnings[0].contains("command is empty"), "{warnings:?}");

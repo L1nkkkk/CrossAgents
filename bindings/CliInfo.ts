@@ -25,4 +25,27 @@ install_hint?: string,
 /**
  * Where to read more about installing and signing in.
  */
-docs?: string, };
+docs?: string, 
+/**
+ * The install method that put it here (`native`, `npm`), when its path says which one
+ * did (docs/DESIGN.md §9.3).
+ */
+installed_via?: string, 
+/**
+ * The command this machine would run to install it, as argv: what the confirmation box
+ * shows before anything runs.
+ */
+install_command?: Array<string>, 
+/**
+ * The command this machine would run to upgrade it, as argv; absent when it cannot be
+ * upgraded here.
+ */
+upgrade_command?: Array<string>, 
+/**
+ * Whether the GUI offers an upgrade button.
+ */
+can_upgrade: boolean, 
+/**
+ * Where the description came from: `built-in`, a manifest's path, or `config.toml`.
+ */
+described_by?: string, };

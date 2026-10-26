@@ -100,6 +100,16 @@ impl Driver for CodebuddyNativeDriver {
         self.inner.probe_cli().await;
     }
 
+    /// The wrapper must forward every default-implemented method too, or takeover, refresh
+    /// and the lookup report silently stop working for CodeBuddy (docs/DESIGN.md §9.1).
+    fn refresh_cli(&self) {
+        self.inner.refresh_cli();
+    }
+
+    fn cli_places(&self) -> Vec<String> {
+        self.inner.cli_places()
+    }
+
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError> {
         self.check(&spec)?;
         self.inner.open(spec).await

@@ -56,7 +56,7 @@ mod tests {
         for (name, config) in all() {
             assert!(config.driver.is_some(), "{name} needs a driver");
             assert!(
-                config.install.hint.is_some(),
+                config.install.hint.is_some() || !config.install.methods.is_empty(),
                 "{name} should say how to install it"
             );
             assert!(

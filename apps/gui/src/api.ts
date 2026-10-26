@@ -6,6 +6,7 @@ import type { Account } from "@bindings/Account";
 import type { AccountUsageGroup } from "@bindings/AccountUsageGroup";
 import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
 import type { ChangesResponse } from "@bindings/ChangesResponse";
+import type { CliInstallAccepted } from "@bindings/CliInstallAccepted";
 import type { AttachmentContent } from "@bindings/AttachmentContent";
 import type { Task } from "@bindings/Task";
 import type { TaskReviewRequest } from "@bindings/TaskReviewRequest";
@@ -141,6 +142,10 @@ export const api = {
     request<TurnDiffResponse>("GET", `/v1/agents/${enc(key)}/turns/${enc(messageId)}/diff`),
   listPlugins: () => request<ListPluginsResponse>("GET", "/v1/plugins"),
   setPluginModels: (name: string, shown: string[] | null) => request<PluginInfo>("POST", `/v1/plugins/${enc(name)}/models`, { shown }),
+  /** Runs the description's install command on this machine; progress comes on the event stream. */
+  installPlugin: (name: string) => request<CliInstallAccepted>("POST", `/v1/plugins/${enc(name)}/install`),
+  /** The same for its upgrade command. */
+  upgradePlugin: (name: string) => request<CliInstallAccepted>("POST", `/v1/plugins/${enc(name)}/upgrade`),
 
   listRuns: () => request<ListRunsResponse>("GET", "/v1/runs"),
   getRun: (key: string) => request<RunDetail>("GET", `/v1/runs/${enc(key)}`),

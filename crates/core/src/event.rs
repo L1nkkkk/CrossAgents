@@ -348,6 +348,53 @@ pub enum EventKind {
         passed: bool,
         checks: Vec<CheckResult>,
     },
+    /// A CLI install or upgrade started (`action`: `install` or `upgrade`), with the exact
+    /// argv the hub is about to run (docs/DESIGN.md §9.3). Only the description's commands
+    /// are ever run: the request names a plugin and an action, never a command.
+    #[serde(rename = "cli.install.started")]
+    CliInstallStarted {
+        plugin: String,
+        action: String,
+        argv: Vec<String>,
+        /// Where the description that says how came from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        described_by: Option<String>,
+    },
+    /// One line its output produced; `dropped` counts the lines past the cap that are not
+    /// sent, so a chatty installer cannot flood the stream.
+    #[serde(rename = "cli.install.output")]
+    CliInstallOutput {
+        plugin: String,
+        action: String,
+        line: String,
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(type = "number"))]
+        dropped: u64,
+    },
+    /// It ended. `ok` is what the lookup after it found, not the exit code alone: a command
+    /// that succeeded but left no CLI behind is a failure, and `reason` says why.
+    #[serde(rename = "cli.install.finished")]
+    CliInstallFinished {
+        plugin: String,
+        action: String,
+        ok: bool,
+        code: Option<i32>,
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(type = "number"))]
+        duration_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        reason: Option<String>,
+        /// Lines past the cap that were dropped.
+        #[serde(default)]
+        #[cfg_attr(feature = "ts", ts(type = "number"))]
+        dropped: u64,
+    },
+    /// A plugin's CLI changed in a way clients should re-read (`GET /v1/plugins`), after an
+    /// install or an upgrade and the lookup that followed it.
+    #[serde(rename = "plugin.changed")]
+    PluginChanged { name: String },
 }
 
 /// A message on its way to an agent. The id is fixed before delivery, so a sender can
@@ -464,6 +511,10 @@ impl EventKind {
             Self::TaskProgress { .. } => "task.progress",
             Self::TaskRerouted { .. } => "task.rerouted",
             Self::TaskCommand { .. } => "task.command",
+            Self::CliInstallStarted { .. } => "cli.install.started",
+            Self::CliInstallOutput { .. } => "cli.install.output",
+            Self::CliInstallFinished { .. } => "cli.install.finished",
+            Self::PluginChanged { .. } => "plugin.changed",
         }
     }
 
@@ -503,7 +554,11 @@ impl EventKind {
             | Self::RunBudget { .. }
             | Self::RunLanded { .. }
             | Self::AccountLoginFinished { .. }
-            | Self::AccountLoginPending { .. } => None,
+            | Self::AccountLoginPending { .. }
+            | Self::CliInstallStarted { .. }
+            | Self::CliInstallOutput { .. }
+            | Self::CliInstallFinished { .. }
+            | Self::PluginChanged { .. } => None,
             Self::AgentSessionStarted { id, .. } => Some(*id),
             Self::ReminderFired { owner, .. } | Self::WatchTriggered { owner, .. } => Some(*owner),
             Self::NoteWritten { author, .. } => Some(*author),

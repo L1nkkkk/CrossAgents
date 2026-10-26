@@ -13,6 +13,7 @@ pub mod claude_native;
 pub mod codebuddy_native;
 pub mod codex_native;
 pub mod host;
+pub mod install;
 pub mod jsonrpc;
 pub mod launch;
 pub mod locate;

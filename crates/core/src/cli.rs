@@ -66,4 +66,17 @@ pub struct CliStatus {
     pub install_hint: Option<String>,
     /// Where to read more about installing and signing in.
     pub docs: Option<String>,
+    /// The install method that put what was found there (`npm`, `native`), when the path
+    /// says which one did (docs/DESIGN.md §9.3).
+    pub installed_via: Option<String>,
+    /// The command this machine would run to install it, as argv: what the confirmation
+    /// box shows.
+    pub install_command: Option<Vec<String>>,
+    /// The command this machine would run to upgrade it; `None` when it cannot be upgraded.
+    pub upgrade_command: Option<Vec<String>>,
+    /// Whether upgrading in place is something the description knows how to do: false for a
+    /// copy another app keeps, and for a program the person pointed at themselves.
+    pub can_upgrade: bool,
+    /// Where the description came from: `built-in`, a manifest's path, or `config.toml`.
+    pub described_by: Option<String>,
 }

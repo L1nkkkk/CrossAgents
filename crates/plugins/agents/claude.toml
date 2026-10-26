@@ -18,7 +18,9 @@ efforts = ["low", "medium", "high", "xhigh", "max"]
 [locate]
 # `native_command` in `config.toml` wins over all of this.
 commands = ["claude"]
-# The native installer (`claude.ai/install.sh`) puts it beside the user's own programs.
+# The native installer puts it beside the user's own programs: `~/.local/bin/claude`,
+# which is `%USERPROFILE%\.local\bin\claude.exe` on Windows.
+# https://support.claude.com/en/articles/14554922 (1.2: the binary's location per system)
 paths = ["~/.local/bin/claude"]
 # The Claude desktop app keeps a copy per build; the newest one is used.
 bundled = ["%LOCALAPPDATA%/Claude-Data/*/claude-code/*/*/claude.exe"]
@@ -26,5 +28,20 @@ version = ["--version"]
 
 [install]
 label = "Claude Code"
-hint = "npm install -g @anthropic-ai/claude-code"
+# The native installer is the way in; npm is deprecated.
+# https://docs.claude.com/en/docs/claude-code/setup
 docs = "https://docs.claude.com/en/docs/claude-code/setup"
+
+[[install.methods]]
+id = "native"
+os = ["windows"]
+# https://docs.claude.com/en/docs/claude-code/setup (Windows: `irm https://claude.ai/install.ps1 | iex`)
+run = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm https://claude.ai/install.ps1 | iex"]
+upgrade = ["claude", "update"]
+
+[[install.methods]]
+id = "native"
+os = ["macos", "linux"]
+# https://docs.claude.com/en/docs/claude-code/setup (macOS and Linux: `curl -fsSL https://claude.ai/install.sh | bash`)
+run = ["bash", "-c", "curl -fsSL https://claude.ai/install.sh | bash"]
+upgrade = ["claude", "update"]

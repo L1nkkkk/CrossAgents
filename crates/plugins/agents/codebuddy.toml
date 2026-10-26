@@ -38,3 +38,10 @@ hint = "npm install -g @tencent-ai/codebuddy-code"
 login = "then sign in once with `codebuddy` and `/login` (or set CODEBUDDY_API_KEY)"
 notes = "The copy inside WorkBuddy cannot run outside the WorkBuddy app."
 docs = "https://www.codebuddy.ai/"
+
+[[install.methods]]
+id = "npm"
+requires = ["npm"]
+# https://www.npmjs.com/package/@tencent-ai/codebuddy-code
+run = ["npm", "install", "-g", "@tencent-ai/codebuddy-code"]
+upgrade = ["npm", "install", "-g", "@tencent-ai/codebuddy-code@latest"]

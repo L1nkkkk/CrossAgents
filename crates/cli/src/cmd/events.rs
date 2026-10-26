@@ -341,6 +341,54 @@ pub fn summary(kind: &EventKind) -> String {
             if *passed { "passed" } else { "FAILED" },
             checks.len()
         ),
+        EventKind::CliInstallStarted {
+            plugin,
+            action,
+            argv,
+            ..
+        } => {
+            format!("{plugin} {action} $ {}", argv.join(" "))
+        }
+        EventKind::CliInstallOutput {
+            plugin,
+            line,
+            dropped,
+            ..
+        } => format!(
+            "{plugin} {}{}",
+            one_line(line),
+            if *dropped > 0 {
+                format!(" ({dropped} line(s) dropped)")
+            } else {
+                String::new()
+            }
+        ),
+        EventKind::CliInstallFinished {
+            plugin,
+            action,
+            ok,
+            code,
+            duration_ms,
+            reason,
+            dropped,
+            ..
+        } => {
+            let mut text = format!(
+                "{plugin} {action} {} ({duration_ms}ms)",
+                if *ok { "ok" } else { "FAILED" }
+            );
+            if let Some(code) = code {
+                text.push_str(&format!(" code {code}"));
+            }
+            if let Some(reason) = reason {
+                text.push_str(&format!(": {}", one_line(reason)));
+            }
+            if *dropped > 0 {
+                text.push_str(&format!(" [{dropped} line(s) dropped]"));
+            }
+            text
+        }
+        EventKind::PluginChanged { name } => format!("{name} re-read"),
     }
 }
 

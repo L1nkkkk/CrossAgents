@@ -173,6 +173,15 @@ impl Driver for ClaudeNativeDriver {
         let _ = self.cli.version().await;
     }
 
+    /// After an install or an upgrade: the file the cache named may be gone or replaced.
+    fn refresh_cli(&self) {
+        self.cli.forget();
+    }
+
+    fn cli_places(&self) -> Vec<String> {
+        self.cli.searched()
+    }
+
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError> {
         Ok(Box::new(self.start(spec, Start::New(new_id())).await?))
     }

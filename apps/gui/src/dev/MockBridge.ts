@@ -49,6 +49,8 @@ export type MockState = {
   usage: Partial<Record<UsageGroup, UsageResponse>>;
   accountUsage?: AccountUsageResponse;
   plugins: PluginInfo[];
+  /** What a mock install or upgrade does: succeed, exit non-zero, or leave nothing behind. */
+  install?: "ok" | "fail" | "missing";
   /** The API version `/v1/info` reports; `v1` when unset. */
   api?: string;
 };
@@ -413,6 +415,8 @@ export class MockBridge implements CrossAgentsBridge {
         return json(m[2] === "answer" ? 200 : 204, q);
       }
       if (p === "/v1/repos/init") return json(200, body);
+      if ((m = p.match(/^\/v1\/plugins\/([^/]+)\/(install|upgrade)$/)))
+        return this.installCli(decodeURIComponent(m[1]), m[2] as "install" | "upgrade");
       return json(204);
     }
 
@@ -490,6 +494,59 @@ export class MockBridge implements CrossAgentsBridge {
     const parts = [req.note ?? "", lines.length ? `Review comments on #${task.key}:\n${lines.join("\n")}` : "", `---\nfrom: the person, reviewing task #${task.key}`];
     this.emit({ type: "agent.input", data: { id: task.assignee, message_id: uid(), text: parts.filter(Boolean).join("\n\n"), queued: true, from: { kind: "human" } } });
     return json(200, task);
+  }
+
+  /** Like the hub: the description's command runs, and the event stream says how it went. */
+  private installCli(name: string, action: "install" | "upgrade"): HubResponse {
+    const plugin = this.state.plugins.find((p) => p.name === name);
+    const cli = plugin?.cli;
+    if (!plugin || !cli) return notFound("plugin");
+    const argv = action === "install" ? cli.install_command : cli.upgrade_command;
+    if (!argv?.length) return json(409, { error: { code: "conflict", message: `${name} cannot be ${action}ed here` } });
+    const mode = this.state.install ?? "ok";
+    const lines =
+      mode === "fail"
+        ? [`$ ${argv.join(" ")}`, "npm error code EACCES", "npm error syscall mkdir"]
+        : mode === "missing"
+          ? [`$ ${argv.join(" ")}`, `installed ${name} into a directory the hub does not look in`]
+          : [`$ ${argv.join(" ")}`, "added 1 package in 3s", `${name} ${action === "install" ? "installed" : "upgraded"}`];
+    this.emit({ type: "cli.install.started", data: { plugin: name, action, argv, described_by: cli.described_by } });
+    lines.forEach((line, i) =>
+      this.timers.push(
+        setTimeout(
+          () => this.emit({ type: "cli.install.output", data: { plugin: name, action, line, dropped: 0 } }),
+          300 + i * 450,
+        ),
+      ),
+    );
+    const ok = mode === "ok";
+    const code = mode === "fail" ? 1 : 0;
+    const reason =
+      mode === "fail"
+        ? "it exited with code 1"
+        : mode === "missing"
+          ? "the command succeeded, but the hub cannot find the installed program afterwards; it looked in: PATH: demo (demo.exe)"
+          : undefined;
+    this.timers.push(
+      setTimeout(
+        () => {
+          if (ok) {
+            cli.installed = true;
+            cli.version = action === "install" ? "1.0.6" : "0.159.0";
+            cli.source = "path";
+            cli.installed_via = "npm";
+            cli.can_upgrade = true;
+          }
+          this.emit({
+            type: "cli.install.finished",
+            data: { plugin: name, action, ok, code, duration_ms: 2400, reason, dropped: 0 },
+          });
+          this.emit({ type: "plugin.changed", data: { name } });
+        },
+        300 + lines.length * 450 + 500,
+      ),
+    );
+    return json(202, { plugin: name, action, argv });
   }
 
   private cancel(key: string): HubResponse {

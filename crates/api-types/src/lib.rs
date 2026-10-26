@@ -488,12 +488,46 @@ pub struct CliInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub docs: Option<String>,
+    /// The install method that put it here (`native`, `npm`), when its path says which one
+    /// did (docs/DESIGN.md §9.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub installed_via: Option<String>,
+    /// The command this machine would run to install it, as argv: what the confirmation box
+    /// shows before anything runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub install_command: Option<Vec<String>>,
+    /// The command this machine would run to upgrade it, as argv; absent when it cannot be
+    /// upgraded here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub upgrade_command: Option<Vec<String>>,
+    /// Whether the GUI offers an upgrade button.
+    #[serde(default)]
+    pub can_upgrade: bool,
+    /// Where the description came from: `built-in`, a manifest's path, or `config.toml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub described_by: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ListPluginsResponse {
     pub plugins: Vec<PluginInfo>,
+}
+
+/// `POST /v1/plugins/{name}/install` and `.../upgrade`: accepted, running in the background.
+/// How it went arrives on the event stream (`cli.install.*`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CliInstallAccepted {
+    pub plugin: String,
+    /// `install` or `upgrade`.
+    pub action: String,
+    /// The exact argv being run: the same one `cli.install.started` carries.
+    pub argv: Vec<String>,
 }
 
 /// `POST /v1/plugins/{name}/models`: the models to offer; `null` offers them all.

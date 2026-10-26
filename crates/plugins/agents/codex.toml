@@ -25,5 +25,13 @@ macos = ["/Applications/Codex.app/Contents/Resources/codex"]
 
 [install]
 label = "Codex"
-hint = "npm install -g @openai/codex"
+# https://github.com/openai/codex (install: `npm install -g @openai/codex`)
 docs = "https://github.com/openai/codex"
+# Kept as the fallback for a machine without npm: the same command, still copyable.
+hint = "npm install -g @openai/codex"
+
+[[install.methods]]
+id = "npm"
+requires = ["npm"]
+run = ["npm", "install", "-g", "@openai/codex"]
+upgrade = ["npm", "install", "-g", "@openai/codex@latest"]

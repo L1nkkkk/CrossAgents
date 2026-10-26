@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { AgentProfile } from "@bindings/AgentProfile";
 import { api, errorText } from "../api";
@@ -19,11 +19,12 @@ import {
   sessionHref,
   useAgents,
 } from "../components";
-import { useHubData } from "../hub";
+import { onHubEvent, useHubData } from "../hub";
 import { useArmed } from "../parts";
 import { ConnectExternal, ConnectInstructions } from "./External";
 import { vendorLabel } from "../lib/models";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
+import type { CliInfo } from "@bindings/CliInfo";
 
 /**
  * 设置 → 智能体: every agent the hub knows, external ones connected here. There is no team to
@@ -95,14 +96,64 @@ const CLI_SOURCE: Record<string, string> = {
 
 /**
  * The agent CLIs this machine has (docs/DESIGN.md §9.3): each vendor's version and where its
- * program came from, or the command that installs it. A CLI the hub cannot find is why an
- * agent fails to start, so it is said here rather than at the first message.
+ * program came from, a button that installs or upgrades it, and why there is no button when
+ * there is none. Nothing runs before the person confirms the exact command.
  */
 function VendorClis() {
-  const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], (e) => e.type.startsWith("account."));
+  const plugins = useHubData(
+    () => api.listPlugins().then((r) => r.plugins),
+    [],
+    (e) =>
+      e.type.startsWith("account.") ||
+      e.type === "plugin.changed" ||
+      e.type.startsWith("cli.install."),
+  );
+  const [confirm, setConfirm] = useState<Job>();
+  const [jobs, setJobs] = useState<Record<string, Progress>>({});
+
+  useEffect(
+    () =>
+      onHubEvent((e) => {
+        if (e.type === "cli.install.started") {
+          const { plugin, action } = e.data;
+          setJobs((all) => ({ ...all, [plugin]: { plugin, action, lines: [], dropped: 0 } }));
+        } else if (e.type === "cli.install.output") {
+          const { plugin, line, dropped } = e.data;
+          setJobs((all) => {
+            const job = all[plugin];
+            if (!job) return all;
+            // Only the tail is kept: an installer may print thousands of lines.
+            return { ...all, [plugin]: { ...job, lines: [...job.lines, line].slice(-200), dropped } };
+          });
+        } else if (e.type === "cli.install.finished") {
+          const { plugin, ok, reason, code } = e.data;
+          setJobs((all) => {
+            const job = all[plugin];
+            if (!job) return all;
+            return { ...all, [plugin]: { ...job, done: { ok, reason: reason ?? undefined, code: code ?? undefined } } };
+          });
+        }
+      }),
+    [],
+  );
+
   const list = (plugins.data ?? []).filter((p) => p.cli);
   if (!list.length) return null;
   const installed = list.filter((p) => p.cli?.installed).length;
+
+  async function start(job: Job) {
+    setConfirm(undefined);
+    try {
+      if (job.action === "install") await api.installPlugin(job.plugin);
+      else await api.upgradePlugin(job.plugin);
+    } catch (err) {
+      setJobs((all) => ({
+        ...all,
+        [job.plugin]: { plugin: job.plugin, action: job.action, lines: [], dropped: 0, done: { ok: false, reason: errorText(err) } },
+      }));
+    }
+  }
+
   return (
     <section className="settings-section">
       <div className="settings-head">
@@ -115,8 +166,9 @@ function VendorClis() {
       <div className="setting-card">
         {list.map((p) => {
           const cli = p.cli!;
+          const job = jobs[p.name];
           return (
-            <div className="setting-line" key={p.name}>
+            <div className="setting-line cli-line" key={p.name}>
               <div className="model-name">
                 <div className="setting-label">
                   <VendorMark plugin={p.name} size={16} />
@@ -128,18 +180,152 @@ function VendorClis() {
                     : "没装"}
                 </div>
               </div>
-              {cli.installed
-                ? cli.docs && (
-                    <a href={cli.docs} target="_blank" rel="noreferrer" className="small">
-                      文档
-                    </a>
-                  )
-                : cli.install_hint && <CopyCommand command={cli.install_hint} />}
+              <div className="cli-actions">
+                {job ? (
+                  <InstallProgress job={job} />
+                ) : cli.installed ? (
+                  <>
+                    {cli.can_upgrade ? (
+                      <button
+                        className="ghost"
+                        onClick={() =>
+                          setConfirm({
+                            plugin: p.name,
+                            action: "upgrade",
+                            argv: cli.upgrade_command ?? [],
+                            described_by: cli.described_by,
+                          })
+                        }
+                      >
+                        升级
+                      </button>
+                    ) : (
+                      upgradeNote(cli) && <span className="setting-hint">{upgradeNote(cli)}</span>
+                    )}
+                    {p.name === "claude" && cli.installed_via === "npm" && (
+                      <span className="setting-hint">
+                        npm 版已弃用，可以运行 <code>claude install</code> 迁到原生安装
+                      </span>
+                    )}
+                    {cli.docs && (
+                      <a href={cli.docs} target="_blank" rel="noreferrer" className="small">
+                        文档
+                      </a>
+                    )}
+                  </>
+                ) : cli.install_command ? (
+                  <>
+                    <button
+                      className="primary"
+                      onClick={() =>
+                        setConfirm({
+                          plugin: p.name,
+                          action: "install",
+                          argv: cli.install_command ?? [],
+                          described_by: cli.described_by,
+                        })
+                      }
+                    >
+                      安装
+                    </button>
+                    {cli.docs && (
+                      <a href={cli.docs} target="_blank" rel="noreferrer" className="small">
+                        文档
+                      </a>
+                    )}
+                  </>
+                ) : (
+                  cli.install_hint && <CopyCommand command={cli.install_hint} />
+                )}
+              </div>
+              {job?.done?.ok && (
+                <div className="cli-done ok">
+                  {job.action === "install" ? (
+                    <>
+                      装好了，下一步登录账号：<a href="#/usage">订阅与额度</a>
+                    </>
+                  ) : (
+                    "升级完成"
+                  )}
+                </div>
+              )}
             </div>
           );
         })}
       </div>
+      {confirm && <InstallConfirm job={confirm} onCancel={() => setConfirm(undefined)} onRun={() => void start(confirm)} />}
     </section>
+  );
+}
+
+type Job = { plugin: string; action: "install" | "upgrade"; argv: string[]; described_by?: string };
+type Progress = {
+  plugin: string;
+  action: string;
+  lines: string[];
+  dropped: number;
+  done?: { ok: boolean; reason?: string; code?: number };
+};
+
+/** What a description says it came from, in words for the confirmation box. */
+function describedBy(source?: string): string {
+  if (!source || source === "built-in") return "内置描述";
+  if (source === "config.toml") return "config.toml 里的覆盖";
+  return source;
+}
+
+/** Why no upgrade button is offered for what was found. */
+function upgradeNote(cli: CliInfo): string | undefined {
+  if (cli.can_upgrade || !cli.installed) return undefined;
+  if (cli.source === "bundled") return "随桌面版更新";
+  if (cli.source === "config" || cli.source === "env") return "由你的配置指定";
+  return "没有对应的升级命令";
+}
+
+/** The confirmation: the exact command, where its description came from, and a reminder. */
+function InstallConfirm({ job, onCancel, onRun }: { job: Job; onCancel: () => void; onRun: () => void }) {
+  const label = vendorLabel(job.plugin);
+  return (
+    <div className="dialog-backdrop" onMouseDown={onCancel}>
+      <div className="dialog" role="dialog" aria-modal="true" onMouseDown={(e) => e.stopPropagation()}>
+        <h2>{job.action === "install" ? `安装 ${label}` : `升级 ${label}`}</h2>
+        <p className="setting-hint">会在这台电脑上执行下面的命令。命令只来自它的描述文件。</p>
+        <pre className="cli-out">{job.argv.join(" ")}</pre>
+        <p className="setting-hint">描述来自：{describedBy(job.described_by)}</p>
+        <div className="row" style={{ justifyContent: "flex-end" }}>
+          <button className="ghost" onClick={onCancel}>
+            取消
+          </button>
+          <button className="primary" onClick={onRun}>
+            执行
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** What the running install printed, last lines first thing shown; the rest folds away. */
+function InstallProgress({ job }: { job: Progress }) {
+  const [expanded, setExpanded] = useState(false);
+  const shown = expanded ? job.lines : job.lines.slice(-6);
+  const running = !job.done;
+  return (
+    <div className="cli-job">
+      <div className="cli-job-head">
+        <span className="chip small">
+          {running ? (job.action === "install" ? "安装中" : "升级中") : job.done?.ok ? "完成" : "失败"}
+        </span>
+        {job.dropped > 0 && <span className="muted small">{job.dropped} 行未显示</span>}
+        {job.lines.length > 6 && (
+          <button className="ghost small" onClick={() => setExpanded((x) => !x)}>
+            {expanded ? "收起" : "展开全部"}
+          </button>
+        )}
+      </div>
+      <pre className="cli-out">{shown.join("\n") || "…"}</pre>
+      {job.done && !job.done.ok && <div className="cli-done bad">{job.done.reason ?? "失败"}</div>}
+    </div>
   );
 }
 

@@ -19,13 +19,14 @@ use chrono::{DateTime, Utc};
 use crossagents_api_types::{
     API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentSettingsRequest,
     AnswerRequest, ApiError, ApproveRunRequest, ArchiveAgentRequest, AttachmentContent,
-    ChangesResponse, CliInfo, ConnectInfo, CreateAccountRequest, CreateAgentRequest,
-    CreateRunRequest, DiffSide, ErrorCode, FinishRequest, HealthResponse, HubInfo, InitRepoRequest,
-    LandRequest, ListAccountsResponse, ListAgentsResponse, ListNotesResponse, ListPluginsResponse,
-    ListQuestionsResponse, ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo,
-    QuotaResponse, RejectRunRequest, RenameAgentRequest, RunDetail, RunTrace, SendMessageRequest,
-    SendMessageResponse, SetModelRequest, SetPluginModelsRequest, SetTopicRequest,
-    TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse, UsageGroup, UsageResponse,
+    ChangesResponse, CliInfo, CliInstallAccepted, ConnectInfo, CreateAccountRequest,
+    CreateAgentRequest, CreateRunRequest, DiffSide, ErrorCode, FinishRequest, HealthResponse,
+    HubInfo, InitRepoRequest, LandRequest, ListAccountsResponse, ListAgentsResponse,
+    ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
+    ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
+    RenameAgentRequest, RunDetail, RunTrace, SendMessageRequest, SendMessageResponse,
+    SetModelRequest, SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace,
+    Transcript, TurnDiffResponse, UsageGroup, UsageResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, AttachmentSupport,
@@ -70,6 +71,8 @@ pub struct AppState {
     /// How agents reach the hub's tools: the MCP command and the API base URL.
     pub mcp_command: Vec<String>,
     pub url: String,
+    /// Runs the description's install and upgrade commands, one job per plugin at a time.
+    pub installer: Arc<crate::install::Installer>,
 }
 
 impl AppState {
@@ -108,6 +111,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/notes", get(list_notes))
         .route("/v1/plugins", get(list_plugins))
         .route("/v1/plugins/{name}/models", post(set_plugin_models))
+        .route("/v1/plugins/{name}/install", post(install_plugin))
+        .route("/v1/plugins/{name}/upgrade", post(upgrade_plugin))
         .route("/v1/usage", get(usage))
         .route("/v1/accounts", get(list_accounts).post(create_account))
         .route("/v1/quota", get(quota))
@@ -880,6 +885,11 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
             .and_then(|located| located.version.clone()),
         install_hint: status.install_hint,
         docs: status.docs,
+        installed_via: status.installed_via,
+        install_command: status.install_command,
+        upgrade_command: status.upgrade_command,
+        can_upgrade: status.can_upgrade,
+        described_by: status.described_by,
     });
     PluginInfo {
         name: name.to_owned(),
@@ -917,6 +927,86 @@ async fn set_plugin_models(
         })?;
     state.models.set(&name, req.shown)?;
     Ok(Json(plugin_info(&state, driver.as_ref()).await))
+}
+
+/// `POST /v1/plugins/{name}/install`: runs the description's install command on this machine
+/// (admin: it executes a program here). `202` once it starts; the event stream says how it
+/// went (docs/DESIGN.md §9.3).
+async fn install_plugin(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> ApiResult<(StatusCode, Json<CliInstallAccepted>)> {
+    run_cli_job(&state, &name, crate::install::Action::Install).await
+}
+
+/// `POST /v1/plugins/{name}/upgrade`: the same for the upgrade command, when the description
+/// has one and the CLI is one of its own installs.
+async fn upgrade_plugin(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> ApiResult<(StatusCode, Json<CliInstallAccepted>)> {
+    run_cli_job(&state, &name, crate::install::Action::Upgrade).await
+}
+
+async fn run_cli_job(
+    state: &AppState,
+    name: &str,
+    action: crate::install::Action,
+) -> ApiResult<(StatusCode, Json<CliInstallAccepted>)> {
+    let registry = state.runtime.plugins();
+    let not_found = || CoreError::NotFound {
+        kind: "plugin",
+        id: name.to_owned(),
+    };
+    let config = registry.config(name).ok_or_else(not_found)?;
+    let driver = registry.get(name).ok_or_else(not_found)?;
+    let status = driver.cli_status().await.ok_or_else(|| {
+        AppError::bad_request(format!("{name} launches no CLI that this machine installs"))
+    })?;
+    let argv = match action {
+        crate::install::Action::Install => status.install_command.clone(),
+        crate::install::Action::Upgrade => status.upgrade_command.clone(),
+    }
+    .ok_or_else(|| match action {
+        crate::install::Action::Install => AppError::bad_request(format!(
+            "the description of {name} says no way to install it on this machine"
+        )),
+        crate::install::Action::Upgrade => AppError::from(CoreError::Conflict(format!(
+            "{name} cannot be upgraded here: {}",
+            why_not_upgradable(&status)
+        ))),
+    })?;
+    let job = crate::install::JobSpec {
+        plugin: name.to_owned(),
+        action,
+        argv: argv.clone(),
+        described_by: config.described_by.clone(),
+    };
+    state
+        .installer
+        .start(state.bus.clone(), driver.clone(), job)
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(CliInstallAccepted {
+            plugin: name.to_owned(),
+            action: action.as_str().to_owned(),
+            argv,
+        }),
+    ))
+}
+
+/// Why the GUI (and this API) does not offer an upgrade for what was found.
+fn why_not_upgradable(status: &crossagents_core::CliStatus) -> String {
+    match status.located.as_ref().map(|found| found.source.as_str()) {
+        Some("bundled") => {
+            "it is the copy the desktop app ships; update the desktop app instead".to_owned()
+        }
+        Some("config") | Some("env") => {
+            "it is the program your configuration names, so the hub does not touch it".to_owned()
+        }
+        _ => "no install method in its description matches where it was found".to_owned(),
+    }
 }
 
 // ---------------------------------------------------------------------------------------

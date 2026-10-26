@@ -41,6 +41,7 @@ const ALLOWED: readonly { method: string; path: RegExp; level: "read" | "write" 
   { method: "GET", path: /^\/v1\/notes$/, level: "read" },
   { method: "GET", path: /^\/v1\/plugins$/, level: "read" },
   { method: "POST", path: /^\/v1\/plugins\/[^/]+\/models$/, level: "write" },
+  { method: "POST", path: /^\/v1\/plugins\/[^/]+\/(install|upgrade)$/, level: "admin" },
   { method: "GET", path: /^\/v1\/runs$/, level: "read" },
   { method: "POST", path: /^\/v1\/runs$/, level: "write" },
   { method: "GET", path: /^\/v1\/runs\/[^/]+$/, level: "read" },

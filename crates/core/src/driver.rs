@@ -586,6 +586,15 @@ pub trait Driver: Send + Sync {
     /// The hub runs this in the background at startup, never on a request's path: the answer
     /// costs a subprocess, and `GET /v1/plugins` must not wait for one.
     async fn probe_cli(&self) {}
+    /// Forgets what the last lookup and the version probe remembered, so that the next
+    /// [`Self::cli_status`] looks again: called after an install or an upgrade, which may
+    /// have put a new file where the old one was (docs/DESIGN.md §9.3).
+    fn refresh_cli(&self) {}
+    /// Everywhere the description looks for its CLI on this machine, for a failure report
+    /// ("the command succeeded, but nothing was found: it looked in ...").
+    fn cli_places(&self) -> Vec<String> {
+        Vec::new()
+    }
     /// Opens a new session.
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError>;
     /// Reopens a suspended session by the id it reported in

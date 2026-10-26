@@ -9,6 +9,7 @@ pub mod collab;
 pub mod event_log;
 pub mod guard;
 pub mod identity;
+pub mod install;
 pub mod models;
 pub mod notices;
 pub mod paths;
@@ -262,6 +263,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         stop_agents: stop_agents.clone(),
         mcp_command: setup.mcp_command.clone(),
         url: format!("http://{addr}"),
+        installer: Arc::new(install::Installer::new()),
     });
     bus.publish(EventKind::HubStarted {
         version: VERSION.into(),

@@ -229,6 +229,15 @@ impl Driver for CodexNativeDriver {
         let _ = self.cli.version().await;
     }
 
+    /// After an install or an upgrade: the file the cache named may be gone or replaced.
+    fn refresh_cli(&self) {
+        self.cli.forget();
+    }
+
+    fn cli_places(&self) -> Vec<String> {
+        self.cli.searched()
+    }
+
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError> {
         let server = self.server_for(&spec).await?;
         let settings = settings_for(&spec);
