@@ -207,9 +207,11 @@ export function task(r: Run, p: PlannedTask, init: { status: TaskStatus; assigne
       question: null,
       question_message: null,
       review: null,
+      rework: [],
     },
     parent: null,
     progress: init.progress ?? null,
+    handoffs: [],
     created_at: ago(init.minutesAgo),
     updated_at: ago(Math.max(0, init.minutesAgo - 5)),
   };

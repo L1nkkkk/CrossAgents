@@ -729,6 +729,21 @@ code.bare { background: none; padding: 0; }
 .peer-body { background: var(--peer); border-radius: var(--radius-lg); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
 .peer-text { white-space: pre-wrap; word-break: break-word; font-size: 13px; color: var(--text-2); max-height: 320px; overflow: auto; }
 
+/* Handoff cards: a task's chain of hands, each step opening its card (handoff.tsx). */
+.hand-chain { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.hand-steps { display: flex; align-items: center; gap: 4px 6px; flex-wrap: wrap; font-size: 12px; }
+.hand-step { display: inline-flex; align-items: center; gap: 6px; }
+.hand-step button.chip { border: 1px solid transparent; cursor: pointer; }
+.hand-step button.chip:hover:not(:disabled), .hand-step button.chip.active { border-color: var(--border-strong); }
+.hand-kind { opacity: 0.75; font-size: 11px; }
+.hand-who { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; color: var(--text); font-weight: 500; }
+.hand-card { border-top: none; }
+.hand-route { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 13px; }
+.hand-list li { font-size: 13px; color: var(--text-2); }
+.hand-card ul.plain code { white-space: normal; overflow-wrap: anywhere; }
+.board-item + .board-item { border-top: 1px solid var(--border); }
+.board-item .board-row + .hand-chain { padding: 0 14px 10px; }
+
 /* Steps: folded runs of tool calls and reasoning. */
 .steps { display: flex; flex-direction: column; gap: 2px; }
 .steps-summary { display: inline-flex; align-items: center; gap: 7px; border: none; padding: 1px 0; font-size: 12.5px; color: var(--text-2); align-self: flex-start; }

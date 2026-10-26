@@ -51,7 +51,7 @@ export function useRunTree() {
       return Promise.all(recent.map((r) => api.getRun(r.id)));
     },
     [],
-    (e) => e.type.startsWith("run.") || e.type === "task.status_changed",
+    (e) => e.type.startsWith("run.") || e.type === "task.status_changed" || e.type === "task.handed_off",
   );
 }
 

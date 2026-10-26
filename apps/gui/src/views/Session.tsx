@@ -3,11 +3,13 @@ import type { Agent } from "@bindings/Agent";
 import type { Capabilities } from "@bindings/Capabilities";
 import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
+import type { Handoff } from "@bindings/Handoff";
 import type { ModelSwitch } from "@bindings/ModelSwitch";
 import type { TranscriptUsage } from "@bindings/TranscriptUsage";
 import { view } from "../activity";
 import { api, errorText } from "../api";
 import { HeldFiles, TurnFiles, useHeld } from "../attach";
+import { HandoffLine } from "../handoff";
 import { dismiss as dismissMessage, retry as retryMessage, sendMessage, useOutbox, type Outgoing } from "../outbox";
 import { ACTIVE_RUN, useRunTree } from "../App";
 import { Avatar, ErrorBox, Icon, Mark, Prose, StatusChip, Vendor, agentTitle, agentTone, displayName, roleShape, time, useAgents, vendorName } from "../components";
@@ -432,9 +434,11 @@ function Conversation({
             </div>
           )}
           <CwdContext.Provider value={agent.cwd}>
-            {byTime(turns, switches).map((x) =>
+            {byTime(turns, [...switches, ...handoffsLedBy(agent, tree)]).map((x) =>
               "message_id" in x ? (
                 <Turn key={x.message_id} turn={x} agent={agent} agents={agents} tree={tree} />
+              ) : "task_key" in x ? (
+                <HandoffLine key={x.id} handoff={x} agents={agents} />
               ) : (
                 <SwitchNote key={x.at} change={x} />
               ),
@@ -449,15 +453,24 @@ function Conversation({
   );
 }
 
-/** Turns and model switches in the order they happened (a switch before the message it applies to). */
-function byTime(turns: TranscriptTurn[], switches: ModelSwitch[]): (TranscriptTurn | ModelSwitch)[] {
-  const out: (TranscriptTurn | ModelSwitch)[] = [];
+/** Every handoff of the tasks in the runs `agent` leads: orchestration lines in its conversation. */
+function handoffsLedBy(agent: Agent, tree: RunDetail[]): Handoff[] {
+  return tree.filter((d) => d.run.planner === agent.id).flatMap((d) => d.tasks.flatMap((t) => t.handoffs));
+}
+
+/**
+ * Turns, model switches and handoffs in the order they happened (a switch before the message
+ * it applies to; a handoff after the turn that caused it).
+ */
+function byTime(turns: TranscriptTurn[], notes: (ModelSwitch | Handoff)[]): (TranscriptTurn | ModelSwitch | Handoff)[] {
+  const sorted = notes.slice().sort((a, b) => a.at.localeCompare(b.at));
+  const out: (TranscriptTurn | ModelSwitch | Handoff)[] = [];
   let i = 0;
   for (const turn of turns) {
-    while (i < switches.length && switches[i].at <= turn.sent_at) out.push(switches[i++]);
+    while (i < sorted.length && sorted[i].at <= turn.sent_at) out.push(sorted[i++]);
     out.push(turn);
   }
-  return out.concat(switches.slice(i));
+  return out.concat(sorted.slice(i));
 }
 
 /** "模型 Haiku → Sonnet · 推理 默认 → 低": only what changed. The agent is told the same with its next message. */

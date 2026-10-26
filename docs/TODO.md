@@ -241,7 +241,10 @@ B 删除 run：
 
 第一批（P0）：
 
-- [ ] 交接卡（Lancer）：`task_assign`、改派（`task.rerouted`）、克隆接手时生成「发起方 → 接手方、文件、摘要、决策、待解问题、交接时上下文大小」，`api-types` 先定结构，事件带字段，对话里显示成卡片（magpie-lancer §2.1）
+- [x] 交接卡（Lancer）：`task_assign`、改派（`task.rerouted`）、克隆接手时生成「发起方 → 接手方、文件、摘要、决策、待解问题、交接时上下文大小」，`api-types` 先定结构，事件带字段，对话里显示成卡片（magpie-lancer §2.1）
+  - 2026-10-27：`Handoff`（assign / reassign / reroute / escalate）存在 `Task.handoffs`，事件 `task.handed_off`，先存、发布，再给新 worker 发 `brief::handover` 文字版；生成点：第一次派活、`task_assign`（可带 `reason`，派给 run 的 escalate 队友算升级）、额度改派。文件 = worktree 对 base 的改动加未提交文件，读不到留空只 warn；决定 = 规格 interfaces 加驳回意见（`TaskReport.rework`）；上下文大小取上一个 worker 最后一次 `agent.usage`，没报就空
+  - 展示：`run show` 打印交接链，trace 每张卡一个节点；GUI 任务板每个任务下一条交接链、任务详情「交接」、主导对话里的编排行，点开同一张卡片；mock 场景 `handoff`，截图在 [screens/handoff](screens/handoff/)
+  - 还没有的：`escalated` 现在没有代码会置位（H1-3 去掉了自动升级），所以只有「`task_assign` 给 escalate 队友」这一条升级路径真的会出卡
 - [ ] 选账号（magpie）：`routing.rs` 默认先用最早续期的账号；新克隆的 Worker 到 90% 让号、返工中的到 98% 才换；失败的账号排到队尾不剔除；额度未知的先试一次读出余量（magpie-lancer §2.2）
 
 第二批（P0，agent 间通信里空着的那块）：

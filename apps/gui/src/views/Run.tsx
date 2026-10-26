@@ -9,6 +9,7 @@ import type { RunPolicy } from "@bindings/RunPolicy";
 import { navigate } from "../App";
 import { api, errorText } from "../api";
 import { DeleteRunDialog } from "../deleteRun";
+import { HandoffChain } from "../handoff";
 import {
   Avatar,
   ErrorBox,
@@ -45,6 +46,7 @@ function concerns(runId: string, e: HubEvent): boolean {
     case "task.status_changed":
     case "task.checked":
     case "task.rerouted":
+    case "task.handed_off":
       return e.data.run_id === runId;
     default:
       return false;
@@ -166,7 +168,8 @@ function TaskBoard({ run, tasks, agents, selectedTask }: { run: Run; tasks: Task
           </div>
           <div className="board">
             {group.tasks.map((task) => (
-              <a key={task.id} className={`board-row ${selectedTask === task.id || selectedTask === task.key ? "active" : ""}`} href={`#/runs/${run.id}/tasks/${task.id}`}>
+              <div key={task.id} className="board-item">
+              <a className={`board-row ${selectedTask === task.id || selectedTask === task.key ? "active" : ""}`} href={`#/runs/${run.id}/tasks/${task.id}`}>
                 <code className="board-key">#{task.key}</code>
                 <div style={{ minWidth: 0 }}>
                   <div className="t">{task.title}</div>
@@ -182,6 +185,8 @@ function TaskBoard({ run, tasks, agents, selectedTask }: { run: Run; tasks: Task
                 </div>
                 <StateWord state={taskState(task, tasks)} />
               </a>
+              <HandoffChain handoffs={task.handoffs} agents={agents} />
+              </div>
             ))}
           </div>
         </div>
@@ -685,6 +690,11 @@ export function TaskDetail({ runId, taskId }: { runId: string; taskId: string })
             <dd title={time(task.updated_at)}>{ago(task.updated_at)}</dd>
           </dl>
 
+          {task.handoffs.length > 0 && (
+            <Section title="交接">
+              <HandoffChain handoffs={task.handoffs} agents={agents.data} open={task.handoffs[task.handoffs.length - 1].id} />
+            </Section>
+          )}
           {task.report.failure && <Section title="失败原因">{<div className="item-error">{task.report.failure}</div>}</Section>}
           {task.report.question && (
             <Section title="Worker 的问题">

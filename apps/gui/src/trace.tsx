@@ -7,6 +7,7 @@ import type { LaneTrace } from "@bindings/LaneTrace";
 import type { TaskTrace } from "@bindings/TaskTrace";
 import { api } from "./api";
 import { ErrorBox, StatusChip, agentName, taskTone, useAgents } from "./components";
+import { HandoffChain } from "./handoff";
 import { useHubData } from "./hub";
 import { clock } from "./lib/time";
 
@@ -18,7 +19,7 @@ export function RunTraceView({ runId }: { runId: string }) {
   const trace = useHubData(
     () => api.runTrace(runId),
     [runId],
-    (e) => (e.type === "task.status_changed" || e.type === "task.checked" || e.type === "task.rerouted") && e.data.run_id === runId,
+    (e) => (e.type === "task.status_changed" || e.type === "task.checked" || e.type === "task.rerouted" || e.type === "task.handed_off") && e.data.run_id === runId,
   );
   if (trace.error) return <ErrorBox error={trace.error} />;
   if (!trace.data) return <p className="muted small">加载追溯…</p>;
@@ -74,6 +75,7 @@ function TaskRow({ task }: { task: TaskTrace }) {
               改派：{r}
             </div>
           ))}
+          {task.handoffs.length > 0 && <HandoffChain handoffs={task.handoffs} agents={agents.data} />}
           {lane.turns.length > 0 && (
             <ul className="trace-list">
               {lane.turns.map((turn) => (

@@ -2,11 +2,13 @@
 // `plan` — the plan waits for approval; `running` — two tasks run, one waits to be checked, one
 // failed, and Ada's conversation carries the orchestrator's messages and task cards.
 
+import type { Handoff } from "@bindings/Handoff";
 import type { HumanItem } from "@bindings/HumanItem";
 import type { RunDetail } from "@bindings/RunDetail";
 import type { RunTrace } from "@bindings/RunTrace";
+import type { Task } from "@bindings/Task";
 import { emptyState, type MockState, type Step } from "../dev/MockBridge";
-import { REPO, ago, clone, fileDiff, planned, run, say, task, team, think, tool, transcript, turn, uid } from "../dev/fixtures";
+import { REPO, agent, ago, clone, fileDiff, planned, run, say, task, team, think, tool, transcript, turn, uid } from "../dev/fixtures";
 import { plugins } from "./Agents.mock";
 import { quota, usage } from "./Usage.mock";
 
@@ -427,8 +429,119 @@ export function traceRun(): { state: MockState; script: Step[]; route: string } 
     lane: t.key === "d" ? failedLane : t.key === "c" ? recoveredLane : lane(t.assignee!, t.key === "a" ? 2 : 1, t.key === "a" ? 0.34 : 0.12, [cmd(t.assignee!, "cargo test -p auth", 0, 30)]),
     checks: t.report.checks.length ? [{ at: ago(27), passed: t.report.checks.every((c) => c.passed), checks: t.report.checks }] : [],
     rerouted: [],
+    handoffs: t.handoffs,
     first_failure: t.key === "d" || t.key === "c" ? "`cargo test -p auth` exited 101" : null,
   }));
   scene.state.traces.set(d.run.id, { run_id: d.run.id, lead: lane(d.run.planner, 3, 0.41), tasks, spent: { tokens: 120_000, cost_usd: 1.32 } });
   return { ...scene, script: [], route: `#/runs/${d.run.id}` };
+}
+
+/**
+ * Handoff cards (docs/research/magpie-lancer.md §2.1): every task's chain of hands on the run
+ * page and in Ada's conversation — #a its first worker (派活), #c given to Mia after a rework
+ * (改派), #d escalated to Kai with a question still open (升级), and #b moving to another
+ * account when Mia's ran out (额度改派, arriving a moment in).
+ */
+export function handoffRun(): { state: MockState; script: Step[]; route: string } {
+  const scene = oauthRun("running");
+  const d = scene.state.runs[0];
+  const r = d.run;
+  const name = (id: string) => scene.state.agents.find((a) => a.id === id)!.name;
+  const byKey = (k: string) => d.tasks.find((t) => t.key === k)!;
+  const kai = agent({ name: "kai", plugin: "claude", model: "claude-opus-4-1", role: "worker", profile: { display_name: "Kai", title: "资深工程师", color: "emerald" } });
+  const mia = scene.state.agents.find((a) => a.name === "Mia")!;
+  const miaC = clone(mia, "c", "running", `${REPO}/.crossagents/worktrees/c`);
+  const kaiD = clone(kai, "d", "running", `${REPO}/.crossagents/worktrees/d`);
+  scene.state.agents.push(kai, miaC, kaiD);
+  r.config = { ...r.config, escalate: kai.id, team: [...r.config.team, kai.id] };
+
+  const card = (t: Task, { minutesAgo, ...init }: Partial<Handoff> & { kind: Handoff["kind"]; to: string; minutesAgo: number }): Handoff => ({
+    id: uid(),
+    run_id: r.id,
+    task_id: t.id,
+    task_key: t.key,
+    from: r.planner,
+    from_name: name(r.planner),
+    to_name: name(t.worker_template ?? init.to),
+    reason: null,
+    goal: t.spec.goal,
+    files: t.spec.scope.allow,
+    summary: null,
+    decisions: t.spec.interfaces,
+    open_questions: [],
+    context_tokens: null,
+    at: ago(minutesAgo),
+    ...init,
+  });
+
+  for (const t of d.tasks) t.handoffs = [card(t, { kind: "assign", to: t.assignee!, minutesAgo: 40 })];
+
+  // #c: Ada sent it back once, then gave it to Mia.
+  const c = byKey("c");
+  const rexC = c.assignee!;
+  c.report = { ...c.report, rework: ["SessionStore 的接口别动：open/close 保持 async，调用方不改"] };
+  c.status = "running";
+  c.assignee = miaC.id;
+  c.worker_template = mia.id;
+  c.handoffs.push(
+    card(c, {
+      kind: "reassign",
+      from: rexC,
+      from_name: "Rex",
+      to: miaC.id,
+      to_name: "Mia",
+      minutesAgo: 12,
+      reason: "Rex 在 a 上忙不过来，c 的返工交给 Mia",
+      files: ["src/auth/session.rs", "Cargo.toml", "src/auth/session_tests.rs"],
+      summary: "SessionStore 换成了 RedisStore，接口没变；`REDIS_URL` 没设置时回落到 MemoryStore。",
+      decisions: ["SessionStore 的接口别动：open/close 保持 async，调用方不改"],
+      context_tokens: 61_000,
+    }),
+  );
+
+  // #d: two failed attempts, escalated to Kai with Rex's question unanswered.
+  const td = byKey("d");
+  const rexD = td.assignee!;
+  td.status = "running";
+  td.escalated = true;
+  td.assignee = kaiD.id;
+  td.report = { ...td.report, failure: null };
+  td.handoffs.push(
+    card(td, {
+      kind: "escalate",
+      from: rexD,
+      from_name: "Rex",
+      to: kaiD.id,
+      to_name: "Kai",
+      minutesAgo: 6,
+      reason: "验收两次没过：migrate::tests::idempotent、migrate::tests::expired 仍失败",
+      files: ["scripts/migrate_sessions.rs", "src/auth/migrate.rs"],
+      summary: "迁移脚本写好了，能跑；两个测试的 fixture 写死了 SQLite 文件路径，没修完。",
+      open_questions: ["已过期的旧会话要迁过去吗，还是直接丢掉？"],
+      context_tokens: 184_500,
+    }),
+  );
+
+  // #b: Mia's account runs out; the card arrives with the event, a moment in.
+  const b = byKey("b");
+  const reroute = card(b, {
+    kind: "reroute",
+    from: b.assignee,
+    from_name: "Mia",
+    to: b.assignee!,
+    to_name: "Mia",
+    minutesAgo: 0,
+    reason: "runs on account claude-work instead: account claude-main (its 5h window is used up)",
+    files: ["web/src/pages/Login.tsx", "web/src/pages/login.css"],
+    summary: "两个按钮加在密码表单上面，中间一条「或者用密码」分隔。",
+    context_tokens: 142_000,
+  });
+  return {
+    ...scene,
+    script: [
+      { at: 500, event: { type: "task.rerouted", data: { run_id: r.id, id: b.id, key: "b", to: b.assignee!, reason: reroute.reason! } } },
+      { at: 520, event: { type: "task.handed_off", data: { run_id: r.id, handoff: reroute } } },
+    ],
+    route: `#/runs/${r.id}`,
+  };
 }
