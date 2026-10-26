@@ -191,7 +191,7 @@ B3 远程开发：
 - [x] 查找不缓存、版本按 (path, 修改时间) 缓存：hub 运行期间装上、就地升级、桌面版更新删掉旧构建目录，`installed()` / 开会话 / `/v1/plugins` 都拿到当下的结果；版本在 hub 启动时后台并行探（`Driver::probe_cli()`），探测期间 `version` 为空但不挡接口；claude / codebuddy 开会话时才取命令，codex 的进程键仍是未解析的 `codex app-server`（接管要按它匹配）。测试用注入的 `Machine` 和临时目录覆盖「后来装上」「旧构建被删、出现更新的构建」「文件时间变了重新探测」
 - [x] `PluginInfo.cli`（`installed` / `path` / `source` / `version` / `install_hint` / `docs`；新增可选字段，不升 `API_VERSION`），`bindings/` 已重新生成；设置 → 智能体页顶部「本机的 CLI」，显示 `2.1.304 · 原生安装`，悬停看完整路径，没装的给可复制的安装命令
 - [x] 迁移有据可查：描述文件与旧 `PluginConfig::claude()/codex()/codebuddy()` 逐字段相等的对照测试（迁完改成固定期望值）；本机三家迁移前后的 argv 逐字节相同
-- [ ] 安装按钮：按 `install.hint` 执行并把进度显示在 GUI（这一轮只显示、不执行）
+- [x] 安装按钮：按 `install.hint` 执行并把进度显示在 GUI（2026-10-26，9971310：描述文件 `[[install.methods]]` 声明安装与升级方式，hub install / upgrade 接口与 `cli.install` 事件流，GUI 一键安装/升级与确认框；Claude 的真实安装未在本机实测）
 - [ ] 从 CLI 读模型列表：Codex 仍读 `models_cache.json`，其余家各自有列表接口后接进来
 - [ ] 描述文件里的账号段：登录方式、配置目录与环境变量也写进描述，加一家账号不用改 `*_account.rs`
 - [ ] 版本钉住与自下载 CLI（DESIGN §9.4 的"已验证范围"要靠它）
@@ -282,3 +282,18 @@ B 删除 run：
 - [ ] 工作流交接：每一步设交给谁、完成后去哪、打回退到哪，交接前能预览说明（Multica）（multica §2.12）
 - [ ] 费用条：每次运行一根，按 agent、模型拆分，与额度管理一起做（Multica）（multica §2.13）
 - [ ] 自动化熔断：7 天内至少 50 次运行且失败率 90% 时自动暂停（Multica）（multica §2.14）
+
+## 十四、Git 视图（只读）
+
+> 2026-10-26 Pia 整理的需求，原本要作为一个新 Work 交给 DeepSeek 做，因 R1-A 被拒而没开工；R1-A 已修好（45cc895），现在可以开。
+> 范围：第一步只读。fetch、切换分支、push 这类会改仓库的操作留到以后。
+
+- [ ] hub：提交图接口，`git log --all`，带父提交和分支 / tag 标记，可分页
+- [ ] hub：本地与远程分支列表，含 upstream 和领先 / 落后数量
+- [ ] hub：工作区状态，`git status --porcelain=v2`
+- [ ] hub：单个提交的详情和 diff
+- [ ] hub：只能查 hub 已知的项目目录（agent 的工作目录、run 的仓库），其余路径拒绝；Rust 测试覆盖每个接口和越界拒绝
+- [ ] GUI：新增 `#/git` 页：左边本地 / 远程分支，中间带泳道的提交图（分支和 tag 标在提交上，HEAD 高亮），右边提交详情和 diff；顶部显示未提交改动的数量
+- [ ] GUI：MockBridge 补一套 git 数据，截图检查
+- [ ] 验收：`cargo test --workspace` 与 GUI 构建通过
+- [ ] 顺带验证：由 CrossAgents 自己开 Work 来做（主导拆任务交给便宜模型），实测 R1-A 与交接卡
