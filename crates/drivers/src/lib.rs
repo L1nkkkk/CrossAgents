@@ -3,6 +3,7 @@
 //! - [`codex_native`]: `codex app-server`, one process per Profile, a thread per session.
 //! - [`claude_native`]: Claude Code's stream-json control protocol, one process per session.
 //! - [`codebuddy_native`]: WorkBuddy's CodeBuddy CLI on the same protocol.
+//! - [`with_native`]: With's `with-cli chat -o stream-json`, one process per turn.
 //! - [`acp`]: `acp-generic`, any ACP agent, one process per session.
 //!
 //! [`launch`] starts agent processes, directly or in a [`host`] that outlives the hub
@@ -18,3 +19,4 @@ pub mod jsonrpc;
 pub mod launch;
 pub mod locate;
 pub mod process;
+pub mod with_native;

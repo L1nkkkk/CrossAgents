@@ -1,4 +1,4 @@
-//! The three built-in agents, as descriptions: `agents/*.toml`, compiled into the hub
+//! The built-in agents, as descriptions: `agents/*.toml`, compiled into the hub
 //! (docs/DESIGN.md §9.3). An agent added by hand uses the same format.
 
 use std::sync::LazyLock;
@@ -13,6 +13,7 @@ static BUILTIN: LazyLock<Vec<(String, PluginConfig)>> = LazyLock::new(|| {
         ("claude", include_str!("../agents/claude.toml")),
         ("codex", include_str!("../agents/codex.toml")),
         ("codebuddy", include_str!("../agents/codebuddy.toml")),
+        ("with", include_str!("../agents/with.toml")),
     ]
     .into_iter()
     .map(|(name, text)| {
@@ -52,7 +53,7 @@ mod tests {
     #[test]
     fn the_built_in_descriptions_load() {
         let names: Vec<&str> = all().iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names, ["claude", "codex", "codebuddy"]);
+        assert_eq!(names, ["claude", "codex", "codebuddy", "with"]);
         for (name, config) in all() {
             assert!(config.driver.is_some(), "{name} needs a driver");
             assert!(

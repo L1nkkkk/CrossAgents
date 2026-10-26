@@ -309,7 +309,7 @@ delivered → rejected → running          # 同一 Worker 返工
 
 ## 9. 驱动
 
-体验优先：主力 agent 走原生接口，其余走 ACP。四个驱动实现同一个 `Driver` trait，hub 只认这个 trait 和自己的事件模型。
+体验优先：主力 agent 走原生接口，其余走 ACP。五个驱动实现同一个 `Driver` trait，hub 只认这个 trait 和自己的事件模型。
 
 ### 9.1 驱动一览
 
@@ -318,7 +318,8 @@ delivered → rejected → running          # 同一 Worker 返工
 | `codex-native` | `codex app-server`（JSON-RPC over stdio） | 每个 Profile 一个进程，进程内多个线程（会话） | 运行时宿主，可接管（按 Profile + 环境认领） | Codex 主力 |
 | `claude-native` | `claude -p --input-format stream-json --output-format stream-json --permission-prompt-tool stdio`，hub 直接说控制协议（即 Agent SDK 所用的协议，见 [实测](research/claude-stream-json.md)） | 一进程一会话 | 运行时宿主，可接管（按会话 id 认领） | Claude Code 主力，含经兼容接口接入的 DeepSeek 等 |
 | `codebuddy-native` | `codebuddy -p`，同一套 stream-json 协议；包装 `claude-native`，补上 CodeBuddy 的模型表、安装检查和会话文件位置 | 一进程一会话 | 同 `claude-native` | CodeBuddy |
-| `acp-generic` | 任意 ACP agent | 一进程多会话 | hub 子进程，Job Object 由 hub 持有，hub 退出即清掉 | Gemini CLI、with-cli（`acp` 子命令）、Goose 等长尾 |
+| `with-native` | `with-cli chat -o stream-json --sessionId <id>`（AG-UI 风格事件，见 [实测](research/with-cli.md)）；会话由 With 服务端按 id 保存，MCP 经会话自己的 `-c` 配置挂载 | 一轮一进程，轮与轮之间没有进程 | hub 子进程，Job Object 由 hub 持有；hub 重启时正在跑的那一轮丢失，会话本身可续 | With |
+| `acp-generic` | 任意 ACP agent | 一进程多会话 | hub 子进程，Job Object 由 hub 持有，hub 退出即清掉 | Gemini CLI、Goose 等长尾（with-cli 的 `acp` 子命令在 v0.31.0 工具调用全部失败，只作备用） |
 
 包装型驱动（如 `codebuddy-native`）必须把 trait 的每个方法都转发给内层，包括有默认实现的 `adopt`；漏转发不会编译报错，只会让接管静默失效。
 
@@ -351,7 +352,7 @@ Session（一个会话）
 
 ### 9.3 配置与挂载
 
-- Profile 指定驱动：`driver = "codex-native" | "claude-native" | "codebuddy-native" | "acp-generic"`，再加模型、账号、`env`（如 Claude Code 经 `ANTHROPIC_BASE_URL` 接 DeepSeek）。
+- Profile 指定驱动：`driver = "codex-native" | "claude-native" | "codebuddy-native" | "with-native" | "acp-generic"`，再加模型、账号、`env`（如 Claude Code 经 `ANTHROPIC_BASE_URL` 接 DeepSeek）。
 - 协议留在代码里，协议以外的东西（去哪找 CLI、怎么装、模型与 effort 档位）写在 **agent 描述文件**里：内置三家在 `crates/plugins/agents/{claude,codex,codebuddy}.toml`（`include_str!` 编进 hub），外部 agent 放 `~/.crossagents/plugins/<name>/plugin.toml`，两者同一种格式。加一家 agent 不用改代码。
 - 来源与优先级：内置描述 < 插件目录 `plugin.toml` < `config.toml` 的 `[plugins.<name>]`。`locate` 与 `install` 按字段合并（只改其中一项也行），`command` / `models` / `driver` 等仍整体替换。
 - 协作工具挂载：开会话时把 `crossagents mcp`（带该会话的令牌）加入它的 MCP 列表；原生驱动用各家的 MCP 配置方式传入。

@@ -1,0 +1,37 @@
+# With's `with-cli`, the built-in agent (docs/DESIGN.md §9.3, docs/research/with-cli.md).
+#
+# `driver = "with-native"` runs each turn as `with-cli chat -o stream-json`, the conversation
+# kept by With under the session id. `acp-generic` goes through `with-cli acp` (`command`
+# below); on v0.31.0 every tool call fails there, so it is only the fallback.
+#
+# The CLI comes with the With desktop app and is signed in through it: nothing to log in to
+# here. Its own `with-cli model list` names the models; the list below is what is offered
+# until it has answered.
+
+name = "with"
+driver = "with-native"
+command = ["with-cli", "acp", "--no-update"]
+
+[models]
+fallback = [
+    "claude-sonnet-5.5",
+    "claude-opus-5.5",
+    "claude-haiku-5.5",
+    "gpt-5.5",
+    "glm-5.3",
+    "deepseek-v4-pro",
+    "hy3",
+]
+efforts = ["low", "medium", "high", "xhigh", "max"]
+
+[locate]
+env = "WITH_CLI"
+commands = ["with-cli"]
+# Where the With app installs it: `%USERPROFILE%\background_agent_cli\bin\with-cli.exe`.
+paths = ["~/background_agent_cli/bin/with-cli"]
+version = ["--version"]
+
+[install]
+label = "With CLI"
+hint = "install the With desktop app, which brings with-cli and signs it in"
+docs = "https://with.woa.com"

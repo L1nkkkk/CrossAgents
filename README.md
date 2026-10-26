@@ -149,7 +149,7 @@ driver = "acp-generic"
 native_command = ["node", "C:/tools/codebuddy/bin/codebuddy"]
 ```
 
-单个 agent 也可以用 `crossagents agent add … --driver codex-native|claude-native|codebuddy-native|acp-generic` 覆盖插件的默认驱动。
+单个 agent 也可以用 `crossagents agent add … --driver codex-native|claude-native|codebuddy-native|with-native|acp-generic` 覆盖插件的默认驱动。
 Claude agent 的 `config` 里还可以写 `permission_mode`（如 `acceptEdits`）、`effort`、`setting_sources`
 （默认 `project,local`，不带你自己的 Claude Code 插件、hook 和连接器）。
 驱动与能力见 [N1 任务书](docs/tasks/N1.md)。

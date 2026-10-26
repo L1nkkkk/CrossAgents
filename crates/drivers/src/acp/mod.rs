@@ -652,7 +652,7 @@ fn parse_detail(update: &Value) -> Option<SessionEventKind> {
 const DIFF_CELLS: usize = 4_000_000;
 
 /// A one-hunk unified diff of `old` → `new` (longest common subsequence of lines).
-fn unified_diff(old: &str, new: &str) -> String {
+pub(crate) fn unified_diff(old: &str, new: &str) -> String {
     let a: Vec<&str> = old.lines().collect();
     let b: Vec<&str> = new.lines().collect();
     let mut lines: Vec<(char, &str)> = Vec::new();

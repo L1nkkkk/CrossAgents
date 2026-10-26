@@ -36,6 +36,7 @@ use crossagents_drivers::claude_native::ClaudeNativeDriver;
 use crossagents_drivers::codebuddy_native::CodebuddyNativeDriver;
 use crossagents_drivers::codex_native::CodexNativeDriver;
 use crossagents_drivers::locate::{Cli, Install, Locator};
+use crossagents_drivers::with_native::WithNativeDriver;
 use serde::Deserialize;
 
 /// What `CliInfo.described_by` says for one of the built-in descriptions, and for an entry
@@ -192,6 +193,10 @@ impl Profile {
                 self.config.cli(),
                 self.config.models.clone(),
             )),
+            DriverKind::WithNative => Arc::new(
+                WithNativeDriver::new(&self.name, self.config.cli(), self.config.models.clone())
+                    .pinned(self.pinned_models),
+            ),
         };
         drivers.insert(kind, driver.clone());
         Ok(Resolved { driver, warning })
@@ -314,7 +319,7 @@ mod tests {
     /// here changes behaviour, not formatting.
     #[test]
     fn the_built_in_descriptions_say_what_the_functions_said() {
-        assert_eq!(builtin::all().len(), 3);
+        assert_eq!(builtin::all().len(), 4);
 
         let claude = builtin::config("claude").unwrap();
         assert_eq!(
@@ -394,7 +399,10 @@ mod tests {
             },
         );
         let registry = PluginRegistry::with_config(&configs);
-        assert_eq!(registry.names(), ["claude", "codebuddy", "codex", "mock"]);
+        assert_eq!(
+            registry.names(),
+            ["claude", "codebuddy", "codex", "mock", "with"]
+        );
         assert_eq!(
             registry.get("claude").unwrap().models(),
             ["opus", "sonnet", "haiku"]
@@ -511,5 +519,21 @@ mod tests {
                 .native_command
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn with_is_built_in_and_runs_on_its_native_driver() {
+        let registry = PluginRegistry::with_config(&BTreeMap::new());
+        let driver = registry.get("with").unwrap();
+        assert_eq!(driver.kind(), DriverKind::WithNative);
+        let capabilities = driver.capabilities();
+        assert!(capabilities.resume && capabilities.set_model && capabilities.mcp);
+        assert!(!capabilities.fork && !capabilities.permission_callback);
+        assert!(!driver.models().is_empty());
+        let config = registry.config("with").unwrap();
+        assert_eq!(config.efforts, ["low", "medium", "high", "xhigh", "max"]);
+        // `with-cli acp` stays available as the fallback.
+        let acp = registry.driver("with", Some("acp-generic")).unwrap();
+        assert_eq!(acp.driver.kind(), DriverKind::AcpGeneric);
     }
 }

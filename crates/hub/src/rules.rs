@@ -63,7 +63,8 @@ fn find(cwd: &Path) -> Option<(PathBuf, &'static str)> {
 /// Whether the agent's own CLI already loads `file`.
 fn reads_itself(agent: &Agent, file: &str) -> bool {
     match file {
-        "AGENTS.md" => agent.plugin == "codex",
+        // with-cli puts the workspace's AGENTS.md into its own rules.
+        "AGENTS.md" => matches!(agent.plugin.as_str(), "codex" | "with"),
         "CLAUDE.md" => {
             agent.plugin == "claude"
                 && agent
@@ -116,9 +117,10 @@ mod tests {
         // A Claude that reads no project settings is told as well.
         assert!(for_agent(&agent("claude", &sub, json!({ "setting_sources": "" }))).is_some());
 
-        // AGENTS.md wins over CLAUDE.md; Codex reads it itself.
+        // AGENTS.md wins over CLAUDE.md; Codex and With read it themselves.
         std::fs::write(repo.path().join("AGENTS.md"), "Run cargo test.").unwrap();
         assert_eq!(for_agent(&agent("codex", &sub, json!({}))), None);
+        assert_eq!(for_agent(&agent("with", &sub, json!({}))), None);
         assert!(
             for_agent(&agent("claude", &sub, json!({})))
                 .unwrap()
