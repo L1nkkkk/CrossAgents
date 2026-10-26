@@ -417,6 +417,15 @@ export class MockBridge implements CrossAgentsBridge {
       if (p === "/v1/repos/init") return json(200, body);
       if ((m = p.match(/^\/v1\/plugins\/([^/]+)\/(install|upgrade)$/)))
         return this.installCli(decodeURIComponent(m[1]), m[2] as "install" | "upgrade");
+      if ((m = p.match(/^\/v1\/plugins\/([^/]+)\/models$/))) {
+        const plugin = s.plugins.find((x) => x.name === decodeURIComponent(m![1]));
+        if (!plugin) return json(404, { error: { code: "not_found", message: "no such plugin" } });
+        const shown = (body as { shown: string[] | null }).shown;
+        plugin.shown = shown;
+        // As the hub does: in the vendor's own order, the first one being the default.
+        plugin.models = shown ? plugin.all_models.filter((x) => shown.includes(x)) : [...plugin.all_models];
+        return json(200, plugin);
+      }
       return json(204);
     }
 

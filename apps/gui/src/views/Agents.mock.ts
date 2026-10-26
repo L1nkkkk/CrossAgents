@@ -5,6 +5,18 @@ import { capabilitiesOf } from "../dev/fixtures";
 
 const CLAUDE_DOCS = "https://docs.claude.com/en/docs/claude-code/setup";
 
+/** What with-cli reported on one machine (2026-10), in its own order. */
+const WITH_MODELS = [
+  "gpt-5.4-fast", "gpt-5.5", "gpt-5.4", "gpt-5.5-fast", "hy3-dev0402", "glm-5.3-flash", "tokenhub_glm-5.3-flash", "ext-glm-5.3",
+  "gemini-4-argon", "claude-4.6-opus", "gpt-6-sol", "tokenhub_deepseek-v4.1-flash", "hy4-preview", "claude-opus-5", "claude-sonnet-5.5",
+  "claude-haiku-5.5", "gpt-6-luna", "tokenhub_deepseek-v4-pro", "glm-5.3", "deepseek-v3.1", "glm-4.7", "ext-glm-5.2", "gemini-3.5-flash",
+  "claude-4.6-sonnet-1m-context", "gpt-6-astra", "kimi-k2.7-code", "kimi-k2.6", "glm-5.2", "claude-5-sonnet", "claude-4.8-opus",
+  "deepseek-v4-flash", "claude-4.5-sonnet", "tokenhub_deepseek-v4-flash", "hy3-preview", "tokenhub_kimi-k3", "claude-4.7-opus-1m-context",
+  "claude-4.7-opus", "gpt-5.6-luna", "glm-5.1", "hy3", "deepseek-v3.2", "hunyuan-2.0-thinking", "gpt-5.6-terra", "gpt-6.1-sol",
+  "deepseek-v4-pro", "claude-4.6-sonnet", "kimi-k2.5", "glm-5", "hunyuan-2.0-instruct", "gemini-3.8-flash", "claude-opus-5.5",
+  "claude-4.6-opus-1m-context", "gpt-5.6-sol",
+];
+
 export const plugins = (): PluginInfo[] => [
   {
     name: "claude",
@@ -66,6 +78,27 @@ export const plugins = (): PluginInfo[] => [
       docs: "https://www.codebuddy.ai/",
       install_command: ["npm", "install", "-g", "@tencent-ai/codebuddy-code"],
       upgrade_command: ["npm", "install", "-g", "@tencent-ai/codebuddy-code@latest"],
+      can_upgrade: false,
+      described_by: "built-in",
+    },
+  },
+  // A gateway with dozens of models from many families: the settings page groups them.
+  {
+    name: "with",
+    models: ["glm-5.3-flash", "gpt-6-sol", "claude-sonnet-5.5"],
+    all_models: WITH_MODELS,
+    shown: ["claude-sonnet-5.5", "gpt-6-sol", "glm-5.3-flash"],
+    models_pinned: false,
+    driver: "with-native",
+    capabilities: capabilitiesOf("with"),
+    efforts: ["low", "medium", "high", "xhigh", "max"],
+    cli: {
+      installed: true,
+      path: "C:/Users/me/AppData/Roaming/npm/with-cli.cmd",
+      source: "path",
+      version: "0.31.0",
+      install_hint: "install the With desktop app, which brings with-cli and signs it in",
+      docs: "https://with.woa.com",
       can_upgrade: false,
       described_by: "built-in",
     },

@@ -1,6 +1,46 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { agentNameFor, chatNameFor, chatTitle, effortLabel, effortLevels, effortOf, prettyModel, vendorLabel, workerModelFor } from "./models.ts";
+import { agentNameFor, chatNameFor, chatTitle, effortLabel, effortLevels, effortOf, groupModels, modelFamily, onlyModels, prettyModel, switchModels, vendorLabel, workerModelFor } from "./models.ts";
+
+test("models fall into their family, whatever gateway prefix they carry", () => {
+  const family = (m: string) => modelFamily(m).key;
+  assert.equal(family("claude-4.6-opus-1m-context"), "claude");
+  assert.equal(family("opus"), "claude");
+  assert.equal(family("gpt-6.1-sol"), "gpt");
+  assert.equal(family("tokenhub_deepseek-v4-flash"), "deepseek");
+  assert.equal(family("ext-glm-5.2"), "glm");
+  assert.equal(family("tokenhub_kimi-k3"), "kimi");
+  assert.equal(family("hy3-preview"), "hunyuan");
+  assert.equal(family("hunyuan-2.0-thinking"), "hunyuan");
+  assert.equal(family("hy4-preview-ioa"), "hunyuan");
+  assert.equal(family("minimax-m3-ioa"), "minimax");
+  assert.equal(family("echo"), "other");
+  assert.equal(family("mimo-v2.6-pro"), "other");
+});
+
+test("groups come in a fixed order, newest model first", () => {
+  const groups = groupModels(["echo", "glm-5", "claude-opus-5", "glm-5.3", "claude-4.6-sonnet", "gpt-5.4"]);
+  assert.deepEqual(
+    groups.map((g) => g.key),
+    ["claude", "gpt", "glm", "other"],
+  );
+  assert.deepEqual(groups.find((g) => g.key === "glm")?.models, ["glm-5.3", "glm-5"]);
+  const glm = groupModels(["ext-glm-5.2", "glm-5.2", "tokenhub_glm-5.3-flash", "glm-4.7", "glm-5.3-flash"])[0].models;
+  assert.deepEqual(glm, ["glm-5.3-flash", "tokenhub_glm-5.3-flash", "glm-5.2", "ext-glm-5.2", "glm-4.7"]);
+  const claude = groupModels(["claude-4.8-opus", "claude-opus-5", "claude-sonnet-5.5", "claude-5-sonnet", "claude-4.5-sonnet"])[0].models;
+  assert.deepEqual(claude, ["claude-sonnet-5.5", "claude-5-sonnet", "claude-opus-5", "claude-4.8-opus", "claude-4.5-sonnet"]);
+});
+
+test("models switch on and off together, and one always stays", () => {
+  const all = ["a", "b", "c", "d"];
+  assert.deepEqual(switchModels(all, new Set(["a"]), ["c", "b"], true), ["a", "b", "c"]);
+  assert.equal(switchModels(all, new Set(["a", "b"]), ["c", "d"], true), null);
+  assert.deepEqual(switchModels(all, new Set(["a", "b", "c"]), ["a"], false), ["b", "c"]);
+  assert.equal(switchModels(all, new Set(["a"]), ["a"], false), undefined);
+  assert.deepEqual(onlyModels(all, ["d", "b"]), ["b", "d"]);
+  assert.equal(onlyModels(all, all), null);
+  assert.equal(onlyModels(all, []), undefined);
+});
 
 test("model ids read like names", () => {
   assert.equal(prettyModel("claude-opus-4-1"), "Opus 4.1");

@@ -59,6 +59,93 @@ export function chatNameFor(model: string, taken: Set<string>): string {
   return free(`chat-${slugOf(model)}`.slice(0, 28), taken);
 }
 
+/** Model families, in the order the settings page lists them; the first match wins. */
+const FAMILIES: { key: string; label: string; test: RegExp }[] = [
+  { key: "claude", label: "Claude", test: /^(claude|opus|sonnet|haiku)\b/ },
+  { key: "gpt", label: "GPT", test: /^(gpt|o\d)\b|^codex/ },
+  { key: "gemini", label: "Gemini", test: /^gemini/ },
+  { key: "deepseek", label: "DeepSeek", test: /^deepseek/ },
+  { key: "glm", label: "GLM", test: /^glm/ },
+  { key: "kimi", label: "Kimi", test: /^kimi/ },
+  { key: "hunyuan", label: "混元", test: /^(hy\d|hunyuan)/ },
+  { key: "minimax", label: "MiniMax", test: /^minimax/ },
+  { key: "qwen", label: "Qwen", test: /^qwen/ },
+];
+const OTHER = { key: "other", label: "其他" };
+
+/**
+ * Gateways put their own prefix on a model (`tokenhub_deepseek-v4`, `ext-glm-5.2`); the
+ * family is the model's, not the gateway's.
+ */
+const GATEWAY_PREFIX = /^(tokenhub|ext|azure|bedrock|vertex|openrouter)[_-]/;
+
+/** The model's own name, without a gateway's prefix. */
+const bareModel = (model: string) => model.toLowerCase().replace(GATEWAY_PREFIX, "");
+
+/** "tokenhub_deepseek-v4-flash" → DeepSeek, "hy3-preview" → 混元; anything unknown → 其他. */
+export function modelFamily(model: string): { key: string; label: string } {
+  const bare = bareModel(model);
+  const found = FAMILIES.find((f) => f.test.test(bare));
+  return found ? { key: found.key, label: found.label } : OTHER;
+}
+
+/** The first version number in a name: "claude-4.8-opus" → [4, 8], "kimi-k2.7-code" → [2, 7]. */
+function versionOf(bare: string): number[] {
+  return (bare.match(/\d+(?:\.\d+)*/)?.[0] ?? "").split(".").filter(Boolean).map(Number);
+}
+
+/**
+ * Newest version first; at the same version by name, and a gateway's copy right after the
+ * model itself ("glm-5.3-flash", then "tokenhub_glm-5.3-flash").
+ */
+function byVersionDesc(a: string, b: string): number {
+  const [ba, bb] = [bareModel(a), bareModel(b)];
+  const [va, vb] = [versionOf(ba), versionOf(bb)];
+  for (let i = 0; i < Math.max(va.length, vb.length); i++) {
+    const d = (vb[i] ?? 0) - (va[i] ?? 0);
+    if (d) return d;
+  }
+  return ba.localeCompare(bb, "en") || a.length - b.length || a.localeCompare(b, "en");
+}
+
+/** `models` by family, families in a fixed order, 其他 last; each family newest first. */
+export function groupModels(models: readonly string[]): { key: string; label: string; models: string[] }[] {
+  const groups = new Map<string, { key: string; label: string; models: string[] }>();
+  for (const m of models) {
+    const f = modelFamily(m);
+    const g = groups.get(f.key) ?? { ...f, models: [] };
+    g.models.push(m);
+    groups.set(f.key, g);
+  }
+  const order = [...FAMILIES.map((f) => f.key), OTHER.key];
+  return order.flatMap((k) => {
+    const g = groups.get(k);
+    if (!g) return [];
+    g.models.sort(byVersionDesc);
+    return [g];
+  });
+}
+
+/**
+ * The shown list after turning `models` on or off together, in `all`'s order (the hub keeps
+ * that order, and the first shown model is the default). `null` means every model is shown;
+ * an empty list is refused (`undefined`): a vendor keeps at least one.
+ */
+export function switchModels(all: readonly string[], on: ReadonlySet<string>, models: readonly string[], value: boolean): string[] | null | undefined {
+  const set = new Set(models);
+  const next = all.filter((m) => (value ? on.has(m) || set.has(m) : on.has(m) && !set.has(m)));
+  if (!next.length) return undefined;
+  return next.length === all.length ? null : next;
+}
+
+/** The shown list with only `models` left on (`all`'s order); `undefined` when that is none. */
+export function onlyModels(all: readonly string[], models: readonly string[]): string[] | null | undefined {
+  const set = new Set(models);
+  const next = all.filter((m) => set.has(m));
+  if (!next.length) return undefined;
+  return next.length === all.length ? null : next;
+}
+
 /** A chat's title from its first message: the first line, at most `max` characters. */
 export function chatTitle(text: string, max = 24): string {
   const line = text.trim().split(/\r?\n/)[0].trim();

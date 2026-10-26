@@ -1032,10 +1032,20 @@ a.button.small { font-size: 12.5px; padding: 4px 10px; background: var(--surface
 .toggle.on { background: var(--accent); }
 .toggle.on span { transform: translateX(14px); }
 .toggle:disabled { opacity: 0.55; cursor: not-allowed; }
+.toggle.mixed { background: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.toggle.mixed span { transform: translateX(7px); }
+.model-family + .model-family { border-top: 1px solid var(--border); }
+.model-family-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; background: var(--hover); }
+.model-family:first-child .model-family-head { border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
+.model-family-name { display: flex; align-items: center; gap: 8px; padding: 0; border: 0; background: none; color: var(--text); cursor: pointer; }
+.model-family-name:disabled { cursor: default; }
+.model-family-name .chip.muted { color: var(--muted); }
+.model-family .model-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 @media (max-width: 760px) {
   .page-inner.settings-layout { grid-template-columns: 1fr; gap: 16px; }
   .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; }
   .setting-card.model-grid { grid-template-columns: 1fr; }
+  .model-family .model-grid { grid-template-columns: 1fr; }
   .model-grid .setting-line:nth-child(odd) { border-right: 0; }
   .model-grid .setting-line:nth-child(2) { border-top: 1px solid var(--border); }
 }

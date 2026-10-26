@@ -73,7 +73,7 @@ const CAPS: Record<DriverKind, Capabilities> = {
 
 export const capabilitiesOf = (plugin: string): Capabilities => CAPS[driverOf(plugin)];
 export const driverOf = (plugin: string): DriverKind =>
-  plugin === "codex" ? "codex-native" : plugin === "claude" ? "claude-native" : plugin === "codebuddy" ? "codebuddy-native" : "acp-generic";
+  plugin === "codex" ? "codex-native" : plugin === "claude" ? "claude-native" : plugin === "codebuddy" ? "codebuddy-native" : plugin === "with" ? "with-native" : "acp-generic";
 
 type AgentInit = {
   name: string;

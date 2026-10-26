@@ -8,7 +8,7 @@ import { api, errorText } from "../api";
 import { navigate } from "../App";
 import { ErrorBox, Icon, VendorMark, type IconName } from "../components";
 import { useHubData } from "../hub";
-import { prettyModel, vendorLabel } from "../lib/models";
+import { groupModels, onlyModels, prettyModel, switchModels, vendorLabel } from "../lib/models";
 import { MODES, PAPERS, resolve, setTheme, useTheme } from "../lib/theme";
 import { AgentsPage } from "./Agents";
 
@@ -106,17 +106,30 @@ function ModelsPage() {
   );
 }
 
+/** Above this many models a vendor's list is grouped by family. */
+const GROUP_FROM = 12;
+/** Above this many, families with nothing on start folded. */
+const FOLD_FROM = 20;
+
 function VendorModels({ plugin, query, onSaved }: { plugin: PluginInfo; query: string; onSaved: () => void }) {
   const [saved, setSaved] = useState<PluginInfo>();
   const [error, setError] = useState<string>();
+  // Families the user opened or folded by hand; the rest follow the default.
+  const [folds, setFolds] = useState<Record<string, boolean>>({});
   const p = saved && saved.name === plugin.name ? saved : plugin;
   const all = p.all_models;
   const on = new Set(p.models);
   const allOn = !p.shown;
-  const shownModels = all.filter((m) => !query || m.toLowerCase().includes(query) || prettyModel(m).toLowerCase().includes(query));
+  const matches = (m: string) => !query || m.toLowerCase().includes(query) || prettyModel(m).toLowerCase().includes(query);
+  const shownModels = all.filter(matches);
 
-  async function save(next: string[] | null) {
+  /** `undefined` is a list that would leave nothing on, which is refused. */
+  async function save(next: string[] | null | undefined) {
     setError(undefined);
+    if (next === undefined) {
+      setError("至少要留一个模型。");
+      return;
+    }
     try {
       setSaved(await api.setPluginModels(p.name, next));
       onSaved();
@@ -125,12 +138,16 @@ function VendorModels({ plugin, query, onSaved }: { plugin: PluginInfo; query: s
     }
   }
 
-  const toggle = (model: string) => {
-    const next = on.has(model) ? all.filter((m) => on.has(m) && m !== model) : all.filter((m) => on.has(m) || m === model);
-    void save(next.length === all.length ? null : next);
-  };
+  const toggle = (model: string) => void save(switchModels(all, on, [model], !on.has(model)));
 
   if (query && !shownModels.length) return null;
+
+  const offAmongShown = shownModels.filter((m) => !on.has(m)).length;
+  const onlyShown = shownModels.length === on.size && shownModels.every((m) => on.has(m));
+  const families = all.length > GROUP_FROM ? groupModels(all) : [];
+  const grouped = families.length > 1;
+  const row = (m: string) => <ModelRow key={m} model={m} checked={on.has(m)} last={on.has(m) && on.size === 1} isDefault={m === p.models[0]} onToggle={toggle} />;
+
   return (
     <section className="settings-section">
       <div className="settings-head">
@@ -140,47 +157,99 @@ function VendorModels({ plugin, query, onSaved }: { plugin: PluginInfo; query: s
           {on.size} / {all.length}
         </span>
         <span className="spacer" />
-        {!allOn && (
-          <button className="ghost small" onClick={() => void save(null)}>
-            全部打开
-          </button>
-        )}
-        {on.size > 1 && (
-          <button className="ghost small" onClick={() => void save([p.models[0]])} title="只留第一个，再逐个打开想要的">
-            只留第一个
-          </button>
+        {query ? (
+          <>
+            {offAmongShown > 0 && (
+              <button className="ghost small" onClick={() => void save(switchModels(all, on, shownModels, true))} title="把搜到的模型都打开，其余不动">
+                打开这 {shownModels.length} 个
+              </button>
+            )}
+            {!onlyShown && (
+              <button className="ghost small" onClick={() => void save(onlyModels(all, shownModels))} title="只留搜到的模型，其余全部关闭">
+                只留这 {shownModels.length} 个
+              </button>
+            )}
+          </>
+        ) : (
+          <>
+            {!allOn && (
+              <button className="ghost small" onClick={() => void save(null)}>
+                全部打开
+              </button>
+            )}
+            {on.size > 1 && (
+              <button className="ghost small" onClick={() => void save([p.models[0]])} title="只留第一个，再逐个打开想要的">
+                只留第一个
+              </button>
+            )}
+          </>
         )}
       </div>
       {p.models_pinned && <div className="setting-hint">这个服务的模型列表写在 config.toml 的 [plugins.{p.name}] models 里，这里只能在其中挑选。</div>}
       <ErrorBox error={error} />
-      <div className="setting-card model-grid">
-        {shownModels.map((m) => {
-          const checked = on.has(m);
-          const last = checked && on.size === 1;
-          return (
-            <div key={m} className="setting-line">
-              <div className="model-name">
-                <div className="setting-label">
-                  {prettyModel(m)}
-                  {m === p.models[0] && <span className="chip small">默认</span>}
+      {grouped ? (
+        <div className="setting-card model-families">
+          {families.map((f) => {
+            const visible = f.models.filter(matches);
+            if (!visible.length) return null;
+            const count = f.models.filter((m) => on.has(m)).length;
+            const full = count === f.models.length;
+            const folded = query ? false : (folds[f.key] ?? (all.length > FOLD_FROM && count === 0));
+            const flip = () => setFolds((s) => ({ ...s, [f.key]: !folded }));
+            return (
+              <div key={f.key} className="model-family">
+                <div className="model-family-head">
+                  <button className="model-family-name" aria-expanded={!folded} onClick={flip} disabled={!!query}>
+                    <Icon name={folded ? "chevronRight" : "chevron"} size={14} />
+                    <span className="setting-label">{f.label}</span>
+                    <span className={`chip small ${count ? "" : "muted"}`}>
+                      {count} / {f.models.length}
+                    </span>
+                  </button>
+                  <button
+                    role="switch"
+                    aria-checked={full ? true : count ? "mixed" : false}
+                    aria-label={`${full ? "关闭" : "打开"} ${f.label} 全部 ${f.models.length} 个模型`}
+                    className={`toggle ${full ? "on" : count ? "mixed" : ""}`}
+                    title={full ? "整组关闭" : "整组打开"}
+                    onClick={() => void save(switchModels(all, on, f.models, !full))}
+                  >
+                    <span />
+                  </button>
                 </div>
-                <div className="setting-hint mono">{m}</div>
+                {!folded && <div className="model-grid">{visible.map(row)}</div>}
               </div>
-              <button
-                role="switch"
-                aria-checked={checked}
-                aria-label={`${checked ? "关闭" : "打开"} ${m}`}
-                className={`toggle ${checked ? "on" : ""}`}
-                disabled={last}
-                title={last ? "至少留一个" : undefined}
-                onClick={() => toggle(m)}
-              >
-                <span />
-              </button>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="setting-card model-grid">{shownModels.map(row)}</div>
+      )}
     </section>
+  );
+}
+
+function ModelRow({ model, checked, last, isDefault, onToggle }: { model: string; checked: boolean; last: boolean; isDefault: boolean; onToggle: (m: string) => void }) {
+  return (
+    <div className="setting-line">
+      <div className="model-name">
+        <div className="setting-label">
+          {prettyModel(model)}
+          {isDefault && <span className="chip small">默认</span>}
+        </div>
+        <div className="setting-hint mono">{model}</div>
+      </div>
+      <button
+        role="switch"
+        aria-checked={checked}
+        aria-label={`${checked ? "关闭" : "打开"} ${model}`}
+        className={`toggle ${checked ? "on" : ""}`}
+        disabled={last}
+        title={last ? "至少留一个" : undefined}
+        onClick={() => onToggle(model)}
+      >
+        <span />
+      </button>
+    </div>
   );
 }
