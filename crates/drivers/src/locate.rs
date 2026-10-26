@@ -299,7 +299,8 @@ pub struct Locator {
     pub paths: PerOs<Vec<String>>,
     /// Copies another app keeps for itself; the newest one wins.
     pub bundled: PerOs<Vec<String>>,
-    /// How to get from an npm wrapper to the real program: `codex-vendor` or `node-script`.
+    /// How to get from a wrapper to the real program: `codex-vendor`, `node-script` or
+    /// `batch-exe`.
     pub shim: Option<String>,
     /// Arguments that print the version (`--version`).
     pub version: PerOs<Vec<String>>,
@@ -1015,12 +1016,64 @@ fn display(path: &Path) -> String {
 fn shim(name: &str, path: &Path, machine: &Machine) -> Option<Vec<String>> {
     match name {
         "codex-vendor" => codex_vendor(path).map(|real| vec![display(&real)]),
+        "batch-exe" => batch_exe(path).map(|real| vec![display(&real)]),
         "node-script" => npm_script(path).map(|script| {
             let node = find_in_path_in("node", Some(&machine.path_dirs()));
             vec![display(&node), display(&script)]
         }),
         _ => None,
     }
+}
+
+/// The program a `.cmd` / `.bat` wrapper hands its arguments to, when all it does is start
+/// one `.exe` with `%*` (npm puts such a wrapper on `PATH` for `with-cli`). Rust will not
+/// pass a newline to a batch file, and `cmd.exe` would mangle `%`, `^` and `&` anyway, so
+/// the program behind it is started directly.
+fn batch_exe(found: &Path) -> Option<PathBuf> {
+    let is_batch = found
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"));
+    if !is_batch {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&std::fs::read(found).ok()?).into_owned();
+    let dir = found.parent()?;
+    for line in text.lines() {
+        let line = line.trim();
+        let lower = line.to_ascii_lowercase();
+        if line.is_empty()
+            || line.starts_with('@')
+            || line.starts_with("::")
+            || lower.starts_with("rem ")
+        {
+            continue;
+        }
+        let (program, rest) = match line.strip_prefix('"') {
+            Some(quoted) => {
+                let end = quoted.find('"')?;
+                (&quoted[..end], &quoted[end + 1..])
+            }
+            None => line.split_once(char::is_whitespace).unwrap_or((line, "")),
+        };
+        if !rest.contains("%*") {
+            continue;
+        }
+        let program = match program
+            .strip_prefix("%~dp0")
+            .or_else(|| program.strip_prefix("%dp0%"))
+        {
+            Some(relative) => dir.join(relative.trim_start_matches(['\\', '/'])),
+            None => PathBuf::from(program),
+        };
+        let is_exe = program
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"));
+        if is_exe && program.is_file() {
+            return Some(program);
+        }
+    }
+    None
 }
 
 /// The real `codex` behind an npm wrapper. npm installs `codex` as a Node script
@@ -1352,6 +1405,52 @@ mod tests {
         let found = locator.locate_in(&machine).unwrap();
         assert_eq!(found.source, CliSource::Bundled);
         assert_eq!(found.path, newer.join("claude.exe"));
+    }
+
+    #[test]
+    fn a_batch_wrapper_is_replaced_by_the_exe_it_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("app").join("with-cli.exe");
+        touch(&real);
+        let wrapper = dir.path().join("with-cli.cmd");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "@echo off\r\n\"{}\" %*\r\nexit /b %errorlevel%\r\n",
+                real.display()
+            ),
+        )
+        .unwrap();
+        let relative = dir.path().join("rel.cmd");
+        std::fs::write(
+            &relative,
+            "@ECHO off\r\n\"%~dp0\\app\\with-cli.exe\" %*\r\n",
+        )
+        .unwrap();
+        let script = dir.path().join("script.cmd");
+        std::fs::write(&script, "@echo off\r\nnode \"%~dp0\\cli.js\" %*\r\n").unwrap();
+
+        assert_eq!(batch_exe(&wrapper), Some(real.clone()));
+        assert_eq!(
+            batch_exe(&relative),
+            Some(dir.path().join("app").join("with-cli.exe"))
+        );
+        assert_eq!(batch_exe(&script), None);
+        assert_eq!(batch_exe(&real), None);
+        assert_eq!(batch_exe(&dir.path().join("missing.cmd")), None);
+
+        if cfg!(windows) {
+            let locator: Locator = toml::from_str(
+                r#"
+                commands = ["with-cli"]
+                shim = "batch-exe"
+                "#,
+            )
+            .unwrap();
+            let found = locator.locate_in(&machine(dir.path())).unwrap();
+            assert_eq!(found.path, wrapper);
+            assert_eq!(found.argv, [display(&real)]);
+        }
     }
 
     #[test]

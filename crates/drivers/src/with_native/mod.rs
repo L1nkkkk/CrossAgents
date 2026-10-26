@@ -336,7 +336,13 @@ impl WithSession {
             }
         }
         let mut text = prompt.text.clone();
-        if text.encode_utf16().count() > wire::PROMPT_ARG_LIMIT {
+        // A batch file cannot take a newline in its arguments (Rust refuses to start it), so
+        // when the CLI is still behind one the message goes in a file like a long one does.
+        let through_batch = self.command.first().is_some_and(|program| {
+            let lower = program.to_ascii_lowercase();
+            lower.ends_with(".cmd") || lower.ends_with(".bat")
+        }) && text.contains(['\r', '\n']);
+        if through_batch || text.encode_utf16().count() > wire::PROMPT_ARG_LIMIT {
             let path = self
                 .files
                 .dir
@@ -344,7 +350,7 @@ impl WithSession {
             std::fs::write(&path, &text)
                 .map_err(|e| CoreError::Agent(format!("cannot write {}: {e}", path.display())))?;
             text = format!(
-                "The message is too long for the command line, so it is in the attached file {}. \
+                "The message cannot go on the command line, so it is in the attached file {}. \
                  Read all of it and treat it as the message itself.",
                 path.display()
             );
