@@ -221,6 +221,7 @@ mod tests {
             parent: None,
             issuer: None,
             progress: None,
+            handoffs: Vec::new(),
             id: TaskId::new(),
             run_id: RunId::new(),
             key: key.into(),

@@ -4,12 +4,12 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 use crossagents_api_types::{
     CreateRunRequest, DeleteRunResponse, Event, EventKind, ListRunsResponse, RejectRunRequest, Run,
-    RunDetail, RunTrace, Task, TaskStatus,
+    RunDetail, RunTrace, Task, TaskStatus, handoff,
 };
 
 use super::Context;
 use super::agent::enum_name;
-use super::events::short_tail;
+use super::events::{one_line, short_tail};
 use crate::output::{local_time, print_json, print_table};
 
 #[derive(Debug, Args)]
@@ -286,6 +286,7 @@ fn print_detail(detail: &RunDetail, verbose: bool) {
     if !detail.tasks.is_empty() {
         println!();
         print_tasks(&detail.tasks);
+        print_handoffs(&detail.tasks);
     }
     if verbose {
         for task in &detail.tasks {
@@ -319,6 +320,21 @@ fn print_tasks(tasks: &[Task]) {
         })
         .collect();
     print_table(&["TASK", "STATUS", "ATTEMPT", "TITLE", "NOTE"], &rows);
+}
+
+/// Who had each task, in turn: `#a Pia → Rex (assign) → Ada (reroute: …)`.
+fn print_handoffs(tasks: &[Task]) {
+    let chains: Vec<String> = tasks
+        .iter()
+        .filter(|t| !t.handoffs.is_empty())
+        .map(|t| format!("#{} {}", t.key, one_line(&handoff::chain(&t.handoffs))))
+        .collect();
+    if !chains.is_empty() {
+        println!("\nhandoffs:");
+        for chain in chains {
+            println!("  {chain}");
+        }
+    }
 }
 
 fn print_task_report(task: &Task) {
@@ -422,6 +438,9 @@ fn print_trace(ctx: &Context, trace: &RunTrace) -> Result<()> {
         }
         for reason in &task.rerouted {
             println!("  rerouted: {reason}");
+        }
+        if !task.handoffs.is_empty() {
+            println!("  handoffs: {}", handoff::chain(&task.handoffs));
         }
         for c in task
             .lane

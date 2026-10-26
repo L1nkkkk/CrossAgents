@@ -5,7 +5,7 @@
 
 use std::fmt::Write;
 
-use crossagents_core::{Agent, AgentId, CheckResult, Role, Run, Task};
+use crossagents_core::{Agent, AgentId, CheckResult, Handoff, HandoffKind, Role, Run, Task};
 
 use crate::project::{self, RunChecks};
 
@@ -149,6 +149,56 @@ pub fn assignment(task: &Task) -> String {
     )
 }
 
+/// A task as the worker it was handed to gets it: the assignment, then the handoff card —
+/// who had it, why it moved, what they changed and left open. A first assignment is the
+/// assignment alone.
+pub fn handover(task: &Task, card: &Handoff) -> String {
+    let mut out = assignment(task);
+    if card.kind == HandoffKind::Assign && card.reason.is_none() {
+        return out;
+    }
+    let kind = match card.kind {
+        HandoffKind::Assign => "assigned",
+        HandoffKind::Reassign => "reassigned",
+        HandoffKind::Reroute => "rerouted",
+        HandoffKind::Escalate => "escalated",
+    };
+    let _ = write!(
+        out,
+        "\n\n---\nhandoff: {} → {} ({kind})\n",
+        card.from_name.as_deref().unwrap_or("?"),
+        card.to_name
+    );
+    if let Some(reason) = &card.reason {
+        let _ = writeln!(out, "why: {}", reason.trim());
+    }
+    if card.kind != HandoffKind::Assign {
+        out.push_str("Someone already worked on this; their work is in your working directory.\n");
+        if card.files.is_empty() {
+            out.push_str("Files they changed: none that the hub could see\n");
+        } else {
+            list(&mut out, "Files they changed", &card.files);
+        }
+    }
+    if let Some(summary) = &card.summary {
+        let _ = writeln!(out, "Their last word: {}", summary.trim());
+    }
+    // The spec's interfaces are in the assignment already.
+    let decisions: Vec<String> = card
+        .decisions
+        .iter()
+        .filter(|d| !task.spec.interfaces.contains(d))
+        .cloned()
+        .collect();
+    list(&mut out, "Decided since (keep to it)", &decisions);
+    list(
+        &mut out,
+        "Open questions (asked, not answered; task_ask again if you need them)",
+        &card.open_questions,
+    );
+    out.trim_end().to_owned()
+}
+
 /// `#key (task id …)`, how task messages to an issuer name the task.
 pub fn task_ref(task: &Task) -> String {
     format!("#{} ({})", task.key, task.id)
@@ -203,5 +253,95 @@ fn first_sentence(text: &str, max: usize) -> String {
         format!("{}…", cut.trim_end())
     } else {
         sentence.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use crossagents_core::{HandoffId, RunId, TaskId, TaskReport, TaskSpec, TaskStatus};
+
+    use super::*;
+
+    fn task() -> Task {
+        let now = Utc::now();
+        Task {
+            id: TaskId::new(),
+            run_id: RunId::new(),
+            key: "a".into(),
+            title: "task a".into(),
+            spec: TaskSpec {
+                goal: "do a".into(),
+                interfaces: vec!["fn a()".into()],
+                ..TaskSpec::default()
+            },
+            depends_on: Vec::new(),
+            issuer: None,
+            assignee: None,
+            reviewer: None,
+            worker_template: None,
+            reviewer_template: None,
+            status: TaskStatus::Running,
+            attempts: 1,
+            escalated: false,
+            nudges: 0,
+            branch: None,
+            worktree: None,
+            report: TaskReport::default(),
+            parent: None,
+            progress: None,
+            handoffs: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn card(kind: HandoffKind) -> Handoff {
+        Handoff {
+            id: HandoffId::new(),
+            run_id: RunId::new(),
+            task_id: TaskId::new(),
+            task_key: "a".into(),
+            kind,
+            from: None,
+            from_name: Some("Rex".into()),
+            to: AgentId::new(),
+            to_name: "Ada".into(),
+            reason: Some("Rex is stuck".into()),
+            goal: "do a".into(),
+            files: vec!["src/a.rs".into()],
+            summary: Some("half done".into()),
+            decisions: vec!["fn a()".into(), "keep the old API".into()],
+            open_questions: vec!["which way?".into()],
+            context_tokens: Some(1200),
+            at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn a_handover_carries_the_card() {
+        let task = task();
+        let text = handover(&task, &card(HandoffKind::Reassign));
+        assert!(text.starts_with(&assignment(&task)), "{text}");
+        for part in [
+            "handoff: Rex → Ada (reassigned)",
+            "why: Rex is stuck",
+            "  - src/a.rs",
+            "Their last word: half done",
+            "  - keep the old API",
+            "  - which way?",
+        ] {
+            assert!(text.contains(part), "{part} missing:\n{text}");
+        }
+        // The interfaces are in the assignment once, not again among the decisions.
+        assert_eq!(text.matches("fn a()").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn a_first_assignment_is_the_assignment() {
+        let task = task();
+        let mut first = card(HandoffKind::Assign);
+        first.reason = None;
+        assert_eq!(handover(&task, &first), assignment(&task));
     }
 }

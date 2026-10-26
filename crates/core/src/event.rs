@@ -331,6 +331,13 @@ pub enum EventKind {
         to: AgentId,
         reason: String,
     },
+    /// The task changed hands; `handoff` is the card, also stored on the task. Published
+    /// before the new worker gets its first message.
+    #[serde(rename = "task.handed_off")]
+    TaskHandedOff {
+        run_id: RunId,
+        handoff: crate::handoff::Handoff,
+    },
     /// A command ran in the task's worktree (`workspace_run`), on behalf of `by`.
     #[serde(rename = "task.command")]
     TaskCommand {
@@ -515,6 +522,7 @@ impl EventKind {
             Self::TaskChecked { .. } => "task.checked",
             Self::TaskProgress { .. } => "task.progress",
             Self::TaskRerouted { .. } => "task.rerouted",
+            Self::TaskHandedOff { .. } => "task.handed_off",
             Self::TaskCommand { .. } => "task.command",
             Self::CliInstallStarted { .. } => "cli.install.started",
             Self::CliInstallOutput { .. } => "cli.install.output",
@@ -538,6 +546,7 @@ impl EventKind {
             | Self::TaskChecked { run_id, .. }
             | Self::TaskProgress { run_id, .. }
             | Self::TaskRerouted { run_id, .. }
+            | Self::TaskHandedOff { run_id, .. }
             | Self::TaskCommand { run_id, .. } => Some(*run_id),
             _ => None,
         }
@@ -573,6 +582,7 @@ impl EventKind {
             Self::TaskStatusChanged { assignee, .. } => *assignee,
             Self::TaskCommand { by, .. } => Some(*by),
             Self::TaskRerouted { to, .. } => Some(*to),
+            Self::TaskHandedOff { handoff, .. } => Some(handoff.to),
             Self::AgentCreated { agent } | Self::AgentUpdated { agent } => Some(agent.id),
             Self::AgentRemoved { id, .. }
             | Self::AgentStatusChanged { id, .. }

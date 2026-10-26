@@ -9,10 +9,13 @@ use ts_rs::TS;
 
 pub use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentProfile, AgentStatus, Capabilities, CheckResult,
-    DataSource, DiffSource, DriverKind, Event, EventKind, MessageId, MessageSource, ModelInfo,
-    OutputStream, PlannedTask, Role, Run, RunId, RunStatus, StopReason, Task, TaskId, TaskStatus,
-    TokenTotals, ToolInfo, ToolStatus,
+    DataSource, DiffSource, DriverKind, Event, EventKind, Handoff, HandoffKind, MessageId,
+    MessageSource, ModelInfo, OutputStream, PlannedTask, Role, Run, RunId, RunStatus, StopReason,
+    Task, TaskId, TaskStatus, TokenTotals, ToolInfo, ToolStatus,
 };
+
+/// Handoff cards and how a task's chain of them reads.
+pub use crossagents_core::handoff;
 
 pub const API_VERSION: &str = "v1";
 
@@ -666,6 +669,9 @@ pub struct TaskTrace {
     pub checks: Vec<CheckTrace>,
     /// Each time quota moved it (`task.rerouted`).
     pub rerouted: Vec<String>,
+    /// Each time it changed hands (`task.handed_off`), oldest first.
+    #[serde(default)]
+    pub handoffs: Vec<Handoff>,
     /// The earliest thing that went wrong: a failed check, a failed command, a failed turn.
     pub first_failure: Option<String>,
 }

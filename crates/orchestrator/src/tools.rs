@@ -338,9 +338,11 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_assign",
-        description: "Give a task you issued to another worker on the team (by name). A started task keeps its worktree; the new worker continues from it.",
+        description: "Give a task you issued to another worker on the team (by name). A started task keeps its worktree; the new worker continues from it and gets a handoff card (files changed, last word, rework notes, open questions). reason says why it changes hands.",
         groups: ALL,
-        schema: || task_schema(json!({ "to": { "type": "string" } })),
+        schema: || {
+            task_schema(json!({ "to": { "type": "string" }, "reason": { "type": "string" } }))
+        },
     },
     ToolDef {
         name: "task_cancel",

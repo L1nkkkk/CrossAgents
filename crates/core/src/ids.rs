@@ -62,7 +62,7 @@ macro_rules! define_id {
     )*};
 }
 
-define_id!(AgentId, RunId, TaskId, SessionId, MessageId);
+define_id!(AgentId, RunId, TaskId, SessionId, MessageId, HandoffId);
 
 #[cfg(test)]
 mod tests {

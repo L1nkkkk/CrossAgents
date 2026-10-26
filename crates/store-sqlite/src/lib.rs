@@ -939,6 +939,7 @@ mod tests {
             let task = Task {
                 issuer: None,
                 progress: None,
+                handoffs: Vec::new(),
                 parent: None,
                 id: TaskId::new(),
                 run_id: run.id,
@@ -1014,6 +1015,7 @@ mod tests {
         let task = Task {
             issuer: None,
             progress: None,
+            handoffs: Vec::new(),
             parent: None,
             id: TaskId::new(),
             run_id: run.id,

@@ -12,9 +12,9 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, AgentStatus, CoreError, Envelope, EventBus, EventKind, MessageSource,
-    PlannedTask, Role, Run, RunConfig, RunId, RunPolicy, RunStatus, Store, Task, TaskId,
-    TaskReport, TaskStatus,
+    Agent, AgentId, AgentKey, AgentStatus, CoreError, Envelope, EventBus, EventKind, HandoffKind,
+    MessageSource, PlannedTask, Role, Run, RunConfig, RunId, RunPolicy, RunStatus, Store, Task,
+    TaskId, TaskReport, TaskStatus,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -66,6 +66,8 @@ pub struct Orchestrator {
     pub(crate) messaging: Mutex<crate::messaging::MessagingState>,
     /// Approvals waiting for the person, by question id (docs/tasks/DOGFOOD.md §7).
     pub(crate) approvals: std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
+    /// Context tokens each agent last reported in use, for handoff cards.
+    pub(crate) contexts: std::sync::Mutex<HashMap<AgentId, u64>>,
 }
 
 /// Agent config key: the directory a lead lived in before the run moved it into its checkout
@@ -96,6 +98,7 @@ impl Orchestrator {
             locks: Mutex::default(),
             messaging: Mutex::default(),
             approvals: std::sync::Mutex::default(),
+            contexts: std::sync::Mutex::default(),
         })
     }
 
@@ -360,10 +363,7 @@ impl Orchestrator {
                 config = serde_json::json!({});
             }
             if let Some(map) = config.as_object_mut() {
-                map.insert(
-                    LEAD_HOME.into(),
-                    planner.cwd.display().to_string().into(),
-                );
+                map.insert(LEAD_HOME.into(), planner.cwd.display().to_string().into());
             }
             self.store.update_agent_config(planner.id, &config).await?;
             self.store.update_agent_cwd(planner.id, dir).await?;
@@ -686,6 +686,7 @@ impl Orchestrator {
                 report: TaskReport::default(),
                 issuer: Some(run.planner),
                 progress: None,
+                handoffs: Vec::new(),
                 parent: None,
                 created_at: now,
                 updated_at: now,
@@ -837,15 +838,27 @@ The person changed: {}",
             assigned
         };
         let name = agent_name(if task.escalated { "e" } else { "w" }, run, task);
+        let left = self.left_by_issuer(run, task).await;
         // On an account with quota left (docs/tasks/DOGFOOD.md §5).
-        let worker = self.routed_worker(run, task, template, &name, None).await?;
+        let (worker, cloned, rerouted) =
+            self.routed_worker(run, task, template, &name, None).await?;
         task.assignee = Some(worker.id);
         task.attempts = 1;
         task.nudges = 0;
         self.transition(task, TaskStatus::Running).await?;
+        let (kind, reason) = if task.escalated {
+            let why = rerouted.unwrap_or_else(|| "moved to the run's escalation teammate".into());
+            (HandoffKind::Escalate, Some(why))
+        } else {
+            (HandoffKind::Assign, rerouted)
+        };
+        let to_name = self.name_of(cloned).await;
+        let card = self
+            .hand_off(run, task, kind, left, &worker, to_name, reason)
+            .await?;
         // The task as its issuer wrote it, from the issuer.
         let issuer = task.issuer_or(run.planner);
-        self.relay(worker.id, issuer, brief::assignment(task), None);
+        self.relay(worker.id, issuer, brief::handover(task, &card), None);
         Ok(())
     }
 
@@ -1025,6 +1038,7 @@ The person changed: {}",
                 match events.recv().await {
                     Ok(event) => match event.kind {
                         EventKind::AgentTurnCompleted { id, .. } => this.on_idle(id).await,
+                        EventKind::AgentUsage { id, used, .. } => this.record_context(id, used),
                         EventKind::AgentStatusChanged {
                             id,
                             to: AgentStatus::Error,

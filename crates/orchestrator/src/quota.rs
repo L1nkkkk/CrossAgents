@@ -3,7 +3,7 @@
 //! hits its limit mid-task hands the task to one that has not. Each move is said in the run.
 
 use crossagents_core::{
-    Agent, AgentId, CoreError, EventKind, Role, Run, RunStatus, Task, TaskStatus,
+    Agent, AgentId, CoreError, EventKind, HandoffKind, Role, Run, RunStatus, Task, TaskStatus,
 };
 
 use crate::brief;
@@ -12,7 +12,8 @@ use crate::host::Route;
 
 impl Orchestrator {
     /// A fresh worker for `task`, cloned from `template` where quota allows, else from the
-    /// account or teammate the host routes it to.
+    /// account or teammate the host routes it to. Returns the worker, the teammate it was
+    /// cloned from, and why it did not go as planned (said in `task.rerouted`).
     pub(crate) async fn routed_worker(
         &self,
         run: &Run,
@@ -20,7 +21,7 @@ impl Orchestrator {
         template: AgentId,
         name: &str,
         limited: Option<AgentId>,
-    ) -> Result<Agent, CoreError> {
+    ) -> Result<(Agent, AgentId, Option<String>), CoreError> {
         let cwd = task.worktree.clone().unwrap_or_default();
         let mut team: Vec<AgentId> = run.config.team.clone();
         if !team.contains(&run.config.worker) {
@@ -44,7 +45,7 @@ impl Orchestrator {
             .host
             .clone_agent_on(template, name, Role::Worker, &cwd, account.as_deref())
             .await?;
-        if let Some(reason) = reason {
+        if let Some(reason) = &reason {
             // Stored before it is announced: whoever reads the task on the event sees why.
             task.progress = Some(reason.clone());
             task.updated_at = chrono::Utc::now();
@@ -64,7 +65,7 @@ impl Orchestrator {
             )
             .await;
         }
-        Ok(worker)
+        Ok((worker, template, reason))
     }
 
     /// `agent` hit its account's limit. If it works on a task, the task goes to a worker on
@@ -103,10 +104,11 @@ impl Orchestrator {
         }
         let name = agent_name("w", &run, &task);
         let _ = self.host.interrupt(agent).await;
+        let left = self.left_by_worker(&run, &task, Some(agent)).await;
         if let Err(err) = self.host.remove_agent(agent).await {
             tracing::warn!(%agent, error = %err, "cannot remove the rate-limited worker");
         }
-        let worker = self
+        let (worker, cloned, rerouted) = self
             .routed_worker(&run, &mut task, template, &name, Some(agent))
             .await?;
         task.assignee = Some(worker.id);
@@ -116,16 +118,21 @@ impl Orchestrator {
             task.updated_at = chrono::Utc::now();
             self.store.update_task(&task).await?;
         }
+        let reason = rerouted.unwrap_or_else(|| format!("its worker hit its quota ({why})"));
+        let to_name = self.name_of(cloned).await;
+        let card = self
+            .hand_off(
+                &run,
+                &mut task,
+                HandoffKind::Reroute,
+                left,
+                &worker,
+                to_name,
+                Some(reason),
+            )
+            .await?;
         let issuer = task.issuer_or(run.planner);
-        self.relay(
-            worker.id,
-            issuer,
-            format!(
-                "{}\n\nThe previous worker stopped when its account hit its quota ({why}); its changes are in your working directory.",
-                brief::assignment(&task)
-            ),
-            None,
-        );
+        self.relay(worker.id, issuer, brief::handover(&task, &card), None);
         Ok(())
     }
 }

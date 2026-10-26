@@ -9,6 +9,7 @@ pub mod cli;
 pub mod driver;
 pub mod error;
 pub mod event;
+pub mod handoff;
 pub mod human;
 pub mod ids;
 pub mod model;
@@ -38,8 +39,9 @@ pub use error::CoreError;
 pub use event::{
     DiffSource, EVENT_SCHEMA_VERSION, Envelope, Event, EventKind, EventSink, MessageSource,
 };
+pub use handoff::{Handoff, HandoffKind};
 pub use human::{HumanAction, HumanItem, HumanItemKind, HumanItemStatus};
-pub use ids::{AgentId, MessageId, RunId, SessionId, TaskId};
+pub use ids::{AgentId, HandoffId, MessageId, RunId, SessionId, TaskId};
 pub use model::{
     Agent, AgentProfile, AgentStatus, CheckResult, LandMode, Landing, NameSource, PlannedTask,
     Role, Run, RunConfig, RunStatus, Scope, Task, TaskReport, TaskSpec, validate_agent_name,

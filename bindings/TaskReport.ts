@@ -33,4 +33,8 @@ question_message: MessageId | null,
 /**
  * The reviewer's verdict notes.
  */
-review: string | null, };
+review: string | null, 
+/**
+ * What the issuer (or the person) wrote each time it sent the task back for rework.
+ */
+rework: Array<string>, };

@@ -422,6 +422,9 @@ pub struct TaskReport {
     /// The reviewer's verdict notes.
     #[serde(default)]
     pub review: Option<String>,
+    /// What the issuer (or the person) wrote each time it sent the task back for rework.
+    #[serde(default)]
+    pub rework: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -472,6 +475,9 @@ pub struct Task {
     /// The assignee's latest one-line progress (`task_progress`).
     #[serde(default)]
     pub progress: Option<String>,
+    /// Each time the task changed hands, oldest first. Empty in tasks recorded before.
+    #[serde(default)]
+    pub handoffs: Vec<crate::handoff::Handoff>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -486,6 +492,19 @@ impl Task {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tasks_recorded_before_handoffs_load_with_none() {
+        let now = Utc::now();
+        let old = serde_json::json!({
+            "id": TaskId::new(), "run_id": RunId::new(), "key": "a", "title": "t",
+            "spec": { "goal": "g" }, "status": "running", "attempts": 1,
+            "report": { "summary": "s" }, "created_at": now, "updated_at": now,
+        });
+        let task: Task = serde_json::from_value(old).unwrap();
+        assert!(task.handoffs.is_empty());
+        assert!(task.report.rework.is_empty());
+    }
 
     #[test]
     fn identity_names_the_agent_and_its_model() {

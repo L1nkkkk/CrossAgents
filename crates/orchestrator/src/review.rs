@@ -118,6 +118,15 @@ impl Orchestrator {
             }
             task.attempts += 1;
             task.report.failure = None;
+            let said: Vec<&str> = note
+                .as_deref()
+                .into_iter()
+                .chain(remarks.iter().map(|r| r.text.trim()))
+                .filter(|t| !t.is_empty())
+                .collect();
+            if !said.is_empty() {
+                task.report.rework.push(said.join("\n"));
+            }
             self.transition(&mut task, TaskStatus::Running).await?;
         }
         let text = remarks_text(&task, &remarks, note.as_deref(), rework && reopen);

@@ -146,6 +146,12 @@ pub fn summary(kind: &EventKind) -> String {
         ),
         EventKind::TaskProgress { key, text, .. } => format!("#{key} {}", one_line(text)),
         EventKind::TaskRerouted { key, reason, .. } => format!("#{key} {}", one_line(reason)),
+        EventKind::TaskHandedOff { handoff, .. } => format!(
+            "#{} {} → {}",
+            handoff.task_key,
+            handoff.from_name.as_deref().unwrap_or("?"),
+            one_line(&handoff.link())
+        ),
         EventKind::TaskCommand {
             key,
             command,
@@ -404,7 +410,7 @@ fn short(id: &impl ToString) -> String {
     id.to_string().chars().take(8).collect()
 }
 
-fn one_line(text: &str) -> String {
+pub(crate) fn one_line(text: &str) -> String {
     const MAX: usize = 100;
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() > MAX {

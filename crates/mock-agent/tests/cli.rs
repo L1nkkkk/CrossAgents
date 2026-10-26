@@ -153,6 +153,9 @@ fn full_run_with_a_directory_plugin() {
     home.stdout(&["run", "approve", &id]);
     let done = wait_run(&home, &id, "completed");
     assert_eq!(done["tasks"][0]["status"], "merged");
+    // Who had each task, in turn.
+    let human = home.stdout(&["run", "show", &id]);
+    assert!(human.contains("#hello boss → coder (assign)"), "{human}");
     let ls = home.stdout(&["run", "ls"]);
     assert!(ls.contains("completed"), "{ls}");
 

@@ -115,6 +115,13 @@ impl Tracer {
                 self.task_mut(*id, key).rerouted.push(reason.clone());
                 self.join(*to, Lane::Task(*id));
             }
+            EventKind::TaskHandedOff { run_id, handoff } if *run_id == self.run => {
+                let (id, to) = (handoff.task_id, handoff.to);
+                self.task_mut(id, &handoff.task_key)
+                    .handoffs
+                    .push(handoff.clone());
+                self.join(to, Lane::Task(id));
+            }
             EventKind::TaskChecked {
                 run_id,
                 id,
@@ -453,6 +460,29 @@ mod tests {
             }],
         });
 
+        s.push(EventKind::TaskHandedOff {
+            run_id: run,
+            handoff: crossagents_core::Handoff {
+                id: crossagents_core::HandoffId::new(),
+                run_id: run,
+                task_id: task,
+                task_key: "a".into(),
+                kind: crossagents_core::HandoffKind::Reassign,
+                from: Some(worker),
+                from_name: Some("rex".into()),
+                to: other,
+                to_name: "ada".into(),
+                reason: None,
+                goal: "g".into(),
+                files: vec!["a.rs".into()],
+                summary: None,
+                decisions: Vec::new(),
+                open_questions: Vec::new(),
+                context_tokens: None,
+                at: Utc::now(),
+            },
+        });
+
         let mut tracer = Tracer::new(run);
         for e in &s.events {
             tracer.push(e);
@@ -461,7 +491,11 @@ mod tests {
         assert_eq!(trace.tasks.len(), 1);
         let a = &trace.tasks[0];
         assert_eq!(a.key, "a");
-        assert_eq!(a.lane.agents, [worker]);
+        // Each handoff is a node of the task; its new worker joins the task's lane.
+        assert_eq!(a.handoffs.len(), 1);
+        assert_eq!(a.handoffs[0].files, ["a.rs"]);
+        assert_eq!(a.lane.agents, [worker, other]);
+
         assert_eq!(a.lane.turns.len(), 1);
         assert_eq!(a.lane.turns[0].stop_reason, Some(StopReason::EndTurn));
         let cmd = &a.lane.commands[0];

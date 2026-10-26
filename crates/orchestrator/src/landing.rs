@@ -325,6 +325,7 @@ impl Orchestrator {
             worktree: None,
             report: TaskReport::default(),
             progress: None,
+            handoffs: Vec::new(),
             created_at: now,
             updated_at: now,
         };

@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, CoreError, EventKind, PlannedTask, Role, Run, RunStatus, Task,
-    TaskId, TaskReport, TaskSpec, TaskStatus,
+    Agent, AgentId, AgentKey, CoreError, EventKind, HandoffKind, PlannedTask, Role, Run, RunStatus,
+    Task, TaskId, TaskReport, TaskSpec, TaskStatus,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -269,6 +269,7 @@ impl Orchestrator {
                 worktree: None,
                 report: TaskReport::default(),
                 progress: None,
+                handoffs: Vec::new(),
                 created_at: now,
                 updated_at: now,
             };
@@ -342,6 +343,9 @@ impl Orchestrator {
         #[derive(Deserialize)]
         struct A {
             to: String,
+            /// Why it changes hands, for the handoff card.
+            #[serde(default)]
+            reason: Option<String>,
         }
         let (run, task) = self.task_arg(caller, &input).await?;
         Self::require_issuer(&run, &task, caller)?;
@@ -355,11 +359,27 @@ impl Orchestrator {
         if task.status.is_terminal() {
             return Err(CoreError::Conflict(format!("#{} has ended", task.key)));
         }
-        task.worker_template = Some(to.id);
         if task.status == TaskStatus::Pending {
+            // Its first worker gets the card when it starts.
+            task.worker_template = Some(to.id);
             self.store_task(&mut task).await?;
             return Ok(task_json(&task));
         }
+        let left = self.left_by_worker(&run, &task, task.assignee).await;
+        task.worker_template = Some(to.id);
+        let reason = a
+            .reason
+            .map(|r| r.trim().to_owned())
+            .filter(|r| !r.is_empty())
+            .or_else(|| task.report.failure.clone());
+        let (kind, reason) = if run.config.escalate == Some(to.id) {
+            let why = reason.unwrap_or_else(|| {
+                format!("{} moved it to the run's escalation teammate", caller.name)
+            });
+            (HandoffKind::Escalate, Some(why))
+        } else {
+            (HandoffKind::Reassign, reason)
+        };
         if let Some(old) = task.assignee.take()
             && let Err(err) = self.host.remove_agent(old).await
         {
@@ -376,15 +396,18 @@ impl Orchestrator {
         } else {
             self.store_task(&mut task).await?;
         }
-        self.relay(
-            worker.id,
-            caller.id,
-            format!(
-                "{}\n\nSomeone already worked on this; their changes are in your working directory.",
-                brief::assignment(&task)
-            ),
-            None,
-        );
+        let card = self
+            .hand_off(
+                &run,
+                &mut task,
+                kind,
+                left,
+                &worker,
+                Some(to.name.clone()),
+                reason,
+            )
+            .await?;
+        self.relay(worker.id, caller.id, brief::handover(&task, &card), None);
         Ok(task_json(&task))
     }
 
@@ -1017,6 +1040,7 @@ impl Orchestrator {
         }
         task.attempts += 1;
         task.report.failure = None;
+        task.report.rework.push(a.notes.trim().to_owned());
         self.transition(&mut task, TaskStatus::Running).await?;
         self.relay(
             worker,

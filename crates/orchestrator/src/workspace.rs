@@ -63,6 +63,11 @@ pub trait WorkspaceProvider: Send + Sync {
     async fn delete_branch(&self, repo: &Path, branch: &str) -> Result<(), CoreError>;
     /// The files `path` changed and did not commit: edits and untracked files, by path.
     async fn uncommitted(&self, path: &Path) -> Result<Vec<String>, CoreError>;
+    /// The files `path` changed relative to `base`, committed or not, untracked included.
+    async fn changed_files(&self, path: &Path, base: &str) -> Result<Vec<String>, CoreError> {
+        let _ = (path, base);
+        Ok(Vec::new())
+    }
     /// Forgets working copies of `repo` whose directory is gone (deleted by hand when
     /// removing them failed), so their branches can be checked out again.
     async fn prune(&self, repo: &Path) -> Result<(), CoreError> {
@@ -502,13 +507,37 @@ impl WorkspaceProvider for GitWorkspaces {
             &["-c", "core.quotePath=false", "status", "--porcelain"],
         )
         .await?;
+        // `git` trims the output, which takes the first line's leading blank status column:
+        // split at the space after the status letters rather than at a fixed column.
         Ok(out
             .lines()
-            .filter_map(|line| line.get(3..))
+            .filter_map(|line| line.trim_start().split_once(' ').map(|(_, rest)| rest))
             .map(|rest| rest.rsplit(" -> ").next().unwrap_or(rest).trim())
             .filter(|path| !path.is_empty())
             .map(str::to_owned)
             .collect())
+    }
+
+    async fn changed_files(&self, path: &Path, base: &str) -> Result<Vec<String>, CoreError> {
+        let merge_base = git(path, &["merge-base", base, "HEAD"]).await?;
+        let tracked = git(
+            path,
+            &[
+                "-c",
+                "core.quotePath=false",
+                "diff",
+                "--name-only",
+                &merge_base,
+            ],
+        )
+        .await?;
+        let mut files: Vec<String> = tracked.lines().map(str::to_owned).collect();
+        for file in self.uncommitted(path).await? {
+            if !files.contains(&file) {
+                files.push(file);
+            }
+        }
+        Ok(files)
     }
 }
 
@@ -710,6 +739,9 @@ mod tests {
         assert!(diff.contains("+a") && diff.contains("b.txt"), "{diff}");
         let only_b = ws.diff(&task, "ca/run", &["b.txt".into()]).await.unwrap();
         assert!(!only_b.contains("a.txt"), "{only_b}");
+        // Committed and new files alike, each once.
+        let changed = ws.changed_files(&task, "ca/run").await.unwrap();
+        assert_eq!(changed, ["a.txt", "b.txt"]);
         std::fs::remove_file(task.join("b.txt")).unwrap();
 
         ws.merge(&integration, "ca/run-a", "merge a").await.unwrap();
