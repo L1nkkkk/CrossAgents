@@ -43,7 +43,7 @@ pub struct CodexNativeDriver {
     command: Vec<String>,
     models: Vec<String>,
     pool: tokio::sync::Mutex<HashMap<ProcessKey, Weak<AppServer>>>,
-    /// The CLI the description names, found once (docs/DESIGN.md §9.3).
+    /// The CLI the description names, found whenever a process starts (docs/DESIGN.md §9.3).
     cli: Cli,
 }
 
@@ -59,11 +59,9 @@ impl CodexNativeDriver {
     /// it describes. `app-server` is added to the program.
     pub fn new(name: impl Into<String>, cli: Cli, models: Vec<String>) -> Self {
         let command = if cli.configured().is_empty() {
-            let program = cli
-                .default_name()
-                .or_else(|| cli.command().and_then(|argv| argv.into_iter().next()))
-                .unwrap_or_default();
-            vec![program, "app-server".into()]
+            // Unresolved on purpose: the program is found when a process starts, and the
+            // key a process is taken over by stays the same across an update.
+            vec![cli.default_name().unwrap_or_default(), "app-server".into()]
         } else {
             cli.configured().to_vec()
         };
@@ -101,10 +99,21 @@ impl CodexNativeDriver {
         {
             return Ok(server);
         }
-        let server =
-            AppServer::spawn(&key, self.cli.launch(&key.command), self.owner_of(&key)).await?;
+        let server = AppServer::spawn(&key, self.command_for(&key), self.owner_of(&key)).await?;
         pool.insert(key, Arc::downgrade(&server));
         Ok(server)
+    }
+
+    /// The argv a process is started with: the key's program, found now.
+    fn command_for(&self, key: &ProcessKey) -> Vec<String> {
+        if key.command.first().is_some_and(String::is_empty) {
+            // The description names no program to keep unresolved (no `commands`): whatever
+            // it finds when the process starts, with the arguments the key carries.
+            let mut found = self.cli.command().unwrap_or_default();
+            found.extend(key.command.iter().skip(1).cloned());
+            return found;
+        }
+        self.cli.launch(&key.command)
     }
 
     fn key_for(&self, spec: &SessionSpec) -> ProcessKey {
@@ -213,6 +222,11 @@ impl Driver for CodexNativeDriver {
 
     async fn cli_status(&self) -> Option<CliStatus> {
         Some(self.status().await)
+    }
+
+    /// Asked at hub startup, in the background: `/v1/plugins` never waits for it.
+    async fn probe_cli(&self) {
+        let _ = self.cli.version().await;
     }
 
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError> {

@@ -475,7 +475,8 @@ pub struct CliInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub source: Option<String>,
-    /// What the CLI printed for its version; `None` when it did not answer in time.
+    /// What the CLI printed for its version; `None` while it has not answered yet (the first
+    /// probe runs in the background) or when it did not answer in time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub version: Option<String>,

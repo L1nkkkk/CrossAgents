@@ -582,6 +582,10 @@ pub trait Driver: Send + Sync {
     async fn cli_status(&self) -> Option<crate::CliStatus> {
         None
     }
+    /// Asks the program its version, so that a later [`Self::cli_status`] can report it.
+    /// The hub runs this in the background at startup, never on a request's path: the answer
+    /// costs a subprocess, and `GET /v1/plugins` must not wait for one.
+    async fn probe_cli(&self) {}
     /// Opens a new session.
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError>;
     /// Reopens a suspended session by the id it reported in

@@ -47,10 +47,10 @@ const LIMITS_EVERY: Duration = Duration::from_secs(60);
 /// The `claude-native` driver for one Profile.
 pub struct ClaudeNativeDriver {
     name: String,
-    command: Vec<String>,
     models: Vec<String>,
     flavor: Flavor,
-    /// The CLI the description names, found once (docs/DESIGN.md §9.3).
+    /// The CLI the description names, found again whenever a session starts
+    /// (docs/DESIGN.md §9.3).
     cli: Cli,
 }
 
@@ -68,14 +68,8 @@ impl ClaudeNativeDriver {
         models: Vec<String>,
         flavor: Flavor,
     ) -> Self {
-        let command = cli.command().unwrap_or_else(|| {
-            cli.default_name()
-                .map(|name| vec![name])
-                .unwrap_or_default()
-        });
         Self {
             name: name.into(),
-            command,
             models,
             flavor,
             cli,
@@ -87,11 +81,17 @@ impl ClaudeNativeDriver {
         self.cli.status().await
     }
 
-    /// The command a session runs: the agent's own when it names one, else this Profile's.
+    /// The command a session runs: the agent's own when it names one, else the CLI the
+    /// description finds now -- installed, moved or updated since the hub started.
     fn command_for(&self, spec: &SessionSpec) -> Vec<String> {
         match &spec.command {
             Some(command) => self.cli.launch(command),
-            None => self.command.clone(),
+            None => self.cli.command().unwrap_or_else(|| {
+                self.cli
+                    .default_name()
+                    .map(|name| vec![name])
+                    .unwrap_or_default()
+            }),
         }
     }
 
@@ -166,6 +166,11 @@ impl Driver for ClaudeNativeDriver {
 
     async fn cli_status(&self) -> Option<CliStatus> {
         Some(self.status().await)
+    }
+
+    /// Asked at hub startup, in the background: `/v1/plugins` never waits for it.
+    async fn probe_cli(&self) {
+        let _ = self.cli.version().await;
     }
 
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError> {

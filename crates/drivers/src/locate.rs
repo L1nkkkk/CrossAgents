@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crossagents_core::{CliSource, CliStatus, Located};
 use serde::{Deserialize, Deserializer};
@@ -344,31 +344,52 @@ impl Locator {
     }
 }
 
-/// A CLI the description found, kept once: the path does not change while the hub runs, and
-/// the version comes from a subprocess (so it is asked for separately, and cached).
+/// A CLI the description names, as this machine has it now (docs/DESIGN.md §9.3).
+///
+/// The lookup itself is not kept: it is a filesystem walk, cheap next to the session it
+/// precedes, and a hub outlives installs and updates. A hit is reused only while the file it
+/// named is still there -- a desktop app that updates removes the build directory of the
+/// build it replaces -- and a miss is never reused, so a CLI installed while the hub runs is
+/// found. What is worth keeping, asking the CLI its version, is cached by (path, modification
+/// time).
+#[derive(Clone)]
 pub struct Cli {
+    inner: std::sync::Arc<CliInner>,
+}
+
+struct CliInner {
     /// `native_command`: this wins over everything the description says.
     configured: Vec<String>,
     locator: Locator,
     install: Install,
-    found: std::sync::OnceLock<Option<Located>>,
-    version: std::sync::Mutex<VersionCache>,
+    cache: std::sync::Mutex<Cache>,
 }
 
 #[derive(Default)]
-struct VersionCache {
-    asked: bool,
+struct Cache {
+    /// The last hit, reused while `path` is still a file.
+    found: Option<Located>,
+    /// What the version probe last answered, for one (path, modification time).
+    version: Option<VersionEntry>,
+    /// The file a version probe is running for.
+    probing: Option<PathBuf>,
+}
+
+struct VersionEntry {
+    path: PathBuf,
+    modified: SystemTime,
     value: Option<String>,
 }
 
 impl Cli {
     pub fn new(configured: Vec<String>, locator: Locator, install: Install) -> Self {
         Self {
-            configured,
-            locator,
-            install,
-            found: std::sync::OnceLock::new(),
-            version: std::sync::Mutex::default(),
+            inner: std::sync::Arc::new(CliInner {
+                configured,
+                locator,
+                install,
+                cache: std::sync::Mutex::default(),
+            }),
         }
     }
 
@@ -379,41 +400,59 @@ impl Cli {
     }
 
     pub fn configured(&self) -> &[String] {
-        &self.configured
+        &self.inner.configured
     }
 
     pub fn locator(&self) -> &Locator {
-        &self.locator
+        &self.inner.locator
     }
 
     pub fn install(&self) -> &Install {
-        &self.install
+        &self.inner.install
     }
 
-    /// The found CLI, without its version.
-    fn found(&self) -> Option<&Located> {
-        self.found.get_or_init(|| self.find()).as_ref()
+    fn cache(&self) -> std::sync::MutexGuard<'_, Cache> {
+        self.inner.cache.lock().expect("cli cache")
     }
 
-    fn find(&self) -> Option<Located> {
-        if let Some(first) = self.configured.first() {
-            let machine = Machine::default();
-            let path = self.locator.resolve_in(first, &machine);
-            let mut argv = vec![display(&path)];
-            argv.extend(self.configured[1..].iter().cloned());
-            return Some(self.locator.launch(argv, path, CliSource::Config, &machine));
+    /// The CLI as it is now.
+    fn found(&self) -> Option<Located> {
+        self.found_in(&Machine::default())
+    }
+
+    /// [`Self::found`], on `machine` rather than this process's environment (tests).
+    fn found_in(&self, machine: &Machine) -> Option<Located> {
+        let mut cache = self.cache();
+        if let Some(found) = &cache.found
+            && found.path.is_file()
+        {
+            return Some(found.clone());
         }
-        self.locator.locate()
+        // Not found last time, or what was found is gone: look again.
+        let found = self.find_in(machine);
+        cache.found = found.clone();
+        found
+    }
+
+    fn find_in(&self, machine: &Machine) -> Option<Located> {
+        let inner = &self.inner;
+        if let Some(first) = inner.configured.first() {
+            let path = inner.locator.resolve_in(first, machine);
+            let mut argv = vec![display(&path)];
+            argv.extend(inner.configured[1..].iter().cloned());
+            return Some(inner.locator.launch(argv, path, CliSource::Config, machine));
+        }
+        inner.locator.locate_in(machine)
     }
 
     /// The arguments that launch it, when it is on this machine.
     pub fn command(&self) -> Option<Vec<String>> {
-        self.found().map(|found| found.argv.clone())
+        self.found().map(|found| found.argv)
     }
 
     /// The file that was found.
     pub fn path(&self) -> Option<PathBuf> {
-        self.found().map(|found| found.path.clone())
+        self.found().map(|found| found.path)
     }
 
     pub fn source(&self) -> Option<CliSource> {
@@ -422,7 +461,8 @@ impl Cli {
 
     /// The name the description looks for (`codex`), for the arguments a driver adds itself.
     pub fn default_name(&self) -> Option<String> {
-        self.locator
+        self.inner
+            .locator
             .commands
             .get()
             .and_then(|names| names.first().cloned())
@@ -434,47 +474,107 @@ impl Cli {
 
     /// `argv` with its program resolved as the description resolves one.
     pub fn launch(&self, argv: &[String]) -> Vec<String> {
-        self.locator.resolve(argv, &Machine::default())
+        self.inner.locator.resolve(argv, &Machine::default())
     }
 
     /// What to say when a session is asked of a CLI that is not installed.
     pub fn missing_message(&self, name: &str) -> Option<String> {
-        self.install.missing_message(name)
+        self.inner.install.missing_message(name)
     }
 
     /// Where the CLI is, and what installing it takes.
+    ///
+    /// The version is reported only once it has been asked: `/v1/plugins` must not wait for
+    /// a subprocess, so a stale one is asked for in the background and the next call reports
+    /// it (`None` meanwhile).
     pub async fn status(&self) -> CliStatus {
-        let mut located = self.found().cloned();
-        if let Some(located) = &mut located {
-            located.version = self.version().await;
+        self.status_in(&Machine::default()).await
+    }
+
+    /// [`Self::status`], on `machine` rather than this process's environment (tests).
+    pub async fn status_in(&self, machine: &Machine) -> CliStatus {
+        let mut located = self.found_in(machine);
+        if let Some(found) = &mut located {
+            match self.known_version(found) {
+                Some(version) => found.version = version,
+                None => {
+                    found.version = None;
+                    self.ask_in_background(found);
+                }
+            }
         }
         CliStatus {
             located,
-            install_hint: self.install.hint.clone(),
-            docs: self.install.docs.clone(),
+            install_hint: self.inner.install.hint.clone(),
+            docs: self.inner.install.docs.clone(),
         }
     }
 
-    /// What `<argv> <version args>` prints, asked once (5 s at most) and remembered.
+    /// What `<argv> <version args>` prints, asked again when the file changed since it was
+    /// last asked (5 s at most).
     pub async fn version(&self) -> Option<String> {
-        {
-            let cache = self.version.lock().expect("version lock");
-            if cache.asked {
-                return cache.value.clone();
-            }
+        self.version_in(&Machine::default()).await
+    }
+
+    /// [`Self::version`], on `machine` rather than this process's environment (tests).
+    pub async fn version_in(&self, machine: &Machine) -> Option<String> {
+        let found = self.found_in(machine)?;
+        if let Some(value) = self.known_version(&found) {
+            return value;
         }
-        let value = self.read_version().await;
+        self.ask(found).await
+    }
+
+    /// The version last asked for this very file: `None` when it has not been asked for this
+    /// (path, modification time) yet.
+    fn known_version(&self, found: &Located) -> Option<Option<String>> {
+        let cache = self.cache();
+        let entry = cache.version.as_ref()?;
+        let modified = modified(&found.path)?;
+        (entry.path == found.path && entry.modified == modified).then(|| entry.value.clone())
+    }
+
+    /// Asks the version without waiting for it: `/v1/plugins` reports it once it answers.
+    fn ask_in_background(&self, found: &Located) {
         {
-            let mut cache = self.version.lock().expect("version lock");
-            cache.asked = true;
-            cache.value = value.clone();
+            let mut cache = self.cache();
+            if cache.probing.as_deref() == Some(found.path.as_path()) {
+                return;
+            }
+            cache.probing = Some(found.path.clone());
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            // No runtime to ask from (a lookup-only test): nothing to wait for.
+            self.cache().probing = None;
+            return;
+        };
+        let cli = self.clone();
+        let found = found.clone();
+        runtime.spawn(async move {
+            cli.ask(found).await;
+        });
+    }
+
+    /// Asks the version and keeps it with the file it came from.
+    async fn ask(&self, found: Located) -> Option<String> {
+        let value = self.read_version(&found).await;
+        let mut cache = self.cache();
+        if cache.probing.as_deref() == Some(found.path.as_path()) {
+            cache.probing = None;
+        }
+        // The modification time now, not before: what the answer is about.
+        if let Some(modified) = modified(&found.path) {
+            cache.version = Some(VersionEntry {
+                path: found.path,
+                modified,
+                value: value.clone(),
+            });
         }
         value
     }
 
-    async fn read_version(&self) -> Option<String> {
-        let found = self.found()?;
-        let args = self.locator.version.get()?;
+    async fn read_version(&self, found: &Located) -> Option<String> {
+        let args = self.inner.locator.version.get()?;
         let (program, rest) = found.argv.split_first()?;
         let mut command = Command::new(program);
         command
@@ -494,6 +594,11 @@ impl Cli {
         text.push_str(&String::from_utf8_lossy(&output.stderr));
         parse_version(&text)
     }
+}
+
+/// When `path` was last changed: the other half of the version cache's key.
+fn modified(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
 }
 
 fn display(path: &Path) -> String {
@@ -727,6 +832,27 @@ mod tests {
         std::fs::write(path, "").unwrap();
     }
 
+    /// A stand-in CLI that answers `--version` with `version`.
+    #[cfg(windows)]
+    fn version_script(path: &Path, version: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("@echo off\r\necho {version}\r\n")).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    fn version_script(path: &Path, version: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("#!/bin/sh\necho {version}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn set_modified(path: &Path, when: SystemTime) {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(when))
+            .unwrap();
+    }
+
     #[test]
     fn a_command_on_path_is_used() {
         let dir = tempfile::tempdir().unwrap();
@@ -952,6 +1078,96 @@ mod tests {
         let cli = Cli::new(Vec::new(), locator, Install::default());
         assert!(!cli.installed());
         assert_eq!(cli.command(), None);
+    }
+
+    /// A CLI installed after the hub started is still found: a miss is not remembered.
+    #[test]
+    fn a_cli_installed_while_the_hub_runs_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let locator: Locator = toml::from_str(r#"commands = ["claude"]"#).unwrap();
+        let cli = Cli::new(Vec::new(), locator, Install::default());
+        let machine = machine(dir.path());
+        assert!(cli.found_in(&machine).is_none());
+        let shim = dir.path().join(if cfg!(windows) {
+            "claude.cmd"
+        } else {
+            "claude"
+        });
+        touch(&shim);
+        let found = cli.found_in(&machine).expect("found once installed");
+        assert_eq!(found.path, shim);
+        assert_eq!(found.source, CliSource::Path);
+    }
+
+    /// A desktop app that updates removes the build directory of the build it replaces: the
+    /// hit is checked before it is used, and the build now there is found instead.
+    #[test]
+    fn a_removed_build_is_looked_up_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let build = |app: &str, version: &str| {
+            dir.path()
+                .join("Claude-Data")
+                .join(app)
+                .join("claude-code")
+                .join(version)
+                .join("build")
+                .join("claude.exe")
+        };
+        let older = build("app-1.0.0", "1.0.0");
+        touch(&older);
+        let locator: Locator = toml::from_str(
+            r#"
+            commands = ["claude"]
+            bundled = ["%LOCALAPPDATA%/Claude-Data/*/claude-code/*/*/claude.exe"]
+            "#,
+        )
+        .unwrap();
+        let machine = Machine {
+            path: Some(Vec::new()),
+            vars: Some(BTreeMap::from([(
+                "LOCALAPPDATA".to_owned(),
+                dir.path().display().to_string(),
+            )])),
+            home: Some(dir.path().to_path_buf()),
+        };
+        let cli = Cli::new(Vec::new(), locator, Install::default());
+        assert_eq!(cli.found_in(&machine).unwrap().path, older);
+        // The update removes that build and brings a newer one.
+        std::fs::remove_dir_all(dir.path().join("Claude-Data").join("app-1.0.0")).unwrap();
+        let newer = build("app-2.0.0", "2.0.0");
+        touch(&newer);
+        assert_eq!(cli.found_in(&machine).unwrap().path, newer);
+    }
+
+    /// The version is kept with the file it came from: a new modification time (the CLI was
+    /// updated in place) is asked again, an unchanged one is not.
+    #[tokio::test]
+    async fn the_version_is_asked_again_when_the_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join(if cfg!(windows) {
+            "claude.cmd"
+        } else {
+            "claude"
+        });
+        version_script(&shim, "1.0.0");
+        let locator: Locator = toml::from_str(
+            r#"
+            commands = ["claude"]
+            version = ["--version"]
+            "#,
+        )
+        .unwrap();
+        let cli = Cli::new(Vec::new(), locator, Install::default());
+        let machine = machine(dir.path());
+        let installed_at = std::fs::metadata(&shim).unwrap().modified().unwrap();
+        assert_eq!(cli.version_in(&machine).await.as_deref(), Some("1.0.0"));
+        // Rewritten, but with the modification time it had: the answer still stands.
+        version_script(&shim, "2.0.0");
+        set_modified(&shim, installed_at);
+        assert_eq!(cli.version_in(&machine).await.as_deref(), Some("1.0.0"));
+        // Updated: a newer modification time, so it is asked again.
+        set_modified(&shim, installed_at + Duration::from_secs(60));
+        assert_eq!(cli.version_in(&machine).await.as_deref(), Some("2.0.0"));
     }
 
     #[test]

@@ -14,7 +14,8 @@ path?: string,
  */
 source?: string, 
 /**
- * What the CLI printed for its version; `None` when it did not answer in time.
+ * What the CLI printed for its version; `None` while it has not answered yet (the first
+ * probe runs in the background) or when it did not answer in time.
  */
 version?: string, 
 /**

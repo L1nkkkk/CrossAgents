@@ -44,14 +44,10 @@ pub struct CodebuddyNativeDriver {
 impl CodebuddyNativeDriver {
     /// `cli` is the description's CLI: `CODEBUDDY_CLI` when it is set, else `codebuddy` on
     /// `PATH` (run through `node` when npm installed it as a `.cmd` wrapper). The
-    /// stream-json arguments are added to it.
+    /// stream-json arguments are added to it. Where it is is found per session, not here.
     pub fn new(name: impl Into<String>, cli: Cli, models: Vec<String>) -> Self {
         let name = name.into();
-        let missing = if cli.installed() {
-            None
-        } else {
-            cli.missing_message(&name)
-        };
+        let missing = cli.missing_message(&name);
         Self {
             inner: ClaudeNativeDriver::with_flavor(name, cli, models, Flavor::Codebuddy),
             missing,
@@ -59,9 +55,10 @@ impl CodebuddyNativeDriver {
     }
 
     /// Refuses a session no CLI can run, saying what to install, instead of failing to
-    /// spawn `codebuddy`.
+    /// spawn `codebuddy`. Asked per session: the CLI may have been installed (or removed)
+    /// since the hub started.
     fn check(&self, spec: &SessionSpec) -> Result<(), CoreError> {
-        if self.missing.is_some() && spec.command.is_none() {
+        if spec.command.is_none() && !self.inner.installed() {
             let message = self
                 .missing
                 .clone()
@@ -96,6 +93,11 @@ impl Driver for CodebuddyNativeDriver {
 
     async fn cli_status(&self) -> Option<CliStatus> {
         Some(self.inner.status().await)
+    }
+
+    /// Asked at hub startup, in the background: `/v1/plugins` never waits for it.
+    async fn probe_cli(&self) {
+        self.inner.probe_cli().await;
     }
 
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError> {

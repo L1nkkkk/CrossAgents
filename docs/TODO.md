@@ -182,7 +182,8 @@ B3 远程开发：
 > 2026-10-26 第一轮：内置三家的硬编码迁到描述文件，hub 按描述扫描本机、Agents 页显示结果。格式与优先级见 [DESIGN.md](DESIGN.md) §9.3。
 
 - [x] 协议留在代码里，协议以外的写进 `plugin.toml`：内置三家在 `crates/plugins/agents/*.toml`（`include_str!` 编进 hub），外部 agent 同一种格式；`locate`（env / commands / paths / bundled / shim / version）、`install`（hint / docs / login / notes / label）、`[models]`（fallback / efforts）；每项都能按系统给。`manifest.rs` 不再只认 `protocol = "acp"`
-- [x] 查找统一成 `Located { argv, path, source, version }`（`crates/core/src/cli.rs`），三家驱动不再各写一套：`native_command` > `env` > `PATH` > 自家安装路径 > 桌面版自带，命中后按名字过 shim（`codex-vendor` 解 npm 外壳、`node-script` 改用 `node <script>`）；版本 5 秒超时、取到就缓存
+- [x] 查找统一成 `Located { argv, path, source, version }`（`crates/core/src/cli.rs`），三家驱动不再各写一套：`native_command` > `env` > `PATH` > 自家安装路径 > 桌面版自带，命中后按名字过 shim（`codex-vendor` 解 npm 外壳、`node-script` 改用 `node <script>`）；版本 5 秒超时
+- [x] 查找不缓存、版本按 (path, 修改时间) 缓存：hub 运行期间装上、就地升级、桌面版更新删掉旧构建目录，`installed()` / 开会话 / `/v1/plugins` 都拿到当下的结果；版本在 hub 启动时后台并行探（`Driver::probe_cli()`），探测期间 `version` 为空但不挡接口；claude / codebuddy 开会话时才取命令，codex 的进程键仍是未解析的 `codex app-server`（接管要按它匹配）。测试用注入的 `Machine` 和临时目录覆盖「后来装上」「旧构建被删、出现更新的构建」「文件时间变了重新探测」
 - [x] `PluginInfo.cli`（`installed` / `path` / `source` / `version` / `install_hint` / `docs`；新增可选字段，不升 `API_VERSION`），`bindings/` 已重新生成；设置 → 智能体页顶部「本机的 CLI」，显示 `2.1.304 · 原生安装`，悬停看完整路径，没装的给可复制的安装命令
 - [x] 迁移有据可查：描述文件与旧 `PluginConfig::claude()/codex()/codebuddy()` 逐字段相等的对照测试（迁完改成固定期望值）；本机三家迁移前后的 argv 逐字节相同
 - [ ] 安装按钮：按 `install.hint` 执行并把进度显示在 GUI（这一轮只显示、不执行）

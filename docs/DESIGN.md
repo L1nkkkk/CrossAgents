@@ -384,7 +384,13 @@ efforts = ["low", "medium", "high"]
 
 **查找优先级**：`config.toml` 的 `native_command` > `locate.env` > `locate.commands`（PATH）> `locate.paths` > `locate.bundled`。命中后再过一次 `locate.shim`，因为有两件事路径表达不了：npm 的 `.cmd` / `.ps1` 外壳必须解到 vendor 里的真实二进制（`codex-vendor`，杀外壳会留下子进程），以及 npm 的 CodeBuddy 外壳要改成 `node <script>` 直接跑（`node-script`，否则 `--mcp-config` 的 JSON 过不了 `cmd.exe` 的引号）。shim 的名字写在描述里，逻辑留在代码里（`crates/drivers/src/locate.rs`）。
 
-**结果**统一成 `Located { argv, path, source, version }`（`crates/core/src/cli.rs`）：`source` 是 `config | env | path | native | bundled`；`Driver::installed()` 由它推出，三家驱动不再各自写查找逻辑。`GET /v1/plugins` 的 `PluginInfo.cli` 把它交给客户端（`installed`、`path`、`source`、`version`、`install_hint`、`docs`；新增可选字段，不升 `API_VERSION`）。版本用 `locate.version` 的命令取，5 秒超时，取到就缓存，取不到时 `version` 为空但仍算已安装——版本不该挡住 hub 启动和开会话。
+**结果**统一成 `Located { argv, path, source, version }`（`crates/core/src/cli.rs`）：`source` 是 `config | env | path | native | bundled`；`Driver::installed()` 由它推出，三家驱动不再各自写查找逻辑。`GET /v1/plugins` 的 `PluginInfo.cli` 把它交给客户端（`installed`、`path`、`source`、`version`、`install_hint`、`docs`；新增可选字段，不升 `API_VERSION`）。
+
+**查找不缓存**：hub 活得比安装和升级长，`installed()`、开会话、`/v1/plugins` 都要当下的结果。留下的只有命中，用之前还要校验路径还在——桌面版自动更新会删掉被替换那一版的构建目录；上次没找到则每次都重查，hub 运行期间装上的 CLI 立刻能发现。查找只是一次文件系统走查，比起它后面的开会话可以忽略。
+
+**版本按 (path, 修改时间) 缓存**：两者任一变了就重新探测（就地升级会改文件时间）。探测要起子进程（`locate.version` 的命令，5 秒超时），所以不挡请求：hub 启动时后台并行探一遍（`Driver::probe_cli()`），正在探测时 `/v1/plugins` 的 `version` 为空但仍算已安装，下一次请求就带上答案。
+
+**命令在开会话时取**（`claude` / `codebuddy`）：构造时定死的话，hub 运行期间的安装和更新都看不见。`codex` 的进程键保持未解析的 `codex app-server`——接管进程按它匹配，解析过的路径一升级就对不上了。
 
 ### 9.4 跟上游
 

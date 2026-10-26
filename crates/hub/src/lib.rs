@@ -140,6 +140,11 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         tracing::warn!("skipping plugin: {warning}");
     }
     let runtime = Arc::new(Runtime::new(bus.clone(), plugins).with_setup(setup.clone()));
+    // Each CLI is asked its version in the background, in parallel: `GET /v1/plugins`
+    // reports it once it answers and never waits for a subprocess (docs/DESIGN.md §9.3).
+    for driver in runtime.plugins().defaults() {
+        tokio::spawn(async move { driver.probe_cli().await });
+    }
     let model_choice = Arc::new(models::ModelChoice::load(paths.models()));
     // Agents from before names were for people get a name and (chats) a title.
     if let Err(err) = identity::fix_up(
