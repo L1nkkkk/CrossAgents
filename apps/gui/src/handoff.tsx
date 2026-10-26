@@ -9,6 +9,15 @@ import type { HandoffKind } from "@bindings/HandoffKind";
 import { Avatar, List, Prose, displayName, isAgent, time } from "./components";
 import { clock } from "./lib/time";
 
+/**
+ * Whether the task is now with the run's escalation teammate: its last handoff was an escalation
+ * (the lead gave it to that teammate), or the hub escalated it on its own (`escalated`, which
+ * nothing sets since H1-3 took automatic escalation out).
+ */
+export function isEscalated(task: { escalated: boolean; handoffs: Handoff[] }): boolean {
+  return task.escalated || task.handoffs[task.handoffs.length - 1]?.kind === "escalate";
+}
+
 export const KIND_LABEL: Record<HandoffKind, string> = {
   assign: "派活",
   reassign: "改派",
@@ -88,7 +97,7 @@ export function HandoffCard({ handoff: h, agents }: { handoff: Handoff; agents?:
       )}
       {!first && (
         <div className="small muted">
-          交接时上下文 {h.context_tokens !== null ? `${tokens(h.context_tokens)} tokens` : "未知（驱动没有报告）"}
+          交接时上下文 {h.context_tokens !== null ? `${tokens(h.context_tokens)} tokens` : "未知"}
         </div>
       )}
     </div>

@@ -503,7 +503,8 @@ export function handoffRun(): { state: MockState; script: Step[]; route: string 
   const td = byKey("d");
   const rexD = td.assignee!;
   td.status = "running";
-  td.escalated = true;
+  // `escalated` stays false: nothing sets it since H1-3 took automatic escalation out; the
+  // badge comes from the escalation card, as it does for a real run.
   td.assignee = kaiD.id;
   td.report = { ...td.report, failure: null };
   td.handoffs.push(

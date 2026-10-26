@@ -11,7 +11,7 @@ import { api, errorText } from "../api";
 import { HeldFiles, TurnFiles, useHeld } from "../attach";
 import { HandoffLine } from "../handoff";
 import { dismiss as dismissMessage, retry as retryMessage, sendMessage, useOutbox, type Outgoing } from "../outbox";
-import { ACTIVE_RUN, useRunTree } from "../App";
+import { ACTIVE_RUN, useRunTree, useRunsLedBy } from "../App";
 import { Avatar, ErrorBox, Icon, Mark, Prose, StatusChip, Vendor, agentTitle, agentTone, displayName, roleShape, time, useAgents, vendorName } from "../components";
 import { ChangeStat, DiffView } from "../diffview";
 import { parseDiff, tailLines, type DiffFile } from "../lib/diff";
@@ -66,6 +66,7 @@ export function SessionView({
   const agents = useAgents();
   const [draft, setDraft] = useState("");
   const agentId = transcript?.agent.id;
+  const ledRuns = useRunsLedBy(agentId);
   const outgoing = useOutbox(agentId, transcript?.turns);
   const { hidden: railOff } = useRail();
   const [width, setWidth] = useState(0);
@@ -125,7 +126,7 @@ export function SessionView({
   return (
     <section className={`pane ${rail ? "with-rail" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)}>
       {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onClose={onClose} />}
-      <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} agents={everyone} tree={runs} top={top}>
+      <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} agents={everyone} tree={runs} top={top}>
         {outgoing.map((m) => (
           <Sending key={m.key} message={m} agent={agent} />
         ))}
@@ -387,6 +388,7 @@ function Conversation({
   agent,
   turns,
   switches,
+  handoffs,
   agents,
   tree,
   top,
@@ -395,6 +397,8 @@ function Conversation({
   agent: Agent;
   turns: TranscriptTurn[];
   switches: ModelSwitch[];
+  /** The handoffs of the tasks in every run this agent leads. */
+  handoffs: Handoff[];
   agents: Agent[];
   tree: RunDetail[];
   top?: ReactNode;
@@ -434,7 +438,7 @@ function Conversation({
             </div>
           )}
           <CwdContext.Provider value={agent.cwd}>
-            {byTime(turns, [...switches, ...handoffsLedBy(agent, tree)]).map((x) =>
+            {byTime(turns, [...switches, ...handoffs]).map((x) =>
               "message_id" in x ? (
                 <Turn key={x.message_id} turn={x} agent={agent} agents={agents} tree={tree} />
               ) : "task_key" in x ? (
@@ -453,9 +457,9 @@ function Conversation({
   );
 }
 
-/** Every handoff of the tasks in the runs `agent` leads: orchestration lines in its conversation. */
-function handoffsLedBy(agent: Agent, tree: RunDetail[]): Handoff[] {
-  return tree.filter((d) => d.run.planner === agent.id).flatMap((d) => d.tasks.flatMap((t) => t.handoffs));
+/** Every handoff of the tasks in `runs` (the ones a lead leads): orchestration lines in its conversation. */
+function handoffsOf(runs: RunDetail[]): Handoff[] {
+  return runs.flatMap((d) => d.tasks.flatMap((t) => t.handoffs));
 }
 
 /**

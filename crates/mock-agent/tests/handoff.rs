@@ -344,3 +344,104 @@ async fn giving_it_to_the_escalation_teammate_is_an_escalation() {
     assert!(reason.contains("escalation"), "{reason}");
     assert!(card.files.contains(&"a.txt".to_owned()), "{:?}", card.files);
 }
+
+/// Two handoffs in a row: each card carries what its own `from` left. rex reports a
+/// summary and gives way to ada; ada only says how far she got and gives way to kai. kai's
+/// card is ada's word, not rex's summary under ada's name.
+#[tokio::test]
+async fn each_card_carries_what_its_own_worker_left() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    t.add_agent_in("kai", Some("opus"), "worker", repo.path())
+        .await;
+    let mut w = t.watch().await;
+    let run = start(&t, json!({ "goal": "Write a." })).await;
+    let first = card(&mut w, HandoffKind::Assign).await;
+
+    t.send(
+        &first.to.to_string(),
+        &call(
+            "task_complete",
+            json!({ "task": "a", "summary": "rex wrote a" }),
+        ),
+    )
+    .await;
+    w.until("reported", task_is(TaskStatus::Passed)).await;
+
+    reassign(&t, &run, "ada").await;
+    let to_ada = card(&mut w, HandoffKind::Reassign).await;
+    assert_eq!(to_ada.summary.as_deref(), Some("rex wrote a"));
+    // The summary went with the card: the task no longer says it is ada's.
+    let task = task_a(&t, &run).await;
+    assert!(task["report"]["summary"].is_null(), "{task}");
+
+    t.send(
+        &to_ada.to.to_string(),
+        &call("task_progress", json!({ "task": "a", "text": "ada is halfway" })),
+    )
+    .await;
+    w.until(
+        "ada's progress",
+        |e| matches!(&e.kind, EventKind::TaskProgress { text, .. } if text == "ada is halfway"),
+    )
+    .await;
+
+    reassign(&t, &run, "kai").await;
+    let to_kai = w
+        .until(
+            "the card to kai",
+            |e| matches!(&e.kind, EventKind::TaskHandedOff { handoff, .. } if handoff.to_name == "kai"),
+        )
+        .await;
+    let EventKind::TaskHandedOff { handoff: to_kai, .. } = to_kai.kind else {
+        unreachable!()
+    };
+    assert_eq!(to_kai.from, Some(to_ada.to));
+    assert_eq!(to_kai.from_name.as_deref(), Some("ada"));
+    assert_eq!(to_kai.summary.as_deref(), Some("ada is halfway"), "{to_kai:?}");
+    let (_, text) = first_input(&mut w, to_kai.to).await;
+    assert!(!text.contains("rex wrote a"), "{text}");
+}
+
+/// Neither an old failure nor what the hub said on a handoff is the next worker's: rex gives
+/// up, the task goes to ada for that reason, ada says nothing and gives way to kai, whose card
+/// has no reason and no last word.
+#[tokio::test]
+async fn a_worker_that_said_nothing_hands_over_nothing_said() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    t.add_agent_in("kai", Some("opus"), "worker", repo.path())
+        .await;
+    let mut w = t.watch().await;
+    let run = start(&t, json!({ "goal": "Write a." })).await;
+    let first = card(&mut w, HandoffKind::Assign).await;
+    t.send(
+        &first.to.to_string(),
+        &call("task_fail", json!({ "task": "a", "reason": "rex gave up" })),
+    )
+    .await;
+    w.until("stalled", task_is(TaskStatus::Stalled)).await;
+
+    reassign(&t, &run, "ada").await;
+    let to_ada = card(&mut w, HandoffKind::Reassign).await;
+    assert_eq!(to_ada.reason.as_deref(), Some("rex gave up"));
+    // The failure went with the card; the task's line says why it changed hands until ada
+    // says something.
+    let task = task_a(&t, &run).await;
+    assert!(task["report"]["failure"].is_null(), "{task}");
+    assert_eq!(task["progress"], "rex gave up", "{task}");
+
+    reassign(&t, &run, "kai").await;
+    let to_kai = w
+        .until(
+            "the card to kai",
+            |e| matches!(&e.kind, EventKind::TaskHandedOff { handoff, .. } if handoff.to_name == "kai"),
+        )
+        .await;
+    let EventKind::TaskHandedOff { handoff: to_kai, .. } = to_kai.kind else {
+        unreachable!()
+    };
+    assert_eq!(to_kai.from_name.as_deref(), Some("ada"));
+    assert!(to_kai.reason.is_none(), "{to_kai:?}");
+    assert!(to_kai.summary.is_none(), "{to_kai:?}");
+}

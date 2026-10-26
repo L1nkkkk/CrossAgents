@@ -17,6 +17,7 @@ import { taskState, type State } from "./lib/taskState";
 import { clock } from "./lib/time";
 import { duration } from "./lib/workGroups";
 import { openBeside, openTool } from "./panes";
+import { isEscalated } from "./handoff";
 
 /** A state as glyph + word; a moving one breathes. */
 export function StateWord({ state, children }: { state: State; children?: ReactNode }) {
@@ -179,7 +180,7 @@ function TaskBody({ task, run, owner, agents }: { task: Task; run: Run; owner?: 
         )}
         <a href={`#/runs/${run.id}/tasks/${task.id}`}>任务详情</a>
         {task.attempts > 1 && <span className="muted">第 {task.attempts} 次尝试</span>}
-        {task.escalated && <span className="muted">已升级给更强的模型</span>}
+        {isEscalated(task) && <span className="muted">已交给升级队友</span>}
       </div>
     </div>
   );

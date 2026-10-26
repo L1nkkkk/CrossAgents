@@ -55,6 +55,22 @@ export function useRunTree() {
   );
 }
 
+/**
+ * Every run `agent` leads, with its tasks, however old: a lead's conversation shows their
+ * handoffs, which must not depend on how many runs the sidebar lists.
+ */
+export function useRunsLedBy(agent: string | undefined) {
+  return useHubData(
+    async () => {
+      if (!agent) return [];
+      const { runs } = await api.listRuns();
+      return Promise.all(runs.filter((r) => r.planner === agent).map((r) => api.getRun(r.id)));
+    },
+    [agent],
+    (e) => e.type.startsWith("run.") || e.type === "task.handed_off",
+  );
+}
+
 /** The agents working in a run: its planner, then each task's worker and reviewer. */
 export function runAgents(detail: RunDetail, agents: Agent[]): Agent[] {
   const ids = [detail.run.planner, ...detail.tasks.flatMap((t) => [t.assignee, t.reviewer])];

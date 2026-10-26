@@ -59,15 +59,15 @@ impl Orchestrator {
                     .await
             }
         };
+        // Its own last word: a handoff clears what the worker before said, and the progress
+        // it leaves (why the task changed hands) is the hub's, not this worker's.
+        let said_by_hub = task.handoffs.last().and_then(|h| h.reason.as_ref());
+        let progress = task.progress.clone().filter(|p| Some(p) != said_by_hub);
         Left {
             from: worker,
             from_name,
             files,
-            summary: task
-                .report
-                .summary
-                .clone()
-                .or_else(|| task.progress.clone()),
+            summary: task.report.summary.clone().or(progress),
             open_questions: task.report.question.iter().cloned().collect(),
             context_tokens: worker.and_then(|w| self.context_of(w)),
         }
@@ -129,6 +129,12 @@ impl Orchestrator {
             at: Utc::now(),
         };
         task.handoffs.push(card.clone());
+        // What the worker before reported is on the card now; left on the task, it would read
+        // as the new worker's (and travel on the next card under its name). Until the new
+        // one says something, the task's line says why it changed hands.
+        task.report.summary = None;
+        task.report.failure = None;
+        task.progress = card.reason.clone();
         task.updated_at = Utc::now();
         self.store.update_task(task).await?;
         self.publish(EventKind::TaskHandedOff {

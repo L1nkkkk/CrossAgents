@@ -9,7 +9,7 @@ import type { RunPolicy } from "@bindings/RunPolicy";
 import { navigate } from "../App";
 import { api, errorText } from "../api";
 import { DeleteRunDialog } from "../deleteRun";
-import { HandoffChain } from "../handoff";
+import { HandoffChain, isEscalated } from "../handoff";
 import {
   Avatar,
   ErrorBox,
@@ -175,7 +175,7 @@ function TaskBoard({ run, tasks, agents, selectedTask }: { run: Run; tasks: Task
                   <div className="t">{task.title}</div>
                   <div className="sub row" style={{ gap: 6, flexWrap: "nowrap" }}>
                     <TaskOwner task={task} agents={agents} fallback={run.config.worker} />
-                    {task.escalated && " · 已升级"}
+                    {isEscalated(task) && " · 已升级"}
                     {task.progress && !task.status.match(/merged|failed|cancelled/) && (
                       <span className="board-progress" title={task.progress}>
                         · {task.progress}
@@ -669,7 +669,7 @@ export function TaskDetail({ runId, taskId }: { runId: string; taskId: string })
             <dt>Worker</dt>
             <dd>
               {task.assignee ? <a href={sessionHref(task.assignee)}>{agentName(agents.data, task.assignee)}</a> : "—"}
-              {task.escalated && <span className="chip warn" style={{ marginLeft: 6 }}>已升级</span>}
+              {isEscalated(task) && <span className="chip warn" style={{ marginLeft: 6 }}>已升级</span>}
             </dd>
             {task.reviewer && (
               <>
