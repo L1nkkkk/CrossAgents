@@ -144,6 +144,75 @@ async fn declining_starts_nothing() {
     assert_eq!(runs["runs"].as_array().unwrap().len(), 0, "{runs}");
 }
 
+async fn runs(t: &TestHub) -> Vec<Value> {
+    let runs: Value = t.get("/v1/runs").await.json().await.unwrap();
+    runs["runs"].as_array().unwrap().clone()
+}
+
+#[tokio::test]
+async fn two_starts_at_once_open_one_work() {
+    let repo = git_repo();
+    let t = TestHub::start().await;
+    t.add_agent_in("lyra", Some("opus"), "worker", repo.path())
+        .await;
+
+    let item = propose(&t).await;
+    let path = format!("/v1/questions/{}/answer", item["id"].as_str().unwrap());
+    let (a, b) = tokio::join!(
+        t.post(&path, json!({ "answer": "开始" })),
+        t.post(&path, json!({ "answer": "开始" })),
+    );
+    let mut codes = [a.status().as_u16(), b.status().as_u16()];
+    codes.sort();
+    assert_eq!(codes, [200, 409]);
+    let late = if a.status() == 409 { a } else { b };
+    let text = late.text().await.unwrap();
+    assert!(text.contains("is already answered"), "{text}");
+    assert_eq!(runs(&t).await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_dismissal_and_a_start_at_once_settle_one_way() {
+    let repo = git_repo();
+    let t = TestHub::start().await;
+    t.add_agent_in("lyra", Some("opus"), "worker", repo.path())
+        .await;
+
+    let item = propose(&t).await;
+    let id = item["id"].as_str().unwrap();
+    let (answer, dismissal) = (
+        format!("/v1/questions/{id}/answer"),
+        format!("/v1/questions/{id}/dismiss"),
+    );
+    let (start, dismiss) = tokio::join!(
+        t.post(&answer, json!({ "answer": "开始" })),
+        t.post(&dismissal, json!({})),
+    );
+    let started = start.status() == 200;
+    // Exactly one of them acted; the other was told it came too late.
+    assert_eq!(
+        (start.status().as_u16(), dismiss.status().as_u16()),
+        if started { (200, 409) } else { (409, 204) }
+    );
+    let all: Value = t.get("/v1/questions?all=true").await.json().await.unwrap();
+    let card = all["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == id)
+        .cloned()
+        .unwrap_or(Value::Null);
+    let runs = runs(&t).await;
+    if started {
+        assert_eq!(runs.len(), 1);
+        assert_eq!(card["status"], "answered", "{all}");
+        assert_eq!(card["run_id"], runs[0]["id"]);
+    } else {
+        assert!(runs.is_empty(), "{runs:?}");
+        assert_eq!(card["status"], "dismissed", "{all}");
+    }
+}
+
 /// R1 §2.3: a lead whose run ended proposes another Work; it starts in the repository the
 /// old run worked in, from its base branch, with a lead in its own checkout.
 #[tokio::test]

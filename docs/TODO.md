@@ -176,6 +176,11 @@ B3 远程开发：
 - [x] P1-6 统一项目规则：`CROSSAGENTS.md` → `AGENTS.md` → `CLAUDE.md`（从工作目录找到仓库根），注入给不会自己读该文件的 agent 的开场说明，各驱动按自家格式（Claude `--append-system-prompt`、Codex `developerInstructions`、ACP 首条消息）；Claude 设置源三档开关；mock 场景「Claude 设置源」
 - [x] P1-7 分级审批与权限：`PermissionPolicy::Guard`（Claude 走 `can_use_tool`、Codex `untrusted`），hub 判断危险动作（push、发布、改 CI、`rm -rf` 到工作目录外等）后以 `HumanAction::Approval` 问人，超时 / `human_ask=deny` 时拒绝；Work worker 默认守卫（run 策略 `approvals`），Chat 可在 `config.permission` 打开；API 三级权限与 403 `forbidden`；mock 场景「危险操作待批准」
 - [x] P1-8 可追溯的失败：`trace.rs` 从事件折叠出 run 的追溯（按 lead / 任务：轮次与出错、命令与退出码和输出尾巴、`workspace_run`、验收、改派、用量、首个失败）；`GET /v1/runs/{key}/trace`；`crossagents run trace <id> [--log]`（`--log` 读磁盘事件日志，hub 不在也能查）；run 页「追溯」节；mock 场景「失败追溯」
+- [x] 验收与落地的四处漏洞（2026-10-27，每条一个提交）
+  - Windows 下带引号的检查命令假通过：`cmd /C` 经 `arg` 传入时引号被转成 `\"`，`powershell -Command "exit 7"` 返回 0。改为 `raw_arg` 拼 `/D /S /C "<命令>"`；`workspace_run` 同一路径一起修好（`verify.rs::shell`）
+  - 检查超时后孙进程还在改工作区：`Job` 从 drivers 挪到 `core::process`，新增 `spawn_tree`——Windows 以 `CREATE_SUSPENDED` 启动、放进带 KILL_ON_JOB_CLOSE 的 Job 后再恢复线程，没有逃出 Job 的窗口；Unix 用独立进程组、结束时 `killpg`。超时、出错、命令结束都整棵树一起结束
+  - 主导落地的代码没经过检查：`run_land` 改为「同步基线 → 跑检查 → 合入」（`landing.rs::ready_to_land` / `merge_run`）。检查在 run 锁外跑，合入前在锁内比对集成工作区的 HEAD，变了就重新同步、重新检查，三次仍在变就拒绝。人从 Run 页 / API 落地仍不跑检查
+  - 同一张 Work 卡片能建出两个 run：`Orchestrator::lock_card` 按卡片 id 加锁，`answer_human` / `dismiss_human` 在锁里重读状态，后到的返回 409 `<id> is already answered`；锁表在最后一个持有者释放时移除该项
 
 ## 十、agent 描述文件
 

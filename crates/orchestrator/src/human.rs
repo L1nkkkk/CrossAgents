@@ -150,6 +150,9 @@ impl Orchestrator {
     /// The person's answer. Answering a question that already fell back to its default
     /// tells the agent that the person decided otherwise.
     pub async fn answer_human(&self, id: &str, answer: String) -> Result<HumanItem, CoreError> {
+        // Read under the card's lock: a second 开始 that arrived while the first was
+        // starting the run finds the card answered.
+        let _card = self.lock_card(id).await;
         let mut item = self.store().get_human_item(id).await?;
         if item.kind != HumanItemKind::Question {
             return Err(CoreError::Conflict(format!(
@@ -200,7 +203,11 @@ impl Orchestrator {
     }
 
     pub async fn dismiss_human(&self, id: &str) -> Result<(), CoreError> {
+        let _card = self.lock_card(id).await;
         let mut item = self.store().get_human_item(id).await?;
+        if item.status == HumanItemStatus::Answered {
+            return Err(CoreError::Conflict(format!("{id} is already answered")));
+        }
         if item.status != HumanItemStatus::Open {
             return Ok(());
         }

@@ -55,6 +55,32 @@ pub struct Approval {
     pub assignees: Vec<(String, Option<AgentId>)>,
 }
 
+/// Locks by human card id. A plain mutex around the table, so a guard can clean up on drop.
+#[derive(Default)]
+pub(crate) struct CardLocks(std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>);
+
+/// Holds a card's lock ([`Orchestrator::lock_card`]).
+pub(crate) struct CardGuard<'a> {
+    locks: &'a CardLocks,
+    id: String,
+    guard: Option<OwnedMutexGuard<()>>,
+}
+
+impl Drop for CardGuard<'_> {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        let mut locks = self.locks.0.lock().unwrap_or_else(|e| e.into_inner());
+        // Only the table holds it: nobody waits for this card. Waiters clone it under this
+        // same table lock, so none can appear meanwhile.
+        if locks
+            .get(&self.id)
+            .is_some_and(|l| Arc::strong_count(l) == 1)
+        {
+            locks.remove(&self.id);
+        }
+    }
+}
+
 pub struct Orchestrator {
     pub(crate) store: Arc<dyn Store>,
     pub(crate) bus: Arc<EventBus>,
@@ -63,6 +89,8 @@ pub struct Orchestrator {
     pub(crate) verifier: Arc<dyn Verifier>,
     pub(crate) config: OrchestratorConfig,
     locks: Mutex<HashMap<RunId, Arc<Mutex<()>>>>,
+    /// Cards being answered or dismissed, by id ([`Self::lock_card`]).
+    cards: CardLocks,
     pub(crate) messaging: Mutex<crate::messaging::MessagingState>,
     /// Approvals waiting for the person, by question id (docs/tasks/DOGFOOD.md §7).
     pub(crate) approvals: std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
@@ -96,6 +124,7 @@ impl Orchestrator {
             verifier,
             config,
             locks: Mutex::default(),
+            cards: CardLocks::default(),
             messaging: Mutex::default(),
             approvals: std::sync::Mutex::default(),
             contexts: std::sync::Mutex::default(),
@@ -109,6 +138,25 @@ impl Orchestrator {
     pub(crate) async fn lock(&self, run: RunId) -> OwnedMutexGuard<()> {
         let lock = self.locks.lock().await.entry(run).or_default().clone();
         lock.lock_owned().await
+    }
+
+    /// One answer or dismissal of card `id` at a time: deciding a Work card starts a run,
+    /// which takes seconds, and two decisions must not both act. The entry goes when the
+    /// last holder or waiter lets go.
+    pub(crate) async fn lock_card(&self, id: &str) -> CardGuard<'_> {
+        let lock = self
+            .cards
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(id.to_owned())
+            .or_default()
+            .clone();
+        CardGuard {
+            locks: &self.cards,
+            id: id.to_owned(),
+            guard: Some(lock.lock_owned().await),
+        }
     }
 
     /// Where a task's work goes: the branch it starts from and is compared with, and the
