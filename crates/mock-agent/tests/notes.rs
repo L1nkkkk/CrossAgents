@@ -92,6 +92,26 @@ async fn team_notes_are_shared_and_only_authors_delete_them() {
 }
 
 #[tokio::test]
+async fn a_message_to_an_unknown_name_says_who_is_there() {
+    let t = TestHub::start().await;
+    t.add_agent("alice", None).await;
+    t.add_agent("bob", None).await;
+    let mut w = t.watch().await;
+    turn(
+        &t,
+        &mut w,
+        "alice",
+        &call("agent_send", json!({ "to": "robert", "text": "hi" })),
+    )
+    .await;
+    let out = w.output();
+    assert!(
+        out.contains("teammates now: bob") && out.contains("agent_list"),
+        "{out}"
+    );
+}
+
+#[tokio::test]
 async fn usage_reports_spend_and_accounts() {
     let t = TestHub::start().await;
     t.add_agent("alice", None).await;
