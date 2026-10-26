@@ -39,7 +39,8 @@ pub trait WorkspaceProvider: Send + Sync {
     /// aborted and the error describes it: the conflicting files and their conflict hunks.
     async fn merge(&self, into: &Path, branch: &str, message: &str) -> Result<(), CoreError>;
     /// Brings `branch` into `base` in `repo` (merge or squash), or opens a pull request.
-    /// Merging never touches a checkout with uncommitted changes. Returns the commit or the
+    /// Merging in a checkout of `base` leaves what is not committed there as it is, and
+    /// refuses when it is staged or in a file the branch changes too. Returns the commit or the
     /// pull request's URL.
     async fn land(
         &self,
@@ -111,6 +112,59 @@ const AUTHOR: [&str; 4] = [
     "-c",
     "user.email=crossagents@localhost",
 ];
+
+/// Before landing in someone's own checkout of `base`: what they have not committed stays
+/// as it is, so landing goes ahead unless it would get mixed up with that. Staged changes
+/// always stop it (the land commit would take them along), and so do edited or untracked
+/// files that the branch changes too. Everything else is left alone by the merge.
+async fn check_checkout(repo: &Path, base: &str, branch: &str) -> Result<(), CoreError> {
+    let list = |text: String| -> Vec<String> {
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect()
+    };
+    const PLAIN: [&str; 2] = ["-c", "core.quotePath=false"];
+    let run = |args: &'static [&'static str]| async move {
+        let mut all = PLAIN.to_vec();
+        all.extend_from_slice(args);
+        git(repo, &all).await
+    };
+    let staged = list(run(&["diff", "--cached", "--name-only"]).await?);
+    if !staged.is_empty() {
+        return Err(CoreError::Conflict(format!(
+            "{} has staged changes on {base}; landing would commit them too. Commit or unstage them first:\n{}",
+            repo.display(),
+            staged.join("\n")
+        )));
+    }
+    let edited = list(run(&["diff", "--name-only"]).await?);
+    let untracked = list(run(&["ls-files", "--others", "--exclude-standard"]).await?);
+    if edited.is_empty() && untracked.is_empty() {
+        return Ok(());
+    }
+    // What the merge brings in: the branch's side since it left base, renames as both names.
+    let range = format!("HEAD...{branch}");
+    let mut args = PLAIN.to_vec();
+    args.extend(["diff", "--name-only", "--no-renames", &range]);
+    let incoming: std::collections::HashSet<String> =
+        list(git(repo, &args).await?).into_iter().collect();
+    let clash: Vec<&str> = edited
+        .iter()
+        .chain(&untracked)
+        .filter(|file| incoming.contains(*file))
+        .map(String::as_str)
+        .collect();
+    if clash.is_empty() {
+        return Ok(());
+    }
+    Err(CoreError::Conflict(format!(
+        "{} has uncommitted changes on {base} in files that {branch} also changes; commit or stash them first:\n{}",
+        repo.display(),
+        clash.join("\n")
+    )))
+}
 
 async fn git(dir: &Path, args: &[&str]) -> Result<String, CoreError> {
     let output = Command::new("git")
@@ -340,17 +394,11 @@ impl WorkspaceProvider for GitWorkspaces {
             }
             return Ok(text.lines().last().unwrap_or_default().to_owned());
         }
-        // Merge where base is checked out (if that checkout is clean), else in a temporary
-        // worktree of base.
+        // Merge where base is checked out (unless that would touch work not committed
+        // there), else in a temporary worktree of base.
         let here = git(repo, &["rev-parse", "--abbrev-ref", "HEAD"]).await? == base;
         let temp = if here {
-            let dirty = git(repo, &["status", "--porcelain", "--untracked-files=no"]).await?;
-            if !dirty.is_empty() {
-                return Err(CoreError::Conflict(format!(
-                    "{} has uncommitted changes on {base}; commit or stash them first:\n{dirty}",
-                    repo.display()
-                )));
-            }
+            check_checkout(repo, base, branch).await?;
             None
         } else {
             let dir = tempfile_dir(repo)?;
@@ -650,19 +698,51 @@ mod tests {
             .await
             .unwrap();
         std::fs::write(run.join("new.txt"), "x\n").unwrap();
+        std::fs::write(run.join("README"), "from the run\n").unwrap();
         ws.commit_all(&run, "work").await.unwrap();
 
-        // A dirty checkout of main is left alone.
+        // An edit to a file the run changes too stops the land.
         std::fs::write(repo.path().join("README"), "edited\n").unwrap();
         let err = ws
             .land(repo.path(), "main", "ca/run", LandMode::Merge, "land")
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("uncommitted"), "{err}");
+        assert!(
+            err.to_string().contains("also changes") && err.to_string().contains("README"),
+            "{err}"
+        );
         git(repo.path(), &["checkout", "--", "README"])
             .await
             .unwrap();
 
+        // So does an untracked file the run adds.
+        std::fs::write(repo.path().join("new.txt"), "mine\n").unwrap();
+        let err = ws
+            .land(repo.path(), "main", "ca/run", LandMode::Merge, "land")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("new.txt"), "{err}");
+        std::fs::remove_file(repo.path().join("new.txt")).unwrap();
+
+        // Anything staged would go into the land commit.
+        std::fs::write(repo.path().join("notes.md"), "draft\n").unwrap();
+        git(repo.path(), &["add", "notes.md"]).await.unwrap();
+        let err = ws
+            .land(repo.path(), "main", "ca/run", LandMode::Squash, "land")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("staged"), "{err}");
+        git(repo.path(), &["reset", "-q", "notes.md"])
+            .await
+            .unwrap();
+
+        // Work elsewhere is no reason to wait, and it stays as it was, uncommitted.
+        std::fs::write(repo.path().join("other.txt"), "base\n").unwrap();
+        git(repo.path(), &["add", "other.txt"]).await.unwrap();
+        let mut commit_other = AUTHOR.to_vec();
+        commit_other.extend(["commit", "-q", "-m", "other"]);
+        git(repo.path(), &commit_other).await.unwrap();
+        std::fs::write(repo.path().join("other.txt"), "mine, not committed\n").unwrap();
         let commit = ws
             .land(repo.path(), "main", "ca/run", LandMode::Squash, "land it")
             .await
@@ -673,6 +753,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(log, "land it");
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("other.txt")).unwrap(),
+            "mine, not committed\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("notes.md")).unwrap(),
+            "draft\n"
+        );
+        let landed = git(repo.path(), &["show", "--name-only", "--format=", "HEAD"])
+            .await
+            .unwrap();
+        assert!(
+            !landed.contains("other.txt") && !landed.contains("notes.md"),
+            "{landed}"
+        );
     }
 
     #[tokio::test]
