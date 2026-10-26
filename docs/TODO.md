@@ -208,3 +208,26 @@ B3 远程开发：
 - [ ] C2 主导从复盘里挑一条开新 run 去修（计划仍要人批）
 - [ ] C3 改 hub 的任务在 `hub sandbox` 里跑冒烟再收尾
 - [x] 落地到人自己的 checkout 时，只在暂存区有改动、或未提交 / 未跟踪的文件与 run 要改的文件重叠时拒绝，其余改动原样保留（2026-10-26，`workspace.rs::check_checkout`；之前一律拒绝，人在主目录改着别的东西时 run 落不了地）
+
+## 十二、run 的收尾：再开 Work 与删除
+
+> 2026-10-26，方案见 [tasks/R1.md](tasks/R1.md)。起因：Pia 主导的 run 已 `completed`，再开 Work 被拒；停在 `planning` 的旧 run 删不掉。先做 A。
+> 待定：硬删除不做归档、未落地的分支默认保留（R1 §3.2），开工前确认。
+
+A 已结束 run 的主导再开 Work：
+
+- [ ] `work_start` 只拦未结束的 run（现在只看 `planner`，与 `team.rs::lead_run` 标准不一致）
+- [ ] `NewRun` 加可选 `repo` / `base_branch`；`home_of(agent)`：住在某 run 集成工作区里的主导，取回该 run 的仓库与基线。`work_decided` 与 `POST /v1/runs` 都走它（否则新 run 以旧集成工作区为仓库、以旧 run 分支为基线）
+- [ ] 旧 run 未落地时，Work 卡片提示新 Work 从 `main` 开始、不含上一个 run 的改动
+- [ ] 测试：结束后能再开且落在原仓库、基于 `main`；未结束仍拒绝；首页以旧主导新建同样正确
+
+B 删除 run：
+
+- [ ] core：`Store::delete_run`、`EventKind::RunDeleted`
+- [ ] store-sqlite：一个事务删 `human_items`、`notes`、`tasks`、`runs`（不依赖 CASCADE）
+- [ ] orchestrator：`delete_run(id, { branches, force })`，只删已结束的；按序移除主导副本与招募的 agent、任务工作区、集成工作区与构建目录、按需删分支，最后删库并发事件；单步失败只记 warn
+- [ ] 分支：已落地默认删，未落地默认留（`branches=true` 才删）；集成工作区有未提交改动且未落地时，不带 `force` 返回 409 并列出文件
+- [ ] 事件不删，GUI 对已删 run 的事件不显示链接
+- [ ] hub：`DELETE /v1/runs/{key}?branches=&force=`，`DeleteRunResponse` 与 bindings；cli：`crossagents run rm`
+- [ ] GUI：Run 页「删除 / 取消并删除」、侧栏右键删除、确认框列清理项与分支选项、收到 `RunDeleted` 移出列表、正在看的被删就回首页；MockBridge 补数据
+- [ ] 测试：store 级联；`tests/delete_run.rs` 覆盖未结束 409、已落地全清、未落地保留分支、脏工作区要 force、原对话不受影响
