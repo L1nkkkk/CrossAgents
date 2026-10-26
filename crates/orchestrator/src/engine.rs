@@ -38,6 +38,11 @@ pub struct NewRun {
     pub title: Option<String>,
     pub planner: AgentId,
     pub config: RunConfig,
+    /// The repository the run works in; `None` is the planner's own directory.
+    pub repo: Option<PathBuf>,
+    /// The branch the run's branch starts from and lands on; `None` is the repository's
+    /// current branch.
+    pub base_branch: Option<String>,
 }
 
 /// What the person settles when approving a plan (docs/tasks/W1.md §5.2); absent fields
@@ -225,6 +230,27 @@ impl Orchestrator {
     // -----------------------------------------------------------------------------------
     // Runs
 
+    /// The run whose checkout `agent` works in: its cwd is that run's integration worktree.
+    /// A lead keeps living in the checkout of a run that ended, so this is how a new run
+    /// finds the repository it belongs to (docs/tasks/R1.md §2.2). An in-place run's checkout
+    /// is its repository, which is the answer anyway, and it has no branch to be based on.
+    pub(crate) fn run_lived_in<'a>(&self, agent: &Agent, runs: &'a [Run]) -> Option<&'a Run> {
+        runs.iter()
+            .find(|r| !r.in_place && agent.cwd == self.integration_path(r))
+    }
+
+    /// Where a run for `agent` starts: the repository and base branch of the run whose
+    /// checkout it lives in, else its own directory and its current branch (`None`). Taking
+    /// the lead's cwd as the repository would make the old run's worktree the new run's
+    /// repository, and its branch the new run's base.
+    pub async fn home_of(&self, agent: &Agent) -> Result<(PathBuf, Option<String>), CoreError> {
+        let runs = self.store.list_runs().await?;
+        Ok(match self.run_lived_in(agent, &runs) {
+            Some(run) => (run.repo.clone(), Some(run.base_branch.clone())),
+            None => (agent.cwd.clone(), None),
+        })
+    }
+
     pub async fn create_run(&self, new: NewRun) -> Result<Run, CoreError> {
         let planner = self.store.get_agent(&AgentKey::Id(new.planner)).await?;
         self.store
@@ -239,13 +265,15 @@ impl Orchestrator {
         if new.request.trim().is_empty() {
             return Err(CoreError::Conflict("the request is empty".into()));
         }
-        let repo = planner.cwd.clone();
+        let repo = new.repo.clone().unwrap_or_else(|| planner.cwd.clone());
         let mut new = new;
         let team = self.gather_team(&new.config, &repo).await?;
         new.config.team = team.iter().map(|a| a.id).collect();
         let in_place = !self.workspaces.versioned(&repo).await;
         let base_branch = if in_place {
             String::new()
+        } else if let Some(base) = new.base_branch.clone() {
+            base
         } else {
             self.workspaces.current_branch(&repo).await?
         };

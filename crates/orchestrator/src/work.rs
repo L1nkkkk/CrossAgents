@@ -17,6 +17,19 @@ use crate::engine::{NewRun, Orchestrator, first_line};
 const START: &str = "开始";
 const DECLINE: &str = "不用";
 
+/// Added to a Work card when the run its lead ended never landed (docs/tasks/R1.md §2.2).
+const UNLANDED: &str = "上一个 run 还没落地，新 Work 从 ";
+
+/// The person's request as the card shows it: the detail without what the card says about
+/// the run before it, which is for the person, not part of the brief.
+fn brief_of(item: &HumanItem) -> String {
+    let detail = item.detail.clone().unwrap_or_else(|| item.text.clone());
+    match detail.find(UNLANDED) {
+        Some(at) => detail[..at].trim_end().to_owned(),
+        None => detail,
+    }
+}
+
 impl Orchestrator {
     pub(crate) async fn work_start(
         &self,
@@ -38,7 +51,7 @@ impl Orchestrator {
             .list_runs()
             .await?
             .into_iter()
-            .find(|r| r.planner == caller.id)
+            .find(|r| r.planner == caller.id && !r.status.is_terminal())
         {
             return Err(CoreError::Conflict(format!(
                 "you lead run {} already: work there (task_create, plan_submit) instead",
@@ -66,10 +79,20 @@ impl Orchestrator {
             .map(|t| t.trim().to_owned())
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| first_line(&a.request, 60));
+        let mut detail = a.request;
+        // The run this lead ended did not land: the new one starts from the base branch,
+        // without that run's changes. Landing is the person's call, so the card says it
+        // rather than merging the old branch in on its own.
+        if let Some(old) = self.unlanded_home_of(caller).await? {
+            detail.push_str(&format!(
+                "\n\n{UNLANDED}{} 开始，不包含它的改动。",
+                old.base_branch
+            ));
+        }
         let id = uuid::Uuid::new_v4().simple().to_string();
         let item = HumanItem {
             id: format!("w-{}", &id[..10]),
-            detail: Some(a.request),
+            detail: Some(detail),
             kind: HumanItemKind::Question,
             from: caller.id,
             run_id: None,
@@ -93,6 +116,19 @@ impl Orchestrator {
         }))
     }
 
+    /// The run whose checkout `caller` lives in, when it ended without landing: a new Work
+    /// starts from the base branch again, and does not carry that run's changes.
+    async fn unlanded_home_of(
+        &self,
+        caller: &Agent,
+    ) -> Result<Option<crossagents_core::Run>, CoreError> {
+        let runs = self.store().list_runs().await?;
+        Ok(self
+            .run_lived_in(caller, &runs)
+            .filter(|r| r.status.is_terminal() && r.landed.is_none())
+            .cloned())
+    }
+
     /// The person's answer to a proposed Work; `None` when they closed the card.
     pub(crate) async fn work_decided(
         &self,
@@ -108,11 +144,20 @@ impl Orchestrator {
             return Ok(());
         }
         let proposer = item.from;
+        let agent = self
+            .store()
+            .get_agent(&crossagents_core::AgentKey::Id(proposer))
+            .await?;
+        // A lead that ended a run still lives in that run's checkout: the new run belongs to
+        // the repository the old one worked in, and starts from its base branch.
+        let (repo, base_branch) = self.home_of(&agent).await?;
         let run = self
             .create_run(NewRun {
-                request: item.detail.clone().unwrap_or_else(|| item.text.clone()),
+                request: brief_of(item),
                 title: Some(item.text.clone()),
                 planner: proposer,
+                repo: Some(repo),
+                base_branch,
                 config: RunConfig {
                     worker: proposer,
                     escalate: None,

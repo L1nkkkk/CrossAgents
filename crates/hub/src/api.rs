@@ -1073,10 +1073,17 @@ async fn create_run(
         Some(key) => agent_id(&state, key).await?,
         None => planner,
     };
+    // A lead that ended a run still lives in that run's checkout: the run it starts from
+    // here belongs to the repository it worked in, and starts from that run's base branch
+    // (docs/tasks/R1.md §2.2).
+    let planner_agent = state.store().get_agent(&AgentKey::Id(planner)).await?;
+    let (repo, base_branch) = state.orchestrator.home_of(&planner_agent).await?;
     let new = NewRun {
         request: req.request,
         title: req.title,
         planner,
+        repo: Some(repo),
+        base_branch,
         config: RunConfig {
             worker,
             escalate,

@@ -216,10 +216,10 @@ B3 远程开发：
 
 A 已结束 run 的主导再开 Work：
 
-- [ ] `work_start` 只拦未结束的 run（现在只看 `planner`，与 `team.rs::lead_run` 标准不一致）
-- [ ] `NewRun` 加可选 `repo` / `base_branch`；`home_of(agent)`：住在某 run 集成工作区里的主导，取回该 run 的仓库与基线。`work_decided` 与 `POST /v1/runs` 都走它（否则新 run 以旧集成工作区为仓库、以旧 run 分支为基线）
-- [ ] 旧 run 未落地时，Work 卡片提示新 Work 从 `main` 开始、不含上一个 run 的改动
-- [ ] 测试：结束后能再开且落在原仓库、基于 `main`；未结束仍拒绝；首页以旧主导新建同样正确
+- [x] `work_start` 只拦未结束的 run（现在只看 `planner`，与 `team.rs::lead_run` 标准不一致）（2026-10-26，`work.rs`：`r.planner == caller.id && !r.status.is_terminal()`）
+- [x] `NewRun` 加可选 `repo` / `base_branch`；`home_of(agent)`：住在某 run 集成工作区里的主导，取回该 run 的仓库与基线。`work_decided` 与 `POST /v1/runs` 都走它（否则新 run 以旧集成工作区为仓库、以旧 run 分支为基线）（2026-10-26，`engine.rs::home_of` / `run_lived_in`）
+- [x] 旧 run 未落地时，Work 卡片提示新 Work 从 `main` 开始、不含上一个 run 的改动（2026-10-26，提示按旧 run 的 `base_branch` 写；不自动合并旧分支）
+- [x] 测试：结束后能再开且落在原仓库、基于 `main`；未结束仍拒绝；首页以旧主导新建同样正确（2026-10-26，`mock-agent/tests/work_start.rs` 新增三条）
 
 B 删除 run：
 
