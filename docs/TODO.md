@@ -297,3 +297,16 @@ B 删除 run：
 - [ ] GUI：MockBridge 补一套 git 数据，截图检查
 - [ ] 验收：`cargo test --workspace` 与 GUI 构建通过
 - [ ] 顺带验证：由 CrossAgents 自己开 Work 来做（主导拆任务交给便宜模型），实测 R1-A 与交接卡
+
+## 十五、会话属于工作区，run 只记录谁参与过
+
+> 2026-10-27，设计见 [DESIGN.md](DESIGN.md) §4.7，方案见 [tasks/S1.md](tasks/S1.md)。起因：run B 承接 run A 时想让 run A 的 planner 接着当主导，并由它决定用新会话还是 run A 用过的会话；现在主导被复制、worker 每个任务克隆一个用完就删、删 run 连带删会话。
+> 待定（S1 §5）：派活默认用本人还是新开、人在聊的会话能否被派活、一次性会话归档后多久清理。
+
+- [ ] 会话的家：`Agent.home`（所属工作区）与迁移；驱动能力 `move_cwd`；`AgentHost::place` / `send_home`（S1 §3.1）
+- [ ] 主导是被选中的会话本人，不复制；run 结束送回工作区；`home_of`、`lead_home` 改由 `home` 取代（S1 §3.2）
+- [ ] 派活可选「用本人」或「`fresh` 新开一次性会话」，忙、不能换 cwd、不同工作区时返回原因（S1 §3.3）
+- [ ] 收尾不删会话：本人回工作区，一次性会话归档；删除 run 不再删任何会话（S1 §3.4，吸收 §十一 A3）
+- [ ] 交接卡补执行结果 `outcome`，run 页按任务列出执行并链接到会话（S1 §3.5）
+- [ ] 开场说明与 `agent_list` 列出工作区里可用的会话及最近一次执行（S1 §3.6）
+- [ ] 真实环境补测：Claude Code 会话在 worktree 干完回仓库根目录 `--resume`，对话完整、CLI 的会话列表里找得到（S1 §4）
