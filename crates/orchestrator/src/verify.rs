@@ -48,16 +48,22 @@ impl Default for ShellVerifier {
     }
 }
 
+/// `command` in the system shell. On Windows the command line is written out as is, not
+/// through `arg`: that escapes the command's quotes as `\"`, which cmd does not understand and
+/// hands to the program unchanged (`powershell -Command "exit 7"` printed `exit 7` and passed).
+/// `/S` makes cmd strip only the outer pair of quotes added here; `/D` skips AutoRun.
+#[cfg(windows)]
 fn shell(command: &str) -> Command {
-    if cfg!(windows) {
-        let mut cmd = Command::new("cmd");
-        cmd.arg("/C").arg(command).no_window();
-        cmd
-    } else {
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(command);
-        cmd
-    }
+    let mut cmd = Command::new("cmd");
+    cmd.raw_arg(format!("/D /S /C \"{command}\"")).no_window();
+    cmd
+}
+
+#[cfg(not(windows))]
+fn shell(command: &str) -> Command {
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(command);
+    cmd
 }
 
 /// A failed check's output, with a word on what the exit code means when the command said
@@ -255,6 +261,45 @@ mod tests {
         let res = verifier.check(Path::new("."), &[sleep.into()]).await;
         assert!(!res[0].passed);
         assert!(res[0].output.contains("timed out"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn quoted_commands_reach_the_program_as_written() {
+        let verifier = ShellVerifier::default();
+        let exit = verifier
+            .check(
+                Path::new("."),
+                &[r#"powershell -NoProfile -Command "exit 7""#.into()],
+            )
+            .await;
+        assert_eq!(exit[0].exit_code, Some(7), "{exit:?}");
+        assert!(!exit[0].passed);
+
+        let echo = verifier
+            .check(Path::new("."), &[r#"echo "C:\Program Files\a b""#.into()])
+            .await;
+        assert_eq!(echo[0].output, r#""C:\Program Files\a b""#);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn plain_commands_still_work_on_windows() {
+        let verifier = ShellVerifier::default();
+        let out = verifier
+            .check(
+                Path::new("."),
+                &[
+                    "cargo --version".into(),
+                    "echo one&& echo two".into(),
+                    "echo piped | findstr piped".into(),
+                ],
+            )
+            .await;
+        assert!(all_passed(&out), "{out:?}");
+        assert!(out[0].output.starts_with("cargo "));
+        assert_eq!(out[1].output.lines().collect::<Vec<_>>(), ["one", "two"]);
+        assert!(out[2].output.contains("piped"));
     }
 
     #[test]
