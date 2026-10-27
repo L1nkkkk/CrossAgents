@@ -43,6 +43,7 @@ fn spec(
             name_source: crossagents_core::NameSource::Chosen,
             topic: None,
             archived_at: None,
+            home: std::path::PathBuf::new(),
             name: "smoke".into(),
             plugin: "codebuddy".into(),
             driver: Some("codebuddy-native".into()),

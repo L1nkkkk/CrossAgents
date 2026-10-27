@@ -556,6 +556,7 @@ dependencies = [
  "crossagents-drivers",
  "crossagents-hub",
  "crossagents-plugins",
+ "crossagents-store-sqlite",
  "futures",
  "reqwest",
  "serde_json",

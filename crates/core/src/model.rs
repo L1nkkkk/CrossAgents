@@ -48,6 +48,12 @@ pub struct Agent {
     pub driver: Option<String>,
     pub model: Option<String>,
     pub role: Role,
+    /// The workspace the agent belongs to (docs/DESIGN.md §4.7): where it lives between
+    /// executions, and what the sidebar groups it under. Empty in records from before homes,
+    /// which read it as `cwd`.
+    #[serde(default)]
+    pub home: PathBuf,
+    /// Where it works now: its home, or the worktree of the task it is executing.
     pub cwd: PathBuf,
     /// Plugin-private settings; core never interprets them.
     pub config: serde_json::Value,
@@ -81,6 +87,15 @@ pub enum NameSource {
 pub const SPAWNED_BY_AGENT: &str = "spawned_by_agent";
 
 impl Agent {
+    /// Its workspace: [`Self::home`], or its cwd in a record from before homes.
+    pub fn home(&self) -> &std::path::Path {
+        if self.home.as_os_str().is_empty() {
+            &self.cwd
+        } else {
+            &self.home
+        }
+    }
+
     /// The agent whose conversation recruited this one, if any.
     pub fn recruiter(&self) -> Option<AgentId> {
         self.config
@@ -516,6 +531,7 @@ mod tests {
             driver: None,
             model: Some("gpt-6-luna".into()),
             role: Role::Worker,
+            home: PathBuf::from("."),
             cwd: PathBuf::from("."),
             config: serde_json::Value::Null,
             status: AgentStatus::Stopped,

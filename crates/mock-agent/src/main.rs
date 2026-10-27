@@ -13,10 +13,10 @@
 
 mod app_server;
 mod script;
+mod scripted;
 mod stream_json;
 
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,138 +27,20 @@ use crossagents_drivers::jsonrpc::{RpcError, RpcHandler, RpcPeer};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify};
 
-use crate::script::{Action, Directive};
+use crate::scripted::{McpLaunch, Scripted};
 
 struct MockAgent {
     peer: Mutex<Option<RpcPeer>>,
     model: Mutex<String>,
     mode: Mutex<String>,
     cancelled: Notify,
-    cwd: Mutex<PathBuf>,
-    mcp_servers: Mutex<Vec<Value>>,
-    mcp: Mutex<Option<(RpcPeer, tokio::process::Child)>>,
-    last_directives: Mutex<Vec<Directive>>,
+    script: Scripted,
     turns: Mutex<u32>,
     /// What `initialize` declares in `promptCapabilities`; `--no-images` clears it.
     images: bool,
 }
 
-/// A client side that ignores whatever an MCP server sends unprompted.
-struct Quiet;
-
-#[async_trait]
-impl RpcHandler for Quiet {
-    async fn request(&self, method: &str, _: Value) -> Result<Value, RpcError> {
-        Err(RpcError::method_not_found(method))
-    }
-    async fn notification(&self, _: &str, _: Value) {}
-}
-
 impl MockAgent {
-    /// Connects to the session's first MCP server on first use.
-    async fn mcp(&self) -> Result<RpcPeer, String> {
-        let mut slot = self.mcp.lock().await;
-        if let Some((peer, _)) = slot.as_ref() {
-            return Ok(peer.clone());
-        }
-        let server = self
-            .mcp_servers
-            .lock()
-            .await
-            .first()
-            .cloned()
-            .ok_or("no MCP server in this session")?;
-        let mut cmd = tokio::process::Command::new(server["command"].as_str().unwrap_or_default());
-        for arg in server["args"].as_array().into_iter().flatten() {
-            cmd.arg(arg.as_str().unwrap_or_default());
-        }
-        for var in server["env"].as_array().into_iter().flatten() {
-            cmd.env(
-                var["name"].as_str().unwrap_or_default(),
-                var["value"].as_str().unwrap_or_default(),
-            );
-        }
-        let mut child = cmd
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| format!("cannot start MCP server: {e}"))?;
-        let stdin = child.stdin.take().expect("piped");
-        let stdout = child.stdout.take().expect("piped");
-        let (peer, _) = RpcPeer::spawn(stdout, stdin, Arc::new(Quiet));
-        let _: Value = peer
-            .request(
-                "initialize",
-                json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "mock", "version": "0" } }),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        let _ = peer.notify("notifications/initialized", json!({}));
-        *slot = Some((peer.clone(), child));
-        Ok(peer)
-    }
-
-    /// Runs the directives that apply; returns a line per action for the transcript.
-    async fn run_directives(&self, text: &str) -> Vec<String> {
-        let (task_id, attempt) = script::context(text);
-        let mut directives = script::parse(text, task_id.as_deref(), attempt);
-        if directives.is_empty() && task_id.is_some() {
-            directives = self.last_directives.lock().await.clone();
-        } else if !directives.is_empty() {
-            *self.last_directives.lock().await = directives.clone();
-        }
-        let model = self.model.lock().await.clone();
-        let mut log = Vec::new();
-        for directive in directives.iter().filter(|d| d.applies(attempt, &model)) {
-            match &directive.action {
-                Action::Write { path, content } => {
-                    let full = self.cwd.lock().await.join(path);
-                    if let Some(parent) = full.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    match std::fs::write(&full, content) {
-                        Ok(()) => log.push(format!("wrote {path}")),
-                        Err(e) => log.push(format!("cannot write {path}: {e}")),
-                    }
-                }
-                Action::Call { tool, args } => {
-                    // Remembered directives were parsed for an earlier prompt; fill in this
-                    // prompt's task id. Without one, placeholders pass through untouched.
-                    let args = match &task_id {
-                        Some(id) => {
-                            serde_json::from_str(&args.to_string().replace("{task_id}", id))
-                                .unwrap_or(args.clone())
-                        }
-                        None => args.clone(),
-                    };
-                    let result = match self.mcp().await {
-                        Ok(peer) => peer
-                            .request::<_, Value>(
-                                "tools/call",
-                                json!({ "name": tool, "arguments": args }),
-                            )
-                            .await
-                            .map(|r| {
-                                r["content"][0]["text"]
-                                    .as_str()
-                                    .unwrap_or_default()
-                                    .to_owned()
-                            })
-                            .map_err(|e| e.to_string()),
-                        Err(e) => Err(e),
-                    };
-                    match result {
-                        Ok(text) => log.push(format!("called {tool}: {text}")),
-                        Err(e) => log.push(format!("call {tool} failed: {e}")),
-                    }
-                }
-            }
-        }
-        log
-    }
-
     async fn peer(&self) -> RpcPeer {
         // `main` stores the peer right after spawning it; wait out that tiny window.
         loop {
@@ -280,7 +162,8 @@ impl MockAgent {
                 .await;
         }
         let all_text: Vec<&str> = blocks.iter().filter_map(|b| b["text"].as_str()).collect();
-        for line in self.run_directives(&all_text.join("\n")).await {
+        let model = self.model.lock().await.clone();
+        for line in self.script.run(&all_text.join("\n"), &model).await {
             self.say(&session_id, &format!("{line}\n")).await;
         }
 
@@ -333,9 +216,31 @@ impl RpcHandler for MockAgent {
                 "agentInfo": { "name": "crossagents-mock-agent", "version": "0" }
             })),
             "session/new" => {
-                *self.cwd.lock().await = PathBuf::from(params["cwd"].as_str().unwrap_or("."));
-                *self.mcp_servers.lock().await =
-                    params["mcpServers"].as_array().cloned().unwrap_or_default();
+                *self.script.cwd.lock().await =
+                    PathBuf::from(params["cwd"].as_str().unwrap_or("."));
+                *self.script.server.lock().await = params["mcpServers"]
+                    .as_array()
+                    .and_then(|servers| servers.first())
+                    .map(|server| McpLaunch {
+                        command: server["command"].as_str().unwrap_or_default().to_owned(),
+                        args: server["args"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|a| a.as_str().unwrap_or_default().to_owned())
+                            .collect(),
+                        env: server["env"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .map(|v| {
+                                (
+                                    v["name"].as_str().unwrap_or_default().to_owned(),
+                                    v["value"].as_str().unwrap_or_default().to_owned(),
+                                )
+                            })
+                            .collect(),
+                    });
                 Ok(json!({
                 "sessionId": "mock-session",
                 "modes": {
@@ -384,10 +289,7 @@ async fn main() {
         model: Mutex::new("mock-opus".into()),
         mode: Mutex::new("default".into()),
         cancelled: Notify::new(),
-        cwd: Mutex::new(PathBuf::from(".")),
-        mcp_servers: Mutex::default(),
-        mcp: Mutex::default(),
-        last_directives: Mutex::default(),
+        script: Scripted::default(),
         turns: Mutex::default(),
         images: !std::env::args().any(|arg| arg == "--no-images"),
     });

@@ -626,6 +626,7 @@ mod tests {
             driver: None,
             model: None,
             role: crossagents_api_types::Role::Worker,
+            home: std::path::PathBuf::new(),
             cwd: std::path::PathBuf::from("."),
             config: serde_json::Value::Null,
             status,

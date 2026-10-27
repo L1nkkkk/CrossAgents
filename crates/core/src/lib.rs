@@ -5,6 +5,7 @@
 pub mod account;
 pub mod attachment;
 pub mod bus;
+pub mod claim;
 pub mod cli;
 pub mod driver;
 pub mod error;
@@ -28,6 +29,7 @@ pub use account::{
 };
 pub use attachment::{Attachment, AttachmentKind, AttachmentSupport, Prompt};
 pub use bus::EventBus;
+pub use claim::{AgentClaim, ClaimRole};
 pub use cli::{CliSource, CliStatus, Located};
 pub use driver::{
     Capabilities, ContextPart, Driver, DriverKind, DriverSession, ExitCause, FileChange,

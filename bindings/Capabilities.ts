@@ -27,6 +27,11 @@ multi_session: boolean,
  */
 resume: boolean, 
 /**
+ * A suspended session resumes in another working directory with its conversation:
+ * the hub can move the agent into a task's worktree and back (docs/tasks/S1.md §3.1).
+ */
+move_cwd: boolean, 
+/**
  * [`DriverSession::fork`].
  */
 fork: boolean, 

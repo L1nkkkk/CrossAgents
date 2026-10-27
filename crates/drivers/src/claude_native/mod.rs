@@ -139,6 +139,7 @@ impl Driver for ClaudeNativeDriver {
             mcp: true,
             multi_session: false,
             resume: true,
+            move_cwd: true,
             fork: true,
             // `rewind_files` undoes files but the history rewind needs a new session id;
             // not wired yet.

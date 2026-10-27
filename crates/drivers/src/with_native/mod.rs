@@ -158,6 +158,8 @@ impl Driver for WithNativeDriver {
             mcp: true,
             multi_session: false,
             resume: true,
+            // Not checked against With yet: S1 moves only the native CLIs it was tried with.
+            move_cwd: false,
             fork: false,
             rollback: false,
             revert_files: false,

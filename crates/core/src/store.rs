@@ -3,6 +3,7 @@
 use async_trait::async_trait;
 
 use crate::account::Account;
+use crate::claim::AgentClaim;
 use crate::error::CoreError;
 use crate::event::{Event, EventKind};
 use crate::human::HumanItem;
@@ -74,11 +75,44 @@ pub trait Store: Send + Sync {
         Err(CoreError::Unsupported("updating agent models".into()))
     }
 
-    /// Moves the agent to another working directory. Only for an agent whose session has
-    /// never started: a vendor session belongs to the directory it began in.
+    /// Moves the agent to another working directory. A live session has to stop first
+    /// (`Runtime::place`): the driver resumes it there.
     async fn update_agent_cwd(&self, id: AgentId, cwd: &std::path::Path) -> Result<(), CoreError> {
         let _ = (id, cwd);
         Err(CoreError::Unsupported("moving agents".into()))
+    }
+
+    /// Sets the workspace the agent belongs to (docs/DESIGN.md §4.7).
+    async fn update_agent_home(
+        &self,
+        id: AgentId,
+        home: &std::path::Path,
+    ) -> Result<(), CoreError> {
+        let _ = (id, home);
+        Err(CoreError::Unsupported("agent homes".into()))
+    }
+
+    /// Holds `claim.agent_id` for a run, in one atomic insert (docs/tasks/S1.md §3.1):
+    /// `None` when it is now held, else the claim already holding it, which stays.
+    async fn claim_agent(&self, claim: &AgentClaim) -> Result<Option<AgentClaim>, CoreError> {
+        let _ = claim;
+        Err(CoreError::Unsupported("claims".into()))
+    }
+    /// Lets go of `agent` if `run` holds it; `false` when it did not (another run's claim is
+    /// left alone).
+    async fn release_agent(&self, agent: AgentId, run: RunId) -> Result<bool, CoreError> {
+        let _ = (agent, run);
+        Ok(false)
+    }
+    /// What holds `agent`, if anything.
+    async fn claim_of(&self, agent: AgentId) -> Result<Option<AgentClaim>, CoreError> {
+        let _ = agent;
+        Ok(None)
+    }
+    /// Every claim, oldest first; only `run`'s when given.
+    async fn list_claims(&self, run: Option<RunId>) -> Result<Vec<AgentClaim>, CoreError> {
+        let _ = run;
+        Ok(Vec::new())
     }
 
     /// Replaces the agent's plugin-private config (e.g. its reasoning `effort`).

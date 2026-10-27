@@ -37,6 +37,20 @@ pub fn mock_plugins() -> BTreeMap<String, PluginConfig> {
     plugins
 }
 
+/// Plugin `native`: the mock speaking Claude Code's stream-json through `claude-native`, a
+/// driver that resumes a session in another directory (`move_cwd`).
+pub fn native_plugin(config: &mut HubConfig) {
+    config.plugins.insert(
+        "native".to_owned(),
+        PluginConfig {
+            driver: Some(crossagents_core::DriverKind::ClaudeNative),
+            native_command: vec![MOCK_AGENT.to_owned(), "stream-json".to_owned()],
+            models: vec!["mock-native".into()],
+            ..PluginConfig::default()
+        },
+    );
+}
+
 /// The `crossagents` binary (it serves `crossagents mcp`).
 pub fn crossagents_bin() -> std::path::PathBuf {
     static BUILT: std::sync::Once = std::sync::Once::new();
@@ -91,7 +105,11 @@ impl TestHub {
 
     /// Starts a hub after `adjust` has changed its config.
     pub async fn start_with(adjust: impl FnOnce(&mut HubConfig)) -> Self {
-        let home = tempfile::tempdir().unwrap();
+        Self::start_in(tempfile::tempdir().unwrap(), adjust).await
+    }
+
+    /// Like [`Self::start_with`], on a home that may hold a previous hub's state.
+    pub async fn start_in(home: tempfile::TempDir, adjust: impl FnOnce(&mut HubConfig)) -> Self {
         let paths = Paths::new(home.path());
         let mut config = HubConfig::new(paths.clone(), 0);
         config.plugins = mock_plugins();
@@ -161,6 +179,27 @@ impl TestHub {
             )
             .await;
         assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+        resp.json().await.unwrap()
+    }
+
+    /// A `native` agent (see [`native_plugin`]) living in `cwd`.
+    pub async fn add_native(&self, name: &str, role: &str, cwd: &std::path::Path) -> Agent {
+        let resp = self
+            .post(
+                "/v1/agents",
+                json!({
+                    "name": name, "plugin": "native", "model": "mock-native", "role": role,
+                    "cwd": cwd.display().to_string(),
+                }),
+            )
+            .await;
+        assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+        resp.json().await.unwrap()
+    }
+
+    pub async fn agent(&self, key: &str) -> Agent {
+        let resp = self.get(&format!("/v1/agents/{key}")).await;
+        assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
         resp.json().await.unwrap()
     }
 

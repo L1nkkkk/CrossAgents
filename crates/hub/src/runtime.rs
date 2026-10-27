@@ -1,8 +1,8 @@
 //! Live agent sessions: start, deliver messages one turn at a time, cancel, stop, and turn
 //! what happens inside a session into events.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -78,6 +78,11 @@ impl Drop for Live {
 #[derive(Default)]
 struct Inbox {
     waiting: std::sync::Mutex<VecDeque<(MessageId, Prompt)>>,
+    /// The messages a person sent, waiting or running: work is not put ahead of them
+    /// (docs/tasks/S1.md §3.3).
+    from_person: std::sync::Mutex<HashSet<MessageId>>,
+    /// The message whose turn is running.
+    running: std::sync::Mutex<Option<MessageId>>,
     /// A turn is running.
     busy: AtomicBool,
     closed: AtomicBool,
@@ -115,6 +120,7 @@ impl Inbox {
             return false;
         };
         waiting.remove(index);
+        self.from_person.lock().unwrap().remove(&id);
         true
     }
 
@@ -126,6 +132,7 @@ impl Inbox {
             }
             if let Some(message) = self.waiting.lock().unwrap().pop_front() {
                 self.busy.store(true, Ordering::SeqCst);
+                *self.running.lock().unwrap() = Some(message.0);
                 return Some(message);
             }
             self.notify.notified().await;
@@ -133,7 +140,30 @@ impl Inbox {
     }
 
     fn finish_turn(&self) {
+        if let Some(id) = self.running.lock().unwrap().take() {
+            self.from_person.lock().unwrap().remove(&id);
+        }
         self.busy.store(false, Ordering::SeqCst);
+    }
+
+    /// A person's message is being answered or waits in line.
+    fn serving_person(&self) -> bool {
+        !self.from_person.lock().unwrap().is_empty()
+    }
+
+    /// Why the agent cannot be moved now, if it cannot: what it is doing.
+    fn busy_with(&self, name: &str) -> Option<String> {
+        if self.is_idle() {
+            return None;
+        }
+        let running = *self.running.lock().unwrap();
+        let person = self.from_person.lock().unwrap();
+        Some(match running {
+            Some(id) if person.contains(&id) => format!("{name} is answering a person's message"),
+            _ if !person.is_empty() => format!("a person's message is waiting for {name}"),
+            Some(_) => format!("{name} is in the middle of a turn"),
+            None => format!("messages are waiting for {name}"),
+        })
     }
 
     fn is_idle(&self) -> bool {
@@ -171,6 +201,9 @@ pub struct Runtime {
     /// What changed about the agent that it has not been told yet (its model or effort, its
     /// name), by topic: said at the top of the next message it gets.
     notices: Mutex<HashMap<AgentId, BTreeMap<&'static str, String>>>,
+    /// Agents to send back to their workspace once their turn ends ([`Self::send_home`]
+    /// while they were busy).
+    going_home: Mutex<HashSet<AgentId>>,
     generation: AtomicU64,
 }
 
@@ -223,6 +256,7 @@ impl Runtime {
             digests: Mutex::default(),
             notices: Mutex::default(),
             external: Mutex::default(),
+            going_home: Mutex::default(),
             generation: AtomicU64::new(0),
         }
     }
@@ -595,6 +629,17 @@ impl Runtime {
         if self.is_live(agent.id).await {
             return Ok(agent);
         }
+        // Read again under the lock: `place` may have moved it meanwhile.
+        let agent = self.store().get_agent(&AgentKey::Id(agent.id)).await?;
+        self.open(&agent, false).await?;
+        Ok(agent)
+    }
+
+    /// Opens (or resumes) the agent's session; the caller holds its lock. With `carry` a
+    /// session that cannot be resumed is an error instead of a new one: the agent was moved
+    /// to work with its conversation (docs/tasks/S1.md §3.1).
+    async fn open(&self, agent: &Agent, carry: bool) -> Result<(), CoreError> {
+        let agent = agent.clone();
         let resolved = match self.plugins.driver(&agent.plugin, agent.driver.as_deref()) {
             Ok(resolved) => resolved,
             Err(CoreError::NotFound { .. }) => {
@@ -621,11 +666,11 @@ impl Runtime {
             Some(setup) => setup.prepare(&agent).await?,
             None => SessionExtras::default(),
         };
-        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let (mut events_tx, mut events_rx) = mpsc::unbounded_channel();
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let generation = self.generation.fetch_add(1, Ordering::Relaxed);
 
-        let spec = || SessionSpec {
+        let spec = |events: &mpsc::UnboundedSender<SessionEvent>| SessionSpec {
             agent: agent.clone(),
             mcp_servers: extras.mcp_servers.clone(),
             permission: extras.permission.unwrap_or_else(|| permission_of(&agent)),
@@ -633,7 +678,7 @@ impl Runtime {
             command: command_of(&agent),
             instructions: extras.instructions.clone(),
             env: extras.env.clone(),
-            events: events_tx.clone(),
+            events: events.clone(),
         };
         // Carry on the agent's last conversation when the driver can.
         let previous = if resolved.driver.capabilities().resume {
@@ -645,8 +690,13 @@ impl Runtime {
             None
         };
         let opened = match previous {
-            Some(previous) => match resolved.driver.resume(&previous, spec()).await {
+            Some(previous) => match resolved.driver.resume(&previous, spec(&events_tx)).await {
                 Ok(session) => Ok(session),
+                Err(err) if carry => Err(CoreError::Agent(format!(
+                    "cannot resume {}'s session in {} ({err}): its context was not carried over",
+                    agent.name,
+                    agent.cwd.display()
+                ))),
                 Err(err) => {
                     publish(
                         &self.bus,
@@ -658,10 +708,13 @@ impl Runtime {
                         },
                     )
                     .await;
-                    resolved.driver.open(spec()).await
+                    // A channel of its own: what the failed attempt still reports (its
+                    // process exiting) must not end the new session.
+                    (events_tx, events_rx) = mpsc::unbounded_channel();
+                    resolved.driver.open(spec(&events_tx)).await
                 }
             },
-            None => resolved.driver.open(spec()).await,
+            None => resolved.driver.open(spec(&events_tx)).await,
         };
         drop(events_tx);
         let session: Arc<dyn DriverSession> = match opened {
@@ -696,7 +749,142 @@ impl Runtime {
         )
         .await;
         set_status(&self.bus, agent.id, AgentStatus::Idle).await;
+        Ok(())
+    }
+
+    /// Moves the agent to work in `dir` (docs/tasks/S1.md §3.1): an idle session's process
+    /// stops, and the session resumes there, with its conversation. Busy while a turn runs
+    /// or a message waits: what was asked of it is not cut off, nor put behind the move.
+    /// With `carry` the session resumes right away and failing to is an error (it is not
+    /// replaced by a new one); without, it resumes with its next message, as any start does.
+    pub async fn place(&self, key: &AgentKey, dir: &Path, carry: bool) -> Result<Agent, CoreError> {
+        let agent = self.store().get_agent(key).await?;
+        if agent.plugin == EXTERNAL_PLUGIN {
+            return Err(CoreError::Conflict(format!(
+                "{} runs outside the hub and cannot be moved",
+                agent.name
+            )));
+        }
+        let lock = self.agent_lock(agent.id).await;
+        let _guard = lock.lock().await;
+        let live = {
+            let mut live = self.live.lock().await;
+            match live.get(&agent.id) {
+                Some(l) => match l.inbox.busy_with(&agent.name) {
+                    Some(why) => return Err(CoreError::Busy(why)),
+                    None => live.remove(&agent.id),
+                },
+                None => None,
+            }
+        };
+        if let Some(live) = live {
+            live.session.shutdown().await;
+            let _ = live.control.send(Control::Stopped);
+            set_status(&self.bus, agent.id, AgentStatus::Stopped).await;
+        }
+        self.going_home.lock().await.remove(&agent.id);
+        if agent.cwd != dir {
+            self.store().update_agent_cwd(agent.id, dir).await?;
+        }
+        let agent = self.store().get_agent(&AgentKey::Id(agent.id)).await?;
+        publish(
+            &self.bus,
+            EventKind::AgentUpdated {
+                agent: agent.clone(),
+            },
+        )
+        .await;
+        if carry && self.store().last_session_id(agent.id).await?.is_some() {
+            self.open(&agent, true).await?;
+        }
         Ok(agent)
+    }
+
+    /// Sends the agent back to its workspace: now when it is idle, else once its turn ends
+    /// and nothing waits for it. `true` when it moved now.
+    pub async fn send_home(&self, key: &AgentKey) -> Result<bool, CoreError> {
+        let agent = self.store().get_agent(key).await?;
+        match self.place(key, agent.home(), false).await {
+            Ok(_) => Ok(true),
+            Err(CoreError::Busy(_)) => {
+                self.going_home.lock().await.insert(agent.id);
+                // Its turn may have ended in between, with nobody left to notice.
+                self.settle_home(agent.id).await;
+                Ok(false)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Moves an agent waiting to go home there, if it is idle now.
+    async fn settle_home(&self, id: AgentId) {
+        if !self.going_home.lock().await.contains(&id) {
+            return;
+        }
+        let agent = match self.store().get_agent(&AgentKey::Id(id)).await {
+            Ok(agent) => agent,
+            Err(_) => {
+                self.going_home.lock().await.remove(&id);
+                return;
+            }
+        };
+        match self.place(&AgentKey::Id(id), agent.home(), false).await {
+            Ok(_) | Err(CoreError::Busy(_)) => {}
+            Err(err) => {
+                self.going_home.lock().await.remove(&id);
+                tracing::warn!(%id, error = %err, "cannot send the agent home");
+            }
+        }
+    }
+
+    /// Follows turns ending, to send home the agents that were busy when asked to go.
+    pub fn watch_moves(self: &Arc<Self>) {
+        let this = self.clone();
+        let mut events = self.bus.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match events.recv().await {
+                    Ok(event) => {
+                        let id = match event.kind {
+                            EventKind::AgentTurnCompleted { id, .. }
+                            | EventKind::AgentStatusChanged { id, .. } => id,
+                            _ => continue,
+                        };
+                        if this.going_home.lock().await.contains(&id) {
+                            let this = this.clone();
+                            tokio::spawn(async move { this.settle_home(id).await });
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let ids: Vec<AgentId> =
+                            this.going_home.lock().await.iter().copied().collect();
+                        for id in ids {
+                            this.settle_home(id).await;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+    }
+
+    /// Whether a person waits on the agent: its running turn answers a person's message,
+    /// or one is in line. Work is not given to it ahead of them (docs/tasks/S1.md §3.3).
+    pub async fn serving_person(&self, id: AgentId) -> bool {
+        self.live
+            .lock()
+            .await
+            .get(&id)
+            .is_some_and(|live| live.inbox.serving_person())
+    }
+
+    /// Whether a turn runs or a message waits.
+    pub async fn is_busy(&self, id: AgentId) -> bool {
+        self.live
+            .lock()
+            .await
+            .get(&id)
+            .is_some_and(|live| !live.inbox.is_idle())
     }
 
     /// Makes `session` the agent's live one: its events are published, its inbox served.
@@ -926,6 +1114,9 @@ impl Runtime {
             }
             None => text,
         };
+        if from == MessageSource::Human {
+            live.inbox.from_person.lock().unwrap().insert(message_id);
+        }
         live.inbox
             .push((message_id, Prompt { text, attachments }), first);
         if first && queued {

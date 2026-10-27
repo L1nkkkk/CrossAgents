@@ -156,6 +156,7 @@ mod tests {
             name_source: crossagents_core::NameSource::Chosen,
             topic: None,
             archived_at: None,
+            home: std::path::PathBuf::new(),
             name: name.into(),
             plugin: "mock".into(),
             driver: None,

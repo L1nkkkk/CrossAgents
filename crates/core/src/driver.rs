@@ -100,6 +100,9 @@ pub struct Capabilities {
     pub multi_session: bool,
     /// [`DriverSession::suspend`] and [`Driver::resume`]: the session outlives its process.
     pub resume: bool,
+    /// A suspended session resumes in another working directory with its conversation:
+    /// the hub can move the agent into a task's worktree and back (docs/tasks/S1.md §3.1).
+    pub move_cwd: bool,
     /// [`DriverSession::fork`].
     pub fork: bool,
     /// [`DriverSession::rollback`] of the conversation history.

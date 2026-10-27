@@ -99,6 +99,7 @@ mod tests {
             profile: AgentProfile::default(),
             topic: None,
             archived_at: None,
+            home: PathBuf::new(),
         }
     }
 

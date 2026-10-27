@@ -126,6 +126,7 @@ mod tests {
             name_source: NameSource::Chosen,
             topic: None,
             archived_at: None,
+            home: std::path::PathBuf::new(),
             name: "w".into(),
             plugin: plugin.into(),
             driver: None,

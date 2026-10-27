@@ -337,6 +337,7 @@ export class MockBridge implements CrossAgentsBridge {
           name_source: req.name ? "chosen" : "generated",
           topic: req.topic ?? null,
           archived_at: null,
+          home: cwd,
           cwd,
           status: "stopped", // as the hub makes them: started by their first message
           created_at: new Date().toISOString(),

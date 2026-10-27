@@ -95,4 +95,27 @@ pub trait AgentHost: Send + Sync {
     /// Stops the agent's session and process, keeping the agent; its next message starts it
     /// again.
     async fn stop_agent(&self, agent: AgentId) -> Result<(), CoreError>;
+    /// Moves the agent to work in `dir` (docs/tasks/S1.md §3.1); [`CoreError::Busy`] while
+    /// a turn runs or messages wait for it. With `carry` its session resumes there at once,
+    /// and failing to is an error: it never quietly becomes a new session.
+    async fn place(&self, agent: AgentId, dir: &Path, carry: bool) -> Result<(), CoreError> {
+        let _ = (agent, dir, carry);
+        Err(CoreError::Unsupported("moving agents".into()))
+    }
+    /// Sends the agent back to its workspace: now when it is idle, else once its turn ends.
+    /// `true` when it moved now.
+    async fn send_home(&self, agent: AgentId) -> Result<bool, CoreError> {
+        let _ = agent;
+        Err(CoreError::Unsupported("moving agents".into()))
+    }
+    /// Whether a person waits on the agent: its turn answers their message, or one waits.
+    async fn serving_person(&self, agent: AgentId) -> bool {
+        let _ = agent;
+        false
+    }
+    /// Whether the agent's driver resumes its session in another directory (`move_cwd`).
+    async fn can_move(&self, agent: &Agent) -> bool {
+        let _ = agent;
+        false
+    }
 }

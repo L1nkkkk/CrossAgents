@@ -55,6 +55,7 @@ fn spec(opts: Opts<'_>) -> (SessionSpec, mpsc::UnboundedReceiver<SessionEvent>) 
         name_source: crossagents_core::NameSource::Chosen,
         topic: None,
         archived_at: None,
+        home: std::path::PathBuf::new(),
         name: "w1".into(),
         plugin: "codex".into(),
         driver: Some("codex-native".into()),

@@ -177,7 +177,7 @@ impl From<CoreError> for AppError {
     fn from(err: CoreError) -> Self {
         let (status, code) = match &err {
             CoreError::NotFound { .. } => (StatusCode::NOT_FOUND, ErrorCode::NotFound),
-            CoreError::Conflict(_) | CoreError::ConflictFiles { .. } => {
+            CoreError::Conflict(_) | CoreError::ConflictFiles { .. } | CoreError::Busy(_) => {
                 (StatusCode::CONFLICT, ErrorCode::Conflict)
             }
             CoreError::InvalidName(_)
@@ -383,6 +383,7 @@ async fn create_agent(
         name_source,
         topic,
         archived_at: None,
+        home: cwd.clone(),
         name,
         plugin: req.plugin,
         driver: req.driver,

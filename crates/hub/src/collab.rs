@@ -257,6 +257,7 @@ impl AgentHost for HubHost {
             name_source: crossagents_core::NameSource::Chosen,
             topic: None,
             archived_at: None,
+            home: template.home().to_path_buf(),
             name: name.to_owned(),
             plugin: template.plugin,
             driver: template.driver,
@@ -444,6 +445,28 @@ impl AgentHost for HubHost {
 
     async fn stop_agent(&self, agent: AgentId) -> Result<(), CoreError> {
         self.runtime.stop(&AgentKey::Id(agent)).await
+    }
+
+    async fn place(&self, agent: AgentId, dir: &Path, carry: bool) -> Result<(), CoreError> {
+        self.runtime
+            .place(&AgentKey::Id(agent), dir, carry)
+            .await
+            .map(|_| ())
+    }
+
+    async fn send_home(&self, agent: AgentId) -> Result<bool, CoreError> {
+        self.runtime.send_home(&AgentKey::Id(agent)).await
+    }
+
+    async fn serving_person(&self, agent: AgentId) -> bool {
+        self.runtime.serving_person(agent).await
+    }
+
+    async fn can_move(&self, agent: &Agent) -> bool {
+        self.runtime
+            .capabilities(agent)
+            .await
+            .is_some_and(|c| c.move_cwd)
     }
 }
 

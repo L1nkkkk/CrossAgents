@@ -20,6 +20,11 @@ pub enum CoreError {
     #[error("conflict: {message}")]
     ConflictFiles { message: String, files: Vec<String> },
 
+    /// The agent is busy: a turn is running, or messages wait for it (docs/tasks/S1.md
+    /// §3.3). Try again later, or pick someone else.
+    #[error("busy: {0}")]
+    Busy(String),
+
     #[error("storage error: {0}")]
     Storage(String),
 

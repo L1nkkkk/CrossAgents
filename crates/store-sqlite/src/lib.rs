@@ -6,7 +6,7 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use crossagents_core::{
-    Account, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError, EVENT_SCHEMA_VERSION,
+    Account, Agent, AgentClaim, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError, EVENT_SCHEMA_VERSION,
     Event, EventKind, HumanItem, MessageId, NameSource, Note, NoteScope, Reminder, Run, RunId,
     Store, Task, TaskId, Watch,
 };
@@ -118,6 +118,8 @@ fn agent_from_row(row: &SqliteRow) -> Result<Agent, CoreError> {
         driver: get_opt("driver")?,
         model: get_opt("model")?,
         role: enum_from(&get("role")?)?,
+        // NULL only in a row written by something that predates the column.
+        home: PathBuf::from(get_opt("home")?.map_or_else(|| get("cwd"), Ok)?),
         cwd: PathBuf::from(get("cwd")?),
         config: serde_json::from_str(&get("config")?).map_err(storage)?,
         status: enum_from(&get("status")?)?,
@@ -128,6 +130,22 @@ fn agent_from_row(row: &SqliteRow) -> Result<Agent, CoreError> {
             .as_deref()
             .map(time_from)
             .transpose()?,
+    })
+}
+
+fn claim_from_row(row: &SqliteRow) -> Result<AgentClaim, CoreError> {
+    let get = |col: &str| row.try_get::<String, _>(col).map_err(storage);
+    Ok(AgentClaim {
+        agent_id: get("agent_id")?.parse().map_err(storage)?,
+        run_id: get("run_id")?.parse().map_err(storage)?,
+        task_id: row
+            .try_get::<Option<String>, _>("task_id")
+            .map_err(storage)?
+            .map(|t| t.parse().map_err(storage))
+            .transpose()?,
+        role: enum_from(&get("role")?)?,
+        fresh: row.try_get::<bool, _>("fresh").map_err(storage)?,
+        since: time_from(&get("since")?)?,
     })
 }
 
@@ -159,8 +177,8 @@ fn not_found(key: &AgentKey) -> CoreError {
 impl Store for SqliteStore {
     async fn insert_agent(&self, agent: &Agent) -> Result<(), CoreError> {
         let result = sqlx::query(
-            "INSERT INTO agents (id, name, plugin, driver, model, role, cwd, config, status, created_at, profile, name_source, topic, archived_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO agents (id, name, plugin, driver, model, role, cwd, config, status, created_at, profile, name_source, topic, archived_at, home)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(agent.id.to_string())
         .bind(&agent.name)
@@ -176,6 +194,7 @@ impl Store for SqliteStore {
         .bind(enum_str(&agent.name_source)?)
         .bind(&agent.topic)
         .bind(agent.archived_at.map(|t| t.to_rfc3339()))
+        .bind(agent.home().to_string_lossy().into_owned())
         .execute(&self.pool)
         .await;
         match result {
@@ -221,7 +240,89 @@ impl Store for SqliteStore {
         if result.rows_affected() == 0 {
             return Err(not_found(&AgentKey::Id(id)));
         }
+        sqlx::query("DELETE FROM agent_claims WHERE agent_id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
         Ok(())
+    }
+
+    async fn update_agent_home(&self, id: AgentId, home: &Path) -> Result<(), CoreError> {
+        self.update_column(
+            id,
+            "UPDATE agents SET home = ? WHERE id = ?",
+            Some(home.to_string_lossy().into_owned()),
+        )
+        .await
+    }
+
+    async fn claim_agent(&self, claim: &AgentClaim) -> Result<Option<AgentClaim>, CoreError> {
+        // One statement: the primary key decides between two runs taking the agent at once.
+        let result = sqlx::query(
+            "INSERT INTO agent_claims (agent_id, run_id, task_id, role, fresh, since)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(claim.agent_id.to_string())
+        .bind(claim.run_id.to_string())
+        .bind(claim.task_id.map(|t| t.to_string()))
+        .bind(enum_str(&claim.role)?)
+        .bind(claim.fresh)
+        .bind(claim.since.to_rfc3339())
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(_) => Ok(None),
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+                match self.claim_of(claim.agent_id).await? {
+                    Some(holder) => Ok(Some(holder)),
+                    // Let go between the insert and this read: say so rather than retry.
+                    None => Err(CoreError::Busy(
+                        "the agent was just let go by another run; try again".into(),
+                    )),
+                }
+            }
+            Err(e) => Err(storage(e)),
+        }
+    }
+
+    async fn release_agent(&self, agent: AgentId, run: RunId) -> Result<bool, CoreError> {
+        let result = sqlx::query("DELETE FROM agent_claims WHERE agent_id = ? AND run_id = ?")
+            .bind(agent.to_string())
+            .bind(run.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn claim_of(&self, agent: AgentId) -> Result<Option<AgentClaim>, CoreError> {
+        sqlx::query("SELECT * FROM agent_claims WHERE agent_id = ?")
+            .bind(agent.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?
+            .as_ref()
+            .map(claim_from_row)
+            .transpose()
+    }
+
+    async fn list_claims(&self, run: Option<RunId>) -> Result<Vec<AgentClaim>, CoreError> {
+        let rows = match run {
+            Some(run) => {
+                sqlx::query("SELECT * FROM agent_claims WHERE run_id = ? ORDER BY since, agent_id")
+                    .bind(run.to_string())
+                    .fetch_all(&self.pool)
+                    .await
+            }
+            None => {
+                sqlx::query("SELECT * FROM agent_claims ORDER BY since, agent_id")
+                    .fetch_all(&self.pool)
+                    .await
+            }
+        }
+        .map_err(storage)?;
+        rows.iter().map(claim_from_row).collect()
     }
 
     async fn rename_agent(
@@ -727,6 +828,12 @@ impl Store for SqliteStore {
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
+        // The run's own claims; another run's on the same agents are not touched.
+        sqlx::query("DELETE FROM agent_claims WHERE run_id = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
         sqlx::query("DELETE FROM tasks WHERE run_id = ?")
             .bind(id.to_string())
             .execute(&mut *tx)
@@ -870,7 +977,9 @@ fn scope_name(scope: NoteScope) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use crossagents_core::{Role, RunConfig, RunStatus, TaskId, TaskReport, TaskSpec, TaskStatus};
+    use crossagents_core::{
+        ClaimRole, Role, RunConfig, RunStatus, TaskId, TaskReport, TaskSpec, TaskStatus,
+    };
 
     #[tokio::test]
     async fn accounts_round_trip() {
@@ -1127,6 +1236,7 @@ mod tests {
             name_source: crossagents_core::NameSource::Chosen,
             topic: None,
             archived_at: None,
+            home: PathBuf::from("/tmp/work"),
             name: name.into(),
             plugin: "claude".into(),
             driver: None,
@@ -1239,6 +1349,81 @@ mod tests {
                 version: "3".into()
             }
         );
+    }
+
+    #[tokio::test]
+    async fn one_claim_per_agent_and_runs_only_release_their_own() {
+        let store = SqliteStore::open_in_memory().await.unwrap();
+        let rex = AgentId::new();
+        let (run_a, run_b) = (RunId::new(), RunId::new());
+        let task = TaskId::new();
+        let held = AgentClaim::new(rex, run_a, Some(task), ClaimRole::Worker, false);
+        assert_eq!(store.claim_agent(&held).await.unwrap(), None);
+        // Another run cannot take it, and learns who has it.
+        let other = AgentClaim::new(rex, run_b, None, ClaimRole::Lead, false);
+        let holder = store.claim_agent(&other).await.unwrap().unwrap();
+        assert_eq!(holder.run_id, run_a);
+        assert_eq!(holder.task_id, Some(task));
+        assert_eq!(holder.role, ClaimRole::Worker);
+        // Run B letting go of it touches nothing: the row is run A's.
+        assert!(!store.release_agent(rex, run_b).await.unwrap());
+        assert_eq!(store.claim_of(rex).await.unwrap().unwrap().run_id, run_a);
+        assert_eq!(store.list_claims(Some(run_b)).await.unwrap(), vec![]);
+        assert!(store.release_agent(rex, run_a).await.unwrap());
+        assert_eq!(store.claim_of(rex).await.unwrap(), None);
+        assert_eq!(store.claim_agent(&other).await.unwrap(), None);
+        assert_eq!(store.list_claims(Some(run_b)).await.unwrap(), vec![other]);
+    }
+
+    #[tokio::test]
+    async fn two_runs_claiming_at_once_only_one_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file, so the two claims go over separate connections.
+        let store = SqliteStore::open(&dir.path().join("state.db")).await.unwrap();
+        let rex = AgentId::new();
+        let (a, b) = (
+            AgentClaim::new(rex, RunId::new(), None, ClaimRole::Worker, false),
+            AgentClaim::new(rex, RunId::new(), None, ClaimRole::Worker, false),
+        );
+        let (ra, rb) = tokio::join!(store.claim_agent(&a), store.claim_agent(&b));
+        let (ra, rb) = (ra.unwrap(), rb.unwrap());
+        assert!(ra.is_none() ^ rb.is_none(), "{ra:?} {rb:?}");
+        let winner = if ra.is_none() { &a } else { &b };
+        assert_eq!(ra.or(rb).unwrap().run_id, winner.run_id);
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn agents_from_before_homes_get_their_cwd_as_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new().connect_with(options).await.unwrap();
+        MIGRATOR.run_to(8, &pool).await.unwrap();
+        let id = AgentId::new();
+        sqlx::query(
+            "INSERT INTO agents (id, name, plugin, role, cwd, status, created_at, profile)
+             VALUES (?, 'old', 'claude', 'worker', '/w/repo', 'stopped', ?, '{}')",
+        )
+        .bind(id.to_string())
+        .bind(Utc::now().to_rfc3339())
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+        // The next hub opens the database it left and migrates it.
+        let store = SqliteStore::open(&path).await.unwrap();
+        let old = store.get_agent(&AgentKey::Id(id)).await.unwrap();
+        assert_eq!(old.home, PathBuf::from("/w/repo"));
+        store
+            .update_agent_home(id, Path::new("/w/other"))
+            .await
+            .unwrap();
+        let old = store.get_agent(&AgentKey::Id(id)).await.unwrap();
+        assert_eq!((old.home, old.cwd), ("/w/other".into(), "/w/repo".into()));
+        store.close().await;
     }
 
     #[tokio::test]

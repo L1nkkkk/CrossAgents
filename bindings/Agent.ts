@@ -27,7 +27,17 @@ plugin: string,
 /**
  * `None` means the plugin's default driver.
  */
-driver: string | null, model: string | null, role: Role, cwd: string, 
+driver: string | null, model: string | null, role: Role, 
+/**
+ * The workspace the agent belongs to (docs/DESIGN.md §4.7): where it lives between
+ * executions, and what the sidebar groups it under. Empty in records from before homes,
+ * which read it as `cwd`.
+ */
+home: string, 
+/**
+ * Where it works now: its home, or the worktree of the task it is executing.
+ */
+cwd: string, 
 /**
  * Plugin-private settings; core never interprets them.
  */

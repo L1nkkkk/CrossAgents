@@ -186,6 +186,7 @@ impl Driver for CodexNativeDriver {
             mcp: true,
             multi_session: true,
             resume: true,
+            move_cwd: true,
             fork: true,
             rollback: true,
             // thread/revert only rewrites history (docs/research/codex-app-server.md §4).

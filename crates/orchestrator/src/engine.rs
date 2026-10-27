@@ -442,6 +442,7 @@ impl Orchestrator {
                 created_at: Utc::now(),
                 topic: None,
                 archived_at: None,
+                home: planner.home().to_path_buf(),
                 ..planner.clone()
             })
             .await

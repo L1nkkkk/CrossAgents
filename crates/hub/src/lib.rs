@@ -141,6 +141,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         tracing::warn!("skipping plugin: {warning}");
     }
     let runtime = Arc::new(Runtime::new(bus.clone(), plugins).with_setup(setup.clone()));
+    runtime.watch_moves();
     // Each CLI is asked its version in the background, in parallel: `GET /v1/plugins`
     // reports it once it answers and never waits for a subprocess (docs/DESIGN.md §9.3).
     for driver in runtime.plugins().defaults() {
@@ -225,6 +226,19 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         .await
     {
         tracing::warn!(error = %err, "cannot settle budgets at startup");
+    }
+    // Agents from before homes get the workspace they belong to; claims of runs that ended
+    // while no hub was there go (docs/tasks/S1.md §3.1).
+    match orchestrator.migrate_homes().await {
+        Ok(moved) => {
+            for (name, home) in &moved {
+                tracing::info!(agent = %name, home = %home.display(), "agent home set");
+            }
+        }
+        Err(err) => tracing::warn!(error = %err, "cannot set agent homes"),
+    }
+    if let Err(err) = orchestrator.settle_claims().await {
+        tracing::warn!(error = %err, "cannot drop stale claims");
     }
     orchestrator.resume().await?;
 

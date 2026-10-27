@@ -9,7 +9,15 @@
 //! - `[slow]`      keep the turn running until interrupted
 //! - `[sleep MS]`  keep the turn running for MS milliseconds
 //! - `[pid]`       say this process's id
+//! - `[cwd]`       say the process's working directory
+//! - `[session]`   say the session id, and whether it was resumed
 //! - `[crash]`     exit the process
+//! - `[write ...]` / `[call ...]` directives, see [`crate::script`]; calls go to the first
+//!   server of `--mcp-config`
+//!
+//! `--resume` fails (the process exits before answering `initialize`) in a directory that
+//! has a file named `mock-no-resume`, for testing what happens when a session cannot be
+//! carried into another directory.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,6 +26,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Stdout};
 use tokio::sync::{Mutex, Notify};
+
+use crate::scripted::{McpLaunch, Scripted};
 
 struct Mock {
     out: Mutex<Stdout>,
@@ -29,6 +39,8 @@ struct Mock {
     turn: Mutex<()>,
     counter: AtomicU64,
     turns: AtomicU64,
+    resumed: bool,
+    script: Scripted,
 }
 
 impl Mock {
@@ -134,7 +146,20 @@ impl Mock {
             if text.contains("[pid]") {
                 self.say(&format!("pid={} ", std::process::id())).await;
             }
+            if text.contains("[cwd]") {
+                let cwd = std::env::current_dir().unwrap_or_default();
+                self.say(&format!("cwd={} ", cwd.display())).await;
+            }
+            if text.contains("[session]") {
+                let how = if self.resumed { "resumed" } else { "new" };
+                self.say(&format!("session={} ({how}) ", self.session_id))
+                    .await;
+            }
             let model = self.model.lock().await.clone();
+            for line in self.script.run(&text, &model).await {
+                self.say(&format!("{line}
+")).await;
+            }
             self.say(&format!("echo(model={model}): {text}")).await;
         }
         // `total_cost_usd` counts from the start of the process.
@@ -162,9 +187,38 @@ fn flag(args: &[String], flag: &str) -> Option<String> {
 }
 
 pub async fn run(args: Vec<String>) {
+    let resumed = flag(&args, "--resume").is_some() && flag(&args, "--fork-session").is_none();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if resumed && cwd.join("mock-no-resume").exists() {
+        eprintln!("No conversation found to resume in {}", cwd.display());
+        std::process::exit(1);
+    }
     let session_id = flag(&args, "--session-id")
         .or_else(|| flag(&args, "--resume"))
         .unwrap_or_else(|| "mock-session".into());
+    let script = Scripted::default();
+    *script.cwd.lock().await = cwd;
+    *script.server.lock().await = flag(&args, "--mcp-config")
+        .and_then(|config| serde_json::from_str::<Value>(&config).ok())
+        .and_then(|config| {
+            let servers = config["mcpServers"].as_object()?;
+            let server = servers.values().next()?;
+            Some(McpLaunch {
+                command: server["command"].as_str()?.to_owned(),
+                args: server["args"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|a| a.as_str().unwrap_or_default().to_owned())
+                    .collect(),
+                env: server["env"]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_owned()))
+                    .collect(),
+            })
+        });
     let mock = Arc::new(Mock {
         out: Mutex::new(tokio::io::stdout()),
         session_id,
@@ -173,6 +227,8 @@ pub async fn run(args: Vec<String>) {
         turn: Mutex::new(()),
         counter: AtomicU64::new(0),
         turns: AtomicU64::new(0),
+        resumed,
+        script,
     });
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Ok(Some(line)) = lines.next_line().await {
