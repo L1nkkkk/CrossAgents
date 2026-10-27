@@ -37,6 +37,7 @@ import { StateWord, TaskChanges } from "../parts";
 import { RunChanges, TaskReview } from "../review";
 import { RunTraceView } from "../trace";
 import { CommitGraphView } from "../commitgraph";
+import { t, type Key } from "../lib/i18n";
 import { wsKey } from "../workspace";
 import { SessionView } from "./Session";
 
@@ -61,12 +62,16 @@ export function useRun(runId: string) {
 }
 
 const ACTIVE = ["planning", "awaiting_approval", "running", "paused"];
-const CONTINUATION_LABELS: Record<string, string> = {
-  ended: "已结束", paused: "已暂停", waiting_approval: "等待批准计划",
-  unavailable: "主管不可用", waiting_human: "等待你的回答", working: "主管正在处理",
-  waiting_tasks: "等待任务执行", waiting_checks: "等待检查", finalize: "等待整体验收",
-  continue: "等待继续开发", recover: "等待主管处理停滞", exhausted: "次数已用完，需要人工处理",
+/** A continuation phase's words: the dictionary key for it. */
+const CONTINUATION_LABELS: Record<string, Key> = {
+  ended: "continuation.phase.ended", paused: "continuation.phase.paused", waiting_approval: "continuation.phase.waiting_approval",
+  unavailable: "continuation.phase.unavailable", waiting_human: "continuation.phase.waiting_human", working: "continuation.phase.working",
+  waiting_tasks: "continuation.phase.waiting_tasks", waiting_checks: "continuation.phase.waiting_checks", finalize: "continuation.phase.finalize",
+  continue: "continuation.phase.continue", recover: "continuation.phase.recover", exhausted: "continuation.phase.exhausted",
 };
+
+/** What a continuation's phase says, in words; a phase the table lacks is shown as the hub sent it. */
+const continuationLabel = (phase: string) => (CONTINUATION_LABELS[phase] ? t(CONTINUATION_LABELS[phase]) : phase);
 
 /**
  * A run is its lead's conversation (docs/tasks/W1.md §8): the run's header, its facts above
@@ -302,11 +307,17 @@ function RunMeta({ run, agents }: { run: Run; agents?: Parameters<typeof agentNa
       <PolicyChip run={run} />
       {run.continuation && (
         <details className={run.continuation.phase === "exhausted" ? "warn-text" : "muted"}>
-          <summary>持续推进：{CONTINUATION_LABELS[run.continuation.phase] ?? run.continuation.phase} · 已唤醒 {run.continuation.attempts}/{run.config.policy.continuation?.max_attempts ?? 0} 次</summary>
+          <summary>
+            {t("continuation.summary", {
+              phase: continuationLabel(run.continuation.phase),
+              attempts: run.continuation.attempts,
+              max: run.config.policy.continuation?.max_attempts ?? 0,
+            })}
+          </summary>
           <p>{run.continuation.next_step}</p>
-          <p>负责人：{agentName(agents, run.continuation.owner)}</p>
-          {run.continuation.next_at && <p>下次检查：{time(run.continuation.next_at)}</p>}
-          {run.continuation.delivery_error && <p>通知未送达：{run.continuation.delivery_error}</p>}
+          <p>{t("continuation.owner", { name: agentName(agents, run.continuation.owner) })}</p>
+          {run.continuation.next_at && <p>{t("continuation.nextCheck", { time: time(run.continuation.next_at) })}</p>}
+          {run.continuation.delivery_error && <p>{t("continuation.deliveryError", { error: run.continuation.delivery_error })}</p>}
         </details>
       )}
       <span title={time(run.created_at)}>{ago(run.created_at)}</span>
