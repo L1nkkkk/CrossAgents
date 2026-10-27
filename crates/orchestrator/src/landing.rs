@@ -617,7 +617,8 @@ impl Orchestrator {
 
     /// An archived lead was restored: it gets a checkout of its run branch back, or of a
     /// fresh one from the base when that branch was removed. Then the conversation is back
-    /// but what the run did is not (unless it landed, onto the base), and the person is told.
+    /// but what the run did is not, and the person is told: a landing does not say the base
+    /// has it now (a pull request may never have merged; a merge may have been reverted).
     pub async fn lead_returned(&self, lead: &Agent) -> Result<(), CoreError> {
         for run in self.runs_lived_in(lead).await? {
             let dir = self.integration_path(&run);
@@ -628,16 +629,25 @@ impl Orchestrator {
             if ws.checkout(&run.repo, &run.branch, &dir).await.is_err() {
                 ws.create(&run.repo, &run.branch, &run.base_branch, &dir)
                     .await?;
-                if run.landed.is_none() {
-                    self.publish(EventKind::AgentWarning {
-                        id: lead.id,
-                        message: format!(
-                            "对话保留了，但原执行代码没有恢复：run 分支 {} 已经删除，检出按 {} 重新建立",
-                            run.branch, run.base_branch
-                        ),
-                    })
-                    .await;
-                }
+                let landed = match &run.landed {
+                    None => String::new(),
+                    Some(l) if l.mode == crossagents_core::LandMode::Pr => format!(
+                        "；run 曾开过 PR（{}），不一定已经合入 {}",
+                        l.reference, run.base_branch
+                    ),
+                    Some(l) => format!(
+                        "；run 曾落地到 {}（{}），没有核对那些改动现在是否还在",
+                        run.base_branch, l.reference
+                    ),
+                };
+                self.publish(EventKind::AgentWarning {
+                    id: lead.id,
+                    message: format!(
+                        "对话保留了，但原执行代码没有恢复：run 分支 {} 已经删除，检出按 {} 重新建立{landed}",
+                        run.branch, run.base_branch
+                    ),
+                })
+                .await;
             }
         }
         Ok(())

@@ -74,6 +74,10 @@ pub struct PluginConfig {
     /// What installing it takes; shown, never run.
     #[serde(default)]
     pub install: Install,
+    /// Overrides the driver's `move_cwd`: `false` for a CLI that resumes a session only in
+    /// the directory it ran in (docs/tasks/S1.md §3.1).
+    #[serde(default)]
+    pub move_cwd: Option<bool>,
     /// Where this description came from (`built-in`, a manifest's path, `config.toml`),
     /// filled by [`PluginRegistry`]: what the install confirmation shows.
     #[serde(skip)]
@@ -122,6 +126,9 @@ impl PluginConfig {
         }
         if !over.install.is_empty() {
             self.install.merge(&over.install);
+        }
+        if over.move_cwd.is_some() {
+            self.move_cwd = over.move_cwd;
         }
         self
     }

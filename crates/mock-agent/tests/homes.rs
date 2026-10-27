@@ -296,3 +296,49 @@ async fn agents_from_before_homes_get_their_workspace_at_start() {
     // The ended run's claim is gone.
     assert_eq!(t.hub.bus.store().list_claims(None).await.unwrap(), vec![]);
 }
+
+/// The lost-context mark (S1 §7) goes only once a new session is up: a start that fails
+/// keeps it, and the next start still says the session is new.
+#[tokio::test]
+async fn a_lost_context_mark_outlives_a_start_that_fails() {
+    let t = TestHub::start_with(native_plugin).await;
+    let a = tempfile::tempdir().unwrap();
+    let pia = t.add_native("Pia", "worker", a.path()).await;
+    let key = AgentKey::Id(pia.id);
+    let mut w = t.watch().await;
+    t.send("Pia", "[session] first").await;
+    turn_done(&mut w, pia.id).await;
+    t.hub.runtime.stop(&key).await.unwrap();
+    let store = t.hub.bus.store();
+    store
+        .update_agent_config(pia.id, &serde_json::json!({ "context_lost": "test" }))
+        .await
+        .unwrap();
+
+    std::fs::write(a.path().join("mock-no-start"), "").unwrap();
+    assert!(
+        t.hub
+            .runtime
+            .send(&key, "second".into(), MessageSource::Human)
+            .await
+            .is_err()
+            || {
+                w.until(
+                    "start failed",
+                    |e| matches!(e.kind, EventKind::AgentError { id, .. } if id == pia.id),
+                )
+                .await;
+                true
+            }
+    );
+    assert_eq!(t.agent("Pia").await.context_lost(), Some("test"));
+
+    std::fs::remove_file(a.path().join("mock-no-start")).unwrap();
+    t.send("Pia", "[session] third").await;
+    w.until("said it is new", |e| {
+        matches!(&e.kind, EventKind::AgentWarning { id, message } if *id == pia.id && message.contains("这是新会话"))
+    })
+    .await;
+    turn_done(&mut w, pia.id).await;
+    assert_eq!(t.agent("Pia").await.context_lost(), None);
+}

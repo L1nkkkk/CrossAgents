@@ -6,7 +6,7 @@ mod common;
 
 use std::path::Path;
 
-use common::{TestHub, Watcher, git_repo, native_plugin};
+use common::{TestHub, Watcher, git_repo, native_plugin, pinned_plugin};
 use crossagents_api_types::{AgentId, EventKind, RunStatus};
 use serde_json::{Value, json};
 
@@ -833,4 +833,112 @@ async fn a_session_whose_driver_cannot_move_is_refused() {
         .await
         .unwrap();
     assert_eq!(detail["run"]["status"], "planning", "{detail}");
+}
+
+/// Ivy's CLI resumes a session only where it ran (`move_cwd = false`) and she has a session,
+/// so the run gets a copy of her as lead (S1 §3.2). Run starts it, the run ends and archives
+/// it, its checkout goes; restored, the checkout is rebuilt at the same path, and the copy
+/// carries on its own session there, with what it was told.
+async fn pinned_run(
+    t: &TestHub,
+    w: &mut Watcher,
+    repo: &Path,
+) -> (AgentId, String, std::path::PathBuf) {
+    let ivy = t.add_on("pinned", "Ivy", "planner", repo).await;
+    t.send("Ivy", "[session] hello").await;
+    w.until(
+        "Ivy answered",
+        |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if *id == ivy.id),
+    )
+    .await;
+    let run = start_run(
+        t,
+        "Ivy",
+        &format!("Run. [remember PELICAN-42] [session] {}", finish()),
+    )
+    .await;
+    assert_ne!(run["planner"], json!(ivy.id), "a copy leads: {run}");
+    assert!(!run["lead_note"].is_null(), "{run}");
+    let lead: AgentId = run["planner"].as_str().unwrap().parse().unwrap();
+    run_ends(w, &run).await;
+    let copy = t.agent(&lead.to_string()).await;
+    assert!(copy.archived_at.is_some(), "{copy:?}");
+    assert!(!copy.cwd.exists(), "{copy:?}");
+    let first = after(&said(w, lead), "session=").to_owned();
+    (lead, first, copy.cwd)
+}
+
+fn warnings_since(w: &Watcher, from: usize, agent: AgentId) -> Vec<String> {
+    w.seen[from..]
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::AgentWarning { id, message } if *id == agent => Some(message.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn restore_and_ask(t: &TestHub, w: &mut Watcher, lead: AgentId) -> String {
+    let resp = t
+        .post(
+            &format!("/v1/agents/{lead}/archive"),
+            json!({ "archived": false }),
+        )
+        .await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let before = said(w, lead).len();
+    t.send(&lead.to_string(), "[recall] [session] still you?")
+        .await;
+    w.until(
+        "answered",
+        |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if *id == lead),
+    )
+    .await;
+    said(w, lead)[before..].to_owned()
+}
+
+#[tokio::test]
+async fn a_copy_that_resumes_only_where_it_ran_carries_on_in_its_rebuilt_checkout() {
+    let repo = git_repo();
+    let sessions = tempfile::tempdir().unwrap();
+    let t = TestHub::start_with(pinned_plugin(sessions.path())).await;
+    let mut w = t.watch().await;
+    let (lead, first, checkout) = pinned_run(&t, &mut w, repo.path()).await;
+
+    let from = w.seen.len();
+    let text = restore_and_ask(&t, &mut w, lead).await;
+    assert!(checkout.is_dir(), "{checkout:?}");
+    assert!(
+        text.contains(&format!("session={first} (resumed)")),
+        "{text}"
+    );
+    assert!(text.contains("recall=PELICAN-42"), "{text}");
+    assert_eq!(warnings_since(&w, from, lead), Vec::<String>::new());
+}
+
+/// The same copy once its run is deleted: no checkout to rebuild, so it does not try to
+/// resume elsewhere (the CLI would refuse anyway): a new session, said on restore and again
+/// when it opens.
+#[tokio::test]
+async fn a_copy_that_resumes_only_where_it_ran_starts_over_after_its_run_is_deleted_and_says_so() {
+    let repo = git_repo();
+    let sessions = tempfile::tempdir().unwrap();
+    let t = TestHub::start_with(pinned_plugin(sessions.path())).await;
+    let mut w = t.watch().await;
+    let (lead, first, _) = pinned_run(&t, &mut w, repo.path()).await;
+    let runs: Value = t.get("/v1/runs").await.json().await.unwrap();
+    let run = runs["runs"][0]["id"].as_str().unwrap().to_owned();
+    let resp = t.delete(&format!("/v1/runs/{run}")).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    let from = w.seen.len();
+    let text = restore_and_ask(&t, &mut w, lead).await;
+    assert!(text.contains("(new)") && !text.contains(&first), "{text}");
+    assert!(text.contains("recall= "), "nothing carried over: {text}");
+    let warned = warnings_since(&w, from, lead);
+    assert!(
+        warned.iter().any(|m| m.contains("不带原来的上下文"))
+            && warned.iter().any(|m| m.contains("这是新会话")),
+        "{warned:?}"
+    );
 }

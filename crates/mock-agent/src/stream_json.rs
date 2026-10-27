@@ -15,9 +15,16 @@
 //! - `[write ...]` / `[call ...]` directives, see [`crate::script`]; calls go to the first
 //!   server of `--mcp-config`
 //!
+//! - `[remember X]` keep X in the session (with `--mock-sessions`)
+//! - `[recall]`    say what the session keeps
+//!
 //! `--resume` fails (the process exits before answering `initialize`) in a directory that
 //! has a file named `mock-no-resume`, for testing what happens when a session cannot be
-//! carried into another directory.
+//! carried into another directory. Any start fails in a directory with `mock-no-start`.
+//!
+//! `--mock-sessions DIR` keeps each session in `DIR/<id>.json` with the directory it was
+//! started in, as CLIs that keep sessions per project do: `--resume` fails anywhere else,
+//! and what `[remember]` kept comes back with the session.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,6 +48,8 @@ struct Mock {
     turns: AtomicU64,
     resumed: bool,
     script: Scripted,
+    /// `--mock-sessions`: where the session is kept.
+    kept: Option<std::path::PathBuf>,
 }
 
 impl Mock {
@@ -155,6 +164,26 @@ impl Mock {
                 self.say(&format!("session={} ({how}) ", self.session_id))
                     .await;
             }
+            if let Some(kept) = &self.kept {
+                let mut session = read_kept(kept).unwrap_or_else(|| json!({}));
+                for word in text.split("[remember ").skip(1) {
+                    if let Some(word) = word.split(']').next()
+                        && let Some(memory) = session["memory"].as_array_mut()
+                    {
+                        memory.push(json!(word));
+                    }
+                }
+                let _ = std::fs::write(kept, session.to_string());
+                if text.contains("[recall]") {
+                    let memory: Vec<&str> = session["memory"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect();
+                    self.say(&format!("recall={} ", memory.join(","))).await;
+                }
+            }
             let model = self.model.lock().await.clone();
             for line in self.script.run(&text, &model).await {
                 self.say(&format!(
@@ -181,6 +210,10 @@ impl Mock {
     }
 }
 
+fn read_kept(path: &std::path::Path) -> Option<Value> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
 /// The value after `flag` in `args`.
 fn flag(args: &[String], flag: &str) -> Option<String> {
     args.iter()
@@ -196,9 +229,30 @@ pub async fn run(args: Vec<String>) {
         eprintln!("No conversation found to resume in {}", cwd.display());
         std::process::exit(1);
     }
+    if cwd.join("mock-no-start").exists() {
+        eprintln!("cannot start in {}", cwd.display());
+        std::process::exit(1);
+    }
     let session_id = flag(&args, "--session-id")
         .or_else(|| flag(&args, "--resume"))
         .unwrap_or_else(|| "mock-session".into());
+    let here = std::fs::canonicalize(&cwd)
+        .unwrap_or_else(|_| cwd.clone())
+        .display()
+        .to_string();
+    let kept = flag(&args, "--mock-sessions")
+        .map(|dir| std::path::PathBuf::from(dir).join(format!("{session_id}.json")));
+    if let Some(kept) = &kept {
+        if resumed {
+            let found = read_kept(kept);
+            if found.as_ref().and_then(|s| s["cwd"].as_str()) != Some(here.as_str()) {
+                eprintln!("No conversation found with session ID: {session_id}");
+                std::process::exit(1);
+            }
+        } else {
+            let _ = std::fs::write(kept, json!({ "cwd": here, "memory": [] }).to_string());
+        }
+    }
     let script = Scripted::default();
     *script.cwd.lock().await = cwd;
     *script.server.lock().await = flag(&args, "--mcp-config")
@@ -232,6 +286,7 @@ pub async fn run(args: Vec<String>) {
         turns: AtomicU64::new(0),
         resumed,
         script,
+        kept,
     });
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Ok(Some(line)) = lines.next_line().await {

@@ -187,6 +187,7 @@ fn parse_in(
             efforts,
             locate: manifest.locate,
             install: manifest.install,
+            move_cwd: None,
             described_by: None,
         },
     ))

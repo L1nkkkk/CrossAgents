@@ -565,6 +565,9 @@ impl Runtime {
             .driver(&agent.plugin, agent.driver.as_deref())
             .ok()?;
         let mut capabilities = resolved.driver.capabilities();
+        if let Some(move_cwd) = self.plugins.config(&agent.plugin).and_then(|c| c.move_cwd) {
+            capabilities.move_cwd = move_cwd;
+        }
         let declared = self
             .live
             .lock()
@@ -735,6 +738,7 @@ impl Runtime {
             }
         };
 
+        // Only now that the new session is up: a start that failed says it again next time.
         if let Some(why) = lost {
             self.forget_lost_context(agent.id).await;
             publish(

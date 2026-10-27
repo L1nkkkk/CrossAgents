@@ -273,7 +273,7 @@ async fn archiving_the_lead_clears_its_checkout_and_restoring_brings_it_back() {
 
     let archive_path = format!("/v1/agents/{}/archive", lead["id"].as_str().unwrap());
     let archive = |on: bool| t.post(&archive_path, json!({ "archived": on }));
-    // Restored, it gets its checkout back.
+    // Restored, it gets its checkout of the run branch back.
     assert_eq!(archive(false).await.status(), 200);
     assert!(dir.join("one.txt").exists());
     // What a cargo build there left in the run's shared build directory.
@@ -290,8 +290,22 @@ async fn archiving_the_lead_clears_its_checkout_and_restoring_brings_it_back() {
         branches(repo.path())
     );
 
+    let from = w.seen.len();
     assert_eq!(archive(false).await.status(), 200);
     assert!(dir.join("one.txt").exists(), "restored from the base");
+    // Landed or not, the person is told the run's code was not checked out again: a landing
+    // does not prove the base still has it.
+    let lead_id = lead["id"].as_str().unwrap().to_owned();
+    w.until("told the code was rebuilt from the base", |e| {
+        matches!(&e.kind, EventKind::AgentWarning { id, message }
+            if id.to_string() == lead_id && message.contains("原执行代码没有恢复") && message.contains("没有核对"))
+    })
+    .await;
+    let rebuilt_once = w.seen[from..]
+        .iter()
+        .filter(|e| matches!(&e.kind, EventKind::AgentWarning { message, .. } if message.contains("原执行代码没有恢复")))
+        .count();
+    assert_eq!(rebuilt_once, 1);
 }
 
 #[tokio::test]

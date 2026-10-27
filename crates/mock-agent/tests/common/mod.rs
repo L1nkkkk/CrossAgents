@@ -51,6 +51,31 @@ pub fn native_plugin(config: &mut HubConfig) {
     );
 }
 
+/// Plugin `pinned`: like `native`, but the mock keeps each session in `sessions` with the
+/// directory it started in and resumes it nowhere else, and the plugin says so
+/// (`move_cwd = false`): a CLI that resumes, but only where it ran.
+pub fn pinned_plugin(sessions: &std::path::Path) -> impl FnOnce(&mut HubConfig) + use<> {
+    let sessions = sessions.display().to_string();
+    move |config| {
+        native_plugin(config);
+        config.plugins.insert(
+            "pinned".to_owned(),
+            PluginConfig {
+                driver: Some(crossagents_core::DriverKind::ClaudeNative),
+                native_command: vec![
+                    MOCK_AGENT.to_owned(),
+                    "stream-json".to_owned(),
+                    "--mock-sessions".to_owned(),
+                    sessions,
+                ],
+                models: vec!["mock-native".into()],
+                move_cwd: Some(false),
+                ..PluginConfig::default()
+            },
+        );
+    }
+}
+
 /// The `crossagents` binary (it serves `crossagents mcp`).
 pub fn crossagents_bin() -> std::path::PathBuf {
     static BUILT: std::sync::Once = std::sync::Once::new();
@@ -184,11 +209,22 @@ impl TestHub {
 
     /// A `native` agent (see [`native_plugin`]) living in `cwd`.
     pub async fn add_native(&self, name: &str, role: &str, cwd: &std::path::Path) -> Agent {
+        self.add_on("native", name, role, cwd).await
+    }
+
+    /// An agent of `plugin` (one of the stream-json plugins here, model `mock-native`).
+    pub async fn add_on(
+        &self,
+        plugin: &str,
+        name: &str,
+        role: &str,
+        cwd: &std::path::Path,
+    ) -> Agent {
         let resp = self
             .post(
                 "/v1/agents",
                 json!({
-                    "name": name, "plugin": "native", "model": "mock-native", "role": role,
+                    "name": name, "plugin": plugin, "model": "mock-native", "role": role,
                     "cwd": cwd.display().to_string(),
                 }),
             )
