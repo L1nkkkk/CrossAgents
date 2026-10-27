@@ -877,6 +877,40 @@ pub struct LandRequest {
     pub mode: Option<crossagents_core::LandMode>,
 }
 
+/// `POST /v1/runs/{key}/policy`: a person changes how an already started run continues by
+/// itself, and may hand its allowance out again. Only the continuation policy moves; every
+/// other part of the run's policy stays as it was. Absent fields keep what the run has.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UpdateRunPolicyRequest {
+    /// Absent: automatic continuation stays as the run has it.
+    #[serde(default)]
+    #[ts(optional)]
+    pub continuation: Option<ContinuationUpdate>,
+    /// Put the allowance back: `attempts` to zero, so a run whose wakeups ran out is woken
+    /// again (and tells the person once more when the new allowance runs out). Default
+    /// false.
+    #[serde(default)]
+    pub reset_attempts: bool,
+}
+
+/// Automatic continuation for a run that is already going: on or off, and its limits. The
+/// cap is for the whole run, not per task.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ContinuationUpdate {
+    /// `false` stops the wakeups — the run itself carries on untouched; `true` starts them.
+    pub enabled: bool,
+    /// Absent: the cap the run had, or the default (3) when it had none.
+    #[serde(default)]
+    #[ts(optional)]
+    pub max_attempts: Option<u32>,
+    /// Absent: the interval the run had, or the default (60 seconds).
+    #[serde(default)]
+    #[ts(optional)]
+    pub interval_seconds: Option<u32>,
+}
+
 /// `POST /v1/runs/{key}/finish`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
