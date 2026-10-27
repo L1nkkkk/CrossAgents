@@ -9,7 +9,7 @@ import type { Task } from "@bindings/Task";
 import type { TranscriptTurn } from "@bindings/TranscriptTurn";
 import { useActivity } from "./activity";
 import { api } from "./api";
-import { Avatar, DiffStat, Prose, agentTitle, ago, displayName, sessionHref } from "./components";
+import { Avatar, DiffStat, FileScopeProvider, Prose, agentTitle, ago, displayName, sessionHref } from "./components";
 import { ChangeStat } from "./diffview";
 import { useHubData } from "./hub";
 import { sumStats } from "./lib/diff";
@@ -124,6 +124,7 @@ function TaskBody({ task, run, owner, agents }: { task: Task; run: Run; owner?: 
   const failedChecks = report.checks.filter((c) => !c.passed);
   const reviewer = task.reviewer ? agents.find((a) => a.id === task.reviewer) : undefined;
   return (
+    <FileScopeProvider value={task.worktree ? { kind: "task", run: run.id, task: task.id } : { kind: "run", run: run.id }}>
     <div className="tc-body">
       <TcSection title="要做什么">
         <div className="tc-goal">
@@ -183,6 +184,7 @@ function TaskBody({ task, run, owner, agents }: { task: Task; run: Run; owner?: 
         {isEscalated(task) && <span className="muted">已交给升级队友</span>}
       </div>
     </div>
+    </FileScopeProvider>
   );
 }
 

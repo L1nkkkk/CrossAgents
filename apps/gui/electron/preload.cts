@@ -29,6 +29,10 @@ const bridge: CrossAgentsBridge = {
     if (error) throw new Error(error);
   },
   pickFolder: () => ipcRenderer.invoke("dialog:pick-folder"),
+  async openPath(scope, path) {
+    const error: string | null = await ipcRenderer.invoke("shell:open-path", scope, path);
+    if (error) throw new Error(error);
+  },
   setTheme: (theme) => ipcRenderer.send("theme:changed", theme),
   command: (name) => ipcRenderer.send("window:command", name),
 };

@@ -12,7 +12,7 @@ import { HeldFiles, TurnFiles, useHeld } from "../attach";
 import { HandoffLine } from "../handoff";
 import { dismiss as dismissMessage, retry as retryMessage, sendMessage, useOutbox, type Outgoing } from "../outbox";
 import { ACTIVE_RUN, useRunTree, useRunsLedBy } from "../App";
-import { Avatar, ErrorBox, Icon, Mark, Prose, StatusChip, Vendor, agentTitle, agentTone, displayName, roleShape, time, useAgents, vendorName } from "../components";
+import { Avatar, ErrorBox, FileScopeProvider, Icon, Mark, Prose, StatusChip, Vendor, agentTitle, agentTone, displayName, roleShape, time, useAgents, useFileScope, vendorName } from "../components";
 import { ChangeStat, DiffView } from "../diffview";
 import { parseDiff, tailLines, type DiffFile } from "../lib/diff";
 import { errorHint } from "../lib/errors";
@@ -554,6 +554,8 @@ function Conversation({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  // The run page shows its lead's conversation inside the run's scope: paths there are the run's.
+  const outerScope = useFileScope();
   // One mark per message from a person; recomputed only when those change.
   const asked = turns.filter(fromPerson);
   const key = asked.map((t) => t.message_id).join(",");
@@ -585,6 +587,7 @@ function Conversation({
               </p>
             </div>
           )}
+          <FileScopeProvider value={outerScope ?? { kind: "agent", agent: agent.id }}>
           <CwdContext.Provider value={agent.cwd}>
             {byTime(turns, [...switches, ...handoffs]).map((x) =>
               "message_id" in x ? (
@@ -596,6 +599,7 @@ function Conversation({
               ),
             )}
           </CwdContext.Provider>
+          </FileScopeProvider>
           {children}
         </div>
       </div>

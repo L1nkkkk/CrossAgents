@@ -21,6 +21,12 @@ export interface CrossAgentsBridge {
   useShippedHub?(): Promise<void>;
   /** Asks for a folder in the system dialog; null when cancelled. */
   pickFolder?(): Promise<string | null>;
+  /**
+   * Opens a file of a scope (`scope` is its API prefix, e.g. `/v1/agents/Rex`; `path` is relative
+   * to its root) with the system's default program. The main process first asks the hub's
+   * `files/resolve` that the path is inside the workspace; rejects with the reason when not.
+   */
+  openPath?(scope: string, path: string): Promise<void>;
   /** The page's theme changed: the window frame follows it. */
   setTheme?(theme: { dark: boolean; background: string; foreground: string }): void;
   /** A window command from the page's menu (electron/main.cts `COMMANDS`). */
