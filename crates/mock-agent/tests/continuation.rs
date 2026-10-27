@@ -48,6 +48,12 @@ fn enabled() -> Value {
     json!({"plan_approval":"auto", "continuation":{"max_attempts":2,"interval_seconds":3600}})
 }
 
+/// Like [`enabled`], plus the opt-in "no progress for this long" report.
+fn stuck(minutes: u32) -> Value {
+    json!({"plan_approval":"auto", "continuation":
+        {"max_attempts":2,"interval_seconds":3600,"stuck_minutes":minutes}})
+}
+
 async fn setup(repo: &std::path::Path) -> TestHub {
     let t = TestHub::start().await;
     t.add_agent_in("boss", None, "planner", repo).await;
@@ -94,6 +100,11 @@ async fn due(t: &TestHub, id: RunId) {
 }
 
 async fn wake_count(t: &TestHub, run: &Run) -> usize {
+    wake_texts(t, run).await.len()
+}
+
+/// Everything the continuation delivered to the lead, in order.
+async fn wake_texts(t: &TestHub, run: &Run) -> Vec<String> {
     t.hub
         .bus
         .store()
@@ -101,11 +112,88 @@ async fn wake_count(t: &TestHub, run: &Run) -> usize {
         .await
         .unwrap()
         .iter()
-        .filter(|e| {
-            matches!(&e.kind, EventKind::AgentInput { id, text, .. }
-            if *id == run.planner && text.contains("Run continuation "))
+        .filter_map(|e| match &e.kind {
+            EventKind::AgentInput { id, text, .. }
+                if *id == run.planner && text.contains("Run continuation ") =>
+            {
+                Some(text.clone())
+            }
+            _ => None,
         })
-        .count()
+        .collect()
+}
+
+/// Stands in for minutes of real waiting: moves the run's records and the arm of its stuck
+/// watch back, so the next tick sees a quiet stretch instead of sleeping.
+async fn quiet(t: &TestHub, id: RunId, minutes: i64) {
+    let ago = chrono::Duration::minutes(minutes);
+    let mut run = get(t, id).await;
+    run.updated_at -= ago;
+    if let Some(watch) = run
+        .continuation
+        .as_mut()
+        .and_then(|continuation| continuation.stuck_watch.as_mut())
+    {
+        watch.progress_at -= ago;
+    }
+    t.hub.orchestrator.store().update_run(&run).await.unwrap();
+    for mut task in t.hub.orchestrator.store().list_tasks(id).await.unwrap() {
+        task.updated_at -= ago;
+        t.hub.orchestrator.store().update_task(&task).await.unwrap();
+    }
+}
+
+/// Ages the run past the threshold and ticks until the lead is woken. The hub clock may land
+/// between the writes of [`quiet`] and refresh the watch; a second aging then does the job,
+/// so only a run that is never reported can fail this.
+async fn quiet_until_woken(t: &TestHub, run: &Run) {
+    for _ in 0..3 {
+        if wake_count(t, run).await > 0 {
+            return;
+        }
+        quiet(t, run.id, 5).await;
+        t.hub.orchestrator.continue_runs().await;
+    }
+    panic!(
+        "the lead was never told the busy run is stuck; state: {:?}",
+        get(t, run.id).await.continuation
+    );
+}
+
+/// A run whose only task waits on a worker with an open `[slow]` turn, so the phase is
+/// `waiting_tasks` and one agent and one task can be named in a report.
+async fn waiting_task_run(t: &TestHub, policy: Value) -> (Run, crossagents_core::Task) {
+    let mut w = t.watch().await;
+    let run = start(t, &plan("inspect", true), policy).await;
+    w.until("stalled", |e| {
+        matches!(
+            &e.kind,
+            EventKind::TaskStatusChanged {
+                to: TaskStatus::Stalled,
+                ..
+            }
+        )
+    })
+    .await;
+    let worker = t.hub.orchestrator.store().list_tasks(run.id).await.unwrap()[0]
+        .assignee
+        .unwrap();
+    t.send(&worker.to_string(), "[slow]").await;
+    w.until(
+        "worker executing",
+        |e| matches!(&e.kind, EventKind::AgentOutput { text, .. } if text.contains("working")),
+    )
+    .await;
+    idle(t, run.planner).await;
+    let task = t
+        .hub
+        .orchestrator
+        .store()
+        .list_tasks(run.id)
+        .await
+        .unwrap()
+        .remove(0);
+    (run, task)
 }
 
 /// The notices the person has for this run, in any state.
@@ -557,4 +645,245 @@ async fn runs_without_continuation_never_get_the_exhausted_notice() {
     t.hub.orchestrator.continue_runs().await;
     assert!(get(&t, run.id).await.continuation.is_none());
     assert!(notices(&t, &run).await.is_empty());
+}
+
+/// Without `stuck_minutes` a busy run is left alone forever, as it always was: no arm, no
+/// wakeup, however long its records have been quiet.
+#[tokio::test]
+async fn without_stuck_minutes_a_busy_run_is_never_reported() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let (run, _) = waiting_task_run(&t, enabled()).await;
+    phase(&t, &run, "waiting_tasks").await;
+    assert!(
+        get(&t, run.id)
+            .await
+            .continuation
+            .unwrap()
+            .stuck_watch
+            .is_none(),
+        "the default policy arms nothing"
+    );
+    quiet(&t, run.id, 120).await;
+    for _ in 0..3 {
+        t.hub.orchestrator.continue_runs().await;
+    }
+    let state = get(&t, run.id).await.continuation.unwrap();
+    assert_eq!(state.attempts, 0);
+    assert_eq!(state.phase, "waiting_tasks");
+    assert!(state.stuck_watch.is_none());
+    assert_eq!(wake_count(&t, &run).await, 0);
+    assert!(notices(&t, &run).await.is_empty());
+}
+
+/// A worker that keeps its turn open and writes nothing for longer than `stuck_minutes` is a
+/// report for the lead, naming the agent and the task, through the same wakeup path and
+/// quota as recovery. Nothing is interrupted: the worker's turn is still running after it.
+#[tokio::test]
+async fn a_quiet_busy_worker_is_reported_to_the_lead_with_agent_and_task() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let (run, task) = waiting_task_run(&t, stuck(2)).await;
+    let worker = task.assignee.unwrap();
+    phase(&t, &run, "waiting_tasks").await;
+    assert_eq!(
+        wake_count(&t, &run).await,
+        0,
+        "a busy agent is not stuck the moment it is first seen"
+    );
+    quiet_until_woken(&t, &run).await;
+
+    let texts = wake_texts(&t, &run).await;
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    let text = &texts[0];
+    let who = t
+        .hub
+        .orchestrator
+        .store()
+        .get_agent(&AgentKey::Id(worker))
+        .await
+        .unwrap()
+        .name;
+    assert!(text.contains(&who), "names the busy agent: {text}");
+    assert!(
+        text.contains(&format!("#{}", task.key)),
+        "names the task: {text}"
+    );
+    assert!(text.contains("No progress for"), "{text}");
+    assert!(text.contains("Nothing was interrupted"), "{text}");
+
+    let state = get(&t, run.id).await.continuation.unwrap();
+    assert_eq!(state.attempts, 1, "the report spent one shared attempt");
+    // The worker still holds its turn: only the lead was told, nothing was replayed.
+    let current = t
+        .hub
+        .orchestrator
+        .store()
+        .list_tasks(run.id)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(current.assignee, Some(worker));
+    assert!(!current.status.is_terminal());
+    // The next one has to wait for both the interval and a fresh quiet stretch.
+    for _ in 0..3 {
+        t.hub.orchestrator.continue_runs().await;
+    }
+    assert_eq!(wake_count(&t, &run).await, 1);
+}
+
+/// A task that moved within the threshold is progress: the worker is reporting on the task,
+/// so the quiet stretch has not run out even though the run itself was last written long ago.
+#[tokio::test]
+async fn a_task_that_moves_within_the_threshold_is_not_reported() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let (run, _) = waiting_task_run(&t, stuck(2)).await;
+    phase(&t, &run, "waiting_tasks").await;
+    quiet(&t, run.id, 5).await;
+    let mut task = t
+        .hub
+        .orchestrator
+        .store()
+        .list_tasks(run.id)
+        .await
+        .unwrap()
+        .remove(0);
+    task.progress = Some("compiled half the crate".into());
+    task.updated_at = Utc::now();
+    t.hub.orchestrator.store().update_task(&task).await.unwrap();
+
+    t.hub.orchestrator.continue_runs().await;
+    let state = get(&t, run.id).await.continuation.unwrap();
+    assert_eq!(wake_count(&t, &run).await, 0, "{state:?}");
+    assert_eq!(state.attempts, 0);
+    assert!(notices(&t, &run).await.is_empty());
+}
+
+/// The same for an agent that is visibly working without touching the task record: its new
+/// event is progress, even after the records themselves have been quiet past the threshold.
+#[tokio::test]
+async fn a_new_agent_event_within_the_threshold_is_not_reported() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let (run, task) = waiting_task_run(&t, stuck(2)).await;
+    phase(&t, &run, "waiting_tasks").await;
+    let mut w = t.watch().await;
+    // A message for the busy worker lands as an agent event right away, then the records
+    // are aged past the threshold: only that event keeps the run out of the report.
+    t.send(&task.assignee.unwrap().to_string(), "still there?")
+        .await;
+    w.until(
+        "worker event",
+        |e| matches!(&e.kind, EventKind::AgentInput { id, .. } if *id == task.assignee.unwrap()),
+    )
+    .await;
+    quiet(&t, run.id, 5).await;
+
+    t.hub.orchestrator.continue_runs().await;
+    let state = get(&t, run.id).await.continuation.unwrap();
+    assert_eq!(wake_count(&t, &run).await, 0, "{state:?}");
+    assert_eq!(state.attempts, 0);
+    assert!(notices(&t, &run).await.is_empty());
+}
+
+/// Stuck reports share `max_attempts` with the other wakeups, and reaching it tells the
+/// person once, on the same persisted flag.
+#[tokio::test]
+async fn stuck_reports_share_the_cap_and_its_single_exhausted_notice() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let (run, _) = waiting_task_run(
+        &t,
+        json!({"plan_approval":"auto", "continuation":
+            {"max_attempts":1,"interval_seconds":3600,"stuck_minutes":2}}),
+    )
+    .await;
+    phase(&t, &run, "waiting_tasks").await;
+    quiet_until_woken(&t, &run).await;
+    assert_eq!(wake_count(&t, &run).await, 1);
+    // The lead answers the wakeup; wait for that turn before the next quiet stretch.
+    idle(&t, run.planner).await;
+    phase(&t, &run, "waiting_tasks").await;
+
+    // The one attempt is gone: a second quiet stretch is reported to the person, not woken.
+    for _ in 0..3 {
+        if !notices(&t, &run).await.is_empty() {
+            break;
+        }
+        quiet(&t, run.id, 5).await;
+        t.hub.orchestrator.continue_runs().await;
+    }
+    let state = get(&t, run.id).await.continuation.unwrap();
+    assert_eq!(state.attempts, 1, "{state:?}");
+    let items = notices(&t, &run).await;
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert!(items[0].text.contains("1/1"), "{}", items[0].text);
+    assert!(
+        items[0].text.contains("waiting_tasks"),
+        "says what it was waiting on: {}",
+        items[0].text
+    );
+    assert!(
+        items[0].text.contains("No progress for"),
+        "carries the stuck advice: {}",
+        items[0].text
+    );
+
+    for _ in 0..3 {
+        quiet(&t, run.id, 5).await;
+        t.hub.orchestrator.continue_runs().await;
+    }
+    assert_eq!(wake_count(&t, &run).await, 1);
+    assert_eq!(
+        notices(&t, &run).await.len(),
+        1,
+        "the person is told about the cap exactly once"
+    );
+}
+
+/// The other wait a hung turn produces: the lead's own turn never returns. The report names
+/// the lead, and the wakeup is only queued — the running turn is left alone, not interrupted.
+#[tokio::test]
+async fn a_hung_lead_turn_is_reported_with_the_lead_named() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    let run = start(&t, "[slow]", stuck(2)).await;
+    w.until(
+        "lead executing",
+        |e| matches!(&e.kind, EventKind::AgentOutput { text, .. } if text.contains("working")),
+    )
+    .await;
+    phase(&t, &run, "working").await;
+    quiet_until_woken(&t, &run).await;
+
+    let texts = wake_texts(&t, &run).await;
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    let lead = t
+        .hub
+        .orchestrator
+        .store()
+        .get_agent(&AgentKey::Id(run.planner))
+        .await
+        .unwrap()
+        .name;
+    assert!(
+        texts[0].contains(&format!("the lead «{lead}»")),
+        "names the hung lead: {}",
+        texts[0]
+    );
+    assert!(texts[0].contains("No progress for"), "{}", texts[0]);
+    assert_eq!(get(&t, run.id).await.continuation.unwrap().attempts, 1);
+    let agent = t
+        .hub
+        .orchestrator
+        .store()
+        .get_agent(&AgentKey::Id(run.planner))
+        .await
+        .unwrap();
+    assert!(
+        matches!(agent.status, AgentStatus::Running | AgentStatus::Starting),
+        "the hung turn is still running, not interrupted: {agent:?}"
+    );
 }

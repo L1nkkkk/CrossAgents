@@ -129,6 +129,7 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
                     continuation: Some(crossagents_api_types::ContinuationPolicy {
                         max_attempts: start.continuation_attempts,
                         interval_seconds: start.continuation_interval,
+                        ..Default::default()
                     }),
                     ..Default::default()
                 }),
