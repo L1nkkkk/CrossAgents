@@ -46,11 +46,17 @@ pub fn required(method: &Method, pattern: &str) -> Level {
     );
     if admin {
         Level::Admin
-    } else if *method == Method::GET {
+    } else if *method == Method::GET || reads_only(pattern) {
         Level::Read
     } else {
         Level::Write
     }
+}
+
+/// POSTs that only read: `files/resolve` answers which paths name something inside a
+/// workspace, the paths carried in the request (docs/tasks/DOGFOOD.md §7).
+fn reads_only(pattern: &str) -> bool {
+    pattern.ends_with("/files/resolve")
 }
 
 /// `None` when `grant` may call the route, else why not (for a 403).
@@ -96,6 +102,19 @@ mod tests {
         assert_eq!(
             required(&Method::POST, "/v1/plugins/{name}/upgrade"),
             Level::Admin
+        );
+        // Asking which paths are inside a workspace reads; nothing changes.
+        assert_eq!(
+            required(&Method::POST, "/v1/agents/{key}/files/resolve"),
+            Level::Read
+        );
+        assert_eq!(
+            required(&Method::POST, "/v1/runs/{key}/tasks/{task}/files/resolve"),
+            Level::Read
+        );
+        assert_eq!(
+            required(&Method::GET, "/v1/runs/{key}/files/content"),
+            Level::Read
         );
     }
 

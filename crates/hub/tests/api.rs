@@ -2,7 +2,10 @@
 
 use std::time::Duration;
 
-use crossagents_api_types::{Agent, ListAgentsResponse};
+use crossagents_api_types::{
+    Agent, FileContentResponse, FileKind, FileTreeResponse, ListAgentsResponse,
+    ResolvePathsResponse, Run,
+};
 use crossagents_hub::{HubConfig, Paths, RunningHub};
 use futures::StreamExt;
 use reqwest::{Client, StatusCode};
@@ -502,4 +505,186 @@ async fn drivers_say_which_files_they_take() {
     assert!(offered.contains("PDFs"), "{offered}");
     assert!(offered.contains("codex-native"), "{offered}");
     assert!(offered.contains("images, text"), "{offered}");
+}
+
+/// docs/DESIGN.md §11: the file API reads a workspace without changing it — relative or
+/// absolute paths, and nothing outside the root.
+#[tokio::test]
+async fn files_are_read_inside_a_workspace() {
+    let t = TestHub::start().await;
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join("src")).unwrap();
+    std::fs::write(ws.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(ws.path().join("bin.dat"), [0u8, 1, 2, 3]).unwrap();
+    let created = t
+        .post("/v1/agents")
+        .json(&json!({
+            "name": "reader", "plugin": "claude", "role": "worker",
+            "cwd": ws.path().display().to_string(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+
+    // The root: directories first, then by name.
+    let tree: FileTreeResponse = t
+        .get("/v1/agents/reader/files/tree")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(tree.path, "");
+    let names: Vec<&str> = tree.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["src", "bin.dat"]);
+    assert_eq!(tree.entries[0].kind, FileKind::Dir);
+    assert_eq!(tree.entries[1].kind, FileKind::File);
+    assert_eq!(tree.entries[1].size, Some(4));
+
+    // One directory of it, with paths relative to the root.
+    let src: FileTreeResponse = t
+        .get("/v1/agents/reader/files/tree?path=src")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(src.path, "src");
+    assert_eq!(src.entries[0].path, "src/main.rs");
+
+    // A text file comes with its text, a binary one without.
+    let text: FileContentResponse = t
+        .get("/v1/agents/reader/files/content?path=src/main.rs")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(text.text.as_deref(), Some("fn main() {}\n"));
+    assert!(!text.binary && !text.truncated);
+    assert_eq!(text.size, 13);
+    assert!(text.abs_path.ends_with("main.rs"), "{}", text.abs_path);
+
+    let binary: FileContentResponse = t
+        .get("/v1/agents/reader/files/content?path=bin.dat")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(binary.binary);
+    assert_eq!(binary.text, None);
+    assert_eq!(binary.size, 4);
+
+    // Which strings name something inside the workspace: one answer per input, in order.
+    let abs = ws.path().join("bin.dat").display().to_string();
+    let resolved: ResolvePathsResponse = t
+        .post("/v1/agents/reader/files/resolve")
+        .json(&json!({ "paths": ["src/main.rs", abs, "../escape", "nope.txt"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let paths: Vec<Option<&str>> = resolved.entries.iter().map(|e| e.path.as_deref()).collect();
+    assert_eq!(paths, [Some("src/main.rs"), Some("bin.dat"), None, None]);
+    assert_eq!(resolved.entries[1].kind, Some(FileKind::File));
+    assert_eq!(resolved.entries[3].input, "nope.txt");
+
+    // Out of the workspace is refused; missing is not found; a bad ref is the caller's.
+    let escape = t
+        .get("/v1/agents/reader/files/tree?path=../")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(escape.status(), StatusCode::FORBIDDEN);
+    let body: Value = escape.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "forbidden");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("outside the workspace"),
+        "{body}"
+    );
+    assert_eq!(
+        t.get("/v1/agents/reader/files/content?path=nope.txt")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        t.get("/v1/agents/reader/files/tree?ref=--output=x")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+/// The same API on a run (its checkout) and a task (its worktree, which a task may not have).
+#[tokio::test]
+async fn files_are_read_in_a_run_and_task_scope() {
+    let t = TestHub::start().await;
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("notes.md"), "hi\n").unwrap();
+    let created = t
+        .post("/v1/agents")
+        .json(&json!({
+            "name": "planner", "plugin": "external", "role": "worker",
+            "cwd": ws.path().display().to_string(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+
+    // A directory outside version control: the run works in place, so its files are these.
+    let created = t
+        .post("/v1/runs")
+        .json(&json!({ "request": "look at the notes", "planner": "planner" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let run: Run = created.json().await.unwrap();
+    assert!(run.in_place);
+
+    let tree: FileTreeResponse = t
+        .get(&format!("/v1/runs/{}/files/tree", run.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let names: Vec<&str> = tree.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["notes.md"]);
+
+    // A task that has not started has no worktree to read, and an unknown run is not found.
+    assert_eq!(
+        t.get(&format!("/v1/runs/{}/tasks/nope/files/tree", run.id))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        t.get("/v1/runs/0000/files/tree")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
 }
