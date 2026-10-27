@@ -1,7 +1,7 @@
 // UI strings (docs/tasks/V6-GUI.md §7). `t(key, vars)` looks a key up in the current locale and
-// fills `{name}` placeholders. Only zh-CN exists so far; Sidebar.tsx, Home.tsx and strips.tsx
-// are the first files moved over, the rest follow. Terms stay as they are in every locale:
-// run, Planner, Worker, Reviewer, hub. i18n.test.ts checks that no key is missing.
+// fills `{name}` placeholders. Only zh-CN exists so far; Sidebar.tsx, Home.tsx, strips.tsx and
+// the continuation parts of Run.tsx are moved over, the rest follow. Terms stay as they are in
+// every locale: run, Planner, Worker, Reviewer, hub. i18n.test.ts checks that no key is missing.
 
 const zhCN = {
   "common.clear": "清除",
@@ -60,6 +60,24 @@ const zhCN = {
   "strip.dismiss": "不再提示 {name}",
   "strip.noTasks": "还没有任务",
   "strip.openRun": "run",
+  "strip.continuationExhausted": "持续推进已达上限 · 需要处理",
+
+  "continuation.summary": "持续推进：{phase} · 已唤醒 {attempts}/{max} 次",
+  "continuation.owner": "负责人：{name}",
+  "continuation.nextCheck": "下次检查：{time}",
+  "continuation.deliveryError": "通知未送达：{error}",
+  "continuation.phase.ended": "已结束",
+  "continuation.phase.paused": "已暂停",
+  "continuation.phase.waiting_approval": "等待批准计划",
+  "continuation.phase.unavailable": "主管不可用",
+  "continuation.phase.waiting_human": "等待你的回答",
+  "continuation.phase.working": "主管正在处理",
+  "continuation.phase.waiting_tasks": "等待任务执行",
+  "continuation.phase.waiting_checks": "等待检查",
+  "continuation.phase.finalize": "等待整体验收",
+  "continuation.phase.continue": "等待继续开发",
+  "continuation.phase.recover": "等待主管处理停滞",
+  "continuation.phase.exhausted": "次数已用完，需要人工处理",
 
   "home.title": "今天想做点什么？",
   "home.placeholder": "描述要做的事，比如：把登录页改成 OAuth，旧的密码登录保留",
@@ -105,6 +123,11 @@ const zhCN = {
   "home.maxTokens": "Token 上限（千）",
   "home.unlimited": "不限",
   "home.notUsed": "（不用）",
+  "home.continuation": "持续推进",
+  "home.continuationWake": "停滞时唤醒主管",
+  "home.continuationHint": "等待回答或暂停时不催促；仍遵守验收与落地权限。",
+  "home.continuationMaxAttempts": "最多唤醒次数（整个 Work）",
+  "home.continuationInterval": "等待间隔（秒）",
 } as const;
 
 export type Key = keyof typeof zhCN;

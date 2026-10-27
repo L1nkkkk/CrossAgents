@@ -563,16 +563,16 @@ export function HomeView() {
                 <AgentSelect agents={team.filter((a) => a.role === "reviewer")} value={reviewer} onChange={setReviewer} empty={t("home.notUsed")} />
               </Field>
             </div>
-            <div className="row" style={{ alignItems: "flex-start" }}>
+            <div className="row row-top">
               <div className="field">
-                <span>持续推进</span>
-                <label style={{ display: "flex", alignItems: "center", gap: 8 }}><input style={{ width: "auto" }} type="checkbox" checked={continuation} onChange={(e) => setContinuation(e.target.checked)} /> 停滞时唤醒主管</label>
-                <span className="muted">等待回答或暂停时不催促；仍遵守验收与落地权限。</span>
+                <span>{t("home.continuation")}</span>
+                <label className="field-check"><input type="checkbox" checked={continuation} onChange={(e) => setContinuation(e.target.checked)} /> {t("home.continuationWake")}</label>
+                <span className="muted">{t("home.continuationHint")}</span>
               </div>
-              <Field label="最多唤醒次数（整个 Work）">
+              <Field label={t("home.continuationMaxAttempts")}>
                 <input type="number" min={1} max={100} disabled={!continuation} value={continuationAttempts} onChange={(e) => setContinuationAttempts(Math.max(1, Math.min(100, Number(e.target.value) || 1)))} />
               </Field>
-              <Field label="等待间隔（秒）">
+              <Field label={t("home.continuationInterval")}>
                 <input type="number" min={1} max={86400} disabled={!continuation} value={continuationInterval} onChange={(e) => setContinuationInterval(Math.max(1, Math.min(86400, Number(e.target.value) || 1)))} />
               </Field>
             </div>
