@@ -169,7 +169,8 @@ impl Orchestrator {
         let run = self.run_of(caller.id).await?;
         let (run_json, assigned, issued) = match &run {
             Some((run, tasks)) => (
-                json!({ "run_id": run.id, "title": run.title, "status": run.status }),
+                json!({ "run_id": run.id, "title": run.title, "status": run.status,
+                    "continuation": run.continuation, "continuation_policy": run.config.policy.continuation }),
                 tasks
                     .iter()
                     .filter(|t| t.assignee == Some(caller.id) || t.reviewer == Some(caller.id))

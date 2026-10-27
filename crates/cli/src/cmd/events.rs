@@ -307,6 +307,13 @@ pub fn summary(kind: &EventKind) -> String {
         EventKind::RunCreated { run } => {
             format!("{} {}", short_tail(&run.id), one_line(&run.title))
         }
+        EventKind::RunContinuationChanged { id, state } => format!(
+            "{} continuation {} ({} wakeups): {}",
+            short_tail(id),
+            state.phase,
+            state.attempts,
+            state.next_step
+        ),
         EventKind::RunStatusChanged { id, from, to, note } => format!(
             "{} {} -> {}{}",
             short_tail(id),

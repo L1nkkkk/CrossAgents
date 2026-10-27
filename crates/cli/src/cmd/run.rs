@@ -23,6 +23,13 @@ pub struct RunArgs {
 
 #[derive(Debug, Args)]
 pub struct StartArgs {
+    /// Enable bounded lead wakeups when the run stops making progress.
+    #[arg(long)]
+    pub continue_run: bool,
+    #[arg(long, default_value_t = 3, requires = "continue_run")]
+    pub continuation_attempts: u32,
+    #[arg(long, default_value_t = 60, requires = "continue_run")]
+    pub continuation_interval: u32,
     /// What you want done.
     pub request: Option<String>,
     /// Agent that leads the run: works on the run branch, and splits the work when it pays.
@@ -116,7 +123,15 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
             max_parallel: start.max_parallel,
             max_attempts: start.max_attempts,
             team: (!start.team.is_empty()).then_some(start.team),
-            policy: None,
+            policy: start
+                .continue_run
+                .then(|| crossagents_api_types::RunPolicy {
+                    continuation: Some(crossagents_api_types::ContinuationPolicy {
+                        max_attempts: start.continuation_attempts,
+                        interval_seconds: start.continuation_interval,
+                    }),
+                    ..Default::default()
+                }),
         };
         let run: Run = client.post("/v1/runs", &req).await?;
         if ctx.json {
@@ -257,6 +272,19 @@ fn print_detail(detail: &RunDetail, verbose: bool) {
         println!("note:     {note}");
     }
     println!("created:  {}", local_time(run.created_at));
+    if let Some(state) = &run.continuation {
+        println!(
+            "continuation: {} ({} wakeups, owner {})",
+            state.phase, state.attempts, state.owner
+        );
+        println!("next:     {}", state.next_step);
+        if let Some(at) = state.next_at {
+            println!("due:      {}", local_time(at));
+        }
+        if let Some(error) = &state.delivery_error {
+            println!("delivery error: {error}");
+        }
+    }
     if detail.tasks.is_empty() && !run.plan.is_empty() {
         println!("\nplan ({} tasks, waiting for approval):", run.plan.len());
         for task in &run.plan {

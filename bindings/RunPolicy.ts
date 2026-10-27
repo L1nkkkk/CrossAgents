@@ -2,10 +2,15 @@
 import type { ApprovalPolicy } from "./ApprovalPolicy";
 import type { AskPolicy } from "./AskPolicy";
 import type { Budget } from "./Budget";
+import type { ContinuationPolicy } from "./ContinuationPolicy";
 import type { LandPolicy } from "./LandPolicy";
 import type { PlanApproval } from "./PlanApproval";
 
-export type RunPolicy = { plan_approval: PlanApproval, land: LandPolicy, human_ask: AskPolicy, 
+export type RunPolicy = { 
+/**
+ * None preserves H1: notifications only, no periodic recovery.
+ */
+continuation: ContinuationPolicy | null, plan_approval: PlanApproval, land: LandPolicy, human_ask: AskPolicy, 
 /**
  * For [`AskPolicy::Timeout`].
  */

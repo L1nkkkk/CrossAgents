@@ -122,7 +122,10 @@ impl Budgets {
     pub async fn check(&self, store: &dyn Store) -> Result<(), CoreError> {
         for run in store.list_runs().await? {
             let budget = &run.config.policy.budget;
-            if run.status != RunStatus::Running || !budget.is_set() {
+            if !(run.status == RunStatus::Running
+                || (run.status == RunStatus::Planning && run.config.policy.continuation.is_some()))
+                || !budget.is_set()
+            {
                 continue;
             }
             let (tokens, usd) = self.ledger.lock().await.spent(run.id);

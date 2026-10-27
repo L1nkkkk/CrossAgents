@@ -75,6 +75,9 @@ impl Budget {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct RunPolicy {
+    /// None preserves H1: notifications only, no periodic recovery.
+    #[serde(default)]
+    pub continuation: Option<ContinuationPolicy>,
     #[serde(default)]
     pub plan_approval: PlanApproval,
     #[serde(default)]
@@ -115,6 +118,7 @@ fn default_max_agents() -> u32 {
 impl Default for RunPolicy {
     fn default() -> Self {
         Self {
+            continuation: None,
             plan_approval: PlanApproval::default(),
             land: LandPolicy::default(),
             human_ask: AskPolicy::default(),
@@ -142,6 +146,24 @@ impl RunPolicy {
     }
 }
 
+/// Optional, bounded supervisor wakeups. The cap is per run, not per task.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(default)]
+pub struct ContinuationPolicy {
+    pub max_attempts: u32,
+    pub interval_seconds: u32,
+}
+
+impl Default for ContinuationPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            interval_seconds: 60,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +177,12 @@ mod tests {
             serde_json::from_str(r#"{"plan_approval":"auto","land":"pr"}"#).unwrap();
         assert_eq!(auto.plan_approval, PlanApproval::Auto);
         assert_eq!(auto.land, LandPolicy::Pr);
+        assert!(auto.continuation.is_none());
+        let enabled: RunPolicy = serde_json::from_str(r#"{"continuation":{}}"#).unwrap();
+        assert_eq!(enabled.continuation, Some(ContinuationPolicy::default()));
+        assert_eq!(
+            serde_json::from_value::<RunPolicy>(serde_json::to_value(&enabled).unwrap()).unwrap(),
+            enabled
+        );
     }
 }

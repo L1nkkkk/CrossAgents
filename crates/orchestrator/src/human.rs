@@ -285,7 +285,9 @@ impl Orchestrator {
     ) -> Result<(), CoreError> {
         let _guard = self.lock(run_id).await;
         let mut run = self.store().get_run(run_id).await?;
-        if run.status != RunStatus::Running {
+        if !(run.status == RunStatus::Running
+            || (run.status == RunStatus::Planning && run.config.policy.continuation.is_some()))
+        {
             return Ok(());
         }
         self.publish(EventKind::RunBudget {

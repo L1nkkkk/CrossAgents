@@ -114,6 +114,9 @@ export function HomeView() {
   const [worker, setWorker] = useState("");
   const [escalate, setEscalate] = useState("");
   const [reviewer, setReviewer] = useState("");
+  const [continuation, setContinuation] = useState(false);
+  const [continuationAttempts, setContinuationAttempts] = useState(3);
+  const [continuationInterval, setContinuationInterval] = useState(60);
   const [maxParallel, setMaxParallel] = useState("");
   const [preset, setPresetState] = useState<Preset>(() => load<Preset>(PRESET_KEY, "manual", (v) => v === "manual" || v === "semi"));
   const [maxUsd, setMaxUsd] = useState("");
@@ -275,6 +278,7 @@ export function HomeView() {
         team: null,
         policy: {
           ...presetPolicy(preset),
+          continuation: continuation ? { max_attempts: continuationAttempts, interval_seconds: continuationInterval } : null,
           budget: {
             max_usd: maxUsd ? Number(maxUsd) : null,
             max_minutes: maxMinutes ? Number(maxMinutes) : null,
@@ -557,6 +561,19 @@ export function HomeView() {
               </Field>
               <Field label={t("home.reviewer")}>
                 <AgentSelect agents={team.filter((a) => a.role === "reviewer")} value={reviewer} onChange={setReviewer} empty={t("home.notUsed")} />
+              </Field>
+            </div>
+            <div className="row" style={{ alignItems: "flex-start" }}>
+              <div className="field">
+                <span>持续推进</span>
+                <label style={{ display: "flex", alignItems: "center", gap: 8 }}><input style={{ width: "auto" }} type="checkbox" checked={continuation} onChange={(e) => setContinuation(e.target.checked)} /> 停滞时唤醒主管</label>
+                <span className="muted">等待回答或暂停时不催促；仍遵守验收与落地权限。</span>
+              </div>
+              <Field label="最多唤醒次数（整个 Work）">
+                <input type="number" min={1} max={100} disabled={!continuation} value={continuationAttempts} onChange={(e) => setContinuationAttempts(Math.max(1, Math.min(100, Number(e.target.value) || 1)))} />
+              </Field>
+              <Field label="等待间隔（秒）">
+                <input type="number" min={1} max={86400} disabled={!continuation} value={continuationInterval} onChange={(e) => setContinuationInterval(Math.max(1, Math.min(86400, Number(e.target.value) || 1)))} />
               </Field>
             </div>
             <div className="row" style={{ alignItems: "flex-start" }}>

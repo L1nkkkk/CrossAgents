@@ -45,13 +45,15 @@ pub use handoff::{Handoff, HandoffKind, HandoffOutcome};
 pub use human::{HumanAction, HumanItem, HumanItemKind, HumanItemStatus};
 pub use ids::{AgentId, HandoffId, MessageId, RunId, SessionId, TaskId};
 pub use model::{
-    Agent, AgentProfile, AgentStatus, CONTEXT_LOST, CheckResult, LandMode, Landing, NameSource,
-    PlannedTask, Role, Run, RunConfig, RunStatus, Scope, Task, TaskReport, TaskSpec,
-    validate_agent_name, validate_slug,
+    Agent, AgentProfile, AgentStatus, CONTEXT_LOST, CheckResult, ContinuationState, LandMode,
+    Landing, NameSource, PlannedTask, Role, Run, RunConfig, RunStatus, Scope, Task, TaskReport,
+    TaskSpec, validate_agent_name, validate_slug,
 };
 pub use note::{EXTERNAL_PLUGIN, Note, NoteScope};
 pub use notify::{Reminder, Watch, WatchOn, WatchTarget};
-pub use policy::{ApprovalPolicy, AskPolicy, Budget, LandPolicy, PlanApproval, RunPolicy};
+pub use policy::{
+    ApprovalPolicy, AskPolicy, Budget, ContinuationPolicy, LandPolicy, PlanApproval, RunPolicy,
+};
 pub use state::TaskStatus;
 pub use store::{AgentKey, Store};
 pub use tool::ToolInfo;

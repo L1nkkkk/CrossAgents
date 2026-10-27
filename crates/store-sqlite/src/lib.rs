@@ -1017,6 +1017,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().await.unwrap();
         let now = time_from(&Utc::now().to_rfc3339()).unwrap();
         let mut run = Run {
+            continuation: None,
             landed: None,
             lead_note: None,
             summary: None,
@@ -1104,6 +1105,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().await.unwrap();
         let now = time_from(&Utc::now().to_rfc3339()).unwrap();
         let run = Run {
+            continuation: None,
             landed: None,
             lead_note: None,
             summary: None,

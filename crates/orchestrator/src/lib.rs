@@ -5,6 +5,7 @@
 pub mod approval;
 pub mod brief;
 pub mod claims;
+pub mod continuation;
 pub mod delete;
 pub mod engine;
 pub mod files;

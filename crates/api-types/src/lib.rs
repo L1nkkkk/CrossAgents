@@ -9,9 +9,9 @@ use ts_rs::TS;
 
 pub use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentProfile, AgentStatus, Capabilities, CheckResult,
-    ClaimRole, DataSource, DiffSource, DriverKind, Event, EventKind, Handoff, HandoffKind,
-    MessageId, MessageSource, ModelInfo, OutputStream, PlannedTask, Role, Run, RunId, RunStatus,
-    StopReason, Task, TaskId, TaskStatus, TokenTotals, ToolInfo, ToolStatus,
+    ClaimRole, ContinuationPolicy, DataSource, DiffSource, DriverKind, Event, EventKind, Handoff,
+    HandoffKind, MessageId, MessageSource, ModelInfo, OutputStream, PlannedTask, Role, Run, RunId,
+    RunPolicy, RunStatus, StopReason, Task, TaskId, TaskStatus, TokenTotals, ToolInfo, ToolStatus,
 };
 
 /// Handoff cards and how a task's chain of them reads.
