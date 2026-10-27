@@ -25,7 +25,7 @@ export const SCENARIOS: Scenario[] = [
   { key: "continuation", label: "持续推进已达上限", hint: "恢复次数已耗尽，显示下一步和负责人", build: () => {
     const scene = oauthRun("running");
     const run = scene.state.runs[0].run;
-    run.config.policy.continuation = { max_attempts: 3, interval_seconds: 60 };
+    run.config.policy.continuation = { max_attempts: 3, interval_seconds: 60, stuck_minutes: null };
     run.continuation = { owner: run.planner, phase: "exhausted", next_step: "已达到自动唤醒次数上限。请检查任务状态，或向主管发送进一步指示。", attempts: 3, next_at: null, last_attempt_at: new Date().toISOString(), delivery_error: null };
     return { ...scene, script: [], route: `#/runs/${run.id}` };
   } },

@@ -318,3 +318,12 @@ B 删除 run：
 - [x] 会话页提供「复制原生恢复命令」：带正确目录（会话文件所在的项目目录）和账号环境（代理、配置目录），人能在终端里接着用同一个 session id（2026-10-27）：hub 新增只读 `GET /v1/agents/{key}/resume-command`（`crates/hub/src/resume.rs`），会话页顶栏「终端恢复」展开命令，Windows 给 PowerShell 写法。目录取会话现在的 cwd（hub 也在这里按 id 恢复，S1 §4 实测可行）；会话文件留在别的项目目录时写明位置，提示在这里打开恢复列表可能看不到它。环境只带账号配置目录（`CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `CODEBUDDY_CONFIG_DIR`）和代理，代理里的用户名密码去掉，不带任何令牌。外部会话、驱动不能恢复（ACP）、with-native（没有终端恢复命令）、没开过会话、`context_lost`、目录不在了、找不到 CLI 时复制按钮置灰并写明原因；hub 正开着这个会话时照给命令，但提示先停掉。Claude / CodeBuddy 用 `--resume <id>`，Codex 用 `codex resume <id>`，真实 CLI 的交互式恢复没有在本机实测。测试：`resume.rs` 单元测试与 `crates/mock-agent/tests/resume_command.rs`；截图见 [screens/context-lost](screens/context-lost/)
 - [x] 上下文没延续、代码没恢复的警告在会话页顶部提示条显示，手动关掉才消失（`apps/gui/src/notices.ts`）：原来这些 `agent.warning` 只折进最后一轮，恢复时会埋在旧消息里，没开过轮次的会话则直接丢掉。mock 场景 `context-lost*`、`code-lost*` 用 hub 的原文（MockBridge `HUB_SAYS`），截图见 [screens/context-lost](screens/context-lost/)
 - [ ] 兼容性增强：仓库根目录的 Claude 原生会话列表能看到在 worktree 里跑过的会话。先实测交互式 `claude --resume` 列表的行为，再决定做法（不在 `send_home` 里复制或链接会话文件，见 S1 §7 第 14 条）
+
+## 十六、并行跑 run / task 时暴露的四个问题
+
+> 2026-10-27，run `01a17e22`（补齐持续推进的 5 个缺口）里三个 worker 并行跑的时候实测出来的，都已核实到具体原因，均未在那个 run 里修。
+
+- [ ] **共享编译目录在并行 worktree 下串味**：`18d4f6a` 让同一仓库的所有 run 共用 `<worktrees>/targets/<仓库>-<哈希>` 作为 `CARGO_TARGET_DIR`，省下重复编译依赖的时间。但 workspace 成员的包名和版本号在各个 worktree 里完全相同，产物会互相覆盖：A 的 worktree 会拿到 B 编译出的 `crossagents-core` / `crossagents-api-types`。实测两种假错误——A 报 `unresolved import crossagents_api_types::UpdateRunPolicyRequest`（代码里明明有），B 报 `missing field stuck_minutes`；换成独立 `CARGO_TARGET_DIR` 两边都干净通过。hub 跑 task 验收时撞上这个会把好改动判成失败。可能的修法：每个 worktree 一个 target 子目录而只共享 registry/git 缓存，或给成员 crate 的编译加上按路径区分的 `-C metadata`。
+- [ ] **`schedule()` 不被 `task_create` / `task_assign` / `task_update` 触发**：`crates/orchestrator/src/engine.rs` 的 `schedule_reporting` 只在计划批准、任务合并/失败这些时刻跑。所以在一个跑着的 run 里新建或改派一条任务，它会一直停在 pending、没有 assignee、也没有任何错误记录，直到别的任务事件顺带触发一次调度。实测等了十几分钟都不动，直到另一条任务合并。
+- [ ] **`crates/mock-agent/tests/work_start.rs::a_proposer_that_can_move_leads_the_work_itself` 在重负载下偶发失败**：提案者还在应答时 work_start 被拒（`409 busy: lyra is answering a person's message`）。机器空闲时连跑三次 8/8 过，整机重编译时复现过一次。是测试自身的竞态，不是功能问题。
+- [ ] **持续推进「唤醒投递失败」那条 Notice 没有集成测试**：实现和代码审查都做了（首次失败发一条、投递成功清标记、再失败再发一条），但真实 hub 下让 `host.notify` 稳定失败做不到——store 只有 INSERT 没有改插件的接口，删 agent 又会先被 `continuation_step` 的 `get_agent` 挡住。要覆盖得加一个可注入失败的 Host 测试替身。

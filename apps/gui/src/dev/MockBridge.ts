@@ -523,14 +523,22 @@ export class MockBridge implements CrossAgentsBridge {
         const d = s.runs.find((x) => x.run.id === decodeURIComponent(m![1]));
         if (!d) return notFound("run");
         const req = body as {
-          continuation?: { enabled: boolean; max_attempts?: number; interval_seconds?: number };
+          continuation?: {
+            enabled: boolean;
+            max_attempts?: number;
+            interval_seconds?: number;
+            stuck_minutes?: number | null;
+          };
           reset_attempts?: boolean;
         };
         if (req.continuation?.enabled) {
-          const had = d.run.config.policy.continuation ?? { max_attempts: 3, interval_seconds: 60 };
+          const had = d.run.config.policy.continuation ?? { max_attempts: 3, interval_seconds: 60, stuck_minutes: null };
           d.run.config.policy.continuation = {
             max_attempts: req.continuation.max_attempts ?? had.max_attempts,
             interval_seconds: req.continuation.interval_seconds ?? had.interval_seconds,
+            // Unstated keeps what the run had; `null` turns the quiet-wait report off.
+            stuck_minutes:
+              req.continuation.stuck_minutes === undefined ? had.stuck_minutes : req.continuation.stuck_minutes,
           };
         } else if (req.continuation) {
           d.run.config.policy.continuation = null;

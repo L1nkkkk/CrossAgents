@@ -123,9 +123,67 @@ fn update(enabled: bool, max_attempts: Option<u32>, reset: bool) -> UpdateRunPol
             enabled,
             max_attempts,
             interval_seconds: Some(3600),
+            stuck_minutes: None,
         }),
         reset_attempts: reset,
     }
+}
+
+/// The stuck report is a nullable limit: saying nothing about it keeps the run's own
+/// setting, a number sets it, and `null` turns it off again. A request body, not the typed
+/// struct, so the three cases are told apart the way a client's JSON tells them apart.
+#[tokio::test]
+async fn the_stuck_report_is_set_kept_and_turned_off() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let run = start(
+        &t,
+        json!({"plan_approval":"auto", "continuation":{"max_attempts":2}}),
+    )
+    .await;
+    idle(&t, run.planner).await;
+    let stuck = |run: &Run| {
+        run.config
+            .policy
+            .continuation
+            .as_ref()
+            .and_then(|p| p.stuck_minutes)
+    };
+    assert_eq!(stuck(&run), None, "off unless asked for");
+
+    let set = t
+        .post(
+            &format!("/v1/runs/{}/policy", run.id),
+            json!({"continuation":{"enabled":true,"stuck_minutes":15}}),
+        )
+        .await;
+    assert_eq!(set.status(), 200, "{}", set.text().await.unwrap());
+    let detail: RunDetail = set.json().await.unwrap();
+    assert_eq!(stuck(&detail.run), Some(15));
+
+    // Another change that does not mention it leaves it alone.
+    let other = change_policy(&t, &run, &update(true, Some(4), false)).await;
+    assert_eq!(stuck(&other.run), Some(15), "unstated means unchanged");
+    assert_eq!(
+        other.run.config.policy.continuation.unwrap().max_attempts,
+        4
+    );
+
+    let cleared = t
+        .post(
+            &format!("/v1/runs/{}/policy", run.id),
+            json!({"continuation":{"enabled":true,"stuck_minutes":null}}),
+        )
+        .await;
+    assert_eq!(cleared.status(), 200, "{}", cleared.text().await.unwrap());
+    let detail: RunDetail = cleared.json().await.unwrap();
+    assert_eq!(stuck(&detail.run), None, "null turns the report off");
+    assert_eq!(
+        detail.run.config.policy.continuation.unwrap().max_attempts,
+        4,
+        "the other limits stay"
+    );
+    assert_eq!(stuck(&get(&t, run.id).await), None, "and it is recorded");
 }
 
 /// The allowance ran out; the person hands out a new one, and the clock wakes the lead

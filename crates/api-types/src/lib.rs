@@ -909,6 +909,28 @@ pub struct ContinuationUpdate {
     #[serde(default)]
     #[ts(optional)]
     pub interval_seconds: Option<u32>,
+    /// Report a run that waits on a busy agent once its own records go quiet for this many
+    /// minutes. Absent keeps what the run had; `null` turns the report off again, which is
+    /// the default. The report only ever asks the lead to decide — nothing is interrupted.
+    // Skipped when it is not stated, so the value round-trips: serialising `None` as `null`
+    // would come back as "the request said null", which means the opposite.
+    #[serde(
+        default,
+        deserialize_with = "stated",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(optional, type = "number | null")]
+    pub stuck_minutes: Option<Option<u32>>,
+}
+
+/// Tells "the request did not mention this" (`None`) from "the request said null"
+/// (`Some(None)`), which a plain `Option<Option<T>>` would read as the same thing.
+fn stated<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer).map(Some)
 }
 
 /// `POST /v1/runs/{key}/finish`.

@@ -278,7 +278,7 @@ export function HomeView() {
         team: null,
         policy: {
           ...presetPolicy(preset),
-          continuation: continuation ? { max_attempts: continuationAttempts, interval_seconds: continuationInterval } : null,
+          continuation: continuation ? { max_attempts: continuationAttempts, interval_seconds: continuationInterval, stuck_minutes: null } : null,
           budget: {
             max_usd: maxUsd ? Number(maxUsd) : null,
             max_minutes: maxMinutes ? Number(maxMinutes) : null,

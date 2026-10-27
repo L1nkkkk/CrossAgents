@@ -95,6 +95,14 @@ pub enum RunCommand {
         /// Put the allowance back: a run whose wakeups ran out is woken again.
         #[arg(long, requires = "continue_run")]
         reset: bool,
+        /// Report the run to its lead when its own records go quiet for this many minutes
+        /// while it waits on a busy agent (default: what it had, or off). Only a report:
+        /// no turn is interrupted.
+        #[arg(long, requires = "continue_run")]
+        stuck_minutes: Option<u32>,
+        /// Stop reporting a quiet wait; the run keeps its other limits.
+        #[arg(long, requires = "continue_run", conflicts_with = "stuck_minutes")]
+        no_stuck: bool,
     },
     /// Delete a run that ended, with its tasks and the agents it started.
     Rm {
@@ -243,11 +251,13 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
             attempts,
             interval,
             reset,
+            stuck_minutes,
+            no_stuck,
         } => {
             if !continue_run && !no_continue && !reset {
                 anyhow::bail!(
                     "say what to change: --continue-run [--attempts N] [--interval S] \
-                     [--reset], or --no-continue"
+                     [--stuck-minutes M | --no-stuck] [--reset], or --no-continue"
                 );
             }
             let req = UpdateRunPolicyRequest {
@@ -255,6 +265,13 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
                     enabled: continue_run,
                     max_attempts: attempts,
                     interval_seconds: interval,
+                    // Said only when asked for: `--no-stuck` states null, a bare command
+                    // leaves the run's own setting alone.
+                    stuck_minutes: match (stuck_minutes, no_stuck) {
+                        (Some(minutes), _) => Some(Some(minutes)),
+                        (None, true) => Some(None),
+                        (None, false) => None,
+                    },
                 }),
                 reset_attempts: reset,
             };
@@ -300,6 +317,10 @@ fn print_policy(detail: &RunDetail) {
         policy.max_attempts,
         policy.interval_seconds
     );
+    match policy.stuck_minutes {
+        Some(minutes) => println!("stuck:    reported after {minutes} quiet minute(s)"),
+        None => println!("stuck:    a quiet wait is not reported"),
+    }
     if let Some(state) = &run.continuation {
         println!("phase:    {}", state.phase);
         if let Some(at) = state.next_at {
@@ -348,8 +369,13 @@ fn print_detail(detail: &RunDetail, verbose: bool) {
     println!("created:  {}", local_time(run.created_at));
     match &run.config.policy.continuation {
         Some(policy) => println!(
-            "policy:   continuation, up to {} wakeup(s) every {}s",
-            policy.max_attempts, policy.interval_seconds
+            "policy:   continuation, up to {} wakeup(s) every {}s{}",
+            policy.max_attempts,
+            policy.interval_seconds,
+            match policy.stuck_minutes {
+                Some(minutes) => format!(", quiet for {minutes}min is reported"),
+                None => String::new(),
+            }
         ),
         None => println!("policy:   no automatic continuation"),
     }

@@ -87,10 +87,27 @@ async fn idle(t: &TestHub, id: AgentId) {
     .expect("agent did not become idle");
 }
 
+/// Waits until the run's checkpoint reads `expected`, checking it again as the hub's own
+/// clock keeps running: the lead can still be answering a wakeup this instant, which reads
+/// as `working` for a moment and is not what a test asking for a settled phase means.
 async fn phase(t: &TestHub, run: &Run, expected: &str) {
-    t.hub.orchestrator.continue_runs().await;
-    let state = get(t, run.id).await.continuation.unwrap();
-    assert_eq!(state.phase, expected, "{state:?}");
+    let mut last = None;
+    let settled = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            t.hub.orchestrator.continue_runs().await;
+            let state = get(t, run.id).await.continuation.unwrap();
+            if state.phase == expected {
+                return;
+            }
+            last = Some(state);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(
+        settled.is_ok(),
+        "the run never reached {expected}; last: {last:?}"
+    );
 }
 
 async fn due(t: &TestHub, id: RunId) {

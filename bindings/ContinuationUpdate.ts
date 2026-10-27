@@ -16,4 +16,10 @@ max_attempts?: number,
 /**
  * Absent: the interval the run had, or the default (60 seconds).
  */
-interval_seconds?: number, };
+interval_seconds?: number, 
+/**
+ * Report a run that waits on a busy agent once its own records go quiet for this many
+ * minutes. Absent keeps what the run had; `null` turns the report off again, which is
+ * the default. The report only ever asks the lead to decide — nothing is interrupted.
+ */
+stuck_minutes?: number | null, };

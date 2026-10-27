@@ -1350,6 +1350,11 @@ async fn update_run_policy(
             if let Some(interval_seconds) = update.interval_seconds {
                 policy.interval_seconds = interval_seconds;
             }
+            // Stated or not is the question here: `null` turns the stuck report off, while
+            // saying nothing about it keeps the run's own setting.
+            if let Some(stuck_minutes) = update.stuck_minutes {
+                policy.stuck_minutes = stuck_minutes;
+            }
             run.config.policy.continuation = Some(policy);
         } else {
             // Off leaves nothing behind for the clock (or a client) to read as still on.

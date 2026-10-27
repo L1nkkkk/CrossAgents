@@ -36,6 +36,7 @@ import { PRESETS, budgetText, presetOf, presetPolicy, type Preset } from "../lib
 import {
   MAX_ATTEMPTS_LIMIT,
   MAX_INTERVAL_SECONDS,
+  MAX_STUCK_MINUTES,
   canReset,
   draftOf,
   draftProblems,
@@ -43,6 +44,7 @@ import {
   isExhausted,
   policyBody,
   resetBody,
+  type ContinuationField,
 } from "../lib/continuation";
 import { accountOf, prettyModel } from "../lib/models";
 import { StateWord, TaskChanges } from "../parts";
@@ -323,6 +325,13 @@ function RunMeta({ run, agents, onPolicyChange }: { run: Run; agents?: Parameter
   );
 }
 
+/** What to say about a limit the person has to fix before the policy can be saved. */
+const INVALID_FIELD: Record<ContinuationField, Key> = {
+  maxAttempts: "continuation.invalidMax",
+  intervalSeconds: "continuation.invalidInterval",
+  stuckMinutes: "continuation.invalidStuck",
+};
+
 /**
  * How the run goes on by itself (docs/CONTINUATION.md): the hub's facts about it, and the
  * person's hand on the policy — on or off, its limits, and, once the wakeups ran out, its
@@ -413,10 +422,23 @@ function ContinuationMeta({ run, agents, onDone }: { run: Run; agents?: Agent[];
             onChange={(e) => setDraft({ ...draft, intervalSeconds: e.target.value })}
           />
         </label>
+        <label className="field">
+          <span>{t("continuation.stuck")}</span>
+          <input
+            type="number"
+            min={1}
+            max={MAX_STUCK_MINUTES}
+            placeholder={t("continuation.stuckOff")}
+            value={draft.stuckMinutes}
+            disabled={busy || !draft.enabled}
+            onChange={(e) => setDraft({ ...draft, stuckMinutes: e.target.value })}
+          />
+          <span className="muted small">{t("continuation.stuckHint")}</span>
+        </label>
       </div>
       {problems.length > 0 && (
         <p className="warn-text small">
-          {problems.map((field) => (field === "maxAttempts" ? t("continuation.invalidMax") : t("continuation.invalidInterval"))).join(" ")}
+          {problems.map((field) => t(INVALID_FIELD[field])).join(" ")}
         </p>
       )}
       <div className="row">

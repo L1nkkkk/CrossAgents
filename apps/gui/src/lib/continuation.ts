@@ -12,6 +12,8 @@ export const DEFAULT_INTERVAL_SECONDS = 60;
 /** The same bounds the form on the home page offers. */
 export const MAX_ATTEMPTS_LIMIT = 100;
 export const MAX_INTERVAL_SECONDS = 86400;
+/** A quiet stretch is counted in minutes, up to a day: longer than that is never reported. */
+export const MAX_STUCK_MINUTES = 1440;
 
 export type ContinuationDraft = {
   /** Whether the hub wakes the lead when nobody is working on the run. */
@@ -20,9 +22,14 @@ export type ContinuationDraft = {
   maxAttempts: string;
   /** Seconds between wakeups, as typed. */
   intervalSeconds: string;
+  /**
+   * Minutes of quiet before a run that waits on a busy agent is reported to its lead, as
+   * typed. `""` means a quiet wait is never reported, which is what a run has unless asked.
+   */
+  stuckMinutes: string;
 };
 
-export type ContinuationField = "maxAttempts" | "intervalSeconds";
+export type ContinuationField = "maxAttempts" | "intervalSeconds" | "stuckMinutes";
 
 /** The form's starting values: the run's policy, or the hub's defaults when it has none. */
 export function draftOf(run: Run): ContinuationDraft {
@@ -31,6 +38,7 @@ export function draftOf(run: Run): ContinuationDraft {
     enabled: !!policy,
     maxAttempts: String(policy?.max_attempts ?? DEFAULT_MAX_ATTEMPTS),
     intervalSeconds: String(policy?.interval_seconds ?? DEFAULT_INTERVAL_SECONDS),
+    stuckMinutes: policy?.stuck_minutes == null ? "" : String(policy.stuck_minutes),
   };
 }
 
@@ -43,12 +51,23 @@ export function wholeInRange(text: string, min: number, max: number): number | n
 export const maxAttemptsOf = (draft: ContinuationDraft) => wholeInRange(draft.maxAttempts, 1, MAX_ATTEMPTS_LIMIT);
 export const intervalOf = (draft: ContinuationDraft) => wholeInRange(draft.intervalSeconds, 1, MAX_INTERVAL_SECONDS);
 
+/**
+ * The quiet stretch to report after: `null` when the field is empty, which is a choice (no
+ * report), not a mistake. A field with something unusable in it is a mistake, so it comes
+ * back as `undefined` and `draftProblems` names it.
+ */
+export function stuckOf(draft: ContinuationDraft): number | null | undefined {
+  if (draft.stuckMinutes.trim() === "") return null;
+  return wholeInRange(draft.stuckMinutes, 1, MAX_STUCK_MINUTES) ?? undefined;
+}
+
 /** Which limits need fixing before the draft can be saved; [] when it can (off needs no numbers). */
 export function draftProblems(draft: ContinuationDraft): ContinuationField[] {
   if (!draft.enabled) return [];
   const problems: ContinuationField[] = [];
   if (maxAttemptsOf(draft) === null) problems.push("maxAttempts");
   if (intervalOf(draft) === null) problems.push("intervalSeconds");
+  if (stuckOf(draft) === undefined) problems.push("stuckMinutes");
   return problems;
 }
 
@@ -61,8 +80,13 @@ export function policyBody(draft: ContinuationDraft): UpdateRunPolicyRequest | n
   if (!draft.enabled) return { continuation: { enabled: false }, reset_attempts: false };
   const max_attempts = maxAttemptsOf(draft);
   const interval_seconds = intervalOf(draft);
-  if (max_attempts === null || interval_seconds === null) return null;
-  return { continuation: { enabled: true, max_attempts, interval_seconds }, reset_attempts: false };
+  const stuck_minutes = stuckOf(draft);
+  if (max_attempts === null || interval_seconds === null || stuck_minutes === undefined) return null;
+  // `null` is sent, not left out: an empty field means the person turned the report off.
+  return {
+    continuation: { enabled: true, max_attempts, interval_seconds, stuck_minutes },
+    reset_attempts: false,
+  };
 }
 
 /** The body that only hands the allowance out again: attempts to zero, policy untouched. */
