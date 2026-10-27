@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, ClaimRole, CoreError, EventKind, HandoffKind, PlannedTask, Role, Run,
+    Agent, AgentId, AgentKey, ClaimRole, CoreError, EventKind, HandoffKind, HandoffOutcome,
+    PlannedTask, Role, Run,
     RunStatus, Task, TaskId, TaskReport, TaskSpec, TaskStatus,
 };
 use serde::Deserialize;
@@ -416,6 +417,11 @@ impl Orchestrator {
                 .await?;
         }
         // The worker before: archived, or home (docs/tasks/S1.md §3.4).
+        crossagents_core::Handoff::end(
+            &mut task.handoffs,
+            task.assignee,
+            HandoffOutcome::Reassigned,
+        );
         if let Some(old) = task.assignee.take() {
             self.let_go(run.id, old).await;
         }
@@ -478,6 +484,11 @@ impl Orchestrator {
         if task.status.is_terminal() {
             return Err(CoreError::Conflict(format!("#{} has ended", task.key)));
         }
+        crossagents_core::Handoff::end(
+            &mut task.handoffs,
+            task.assignee,
+            HandoffOutcome::Cancelled,
+        );
         self.release_agents(&mut task).await;
         self.cleanup_worktree(&run, &task, !a.keep_branch).await;
         task.report.failure = Some(format!("cancelled by {}", caller.name));
@@ -1051,6 +1062,11 @@ impl Orchestrator {
                 }));
             }
         }
+        crossagents_core::Handoff::end(
+            &mut task.handoffs,
+            task.assignee,
+            HandoffOutcome::Delivered,
+        );
         self.release_agents(&mut task).await;
         self.cleanup_worktree(&run, &task, true).await;
         task.report.failure = None;
@@ -1101,6 +1117,11 @@ impl Orchestrator {
             self.let_go_task(run.id, task.id, Some(ClaimRole::Reviewer))
                 .await;
         }
+        crossagents_core::Handoff::end(
+            &mut task.handoffs,
+            Some(worker),
+            HandoffOutcome::Reworked,
+        );
         task.attempts += 1;
         task.report.failure = None;
         task.report.rework.push(a.notes.trim().to_owned());
@@ -1139,6 +1160,12 @@ impl Orchestrator {
         if task.status.is_terminal() {
             return Ok(json!({ "task": task_json(&task), "repeated": true }));
         }
+        // Its result is thrown away: that execution counts as cancelled.
+        crossagents_core::Handoff::end(
+            &mut task.handoffs,
+            task.assignee,
+            HandoffOutcome::Cancelled,
+        );
         self.release_agents(&mut task).await;
         self.cleanup_worktree(&run, &task, true).await;
         task.worktree = None;

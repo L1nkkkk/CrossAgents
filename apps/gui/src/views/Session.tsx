@@ -32,7 +32,7 @@ import { QuestionCards } from "../questions";
 import { NeedsYouStrip, RunStrip } from "../strips";
 import { useHubData } from "../hub";
 import { mentionsFor, useMention } from "../mention";
-import { isChat, wsKey } from "../workspace";
+import { homeOf, isChat, wsKey } from "../workspace";
 import { ProfileEditor } from "./Agents";
 import { PlanTasks, usePlanApproval } from "./Run";
 
@@ -120,12 +120,13 @@ export function SessionView({
   // Who @ offers: this conversation's recruits, then the other agents working in its project.
   const mates = [
     ...recruits,
-    ...(isChat(agent) ? [] : everyone.filter((a) => a.id !== agent.id && !a.archived_at && !recruits.includes(a) && wsKey(a.cwd) === wsKey(agent.cwd))),
+    ...(isChat(agent) ? [] : everyone.filter((a) => a.id !== agent.id && !a.archived_at && !recruits.includes(a) && wsKey(homeOf(a)) === wsKey(homeOf(agent)))),
   ];
 
   return (
     <section className={`pane ${rail ? "with-rail" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)}>
       {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onClose={onClose} />}
+      <ExecutionBar agent={agent} />
       <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} agents={everyone} tree={runs} top={top}>
         {outgoing.map((m) => (
           <Sending key={m.key} message={m} agent={agent} />
@@ -158,6 +159,60 @@ export function SessionView({
         )}
       </div>
     </section>
+  );
+}
+
+/**
+ * What the session does for a run right now (docs/tasks/S1.md §3.3): 正在执行 run X · 任务 y,
+ * with 中断 — the person's messages still wait their turn behind it, so this is how they take
+ * the session back. Nothing when no run holds it.
+ */
+function ExecutionBar({ agent }: { agent: Agent }) {
+  const now = useHubData(
+    () => api.agentExecution(agent.id),
+    [agent.id],
+    (e) => ["agent.updated", "agent.status_changed", "task.status_changed", "task.handed_off", "run.status_changed"].includes(e.type),
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const x = now.data?.execution;
+  if (!x) return null;
+  async function interrupt() {
+    setBusy(true);
+    setError(undefined);
+    try {
+      await api.interruptExecution(agent.id);
+      now.reload();
+    } catch (err) {
+      setError(errorText(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+  const doing = x.role === "lead" ? "正在主导" : x.role === "reviewer" ? "正在审查" : "正在执行";
+  return (
+    <div className="exec-bar" role="status">
+      <Icon name="branch" size={14} />
+      <span>
+        {doing} <a href={`#/runs/${x.run_id}`}>{x.run_title}</a>
+        {x.task_key && x.task_id && (
+          <>
+            {" · 任务 "}
+            <a href={`#/runs/${x.run_id}/tasks/${x.task_id}`}>
+              <code className="bare">#{x.task_key}</code>
+            </a>
+          </>
+        )}
+        <span className="muted"> · {x.fresh ? "为它新开的执行会话" : "本人，带着自己的上下文"}；你发的消息会排在这一轮后面</span>
+      </span>
+      <span className="spacer" />
+      {error && <span className="error small">{error}</span>}
+      {x.task_id && (
+        <button disabled={busy} onClick={() => void interrupt()} title="中断这一轮：执行记为被人打断，会话回到工作区，主导收到通知后改派">
+          中断执行
+        </button>
+      )}
+    </div>
   );
 }
 

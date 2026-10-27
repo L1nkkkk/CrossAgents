@@ -2,7 +2,9 @@
 // `plan` — the plan waits for approval; `running` — two tasks run, one waits to be checked, one
 // failed, and Ada's conversation carries the orchestrator's messages and task cards.
 
+import type { Agent } from "@bindings/Agent";
 import type { Handoff } from "@bindings/Handoff";
+import type { Run } from "@bindings/Run";
 import type { HumanItem } from "@bindings/HumanItem";
 import type { RunDetail } from "@bindings/RunDetail";
 import type { RunTrace } from "@bindings/RunTrace";
@@ -470,6 +472,8 @@ export function handoffRun(): { state: MockState; script: Step[]; route: string 
     decisions: t.spec.interfaces,
     open_questions: [],
     context_tokens: null,
+    fresh: true,
+    outcome: null,
     at: ago(minutesAgo),
     ...init,
   });
@@ -545,4 +549,72 @@ export function handoffRun(): { state: MockState; script: Step[]; route: string 
     ],
     route: `#/runs/${r.id}`,
   };
+}
+
+/**
+ * Sessions belong to the workspace (docs/tasks/S1.md): run A is done — Rex worked on #a
+ * himself, a new execution session (Rex-b) did #b and is archived now. Run B, led by the same
+ * Ada, has Rex on #c again, himself, with run A's conversation; he is at it now.
+ */
+export function reuseRun(page: "b" | "a" | "rex" = "b"): { state: MockState; script: Step[]; route: string } {
+  const { ada, rex, mia, sam } = team();
+  const state: MockState = { ...emptyState(), plugins: plugins(), quota: quota(), usage: usage() };
+  const [pa, pb, pc] = PLAN;
+  const runA = run({ title: "OAuth 登录（一期）", request: REQUEST, planner: ada, worker: rex, team: [rex, mia, sam], status: "completed", plan: [pa, pb], minutesAgo: 300 });
+  const runB = run({ title: "OAuth 登录（二期）", request: "接着一期：把会话存储换成 Redis。", planner: ada, worker: rex, team: [rex, mia, sam], status: "running", plan: [pc], minutesAgo: 30 });
+  runB.branch = "crossagents/oauth-login-2";
+  // Rex-b: the execution session started for #b, archived when it was merged.
+  const rexB = { ...clone(rex, "b", "stopped", REPO), archived_at: ago(200) };
+  state.agents.push(ada, rex, mia, sam, rexB);
+  rex.cwd = `${REPO}/.crossagents/worktrees/c`;
+  rex.status = "running";
+
+  const card = (r: Run, t: Task, to: Agent, init: Partial<Handoff> & { minutesAgo: number }): Handoff => {
+    const { minutesAgo, ...rest } = init;
+    return {
+      id: uid(),
+      run_id: r.id,
+      task_id: t.id,
+      task_key: t.key,
+      kind: "assign",
+      from: ada.id,
+      from_name: ada.name,
+      to: to.id,
+      to_name: to.name,
+      reason: null,
+      goal: t.spec.goal,
+      files: t.spec.scope.allow,
+      summary: null,
+      decisions: t.spec.interfaces,
+      open_questions: [],
+      context_tokens: null,
+      fresh: true,
+      outcome: null,
+      at: ago(minutesAgo),
+      ...rest,
+    };
+  };
+  const ta = task(runA, { ...pa, assignee: "Rex", fresh: false }, { status: "merged", template: rex, minutesAgo: 280, summary: "回调写好了" });
+  ta.worker_fresh = false;
+  ta.handoffs = [card(runA, ta, rex, { minutesAgo: 280, fresh: false, outcome: "reworked" }), card(runA, ta, rex, { minutesAgo: 240, kind: "reassign", from: rex.id, from_name: rex.name, fresh: false, outcome: "delivered", reason: "返工后还是 Rex 本人接着做" })];
+  const tb = task(runA, pb, { status: "merged", template: rex, minutesAgo: 280, summary: "登录页加了按钮" });
+  tb.handoffs = [card(runA, tb, rexB, { minutesAgo: 280, outcome: "delivered" })];
+  const tc = task(runB, { ...pc, assignee: "Rex", fresh: false }, { status: "running", assignee: rex, template: rex, minutesAgo: 20, progress: "RedisStore 写了一半" });
+  tc.worker_fresh = false;
+  tc.handoffs = [card(runB, tc, rex, { minutesAgo: 20, fresh: false })];
+  state.runs.push({ run: runB, tasks: [tc] }, { run: runA, tasks: [ta, tb] });
+  state.executions = {
+    [rex.id]: { run_id: runB.id, run_title: runB.title, task_id: tc.id, task_key: tc.key, role: "worker", fresh: false, since: ago(20) },
+    [ada.id]: { run_id: runB.id, run_title: runB.title, task_id: null, task_key: null, role: "lead", fresh: false, since: ago(30) },
+  };
+  state.transcripts.set(
+    rex.id,
+    transcript(rex, [
+      turn({ input: "task #a：GitHub OAuth 回调", minutesAgo: 280, took: 30, items: [say("回调写好了。")] }),
+      turn({ input: "task #c：把会话存储换成 Redis（接着一期）", minutesAgo: 20, took: 0, items: [say("记得一期的回调：SessionStore 还在内存里，我先换成 RedisStore。")] }),
+    ], 0),
+  );
+  state.transcripts.set(rexB.id, transcript(rexB, [turn({ input: "task #b：登录页按钮", minutesAgo: 280, took: 20, items: [say("按钮加好了。")] })], 0));
+  const route = page === "a" ? `#/runs/${runA.id}` : page === "rex" ? `#/s/${rex.id}` : `#/runs/${runB.id}`;
+  return { state, script: [], route };
 }

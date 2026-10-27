@@ -4,6 +4,7 @@
 // what streamed (transcripts fold with the GUI's own session.ts). Writes that matter to the
 // look (sending, withdrawing, approving) are acted out; the rest answer 204.
 
+import type { AgentExecution } from "@bindings/AgentExecution";
 import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
 import type { Agent } from "@bindings/Agent";
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
@@ -55,6 +56,8 @@ export type MockState = {
   dirty?: Record<string, string[]>;
   /** The API version `/v1/info` reports; `v1` when unset. */
   api?: string;
+  /** What holds each session now (docs/tasks/S1.md §3.3), by agent id. */
+  executions?: Record<string, AgentExecution>;
 };
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
@@ -262,6 +265,11 @@ export class MockBridge implements CrossAgentsBridge {
       }
       if (p === "/v1/agents") return json(200, { agents: s.agents });
       if ((m = p.match(/^\/v1\/agents\/([^/]+)$/))) return this.agent(m[1]) ? json(200, this.agent(m[1])) : notFound("agent");
+      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/execution$/))) {
+        const a = this.agent(m[1]);
+        if (!a) return notFound("agent");
+        return json(200, { execution: s.executions?.[a.id] ?? null });
+      }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/transcript$/))) {
         const a = this.agent(m[1]);
         const t = a && s.transcripts.get(a.id);
@@ -377,6 +385,25 @@ export class MockBridge implements CrossAgentsBridge {
         a.topic = (body as { topic: string | null }).topic?.trim() || null;
         this.emit({ type: "agent.updated", data: { agent: { ...a } } });
         return json(200, a);
+      }
+      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/execution\/interrupt$/))) {
+        // Like the hub: the execution ends as interrupted, the task waits for its issuer, and
+        // the session goes back to its workspace.
+        const a = this.agent(m[1]);
+        const x = a && s.executions?.[a.id];
+        if (!a || !x?.task_id) return json(409, { error: { code: "conflict", message: `${a?.name ?? "it"} is not working on any task` } });
+        delete s.executions![a.id];
+        const task = s.runs.flatMap((d) => d.tasks).find((t) => t.id === x.task_id)!;
+        const card = [...task.handoffs].reverse().find((h) => h.to === a.id);
+        if (card) card.outcome = "interrupted";
+        const from = task.status;
+        task.assignee = null;
+        task.status = "stalled";
+        a.cwd = a.home;
+        a.status = "idle";
+        this.emit({ type: "task.status_changed", data: { run_id: task.run_id, id: task.id, key: task.key, from, to: "stalled", assignee: null } });
+        this.emit({ type: "agent.updated", data: { agent: a } });
+        return json(200, task);
       }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/archive$/))) {
         const root = this.agent(m[1]);

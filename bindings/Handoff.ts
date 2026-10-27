@@ -2,6 +2,7 @@
 import type { AgentId } from "./AgentId";
 import type { HandoffId } from "./HandoffId";
 import type { HandoffKind } from "./HandoffKind";
+import type { HandoffOutcome } from "./HandoffOutcome";
 import type { RunId } from "./RunId";
 import type { TaskId } from "./TaskId";
 
@@ -53,4 +54,13 @@ open_questions: Array<string>,
  * Context tokens the worker before had in use, as its agent last reported; `None` when
  * it reported none.
  */
-context_tokens: number | null, at: string, };
+context_tokens: number | null, 
+/**
+ * `to` is an execution session started for the task (`true`; every card from before
+ * S1), or the agent itself with its conversation (docs/tasks/S1.md §3.5).
+ */
+fresh: boolean, 
+/**
+ * How this execution ended; `None` while it goes on.
+ */
+outcome: HandoffOutcome | null, at: string, };

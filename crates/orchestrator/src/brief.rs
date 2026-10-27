@@ -320,6 +320,8 @@ mod tests {
             decisions: vec!["fn a()".into(), "keep the old API".into()],
             open_questions: vec!["which way?".into()],
             context_tokens: Some(1200),
+            fresh: true,
+            outcome: None,
             at: Utc::now(),
         }
     }

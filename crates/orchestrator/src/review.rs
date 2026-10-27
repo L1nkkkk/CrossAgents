@@ -117,6 +117,11 @@ impl Orchestrator {
                 self.let_go_task(run.id, task.id, Some(crossagents_core::ClaimRole::Reviewer))
                     .await;
             }
+            crossagents_core::Handoff::end(
+                &mut task.handoffs,
+                Some(worker),
+                crossagents_core::HandoffOutcome::Reworked,
+            );
             task.attempts += 1;
             task.report.failure = None;
             let said: Vec<&str> = note

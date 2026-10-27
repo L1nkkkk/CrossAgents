@@ -1,6 +1,6 @@
 // Workspaces: the repositories the hub works in. The hub has no project registry yet, so they
-// are derived from what it records: each run's `repo`, and each agent's `cwd`. An agent that
-// belongs to a run counts under that run's repo (worker clones live in worktrees elsewhere).
+// are derived from what it records: each run's `repo`, and each agent's `home` — the workspace
+// it belongs to (docs/DESIGN.md §4.7), wherever it works now (a task's worktree, say).
 
 import { useSyncExternalStore } from "react";
 import type { Agent } from "@bindings/Agent";
@@ -16,6 +16,9 @@ export type Workspace = {
   runs: RunDetail[];
   agents: Agent[];
 };
+
+/** The workspace an agent belongs to; its cwd in records from before homes. */
+export const homeOf = (agent: Agent) => agent.home || agent.cwd;
 
 /** Paths compare case-insensitively with either slash (Windows). */
 export const wsKey = (path: string) => path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
@@ -57,8 +60,8 @@ export function useWorkspaces() {
   const byId = new Map(all.map((a) => [a.id, a]));
   for (const agent of all) {
     if (placed.has(agent.id)) continue;
-    const group = isConversation(agent, byId) ? chats : get(agent.cwd);
-    if (!isChat(agent)) get(agent.cwd);
+    const group = isConversation(agent, byId) ? chats : get(homeOf(agent));
+    if (!isChat(agent)) get(homeOf(agent));
     group.agents.push(agent);
   }
 
@@ -77,7 +80,7 @@ export const CHATS = "__chats";
  * (`.crossagents`) any directory there is one.
  */
 export function isChat(agent: Agent): boolean {
-  const parts = agent.cwd.replace(/\\/g, "/").replace(/\/+$/, "").split("/");
+  const parts = homeOf(agent).replace(/\\/g, "/").replace(/\/+$/, "").split("/");
   const [home, chats, last] = parts.slice(-3);
   if (chats !== "chats") return false;
   return home === ".crossagents" || last === agent.id || last.toLowerCase() === agent.name.toLowerCase();
@@ -100,7 +103,7 @@ export function isConversation(agent: Agent, byId: Map<string, Agent>): boolean 
 }
 
 /** The project a conversation works in, if it has one. */
-export const projectOf = (agent: Agent) => (isChat(agent) ? undefined : wsName(agent.cwd));
+export const projectOf = (agent: Agent) => (isChat(agent) ? undefined : wsName(homeOf(agent)));
 
 export const liveRuns =(ws: Workspace) => ws.runs.filter((d) => ACTIVE_RUN.includes(d.run.status)).length;
 

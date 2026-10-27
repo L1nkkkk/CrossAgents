@@ -494,6 +494,11 @@ impl Orchestrator {
                     continue;
                 }
                 let _guard = self.lock(id).await;
+                crossagents_core::Handoff::end(
+                    &mut task.handoffs,
+                    task.assignee,
+                    crossagents_core::HandoffOutcome::Cancelled,
+                );
                 self.release_agents(&mut task).await;
                 self.cleanup_worktree(&run, &task, false).await;
                 task.report.failure = Some("cancelled when the run finished".into());

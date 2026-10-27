@@ -303,10 +303,10 @@ B 删除 run：
 > 2026-10-27，设计见 [DESIGN.md](DESIGN.md) §4.7，方案见 [tasks/S1.md](tasks/S1.md)。起因：run B 承接 run A 时想让 run A 的 planner 接着当主导，并由它决定用新会话还是 run A 用过的会话；现在主导被复制、worker 每个任务克隆一个用完就删、删 run 连带删会话。
 > 已定（S1 §5）：派活默认新开执行会话（`fresh: true`），复用要写 `fresh: false`；人在聊的会话可以被派活，但人的请求优先、可中断；归档不自动清理，可恢复、可批量删除。
 
-- [ ] 会话的家：`Agent.home`（所属工作区）与迁移；跨 run 的原子占用表 `agent_claims`；驱动能力 `move_cwd`；`AgentHost::place` / `send_home`，用本人时恢复失败报错不新开（S1 §3.1）
-- [ ] 主导是被选中的会话本人，不复制；run 结束送回工作区；`home_of`、`lead_home` 改由 `home` 取代（S1 §3.2）
-- [ ] 派活 `fresh` 默认 true 新开执行会话，`fresh: false` 用本人；不同工作区、不能换 cwd、已归档、人的请求在排队、被占用时返回原因；会话页显示正在执行的任务并可中断（S1 §3.3）
-- [ ] 收尾不删会话、只释放本 run 的占用：本人回工作区，执行会话归档；删除旧 run 不影响正被新 run 占着的会话（S1 §3.4，吸收 §十一 A3）
-- [ ] 交接卡补执行结果 `outcome`，run 页按任务列出执行并链接到会话（S1 §3.5）
-- [ ] 开场说明与 `agent_list` 列出工作区里可用的会话及最近一次执行（S1 §3.6）
-- [ ] 真实环境补测：Claude Code 会话在 worktree 干完回仓库根目录 `--resume`，对话完整、CLI 的会话列表里找得到（S1 §4）
+- [x] 会话的家：`Agent.home`（所属工作区）与迁移；跨 run 的原子占用表 `agent_claims`；驱动能力 `move_cwd`；`AgentHost::place` / `send_home`，用本人时恢复失败报错不新开（S1 §3.1）（2026-10-27）：迁移 0009 先 home = cwd，启动时 `migrate_homes` 把 worktree 里的会话归到 run 的 repo、吸收 `lead_home`；`claim_agent` 一条 INSERT；`place(carry)` 恢复失败报错；忙时 `send_home` 记待办（fbf76ce）
+- [x] 主导是被选中的会话本人，不复制；run 结束送回工作区；`home_of`、`lead_home` 改由 `home` 取代（S1 §3.2）（2026-10-27）：不能换目录的驱动才复制，`run.lead_note` 写明；复制的主导留在检出里到删除 run（S1 §7 第 2 条，66f66f6）
+- [x] 派活 `fresh` 默认 true 新开执行会话，`fresh: false` 用本人；不同工作区、不能换 cwd、已归档、人的请求在排队、被占用时返回原因；会话页显示正在执行的任务并可中断（S1 §3.3）（2026-10-27）：`restore: true` 恢复归档的会话；动态检查不过时任务留在 pending 下次再试；`/v1/agents/{key}/execution` 与 `…/interrupt`（77b603a）
+- [x] 收尾不删会话、只释放本 run 的占用：本人回工作区，执行会话归档；删除旧 run 不影响正被新 run 占着的会话（S1 §3.4，吸收 §十一 A3）（2026-10-27）：`DeleteRunResponse.agents` 改为 `{ returned, archived }`；`AgentHost::remove_agent` 删掉（66f66f6）
+- [x] 交接卡补执行结果 `outcome`，run 页按任务列出执行并链接到会话（S1 §3.5）（2026-10-27）：卡片加 `fresh`（新开 / 本人）和 `outcome`；run 页「参与者」可打开、恢复已归档的执行会话；侧栏按 `home` 分组；会话页「正在执行」条带中断；截图见 [screens/s1](screens/s1/)
+- [x] 开场说明与 `agent_list` 列出工作区里可用的会话及最近一次执行（S1 §3.6）（2026-10-27）：最多 12 个、按最近使用排序；`agent_list` 另列本工作区已归档的会话（77b603a）
+- [ ] 真实环境补测：Claude Code 会话在 worktree 干完回仓库根目录 `--resume`，对话完整、CLI 的会话列表里找得到（S1 §4）（2026-10-27）在 CLI 层做了：`--resume` 对话完整，删掉 worktree 后仍能恢复；但会话文件留在 worktree 的项目目录，仓库根目录的列表大概率看不到它（S1 §4 末尾、§7 待拍板）；hub 层 `place` 没接真实账号测

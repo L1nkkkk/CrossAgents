@@ -126,6 +126,13 @@ impl Orchestrator {
             decisions,
             open_questions: left.open_questions,
             context_tokens: left.context_tokens,
+            // What holds it says how it was taken: started for this, or itself.
+            fresh: self
+                .store
+                .claim_of(worker.id)
+                .await?
+                .is_none_or(|c| c.fresh),
+            outcome: None,
             at: Utc::now(),
         };
         task.handoffs.push(card.clone());

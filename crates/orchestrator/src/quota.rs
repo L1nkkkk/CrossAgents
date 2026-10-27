@@ -103,6 +103,11 @@ impl Orchestrator {
         let name = agent_name("w", &run, &task);
         let _ = self.host.interrupt(agent).await;
         let left = self.left_by_worker(&run, &task, Some(agent)).await;
+        crossagents_core::Handoff::end(
+            &mut task.handoffs,
+            Some(agent),
+            crossagents_core::HandoffOutcome::Reassigned,
+        );
         // The run lets go of it: archived (a session it started), or home (the agent itself).
         self.let_go_task(run.id, task.id, Some(ClaimRole::Worker))
             .await;

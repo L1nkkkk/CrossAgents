@@ -401,6 +401,13 @@ impl Orchestrator {
         if let Err(err) = self.host.interrupt(agent).await {
             tracing::warn!(%agent, error = %err, "cannot interrupt the turn");
         }
+        if claim.role != ClaimRole::Reviewer {
+            crossagents_core::Handoff::end(
+                &mut task.handoffs,
+                Some(agent),
+                crossagents_core::HandoffOutcome::Interrupted,
+            );
+        }
         let what = match claim.role {
             ClaimRole::Reviewer => {
                 task.reviewer = None;

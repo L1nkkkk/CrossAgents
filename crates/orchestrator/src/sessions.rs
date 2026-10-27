@@ -71,7 +71,10 @@ impl Orchestrator {
             };
             let last = cards.iter().rev().find(|(_, c)| c.to == agent.id);
             let used = last.map_or(agent.created_at, |(_, c)| c.at);
-            let last = last.map(|(run, c)| format!("run \"{run}\" #{}", c.task_key));
+            let last = last.map(|(run, c)| {
+                let how = c.outcome.map_or("in progress", |o| o.word());
+                format!("run \"{run}\" #{} ({how})", c.task_key)
+            });
             sessions.push(Session {
                 agent,
                 state,

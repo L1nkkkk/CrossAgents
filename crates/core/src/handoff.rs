@@ -23,6 +23,42 @@ pub enum HandoffKind {
     Escalate,
 }
 
+/// How an execution (one hand on the task, docs/DESIGN.md §4.7) ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum HandoffOutcome {
+    /// Its work was accepted (merged).
+    Delivered,
+    /// Sent back for rework.
+    Reworked,
+    /// The task went to someone else.
+    Reassigned,
+    /// A person stopped it.
+    Interrupted,
+    /// It failed, including a session whose context could not be carried over.
+    Failed,
+    /// The task or its run was cancelled, or its result dropped.
+    Cancelled,
+}
+
+impl HandoffOutcome {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Delivered => "delivered",
+            Self::Reworked => "reworked",
+            Self::Reassigned => "reassigned",
+            Self::Interrupted => "interrupted",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Handoff {
@@ -66,10 +102,32 @@ pub struct Handoff {
     #[serde(default)]
     #[cfg_attr(feature = "ts", ts(type = "number | null"))]
     pub context_tokens: Option<u64>,
+    /// `to` is an execution session started for the task (`true`; every card from before
+    /// S1), or the agent itself with its conversation (docs/tasks/S1.md §3.5).
+    #[serde(default = "yes")]
+    pub fresh: bool,
+    /// How this execution ended; `None` while it goes on.
+    #[serde(default)]
+    pub outcome: Option<HandoffOutcome>,
     pub at: DateTime<Utc>,
 }
 
 impl Handoff {
+    /// Marks how the execution of `agent` (the last card's when `None`) on `task` ended:
+    /// the latest card handed to it. `Reassigned` does not replace an outcome already
+    /// known (sent back, then given to someone else, reads as sent back).
+    pub fn end(cards: &mut [Handoff], agent: Option<AgentId>, outcome: HandoffOutcome) {
+        let card = match agent {
+            Some(agent) => cards.iter_mut().rev().find(|c| c.to == agent),
+            None => cards.last_mut(),
+        };
+        if let Some(card) = card
+            && !(outcome == HandoffOutcome::Reassigned && card.outcome.is_some())
+        {
+            card.outcome = Some(outcome);
+        }
+    }
+
     /// `Pia → Rex`, with the reason in brackets when there is one.
     pub fn link(&self) -> String {
         let to = if self.to_name.is_empty() {
@@ -125,8 +183,31 @@ mod tests {
             decisions: Vec::new(),
             open_questions: Vec::new(),
             context_tokens: None,
+            fresh: true,
+            outcome: None,
             at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn an_execution_ends_once_and_being_reassigned_does_not_hide_why() {
+        let mut cards = [
+            card(HandoffKind::Assign, "Rex", None),
+            card(HandoffKind::Reassign, "Mia", None),
+        ];
+        let rex = cards[0].to;
+        Handoff::end(&mut cards, Some(rex), HandoffOutcome::Reworked);
+        Handoff::end(&mut cards, Some(rex), HandoffOutcome::Reassigned);
+        assert_eq!(cards[0].outcome, Some(HandoffOutcome::Reworked));
+        assert_eq!(cards[1].outcome, None, "Mia's goes on");
+        Handoff::end(&mut cards, None, HandoffOutcome::Delivered);
+        assert_eq!(cards[1].outcome, Some(HandoffOutcome::Delivered));
+        // Cards from before S1 read as execution sessions, still open.
+        let mut old = serde_json::to_value(&cards[0]).unwrap();
+        old.as_object_mut().unwrap().remove("fresh");
+        old.as_object_mut().unwrap().remove("outcome");
+        let old: Handoff = serde_json::from_value(old).unwrap();
+        assert!(old.fresh && old.outcome.is_none());
     }
 
     #[test]

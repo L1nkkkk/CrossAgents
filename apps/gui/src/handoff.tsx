@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { Handoff } from "@bindings/Handoff";
 import type { HandoffKind } from "@bindings/HandoffKind";
+import type { HandoffOutcome } from "@bindings/HandoffOutcome";
 import { Avatar, List, Prose, displayName, isAgent, time } from "./components";
 import { clock } from "./lib/time";
 
@@ -26,6 +27,33 @@ export const KIND_LABEL: Record<HandoffKind, string> = {
 };
 
 const KIND_TONE: Record<HandoffKind, string> = { assign: "", reassign: "accent", reroute: "warn", escalate: "danger" };
+
+/** How an execution ended (docs/tasks/S1.md §3.5). */
+export const OUTCOME_LABEL: Record<HandoffOutcome, string> = {
+  delivered: "交付",
+  reworked: "被打回",
+  reassigned: "被改派",
+  interrupted: "被人打断",
+  failed: "失败",
+  cancelled: "取消",
+};
+
+export const OUTCOME_TONE: Record<HandoffOutcome, string> = {
+  delivered: "ok",
+  reworked: "warn",
+  reassigned: "",
+  interrupted: "warn",
+  failed: "danger",
+  cancelled: "",
+};
+
+/** 新开: an execution session started for the task; 本人: the session itself, with its context. */
+export const freshLabel = (h: Handoff) => (h.fresh ? "新开" : "本人");
+
+/** How this hand went: its outcome, or 进行中. */
+export function OutcomeChip({ handoff: h }: { handoff: Handoff }) {
+  return h.outcome ? <span className={`chip ${OUTCOME_TONE[h.outcome]}`}>{OUTCOME_LABEL[h.outcome]}</span> : <span className="chip accent">进行中</span>;
+}
 
 const tokens = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k` : String(n));
 
@@ -54,6 +82,10 @@ export function HandoffCard({ handoff: h, agents }: { handoff: Handoff; agents?:
         <span className="muted">→</span>
         <Who name={h.to_name} agents={agents} />
         <span className={`chip ${KIND_TONE[h.kind]}`}>{KIND_LABEL[h.kind]}</span>
+        <span className="chip" title={h.fresh ? "为这个任务新开的执行会话，干净的上下文" : "会话本人，带着它原来的上下文"}>
+          {freshLabel(h)}
+        </span>
+        <OutcomeChip handoff={h} />
         <span className="spacer" />
         <span className="muted small" title={time(h.at)}>
           {clock(h.at)}

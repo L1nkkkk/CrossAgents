@@ -41,7 +41,7 @@ pub use error::CoreError;
 pub use event::{
     DiffSource, EVENT_SCHEMA_VERSION, Envelope, Event, EventKind, EventSink, MessageSource,
 };
-pub use handoff::{Handoff, HandoffKind};
+pub use handoff::{Handoff, HandoffKind, HandoffOutcome};
 pub use human::{HumanAction, HumanItem, HumanItemKind, HumanItemStatus};
 pub use ids::{AgentId, HandoffId, MessageId, RunId, SessionId, TaskId};
 pub use model::{

@@ -326,6 +326,9 @@ async fn fresh_false_gives_a_task_to_the_session_run_a_used() {
     // Rex himself got it: the same agent, his conversation resumed in run B's worktree.
     let tasks = tasks_of(&t, &b).await;
     assert_eq!(tasks[0]["handoffs"][0]["to"], json!(rex.id), "{tasks:?}");
+    // The execution record says it was Rex himself, and that he delivered (S1 §3.5).
+    assert_eq!(tasks[0]["handoffs"][0]["fresh"], false, "{tasks:?}");
+    assert_eq!(tasks[0]["handoffs"][0]["outcome"], "delivered", "{tasks:?}");
     let text = said(&w, rex.id);
     assert!(text.contains(&format!("session={session} (resumed)")), "{text}");
     let cwd = after(&text, "cwd=");
@@ -355,6 +358,8 @@ async fn a_new_execution_session_is_archived_and_can_be_used_again_once_restored
     let tasks = tasks_of(&t, &a).await;
     let exec_id: AgentId = tasks[0]["handoffs"][0]["to"].as_str().unwrap().parse().unwrap();
     assert_ne!(exec_id, rex.id);
+    assert_eq!(tasks[0]["handoffs"][0]["fresh"], true, "{tasks:?}");
+    assert_eq!(tasks[0]["handoffs"][0]["outcome"], "delivered", "{tasks:?}");
     // Archived, not deleted: its conversation can still be read.
     let mut exec = Value::Null;
     for _ in 0..100 {
@@ -490,6 +495,7 @@ async fn the_person_interrupts_an_execution() {
     let task: Value = resp.json().await.unwrap();
     assert_eq!(task["status"], "stalled", "{task}");
     assert!(task["assignee"].is_null(), "{task}");
+    assert_eq!(task["handoffs"][0]["outcome"], "interrupted", "{task}");
     // Let go, back home, and the lead hears it.
     let now: Value = t.get("/v1/agents/Rex/execution").await.json().await.unwrap();
     assert!(now["execution"].is_null(), "{now}");
@@ -544,6 +550,10 @@ async fn taking_a_session_that_cannot_resume_there_fails_and_starts_no_new_one()
     assert_eq!(task["status"], "pending", "{task}");
     let why = task["progress"].as_str().unwrap_or_default();
     assert!(why.contains("its context was not carried over"), "{task}");
+    // The execution is on record as Rex himself, failed, and why.
+    let card = &task["handoffs"][0];
+    assert_eq!((card["fresh"].clone(), card["outcome"].clone()), (json!(false), json!("failed")), "{task}");
+    assert!(card["reason"].as_str().unwrap_or_default().contains("上下文没能延续"), "{task}");
     // No session took its place, nobody new, nothing held, and Rex is home.
     assert_eq!(t.hub.bus.store().last_session_id(rex.id).await.unwrap(), session);
     assert_eq!(agent_count(&t).await, before);

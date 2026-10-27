@@ -865,6 +865,11 @@ The person changed: {}",
             if task.status.is_terminal() {
                 continue;
             }
+            crossagents_core::Handoff::end(
+                &mut task.handoffs,
+                task.assignee,
+                crossagents_core::HandoffOutcome::Cancelled,
+            );
             self.release_agents(&mut task).await;
             self.cleanup_worktree(&run, &task, false).await;
             task.report.failure = Some("run cancelled".into());
@@ -1001,8 +1006,23 @@ The person changed: {}",
         let (worker, cloned, rerouted) = if !task.worker_fresh && !task.escalated {
             // The session itself, with its conversation (docs/tasks/S1.md §3.3).
             let me = self.store.get_agent(&AgentKey::Id(template)).await?;
-            self.take_self(run, task, &me, ClaimRole::Worker, task.worker_restore)
-                .await?;
+            if let Err(err) = self
+                .take_self(run, task, &me, ClaimRole::Worker, task.worker_restore)
+                .await
+            {
+                // It could not take its conversation there: that execution failed, and the
+                // card says why (docs/tasks/S1.md §3.1).
+                if let CoreError::Agent(why) = &err {
+                    self.hand_off(run, task, HandoffKind::Assign, left, &me, None, Some(why.clone()))
+                        .await?;
+                    if let Some(card) = task.handoffs.last_mut() {
+                        card.fresh = false;
+                        card.outcome = Some(crossagents_core::HandoffOutcome::Failed);
+                    }
+                    self.store.update_task(task).await?;
+                }
+                return Err(err);
+            }
             task.progress = None;
             let me = self.store.get_agent(&AgentKey::Id(template)).await?;
             (me, template, None)
@@ -1242,6 +1262,11 @@ The person changed: {}",
         task: &mut Task,
         reason: String,
     ) -> Result<(), CoreError> {
+        crossagents_core::Handoff::end(
+            &mut task.handoffs,
+            task.assignee,
+            crossagents_core::HandoffOutcome::Failed,
+        );
         self.release_agents(task).await;
         // Keep the branch so the issuer or a person can inspect what was done.
         self.cleanup_worktree(run, task, false).await;

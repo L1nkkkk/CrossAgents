@@ -9,7 +9,7 @@ import type { RunPolicy } from "@bindings/RunPolicy";
 import { navigate } from "../App";
 import { api, errorText } from "../api";
 import { DeleteRunDialog } from "../deleteRun";
-import { HandoffChain, isEscalated } from "../handoff";
+import { HandoffChain, OutcomeChip, freshLabel, isEscalated } from "../handoff";
 import {
   Avatar,
   ErrorBox,
@@ -126,6 +126,7 @@ export function RunView({ runId, selectedTask, confirmDelete }: { runId: string;
     <div className="run-foot">
       {run.status !== "awaiting_approval" && tasks.length === 0 && run.plan.length > 0 && <PlanList run={run} />}
       {(run.status === "completed" || (run.status === "running" && allEnded)) && <Ending run={run} closing={run.status === "running"} onDone={detail.reload} />}
+      <Participants tasks={tasks} agents={agents.data} />
       <RunNotes runId={run.id} />
       {tasks.length > 0 && (
         <details className="notes-panel">
@@ -151,6 +152,68 @@ export function RunView({ runId, selectedTask, confirmDelete }: { runId: string;
         />
       )}
     </>
+  );
+}
+
+/**
+ * Who took part (docs/tasks/S1.md §3.5): each task's executions in turn, from its handoff
+ * cards — the session (linked; an archived execution session opens too, and can be restored),
+ * whether it was started for the task or worked on it itself, and how it went. The run owns
+ * none of them: they belong to the workspace.
+ */
+function Participants({ tasks, agents }: { tasks: Task[]; agents?: Agent[] }) {
+  const [error, setError] = useState<string>();
+  const worked = tasks.filter((t) => t.handoffs.length > 0);
+  if (!worked.length) return null;
+  async function restore(id: string) {
+    setError(undefined);
+    try {
+      await api.archiveAgent(id, false);
+    } catch (err) {
+      setError(errorText(err));
+    }
+  }
+  return (
+    <details className="notes-panel participants" open>
+      <summary>参与者</summary>
+      <ErrorBox error={error} />
+      {worked.map((task) => (
+        <div key={task.id} className="part-task">
+          <div className="part-head">
+            <code className="board-key">#{task.key}</code> <span>{task.title}</span>
+          </div>
+          <ul className="plain part-list">
+            {task.handoffs.map((h, i) => {
+              const who = agents?.find((a) => a.id === h.to);
+              return (
+                <li key={h.id} className="part-row">
+                  <span className="muted small">执行 {i + 1}</span>
+                  <a className="hand-who" href={sessionHref(h.to)} title="打开这个会话">
+                    {who && <Avatar agent={who} size={16} />}
+                    {who ? displayName(who) : h.to_name || "?"}
+                  </a>
+                  <span className="chip">{freshLabel(h)}</span>
+                  <OutcomeChip handoff={h} />
+                  {who?.archived_at && (
+                    <>
+                      <span className="chip">已归档</span>
+                      <button className="ghost small" onClick={() => void restore(h.to)} title="恢复后可以再被指定用本人（fresh: false）">
+                        恢复
+                      </button>
+                    </>
+                  )}
+                  {!who && <span className="muted small">会话已删除</span>}
+                  <span className="spacer" />
+                  <span className="muted small" title={time(h.at)}>
+                    {ago(h.at)}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ))}
+    </details>
   );
 }
 

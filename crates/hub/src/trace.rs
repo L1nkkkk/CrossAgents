@@ -479,6 +479,8 @@ mod tests {
                 decisions: Vec::new(),
                 open_questions: Vec::new(),
                 context_tokens: None,
+                fresh: true,
+                outcome: None,
                 at: Utc::now(),
             },
         });

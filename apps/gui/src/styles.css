@@ -1486,3 +1486,13 @@ html, body { overflow: hidden; }
 .cli-done { flex-basis: 100%; font-size: 12px; }
 .cli-done.ok { color: var(--text-2); }
 .cli-done.bad { color: var(--danger); }
+
+/* S1: who took part in a run, and what a session is executing now. */
+.participants .part-task { margin: 8px 0 12px; }
+.participants .part-head { display: flex; align-items: center; gap: 6px; font-size: 13px; margin-bottom: 4px; }
+.participants .part-list { display: flex; flex-direction: column; gap: 4px; margin: 0; padding-left: 4px; }
+.participants .part-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.participants a.hand-who { text-decoration: none; }
+.participants a.hand-who:hover { text-decoration: underline; }
+.exec-bar { display: flex; align-items: center; gap: 10px; margin: 0 16px; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--accent-bg); color: var(--text-2); font-size: 13px; flex-wrap: wrap; }
+.exec-bar a { color: var(--accent-text); }
