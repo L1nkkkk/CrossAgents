@@ -181,6 +181,11 @@ B3 远程开发：
   - 检查超时后孙进程还在改工作区：`Job` 从 drivers 挪到 `core::process`，新增 `spawn_tree`——Windows 以 `CREATE_SUSPENDED` 启动、放进带 KILL_ON_JOB_CLOSE 的 Job 后再恢复线程，没有逃出 Job 的窗口；Unix 用独立进程组、结束时 `killpg`。超时、出错、命令结束都整棵树一起结束
   - 主导落地的代码没经过检查：`run_land` 改为「同步基线 → 跑检查 → 合入」（`landing.rs::ready_to_land` / `merge_run`）。检查在 run 锁外跑，合入前在锁内比对集成工作区的 HEAD，变了就重新同步、重新检查，三次仍在变就拒绝。人从 Run 页 / API 落地仍不跑检查
   - 同一张 Work 卡片能建出两个 run：`Orchestrator::lock_card` 按卡片 id 加锁，`answer_human` / `dismiss_human` 在锁里重读状态，后到的返回 409 `<id> is already answered`；锁表在最后一个持有者释放时移除该项
+- [ ] 2026-10-27 trace run `01a17c78…dccf42e8` 发现的问题（未修）
+  - 检查没跑完就被合并：`tasks.rs::complete` 先把任务置为 Passed，提交、跑 `spec.acceptance`、转发 worker 总结都放在后台的 `report_done` 里。主导订阅了 "now passed"，立刻 `task_accept`，`cleanup_worktree` 把 worktree 删掉时 `cargo test --workspace` 还在里面跑。实际经过：api-files 在 08:53:16 变成 passed，08:54:03 被合并，08:54:05 才出 `task.checked passed=false`（mock-agent 测试报 `cannot build crossagents`，因为工程目录被删了），总结也是这时才到主导。改法：检查和总结都发完再放出 passed（或加一个中间状态）；`task_accept` 遇到检查还在跑时拒绝；`cleanup_worktree` 不删正在用的 worktree。Windows 上删一半的目录会留在 `worktrees/<run>/<task>/`
+  - 派工通知写的是模板名：`engine.rs::approve_locked` 的 "Who does each task" 用的是 worker 模板（如 Dara），`task.handed_off` 的 `to_name` 也一样，实际干活的是克隆出来的 `w-<run>-<task>`。主导照着通知给 Dara 发消息，Dara 不在这个 run 里（`you are in no run`），白跑了一轮。改法：通知和 handoff 写实际执行会话的名字，同时注明来自哪个模板
+  - 克隆把原会话的 `config.spawned_by_run` 也带过来了，应该去掉；批准时建的模板会话（如 Orion、Zara）没有用到，一直留在名单里
+  - GUI：编辑类工具失败（with-cli 报 "模型返回的待替换代码块未匹配到整行"）时，工具行仍按模型打算改的 diff 显示 `+2 -0`，`detail.error` 也不显示（`Session.tsx` 只有部分工具类型会读它）。失败的编辑不该显示增减行数，原因要能点开看到
 
 ## 十、agent 描述文件
 
