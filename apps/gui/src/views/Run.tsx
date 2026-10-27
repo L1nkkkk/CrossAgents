@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { Task } from "@bindings/Task";
 import type { Run } from "@bindings/Run";
@@ -36,6 +36,7 @@ import { accountOf, prettyModel } from "../lib/models";
 import { StateWord, TaskChanges } from "../parts";
 import { RunChanges, TaskReview } from "../review";
 import { RunTraceView } from "../trace";
+import { CommitGraphView } from "../commitgraph";
 import { wsKey } from "../workspace";
 import { SessionView } from "./Session";
 
@@ -65,7 +66,18 @@ const ACTIVE = ["planning", "awaiting_approval", "running", "paused"];
  * the messages, how it ended after them, and the task board beside them. The plan waits
  * for approval in the dock above the composer, as in the lead's own conversation.
  */
-export function RunView({ runId, selectedTask, confirmDelete }: { runId: string; selectedTask?: string; confirmDelete?: boolean }) {
+export function RunView({
+  runId,
+  selectedTask,
+  confirmDelete,
+  graphOpen,
+}: {
+  runId: string;
+  selectedTask?: string;
+  confirmDelete?: boolean;
+  /** `#/runs/<id>/graph` opens the commit graph (a link the person can be sent; the mock previews too). */
+  graphOpen?: boolean;
+}) {
   const detail = useRun(runId);
   const agents = useAgents();
   const [deleting, setDeleting] = useState(false);
@@ -129,6 +141,7 @@ export function RunView({ runId, selectedTask, confirmDelete }: { runId: string;
       {(run.status === "completed" || (run.status === "running" && allEnded)) && <Ending run={run} closing={run.status === "running"} onDone={detail.reload} />}
       <Participants tasks={tasks} agents={agents.data} />
       <RunNotes runId={run.id} />
+      {!run.in_place && <RunGraph runId={run.id} open={graphOpen} />}
       {tasks.length > 0 && (
         <details className="notes-panel">
           <summary>追溯</summary>
@@ -357,6 +370,28 @@ function Ending({ run, closing, onDone }: { run: Run; closing: boolean; onDone: 
         )}
       </div>
     </div>
+  );
+}
+
+/** The run's commit graph, loaded when opened. */
+function RunGraph({ runId, open: initial }: { runId: string; open?: boolean }) {
+  const [open, setOpen] = useState(!!initial);
+  const ref = useRef<HTMLDetailsElement>(null);
+  // Opened by its route (#/runs/<id>/graph): bring it into view once its rows are in.
+  useEffect(() => {
+    if (!initial) return;
+    const timers = [300, 900, 1500].map((ms) => setTimeout(() => ref.current?.scrollIntoView({ block: "start" }), ms));
+    return () => timers.forEach(clearTimeout);
+  }, [initial]);
+  return (
+    <details ref={ref} className="notes-panel run-graph" open={initial} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
+      <summary>提交图</summary>
+      {open && (
+        <div style={{ marginTop: 8 }}>
+          <CommitGraphView scope={{ kind: "run", run: runId }} />
+        </div>
+      )}
+    </details>
   );
 }
 

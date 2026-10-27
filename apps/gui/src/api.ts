@@ -6,6 +6,7 @@ import type { Account } from "@bindings/Account";
 import type { AccountUsageGroup } from "@bindings/AccountUsageGroup";
 import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
 import type { ChangesResponse } from "@bindings/ChangesResponse";
+import type { CommitGraph } from "@bindings/CommitGraph";
 import type { CliInstallAccepted } from "@bindings/CliInstallAccepted";
 import type { AttachmentContent } from "@bindings/AttachmentContent";
 import type { Task } from "@bindings/Task";
@@ -254,6 +255,18 @@ export const api = {
   taskDiff: (run: string, task: string) => request<ChangesResponse>("GET", `/v1/runs/${enc(run)}/tasks/${enc(task)}/diff`),
   /** What landing the run would bring into its base branch. */
   runDiff: (run: string) => request<ChangesResponse>("GET", `/v1/runs/${enc(run)}/diff`),
+  /** The commit graph of the run's branches (base, run branch, tasks), newest first in topo order. */
+  runGraph: (run: string, limit?: number) =>
+    request<CommitGraph>("GET", `/v1/runs/${enc(run)}/graph${limit ? `?limit=${limit}` : ""}`),
+  /** The commit graph of the session's checkout (HEAD and local branches). */
+  agentGraph: (agent: string, limit?: number) =>
+    request<CommitGraph>("GET", `/v1/agents/${enc(agent)}/graph${limit ? `?limit=${limit}` : ""}`),
+  /** What one commit of the run's graph changed, against its first parent. */
+  runCommitDiff: (run: string, sha: string) =>
+    request<ChangesResponse>("GET", `/v1/runs/${enc(run)}/commits/${enc(sha)}/diff`),
+  /** The same for a commit of the session's checkout. */
+  agentCommitDiff: (agent: string, sha: string) =>
+    request<ChangesResponse>("GET", `/v1/agents/${enc(agent)}/commits/${enc(sha)}/diff`),
   /** What happened in a run, by task, from its events. */
   runTrace: (run: string) => request<RunTrace>("GET", `/v1/runs/${enc(run)}/trace`),
   /** The person's comments, to the task's worker as its next turn; `rework` sends the task back. */
