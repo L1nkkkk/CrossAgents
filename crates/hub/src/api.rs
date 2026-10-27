@@ -20,15 +20,15 @@ use crossagents_api_types::{
     API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentExecution,
     AgentExecutionResponse, AgentSettingsRequest, AnswerRequest, ApiError, ApproveRunRequest,
     ArchiveAgentRequest, AttachmentContent, ChangesResponse, CliInfo, CliInstallAccepted,
-    ConnectInfo, CreateAccountRequest, CreateAgentRequest, CreateRunRequest, DeleteRunResponse,
-    DiffSide, ErrorCode, FileContentResponse, FileEntry, FileKind, FileTreeResponse, FinishRequest,
-    HealthResponse, HubInfo, InitRepoRequest, LandRequest, ListAccountsResponse,
-    ListAgentsResponse, ListNotesResponse, ListPluginsResponse, ListQuestionsResponse,
-    ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
-    RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse, ResolvedPath, RunDetail,
-    RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest, SetPluginModelsRequest,
-    SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse, UsageGroup,
-    UsageResponse,
+    CommitGraph, ConnectInfo, CreateAccountRequest, CreateAgentRequest, CreateRunRequest,
+    DeleteRunResponse, DiffSide, ErrorCode, FileContentResponse, FileEntry, FileKind,
+    FileTreeResponse, FinishRequest, GraphCommit, GraphRef, GraphRefKind, HealthResponse, HubInfo,
+    InitRepoRequest, LandRequest, ListAccountsResponse, ListAgentsResponse, ListNotesResponse,
+    ListPluginsResponse, ListQuestionsResponse, ListRunsResponse, ListToolsResponse, LoginStarted,
+    PluginInfo, QuotaResponse, RejectRunRequest, RenameAgentRequest, ResolvePathsRequest,
+    ResolvePathsResponse, ResolvedPath, RunDetail, RunTrace, SendMessageRequest,
+    SendMessageResponse, SetModelRequest, SetPluginModelsRequest, SetTopicRequest,
+    TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse, UsageGroup, UsageResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, AttachmentSupport,
@@ -165,6 +165,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/runs/{key}/tasks/{task}/files/resolve",
             post(task_files_resolve),
+        )
+        .route("/v1/runs/{key}/graph", get(run_graph))
+        .route("/v1/agents/{key}/graph", get(agent_graph))
+        .route("/v1/runs/{key}/commits/{sha}/diff", get(run_commit_diff))
+        .route(
+            "/v1/agents/{key}/commits/{sha}/diff",
+            get(agent_commit_diff),
         )
         .route("/v1/repos/init", post(init_repo))
         .route("/v1/events", get(events))
@@ -1403,6 +1410,122 @@ async fn run_diff(
 ) -> ApiResult<Json<ChangesResponse>> {
     let run = resolve_run(&state, &key).await?;
     Ok(changes_response(state.orchestrator.run_changes(run).await?))
+}
+
+// ---------------------------------------------------------------------------------------
+// Commit graph (read-only)
+
+/// What `GET .../graph` takes: how many commits to hand out (200 when absent, at most 500).
+#[derive(Debug, Default, Deserialize)]
+struct GraphQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+fn graph_kind(kind: crossagents_orchestrator::graph::RefKind) -> GraphRefKind {
+    use crossagents_orchestrator::graph::RefKind;
+    match kind {
+        RefKind::Base => GraphRefKind::Base,
+        RefKind::Run => GraphRefKind::Run,
+        RefKind::Task => GraphRefKind::Task,
+        RefKind::Head => GraphRefKind::Head,
+        RefKind::Other => GraphRefKind::Other,
+    }
+}
+
+fn graph_response(graph: crossagents_orchestrator::Graph) -> Json<CommitGraph> {
+    Json(CommitGraph {
+        base_branch: graph.base_branch,
+        run_branch: graph.run_branch,
+        refs: graph
+            .refs
+            .into_iter()
+            .map(|entry| GraphRef {
+                name: entry.name,
+                kind: graph_kind(entry.kind),
+                sha: entry.sha,
+                task_key: entry.task_key,
+                task_title: entry.task_title,
+            })
+            .collect(),
+        commits: graph
+            .commits
+            .into_iter()
+            .map(|commit| GraphCommit {
+                sha: commit.sha,
+                parents: commit.parents,
+                subject: commit.subject,
+                author: commit.author,
+                time: commit.time,
+                refs: commit.refs,
+            })
+            .collect(),
+        truncated: graph.truncated,
+    })
+}
+
+/// The commits of a run's base, run and task branches.
+async fn run_graph(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Query(q): Query<GraphQuery>,
+) -> ApiResult<Json<CommitGraph>> {
+    let run = resolve_run(&state, &key).await?;
+    Ok(graph_response(
+        state
+            .orchestrator
+            .run_graph(run, q.limit.unwrap_or(0))
+            .await?,
+    ))
+}
+
+/// The commits of the repository an agent works in: its HEAD and local branches.
+async fn agent_graph(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Query(q): Query<GraphQuery>,
+) -> ApiResult<Json<CommitGraph>> {
+    let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    Ok(graph_response(
+        state
+            .orchestrator
+            .agent_graph(&agent, q.limit.unwrap_or(0))
+            .await?,
+    ))
+}
+
+/// A commit sha as the route carries it; anything else is refused before git sees it.
+fn commit_sha(sha: &str) -> ApiResult<&str> {
+    if !crossagents_orchestrator::graph::valid_sha(sha) {
+        return Err(AppError::bad_request(format!(
+            "{sha:?} is not a commit sha (4 to 40 lowercase hex digits)"
+        )));
+    }
+    Ok(sha)
+}
+
+/// What one commit of a run changed.
+async fn run_commit_diff(
+    State(state): State<Arc<AppState>>,
+    Path((key, sha)): Path<(String, String)>,
+) -> ApiResult<Json<ChangesResponse>> {
+    let run = resolve_run(&state, &key).await?;
+    let sha = commit_sha(&sha)?;
+    Ok(changes_response(
+        state.orchestrator.run_commit_diff(run, sha).await?,
+    ))
+}
+
+/// What one commit of an agent's repository changed.
+async fn agent_commit_diff(
+    State(state): State<Arc<AppState>>,
+    Path((key, sha)): Path<(String, String)>,
+) -> ApiResult<Json<ChangesResponse>> {
+    let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    let sha = commit_sha(&sha)?;
+    Ok(changes_response(
+        state.orchestrator.agent_commit_diff(&agent, sha).await?,
+    ))
 }
 
 // ---------------------------------------------------------------------------------------
