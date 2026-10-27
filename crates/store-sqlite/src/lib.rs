@@ -1011,6 +1011,7 @@ mod tests {
         let now = time_from(&Utc::now().to_rfc3339()).unwrap();
         let mut run = Run {
             landed: None,
+            lead_note: None,
             summary: None,
             checks: Vec::new(),
             id: RunId::new(),
@@ -1094,6 +1095,7 @@ mod tests {
         let now = time_from(&Utc::now().to_rfc3339()).unwrap();
         let run = Run {
             landed: None,
+            lead_note: None,
             summary: None,
             checks: Vec::new(),
             id: RunId::new(),

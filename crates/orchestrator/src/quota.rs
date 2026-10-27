@@ -3,7 +3,8 @@
 //! hits its limit mid-task hands the task to one that has not. Each move is said in the run.
 
 use crossagents_core::{
-    Agent, AgentId, CoreError, EventKind, HandoffKind, Role, Run, RunStatus, Task, TaskStatus,
+    Agent, AgentId, ClaimRole, CoreError, EventKind, HandoffKind, Role, Run, RunStatus, Task,
+    TaskStatus,
 };
 
 use crate::brief;
@@ -34,16 +35,13 @@ impl Orchestrator {
             Route::Account { account, reason } => (template, Some(account), Some(reason)),
             Route::Teammate { agent, reason } => (agent, None, Some(reason)),
         };
-        if let Ok(stale) = self
-            .store
-            .get_agent(&crossagents_core::AgentKey::Name(name.to_owned()))
-            .await
-        {
-            self.host.remove_agent(stale.id).await?;
-        }
+        // An earlier execution session on the task keeps its name, archived.
+        let name = self.free_name(name).await?;
         let worker = self
             .host
-            .clone_agent_on(template, name, Role::Worker, &cwd, account.as_deref())
+            .clone_agent_on(template, &name, Role::Worker, &cwd, account.as_deref())
+            .await?;
+        self.claim(&worker, run.id, Some(task.id), ClaimRole::Worker, true)
             .await?;
         if let Some(reason) = &reason {
             // Stored before it is announced: whoever reads the task on the event sees why.
@@ -105,9 +103,9 @@ impl Orchestrator {
         let name = agent_name("w", &run, &task);
         let _ = self.host.interrupt(agent).await;
         let left = self.left_by_worker(&run, &task, Some(agent)).await;
-        if let Err(err) = self.host.remove_agent(agent).await {
-            tracing::warn!(%agent, error = %err, "cannot remove the rate-limited worker");
-        }
+        // The run lets go of it: archived (a session it started), or home (the agent itself).
+        self.let_go_task(run.id, task.id, Some(ClaimRole::Worker))
+            .await;
         let (worker, cloned, rerouted) = self
             .routed_worker(&run, &mut task, template, &name, Some(agent))
             .await?;

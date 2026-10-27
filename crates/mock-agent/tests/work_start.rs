@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{TestHub, git_repo};
+use common::{TestHub, git_repo, native_plugin};
 use crossagents_api_types::EventKind;
 use serde_json::{Value, json};
 
@@ -105,8 +105,14 @@ async fn starting_a_proposed_work_runs_it_on_its_own_branch() {
     let run = start(&t, &item).await;
     assert_eq!(run["title"], "Add notes");
     assert_eq!(run["request"], "Add notes.txt with the agreed wording.");
-    // A copy leads it in the run's checkout; the conversation stays where it was.
+    // lyra's driver (ACP) cannot resume its session elsewhere: a copy leads it in the run's
+    // checkout, the run says so, and the conversation stays where it was (S1 §3.2).
     assert_ne!(run["planner"], json!(lyra.id));
+    assert_eq!(
+        run["lead_note"],
+        "主导是复制出来的，没带上原会话的上下文",
+        "{run}"
+    );
     let lead = agent(&t, run["planner"].as_str().unwrap()).await;
     assert!(
         lead["cwd"].as_str().unwrap().contains("integration"),
@@ -230,7 +236,8 @@ async fn a_lead_whose_run_ended_starts_another_on_the_repository() {
         .to_owned();
     assert!(old_cwd.contains("integration"), "{old_cwd}");
 
-    // Ended, nothing merged, never landed: the lead stays in the old run's checkout.
+    // Ended, nothing merged, never landed. The lead is a copy made for the run (lyra cannot
+    // move), so it stays in the old run's checkout until the run is deleted.
     let ended = finish(&t, &first).await;
     assert_eq!(ended["status"], "completed", "{ended}");
     assert!(ended["landed"].is_null(), "{ended}");
@@ -353,4 +360,42 @@ async fn the_home_page_starts_a_run_for_a_lead_that_ended_one() {
         run["id"]
     );
     assert!(std::path::Path::new(cwd).is_dir(), "{lead}");
+}
+
+/// S1 §3.2: a proposer whose driver resumes a session elsewhere leads its Work itself, with
+/// this conversation, from the run's checkout; when the run ends it is back in the repository.
+#[tokio::test]
+async fn a_proposer_that_can_move_leads_the_work_itself() {
+    let repo = git_repo();
+    let t = TestHub::start_with(native_plugin).await;
+    let lyra = t.add_native("lyra", "worker", repo.path()).await;
+    let before: Value = t.get("/v1/agents").await.json().await.unwrap();
+
+    let run = start(&t, &propose(&t).await).await;
+    assert_eq!(run["planner"], json!(lyra.id), "{run}");
+    assert!(run["lead_note"].is_null(), "{run}");
+    let after: Value = t.get("/v1/agents").await.json().await.unwrap();
+    assert_eq!(
+        after["agents"].as_array().unwrap().len(),
+        before["agents"].as_array().unwrap().len(),
+        "no copy was made"
+    );
+    let lead = agent(&t, "lyra").await;
+    let cwd = lead["cwd"].as_str().unwrap();
+    assert!(
+        cwd.contains("integration") && cwd.contains(&short(run["id"].as_str().unwrap())),
+        "{lead}"
+    );
+    assert_eq!(lead["home"], json!(lyra.home), "{lead}");
+
+    finish(&t, &run).await;
+    let mut home = Value::Null;
+    for _ in 0..100 {
+        home = agent(&t, "lyra").await;
+        if home["cwd"] == home["home"] {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(home["cwd"], home["home"], "{home}");
 }

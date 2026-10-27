@@ -184,15 +184,21 @@ async fn the_planner_accepts_what_workers_report() {
         "{report}"
     );
 
-    // Temporary workers are gone; only the two teammates remain.
+    // The tasks' execution sessions are archived, not deleted (docs/tasks/S1.md §3.4): only
+    // the two teammates are left in the lists, and each task's worker can still be read.
     let agents: Value = t.get("/v1/agents").await.json().await.unwrap();
-    let names: Vec<&str> = agents["agents"]
+    let (archived, listed): (Vec<&Value>, Vec<&Value>) = agents["agents"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|a| a["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(names, ["boss", "coder"]);
+        .partition(|a| !a["archived_at"].is_null());
+    let names = |v: &[&Value]| -> Vec<String> {
+        v.iter().map(|a| a["name"].as_str().unwrap().to_owned()).collect()
+    };
+    assert_eq!(names(&listed), ["boss", "coder"]);
+    let archived = names(&archived);
+    assert_eq!(archived.len(), 2, "{archived:?}");
+    assert!(archived.iter().all(|n| n.starts_with("w-")), "{archived:?}");
 }
 
 #[tokio::test]

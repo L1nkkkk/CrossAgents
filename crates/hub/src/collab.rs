@@ -427,22 +427,6 @@ impl AgentHost for HubHost {
             .collect())
     }
 
-    async fn remove_agent(&self, agent: AgentId) -> Result<(), CoreError> {
-        let record = self.bus.store().get_agent(&AgentKey::Id(agent)).await?;
-        self.runtime.stop(&AgentKey::Id(agent)).await?;
-        self.bus.store().delete_agent(agent).await?;
-        if let Err(err) = crate::attachments::remove(&self.home, agent) {
-            tracing::warn!(agent = %record.name, error = %err, "cannot remove the agent's attachments");
-        }
-        self.bus
-            .publish(EventKind::AgentRemoved {
-                id: agent,
-                name: record.name,
-            })
-            .await?;
-        Ok(())
-    }
-
     async fn stop_agent(&self, agent: AgentId) -> Result<(), CoreError> {
         self.runtime.stop(&AgentKey::Id(agent)).await
     }

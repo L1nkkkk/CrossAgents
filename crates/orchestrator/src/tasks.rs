@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, CoreError, EventKind, HandoffKind, PlannedTask, Role, Run, RunStatus,
-    Task, TaskId, TaskReport, TaskSpec, TaskStatus,
+    Agent, AgentId, AgentKey, ClaimRole, CoreError, EventKind, HandoffKind, PlannedTask, Role, Run,
+    RunStatus, Task, TaskId, TaskReport, TaskSpec, TaskStatus,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -380,14 +380,19 @@ impl Orchestrator {
         } else {
             (HandoffKind::Reassign, reason)
         };
-        if let Some(old) = task.assignee.take()
-            && let Err(err) = self.host.remove_agent(old).await
-        {
-            tracing::warn!(%old, error = %err, "cannot remove agent");
-        }
+        // The worker before: archived, or home (docs/tasks/S1.md §3.4).
+        task.assignee = None;
+        self.let_go_task(run.id, task.id, Some(ClaimRole::Worker))
+            .await;
         let cwd = Self::worktree(&task)?;
         let worker = self
-            .fresh_agent(to.id, &agent_name("w", &run, &task), Role::Worker, &cwd)
+            .fresh_agent(
+                &task,
+                to.id,
+                &agent_name("w", &run, &task),
+                Role::Worker,
+                &cwd,
+            )
             .await?;
         task.assignee = Some(worker.id);
         task.report.question = None;
@@ -872,6 +877,7 @@ impl Orchestrator {
             .await?;
         let reviewer = self
             .fresh_agent(
+                &task,
                 template,
                 &agent_name("r", &run, &task),
                 Role::Reviewer,
@@ -914,9 +920,10 @@ impl Orchestrator {
                 "you are not reviewing this task".into(),
             ));
         }
-        if let Some(reviewer) = task.reviewer.take() {
-            let _ = self.host.remove_agent(reviewer).await;
-        }
+        // Its review is in; the run lets go of the reviewer.
+        task.reviewer = None;
+        self.let_go_task(run.id, task.id, Some(ClaimRole::Reviewer))
+            .await;
         task.report.review = Some(notes.clone());
         self.transition(&mut task, TaskStatus::Passed).await?;
         self.relay(
@@ -1035,8 +1042,9 @@ impl Orchestrator {
                 task.key
             )));
         };
-        if let Some(reviewer) = task.reviewer.take() {
-            let _ = self.host.remove_agent(reviewer).await;
+        if task.reviewer.take().is_some() {
+            self.let_go_task(run.id, task.id, Some(ClaimRole::Reviewer))
+                .await;
         }
         task.attempts += 1;
         task.report.failure = None;

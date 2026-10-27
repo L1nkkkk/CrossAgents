@@ -400,7 +400,8 @@ impl Orchestrator {
                 agent.name
             )));
         }
-        self.host.remove_agent(agent.id).await?;
+        // Archived, not deleted: its conversation stays (docs/tasks/S1.md §3.4).
+        self.host.archive_agent(agent.id).await?;
         let _guard = self.lock(run.id).await;
         let mut run = self.store.get_run(run.id).await?;
         run.config.team.retain(|id| *id != agent.id);

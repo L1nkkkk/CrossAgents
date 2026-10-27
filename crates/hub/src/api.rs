@@ -1081,11 +1081,10 @@ async fn create_run(
         Some(key) => agent_id(&state, key).await?,
         None => planner,
     };
-    // A lead that ended a run still lives in that run's checkout: the run it starts from
-    // here belongs to the repository it worked in, and starts from that run's base branch
-    // (docs/tasks/R1.md §2.2).
+    // The planner's workspace, wherever it works now (an ended run's checkout, say), from
+    // the branch it is on (docs/tasks/S1.md §3.2).
     let planner_agent = state.store().get_agent(&AgentKey::Id(planner)).await?;
-    let (repo, base_branch) = state.orchestrator.home_of(&planner_agent).await?;
+    let (repo, base_branch) = (planner_agent.home().to_path_buf(), None);
     let new = NewRun {
         request: req.request,
         title: req.title,
@@ -1200,8 +1199,10 @@ async fn delete_run(
         )
         .await?;
     Ok(Json(DeleteRunResponse {
-        agents: done.agents,
-        returned: done.returned,
+        agents: crossagents_api_types::DeletedRunAgents {
+            returned: done.agents.returned,
+            archived: done.agents.archived,
+        },
         worktrees: done.worktrees,
         branches: done.branches,
         warnings: done.warnings,

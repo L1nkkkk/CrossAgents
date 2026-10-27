@@ -116,17 +116,20 @@ impl Orchestrator {
         }))
     }
 
-    /// The run whose checkout `caller` lives in, when it ended without landing: a new Work
+    /// The last run `caller` led in its workspace, when it ended without landing: a new Work
     /// starts from the base branch again, and does not carry that run's changes.
     async fn unlanded_home_of(
         &self,
         caller: &Agent,
     ) -> Result<Option<crossagents_core::Run>, CoreError> {
-        let runs = self.store().list_runs().await?;
-        Ok(self
-            .run_lived_in(caller, &runs)
-            .filter(|r| r.status.is_terminal() && r.landed.is_none())
-            .cloned())
+        // Newest first.
+        let last = self
+            .store()
+            .list_runs()
+            .await?
+            .into_iter()
+            .find(|r| r.planner == caller.id && r.repo == caller.home() && !r.in_place);
+        Ok(last.filter(|r| r.status.is_terminal() && r.landed.is_none()))
     }
 
     /// The person's answer to a proposed Work; `None` when they closed the card.
@@ -148,9 +151,9 @@ impl Orchestrator {
             .store()
             .get_agent(&crossagents_core::AgentKey::Id(proposer))
             .await?;
-        // A lead that ended a run still lives in that run's checkout: the new run belongs to
-        // the repository the old one worked in, and starts from its base branch.
-        let (repo, base_branch) = self.home_of(&agent).await?;
+        // The proposer's workspace, wherever it works now; the run starts from the current
+        // branch there.
+        let (repo, base_branch) = (agent.home().to_path_buf(), None);
         let run = self
             .create_run(NewRun {
                 request: brief_of(item),
@@ -176,14 +179,22 @@ impl Orchestrator {
             .store()
             .get_agent(&crossagents_core::AgentKey::Id(run.planner))
             .await?;
-        self.deliver(
-            proposer,
-            MessageSource::Human,
+        let text = if lead.id == proposer {
+            // It leads the run itself, from the run's checkout, with this conversation.
+            format!(
+                "The person started the Work \"{}\" (run {}): you lead it yourself, on branch {}, working in the run's checkout {}. Your request is the brief that follows.",
+                run.title,
+                run.id,
+                run.branch,
+                lead.cwd.display()
+            )
+        } else {
             format!(
                 "The person started the Work \"{}\" (run {}): {} leads it on branch {}, with your request as its brief. This conversation stays as it is; the Work goes on there.",
                 run.title, run.id, lead.name, run.branch
-            ),
-        );
+            )
+        };
+        self.deliver(proposer, MessageSource::Human, text);
         Ok(())
     }
 }

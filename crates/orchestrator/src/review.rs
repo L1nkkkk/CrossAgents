@@ -113,8 +113,9 @@ impl Orchestrator {
             }
         }
         if rework && reopen {
-            if let Some(reviewer) = task.reviewer.take() {
-                let _ = self.host.remove_agent(reviewer).await;
+            if task.reviewer.take().is_some() {
+                self.let_go_task(run.id, task.id, Some(crossagents_core::ClaimRole::Reviewer))
+                    .await;
             }
             task.attempts += 1;
             task.report.failure = None;

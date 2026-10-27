@@ -745,17 +745,26 @@ pub struct FinishRequest {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DeleteRunResponse {
-    /// The agents removed, by name: the lead's copy and the ones the run recruited.
-    pub agents: Vec<String>,
-    /// Leads the run moved into its checkout instead of copying, by name: stopped and back in
-    /// the directory they came from, not removed.
-    pub returned: Vec<String>,
+    /// The sessions the run still held, by name. None is deleted (docs/tasks/S1.md §3.4).
+    pub agents: DeletedRunAgents,
     /// The directories that went: the run's checkout, its tasks', and the build directory
     /// they shared.
     pub worktrees: Vec<String>,
     pub branches: Vec<String>,
     /// What could not be cleaned up, and why.
     pub warnings: Vec<String>,
+}
+
+/// What became of the sessions a deleted run still held. Those that took part in it and are
+/// no longer its (gone home, archived, or working for another run) are not listed.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DeletedRunAgents {
+    /// Agents working for it themselves, back in their workspace.
+    pub returned: Vec<String>,
+    /// Execution sessions it started (a lead copied for it, say), archived; they can be
+    /// restored.
+    pub archived: Vec<String>,
 }
 
 /// `POST /v1/agents/{key}/connect`: how an external agent reaches the hub.

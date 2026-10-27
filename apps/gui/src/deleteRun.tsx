@@ -12,8 +12,10 @@ export function DeleteRunDialog({ detail, onClose }: { detail: RunDetail; onClos
   const { run } = detail;
   const agents = useAgents();
   const lead = agentName(agents.data, run.planner);
-  // A lead the run moved in (not a copy) goes back to its own directory instead of away.
-  const leadHome = (agents.data?.find((a) => a.id === run.planner)?.config as Record<string, unknown> | null)?.lead_home;
+  // Sessions are not the run's (docs/tasks/S1.md §3.4): a lead still in the run's checkout is
+  // a copy made for it and is archived; the lead itself went home when the run ended.
+  const leadAgent = agents.data?.find((a) => a.id === run.planner);
+  const copiedLead = !!leadAgent && leadAgent.cwd !== leadAgent.home;
   const live = ACTIVE_RUN.includes(run.status);
   const landed = !!run.landed;
   // A landed run's branches carry nothing the base branch lacks; an unlanded one's carry
@@ -48,18 +50,17 @@ export function DeleteRunDialog({ detail, onClose }: { detail: RunDetail; onClos
       <div className="dialog" role="dialog" aria-modal="true" aria-label="删除 run" onMouseDown={(e) => e.stopPropagation()}>
         <h2>{live ? "取消并删除这个 run？" : "删除这个 run？"}</h2>
         <p className="setting-hint">
-          删除是彻底的：run 的记录、任务、它起的 agent 和它的工作区都会消失。事件日志保留，可以按 run id 查。
+          删除是彻底的：run 的记录、任务和它的工作目录都会消失。会话不删：参与过的会话留在工作区，run 自己开的执行会话归档，可以恢复。事件日志保留，可以按 run id 查。
         </p>
         <dl className="kv small">
           <dt>主导</dt>
           <dd>
             {lead}
-            {!run.in_place &&
-              (typeof leadHome === "string" ? (
-                <span className="muted"> · {lead} 会保留，回到 <code>{leadHome}</code>，这个 run 里的对话不再接着</span>
-              ) : (
-                <span className="muted"> · 和 {lead} 的对话会一起删除</span>
-              ))}
+            {copiedLead ? (
+              <span className="muted"> · 为这个 run 复制出来的主导，会归档，对话保留、可以恢复</span>
+            ) : (
+              <span className="muted"> · 在工作区里，不受影响</span>
+            )}
           </dd>
           <dt>工作区</dt>
           <dd className="mono" style={{ overflowWrap: "anywhere" }}>

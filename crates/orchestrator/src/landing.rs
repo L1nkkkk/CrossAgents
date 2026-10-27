@@ -184,7 +184,18 @@ impl Orchestrator {
         if let Some(outcome) = self.ready_to_land(&mut run).await? {
             return Ok(outcome);
         }
-        self.merge_run(run, mode, by, message).await
+        let outcome = self.merge_run(run, mode, by, message).await?;
+        // Landed after it ended: the checkout landing needed goes again, unless someone the
+        // run still holds lives there (a lead copied for it).
+        let run = self.store.get_run(id).await?;
+        if run.status.is_terminal()
+            && !run.in_place
+            && self.store.list_claims(Some(id)).await?.is_empty()
+            && !self.lead_lives_in_integration(&run).await
+        {
+            self.remove_integration(&run).await;
+        }
+        Ok(outcome)
     }
 
     /// Everything before merging, under the run's lock: refuses a run that cannot land,

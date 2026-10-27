@@ -26,7 +26,7 @@ pub mod verify;
 pub mod work;
 pub mod workspace;
 
-pub use delete::{DeleteRun, DeletedRun};
+pub use delete::{DeleteRun, DeletedRun, DeletedRunAgents};
 pub use engine::{Approval, NewRun, Orchestrator, OrchestratorConfig};
 pub use host::{AgentHost, Route};
 pub use landing::LandOutcome;

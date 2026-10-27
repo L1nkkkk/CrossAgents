@@ -1,6 +1,7 @@
-//! Deleting a run (docs/tasks/R1.md §3): a run that ended goes with its tasks, the agents it
-//! started, its working copies and — by choice — its branches. A hard delete: nothing comes
-//! back, so a run that has not ended must be cancelled first.
+//! Deleting a run (docs/tasks/R1.md §3): a run that ended goes with its tasks, its working
+//! copies and — by choice — its branches. A hard delete: nothing comes back, so a run that has
+//! not ended must be cancelled first. Sessions are not the run's (docs/tasks/S1.md §3.4): none
+//! is deleted.
 
 mod common;
 
@@ -150,8 +151,8 @@ async fn a_run_that_is_still_open_must_be_cancelled_first() {
     );
 }
 
-/// R1 §3.4: a landed run takes its checkout, its branches and the lead's copy with it, leaves
-/// `/v1/runs`, and says so on the event stream.
+/// R1 §3.4: a landed run takes its checkout and its branches with it, leaves `/v1/runs`, and
+/// says so on the event stream. The lead's copy is archived, not deleted (S1 §3.4).
 #[tokio::test]
 async fn a_landed_run_goes_with_its_worktrees_branches_and_lead() {
     let (repo, t) = setup().await;
@@ -177,9 +178,11 @@ async fn a_landed_run_goes_with_its_worktrees_branches_and_lead() {
     assert_eq!(done["branches"], json!([branch]), "{done}");
     assert_eq!(done["worktrees"], json!([checkout]), "{done}");
     assert_eq!(done["warnings"], json!([]), "{done}");
-    // The lead's copy went; its name is what the person saw.
-    let name = done["agents"][0].as_str().unwrap_or_default();
-    assert!(!name.is_empty(), "{done}");
+    // The lead's copy was archived; its name is what the person saw. Nobody went home: the
+    // copy was the only session the run still held.
+    let copy = agent(&t, &lead).await;
+    assert_eq!(done["agents"]["archived"], json!([copy["name"]]), "{done}");
+    assert_eq!(done["agents"]["returned"], json!([]), "{done}");
 
     w.until(
         "run deleted",
@@ -195,8 +198,10 @@ async fn a_landed_run_goes_with_its_worktrees_branches_and_lead() {
             .all(|r| r["id"] != json!(id)),
         "{runs}"
     );
-    let gone = t.get(&format!("/v1/agents/{lead}")).await;
-    assert_eq!(gone.status(), 404, "{}", gone.text().await.unwrap());
+    // Still there, archived, back in the repository: its conversation can be restored.
+    let kept = agent(&t, &lead).await;
+    assert!(!kept["archived_at"].is_null(), "{kept}");
+    assert_eq!(kept["cwd"], kept["home"], "{kept}");
     assert!(!Path::new(&checkout).exists(), "{checkout}");
     assert!(
         branches(repo.path()).is_empty(),
@@ -317,8 +322,9 @@ async fn the_conversation_that_proposed_the_work_stays() {
 }
 
 /// A lead that never had a session is moved into the run's checkout, not copied: it may be
-/// someone the person picked from the roster, so deleting the run sends it back to where it
-/// lived instead of removing it.
+/// someone the person picked from the roster. The run lets go of it when it ends (S1 §3.4),
+/// so it is back where it lived before the run is deleted, and the delete has nobody left
+/// to send home.
 #[tokio::test]
 async fn a_lead_moved_into_the_run_goes_back_home() {
     let (repo, t) = setup().await;
@@ -345,25 +351,32 @@ async fn a_lead_moved_into_the_run_goes_back_home() {
 
     let resp = t.post(&format!("/v1/runs/{id}/finish"), json!({})).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
-    let resp = t.delete(&format!("/v1/runs/{id}")).await;
-    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
-    let done: Value = resp.json().await.unwrap();
-    assert_eq!(done["returned"], json!(["pia"]), "{done}");
-    assert!(
-        !done["agents"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|a| a == "pia"),
-        "{done}"
-    );
-
-    let back = agent(&t, "pia").await;
+    // Ended: back home, once its turn (the kickoff) is over.
+    let mut back = Value::Null;
+    for _ in 0..100 {
+        back = agent(&t, "pia").await;
+        if back["cwd"] == json!(repo.path().display().to_string()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     assert_eq!(
         back["cwd"],
         json!(repo.path().display().to_string()),
         "{back}"
     );
+    let resp = t.delete(&format!("/v1/runs/{id}")).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let done: Value = resp.json().await.unwrap();
+    // The run held nobody any more: pia's claim went when it ended.
+    assert_eq!(
+        done["agents"],
+        json!({ "returned": [], "archived": [] }),
+        "{done}"
+    );
+
+    let back = agent(&t, "pia").await;
+    assert!(back["archived_at"].is_null(), "{back}");
     assert!(back["config"].get("lead_home").is_none(), "{back}");
     assert!(!Path::new(moved["cwd"].as_str().unwrap()).exists(), "{moved}");
 }

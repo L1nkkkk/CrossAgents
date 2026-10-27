@@ -38,6 +38,12 @@ note: string | null,
  */
 plan: Array<PlannedTask>, 
 /**
+ * What to know about the lead: set when it is a copy of the agent picked, without that
+ * agent's conversation (its driver cannot resume a session elsewhere, docs/tasks/S1.md
+ * §3.2).
+ */
+lead_note: string | null, 
+/**
  * How the run's result reached the base branch, once it did.
  */
 landed: Landing | null, 

@@ -38,6 +38,30 @@ async fn agent(t: &TestHub, id: &str) -> Value {
         .unwrap()
 }
 
+/// Waits until `name` works in `dir` again (a lead the run let go of goes home once its turn
+/// is over).
+async fn until_home(t: &TestHub, name: &str, dir: &Path) {
+    for _ in 0..100 {
+        let cwd = agent(t, name).await["cwd"].as_str().unwrap().to_owned();
+        if std::fs::canonicalize(&cwd).ok() == std::fs::canonicalize(dir).ok() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("{name} never went back to {}", dir.display());
+}
+
+/// Gives boss a conversation first. Its driver (ACP) cannot resume a session elsewhere, so a
+/// run gets a copy of it, which keeps living in the run's checkout after the run ends.
+async fn chat_first(t: &TestHub, w: &mut common::Watcher) {
+    let boss = agent(t, "boss").await["id"].as_str().unwrap().to_owned();
+    t.send("boss", "hello").await;
+    w.until("boss answered", |e| {
+        matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if id.to_string() == boss)
+    })
+    .await;
+}
+
 async fn setup(repo: &Path) -> TestHub {
     let t = TestHub::start().await;
     t.add_agent_in("boss", Some("opus"), "planner", repo).await;
@@ -62,10 +86,10 @@ async fn the_lead_changes_the_run_branch_and_it_lands() {
     w.until("run completed", run_status_is(&id, RunStatus::Completed))
         .await;
 
-    // The lead worked in the run's checkout, not in the person's.
-    let lead = agent(&t, run["planner"].as_str().unwrap()).await;
-    let cwd = lead["cwd"].as_str().unwrap();
-    assert!(cwd.contains("integration"), "{lead}");
+    // boss led it itself, in the run's checkout rather than the person's (the change is on
+    // the run branch only); the run let go of it, so it is back in the repository.
+    assert_eq!(run["planner"], agent(&t, "boss").await["id"], "{run}");
+    until_home(&t, "boss", repo.path()).await;
     // With no worker given, tasks would go to copies of the lead: no teammates listed.
     assert_eq!(run["config"]["team"], json!([]), "{run}");
     assert!(!repo.path().join("notes.txt").exists());
@@ -216,6 +240,7 @@ async fn archiving_the_lead_clears_its_checkout_and_restoring_brings_it_back() {
     let repo = git_repo();
     let t = setup(repo.path()).await;
     let mut w = t.watch().await;
+    chat_first(&t, &mut w).await;
 
     // Run 1 lands; run 2 changes something but is never landed.
     let landed = start(
@@ -266,6 +291,7 @@ async fn an_unlanded_branch_outlives_the_checkout() {
     let repo = git_repo();
     let t = setup(repo.path()).await;
     let mut w = t.watch().await;
+    chat_first(&t, &mut w).await;
 
     let run = start(
         &t,

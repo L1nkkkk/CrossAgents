@@ -230,8 +230,8 @@ fn print_cleanup(done: &DeleteRunResponse) {
             println!("  {item}");
         }
     };
-    list("agents", &done.agents);
-    list("back where they came from", &done.returned);
+    list("back in their workspace", &done.agents.returned);
+    list("archived (can be restored)", &done.agents.archived);
     list("worktrees", &done.worktrees);
     list("branches", &done.branches);
     if !done.warnings.is_empty() {

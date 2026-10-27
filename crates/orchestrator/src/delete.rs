@@ -1,14 +1,16 @@
-//! Deleting a run (docs/tasks/R1.md §3): its row and tasks, the agents it started, the
-//! working copies it used and, when the person says so, its branches. A hard delete — runs do
-//! not come back — so only a run that ended can go, and a checkout with work that never landed
-//! asks first. Events stay: the log only grows, and the trace outlives the run.
+//! Deleting a run (docs/tasks/R1.md §3): its row and tasks, the working copies it used and,
+//! when the person says so, its branches. A hard delete — runs do not come back — so only a
+//! run that ended can go, and a checkout with work that never landed asks first. Sessions
+//! are not the run's (docs/tasks/S1.md §3.4): what it still holds is let go, nothing is
+//! deleted. Events stay: the log only grows, and the trace outlives the run.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use crossagents_core::{Agent, AgentKey, CoreError, EventKind, Run, RunId};
+use crossagents_core::{CoreError, EventKind, Run, RunId};
 use serde::Serialize;
 
-use crate::engine::{LEAD_HOME, Orchestrator, short};
+use crate::claims::LetGo;
+use crate::engine::{Orchestrator, short};
 
 /// What to clean up along with a run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -24,17 +26,25 @@ pub struct DeleteRun {
 /// itself goes all the same, as `cancel` does.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct DeletedRun {
-    /// The agents removed, by name: the lead's copy and the ones the run recruited.
-    pub agents: Vec<String>,
-    /// Leads the run moved into its checkout instead of copying, by name: stopped and back in
-    /// the directory they came from, not removed.
-    pub returned: Vec<String>,
+    /// The sessions the run still held, by name: none is deleted.
+    pub agents: DeletedRunAgents,
     /// The directories that went: the run's checkout, its tasks', and the build directory
     /// they shared.
     pub worktrees: Vec<String>,
     pub branches: Vec<String>,
     /// What could not be cleaned up, and why.
     pub warnings: Vec<String>,
+}
+
+/// What became of the sessions a deleted run still held (docs/tasks/S1.md §3.4). Those that
+/// took part in it and are no longer its (gone home, archived, or working for another run)
+/// are not listed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DeletedRunAgents {
+    /// Agents working for it themselves, back in their workspace.
+    pub returned: Vec<String>,
+    /// Execution sessions it started (a lead copied for it, say), archived.
+    pub archived: Vec<String>,
 }
 
 impl Orchestrator {
@@ -63,33 +73,12 @@ impl Orchestrator {
         }
 
         let mut done = DeletedRun::default();
-        // b. The lead's copy and the run's recruits: their turn stopped, then removed. The
-        // conversation that proposed the Work is another agent, and stays as it is. A lead
-        // the run moved in rather than copied is someone the person may have picked from the
-        // roster: it is stopped and goes back to where it lived.
-        let (owned, moved) = self.owned_agents(&run).await?;
-        if let Some((lead, home)) = moved {
-            match self.send_home(&lead, &home).await {
-                Ok(()) => done.returned.push(lead.name.clone()),
-                Err(err) => done.warnings.push(format!(
-                    "{}: cannot go back to {}: {err}",
-                    lead.name,
-                    home.display()
-                )),
-            }
-        }
-        for agent in owned {
-            if let Err(err) = self.host.interrupt(agent.id).await {
-                done.warnings.push(format!(
-                    "{}: cannot stop its running turn: {err}",
-                    agent.name
-                ));
-            }
-            match self.host.remove_agent(agent.id).await {
-                Ok(()) => done.agents.push(agent.name.clone()),
-                Err(err) => done
-                    .warnings
-                    .push(format!("{}: cannot remove the agent: {err}", agent.name)),
+        // b. What the run still holds, by its own claims only: an agent another run holds now
+        // is not touched. The agents themselves go home, its execution sessions are archived.
+        for gone in self.let_go_run(id, false).await {
+            match gone {
+                LetGo::Home(name) => done.agents.returned.push(name),
+                LetGo::Archived(name) => done.agents.archived.push(name),
             }
         }
 
@@ -142,55 +131,6 @@ impl Orchestrator {
         self.store.delete_run(id).await?;
         self.publish(EventKind::RunDeleted { run_id: id }).await;
         Ok(done)
-    }
-
-    /// The agents a run owns: the lead's copy living in its checkout, and the ones it
-    /// recruited; and apart, a lead that was moved in, with the directory it came from.
-    async fn owned_agents(
-        &self,
-        run: &Run,
-    ) -> Result<(Vec<Agent>, Option<(Agent, PathBuf)>), CoreError> {
-        let mut agents = Vec::new();
-        let mut moved = None;
-        if self.lead_lives_in_integration(run).await
-            && let Ok(lead) = self.store.get_agent(&AgentKey::Id(run.planner)).await
-        {
-            match lead
-                .config
-                .get(LEAD_HOME)
-                .and_then(serde_json::Value::as_str)
-            {
-                Some(home) => moved = Some((lead.clone(), PathBuf::from(home))),
-                None => agents.push(lead),
-            }
-        }
-        let id = run.id.to_string();
-        for agent in self.store.list_agents().await? {
-            let spawned = agent
-                .config
-                .get("spawned_by_run")
-                .and_then(serde_json::Value::as_str);
-            if spawned == Some(id.as_str()) && !agents.iter().any(|a| a.id == agent.id) {
-                agents.push(agent);
-            }
-        }
-        Ok((agents, moved))
-    }
-
-    /// Stops a lead the run moved into its checkout and puts it back in `home`, without the
-    /// mark. Its session was in the checkout, so its next turn starts a new one when resuming
-    /// fails there.
-    async fn send_home(&self, lead: &Agent, home: &Path) -> Result<(), CoreError> {
-        self.host.stop_agent(lead.id).await?;
-        let mut config = lead.config.clone();
-        if let Some(map) = config.as_object_mut() {
-            map.remove(LEAD_HOME);
-        }
-        self.store.update_agent_config(lead.id, &config).await?;
-        self.store.update_agent_cwd(lead.id, home).await?;
-        let agent = self.store.get_agent(&AgentKey::Id(lead.id)).await?;
-        self.publish(EventKind::AgentUpdated { agent }).await;
-        Ok(())
     }
 
     /// The branches a run left behind: its own, and each task's.

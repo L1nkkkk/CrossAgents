@@ -88,10 +88,10 @@ pub trait AgentHost: Send + Sync {
     async fn usage_report(&self, run: Option<RunId>) -> Result<Value, CoreError>;
     /// Takes the messages waiting for an agent that runs outside the hub.
     async fn take_inbox(&self, agent: AgentId) -> Result<Vec<Value>, CoreError>;
-    /// Archives a conversation's recruit: stopped and out of the lists, its transcript kept.
+    /// Archives an agent (and the ones its conversation recruited): stopped and out of the
+    /// lists, its transcript kept. Nothing the orchestrator does deletes an agent; only a
+    /// person does (docs/tasks/S1.md §3.4).
     async fn archive_agent(&self, agent: AgentId) -> Result<(), CoreError>;
-    /// Stops and deletes an agent created with [`Self::clone_agent`].
-    async fn remove_agent(&self, agent: AgentId) -> Result<(), CoreError>;
     /// Stops the agent's session and process, keeping the agent; its next message starts it
     /// again.
     async fn stop_agent(&self, agent: AgentId) -> Result<(), CoreError>;

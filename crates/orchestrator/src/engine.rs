@@ -12,9 +12,9 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, AgentStatus, CoreError, Envelope, EventBus, EventKind, HandoffKind,
-    MessageSource, PlannedTask, Role, Run, RunConfig, RunId, RunPolicy, RunStatus, Store, Task,
-    TaskId, TaskReport, TaskStatus,
+    Agent, AgentId, AgentKey, AgentStatus, ClaimRole, CoreError, Envelope, EventBus, EventKind,
+    HandoffKind, MessageSource, PlannedTask, Role, Run, RunConfig, RunId, RunPolicy, RunStatus,
+    Store, Task, TaskId, TaskReport, TaskStatus,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -98,9 +98,8 @@ pub struct Orchestrator {
     pub(crate) contexts: std::sync::Mutex<HashMap<AgentId, u64>>,
 }
 
-/// Agent config key: the directory a lead lived in before the run moved it into its checkout
-/// (a lead that never started a session moves rather than being copied).
-pub(crate) const LEAD_HOME: &str = "lead_home";
+/// What a run says about a lead copied for it (docs/tasks/S1.md §3.2).
+pub const COPIED_LEAD_NOTE: &str = "主导是复制出来的，没带上原会话的上下文";
 
 pub(crate) fn short(id: impl ToString) -> String {
     let s = id.to_string().replace('-', "");
@@ -285,27 +284,6 @@ impl Orchestrator {
     // -----------------------------------------------------------------------------------
     // Runs
 
-    /// The run whose checkout `agent` works in: its cwd is that run's integration worktree.
-    /// A lead keeps living in the checkout of a run that ended, so this is how a new run
-    /// finds the repository it belongs to (docs/tasks/R1.md §2.2). An in-place run's checkout
-    /// is its repository, which is the answer anyway, and it has no branch to be based on.
-    pub(crate) fn run_lived_in<'a>(&self, agent: &Agent, runs: &'a [Run]) -> Option<&'a Run> {
-        runs.iter()
-            .find(|r| !r.in_place && agent.cwd == self.integration_path(r))
-    }
-
-    /// Where a run for `agent` starts: the repository and base branch of the run whose
-    /// checkout it lives in, else its own directory and its current branch (`None`). Taking
-    /// the lead's cwd as the repository would make the old run's worktree the new run's
-    /// repository, and its branch the new run's base.
-    pub async fn home_of(&self, agent: &Agent) -> Result<(PathBuf, Option<String>), CoreError> {
-        let runs = self.store.list_runs().await?;
-        Ok(match self.run_lived_in(agent, &runs) {
-            Some(run) => (run.repo.clone(), Some(run.base_branch.clone())),
-            None => (agent.cwd.clone(), None),
-        })
-    }
-
     pub async fn create_run(&self, new: NewRun) -> Result<Run, CoreError> {
         let planner = self.store.get_agent(&AgentKey::Id(new.planner)).await?;
         self.store
@@ -320,7 +298,11 @@ impl Orchestrator {
         if new.request.trim().is_empty() {
             return Err(CoreError::Conflict("the request is empty".into()));
         }
-        let repo = new.repo.clone().unwrap_or_else(|| planner.cwd.clone());
+        // The planner's workspace, not where it works now (a run's checkout, say).
+        let repo = new
+            .repo
+            .clone()
+            .unwrap_or_else(|| planner.home().to_path_buf());
         let mut new = new;
         let team = self.gather_team(&new.config, &repo).await?;
         new.config.team = team.iter().map(|a| a.id).collect();
@@ -354,6 +336,7 @@ impl Orchestrator {
             in_place,
             note: None,
             plan: Vec::new(),
+            lead_note: None,
             created_at: now,
             updated_at: now,
         };
@@ -373,14 +356,32 @@ impl Orchestrator {
             )
             .await?;
         // The lead works in the run's own checkout: what it changes stays on the run branch
-        // until it is landed (docs/tasks/W1.md §4.1).
-        if !in_place {
-            run.planner = self
-                .lead_in(&planner, &self.integration_path(&run))
-                .await?
-                .id;
+        // until it is landed (docs/tasks/W1.md §4.1). In place, it works where it is.
+        let lead = if in_place {
+            self.claim(&planner, run.id, None, ClaimRole::Lead, false)
+                .await
+                .map(|()| (planner.clone(), false))
+        } else {
+            self.lead_in(&planner, run.id, &self.integration_path(&run))
+                .await
+        };
+        let (lead, copied) = match lead {
+            Ok(lead) => lead,
+            Err(err) => {
+                if !in_place {
+                    self.remove_integration(&run).await;
+                }
+                return Err(err);
+            }
+        };
+        run.planner = lead.id;
+        if copied {
+            run.lead_note = Some(COPIED_LEAD_NOTE.into());
         }
-        self.store.insert_run(&run).await?;
+        if let Err(err) = self.store.insert_run(&run).await {
+            self.let_go_run(run.id, false).await;
+            return Err(err);
+        }
         self.publish(EventKind::RunCreated { run: run.clone() })
             .await;
         // The request is the person's; the roster and ids are facts the lead needs.
@@ -397,39 +398,37 @@ impl Orchestrator {
         Ok(run)
     }
 
-    /// The run's lead, working in `dir`: `planner` itself when its session never started
-    /// (a lead made for this run), else a copy of it, so a conversation keeps its directory
-    /// (a vendor session cannot move).
-    async fn lead_in(&self, planner: &Agent, dir: &Path) -> Result<Agent, CoreError> {
-        let fresh = planner.status == AgentStatus::Stopped
+    /// The run's lead, working in `dir` (docs/tasks/S1.md §3.2): `planner` itself, held for
+    /// the run and moved in with its conversation, when its driver resumes a session in
+    /// another directory (or it never started one). Else a copy, which starts without that
+    /// conversation: `true` then. Busy when `planner` works for another run or is answering
+    /// a person.
+    async fn lead_in(
+        &self,
+        planner: &Agent,
+        run: RunId,
+        dir: &Path,
+    ) -> Result<(Agent, bool), CoreError> {
+        let never_started = planner.status == AgentStatus::Stopped
             && self.store.last_session_id(planner.id).await?.is_none();
-        if fresh {
-            // The agent itself moves, so deleting the run sends it back rather than removing
-            // it (`delete.rs`): it may be one the person picked from the roster.
-            let mut config = planner.config.clone();
-            if !config.is_object() {
-                config = serde_json::json!({});
+        if never_started || self.host.can_move(planner).await {
+            self.claim(planner, run, None, ClaimRole::Lead, false)
+                .await?;
+            if let Err(err) = self.host.place(planner.id, dir, true).await {
+                let _ = self.store.release_agent(planner.id, run).await;
+                return Err(err);
             }
-            if let Some(map) = config.as_object_mut() {
-                map.insert(LEAD_HOME.into(), planner.cwd.display().to_string().into());
-            }
-            self.store.update_agent_config(planner.id, &config).await?;
-            self.store.update_agent_cwd(planner.id, dir).await?;
             let lead = self.store.get_agent(&AgentKey::Id(planner.id)).await?;
-            self.publish(EventKind::AgentUpdated {
-                agent: lead.clone(),
-            })
-            .await;
-            return Ok(lead);
+            return Ok((lead, false));
         }
         let mut config = planner.config.clone();
         // The copy leads the run; it is nobody's recruit.
         if let Some(map) = config.as_object_mut() {
             map.remove("spawned_by_agent");
             map.remove("spawned_by_run");
-            map.remove(LEAD_HOME);
         }
-        self.host
+        let copy = self
+            .host
             .spawn_agent(Agent {
                 id: AgentId::new(),
                 // A made-up person's name.
@@ -445,7 +444,10 @@ impl Orchestrator {
                 home: planner.home().to_path_buf(),
                 ..planner.clone()
             })
-            .await
+            .await?;
+        // Made for this run: an execution session of it, archived when the run lets go.
+        self.claim(&copy, run, None, ClaimRole::Lead, true).await?;
+        Ok((copy, true))
     }
 
     /// The run's team: the given teammates, or every worker and reviewer registered in the
@@ -468,7 +470,16 @@ impl Orchestrator {
         }
         if config.team.is_empty() {
             for agent in self.store.list_agents().await? {
-                if agent.role != Role::Planner && agent.cwd == repo {
+                // The workspace's own sessions, not the executions runs started in it.
+                let execution = matches!(
+                    self.store.claim_of(agent.id).await?,
+                    Some(claim) if claim.fresh
+                );
+                if agent.role != Role::Planner
+                    && agent.home() == repo
+                    && agent.archived_at.is_none()
+                    && !execution
+                {
                     add(agent);
                 }
             }
@@ -806,6 +817,8 @@ The person changed: {}",
             task.report.failure = Some("run cancelled".into());
             self.transition(&mut task, TaskStatus::Cancelled).await?;
         }
+        // Its lead goes home (or is archived, a copy) before its checkout goes.
+        self.let_go_run(id, false).await;
         self.remove_integration(&run).await;
         self.set_run_status(&mut run, RunStatus::Cancelled, Some("cancelled".into()))
             .await?;
@@ -911,29 +924,59 @@ The person changed: {}",
         Ok(())
     }
 
-    /// Clones `template`, replacing a leftover agent of the same name.
+    /// A new execution session of `template` for `task`, working in `cwd` and held for it
+    /// (docs/tasks/S1.md §3.3). Named `name`, or `name-2`… when an earlier one (archived)
+    /// has that name.
     pub(crate) async fn fresh_agent(
         &self,
+        task: &Task,
         template: AgentId,
         name: &str,
         role: Role,
         cwd: &Path,
     ) -> Result<Agent, CoreError> {
-        if let Ok(stale) = self.store.get_agent(&AgentKey::Name(name.to_owned())).await {
-            self.host.remove_agent(stale.id).await?;
-        }
-        self.host.clone_agent(template, name, role, cwd).await
+        let name = self.free_name(name).await?;
+        let agent = self.host.clone_agent(template, &name, role, cwd).await?;
+        let claim = if role == Role::Reviewer {
+            ClaimRole::Reviewer
+        } else {
+            ClaimRole::Worker
+        };
+        self.claim(&agent, task.run_id, Some(task.id), claim, true)
+            .await?;
+        Ok(agent)
     }
 
-    pub(crate) async fn release_agents(&self, task: &mut Task) {
-        for agent in [task.assignee.take(), task.reviewer.take()]
-            .into_iter()
-            .flatten()
-        {
-            if let Err(err) = self.host.remove_agent(agent).await {
-                tracing::warn!(%agent, error = %err, "cannot remove agent");
+    /// `name`, or `name-2`, `name-3`… when an agent has it: execution sessions are archived,
+    /// not deleted, and keep their names.
+    pub(crate) async fn free_name(&self, name: &str) -> Result<String, CoreError> {
+        let mut candidate = name.to_owned();
+        for n in 2..1000 {
+            match self
+                .store
+                .get_agent(&AgentKey::Name(candidate.clone()))
+                .await
+            {
+                Err(CoreError::NotFound { .. }) => return Ok(candidate),
+                Err(err) => return Err(err),
+                Ok(_) => {
+                    let suffix = format!("-{n}");
+                    let mut base = name.to_owned();
+                    base.truncate(32 - suffix.len());
+                    candidate = format!("{}{suffix}", base.trim_end_matches('-'));
+                }
             }
         }
+        Err(CoreError::Conflict(format!("no free name like {name:?}")))
+    }
+
+    /// The task's worker and reviewer are done with it: what the run holds for the task is
+    /// let go (docs/tasks/S1.md §3.4). Execution sessions are archived, agents working on it
+    /// themselves go back to their workspace; nothing is deleted.
+    pub(crate) async fn release_agents(&self, task: &mut Task) {
+        task.assignee = None;
+        task.reviewer = None;
+        self.let_go_task(task.run_id, task.id, None).await;
     }
 
     pub(crate) async fn cleanup_worktree(&self, run: &Run, task: &Task, delete_branch: bool) {
@@ -945,7 +988,7 @@ The person changed: {}",
         }
     }
 
-    async fn remove_integration(&self, run: &Run) {
+    pub(crate) async fn remove_integration(&self, run: &Run) {
         if let Err(err) = self
             .ws_for(run)
             .remove(&run.repo, &self.integration_path(run), None)
@@ -1000,12 +1043,51 @@ The person changed: {}",
                 Some(format!("{missed} of {} tasks did not merge", tasks.len())),
             ),
         };
-        // A lead working in the checkout keeps it: the person may still talk to it.
+        // The run lets go of everyone it holds; a lead copied for it stays in its checkout,
+        // where the person may still talk to it, until the run is deleted. The lead itself
+        // goes home, and its checkout goes once it has left (`checkout_vacated`).
+        self.let_go_run(run.id, true).await;
         if !self.lead_lives_in_integration(run).await {
             self.remove_integration(run).await;
         }
         self.set_run_status(run, status, note).await?;
         Ok(())
+    }
+
+    /// `agent` moved: the ended runs it led keep no checkout for it any more, unless the run
+    /// still holds someone (a lead copied for it, who lives there). What was left
+    /// uncommitted there is committed first.
+    async fn checkout_vacated(&self, agent: &Agent) {
+        let Ok(runs) = self.store.list_runs().await else {
+            return;
+        };
+        for run in runs {
+            if run.planner != agent.id || !run.status.is_terminal() || run.in_place {
+                continue;
+            }
+            let dir = self.integration_path(&run);
+            if !dir.exists() || agent.cwd == dir {
+                continue;
+            }
+            let _guard = self.lock(run.id).await;
+            if !self
+                .store
+                .list_claims(Some(run.id))
+                .await
+                .unwrap_or_default()
+                .is_empty()
+            {
+                continue;
+            }
+            if let Err(err) = self
+                .commit_lead(&run, &format!("crossagents: {} (after the run)", run.title))
+                .await
+            {
+                tracing::warn!(run = %run.id, error = %err, "cannot commit the run's checkout");
+                continue;
+            }
+            self.remove_integration(&run).await;
+        }
     }
 
     pub(crate) async fn lead_lives_in_integration(&self, run: &Run) -> bool {
@@ -1087,6 +1169,10 @@ The person changed: {}",
                 match events.recv().await {
                     Ok(event) => match event.kind {
                         EventKind::AgentTurnCompleted { id, .. } => this.on_idle(id).await,
+                        EventKind::AgentUpdated { agent } => {
+                            let this = this.clone();
+                            tokio::spawn(async move { this.checkout_vacated(&agent).await });
+                        }
                         EventKind::AgentUsage { id, used, .. } => this.record_context(id, used),
                         EventKind::AgentStatusChanged {
                             id,

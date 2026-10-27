@@ -320,6 +320,11 @@ pub struct Run {
     /// The submitted plan; tasks are created from it on approval.
     #[serde(default)]
     pub plan: Vec<PlannedTask>,
+    /// What to know about the lead: set when it is a copy of the agent picked, without that
+    /// agent's conversation (its driver cannot resume a session elsewhere, docs/tasks/S1.md
+    /// §3.2).
+    #[serde(default)]
+    pub lead_note: Option<String>,
     /// How the run's result reached the base branch, once it did.
     #[serde(default)]
     pub landed: Option<Landing>,
