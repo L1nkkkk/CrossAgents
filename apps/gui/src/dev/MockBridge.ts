@@ -6,6 +6,7 @@
 
 import type { AgentExecution } from "@bindings/AgentExecution";
 import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
+import type { CommitGraph } from "@bindings/CommitGraph";
 import type { Agent } from "@bindings/Agent";
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
 import type { HumanItem } from "@bindings/HumanItem";
@@ -43,6 +44,10 @@ export type MockState = {
   taskDiffs: Map<string, string>;
   /** Each run's branch against its base (before landing), by run id. */
   runDiffs: Map<string, string>;
+  /** Commit graphs (`GET .../graph`), by run id or agent id; absent: no commits. */
+  graphs?: Map<string, CommitGraph>;
+  /** What each commit of those graphs changed against its first parent, by sha. */
+  commitDiffs?: Map<string, string>;
   /** Run traces (docs/tasks/DOGFOOD.md §8), by run id; absent: tasks only. */
   traces: Map<string, RunTrace>;
   /** Files sent with messages, by id: type and base64 bytes. */
@@ -346,6 +351,22 @@ export class MockBridge implements CrossAgentsBridge {
         if (!d) return notFound("run");
         if (d.run.in_place) return json(409, { error: { code: "conflict", message: "this directory is not under version control, so there is no diff" } });
         return json(200, { base: d.run.base_branch, head: d.run.branch, diff: s.runDiffs.get(d.run.id) ?? "", truncated: false });
+      }
+      if ((m = p.match(/^\/v1\/(runs|agents)\/([^/]+)\/graph$/))) {
+        const id = m[1] === "runs" ? s.runs.find((x) => x.run.id === m![2])?.run.id : this.agent(m[2])?.id;
+        if (!id) return notFound(m[1] === "runs" ? "run" : "agent");
+        if (m[1] === "runs" && s.runs.find((x) => x.run.id === id)!.run.in_place)
+          return json(409, { error: { code: "conflict", message: "this directory is not under version control, so there is no commit graph" } });
+        const graph = s.graphs?.get(id) ?? { refs: [], commits: [], truncated: false };
+        const limit = Number(url.searchParams.get("limit") ?? 200);
+        return json(200, { ...graph, commits: graph.commits.slice(0, limit), truncated: graph.truncated || graph.commits.length > limit });
+      }
+      if ((m = p.match(/^\/v1\/(runs|agents)\/([^/]+)\/commits\/([^/]+)\/diff$/))) {
+        const id = m[1] === "runs" ? s.runs.find((x) => x.run.id === m![2])?.run.id : this.agent(m[2])?.id;
+        const sha = decodeURIComponent(m[3]);
+        const commit = id ? s.graphs?.get(id)?.commits.find((c) => c.sha === sha) : undefined;
+        if (!commit) return notFound(`commit ${sha}`);
+        return json(200, { base: commit.parents[0] ?? "", head: sha, diff: s.commitDiffs?.get(sha) ?? "", truncated: false });
       }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/attachments\/([^/]+)$/))) {
         const file = s.files.get(decodeURIComponent(m[2]));
