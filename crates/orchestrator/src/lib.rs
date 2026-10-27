@@ -31,7 +31,7 @@ pub mod workspace;
 
 pub use claims::Execution;
 pub use delete::{DeleteRun, DeletedRun, DeletedRunAgents};
-pub use engine::{Approval, NewRun, Orchestrator, OrchestratorConfig};
+pub use engine::{Approval, DEFAULT_BUILD_CACHE_LIMIT, NewRun, Orchestrator, OrchestratorConfig};
 pub use files::{FileError, FilesScope};
 pub use graph::{Graph, RefEntry, RefKind};
 pub use host::{AgentHost, Route};

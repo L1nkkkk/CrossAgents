@@ -209,10 +209,12 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         OrchestratorConfig {
             worktrees: paths.home.join("worktrees"),
             max_nudges: 2,
+            build_cache_limit: config.build_cache_limit,
         },
     );
     let _ = setup.orchestrator.set(orchestrator.clone());
     orchestrator.watch();
+    orchestrator.prune_build_cache();
     // Settle what runs spent while no hub was there (agents' replayed usage included) before
     // anything is dispatched: an over-budget run pauses first (docs/tasks/DOGFOOD.md §5).
     let budgets = Arc::new(

@@ -29,7 +29,13 @@ pub struct OrchestratorConfig {
     pub worktrees: PathBuf,
     /// No longer used: the hub does not nudge (H1). Kept so configurations still load.
     pub max_nudges: u32,
+    /// Bytes a repository's shared build directory may grow to before it is removed once no
+    /// run uses it (`workspace::prune_shared_targets`).
+    pub build_cache_limit: u64,
 }
+
+/// `build_cache_limit` unless the hub's configuration says otherwise.
+pub const DEFAULT_BUILD_CACHE_LIMIT: u64 = 30 << 30;
 
 /// Everything needed to start a run.
 #[derive(Debug, Clone)]
@@ -1156,8 +1162,9 @@ The person changed: {}",
         self.remove_run_build(run);
     }
 
-    /// Removes the build directory the run's worktrees share (`<worktrees>/<run>/target`,
-    /// see `workspace::worktree_env`), and the run's directory once nothing else is in it.
+    /// Removes the run's own build directory (`<worktrees>/<run>/target`, used only where
+    /// the repository's shared one could not be found, see `workspace::worktree_env`), and
+    /// the run's directory once nothing else is in it.
     /// Called when the run's checkout goes: nothing builds there any more.
     pub(crate) fn remove_run_build(&self, run: &Run) {
         let dir = self.config.worktrees.join(short(run.id));
@@ -1169,6 +1176,18 @@ The person changed: {}",
         }
         // Fails while task worktrees remain: those are cleaned up on their own.
         let _ = std::fs::remove_dir(&dir);
+        self.prune_build_cache();
+    }
+
+    /// Removes shared build directories that grew past the limit and no run uses any more,
+    /// in the background (it walks gigabytes). At startup, and whenever a run's checkout goes.
+    pub fn prune_build_cache(&self) {
+        let (root, limit) = (self.config.worktrees.clone(), self.config.build_cache_limit);
+        tokio::task::spawn_blocking(move || {
+            for (dir, size) in crate::workspace::prune_shared_targets(&root, limit) {
+                tracing::info!(dir = %dir.display(), gb = size >> 30, "removed a shared build directory over its limit");
+            }
+        });
     }
 
     /// Completed when every task merged, or when some did not but the run branch changes

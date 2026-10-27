@@ -266,5 +266,6 @@ impl Orchestrator {
         }
         // Fails while a task's checkout is still there; those are removed above.
         let _ = std::fs::remove_dir(&dir);
+        self.prune_build_cache();
     }
 }

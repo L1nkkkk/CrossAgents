@@ -857,17 +857,18 @@ fn commit_all(repo: &Path, message: &str) {
 /// `before_land` runs on the person's checkout and the lead calls `run_land`. Returns the
 /// run's detail once the lead heard back.
 async fn land_after(before_land: impl FnOnce(&Path)) -> (tempfile::TempDir, Value) {
-    let repo = git_repo();
     let check = if cfg!(windows) {
         "if exist bad.txt exit 1"
     } else {
         "test ! -e bad.txt"
     };
-    std::fs::write(
-        repo.path().join("crossagents.toml"),
-        format!("[run]\nchecks = [\"{check}\"]\n"),
-    )
-    .unwrap();
+    land_with(&format!("[run]\nchecks = [\"{check}\"]\n"), before_land).await
+}
+
+/// `land_after` with `config` as the project's crossagents.toml.
+async fn land_with(config: &str, before_land: impl FnOnce(&Path)) -> (tempfile::TempDir, Value) {
+    let repo = git_repo();
+    std::fs::write(repo.path().join("crossagents.toml"), config).unwrap();
     commit_all(repo.path(), "checks");
     let t = setup(repo.path()).await;
     let mut w = t.watch().await;
@@ -934,6 +935,22 @@ async fn the_lead_lands_when_the_base_keeps_the_checks_passing() {
     assert_eq!(git_show(repo.path(), "main:z.txt"), "zed");
     assert_eq!(git_show(repo.path(), "main:fine.txt"), "harmless");
     assert_eq!(detail["run"]["checks"][0]["passed"], true, "{detail}");
+}
+
+#[tokio::test]
+async fn a_check_for_other_paths_does_not_hold_up_landing() {
+    // The check would fail, but it is only for `crates`, and the run writes `z.txt`.
+    let (repo, detail) = land_with(
+        "[run]\nchecks = [{ command = \"exit 1\", paths = [\"crates\"] }]\n",
+        |_| {},
+    )
+    .await;
+    assert_eq!(detail["run"]["landed"]["mode"], "merge", "{detail}");
+    assert_eq!(git_show(repo.path(), "main:z.txt"), "zed");
+    assert!(
+        detail["run"]["checks"].as_array().is_none_or(Vec::is_empty),
+        "{detail}"
+    );
 }
 
 #[tokio::test]

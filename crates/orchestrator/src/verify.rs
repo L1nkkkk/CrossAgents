@@ -33,7 +33,7 @@ pub trait Verifier: Send + Sync {
 pub struct ShellVerifier {
     pub timeout: Duration,
     pub max_output: usize,
-    /// Where runs' worktrees live: checks in one build in the run's shared target, as its
+    /// Where runs' worktrees live: checks in one build in the shared target, as the run's
     /// agents do (`workspace::worktree_env`).
     pub worktrees: Option<PathBuf>,
 }

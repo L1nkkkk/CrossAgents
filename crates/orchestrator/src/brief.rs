@@ -34,9 +34,16 @@ pub fn kickoff(
             run.title, run.id, run.base_branch, run.branch
         );
         match checks {
-            Ok(c) if c.commands.is_empty() => {}
+            Ok(c) if c.checks.is_empty() => {}
             Ok(c) => {
-                let list: Vec<String> = c.commands.iter().map(|c| format!("`{c}`")).collect();
+                let list: Vec<String> = c
+                    .checks
+                    .iter()
+                    .map(|c| match c.paths.as_slice() {
+                        [] => format!("`{}`", c.command),
+                        paths => format!("`{}` (when {} changes)", c.command, paths.join(", ")),
+                    })
+                    .collect();
                 let _ = write!(
                     out,
                     "\nchecks ({}): before you land or finish with changes, the hub runs {} in \

@@ -141,6 +141,9 @@ struct HubSection {
     runtime_hosts: Option<bool>,
     /// Write every event to a JSON-lines file per day under `logs/` (default on).
     event_log: Option<bool>,
+    /// Gigabytes a repository's shared build directory may reach before it is removed once
+    /// no run uses it (default 30).
+    build_cache_gb: Option<u64>,
 }
 
 /// Hub settings. `port = 0` binds a random free port.
@@ -165,6 +168,8 @@ pub struct HubConfig {
     /// Write every event to `logs/events-YYYY-MM-DD.jsonl` (`[hub] event_log`, on by default;
     /// off in [`HubConfig::new`] so tests never write to the user's log directory).
     pub event_log: bool,
+    /// `[hub] build_cache_gb`, in bytes: see `OrchestratorConfig::build_cache_limit`.
+    pub build_cache_limit: u64,
 }
 
 impl HubConfig {
@@ -179,6 +184,7 @@ impl HubConfig {
             detect_accounts: false,
             runtime_host: None,
             event_log: false,
+            build_cache_limit: crossagents_orchestrator::DEFAULT_BUILD_CACHE_LIMIT,
         }
     }
 }
@@ -217,6 +223,12 @@ impl HubConfig {
             detect_accounts: config.accounts.detect.unwrap_or(true),
             runtime_host,
             event_log: config.hub.event_log.unwrap_or(true),
+            build_cache_limit: config
+                .hub
+                .build_cache_gb
+                .map_or(crossagents_orchestrator::DEFAULT_BUILD_CACHE_LIMIT, |gb| {
+                    gb << 30
+                }),
         })
     }
 }
@@ -229,8 +241,12 @@ mod tests {
     fn config_defaults_and_overrides() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::new(dir.path());
-        assert_eq!(HubConfig::load(paths.clone()).unwrap().port, DEFAULT_PORT);
-        std::fs::write(paths.config(), "[hub]\nport = 0\n").unwrap();
-        assert_eq!(HubConfig::load(paths).unwrap().port, 0);
+        let defaults = HubConfig::load(paths.clone()).unwrap();
+        assert_eq!(defaults.port, DEFAULT_PORT);
+        assert_eq!(defaults.build_cache_limit, 30 << 30);
+        std::fs::write(paths.config(), "[hub]\nport = 0\nbuild_cache_gb = 8\n").unwrap();
+        let config = HubConfig::load(paths).unwrap();
+        assert_eq!(config.port, 0);
+        assert_eq!(config.build_cache_limit, 8 << 30);
     }
 }

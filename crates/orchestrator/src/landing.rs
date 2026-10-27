@@ -60,12 +60,26 @@ impl Orchestrator {
         }
         let checks = project::run_checks(&dir)
             .map_err(|e| CoreError::Conflict(format!("{e}; fix it, then call {tool} again")))?;
-        if checks.commands.is_empty() {
+        if checks.checks.is_empty() {
+            return Ok(());
+        }
+        // What the run changes against its base, so that a check scoped to other paths is
+        // skipped. Not knowing (an error) runs them all.
+        let changed = self
+            .ws_for(run)
+            .changed_files(&dir, &run.base_branch)
+            .await
+            .unwrap_or_else(|err| {
+                tracing::warn!(run = %run.id, error = %err, "cannot list the run's changes; running every check");
+                Vec::new()
+            });
+        let commands = checks.commands_for(&changed);
+        if commands.is_empty() {
             return Ok(());
         }
         let results = self
             .verifier
-            .check_within(&dir, &checks.commands, checks.timeout)
+            .check_within(&dir, &commands, checks.timeout)
             .await;
         {
             let _guard = self.lock(run.id).await;
