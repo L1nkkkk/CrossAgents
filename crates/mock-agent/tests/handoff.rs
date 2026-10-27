@@ -377,7 +377,10 @@ async fn each_card_carries_what_its_own_worker_left() {
 
     t.send(
         &to_ada.to.to_string(),
-        &call("task_progress", json!({ "task": "a", "text": "ada is halfway" })),
+        &call(
+            "task_progress",
+            json!({ "task": "a", "text": "ada is halfway" }),
+        ),
     )
     .await;
     w.until(
@@ -393,12 +396,19 @@ async fn each_card_carries_what_its_own_worker_left() {
             |e| matches!(&e.kind, EventKind::TaskHandedOff { handoff, .. } if handoff.to_name == "kai"),
         )
         .await;
-    let EventKind::TaskHandedOff { handoff: to_kai, .. } = to_kai.kind else {
+    let EventKind::TaskHandedOff {
+        handoff: to_kai, ..
+    } = to_kai.kind
+    else {
         unreachable!()
     };
     assert_eq!(to_kai.from, Some(to_ada.to));
     assert_eq!(to_kai.from_name.as_deref(), Some("ada"));
-    assert_eq!(to_kai.summary.as_deref(), Some("ada is halfway"), "{to_kai:?}");
+    assert_eq!(
+        to_kai.summary.as_deref(),
+        Some("ada is halfway"),
+        "{to_kai:?}"
+    );
     let (_, text) = first_input(&mut w, to_kai.to).await;
     assert!(!text.contains("rex wrote a"), "{text}");
 }
@@ -438,7 +448,10 @@ async fn a_worker_that_said_nothing_hands_over_nothing_said() {
             |e| matches!(&e.kind, EventKind::TaskHandedOff { handoff, .. } if handoff.to_name == "kai"),
         )
         .await;
-    let EventKind::TaskHandedOff { handoff: to_kai, .. } = to_kai.kind else {
+    let EventKind::TaskHandedOff {
+        handoff: to_kai, ..
+    } = to_kai.kind
+    else {
         unreachable!()
     };
     assert_eq!(to_kai.from_name.as_deref(), Some("ada"));
