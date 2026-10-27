@@ -56,6 +56,10 @@
       {
         "from": "../../target/release/crossagents.exe",
         "to": "bin/crossagents.exe"
+      },
+      {
+        "from": "build/icon.ico",
+        "to": "icon.ico"
       }
     ],
     "nsis": {

@@ -10,6 +10,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell, session,
 import { autoUpdater } from "electron-updater";
 import { allowed, route } from "./allowed.cjs";
 import { manageLocalHub, type LocalHub } from "./localHub.cjs";
+import { createTray, type AppTray } from "./tray.cjs";
 
 const METHODS = new Set(["GET", "POST", "DELETE"]);
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -67,6 +68,8 @@ async function connection(): Promise<{ base: string; token: string }> {
  * a dev run (`npm run electron:dev`) talks to whatever hub is running, as before.
  */
 let localHub: LocalHub | undefined;
+/** The tray icon that keeps the GUI around while that hub runs (electron/tray.cts); packaged only. */
+let tray: AppTray | undefined;
 
 function message(err: unknown): string {
   if (err instanceof Error) {
@@ -371,6 +374,7 @@ async function createWindow() {
     },
   });
   win.once("ready-to-show", () => win.show());
+  tray?.keep(win);
   // No native menu, so the shortcuts it carried are wired here: zoom always (the page's own
   // menu, src/menubar.tsx, lists them); reload and dev tools only in development.
   win.webContents.on("before-input-event", (event, input) => {
@@ -420,18 +424,25 @@ function logLine(line: string) {
 // One GUI per user: two would race to start and upgrade the same local hub.
 const single = app.requestSingleInstanceLock();
 if (!single) app.quit();
-app.on("second-instance", () => {
+/** Brings the window back from the tray or from behind other windows. */
+function showWindow() {
   const win = BrowserWindow.getAllWindows()[0];
-  if (!win) return;
+  if (!win) {
+    void createWindow();
+    return;
+  }
   if (win.isMinimized()) win.restore();
+  win.show();
   win.focus();
-});
+}
+app.on("second-instance", showWindow);
 
 app.whenReady().then(() => {
   if (!single) return;
   if (app.isPackaged) {
     const exe = process.platform === "win32" ? "crossagents.exe" : "crossagents";
     localHub = manageLocalHub(join(process.resourcesPath, "bin", exe), hubHome(), logLine);
+    tray = createTray(join(process.resourcesPath, "icon.ico"), localHub, showWindow, logLine);
     // Downloads a newer release in the background and installs it when the GUI quits; the
     // next launch then upgrades the local hub (package.json `build.publish`).
     const updaterLog = (m: unknown) => logLine(`updater: ${String(m)}`);
@@ -451,6 +462,7 @@ app.whenReady().then(() => {
   });
 });
 
+// With a tray the window only hides; the GUI quits from the tray's menu.
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
+  if (process.platform !== "darwin" && !tray) app.quit();
 });

@@ -15,6 +15,8 @@ const CLI_TIMEOUT_MS = 45_000;
 const RETRY_MS = 30_000;
 /** Nor is a hub that went away looked at again sooner than this. */
 const RECHECK_MS = 5_000;
+/** `hub stop --agents` waits for every agent's session to close (up to 30 s) before it gives up. */
+const STOP_ALL_TIMEOUT_MS = 90_000;
 
 /** What `hub.json` says about the running hub (crates/hub/src/paths.rs `HubFile`). */
 export type HubFile = { pid: number; port: number; version: string; exe?: string };
@@ -88,9 +90,9 @@ export function plan(running: { file: HubFile; version: string } | undefined, ou
   return order < 0 ? { action: "replace", from: running.version } : { action: "newer", running: running.version };
 }
 
-function run(exe: string, args: string[]): Promise<string> {
+function run(exe: string, args: string[], timeout = CLI_TIMEOUT_MS): Promise<string> {
   return new Promise((done, fail) => {
-    execFile(exe, args, { timeout: CLI_TIMEOUT_MS, windowsHide: true }, (err, stdout, stderr) => {
+    execFile(exe, args, { timeout, windowsHide: true }, (err, stdout, stderr) => {
       if (err) fail(new Error(`${EXE} ${args.join(" ")} failed: ${(stderr || stdout || err.message).trim()}`));
       else done(stdout.trim());
     });
@@ -225,6 +227,13 @@ export type LocalHub = {
   devHub(): DevHub | undefined;
   /** Stops the development hub and starts the shipped one; agents keep running. */
   useShipped(): Promise<void>;
+  /** Whether a hub answers now. */
+  running(): Promise<boolean>;
+  /**
+   * Stops the hub and every agent, whichever build runs it, and never starts one again: the
+   * GUI quits next (the tray's "stop", electron/tray.cts).
+   */
+  stopAll(): Promise<void>;
 };
 
 /** What the page shows about a development hub (src/bridge.d.ts `DevHub`). */
@@ -241,6 +250,7 @@ export function manageLocalHub(shipped: string, home: string, log: (line: string
   let checkedAt = 0;
   let problem: string | undefined;
   let dev: DevHub | undefined;
+  let stopped = false;
 
   // The shipped file does not change while the GUI runs: version and copy are done once.
   let installed: Promise<{ version: string; exe: string }> | undefined;
@@ -271,7 +281,7 @@ export function manageLocalHub(shipped: string, home: string, log: (line: string
   };
 
   const check = () => {
-    if (running) return;
+    if (running || stopped) return;
     running = true;
     current = once()
       .then(() => {
@@ -309,6 +319,14 @@ export function manageLocalHub(shipped: string, home: string, log: (line: string
       check();
       await current;
       if (problem) throw new Error(problem);
+    },
+    running: async () => (await probe(home)) !== undefined,
+    stopAll: async () => {
+      stopped = true;
+      await current;
+      const { exe } = await ensureInstalled();
+      log("local hub: stopping the hub and its agents");
+      await run(exe, ["hub", "stop", "--agents"], STOP_ALL_TIMEOUT_MS);
     },
   };
 }
