@@ -17,7 +17,10 @@ tried, what was refused and why, and what you did instead. Never report a substi
 thing that was asked for: another agent, or another model, is not the one requested. An \
 action the hub declines (a push, a publish, a command) was refused by the person or the \
 hub's rules: do not retry it, in that or another form. Call \
-teammates by their names; the model a teammate runs on is an attribute that can change.";
+teammates by their names; the model a teammate runs on is an attribute that can change.\n\
+When you mention a file, write its path relative to your working directory's root, with \
+forward slashes, optionally with `:line`, e.g. `crates/x/src/a.rs:12` or \
+[a.rs](crates/x/src/a.rs:12): the person can click it to open the file.";
 
 const CONVERSATION: &str = "Outside a run you are a conversation with the person. Run tools \
 (plan_submit, task_create, run_land, …) work only in a run, and a run starts when the person \
@@ -144,6 +147,18 @@ mod tests {
             status: AgentStatus::Stopped,
             created_at: Utc::now(),
             profile: AgentProfile::default(),
+        }
+    }
+
+    #[test]
+    fn every_role_learns_how_to_cite_files() {
+        for role in [Role::Planner, Role::Worker, Role::Reviewer] {
+            let text = guide(role);
+            assert!(
+                text.contains("relative to your working directory's root")
+                    && text.contains("`crates/x/src/a.rs:12`"),
+                "{text}"
+            );
         }
     }
 

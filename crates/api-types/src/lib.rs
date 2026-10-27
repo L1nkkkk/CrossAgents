@@ -634,6 +634,152 @@ pub struct TaskReviewRequest {
     pub rework: bool,
 }
 
+/// What a path in a workspace is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum FileKind {
+    Dir,
+    File,
+    Symlink,
+}
+
+/// One entry of a directory listing. `path` is relative to the workspace root, with `/`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FileEntry {
+    pub name: String,
+    pub path: String,
+    pub kind: FileKind,
+    #[serde(default)]
+    #[ts(optional, type = "number")]
+    pub size: Option<u64>,
+    /// Matched by .gitignore (only listed with `all=true`).
+    #[serde(default)]
+    pub ignored: bool,
+}
+
+/// `GET {scope}/files/tree?path=&ref=&all=`: one directory of a workspace (scope is
+/// `/v1/agents/{key}`, `/v1/runs/{key}` or `/v1/runs/{key}/tasks/{task}`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FileTreeResponse {
+    /// The workspace root, absolute.
+    pub root: String,
+    /// The directory listed, relative to the root ("" for the root).
+    pub path: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub git_ref: Option<String>,
+    pub entries: Vec<FileEntry>,
+}
+
+/// `GET {scope}/files/content?path=&ref=`: a file, read-only. Text is cut at 1 MiB;
+/// a binary file has no `text`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FileContentResponse {
+    pub path: String,
+    pub abs_path: String,
+    #[ts(type = "number")]
+    pub size: u64,
+    pub binary: bool,
+    pub truncated: bool,
+    #[serde(default)]
+    #[ts(optional)]
+    pub text: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub git_ref: Option<String>,
+}
+
+/// `POST {scope}/files/resolve`: which of these strings (relative or absolute paths,
+/// without a `:line` suffix) name something inside the workspace.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ResolvePathsRequest {
+    pub paths: Vec<String>,
+}
+
+/// One answer of `files/resolve`: `path` (relative, `/`) is set only when the input names
+/// an existing entry inside the workspace.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ResolvedPath {
+    pub input: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub path: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub abs_path: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub kind: Option<FileKind>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ResolvePathsResponse {
+    pub entries: Vec<ResolvedPath>,
+}
+
+/// What a ref of the commit graph is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphRefKind {
+    Base,
+    Run,
+    Task,
+    Head,
+    Other,
+}
+
+/// A branch shown in the commit graph.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GraphRef {
+    pub name: String,
+    pub kind: GraphRefKind,
+    pub sha: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub task_key: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub task_title: Option<String>,
+}
+
+/// One commit; `refs` are the names in `CommitGraph::refs` pointing at it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GraphCommit {
+    pub sha: String,
+    pub parents: Vec<String>,
+    pub subject: String,
+    pub author: String,
+    pub time: DateTime<Utc>,
+    #[serde(default)]
+    pub refs: Vec<String>,
+}
+
+/// `GET /v1/runs/{key}/graph?limit=` and `GET /v1/agents/{key}/graph?limit=`: commits of
+/// the base, run and task branches, newest first (topological), at most `limit` (200).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CommitGraph {
+    #[serde(default)]
+    #[ts(optional)]
+    pub base_branch: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub run_branch: Option<String>,
+    pub refs: Vec<GraphRef>,
+    pub commits: Vec<GraphCommit>,
+    pub truncated: bool,
+}
+
 /// `GET /v1/runs/{key}/trace` (docs/tasks/DOGFOOD.md §8): what happened in a run, by task,
 /// folded from the events (so it outlives the workers).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
