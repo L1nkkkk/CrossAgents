@@ -112,6 +112,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/agents/{key}/execution/interrupt",
             post(interrupt_execution),
         )
+        .route("/v1/agents/{key}/resume-command", get(resume_command))
         .route("/v1/agents/{key}/connect", post(connect_agent))
         .route("/v1/notes", get(list_notes))
         .route("/v1/plugins", get(list_plugins))
@@ -671,6 +672,17 @@ async fn agent_execution(
             since: e.claim.since,
         });
     Ok(Json(AgentExecutionResponse { execution }))
+}
+
+/// The command that carries the session on in its own CLI (docs/TODO.md §十五). Always 200
+/// for a known agent: why it cannot be done is part of the answer.
+async fn resume_command(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<crossagents_api_types::ResumeCommandResponse>> {
+    Ok(Json(
+        state.runtime.resume_command(&AgentKey::parse(&key)).await?,
+    ))
 }
 
 /// The person stops what the session does on a task: the execution ends as interrupted, the

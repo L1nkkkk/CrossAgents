@@ -777,6 +777,33 @@ pub struct AgentExecution {
     pub since: DateTime<Utc>,
 }
 
+/// `GET /v1/agents/{key}/resume-command` (docs/TODO.md §十五): the command that carries the
+/// session on in its own CLI, in a terminal, by the same session id. Read-only: the hub runs
+/// nothing. `command` is `None` when it cannot be done, and `unavailable` says why.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ResumeCommandResponse {
+    /// Ready to paste into `shell`.
+    pub command: Option<String>,
+    pub unavailable: Option<String>,
+    /// What `command` is written for: `powershell` on Windows, `sh` elsewhere.
+    pub shell: String,
+    /// The directory it runs in: where the session works now.
+    pub cwd: String,
+    pub session_id: Option<String>,
+    /// What the command sets: the account's config directory and the proxy, never a token.
+    pub env: Vec<ResumeEnv>,
+    /// What to know before running it (where the session file is, that the hub has it open).
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ResumeEnv {
+    pub name: String,
+    pub value: String,
+}
+
 /// What became of the sessions a deleted run still held. Those that took part in it and are
 /// no longer its (gone home, archived, or working for another run) are not listed.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]

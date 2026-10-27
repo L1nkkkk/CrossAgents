@@ -28,6 +28,7 @@ import { taskState } from "../lib/taskState";
 import { actionOf, duration, failed, liveActivity, stepLine, summarize, workGroups, type ActionTool, type Step } from "../lib/workGroups";
 import { PeerMessage, StateWord, useArmed } from "../parts";
 import { useSession, type TranscriptItem, type TranscriptTurn } from "../session";
+import { dismissNotice, useNotices } from "../notices";
 import { QuestionCards } from "../questions";
 import { NeedsYouStrip, RunStrip } from "../strips";
 import { useHubData } from "../hub";
@@ -127,6 +128,7 @@ export function SessionView({
     <section className={`pane ${rail ? "with-rail" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)}>
       {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onClose={onClose} />}
       <ExecutionBar agent={agent} />
+      <NoticeBar agent={agent} />
       <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} agents={everyone} tree={runs} top={top}>
         {outgoing.map((m) => (
           <Sending key={m.key} message={m} agent={agent} />
@@ -216,6 +218,92 @@ function ExecutionBar({ agent }: { agent: Agent }) {
   );
 }
 
+/**
+ * What the session lost on the way back (src/notices.ts), in the hub's words: kept at the top
+ * until the person closes each one, rather than folded under an old message.
+ */
+function NoticeBar({ agent }: { agent: Agent }) {
+  const notices = useNotices(agent.id);
+  if (!notices.length) return null;
+  return (
+    <div className="notice-bar" role="alert">
+      {notices.map((n) => (
+        <div key={n.id} className="notice-row">
+          <span className="notice-text">{n.message}</span>
+          <span className="notice-at">{clock(n.at)}</span>
+          <button className="ghost icon" onClick={() => dismissNotice(agent.id, n.id)} title="知道了，关掉这条提示" aria-label="关掉这条提示">
+            <Icon name="close" size={13} />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * The command that carries this session on in its own CLI, in a terminal, by the same
+ * session id (docs/TODO.md §十五). The hub writes it; when it cannot be done, the copy
+ * button is off and the hub's reason is shown.
+ */
+function ResumePanel({ agent, onClose }: { agent: Agent; onClose: () => void }) {
+  const now = useHubData(
+    () => api.resumeCommand(agent.id),
+    [agent.id],
+    (e) => (e.type === "agent.updated" && e.data.agent.id === agent.id) || (e.type === "agent.status_changed" && e.data.id === agent.id),
+  );
+  const [copied, setCopied] = useState(false);
+  const r = now.data;
+  async function copy() {
+    if (!r?.command) return;
+    try {
+      await navigator.clipboard.writeText(r.command);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // The command is shown; it can be copied by hand.
+    }
+  }
+  return (
+    <div className="resume-pop">
+      <div className="resume-head">
+        <strong>在终端里接着聊</strong>
+        <span className="muted small">用同一个 session id 恢复原生 CLI 会话{r?.shell === "powershell" ? "，PowerShell 写法" : ""}</span>
+        <span className="spacer" />
+        <button className="ghost icon" onClick={onClose} title="收起" aria-label="收起">
+          <Icon name="close" size={14} />
+        </button>
+      </div>
+      {now.error && <ErrorBox error={now.error} />}
+      {!r ? (
+        !now.error && <p className="muted small">读取中…</p>
+      ) : (
+        <>
+          {r.command ? <pre className="resume-command">{r.command}</pre> : <p className="resume-why">{r.unavailable}</p>}
+          <div className="resume-actions">
+            <button className="small" disabled={!r.command} onClick={() => void copy()} title={r.unavailable ?? "复制到剪贴板，粘贴到终端运行"}>
+              <span className="row" style={{ gap: 5 }}>
+                <Icon name={copied ? "check" : "copy"} size={13} />
+                {copied ? "已复制" : "复制原生恢复命令"}
+              </span>
+            </button>
+            {r.session_id && <span className="muted small mono">session {r.session_id}</span>}
+          </div>
+          {r.command && r.env.length > 0 && (
+            <p className="muted small">
+              带上的环境：{r.env.map((e) => e.name).join("、")}。只有账号配置目录和代理，不含令牌。
+            </p>
+          )}
+          {r.notes.map((n) => (
+            <p key={n} className="resume-note">
+              {n}
+            </p>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
 function Header({
   agent,
   capabilities,
@@ -237,6 +325,7 @@ function Header({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [profile, setProfile] = useState(false);
+  const [resume, setResume] = useState(false);
   const stop = useArmed();
 
   async function run(action: () => Promise<unknown>) {
@@ -308,6 +397,9 @@ function Header({
             {stop.armed ? "再点一次停止" : "停止"}
           </button>
         )}
+        <button className={`ghost small resume-toggle ${resume ? "on" : ""}`} onClick={() => setResume(!resume)} title="复制原生恢复命令：在终端里用同一个 session id 接着聊" aria-expanded={resume}>
+          终端恢复
+        </button>
         <ToolsToggle />
         {onClose && (
           <button className="ghost icon" onClick={onClose} title="关闭这一栏" aria-label="关闭这一栏">
@@ -320,6 +412,7 @@ function Header({
           <ProfileEditor agent={agent} onDone={() => setProfile(false)} />
         </div>
       )}
+      {resume && <ResumePanel agent={agent} onClose={() => setResume(false)} />}
       {error && (
         <div style={{ padding: "8px 20px 0" }}>
           <ErrorBox error={error} />

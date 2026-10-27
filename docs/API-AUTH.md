@@ -62,6 +62,9 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 | POST | `/v1/agents/{key}/topic` | write | GUI |
 | POST | `/v1/agents/{key}/archive` | write | GUI |
 | POST | `/v1/agents/{key}/connect` | write | GUI |
+| GET | `/v1/agents/{key}/execution` | read | GUI |
+| POST | `/v1/agents/{key}/execution/interrupt` | write | GUI |
+| GET | `/v1/agents/{key}/resume-command` | read | GUI |
 | GET | `/v1/notes` | read | GUI |
 | GET | `/v1/plugins` | read | GUI、CLI |
 | POST | `/v1/plugins/{name}/models` | write | GUI |
@@ -83,6 +86,7 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 | GET | `/v1/runs` | read | GUI、CLI |
 | POST | `/v1/runs` | write | GUI、CLI |
 | GET | `/v1/runs/{key}` | read | GUI、CLI |
+| DELETE | `/v1/runs/{key}?branches=&force=` | write | GUI、CLI |
 | POST | `/v1/runs/{key}/approve` | write | GUI、CLI |
 | POST | `/v1/runs/{key}/reject` | write | GUI、CLI |
 | POST | `/v1/runs/{key}/cancel` | write | GUI、CLI |
@@ -127,7 +131,7 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 
 - 把 `require_token` 抽成策略点，按 read / write / admin 校验；路由表只标级别，不写鉴权逻辑。
 - `ErrorCode` 增 `Forbidden`：越权返回 403 而不是 401。401 表示"没带凭据或凭据无效"，403 表示"凭据有效但级别不够"，GUI 据此置灰入口并说明原因。
-- Electron 主进程维护"方法 + 路径"白名单，只放行 GUI 实际用到的接口（已做）。这把收窄放在主进程，页面即使被注入了也无法调用 `/v1/shutdown`。
+- Electron 主进程维护"方法 + 路径"白名单，只放行 GUI 实际用到的接口（已做，`apps/gui/electron/allowed.cts`；`allowed.test.cts` 从 `src/api.ts` 抽出全部调用逐条核对，漏登记就失败）。这把收窄放在主进程，页面即使被注入了也无法调用 `/v1/shutdown`。
 - A1 引入 users / devices 后，策略点换成"设备或用户 → 级别"的映射，路由表和白名单都不动。
 
 ### Windows 上的令牌文件
@@ -154,6 +158,8 @@ NTFS 默认 ACL 已限制到本用户、SYSTEM 和 Administrators，同机其他
 - 新增可选字段或新接口
 - 新增错误码取值、新增枚举取值（前提是客户端忽略未知值，这点是硬性要求）
 - 放宽校验
+
+0.1.x 例外：GUI 与 hub 同一安装包发布，不存在旧 GUI 连新 hub 的情况，破坏性变更暂不升版（S1 改 `DeleteRunResponse` 即属此类）。多节点（TODO §八）开工时统一升到 `v2`，并同时做 §二 的版本不一致提示。
 
 ### GUI 侧比对
 

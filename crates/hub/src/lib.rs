@@ -13,6 +13,7 @@ pub mod install;
 pub mod models;
 pub mod notices;
 pub mod paths;
+pub mod resume;
 pub mod routing;
 pub mod rules;
 pub mod runtime;

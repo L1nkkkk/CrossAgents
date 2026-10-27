@@ -1419,6 +1419,64 @@ impl Runtime {
         (!resumes).then(|| format!("{} 的驱动不能延续会话", agent.name))
     }
 
+    /// The command that carries the session on in its own CLI, in a terminal
+    /// (`GET /v1/agents/{key}/resume-command`, [`crate::resume`]). Runs nothing.
+    pub async fn resume_command(
+        &self,
+        key: &AgentKey,
+    ) -> Result<crossagents_api_types::ResumeCommandResponse, CoreError> {
+        use crate::resume;
+        let agent = self.store().get_agent(key).await?;
+        let external = agent.plugin == EXTERNAL_PLUGIN;
+        let resolved = if external {
+            None
+        } else {
+            self.plugins
+                .driver(&agent.plugin, agent.driver.as_deref())
+                .ok()
+        };
+        let kind = resolved.as_ref().map(|r| r.driver.kind());
+        let resumes = self.capabilities(&agent).await.is_some_and(|c| c.resume);
+        let session_id = self.store().last_session_id(agent.id).await?;
+        let program = match &resolved {
+            Some(r) => r
+                .driver
+                .cli_status()
+                .await
+                .and_then(|s| s.located)
+                .map(|l| l.argv),
+            None => None,
+        };
+        // The account's environment, as the session gets it; `resume::build` keeps only the
+        // config directories and proxies of it.
+        let mut env = match &self.setup {
+            Some(setup) if !external => setup.environment(&agent).await.unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        env.extend(resume::proxy_env(kind));
+        let session_file = match (kind, &session_id) {
+            (Some(kind), Some(id)) => resume::claude_config_dir(kind, &env)
+                .and_then(|dir| resume::find_session_file(&dir, id)),
+            _ => None,
+        };
+        let facts = resume::Facts {
+            name: agent.name.clone(),
+            external,
+            kind,
+            resumes,
+            session_id,
+            context_lost: agent.context_lost().map(str::to_owned),
+            cwd_exists: agent.cwd.is_dir(),
+            moved_away: agent.archived_at.is_some() && agent.cwd != agent.home(),
+            cwd: agent.cwd.clone(),
+            program,
+            env,
+            live: self.is_live(agent.id).await,
+            session_file,
+        };
+        Ok(resume::build(&facts, resume::Shell::here()))
+    }
+
     /// Drops the [`crossagents_core::CONTEXT_LOST`] mark once a new session has opened.
     async fn forget_lost_context(&self, agent: AgentId) {
         let Ok(mut record) = self.store().get_agent(&AgentKey::Id(agent)).await else {

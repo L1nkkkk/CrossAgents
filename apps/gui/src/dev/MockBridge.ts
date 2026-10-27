@@ -9,9 +9,11 @@ import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
 import type { Agent } from "@bindings/Agent";
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
 import type { HumanItem } from "@bindings/HumanItem";
+import type { LandMode } from "@bindings/LandMode";
 import type { Note } from "@bindings/Note";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import type { QuotaResponse } from "@bindings/QuotaResponse";
+import type { ResumeCommandResponse } from "@bindings/ResumeCommandResponse";
 import type { RunDetail } from "@bindings/RunDetail";
 import type { RunTrace } from "@bindings/RunTrace";
 import type { SendMessageRequest } from "@bindings/SendMessageRequest";
@@ -24,7 +26,7 @@ import type { HubEvent } from "../hub";
 import { turnStat } from "../lib/diff";
 import { effortOf } from "../lib/models";
 import { applyEvent } from "../session";
-import { transcript, uid } from "./fixtures";
+import { capabilitiesOf, driverOf, transcript, uid } from "./fixtures";
 
 /** Names the mock hub makes up, like the real one (see crates/core/src/names.rs). */
 const MOCK_NAMES = ["Nova", "Iris", "Atlas", "Orion", "Vega", "Lyra", "Mira", "Sage"];
@@ -58,13 +60,39 @@ export type MockState = {
   api?: string;
   /** What holds each session now (docs/tasks/S1.md §3.3), by agent id. */
   executions?: Record<string, AgentExecution>;
+  /** The native resume command (docs/TODO.md §十五) by agent id, when a scenario fixes it; else made up from the agent like the hub would. */
+  resume?: Record<string, ResumeCommandResponse>;
+  /**
+   * Copied leads whose run branch is gone (docs/tasks/S1.md §7 第 15 条), by agent id: restoring
+   * one rebuilds its checkout from the base and says the code did not come back.
+   */
+  codeLost?: Record<string, { branch: string; base: string; landed?: { mode: LandMode; reference: string } }>;
+};
+
+/**
+ * The hub's own words, filled in the same way, for what the mock acts out. Keep them equal to
+ * the Rust they name: the GUI shows these strings, it does not write its own.
+ */
+export const HUB_SAYS = {
+  /** crates/orchestrator/src/delete.rs `move_out_of`: the `config.context_lost` mark. */
+  contextLost: (runTitle: string, dir: string, name: string) => `run「${runTitle}」删除了，原执行目录 ${dir} 也不在了，${name} 的驱动只能在原目录延续会话`,
+  /** crates/hub/src/runtime.rs `archive`, when restoring cannot carry the context on. */
+  restored: (why: string) => `对话记录恢复了，但${why}：下一条消息会开新会话，不带原来的上下文`,
+  /** crates/hub/src/runtime.rs `cannot_carry_on`, a driver that resumes nothing. */
+  cannotResume: (name: string) => `${name} 的驱动不能延续会话`,
+  /** crates/hub/src/runtime.rs `start`, once the new session is up. */
+  fresh: (why: string) => `这是新会话，没有带上之前的上下文：${why}`,
+  /** crates/orchestrator/src/landing.rs `lead_returned`. */
+  codeLost: (branch: string, base: string, landed?: { mode: LandMode; reference: string }) =>
+    `对话保留了，但原执行代码没有恢复：run 分支 ${branch} 已经删除，检出按 ${base} 重新建立` +
+    (!landed ? "" : landed.mode === "pr" ? `；run 曾开过 PR（${landed.reference}），不一定已经合入 ${base}` : `；run 曾落地到 ${base}（${landed.reference}），没有核对那些改动现在是否还在`),
 };
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 /** An event as a script writes it; the bridge numbers and stamps it. */
 export type Payload = DistributiveOmit<HubEvent, "seq" | "id" | "ts" | "schema">;
-/** One script step: `at` ms after the stream connects, an event or a change to the state. */
-export type Step = { at: number; event?: Payload; act?: (s: MockState) => void };
+/** One script step: `at` ms after the stream connects, an event, a change to the state, or a request made as the page would (`bridge`). */
+export type Step = { at: number; event?: Payload; act?: (s: MockState, bridge: MockBridge) => void };
 
 export function emptyState(): MockState {
   return {
@@ -167,7 +195,7 @@ export class MockBridge implements CrossAgentsBridge {
   }
 
   private play(step: Step) {
-    step.act?.(this.state);
+    step.act?.(this.state, this);
     if (step.event) this.emit(step.event);
   }
 
@@ -269,6 +297,10 @@ export class MockBridge implements CrossAgentsBridge {
         const a = this.agent(m[1]);
         if (!a) return notFound("agent");
         return json(200, { execution: s.executions?.[a.id] ?? null });
+      }
+      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/resume-command$/))) {
+        const a = this.agent(m[1]);
+        return a ? json(200, this.resumeCommand(a)) : notFound("agent");
       }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/transcript$/))) {
         const a = this.agent(m[1]);
@@ -415,6 +447,7 @@ export class MockBridge implements CrossAgentsBridge {
           if (archived) a.status = "stopped";
           this.emit({ type: "agent.updated", data: { agent: { ...a } } });
         }
+        if (!archived) this.restored(root);
         return json(200, root);
       }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/model$/))) {
@@ -501,8 +534,74 @@ export class MockBridge implements CrossAgentsBridge {
       return { id, name: f.name, mime: f.mime, size: Math.floor((f.data.length * 3) / 4), path: `C:/Users/me/.crossagents/attachments/${a.id}/${id}` };
     });
     this.emit({ type: "agent.input", data: { id: a.id, message_id, text: req.text, queued: busy, from: { kind: "human" }, ...(attachments.length ? { attachments } : {}) } });
+    this.freshSession(a);
     if (!busy) this.answer(a, message_id, req.text);
     return json(202, { message_id, queued: busy });
+  }
+
+  /** Like the hub's `archive` (and `lead_returned` for a copied lead): what restoring could not bring back is said. */
+  restored(a: Agent) {
+    const s = this.state;
+    const hadSession = !!s.transcripts.get(a.id)?.turns.some((t) => t.started_at);
+    const lost = (a.config as Record<string, unknown> | null)?.context_lost;
+    const why = typeof lost === "string" ? lost : !capabilitiesOf(a.plugin).resume ? HUB_SAYS.cannotResume(a.name) : undefined;
+    if (hadSession && why) this.emit({ type: "agent.warning", data: { id: a.id, message: HUB_SAYS.restored(why) } });
+    const code = s.codeLost?.[a.id];
+    if (code) {
+      // The checkout is rebuilt from the base, once.
+      delete s.codeLost![a.id];
+      this.emit({ type: "agent.warning", data: { id: a.id, message: HUB_SAYS.codeLost(code.branch, code.base, code.landed) } });
+    }
+  }
+
+  /** Like the hub's `start`: a session marked `context_lost` opens a new one, says so, and drops the mark. */
+  freshSession(a: Agent) {
+    const config = (a.config as Record<string, unknown> | null) ?? {};
+    const lost = config.context_lost;
+    if (typeof lost !== "string") return;
+    const rest = { ...config };
+    delete rest.context_lost;
+    a.config = rest as Agent["config"];
+    this.emit({ type: "agent.warning", data: { id: a.id, message: HUB_SAYS.fresh(lost) } });
+    this.emit({ type: "agent.updated", data: { agent: { ...a } } });
+  }
+
+  /**
+   * `GET /v1/agents/{key}/resume-command`, decided in the order the hub decides it
+   * (crates/hub/src/resume.rs `command`), with made-up paths. A scenario can fix the answer.
+   */
+  private resumeCommand(a: Agent): ResumeCommandResponse {
+    const s = this.state;
+    const fixed = s.resume?.[a.id];
+    if (fixed) return fixed;
+    const started = !!s.transcripts.get(a.id)?.turns.some((t) => t.started_at);
+    const session_id = started ? `5e55${a.id.slice(4)}` : null;
+    const base: ResumeCommandResponse = { command: null, unavailable: null, shell: "powershell", cwd: a.cwd, session_id, env: [], notes: [] };
+    const driver = driverOf(a.plugin);
+    const lost = (a.config as Record<string, unknown> | null)?.context_lost;
+    const no = (unavailable: string) => ({ ...base, unavailable });
+    if (a.plugin === "external") return no(`${a.name} 是外部接入的会话，CrossAgents 不知道它的 CLI 怎么恢复`);
+    if (!capabilitiesOf(a.plugin).resume) return no(`${a.name} 的驱动（${driver}）不能恢复会话：进程停了，上下文就没了`);
+    if (driver === "with-native" || driver === "acp-generic") return no(`${driver} 驱动的 CLI 没有在终端里按 session id 接着聊的命令`);
+    if (!session_id) return no(`${a.name} 还没开过会话，没有可以恢复的 session id`);
+    if (typeof lost === "string") return no(`原来的上下文已经带不回来：${lost}`);
+    if (a.archived_at && a.cwd !== a.home && s.codeLost?.[a.id])
+      return no(`目录 ${a.cwd} 不在了：复制的主导在 run 结束后检出被删掉了。先在这里点「恢复对话」，hub 会重建检出，之后再复制命令`);
+    const [name, program, sub] =
+      driver === "codex-native"
+        ? ["CODEX_HOME", "C:\\Users\\me\\AppData\\Roaming\\npm\\codex.cmd", "'resume'"]
+        : driver === "codebuddy-native"
+          ? ["CODEBUDDY_CONFIG_DIR", "C:\\Users\\me\\AppData\\Roaming\\npm\\codebuddy.cmd", "--resume"]
+          : ["CLAUDE_CONFIG_DIR", "C:\\Users\\me\\.local\\bin\\claude.exe", "--resume"];
+    const env = [
+      { name, value: `C:\\Users\\me\\.crossagents\\accounts\\${a.plugin}-work` },
+      { name: "HTTPS_PROXY", value: "http://127.0.0.1:7890" },
+    ];
+    const q = (v: string) => `'${v.replace(/'/g, "''")}'`;
+    const command = [`Set-Location -LiteralPath ${q(a.cwd)}`, ...env.map((e) => `$env:${e.name} = ${q(e.value)}`), `& ${q(program)} ${sub} ${q(session_id)}`].join("; ");
+    const notes = ["命令里用 $env: 设的变量会留在这个 PowerShell 窗口里"];
+    if (a.status !== "stopped" && a.status !== "error") notes.unshift(`${a.name} 现在在 hub 里开着：两边同时用同一个会话会互相覆盖，先在 GUI 里停掉它，再在终端里接着聊`);
+    return { ...base, command, env, notes };
   }
 
   private answer(a: Agent, message_id: string, text: string) {

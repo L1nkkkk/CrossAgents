@@ -27,6 +27,7 @@ import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
 import type { CreateRunRequest } from "@bindings/CreateRunRequest";
 import type { DeleteRunResponse } from "@bindings/DeleteRunResponse";
 import type { AgentExecutionResponse } from "@bindings/AgentExecutionResponse";
+import type { ResumeCommandResponse } from "@bindings/ResumeCommandResponse";
 import type { HubInfo } from "@bindings/HubInfo";
 import type { ListAgentsResponse } from "@bindings/ListAgentsResponse";
 import type { ListPluginsResponse } from "@bindings/ListPluginsResponse";
@@ -138,6 +139,8 @@ export const api = {
   /** What the session works on for a run now (docs/tasks/S1.md §3.3). */
   agentExecution: (key: string) => request<AgentExecutionResponse>("GET", `/v1/agents/${enc(key)}/execution`),
   interruptExecution: (key: string) => request<Task>("POST", `/v1/agents/${enc(key)}/execution/interrupt`, {}),
+  /** The command that carries the session on in its own CLI (docs/TODO.md §十五); read-only. */
+  resumeCommand: (key: string) => request<ResumeCommandResponse>("GET", `/v1/agents/${enc(key)}/resume-command`),
   deleteAgent: (key: string) => request<void>("DELETE", `/v1/agents/${enc(key)}`),
   connectAgent: (key: string) => request<ConnectInfo>("POST", `/v1/agents/${enc(key)}/connect`),
   notes: (scope: "run" | "team", run?: string) =>
