@@ -323,3 +323,47 @@ async fn an_unlanded_branch_outlives_the_checkout() {
     // Still waiting to be landed.
     assert!(branches(repo.path()).contains(&branch));
 }
+
+/// S1 §7: restoring a copied lead whose unlanded run branch was deleted gets it a checkout
+/// from the base: the conversation is back, the run's code is not, and the person is told.
+#[tokio::test]
+async fn restoring_a_lead_whose_branch_is_gone_says_the_code_did_not_come_back() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    chat_first(&t, &mut w).await;
+    let run = start(
+        &t,
+        format!(
+            "Two. [write two.txt=2] {}",
+            call("run_finish", json!({ "summary": "ok" }))
+        ),
+    )
+    .await;
+    let id = run["id"].as_str().unwrap().to_owned();
+    w.until("run completed", run_status_is(&id, RunStatus::Completed))
+        .await;
+    let lead = agent(&t, run["planner"].as_str().unwrap()).await;
+    assert!(!lead["archived_at"].is_null(), "{lead}");
+    let dir = std::path::PathBuf::from(lead["cwd"].as_str().unwrap());
+    let branch = run["branch"].as_str().unwrap().to_owned();
+    let out = std::process::Command::new("git")
+        .args(["branch", "-D", &branch])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+
+    let lead_id = lead["id"].as_str().unwrap().to_owned();
+    let resp = t
+        .post(&format!("/v1/agents/{lead_id}/archive"), json!({ "archived": false }))
+        .await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    w.until("told the code did not come back", |e| {
+        matches!(&e.kind, EventKind::AgentWarning { id, message }
+            if id.to_string() == lead_id && message.contains("原执行代码没有恢复") && message.contains(&branch))
+    })
+    .await;
+    assert!(dir.is_dir(), "{dir:?}");
+    assert!(!dir.join("two.txt").exists(), "rebuilt from the base");
+}

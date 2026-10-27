@@ -45,7 +45,7 @@ pub use handoff::{Handoff, HandoffKind, HandoffOutcome};
 pub use human::{HumanAction, HumanItem, HumanItemKind, HumanItemStatus};
 pub use ids::{AgentId, HandoffId, MessageId, RunId, SessionId, TaskId};
 pub use model::{
-    Agent, AgentProfile, AgentStatus, CheckResult, LandMode, Landing, NameSource, PlannedTask,
+    Agent, CONTEXT_LOST, AgentProfile, AgentStatus, CheckResult, LandMode, Landing, NameSource, PlannedTask,
     Role, Run, RunConfig, RunStatus, Scope, Task, TaskReport, TaskSpec, validate_agent_name,
     validate_slug,
 };

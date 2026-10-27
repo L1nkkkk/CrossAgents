@@ -395,6 +395,51 @@ async fn a_new_execution_session_is_archived_and_can_be_used_again_once_restored
     assert!(exec["archived_at"].is_null(), "{exec}");
 }
 
+/// S1 §7: an execution session whose driver moves keeps its conversation when its run is
+/// deleted: restored, the next message resumes the same session, with no warning.
+#[tokio::test]
+async fn an_execution_session_restored_after_its_run_is_deleted_carries_on() {
+    let repo = git_repo();
+    let t = TestHub::start_with(native_plugin).await;
+    let pia = t.add_native("Pia", "planner", repo.path()).await;
+    t.add_native("Rex", "worker", repo.path()).await;
+    let mut w = t.watch().await;
+    let a_task = task("a", goal("[session] [write a.txt=1]", &accept_and_finish("a")), None, None);
+    let a = run_with(&t, "Pia", "Rex", format!("Run A. {}", plan(json!([a_task]))), true).await;
+    run_ends(&mut w, &a).await;
+    back_home(&mut w, pia.id, repo.path()).await;
+    let tasks = tasks_of(&t, &a).await;
+    let exec_id: AgentId = tasks[0]["handoffs"][0]["to"].as_str().unwrap().parse().unwrap();
+    w.find("archived", |e| {
+        matches!(&e.kind, EventKind::AgentUpdated { agent } if agent.id == exec_id && agent.archived_at.is_some())
+    })
+    .await;
+    let exec_session = after(&said(&w, exec_id), "session=").to_owned();
+
+    let resp = t.delete(&format!("/v1/runs/{}", a["id"].as_str().unwrap())).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let resp = t
+        .post(&format!("/v1/agents/{exec_id}/archive"), json!({ "archived": false }))
+        .await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let before = w.seen.len();
+    t.send(&exec_id.to_string(), "[session] still you?").await;
+    w.until("answered", |e| {
+        matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if *id == exec_id)
+    })
+    .await;
+    let text = said(&w, exec_id);
+    assert!(text.contains(&format!("session={exec_session} (resumed)")), "{text}");
+    let warned: Vec<&String> = w.seen[before..]
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::AgentWarning { id, message } if *id == exec_id => Some(message),
+            _ => None,
+        })
+        .collect();
+    assert!(warned.is_empty(), "{warned:?}");
+}
+
 #[tokio::test]
 async fn two_runs_taking_one_session_at_once_only_one_gets_it() {
     let repo = git_repo();

@@ -392,3 +392,45 @@ async fn a_lead_moved_into_the_run_goes_back_home() {
     assert!(back["config"].get("lead_home").is_none(), "{back}");
     assert!(!Path::new(moved["cwd"].as_str().unwrap()).exists(), "{moved}");
 }
+
+/// S1 §7: the lead copied for a run has a driver that resumes a session only where it ran.
+/// Once the run is deleted that directory is gone, so restoring the copy and talking to it
+/// cannot carry on its conversation: both say so, and the next session is a new one — never
+/// a resume that quietly starts over.
+#[tokio::test]
+async fn a_copy_restored_after_its_run_is_deleted_says_its_context_is_gone() {
+    let (_repo, t) = setup().await;
+    let run = start(&t).await;
+    let id = run["id"].as_str().unwrap().to_owned();
+    let lead = run["planner"].as_str().unwrap().to_owned();
+    finish_with_a_change(&t, &run).await;
+    let resp = t.delete(&format!("/v1/runs/{id}")).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let copy = agent(&t, &lead).await;
+    assert_eq!(copy["cwd"], copy["home"], "{copy}");
+
+    let mut w = t.watch().await;
+    let resp = t
+        .post(&format!("/v1/agents/{lead}/archive"), json!({ "archived": false }))
+        .await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    w.until("restore says the context is gone", |e| {
+        matches!(&e.kind, EventKind::AgentWarning { id, message }
+            if id.to_string() == lead && message.contains("不带原来的上下文") && message.contains("删除了"))
+    })
+    .await;
+
+    t.send(&lead, "Still there?").await;
+    w.until("the new session says so", |e| {
+        matches!(&e.kind, EventKind::AgentWarning { id, message }
+            if id.to_string() == lead && message.contains("这是新会话"))
+    })
+    .await;
+    w.until("answered", |e| {
+        matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if id.to_string() == lead)
+    })
+    .await;
+    // Said once: the mark goes with the new session.
+    let copy = agent(&t, &lead).await;
+    assert!(copy["config"].get("context_lost").is_none(), "{copy}");
+}

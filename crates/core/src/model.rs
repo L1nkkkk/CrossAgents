@@ -86,6 +86,12 @@ pub enum NameSource {
 /// recruits carry `spawned_by_run` instead.
 pub const SPAWNED_BY_AGENT: &str = "spawned_by_agent";
 
+/// `config` key saying why the agent's next session cannot carry on its conversation (its
+/// driver resumes only in the directory the session ran in, and that went with a deleted
+/// run): the hub opens a new session and says so instead of resuming somewhere else
+/// (docs/tasks/S1.md §7).
+pub const CONTEXT_LOST: &str = "context_lost";
+
 impl Agent {
     /// Its workspace: [`Self::home`], or its cwd in a record from before homes.
     pub fn home(&self) -> &std::path::Path {
@@ -94,6 +100,11 @@ impl Agent {
         } else {
             &self.home
         }
+    }
+
+    /// Why its next session cannot carry on its conversation ([`CONTEXT_LOST`]).
+    pub fn context_lost(&self) -> Option<&str> {
+        self.config.get(CONTEXT_LOST).and_then(|v| v.as_str())
     }
 
     /// The agent whose conversation recruited this one, if any.

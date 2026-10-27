@@ -616,7 +616,8 @@ impl Orchestrator {
     }
 
     /// An archived lead was restored: it gets a checkout of its run branch back, or of a
-    /// fresh one from the base when that branch was removed.
+    /// fresh one from the base when that branch was removed. Then the conversation is back
+    /// but what the run did is not (unless it landed, onto the base), and the person is told.
     pub async fn lead_returned(&self, lead: &Agent) -> Result<(), CoreError> {
         for run in self.runs_lived_in(lead).await? {
             let dir = self.integration_path(&run);
@@ -627,6 +628,16 @@ impl Orchestrator {
             if ws.checkout(&run.repo, &run.branch, &dir).await.is_err() {
                 ws.create(&run.repo, &run.branch, &run.base_branch, &dir)
                     .await?;
+                if run.landed.is_none() {
+                    self.publish(EventKind::AgentWarning {
+                        id: lead.id,
+                        message: format!(
+                            "对话保留了，但原执行代码没有恢复：run 分支 {} 已经删除，检出按 {} 重新建立",
+                            run.branch, run.base_branch
+                        ),
+                    })
+                    .await;
+                }
             }
         }
         Ok(())

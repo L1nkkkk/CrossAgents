@@ -102,10 +102,10 @@ impl Orchestrator {
         // d. The run's own checkout and the build directory its worktrees shared. An in-place
         // run works in the repository itself, which stays. An archived lead copied for the run
         // kept it as its directory; with the run gone nothing can bring it back, so the copy
-        // goes back to its workspace.
+        // goes back to its workspace, marked as unable to carry on its conversation there.
         if !run.in_place {
             let dir = self.integration_path(&run);
-            self.move_out_of(&dir).await;
+            self.move_out_of(&run, &dir).await;
             if dir.exists() {
                 match self.remove_worktree(&run, &dir).await {
                     Ok(()) => done.worktrees.push(dir.display().to_string()),
@@ -136,11 +136,34 @@ impl Orchestrator {
         Ok(done)
     }
 
-    /// Puts the sessions whose directory is `dir` back in their workspace.
-    async fn move_out_of(&self, dir: &Path) {
-        for agent in self.store.list_agents().await.unwrap_or_default() {
+    /// Puts the sessions whose directory is `dir` back in their workspace. One whose driver
+    /// resumes a session only where it ran cannot carry on its conversation there, and is
+    /// marked so ([`crossagents_core::CONTEXT_LOST`]): its next session is a new one, said
+    /// out loud, not a resume that quietly starts over.
+    async fn move_out_of(&self, run: &Run, dir: &Path) {
+        for mut agent in self.store.list_agents().await.unwrap_or_default() {
             if agent.cwd != dir || agent.home() == dir {
                 continue;
+            }
+            let had_session = self.store.last_session_id(agent.id).await.ok().flatten().is_some();
+            if had_session && !self.host.can_move(&agent).await {
+                if !agent.config.is_object() {
+                    agent.config = serde_json::json!({});
+                }
+                let config = agent.config.as_object_mut().expect("an object");
+                config.insert(
+                    crossagents_core::CONTEXT_LOST.into(),
+                    format!(
+                        "run「{}」删除了，原执行目录 {} 也不在了，{} 的驱动只能在原目录延续会话",
+                        run.title,
+                        dir.display(),
+                        agent.name
+                    )
+                    .into(),
+                );
+                if let Err(err) = self.store.update_agent_config(agent.id, &agent.config).await {
+                    tracing::warn!(agent = %agent.name, error = %err, "cannot mark the lost context");
+                }
             }
             match self.store.update_agent_cwd(agent.id, agent.home()).await {
                 Ok(()) => {

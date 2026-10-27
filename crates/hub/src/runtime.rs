@@ -680,8 +680,10 @@ impl Runtime {
             env: extras.env.clone(),
             events: events.clone(),
         };
-        // Carry on the agent's last conversation when the driver can.
-        let previous = if resolved.driver.capabilities().resume {
+        // Carry on the agent's last conversation when the driver can, unless it is known
+        // not to carry on from where the agent is now.
+        let lost = agent.context_lost().map(str::to_owned);
+        let previous = if resolved.driver.capabilities().resume && lost.is_none() {
             self.store()
                 .last_session_id(agent.id)
                 .await
@@ -732,6 +734,18 @@ impl Runtime {
                 return Err(err);
             }
         };
+
+        if let Some(why) = lost {
+            self.forget_lost_context(agent.id).await;
+            publish(
+                &self.bus,
+                EventKind::AgentWarning {
+                    id: agent.id,
+                    message: format!("这是新会话，没有带上之前的上下文：{why}"),
+                },
+            )
+            .await;
+        }
 
         // Drivers that do not report what a turn changed get it worked out by the hub.
         let diff_dir = (!resolved.driver.capabilities().structured_diff).then(|| agent.cwd.clone());
@@ -1371,7 +1385,43 @@ impl Runtime {
                 result = agent;
             }
         }
+        if !archived && let Some(why) = self.cannot_carry_on(&result).await {
+            publish(
+                &self.bus,
+                EventKind::AgentWarning {
+                    id: result.id,
+                    message: format!(
+                        "对话记录恢复了，但{why}：下一条消息会开新会话，不带原来的上下文"
+                    ),
+                },
+            )
+            .await;
+        }
         Ok(result)
+    }
+
+    /// Why the agent's next session will not carry on its last conversation, when it had
+    /// one: its driver resumes no session, or the place it could resume in is gone.
+    async fn cannot_carry_on(&self, agent: &Agent) -> Option<String> {
+        self.store().last_session_id(agent.id).await.ok().flatten()?;
+        if let Some(why) = agent.context_lost() {
+            return Some(why.to_owned());
+        }
+        let resumes = self.capabilities(agent).await.is_some_and(|c| c.resume);
+        (!resumes).then(|| format!("{} 的驱动不能延续会话", agent.name))
+    }
+
+    /// Drops the [`crossagents_core::CONTEXT_LOST`] mark once a new session has opened.
+    async fn forget_lost_context(&self, agent: AgentId) {
+        let Ok(mut record) = self.store().get_agent(&AgentKey::Id(agent)).await else {
+            return;
+        };
+        if let Some(config) = record.config.as_object_mut() {
+            config.remove(crossagents_core::CONTEXT_LOST);
+        }
+        if let Err(err) = self.store().update_agent_config(agent, &record.config).await {
+            tracing::warn!(%agent, error = %err, "cannot clear the lost-context mark");
+        }
     }
 
     /// Stops the agent's session. Stopping a stopped agent is fine.
