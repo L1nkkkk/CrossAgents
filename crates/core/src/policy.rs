@@ -153,6 +153,12 @@ impl RunPolicy {
 pub struct ContinuationPolicy {
     pub max_attempts: u32,
     pub interval_seconds: u32,
+    /// Report a run that waits on a busy agent to the lead when the run's own durable
+    /// facts show no progress for this many minutes. `None` (the default) keeps waiting
+    /// in silence forever, exactly as before; the report never interrupts a turn, it only
+    /// asks the lead to decide. Shares `max_attempts` with the other wakeups.
+    #[serde(default)]
+    pub stuck_minutes: Option<u32>,
 }
 
 impl Default for ContinuationPolicy {
@@ -160,6 +166,7 @@ impl Default for ContinuationPolicy {
         Self {
             max_attempts: 3,
             interval_seconds: 60,
+            stuck_minutes: None,
         }
     }
 }
@@ -181,8 +188,16 @@ mod tests {
         let enabled: RunPolicy = serde_json::from_str(r#"{"continuation":{}}"#).unwrap();
         assert_eq!(enabled.continuation, Some(ContinuationPolicy::default()));
         assert_eq!(
+            enabled.continuation.as_ref().unwrap().stuck_minutes,
+            None,
+            "no stuck timeout unless asked for"
+        );
+        assert_eq!(
             serde_json::from_value::<RunPolicy>(serde_json::to_value(&enabled).unwrap()).unwrap(),
             enabled
         );
+        let stuck: RunPolicy =
+            serde_json::from_str(r#"{"continuation":{"stuck_minutes":15}}"#).unwrap();
+        assert_eq!(stuck.continuation.unwrap().stuck_minutes, Some(15));
     }
 }
