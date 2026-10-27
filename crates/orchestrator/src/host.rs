@@ -113,6 +113,11 @@ pub trait AgentHost: Send + Sync {
         let _ = agent;
         false
     }
+    /// Brings an archived agent back to the lists (and its recruits with it).
+    async fn restore_agent(&self, agent: AgentId) -> Result<(), CoreError> {
+        let _ = agent;
+        Err(CoreError::Unsupported("restoring agents".into()))
+    }
     /// Whether the agent's driver resumes its session in another directory (`move_cwd`).
     async fn can_move(&self, agent: &Agent) -> bool {
         let _ = agent;

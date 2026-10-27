@@ -18,6 +18,7 @@ pub mod project;
 pub mod protocol;
 pub mod quota;
 pub mod review;
+mod sessions;
 pub mod screenshot;
 pub mod tasks;
 pub mod team;
@@ -26,6 +27,7 @@ pub mod verify;
 pub mod work;
 pub mod workspace;
 
+pub use claims::Execution;
 pub use delete::{DeleteRun, DeletedRun, DeletedRunAgents};
 pub use engine::{Approval, NewRun, Orchestrator, OrchestratorConfig};
 pub use host::{AgentHost, Route};

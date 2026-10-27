@@ -9,6 +9,7 @@ use ts_rs::TS;
 
 pub use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentProfile, AgentStatus, Capabilities, CheckResult,
+    ClaimRole,
     DataSource, DiffSource, DriverKind, Event, EventKind, Handoff, HandoffKind, MessageId,
     MessageSource, ModelInfo, OutputStream, PlannedTask, Role, Run, RunId, RunStatus, StopReason,
     Task, TaskId, TaskStatus, TokenTotals, ToolInfo, ToolStatus,
@@ -753,6 +754,28 @@ pub struct DeleteRunResponse {
     pub branches: Vec<String>,
     /// What could not be cleaned up, and why.
     pub warnings: Vec<String>,
+}
+
+/// `GET /v1/agents/{key}/execution`: what the session works on for a run now, if anything
+/// (docs/tasks/S1.md §3.3). `POST …/execution/interrupt` stops it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AgentExecutionResponse {
+    pub execution: Option<AgentExecution>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AgentExecution {
+    pub run_id: RunId,
+    pub run_title: String,
+    /// `None` while it leads the run.
+    pub task_id: Option<TaskId>,
+    pub task_key: Option<String>,
+    pub role: ClaimRole,
+    /// An execution session started for this, rather than the agent itself.
+    pub fresh: bool,
+    pub since: DateTime<Utc>,
 }
 
 /// What became of the sessions a deleted run still held. Those that took part in it and are

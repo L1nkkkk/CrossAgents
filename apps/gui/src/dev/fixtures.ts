@@ -138,6 +138,9 @@ export function planned(key: string, title: string, goal: string, assignee: stri
     depends_on: deps,
     assignee,
     reviewer: null,
+    fresh: true,
+    restore: false,
+    reviewer_fresh: true,
   };
 }
 
@@ -197,6 +200,9 @@ export function task(r: Run, p: PlannedTask, init: { status: TaskStatus; assigne
     reviewer: null,
     worker_template: init.template?.id ?? null,
     reviewer_template: null,
+    worker_fresh: true,
+    worker_restore: false,
+    reviewer_fresh: true,
     status: init.status,
     attempts: 1,
     escalated: false,

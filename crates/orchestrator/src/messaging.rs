@@ -215,15 +215,24 @@ impl Orchestrator {
         Ok(by_agent)
     }
 
-    pub(crate) async fn agent_list(&self) -> Result<Value, CoreError> {
+    /// Every agent in the lists, then the archived sessions of the caller's workspace (most
+    /// recent first, at most a dozen): each with its state (idle, busy and where, archived)
+    /// and its last execution (docs/tasks/S1.md §3.6).
+    pub(crate) async fn agent_list(&self, caller: &Agent) -> Result<Value, CoreError> {
         let tasks = self.current_tasks().await?;
-        let agents: Vec<Value> = self
-            .store()
-            .list_agents()
-            .await?
-            .into_iter()
-            .filter(|a| a.archived_at.is_none())
-            .map(|a| {
+        let sessions = self.workspace_sessions(caller.home(), None).await?;
+        let about = |id: AgentId| sessions.iter().find(|s| s.agent.id == id).map(|s| s.json());
+        let mut agents: Vec<Value> = Vec::new();
+        for a in self.store().list_agents().await? {
+            if a.archived_at.is_some() {
+                continue;
+            }
+            let held = match self.store().claim_of(a.id).await? {
+                Some(claim) => Some(self.held_by(&a, &claim).await),
+                None => None,
+            };
+            let session = about(a.id);
+            agents.push({
                 json!({
                     "name": a.name,
                     "id": a.id,
@@ -234,9 +243,24 @@ impl Orchestrator {
                     "plugin": a.plugin,
                     "model": a.model,
                     "current_tasks": tasks.get(&a.id).cloned().unwrap_or_default(),
+                    "home": a.home(),
+                    "state": if held.is_some() { "busy" } else { "idle" },
+                    "busy_with": held,
+                    "last_execution": session.and_then(|s| s["last_execution"].as_str().map(str::to_owned)),
                 })
-            })
-            .collect();
+            });
+        }
+        for s in sessions
+            .iter()
+            .filter(|s| s.state == "archived")
+            .take(crate::sessions::KICKOFF_SESSIONS)
+        {
+            let mut entry = s.json();
+            entry["id"] = json!(s.agent.id);
+            entry["role"] = json!(s.agent.role);
+            entry["note"] = json!("archived: assign with fresh: false and restore: true to use it");
+            agents.push(entry);
+        }
         Ok(json!({ "agents": agents }))
     }
 

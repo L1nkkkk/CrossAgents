@@ -28,7 +28,20 @@ worker_template: AgentId | null,
 /**
  * The teammate reviewers on this task are cloned from (the plan's `reviewer`).
  */
-reviewer_template: AgentId | null, status: TaskStatus, 
+reviewer_template: AgentId | null, 
+/**
+ * Whether its worker is a new execution session of `worker_template` (`true`), or
+ * `worker_template` itself, with its conversation (docs/tasks/S1.md §3.3).
+ */
+worker_fresh: boolean, 
+/**
+ * With `worker_fresh` false: restore it first if it is archived.
+ */
+worker_restore: boolean, 
+/**
+ * Like `worker_fresh`, for `reviewer_template`.
+ */
+reviewer_fresh: boolean, status: TaskStatus, 
 /**
  * Attempts by the current worker.
  */

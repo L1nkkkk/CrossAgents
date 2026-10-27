@@ -63,8 +63,11 @@ fn planned_task_schema() -> Value {
             "title": { "type": "string" },
             "spec": spec_schema(),
             "depends_on": { "type": "array", "items": { "type": "string" } },
-            "assignee": { "type": "string", "description": "Name of the worker on your team whose specialty fits this task; omit for the default worker" },
-            "reviewer": { "type": "string", "description": "Name of a reviewer on your team (e.g. a security reviewer)" }
+            "assignee": { "type": "string", "description": "Name of the worker on your team whose specialty fits this task; omit for the default worker. With fresh: false, any session of this workspace (see agent_list or your kickoff's sessions)" },
+            "fresh": { "type": "boolean", "description": "Default true: a new execution session of the assignee takes the task, from a clean context. false: the assignee itself does it, with its conversation; refused (with the reason) when it is busy with a person or another run, archived, or cannot move" },
+            "restore": { "type": "boolean", "description": "With fresh: false, restore the assignee first if it is archived" },
+            "reviewer": { "type": "string", "description": "Name of a reviewer on your team (e.g. a security reviewer)" },
+            "reviewer_fresh": { "type": "boolean", "description": "Like fresh, for the reviewer (default true)" }
         },
         "required": ["key", "title", "spec"]
     })
@@ -97,7 +100,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "agent_list",
-        description: "Your teammates: name, title, specialty, role, status, model and current tasks.",
+        description: "Your teammates and the sessions of your workspace: name, title, specialty, role, status, model, current tasks, state (idle, busy with which run's task, archived) and last execution. Archived sessions of your workspace are listed too.",
         groups: ALL,
         schema: || object(json!({}), &[]),
     },
@@ -284,7 +287,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "plan_submit",
-        description: "Submit the plan for your current run: the full list of tasks for workers. Depending on the run's policy the person approves it first, or it starts at once.",
+        description: "Submit the plan for your current run: the full list of tasks for workers. Each task goes to a new execution session of its assignee by default (fresh: true); write fresh: false to have that session itself, with its conversation, do it. Depending on the run's policy the person approves it first, or it starts at once.",
         groups: PLANNER,
         schema: || {
             json!({
@@ -298,7 +301,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_create",
-        description: "Add tasks to your running run (same fields as plan_submit's tasks). They start once their dependencies are merged. Keys already in the run are left as they are. If the run lets workers delegate, a worker can split parts off its own task this way: they branch from it and merge back into it, and the worker accepts them.",
+        description: "Add tasks to your running run (same fields as plan_submit's tasks). They start once their dependencies are merged. Keys already in the run are left as they are. If the run lets workers delegate, a worker can split parts off its own task this way: they branch from it and merge back into it, and the worker accepts them. Like plan_submit, each task goes to a new execution session unless it says fresh: false; tasks that could not start are listed in not_started with the reason.",
         groups: ALL,
         schema: || {
             object(
@@ -338,10 +341,15 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_assign",
-        description: "Give a task you issued to another worker on the team (by name). A started task keeps its worktree; the new worker continues from it and gets a handoff card (files changed, last word, rework notes, open questions). reason says why it changes hands.",
+        description: "Give a task you issued to another worker (by name). By default a new execution session of `to` takes it (fresh: true); fresh: false gives it to `to` itself, with its conversation (a session of this workspace; restore: true brings back an archived one), and is refused with the reason when it cannot take it now. A started task keeps its worktree; the new worker continues from it and gets a handoff card (files changed, last word, rework notes, open questions). reason says why it changes hands.",
         groups: ALL,
         schema: || {
-            task_schema(json!({ "to": { "type": "string" }, "reason": { "type": "string" } }))
+            task_schema(json!({
+                "to": { "type": "string" },
+                "reason": { "type": "string" },
+                "fresh": { "type": "boolean", "description": "Default true: a new execution session. false: `to` itself, with its conversation" },
+                "restore": { "type": "boolean", "description": "With fresh: false, restore `to` first if it is archived" }
+            }))
         },
     },
     ToolDef {
@@ -412,10 +420,15 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "review_request",
-        description: "Ask a reviewer (by name, else the task's or run's reviewer) for a verdict on a task reported done; its verdict comes back to you.",
+        description: "Ask a reviewer (by name, else the task's or run's reviewer) for a verdict on a task reported done; its verdict comes back to you. A new execution session of the reviewer reviews by default; fresh: false has the reviewer itself do it, with its conversation.",
         groups: ALL,
         schema: || {
-            task_schema(json!({ "reviewer": { "type": "string" }, "focus": { "type": "string" } }))
+            task_schema(json!({
+                "reviewer": { "type": "string" },
+                "focus": { "type": "string" },
+                "fresh": { "type": "boolean", "description": "false: the reviewer itself, with its conversation (default: a new execution session)" },
+                "restore": { "type": "boolean", "description": "With fresh: false, restore the reviewer first if it is archived" }
+            }))
         },
     },
     ToolDef {
@@ -605,7 +618,7 @@ impl Orchestrator {
                 let tools = self.tools_for(caller).into_iter().map(|t| t.name).collect();
                 self.whoami(caller, tools).await
             }
-            "agent_list" => self.agent_list().await,
+            "agent_list" => self.agent_list(caller).await,
             "agent_get" => {
                 #[derive(Deserialize)]
                 struct A {

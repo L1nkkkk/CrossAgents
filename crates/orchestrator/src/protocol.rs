@@ -51,7 +51,11 @@ hub runs them before `run_land` or `run_finish` accepts a run that changed somet
 failure is refused with the output: fix it and call again.\n\
 1. Plan: call `plan_submit` once with all tasks (key, title, spec.goal written so a worker who \
 sees only it and the repository can do it, scope, interfaces, references, optional \
-spec.acceptance commands, depends_on, assignee from the roster). Depending on the run's policy \
+spec.acceptance commands, depends_on, assignee from the roster). A task goes to a new \
+execution session of its assignee, from a clean context, unless you write `fresh: false`: then \
+that session itself does it, with its conversation (one of the workspace's sessions your \
+kickoff and `agent_list` show; `restore: true` for an archived one). It is refused, with the \
+reason, while a person waits on it or another run holds it. Depending on the run's policy \
 the person approves it first, or it starts at once; end your turn after submitting. Tasks \
 start from the run branch as you left it. Later you can add tasks with `task_create`.\n\
 2. Tasks start by themselves once their dependencies are merged; each worker works in its own \
@@ -75,7 +79,10 @@ working directory (the task's own git worktree). Do not commit; the hub does. Re
 task_id from your task: `task_progress` for a short status now and then, `task_ask` if the spec \
 is unclear (then end your turn and wait for the answer), `task_complete` with a summary of what \
 you changed when done, `task_fail` with the reason if it cannot be done. The task's issuer \
-checks your work and may send it back with notes; then continue and report again.";
+checks your work and may send it back with notes; then continue and report again. When you \
+are given a task yourself (with your conversation, rather than as a new session), you work in \
+the task's worktree until it ends and then go back to your own directory; a person may still \
+write to you, and comes first.";
 
 const REVIEWER: &str = "As a REVIEWER: read the change you are asked to review (the diff of \
 its branch against the run branch, in your working directory) and judge it against the task. \

@@ -237,6 +237,9 @@ impl Orchestrator {
                     depends_on: Vec::new(),
                     assignee: None,
                     reviewer: None,
+                    fresh: true,
+                    restore: false,
+                    reviewer_fresh: true,
                 });
             }
         }
@@ -261,6 +264,9 @@ impl Orchestrator {
                 reviewer: None,
                 worker_template,
                 reviewer_template,
+                worker_fresh: planned.fresh,
+                worker_restore: planned.restore,
+                reviewer_fresh: planned.reviewer_fresh,
                 status: TaskStatus::Pending,
                 attempts: 0,
                 escalated: false,
@@ -285,9 +291,9 @@ impl Orchestrator {
             .await;
             created.push(task_json(&task));
         }
-        self.schedule(&mut run).await?;
+        let not_started = self.schedule_reporting(&mut run).await?;
         let repeated: Vec<String> = repeated.into_iter().map(|t| t.key).collect();
-        Ok(json!({ "created": created, "repeated": repeated }))
+        Ok(json!({ "created": created, "repeated": repeated, "not_started": not_started }))
     }
 
     pub(crate) async fn task_update(
@@ -346,6 +352,14 @@ impl Orchestrator {
             /// Why it changes hands, for the handoff card.
             #[serde(default)]
             reason: Option<String>,
+            /// `false`: `to` itself, with its conversation (docs/tasks/S1.md §3.3).
+            #[serde(default = "yes")]
+            fresh: bool,
+            #[serde(default)]
+            restore: bool,
+        }
+        fn yes() -> bool {
+            true
         }
         let (run, task) = self.task_arg(caller, &input).await?;
         Self::require_issuer(&run, &task, caller)?;
@@ -354,19 +368,33 @@ impl Orchestrator {
         if to.role != Role::Worker {
             return Err(CoreError::Conflict(format!("{} is not a worker", to.name)));
         }
+        if !a.fresh {
+            self.may_take_self(&run, &to, a.restore).await?;
+        }
         let _guard = self.lock(run.id).await;
+        let mut run = self.store.get_run(run.id).await?;
         let mut task = self.store.get_task(task.id).await?;
         if task.status.is_terminal() {
             return Err(CoreError::Conflict(format!("#{} has ended", task.key)));
         }
         if task.status == TaskStatus::Pending {
-            // Its first worker gets the card when it starts.
+            // Its first worker gets the card when it starts, if it can start now.
             task.worker_template = Some(to.id);
+            task.worker_fresh = a.fresh;
+            task.worker_restore = a.restore;
+            task.progress = None;
             self.store_task(&mut task).await?;
-            return Ok(task_json(&task));
+            let not_started = self.schedule_reporting(&mut run).await?;
+            let task = self.store.get_task(task.id).await?;
+            return Ok(json!({ "task": task_json(&task), "not_started": not_started }));
+        }
+        if !a.fresh && task.assignee == Some(to.id) {
+            return Err(CoreError::Conflict(format!(
+                "{} already works on #{}",
+                to.name, task.key
+            )));
         }
         let left = self.left_by_worker(&run, &task, task.assignee).await;
-        task.worker_template = Some(to.id);
         let reason = a
             .reason
             .map(|r| r.trim().to_owned())
@@ -380,20 +408,32 @@ impl Orchestrator {
         } else {
             (HandoffKind::Reassign, reason)
         };
-        // The worker before: archived, or home (docs/tasks/S1.md §3.4).
-        task.assignee = None;
-        self.let_go_task(run.id, task.id, Some(ClaimRole::Worker))
-            .await;
         let cwd = Self::worktree(&task)?;
-        let worker = self
-            .fresh_agent(
+        // `to` itself is checked and moved in before the worker before goes: a refusal leaves
+        // the task as it was.
+        if !a.fresh {
+            self.take_self(&run, &task, &to, ClaimRole::Worker, a.restore)
+                .await?;
+        }
+        // The worker before: archived, or home (docs/tasks/S1.md §3.4).
+        if let Some(old) = task.assignee.take() {
+            self.let_go(run.id, old).await;
+        }
+        let worker = if a.fresh {
+            self.fresh_agent(
                 &task,
                 to.id,
                 &agent_name("w", &run, &task),
                 Role::Worker,
                 &cwd,
             )
-            .await?;
+            .await?
+        } else {
+            self.store.get_agent(&AgentKey::Id(to.id)).await?
+        };
+        task.worker_template = Some(to.id);
+        task.worker_fresh = a.fresh;
+        task.worker_restore = a.restore;
         task.assignee = Some(worker.id);
         task.report.question = None;
         if task.status != TaskStatus::Running {
@@ -838,6 +878,12 @@ impl Orchestrator {
             reviewer: Option<String>,
             #[serde(default)]
             focus: Option<String>,
+            /// `false`: the reviewer itself, with its conversation; unset, the task's plan
+            /// decides for its own reviewer and a named one is a new execution session.
+            #[serde(default)]
+            fresh: Option<bool>,
+            #[serde(default)]
+            restore: bool,
         }
         let (run, task) = self.task_arg(caller, &input).await?;
         Self::require_issuer(&run, &task, caller)?;
@@ -860,6 +906,9 @@ impl Orchestrator {
                     CoreError::Conflict("name a reviewer: this run has none by default".into())
                 })?,
         };
+        let fresh = a
+            .fresh
+            .unwrap_or(a.reviewer.is_some() || task.reviewer_fresh);
         let _guard = self.lock(run.id).await;
         let mut task = self.store.get_task(task.id).await?;
         if task.status == TaskStatus::Reviewing {
@@ -875,15 +924,21 @@ impl Orchestrator {
         self.ws_for(&run)
             .commit_all(&cwd, &format!("{}: {}", task.key, task.title))
             .await?;
-        let reviewer = self
-            .fresh_agent(
+        let reviewer = if fresh {
+            self.fresh_agent(
                 &task,
                 template,
                 &agent_name("r", &run, &task),
                 Role::Reviewer,
                 &cwd,
             )
-            .await?;
+            .await?
+        } else {
+            let me = self.store.get_agent(&AgentKey::Id(template)).await?;
+            self.take_self(&run, &task, &me, ClaimRole::Reviewer, a.restore)
+                .await?;
+            self.store.get_agent(&AgentKey::Id(template)).await?
+        };
         task.reviewer = Some(reviewer.id);
         self.transition(&mut task, TaskStatus::Reviewing).await?;
         let focus = a

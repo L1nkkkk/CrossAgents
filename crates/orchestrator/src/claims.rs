@@ -4,10 +4,13 @@
 use std::path::PathBuf;
 
 use crossagents_core::{
-    Agent, AgentClaim, AgentId, AgentKey, ClaimRole, CoreError, EventKind, RunId, TaskId,
+    Agent, AgentClaim, AgentId, AgentKey, ClaimRole, CoreError, EventKind, Run, RunId, Task,
+    TaskId, TaskStatus,
 };
 
+use crate::brief;
 use crate::engine::{Orchestrator, short};
+use crate::host::Route;
 
 /// Agent config key from before homes: the directory a lead lived in before a run moved it
 /// into its checkout. Read once, by [`Orchestrator::migrate_homes`], and dropped.
@@ -255,5 +258,182 @@ impl Orchestrator {
             done.extend(self.let_go(run, claim.agent_id).await);
         }
         done
+    }
+}
+
+impl Orchestrator {
+    /// The checks a session must pass before it works on `task` itself, with its
+    /// conversation (`fresh: false`, docs/tasks/S1.md §3.3) that do not depend on the
+    /// moment: it belongs to the run's workspace, its driver resumes a session elsewhere, and
+    /// it is not archived (unless `restore` says to bring it back, which happens later).
+    pub(crate) async fn may_take_self(
+        &self,
+        run: &Run,
+        agent: &Agent,
+        restore: bool,
+    ) -> Result<(), CoreError> {
+        if agent.home() != run.repo {
+            return Err(CoreError::Conflict(format!(
+                "{} belongs to {}, not to this run's workspace {}: give the task to a new execution session (leave fresh out)",
+                agent.name,
+                agent.home().display(),
+                run.repo.display()
+            )));
+        }
+        if !self.host.can_move(agent).await {
+            return Err(CoreError::Conflict(format!(
+                "{}'s driver cannot resume its session in another directory, so it cannot work on a task itself: leave fresh out, and a new execution session takes the task",
+                agent.name
+            )));
+        }
+        if agent.archived_at.is_some() && !restore {
+            return Err(CoreError::Conflict(format!(
+                "{} is archived: restore it first (fresh: false with restore: true), or leave fresh out",
+                agent.name
+            )));
+        }
+        Ok(())
+    }
+
+    /// Puts `agent` itself on `task` (`fresh: false`, docs/tasks/S1.md §3.3), after checking
+    /// in order: same workspace, a driver that moves, not archived (or restored now), no
+    /// person waiting on it, held for nobody else (one atomic claim), and not moved off its
+    /// account by quota. Then it moves into the task's worktree with its conversation;
+    /// failing to resume there is an error, never a new session. On any refusal nothing is
+    /// held and the agent is where it was.
+    pub(crate) async fn take_self(
+        &self,
+        run: &Run,
+        task: &Task,
+        agent: &Agent,
+        role: ClaimRole,
+        restore: bool,
+    ) -> Result<(), CoreError> {
+        self.may_take_self(run, agent, restore).await?;
+        if agent.archived_at.is_some() {
+            self.host.restore_agent(agent.id).await?;
+        }
+        if self.host.serving_person(agent.id).await {
+            return Err(CoreError::Busy(format!(
+                "{} is answering a person, or a person's message waits for it: the person comes first. Pick someone else, leave fresh out, or try again later",
+                agent.name
+            )));
+        }
+        self.claim(agent, run.id, Some(task.id), role, false)
+            .await?;
+        let mut team: Vec<AgentId> = run.config.team.clone();
+        team.push(run.config.worker);
+        if let Route::Account { reason, .. } | Route::Teammate { reason, .. } =
+            self.host.route(agent.id, &team, None).await
+        {
+            let _ = self.store.release_agent(agent.id, run.id).await;
+            return Err(CoreError::Conflict(format!(
+                "{} cannot work on it now: {reason}. Its conversation lives on its own account, so another account means a new session: leave fresh out",
+                agent.name
+            )));
+        }
+        let dir = task.worktree.clone().unwrap_or_else(|| run.repo.clone());
+        if let Err(err) = self.host.place(agent.id, &dir, true).await {
+            let _ = self.store.release_agent(agent.id, run.id).await;
+            // It may have been moved before its session failed to resume: back home.
+            let _ = self.host.send_home(agent.id).await;
+            return Err(match err {
+                CoreError::Agent(why) => CoreError::Agent(format!(
+                    "{why} (上下文没能延续). Give the task to a new execution session (leave fresh out) or to someone else"
+                )),
+                other => other,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// What a session is doing for a run, for its page (docs/tasks/S1.md §3.3).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Execution {
+    pub claim: AgentClaim,
+    pub run_title: String,
+    pub task_key: Option<String>,
+}
+
+impl Orchestrator {
+    /// What holds `agent` now, if anything.
+    pub async fn execution_of(&self, agent: AgentId) -> Result<Option<Execution>, CoreError> {
+        let Some(claim) = self.store.claim_of(agent).await? else {
+            return Ok(None);
+        };
+        let run_title = match self.store.get_run(claim.run_id).await {
+            Ok(run) => run.title,
+            Err(_) => claim.run_id.to_string(),
+        };
+        let task_key = match claim.task_id {
+            Some(id) => self.store.get_task(id).await.ok().map(|t| t.key),
+            None => None,
+        };
+        Ok(Some(Execution {
+            claim,
+            run_title,
+            task_key,
+        }))
+    }
+
+    /// The person stops what `agent` does on a task (docs/tasks/S1.md §3.3): its turn is
+    /// interrupted, the execution ends as interrupted, the run lets go of it (home, or
+    /// archived when it is an execution session), and the task's issuer hears it and decides
+    /// who goes on. Messages the person sent it stay in line.
+    pub async fn interrupt_execution(&self, agent: AgentId) -> Result<Task, CoreError> {
+        let record = self.store.get_agent(&AgentKey::Id(agent)).await?;
+        let Some(claim) = self.store.claim_of(agent).await? else {
+            return Err(CoreError::Conflict(format!(
+                "{} is not working on any task",
+                record.name
+            )));
+        };
+        let Some(task_id) = claim.task_id else {
+            return Err(CoreError::Conflict(format!(
+                "{} leads its run rather than working on a task: stop its turn, or cancel the run",
+                record.name
+            )));
+        };
+        let _guard = self.lock(claim.run_id).await;
+        let run = self.store.get_run(claim.run_id).await?;
+        let mut task = self.store.get_task(task_id).await?;
+        if let Err(err) = self.host.interrupt(agent).await {
+            tracing::warn!(%agent, error = %err, "cannot interrupt the turn");
+        }
+        let what = match claim.role {
+            ClaimRole::Reviewer => {
+                task.reviewer = None;
+                if task.status == TaskStatus::Reviewing {
+                    self.transition(&mut task, TaskStatus::Passed).await?;
+                } else {
+                    task.updated_at = chrono::Utc::now();
+                    self.store.update_task(&task).await?;
+                }
+                "reviewing"
+            }
+            _ => {
+                task.assignee = None;
+                if matches!(task.status, TaskStatus::Running | TaskStatus::WaitingAnswer) {
+                    self.transition(&mut task, TaskStatus::Stalled).await?;
+                } else {
+                    task.updated_at = chrono::Utc::now();
+                    self.store.update_task(&task).await?;
+                }
+                "working on"
+            }
+        };
+        self.let_go(run.id, agent).await;
+        self.notice(
+            task.issuer_or(run.planner),
+            &format!("task:{}", task.id),
+            &format!(
+                "The person interrupted {} {what} {}. Nobody works on it now: task_assign it (a new execution session by default, or someone with fresh: false), or drop it.",
+                record.name,
+                brief::task_ref(&task)
+            ),
+        )
+        .await;
+        Ok(task)
     }
 }

@@ -12,4 +12,18 @@ assignee: string | null,
 /**
  * Teammate (reviewer, by name) to review this task instead of the run's reviewer.
  */
-reviewer: string | null, };
+reviewer: string | null, 
+/**
+ * `true` (the default): a new execution session of `assignee` does the task, starting
+ * from a clean context. `false`: `assignee` itself, with its conversation — a session of
+ * the run's workspace (docs/tasks/S1.md §3.3).
+ */
+fresh: boolean, 
+/**
+ * With `fresh` false: restore `assignee` first when it is archived.
+ */
+restore: boolean, 
+/**
+ * Like `fresh`, for `reviewer`.
+ */
+reviewer_fresh: boolean, };

@@ -20,7 +20,8 @@ use crossagents_api_types::{
     API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentSettingsRequest,
     AnswerRequest, ApiError, ApproveRunRequest, ArchiveAgentRequest, AttachmentContent,
     ChangesResponse, CliInfo, CliInstallAccepted, ConnectInfo, CreateAccountRequest,
-    CreateAgentRequest, CreateRunRequest, DeleteRunResponse, DiffSide, ErrorCode, FinishRequest,
+    AgentExecution, AgentExecutionResponse, CreateAgentRequest, CreateRunRequest,
+    DeleteRunResponse, DiffSide, ErrorCode, FinishRequest,
     HealthResponse, HubInfo, InitRepoRequest, LandRequest, ListAccountsResponse,
     ListAgentsResponse, ListNotesResponse, ListPluginsResponse, ListQuestionsResponse,
     ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
@@ -107,6 +108,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/agents/{key}/name", post(rename_agent))
         .route("/v1/agents/{key}/topic", post(set_topic))
         .route("/v1/agents/{key}/archive", post(archive_agent))
+        .route("/v1/agents/{key}/execution", get(agent_execution))
+        .route(
+            "/v1/agents/{key}/execution/interrupt",
+            post(interrupt_execution),
+        )
         .route("/v1/agents/{key}/connect", post(connect_agent))
         .route("/v1/notes", get(list_notes))
         .route("/v1/plugins", get(list_plugins))
@@ -644,6 +650,39 @@ async fn set_topic(
             .set_topic(&AgentKey::parse(&key), req.topic)
             .await?,
     ))
+}
+
+/// What the session works on for a run now (docs/tasks/S1.md §3.3).
+async fn agent_execution(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<AgentExecutionResponse>> {
+    let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    let execution = state
+        .orchestrator
+        .execution_of(agent.id)
+        .await?
+        .map(|e| AgentExecution {
+            run_id: e.claim.run_id,
+            run_title: e.run_title,
+            task_id: e.claim.task_id,
+            task_key: e.task_key,
+            role: e.claim.role,
+            fresh: e.claim.fresh,
+            since: e.claim.since,
+        });
+    Ok(Json(AgentExecutionResponse { execution }))
+}
+
+/// The person stops what the session does on a task: the execution ends as interrupted, the
+/// session goes back to its workspace (or is archived, an execution session), and the task's
+/// issuer is told. Returns the task.
+async fn interrupt_execution(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<Task>> {
+    let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    Ok(Json(state.orchestrator.interrupt_execution(agent.id).await?))
 }
 
 async fn archive_agent(

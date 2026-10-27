@@ -213,6 +213,9 @@ mod tests {
             depends_on: deps.iter().map(|d| d.to_string()).collect(),
             assignee: None,
             reviewer: None,
+            fresh: true,
+            restore: false,
+            reviewer_fresh: true,
         }
     }
 
@@ -239,6 +242,9 @@ mod tests {
             reviewer: None,
             worker_template: None,
             reviewer_template: None,
+            worker_fresh: true,
+            worker_restore: false,
+            reviewer_fresh: true,
             status,
             attempts: 0,
             escalated: false,

@@ -404,6 +404,21 @@ pub struct PlannedTask {
     /// Teammate (reviewer, by name) to review this task instead of the run's reviewer.
     #[serde(default)]
     pub reviewer: Option<String>,
+    /// `true` (the default): a new execution session of `assignee` does the task, starting
+    /// from a clean context. `false`: `assignee` itself, with its conversation — a session of
+    /// the run's workspace (docs/tasks/S1.md §3.3).
+    #[serde(default = "yes")]
+    pub fresh: bool,
+    /// With `fresh` false: restore `assignee` first when it is archived.
+    #[serde(default)]
+    pub restore: bool,
+    /// Like `fresh`, for `reviewer`.
+    #[serde(default = "yes")]
+    pub reviewer_fresh: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// The result of one acceptance command.
@@ -473,6 +488,16 @@ pub struct Task {
     /// The teammate reviewers on this task are cloned from (the plan's `reviewer`).
     #[serde(default)]
     pub reviewer_template: Option<AgentId>,
+    /// Whether its worker is a new execution session of `worker_template` (`true`), or
+    /// `worker_template` itself, with its conversation (docs/tasks/S1.md §3.3).
+    #[serde(default = "yes")]
+    pub worker_fresh: bool,
+    /// With `worker_fresh` false: restore it first if it is archived.
+    #[serde(default)]
+    pub worker_restore: bool,
+    /// Like `worker_fresh`, for `reviewer_template`.
+    #[serde(default = "yes")]
+    pub reviewer_fresh: bool,
     pub status: TaskStatus,
     /// Attempts by the current worker.
     pub attempts: u32,

@@ -385,6 +385,7 @@ impl Orchestrator {
         self.publish(EventKind::RunCreated { run: run.clone() })
             .await;
         // The request is the person's; the roster and ids are facts the lead needs.
+        let sessions = self.sessions_section(&run.repo, run.planner).await;
         self.deliver(
             run.planner,
             MessageSource::Human,
@@ -393,6 +394,7 @@ impl Orchestrator {
                 &team,
                 run.config.worker,
                 &crate::project::run_checks(&self.integration_path(&run)),
+                &sessions,
             ),
         );
         Ok(run)
@@ -519,45 +521,26 @@ impl Orchestrator {
         Ok(team)
     }
 
-    /// Resolves each planned task's `assignee` and `reviewer` to teammates of the right role.
+    /// Resolves each planned task's `assignee` and `reviewer` to agents of the right role:
+    /// teammates for a new execution session (`fresh`, the default), or, with `fresh: false`,
+    /// any session of the run's workspace that may work on it itself (docs/tasks/S1.md §3.3).
     pub(crate) async fn resolve_assignments(
         &self,
         run: &Run,
         tasks: &[PlannedTask],
     ) -> Result<Vec<(Option<AgentId>, Option<AgentId>)>, CoreError> {
         let team = self.team_of(run).await?;
-        let names = |role: Role| {
-            team.iter()
-                .filter(|a| a.role == role)
-                .map(|a| a.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
         let mut problems = Vec::new();
-        let mut pick = |task: &str, name: &Option<String>, role: Role, field: &str| {
-            let name = name.as_deref()?;
-            match team.iter().find(|a| a.name == name && a.role == role) {
-                Some(agent) => Some(agent.id),
-                None => {
-                    let known = names(role);
-                    problems.push(format!(
-                        "task {task:?}: {field} {name:?} is not a {} on the team (available: {})",
-                        role_word(role),
-                        if known.is_empty() { "none" } else { &known }
-                    ));
-                    None
-                }
-            }
-        };
-        let resolved = tasks
-            .iter()
-            .map(|t| {
-                (
-                    pick(&t.key, &t.assignee, Role::Worker, "assignee"),
-                    pick(&t.key, &t.reviewer, Role::Reviewer, "reviewer"),
-                )
-            })
-            .collect();
+        let mut resolved = Vec::new();
+        for t in tasks {
+            let worker = self
+                .pick(run, &team, &t.key, t.assignee.as_deref(), Role::Worker, t.fresh, t.restore, &mut problems)
+                .await;
+            let reviewer = self
+                .pick(run, &team, &t.key, t.reviewer.as_deref(), Role::Reviewer, t.reviewer_fresh, false, &mut problems)
+                .await;
+            resolved.push((worker, reviewer));
+        }
         if problems.is_empty() {
             Ok(resolved)
         } else {
@@ -565,6 +548,73 @@ impl Orchestrator {
                 "the plan is invalid:\n{}",
                 problems.join("\n")
             )))
+        }
+    }
+
+    /// One assignment of [`Self::resolve_assignments`]; what is wrong goes in `problems`.
+    #[allow(clippy::too_many_arguments)]
+    async fn pick(
+        &self,
+        run: &Run,
+        team: &[Agent],
+        task: &str,
+        name: Option<&str>,
+        role: Role,
+        fresh: bool,
+        restore: bool,
+        problems: &mut Vec<String>,
+    ) -> Option<AgentId> {
+        let field = if role == Role::Worker { "assignee" } else { "reviewer" };
+        let Some(name) = name else {
+            if !fresh {
+                problems.push(format!(
+                    "task {task:?}: fresh: false needs {field}: the session that works on it itself"
+                ));
+            }
+            return None;
+        };
+        if fresh {
+            if let Some(agent) = team.iter().find(|a| a.name == name && a.role == role) {
+                return Some(agent.id);
+            }
+            let known: Vec<&str> = team
+                .iter()
+                .filter(|a| a.role == role)
+                .map(|a| a.name.as_str())
+                .collect();
+            problems.push(format!(
+                "task {task:?}: {field} {name:?} is not a {} on the team (available: {})",
+                role_word(role),
+                if known.is_empty() { "none".to_owned() } else { known.join(", ") }
+            ));
+            return None;
+        }
+        // The session itself: any of the workspace's, archived ones too.
+        match self.store.get_agent(&AgentKey::Name(name.to_owned())).await {
+            Ok(agent) if agent.role != role => {
+                problems.push(format!(
+                    "task {task:?}: {field} {name:?} is not a {}",
+                    role_word(role)
+                ));
+                None
+            }
+            Ok(agent) => match self.may_take_self(run, &agent, restore).await {
+                Ok(()) => Some(agent.id),
+                Err(CoreError::Conflict(why)) => {
+                    problems.push(format!("task {task:?}: {why}"));
+                    None
+                }
+                Err(err) => {
+                    problems.push(format!("task {task:?}: {err}"));
+                    None
+                }
+            },
+            Err(_) => {
+                problems.push(format!(
+                    "task {task:?}: no session named {name:?} (agent_list lists them)"
+                ));
+                None
+            }
         }
     }
 
@@ -737,6 +787,9 @@ impl Orchestrator {
                 reviewer: None,
                 worker_template,
                 reviewer_template,
+                worker_fresh: planned.fresh,
+                worker_restore: planned.restore,
+                reviewer_fresh: planned.reviewer_fresh,
                 status: TaskStatus::Pending,
                 attempts: 0,
                 escalated: false,
@@ -830,8 +883,19 @@ The person changed: {}",
 
     /// Starts every task that can start; finishes the run when nothing is left.
     pub(crate) async fn schedule(&self, run: &mut Run) -> Result<(), CoreError> {
+        self.schedule_reporting(run).await.map(|_| ())
+    }
+
+    /// [`Self::schedule`], returning the tasks that could not start because the session
+    /// they name to work on them itself would not take them now (`#key: why`). Those stay
+    /// pending, their issuer is told, and the next schedule tries again.
+    pub(crate) async fn schedule_reporting(
+        &self,
+        run: &mut Run,
+    ) -> Result<Vec<String>, CoreError> {
+        let mut refused = Vec::new();
         if run.status != RunStatus::Running {
-            return Ok(());
+            return Ok(refused);
         }
         let tasks = self.store.list_tasks(run.id).await?;
         for blocked in plan::blocked_tasks(&tasks) {
@@ -845,11 +909,16 @@ The person changed: {}",
             .cloned()
             .collect();
         for mut task in ready {
+            let itself = !task.worker_fresh && !task.escalated;
             if let Err(err) = self.dispatch(run, &mut task).await {
+                if itself && task.status == TaskStatus::Pending {
+                    refused.push(self.not_started(run, &mut task, err).await?);
+                    continue;
+                }
                 self.fail_task(run, &mut task, format!("cannot start the task: {err}"))
                     .await?;
                 // fail_task schedules again.
-                return Ok(());
+                return Ok(refused);
             }
         }
         // Every task ended: the lead lands and closes the run (run_land, run_finish).
@@ -871,7 +940,35 @@ The person changed: {}",
             )
             .await;
         }
-        Ok(())
+        Ok(refused)
+    }
+
+    /// `task` names a session to work on it itself and that session would not take it now
+    /// (docs/tasks/S1.md §3.3): the task stays pending, says why, and its issuer hears it.
+    async fn not_started(
+        &self,
+        run: &Run,
+        task: &mut Task,
+        err: CoreError,
+    ) -> Result<String, CoreError> {
+        let why = match err {
+            CoreError::Conflict(why) | CoreError::Busy(why) | CoreError::Agent(why) => why,
+            other => other.to_string(),
+        };
+        task.progress = Some(format!("not started: {why}"));
+        task.updated_at = Utc::now();
+        // Keeps the worktree made for it, for the next try.
+        self.store.update_task(task).await?;
+        self.notice(
+            task.issuer_or(run.planner),
+            &format!("task:{}", task.id),
+            &format!(
+                "Task {} did not start: {why}. It stays pending and is tried again when the run next moves on; or task_assign it (a new execution session by default, or someone else).",
+                brief::task_ref(task)
+            ),
+        )
+        .await;
+        Ok(format!("#{}: {why}", task.key))
     }
 
     pub(crate) async fn dispatch(&self, run: &Run, task: &mut Task) -> Result<(), CoreError> {
@@ -901,9 +998,18 @@ The person changed: {}",
         };
         let name = agent_name(if task.escalated { "e" } else { "w" }, run, task);
         let left = self.left_by_issuer(run, task).await;
-        // On an account with quota left (docs/tasks/DOGFOOD.md §5).
-        let (worker, cloned, rerouted) =
-            self.routed_worker(run, task, template, &name, None).await?;
+        let (worker, cloned, rerouted) = if !task.worker_fresh && !task.escalated {
+            // The session itself, with its conversation (docs/tasks/S1.md §3.3).
+            let me = self.store.get_agent(&AgentKey::Id(template)).await?;
+            self.take_self(run, task, &me, ClaimRole::Worker, task.worker_restore)
+                .await?;
+            task.progress = None;
+            let me = self.store.get_agent(&AgentKey::Id(template)).await?;
+            (me, template, None)
+        } else {
+            // On an account with quota left (docs/tasks/DOGFOOD.md §5).
+            self.routed_worker(run, task, template, &name, None).await?
+        };
         task.assignee = Some(worker.id);
         task.attempts = 1;
         task.nudges = 0;

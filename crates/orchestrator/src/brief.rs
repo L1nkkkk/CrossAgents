@@ -15,6 +15,7 @@ pub fn kickoff(
     team: &[Agent],
     default_worker: AgentId,
     checks: &Result<RunChecks, String>,
+    sessions: &str,
 ) -> String {
     let mut out = run.request.trim().to_owned();
     if run.in_place {
@@ -59,6 +60,8 @@ pub fn kickoff(
             "\nworkers: none on the team; a task you assign to nobody goes to a copy of you",
         );
     }
+    // The workspace's sessions, for working with one of them itself (docs/tasks/S1.md §3.6).
+    out.push_str(sessions);
     out
 }
 
@@ -281,6 +284,9 @@ mod tests {
             reviewer: None,
             worker_template: None,
             reviewer_template: None,
+            worker_fresh: true,
+            worker_restore: false,
+            reviewer_fresh: true,
             status: TaskStatus::Running,
             attempts: 1,
             escalated: false,

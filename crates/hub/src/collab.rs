@@ -446,6 +446,13 @@ impl AgentHost for HubHost {
         self.runtime.serving_person(agent).await
     }
 
+    async fn restore_agent(&self, agent: AgentId) -> Result<(), CoreError> {
+        self.runtime
+            .archive(&AgentKey::Id(agent), false)
+            .await
+            .map(|_| ())
+    }
+
     async fn can_move(&self, agent: &Agent) -> bool {
         self.runtime
             .capabilities(agent)
