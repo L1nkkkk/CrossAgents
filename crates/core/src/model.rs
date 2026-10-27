@@ -559,6 +559,23 @@ pub struct ContinuationState {
     pub next_at: Option<DateTime<Utc>>,
     pub last_attempt_at: Option<DateTime<Utc>>,
     pub delivery_error: Option<String>,
+    /// The person was told that the attempts ran out. Kept in the run record, so the
+    /// check that repeats every few seconds, and a restarted hub reading this record,
+    /// both see that the notice was already made. Cleared when the run is re-armed below
+    /// the cap (attempts reset), so a later exhaustion tells them again.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub exhausted_notified: bool,
+    /// The person was told that a wakeup could not be delivered. One notice per run of
+    /// consecutive failures; cleared once a delivery succeeds, so the next failure after
+    /// that is a new fact worth one notice. Persisted for the same reason as above.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub delivery_error_notified: bool,
+}
+
+/// Keeps a `false` flag out of the run JSON: old records read it back as `false`, and
+/// clients see the field as optional.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[cfg(test)]
@@ -652,5 +669,17 @@ mod tests {
         let spec: TaskSpec = serde_json::from_str(r#"{"goal":"do it"}"#).unwrap();
         assert_eq!(spec.goal, "do it");
         assert!(spec.acceptance.is_empty() && spec.scope.allow.is_empty());
+    }
+
+    #[test]
+    fn continuation_state_recorded_before_notices_loads_as_not_notified() {
+        let now = Utc::now();
+        let old = serde_json::json!({
+            "owner": AgentId::new(), "phase": "exhausted", "next_step": "a person must look",
+            "attempts": 3, "next_at": null, "last_attempt_at": now, "delivery_error": null,
+        });
+        let state: ContinuationState = serde_json::from_value(old).unwrap();
+        assert!(!state.exhausted_notified);
+        assert!(!state.delivery_error_notified);
     }
 }

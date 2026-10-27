@@ -5,4 +5,17 @@ import type { AgentId } from "./AgentId";
  * Persisted supervisor checkpoint. Attempts are reserved before delivery, so a crash
  * cannot replay a reserved wakeup. A lost delivery consumes an attempt conservatively.
  */
-export type ContinuationState = { owner: AgentId, phase: string, next_step: string, attempts: number, next_at: string | null, last_attempt_at: string | null, delivery_error: string | null, };
+export type ContinuationState = { owner: AgentId, phase: string, next_step: string, attempts: number, next_at: string | null, last_attempt_at: string | null, delivery_error: string | null, 
+/**
+ * The person was told that the attempts ran out. Kept in the run record, so the
+ * check that repeats every few seconds, and a restarted hub reading this record,
+ * both see that the notice was already made. Cleared when the run is re-armed below
+ * the cap (attempts reset), so a later exhaustion tells them again.
+ */
+exhausted_notified?: boolean, 
+/**
+ * The person was told that a wakeup could not be delivered. One notice per run of
+ * consecutive failures; cleared once a delivery succeeds, so the next failure after
+ * that is a new fact worth one notice. Persisted for the same reason as above.
+ */
+delivery_error_notified?: boolean, };

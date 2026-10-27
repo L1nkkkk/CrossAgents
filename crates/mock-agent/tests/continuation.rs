@@ -6,7 +6,8 @@ use std::time::Duration;
 use chrono::Utc;
 use common::{TestHub, git_repo};
 use crossagents_core::{
-    AgentId, AgentKey, AgentStatus, EventKind, Run, RunId, RunStatus, TaskStatus,
+    AgentId, AgentKey, AgentStatus, EventKind, HumanItem, HumanItemKind, Run, RunId, RunStatus,
+    TaskStatus,
 };
 use serde_json::{Value, json};
 
@@ -105,6 +106,50 @@ async fn wake_count(t: &TestHub, run: &Run) -> usize {
             if *id == run.planner && text.contains("Run continuation "))
         })
         .count()
+}
+
+/// The notices the person has for this run, in any state.
+async fn notices(t: &TestHub, run: &Run) -> Vec<HumanItem> {
+    t.hub
+        .orchestrator
+        .store()
+        .list_human_items(false)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|item| item.run_id == Some(run.id) && item.kind == HumanItemKind::Notice)
+        .collect()
+}
+
+/// A run whose single task stalls, so continuation has to wake the lead.
+async fn stalled_run(t: &TestHub) -> Run {
+    let mut w = t.watch().await;
+    let run = start(t, &plan("[write a.txt=work already done]", true), enabled()).await;
+    w.until("stalled", |e| {
+        matches!(
+            &e.kind,
+            EventKind::TaskStatusChanged {
+                to: TaskStatus::Stalled,
+                ..
+            }
+        )
+    })
+    .await;
+    run
+}
+
+/// Uses both wakeups of [`enabled`] and leaves the run on its cap.
+async fn exhaust(t: &TestHub, run: &Run) {
+    idle(t, run.planner).await;
+    phase(t, run, "recover").await;
+    for attempt in 1..=2 {
+        phase(t, run, "recover").await;
+        due(t, run.id).await;
+        t.hub.orchestrator.continue_runs().await;
+        idle(t, run.planner).await;
+        assert_eq!(get(t, run.id).await.continuation.unwrap().attempts, attempt);
+    }
+    phase(t, run, "exhausted").await;
 }
 
 #[tokio::test]
@@ -315,15 +360,17 @@ async fn all_tasks_ended_prompts_integration_verification_without_auto_finish_or
     phase(&t, &run, "finalize").await;
     due(&t, run.id).await;
     t.hub.orchestrator.continue_runs().await;
+    // The checkpoint's `next_step` follows the live situation (`working` while the lead
+    // answers this wakeup), so assert on the advice that was actually delivered.
+    w.until("finalize advice", |e| {
+        matches!(&e.kind, EventKind::AgentInput { id, text, .. }
+        if *id == run.planner
+            && text.contains("Run continuation 1/2")
+            && text.contains("original request"))
+    })
+    .await;
     idle(&t, run.planner).await;
     let current = get(&t, run.id).await;
-    assert!(
-        current
-            .continuation
-            .unwrap()
-            .next_step
-            .contains("original request")
-    );
     assert_eq!(current.status, RunStatus::Running);
     assert!(current.landed.is_none());
     assert_eq!(wake_count(&t, &run).await, 1);
@@ -373,4 +420,141 @@ async fn hub_clock_delivers_recovery_without_manual_ticks() {
     })
     .await;
     assert_eq!(get(&t, run.id).await.continuation.unwrap().attempts, 1);
+}
+
+/// Reaching the cap is exactly when a person has to hear about it, and only then: one
+/// notice per exhaustion, however often the clock revisits the run or the hub restarts.
+#[tokio::test]
+async fn exhausted_continuation_tells_the_person_once_across_ticks_and_a_restart() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let run = stalled_run(&t).await;
+    idle(&t, run.planner).await;
+    phase(&t, &run, "recover").await;
+    assert!(
+        notices(&t, &run).await.is_empty(),
+        "nothing to report before the cap"
+    );
+    exhaust(&t, &run).await;
+
+    let items = notices(&t, &run).await;
+    assert_eq!(
+        items.len(),
+        1,
+        "one notice when the cap is reached: {items:?}"
+    );
+    let text = &items[0].text;
+    assert!(text.contains(&run.title), "names the run: {text}");
+    assert!(
+        text.contains(&run.id.to_string()),
+        "names the run id: {text}"
+    );
+    assert!(
+        text.contains("2/2"),
+        "says how often it woke the lead: {text}"
+    );
+    assert!(
+        text.contains("recover"),
+        "says what it was waiting on: {text}"
+    );
+    assert!(
+        text.contains("Automatic continuation limit"),
+        "carries the suggested next step: {text}"
+    );
+
+    // The clock keeps landing on the exhausted branch; still one notice.
+    for _ in 0..3 {
+        due(&t, run.id).await;
+        t.hub.orchestrator.continue_runs().await;
+        phase(&t, &run, "exhausted").await;
+    }
+    assert_eq!(notices(&t, &run).await.len(), 1);
+    assert_eq!(wake_count(&t, &run).await, 2);
+
+    // The flag lives in the run record, so a real restart reads it back and stays quiet.
+    t.hub.shutdown();
+    t.hub.wait().await.unwrap();
+    let t = TestHub::start_in(t.home, |_| {}).await;
+    idle(&t, run.planner).await;
+    phase(&t, &run, "exhausted").await;
+    assert_eq!(
+        notices(&t, &run).await.len(),
+        1,
+        "a restarted hub must not send a second notice"
+    );
+}
+
+/// Re-arming (attempts back to zero, as a policy update will do) makes the next
+/// exhaustion a new fact: it tells the person once more.
+#[tokio::test]
+async fn a_rearmed_run_tells_the_person_again_when_it_exhausts_once_more() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let run = stalled_run(&t).await;
+    exhaust(&t, &run).await;
+    assert_eq!(notices(&t, &run).await.len(), 1);
+
+    let mut current = get(&t, run.id).await;
+    current.continuation.as_mut().unwrap().attempts = 0;
+    t.hub
+        .orchestrator
+        .store()
+        .update_run(&current)
+        .await
+        .unwrap();
+
+    exhaust(&t, &run).await;
+    assert_eq!(
+        notices(&t, &run).await.len(),
+        2,
+        "re-arming allows exactly one more notice"
+    );
+    assert_eq!(wake_count(&t, &run).await, 4);
+}
+
+/// A cap of zero means no wakeup at all, so the run is exhausted the first time it is
+/// observed; that is still worth one notice, not one per tick.
+#[tokio::test]
+async fn a_zero_cap_is_exhausted_at_once_and_told_once() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let run = start(
+        &t,
+        "inspect first",
+        json!({"continuation":{"max_attempts":0,"interval_seconds":60}}),
+    )
+    .await;
+    idle(&t, run.planner).await;
+    phase(&t, &run, "exhausted").await;
+    assert_eq!(notices(&t, &run).await.len(), 1);
+    phase(&t, &run, "exhausted").await;
+    assert_eq!(notices(&t, &run).await.len(), 1);
+    assert_eq!(wake_count(&t, &run).await, 0);
+}
+
+/// Runs without the opt-in policy are untouched: no checkpoint, no notice, whatever
+/// state they are in.
+#[tokio::test]
+async fn runs_without_continuation_never_get_the_exhausted_notice() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let run = start(&t, "inspect first", json!({})).await;
+    idle(&t, run.planner).await;
+    for _ in 0..3 {
+        t.hub.orchestrator.continue_runs().await;
+    }
+    assert!(get(&t, run.id).await.continuation.is_none());
+    assert!(notices(&t, &run).await.is_empty());
+
+    let mut current = get(&t, run.id).await;
+    current.status = RunStatus::Cancelled;
+    t.hub
+        .orchestrator
+        .store()
+        .update_run(&current)
+        .await
+        .unwrap();
+    t.hub.orchestrator.continue_runs().await;
+    assert!(get(&t, run.id).await.continuation.is_none());
+    assert!(notices(&t, &run).await.is_empty());
 }
