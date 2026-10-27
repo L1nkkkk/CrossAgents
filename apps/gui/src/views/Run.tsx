@@ -6,8 +6,9 @@ import type { RunDetail } from "@bindings/RunDetail";
 import type { TaskSpec } from "@bindings/TaskSpec";
 import type { PlannedTask } from "@bindings/PlannedTask";
 import type { RunPolicy } from "@bindings/RunPolicy";
+import type { UpdateRunPolicyRequest } from "@bindings/UpdateRunPolicyRequest";
 import { navigate } from "../App";
-import { api, errorText } from "../api";
+import { ApiError, api, errorText } from "../api";
 import { DeleteRunDialog } from "../deleteRun";
 import { HandoffChain, OutcomeChip, freshLabel, isEscalated } from "../handoff";
 import {
@@ -32,6 +33,17 @@ import {
 import { onHubEvent, useHubData, type HubEvent } from "../hub";
 import { BUCKET_LABEL, groupTasks, progress, taskState } from "../lib/taskState";
 import { PRESETS, budgetText, presetOf, presetPolicy, type Preset } from "../lib/policy";
+import {
+  MAX_ATTEMPTS_LIMIT,
+  MAX_INTERVAL_SECONDS,
+  canReset,
+  draftOf,
+  draftProblems,
+  failureText,
+  isExhausted,
+  policyBody,
+  resetBody,
+} from "../lib/continuation";
 import { accountOf, prettyModel } from "../lib/models";
 import { StateWord, TaskChanges } from "../parts";
 import { RunChanges, TaskReview } from "../review";
@@ -140,7 +152,7 @@ export function RunView({
 
   const top = (
     <div className="run-head">
-      <RunMeta run={run} agents={agents.data} />
+      <RunMeta run={run} agents={agents.data} onPolicyChange={detail.reload} />
       <ErrorBox error={detail.error} />
       {run.status === "paused" && <div className="item-warn">已暂停：{run.note ?? "等你决定"}。在「问你」里选择加预算继续，或取消这个 run。</div>}
       {run.note && !["awaiting_approval", "paused", "planning"].includes(run.status) && <div className="item-error">{run.note}</div>}
@@ -284,7 +296,7 @@ function TaskBoard({ run, tasks, agents, selectedTask }: { run: Run; tasks: Task
   );
 }
 
-function RunMeta({ run, agents }: { run: Run; agents?: Parameters<typeof agentName>[0] }) {
+function RunMeta({ run, agents, onPolicyChange }: { run: Run; agents?: Parameters<typeof agentName>[0]; onPolicyChange: () => void }) {
   return (
     <div className="row small secondary" style={{ gap: 14 }}>
       {run.in_place ? (
@@ -305,23 +317,133 @@ function RunMeta({ run, agents }: { run: Run; agents?: Parameters<typeof agentNa
         {run.config.escalate && ` → 升级 ${agentName(agents, run.config.escalate)}`} · 并行 {run.config.max_parallel}
       </span>
       <PolicyChip run={run} />
-      {run.continuation && (
-        <details className={run.continuation.phase === "exhausted" ? "warn-text" : "muted"}>
-          <summary>
-            {t("continuation.summary", {
-              phase: continuationLabel(run.continuation.phase),
-              attempts: run.continuation.attempts,
-              max: run.config.policy.continuation?.max_attempts ?? 0,
-            })}
-          </summary>
-          <p>{run.continuation.next_step}</p>
-          <p>{t("continuation.owner", { name: agentName(agents, run.continuation.owner) })}</p>
-          {run.continuation.next_at && <p>{t("continuation.nextCheck", { time: time(run.continuation.next_at) })}</p>}
-          {run.continuation.delivery_error && <p>{t("continuation.deliveryError", { error: run.continuation.delivery_error })}</p>}
-        </details>
-      )}
+      <ContinuationMeta key={run.id} run={run} agents={agents} onDone={onPolicyChange} />
       <span title={time(run.created_at)}>{ago(run.created_at)}</span>
     </div>
+  );
+}
+
+/**
+ * How the run goes on by itself (docs/CONTINUATION.md): the hub's facts about it, and the
+ * person's hand on the policy — on or off, its limits, and, once the wakeups ran out, its
+ * allowance handed out again. Nothing here happens by itself; a refusal is shown, not
+ * swallowed.
+ */
+function ContinuationMeta({ run, agents, onDone }: { run: Run; agents?: Agent[]; onDone: () => void }) {
+  const state = run.continuation;
+  const exhausted = isExhausted(run);
+  const [open, setOpen] = useState(exhausted);
+  const [draft, setDraft] = useState(() => draftOf(run));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const [note, setNote] = useState<Key>();
+  const problems = draftProblems(draft);
+
+  async function act(body: UpdateRunPolicyRequest, done: Key, failed: Key) {
+    setBusy(true);
+    setError(undefined);
+    setNote(undefined);
+    try {
+      await api.updateRunPolicy(run.id, body);
+      setNote(done);
+      onDone();
+    } catch (err) {
+      setError(t(failed, { error: failureText(err instanceof ApiError ? err.status : 0, errorText(err)) }));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <details
+      className={exhausted ? "warn-text" : "muted"}
+      open={open}
+      onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
+    >
+      <summary>
+        {state
+          ? t("continuation.summary", {
+              phase: continuationLabel(state.phase),
+              attempts: state.attempts,
+              max: run.config.policy.continuation?.max_attempts ?? 0,
+            })
+          : t("continuation.off")}
+      </summary>
+      {state && (
+        <>
+          <p>{state.next_step}</p>
+          <p>{t("continuation.owner", { name: agentName(agents, state.owner) })}</p>
+          {state.next_at && <p>{t("continuation.nextCheck", { time: time(state.next_at) })}</p>}
+          {state.delivery_error && <p>{t("continuation.deliveryError", { error: state.delivery_error })}</p>}
+        </>
+      )}
+      <div className="row row-top">
+        <div className="field">
+          <span>{t("continuation.title")}</span>
+          <label className="field-check">
+            <input
+              type="checkbox"
+              checked={draft.enabled}
+              disabled={busy}
+              onChange={(e) => setDraft({ ...draft, enabled: e.target.checked })}
+            />
+            {t("continuation.enable")}
+          </label>
+          <span className="muted small">{t("continuation.hint")}</span>
+        </div>
+        <label className="field">
+          <span>{t("continuation.maxAttempts")}</span>
+          <input
+            type="number"
+            min={1}
+            max={MAX_ATTEMPTS_LIMIT}
+            value={draft.maxAttempts}
+            disabled={busy || !draft.enabled}
+            onChange={(e) => setDraft({ ...draft, maxAttempts: e.target.value })}
+          />
+        </label>
+        <label className="field">
+          <span>{t("continuation.interval")}</span>
+          <input
+            type="number"
+            min={1}
+            max={MAX_INTERVAL_SECONDS}
+            value={draft.intervalSeconds}
+            disabled={busy || !draft.enabled}
+            onChange={(e) => setDraft({ ...draft, intervalSeconds: e.target.value })}
+          />
+        </label>
+      </div>
+      {problems.length > 0 && (
+        <p className="warn-text small">
+          {problems.map((field) => (field === "maxAttempts" ? t("continuation.invalidMax") : t("continuation.invalidInterval"))).join(" ")}
+        </p>
+      )}
+      <div className="row">
+        <button
+          className={exhausted ? "ghost small" : "primary small"}
+          disabled={busy || problems.length > 0}
+          title={problems.length > 0 ? t("continuation.saveDisabled") : t("continuation.hint")}
+          onClick={() => {
+            const body = policyBody(draft);
+            if (body) void act(body, "continuation.saved", "continuation.saveFailed");
+          }}
+        >
+          {t("continuation.save")}
+        </button>
+        <button
+          className={exhausted ? "primary small" : "ghost small"}
+          disabled={busy || !canReset(run)}
+          title={canReset(run) ? t("continuation.resetHint") : t("continuation.resetDisabled")}
+          onClick={() => void act(resetBody(), "continuation.resetDone", "continuation.resetFailed")}
+        >
+          {t("continuation.reset")}
+        </button>
+        {note && <span className="small muted">{t(note)}</span>}
+      </div>
+      {!canReset(run) && <p className="small muted">{t("continuation.resetDisabled")}</p>}
+      <ErrorBox error={error} />
+    </details>
   );
 }
 

@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { dictionaries, hasKey, missingKeys, setLocale, t } from "./i18n.ts";
 
 /** Files that take their strings from the dictionary. */
-const MIGRATED = ["../Sidebar.tsx", "../views/Home.tsx", "../strips.tsx", "../views/Run.tsx"];
+const MIGRATED = ["../Sidebar.tsx", "../views/Home.tsx", "../strips.tsx", "../views/Run.tsx", "./continuation.ts"];
 
 /** Every literal key passed to `t(...)` in `file`. */
 function keysIn(file: string): string[] {
@@ -40,7 +40,8 @@ const CONTINUATION_SOURCE: [file: string, from: string, to: string][] = [
   ["../views/Home.tsx", 't("home.continuation")', 't("home.parallel")'],
   ["../strips.tsx", 'run.continuation?.phase === "exhausted"', 'className="rs-link"'],
   ["../views/Run.tsx", "const CONTINUATION_LABELS", "export function RunView"],
-  ["../views/Run.tsx", "{run.continuation && (", "<span title={time(run.created_at)}>"],
+  ["../views/Run.tsx", "<ContinuationMeta", "<span title={time(run.created_at)}>"],
+  ["../views/Run.tsx", "function ContinuationMeta", "function Ending"],
 ];
 
 test("every key the migrated files use is in the dictionary", () => {
@@ -101,6 +102,24 @@ test("the continuation keys are in the dictionary", () => {
     "continuation.phase.continue",
     "continuation.phase.recover",
     "continuation.phase.exhausted",
+    "continuation.off",
+    "continuation.title",
+    "continuation.enable",
+    "continuation.hint",
+    "continuation.maxAttempts",
+    "continuation.interval",
+    "continuation.save",
+    "continuation.saved",
+    "continuation.saveDisabled",
+    "continuation.reset",
+    "continuation.resetHint",
+    "continuation.resetDisabled",
+    "continuation.resetDone",
+    "continuation.invalidMax",
+    "continuation.invalidInterval",
+    "continuation.forbidden",
+    "continuation.saveFailed",
+    "continuation.resetFailed",
   ];
   assert.deepEqual(
     keys.filter((k) => !hasKey(k)),
