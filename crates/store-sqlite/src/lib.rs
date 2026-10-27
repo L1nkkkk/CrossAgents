@@ -804,7 +804,14 @@ impl Store for SqliteStore {
     /// transaction (docs/tasks/R1.md §3.3). `tasks` are deleted explicitly rather than by
     /// `ON DELETE CASCADE`: a connection need not have `foreign_keys` on. Events stay.
     async fn delete_run(&self, id: RunId) -> Result<(), CoreError> {
-        let mut tx = self.pool.begin().await.map_err(storage)?;
+        // Takes the write lock first: a deferred transaction that reads and then writes is
+        // refused outright (SQLITE_BUSY_SNAPSHOT) when another connection wrote in between,
+        // as an agent let go just before the delete does.
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
         let exists: Option<String> = sqlx::query_scalar("SELECT id FROM runs WHERE id = ?")
             .bind(id.to_string())
             .fetch_optional(&mut *tx)
