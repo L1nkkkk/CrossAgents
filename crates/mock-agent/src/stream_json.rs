@@ -157,8 +157,11 @@ impl Mock {
             }
             let model = self.model.lock().await.clone();
             for line in self.script.run(&text, &model).await {
-                self.say(&format!("{line}
-")).await;
+                self.say(&format!(
+                    "{line}
+"
+                ))
+                .await;
             }
             self.say(&format!("echo(model={model}): {text}")).await;
         }

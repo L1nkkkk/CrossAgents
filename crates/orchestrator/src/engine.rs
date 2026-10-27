@@ -534,10 +534,28 @@ impl Orchestrator {
         let mut resolved = Vec::new();
         for t in tasks {
             let worker = self
-                .pick(run, &team, &t.key, t.assignee.as_deref(), Role::Worker, t.fresh, t.restore, &mut problems)
+                .pick(
+                    run,
+                    &team,
+                    &t.key,
+                    t.assignee.as_deref(),
+                    Role::Worker,
+                    t.fresh,
+                    t.restore,
+                    &mut problems,
+                )
                 .await;
             let reviewer = self
-                .pick(run, &team, &t.key, t.reviewer.as_deref(), Role::Reviewer, t.reviewer_fresh, false, &mut problems)
+                .pick(
+                    run,
+                    &team,
+                    &t.key,
+                    t.reviewer.as_deref(),
+                    Role::Reviewer,
+                    t.reviewer_fresh,
+                    false,
+                    &mut problems,
+                )
                 .await;
             resolved.push((worker, reviewer));
         }
@@ -564,7 +582,11 @@ impl Orchestrator {
         restore: bool,
         problems: &mut Vec<String>,
     ) -> Option<AgentId> {
-        let field = if role == Role::Worker { "assignee" } else { "reviewer" };
+        let field = if role == Role::Worker {
+            "assignee"
+        } else {
+            "reviewer"
+        };
         let Some(name) = name else {
             if !fresh {
                 problems.push(format!(
@@ -585,7 +607,11 @@ impl Orchestrator {
             problems.push(format!(
                 "task {task:?}: {field} {name:?} is not a {} on the team (available: {})",
                 role_word(role),
-                if known.is_empty() { "none".to_owned() } else { known.join(", ") }
+                if known.is_empty() {
+                    "none".to_owned()
+                } else {
+                    known.join(", ")
+                }
             ));
             return None;
         }
@@ -894,10 +920,7 @@ The person changed: {}",
     /// [`Self::schedule`], returning the tasks that could not start because the session
     /// they name to work on them itself would not take them now (`#key: why`). Those stay
     /// pending, their issuer is told, and the next schedule tries again.
-    pub(crate) async fn schedule_reporting(
-        &self,
-        run: &mut Run,
-    ) -> Result<Vec<String>, CoreError> {
+    pub(crate) async fn schedule_reporting(&self, run: &mut Run) -> Result<Vec<String>, CoreError> {
         let mut refused = Vec::new();
         if run.status != RunStatus::Running {
             return Ok(refused);
@@ -1013,8 +1036,16 @@ The person changed: {}",
                 // It could not take its conversation there: that execution failed, and the
                 // card says why (docs/tasks/S1.md §3.1).
                 if let CoreError::Agent(why) = &err {
-                    self.hand_off(run, task, HandoffKind::Assign, left, &me, None, Some(why.clone()))
-                        .await?;
+                    self.hand_off(
+                        run,
+                        task,
+                        HandoffKind::Assign,
+                        left,
+                        &me,
+                        None,
+                        Some(why.clone()),
+                    )
+                    .await?;
                     if let Some(card) = task.handoffs.last_mut() {
                         card.fresh = false;
                         card.outcome = Some(crossagents_core::HandoffOutcome::Failed);

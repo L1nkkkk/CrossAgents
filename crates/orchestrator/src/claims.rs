@@ -43,7 +43,10 @@ impl Orchestrator {
                     })
                     .map(|run| run.repo.clone()),
             };
-            if lead_home.is_none() && home.is_none() && agent.home().starts_with(&self.config.worktrees) {
+            if lead_home.is_none()
+                && home.is_none()
+                && agent.home().starts_with(&self.config.worktrees)
+            {
                 tracing::warn!(agent = %agent.name, home = %agent.home().display(), "lives in the worktree of a run that is gone; its home stays there");
             }
             let Some(home) = home else { continue };
@@ -89,7 +92,12 @@ impl Orchestrator {
                     Err(err) => return Err(err),
                 },
             };
-            if !(run_open && task_open) && self.store.release_agent(claim.agent_id, claim.run_id).await? {
+            if !(run_open && task_open)
+                && self
+                    .store
+                    .release_agent(claim.agent_id, claim.run_id)
+                    .await?
+            {
                 dropped += 1;
             }
         }
@@ -111,7 +119,13 @@ impl Orchestrator {
                 && lead.cwd == self.integration_path(&run)
             {
                 let moved = lead.config.get(LEAD_HOME).is_some();
-                claims.push(AgentClaim::new(lead.id, run.id, None, ClaimRole::Lead, !moved));
+                claims.push(AgentClaim::new(
+                    lead.id,
+                    run.id,
+                    None,
+                    ClaimRole::Lead,
+                    !moved,
+                ));
             }
             for task in self.store.list_tasks(run.id).await? {
                 if task.status.is_terminal() {
@@ -200,7 +214,10 @@ impl Orchestrator {
                 return None;
             }
         }
-        let name = self.name_of(agent).await.unwrap_or_else(|| agent.to_string());
+        let name = self
+            .name_of(agent)
+            .await
+            .unwrap_or_else(|| agent.to_string());
         if claim.fresh {
             // A lead copied for the run keeps its directory: its driver resumes only there,
             // and restoring it brings the checkout back (`lead_returned`).
@@ -225,7 +242,8 @@ impl Orchestrator {
         if !keep_dir && record.cwd != record.home() {
             self.store.update_agent_cwd(agent, record.home()).await?;
             let record = self.store.get_agent(&AgentKey::Id(agent)).await?;
-            self.publish(EventKind::AgentUpdated { agent: record }).await;
+            self.publish(EventKind::AgentUpdated { agent: record })
+                .await;
         }
         Ok(())
     }

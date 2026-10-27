@@ -17,17 +17,16 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use crossagents_api_types::{
-    API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentSettingsRequest,
-    AnswerRequest, ApiError, ApproveRunRequest, ArchiveAgentRequest, AttachmentContent,
-    ChangesResponse, CliInfo, CliInstallAccepted, ConnectInfo, CreateAccountRequest,
-    AgentExecution, AgentExecutionResponse, CreateAgentRequest, CreateRunRequest,
-    DeleteRunResponse, DiffSide, ErrorCode, FinishRequest,
-    HealthResponse, HubInfo, InitRepoRequest, LandRequest, ListAccountsResponse,
-    ListAgentsResponse, ListNotesResponse, ListPluginsResponse, ListQuestionsResponse,
-    ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
-    RenameAgentRequest, RunDetail, RunTrace, SendMessageRequest, SendMessageResponse,
-    SetModelRequest, SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace,
-    Transcript, TurnDiffResponse, UsageGroup, UsageResponse,
+    API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentExecution,
+    AgentExecutionResponse, AgentSettingsRequest, AnswerRequest, ApiError, ApproveRunRequest,
+    ArchiveAgentRequest, AttachmentContent, ChangesResponse, CliInfo, CliInstallAccepted,
+    ConnectInfo, CreateAccountRequest, CreateAgentRequest, CreateRunRequest, DeleteRunResponse,
+    DiffSide, ErrorCode, FinishRequest, HealthResponse, HubInfo, InitRepoRequest, LandRequest,
+    ListAccountsResponse, ListAgentsResponse, ListNotesResponse, ListPluginsResponse,
+    ListQuestionsResponse, ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo,
+    QuotaResponse, RejectRunRequest, RenameAgentRequest, RunDetail, RunTrace, SendMessageRequest,
+    SendMessageResponse, SetModelRequest, SetPluginModelsRequest, SetTopicRequest,
+    TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse, UsageGroup, UsageResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, AttachmentSupport,
@@ -682,7 +681,9 @@ async fn interrupt_execution(
     Path(key): Path<String>,
 ) -> ApiResult<Json<Task>> {
     let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
-    Ok(Json(state.orchestrator.interrupt_execution(agent.id).await?))
+    Ok(Json(
+        state.orchestrator.interrupt_execution(agent.id).await?,
+    ))
 }
 
 async fn archive_agent(

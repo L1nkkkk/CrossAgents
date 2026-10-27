@@ -6,9 +6,9 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use crossagents_core::{
-    Account, Agent, AgentClaim, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError, EVENT_SCHEMA_VERSION,
-    Event, EventKind, HumanItem, MessageId, NameSource, Note, NoteScope, Reminder, Run, RunId,
-    Store, Task, TaskId, Watch,
+    Account, Agent, AgentClaim, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError,
+    EVENT_SCHEMA_VERSION, Event, EventKind, HumanItem, MessageId, NameSource, Note, NoteScope,
+    Reminder, Run, RunId, Store, Task, TaskId, Watch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -1394,7 +1394,9 @@ mod tests {
     async fn two_runs_claiming_at_once_only_one_wins() {
         let dir = tempfile::tempdir().unwrap();
         // A file, so the two claims go over separate connections.
-        let store = SqliteStore::open(&dir.path().join("state.db")).await.unwrap();
+        let store = SqliteStore::open(&dir.path().join("state.db"))
+            .await
+            .unwrap();
         let rex = AgentId::new();
         let (a, b) = (
             AgentClaim::new(rex, RunId::new(), None, ClaimRole::Worker, false),
@@ -1415,7 +1417,10 @@ mod tests {
         let options = SqliteConnectOptions::new()
             .filename(&path)
             .create_if_missing(true);
-        let pool = SqlitePoolOptions::new().connect_with(options).await.unwrap();
+        let pool = SqlitePoolOptions::new()
+            .connect_with(options)
+            .await
+            .unwrap();
         MIGRATOR.run_to(8, &pool).await.unwrap();
         let id = AgentId::new();
         sqlx::query(

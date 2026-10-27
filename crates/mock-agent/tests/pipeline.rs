@@ -193,7 +193,9 @@ async fn the_planner_accepts_what_workers_report() {
         .iter()
         .partition(|a| !a["archived_at"].is_null());
     let names = |v: &[&Value]| -> Vec<String> {
-        v.iter().map(|a| a["name"].as_str().unwrap().to_owned()).collect()
+        v.iter()
+            .map(|a| a["name"].as_str().unwrap().to_owned())
+            .collect()
     };
     assert_eq!(names(&listed), ["boss", "coder"]);
     let archived = names(&archived);

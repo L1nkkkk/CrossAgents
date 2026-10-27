@@ -1403,7 +1403,11 @@ impl Runtime {
     /// Why the agent's next session will not carry on its last conversation, when it had
     /// one: its driver resumes no session, or the place it could resume in is gone.
     async fn cannot_carry_on(&self, agent: &Agent) -> Option<String> {
-        self.store().last_session_id(agent.id).await.ok().flatten()?;
+        self.store()
+            .last_session_id(agent.id)
+            .await
+            .ok()
+            .flatten()?;
         if let Some(why) = agent.context_lost() {
             return Some(why.to_owned());
         }
@@ -1419,7 +1423,11 @@ impl Runtime {
         if let Some(config) = record.config.as_object_mut() {
             config.remove(crossagents_core::CONTEXT_LOST);
         }
-        if let Err(err) = self.store().update_agent_config(agent, &record.config).await {
+        if let Err(err) = self
+            .store()
+            .update_agent_config(agent, &record.config)
+            .await
+        {
             tracing::warn!(%agent, error = %err, "cannot clear the lost-context mark");
         }
     }

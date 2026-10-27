@@ -145,7 +145,13 @@ impl Orchestrator {
             if agent.cwd != dir || agent.home() == dir {
                 continue;
             }
-            let had_session = self.store.last_session_id(agent.id).await.ok().flatten().is_some();
+            let had_session = self
+                .store
+                .last_session_id(agent.id)
+                .await
+                .ok()
+                .flatten()
+                .is_some();
             if had_session && !self.host.can_move(&agent).await {
                 if !agent.config.is_object() {
                     agent.config = serde_json::json!({});
@@ -161,7 +167,11 @@ impl Orchestrator {
                     )
                     .into(),
                 );
-                if let Err(err) = self.store.update_agent_config(agent.id, &agent.config).await {
+                if let Err(err) = self
+                    .store
+                    .update_agent_config(agent.id, &agent.config)
+                    .await
+                {
                     tracing::warn!(agent = %agent.name, error = %err, "cannot mark the lost context");
                 }
             }

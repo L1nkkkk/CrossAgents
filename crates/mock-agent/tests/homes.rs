@@ -17,9 +17,10 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 }
 
 async fn turn_done(w: &mut Watcher, agent: AgentId) {
-    w.until("turn completed", |e| {
-        matches!(e.kind, EventKind::AgentTurnCompleted { id, .. } if id == agent)
-    })
+    w.until(
+        "turn completed",
+        |e| matches!(e.kind, EventKind::AgentTurnCompleted { id, .. } if id == agent),
+    )
     .await;
 }
 
@@ -88,11 +89,17 @@ async fn place_is_busy_while_a_turn_runs_or_a_persons_message_waits() {
 
     // Answering a person.
     t.send("Pia", "[sleep 1500] one").await;
-    w.until("turn started", |e| {
-        matches!(e.kind, EventKind::AgentTurnStarted { id, .. } if id == pia.id)
-    })
+    w.until(
+        "turn started",
+        |e| matches!(e.kind, EventKind::AgentTurnStarted { id, .. } if id == pia.id),
+    )
     .await;
-    let err = t.hub.runtime.place(&key, b.path(), false).await.unwrap_err();
+    let err = t
+        .hub
+        .runtime
+        .place(&key, b.path(), false)
+        .await
+        .unwrap_err();
     assert!(
         matches!(&err, CoreError::Busy(why) if why.contains("answering a person's message")),
         "{err}"
@@ -107,7 +114,12 @@ async fn place_is_busy_while_a_turn_runs_or_a_persons_message_waits() {
         .unwrap();
     t.send("Pia", "two").await;
     assert!(t.hub.runtime.serving_person(pia.id).await);
-    let err = t.hub.runtime.place(&key, b.path(), false).await.unwrap_err();
+    let err = t
+        .hub
+        .runtime
+        .place(&key, b.path(), false)
+        .await
+        .unwrap_err();
     assert!(
         matches!(&err, CoreError::Busy(why) if why.contains("a person's message is waiting")),
         "{err}"
@@ -118,7 +130,11 @@ async fn place_is_busy_while_a_turn_runs_or_a_persons_message_waits() {
 
     // Idle: it moves, and nothing it was asked was cut off.
     t.hub.runtime.place(&key, b.path(), false).await.unwrap();
-    assert!(w.output().contains("echo(model=mock-native): two"), "{}", w.output());
+    assert!(
+        w.output().contains("echo(model=mock-native): two"),
+        "{}",
+        w.output()
+    );
     assert!(
         !w.seen
             .iter()
@@ -136,9 +152,10 @@ async fn sending_a_busy_agent_home_waits_for_its_turn_to_end() {
     t.hub.runtime.place(&key, b.path(), false).await.unwrap();
     let mut w = t.watch().await;
     t.send("Pia", "[sleep 1500] [cwd] working").await;
-    w.until("turn started", |e| {
-        matches!(e.kind, EventKind::AgentTurnStarted { id, .. } if id == pia.id)
-    })
+    w.until(
+        "turn started",
+        |e| matches!(e.kind, EventKind::AgentTurnStarted { id, .. } if id == pia.id),
+    )
     .await;
     // Busy: it goes once the turn is over, not in the middle of it.
     assert!(!t.hub.runtime.send_home(&key).await.unwrap());
@@ -266,7 +283,11 @@ async fn agents_from_before_homes_get_their_workspace_at_start() {
     let t = TestHub::start_in(home, |_| {}).await;
     for name in ["Pia", "Rex", "Ada"] {
         let agent = t.agent(name).await;
-        assert!(same_dir(&agent.home, repo.path()), "{name}: {:?}", agent.home);
+        assert!(
+            same_dir(&agent.home, repo.path()),
+            "{name}: {:?}",
+            agent.home
+        );
     }
     // Where they work is left as it was; the lead's mark is gone.
     let pia = t.agent("Pia").await;

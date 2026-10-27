@@ -53,7 +53,12 @@ async fn back_home(w: &mut Watcher, agent: AgentId, home: &Path) {
 }
 
 async fn agent_count(t: &TestHub) -> usize {
-    let all: Value = t.get("/v1/agents?archived=true").await.json().await.unwrap();
+    let all: Value = t
+        .get("/v1/agents?archived=true")
+        .await
+        .json()
+        .await
+        .unwrap();
     all["agents"].as_array().unwrap().len()
 }
 
@@ -125,12 +130,16 @@ async fn deleting_an_old_run_leaves_the_run_that_holds_its_lead_now() {
     // Run B holds her now, working in its checkout.
     let b = start_run(&t, "Pia", "Run B. Wait for my word.").await;
     let b_id = b["id"].as_str().unwrap().to_owned();
-    w.until("run B's first turn", |e| {
-        matches!(e.kind, EventKind::AgentTurnCompleted { id, .. } if id == pia.id)
-    })
+    w.until(
+        "run B's first turn",
+        |e| matches!(e.kind, EventKind::AgentTurnCompleted { id, .. } if id == pia.id),
+    )
     .await;
     let in_b = t.agent("Pia").await.cwd;
-    assert!(in_b.display().to_string().contains(&short(&b_id)), "{in_b:?}");
+    assert!(
+        in_b.display().to_string().contains(&short(&b_id)),
+        "{in_b:?}"
+    );
 
     // Run A took part in her past, not her present: deleting it leaves her where she is.
     let resp = t
@@ -275,9 +284,10 @@ async fn approve(t: &TestHub, run: &Value) -> reqwest::Response {
 }
 
 async fn turn_of(w: &mut Watcher, agent: AgentId) {
-    w.until("turn completed", |e| {
-        matches!(e.kind, EventKind::AgentTurnCompleted { id, .. } if id == agent)
-    })
+    w.until(
+        "turn completed",
+        |e| matches!(e.kind, EventKind::AgentTurnCompleted { id, .. } if id == agent),
+    )
     .await;
 }
 
@@ -289,8 +299,20 @@ async fn fresh_false_gives_a_task_to_the_session_run_a_used() {
     let rex = t.add_native("Rex", "worker", repo.path()).await;
     let mut w = t.watch().await;
 
-    let a_task = task("a", goal("[session] [write a.txt=1]", &accept_and_finish("a")), Some("Rex"), Some(false));
-    let a = run_with(&t, "Pia", "Rex", format!("Run A. {}", plan(json!([a_task]))), true).await;
+    let a_task = task(
+        "a",
+        goal("[session] [write a.txt=1]", &accept_and_finish("a")),
+        Some("Rex"),
+        Some(false),
+    );
+    let a = run_with(
+        &t,
+        "Pia",
+        "Rex",
+        format!("Run A. {}", plan(json!([a_task]))),
+        true,
+    )
+    .await;
     run_ends(&mut w, &a).await;
     back_home(&mut w, rex.id, repo.path()).await;
     // Pia leads run B too: once run A has let go of her.
@@ -298,7 +320,12 @@ async fn fresh_false_gives_a_task_to_the_session_run_a_used() {
     let session = after(&said(&w, rex.id), "session=").to_owned();
     let before = agent_count(&t).await;
 
-    let b_task = task("b", goal("[session] [cwd] [write b.txt=2]", &accept_and_finish("b")), Some("Rex"), Some(false));
+    let b_task = task(
+        "b",
+        goal("[session] [cwd] [write b.txt=2]", &accept_and_finish("b")),
+        Some("Rex"),
+        Some(false),
+    );
     let b = run_with(
         &t,
         "Pia",
@@ -313,16 +340,29 @@ async fn fresh_false_gives_a_task_to_the_session_run_a_used() {
         .seen
         .iter()
         .find_map(|e| match &e.kind {
-            EventKind::AgentInput { id, text, .. } if *id == pia.id && text.starts_with("Run B.") => Some(text.clone()),
+            EventKind::AgentInput { id, text, .. }
+                if *id == pia.id && text.starts_with("Run B.") =>
+            {
+                Some(text.clone())
+            }
             _ => None,
         })
         .unwrap();
     assert!(kickoff.contains("sessions in this workspace"), "{kickoff}");
     assert!(kickoff.contains("fresh: false"), "{kickoff}");
-    let rex_line = kickoff.lines().find(|l| l.starts_with("- Rex ·")).unwrap_or_else(|| panic!("{kickoff}"));
-    assert!(rex_line.contains("idle") && rex_line.contains("last: run \"Run A."), "{rex_line}");
+    let rex_line = kickoff
+        .lines()
+        .find(|l| l.starts_with("- Rex ·"))
+        .unwrap_or_else(|| panic!("{kickoff}"));
+    assert!(
+        rex_line.contains("idle") && rex_line.contains("last: run \"Run A."),
+        "{rex_line}"
+    );
     let listed = said(&w, pia.id);
-    assert!(listed.contains("\"state\"") && listed.contains("\"last_execution\""), "{listed}");
+    assert!(
+        listed.contains("\"state\"") && listed.contains("\"last_execution\""),
+        "{listed}"
+    );
     // Rex himself got it: the same agent, his conversation resumed in run B's worktree.
     let tasks = tasks_of(&t, &b).await;
     assert_eq!(tasks[0]["handoffs"][0]["to"], json!(rex.id), "{tasks:?}");
@@ -330,13 +370,20 @@ async fn fresh_false_gives_a_task_to_the_session_run_a_used() {
     assert_eq!(tasks[0]["handoffs"][0]["fresh"], false, "{tasks:?}");
     assert_eq!(tasks[0]["handoffs"][0]["outcome"], "delivered", "{tasks:?}");
     let text = said(&w, rex.id);
-    assert!(text.contains(&format!("session={session} (resumed)")), "{text}");
+    assert!(
+        text.contains(&format!("session={session} (resumed)")),
+        "{text}"
+    );
     let cwd = after(&text, "cwd=");
     assert!(
         cwd.contains(&short(b["id"].as_str().unwrap())) && cwd.ends_with('b'),
         "{cwd}"
     );
-    assert_eq!(agent_count(&t).await, before, "no execution session was started");
+    assert_eq!(
+        agent_count(&t).await,
+        before,
+        "no execution session was started"
+    );
     // Merged: back in the workspace, and still there.
     back_home(&mut w, rex.id, repo.path()).await;
     assert!(t.agent("Rex").await.archived_at.is_none());
@@ -351,19 +398,40 @@ async fn a_new_execution_session_is_archived_and_can_be_used_again_once_restored
     let mut w = t.watch().await;
 
     // No fresh: a new execution session of Rex does it.
-    let a_task = task("a", goal("[session] [write a.txt=1]", &accept_and_finish("a")), None, None);
-    let a = run_with(&t, "Pia", "Rex", format!("Run A. {}", plan(json!([a_task]))), true).await;
+    let a_task = task(
+        "a",
+        goal("[session] [write a.txt=1]", &accept_and_finish("a")),
+        None,
+        None,
+    );
+    let a = run_with(
+        &t,
+        "Pia",
+        "Rex",
+        format!("Run A. {}", plan(json!([a_task]))),
+        true,
+    )
+    .await;
     run_ends(&mut w, &a).await;
     back_home(&mut w, pia.id, repo.path()).await;
     let tasks = tasks_of(&t, &a).await;
-    let exec_id: AgentId = tasks[0]["handoffs"][0]["to"].as_str().unwrap().parse().unwrap();
+    let exec_id: AgentId = tasks[0]["handoffs"][0]["to"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
     assert_ne!(exec_id, rex.id);
     assert_eq!(tasks[0]["handoffs"][0]["fresh"], true, "{tasks:?}");
     assert_eq!(tasks[0]["handoffs"][0]["outcome"], "delivered", "{tasks:?}");
     // Archived, not deleted: its conversation can still be read.
     let mut exec = Value::Null;
     for _ in 0..100 {
-        exec = t.get(&format!("/v1/agents/{exec_id}")).await.json().await.unwrap();
+        exec = t
+            .get(&format!("/v1/agents/{exec_id}"))
+            .await
+            .json()
+            .await
+            .unwrap();
         if !exec["archived_at"].is_null() {
             break;
         }
@@ -376,22 +444,45 @@ async fn a_new_execution_session_is_archived_and_can_be_used_again_once_restored
         .json()
         .await
         .unwrap();
-    assert!(!transcript["turns"].as_array().unwrap().is_empty(), "{transcript}");
+    assert!(
+        !transcript["turns"].as_array().unwrap().is_empty(),
+        "{transcript}"
+    );
     let exec_session = after(&said(&w, exec_id), "session=").to_owned();
 
     // Run B uses it itself, restoring it first.
     let name = exec["name"].as_str().unwrap();
-    let mut b_task = task("b", goal("[session] [write b.txt=2]", &accept_and_finish("b")), Some(name), Some(false));
+    let mut b_task = task(
+        "b",
+        goal("[session] [write b.txt=2]", &accept_and_finish("b")),
+        Some(name),
+        Some(false),
+    );
     b_task["restore"] = json!(true);
-    let b = run_with(&t, "Pia", "Rex", format!("Run B. {}", plan(json!([b_task]))), true).await;
+    let b = run_with(
+        &t,
+        "Pia",
+        "Rex",
+        format!("Run B. {}", plan(json!([b_task]))),
+        true,
+    )
+    .await;
     run_ends(&mut w, &b).await;
     let tasks = tasks_of(&t, &b).await;
     assert_eq!(tasks[0]["handoffs"][0]["to"], json!(exec_id), "{tasks:?}");
     let text = said(&w, exec_id);
-    assert!(text.contains(&format!("session={exec_session} (resumed)")), "{text}");
+    assert!(
+        text.contains(&format!("session={exec_session} (resumed)")),
+        "{text}"
+    );
     // Used itself this time: back home, not archived.
     back_home(&mut w, exec_id, repo.path()).await;
-    let exec: Value = t.get(&format!("/v1/agents/{exec_id}")).await.json().await.unwrap();
+    let exec: Value = t
+        .get(&format!("/v1/agents/{exec_id}"))
+        .await
+        .json()
+        .await
+        .unwrap();
     assert!(exec["archived_at"].is_null(), "{exec}");
 }
 
@@ -404,32 +495,57 @@ async fn an_execution_session_restored_after_its_run_is_deleted_carries_on() {
     let pia = t.add_native("Pia", "planner", repo.path()).await;
     t.add_native("Rex", "worker", repo.path()).await;
     let mut w = t.watch().await;
-    let a_task = task("a", goal("[session] [write a.txt=1]", &accept_and_finish("a")), None, None);
-    let a = run_with(&t, "Pia", "Rex", format!("Run A. {}", plan(json!([a_task]))), true).await;
+    let a_task = task(
+        "a",
+        goal("[session] [write a.txt=1]", &accept_and_finish("a")),
+        None,
+        None,
+    );
+    let a = run_with(
+        &t,
+        "Pia",
+        "Rex",
+        format!("Run A. {}", plan(json!([a_task]))),
+        true,
+    )
+    .await;
     run_ends(&mut w, &a).await;
     back_home(&mut w, pia.id, repo.path()).await;
     let tasks = tasks_of(&t, &a).await;
-    let exec_id: AgentId = tasks[0]["handoffs"][0]["to"].as_str().unwrap().parse().unwrap();
+    let exec_id: AgentId = tasks[0]["handoffs"][0]["to"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
     w.find("archived", |e| {
         matches!(&e.kind, EventKind::AgentUpdated { agent } if agent.id == exec_id && agent.archived_at.is_some())
     })
     .await;
     let exec_session = after(&said(&w, exec_id), "session=").to_owned();
 
-    let resp = t.delete(&format!("/v1/runs/{}", a["id"].as_str().unwrap())).await;
+    let resp = t
+        .delete(&format!("/v1/runs/{}", a["id"].as_str().unwrap()))
+        .await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let resp = t
-        .post(&format!("/v1/agents/{exec_id}/archive"), json!({ "archived": false }))
+        .post(
+            &format!("/v1/agents/{exec_id}/archive"),
+            json!({ "archived": false }),
+        )
         .await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let before = w.seen.len();
     t.send(&exec_id.to_string(), "[session] still you?").await;
-    w.until("answered", |e| {
-        matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if *id == exec_id)
-    })
+    w.until(
+        "answered",
+        |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if *id == exec_id),
+    )
     .await;
     let text = said(&w, exec_id);
-    assert!(text.contains(&format!("session={exec_session} (resumed)")), "{text}");
+    assert!(
+        text.contains(&format!("session={exec_session} (resumed)")),
+        "{text}"
+    );
     let warned: Vec<&String> = w.seen[before..]
         .iter()
         .filter_map(|e| match &e.kind {
@@ -451,8 +567,22 @@ async fn two_runs_taking_one_session_at_once_only_one_gets_it() {
     let a_task = task("a", "[cwd] wait".into(), Some("Rex"), Some(false));
     let b_task = task("b", "[cwd] wait".into(), Some("Rex"), Some(false));
     let runs = [
-        run_with(&t, "Ada", "Rex", format!("Run A. {}", plan(json!([a_task]))), false).await,
-        run_with(&t, "Bea", "Rex", format!("Run B. {}", plan(json!([b_task]))), false).await,
+        run_with(
+            &t,
+            "Ada",
+            "Rex",
+            format!("Run A. {}", plan(json!([a_task]))),
+            false,
+        )
+        .await,
+        run_with(
+            &t,
+            "Bea",
+            "Rex",
+            format!("Run B. {}", plan(json!([b_task]))),
+            false,
+        )
+        .await,
     ];
     for run in &runs {
         awaiting_approval(&mut w, run).await;
@@ -485,7 +615,14 @@ async fn a_persons_waiting_message_comes_before_a_task() {
     t.add_agent_in("Ada", None, "planner", repo.path()).await;
     let mut w = t.watch().await;
     let a_task = task("a", "[cwd] go".into(), Some("Rex"), Some(false));
-    let run = run_with(&t, "Ada", "Rex", format!("Run. {}", plan(json!([a_task]))), false).await;
+    let run = run_with(
+        &t,
+        "Ada",
+        "Rex",
+        format!("Run. {}", plan(json!([a_task]))),
+        false,
+    )
+    .await;
     awaiting_approval(&mut w, &run).await;
 
     // Busy with a notice, a person's message waiting behind it.
@@ -503,7 +640,13 @@ async fn a_persons_waiting_message_comes_before_a_task() {
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let task = tasks_of(&t, &run).await.remove(0);
     assert_eq!(task["status"], "pending", "{task}");
-    assert!(task["progress"].as_str().unwrap_or_default().contains("person"), "{task}");
+    assert!(
+        task["progress"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("person"),
+        "{task}"
+    );
 
     // The person's message is answered, and no task was put in front of it.
     w.until("the person answered", |e| {
@@ -525,24 +668,48 @@ async fn the_person_interrupts_an_execution() {
     let pia = t.add_native("Pia", "planner", repo.path()).await;
     let rex = t.add_native("Rex", "worker", repo.path()).await;
     let mut w = t.watch().await;
-    let a_task = task("a", "[sleep 30000] working".into(), Some("Rex"), Some(false));
-    let run = run_with(&t, "Pia", "Rex", format!("Run. {}", plan(json!([a_task]))), true).await;
+    let a_task = task(
+        "a",
+        "[sleep 30000] working".into(),
+        Some("Rex"),
+        Some(false),
+    );
+    let run = run_with(
+        &t,
+        "Pia",
+        "Rex",
+        format!("Run. {}", plan(json!([a_task]))),
+        true,
+    )
+    .await;
     w.until("Rex at work", |e| {
         matches!(&e.kind, EventKind::AgentOutput { id, text, .. } if *id == rex.id && text.contains("sleeping"))
     })
     .await;
-    let now: Value = t.get("/v1/agents/Rex/execution").await.json().await.unwrap();
+    let now: Value = t
+        .get("/v1/agents/Rex/execution")
+        .await
+        .json()
+        .await
+        .unwrap();
     assert_eq!(now["execution"]["run_id"], run["id"], "{now}");
     assert_eq!(now["execution"]["task_key"], "a", "{now}");
 
-    let resp = t.post("/v1/agents/Rex/execution/interrupt", json!({})).await;
+    let resp = t
+        .post("/v1/agents/Rex/execution/interrupt", json!({}))
+        .await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let task: Value = resp.json().await.unwrap();
     assert_eq!(task["status"], "stalled", "{task}");
     assert!(task["assignee"].is_null(), "{task}");
     assert_eq!(task["handoffs"][0]["outcome"], "interrupted", "{task}");
     // Let go, back home, and the lead hears it.
-    let now: Value = t.get("/v1/agents/Rex/execution").await.json().await.unwrap();
+    let now: Value = t
+        .get("/v1/agents/Rex/execution")
+        .await
+        .json()
+        .await
+        .unwrap();
     assert!(now["execution"].is_null(), "{now}");
     back_home(&mut w, rex.id, repo.path()).await;
     w.find("the lead hears it", |e| match &e.kind {
@@ -561,7 +728,16 @@ async fn taking_a_session_that_cannot_resume_there_fails_and_starts_no_new_one()
     std::fs::write(repo.path().join("mock-no-resume"), "").unwrap();
     for args in [
         &["add", "-A"][..],
-        &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "marker"],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "marker",
+        ],
     ] {
         let ok = std::process::Command::new("git")
             .args(args)
@@ -582,7 +758,14 @@ async fn taking_a_session_that_cannot_resume_there_fails_and_starts_no_new_one()
     let before = agent_count(&t).await;
 
     let a_task = task("a", "[cwd] go".into(), Some("Rex"), Some(false));
-    let run = run_with(&t, "Pia", "Rex", format!("Run. {}", plan(json!([a_task]))), true).await;
+    let run = run_with(
+        &t,
+        "Pia",
+        "Rex",
+        format!("Run. {}", plan(json!([a_task]))),
+        true,
+    )
+    .await;
     // A notice in the lead's digest: a new message, or one still waiting, updated.
     w.find("the lead hears it", |e| match &e.kind {
         EventKind::AgentInput { id, text, .. } | EventKind::AgentInputUpdated { id, text, .. } => {
@@ -597,10 +780,23 @@ async fn taking_a_session_that_cannot_resume_there_fails_and_starts_no_new_one()
     assert!(why.contains("its context was not carried over"), "{task}");
     // The execution is on record as Rex himself, failed, and why.
     let card = &task["handoffs"][0];
-    assert_eq!((card["fresh"].clone(), card["outcome"].clone()), (json!(false), json!("failed")), "{task}");
-    assert!(card["reason"].as_str().unwrap_or_default().contains("上下文没能延续"), "{task}");
+    assert_eq!(
+        (card["fresh"].clone(), card["outcome"].clone()),
+        (json!(false), json!("failed")),
+        "{task}"
+    );
+    assert!(
+        card["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("上下文没能延续"),
+        "{task}"
+    );
     // No session took its place, nobody new, nothing held, and Rex is home.
-    assert_eq!(t.hub.bus.store().last_session_id(rex.id).await.unwrap(), session);
+    assert_eq!(
+        t.hub.bus.store().last_session_id(rex.id).await.unwrap(),
+        session
+    );
     assert_eq!(agent_count(&t).await, before);
     assert!(t.hub.bus.store().claim_of(rex.id).await.unwrap().is_none());
     assert!(same_dir(&t.agent("Rex").await.cwd, repo.path()));
@@ -615,10 +811,20 @@ async fn a_session_whose_driver_cannot_move_is_refused() {
     t.add_agent_in("coder", None, "worker", repo.path()).await;
     let mut w = t.watch().await;
     let a_task = task("a", "go".into(), Some("coder"), Some(false));
-    let run = run_with(&t, "Pia", "coder", format!("Run. {}", plan(json!([a_task]))), true).await;
+    let run = run_with(
+        &t,
+        "Pia",
+        "coder",
+        format!("Run. {}", plan(json!([a_task]))),
+        true,
+    )
+    .await;
     turn_of(&mut w, pia.id).await;
     let text = said(&w, pia.id);
-    assert!(text.contains("cannot resume its session in another directory"), "{text}");
+    assert!(
+        text.contains("cannot resume its session in another directory"),
+        "{text}"
+    );
     assert!(text.contains("leave fresh out"), "{text}");
     let detail: Value = t
         .get(&format!("/v1/runs/{}", run["id"].as_str().unwrap()))

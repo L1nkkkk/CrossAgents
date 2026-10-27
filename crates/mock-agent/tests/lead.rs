@@ -56,9 +56,10 @@ async fn until_home(t: &TestHub, name: &str, dir: &Path) {
 async fn chat_first(t: &TestHub, w: &mut common::Watcher) {
     let boss = agent(t, "boss").await["id"].as_str().unwrap().to_owned();
     t.send("boss", "hello").await;
-    w.until("boss answered", |e| {
-        matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if id.to_string() == boss)
-    })
+    w.until(
+        "boss answered",
+        |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if id.to_string() == boss),
+    )
     .await;
 }
 
@@ -352,11 +353,18 @@ async fn restoring_a_lead_whose_branch_is_gone_says_the_code_did_not_come_back()
         .current_dir(repo.path())
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let lead_id = lead["id"].as_str().unwrap().to_owned();
     let resp = t
-        .post(&format!("/v1/agents/{lead_id}/archive"), json!({ "archived": false }))
+        .post(
+            &format!("/v1/agents/{lead_id}/archive"),
+            json!({ "archived": false }),
+        )
         .await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     w.until("told the code did not come back", |e| {

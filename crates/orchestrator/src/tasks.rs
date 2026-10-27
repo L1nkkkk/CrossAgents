@@ -9,8 +9,7 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use crossagents_core::{
     Agent, AgentId, AgentKey, ClaimRole, CoreError, EventKind, HandoffKind, HandoffOutcome,
-    PlannedTask, Role, Run,
-    RunStatus, Task, TaskId, TaskReport, TaskSpec, TaskStatus,
+    PlannedTask, Role, Run, RunStatus, Task, TaskId, TaskReport, TaskSpec, TaskStatus,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -1117,11 +1116,7 @@ impl Orchestrator {
             self.let_go_task(run.id, task.id, Some(ClaimRole::Reviewer))
                 .await;
         }
-        crossagents_core::Handoff::end(
-            &mut task.handoffs,
-            Some(worker),
-            HandoffOutcome::Reworked,
-        );
+        crossagents_core::Handoff::end(&mut task.handoffs, Some(worker), HandoffOutcome::Reworked);
         task.attempts += 1;
         task.report.failure = None;
         task.report.rework.push(a.notes.trim().to_owned());

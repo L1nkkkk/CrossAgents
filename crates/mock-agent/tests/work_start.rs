@@ -109,8 +109,7 @@ async fn starting_a_proposed_work_runs_it_on_its_own_branch() {
     // checkout, the run says so, and the conversation stays where it was (S1 §3.2).
     assert_ne!(run["planner"], json!(lyra.id));
     assert_eq!(
-        run["lead_note"],
-        "主导是复制出来的，没带上原会话的上下文",
+        run["lead_note"], "主导是复制出来的，没带上原会话的上下文",
         "{run}"
     );
     let lead = agent(&t, run["planner"].as_str().unwrap()).await;
@@ -246,7 +245,10 @@ async fn a_lead_whose_run_ended_starts_another_on_the_repository() {
     assert!(!copy["archived_at"].is_null(), "{copy}");
     assert_eq!(copy["cwd"], json!(old_cwd), "{copy}");
     let resp = t
-        .post(&format!("/v1/agents/{old_lead}/archive"), json!({ "archived": false }))
+        .post(
+            &format!("/v1/agents/{old_lead}/archive"),
+            json!({ "archived": false }),
+        )
         .await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     assert!(std::path::Path::new(&old_cwd).is_dir(), "{old_cwd}");

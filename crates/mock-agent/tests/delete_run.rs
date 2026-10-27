@@ -168,7 +168,11 @@ async fn a_landed_run_goes_with_its_worktrees_branches_and_lead() {
     finish_with_a_change(&t, &run).await;
     let copy = agent(&t, &lead).await;
     assert!(!copy["archived_at"].is_null(), "{copy}");
-    assert_eq!(copy["cwd"], json!(checkout), "it keeps its directory: {copy}");
+    assert_eq!(
+        copy["cwd"],
+        json!(checkout),
+        "it keeps its directory: {copy}"
+    );
     assert!(!Path::new(&checkout).exists(), "{checkout}");
     let resp = t
         .post(&format!("/v1/runs/{id}/land"), json!({ "mode": "merge" }))
@@ -265,7 +269,10 @@ async fn a_dirty_checkout_asks_for_force() {
     // The person restores the copy, which brings its checkout back, and something is left
     // there uncommitted.
     let resp = t
-        .post(&format!("/v1/agents/{lead}/archive"), json!({ "archived": false }))
+        .post(
+            &format!("/v1/agents/{lead}/archive"),
+            json!({ "archived": false }),
+        )
         .await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     assert!(checkout.is_dir(), "{checkout:?}");
@@ -390,7 +397,10 @@ async fn a_lead_moved_into_the_run_goes_back_home() {
     let back = agent(&t, "pia").await;
     assert!(back["archived_at"].is_null(), "{back}");
     assert!(back["config"].get("lead_home").is_none(), "{back}");
-    assert!(!Path::new(moved["cwd"].as_str().unwrap()).exists(), "{moved}");
+    assert!(
+        !Path::new(moved["cwd"].as_str().unwrap()).exists(),
+        "{moved}"
+    );
 }
 
 /// S1 §7: the lead copied for a run has a driver that resumes a session only where it ran.
@@ -411,7 +421,10 @@ async fn a_copy_restored_after_its_run_is_deleted_says_its_context_is_gone() {
 
     let mut w = t.watch().await;
     let resp = t
-        .post(&format!("/v1/agents/{lead}/archive"), json!({ "archived": false }))
+        .post(
+            &format!("/v1/agents/{lead}/archive"),
+            json!({ "archived": false }),
+        )
         .await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     w.until("restore says the context is gone", |e| {
@@ -426,9 +439,10 @@ async fn a_copy_restored_after_its_run_is_deleted_says_its_context_is_gone() {
             if id.to_string() == lead && message.contains("这是新会话"))
     })
     .await;
-    w.until("answered", |e| {
-        matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if id.to_string() == lead)
-    })
+    w.until(
+        "answered",
+        |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if id.to_string() == lead),
+    )
     .await;
     // Said once: the mark goes with the new session.
     let copy = agent(&t, &lead).await;
