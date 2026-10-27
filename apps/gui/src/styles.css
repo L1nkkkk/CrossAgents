@@ -1289,6 +1289,9 @@ button.ghost.icon, .icon-btn { background: transparent; border-color: transparen
    its composer keep left of it. */
 .pane { position: relative; }
 .pane.with-rail .convo, .pane.with-rail .dock { padding-right: 280px; }
+/* Header pop-outs center in the same space left of the rail: half the rail's 280px to the left. */
+.pane.with-rail :is(.resume-pop, .graph-pop) { position: relative; left: -140px; }
+.pane.with-rail .resume-pop { max-width: min(820px, calc(100% - 312px)); }
 .rail { position: absolute; top: 14px; right: 14px; width: 250px; max-height: calc(100% - 28px); overflow: auto; display: flex; flex-direction: column; gap: 10px; z-index: 2; }
 .pane > .topbar ~ .rail { top: 64px; max-height: calc(100% - 78px); }
 .rail-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 6px 8px 8px; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04); }
@@ -1510,6 +1513,8 @@ html, body { overflow: hidden; }
 /* The native resume command (docs/TODO.md §十五), under the session's header. */
 .resume-pop { max-width: 820px; width: 100%; margin: 10px auto 0; padding: 10px 14px; box-sizing: border-box; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); font-size: 13px; display: flex; flex-direction: column; gap: 8px; }
 .resume-head { display: flex; align-items: center; gap: 10px; }
+.resume-head > strong { flex-shrink: 0; white-space: nowrap; }
+.resume-head > .muted { min-width: 0; overflow-wrap: anywhere; }
 .resume-command { margin: 0; padding: 8px 10px; border-radius: var(--radius); background: var(--surface-sunk); font-size: var(--mono-size); white-space: pre-wrap; word-break: break-all; color: var(--text); }
 .resume-why { margin: 0; padding: 8px 10px; border-radius: var(--radius); background: var(--surface-sunk); color: var(--text-2); }
 .resume-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
