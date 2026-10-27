@@ -43,6 +43,7 @@ import type { SendMessageRequest } from "@bindings/SendMessageRequest";
 import type { SendMessageResponse } from "@bindings/SendMessageResponse";
 import type { Transcript } from "@bindings/Transcript";
 import type { TurnDiffResponse } from "@bindings/TurnDiffResponse";
+import type { UpdateRunPolicyRequest } from "@bindings/UpdateRunPolicyRequest";
 import type { UsageGroup } from "@bindings/UsageGroup";
 import type { UsageResponse } from "@bindings/UsageResponse";
 import type { FileTreeResponse } from "@bindings/FileTreeResponse";
@@ -250,6 +251,9 @@ export const api = {
   deleteRun: (key: string, opts: { branches?: boolean; force?: boolean } = {}) =>
     request<DeleteRunResponse>("DELETE", `/v1/runs/${enc(key)}?branches=${!!opts.branches}&force=${!!opts.force}`),
   landRun: (key: string, mode: LandMode) => request<RunDetail>("POST", `/v1/runs/${enc(key)}/land`, { mode }),
+  /** How the run continues by itself from now on, and whether its allowance starts over. */
+  updateRunPolicy: (key: string, req: UpdateRunPolicyRequest) =>
+    request<RunDetail>("POST", `/v1/runs/${enc(key)}/policy`, req),
   finishRun: (key: string) => request<RunDetail>("POST", `/v1/runs/${enc(key)}/finish`, {}),
   /** Everything a task changed (its worktree against its base), for review. */
   taskDiff: (run: string, task: string) => request<ChangesResponse>("GET", `/v1/runs/${enc(run)}/tasks/${enc(task)}/diff`),
