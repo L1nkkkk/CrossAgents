@@ -4,6 +4,7 @@ import type { RunDetail } from "@bindings/RunDetail";
 import { api, getBridge } from "./api";
 import { useHubData, useVersionMismatch, type VersionMismatch } from "./hub";
 import { closeBeside, closeTools, focusedOf, setRatio, useLayout, usePanes } from "./panes";
+import { FileViewerHost } from "./FileViewer";
 import { startNew } from "./menubar";
 import { toggleRail } from "./rail";
 import { Sidebar } from "./Sidebar";
@@ -178,7 +179,7 @@ export function App() {
   let drawer = null;
   switch (section) {
     case "runs":
-      main = a ? <RunView runId={a} selectedTask={b === "tasks" ? c : undefined} confirmDelete={b === "delete"} /> : <HomeView />;
+      main = a ? <RunView runId={a} selectedTask={b === "tasks" ? c : undefined} confirmDelete={b === "delete"} graphOpen={b === "graph"} /> : <HomeView />;
       if (a && b === "tasks" && c)
         drawer = (
           <ToolColumn
@@ -230,6 +231,7 @@ export function App() {
           {drawer}
         </aside>
       )}
+      <FileViewerHost />
     </div>
   );
   if (!inDesktop) return app;

@@ -2,11 +2,12 @@
 // an event script to replay, and the page to open.
 
 import { emptyHub } from "../views/Home.mock";
-import { approvalRun, deleteRun, handoffRun, inPlaceRun, landingRun, oauthRun, rerouteRun, reuseRun, reviewRun, syncRun, traceRun } from "../views/Run.mock";
+import { approvalRun, deleteRun, graphRun, handoffRun, inPlaceRun, landingRun, oauthRun, rerouteRun, reuseRun, reviewRun, syncRun, traceRun } from "../views/Run.mock";
 import { attachmentSession, chatWithRecruit, crashedSession, soloSession } from "../views/Session.mock";
 import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
 import { usageScene } from "../views/Usage.mock";
-import { agent } from "./fixtures";
+import { agent, say, think, turn } from "./fixtures";
+import { openFile } from "../FileViewer";
 import type { MockState, Step } from "./MockBridge";
 
 export type Scenario = {
@@ -30,11 +31,14 @@ export const SCENARIOS: Scenario[] = [
   { key: "reuse-busy", label: "会话正在执行", hint: "Rex 的会话页：顶部写明正在执行二期 · 任务 #c（本人），带中断按钮", build: () => reuseRun("rex") },
   { key: "approval", label: "危险操作待批准", hint: "Rex 想 git push：需要你里出现「等你批准」，允许 / 拒绝，30 分钟没回答就拒绝", build: () => approvalRun() },
   { key: "trace", label: "失败追溯", hint: "run 页「追溯」：#d 失败、首个失败标红展开；#c 途中出错后通过，灰色折叠；每一轮、每条命令和花费", build: () => traceRun() },
+  { key: "graph", label: "提交图", hint: "run 页「提交图」：main、run 分支和 #a #b #c 三个任务分支，合并提交是空心点；选中了 #b 的合并，下面是它的 diff，点文件名打开文件", build: () => graphRun() },
+  { key: "graph-session", label: "会话的提交图", hint: "Rex 在 #c 的会话页：工具栏「提交图」打开面板，HEAD 和本地分支，选中了最新的提交", build: () => graphRun("session") },
   { key: "inplace", label: "无 git 的 run", hint: "文件夹没有 git：run 直接改文件、一次一个任务，可一键初始化 git", build: () => inPlaceRun() },
   { key: "workcard", label: "会话提议 Work", hint: "Nova 在单聊里用 work_start 提议到独立分支上做：卡片可展开交给 Work 的说明，开始 / 不用", build: () => workProposal() },
   { key: "delete-landed", label: "删除已落地的 run", hint: "删除确认框：主导和它的对话一起删，工作区和分支，已落地所以分支默认勾选", build: () => deleteRun("landed") },
   { key: "delete-unlanded", label: "删除未落地的 run", hint: "未落地：分支默认不勾，写明「未落地的改动会丢失」", build: () => deleteRun("unlanded") },
   { key: "delete-dirty", label: "删除时工作区有改动", hint: "点「删除」后 hub 返回 409 并列出没提交的文件，可以「仍然删除」", build: () => deleteRun("dirty") },
+  { key: "files", label: "文件链接与查看器", hint: "回复里的路径（确认存在的才成链接）可点开只读查看器：左侧懒加载目录树，右侧行号、高亮、跳到第 12 行", build: () => filesScene() },
   { key: "solo", label: "单聊", hint: "Claude 会话：折叠的工具步骤、一轮进行中、两条排队", build: () => soloSession() },
   { key: "attach", label: "消息带附件", hint: "人发的消息带了截图和日志（点缩略图看大图）；输入框可粘贴截图、拖文件或点回形针，发送前能删", build: () => attachmentSession() },
   { key: "settings-src", label: "Claude 设置源", hint: "设置 → 智能体：点 Nova 编辑，「读取 Claude 设置」三档预设（缺省 / 全部 / 都不读）；点 Vega（CodeBuddy）编辑，标签说明它不读 CLAUDE.md", build: settingSources },
@@ -60,6 +64,31 @@ export const SCENARIOS: Scenario[] = [
 ];
 
 export const DEFAULT_SCENARIO = "running";
+
+/** Nova's reply names files; the viewer opens on main.rs at line 12. */
+function filesScene() {
+  const solo = soloSession();
+  const nova = solo.state.agents[0];
+  nova.status = "idle";
+  const t = solo.state.transcripts.get(nova.id)!;
+  const asked = turn({
+    input: "--json 是在哪里解析的？顺便看看文档有没有写。",
+    minutesAgo: 3,
+    took: 1,
+    items: [
+      think("先找 CLI 入口，再对一下 docs。"),
+      say(
+        "在 [main.rs](crates/cli/src/main.rs:12) 里，`Args` 结构体的 `json` 字段就是全局的 `--json`。文档在 `docs/cli.md`，依赖版本见 `Cargo.toml`。\n\n另外 `docs/old-cli.md` 已经删掉了，不用再改；设计说明在 `docs/DESIGN.md`。",
+      ),
+    ],
+  });
+  t.turns = [t.turns[0], asked.turn];
+  return {
+    ...solo,
+    script: [{ at: 600, act: () => openFile({ scope: { kind: "agent", agent: nova.id }, path: "crates/cli/src/main.rs", line: 12 }) }],
+    route: `#/s/${nova.name}`,
+  };
+}
 
 /** The solo chat, where Nova proposes doing the rest on a branch of its own. */
 function workProposal() {

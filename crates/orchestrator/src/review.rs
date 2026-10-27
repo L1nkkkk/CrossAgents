@@ -28,7 +28,7 @@ pub struct Remark {
 }
 
 impl Changes {
-    fn new(base: String, head: String, mut diff: String) -> Self {
+    pub(crate) fn new(base: String, head: String, mut diff: String) -> Self {
         let truncated = diff.len() > DIFF_LIMIT;
         if truncated {
             let mut end = DIFF_LIMIT;

@@ -3,6 +3,8 @@
 // failed, and Ada's conversation carries the orchestrator's messages and task cards.
 
 import type { Agent } from "@bindings/Agent";
+import type { CommitGraph } from "@bindings/CommitGraph";
+import type { GraphRef } from "@bindings/GraphRef";
 import type { Handoff } from "@bindings/Handoff";
 import type { Run } from "@bindings/Run";
 import type { HumanItem } from "@bindings/HumanItem";
@@ -617,4 +619,103 @@ export function reuseRun(page: "b" | "a" | "rex" = "b"): { state: MockState; scr
   state.transcripts.set(rexB.id, transcript(rexB, [turn({ input: "task #b：登录页按钮", minutesAgo: 280, took: 20, items: [say("按钮加好了。")] })], 0));
   const route = page === "a" ? `#/runs/${runA.id}` : page === "rex" ? `#/s/${rex.id}` : `#/runs/${runB.id}`;
   return { state, script: [], route };
+}
+
+/** A fake 40-hex sha, stable for a seed. */
+function fakeSha(seed: string): string {
+  let h = 2166136261;
+  let out = "";
+  while (out.length < 40) {
+    for (const ch of seed + out.length) h = Math.imul(h ^ ch.charCodeAt(0), 16777619) >>> 0;
+    out += h.toString(16).padStart(8, "0");
+  }
+  return out.slice(0, 40);
+}
+
+/**
+ * The commit graph (`#/runs/<id>/graph`): main moved on after the run branched; #a and #b are
+ * merged into the run branch (merge commits), #c is still at work on its own branch. Rex's #c
+ * session gets a graph too (HEAD and local branches) for the session page's panel.
+ */
+export function graphRun(page: "run" | "session" = "run"): { state: MockState; script: Step[]; route: string } {
+  const scene = oauthRun("running");
+  const d = scene.state.runs[0];
+  const byKey = (k: string) => d.tasks.find((t) => t.key === k)!;
+  const [ta, tb, tc, td] = ["a", "b", "c", "d"].map(byKey);
+  ta.status = "merged";
+  ta.assignee = null;
+  tb.status = "merged";
+  tb.assignee = null;
+  tc.status = "running";
+  tc.progress = "RedisStore 写好了，在补本地回落";
+  td.status = "pending";
+
+  const base = d.run.base_branch || "main";
+  const runBranch = d.run.branch || "crossagents/oauth-login";
+  const branchOf = (k: string) => `${runBranch}/${k}`;
+  const s = (name: string) => fakeSha(`oauth-${name}`);
+  type C = { id: string; parents: string[]; subject: string; author: string; minutesAgo: number; diff?: string };
+  const list: C[] = [
+    { id: "c2", parents: ["c1"], subject: "会话存储：没有 REDIS_URL 时回落到内存", author: "Rex", minutesAgo: 2, diff: fileDiff("src/auth/session.rs", 30, ["    RedisStore::connect(url).await"], ["    match std::env::var(\"REDIS_URL\") {", "        Ok(url) => RedisStore::connect(&url).await,", "        Err(_) => Ok(Box::new(MemoryStore::default())),", "    }"], ["pub async fn store() -> Result<Box<dyn SessionStore>> {"]) },
+    { id: "m2", parents: ["m1", "b2"], subject: `Merge #b: ${tb.title}`, author: "CrossAgents", minutesAgo: 6, diff: LOGIN_DIFF },
+    { id: "b2", parents: ["b1"], subject: "深色模式下 OAuth 按钮改成描边样式", author: "Mia", minutesAgo: 10, diff: fileDiff("web/src/pages/login.css", 42, [], ["@media (prefers-color-scheme: dark) { .oauth button { background: none; border: 1px solid var(--line); } }"], [".or { color: var(--muted); text-align: center; }"]) },
+    { id: "x1", parents: ["base"], subject: "README：修正本地启动命令", author: "Sam", minutesAgo: 15, diff: fileDiff("README.md", 8, ["cargo run -- serve"], ["cargo run -p server -- serve"], ["## 本地启动"]) },
+    { id: "m1", parents: ["base", "a2"], subject: `Merge #a: ${ta.title}`, author: "CrossAgents", minutesAgo: 18, diff: OAUTH_DIFF },
+    { id: "c1", parents: ["base"], subject: "SessionStore 换成 RedisStore，接口不变", author: "Rex", minutesAgo: 25, diff: SESSION_DIFF },
+    { id: "b1", parents: ["base"], subject: "登录页加「用 GitHub / Google 登录」按钮", author: "Mia", minutesAgo: 30, diff: LOGIN_DIFF },
+    { id: "a2", parents: ["a1"], subject: "token 过期和 provider 拒绝时给出中文提示", author: "Rex", minutesAgo: 32, diff: fileDiff("src/auth/error.rs", 0, [], ["#[derive(Debug, thiserror::Error)]", "pub enum OAuthError {", '    #[error("登录已过期，请重新登录")]', "    Expired,", "}"]) },
+    { id: "a1", parents: ["base"], subject: "OAuth 回调：用授权码换 token 并建立会话", author: "Rex", minutesAgo: 38, diff: OAUTH_DIFF },
+    { id: "base", parents: ["p1"], subject: "登录页支持「记住我」", author: "Sam", minutesAgo: 60 * 3 },
+    { id: "p1", parents: ["p0"], subject: "密码登录加限流", author: "Sam", minutesAgo: 60 * 26 },
+    { id: "p0", parents: [], subject: "初始化项目", author: "Sam", minutesAgo: 60 * 24 * 9, diff: fileDiff("README.md", 0, [], ["# shop", "", "## 本地启动", "", "cargo run -- serve"]) },
+  ];
+
+  const graphWith = (refs: GraphRef[], extra: Partial<CommitGraph> = {}): CommitGraph => ({
+    ...extra,
+    refs,
+    commits: list.map((c) => ({
+      sha: s(c.id),
+      parents: c.parents.map(s),
+      subject: c.subject,
+      author: c.author,
+      time: ago(c.minutesAgo),
+      refs: refs.filter((r) => r.sha === s(c.id)).map((r) => r.name),
+    })),
+    truncated: false,
+  });
+  const taskRef = (t: Task, tip: string): GraphRef => ({ name: branchOf(t.key), kind: "task", sha: s(tip), task_key: t.key, task_title: t.title });
+  const runGraph = graphWith(
+    [
+      { name: base, kind: "base", sha: s("x1") },
+      { name: runBranch, kind: "run", sha: s("m2") },
+      taskRef(ta, "a2"),
+      taskRef(tb, "b2"),
+      taskRef(tc, "c2"),
+    ],
+    { base_branch: base, run_branch: runBranch },
+  );
+  const graphs = new Map<string, CommitGraph>([[d.run.id, runGraph]]);
+  const rexC = scene.state.agents.find((a) => a.cwd.endsWith("/worktrees/c"))!;
+  graphs.set(
+    rexC.id,
+    graphWith([
+      { name: "HEAD", kind: "head", sha: s("c2") },
+      { name: branchOf("c"), kind: "other", sha: s("c2") },
+      { name: runBranch, kind: "other", sha: s("m2") },
+      { name: base, kind: "other", sha: s("x1") },
+    ]),
+  );
+  scene.state.graphs = graphs;
+  scene.state.commitDiffs = new Map(list.filter((c) => c.diff).map((c) => [s(c.id), c.diff!]));
+
+  // Pick the merge of #b once the graph is in, so the picture shows a diff too.
+  const pick = (index: number): Step => ({
+    at: 700,
+    act: () => (document.querySelectorAll<HTMLButtonElement>(".cgraph-row")[index] ?? null)?.click(),
+  });
+  if (page === "session") {
+    const open: Step = { at: 400, act: () => document.querySelector<HTMLButtonElement>(".graph-toggle")?.click() };
+    return { ...scene, script: [open, { ...pick(0), at: 900 }], route: `#/s/${rexC.id}` };
+  }
+  return { ...scene, script: [pick(1)], route: `#/runs/${d.run.id}/graph` };
 }

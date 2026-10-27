@@ -1,8 +1,12 @@
 //! Integration tests of the local API against a real hub on a random port.
 
+use std::path::Path;
 use std::time::Duration;
 
-use crossagents_api_types::{Agent, ListAgentsResponse};
+use crossagents_api_types::{
+    Agent, ChangesResponse, CommitGraph, FileContentResponse, FileKind, FileTreeResponse,
+    GraphRefKind, ListAgentsResponse, ResolvePathsResponse, Run,
+};
 use crossagents_hub::{HubConfig, Paths, RunningHub};
 use futures::StreamExt;
 use reqwest::{Client, StatusCode};
@@ -18,11 +22,16 @@ struct TestHub {
 
 impl TestHub {
     async fn start() -> Self {
+        Self::start_with(|_| {}).await
+    }
+
+    /// A hub whose configuration is adjusted before it starts (a plugin's CLI, say).
+    async fn start_with(adjust: impl FnOnce(&mut HubConfig)) -> Self {
         let home = tempfile::tempdir().unwrap();
         let paths = Paths::new(home.path());
-        let hub = crossagents_hub::start(HubConfig::new(paths.clone(), 0))
-            .await
-            .unwrap();
+        let mut config = HubConfig::new(paths.clone(), 0);
+        adjust(&mut config);
+        let hub = crossagents_hub::start(config).await.unwrap();
         let base = format!("http://{}", hub.addr);
         Self {
             hub,
@@ -502,4 +511,408 @@ async fn drivers_say_which_files_they_take() {
     assert!(offered.contains("PDFs"), "{offered}");
     assert!(offered.contains("codex-native"), "{offered}");
     assert!(offered.contains("images, text"), "{offered}");
+}
+
+/// docs/DESIGN.md §11: the file API reads a workspace without changing it — relative or
+/// absolute paths, and nothing outside the root.
+#[tokio::test]
+async fn files_are_read_inside_a_workspace() {
+    let t = TestHub::start().await;
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join("src")).unwrap();
+    std::fs::write(ws.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(ws.path().join("bin.dat"), [0u8, 1, 2, 3]).unwrap();
+    let created = t
+        .post("/v1/agents")
+        .json(&json!({
+            "name": "reader", "plugin": "claude", "role": "worker",
+            "cwd": ws.path().display().to_string(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+
+    // The root: directories first, then by name.
+    let tree: FileTreeResponse = t
+        .get("/v1/agents/reader/files/tree")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(tree.path, "");
+    let names: Vec<&str> = tree.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["src", "bin.dat"]);
+    assert_eq!(tree.entries[0].kind, FileKind::Dir);
+    assert_eq!(tree.entries[1].kind, FileKind::File);
+    assert_eq!(tree.entries[1].size, Some(4));
+
+    // One directory of it, with paths relative to the root.
+    let src: FileTreeResponse = t
+        .get("/v1/agents/reader/files/tree?path=src")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(src.path, "src");
+    assert_eq!(src.entries[0].path, "src/main.rs");
+
+    // A text file comes with its text, a binary one without.
+    let text: FileContentResponse = t
+        .get("/v1/agents/reader/files/content?path=src/main.rs")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(text.text.as_deref(), Some("fn main() {}\n"));
+    assert!(!text.binary && !text.truncated);
+    assert_eq!(text.size, 13);
+    assert!(text.abs_path.ends_with("main.rs"), "{}", text.abs_path);
+
+    let binary: FileContentResponse = t
+        .get("/v1/agents/reader/files/content?path=bin.dat")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(binary.binary);
+    assert_eq!(binary.text, None);
+    assert_eq!(binary.size, 4);
+
+    // Which strings name something inside the workspace: one answer per input, in order.
+    let abs = ws.path().join("bin.dat").display().to_string();
+    let resolved: ResolvePathsResponse = t
+        .post("/v1/agents/reader/files/resolve")
+        .json(&json!({ "paths": ["src/main.rs", abs, "../escape", "nope.txt"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let paths: Vec<Option<&str>> = resolved.entries.iter().map(|e| e.path.as_deref()).collect();
+    assert_eq!(paths, [Some("src/main.rs"), Some("bin.dat"), None, None]);
+    assert_eq!(resolved.entries[1].kind, Some(FileKind::File));
+    assert_eq!(resolved.entries[3].input, "nope.txt");
+
+    // Out of the workspace is refused; missing is not found; a bad ref is the caller's.
+    let escape = t
+        .get("/v1/agents/reader/files/tree?path=../")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(escape.status(), StatusCode::FORBIDDEN);
+    let body: Value = escape.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "forbidden");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("outside the workspace"),
+        "{body}"
+    );
+    assert_eq!(
+        t.get("/v1/agents/reader/files/content?path=nope.txt")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        t.get("/v1/agents/reader/files/tree?ref=--output=x")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+/// The same API on a run (its checkout) and a task (its worktree, which a task may not have).
+#[tokio::test]
+async fn files_are_read_in_a_run_and_task_scope() {
+    let t = TestHub::start().await;
+    let ws = tempfile::tempdir().unwrap();
+    std::fs::write(ws.path().join("notes.md"), "hi\n").unwrap();
+    let created = t
+        .post("/v1/agents")
+        .json(&json!({
+            "name": "planner", "plugin": "external", "role": "worker",
+            "cwd": ws.path().display().to_string(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+
+    // A directory outside version control: the run works in place, so its files are these.
+    let created = t
+        .post("/v1/runs")
+        .json(&json!({ "request": "look at the notes", "planner": "planner" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let run: Run = created.json().await.unwrap();
+    assert!(run.in_place);
+
+    let tree: FileTreeResponse = t
+        .get(&format!("/v1/runs/{}/files/tree", run.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let names: Vec<&str> = tree.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["notes.md"]);
+
+    // A task that has not started has no worktree to read, and an unknown run is not found.
+    assert_eq!(
+        t.get(&format!("/v1/runs/{}/tasks/nope/files/tree", run.id))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        t.get("/v1/runs/0000/files/tree")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+/// docs/DESIGN.md §11: the commit graph of a run (its base, its own branch and its tasks')
+/// and of an agent's repository, and what one commit changed.
+#[tokio::test]
+async fn commit_graph_and_commit_diff() {
+    // The run's lead is a real plugin agent, so the run gets a checkout; its CLI is not
+    // there, so the kickoff it is handed never starts a process.
+    let t = TestHub::start_with(|config| {
+        config.plugins.insert(
+            "claude".into(),
+            crossagents_plugins::PluginConfig {
+                native_command: vec!["crossagents-test-no-such-cli".into()],
+                ..Default::default()
+            },
+        );
+    })
+    .await;
+    let repo = tempfile::tempdir().unwrap();
+    git(repo.path(), &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.path().join("a.txt"), "one\n").unwrap();
+    let root = commit(repo.path(), "one");
+    let cwd = repo.path().display().to_string();
+
+    for name in ["planner", "watcher"] {
+        let created = t
+            .post("/v1/agents")
+            .json(&json!({
+                "name": name, "plugin": "claude", "role": "worker", "cwd": cwd,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            created.status(),
+            StatusCode::CREATED,
+            "{}",
+            created.text().await.unwrap()
+        );
+    }
+
+    // A run in a repository gets its own branch, in a checkout of its own.
+    let created = t
+        .post("/v1/runs")
+        .json(&json!({ "request": "look at the history", "planner": "planner" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        created.status(),
+        StatusCode::CREATED,
+        "{}",
+        created.text().await.unwrap()
+    );
+    let run: Run = created.json().await.unwrap();
+    assert!(!run.in_place);
+
+    let graph: CommitGraph = t
+        .get(&format!("/v1/runs/{}/graph", run.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(graph.base_branch.as_deref(), Some("main"));
+    assert_eq!(graph.run_branch.as_deref(), Some(run.branch.as_str()));
+    let refs: Vec<(&str, GraphRefKind)> = graph
+        .refs
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.kind))
+        .collect();
+    assert!(refs.contains(&("main", GraphRefKind::Base)), "{refs:?}");
+    assert!(
+        refs.contains(&(run.branch.as_str(), GraphRefKind::Run)),
+        "{refs:?}"
+    );
+    let base = graph
+        .refs
+        .iter()
+        .find(|entry| entry.kind == GraphRefKind::Base)
+        .unwrap();
+    assert_eq!(base.sha, root);
+    // The run branch has no commit of its own yet: both refs name the base commit.
+    let commit = graph
+        .commits
+        .iter()
+        .find(|commit| commit.sha == root)
+        .expect("the base commit is in the graph");
+    let mut named = commit.refs.clone();
+    named.sort();
+    let mut expected = vec!["main".to_owned(), run.branch.clone()];
+    expected.sort();
+    assert_eq!(named, expected);
+    assert!(commit.parents.is_empty());
+    assert!(!graph.truncated);
+
+    // An agent's own repository: its HEAD and its local branches.
+    let agent: CommitGraph = t
+        .get("/v1/agents/watcher/graph")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(agent.base_branch.is_none() && agent.run_branch.is_none());
+    assert!(
+        agent
+            .refs
+            .iter()
+            .any(|entry| entry.kind == GraphRefKind::Head && entry.sha == root),
+        "{:?}",
+        agent.refs
+    );
+    assert!(
+        agent
+            .refs
+            .iter()
+            .any(|entry| entry.kind == GraphRefKind::Other && entry.name == "main"),
+        "{:?}",
+        agent.refs
+    );
+    assert_eq!(agent.commits[0].sha, root);
+
+    // One commit's diff: a root commit against the empty tree, in both scopes.
+    let changes: ChangesResponse = t
+        .get(&format!("/v1/runs/{}/commits/{root}/diff", run.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(changes.base, "");
+    assert_eq!(changes.head, root);
+    assert!(changes.diff.contains("+one"), "{}", changes.diff);
+    assert!(!changes.truncated);
+    let changes: ChangesResponse = t
+        .get(&format!("/v1/agents/watcher/commits/{root}/diff"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(changes.diff.contains("+one"), "{}", changes.diff);
+
+    // A sha that is not one is refused before git sees it; one that names nothing is 404.
+    for bad in ["abc", "HEAD", "not-a-sha", "ABCDEF"] {
+        let resp = t
+            .get(&format!("/v1/runs/{}/commits/{bad}/diff", run.id))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad}");
+    }
+    assert_eq!(
+        t.get(&format!("/v1/runs/{}/commits/deadbeef/diff", run.id))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let limited: CommitGraph = t
+        .get(&format!("/v1/runs/{}/graph?limit=1", run.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(limited.commits.len(), 1);
+    // An unknown run or agent has no graph.
+    assert_eq!(
+        t.get("/v1/runs/0000/graph").send().await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        t.get("/v1/agents/nobody/graph")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+/// Runs git in `dir`, returning its trimmed stdout; panics when git says no.
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {}: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// Commits everything in `dir` as `message`, returning the commit's sha.
+fn commit(dir: &Path, message: &str) -> String {
+    git(dir, &["add", "-A"]);
+    git(
+        dir,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ],
+    );
+    git(dir, &["rev-parse", "HEAD"])
 }

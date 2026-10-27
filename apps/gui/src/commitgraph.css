@@ -1,0 +1,45 @@
+/* The commit graph (commitgraph.tsx). Branch colours come from theme variables, so light and
+   dark both read: base grey, run branch the accent, tasks in turn. */
+
+.cgraph { --g0: var(--text-2); --g1: var(--accent); --g2: var(--codex); --g3: var(--claude); --g4: var(--warn); --g5: var(--danger); --g6: var(--codebuddy); --g7: var(--ok); --gx: var(--muted); display: flex; flex-direction: column; gap: 8px; }
+.cgraph .g-c0 { --g: var(--g0); }
+.cgraph .g-c1 { --g: var(--g1); }
+.cgraph .g-c2 { --g: var(--g2); }
+.cgraph .g-c3 { --g: var(--g3); }
+.cgraph .g-c4 { --g: var(--g4); }
+.cgraph .g-c5 { --g: var(--g5); }
+.cgraph .g-c6 { --g: var(--g6); }
+.cgraph .g-c7 { --g: var(--g7); }
+.cgraph .g-cx { --g: var(--gx); }
+
+.cgraph-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--text-2); }
+.cgraph-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.cgraph-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--g); }
+
+.cgraph-list { border: 1px solid var(--border); border-radius: var(--radius); overflow: auto; max-height: 420px; background: var(--surface); }
+.cgraph-row { display: flex; align-items: center; gap: 10px; width: 100%; height: 28px; padding: 0 10px 0 2px; border: 0; border-radius: 0; background: none; color: var(--text); text-align: left; font: inherit; font-size: 13px; cursor: pointer; }
+.cgraph-row:hover { background: var(--hover); }
+.cgraph-row.active { background: var(--selected); box-shadow: inset 2px 0 0 var(--accent); }
+.cgraph-lanes { flex: none; overflow: visible; }
+.cgraph-edge { fill: none; stroke: var(--g); stroke-width: 2; stroke-linecap: round; }
+.cgraph-node { fill: var(--g); stroke: var(--surface); stroke-width: 1.5; }
+.cgraph-node.merge { fill: var(--surface); stroke: var(--g); stroke-width: 2.5; }
+.cgraph-text { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden; white-space: nowrap; }
+.cgraph-subject { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cgraph-row.merge .cgraph-subject { color: var(--text-2); }
+.cgraph-ref { flex: none; padding: 0 6px; border-radius: 9px; font-size: 11px; line-height: 17px; font-family: var(--font-mono); color: var(--g); background: color-mix(in srgb, var(--g) 14%, transparent); border: 1px solid color-mix(in srgb, var(--g) 35%, transparent); }
+.cgraph-ref.k-run, .cgraph-ref.k-head { font-weight: 600; }
+.cgraph-merge-tag { flex: none; font-size: 11px; color: var(--muted); border: 1px dashed var(--border-strong); border-radius: 4px; padding: 0 4px; line-height: 16px; }
+.cgraph-author { flex: none; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cgraph-time { flex: none; width: 72px; text-align: right; }
+.cgraph-sha { flex: none; font-size: 11.5px; color: var(--muted); background: none; }
+.cgraph-more { padding: 6px 12px; border-top: 1px solid var(--border); text-align: center; }
+
+.cgraph-diff { display: flex; flex-direction: column; gap: 8px; }
+.cgraph-diff-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.cgraph-diff-head .cgraph-subject { font-weight: 600; }
+.diff-head button.file-link { font-size: 12px; }
+
+/* The panel the session's toolbar opens. */
+.graph-pop { max-width: 980px; width: 100%; margin: 10px auto 0; padding: 10px 14px; box-sizing: border-box; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-float); max-height: 70vh; overflow: auto; }
+.graph-pop .resume-head { margin-bottom: 8px; }

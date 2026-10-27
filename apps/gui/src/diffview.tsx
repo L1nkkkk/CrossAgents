@@ -25,7 +25,7 @@ export type DiffReview = {
 };
 
 /** Unified diffs, one block per file; `focus` scrolls to that file and marks it. */
-export function DiffView({ files, focus, review }: { files: DiffFile[]; focus?: string; review?: DiffReview }) {
+export function DiffView({ files, focus, review, onOpenFile }: { files: DiffFile[]; focus?: string; review?: DiffReview; onOpenFile?: (path: string) => void }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!focus) return;
@@ -37,7 +37,13 @@ export function DiffView({ files, focus, review }: { files: DiffFile[]; focus?: 
       {files.map((file, i) => (
         <div key={i} className={`diff-file ${focus === file.path ? "focus" : ""}`} data-path={file.path}>
           <div className="diff-head">
-            <span className="mono">{file.path || "（未命名）"}</span>
+            {onOpenFile && file.path ? (
+              <button className="link mono file-link" onClick={() => onOpenFile(file.path)} title="打开这个文件">
+                {file.path}
+              </button>
+            ) : (
+              <span className="mono">{file.path || "（未命名）"}</span>
+            )}
             <span className="row" style={{ gap: 8 }}>
               <ChangeStat files={[file]} />
               {review && file.path && (

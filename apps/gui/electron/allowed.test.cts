@@ -87,6 +87,20 @@ test("the S1 endpoints pass, query strings included", () => {
   assert.ok(allowed("GET", "/v1/agents/Rex/resume-command"));
 });
 
+test("the files and graph endpoints pass for every scope", () => {
+  assert.ok(allowed("GET", "/v1/agents/Rex/files/tree?path=src&all=true"));
+  assert.ok(allowed("GET", "/v1/runs/r1/files/content?path=a.rs"));
+  assert.ok(allowed("GET", "/v1/runs/r1/tasks/auth/files/tree?path="));
+  assert.ok(allowed("POST", "/v1/runs/r1/tasks/auth/files/resolve"));
+  assert.ok(allowed("POST", "/v1/agents/Rex/files/resolve"));
+  assert.ok(!allowed("POST", "/v1/agents/Rex/files/content"));
+  assert.ok(!allowed("GET", "/v1/files/tree"));
+  assert.ok(allowed("GET", "/v1/runs/r1/graph?limit=50"));
+  assert.ok(allowed("GET", "/v1/agents/Rex/graph"));
+  assert.ok(allowed("GET", "/v1/runs/r1/commits/abc123/diff"));
+  assert.ok(allowed("GET", "/v1/agents/Rex/commits/abc123/diff"));
+});
+
 test("what the GUI never calls stays refused", () => {
   assert.ok(!allowed("POST", "/v1/shutdown"));
   assert.ok(!allowed("GET", "/v1/me"));

@@ -63,3 +63,14 @@ test("inline: italic, strikethrough, safe links, snake_case stays text", () => {
   assert.deepEqual(parseInline("call agent_list now"), [{ t: "text", text: "call agent_list now" }]);
   assert.deepEqual(parseInline("2 * 3 * 4"), [{ t: "text", text: "2 * 3 * 4" }]);
 });
+
+test("inline: links to local files become file nodes, with their line", () => {
+  assert.deepEqual(parseInline("见 [main.rs](crates/cli/src/main.rs:12)"), [
+    { t: "text", text: "见 " },
+    { t: "file", path: "crates/cli/src/main.rs", line: 12, children: [{ t: "text", text: "main.rs" }] },
+  ]);
+  assert.deepEqual(parseInline("[说明](docs/cli.md#L3)"), [{ t: "file", path: "docs/cli.md", line: 3, children: [{ t: "text", text: "说明" }] }]);
+  assert.deepEqual(parseInline("[todo](C:/work/notes/todo.md)"), [{ t: "file", path: "C:/work/notes/todo.md", children: [{ t: "text", text: "todo" }] }]);
+  assert.deepEqual(parseInline("[x](file:///etc/passwd)"), [{ t: "text", text: "[x](file:///etc/passwd)" }]);
+  assert.deepEqual(parseInline("[x](vbscript:msgbox)"), [{ t: "text", text: "[x](vbscript:msgbox)" }]);
+});

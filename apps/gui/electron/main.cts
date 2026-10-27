@@ -141,6 +141,59 @@ ipcMain.handle("dialog:pick-folder", async (event) => {
   return result.canceled ? null : (result.filePaths[0] ?? null);
 });
 
+/** A scope's API prefix: a session, a run, or a task of a run. */
+const FILE_SCOPE = /^\/v1\/(agents\/[^/?#]+|runs\/[^/?#]+(\/tasks\/[^/?#]+)?)$/;
+
+/**
+ * Files the system would run rather than show: an agent can write one and link it, so opening
+ * it with its default program is refused (the in-app viewer still shows it).
+ */
+const RUNS_WHEN_OPENED =
+  /\.(exe|com|bat|cmd|ps1|psm1|vbs|vbe|js|jse|wsf|wsh|msi|msp|scr|pif|cpl|hta|lnk|url|reg|jar|app|command|sh|desktop|appimage)$/i;
+
+/**
+ * Opens a workspace file with the system's default program; resolves to an error message or
+ * null. The path is never trusted as given: the hub's `files/resolve` says where it is, and
+ * refuses (empty path, or 403) anything outside the scope's root.
+ */
+ipcMain.handle("shell:open-path", async (event, scope: unknown, path: unknown) => {
+  try {
+    if (!fromApp(event)) throw new Error("request from an unknown page");
+    if (typeof scope !== "string" || !FILE_SCOPE.test(scope)) throw new Error(`not a file scope: ${scope}`);
+    if (typeof path !== "string" || !path) throw new Error("no path to open");
+    await localHub?.ready();
+    const { base, token } = await connection();
+    let response: Response;
+    try {
+      response = await fetch(`${base}${scope}/files/resolve`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ paths: [path] }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (err) {
+      throw new Error(`cannot reach the hub: ${message(err)}`);
+    }
+    const text = await response.text();
+    if (response.status >= 400) {
+      let reason = text || `HTTP ${response.status}`;
+      try {
+        reason = JSON.parse(text).error?.message ?? reason;
+      } catch {
+        // Not an API error body.
+      }
+      throw new Error(reason);
+    }
+    const entry = (JSON.parse(text) as { entries?: { path?: string | null; abs_path?: string | null }[] }).entries?.[0];
+    if (!entry?.path || !entry.abs_path) throw new Error("文件不存在或不在工作区内");
+    if (RUNS_WHEN_OPENED.test(entry.abs_path)) throw new Error("可执行文件或脚本不会用默认程序打开，请在查看器里阅读");
+    const failure = await shell.openPath(entry.abs_path);
+    return failure || null;
+  } catch (err) {
+    return message(err);
+  }
+});
+
 /** One event relay per page; a reload starts a new one. */
 const relays = new Map<number, AbortController>();
 

@@ -6,6 +6,7 @@ import type { Account } from "@bindings/Account";
 import type { AccountUsageGroup } from "@bindings/AccountUsageGroup";
 import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
 import type { ChangesResponse } from "@bindings/ChangesResponse";
+import type { CommitGraph } from "@bindings/CommitGraph";
 import type { CliInstallAccepted } from "@bindings/CliInstallAccepted";
 import type { AttachmentContent } from "@bindings/AttachmentContent";
 import type { Task } from "@bindings/Task";
@@ -44,6 +45,36 @@ import type { Transcript } from "@bindings/Transcript";
 import type { TurnDiffResponse } from "@bindings/TurnDiffResponse";
 import type { UsageGroup } from "@bindings/UsageGroup";
 import type { UsageResponse } from "@bindings/UsageResponse";
+import type { FileTreeResponse } from "@bindings/FileTreeResponse";
+import type { FileContentResponse } from "@bindings/FileContentResponse";
+import type { ResolvePathsRequest } from "@bindings/ResolvePathsRequest";
+import type { ResolvePathsResponse } from "@bindings/ResolvePathsResponse";
+
+/**
+ * Whose files a path is relative to: a session's working directory, a run's integration
+ * checkout, or a task's worktree.
+ */
+export type FileScope =
+  | { kind: "agent"; agent: string }
+  | { kind: "run"; run: string }
+  | { kind: "task"; run: string; task: string };
+
+/** The API prefix of a scope, e.g. `/v1/runs/0193-abc/tasks/auth`. */
+export function scopePath(scope: FileScope): string {
+  switch (scope.kind) {
+    case "agent":
+      return `/v1/agents/${encodeURIComponent(scope.agent)}`;
+    case "run":
+      return `/v1/runs/${encodeURIComponent(scope.run)}`;
+    case "task":
+      return `/v1/runs/${encodeURIComponent(scope.run)}/tasks/${encodeURIComponent(scope.task)}`;
+  }
+}
+
+/** A stable key for a scope, for caches. */
+export function scopeKey(scope: FileScope): string {
+  return scopePath(scope);
+}
 
 /**
  * The Electron preload bridge (electron/preload.cts), or the mock one in `preview:mock`;
@@ -120,6 +151,52 @@ async function request<T>(method: Method, path: string, body?: unknown): Promise
 
 const enc = encodeURIComponent;
 
+function treeQuery(path: string, all: boolean, ref?: string): string {
+  return `path=${enc(path)}${all ? "&all=true" : ""}${ref ? `&ref=${enc(ref)}` : ""}`;
+}
+
+function contentQuery(path: string, ref?: string): string {
+  return `path=${enc(path)}${ref ? `&ref=${enc(ref)}` : ""}`;
+}
+
+// One literal path per scope kind: allowed.test.cts reads every call's path from this file.
+function filesTree(scope: FileScope, path = "", all = false, ref?: string): Promise<FileTreeResponse> {
+  const q = treeQuery(path, all, ref);
+  switch (scope.kind) {
+    case "agent":
+      return request<FileTreeResponse>("GET", `/v1/agents/${enc(scope.agent)}/files/tree?${q}`);
+    case "run":
+      return request<FileTreeResponse>("GET", `/v1/runs/${enc(scope.run)}/files/tree?${q}`);
+    case "task":
+      return request<FileTreeResponse>("GET", `/v1/runs/${enc(scope.run)}/tasks/${enc(scope.task)}/files/tree?${q}`);
+  }
+}
+
+function filesContent(scope: FileScope, path: string, ref?: string): Promise<FileContentResponse> {
+  const q = contentQuery(path, ref);
+  switch (scope.kind) {
+    case "agent":
+      return request<FileContentResponse>("GET", `/v1/agents/${enc(scope.agent)}/files/content?${q}`);
+    case "run":
+      return request<FileContentResponse>("GET", `/v1/runs/${enc(scope.run)}/files/content?${q}`);
+    case "task":
+      return request<FileContentResponse>("GET", `/v1/runs/${enc(scope.run)}/tasks/${enc(scope.task)}/files/content?${q}`);
+  }
+}
+
+/** Which of `paths` exist inside the scope's root; in input order, `path` empty when not. At most 200. */
+function filesResolve(scope: FileScope, paths: string[]): Promise<ResolvePathsResponse> {
+  const body = { paths } satisfies ResolvePathsRequest;
+  switch (scope.kind) {
+    case "agent":
+      return request<ResolvePathsResponse>("POST", `/v1/agents/${enc(scope.agent)}/files/resolve`, body);
+    case "run":
+      return request<ResolvePathsResponse>("POST", `/v1/runs/${enc(scope.run)}/files/resolve`, body);
+    case "task":
+      return request<ResolvePathsResponse>("POST", `/v1/runs/${enc(scope.run)}/tasks/${enc(scope.task)}/files/resolve`, body);
+  }
+}
+
 export const api = {
   info: () => request<HubInfo>("GET", "/v1/info"),
 
@@ -178,6 +255,18 @@ export const api = {
   taskDiff: (run: string, task: string) => request<ChangesResponse>("GET", `/v1/runs/${enc(run)}/tasks/${enc(task)}/diff`),
   /** What landing the run would bring into its base branch. */
   runDiff: (run: string) => request<ChangesResponse>("GET", `/v1/runs/${enc(run)}/diff`),
+  /** The commit graph of the run's branches (base, run branch, tasks), newest first in topo order. */
+  runGraph: (run: string, limit?: number) =>
+    request<CommitGraph>("GET", `/v1/runs/${enc(run)}/graph${limit ? `?limit=${limit}` : ""}`),
+  /** The commit graph of the session's checkout (HEAD and local branches). */
+  agentGraph: (agent: string, limit?: number) =>
+    request<CommitGraph>("GET", `/v1/agents/${enc(agent)}/graph${limit ? `?limit=${limit}` : ""}`),
+  /** What one commit of the run's graph changed, against its first parent. */
+  runCommitDiff: (run: string, sha: string) =>
+    request<ChangesResponse>("GET", `/v1/runs/${enc(run)}/commits/${enc(sha)}/diff`),
+  /** The same for a commit of the session's checkout. */
+  agentCommitDiff: (agent: string, sha: string) =>
+    request<ChangesResponse>("GET", `/v1/agents/${enc(agent)}/commits/${enc(sha)}/diff`),
   /** What happened in a run, by task, from its events. */
   runTrace: (run: string) => request<RunTrace>("GET", `/v1/runs/${enc(run)}/trace`),
   /** The person's comments, to the task's worker as its next turn; `rework` sends the task back. */
@@ -197,6 +286,12 @@ export const api = {
   accountUsage: (id: string, by: AccountUsageGroup) =>
     request<AccountUsageResponse>("GET", `/v1/accounts/${enc(id)}/usage?by=${by}`),
   login: (id: string) => request<LoginStarted>("POST", `/v1/accounts/${enc(id)}/login`),
+
+  /** One directory of the scope's root, lazily; `all` lists gitignored entries too. */
+  filesTree,
+  /** A file's text (up to 1 MiB), or `binary` without it. */
+  filesContent,
+  filesResolve,
 };
 
 export function errorText(err: unknown): string {

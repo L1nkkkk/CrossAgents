@@ -6,6 +6,7 @@
 
 import type { AgentExecution } from "@bindings/AgentExecution";
 import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
+import type { CommitGraph } from "@bindings/CommitGraph";
 import type { Agent } from "@bindings/Agent";
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
 import type { HumanItem } from "@bindings/HumanItem";
@@ -27,6 +28,7 @@ import { turnStat } from "../lib/diff";
 import { effortOf } from "../lib/models";
 import { applyEvent } from "../session";
 import { capabilitiesOf, driverOf, transcript, uid } from "./fixtures";
+import { mockContent, mockResolve, mockTree } from "./files.mock";
 
 /** Names the mock hub makes up, like the real one (see crates/core/src/names.rs). */
 const MOCK_NAMES = ["Nova", "Iris", "Atlas", "Orion", "Vega", "Lyra", "Mira", "Sage"];
@@ -42,6 +44,10 @@ export type MockState = {
   taskDiffs: Map<string, string>;
   /** Each run's branch against its base (before landing), by run id. */
   runDiffs: Map<string, string>;
+  /** Commit graphs (`GET .../graph`), by run id or agent id; absent: no commits. */
+  graphs?: Map<string, CommitGraph>;
+  /** What each commit of those graphs changed against its first parent, by sha. */
+  commitDiffs?: Map<string, string>;
   /** Run traces (docs/tasks/DOGFOOD.md §8), by run id; absent: tasks only. */
   traces: Map<string, RunTrace>;
   /** Files sent with messages, by id: type and base64 bytes. */
@@ -117,6 +123,8 @@ const LATENCY = 40;
 const STARTUP = 2_500;
 const json = (status: number, body?: unknown): HubResponse => ({ status, body: body === undefined ? "" : JSON.stringify(body) });
 const notFound = (what: string) => json(404, { error: { code: "not_found", message: `${what} not found` } });
+/** `{scope}/files/{tree|content|resolve}`; every scope answers from the same mock workspace. */
+const FILES_ROUTE = /^\/v1\/(?:agents\/[^/]+|runs\/[^/]+(?:\/tasks\/[^/]+)?)\/files\/(tree|content|resolve)$/;
 
 export class MockBridge implements CrossAgentsBridge {
   private seq = 1000;
@@ -182,6 +190,11 @@ export class MockBridge implements CrossAgentsBridge {
 
   async pickFolder() {
     return "C:/work/new-project";
+  }
+
+  async openPath(scope: string, path: string) {
+    // No desktop to open it on in a browser.
+    console.info("mock openPath", scope, path);
   }
 
   setTheme() {
@@ -339,6 +352,22 @@ export class MockBridge implements CrossAgentsBridge {
         if (d.run.in_place) return json(409, { error: { code: "conflict", message: "this directory is not under version control, so there is no diff" } });
         return json(200, { base: d.run.base_branch, head: d.run.branch, diff: s.runDiffs.get(d.run.id) ?? "", truncated: false });
       }
+      if ((m = p.match(/^\/v1\/(runs|agents)\/([^/]+)\/graph$/))) {
+        const id = m[1] === "runs" ? s.runs.find((x) => x.run.id === m![2])?.run.id : this.agent(m[2])?.id;
+        if (!id) return notFound(m[1] === "runs" ? "run" : "agent");
+        if (m[1] === "runs" && s.runs.find((x) => x.run.id === id)!.run.in_place)
+          return json(409, { error: { code: "conflict", message: "this directory is not under version control, so there is no commit graph" } });
+        const graph = s.graphs?.get(id) ?? { refs: [], commits: [], truncated: false };
+        const limit = Number(url.searchParams.get("limit") ?? 200);
+        return json(200, { ...graph, commits: graph.commits.slice(0, limit), truncated: graph.truncated || graph.commits.length > limit });
+      }
+      if ((m = p.match(/^\/v1\/(runs|agents)\/([^/]+)\/commits\/([^/]+)\/diff$/))) {
+        const id = m[1] === "runs" ? s.runs.find((x) => x.run.id === m![2])?.run.id : this.agent(m[2])?.id;
+        const sha = decodeURIComponent(m[3]);
+        const commit = id ? s.graphs?.get(id)?.commits.find((c) => c.sha === sha) : undefined;
+        if (!commit) return notFound(`commit ${sha}`);
+        return json(200, { base: commit.parents[0] ?? "", head: sha, diff: s.commitDiffs?.get(sha) ?? "", truncated: false });
+      }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/attachments\/([^/]+)$/))) {
         const file = s.files.get(decodeURIComponent(m[2]));
         return file ? json(200, { id: m[2], mime: file.mime, size: file.data.length, data: file.data }) : notFound("attachment");
@@ -358,10 +387,20 @@ export class MockBridge implements CrossAgentsBridge {
       if ((m = p.match(/^\/v1\/accounts\/([^/]+)\/usage$/)))
         return json(200, s.accountUsage ?? { by: url.searchParams.get("by") ?? "day", rows: [], total: { sessions: 0, input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0 }, total_cache_hit_rate: 0 });
       if (p === "/v1/plugins") return json(200, { plugins: s.plugins });
+      if ((m = p.match(FILES_ROUTE)) && m[1] !== "resolve") {
+        const at = url.searchParams.get("path") ?? "";
+        if (m[1] === "tree") {
+          const tree = mockTree(at, url.searchParams.get("all") === "true");
+          return tree ? json(200, tree) : notFound(`directory ${at}`);
+        }
+        const file = mockContent(at);
+        return file ? json(200, file) : notFound(`file ${at}`);
+      }
       return notFound(p);
     }
 
     if (method === "POST") {
+      if ((m = p.match(FILES_ROUTE)) && m[1] === "resolve") return json(200, { entries: mockResolve((body as { paths: string[] }).paths ?? []) });
       if (p === "/v1/agents") {
         const req = body as CreateAgentRequest;
         const taken = (n: string) => s.agents.some((a) => a.name.toLowerCase() === n.toLowerCase());
