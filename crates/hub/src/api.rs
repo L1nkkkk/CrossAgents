@@ -28,7 +28,8 @@ use crossagents_api_types::{
     PluginInfo, QuotaResponse, RejectRunRequest, RenameAgentRequest, ResolvePathsRequest,
     ResolvePathsResponse, ResolvedPath, RunDetail, RunTrace, SendMessageRequest,
     SendMessageResponse, SetModelRequest, SetPluginModelsRequest, SetTopicRequest,
-    TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse, UsageGroup, UsageResponse,
+    TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse, UpdateRunPolicyRequest, UsageGroup,
+    UsageResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, AttachmentSupport,
@@ -143,6 +144,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{key}/reject", post(reject_run))
         .route("/v1/runs/{key}/cancel", post(cancel_run))
         .route("/v1/runs/{key}/land", post(land_run))
+        .route("/v1/runs/{key}/policy", post(update_run_policy))
         .route("/v1/runs/{key}/finish", post(finish_run))
         .route("/v1/runs/{key}/diff", get(run_diff))
         .route("/v1/runs/{key}/trace", get(run_trace))
@@ -1317,6 +1319,69 @@ async fn land_run(
         .orchestrator
         .land(id, req.mode.unwrap_or(LandMode::Merge), "person", None)
         .await?;
+    run_detail(&state, id).await
+}
+
+/// The person changes how a run that is already going continues by itself, and may hand its
+/// allowance out again (a run whose wakeups ran out otherwise stays where it is until the
+/// person writes to the lead). The clock reads the policy back on every tick, so the write
+/// is all it takes; `null` on `continuation` in the run is what the clock checks.
+async fn update_run_policy(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(req): Json<UpdateRunPolicyRequest>,
+) -> ApiResult<Json<RunDetail>> {
+    if req.continuation.is_none() && !req.reset_attempts {
+        return Err(AppError::bad_request(
+            "say what to change: continuation (on or off, with its limits) or reset_attempts",
+        ));
+    }
+    let id = resolve_run(&state, &key).await?;
+    let mut run = state.store().get_run(id).await?;
+    if let Some(update) = req.continuation {
+        if update.enabled {
+            // Kept as a value and edited field by field: a limit the request does not
+            // mention keeps what the run had (or the default when it had no policy), and a
+            // limit added to the policy later does not have to be named here.
+            let mut policy = run.config.policy.continuation.take().unwrap_or_default();
+            if let Some(max_attempts) = update.max_attempts {
+                policy.max_attempts = max_attempts;
+            }
+            if let Some(interval_seconds) = update.interval_seconds {
+                policy.interval_seconds = interval_seconds;
+            }
+            run.config.policy.continuation = Some(policy);
+        } else {
+            // Off leaves nothing behind for the clock (or a client) to read as still on.
+            run.config.policy.continuation = None;
+            run.continuation = None;
+        }
+    }
+    if req.reset_attempts
+        && let Some(mut continuation) = run.continuation.take()
+    {
+        // A fresh allowance: the cap is counted from zero, and the fact that the person
+        // was told the old one ran out is forgotten, so the next exhaustion tells again.
+        continuation.attempts = 0;
+        continuation.exhausted_notified = false;
+        // The clock arms the next wakeup from the interval it reads; it does not fire
+        // one immediately.
+        continuation.next_at = None;
+        run.continuation = Some(continuation);
+    }
+    run.updated_at = Utc::now();
+    state.store().update_run(&run).await?;
+    if let Some(continuation) = run.continuation.as_deref()
+        && let Err(error) = state
+            .bus
+            .publish(EventKind::RunContinuationChanged {
+                id,
+                state: continuation.clone(),
+            })
+            .await
+    {
+        tracing::error!(%error, run = %id, "cannot publish a policy change");
+    }
     run_detail(&state, id).await
 }
 
