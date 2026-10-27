@@ -518,6 +518,38 @@ export class MockBridge implements CrossAgentsBridge {
         this.emit({ type: "run.status_changed", data: { id: d.run.id, from: d.run.status, to, note: m[2] === "reject" ? ((body as { reason?: string })?.reason ?? null) : null } });
         return json(200, d);
       }
+      if ((m = p.match(/^\/v1\/runs\/([^/]+)\/policy$/))) {
+        // The person's change to how the run continues by itself (crates/hub/src/api.rs).
+        const d = s.runs.find((x) => x.run.id === decodeURIComponent(m![1]));
+        if (!d) return notFound("run");
+        const req = body as {
+          continuation?: {
+            enabled: boolean;
+            max_attempts?: number;
+            interval_seconds?: number;
+            stuck_minutes?: number | null;
+          };
+          reset_attempts?: boolean;
+        };
+        if (req.continuation?.enabled) {
+          const had = d.run.config.policy.continuation ?? { max_attempts: 3, interval_seconds: 60, stuck_minutes: null };
+          d.run.config.policy.continuation = {
+            max_attempts: req.continuation.max_attempts ?? had.max_attempts,
+            interval_seconds: req.continuation.interval_seconds ?? had.interval_seconds,
+            // Unstated keeps what the run had; `null` turns the quiet-wait report off.
+            stuck_minutes:
+              req.continuation.stuck_minutes === undefined ? had.stuck_minutes : req.continuation.stuck_minutes,
+          };
+        } else if (req.continuation) {
+          d.run.config.policy.continuation = null;
+          d.run.continuation = null;
+        }
+        if (req.reset_attempts && d.run.continuation) {
+          d.run.continuation = { ...d.run.continuation, attempts: 0, next_at: null, exhausted_notified: false };
+        }
+        if (d.run.continuation) this.emit({ type: "run.continuation_changed", data: { id: d.run.id, state: d.run.continuation } });
+        return json(200, d);
+      }
       if ((m = p.match(/^\/v1\/runs\/([^/]+)\/tasks\/([^/]+)\/review$/))) return this.review(m[1], m[2], body as TaskReviewRequest);
       if (p === "/v1/repos/init") return json(200, body);
       if ((m = p.match(/^\/v1\/questions\/([^/]+)\/(answer|dismiss)$/))) {

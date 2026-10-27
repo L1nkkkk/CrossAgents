@@ -40,7 +40,7 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "GET", path: /^\/v1\/runs\/[^/]+$/, level: "read" },
   // `?branches=&force=` rides along; `route()` drops it before matching.
   { method: "DELETE", path: /^\/v1\/runs\/[^/]+$/, level: "write" },
-  { method: "POST", path: /^\/v1\/runs\/[^/]+\/(approve|reject|cancel|land|finish)$/, level: "write" },
+  { method: "POST", path: /^\/v1\/runs\/[^/]+\/(approve|reject|cancel|land|finish|policy)$/, level: "write" },
   { method: "GET", path: /^\/v1\/runs\/[^/]+\/diff$/, level: "read" },
   { method: "GET", path: /^\/v1\/runs\/[^/]+\/trace$/, level: "read" },
   { method: "GET", path: /^\/v1\/runs\/[^/]+\/tasks\/[^/]+\/diff$/, level: "read" },

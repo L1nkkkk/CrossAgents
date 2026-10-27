@@ -559,6 +559,44 @@ pub struct ContinuationState {
     pub next_at: Option<DateTime<Utc>>,
     pub last_attempt_at: Option<DateTime<Utc>>,
     pub delivery_error: Option<String>,
+    /// The person was told that the attempts ran out. Kept in the run record, so the
+    /// check that repeats every few seconds, and a restarted hub reading this record,
+    /// both see that the notice was already made. Cleared when the run is re-armed below
+    /// the cap (attempts reset), so a later exhaustion tells them again.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub exhausted_notified: bool,
+    /// The person was told that a wakeup could not be delivered. One notice per run of
+    /// consecutive failures; cleared once a delivery succeeds, so the next failure after
+    /// that is a new fact worth one notice. Persisted for the same reason as above.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub delivery_error_notified: bool,
+    /// The opt-in stuck watch (`ContinuationPolicy::stuck_minutes`): when this run last
+    /// showed durable progress while it waits on a busy agent. Absent unless that policy is
+    /// set and the run is in such a phase; old records read it back as absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck_watch: Option<StuckWatch>,
+}
+
+/// Progress bookmark of the stuck watch. It lives in the run record, so a restarted hub
+/// resumes the same quiet stretch instead of forgetting it. It only ever says when
+/// `continuation_step` last saw progress; waking still goes through `attempts`/`next_at`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct StuckWatch {
+    /// When durable progress was last seen: the newest `updated_at` among the run and its
+    /// tasks, or the time of the newest event one of the run's own agents appended.
+    pub progress_at: DateTime<Utc>,
+    /// The event log was read up to this sequence number. Events after it are new; the
+    /// watch keeps this fresh so the next look only reads what happened since.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub event_seq: u64,
+}
+
+/// Keeps a `false` flag out of the run JSON: old records read it back as `false`, and
+/// clients see the field as optional.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[cfg(test)]
@@ -652,5 +690,55 @@ mod tests {
         let spec: TaskSpec = serde_json::from_str(r#"{"goal":"do it"}"#).unwrap();
         assert_eq!(spec.goal, "do it");
         assert!(spec.acceptance.is_empty() && spec.scope.allow.is_empty());
+    }
+
+    #[test]
+    fn continuation_state_recorded_before_notices_loads_as_not_notified() {
+        let now = Utc::now();
+        let old = serde_json::json!({
+            "owner": AgentId::new(), "phase": "exhausted", "next_step": "a person must look",
+            "attempts": 3, "next_at": null, "last_attempt_at": now, "delivery_error": null,
+        });
+        let state: ContinuationState = serde_json::from_value(old).unwrap();
+        assert!(!state.exhausted_notified);
+        assert!(!state.delivery_error_notified);
+        assert!(
+            state.stuck_watch.is_none(),
+            "a run recorded before the stuck watch has none"
+        );
+    }
+
+    #[test]
+    fn a_stuck_watch_round_trips_and_stays_out_of_records_without_one() {
+        let now = Utc::now();
+        let state = ContinuationState {
+            owner: AgentId::new(),
+            phase: "waiting_tasks".into(),
+            next_step: "wait".into(),
+            attempts: 1,
+            next_at: None,
+            last_attempt_at: None,
+            delivery_error: None,
+            exhausted_notified: false,
+            delivery_error_notified: false,
+            stuck_watch: Some(StuckWatch {
+                progress_at: now,
+                event_seq: 42,
+            }),
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["stuck_watch"]["event_seq"], 42);
+        assert_eq!(
+            serde_json::from_value::<ContinuationState>(json).unwrap(),
+            state
+        );
+
+        let mut without = state.clone();
+        without.stuck_watch = None;
+        let json = serde_json::to_value(&without).unwrap();
+        assert!(
+            json.get("stuck_watch").is_none(),
+            "the default record stays as it was: {json}"
+        );
     }
 }

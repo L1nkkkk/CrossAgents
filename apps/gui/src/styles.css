@@ -172,6 +172,8 @@ h3 { font-size: 14px; font-weight: 600; margin: 0 0 6px; }
 .pre { white-space: pre-wrap; word-break: break-word; }
 .spacer { flex: 1; }
 .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+/* A row of fields aligned at their tops: labels of different heights start level. */
+.row-top { align-items: flex-start; }
 ::selection { background: var(--accent-bg); }
 
 /* ---- Controls ---------------------------------------------------------------------- */
@@ -201,6 +203,9 @@ textarea { resize: vertical; }
 .form { display: flex; flex-direction: column; gap: 12px; }
 .field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 160px; }
 .field > span { font-size: 12px; color: var(--text-2); }
+/* A field's checkbox with its words on the same line. */
+.field-check { display: flex; gap: 8px; align-items: center; }
+.field-check input { width: auto; }
 .check { display: flex; gap: 6px; align-items: center; color: var(--text-2); }
 .check input { width: auto; }
 .error { background: var(--danger-bg); color: var(--danger-text); border-radius: var(--radius); padding: 8px 12px; white-space: pre-wrap; word-break: break-word; }

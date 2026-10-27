@@ -3,4 +3,11 @@
 /**
  * Optional, bounded supervisor wakeups. The cap is per run, not per task.
  */
-export type ContinuationPolicy = { max_attempts: number, interval_seconds: number, };
+export type ContinuationPolicy = { max_attempts: number, interval_seconds: number, 
+/**
+ * Report a run that waits on a busy agent to the lead when the run's own durable
+ * facts show no progress for this many minutes. `None` (the default) keeps waiting
+ * in silence forever, exactly as before; the report never interrupts a turn, it only
+ * asks the lead to decide. Shares `max_attempts` with the other wakeups.
+ */
+stuck_minutes: number | null, };

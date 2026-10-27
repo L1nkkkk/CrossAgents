@@ -1,7 +1,7 @@
 // UI strings (docs/tasks/V6-GUI.md §7). `t(key, vars)` looks a key up in the current locale and
-// fills `{name}` placeholders. Only zh-CN exists so far; Sidebar.tsx, Home.tsx and strips.tsx
-// are the first files moved over, the rest follow. Terms stay as they are in every locale:
-// run, Planner, Worker, Reviewer, hub. i18n.test.ts checks that no key is missing.
+// fills `{name}` placeholders. Only zh-CN exists so far; Sidebar.tsx, Home.tsx, strips.tsx and
+// the continuation parts of Run.tsx are moved over, the rest follow. Terms stay as they are in
+// every locale: run, Planner, Worker, Reviewer, hub. i18n.test.ts checks that no key is missing.
 
 const zhCN = {
   "common.clear": "清除",
@@ -60,6 +60,46 @@ const zhCN = {
   "strip.dismiss": "不再提示 {name}",
   "strip.noTasks": "还没有任务",
   "strip.openRun": "run",
+  "strip.continuationExhausted": "持续推进已达上限 · 需要处理",
+
+  "continuation.summary": "持续推进：{phase} · 已唤醒 {attempts}/{max} 次",
+  "continuation.owner": "负责人：{name}",
+  "continuation.nextCheck": "下次检查：{time}",
+  "continuation.deliveryError": "通知未送达：{error}",
+  "continuation.phase.ended": "已结束",
+  "continuation.phase.paused": "已暂停",
+  "continuation.phase.waiting_approval": "等待批准计划",
+  "continuation.phase.unavailable": "主管不可用",
+  "continuation.phase.waiting_human": "等待你的回答",
+  "continuation.phase.working": "主管正在处理",
+  "continuation.phase.waiting_tasks": "等待任务执行",
+  "continuation.phase.waiting_checks": "等待检查",
+  "continuation.phase.finalize": "等待整体验收",
+  "continuation.phase.continue": "等待继续开发",
+  "continuation.phase.recover": "等待主管处理停滞",
+  "continuation.phase.exhausted": "次数已用完，需要人工处理",
+  "continuation.off": "持续推进：关闭",
+  "continuation.title": "持续推进",
+  "continuation.enable": "停滞时唤醒主管",
+  "continuation.hint": "hub 发现没人干活时唤醒主管，次数用完就停下。等待你回答或暂停时不催促。",
+  "continuation.maxAttempts": "最多唤醒次数（整个 Work）",
+  "continuation.interval": "等待间隔（秒）",
+  "continuation.save": "保存策略",
+  "continuation.saved": "已保存",
+  "continuation.saveDisabled": "请先改正填错的次数或间隔。",
+  "continuation.reset": "重新加额度",
+  "continuation.resetHint": "把已唤醒次数归零，让耗尽的持续推进再试；不会立刻唤醒，下一次检查按间隔来。",
+  "continuation.resetDisabled": "持续推进已关闭，没有可以加额度的记录：先打开并保存策略。",
+  "continuation.resetDone": "已重新加额度，次数从零算起。",
+  "continuation.stuck": "无进展多久上报（分钟）",
+  "continuation.stuckOff": "不上报",
+  "continuation.stuckHint": "等一个忙着的 agent 时，记录这么久没动就提醒主管；留空则不提醒。只提醒，不中断。",
+  "continuation.invalidStuck": "「无进展多久上报」留空表示不上报，要填就填 1–1440 的整数。",
+  "continuation.invalidMax":"唤醒次数要填 1–100 的整数。",
+  "continuation.invalidInterval": "等待间隔要填 1–86400 秒的整数。",
+  "continuation.forbidden": "这个凭据没有写权限（需要 write 级别），改不了 run 的策略。",
+  "continuation.saveFailed": "没能保存：{error}",
+  "continuation.resetFailed": "没能重新加额度：{error}",
 
   "home.title": "今天想做点什么？",
   "home.placeholder": "描述要做的事，比如：把登录页改成 OAuth，旧的密码登录保留",
@@ -105,6 +145,11 @@ const zhCN = {
   "home.maxTokens": "Token 上限（千）",
   "home.unlimited": "不限",
   "home.notUsed": "（不用）",
+  "home.continuation": "持续推进",
+  "home.continuationWake": "停滞时唤醒主管",
+  "home.continuationHint": "等待回答或暂停时不催促；仍遵守验收与落地权限。",
+  "home.continuationMaxAttempts": "最多唤醒次数（整个 Work）",
+  "home.continuationInterval": "等待间隔（秒）",
 } as const;
 
 export type Key = keyof typeof zhCN;

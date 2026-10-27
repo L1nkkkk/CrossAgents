@@ -3,8 +3,8 @@
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use crossagents_api_types::{
-    CreateRunRequest, DeleteRunResponse, Event, EventKind, ListRunsResponse, RejectRunRequest, Run,
-    RunDetail, RunTrace, Task, TaskStatus, handoff,
+    ContinuationUpdate, CreateRunRequest, DeleteRunResponse, Event, EventKind, ListRunsResponse,
+    RejectRunRequest, Run, RunDetail, RunTrace, Task, TaskStatus, UpdateRunPolicyRequest, handoff,
 };
 
 use super::Context;
@@ -77,6 +77,33 @@ pub enum RunCommand {
     Reject { run: String, reason: String },
     /// Stop all work on a run.
     Cancel { run: String },
+    /// Change how an existing run continues by itself, and hand its allowance out again.
+    Policy {
+        run: String,
+        /// Wake the lead when nothing is executing, if the run does not already.
+        #[arg(long)]
+        continue_run: bool,
+        /// Stop the wakeups; the run itself carries on.
+        #[arg(long, conflicts_with = "continue_run")]
+        no_continue: bool,
+        /// Wakeups the run may have from now on, in all (default: what it had, or 3).
+        #[arg(long, requires = "continue_run")]
+        attempts: Option<u32>,
+        /// Seconds between wakeups (default: what the run had, or 60).
+        #[arg(long, requires = "continue_run")]
+        interval: Option<u32>,
+        /// Put the allowance back: a run whose wakeups ran out is woken again.
+        #[arg(long, requires = "continue_run")]
+        reset: bool,
+        /// Report the run to its lead when its own records go quiet for this many minutes
+        /// while it waits on a busy agent (default: what it had, or off). Only a report:
+        /// no turn is interrupted.
+        #[arg(long, requires = "continue_run")]
+        stuck_minutes: Option<u32>,
+        /// Stop reporting a quiet wait; the run keeps its other limits.
+        #[arg(long, requires = "continue_run", conflicts_with = "stuck_minutes")]
+        no_stuck: bool,
+    },
     /// Delete a run that ended, with its tasks and the agents it started.
     Rm {
         run: String,
@@ -109,7 +136,7 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
         let (Some(request), Some(planner)) = (start.request, start.planner) else {
             anyhow::bail!(
                 "usage: crossagents run \"<request>\" --planner <agent> [--worker <agent>] \
-                 (or a subcommand: ls, show, approve, reject, cancel, rm)"
+                 (or a subcommand: ls, show, approve, reject, cancel, policy, rm)"
             );
         };
         let req = CreateRunRequest {
@@ -129,6 +156,7 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
                     continuation: Some(crossagents_api_types::ContinuationPolicy {
                         max_attempts: start.continuation_attempts,
                         interval_seconds: start.continuation_interval,
+                        ..Default::default()
                     }),
                     ..Default::default()
                 }),
@@ -216,6 +244,43 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
             }
             println!("run {} cancelled", short_tail(&detail.run.id));
         }
+        RunCommand::Policy {
+            run,
+            continue_run,
+            no_continue,
+            attempts,
+            interval,
+            reset,
+            stuck_minutes,
+            no_stuck,
+        } => {
+            if !continue_run && !no_continue && !reset {
+                anyhow::bail!(
+                    "say what to change: --continue-run [--attempts N] [--interval S] \
+                     [--stuck-minutes M | --no-stuck] [--reset], or --no-continue"
+                );
+            }
+            let req = UpdateRunPolicyRequest {
+                continuation: (continue_run || no_continue).then_some(ContinuationUpdate {
+                    enabled: continue_run,
+                    max_attempts: attempts,
+                    interval_seconds: interval,
+                    // Said only when asked for: `--no-stuck` states null, a bare command
+                    // leaves the run's own setting alone.
+                    stuck_minutes: match (stuck_minutes, no_stuck) {
+                        (Some(minutes), _) => Some(Some(minutes)),
+                        (None, true) => Some(None),
+                        (None, false) => None,
+                    },
+                }),
+                reset_attempts: reset,
+            };
+            let detail: RunDetail = client.post(&format!("/v1/runs/{run}/policy"), &req).await?;
+            if ctx.json {
+                return print_json(&detail);
+            }
+            print_policy(&detail);
+        }
         RunCommand::Rm {
             run,
             branches,
@@ -232,6 +297,36 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// What a run continues by itself now, after a policy change: the limits it is woken under,
+/// and how much of the allowance is used.
+fn print_policy(detail: &RunDetail) {
+    let run = &detail.run;
+    let Some(policy) = &run.config.policy.continuation else {
+        println!(
+            "continuation off for run {}; it is no longer woken (the run itself goes on)",
+            short_tail(&run.id)
+        );
+        return;
+    };
+    let used = run.continuation.as_ref().map(|s| s.attempts).unwrap_or(0);
+    println!(
+        "continuation on for run {}: up to {} wakeup(s) every {}s, {used} used",
+        short_tail(&run.id),
+        policy.max_attempts,
+        policy.interval_seconds
+    );
+    match policy.stuck_minutes {
+        Some(minutes) => println!("stuck:    reported after {minutes} quiet minute(s)"),
+        None => println!("stuck:    a quiet wait is not reported"),
+    }
+    if let Some(state) = &run.continuation {
+        println!("phase:    {}", state.phase);
+        if let Some(at) = state.next_at {
+            println!("due:      {}", local_time(at));
+        }
+    }
 }
 
 /// What deleting a run removed, and what it could not (docs/tasks/R1.md §3.3).
@@ -272,6 +367,18 @@ fn print_detail(detail: &RunDetail, verbose: bool) {
         println!("note:     {note}");
     }
     println!("created:  {}", local_time(run.created_at));
+    match &run.config.policy.continuation {
+        Some(policy) => println!(
+            "policy:   continuation, up to {} wakeup(s) every {}s{}",
+            policy.max_attempts,
+            policy.interval_seconds,
+            match policy.stuck_minutes {
+                Some(minutes) => format!(", quiet for {minutes}min is reported"),
+                None => String::new(),
+            }
+        ),
+        None => println!("policy:   no automatic continuation"),
+    }
     if let Some(state) = &run.continuation {
         println!(
             "continuation: {} ({} wakeups, owner {})",
