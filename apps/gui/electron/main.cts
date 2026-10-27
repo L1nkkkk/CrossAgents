@@ -145,6 +145,13 @@ ipcMain.handle("dialog:pick-folder", async (event) => {
 const FILE_SCOPE = /^\/v1\/(agents\/[^/?#]+|runs\/[^/?#]+(\/tasks\/[^/?#]+)?)$/;
 
 /**
+ * Files the system would run rather than show: an agent can write one and link it, so opening
+ * it with its default program is refused (the in-app viewer still shows it).
+ */
+const RUNS_WHEN_OPENED =
+  /\.(exe|com|bat|cmd|ps1|psm1|vbs|vbe|js|jse|wsf|wsh|msi|msp|scr|pif|cpl|hta|lnk|url|reg|jar|app|command|sh|desktop|appimage)$/i;
+
+/**
  * Opens a workspace file with the system's default program; resolves to an error message or
  * null. The path is never trusted as given: the hub's `files/resolve` says where it is, and
  * refuses (empty path, or 403) anything outside the scope's root.
@@ -179,6 +186,7 @@ ipcMain.handle("shell:open-path", async (event, scope: unknown, path: unknown) =
     }
     const entry = (JSON.parse(text) as { entries?: { path?: string | null; abs_path?: string | null }[] }).entries?.[0];
     if (!entry?.path || !entry.abs_path) throw new Error("文件不存在或不在工作区内");
+    if (RUNS_WHEN_OPENED.test(entry.abs_path)) throw new Error("可执行文件或脚本不会用默认程序打开，请在查看器里阅读");
     const failure = await shell.openPath(entry.abs_path);
     return failure || null;
   } catch (err) {
