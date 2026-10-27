@@ -202,7 +202,10 @@ impl Orchestrator {
         }
         let name = self.name_of(agent).await.unwrap_or_else(|| agent.to_string());
         if claim.fresh {
-            if let Err(err) = self.put_away(agent).await {
+            // A lead copied for the run keeps its directory: its driver resumes only there,
+            // and restoring it brings the checkout back (`lead_returned`).
+            let keep_dir = claim.role == ClaimRole::Lead;
+            if let Err(err) = self.put_away(agent, keep_dir).await {
                 tracing::warn!(%agent, error = %err, "cannot archive the execution session");
             }
             Some(LetGo::Archived(name))
@@ -214,12 +217,12 @@ impl Orchestrator {
         }
     }
 
-    /// Archives an execution session and puts it back in its workspace, so that restoring
-    /// it resumes there rather than in a worktree that is gone.
-    async fn put_away(&self, agent: AgentId) -> Result<(), CoreError> {
+    /// Archives an execution session and, unless `keep_dir`, puts it back in its workspace,
+    /// so that restoring it resumes there rather than in a worktree that is gone.
+    async fn put_away(&self, agent: AgentId, keep_dir: bool) -> Result<(), CoreError> {
         self.host.archive_agent(agent).await?;
         let record = self.store.get_agent(&AgentKey::Id(agent)).await?;
-        if record.cwd != record.home() {
+        if !keep_dir && record.cwd != record.home() {
             self.store.update_agent_cwd(agent, record.home()).await?;
             let record = self.store.get_agent(&AgentKey::Id(agent)).await?;
             self.publish(EventKind::AgentUpdated { agent: record }).await;
@@ -246,15 +249,11 @@ impl Orchestrator {
         done
     }
 
-    /// Lets go of everything `run` holds; `keep_copied_lead` leaves a lead copied for the
-    /// run (it lives in the run's checkout as long as that is kept).
-    pub(crate) async fn let_go_run(&self, run: RunId, keep_copied_lead: bool) -> Vec<LetGo> {
+    /// Lets go of everything `run` holds.
+    pub(crate) async fn let_go_run(&self, run: RunId) -> Vec<LetGo> {
         let claims = self.store.list_claims(Some(run)).await.unwrap_or_default();
         let mut done = Vec::new();
         for claim in claims {
-            if keep_copied_lead && claim.role == ClaimRole::Lead && claim.fresh {
-                continue;
-            }
             done.extend(self.let_go(run, claim.agent_id).await);
         }
         done

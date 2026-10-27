@@ -151,8 +151,9 @@ async fn a_run_that_is_still_open_must_be_cancelled_first() {
     );
 }
 
-/// R1 §3.4: a landed run takes its checkout and its branches with it, leaves `/v1/runs`, and
-/// says so on the event stream. The lead's copy is archived, not deleted (S1 §3.4).
+/// R1 §3.4: a landed run takes its branches with it, leaves `/v1/runs`, and says so on the
+/// event stream. The lead's copy was archived when the run ended, its checkout gone with it
+/// (S1 §3.4); it is not deleted, and the delete puts it back in its workspace.
 #[tokio::test]
 async fn a_landed_run_goes_with_its_worktrees_branches_and_lead() {
     let (repo, t) = setup().await;
@@ -165,6 +166,10 @@ async fn a_landed_run_goes_with_its_worktrees_branches_and_lead() {
     assert_eq!(branches(repo.path()), vec![branch.clone()]);
 
     finish_with_a_change(&t, &run).await;
+    let copy = agent(&t, &lead).await;
+    assert!(!copy["archived_at"].is_null(), "{copy}");
+    assert_eq!(copy["cwd"], json!(checkout), "it keeps its directory: {copy}");
+    assert!(!Path::new(&checkout).exists(), "{checkout}");
     let resp = t
         .post(&format!("/v1/runs/{id}/land"), json!({ "mode": "merge" }))
         .await;
@@ -176,12 +181,9 @@ async fn a_landed_run_goes_with_its_worktrees_branches_and_lead() {
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let done: Value = resp.json().await.unwrap();
     assert_eq!(done["branches"], json!([branch]), "{done}");
-    assert_eq!(done["worktrees"], json!([checkout]), "{done}");
     assert_eq!(done["warnings"], json!([]), "{done}");
-    // The lead's copy was archived; its name is what the person saw. Nobody went home: the
-    // copy was the only session the run still held.
-    let copy = agent(&t, &lead).await;
-    assert_eq!(done["agents"]["archived"], json!([copy["name"]]), "{done}");
+    // The run held nobody any more: its copy was archived when it ended.
+    assert_eq!(done["agents"]["archived"], json!([]), "{done}");
     assert_eq!(done["agents"]["returned"], json!([]), "{done}");
 
     w.until(
@@ -251,13 +253,23 @@ async fn a_dirty_checkout_asks_for_force() {
     let run = start(&t).await;
     let id = run["id"].as_str().unwrap().to_owned();
     let lead = run["planner"].as_str().unwrap().to_owned();
-    // The person ends the run as it is: nothing merged, nothing landed, the checkout stays.
+    let checkout = std::path::PathBuf::from(agent(&t, &lead).await["cwd"].as_str().unwrap());
+    std::fs::write(checkout.join("left.txt"), "the lead's\n").unwrap();
+    // The person ends the run as it is: nothing merged, nothing landed. Its lead, a copy, is
+    // archived and the checkout goes (S1 §3.4), what it left committed to the run branch.
     let resp = t.post(&format!("/v1/runs/{id}/finish"), json!({})).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let finished: Value = resp.json().await.unwrap();
     assert!(finished["run"]["landed"].is_null(), "{finished}");
-    // Then something is left in its checkout, uncommitted.
-    let checkout = std::path::PathBuf::from(agent(&t, &lead).await["cwd"].as_str().unwrap());
+    assert!(!checkout.exists(), "{checkout:?}");
+    // The person restores the copy, which brings its checkout back, and something is left
+    // there uncommitted.
+    let resp = t
+        .post(&format!("/v1/agents/{lead}/archive"), json!({ "archived": false }))
+        .await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    assert!(checkout.is_dir(), "{checkout:?}");
+    assert!(checkout.join("left.txt").exists(), "{checkout:?}");
     std::fs::write(checkout.join("wip.txt"), "unfinished\n").unwrap();
 
     let resp = t.delete(&format!("/v1/runs/{id}")).await;

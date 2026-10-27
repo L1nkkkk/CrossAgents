@@ -379,7 +379,7 @@ impl Orchestrator {
             run.lead_note = Some(COPIED_LEAD_NOTE.into());
         }
         if let Err(err) = self.store.insert_run(&run).await {
-            self.let_go_run(run.id, false).await;
+            self.let_go_run(run.id).await;
             return Err(err);
         }
         self.publish(EventKind::RunCreated { run: run.clone() })
@@ -876,7 +876,7 @@ The person changed: {}",
             self.transition(&mut task, TaskStatus::Cancelled).await?;
         }
         // Its lead goes home (or is archived, a copy) before its checkout goes.
-        self.let_go_run(id, false).await;
+        self.let_go_run(id).await;
         self.remove_integration(&run).await;
         self.set_run_status(&mut run, RunStatus::Cancelled, Some("cancelled".into()))
             .await?;
@@ -1169,10 +1169,11 @@ The person changed: {}",
                 Some(format!("{missed} of {} tasks did not merge", tasks.len())),
             ),
         };
-        // The run lets go of everyone it holds; a lead copied for it stays in its checkout,
-        // where the person may still talk to it, until the run is deleted. The lead itself
-        // goes home, and its checkout goes once it has left (`checkout_vacated`).
-        self.let_go_run(run.id, true).await;
+        // The run lets go of everyone it holds: the lead itself goes home, and its checkout
+        // goes once it has left (`checkout_vacated`); a lead copied for it is archived, its
+        // history kept, and the checkout goes now (the callers committed what it left).
+        // Restoring the copy brings the checkout back (`lead_returned`).
+        self.let_go_run(run.id).await;
         if !self.lead_lives_in_integration(run).await {
             self.remove_integration(run).await;
         }
@@ -1216,13 +1217,17 @@ The person changed: {}",
         }
     }
 
+    /// Whether the run's lead is in its checkout and about: an archived copy keeps the
+    /// directory as its own, but nobody works there until it is restored.
     pub(crate) async fn lead_lives_in_integration(&self, run: &Run) -> bool {
         !run.in_place
             && self
                 .store
                 .get_agent(&AgentKey::Id(run.planner))
                 .await
-                .is_ok_and(|lead| lead.cwd == self.integration_path(run))
+                .is_ok_and(|lead| {
+                    lead.archived_at.is_none() && lead.cwd == self.integration_path(run)
+                })
     }
 
     /// Commits what the lead left uncommitted in the run's checkout, so that branching off

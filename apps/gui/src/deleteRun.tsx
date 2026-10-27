@@ -57,7 +57,7 @@ export function DeleteRunDialog({ detail, onClose }: { detail: RunDetail; onClos
           <dd>
             {lead}
             {copiedLead ? (
-              <span className="muted"> · 为这个 run 复制出来的主导，会归档，对话保留、可以恢复</span>
+              <span className="muted"> · 为这个 run 复制出来的主导，run 结束时已归档，对话保留、可以恢复</span>
             ) : (
               <span className="muted"> · 在工作区里，不受影响</span>
             )}

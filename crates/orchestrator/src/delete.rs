@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use crossagents_core::{CoreError, EventKind, Run, RunId};
+use crossagents_core::{AgentKey, CoreError, EventKind, Run, RunId};
 use serde::Serialize;
 
 use crate::claims::LetGo;
@@ -43,7 +43,7 @@ pub struct DeletedRun {
 pub struct DeletedRunAgents {
     /// Agents working for it themselves, back in their workspace.
     pub returned: Vec<String>,
-    /// Execution sessions it started (a lead copied for it, say), archived.
+    /// Execution sessions it started, archived.
     pub archived: Vec<String>,
 }
 
@@ -75,7 +75,7 @@ impl Orchestrator {
         let mut done = DeletedRun::default();
         // b. What the run still holds, by its own claims only: an agent another run holds now
         // is not touched. The agents themselves go home, its execution sessions are archived.
-        for gone in self.let_go_run(id, false).await {
+        for gone in self.let_go_run(id).await {
             match gone {
                 LetGo::Home(name) => done.agents.returned.push(name),
                 LetGo::Archived(name) => done.agents.archived.push(name),
@@ -100,9 +100,12 @@ impl Orchestrator {
         }
 
         // d. The run's own checkout and the build directory its worktrees shared. An in-place
-        // run works in the repository itself, which stays.
+        // run works in the repository itself, which stays. An archived lead copied for the run
+        // kept it as its directory; with the run gone nothing can bring it back, so the copy
+        // goes back to its workspace.
         if !run.in_place {
             let dir = self.integration_path(&run);
+            self.move_out_of(&dir).await;
             if dir.exists() {
                 match self.remove_worktree(&run, &dir).await {
                     Ok(()) => done.worktrees.push(dir.display().to_string()),
@@ -131,6 +134,25 @@ impl Orchestrator {
         self.store.delete_run(id).await?;
         self.publish(EventKind::RunDeleted { run_id: id }).await;
         Ok(done)
+    }
+
+    /// Puts the sessions whose directory is `dir` back in their workspace.
+    async fn move_out_of(&self, dir: &Path) {
+        for agent in self.store.list_agents().await.unwrap_or_default() {
+            if agent.cwd != dir || agent.home() == dir {
+                continue;
+            }
+            match self.store.update_agent_cwd(agent.id, agent.home()).await {
+                Ok(()) => {
+                    if let Ok(agent) = self.store.get_agent(&AgentKey::Id(agent.id)).await {
+                        self.publish(EventKind::AgentUpdated { agent }).await;
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(agent = %agent.name, error = %err, "cannot move the session home")
+                }
+            }
+        }
     }
 
     /// The branches a run left behind: its own, and each task's.

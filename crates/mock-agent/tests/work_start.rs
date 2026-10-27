@@ -237,15 +237,19 @@ async fn a_lead_whose_run_ended_starts_another_on_the_repository() {
     assert!(old_cwd.contains("integration"), "{old_cwd}");
 
     // Ended, nothing merged, never landed. The lead is a copy made for the run (lyra cannot
-    // move), so it stays in the old run's checkout until the run is deleted.
+    // move), so it is archived with the run's checkout as its directory (S1 §3.4); the person
+    // restores it to go on, and gets the checkout back.
     let ended = finish(&t, &first).await;
     assert_eq!(ended["status"], "completed", "{ended}");
     assert!(ended["landed"].is_null(), "{ended}");
-    assert_eq!(
-        agent(&t, &old_lead).await["cwd"],
-        json!(old_cwd),
-        "the lead keeps its checkout"
-    );
+    let copy = agent(&t, &old_lead).await;
+    assert!(!copy["archived_at"].is_null(), "{copy}");
+    assert_eq!(copy["cwd"], json!(old_cwd), "{copy}");
+    let resp = t
+        .post(&format!("/v1/agents/{old_lead}/archive"), json!({ "archived": false }))
+        .await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    assert!(std::path::Path::new(&old_cwd).is_dir(), "{old_cwd}");
 
     // The lead can propose again, and the card says where the new Work starts.
     let mut w = t.watch().await;

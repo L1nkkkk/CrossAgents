@@ -262,16 +262,23 @@ async fn archiving_the_lead_clears_its_checkout_and_restoring_brings_it_back() {
         .await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
 
+    // The lead is a copy: archived when the run ended (S1 §3.4), keeping the checkout's path
+    // as its directory, while the checkout itself went.
     let lead = agent(&t, landed["planner"].as_str().unwrap()).await;
+    assert!(!lead["archived_at"].is_null(), "{lead}");
     let dir = std::path::PathBuf::from(lead["cwd"].as_str().unwrap());
     let branch = landed["branch"].as_str().unwrap().to_owned();
-    assert!(dir.exists());
+    assert!(!dir.exists());
+
+    let archive_path = format!("/v1/agents/{}/archive", lead["id"].as_str().unwrap());
+    let archive = |on: bool| t.post(&archive_path, json!({ "archived": on }));
+    // Restored, it gets its checkout back.
+    assert_eq!(archive(false).await.status(), 200);
+    assert!(dir.join("one.txt").exists());
     // What a cargo build there left in the run's shared build directory.
     let target = dir.parent().unwrap().join("target");
     std::fs::create_dir_all(target.join("debug")).unwrap();
 
-    let archive_path = format!("/v1/agents/{}/archive", lead["id"].as_str().unwrap());
-    let archive = |on: bool| t.post(&archive_path, json!({ "archived": on }));
     assert_eq!(archive(true).await.status(), 200);
     // Landed: nothing waits on the branch, so it goes with the checkout.
     assert!(!dir.exists());
