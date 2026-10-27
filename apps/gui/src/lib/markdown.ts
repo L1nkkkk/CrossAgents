@@ -4,11 +4,15 @@
 // tables, and inline code, bold, italic, strikethrough and links. Pure; tested in
 // markdown.test.ts.
 
+import { fileLinkTarget } from "./filelinks.ts";
+
 export type Inline =
   | { t: "text"; text: string }
   | { t: "code"; text: string }
   | { t: "strong" | "em" | "del"; children: Inline[] }
   | { t: "link"; href: string; children: Inline[] }
+  /** A link to a local file (relative to the reply's scope, or absolute); opens the viewer. */
+  | { t: "file"; path: string; line?: number; children: Inline[] }
   | { t: "br" };
 
 export type ListItem = { text: string; children: Block[] };
@@ -149,7 +153,7 @@ function parseList(lines: string[], start: number): [Block, number] {
 
 const INLINE = /(`+)([\s\S]*?[^`])\1(?!`)|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|~~([\s\S]+?)~~|\*([^\s*](?:[\s\S]*?[^\s*])?)\*|(?<![\w])_([^\s_](?:[\s\S]*?[^\s_])?)_(?![\w])|\[([^\]]+)\]\(([^)\s]+)\)|\n/;
 
-/** Inline spans of `text`. Links keep only http(s) and mailto targets; others stay text. */
+/** Inline spans of `text`. Links keep only http(s) and mailto targets and local files; others stay text. */
 export function parseInline(text: string): Inline[] {
   const out: Inline[] = [];
   let rest = text;
@@ -167,7 +171,11 @@ export function parseInline(text: string): Inline[] {
     else if (em !== undefined || em2 !== undefined) out.push({ t: "em", children: parseInline(em ?? em2) });
     else if (label !== undefined) {
       if (/^(https?:|mailto:)/i.test(href)) out.push({ t: "link", href, children: parseInline(label) });
-      else out.push({ t: "text", text: all });
+      else {
+        const file = fileLinkTarget(href);
+        if (file) out.push(file.line ? { t: "file", path: file.path, line: file.line, children: parseInline(label) } : { t: "file", path: file.path, children: parseInline(label) });
+        else out.push({ t: "text", text: all });
+      }
     } else out.push({ t: "br" });
     rest = rest.slice(m.index + all.length);
   }

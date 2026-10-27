@@ -4,6 +4,7 @@ import type { RunDetail } from "@bindings/RunDetail";
 import { api, getBridge } from "./api";
 import { useHubData, useVersionMismatch, type VersionMismatch } from "./hub";
 import { closeBeside, closeTools, focusedOf, setRatio, useLayout, usePanes } from "./panes";
+import { FileViewerHost } from "./FileViewer";
 import { startNew } from "./menubar";
 import { toggleRail } from "./rail";
 import { Sidebar } from "./Sidebar";
@@ -230,6 +231,7 @@ export function App() {
           {drawer}
         </aside>
       )}
+      <FileViewerHost />
     </div>
   );
   if (!inDesktop) return app;

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { createContext, useContext, useState, type ReactNode } from "react";
 import {
   Activity,
   Archive,
@@ -44,6 +44,10 @@ import type { TaskStatus } from "@bindings/TaskStatus";
 import { api } from "./api";
 import { useHubData } from "./hub";
 import { parseBlocks, parseInline, type Block, type Inline } from "./lib/markdown";
+import { codeFileTarget } from "./lib/filelinks";
+import type { FileScope } from "./api";
+import { openFile } from "./FileViewer";
+import { useResolved } from "./fileResolve";
 import { prettyModel } from "./lib/models";
 import { full, when } from "./lib/time";
 
@@ -168,6 +172,42 @@ export function Prose({ text }: { text: string }) {
   return <div className="prose">{renderBlocks(parseBlocks(text))}</div>;
 }
 
+/**
+ * Whose files the paths in the prose below are relative to: a session's working directory, a
+ * run's integration branch, a task's worktree. The innermost provider wins.
+ */
+const FileScopeContext = createContext<FileScope | null>(null);
+export const FileScopeProvider = FileScopeContext.Provider;
+export const useFileScope = () => useContext(FileScopeContext);
+
+/** A markdown link to a file: a button opening the viewer (plain text without a scope). */
+function FileLink({ path, line, children }: { path: string; line?: number; children: ReactNode }) {
+  const scope = useFileScope();
+  if (!scope) return <>{children}</>;
+  return (
+    <button className="file-link" title={line ? `${path} 第 ${line} 行` : path} onClick={() => openFile({ scope, path, line })}>
+      {children}
+    </button>
+  );
+}
+
+/** Inline code: a link once the hub confirms it names a file of the scope's workspace. */
+function InlineCode({ text }: { text: string }) {
+  const scope = useFileScope();
+  const target = scope ? codeFileTarget(text) : undefined;
+  const found = useResolved(target ? scope : null, target?.path);
+  if (!scope || !target || !found) return <code>{text}</code>;
+  return (
+    <button
+      className="file-link code"
+      title={target.line ? `打开 ${found} 第 ${target.line} 行` : `打开 ${found}`}
+      onClick={() => openFile({ scope, path: found, line: target.line })}
+    >
+      {text}
+    </button>
+  );
+}
+
 function renderBlocks(blocks: Block[]): ReactNode[] {
   return blocks.map((b, i) => {
     switch (b.t) {
@@ -235,7 +275,13 @@ function renderInline(spans: Inline[]): ReactNode[] {
       case "text":
         return s.text;
       case "code":
-        return <code key={i}>{s.text}</code>;
+        return <InlineCode key={i} text={s.text} />;
+      case "file":
+        return (
+          <FileLink key={i} path={s.path} line={s.line}>
+            {renderInline(s.children)}
+          </FileLink>
+        );
       case "strong":
         return <strong key={i}>{renderInline(s.children)}</strong>;
       case "em":

@@ -13,6 +13,7 @@ import { HandoffChain, OutcomeChip, freshLabel, isEscalated } from "../handoff";
 import {
   Avatar,
   ErrorBox,
+  FileScopeProvider,
   Icon,
   List,
   Prose,
@@ -140,7 +141,7 @@ export function RunView({ runId, selectedTask, confirmDelete }: { runId: string;
   const side = tasks.length ? <TaskBoard run={run} tasks={tasks} agents={agents.data} selectedTask={selectedTask} /> : undefined;
 
   return (
-    <>
+    <FileScopeProvider value={{ kind: "run", run: run.id }}>
       <SessionView key={run.planner} name={run.planner} header={header} top={top} bottom={bottom} side={side} />
       {deleting && (
         <DeleteRunDialog
@@ -151,7 +152,7 @@ export function RunView({ runId, selectedTask, confirmDelete }: { runId: string;
           }}
         />
       )}
-    </>
+    </FileScopeProvider>
   );
 }
 
@@ -718,7 +719,8 @@ export function TaskDetail({ runId, taskId }: { runId: string; taskId: string })
       {!detail.data && (detail.error ? <ErrorBox error={detail.error} /> : <p className="muted">加载中…</p>)}
       {detail.data && !task && <ErrorBox error={`这个 run 里没有任务 ${taskId}`} />}
       {task && (
-        <>
+        // Paths in the task's words are its worktree's; once that is gone, the run's branch has them.
+        <FileScopeProvider value={task.worktree ? { kind: "task", run: detail.data!.run.id, task: task.id } : { kind: "run", run: detail.data!.run.id }}>
           <div className="row" style={{ gap: 8 }}>
             <code>#{task.key}</code>
             <StatusChip status={task.status} tone={taskTone(task.status)} />
@@ -807,7 +809,7 @@ export function TaskDetail({ runId, taskId }: { runId: string; taskId: string })
           <Section title="规格">
             <SpecView spec={task.spec} />
           </Section>
-        </>
+        </FileScopeProvider>
       )}
     </div>
   );

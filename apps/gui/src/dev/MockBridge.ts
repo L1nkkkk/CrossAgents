@@ -27,6 +27,7 @@ import { turnStat } from "../lib/diff";
 import { effortOf } from "../lib/models";
 import { applyEvent } from "../session";
 import { capabilitiesOf, driverOf, transcript, uid } from "./fixtures";
+import { mockContent, mockResolve, mockTree } from "./files.mock";
 
 /** Names the mock hub makes up, like the real one (see crates/core/src/names.rs). */
 const MOCK_NAMES = ["Nova", "Iris", "Atlas", "Orion", "Vega", "Lyra", "Mira", "Sage"];
@@ -117,6 +118,8 @@ const LATENCY = 40;
 const STARTUP = 2_500;
 const json = (status: number, body?: unknown): HubResponse => ({ status, body: body === undefined ? "" : JSON.stringify(body) });
 const notFound = (what: string) => json(404, { error: { code: "not_found", message: `${what} not found` } });
+/** `{scope}/files/{tree|content|resolve}`; every scope answers from the same mock workspace. */
+const FILES_ROUTE = /^\/v1\/(?:agents\/[^/]+|runs\/[^/]+(?:\/tasks\/[^/]+)?)\/files\/(tree|content|resolve)$/;
 
 export class MockBridge implements CrossAgentsBridge {
   private seq = 1000;
@@ -182,6 +185,11 @@ export class MockBridge implements CrossAgentsBridge {
 
   async pickFolder() {
     return "C:/work/new-project";
+  }
+
+  async openPath(scope: string, path: string) {
+    // No desktop to open it on in a browser.
+    console.info("mock openPath", scope, path);
   }
 
   setTheme() {
@@ -358,10 +366,20 @@ export class MockBridge implements CrossAgentsBridge {
       if ((m = p.match(/^\/v1\/accounts\/([^/]+)\/usage$/)))
         return json(200, s.accountUsage ?? { by: url.searchParams.get("by") ?? "day", rows: [], total: { sessions: 0, input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0 }, total_cache_hit_rate: 0 });
       if (p === "/v1/plugins") return json(200, { plugins: s.plugins });
+      if ((m = p.match(FILES_ROUTE)) && m[1] !== "resolve") {
+        const at = url.searchParams.get("path") ?? "";
+        if (m[1] === "tree") {
+          const tree = mockTree(at, url.searchParams.get("all") === "true");
+          return tree ? json(200, tree) : notFound(`directory ${at}`);
+        }
+        const file = mockContent(at);
+        return file ? json(200, file) : notFound(`file ${at}`);
+      }
       return notFound(p);
     }
 
     if (method === "POST") {
+      if ((m = p.match(FILES_ROUTE)) && m[1] === "resolve") return json(200, { entries: mockResolve((body as { paths: string[] }).paths ?? []) });
       if (p === "/v1/agents") {
         const req = body as CreateAgentRequest;
         const taken = (n: string) => s.agents.some((a) => a.name.toLowerCase() === n.toLowerCase());
