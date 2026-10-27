@@ -12,6 +12,7 @@ export const PRESETS: { key: Preset; label: string; hint: string }[] = [
 ];
 
 export const DEFAULT_POLICY: RunPolicy = {
+  continuation: null,
   plan_approval: "required",
   land: "manual",
   human_ask: "allow",

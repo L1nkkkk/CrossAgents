@@ -308,6 +308,8 @@ impl RunConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Run {
+    #[serde(default)]
+    pub continuation: Option<Box<ContinuationState>>,
     pub id: RunId,
     pub title: String,
     /// What the human asked for.
@@ -543,6 +545,20 @@ impl Task {
     pub fn issuer_or(&self, planner: AgentId) -> AgentId {
         self.issuer.unwrap_or(planner)
     }
+}
+
+/// Persisted supervisor checkpoint. Attempts are reserved before delivery, so a crash
+/// cannot replay a reserved wakeup. A lost delivery consumes an attempt conservatively.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ContinuationState {
+    pub owner: AgentId,
+    pub phase: String,
+    pub next_step: String,
+    pub attempts: u32,
+    pub next_at: Option<DateTime<Utc>>,
+    pub last_attempt_at: Option<DateTime<Utc>>,
+    pub delivery_error: Option<String>,
 }
 
 #[cfg(test)]

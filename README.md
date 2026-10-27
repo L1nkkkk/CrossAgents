@@ -10,6 +10,7 @@ CrossAgents 是一个分层的多 agent 编码编排器：**强模型（Opus / G
 
 - 设计：[docs/DESIGN.md](docs/DESIGN.md)
 - 各里程碑任务书：[docs/tasks/](docs/tasks/)
+- 可选的停滞恢复与持续推进：[docs/CONTINUATION.md](docs/CONTINUATION.md)
 
 ## 准备
 

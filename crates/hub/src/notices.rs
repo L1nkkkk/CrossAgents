@@ -46,10 +46,13 @@ impl Notices {
                 if let Err(err) = clock.orchestrator.expire_questions().await {
                     tracing::warn!(error = %err, "cannot time out questions");
                 }
-                if ticks.is_multiple_of(BUDGET_EVERY)
-                    && let Err(err) = clock.budgets.check(clock.bus.store().as_ref()).await
-                {
-                    tracing::warn!(error = %err, "cannot check budgets");
+                if ticks.is_multiple_of(BUDGET_EVERY) {
+                    match clock.budgets.check(clock.bus.store().as_ref()).await {
+                        Ok(()) => clock.orchestrator.continue_runs().await,
+                        Err(err) => {
+                            tracing::warn!(error = %err, "cannot check budgets; continuation deferred")
+                        }
+                    }
                 }
             }
         });

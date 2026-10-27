@@ -442,6 +442,10 @@ impl AgentHost for HubHost {
         self.runtime.send_home(&AgentKey::Id(agent)).await
     }
 
+    async fn is_busy(&self, agent: AgentId) -> bool {
+        self.runtime.is_busy(agent).await
+    }
+
     async fn serving_person(&self, agent: AgentId) -> bool {
         self.runtime.serving_person(agent).await
     }

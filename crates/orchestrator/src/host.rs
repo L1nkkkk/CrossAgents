@@ -108,6 +108,11 @@ pub trait AgentHost: Send + Sync {
         let _ = agent;
         Err(CoreError::Unsupported("moving agents".into()))
     }
+    /// Whether a turn runs or any message is queued. Unknown hosts fail closed.
+    async fn is_busy(&self, agent: AgentId) -> bool {
+        let _ = agent;
+        true
+    }
     /// Whether a person waits on the agent: its turn answers their message, or one waits.
     async fn serving_person(&self, agent: AgentId) -> bool {
         let _ = agent;

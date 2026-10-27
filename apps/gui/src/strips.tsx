@@ -233,6 +233,9 @@ export function RunStrip({ runs, agents }: { runs: RunDetail[]; agents: Agent[] 
                 <span className="rs-progress">{tasks.length ? progress(tasks) : t("strip.noTasks")}</span>
               </button>
               <StateWord state={runState(run.status)} />
+              {run.continuation?.phase === "exhausted" && (
+                <a className="warn-text" href={`#/runs/${run.id}`} title={run.continuation.next_step}>持续推进已达上限 · 需要处理</a>
+              )}
               <a className="rs-link" href={`#/runs/${run.id}`}>
                 {t("strip.openRun")}
               </a>

@@ -294,6 +294,11 @@ pub enum EventKind {
     AccountLoginPending { id: String, url: Option<String> },
     #[serde(rename = "run.created")]
     RunCreated { run: Run },
+    #[serde(rename = "run.continuation_changed")]
+    RunContinuationChanged {
+        id: RunId,
+        state: crate::model::ContinuationState,
+    },
     #[serde(rename = "run.status_changed")]
     RunStatusChanged {
         id: RunId,
@@ -516,6 +521,7 @@ impl EventKind {
             Self::AccountLoginFinished { .. } => "account.login_finished",
             Self::AccountLoginPending { .. } => "account.login_pending",
             Self::RunCreated { .. } => "run.created",
+            Self::RunContinuationChanged { .. } => "run.continuation_changed",
             Self::RunStatusChanged { .. } => "run.status_changed",
             Self::RunPlanSubmitted { .. } => "run.plan_submitted",
             Self::TaskStatusChanged { .. } => "task.status_changed",
@@ -535,7 +541,8 @@ impl EventKind {
     pub fn run_id(&self) -> Option<RunId> {
         match self {
             Self::RunCreated { run } => Some(run.id),
-            Self::RunStatusChanged { id, .. }
+            Self::RunContinuationChanged { id, .. }
+            | Self::RunStatusChanged { id, .. }
             | Self::RunPlanSubmitted { id, .. }
             | Self::RunBudget { id, .. }
             | Self::RunLanded { id, .. } => Some(*id),
@@ -558,6 +565,7 @@ impl EventKind {
             Self::HubStarted { .. }
             | Self::HubStopping
             | Self::RunCreated { .. }
+            | Self::RunContinuationChanged { .. }
             | Self::RunStatusChanged { .. }
             | Self::RunPlanSubmitted { .. }
             | Self::TaskChecked { .. }

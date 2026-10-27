@@ -18,6 +18,17 @@ export type Scenario = {
 };
 
 export const SCENARIOS: Scenario[] = [
+  { key: "continuation-options", label: "持续推进设置", hint: "新建 Work 的持续推进开关及次数、间隔", build: () => {
+    localStorage.setItem("crossagents.mode", JSON.stringify("run"));
+    return { state: emptyHub(), route: "#/", script: [{ at: 300, act: () => document.querySelector<HTMLButtonElement>('button[aria-label="选项"]')?.click() }] };
+  } },
+  { key: "continuation", label: "持续推进已达上限", hint: "恢复次数已耗尽，显示下一步和负责人", build: () => {
+    const scene = oauthRun("running");
+    const run = scene.state.runs[0].run;
+    run.config.policy.continuation = { max_attempts: 3, interval_seconds: 60 };
+    run.continuation = { owner: run.planner, phase: "exhausted", next_step: "已达到自动唤醒次数上限。请检查任务状态，或向主管发送进一步指示。", attempts: 3, next_at: null, last_attempt_at: new Date().toISOString(), delivery_error: null };
+    return { ...scene, script: [], route: `#/runs/${run.id}` };
+  } },
   { key: "empty", label: "空 hub", hint: "第一次打开：没有队友、没有 run", build: () => ({ state: emptyHub(), script: [], route: "#/" }) },
   { key: "plan", label: "计划待审批", hint: "Planner + 两个 Worker，计划等你批", build: () => oauthRun("plan") },
   { key: "running", label: "run 进行中", hint: "两个任务在跑、一个待检查、一个失败；Planner 对话里有编排消息和任务卡片", build: () => oauthRun("running") },

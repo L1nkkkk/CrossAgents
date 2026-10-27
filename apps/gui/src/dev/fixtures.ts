@@ -160,6 +160,7 @@ export function run(init: { title: string; request: string; planner: Agent; work
       max_attempts: 2,
       team: init.team.map((a) => a.id),
       policy: {
+        continuation: null,
         plan_approval: "required",
         land: "manual",
         human_ask: "allow",
@@ -176,6 +177,7 @@ export function run(init: { title: string; request: string; planner: Agent; work
     base_branch: "main",
     branch: "crossagents/oauth-login",
     in_place: false,
+    continuation: null,
     lead_note: null,
     note: null,
     plan: init.plan,

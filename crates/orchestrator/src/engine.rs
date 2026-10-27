@@ -323,6 +323,7 @@ impl Orchestrator {
         let id = RunId::new();
         let now = Utc::now();
         let mut run = Run {
+            continuation: None,
             landed: None,
             summary: None,
             checks: Vec::new(),
@@ -1454,6 +1455,12 @@ The person changed: {}",
                 ) {
                     continue;
                 }
+                if run.config.policy.continuation.is_some()
+                    && let Some(agent) = task.assignee
+                    && self.host.is_busy(agent).await
+                {
+                    continue;
+                }
                 if task.status == TaskStatus::Running {
                     self.transition(&mut task, TaskStatus::Stalled).await?;
                 } else {
@@ -1461,6 +1468,11 @@ The person changed: {}",
                     task.status = TaskStatus::Stalled;
                     task.updated_at = Utc::now();
                     self.store.update_task(&task).await?;
+                }
+                // Opt-in runs recover through the durable, bounded clock. Restarting
+                // must not bypass the cap or enqueue another recovery notice.
+                if run.config.policy.continuation.is_some() {
+                    continue;
                 }
                 self.notice(
                     task.issuer_or(run.planner),
