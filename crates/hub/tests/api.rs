@@ -1,10 +1,11 @@
 //! Integration tests of the local API against a real hub on a random port.
 
+use std::path::Path;
 use std::time::Duration;
 
 use crossagents_api_types::{
-    Agent, FileContentResponse, FileKind, FileTreeResponse, ListAgentsResponse,
-    ResolvePathsResponse, Run,
+    Agent, ChangesResponse, CommitGraph, FileContentResponse, FileKind, FileTreeResponse,
+    GraphRefKind, ListAgentsResponse, ResolvePathsResponse, Run,
 };
 use crossagents_hub::{HubConfig, Paths, RunningHub};
 use futures::StreamExt;
@@ -21,11 +22,16 @@ struct TestHub {
 
 impl TestHub {
     async fn start() -> Self {
+        Self::start_with(|_| {}).await
+    }
+
+    /// A hub whose configuration is adjusted before it starts (a plugin's CLI, say).
+    async fn start_with(adjust: impl FnOnce(&mut HubConfig)) -> Self {
         let home = tempfile::tempdir().unwrap();
         let paths = Paths::new(home.path());
-        let hub = crossagents_hub::start(HubConfig::new(paths.clone(), 0))
-            .await
-            .unwrap();
+        let mut config = HubConfig::new(paths.clone(), 0);
+        adjust(&mut config);
+        let hub = crossagents_hub::start(config).await.unwrap();
         let base = format!("http://{}", hub.addr);
         Self {
             hub,
@@ -687,4 +693,226 @@ async fn files_are_read_in_a_run_and_task_scope() {
             .status(),
         StatusCode::NOT_FOUND
     );
+}
+
+/// docs/DESIGN.md §11: the commit graph of a run (its base, its own branch and its tasks')
+/// and of an agent's repository, and what one commit changed.
+#[tokio::test]
+async fn commit_graph_and_commit_diff() {
+    // The run's lead is a real plugin agent, so the run gets a checkout; its CLI is not
+    // there, so the kickoff it is handed never starts a process.
+    let t = TestHub::start_with(|config| {
+        config.plugins.insert(
+            "claude".into(),
+            crossagents_plugins::PluginConfig {
+                native_command: vec!["crossagents-test-no-such-cli".into()],
+                ..Default::default()
+            },
+        );
+    })
+    .await;
+    let repo = tempfile::tempdir().unwrap();
+    git(repo.path(), &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.path().join("a.txt"), "one\n").unwrap();
+    let root = commit(repo.path(), "one");
+    let cwd = repo.path().display().to_string();
+
+    for name in ["planner", "watcher"] {
+        let created = t
+            .post("/v1/agents")
+            .json(&json!({
+                "name": name, "plugin": "claude", "role": "worker", "cwd": cwd,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            created.status(),
+            StatusCode::CREATED,
+            "{}",
+            created.text().await.unwrap()
+        );
+    }
+
+    // A run in a repository gets its own branch, in a checkout of its own.
+    let created = t
+        .post("/v1/runs")
+        .json(&json!({ "request": "look at the history", "planner": "planner" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        created.status(),
+        StatusCode::CREATED,
+        "{}",
+        created.text().await.unwrap()
+    );
+    let run: Run = created.json().await.unwrap();
+    assert!(!run.in_place);
+
+    let graph: CommitGraph = t
+        .get(&format!("/v1/runs/{}/graph", run.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(graph.base_branch.as_deref(), Some("main"));
+    assert_eq!(graph.run_branch.as_deref(), Some(run.branch.as_str()));
+    let refs: Vec<(&str, GraphRefKind)> = graph
+        .refs
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.kind))
+        .collect();
+    assert!(refs.contains(&("main", GraphRefKind::Base)), "{refs:?}");
+    assert!(
+        refs.contains(&(run.branch.as_str(), GraphRefKind::Run)),
+        "{refs:?}"
+    );
+    let base = graph
+        .refs
+        .iter()
+        .find(|entry| entry.kind == GraphRefKind::Base)
+        .unwrap();
+    assert_eq!(base.sha, root);
+    // The run branch has no commit of its own yet: both refs name the base commit.
+    let commit = graph
+        .commits
+        .iter()
+        .find(|commit| commit.sha == root)
+        .expect("the base commit is in the graph");
+    let mut named = commit.refs.clone();
+    named.sort();
+    let mut expected = vec!["main".to_owned(), run.branch.clone()];
+    expected.sort();
+    assert_eq!(named, expected);
+    assert!(commit.parents.is_empty());
+    assert!(!graph.truncated);
+
+    // An agent's own repository: its HEAD and its local branches.
+    let agent: CommitGraph = t
+        .get("/v1/agents/watcher/graph")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(agent.base_branch.is_none() && agent.run_branch.is_none());
+    assert!(
+        agent
+            .refs
+            .iter()
+            .any(|entry| entry.kind == GraphRefKind::Head && entry.sha == root),
+        "{:?}",
+        agent.refs
+    );
+    assert!(
+        agent
+            .refs
+            .iter()
+            .any(|entry| entry.kind == GraphRefKind::Other && entry.name == "main"),
+        "{:?}",
+        agent.refs
+    );
+    assert_eq!(agent.commits[0].sha, root);
+
+    // One commit's diff: a root commit against the empty tree, in both scopes.
+    let changes: ChangesResponse = t
+        .get(&format!("/v1/runs/{}/commits/{root}/diff", run.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(changes.base, "");
+    assert_eq!(changes.head, root);
+    assert!(changes.diff.contains("+one"), "{}", changes.diff);
+    assert!(!changes.truncated);
+    let changes: ChangesResponse = t
+        .get(&format!("/v1/agents/watcher/commits/{root}/diff"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(changes.diff.contains("+one"), "{}", changes.diff);
+
+    // A sha that is not one is refused before git sees it; one that names nothing is 404.
+    for bad in ["abc", "HEAD", "not-a-sha", "ABCDEF"] {
+        let resp = t
+            .get(&format!("/v1/runs/{}/commits/{bad}/diff", run.id))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{bad}");
+    }
+    assert_eq!(
+        t.get(&format!("/v1/runs/{}/commits/deadbeef/diff", run.id))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let limited: CommitGraph = t
+        .get(&format!("/v1/runs/{}/graph?limit=1", run.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(limited.commits.len(), 1);
+    // An unknown run or agent has no graph.
+    assert_eq!(
+        t.get("/v1/runs/0000/graph").send().await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        t.get("/v1/agents/nobody/graph")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+/// Runs git in `dir`, returning its trimmed stdout; panics when git says no.
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {}: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// Commits everything in `dir` as `message`, returning the commit's sha.
+fn commit(dir: &Path, message: &str) -> String {
+    git(dir, &["add", "-A"]);
+    git(
+        dir,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        ],
+    );
+    git(dir, &["rev-parse", "HEAD"])
 }
