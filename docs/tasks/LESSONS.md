@@ -86,7 +86,10 @@ projects
 - **没有 remote 的仓库**：先按「节点 + 路径」新建项目，以后可以由人手动绑定到已有项目。
 - **fork 不自动合并**：remote 不同就是不同的项目，即使提交历史相同。两个独立项目的记录不能混在一起。
 - **worktree** 按 `.git` 文件找到主仓库，与 `workspace::repo_key` 的做法相同，再按主仓库路径找项目。
-- **remote 改了**：迁移或改名后，一个已绑定的路径出现了新的 remote。这时把新 remote 也绑到同一个项目上，不新建。
+- **已绑定的路径出现了陌生 remote**：路径相同不能证明还是同一个项目，用户可能换掉了目录里的仓库，也可能把 remote 改成了 fork。所以：
+  - 路径的绑定保持不变，项目标记为「身份待确认」，在 GUI 的「需要你」条里显示；
+  - 只有人明确确认是改名或迁移，才把新 remote 加为这个项目的别名；确认是另一个项目，就把这个路径改绑到新项目；
+  - 待确认期间 run 照常进行，lessons 照常读写，只是暂停自动建立新的关联（这个路径不再参与 remote 匹配，新 remote 也不会自动绑到任何项目上）。
 
 单机阶段，「节点」就是本机。多节点（[MULTI-NODE.md](../MULTI-NODE.md)）之后，节点 id 用节点注册时的 id。
 
@@ -104,11 +107,15 @@ projects
 
 **整理工具（只开放给负责整理的 agent）：**
 - `issue_pending { run }`：列出某个 run 里还没处理的 issue，读取时按 run id 走专门通道，所以已结束的 run 也能读（§2）。
+  - **要校验归属**：只能读调用者所属项目里的 run，拿到别的项目的 run id 也读不到。
+  - **原始笔记只读**：已结束 run 的 issue 只能读、只能标记处理结果，不能改、不能删，通道里不开放写入。
 - `lesson_create { title, symptom, keywords, conditions, resolution, outcome, sources: [issue…] }`：新增一条 lesson，并把 `sources` 里的 issue 标成 `lesson`。
 - `lesson_merge { lesson, update?, sources }`：合并进已有的 lesson，标成 `merged`。
 - `issue_keep { run, issues, why? }`：标成 `kept`。
 
 这几个工具都按 issue 记录处理结果。整理到一半中断后，换一个 agent 重做，看到的只剩没处理完的那些，不会重复生成。
+
+**整理必须可重试：** 写入或更新 lesson、追加 evidence、标记 issue 已处理，三件事在同一个数据库事务里完成，要么全成，要么全不成。中断后不会出现 lesson 已入库、issue 却仍是未处理（于是被重复整理），也不会出现 issue 已标处理、lesson 却没写进去（于是记录丢失）。某条 issue 已被处理时再提交，返回它已有的处理结果，不报错，也不重复写入。
 
 **谁来整理：**
 - 正常收尾：主导在 `run_finish` 前整理。`run_finish` 的工具说明写明这一步。还有未处理 issue 时，`run_finish` 的结果里会给出未处理的数量，但不拦截收尾：整理是锦上添花，不能卡住落地。
@@ -146,7 +153,8 @@ projects
 
    规则：
    - 最多 3 条。
-   - 只拿报错输出里像关键词的片段去搜：错误码、异常名、`error:` 后面的那一行。BM25 分数低于阈值的丢掉。
+   - 只拿报错输出里像关键词的片段去搜：错误码、异常名、`error:` 后面的那一行。
+   - FTS5 的 `bm25()` 分数不是置信度：值越小越相关，量纲还随文档长度和词频变化，不能把阈值理解成「匹配概率」。第一版靠两点过滤：限制参与查询的关键词（只用上面抽出来的片段，而且至少要命中一个错误码或异常名这类「强词」）、限制条数。阈值等收集到实际报错样本再调整。
    - 没有可靠命中就返回空列表。
    - 字段说明里写清楚：命中只表示「可能相关」，不代表历史解法已确认适用。
 3. **主动搜索**：
@@ -176,7 +184,7 @@ projects
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| L1 | `projects` 表及其绑定（remote 规范化、首次接入时匹配、worktree 归属）；`issue/` 前缀的约定；`issue_triage`、`lessons`、`lesson_evidence`、FTS5；整理工具；按 run id 读 issue；`lesson_search` / `lesson_get` / `lesson_report`；开场那一行 | 单测：两种写法的 remote 归到同一个项目，fork 不归入；同一仓库的两个路径共用 lessons，别的项目查不到；整理中断后重做不重复生成；已取消的 run 仍能整理。mock-agent 集成测试走一遍「记录 → 整理 → 新 run 搜到」 |
+| L1 | `projects` 表及其绑定（remote 规范化、首次接入时匹配、worktree 归属、陌生 remote 标「身份待确认」）；`issue/` 前缀的约定；`issue_triage`、`lessons`、`lesson_evidence`、FTS5；整理工具（同一事务、可重试）；按 run id 读 issue（校验归属、只读）；`lesson_search` / `lesson_get` / `lesson_report`；开场那一行 | 单测：两种写法的 remote 归到同一个项目，fork 不归入；已绑定路径出现陌生 remote 时不自动改绑、项目标为待确认；同一仓库的两个路径共用 lessons，别的项目查不到，也读不到别的项目的 run；同一批 issue 整理两次只入库一次。mock-agent 集成测试：run 结束后，由**另一个 run 里的 agent** 用 `issue_pending` 读到并整理，然后第三个 run 用 `lesson_search` 搜到 |
 | L2 | 失败结果附上 `related_lessons`；GUI 的排障记录页、run 页、「需要你」入口；CLI；Markdown 导出 | 单测：检查失败的输出命中关键词时附上记录，无关输出返回空列表、最多 3 条；mock 场景截图 |
 | L3 | 「相关文件在此 commit 之后有改动」的复核标注；项目绑定、合并的 GUI；接入 [SELF.md](SELF.md) C1 复盘（复盘结论可以直接走整理工具） | 单测：标注正确；合并项目后 lessons 和 evidence 都并入 |
 
