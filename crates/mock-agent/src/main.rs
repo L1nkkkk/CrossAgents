@@ -4,6 +4,8 @@
 //! - `[tool]`  report a tool call, ask for permission, then echo the chosen option
 //! - `[slow]`  keep the turn running until cancelled
 //! - `[crash]` exit the process immediately
+//! - `[fail]`  fail the turn with an error, as a model the account cannot run does;
+//!   `[fail#MODEL]` only when the session's model is MODEL
 //! - `[write ...]` / `[call ...]` directives, see [`script`]. A prompt without directives
 //!   that carries a `task_id:` line repeats the session's last directives (for retries).
 //!
@@ -107,6 +109,13 @@ impl MockAgent {
 
         if text.contains("[crash]") {
             std::process::exit(3);
+        }
+        let model = self.model.lock().await.clone();
+        if text.contains("[fail]") || text.contains(&format!("[fail#{model}]")) {
+            return Err(RpcError::new(
+                crossagents_drivers::jsonrpc::INTERNAL_ERROR,
+                "There's an issue with the selected model (mock-gone)",
+            ));
         }
         if text.contains("[slow]") {
             self.say(&session_id, "working").await;

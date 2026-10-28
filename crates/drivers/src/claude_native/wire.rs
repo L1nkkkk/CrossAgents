@@ -805,6 +805,11 @@ impl Translator {
             StopReason::Cancelled
         } else {
             match (subtype, result.get("stop_reason").and_then(Value::as_str)) {
+                // An API error the CLI answers itself (a model it does not know, say) ends
+                // as a "success" that is an error: no request ran.
+                ("success", _) if result.get("is_error").and_then(Value::as_bool) == Some(true) => {
+                    StopReason::Error
+                }
                 ("success", Some("max_tokens")) => StopReason::MaxTokens,
                 ("success", Some("refusal")) => StopReason::Refusal,
                 ("success", _) => StopReason::EndTurn,
@@ -1496,6 +1501,23 @@ mod tests {
         assert_eq!(stop, StopReason::Error);
         assert!(events.contains(&SessionEventKind::Error {
             message: "boom".into()
+        }));
+    }
+
+    /// Claude Code 2.1 on a model it does not know: no request runs, and the result is a
+    /// "success" with `is_error` (captured from the real CLI).
+    #[test]
+    fn a_model_the_cli_cannot_run_ends_the_turn_in_error() {
+        let mut t = Translator::default();
+        let text = "There's an issue with the selected model (deepseek-v4.1-flash). It may not exist or you may not have access to it. Run --model to pick a different model.";
+        let result = json!({ "type": "result", "subtype": "success", "is_error": true,
+            "stop_reason": "stop_sequence", "terminal_reason": "api_error", "api_error_status": 404,
+            "total_cost_usd": 0, "usage": { "input_tokens": 0, "output_tokens": 0 }, "modelUsage": {},
+            "result": text });
+        let (stop, events) = t.turn_end(&result, false);
+        assert_eq!(stop, StopReason::Error);
+        assert!(events.contains(&SessionEventKind::Error {
+            message: text.into()
         }));
     }
 
