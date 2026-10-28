@@ -122,13 +122,15 @@ pub fn cleanup(locks_dir: &Path, older_than: Duration) -> Result<Cleanup, ExecEr
             if !matches!(lock.try_lock(Access::Exclusive), Ok(true)) {
                 continue;
             }
+            // Both while the exclusive lock is held: nobody can have taken the lock and
+            // written a record in between, so the records this removes are all orphans.
+            let _ = std::fs::remove_dir_all(locks_dir.join(format!("{hash}.holders")));
             // Unlink while the lock is held: whoever takes the lock next gets a new file.
             if std::fs::remove_file(&path).is_ok() {
                 done.locks += 1;
             }
             lock.unlock();
             drop(lock);
-            let _ = std::fs::remove_dir_all(locks_dir.join(format!("{hash}.holders")));
         } else if name.ends_with(".holders") {
             done.records += clean_records(&path, older_than, now);
         }

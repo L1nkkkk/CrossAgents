@@ -4,19 +4,21 @@
 //!
 //! These tests talk to the library the way `exec-run` and the hub will: take locks, read the
 //! holder records, clean up. They cover §7 items 2, 5 (the lock layer of it), 6, 7 and 9,
-//! shared-plus-shared and shared-versus-exclusive, plus records and cleanup. Item 9 also runs
-//! a second process (`tests/support/exec_lock_helper.rs`), because a lock that only excludes
-//! tasks would be no lock at all.
+//! shared-plus-shared and shared-versus-exclusive, records and cleanup, and the lock file
+//! deleted and re-created under a request (§4.1). Item 9 also runs a second process
+//! (`tests/support/exec_lock_helper.rs`), because a lock that only excludes tasks would be no
+//! lock at all.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use crossagents_core::exec::{
-    Access, EXIT_TEMPFAIL, ExecError, Holder, Request, Resource, acquire, cleanup, holders,
-    holders_dir, lock_name, lock_path,
+    Access, EXIT_TEMPFAIL, ExecError, Holder, LockFile, Request, Resource, acquire, cleanup,
+    holders, holders_dir, lock_name, lock_path,
 };
 use tempfile::TempDir;
 
@@ -667,5 +669,128 @@ async fn exec_cleanup_removes_idle_locks_and_dead_records() {
     assert!(
         !holders_dir(&locks, &busy).exists(),
         "its records went with it"
+    );
+}
+
+// --- §4.1: a deleted-and-recreated lock file is not a lock --------------------------------
+
+#[tokio::test]
+async fn exec_a_replaced_lock_file_does_not_count_as_held() {
+    let dir = temp();
+    let locks = dir.path().join("locks");
+    let build = resource(dir.path(), "build");
+    std::fs::create_dir_all(&locks).expect("create the locks directory");
+    let file = lock_path(&locks, &build);
+
+    // What `acquire` does first, minus the lock: open the file.
+    let opened = LockFile::open(&file).expect("open the lock file");
+    assert!(opened.still_at(&file), "it is the file the path leads to");
+
+    // Cleanup runs in the gap between the open and the lock and deletes the file.
+    let done = cleanup(&locks, Duration::ZERO).expect("cleanup");
+    assert_eq!(done.locks, 1, "the lock file was removable");
+    assert!(!file.exists(), "the lock file is gone");
+
+    // The old handle still locks what it holds — and that is exactly why it must not count:
+    // the path no longer leads there, so a newcomer would create and lock another file.
+    assert!(
+        opened
+            .try_lock(Access::Exclusive)
+            .expect("lock the old file"),
+        "the deleted file can be locked; the check is what makes this harmless"
+    );
+    assert!(
+        !opened.still_at(&file),
+        "a lock on a file that is not at the path is not a lock on the resource"
+    );
+
+    // A request made now takes a lock on a new file, as it should, and gets it.
+    let held = acquire(
+        &locks,
+        &request(
+            "cargo test",
+            &[("build", build.as_path(), Access::Exclusive)],
+            Duration::from_secs(5),
+            millis(100),
+        ),
+        |_| {},
+    )
+    .await
+    .expect("the resource is free: the stale lock belongs to nobody");
+    assert!(file.exists(), "acquire created a lock file of its own");
+    assert!(!opened.still_at(&file), "and it is not the one we opened");
+    assert_eq!(held.locks().len(), 1);
+}
+
+// --- §4.1 under pressure: cleanup running while two execs take the same lock --------------
+
+#[test]
+fn exec_cleanup_never_lets_two_holders_in() {
+    let dir = temp();
+    let locks = dir.path().join("locks");
+    let build = resource(dir.path(), "build");
+    std::fs::create_dir_all(&locks).expect("create the locks directory");
+
+    let holding = Arc::new(AtomicUsize::new(0));
+    let most_at_once = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+
+    // The cleaner deletes every lock file it can while the two execs take the same lock in a
+    // loop. What is asserted here is the invariant — never two holders at once — and that the
+    // churn never turns into an error. The microsecond-wide window in which a lock file is
+    // replaced between the open and the lock is not reachable from a test here; it is covered
+    // exactly by `exec_a_replaced_lock_file_does_not_count_as_held`.
+    let cleaner = std::thread::spawn({
+        let locks = locks.clone();
+        let stop = Arc::clone(&stop);
+        move || {
+            while !stop.load(Ordering::Relaxed) {
+                let _ = cleanup(&locks, Duration::ZERO);
+                std::thread::sleep(Duration::from_micros(100));
+            }
+        }
+    });
+
+    let holders: Vec<_> = (0..2)
+        .map(|_| {
+            let locks = locks.clone();
+            let build = build.clone();
+            let holding = Arc::clone(&holding);
+            let most_at_once = Arc::clone(&most_at_once);
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("a runtime");
+                let report = request(
+                    "cargo test",
+                    &[("build", build.as_path(), Access::Exclusive)],
+                    Duration::from_secs(60),
+                    Duration::from_secs(1),
+                );
+                for _ in 0..150 {
+                    let held = runtime
+                        .block_on(acquire(&locks, &report, |_| {}))
+                        .expect("acquire");
+                    let now = holding.fetch_add(1, Ordering::SeqCst) + 1;
+                    most_at_once.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(millis(2));
+                    holding.fetch_sub(1, Ordering::SeqCst);
+                    drop(held);
+                }
+            })
+        })
+        .collect();
+
+    for holder in holders {
+        holder.join().expect("a holder thread panicked");
+    }
+    stop.store(true, Ordering::Relaxed);
+    cleaner.join().expect("the cleaner thread panicked");
+
+    assert_eq!(
+        most_at_once.load(Ordering::SeqCst),
+        1,
+        "two execs held the same resource at the same time"
     );
 }

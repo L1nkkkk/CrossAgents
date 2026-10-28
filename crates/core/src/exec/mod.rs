@@ -23,6 +23,12 @@
 //! holds part of a request while waiting for the rest, so two requests that want the same
 //! resources in different orders cannot deadlock — the worst case is both waiting.
 //!
+//! A lock counts only when it is on the file that is at the path *at that moment*: after
+//! locking, `acquire` compares the handle's file identity ([`file_id`]) with the path's
+//! ([`path_id`]) and starts over when they differ. Without that, a cleanup deleting the lock
+//! file between the open and the lock would leave two processes each holding a "lock" on a
+//! different file with the same name.
+//!
 //! While waiting it calls the `on_wait` callback with one line per report period
 //! ([`Request::notice_every`]), naming who holds the lock, from the holder records:
 //!
@@ -62,6 +68,9 @@
 //! * [`cleanup`] — delete lock files nobody touched for a while and records of gone processes.
 //! * [`identity`], [`lock_name`], [`lock_path`], [`holders_dir`] — the names, for display and
 //!   for tests.
+//! * [`LockFile`], [`file_id`], [`path_id`], [`LockFile::still_at`] — the open handle and what
+//!   file it really is; `exec-run` needs the same comparison to check that a lock handle
+//!   inherited through `CROSSAGENTS_HELD` still points at the lock file.
 //! * [`ExecError`] and [`EXIT_TEMPFAIL`] — how to report that the lock did not come.
 
 use std::ffi::OsString;
@@ -75,7 +84,7 @@ mod holders;
 mod lock;
 
 pub use holders::{Cleanup, Holder, cleanup, holders};
-pub use lock::RawLock;
+pub use lock::{FileId, LockFile, RawLock, file_id, path_id};
 
 /// Exit code for "could not get the lock in time" (BSD `EX_TEMPFAIL`).
 pub const EXIT_TEMPFAIL: i32 = 75;
@@ -94,6 +103,10 @@ const BACKOFF_MAX: Duration = Duration::from_secs(2);
 
 /// The shortest pause, so a very small `notice_every` cannot turn into a spin.
 const MIN_POLL: Duration = Duration::from_millis(5);
+
+/// How many times in a row `acquire` retries a lock file it cannot open at all (a delete in
+/// progress seen on Windows), at 2 ms each.
+const UNAVAILABLE_ROUNDS: u32 = 200;
 
 /// How a request wants to use a resource.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -242,23 +255,38 @@ pub async fn acquire(
     // The first failed attempt reports at once: a person should not wait ten seconds to learn
     // who they are waiting for.
     let mut next_notice = started;
+    let mut unavailable = 0u32;
     loop {
-        let blocked = match try_all(locks_dir, &wants)? {
-            Ok(taken) => return Held::take(locks_dir, req, taken),
-            Err(blocked) => blocked,
+        let (waiting, notify) = match try_all(locks_dir, &wants)? {
+            Attempt::Taken(taken) => return Held::take(locks_dir, req, taken),
+            Attempt::Blocked(blocked) => (blocked.want, true),
+            // The lock file was replaced under us; nobody to name, just start over.
+            Attempt::Replaced(want) => (want, false),
+            // Windows keeps a deleted file's name unusable until its last handle closes, and
+            // cleanup holds that handle for the moment it takes to unlink. Retry briefly; a
+            // real permission problem still ends as an I/O error, not as a lock timeout.
+            Attempt::Unavailable(error) => {
+                unavailable += 1;
+                if unavailable > UNAVAILABLE_ROUNDS || started.elapsed() >= req.timeout {
+                    return Err(error.into());
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                continue;
+            }
         };
+        unavailable = 0;
         let waited = started.elapsed();
         if waited >= req.timeout {
             return Err(ExecError::Timeout {
-                resource: blocked.want.name.clone(),
-                path: blocked.want.path.display().to_string(),
+                resource: waiting.name.clone(),
+                path: waiting.path.display().to_string(),
                 waited_secs: waited.as_secs_f64(),
-                holder: held_by(locks_dir, &blocked.want),
+                holder: held_by(locks_dir, &waiting),
             });
         }
         let now = Instant::now();
-        if now >= next_notice {
-            on_wait(&describe(locks_dir, &blocked.want));
+        if notify && now >= next_notice {
+            on_wait(&describe(locks_dir, &waiting));
             next_notice = now + notice_every;
         }
         let pause = backoff
@@ -417,6 +445,21 @@ struct Blocked {
     want: Want,
 }
 
+/// What one pass over the request found.
+enum Attempt {
+    /// Every lock is held, and on the file that is at its path.
+    Taken(Vec<(Want, lock::LockFile)>),
+    /// Somebody else holds one of them.
+    Blocked(Blocked),
+    /// A lock file was deleted and re-created (by [`cleanup`]) between the open and the lock,
+    /// so the lock is on a file nobody will ever look at. Start over.
+    Replaced(Want),
+    /// The lock file cannot be opened at all right now: on Windows a file that was just
+    /// deleted stays unopenable until the last handle to it closes, and [`cleanup`] holds
+    /// that handle for the instant it takes to unlink.
+    Unavailable(std::io::Error),
+}
+
 /// The resources of a request, one entry per lock file, in lock-file order.
 ///
 /// A resource listed twice (`build:shared` and `build:exclusive` by mistake) is one lock taken
@@ -449,19 +492,30 @@ fn wants(resources: &[Resource]) -> Vec<Want> {
 
 /// Tries every lock once, in order. On the first conflict the locks already taken are
 /// released by dropping them, and the conflicted one is returned.
-fn try_all(
-    locks_dir: &Path,
-    wants: &[Want],
-) -> Result<Result<Vec<(Want, lock::LockFile)>, Blocked>, ExecError> {
+fn try_all(locks_dir: &Path, wants: &[Want]) -> Result<Attempt, ExecError> {
     let mut taken = Vec::with_capacity(wants.len());
     for want in wants {
-        let file = lock::LockFile::open(&locks_dir.join(format!("{}.lock", want.hash)))?;
+        let path = locks_dir.join(format!("{}.lock", want.hash));
+        let file = match lock::LockFile::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                // Windows, a file whose deletion is still pending; anything else is real.
+                return Ok(Attempt::Unavailable(error));
+            }
+            Err(error) => return Err(error.into()),
+        };
         if !file.try_lock(want.access)? {
-            return Ok(Err(Blocked { want: want.clone() }));
+            return Ok(Attempt::Blocked(Blocked { want: want.clone() }));
+        }
+        // The lock is only worth something if it is on the file the path leads to now. A
+        // cleanup between the open and the lock leaves us holding a deleted file while the
+        // next request creates and locks another one of the same name.
+        if !file.still_at(&path) {
+            return Ok(Attempt::Replaced(want.clone()));
         }
         taken.push((want.clone(), file));
     }
-    Ok(Ok(taken))
+    Ok(Attempt::Taken(taken))
 }
 
 /// The line reported while waiting: one per report period, naming the holder.
