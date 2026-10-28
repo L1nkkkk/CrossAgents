@@ -43,8 +43,18 @@
 //! # Releasing
 //!
 //! [`Held`] owns the locks: dropping it deletes its holder records and releases the locks.
-//! `exec-run` waits for the whole process tree to end before dropping it. Between `acquire`
-//! and starting the command there is no PID to record; [`Held::set_process`] fills it in.
+//! [`run`] (and `exec-run` generally) waits for the whole process tree to end before dropping
+//! it: see [`spawn`] and [`wait_tree_empty`]. Between `acquire` and starting the command
+//! there is no PID to record; [`Held::set_process`] fills it in.
+//!
+//! # The predecessor check
+//!
+//! A killed executor loses its lock before the processes in its job are gone
+//! (`docs/tasks/LOCKS.md` §5, conclusion 1). So after taking every lock, `acquire` reads the
+//! records of that lock and, if one names a root process that is still running (same PID and
+//! creation time), releases the locks and tries again. The record only ever makes a newcomer
+//! wait longer; a record of a process that is gone is deleted and ignored. This closes the
+//! window L0 measured on Windows, and is harmless on Unix.
 //!
 //! # Holder records
 //!
@@ -66,6 +76,11 @@
 //!   descriptor to pass on to the process tree.
 //! * [`holders`] — who holds a resource now, for a notice or the run page.
 //! * [`cleanup`] — delete lock files nobody touched for a while and records of gone processes.
+//! * [`spawn`], [`wait_tree_empty`], [`run`] — start the command in a strict process tree,
+//!   wait for the whole tree (not just the root) before letting go, and pass the locks on to
+//!   nested `exec`s through [`HELD_ENV`].
+//! * [`inherited_holds`] — whether a `CROSSAGENTS_HELD` value still covers a request: the
+//!   outer exec's process is alive and its handles are the lock files.
 //! * [`identity`], [`lock_name`], [`lock_path`], [`holders_dir`] — the names, for display and
 //!   for tests.
 //! * [`LockFile`], [`file_id`], [`path_id`], [`LockFile::still_at`] — the open handle and what
@@ -82,9 +97,11 @@ use sha2::{Digest, Sha256};
 
 mod holders;
 mod lock;
+mod run;
 
-pub use holders::{Cleanup, Holder, cleanup, holders};
-pub use lock::{FileId, LockFile, RawLock, file_id, path_id};
+pub use holders::{Cleanup, Holder, cleanup, holders, predecessor_alive};
+pub use lock::{FileId, LockFile, RawLock, file_id, file_id_raw, path_id};
+pub use run::{HELD_ENV, Inherited, inherited_holds, run, spawn, wait_tree_empty};
 
 /// Exit code for "could not get the lock in time" (BSD `EX_TEMPFAIL`).
 pub const EXIT_TEMPFAIL: i32 = 75;
@@ -194,6 +211,11 @@ pub enum ExecError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    /// The request cannot run inside the outer `exec` it was started from
+    /// (`docs/tasks/LOCKS.md` §4.5): a resource the outer one does not hold, or an upgrade
+    /// from shared to exclusive.
+    #[error("{0}")]
+    Nesting(String),
 }
 
 /// The normalized identity of a resource path.
@@ -260,6 +282,9 @@ pub async fn acquire(
         let (waiting, notify) = match try_all(locks_dir, &wants)? {
             Attempt::Taken(taken) => return Held::take(locks_dir, req, taken),
             Attempt::Blocked(blocked) => (blocked.want, true),
+            // The lock came free, but the previous holder's tree has not: the record shows
+            // its root process is still running. Treat it as held, with the record's name.
+            Attempt::Predecessor(want) => (want, true),
             // The lock file was replaced under us; nobody to name, just start over.
             Attempt::Replaced(want) => (want, false),
             // Windows keeps a deleted file's name unusable until its last handle closes, and
@@ -341,6 +366,18 @@ impl Held {
                 raw: held.file.raw(),
             })
             .collect()
+    }
+
+    /// Makes every lock handle or descriptor inheritable by the next child, so a nested
+    /// `exec` can verify that it still points at the lock file (`docs/tasks/LOCKS.md` §4.5).
+    ///
+    /// [`spawn`] calls this; the inheritance is for the check only and does not extend the
+    /// lock (`§5`, conclusion 2).
+    pub fn inherit_locks(&self) -> std::io::Result<()> {
+        for held in &self.locks {
+            held.file.make_inheritable()?;
+        }
+        Ok(())
     }
 
     /// Records the command's root process and its tree, once `exec-run` has started them.
@@ -451,6 +488,9 @@ enum Attempt {
     Taken(Vec<(Want, lock::LockFile)>),
     /// Somebody else holds one of them.
     Blocked(Blocked),
+    /// Every lock could be taken, but a holder record names a root process that is still
+    /// running (`docs/tasks/LOCKS.md` §5, conclusion 3). Back off and look again.
+    Predecessor(Want),
     /// A lock file was deleted and re-created (by [`cleanup`]) between the open and the lock,
     /// so the lock is on a file nobody will ever look at. Start over.
     Replaced(Want),
@@ -515,6 +555,15 @@ fn try_all(locks_dir: &Path, wants: &[Want]) -> Result<Attempt, ExecError> {
         }
         taken.push((want.clone(), file));
     }
+    // The OS lock is not the whole story: a predecessor killed while its tree kept running
+    // loses the lock before its processes stop. Its record still names the root process, so
+    // this only waits longer (§5). The locks just taken are released by dropping `taken`.
+    if let Some(want) = wants
+        .iter()
+        .find(|want| holders::predecessor_alive(locks_dir, &want.path, want.access))
+    {
+        return Ok(Attempt::Predecessor(want.clone()));
+    }
     Ok(Attempt::Taken(taken))
 }
 
@@ -561,6 +610,14 @@ fn human(duration: Duration) -> String {
         60..=3599 => format!("{}m {:02}s", seconds / 60, seconds % 60),
         _ => format!("{}h {:02}m", seconds / 3600, (seconds % 3600) / 60),
     }
+}
+
+/// `pid`'s creation time, as that platform can tell it (`None` where it cannot).
+///
+/// `exec-run` records it next to the PID so a reused PID is not mistaken for the holder; the
+/// predecessor check and the nesting check compare the same value.
+pub fn process_created(pid: u32) -> Option<u64> {
+    holders::created(pid)
 }
 
 /// Spreads retries out by ±10%, so two waiters that started together do not take turns

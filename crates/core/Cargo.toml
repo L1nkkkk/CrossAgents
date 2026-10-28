@@ -38,6 +38,17 @@ path = "tests/support/lock_kill_helper.rs"
 name = "exec_lock_helper"
 path = "tests/support/exec_lock_helper.rs"
 
+# Only for `tests/exec_tree.rs`: processes for the tree, nesting and predecessor checks.
+[[bin]]
+name = "exec_sleeper"
+path = "tests/support/exec_sleeper.rs"
+
+# Only for `tests/exec_tree.rs`: closes the inherited lock handles and leaves a grandchild
+# behind (docs/tasks/LOCKS.md §7 item 4).
+[[bin]]
+name = "exec_tree_helper"
+path = "tests/support/exec_tree_helper.rs"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.191"
 

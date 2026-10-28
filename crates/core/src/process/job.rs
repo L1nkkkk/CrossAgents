@@ -19,8 +19,9 @@ mod imp {
     };
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-        SetInformationJobObject,
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+        QueryInformationJobObject, SetInformationJobObject,
     };
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, OpenProcess, OpenThread, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
@@ -66,6 +67,30 @@ mod imp {
                 return Err(io::Error::last_os_error());
             }
             Ok(())
+        }
+
+        /// How many processes are alive in the job right now
+        /// (`JobObjectBasicAccountingInformation.ActiveProcesses`).
+        ///
+        /// The job is unnamed on purpose: it dies with its last handle, so it cannot be used to
+        /// find a predecessor (`docs/tasks/LOCKS.md` §5, conclusion 3). This is only for
+        /// waiting until the job is empty before releasing the locks.
+        pub fn active_processes(&self) -> io::Result<u32> {
+            // SAFETY: `info` is a live out-param of exactly the size the call is given.
+            unsafe {
+                let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = std::mem::zeroed();
+                let ok = QueryInformationJobObject(
+                    self.handle(),
+                    JobObjectBasicAccountingInformation,
+                    (&raw mut info).cast(),
+                    std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    std::ptr::null_mut(),
+                );
+                if ok == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(info.ActiveProcesses)
+            }
         }
 
         /// Puts process `pid` in the job.
@@ -146,6 +171,21 @@ pub(super) fn kill_group(group: u32) {
     }
 }
 
+/// Whether any process is still in group `group`: the Unix stand-in for the job's active
+/// process count (`kill(-pgid, 0)`).
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub(super) fn group_alive(group: u32) -> bool {
+    // SAFETY: signal 0 sends nothing; it only asks whether the group exists. A group of
+    // somebody else's processes answers `EPERM`, which still means it is there.
+    unsafe {
+        if libc::kill(-(group as libc::pid_t), 0) == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+}
+
 #[cfg(not(windows))]
 mod imp {
     use std::io;
@@ -166,6 +206,10 @@ mod imp {
 
         pub fn assign(&self, _pid: u32) -> io::Result<()> {
             Ok(())
+        }
+
+        pub fn active_processes(&self) -> io::Result<u32> {
+            Ok(0)
         }
     }
 }

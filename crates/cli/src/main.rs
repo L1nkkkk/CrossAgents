@@ -52,6 +52,8 @@ pub enum Command {
     Account(cmd::account::AccountCommand),
     /// Guided setup of a vendor: account, login, models and agents.
     Setup(cmd::setup::SetupArgs),
+    /// Run a command under the local resource locks (docs/tasks/LOCKS.md §4).
+    Exec(cmd::exec::ExecArgs),
     /// Serve the collaboration tools over MCP on stdio (started by the hub for agents).
     #[command(hide = true)]
     Mcp,
@@ -81,6 +83,17 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // `exec` hands back the command's own exit code (and 75 for a lock timeout), so it cannot
+    // go through `cmd::run`, which only knows success or failure.
+    if let Command::Exec(args) = &cli.command {
+        return match runtime.block_on(cmd::exec::run_cli(args.clone())) {
+            Ok(code) => ExitCode::from(code.rem_euclid(256) as u8),
+            Err(err) => {
+                eprintln!("error: {err:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     match runtime.block_on(cmd::run(cli)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
