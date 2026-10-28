@@ -60,7 +60,7 @@ export function DiffView({ files, focus, review, onOpenFile }: { files: DiffFile
                 <div className={`dl ${line.kind}`}>
                   {review && <LineNo line={line} onClick={() => review.onLine(file.path, line)} />}
                   <span className="sign">{line.kind === "add" ? "+" : line.kind === "del" ? "−" : " "}</span>
-                  {line.text}
+                  <span className="dl-text">{line.text}</span>
                 </div>
                 {review?.below(file.path, line)}
               </div>

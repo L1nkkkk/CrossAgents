@@ -197,6 +197,7 @@ input, select, textarea {
   background: var(--surface); color: var(--text); width: 100%;
 }
 input:focus, select:focus, textarea:focus { outline: none; border-color: var(--focus); }
+input[type="radio"], input[type="checkbox"] { width: auto; padding: 0; margin: 0; flex: none; accent-color: var(--accent); }
 textarea { resize: vertical; }
 
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px 16px; }
@@ -233,10 +234,18 @@ a.chip:hover { text-decoration: none; background: var(--selected); }
 
 /* ---- Shell ------------------------------------------------------------------------- */
 .app {
-  display: grid; grid-template-columns: 264px minmax(0, 1fr); height: 100%;
+  display: grid; grid-template-columns: var(--sidebar-width, 264px) minmax(0, 1fr); height: 100%; position: relative;
   background: var(--page); padding: var(--panel-gap); column-gap: var(--panel-gap);
 }
-.app.with-drawer { grid-template-columns: 264px minmax(0, 1fr) var(--tools-width, minmax(360px, 440px)); }
+.app.with-drawer { grid-template-columns: var(--sidebar-width, 264px) minmax(0, 1fr) var(--tools-width, 420px); }
+/* Drag handles on the docked columns' inner edges (lib/widths.ts). */
+.col-edge { position: absolute; top: 0; bottom: 0; width: 8px; z-index: 30; cursor: col-resize; touch-action: none; }
+.col-edge::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; transition: background 0.12s; }
+.col-edge:hover::after, body.col-resizing .col-edge::after { background: var(--accent); }
+.sidebar-edge { left: calc(var(--panel-gap) + var(--sidebar-width) + var(--panel-gap) / 2 - 4px); }
+.tools-edge { right: calc(var(--panel-gap) + var(--tools-width) + var(--panel-gap) / 2 - 4px); }
+body.col-resizing { cursor: col-resize; user-select: none; }
+body.col-resizing iframe, body.col-resizing webview { pointer-events: none; }
 :root[data-theme="dark"] .sidebar, :root[data-theme="dark"] .main, :root[data-theme="dark"] .drawer {
   border: 1px solid var(--panel-edge); border-radius: var(--radius-lg); overflow: hidden;
 }
@@ -289,16 +298,16 @@ a.chip:hover { text-decoration: none; background: var(--selected); }
 .group-head .group-add { margin-left: auto; opacity: 0; }
 .group-head:hover .group-add, .group-add:focus-visible { opacity: 1; }
 
-.row { position: relative; display: flex; align-items: center; border-radius: var(--radius); min-width: 0; }
-.row:hover { background: var(--hover); }
-.row.active { background: var(--accent-bg); }
+.nav-row { position: relative; display: flex; align-items: center; border-radius: var(--radius); min-width: 0; }
+.nav-row:hover { background: var(--hover); }
+.nav-row.active { background: var(--accent-bg); }
 .row-link {
   flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; padding: 5px 8px;
   color: var(--text); font-size: 13.5px; line-height: 20px;
 }
 .row-link:hover { text-decoration: none; }
-.row.dim .row-link { color: var(--text-2); }
-.row.dim:hover .row-link, .row.dim.active .row-link { color: var(--text); }
+.nav-row.dim .row-link { color: var(--text-2); }
+.nav-row.dim:hover .row-link, .nav-row.dim.active .row-link { color: var(--text); }
 .row-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-label .role { color: var(--muted); font-size: 12px; margin-left: 8px; }
 .row-tag { flex-shrink: 0; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 6px; padding: 0 6px; border-radius: 999px; font-size: 11px; line-height: 17px; color: var(--muted); background: color-mix(in srgb, var(--muted) 12%, transparent); }
@@ -308,8 +317,8 @@ a.chip:hover { text-decoration: none; background: var(--selected); }
 .row-dot.danger { background: var(--danger); }
 .row-dot.unread { background: var(--text-2); }
 .row-actions { display: none; align-items: center; gap: 1px; padding-right: 4px; }
-.row:hover .row-actions, .row:focus-within .row-actions { display: flex; }
-.row:hover .row-dot, .row:focus-within .row-dot { display: none; }
+.nav-row:hover .row-actions, .nav-row:focus-within .row-actions { display: flex; }
+.nav-row:hover .row-dot, .nav-row:focus-within .row-dot { display: none; }
 .disclose {
   display: inline-grid; place-items: center; width: 18px; height: 18px; padding: 0; border: none; border-radius: 4px;
   background: transparent; color: var(--muted); flex-shrink: 0; transform: rotate(-90deg); transition: transform 0.12s;
@@ -331,6 +340,9 @@ a.chip:hover { text-decoration: none; background: var(--selected); }
 .dev-hub { display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: baseline; font-size: 11.5px; padding: 6px 8px; border-radius: 6px; background: var(--warn-bg); color: var(--warn-text); }
 .dev-hub .err { flex-basis: 100%; color: var(--danger); overflow-wrap: anywhere; }
 .dev-hub button.link { margin-left: auto; }
+.update-ready { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 6px 6px 6px 8px; border-radius: 6px; background: var(--accent-bg); color: var(--text); }
+.update-ready .update-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.update-ready button.small { padding: 2px 8px; }
 .spark { display: inline-block; animation: spin 2.4s linear infinite; }
 
 /* Shape marks (role ◆ ● ■, run ◯) used in headers and the workspace page. */
@@ -888,9 +900,11 @@ button.tool .chip.tiny { padding: 0 6px; line-height: 16px; font-family: var(--f
 .diff { display: flex; flex-direction: column; gap: 8px; }
 .diff-file { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
 .diff-head { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 5px 10px; background: var(--surface-sunk); font-size: 12px; }
-.diff-body { background: none; padding: 4px 0; border-radius: 0; font-size: var(--mono-size); line-height: 1.55; max-height: 480px; white-space: pre; overflow: auto; }
-.dl { padding: 0 10px; min-width: max-content; }
-.dl .sign { display: inline-block; width: 14px; color: var(--muted); user-select: none; }
+.diff-body { background: none; padding: 4px 0; border-radius: 0; font-size: var(--mono-size); line-height: 1.55; max-height: 480px; white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; }
+/* Long lines wrap under their text, not under the +/- sign. */
+.dl { display: flex; padding: 0 10px; }
+.dl-text { flex: 1; min-width: 0; }
+.dl .sign { display: inline-block; flex: none; width: 14px; color: var(--muted); user-select: none; }
 .dl.add { background: color-mix(in srgb, var(--add) 12%, transparent); color: var(--text); }
 .dl.add .sign { color: var(--add); }
 .dl.del { background: color-mix(in srgb, var(--del) 12%, transparent); color: var(--text); }
@@ -1252,7 +1266,7 @@ button.ghost.icon, .icon-btn { background: transparent; border-color: transparen
 
 /* Sidebar hidden from the title bar (Ctrl+B). */
 .app.no-sidebar { grid-template-columns: minmax(0, 1fr); }
-.app.no-sidebar.with-drawer { grid-template-columns: minmax(0, 1fr) var(--tools-width, minmax(360px, 440px)); }
+.app.no-sidebar.with-drawer { grid-template-columns: minmax(0, 1fr) var(--tools-width, 420px); }
 .window .app.drawer-float .drawer { top: calc(40px + var(--panel-gap)); }
 
 /* The sidebar in a small window: over the page from the left (hovered, or opened by a click with
@@ -1438,7 +1452,7 @@ html, body { overflow: hidden; }
 .review-file .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .review-file + .review-file { border-top: 1px solid var(--border); }
 .diff.reviewing .dl { padding-left: 0; }
-.dl .ln { display: inline-block; width: 44px; padding: 0 8px 0 0; margin-right: 4px; text-align: right; color: var(--muted); border: none; border-radius: 0; background: none; font: inherit; user-select: none; }
+.dl .ln { display: inline-block; flex: none; width: 44px; padding: 0 8px 0 0; margin-right: 4px; text-align: right; color: var(--muted); border: none; border-radius: 0; background: none; font: inherit; user-select: none; }
 .dl button.ln { cursor: pointer; }
 .dl button.ln:hover { color: var(--accent-text); background: var(--surface-sunk); }
 .review-edit, .review-draft { white-space: normal; font-family: var(--font-sans); margin: 4px 10px 6px 58px; display: flex; gap: 6px; }

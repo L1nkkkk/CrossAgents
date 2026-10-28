@@ -7,11 +7,11 @@ import { useEffect, useState } from "react";
 import type { HubInfo } from "@bindings/HubInfo";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import { api, errorText } from "../api";
-import type { UpdateState } from "../bridge";
 import { navigate } from "../App";
 import { ErrorBox, Icon, VendorMark, type IconName } from "../components";
 import { useConnectionStatus, useHubData } from "../hub";
 import { buildTag } from "../lib/build";
+import { useUpdateState } from "../lib/updates";
 import { groupModels, onlyModels, prettyModel, switchModels, vendorLabel } from "../lib/models";
 import { MODES, PAPERS, resolve, setTheme, useTheme } from "../lib/theme";
 import { AgentsPage } from "./Agents";
@@ -132,12 +132,7 @@ function AboutPage() {
 /** Checks for, downloads and installs a newer GUI; the next launch then upgrades the local hub. */
 function UpdateCard() {
   const bridge = window.crossagents?.updates;
-  const [state, setState] = useState<UpdateState | null>();
-  useEffect(() => {
-    if (!bridge) return setState(null);
-    void bridge.get().then(setState, () => setState(null));
-    return bridge.onState(setState);
-  }, [bridge]);
+  const [state, setState] = useUpdateState();
   if (state === undefined) return null;
   const at = (iso: string) => new Date(iso).toLocaleString("zh-CN", { hour12: false });
   let text: string;

@@ -29,9 +29,20 @@ export function createTray(icon: string, hub: LocalHub, show: () => void, log: (
   const tray = new Tray(nativeImage.createFromPath(icon));
   tray.setToolTip("CrossAgents");
   let stopping = false;
+  let announced: string | undefined;
   updates.onChange((state) => {
-    if (state.state === "ready") tray.setToolTip(`CrossAgents：${state.version} 已下载，退出时安装`);
+    if (state.state !== "ready") return;
+    tray.setToolTip(`CrossAgents：${state.version} 已下载，退出时安装`);
+    // Said once per version: the window may be hidden in the tray for days.
+    if (announced === state.version) return;
+    announced = state.version;
+    tray.displayBalloon({
+      title: `CrossAgents ${state.version} 已下载`,
+      content: "退出时会自动安装；也可以在侧栏底部或托盘菜单里「重启更新」。后台的 hub 和 agent 不会中断。",
+    });
   });
+  // The balloons say where things are; clicking one opens the window.
+  tray.on("balloon-click", show);
 
   const update = (): MenuItemConstructorOptions => {
     const state = updates.state();

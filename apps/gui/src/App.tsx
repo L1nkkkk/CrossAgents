@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { RunDetail } from "@bindings/RunDetail";
 import { api, getBridge } from "./api";
@@ -10,6 +10,7 @@ import { toggleRail } from "./rail";
 import { Sidebar } from "./Sidebar";
 import { Titlebar, closeSidebarPeek, hoverSidebar, inDesktop, toggleSidebar, unhoverSidebar, useSidebar } from "./titlebar";
 import { ToolColumn, useToolsFloat } from "./ToolColumn";
+import { SIDEBAR, TOOLS, dragEdge, setSidebarWidth, setToolsWidth, useWidths } from "./lib/widths";
 import { HomeView } from "./views/Home";
 import { RunView } from "./views/Run";
 import { SessionView } from "./views/Session";
@@ -134,6 +135,7 @@ export function App() {
 
   const sidebar = useSidebar();
   const floatTools = useToolsFloat();
+  const widths = useWidths(sidebar.docked);
   const mismatch = useVersionMismatch();
 
   // Picking something in the floating sidebar puts it away.
@@ -214,8 +216,21 @@ export function App() {
   }
 
   const app = (
-    <div className={`app ${drawer ? (floatTools ? "drawer-float" : "with-drawer") : ""} ${sidebar.docked ? "" : "no-sidebar"}`}>
+    <div
+      className={`app ${drawer ? (floatTools ? "drawer-float" : "with-drawer") : ""} ${sidebar.docked ? "" : "no-sidebar"}`}
+      style={{ "--sidebar-width": `${widths.sidebar}px`, "--tools-width": `${widths.tools}px` } as CSSProperties}
+    >
       {sidebar.docked && <Sidebar route={route} />}
+      {sidebar.docked && (
+        <div
+          className="col-edge sidebar-edge"
+          role="separator"
+          aria-orientation="vertical"
+          title="拖动调整宽度，双击还原"
+          onPointerDown={(e) => dragEdge(e, widths.sidebar, "right", setSidebarWidth)}
+          onDoubleClick={() => setSidebarWidth(SIDEBAR.initial)}
+        />
+      )}
       {sidebar.floating && (
         <>
           {/* Opened by a click: a click anywhere else puts it away. */}
@@ -230,6 +245,16 @@ export function App() {
         <aside className="drawer">
           {drawer}
         </aside>
+      )}
+      {drawer && !floatTools && (
+        <div
+          className="col-edge tools-edge"
+          role="separator"
+          aria-orientation="vertical"
+          title="拖动调整宽度，双击还原"
+          onPointerDown={(e) => dragEdge(e, widths.tools, "left", (w) => setToolsWidth(w, sidebar.docked))}
+          onDoubleClick={() => setToolsWidth(TOOLS.initial, sidebar.docked)}
+        />
       )}
       <FileViewerHost />
     </div>

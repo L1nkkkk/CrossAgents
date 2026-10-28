@@ -16,20 +16,18 @@ import type { HubEvent } from "./hub";
 import { parseDiff } from "./lib/diff";
 import { clock, full } from "./lib/time";
 import { PANE_KINDS, addPane, clearTarget, removePane, setPane, setSplit, useLayout, type PaneKind, type Target } from "./panes";
-import { useMedia } from "./lib/media";
+import { useWidths } from "./lib/widths";
 import { useSession, type TranscriptTurn } from "./session";
 import { useSidebar } from "./titlebar";
 import { TaskDetail } from "./views/Run";
 
 /**
  * Whether the tool column floats over the page as a drawer: when docking it would leave the
- * conversation too narrow (about 500px), so the threshold depends on the sidebar.
+ * conversation narrower than MIN_MAIN, which depends on the sidebar and the dragged widths.
  */
 export function useToolsFloat() {
   const { docked } = useSidebar();
-  const besideSidebar = useMedia("(max-width: 1199px)");
-  const alone = useMedia("(max-width: 939px)");
-  return docked ? besideSidebar : alone;
+  return useWidths(docked).float;
 }
 
 /**
