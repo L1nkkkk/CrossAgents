@@ -191,3 +191,42 @@ async fn what_the_agent_does_not_take_is_refused_not_dropped() {
     assert_eq!(resp.status(), 400);
     assert!(resp.text().await.unwrap().contains("PDFs"));
 }
+
+/// Files given when a run starts go to its lead with the kickoff.
+#[tokio::test]
+async fn files_given_with_a_run_reach_its_lead() {
+    let t = TestHub::start().await;
+    t.add_agent("boss", Some("haiku")).await;
+    let mut w = t.watch().await;
+    let resp = t
+        .post(
+            "/v1/runs",
+            json!({
+                "request": "Make it look like the screenshot.",
+                "planner": "boss",
+                "attachments": [{ "name": "mock.png", "mime": "image/png", "data": "iVBORw==" }],
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    w.until("kickoff answered", turn_completed).await;
+    let output = w.output();
+    assert!(
+        output.contains("Make it look like the screenshot."),
+        "{output}"
+    );
+    assert!(output.contains("[image image/png 4 bytes]"), "{output}");
+
+    // The same checks as a message: a file messages cannot carry stops the run.
+    let resp = t
+        .post(
+            "/v1/runs",
+            json!({
+                "request": "x",
+                "planner": "boss",
+                "attachments": [{ "name": "a.exe", "mime": "application/x-msdownload", "data": "TVo=" }],
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 400);
+}

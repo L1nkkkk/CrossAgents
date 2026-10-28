@@ -571,6 +571,11 @@ pub struct CreateRunRequest {
     #[serde(default)]
     #[ts(optional)]
     pub policy: Option<crossagents_core::RunPolicy>,
+    /// Files that come with the request (screenshots, specs), handed to the lead with its
+    /// kickoff; the same limits as [`SendMessageRequest::attachments`].
+    #[serde(default)]
+    #[ts(optional)]
+    pub attachments: Option<Vec<AttachmentUpload>>,
 }
 
 /// `POST /v1/repos/init`: put a directory under version control (`git init` and a first

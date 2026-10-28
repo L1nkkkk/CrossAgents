@@ -161,6 +161,7 @@ impl Orchestrator {
                 planner: proposer,
                 repo: Some(repo),
                 base_branch,
+                attachments: Vec::new(),
                 config: RunConfig {
                     worker: proposer,
                     escalate: None,

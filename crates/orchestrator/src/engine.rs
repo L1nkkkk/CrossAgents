@@ -12,9 +12,9 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, AgentStatus, ClaimRole, CoreError, Envelope, EventBus, EventKind,
-    HandoffKind, MessageSource, PlannedTask, Role, Run, RunConfig, RunId, RunPolicy, RunStatus,
-    Store, Task, TaskId, TaskReport, TaskStatus,
+    Agent, AgentId, AgentKey, AgentStatus, Attachment, ClaimRole, CoreError, Envelope, EventBus,
+    EventKind, HandoffKind, MessageSource, PlannedTask, Role, Run, RunConfig, RunId, RunPolicy,
+    RunStatus, Store, Task, TaskId, TaskReport, TaskStatus,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -49,6 +49,8 @@ pub struct NewRun {
     /// The branch the run's branch starts from and lands on; `None` is the repository's
     /// current branch.
     pub base_branch: Option<String>,
+    /// Files that came with the request, already stored; they go with the lead's kickoff.
+    pub attachments: Vec<Attachment>,
 }
 
 /// What the person settles when approving a plan (docs/tasks/W1.md §5.2); absent fields
@@ -393,17 +395,26 @@ impl Orchestrator {
             .await;
         // The request is the person's; the roster and ids are facts the lead needs.
         let sessions = self.sessions_section(&run.repo, run.planner).await;
-        self.deliver(
-            run.planner,
-            MessageSource::Human,
-            brief::kickoff(
-                &run,
-                &team,
-                run.config.worker,
-                &crate::project::run_checks(&self.integration_path(&run)),
-                &sessions,
-            ),
-        );
+        let kickoff = Envelope {
+            attachments: new.attachments,
+            ..Envelope::new(
+                MessageSource::Human,
+                brief::kickoff(
+                    &run,
+                    &team,
+                    run.config.worker,
+                    &crate::project::run_checks(&self.integration_path(&run)),
+                    &sessions,
+                ),
+            )
+        };
+        let host = self.host.clone();
+        let lead = run.planner;
+        tokio::spawn(async move {
+            if let Err(err) = host.send_envelope(lead, kickoff, false).await {
+                tracing::warn!(agent = %lead, error = %err, "cannot deliver the kickoff");
+            }
+        });
         Ok(run)
     }
 

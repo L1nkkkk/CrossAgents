@@ -19,22 +19,22 @@ use chrono::{DateTime, Utc};
 use crossagents_api_types::{
     API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentExecution,
     AgentExecutionResponse, AgentSettingsRequest, AnswerRequest, ApiError, ApproveRunRequest,
-    ArchiveAgentRequest, AttachmentContent, ChangesResponse, CliInfo, CliInstallAccepted,
-    CommitGraph, ConnectInfo, CreateAccountRequest, CreateAgentRequest, CreateRunRequest,
-    DeleteRunResponse, DiffSide, ErrorCode, FileContentResponse, FileEntry, FileKind,
-    FileTreeResponse, FinishRequest, GraphCommit, GraphRef, GraphRefKind, HealthResponse, HubInfo,
-    InitRepoRequest, LandRequest, ListAccountsResponse, ListAgentsResponse, ListNotesResponse,
-    ListPluginsResponse, ListQuestionsResponse, ListRunsResponse, ListToolsResponse, LoginStarted,
-    PluginInfo, QuotaResponse, RejectRunRequest, RenameAgentRequest, ResolvePathsRequest,
-    ResolvePathsResponse, ResolvedPath, RunDetail, RunTrace, SendMessageRequest,
-    SendMessageResponse, SetModelRequest, SetPluginModelsRequest, SetTopicRequest,
-    TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse, UpdateRunPolicyRequest, UsageGroup,
-    UsageResponse,
+    ArchiveAgentRequest, AttachmentContent, AttachmentUpload, ChangesResponse, CliInfo,
+    CliInstallAccepted, CommitGraph, ConnectInfo, CreateAccountRequest, CreateAgentRequest,
+    CreateRunRequest, DeleteRunResponse, DiffSide, ErrorCode, FileContentResponse, FileEntry,
+    FileKind, FileTreeResponse, FinishRequest, GraphCommit, GraphRef, GraphRefKind, HealthResponse,
+    HubInfo, InitRepoRequest, LandRequest, ListAccountsResponse, ListAgentsResponse,
+    ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
+    ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
+    RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse, ResolvedPath, RunDetail,
+    RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest, SetPluginModelsRequest,
+    SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse,
+    UpdateRunPolicyRequest, UsageGroup, UsageResponse,
 };
 use crossagents_core::{
-    Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, AttachmentSupport,
-    CoreError, DriverKind, Envelope, Event, EventBus, EventKind, HumanItem, LandMode, MessageId,
-    MessageSource, Run, RunConfig, RunId, Store, Task, TaskId,
+    Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, Attachment,
+    AttachmentSupport, CoreError, DriverKind, Envelope, Event, EventBus, EventKind, HumanItem,
+    LandMode, MessageId, MessageSource, Run, RunConfig, RunId, Store, Task, TaskId,
 };
 use crossagents_orchestrator::{
     Approval, DeleteRun, FileError, FilesScope, GitWorkspaces, NewRun, Orchestrator,
@@ -903,28 +903,7 @@ async fn send_message(
         return Err(AppError::bad_request("text must not be empty"));
     }
     let key = AgentKey::parse(&key);
-    let attachments = if uploads.is_empty() {
-        Vec::new()
-    } else {
-        let agent = state.store().get_agent(&key).await?;
-        // Refuse a kind the agent does not take, before storing anything (docs/TODO.md
-        // §7); an ACP agent declares its kinds when its session starts.
-        let support = state
-            .runtime
-            .attachment_support(&agent)
-            .await?
-            .unwrap_or(AttachmentSupport::TEXT_ONLY);
-        let driver = state
-            .runtime
-            .plugins()
-            .driver(&agent.plugin, agent.driver.as_deref())
-            .map(|resolved| resolved.driver.kind().as_str())
-            .unwrap_or("unknown");
-        crate::attachments::check_support(&uploads, support, &agent.name, driver)
-            .map_err(|refused| AppError::bad_request(refused.0))?;
-        crate::attachments::store(&state.home, agent.id, uploads)
-            .map_err(|refused| AppError::bad_request(refused.0))?
-    };
+    let attachments = store_uploads(&state, &key, uploads).await?;
     let envelope = Envelope {
         attachments,
         ..Envelope::new(MessageSource::Human, req.text)
@@ -938,6 +917,36 @@ async fn send_message(
         StatusCode::ACCEPTED,
         Json(SendMessageResponse { message_id, queued }),
     ))
+}
+
+/// Checks `uploads` against what the agent takes and stores them for it; nothing to do
+/// without uploads.
+async fn store_uploads(
+    state: &AppState,
+    key: &AgentKey,
+    uploads: Vec<AttachmentUpload>,
+) -> ApiResult<Vec<Attachment>> {
+    if uploads.is_empty() {
+        return Ok(Vec::new());
+    }
+    let agent = state.store().get_agent(key).await?;
+    // Refuse a kind the agent does not take, before storing anything (docs/TODO.md §7); an
+    // ACP agent declares its kinds when its session starts.
+    let support = state
+        .runtime
+        .attachment_support(&agent)
+        .await?
+        .unwrap_or(AttachmentSupport::TEXT_ONLY);
+    let driver = state
+        .runtime
+        .plugins()
+        .driver(&agent.plugin, agent.driver.as_deref())
+        .map(|resolved| resolved.driver.kind().as_str())
+        .unwrap_or("unknown");
+    crate::attachments::check_support(&uploads, support, &agent.name, driver)
+        .map_err(|refused| AppError::bad_request(refused.0))?;
+    crate::attachments::store(&state.home, agent.id, uploads)
+        .map_err(|refused| AppError::bad_request(refused.0))
 }
 
 /// One file sent to the agent, for clients to show.
@@ -1184,7 +1193,14 @@ async fn create_run(
     // the branch it is on (docs/tasks/S1.md §3.2).
     let planner_agent = state.store().get_agent(&AgentKey::Id(planner)).await?;
     let (repo, base_branch) = (planner_agent.home().to_path_buf(), None);
+    let attachments = store_uploads(
+        &state,
+        &AgentKey::Id(planner),
+        req.attachments.unwrap_or_default(),
+    )
+    .await?;
     let new = NewRun {
+        attachments,
         request: req.request,
         title: req.title,
         planner,

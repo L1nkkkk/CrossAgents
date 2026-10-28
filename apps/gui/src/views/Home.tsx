@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from
 import type { Agent } from "@bindings/Agent";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import { api, errorText } from "../api";
+import { HeldFiles, useHeld } from "../attach";
 import { sendMessage } from "../outbox";
 import { navigate } from "../App";
 import { Avatar, BrandMark, ErrorBox, Field, Icon, VendorMark, agentTitle, displayName, hueOf, useAgents } from "../components";
@@ -125,6 +126,9 @@ export function HomeView() {
   const [options, setOptions] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  // Screenshots and files for the first message: the chat's, or the run lead's kickoff. What
+  // the agent takes is only known once it exists; the hub checks then and says why.
+  const files = useHeld(setError);
   const ref = useRef<HTMLTextAreaElement>(null);
 
   // 全托管 is picked anew each time: a risky choice never carries over (docs/tasks/W1.md §7).
@@ -244,7 +248,8 @@ export function HomeView() {
         profile: { display_name: null, title: null, avatar: null, color: null, persona: null },
       });
       // Into the conversation at once; the message shows there while the agent starts.
-      void sendMessage(agent.id, text).catch(() => {});
+      void sendMessage(agent.id, text, { attachments: uploads() }).catch(() => {});
+      files.clear();
       navigate("s", agent.id);
     } catch (err) {
       setError(errorText(err));
@@ -276,6 +281,7 @@ export function HomeView() {
         max_parallel: maxParallel ? Number(maxParallel) : null,
         max_attempts: null,
         team: null,
+        attachments: uploads(),
         policy: {
           ...presetPolicy(preset),
           continuation: continuation ? { max_attempts: continuationAttempts, interval_seconds: continuationInterval, stuck_minutes: null } : null,
@@ -286,12 +292,18 @@ export function HomeView() {
           },
         },
       });
+      files.clear();
       navigate("runs", run.id);
     } catch (err) {
       setError(errorText(err));
     } finally {
       setBusy(false);
     }
+  }
+
+  /** The held files as the hub takes them. */
+  function uploads() {
+    return files.held.map(({ name, mime, data }) => ({ name, mime, data }));
   }
 
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -443,9 +455,11 @@ export function HomeView() {
         </div>
 
         <QuestionCards agents={everyone} />
-        <div className="composer home-composer">
+        <div className="composer home-composer" onDrop={files.onDrop} onDragOver={files.onDragOver}>
           {mention.menu}
+          <HeldFiles files={files.held} onRemove={files.remove} />
           <textarea
+            onPaste={files.onPaste}
             ref={ref}
             rows={3}
             value={request}
@@ -495,6 +509,7 @@ export function HomeView() {
               />
             )}
             <div className="spacer" />
+            {files.picker}
             {mode === "run" && (
               <button
                 type="button"
