@@ -572,6 +572,7 @@ dependencies = [
  "base64 0.23.1",
  "chrono",
  "crossagents-core",
+ "crossagents-store-sqlite",
  "dunce",
  "serde",
  "serde_json",

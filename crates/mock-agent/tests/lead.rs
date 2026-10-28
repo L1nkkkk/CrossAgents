@@ -276,8 +276,9 @@ async fn archiving_the_lead_clears_its_checkout_and_restoring_brings_it_back() {
     // Restored, it gets its checkout of the run branch back.
     assert_eq!(archive(false).await.status(), 200);
     assert!(dir.join("one.txt").exists());
-    // What a cargo build there left in the run's shared build directory.
-    let target = dir.parent().unwrap().join("target");
+    // What a cargo build there left in the checkout's own build directory
+    // (`<run>/targets/integration`, docs/TODO.md §九 ②).
+    let target = dir.parent().unwrap().join("targets").join("integration");
     std::fs::create_dir_all(target.join("debug")).unwrap();
 
     assert_eq!(archive(true).await.status(), 200);

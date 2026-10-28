@@ -14,7 +14,10 @@ fn call(tool: &str, args: Value) -> String {
 }
 
 fn accept(key: &str) -> String {
-    call("task_accept", json!({ "task": key, "force": true, "reason": "no checks configured" }))
+    call(
+        "task_accept",
+        json!({ "task": key, "force": true, "reason": "no checks configured" }),
+    )
 }
 
 fn finish() -> String {

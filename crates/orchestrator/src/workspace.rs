@@ -912,7 +912,11 @@ pub fn prune_all_targets(
         let Some(name) = run.file_name().map(|n| n.to_string_lossy().into_owned()) else {
             continue;
         };
-        removed.extend(prune_run_targets(root, &name, keep.get(&name).unwrap_or(&empty)));
+        removed.extend(prune_run_targets(
+            root,
+            &name,
+            keep.get(&name).unwrap_or(&empty),
+        ));
     }
     removed
 }
@@ -1007,9 +1011,8 @@ pub fn prune_legacy_run_targets(root: &Path) -> Vec<(PathBuf, u64)> {
             .map(|rd| {
                 rd.flatten().map(|e| e.path()).any(|p| {
                     p.is_dir()
-                        && p.file_name().is_some_and(|n| {
-                            n != "target" && n != SHARED_TARGETS && !is_trash(&p)
-                        })
+                        && p.file_name()
+                            .is_some_and(|n| n != "target" && n != SHARED_TARGETS && !is_trash(&p))
                 })
             })
             .unwrap_or(true);
@@ -1047,9 +1050,8 @@ pub fn build_cache_size(root: &Path) -> u64 {
                     .map(|e| e.path())
                     .filter(|p| {
                         p.is_dir()
-                            && p.file_name().is_some_and(|n| {
-                                n == "target" || n == SHARED_TARGETS
-                            })
+                            && p.file_name()
+                                .is_some_and(|n| n == "target" || n == SHARED_TARGETS)
                     })
                     .map(|p| dir_size(&p))
                     .sum::<u64>()
@@ -1259,7 +1261,9 @@ mod tests {
         assert!(build_cache_size(&root) >= 100);
         assert_eq!(prune_shared_targets(&root, 0), [(busy.clone(), 100)]);
         assert_eq!(build_cache_size(&home.path().join("nowhere")), 0);
-        assert!(prune_run_targets(&home.path().join("nowhere"), "x", &Default::default()).is_empty());
+        assert!(
+            prune_run_targets(&home.path().join("nowhere"), "x", &Default::default()).is_empty()
+        );
     }
 
     #[tokio::test]

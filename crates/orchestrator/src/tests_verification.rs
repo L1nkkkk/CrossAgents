@@ -1,0 +1,701 @@
+//! The edges of the verification gate (docs/TODO.md §九 ①, ②): what happens when the checks
+//! themselves cannot run, when the hub restarts in the middle of one, when a run is cancelled
+//! under one, and what an agent that cannot be let go of keeps.
+//!
+//! These go through the orchestrator directly, with a fake host and a fake workspace: the
+//! failure they need (a commit that cannot be made, an agent that will not go home) is not
+//! something a real git or a real hub can be made to do on demand.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use async_trait::async_trait;
+use chrono::Utc;
+use crossagents_core::{
+    Agent, AgentClaim, AgentId, AgentStatus, ClaimRole, CoreError, Envelope, EventBus, LandMode,
+    MessageId, MessageSource, Role, Run, RunConfig, RunId, RunPolicy, RunStatus, Store, Task,
+    TaskId, TaskReport, TaskSpec, TaskStatus,
+};
+use crossagents_store_sqlite::SqliteStore;
+use serde_json::{Value, json};
+use tokio::sync::Mutex;
+
+use crate::engine::{Orchestrator, OrchestratorConfig};
+use crate::host::AgentHost;
+use crate::verify::Verifier;
+use crate::workspace::{Synced, WorkspaceProvider};
+
+// ---------------------------------------------------------------------------------------
+// Doubles
+
+/// Answers messages, notices and moves; fails the move or the archive when told to.
+#[derive(Default)]
+struct FakeHost {
+    will_not_go_home: AtomicBool,
+    will_not_archive: AtomicBool,
+    busy: AtomicBool,
+    notices: Mutex<Vec<String>>,
+    delivered: Mutex<Vec<(AgentId, String)>>,
+}
+
+impl FakeHost {
+    async fn delivered_to(&self, agent: AgentId) -> Vec<String> {
+        self.delivered
+            .lock()
+            .await
+            .iter()
+            .filter(|(to, _)| *to == agent)
+            .map(|(_, text)| text.clone())
+            .collect()
+    }
+}
+
+#[async_trait]
+impl AgentHost for FakeHost {
+    async fn send(&self, agent: AgentId, _: MessageSource, text: String) -> Result<(), CoreError> {
+        self.delivered.lock().await.push((agent, text));
+        Ok(())
+    }
+    async fn send_envelope(
+        &self,
+        agent: AgentId,
+        envelope: Envelope,
+        _: bool,
+    ) -> Result<(), CoreError> {
+        self.delivered.lock().await.push((agent, envelope.text));
+        Ok(())
+    }
+    async fn interrupt(&self, _: AgentId) -> Result<(), CoreError> {
+        Ok(())
+    }
+    async fn withdraw(&self, _: AgentId, _: MessageId) -> Result<(), CoreError> {
+        Ok(())
+    }
+    async fn notify(&self, _: AgentId, topic: &str, line: &str) -> Result<(), CoreError> {
+        self.notices.lock().await.push(format!("{topic}: {line}"));
+        Ok(())
+    }
+    async fn clone_agent(
+        &self,
+        _: AgentId,
+        _: &str,
+        _: Role,
+        _: &Path,
+    ) -> Result<Agent, CoreError> {
+        Err(CoreError::Unsupported("nothing is recruited here".into()))
+    }
+    async fn spawn_agent(&self, _: Agent) -> Result<Agent, CoreError> {
+        Err(CoreError::Unsupported("nothing is recruited here".into()))
+    }
+    async fn available_models(&self, _: &str) -> Result<Vec<String>, CoreError> {
+        Ok(Vec::new())
+    }
+    fn denied_name_words(&self) -> Vec<String> {
+        Vec::new()
+    }
+    async fn set_model(&self, _: AgentId, _: Option<String>) -> Result<Agent, CoreError> {
+        Err(CoreError::Unsupported("no models here".into()))
+    }
+    async fn usage_report(&self, _: Option<RunId>) -> Result<Value, CoreError> {
+        Ok(json!({}))
+    }
+    async fn take_inbox(&self, _: AgentId) -> Result<Vec<Value>, CoreError> {
+        Ok(Vec::new())
+    }
+    async fn archive_agent(&self, _: AgentId) -> Result<(), CoreError> {
+        if self.will_not_archive.load(Ordering::SeqCst) {
+            return Err(CoreError::Storage("the session cannot be stopped".into()));
+        }
+        Ok(())
+    }
+    async fn stop_agent(&self, _: AgentId) -> Result<(), CoreError> {
+        Ok(())
+    }
+    async fn send_home(&self, _: AgentId) -> Result<bool, CoreError> {
+        if self.will_not_go_home.load(Ordering::SeqCst) {
+            return Err(CoreError::Agent("its turn will not end".into()));
+        }
+        Ok(true)
+    }
+    async fn is_busy(&self, _: AgentId) -> bool {
+        self.busy.load(Ordering::SeqCst)
+    }
+}
+
+/// Records what it was asked to do; fails the commit when told to.
+#[derive(Default)]
+struct FakeWorkspaces {
+    cannot_commit: AtomicBool,
+    head: Mutex<Option<String>>,
+    merged: Mutex<Vec<String>>,
+    removed: Mutex<Vec<PathBuf>>,
+}
+
+impl FakeWorkspaces {
+    async fn removed(&self) -> Vec<PathBuf> {
+        self.removed.lock().await.clone()
+    }
+
+    async fn merged(&self) -> Vec<String> {
+        self.merged.lock().await.clone()
+    }
+}
+
+#[async_trait]
+impl WorkspaceProvider for FakeWorkspaces {
+    async fn versioned(&self, _: &Path) -> bool {
+        true
+    }
+    async fn current_branch(&self, _: &Path) -> Result<String, CoreError> {
+        Ok("main".into())
+    }
+    async fn create(&self, _: &Path, _: &str, _: &str, _: &Path) -> Result<(), CoreError> {
+        Ok(())
+    }
+    async fn commit_all(&self, _: &Path, _: &str) -> Result<bool, CoreError> {
+        if self.cannot_commit.load(Ordering::SeqCst) {
+            return Err(CoreError::Storage("index.lock is held".into()));
+        }
+        Ok(true)
+    }
+    async fn diff_stat(&self, _: &Path, _: &str) -> Result<String, CoreError> {
+        Ok(" a.txt | 1 +\n".into())
+    }
+    async fn diff(&self, _: &Path, _: &str, _: &[String]) -> Result<String, CoreError> {
+        Ok(String::new())
+    }
+    async fn branch_diff(&self, _: &Path, _: &str, _: &str) -> Result<String, CoreError> {
+        Ok(String::new())
+    }
+    async fn merge(&self, _: &Path, branch: &str, _: &str) -> Result<(), CoreError> {
+        self.merged.lock().await.push(branch.to_owned());
+        Ok(())
+    }
+    async fn land(
+        &self,
+        repo: &Path,
+        _: &str,
+        _: &str,
+        _: LandMode,
+        _: &str,
+    ) -> Result<String, CoreError> {
+        Ok(repo.display().to_string())
+    }
+    async fn checkout(&self, _: &Path, _: &str, _: &Path) -> Result<(), CoreError> {
+        Ok(())
+    }
+    async fn sync_base(&self, _: &Path, _: &str) -> Result<Synced, CoreError> {
+        Ok(Synced::UpToDate)
+    }
+    async fn remove(&self, _: &Path, path: &Path, _: Option<&str>) -> Result<(), CoreError> {
+        self.removed.lock().await.push(path.to_path_buf());
+        Ok(())
+    }
+    async fn delete_branch(&self, _: &Path, _: &str) -> Result<(), CoreError> {
+        Ok(())
+    }
+    async fn uncommitted(&self, _: &Path) -> Result<Vec<String>, CoreError> {
+        Ok(Vec::new())
+    }
+    async fn head(&self, _: &Path) -> Result<String, CoreError> {
+        Ok(self.head.lock().await.clone().unwrap_or_default())
+    }
+}
+
+/// Answers every check the way the test says.
+#[derive(Default)]
+struct FixedChecks(Vec<bool>);
+
+#[async_trait]
+impl Verifier for FixedChecks {
+    async fn check(&self, _: &Path, commands: &[String]) -> Vec<crossagents_core::CheckResult> {
+        commands
+            .iter()
+            .enumerate()
+            .map(|(i, command)| crossagents_core::CheckResult {
+                command: command.clone(),
+                exit_code: Some(if self.0.get(i).copied().unwrap_or(true) {
+                    0
+                } else {
+                    1
+                }),
+                passed: self.0.get(i).copied().unwrap_or(true),
+                output: String::new(),
+            })
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// A run with one task in it
+
+struct Fixture {
+    store: Arc<dyn Store>,
+    orchestrator: Arc<Orchestrator>,
+    host: Arc<FakeHost>,
+    ws: Arc<FakeWorkspaces>,
+    worktrees: PathBuf,
+    run: Run,
+    task: Task,
+    lead: Agent,
+    worker: Agent,
+    _home: tempfile::TempDir,
+}
+
+impl Fixture {
+    async fn new(acceptance: &[&str]) -> Self {
+        Fixture::with_checks(acceptance, Vec::new()).await
+    }
+
+    async fn with_checks(acceptance: &[&str], checks: Vec<bool>) -> Self {
+        let home = tempfile::tempdir().unwrap();
+        let worktrees = home.path().join("worktrees");
+        let repo = home.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().await.unwrap());
+        let host = Arc::new(FakeHost::default());
+        let ws = Arc::new(FakeWorkspaces::default());
+        let orchestrator = Orchestrator::new(
+            store.clone(),
+            Arc::new(EventBus::new(store.clone())),
+            host.clone(),
+            ws.clone(),
+            Arc::new(FixedChecks(checks)),
+            OrchestratorConfig {
+                worktrees: worktrees.clone(),
+                max_nudges: 0,
+                build_cache_limit: u64::MAX,
+            },
+        );
+        let lead = agent("Ada", Role::Planner, &repo);
+        let worker = agent("Rex", Role::Worker, &repo);
+        for a in [&lead, &worker] {
+            store.insert_agent(a).await.unwrap();
+        }
+        let run = Run {
+            continuation: None,
+            id: RunId::new(),
+            title: "a run".into(),
+            request: "build it".into(),
+            planner: lead.id,
+            status: RunStatus::Running,
+            config: RunConfig {
+                worker: worker.id,
+                escalate: None,
+                reviewer: None,
+                auto_approve: true,
+                max_parallel: 1,
+                max_attempts: 3,
+                team: vec![worker.id],
+                policy: RunPolicy::default(),
+            },
+            repo: repo.clone(),
+            base_branch: "main".into(),
+            branch: "crossagents/run".into(),
+            in_place: false,
+            note: None,
+            plan: Vec::new(),
+            lead_note: None,
+            landed: None,
+            summary: None,
+            checks: Vec::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        store.insert_run(&run).await.unwrap();
+        let worktree = worktrees.join(short(&run.id)).join("a");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let task = Task {
+            id: TaskId::new(),
+            run_id: run.id,
+            key: "a".into(),
+            title: "task a".into(),
+            spec: TaskSpec {
+                goal: "do a".into(),
+                acceptance: acceptance.iter().map(|c| (*c).to_owned()).collect(),
+                ..TaskSpec::default()
+            },
+            depends_on: Vec::new(),
+            issuer: Some(lead.id),
+            assignee: Some(worker.id),
+            reviewer: None,
+            worker_template: Some(worker.id),
+            reviewer_template: None,
+            worker_fresh: false,
+            worker_restore: false,
+            reviewer_fresh: true,
+            status: TaskStatus::Running,
+            attempts: 1,
+            escalated: false,
+            nudges: 0,
+            branch: Some("crossagents/run-a".into()),
+            worktree: Some(worktree),
+            report: TaskReport::default(),
+            parent: None,
+            progress: None,
+            handoffs: Vec::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        store.insert_task(&task).await.unwrap();
+        // The worker works on it (fresh: false: the agent itself, so letting go sends it home).
+        store
+            .claim_agent(&AgentClaim::new(
+                worker.id,
+                run.id,
+                Some(task.id),
+                ClaimRole::Worker,
+                false,
+            ))
+            .await
+            .unwrap();
+        // And the lead leading it, as a copy (archived when let go of).
+        store
+            .claim_agent(&AgentClaim::new(
+                lead.id,
+                run.id,
+                None,
+                ClaimRole::Lead,
+                true,
+            ))
+            .await
+            .unwrap();
+        Self {
+            store,
+            orchestrator,
+            host,
+            ws,
+            worktrees,
+            run,
+            task,
+            lead,
+            worker,
+            _home: home,
+        }
+    }
+
+    async fn task(&self) -> Task {
+        self.store.get_task(self.task.id).await.unwrap()
+    }
+
+    async fn run(&self) -> Run {
+        self.store.get_run(self.run.id).await.unwrap()
+    }
+
+    /// Waits for the background verification to settle the task.
+    async fn settled(&self) -> Task {
+        for _ in 0..200 {
+            let task = self.task().await;
+            if task.status != TaskStatus::Verifying {
+                return task;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the task is still verifying: {:?}", self.task().await);
+    }
+}
+
+fn agent(name: &str, role: Role, home: &Path) -> Agent {
+    Agent {
+        id: AgentId::new(),
+        name: name.into(),
+        name_source: Default::default(),
+        plugin: "mock".into(),
+        driver: None,
+        model: None,
+        role,
+        home: home.to_path_buf(),
+        cwd: home.to_path_buf(),
+        config: json!({}),
+        status: AgentStatus::Idle,
+        created_at: Utc::now(),
+        profile: Default::default(),
+        topic: None,
+        archived_at: None,
+    }
+}
+
+/// The `short` id a run's directory is named by (eight hex digits of the id).
+fn short(id: &RunId) -> String {
+    let s = id.to_string().replace('-', "");
+    s[s.len() - 8..].to_owned()
+}
+
+// ---------------------------------------------------------------------------------------
+// 1. A verification that cannot finish leaves Verifying, as an unverified report
+
+#[tokio::test]
+async fn a_verification_whose_commit_fails_leaves_verifying() {
+    let f = Fixture::new(&["cargo test"]).await;
+    f.ws.cannot_commit.store(true, Ordering::SeqCst);
+
+    f.orchestrator
+        .complete(&f.worker, f.task.id, "wrote a".into())
+        .await
+        .unwrap();
+    let task = f.settled().await;
+
+    assert_eq!(task.status, TaskStatus::Passed, "{task:?}");
+    let failure = task.report.failure.as_deref().unwrap_or_default();
+    assert!(failure.contains("could not run"), "{failure}");
+    assert!(failure.contains("index.lock"), "{failure}");
+    assert!(task.report.verification.is_none(), "{task:?}");
+    assert!(task.report.verified_sha.is_none(), "{task:?}");
+    assert!(task.report.checks.is_empty(), "{task:?}");
+
+    // Not stuck: a plain accept is refused (it counts as a failed check), and the issuer can
+    // rework it or drop it.
+    let refused = f
+        .orchestrator
+        .task_accept(&f.lead, json!({ "task": "a" }))
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("not verified"), "{refused}");
+    let reworked = f
+        .orchestrator
+        .task_rework(&f.lead, json!({ "task": "a", "notes": "try again" }))
+        .await
+        .unwrap();
+    assert_eq!(reworked["task"]["status"], "running", "{reworked}");
+}
+
+#[tokio::test]
+async fn a_verification_whose_worktree_is_gone_leaves_verifying_and_can_be_dropped() {
+    let f = Fixture::new(&["cargo test"]).await;
+    let mut task = f.task().await;
+    task.worktree = None;
+    f.store.update_task(&task).await.unwrap();
+
+    f.orchestrator
+        .complete(&f.worker, f.task.id, "wrote a".into())
+        .await
+        .unwrap();
+    let task = f.settled().await;
+
+    assert_eq!(task.status, TaskStatus::Passed, "{task:?}");
+    assert!(
+        task.report
+            .failure
+            .as_deref()
+            .is_some_and(|f| f.contains("no worktree")),
+        "{task:?}"
+    );
+    // ...or drop it.
+    let dropped = f
+        .orchestrator
+        .task_drop(&f.lead, json!({ "task": "a" }))
+        .await
+        .unwrap();
+    assert_eq!(dropped["task"]["status"], "cancelled", "{dropped}");
+}
+
+#[tokio::test]
+async fn a_second_verification_that_fails_also_leaves_verifying() {
+    let f = Fixture::new(&["cargo test"]).await;
+    // A report that already waits, as after a restart.
+    let mut task = f.task().await;
+    task.status = TaskStatus::Passed;
+    task.report.interrupted = true;
+    task.report.summary = Some("wrote a".into());
+    f.store.update_task(&task).await.unwrap();
+    f.ws.cannot_commit.store(true, Ordering::SeqCst);
+
+    let asked = f
+        .orchestrator
+        .task_verify(&f.lead, json!({ "task": "a" }))
+        .await
+        .unwrap();
+    assert_eq!(asked["status"], "verifying", "{asked}");
+    let task = f.settled().await;
+
+    assert_eq!(task.status, TaskStatus::Passed, "{task:?}");
+    assert!(
+        task.report
+            .failure
+            .as_deref()
+            .is_some_and(|f| f.contains("could not run")),
+        "{task:?}"
+    );
+    // Its issuer was told, so the report does not sit there silently.
+    let told = f.host.delivered_to(f.lead.id).await.join("\n");
+    assert!(told.contains("nothing verified this report"), "{told}");
+    assert!(told.contains("task_verify"), "{told}");
+}
+
+// ---------------------------------------------------------------------------------------
+// 2. A restart settles Verifying whether or not the worker is busy
+
+#[tokio::test]
+async fn a_restart_settles_verifying_even_with_continuations_and_a_busy_worker() {
+    let f = Fixture::new(&["cargo test"]).await;
+    let mut run = f.run().await;
+    run.config.policy = serde_json::from_value::<RunPolicy>(json!({ "continuation": {} })).unwrap();
+    f.store.update_run(&run).await.unwrap();
+    f.host.busy.store(true, Ordering::SeqCst);
+    // A second task still running: the one that must keep its own rule (busy + continuation
+    // leaves it alone).
+    let mut running = f.task().await;
+    running.id = TaskId::new();
+    running.key = "b".into();
+    running.status = TaskStatus::Running;
+    running.worktree = None;
+    let running_id = running.id;
+    f.store.insert_task(&running).await.unwrap();
+    let mut verifying = f.task().await;
+    verifying.status = TaskStatus::Verifying;
+    verifying.report.verification = Some("token".into());
+    f.store.update_task(&verifying).await.unwrap();
+
+    f.orchestrator.resume().await.unwrap();
+
+    let settled = f.store.get_task(verifying.id).await.unwrap();
+    assert_eq!(settled.status, TaskStatus::Passed, "{settled:?}");
+    assert!(settled.report.interrupted, "{settled:?}");
+    assert!(settled.report.verification.is_none(), "{settled:?}");
+    // The busy worker's running task is left for the continuation clock, as before.
+    assert_eq!(
+        f.store.get_task(running_id).await.unwrap().status,
+        TaskStatus::Running
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// 3. A run is not cancelled under a verification
+
+#[tokio::test]
+async fn a_run_is_not_cancelled_while_a_task_is_verified() {
+    let f = Fixture::new(&["cargo test"]).await;
+    let mut task = f.task().await;
+    task.status = TaskStatus::Verifying;
+    task.report.verification = Some("token".into());
+    f.store.update_task(&task).await.unwrap();
+
+    let refused = f.orchestrator.cancel(f.run.id).await.unwrap_err();
+    let why = refused.to_string();
+    assert!(why.contains("still being verified"), "{why}");
+    assert!(why.contains("then cancel the run"), "{why}");
+    // Nothing happened: the task, its checkout and the run are as they were.
+    assert_eq!(f.task().await.status, TaskStatus::Verifying);
+    assert_eq!(f.run().await.status, RunStatus::Running);
+    assert!(
+        f.task().await.worktree.unwrap().exists(),
+        "the checkout the checks run in"
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// 4. An agent that cannot be let go of keeps its checkout and its build directory
+
+#[tokio::test]
+async fn an_agent_that_will_not_go_home_keeps_its_checkout_and_build_directory() {
+    let f = Fixture::new(&["cargo test"]).await;
+    let dir = f.task().await.worktree.unwrap();
+    let target = f.worktrees.join(short(&f.run.id)).join("targets").join("a");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("lib.rlib"), b"built").unwrap();
+    f.host.will_not_go_home.store(true, Ordering::SeqCst);
+
+    let mut task = f.task().await;
+    let problems = f.orchestrator.release_agents(&mut task).await;
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(problems[0].contains("Rex"), "{problems:?}");
+    f.orchestrator
+        .cleanup_worktree(&f.run().await, &task, true, problems.is_empty())
+        .await;
+
+    assert!(f.ws.removed().await.is_empty(), "nothing was removed");
+    assert!(dir.exists(), "the checkout an agent may still use");
+    assert!(target.join("lib.rlib").exists(), "and what it built in");
+}
+
+#[tokio::test]
+async fn an_agent_that_cannot_be_archived_keeps_its_checkout() {
+    let f = Fixture::new(&["cargo test"]).await;
+    let dir = f.task().await.worktree.unwrap();
+    // An execution session (fresh), which is archived rather than sent home.
+    let session = agent("Rex-a", Role::Worker, &f.run.repo);
+    f.store.insert_agent(&session).await.unwrap();
+    let mut task = f.task().await;
+    task.assignee = Some(session.id);
+    f.store.update_task(&task).await.unwrap();
+    f.store.release_agent(f.worker.id, f.run.id).await.unwrap();
+    f.store
+        .claim_agent(&AgentClaim::new(
+            session.id,
+            f.run.id,
+            Some(task.id),
+            ClaimRole::Worker,
+            true,
+        ))
+        .await
+        .unwrap();
+    assert!(
+        f.store.claim_of(session.id).await.unwrap().is_some(),
+        "the session holds the task"
+    );
+    f.host.will_not_archive.store(true, Ordering::SeqCst);
+
+    let mut task = f.task().await;
+    let problems = f.orchestrator.release_agents(&mut task).await;
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    f.orchestrator
+        .cleanup_worktree(&f.run().await, &task, true, problems.is_empty())
+        .await;
+
+    assert!(f.ws.removed().await.is_empty(), "nothing was removed");
+    assert!(dir.exists(), "the checkout the session may still hold");
+}
+
+#[tokio::test]
+async fn an_agent_that_goes_home_takes_its_checkout_with_it() {
+    let f = Fixture::new(&["cargo test"]).await;
+    let dir = f.task().await.worktree.unwrap();
+    let mut task = f.task().await;
+
+    let problems = f.orchestrator.release_agents(&mut task).await;
+    assert!(problems.is_empty(), "{problems:?}");
+    f.orchestrator
+        .cleanup_worktree(&f.run().await, &task, true, problems.is_empty())
+        .await;
+
+    assert_eq!(f.ws.removed().await, vec![dir], "the control case");
+}
+
+// ---------------------------------------------------------------------------------------
+// 5. A forced accept reports the commit it merged, not the one the checks saw
+
+#[tokio::test]
+async fn a_forced_accept_reports_the_commit_it_merged() {
+    let f = Fixture::with_checks(&["cargo test"], vec![false]).await;
+    let mut task = f.task().await;
+    task.status = TaskStatus::Passed;
+    task.report.summary = Some("wrote a".into());
+    task.report.checks = vec![crossagents_core::CheckResult {
+        command: "cargo test".into(),
+        exit_code: Some(1),
+        passed: false,
+        output: "boom".into(),
+    }];
+    task.report.verified_sha = Some("aaaaaaa".into());
+    f.store.update_task(&task).await.unwrap();
+    // What the forced merge commits is not what the checks ran on.
+    *f.ws.head.lock().await = Some("bbbbbbb".into());
+
+    let accepted = f
+        .orchestrator
+        .task_accept(
+            &f.lead,
+            json!({ "task": "a", "force": true, "reason": "the failure is unrelated" }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(accepted["merged"], true, "{accepted}");
+    assert_eq!(accepted["as"], "forced", "{accepted}");
+    assert_eq!(
+        accepted["merged_sha"], "bbbbbbb",
+        "the commit the merge brought in, not the verified one: {accepted}"
+    );
+    assert_eq!(f.ws.merged().await, vec!["crossagents/run-a".to_owned()]);
+}

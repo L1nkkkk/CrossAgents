@@ -244,10 +244,16 @@ async fn a_failed_check_needs_force_and_a_reason() {
     )
     .await;
     approve(&t, &id).await;
-    w.until("passed with a failed check", task_is("a", TaskStatus::Passed))
-        .await;
-    w.until("the issuer's plain accept", said_in("its checks did not pass"))
-        .await;
+    w.until(
+        "passed with a failed check",
+        task_is("a", TaskStatus::Passed),
+    )
+    .await;
+    w.until(
+        "the issuer's plain accept",
+        said_in("its checks did not pass"),
+    )
+    .await;
     assert_eq!(detail(&t, &id).await["tasks"][0]["status"], "passed");
 
     // Forced, with a reason, it goes through and the reason stays on the record.
@@ -261,7 +267,10 @@ async fn a_failed_check_needs_force_and_a_reason() {
     .await;
     w.until("merged", task_is("a", TaskStatus::Merged)).await;
     let d = detail(&t, &id).await;
-    assert_eq!(task_in(&d, "a")["report"]["forced"], "the flaky check is unrelated");
+    assert_eq!(
+        task_in(&d, "a")["report"]["forced"],
+        "the flaky check is unrelated"
+    );
 }
 
 #[tokio::test]
@@ -333,17 +342,23 @@ async fn work_done_after_the_checks_is_not_merged_plainly() {
     git(&worktree, &["add", "-A"]);
     git(
         &worktree,
-        &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "after the checks"],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "after the checks",
+        ],
     );
 
     // A plain accept now would merge work nobody checked.
     t.send("boss", &call("task_accept", json!({ "task": "a" })))
         .await;
-    w.until(
-        "the second refusal",
-        said_in("it changed after its checks"),
-    )
-    .await;
+    w.until("the second refusal", said_in("it changed after its checks"))
+        .await;
     assert_eq!(detail(&t, &id).await["tasks"][0]["status"], "passed");
 
     // Forced, it merges what is there now; what the checks saw stays on record.
@@ -363,11 +378,14 @@ async fn work_done_after_the_checks_is_not_merged_plainly() {
         "beta"
     );
     assert_eq!(task_in(&d, "a")["report"]["verified_sha"], sha.as_str());
-    assert_eq!(task_in(&d, "a")["report"]["forced"], "the edit is a typo fix");
+    assert_eq!(
+        task_in(&d, "a")["report"]["forced"],
+        "the edit is a typo fix"
+    );
 }
 
 #[tokio::test]
-async fn a_cancelled_run_does_not_get_its_report_written_back() {
+async fn a_report_for_a_round_that_ended_is_not_written_back() {
     let repo = git_repo();
     let t = setup(repo.path()).await;
     let mut w = t.watch().await;
@@ -375,10 +393,7 @@ async fn a_cancelled_run_does_not_get_its_report_written_back() {
     let go = gate_dir.path().join("go");
     let a = planned(
         "a",
-        goal(
-            "[write a.txt=alpha]",
-            &format!("wrote a {}", call("task_accept", json!({ "task": "a" }))),
-        ),
+        goal("[write a.txt=alpha]", "wrote a"),
         Some(vec![wait_for(&go)]),
     );
     let id = start_run(&t, request(json!([a])), json!({})).await;
@@ -391,21 +406,32 @@ async fn a_cancelled_run_does_not_get_its_report_written_back() {
     w.until("verifying", task_is("a", TaskStatus::Verifying))
         .await;
 
-    // The person cancels the run while the check runs. Nothing waits for the verification to
-    // end (`report_done` needs the same run lock), and the report it wrote for a round that
-    // no longer exists must not land (its verification id is not the task's any more).
+    // Nothing ends a round under a running verification - not even the person: both would pull
+    // the checkout out from under the checks (docs/TODO.md §九 ①).
     let resp = t.post(&format!("/v1/runs/{id}/cancel"), json!({})).await;
-    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
-    w.until("run cancelled", run_status_is(&id, RunStatus::Cancelled))
-        .await;
+    assert_eq!(resp.status(), 409);
+    let said = resp.text().await.unwrap();
+    assert!(said.contains("still being verified"), "{said}");
+
+    // A restart ends it instead: the next hub cannot know how the checks went, so it marks the
+    // report interrupted and leaves it as passed. The round the old hub started is gone with
+    // its verification id, and what it writes when its check finally returns must not land.
+    let home = t.restart_home().await;
+    let t = TestHub::start_in(home, |_| {}).await;
+    let mut w = t.watch().await;
+    let d = detail(&t, &id).await;
+    assert_eq!(task_in(&d, "a")["status"], "passed", "{d}");
+    assert_eq!(task_in(&d, "a")["report"]["interrupted"], true, "{d}");
+
     std::fs::write(&go, "go").unwrap();
     // Nothing says the report is in: wait for the check to finish and the write-back to be
     // turned away, then check that it left no trace.
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
 
     let d = detail(&t, &id).await;
     let task = task_in(&d, "a");
-    assert_eq!(task["status"], "cancelled", "{task}");
+    assert_eq!(task["status"], "passed", "{task}");
+    assert_eq!(task["report"]["interrupted"], true, "{task}");
     assert!(
         task["report"]["checks"].as_array().unwrap().is_empty(),
         "a stale verification wrote its checks back: {task}"
@@ -429,10 +455,7 @@ async fn a_hub_that_restarts_marks_what_it_was_verifying_as_interrupted() {
     let go = gate_dir.path().join("go");
     let a = planned(
         "a",
-        goal(
-            "[write a.txt=alpha]",
-            "wrote a",
-        ),
+        goal("[write a.txt=alpha]", "wrote a"),
         Some(vec![wait_for(&go)]),
     );
     let id = start_run(&t, request(json!([a])), json!({})).await;

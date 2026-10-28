@@ -515,9 +515,9 @@ impl Orchestrator {
                     task.assignee,
                     crossagents_core::HandoffOutcome::Cancelled,
                 );
-        let released = self.release_agents(&mut task).await;
-        self.cleanup_worktree(&run, &task, false, released.is_empty())
-            .await;
+                let released = self.release_agents(&mut task).await;
+                self.cleanup_worktree(&run, &task, false, released.is_empty())
+                    .await;
                 task.report.failure = Some("cancelled when the run finished".into());
                 self.transition(&mut task, TaskStatus::Cancelled).await?;
             }
@@ -614,6 +614,10 @@ impl Orchestrator {
     /// `lead` was archived or is being removed (docs/tasks/W1.md §11): the checkout it kept
     /// after its run ended goes. What it changed since is committed first; the run branch
     /// goes too when nothing on it waits for the person (landed, or nothing changed).
+    ///
+    /// Its build directories follow the rule the rest of the hub uses (docs/TODO.md §九 ②):
+    /// only the ones whose checkout is gone go, and a task still being verified keeps its own,
+    /// so a run that other work still uses is not torn down from here.
     pub async fn lead_left(&self, lead: &Agent) -> Result<(), CoreError> {
         for run in self.runs_lived_in(lead).await? {
             let dir = self.integration_path(&run);
@@ -627,7 +631,7 @@ impl Orchestrator {
             let waiting = after || (run.landed.is_none() && self.has_changes(&run, &tasks).await?);
             let branch = (!waiting).then_some(run.branch.as_str());
             self.ws_for(&run).remove(&run.repo, &dir, branch).await?;
-            self.remove_run_build(&run);
+            self.prune_run_build(&run).await;
         }
         Ok(())
     }

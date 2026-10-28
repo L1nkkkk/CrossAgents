@@ -142,7 +142,7 @@ struct HubSection {
     /// Write every event to a JSON-lines file per day under `logs/` (default on).
     event_log: Option<bool>,
     /// Gigabytes all build output under the worktrees may reach before the hub warns; what
-    /// nothing uses is reclaimed first (default 60). See
+    /// nothing uses is reclaimed first (default 120). See
     /// `OrchestratorConfig::build_cache_limit`.
     build_cache_gb: Option<u64>,
 }
@@ -244,9 +244,9 @@ mod tests {
         let paths = Paths::new(dir.path());
         let defaults = HubConfig::load(paths.clone()).unwrap();
         assert_eq!(defaults.port, DEFAULT_PORT);
-        // One build directory per worktree now, so a workspace needs more room than when a
-        // repository shared one (docs/TODO.md §九 ②).
-        assert_eq!(defaults.build_cache_limit, 60 << 30);
+        // One build directory per worktree, and a full test build of this workspace is about
+        // 10 GB, so a run at the default parallelism holds ~40 GB (docs/TODO.md §九 ②).
+        assert_eq!(defaults.build_cache_limit, 120 << 30);
         std::fs::write(paths.config(), "[hub]\nport = 0\nbuild_cache_gb = 8\n").unwrap();
         let config = HubConfig::load(paths).unwrap();
         assert_eq!(config.port, 0);

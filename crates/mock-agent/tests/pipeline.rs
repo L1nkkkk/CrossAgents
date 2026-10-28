@@ -20,7 +20,10 @@ fn call(tool: &str, args: Value) -> String {
 /// The planner's step after a task is reported: accept it. Most tasks here have no checks, so
 /// the accept is a forced one (docs/TODO.md §九 ①): it says why it takes the work unverified.
 fn accept(key: &str) -> String {
-    call("task_accept", json!({ "task": key, "force": true, "reason": "no checks configured" }))
+    call(
+        "task_accept",
+        json!({ "task": key, "force": true, "reason": "no checks configured" }),
+    )
 }
 
 /// After the last task: accept it, then close the run.

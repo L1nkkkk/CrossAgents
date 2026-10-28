@@ -194,7 +194,10 @@ fn plan(tasks: Value) -> String {
 }
 
 fn accept(key: &str) -> String {
-    call("task_accept", json!({ "task": key, "force": true, "reason": "no checks configured" }))
+    call(
+        "task_accept",
+        json!({ "task": key, "force": true, "reason": "no checks configured" }),
+    )
 }
 
 /// A worker's goal: `markers`, then report done with a summary carrying the lead's next step.

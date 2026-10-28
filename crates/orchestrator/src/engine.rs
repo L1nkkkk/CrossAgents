@@ -34,12 +34,15 @@ pub struct OrchestratorConfig {
     pub build_cache_limit: u64,
 }
 
-/// `build_cache_limit` unless the hub's configuration says otherwise. Each worktree builds into
-/// its own directory now (`<run>/targets/<tree>`), so a workspace needs one per task it runs at
-/// once plus one for the run, where a repository used to share one: the same work costs several
-/// times the disk. 60 GB is about a dozen fresh builds of this workspace, enough for a few runs
-/// in parallel before the warning (which deletes nothing in use) starts.
-pub const DEFAULT_BUILD_CACHE_LIMIT: u64 = 60 << 30;
+/// `build_cache_limit` unless the hub's configuration says otherwise.
+///
+/// Each worktree builds into its own directory (`<run>/targets/<tree>`), so a run at the
+/// default parallelism of three holds up to four of them, where a repository used to share one.
+/// Measured on this workspace with an empty target: `cargo check --workspace` takes 32s and
+/// 646 MB, a full `cargo test --workspace --no-run` 68s and 10 GB (debug info and every test
+/// binary). Four trees of a run are therefore up to ~40 GB, so 120 GB leaves about three runs
+/// in flight before the warning, which deletes nothing that is in use.
+pub const DEFAULT_BUILD_CACHE_LIMIT: u64 = 120 << 30;
 
 /// Everything needed to start a run.
 #[derive(Debug, Clone)]
@@ -144,7 +147,9 @@ async fn targets_in_use(store: &dyn Store) -> HashMap<String, std::collections::
             .filter(|t| t.status == TaskStatus::Verifying)
         {
             if let Some(path) = &task.worktree {
-                keep.entry(short(run.id)).or_default().insert(tree_name(path));
+                keep.entry(short(run.id))
+                    .or_default()
+                    .insert(tree_name(path));
             }
         }
     }
@@ -935,6 +940,24 @@ The person changed: {}",
     }
 
     pub async fn cancel(&self, id: RunId) -> Result<Run, CoreError> {
+        // A verification still running is using its checkout, and cancelling would pull it out
+        // from under the checks (docs/TODO.md §九 ①). Read before the run's lock and return:
+        // waiting for the verification to end while holding that lock would deadlock with the
+        // result being written back, which needs the same lock.
+        let verifying: Vec<String> = self
+            .store
+            .list_tasks(id)
+            .await?
+            .into_iter()
+            .filter(|t| t.status == TaskStatus::Verifying)
+            .map(|t| t.key)
+            .collect();
+        if !verifying.is_empty() {
+            return Err(CoreError::Conflict(format!(
+                "#{} is still being verified; its checks' result arrives as a message - wait for it, then cancel the run",
+                verifying.join(", #")
+            )));
+        }
         let _guard = self.lock(id).await;
         let mut run = self.store.get_run(id).await?;
         if run.status.is_terminal() {
@@ -1246,20 +1269,42 @@ The person changed: {}",
                     }
                 });
             }
-            Err(err) => tracing::warn!(run = %run.id, error = %err, "cannot remove integration worktree"),
+            Err(err) => {
+                tracing::warn!(run = %run.id, error = %err, "cannot remove integration worktree")
+            }
         }
         self.prune_build_cache();
     }
 
-    /// Removes everything the run built in (`<worktrees>/<run>/targets`, the old
-    /// `<run>/target`) and its directory once nothing else is in it. Called when the run goes
-    /// away, so nothing there can be needed any more.
-    pub(crate) fn remove_run_build(&self, run: &Run) {
+    /// Reclaims what a run no longer needs while it stays: the build directories whose
+    /// checkout is gone, and the leftovers of a delete that could not finish. A task still
+    /// being verified keeps its own, because its checks may be writing there. It never takes a
+    /// tree whose checkout is still in place: a run whose lead left can still have work in it.
+    /// Deleting the whole run reclaims everything at once (`workspace::remove_run_build_dirs`).
+    pub(crate) async fn prune_run_build(&self, run: &Run) {
+        let keep = self.run_targets_in_use(run.id).await;
         let (root, key) = (self.config.worktrees.clone(), short(run.id));
-        let _ = tokio::task::spawn_blocking(move || {
-            crate::workspace::remove_run_build_dirs(&root, &key)
-        });
+        let pruned = tokio::task::spawn_blocking(move || {
+            crate::workspace::prune_run_targets(&root, &key, &keep)
+        })
+        .await;
+        for (dir, size) in pruned.unwrap_or_default() {
+            tracing::info!(dir = %dir.display(), gb = size >> 30, "removed a build directory");
+        }
         self.prune_build_cache();
+    }
+
+    /// The build directories `run`'s tasks are using right now, by tree: a verification still
+    /// running writes into its tree's, even after the checkout itself has gone.
+    pub(crate) async fn run_targets_in_use(&self, run: RunId) -> std::collections::HashSet<String> {
+        self.store
+            .list_tasks(run)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| t.status == TaskStatus::Verifying)
+            .filter_map(|t| t.worktree.as_deref().map(tree_name))
+            .collect()
     }
 
     /// Removes build directories nothing can be using, in the background (it walks gigabytes),
@@ -1564,16 +1609,11 @@ The person changed: {}",
                 ) {
                     continue;
                 }
-                if run.config.policy.continuation.is_some()
-                    && let Some(agent) = task.assignee
-                    && self.host.is_busy(agent).await
-                {
-                    continue;
-                }
-                if task.status == TaskStatus::Running {
-                    self.transition(&mut task, TaskStatus::Stalled).await?;
-                } else if task.status == TaskStatus::Verifying {
-                    // Its checks never finished: say so, and let the issuer decide.
+                // A verification belonged to the hub that started it, and the checks ran in the
+                // hub's name, not the worker's: whether that worker is busy and whether the run
+                // opts into continuations say nothing about it. It is always settled here, or
+                // the task would wait forever on a result that cannot come.
+                if task.status == TaskStatus::Verifying {
                     task.report.interrupted = true;
                     task.report.verification = None;
                     self.transition(&mut task, TaskStatus::Passed).await?;
@@ -1587,6 +1627,15 @@ The person changed: {}",
                     )
                     .await;
                     continue;
+                }
+                if run.config.policy.continuation.is_some()
+                    && let Some(agent) = task.assignee
+                    && self.host.is_busy(agent).await
+                {
+                    continue;
+                }
+                if task.status == TaskStatus::Running {
+                    self.transition(&mut task, TaskStatus::Stalled).await?;
                 } else {
                     // Left over from the fixed pipeline: hand it to the issuer as done.
                     task.status = TaskStatus::Stalled;
@@ -1614,7 +1663,8 @@ The person changed: {}",
 }
 
 /// `w-<run>-<task key>`, within the 32-character agent name limit.
-pub(crate) fn agent_name(prefix: &str, run: &Run, task: &Task) -> String {    let mut name = format!("{prefix}-{}-{}", &short(run.id)[..6], task.key);
+pub(crate) fn agent_name(prefix: &str, run: &Run, task: &Task) -> String {
+    let mut name = format!("{prefix}-{}-{}", &short(run.id)[..6], task.key);
     name.truncate(32);
     name.trim_end_matches('-').to_owned()
 }

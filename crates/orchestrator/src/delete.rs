@@ -273,8 +273,7 @@ impl Orchestrator {
     /// `<short>/target`, then the run's directory once nothing else is in it; records what went.
     fn remove_run_build_into(&self, run: &Run, done: &mut DeletedRun) {
         let key = short(run.id);
-        for (path, _size) in crate::workspace::remove_run_build_dirs(&self.config.worktrees, &key)
-        {
+        for (path, _size) in crate::workspace::remove_run_build_dirs(&self.config.worktrees, &key) {
             done.worktrees.push(path.display().to_string());
         }
         // Fails while a task's checkout is still there; those are removed above.

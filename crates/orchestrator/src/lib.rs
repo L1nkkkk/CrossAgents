@@ -32,6 +32,9 @@ pub mod verify;
 pub mod work;
 pub mod workspace;
 
+#[cfg(test)]
+mod tests_verification;
+
 pub use claims::Execution;
 pub use delete::{DeleteRun, DeletedRun, DeletedRunAgents};
 pub use engine::{Approval, DEFAULT_BUILD_CACHE_LIMIT, NewRun, Orchestrator, OrchestratorConfig};

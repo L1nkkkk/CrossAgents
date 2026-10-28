@@ -574,11 +574,7 @@ impl Orchestrator {
         self.transition(&mut task, TaskStatus::Verifying).await?;
         let this = self.clone();
         let worker = caller.id;
-        tokio::spawn(async move {
-            if let Err(err) = this.report_done(id, worker, token).await {
-                tracing::error!(task = %id, error = %err, "cannot record a finished task");
-            }
-        });
+        tokio::spawn(async move { this.report_done(id, worker, token).await });
         Ok(())
     }
 
@@ -586,15 +582,29 @@ impl Orchestrator {
     /// a rework or a newer verification in the meantime drops this one instead of overwriting
     /// it. The order matters: `Passed` and the summary reach the issuer after the checks, so
     /// accepting on that word accepts checked work.
-    async fn report_done(
+    ///
+    /// Whatever goes wrong on the way - the commit, a worktree that is gone, the base branch,
+    /// the checks' own bookkeeping - the task still leaves `Verifying`: the error is written
+    /// into its report as the failure and the report goes to its issuer as an unverified one.
+    /// A verification that never lands would leave the task stuck, refused to accept, rework
+    /// or drop at once (docs/TODO.md §九 ①).
+    async fn report_done(self: &Arc<Self>, id: TaskId, worker: AgentId, token: String) {
+        if let Err(err) = self.verify_and_record(id, worker, &token).await {
+            self.record_verification_error(id, worker, &token, err)
+                .await;
+        }
+    }
+
+    /// The work of [`Self::report_done`]: everything that can fail.
+    async fn verify_and_record(
         &self,
         id: TaskId,
         worker: AgentId,
-        token: String,
+        token: &str,
     ) -> Result<(), CoreError> {
         let task = self.store.get_task(id).await?;
         let run = self.store.get_run(task.run_id).await?;
-        if !Self::still_verifying(&task, &token) {
+        if !Self::still_verifying(&task, token) {
             tracing::debug!(task = %task.key, "the report is for a verification that ended; dropping it");
             return Ok(());
         }
@@ -613,7 +623,7 @@ impl Orchestrator {
         };
         let _guard = self.lock(run.id).await;
         let mut task = self.store.get_task(id).await?;
-        if !Self::still_verifying(&task, &token) {
+        if !Self::still_verifying(&task, token) {
             tracing::debug!(task = %task.key, "the report is for a verification that ended; dropping it");
             return Ok(());
         }
@@ -643,10 +653,59 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// A verification that failed on the way: the task is `Passed` at once, with the error as
+    /// its failure and no verified commit, so a plain accept refuses it and its issuer can
+    /// still rework, drop or verify it again. Nothing is written if the round is gone (a
+    /// rework, a newer verification, a cancelled run).
+    async fn record_verification_error(
+        &self,
+        id: TaskId,
+        worker: AgentId,
+        token: &str,
+        err: CoreError,
+    ) {
+        let run_id = match self.store.get_task(id).await {
+            Ok(task) => task.run_id,
+            Err(_) => return,
+        };
+        let _guard = self.lock(run_id).await;
+        let mut task = match self.store.get_task(id).await {
+            Ok(task) => task,
+            Err(_) => return,
+        };
+        if !Self::still_verifying(&task, token) {
+            tracing::debug!(task = %task.key, error = %err, "a verification failed after its round ended; dropping the error");
+            return;
+        }
+        let why = err.to_string();
+        task.report.verification = None;
+        task.report.verified_sha = None;
+        task.report.unchecked = task.spec.acceptance.is_empty();
+        task.report.failure = Some(format!("its verification could not run: {why}"));
+        if let Err(err) = self.transition(&mut task, TaskStatus::Passed).await {
+            tracing::error!(task = %task.key, error = %err, "cannot pass a task whose verification failed");
+            return;
+        }
+        tracing::warn!(task = %task.key, error = %why, "a verification failed; the report waits as unverified");
+        let Ok(run) = self.store.get_run(run_id).await else {
+            return;
+        };
+        let summary = task.report.summary.clone().unwrap_or_default();
+        self.relay(
+            task.issuer_or(run.planner),
+            worker,
+            format!(
+                "{}\n\n{}\n\nNote: nothing verified this report - {why}. Accept it with force and a reason, verify it again (task_verify), rework it or drop it.",
+                summary.trim(),
+                brief::facts(&task)
+            ),
+            None,
+        );
+    }
+
     /// Whether `task` still waits for the verification `token` (nothing else wrote it).
     fn still_verifying(task: &Task, token: &str) -> bool {
-        task.status == TaskStatus::Verifying
-            && task.report.verification.as_deref() == Some(token)
+        task.status == TaskStatus::Verifying && task.report.verification.as_deref() == Some(token)
     }
 
     /// Runs a task's checks again, or for the first time after the hub restarted before they
@@ -683,11 +742,7 @@ impl Orchestrator {
         let this = self.clone();
         let worker = task.assignee.unwrap_or(run.planner);
         let id = task.id;
-        tokio::spawn(async move {
-            if let Err(err) = this.report_done(id, worker, token).await {
-                tracing::error!(task = %id, error = %err, "cannot record a verification");
-            }
-        });
+        tokio::spawn(async move { this.report_done(id, worker, token).await });
         Ok(json!({
             "status": "verifying",
             "next": "End your turn; the checks' result arrives as a message.",
@@ -1183,7 +1238,11 @@ impl Orchestrator {
                 {
                     unchecked.push("it changed after its checks".into());
                 }
-                let dirty = self.ws_for(&run).uncommitted(&dir).await.unwrap_or_default();
+                let dirty = self
+                    .ws_for(&run)
+                    .uncommitted(&dir)
+                    .await
+                    .unwrap_or_default();
                 if !dirty.is_empty() {
                     unchecked.push(format!(
                         "it has uncommitted changes since its checks: {}",
@@ -1209,6 +1268,10 @@ impl Orchestrator {
             (Some(sha), true) => Some(sha.clone()),
             _ => None,
         };
+        // What was actually merged, for the answer: the verified commit, or (forced) the
+        // commit that holds what is in the worktree now. Never the verified one for a forced
+        // merge: that would name a commit the run branch does not have.
+        let mut merged_sha = merge_target.clone();
         // No worktree left: an earlier accept merged it and cleaned up, then failed before
         // recording that; this one only records it.
         if dir.exists() {
@@ -1225,6 +1288,7 @@ impl Orchestrator {
                 None => {
                     // Forced: what is there now, never checked as it is.
                     self.ws_for(&run).commit_all(&dir, &message).await?;
+                    merged_sha = self.ws_for(&run).head(&dir).await.ok();
                     task.branch.clone().unwrap_or_default()
                 }
             };
@@ -1277,7 +1341,7 @@ impl Orchestrator {
             "task": task_json(&task),
             "into": base,
             "as": verified_word,
-            "merged_sha": task.report.verified_sha,
+            "merged_sha": merged_sha,
             "unverified": unchecked,
         }))
     }
