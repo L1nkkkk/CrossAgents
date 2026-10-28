@@ -339,3 +339,14 @@ B 删除 run：
 - [x] **`schedule()` 不被 `task_create` / `task_assign` / `task_update` 触发**（2026-10-28 修）：`crates/orchestrator/src/engine.rs` 的 `schedule_reporting` 只在计划批准、任务合并/失败这些时刻跑。所以在一个跑着的 run 里新建或改派一条任务，它会一直停在 pending、没有 assignee、也没有任何错误记录，直到别的任务事件顺带触发一次调度。实测等了十几分钟都不动，直到另一条任务合并。核实时 `task_create`（含 worker delegate 拆子任务）和 `task_assign` 的 pending 分支已经在写完后调用 `schedule_reporting`，只剩 `task_update` 没调。现在 `task_update` 也在锁内重新读 run、写完后 `schedule`，返回的任务是调度后的状态，返回结构不变；run 不在 Running 时照旧不派活。测试在 `crates/orchestrator/src/tests_scheduling.rs`：新建无依赖任务、改派 pending 任务、把依赖改成已合并的任务，三种情况都会当场派出，run 暂停时不会派出。当时 run `01a17e22` 的数据已经不在库里，没法确认那次卡住是不是只因为 `task_update`，也可能是旧代码，或者是 `max_parallel` / scope 冲突造成的正常排队
 - [ ] **`crates/mock-agent/tests/work_start.rs::a_proposer_that_can_move_leads_the_work_itself` 在重负载下偶发失败**：提案者还在应答时 work_start 被拒（`409 busy: lyra is answering a person's message`）。机器空闲时连跑三次 8/8 过，整机重编译时复现过一次。是测试自身的竞态，不是功能问题。
 - [ ] **持续推进「唤醒投递失败」那条 Notice 没有集成测试**：实现和代码审查都做了（首次失败发一条、投递成功清标记、再失败再发一条），但真实 hub 下让 `host.notify` 稳定失败做不到——store 只有 INSERT 没有改插件的接口，删 agent 又会先被 `continuation_step` 的 `get_agent` 挡住。要覆盖得加一个可注入失败的 Host 测试替身。
+
+## 十七、本地资源锁与通用执行器
+
+> 2026-10-29，run `27bd5f0e` 的 `run_finish` 检查撞上主导自己的另一轮 `cargo test`（LNK1104）。设计见 [tasks/LOCKS.md](tasks/LOCKS.md)。
+
+- [ ] L0：验证执行器被强杀时，锁释放与进程树结束的先后（Windows Job、Unix flock 继承），按结论定保证的措辞（LOCKS §5）
+- [ ] L1：执行器库与 `crossagents exec`：锁放在 `<home>/locks/`、一次拿全、持有记录单独写、嵌套只放行不升级的重入、放不进 Job 就不运行（LOCKS §4）
+- [ ] L2：hub 检查、任务验收、`workspace_run` 改走执行器；删掉 `refuse_while_running` 的拒绝；`protocol.rs` 加一句（LOCKS §6）
+- [ ] L3：Rust 预设的 cargo shim（`crossagents.exe` 硬链接，按 `argv[0]` 识别）
+- [ ] L4：run 页显示资源持有者；强制释放（先杀树再放锁）
+- [ ] 跨节点共享资源（数据库、部署环境）随多节点 B1 设计，v1 遇到 `scope = "shared"` 直接报错
