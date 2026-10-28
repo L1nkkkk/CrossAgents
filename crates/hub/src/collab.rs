@@ -376,6 +376,10 @@ impl AgentHost for HubHost {
             .map(|_| ())
     }
 
+    async fn archive_agent_after_turn(&self, agent: AgentId) -> Result<bool, CoreError> {
+        self.runtime.archive_after_turn(&AgentKey::Id(agent)).await
+    }
+
     fn plugin_names(&self) -> Vec<String> {
         self.runtime
             .plugins()

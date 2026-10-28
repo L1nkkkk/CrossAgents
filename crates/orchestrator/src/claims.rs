@@ -243,11 +243,30 @@ impl Orchestrator {
     }
 
     /// Archives an execution session and, unless `keep_dir`, puts it back in its workspace,
-    /// so that restoring it resumes there rather than in a worktree that is gone.
+    /// so that restoring it resumes there rather than in a worktree that is gone. A lead
+    /// copied for the run (`keep_dir`) is usually in the very turn that closed the run, still
+    /// to answer the person: it is archived once that turn ends, and its checkout goes then
+    /// (`checkout_vacated`).
     async fn put_away(&self, agent: AgentId, keep_dir: bool) -> Result<(), CoreError> {
+        if keep_dir {
+            // Archived now: the caller removes the checkout (`finish_run`). Else it goes when
+            // the archive lands; one that landed before it was marked is the caller's again.
+            if !self.host.archive_agent_after_turn(agent).await? {
+                self.leaving.lock().unwrap().insert(agent);
+                let archived = self
+                    .store
+                    .get_agent(&AgentKey::Id(agent))
+                    .await
+                    .is_ok_and(|a| a.archived_at.is_some());
+                if archived {
+                    self.leaving.lock().unwrap().remove(&agent);
+                }
+            }
+            return Ok(());
+        }
         self.host.archive_agent(agent).await?;
         let record = self.store.get_agent(&AgentKey::Id(agent)).await?;
-        if !keep_dir && record.cwd != record.home() {
+        if record.cwd != record.home() {
             self.store.update_agent_cwd(agent, record.home()).await?;
             let record = self.store.get_agent(&AgentKey::Id(agent)).await?;
             self.publish(EventKind::AgentUpdated { agent: record })

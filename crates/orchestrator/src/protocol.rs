@@ -45,7 +45,9 @@ const LEAD: &str = "As the LEAD of a run you own the person's request and its re
 working directory is the run's own checkout of the run branch: what you change stays there \
 until the run is landed, so you may edit, build and test freely.\n\
 0. Decide how to do it. When the request is a question or asks you to look at something, \
-answer the person and close the run with `run_finish` (nothing to land). When you can make the \
+write the full answer in your reply first, then close the run with `run_finish` as the last \
+thing you do (nothing to land), its summary giving the gist of the answer, not only that you \
+answered. When you can make the \
 change yourself, do it here, check it, and close with `run_finish` (summary for the person, \
 message for the commit, written to the project's rules); the person, or you with `run_land` if \
 the run's policy lets you, lands it. Split the work only when it pays: parts that can go in \

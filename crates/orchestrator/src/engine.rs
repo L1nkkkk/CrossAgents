@@ -113,6 +113,9 @@ pub struct Orchestrator {
     pub(crate) contexts: std::sync::Mutex<HashMap<AgentId, u64>>,
     /// Held while a directory is looked up among projects ([`Self::project_for`]).
     pub(crate) projects_lock: Mutex<()>,
+    /// Leads copied for a run, to be archived once the turn that closed it ends; their
+    /// checkout goes when they are (`lead_left`).
+    pub(crate) leaving: std::sync::Mutex<std::collections::HashSet<AgentId>>,
 }
 
 /// What a run says about a lead copied for it (docs/tasks/S1.md §3.2).
@@ -178,6 +181,7 @@ impl Orchestrator {
             approvals: std::sync::Mutex::default(),
             contexts: std::sync::Mutex::default(),
             projects_lock: Mutex::default(),
+            leaving: std::sync::Mutex::default(),
         })
     }
 
@@ -1371,8 +1375,10 @@ The person changed: {}",
         };
         // The run lets go of everyone it holds: the lead itself goes home, and its checkout
         // goes once it has left (`checkout_vacated`); a lead copied for it is archived, its
-        // history kept, and the checkout goes now (the callers committed what it left).
-        // Restoring the copy brings the checkout back (`lead_returned`).
+        // history kept, once the turn that closed the run ends (it may still be answering
+        // the person), and the checkout goes then (`lead_left`), or now when it is already
+        // archived (the callers committed what it left). Restoring the copy brings the
+        // checkout back (`lead_returned`).
         self.let_go_run(run.id).await;
         if !self.lead_lives_in_integration(run).await {
             self.remove_integration(run).await;
@@ -1508,7 +1514,21 @@ The person changed: {}",
                         EventKind::AgentTurnCompleted { id, .. } => this.on_idle(id).await,
                         EventKind::AgentUpdated { agent } => {
                             let this = this.clone();
-                            tokio::spawn(async move { this.checkout_vacated(&agent).await });
+                            tokio::spawn(async move {
+                                let left = agent.archived_at.is_some()
+                                    && this.leaving.lock().unwrap().remove(&agent.id);
+                                if left {
+                                    if let Err(err) = this.lead_left(&agent).await {
+                                        tracing::warn!(
+                                            agent = %agent.name,
+                                            error = %err,
+                                            "cannot remove the run checkout"
+                                        );
+                                    }
+                                    return;
+                                }
+                                this.checkout_vacated(&agent).await
+                            });
                         }
                         EventKind::AgentUsage { id, used, .. } => this.record_context(id, used),
                         EventKind::AgentStatusChanged {

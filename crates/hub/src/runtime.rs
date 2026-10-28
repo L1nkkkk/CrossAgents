@@ -204,6 +204,9 @@ pub struct Runtime {
     /// Agents to send back to their workspace once their turn ends ([`Self::send_home`]
     /// while they were busy).
     going_home: Mutex<HashSet<AgentId>>,
+    /// Agents to archive once their turn ends ([`Self::archive_after_turn`] while they were
+    /// busy).
+    archiving: Mutex<HashSet<AgentId>>,
     generation: AtomicU64,
 }
 
@@ -257,6 +260,7 @@ impl Runtime {
             notices: Mutex::default(),
             external: Mutex::default(),
             going_home: Mutex::default(),
+            archiving: Mutex::default(),
             generation: AtomicU64::new(0),
         }
     }
@@ -855,7 +859,35 @@ impl Runtime {
         }
     }
 
-    /// Follows turns ending, to send home the agents that were busy when asked to go.
+    /// Archives the agent once its turn ends and nothing waits for it: now when it is idle.
+    /// `true` when it was archived now.
+    pub async fn archive_after_turn(&self, key: &AgentKey) -> Result<bool, CoreError> {
+        let agent = self.store().get_agent(key).await?;
+        if !self.is_busy(agent.id).await {
+            self.archive(&AgentKey::Id(agent.id), true).await?;
+            return Ok(true);
+        }
+        self.archiving.lock().await.insert(agent.id);
+        // Its turn may have ended in between, with nobody left to notice.
+        self.settle_archive(agent.id).await;
+        Ok(false)
+    }
+
+    /// Archives an agent waiting to be, if it is idle now.
+    async fn settle_archive(&self, id: AgentId) {
+        if !self.archiving.lock().await.contains(&id) || self.is_busy(id).await {
+            return;
+        }
+        // Taken out first, so that two turns ending together archive it once.
+        if !self.archiving.lock().await.remove(&id) {
+            return;
+        }
+        if let Err(err) = self.archive(&AgentKey::Id(id), true).await {
+            tracing::warn!(%id, error = %err, "cannot archive the agent after its turn");
+        }
+    }
+
+    /// Follows turns ending, to send home (or archive) the agents that were busy when asked.
     pub fn watch_moves(self: &Arc<Self>) {
         let this = self.clone();
         let mut events = self.bus.subscribe();
@@ -872,12 +904,21 @@ impl Runtime {
                             let this = this.clone();
                             tokio::spawn(async move { this.settle_home(id).await });
                         }
+                        if this.archiving.lock().await.contains(&id) {
+                            let this = this.clone();
+                            tokio::spawn(async move { this.settle_archive(id).await });
+                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         let ids: Vec<AgentId> =
                             this.going_home.lock().await.iter().copied().collect();
                         for id in ids {
                             this.settle_home(id).await;
+                        }
+                        let ids: Vec<AgentId> =
+                            this.archiving.lock().await.iter().copied().collect();
+                        for id in ids {
+                            this.settle_archive(id).await;
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
@@ -1358,6 +1399,8 @@ impl Runtime {
     /// recruited: archived, they are out of the lists and stopped; every transcript stays.
     pub async fn archive(&self, key: &AgentKey, archived: bool) -> Result<Agent, CoreError> {
         let root = self.store().get_agent(key).await?;
+        // Archived or restored now: nothing is left to do once its turn ends.
+        self.archiving.lock().await.remove(&root.id);
         let mut ids = vec![root.id];
         let all = self.store().list_agents().await?;
         let mut i = 0;

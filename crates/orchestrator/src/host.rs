@@ -92,6 +92,13 @@ pub trait AgentHost: Send + Sync {
     /// lists, its transcript kept. Nothing the orchestrator does deletes an agent; only a
     /// person does (docs/tasks/S1.md §3.4).
     async fn archive_agent(&self, agent: AgentId) -> Result<(), CoreError>;
+    /// Archives the agent as [`AgentHost::archive_agent`] does, but only once its turn has
+    /// ended and nothing waits for it (now when it is idle): a lead closing its own run is
+    /// still in the turn that called `run_finish`, and stopping it there cuts off its reply
+    /// to the person. `true` when it was archived now.
+    async fn archive_agent_after_turn(&self, agent: AgentId) -> Result<bool, CoreError> {
+        self.archive_agent(agent).await.map(|_| true)
+    }
     /// Stops the agent's session and process, keeping the agent; its next message starts it
     /// again.
     async fn stop_agent(&self, agent: AgentId) -> Result<(), CoreError>;

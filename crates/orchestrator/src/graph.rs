@@ -96,7 +96,22 @@ async fn run_git(dir: &Path, args: &[&str]) -> Result<Outcome, CoreError> {
 
 /// Whether `dir` is inside a git repository (a missing directory is not one).
 async fn is_repo(dir: &Path) -> Result<bool, CoreError> {
+    // git cannot even start in a directory that is gone (os error 267 on Windows).
+    if !dir.is_dir() {
+        return Ok(false);
+    }
     Ok(run_git(dir, &["rev-parse", "--git-dir"]).await?.ok)
+}
+
+/// Where a run's branches are read: its integration checkout, or the repository itself once
+/// that checkout is gone (a run that ended without changes, or after its lead left). The
+/// branches live in the repository either way.
+fn run_dir(integration: std::path::PathBuf, run: &crossagents_core::Run) -> std::path::PathBuf {
+    if integration.is_dir() {
+        integration
+    } else {
+        run.repo.clone()
+    }
 }
 
 /// The commit `name` is a local branch of `dir`; `None` when there is no such branch.
@@ -247,7 +262,7 @@ impl Orchestrator {
     /// task that has one, as they are in the run's integration checkout.
     pub async fn run_graph(&self, run: RunId, limit: usize) -> Result<Graph, CoreError> {
         let run = self.store.get_run(run).await?;
-        let dir = self.integration_path(&run);
+        let dir = run_dir(self.integration_path(&run), &run);
         let mut wanted: Vec<(String, RefKind, Option<String>, Option<String>)> = Vec::new();
         if !run.base_branch.is_empty() {
             wanted.push((run.base_branch.clone(), RefKind::Base, None, None));
@@ -284,9 +299,10 @@ impl Orchestrator {
         graph_of(&dir, refs, base, branch, limit).await
     }
 
-    /// The graph of the repository `agent` works in: its HEAD and local branches.
+    /// The graph of the repository `agent` works in: its HEAD and local branches. When its
+    /// directory is gone (a run's checkout removed under an archived lead), its workspace.
     pub async fn agent_graph(&self, agent: &Agent, limit: usize) -> Result<Graph, CoreError> {
-        let dir = agent.cwd.clone();
+        let dir = agent_dir(agent);
         if !is_repo(&dir).await? {
             return Err(CoreError::NotFound {
                 kind: "git repository",
@@ -318,12 +334,22 @@ impl Orchestrator {
     /// What one commit of `run` changed, in its integration checkout.
     pub async fn run_commit_diff(&self, run: RunId, sha: &str) -> Result<Changes, CoreError> {
         let run = self.store.get_run(run).await?;
-        commit_diff(&self.integration_path(&run), sha).await
+        commit_diff(&run_dir(self.integration_path(&run), &run), sha).await
     }
 
     /// What one commit of the repository `agent` works in changed.
     pub async fn agent_commit_diff(&self, agent: &Agent, sha: &str) -> Result<Changes, CoreError> {
-        commit_diff(&agent.cwd, sha).await
+        commit_diff(&agent_dir(agent), sha).await
+    }
+}
+
+/// The directory an agent's graph is read in: where it works, or its workspace once that is
+/// gone.
+fn agent_dir(agent: &Agent) -> std::path::PathBuf {
+    if agent.cwd.is_dir() {
+        agent.cwd.clone()
+    } else {
+        agent.home().to_path_buf()
     }
 }
 

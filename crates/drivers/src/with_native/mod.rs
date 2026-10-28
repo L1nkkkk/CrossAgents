@@ -7,7 +7,8 @@
 //! no process to keep between turns (nor to hand over when the hub restarts).
 //!
 //! - Model and effort go as `--model` / `--reasoning-effort` on every turn, so changing them
-//!   between turns needs nothing from the CLI.
+//!   between turns needs nothing from the CLI. Thinking is asked for (`--enable-thinking`)
+//!   unless the agent's `config.thinking` is `false`.
 //! - The collaboration MCP servers go in a client configuration of the session's own
 //!   (`-c`): a copy of the user's `~/.bg-agent/bg-agent-client.yaml` whose
 //!   `mcp_config_path` names an MCP file listing the user's servers plus the session's. A
@@ -301,7 +302,10 @@ impl WithSession {
             settings: Mutex::new(Settings {
                 model: spec.agent.model.clone().filter(|m| !m.is_empty()),
                 effort: text("effort"),
-                thinking: config.get("thinking").and_then(Value::as_bool),
+                // with-cli thinks only when asked (`--enable-thinking`, off by default), and
+                // a session that shows no reasoning leaves the person guessing what it is
+                // doing. Models without thinking ignore it; `thinking: false` turns it off.
+                thinking: Some(config.get("thinking").and_then(Value::as_bool).unwrap_or(true)),
                 access_mode,
             }),
             id,

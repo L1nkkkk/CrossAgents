@@ -6,8 +6,9 @@
 //! - `RUN_STARTED` / `RUN_FINISHED` / `RUN_ERROR` frame the turn; `message_id` in every
 //!   `rawEvent` is the request id `with-cli cancel` takes.
 //! - `TEXT_MESSAGE_CONTENT` and `THINKING_TEXT_MESSAGE_CONTENT` carry text in `content`.
-//! - `TOOL_CALL_START` names the tool; `default_show: false` marks bookkeeping calls
-//!   ("任务规划中") nobody needs to see. `TOOL_CALL_ARGS` streams the arguments, either
+//! - `TOOL_CALL_START` names the tool; `need_result: false` marks with-cli's own bookkeeping
+//!   calls ("任务规划中") nobody needs to see (`default_show: false` does not: real tools such
+//!   as `read_file` carry it too). `TOOL_CALL_ARGS` streams the arguments, either
 //!   whole (`document`) or as JSON-patch-like `patchs` where `add` to a string appends to
 //!   it. `TOOL_CALL_RESULT` ends the call, with the result in `rawEvent.result` and its text
 //!   in the top-level `content`.
@@ -243,11 +244,11 @@ impl Turn {
         let Some(id) = str_of(raw, "tool_call_id") else {
             return Vec::new();
         };
-        if raw.get("default_show") == Some(&Value::Bool(false)) {
+        let name = str_of(raw, "name").unwrap_or_default().to_owned();
+        if bookkeeping(raw, &name) {
             self.hidden.insert(id.to_owned());
             return Vec::new();
         }
-        let name = str_of(raw, "name").unwrap_or_default().to_owned();
         let title = str_of(raw, "ch_name")
             .or_else(|| str_of(raw, "display_name"))
             .unwrap_or(&name)
@@ -329,6 +330,14 @@ impl Turn {
 
 fn str_of<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(Value::as_str)
+}
+
+/// A call with-cli makes for itself ("任务规划中"), which nobody needs to see. Not
+/// `default_show: false`: with-cli v0.31.0 marks `read_file` and other real tools so too,
+/// and hiding them left reads, searches and MCP calls out of the transcript. Its own calls
+/// want no result.
+fn bookkeeping(raw: &Value, name: &str) -> bool {
+    name == "task_planning" || raw.get("need_result") == Some(&Value::Bool(false))
 }
 
 fn text_of(raw: &Value) -> Option<String> {
@@ -680,13 +689,47 @@ mod tests {
     fn bookkeeping_calls_are_hidden() {
         let mut turn = Turn::default();
         for line in [
-            r#"{"type":"TOOL_CALL_START","rawEvent":{"tool_call_id":"p","name":"task_planning","ch_name":"任务规划中","default_show":false}}"#,
+            r#"{"type":"TOOL_CALL_START","rawEvent":{"tool_call_id":"p","name":"task_planning","ch_name":"任务规划中","default_show":false,"need_result":false}}"#,
             r#"{"type":"TOOL_CALL_END","rawEvent":{"tool_call_id":"p"}}"#,
             r#"{"type":"TOOL_CALL_RESULT","rawEvent":{"tool_call_id":"p","display_name":"任务规划完成"}}"#,
             r#"{"type":"CUSTOM","rawEvent":{"type":"remove-tool","tool_call_id":"p"}}"#,
         ] {
             assert_eq!(events(&mut turn, line), []);
         }
+    }
+
+    /// As with-cli v0.31.0 printed a read: `default_show: false` on a real tool.
+    #[test]
+    fn reads_marked_not_shown_are_still_reported() {
+        let mut turn = Turn::default();
+        assert_eq!(
+            events(
+                &mut turn,
+                r#"{"type":"TOOL_CALL_START","rawEvent":{"tool_call_id":"r","name":"read_file","ch_name":"读取文件","display_name":"读取文件中","render_type":"None","default_show":false,"need_result":true}}"#
+            ),
+            [SessionEventKind::ToolCall {
+                tool_call_id: "r".into(),
+                title: "读取文件".into(),
+                kind: Some("read".into()),
+                status: ToolStatus::InProgress,
+            }]
+        );
+        events(
+            &mut turn,
+            r#"{"type":"TOOL_CALL_ARGS","rawEvent":{"tool_call_id":"r","document":{"path":"C:\\ws\\a.txt"}}}"#,
+        );
+        let done = events(
+            &mut turn,
+            r#"{"type":"TOOL_CALL_RESULT","rawEvent":{"tool_call_id":"r","result":{},"display_name":"读取文件"},"content":"{\"content\": \"hello\"}"}"#,
+        );
+        assert!(matches!(
+            done.last(),
+            Some(SessionEventKind::ToolCallUpdated {
+                title: Some(title),
+                status: Some(ToolStatus::Completed),
+                ..
+            }) if title == r"C:\ws\a.txt"
+        ));
     }
 
     /// As with-cli printed it for `echo hi` (arguments shortened).
