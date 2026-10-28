@@ -14,7 +14,7 @@ use chrono::Utc;
 use crossagents_core::{
     Agent, AgentId, AgentKey, AgentStatus, Attachment, ClaimRole, CoreError, Envelope, EventBus,
     EventKind, HandoffKind, MessageSource, PlannedTask, Role, Run, RunConfig, RunId, RunPolicy,
-    RunStatus, Store, Task, TaskId, TaskReport, TaskStatus,
+    RunStatus, StopReason, Store, Task, TaskId, TaskReport, TaskStatus,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -124,6 +124,9 @@ pub struct Orchestrator {
     pub(crate) leaving: std::sync::Mutex<std::collections::HashSet<AgentId>>,
     /// Commands agents are running now (`crate::running`).
     pub(crate) running: std::sync::Mutex<crate::running::RunningCommands>,
+    /// What an agent's current turn failed with, until the turn ends: the stalled notice
+    /// says why, or its issuer only nudges it into the same failure.
+    turn_errors: std::sync::Mutex<HashMap<AgentId, String>>,
 }
 
 /// What a run says about a lead copied for it (docs/tasks/S1.md §3.2).
@@ -191,6 +194,7 @@ impl Orchestrator {
             projects_lock: Mutex::default(),
             leaving: std::sync::Mutex::default(),
             running: std::sync::Mutex::default(),
+            turn_errors: std::sync::Mutex::default(),
         })
     }
 
@@ -1530,7 +1534,16 @@ The person changed: {}",
             loop {
                 match events.recv().await {
                     Ok(event) => match this.note_running(event) {
-                        EventKind::AgentTurnCompleted { id, .. } => this.on_idle(id).await,
+                        EventKind::AgentError { id, message } => {
+                            this.turn_errors.lock().unwrap().insert(id, message);
+                        }
+                        EventKind::AgentTurnCompleted {
+                            id, stop_reason, ..
+                        } => {
+                            let error = this.turn_errors.lock().unwrap().remove(&id);
+                            let error = error.filter(|_| stop_reason == StopReason::Error);
+                            this.on_idle(id, error).await
+                        }
                         EventKind::AgentUpdated { agent } => {
                             let this = this.clone();
                             tokio::spawn(async move {
@@ -1567,7 +1580,10 @@ The person changed: {}",
                             id,
                             to: AgentStatus::Error,
                             ..
-                        } => this.on_idle(id).await,
+                        } => {
+                            let error = this.turn_errors.lock().unwrap().remove(&id);
+                            this.on_idle(id, error).await
+                        }
                         _ => {}
                     },
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -1595,8 +1611,9 @@ The person changed: {}",
     }
 
     /// An agent's turn ended (or it crashed) while its task still waits for its report. The
-    /// hub does not nudge: the task shows as stalled and its issuer decides.
-    async fn on_idle(&self, agent: AgentId) {
+    /// hub does not nudge: the task shows as stalled and its issuer decides, told what the
+    /// turn failed with when it did.
+    async fn on_idle(&self, agent: AgentId, error: Option<String>) {
         let Some((run, task)) = self.task_for_agent(agent).await else {
             return;
         };
@@ -1632,10 +1649,16 @@ The person changed: {}",
         self.notice(
             issuer,
             &format!("task:{}", task.id),
-            &format!(
-                "Task {} is stalled: {name} ended a turn without reporting.",
-                brief::task_ref(&task)
-            ),
+            &match error {
+                Some(error) => format!(
+                    "Task {} is stalled: {name}'s turn failed before it could report: {error}\nA nudge fails the same way while the cause stays: fix it, or task_assign the task to someone else.",
+                    brief::task_ref(&task)
+                ),
+                None => format!(
+                    "Task {} is stalled: {name} ended a turn without reporting.",
+                    brief::task_ref(&task)
+                ),
+            },
         )
         .await;
     }

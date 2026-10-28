@@ -144,17 +144,13 @@ impl Orchestrator {
                 "a run has one lead: recruit workers or reviewers".into(),
             ));
         }
-        // Defaults: the run's default worker's plugin (and model, unless one is named).
+        // Defaults: the run's default worker's plugin (and model, unless one is named); a
+        // model it cannot run goes to the plugin that can.
         let default = self
             .store
             .get_agent(&AgentKey::Id(run.config.worker))
             .await?;
-        let plugin = a.plugin.unwrap_or_else(|| default.plugin.clone());
-        let model = a.model.or_else(|| {
-            (plugin == default.plugin)
-                .then(|| default.model.clone())
-                .flatten()
-        });
+        let (plugin, model) = self.recruit_target(&default, &a).await?;
         let mut config = serde_json::Map::new();
         config.insert(SPAWNED_BY.into(), json!(run.id));
         let agent = Agent {
@@ -201,21 +197,21 @@ impl Orchestrator {
     /// it and archived with it.
     /// The plugin and model a recruit runs on. A model asked for without a plugin picks the
     /// plugin whose logged-in account runs it ("haiku" from a Codex chat is a Claude agent);
-    /// nothing asked for is the caller's own.
+    /// nothing asked for is `like`'s own (the calling conversation, or a run's default worker).
     async fn recruit_target(
         &self,
-        caller: &Agent,
+        like: &Agent,
         a: &SpawnArgs,
     ) -> Result<(String, Option<String>), CoreError> {
         let Some(wanted) = &a.model else {
-            let plugin = a.plugin.clone().unwrap_or_else(|| caller.plugin.clone());
+            let plugin = a.plugin.clone().unwrap_or_else(|| like.plugin.clone());
             if self.host.available_models(&plugin).await?.is_empty() {
                 return Err(CoreError::Conflict(format!(
                     "not recruited: no {plugin} agent can run here (its CLI is not installed, or no {plugin} account is logged in); tell the person, or recruit with a plugin that has one"
                 )));
             }
-            let model = (plugin == caller.plugin)
-                .then(|| caller.model.clone())
+            let model = (plugin == like.plugin)
+                .then(|| like.model.clone())
                 .flatten();
             return Ok((plugin, model));
         };
@@ -223,10 +219,10 @@ impl Orchestrator {
             Some(plugin) => vec![plugin.clone()],
             None => self.host.plugin_names(),
         };
-        // The caller's own plugin first: a model both offer stays with it.
-        plugins.sort_by_key(|p| *p != caller.plugin);
-        if !plugins.contains(&caller.plugin) && a.plugin.is_none() {
-            plugins.insert(0, caller.plugin.clone());
+        // `like`'s own plugin first: a model both offer stays with it.
+        plugins.sort_by_key(|p| *p != like.plugin);
+        if !plugins.contains(&like.plugin) && a.plugin.is_none() {
+            plugins.insert(0, like.plugin.clone());
         }
         let mut offered = Vec::new();
         for plugin in plugins {
@@ -422,7 +418,22 @@ impl Orchestrator {
         let a: A = args(input)?;
         let run = self.lead_run(caller).await?;
         let agent = self.run_member(&run, &a.name).await?;
-        let agent = self.host.set_model(agent.id, Some(a.model)).await?;
+        // A model its plugin cannot run would only fail on its next turn: say so now.
+        let available = self.host.available_models(&agent.plugin).await?;
+        let Some(model) = available.iter().find(|m| m.eq_ignore_ascii_case(&a.model)) else {
+            return Err(CoreError::Conflict(format!(
+                "{} runs on {}, which cannot run model {} (it offers: {}); recruit a teammate with agent_spawn on that model instead",
+                agent.name,
+                agent.plugin,
+                a.model,
+                if available.is_empty() {
+                    "none".to_owned()
+                } else {
+                    available.join(", ")
+                }
+            )));
+        };
+        let agent = self.host.set_model(agent.id, Some(model.clone())).await?;
         Ok(
             json!({ "agent": agent.name, "model": agent.model, "note": "applies from its next turn" }),
         )

@@ -95,7 +95,7 @@ async fn the_lead_recruits_within_the_cap_and_assigns_by_name() {
         "{} {} {} {}",
         call(
             "agent_spawn",
-            json!({ "name": "helper", "model": "opus", "title": "Helper" })
+            json!({ "name": "helper", "model": "mock-opus", "title": "Helper" })
         ),
         call("task_create", json!({ "tasks": [b] })),
         call("agent_spawn", json!({ "name": "helper2" })),
@@ -116,13 +116,13 @@ async fn the_lead_recruits_within_the_cap_and_assigns_by_name() {
     assert!(w.output().contains("at most 1"), "{}", w.output());
     let helper: Value = t.get("/v1/agents/helper").await.json().await.unwrap();
     assert_eq!(helper["config"]["spawned_by_run"], json!(id));
-    assert_eq!(helper["model"], "opus");
+    assert_eq!(helper["model"], "mock-opus");
     // b's worker was cloned from the recruit.
     let clone = w.seen.iter().find_map(|e| match &e.kind {
         EventKind::AgentCreated { agent } if agent.name.ends_with("-b") => Some(agent.clone()),
         _ => None,
     });
-    assert_eq!(clone.unwrap().model.as_deref(), Some("opus"));
+    assert_eq!(clone.unwrap().model.as_deref(), Some("mock-opus"));
     let detail: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
     let branch = detail["run"]["branch"].as_str().unwrap();
     assert_eq!(git_show(repo.path(), &format!("{branch}:b.txt")), "bee");
@@ -211,7 +211,7 @@ async fn the_lead_moves_a_teammate_to_a_stronger_model() {
         "{} {} {}",
         call(
             "agent_set_model",
-            json!({ "name": "coder", "model": "opus" })
+            json!({ "name": "coder", "model": "mock-opus" })
         ),
         accept("a"),
         finish()
@@ -220,7 +220,65 @@ async fn the_lead_moves_a_teammate_to_a_stronger_model() {
     let id = start_run(&t, json!([a]), json!({ "plan_approval": "auto" })).await;
     w.until("run completed", completed(&id)).await;
     let coder: Value = t.get("/v1/agents/coder").await.json().await.unwrap();
-    assert_eq!(coder["model"], "opus");
+    assert_eq!(coder["model"], "mock-opus");
+}
+
+/// A worker whose turn fails before it reports (a model its account cannot run) leaves the
+/// task stalled, and the lead is told what the turn failed with, not only that it ended.
+#[tokio::test]
+async fn a_failed_turn_tells_the_lead_why_the_task_stalled() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    let a = task("a", "[fail#mock-haiku]".into());
+    start_run(&t, json!([a]), json!({ "plan_approval": "auto" })).await;
+    w.until("the lead told why", |e| {
+        matches!(&e.kind, EventKind::AgentOutput { text, .. }
+            if text.contains("turn failed before it could report") && text.contains("mock-gone"))
+    })
+    .await;
+    assert!(w.output().contains("task_assign"), "{}", w.output());
+}
+
+/// A model no logged-in account runs is refused when the lead recruits on it or moves a
+/// teammate to it, rather than giving an agent that fails on every turn (Kiran: a Claude
+/// agent on a CodeBuddy model).
+#[tokio::test]
+async fn the_lead_cannot_put_a_teammate_on_a_model_nobody_runs() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    let lead = format!(
+        "{} {} {} {}",
+        call(
+            "agent_spawn",
+            json!({ "name": "wrong", "model": "gpt-6-luna" })
+        ),
+        call(
+            "agent_set_model",
+            json!({ "name": "coder", "model": "gpt-6-luna" })
+        ),
+        accept("a"),
+        finish()
+    );
+    let a = task("a", goal("a", "[write a.txt=ay]", &lead));
+    let id = start_run(&t, json!([a]), json!({ "plan_approval": "auto" })).await;
+    w.until("run completed", completed(&id)).await;
+    // The lead's turn prints what its calls answered once it ends, after run_finish.
+    w.until("the lead's calls answered", |e| {
+        matches!(&e.kind, EventKind::AgentOutput { text, .. } if text.contains("cannot run model"))
+    })
+    .await;
+
+    let out = w.output();
+    assert!(
+        out.contains("no logged-in account runs model gpt-6-luna"),
+        "{out}"
+    );
+    assert!(out.contains("cannot run model gpt-6-luna"), "{out}");
+    assert_eq!(t.get("/v1/agents/wrong").await.status(), 404);
+    let coder: Value = t.get("/v1/agents/coder").await.json().await.unwrap();
+    assert_eq!(coder["model"], "haiku");
 }
 
 /// A conversation outside any run recruits for itself, within its policy; every refusal says
