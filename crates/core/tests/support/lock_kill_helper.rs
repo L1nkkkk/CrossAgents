@@ -8,13 +8,19 @@
 //! ```text
 //! lock_kill_helper executor <lock> <data> <job> <job|inherit>                 (Windows)
 //! lock_kill_helper executor <lock> <data> <group> <job|inherit|close|setsid>  (Unix)
-//! lock_kill_helper writer <data> <interval_ms> <handle> <keep|close> <lock>
+//! lock_kill_helper writer <data> <interval_ms> <handle|env> <keep|close> <lock>
+//! lock_kill_helper exec <locks dir> <resource path> <command> [args…]
 //! ```
 //!
 //! `executor` takes the lock, starts a `writer` child and then waits to be killed. The
 //! writer appends a line to `<data>` — every `<interval_ms>` milliseconds, or back to back
 //! when that is `0` — which is the "task still using the resource" the competitor must not
 //! run beside. It reports on stdout whether it really has the parent's lock handle.
+//!
+//! `exec` is the real executor ([`crossagents_core::exec::run`]) over one resource, for the
+//! L1 regression of §7 item 1 (`tests/exec_kill_regression.rs`). It is started only to be
+//! killed from outside, like a `crossagents exec` that crashed — so the writer can pass
+//! `env` as its handle argument and close whatever `CROSSAGENTS_HELD` names.
 
 #![allow(unsafe_code)]
 
@@ -40,11 +46,48 @@ fn main() {
             }
         }
         Some("writer") => writer(&args),
+        Some("exec") => exec(&args),
         _ => {
             eprintln!(
-                "usage: lock_kill_helper executor <lock> <data> <job> <mode> | writer <data> <interval_ms> <handle> <keep|close> <lock>"
+                "usage: lock_kill_helper executor <lock> <data> <job> <mode> | writer <data> <interval_ms> <handle> <keep|close> <lock> | exec <locks> <resource> <command> [args…]"
             );
             std::process::exit(2);
+        }
+    }
+}
+
+/// Runs the real executor over one resource, for `tests/exec_kill_regression.rs` (§7 item 1).
+///
+/// The process behaves like `crossagents exec`: it takes the lock, starts the command as a
+/// strict tree, records the root process and holds the lock until the tree ends. The test
+/// kills it from outside and then competes for the lock.
+fn exec(args: &[String]) {
+    use crossagents_core::exec::{Access, Request, Resource, run};
+
+    let locks = std::path::PathBuf::from(&args[2]);
+    let resource = std::path::PathBuf::from(&args[3]);
+    let command = &args[4..];
+    let Some(program) = command.first() else {
+        eprintln!("usage: lock_kill_helper exec <locks> <resource> <command> [args…]");
+        std::process::exit(2);
+    };
+    let mut request = Request::new(
+        command.join(" "),
+        vec![Resource::new("build", resource, Access::Exclusive)],
+    );
+    request.agent = Some("executor".to_owned());
+
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(&command[1..]);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    match runtime.block_on(run(&locks, &request, &mut cmd)) {
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(error) => {
+            eprintln!("executor error: {error}");
+            std::process::exit(70);
         }
     }
 }
@@ -60,7 +103,12 @@ fn ready(pid: u32, inherited: bool) {
 fn writer(args: &[String]) {
     let data = &args[2];
     let interval: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
-    let handle: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+    // `env`: whatever the executor passed on in `CROSSAGENTS_HELD`, for a writer started by
+    // the real executor rather than by the L0 experiment.
+    let handle: usize = match args.get(4).map(String::as_str) {
+        Some("env") => inherited_raw(),
+        other => other.and_then(|s| s.parse().ok()).unwrap_or(0),
+    };
     let close = args.get(5).map(String::as_str) == Some("close");
     let lock = args.get(6).map(String::as_str).unwrap_or("");
 
@@ -85,6 +133,16 @@ fn writer(args: &[String]) {
             std::thread::sleep(std::time::Duration::from_millis(interval));
         }
     }
+}
+
+/// The first handle or descriptor in `CROSSAGENTS_HELD` (`<exec-id>;<name>:<access>:<raw>,…`).
+fn inherited_raw() -> usize {
+    std::env::var(crossagents_core::exec::HELD_ENV)
+        .ok()
+        .and_then(|value| value.split(';').nth(1).map(str::to_owned))
+        .and_then(|claims| claims.split(',').next().map(str::to_owned))
+        .and_then(|claim| claim.rsplit(':').next().and_then(|raw| raw.parse().ok()))
+        .unwrap_or(0)
 }
 
 /// Whether `handle` really is this process's handle on `lock` — same volume and file index
