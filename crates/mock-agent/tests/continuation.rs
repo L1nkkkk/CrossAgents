@@ -494,7 +494,20 @@ async fn reserved_due_time_survives_restart_and_default_runs_stay_unchanged() {
     due(&t, run.id).await;
     t.hub.orchestrator.continue_runs().await;
     idle(&t, run.planner).await;
+    // The turn a wakeup bought has ended: the checkpoint reads the settled phase with the
+    // next wakeup reserved, not `working` with nothing due (`settle_continuation`). Wait for
+    // it rather than for the clock that would otherwise get there a tick later.
+    phase(&t, &run, "continue").await;
     let before = get(&t, run.id).await.continuation.unwrap();
+    assert_eq!(before.attempts, 1, "{before:?}");
+    assert_eq!(
+        before
+            .next_at
+            .zip(before.last_attempt_at)
+            .map(|(at, last)| (at - last).num_minutes()),
+        Some(60),
+        "the interval is reserved past the attempt: {before:?}"
+    );
     t.hub.shutdown();
     t.hub.wait().await.unwrap();
     let t = TestHub::start_in(t.home, |_| {}).await;

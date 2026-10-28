@@ -70,7 +70,8 @@ fn short(id: &str) -> String {
     id[id.len() - 8..].to_owned()
 }
 
-/// Ends a run the person's way; the lead keeps its checkout (it is not archived).
+/// Ends a run the person's way. The run lets go of its lead: a copy is archived once the
+/// turn that closed the run ends (its checkout goes then), one that moved goes home.
 async fn finish(t: &TestHub, run: &Value) -> Value {
     let resp = t
         .post(
@@ -88,6 +89,31 @@ async fn agent(t: &TestHub, id: &str) -> Value {
         .json()
         .await
         .unwrap()
+}
+
+/// Waits for a lead copied for a run to be archived with its checkout gone: both land after
+/// the turn that closed the run ends, and a restore made in between finds a checkout that is
+/// still being taken away.
+async fn until_left(t: &TestHub, id: &str, dir: &str) -> Value {
+    for _ in 0..300 {
+        let a = agent(t, id).await;
+        if !a["archived_at"].is_null() && !std::path::Path::new(dir).exists() {
+            return a;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("{id} never left {dir}");
+}
+
+/// Waits for a restored lead's checkout to be made again (`lead_returned`).
+async fn until_checkout(dir: &str) {
+    for _ in 0..300 {
+        if std::path::Path::new(dir).is_dir() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("{dir} never came back");
 }
 
 #[tokio::test]
@@ -241,8 +267,7 @@ async fn a_lead_whose_run_ended_starts_another_on_the_repository() {
     let ended = finish(&t, &first).await;
     assert_eq!(ended["status"], "completed", "{ended}");
     assert!(ended["landed"].is_null(), "{ended}");
-    let copy = agent(&t, &old_lead).await;
-    assert!(!copy["archived_at"].is_null(), "{copy}");
+    let copy = until_left(&t, &old_lead, &old_cwd).await;
     assert_eq!(copy["cwd"], json!(old_cwd), "{copy}");
     let resp = t
         .post(
@@ -251,7 +276,7 @@ async fn a_lead_whose_run_ended_starts_another_on_the_repository() {
         )
         .await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
-    assert!(std::path::Path::new(&old_cwd).is_dir(), "{old_cwd}");
+    until_checkout(&old_cwd).await;
 
     // The lead can propose again, and the card says where the new Work starts.
     let mut w = t.watch().await;

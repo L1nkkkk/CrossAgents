@@ -40,8 +40,37 @@ impl Orchestrator {
             if run.config.policy.continuation.is_none() {
                 continue;
             }
-            if let Err(error) = self.continue_run(run.id).await {
+            if let Err(error) = self.continue_run(run.id, true).await {
                 tracing::warn!(%error, run = %run.id, "cannot continue run");
+            }
+        }
+    }
+
+    /// The lead's turn ended: rewrite the checkpoint from the facts as they are now.
+    ///
+    /// The clock wrote "working" while the lead was in the turn a wakeup bought, with nothing
+    /// due; a restart derives "continue" (or another settled phase) and reserves the next
+    /// wakeup afresh, so the run read differently before and after a restart. Doing the same
+    /// observation here, as soon as the agent is idle, keeps the two the same without waiting
+    /// for the next tick.
+    ///
+    /// Nothing is woken and no attempt is counted ([`Self::continue_run`] with `deliver`
+    /// false): the lead has just finished the turn, and a due time that passed during it is
+    /// left due for the clock to deliver.
+    pub async fn settle_continuation(&self, lead: AgentId) {
+        let runs = match self.store.list_runs().await {
+            Ok(runs) => runs,
+            Err(error) => {
+                tracing::warn!(%error, "cannot list runs to settle a continuation");
+                return;
+            }
+        };
+        for run in runs {
+            if run.planner != lead || run.continuation.is_none() {
+                continue;
+            }
+            if let Err(error) = self.continue_run(run.id, false).await {
+                tracing::warn!(%error, run = %run.id, "cannot settle the run's continuation");
             }
         }
     }
@@ -248,7 +277,7 @@ impl Orchestrator {
         Ok(())
     }
 
-    async fn continue_run(&self, id: RunId) -> Result<(), CoreError> {
+    async fn continue_run(&self, id: RunId, deliver: bool) -> Result<(), CoreError> {
         let _guard = self.lock(id).await;
         let mut run = self.store.get_run(id).await?;
         let Some(policy) = run.config.policy.continuation.clone() else {
@@ -342,7 +371,7 @@ impl Orchestrator {
                 // The quiet stretch already lasted the threshold; do not add an interval.
                 state.next_at = Some(now);
             }
-            if state.next_at.is_some_and(|at| at <= now) {
+            if deliver && state.next_at.is_some_and(|at| at <= now) {
                 state.attempts += 1;
                 state.last_attempt_at = Some(now);
                 state.next_at = Some(now + interval);

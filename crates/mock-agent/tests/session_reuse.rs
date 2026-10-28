@@ -5,6 +5,7 @@
 mod common;
 
 use std::path::Path;
+use std::time::Duration;
 
 use common::{TestHub, Watcher, git_repo, native_plugin, pinned_plugin};
 use crossagents_api_types::{AgentId, EventKind, RunStatus};
@@ -864,7 +865,23 @@ async fn pinned_run(
     assert!(!run["lead_note"].is_null(), "{run}");
     let lead: AgentId = run["planner"].as_str().unwrap().parse().unwrap();
     run_ends(w, &run).await;
-    let copy = t.agent(&lead.to_string()).await;
+    // The turn that closed the run is still finishing: wait for it to end (it may still be
+    // answering), then for the copy to be archived with its checkout gone (S1 §3.4). Both
+    // land after the run's status changes, and leaving the turn's events unread would let
+    // the restore below answer to the old turn.
+    w.until(
+        "the lead finished the turn that closed the run",
+        |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if *id == lead),
+    )
+    .await;
+    let mut copy = t.agent(&lead.to_string()).await;
+    for _ in 0..300 {
+        if copy.archived_at.is_some() && !copy.cwd.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        copy = t.agent(&lead.to_string()).await;
+    }
     assert!(copy.archived_at.is_some(), "{copy:?}");
     assert!(!copy.cwd.exists(), "{copy:?}");
     let first = after(&said(w, lead), "session=").to_owned();
@@ -889,6 +906,17 @@ async fn restore_and_ask(t: &TestHub, w: &mut Watcher, lead: AgentId) -> String 
         )
         .await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    // The checkout is made as part of restoring (S1 §7): wait for it rather than race the
+    // event that builds it.
+    let mut rebuilt = false;
+    for _ in 0..300 {
+        if t.agent(&lead.to_string()).await.cwd.is_dir() {
+            rebuilt = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(rebuilt, "restoring {lead} did not bring its checkout back");
     let before = said(w, lead).len();
     t.send(&lead.to_string(), "[recall] [session] still you?")
         .await;
@@ -916,7 +944,16 @@ async fn a_copy_that_resumes_only_where_it_ran_carries_on_in_its_rebuilt_checkou
         "{text}"
     );
     assert!(text.contains("recall=PELICAN-42"), "{text}");
-    assert_eq!(warnings_since(&w, from, lead), Vec::<String>::new());
+    // The conversation carried on: nothing said it did not. The run's branch went with the
+    // checkout (the run never landed), so the code being rebuilt from the base is said, and
+    // that is not about the conversation.
+    let warned = warnings_since(&w, from, lead);
+    assert!(
+        warned
+            .iter()
+            .all(|m| !m.contains("不带原来的上下文") && !m.contains("这是新会话")),
+        "{warned:?}"
+    );
 }
 
 /// The same copy once its run is deleted: no checkout to rebuild, so it does not try to

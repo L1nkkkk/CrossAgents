@@ -51,6 +51,56 @@ async fn until_home(t: &TestHub, name: &str, dir: &Path) {
     panic!("{name} never went back to {}", dir.display());
 }
 
+/// Waits for a lead copied for a run to leave (S1 §3.4): archived once the turn that closed
+/// the run has ended, the run's checkout gone with it (`lead_left`). Both land after the
+/// run's status changes, so a test that wants them waits rather than reads straight away.
+async fn until_left(t: &TestHub, id: &str, dir: &Path) {
+    for _ in 0..300 {
+        let a = agent(t, id).await;
+        if !a["archived_at"].is_null() && !dir.exists() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let a = agent(t, id).await;
+    panic!(
+        "{id} never left {} (archived: {}, cwd: {}, there: {})",
+        dir.display(),
+        a["archived_at"],
+        a["cwd"],
+        dir.exists()
+    );
+}
+
+/// Waits for a restored lead's checkout to be made again and to hold `file`: restoring
+/// publishes the agent, and the checkout is built from that event.
+async fn until_back(repo: &Path, dir: &Path, file: &str) {
+    for _ in 0..300 {
+        if dir.join(file).exists() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!(
+        "{} never came back under {} (repo {})",
+        file,
+        dir.display(),
+        repo.display()
+    );
+}
+
+/// Waits for a directory to be removed (archiving or deleting a lead removes what the run
+/// left, from the event that announces it).
+async fn until_gone(dir: &Path) {
+    for _ in 0..300 {
+        if !dir.exists() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("{} is still there", dir.display());
+}
+
 /// Gives boss a conversation first. Its driver (ACP) cannot resume a session elsewhere, so a
 /// run gets a copy of it, which keeps living in the run's checkout after the run ends.
 async fn chat_first(t: &TestHub, w: &mut common::Watcher) {
@@ -263,28 +313,36 @@ async fn archiving_the_lead_clears_its_checkout_and_restoring_brings_it_back() {
         .await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
 
-    // The lead is a copy: archived when the run ended (S1 §3.4), keeping the checkout's path
-    // as its directory, while the checkout itself went.
+    // The lead is a copy: archived once the turn that closed the run has ended (S1 §3.4),
+    // keeping the checkout's path as its directory, while the checkout itself went.
     let lead = agent(&t, landed["planner"].as_str().unwrap()).await;
-    assert!(!lead["archived_at"].is_null(), "{lead}");
+    let lead_id = lead["id"].as_str().unwrap().to_owned();
     let dir = std::path::PathBuf::from(lead["cwd"].as_str().unwrap());
     let branch = landed["branch"].as_str().unwrap().to_owned();
-    assert!(!dir.exists());
+    until_left(&t, &lead_id, &dir).await;
+    // Whether the branch went with the checkout is `lead_left`'s call, and it races the
+    // landing: a landed run's branch goes, one read before the landing may stay. Drop it
+    // here so the restore is the same either way: built from the base.
+    let _ = std::process::Command::new("git")
+        .args(["branch", "-D", &branch])
+        .current_dir(repo.path())
+        .output();
 
-    let archive_path = format!("/v1/agents/{}/archive", lead["id"].as_str().unwrap());
+    let archive_path = format!("/v1/agents/{lead_id}/archive");
     let archive = |on: bool| t.post(&archive_path, json!({ "archived": on }));
-    // Restored, it gets its checkout of the run branch back.
+    // Restored, it gets its checkout back, from the base the run landed on.
     assert_eq!(archive(false).await.status(), 200);
-    assert!(dir.join("one.txt").exists());
+    until_back(repo.path(), &dir, "one.txt").await;
     // What a cargo build there left in the checkout's own build directory
     // (`<run>/targets/integration`, docs/TODO.md §九 ②).
     let target = dir.parent().unwrap().join("targets").join("integration");
     std::fs::create_dir_all(target.join("debug")).unwrap();
 
     assert_eq!(archive(true).await.status(), 200);
-    // Landed: nothing waits on the branch, so it goes with the checkout.
+    // Landed: nothing waits on the branch, so it goes with the checkout, build directory
+    // and all.
+    until_gone(&target).await;
     assert!(!dir.exists());
-    assert!(!target.exists(), "the run's build directory goes too");
     assert!(
         !branches(repo.path()).contains(&branch),
         "{}",
@@ -293,10 +351,9 @@ async fn archiving_the_lead_clears_its_checkout_and_restoring_brings_it_back() {
 
     let from = w.seen.len();
     assert_eq!(archive(false).await.status(), 200);
-    assert!(dir.join("one.txt").exists(), "restored from the base");
+    until_back(repo.path(), &dir, "one.txt").await;
     // Landed or not, the person is told the run's code was not checked out again: a landing
     // does not prove the base still has it.
-    let lead_id = lead["id"].as_str().unwrap().to_owned();
     w.until("told the code was rebuilt from the base", |e| {
         matches!(&e.kind, EventKind::AgentWarning { id, message }
             if id.to_string() == lead_id && message.contains("原执行代码没有恢复") && message.contains("没有核对"))
@@ -335,7 +392,7 @@ async fn an_unlanded_branch_outlives_the_checkout() {
         .delete(&format!("/v1/agents/{}", lead["id"].as_str().unwrap()))
         .await;
     assert_eq!(resp.status(), 204);
-    assert!(!dir.exists());
+    until_gone(&dir).await;
     // Still waiting to be landed.
     assert!(branches(repo.path()).contains(&branch));
 }
@@ -360,9 +417,11 @@ async fn restoring_a_lead_whose_branch_is_gone_says_the_code_did_not_come_back()
     w.until("run completed", run_status_is(&id, RunStatus::Completed))
         .await;
     let lead = agent(&t, run["planner"].as_str().unwrap()).await;
-    assert!(!lead["archived_at"].is_null(), "{lead}");
+    let lead_id = lead["id"].as_str().unwrap().to_owned();
     let dir = std::path::PathBuf::from(lead["cwd"].as_str().unwrap());
     let branch = run["branch"].as_str().unwrap().to_owned();
+    // Archived once the turn that closed the run has ended, its checkout gone then.
+    until_left(&t, &lead_id, &dir).await;
     let out = std::process::Command::new("git")
         .args(["branch", "-D", &branch])
         .current_dir(repo.path())

@@ -53,9 +53,11 @@ const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(30);
 const CANCEL_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long the process gets to exit once its output has ended.
 const EXIT_TIMEOUT: Duration = Duration::from_secs(30);
-/// What with-cli waits for an MCP tool call, in seconds: collaboration tools run commands
-/// (`timeout_secs` up to 600 by default) and wait on other agents.
-const MCP_TIMEOUT_SECS: u64 = 1800;
+/// What with-cli waits for an MCP tool call, in milliseconds: `mcpServers.<name>.timeout` is
+/// milliseconds on its side, which is what its own report says ("请求超时, 超时时间:%d ms").
+/// Half an hour, because collaboration tools run commands (`timeout_secs` up to 600 by
+/// default), wait on other agents, and `run_finish` runs the project's checks.
+const MCP_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 /// Plain lines kept for an error report.
 const TEXT_LINES: usize = 20;
 
@@ -305,7 +307,12 @@ impl WithSession {
                 // with-cli thinks only when asked (`--enable-thinking`, off by default), and
                 // a session that shows no reasoning leaves the person guessing what it is
                 // doing. Models without thinking ignore it; `thinking: false` turns it off.
-                thinking: Some(config.get("thinking").and_then(Value::as_bool).unwrap_or(true)),
+                thinking: Some(
+                    config
+                        .get("thinking")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
+                ),
                 access_mode,
             }),
             id,
@@ -702,7 +709,7 @@ fn mcp_config(user: &str, servers: &[McpServerSpec]) -> Value {
             json!({
                 "description": "CrossAgents collaboration tools",
                 "disabled": false,
-                "timeout": MCP_TIMEOUT_SECS,
+                "timeout": MCP_TIMEOUT_MS,
                 "transportType": "stdio",
                 "command": server.command.display().to_string(),
                 "args": server.args,
@@ -750,6 +757,18 @@ mod tests {
         assert_eq!(servers["crossagents"]["env"]["CROSSAGENTS_TOKEN"], "t");
         // An empty or broken file is no servers.
         assert_eq!(mcp_config("", &[]), json!({ "mcpServers": {} }));
+    }
+
+    /// with-cli reads `mcpServers.<name>.timeout` as milliseconds: written as 1800 it timed
+    /// every call out after 1.8 s, which no collaboration tool that runs a build survives.
+    #[test]
+    fn the_mcp_timeout_is_half_an_hour_in_milliseconds() {
+        let config = mcp_config("", &[server()]);
+        assert_eq!(
+            config["mcpServers"]["crossagents"]["timeout"],
+            json!(1_800_000)
+        );
+        assert_eq!(MCP_TIMEOUT_MS, 30 * 60 * 1000);
     }
 
     #[test]

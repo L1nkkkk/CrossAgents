@@ -1531,6 +1531,19 @@ The person changed: {}",
                             });
                         }
                         EventKind::AgentUsage { id, used, .. } => this.record_context(id, used),
+                        // Idle is set after the turn's end is published, and only when nothing
+                        // is queued: the lead is really between turns here, so its run's
+                        // checkpoint is rewritten now rather than by the next clock tick.
+                        // In the background: it reads every run, and must not hold up the
+                        // event this one is about.
+                        EventKind::AgentStatusChanged {
+                            id,
+                            to: AgentStatus::Idle,
+                            ..
+                        } => {
+                            let this = this.clone();
+                            tokio::spawn(async move { this.settle_continuation(id).await });
+                        }
                         EventKind::AgentStatusChanged {
                             id,
                             to: AgentStatus::Error,

@@ -89,6 +89,21 @@ async fn until_run(t: &TestHub, id: &str, done: impl Fn(&Value) -> bool) -> Valu
     panic!("the run never got there: {last}");
 }
 
+/// Waits for a lead copied for a run to leave (`lead_left`): archived once the turn that
+/// closed the run has ended, and its checkout removed with it. Both land after the run's
+/// status does, so a test that wants them waits rather than reads straight away.
+async fn until_lead_left(t: &TestHub, lead: &str, checkout: &Path) {
+    let mut last = Value::Null;
+    for _ in 0..300 {
+        last = agent(t, lead).await;
+        if !last["archived_at"].is_null() && !checkout.exists() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("the lead never left its checkout: {last}");
+}
+
 /// The lead writes a file and closes the run; the run is `completed` and never landed.
 async fn finish_with_a_change(t: &TestHub, run: &Value) -> Value {
     let lead = run["planner"].as_str().unwrap();
@@ -152,8 +167,9 @@ async fn a_run_that_is_still_open_must_be_cancelled_first() {
 }
 
 /// R1 §3.4: a landed run takes its branches with it, leaves `/v1/runs`, and says so on the
-/// event stream. The lead's copy was archived when the run ended, its checkout gone with it
-/// (S1 §3.4); it is not deleted, and the delete puts it back in its workspace.
+/// event stream. The lead's copy is archived once the turn that closed the run has ended,
+/// its checkout gone with it (S1 §3.4); it is not deleted, and the delete puts it back in
+/// its workspace.
 #[tokio::test]
 async fn a_landed_run_goes_with_its_worktrees_branches_and_lead() {
     let (repo, t) = setup().await;
@@ -166,6 +182,9 @@ async fn a_landed_run_goes_with_its_worktrees_branches_and_lead() {
     assert_eq!(branches(repo.path()), vec![branch.clone()]);
 
     finish_with_a_change(&t, &run).await;
+    // The lead is still in the turn that closed the run, answering the person: it is
+    // archived when that turn ends, and the checkout goes with it.
+    until_lead_left(&t, &lead, Path::new(&checkout)).await;
     let copy = agent(&t, &lead).await;
     assert!(!copy["archived_at"].is_null(), "{copy}");
     assert_eq!(
@@ -186,7 +205,8 @@ async fn a_landed_run_goes_with_its_worktrees_branches_and_lead() {
     let done: Value = resp.json().await.unwrap();
     assert_eq!(done["branches"], json!([branch]), "{done}");
     assert_eq!(done["warnings"], json!([]), "{done}");
-    // The run held nobody any more: its copy was archived when it ended.
+    // The run held nobody any more: its copy was archived when the run ended and its lead
+    // left the checkout it was still working in.
     assert_eq!(done["agents"]["archived"], json!([]), "{done}");
     assert_eq!(done["agents"]["returned"], json!([]), "{done}");
 
@@ -260,11 +280,13 @@ async fn a_dirty_checkout_asks_for_force() {
     let checkout = std::path::PathBuf::from(agent(&t, &lead).await["cwd"].as_str().unwrap());
     std::fs::write(checkout.join("left.txt"), "the lead's\n").unwrap();
     // The person ends the run as it is: nothing merged, nothing landed. Its lead, a copy, is
-    // archived and the checkout goes (S1 §3.4), what it left committed to the run branch.
+    // archived once the turn it is in ends and the checkout goes then (S1 §3.4), what it
+    // left committed to the run branch.
     let resp = t.post(&format!("/v1/runs/{id}/finish"), json!({})).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let finished: Value = resp.json().await.unwrap();
     assert!(finished["run"]["landed"].is_null(), "{finished}");
+    until_lead_left(&t, &lead, &checkout).await;
     assert!(!checkout.exists(), "{checkout:?}");
     // The person restores the copy, which brings its checkout back, and something is left
     // there uncommitted.

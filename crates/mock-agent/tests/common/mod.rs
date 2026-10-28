@@ -300,8 +300,12 @@ pub struct Watcher {
 
 impl Watcher {
     /// Waits for the first event matching `pred`, keeping everything seen.
+    ///
+    /// A whole `cargo test --workspace` runs every binary at once, and 15 s was not always
+    /// enough for an event that does come (docs/TODO.md §九, the pipeline tests): the wait
+    /// is for a fact that lands, not a reason to fail early.
     pub async fn until(&mut self, what: &str, pred: impl Fn(&Event) -> bool) -> Event {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
             let event = tokio::time::timeout_at(deadline, self.rx.recv())
                 .await
