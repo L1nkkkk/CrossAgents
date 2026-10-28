@@ -95,6 +95,14 @@ const REVIEWER: &str = "As a REVIEWER: read the change you are asked to review (
 its branch against the run branch, in your working directory) and judge it against the task. \
 Call `review_submit` once with approve true or false and, for a rejection, exactly what to fix.";
 
+/// Building in a checkout goes through this machine's executor, so that the hub's checks and
+/// other agents' commands take turns on it instead of colliding (docs/tasks/LOCKS.md §6).
+const LOCKS: &str = "Commands that build or test in your checkout go through the executor: \
+`crossagents exec --resource build -- <command>` (cargo already goes through it by itself: the \
+checkout's PATH has a shim). When you see `waiting for …` another command holds the build \
+directory and you are queued, so do not start the same command again; exit code 75 is the wait \
+timing out, and you can retry.";
+
 /// Codex names MCP tools `mcp__<server>__<tool>`, and its code-mode models (`tool_mode:
 /// code_mode_only`, e.g. gpt-6-luna) see no tool but `exec`: told only "call task_complete",
 /// they find nothing by that name and end the turn without reporting.
@@ -124,7 +132,13 @@ pub fn guide(role: Role) -> String {
         Role::Worker => WORKER,
         Role::Reviewer => REVIEWER,
     };
-    format!("{COMMON}\n\n{specific}")
+    // A reviewer reads; the two who build in a worktree are told how their commands take
+    // turns with the hub's checks.
+    let locks = match role {
+        Role::Planner | Role::Worker => format!("\n\n{LOCKS}"),
+        Role::Reviewer => String::new(),
+    };
+    format!("{COMMON}\n\n{specific}{locks}")
 }
 
 #[cfg(test)]
@@ -164,6 +178,21 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn agents_that_build_in_a_checkout_are_told_to_go_through_the_executor() {
+        for role in [Role::Planner, Role::Worker] {
+            let text = guide(role);
+            assert!(
+                text.contains("crossagents exec --resource build --")
+                    && text.contains("waiting for …")
+                    && text.contains("exit code 75"),
+                "{text}"
+            );
+        }
+        // A reviewer reads; nothing it runs needs the build directory.
+        assert!(!guide(Role::Reviewer).contains("crossagents exec"));
     }
 
     #[test]

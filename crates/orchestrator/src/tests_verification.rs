@@ -264,6 +264,7 @@ impl Fixture {
             Arc::new(FixedChecks(checks)),
             OrchestratorConfig {
                 worktrees: worktrees.clone(),
+                locks: home.path().join("locks"),
                 max_nudges: 0,
                 build_cache_limit: u64::MAX,
             },

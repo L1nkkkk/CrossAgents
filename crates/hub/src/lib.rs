@@ -204,10 +204,12 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         Arc::new(GitWorkspaces),
         Arc::new(ShellVerifier {
             worktrees: Some(paths.home.join("worktrees")),
+            locks: Some(paths.home.join("locks")),
             ..ShellVerifier::default()
         }),
         OrchestratorConfig {
             worktrees: paths.home.join("worktrees"),
+            locks: paths.home.join("locks"),
             max_nudges: 2,
             build_cache_limit: config.build_cache_limit,
         },

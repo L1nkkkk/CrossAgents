@@ -84,7 +84,6 @@ impl Orchestrator {
                 .record_checks(run.id, ChecksState::NotApplicable { declared }, Vec::new())
                 .await;
         }
-        self.refuse_while_running(&dir, tool).await?;
         let results = self
             .verifier
             .check_within(&dir, &commands, checks.timeout)
@@ -97,6 +96,17 @@ impl Orchestrator {
         let Some(bad) = results.iter().find(|r| !r.passed) else {
             return Ok(());
         };
+        // The checks hold the checkout's build directory (docs/tasks/LOCKS.md §6); when it did
+        // not come free in time nothing ran, and that says nothing about the change.
+        if bad.exit_code == Some(crossagents_core::exec::EXIT_TEMPFAIL) {
+            return Err(CoreError::Conflict(format!(
+                "the project's checks ({}) did not run: {}\nThe checks wait for whatever \
+                 builds in this checkout; this is not a problem in your change: call {tool} \
+                 again when it is free.",
+                project::FILE,
+                bad.output
+            )));
+        }
         // A file the system says another process holds is the machine, not the change: say
         // so, or the lead goes looking for a bug that is not there.
         if crate::running::in_use_failure(&bad.output) {
@@ -145,42 +155,6 @@ impl Orchestrator {
         stored.checks_state = Some(state);
         stored.updated_at = Utc::now();
         self.store.update_run(&stored).await
-    }
-
-    /// Refuses to start the checks while an agent working in `dir` still runs a command
-    /// there: they build in the same directory and would collide with it.
-    async fn refuse_while_running(
-        &self,
-        dir: &std::path::Path,
-        tool: &str,
-    ) -> Result<(), CoreError> {
-        let now = Utc::now();
-        let mut busy = Vec::new();
-        for agent in self.store.list_agents().await? {
-            if !agent.cwd.starts_with(dir) {
-                continue;
-            }
-            let running = self.running.lock().unwrap().of(agent.id, now);
-            for command in running {
-                busy.push(format!(
-                    "{} is still running `{}` (since {}, {} min ago)",
-                    agent.name,
-                    command.command,
-                    command.since.format("%H:%M:%S"),
-                    (now - command.since).num_minutes()
-                ));
-            }
-        }
-        if busy.is_empty() {
-            return Ok(());
-        }
-        Err(CoreError::Conflict(format!(
-            "not running the project's checks yet: {} in this checkout, and the checks build in \
-             the same directory, so they would collide with it. Wait for it to finish (or stop \
-             it), then call {tool} again. The hub runs the full checks itself: you need not run \
-             them first.",
-            busy.join("; ")
-        )))
     }
 
     pub(crate) async fn run_land_tool(
