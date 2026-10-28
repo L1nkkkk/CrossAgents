@@ -1,0 +1,213 @@
+//! Commands agents have started and not finished, followed from their tool-call events, so
+//! the hub does not build in a checkout while its agent still builds or tests there: on
+//! Windows the second build waits on cargo's lock and then cannot relink a test binary the
+//! first one is running (LNK1104). Kept in memory only; after a restart nothing is known to
+//! run, which lets the checks go as before.
+
+use std::collections::HashMap;
+
+use chrono::{DateTime, Duration, Utc};
+use crossagents_core::{AgentId, Event, EventKind, ToolStatus};
+
+/// A command still going.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Running {
+    pub tool_call_id: String,
+    pub command: String,
+    pub since: DateTime<Utc>,
+}
+
+/// Running commands by agent.
+#[derive(Debug, Default)]
+pub struct RunningCommands {
+    by_agent: HashMap<AgentId, Vec<Running>>,
+}
+
+/// Longer than any check is let run: past it a command whose end was never reported is
+/// taken as gone rather than holding up the checks for good.
+const STALE_AFTER_HOURS: i64 = 2;
+
+impl RunningCommands {
+    pub fn push(&mut self, event: &Event) {
+        match &event.kind {
+            EventKind::AgentToolCall {
+                id,
+                tool_call_id,
+                title,
+                kind,
+                status,
+            } if kind.as_deref() == Some("execute") => {
+                let commands = self.by_agent.entry(*id).or_default();
+                commands.retain(|c| &c.tool_call_id != tool_call_id);
+                if matches!(status, ToolStatus::Pending | ToolStatus::InProgress) {
+                    commands.push(Running {
+                        tool_call_id: tool_call_id.clone(),
+                        command: title.clone(),
+                        since: event.ts,
+                    });
+                }
+            }
+            EventKind::AgentToolCallUpdated {
+                id,
+                tool_call_id,
+                title,
+                status,
+            } => {
+                if matches!(status, Some(ToolStatus::Completed | ToolStatus::Failed)) {
+                    self.end(*id, tool_call_id);
+                } else if let Some(title) = title {
+                    self.rename(*id, tool_call_id, title);
+                }
+            }
+            EventKind::AgentToolDetail {
+                id,
+                tool_call_id,
+                detail,
+            } => {
+                if detail.exit_code.is_some() {
+                    self.end(*id, tool_call_id);
+                } else if let Some(command) = &detail.command {
+                    self.rename(*id, tool_call_id, command);
+                }
+            }
+            // A turn's end, or its process's, ends what it ran.
+            EventKind::AgentTurnCompleted { id, .. } | EventKind::AgentExited { id, .. } => {
+                self.by_agent.remove(id);
+            }
+            _ => {}
+        }
+    }
+
+    fn end(&mut self, agent: AgentId, tool_call_id: &str) {
+        if let Some(commands) = self.by_agent.get_mut(&agent) {
+            commands.retain(|c| c.tool_call_id != tool_call_id);
+        }
+    }
+
+    fn rename(&mut self, agent: AgentId, tool_call_id: &str, command: &str) {
+        if let Some(c) = self
+            .by_agent
+            .get_mut(&agent)
+            .and_then(|cs| cs.iter_mut().find(|c| c.tool_call_id == tool_call_id))
+        {
+            c.command = command.to_owned();
+        }
+    }
+
+    /// What `agent` is running now.
+    pub fn of(&self, agent: AgentId, now: DateTime<Utc>) -> Vec<Running> {
+        self.by_agent
+            .get(&agent)
+            .map(|cs| {
+                cs.iter()
+                    .filter(|c| now - c.since < Duration::hours(STALE_AFTER_HOURS))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// Whether a failed check's output says a file was in use by another process rather than
+/// that the code is wrong: what a build running at the same time causes.
+pub fn in_use_failure(output: &str) -> bool {
+    const SIGNS: [&str; 6] = [
+        "LNK1104",
+        "os error 32",
+        "being used by another process",
+        "另一个程序正在使用此文件",
+        "Blocking waiting for file lock",
+        "Text file busy",
+    ];
+    SIGNS.iter().any(|sign| output.contains(sign))
+}
+
+#[cfg(test)]
+mod tests {
+    use crossagents_core::{EVENT_SCHEMA_VERSION, EventKind, ToolDetail};
+
+    use super::*;
+
+    fn event(kind: EventKind) -> Event {
+        Event {
+            seq: 0,
+            id: uuid::Uuid::new_v4(),
+            ts: Utc::now(),
+            schema: EVENT_SCHEMA_VERSION,
+            kind,
+        }
+    }
+
+    #[test]
+    fn a_command_runs_from_its_call_to_its_exit() {
+        let agent = AgentId::new();
+        let mut running = RunningCommands::default();
+        running.push(&event(EventKind::AgentToolCall {
+            id: agent,
+            tool_call_id: "c1".into(),
+            title: "cargo".into(),
+            kind: Some("execute".into()),
+            status: ToolStatus::InProgress,
+        }));
+        // Reads and edits are not commands.
+        running.push(&event(EventKind::AgentToolCall {
+            id: agent,
+            tool_call_id: "r1".into(),
+            title: "read".into(),
+            kind: Some("read".into()),
+            status: ToolStatus::InProgress,
+        }));
+        running.push(&event(EventKind::AgentToolDetail {
+            id: agent,
+            tool_call_id: "c1".into(),
+            detail: ToolDetail {
+                command: Some("cargo test --workspace".into()),
+                ..ToolDetail::default()
+            },
+        }));
+        let now = Utc::now();
+        let seen = running.of(agent, now);
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].command, "cargo test --workspace");
+        // Long gone without an end: no longer holds anything up.
+        assert!(running.of(agent, now + Duration::hours(3)).is_empty());
+        running.push(&event(EventKind::AgentToolDetail {
+            id: agent,
+            tool_call_id: "c1".into(),
+            detail: ToolDetail {
+                exit_code: Some(0),
+                ..ToolDetail::default()
+            },
+        }));
+        assert!(running.of(agent, now).is_empty());
+        // The end of the turn ends whatever was still listed.
+        running.push(&event(EventKind::AgentToolCall {
+            id: agent,
+            tool_call_id: "c2".into(),
+            title: "npm test".into(),
+            kind: Some("execute".into()),
+            status: ToolStatus::Pending,
+        }));
+        assert_eq!(running.of(agent, now).len(), 1);
+        running.push(&event(EventKind::AgentToolCallUpdated {
+            id: agent,
+            tool_call_id: "c2".into(),
+            title: None,
+            status: Some(ToolStatus::Failed),
+        }));
+        assert!(running.of(agent, now).is_empty());
+    }
+
+    #[test]
+    fn a_file_in_use_is_told_apart_from_a_failing_test() {
+        assert!(in_use_failure(
+            "LINK : fatal error LNK1104: 无法打开文件“…\\adopt-4ea7e29f8329f9ed.exe”"
+        ));
+        assert!(in_use_failure(
+            "error: failed to remove file: 另一个程序正在使用此文件，进程无法访问。 (os error 32)"
+        ));
+        assert!(!in_use_failure(
+            "test pipeline::lands ... FAILED\nassertion `left == right` failed"
+        ));
+    }
+}

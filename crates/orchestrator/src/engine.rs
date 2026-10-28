@@ -116,6 +116,8 @@ pub struct Orchestrator {
     /// Leads copied for a run, to be archived once the turn that closed it ends; their
     /// checkout goes when they are (`lead_left`).
     pub(crate) leaving: std::sync::Mutex<std::collections::HashSet<AgentId>>,
+    /// Commands agents are running now (`crate::running`).
+    pub(crate) running: std::sync::Mutex<crate::running::RunningCommands>,
 }
 
 /// What a run says about a lead copied for it (docs/tasks/S1.md §3.2).
@@ -182,6 +184,7 @@ impl Orchestrator {
             contexts: std::sync::Mutex::default(),
             projects_lock: Mutex::default(),
             leaving: std::sync::Mutex::default(),
+            running: std::sync::Mutex::default(),
         })
     }
 
@@ -1504,13 +1507,19 @@ The person changed: {}",
     // Reacting to agents
 
     /// Follows agent events to notice assignees and reviewers that stop without reporting.
+    /// Follows the commands agents run (`crate::running`), handing the event on.
+    fn note_running(&self, event: crossagents_core::Event) -> EventKind {
+        self.running.lock().unwrap().push(&event);
+        event.kind
+    }
+
     pub fn watch(self: &Arc<Self>) {
         let this = self.clone();
         let mut events = self.bus.subscribe();
         tokio::spawn(async move {
             loop {
                 match events.recv().await {
-                    Ok(event) => match event.kind {
+                    Ok(event) => match this.note_running(event) {
                         EventKind::AgentTurnCompleted { id, .. } => this.on_idle(id).await,
                         EventKind::AgentUpdated { agent } => {
                             let this = this.clone();

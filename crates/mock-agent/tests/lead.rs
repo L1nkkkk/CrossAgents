@@ -449,3 +449,52 @@ async fn restoring_a_lead_whose_branch_is_gone_says_the_code_did_not_come_back()
     assert!(dir.is_dir(), "{dir:?}");
     assert!(!dir.join("two.txt").exists(), "rebuilt from the base");
 }
+
+/// The checks build where the lead builds: while a command the lead started there is still
+/// going, closing is refused with what is running, before any check runs; once it is over the
+/// same call goes through.
+#[tokio::test]
+async fn the_checks_wait_for_the_leads_own_build() {
+    let repo = git_repo();
+    std::fs::write(
+        repo.path().join("crossagents.toml"),
+        "[run]\nchecks = [\"git --version\"]\n",
+    )
+    .unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    };
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "checks"]);
+    let t = setup(repo.path()).await;
+    let boss = t.agent("boss").await;
+    let mut w = t.watch().await;
+
+    let finish = call("run_finish", json!({ "summary": "added notes" }));
+    let request = format!("Add notes. [write notes.txt=x] [running] {finish}");
+    let id = start(&t, request).await["id"].as_str().unwrap().to_owned();
+    w.until(
+        "kickoff answered",
+        |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if *id == boss.id),
+    )
+    .await;
+    let output = w.output();
+    assert!(
+        output.contains("boss is still running `cargo test --workspace`"),
+        "{output}"
+    );
+    let run: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
+    assert_ne!(run["run"]["status"], "completed", "{run}");
+    assert!(run["run"]["checks"].as_array().unwrap().is_empty(), "{run}");
+
+    // That turn is over, and what it ran with it.
+    t.send("boss", &finish).await;
+    w.until("run completed", run_status_is(&id, RunStatus::Completed))
+        .await;
+}

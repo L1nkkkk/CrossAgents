@@ -47,7 +47,9 @@ pub fn kickoff(
                 let _ = write!(
                     out,
                     "\nchecks ({}): before you land or finish with changes, the hub runs {} in \
-                     your checkout; they must pass",
+                     your checkout; they must pass. It runs them itself, in your build \
+                     directory: run only the tests your change needs, and let any build or test \
+                     you started finish before you call run_finish or run_land",
                     project::FILE,
                     list.join(", ")
                 );

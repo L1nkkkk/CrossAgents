@@ -77,6 +77,7 @@ impl Orchestrator {
         if commands.is_empty() {
             return Ok(());
         }
+        self.refuse_while_running(&dir, tool).await?;
         let results = self
             .verifier
             .check_within(&dir, &commands, checks.timeout)
@@ -91,12 +92,58 @@ impl Orchestrator {
         if all_passed(&results) {
             return Ok(());
         }
+        // A file held by another process is the machine, not the change: say so, or the lead
+        // goes looking for a bug that is not there.
+        if results
+            .iter()
+            .any(|r| !r.passed && crate::running::in_use_failure(&r.output))
+        {
+            return Err(CoreError::Conflict(format!(
+                "the project's checks ({}) could not run cleanly: a file they build was in use by                  another process (a build or test running at the same time), not a problem in                  your change: {}
+Make sure nothing else is building or testing in this checkout,                  then call {tool} again.",
+                project::FILE,
+                brief::checks(&results)
+            )));
+        }
         Err(CoreError::Conflict(format!(
             "the project's checks ({}) failed: {}\nFix it in your checkout and call {tool} again. \
              If a check itself is wrong, tell the person: they can still land or end the run \
              from the run page.",
             project::FILE,
             brief::checks(&results)
+        )))
+    }
+
+    /// Refuses to start the checks while an agent working in `dir` still runs a command
+    /// there: they build in the same directory and would collide with it.
+    async fn refuse_while_running(
+        &self,
+        dir: &std::path::Path,
+        tool: &str,
+    ) -> Result<(), CoreError> {
+        let now = Utc::now();
+        let mut busy = Vec::new();
+        for agent in self.store.list_agents().await? {
+            if !agent.cwd.starts_with(dir) {
+                continue;
+            }
+            let running = self.running.lock().unwrap().of(agent.id, now);
+            for command in running {
+                busy.push(format!(
+                    "{} is still running `{}` (since {}, {} min ago)",
+                    agent.name,
+                    command.command,
+                    command.since.format("%H:%M:%S"),
+                    (now - command.since).num_minutes()
+                ));
+            }
+        }
+        if busy.is_empty() {
+            return Ok(());
+        }
+        Err(CoreError::Conflict(format!(
+            "not running the project's checks yet: {} in this checkout, and the checks build in              the same directory, so they would collide with it. Wait for it to finish (or stop              it), then call {tool} again. The hub runs the full checks itself: you need not run              them first.",
+            busy.join("; ")
         )))
     }
 
