@@ -32,6 +32,10 @@ use serde::Deserialize;
 /// rather than imported, so the CLI does not depend on the orchestrator.
 const RESOURCES_ENV: &str = "CROSSAGENTS_RESOURCES";
 
+/// The resource a build in a run worktree holds, and the one a shim holds for its program
+/// (docs/tasks/LOCKS.md §3, §4.6).
+const BUILD: &str = "build";
+
 #[derive(Debug, Clone, Args)]
 pub struct ExecArgs {
     /// A resource to hold: `NAME`, `NAME:shared` or `NAME:exclusive` for one declared in
@@ -59,7 +63,7 @@ pub async fn run_cli(args: ExecArgs) -> Result<i32> {
         bail!("no command: crossagents exec [--resource NAME]… -- <command> …");
     };
     let resources = resources(&args.resource)?;
-    let locks_dir = home()?.join("locks");
+    let locks_dir = locks_dir()?;
 
     let mut request = Request::new(args.command.join(" "), resources);
     request.agent = env_non_empty("CROSSAGENTS_AGENT");
@@ -99,6 +103,28 @@ fn home() -> Result<PathBuf> {
         }
     }
     Ok(crossagents_hub::Paths::from_env()?.home)
+}
+
+/// `<home>/locks`, where the executor keeps its lock files.
+pub(crate) fn locks_dir() -> Result<PathBuf> {
+    Ok(home()?.join("locks"))
+}
+
+/// The `build` resource [`RESOURCES_ENV`] declares, if it declares one: what the shim holds
+/// for the real program it runs (docs/tasks/LOCKS.md §4.6).
+///
+/// A value that does not parse is treated as none rather than as an error: the shim must still
+/// run the program, and `exec` reports the mistake when someone asks it for a resource.
+pub(crate) fn declared_build() -> Option<Resource> {
+    let declared = declared().ok()?;
+    let build = declared
+        .into_iter()
+        .find(|declared| declared.name == BUILD)?;
+    Some(Resource::new(
+        BUILD,
+        build.path,
+        build.access.unwrap_or(Access::Exclusive),
+    ))
 }
 
 fn env_non_empty(name: &str) -> Option<String> {

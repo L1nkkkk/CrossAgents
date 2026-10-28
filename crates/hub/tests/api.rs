@@ -73,6 +73,22 @@ impl TestHub {
 }
 
 #[tokio::test]
+async fn a_started_hub_puts_this_executable_in_the_shims_directory() {
+    let t = TestHub::start().await;
+    // `cargo` in a run worktree is the hub's executable (docs/tasks/LOCKS.md §4.6).
+    let dir = crossagents_hub::shims::dir(&t.paths);
+    let shim = crossagents_hub::shims::file(&dir, "cargo");
+    assert!(shim.is_file(), "{}", shim.display());
+    let exe = std::env::current_exe().unwrap();
+    assert_eq!(
+        std::fs::metadata(&shim).unwrap().len(),
+        std::fs::metadata(&exe).unwrap().len(),
+        "{} is not this executable",
+        shim.display()
+    );
+}
+
+#[tokio::test]
 async fn health_is_public_and_everything_else_needs_the_token() {
     let t = TestHub::start().await;
     let health: Value = t

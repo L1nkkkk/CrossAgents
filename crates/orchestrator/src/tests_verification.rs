@@ -265,6 +265,7 @@ impl Fixture {
             OrchestratorConfig {
                 worktrees: worktrees.clone(),
                 locks: home.path().join("locks"),
+                shims: None,
                 max_nudges: 0,
                 build_cache_limit: u64::MAX,
             },
