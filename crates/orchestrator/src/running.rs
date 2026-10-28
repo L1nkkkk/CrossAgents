@@ -1,8 +1,11 @@
-//! Commands agents have started and not finished, followed from their tool-call events, so
-//! the hub does not build in a checkout while its agent still builds or tests there (two
-//! builds in one build directory wait on each other's locks and overwrite files the other is
-//! running). Kept in memory only; after a restart nothing is known to run, which lets the
-//! checks go as before.
+//! Commands agents have started and not finished, followed from their tool-call events, for
+//! display: what is going on in a checkout right now.
+//!
+//! This is not a lock. The hub's checks and `workspace_run` hold the checkout's resources
+//! through the executor and wait for whoever holds them (docs/tasks/LOCKS.md §6), and an
+//! event cannot prove that a command bypassed the executor — so what is recorded here never
+//! decides whether a check may start. Kept in memory only; after a restart nothing is known
+//! to be running.
 
 use std::collections::HashMap;
 
@@ -23,8 +26,8 @@ pub struct RunningCommands {
     by_agent: HashMap<AgentId, Vec<Running>>,
 }
 
-/// Longer than any check is let run: past it a command whose end was never reported is
-/// taken as gone rather than holding up the checks for good.
+/// Past it a command whose end was never reported is taken as gone: a command put in the
+/// background reports its end long before the command does.
 const STALE_AFTER_HOURS: i64 = 2;
 
 impl RunningCommands {
@@ -94,7 +97,9 @@ impl RunningCommands {
         }
     }
 
-    /// What `agent` is running now.
+    /// What `agent` is running now, for display (LOCKS.md §6: the hub no longer refuses its
+    /// checks on this record; waiting for the executor's locks is what keeps two builds
+    /// apart).
     pub fn of(&self, agent: AgentId, now: DateTime<Utc>) -> Vec<Running> {
         self.by_agent
             .get(&agent)

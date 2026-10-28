@@ -188,6 +188,7 @@ impl Fixture {
             Arc::new(NoChecks),
             OrchestratorConfig {
                 worktrees: home.path().join("worktrees"),
+                locks: home.path().join("locks"),
                 max_nudges: 0,
                 build_cache_limit: u64::MAX,
             },
