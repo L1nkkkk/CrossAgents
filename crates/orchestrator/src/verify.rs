@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::CheckResult;
+use crossagents_core::exec;
 use crossagents_core::process::{self, NoWindow};
 use tokio::process::Command;
 
@@ -29,6 +30,10 @@ pub trait Verifier: Send + Sync {
 
 /// Runs each acceptance command in the system shell; all must exit 0. Stops at the first
 /// failure, since later checks usually depend on earlier ones.
+///
+/// In a run's worktree the whole group holds the checkout's resources first
+/// (docs/tasks/LOCKS.md §6): a `cargo test` an agent started there and the hub's checks take
+/// turns, by waiting for the lock rather than by failing.
 #[derive(Debug, Clone)]
 pub struct ShellVerifier {
     pub timeout: Duration,
@@ -36,6 +41,14 @@ pub struct ShellVerifier {
     /// Where runs' worktrees live: checks in one get the environment the run's agents there
     /// do (`workspace::worktree_env`), so they build in the same directory.
     pub worktrees: Option<PathBuf>,
+    /// Where the executor's lock files live (`<home>/locks`, docs/tasks/LOCKS.md §4.1).
+    /// `None` runs the checks without holding anything: for a directory outside the
+    /// worktrees, or a check that declares no resources, that is what happens anyway.
+    pub locks: Option<PathBuf>,
+    /// `<home>/shims/<version>`: the directory a check's `PATH` starts with in a run worktree,
+    /// so `cargo` there is the executor's shim (docs/tasks/LOCKS.md §4.6). `None` leaves
+    /// `PATH` alone.
+    pub shims: Option<PathBuf>,
 }
 
 impl Default for ShellVerifier {
@@ -44,6 +57,8 @@ impl Default for ShellVerifier {
             timeout: Duration::from_secs(600),
             max_output: 8_000,
             worktrees: None,
+            locks: None,
+            shims: None,
         }
     }
 }
@@ -87,6 +102,20 @@ fn explain(code: Option<i32>, output: String) -> String {
     }
 }
 
+/// Waits for a command's whole tree to end, and ends what is left of it once `deadline` is up:
+/// the build directory is let go only then (docs/tasks/LOCKS.md §4.3).
+async fn end_tree(tree: &mut process::Tree, deadline: tokio::time::Instant) {
+    if tokio::time::timeout_at(deadline, exec::wait_tree_empty(tree))
+        .await
+        .is_ok()
+    {
+        return;
+    }
+    tree.kill();
+    // The platform ends them with it; look once more rather than take that on trust.
+    let _ = tokio::time::timeout(Duration::from_secs(5), exec::wait_tree_empty(tree)).await;
+}
+
 /// Keeps the end of long output, where errors usually are.
 fn tail(text: &str, max: usize) -> String {
     if text.len() <= max {
@@ -111,56 +140,102 @@ impl Verifier for ShellVerifier {
         commands: &[String],
         timeout: Duration,
     ) -> Vec<CheckResult> {
+        let commands: Vec<&String> = commands.iter().filter(|c| !c.trim().is_empty()).collect();
+        if commands.is_empty() {
+            return Vec::new();
+        }
+        // One acquisition for the whole group: the checks in a checkout take turns with
+        // whatever else works there (an agent's `crossagents exec`, another check), not with
+        // each other (docs/tasks/LOCKS.md §6).
+        let request = exec::Request {
+            resources: self.resources_in(dir),
+            command: commands
+                .iter()
+                .map(|c| c.as_str())
+                .collect::<Vec<_>>()
+                .join(" && "),
+            agent: Some("the hub".to_owned()),
+            run: None,
+            timeout,
+            notice_every: exec::DEFAULT_NOTICE_EVERY,
+        };
+        let mut held = match (&self.locks, request.resources.is_empty()) {
+            (Some(locks), false) => match exec::acquire(locks, &request, |line| {
+                // Somebody else builds in this checkout: that is a wait, not a failure.
+                tracing::info!(target: "crossagents::locks", "{line}");
+            })
+            .await
+            {
+                Ok(held) => Some(held),
+                Err(error) => return vec![without_lock(&request, error)],
+            },
+            _ => None,
+        };
         let mut results = Vec::new();
-        for command in commands.iter().filter(|c| !c.trim().is_empty()) {
+        for command in commands {
             let mut cmd = shell(command);
             if let Some(root) = self.worktrees.as_deref() {
-                cmd.envs(worktree_env(root, dir));
+                cmd.envs(worktree_env(root, dir, self.shims.as_deref()));
             }
             cmd.current_dir(dir)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
-            // The whole tree goes when the check ends, times out or fails: killing the shell
-            // alone left what it started still writing to the worktree.
-            let result = match process::spawn_tree(&mut cmd) {
+            // Under the locks the tree is the executor's (`exec::spawn`), which refuses to run
+            // a command it cannot follow to its end, since the lock is let go only then.
+            // Without resources the whole tree still goes when the check ends, times out or
+            // fails: killing the shell alone left what it started still writing to the
+            // worktree.
+            let started = match held.as_mut() {
+                Some(held) => exec::spawn(held, &mut cmd),
+                None => process::spawn_tree(&mut cmd),
+            };
+            let result = match started {
                 Err(e) => CheckResult {
                     command: command.clone(),
                     exit_code: None,
                     passed: false,
                     output: format!("cannot start: {e}"),
                 },
-                Ok((child, _tree)) => {
-                    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-                        Err(_) => CheckResult {
-                            command: command.clone(),
-                            exit_code: None,
-                            passed: false,
-                            output: format!("timed out after {}s", timeout.as_secs()),
-                        },
-                        Ok(Err(e)) => CheckResult {
-                            command: command.clone(),
-                            exit_code: None,
-                            passed: false,
-                            output: format!("failed to run: {e}"),
-                        },
-                        Ok(Ok(out)) => {
-                            let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-                            text.push_str(&String::from_utf8_lossy(&out.stderr));
-                            let code = out.status.code();
-                            let mut output = tail(text.trim(), self.max_output);
-                            if !out.status.success() {
-                                output = explain(code, output);
-                            }
-                            CheckResult {
+                Ok((child, mut tree)) => {
+                    let deadline = tokio::time::Instant::now() + timeout;
+                    let result =
+                        match tokio::time::timeout_at(deadline, child.wait_with_output()).await {
+                            Err(_) => CheckResult {
                                 command: command.clone(),
-                                exit_code: code,
-                                passed: out.status.success(),
-                                output,
+                                exit_code: None,
+                                passed: false,
+                                output: format!("timed out after {}s", timeout.as_secs()),
+                            },
+                            Ok(Err(e)) => CheckResult {
+                                command: command.clone(),
+                                exit_code: None,
+                                passed: false,
+                                output: format!("failed to run: {e}"),
+                            },
+                            Ok(Ok(out)) => {
+                                let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+                                text.push_str(&String::from_utf8_lossy(&out.stderr));
+                                let code = out.status.code();
+                                let mut output = tail(text.trim(), self.max_output);
+                                if !out.status.success() {
+                                    output = explain(code, output);
+                                }
+                                CheckResult {
+                                    command: command.clone(),
+                                    exit_code: code,
+                                    passed: out.status.success(),
+                                    output,
+                                }
                             }
-                        }
-                    }
+                        };
+                    // The command's own process is done; what it started runs on. The lock
+                    // goes only once the whole tree is gone (LOCKS.md §4.3), so the next
+                    // command in the group and whoever gets the build directory next do not
+                    // find a compiler of this check still writing there.
+                    end_tree(&mut tree, deadline).await;
+                    result
                 }
             };
             let passed = result.passed;
@@ -173,19 +248,73 @@ impl Verifier for ShellVerifier {
     }
 }
 
+impl ShellVerifier {
+    /// The resources a check in `dir` holds (`docs/tasks/LOCKS.md` §6): those its worktree
+    /// declares, at the same paths its commands get from [`worktree_env`], so a check and an
+    /// agent's `exec` ask for the same lock. Empty outside the worktrees, or for a checkout
+    /// that declares none: such a check runs as it did before.
+    fn resources_in(&self, dir: &Path) -> Vec<exec::Resource> {
+        let Some(root) = self.worktrees.as_deref() else {
+            return Vec::new();
+        };
+        let Some(env) = crate::workspace::worktree_run_env(root, dir) else {
+            return Vec::new();
+        };
+        env.resources
+            .iter()
+            .map(|resource| {
+                let access = match resource.access {
+                    crate::project::ResourceAccess::Shared => exec::Access::Shared,
+                    crate::project::ResourceAccess::Exclusive => exec::Access::Exclusive,
+                };
+                exec::Resource::new(resource.name.clone(), resource.path.clone(), access)
+            })
+            .collect()
+    }
+}
+
+/// The group could not get the checkout's resources, so no command ran. A timeout says who
+/// held them: waiting for another build is not a failure of the change being checked.
+fn without_lock(request: &exec::Request, error: exec::ExecError) -> CheckResult {
+    let (exit_code, output) = match error {
+        error @ exec::ExecError::Timeout { .. } => (
+            Some(exec::EXIT_TEMPFAIL),
+            format!(
+                "none of the checks ran: {error}. This is not a problem in the change; wait for \
+                 it to finish, then run the checks again."
+            ),
+        ),
+        error => (
+            None,
+            format!("cannot take the checkout's resources (docs/tasks/LOCKS.md): {error}"),
+        ),
+    };
+    CheckResult {
+        command: request.command.clone(),
+        exit_code,
+        passed: false,
+        output,
+    }
+}
+
 /// One command in `dir` with its own time limit (`workspace_run`), building in the run's
-/// shared target when `dir` is under `worktrees`. Never fails: problems are in the result.
+/// shared target when `dir` is under `worktrees` and holding its resources (LOCKS.md §6).
+/// Never fails: problems are in the result.
 pub async fn run_command(
     dir: &Path,
     command: &str,
     timeout: Duration,
     max_output: usize,
     worktrees: &Path,
+    locks: &Path,
+    shims: Option<&Path>,
 ) -> CheckResult {
     let verifier = ShellVerifier {
         timeout,
         max_output,
         worktrees: Some(worktrees.to_path_buf()),
+        locks: Some(locks.to_path_buf()),
+        shims: shims.map(Path::to_path_buf),
     };
     let mut results = verifier.check(dir, &[command.to_owned()]).await;
     results.pop().unwrap_or(CheckResult {
@@ -248,6 +377,17 @@ mod tests {
             .join("integration")
             .join("cargo");
         assert_eq!(out[0].output, want.display().to_string());
+        // A check holds the same build directory the agent builds into (LOCKS §3).
+        let echo_resources = if cfg!(windows) {
+            "echo %CROSSAGENTS_RESOURCES%"
+        } else {
+            "echo $CROSSAGENTS_RESOURCES"
+        };
+        let out = verifier.check(&dir, &[echo_resources.into()]).await;
+        let resources: serde_json::Value = serde_json::from_str(&out[0].output).unwrap();
+        assert_eq!(resources[0]["name"], "build");
+        assert_eq!(resources[0]["access"], "exclusive");
+        assert_eq!(resources[0]["path"], want.display().to_string());
         // A task's checkout builds in its own, not in the run's.
         let task = root.join("ab12cd34").join("auth");
         std::fs::create_dir_all(&task).unwrap();
@@ -266,7 +406,7 @@ mod tests {
         let verifier = ShellVerifier {
             timeout: Duration::from_millis(200),
             max_output: 100,
-            worktrees: None,
+            ..ShellVerifier::default()
         };
         let sleep = if cfg!(windows) {
             "ping -n 5 127.0.0.1"
@@ -360,5 +500,139 @@ mod tests {
     #[test]
     fn no_checks_is_not_a_pass() {
         assert!(!all_passed(&[]));
+    }
+
+    /// A run's worktree with a `Cargo.toml` (so the Rust preset declares `build`), the build
+    /// directory a check there holds, and a verifier that holds it
+    /// (docs/tasks/LOCKS.md §6).
+    fn worktree(home: &tempfile::TempDir, tree: &str) -> (PathBuf, PathBuf, ShellVerifier) {
+        let root = home.path().join("worktrees");
+        let dir = root.join("ab12cd34").join(tree);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "").unwrap();
+        let verifier = ShellVerifier {
+            timeout: Duration::from_secs(30),
+            worktrees: Some(root.clone()),
+            locks: Some(home.path().join("locks")),
+            ..ShellVerifier::default()
+        };
+        // The same path the check's commands get from their environment.
+        let env = crate::workspace::worktree_run_env(&root, &dir).unwrap();
+        let build = PathBuf::from(&env.resources[0].path);
+        assert_eq!(env.resources[0].name, "build");
+        (dir, build, verifier)
+    }
+
+    /// Holds `path` the way `crossagents exec --resource build -- …` does.
+    async fn hold(home: &tempfile::TempDir, path: &Path) -> exec::Held {
+        let request = exec::Request::new(
+            "cargo test --workspace",
+            vec![exec::Resource::new("build", path, exec::Access::Exclusive)],
+        );
+        exec::acquire(&home.path().join("locks"), &request, |_| {})
+            .await
+            .expect("take the build directory")
+    }
+
+    #[tokio::test]
+    async fn a_check_waits_for_a_build_another_executor_holds() {
+        let home = tempfile::tempdir().unwrap();
+        let (dir, build, verifier) = worktree(&home, "integration");
+        std::fs::create_dir_all(&build).unwrap();
+        let held = hold(&home, &build).await;
+
+        let verifier_in_background = verifier.clone();
+        let dir_in_background = dir.clone();
+        let mut check = tokio::spawn(async move {
+            verifier_in_background
+                .check(&dir_in_background, &["echo ran > ran.txt".into()])
+                .await
+        });
+        // Far longer than the command takes: had it not waited, it would be done.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), &mut check)
+                .await
+                .is_err(),
+            "the check did not wait for the build directory"
+        );
+        assert!(!dir.join("ran.txt").exists());
+
+        drop(held);
+        let out = check.await.unwrap();
+        assert!(out[0].passed, "{out:?}");
+        assert!(dir.join("ran.txt").exists(), "the check never ran");
+    }
+
+    #[tokio::test]
+    async fn a_check_that_could_not_get_the_build_directory_says_who_held_it() {
+        let home = tempfile::tempdir().unwrap();
+        let (dir, build, verifier) = worktree(&home, "integration");
+        std::fs::create_dir_all(&build).unwrap();
+        let held = hold(&home, &build).await;
+
+        let short = ShellVerifier {
+            timeout: Duration::from_millis(300),
+            ..verifier
+        };
+        let out = short.check(&dir, &["echo ran > ran.txt".into()]).await;
+        assert!(!out[0].passed);
+        // Not the command failing: the CLI's "could not get the lock" code.
+        assert_eq!(out[0].exit_code, Some(exec::EXIT_TEMPFAIL), "{out:?}");
+        assert!(out[0].output.contains("waiting for build"), "{out:?}");
+        assert!(out[0].output.contains("cargo test --workspace"), "{out:?}");
+        assert!(out[0].output.contains("not a problem"), "{out:?}");
+        assert!(!dir.join("ran.txt").exists(), "the check ran anyway");
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn two_checks_in_one_checkout_take_turns() {
+        let home = tempfile::tempdir().unwrap();
+        let (dir, _build, verifier) = worktree(&home, "integration");
+        // Each check writes its start and its end, so the log shows whether they overlapped.
+        let command = if cfg!(windows) {
+            r#"powershell -NoProfile -Command "Add-Content -Path log.txt -Value ('start ' + [DateTime]::UtcNow.Ticks); Start-Sleep -Milliseconds 300; Add-Content -Path log.txt -Value ('end ' + [DateTime]::UtcNow.Ticks)""#
+        } else {
+            "sh -c 'echo start $(date +%s%N) >> log.txt; sleep 0.3; echo end $(date +%s%N) >> log.txt'"
+        };
+        let (first, dir_one, command_one) = (verifier.clone(), dir.clone(), command.to_owned());
+        let (second, dir_two, command_two) = (verifier.clone(), dir.clone(), command.to_owned());
+        let (one, two) = tokio::join!(
+            async move { first.check(&dir_one, &[command_one]).await },
+            async move { second.check(&dir_two, &[command_two]).await },
+        );
+        assert!(one[0].passed, "{one:?}");
+        assert!(two[0].passed, "{two:?}");
+
+        let log = std::fs::read_to_string(dir.join("log.txt")).unwrap();
+        let lines: Vec<&str> = log.lines().map(str::trim).collect();
+        let phases: Vec<&str> = lines
+            .iter()
+            .map(|line| line.split_whitespace().next().unwrap())
+            .collect();
+        assert_eq!(
+            phases,
+            ["start", "end", "start", "end"],
+            "the checks overlapped: {log}"
+        );
+    }
+
+    #[tokio::test]
+    async fn another_worktree_s_build_directory_does_not_hold_a_check_up() {
+        let home = tempfile::tempdir().unwrap();
+        let (_one_dir, one_build, _one) = worktree(&home, "integration");
+        let (two_dir, _two_build, two) = worktree(&home, "auth");
+        std::fs::create_dir_all(&one_build).unwrap();
+        let held = hold(&home, &one_build).await;
+
+        let started = std::time::Instant::now();
+        let out = two.check(&two_dir, &["echo ok".into()]).await;
+        assert!(out[0].passed, "{out:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "another worktree's lock held it up for {:?}",
+            started.elapsed()
+        );
+        drop(held);
     }
 }

@@ -14,19 +14,46 @@ async-trait.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync", "process"] }
+tokio = { workspace = true, features = ["sync", "process", "time", "rt"] }
 tracing.workspace = true
 ts-rs = { workspace = true, optional = true }
 uuid.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
+# `Win32_Storage_FileSystem` and `Win32_System_IO` are for `tests/lock_kill_race.rs` only
+# (docs/tasks/LOCKS.md §5: `LockFileEx` on a lock file).
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+# Only for `tests/lock_kill_race.rs`: the experiment needs a second process that can be
+# killed from the outside while it holds the lock (docs/tasks/LOCKS.md §5).
+[[bin]]
+name = "lock_kill_helper"
+path = "tests/support/lock_kill_helper.rs"
+
+# Only for `tests/exec_locks.rs`: a second process that holds a lock, so the test can prove
+# the locks exclude across processes and not just across tasks.
+[[bin]]
+name = "exec_lock_helper"
+path = "tests/support/exec_lock_helper.rs"
+
+# Only for `tests/exec_tree.rs`: processes for the tree, nesting and predecessor checks.
+[[bin]]
+name = "exec_sleeper"
+path = "tests/support/exec_sleeper.rs"
+
+# Only for `tests/exec_tree.rs`: closes the inherited lock handles and leaves a grandchild
+# behind (docs/tasks/LOCKS.md §7 item 4).
+[[bin]]
+name = "exec_tree_helper"
+path = "tests/support/exec_tree_helper.rs"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.191"
 
 [dev-dependencies]
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

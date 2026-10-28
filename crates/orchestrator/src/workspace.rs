@@ -710,12 +710,42 @@ pub fn target_dir(root: &Path, run: &str, tree: &str) -> PathBuf {
 
 /// The environment agents and the hub's checks get when `cwd` is in one of a run's worktrees
 /// under `root`: what the checkout's presets and `crossagents.toml` declare (docs/tasks/
-/// TOOLCHAIN.md §3), placeholders filled in. The same for both, or they would build into
-/// different directories. Empty outside a run worktree.
-pub fn worktree_env(root: &Path, cwd: &Path) -> Vec<(String, String)> {
-    worktree_run_env(root, cwd)
-        .map(|env| env.vars.into_iter().map(|v| (v.name, v.value)).collect())
-        .unwrap_or_default()
+/// TOOLCHAIN.md §3), placeholders filled in, its resources in [`project::RESOURCES_ENV`]
+/// (docs/tasks/LOCKS.md §3), and — when the project keeps any shims — `shims` at the front of
+/// `PATH` (§4.6). The same for both, or they would build into different directories. Empty
+/// outside a run worktree.
+pub fn worktree_env(root: &Path, cwd: &Path, shims: Option<&Path>) -> Vec<(String, String)> {
+    let Some(env) = worktree_run_env(root, cwd) else {
+        return Vec::new();
+    };
+    let mut vars: Vec<(String, String)> = env.vars.into_iter().map(|v| (v.name, v.value)).collect();
+    // The executor's commands in an agent's shell and the hub's checks hold the same
+    // resources, at the same paths.
+    if !env.resources.is_empty() {
+        vars.push((
+            crate::project::RESOURCES_ENV.to_owned(),
+            crate::project::resources_json(&env.resources),
+        ));
+    }
+    // `cargo` typed in the worktree is the executor's (§4.6). A project that shims nothing
+    // gets no shim directory at all, which is what `[run] shims = []` asks for.
+    if let Some(dir) = shims
+        && !env.shims.is_empty()
+    {
+        vars.push(("PATH".to_owned(), path_with(dir)));
+    }
+    vars
+}
+
+/// `dir` in front of this process's `PATH`: the original value, not a replacement.
+fn path_with(dir: &Path) -> String {
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let parts = std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&current));
+    match std::env::join_paths(parts) {
+        Ok(path) => path.to_string_lossy().into_owned(),
+        // A `PATH` entry with a separator in it cannot be joined; the shim alone still works.
+        Err(_) => dir.display().to_string(),
+    }
 }
 
 /// [`worktree_env`] with where each variable comes from, and what was left unset.
@@ -731,6 +761,10 @@ pub fn worktree_run_env(root: &Path, cwd: &Path) -> Option<crate::project::RunEn
         }
         var.value = crate::project::fill(&var.value, &build, &checkout);
     }
+    if env.resources.iter().any(|r| r.path.contains("{build}")) {
+        let _ = std::fs::create_dir_all(&build);
+    }
+    crate::project::fill_resources(&mut env.resources, &build, &checkout);
     Some(env)
 }
 

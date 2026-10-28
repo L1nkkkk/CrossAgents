@@ -57,9 +57,64 @@ pub struct Tree {
     job: Option<Job>,
     #[cfg(unix)]
     group: Option<u32>,
+    pid: Option<u32>,
 }
 
 impl Tree {
+    /// The root process's PID, if it could be read.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
+    /// How many processes in the tree are alive right now.
+    ///
+    /// Windows counts them in the job. Unix cannot count a process group, so this is `1` while
+    /// anything is left in it and `0` once it is gone — enough for [`Tree::is_empty`].
+    pub fn active_processes(&self) -> io::Result<u32> {
+        #[cfg(windows)]
+        {
+            match &self.job {
+                Some(job) => job.active_processes(),
+                None => Ok(0),
+            }
+        }
+        #[cfg(unix)]
+        {
+            Ok(match self.group {
+                Some(group) if job::group_alive(group) => 1,
+                _ => 0,
+            })
+        }
+        #[cfg(not(any(windows, unix)))]
+        {
+            Ok(0)
+        }
+    }
+
+    /// Whether no process of the tree is left.
+    pub fn is_empty(&self) -> io::Result<bool> {
+        Ok(self.active_processes()? == 0)
+    }
+
+    /// The value written to a holder record: the job (which has no name) on Windows, the
+    /// process group number elsewhere.
+    pub fn record(&self) -> String {
+        #[cfg(windows)]
+        {
+            "job".to_owned()
+        }
+        #[cfg(unix)]
+        {
+            self.group
+                .map(|group| group.to_string())
+                .unwrap_or_else(|| "group".to_owned())
+        }
+        #[cfg(not(any(windows, unix)))]
+        {
+            "tree".to_owned()
+        }
+    }
+
     /// Ends the tree now.
     pub fn kill(&mut self) {
         #[cfg(windows)]
@@ -90,7 +145,13 @@ pub fn spawn_tree(cmd: &mut tokio::process::Command) -> io::Result<(tokio::proce
         cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
         let mut child = cmd.spawn()?;
         let Some(pid) = child.id() else {
-            return Ok((child, Tree { job: None }));
+            return Ok((
+                child,
+                Tree {
+                    job: None,
+                    pid: None,
+                },
+            ));
         };
         let job = Job::new().and_then(|job| job.assign(pid).map(|()| job));
         if let Err(e) = &job {
@@ -103,17 +164,90 @@ pub fn spawn_tree(cmd: &mut tokio::process::Command) -> io::Result<(tokio::proce
             let _ = child.start_kill();
             return Err(e);
         }
-        Ok((child, Tree { job: job.ok() }))
+        Ok((
+            child,
+            Tree {
+                job: job.ok(),
+                pid: Some(pid),
+            },
+        ))
     }
     #[cfg(unix)]
     {
         cmd.process_group(0);
         let child = cmd.spawn()?;
         let group = child.id();
-        Ok((child, Tree { group }))
+        Ok((child, Tree { group, pid: group }))
     }
     #[cfg(not(any(windows, unix)))]
     {
-        Ok((cmd.spawn()?, Tree {}))
+        Ok((cmd.spawn()?, Tree { pid: None }))
+    }
+}
+
+/// Spawns `cmd` as the root of a [`Tree`], and **refuses to run it** when there is no tree.
+///
+/// [`spawn_tree`] warns and runs the command anyway when the platform will not give it a
+/// tree; the executor cannot accept that, because "the lock is released once the tree ends"
+/// would then be a claim about a process nobody can see (`docs/tasks/LOCKS.md` §4.3). Here a
+/// failure to join a job (Windows) or to lead a process group (Unix) ends the process and is
+/// returned as an error. Creation flags are replaced just as in [`spawn_tree`].
+pub fn spawn_tree_strict(
+    cmd: &mut tokio::process::Command,
+) -> io::Result<(tokio::process::Child, Tree)> {
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+        let mut child = cmd.spawn()?;
+        let Some(pid) = child.id() else {
+            let _ = child.start_kill();
+            return Err(io::Error::other("the started process has no pid"));
+        };
+        let job = match Job::new().and_then(|job| job.assign(pid).map(|()| job)) {
+            Ok(job) => job,
+            Err(error) => {
+                let _ = child.start_kill();
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("cannot put the process in a job, refusing to run it: {error}"),
+                ));
+            }
+        };
+        if let Err(error) = job::resume(pid) {
+            let _ = child.start_kill();
+            return Err(error);
+        }
+        Ok((
+            child,
+            Tree {
+                job: Some(job),
+                pid: Some(pid),
+            },
+        ))
+    }
+    #[cfg(unix)]
+    {
+        // `process_group(0)` is a `setpgid` before `exec`: when it cannot be done the spawn
+        // itself fails, so a child that comes back at all leads its own group.
+        cmd.process_group(0);
+        let mut child = cmd.spawn()?;
+        let Some(group) = child.id() else {
+            let _ = child.start_kill();
+            return Err(io::Error::other("the started process has no pid"));
+        };
+        Ok((
+            child,
+            Tree {
+                group: Some(group),
+                pid: Some(group),
+            },
+        ))
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this platform has no process trees",
+        ))
     }
 }

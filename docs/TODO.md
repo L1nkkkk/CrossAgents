@@ -344,10 +344,10 @@ B 删除 run：
 
 > 2026-10-29，run `27bd5f0e` 的 `run_finish` 检查撞上主导自己的另一轮 `cargo test`（LNK1104）。设计见 [tasks/LOCKS.md](tasks/LOCKS.md)。
 
-- [ ] L0：验证执行器被强杀时，锁释放与进程树结束的先后（Windows Job、Unix flock 继承），按结论定保证的措辞（LOCKS §5）
-- [ ] L1：执行器库与 `crossagents exec`：锁放在 `<home>/locks/`、一次拿全、持有记录单独写、嵌套只放行不升级的重入、放不进 Job 就不运行（LOCKS §4）
-- [ ] L2：hub 检查、任务验收、`workspace_run` 改走执行器；删掉 `refuse_while_running` 的拒绝；`protocol.rs` 加一句（LOCKS §6）
-- [ ] L3：Rust 预设的 cargo shim（`crossagents.exe` 硬链接，按 `argv[0]` 识别）
+- [x] L0：验证执行器被强杀时，锁释放与进程树结束的先后（Windows Job、Unix flock 继承），按结论定保证的措辞（LOCKS §5；Windows 已实测，Unix 未验证）
+- [x] L1：执行器库与 `crossagents exec`：锁放在 `<home>/locks/`、一次拿全、持有记录单独写、嵌套只放行不升级的重入、放不进 Job 就不运行（LOCKS §4；强杀与关句柄两条回归见 `crates/core/tests/exec_kill_regression.rs`）
+- [x] L2：hub 检查、任务验收、`workspace_run` 改走执行器；删掉 `refuse_while_running` 的拒绝；`protocol.rs` 加一句（LOCKS §6）
+- [x] L3：Rust 预设的 cargo shim（`crossagents.exe` 硬链接，按 `argv[0]` 识别）
 - [ ] L4：run 页显示资源持有者；强制释放（先杀树再放锁）
 - [ ] 跨节点共享资源（数据库、部署环境）随多节点 B1 设计，v1 遇到 `scope = "shared"` 直接报错
 

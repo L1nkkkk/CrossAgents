@@ -10,6 +10,7 @@ pub mod cli;
 pub mod driver;
 pub mod error;
 pub mod event;
+pub mod exec;
 pub mod handoff;
 pub mod human;
 pub mod ids;

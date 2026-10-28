@@ -14,23 +14,37 @@
 //! # Toolchain defaults (`presets.rs`): left out, every preset whose marker file is at the
 //! # root; listed, only those; `[]`, none.
 //! presets = ["rust"]
+//! # Programs the run worktree's PATH sends through the executor (docs/tasks/LOCKS.md §4.6);
+//! # left out, those the enabled presets carry (Rust: `cargo`); `[]`, none.
+//! shims = ["cargo"]
 //!
 //! [run.env]
 //! # For agents and checks in the run's worktrees (docs/tasks/TOOLCHAIN.md §3), over a
 //! # preset's; `false` drops a preset's. `{build}` is the worktree's own build directory,
 //! # `{checkout}` the worktree.
 //! CARGO_TARGET_DIR = "{build}/cargo"
+//!
+//! [resources]
+//! # What a build in a run worktree holds while it runs (docs/tasks/LOCKS.md §3): the name an
+//! # executor command asks for, where it is (the same placeholders as in [run.env]), and
+//! # `access = "exclusive"` (the default) or `"shared"`. A `scope` other than `local` is not
+//! # supported yet (§1). A resource named here replaces the preset's of that name.
+//! build = { path = "{build}/cargo", access = "exclusive" }
 //! ```
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::presets::{self, Preset};
 
 pub const FILE: &str = "crossagents.toml";
+
+/// The environment variable agents and checks in a run worktree get the resources in: a JSON
+/// array of `{"name", "path", "access"}` (docs/tasks/LOCKS.md §3).
+pub const RESOURCES_ENV: &str = "CROSSAGENTS_RESOURCES";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -81,6 +95,8 @@ impl RunChecks {
 struct File {
     #[serde(default)]
     run: Run,
+    #[serde(default)]
+    resources: BTreeMap<String, ResourceDecl>,
 }
 
 #[derive(Deserialize, Default)]
@@ -93,7 +109,41 @@ struct Run {
     #[serde(default)]
     presets: Option<Vec<String>>,
     #[serde(default)]
+    shims: Option<Vec<String>>,
+    #[serde(default)]
     env: BTreeMap<String, EnvValue>,
+}
+
+/// One entry of `[resources]`: where the resource is (placeholders as in `[run.env]`), how it
+/// is held, and whether it is this machine's.
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ResourceDecl {
+    path: String,
+    #[serde(default)]
+    access: ResourceAccess,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// How a command holds a resource: alone, or alongside others that only read it
+/// (docs/tasks/LOCKS.md §3).
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum ResourceAccess {
+    Shared,
+    /// The default: a build directory, or anything else one writer owns.
+    #[default]
+    Exclusive,
+}
+
+/// A resource of a run worktree: its name, its path (placeholders not filled in yet), and how
+/// it is held.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedResource {
+    pub name: String,
+    pub path: String,
+    pub access: ResourceAccess,
 }
 
 /// A value in `[run.env]`: set, or `false` to drop a preset's.
@@ -186,6 +236,10 @@ pub struct RunEnv {
     pub conflicts: Vec<Conflict>,
     /// The presets in use.
     pub presets: Vec<&'static Preset>,
+    /// The worktree's resources ([`run_resources`]), placeholders not filled in yet.
+    pub resources: Vec<ResolvedResource>,
+    /// The programs the worktree's `PATH` sends through the executor ([`run_shims`]).
+    pub shims: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,11 +256,10 @@ pub struct Conflict {
     pub presets: Vec<&'static str>,
 }
 
-/// The environment `dir` (a checkout) declares, with the presets it turns on.
-pub fn run_env(dir: &Path) -> Result<RunEnv, String> {
-    let file = read(dir)?;
-    let presets = match &file.run.presets {
-        None => presets::detect(dir),
+/// The presets `dir`'s file turns on: what it lists, or every one whose marker is at the root.
+fn presets_for(file: &File, dir: &Path) -> Result<Vec<&'static Preset>, String> {
+    match &file.run.presets {
+        None => Ok(presets::detect(dir)),
         Some(names) => names
             .iter()
             .map(|name| {
@@ -218,15 +271,127 @@ pub fn run_env(dir: &Path) -> Result<RunEnv, String> {
                     )
                 })
             })
-            .collect::<Result<_, _>>()?,
-    };
-    resolve(&presets, &file.run.env)
+            .collect(),
+    }
+}
+
+/// The environment `dir` (a checkout) declares, with the presets it turns on.
+pub fn run_env(dir: &Path) -> Result<RunEnv, String> {
+    let file = read(dir)?;
+    let presets = presets_for(&file, dir)?;
+    let mut env = resolve(&presets, &file.run.env, &file.resources)?;
+    env.shims = shims_from(&file, &presets);
+    Ok(env)
 }
 
 /// What `dir`'s presets alone set: for a file that does not parse, whose mistake the checks
 /// report.
 pub fn preset_env(dir: &Path) -> RunEnv {
-    resolve(&presets::detect(dir), &BTreeMap::new()).unwrap_or_default()
+    let presets = presets::detect(dir);
+    let mut env = resolve(&presets, &BTreeMap::new(), &BTreeMap::new()).unwrap_or_default();
+    // No file to read: the presets' own shims, as if `[run] shims` were left out.
+    env.shims = shims_from(&File::default(), &presets);
+    env
+}
+
+/// The resources agents and checks hold in a run worktree: the presets', then the project's
+/// over them by name, sorted by name (docs/tasks/LOCKS.md §3).
+pub fn run_resources(dir: &Path) -> Result<Vec<ResolvedResource>, String> {
+    let file = read(dir)?;
+    let presets = presets_for(&file, dir)?;
+    resolve_resources(&presets, &file.resources)
+}
+
+/// `dir`'s `[run] shims`: what it lists; left out, those the presets it turns on carry
+/// (LOCKS §4.6).
+pub fn run_shims(dir: &Path) -> Result<Vec<String>, String> {
+    let file = read(dir)?;
+    let presets = presets_for(&file, dir)?;
+    Ok(shims_from(&file, &presets))
+}
+
+/// [`run_shims`] for a file already read: `[run] shims` if the project says, else the presets'.
+fn shims_from(file: &File, presets: &[&'static Preset]) -> Vec<String> {
+    let listed: Vec<&str> = match &file.run.shims {
+        Some(shims) => shims.iter().map(String::as_str).collect(),
+        None => presets
+            .iter()
+            .flat_map(|preset| preset.shims.iter().copied())
+            .collect(),
+    };
+    let mut shims: Vec<String> = Vec::new();
+    for shim in listed {
+        let shim = shim.trim();
+        if !shim.is_empty() && !shims.iter().any(|s| s == shim) {
+            shims.push(shim.to_owned());
+        }
+    }
+    shims
+}
+
+fn resolve_resources(
+    presets: &[&'static Preset],
+    project: &BTreeMap<String, ResourceDecl>,
+) -> Result<Vec<ResolvedResource>, String> {
+    let mut resources: BTreeMap<String, ResolvedResource> = BTreeMap::new();
+    for preset in presets {
+        for &(name, path, access) in preset.resources {
+            resources.insert(
+                name.to_owned(),
+                ResolvedResource {
+                    name: name.to_owned(),
+                    path: path.to_owned(),
+                    access,
+                },
+            );
+        }
+    }
+    for (name, decl) in project {
+        check_resource(name, decl)?;
+        resources.insert(
+            name.clone(),
+            ResolvedResource {
+                name: name.clone(),
+                path: decl.path.clone(),
+                access: decl.access,
+            },
+        );
+    }
+    Ok(resources.into_values().collect())
+}
+
+/// A resource that is not this machine's, or cannot be a path, is a mistake: say so rather
+/// than quietly treat it as a local one.
+fn check_resource(name: &str, decl: &ResourceDecl) -> Result<(), String> {
+    match decl.scope.as_deref() {
+        None | Some("local") => {}
+        Some(scope) => {
+            return Err(format!(
+                "{FILE} is not valid: [resources] {name} has scope = \"{scope}\"; this version \
+                 has only local resources (a `shared` one would need several machines and a hub \
+                 to coordinate them, docs/tasks/LOCKS.md §1)"
+            ));
+        }
+    }
+    if decl.path.trim().is_empty() {
+        return Err(format!(
+            "{FILE} is not valid: [resources] {name} has no path"
+        ));
+    }
+    check_placeholders(&format!("[resources] {name}.path"), &decl.path)
+}
+
+/// `resources` with their placeholders filled in, for a worktree whose build directory is
+/// `build` and whose checkout is `checkout`.
+pub fn fill_resources(resources: &mut [ResolvedResource], build: &Path, checkout: &Path) {
+    for resource in resources {
+        resource.path = fill(&resource.path, build, checkout);
+    }
+}
+
+/// The value of [`RESOURCES_ENV`]: `[{"name","path","access"}]`, one per resource.
+pub fn resources_json(resources: &[ResolvedResource]) -> String {
+    serde_json::to_string(resources).unwrap_or_else(|_| "[]".to_owned())
 }
 
 /// The presets' variables, then the project's over them. Two presets that set one variable
@@ -234,6 +399,7 @@ pub fn preset_env(dir: &Path) -> RunEnv {
 fn resolve(
     presets: &[&'static Preset],
     project: &BTreeMap<String, EnvValue>,
+    resources: &BTreeMap<String, ResourceDecl>,
 ) -> Result<RunEnv, String> {
     let mut set: BTreeMap<&str, (&str, Vec<&'static str>)> = BTreeMap::new();
     let mut conflicts: BTreeMap<&str, Vec<&'static str>> = BTreeMap::new();
@@ -268,7 +434,7 @@ fn resolve(
         conflicts.remove(name.as_str());
         match value {
             EnvValue::Set(value) => {
-                check_placeholders(name, value)?;
+                check_placeholders(&format!("[run.env] {name}"), value)?;
                 let var = EnvVar {
                     name: name.clone(),
                     value: value.clone(),
@@ -296,11 +462,15 @@ fn resolve(
             })
             .collect(),
         presets: presets.to_vec(),
+        resources: resolve_resources(presets, resources)?,
+        // Filled in by `run_env` and `preset_env`, which have the presets.
+        shims: Vec::new(),
     })
 }
 
-/// A `{word}` that is no placeholder is a mistake, not text to pass on.
-fn check_placeholders(name: &str, value: &str) -> Result<(), String> {
+/// A `{word}` that is no placeholder is a mistake, not text to pass on. `what` names the key
+/// for the message, e.g. `[run.env] CARGO_TARGET_DIR`.
+fn check_placeholders(what: &str, value: &str) -> Result<(), String> {
     let mut rest = value;
     while let Some(start) = rest.find('{') {
         let after = &rest[start + 1..];
@@ -308,7 +478,7 @@ fn check_placeholders(name: &str, value: &str) -> Result<(), String> {
         let word = &after[..end];
         if !PLACEHOLDERS.contains(&word) {
             return Err(format!(
-                "{FILE} is not valid: [run.env] {name} names {{{word}}}; the placeholders are {}",
+                "{FILE} is not valid: {what} names {{{word}}}; the placeholders are {}",
                 PLACEHOLDERS.map(|p| format!("{{{p}}}")).join(", ")
             ));
         }
@@ -488,15 +658,19 @@ checks = [
             name: "a",
             markers: &[],
             env: &[("SHARED", "1"), ("OUT", "{build}/a")],
+            resources: &[],
+            shims: &[],
             hints: &[],
         };
         static B: Preset = Preset {
             name: "b",
             markers: &[],
             env: &[("SHARED", "1"), ("OUT", "{build}/b")],
+            resources: &[],
+            shims: &[],
             hints: &[],
         };
-        let env = resolve(&[&A, &B], &BTreeMap::new()).unwrap();
+        let env = resolve(&[&A, &B], &BTreeMap::new(), &BTreeMap::new()).unwrap();
         assert_eq!(vars(&env), [("SHARED", "1")]);
         assert_eq!(env.vars[0].source, "preset a, b");
         assert_eq!(
@@ -508,8 +682,147 @@ checks = [
         );
 
         let project = BTreeMap::from([("OUT".to_owned(), EnvValue::Set("{build}/x".into()))]);
-        let env = resolve(&[&A, &B], &project).unwrap();
+        let env = resolve(&[&A, &B], &project, &BTreeMap::new()).unwrap();
         assert!(env.conflicts.is_empty());
         assert_eq!(vars(&env), [("OUT", "{build}/x"), ("SHARED", "1")]);
+    }
+
+    fn resources(list: &[ResolvedResource]) -> Vec<(&str, &str, ResourceAccess)> {
+        list.iter()
+            .map(|r| (r.name.as_str(), r.path.as_str(), r.access))
+            .collect()
+    }
+
+    #[test]
+    fn the_rust_preset_declares_its_build_directory_and_the_project_has_the_last_word() {
+        let dir = tempfile::tempdir().unwrap();
+        // Nothing to go by: nothing to hold.
+        assert!(run_resources(dir.path()).unwrap().is_empty());
+
+        std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+        // The same directory as the CARGO_TARGET_DIR the preset sets, held exclusively.
+        assert_eq!(
+            resources(&run_resources(dir.path()).unwrap()),
+            [("build", "{build}/cargo", ResourceAccess::Exclusive)]
+        );
+        assert_eq!(
+            run_env(dir.path()).unwrap().resources,
+            run_resources(dir.path()).unwrap()
+        );
+
+        // A project resource of the same name replaces the preset's, and one of its own adds to
+        // it; `access` left out is exclusive, `shared` is kept.
+        let file = dir.path().join(FILE);
+        std::fs::write(
+            &file,
+            r#"[resources]
+build = { path = "{checkout}/target" }
+ui = { path = "{build}/ui", access = "shared" }
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            resources(&run_resources(dir.path()).unwrap()),
+            [
+                ("build", "{checkout}/target", ResourceAccess::Exclusive),
+                ("ui", "{build}/ui", ResourceAccess::Shared),
+            ]
+        );
+
+        // `presets = []` takes the preset's resource with it.
+        std::fs::write(&file, "[run]\npresets = []\n").unwrap();
+        assert!(run_resources(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_resource_that_makes_no_sense_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(FILE);
+        // A resource several machines share is not this version's (LOCKS §1, §7 item 10).
+        std::fs::write(
+            &file,
+            "[resources]\ndb = { path = \"//nas/db\", scope = \"shared\" }\n",
+        )
+        .unwrap();
+        let err = run_resources(dir.path()).unwrap_err();
+        assert!(err.contains("scope") && err.contains("LOCKS.md"), "{err}");
+        // So is anything else but `local`.
+        std::fs::write(
+            &file,
+            "[resources]\ndb = { path = \"//nas/db\", scope = \"remote\" }\n",
+        )
+        .unwrap();
+        assert!(run_resources(dir.path()).is_err());
+
+        // Placeholders, missing paths and unknown keys are mistakes, never quietly nothing.
+        for text in [
+            "[resources]\nx = { path = \"{cache}/x\" }\n",
+            "[resources]\nx = { path = \"\" }\n",
+            "[resources]\nx = { path = \"{build}/x\", acces = \"shared\" }\n",
+        ] {
+            std::fs::write(&file, text).unwrap();
+            assert!(
+                run_resources(dir.path()).unwrap_err().contains(FILE),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn shims_come_from_the_presets_unless_the_project_says() {
+        let dir = tempfile::tempdir().unwrap();
+        // Not Rust: nothing to shim.
+        assert!(run_shims(dir.path()).unwrap().is_empty());
+
+        std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+        assert_eq!(run_shims(dir.path()).unwrap(), ["cargo"]);
+
+        let file = dir.path().join(FILE);
+        // Listed explicitly: the same result, and a project's own list replaces the presets'.
+        std::fs::write(&file, "[run]\nshims = [\"cargo\"]\n").unwrap();
+        assert_eq!(run_shims(dir.path()).unwrap(), ["cargo"]);
+        std::fs::write(
+            &file,
+            "[run]\nshims = [\"cargo\", \" cc \", \"cargo\", \"\"]\n",
+        )
+        .unwrap();
+        assert_eq!(run_shims(dir.path()).unwrap(), ["cargo", "cc"]);
+        // `[]` turns them all off (LOCKS §4.6).
+        std::fs::write(&file, "[run]\nshims = []\n").unwrap();
+        assert!(run_shims(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn resources_are_filled_in_and_serialized_for_the_environment() {
+        let mut list = vec![
+            ResolvedResource {
+                name: "build".into(),
+                path: "{build}/cargo".into(),
+                access: ResourceAccess::Exclusive,
+            },
+            ResolvedResource {
+                name: "ui".into(),
+                path: "{checkout}/node_modules".into(),
+                access: ResourceAccess::Shared,
+            },
+        ];
+        let (build, checkout) = (
+            Path::new("/wt/ab12cd34/targets/integration"),
+            Path::new("/wt/ab12cd34/integration"),
+        );
+        fill_resources(&mut list, build, checkout);
+        assert_eq!(list[0].path, fill("{build}/cargo", build, checkout));
+        assert_eq!(
+            list[1].path,
+            fill("{checkout}/node_modules", build, checkout)
+        );
+
+        let json: serde_json::Value = serde_json::from_str(&resources_json(&list)).unwrap();
+        assert_eq!(json[0]["name"], "build");
+        assert_eq!(json[0]["path"], list[0].path.as_str());
+        assert_eq!(json[0]["access"], "exclusive");
+        assert_eq!(json[1]["access"], "shared");
+        assert_eq!(json.as_array().unwrap().len(), 2);
+        assert_eq!(resources_json(&[]), "[]");
     }
 }

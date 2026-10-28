@@ -18,6 +18,7 @@ pub mod routing;
 pub mod rules;
 pub mod runtime;
 pub mod shadow;
+pub mod shims;
 pub mod snapshot;
 pub mod trace;
 pub mod transcript;
@@ -84,6 +85,16 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         .with_context(|| format!("cannot create {}", paths.home.display()))?;
 
     let lock = acquire_lock(&paths)?;
+    // `cargo` in a run worktree is this executable (docs/tasks/LOCKS.md §4.6). Failing to
+    // place the shims is not fatal: the worktrees then run the real programs directly, which
+    // is what happened before them.
+    let shims = match shims::ensure(&paths) {
+        Ok(dir) => Some(dir),
+        Err(err) => {
+            tracing::warn!(error = %err, "cannot install the shims; run worktrees will not hold their resources for plain commands");
+            None
+        }
+    };
     let token = ensure_token(&paths)?;
     let read_token = ensure_token_at(&paths.token_read())?;
     let store = Arc::new(SqliteStore::open(&paths.db()).await?);
@@ -135,6 +146,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         },
         url: OnceLock::new(),
         worktrees: paths.home.join("worktrees"),
+        shims: shims.clone(),
         orchestrator: Arc::new(OnceLock::new()),
     });
     let (plugins, plugin_warnings) = PluginRegistry::load(&config.plugins, &paths.plugins());
@@ -204,10 +216,14 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         Arc::new(GitWorkspaces),
         Arc::new(ShellVerifier {
             worktrees: Some(paths.home.join("worktrees")),
+            locks: Some(paths.home.join("locks")),
+            shims: shims.clone(),
             ..ShellVerifier::default()
         }),
         OrchestratorConfig {
             worktrees: paths.home.join("worktrees"),
+            locks: paths.home.join("locks"),
+            shims,
             max_nudges: 2,
             build_cache_limit: config.build_cache_limit,
         },

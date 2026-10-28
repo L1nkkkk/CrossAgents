@@ -1,12 +1,14 @@
 pub mod account;
 pub mod agent;
 pub mod events;
+pub mod exec;
 pub mod hub;
 pub mod mcp;
 pub mod plugin;
 pub mod run;
 pub mod session;
 pub mod setup;
+pub mod shim;
 pub mod usage;
 
 use anyhow::Result;
@@ -41,7 +43,9 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Usage(args) => usage::run(&ctx, args).await,
         Command::Account(cmd) => account::run(&ctx, cmd).await,
         Command::Setup(args) => setup::run(&ctx, args).await,
-        Command::Mcp | Command::RuntimeHost(_) => unreachable!("handled above"),
+        Command::Mcp | Command::RuntimeHost(_) | Command::Exec(_) => {
+            unreachable!("handled in main")
+        }
     }
 }
 

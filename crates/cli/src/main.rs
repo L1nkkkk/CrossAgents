@@ -1,4 +1,7 @@
 //! `crossagents` command line. Every command except `hub run` talks to the hub's local API.
+//!
+//! A program that was started under a shim's name (`cargo`, docs/tasks/LOCKS.md §4.6) is not
+//! this command line at all: `main` hands it to `cmd::shim` before clap sees the arguments.
 
 mod client;
 mod cmd;
@@ -52,6 +55,8 @@ pub enum Command {
     Account(cmd::account::AccountCommand),
     /// Guided setup of a vendor: account, login, models and agents.
     Setup(cmd::setup::SetupArgs),
+    /// Run a command under the local resource locks (docs/tasks/LOCKS.md §4).
+    Exec(cmd::exec::ExecArgs),
     /// Serve the collaboration tools over MCP on stdio (started by the hub for agents).
     #[command(hide = true)]
     Mcp,
@@ -70,6 +75,12 @@ pub struct RuntimeHostArgs {
 }
 
 fn main() -> ExitCode {
+    // A program that was started as `cargo` (a shim, docs/tasks/LOCKS.md §4.6) has no
+    // `crossagents` arguments to parse: everything after its name belongs to the real program.
+    let argv0 = std::env::args_os().next().unwrap_or_default();
+    if let Some(name) = crossagents_hub::shims::invoked_as(&argv0) {
+        return cmd::shim::main(name);
+    }
     let cli = Cli::parse();
     if let Command::Hub(cmd::hub::HubCommand::Run) = &cli.command {
         mark_hub_home();
@@ -81,6 +92,17 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // `exec` hands back the command's own exit code (and 75 for a lock timeout), so it cannot
+    // go through `cmd::run`, which only knows success or failure.
+    if let Command::Exec(args) = &cli.command {
+        return match runtime.block_on(cmd::exec::run_cli(args.clone())) {
+            Ok(code) => ExitCode::from(code.rem_euclid(256) as u8),
+            Err(err) => {
+                eprintln!("error: {err:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     match runtime.block_on(cmd::run(cli)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {

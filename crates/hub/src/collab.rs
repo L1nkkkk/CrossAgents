@@ -88,6 +88,9 @@ pub struct CollabSetup {
     /// Root of run and task worktrees: agents working there build into their own target
     /// directory (docs/tasks/DOGFOOD.md §1).
     pub worktrees: PathBuf,
+    /// `<home>/shims/<version>`, the shims a run worktree's `PATH` starts with
+    /// (docs/tasks/LOCKS.md §4.6); `None` leaves `PATH` alone.
+    pub shims: Option<PathBuf>,
     /// Decides guarded agents' permission requests; set once the orchestrator exists.
     pub orchestrator: Arc<OnceLock<Arc<crossagents_orchestrator::Orchestrator>>>,
 }
@@ -99,7 +102,7 @@ impl CollabSetup {
         let account = self.accounts.agent_env(agent).await?;
         Ok(with_project_env(
             account,
-            worktree_env(&self.worktrees, &agent.cwd),
+            worktree_env(&self.worktrees, &agent.cwd, self.shims.as_deref()),
         ))
     }
 }
@@ -522,12 +525,15 @@ mod tests {
             // Rust projects: the preset sets the build directory.
             std::fs::write(d.join("Cargo.toml"), "").unwrap();
         }
-        let env = worktree_env(&root, &task);
-        let [(key, value)] = env.as_slice() else {
-            panic!("{env:?}")
+        let env = worktree_env(&root, &task, None);
+        let target_var = |env: Vec<(String, String)>| {
+            env.iter()
+                .find(|(name, _)| name == "CARGO_TARGET_DIR")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| panic!("{env:?}"))
         };
-        assert_eq!(key, "CARGO_TARGET_DIR");
-        let target = PathBuf::from(value);
+        let value = target_var(env.clone());
+        let target = PathBuf::from(&value);
         assert!(target.is_absolute());
         // Its own directory, under its run and its tree, never the run's or a sibling's.
         assert!(
@@ -539,19 +545,62 @@ mod tests {
             ),
             "{value}"
         );
-        assert_ne!(worktree_env(&root, &integration)[0].1, *value);
-        assert_ne!(worktree_env(&root, &other)[0].1, *value);
+        // The agent holds the same build directory the preset injects into it (LOCKS §3).
+        let (name, json) = env
+            .iter()
+            .find(|(name, _)| name == "CROSSAGENTS_RESOURCES")
+            .unwrap_or_else(|| panic!("{env:?}"));
+        assert_eq!(name, "CROSSAGENTS_RESOURCES");
+        let resources: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(resources[0]["name"], "build");
+        assert_eq!(resources[0]["path"], value.as_str());
+
+        assert_ne!(target_var(worktree_env(&root, &integration, None)), value);
+        assert_ne!(target_var(worktree_env(&root, &other, None)), value);
         // Chats in a person's checkout, the root itself, the run's directory and the build
         // directories keep the inherited setting.
         std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
-        assert!(worktree_env(&root, dir.path()).is_empty());
-        assert!(worktree_env(&root, &root).is_empty());
-        assert!(worktree_env(&root, &root.join("ab12cd34")).is_empty());
-        assert!(worktree_env(&root, &target).is_empty());
+        assert!(worktree_env(&root, dir.path(), None).is_empty());
+        assert!(worktree_env(&root, &root, None).is_empty());
+        assert!(worktree_env(&root, &root.join("ab12cd34"), None).is_empty());
+        assert!(worktree_env(&root, &target, None).is_empty());
         // A project that is not Rust gets no cargo setting.
         std::fs::remove_file(other.join("Cargo.toml")).unwrap();
         std::fs::write(other.join("package.json"), "{}").unwrap();
-        assert!(worktree_env(&root, &other).is_empty());
+        assert!(worktree_env(&root, &other, None).is_empty());
+    }
+
+    #[test]
+    fn a_run_worktree_puts_the_shims_in_front_of_path_unless_it_shims_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("worktrees");
+        let task = root.join("ab12cd34").join("auth");
+        std::fs::create_dir_all(&task).unwrap();
+        std::fs::write(task.join("Cargo.toml"), "").unwrap();
+        let shims = dir.path().join("shims").join("1.0.0");
+        std::fs::create_dir_all(&shims).unwrap();
+        let path_of = |env: Vec<(String, String)>| {
+            env.into_iter()
+                .find(|(name, _)| name == "PATH")
+                .map(|(_, value)| value)
+        };
+        let original = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .collect::<Vec<_>>();
+
+        // Rust: `cargo` in the worktree comes from the shim directory, and the rest of PATH
+        // is the original value (LOCKS §4.6).
+        let path = path_of(worktree_env(&root, &task, Some(&shims))).expect("a PATH");
+        let entries: Vec<PathBuf> = std::env::split_paths(&path).collect();
+        assert_eq!(entries[0], shims);
+        assert_eq!(entries.len(), original.len() + 1);
+
+        // `[run] shims = []`: the shim directory is not added at all.
+        std::fs::write(task.join("crossagents.toml"), "[run]\nshims = []\n").unwrap();
+        assert!(path_of(worktree_env(&root, &task, Some(&shims))).is_none());
+
+        // A hub that could not install the shims leaves PATH alone as well.
+        std::fs::remove_file(task.join("crossagents.toml")).unwrap();
+        assert!(path_of(worktree_env(&root, &task, None)).is_none());
     }
 
     #[test]

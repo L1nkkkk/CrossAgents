@@ -27,6 +27,12 @@ use crate::workspace::{InPlaceWorkspaces, WorkspaceProvider, worktree_path};
 pub struct OrchestratorConfig {
     /// Root for run and task worktrees.
     pub worktrees: PathBuf,
+    /// Where the executor's lock files live, `<home>/locks` (docs/tasks/LOCKS.md §4.1): the
+    /// checks the hub runs in a worktree hold its resources before they start (§6).
+    pub locks: PathBuf,
+    /// `<home>/shims/<version>`, where the hub put its shims: a run worktree's `PATH` starts
+    /// with it, so `cargo` there goes through the executor (§4.6). `None` leaves `PATH` alone.
+    pub shims: Option<PathBuf>,
     /// No longer used: the hub does not nudge (H1). Kept so configurations still load.
     pub max_nudges: u32,
     /// Soft budget for all build output under `worktrees` (`workspace::build_cache_size`):
@@ -1515,7 +1521,7 @@ The person changed: {}",
     // Reacting to agents
 
     /// Follows agent events to notice assignees and reviewers that stop without reporting.
-    /// Follows the commands agents run (`crate::running`), handing the event on.
+    /// Follows the commands agents run (`crate::running`, for display), handing the event on.
     fn note_running(&self, event: crossagents_core::Event) -> EventKind {
         self.running.lock().unwrap().push(&event);
         event.kind
