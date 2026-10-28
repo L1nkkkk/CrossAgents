@@ -33,6 +33,8 @@ pub mod work;
 pub mod workspace;
 
 #[cfg(test)]
+mod tests_scheduling;
+#[cfg(test)]
 mod tests_verification;
 
 pub use claims::Execution;

@@ -314,6 +314,7 @@ impl Orchestrator {
         Self::require_issuer(&run, &task, caller)?;
         let a: A = args(input)?;
         let _guard = self.lock(run.id).await;
+        let mut run = self.store.get_run(run.id).await?;
         let mut task = self.store.get_task(task.id).await?;
         if task.status.is_terminal() {
             return Err(CoreError::Conflict(format!("#{} has ended", task.key)));
@@ -336,6 +337,10 @@ impl Orchestrator {
                 None,
             );
         }
+        // New dependencies (or a narrower scope) may let it, or another pending task, start
+        // now rather than when some other task next ends (docs/TODO.md §十六).
+        self.schedule(&mut run).await?;
+        let task = self.store.get_task(task.id).await?;
         Ok(task_json(&task))
     }
 
