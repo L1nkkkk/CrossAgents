@@ -29,13 +29,17 @@ pub struct OrchestratorConfig {
     pub worktrees: PathBuf,
     /// No longer used: the hub does not nudge (H1). Kept so configurations still load.
     pub max_nudges: u32,
-    /// Bytes a repository's shared build directory may grow to before it is removed once no
-    /// run uses it (`workspace::prune_shared_targets`).
+    /// Soft budget for all build output under `worktrees` (`workspace::build_cache_size`):
+    /// what nothing uses is reclaimed; what is in use is kept and only warned about.
     pub build_cache_limit: u64,
 }
 
-/// `build_cache_limit` unless the hub's configuration says otherwise.
-pub const DEFAULT_BUILD_CACHE_LIMIT: u64 = 30 << 30;
+/// `build_cache_limit` unless the hub's configuration says otherwise. Each worktree builds into
+/// its own directory now (`<run>/targets/<tree>`), so a workspace needs one per task it runs at
+/// once plus one for the run, where a repository used to share one: the same work costs several
+/// times the disk. 60 GB is about a dozen fresh builds of this workspace, enough for a few runs
+/// in parallel before the warning (which deletes nothing in use) starts.
+pub const DEFAULT_BUILD_CACHE_LIMIT: u64 = 60 << 30;
 
 /// Everything needed to start a run.
 #[derive(Debug, Clone)]
@@ -114,6 +118,37 @@ pub const COPIED_LEAD_NOTE: &str = "主导是复制出来的，没带上原会�
 pub(crate) fn short(id: impl ToString) -> String {
     let s = id.to_string().replace('-', "");
     s[s.len().saturating_sub(8)..].to_owned()
+}
+
+/// The last part of a worktree's path: its tree name, which names its build directory.
+pub(crate) fn tree_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// The build directories tasks being verified may still be using, by run (`short` id) and tree:
+/// their checkouts can go while the checks run (a run cancelled mid-verification, say), and
+/// deleting what a check is writing to breaks it.
+async fn targets_in_use(store: &dyn Store) -> HashMap<String, std::collections::HashSet<String>> {
+    let mut keep: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+    let Ok(runs) = store.list_runs().await else {
+        return keep;
+    };
+    for run in runs {
+        let Ok(tasks) = store.list_tasks(run.id).await else {
+            continue;
+        };
+        for task in tasks
+            .into_iter()
+            .filter(|t| t.status == TaskStatus::Verifying)
+        {
+            if let Some(path) = &task.worktree {
+                keep.entry(short(run.id)).or_default().insert(tree_name(path));
+            }
+        }
+    }
+    keep
 }
 
 impl Orchestrator {
@@ -1160,9 +1195,10 @@ The person changed: {}",
         problems
     }
 
-    /// Removes the task's checkout and branch. `released` says its agents are confirmed gone:
-    /// when they are not, the checkout stays (with a warning), because deleting the directory
-    /// an agent still works in breaks it and any check still running there (docs/TODO.md §九 ①).
+    /// Removes the task's checkout and branch, and then what it built in. `released` says its
+    /// agents are confirmed gone: when they are not, the checkout stays (with a warning),
+    /// because deleting the directory an agent still works in breaks it and any check still
+    /// running there (docs/TODO.md §九 ①); its build directory stays with it.
     pub(crate) async fn cleanup_worktree(
         &self,
         run: &Run,
@@ -1173,53 +1209,88 @@ The person changed: {}",
         if !released {
             tracing::warn!(
                 task = %task.key,
-                "keeping the checkout: it is not known that the agents using it stopped"
+                "keeping the checkout and its build directory: it is not known that the agents using it stopped"
             );
             return;
         }
-        if let Some(path) = &task.worktree {
-            let branch = task.branch.as_deref().filter(|_| delete_branch);
-            if let Err(err) = self.ws_for(run).remove(&run.repo, path, branch).await {
-                tracing::warn!(task = %task.key, error = %err, "cannot remove worktree");
+        let Some(path) = &task.worktree else { return };
+        let branch = task.branch.as_deref().filter(|_| delete_branch);
+        match self.ws_for(run).remove(&run.repo, path, branch).await {
+            Ok(()) => {
+                let (root, key) = (self.config.worktrees.clone(), short(run.id));
+                let tree = tree_name(path);
+                tokio::task::spawn_blocking(move || {
+                    for (dir, size) in crate::workspace::remove_target(&root, &key, &tree) {
+                        tracing::info!(dir = %dir.display(), gb = size >> 30, "removed a worktree's build directory");
+                    }
+                });
+                self.prune_build_cache();
             }
+            Err(err) => tracing::warn!(task = %task.key, error = %err, "cannot remove worktree"),
         }
     }
 
     pub(crate) async fn remove_integration(&self, run: &Run) {
-        if let Err(err) = self
+        let removed = self
             .ws_for(run)
             .remove(&run.repo, &self.integration_path(run), None)
-            .await
-        {
-            tracing::warn!(run = %run.id, error = %err, "cannot remove integration worktree");
+            .await;
+        let (root, key) = (self.config.worktrees.clone(), short(run.id));
+        match removed {
+            // The run's own checkout built into `targets/integration`; only that one goes -
+            // other trees may still be building in the same `targets` directory.
+            Ok(()) => {
+                tokio::task::spawn_blocking(move || {
+                    for (dir, size) in crate::workspace::remove_target(&root, &key, "integration") {
+                        tracing::info!(dir = %dir.display(), gb = size >> 30, "removed the run's build directory");
+                    }
+                });
+            }
+            Err(err) => tracing::warn!(run = %run.id, error = %err, "cannot remove integration worktree"),
         }
-        self.remove_run_build(run);
-    }
-
-    /// Removes the run's own build directory (`<worktrees>/<run>/target`, used only where
-    /// the repository's shared one could not be found, see `workspace::worktree_env`), and
-    /// the run's directory once nothing else is in it.
-    /// Called when the run's checkout goes: nothing builds there any more.
-    pub(crate) fn remove_run_build(&self, run: &Run) {
-        let dir = self.config.worktrees.join(short(run.id));
-        let target = dir.join("target");
-        if target.exists()
-            && let Err(err) = std::fs::remove_dir_all(&target)
-        {
-            tracing::warn!(run = %run.id, error = %err, "cannot remove the run's build directory");
-        }
-        // Fails while task worktrees remain: those are cleaned up on their own.
-        let _ = std::fs::remove_dir(&dir);
         self.prune_build_cache();
     }
 
-    /// Removes shared build directories that grew past the limit and no run uses any more,
-    /// in the background (it walks gigabytes). At startup, and whenever a run's checkout goes.
+    /// Removes everything the run built in (`<worktrees>/<run>/targets`, the old
+    /// `<run>/target`) and its directory once nothing else is in it. Called when the run goes
+    /// away, so nothing there can be needed any more.
+    pub(crate) fn remove_run_build(&self, run: &Run) {
+        let (root, key) = (self.config.worktrees.clone(), short(run.id));
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::workspace::remove_run_build_dirs(&root, &key)
+        });
+        self.prune_build_cache();
+    }
+
+    /// Removes build directories nothing can be using, in the background (it walks gigabytes),
+    /// then says whether what is left is over the soft budget: what is still in use is never
+    /// deleted for the budget's sake, so being over it is a warning, not an action.
+    /// At startup, and whenever a checkout or a run goes.
     pub fn prune_build_cache(&self) {
         let (root, limit) = (self.config.worktrees.clone(), self.config.build_cache_limit);
-        tokio::task::spawn_blocking(move || {
-            for (dir, size) in crate::workspace::prune_shared_targets(&root, limit) {
-                tracing::info!(dir = %dir.display(), gb = size >> 30, "removed a shared build directory over its limit");
+        let (store, bus) = (self.store.clone(), self.bus.clone());
+        tokio::spawn(async move {
+            let keep = targets_in_use(store.as_ref()).await;
+            let pruned = tokio::task::spawn_blocking(move || {
+                let mut gone = crate::workspace::prune_all_targets(&root, &keep);
+                // The old layout: `<root>/targets/<repo>-<hash>` and `<run>/target`.
+                gone.extend(crate::workspace::prune_shared_targets(&root, 0));
+                gone.extend(crate::workspace::prune_legacy_run_targets(&root));
+                let used = crate::workspace::build_cache_size(&root);
+                (gone, used)
+            })
+            .await;
+            let Ok((gone, used)) = pruned else { return };
+            for (dir, size) in gone {
+                tracing::info!(dir = %dir.display(), gb = size >> 30, "removed a build directory");
+            }
+            if used > limit {
+                tracing::warn!(
+                    used_gb = used >> 30,
+                    limit_gb = limit >> 30,
+                    "the worktrees' build cache is over its soft budget; what is in use is kept"
+                );
+                let _ = bus.publish(EventKind::BuildCache { used, limit }).await;
             }
         });
     }
@@ -1543,8 +1614,7 @@ The person changed: {}",
 }
 
 /// `w-<run>-<task key>`, within the 32-character agent name limit.
-pub(crate) fn agent_name(prefix: &str, run: &Run, task: &Task) -> String {
-    let mut name = format!("{prefix}-{}-{}", &short(run.id)[..6], task.key);
+pub(crate) fn agent_name(prefix: &str, run: &Run, task: &Task) -> String {    let mut name = format!("{prefix}-{}-{}", &short(run.id)[..6], task.key);
     name.truncate(32);
     name.trim_end_matches('-').to_owned()
 }

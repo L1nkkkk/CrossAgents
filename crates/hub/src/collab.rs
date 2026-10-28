@@ -481,7 +481,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_runs_worktrees_share_one_target_dir() {
+    fn each_worktree_of_a_run_builds_apart_and_checks_build_with_its_worker() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("worktrees");
         let task = root.join("ab12cd34").join("auth");
@@ -494,15 +494,18 @@ mod tests {
         assert_eq!(key, "CARGO_TARGET_DIR");
         let target = PathBuf::from(&value);
         assert!(target.is_absolute());
+        // Its own directory, under its run and its tree, never the run's or a sibling's.
         assert!(
-            target.ends_with(Path::new("ab12cd34").join("target")),
+            target.ends_with(Path::new("ab12cd34").join("targets").join("auth")),
             "{value}"
         );
-        // The run's checkout builds into the same place; another run does not.
-        assert_eq!(worktree_env(&root, &integration).unwrap().1, value);
+        assert_ne!(worktree_env(&root, &integration).unwrap().1, value);
         assert_ne!(worktree_env(&root, &other).unwrap().1, value);
-        // Chats in a person's checkout, and the root itself, keep the inherited setting.
+        // Chats in a person's checkout, the root itself, the run's directory and the build
+        // directories keep the inherited setting.
         assert_eq!(worktree_env(&root, dir.path()), None);
         assert_eq!(worktree_env(&root, &root), None);
+        assert_eq!(worktree_env(&root, &root.join("ab12cd34")), None);
+        assert_eq!(worktree_env(&root, &target), None);
     }
 }

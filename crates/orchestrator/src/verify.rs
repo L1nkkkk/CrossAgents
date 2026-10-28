@@ -228,7 +228,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checks_in_a_run_build_in_its_shared_target() {
+    async fn checks_in_a_run_build_in_its_own_worktrees_target() {
         let home = tempfile::tempdir().unwrap();
         let root = home.path().join("worktrees");
         let dir = root.join("ab12cd34").join("integration");
@@ -246,8 +246,15 @@ mod tests {
         let want = dunce::canonicalize(&root)
             .unwrap()
             .join("ab12cd34")
-            .join("target");
+            .join("targets")
+            .join("integration");
         assert_eq!(out[0].output, want.display().to_string());
+        // A task's checkout builds in its own, not in the run's.
+        let task = root.join("ab12cd34").join("auth");
+        std::fs::create_dir_all(&task).unwrap();
+        let out = verifier.check(&task, &[echo.into()]).await;
+        assert!(out[0].output.ends_with("auth"), "{}", out[0].output);
+        assert_ne!(out[0].output, want.display().to_string());
     }
 
     #[tokio::test]

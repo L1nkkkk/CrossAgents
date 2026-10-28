@@ -252,6 +252,15 @@ pub enum EventKind {
         what: String,
         percent: u32,
     },
+    /// The worktrees' build output is over its soft budget after reclaiming what nothing uses
+    /// (docs/TODO.md §九 ②). A warning, not an action: what is in use is never deleted for it.
+    #[serde(rename = "hub.build_cache")]
+    BuildCache {
+        #[cfg_attr(feature = "ts", ts(type = "number"))]
+        used: u64,
+        #[cfg_attr(feature = "ts", ts(type = "number"))]
+        limit: u64,
+    },
     /// A shared note was written (`text`) or deleted (`None`).
     #[serde(rename = "note.written")]
     NoteWritten {
@@ -494,7 +503,8 @@ impl EventKind {
             Self::NoteWritten { .. } => "note.written",
             Self::HumanAnswered { .. } => "human.answered",
             Self::HumanDismissed { .. } => "human.dismissed",
-            Self::RunBudget { .. } => "run.budget",
+        Self::RunBudget { .. } => "run.budget",
+        Self::BuildCache { .. } => "hub.build_cache",
             Self::RunLanded { .. } => "run.landed",
             Self::RunDeleted { .. } => "run.deleted",
             Self::WatchTriggered { .. } => "watch.triggered",
@@ -575,6 +585,7 @@ impl EventKind {
             | Self::AccountQuotaUpdated { .. }
             | Self::HumanDismissed { .. }
             | Self::RunBudget { .. }
+            | Self::BuildCache { .. }
             | Self::RunLanded { .. }
             | Self::RunDeleted { .. }
             | Self::AccountLoginFinished { .. }

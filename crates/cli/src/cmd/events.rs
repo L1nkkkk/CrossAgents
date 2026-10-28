@@ -173,6 +173,11 @@ pub fn summary(kind: &EventKind) -> String {
         EventKind::RunBudget { id, what, percent } => {
             format!("{} {what} {percent}%", short_tail(id))
         }
+        EventKind::BuildCache { used, limit } => format!(
+            "build output {} GB of a {} GB soft budget",
+            used >> 30,
+            limit >> 30
+        ),
         EventKind::RunDeleted { run_id } => short_tail(run_id),
         EventKind::ReminderFired { owner, note, .. } => {
             format!("{} {}", short(owner), one_line(note))

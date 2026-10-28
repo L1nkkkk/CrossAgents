@@ -696,33 +696,42 @@ pub fn worktree_path(root: &Path, run: &str, name: &str) -> PathBuf {
     root.join(run).join(name)
 }
 
-/// Where the build directories every run of one repository shares live, under the worktrees.
+/// The directory a run's build directories live in, under its worktrees: `<root>/<run>/targets`.
 pub const SHARED_TARGETS: &str = "targets";
 
-/// `CARGO_TARGET_DIR` when `cwd` is in one of a run's worktrees under `root` (its
-/// integration checkout or a task's): `<root>/targets/<repo>-<hash>`, one build directory for
-/// every run of the same repository, so dependencies compile once rather than once per run
-/// (each run starting from an empty one rebuilt them all before every landing). It lies
-/// outside every checkout, so nothing commits it (DOGFOOD.md §9), and it outlives the runs.
-/// Builds running at the same time wait for each other on cargo's lock. Where the repository
-/// cannot be told from the worktree, the run's own `<root>/<run>/target`, which goes with the
-/// run's checkout. Absolute: a relative one would follow every `cd`.
+/// `<root>/<run>/targets/<tree>`: one build directory per worktree - the run's checkout is
+/// `integration`, a task's is its key. The worker and the hub's checks in the same worktree
+/// share it; another worktree never does, because workspace members have the same package
+/// names and versions there, so their artefacts overwrite each other (fake "unresolved import"
+/// errors: docs/TODO.md §十六).
+pub fn target_dir(root: &Path, run: &str, tree: &str) -> PathBuf {
+    worktree_path(root, run, SHARED_TARGETS).join(tree)
+}
+
+/// `CARGO_TARGET_DIR` when `cwd` is in one of a run's worktrees under `root` (its integration
+/// checkout or a task's): [`target_dir`]. It lies outside every checkout, so nothing commits it
+/// (DOGFOOD.md §9). Absolute: a relative one would follow every `cd`. `None` for a directory
+/// that is nobody's checkout: the build directories themselves, the run's own directory, the
+/// old shared ones, and everything outside.
 pub fn worktree_env(root: &Path, cwd: &Path) -> Option<(String, String)> {
     let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let (root, cwd) = (canon(root), canon(cwd));
     let mut parts = cwd.strip_prefix(&root).ok()?.components();
-    let run = parts.next()?;
-    if run.as_os_str() == SHARED_TARGETS {
+    let run = parts.next()?.as_os_str().to_string_lossy().into_owned();
+    // `<root>/targets/<repo>-<hash>`: where every run of a repository used to build.
+    if run == SHARED_TARGETS {
         return None;
     }
-    let target = parts
-        .next()
-        .and_then(|tree| repo_key(&root.join(run).join(tree)))
-        .map_or_else(
-            || root.join(run).join("target"),
-            |key| root.join(SHARED_TARGETS).join(key),
-        );
-    Some(("CARGO_TARGET_DIR".to_owned(), target.display().to_string()))
+    let tree = parts.next()?.as_os_str().to_string_lossy().into_owned();
+    // `<root>/<run>` itself is no checkout, and neither are `<run>/targets` (nor a shell in
+    // the old `<run>/target`).
+    if tree == SHARED_TARGETS || tree == "target" {
+        return None;
+    }
+    Some((
+        "CARGO_TARGET_DIR".to_owned(),
+        target_dir(&root, &run, &tree).display().to_string(),
+    ))
 }
 
 /// `<name>-<hash>` of the repository `worktree` is a working copy of: its `.git` file names
@@ -779,13 +788,13 @@ pub fn common_repo(worktree: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Removes each shared build directory (`<root>/targets/*`) that has grown past `limit`
-/// bytes while no run's worktree uses it: every worktree of a repository builds its own
-/// crates into it, so it only grows. The next run of that repository builds from scratch
-/// once. One in use is left alone, even over the limit: what is building there would
-/// break. Renamed first, so a build that starts meanwhile gets a fresh directory, and a
-/// directory a process still holds (Windows refuses the rename) stays. Returns what went,
-/// with its size. Blocking: walks the directories to size them.
+/// Removes each old shared build directory (`<root>/targets/*`, where every run of a
+/// repository used to build) that none of them uses any more. Nothing writes them now
+/// (`worktree_env`), so this only finishes the old layout off: `limit` is 0 in practice, and a
+/// directory some run's worktree still maps to its repository stays. Renamed first, so a build
+/// that starts meanwhile gets a fresh directory, and a directory a process still holds (Windows
+/// refuses the rename) stays. Returns what went, with its size. Blocking: walks the
+/// directories to size them.
 pub fn prune_shared_targets(root: &Path, limit: u64) -> Vec<(PathBuf, u64)> {
     let shared = root.join(SHARED_TARGETS);
     let Ok(entries) = std::fs::read_dir(&shared) else {
@@ -809,15 +818,9 @@ pub fn prune_shared_targets(root: &Path, limit: u64) -> Vec<(PathBuf, u64)> {
         if size <= limit {
             continue;
         }
-        let trash = shared.join(format!(".trash-{key}-{}", std::process::id()));
-        if let Err(err) = std::fs::rename(dir, &trash) {
-            tracing::debug!(dir = %dir.display(), error = %err, "build directory busy; keeping it");
-            continue;
+        if let Some(gone) = remove_build_dir(dir, size) {
+            removed.push(gone);
         }
-        if let Err(err) = std::fs::remove_dir_all(&trash) {
-            tracing::warn!(dir = %trash.display(), error = %err, "cannot finish removing an old build directory; retrying next time");
-        }
-        removed.push((dir.clone(), size));
     }
     removed
 }
@@ -827,7 +830,237 @@ fn is_trash(path: &Path) -> bool {
         .is_some_and(|n| n.to_string_lossy().starts_with(".trash-"))
 }
 
-/// The shared build directories some worktree under `root` (`<root>/<run>/<tree>`) builds in.
+/// Removes one build directory, renamed to `.trash-*` first so a build that starts meanwhile
+/// gets a fresh one, and a directory a process still holds (Windows refuses the rename) stays
+/// for the next pass. Renaming proves nothing about use: what may go is decided by the callers
+/// (`prune_run_targets`: its checkout is gone; on Unix a rename never fails, so the rules are
+/// what keeps a directory a build is writing to).
+fn remove_build_dir(dir: &Path, size: u64) -> Option<(PathBuf, u64)> {
+    let name = dir.file_name()?.to_string_lossy().into_owned();
+    let trash = dir
+        .parent()?
+        .join(format!(".trash-{name}-{}", std::process::id()));
+    if let Err(err) = std::fs::rename(dir, &trash) {
+        tracing::debug!(dir = %dir.display(), error = %err, "build directory busy; keeping it");
+        return None;
+    }
+    if let Err(err) = std::fs::remove_dir_all(&trash) {
+        tracing::warn!(dir = %trash.display(), error = %err, "cannot finish removing a build directory; retrying next time");
+    }
+    Some((dir.to_path_buf(), size))
+}
+
+/// Removes the build directories under `<root>/<run>/targets` that nothing uses any more: the
+/// worktree they belong to is gone and `keep` (a task still being verified, say) does not name
+/// them. Leftovers of a delete that could not finish (`.trash-*`) go too. Once none are left,
+/// the `targets` directory itself goes. Blocking: sizes what it removes.
+pub fn prune_run_targets(
+    root: &Path,
+    run: &str,
+    keep: &std::collections::HashSet<String>,
+) -> Vec<(PathBuf, u64)> {
+    let targets = worktree_path(root, run, SHARED_TARGETS);
+    let Ok(entries) = std::fs::read_dir(&targets) else {
+        return Vec::new();
+    };
+    let mut removed = Vec::new();
+    let mut left = 0;
+    for dir in entries.flatten().map(|e| e.path()) {
+        if is_trash(&dir) {
+            let _ = std::fs::remove_dir_all(&dir);
+            continue;
+        }
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(tree) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        // Its checkout is still there, or it is being verified: whatever builds there needs it.
+        if keep.contains(&tree) || worktree_path(root, run, &tree).exists() {
+            left += 1;
+            continue;
+        }
+        let size = dir_size(&dir);
+        match remove_build_dir(&dir, size) {
+            Some(gone) => removed.push(gone),
+            None => left += 1,
+        }
+    }
+    if left == 0 {
+        let _ = std::fs::remove_dir(&targets);
+    }
+    removed
+}
+
+/// [`prune_run_targets`] for every run under `root`, each with the build directories `keep`
+/// says to leave alone (run's short id → its trees).
+pub fn prune_all_targets(
+    root: &Path,
+    keep: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+) -> Vec<(PathBuf, u64)> {
+    let empty = std::collections::HashSet::new();
+    let mut removed = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return removed;
+    };
+    for run in entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.file_name().is_some_and(|n| n != SHARED_TARGETS))
+    {
+        let Some(name) = run.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        removed.extend(prune_run_targets(root, &name, keep.get(&name).unwrap_or(&empty)));
+    }
+    removed
+}
+
+/// Removes one worktree's build directory (`<run>/targets/<tree>`), then the `targets`
+/// directory and the run's directory when nothing is left in them. Never recursive over
+/// `targets`: other trees may still be building there. Its checkout is gone, which is what
+/// makes this safe (the caller removes the checkout first). Blocking: sizes what it removes.
+pub fn remove_target(root: &Path, run: &str, tree: &str) -> Vec<(PathBuf, u64)> {
+    let mut removed = Vec::new();
+    let dir = target_dir(root, run, tree);
+    if dir.is_dir() {
+        let size = dir_size(&dir);
+        if let Some(gone) = remove_build_dir(&dir, size) {
+            removed.push(gone);
+        }
+    }
+    let _ = std::fs::remove_dir(worktree_path(root, run, SHARED_TARGETS));
+    // The old fallback for a worktree whose repository could not be told; nothing writes it.
+    let legacy = worktree_path(root, run, "target");
+    if legacy.is_dir() && !has_other_trees(root, run) {
+        let size = dir_size(&legacy);
+        if let Some(gone) = remove_build_dir(&legacy, size) {
+            removed.push(gone);
+        }
+    }
+    let _ = std::fs::remove_dir(root.join(run));
+    removed
+}
+
+/// Whether anything besides build directories is left in a run's directory.
+fn has_other_trees(root: &Path, run: &str) -> bool {
+    std::fs::read_dir(root.join(run))
+        .map(|rd| {
+            rd.flatten().map(|e| e.path()).any(|p| {
+                p.is_dir()
+                    && p.file_name()
+                        .is_some_and(|n| n != "target" && n != SHARED_TARGETS && !is_trash(&p))
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// The whole build area of a run that is going away: every `<run>/targets/*` (not only the
+/// ones whose checkout is gone) and the old `<run>/target`. What could not be removed is
+/// returned as words; the run's directory stays when something is still in it.
+pub fn remove_run_build_dirs(root: &Path, run: &str) -> Vec<(PathBuf, u64)> {
+    let mut removed = Vec::new();
+    let targets = worktree_path(root, run, SHARED_TARGETS);
+    if let Ok(entries) = std::fs::read_dir(&targets) {
+        for dir in entries.flatten().map(|e| e.path()) {
+            if !dir.is_dir() {
+                continue;
+            }
+            let size = dir_size(&dir);
+            if is_trash(&dir) {
+                let _ = std::fs::remove_dir_all(&dir);
+                continue;
+            }
+            if let Some(gone) = remove_build_dir(&dir, size) {
+                removed.push(gone);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir(&targets);
+    let legacy = worktree_path(root, run, "target");
+    if legacy.is_dir() {
+        let size = dir_size(&legacy);
+        if let Some(gone) = remove_build_dir(&legacy, size) {
+            removed.push(gone);
+        }
+    }
+    let _ = std::fs::remove_dir(root.join(run));
+    removed
+}
+
+/// Removes `<root>/<run>/target` (the old fallback, where a worktree whose repository could not
+/// be told used to build) once the run has no checkout left to build anything, and the run's
+/// directory when it is empty. Blocking: sizes what it removes.
+pub fn prune_legacy_run_targets(root: &Path) -> Vec<(PathBuf, u64)> {
+    let mut removed = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return removed;
+    };
+    for run in entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.file_name().is_some_and(|n| n != SHARED_TARGETS))
+    {
+        let target = run.join("target");
+        let busy = std::fs::read_dir(&run)
+            .map(|rd| {
+                rd.flatten().map(|e| e.path()).any(|p| {
+                    p.is_dir()
+                        && p.file_name().is_some_and(|n| {
+                            n != "target" && n != SHARED_TARGETS && !is_trash(&p)
+                        })
+                })
+            })
+            .unwrap_or(true);
+        if target.is_dir() && !busy {
+            let size = dir_size(&target);
+            if let Some(gone) = remove_build_dir(&target, size) {
+                removed.push(gone);
+            }
+        }
+        let _ = std::fs::remove_dir(&run);
+    }
+    removed
+}
+
+/// Bytes of build output under `root`: each run's `<run>/targets/*`, the old `<run>/target`,
+/// and the old shared `<root>/targets/*`. Blocking: walks them.
+pub fn build_cache_size(root: &Path) -> u64 {
+    let mut total = 0;
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return total;
+    };
+    for run in entries.flatten().map(|e| e.path()) {
+        if !run.is_dir() {
+            continue;
+        }
+        if run.file_name().is_some_and(|n| n == SHARED_TARGETS) {
+            total += std::fs::read_dir(&run)
+                .map(|rd| rd.flatten().map(|e| dir_size(&e.path())).sum::<u64>())
+                .unwrap_or(0);
+            continue;
+        }
+        total += std::fs::read_dir(&run)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.is_dir()
+                            && p.file_name().is_some_and(|n| {
+                                n == "target" || n == SHARED_TARGETS
+                            })
+                    })
+                    .map(|p| dir_size(&p))
+                    .sum::<u64>()
+            })
+            .unwrap_or(0);
+    }
+    total
+}
+
+/// The old shared build directories some worktree under `root` (`<root>/<run>/<tree>`) maps to:
+/// nothing builds there any more, but a run that is still working may be about to.
 fn keys_in_use(root: &Path) -> std::collections::HashSet<String> {
     let dirs = |dir: &Path| -> Vec<PathBuf> {
         std::fs::read_dir(dir)
@@ -843,6 +1076,11 @@ fn keys_in_use(root: &Path) -> std::collections::HashSet<String> {
         .iter()
         .filter(|run| run.file_name().is_some_and(|n| n != SHARED_TARGETS))
         .flat_map(|run| dirs(run))
+        // `<run>/targets` and `<run>/target` are build directories, not checkouts.
+        .filter(|tree| {
+            tree.file_name()
+                .is_some_and(|n| n != SHARED_TARGETS && n != "target")
+        })
         .filter_map(|tree| repo_key(&tree))
         .collect()
 }
@@ -883,53 +1121,115 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runs_of_one_repo_share_a_target_dir() {
+    async fn each_worktree_builds_in_its_own_dir() {
         let (repo, other) = (repo().await, repo().await);
         let home = tempfile::tempdir().unwrap();
         let root = home.path().join("worktrees");
         let ws = GitWorkspaces;
-        let first = worktree_path(&root, "ab12cd34", "integration");
+        let integration = worktree_path(&root, "ab12cd34", "integration");
         let task = worktree_path(&root, "ab12cd34", "auth");
-        let second = worktree_path(&root, "ff00ee11", "integration");
-        let elsewhere = worktree_path(&root, "99887766", "integration");
-        ws.create(repo.path(), "ca/one", "main", &first)
+        let sibling = worktree_path(&root, "ab12cd34", "api");
+        let other_run = worktree_path(&root, "ff00ee11", "integration");
+        let other_repo = worktree_path(&root, "99887766", "integration");
+        ws.create(repo.path(), "ca/one", "main", &integration)
             .await
             .unwrap();
         ws.create(repo.path(), "ca/one-a", "ca/one", &task)
             .await
             .unwrap();
-        ws.create(repo.path(), "ca/two", "main", &second)
+        ws.create(repo.path(), "ca/one-b", "ca/one", &sibling)
             .await
             .unwrap();
-        ws.create(other.path(), "ca/three", "main", &elsewhere)
+        ws.create(repo.path(), "ca/two", "main", &other_run)
+            .await
+            .unwrap();
+        ws.create(other.path(), "ca/three", "main", &other_repo)
             .await
             .unwrap();
 
         let target = |cwd: &Path| PathBuf::from(worktree_env(&root, cwd).unwrap().1);
-        let shared = target(&first);
-        assert!(shared.is_absolute());
-        assert!(
-            shared.starts_with(dunce::canonicalize(&root).unwrap().join(SHARED_TARGETS)),
-            "{}",
-            shared.display()
-        );
-        // A task's checkout, a subdirectory, and another run of the same repository.
+        let canon = dunce::canonicalize(&root).unwrap();
+        let want = |run: &str, tree: &str| canon.join(run).join(SHARED_TARGETS).join(tree);
+        // One per worktree: two tasks of one run, its checkout, and other runs never share.
+        assert_eq!(target(&integration), want("ab12cd34", "integration"));
+        assert_eq!(target(&task), want("ab12cd34", "auth"));
+        assert_eq!(target(&sibling), want("ab12cd34", "api"));
+        assert_eq!(target(&other_run), want("ff00ee11", "integration"));
+        assert_eq!(target(&other_repo), want("99887766", "integration"));
+        // The worker and the hub's checks in one checkout build together; a subdirectory too.
         std::fs::create_dir_all(task.join("src")).unwrap();
-        for cwd in [task.clone(), task.join("src"), second] {
-            assert_eq!(target(&cwd), shared, "{}", cwd.display());
+        assert_eq!(target(&task.join("src")), target(&task));
+        // Build directories, the run's own directory and the old shared ones are no checkouts.
+        for cwd in [
+            target(&task),
+            root.join("ab12cd34"),
+            root.join("ab12cd34").join("target"),
+            root.join(SHARED_TARGETS).join("repo-0000aaaa"),
+        ] {
+            assert_eq!(worktree_env(&root, &cwd), None, "{}", cwd.display());
         }
-        // Another repository builds apart.
-        assert_ne!(target(&elsewhere), shared);
-        // A directory that is not a worktree keeps the run's own.
-        let plain = root.join("55443322").join("integration");
-        std::fs::create_dir_all(&plain).unwrap();
-        assert!(target(&plain).ends_with(Path::new("55443322").join("target")));
-        // The shared directories are nobody's checkout.
-        assert_eq!(worktree_env(&root, &shared), None);
+    }
+
+    /// Fills a build directory with `bytes` of "artefacts".
+    fn built(dir: &Path, bytes: usize) {
+        std::fs::create_dir_all(dir.join("debug/deps")).unwrap();
+        std::fs::write(dir.join("debug/deps/lib.rlib"), vec![0u8; bytes]).unwrap();
+    }
+
+    #[test]
+    fn a_build_directory_goes_when_its_checkout_does() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("worktrees");
+        let run = "ab12cd34";
+        let (integration, task, gone) = (
+            target_dir(&root, run, "integration"),
+            target_dir(&root, run, "auth"),
+            target_dir(&root, run, "gone"),
+        );
+        for dir in [&integration, &task, &gone] {
+            built(dir, 10);
+        }
+        std::fs::create_dir_all(worktree_path(&root, run, "auth")).unwrap();
+        std::fs::create_dir_all(worktree_path(&root, run, "integration")).unwrap();
+
+        // `gone`'s checkout is not there any more; the others are.
+        assert_eq!(
+            prune_run_targets(&root, run, &std::collections::HashSet::new()),
+            [(gone.clone(), 10)]
+        );
+        assert!(integration.exists() && task.exists());
+
+        // Removing the run's checkout takes its own build directory and nothing else.
+        std::fs::remove_dir_all(worktree_path(&root, run, "integration")).unwrap();
+        assert_eq!(
+            prune_run_targets(&root, run, &std::collections::HashSet::new()),
+            [(integration.clone(), 10)]
+        );
+        assert!(task.exists(), "a task still builds there");
+        assert!(integration.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn what_is_being_verified_is_kept_and_leftovers_go() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("worktrees");
+        let run = "ab12cd34";
+        let verifying = target_dir(&root, run, "auth");
+        let trash = target_dir(&root, run, ".trash-api-1");
+        built(&verifying, 10);
+        built(&trash, 10);
+        // Its checkout is gone (a run cancelled mid-verification), the task still verifies.
+        let keep = std::collections::HashMap::from([(
+            run.to_owned(),
+            std::collections::HashSet::from(["auth".to_owned()]),
+        )]);
+        assert!(prune_all_targets(&root, &keep).is_empty());
+        assert!(verifying.exists(), "a check may still be writing there");
+        assert!(!trash.exists(), "a leftover of an interrupted delete goes");
     }
 
     #[tokio::test]
-    async fn only_idle_build_directories_over_the_limit_are_removed() {
+    async fn old_shared_directories_go_once_no_run_maps_to_them() {
         let repo = repo().await;
         let home = tempfile::tempdir().unwrap();
         let root = home.path().join("worktrees");
@@ -938,24 +1238,28 @@ mod tests {
             .create(repo.path(), "ca/open", "main", &open)
             .await
             .unwrap();
-        let busy = PathBuf::from(worktree_env(&root, &open).unwrap().1);
         let shared = root.join(SHARED_TARGETS);
-        let (idle, small) = (shared.join("gone-0000aaaa"), shared.join("tiny-0000bbbb"));
-        let leftover = shared.join(".trash-old-1");
-        for (dir, bytes) in [(&busy, 100), (&idle, 100), (&small, 5), (&leftover, 1)] {
-            std::fs::create_dir_all(dir.join("debug/deps")).unwrap();
-            std::fs::write(dir.join("debug/deps/lib.rlib"), vec![0u8; bytes]).unwrap();
+        let busy = shared.join(repo_key(&open).unwrap());
+        let (idle, leftover) = (shared.join("gone-0000aaaa"), shared.join(".trash-old-1"));
+        for dir in [&busy, &idle, &leftover] {
+            built(dir, 100);
         }
 
-        let removed = prune_shared_targets(&root, 50);
-        assert_eq!(removed, [(idle.clone(), 100)]);
+        // Every one of them is past the limit; only the one a live worktree maps to stays.
+        assert_eq!(prune_shared_targets(&root, 0), [(idle.clone(), 100)]);
         assert!(!idle.exists() && !leftover.exists());
-        // An open run's directory stays over the limit; an idle one under it stays too.
-        assert!(busy.exists() && small.exists());
-        // Once the run's checkout goes, its directory can go as well.
+        assert!(busy.exists());
+        // The old fallback `<run>/target` goes once nothing else is in the run's directory.
+        let legacy = root.join("ab12cd34").join("target");
+        built(&legacy, 100);
         std::fs::remove_dir_all(&open).unwrap();
-        assert_eq!(prune_shared_targets(&root, 50), [(busy.clone(), 100)]);
-        assert!(prune_shared_targets(&home.path().join("nowhere"), 0).is_empty());
+        assert_eq!(prune_legacy_run_targets(&root), [(legacy.clone(), 100)]);
+        assert!(!legacy.exists());
+        // What is left is counted, and the old shared directory goes with it.
+        assert!(build_cache_size(&root) >= 100);
+        assert_eq!(prune_shared_targets(&root, 0), [(busy.clone(), 100)]);
+        assert_eq!(build_cache_size(&home.path().join("nowhere")), 0);
+        assert!(prune_run_targets(&home.path().join("nowhere"), "x", &Default::default()).is_empty());
     }
 
     #[tokio::test]

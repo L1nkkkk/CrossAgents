@@ -269,23 +269,16 @@ impl Orchestrator {
         Err(last.unwrap_or_else(|| CoreError::Storage("cannot remove the working copy".into())))
     }
 
-    /// Removes `<worktrees>/<short>/target`, and the run's directory once nothing else is in
-    /// it, recording what went and what could not (`remove_run_build` for callers that only
-    /// want it logged).
+    /// Removes `<worktrees>/<short>/targets` (every tree's build directory) and the old
+    /// `<short>/target`, then the run's directory once nothing else is in it; records what went.
     fn remove_run_build_into(&self, run: &Run, done: &mut DeletedRun) {
-        let dir = self.config.worktrees.join(short(run.id));
-        let target = dir.join("target");
-        if target.exists() {
-            match std::fs::remove_dir_all(&target) {
-                Ok(()) => done.worktrees.push(target.display().to_string()),
-                Err(err) => done.warnings.push(format!(
-                    "cannot remove the run's build directory {}: {err}",
-                    target.display()
-                )),
-            }
+        let key = short(run.id);
+        for (path, _size) in crate::workspace::remove_run_build_dirs(&self.config.worktrees, &key)
+        {
+            done.worktrees.push(path.display().to_string());
         }
         // Fails while a task's checkout is still there; those are removed above.
-        let _ = std::fs::remove_dir(&dir);
+        let _ = std::fs::remove_dir(self.config.worktrees.join(&key));
         self.prune_build_cache();
     }
 }

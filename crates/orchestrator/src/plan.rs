@@ -21,6 +21,12 @@ pub fn validate(tasks: &[PlannedTask]) -> Result<(), String> {
                 "task key {key:?} must be 1-{KEY_MAX} characters of a-z, 0-9 and -"
             ));
         }
+        // Its worktree would be `<run>/targets`, where every worktree of the run builds.
+        if key == crate::workspace::SHARED_TARGETS {
+            problems.push(format!(
+                "task key {key:?} is taken by the build directories; choose another"
+            ));
+        }
         if !keys.insert(key.as_str()) {
             problems.push(format!("duplicate task key {key:?}"));
         }
@@ -270,6 +276,9 @@ mod tests {
         let mut no_check = planned("c", &[]);
         no_check.spec.acceptance.clear();
         assert!(validate(&[no_check]).is_ok());
+        // The build directories live in `<run>/targets`, so no task may be called that.
+        let err = validate(&[planned("targets", &[])]).unwrap_err();
+        assert!(err.contains("build directories"), "{err}");
     }
 
     #[test]

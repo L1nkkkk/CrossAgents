@@ -141,8 +141,9 @@ struct HubSection {
     runtime_hosts: Option<bool>,
     /// Write every event to a JSON-lines file per day under `logs/` (default on).
     event_log: Option<bool>,
-    /// Gigabytes a repository's shared build directory may reach before it is removed once
-    /// no run uses it (default 30).
+    /// Gigabytes all build output under the worktrees may reach before the hub warns; what
+    /// nothing uses is reclaimed first (default 60). See
+    /// `OrchestratorConfig::build_cache_limit`.
     build_cache_gb: Option<u64>,
 }
 
@@ -243,7 +244,9 @@ mod tests {
         let paths = Paths::new(dir.path());
         let defaults = HubConfig::load(paths.clone()).unwrap();
         assert_eq!(defaults.port, DEFAULT_PORT);
-        assert_eq!(defaults.build_cache_limit, 30 << 30);
+        // One build directory per worktree now, so a workspace needs more room than when a
+        // repository shared one (docs/TODO.md §九 ②).
+        assert_eq!(defaults.build_cache_limit, 60 << 30);
         std::fs::write(paths.config(), "[hub]\nport = 0\nbuild_cache_gb = 8\n").unwrap();
         let config = HubConfig::load(paths).unwrap();
         assert_eq!(config.port, 0);
