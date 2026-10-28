@@ -523,11 +523,14 @@ mod tests {
             std::fs::write(d.join("Cargo.toml"), "").unwrap();
         }
         let env = worktree_env(&root, &task);
-        let [(key, value)] = env.as_slice() else {
-            panic!("{env:?}")
+        let target_var = |env: Vec<(String, String)>| {
+            env.iter()
+                .find(|(name, _)| name == "CARGO_TARGET_DIR")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| panic!("{env:?}"))
         };
-        assert_eq!(key, "CARGO_TARGET_DIR");
-        let target = PathBuf::from(value);
+        let value = target_var(env.clone());
+        let target = PathBuf::from(&value);
         assert!(target.is_absolute());
         // Its own directory, under its run and its tree, never the run's or a sibling's.
         assert!(
@@ -539,8 +542,18 @@ mod tests {
             ),
             "{value}"
         );
-        assert_ne!(worktree_env(&root, &integration)[0].1, *value);
-        assert_ne!(worktree_env(&root, &other)[0].1, *value);
+        // The agent holds the same build directory the preset injects into it (LOCKS §3).
+        let (name, json) = env
+            .iter()
+            .find(|(name, _)| name == "CROSSAGENTS_RESOURCES")
+            .unwrap_or_else(|| panic!("{env:?}"));
+        assert_eq!(name, "CROSSAGENTS_RESOURCES");
+        let resources: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(resources[0]["name"], "build");
+        assert_eq!(resources[0]["path"], value.as_str());
+
+        assert_ne!(target_var(worktree_env(&root, &integration)), value);
+        assert_ne!(target_var(worktree_env(&root, &other)), value);
         // Chats in a person's checkout, the root itself, the run's directory and the build
         // directories keep the inherited setting.
         std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();

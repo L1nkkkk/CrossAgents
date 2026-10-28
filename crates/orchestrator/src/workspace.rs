@@ -710,12 +710,23 @@ pub fn target_dir(root: &Path, run: &str, tree: &str) -> PathBuf {
 
 /// The environment agents and the hub's checks get when `cwd` is in one of a run's worktrees
 /// under `root`: what the checkout's presets and `crossagents.toml` declare (docs/tasks/
-/// TOOLCHAIN.md §3), placeholders filled in. The same for both, or they would build into
-/// different directories. Empty outside a run worktree.
+/// TOOLCHAIN.md §3), placeholders filled in, and its resources in [`project::RESOURCES_ENV`]
+/// (docs/tasks/LOCKS.md §3). The same for both, or they would build into different
+/// directories. Empty outside a run worktree.
 pub fn worktree_env(root: &Path, cwd: &Path) -> Vec<(String, String)> {
-    worktree_run_env(root, cwd)
-        .map(|env| env.vars.into_iter().map(|v| (v.name, v.value)).collect())
-        .unwrap_or_default()
+    let Some(env) = worktree_run_env(root, cwd) else {
+        return Vec::new();
+    };
+    let mut vars: Vec<(String, String)> = env.vars.into_iter().map(|v| (v.name, v.value)).collect();
+    // The executor's commands in an agent's shell and the hub's checks hold the same
+    // resources, at the same paths.
+    if !env.resources.is_empty() {
+        vars.push((
+            crate::project::RESOURCES_ENV.to_owned(),
+            crate::project::resources_json(&env.resources),
+        ));
+    }
+    vars
 }
 
 /// [`worktree_env`] with where each variable comes from, and what was left unset.
@@ -731,6 +742,10 @@ pub fn worktree_run_env(root: &Path, cwd: &Path) -> Option<crate::project::RunEn
         }
         var.value = crate::project::fill(&var.value, &build, &checkout);
     }
+    if env.resources.iter().any(|r| r.path.contains("{build}")) {
+        let _ = std::fs::create_dir_all(&build);
+    }
+    crate::project::fill_resources(&mut env.resources, &build, &checkout);
     Some(env)
 }
 
