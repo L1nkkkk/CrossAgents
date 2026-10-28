@@ -14,8 +14,9 @@ async-trait.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync", "process"] }
+tokio = { workspace = true, features = ["sync", "process", "time", "rt"] }
 tracing.workspace = true
 ts-rs = { workspace = true, optional = true }
 uuid.workspace = true
@@ -31,10 +32,17 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 name = "lock_kill_helper"
 path = "tests/support/lock_kill_helper.rs"
 
+# Only for `tests/exec_locks.rs`: a second process that holds a lock, so the test can prove
+# the locks exclude across processes and not just across tasks.
+[[bin]]
+name = "exec_lock_helper"
+path = "tests/support/exec_lock_helper.rs"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.191"
 
 [dev-dependencies]
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
