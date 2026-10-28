@@ -8,8 +8,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crossagents_core::exec::{
-    Access, ExecError, Holder, Request, Resource, acquire, holders_dir, inherited_holds,
-    process_created, spawn, wait_tree_empty,
+    Access, ExecError, Holder, LockFile, Request, Resource, acquire, holders_dir, inherited_holds,
+    lock_name, lock_path, process_created, spawn, wait_tree_empty,
 };
 use tempfile::TempDir;
 
@@ -137,6 +137,91 @@ async fn exec_nested_claim_needs_the_outer_process_to_be_alive() {
             .is_none(),
         "a record whose root process is gone must fall back to taking the locks"
     );
+}
+
+// --- §4.5: a stale CROSSAGENTS_HELD value is not an outer hold -----------------------------
+
+/// A `CROSSAGENTS_HELD` value for `path` whose holder record names a root process that is
+/// gone (PID 4 with creation time 1) — what an outer exec leaves in a long-lived shell after
+/// it exits. The open handle is returned so it stays valid while the value is checked: the
+/// handle is real, the outer process is not.
+fn stale_held(locks: &Path, path: &Path, exec_id: &str, access: Access) -> (LockFile, String) {
+    std::fs::create_dir_all(locks).expect("create the locks directory");
+    let file = LockFile::open(&lock_path(locks, path)).expect("open the lock file");
+    let record = holders_dir(locks, path).join(format!("{exec_id}.json"));
+    std::fs::create_dir_all(record.parent().expect("the holders directory"))
+        .expect("create the holders directory");
+    Holder {
+        exec_id: exec_id.to_owned(),
+        resource: "build".to_owned(),
+        path: path.to_path_buf(),
+        access,
+        command: "cargo test".to_owned(),
+        agent: Some("Kai".to_owned()),
+        run: None,
+        root_pid: Some(4),
+        root_created: Some(1),
+        tree: None,
+        started_at: chrono::Utc::now(),
+    }
+    .write(&record)
+    .expect("write the record");
+    let value = format!(
+        "{exec_id};{}.lock:{}:{}",
+        lock_name(path),
+        access.as_str(),
+        file.raw()
+    );
+    (file, value)
+}
+
+#[tokio::test]
+async fn exec_stale_held_value_does_not_report_a_missing_resource() {
+    let dir = temp();
+    let locks = dir.path().join("locks");
+    let declared = resource(dir.path(), "declared");
+    let other = resource(dir.path(), "other");
+    let (_file, value) = stale_held(&locks, &declared, "gone", Access::Shared);
+
+    // An outer exec that is gone never declared `other` — but that is not a request mistake,
+    // it means the environment value is worthless, so the locks are taken normally.
+    let resources = vec![Resource::new("other", other.clone(), Access::Shared)];
+    assert!(
+        inherited_holds(&locks, &value, &resources)
+            .expect("a stale value is not an error")
+            .is_none(),
+        "a dead outer exec must not turn a new resource into a Nesting error"
+    );
+    acquire(
+        &locks,
+        &request("cargo check", &other, Access::Shared, millis(5_000)),
+        |_| {},
+    )
+    .await
+    .expect("the request takes the locks like any other");
+}
+
+#[tokio::test]
+async fn exec_stale_shared_value_does_not_block_an_exclusive_request() {
+    let dir = temp();
+    let locks = dir.path().join("locks");
+    let build = resource(dir.path(), "build");
+    let (_file, value) = stale_held(&locks, &build, "gone", Access::Shared);
+
+    let resources = vec![Resource::new("build", build.clone(), Access::Exclusive)];
+    assert!(
+        inherited_holds(&locks, &value, &resources)
+            .expect("a stale value is not an error")
+            .is_none(),
+        "a dead outer exec's shared claim cannot be an upgrade error"
+    );
+    acquire(
+        &locks,
+        &request("cargo test", &build, Access::Exclusive, millis(5_000)),
+        |_| {},
+    )
+    .await
+    .expect("the request takes the lock normally and runs");
 }
 
 // --- §5 conclusion 3: a predecessor's root process holds the lock until it is gone ----------

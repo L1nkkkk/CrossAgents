@@ -113,12 +113,19 @@ impl Claim {
 
 /// Whether `value` (a `CROSSAGENTS_HELD` value) still covers every resource in `resources`.
 ///
-/// * `Ok(Some(_))` — it does: the caller may run without taking the locks again.
-/// * `Ok(None)` — there is no usable inherited hold (absent, malformed, a closed handle, a
-///   handle to another file, or a record of a process that is gone): take the locks normally.
-/// * `Err(`[`ExecError::Nesting`]`)` — the resource is genuinely held by the outer exec, but
-///   at a lower access than asked, or the outer exec does not hold it at all. This is a
-///   mistake in the request, and waiting could never fix it.
+/// The value is proved real first: every claim must be a handle to the lock file at its path,
+/// and the outer exec's record must name a root process that is still running. A leftover
+/// value in a long-lived shell — the outer exec exited long ago — or a forged one is not
+/// evidence of anything, so it gives `Ok(None)` and the request takes the locks normally.
+///
+/// Only a **real** outer hold is then compared with the request (§4.5's table):
+///
+/// * `Ok(Some(_))` — it covers every resource: the caller may run without taking the locks.
+/// * `Ok(None)` — no usable inherited hold (absent, malformed, a closed handle, a handle to
+///   another file, or a record of a process that is gone): take the locks normally.
+/// * `Err(`[`ExecError::Nesting`]`)` — the outer exec really holds the resource, but at a
+///   lower access than asked, or does not hold it at all. This is a mistake in the request,
+///   and waiting could never fix it.
 pub fn inherited_holds(
     locks_dir: &Path,
     value: &str,
@@ -128,7 +135,17 @@ pub fn inherited_holds(
         return Ok(None);
     };
 
-    // The table in §4.5 first: what the request wants versus what the outer exec declared.
+    // A name in the environment is not a lock. Until every claim checks out, treat the value
+    // as absent: the table below must not turn a stale or forged value into an error.
+    let real = inherited
+        .claims
+        .iter()
+        .all(|claim| claim_still_holds(locks_dir, &inherited.exec_id, claim));
+    if !real {
+        return Ok(None);
+    }
+
+    // It is real: what the request wants versus what the outer exec declared (§4.5).
     for resource in resources {
         let name = format!("{}.lock", lock_name(&resource.path));
         let Some(claim) = inherited.claim(&name) else {
@@ -153,14 +170,7 @@ pub fn inherited_holds(
         }
     }
 
-    // Then the proof: a name in the environment is not a lock.
-    let covers = resources.iter().all(|resource| {
-        let name = format!("{}.lock", lock_name(&resource.path));
-        inherited
-            .claim(&name)
-            .is_some_and(|claim| claim_still_holds(locks_dir, &inherited.exec_id, claim))
-    });
-    Ok(covers.then_some(inherited))
+    Ok(Some(inherited))
 }
 
 /// The outer exec's claim is real: the handle is the lock file at its path, and the outer
