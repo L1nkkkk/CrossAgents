@@ -7,10 +7,10 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell, session, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
-import { autoUpdater } from "electron-updater";
 import { allowed, route } from "./allowed.cjs";
 import { manageLocalHub, type LocalHub } from "./localHub.cjs";
 import { createTray, type AppTray } from "./tray.cjs";
+import { startUpdates, type Updates } from "./updates.cjs";
 
 const METHODS = new Set(["GET", "POST", "DELETE"]);
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -70,6 +70,8 @@ async function connection(): Promise<{ base: string; token: string }> {
 let localHub: LocalHub | undefined;
 /** The tray icon that keeps the GUI around while that hub runs (electron/tray.cts); packaged only. */
 let tray: AppTray | undefined;
+/** The GUI's own updates; packaged only. */
+let updates: Updates | undefined;
 
 function message(err: unknown): string {
   if (err instanceof Error) {
@@ -122,6 +124,13 @@ ipcMain.handle("hub:dev", async (event) => {
   if (!fromApp(event)) return null;
   await localHub?.ready();
   return localHub?.devHub() ?? null;
+});
+
+/** The GUI's own update (electron/updates.cts); null where it does not update itself. */
+ipcMain.handle("update:get", (event) => (fromApp(event) ? (updates?.state() ?? null) : null));
+ipcMain.handle("update:check", async (event) => (fromApp(event) && updates ? updates.check() : null));
+ipcMain.on("update:install", (event) => {
+  if (fromApp(event)) updates?.install();
 });
 
 /** Swaps the development hub for the shipped one; resolves to an error message or null. */
@@ -442,15 +451,10 @@ app.whenReady().then(() => {
   if (app.isPackaged) {
     const exe = process.platform === "win32" ? "crossagents.exe" : "crossagents";
     localHub = manageLocalHub(join(process.resourcesPath, "bin", exe), hubHome(), logLine);
-    tray = createTray(join(process.resourcesPath, "icon.ico"), localHub, showWindow, logLine);
     // Downloads a newer release in the background and installs it when the GUI quits; the
     // next launch then upgrades the local hub (package.json `build.publish`).
-    const updaterLog = (m: unknown) => logLine(`updater: ${String(m)}`);
-    autoUpdater.logger = { info: updaterLog, warn: updaterLog, error: updaterLog };
-    // The logger above already has the details; one line is enough here.
-    autoUpdater
-      .checkForUpdatesAndNotify()
-      .catch((err: unknown) => logLine(`update check failed: ${message(err).split("\n")[0]}`));
+    updates = startUpdates(logLine);
+    tray = createTray(join(process.resourcesPath, "icon.ico"), localHub, showWindow, logLine, updates);
   }
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   session.defaultSession.setPermissionCheckHandler(() => false);

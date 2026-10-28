@@ -22,7 +22,7 @@ import type { TaskReviewRequest } from "@bindings/TaskReviewRequest";
 import type { Transcript } from "@bindings/Transcript";
 import type { UsageGroup } from "@bindings/UsageGroup";
 import type { UsageResponse } from "@bindings/UsageResponse";
-import type { CrossAgentsBridge, HubResponse } from "../bridge";
+import type { CrossAgentsBridge, HubResponse, UpdateState } from "../bridge";
 import type { HubEvent } from "../hub";
 import { turnStat } from "../lib/diff";
 import { effortOf } from "../lib/models";
@@ -155,6 +155,35 @@ export class MockBridge implements CrossAgentsBridge {
       return json(500, { error: { code: "internal", message: `mock: ${err}` } });
     }
   }
+
+  /** An update that is found, downloads in a few steps and waits to be installed. */
+  private update: UpdateState = { state: "latest", current: __BUILD__.version, checked_at: new Date().toISOString() };
+  private updateListeners = new Set<(state: UpdateState) => void>();
+  private setUpdate(state: UpdateState) {
+    this.update = state;
+    for (const listener of this.updateListeners) listener(state);
+  }
+  updates = {
+    get: async () => this.update,
+    check: async () => {
+      const current = __BUILD__.version;
+      this.setUpdate({ state: "checking", current });
+      await new Promise((r) => setTimeout(r, 600));
+      for (const percent of [0, 35, 80]) {
+        this.setUpdate({ state: "downloading", current, version: "9.9.9", percent });
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      this.setUpdate({ state: "ready", current, version: "9.9.9" });
+      return this.update;
+    },
+    install: () => this.setUpdate({ state: "error", current: __BUILD__.version, message: "mock: 不会真的安装", checked_at: new Date().toISOString() }),
+    onState: (listener: (state: UpdateState) => void) => {
+      this.updateListeners.add(listener);
+      return () => {
+        this.updateListeners.delete(listener);
+      };
+    },
+  };
 
   startEvents() {
     if (this.started) return;

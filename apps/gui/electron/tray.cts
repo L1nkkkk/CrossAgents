@@ -1,12 +1,14 @@
 // The tray icon of a packaged GUI. The hub it starts runs on after the window closes, so the
 // window closes to the tray instead of quitting: the icon shows the hub is there, and its menu
-// opens the window again or stops the hub and its agents for good.
+// opens the window again or stops the hub and its agents for good, and checks for or installs
+// an update of the GUI.
 
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { app, BrowserWindow, dialog, Menu, nativeImage, Tray } from "electron";
+import { app, BrowserWindow, dialog, Menu, nativeImage, Tray, type MenuItemConstructorOptions } from "electron";
 import type { LocalHub } from "./localHub.cjs";
+import type { Updates } from "./updates.cjs";
 
 /** Set once the GUI is really quitting, so closing the window no longer just hides it. */
 let quitting = false;
@@ -23,16 +25,34 @@ export type AppTray = {
  * Puts the icon in the tray. `icon` is an .ico or .png file; `show` brings the window back
  * (creating it if needed); `log` gets what the tray did to the hub.
  */
-export function createTray(icon: string, hub: LocalHub, show: () => void, log: (line: string) => void): AppTray {
+export function createTray(icon: string, hub: LocalHub, show: () => void, log: (line: string) => void, updates: Updates): AppTray {
   const tray = new Tray(nativeImage.createFromPath(icon));
   tray.setToolTip("CrossAgents");
   let stopping = false;
+  updates.onChange((state) => {
+    if (state.state === "ready") tray.setToolTip(`CrossAgents：${state.version} 已下载，退出时安装`);
+  });
+
+  const update = (): MenuItemConstructorOptions => {
+    const state = updates.state();
+    switch (state.state) {
+      case "ready":
+        return { label: `重启并更新到 ${state.version}`, click: () => updates.install(), enabled: !stopping };
+      case "downloading":
+        return { label: `正在下载 ${state.version}（${state.percent}%）`, enabled: false };
+      case "checking":
+        return { label: "正在检查更新…", enabled: false };
+      default:
+        return { label: `检查更新（当前 ${state.current}）`, click: () => void updates.check(), enabled: !stopping };
+    }
+  };
 
   const menu = (running: boolean) =>
     Menu.buildFromTemplate([
       { label: stopping ? "正在停止后台…" : running ? "后台运行中" : "后台未运行", enabled: false },
       { type: "separator" },
       { label: "打开 CrossAgents", click: show, enabled: !stopping },
+      update(),
       { type: "separator" },
       { label: "退出界面（后台继续运行）", click: () => app.quit(), enabled: !stopping },
       { label: "停止后台并退出", click: () => void stop(), enabled: !stopping },
