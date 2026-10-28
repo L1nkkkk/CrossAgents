@@ -217,6 +217,7 @@ B3 远程开发：
 - [ ] C1 run 复盘：从 trace 产出「现象 / 影响 / 方向」表到 `docs/tasks/RETRO-<run>.md`
 - [ ] C2 主导从复盘里挑一条开新 run 去修（计划仍要人批）
 - [ ] C3 改 hub 的任务在 `hub sandbox` 里跑冒烟再收尾
+- [ ] L1–L3 共享教训：agent 用 `lesson_propose` 记踩过的坑，人（或 policy 允许时主导）批准后注入同仓库所有 agent 的开场说明（任务书 [tasks/LESSONS.md](tasks/LESSONS.md)）
 - [x] 落地到人自己的 checkout 时，只在暂存区有改动、或未提交 / 未跟踪的文件与 run 要改的文件重叠时拒绝，其余改动原样保留（2026-10-26，`workspace.rs::check_checkout`；之前一律拒绝，人在主目录改着别的东西时 run 落不了地）
 
 ## 十二、run 的收尾：再开 Work 与删除
