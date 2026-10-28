@@ -635,7 +635,7 @@ function fakeSha(seed: string): string {
 /**
  * The commit graph (`#/runs/<id>/graph`): main moved on after the run branched; #a and #b are
  * merged into the run branch (merge commits), #c is still at work on its own branch. Rex's #c
- * session gets a graph too (HEAD and local branches) for the session page's panel.
+ * session gets a graph too (HEAD and local branches), shown in the tool column.
  */
 export function graphRun(page: "run" | "session" = "run"): { state: MockState; script: Step[]; route: string } {
   const scene = oauthRun("running");

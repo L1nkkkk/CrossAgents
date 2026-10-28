@@ -12,6 +12,7 @@ import { api, errorText } from "./api";
 import type { DevHub } from "./bridge";
 import type { HubInfo } from "@bindings/HubInfo";
 import { buildTag, compareBuilds } from "./lib/build";
+import { useUpdateState } from "./lib/updates";
 import { ACTIVE_RUN, runAgents } from "./App";
 import { Avatar, BrandMark, Icon, Mark, agentTitle, displayName, hueOf, isAgent, runTone, sessionHref } from "./components";
 import { DeleteRunDialog } from "./deleteRun";
@@ -148,6 +149,7 @@ export function Sidebar({ route }: { route: string[] }) {
         </div>
 
         <div className="foot">
+          <UpdateNotice />
           <DevHubNotice />
           <QuotaMini />
           <div className="foot-row">
@@ -433,7 +435,7 @@ function Archived({ agents, isSession }: { agents: Agent[]; isSession: (a: Agent
       </div>
       {open &&
         sorted.map((a) => (
-          <div key={a.id} className={`row dim ${isSession(a) ? "active" : ""}`}>
+          <div key={a.id} className={`nav-row dim ${isSession(a) ? "active" : ""}`}>
             <a className="row-link" href={sessionHref(a)} title={`${labelOf(a)} · ${displayName(a)}`}>
               <span className="row-lead">
                 <Avatar agent={a} size={16} />
@@ -492,7 +494,7 @@ function Row({
     if (beside) openBeside(beside);
   };
   return (
-    <div className={`row ${active ? "active" : ""} ${dim ? "dim" : ""}`}>
+    <div className={`nav-row ${active ? "active" : ""} ${dim ? "dim" : ""}`}>
       <a
         className="row-link"
         href={href}
@@ -666,5 +668,27 @@ function Versions({ hub }: { hub: HubInfo }) {
       {cmp.same ? `v${hub.version}` : t("build.differs", { page: cmp.page, hub: cmp.hub })}
       {dev && <span className="dev">dev</span>}
     </span>
+  );
+}
+
+/**
+ * A downloaded update, offered where the person looks anyway: it installs by itself when the
+ * GUI quits, but the tray keeps the GUI running for days. 稍后 hides it until the next version.
+ */
+function UpdateNotice() {
+  const [state] = useUpdateState();
+  const [later, setLater] = useState<string>();
+  if (state?.state !== "ready" || later === state.version) return null;
+  return (
+    <div className="update-ready" title="重启只换界面：后台的 hub 和 agent 不会中断，重新打开后自动换成新版本">
+      <Icon name="info" size={14} />
+      <span className="update-text">新版本 {state.version} 已下载</span>
+      <button className="link" onClick={() => setLater(state.version)}>
+        稍后
+      </button>
+      <button className="primary small" onClick={() => window.crossagents?.updates?.install()}>
+        重启更新
+      </button>
+    </div>
   );
 }

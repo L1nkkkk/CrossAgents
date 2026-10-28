@@ -174,7 +174,7 @@ button.file-link.code:hover { background: color-mix(in srgb, var(--accent) 18%, 
 .fv-empty.err { color: var(--danger-text); }
 
 .fv-code { flex: 1; overflow: auto; font-family: var(--font-mono); font-size: var(--mono-size, 12.5px); line-height: 1.6; }
-.fv-code table { border-collapse: collapse; min-width: 100%; }
+.fv-code table { border-collapse: collapse; width: 100%; }
 .fv-code td { padding: 0; vertical-align: top; }
 .fv-code td.ln {
   position: sticky;
@@ -191,7 +191,8 @@ button.file-link.code:hover { background: color-mix(in srgb, var(--accent) 18%, 
   border-right: 1px solid var(--border);
 }
 .fv-code td.ln:hover { color: var(--text); opacity: 1; }
-.fv-code td.src { padding: 0 16px; white-space: pre; color: var(--text); }
+.fv-code td.ln { width: 1%; }
+.fv-code td.src { padding: 0 16px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
 .fv-code tr:first-child td { padding-top: 8px; }
 .fv-code tr:last-child td { padding-bottom: 14px; }
 .fv-code tr.hit td.src { background: color-mix(in srgb, var(--accent) 14%, transparent); }

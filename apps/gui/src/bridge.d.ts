@@ -6,6 +6,15 @@ export type HubResponse = { status: number; body: string };
 /** A development build of the hub running where the GUI's own would (electron/localHub.cts). */
 export type DevHub = { exe: string; running: string; shipped: string };
 
+/** Where the GUI's own update stands (electron/updates.cts). Times are ISO strings. */
+export type UpdateState =
+  | { state: "idle"; current: string }
+  | { state: "checking"; current: string }
+  | { state: "latest"; current: string; checked_at: string }
+  | { state: "downloading"; current: string; version: string; percent: number }
+  | { state: "ready"; current: string; version: string }
+  | { state: "error"; current: string; message: string; checked_at: string };
+
 export interface CrossAgentsBridge {
   /** Forwards one API request to the hub. Rejects when the hub cannot be reached. */
   request(method: string, path: string, body: string | null): Promise<HubResponse>;
@@ -29,6 +38,13 @@ export interface CrossAgentsBridge {
   openPath?(scope: string, path: string): Promise<void>;
   /** The page's theme changed: the window frame follows it. */
   setTheme?(theme: { dark: boolean; background: string; foreground: string }): void;
+  /** The GUI's update, and checking or installing it. `null`: this build does not update itself. */
+  updates?: {
+    get(): Promise<UpdateState | null>;
+    check(): Promise<UpdateState | null>;
+    install(): void;
+    onState(listener: (state: UpdateState) => void): () => void;
+  };
   /** A window command from the page's menu (electron/main.cts `COMMANDS`). */
   command?(name: "zoomIn" | "zoomOut" | "zoomReset" | "reload" | "devtools" | "fullscreen" | "quit"): void;
 }

@@ -153,6 +153,19 @@ impl MockAgent {
                 .await;
         }
 
+        // `[running]` starts a command and never says it ended, like a build left going in
+        // the background while the agent carries on.
+        if text.contains("[running]") {
+            self.update(
+                &session_id,
+                json!({
+                    "sessionUpdate": "tool_call", "toolCallId": "bg1",
+                    "title": "cargo test --workspace", "kind": "execute", "status": "in_progress"
+                }),
+            )
+            .await;
+        }
+
         // `[env NAME]` reports an environment variable (tests check account binding).
         if let Some(rest) = text.split("[env ").nth(1)
             && let Some(name) = rest.split(']').next()

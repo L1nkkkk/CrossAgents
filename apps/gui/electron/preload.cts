@@ -2,7 +2,7 @@
 // `CrossAgentsBridge`; no Electron or Node API reaches the page.
 
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
-import type { CrossAgentsBridge, HubResponse } from "../src/bridge";
+import type { CrossAgentsBridge, HubResponse, UpdateState } from "../src/bridge";
 
 type Reply = { ok: true; response: HubResponse } | { ok: false; error: string };
 
@@ -32,6 +32,18 @@ const bridge: CrossAgentsBridge = {
   async openPath(scope, path) {
     const error: string | null = await ipcRenderer.invoke("shell:open-path", scope, path);
     if (error) throw new Error(error);
+  },
+  updates: {
+    get: () => ipcRenderer.invoke("update:get"),
+    check: () => ipcRenderer.invoke("update:check"),
+    install: () => ipcRenderer.send("update:install"),
+    onState(listener) {
+      const wrapped = (_event: IpcRendererEvent, state: UpdateState) => listener(state);
+      ipcRenderer.on("update:state", wrapped);
+      return () => {
+        ipcRenderer.removeListener("update:state", wrapped);
+      };
+    },
   },
   setTheme: (theme) => ipcRenderer.send("theme:changed", theme),
   command: (name) => ipcRenderer.send("window:command", name),

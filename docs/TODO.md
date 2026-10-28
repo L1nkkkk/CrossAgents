@@ -195,6 +195,7 @@ B3 远程开发：
   - 持续推进的检查点停在 `working`，重启前后不一致（2026-10-28 修）：`continuation::reserved_due_time_survives_restart_and_default_runs_stay_unchanged`（`:502`）唤醒后读到 `phase="working"`、`next_at=None`，重启同一个 run 变成 `phase="continue"`、`next_at=last_attempt_at+1h`，`attempts` 与 `last_attempt_at` 相同。根因：检查点只在 hub 时钟每秒一次的 `continue_runs` 里写，主导回合结束时没有任何人重算它，于是「主导正在这一轮里」那个观测（`working`、没有预留）被持久化下来；重启后的第一次推导直接是 `continue` 并重新预留，两边自然不同。引入提交 `3d8f6e5`（`feat: add opt-in bounded run continuation`，`git log -S "The lead has a turn or queued messages"` 只命中它，此后 `continue_run` 的调用方一直只有时钟）。修法：`continue_run` 加 `deliver` 开关，新增 `Orchestrator::settle_continuation(lead)`，在 `AgentStatusChanged → Idle`（回合已发布结束、且队列为空时才置 Idle）时按同样的事实重写该 run 的检查点；`deliver=false` 保证不计数、不投递唤醒，已经到期的 `next_at` 留给时钟下一次投递。测试在重启前先 `phase(..., "continue")` 等检查点落定，并断言 `attempts == 1`、`next_at - last_attempt_at == 60 分钟`
 - [ ] plan_approval=required 时主导可以不提计划就动手（2026-10-28 记，未修，要不要拦由人定）：run `43af3611` 的 `plan_approval` 是 `required`，主导一跳过 `plan_submit`，直接在 `planning` 状态下改代码、`git commit` 并调用 `run_finish`，hub 没有拦。现在只在「有计划待批」时卡住流程，主导自己不提计划就绕过了审批门禁；可选做法是 `planning` + `required` 时拒绝改文件的工具与 `run_finish`（或先要求 `plan_submit`），但这会改变主导能干的事，先记下来等决定
 - [ ] `settle_continuation` 会吞掉卡住提醒（2026-10-28 记，未修）：7bc3aff 在主导变 Idle 时调 `continue_run(id, false)`，`deliver=false` 只挡住计数和投递，卡住检测照跑（`continuation.rs` 约 :336-353）。若主导变 Idle 那一刻恰好有 worker 安静满 `stuck_minutes`，这次刷新会写入卡住文案、`next_at=now`，并把 `stuck_watch.progress_at` 重置为现在，但什么都不发；下一秒时钟重算时安静时长已归零，文案退回普通「继续推进」并照常投递，主导收到的是普通唤醒，「N 分钟没进展、在等谁」丢了。修法：`deliver=false` 时跳过卡住判定、不重置 `progress_at`，只刷新 phase / next_step / next_at；补测试：主导在 worker 安静满阈值时变 Idle，下一次唤醒仍是卡住提醒
+- [x] 收尾检查和主导自己的构建抢同一个编译目录（2026-10-28 修）：run `01a182ed…27bd5f0e` 的主导 22:33 自己开了 `cargo test --workspace`，没跑完就调 `run_finish`；hub 在同一个 `<run>/targets/integration` 里再跑一遍，先是 `Blocking waiting for file lock`，再是 Windows 不让覆盖正在执行的测试程序（`LNK1104 adopt-….exe`），被报成「Fix it in your checkout」，主导会去找不存在的 bug。修法三处：orchestrator 从工具调用事件跟踪每个 agent 正在跑的命令（`crates/orchestrator/src/running.rs`，回合结束或进程退出即清空，超过 2 小时没报结束的不算），检查开始前若检出里还有命令在跑就拒绝并说清是谁的哪条命令、从几点开始；检查失败里有 `LNK1104`、`os error 32`、文件锁等「文件被占用」特征时改报环境冲突而不是代码错误；开场说明的 checks 一句加上「hub 自己会跑，只跑和改动相关的测试，收尾前等自己开的构建结束」。测试：`lead.rs::the_checks_wait_for_the_leads_own_build`（mock 的 `[running]` 模拟没结束的命令）、`running.rs` 两条单测
 
 ## 十、agent 描述文件
 
@@ -227,6 +228,7 @@ B3 远程开发：
 - [ ] C2 主导从复盘里挑一条开新 run 去修（计划仍要人批）
 - [ ] C3 改 hub 的任务在 `hub sandbox` 里跑冒烟再收尾
 - [ ] L1–L3 项目排障记录（L1 完成 2026-10-28）：run 中用 `issue/` 笔记随手记问题与绕法，收尾逐条整理进项目 lessons（按稳定的 project_id 跨节点共享、跨项目隔离），按需搜、失败时附相关条目，不当规则注入（任务书 [tasks/LESSONS.md](tasks/LESSONS.md)）
+- [x] T1 hub 核心不绑语言（2026-10-28）：构建目录等环境变量改由预设表（按根目录标志文件命中、可组合）加 `crossagents.toml` 的 `[run.env]` 声明，占位符 `{build}`；没配检查时明确报「未验证」；占用识别分确定 / 可能相关两级。依赖目录（node_modules、.venv）不默认共享，另行设计（任务书 [tasks/TOOLCHAIN.md](tasks/TOOLCHAIN.md)）
 - [x] 落地到人自己的 checkout 时，只在暂存区有改动、或未提交 / 未跟踪的文件与 run 要改的文件重叠时拒绝，其余改动原样保留（2026-10-26，`workspace.rs::check_checkout`；之前一律拒绝，人在主目录改着别的东西时 run 落不了地）
 
 ## 十二、run 的收尾：再开 Work 与删除

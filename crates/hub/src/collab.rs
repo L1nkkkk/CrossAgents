@@ -93,12 +93,38 @@ pub struct CollabSetup {
 }
 
 impl CollabSetup {
-    /// The account's environment, plus `CARGO_TARGET_DIR` for an agent in a worktree.
+    /// The account's environment, plus what the project declares for an agent in a run
+    /// worktree; the account's wins (docs/tasks/TOOLCHAIN.md §3.2).
     async fn agent_env(&self, agent: &Agent) -> Result<Vec<(String, String)>, CoreError> {
-        let mut env = self.accounts.agent_env(agent).await?;
-        env.extend(worktree_env(&self.worktrees, &agent.cwd));
-        Ok(env)
+        let account = self.accounts.agent_env(agent).await?;
+        Ok(with_project_env(
+            account,
+            worktree_env(&self.worktrees, &agent.cwd),
+        ))
     }
+}
+
+/// `account` plus each of `project` it does not set itself (names compared as the platform
+/// does).
+fn with_project_env(
+    mut account: Vec<(String, String)>,
+    project: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    let same = |a: &str, b: &str| {
+        if cfg!(windows) {
+            a.eq_ignore_ascii_case(b)
+        } else {
+            a == b
+        }
+    };
+    for (name, value) in project {
+        if account.iter().any(|(n, _)| same(n, &name)) {
+            tracing::warn!(%name, "the account sets it; the project's value is not used");
+        } else {
+            account.push((name, value));
+        }
+    }
+    account
 }
 
 #[async_trait]
@@ -493,23 +519,57 @@ mod tests {
         let other = root.join("ff00ee11").join("integration");
         for d in [&task, &integration, &other] {
             std::fs::create_dir_all(d).unwrap();
+            // Rust projects: the preset sets the build directory.
+            std::fs::write(d.join("Cargo.toml"), "").unwrap();
         }
-        let (key, value) = worktree_env(&root, &task).unwrap();
+        let env = worktree_env(&root, &task);
+        let [(key, value)] = env.as_slice() else {
+            panic!("{env:?}")
+        };
         assert_eq!(key, "CARGO_TARGET_DIR");
-        let target = PathBuf::from(&value);
+        let target = PathBuf::from(value);
         assert!(target.is_absolute());
         // Its own directory, under its run and its tree, never the run's or a sibling's.
         assert!(
-            target.ends_with(Path::new("ab12cd34").join("targets").join("auth")),
+            target.ends_with(
+                Path::new("ab12cd34")
+                    .join("targets")
+                    .join("auth")
+                    .join("cargo")
+            ),
             "{value}"
         );
-        assert_ne!(worktree_env(&root, &integration).unwrap().1, value);
-        assert_ne!(worktree_env(&root, &other).unwrap().1, value);
+        assert_ne!(worktree_env(&root, &integration)[0].1, *value);
+        assert_ne!(worktree_env(&root, &other)[0].1, *value);
         // Chats in a person's checkout, the root itself, the run's directory and the build
         // directories keep the inherited setting.
-        assert_eq!(worktree_env(&root, dir.path()), None);
-        assert_eq!(worktree_env(&root, &root), None);
-        assert_eq!(worktree_env(&root, &root.join("ab12cd34")), None);
-        assert_eq!(worktree_env(&root, &target), None);
+        std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+        assert!(worktree_env(&root, dir.path()).is_empty());
+        assert!(worktree_env(&root, &root).is_empty());
+        assert!(worktree_env(&root, &root.join("ab12cd34")).is_empty());
+        assert!(worktree_env(&root, &target).is_empty());
+        // A project that is not Rust gets no cargo setting.
+        std::fs::remove_file(other.join("Cargo.toml")).unwrap();
+        std::fs::write(other.join("package.json"), "{}").unwrap();
+        assert!(worktree_env(&root, &other).is_empty());
+    }
+
+    #[test]
+    fn the_accounts_environment_wins_over_the_projects() {
+        let pair = |n: &str, v: &str| (n.to_owned(), v.to_owned());
+        let env = with_project_env(
+            vec![pair("HTTPS_PROXY", "http://127.0.0.1:7890")],
+            vec![
+                pair("HTTPS_PROXY", "http://elsewhere"),
+                pair("CARGO_TARGET_DIR", "/b"),
+            ],
+        );
+        assert_eq!(
+            env,
+            [
+                pair("HTTPS_PROXY", "http://127.0.0.1:7890"),
+                pair("CARGO_TARGET_DIR", "/b")
+            ]
+        );
     }
 }

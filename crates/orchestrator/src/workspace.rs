@@ -708,12 +708,38 @@ pub fn target_dir(root: &Path, run: &str, tree: &str) -> PathBuf {
     worktree_path(root, run, SHARED_TARGETS).join(tree)
 }
 
-/// `CARGO_TARGET_DIR` when `cwd` is in one of a run's worktrees under `root` (its integration
-/// checkout or a task's): [`target_dir`]. It lies outside every checkout, so nothing commits it
-/// (DOGFOOD.md §9). Absolute: a relative one would follow every `cd`. `None` for a directory
-/// that is nobody's checkout: the build directories themselves, the run's own directory, the
-/// old shared ones, and everything outside.
-pub fn worktree_env(root: &Path, cwd: &Path) -> Option<(String, String)> {
+/// The environment agents and the hub's checks get when `cwd` is in one of a run's worktrees
+/// under `root`: what the checkout's presets and `crossagents.toml` declare (docs/tasks/
+/// TOOLCHAIN.md §3), placeholders filled in. The same for both, or they would build into
+/// different directories. Empty outside a run worktree.
+pub fn worktree_env(root: &Path, cwd: &Path) -> Vec<(String, String)> {
+    worktree_run_env(root, cwd)
+        .map(|env| env.vars.into_iter().map(|v| (v.name, v.value)).collect())
+        .unwrap_or_default()
+}
+
+/// [`worktree_env`] with where each variable comes from, and what was left unset.
+pub fn worktree_run_env(root: &Path, cwd: &Path) -> Option<crate::project::RunEnv> {
+    let (checkout, build) = worktree_dirs(root, cwd)?;
+    let mut env = crate::project::run_env(&checkout).unwrap_or_else(|err| {
+        tracing::warn!(checkout = %checkout.display(), error = %err, "using the presets alone");
+        crate::project::preset_env(&checkout)
+    });
+    for var in &mut env.vars {
+        if var.value.contains("{build}") {
+            let _ = std::fs::create_dir_all(&build);
+        }
+        var.value = crate::project::fill(&var.value, &build, &checkout);
+    }
+    Some(env)
+}
+
+/// The run worktree `cwd` is in under `root`, and its build directory ([`target_dir`]). The
+/// build directory lies outside every checkout, so nothing commits it (DOGFOOD.md §9), and is
+/// absolute: a relative one would follow every `cd`. `None` for a directory that is nobody's
+/// checkout: the build directories themselves, the run's own directory, the old shared ones,
+/// and everything outside.
+pub fn worktree_dirs(root: &Path, cwd: &Path) -> Option<(PathBuf, PathBuf)> {
     let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let (root, cwd) = (canon(root), canon(cwd));
     let mut parts = cwd.strip_prefix(&root).ok()?.components();
@@ -729,8 +755,8 @@ pub fn worktree_env(root: &Path, cwd: &Path) -> Option<(String, String)> {
         return None;
     }
     Some((
-        "CARGO_TARGET_DIR".to_owned(),
-        target_dir(&root, &run, &tree).display().to_string(),
+        worktree_path(&root, &run, &tree),
+        target_dir(&root, &run, &tree),
     ))
 }
 
@@ -1149,7 +1175,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target = |cwd: &Path| PathBuf::from(worktree_env(&root, cwd).unwrap().1);
+        let target = |cwd: &Path| worktree_dirs(&root, cwd).unwrap().1;
         let canon = dunce::canonicalize(&root).unwrap();
         let want = |run: &str, tree: &str| canon.join(run).join(SHARED_TARGETS).join(tree);
         // One per worktree: two tasks of one run, its checkout, and other runs never share.
@@ -1168,7 +1194,7 @@ mod tests {
             root.join("ab12cd34").join("target"),
             root.join(SHARED_TARGETS).join("repo-0000aaaa"),
         ] {
-            assert_eq!(worktree_env(&root, &cwd), None, "{}", cwd.display());
+            assert_eq!(worktree_dirs(&root, &cwd), None, "{}", cwd.display());
         }
     }
 

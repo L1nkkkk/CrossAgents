@@ -16,7 +16,7 @@ GUI 改动的对错靠 agent 自述，在这种状态下加速自改等于在没
 
 | # | 任务 | 改哪里 | 验收 |
 |---|---|---|---|
-| A1 | 同一 run 共用一份 `node_modules`（照 `CARGO_TARGET_DIR` 按 run 共享），把 GUI 的 `tsc --noEmit` 和 `node --test` 加进 `crossagents.toml` checks（DOGFOOD §10 第 4 条） | `crates/hub` 拼 worker 环境与建 / 删 worktree 处；`crossagents.toml` | sandbox 里只改 GUI 的 run 收尾显示「验收 3/3 通过」；故意写类型错误时 `run_finish` 被拒 |
+| A1 | （待按 [TOOLCHAIN.md](TOOLCHAIN.md) §7 改：依赖目录不默认共享，改为 worktree 准备命令）同一 run 共用一份 `node_modules`（照 `CARGO_TARGET_DIR` 按 run 共享），把 GUI 的 `tsc --noEmit` 和 `node --test` 加进 `crossagents.toml` checks（DOGFOOD §10 第 4 条） | `crates/hub` 拼 worker 环境与建 / 删 worktree 处；`crossagents.toml` | sandbox 里只改 GUI 的 run 收尾显示「验收 3/3 通过」；故意写类型错误时 `run_finish` 被拒 |
 | A2 | mock 预览里无对话的 agent 也按插件给出能力（§10 第 5 条） | `apps/gui` mock 数据 | `gui_screenshot` 截出 codex agent 的能力提示 |
 | A3 | worker 克隆在任务合并 / 取消后归档而不删，run 追溯里留下它最后几轮（§10 第 3 条） | `crates/hub` run / task 收尾、`trace.rs` | 单测：任务合并后 `/v1/runs/{key}/trace` 仍能查到该 worker 最后一轮和出错 |
 

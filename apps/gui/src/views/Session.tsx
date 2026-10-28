@@ -14,7 +14,6 @@ import { dismiss as dismissMessage, retry as retryMessage, sendMessage, useOutbo
 import { ACTIVE_RUN, useRunTree, useRunsLedBy } from "../App";
 import { Avatar, ErrorBox, FileScopeProvider, Icon, Mark, Prose, StatusChip, Vendor, agentTitle, agentTone, displayName, roleShape, time, useAgents, useFileScope, vendorName } from "../components";
 import { ChangeStat, DiffView } from "../diffview";
-import { CommitGraphView } from "../commitgraph";
 import { parseDiff, tailLines, type DiffFile } from "../lib/diff";
 import { errorHint } from "../lib/errors";
 import { supportNote } from "../lib/attachments";
@@ -305,24 +304,6 @@ function ResumePanel({ agent, onClose }: { agent: Agent; onClose: () => void }) 
   );
 }
 
-/** The session's checkout as a commit graph, opened from the header. */
-function GraphPanel({ agent, onClose }: { agent: Agent; onClose: () => void }) {
-  return (
-    <div className="graph-pop">
-      <div className="resume-head">
-        <strong>提交图</strong>
-        <span className="muted small">
-          <code>{agent.cwd}</code> 的 HEAD 和本地分支，点一个提交看它改了什么
-        </span>
-        <span className="spacer" />
-        <button className="ghost icon" onClick={onClose} title="收起" aria-label="收起">
-          <Icon name="close" size={14} />
-        </button>
-      </div>
-      <CommitGraphView scope={{ kind: "agent", agent: agent.id }} />
-    </div>
-  );
-}
 
 function Header({
   agent,
@@ -346,7 +327,6 @@ function Header({
   const [error, setError] = useState<string>();
   const [profile, setProfile] = useState(false);
   const [resume, setResume] = useState(false);
-  const [graph, setGraph] = useState(false);
   const stop = useArmed();
 
   async function run(action: () => Promise<unknown>) {
@@ -422,7 +402,7 @@ function Header({
           终端恢复
         </button>
         {agent.plugin !== "external" && (
-          <button className={`ghost small graph-toggle ${graph ? "on" : ""}`} onClick={() => setGraph(!graph)} title="这个会话检出的提交图：HEAD 和本地分支" aria-expanded={graph}>
+          <button className="ghost small graph-toggle" onClick={() => openTool("graph", { agent: agent.name })} title="在右侧工具列看这个会话检出的提交图：HEAD 和本地分支">
             <span className="row" style={{ gap: 5 }}>
               <Icon name="branch" size={13} />
               提交图
@@ -442,7 +422,6 @@ function Header({
         </div>
       )}
       {resume && <ResumePanel agent={agent} onClose={() => setResume(false)} />}
-      {graph && <GraphPanel agent={agent} onClose={() => setGraph(false)} />}
       {error && (
         <div style={{ padding: "8px 20px 0" }}>
           <ErrorBox error={error} />

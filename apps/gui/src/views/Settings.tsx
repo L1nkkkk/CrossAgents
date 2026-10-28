@@ -1,13 +1,17 @@
 // Settings, laid out like Codex's: sections on the left, one page of cards on the right.
 // 外观 is kept on this device (docs/tasks/V6-GUI.md §4.4); 模型 is kept by the hub, so every
 // window and the hub's own picks (e.g. a worker's model) see the same list.
+// 关于 shows both builds and the GUI's own update (electron/updates.cts).
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import type { HubInfo } from "@bindings/HubInfo";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import { api, errorText } from "../api";
 import { navigate } from "../App";
 import { ErrorBox, Icon, VendorMark, type IconName } from "../components";
-import { useHubData } from "../hub";
+import { useConnectionStatus, useHubData } from "../hub";
+import { buildTag } from "../lib/build";
+import { useUpdateState } from "../lib/updates";
 import { groupModels, onlyModels, prettyModel, switchModels, vendorLabel } from "../lib/models";
 import { MODES, PAPERS, resolve, setTheme, useTheme } from "../lib/theme";
 import { AgentsPage } from "./Agents";
@@ -16,6 +20,7 @@ const PAGES: { key: string; label: string; icon: IconName }[] = [
   { key: "appearance", label: "外观", icon: "settings" },
   { key: "models", label: "模型", icon: "brain" },
   { key: "agents", label: "智能体", icon: "team" },
+  { key: "about", label: "关于", icon: "info" },
 ];
 
 export function SettingsView({ page }: { page?: string }) {
@@ -37,7 +42,7 @@ export function SettingsView({ page }: { page?: string }) {
           </nav>
           <div className="settings">
             <h1 className="settings-title">{current.label}</h1>
-            {current.key === "models" ? <ModelsPage /> : current.key === "agents" ? <AgentsPage /> : <AppearancePage />}
+            {current.key === "models" ? <ModelsPage /> : current.key === "agents" ? <AgentsPage /> : current.key === "about" ? <AboutPage /> : <AppearancePage />}
           </div>
         </div>
       </div>
@@ -82,6 +87,99 @@ function AppearancePage() {
         </div>
       </div>
     </section>
+  );
+}
+
+/** What this window and the hub were built from, and the GUI's own update. */
+function AboutPage() {
+  const status = useConnectionStatus();
+  const [hub, setHub] = useState<HubInfo>();
+  useEffect(() => {
+    if (status === "connected") api.info().then(setHub, () => {});
+  }, [status]);
+  const page = __BUILD__;
+  return (
+    <section className="settings-section">
+      <div className="setting-card">
+        <div className="setting-line">
+          <div>
+            <div className="setting-label">界面</div>
+            <div className="setting-hint">这个窗口</div>
+          </div>
+          <span className="mono">
+            {buildTag(page)}
+            {page.dev && <span className="chip small">dev</span>}
+          </span>
+        </div>
+        <div className="setting-line">
+          <div>
+            <div className="setting-label">hub</div>
+            <div className="setting-hint mono">{hub ? hub.home : status === "connected" ? "…" : "未连接"}</div>
+          </div>
+          {hub && (
+            <span className="mono">
+              {buildTag(hub)}
+              {hub.debug && <span className="chip small">dev</span>}
+            </span>
+          )}
+        </div>
+      </div>
+      <UpdateCard />
+    </section>
+  );
+}
+
+/** Checks for, downloads and installs a newer GUI; the next launch then upgrades the local hub. */
+function UpdateCard() {
+  const bridge = window.crossagents?.updates;
+  const [state, setState] = useUpdateState();
+  if (state === undefined) return null;
+  const at = (iso: string) => new Date(iso).toLocaleString("zh-CN", { hour12: false });
+  let text: string;
+  let action: { label: string; run: () => void } | undefined;
+  const check = { label: "检查更新", run: () => void bridge?.check().then(setState, () => {}) };
+  switch (state?.state) {
+    case undefined:
+      text = "开发版和浏览器里打开的页面不会自动更新。";
+      break;
+    case "idle":
+      text = "还没有检查过。";
+      action = check;
+      break;
+    case "checking":
+      text = "正在检查…";
+      break;
+    case "latest":
+      text = `已是最新版本（${at(state.checked_at)} 检查）。`;
+      action = check;
+      break;
+    case "downloading":
+      text = `发现 ${state.version}，正在后台下载（${state.percent}%）…`;
+      break;
+    case "ready":
+      text = `${state.version} 已下载，退出时自动安装。也可以现在重启安装：后台的 hub 和 agent 不会中断，重新打开后自动换成新版本。`;
+      action = { label: "重启并安装", run: () => bridge?.install() };
+      break;
+    case "error":
+      text = `检查更新失败（${at(state.checked_at)}）：${state.message}`;
+      action = { label: "重试", run: check.run };
+      break;
+  }
+  return (
+    <div className="setting-card">
+      <div className="setting-line">
+        <div>
+          <div className="setting-label">更新</div>
+          <div className="setting-hint">{text}</div>
+          {state && <div className="setting-hint">每 4 小时自动检查一次；托盘菜单里也可以检查。</div>}
+        </div>
+        {action && (
+          <button className={state?.state === "ready" ? "primary small" : "ghost small"} onClick={action.run}>
+            {action.label}
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
 

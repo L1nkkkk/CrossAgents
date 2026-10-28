@@ -184,6 +184,7 @@ export function run(init: { title: string; request: string; planner: Agent; work
     landed: null,
     summary: null,
     checks: [],
+    checks_state: null,
     created_at: ago(init.minutesAgo),
     updated_at: ago(Math.max(0, init.minutesAgo - 30)),
   };

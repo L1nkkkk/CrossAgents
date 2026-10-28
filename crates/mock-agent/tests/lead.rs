@@ -145,7 +145,28 @@ async fn the_lead_changes_the_run_branch_and_it_lands() {
     assert_eq!(run["config"]["team"], json!([]), "{run}");
     assert!(!repo.path().join("notes.txt").exists());
 
+    // The project declares no checks: the lead is told so up front, and the run says it was
+    // not verified rather than passing.
+    w.until("turn completed", |e| {
+        matches!(e.kind, EventKind::AgentTurnCompleted { .. })
+    })
+    .await;
+    let output = w.output();
+    assert!(
+        output.contains("checks: none declared in crossagents.toml"),
+        "{output}"
+    );
+    assert!(
+        output.contains("not configured in crossagents.toml"),
+        "{output}"
+    );
+    let stored: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
+    assert_eq!(
+        stored["run"]["checks_state"]["state"], "not_configured",
+        "{stored}"
+    );
     let open = || async { t.get("/v1/questions").await.text().await.unwrap() };
+    assert!(open().await.contains("未执行验证"));
     assert!(open().await.contains("等你落地"));
     let resp = t
         .post(&format!("/v1/runs/{id}/land"), json!({ "mode": "merge" }))
@@ -177,6 +198,8 @@ async fn the_projects_checks_hold_back_run_finish() {
         "[run]\nchecks = [\"git ls-files --error-unmatch ok.txt\"]\n",
     )
     .unwrap();
+    // A Rust project, as far as the presets go.
+    std::fs::write(repo.path().join("Cargo.toml"), "").unwrap();
     let git = |args: &[&str]| {
         let out = std::process::Command::new("git")
             .args(["-c", "user.name=t", "-c", "user.email=t@t"])
@@ -207,6 +230,8 @@ async fn the_projects_checks_hold_back_run_finish() {
     let output = w.output();
     // The lead was told up front, and the refusal carried the failing command.
     assert!(output.contains("checks (crossagents.toml)"), "{output}");
+    assert!(output.contains("build env: CARGO_TARGET_DIR="), "{output}");
+    assert!(output.contains("(preset rust)"), "{output}");
     assert!(
         output.contains("checks (crossagents.toml) failed"),
         "{output}"
@@ -214,6 +239,7 @@ async fn the_projects_checks_hold_back_run_finish() {
     assert!(output.contains("ok.txt"), "{output}");
     let run: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
     assert_eq!(run["run"]["checks"][0]["passed"], true, "{run}");
+    assert_eq!(run["run"]["checks_state"]["state"], "ran", "{run}");
     let human = t.get("/v1/questions").await.text().await.unwrap();
     assert!(
         human.contains("验收（crossagents.toml）：1/1 通过"),
@@ -448,4 +474,53 @@ async fn restoring_a_lead_whose_branch_is_gone_says_the_code_did_not_come_back()
     .await;
     assert!(dir.is_dir(), "{dir:?}");
     assert!(!dir.join("two.txt").exists(), "rebuilt from the base");
+}
+
+/// The checks build where the lead builds: while a command the lead started there is still
+/// going, closing is refused with what is running, before any check runs; once it is over the
+/// same call goes through.
+#[tokio::test]
+async fn the_checks_wait_for_the_leads_own_build() {
+    let repo = git_repo();
+    std::fs::write(
+        repo.path().join("crossagents.toml"),
+        "[run]\nchecks = [\"git --version\"]\n",
+    )
+    .unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    };
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "checks"]);
+    let t = setup(repo.path()).await;
+    let boss = t.agent("boss").await;
+    let mut w = t.watch().await;
+
+    let finish = call("run_finish", json!({ "summary": "added notes" }));
+    let request = format!("Add notes. [write notes.txt=x] [running] {finish}");
+    let id = start(&t, request).await["id"].as_str().unwrap().to_owned();
+    w.until(
+        "kickoff answered",
+        |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if *id == boss.id),
+    )
+    .await;
+    let output = w.output();
+    assert!(
+        output.contains("boss is still running `cargo test --workspace`"),
+        "{output}"
+    );
+    let run: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
+    assert_ne!(run["run"]["status"], "completed", "{run}");
+    assert!(run["run"]["checks"].as_array().unwrap().is_empty(), "{run}");
+
+    // That turn is over, and what it ran with it.
+    t.send("boss", &finish).await;
+    w.until("run completed", run_status_is(&id, RunStatus::Completed))
+        .await;
 }

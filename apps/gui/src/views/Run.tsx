@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { Task } from "@bindings/Task";
 import type { Run } from "@bindings/Run";
@@ -50,9 +50,9 @@ import { accountOf, prettyModel } from "../lib/models";
 import { StateWord, TaskChanges } from "../parts";
 import { RunChanges, TaskReview } from "../review";
 import { RunTraceView } from "../trace";
-import { CommitGraphView } from "../commitgraph";
 import { t, type Key } from "../lib/i18n";
 import { wsKey } from "../workspace";
+import { openTool } from "../panes";
 import { SessionView } from "./Session";
 
 function concerns(runId: string, e: HubEvent): boolean {
@@ -96,13 +96,10 @@ export function RunView({
   runId,
   selectedTask,
   confirmDelete,
-  graphOpen,
 }: {
   runId: string;
   selectedTask?: string;
   confirmDelete?: boolean;
-  /** `#/runs/<id>/graph` opens the commit graph (a link the person can be sent; the mock previews too). */
-  graphOpen?: boolean;
 }) {
   const detail = useRun(runId);
   const agents = useAgents();
@@ -141,6 +138,14 @@ export function RunView({
         </span>
       )}
       <div className="spacer" />
+      {!run.in_place && (
+        <button className="ghost small graph-toggle" onClick={() => openTool("graph")} title="在右侧工具列看这个 run 的分支和提交">
+          <span className="row" style={{ gap: 5 }}>
+            <Icon name="branch" size={13} />
+            提交图
+          </span>
+        </button>
+      )}
       {plannerAgent ? <Who agent={plannerAgent} label="主导" /> : <a className="chip" href={sessionHref(run.planner)}>主导 · {planner}</a>}
       <button
         className="danger"
@@ -167,7 +172,6 @@ export function RunView({
       {(run.status === "completed" || (run.status === "running" && allEnded)) && <Ending run={run} closing={run.status === "running"} onDone={detail.reload} />}
       <Participants tasks={tasks} agents={agents.data} />
       <RunNotes runId={run.id} />
-      {!run.in_place && <RunGraph runId={run.id} open={graphOpen} />}
       {tasks.length > 0 && (
         <details className="notes-panel">
           <summary>追溯</summary>
@@ -544,27 +548,6 @@ function Ending({ run, closing, onDone }: { run: Run; closing: boolean; onDone: 
   );
 }
 
-/** The run's commit graph, loaded when opened. */
-function RunGraph({ runId, open: initial }: { runId: string; open?: boolean }) {
-  const [open, setOpen] = useState(!!initial);
-  const ref = useRef<HTMLDetailsElement>(null);
-  // Opened by its route (#/runs/<id>/graph): bring it into view once its rows are in.
-  useEffect(() => {
-    if (!initial) return;
-    const timers = [300, 900, 1500].map((ms) => setTimeout(() => ref.current?.scrollIntoView({ block: "start" }), ms));
-    return () => timers.forEach(clearTimeout);
-  }, [initial]);
-  return (
-    <details ref={ref} className="notes-panel run-graph" open={initial} onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}>
-      <summary>提交图</summary>
-      {open && (
-        <div style={{ marginTop: 8 }}>
-          <CommitGraphView scope={{ kind: "run", run: runId }} />
-        </div>
-      )}
-    </details>
-  );
-}
 
 /** Notes the run's agents keep for each other (note_write, scope "run"). */
 function RunNotes({ runId }: { runId: string }) {

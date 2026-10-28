@@ -3,18 +3,20 @@
 // - Two conversations side by side: the routed session on the left, one more beside it.
 //   Ctrl/⌘-click or middle-click an agent in the sidebar to open it beside.
 // - The tool column on the right (docs/tasks/V6-GUI.md §6): up to two panes stacked, each one
-//   of 改动 (per-turn diffs), 任务 (the task's details) or 事件流 (raw hub events). Panes follow
+//   of 改动 (per-turn diffs), 任务 (the task's details), 事件流 (raw hub events) or 提交图 (the
+//   run's branches on a run page, else the conversation's checkout). Panes follow
 //   the focused conversation: the routed one, or the one beside it once it was clicked last.
 //   Something opened on purpose (a turn's "查看变更", a task card's turn) is the pane's
 //   `target` until the focus moves to another conversation.
 
 import { useSyncExternalStore } from "react";
 
-export type PaneKind = "changes" | "task" | "events";
+export type PaneKind = "changes" | "task" | "events" | "graph";
 export const PANE_KINDS: { kind: PaneKind; label: string }[] = [
   { kind: "changes", label: "改动" },
   { kind: "task", label: "任务" },
   { kind: "events", label: "事件流" },
+  { kind: "graph", label: "提交图" },
 ];
 
 /** What a pane was opened for: an agent's turn (and file), or a task. */
