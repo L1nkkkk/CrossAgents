@@ -16,6 +16,7 @@ base64.workspace = true
 chrono.workspace = true
 clap.workspace = true
 crossagents-api-types.workspace = true
+crossagents-core.workspace = true
 crossagents-drivers.workspace = true
 crossagents-hub.workspace = true
 dunce.workspace = true

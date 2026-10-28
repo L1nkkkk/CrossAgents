@@ -47,6 +47,15 @@ pub fn path_id(path: &Path) -> io::Result<FileId> {
     file_id(&file)
 }
 
+/// The identity of the file behind a raw handle or descriptor inherited through
+/// `CROSSAGENTS_HELD` (`docs/tasks/LOCKS.md` §4.5).
+///
+/// Fails for a handle that is closed, not inherited into this process, or not a file at all;
+/// the caller treats every failure as "this is not the lock file".
+pub fn file_id_raw(raw: RawLock) -> io::Result<FileId> {
+    imp::file_id_raw(raw)
+}
+
 /// One open lock file. Dropping it unlocks and closes it.
 pub struct LockFile {
     file: File,
@@ -97,6 +106,15 @@ impl LockFile {
     /// The handle or descriptor, for `exec-run` to make inheritable.
     pub fn raw(&self) -> RawLock {
         imp::raw(&self.file)
+    }
+
+    /// Makes the lock handle or descriptor inheritable by the next child process, so a
+    /// nested `exec` can prove the lock is still held (`docs/tasks/LOCKS.md` §4.5).
+    ///
+    /// This is for the nesting check only. A lock belongs to the process that took it, not to
+    /// the file handle, so inheriting it does not keep the lock alive (`§5`, conclusion 2).
+    pub fn make_inheritable(&self) -> io::Result<()> {
+        imp::make_inheritable(&self.file)
     }
 }
 
@@ -172,12 +190,45 @@ mod imp {
         file.as_raw_handle() as RawLock
     }
 
+    /// Marks the handle inheritable (`SetHandleInformation(..., HANDLE_FLAG_INHERIT, ...)`).
+    pub(super) fn make_inheritable(file: &File) -> io::Result<()> {
+        use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
+
+        // SAFETY: the handle belongs to `file`, which stays open; the flags are constants.
+        unsafe {
+            let ok = SetHandleInformation(
+                file.as_raw_handle() as HANDLE,
+                HANDLE_FLAG_INHERIT,
+                HANDLE_FLAG_INHERIT,
+            );
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
     /// Volume serial number and file index of the open file.
     pub(super) fn file_id(file: &File) -> io::Result<FileId> {
         // SAFETY: `info` is a plain out-param; the handle belongs to `file` and stays open.
         unsafe {
             let mut info: BY_HANDLE_FILE_INFORMATION = zeroed();
             if GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(FileId {
+                device: u64::from(info.dwVolumeSerialNumber),
+                file: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+            })
+        }
+    }
+
+    /// The same, for a raw handle inherited from the outer `exec`.
+    pub(super) fn file_id_raw(raw: RawLock) -> io::Result<FileId> {
+        // SAFETY: `info` is a plain out-param; an invalid handle simply fails the call.
+        unsafe {
+            let mut info: BY_HANDLE_FILE_INFORMATION = zeroed();
+            if GetFileInformationByHandle(raw as HANDLE, &mut info) == 0 {
                 return Err(io::Error::last_os_error());
             }
             Ok(FileId {
@@ -227,6 +278,22 @@ mod imp {
         file.as_raw_fd()
     }
 
+    /// Clears `FD_CLOEXEC`, so the descriptor survives `exec` into the child.
+    pub(super) fn make_inheritable(file: &File) -> io::Result<()> {
+        let fd = file.as_raw_fd();
+        // SAFETY: `fcntl` only reads and sets flags on a descriptor that is still open.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
     /// Device and inode of the open file — what `stat` would report for it.
     pub(super) fn file_id(file: &File) -> io::Result<FileId> {
         use std::os::unix::fs::MetadataExt;
@@ -236,6 +303,22 @@ mod imp {
             device: metadata.dev(),
             file: metadata.ino(),
         })
+    }
+
+    /// The same, for a descriptor inherited from the outer `exec`.
+    pub(super) fn file_id_raw(raw: RawLock) -> io::Result<FileId> {
+        // SAFETY: `fstat` writes into a zeroed `stat` of the right size; an invalid descriptor
+        // only fails the call.
+        unsafe {
+            let mut stat: libc::stat = std::mem::zeroed();
+            if libc::fstat(raw, &mut stat) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(FileId {
+                device: stat.st_dev as u64,
+                file: stat.st_ino as u64,
+            })
+        }
     }
 }
 
@@ -260,7 +343,18 @@ mod imp {
         0
     }
 
+    pub(super) fn make_inheritable(_file: &File) -> io::Result<()> {
+        Ok(())
+    }
+
     pub(super) fn file_id(_file: &File) -> io::Result<FileId> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "no file identities on this platform",
+        ))
+    }
+
+    pub(super) fn file_id_raw(_raw: RawLock) -> io::Result<FileId> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "no file identities on this platform",

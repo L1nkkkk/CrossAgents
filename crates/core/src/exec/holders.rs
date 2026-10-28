@@ -88,6 +88,51 @@ pub fn holders(locks_dir: &Path, path: &Path) -> Vec<Holder> {
     found
 }
 
+/// Whether a record in the lock's directory names a root process that is still the one it
+/// was written for, in a way that conflicts with a request for `access`.
+///
+/// This is the predecessor check of `docs/tasks/LOCKS.md` §5, conclusion 3: on Windows the
+/// lock of a killed executor disappears 7–10 ms before the job's processes do, so after
+/// taking the lock a newcomer looks at the records and, if the previous root process is still
+/// running, releases the lock and tries again. The check only ever makes the newcomer more
+/// conservative — it never lets anybody through.
+///
+/// A record with no PID was written between taking the lock and starting the command; there
+/// is nothing to check yet, and the OS lock already decides. A record whose PID is alive but
+/// whose creation time differs names a process that is gone: it is deleted, as §4.4 says.
+///
+/// Shared requests only wait for an exclusive predecessor: two shared holders are supposed to
+/// run side by side, and their records must not turn into an exclusive lock.
+pub fn predecessor_alive(locks_dir: &Path, path: &Path, access: Access) -> bool {
+    let dir = super::holders_dir(locks_dir, path);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return false;
+    };
+    let mut conflict = false;
+    for entry in entries.flatten() {
+        let record = entry.path();
+        if !entry.file_name().to_string_lossy().ends_with(".json") {
+            continue;
+        }
+        let Ok(holder) = Holder::read(&record) else {
+            continue;
+        };
+        let Some(pid) = holder.root_pid else {
+            continue;
+        };
+        if alive_since(pid, holder.root_created) {
+            if access == Access::Exclusive || holder.access == Access::Exclusive {
+                conflict = true;
+            }
+        } else {
+            // PID gone, or reused by another process: the record is about a process that is
+            // no longer running, and it must not make anybody wait.
+            let _ = std::fs::remove_file(&record);
+        }
+    }
+    conflict
+}
+
 /// What [`cleanup`] removed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Cleanup {
