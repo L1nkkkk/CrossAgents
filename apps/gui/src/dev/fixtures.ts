@@ -189,7 +189,7 @@ export function run(init: { title: string; request: string; planner: Agent; work
   };
 }
 
-export function task(r: Run, p: PlannedTask, init: { status: TaskStatus; assignee?: Agent; template?: Agent; minutesAgo: number; summary?: string; failure?: string; diffStat?: string; progress?: string; checks?: Task["report"]["checks"] }): Task {
+export function task(r: Run, p: PlannedTask, init: { status: TaskStatus; assignee?: Agent; template?: Agent; minutesAgo: number; summary?: string; failure?: string; diffStat?: string; progress?: string; checks?: Task["report"]["checks"]; interrupted?: boolean; unchecked?: boolean; forced?: string }): Task {
   return {
     id: uid(),
     run_id: r.id,
@@ -220,6 +220,11 @@ export function task(r: Run, p: PlannedTask, init: { status: TaskStatus; assigne
       question_message: null,
       review: null,
       rework: [],
+      verification: null,
+      verified_sha: init.checks?.length ? "9f2c1ab" : null,
+      interrupted: init.interrupted ?? false,
+      unchecked: init.unchecked ?? !init.checks?.length,
+      forced: init.forced ?? null,
     },
     parent: null,
     progress: init.progress ?? null,

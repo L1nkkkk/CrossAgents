@@ -442,7 +442,7 @@ async fn all_tasks_ended_prompts_integration_verification_without_auto_finish_or
     let repo = git_repo();
     let t = setup(repo.path()).await;
     let mut w = t.watch().await;
-    let summary = call("task_accept", json!({"task":"a"}));
+    let summary = call("task_accept", json!({"task":"a", "force": true, "reason": "no checks configured"}));
     let goal = format!(
         "[write a.txt=done] {}",
         call(

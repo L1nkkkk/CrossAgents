@@ -37,4 +37,27 @@ review: string | null,
 /**
  * What the issuer (or the person) wrote each time it sent the task back for rework.
  */
-rework: Array<string>, };
+rework: Array<string>, 
+/**
+ * The verification this report answers: a fresh id each time the task enters
+ * `Verifying`. A report written for another one (a rework, or a later verification that
+ * started meanwhile) is dropped instead of overwriting it (docs/TODO.md §九 ①).
+ */
+verification: string | null, 
+/**
+ * The commit the checks ran on. `task_accept` merges this one, and only this one.
+ */
+verified_sha: string | null, 
+/**
+ * The hub restarted before the checks finished: nothing verified this report. Counted
+ * as a failure, so accepting it takes `force`.
+ */
+interrupted: boolean, 
+/**
+ * The task has no checks (`spec.acceptance` is empty), so nothing verified it.
+ */
+unchecked: boolean, 
+/**
+ * Why the issuer accepted it without a verification; also that it did.
+ */
+forced: string | null, };

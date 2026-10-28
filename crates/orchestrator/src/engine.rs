@@ -917,8 +917,9 @@ The person changed: {}",
                 task.assignee,
                 crossagents_core::HandoffOutcome::Cancelled,
             );
-            self.release_agents(&mut task).await;
-            self.cleanup_worktree(&run, &task, false).await;
+            let released = self.release_agents(&mut task).await;
+            self.cleanup_worktree(&run, &task, false, released.is_empty())
+                .await;
             task.report.failure = Some("run cancelled".into());
             self.transition(&mut task, TaskStatus::Cancelled).await?;
         }
@@ -1150,14 +1151,32 @@ The person changed: {}",
 
     /// The task's worker and reviewer are done with it: what the run holds for the task is
     /// let go (docs/tasks/S1.md §3.4). Execution sessions are archived, agents working on it
-    /// themselves go back to their workspace; nothing is deleted.
-    pub(crate) async fn release_agents(&self, task: &mut Task) {
+    /// themselves go back to their workspace; nothing is deleted. What could not be confirmed
+    /// stopped is returned, by words; whoever would delete its checkout must not.
+    pub(crate) async fn release_agents(&self, task: &mut Task) -> Vec<String> {
         task.assignee = None;
         task.reviewer = None;
-        self.let_go_task(task.run_id, task.id, None).await;
+        let (_gone, problems) = self.let_go_task(task.run_id, task.id, None).await;
+        problems
     }
 
-    pub(crate) async fn cleanup_worktree(&self, run: &Run, task: &Task, delete_branch: bool) {
+    /// Removes the task's checkout and branch. `released` says its agents are confirmed gone:
+    /// when they are not, the checkout stays (with a warning), because deleting the directory
+    /// an agent still works in breaks it and any check still running there (docs/TODO.md §九 ①).
+    pub(crate) async fn cleanup_worktree(
+        &self,
+        run: &Run,
+        task: &Task,
+        delete_branch: bool,
+        released: bool,
+    ) {
+        if !released {
+            tracing::warn!(
+                task = %task.key,
+                "keeping the checkout: it is not known that the agents using it stopped"
+            );
+            return;
+        }
         if let Some(path) = &task.worktree {
             let branch = task.branch.as_deref().filter(|_| delete_branch);
             if let Err(err) = self.ws_for(run).remove(&run.repo, path, branch).await {
@@ -1337,9 +1356,10 @@ The person changed: {}",
             task.assignee,
             crossagents_core::HandoffOutcome::Failed,
         );
-        self.release_agents(task).await;
+        let released = self.release_agents(task).await;
         // Keep the branch so the issuer or a person can inspect what was done.
-        self.cleanup_worktree(run, task, false).await;
+        self.cleanup_worktree(run, task, false, released.is_empty())
+            .await;
         task.report.failure = Some(reason.clone());
         self.transition(task, TaskStatus::Failed).await?;
         self.notice(
@@ -1453,7 +1473,11 @@ The person changed: {}",
     }
 
     /// After a hub restart sessions resume where the driver can, but nothing is running:
-    /// working tasks count as stalled until their issuer looks at them.
+    /// working tasks count as stalled until their issuer looks at them. A task left in
+    /// `Verifying` was checked by a hub that is gone; its report is marked `interrupted` (as a
+    /// failure: accepting it takes `force`) rather than re-checked, since checks may have side
+    /// effects the person did not ask for twice. Its issuer can verify it again (`task_verify`),
+    /// rework it or drop it.
     pub async fn resume(self: &Arc<Self>) -> Result<(), CoreError> {
         for run in self.store.list_runs().await? {
             if run.status != RunStatus::Running {
@@ -1477,6 +1501,21 @@ The person changed: {}",
                 }
                 if task.status == TaskStatus::Running {
                     self.transition(&mut task, TaskStatus::Stalled).await?;
+                } else if task.status == TaskStatus::Verifying {
+                    // Its checks never finished: say so, and let the issuer decide.
+                    task.report.interrupted = true;
+                    task.report.verification = None;
+                    self.transition(&mut task, TaskStatus::Passed).await?;
+                    self.notice(
+                        task.issuer_or(run.planner),
+                        &format!("task:{}", task.id),
+                        &format!(
+                            "The hub restarted while task {} was being verified, so nothing verified it. Look at it, then accept it with force and a reason, verify it again (task_verify), rework it or drop it.",
+                            brief::task_ref(&task)
+                        ),
+                    )
+                    .await;
+                    continue;
                 } else {
                     // Left over from the fixed pipeline: hand it to the issuer as done.
                     task.status = TaskStatus::Stalled;

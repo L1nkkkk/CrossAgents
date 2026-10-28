@@ -42,7 +42,7 @@ async fn merged_run(t: &TestHub, w: &mut common::Watcher) -> String {
         "[write a.txt=from the run] {}",
         call(
             "task_complete",
-            json!({ "task_id": "{task_id}", "summary": format!("done {}", call("task_accept", json!({ "task": "a" }))) })
+            json!({ "task_id": "{task_id}", "summary": format!("done {}", call("task_accept", json!({ "task": "a", "force": true, "reason": "no checks configured" }))) })
         )
     );
     let plan = json!([{ "key": "a", "title": "task a", "spec": { "goal": goal } }]);
@@ -149,7 +149,7 @@ async fn a_conflict_with_main_becomes_a_task_and_lands_after_it() {
     git(worktree, &["commit", "-q", "-m", "resolve"]);
     let report = call(
         "task_complete",
-        json!({ "task_id": sync["id"], "summary": format!("resolved {}", call("task_accept", json!({ "task": "sync-main" }))) }),
+        json!({ "task_id": sync["id"], "summary": format!("resolved {}", call("task_accept", json!({ "task": "sync-main", "force": true, "reason": "no checks configured" }))) }),
     );
     let worker = sync["assignee"].as_str().unwrap();
     let resp = t

@@ -422,7 +422,9 @@ impl Orchestrator {
             HandoffOutcome::Reassigned,
         );
         if let Some(old) = task.assignee.take() {
-            self.let_go(run.id, old).await;
+            if let Err(err) = self.let_go(run.id, old).await {
+                tracing::warn!(task = %task.key, error = %err, "cannot let go of the worker before");
+            }
         }
         let worker = if a.fresh {
             self.fresh_agent(
@@ -480,6 +482,12 @@ impl Orchestrator {
         if task.status == TaskStatus::Cancelled {
             return Ok(json!({ "task": task_json(&task), "repeated": true }));
         }
+        if task.status == TaskStatus::Verifying {
+            return Err(CoreError::Conflict(format!(
+                "#{} is still being verified; wait for its checks (the result arrives as a message), then cancel it",
+                task.key
+            )));
+        }
         if task.status.is_terminal() {
             return Err(CoreError::Conflict(format!("#{} has ended", task.key)));
         }
@@ -488,8 +496,9 @@ impl Orchestrator {
             task.assignee,
             HandoffOutcome::Cancelled,
         );
-        self.release_agents(&mut task).await;
-        self.cleanup_worktree(&run, &task, !a.keep_branch).await;
+        let released = self.release_agents(&mut task).await;
+        self.cleanup_worktree(&run, &task, !a.keep_branch, released.is_empty())
+            .await;
         task.report.failure = Some(format!("cancelled by {}", caller.name));
         self.transition(&mut task, TaskStatus::Cancelled).await?;
         self.schedule(&mut run).await?;
@@ -530,9 +539,10 @@ impl Orchestrator {
         Ok(json!({ "recorded": true }))
     }
 
-    /// The assignee says it is done: the task waits for its issuer at once (so the end of
-    /// this turn does not count as stalling); the hub commits, runs any checks, and relays
-    /// the worker's summary with the facts.
+    /// The assignee says it is done: the task goes into `Verifying` (a fresh verification id
+    /// on it) and the hub commits, runs any checks, records the verified commit and only then
+    /// makes it `Passed` and relays the worker's summary. Nothing the issuer sees as done has
+    /// been unchecked (docs/TODO.md §九 ①).
     pub(crate) async fn complete(
         self: &Arc<Self>,
         caller: &Agent,
@@ -543,8 +553,11 @@ impl Orchestrator {
         let _guard = self.lock(run.id).await;
         let mut task = self.store.get_task(id).await?;
         Self::require_assignee(&task, caller)?;
+        if task.status == TaskStatus::Verifying {
+            return Ok(()); // a retried call: its checks are still running
+        }
         if task.status == TaskStatus::Passed {
-            return Ok(()); // a retried call
+            return Ok(());
         }
         if !matches!(task.status, TaskStatus::Running | TaskStatus::Stalled) {
             return Err(CoreError::Conflict(format!(
@@ -554,36 +567,62 @@ impl Orchestrator {
         }
         task.report.summary = Some(summary);
         task.report.failure = None;
-        self.transition(&mut task, TaskStatus::Passed).await?;
+        task.report.forced = None;
+        task.report.interrupted = false;
+        let token = uuid::Uuid::new_v4().to_string();
+        task.report.verification = Some(token.clone());
+        self.transition(&mut task, TaskStatus::Verifying).await?;
         let this = self.clone();
         let worker = caller.id;
         tokio::spawn(async move {
-            if let Err(err) = this.report_done(id, worker).await {
+            if let Err(err) = this.report_done(id, worker, token).await {
                 tracing::error!(task = %id, error = %err, "cannot record a finished task");
             }
         });
         Ok(())
     }
 
-    async fn report_done(&self, id: TaskId, worker: AgentId) -> Result<(), CoreError> {
+    /// Commits, checks and records the report of `worker`, for the verification `token` only:
+    /// a rework or a newer verification in the meantime drops this one instead of overwriting
+    /// it. The order matters: `Passed` and the summary reach the issuer after the checks, so
+    /// accepting on that word accepts checked work.
+    async fn report_done(
+        &self,
+        id: TaskId,
+        worker: AgentId,
+        token: String,
+    ) -> Result<(), CoreError> {
         let task = self.store.get_task(id).await?;
         let run = self.store.get_run(task.run_id).await?;
+        if !Self::still_verifying(&task, &token) {
+            tracing::debug!(task = %task.key, "the report is for a verification that ended; dropping it");
+            return Ok(());
+        }
         let dir = Self::worktree(&task)?;
         self.ws_for(&run)
             .commit_all(&dir, &format!("{}: {}", task.key, task.title))
             .await?;
+        let sha = self.ws_for(&run).head(&dir).await.ok();
         let (base, _) = self.base_of(&run, &task).await?;
         let diff_stat = self.ws_for(&run).diff_stat(&dir, &base).await.ok();
-        let checks = if task.spec.acceptance.is_empty() {
+        let unchecked = task.spec.acceptance.is_empty();
+        let checks = if unchecked {
             Vec::new()
         } else {
             self.verifier.check(&dir, &task.spec.acceptance).await
         };
         let _guard = self.lock(run.id).await;
         let mut task = self.store.get_task(id).await?;
+        if !Self::still_verifying(&task, &token) {
+            tracing::debug!(task = %task.key, "the report is for a verification that ended; dropping it");
+            return Ok(());
+        }
         task.report.diff_stat = diff_stat;
         task.report.checks = checks.clone();
-        self.store_task(&mut task).await?;
+        task.report.verified_sha = sha;
+        task.report.unchecked = unchecked;
+        task.report.verification = None;
+        self.transition(&mut task, TaskStatus::Passed).await?;
         if !checks.is_empty() {
             self.publish(EventKind::TaskChecked {
                 run_id: run.id,
@@ -602,6 +641,57 @@ impl Orchestrator {
             None,
         );
         Ok(())
+    }
+
+    /// Whether `task` still waits for the verification `token` (nothing else wrote it).
+    fn still_verifying(task: &Task, token: &str) -> bool {
+        task.status == TaskStatus::Verifying
+            && task.report.verification.as_deref() == Some(token)
+    }
+
+    /// Runs a task's checks again, or for the first time after the hub restarted before they
+    /// finished (`interrupted`): a fresh verification id, so an older report cannot land on
+    /// it. Its issuer only; the result arrives as a message.
+    pub(crate) async fn task_verify(
+        self: &Arc<Self>,
+        caller: &Agent,
+        input: Value,
+    ) -> Result<Value, CoreError> {
+        let (run, task) = self.task_arg(caller, &input).await?;
+        Self::require_issuer(&run, &task, caller)?;
+        let _guard = self.lock(run.id).await;
+        let mut task = self.store.get_task(task.id).await?;
+        if task.status == TaskStatus::Verifying {
+            return Ok(json!({
+                "task": task_json(&task),
+                "next": "Its checks are already running; the result arrives as a message.",
+            }));
+        }
+        if task.status != TaskStatus::Passed {
+            return Err(CoreError::Conflict(format!(
+                "#{} is {:?}; only a task whose report is ready can be verified again",
+                task.key, task.status
+            )));
+        }
+        Self::worktree(&task)?;
+        task.report.interrupted = false;
+        task.report.forced = None;
+        task.report.checks.clear();
+        let token = uuid::Uuid::new_v4().to_string();
+        task.report.verification = Some(token.clone());
+        self.transition(&mut task, TaskStatus::Verifying).await?;
+        let this = self.clone();
+        let worker = task.assignee.unwrap_or(run.planner);
+        let id = task.id;
+        tokio::spawn(async move {
+            if let Err(err) = this.report_done(id, worker, token).await {
+                tracing::error!(task = %id, error = %err, "cannot record a verification");
+            }
+        });
+        Ok(json!({
+            "status": "verifying",
+            "next": "End your turn; the checks' result arrives as a message.",
+        }))
     }
 
     /// The assignee cannot finish: the task stalls and its issuer reads why.
@@ -987,7 +1077,8 @@ impl Orchestrator {
         }
         // Its review is in; the run lets go of the reviewer.
         task.reviewer = None;
-        self.let_go_task(run.id, task.id, Some(ClaimRole::Reviewer))
+        let _ = self
+            .let_go_task(run.id, task.id, Some(ClaimRole::Reviewer))
             .await;
         task.report.review = Some(notes.clone());
         self.transition(&mut task, TaskStatus::Passed).await?;
@@ -1012,20 +1103,44 @@ impl Orchestrator {
     // -----------------------------------------------------------------------------------
     // Deciding (issuer)
 
-    /// Merges the task's branch into the run branch. A conflict leaves everything as it was
-    /// and returns the conflicting hunks.
+    /// Merges the task's verified commit into the run branch. A conflict leaves everything as
+    /// it was and returns the conflicting hunks.
+    ///
+    /// The gate (docs/TODO.md §九 ①): a task being verified is refused, `force` or not. A
+    /// plain accept needs every check to have passed and nothing to have changed since the
+    /// checks; it merges the verified commit and nothing else. Failed or missing checks, a
+    /// task with none, an interrupted verification, a stalled task and work done after the
+    /// checks are accepted only with `force` and a `reason`, which is recorded.
     pub(crate) async fn task_accept(
         &self,
         caller: &Agent,
         input: Value,
     ) -> Result<Value, CoreError> {
+        #[derive(Deserialize)]
+        struct A {
+            #[serde(default)]
+            message: Option<String>,
+            /// Accept although nothing verified it (or it changed since); `reason` is required
+            /// and recorded.
+            #[serde(default)]
+            force: bool,
+            #[serde(default)]
+            reason: Option<String>,
+        }
         let (run, task) = self.task_arg(caller, &input).await?;
         Self::require_issuer(&run, &task, caller)?;
+        let a: A = args(input)?;
         let _guard = self.lock(run.id).await;
         let mut run = self.store.get_run(run.id).await?;
         let mut task = self.store.get_task(task.id).await?;
         if task.status == TaskStatus::Merged {
             return Ok(json!({ "task": task_json(&task), "repeated": true }));
+        }
+        if task.status == TaskStatus::Verifying {
+            return Err(CoreError::Conflict(format!(
+                "#{} is still being verified; its checks' result arrives as a message, then accept it",
+                task.key
+            )));
         }
         if !matches!(task.status, TaskStatus::Passed | TaskStatus::Stalled) {
             return Err(CoreError::Conflict(format!(
@@ -1035,25 +1150,90 @@ impl Orchestrator {
         }
         let dir = Self::worktree(&task)?;
         let (base, into) = self.base_of(&run, &task).await?;
+        // What keeps this from being a plain accept: why, in the issuer's words.
+        let mut unchecked: Vec<String> = Vec::new();
+        if task.report.interrupted {
+            unchecked.push("the hub restarted before its checks finished".into());
+        }
+        if task.spec.acceptance.is_empty() {
+            unchecked.push("it has no checks (spec.acceptance is empty)".into());
+        } else if task.report.checks.is_empty() {
+            unchecked.push("its checks never ran".into());
+        } else if !all_passed(&task.report.checks) {
+            unchecked.push("its checks did not pass".into());
+        }
+        if task.status == TaskStatus::Stalled {
+            unchecked.push("it is stalled: its worker never reported".into());
+        }
+        let verified = task
+            .report
+            .verified_sha
+            .clone()
+            .filter(|_| !task.report.interrupted);
+        match (&verified, dir.exists()) {
+            (None, _) => {
+                if task.status == TaskStatus::Passed {
+                    unchecked.push("nothing verified its report".into());
+                }
+            }
+            (Some(_), true) => {
+                let head = self.ws_for(&run).head(&dir).await.ok();
+                if let Some(verified) = &verified
+                    && head.as_deref().map(str::trim) != Some(verified.trim())
+                {
+                    unchecked.push("it changed after its checks".into());
+                }
+                let dirty = self.ws_for(&run).uncommitted(&dir).await.unwrap_or_default();
+                if !dirty.is_empty() {
+                    unchecked.push(format!(
+                        "it has uncommitted changes since its checks: {}",
+                        dirty.join(", ")
+                    ));
+                }
+            }
+            (Some(_), false) => {}
+        }
+        let reason = a
+            .reason
+            .map(|r| r.trim().to_owned())
+            .filter(|r| !r.is_empty());
+        if !unchecked.is_empty() && (!a.force || reason.is_none()) {
+            return Err(CoreError::Conflict(format!(
+                "#{} is not verified: {}. Accept it anyway with force: true and a reason, or send it back (task_rework), or have it verified again (task_verify).",
+                task.key,
+                unchecked.join("; ")
+            )));
+        }
+        // What this accept stands on: the verified commit, else what the worker left now.
+        let merge_target = match (&verified, unchecked.is_empty()) {
+            (Some(sha), true) => Some(sha.clone()),
+            _ => None,
+        };
         // No worktree left: an earlier accept merged it and cleaned up, then failed before
         // recording that; this one only records it.
         if dir.exists() {
             // The issuer's, written to the project's rules; the hub cannot read those.
-            let message = input
-                .get("message")
-                .and_then(Value::as_str)
+            let message = a
+                .message
+                .as_deref()
                 .map(str::trim)
                 .filter(|m| !m.is_empty())
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("{}: {}", task.key, task.title));
-            self.ws_for(&run).commit_all(&dir, &message).await?;
+            let target = match merge_target {
+                Some(sha) => sha,
+                None => {
+                    // Forced: what is there now, never checked as it is.
+                    self.ws_for(&run).commit_all(&dir, &message).await?;
+                    task.branch.clone().unwrap_or_default()
+                }
+            };
             if base == run.branch {
                 // The lead's own edits in the run's checkout would block the merge.
                 self.commit_lead(&run, &format!("crossagents: {}", run.title))
                     .await?;
             }
-            let branch = task.branch.clone().unwrap_or_default();
-            if let Err(err) = self.ws_for(&run).merge(&into, &branch, &message).await {
+            if let Err(err) = self.ws_for(&run).merge(&into, &target, &message).await {
                 return Ok(json!({
                     "merged": false,
                     "conflict": err.to_string(),
@@ -1061,13 +1241,23 @@ impl Orchestrator {
                 }));
             }
         }
+        if let Some(reason) = &reason
+            && !unchecked.is_empty()
+        {
+            task.report.forced = Some(reason.clone());
+            task.progress = Some(format!(
+                "merged without a verification, at {}'s word: {reason}",
+                caller.name
+            ));
+        }
         crossagents_core::Handoff::end(
             &mut task.handoffs,
             task.assignee,
             HandoffOutcome::Delivered,
         );
-        self.release_agents(&mut task).await;
-        self.cleanup_worktree(&run, &task, true).await;
+        let released = self.release_agents(&mut task).await;
+        self.cleanup_worktree(&run, &task, true, released.is_empty())
+            .await;
         task.report.failure = None;
         // Accepting a stalled task stands in for the report its worker never sent.
         if task.status == TaskStatus::Stalled {
@@ -1077,7 +1267,19 @@ impl Orchestrator {
         self.sync_resolved(&mut run, &task).await?;
         self.transition(&mut task, TaskStatus::Merged).await?;
         self.schedule(&mut run).await?;
-        Ok(json!({ "merged": true, "task": task_json(&task), "into": base }))
+        let verified_word = if unchecked.is_empty() {
+            json!("verified")
+        } else {
+            json!("forced")
+        };
+        Ok(json!({
+            "merged": true,
+            "task": task_json(&task),
+            "into": base,
+            "as": verified_word,
+            "merged_sha": task.report.verified_sha,
+            "unverified": unchecked,
+        }))
     }
 
     pub(crate) async fn task_rework(
@@ -1113,9 +1315,12 @@ impl Orchestrator {
             )));
         };
         if task.reviewer.take().is_some() {
-            self.let_go_task(run.id, task.id, Some(ClaimRole::Reviewer))
+            let _ = self
+                .let_go_task(run.id, task.id, Some(ClaimRole::Reviewer))
                 .await;
         }
+        // A new round: an older verification's report must not land on it.
+        task.report.verification = None;
         crossagents_core::Handoff::end(&mut task.handoffs, Some(worker), HandoffOutcome::Reworked);
         task.attempts += 1;
         task.report.failure = None;
@@ -1155,14 +1360,21 @@ impl Orchestrator {
         if task.status.is_terminal() {
             return Ok(json!({ "task": task_json(&task), "repeated": true }));
         }
+        if task.status == TaskStatus::Verifying {
+            return Err(CoreError::Conflict(format!(
+                "#{} is still being verified; wait for its checks (the result arrives as a message), then drop it",
+                task.key
+            )));
+        }
         // Its result is thrown away: that execution counts as cancelled.
         crossagents_core::Handoff::end(
             &mut task.handoffs,
             task.assignee,
             HandoffOutcome::Cancelled,
         );
-        self.release_agents(&mut task).await;
-        self.cleanup_worktree(&run, &task, true).await;
+        let released = self.release_agents(&mut task).await;
+        self.cleanup_worktree(&run, &task, true, released.is_empty())
+            .await;
         task.worktree = None;
         task.branch = None;
         task.progress = None;

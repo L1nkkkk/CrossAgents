@@ -128,6 +128,15 @@ impl TestHub {
         Self::start_with(|_| {}).await
     }
 
+    /// Stops this hub and gives back the home it used, so that a hub started on it finds what
+    /// the last one left (`start_in`), as after a restart.
+    pub async fn restart_home(self) -> tempfile::TempDir {
+        self.hub.shutdown();
+        let TestHub { hub, home, .. } = self;
+        hub.wait().await.expect("the hub stops");
+        home
+    }
+
     /// Starts a hub after `adjust` has changed its config.
     pub async fn start_with(adjust: impl FnOnce(&mut HubConfig)) -> Self {
         Self::start_in(tempfile::tempdir().unwrap(), adjust).await

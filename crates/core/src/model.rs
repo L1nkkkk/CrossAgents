@@ -473,6 +473,24 @@ pub struct TaskReport {
     /// What the issuer (or the person) wrote each time it sent the task back for rework.
     #[serde(default)]
     pub rework: Vec<String>,
+    /// The verification this report answers: a fresh id each time the task enters
+    /// `Verifying`. A report written for another one (a rework, or a later verification that
+    /// started meanwhile) is dropped instead of overwriting it (docs/TODO.md §九 ①).
+    #[serde(default)]
+    pub verification: Option<String>,
+    /// The commit the checks ran on. `task_accept` merges this one, and only this one.
+    #[serde(default)]
+    pub verified_sha: Option<String>,
+    /// The hub restarted before the checks finished: nothing verified this report. Counted
+    /// as a failure, so accepting it takes `force`.
+    #[serde(default)]
+    pub interrupted: bool,
+    /// The task has no checks (`spec.acceptance` is empty), so nothing verified it.
+    #[serde(default)]
+    pub unchecked: bool,
+    /// Why the issuer accepted it without a verification; also that it did.
+    #[serde(default)]
+    pub forced: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -55,15 +55,16 @@ impl TaskStatus {
         }
         matches!(
             (self, next),
-            // The issuer-driven flow (docs/tasks/H1.md §5.7–5.10).
-            (Running, Passed | Stalled)
-                | (WaitingAnswer, Stalled | Passed)
-                | (Stalled, Running | Passed | WaitingAnswer)
-                | (Passed, Running)
+            // The issuer-driven flow (docs/tasks/H1.md §5.7–5.10). Reporting done goes
+            // through Verifying: Passed only says the report is ready (docs/TODO.md §九).
+            (Running, Passed | Stalled | Verifying)
+                | (WaitingAnswer, Stalled | Passed | Verifying)
+                | (Stalled, Running | Passed | WaitingAnswer | Verifying)
+                | (Passed, Running | Verifying)
                 | (Reviewing, Running)
                 // Earlier pipeline states, still found in older runs.
                 | (Pending, Running)
-                | (Running, WaitingAnswer | Verifying | Retrying | Escalated)
+                | (Running, WaitingAnswer | Retrying | Escalated)
                 | (WaitingAnswer, Running)
                 | (Verifying, Passed | Retrying | Escalated)
                 | (Retrying, Running)
@@ -103,6 +104,9 @@ mod tests {
         (Pending, Running),
         (Running, WaitingAnswer),
         (Running, Verifying),
+        (WaitingAnswer, Verifying),
+        (Stalled, Verifying),
+        (Passed, Verifying),
         (Running, Retrying),
         (Running, Escalated),
         (WaitingAnswer, Running),

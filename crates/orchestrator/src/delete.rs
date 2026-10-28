@@ -57,6 +57,22 @@ impl Orchestrator {
                 run.status
             )));
         }
+        // A verification still running is using its checkout: deleting now would pull it out
+        // from under the checks (docs/TODO.md §九 ①).
+        let verifying: Vec<String> = self
+            .store
+            .list_tasks(id)
+            .await?
+            .into_iter()
+            .filter(|t| t.status == crossagents_core::TaskStatus::Verifying)
+            .map(|t| t.key)
+            .collect();
+        if !verifying.is_empty() {
+            return Err(CoreError::Conflict(format!(
+                "#{} is still being verified; wait for its checks, then delete the run",
+                verifying.join(", #")
+            )));
+        }
         // a. Work that is only in the checkout's files would go with it; the branch keeps
         // what was committed, so only an unlanded run has anything to lose.
         let dirty = self.checkout_changes(&run).await?;
@@ -75,7 +91,11 @@ impl Orchestrator {
         let mut done = DeletedRun::default();
         // b. What the run still holds, by its own claims only: an agent another run holds now
         // is not touched. The agents themselves go home, its execution sessions are archived.
-        for gone in self.let_go_run(id).await {
+        let (gone, problems) = self.let_go_run(id).await;
+        for problem in problems {
+            done.warnings.push(problem);
+        }
+        for gone in gone {
             match gone {
                 LetGo::Home(name) => done.agents.returned.push(name),
                 LetGo::Archived(name) => done.agents.archived.push(name),

@@ -66,7 +66,7 @@ async fn the_person_comments_on_a_task_and_sends_it_back() {
         "say beta instead [write a.txt=beta] {}",
         call(
             "task_complete",
-            json!({ "task_id": "{task_id}", "summary": format!("now beta {}", call("task_accept", json!({ "task": "a" }))) })
+            json!({ "task_id": "{task_id}", "summary": format!("now beta {}", call("task_accept", json!({ "task": "a", "force": true, "reason": "no checks configured" }))) })
         )
     );
     let resp = t

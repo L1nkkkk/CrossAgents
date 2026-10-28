@@ -515,8 +515,9 @@ impl Orchestrator {
                     task.assignee,
                     crossagents_core::HandoffOutcome::Cancelled,
                 );
-                self.release_agents(&mut task).await;
-                self.cleanup_worktree(&run, &task, false).await;
+        let released = self.release_agents(&mut task).await;
+        self.cleanup_worktree(&run, &task, false, released.is_empty())
+            .await;
                 task.report.failure = Some("cancelled when the run finished".into());
                 self.transition(&mut task, TaskStatus::Cancelled).await?;
             }

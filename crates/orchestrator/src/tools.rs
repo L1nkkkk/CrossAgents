@@ -530,9 +530,21 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_accept",
-        description: "Merge a task you issued into the run branch. On a conflict nothing changes and you get the conflicting files and hunks. message is the commit message, written the way the project's rules ask (default: \"<key>: <title>\").",
+        description: "Merge a task you issued into the run branch. Only a verified task is accepted plainly: every check passed, and nothing changed after they ran; only the verified commit is merged (nothing the worker wrote afterwards). Refused while the task is still being verified (force does not bypass that). Accepting without a verification - checks that failed or never ran, a task with no checks, a verification the hub restarted out of, a stalled task, or work done after the checks - takes force: true and a non-empty reason, which is recorded. On a conflict nothing changes and you get the conflicting files and hunks. message is the commit message, written the way the project's rules ask (default: \"<key>: <title>\").",
         groups: ALL,
-        schema: || task_schema(json!({ "message": { "type": "string" } })),
+        schema: || {
+            task_schema(json!({
+                "message": { "type": "string" },
+                "force": { "type": "boolean", "description": "Accept although nothing verified it; needs reason, and is recorded" },
+                "reason": { "type": "string", "description": "Why you accept it unverified (required with force)" }
+            }))
+        },
+    },
+    ToolDef {
+        name: "task_verify",
+        description: "Run a task's acceptance checks again on its current worktree, or for the first time after the hub restarted before they finished; the result comes back to you as a message. For a task whose report is ready (passed).",
+        groups: ALL,
+        schema: || task_schema(json!({})),
     },
     ToolDef {
         name: "task_rework",
@@ -633,7 +645,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_complete",
-        description: "Report your task done with a summary of what you changed. The hub commits your work and passes your summary to the task's issuer, who checks it.",
+        description: "Report your task done with a summary of what you changed. The hub commits your work, runs the task's checks and passes your summary to the task's issuer only once they are done, so the issuer sees checked work.",
         groups: WORKER,
         schema: || {
             task_id_schema(
@@ -786,6 +798,7 @@ impl Orchestrator {
             "gui_screenshot" => self.gui_screenshot(caller, input).await,
             "review_request" => self.review_request(caller, input).await,
             "task_accept" => self.task_accept(caller, input).await,
+            "task_verify" => self.task_verify(caller, input).await,
             "task_rework" => self.task_rework(caller, input).await,
             "task_drop" => self.task_drop(caller, input).await,
             "branch_sync" => self.branch_sync(caller, input).await,
@@ -806,8 +819,8 @@ impl Orchestrator {
                 let a: A = args(input)?;
                 self.complete(caller, task, a.summary).await?;
                 Ok(json!({
-                    "status": "passed",
-                    "next": "Your summary goes to the task's issuer, who checks the work. End your turn; if it comes back with notes, continue and report again."
+                    "status": "verifying",
+                    "next": "The hub commits your work and runs the task's checks; your summary reaches the task's issuer once they are done. End your turn; if it comes back with notes, continue and report again."
                 }))
             }
             "task_fail" => {

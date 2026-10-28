@@ -21,8 +21,24 @@ const s = (glyph: Glyph, word: string, tone: StateTone, bucket: Bucket, live = f
 
 type Sibling = Pick<Task, "key" | "status">;
 
+/** What a state needs of a task: the facts its report carries are optional (old records). */
+type Reported = Pick<Task, "status" | "attempts" | "depends_on"> & { report?: Task["report"] };
+
+/**
+ * `passed` only says the report is ready and waits for its issuer (docs/TODO.md §九 ①): the
+ * word follows what the report says actually happened, so "done" never stands for "unchecked".
+ */
+function reportedState(report: Task["report"] | undefined): State {
+  if (report?.interrupted) return s("○", "验收中断", "warn", "waiting");
+  if (report?.unchecked) return s("○", "未验 · 待接收", "warn", "waiting");
+  const checks = report?.checks ?? [];
+  if (!checks.length) return s("○", "待检查", "ok", "waiting");
+  if (checks.every((c) => c.passed)) return s("○", "检查通过", "ok", "waiting");
+  return s("○", "检查未过", "danger", "waiting");
+}
+
 /** `siblings` (the run's tasks) lets a pending task say which dependencies it still waits for. */
-export function taskState(task: Pick<Task, "status" | "attempts" | "depends_on">, siblings?: Sibling[]): State {
+export function taskState(task: Reported, siblings?: Sibling[]): State {
   const status: TaskStatus = task.status;
   switch (status) {
     case "pending": {
@@ -42,7 +58,7 @@ export function taskState(task: Pick<Task, "status" | "attempts" | "depends_on">
     case "reviewing":
       return s("●", "审查中", "accent", "active", true);
     case "passed":
-      return s("○", "待检查", "ok", "waiting");
+      return reportedState(task.report);
     case "stalled":
       return s("○", "停了 · 未上报", "warn", "waiting");
     case "merged":
@@ -74,12 +90,12 @@ export function runState(status: RunStatus): State {
 }
 
 /** Tasks grouped by bucket in display order, empty groups left out; plan order inside. */
-export function groupTasks<T extends Pick<Task, "status" | "attempts" | "depends_on">>(tasks: T[]): { bucket: Bucket; tasks: T[] }[] {
+export function groupTasks<T extends Reported>(tasks: T[]): { bucket: Bucket; tasks: T[] }[] {
   return BUCKETS.map((bucket) => ({ bucket, tasks: tasks.filter((t) => taskState(t).bucket === bucket) })).filter((g) => g.tasks.length);
 }
 
 /** "3/5 已合并 · 2 进行中", the run's progress in one phrase. */
-export function progress(tasks: Pick<Task, "status" | "attempts" | "depends_on">[]): string {
+export function progress(tasks: Reported[]): string {
   if (!tasks.length) return "";
   const merged = tasks.filter((t) => t.status === "merged").length;
   const active = tasks.filter((t) => taskState(t).bucket === "active").length;

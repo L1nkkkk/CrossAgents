@@ -17,9 +17,10 @@ fn call(tool: &str, args: Value) -> String {
     format!("[call {tool} {args}]")
 }
 
-/// The planner's step after a task is reported: accept it.
+/// The planner's step after a task is reported: accept it. Most tasks here have no checks, so
+/// the accept is a forced one (docs/TODO.md §九 ①): it says why it takes the work unverified.
 fn accept(key: &str) -> String {
-    call("task_accept", json!({ "task": key }))
+    call("task_accept", json!({ "task": key, "force": true, "reason": "no checks configured" }))
 }
 
 /// After the last task: accept it, then close the run.
@@ -703,7 +704,7 @@ async fn a_hands_off_run_lands_on_main_and_reports_to_the_person() {
         // Commit messages written to the project's rules.
         call(
             "task_accept",
-            json!({ "task": "z", "message": "ledger: add z" })
+            json!({ "task": "z", "message": "ledger: add z", "force": true, "reason": "no checks configured" })
         ),
         call(
             "run_land",

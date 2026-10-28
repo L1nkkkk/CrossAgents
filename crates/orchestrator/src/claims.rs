@@ -200,19 +200,23 @@ impl Orchestrator {
 impl Orchestrator {
     /// Lets go of `agent` if `run` holds it, and puts it away (docs/tasks/S1.md §3.4): the
     /// agent itself goes back to its workspace, an execution session is archived. Another
-    /// run's claim on it is left alone, and so is the agent. `None` when `run` held nothing.
-    pub(crate) async fn let_go(&self, run: RunId, agent: AgentId) -> Option<LetGo> {
-        let claim = self.store.claim_of(agent).await.ok().flatten()?;
+    /// run's claim on it is left alone, and so is the agent. `Ok(None)` when `run` held
+    /// nothing. An error means the claim may be gone but the agent was not confirmed stopped:
+    /// whoever would delete what it used must not, and says so instead (`release_agents`).
+    pub(crate) async fn let_go(
+        &self,
+        run: RunId,
+        agent: AgentId,
+    ) -> Result<Option<LetGo>, CoreError> {
+        let claim = match self.store.claim_of(agent).await? {
+            Some(claim) => claim,
+            None => return Ok(None),
+        };
         if claim.run_id != run {
-            return None;
+            return Ok(None);
         }
-        match self.store.release_agent(agent, run).await {
-            Ok(true) => {}
-            Ok(false) => return None,
-            Err(err) => {
-                tracing::warn!(%agent, error = %err, "cannot let go of the agent");
-                return None;
-            }
+        if !self.store.release_agent(agent, run).await? {
+            return Ok(None);
         }
         let name = self
             .name_of(agent)
@@ -222,15 +226,19 @@ impl Orchestrator {
             // A lead copied for the run keeps its directory: its driver resumes only there,
             // and restoring it brings the checkout back (`lead_returned`).
             let keep_dir = claim.role == ClaimRole::Lead;
-            if let Err(err) = self.put_away(agent, keep_dir).await {
-                tracing::warn!(%agent, error = %err, "cannot archive the execution session");
-            }
-            Some(LetGo::Archived(name))
+            self.put_away(agent, keep_dir).await.map_err(|err| {
+                CoreError::Storage(format!(
+                    "{name} was let go of the run, but cannot be archived, so it may still hold its directory: {err}"
+                ))
+            })?;
+            Ok(Some(LetGo::Archived(name)))
         } else {
-            if let Err(err) = self.host.send_home(agent).await {
-                tracing::warn!(%agent, error = %err, "cannot send the agent home");
-            }
-            Some(LetGo::Home(name))
+            self.host.send_home(agent).await.map_err(|err| {
+                CoreError::Agent(format!(
+                    "{name} was let go of the run, but cannot be sent home, so it is not known to have stopped: {err}"
+                ))
+            })?;
+            Ok(Some(LetGo::Home(name)))
         }
     }
 
@@ -249,32 +257,45 @@ impl Orchestrator {
     }
 
     /// Lets go of what `run` holds for `task`: its worker and reviewer, or only the one in
-    /// `role`. Only rows that are this run's are touched.
+    /// `role`. Only rows that are this run's are touched. What went is returned with what
+    /// could not be confirmed stopped, by words for the issuer.
     pub(crate) async fn let_go_task(
         &self,
         run: RunId,
         task: TaskId,
         role: Option<ClaimRole>,
-    ) -> Vec<LetGo> {
+    ) -> (Vec<LetGo>, Vec<String>) {
         let claims = self.store.list_claims(Some(run)).await.unwrap_or_default();
-        let mut done = Vec::new();
-        for claim in claims
-            .into_iter()
-            .filter(|c| c.task_id == Some(task) && role.is_none_or(|r| c.role == r))
-        {
-            done.extend(self.let_go(run, claim.agent_id).await);
-        }
-        done
+        self.let_go_each(
+            run,
+            claims
+                .into_iter()
+                .filter(|c| c.task_id == Some(task) && role.is_none_or(|r| c.role == r)),
+        )
+        .await
     }
 
     /// Lets go of everything `run` holds.
-    pub(crate) async fn let_go_run(&self, run: RunId) -> Vec<LetGo> {
+    pub(crate) async fn let_go_run(&self, run: RunId) -> (Vec<LetGo>, Vec<String>) {
         let claims = self.store.list_claims(Some(run)).await.unwrap_or_default();
+        self.let_go_each(run, claims.into_iter()).await
+    }
+
+    async fn let_go_each(
+        &self,
+        run: RunId,
+        claims: impl IntoIterator<Item = AgentClaim>,
+    ) -> (Vec<LetGo>, Vec<String>) {
         let mut done = Vec::new();
+        let mut problems = Vec::new();
         for claim in claims {
-            done.extend(self.let_go(run, claim.agent_id).await);
+            match self.let_go(run, claim.agent_id).await {
+                Ok(Some(gone)) => done.push(gone),
+                Ok(None) => {}
+                Err(err) => problems.push(err.to_string()),
+            }
         }
-        done
+        (done, problems)
     }
 }
 
@@ -447,7 +468,7 @@ impl Orchestrator {
                 "working on"
             }
         };
-        self.let_go(run.id, agent).await;
+        self.let_go(run.id, agent).await.ok();
         self.notice(
             task.issuer_or(run.planner),
             &format!("task:{}", task.id),
