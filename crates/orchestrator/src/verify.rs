@@ -33,8 +33,8 @@ pub trait Verifier: Send + Sync {
 pub struct ShellVerifier {
     pub timeout: Duration,
     pub max_output: usize,
-    /// Where runs' worktrees live: checks in one build in the shared target, as the run's
-    /// agents do (`workspace::worktree_env`).
+    /// Where runs' worktrees live: checks in one get the environment the run's agents there
+    /// do (`workspace::worktree_env`), so they build in the same directory.
     pub worktrees: Option<PathBuf>,
 }
 
@@ -114,12 +114,8 @@ impl Verifier for ShellVerifier {
         let mut results = Vec::new();
         for command in commands.iter().filter(|c| !c.trim().is_empty()) {
             let mut cmd = shell(command);
-            if let Some((key, value)) = self
-                .worktrees
-                .as_deref()
-                .and_then(|root| worktree_env(root, dir))
-            {
-                cmd.env(key, value);
+            if let Some(root) = self.worktrees.as_deref() {
+                cmd.envs(worktree_env(root, dir));
             }
             cmd.current_dir(dir)
                 .stdin(Stdio::null())
@@ -233,6 +229,8 @@ mod tests {
         let root = home.path().join("worktrees");
         let dir = root.join("ab12cd34").join("integration");
         std::fs::create_dir_all(&dir).unwrap();
+        // A Rust project: the preset sets the build directory.
+        std::fs::write(dir.join("Cargo.toml"), "").unwrap();
         let verifier = ShellVerifier {
             worktrees: Some(root.clone()),
             ..ShellVerifier::default()
@@ -247,13 +245,19 @@ mod tests {
             .unwrap()
             .join("ab12cd34")
             .join("targets")
-            .join("integration");
+            .join("integration")
+            .join("cargo");
         assert_eq!(out[0].output, want.display().to_string());
         // A task's checkout builds in its own, not in the run's.
         let task = root.join("ab12cd34").join("auth");
         std::fs::create_dir_all(&task).unwrap();
+        std::fs::write(task.join("Cargo.toml"), "").unwrap();
         let out = verifier.check(&task, &[echo.into()]).await;
-        assert!(out[0].output.ends_with("auth"), "{}", out[0].output);
+        assert!(
+            Path::new(&out[0].output).ends_with(Path::new("auth").join("cargo")),
+            "{}",
+            out[0].output
+        );
         assert_ne!(out[0].output, want.display().to_string());
     }
 

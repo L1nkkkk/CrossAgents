@@ -145,7 +145,28 @@ async fn the_lead_changes_the_run_branch_and_it_lands() {
     assert_eq!(run["config"]["team"], json!([]), "{run}");
     assert!(!repo.path().join("notes.txt").exists());
 
+    // The project declares no checks: the lead is told so up front, and the run says it was
+    // not verified rather than passing.
+    w.until("turn completed", |e| {
+        matches!(e.kind, EventKind::AgentTurnCompleted { .. })
+    })
+    .await;
+    let output = w.output();
+    assert!(
+        output.contains("checks: none declared in crossagents.toml"),
+        "{output}"
+    );
+    assert!(
+        output.contains("not configured in crossagents.toml"),
+        "{output}"
+    );
+    let stored: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
+    assert_eq!(
+        stored["run"]["checks_state"]["state"], "not_configured",
+        "{stored}"
+    );
     let open = || async { t.get("/v1/questions").await.text().await.unwrap() };
+    assert!(open().await.contains("未执行验证"));
     assert!(open().await.contains("等你落地"));
     let resp = t
         .post(&format!("/v1/runs/{id}/land"), json!({ "mode": "merge" }))
@@ -177,6 +198,8 @@ async fn the_projects_checks_hold_back_run_finish() {
         "[run]\nchecks = [\"git ls-files --error-unmatch ok.txt\"]\n",
     )
     .unwrap();
+    // A Rust project, as far as the presets go.
+    std::fs::write(repo.path().join("Cargo.toml"), "").unwrap();
     let git = |args: &[&str]| {
         let out = std::process::Command::new("git")
             .args(["-c", "user.name=t", "-c", "user.email=t@t"])
@@ -207,6 +230,8 @@ async fn the_projects_checks_hold_back_run_finish() {
     let output = w.output();
     // The lead was told up front, and the refusal carried the failing command.
     assert!(output.contains("checks (crossagents.toml)"), "{output}");
+    assert!(output.contains("build env: CARGO_TARGET_DIR="), "{output}");
+    assert!(output.contains("(preset rust)"), "{output}");
     assert!(
         output.contains("checks (crossagents.toml) failed"),
         "{output}"
@@ -214,6 +239,7 @@ async fn the_projects_checks_hold_back_run_finish() {
     assert!(output.contains("ok.txt"), "{output}");
     let run: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
     assert_eq!(run["run"]["checks"][0]["passed"], true, "{run}");
+    assert_eq!(run["run"]["checks_state"]["state"], "ran", "{run}");
     let human = t.get("/v1/questions").await.text().await.unwrap();
     assert!(
         human.contains("验收（crossagents.toml）：1/1 通过"),

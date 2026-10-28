@@ -1,8 +1,8 @@
 //! Commands agents have started and not finished, followed from their tool-call events, so
-//! the hub does not build in a checkout while its agent still builds or tests there: on
-//! Windows the second build waits on cargo's lock and then cannot relink a test binary the
-//! first one is running (LNK1104). Kept in memory only; after a restart nothing is known to
-//! run, which lets the checks go as before.
+//! the hub does not build in a checkout while its agent still builds or tests there (two
+//! builds in one build directory wait on each other's locks and overwrite files the other is
+//! running). Kept in memory only; after a restart nothing is known to run, which lets the
+//! checks go as before.
 
 use std::collections::HashMap;
 
@@ -108,18 +108,33 @@ impl RunningCommands {
     }
 }
 
-/// Whether a failed check's output says a file was in use by another process rather than
-/// that the code is wrong: what a build running at the same time causes.
+/// Whether a failed check's output has the system saying a file was in use by another
+/// process, rather than the code being wrong: what a build running at the same time causes.
+/// Only what the operating system says, in any language's tools (docs/tasks/TOOLCHAIN.md §6).
 pub fn in_use_failure(output: &str) -> bool {
-    const SIGNS: [&str; 6] = [
-        "LNK1104",
+    const SIGNS: [&str; 8] = [
+        // Windows: ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION.
         "os error 32",
+        "os error 33",
         "being used by another process",
         "另一个程序正在使用此文件",
-        "Blocking waiting for file lock",
+        // Unix: ETXTBSY, EBUSY.
         "Text file busy",
+        "Device or resource busy",
+        "EBUSY",
+        "ETXTBSY",
     ];
     SIGNS.iter().any(|sign| output.contains(sign))
+}
+
+/// The hints of `presets` that a failed check's output has: signs it may come from another
+/// build at the same time, which never decide it.
+pub fn hints<'a>(output: &str, presets: &[&'a crate::presets::Preset]) -> Vec<&'a str> {
+    presets
+        .iter()
+        .flat_map(|p| p.hints.iter().copied())
+        .filter(|hint| output.contains(hint))
+        .collect()
 }
 
 #[cfg(test)]
@@ -201,13 +216,17 @@ mod tests {
     #[test]
     fn a_file_in_use_is_told_apart_from_a_failing_test() {
         assert!(in_use_failure(
-            "LINK : fatal error LNK1104: 无法打开文件“…\\adopt-4ea7e29f8329f9ed.exe”"
-        ));
-        assert!(in_use_failure(
             "error: failed to remove file: 另一个程序正在使用此文件，进程无法访问。 (os error 32)"
         ));
+        assert!(in_use_failure("cannot execute: Text file busy"));
         assert!(!in_use_failure(
             "test pipeline::lands ... FAILED\nassertion `left == right` failed"
         ));
+        // The linker could not open a file: maybe one in use, maybe not. A hint only.
+        let lnk = "LINK : fatal error LNK1104: 无法打开文件“…\\adopt-4ea7e29f8329f9ed.exe”";
+        assert!(!in_use_failure(lnk));
+        let rust = crate::presets::get("rust").unwrap();
+        assert_eq!(hints(lnk, &[rust]), ["LNK1104"]);
+        assert!(hints(lnk, &[]).is_empty());
     }
 }

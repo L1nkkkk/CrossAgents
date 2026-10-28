@@ -228,6 +228,7 @@ B3 远程开发：
 - [ ] C2 主导从复盘里挑一条开新 run 去修（计划仍要人批）
 - [ ] C3 改 hub 的任务在 `hub sandbox` 里跑冒烟再收尾
 - [ ] L1–L3 项目排障记录（L1 完成 2026-10-28）：run 中用 `issue/` 笔记随手记问题与绕法，收尾逐条整理进项目 lessons（按稳定的 project_id 跨节点共享、跨项目隔离），按需搜、失败时附相关条目，不当规则注入（任务书 [tasks/LESSONS.md](tasks/LESSONS.md)）
+- [x] T1 hub 核心不绑语言（2026-10-28）：构建目录等环境变量改由预设表（按根目录标志文件命中、可组合）加 `crossagents.toml` 的 `[run.env]` 声明，占位符 `{build}`；没配检查时明确报「未验证」；占用识别分确定 / 可能相关两级。依赖目录（node_modules、.venv）不默认共享，另行设计（任务书 [tasks/TOOLCHAIN.md](tasks/TOOLCHAIN.md)）
 - [x] 落地到人自己的 checkout 时，只在暂存区有改动、或未提交 / 未跟踪的文件与 run 要改的文件重叠时拒绝，其余改动原样保留（2026-10-26，`workspace.rs::check_checkout`；之前一律拒绝，人在主目录改着别的东西时 run 落不了地）
 
 ## 十二、run 的收尾：再开 Work 与删除

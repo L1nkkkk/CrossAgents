@@ -5,9 +5,11 @@
 
 use std::fmt::Write;
 
-use crossagents_core::{Agent, AgentId, CheckResult, Handoff, HandoffKind, Role, Run, Task};
+use crossagents_core::{
+    Agent, AgentId, CheckResult, ChecksState, Handoff, HandoffKind, Role, Run, Task,
+};
 
-use crate::project::{self, RunChecks};
+use crate::project::{self, RunChecks, RunEnv};
 
 /// The run's request as the person wrote it, then the facts the lead needs.
 pub fn kickoff(
@@ -15,6 +17,7 @@ pub fn kickoff(
     team: &[Agent],
     default_worker: AgentId,
     checks: &Result<RunChecks, String>,
+    env: Option<&RunEnv>,
     sessions: &str,
 ) -> String {
     let mut out = run.request.trim().to_owned();
@@ -34,7 +37,13 @@ pub fn kickoff(
             run.title, run.id, run.base_branch, run.branch
         );
         match checks {
-            Ok(c) if c.checks.is_empty() => {}
+            Ok(c) if c.checks.is_empty() => {
+                let _ = write!(
+                    out,
+                    "\nchecks: none declared in {}; the hub will not verify this run",
+                    project::FILE
+                );
+            }
             Ok(c) => {
                 let list: Vec<String> = c
                     .checks
@@ -61,6 +70,9 @@ pub fn kickoff(
                 );
             }
         }
+        if let Some(env) = env {
+            out.push_str(&environment(env));
+        }
     }
     out.push_str(&roster(team, default_worker));
     if !team.iter().any(|a| a.role == Role::Worker) {
@@ -72,6 +84,44 @@ pub fn kickoff(
     // The workspace's sessions, for working with one of them itself (docs/tasks/S1.md §3.6).
     out.push_str(sessions);
     out
+}
+
+/// What the run's checkout sets in its agents' and checks' environment, and from where; a
+/// variable presets disagree on is named, since it is left unset.
+fn environment(env: &RunEnv) -> String {
+    let mut out = String::new();
+    if !env.vars.is_empty() {
+        let vars: Vec<String> = env
+            .vars
+            .iter()
+            .map(|v| format!("{}={} ({})", v.name, v.value, v.source))
+            .collect();
+        let _ = write!(out, "\nbuild env: {}", vars.join(", "));
+    }
+    for c in &env.conflicts {
+        let _ = write!(
+            out,
+            "\nbuild env: {} left unset: presets {} set it differently ({} can settle it in [run.env])",
+            c.name,
+            c.presets.join(", "),
+            project::FILE
+        );
+    }
+    out
+}
+
+/// How far the project's checks verified `run`, for the lead's landing and finishing.
+pub fn verification(run: &Run) -> Option<String> {
+    Some(match run.checks_state? {
+        ChecksState::NotConfigured => {
+            format!("not configured in {}: nothing was verified", project::FILE)
+        }
+        ChecksState::NotApplicable { declared } => format!(
+            "none of the {declared} declared in {} applies to this change: nothing was verified",
+            project::FILE
+        ),
+        ChecksState::Ran => checks(&run.checks),
+    })
 }
 
 /// The team: who is good at what, for picking assignees.

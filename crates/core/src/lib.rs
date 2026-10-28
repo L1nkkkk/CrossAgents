@@ -50,9 +50,9 @@ pub use lesson::{
     Triage, TriageRecord, TriageStep,
 };
 pub use model::{
-    Agent, AgentProfile, AgentStatus, CONTEXT_LOST, CheckResult, ContinuationState, LandMode,
-    Landing, NameSource, PlannedTask, Role, Run, RunConfig, RunStatus, Scope, Task, TaskReport,
-    TaskSpec, validate_agent_name, validate_slug,
+    Agent, AgentProfile, AgentStatus, CONTEXT_LOST, CheckResult, ChecksState, ContinuationState,
+    LandMode, Landing, NameSource, PlannedTask, Role, Run, RunConfig, RunStatus, Scope, Task,
+    TaskReport, TaskSpec, validate_agent_name, validate_slug,
 };
 pub use note::{EXTERNAL_PLUGIN, Note, NoteScope};
 pub use notify::{Reminder, Watch, WatchOn, WatchTarget};

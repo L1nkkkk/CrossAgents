@@ -348,8 +348,25 @@ pub struct Run {
     /// landed or finished the run.
     #[serde(default)]
     pub checks: Vec<CheckResult>,
+    /// Whether those checks verified the run; none yet when nothing called for them.
+    #[serde(default)]
+    pub checks_state: Option<ChecksState>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Whether the project's checks verified a run (docs/tasks/TOOLCHAIN.md §5): no results is
+/// not a pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ChecksState {
+    /// The project declares none: nothing was verified.
+    NotConfigured,
+    /// None of the `declared` checks covers what the run changed: nothing was verified.
+    NotApplicable { declared: u32 },
+    /// They ran; `checks` has how they went.
+    Ran,
 }
 
 /// How a run's branch is brought into its base branch.

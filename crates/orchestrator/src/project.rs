@@ -11,12 +11,24 @@
 //!     { command = "cargo test --workspace", paths = ["crates", "Cargo.toml", "Cargo.lock"] },
 //! ]
 //! timeout_secs = 1800   # per command; default 600
+//! # Toolchain defaults (`presets.rs`): left out, every preset whose marker file is at the
+//! # root; listed, only those; `[]`, none.
+//! presets = ["rust"]
+//!
+//! [run.env]
+//! # For agents and checks in the run's worktrees (docs/tasks/TOOLCHAIN.md §3), over a
+//! # preset's; `false` drops a preset's. `{build}` is the worktree's own build directory,
+//! # `{checkout}` the worktree.
+//! CARGO_TARGET_DIR = "{build}/cargo"
 //! ```
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
 use serde::Deserialize;
+
+use crate::presets::{self, Preset};
 
 pub const FILE: &str = "crossagents.toml";
 
@@ -78,6 +90,18 @@ struct Run {
     checks: Vec<Check>,
     #[serde(default)]
     timeout_secs: Option<u64>,
+    #[serde(default)]
+    presets: Option<Vec<String>>,
+    #[serde(default)]
+    env: BTreeMap<String, EnvValue>,
+}
+
+/// A value in `[run.env]`: set, or `false` to drop a preset's.
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+enum EnvValue {
+    Set(String),
+    Drop(bool),
 }
 
 #[derive(Deserialize)]
@@ -101,15 +125,20 @@ fn normalize(path: &str) -> String {
     path.trim_matches('/').to_owned()
 }
 
-/// The run checks `dir` declares. No file is no checks; a file that does not parse is an
-/// error, so that a typo does not quietly turn the checks off.
-pub fn run_checks(dir: &Path) -> Result<RunChecks, String> {
+/// `dir`'s file; none is an empty one. One that does not parse is an error, so that a typo
+/// does not quietly turn something off.
+fn read(dir: &Path) -> Result<File, String> {
     let text = match std::fs::read_to_string(dir.join(FILE)) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(format!("cannot read {FILE}: {e}")),
     };
-    let file: File = toml::from_str(&text).map_err(|e| format!("{FILE} is not valid: {e}"))?;
+    toml::from_str(&text).map_err(|e| format!("{FILE} is not valid: {e}"))
+}
+
+/// The run checks `dir` declares. No file is no checks.
+pub fn run_checks(dir: &Path) -> Result<RunChecks, String> {
+    let file = read(dir)?;
     let mut checks = Vec::new();
     for check in file.run.checks {
         let (command, paths) = match check {
@@ -143,6 +172,161 @@ pub fn run_checks(dir: &Path) -> Result<RunChecks, String> {
             .timeout_secs
             .map_or(DEFAULT_TIMEOUT, Duration::from_secs),
     })
+}
+
+/// What a run worktree's environment may name: `{build}` its build directory, `{checkout}`
+/// the worktree itself.
+pub const PLACEHOLDERS: [&str; 2] = ["build", "checkout"];
+
+/// The variables agents and checks get in a run worktree, placeholders not filled in yet.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunEnv {
+    pub vars: Vec<EnvVar>,
+    /// Variables two presets set differently and the project did not settle: left unset.
+    pub conflicts: Vec<Conflict>,
+    /// The presets in use.
+    pub presets: Vec<&'static Preset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvVar {
+    pub name: String,
+    pub value: String,
+    /// `preset rust`, or the file's name.
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conflict {
+    pub name: String,
+    pub presets: Vec<&'static str>,
+}
+
+/// The environment `dir` (a checkout) declares, with the presets it turns on.
+pub fn run_env(dir: &Path) -> Result<RunEnv, String> {
+    let file = read(dir)?;
+    let presets = match &file.run.presets {
+        None => presets::detect(dir),
+        Some(names) => names
+            .iter()
+            .map(|name| {
+                presets::get(name).ok_or_else(|| {
+                    let known: Vec<&str> = presets::PRESETS.iter().map(|p| p.name).collect();
+                    format!(
+                        "{FILE} is not valid: there is no preset `{name}` (there are: {})",
+                        known.join(", ")
+                    )
+                })
+            })
+            .collect::<Result<_, _>>()?,
+    };
+    resolve(&presets, &file.run.env)
+}
+
+/// What `dir`'s presets alone set: for a file that does not parse, whose mistake the checks
+/// report.
+pub fn preset_env(dir: &Path) -> RunEnv {
+    resolve(&presets::detect(dir), &BTreeMap::new()).unwrap_or_default()
+}
+
+/// The presets' variables, then the project's over them. Two presets that set one variable
+/// differently set neither: picking one by order would be harder to find than none.
+fn resolve(
+    presets: &[&'static Preset],
+    project: &BTreeMap<String, EnvValue>,
+) -> Result<RunEnv, String> {
+    let mut set: BTreeMap<&str, (&str, Vec<&'static str>)> = BTreeMap::new();
+    let mut conflicts: BTreeMap<&str, Vec<&'static str>> = BTreeMap::new();
+    for preset in presets {
+        for &(name, value) in preset.env {
+            if let Some(names) = conflicts.get_mut(name) {
+                names.push(preset.name);
+            } else if let Some((other, mut names)) = set.remove(name) {
+                names.push(preset.name);
+                if other == value {
+                    set.insert(name, (other, names));
+                } else {
+                    conflicts.insert(name, names);
+                }
+            } else {
+                set.insert(name, (value, vec![preset.name]));
+            }
+        }
+    }
+    let mut vars: BTreeMap<String, EnvVar> = set
+        .into_iter()
+        .map(|(name, (value, names))| {
+            let var = EnvVar {
+                name: name.to_owned(),
+                value: value.to_owned(),
+                source: format!("preset {}", names.join(", ")),
+            };
+            (name.to_owned(), var)
+        })
+        .collect();
+    for (name, value) in project {
+        conflicts.remove(name.as_str());
+        match value {
+            EnvValue::Set(value) => {
+                check_placeholders(name, value)?;
+                let var = EnvVar {
+                    name: name.clone(),
+                    value: value.clone(),
+                    source: FILE.to_owned(),
+                };
+                vars.insert(name.clone(), var);
+            }
+            EnvValue::Drop(false) => {
+                vars.remove(name);
+            }
+            EnvValue::Drop(true) => {
+                return Err(format!(
+                    "{FILE} is not valid: [run.env] {name} = true; give it a value, or false to drop it"
+                ));
+            }
+        }
+    }
+    Ok(RunEnv {
+        vars: vars.into_values().collect(),
+        conflicts: conflicts
+            .into_iter()
+            .map(|(name, presets)| Conflict {
+                name: name.to_owned(),
+                presets,
+            })
+            .collect(),
+        presets: presets.to_vec(),
+    })
+}
+
+/// A `{word}` that is no placeholder is a mistake, not text to pass on.
+fn check_placeholders(name: &str, value: &str) -> Result<(), String> {
+    let mut rest = value;
+    while let Some(start) = rest.find('{') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('}') else { break };
+        let word = &after[..end];
+        if !PLACEHOLDERS.contains(&word) {
+            return Err(format!(
+                "{FILE} is not valid: [run.env] {name} names {{{word}}}; the placeholders are {}",
+                PLACEHOLDERS.map(|p| format!("{{{p}}}")).join(", ")
+            ));
+        }
+        rest = &after[end + 1..];
+    }
+    Ok(())
+}
+
+/// `value` with its placeholders filled in.
+/// The `/` right after a placeholder is the platform's, so `{build}/cargo` reads as one path.
+pub fn fill(value: &str, build: &Path, checkout: &Path) -> String {
+    let sep = std::path::MAIN_SEPARATOR;
+    let (build, checkout) = (build.display(), checkout.display());
+    value
+        .replace("{build}/", &format!("{build}{sep}"))
+        .replace("{build}", &build.to_string())
+        .replace("{checkout}/", &format!("{checkout}{sep}"))
+        .replace("{checkout}", &checkout.to_string())
 }
 
 #[cfg(test)]
@@ -241,5 +425,91 @@ checks = [
                 .commands_for(&changed(&["apps/gui/src/styles.css", "docs/DESIGN.md"]))
                 .is_empty()
         );
+    }
+
+    fn vars(env: &RunEnv) -> Vec<(&str, &str)> {
+        env.vars
+            .iter()
+            .map(|v| (v.name.as_str(), v.value.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn presets_follow_the_marker_files_and_the_project_has_the_last_word() {
+        let dir = tempfile::tempdir().unwrap();
+        // Nothing to go by: nothing set.
+        assert_eq!(run_env(dir.path()).unwrap(), RunEnv::default());
+        std::fs::write(dir.path().join("package.json"), "{}").unwrap();
+        assert!(run_env(dir.path()).unwrap().vars.is_empty());
+
+        // A Cargo.toml next to it turns rust on as well.
+        std::fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+        let env = run_env(dir.path()).unwrap();
+        assert_eq!(vars(&env), [("CARGO_TARGET_DIR", "{build}/cargo")]);
+        assert_eq!(env.vars[0].source, "preset rust");
+
+        let file = dir.path().join(FILE);
+        std::fs::write(
+            &file,
+            "[run.env]\nCARGO_TARGET_DIR = \"{checkout}/out\"\nPYTHONDONTWRITEBYTECODE = \"1\"\n",
+        )
+        .unwrap();
+        let env = run_env(dir.path()).unwrap();
+        assert_eq!(
+            vars(&env),
+            [
+                ("CARGO_TARGET_DIR", "{checkout}/out"),
+                ("PYTHONDONTWRITEBYTECODE", "1")
+            ]
+        );
+        assert_eq!(env.vars[0].source, FILE);
+
+        std::fs::write(&file, "[run.env]\nCARGO_TARGET_DIR = false\n").unwrap();
+        assert!(run_env(dir.path()).unwrap().vars.is_empty());
+        std::fs::write(&file, "[run]\npresets = []\n").unwrap();
+        let env = run_env(dir.path()).unwrap();
+        assert!(env.vars.is_empty() && env.presets.is_empty());
+
+        // Mistakes are errors, never quietly nothing.
+        for text in [
+            "[run]\npresets = [\"nope\"]\n",
+            "[run.env]\nX = true\n",
+            "[run.env]\nX = 3\n",
+            "[run.env]\nX = \"{cache}/x\"\n",
+        ] {
+            std::fs::write(&file, text).unwrap();
+            assert!(run_env(dir.path()).unwrap_err().contains(FILE), "{text}");
+        }
+    }
+
+    #[test]
+    fn two_presets_that_disagree_set_neither_until_the_project_says() {
+        static A: Preset = Preset {
+            name: "a",
+            markers: &[],
+            env: &[("SHARED", "1"), ("OUT", "{build}/a")],
+            hints: &[],
+        };
+        static B: Preset = Preset {
+            name: "b",
+            markers: &[],
+            env: &[("SHARED", "1"), ("OUT", "{build}/b")],
+            hints: &[],
+        };
+        let env = resolve(&[&A, &B], &BTreeMap::new()).unwrap();
+        assert_eq!(vars(&env), [("SHARED", "1")]);
+        assert_eq!(env.vars[0].source, "preset a, b");
+        assert_eq!(
+            env.conflicts,
+            [Conflict {
+                name: "OUT".into(),
+                presets: vec!["a", "b"]
+            }]
+        );
+
+        let project = BTreeMap::from([("OUT".to_owned(), EnvValue::Set("{build}/x".into()))]);
+        let env = resolve(&[&A, &B], &project).unwrap();
+        assert!(env.conflicts.is_empty());
+        assert_eq!(vars(&env), [("OUT", "{build}/x"), ("SHARED", "1")]);
     }
 }

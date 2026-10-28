@@ -18,6 +18,7 @@ pub mod lessons;
 pub mod messaging;
 pub mod notes;
 pub mod plan;
+pub mod presets;
 pub mod project;
 pub mod projects;
 pub mod protocol;

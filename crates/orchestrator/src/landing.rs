@@ -3,8 +3,9 @@
 
 use chrono::Utc;
 use crossagents_core::{
-    Agent, CoreError, EventKind, HumanItem, HumanItemKind, HumanItemStatus, LandMode, LandPolicy,
-    Landing, Run, RunId, RunStatus, Task, TaskId, TaskReport, TaskSpec, TaskStatus,
+    Agent, CheckResult, ChecksState, CoreError, EventKind, HumanItem, HumanItemKind,
+    HumanItemStatus, LandMode, LandPolicy, Landing, Run, RunId, RunStatus, Task, TaskId,
+    TaskReport, TaskSpec, TaskStatus,
 };
 use serde::Deserialize;
 use serde::Serialize;
@@ -60,8 +61,11 @@ impl Orchestrator {
         }
         let checks = project::run_checks(&dir)
             .map_err(|e| CoreError::Conflict(format!("{e}; fix it, then call {tool} again")))?;
+        // Not checked is said as such, never left to read as passed.
         if checks.checks.is_empty() {
-            return Ok(());
+            return self
+                .record_checks(run.id, ChecksState::NotConfigured, Vec::new())
+                .await;
         }
         // What the run changes against its base, so that a check scoped to other paths is
         // skipped. Not knowing (an error) runs them all.
@@ -75,43 +79,72 @@ impl Orchestrator {
             });
         let commands = checks.commands_for(&changed);
         if commands.is_empty() {
-            return Ok(());
+            let declared = u32::try_from(checks.checks.len()).unwrap_or(u32::MAX);
+            return self
+                .record_checks(run.id, ChecksState::NotApplicable { declared }, Vec::new())
+                .await;
         }
         self.refuse_while_running(&dir, tool).await?;
         let results = self
             .verifier
             .check_within(&dir, &commands, checks.timeout)
             .await;
-        {
-            let _guard = self.lock(run.id).await;
-            let mut stored = self.store.get_run(run.id).await?;
-            stored.checks = results.clone();
-            stored.updated_at = Utc::now();
-            self.store.update_run(&stored).await?;
-        }
+        self.record_checks(run.id, ChecksState::Ran, results.clone())
+            .await?;
         if all_passed(&results) {
             return Ok(());
         }
-        // A file held by another process is the machine, not the change: say so, or the lead
-        // goes looking for a bug that is not there.
-        if results
-            .iter()
-            .any(|r| !r.passed && crate::running::in_use_failure(&r.output))
-        {
+        let Some(bad) = results.iter().find(|r| !r.passed) else {
+            return Ok(());
+        };
+        // A file the system says another process holds is the machine, not the change: say
+        // so, or the lead goes looking for a bug that is not there.
+        if crate::running::in_use_failure(&bad.output) {
             return Err(CoreError::Conflict(format!(
-                "the project's checks ({}) could not run cleanly: a file they build was in use by                  another process (a build or test running at the same time), not a problem in                  your change: {}
-Make sure nothing else is building or testing in this checkout,                  then call {tool} again.",
+                "the project's checks ({}) could not run cleanly: a file they use was held by \
+                 another process (a build or test running at the same time?), which is not a \
+                 problem in your change: {}\nMake sure nothing else is building or testing in \
+                 this checkout, then call {tool} again.",
                 project::FILE,
                 brief::checks(&results)
             )));
         }
+        // What the toolchain's own messages suggest is only noted: they do not prove it.
+        let presets = project::run_env(&dir)
+            .map(|env| env.presets)
+            .unwrap_or_else(|_| crate::presets::detect(&dir));
+        let hints = crate::running::hints(&bad.output, &presets);
+        let maybe = if hints.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\npossibly related: {} in the output, which another build running at the same \
+                 time can cause.",
+                hints.join(", ")
+            )
+        };
         Err(CoreError::Conflict(format!(
-            "the project's checks ({}) failed: {}\nFix it in your checkout and call {tool} again. \
-             If a check itself is wrong, tell the person: they can still land or end the run \
-             from the run page.",
+            "the project's checks ({}) failed: {}{maybe}\nFix it in your checkout and call {tool} \
+             again. If a check itself is wrong, tell the person: they can still land or end the \
+             run from the run page.",
             project::FILE,
             brief::checks(&results)
         )))
+    }
+
+    /// Keeps on the run how its checks went.
+    async fn record_checks(
+        &self,
+        id: RunId,
+        state: ChecksState,
+        results: Vec<CheckResult>,
+    ) -> Result<(), CoreError> {
+        let _guard = self.lock(id).await;
+        let mut stored = self.store.get_run(id).await?;
+        stored.checks = results;
+        stored.checks_state = Some(state);
+        stored.updated_at = Utc::now();
+        self.store.update_run(&stored).await
     }
 
     /// Refuses to start the checks while an agent working in `dir` still runs a command
@@ -142,7 +175,10 @@ Make sure nothing else is building or testing in this checkout,                 
             return Ok(());
         }
         Err(CoreError::Conflict(format!(
-            "not running the project's checks yet: {} in this checkout, and the checks build in              the same directory, so they would collide with it. Wait for it to finish (or stop              it), then call {tool} again. The hub runs the full checks itself: you need not run              them first.",
+            "not running the project's checks yet: {} in this checkout, and the checks build in \
+             the same directory, so they would collide with it. Wait for it to finish (or stop \
+             it), then call {tool} again. The hub runs the full checks itself: you need not run \
+             them first.",
             busy.join("; ")
         )))
     }
@@ -211,9 +247,10 @@ Make sure nothing else is building or testing in this checkout,                 
             if self.head_of(&run).await? != checked {
                 continue;
             }
-            return Ok(json(
-                self.merge_run(run, mode, &caller.name, message).await?,
-            ));
+            let verified = brief::verification(&run);
+            let mut out = json(self.merge_run(run, mode, &caller.name, message).await?);
+            out["checks"] = verified.into();
+            return Ok(out);
         }
         Err(CoreError::Conflict(format!(
             "{} kept changing while the project's checks ran, so what would land was never \
@@ -523,7 +560,12 @@ Make sure nothing else is building or testing in this checkout,                 
         let run = self.finish(run.id, Some(a.summary), a.cancel_open).await?;
         // Sorting is its own state: it never holds up the end, it is only counted.
         let unsorted = self.unsorted_issues(run.id).await;
-        Ok(json!({ "status": run.status, "landed": run.landed, "unsorted_issues": unsorted }))
+        Ok(json!({
+            "status": run.status,
+            "landed": run.landed,
+            "checks": brief::verification(&run),
+            "unsorted_issues": unsorted,
+        }))
     }
 
     /// Closes the run: completed if anything merged, else failed. Open tasks are refused
@@ -597,6 +639,17 @@ Make sure nothing else is building or testing in this checkout,                 
             Some(l) => text.push_str(&format!("已落地到 {}（{}）", run.base_branch, l.reference)),
             None if changed => text.push_str(&format!("结果在 {}，{AWAITING_LAND}", run.branch)),
             None => text.push_str("没有改动"),
+        }
+        match run.checks_state {
+            Some(ChecksState::NotConfigured) => text.push_str(&format!(
+                "\n验收：{} 没有声明检查，未执行验证",
+                project::FILE
+            )),
+            Some(ChecksState::NotApplicable { declared }) => text.push_str(&format!(
+                "\n验收：这次的改动不涉及 {} 里声明的 {declared} 项检查，未执行验证",
+                project::FILE
+            )),
+            _ => {}
         }
         if !run.checks.is_empty() {
             let passed = run.checks.iter().filter(|c| c.passed).count();

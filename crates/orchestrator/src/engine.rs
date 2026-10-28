@@ -379,6 +379,7 @@ impl Orchestrator {
             landed: None,
             summary: None,
             checks: Vec::new(),
+            checks_state: None,
             id,
             title: new.title.unwrap_or_else(|| first_line(&new.request, 60)),
             request: new.request,
@@ -445,6 +446,8 @@ impl Orchestrator {
             .await;
         // The request is the person's; the roster and ids are facts the lead needs.
         let sessions = self.sessions_section(&run.repo, run.planner).await;
+        let checkout = self.integration_path(&run);
+        let env = crate::workspace::worktree_run_env(&self.config.worktrees, &checkout);
         let kickoff = Envelope {
             attachments: new.attachments,
             ..Envelope::new(
@@ -453,7 +456,8 @@ impl Orchestrator {
                     &run,
                     &team,
                     run.config.worker,
-                    &crate::project::run_checks(&self.integration_path(&run)),
+                    &crate::project::run_checks(&checkout),
+                    env.as_ref(),
                     &sessions,
                 ),
             )

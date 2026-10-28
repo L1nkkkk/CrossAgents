@@ -225,6 +225,7 @@ impl Fixture {
             landed: None,
             summary: None,
             checks: Vec::new(),
+            checks_state: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
