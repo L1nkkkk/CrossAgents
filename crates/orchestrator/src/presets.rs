@@ -6,6 +6,8 @@
 
 use std::path::Path;
 
+use crate::project::ResourceAccess;
+
 /// One toolchain's defaults.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Preset {
@@ -15,6 +17,12 @@ pub struct Preset {
     /// Variables for agents and checks in a run worktree; values may hold placeholders
     /// (`project::PLACEHOLDERS`).
     pub env: &'static [(&'static str, &'static str)],
+    /// Local resources a build there holds (docs/tasks/LOCKS.md §3): name, path template
+    /// (placeholders as in `env`), access. The project replaces one by name.
+    pub resources: &'static [(&'static str, &'static str, ResourceAccess)],
+    /// Programs the run worktree's `PATH` sends through the executor (LOCKS §4.6); the
+    /// project's `[run] shims` replaces the list.
+    pub shims: &'static [&'static str],
     /// Signs in a failed check's output that the failure may come from another build at
     /// the same time: noted, never taken as proof (`running::in_use_failure` is).
     pub hints: &'static [&'static str],
@@ -26,6 +34,11 @@ pub const PRESETS: &[Preset] = &[Preset {
     // Each worktree builds apart: workspace members have the same names and versions in
     // every worktree, so their artefacts would overwrite each other (docs/TODO.md §十六).
     env: &[("CARGO_TARGET_DIR", "{build}/cargo")],
+    // The same directory as `CARGO_TARGET_DIR`: two cargos on it must not run at once
+    // (LOCKS §3).
+    resources: &[("build", "{build}/cargo", ResourceAccess::Exclusive)],
+    // `cargo` in a run worktree holds `build` without the agent asking (LOCKS §4.6).
+    shims: &["cargo"],
     // MSVC cannot open an output file (one a test still runs, or anything else); cargo
     // waits for another cargo's lock, and may well succeed after.
     hints: &["LNK1104", "Blocking waiting for file lock"],

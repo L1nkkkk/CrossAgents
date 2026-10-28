@@ -248,6 +248,17 @@ mod tests {
             .join("integration")
             .join("cargo");
         assert_eq!(out[0].output, want.display().to_string());
+        // A check holds the same build directory the agent builds into (LOCKS §3).
+        let echo_resources = if cfg!(windows) {
+            "echo %CROSSAGENTS_RESOURCES%"
+        } else {
+            "echo $CROSSAGENTS_RESOURCES"
+        };
+        let out = verifier.check(&dir, &[echo_resources.into()]).await;
+        let resources: serde_json::Value = serde_json::from_str(&out[0].output).unwrap();
+        assert_eq!(resources[0]["name"], "build");
+        assert_eq!(resources[0]["access"], "exclusive");
+        assert_eq!(resources[0]["path"], want.display().to_string());
         // A task's checkout builds in its own, not in the run's.
         let task = root.join("ab12cd34").join("auth");
         std::fs::create_dir_all(&task).unwrap();

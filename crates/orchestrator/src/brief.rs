@@ -421,12 +421,20 @@ mod tests {
             landed: None,
             summary: None,
             checks: vec![],
+            checks_state: None,
             created_at: now,
             updated_at: now,
         };
         for in_place in [false, true] {
             run.in_place = in_place;
-            let text = kickoff(&run, &[], worker, &Err("test".into()), "\nsessions: test");
+            let text = kickoff(
+                &run,
+                &[],
+                worker,
+                &Err("test".into()),
+                None,
+                "\nsessions: test",
+            );
             assert!(
                 text.starts_with("hello\nworld\n\n---\nrun: title (run_id: "),
                 "{text}"
