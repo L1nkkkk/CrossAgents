@@ -657,12 +657,24 @@ function SwitchNote({ change }: { change: ModelSwitch }) {
 /** Inputs longer than this start folded. */
 const FOLD_INPUT = 600;
 
-function Bubble({ turn }: { turn: TranscriptTurn }) {
+// Keep in sync with the kickoff separator in crates/orchestrator/src/brief.rs.
+const KICKOFF_SEPARATOR = "\n\n---\nrun: ";
+
+function Bubble({ turn, tree }: { turn: TranscriptTurn; tree: RunDetail[] }) {
   const [open, setOpen] = useState(false);
-  const long = turn.input.length > FOLD_INPUT;
+  const request = tree.find(({ run }) => turn.input.startsWith(run.request.trim() + KICKOFF_SEPARATOR))?.run.request.trim();
+  const visible = request === undefined || open ? turn.input : request;
+  const long = request === undefined && turn.input.length > FOLD_INPUT;
   return (
     <div className="bubble" title={time(turn.sent_at)}>
-      {long && !open ? turn.input.slice(0, FOLD_INPUT).trimEnd() + "…" : turn.input}
+      {long && !open ? visible.slice(0, FOLD_INPUT).trimEnd() + "…" : visible}
+      {request !== undefined && (
+        <div>
+          <button className="tools-more" style={{ padding: 0, marginTop: 4 }} aria-expanded={open} onClick={() => setOpen(!open)}>
+            {open ? "收起 run 上下文 ▾" : "已附上 run 上下文（成员、校验、会话）▸"}
+          </button>
+        </div>
+      )}
       {long && (
         <div>
           <button className="tools-more" style={{ padding: 0, marginTop: 4 }} onClick={() => setOpen(!open)}>
@@ -680,7 +692,7 @@ function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agen
     <div className="turn" data-turn={turn.message_id}>
       {fromPerson(turn) ? (
         <>
-          {(turn.input || !turn.attachments?.length) && <Bubble turn={turn} />}
+          {(turn.input || !turn.attachments?.length) && <Bubble turn={turn} tree={tree} />}
           <TurnFiles agent={agent.id} files={turn.attachments ?? []} />
         </>
       ) : (
