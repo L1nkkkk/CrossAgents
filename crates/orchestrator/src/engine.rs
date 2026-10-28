@@ -104,6 +104,8 @@ pub struct Orchestrator {
     pub(crate) approvals: std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
     /// Context tokens each agent last reported in use, for handoff cards.
     pub(crate) contexts: std::sync::Mutex<HashMap<AgentId, u64>>,
+    /// Held while a directory is looked up among projects ([`Self::project_for`]).
+    pub(crate) projects_lock: Mutex<()>,
 }
 
 /// What a run says about a lead copied for it (docs/tasks/S1.md §3.2).
@@ -135,6 +137,7 @@ impl Orchestrator {
             messaging: Mutex::default(),
             approvals: std::sync::Mutex::default(),
             contexts: std::sync::Mutex::default(),
+            projects_lock: Mutex::default(),
         })
     }
 

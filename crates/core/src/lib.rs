@@ -13,6 +13,7 @@ pub mod event;
 pub mod handoff;
 pub mod human;
 pub mod ids;
+pub mod lesson;
 pub mod model;
 pub mod names;
 pub mod note;
@@ -44,6 +45,10 @@ pub use event::{
 pub use handoff::{Handoff, HandoffKind, HandoffOutcome};
 pub use human::{HumanAction, HumanItem, HumanItemKind, HumanItemStatus};
 pub use ids::{AgentId, HandoffId, MessageId, RunId, SessionId, TaskId};
+pub use lesson::{
+    Evidence, ISSUE_PREFIX, IssueRef, Lesson, LessonOutcome, LessonStatus, Project, ProjectPath,
+    Triage, TriageRecord, TriageStep,
+};
 pub use model::{
     Agent, AgentProfile, AgentStatus, CONTEXT_LOST, CheckResult, ContinuationState, LandMode,
     Landing, NameSource, PlannedTask, Role, Run, RunConfig, RunStatus, Scope, Task, TaskReport,

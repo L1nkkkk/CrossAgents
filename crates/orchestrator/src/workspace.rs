@@ -73,6 +73,11 @@ pub trait WorkspaceProvider: Send + Sync {
         let _ = path;
         Ok(String::new())
     }
+    /// The URL of `repo`'s `origin`, else of its first remote; `None` without one.
+    async fn remote(&self, repo: &Path) -> Option<String> {
+        let _ = repo;
+        None
+    }
     /// Forgets working copies of `repo` whose directory is gone (deleted by hand when
     /// removing them failed), so their branches can be checked out again.
     async fn prune(&self, repo: &Path) -> Result<(), CoreError> {
@@ -548,6 +553,15 @@ impl WorkspaceProvider for GitWorkspaces {
     async fn head(&self, path: &Path) -> Result<String, CoreError> {
         git(path, &["rev-parse", "HEAD"]).await
     }
+
+    async fn remote(&self, repo: &Path) -> Option<String> {
+        if let Ok(url) = git(repo, &["remote", "get-url", "origin"]).await {
+            return Some(url);
+        }
+        let names = git(repo, &["remote"]).await.ok()?;
+        let first = names.lines().next()?.trim().to_owned();
+        git(repo, &["remote", "get-url", &first]).await.ok()
+    }
 }
 
 impl GitWorkspaces {
@@ -714,13 +728,7 @@ pub fn worktree_env(root: &Path, cwd: &Path) -> Option<(String, String)> {
 /// `<name>-<hash>` of the repository `worktree` is a working copy of: its `.git` file names
 /// the worktree's git directory, whose `commondir` (or grandparent) is the repository's.
 fn repo_key(worktree: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(worktree.join(".git")).ok()?;
-    let gitdir = worktree.join(text.strip_prefix("gitdir:")?.trim());
-    let common = match std::fs::read_to_string(gitdir.join("commondir")) {
-        Ok(rel) => gitdir.join(rel.trim()),
-        Err(_) => gitdir.parent()?.parent()?.to_path_buf(),
-    };
-    let common = dunce::canonicalize(common).ok()?;
+    let common = common_dir(worktree)?;
     let repo = if common.file_name()? == ".git" {
         common.parent()?
     } else {
@@ -747,6 +755,28 @@ fn repo_key(worktree: &Path) -> Option<String> {
         (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
     });
     Some(format!("{name}-{:08x}", hash & 0xffff_ffff))
+}
+
+/// The repository's git directory, from `worktree`'s `.git` file.
+fn common_dir(worktree: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(worktree.join(".git")).ok()?;
+    let gitdir = worktree.join(text.strip_prefix("gitdir:")?.trim());
+    let common = match std::fs::read_to_string(gitdir.join("commondir")) {
+        Ok(rel) => gitdir.join(rel.trim()),
+        Err(_) => gitdir.parent()?.parent()?.to_path_buf(),
+    };
+    dunce::canonicalize(common).ok()
+}
+
+/// The main checkout `worktree` is a working copy of (its git directory's parent; a bare
+/// repository is its own).
+pub fn common_repo(worktree: &Path) -> Option<PathBuf> {
+    let common = common_dir(worktree)?;
+    if common.file_name()? == ".git" {
+        common.parent().map(Path::to_path_buf)
+    } else {
+        Some(common)
+    }
 }
 
 /// Removes each shared build directory (`<root>/targets/*`) that has grown past `limit`

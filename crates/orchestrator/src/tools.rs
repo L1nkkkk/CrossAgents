@@ -9,6 +9,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use crate::engine::Orchestrator;
+use crate::lessons::outcome_schema;
 use crate::messaging::{Group, groups_of};
 
 const ALL: &[Group] = &[Group::Everyone];
@@ -212,7 +213,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "note_write",
-        description: "Write a shared note under a key (replacing what was there): conventions, decisions, interfaces, pitfalls. scope \"run\" (default, this run) or \"team\" (lasts across runs). text null deletes it (author or a lead only).",
+        description: "Write a shared note under a key (replacing what was there): conventions, decisions, interfaces, pitfalls. scope \"run\" (default, this run) or \"team\" (lasts across runs). text null deletes it (author or a lead only). When you hit a problem and got past it (or did not), record it in the run under issue/<task_id>/<a new uuid>, as it happens: 问题 (the symptom, with the error text), 环境 (what matters: system, tool versions), 尝试 (what did not work), 处理 (what you did), 结果 (已解决, 临时绕过 or 未解决), 相关文件. Teammates in the run read them with note_list prefix issue/; the run's issues are sorted into the project's troubleshooting records when it ends.",
         groups: ALL,
         schema: || {
             object(
@@ -244,6 +245,102 @@ const TOOLS: &[ToolDef] = &[
             object(
                 json!({ "prefix": { "type": "string" }, "scope": { "type": "string", "enum": ["run", "team"] } }),
                 &[],
+            )
+        },
+    },
+    ToolDef {
+        name: "issue_pending",
+        description: "The problems recorded in a run (run notes under issue/) that nobody has sorted yet, with their text. Defaults to your run; name another run of this project to sort one that already ended, failed or was cancelled. Sort each with lesson_create, lesson_merge or issue_keep.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({ "run": { "type": "string", "description": "Run id, or 4+ characters of it. Default: yours." } }),
+                &[],
+            )
+        },
+    },
+    ToolDef {
+        name: "lesson_create",
+        description: "Turn recorded problems into one troubleshooting record of this project, for later agents to find with lesson_search when they hit the same thing. Write what someone with the error in front of them needs: the symptom with the exact error text, keywords (error codes, tool names), when it applies, what to do. A record is reference for later agents, not a rule. Issues already sorted are left as they were, so repeating a call is safe.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({
+                    "run": { "type": "string" },
+                    "issues": { "type": "array", "items": { "type": "string" }, "description": "Issue note keys (issue/<task>/<id>)." },
+                    "title": { "type": "string", "description": "One line." },
+                    "symptom": { "type": "string" },
+                    "keywords": { "type": "array", "items": { "type": "string" } },
+                    "conditions": { "type": "string", "description": "Where it applies: system, tool versions, node, files." },
+                    "resolution": { "type": "string" },
+                    "outcome": outcome_schema()
+                }),
+                &["issues", "title", "symptom", "resolution", "outcome"],
+            )
+        },
+    },
+    ToolDef {
+        name: "lesson_merge",
+        description: "Sort recorded problems into an existing troubleshooting record (find it with lesson_search): adds them as evidence, optionally with a better resolution or a new outcome.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({
+                    "run": { "type": "string" },
+                    "issues": { "type": "array", "items": { "type": "string" } },
+                    "lesson": { "type": "string", "description": "The record's id." },
+                    "resolution": { "type": "string" },
+                    "outcome": outcome_schema(),
+                    "note": { "type": "string" }
+                }),
+                &["issues", "lesson"],
+            )
+        },
+    },
+    ToolDef {
+        name: "issue_keep",
+        description: "Mark recorded problems as sorted without a record: nothing in them is worth reusing. They stay in the run.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({
+                    "run": { "type": "string" },
+                    "issues": { "type": "array", "items": { "type": "string" } },
+                    "why": { "type": "string" }
+                }),
+                &["issues"],
+            )
+        },
+    },
+    ToolDef {
+        name: "lesson_search",
+        description: "Search this project's troubleshooting records: problems earlier agents hit here and what they did. Paste the error or a few keywords. A match is a lead, not proof it applies: check its conditions and evidence.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({
+                    "query": { "type": "string" },
+                    "limit": { "type": "integer", "description": "1-10, default 5." },
+                    "include_superseded": { "type": "boolean" }
+                }),
+                &["query"],
+            )
+        },
+    },
+    ToolDef {
+        name: "lesson_get",
+        description: "A troubleshooting record in full: conditions, resolution, every time it was tried, and the runs it came from.",
+        groups: ALL,
+        schema: || object(json!({ "id": { "type": "string" } }), &["id"]),
+    },
+    ToolDef {
+        name: "lesson_report",
+        description: "Say how a troubleshooting record went when you used it. One that did not work is put up for review; its history stays.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({ "id": { "type": "string" }, "worked": { "type": "boolean" }, "note": { "type": "string" } }),
+                &["id", "worked"],
             )
         },
     },
@@ -515,7 +612,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "run_finish",
-        description: "Close your run with a summary for the person. What you changed yourself and did not commit is committed on the run branch with message (written the way the project's rules ask; default: the summary's first line). Tasks still open are refused unless cancel_open. A run that changed something must first pass the project's checks (crossagents.toml), run by the hub in your checkout; a failure is refused with their output. The person also sees every decision taken by default. A run that changed something can then be landed (`run_land`).",
+        description: "Close your run with a summary for the person. What you changed yourself and did not commit is committed on the run branch with message (written the way the project's rules ask; default: the summary's first line). Tasks still open are refused unless cancel_open. A run that changed something must first pass the project's checks (crossagents.toml), run by the hub in your checkout; a failure is refused with their output. The person also sees every decision taken by default. A run that changed something can then be landed (`run_land`). Before closing, sort the problems recorded in the run (issue_pending, then lesson_create, lesson_merge or issue_keep); closing does not wait for it, and the answer says how many are left.",
         groups: PLANNER,
         schema: || {
             object(
@@ -638,6 +735,13 @@ impl Orchestrator {
             "note_write" => self.note_write(caller, input).await,
             "note_read" => self.note_read(caller, input).await,
             "note_list" => self.note_list(caller, input).await,
+            "issue_pending" => self.issue_pending(caller, input).await,
+            "lesson_create" | "lesson_merge" | "issue_keep" => {
+                self.issue_sort(caller, name, input).await
+            }
+            "lesson_search" => self.lesson_search(caller, input).await,
+            "lesson_get" => self.lesson_get(caller, input).await,
+            "lesson_report" => self.lesson_report(caller, input).await,
             "usage_get" => self.usage_get(caller).await,
             "inbox_read" => self.inbox_read(caller).await,
             "human_ask" => self.human_ask(caller, input).await,

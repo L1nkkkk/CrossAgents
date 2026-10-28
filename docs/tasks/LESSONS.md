@@ -1,6 +1,6 @@
 # LESSONS 任务书：项目排障记录
 
-> 依据：2026-10-28 讨论（run 里随手记问题和绕法，收尾统一整理；按项目共享、跨项目隔离；按需查，不当规则注入）· 状态：设计定稿，未开工 · 2026-10-28
+> 依据：2026-10-28 讨论（run 里随手记问题和绕法，收尾统一整理；按项目共享、跨项目隔离；按需查，不当规则注入）· 状态：L1 完成（2026-10-28，出入见 §8），L2、L3 未开工 · 2026-10-28
 
 ## 1. 目标
 
@@ -201,3 +201,23 @@ projects
 - 节点断线时的工作方式：在节点本地暂存 issue、缓存本项目的 lessons，恢复连接后补传。等多节点 B 阶段协议定下来再做。
 - 「像关键词的片段」怎么抽取：先用正则（错误码、异常类名、`error:` 行），跑一阵再看命中质量。
 - 现有 `team` 笔记里那几条「坑」，要不要用整理工具迁移进 lessons。
+
+## 8. L1 实现记录（2026-10-28）
+
+| 部分 | 位置 |
+|---|---|
+| 类型：`Project`、`Lesson`、`Evidence`、`TriageRecord`、`TriageStep` | `crates/core/src/lesson.rs` |
+| 表与 FTS5（trigram 分词）、整理事务、搜索 | `crates/store-sqlite/migrations/0010_projects_lessons.sql`、`crates/store-sqlite/src/lib.rs` |
+| 项目识别：remote 规范化、`resolve`（纯函数）、`main_repo` | `crates/orchestrator/src/projects.rs` |
+| 工具：`issue_pending`、`lesson_create`、`lesson_merge`、`issue_keep`、`lesson_search`、`lesson_get`、`lesson_report`；开场那一行 | `crates/orchestrator/src/lessons.rs`、`crates/orchestrator/src/tools.rs`、`crates/hub/src/collab.rs` |
+| 集成测试：run 取消后由另一个 run 整理（重复两次只入库一次），第三个 agent 搜到，别的项目读不到、搜不到 | `crates/mock-agent/tests/lessons.rs` |
+
+与设计的出入：
+
+- **搜索用 trigram 分词**：中文没有空格，trigram 能在长串里按子串命中。不到 3 个字的词（如「代理」）trigram 匹配不了，改用 LIKE 兜底。查询里的引号和 FTS 语法一律按文本处理。
+- **`run_finish` 只报数**：结果里多一个 `unsorted_issues`，不拦截收尾。
+- **一个没有 remote 的项目后来加了 remote，也按「身份待确认」处理**，不自动收下：和「已绑定路径出现陌生 remote」是同一种情况，都要由人判断。
+- **开场那一行只在已经认识的项目里出现**：会话开始时只查找，不新建项目，避免每个聊天目录都生成一个项目。
+- **REST、CLI、`issue.*` / `lesson.*` 事件留到 L2**：L1 只有协作工具。issue 的写入仍然有 `NoteWritten` 事件。
+- **`node` 暂时固定为 `local`**：等多节点有了节点 id 再换。
+

@@ -7,8 +7,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use crossagents_core::{
     Account, Agent, AgentClaim, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError,
-    EVENT_SCHEMA_VERSION, Event, EventKind, HumanItem, MessageId, NameSource, Note, NoteScope,
-    Reminder, Run, RunId, Store, Task, TaskId, Watch,
+    EVENT_SCHEMA_VERSION, Event, EventKind, HumanItem, IssueRef, Lesson, LessonStatus, MessageId,
+    NameSource, Note, NoteScope, Project, Reminder, Run, RunId, Store, Task, TaskId, Triage,
+    TriageRecord, TriageStep, Watch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -163,6 +164,52 @@ fn event_from_row(row: &SqliteRow) -> Result<Event, CoreError> {
         schema: row.try_get::<i64, _>("schema").map_err(storage)? as u32,
         kind: serde_json::from_value(tagged).map_err(storage)?,
     })
+}
+
+/// Writes a lesson and its search entry; `new` inserts, else replaces the stored one.
+async fn insert_lesson(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    lesson: &Lesson,
+    new: bool,
+) -> Result<(), CoreError> {
+    let status = match lesson.status {
+        LessonStatus::Active => "active",
+        LessonStatus::Review => "review",
+        LessonStatus::Superseded => "superseded",
+    };
+    let data = serde_json::to_string(lesson).map_err(storage)?;
+    let sql = if new {
+        "INSERT INTO lessons (id, project_id, status, created_at, data) VALUES (?1, ?2, ?3, ?4, ?5)"
+    } else {
+        "UPDATE lessons SET project_id = ?2, status = ?3, created_at = ?4, data = ?5 WHERE id = ?1"
+    };
+    sqlx::query(sql)
+        .bind(&lesson.id)
+        .bind(&lesson.project_id)
+        .bind(status)
+        .bind(lesson.created_at.to_rfc3339())
+        .bind(data)
+        .execute(&mut **tx)
+        .await
+        .map_err(storage)?;
+    sqlx::query("DELETE FROM lessons_fts WHERE id = ?")
+        .bind(&lesson.id)
+        .execute(&mut **tx)
+        .await
+        .map_err(storage)?;
+    sqlx::query(
+        "INSERT INTO lessons_fts (id, title, symptom, keywords, resolution)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+    .bind(&lesson.id)
+    .bind(&lesson.title)
+    .bind(&lesson.symptom)
+    .bind(lesson.keywords.join(" "))
+    .bind(&lesson.resolution)
+    .execute(&mut **tx)
+    .await
+    .map_err(storage)?;
+    Ok(())
 }
 
 fn not_found(key: &AgentKey) -> CoreError {
@@ -639,6 +686,258 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    async fn put_project(&self, project: &Project) -> Result<(), CoreError> {
+        sqlx::query(
+            "INSERT INTO projects (id, data) VALUES (?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET data = ?2",
+        )
+        .bind(&project.id)
+        .bind(serde_json::to_string(project).map_err(storage)?)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    async fn list_projects(&self) -> Result<Vec<Project>, CoreError> {
+        let rows: Vec<String> = sqlx::query_scalar("SELECT data FROM projects ORDER BY id")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage)?;
+        rows.iter()
+            .map(|d| serde_json::from_str(d).map_err(storage))
+            .collect()
+    }
+
+    async fn triage(
+        &self,
+        issues: &[IssueRef],
+        step: TriageStep,
+        by: AgentId,
+    ) -> Result<(Vec<TriageRecord>, Option<Lesson>), CoreError> {
+        // Write lock first, as in `delete_run`: this reads, then writes.
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        let mut records = Vec::with_capacity(issues.len());
+        let mut fresh: Vec<IssueRef> = Vec::new();
+        for issue in issues {
+            let earlier: Option<String> =
+                sqlx::query_scalar("SELECT data FROM issue_triage WHERE run_id = ?1 AND key = ?2")
+                    .bind(issue.run_id.to_string())
+                    .bind(&issue.key)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(storage)?;
+            match earlier {
+                Some(data) => records.push(serde_json::from_str(&data).map_err(storage)?),
+                None if !fresh.contains(issue) => fresh.push(issue.clone()),
+                None => {}
+            }
+        }
+        if fresh.is_empty() {
+            // A retry of a step that went through: hand back what it did.
+            tx.rollback().await.map_err(storage)?;
+            let lesson = match records.first().map(|r: &TriageRecord| &r.triage) {
+                Some(Triage::Lesson { lesson_id } | Triage::Merged { lesson_id }) => {
+                    Some(self.get_lesson(lesson_id).await?)
+                }
+                _ => None,
+            };
+            return Ok((records, lesson));
+        }
+        let (triage, lesson) = match step {
+            TriageStep::Create(mut lesson) => {
+                lesson.sources = fresh.clone();
+                insert_lesson(&mut tx, &lesson, true).await?;
+                let triage = Triage::Lesson {
+                    lesson_id: lesson.id.clone(),
+                };
+                (triage, Some(lesson))
+            }
+            TriageStep::Merge(mut lesson) => {
+                let stored: Option<String> =
+                    sqlx::query_scalar("SELECT id FROM lessons WHERE id = ?")
+                        .bind(&lesson.id)
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .map_err(storage)?;
+                if stored.is_none() {
+                    return Err(CoreError::NotFound {
+                        kind: "lesson",
+                        id: lesson.id,
+                    });
+                }
+                for issue in &fresh {
+                    if !lesson.sources.contains(issue) {
+                        lesson.sources.push(issue.clone());
+                    }
+                }
+                insert_lesson(&mut tx, &lesson, false).await?;
+                let triage = Triage::Merged {
+                    lesson_id: lesson.id.clone(),
+                };
+                (triage, Some(lesson))
+            }
+            TriageStep::Keep { why } => (Triage::Kept { why }, None),
+        };
+        let at = Utc::now();
+        for issue in fresh {
+            let record = TriageRecord {
+                issue,
+                triage: triage.clone(),
+                by,
+                at,
+            };
+            sqlx::query("INSERT INTO issue_triage (run_id, key, data) VALUES (?1, ?2, ?3)")
+                .bind(record.issue.run_id.to_string())
+                .bind(&record.issue.key)
+                .bind(serde_json::to_string(&record).map_err(storage)?)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage)?;
+            records.push(record);
+        }
+        tx.commit().await.map_err(storage)?;
+        Ok((records, lesson))
+    }
+
+    async fn list_triage(&self, run: RunId) -> Result<Vec<TriageRecord>, CoreError> {
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT data FROM issue_triage WHERE run_id = ? ORDER BY key")
+                .bind(run.to_string())
+                .fetch_all(&self.pool)
+                .await
+                .map_err(storage)?;
+        rows.iter()
+            .map(|d| serde_json::from_str(d).map_err(storage))
+            .collect()
+    }
+
+    async fn get_lesson(&self, id: &str) -> Result<Lesson, CoreError> {
+        let data: Option<String> = sqlx::query_scalar("SELECT data FROM lessons WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?;
+        match data {
+            Some(d) => serde_json::from_str(&d).map_err(storage),
+            None => Err(CoreError::NotFound {
+                kind: "lesson",
+                id: id.to_owned(),
+            }),
+        }
+    }
+
+    async fn update_lesson(&self, lesson: &Lesson) -> Result<(), CoreError> {
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let stored: Option<String> = sqlx::query_scalar("SELECT id FROM lessons WHERE id = ?")
+            .bind(&lesson.id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage)?;
+        if stored.is_none() {
+            return Err(CoreError::NotFound {
+                kind: "lesson",
+                id: lesson.id.clone(),
+            });
+        }
+        insert_lesson(&mut tx, lesson, false).await?;
+        tx.commit().await.map_err(storage)
+    }
+
+    async fn list_lessons(&self, project: &str) -> Result<Vec<Lesson>, CoreError> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT data FROM lessons WHERE project_id = ? ORDER BY created_at DESC",
+        )
+        .bind(project)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        rows.iter()
+            .map(|d| serde_json::from_str(d).map_err(storage))
+            .collect()
+    }
+
+    async fn search_lessons(
+        &self,
+        project: &str,
+        terms: &[String],
+        superseded: bool,
+        limit: usize,
+    ) -> Result<Vec<Lesson>, CoreError> {
+        let terms: Vec<&str> = terms
+            .iter()
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if terms.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        // Trigrams need three characters; shorter terms ("代理") are looked up as substrings.
+        let (long, short): (Vec<&str>, Vec<&str>) =
+            terms.into_iter().partition(|t| t.chars().count() >= 3);
+        let mut found: Vec<String> = Vec::new();
+        if !long.is_empty() {
+            let query = long
+                .iter()
+                .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let rows: Vec<String> = sqlx::query_scalar(
+                "SELECT l.data FROM lessons_fts f JOIN lessons l ON l.id = f.id
+                 WHERE lessons_fts MATCH ?1 AND l.project_id = ?2
+                   AND (l.status != 'superseded' OR ?4)
+                 ORDER BY bm25(lessons_fts) LIMIT ?3",
+            )
+            .bind(query)
+            .bind(project)
+            .bind(limit as i64)
+            .bind(superseded)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage)?;
+            found.extend(rows);
+        }
+        for term in short {
+            if found.len() >= limit {
+                break;
+            }
+            let pattern = format!(
+                "%{}%",
+                term.replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            );
+            let rows: Vec<String> = sqlx::query_scalar(
+                "SELECT l.data FROM lessons_fts f JOIN lessons l ON l.id = f.id
+                 WHERE l.project_id = ?1 AND (l.status != 'superseded' OR ?4)
+                   AND (f.title LIKE ?2 ESCAPE '\\' OR f.symptom LIKE ?2 ESCAPE '\\'
+                        OR f.keywords LIKE ?2 ESCAPE '\\' OR f.resolution LIKE ?2 ESCAPE '\\')
+                 ORDER BY l.created_at DESC LIMIT ?3",
+            )
+            .bind(project)
+            .bind(pattern)
+            .bind(limit as i64)
+            .bind(superseded)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage)?;
+            for row in rows {
+                if !found.contains(&row) {
+                    found.push(row);
+                }
+            }
+        }
+        found.truncate(limit);
+        found
+            .iter()
+            .map(|d| serde_json::from_str(d).map_err(storage))
+            .collect()
+    }
+
     async fn put_human_item(&self, item: &HumanItem) -> Result<(), CoreError> {
         sqlx::query(
             "INSERT INTO human_items (id, status, created_at, data) VALUES (?1, ?2, ?3, ?4)
@@ -825,6 +1124,12 @@ impl Store for SqliteStore {
         }
         // human_items has no run column; the record is JSON.
         sqlx::query("DELETE FROM human_items WHERE json_extract(data, '$.run_id') = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        // How its issues were sorted goes with them; lessons made of them stay.
+        sqlx::query("DELETE FROM issue_triage WHERE run_id = ?")
             .bind(id.to_string())
             .execute(&mut *tx)
             .await
@@ -1469,5 +1774,173 @@ mod tests {
         let events = store.events_since(0, 10).await.unwrap();
         assert_eq!(events[0].kind, EventKind::AgentCreated { agent: alice });
         store.close().await;
+    }
+
+    fn run_for(id: RunId) -> Run {
+        let now = Utc::now();
+        Run {
+            continuation: None,
+            landed: None,
+            lead_note: None,
+            summary: None,
+            checks: Vec::new(),
+            id,
+            title: "t".into(),
+            request: "do things".into(),
+            planner: AgentId::new(),
+            status: RunStatus::Completed,
+            config: RunConfig {
+                worker: AgentId::new(),
+                escalate: None,
+                reviewer: None,
+                auto_approve: false,
+                max_parallel: 3,
+                max_attempts: 3,
+                team: vec![],
+                policy: Default::default(),
+            },
+            repo: PathBuf::from("/repo"),
+            base_branch: "main".into(),
+            branch: "crossagents/x".into(),
+            in_place: false,
+            note: None,
+            plan: vec![],
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn lesson(id: &str, project: &str, title: &str, symptom: &str) -> Lesson {
+        let now = Utc::now();
+        Lesson {
+            id: id.into(),
+            project_id: project.into(),
+            title: title.into(),
+            symptom: symptom.into(),
+            keywords: Vec::new(),
+            conditions: String::new(),
+            resolution: "use node".into(),
+            outcome: crossagents_core::LessonOutcome::Workaround,
+            status: LessonStatus::Active,
+            superseded_by: None,
+            evidence: Vec::new(),
+            sources: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Sorting is one transaction and safe to repeat: a retry writes nothing new, and only
+    /// the issues not sorted yet go into a step (docs/tasks/LESSONS.md §4.3).
+    #[tokio::test]
+    async fn sorting_issues_twice_stores_the_lesson_once() {
+        let store = SqliteStore::open_in_memory().await.unwrap();
+        let run = RunId::new();
+        let by = AgentId::new();
+        let issue = |k: &str| IssueRef {
+            run_id: run,
+            key: format!("issue/t/{k}"),
+        };
+        let step = || TriageStep::Create(lesson("l1", "p", "python is a stub", "exit 9009"));
+        let (records, made) = store
+            .triage(&[issue("a"), issue("b")], step(), by)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(made.unwrap().sources, vec![issue("a"), issue("b")]);
+        // The same call again, as after a crash: the same answer, nothing added.
+        let (again, made) = store
+            .triage(&[issue("a"), issue("b")], step(), by)
+            .await
+            .unwrap();
+        assert_eq!(again, records);
+        assert_eq!(made.unwrap().id, "l1");
+        assert_eq!(store.list_lessons("p").await.unwrap().len(), 1);
+        // A step over one sorted and one new issue only takes the new one.
+        let (mixed, _) = store
+            .triage(
+                &[issue("a"), issue("c")],
+                TriageStep::Keep {
+                    why: "one-off".into(),
+                },
+                by,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(mixed[0].triage, Triage::Lesson { .. }));
+        assert!(matches!(mixed[1].triage, Triage::Kept { .. }));
+        assert_eq!(store.list_triage(run).await.unwrap().len(), 3);
+        // Merging into a lesson that is not there writes nothing.
+        let missing = store
+            .triage(
+                &[issue("d")],
+                TriageStep::Merge(lesson("nope", "p", "x", "x")),
+                by,
+            )
+            .await;
+        assert!(matches!(missing, Err(CoreError::NotFound { .. })));
+        assert_eq!(store.list_triage(run).await.unwrap().len(), 3);
+        // Deleting the run takes its sorting records; the lesson stays.
+        store.insert_run(&run_for(run)).await.unwrap();
+        store.delete_run(run).await.unwrap();
+        assert!(store.list_triage(run).await.unwrap().is_empty());
+        assert_eq!(store.list_lessons("p").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn lessons_are_searched_within_their_project() {
+        let store = SqliteStore::open_in_memory().await.unwrap();
+        let by = AgentId::new();
+        let run = RunId::new();
+        let mut python = lesson(
+            "l1",
+            "p",
+            "python 是 Windows Store 的占位程序",
+            "python exited with 9009",
+        );
+        python.keywords = vec!["9009".into(), "WindowsApps".into()];
+        let proxy = lesson("l2", "p", "claude.com 要走代理", "connect ETIMEDOUT");
+        let other = lesson("l3", "q", "python stub elsewhere", "9009");
+        for (i, l) in [python, proxy, other].into_iter().enumerate() {
+            let issue = IssueRef {
+                run_id: run,
+                key: format!("issue/t/{i}"),
+            };
+            store
+                .triage(&[issue], TriageStep::Create(l), by)
+                .await
+                .unwrap();
+        }
+        let ids = |ls: Vec<Lesson>| ls.into_iter().map(|l| l.id).collect::<Vec<_>>();
+        let search = |terms: &[&str], superseded: bool| {
+            let terms: Vec<String> = terms.iter().map(|t| t.to_string()).collect();
+            let store = &store;
+            async move {
+                ids(store
+                    .search_lessons("p", &terms, superseded, 5)
+                    .await
+                    .unwrap())
+            }
+        };
+        // Inside longer words, either language; another project's lesson never shows.
+        assert_eq!(search(&["9009"], false).await, vec!["l1"]);
+        assert_eq!(search(&["占位程序"], false).await, vec!["l1"]);
+        assert_eq!(search(&["TIMEDOUT"], false).await, vec!["l2"]);
+        // Shorter than a trigram: looked up as a substring.
+        assert_eq!(search(&["代理"], false).await, vec!["l2"]);
+        assert!(search(&["nothing like it"], false).await.is_empty());
+        // Quotes and FTS syntax in what an agent pastes are taken as text.
+        assert!(
+            search(&["\"; DROP TABLE lessons; --"], false)
+                .await
+                .is_empty()
+        );
+        assert!(search(&["9009 OR NEAR(x"], false).await.is_empty());
+        // Superseded lessons only when asked for.
+        let mut old = store.get_lesson("l1").await.unwrap();
+        old.status = LessonStatus::Superseded;
+        store.update_lesson(&old).await.unwrap();
+        assert!(search(&["9009"], false).await.is_empty());
+        assert_eq!(search(&["9009"], true).await, vec!["l1"]);
     }
 }

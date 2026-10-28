@@ -474,7 +474,9 @@ impl Orchestrator {
         self.commit_lead(&run, &message).await?;
         self.require_run_checks(&run, "run_finish").await?;
         let run = self.finish(run.id, Some(a.summary), a.cancel_open).await?;
-        Ok(json!({ "status": run.status, "landed": run.landed }))
+        // Sorting is its own state: it never holds up the end, it is only counted.
+        let unsorted = self.unsorted_issues(run.id).await;
+        Ok(json!({ "status": run.status, "landed": run.landed, "unsorted_issues": unsorted }))
     }
 
     /// Closes the run: completed if anything merged, else failed. Open tasks are refused

@@ -8,6 +8,7 @@ use crate::error::CoreError;
 use crate::event::{Event, EventKind};
 use crate::human::HumanItem;
 use crate::ids::{AgentId, MessageId, RunId, TaskId};
+use crate::lesson::{IssueRef, Lesson, Project, TriageRecord, TriageStep};
 use crate::model::{Agent, AgentProfile, AgentStatus, Run, Task};
 use crate::note::{Note, NoteScope};
 use crate::notify::{Reminder, Watch};
@@ -265,6 +266,59 @@ pub trait Store: Send + Sync {
     ) -> Result<(), CoreError> {
         let _ = (scope, run_id, key);
         Ok(())
+    }
+    /// Inserts or replaces a project (by id).
+    async fn put_project(&self, project: &Project) -> Result<(), CoreError> {
+        let _ = project;
+        Err(CoreError::Unsupported("projects".into()))
+    }
+    async fn list_projects(&self) -> Result<Vec<Project>, CoreError> {
+        Ok(Vec::new())
+    }
+    /// Sorts `issues` in one transaction (docs/tasks/LESSONS.md §4.3; see [`TriageStep`]):
+    /// returns every issue's record, the earlier one for those already sorted, and the lesson
+    /// written, if any.
+    async fn triage(
+        &self,
+        issues: &[IssueRef],
+        step: TriageStep,
+        by: crate::ids::AgentId,
+    ) -> Result<(Vec<TriageRecord>, Option<Lesson>), CoreError> {
+        let _ = (issues, step, by);
+        Err(CoreError::Unsupported("lessons".into()))
+    }
+    /// How the issues of `run` were sorted so far.
+    async fn list_triage(&self, run: RunId) -> Result<Vec<TriageRecord>, CoreError> {
+        let _ = run;
+        Ok(Vec::new())
+    }
+    async fn get_lesson(&self, id: &str) -> Result<Lesson, CoreError> {
+        Err(CoreError::NotFound {
+            kind: "lesson",
+            id: id.to_owned(),
+        })
+    }
+    /// Replaces a stored lesson (by id) and its search entry.
+    async fn update_lesson(&self, lesson: &Lesson) -> Result<(), CoreError> {
+        let _ = lesson;
+        Err(CoreError::Unsupported("lessons".into()))
+    }
+    /// The project's lessons, newest first.
+    async fn list_lessons(&self, project: &str) -> Result<Vec<Lesson>, CoreError> {
+        let _ = project;
+        Ok(Vec::new())
+    }
+    /// The project's lessons matching any of `terms`, best first (FTS5 `bm25`), at most
+    /// `limit`. Superseded ones only with `superseded`.
+    async fn search_lessons(
+        &self,
+        project: &str,
+        terms: &[String],
+        superseded: bool,
+        limit: usize,
+    ) -> Result<Vec<Lesson>, CoreError> {
+        let _ = (project, terms, superseded, limit);
+        Ok(Vec::new())
     }
     /// Inserts or replaces (by id) an item for the person.
     async fn put_human_item(&self, item: &HumanItem) -> Result<(), CoreError> {
