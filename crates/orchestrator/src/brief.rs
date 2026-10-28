@@ -9,6 +9,9 @@ use crossagents_core::{Agent, AgentId, CheckResult, Handoff, HandoffKind, Role, 
 
 use crate::project::{self, RunChecks};
 
+// Kept in sync with the GUI kickoff recognizer.
+const KICKOFF_SEPARATOR: &str = "\n\n---\nrun: ";
+
 /// The run's request as the person wrote it, then the facts the lead needs.
 pub fn kickoff(
     run: &Run,
@@ -18,10 +21,11 @@ pub fn kickoff(
     sessions: &str,
 ) -> String {
     let mut out = run.request.trim().to_owned();
+    out.push_str(KICKOFF_SEPARATOR);
     if run.in_place {
         let _ = write!(
             out,
-            "\n\n---\nrun: {} (run_id: {}) · {} is not under version control: tasks run one at a \
+            "{} (run_id: {}) · {} is not under version control: tasks run one at a \
              time directly in it, with no branches, diffs or merges, and nothing can be rolled back",
             run.title,
             run.id,
@@ -30,7 +34,7 @@ pub fn kickoff(
     } else {
         let _ = write!(
             out,
-            "\n\n---\nrun: {} (run_id: {}) · base branch {} · run branch {}",
+            "{} (run_id: {}) · base branch {} · run branch {}",
             run.title, run.id, run.base_branch, run.branch
         );
         match checks {
@@ -330,6 +334,52 @@ mod tests {
             fresh: true,
             outcome: None,
             at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn kickoff_keeps_request_and_context_boundary() {
+        use crossagents_core::{RunConfig, RunPolicy, RunStatus};
+        let now = Utc::now();
+        let worker = AgentId::new();
+        let mut run = Run {
+            continuation: None,
+            id: RunId::new(),
+            title: "title".into(),
+            request: "  hello\nworld  ".into(),
+            planner: AgentId::new(),
+            status: RunStatus::Planning,
+            config: RunConfig {
+                worker,
+                escalate: None,
+                reviewer: None,
+                auto_approve: false,
+                max_parallel: 1,
+                max_attempts: 1,
+                team: vec![],
+                policy: RunPolicy::default(),
+            },
+            repo: "repo".into(),
+            base_branch: "main".into(),
+            branch: "run".into(),
+            in_place: false,
+            note: None,
+            plan: vec![],
+            lead_note: None,
+            landed: None,
+            summary: None,
+            checks: vec![],
+            created_at: now,
+            updated_at: now,
+        };
+        for in_place in [false, true] {
+            run.in_place = in_place;
+            let text = kickoff(&run, &[], worker, &Err("test".into()), "\nsessions: test");
+            assert!(
+                text.starts_with("hello\nworld\n\n---\nrun: title (run_id: "),
+                "{text}"
+            );
+            assert!(text.contains("\nsessions: test"));
         }
     }
 
