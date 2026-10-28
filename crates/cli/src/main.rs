@@ -1,4 +1,7 @@
 //! `crossagents` command line. Every command except `hub run` talks to the hub's local API.
+//!
+//! A program that was started under a shim's name (`cargo`, docs/tasks/LOCKS.md §4.6) is not
+//! this command line at all: `main` hands it to `cmd::shim` before clap sees the arguments.
 
 mod client;
 mod cmd;
@@ -72,6 +75,12 @@ pub struct RuntimeHostArgs {
 }
 
 fn main() -> ExitCode {
+    // A program that was started as `cargo` (a shim, docs/tasks/LOCKS.md §4.6) has no
+    // `crossagents` arguments to parse: everything after its name belongs to the real program.
+    let argv0 = std::env::args_os().next().unwrap_or_default();
+    if let Some(name) = crossagents_hub::shims::invoked_as(&argv0) {
+        return cmd::shim::main(name);
+    }
     let cli = Cli::parse();
     if let Command::Hub(cmd::hub::HubCommand::Run) = &cli.command {
         mark_hub_home();

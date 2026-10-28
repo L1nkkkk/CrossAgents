@@ -30,6 +30,9 @@ pub struct OrchestratorConfig {
     /// Where the executor's lock files live, `<home>/locks` (docs/tasks/LOCKS.md §4.1): the
     /// checks the hub runs in a worktree hold its resources before they start (§6).
     pub locks: PathBuf,
+    /// `<home>/shims/<version>`, where the hub put its shims: a run worktree's `PATH` starts
+    /// with it, so `cargo` there goes through the executor (§4.6). `None` leaves `PATH` alone.
+    pub shims: Option<PathBuf>,
     /// No longer used: the hub does not nudge (H1). Kept so configurations still load.
     pub max_nudges: u32,
     /// Soft budget for all build output under `worktrees` (`workspace::build_cache_size`):

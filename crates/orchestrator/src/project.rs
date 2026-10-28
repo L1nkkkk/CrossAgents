@@ -238,6 +238,8 @@ pub struct RunEnv {
     pub presets: Vec<&'static Preset>,
     /// The worktree's resources ([`run_resources`]), placeholders not filled in yet.
     pub resources: Vec<ResolvedResource>,
+    /// The programs the worktree's `PATH` sends through the executor ([`run_shims`]).
+    pub shims: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,13 +279,19 @@ fn presets_for(file: &File, dir: &Path) -> Result<Vec<&'static Preset>, String> 
 pub fn run_env(dir: &Path) -> Result<RunEnv, String> {
     let file = read(dir)?;
     let presets = presets_for(&file, dir)?;
-    resolve(&presets, &file.run.env, &file.resources)
+    let mut env = resolve(&presets, &file.run.env, &file.resources)?;
+    env.shims = shims_from(&file, &presets);
+    Ok(env)
 }
 
 /// What `dir`'s presets alone set: for a file that does not parse, whose mistake the checks
 /// report.
 pub fn preset_env(dir: &Path) -> RunEnv {
-    resolve(&presets::detect(dir), &BTreeMap::new(), &BTreeMap::new()).unwrap_or_default()
+    let presets = presets::detect(dir);
+    let mut env = resolve(&presets, &BTreeMap::new(), &BTreeMap::new()).unwrap_or_default();
+    // No file to read: the presets' own shims, as if `[run] shims` were left out.
+    env.shims = shims_from(&File::default(), &presets);
+    env
 }
 
 /// The resources agents and checks hold in a run worktree: the presets', then the project's
@@ -298,11 +306,17 @@ pub fn run_resources(dir: &Path) -> Result<Vec<ResolvedResource>, String> {
 /// (LOCKS §4.6).
 pub fn run_shims(dir: &Path) -> Result<Vec<String>, String> {
     let file = read(dir)?;
+    let presets = presets_for(&file, dir)?;
+    Ok(shims_from(&file, &presets))
+}
+
+/// [`run_shims`] for a file already read: `[run] shims` if the project says, else the presets'.
+fn shims_from(file: &File, presets: &[&'static Preset]) -> Vec<String> {
     let listed: Vec<&str> = match &file.run.shims {
         Some(shims) => shims.iter().map(String::as_str).collect(),
-        None => presets_for(&file, dir)?
+        None => presets
             .iter()
-            .flat_map(|p| p.shims.iter().copied())
+            .flat_map(|preset| preset.shims.iter().copied())
             .collect(),
     };
     let mut shims: Vec<String> = Vec::new();
@@ -312,7 +326,7 @@ pub fn run_shims(dir: &Path) -> Result<Vec<String>, String> {
             shims.push(shim.to_owned());
         }
     }
-    Ok(shims)
+    shims
 }
 
 fn resolve_resources(
@@ -449,6 +463,8 @@ fn resolve(
             .collect(),
         presets: presets.to_vec(),
         resources: resolve_resources(presets, resources)?,
+        // Filled in by `run_env` and `preset_env`, which have the presets.
+        shims: Vec::new(),
     })
 }
 

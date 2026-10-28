@@ -45,6 +45,10 @@ pub struct ShellVerifier {
     /// `None` runs the checks without holding anything: for a directory outside the
     /// worktrees, or a check that declares no resources, that is what happens anyway.
     pub locks: Option<PathBuf>,
+    /// `<home>/shims/<version>`: the directory a check's `PATH` starts with in a run worktree,
+    /// so `cargo` there is the executor's shim (docs/tasks/LOCKS.md §4.6). `None` leaves
+    /// `PATH` alone.
+    pub shims: Option<PathBuf>,
 }
 
 impl Default for ShellVerifier {
@@ -54,6 +58,7 @@ impl Default for ShellVerifier {
             max_output: 8_000,
             worktrees: None,
             locks: None,
+            shims: None,
         }
     }
 }
@@ -170,7 +175,7 @@ impl Verifier for ShellVerifier {
         for command in commands {
             let mut cmd = shell(command);
             if let Some(root) = self.worktrees.as_deref() {
-                cmd.envs(worktree_env(root, dir));
+                cmd.envs(worktree_env(root, dir, self.shims.as_deref()));
             }
             cmd.current_dir(dir)
                 .stdin(Stdio::null())
@@ -302,12 +307,14 @@ pub async fn run_command(
     max_output: usize,
     worktrees: &Path,
     locks: &Path,
+    shims: Option<&Path>,
 ) -> CheckResult {
     let verifier = ShellVerifier {
         timeout,
         max_output,
         worktrees: Some(worktrees.to_path_buf()),
         locks: Some(locks.to_path_buf()),
+        shims: shims.map(Path::to_path_buf),
     };
     let mut results = verifier.check(dir, &[command.to_owned()]).await;
     results.pop().unwrap_or(CheckResult {
@@ -399,8 +406,7 @@ mod tests {
         let verifier = ShellVerifier {
             timeout: Duration::from_millis(200),
             max_output: 100,
-            worktrees: None,
-            locks: None,
+            ..ShellVerifier::default()
         };
         let sleep = if cfg!(windows) {
             "ping -n 5 127.0.0.1"

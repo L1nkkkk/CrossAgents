@@ -984,6 +984,7 @@ impl Orchestrator {
             RUN_OUTPUT,
             &self.config.worktrees,
             &self.config.locks,
+            self.config.shims.as_deref(),
         )
         .await;
         let duration_ms = started.elapsed().as_millis() as u64;
