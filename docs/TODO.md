@@ -69,7 +69,8 @@
 - [x] 安装版 GUI 自带 hub：安装包带同版本 `crossagents.exe`，启动时复制到 `<home>/bin/<版本>/` 并从那份启动（运行时宿主、`mcp` 都从 `current_exe()` 拉起，按版本分目录才不锁住安装目录）；没有 hub 就起，自己的 hub 版本旧就 `hub stop` 再起新版，agent 被接管；手动起的 dev hub、远程 hub 不碰。判断依据：`hub.json` 的 `exe` 在 `<home>/bin/` 下。旧版本目录在无进程使用后清理。设计见 [MULTI-NODE.md](MULTI-NODE.md) §13，手测见 [tasks/U1.md](tasks/U1.md)
 - [x] GUI 自动更新：electron-builder 改出 NSIS 安装包（按用户安装），electron-updater 从 GitHub Releases 后台下载、退出时安装；打包前检查 GUI 与 Cargo 版本一致
 - [x] 建公开的发布仓库 `L1nkkkk/CrossAgents-releases`（主仓库私有，见 MULTI-NODE §13.5），发布 v0.1.0（2026-10-25：`electron:build` 打包后用 `gh release create` 上传，资产名与 `latest.yml` 一致）
-- [ ] 发 0.1.1 时验证真实的在线更新：装着 0.1.0 的 GUI 能在后台下载并在退出时装上新版
+- [x] 发 0.1.1 时验证真实的在线更新：装着 0.1.0 的 GUI 能在后台下载并在退出时装上新版（2026-10-28：启动 3 秒发现 0.1.1，按 blockmap 差量下载 8.4 MB / 116 MB；托盘退出后静默安装约 6 秒；重开后起 `bin/0.1.1` 的 hub 并清掉 `bin/0.1.0`）
+- [ ] 旧 hub 遇到新库时说清楚：本机跑过 dev hub 后 `state.db` 已有 0.1.0 不认识的迁移（`migration 9 was previously applied but is missing`），0.1.0 的 hub 直接退出，GUI 只显示「cannot start the local hub」，hub.log 里没有原因。至少把这句错误带进 GUI 和 hub.log，提示「数据库来自更新的版本，请升级」
 - [ ] 安装包与 exe 代码签名（未签名时 SmartScreen 首次运行会拦）
 - [x] 无窗口时的额度与预算上限（2026-10-24 决定，见 [tasks/DOGFOOD.md](tasks/DOGFOOD.md) §5）：hub 不在时只记账、hub 回来时结算——宿主缓存并补发用量事件，新 hub 启动时先读账并立即检查一次预算，再恢复调度；不在宿主里强制。Chat 默认上限仍未做。原记录：暂缓（2026-10-23 决定）。现状：Work run 的 `policy.budget` 只在 hub 在时检查（`crates/hub/src/budget.rs`），hub 不在时宿主里的 agent 不受限，Chat 会话没有上限。开工前要定：hub 不在时超限是宿主停在轮次之间，还是只记账等 hub 回来处理；Chat 要不要默认上限
 
