@@ -1309,7 +1309,7 @@ button.ghost.icon, .icon-btn { background: transparent; border-color: transparen
 .pane { position: relative; }
 .pane.with-rail .convo, .pane.with-rail .dock { padding-right: 280px; }
 /* Header pop-outs center in the same space left of the rail: half the rail's 280px to the left. */
-.pane.with-rail :is(.resume-pop, .graph-pop) { position: relative; left: -140px; }
+.pane.with-rail .resume-pop { position: relative; left: -140px; }
 .pane.with-rail .resume-pop { max-width: min(820px, calc(100% - 312px)); }
 .rail { position: absolute; top: 14px; right: 14px; width: 250px; max-height: calc(100% - 28px); overflow: auto; display: flex; flex-direction: column; gap: 10px; z-index: 2; }
 .pane > .topbar ~ .rail { top: 64px; max-height: calc(100% - 78px); }

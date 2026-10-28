@@ -3,7 +3,7 @@ import type { Agent } from "@bindings/Agent";
 import type { RunDetail } from "@bindings/RunDetail";
 import { api, getBridge } from "./api";
 import { useHubData, useVersionMismatch, type VersionMismatch } from "./hub";
-import { closeBeside, closeTools, focusedOf, setRatio, useLayout, usePanes } from "./panes";
+import { closeBeside, closeTools, focusedOf, openTool, setRatio, useLayout, usePanes } from "./panes";
 import { FileViewerHost } from "./FileViewer";
 import { startNew } from "./menubar";
 import { toggleRail } from "./rail";
@@ -136,6 +136,11 @@ export function App() {
   const sidebar = useSidebar();
   const floatTools = useToolsFloat();
   const widths = useWidths(sidebar.docked);
+  // `#/runs/<id>/graph` (a link the person can be sent; the mock previews too) opens 提交图.
+  const graphRoute = section === "runs" && b === "graph" ? a : undefined;
+  useEffect(() => {
+    if (graphRoute) openTool("graph");
+  }, [graphRoute]);
   const mismatch = useVersionMismatch();
 
   // Picking something in the floating sidebar puts it away.
@@ -181,18 +186,19 @@ export function App() {
   let drawer = null;
   switch (section) {
     case "runs":
-      main = a ? <RunView runId={a} selectedTask={b === "tasks" ? c : undefined} confirmDelete={b === "delete"} graphOpen={b === "graph"} /> : <HomeView />;
+      main = a ? <RunView runId={a} selectedTask={b === "tasks" ? c : undefined} confirmDelete={b === "delete"} /> : <HomeView />;
       if (a && b === "tasks" && c)
         drawer = (
           <ToolColumn
             task={{ run: a, task: c }}
+            run={a}
             onClose={() => {
               closeTools();
               navigate("runs", a);
             }}
           />
         );
-      else if (a && state.tools.open) drawer = <ToolColumn onClose={closeTools} />;
+      else if (a && state.tools.open) drawer = <ToolColumn run={a} onClose={closeTools} />;
       break;
     case "s":
       main = a ? <Sessions primary={a} /> : <HomeView />;

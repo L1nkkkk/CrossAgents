@@ -41,6 +41,5 @@
 .diff-head button.file-link { font-size: 12px; }
 
 /* The panel the session's toolbar opens. */
-.graph-pop { max-width: 980px; width: 100%; margin: 10px auto 0; padding: 10px 14px; box-sizing: border-box; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow-float); max-height: 70vh; overflow: auto; }
-.pane.with-rail .graph-pop { max-width: min(980px, calc(100% - 312px)); }
-.graph-pop .resume-head { margin-bottom: 8px; }
+/* In the tool column the list takes up to half the window, so the picked commit's diff stays in view. */
+.tool-body .cgraph-list { max-height: 45vh; }

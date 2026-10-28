@@ -10,6 +10,7 @@ import type { TurnDiffResponse } from "@bindings/TurnDiffResponse";
 import { api, errorText } from "./api";
 import { useRunTree } from "./App";
 import { Avatar, ErrorBox, Icon, displayName, isAgent, useAgents } from "./components";
+import { CommitGraphView } from "./commitgraph";
 import { ChangeStat, DiffView } from "./diffview";
 import { useEventLog } from "./eventlog";
 import type { HubEvent } from "./hub";
@@ -32,9 +33,10 @@ export function useToolsFloat() {
 
 /**
  * `follow`: the conversation the panes follow (session routes). `task`: the task the route
- * opened (run routes), shown in the first pane. `onClose` closes the whole column.
+ * opened (run routes), shown in the first pane. `run`: the routed run, whose branches 提交图
+ * shows. `onClose` closes the whole column.
  */
-export function ToolColumn({ follow, task, onClose }: { follow?: string; task?: { run: string; task: string }; onClose: () => void }) {
+export function ToolColumn({ follow, task, run, onClose }: { follow?: string; task?: { run: string; task: string }; run?: string; onClose: () => void }) {
   const { state, target } = useLayout();
   const narrow = useToolsFloat();
   const ref = useRef<HTMLDivElement>(null);
@@ -68,6 +70,7 @@ export function ToolColumn({ follow, task, onClose }: { follow?: string; task?: 
           follow={follow}
           target={target}
           routeTask={task}
+          routeRun={run}
           onCloseColumn={onClose}
           divider={i === 1 ? <div className="divider horizontal" onPointerDown={drag} onDoubleClick={() => setSplit(0.5)} role="separator" aria-orientation="horizontal" /> : null}
         />
@@ -84,6 +87,7 @@ function PaneSlot({
   follow,
   target,
   routeTask,
+  routeRun,
   onCloseColumn,
   divider,
 }: {
@@ -94,6 +98,7 @@ function PaneSlot({
   follow?: string;
   target: Target | null;
   routeTask?: { run: string; task: string };
+  routeRun?: string;
   onCloseColumn: () => void;
   divider: React.ReactNode;
 }) {
@@ -141,6 +146,14 @@ function PaneSlot({
           {kind === "changes" && (agent ? <ChangesPane key={agent} agent={agent} target={target?.agent === agent ? target : null} /> : <Blank text="打开一个会话，这里显示它每一轮改了什么。" />)}
           {kind === "task" && <TaskPane follow={follow} target={target} routeTask={routeTask} />}
           {kind === "events" && (agent ? <EventsPane key={agent} agent={agent} /> : <Blank text="打开一个会话，这里显示它的原始 hub 事件。" />)}
+          {kind === "graph" &&
+            (routeRun ? (
+              <CommitGraphView key={routeRun} scope={{ kind: "run", run: routeRun }} />
+            ) : agent ? (
+              <CommitGraphView key={agent} scope={{ kind: "agent", agent }} />
+            ) : (
+              <Blank text="打开一个会话或 run，这里显示它的提交图。" />
+            ))}
         </div>
       </section>
     </>
