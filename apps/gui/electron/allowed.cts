@@ -28,6 +28,7 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "GET", path: /^\/v1\/agents\/[^/]+\/execution$/, level: "read" },
   { method: "POST", path: /^\/v1\/agents\/[^/]+\/execution\/interrupt$/, level: "write" },
   { method: "GET", path: /^\/v1\/agents\/[^/]+\/resume-command$/, level: "read" },
+  { method: "GET", path: /^\/v1\/agents\/[^/]+\/commands$/, level: "read" },
   { method: "GET", path: /^\/v1\/agents\/[^/]+\/transcript$/, level: "read" },
   { method: "GET", path: /^\/v1\/agents\/[^/]+\/turns\/[^/]+\/diff$/, level: "read" },
   { method: "GET", path: /^\/v1\/agents\/[^/]+\/attachments\/[^/]+$/, level: "read" },
