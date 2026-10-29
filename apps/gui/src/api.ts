@@ -202,6 +202,44 @@ function filesResolve(scope: FileScope, paths: string[]): Promise<ResolvePathsRe
   }
 }
 
+/**
+ * An image a tool call named by a path (a `ViewImage` tool's `image_path`, say), as a URL
+ * for `<img src>`. The hub serves only png, jpg, jpeg, gif, webp, bmp and svg, at most 10 MB,
+ * and only inside the agent's working directory or the system temp directory.
+ */
+export function agentImageUrl(key: string, path: string): string {
+  return `/v1/agents/${enc(key)}/files/image?path=${enc(path)}`;
+}
+
+/**
+ * Why the hub would not show that image, as it says it, for the page to display; `undefined`
+ * when it can be shown. Meant for an `<img>` that failed to load ({@link agentImageUrl}), so
+ * a good image is fetched once, not twice.
+ */
+export async function agentImageReason(key: string, path: string): Promise<string | undefined> {
+  const url = agentImageUrl(key, path);
+  try {
+    const bridge = getBridge();
+    const answer = bridge ? await bridge.request("GET", url, null) : await plainAnswer(url);
+    if (answer.status < 400) return undefined;
+    let parsed: ApiErrorJson | undefined;
+    try {
+      parsed = JSON.parse(answer.body);
+    } catch {
+      // Not an API error body (the hub could not be reached, say).
+    }
+    return parsed?.error.message ?? (answer.body || `HTTP ${answer.status}`);
+  } catch (err) {
+    return errorText(err);
+  }
+}
+
+/** `url` from this page's own origin; the dev server forwards it with the token. */
+async function plainAnswer(url: string): Promise<{ status: number; body: string }> {
+  const response = await fetch(url);
+  return { status: response.status, body: await response.text() };
+}
+
 export const api = {
   info: () => request<HubInfo>("GET", "/v1/info"),
 
@@ -310,6 +348,9 @@ export const api = {
   /** A file's text (up to 1 MiB), or `binary` without it. */
   filesContent,
   filesResolve,
+  /** An image a tool call named, as a URL for `<img src>`; the hub says why when it will not. */
+  agentImageUrl,
+  agentImageReason,
 };
 
 export function errorText(err: unknown): string {

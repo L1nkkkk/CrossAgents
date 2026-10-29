@@ -7,9 +7,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Extension;
+use axum::body::Bytes;
 use axum::extract::DefaultBodyLimit;
 use axum::extract::{MatchedPath, Path, Query, Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -155,6 +156,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{key}/tasks/{task}/review", post(review_task))
         .route("/v1/agents/{key}/files/tree", get(agent_files_tree))
         .route("/v1/agents/{key}/files/content", get(agent_files_content))
+        .route("/v1/agents/{key}/files/image", get(agent_files_image))
         .route("/v1/agents/{key}/files/resolve", post(agent_files_resolve))
         .route("/v1/runs/{key}/files/tree", get(run_files_tree))
         .route("/v1/runs/{key}/files/content", get(run_files_content))
@@ -1698,6 +1700,49 @@ async fn agent_files_content(
 ) -> ApiResult<Json<FileContentResponse>> {
     let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
     files_content(&state, FilesScope::Agent(&agent), q).await
+}
+
+/// `GET /v1/agents/{key}/files/image?path=`: the bytes of an image a tool call named by
+/// path, for a client to show as a thumbnail (crate::image says what is allowed).
+async fn agent_files_image(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Query(q): Query<FilesQuery>,
+) -> ApiResult<Response> {
+    let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    let input = q.path();
+    if input.trim().is_empty() {
+        return Err(AppError::bad_request(
+            "path is missing: `?path=<an image inside the agent's working directory or the system temp directory>`",
+        ));
+    }
+    let root = state
+        .orchestrator
+        .files_root(FilesScope::Agent(&agent))
+        .await?;
+    let abs = crate::image::locate(&root, input)?;
+    let (kind, bytes) = crate::image::load(&abs, input).await?;
+    let mut response = Response::new(Bytes::from(bytes).into());
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(kind.content_type()),
+    );
+    // Never let a browser read the type from the bytes: a `.png` that is not one is
+    // refused above, and this keeps any future gap from becoming a script.
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    if kind == crate::image::ImageType::Svg {
+        // An SVG is a document: sandbox it, so its script cannot reach the page.
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("sandbox"),
+        );
+    }
+    Ok(response)
 }
 
 async fn run_files_content(
