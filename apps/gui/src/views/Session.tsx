@@ -12,7 +12,7 @@ import { HeldFiles, TurnFiles, useHeld } from "../attach";
 import { HandoffLine } from "../handoff";
 import { dismiss as dismissMessage, retry as retryMessage, sendMessage, useOutbox, type Outgoing } from "../outbox";
 import { ACTIVE_RUN, useRunTree, useRunsLedBy } from "../App";
-import { Avatar, ErrorBox, FileScopeProvider, Icon, Mark, Prose, StatusChip, Vendor, agentTitle, agentTone, displayName, roleShape, time, useAgents, useFileScope, vendorName } from "../components";
+import { Avatar, ErrorBox, FileScopeProvider, Fold, Icon, Mark, Prose, StatusChip, Vendor, agentTitle, agentTone, displayName, roleShape, time, useAgents, useFileScope, vendorName } from "../components";
 import { ChangeStat, DiffView } from "../diffview";
 import { parseDiff, tailLines, type DiffFile } from "../lib/diff";
 import { errorHint } from "../lib/errors";
@@ -771,7 +771,10 @@ function ActionCard({ action, call }: { action: ActionTool; call: Extract<Transc
         {what && <span className="action-what">{what}</span>}
         <span className="action-state">{state}</span>
       </div>
-      {refused && raw && <div className="action-reason">{raw.replace(/^(conflict|not found|invalid|unsupported)\s*:\s*/i, "")}</div>}
+      {refused && raw && (
+        // A refusal can carry a whole check log: its first lines say why, the rest on request.
+        <Fold className="action-reason">{raw.replace(/^(conflict|not found|invalid|unsupported)\s*:\s*/i, "")}</Fold>
+      )}
     </div>
   );
 }

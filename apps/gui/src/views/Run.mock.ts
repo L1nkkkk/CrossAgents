@@ -403,6 +403,62 @@ export function deleteRun(kind: "landed" | "unlanded" | "dirty"): { state: MockS
 }
 
 /**
+ * Long results kept short: Ada's first `run_land` was refused with the whole `cargo test` log in
+ * the reason, and her closing summary runs to many lines. Both show their opening lines and
+ * 展开全文; the route is Ada's conversation, the run page has the summary.
+ */
+export function longResultsRun(): { state: MockState; script: Step[]; route: string } {
+  const scene = oauthRun("running");
+  const d = scene.state.runs[0];
+  for (const t of d.tasks) {
+    t.status = "merged";
+    t.assignee = null;
+  }
+  const deps = "C:\\Users\\me\\.crossagents\\worktrees\\ab12cd34\\targets\\integration\\cargo\\debug\\deps";
+  const log = [
+    "    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 13s",
+    ...["api_types", "e2e", "exec", "shim", "core", "exec_locks", "exec_tree", "lock_kill_race", "drivers", "hub", "api", "accounts", "acp", "landing"].map(
+      (name, i) => `     Running tests\\${name}.rs (${deps}\\${name}-${(i * 7919).toString(16).padStart(16, "0")}.exe)`,
+    ),
+    "test the_checks_wait_for_the_leads_own_build ... FAILED",
+    "error: test failed, to rerun pass `-p crossagents-mock-agent --test lead`",
+  ].join("\n");
+  const refused = `conflict: the project's checks (crossagents.toml) failed: 0/1 passed; failed: $ cargo test --workspace (exit 101)\n${log}\nFix it in your checkout and call run_land again. If a check itself is wrong, tell the person: they can still land or end the run from the run page.`;
+  const ada = scene.state.agents.find((a) => a.id === d.run.planner)!;
+  const t = scene.state.transcripts.get(ada.id)!;
+  const landing = turn({
+    input: "所有任务都合并了，落地吧。",
+    minutesAgo: 2,
+    took: 2,
+    items: [
+      tool("crossagents.run_land", "mcp", "failed", { arguments: JSON.stringify({ message: "feat: OAuth 登录" }), error: refused, changes: [] }),
+      say("检查挂在 `lead.rs` 一个断言旧行为的测试上，我改写后再落地。"),
+    ],
+  });
+  t.turns = [...t.turns, landing.turn];
+  d.run = {
+    ...d.run,
+    status: "completed",
+    landed: { mode: "merge", by: ada.name, reference: "4a19c00", at: ago(1) },
+    summary: [
+      "OAuth 登录已落地到 main（4a19c00，检查通过）。",
+      "",
+      "做了什么：",
+      "- #a：/auth/callback/{provider} 用授权码换 token、取用户信息、建立会话，GitHub 和 Google 两家。",
+      "- #b：登录页加了两个 OAuth 按钮，密码表单保留在下面，深浅色都核对过。",
+      "- #c：SessionStore 换成 RedisStore，接口不变；`REDIS_URL` 没设置时回落到 MemoryStore。",
+      "- #d：一次性迁移脚本，可重复执行。",
+      "",
+      "需要你知道的：",
+      "- Google 的回调地址要在控制台里加上生产域名。",
+      "- Redis 连接池默认 16，压测前可能要调。",
+      "- 落地前检查挂在一个断言旧行为的测试上，已改写。",
+    ].join("\n"),
+  };
+  return { ...scene, script: [], route: `#/s/${ada.name}` };
+}
+
+/**
  * Tracing a failure (docs/tasks/DOGFOOD.md §8): the run page's 追溯 shows #d's first failure
  * (its tests exited 101), every turn and command, and what each task cost.
  */

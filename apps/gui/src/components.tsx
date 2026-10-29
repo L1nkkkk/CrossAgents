@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, type ReactNode } from "react";
+import { createContext, useContext, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import {
   Activity,
   Archive,
@@ -45,6 +45,7 @@ import type { TaskStatus } from "@bindings/TaskStatus";
 import { api } from "./api";
 import { useHubData } from "./hub";
 import { parseBlocks, parseInline, type Block, type Inline } from "./lib/markdown";
+import { t } from "./lib/i18n";
 import { codeFileTarget } from "./lib/filelinks";
 import type { FileScope } from "./api";
 import { openFile } from "./FileViewer";
@@ -171,6 +172,38 @@ export const sessionHref = (agent: Agent | string) => `#/s/${encodeURIComponent(
  */
 export function Prose({ text }: { text: string }) {
   return <div className="prose">{renderBlocks(parseBlocks(text))}</div>;
+}
+
+/**
+ * Long text kept to a few lines until asked for: a refused call's reason with a whole check log
+ * in it, a run's summary. The toggle shows only when something is actually cut off; opened, the
+ * text scrolls within a bounded height rather than pushing the conversation away.
+ */
+export function Fold({ lines = 3, className, children }: { lines?: number; className?: string; children: ReactNode }) {
+  const body = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const [cut, setCut] = useState(false);
+  useLayoutEffect(() => {
+    const el = body.current;
+    if (!el || open) return;
+    const measure = () => setCut(el.scrollHeight > el.clientHeight + 2);
+    measure();
+    const watch = new ResizeObserver(measure);
+    watch.observe(el);
+    return () => watch.disconnect();
+  }, [open, children]);
+  return (
+    <div className={`fold ${open ? "open" : cut ? "cut" : ""} ${className ?? ""}`}>
+      <div ref={body} className="fold-body" style={open ? undefined : { maxHeight: `${lines * 1.5}em` }}>
+        {children}
+      </div>
+      {(cut || open) && (
+        <button className="fold-toggle" onClick={() => setOpen(!open)} aria-expanded={open}>
+          {open ? t("common.less") : t("common.expand")}
+        </button>
+      )}
+    </div>
+  );
 }
 
 /**
