@@ -686,10 +686,6 @@ a.who-chip:hover { text-decoration: none; background: var(--selected); }
 .request { background: var(--surface-sunk); border-radius: var(--radius-xl); padding: 12px 16px; display: flex; flex-direction: column; gap: 6px; }
 .request-text { white-space: pre-wrap; word-break: break-word; font-size: 14.5px; line-height: 1.6; }
 .request.folded .request-text { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
-.done-card { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 16px; border-radius: var(--radius-lg); background: var(--ok-bg); }
-.done-check { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; background: var(--ok); color: #fff; font-size: 13px; font-weight: 700; flex-shrink: 0; }
-.done-text { flex: 1; min-width: 200px; font-size: 13.5px; }
-.done-card .copy { background: var(--surface); }
 
 /* ---- V4: states, cards and the area above the composer (docs/tasks/V4-GUI.md) ------------ */
 /* Disclosure arrows show state: ▸ closed, ▾ open below, ▴ open above. */
@@ -871,10 +867,7 @@ button.need { padding: 2px 10px; line-height: 18px; color: var(--text-2); }
 
 /* Run board grouped by bucket. */
 .run-head { display: flex; flex-direction: column; gap: 10px; padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
-.run-foot { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
-.run-foot:empty { display: none; }
 .task-board { margin-top: 12px; }
-.task-board-head { font-size: 12px; font-weight: 600; color: var(--text-2); padding: 0 2px 8px; }
 .rail .task-board { margin-top: 0; }
 .rail .board-row { grid-template-columns: auto minmax(0, 1fr); padding: 8px 10px; gap: 4px 8px; }
 .rail .board-row > :last-child { grid-column: 2; }
@@ -969,7 +962,6 @@ button.small, .segmented.small button { font-size: 12px; padding: 3px 10px; }
 .ask-options button.default { border-color: var(--text); }
 .ask-reply { display: flex; gap: 6px; }
 .ask-reply input { flex: 1; min-width: 0; }
-.run-summary { margin-top: 6px; font-size: 13.5px; }
 
 /* External agents and notes (H1-6). */
 .connect-config { font-size: 11.5px; max-height: 260px; white-space: pre-wrap; word-break: break-all; }
@@ -1453,6 +1445,51 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
 .action-reason { color: var(--danger-text); }
 .rail-spend { display: flex; justify-content: space-between; gap: 8px; margin: 8px 4px 0; padding-top: 6px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
 .rail-spend-v { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 500; }
+
+/* ---- A run's rail (views/Run.tsx): the run's structure beside its conversation -------------- */
+/* Wider than the info rail: task rows carry a handoff chain, and the plan carries specs. The
+   conversation steps aside by just that much. */
+.rail.rail-run { width: 320px; }
+.pane.with-rail.run-side .convo, .pane.with-rail.run-side .dock { padding-right: 350px; }
+.pane.with-rail.run-side .turn-map { right: 340px; }
+/* Panels inside a panel: no second border, no second title. */
+.rail .board { border: none; border-radius: 0; background: none; }
+.rail .board-group { margin-bottom: 10px; }
+.rail .board-group:last-child { margin-bottom: 0; }
+.rail .plan-card { border: none; }
+.rail .plan-task { padding: 6px 2px; }
+.rail .plan-task .head { gap: 6px; }
+.rail .plan-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.rail-facts { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rail-facts .rail-line { align-items: flex-start; }
+.rail-facts .rail-line .rail-main { overflow-wrap: anywhere; }
+.rail .trace-head { padding: 6px 2px; }
+.rail .trace-body { padding: 6px 0 2px; }
+.rail .participants .part-task { margin: 6px 0 10px; }
+.rail .participants .part-row { font-size: 12.5px; }
+.rail-head-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.rail-head-aside { flex-shrink: 0; max-width: 60%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* A run's header keeps its title when it gets crowded; the chips around it give way. */
+.topbar .title { min-width: 84px; }
+
+/* No room beside the conversation: the same panels over it, from the header's button. */
+.rail-scrim { position: absolute; inset: 0; z-index: 20; background: rgba(0, 0, 0, 0.28); }
+.pane .rail.rail-drawer {
+  position: absolute; top: 48px; right: 0; bottom: 0; left: auto; width: min(360px, 94%);
+  max-height: none; padding: 10px 12px 16px; overflow: auto; background: var(--canvas);
+  border-left: 1px solid var(--border); box-shadow: var(--shadow-float); z-index: 21;
+}
+.rail-drawer-head { display: flex; align-items: center; gap: 8px; padding: 0 2px 4px; font-size: 12px; color: var(--text-2); }
+
+/* A run's end and the strips that need the person: one line each, buttons on the right. */
+.done-line { display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
+.done-line > .oneline { flex: 1; min-width: 220px; padding: 6px 10px; border-radius: var(--radius-lg); background: var(--ok-bg); }
+.done-line > .oneline.warn { background: var(--warn-bg); }
+.done-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; padding-top: 2px; }
+.done-glyph { font-size: 12px; font-weight: 700; line-height: 1; }
+.run-head { padding-bottom: 10px; margin-bottom: 0; }
+.run-head:empty { display: none; border: none; }
+
 
 /* An archived conversation: no composer, a bar to restore it. */
 .archived-bar { display: flex; align-items: center; gap: 10px; max-width: 780px; width: calc(100% - 48px); margin: 0 auto 16px; padding: 10px 14px; border: 1px dashed var(--border-strong); border-radius: var(--radius-lg); color: var(--text-2); font-size: 13px; }

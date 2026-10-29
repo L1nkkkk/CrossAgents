@@ -21,7 +21,7 @@ import { supportNote } from "../lib/attachments";
 import { effortLabel, prettyModel } from "../lib/models";
 import { clock, range } from "../lib/time";
 import { ModelEffortPicks } from "../modelPick";
-import { InfoRail, RAIL_ROOM, useRail } from "../rail";
+import { InfoRail, RAIL_ROOM, SIDE_ROOM, useRail } from "../rail";
 import { ScrollThumb } from "../scrollthumb";
 import { TurnMap, type MapEntry } from "../turnmap";
 import { focusSession, openTool, toggleTools, useLayout } from "../panes";
@@ -43,10 +43,24 @@ const fromPerson = (turn: TranscriptTurn) => !turn.from || turn.from.kind === "h
 const started = (turn: TranscriptTurn) => !!turn.started_at || !!turn.completed_at;
 
 /**
+ * What the pane's own header needs to know about the side slot: whether the rail is a drawer
+ * (too narrow to sit beside the conversation), whether it is open, and how to open it. A header
+ * that carries the run's facts uses this for its 面板 button; nothing is moved back into the
+ * conversation when the rail does not fit.
+ */
+const SideSlot = createContext<{ narrow: boolean; open: boolean; toggle: () => void }>({
+  narrow: false,
+  open: false,
+  toggle: () => {},
+});
+
+export const useSideSlot = () => useContext(SideSlot);
+
+/**
  * A conversation with one agent. The run page shows its lead's conversation through this
  * view (docs/tasks/W1.md §8): `header` replaces the agent's header, `top` comes before the
- * messages, `bottom` after them, and `side` takes the rail (or follows the messages when the
- * window is too narrow for one).
+ * messages, `bottom` after them, and `side` takes the rail beside them — or, when the window
+ * is too narrow for that, a drawer the header opens. `side` never joins the conversation.
  */
 export function SessionView({
   name,
@@ -71,6 +85,9 @@ export function SessionView({
   const ledRuns = useRunsLedBy(agentId);
   const outgoing = useOutbox(agentId, transcript?.turns);
   const { hidden: railOff } = useRail();
+  // The run's side slot: a rail beside the conversation while it has room, else a drawer the
+  // header opens. The plain info rail needs more room, since nothing waits on it.
+  const [drawer, setDrawer] = useState(false);
   const [width, setWidth] = useState(0);
   const ro = useRef<ResizeObserver | null>(null);
   // A callback ref: the section mounts once the transcript has loaded.
@@ -83,6 +100,30 @@ export function SessionView({
   }, []);
 
   useEffect(() => (agentId ? view(agentId) : undefined), [agentId]);
+
+  // Wide enough for a rail again: the drawer has nothing left to do.
+  const rail = !railOff && width >= (side ? SIDE_ROOM : RAIL_ROOM);
+  useEffect(() => {
+    if (rail) setDrawer(false);
+  }, [rail]);
+
+  // A drawer that no longer has to be one (the window widened) is not a drawer left open.
+  const drawerRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!drawer) return;
+    drawerRef.current?.focus();
+    const close = () => setDrawer(false);
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("keydown", onKey);
+    // Opening a task in the tool column replaces the drawer: it has served its purpose.
+    window.addEventListener("hashchange", close);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("hashchange", close);
+    };
+  }, [drawer]);
 
   if (!transcript) {
     // Worker and reviewer clones are removed once their task ends.
@@ -116,7 +157,6 @@ export function SessionView({
   const liveRuns = runs.filter((d) => d.run.planner === agent.id && ACTIVE_RUN.includes(d.run.status) && d.run.status !== "awaiting_approval");
   const tasks = runs.flatMap((d) => d.tasks.filter((t) => t.assignee === agent.id || t.reviewer === agent.id).map((t) => ({ run: d.run, task: t })));
   const queued = turns.filter((t) => !started(t));
-  const rail = !railOff && width >= RAIL_ROOM;
   const led = runs.filter((d) => d.run.planner === agent.id);
   const recruits = everyone.filter((a) => (a.config as Record<string, unknown> | null)?.spawned_by_agent === agent.id && !a.archived_at);
   // Who @ offers: this conversation's recruits, then the other agents working in its project.
@@ -126,42 +166,63 @@ export function SessionView({
   ];
 
   return (
-    <section className={`pane ${rail ? "with-rail" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)}>
-      {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onClose={onClose} />}
-      <ExecutionBar agent={agent} />
-      <NoticeBar agent={agent} />
-      <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} agents={everyone} tree={runs} top={top}>
-        {outgoing.map((m) => (
-          <Sending key={m.key} message={m} agent={agent} />
-        ))}
-        {bottom}
-        {!rail && side}
-      </Conversation>
-      {rail && side && <aside className="rail" aria-label="run">{side}</aside>}
-      {rail && !side && <InfoRail agent={agent} usage={usage} turns={turns} tasks={tasks} led={led} agents={everyone} recruits={recruits} spend={transcript.conversation_cost_usd} />}
-      <div className="dock">
-        {/* One strip is enough: the pane beside leaves it to the main one. */}
-        {!onClose && <QuestionCards agents={everyone} />}
-        {!onClose && <NeedsYouStrip agents={everyone} tree={runs} />}
-        <RunStrip runs={liveRuns} agents={everyone} />
-        <QueuePanel agent={agent} queued={queued} onEdit={setDraft} />
-        {agent.status === "error" && transcript.error && (
-          <div className="error-bar" role="alert" title={transcript.error}>
-            <strong>{errorHint(transcript.error, transcript.exit)}</strong>
-            <span className="mono small">{transcript.error}</span>
-          </div>
+    <SideSlot.Provider value={{ narrow: !rail, open: drawer, toggle: () => setDrawer((d) => !d) }}>
+      <section className={`pane ${rail ? "with-rail" : ""} ${side ? "run-side" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)}>
+        {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onClose={onClose} />}
+        <ExecutionBar agent={agent} />
+        <NoticeBar agent={agent} />
+        <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} agents={everyone} tree={runs} top={top}>
+          {outgoing.map((m) => (
+            <Sending key={m.key} message={m} agent={agent} />
+          ))}
+          {bottom}
+        </Conversation>
+        {rail && side && (
+          <aside className="rail rail-run" aria-label="run 的面板">
+            {side}
+          </aside>
         )}
-        {agent.archived_at ? (
-          <div className="archived-bar">
-            <Icon name="archive" size={14} />
-            <span>这个对话已归档，它招来的队友也一起停下了。恢复后可以继续。</span>
-            <button onClick={() => void api.archiveAgent(agent.id, false)}>恢复对话</button>
-          </div>
-        ) : (
-          <Composer agent={agent} capabilities={capabilities} driver={transcript.driver} draft={draft} setDraft={setDraft} plans={pendingPlans} onPlanDone={reload} mates={mates} />
+        {rail && !side && <InfoRail agent={agent} usage={usage} turns={turns} tasks={tasks} led={led} agents={everyone} recruits={recruits} spend={transcript.conversation_cost_usd} />}
+        {/* No room beside the conversation: the same panels, over it, opened from the header. */}
+        {!rail && side && drawer && (
+          <>
+            <div className="rail-scrim" onClick={() => setDrawer(false)} />
+            <aside className="rail rail-run rail-drawer" role="dialog" aria-label="run 的面板" ref={drawerRef} tabIndex={-1}>
+              <div className="rail-drawer-head">
+                <strong>run 的面板</strong>
+                <span className="spacer" />
+                <button className="ghost icon" onClick={() => setDrawer(false)} aria-label="关闭面板" title="关闭面板">
+                  <Icon name="close" size={14} />
+                </button>
+              </div>
+              {side}
+            </aside>
+          </>
         )}
-      </div>
-    </section>
+        <div className="dock">
+          {/* One strip is enough: the pane beside leaves it to the main one. */}
+          {!onClose && <QuestionCards agents={everyone} />}
+          {!onClose && <NeedsYouStrip agents={everyone} tree={runs} />}
+          <RunStrip runs={liveRuns} agents={everyone} />
+          <QueuePanel agent={agent} queued={queued} onEdit={setDraft} />
+          {agent.status === "error" && transcript.error && (
+            <div className="error-bar" role="alert" title={transcript.error}>
+              <strong>{errorHint(transcript.error, transcript.exit)}</strong>
+              <span className="mono small">{transcript.error}</span>
+            </div>
+          )}
+          {agent.archived_at ? (
+            <div className="archived-bar">
+              <Icon name="archive" size={14} />
+              <span>这个对话已归档，它招来的队友也一起停下了。恢复后可以继续。</span>
+              <button onClick={() => void api.archiveAgent(agent.id, false)}>恢复对话</button>
+            </div>
+          ) : (
+            <Composer agent={agent} capabilities={capabilities} driver={transcript.driver} draft={draft} setDraft={setDraft} plans={pendingPlans} onPlanDone={reload} mates={mates} />
+          )}
+        </div>
+      </section>
+    </SideSlot.Provider>
   );
 }
 
