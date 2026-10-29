@@ -224,6 +224,37 @@ async fn an_agent_without_cwd_gets_a_chat_directory() {
     assert_eq!(agent["topic"], "写个冒泡排序");
 }
 
+/// The commands an agent's CLI brings are unknown until a session reports them.
+#[tokio::test]
+async fn commands_are_unknown_until_a_session_reports_them() {
+    let t = TestHub::start().await;
+    assert_eq!(t.create("quiet").await.status(), StatusCode::CREATED);
+
+    let body: Value = t
+        .get("/v1/agents/quiet/commands")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["known"], false);
+    assert_eq!(body["commands"], json!([]));
+    assert!(
+        body["note"].as_str().unwrap().contains("还没启动过会话"),
+        "{body}"
+    );
+
+    assert_eq!(
+        t.get("/v1/agents/nobody/commands")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
 #[tokio::test]
 async fn model_and_effort_are_set_together_and_effort_can_be_cleared() {
     let t = TestHub::start().await;

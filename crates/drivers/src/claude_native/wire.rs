@@ -6,9 +6,9 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use crossagents_core::{
-    ContextPart, Credits, FileChange, LimitGroup, McpServerSpec, OutputStream, PermissionDecision,
-    PermissionRequest, RateLimits, RateWindow, SessionEventKind, StopReason, TokenUsage,
-    ToolDetail, ToolStatus,
+    AgentCommand, AgentCommandKind, ContextPart, Credits, FileChange, LimitGroup, McpServerSpec,
+    OutputStream, PermissionDecision, PermissionRequest, RateLimits, RateWindow, SessionEventKind,
+    StopReason, TokenUsage, ToolDetail, ToolStatus,
 };
 use serde_json::{Map, Value, json};
 
@@ -987,6 +987,47 @@ pub fn rate_limit_event(info: &Value) -> RateLimits {
     }
 }
 
+/// The slash commands and skills a `system`/`init` message declares (Claude Code's own:
+/// `slash_commands` and `skills`, arrays of names). `None` for any other message, so callers
+/// can tell "the CLI reported none" from "the CLI said nothing".
+pub fn commands(message: &Value) -> Option<Vec<AgentCommand>> {
+    if message.get("type").and_then(Value::as_str) != Some("system")
+        || message.get("subtype").and_then(Value::as_str) != Some("init")
+    {
+        return None;
+    }
+    let names = |key: &str| {
+        message
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+    };
+    let mut commands = Vec::new();
+    for name in names("slash_commands") {
+        // The field carries names without `/`; a fork may keep it.
+        let name = name.trim_start_matches('/');
+        if !name.is_empty() {
+            commands.push(AgentCommand {
+                name: name.to_owned(),
+                description: None,
+                kind: AgentCommandKind::Command,
+            });
+        }
+    }
+    for name in names("skills") {
+        if !name.is_empty() {
+            commands.push(AgentCommand {
+                name: name.to_owned(),
+                description: None,
+                kind: AgentCommandKind::Skill,
+            });
+        }
+    }
+    Some(commands)
+}
+
 /// The categories of a `get_context_usage` answer; `None` without any.
 pub fn context_parts(answer: &Value) -> Option<Vec<ContextPart>> {
     let parts: Vec<ContextPart> = answer
@@ -1416,6 +1457,38 @@ mod tests {
         assert_eq!(used(&mut t, summed.clone()), 400_120);
         // Taken once: a turn without deltas falls back to the result's own figure.
         assert_eq!(used(&mut t, summed), 1_200_300);
+    }
+
+    #[test]
+    fn an_init_message_brings_the_cli_s_own_commands_and_skills() {
+        // As Claude Code 2.1 prints it (trimmed; names carry no `/`).
+        let init = json!({
+            "type": "system", "subtype": "init", "session_id": "s1",
+            "slash_commands": ["compact", "clear", "/review"],
+            "skills": ["deploy-check", "notes"],
+        });
+        let parsed = commands(&init).unwrap();
+        let names: Vec<(&str, AgentCommandKind)> =
+            parsed.iter().map(|c| (c.name.as_str(), c.kind)).collect();
+        assert_eq!(
+            names,
+            [
+                ("compact", AgentCommandKind::Command),
+                ("clear", AgentCommandKind::Command),
+                ("review", AgentCommandKind::Command),
+                ("deploy-check", AgentCommandKind::Skill),
+                ("notes", AgentCommandKind::Skill),
+            ]
+        );
+        assert!(parsed.iter().all(|c| c.description.is_none()));
+
+        // An init that names none still counts as a report; other system messages do not.
+        assert_eq!(
+            commands(&json!({ "type": "system", "subtype": "init" })),
+            Some(Vec::new())
+        );
+        assert!(commands(&json!({ "type": "system", "subtype": "api_retry" })).is_none());
+        assert!(commands(&json!({ "type": "assistant" })).is_none());
     }
 
     #[test]

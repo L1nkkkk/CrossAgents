@@ -93,6 +93,19 @@ impl Mock {
         let request = &message["request"];
         match request["subtype"].as_str().unwrap_or_default() {
             "initialize" => {
+                // As Claude Code does once it is up: the CLI's own slash commands and
+                // skills, before the handshake's answer so a caller that has it has these.
+                self.send(json!({
+                    "type": "system",
+                    "subtype": "init",
+                    "uuid": self.new_id("system"),
+                    "session_id": self.session_id,
+                    "cwd": std::env::current_dir().unwrap_or_default(),
+                    "model": self.model.lock().await.clone(),
+                    "slash_commands": ["compact", "clear", "review"],
+                    "skills": ["mock-skill"],
+                }))
+                .await;
                 let model = self.model.lock().await.clone();
                 self.answer(
                     id,

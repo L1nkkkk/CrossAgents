@@ -28,6 +28,7 @@ import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
 import type { CreateRunRequest } from "@bindings/CreateRunRequest";
 import type { DeleteRunResponse } from "@bindings/DeleteRunResponse";
 import type { AgentExecutionResponse } from "@bindings/AgentExecutionResponse";
+import type { AgentCommandsResponse } from "@bindings/AgentCommandsResponse";
 import type { ResumeCommandResponse } from "@bindings/ResumeCommandResponse";
 import type { HubInfo } from "@bindings/HubInfo";
 import type { ListAgentsResponse } from "@bindings/ListAgentsResponse";
@@ -209,6 +210,9 @@ export const api = {
     request<void>("DELETE", `/v1/agents/${enc(key)}/messages/${enc(messageId)}`),
   cancelAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/cancel`),
   compactAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/compact`),
+  /** The slash commands and skills the agent's own CLI brings; `known` is false until it
+   * reports them (a session has started). */
+  agentCommands: (key: string) => request<AgentCommandsResponse>("GET", `/v1/agents/${enc(key)}/commands`),
   stopAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/stop`),
   setModel: (key: string, model: string | null, effort?: string) => request<Agent>("POST", `/v1/agents/${enc(key)}/model`, { model, effort }),
   renameAgent: (key: string, name: string) => request<Agent>("POST", `/v1/agents/${enc(key)}/name`, { name }),
