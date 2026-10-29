@@ -99,6 +99,41 @@ export function failedEditSession(): { state: MockState; script: Step[]; route: 
   };
 }
 
+/**
+ * A long command running under the conversation (`stream`: its output keeps arriving), or a turn
+ * that stopped producing anything long ago (`quiet`: what the live line says after 30 seconds
+ * without news). `quiet` needs the page to sit still: screenshot it with a wait of ~46s.
+ */
+export function liveSession(kind: "stream" | "quiet"): { state: MockState; script: Step[]; route: string } {
+  const nova = agent({ name: "nova", plugin: "claude", model: "claude-sonnet-4-5", role: "worker", status: "running", cwd: NOTES_REPO, topic: "把三个包都构建一遍", profile: { display_name: "Nova", title: "文档", color: "violet" } });
+  const state: MockState = { ...emptyState(), agents: [nova], plugins: plugins(), quota: quota() };
+  const before = turn({
+    input: "先看看构建脚本，然后把三个包按 core、cli、gui 的顺序都构建一遍。",
+    minutesAgo: 6,
+    took: 2,
+    items: [think("工作区有三个包，按依赖顺序构建。"), tool(`Read ${NOTES_REPO}/package.json`, "read"), say("构建脚本是 `npm run build`，会先跑 tsc 再打包 vite。core 和 cli 都过了，现在构建 gui，vite 这一步最久。")],
+  });
+  const build = uid();
+  const started = ["> crossagents-gui@0.1.8 build", "> tsc --noEmit && vite build", "vite v8.3.4 building for production...", "transforming (12/214) src/lib/workGroups.ts"].join("\n");
+  const current = turn({
+    input: "三个包都构建一遍。",
+    minutesAgo: 1,
+    running: true,
+    items: [think("最后一个是 gui。"), { type: "tool_call", tool_call_id: build, title: "npm run build", kind: "execute", status: "in_progress", output: started, detail: { changes: [], command: "npm run build", cwd: NOTES_REPO } }],
+  });
+  state.transcripts.set(nova.id, transcript(nova, [before, current], 44_000));
+  // Twenty seconds of build output, a couple of lines at a time, so the tail visibly moves.
+  const lines = ["transforming (38/214) src/views/Session.tsx", "transforming (74/214) src/ToolColumn.tsx", "rendering chunks...", "computing gzip size...", "dist/assets/index-8ac14f2e.js  412.61 kB │ gzip: 128.40 kB"];
+  const script: Step[] =
+    kind === "quiet"
+      ? []
+      : lines.flatMap((line, i) => [
+          { at: 900 + i * 900, event: { type: "agent.tool_output", data: { id: nova.id, tool_call_id: build, text: `${line}\n` } } },
+          { at: 1_350 + i * 900, event: { type: "agent.tool_output", data: { id: nova.id, tool_call_id: build, text: `transforming (${40 + i * 8}/214) src/main.tsx\n` } } },
+        ]);
+  return { state, script, route: `#/s/${nova.name}` };
+}
+
 /** Nova's CLI crashes mid-turn: the session shows how its process ended. */
 export function crashedSession(): { state: MockState; script: Step[]; route: string } {
   const solo = soloSession();

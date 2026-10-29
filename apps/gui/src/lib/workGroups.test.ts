@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { TranscriptItem } from "@bindings/TranscriptItem";
-import { actionOf, duration, liveActivity, relativeTo, stepLine, summarize, workGroups, type Step } from "./workGroups.ts";
+import { actionOf, duration, liveActivity, liveKey, liveNow, quietSeconds, relativeTo, stepLine, summarize, workGroups, type Step } from "./workGroups.ts";
 
 const tool = (kind: string, status: "in_progress" | "completed" | "failed" = "completed", title = kind): TranscriptItem => ({
   type: "tool_call",
@@ -77,4 +77,40 @@ test("calls that change the team or the code are cards, not folded steps", () =>
     blocks.map((b) => b.kind),
     ["steps", "item", "steps"],
   );
+});
+
+type Call = Extract<TranscriptItem, { type: "tool_call" }>;
+const running = (title: string, kind: string, output?: string): Call => ({ type: "tool_call", tool_call_id: "run-1", title, kind, status: "in_progress", ...(output !== undefined ? { output } : {}) });
+
+test("the live line shows the newest step: a stream's last line, or a running command's tail", () => {
+  assert.equal(liveNow([]), undefined);
+  // A stream is one line: the last non-empty one (the whole text is in the steps above).
+  assert.deepEqual(liveNow([text("先看 README\n\n再改 cli.md")]), { title: "再改 cli.md" });
+  assert.deepEqual(liveNow([thought("想一下")]), { title: "想一下" });
+  assert.equal(liveNow([text("\n\n")]), undefined, "nothing to show yet");
+  // A step is its line, with paths shortened.
+  assert.deepEqual(liveNow([tool("read", "in_progress", "Read /w/a/README.md")], "/w/a"), { title: "Read README.md" });
+  // A running command also shows its newest output lines, and how many it left out.
+  const tail = liveNow([running("cargo test", "execute", "1\n2\n3\n4\n5\n")]);
+  assert.equal(tail?.title, "$ cargo test");
+  assert.deepEqual(tail?.output, { lines: ["3", "4", "5"], hidden: 2 });
+  // Finished, its output belongs to the step, not to the live line.
+  assert.deepEqual(liveNow([{ ...running("cargo test", "execute", "done"), status: "completed" }]), { title: "$ cargo test" });
+  assert.deepEqual(liveNow([running("Edit /w/a/b.ts", "edit")], "/w/a"), { title: "✎ b.ts" });
+});
+
+test("time without new output counts up, and never goes back", () => {
+  const at = 1_000_000;
+  assert.equal(quietSeconds(at, at), 0);
+  assert.equal(quietSeconds(at, at + 45_900), 45);
+  assert.equal(quietSeconds(at, at - 5_000), 0);
+});
+
+test("the live key changes only when the turn produced something", () => {
+  const call = running("cargo test", "execute", "a\n");
+  assert.equal(liveKey([call]), liveKey([call]));
+  assert.notEqual(liveKey([call]), liveKey([{ ...call, output: "a\nb\n" }]));
+  assert.notEqual(liveKey([call]), liveKey([call, { ...call, tool_call_id: "run-2" }]));
+  assert.notEqual(liveKey([text("ab")]), liveKey([text("abc")]));
+  assert.notEqual(liveKey([text("ab")]), liveKey([thought("ab")]));
 });

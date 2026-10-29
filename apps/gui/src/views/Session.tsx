@@ -26,7 +26,7 @@ import { ScrollThumb } from "../scrollthumb";
 import { TurnMap, type MapEntry } from "../turnmap";
 import { focusSession, openTool, toggleTools, useLayout } from "../panes";
 import { taskState } from "../lib/taskState";
-import { actionOf, duration, failed, liveActivity, stepLine, summarize, workGroups, type ActionTool, type Step } from "../lib/workGroups";
+import { QUIET_AFTER, actionOf, duration, failed, liveActivity, liveKey, liveNow, quietSeconds, stepLine, summarize, workGroups, type ActionTool, type Step } from "../lib/workGroups";
 import { PeerMessage, StateWord, useArmed } from "../parts";
 import { useSession, type TranscriptItem, type TranscriptTurn } from "../session";
 import { dismissNotice, useNotices } from "../notices";
@@ -1053,28 +1053,53 @@ function ToolsToggle() {
   // Open, the column's own header has the button that folds it away: one place, like Codex.
   if (state.tools.open) return null;
   return (
-    <button className="ghost icon" onClick={toggleTools} title="工具列：改动、任务、事件流" aria-label="工具列">
+    <button className="ghost icon" onClick={toggleTools} title="工具列：改动、任务、提交图" aria-label="工具列">
       <Icon name="panel" size={16} />
     </button>
   );
 }
 
-/** The bottom of a running turn: `••• 42s · 运行命令`. */
+/**
+ * The bottom of a running turn: `••• 42s · 运行命令`, and under it what it is producing now (the
+ * newest step, a running command's last lines) so a person can see it move. With nothing new for
+ * `QUIET_AFTER` seconds the line says how long, instead of pretending to work.
+ */
 function LiveLine({ since, items }: { since: string; items: TranscriptItem[] }) {
+  const cwd = useContext(CwdContext);
   const [now, setNow] = useState(Date.now());
+  // When the turn was last seen to produce something. Only time on this page counts: the hub
+  // sends items, not when each one arrived.
+  const key = liveKey(items);
+  const [seen, setSeen] = useState(() => ({ key, at: Date.now() }));
+  useEffect(() => setSeen((s) => (s.key === key ? s : { key, at: Date.now() })), [key]);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
+  const current = liveNow(items, cwd);
+  const quiet = quietSeconds(seen.at, now);
   return (
-    <div className="working">
-      <span className="busy-dots" aria-hidden="true">
-        <i />
-        <i />
-        <i />
-      </span>
-      <span className="muted small">{duration(now - new Date(since).getTime())}</span>
-      <span>· {liveActivity(items)}</span>
+    <div className="working live-turn">
+      <div className="working-row">
+        <span className={`busy-dots ${quiet >= QUIET_AFTER ? "still" : ""}`} aria-hidden="true">
+          <i />
+          <i />
+          <i />
+        </span>
+        <span className="muted small">{duration(now - new Date(since).getTime())}</span>
+        <span>· {liveActivity(items)}</span>
+      </div>
+      {current && (
+        <div className="working-now" title={current.title}>
+          {current.title}
+        </div>
+      )}
+      {current?.output && (
+        <pre className="working-out" aria-label="最新输出" title={current.output.hidden ? `前面还有 ${current.output.hidden} 行` : undefined}>
+          {current.output.lines.join("\n")}
+        </pre>
+      )}
+      {quiet >= QUIET_AFTER && <div className="muted small">已 {quiet} 秒没有新输出</div>}
     </div>
   );
 }
