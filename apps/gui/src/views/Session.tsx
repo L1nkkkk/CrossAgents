@@ -12,11 +12,11 @@ import { HeldFiles, TurnFiles, useHeld } from "../attach";
 import { HandoffLine } from "../handoff";
 import { dismiss as dismissMessage, retry as retryMessage, sendMessage, useOutbox, type Outgoing } from "../outbox";
 import { ACTIVE_RUN, useRunTree, useRunsLedBy } from "../App";
-import { Avatar, ErrorBox, FileScopeProvider, Fold, Icon, Mark, Prose, StatusChip, Vendor, agentTitle, agentTone, displayName, roleShape, time, useAgents, useFileScope, vendorName } from "../components";
+import { Avatar, ErrorBox, FileScopeProvider, Icon, Mark, OneLine, Prose, StatusChip, Vendor, agentTitle, agentTone, beyondFirstLine, displayName, firstLine, firstSentence, roleShape, time, useAgents, useFileScope, vendorName } from "../components";
 import { ChangeStat, DiffView } from "../diffview";
 import { parseDiff, tailLines, type DiffFile } from "../lib/diff";
 import { errorHint } from "../lib/errors";
-import { fields, toolChanges, toolError, toolFailed, toolShowsStat } from "../lib/toolcall";
+import { fields, plainText, toolChanges, toolError, toolFailed, toolShowsStat } from "../lib/toolcall";
 import { supportNote } from "../lib/attachments";
 import { effortLabel, prettyModel } from "../lib/models";
 import { clock, range } from "../lib/time";
@@ -723,9 +723,18 @@ function Item({ item }: { item: TranscriptItem }) {
     case "output":
       return <Prose text={item.text} />;
     case "error":
-      return <div className="item-error">{item.message}</div>;
+      // One line; the whole message opens under it (a stack trace can be long).
+      return (
+        <OneLine tone="danger" icon={<Icon name="close" size={13} />} title="报错" summary={firstLine(item.message)}>
+          {beyondFirstLine(item.message)}
+        </OneLine>
+      );
     case "warning":
-      return <div className="item-warn">{item.message}</div>;
+      return (
+        <OneLine tone="warn" icon={<Icon name="info" size={13} />} title="警告" summary={firstLine(item.message)}>
+          {beyondFirstLine(item.message)}
+        </OneLine>
+      );
     default:
       return null;
   }
@@ -743,9 +752,9 @@ const ACTION_LABEL: Record<ActionTool, string> = {
 };
 
 /**
- * A call that changed (or tried to change) the team or the code, as a card: what was asked, and
- * what the hub did — refused calls say why, in the hub's words. This is the record to trust
- * over the agent's summary.
+ * A call that changed (or tried to change) the team or the code, as one line: what was asked and
+ * what the hub did — refused calls say why, in the hub's words. This is the record to trust over
+ * the agent's summary, so the whole reason and the call's arguments open under the line.
  */
 function ActionCard({ action, call }: { action: ActionTool; call: Extract<TranscriptItem, { type: "tool_call" }> }) {
   const args = fields(call.detail?.arguments);
@@ -762,20 +771,36 @@ function ActionCard({ action, call }: { action: ActionTool; call: Extract<Transc
   } else if (action === "agent_retire") what = str(args.name) ?? "";
   else if (action === "agent_set_model") what = `${str(args.name) ?? ""} → ${str(args.model) ?? "默认"}`;
   else what = str(args.task_id) ?? str(args.task) ?? str(args.summary)?.slice(0, 80) ?? "";
-  const state = running ? "进行中" : refused ? "被拒绝" : "完成";
+  // The hub's words without its machine prefix; the first sentence of them is the gist.
+  const reason = raw?.replace(/^(conflict|not found|invalid|unsupported)\s*:\s*/i, "");
+  // What a completed call answered, when it answered in words rather than a JSON payload (for a
+  // recruit, the name and model above already are the result).
+  const answered = Object.keys(result).length ? undefined : plainText(call.detail?.result);
+  const summary = (running ? ["进行中", what] : refused ? [what, firstSentence(reason)] : [what, action !== "agent_spawn" && answered && firstSentence(answered)])
+    .filter(Boolean)
+    .join(" · ");
+  const detail =
+    (refused && reason) || call.detail?.arguments ? (
+      <>
+        {refused && reason && <div className="action-reason">{reason}</div>}
+        {call.detail?.arguments && (
+          <>
+            <div className="muted tiny">参数</div>
+            <pre className="out">{call.detail.arguments}</pre>
+          </>
+        )}
+      </>
+    ) : undefined;
   return (
-    <div className={`action-card ${refused ? "refused" : running ? "running" : "done"}`}>
-      <div className="action-head">
-        <Icon name={refused ? "close" : action === "agent_spawn" ? "addMate" : "check"} size={14} />
-        <span className="action-name">{ACTION_LABEL[action]}</span>
-        {what && <span className="action-what">{what}</span>}
-        <span className="action-state">{state}</span>
-      </div>
-      {refused && raw && (
-        // A refusal can carry a whole check log: its first lines say why, the rest on request.
-        <Fold className="action-reason">{raw.replace(/^(conflict|not found|invalid|unsupported)\s*:\s*/i, "")}</Fold>
-      )}
-    </div>
+    <OneLine
+      className="action-line"
+      tone={running ? "running" : refused ? "danger" : "ok"}
+      icon={running ? <span className="dot accent pulse" /> : <Icon name={refused ? "close" : "check"} size={13} />}
+      title={ACTION_LABEL[action]}
+      summary={summary}
+    >
+      {detail}
+    </OneLine>
   );
 }
 
@@ -871,20 +896,37 @@ function ToolStep({ step }: { step: ToolCall }) {
   const running = step.status === "in_progress" || step.status === "pending";
   // Failed, or refused with its reason in the detail: either way nothing was changed.
   const bad = toolFailed(step);
-  const tone = bad ? "danger" : running ? "accent pulse" : "ok";
   const code = d?.exit_code;
-  const live = running && step.output ? tailLines(step.output, LIVE_LINES) : undefined;
-  const more = !!(d || step.output);
+  const cwd = useContext(CwdContext);
   // A failed edit carries the diff the model meant to make: showing +N −M would claim a change
   // that never happened (docs/TODO.md §九).
   const changes = toolChanges(step).flatMap((c) => parseDiff(c.diff, c.path));
-  const cwd = useContext(CwdContext);
+  if (bad) {
+    // One line, like a result card: ✕, the call, and why it failed; the detail opens below.
+    const reason = firstLine(toolError(step));
+    const more = !!(d || step.output);
+    return (
+      <div className="tool-step failed">
+        <OneLine
+          tone="danger"
+          icon={<Icon name="close" size={13} />}
+          title={stepLine(step, cwd)}
+          summary={[code != null && code !== 0 ? `退出 ${code}` : "", reason || "失败"].filter(Boolean).join(" · ")}
+        >
+          {more ? <ToolDetailView step={step} changes={changes} /> : undefined}
+        </OneLine>
+      </div>
+    );
+  }
+  const tone = running ? "accent pulse" : "ok";
+  const live = running && step.output ? tailLines(step.output, LIVE_LINES) : undefined;
+  const more = !!(d || step.output);
   return (
-    <div className={`tool-step ${bad ? "failed" : ""}`}>
+    <div className="tool-step">
       <button className="tool" onClick={() => more && setOpen(!open)} aria-expanded={more ? open : undefined} disabled={!more} title={step.title}>
         <span className={`dot ${tone}`} />
         <span className="title">{stepLine(step, cwd)}</span>
-        {code != null && code !== 0 ? <span className="chip danger tiny">退出 {code}</span> : bad && <span className="chip danger tiny">失败</span>}
+        {code != null && code !== 0 ? <span className="chip danger tiny">退出 {code}</span> : null}
         {d?.duration_ms != null && <span className="muted tiny">{took(d.duration_ms)}</span>}
         {toolShowsStat(step) && changes.length > 0 && <ChangeStat files={changes} />}
         {more && (

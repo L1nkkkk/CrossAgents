@@ -1,4 +1,4 @@
-import { createContext, useContext, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Activity,
   Archive,
@@ -45,7 +45,6 @@ import type { TaskStatus } from "@bindings/TaskStatus";
 import { api } from "./api";
 import { useHubData } from "./hub";
 import { parseBlocks, parseInline, type Block, type Inline } from "./lib/markdown";
-import { t } from "./lib/i18n";
 import { codeFileTarget } from "./lib/filelinks";
 import type { FileScope } from "./api";
 import { openFile } from "./FileViewer";
@@ -175,35 +174,91 @@ export function Prose({ text }: { text: string }) {
 }
 
 /**
- * Long text kept to a few lines until asked for: a refused call's reason with a whole check log
- * in it, a run's summary. The toggle shows only when something is actually cut off; opened, the
- * text scrolls within a bounded height rather than pushing the conversation away.
+ * Long text kept to one line until asked for: a refused call's reason with a whole check log in
+ * it, a run's summary, a failed step. The line reads as status icon · what it was · a one-line
+ * gist; the icon — or the line — opens the whole thing below, in a bounded box that scrolls
+ * rather than pushing the conversation away.
  */
-export function Fold({ lines = 3, className, children }: { lines?: number; className?: string; children: ReactNode }) {
-  const body = useRef<HTMLDivElement>(null);
+export type OneLineTone = "ok" | "danger" | "warn" | "running";
+
+export function OneLine({
+  tone,
+  icon,
+  title,
+  summary,
+  className,
+  children,
+}: {
+  tone: OneLineTone;
+  icon?: ReactNode;
+  title: string;
+  summary?: string;
+  className?: string;
+  /** The full content. Without it the line cannot be opened and the icon is not a control. */
+  children?: ReactNode;
+}) {
   const [open, setOpen] = useState(false);
-  const [cut, setCut] = useState(false);
-  useLayoutEffect(() => {
-    const el = body.current;
-    if (!el || open) return;
-    const measure = () => setCut(el.scrollHeight > el.clientHeight + 2);
-    measure();
-    const watch = new ResizeObserver(measure);
-    watch.observe(el);
-    return () => watch.disconnect();
-  }, [open, children]);
+  // Opened near the bottom of the conversation, the body would start off-screen: bring it in.
+  const root = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (open) root.current?.scrollIntoView({ block: "nearest" });
+  }, [open]);
+  const more = children != null && children !== false;
+  const toggle = () => more && setOpen(!open);
+  const label = open ? "收起详情" : "展开详情";
+  const words = (
+    <>
+      <span className="oneline-title">{title}</span>
+      {summary && <span className="oneline-summary">{summary}</span>}
+    </>
+  );
   return (
-    <div className={`fold ${open ? "open" : cut ? "cut" : ""} ${className ?? ""}`}>
-      <div ref={body} className="fold-body" style={open ? undefined : { maxHeight: `${lines * 1.5}em` }}>
-        {children}
+    <div ref={root} className={`oneline ${tone} ${open ? "open" : ""} ${className ?? ""}`}>
+      <div className="oneline-head">
+        {more ? (
+          <button className="oneline-icon" onClick={toggle} aria-expanded={open} aria-label={label} title={label}>
+            {icon}
+          </button>
+        ) : (
+          <span className="oneline-icon" aria-hidden="true">
+            {icon}
+          </span>
+        )}
+        {more ? (
+          <button className="oneline-main" onClick={toggle} aria-expanded={open} title={summary}>
+            {words}
+          </button>
+        ) : (
+          <span className="oneline-main" title={summary}>
+            {words}
+          </span>
+        )}
       </div>
-      {(cut || open) && (
-        <button className="fold-toggle" onClick={() => setOpen(!open)} aria-expanded={open}>
-          {open ? t("common.less") : t("common.expand")}
-        </button>
-      )}
+      {open && <div className="oneline-body">{children}</div>}
     </div>
   );
+}
+
+/** The first non-empty line of `text`, trimmed. */
+export function firstLine(text?: string | null): string {
+  for (const line of (text ?? "").split(/\r?\n/)) {
+    const s = line.trim();
+    if (s) return s;
+  }
+  return "";
+}
+
+/** That first line cut at its first sentence, so a gist fits one line. */
+export function firstSentence(text?: string | null): string {
+  const line = firstLine(text);
+  const match = line.match(/^.*?[。！？]|^.*?\.(?=\s|$)/);
+  return (match ? match[0] : line).trim();
+}
+
+/** `text` when it says more than its first line (so there is something to open), else nothing. */
+export function beyondFirstLine(text?: string | null): string | undefined {
+  const full = (text ?? "").trim();
+  return full && full !== firstLine(full) ? full : undefined;
 }
 
 /**
