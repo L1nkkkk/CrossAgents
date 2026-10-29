@@ -101,7 +101,9 @@ mod run;
 
 pub use holders::{Cleanup, Holder, cleanup, holders, predecessor_alive};
 pub use lock::{FileId, LockFile, RawLock, file_id, file_id_raw, path_id};
-pub use run::{HELD_ENV, Inherited, inherited_holds, run, spawn, wait_tree_empty};
+pub use run::{
+    HELD_ENV, Inherited, LEFTOVER_GRACE, end_tree, inherited_holds, run, spawn, wait_tree_empty,
+};
 
 /// Exit code for "could not get the lock in time" (BSD `EX_TEMPFAIL`).
 pub const EXIT_TEMPFAIL: i32 = 75;

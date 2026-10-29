@@ -124,6 +124,23 @@ impl Tree {
             job::kill_group(group);
         }
     }
+
+    /// Ends every process in the tree now and keeps watching it: [`Tree::is_empty`] then
+    /// says when they are really gone, which [`Tree::kill`] (it lets go of the job or group)
+    /// cannot.
+    pub fn end(&mut self) {
+        #[cfg(windows)]
+        if let Some(job) = &self.job
+            && let Err(error) = job.terminate()
+        {
+            tracing::warn!(%error, "cannot end the job's processes; closing it instead");
+            self.kill();
+        }
+        #[cfg(unix)]
+        if let Some(group) = self.group {
+            job::kill_group(group);
+        }
+    }
 }
 
 impl Drop for Tree {

@@ -351,6 +351,7 @@ B 删除 run：
 - [x] L2：hub 检查、任务验收、`workspace_run` 改走执行器；删掉 `refuse_while_running` 的拒绝；`protocol.rs` 加一句（LOCKS §6）
 - [x] L3：Rust 预设的 cargo shim（`crossagents.exe` 硬链接，按 `argv[0]` 识别）
 - [ ] L4：run 页显示资源持有者；强制释放（先杀树再放锁）
+- [x] 执行器在根进程退出后被残留进程无限拖住（2026-10-29 记，同日修）：run `041aba99` 的 worker 跑 `cargo test`，真正的 cargo 早已退出，shim 却挂了十几分钟不返回，worker 一直显示“运行命令”，当天卡了三次。原因是 MSVC `link.exe` 会拉起遥测进程 `VCTIP.EXE`，它在父进程退出后还会挂很久，又在同一个 Job 里，而 `exec::run::wait_tree_empty` 要等 Job 清空才放锁、返回，没有上限。修法：新增 `exec::end_tree(tree, grace)`，根进程退出后最多再等 `LEFTOVER_GRACE`（10 秒），到点 `Tree::end`（Windows 用 `TerminateJobObject`，保留句柄以便确认清空；Unix 结束进程组）后再等树空、放锁，仍满足 LOCKS §4.3“锁持有到树结束”；结束了残留进程时 shim 在 stderr 说明。hub 检查的 `verify.rs::end_tree` 同样改为最多宽限 10 秒（之前会一直等到这条检查的超时）。测试 `exec_tree.rs::exec_what_a_command_leaves_running_is_ended_after_the_grace`、`exec_a_tree_that_ends_within_the_grace_is_left_alone`；实测：隔离环境里经 shim 编译小项目，链接留下的 VCTIP.EXE 在 10 秒后被结束，命令 10.9 秒返回。部署：没有重启 hub，只把 `<home>/shims/0.1.6/cargo.exe` 换成新构建（旧文件移到 `shims/retired/`），之后启动的 cargo 立即生效；hub 自身的检查要等下次换 hub 才用上新逻辑
 - [ ] 跨节点共享资源（数据库、部署环境）随多节点 B1 设计，v1 遇到 `scope = "shared"` 直接报错
 
 ## 十八、工作组：持续的工作空间，run 是其中一轮

@@ -102,18 +102,22 @@ fn explain(code: Option<i32>, output: String) -> String {
     }
 }
 
-/// Waits for a command's whole tree to end, and ends what is left of it once `deadline` is up:
-/// the build directory is let go only then (docs/tasks/LOCKS.md §4.3).
+/// Waits for a command's whole tree to end, and ends what is left of it after
+/// [`exec::LEFTOVER_GRACE`] (or at `deadline`, whichever comes first): the build directory
+/// is let go only then (docs/tasks/LOCKS.md §4.3). Before, what was left ran until the
+/// check's own deadline, so a lingering `VCTIP.EXE` held every check for its full timeout.
 async fn end_tree(tree: &mut process::Tree, deadline: tokio::time::Instant) {
-    if tokio::time::timeout_at(deadline, exec::wait_tree_empty(tree))
-        .await
-        .is_ok()
-    {
-        return;
+    let grace = deadline
+        .saturating_duration_since(tokio::time::Instant::now())
+        .min(exec::LEFTOVER_GRACE);
+    match exec::end_tree(tree, grace).await {
+        Ok(0) => {}
+        Ok(left) => tracing::info!(left, "ended what a check left running after it finished"),
+        Err(error) => {
+            tracing::warn!(%error, "cannot wait for a check's processes to end");
+            tree.kill();
+        }
     }
-    tree.kill();
-    // The platform ends them with it; look once more rather than take that on trust.
-    let _ = tokio::time::timeout(Duration::from_secs(5), exec::wait_tree_empty(tree)).await;
 }
 
 /// Keeps the end of long output, where errors usually are.

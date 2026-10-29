@@ -8,8 +8,8 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use crossagents_core::exec::{
-    Access, ExecError, Holder, LockFile, Request, Resource, acquire, holders_dir, inherited_holds,
-    lock_name, lock_path, process_created, spawn, wait_tree_empty,
+    Access, ExecError, Holder, LockFile, Request, Resource, acquire, end_tree, holders_dir,
+    inherited_holds, lock_name, lock_path, process_created, spawn, wait_tree_empty,
 };
 use tempfile::TempDir;
 
@@ -374,4 +374,77 @@ async fn exec_records_the_root_process_and_its_tree() {
     let status = child.wait().await.expect("wait for the command");
     assert_eq!(status.code(), Some(0));
     wait_tree_empty(&tree).await.expect("the tree ends");
+}
+
+// --- What a command leaves running on purpose is ended after a grace (2026-10-29) ----------
+
+/// `VCTIP.EXE` in small: an MSVC link leaves it behind for minutes, and a worker's
+/// `cargo test` held its lock — and did not return — until someone killed it by hand.
+#[tokio::test]
+async fn exec_what_a_command_leaves_running_is_ended_after_the_grace() {
+    let dir = temp();
+    let locks = dir.path().join("locks");
+    let build = resource(dir.path(), "build");
+    let mut held = acquire(
+        &locks,
+        &request("helper", &build, Access::Exclusive, millis(5_000)),
+        |_| {},
+    )
+    .await
+    .expect("take the lock");
+
+    // The grandchild would sleep for a minute after the root is gone.
+    let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_exec_tree_helper"));
+    cmd.arg("60000");
+    let (mut child, mut tree) = spawn(&mut held, &mut cmd).expect("start the tree");
+    let status = child.wait().await.expect("wait for the root");
+    assert_eq!(status.code(), Some(0));
+
+    let started = Instant::now();
+    let ended = end_tree(&mut tree, millis(300))
+        .await
+        .expect("the tree is ended");
+    assert!(ended >= 1, "the grandchild was still running and had to be ended");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "it must not wait out the grandchild's minute: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(tree.active_processes().expect("ask the tree"), 0);
+    drop(held);
+
+    acquire(
+        &locks,
+        &request("cargo build", &build, Access::Exclusive, millis(5_000)),
+        |_| {},
+    )
+    .await
+    .expect("the lock comes free once the leftover is ended");
+}
+
+/// A tree that empties within the grace is left to end by itself: nothing is killed.
+#[tokio::test]
+async fn exec_a_tree_that_ends_within_the_grace_is_left_alone() {
+    let dir = temp();
+    let locks = dir.path().join("locks");
+    let build = resource(dir.path(), "build");
+    let mut held = acquire(
+        &locks,
+        &request("helper", &build, Access::Exclusive, millis(5_000)),
+        |_| {},
+    )
+    .await
+    .expect("take the lock");
+
+    let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_exec_tree_helper"));
+    cmd.arg("300");
+    let (mut child, mut tree) = spawn(&mut held, &mut cmd).expect("start the tree");
+    assert_eq!(child.wait().await.expect("wait for the root").code(), Some(0));
+    assert_eq!(
+        end_tree(&mut tree, millis(10_000))
+            .await
+            .expect("the tree ends"),
+        0,
+        "the grandchild ended by itself"
+    );
 }

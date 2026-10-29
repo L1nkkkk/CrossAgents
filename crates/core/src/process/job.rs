@@ -21,7 +21,7 @@ mod imp {
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
-        QueryInformationJobObject, SetInformationJobObject,
+        QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
     };
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, OpenProcess, OpenThread, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
@@ -91,6 +91,17 @@ mod imp {
                 }
                 Ok(info.ActiveProcesses)
             }
+        }
+
+        /// Ends every process in the job now, keeping the handle: unlike dropping the job,
+        /// [`Job::active_processes`] can still tell when they are really gone.
+        pub fn terminate(&self) -> io::Result<()> {
+            // SAFETY: we own the handle, created with full access.
+            let ok = unsafe { TerminateJobObject(self.handle(), 1) };
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
         }
 
         /// Puts process `pid` in the job.
@@ -210,6 +221,10 @@ mod imp {
 
         pub fn active_processes(&self) -> io::Result<u32> {
             Ok(0)
+        }
+
+        pub fn terminate(&self) -> io::Result<()> {
+            Ok(())
         }
     }
 }

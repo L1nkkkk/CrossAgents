@@ -44,6 +44,16 @@ pub const HELD_ENV: &str = "CROSSAGENTS_HELD";
 /// How often [`wait_tree_empty`] looks again.
 const TREE_POLL: Duration = Duration::from_millis(25);
 
+/// How long [`end_tree`] lets what a command left behind run on after the command exited,
+/// before ending it. A build's own processes are done by then (cargo waits for its rustc and
+/// linkers); what is left is the kind of helper that outlives its parent on purpose — an
+/// MSVC link starts the telemetry process `VCTIP.EXE`, which stayed for many minutes and
+/// held a worker's `cargo test` lock with it (2026-10-29).
+pub const LEFTOVER_GRACE: Duration = Duration::from_secs(10);
+
+/// How long [`end_tree`] waits for the tree to empty once it has ended it.
+const END_WAIT: Duration = Duration::from_secs(5);
+
 /// One lock an outer `exec` says it holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Claim {
@@ -205,7 +215,8 @@ fn claim_still_holds(locks_dir: &Path, exec_id: &str, claim: &Claim) -> bool {
 /// the locks could not then be held until the tree ends (§4.3).
 ///
 /// The caller keeps the [`tokio::process::Child`] and decides what to do with its stdio; it
-/// must wait for the child itself and then call [`wait_tree_empty`] before releasing `held`.
+/// must wait for the child itself and then call [`end_tree`] (or [`wait_tree_empty`]) before
+/// releasing `held`.
 pub fn spawn(
     held: &mut Held,
     cmd: &mut tokio::process::Command,
@@ -254,11 +265,34 @@ pub async fn wait_tree_empty(tree: &Tree) -> io::Result<()> {
     }
 }
 
+/// After the root process exited: waits up to `grace` for the rest of the tree to end, then
+/// ends whatever is still in it and waits for that too. Returns how many processes had to be
+/// ended (`0` when the tree emptied by itself).
+///
+/// The locks are still held throughout, so §4.3 ("released once the tree has ended") holds;
+/// only "ended" no longer waits without a limit for a process that never means to stop.
+/// An error means the tree could not be watched, or did not empty even after it was ended.
+pub async fn end_tree(tree: &mut Tree, grace: Duration) -> io::Result<u32> {
+    if let Ok(waited) = tokio::time::timeout(grace, wait_tree_empty(tree)).await {
+        waited?;
+        return Ok(0);
+    }
+    let left = tree.active_processes()?;
+    tree.end();
+    match tokio::time::timeout(END_WAIT, wait_tree_empty(tree)).await {
+        Ok(waited) => waited.map(|()| left),
+        Err(_) => Err(io::Error::other(format!(
+            "{left} process(es) left in the tree were ended but still had not exited after {}s",
+            END_WAIT.as_secs()
+        ))),
+    }
+}
+
 /// Takes the locks, runs `cmd` under them and returns the command's exit status.
 ///
 /// Waiting notices go to stderr; the CLI is the caller that wants them. A request the outer
 /// exec already covers runs without taking the locks again (§4.5); everything else goes
-/// through [`acquire`], [`spawn`] and [`wait_tree_empty`].
+/// through [`acquire`], [`spawn`] and [`end_tree`].
 pub async fn run(
     locks_dir: &Path,
     req: &Request,
@@ -274,8 +308,16 @@ pub async fn run(
     }
 
     let mut held = acquire(locks_dir, req, |line| eprintln!("{line}")).await?;
-    let (mut child, tree) = spawn(&mut held, cmd)?;
+    let (mut child, mut tree) = spawn(&mut held, cmd)?;
     let status = child.wait().await?;
-    wait_tree_empty(&tree).await?;
+    let ended = end_tree(&mut tree, LEFTOVER_GRACE).await?;
+    if ended > 0 {
+        eprintln!(
+            "crossagents: the command finished, but {ended} process(es) it started were still \
+             running {}s later; ended them to let the lock go (an MSVC link leaves VCTIP.EXE \
+             behind, for one)",
+            LEFTOVER_GRACE.as_secs()
+        );
+    }
     Ok(status)
 }
