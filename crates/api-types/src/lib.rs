@@ -8,10 +8,11 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 pub use crossagents_core::{
-    Account, AccountStatus, Agent, AgentId, AgentProfile, AgentStatus, Capabilities, CheckResult,
-    ClaimRole, ContinuationPolicy, DataSource, DiffSource, DriverKind, Event, EventKind, Handoff,
-    HandoffKind, MessageId, MessageSource, ModelInfo, OutputStream, PlannedTask, Role, Run, RunId,
-    RunPolicy, RunStatus, StopReason, Task, TaskId, TaskStatus, TokenTotals, ToolInfo, ToolStatus,
+    Account, AccountStatus, Agent, AgentCommand, AgentCommandKind, AgentId, AgentProfile,
+    AgentStatus, Capabilities, CheckResult, ClaimRole, ContinuationPolicy, DataSource, DiffSource,
+    DriverKind, Event, EventKind, Handoff, HandoffKind, MessageId, MessageSource, ModelInfo,
+    OutputStream, PlannedTask, Role, Run, RunId, RunPolicy, RunStatus, StopReason, Task, TaskId,
+    TaskStatus, TokenTotals, ToolInfo, ToolStatus,
 };
 
 /// Handoff cards and how a task's chain of them reads.
@@ -1009,6 +1010,20 @@ pub struct ResumeCommandResponse {
 pub struct ResumeEnv {
     pub name: String,
     pub value: String,
+}
+
+/// `GET /v1/agents/{key}/commands`: the slash commands and skills the agent's own CLI brings
+/// (Claude Code's `system/init`), for a GUI to offer next to its input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AgentCommandsResponse {
+    pub commands: Vec<AgentCommand>,
+    /// The CLI reported them: a session is running and named its own.
+    pub known: bool,
+    /// Why they are not known, in one sentence for people (`known` is false).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub note: Option<String>,
 }
 
 /// What became of the sessions a deleted run still held. Those that took part in it and are

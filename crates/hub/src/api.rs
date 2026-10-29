@@ -17,19 +17,19 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use crossagents_api_types::{
-    API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentExecution,
-    AgentExecutionResponse, AgentSettingsRequest, AnswerRequest, ApiError, ApproveRunRequest,
-    ArchiveAgentRequest, AttachmentContent, AttachmentUpload, ChangesResponse, CliInfo,
-    CliInstallAccepted, CommitGraph, ConnectInfo, CreateAccountRequest, CreateAgentRequest,
-    CreateRunRequest, DeleteRunResponse, DiffSide, ErrorCode, FileContentResponse, FileEntry,
-    FileKind, FileTreeResponse, FinishRequest, GraphCommit, GraphRef, GraphRefKind, HealthResponse,
-    HubInfo, InitRepoRequest, LandRequest, ListAccountsResponse, ListAgentsResponse,
-    ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
-    ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
-    RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse, ResolvedPath, RunDetail,
-    RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest, SetPluginModelsRequest,
-    SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse,
-    UpdateRunPolicyRequest, UsageGroup, UsageResponse,
+    API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentCommandsResponse,
+    AgentExecution, AgentExecutionResponse, AgentSettingsRequest, AnswerRequest, ApiError,
+    ApproveRunRequest, ArchiveAgentRequest, AttachmentContent, AttachmentUpload, ChangesResponse,
+    CliInfo, CliInstallAccepted, CommitGraph, ConnectInfo, CreateAccountRequest,
+    CreateAgentRequest, CreateRunRequest, DeleteRunResponse, DiffSide, ErrorCode,
+    FileContentResponse, FileEntry, FileKind, FileTreeResponse, FinishRequest, GraphCommit,
+    GraphRef, GraphRefKind, HealthResponse, HubInfo, InitRepoRequest, LandRequest,
+    ListAccountsResponse, ListAgentsResponse, ListNotesResponse, ListPluginsResponse,
+    ListQuestionsResponse, ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo,
+    QuotaResponse, RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse,
+    ResolvedPath, RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
+    SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript,
+    TurnDiffResponse, UpdateRunPolicyRequest, UsageGroup, UsageResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, Attachment,
@@ -95,6 +95,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/agents/{key}/stop", post(stop_agent))
         .route("/v1/agents/{key}/cancel", post(cancel_agent))
         .route("/v1/agents/{key}/compact", post(compact_agent))
+        .route("/v1/agents/{key}/commands", get(agent_commands))
         .route(
             "/v1/agents/{key}/messages",
             post(send_message).layer(DefaultBodyLimit::max(MESSAGE_BODY_LIMIT)),
@@ -876,6 +877,14 @@ async fn compact_agent(
 ) -> ApiResult<StatusCode> {
     state.runtime.compact(&AgentKey::parse(&key)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The slash commands and skills the agent's own CLI brings, when it reports them.
+async fn agent_commands(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<AgentCommandsResponse>> {
+    Ok(Json(state.runtime.commands(&AgentKey::parse(&key)).await?))
 }
 
 /// Takes back a message that is still waiting for its turn.

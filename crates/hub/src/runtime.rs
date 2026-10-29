@@ -1219,6 +1219,29 @@ impl Runtime {
         }
     }
 
+    /// The slash commands and skills the agent's own CLI reports for its live session
+    /// (Claude Code's `system/init`). `known` is false when nothing has started, or the
+    /// driver does not report them, and `note` says which.
+    pub async fn commands(
+        &self,
+        key: &AgentKey,
+    ) -> Result<crossagents_api_types::AgentCommandsResponse, CoreError> {
+        let agent = self.store().get_agent(key).await?;
+        let live = self.live.lock().await.get(&agent.id).cloned();
+        let (commands, note) = match live {
+            Some(live) => match live.session.commands() {
+                Some(commands) => (commands, None),
+                None => (Vec::new(), Some("这个驱动不报告自带指令".to_owned())),
+            },
+            None => (Vec::new(), Some("还没启动过会话".to_owned())),
+        };
+        Ok(crossagents_api_types::AgentCommandsResponse {
+            known: note.is_none(),
+            commands,
+            note,
+        })
+    }
+
     /// Summarises the running session's history to free context.
     pub async fn compact(&self, key: &AgentKey) -> Result<(), CoreError> {
         let agent = self.store().get_agent(key).await?;
