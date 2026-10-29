@@ -13,6 +13,7 @@ pub mod install;
 pub mod models;
 pub mod notices;
 pub mod paths;
+pub mod prices;
 pub mod resume;
 pub mod routing;
 pub mod rules;
@@ -23,6 +24,7 @@ pub mod snapshot;
 pub mod trace;
 pub mod transcript;
 pub mod usage;
+pub mod usage_series;
 
 use std::fs::{File, TryLockError};
 use std::net::SocketAddr;

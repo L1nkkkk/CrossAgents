@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use crossagents_core::{
     Account, AccountProvider, AccountStatus, CoreError, DataSource, LoginCommand, ModelInfo,
-    RateWindow, SessionUsage, TokenTotals,
+    RateWindow, RequestUsage, SessionUsage, TokenTotals,
 };
 use crossagents_drivers::codebuddy_native;
 use crossagents_drivers::process::system_proxy_env;
@@ -365,31 +365,35 @@ fn scan_transcript(path: &Path) -> Option<SessionUsage> {
     let file = std::fs::File::open(path).ok()?;
     let mut started_at: Option<DateTime<Utc>> = None;
     let mut model = None;
-    let mut calls: HashMap<String, Value> = HashMap::new();
+    // Per call: when the line was written, the model it used and its usage.
+    let mut calls: HashMap<String, (DateTime<Utc>, Option<String>, Value)> = HashMap::new();
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         let Ok(entry) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        let at = entry
+            .get("timestamp")
+            .and_then(Value::as_i64)
+            .and_then(DateTime::from_timestamp_millis);
         if started_at.is_none() {
-            started_at = entry
-                .get("timestamp")
-                .and_then(Value::as_i64)
-                .and_then(DateTime::from_timestamp_millis);
+            started_at = at;
         }
         let Some(provider) = entry.get("providerData") else {
             continue;
         };
+        let asked = provider
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         if model.is_none() {
-            model = provider
-                .get("model")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
+            model = asked.clone();
         }
         if let (Some(id), Some(usage)) = (
             provider.get("messageId").and_then(Value::as_str),
             provider.get("rawUsage"),
         ) {
-            calls.insert(id.to_owned(), usage.clone());
+            let at = at.or(started_at).unwrap_or_default();
+            calls.insert(id.to_owned(), (at, asked, usage.clone()));
         }
     }
     if calls.is_empty() {
@@ -399,14 +403,27 @@ fn scan_transcript(path: &Path) -> Option<SessionUsage> {
         sessions: 1,
         ..TokenTotals::default()
     };
-    for usage in calls.values() {
+    let mut requests = Vec::with_capacity(calls.len());
+    for (at, asked, usage) in calls.into_values() {
+        let mut call = TokenTotals::default();
         let num = |pointer: &str| usage.pointer(pointer).and_then(Value::as_u64).unwrap_or(0);
-        totals.input_tokens += num("/prompt_tokens");
-        totals.cached_input_tokens += num("/prompt_tokens_details/cached_tokens");
-        totals.output_tokens += num("/completion_tokens");
-        totals.reasoning_output_tokens += num("/completion_tokens_details/reasoning_tokens");
-        totals.credits += usage.get("credit").and_then(Value::as_f64).unwrap_or(0.0);
+        call.input_tokens += num("/prompt_tokens");
+        call.cached_input_tokens += num("/prompt_tokens_details/cached_tokens");
+        call.output_tokens += num("/completion_tokens");
+        call.reasoning_output_tokens += num("/completion_tokens_details/reasoning_tokens");
+        call.credits += usage.get("credit").and_then(Value::as_f64).unwrap_or(0.0);
+        totals.input_tokens += call.input_tokens;
+        totals.cached_input_tokens += call.cached_input_tokens;
+        totals.output_tokens += call.output_tokens;
+        totals.reasoning_output_tokens += call.reasoning_output_tokens;
+        totals.credits += call.credits;
+        requests.push(RequestUsage {
+            at,
+            model: asked.clone().or_else(|| model.clone()),
+            totals: call,
+        });
     }
+    requests.sort_by_key(|r| r.at);
     Some(SessionUsage {
         session_id: path.file_stem()?.to_string_lossy().into_owned(),
         started_at: started_at.unwrap_or_default(),
@@ -414,6 +431,7 @@ fn scan_transcript(path: &Path) -> Option<SessionUsage> {
         // Transcripts do not say who started the session.
         originator: None,
         totals,
+        requests,
     })
 }
 
@@ -566,6 +584,16 @@ mod tests {
         assert_eq!(usage.totals.reasoning_output_tokens, 4);
         // Two calls, each counted once.
         assert!((usage.totals.credits - 2.5).abs() < 1e-9);
+        // Each call is one timed request.
+        assert_eq!(usage.requests.len(), 2);
+        assert!(
+            usage
+                .requests
+                .iter()
+                .all(|r| r.model.as_deref() == Some("hy4-preview"))
+        );
+        let outputs: u64 = usage.requests.iter().map(|r| r.totals.output_tokens).sum();
+        assert_eq!(outputs, 35);
         assert!(scan_transcript(&dir.join("empty.jsonl")).is_none());
     }
 
