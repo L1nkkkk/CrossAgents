@@ -41,6 +41,7 @@ impl Orchestrator {
             .host
             .clone_agent_on(template, &name, Role::Worker, &cwd, account.as_deref())
             .await?;
+        let worker = self.unmark_recruit(worker).await?;
         self.claim(&worker, run.id, Some(task.id), ClaimRole::Worker, true)
             .await?;
         if let Some(reason) = &reason {
@@ -56,10 +57,16 @@ impl Orchestrator {
                 reason: reason.clone(),
             })
             .await;
+            // By the session's own name: the template is only where it came from.
+            let from = self.name_of(template).await.unwrap_or_default();
             self.notice(
                 run.planner,
                 &format!("task:{}:route", task.id),
-                &format!("{}: {reason}", brief::task_ref(task)),
+                &format!(
+                    "{}: {reason}; 执行会话 {}（来自模板 {from}）",
+                    brief::task_ref(task),
+                    worker.name
+                ),
             )
             .await;
         }
@@ -122,7 +129,7 @@ impl Orchestrator {
             self.store.update_task(&task).await?;
         }
         let reason = rerouted.unwrap_or_else(|| format!("its worker hit its quota ({why})"));
-        let to_name = self.name_of(cloned).await;
+        let template_name = self.name_of(cloned).await;
         let card = self
             .hand_off(
                 &run,
@@ -130,11 +137,12 @@ impl Orchestrator {
                 HandoffKind::Reroute,
                 left,
                 &worker,
-                to_name,
+                template_name,
                 Some(reason),
             )
             .await?;
         let issuer = task.issuer_or(run.planner);
+        self.notify_dispatched(issuer, &task, &card).await;
         self.relay(worker.id, issuer, brief::handover(&task, &card), None);
         Ok(())
     }

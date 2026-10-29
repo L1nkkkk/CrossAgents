@@ -70,15 +70,22 @@ pub struct Handoff {
     /// The issuer on a first assignment; the worker before otherwise. `None` when there was
     /// none (a task whose worker had already gone).
     pub from: Option<AgentId>,
-    /// Who `from` is to the person: the issuer, or the teammate the worker was cloned from
-    /// (worker clones are removed with their task, their names mean nothing later).
+    /// Who `from` is to the person: the issuer, or the worker before by the name the last
+    /// card gave it.
     #[serde(default)]
     pub from_name: Option<String>,
     /// The worker that has the task now.
     pub to: AgentId,
-    /// The teammate `to` was cloned from.
+    /// The name of `to` itself: the execution session that works on the task (the name to
+    /// message it by), or the agent itself when it took the task with its conversation.
+    /// Cards from before kept the teammate it was cloned from here.
     #[serde(default)]
     pub to_name: String,
+    /// The teammate `to` was cloned from, when it is an execution session started for the
+    /// task; `None` when the agent took the task itself (or on cards from before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub template: Option<String>,
     /// Why it changed hands; always given for `reroute` and `escalate`.
     #[serde(default)]
     pub reason: Option<String>,
@@ -128,13 +135,23 @@ impl Handoff {
         }
     }
 
-    /// `Pia → Rex`, with the reason in brackets when there is one.
-    pub fn link(&self) -> String {
+    /// Who has the task, as the person reads it: `w-abc123-a（来自模板 Rex）` for an execution
+    /// session, the agent's own name otherwise.
+    pub fn to_label(&self) -> String {
         let to = if self.to_name.is_empty() {
             "?"
         } else {
             &self.to_name
         };
+        match &self.template {
+            Some(template) if template != to => format!("{to}（来自模板 {template}）"),
+            _ => to.to_owned(),
+        }
+    }
+
+    /// `Pia → Rex`, with the reason in brackets when there is one.
+    pub fn link(&self) -> String {
+        let to = self.to_label();
         let kind = match self.kind {
             HandoffKind::Assign => "assign",
             HandoffKind::Reassign => "reassign",
@@ -176,6 +193,7 @@ mod tests {
             from_name: Some("Pia".into()),
             to: AgentId::new(),
             to_name: to.into(),
+            template: None,
             reason: reason.map(str::to_owned),
             goal: "g".into(),
             files: Vec::new(),
@@ -220,5 +238,11 @@ mod tests {
         assert_eq!(chain(&[]), "");
         let value = serde_json::to_value(&cards[1]).unwrap();
         assert_eq!(value["kind"], "reroute");
+        assert!(value.get("template").is_none(), "no template, no key");
+        let mut session = card(HandoffKind::Assign, "w-abc123-a", None);
+        session.template = Some("Dara".into());
+        assert_eq!(session.link(), "w-abc123-a（来自模板 Dara） (assign)");
+        let value = serde_json::to_value(&session).unwrap();
+        assert_eq!(value["template"], "Dara");
     }
 }

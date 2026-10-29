@@ -252,11 +252,11 @@ async fn the_lead_cannot_put_a_teammate_on_a_model_nobody_runs() {
         "{} {} {} {}",
         call(
             "agent_spawn",
-            json!({ "name": "wrong", "model": "gpt-6-luna" })
+            json!({ "name": "wrong", "model": "no-such-model-zz" })
         ),
         call(
             "agent_set_model",
-            json!({ "name": "coder", "model": "gpt-6-luna" })
+            json!({ "name": "coder", "model": "no-such-model-zz" })
         ),
         accept("a"),
         finish()
@@ -272,10 +272,10 @@ async fn the_lead_cannot_put_a_teammate_on_a_model_nobody_runs() {
 
     let out = w.output();
     assert!(
-        out.contains("no logged-in account runs model gpt-6-luna"),
+        out.contains("no logged-in account runs model no-such-model-zz"),
         "{out}"
     );
-    assert!(out.contains("cannot run model gpt-6-luna"), "{out}");
+    assert!(out.contains("cannot run model no-such-model-zz"), "{out}");
     assert_eq!(t.get("/v1/agents/wrong").await.status(), 404);
     let coder: Value = t.get("/v1/agents/coder").await.json().await.unwrap();
     assert_eq!(coder["model"], "haiku");
@@ -305,7 +305,7 @@ async fn a_conversation_recruits_within_its_policy() {
             "agent_spawn",
             json!({ "name": "Haiku", "model": "mock-opus" }),
         ),
-        call("agent_spawn", json!({ "model": "gpt-6-luna" })),
+        call("agent_spawn", json!({ "model": "no-such-model-zz" })),
         call("agent_spawn", json!({ "model": "mock-opus" })),
         call(
             "agent_spawn",
@@ -321,7 +321,7 @@ async fn a_conversation_recruits_within_its_policy() {
     let out = w.output();
     assert!(out.contains("vendor or model word"), "{out}");
     assert!(
-        out.contains("no logged-in account runs model gpt-6-luna"),
+        out.contains("no logged-in account runs model no-such-model-zz"),
         "{out}"
     );
     assert!(out.contains("at most 1 teammates"), "{out}");

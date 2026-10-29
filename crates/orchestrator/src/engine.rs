@@ -881,7 +881,16 @@ impl Orchestrator {
                 ),
                 Err(_) => "the default worker".into(),
             };
-            who.push(format!("#{} → {name}", planned.key));
+            // A new execution session of the template does it, unless the plan names the
+            // session itself; the session's name comes when the task is handed out.
+            if planned.fresh {
+                who.push(format!(
+                    "#{} 由模板 {name} 派生的新执行会话执行",
+                    planned.key
+                ));
+            } else {
+                who.push(format!("#{} 由 {name} 本人执行", planned.key));
+            }
         }
         for (planned, (worker_template, reviewer_template)) in run.plan.iter().zip(assignments) {
             let task = Task {
@@ -917,7 +926,8 @@ impl Orchestrator {
         self.set_run_status(run, RunStatus::Running, None).await?;
         let mut text = format!(
             "The plan of run {} was approved: {} task(s) start as their dependencies allow.
-Who does each task: {}",
+Who does each task: {}
+The name of each execution session (the one to message) comes in a notice when its task is handed out.",
             run.id,
             run.plan.len(),
             who.join(", ")
@@ -1172,14 +1182,66 @@ The person changed: {}",
         } else {
             (HandoffKind::Assign, rerouted)
         };
-        let to_name = self.name_of(cloned).await;
+        // A session started for the task names the teammate it came from.
+        let template_name = if cloned == worker.id {
+            None
+        } else {
+            self.name_of(cloned).await
+        };
         let card = self
-            .hand_off(run, task, kind, left, &worker, to_name, reason)
+            .hand_off(run, task, kind, left, &worker, template_name, reason)
             .await?;
         // The task as its issuer wrote it, from the issuer.
         let issuer = task.issuer_or(run.planner);
+        self.notify_dispatched(issuer, task, &card).await;
         self.relay(worker.id, issuer, brief::handover(task, &card), None);
         Ok(())
+    }
+
+    /// Tells `to` (the task's issuer) who has the task now, by the name to message it by.
+    pub(crate) async fn notify_dispatched(
+        &self,
+        to: AgentId,
+        task: &Task,
+        card: &crossagents_core::Handoff,
+    ) {
+        let line = match &card.template {
+            Some(template) => format!(
+                "#{} 已派给 {}（来自模板 {template}），给它发消息用这个名字",
+                task.key, card.to_name
+            ),
+            None => format!(
+                "#{} 已派给 {}（它本人，带着自己的对话），给它发消息用这个名字",
+                task.key, card.to_name
+            ),
+        };
+        let line = match &card.reason {
+            Some(reason) => format!("{line}（{reason}）"),
+            None => line,
+        };
+        self.notice(to, &format!("task:{}:dispatch", task.id), &line)
+            .await;
+    }
+
+    /// An execution session cloned from a teammate is nobody's recruit: the clone copies the
+    /// template's config, recruiting marks included, and those would count it among the
+    /// run's or a conversation's recruits.
+    pub(crate) async fn unmark_recruit(&self, mut agent: Agent) -> Result<Agent, CoreError> {
+        let Some(map) = agent.config.as_object_mut() else {
+            return Ok(agent);
+        };
+        let had = map.remove(crossagents_core::model::SPAWNED_BY_AGENT).is_some()
+            | map.remove("spawned_by_run").is_some();
+        if had {
+            self.store
+                .update_agent_config(agent.id, &agent.config)
+                .await?;
+            self.publish(EventKind::AgentUpdated {
+                agent: agent.clone(),
+            })
+            .await;
+        }
+        Ok(agent)
     }
 
     /// A new execution session of `template` for `task`, working in `cwd` and held for it
@@ -1195,6 +1257,7 @@ The person changed: {}",
     ) -> Result<Agent, CoreError> {
         let name = self.free_name(name).await?;
         let agent = self.host.clone_agent(template, &name, role, cwd).await?;
+        let agent = self.unmark_recruit(agent).await?;
         let claim = if role == Role::Reviewer {
             ClaimRole::Reviewer
         } else {

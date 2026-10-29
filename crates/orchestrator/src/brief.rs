@@ -233,7 +233,7 @@ pub fn handover(task: &Task, card: &Handoff) -> String {
         out,
         "\n\n---\nhandoff: {} → {} ({kind})\n",
         card.from_name.as_deref().unwrap_or("?"),
-        card.to_name
+        card.to_label()
     );
     if let Some(reason) = &card.reason {
         let _ = writeln!(out, "why: {}", reason.trim());
@@ -376,6 +376,7 @@ mod tests {
             from_name: Some("Rex".into()),
             to: AgentId::new(),
             to_name: "Ada".into(),
+            template: None,
             reason: Some("Rex is stuck".into()),
             goal: "do a".into(),
             files: vec!["src/a.rs".into()],

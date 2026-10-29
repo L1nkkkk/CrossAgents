@@ -50,7 +50,7 @@ impl Orchestrator {
                 Vec::new()
             }
         };
-        // Who the person knew the worker as: the teammate the last handoff named, else the
+        // Who the person knew the worker as: the session the last handoff named, else the
         // one it was cloned from.
         let from_name = match task.handoffs.last() {
             Some(last) => Some(last.to_name.clone()),
@@ -90,7 +90,8 @@ impl Orchestrator {
     }
 
     /// Records the card on `task` and announces it. Called once `worker` has the task and
-    /// before its first message is sent.
+    /// before its first message is sent. `template` is the teammate `worker` was cloned
+    /// from, `None` when `worker` took the task itself.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn hand_off(
         &self,
@@ -99,7 +100,7 @@ impl Orchestrator {
         kind: HandoffKind,
         left: Left,
         worker: &Agent,
-        to_name: Option<String>,
+        template: Option<String>,
         reason: Option<String>,
     ) -> Result<Handoff, CoreError> {
         let decisions = task
@@ -118,7 +119,9 @@ impl Orchestrator {
             from: left.from,
             from_name: left.from_name,
             to: worker.id,
-            to_name: to_name.unwrap_or_else(|| worker.name.clone()),
+            // The name to message it by; where it came from goes alongside.
+            to_name: worker.name.clone(),
+            template: template.filter(|t| *t != worker.name),
             reason,
             goal: task.spec.goal.clone(),
             files: left.files,

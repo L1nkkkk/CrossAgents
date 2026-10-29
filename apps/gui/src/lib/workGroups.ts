@@ -11,6 +11,7 @@
 // folded away under a summary line (the agent's prose may say otherwise).
 
 import type { TranscriptItem } from "@bindings/TranscriptItem";
+import { toolFailed } from "./toolcall.ts";
 
 export type Step =
   | Extract<TranscriptItem, { type: "tool_call" }>
@@ -90,7 +91,8 @@ const PHRASE: Record<Category, (n: number) => string> = {
 };
 const ORDER: Category[] = ["command", "edit", "read", "search", "tool"];
 
-export const failed = (step: Step) => step.type === "tool_call" && step.status === "failed";
+// A failure is what toolcall.ts says it is: the status, or an error recorded with the call.
+export const failed = (step: Step) => step.type === "tool_call" && toolFailed(step);
 
 /** One line for a folded run: what it did, by kind; reasoning is named only when alone. */
 export function summarize(steps: Step[]): string {

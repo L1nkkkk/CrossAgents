@@ -460,10 +460,11 @@ impl Orchestrator {
                 kind,
                 left,
                 &worker,
-                Some(to.name.clone()),
+                a.fresh.then(|| to.name.clone()),
                 reason,
             )
             .await?;
+        self.notify_dispatched(caller.id, &task, &card).await;
         self.relay(worker.id, caller.id, brief::handover(&task, &card), None);
         Ok(task_json(&task))
     }
