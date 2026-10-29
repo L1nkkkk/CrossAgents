@@ -1403,6 +1403,13 @@ button.ghost.icon, .icon-btn { background: transparent; border-color: transparen
 .topbar .who-block .name-auto { display: inline-block; margin-left: 6px; }
 .topbar > * { flex-shrink: 0; }
 .topbar > .who-block, .topbar > .spacer, .topbar > h1, .topbar > .title { flex-shrink: 1; min-width: 0; }
+/* The name is how you know whose conversation this is: it keeps room for a short name, and only
+   a long one is cut. Everything else in the topbar gives way first. */
+.topbar > .who-block { min-width: 60px; }
+/* A topbar short of room folds the secondary buttons to their icons (title and aria-label still
+   say what they are) and the meter to its percentage, before the name loses its room. */
+@media (max-width: 1260px) { .topbar-label { display: none; } }
+@media (max-width: 1100px) { .meter .track { display: none; } }
 
 /* Small windows: tab strips keep each label on one line, and a section head wraps its controls
    below the title rather than squeezing them. */

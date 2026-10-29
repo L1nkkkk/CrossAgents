@@ -304,3 +304,17 @@ export function slashScene(kind: "idle" | "running"): { state: MockState; script
     ],
   };
 }
+
+/**
+ * A long agent name in a topbar that has every button (running, over half full): the name keeps
+ * a short name's room and only its own overflow is cut — never squeezed out by the buttons.
+ */
+export function longNameScene(): { state: MockState; script: Step[]; route: string } {
+  const s = soloSession();
+  const a = s.state.agents[0];
+  a.name = "Nova 文档与发布助手";
+  a.name_source = "chosen";
+  const t = s.state.transcripts.get(a.id)!;
+  if (t.usage) t.usage = { ...t.usage, used: 130_000, parts: contextParts(130_000, t.usage.size) };
+  return { ...s, route: `#/s/${encodeURIComponent(a.name)}` };
+}

@@ -444,10 +444,11 @@ function Header({
             a conspicuous button of its own. */}
         {!rail && <ContextUsageButton agent={agent} usage={usage} variant="topbar" />}
         {agent.status === "idle" && usage && usage.size > 0 && usage.used / usage.size >= 0.5 && (
-          <button className="ghost small hide-narrow" disabled={compact.busy} onClick={() => void compact.compact()} title="让 agent 把历史压缩成摘要，腾出上下文">
+          <button className="ghost small" disabled={compact.busy} onClick={() => void compact.compact()} title="让 agent 把历史压缩成摘要，腾出上下文" aria-label="压缩上下文">
             <span className="row" style={{ gap: 5 }}>
               <Icon name="shrink" size={13} />
-              {compact.busy ? "压缩中…" : "压缩上下文"}
+              {/* Compacting is under way: that word stays even on a narrow topbar. */}
+              <span className={compact.busy ? undefined : "topbar-label"}>{compact.busy ? "压缩中…" : "压缩上下文"}</span>
             </span>
           </button>
         )}
@@ -469,14 +470,23 @@ function Header({
             {stop.armed ? "再点一次停止" : "停止"}
           </button>
         )}
-        <button className={`ghost small resume-toggle ${resume ? "on" : ""}`} onClick={() => setResume(!resume)} title="复制原生恢复命令：在终端里用同一个 session id 接着聊" aria-expanded={resume}>
-          终端恢复
+        <button
+          className={`ghost small resume-toggle ${resume ? "on" : ""}`}
+          onClick={() => setResume(!resume)}
+          title="复制原生恢复命令：在终端里用同一个 session id 接着聊"
+          aria-label="终端恢复"
+          aria-expanded={resume}
+        >
+          <span className="row" style={{ gap: 5 }}>
+            <Icon name="terminal" size={13} />
+            <span className="topbar-label">终端恢复</span>
+          </span>
         </button>
         {agent.plugin !== "external" && (
-          <button className="ghost small graph-toggle" onClick={() => openTool("graph", { agent: agent.name })} title="在右侧工具列看这个会话检出的提交图：HEAD 和本地分支">
+          <button className="ghost small graph-toggle" onClick={() => openTool("graph", { agent: agent.name })} title="在右侧工具列看这个会话检出的提交图：HEAD 和本地分支" aria-label="提交图">
             <span className="row" style={{ gap: 5 }}>
               <Icon name="branch" size={13} />
-              提交图
+              <span className="topbar-label">提交图</span>
             </span>
           </button>
         )}
