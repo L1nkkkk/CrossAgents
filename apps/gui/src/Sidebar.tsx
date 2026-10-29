@@ -273,7 +273,8 @@ function RunRow({
   const members = runAgents(detail, agents);
   const unread = useUnread();
   const live = ACTIVE_RUN.includes(run.status);
-  const memberActive = members.some(isSession);
+  // A lead sits in every run it led: only a live one opens for its session (workers belong to one run).
+  const memberActive = members.some((m) => isSession(m) && (live || m.id !== run.planner));
   // Live runs and the one you are in start open; your click wins after that.
   const [toggled, setToggled] = useState<boolean>();
   const open = searching || (toggled ?? (live || selected || memberActive));
@@ -323,7 +324,7 @@ function RunRow({
       {open && members.length > 0 && (
         <div className="children">
           {members.map((agent) => (
-            <SessionRow key={agent.id} agent={agent} active={isSession(agent)} note={workingOn(detail, agent)} />
+            <SessionRow key={agent.id} agent={agent} active={isSession(agent)} note={workingOn(detail, agent)} ended={!live} />
           ))}
         </div>
       )}
@@ -350,6 +351,7 @@ function SessionRow({
   recruits = [],
   isSession,
   searching,
+  ended,
 }: {
   agent: Agent;
   active: boolean;
@@ -358,6 +360,8 @@ function SessionRow({
   recruits?: Agent[];
   isSession?: (a: Agent) => boolean;
   searching?: boolean;
+  /** A member row of a run that is over: the agent may be busy elsewhere (a lead runs many), not here. */
+  ended?: boolean;
 }) {
   const [toggled, setToggled] = useState<boolean>();
   const recruitActive = !!isSession && recruits.some(isSession);
@@ -366,7 +370,19 @@ function SessionRow({
   const unread = useUnread()[agent.id];
   const planWaiting = useContext(PendingPlans).has(agent.id);
   const dot: Dot =
-    agent.status === "error" || unread?.kind === "error" ? "danger" : planWaiting ? "warn" : agent.status === "running" ? "live" : unread ? "unread" : undefined;
+    agent.status === "error" || unread?.kind === "error"
+      ? "danger"
+      : ended
+        ? unread
+          ? "unread"
+          : undefined
+        : planWaiting
+          ? "warn"
+          : agent.status === "running"
+            ? "live"
+            : unread
+              ? "unread"
+              : undefined;
   const role = agent.profile?.title || agentTitle(agent);
   // Conversations from every project share one list: each says which project it works in.
   const project = useContext(InChats) ? projectOf(agent) : undefined;
