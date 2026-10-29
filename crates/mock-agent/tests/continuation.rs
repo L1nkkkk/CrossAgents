@@ -920,3 +920,72 @@ async fn a_hung_lead_turn_is_reported_with_the_lead_named() {
         "the hung turn is still running, not interrupted: {agent:?}"
     );
 }
+
+/// The lead's turn ending is not an observation the stuck watch may act on: at Idle the
+/// checkpoint is settled without delivering (`settle_continuation`, from `engine.rs` on
+/// `AgentStatusChanged → Idle`). Judging the quiet stretch there would write the stuck
+/// advice and re-arm the watch, then send nothing — and the clock's next wakeup would carry
+/// the plain advice, with "N minutes without progress, waiting for whom" lost for good.
+#[tokio::test]
+async fn settling_the_checkpoint_at_idle_does_not_swallow_a_stuck_report() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let (run, task) = waiting_task_run(&t, stuck(2)).await;
+    phase(&t, &run, "waiting_tasks").await;
+    let armed = get(&t, run.id).await.continuation.unwrap();
+    assert!(
+        armed.stuck_watch.is_some(),
+        "the waiting phase arms the watch: {armed:?}"
+    );
+    // The worker has been quiet past `stuck_minutes`...
+    quiet(&t, run.id, 5).await;
+    let quiet_at = get(&t, run.id)
+        .await
+        .continuation
+        .unwrap()
+        .stuck_watch
+        .as_ref()
+        .unwrap()
+        .progress_at;
+    // ...exactly as the lead's turn ends. Settling is called directly: the real Idle event
+    // would run the lead's own turn first, and a clock tick landing inside that turn reads
+    // the phase as `working` and arms the watch afresh for a genuine reason, which is not
+    // what this test is about.
+    t.hub.orchestrator.settle_continuation(run.planner).await;
+    let settled = get(&t, run.id).await.continuation.unwrap();
+    assert_eq!(
+        settled.stuck_watch.as_ref().map(|watch| watch.progress_at),
+        Some(quiet_at),
+        "settling at Idle must not re-arm the watch: {settled:?}"
+    );
+    assert_eq!(settled.attempts, 0, "settling wakes nobody: {settled:?}");
+    assert_eq!(wake_count(&t, &run).await, 0);
+
+    // The clock's next pass is the one that judges the stretch, and it still reports it.
+    t.hub.orchestrator.continue_runs().await;
+    let texts = wake_texts(&t, &run).await;
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    let text = &texts[0];
+    assert!(
+        text.contains("No progress for 5 minutes"),
+        "the quiet stretch is reported, not a plain nudge: {text}"
+    );
+    let name = t
+        .hub
+        .orchestrator
+        .store()
+        .get_agent(&AgentKey::Id(task.assignee.unwrap()))
+        .await
+        .unwrap()
+        .name;
+    assert!(
+        text.contains(&format!("agent «{name}» on #{} ({})", task.key, task.title)),
+        "names who is being waited for: {text}"
+    );
+    let report = get(&t, run.id).await.continuation.unwrap();
+    assert_eq!(report.attempts, 1, "{report:?}");
+    assert!(
+        report.stuck_watch.as_ref().unwrap().progress_at > quiet_at,
+        "the report starts the next stretch: {report:?}"
+    );
+}
