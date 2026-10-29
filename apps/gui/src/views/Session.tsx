@@ -759,6 +759,10 @@ function Bubble({ turn, tree }: { turn: TranscriptTurn; tree: RunDetail[] }) {
 
 function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agent; agents: Agent[]; tree: RunDetail[] }) {
   const running = !!turn.started_at && !turn.completed_at;
+  // Which step the conversation shows live, as Steps reports it: the live line leaves that step's
+  // command and output out, so the same lines are not written twice (see ShownLive).
+  const [shownLive, setShownLive] = useState<string | null>(null);
+  const blocks = workGroups(turn.items);
   return (
     <div className="turn" data-turn={turn.message_id}>
       {fromPerson(turn) ? (
@@ -776,10 +780,16 @@ function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agen
           <span className="what">{agentTitle(agent)}</span>
         </div>
       )}
-      {workGroups(turn.items).map((block, i) =>
-        block.kind === "steps" ? <Steps key={i} steps={block.steps} closed={block.closed} /> : <Item key={i} item={block.item} />,
-      )}
-      {running && <LiveLine since={turn.started_at!} items={turn.items} />}
+      <ShownLive.Provider value={{ id: shownLive, set: setShownLive }}>
+        {blocks.map((block, i) =>
+          block.kind === "steps" ? (
+            <Steps key={i} steps={block.steps} closed={block.closed} live={running && i === blocks.length - 1 ? setShownLive : undefined} />
+          ) : (
+            <Item key={i} item={block.item} />
+          ),
+        )}
+        {running && <LiveLine since={turn.started_at!} items={turn.items} />}
+      </ShownLive.Provider>
       {turn.completed_at && <TurnFoot turn={turn} />}
       {turn.completed_at && turn.diff && <TurnChanges turn={turn} agent={agent} />}
     </div>
@@ -878,13 +888,30 @@ function ActionCard({ action, call }: { action: ActionTool; call: Extract<Transc
 const OPEN_STEPS = 3;
 
 /**
+ * The tool call whose live output the conversation already shows. `Steps` reports it while it
+ * shows its newest steps; the live line under the turn then leaves that call's command and output
+ * out, so the same lines are never written twice (the step is where they belong).
+ */
+const ShownLive = createContext<{ id: string | null; set: (id: string | null) => void }>({ id: null, set: () => {} });
+
+/**
  * A run of tool calls and reasoning. Closed runs read as one summary line (failures stay
  * listed under it); open ones show the newest steps. A click overrides either.
+ *
+ * `live` is set on the turn's last block while the turn runs: the newest step's live output is on
+ * screen here, and Steps says so, so the live line does not repeat it.
  */
-function Steps({ steps, closed }: { steps: Step[]; closed: boolean }) {
+function Steps({ steps, closed, live }: { steps: Step[]; closed: boolean; live?: (id: string | null) => void }) {
   const [manual, setManual] = useState<boolean>();
   const expanded = manual ?? !closed;
   const [all, setAll] = useState(false);
+  // The newest step is always among those shown while this block is open, so what it reports is
+  // just whether the block is open at all.
+  const newest = steps[steps.length - 1];
+  const shown = expanded && newest?.type === "tool_call" ? newest.tool_call_id : null;
+  useEffect(() => {
+    live?.(shown);
+  }, [live, shown]);
 
   if (!expanded) {
     const bad = steps.filter(failed);
@@ -1092,7 +1119,12 @@ function LiveLine({ since, items }: { since: string; items: TranscriptItem[] }) 
     const el = follow?.el.current;
     if (el && follow?.stick.current) el.scrollTop = el.scrollHeight;
   });
-  const current = liveNow(items, cwd);
+  const shown = useContext(ShownLive);
+  const last = items[items.length - 1];
+  // A running step whose command and output are already on screen (the open steps at the end of
+  // the turn): the status row says enough; repeating it here would write the same output twice.
+  const onScreen = last?.type === "tool_call" && shown.id === last.tool_call_id;
+  const current = onScreen ? undefined : liveNow(items, cwd);
   const quiet = quietSeconds(seen.at, now);
   return (
     <div className="working live-turn">

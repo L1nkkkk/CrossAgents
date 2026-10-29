@@ -122,15 +122,20 @@ export function liveSession(kind: "stream" | "quiet"): { state: MockState; scrip
     items: [think("最后一个是 gui。"), { type: "tool_call", tool_call_id: build, title: "npm run build", kind: "execute", status: "in_progress", output: started, detail: { changes: [], command: "npm run build", cwd: NOTES_REPO } }],
   });
   state.transcripts.set(nova.id, transcript(nova, [before, current], 44_000));
-  // Twenty seconds of build output, a couple of lines at a time, so the tail visibly moves.
+  // Build output a couple of lines at a time, then a thought (which the conversation folds to
+  // "推理", so the live line is the only place its words show), then output again.
   const lines = ["transforming (38/214) src/views/Session.tsx", "transforming (74/214) src/ToolColumn.tsx", "rendering chunks...", "computing gzip size...", "dist/assets/index-8ac14f2e.js  412.61 kB │ gzip: 128.40 kB"];
+  const output = (at: number, text: string): Step => ({ at, event: { type: "agent.tool_output", data: { id: nova.id, tool_call_id: build, text: `${text}\n` } } });
   const script: Step[] =
     kind === "quiet"
       ? []
-      : lines.flatMap((line, i) => [
-          { at: 900 + i * 900, event: { type: "agent.tool_output", data: { id: nova.id, tool_call_id: build, text: `${line}\n` } } },
-          { at: 1_350 + i * 900, event: { type: "agent.tool_output", data: { id: nova.id, tool_call_id: build, text: `transforming (${40 + i * 8}/214) src/main.tsx\n` } } },
-        ]);
+      : [
+          ...lines.flatMap((line, i) => [output(900 + i * 900, line), output(1_350 + i * 900, `transforming (${40 + i * 8}/214) src/main.tsx`)]),
+          { at: 5_200, event: { type: "agent.output", data: { id: nova.id, stream: "thought", text: "这次比上次慢，" } } },
+          { at: 5_700, event: { type: "agent.output", data: { id: nova.id, stream: "thought", text: "大概是 chunk 变多了，跑完再看一眼 dist。" } } },
+          output(6_400, "✓ 214 modules transformed."),
+          output(7_200, "rendering chunks (3)..."),
+        ];
   return { state, script, route: `#/s/${nova.name}` };
 }
 
