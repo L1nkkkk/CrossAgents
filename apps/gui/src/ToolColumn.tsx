@@ -147,7 +147,7 @@ function PaneSlot({
       {divider}
       <section className="tool-pane" aria-label={paneLabel(kind)}>
         <header className="tool-head">{head}</header>
-        <div className="tool-body">
+        <div className={`tool-body ${kind === "graph" ? "tool-body-graph" : ""}`}>
           {kind === "changes" && (agent ? <ChangesPane key={agent} agent={agent} target={target?.agent === agent ? target : null} /> : <Blank text="打开一个会话，这里显示它每一轮改了什么。" />)}
           {kind === "task" && <TaskPane follow={follow} target={target} routeTask={routeTask} />}
           {kind === "events" && (agent ? <EventsPane key={agent} agent={agent} /> : <Blank text="打开一个会话，这里显示它的原始 hub 事件。" />)}
