@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import type { Agent } from "@bindings/Agent";
+import type { AgentCommand } from "@bindings/AgentCommand";
 import type { Capabilities } from "@bindings/Capabilities";
 import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
@@ -33,7 +34,9 @@ import { dismissNotice, useNotices } from "../notices";
 import { QuestionCards } from "../questions";
 import { NeedsYouStrip, RunStrip } from "../strips";
 import { useHubData } from "../hub";
+import { ContextUsageButton, useCompact } from "../contextusage";
 import { mentionsFor, useMention } from "../mention";
+import { useSlash, type SlashMenuGroup } from "../slash";
 import { homeOf, isChat, wsKey } from "../workspace";
 import { ProfileEditor } from "./Agents";
 import { PlanTasks, usePlanApproval } from "./Run";
@@ -389,6 +392,7 @@ function Header({
   const [error, setError] = useState<string>();
   const [profile, setProfile] = useState(false);
   const [resume, setResume] = useState(false);
+  const compact = useCompact(agent);
   const stop = useArmed();
 
   async function run(action: () => Promise<unknown>) {
@@ -436,10 +440,16 @@ function Header({
           </>
         )}
         <div className="spacer" />
-        {!rail && usage && usage.size > 0 && <Meter usage={usage} />}
+        {/* Always an entry: the meter opens usage and 压缩上下文; over half full the header keeps
+            a conspicuous button of its own. */}
+        {!rail && <ContextUsageButton agent={agent} usage={usage} variant="topbar" />}
         {agent.status === "idle" && usage && usage.size > 0 && usage.used / usage.size >= 0.5 && (
-          <button className="ghost small" disabled={busy} onClick={() => run(() => api.compactAgent(agent.id))} title="让 agent 把历史压缩成摘要，腾出上下文">
-            压缩上下文
+          <button className="ghost small" disabled={compact.busy} onClick={() => void compact.compact()} title="让 agent 把历史压缩成摘要，腾出上下文" aria-label="压缩上下文">
+            <span className="row" style={{ gap: 5 }}>
+              <Icon name="shrink" size={13} />
+              {/* Compacting is under way: that word stays even on a narrow topbar. */}
+              <span className={compact.busy ? undefined : "topbar-label"}>{compact.busy ? "压缩中…" : "压缩上下文"}</span>
+            </span>
           </button>
         )}
         {agent.status === "running" && capabilities?.interrupt !== false && (
@@ -460,14 +470,23 @@ function Header({
             {stop.armed ? "再点一次停止" : "停止"}
           </button>
         )}
-        <button className={`ghost small resume-toggle ${resume ? "on" : ""}`} onClick={() => setResume(!resume)} title="复制原生恢复命令：在终端里用同一个 session id 接着聊" aria-expanded={resume}>
-          终端恢复
+        <button
+          className={`ghost small resume-toggle ${resume ? "on" : ""}`}
+          onClick={() => setResume(!resume)}
+          title="复制原生恢复命令：在终端里用同一个 session id 接着聊"
+          aria-label="终端恢复"
+          aria-expanded={resume}
+        >
+          <span className="row" style={{ gap: 5 }}>
+            <Icon name="terminal" size={13} />
+            <span className="topbar-label">终端恢复</span>
+          </span>
         </button>
         {agent.plugin !== "external" && (
-          <button className="ghost small graph-toggle" onClick={() => openTool("graph", { agent: agent.name })} title="在右侧工具列看这个会话检出的提交图：HEAD 和本地分支">
+          <button className="ghost small graph-toggle" onClick={() => openTool("graph", { agent: agent.name })} title="在右侧工具列看这个会话检出的提交图：HEAD 和本地分支" aria-label="提交图">
             <span className="row" style={{ gap: 5 }}>
               <Icon name="branch" size={13} />
-              提交图
+              <span className="topbar-label">提交图</span>
             </span>
           </button>
         )}
@@ -484,9 +503,10 @@ function Header({
         </div>
       )}
       {resume && <ResumePanel agent={agent} onClose={() => setResume(false)} />}
-      {error && (
+      {(error || compact.error) && (
         <div style={{ padding: "8px 20px 0" }}>
-          <ErrorBox error={error} />
+          {error && <ErrorBox error={error} />}
+          {compact.error && <ErrorBox error={compact.error} />}
         </div>
       )}
     </>
@@ -545,30 +565,6 @@ function AgentName({ agent }: { agent: Agent }) {
       {displayName(agent)}
       {generated && <span className="name-auto">自动命名</span>}
     </button>
-  );
-}
-
-function Meter({ usage }: { usage: TranscriptUsage }) {
-  const pct = Math.min(100, Math.round((usage.used / usage.size) * 100));
-  const t = usage.tokens;
-  const lines = [
-    `上下文 ${usage.used.toLocaleString()} / ${usage.size.toLocaleString()} tokens`,
-    ...(t
-      ? [
-          `本会话累计 ${t.total.toLocaleString()} tokens`,
-          `  输入 ${t.input.toLocaleString()}（缓存命中 ${t.input ? Math.round((t.cached_input / t.input) * 100) : 0}%）`,
-          `  输出 ${t.output.toLocaleString()}（推理 ${t.reasoning_output.toLocaleString()}）`,
-        ]
-      : []),
-    ...(usage.cost_usd != null ? [`花费 $${usage.cost_usd.toFixed(4)}`] : []),
-  ];
-  return (
-    <span className="meter" title={lines.join("\n")}>
-      <span className="track">
-        <span className={`fill ${pct >= 80 ? "warn" : ""}`} style={{ width: `${pct}%`, display: "block" }} />
-      </span>
-      {pct}%
-    </span>
   );
 }
 
@@ -1339,6 +1335,7 @@ function Composer({
   plans,
   onPlanDone,
   mates,
+  agentCommands = [],
 }: {
   agent: Agent;
   capabilities: Capabilities | null;
@@ -1349,6 +1346,8 @@ function Composer({
   onPlanDone: () => void;
   /** Agents @ offers, besides the models. */
   mates: Agent[];
+  /** Slash commands the agent's own CLI brings: `/`'s second group (empty until wired up). */
+  agentCommands?: AgentCommand[];
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -1356,6 +1355,34 @@ function Composer({
   const ref = useRef<HTMLTextAreaElement>(null);
   const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
   const mention = useMention(ref, setDraft, mentionsFor(mates, (plugins.data ?? []).filter((p) => p.models.length > 0)));
+  const compact = useCompact(agent);
+  const groups: SlashMenuGroup[] = [
+    {
+      key: "crossagents",
+      label: "CrossAgents 指令",
+      commands: [
+        {
+          key: "compact",
+          group: "crossagents",
+          name: "compact",
+          title: "压缩上下文",
+          sub: "把历史压成摘要，腾出上下文",
+          blocked: compact.blocked,
+          run: () => void compact.compact(),
+        },
+      ],
+    },
+    ...(agentCommands.length > 0
+      ? [
+          {
+            key: "agent",
+            label: `${displayName(agent)} 自带的指令`,
+            commands: agentCommands.map((c) => ({ key: `agent/${c.name}`, group: "agent", name: c.name, title: c.description ?? (c.kind === "skill" ? "技能" : "agent 自带的指令") })),
+          },
+        ]
+      : []),
+  ];
+  const slash = useSlash(ref, setDraft, groups);
   const running = agent.status === "running";
   const canInterrupt = running && capabilities?.interrupt !== false;
   const plan = plans.find((d) => !deferred.includes(d.run.id));
@@ -1422,6 +1449,7 @@ function Composer({
   return (
     <div className="composer-wrap">
       {error && <ErrorBox error={error} />}
+      {compact.error && <ErrorBox error={compact.error} />}
       {plans.length > 0 && (
         <button className="dock-recall" onClick={() => setDeferred([])}>
           <span className="disclosure" aria-hidden="true">
@@ -1431,20 +1459,26 @@ function Composer({
         </button>
       )}
       <div className="composer" onDrop={files.onDrop} onDragOver={files.onDragOver}>
+        {slash.menu}
         {mention.menu}
         <HeldFiles files={files.held} onRemove={files.remove} />
         <textarea
+          {...slash.textarea}
           onPaste={files.onPaste}
           ref={ref}
           rows={1}
           value={draft}
           onChange={(e) => {
             setDraft(e.target.value);
+            slash.sync();
             mention.sync();
           }}
-          onClick={mention.sync}
-          onKeyDown={(e) => mention.onKeyDown(e) || onKey(e)}
-          placeholder={running ? `${displayName(agent)} 正在工作，新消息会排在本轮之后` : `给 ${displayName(agent)} 发消息，@ 点名协作者或模型`}
+          onClick={() => {
+            slash.sync();
+            mention.sync();
+          }}
+          onKeyDown={(e) => slash.onKeyDown(e) || mention.onKeyDown(e) || onKey(e)}
+          placeholder={running ? `${displayName(agent)} 正在工作，新消息会排在本轮之后` : `给 ${displayName(agent)} 发消息，@ 点名协作者或模型，/ 看指令`}
         />
         <div className="bar">
           {agent.plugin === "external" ? (
@@ -1471,7 +1505,7 @@ function Composer({
       </div>
       <div className="composer-hint">
         {note && <span>{note} · </span>}
-        {running ? "Enter 排队 · Ctrl+Shift+Enter 打断并发送 · Esc 中断" : "Enter 发送 · Shift+Enter 换行 · agent 离线时会自动启动"}
+        {compact.busy ? "压缩中…" : running ? "Enter 排队 · Ctrl+Shift+Enter 打断并发送 · Esc 中断" : "Enter 发送 · Shift+Enter 换行 · agent 离线时会自动启动"}
       </div>
     </div>
   );

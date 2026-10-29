@@ -27,7 +27,7 @@ import type { HubEvent } from "../hub";
 import { turnStat } from "../lib/diff";
 import { effortOf } from "../lib/models";
 import { applyEvent } from "../session";
-import { capabilitiesOf, driverOf, transcript, uid } from "./fixtures";
+import { capabilitiesOf, contextParts, driverOf, transcript, uid } from "./fixtures";
 import { mockContent, mockResolve, mockTree } from "./files.mock";
 
 /** Names the mock hub makes up, like the real one (see crates/core/src/names.rs). */
@@ -540,6 +540,7 @@ export class MockBridge implements CrossAgentsBridge {
       }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/messages$/))) return this.send(m[1], body as SendMessageRequest);
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/cancel$/))) return this.cancel(m[1]);
+      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/compact$/))) return this.compact(m[1]);
       if ((m = p.match(/^\/v1\/runs\/([^/]+)\/(approve|reject|cancel)$/))) {
         const d = s.runs.find((x) => x.run.id === m![1]);
         if (!d) return notFound("run");
@@ -619,6 +620,20 @@ export class MockBridge implements CrossAgentsBridge {
       return json(204);
     }
     return json(405, { error: { code: "bad_request", message: `${method} ${p}` } });
+  }
+
+  /** Compacting: a running agent refuses, as the hub does; otherwise the window empties out. */
+  private compact(key: string): HubResponse {
+    const a = this.agent(key);
+    if (!a) return notFound("agent");
+    if (a.status !== "idle") return json(409, { error: { code: "conflict", message: `agent ${a.name} is not idle: compact after this turn` } });
+    const t = this.state.transcripts.get(a.id);
+    const usage = t?.usage;
+    if (!t || !usage) return json(204);
+    const used = Math.round(usage.size * 0.08);
+    t.usage = { ...usage, used, tokens: { input: used * 2, cached_input: used, output: Math.round(used / 5), reasoning_output: Math.round(used / 10), total: used * 2 + Math.round(used / 5) }, parts: a.plugin === "claude" ? contextParts(used, usage.size) : usage.parts };
+    this.emit({ type: "agent.usage", data: { id: a.id, used, size: usage.size, cost_usd: usage.cost_usd, tokens: t.usage.tokens } });
+    return json(204);
   }
 
   /** A message: queued behind a running turn, else answered by a short made-up turn. */
