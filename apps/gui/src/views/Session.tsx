@@ -1,6 +1,3 @@
-import { Image as ImageIcon } from "lucide-react";
-import { extractToolImagePaths, extractToolImages } from "../lib/toolimages";
-import { ToolImages } from "../toolimages";
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { Capabilities } from "@bindings/Capabilities";
@@ -16,6 +13,9 @@ import { HandoffLine } from "../handoff";
 import { dismiss as dismissMessage, retry as retryMessage, sendMessage, useOutbox, type Outgoing } from "../outbox";
 import { ACTIVE_RUN, useRunTree, useRunsLedBy } from "../App";
 import { Avatar, ErrorBox, FileScopeProvider, Icon, Mark, OneLine, Prose, StatusChip, Vendor, agentTitle, agentTone, beyondFirstLine, displayName, firstLine, firstSentence, roleShape, time, useAgents, useFileScope, vendorName } from "../components";
+import { Image as ImageIcon } from "lucide-react";
+import { extractToolImagePaths, extractToolImages } from "../lib/toolimages";
+import { ToolImages } from "../toolimages";
 import { ChangeStat, DiffView } from "../diffview";
 import { parseDiff, tailLines, type DiffFile } from "../lib/diff";
 import { errorHint } from "../lib/errors";
