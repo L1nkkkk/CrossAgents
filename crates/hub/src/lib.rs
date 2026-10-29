@@ -9,6 +9,7 @@ pub mod collab;
 pub mod event_log;
 pub mod guard;
 pub mod identity;
+pub mod image;
 pub mod install;
 pub mod models;
 pub mod notices;

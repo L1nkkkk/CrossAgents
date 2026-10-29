@@ -182,6 +182,22 @@ pub struct AttachmentContent {
     pub data: String,
 }
 
+/// `GET /v1/agents/{key}/files/image?path=`: an image a tool call named by a path (a
+/// `ViewImage` tool's `image_path`, say), for a client to show as a thumbnail. The bytes are
+/// base64, as with attachments, so a page that only carries text (the Electron bridge) can
+/// show them as a `data:` URL.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ImageContent {
+    /// Where the image is, as the hub read it (absolute).
+    pub path: String,
+    pub mime: String,
+    #[ts(type = "number")]
+    pub size: u64,
+    /// The bytes, base64 (standard alphabet, padded).
+    pub data: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct SendMessageResponse {

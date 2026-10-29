@@ -3,9 +3,11 @@
 use std::path::Path;
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use crossagents_api_types::{
     Agent, ChangesResponse, CommitGraph, FileContentResponse, FileKind, FileTreeResponse,
-    GraphRefKind, ListAgentsResponse, ResolvePathsResponse, Run,
+    GraphRefKind, ImageContent, ListAgentsResponse, ResolvePathsResponse, Run,
 };
 use crossagents_hub::{HubConfig, Paths, RunningHub};
 use futures::StreamExt;
@@ -982,4 +984,227 @@ fn commit(dir: &Path, message: &str) -> String {
         ],
     );
     git(dir, &["rev-parse", "HEAD"])
+}
+
+// ---------------------------------------------------------------------------------------
+// Images of a tool call's parameters
+
+/// A png's first bytes, which is all the API reads to tell a png from a file named `.png`.
+const PNG: &[u8] = &[
+    0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, b'I', b'H', b'D', b'R',
+];
+
+/// An svg's opening, declaration and comment included.
+const SVG: &[u8] = b"<?xml version=\"1.0\"?>\n<!-- a screenshot's artwork -->\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>";
+
+/// A hub with one agent named `painter` whose working directory is `ws`.
+async fn painter(t: &TestHub, ws: &Path) {
+    let created = t
+        .post("/v1/agents")
+        .json(&json!({
+            "name": "painter", "plugin": "claude", "role": "worker",
+            "cwd": ws.display().to_string(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+}
+
+/// The API's refusal of an image request, as the error body carries it.
+async fn refusal(response: reqwest::Response) -> (StatusCode, String) {
+    let status = response.status();
+    let body: Value = response.json().await.unwrap();
+    let message = body["error"]["message"].as_str().unwrap().to_owned();
+    assert!(body["error"]["code"].is_string(), "no error code: {body}");
+    (status, message)
+}
+
+/// `GET /v1/agents/{key}/files/image`: the bytes of an image a tool call named, from the
+/// agent's working directory or the system temp directory, png/jpg/gif/webp/bmp/svg only.
+#[tokio::test]
+async fn an_image_is_served_from_the_working_directory_or_the_temp_directory() {
+    let t = TestHub::start().await;
+    let base = tempfile::tempdir().unwrap();
+    let ws = base.path().join("ws");
+    std::fs::create_dir_all(ws.join("renders")).unwrap();
+    std::fs::write(ws.join("shot.png"), PNG).unwrap();
+    std::fs::write(ws.join("renders/icon.svg"), SVG).unwrap();
+    painter(&t, &ws).await;
+
+    // A relative path, from the working directory.
+    let response = t
+        .get("/v1/agents/painter/files/image?path=shot.png")
+        .send()
+        .await
+        .unwrap();
+    let image = an_image(response, "image/png", PNG).await;
+    assert!(image.path.ends_with("shot.png"), "{}", image.path);
+
+    // An absolute path names the same file.
+    let abs = ws.join("shot.png").display().to_string();
+    let response = t
+        .get(&format!("/v1/agents/painter/files/image?path={abs}"))
+        .send()
+        .await
+        .unwrap();
+    an_image(response, "image/png", PNG).await;
+
+    // An svg comes back too, as a `data:` URL a page shows without running its script.
+    let response = t
+        .get("/v1/agents/painter/files/image?path=renders/icon.svg")
+        .send()
+        .await
+        .unwrap();
+    an_image(response, "image/svg+xml", SVG).await;
+
+    // A screenshot a tool wrote to the temp directory, by its absolute path.
+    let temp = tempfile::tempdir_in(std::env::temp_dir()).unwrap();
+    let pasted = temp.path().join("paste.png");
+    std::fs::write(&pasted, PNG).unwrap();
+    let response = t
+        .get(&format!(
+            "/v1/agents/painter/files/image?path={}",
+            pasted.display()
+        ))
+        .send()
+        .await
+        .unwrap();
+    an_image(response, "image/png", PNG).await;
+}
+
+/// The image a response carries, checked: JSON with its type, size and the same bytes,
+/// base64 (what a page turns into `data:${mime};base64,${data}`).
+async fn an_image(response: reqwest::Response, mime: &str, bytes: &[u8]) -> ImageContent {
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "application/json");
+    let image: ImageContent = response.json().await.unwrap();
+    assert_eq!(image.mime, mime);
+    assert_eq!(image.size, bytes.len() as u64);
+    assert_eq!(STANDARD.decode(&image.data).unwrap(), bytes);
+    image
+}
+
+/// Everything the image API does not serve: a path out of the allowed directories (through
+/// `..` or a symlink), a file that is not an image, an extension that lies, a file too big,
+/// nothing at all.
+#[tokio::test]
+async fn what_is_not_an_allowed_image_is_refused_with_the_reason() {
+    let t = TestHub::start().await;
+    let base = tempfile::tempdir().unwrap();
+    let ws = base.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    let outside = base.path().join("secret.png");
+    std::fs::write(&outside, PNG).unwrap();
+    std::fs::write(ws.join("shot.png"), PNG).unwrap();
+    std::fs::write(ws.join("notes.txt"), "just words\n").unwrap();
+    std::fs::write(ws.join("fake.png"), "not a png at all").unwrap();
+    // 10 MB + 1 byte, spread out rather than written: only its size matters here.
+    let big = std::fs::File::create(ws.join("big.png")).unwrap();
+    big.set_len(10 * 1024 * 1024 + 1).unwrap();
+    drop(big);
+    painter(&t, &ws).await;
+
+    // `..` climbs out of the working directory, and the temp directory is entered by
+    // absolute path only, so the file next to it is out of reach by that name.
+    let response = t
+        .get("/v1/agents/painter/files/image?path=../secret.png")
+        .send()
+        .await
+        .unwrap();
+    let (status, message) = refusal(response).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(message.contains("outside"), "{message}");
+
+    // A path that leaves both directories, named absolutely.
+    let response = t
+        .get(&format!(
+            "/v1/agents/painter/files/image?path={}",
+            std::env::current_exe().unwrap().display()
+        ))
+        .send()
+        .await
+        .unwrap();
+    let (status, message) = refusal(response).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert!(message.contains("outside"), "{message}");
+
+    // A symlink that leads out is judged by where it leads.
+    match symlink(&std::env::current_exe().unwrap(), &ws.join("link.png")) {
+        Ok(()) => {
+            let response = t
+                .get("/v1/agents/painter/files/image?path=link.png")
+                .send()
+                .await
+                .unwrap();
+            let (status, message) = refusal(response).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{message}");
+            assert!(message.contains("outside"), "{message}");
+        }
+        // Windows without the privilege to make one (no Developer Mode): nothing to test.
+        Err(err) => eprintln!("skipping the symlink case: cannot create one here ({err})"),
+    }
+
+    // Not an image at all.
+    let response = t
+        .get("/v1/agents/painter/files/image?path=notes.txt")
+        .send()
+        .await
+        .unwrap();
+    let (status, message) = refusal(response).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(message.contains("is not an image"), "{message}");
+
+    // An extension that does not match the bytes.
+    let response = t
+        .get("/v1/agents/painter/files/image?path=fake.png")
+        .send()
+        .await
+        .unwrap();
+    let (status, message) = refusal(response).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(message.contains("does not start like a png"), "{message}");
+
+    // Too big.
+    let response = t
+        .get("/v1/agents/painter/files/image?path=big.png")
+        .send()
+        .await
+        .unwrap();
+    let (status, message) = refusal(response).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(message.contains("at most 10 MB"), "{message}");
+
+    // Nothing there, and nothing named.
+    let response = t
+        .get("/v1/agents/painter/files/image?path=nope.png")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refusal(response).await.0, StatusCode::NOT_FOUND);
+    let response = t
+        .get("/v1/agents/painter/files/image")
+        .send()
+        .await
+        .unwrap();
+    let (status, message) = refusal(response).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(message.contains("path is missing"), "{message}");
+}
+
+/// A symlink at `link` pointing to `target`, where the platform allows one.
+fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (target, link);
+        Err(std::io::Error::other("no symlinks here"))
+    }
 }

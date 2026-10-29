@@ -9,6 +9,7 @@ import type { ChangesResponse } from "@bindings/ChangesResponse";
 import type { CommitGraph } from "@bindings/CommitGraph";
 import type { CliInstallAccepted } from "@bindings/CliInstallAccepted";
 import type { AttachmentContent } from "@bindings/AttachmentContent";
+import type { ImageContent } from "@bindings/ImageContent";
 import type { Task } from "@bindings/Task";
 import type { TaskReviewRequest } from "@bindings/TaskReviewRequest";
 import type { Agent } from "@bindings/Agent";
@@ -310,6 +311,12 @@ export const api = {
   /** A file's text (up to 1 MiB), or `binary` without it. */
   filesContent,
   filesResolve,
+  /** An image a tool call named by path (a `ViewImage` tool's `image_path`, say), base64:
+   * show it as `data:${mime};base64,${data}`, as an attachment is shown. The hub serves only
+   * png, jpg, jpeg, gif, webp, bmp and svg, at most 10 MB, inside the agent's working
+   * directory or the system temp directory; anything else is an ApiError with the reason. */
+  agentImage: (key: string, path: string) =>
+    request<ImageContent>("GET", `/v1/agents/${enc(key)}/files/image?path=${enc(path)}`),
 };
 
 export function errorText(err: unknown): string {
