@@ -3,7 +3,7 @@
 // the same look as `@` (src/mention.tsx). CrossAgents' own commands come first; the second
 // group is whatever the agent's CLI brings, which the composer can pass in.
 
-import { useState, type KeyboardEvent, type RefObject } from "react";
+import { useEffect, useState, type KeyboardEvent, type RefObject } from "react";
 import { matchCommands, type SlashCommand, type SlashGroup } from "./lib/slash";
 
 /**
@@ -11,12 +11,10 @@ import { matchCommands, type SlashCommand, type SlashGroup } from "./lib/slash";
  * one, picking writes `/${name} ` into the input so arguments can follow — what the agent's own
  * commands need.
  */
-export type SlashEntry = SlashCommand & { run?: () => void };
+export type SlashEntry = SlashCommand & { run?: () => void; kind?: "command" | "skill" };
 
-export type SlashMenuGroup = Omit<SlashGroup, "commands"> & { commands: SlashEntry[] };
+export type SlashMenuGroup = Omit<SlashGroup, "commands"> & { commands: SlashEntry[]; note?: string };
 
-/** Rows the menu shows at most. */
-const SHOWN = 10;
 
 export const SLASH_MENU_ID = "composer-slash-menu";
 
@@ -40,11 +38,15 @@ export function useSlash(ref: RefObject<HTMLTextAreaElement | null>, setValue: (
     setQuery(m[1]);
   };
 
-  const shown = query === undefined ? [] : matchCommands(groups, query).slice(0, SHOWN);
-  const open = query !== undefined && shown.length > 0;
+  const shown = query === undefined ? [] : groups.flatMap((g) => matchCommands([g], query) as SlashEntry[]);
+  const open = query !== undefined && (shown.length > 0 || groups.some((g) => g.note));
   const at = Math.min(cursor, Math.max(0, shown.length - 1));
   const label = (key: string) => groups.find((g) => g.key === key)?.label ?? key;
   const idOf = (c: SlashCommand) => `${SLASH_MENU_ID}-${c.key.replace(/[^\w-]/g, "-")}`;
+
+  useEffect(() => {
+    if (open && shown[at]) document.getElementById(idOf(shown[at]))?.scrollIntoView({ block: "nearest" });
+  }, [open, at, query]);
 
   const pick = (c: SlashEntry) => {
     // A blocked command says why in its row; picking it does nothing rather than send it.
@@ -67,6 +69,12 @@ export function useSlash(ref: RefObject<HTMLTextAreaElement | null>, setValue: (
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): boolean => {
     if (!open || e.nativeEvent.isComposing) return false;
+    if (!shown.length) {
+      if (e.key !== "Escape") return false;
+      setQuery(undefined);
+      e.preventDefault();
+      return true;
+    }
     if (e.key === "ArrowDown") setCursor((at + 1) % shown.length);
     else if (e.key === "ArrowUp") setCursor((at - 1 + shown.length) % shown.length);
     else if ((e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) || e.key === "Tab") pick(shown[at]);
@@ -96,13 +104,15 @@ export function useSlash(ref: RefObject<HTMLTextAreaElement | null>, setValue: (
             <span className="menu-text">
               <span className="menu-label">
                 <code className="slash-name">/{c.name}</code>
-                <span>{c.title}</span>
+                {c.kind && <span className="slash-kind">{c.kind === "skill" ? "skill" : "指令"}</span>}
+                {!c.kind && <span>{c.title}</span>}
               </span>
-              {(c.blocked ?? c.sub) && <span className="menu-sub">{c.blocked ? `不可用 · ${c.blocked}` : c.sub}</span>}
+              {(c.blocked || c.sub || (c.kind && c.title)) && <span className="menu-sub">{c.blocked ? `不可用 · ${c.blocked}` : c.sub ?? c.title}</span>}
             </span>
           </button>
         </div>
       ))}
+      {groups.filter((g) => g.note).map((g) => <div key={`${g.key}-note`}><div className="menu-head">{g.label}</div><div className="slash-note">{g.note}</div></div>)}
     </div>
   ) : null;
 
@@ -111,7 +121,7 @@ export function useSlash(ref: RefObject<HTMLTextAreaElement | null>, setValue: (
     role: "combobox",
     "aria-expanded": open,
     "aria-controls": open ? SLASH_MENU_ID : undefined,
-    "aria-activedescendant": open ? idOf(shown[at]) : undefined,
+    "aria-activedescendant": open && shown.length ? idOf(shown[at]) : undefined,
     "aria-autocomplete": "list" as const,
   };
 
