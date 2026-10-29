@@ -140,7 +140,6 @@ function FileCard({ file }: { file: Attachment }) {
 
 function Thumb({ agent, file }: { agent: string; file: Attachment }) {
   const [src, setSrc] = useState<string>();
-  const [open, setOpen] = useState(false);
   useEffect(() => {
     let live = true;
     api.attachment(agent, file.id).then(
@@ -152,14 +151,20 @@ function Thumb({ agent, file }: { agent: string; file: Attachment }) {
     };
   }, [agent, file.id]);
   if (!src) return <FileCard file={file} />;
+  return <ImageThumb src={src} alt={file.name} title={`${file.name} ? ${bytes(file.size)}`} />;
+}
+
+/** Shared attachment thumbnail and lightbox. */
+export function ImageThumb({ src, alt, title }: { src: string; alt: string; title?: string }) {
+  const [open, setOpen] = useState(false);
   return (
     <>
-      <button className="thumb" onClick={() => setOpen(true)} title={`${file.name} · ${bytes(file.size)}`}>
-        <img src={src} alt={file.name} />
+      <button className="thumb" onClick={() => setOpen(true)} title={title ?? alt}>
+        <img src={src} alt={alt} />
       </button>
       {open && (
-        <div className="lightbox" onClick={() => setOpen(false)} role="dialog" aria-label={file.name}>
-          <img src={src} alt={file.name} />
+        <div className="lightbox" onClick={() => setOpen(false)} role="dialog" aria-label={alt}>
+          <img src={src} alt={alt} />
         </div>
       )}
     </>

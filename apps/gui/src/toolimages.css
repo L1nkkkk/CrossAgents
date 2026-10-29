@@ -1,0 +1,5 @@
+.tool-images { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+.tool-images figure { margin: 0; }
+.tool-images figcaption { color: var(--muted); font-size: 12px; }
+.tool-result-heading { display: flex; align-items: center; gap: 8px; }
+.tool-image-indicator { display: inline-flex; color: var(--muted); }
