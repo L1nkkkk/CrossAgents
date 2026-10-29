@@ -13,8 +13,8 @@ export type Handoff = { id: HandoffId, run_id: RunId, task_id: TaskId, task_key:
  */
 from: AgentId | null, 
 /**
- * Who `from` is to the person: the issuer, or the teammate the worker was cloned from
- * (worker clones are removed with their task, their names mean nothing later).
+ * Who `from` is to the person: the issuer, or the worker before by the name the last
+ * card gave it.
  */
 from_name: string | null, 
 /**
@@ -22,9 +22,16 @@ from_name: string | null,
  */
 to: AgentId, 
 /**
- * The teammate `to` was cloned from.
+ * The name of `to` itself: the execution session that works on the task (the name to
+ * message it by), or the agent itself when it took the task with its conversation.
+ * Cards from before kept the teammate it was cloned from here.
  */
 to_name: string, 
+/**
+ * The teammate `to` was cloned from, when it is an execution session started for the
+ * task; `None` when the agent took the task itself (or on cards from before).
+ */
+template?: string, 
 /**
  * Why it changed hands; always given for `reroute` and `escalate`.
  */
