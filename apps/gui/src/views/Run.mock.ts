@@ -236,13 +236,52 @@ export function oauthRun(phase: "plan" | "running"): { state: MockState; script:
     };
     state.questions.push(ask);
 
+    // The agents' notes for each other, shown in the run's rail.
+    state.notes = [
+      {
+        scope: "run",
+        run_id: r.id,
+        key: "oauth-约定",
+        text: "回调地址统一用 `/auth/callback/{provider}`；错误提示写中文，别把 provider 的原文抛给用户。",
+        author: ada.id,
+        updated_at: ago(26),
+      },
+      {
+        scope: "run",
+        run_id: r.id,
+        key: "redis-回落",
+        text: "本地没有 Redis 时回落到内存；`REDIS_URL` 没设就不要在启动日志里警告。",
+        author: rexC.id,
+        updated_at: ago(18),
+      },
+      {
+        scope: "run",
+        run_id: r.id,
+        key: "迁移脚本",
+        text: "旧会话里的过期条目直接丢掉，不迁。",
+        author: rexD.id,
+        updated_at: ago(7),
+      },
+    ];
+
     state.transcripts.set(ada.id, transcript(ada, adaTurns, 92_000));
-    return { state, script: runningScript(rexA.id, a2.turn.message_id, editId, ta.id, r.id, miaB.id), route: `#/s/${ada.name}` };
+    return { state, script: runningScript(rexA.id, a2.turn.message_id, editId, ta.id, r.id, miaB.id), route: `#/runs/${r.id}` };
   }
 
   state.runs.push({ run: r, tasks: [] });
   state.transcripts.set(ada.id, transcript(ada, adaTurns, 52_000));
-  return { state, script: [], route: `#/s/${ada.name}` };
+  return { state, script: [], route: `#/runs/${r.id}` };
+}
+
+/**
+ * Stopped for the person: the budget ran out mid-run. The conversation keeps one line saying
+ * so (and the questions above the composer); the run's plan and facts stay in the rail.
+ */
+export function pausedRun(): { state: MockState; script: Step[]; route: string } {
+  const scene = oauthRun("plan");
+  const d = scene.state.runs[0];
+  d.run = { ...d.run, status: "paused", note: "预算上限 $8 已经用完：先停在这里，加预算或取消这个 run。" };
+  return { ...scene, script: [], route: `#/runs/${d.run.id}` };
 }
 
 /** The plan of a run in a folder without git: it works in place, one task at a time. */
@@ -331,7 +370,8 @@ export function syncRun(): { state: MockState; script: Step[]; route: string } {
   );
   d.tasks.push(sync);
   d.run = { ...d.run, note: "main moved and conflicts with the run in src/auth/session.rs; task #sync-main resolves it, land again once it is merged" };
-  return { ...scene, route: `#/runs/${d.run.id}` };
+  // The note is the point of this scene: the conversation starts at the top, where it is.
+  return { ...scene, script: [{ at: 400, act: () => document.querySelector<HTMLElement>(".convo")?.scrollTo({ top: 0 }) }], route: `#/runs/${d.run.id}` };
 }
 
 /**
@@ -493,7 +533,10 @@ export function traceRun(): { state: MockState; script: Step[]; route: string } 
     first_failure: t.key === "d" || t.key === "c" ? "`cargo test -p auth` exited 101" : null,
   }));
   scene.state.traces.set(d.run.id, { run_id: d.run.id, lead: lane(d.run.planner, 3, 0.41), tasks, spent: { tokens: 120_000, cost_usd: 1.32 } });
-  return { ...scene, script: [], route: `#/runs/${d.run.id}` };
+  // The trace starts folded at the rail's end: this scene opens it and scrolls down to it.
+  const open: Step = { at: 400, act: () => document.querySelector<HTMLButtonElement>('[data-card="run-trace"] .rail-head')?.click() };
+  const show: Step = { at: 800, act: () => document.querySelector<HTMLElement>(".rail")?.scrollTo({ top: 99999 }) };
+  return { ...scene, script: [open, show], route: `#/runs/${d.run.id}` };
 }
 
 /**
@@ -674,7 +717,9 @@ export function reuseRun(page: "b" | "a" | "rex" = "b"): { state: MockState; scr
   );
   state.transcripts.set(rexB.id, transcript(rexB, [turn({ input: "task #b：登录页按钮", minutesAgo: 280, took: 20, items: [say("按钮加好了。")] })], 0));
   const route = page === "a" ? `#/runs/${runA.id}` : page === "rex" ? `#/s/${rex.id}` : `#/runs/${runB.id}`;
-  return { state, script: [], route };
+  // The participants start folded in the rail: these scenes open them.
+  const open: Step = { at: 400, act: () => document.querySelector<HTMLButtonElement>('[data-card="run-participants"] .rail-head')?.click() };
+  return { state, script: page === "rex" ? [] : [open], route };
 }
 
 /** A fake 40-hex sha, stable for a seed. */

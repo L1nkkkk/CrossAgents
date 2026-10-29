@@ -2,8 +2,8 @@
 // an event script to replay, and the page to open.
 
 import { emptyHub } from "../views/Home.mock";
-import { approvalRun, deleteRun, graphRun, handoffRun, inPlaceRun, landingRun, longResultsRun, oauthRun, rerouteRun, reuseRun, reviewRun, syncRun, traceRun } from "../views/Run.mock";
-import { attachmentSession, chatWithRecruit, crashedSession, failedEditSession, soloSession } from "../views/Session.mock";
+import { approvalRun, deleteRun, graphRun, handoffRun, inPlaceRun, landingRun, longResultsRun, oauthRun, pausedRun, rerouteRun, reuseRun, reviewRun, syncRun, traceRun } from "../views/Run.mock";
+import { attachmentSession, chatWithRecruit, crashedSession, failedEditSession, liveRun, liveSession, soloSession } from "../views/Session.mock";
 import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
 import { usageScene } from "../views/Usage.mock";
 import { agent, say, think, turn } from "./fixtures";
@@ -30,33 +30,38 @@ export const SCENARIOS: Scenario[] = [
     return { ...scene, script: [], route: `#/runs/${run.id}` };
   } },
   { key: "empty", label: "空 hub", hint: "第一次打开：没有队友、没有 run", build: () => ({ state: emptyHub(), script: [], route: "#/" }) },
-  { key: "plan", label: "计划待审批", hint: "Planner + 两个 Worker，计划等你批", build: () => oauthRun("plan") },
-  { key: "running", label: "run 进行中", hint: "两个任务在跑、一个待检查、一个失败；Planner 对话里有编排消息和任务卡片", build: () => oauthRun("running") },
+  { key: "plan", label: "计划待审批", hint: "run 页：中间只有主导的对话和待审批的 Plan；右侧栏是计划、run 信息、策略与预算", build: () => oauthRun("plan") },
+  { key: "running", label: "run 进行中", hint: "run 页：中间栏只有对话；右侧栏按任务分组（含交接链）、run 信息、策略、笔记，追溯和参与者收起", build: () => oauthRun("running") },
+  { key: "paused", label: "run 已暂停", hint: "中间只有一行「已暂停」提示，展开看全文；计划、run 信息、策略都在右侧栏", build: () => pausedRun() },
   { key: "review", label: "审查任务", hint: "#c 已报告完成：整个任务的 diff 带行号，点行号写意见，可发给 worker 或打回重做", build: () => reviewRun() },
   { key: "landing", label: "落地前总 diff", hint: "所有任务都已合并、等落地：展开「查看全部改动」看 run 分支对 main 的总 diff", build: () => landingRun() },
   { key: "sync", label: "落地等冲突解决", hint: "main 动过且和 run 冲突：hub 建了 #sync-main 交给 Rex，run 页写明原因，合并后再落地", build: () => syncRun() },
   { key: "reroute", label: "额度改派", hint: "Mia 的账号额度用完，#b 改到另一个账号；任务卡片写明原因", build: () => rerouteRun() },
-  { key: "handoff", label: "交接卡", hint: "每个任务下一条交接链：#a 派活、#c 返工后改派给 Mia、#d 升级给 Kai 还有问题没答、#b 额度改派（稍后到）；点节点展开卡片，Ada 的对话里是编排行", build: () => handoffRun() },
+  { key: "handoff", label: "交接卡", hint: "右侧栏的任务列表里每个任务下一条交接链：#a 派活、#c 返工后改派给 Mia、#d 升级给 Kai 还有问题没答、#b 额度改派（稍后到）；点节点展开卡片", build: () => handoffRun() },
   { key: "reuse", label: "会话跨 run 复用", hint: "Rex 在一期本人做了 #a，二期又被指定用本人做 #c、此刻正在执行；一期 #b 的执行会话 Rex-b 已归档，可恢复。看 run 页「参与者」和 Rex 的会话页", build: () => reuseRun() },
   { key: "reuse-done", label: "参与过的 run", hint: "一期 run 页「参与者」：#a 是 Rex 本人（被打回、交付），#b 的执行会话 Rex-b 已归档，可以点开或恢复", build: () => reuseRun("a") },
   { key: "reuse-busy", label: "会话正在执行", hint: "Rex 的会话页：顶部写明正在执行二期 · 任务 #c（本人），带中断按钮", build: () => reuseRun("rex") },
   { key: "approval", label: "危险操作待批准", hint: "Rex 想 git push：需要你里出现「等你批准」，允许 / 拒绝，30 分钟没回答就拒绝", build: () => approvalRun() },
-  { key: "trace", label: "失败追溯", hint: "run 页「追溯」：#d 失败、首个失败标红展开；#c 途中出错后通过，灰色折叠；每一轮、每条命令和花费", build: () => traceRun() },
+  { key: "trace", label: "失败追溯", hint: "run 页右侧栏的「追溯」：#d 失败、首个失败标红展开；#c 途中出错后通过，灰色折叠；每一轮、每条命令和花费", build: () => traceRun() },
   { key: "graph", label: "提交图", hint: "run 页的工具列「提交图」：main、run 分支和 #a #b #c 三个任务分支，合并提交是空心点；选中了 #b 的合并，下面是它的 diff，点文件名打开文件", build: () => graphRun() },
   { key: "graph-session", label: "会话的提交图", hint: "Rex 在 #c 的会话页：顶栏「提交图」在右侧工具列打开，HEAD 和本地分支，选中了最新的提交", build: () => graphRun("session") },
   { key: "inplace", label: "无 git 的 run", hint: "文件夹没有 git：run 直接改文件、一次一个任务，可一键初始化 git", build: () => inPlaceRun() },
   { key: "workcard", label: "会话提议 Work", hint: "Nova 在单聊里用 work_start 提议到独立分支上做：卡片可展开交给 Work 的说明，开始 / 不用", build: () => workProposal() },
-  { key: "long-results", label: "长结果折叠", hint: "Ada 第一次落地被拒、理由里是整段 cargo test 日志：卡片只露前几行，「展开全文」看全部；run 页的总结同样折叠", build: () => longResultsRun() },
-  { key: "long-results-run", label: "长总结折叠（run 页）", hint: "完成卡片里的总结只露前五行，「展开全文」看全部", build: () => { const s = longResultsRun(); return { ...s, route: `#/runs/${s.state.runs[0].run.id}` }; } },
+  { key: "long-results", label: "长结果折叠", hint: "Ada 第一次落地被拒、理由里是整段 cargo test 日志：卡片只留一行（✕ · 落地 run · 对象和理由第一句），点图标或整行看完整理由和调用参数；run 页的总结同样只留一行", build: () => longResultsRun() },
+  { key: "long-results-run", label: "长总结折叠（run 页）", hint: "完成卡片里的总结只留第一行，点图标或整行展开看完整总结", build: () => { const s = longResultsRun(); return { ...s, route: `#/runs/${s.state.runs[0].run.id}` }; } },
   { key: "delete-landed", label: "删除已落地的 run", hint: "删除确认框：主导和它的对话一起删，工作区和分支，已落地所以分支默认勾选", build: () => deleteRun("landed") },
   { key: "delete-unlanded", label: "删除未落地的 run", hint: "未落地：分支默认不勾，写明「未落地的改动会丢失」", build: () => deleteRun("unlanded") },
   { key: "delete-dirty", label: "删除时工作区有改动", hint: "点「删除」后 hub 返回 409 并列出没提交的文件，可以「仍然删除」", build: () => deleteRun("dirty") },
   { key: "files", label: "文件链接与查看器", hint: "回复里的路径（确认存在的才成链接）可点开只读查看器：左侧懒加载目录树，右侧行号、高亮、跳到第 12 行", build: () => filesScene() },
   { key: "solo", label: "单聊", hint: "Claude 会话：折叠的工具步骤、一轮进行中、两条排队", build: () => soloSession() },
-  { key: "tool-fail", label: "工具调用失败", hint: "编辑失败（待替换代码块没匹配到整行）：行上没有 +N −M、带「失败」，展开是工具原话；成功的编辑照旧", build: () => failedEditSession() },
+  { key: "live-stream", label: "运行中：输出还在来", hint: "正在跑的命令，实时输出只在工具那一行里（一次，不重复）；约 6 秒后出现推理流，LiveLine 显示推理的最后一行", build: () => liveSession("stream") },
+  { key: "live-quiet", label: "运行中：45 秒没有新输出", hint: "同一处写明「已 N 秒没有新输出」（要等页面静置 30 秒以上；截图请用 wait≈46s）", build: () => liveSession("quiet") },
+  { key: "live-run", label: "run 页：输出还在来", hint: "同一个运行中的一轮放在 run 页的中间栏：命令的实时输出只在工具行里一次，LiveLine 只留状态行", build: () => liveRun("stream") },
+  { key: "live-run-quiet", label: "run 页：45 秒没有新输出", hint: "run 页同样写明「已 N 秒没有新输出」（截图请用 wait≈46s）", build: () => liveRun("quiet") },
+  { key: "tool-fail", label: "工具调用失败", hint: "编辑失败：失败步骤收成一行（✕ · 工具 · 失败原因第一行），点 ✕ 展开工具原话、退出码和参数；成功的编辑照旧", build: () => failedEditSession() },
   { key: "attach", label: "消息带附件", hint: "人发的消息带了截图和日志（点缩略图看大图）；输入框可粘贴截图、拖文件或点回形针，发送前能删", build: () => attachmentSession() },
   { key: "settings-src", label: "Claude 设置源", hint: "设置 → 智能体：点 Nova 编辑，「读取 Claude 设置」三档预设（缺省 / 全部 / 都不读）；点 Vega（CodeBuddy）编辑，标签说明它不读 CLAUDE.md", build: settingSources },
-  { key: "recruit", label: "对话招队友", hint: "对话里招人：一次因为用模型名当名字被拒绝（卡片写明原因），一次招到 Iris，挂在对话下面", build: () => chatWithRecruit() },
+  { key: "recruit", label: "对话招队友", hint: "对话里招人：一次因为用模型名当名字被拒绝（一行写明对象和理由第一句，点 ✕ 看完整理由），一次招到 Iris，挂在对话下面", build: () => chatWithRecruit() },
   { key: "crash", label: "进程崩溃", hint: "单聊里 Claude CLI 崩溃退出：错误条和「需要你」写明怎么退出的", build: () => crashedSession() },
   { key: "context-lost", label: "上下文没延续（手动）", hint: "Pia 已归档、带 context_lost：自己点「恢复对话」，再发一条消息；顶部提示条要手动关", build: () => contextLost() },
   { key: "context-lost-restored", label: "恢复后：上下文带不回来", hint: "自动恢复 Pia：顶部提示「对话记录恢复了，但……下一条消息会开新会话」", build: () => contextLost([]) },

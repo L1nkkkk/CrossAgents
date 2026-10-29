@@ -408,6 +408,13 @@ body.col-resizing iframe, body.col-resizing webview { pointer-events: none; }
 .working .spark { color: var(--claude); }
 .working .spark { display: inline-block; animation: spin 2.4s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* A running turn: its status row, then what it is producing now (see Session.tsx LiveLine). */
+.working.live-turn { flex-direction: column; align-items: flex-start; gap: 3px; }
+.working-row { display: flex; gap: 8px; align-items: center; }
+/* One line, ellipsis: what the turn is doing right now (a step, or the last line of a stream). */
+.working-now { font-family: var(--font-mono); font-size: 11.5px; color: var(--muted); margin-left: 16px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* At most three lines: a running command's tail, never its whole output; no room to jump. */
+.working-out { font-family: var(--font-mono); font-size: 11.5px; line-height: 1.5; color: var(--muted); background: none; padding: 0; margin: 0 0 0 16px; max-height: 4.5em; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; }
 .empty { text-align: center; color: var(--muted); padding: 60px 20px; }
 .empty h1 { color: var(--text); margin-bottom: 6px; font-weight: 600; font-size: 20px; letter-spacing: -0.015em; }
 
@@ -686,10 +693,6 @@ a.who-chip:hover { text-decoration: none; background: var(--selected); }
 .request { background: var(--surface-sunk); border-radius: var(--radius-xl); padding: 12px 16px; display: flex; flex-direction: column; gap: 6px; }
 .request-text { white-space: pre-wrap; word-break: break-word; font-size: 14.5px; line-height: 1.6; }
 .request.folded .request-text { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
-.done-card { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 16px; border-radius: var(--radius-lg); background: var(--ok-bg); }
-.done-check { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; background: var(--ok); color: #fff; font-size: 13px; font-weight: 700; flex-shrink: 0; }
-.done-text { flex: 1; min-width: 200px; font-size: 13.5px; }
-.done-card .copy { background: var(--surface); }
 
 /* ---- V4: states, cards and the area above the composer (docs/tasks/V4-GUI.md) ------------ */
 /* Disclosure arrows show state: ▸ closed, ▾ open below, ▴ open above. */
@@ -770,6 +773,8 @@ code.bare { background: none; padding: 0; }
 .busy-dots i { width: 4px; height: 4px; border-radius: 50%; background: var(--claude); animation: pulse 1.2s ease-in-out infinite; }
 .busy-dots i:nth-child(2) { animation-delay: 0.2s; }
 .busy-dots i:nth-child(3) { animation-delay: 0.4s; }
+/* Nothing new for a while: the dots stop pretending to move. */
+.busy-dots.still i { animation: none; opacity: 0.45; }
 
 /* Panes: one conversation, or two side by side. */
 .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; flex: 1; }
@@ -871,10 +876,7 @@ button.need { padding: 2px 10px; line-height: 18px; color: var(--text-2); }
 
 /* Run board grouped by bucket. */
 .run-head { display: flex; flex-direction: column; gap: 10px; padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
-.run-foot { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
-.run-foot:empty { display: none; }
 .task-board { margin-top: 12px; }
-.task-board-head { font-size: 12px; font-weight: 600; color: var(--text-2); padding: 0 2px 8px; }
 .rail .task-board { margin-top: 0; }
 .rail .board-row { grid-template-columns: auto minmax(0, 1fr); padding: 8px 10px; gap: 4px 8px; }
 .rail .board-row > :last-child { grid-column: 2; }
@@ -890,12 +892,12 @@ button.tool { border: none; background: none; padding: 1px 0; text-align: left; 
 button.tool:hover:not(:disabled) { background: none; color: var(--text); }
 button.tool:disabled { opacity: 1; cursor: default; }
 button.tool .chip.tiny { padding: 0 6px; line-height: 16px; font-family: var(--font-sans); }
-/* A failed call says so on the line, and shows no +N −M: the diff it carries is the one the model
-   meant to make, not a change that happened (docs/TODO.md §九). */
-.tool-step.failed .title { color: var(--danger-text); }
+/* A failed call says so on its line (OneLine, red ✕), and shows no +N −M: the diff it carries
+   is the one the model meant to make, not a change that happened (docs/TODO.md §九). */
 .tool-step .out { font-size: 11.5px; max-height: 360px; padding: 8px 10px; color: var(--text-2); }
 .tool-step .out.live { max-height: none; margin-left: 16px; opacity: 0.85; }
 .tool-detail { display: flex; flex-direction: column; gap: 6px; margin: 2px 0 6px 16px; padding-left: 10px; border-left: 2px solid var(--border); }
+.oneline-body .tool-detail { margin-left: 0; }
 .tool-detail .cmd { font-size: 11.5px; background: none; padding: 0; color: var(--text); }
 .item-warn { color: var(--warn-text); background: var(--warn-bg); border-radius: var(--radius); padding: 7px 11px; font-size: 13px; white-space: pre-wrap; }
 .turn-diff { border: none; background: none; padding: 0; font-size: 12px; color: var(--muted); display: inline-flex; gap: 5px; align-items: center; }
@@ -969,7 +971,6 @@ button.small, .segmented.small button { font-size: 12px; padding: 3px 10px; }
 .ask-options button.default { border-color: var(--text); }
 .ask-reply { display: flex; gap: 6px; }
 .ask-reply input { flex: 1; min-width: 0; }
-.run-summary { margin-top: 6px; font-size: 13.5px; }
 
 /* External agents and notes (H1-6). */
 .connect-config { font-size: 11.5px; max-height: 260px; white-space: pre-wrap; word-break: break-all; }
@@ -1428,29 +1429,76 @@ html, body { overflow: hidden; }
 .name-edit { font: inherit; font-weight: 600; font-size: 14px; padding: 1px 6px; width: 14em; }
 .name-edit.bad { border-color: var(--danger); }
 
-/* A call that changed the team or the code (ActionCard in views/Session.tsx): its own card with
-   the outcome, green when done, red with the hub's reason when refused. */
-.action-card { border: 1px solid var(--border); border-left: 3px solid var(--ok); border-radius: var(--radius); background: var(--surface); padding: 7px 12px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
-.action-card.refused { border-left-color: var(--danger); background: color-mix(in srgb, var(--danger) 6%, var(--surface)); }
-.action-card.running { border-left-color: var(--warn); }
-.action-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.action-head .icon { color: var(--ok); flex-shrink: 0; }
-.action-card.refused .action-head .icon { color: var(--danger); }
-.action-name { font-weight: 600; white-space: nowrap; }
-.action-what { color: var(--text-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; }
-.action-state { margin-left: auto; font-size: 12px; color: var(--muted); white-space: nowrap; }
-.action-card.refused .action-state { color: var(--danger-text); font-weight: 600; }
-.action-reason { color: var(--danger-text); font-size: 12.5px; line-height: 1.5; }
-.action-reason .fold-body { white-space: pre-wrap; overflow-wrap: anywhere; }
-
-/* Fold (components.tsx): long text cut to a few lines; opened, it scrolls inside a bounded box. */
-.fold-body { overflow: hidden; line-height: 1.5; }
-.fold.cut:not(.open) .fold-body { -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent); mask-image: linear-gradient(to bottom, #000 60%, transparent); }
-.fold.open .fold-body { max-height: min(420px, 60vh); overflow: auto; }
-.fold-toggle { border: none; background: none; padding: 2px 0 0; font: inherit; font-size: 12px; color: var(--accent-text); cursor: pointer; }
-.fold-toggle:hover { text-decoration: underline; background: none; }
+/* OneLine (components.tsx): a result as one line — status icon, what it was, a one-line gist;
+   the icon (or the line) opens the whole thing under it. No card: the coloured icon carries the
+   state, and the opened body scrolls in a bounded box instead of pushing the conversation. */
+.oneline { display: flex; flex-direction: column; gap: 3px; min-width: 0; font-size: 13px; }
+.oneline-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.oneline-icon { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: none; border-radius: var(--radius-sm); background: none; color: var(--muted); }
+button.oneline-icon { cursor: pointer; }
+button.oneline-icon:hover:not(:disabled) { background: var(--hover); }
+.oneline.ok .oneline-icon { color: var(--ok); }
+.oneline.danger .oneline-icon { color: var(--danger); }
+.oneline.warn .oneline-icon { color: var(--warn); }
+.oneline.running .oneline-icon { color: var(--accent); }
+.oneline-main { flex: 1; display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 1px 4px; margin-left: -4px; border: none; background: none; border-radius: var(--radius-sm); font: inherit; color: inherit; text-align: left; }
+button.oneline-main { cursor: pointer; }
+button.oneline-main:hover:not(:disabled) { background: var(--hover); }
+.oneline-title { flex-shrink: 0; font-weight: 600; white-space: nowrap; }
+.oneline-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); font-size: 12.5px; }
+.oneline.danger .oneline-summary { color: var(--danger-text); }
+.oneline.warn .oneline-summary { color: var(--warn-text); }
+.oneline-body { margin: 2px 0 2px 27px; max-height: min(420px, 60vh); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-2); font-size: 12.5px; line-height: 1.55; }
+.oneline-body .prose { white-space: normal; color: var(--text); }
+/* A refusal's reason: the hub's words, in its colour. */
+.action-reason { color: var(--danger-text); }
 .rail-spend { display: flex; justify-content: space-between; gap: 8px; margin: 8px 4px 0; padding-top: 6px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
 .rail-spend-v { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 500; }
+
+/* ---- A run's rail (views/Run.tsx): the run's structure beside its conversation -------------- */
+/* Wider than the info rail: task rows carry a handoff chain, and the plan carries specs. The
+   conversation steps aside by just that much. */
+.rail.rail-run { width: 320px; }
+.pane.with-rail.run-side .convo, .pane.with-rail.run-side .dock { padding-right: 350px; }
+.pane.with-rail.run-side .turn-map { right: 340px; }
+/* Panels inside a panel: no second border, no second title. */
+.rail .board { border: none; border-radius: 0; background: none; }
+.rail .board-group { margin-bottom: 10px; }
+.rail .board-group:last-child { margin-bottom: 0; }
+.rail .plan-card { border: none; }
+.rail .plan-task { padding: 6px 2px; }
+.rail .plan-task .head { gap: 6px; }
+.rail .plan-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.rail-facts { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rail-facts .rail-line { align-items: flex-start; }
+.rail-facts .rail-line .rail-main { overflow-wrap: anywhere; }
+.rail .trace-head { padding: 6px 2px; }
+.rail .trace-body { padding: 6px 0 2px; }
+.rail .participants .part-task { margin: 6px 0 10px; }
+.rail .participants .part-row { font-size: 12.5px; }
+.rail-head-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.rail-head-aside { flex-shrink: 0; max-width: 60%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* A run's header keeps its title when it gets crowded; the chips around it give way. */
+.topbar .title { min-width: 84px; }
+
+/* No room beside the conversation: the same panels over it, from the header's button. */
+.rail-scrim { position: absolute; inset: 0; z-index: 20; background: rgba(0, 0, 0, 0.28); }
+.pane .rail.rail-drawer {
+  position: absolute; top: 48px; right: 0; bottom: 0; left: auto; width: min(360px, 94%);
+  max-height: none; padding: 10px 12px 16px; overflow: auto; background: var(--canvas);
+  border-left: 1px solid var(--border); box-shadow: var(--shadow-float); z-index: 21;
+}
+.rail-drawer-head { display: flex; align-items: center; gap: 8px; padding: 0 2px 4px; font-size: 12px; color: var(--text-2); }
+
+/* A run's end and the strips that need the person: one line each, buttons on the right. */
+.done-line { display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap; }
+.done-line > .oneline { flex: 1; min-width: 220px; padding: 6px 10px; border-radius: var(--radius-lg); background: var(--ok-bg); }
+.done-line > .oneline.warn { background: var(--warn-bg); }
+.done-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; padding-top: 2px; }
+.done-glyph { font-size: 12px; font-weight: 700; line-height: 1; }
+.run-head { padding-bottom: 10px; margin-bottom: 0; }
+.run-head:empty { display: none; border: none; }
+
 
 /* An archived conversation: no composer, a bar to restore it. */
 .archived-bar { display: flex; align-items: center; gap: 10px; max-width: 780px; width: calc(100% - 48px); margin: 0 auto 16px; padding: 10px 14px; border: 1px dashed var(--border-strong); border-radius: var(--radius-lg); color: var(--text-2); font-size: 13px; }

@@ -3,7 +3,7 @@
 // steps, and two of your messages wait behind it.
 
 import { emptyState, type MockState, type Step } from "../dev/MockBridge";
-import { NOTES_REPO, agent, fileDiff, say, think, tool, transcript, turn, uid } from "../dev/fixtures";
+import { NOTES_REPO, agent, fileDiff, planned, run, say, task, think, tool, transcript, turn, uid } from "../dev/fixtures";
 import { plugins } from "./Agents.mock";
 import { quota } from "./Usage.mock";
 
@@ -97,6 +97,67 @@ export function failedEditSession(): { state: MockState; script: Step[]; route: 
     script: [{ at: 600, act: () => document.querySelector<HTMLButtonElement>(".tool-step.failed button.tool")?.click() }],
     route: `#/s/${nova.name}`,
   };
+}
+
+/**
+ * A long command running under the conversation (`stream`: its output keeps arriving), or a turn
+ * that stopped producing anything long ago (`quiet`: what the live line says after 30 seconds
+ * without news). `quiet` needs the page to sit still: screenshot it with a wait of ~46s.
+ */
+export function liveSession(kind: "stream" | "quiet"): { state: MockState; script: Step[]; route: string } {
+  const nova = agent({ name: "nova", plugin: "claude", model: "claude-sonnet-4-5", role: "worker", status: "running", cwd: NOTES_REPO, topic: "把三个包都构建一遍", profile: { display_name: "Nova", title: "文档", color: "violet" } });
+  const state: MockState = { ...emptyState(), agents: [nova], plugins: plugins(), quota: quota() };
+  const before = turn({
+    input: "先看看构建脚本，然后把三个包按 core、cli、gui 的顺序都构建一遍。",
+    minutesAgo: 6,
+    took: 2,
+    items: [think("工作区有三个包，按依赖顺序构建。"), tool(`Read ${NOTES_REPO}/package.json`, "read"), say("构建脚本是 `npm run build`，会先跑 tsc 再打包 vite。core 和 cli 都过了，现在构建 gui，vite 这一步最久。")],
+  });
+  const build = uid();
+  const started = ["> crossagents-gui@0.1.8 build", "> tsc --noEmit && vite build", "vite v8.3.4 building for production...", "transforming (12/214) src/lib/workGroups.ts"].join("\n");
+  const current = turn({
+    input: "三个包都构建一遍。",
+    minutesAgo: 1,
+    running: true,
+    items: [think("最后一个是 gui。"), { type: "tool_call", tool_call_id: build, title: "npm run build", kind: "execute", status: "in_progress", output: started, detail: { changes: [], command: "npm run build", cwd: NOTES_REPO } }],
+  });
+  state.transcripts.set(nova.id, transcript(nova, [before, current], 44_000));
+  // Build output a couple of lines at a time, then a thought (which the conversation folds to
+  // "推理", so the live line is the only place its words show), then output again.
+  const lines = ["transforming (38/214) src/views/Session.tsx", "transforming (74/214) src/ToolColumn.tsx", "rendering chunks...", "computing gzip size...", "dist/assets/index-8ac14f2e.js  412.61 kB │ gzip: 128.40 kB"];
+  const output = (at: number, text: string): Step => ({ at, event: { type: "agent.tool_output", data: { id: nova.id, tool_call_id: build, text: `${text}\n` } } });
+  const script: Step[] =
+    kind === "quiet"
+      ? []
+      : [
+          ...lines.flatMap((line, i) => [output(900 + i * 900, line), output(1_350 + i * 900, `transforming (${40 + i * 8}/214) src/main.tsx`)]),
+          { at: 5_200, event: { type: "agent.output", data: { id: nova.id, stream: "thought", text: "这次比上次慢，" } } },
+          { at: 5_700, event: { type: "agent.output", data: { id: nova.id, stream: "thought", text: "大概是 chunk 变多了，跑完再看一眼 dist。" } } },
+          output(6_400, "✓ 214 modules transformed."),
+          output(7_200, "rendering chunks (3)..."),
+        ];
+  return { state, script, route: `#/s/${nova.name}` };
+}
+
+/**
+ * The same running turn as `liveSession`, seen on a run page: the run's lead is the one building,
+ * so the middle column's live line is what the run page shows while it works.
+ */
+export function liveRun(kind: "stream" | "quiet"): { state: MockState; script: Step[]; route: string } {
+  const scene = liveSession(kind);
+  const nova = scene.state.agents[0];
+  const r = run({
+    title: "三个包都构建一遍",
+    request: "先看看构建脚本，然后把三个包按 core、cli、gui 的顺序都构建一遍。",
+    planner: nova,
+    worker: nova,
+    team: [nova],
+    status: "running",
+    plan: [planned("a", "构建 core、cli、gui", "三个包都能构建通过，有报错就修。", nova.id)],
+    minutesAgo: 12,
+  });
+  scene.state.runs.push({ run: r, tasks: [task(r, r.plan[0], { status: "running", assignee: nova, minutesAgo: 10, progress: "gui 的 vite 打包还在跑" })] });
+  return { ...scene, route: `#/runs/${r.id}` };
 }
 
 /** Nova's CLI crashes mid-turn: the session shows how its process ended. */

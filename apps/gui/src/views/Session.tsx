@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { Capabilities } from "@bindings/Capabilities";
 import type { Run } from "@bindings/Run";
@@ -12,21 +12,21 @@ import { HeldFiles, TurnFiles, useHeld } from "../attach";
 import { HandoffLine } from "../handoff";
 import { dismiss as dismissMessage, retry as retryMessage, sendMessage, useOutbox, type Outgoing } from "../outbox";
 import { ACTIVE_RUN, useRunTree, useRunsLedBy } from "../App";
-import { Avatar, ErrorBox, FileScopeProvider, Fold, Icon, Mark, Prose, StatusChip, Vendor, agentTitle, agentTone, displayName, roleShape, time, useAgents, useFileScope, vendorName } from "../components";
+import { Avatar, ErrorBox, FileScopeProvider, Icon, Mark, OneLine, Prose, StatusChip, Vendor, agentTitle, agentTone, beyondFirstLine, displayName, firstLine, firstSentence, roleShape, time, useAgents, useFileScope, vendorName } from "../components";
 import { ChangeStat, DiffView } from "../diffview";
 import { parseDiff, tailLines, type DiffFile } from "../lib/diff";
 import { errorHint } from "../lib/errors";
-import { fields, toolChanges, toolError, toolFailed, toolShowsStat } from "../lib/toolcall";
+import { fields, plainText, toolChanges, toolError, toolFailed, toolShowsStat } from "../lib/toolcall";
 import { supportNote } from "../lib/attachments";
 import { effortLabel, prettyModel } from "../lib/models";
 import { clock, range } from "../lib/time";
 import { ModelEffortPicks } from "../modelPick";
-import { InfoRail, RAIL_ROOM, useRail } from "../rail";
+import { InfoRail, RAIL_ROOM, SIDE_ROOM, useRail } from "../rail";
 import { ScrollThumb } from "../scrollthumb";
 import { TurnMap, type MapEntry } from "../turnmap";
 import { focusSession, openTool, toggleTools, useLayout } from "../panes";
 import { taskState } from "../lib/taskState";
-import { actionOf, duration, failed, liveActivity, stepLine, summarize, workGroups, type ActionTool, type Step } from "../lib/workGroups";
+import { QUIET_AFTER, actionOf, duration, failed, liveActivity, liveKey, liveNow, quietSeconds, stepLine, summarize, workGroups, type ActionTool, type Step } from "../lib/workGroups";
 import { PeerMessage, StateWord, useArmed } from "../parts";
 import { useSession, type TranscriptItem, type TranscriptTurn } from "../session";
 import { dismissNotice, useNotices } from "../notices";
@@ -43,10 +43,24 @@ const fromPerson = (turn: TranscriptTurn) => !turn.from || turn.from.kind === "h
 const started = (turn: TranscriptTurn) => !!turn.started_at || !!turn.completed_at;
 
 /**
+ * What the pane's own header needs to know about the side slot: whether the rail is a drawer
+ * (too narrow to sit beside the conversation), whether it is open, and how to open it. A header
+ * that carries the run's facts uses this for its 面板 button; nothing is moved back into the
+ * conversation when the rail does not fit.
+ */
+const SideSlot = createContext<{ narrow: boolean; open: boolean; toggle: () => void }>({
+  narrow: false,
+  open: false,
+  toggle: () => {},
+});
+
+export const useSideSlot = () => useContext(SideSlot);
+
+/**
  * A conversation with one agent. The run page shows its lead's conversation through this
  * view (docs/tasks/W1.md §8): `header` replaces the agent's header, `top` comes before the
- * messages, `bottom` after them, and `side` takes the rail (or follows the messages when the
- * window is too narrow for one).
+ * messages, `bottom` after them, and `side` takes the rail beside them — or, when the window
+ * is too narrow for that, a drawer the header opens. `side` never joins the conversation.
  */
 export function SessionView({
   name,
@@ -71,6 +85,9 @@ export function SessionView({
   const ledRuns = useRunsLedBy(agentId);
   const outgoing = useOutbox(agentId, transcript?.turns);
   const { hidden: railOff } = useRail();
+  // The run's side slot: a rail beside the conversation while it has room, else a drawer the
+  // header opens. The plain info rail needs more room, since nothing waits on it.
+  const [drawer, setDrawer] = useState(false);
   const [width, setWidth] = useState(0);
   const ro = useRef<ResizeObserver | null>(null);
   // A callback ref: the section mounts once the transcript has loaded.
@@ -83,6 +100,30 @@ export function SessionView({
   }, []);
 
   useEffect(() => (agentId ? view(agentId) : undefined), [agentId]);
+
+  // Wide enough for a rail again: the drawer has nothing left to do.
+  const rail = !railOff && width >= (side ? SIDE_ROOM : RAIL_ROOM);
+  useEffect(() => {
+    if (rail) setDrawer(false);
+  }, [rail]);
+
+  // A drawer that no longer has to be one (the window widened) is not a drawer left open.
+  const drawerRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!drawer) return;
+    drawerRef.current?.focus();
+    const close = () => setDrawer(false);
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("keydown", onKey);
+    // Opening a task in the tool column replaces the drawer: it has served its purpose.
+    window.addEventListener("hashchange", close);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("hashchange", close);
+    };
+  }, [drawer]);
 
   if (!transcript) {
     // Worker and reviewer clones are removed once their task ends.
@@ -116,7 +157,6 @@ export function SessionView({
   const liveRuns = runs.filter((d) => d.run.planner === agent.id && ACTIVE_RUN.includes(d.run.status) && d.run.status !== "awaiting_approval");
   const tasks = runs.flatMap((d) => d.tasks.filter((t) => t.assignee === agent.id || t.reviewer === agent.id).map((t) => ({ run: d.run, task: t })));
   const queued = turns.filter((t) => !started(t));
-  const rail = !railOff && width >= RAIL_ROOM;
   const led = runs.filter((d) => d.run.planner === agent.id);
   const recruits = everyone.filter((a) => (a.config as Record<string, unknown> | null)?.spawned_by_agent === agent.id && !a.archived_at);
   // Who @ offers: this conversation's recruits, then the other agents working in its project.
@@ -126,42 +166,63 @@ export function SessionView({
   ];
 
   return (
-    <section className={`pane ${rail ? "with-rail" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)}>
-      {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onClose={onClose} />}
-      <ExecutionBar agent={agent} />
-      <NoticeBar agent={agent} />
-      <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} agents={everyone} tree={runs} top={top}>
-        {outgoing.map((m) => (
-          <Sending key={m.key} message={m} agent={agent} />
-        ))}
-        {bottom}
-        {!rail && side}
-      </Conversation>
-      {rail && side && <aside className="rail" aria-label="run">{side}</aside>}
-      {rail && !side && <InfoRail agent={agent} usage={usage} turns={turns} tasks={tasks} led={led} agents={everyone} recruits={recruits} spend={transcript.conversation_cost_usd} />}
-      <div className="dock">
-        {/* One strip is enough: the pane beside leaves it to the main one. */}
-        {!onClose && <QuestionCards agents={everyone} />}
-        {!onClose && <NeedsYouStrip agents={everyone} tree={runs} />}
-        <RunStrip runs={liveRuns} agents={everyone} />
-        <QueuePanel agent={agent} queued={queued} onEdit={setDraft} />
-        {agent.status === "error" && transcript.error && (
-          <div className="error-bar" role="alert" title={transcript.error}>
-            <strong>{errorHint(transcript.error, transcript.exit)}</strong>
-            <span className="mono small">{transcript.error}</span>
-          </div>
+    <SideSlot.Provider value={{ narrow: !rail, open: drawer, toggle: () => setDrawer((d) => !d) }}>
+      <section className={`pane ${rail ? "with-rail" : ""} ${side ? "run-side" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)}>
+        {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onClose={onClose} />}
+        <ExecutionBar agent={agent} />
+        <NoticeBar agent={agent} />
+        <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} agents={everyone} tree={runs} top={top}>
+          {outgoing.map((m) => (
+            <Sending key={m.key} message={m} agent={agent} />
+          ))}
+          {bottom}
+        </Conversation>
+        {rail && side && (
+          <aside className="rail rail-run" aria-label="run 的面板">
+            {side}
+          </aside>
         )}
-        {agent.archived_at ? (
-          <div className="archived-bar">
-            <Icon name="archive" size={14} />
-            <span>这个对话已归档，它招来的队友也一起停下了。恢复后可以继续。</span>
-            <button onClick={() => void api.archiveAgent(agent.id, false)}>恢复对话</button>
-          </div>
-        ) : (
-          <Composer agent={agent} capabilities={capabilities} driver={transcript.driver} draft={draft} setDraft={setDraft} plans={pendingPlans} onPlanDone={reload} mates={mates} />
+        {rail && !side && <InfoRail agent={agent} usage={usage} turns={turns} tasks={tasks} led={led} agents={everyone} recruits={recruits} spend={transcript.conversation_cost_usd} />}
+        {/* No room beside the conversation: the same panels, over it, opened from the header. */}
+        {!rail && side && drawer && (
+          <>
+            <div className="rail-scrim" onClick={() => setDrawer(false)} />
+            <aside className="rail rail-run rail-drawer" role="dialog" aria-label="run 的面板" ref={drawerRef} tabIndex={-1}>
+              <div className="rail-drawer-head">
+                <strong>run 的面板</strong>
+                <span className="spacer" />
+                <button className="ghost icon" onClick={() => setDrawer(false)} aria-label="关闭面板" title="关闭面板">
+                  <Icon name="close" size={14} />
+                </button>
+              </div>
+              {side}
+            </aside>
+          </>
         )}
-      </div>
-    </section>
+        <div className="dock">
+          {/* One strip is enough: the pane beside leaves it to the main one. */}
+          {!onClose && <QuestionCards agents={everyone} />}
+          {!onClose && <NeedsYouStrip agents={everyone} tree={runs} />}
+          <RunStrip runs={liveRuns} agents={everyone} />
+          <QueuePanel agent={agent} queued={queued} onEdit={setDraft} />
+          {agent.status === "error" && transcript.error && (
+            <div className="error-bar" role="alert" title={transcript.error}>
+              <strong>{errorHint(transcript.error, transcript.exit)}</strong>
+              <span className="mono small">{transcript.error}</span>
+            </div>
+          )}
+          {agent.archived_at ? (
+            <div className="archived-bar">
+              <Icon name="archive" size={14} />
+              <span>这个对话已归档，它招来的队友也一起停下了。恢复后可以继续。</span>
+              <button onClick={() => void api.archiveAgent(agent.id, false)}>恢复对话</button>
+            </div>
+          ) : (
+            <Composer agent={agent} capabilities={capabilities} driver={transcript.driver} draft={draft} setDraft={setDraft} plans={pendingPlans} onPlanDone={reload} mates={mates} />
+          )}
+        </div>
+      </section>
+    </SideSlot.Provider>
   );
 }
 
@@ -542,6 +603,13 @@ function Sending({ message, agent }: { message: Outgoing; agent: Agent }) {
   );
 }
 
+/**
+ * The conversation's scroll box and whether it follows the bottom. A part that grows on its own
+ * (the live line under a running turn, once its timer has something new to say) uses this, since
+ * only the conversation itself is re-rendered when a transcript item arrives.
+ */
+const Follow = createContext<{ el: RefObject<HTMLDivElement | null>; stick: RefObject<boolean> } | null>(null);
+
 function Conversation({
   agent,
   turns,
@@ -599,6 +667,7 @@ function Conversation({
           )}
           <FileScopeProvider value={outerScope ?? { kind: "agent", agent: agent.id }}>
           <CwdContext.Provider value={agent.cwd}>
+          <Follow.Provider value={{ el: ref, stick }}>
             {byTime(turns, [...switches, ...handoffs]).map((x) =>
               "message_id" in x ? (
                 <Turn key={x.message_id} turn={x} agent={agent} agents={agents} tree={tree} />
@@ -608,6 +677,7 @@ function Conversation({
                 <SwitchNote key={x.at} change={x} />
               ),
             )}
+          </Follow.Provider>
           </CwdContext.Provider>
           </FileScopeProvider>
           {children}
@@ -689,6 +759,10 @@ function Bubble({ turn, tree }: { turn: TranscriptTurn; tree: RunDetail[] }) {
 
 function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agent; agents: Agent[]; tree: RunDetail[] }) {
   const running = !!turn.started_at && !turn.completed_at;
+  // Which step the conversation shows live, as Steps reports it: the live line leaves that step's
+  // command and output out, so the same lines are not written twice (see ShownLive).
+  const [shownLive, setShownLive] = useState<string | null>(null);
+  const blocks = workGroups(turn.items);
   return (
     <div className="turn" data-turn={turn.message_id}>
       {fromPerson(turn) ? (
@@ -706,10 +780,16 @@ function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agen
           <span className="what">{agentTitle(agent)}</span>
         </div>
       )}
-      {workGroups(turn.items).map((block, i) =>
-        block.kind === "steps" ? <Steps key={i} steps={block.steps} closed={block.closed} /> : <Item key={i} item={block.item} />,
-      )}
-      {running && <LiveLine since={turn.started_at!} items={turn.items} />}
+      <ShownLive.Provider value={{ id: shownLive, set: setShownLive }}>
+        {blocks.map((block, i) =>
+          block.kind === "steps" ? (
+            <Steps key={i} steps={block.steps} closed={block.closed} live={running && i === blocks.length - 1 ? setShownLive : undefined} />
+          ) : (
+            <Item key={i} item={block.item} />
+          ),
+        )}
+        {running && <LiveLine since={turn.started_at!} items={turn.items} />}
+      </ShownLive.Provider>
       {turn.completed_at && <TurnFoot turn={turn} />}
       {turn.completed_at && turn.diff && <TurnChanges turn={turn} agent={agent} />}
     </div>
@@ -723,9 +803,18 @@ function Item({ item }: { item: TranscriptItem }) {
     case "output":
       return <Prose text={item.text} />;
     case "error":
-      return <div className="item-error">{item.message}</div>;
+      // One line; the whole message opens under it (a stack trace can be long).
+      return (
+        <OneLine tone="danger" icon={<Icon name="close" size={13} />} title="报错" summary={firstLine(item.message)}>
+          {beyondFirstLine(item.message)}
+        </OneLine>
+      );
     case "warning":
-      return <div className="item-warn">{item.message}</div>;
+      return (
+        <OneLine tone="warn" icon={<Icon name="info" size={13} />} title="警告" summary={firstLine(item.message)}>
+          {beyondFirstLine(item.message)}
+        </OneLine>
+      );
     default:
       return null;
   }
@@ -743,9 +832,9 @@ const ACTION_LABEL: Record<ActionTool, string> = {
 };
 
 /**
- * A call that changed (or tried to change) the team or the code, as a card: what was asked, and
- * what the hub did — refused calls say why, in the hub's words. This is the record to trust
- * over the agent's summary.
+ * A call that changed (or tried to change) the team or the code, as one line: what was asked and
+ * what the hub did — refused calls say why, in the hub's words. This is the record to trust over
+ * the agent's summary, so the whole reason and the call's arguments open under the line.
  */
 function ActionCard({ action, call }: { action: ActionTool; call: Extract<TranscriptItem, { type: "tool_call" }> }) {
   const args = fields(call.detail?.arguments);
@@ -762,20 +851,36 @@ function ActionCard({ action, call }: { action: ActionTool; call: Extract<Transc
   } else if (action === "agent_retire") what = str(args.name) ?? "";
   else if (action === "agent_set_model") what = `${str(args.name) ?? ""} → ${str(args.model) ?? "默认"}`;
   else what = str(args.task_id) ?? str(args.task) ?? str(args.summary)?.slice(0, 80) ?? "";
-  const state = running ? "进行中" : refused ? "被拒绝" : "完成";
+  // The hub's words without its machine prefix; the first sentence of them is the gist.
+  const reason = raw?.replace(/^(conflict|not found|invalid|unsupported)\s*:\s*/i, "");
+  // What a completed call answered, when it answered in words rather than a JSON payload (for a
+  // recruit, the name and model above already are the result).
+  const answered = Object.keys(result).length ? undefined : plainText(call.detail?.result);
+  const summary = (running ? ["进行中", what] : refused ? [what, firstSentence(reason)] : [what, action !== "agent_spawn" && answered && firstSentence(answered)])
+    .filter(Boolean)
+    .join(" · ");
+  const detail =
+    (refused && reason) || call.detail?.arguments ? (
+      <>
+        {refused && reason && <div className="action-reason">{reason}</div>}
+        {call.detail?.arguments && (
+          <>
+            <div className="muted tiny">参数</div>
+            <pre className="out">{call.detail.arguments}</pre>
+          </>
+        )}
+      </>
+    ) : undefined;
   return (
-    <div className={`action-card ${refused ? "refused" : running ? "running" : "done"}`}>
-      <div className="action-head">
-        <Icon name={refused ? "close" : action === "agent_spawn" ? "addMate" : "check"} size={14} />
-        <span className="action-name">{ACTION_LABEL[action]}</span>
-        {what && <span className="action-what">{what}</span>}
-        <span className="action-state">{state}</span>
-      </div>
-      {refused && raw && (
-        // A refusal can carry a whole check log: its first lines say why, the rest on request.
-        <Fold className="action-reason">{raw.replace(/^(conflict|not found|invalid|unsupported)\s*:\s*/i, "")}</Fold>
-      )}
-    </div>
+    <OneLine
+      className="action-line"
+      tone={running ? "running" : refused ? "danger" : "ok"}
+      icon={running ? <span className="dot accent pulse" /> : <Icon name={refused ? "close" : "check"} size={13} />}
+      title={ACTION_LABEL[action]}
+      summary={summary}
+    >
+      {detail}
+    </OneLine>
   );
 }
 
@@ -783,13 +888,31 @@ function ActionCard({ action, call }: { action: ActionTool; call: Extract<Transc
 const OPEN_STEPS = 3;
 
 /**
+ * The tool call whose live output the conversation already shows. `Steps` reports it while it
+ * shows its newest steps; the live line under the turn then leaves that call's command and output
+ * out, so the same lines are never written twice (the step is where they belong).
+ */
+const ShownLive = createContext<{ id: string | null; set: (id: string | null) => void }>({ id: null, set: () => {} });
+
+/**
  * A run of tool calls and reasoning. Closed runs read as one summary line (failures stay
  * listed under it); open ones show the newest steps. A click overrides either.
+ *
+ * `live` is set on the turn's last block while the turn runs: the newest step's live output is on
+ * screen here, and Steps says so, so the live line does not repeat it.
  */
-function Steps({ steps, closed }: { steps: Step[]; closed: boolean }) {
+function Steps({ steps, closed, live }: { steps: Step[]; closed: boolean; live?: (id: string | null) => void }) {
   const [manual, setManual] = useState<boolean>();
   const expanded = manual ?? !closed;
   const [all, setAll] = useState(false);
+  const hidden = expanded ? (all || steps.length <= OPEN_STEPS ? 0 : steps.length - OPEN_STEPS) : steps.length;
+  // What `live` reports is whether the newest step is on screen: the block open (not folded to
+  // its summary) and the newest step past the "+N 个更早的步骤" fold.
+  const newest = steps[steps.length - 1];
+  const shown = expanded && steps.length - 1 >= hidden && newest?.type === "tool_call" ? newest.tool_call_id : null;
+  useEffect(() => {
+    live?.(shown);
+  }, [live, shown]);
 
   if (!expanded) {
     const bad = steps.filter(failed);
@@ -808,7 +931,6 @@ function Steps({ steps, closed }: { steps: Step[]; closed: boolean }) {
       </div>
     );
   }
-  const hidden = all || steps.length <= OPEN_STEPS ? 0 : steps.length - OPEN_STEPS;
   return (
     <div className="steps">
       {closed && (
@@ -871,20 +993,37 @@ function ToolStep({ step }: { step: ToolCall }) {
   const running = step.status === "in_progress" || step.status === "pending";
   // Failed, or refused with its reason in the detail: either way nothing was changed.
   const bad = toolFailed(step);
-  const tone = bad ? "danger" : running ? "accent pulse" : "ok";
   const code = d?.exit_code;
-  const live = running && step.output ? tailLines(step.output, LIVE_LINES) : undefined;
-  const more = !!(d || step.output);
+  const cwd = useContext(CwdContext);
   // A failed edit carries the diff the model meant to make: showing +N −M would claim a change
   // that never happened (docs/TODO.md §九).
   const changes = toolChanges(step).flatMap((c) => parseDiff(c.diff, c.path));
-  const cwd = useContext(CwdContext);
+  if (bad) {
+    // One line, like a result card: ✕, the call, and why it failed; the detail opens below.
+    const reason = firstLine(toolError(step));
+    const more = !!(d || step.output);
+    return (
+      <div className="tool-step failed">
+        <OneLine
+          tone="danger"
+          icon={<Icon name="close" size={13} />}
+          title={stepLine(step, cwd)}
+          summary={[code != null && code !== 0 ? `退出 ${code}` : "", reason || "失败"].filter(Boolean).join(" · ")}
+        >
+          {more ? <ToolDetailView step={step} changes={changes} /> : undefined}
+        </OneLine>
+      </div>
+    );
+  }
+  const tone = running ? "accent pulse" : "ok";
+  const live = running && step.output ? tailLines(step.output, LIVE_LINES) : undefined;
+  const more = !!(d || step.output);
   return (
-    <div className={`tool-step ${bad ? "failed" : ""}`}>
+    <div className="tool-step">
       <button className="tool" onClick={() => more && setOpen(!open)} aria-expanded={more ? open : undefined} disabled={!more} title={step.title}>
         <span className={`dot ${tone}`} />
         <span className="title">{stepLine(step, cwd)}</span>
-        {code != null && code !== 0 ? <span className="chip danger tiny">退出 {code}</span> : bad && <span className="chip danger tiny">失败</span>}
+        {code != null && code !== 0 ? <span className="chip danger tiny">退出 {code}</span> : null}
         {d?.duration_ms != null && <span className="muted tiny">{took(d.duration_ms)}</span>}
         {toolShowsStat(step) && changes.length > 0 && <ChangeStat files={changes} />}
         {more && (
@@ -950,28 +1089,65 @@ function ToolsToggle() {
   // Open, the column's own header has the button that folds it away: one place, like Codex.
   if (state.tools.open) return null;
   return (
-    <button className="ghost icon" onClick={toggleTools} title="工具列：改动、任务、事件流" aria-label="工具列">
+    <button className="ghost icon" onClick={toggleTools} title="工具列：改动、任务、提交图" aria-label="工具列">
       <Icon name="panel" size={16} />
     </button>
   );
 }
 
-/** The bottom of a running turn: `••• 42s · 运行命令`. */
+/**
+ * The bottom of a running turn: `••• 42s · 运行命令`, and under it what it is producing now (the
+ * newest step, a running command's last lines) so a person can see it move. With nothing new for
+ * `QUIET_AFTER` seconds the line says how long, instead of pretending to work.
+ */
 function LiveLine({ since, items }: { since: string; items: TranscriptItem[] }) {
+  const cwd = useContext(CwdContext);
+  const follow = useContext(Follow);
   const [now, setNow] = useState(Date.now());
+  // When the turn was last seen to produce something. Only time on this page counts: the hub
+  // sends items, not when each one arrived.
+  const key = liveKey(items);
+  const [seen, setSeen] = useState(() => ({ key, at: Date.now() }));
+  useEffect(() => setSeen((s) => (s.key === key ? s : { key, at: Date.now() })), [key]);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
+  // This line grows on its own (a new tail line, the quiet notice) without the conversation
+  // re-rendering, so it keeps the person at the bottom itself.
+  useLayoutEffect(() => {
+    const el = follow?.el.current;
+    if (el && follow?.stick.current) el.scrollTop = el.scrollHeight;
+  });
+  const shown = useContext(ShownLive);
+  const last = items[items.length - 1];
+  // A running step whose command and output are already on screen (the open steps at the end of
+  // the turn): the status row says enough; repeating it here would write the same output twice.
+  const onScreen = last?.type === "tool_call" && shown.id === last.tool_call_id;
+  const current = onScreen ? undefined : liveNow(items, cwd);
+  const quiet = quietSeconds(seen.at, now);
   return (
-    <div className="working">
-      <span className="busy-dots" aria-hidden="true">
-        <i />
-        <i />
-        <i />
-      </span>
-      <span className="muted small">{duration(now - new Date(since).getTime())}</span>
-      <span>· {liveActivity(items)}</span>
+    <div className="working live-turn">
+      <div className="working-row">
+        <span className={`busy-dots ${quiet >= QUIET_AFTER ? "still" : ""}`} aria-hidden="true">
+          <i />
+          <i />
+          <i />
+        </span>
+        <span className="muted small">{duration(now - new Date(since).getTime())}</span>
+        <span>· {liveActivity(items)}</span>
+      </div>
+      {current && (
+        <div className="working-now" title={current.title}>
+          {current.title}
+        </div>
+      )}
+      {current?.output && (
+        <pre className="working-out" aria-label="最新输出" title={current.output.hidden ? `前面还有 ${current.output.hidden} 行` : undefined}>
+          {current.output.lines.join("\n")}
+        </pre>
+      )}
+      {quiet >= QUIET_AFTER && <div className="muted small">已 {quiet} 秒没有新输出</div>}
     </div>
   );
 }

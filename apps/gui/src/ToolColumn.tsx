@@ -1,8 +1,9 @@
 // The tool column (docs/tasks/V6-GUI.md §6): up to two panes stacked on the right — 改动 (what
-// each turn changed), 任务 (a task's details), 事件流 (raw hub events, for debugging). Panes
-// show the focused conversation, or what was opened on purpose (panes.ts `target`); nothing
-// from another conversation mixes in. When docking it would squeeze the conversation it is a
-// one-pane drawer over the page.
+// each turn changed), 任务 (a task's details), and 提交图 (commits). 事件流 (raw hub events, for
+// debugging) is offered only where debugging is on (panes.ts `PANE_KINDS`). Panes show the
+// focused conversation, or what was opened on purpose (panes.ts `target`); nothing from another
+// conversation mixes in. When docking it would squeeze the conversation it is a one-pane drawer
+// over the page.
 
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { Agent } from "@bindings/Agent";
@@ -16,7 +17,7 @@ import { useEventLog } from "./eventlog";
 import type { HubEvent } from "./hub";
 import { parseDiff } from "./lib/diff";
 import { clock, full } from "./lib/time";
-import { PANE_KINDS, addPane, clearTarget, removePane, setPane, setSplit, useLayout, type PaneKind, type Target } from "./panes";
+import { PANE_KINDS, addPane, clearTarget, offered, paneLabel, removePane, setPane, setSplit, useLayout, type PaneKind, type Target } from "./panes";
 import { useWidths } from "./lib/widths";
 import { useSession, type TranscriptTurn } from "./session";
 import { useSidebar } from "./titlebar";
@@ -42,6 +43,10 @@ export function ToolColumn({ follow, task, run, onClose }: { follow?: string; ta
   const ref = useRef<HTMLDivElement>(null);
   const tools = state.tools;
   let panes: PaneKind[] = task ? [...new Set<PaneKind>(["task", ...(tools.open ? tools.panes : [])])] : tools.panes;
+  // A saved layout may name a pane this build does not offer (事件流): drop it, and never leave
+  // the column with nothing to show.
+  panes = panes.filter(offered);
+  if (!panes.length) panes = ["changes"];
   panes = panes.slice(0, narrow ? 1 : 2);
 
   const drag = (e: ReactPointerEvent<HTMLDivElement>) => {
@@ -140,7 +145,7 @@ function PaneSlot({
   return (
     <>
       {divider}
-      <section className="tool-pane" aria-label={PANE_KINDS.find((p) => p.kind === kind)!.label}>
+      <section className="tool-pane" aria-label={paneLabel(kind)}>
         <header className="tool-head">{head}</header>
         <div className="tool-body">
           {kind === "changes" && (agent ? <ChangesPane key={agent} agent={agent} target={target?.agent === agent ? target : null} /> : <Blank text="打开一个会话，这里显示它每一轮改了什么。" />)}

@@ -7,7 +7,6 @@ const zhCN = {
   "common.clear": "清除",
   "common.more": "更多 ({n})",
   "common.less": "收起",
-  "common.expand": "展开全文",
   "common.none": "无",
 
   "nav.usage": "用量",
