@@ -1,7 +1,7 @@
 /* The commit graph (commitgraph.tsx). Branch colours come from theme variables, so light and
    dark both read: base grey, run branch the accent, tasks in turn. */
 
-.cgraph { --g0: var(--text-2); --g1: var(--accent); --g2: var(--codex); --g3: var(--claude); --g4: var(--warn); --g5: var(--danger); --g6: var(--codebuddy); --g7: var(--ok); --gx: var(--muted); display: flex; flex-direction: column; gap: 8px; min-height: 0; flex: 1; }
+.cgraph { --g0: var(--text-2); --g1: var(--accent); --g2: var(--codex); --g3: var(--claude); --g4: var(--warn); --g5: var(--danger); --g6: var(--codebuddy); --g7: var(--ok); --gx: var(--muted); display: flex; flex-direction: column; gap: 8px; min-height: 0; min-width: 0; flex: 1; container-type: inline-size; }
 .cgraph .g-c0 { --g: var(--g0); }
 .cgraph .g-c1 { --g: var(--g1); }
 .cgraph .g-c2 { --g: var(--g2); }
@@ -46,3 +46,16 @@
 .cgraph-diff-head .cgraph-subject { font-weight: 600; }
 .diff-head button.file-link { font-size: 12px; }
 
+
+.cgraph-ref-count, .cgraph-time-short { display: none; }
+@container (max-width: 559px) {
+  .cgraph-row { gap: 6px; }
+  .cgraph-author, .cgraph-sha, .cgraph-time-full { display: none; }
+  .cgraph-time-short { display: inline; }
+  .cgraph-time { width: 36px; }
+  .cgraph-ref { max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cgraph-ref ~ .cgraph-ref { display: none; }
+  .cgraph-ref-count { display: inline; flex: none; font-size: 11px; color: var(--muted); }
+  .cgraph-row .cgraph-subject { flex: 1; min-width: 0; }
+  .cgraph-merge-tag { display: none; }
+}

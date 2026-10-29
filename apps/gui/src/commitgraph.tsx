@@ -79,7 +79,7 @@ function Legend({ refs, colors, rows, base }: { refs: GraphRef[]; colors: Map<st
   const hidden = refs.filter((ref) => !primary.includes(ref));
   const matches = hidden.filter((ref) => `${ref.name} ${ref.task_title ?? ""}`.toLowerCase().includes(query.toLowerCase()));
   const item = (ref: GraphRef) => (
-    <span key={ref.name} className={`cgraph-legend-item g-c${colors.get(ref.name) ?? 0}`} title={ref.task_title ? `${ref.name} ? ${ref.task_title}` : ref.name}>
+    <span key={ref.name} className={`cgraph-legend-item g-c${colors.get(ref.name) ?? 0}`} title={ref.task_title ? `${ref.name} · ${ref.task_title}` : ref.name}>
       <span className="cgraph-dot" />{refLabel(ref)} <span className="muted">{KIND_WORD[ref.kind]}</span>
     </span>
   );
@@ -107,7 +107,7 @@ function Row({ row, width, active, onPick }: { row: GraphRow; width: number; act
   const { commit } = row;
   const cx = x(row.lane);
   return (
-    <button className={`cgraph-row ${active ? "active" : ""} ${row.merge ? "merge" : ""}`} onClick={onPick} role="option" aria-selected={active} title={`${commit.sha}\n${commit.subject}`}>
+    <button className={`cgraph-row ${active ? "active" : ""} ${row.merge ? "merge" : ""}`} onClick={onPick} role="option" aria-selected={active} title={`${commit.subject}\n${commit.author} \u00b7 ${time(commit.time)}\n${commit.sha}`}>
       <svg className="cgraph-lanes" width={width} height={ROW} viewBox={`0 0 ${width} ${ROW}`} aria-hidden>
         {row.top.map((e, i) => (
           <Edge key={`t${i}`} edge={e} y0={0} y1={MID} />
@@ -127,16 +127,27 @@ function Row({ row, width, active, onPick }: { row: GraphRow; width: number; act
             {refLabel(ref)}
           </span>
         ))}
+        {row.refs.length > 1 && <span className="cgraph-ref-count" title={row.refs.map((ref) => ref.name).join(", ")}>+{row.refs.length - 1}</span>}
         {row.merge && <span className="cgraph-merge-tag">合并</span>}
         <span className="cgraph-subject">{commit.subject || "（无标题）"}</span>
       </span>
       <span className="cgraph-author muted small">{commit.author}</span>
       <span className="cgraph-time muted small" title={time(commit.time)}>
-        {ago(commit.time)}
+        <span className="cgraph-time-full">{ago(commit.time)}</span><span className="cgraph-time-short">{shortTime(commit.time)}</span>
       </span>
       <code className="cgraph-sha">{commit.sha.slice(0, 7)}</code>
     </button>
   );
+}
+
+function shortTime(value: string): string {
+  const date = new Date(value);
+  const minutes = Math.max(0, Math.floor((Date.now() - date.getTime()) / 60000));
+  if (!Number.isFinite(minutes)) return value;
+  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 1440) return `${Math.floor(minutes / 60)}h`;
+  if (minutes < 10080) return `${Math.floor(minutes / 1440)}d`;
+  return `${date.getMonth() + 1}/${date.getDate()}`;
 }
 
 const color = (c: number) => (c < 0 ? "x" : String(c));
