@@ -3,7 +3,7 @@
 
 import { emptyHub } from "../views/Home.mock";
 import { approvalRun, deleteRun, graphRun, handoffRun, inPlaceRun, landingRun, longResultsRun, oauthRun, pausedRun, rerouteRun, reuseRun, reviewRun, syncRun, traceRun } from "../views/Run.mock";
-import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, failedEditSession, liveRun, liveSession, longNameScene, slashScene, soloSession, toolImagesSession } from "../views/Session.mock";
+import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, failedEditSession, liveRun, liveSession, longNameScene, slashScene, soloSession, toolImagePathsSession, toolImagesSession } from "../views/Session.mock";
 import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
 import { usageScene } from "../views/Usage.mock";
 import { agent, say, think, turn } from "./fixtures";
@@ -18,6 +18,7 @@ export type Scenario = {
 };
 
 export const SCENARIOS: Scenario[] = [
+  { key: "tool-image-paths", label: "工具参数图片路径", hint: "加载、拒绝与去重", build: () => toolImagePathsSession() },
   { key: "tool-images", label: "工具结果图片", hint: "图片结果与混合文字", build: () => toolImagesSession() },
   { key: "continuation-options", label: "持续推进设置", hint: "新建 Work 的持续推进开关及次数、间隔", build: () => {
     localStorage.setItem("crossagents.mode", JSON.stringify("run"));

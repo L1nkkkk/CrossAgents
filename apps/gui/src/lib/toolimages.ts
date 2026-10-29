@@ -25,3 +25,20 @@ export function extractToolImages(raw: string): { images: string[]; text: string
   if (rest === undefined || (Array.isArray(rest) && !rest.length)) return { images, text: "" };
   return { images, text: typeof rest === "string" ? rest : JSON.stringify(rest, null, 2) };
 }
+
+/** Find image-valued path arguments, including nested tool arguments. */
+export function extractToolImagePaths(raw: string): string[] {
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { return []; }
+  const paths = new Set<string>();
+  const visit = (v: unknown) => {
+    if (Array.isArray(v)) { v.forEach(visit); return; }
+    if (!v || typeof v !== "object") return;
+    for (const [key, item] of Object.entries(v)) {
+      if (/^(?:image_?path|file_?path|path|screenshot)$/i.test(key) && typeof item === "string" && /\.(?:png|jpe?g|gif|webp|bmp|ico|avif)$/i.test(item) && !/^(?:data:|https?:)/i.test(item)) paths.add(item);
+      else visit(item);
+    }
+  };
+  visit(value);
+  return [...paths];
+}
