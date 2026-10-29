@@ -57,6 +57,48 @@ export function soloSession(): { state: MockState; script: Step[]; route: string
   return { state, script: soloScript(nova.id, t2.turn.message_id, readId, q1.turn.message_id), route: `#/s/${nova.name}` };
 }
 
+/**
+ * Edits that failed (docs/TODO.md §九): `with-cli` could not find the block the model meant to
+ * replace, so nothing changed. The rows say so and show no +N −M; the diff they carry is what the
+ * model planned. The first one is opened, so the tool's own words are on screen; the second has no
+ * `detail.error` and falls back to its result text; the third edit went through, for comparison.
+ */
+export function failedEditSession(): { state: MockState; script: Step[]; route: string } {
+  const nova = agent({ name: "nova", plugin: "claude", model: "claude-sonnet-4-5", role: "worker", status: "idle", cwd: NOTES_REPO, topic: "README 标题改成中文", profile: { display_name: "Nova", title: "文档", color: "violet" } });
+  const state: MockState = { ...emptyState(), agents: [nova], plugins: plugins(), quota: quota() };
+  const mismatch = "模型返回的待替换代码块未匹配到整行";
+  const planned = fileDiff("README.md", 12, ["## Quick start"], ["## 快速开始", ""]);
+  const t1 = turn({
+    input: "把 README 的标题改成中文，顺便把 CLI 的 --json 说明补全。",
+    minutesAgo: 8,
+    took: 2,
+    items: [
+      think("README 第一个二级标题是 `## Quick start`，照它写待替换的代码块。"),
+      tool(`Read ${NOTES_REPO}/README.md`, "read"),
+      tool(`Edit ${NOTES_REPO}/README.md`, "edit", "failed", {
+        arguments: JSON.stringify({ path: "README.md", old_string: "## Quick start\n", new_string: "## 快速开始\n" }),
+        result: mismatch,
+        error: mismatch,
+        changes: [{ path: "README.md", kind: "update", diff: planned }],
+      }),
+      tool(`MultiEdit ${NOTES_REPO}/README.md`, "edit", "failed", {
+        result: mismatch,
+        changes: [{ path: "README.md", kind: "update", diff: planned }],
+      }),
+      tool(`Edit ${NOTES_REPO}/docs/cli.md`, "edit", "completed", {
+        changes: [{ path: "docs/cli.md", kind: "update", diff: fileDiff("docs/cli.md", 30, ["`--json` 输出 JSON。"], ["`--json`：所有命令都支持，输出一行一个 JSON 对象。"]) }],
+      }),
+      say("`docs/cli.md` 补好了。README 的标题改了两次都没成：with-cli 两次都回「模型返回的待替换代码块未匹配到整行」，文件没动，现在还是 `## Quick start`。"),
+    ],
+  });
+  state.transcripts.set(nova.id, transcript(nova, [t1], 12_000));
+  return {
+    state,
+    script: [{ at: 600, act: () => document.querySelector<HTMLButtonElement>(".tool-step.failed button.tool")?.click() }],
+    route: `#/s/${nova.name}`,
+  };
+}
+
 /** Nova's CLI crashes mid-turn: the session shows how its process ended. */
 export function crashedSession(): { state: MockState; script: Step[]; route: string } {
   const solo = soloSession();
