@@ -1037,7 +1037,10 @@ async fn the_approval_settles_policy_caps_and_who_does_each_task() {
     let EventKind::AgentInput { text, .. } = &told.kind else {
         unreachable!()
     };
-    assert!(text.contains("#a → helper (sonnet)"), "{text}");
+    assert!(
+        text.contains("#a 由模板 helper (sonnet) 派生的新执行会话执行"),
+        "{text}"
+    );
     assert!(
         text.contains("#a goes to helper (your plan said the default worker)"),
         "{text}"
