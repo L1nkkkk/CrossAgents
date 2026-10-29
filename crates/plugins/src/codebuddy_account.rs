@@ -7,6 +7,9 @@
 //! with the login's token, which goes nowhere else), each model's multiplier from the model
 //! list the CLI caches. Its CLI logs in only inside its TUI, so a login serves the CLI's web
 //! UI locally (`--serve`) and the login is done on that page.
+//!
+//! Explicit site accounts additionally move the child process's user-data profile, so
+//! mainland and international credentials cannot overwrite the machine's shared login.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader};
@@ -17,8 +20,8 @@ use std::time::{Duration, Instant, SystemTime};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use crossagents_core::{
-    Account, AccountProvider, AccountStatus, CoreError, DataSource, LoginCommand, ModelInfo,
-    RateWindow, RequestUsage, SessionUsage, TokenTotals,
+    Account, AccountProvider, AccountStatus, CodebuddySite, CoreError, DataSource, LoginCommand,
+    ModelInfo, RateWindow, RequestUsage, SessionUsage, TokenTotals,
 };
 use crossagents_drivers::codebuddy_native;
 use crossagents_drivers::process::system_proxy_env;
@@ -62,6 +65,46 @@ impl CodebuddyAccounts {
 
     /// `CODEBUDDY_CONFIG_DIR` for an account, except for the default directory.
     fn env_for(&self, account: &Account) -> Vec<(String, String)> {
+        if let Some(site) = account.codebuddy_site {
+            let profile = account.home.join("profile");
+            // The CLI's auth lives in CodeBuddyExtension outside CONFIG_DIR. Move the
+            // child process's user profile too, without changing the hub's environment.
+            return vec![
+                (
+                    "CODEBUDDY_CONFIG_DIR".into(),
+                    account.home.display().to_string(),
+                ),
+                ("USERPROFILE".into(), profile.display().to_string()),
+                ("HOME".into(), profile.display().to_string()),
+                (
+                    "APPDATA".into(),
+                    profile.join("AppData/Roaming").display().to_string(),
+                ),
+                (
+                    "LOCALAPPDATA".into(),
+                    profile.join("AppData/Local").display().to_string(),
+                ),
+                (
+                    "XDG_DATA_HOME".into(),
+                    profile.join(".local/share").display().to_string(),
+                ),
+                (
+                    "XDG_CONFIG_HOME".into(),
+                    profile.join(".config").display().to_string(),
+                ),
+                (
+                    "CODEBUDDY_INTERNET_ENVIRONMENT".into(),
+                    site.environment().into(),
+                ),
+                (
+                    "CODEBUDDY_COPILOT_INTERNET_ENVIRONMENT".into(),
+                    site.environment().into(),
+                ),
+                // A parent WorkBuddy/API login must not silently win over this login.
+                ("CODEBUDDY_API_KEY".into(), String::new()),
+                ("CODEBUDDY_AUTH_TOKEN".into(), String::new()),
+            ];
+        }
         if self
             .default_home()
             .is_some_and(|home| same_path(&home, &account.home))
@@ -104,7 +147,11 @@ impl CodebuddyAccounts {
                 return (status, Vec::new());
             }
         };
-        read_initialize(&mut status, &init, !self.env_for(account).is_empty());
+        read_initialize(
+            &mut status,
+            &init,
+            account.codebuddy_site.is_none() && !self.env_for(account).is_empty(),
+        );
         let mut models = models_of(&init);
         let login = init.get("account").filter(|a| a.is_object());
         if let Some(uid) = login.and_then(|a| a.get("uid")).and_then(Value::as_str) {
@@ -117,8 +164,12 @@ impl CodebuddyAccounts {
                 model.credit_multiplier = rates.get(&model.id).copied();
             }
         }
-        if let Some((token, uid)) =
-            login.and_then(|a| Some((a.get("token")?.as_str()?, a.get("uid")?.as_str()?)))
+        if account.codebuddy_site == Some(CodebuddySite::International) && status.logged_in {
+            // Do not send an international credential to the mainland billing API.
+            status.note = Some("International CodeBuddy login and models are available; its billing endpoint is not integrated".into());
+        } else if account.codebuddy_site != Some(CodebuddySite::International)
+            && let Some((token, uid)) =
+                login.and_then(|a| Some((a.get("token")?.as_str()?, a.get("uid")?.as_str()?)))
         {
             match billing_summary(token, uid).await {
                 Ok(summary) => read_summary(&mut status, &summary),
@@ -548,6 +599,48 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn site_logins_probes_and_agents_share_private_profiles() {
+        let provider = CodebuddyAccounts::new(None);
+        let accounts = [CodebuddySite::China, CodebuddySite::International].map(|site| Account {
+            id: site.environment().into(),
+            provider: "codebuddy".into(),
+            label: String::new(),
+            home: PathBuf::from(format!("/accounts/{}", site.environment())),
+            codebuddy_site: Some(site),
+            created_at: Utc::now(),
+        });
+        for account in &accounts {
+            let env: BTreeMap<_, _> = provider.agent_env(account).into_iter().collect();
+            let login = provider.login_command(account);
+            for (key, value) in &env {
+                assert_eq!(login.env.get(key), Some(value), "{key}");
+            }
+            assert_eq!(
+                env["CODEBUDDY_CONFIG_DIR"],
+                account.home.display().to_string()
+            );
+            assert_eq!(
+                env["USERPROFILE"],
+                account.home.join("profile").display().to_string()
+            );
+            assert!(env["LOCALAPPDATA"].starts_with(&env["USERPROFILE"]));
+            assert_eq!(env["CODEBUDDY_API_KEY"], "");
+            assert_eq!(env["CODEBUDDY_AUTH_TOKEN"], "");
+            assert_eq!(
+                env["CODEBUDDY_INTERNET_ENVIRONMENT"],
+                account.codebuddy_site.unwrap().environment()
+            );
+        }
+        let a: BTreeMap<_, _> = provider.agent_env(&accounts[0]).into_iter().collect();
+        let b: BTreeMap<_, _> = provider.agent_env(&accounts[1]).into_iter().collect();
+        assert_ne!(a["USERPROFILE"], b["USERPROFILE"]);
+        assert_ne!(
+            a["CODEBUDDY_INTERNET_ENVIRONMENT"],
+            b["CODEBUDDY_INTERNET_ENVIRONMENT"]
+        );
+    }
+
+    #[test]
     fn counts_each_model_call_once_from_transcripts() {
         let home = tempfile::tempdir().unwrap();
         let dir = home.path().join("projects").join("c-w");
@@ -722,6 +815,7 @@ mod tests {
     fn the_default_directory_keeps_codebuddy_config_dir_unset() {
         let accounts = CodebuddyAccounts::new(None);
         let account = |home: PathBuf| Account {
+            codebuddy_site: None,
             id: "codebuddy".into(),
             provider: "codebuddy".into(),
             label: String::new(),

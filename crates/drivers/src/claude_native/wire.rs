@@ -106,7 +106,19 @@ impl Flavor {
         }
         match self {
             Self::Claude => "api.anthropic.com".to_owned(),
-            Self::Codebuddy => "www.codebuddy.ai".to_owned(),
+            Self::Codebuddy => {
+                let region = env
+                    .iter()
+                    .rev()
+                    .find(|(key, _)| key.eq_ignore_ascii_case("CODEBUDDY_INTERNET_ENVIRONMENT"))
+                    .map(|(_, value)| value.clone())
+                    .or_else(|| std::env::var("CODEBUDDY_INTERNET_ENVIRONMENT").ok());
+                if region.as_deref() == Some("internal") {
+                    "www.workbuddy.cn".to_owned()
+                } else {
+                    "www.codebuddy.ai".to_owned()
+                }
+            }
         }
     }
 }
@@ -1156,6 +1168,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn codebuddy_site_selects_its_own_proxy_probe_host() {
+        for (region, host) in [
+            ("internal", "www.workbuddy.cn"),
+            ("external", "www.codebuddy.ai"),
+        ] {
+            let env = vec![
+                ("ANTHROPIC_BASE_URL".into(), String::new()),
+                ("CODEBUDDY_INTERNET_ENVIRONMENT".into(), region.into()),
+            ];
+            assert_eq!(Flavor::Codebuddy.api_host(&env), host);
+            assert_eq!(Flavor::Claude.api_host(&env), "api.anthropic.com");
+        }
+    }
+
+    #[test]
     fn launch_args_for_new_resumed_and_forked_sessions() {
         let launch = Launch {
             model: Some("haiku".into()),
@@ -1305,7 +1332,10 @@ mod tests {
     #[test]
     fn the_api_host_follows_the_gateway_an_agent_points_the_cli_at() {
         // An empty value keeps the process environment out of these: it means "unset".
-        let unset = vec![("ANTHROPIC_BASE_URL".to_owned(), String::new())];
+        let unset = vec![
+            ("ANTHROPIC_BASE_URL".to_owned(), String::new()),
+            ("CODEBUDDY_INTERNET_ENVIRONMENT".to_owned(), String::new()),
+        ];
         assert_eq!(Flavor::Claude.api_host(&unset), "api.anthropic.com");
         assert_eq!(Flavor::Codebuddy.api_host(&unset), "www.codebuddy.ai");
 

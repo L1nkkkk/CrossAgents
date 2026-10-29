@@ -1317,6 +1317,7 @@ mod tests {
     async fn accounts_round_trip() {
         let store = SqliteStore::open_in_memory().await.unwrap();
         let account = Account {
+            codebuddy_site: None,
             id: "codex-main".into(),
             provider: "codex".into(),
             label: "main".into(),

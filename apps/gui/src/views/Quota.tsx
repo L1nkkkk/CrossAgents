@@ -112,6 +112,7 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
           <span className="series-key" style={{ background: color }} />
           <VendorMark plugin={account.provider} size={14} />
           <span className="account-name">{account.label || account.id}</span>
+          {account.codebuddy_site && <span className="chip">{account.codebuddy_site === "china" ? "国内站" : "国际站"}</span>}
           {plan && <span className="chip">{plan}</span>}
         </button>
         <div className="account-meters">
@@ -458,6 +459,7 @@ function AddAccount({ providers, onDone }: { providers: string[]; onDone: () => 
   const [id, setId] = useState("");
   const [label, setLabel] = useState("");
   const [source, setSource] = useState<"import" | "new">("new");
+  const [site, setSite] = useState<"china" | "international">("china");
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const chosen = provider || providers[0] || "";
@@ -468,12 +470,17 @@ function AddAccount({ providers, onDone }: { providers: string[]; onDone: () => 
     setError(undefined);
     try {
       const account = await api.createAccount({
+        codebuddy_site: chosen === "codebuddy" && source === "new" ? site : null,
         id: id.trim(),
         provider: chosen,
         label: label.trim() || null,
         home: null,
         import_default: source === "import",
       });
+      if (chosen === "codebuddy" && source === "new" && account.codebuddy_site !== site) {
+        await api.deleteAccount(account.id);
+        throw new Error("当前 hub 不支持独立站点登录；请同时更新 hub 和 GUI。此次未启动登录，刚登记的账号已撤回。");
+      }
       // A fresh login home starts logged out: open the login right away.
       if (source === "new") {
         const started = await api.login(account.id);
@@ -512,6 +519,15 @@ function AddAccount({ providers, onDone }: { providers: string[]; onDone: () => 
           <input type="radio" checked={source === "import"} onChange={() => setSource("import")} /> 使用本机已有的登录
         </label>
       </div>
+      {chosen === "codebuddy" && source === "new" && (
+        <Field label="CodeBuddy 站点">
+          <select value={site} onChange={(e) => setSite(e.target.value as "china" | "international")}>
+            <option value="china">国内站</option>
+            <option value="international">国际站</option>
+          </select>
+          <span className="muted">两个站点请分别添加账号。登录页中选择相应站点完成登录，之后可分别绑定给队友。</span>
+        </Field>
+      )}
       <ErrorBox error={error} />
       <div className="row">
         <button type="submit" className="primary" disabled={busy || !id.trim() || !chosen}>

@@ -1,5 +1,7 @@
 # CrossAgents
 
+CodeBuddy 国内站与国际站的独立登录设置见 [使用说明](docs/CODEBUDDY-SITES.md)。
+
 CrossAgents 是一个分层的多 agent 编码编排器：**强模型（Opus / GPT-5 级）负责设计、拆解和验收，
 便宜模型（Haiku / mini 级）并行写代码**。每个任务在独立的 git worktree 里完成，由 hub 亲自跑验收命令，
 失败自动打回重试、必要时升级到更强的模型，通过后合并到一个集成分支，最终是否合入由你决定。

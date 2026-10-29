@@ -49,6 +49,8 @@ pub struct Accounts {
     statuses: Statuses,
     /// Accounts whose status is being read in the background.
     refreshing: Arc<std::sync::Mutex<HashSet<String>>>,
+    /// Serialize directory claims so concurrent site accounts cannot share a profile.
+    creating: Mutex<()>,
 }
 
 impl Accounts {
@@ -68,6 +70,7 @@ impl Accounts {
             observed: std::sync::Mutex::default(),
             statuses: Arc::default(),
             refreshing: Arc::default(),
+            creating: Mutex::new(()),
         }
     }
 
@@ -83,6 +86,7 @@ impl Accounts {
                 continue;
             }
             let probe = Account {
+                codebuddy_site: None,
                 id: name.clone(),
                 provider: name.clone(),
                 label: String::new(),
@@ -177,7 +181,11 @@ impl Accounts {
     }
 
     pub async fn create(&self, req: CreateAccountRequest) -> Result<Account, CoreError> {
+        let _creating = self.creating.lock().await;
         validate_slug(&req.id)?;
+        if req.codebuddy_site.is_some() && (req.provider != "codebuddy" || req.import_default) {
+            return Err(CoreError::Conflict("a CodeBuddy site requires a new, independent CodeBuddy login; it cannot import the machine login".into()));
+        }
         let provider = self.provider(&req.provider)?;
         let home = match (req.home, req.import_default) {
             (Some(home), _) => PathBuf::from(home),
@@ -188,7 +196,34 @@ impl Accounts {
         };
         std::fs::create_dir_all(&home)
             .map_err(|e| CoreError::Storage(format!("cannot create {}: {e}", home.display())))?;
+        let home = if req.codebuddy_site.is_some() {
+            let home = dunce::canonicalize(&home)
+                .map_err(|e| CoreError::Storage(format!("cannot resolve account home: {e}")))?;
+            if provider
+                .default_home()
+                .is_some_and(|default| same_path(&default, &home))
+                || self
+                    .store()
+                    .list_accounts()
+                    .await?
+                    .iter()
+                    .any(|a| same_path(&a.home, &home))
+            {
+                return Err(CoreError::Conflict(
+                    "use a separate home for each CodeBuddy site account".into(),
+                ));
+            }
+            for directory in ["profile/AppData/Roaming", "profile/AppData/Local"] {
+                std::fs::create_dir_all(home.join(directory)).map_err(|e| {
+                    CoreError::Storage(format!("cannot create private login profile: {e}"))
+                })?;
+            }
+            home
+        } else {
+            home
+        };
         let account = Account {
+            codebuddy_site: req.codebuddy_site,
             label: req.label.unwrap_or_else(|| req.id.clone()),
             id: req.id,
             provider: req.provider,

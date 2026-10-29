@@ -16,6 +16,10 @@ use crate::error::CoreError;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Account {
+    /// Explicit CodeBuddy site: uses a private login profile as well as settings.
+    /// None preserves the existing machine login behavior.
+    #[serde(default)]
+    pub codebuddy_site: Option<CodebuddySite>,
     /// Unique, same rules as agent names (e.g. `codex-main`).
     pub id: String,
     /// The provider that manages it, e.g. `codex`.
@@ -24,6 +28,23 @@ pub struct Account {
     /// The provider's home for this account (for Codex: its `CODEX_HOME`).
     pub home: PathBuf,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum CodebuddySite {
+    China,
+    International,
+}
+
+impl CodebuddySite {
+    pub fn environment(self) -> &'static str {
+        match self {
+            Self::China => "internal",
+            Self::International => "external",
+        }
+    }
 }
 
 /// Where a status figure came from.
@@ -275,6 +296,22 @@ mod tests {
     fn masks_email() {
         assert_eq!(mask_email("zhang@gmail.com"), "z***@gmail.com");
         assert_eq!(mask_email("nope"), "***");
+    }
+
+    #[test]
+    fn codebuddy_accounts_keep_old_logins_and_sites_round_trip() {
+        let old = serde_json::json!({"id":"codebuddy", "provider":"codebuddy", "label":"old", "home":"/old", "created_at":"2026-10-30T00:00:00Z"});
+        let account: Account = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(account.codebuddy_site, None);
+        for site in ["china", "international"] {
+            let mut data = old.clone();
+            data["codebuddy_site"] = site.into();
+            let account: Account = serde_json::from_value(data).unwrap();
+            assert_eq!(
+                serde_json::to_value(account).unwrap()["codebuddy_site"],
+                site
+            );
+        }
     }
 
     #[test]
