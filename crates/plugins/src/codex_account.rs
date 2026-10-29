@@ -16,7 +16,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, TimeZone, Utc};
 use crossagents_core::{
     Account, AccountProvider, AccountStatus, CoreError, Credits, DataSource, LoginCommand,
-    ModelInfo, RateWindow, SessionUsage, TokenTotals, mask_email,
+    ModelInfo, RateWindow, RequestUsage, SessionUsage, TokenTotals, mask_email,
 };
 use serde_json::Value;
 
@@ -32,6 +32,9 @@ pub struct CodexAccounts {
     live: Mutex<HashMap<PathBuf, (Instant, AccountStatus)>>,
     /// Parsed session logs by path, valid while size and mtime are unchanged.
     scanned: Mutex<HashMap<PathBuf, ScanEntry>>,
+    /// The same logs with every request timed (see [`scan_requests`]), for the usage series.
+    /// Read whole, so kept apart from `scanned`, which serves [`Self::sessions`] cheaply.
+    detailed: Mutex<HashMap<PathBuf, ScanEntry>>,
 }
 
 impl Default for CodexAccounts {
@@ -51,6 +54,7 @@ impl CodexAccounts {
                 .unwrap_or_default(),
             live: Mutex::default(),
             scanned: Mutex::default(),
+            detailed: Mutex::default(),
         }
     }
 }
@@ -307,9 +311,118 @@ fn scan_file(path: &Path) -> Scanned {
                 sessions: 1,
                 ..Default::default()
             }),
+            requests: Vec::new(),
         });
     }
     out
+}
+
+/// The whole log, with each request timed. Codex reports `token_count` after every request
+/// with the session's running totals, so the step from one report to the next is that
+/// request's use; the report's own timestamp is when it finished. Unlike [`scan_file`] this
+/// reads big logs to the end, so it is only used where every request is wanted.
+fn scan_requests(path: &Path) -> Option<SessionUsage> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut session_id = None;
+    let mut started_at = None;
+    let mut originator = None;
+    let mut model: Option<String> = None;
+    let mut previous = TokenTotals::default();
+    let mut totals: Option<TokenTotals> = None;
+    let mut requests = Vec::new();
+    // These logs run to hundreds of megabytes, so the line buffer is reused and only the
+    // few lines that carry session metadata or a token count are parsed.
+    let mut reader = BufReader::with_capacity(1 << 20, file);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let Ok(text) = std::str::from_utf8(&line) else {
+            continue;
+        };
+        let interesting = text.contains("\"session_meta\"")
+            || text.contains("\"turn_context\"")
+            || text.contains("\"token_count\"");
+        if !interesting {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(text) else {
+            continue;
+        };
+        let payload = &v["payload"];
+        match (v["type"].as_str(), payload["type"].as_str()) {
+            (Some("session_meta"), _) => {
+                session_id = payload["id"].as_str().map(str::to_owned);
+                started_at =
+                    parse_time(&payload["timestamp"]).or_else(|| parse_time(&v["timestamp"]));
+                originator = payload["originator"].as_str().map(str::to_owned);
+            }
+            (Some("turn_context"), _) => {
+                if let Some(m) = payload["model"].as_str() {
+                    model = Some(m.to_owned());
+                }
+            }
+            (Some("event_msg"), Some("token_count")) => {
+                let t = &payload["info"]["total_token_usage"];
+                if !t.is_object() {
+                    continue;
+                }
+                let num = |key: &str| t[key].as_u64().unwrap_or(0);
+                let running = TokenTotals {
+                    sessions: 1,
+                    input_tokens: num("input_tokens"),
+                    cached_input_tokens: num("cached_input_tokens"),
+                    output_tokens: num("output_tokens"),
+                    reasoning_output_tokens: num("reasoning_output_tokens"),
+                    credits: 0.0,
+                };
+                let call = TokenTotals {
+                    sessions: 0,
+                    input_tokens: running.input_tokens.saturating_sub(previous.input_tokens),
+                    cached_input_tokens: running
+                        .cached_input_tokens
+                        .saturating_sub(previous.cached_input_tokens),
+                    output_tokens: running.output_tokens.saturating_sub(previous.output_tokens),
+                    reasoning_output_tokens: running
+                        .reasoning_output_tokens
+                        .saturating_sub(previous.reasoning_output_tokens),
+                    credits: 0.0,
+                };
+                previous = running.clone();
+                totals = Some(running);
+                // A report that adds nothing repeats an earlier one: not a request of its own.
+                let used = call.input_tokens
+                    + call.cached_input_tokens
+                    + call.output_tokens
+                    + call.reasoning_output_tokens;
+                if used > 0
+                    && let Some(at) = parse_time(&v["timestamp"])
+                {
+                    requests.push(RequestUsage {
+                        at,
+                        model: model.clone(),
+                        totals: call,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    requests.sort_by_key(|r| r.at);
+    Some(SessionUsage {
+        session_id: session_id?,
+        started_at: started_at?,
+        model,
+        originator,
+        totals: totals.unwrap_or(TokenTotals {
+            sessions: 1,
+            ..Default::default()
+        }),
+        requests,
+    })
 }
 
 /// Every `rollout-*.jsonl` under `sessions/` and `archived_sessions/`.
@@ -513,6 +626,48 @@ impl AccountProvider for CodexAccounts {
         .await
         .map_err(|e| CoreError::Storage(format!("cannot scan Codex sessions: {e}")))?;
         let mut cache = self.scanned.lock().unwrap();
+        for (path, modified, len, usage) in scanned {
+            result.extend(usage.clone());
+            cache.insert(path, (modified, len, usage));
+        }
+        result.sort_by_key(|s| std::cmp::Reverse(s.started_at));
+        Ok(result)
+    }
+
+    /// The same sessions with each request timed (see [`scan_requests`]). These logs are read
+    /// whole, so this has its own cache and leaves [`Self::sessions`] fast.
+    async fn usage_sessions(&self, account: &Account) -> Result<Vec<SessionUsage>, CoreError> {
+        let files = session_files(&account.home);
+        let mut result = Vec::with_capacity(files.len());
+        let mut to_scan = Vec::new();
+        {
+            let cache = self.detailed.lock().unwrap();
+            for path in files {
+                let Ok(meta) = path.metadata() else { continue };
+                let (modified, len) = (
+                    meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                    meta.len(),
+                );
+                match cache.get(&path) {
+                    Some((m, l, usage)) if *m == modified && *l == len => {
+                        result.extend(usage.clone());
+                    }
+                    _ => to_scan.push((path, modified, len)),
+                }
+            }
+        }
+        let scanned = tokio::task::spawn_blocking(move || {
+            to_scan
+                .into_iter()
+                .map(|(path, modified, len)| {
+                    let usage = scan_requests(&path);
+                    (path, modified, len, usage)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .map_err(|e| CoreError::Storage(format!("cannot scan Codex sessions: {e}")))?;
+        let mut cache = self.detailed.lock().unwrap();
         for (path, modified, len, usage) in scanned {
             result.extend(usage.clone());
             cache.insert(path, (modified, len, usage));
@@ -757,6 +912,44 @@ pub(crate) mod tests {
         // Cached: a second call does not hit the (now closed) server.
         let again = provider.status(&account(home.path())).await;
         assert_eq!(again.source, Some(DataSource::Live));
+    }
+
+    #[test]
+    fn times_every_request_from_the_running_token_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-two.jsonl");
+        let report = |ts: &str, input: u64, cached: u64, out: u64| {
+            serde_json::json!({ "timestamp": ts, "type": "event_msg", "payload": {
+                "type": "token_count", "info": { "total_token_usage": {
+                    "input_tokens": input, "cached_input_tokens": cached, "output_tokens": out } } } })
+            .to_string()
+        };
+        let text = [
+            serde_json::json!({ "timestamp": "2026-10-21T23:59:00Z", "type": "session_meta",
+                "payload": { "id": "two", "timestamp": "2026-10-21T23:59:00Z", "originator": "codex_cli_rs" } })
+            .to_string(),
+            serde_json::json!({ "type": "turn_context", "payload": { "model": "gpt-5" } }).to_string(),
+            report("2026-10-21T23:59:30Z", 100, 60, 10),
+            report("2026-10-22T00:01:00Z", 300, 200, 25),
+        ]
+        .join("\n");
+        std::fs::write(&path, text).unwrap();
+
+        let usage = scan_requests(&path).unwrap();
+        assert_eq!(usage.session_id, "two");
+        assert_eq!(usage.totals.input_tokens, 300);
+        // Two reports: the second one's step is its own request (200 in, 100 cached, 15 out).
+        assert_eq!(usage.requests.len(), 2);
+        assert_eq!(usage.requests[0].totals.input_tokens, 100);
+        assert_eq!(usage.requests[0].totals.cached_input_tokens, 60);
+        assert_eq!(usage.requests[1].totals.input_tokens, 200);
+        assert_eq!(usage.requests[1].totals.cached_input_tokens, 140);
+        assert_eq!(usage.requests[1].totals.output_tokens, 15);
+        assert_eq!(
+            usage.requests[1].at.to_rfc3339(),
+            "2026-10-22T00:01:00+00:00"
+        );
+        assert_eq!(usage.requests[1].model.as_deref(), Some("gpt-5"));
     }
 
     #[test]

@@ -172,6 +172,23 @@ pub struct SessionUsage {
     /// Who started it, e.g. `crossagents` or the vendor's own CLI.
     pub originator: Option<String>,
     pub totals: TokenTotals,
+    /// Each model call of the session, oldest first, when the vendor's logs time them.
+    /// Empty when only the session total is known: a session is then counted on the day it
+    /// started, while a session with requests is counted per request (see
+    /// [`crate::AccountProvider::usage_sessions`]).
+    #[serde(default)]
+    pub requests: Vec<RequestUsage>,
+}
+
+/// One model call (one request to the vendor), timed by the vendor's own log.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RequestUsage {
+    /// When the request was made (UTC; a usage series buckets it by local time).
+    pub at: DateTime<Utc>,
+    /// The model it asked for, when the log says (a session may switch models mid-way).
+    pub model: Option<String>,
+    /// What it used. `sessions` stays 0: a request is not a session.
+    pub totals: TokenTotals,
 }
 
 /// A model the account may use.
@@ -216,6 +233,12 @@ pub trait AccountProvider: Send + Sync {
     async fn status(&self, account: &Account) -> AccountStatus;
     /// Per-session token use from the vendor's local logs, newest first.
     async fn sessions(&self, account: &Account) -> Result<Vec<SessionUsage>, CoreError>;
+    /// The same, with each request's own time and tokens (`SessionUsage::requests`) for the
+    /// vendors whose logs record them. The default drops that detail, so a caller falls back
+    /// to session-day figures.
+    async fn usage_sessions(&self, account: &Account) -> Result<Vec<SessionUsage>, CoreError> {
+        self.sessions(account).await
+    }
     /// Models this account may use, best first. Empty if unknown.
     async fn models(&self, account: &Account) -> Vec<ModelInfo>;
     /// The command that logs this account in (interactive, usually opens a browser).

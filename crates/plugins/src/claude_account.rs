@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use crossagents_core::{
     Account, AccountProvider, AccountStatus, CoreError, DataSource, LoginCommand, ModelInfo,
-    SessionUsage, TokenTotals, mask_email,
+    RequestUsage, SessionUsage, TokenTotals, mask_email,
 };
 use crossagents_drivers::claude_native::{self, wire};
 use crossagents_drivers::process::system_proxy_env;
@@ -184,16 +184,20 @@ fn scan_transcript(path: &Path) -> Option<SessionUsage> {
     let mut started_at: Option<DateTime<Utc>> = None;
     let mut model = None;
     let mut originator = None;
-    let mut replies: HashMap<String, Value> = HashMap::new();
+    // Per reply: the line's time, the model it used and its usage (the last line of a reply
+    // carries the whole reply's usage).
+    let mut replies: HashMap<String, (Option<DateTime<Utc>>, Option<String>, Value)> =
+        HashMap::new();
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         let Ok(entry) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        let at = entry
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(|t| t.parse().ok());
         if started_at.is_none() {
-            started_at = entry
-                .get("timestamp")
-                .and_then(Value::as_str)
-                .and_then(|t| t.parse().ok());
+            started_at = at;
         }
         if originator.is_none() {
             originator = entry
@@ -205,18 +209,19 @@ fn scan_transcript(path: &Path) -> Option<SessionUsage> {
             continue;
         }
         let message = entry.get("message").unwrap_or(&Value::Null);
+        let asked = message
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|m| !m.starts_with('<'))
+            .map(str::to_owned);
         if model.is_none() {
-            model = message
-                .get("model")
-                .and_then(Value::as_str)
-                .filter(|m| !m.starts_with('<'))
-                .map(str::to_owned);
+            model = asked.clone();
         }
         if let (Some(id), Some(usage)) = (
             message.get("id").and_then(Value::as_str),
             message.get("usage"),
         ) {
-            replies.insert(id.to_owned(), usage.clone());
+            replies.insert(id.to_owned(), (at, asked, usage.clone()));
         }
     }
     if replies.is_empty() {
@@ -226,24 +231,40 @@ fn scan_transcript(path: &Path) -> Option<SessionUsage> {
         sessions: 1,
         ..TokenTotals::default()
     };
-    for usage in replies.values() {
+    let mut requests = Vec::with_capacity(replies.len());
+    for (at, asked, usage) in replies.into_values() {
+        let mut call = TokenTotals::default();
         let num = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
-        totals.input_tokens += num("input_tokens")
+        call.input_tokens += num("input_tokens")
             + num("cache_read_input_tokens")
             + num("cache_creation_input_tokens");
-        totals.cached_input_tokens += num("cache_read_input_tokens");
-        totals.output_tokens += num("output_tokens");
-        totals.reasoning_output_tokens += usage
+        call.cached_input_tokens += num("cache_read_input_tokens");
+        call.output_tokens += num("output_tokens");
+        call.reasoning_output_tokens += usage
             .pointer("/output_tokens_details/thinking_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        totals.input_tokens += call.input_tokens;
+        totals.cached_input_tokens += call.cached_input_tokens;
+        totals.output_tokens += call.output_tokens;
+        totals.reasoning_output_tokens += call.reasoning_output_tokens;
+        // A line without a time of its own belongs to the session's start.
+        let at = at.or(started_at).unwrap_or_default();
+        requests.push(RequestUsage {
+            at,
+            model: asked.clone().or_else(|| model.clone()),
+            totals: call,
+        });
     }
+    requests.sort_by_key(|r| r.at);
+    let session_id = path.file_stem()?.to_string_lossy().into_owned();
     Some(SessionUsage {
-        session_id: path.file_stem()?.to_string_lossy().into_owned(),
+        session_id,
         started_at: started_at.unwrap_or_default(),
         model,
         originator,
         totals,
+        requests,
     })
 }
 
@@ -404,6 +425,17 @@ mod tests {
         assert_eq!(usage.totals.input_tokens, 224);
         assert_eq!(usage.totals.cached_input_tokens, 200);
         assert_eq!(usage.totals.output_tokens, 27);
+        // Each reply is one timed request; the last line of a reply carries its usage.
+        assert_eq!(usage.requests.len(), 2);
+        assert!(
+            usage
+                .requests
+                .iter()
+                .all(|r| r.at.to_rfc3339() == "2026-10-22T04:32:11.128+00:00")
+        );
+        assert_eq!(usage.requests[0].model.as_deref(), Some("claude-haiku-5-5"));
+        let outputs: u64 = usage.requests.iter().map(|r| r.totals.output_tokens).sum();
+        assert_eq!(outputs, 27);
         assert!(scan_transcript(&dir.join("empty.jsonl")).is_none());
     }
 

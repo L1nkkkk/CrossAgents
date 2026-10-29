@@ -377,6 +377,26 @@ async fn shutdown_over_api_stops_hub_and_removes_hub_file() {
     assert!(!t.paths.hub_file().exists());
 }
 
+/// `GET /v1/usage/series` (crates/hub/src/usage_series.rs) refuses what it cannot parse,
+/// before reading any log.
+#[tokio::test]
+async fn usage_series_checks_its_parameters() {
+    let t = TestHub::start().await;
+    let resp = t.get("/v1/usage/series?range=1y").send().await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: Value = resp.json().await.unwrap();
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("7d, 30d, 90d or all")
+    );
+    let resp = t.get("/v1/usage/series?group=week").send().await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let resp = t.get("/v1/usage/series?source=nope").send().await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 /// docs/API-AUTH.md §3, docs/tasks/DOGFOOD.md §7: a valid credential below the route's level
 /// gets 403 naming the level it lacks; an invalid one still 401.
 #[tokio::test]

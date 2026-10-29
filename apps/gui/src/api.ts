@@ -47,6 +47,9 @@ import type { TurnDiffResponse } from "@bindings/TurnDiffResponse";
 import type { UpdateRunPolicyRequest } from "@bindings/UpdateRunPolicyRequest";
 import type { UsageGroup } from "@bindings/UsageGroup";
 import type { UsageResponse } from "@bindings/UsageResponse";
+import type { UsageSeriesGroup } from "@bindings/UsageSeriesGroup";
+import type { UsageSeriesRange } from "@bindings/UsageSeriesRange";
+import type { UsageSeriesResponse } from "@bindings/UsageSeriesResponse";
 import type { FileTreeResponse } from "@bindings/FileTreeResponse";
 import type { FileContentResponse } from "@bindings/FileContentResponse";
 import type { ResolvePathsRequest } from "@bindings/ResolvePathsRequest";
@@ -283,6 +286,13 @@ export const api = {
   initRepo: (path: string) => request<InitRepoRequest>("POST", "/v1/repos/init", { path } satisfies InitRepoRequest),
 
   usage: (by: UsageGroup) => request<UsageResponse>("GET", `/v1/usage?by=${by}`),
+  /** Token use and cost day by day, across every account (`source: "all"`) or one.
+   * `granularity` says whether days count calls or sessions; see the response's notes. */
+  usageSeries: (range: UsageSeriesRange = "30d", group: UsageSeriesGroup = "total", source = "all") =>
+    request<UsageSeriesResponse>(
+      "GET",
+      `/v1/usage/series?range=${range}&group=${group}&source=${enc(source)}`,
+    ),
 
   questions: (all = false) => request<ListQuestionsResponse>("GET", `/v1/questions${all ? "?all=true" : ""}`),
   answer: (id: string, answer: string) => request<HumanItem>("POST", `/v1/questions/${enc(id)}/answer`, { answer }),

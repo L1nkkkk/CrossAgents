@@ -29,7 +29,8 @@ use crossagents_api_types::{
     QuotaResponse, RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse,
     ResolvedPath, RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
     SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript,
-    TurnDiffResponse, UpdateRunPolicyRequest, UsageGroup, UsageResponse,
+    TurnDiffResponse, UpdateRunPolicyRequest, UsageGroup, UsageResponse, UsageSeriesGroup,
+    UsageSeriesRange, UsageSeriesResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, Attachment,
@@ -126,6 +127,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/plugins/{name}/install", post(install_plugin))
         .route("/v1/plugins/{name}/upgrade", post(upgrade_plugin))
         .route("/v1/usage", get(usage))
+        .route("/v1/usage/series", get(usage_series))
         .route("/v1/accounts", get(list_accounts).post(create_account))
         .route("/v1/quota", get(quota))
         .route("/v1/questions", get(list_questions))
@@ -2049,6 +2051,53 @@ async fn usage(
     Ok(Json(
         crate::usage::compute(state.store().as_ref(), query.by).await?,
     ))
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageSeriesParams {
+    #[serde(default)]
+    range: Option<String>,
+    #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// `GET /v1/usage/series`: token use and cost day by day, across accounts (see
+/// [`crate::usage_series`]). Defaults: the last 30 days, one total, every account.
+async fn usage_series(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<UsageSeriesParams>,
+) -> ApiResult<Json<UsageSeriesResponse>> {
+    let range = match params.range.as_deref().unwrap_or("30d") {
+        "7d" => UsageSeriesRange::Days7,
+        "30d" => UsageSeriesRange::Days30,
+        "90d" => UsageSeriesRange::Days90,
+        "all" => UsageSeriesRange::All,
+        other => {
+            return Err(AppError::bad_request(format!(
+                "range must be 7d, 30d, 90d or all, not {other:?}"
+            )));
+        }
+    };
+    let group = match params.group.as_deref().unwrap_or("total") {
+        "total" => UsageSeriesGroup::Total,
+        "model" => UsageSeriesGroup::Model,
+        "origin" => UsageSeriesGroup::Origin,
+        "agent" => UsageSeriesGroup::Agent,
+        "run" => UsageSeriesGroup::Run,
+        other => {
+            return Err(AppError::bad_request(format!(
+                "group must be total, model, origin, agent or run, not {other:?}"
+            )));
+        }
+    };
+    let query = crate::usage_series::SeriesQuery {
+        range,
+        group,
+        source: params.source.unwrap_or_else(|| "all".into()),
+    };
+    Ok(Json(state.accounts.usage_series(query).await?))
 }
 
 #[derive(Debug, Default, serde::Deserialize)]

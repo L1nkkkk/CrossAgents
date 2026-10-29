@@ -1217,6 +1217,166 @@ pub struct AccountUsageResponse {
     pub total_cache_hit_rate: f64,
 }
 
+/// `GET /v1/usage/series?range=`: the window counted, today included.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum UsageSeriesRange {
+    #[serde(rename = "7d")]
+    Days7,
+    #[default]
+    #[serde(rename = "30d")]
+    Days30,
+    #[serde(rename = "90d")]
+    Days90,
+    /// Everything the logs hold.
+    #[serde(rename = "all")]
+    All,
+}
+
+impl UsageSeriesRange {
+    /// How many days the window holds, today included (`all` counts whatever there is).
+    pub fn days(self) -> i64 {
+        match self {
+            Self::Days7 => 7,
+            Self::Days30 => 30,
+            Self::Days90 => 90,
+            Self::All => 0,
+        }
+    }
+}
+
+/// How a usage series is split besides its days.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageSeriesGroup {
+    /// One total, no rows: `groups` is empty.
+    #[default]
+    Total,
+    Model,
+    /// CrossAgents sessions vs. the vendor's own tools.
+    Origin,
+    Agent,
+    Run,
+}
+
+/// What the days count. `request`: each model call at the time it was made, so `turns` and
+/// `max_request` are known. `session`: each session on the day it started, when not every
+/// source times its calls; `turns` and `max_request` are then null.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageGranularity {
+    Request,
+    Session,
+}
+
+/// One day of the series; days without use are present with zeros.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UsageSeriesDay {
+    /// `YYYY-MM-DD`, in the machine's local time zone.
+    pub date: String,
+    /// Input tokens served from the prompt cache.
+    #[ts(type = "number")]
+    pub cached_input: u64,
+    /// Input tokens not from the cache (`input - cached_input`).
+    #[ts(type = "number")]
+    pub new_input: u64,
+    #[ts(type = "number")]
+    pub output: u64,
+    /// Part of `output` spent on reasoning.
+    #[ts(type = "number")]
+    pub reasoning: u64,
+    /// What the priced part of the day costs, in USD; `null` when nothing used that day has
+    /// a known price (see `unpriced_models`).
+    pub cost_usd: Option<f64>,
+}
+
+/// One key's use over the whole window (`group=total` has none of these).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UsageSeriesGroupRow {
+    pub key: String,
+    /// For people: the model id, "CrossAgents", an agent's name, a run id…
+    pub label: String,
+    #[ts(type = "number")]
+    pub cached_input: u64,
+    #[ts(type = "number")]
+    pub new_input: u64,
+    #[ts(type = "number")]
+    pub output: u64,
+    pub cost_usd: Option<f64>,
+}
+
+/// The window's totals.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UsageSeriesTotal {
+    #[ts(type = "number")]
+    pub cached_input: u64,
+    #[ts(type = "number")]
+    pub new_input: u64,
+    #[ts(type = "number")]
+    pub output: u64,
+    #[ts(type = "number")]
+    pub reasoning: u64,
+    /// Sessions with use in the window.
+    pub sessions: u32,
+    /// Model calls in the window; `null` at `granularity: session`.
+    #[ts(type = "number | null")]
+    pub turns: Option<u64>,
+    /// input + output of the biggest single call; `null` at `granularity: session`.
+    #[ts(type = "number | null")]
+    pub max_request: Option<u64>,
+    pub cost_usd: Option<f64>,
+}
+
+/// One account the series was read from. A source that could not be read says why and does
+/// not spoil the rest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UsageSeriesSource {
+    pub id: String,
+    pub label: String,
+    /// e.g. `claude`, `codex`, `codebuddy`.
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+/// `GET /v1/usage/series?range=7d|30d|90d|all&group=total|model|origin|agent|run&source=all|<account id>`:
+/// token use and cost, day by day, across accounts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UsageSeriesResponse {
+    pub range: UsageSeriesRange,
+    pub group: UsageSeriesGroup,
+    /// `all`, or the account id asked for.
+    pub source: String,
+    /// Whether the days count each request or each session (see [`UsageGranularity`]).
+    pub granularity: UsageGranularity,
+    /// The earliest day with use in the logs (outside the window too), or `null` when there
+    /// is none.
+    pub first_day: Option<String>,
+    /// Every day of the window, oldest first, zeros for days without use.
+    pub days: Vec<UsageSeriesDay>,
+    /// One row per key over the window, busiest first; empty for `group=total`.
+    pub groups: Vec<UsageSeriesGroupRow>,
+    pub total: UsageSeriesTotal,
+    /// Tokens of the window just before this one, the same length; `null` for `range=all`.
+    #[ts(type = "number | null")]
+    pub previous_total: Option<u64>,
+    /// Models with use in the window that have no known price, so `cost_usd` leaves them out.
+    pub unpriced_models: Vec<String>,
+    /// The accounts read, and why any of them was not.
+    pub sources: Vec<UsageSeriesSource>,
+    /// In plain words: the granularity, and what cannot be known (why `turns` or
+    /// `max_request` are missing), and how cost is counted.
+    pub notes: Vec<String>,
+}
+
 /// A login was started; the human finishes it in the browser.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
