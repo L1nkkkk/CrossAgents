@@ -108,7 +108,17 @@ async fn the_first_worker_gets_an_assign_card_from_the_lead() {
         run["planner"].as_str().map(str::to_owned)
     );
     assert_eq!(card.from_name.as_deref(), Some("boss"));
-    assert_eq!(card.to_name, "rex");
+    // The card names the execution session that works the task, and the template it came from.
+    assert!(card.to_name.starts_with("w-"), "{card:?}");
+    assert_ne!(card.to_name, "rex");
+    assert_eq!(card.template.as_deref(), Some("rex"));
+    let session: Value = t
+        .get(&format!("/v1/agents/{}", card.to))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(session["name"], card.to_name, "{session}");
     assert_eq!(card.task_key, "a");
     assert_eq!(card.files, ["a.txt", "src/"]);
     assert_eq!(card.decisions, ["fn a() -> u8"]);
@@ -139,8 +149,10 @@ async fn task_assign_hands_over_the_files_the_worker_changed() {
     reassign(&t, &run, "ada").await;
     let card = card(&mut w, HandoffKind::Reassign).await;
     assert_eq!(card.from, Some(first.to));
-    assert_eq!(card.from_name.as_deref(), Some("rex"));
-    assert_eq!(card.to_name, "ada");
+    assert_eq!(card.from_name.as_deref(), Some(first.to_name.as_str()));
+    assert_eq!(card.template.as_deref(), Some("ada"));
+    assert!(card.to_name.starts_with("w-"), "{card:?}");
+    assert_ne!(card.to_name, first.to_name);
     assert!(
         card.files.contains(&"notes.txt".to_owned()),
         "{:?}",
@@ -153,7 +165,7 @@ async fn task_assign_hands_over_the_files_the_worker_changed() {
         "the card came after the worker's first message"
     );
     assert!(text.contains("notes.txt"), "{text}");
-    assert!(text.contains("rex"), "{text}");
+    assert!(text.contains(&first.to_name), "{text}");
     assert!(
         !text.contains("Someone already worked on this; their changes"),
         "{text}"
@@ -218,7 +230,8 @@ async fn a_quota_reroute_is_a_reroute_card_with_the_same_reason() {
     let first = card(&mut w, HandoffKind::Assign).await;
     let card = card(&mut w, HandoffKind::Reroute).await;
     assert_eq!(card.from, Some(first.to));
-    assert_eq!(card.to_name, "coder");
+    assert_eq!(card.template.as_deref(), Some("coder"));
+    assert!(card.to_name.starts_with("w-"), "{card:?}");
     let reason = card.reason.clone().expect("a reroute says why");
     assert!(reason.contains("codex-b"), "{reason}");
     let rerouted: Vec<String> = w
@@ -339,7 +352,15 @@ async fn giving_it_to_the_escalation_teammate_is_an_escalation() {
 
     reassign(&t, &run, "ada").await;
     let card = card(&mut w, HandoffKind::Escalate).await;
-    assert_eq!(card.to_name, "ada");
+    assert_eq!(card.template.as_deref(), Some("ada"));
+    assert_ne!(card.to_name, "ada");
+    let session: Value = t
+        .get(&format!("/v1/agents/{}", card.to))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(session["name"], card.to_name, "{session}");
     let reason = card.reason.expect("an escalation says why");
     assert!(reason.contains("escalation"), "{reason}");
     assert!(card.files.contains(&"a.txt".to_owned()), "{:?}", card.files);
@@ -393,7 +414,7 @@ async fn each_card_carries_what_its_own_worker_left() {
     let to_kai = w
         .until(
             "the card to kai",
-            |e| matches!(&e.kind, EventKind::TaskHandedOff { handoff, .. } if handoff.to_name == "kai"),
+            |e| matches!(&e.kind, EventKind::TaskHandedOff { handoff, .. } if handoff.template.as_deref() == Some("kai")),
         )
         .await;
     let EventKind::TaskHandedOff {
@@ -403,7 +424,7 @@ async fn each_card_carries_what_its_own_worker_left() {
         unreachable!()
     };
     assert_eq!(to_kai.from, Some(to_ada.to));
-    assert_eq!(to_kai.from_name.as_deref(), Some("ada"));
+    assert_eq!(to_kai.from_name.as_deref(), Some(to_ada.to_name.as_str()));
     assert_eq!(
         to_kai.summary.as_deref(),
         Some("ada is halfway"),
@@ -445,7 +466,7 @@ async fn a_worker_that_said_nothing_hands_over_nothing_said() {
     let to_kai = w
         .until(
             "the card to kai",
-            |e| matches!(&e.kind, EventKind::TaskHandedOff { handoff, .. } if handoff.to_name == "kai"),
+            |e| matches!(&e.kind, EventKind::TaskHandedOff { handoff, .. } if handoff.template.as_deref() == Some("kai")),
         )
         .await;
     let EventKind::TaskHandedOff {
@@ -454,7 +475,72 @@ async fn a_worker_that_said_nothing_hands_over_nothing_said() {
     else {
         unreachable!()
     };
-    assert_eq!(to_kai.from_name.as_deref(), Some("ada"));
+    assert_eq!(to_kai.from_name.as_deref(), Some(to_ada.to_name.as_str()));
     assert!(to_kai.reason.is_none(), "{to_kai:?}");
     assert!(to_kai.summary.is_none(), "{to_kai:?}");
+}
+
+/// The lead hears which execution session took the task, by the name it answers to.
+#[tokio::test]
+async fn the_lead_is_told_the_execution_sessions_name() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    let run = start(&t, json!({ "goal": "[write a.txt=alpha]" })).await;
+    let card = card(&mut w, HandoffKind::Assign).await;
+    let lead = run["planner"].as_str().unwrap().to_owned();
+    let want = format!("#a 已派给 {}（来自模板 rex）", card.to_name);
+    let event = w
+        .find("the lead's dispatch notice", |e| {
+            matches!(&e.kind, EventKind::AgentInput { id, text, .. } | EventKind::AgentInputUpdated { id, text, .. }
+                if id.to_string() == lead && text.contains(&want))
+        })
+        .await;
+    let (EventKind::AgentInput { text, .. } | EventKind::AgentInputUpdated { text, .. }) =
+        event.kind
+    else {
+        unreachable!()
+    };
+    assert!(text.contains("给它发消息用这个名字"), "{text}");
+}
+
+/// A worker cloned from a template is the run's execution session, not anyone's recruit: the
+/// template's `spawned_by_*` keys stay on the template and do not come along.
+#[tokio::test]
+async fn a_cloned_worker_does_not_carry_the_templates_recruit_marks() {
+    let repo = git_repo();
+    let t = TestHub::start().await;
+    let boss = t
+        .add_agent_in("boss", Some("opus"), "planner", repo.path())
+        .await;
+    let resp = t
+        .post(
+            "/v1/agents",
+            json!({ "name": "rex", "plugin": "mock", "model": "haiku", "role": "worker",
+                    "cwd": repo.path().display().to_string(),
+                    "config": { "spawned_by_agent": boss.id, "spawned_by_run": "an-old-run" } }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let mut w = t.watch().await;
+    start(&t, json!({ "goal": "[write a.txt=alpha]" })).await;
+    let card = card(&mut w, HandoffKind::Assign).await;
+    assert_eq!(card.template.as_deref(), Some("rex"));
+
+    let clone: Value = t
+        .get(&format!("/v1/agents/{}", card.to))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(clone["name"], card.to_name, "{clone}");
+    assert!(clone["config"].get("spawned_by_agent").is_none(), "{clone}");
+    assert!(clone["config"].get("spawned_by_run").is_none(), "{clone}");
+    let template: Value = t.get("/v1/agents/rex").await.json().await.unwrap();
+    assert_eq!(template["config"]["spawned_by_run"], "an-old-run", "{template}");
+    assert_eq!(
+        template["config"]["spawned_by_agent"],
+        json!(boss.id),
+        "{template}"
+    );
 }
