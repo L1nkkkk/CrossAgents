@@ -890,12 +890,12 @@ button.tool { border: none; background: none; padding: 1px 0; text-align: left; 
 button.tool:hover:not(:disabled) { background: none; color: var(--text); }
 button.tool:disabled { opacity: 1; cursor: default; }
 button.tool .chip.tiny { padding: 0 6px; line-height: 16px; font-family: var(--font-sans); }
-/* A failed call says so on the line, and shows no +N −M: the diff it carries is the one the model
-   meant to make, not a change that happened (docs/TODO.md §九). */
-.tool-step.failed .title { color: var(--danger-text); }
+/* A failed call says so on its line (OneLine, red ✕), and shows no +N −M: the diff it carries
+   is the one the model meant to make, not a change that happened (docs/TODO.md §九). */
 .tool-step .out { font-size: 11.5px; max-height: 360px; padding: 8px 10px; color: var(--text-2); }
 .tool-step .out.live { max-height: none; margin-left: 16px; opacity: 0.85; }
 .tool-detail { display: flex; flex-direction: column; gap: 6px; margin: 2px 0 6px 16px; padding-left: 10px; border-left: 2px solid var(--border); }
+.oneline-body .tool-detail { margin-left: 0; }
 .tool-detail .cmd { font-size: 11.5px; background: none; padding: 0; color: var(--text); }
 .item-warn { color: var(--warn-text); background: var(--warn-bg); border-radius: var(--radius); padding: 7px 11px; font-size: 13px; white-space: pre-wrap; }
 .turn-diff { border: none; background: none; padding: 0; font-size: 12px; color: var(--muted); display: inline-flex; gap: 5px; align-items: center; }
@@ -1428,27 +1428,29 @@ html, body { overflow: hidden; }
 .name-edit { font: inherit; font-weight: 600; font-size: 14px; padding: 1px 6px; width: 14em; }
 .name-edit.bad { border-color: var(--danger); }
 
-/* A call that changed the team or the code (ActionCard in views/Session.tsx): its own card with
-   the outcome, green when done, red with the hub's reason when refused. */
-.action-card { border: 1px solid var(--border); border-left: 3px solid var(--ok); border-radius: var(--radius); background: var(--surface); padding: 7px 12px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
-.action-card.refused { border-left-color: var(--danger); background: color-mix(in srgb, var(--danger) 6%, var(--surface)); }
-.action-card.running { border-left-color: var(--warn); }
-.action-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.action-head .icon { color: var(--ok); flex-shrink: 0; }
-.action-card.refused .action-head .icon { color: var(--danger); }
-.action-name { font-weight: 600; white-space: nowrap; }
-.action-what { color: var(--text-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12px; }
-.action-state { margin-left: auto; font-size: 12px; color: var(--muted); white-space: nowrap; }
-.action-card.refused .action-state { color: var(--danger-text); font-weight: 600; }
-.action-reason { color: var(--danger-text); font-size: 12.5px; line-height: 1.5; }
-.action-reason .fold-body { white-space: pre-wrap; overflow-wrap: anywhere; }
-
-/* Fold (components.tsx): long text cut to a few lines; opened, it scrolls inside a bounded box. */
-.fold-body { overflow: hidden; line-height: 1.5; }
-.fold.cut:not(.open) .fold-body { -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent); mask-image: linear-gradient(to bottom, #000 60%, transparent); }
-.fold.open .fold-body { max-height: min(420px, 60vh); overflow: auto; }
-.fold-toggle { border: none; background: none; padding: 2px 0 0; font: inherit; font-size: 12px; color: var(--accent-text); cursor: pointer; }
-.fold-toggle:hover { text-decoration: underline; background: none; }
+/* OneLine (components.tsx): a result as one line — status icon, what it was, a one-line gist;
+   the icon (or the line) opens the whole thing under it. No card: the coloured icon carries the
+   state, and the opened body scrolls in a bounded box instead of pushing the conversation. */
+.oneline { display: flex; flex-direction: column; gap: 3px; min-width: 0; font-size: 13px; }
+.oneline-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.oneline-icon { flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: none; border-radius: var(--radius-sm); background: none; color: var(--muted); }
+button.oneline-icon { cursor: pointer; }
+button.oneline-icon:hover:not(:disabled) { background: var(--hover); }
+.oneline.ok .oneline-icon { color: var(--ok); }
+.oneline.danger .oneline-icon { color: var(--danger); }
+.oneline.warn .oneline-icon { color: var(--warn); }
+.oneline.running .oneline-icon { color: var(--accent); }
+.oneline-main { flex: 1; display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 1px 4px; margin-left: -4px; border: none; background: none; border-radius: var(--radius-sm); font: inherit; color: inherit; text-align: left; }
+button.oneline-main { cursor: pointer; }
+button.oneline-main:hover:not(:disabled) { background: var(--hover); }
+.oneline-title { flex-shrink: 0; font-weight: 600; white-space: nowrap; }
+.oneline-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); font-size: 12.5px; }
+.oneline.danger .oneline-summary { color: var(--danger-text); }
+.oneline.warn .oneline-summary { color: var(--warn-text); }
+.oneline-body { margin: 2px 0 2px 27px; max-height: min(420px, 60vh); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-2); font-size: 12.5px; line-height: 1.55; }
+.oneline-body .prose { white-space: normal; color: var(--text); }
+/* A refusal's reason: the hub's words, in its colour. */
+.action-reason { color: var(--danger-text); }
 .rail-spend { display: flex; justify-content: space-between; gap: 8px; margin: 8px 4px 0; padding-top: 6px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
 .rail-spend-v { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 500; }
 

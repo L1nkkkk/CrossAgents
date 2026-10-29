@@ -15,15 +15,17 @@ import {
   Avatar,
   ErrorBox,
   FileScopeProvider,
-  Fold,
   Icon,
   List,
+  OneLine,
   Prose,
   StatusChip,
   agentName,
   agentTitle,
   ago,
+  beyondFirstLine,
   displayName,
+  firstLine,
   isAgent,
   runTone,
   sessionHref,
@@ -522,10 +524,11 @@ function Ending({ run, closing, onDone }: { run: Run; closing: boolean; onDone: 
         )}
         {landable && <RunChanges run={run} />}
         {run.summary && (
-          // The lead's summary can run to pages; its opening lines are the gist.
-          <Fold lines={5} className="run-summary">
-            <Prose text={run.summary} />
-          </Fold>
+          // The lead's summary can run to pages: one line says what it concluded, the whole
+          // thing opens under it.
+          <OneLine className="run-summary" tone="ok" icon={<Icon name="info" size={13} />} title="总结" summary={firstLine(run.summary)}>
+            {beyondFirstLine(run.summary) ? <Prose text={run.summary} /> : undefined}
+          </OneLine>
         )}
         <ErrorBox error={error} />
       </div>
