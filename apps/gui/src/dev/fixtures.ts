@@ -280,7 +280,7 @@ export function turn(init: {
 }
 
 /** A /context-like breakdown of `used` tokens, shaped like Claude Code 2.1.308 answers it. */
-function contextParts(used: number, size: number) {
+export function contextParts(used: number, size: number) {
   const fixed = { system_prompt: 2_848, system_tools: 14_200, mcp_tools: 3_100, skills: 2_505 };
   const messages = Math.max(0, used - Object.values(fixed).reduce((a, b) => a + b, 0));
   const buffer = 33_000;

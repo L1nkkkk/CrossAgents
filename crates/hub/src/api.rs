@@ -15,21 +15,24 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Utc};
 use crossagents_api_types::{
-    API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentExecution,
-    AgentExecutionResponse, AgentSettingsRequest, AnswerRequest, ApiError, ApproveRunRequest,
-    ArchiveAgentRequest, AttachmentContent, AttachmentUpload, ChangesResponse, CliInfo,
-    CliInstallAccepted, CommitGraph, ConnectInfo, CreateAccountRequest, CreateAgentRequest,
-    CreateRunRequest, DeleteRunResponse, DiffSide, ErrorCode, FileContentResponse, FileEntry,
-    FileKind, FileTreeResponse, FinishRequest, GraphCommit, GraphRef, GraphRefKind, HealthResponse,
-    HubInfo, InitRepoRequest, LandRequest, ListAccountsResponse, ListAgentsResponse,
-    ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
-    ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
-    RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse, ResolvedPath, RunDetail,
-    RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest, SetPluginModelsRequest,
-    SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse,
-    UpdateRunPolicyRequest, UsageGroup, UsageResponse,
+    API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentCommandsResponse,
+    AgentExecution, AgentExecutionResponse, AgentSettingsRequest, AnswerRequest, ApiError,
+    ApproveRunRequest, ArchiveAgentRequest, AttachmentContent, AttachmentUpload, ChangesResponse,
+    CliInfo, CliInstallAccepted, CommitGraph, ConnectInfo, CreateAccountRequest,
+    CreateAgentRequest, CreateRunRequest, DeleteRunResponse, DiffSide, ErrorCode,
+    FileContentResponse, FileEntry, FileKind, FileTreeResponse, FinishRequest, GraphCommit,
+    GraphRef, GraphRefKind, HealthResponse, HubInfo, ImageContent, InitRepoRequest, LandRequest,
+    ListAccountsResponse, ListAgentsResponse, ListNotesResponse, ListPluginsResponse,
+    ListQuestionsResponse, ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo,
+    QuotaResponse, RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse,
+    ResolvedPath, RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
+    SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript,
+    TurnDiffResponse, UpdateRunPolicyRequest, UsageGroup, UsageResponse, UsageSeriesGroup,
+    UsageSeriesRange, UsageSeriesResponse,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, Attachment,
@@ -95,6 +98,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/agents/{key}/stop", post(stop_agent))
         .route("/v1/agents/{key}/cancel", post(cancel_agent))
         .route("/v1/agents/{key}/compact", post(compact_agent))
+        .route("/v1/agents/{key}/commands", get(agent_commands))
         .route(
             "/v1/agents/{key}/messages",
             post(send_message).layer(DefaultBodyLimit::max(MESSAGE_BODY_LIMIT)),
@@ -125,6 +129,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/plugins/{name}/install", post(install_plugin))
         .route("/v1/plugins/{name}/upgrade", post(upgrade_plugin))
         .route("/v1/usage", get(usage))
+        .route("/v1/usage/series", get(usage_series))
         .route("/v1/accounts", get(list_accounts).post(create_account))
         .route("/v1/quota", get(quota))
         .route("/v1/questions", get(list_questions))
@@ -152,6 +157,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{key}/tasks/{task}/review", post(review_task))
         .route("/v1/agents/{key}/files/tree", get(agent_files_tree))
         .route("/v1/agents/{key}/files/content", get(agent_files_content))
+        .route("/v1/agents/{key}/files/image", get(agent_files_image))
         .route("/v1/agents/{key}/files/resolve", post(agent_files_resolve))
         .route("/v1/runs/{key}/files/tree", get(run_files_tree))
         .route("/v1/runs/{key}/files/content", get(run_files_content))
@@ -876,6 +882,14 @@ async fn compact_agent(
 ) -> ApiResult<StatusCode> {
     state.runtime.compact(&AgentKey::parse(&key)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The slash commands and skills the agent's own CLI brings, when it reports them.
+async fn agent_commands(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<AgentCommandsResponse>> {
+    Ok(Json(state.runtime.commands(&AgentKey::parse(&key)).await?))
 }
 
 /// Takes back a message that is still waiting for its turn.
@@ -1689,6 +1703,35 @@ async fn agent_files_content(
     files_content(&state, FilesScope::Agent(&agent), q).await
 }
 
+/// `GET /v1/agents/{key}/files/image?path=`: an image a tool call named by path, base64 like
+/// an attachment, so a client can show it as a `data:` URL (crate::image says what is
+/// allowed; anything else is the usual error body with the reason).
+async fn agent_files_image(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Query(q): Query<FilesQuery>,
+) -> ApiResult<Json<ImageContent>> {
+    let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    let input = q.path();
+    if input.trim().is_empty() {
+        return Err(AppError::bad_request(
+            "path is missing: `?path=<an image inside the agent's working directory or the system temp directory>`",
+        ));
+    }
+    let root = state
+        .orchestrator
+        .files_root(FilesScope::Agent(&agent))
+        .await?;
+    let abs = crate::image::locate(&root, input)?;
+    let (kind, bytes) = crate::image::load(&abs, input).await?;
+    Ok(Json(ImageContent {
+        path: abs.display().to_string(),
+        mime: kind.content_type().to_owned(),
+        size: bytes.len() as u64,
+        data: STANDARD.encode(&bytes),
+    }))
+}
+
 async fn run_files_content(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
@@ -2040,6 +2083,53 @@ async fn usage(
     Ok(Json(
         crate::usage::compute(state.store().as_ref(), query.by).await?,
     ))
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageSeriesParams {
+    #[serde(default)]
+    range: Option<String>,
+    #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// `GET /v1/usage/series`: token use and cost day by day, across accounts (see
+/// [`crate::usage_series`]). Defaults: the last 30 days, one total, every account.
+async fn usage_series(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<UsageSeriesParams>,
+) -> ApiResult<Json<UsageSeriesResponse>> {
+    let range = match params.range.as_deref().unwrap_or("30d") {
+        "7d" => UsageSeriesRange::Days7,
+        "30d" => UsageSeriesRange::Days30,
+        "90d" => UsageSeriesRange::Days90,
+        "all" => UsageSeriesRange::All,
+        other => {
+            return Err(AppError::bad_request(format!(
+                "range must be 7d, 30d, 90d or all, not {other:?}"
+            )));
+        }
+    };
+    let group = match params.group.as_deref().unwrap_or("total") {
+        "total" => UsageSeriesGroup::Total,
+        "model" => UsageSeriesGroup::Model,
+        "origin" => UsageSeriesGroup::Origin,
+        "agent" => UsageSeriesGroup::Agent,
+        "run" => UsageSeriesGroup::Run,
+        other => {
+            return Err(AppError::bad_request(format!(
+                "group must be total, model, origin, agent or run, not {other:?}"
+            )));
+        }
+    };
+    let query = crate::usage_series::SeriesQuery {
+        range,
+        group,
+        source: params.source.unwrap_or_else(|| "all".into()),
+    };
+    Ok(Json(state.accounts.usage_series(query).await?))
 }
 
 #[derive(Debug, Default, serde::Deserialize)]

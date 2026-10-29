@@ -771,6 +771,11 @@ export function graphRun(page: "run" | "session" = "run"): { state: MockState; s
     { id: "p0", parents: [], subject: "初始化项目", author: "Sam", minutesAgo: 60 * 24 * 9, diff: fileDiff("README.md", 0, [], ["# shop", "", "## 本地启动", "", "cargo run -- serve"]) },
   ];
 
+  // Long history and many local refs exercise scrolling and the collapsed legend.
+  list[list.length - 1].parents = ["history-0"];
+  for (let i = 0; i < 45; i++) list.push({ id: `history-${i}`, parents: i < 44 ? [`history-${i + 1}`] : [], subject: `历史提交 ${i + 1}`, author: "Sam", minutesAgo: 60 * (250 + i) });
+  const extraRefs: GraphRef[] = Array.from({ length: 36 }, (_, i) => ({ name: `feature/archive-${i + 1}`, kind: "other", sha: s(`history-${i}`) }));
+
   const graphWith = (refs: GraphRef[], extra: Partial<CommitGraph> = {}): CommitGraph => ({
     ...extra,
     refs,
@@ -792,6 +797,7 @@ export function graphRun(page: "run" | "session" = "run"): { state: MockState; s
       taskRef(ta, "a2"),
       taskRef(tb, "b2"),
       taskRef(tc, "c2"),
+      ...extraRefs,
     ],
     { base_branch: base, run_branch: runBranch },
   );
@@ -804,6 +810,7 @@ export function graphRun(page: "run" | "session" = "run"): { state: MockState; s
       { name: branchOf("c"), kind: "other", sha: s("c2") },
       { name: runBranch, kind: "other", sha: s("m2") },
       { name: base, kind: "other", sha: s("x1") },
+      ...extraRefs,
     ]),
   );
   scene.state.graphs = graphs;

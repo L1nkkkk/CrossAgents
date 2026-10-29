@@ -299,6 +299,30 @@ pub struct ContextPart {
     pub kind: String,
 }
 
+/// Something the agent's own CLI brings besides its tools: a slash command, or a skill.
+/// What a GUI offers when the session's driver reports them (`system/init` in Claude Code's
+/// stream-json).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct AgentCommand {
+    /// As the CLI names it, without the leading `/`.
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub description: Option<String>,
+    pub kind: AgentCommandKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommandKind {
+    /// A slash command (`/compact`, `/review`).
+    Command,
+    /// A skill the CLI can load.
+    Skill,
+}
+
 /// Cumulative token counts of a session.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -511,6 +535,13 @@ pub trait DriverSession: Send + Sync {
     /// What this session's agent takes as files, when it declared it at start (ACP agents
     /// do). `None`: whatever its driver's [`Capabilities::attachments`] says.
     fn attachment_support(&self) -> Option<AttachmentSupport> {
+        None
+    }
+
+    /// The slash commands and skills the agent's own CLI reports for this session (Claude
+    /// Code's `system/init`), names without the leading `/`. `None` when the driver does not
+    /// report them, or the session has not said yet.
+    fn commands(&self) -> Option<Vec<AgentCommand>> {
         None
     }
 

@@ -9,6 +9,7 @@ import type { ChangesResponse } from "@bindings/ChangesResponse";
 import type { CommitGraph } from "@bindings/CommitGraph";
 import type { CliInstallAccepted } from "@bindings/CliInstallAccepted";
 import type { AttachmentContent } from "@bindings/AttachmentContent";
+import type { ImageContent } from "@bindings/ImageContent";
 import type { Task } from "@bindings/Task";
 import type { TaskReviewRequest } from "@bindings/TaskReviewRequest";
 import type { Agent } from "@bindings/Agent";
@@ -28,6 +29,7 @@ import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
 import type { CreateRunRequest } from "@bindings/CreateRunRequest";
 import type { DeleteRunResponse } from "@bindings/DeleteRunResponse";
 import type { AgentExecutionResponse } from "@bindings/AgentExecutionResponse";
+import type { AgentCommandsResponse } from "@bindings/AgentCommandsResponse";
 import type { ResumeCommandResponse } from "@bindings/ResumeCommandResponse";
 import type { HubInfo } from "@bindings/HubInfo";
 import type { ListAgentsResponse } from "@bindings/ListAgentsResponse";
@@ -46,6 +48,9 @@ import type { TurnDiffResponse } from "@bindings/TurnDiffResponse";
 import type { UpdateRunPolicyRequest } from "@bindings/UpdateRunPolicyRequest";
 import type { UsageGroup } from "@bindings/UsageGroup";
 import type { UsageResponse } from "@bindings/UsageResponse";
+import type { UsageSeriesGroup } from "@bindings/UsageSeriesGroup";
+import type { UsageSeriesRange } from "@bindings/UsageSeriesRange";
+import type { UsageSeriesResponse } from "@bindings/UsageSeriesResponse";
 import type { FileTreeResponse } from "@bindings/FileTreeResponse";
 import type { FileContentResponse } from "@bindings/FileContentResponse";
 import type { ResolvePathsRequest } from "@bindings/ResolvePathsRequest";
@@ -209,6 +214,9 @@ export const api = {
     request<void>("DELETE", `/v1/agents/${enc(key)}/messages/${enc(messageId)}`),
   cancelAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/cancel`),
   compactAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/compact`),
+  /** The slash commands and skills the agent's own CLI brings; `known` is false until it
+   * reports them (a session has started). */
+  agentCommands: (key: string) => request<AgentCommandsResponse>("GET", `/v1/agents/${enc(key)}/commands`),
   stopAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/stop`),
   setModel: (key: string, model: string | null, effort?: string) => request<Agent>("POST", `/v1/agents/${enc(key)}/model`, { model, effort }),
   renameAgent: (key: string, name: string) => request<Agent>("POST", `/v1/agents/${enc(key)}/name`, { name }),
@@ -279,6 +287,13 @@ export const api = {
   initRepo: (path: string) => request<InitRepoRequest>("POST", "/v1/repos/init", { path } satisfies InitRepoRequest),
 
   usage: (by: UsageGroup) => request<UsageResponse>("GET", `/v1/usage?by=${by}`),
+  /** Token use and cost day by day, across every account (`source: "all"`) or one.
+   * `granularity` says whether days count calls or sessions; see the response's notes. */
+  usageSeries: (range: UsageSeriesRange = "30d", group: UsageSeriesGroup = "total", source = "all") =>
+    request<UsageSeriesResponse>(
+      "GET",
+      `/v1/usage/series?range=${range}&group=${group}&source=${enc(source)}`,
+    ),
 
   questions: (all = false) => request<ListQuestionsResponse>("GET", `/v1/questions${all ? "?all=true" : ""}`),
   answer: (id: string, answer: string) => request<HumanItem>("POST", `/v1/questions/${enc(id)}/answer`, { answer }),
@@ -296,6 +311,12 @@ export const api = {
   /** A file's text (up to 1 MiB), or `binary` without it. */
   filesContent,
   filesResolve,
+  /** An image a tool call named by path (a `ViewImage` tool's `image_path`, say), base64:
+   * show it as `data:${mime};base64,${data}`, as an attachment is shown. The hub serves only
+   * png, jpg, jpeg, gif, webp, bmp and svg, at most 10 MB, inside the agent's working
+   * directory or the system temp directory; anything else is an ApiError with the reason. */
+  agentImage: (key: string, path: string) =>
+    request<ImageContent>("GET", `/v1/agents/${enc(key)}/files/image?path=${enc(path)}`),
 };
 
 export function errorText(err: unknown): string {

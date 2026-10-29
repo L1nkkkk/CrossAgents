@@ -28,6 +28,7 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "GET", path: /^\/v1\/agents\/[^/]+\/execution$/, level: "read" },
   { method: "POST", path: /^\/v1\/agents\/[^/]+\/execution\/interrupt$/, level: "write" },
   { method: "GET", path: /^\/v1\/agents\/[^/]+\/resume-command$/, level: "read" },
+  { method: "GET", path: /^\/v1\/agents\/[^/]+\/commands$/, level: "read" },
   { method: "GET", path: /^\/v1\/agents\/[^/]+\/transcript$/, level: "read" },
   { method: "GET", path: /^\/v1\/agents\/[^/]+\/turns\/[^/]+\/diff$/, level: "read" },
   { method: "GET", path: /^\/v1\/agents\/[^/]+\/attachments\/[^/]+$/, level: "read" },
@@ -47,6 +48,8 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "POST", path: /^\/v1\/runs\/[^/]+\/tasks\/[^/]+\/review$/, level: "write" },
   { method: "POST", path: /^\/v1\/repos\/init$/, level: "write" },
   { method: "GET", path: /^\/v1\/usage$/, level: "read" },
+  // `?range=&group=&source=` rides along; `route()` drops it before matching.
+  { method: "GET", path: /^\/v1\/usage\/series$/, level: "read" },
   { method: "GET", path: /^\/v1\/questions$/, level: "read" },
   { method: "POST", path: /^\/v1\/questions\/[^/]+\/(answer|dismiss)$/, level: "write" },
   { method: "GET", path: /^\/v1\/quota$/, level: "read" },
@@ -57,6 +60,8 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   // Files of a scope: a session's cwd, a run's checkout, a task's worktree.
   { method: "GET", path: /^\/v1\/(agents\/[^/]+|runs\/[^/]+(\/tasks\/[^/]+)?)\/files\/(tree|content)$/, level: "read" },
   { method: "POST", path: /^\/v1\/(agents\/[^/]+|runs\/[^/]+(\/tasks\/[^/]+)?)\/files\/resolve$/, level: "read" },
+  // An image a tool call named by path, for a thumbnail (agents only: it is the agent's cwd).
+  { method: "GET", path: /^\/v1\/agents\/[^/]+\/files\/image$/, level: "read" },
   // The commit graph and one commit's diff.
   { method: "GET", path: /^\/v1\/(runs|agents)\/[^/]+\/graph$/, level: "read" },
   { method: "GET", path: /^\/v1\/(runs|agents)\/[^/]+\/commits\/[^/]+\/diff$/, level: "read" },

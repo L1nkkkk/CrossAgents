@@ -13,6 +13,9 @@ import { HandoffLine } from "../handoff";
 import { dismiss as dismissMessage, retry as retryMessage, sendMessage, useOutbox, type Outgoing } from "../outbox";
 import { ACTIVE_RUN, useRunTree, useRunsLedBy } from "../App";
 import { Avatar, ErrorBox, FileScopeProvider, Icon, Mark, OneLine, Prose, StatusChip, Vendor, agentTitle, agentTone, beyondFirstLine, displayName, firstLine, firstSentence, roleShape, time, useAgents, useFileScope, vendorName } from "../components";
+import { Image as ImageIcon } from "lucide-react";
+import { extractToolImagePaths, extractToolImages } from "../lib/toolimages";
+import { ToolImages } from "../toolimages";
 import { ChangeStat, DiffView } from "../diffview";
 import { parseDiff, tailLines, type DiffFile } from "../lib/diff";
 import { errorHint } from "../lib/errors";
@@ -33,7 +36,9 @@ import { dismissNotice, useNotices } from "../notices";
 import { QuestionCards } from "../questions";
 import { NeedsYouStrip, RunStrip } from "../strips";
 import { useHubData } from "../hub";
+import { ContextUsageButton, useCompact } from "../contextusage";
 import { mentionsFor, useMention } from "../mention";
+import { useSlash, type SlashMenuGroup } from "../slash";
 import { homeOf, isChat, wsKey } from "../workspace";
 import { ProfileEditor } from "./Agents";
 import { PlanTasks, usePlanApproval } from "./Run";
@@ -389,6 +394,7 @@ function Header({
   const [error, setError] = useState<string>();
   const [profile, setProfile] = useState(false);
   const [resume, setResume] = useState(false);
+  const compact = useCompact(agent);
   const stop = useArmed();
 
   async function run(action: () => Promise<unknown>) {
@@ -436,10 +442,16 @@ function Header({
           </>
         )}
         <div className="spacer" />
-        {!rail && usage && usage.size > 0 && <Meter usage={usage} />}
+        {/* Always an entry: the meter opens usage and 压缩上下文; over half full the header keeps
+            a conspicuous button of its own. */}
+        {!rail && <ContextUsageButton agent={agent} usage={usage} variant="topbar" />}
         {agent.status === "idle" && usage && usage.size > 0 && usage.used / usage.size >= 0.5 && (
-          <button className="ghost small" disabled={busy} onClick={() => run(() => api.compactAgent(agent.id))} title="让 agent 把历史压缩成摘要，腾出上下文">
-            压缩上下文
+          <button className="ghost small" disabled={compact.busy} onClick={() => void compact.compact()} title="让 agent 把历史压缩成摘要，腾出上下文" aria-label="压缩上下文">
+            <span className="row" style={{ gap: 5 }}>
+              <Icon name="shrink" size={13} />
+              {/* Compacting is under way: that word stays even on a narrow topbar. */}
+              <span className={compact.busy ? undefined : "topbar-label"}>{compact.busy ? "压缩中…" : "压缩上下文"}</span>
+            </span>
           </button>
         )}
         {agent.status === "running" && capabilities?.interrupt !== false && (
@@ -460,14 +472,23 @@ function Header({
             {stop.armed ? "再点一次停止" : "停止"}
           </button>
         )}
-        <button className={`ghost small resume-toggle ${resume ? "on" : ""}`} onClick={() => setResume(!resume)} title="复制原生恢复命令：在终端里用同一个 session id 接着聊" aria-expanded={resume}>
-          终端恢复
+        <button
+          className={`ghost small resume-toggle ${resume ? "on" : ""}`}
+          onClick={() => setResume(!resume)}
+          title="复制原生恢复命令：在终端里用同一个 session id 接着聊"
+          aria-label="终端恢复"
+          aria-expanded={resume}
+        >
+          <span className="row" style={{ gap: 5 }}>
+            <Icon name="terminal" size={13} />
+            <span className="topbar-label">终端恢复</span>
+          </span>
         </button>
         {agent.plugin !== "external" && (
-          <button className="ghost small graph-toggle" onClick={() => openTool("graph", { agent: agent.name })} title="在右侧工具列看这个会话检出的提交图：HEAD 和本地分支">
+          <button className="ghost small graph-toggle" onClick={() => openTool("graph", { agent: agent.name })} title="在右侧工具列看这个会话检出的提交图：HEAD 和本地分支" aria-label="提交图">
             <span className="row" style={{ gap: 5 }}>
               <Icon name="branch" size={13} />
-              提交图
+              <span className="topbar-label">提交图</span>
             </span>
           </button>
         )}
@@ -484,9 +505,10 @@ function Header({
         </div>
       )}
       {resume && <ResumePanel agent={agent} onClose={() => setResume(false)} />}
-      {error && (
+      {(error || compact.error) && (
         <div style={{ padding: "8px 20px 0" }}>
-          <ErrorBox error={error} />
+          {error && <ErrorBox error={error} />}
+          {compact.error && <ErrorBox error={compact.error} />}
         </div>
       )}
     </>
@@ -545,30 +567,6 @@ function AgentName({ agent }: { agent: Agent }) {
       {displayName(agent)}
       {generated && <span className="name-auto">自动命名</span>}
     </button>
-  );
-}
-
-function Meter({ usage }: { usage: TranscriptUsage }) {
-  const pct = Math.min(100, Math.round((usage.used / usage.size) * 100));
-  const t = usage.tokens;
-  const lines = [
-    `上下文 ${usage.used.toLocaleString()} / ${usage.size.toLocaleString()} tokens`,
-    ...(t
-      ? [
-          `本会话累计 ${t.total.toLocaleString()} tokens`,
-          `  输入 ${t.input.toLocaleString()}（缓存命中 ${t.input ? Math.round((t.cached_input / t.input) * 100) : 0}%）`,
-          `  输出 ${t.output.toLocaleString()}（推理 ${t.reasoning_output.toLocaleString()}）`,
-        ]
-      : []),
-    ...(usage.cost_usd != null ? [`花费 $${usage.cost_usd.toFixed(4)}`] : []),
-  ];
-  return (
-    <span className="meter" title={lines.join("\n")}>
-      <span className="track">
-        <span className={`fill ${pct >= 80 ? "warn" : ""}`} style={{ width: `${pct}%`, display: "block" }} />
-      </span>
-      {pct}%
-    </span>
   );
 }
 
@@ -666,6 +664,7 @@ function Conversation({
             </div>
           )}
           <FileScopeProvider value={outerScope ?? { kind: "agent", agent: agent.id }}>
+          <AgentImageContext.Provider value={agent.id}>
           <CwdContext.Provider value={agent.cwd}>
           <Follow.Provider value={{ el: ref, stick }}>
             {byTime(turns, [...switches, ...handoffs]).map((x) =>
@@ -679,6 +678,7 @@ function Conversation({
             )}
           </Follow.Provider>
           </CwdContext.Provider>
+          </AgentImageContext.Provider>
           </FileScopeProvider>
           {children}
         </div>
@@ -985,6 +985,7 @@ const OPEN_LINES = 400;
 
 /** The session's working directory, for shortening paths in tool lines. */
 const CwdContext = createContext<string | undefined>(undefined);
+const AgentImageContext = createContext<string | undefined>(undefined);
 
 /** One tool call; a click opens what it did (output, exit code, diffs, arguments). */
 function ToolStep({ step }: { step: ToolCall }) {
@@ -998,15 +999,16 @@ function ToolStep({ step }: { step: ToolCall }) {
   // A failed edit carries the diff the model meant to make: showing +N −M would claim a change
   // that never happened (docs/TODO.md §九).
   const changes = toolChanges(step).flatMap((c) => parseDiff(c.diff, c.path));
+  const hasImages = !!d?.result && extractToolImages(d.result).images.length > 0;
   if (bad) {
     // One line, like a result card: ✕, the call, and why it failed; the detail opens below.
-    const reason = firstLine(toolError(step));
+    const reason = firstLine(hasImages ? extractToolImages(toolError(step) ?? "").text : toolError(step));
     const more = !!(d || step.output);
     return (
       <div className="tool-step failed">
         <OneLine
           tone="danger"
-          icon={<Icon name="close" size={13} />}
+          icon={<><Icon name="close" size={13} />{hasImages && <span className="tool-image-indicator" aria-label="含图片"><ImageIcon size={14} /></span>}</>}
           title={stepLine(step, cwd)}
           summary={[code != null && code !== 0 ? `退出 ${code}` : "", reason || "失败"].filter(Boolean).join(" · ")}
         >
@@ -1023,6 +1025,7 @@ function ToolStep({ step }: { step: ToolCall }) {
       <button className="tool" onClick={() => more && setOpen(!open)} aria-expanded={more ? open : undefined} disabled={!more} title={step.title}>
         <span className={`dot ${tone}`} />
         <span className="title">{stepLine(step, cwd)}</span>
+        {hasImages && <span className="tool-image-indicator" aria-label="含图片"><ImageIcon size={14} /></span>}
         {code != null && code !== 0 ? <span className="chip danger tiny">退出 {code}</span> : null}
         {d?.duration_ms != null && <span className="muted tiny">{took(d.duration_ms)}</span>}
         {toolShowsStat(step) && changes.length > 0 && <ChangeStat files={changes} />}
@@ -1040,12 +1043,28 @@ function ToolStep({ step }: { step: ToolCall }) {
 
 function ToolDetailView({ step, changes }: { step: ToolCall; changes: DiffFile[] }) {
   const d = step.detail;
+  const agent = useContext(AgentImageContext);
+  const paths = useMemo(() => extractToolImagePaths(d?.arguments ?? ""), [d?.arguments]);
+  const [loaded, setLoaded] = useState<Record<string, ImageLoad>>({});
+  useEffect(() => {
+    if (!agent) return;
+    let active = true;
+    setLoaded({});
+    for (const path of paths) void loadToolImage(agent, path).then((value) => {
+      if (active) setLoaded((old) => ({ ...old, [path]: value }));
+    });
+    return () => { active = false; };
+  }, [agent, paths]);
   const output = d?.output ?? step.output;
   const shown = output != null ? tailLines(output, OPEN_LINES) : undefined;
   // A failed call says why, first: detail.error when there is one, else the tool's own words.
-  const error = toolFailed(step) ? toolError(step) : undefined;
+  const rawError = toolFailed(step) ? toolError(step) : undefined;
+  const error = rawError ? extractToolImages(rawError).text : undefined;
   // The result may be the very words shown above as the reason: one copy is enough.
-  const result = d?.result != null ? tailLines(d.result, OPEN_LINES).text : undefined;
+  const extracted = d?.result != null ? extractToolImages(d.result) : undefined;
+  const resultImages = (extracted?.images ?? []).map((src, i) => ({ src, alt: `${step.title} 图片 ${i + 1}`, caption: paths.filter((path) => loaded[path]?.src === src).join("、") || undefined }));
+  const pathImages = paths.flatMap((path) => loaded[path]?.src && !extracted?.images.includes(loaded[path].src!) ? [{ src: loaded[path].src!, alt: `${step.title} 图片`, caption: path }] : []);
+  const result = extracted?.text ? tailLines(extracted.text, OPEN_LINES).text : undefined;
   return (
     <div className="tool-detail">
       {d?.command && <pre className="cmd">$ {d.command}</pre>}
@@ -1068,12 +1087,15 @@ function ToolDetailView({ step, changes }: { step: ToolCall; changes: DiffFile[]
         <>
           <div className="muted tiny">参数</div>
           <pre className="out">{d.arguments}</pre>
+          <ToolImages images={pathImages} />
+          {paths.map((path) => loaded[path]?.error ? <div className="tool-image-error" key={path}>{path}：{loaded[path].error}</div> : !loaded[path] ? <div className="tool-image-loading" key={path}>{path}：加载中…</div> : null)}
         </>
       )}
-      {result && result !== error && (
+      {d?.result != null && (
         <>
-          <div className="muted tiny">结果</div>
-          <pre className="out">{result}</pre>
+          <div className="tool-result-heading"><span className="muted tiny">结果</span><button className="ghost tiny" onClick={() => void navigator.clipboard.writeText(d.result!)}>复制原始结果</button></div>
+          <ToolImages images={resultImages} />
+          {result && result !== error && <pre className="out">{result}</pre>}
         </>
       )}
     </div>
@@ -1356,6 +1378,35 @@ function Composer({
   const ref = useRef<HTMLTextAreaElement>(null);
   const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
   const mention = useMention(ref, setDraft, mentionsFor(mates, (plugins.data ?? []).filter((p) => p.models.length > 0)));
+  const compact = useCompact(agent);
+  const agentCommands = useHubData(() => api.agentCommands(agent.id), [agent.id],
+    (e) => (e.type === "agent.status_changed" && e.data.id === agent.id) || (e.type === "agent.updated" && e.data.agent.id === agent.id));
+  const groups: SlashMenuGroup[] = [
+    {
+      key: "crossagents",
+      label: "CrossAgents 指令",
+      commands: [
+        {
+          key: "compact",
+          group: "crossagents",
+          name: "compact",
+          title: "压缩上下文",
+          sub: "把历史压成摘要，腾出上下文",
+          blocked: compact.blocked,
+          run: () => void compact.compact(),
+        },
+      ],
+    },
+    {
+      key: "agent",
+      label: "agent 自带",
+      note: agentCommands.error ? `获取失败：${agentCommands.error}` : agentCommands.data && !agentCommands.data.known ? (agentCommands.data.note ?? "这个驱动不报告自带指令") : undefined,
+      commands: agentCommands.error || !agentCommands.data?.known ? [] : agentCommands.data.commands
+        .filter((c) => c.name.toLowerCase() !== "compact")
+        .map((c) => ({ key: `agent/${c.name}`, group: "agent", name: c.name, title: c.description ?? "", kind: c.kind })),
+    },
+  ];
+  const slash = useSlash(ref, setDraft, groups);
   const running = agent.status === "running";
   const canInterrupt = running && capabilities?.interrupt !== false;
   const plan = plans.find((d) => !deferred.includes(d.run.id));
@@ -1422,6 +1473,7 @@ function Composer({
   return (
     <div className="composer-wrap">
       {error && <ErrorBox error={error} />}
+      {compact.error && <ErrorBox error={compact.error} />}
       {plans.length > 0 && (
         <button className="dock-recall" onClick={() => setDeferred([])}>
           <span className="disclosure" aria-hidden="true">
@@ -1431,20 +1483,26 @@ function Composer({
         </button>
       )}
       <div className="composer" onDrop={files.onDrop} onDragOver={files.onDragOver}>
+        {slash.menu}
         {mention.menu}
         <HeldFiles files={files.held} onRemove={files.remove} />
         <textarea
+          {...slash.textarea}
           onPaste={files.onPaste}
           ref={ref}
           rows={1}
           value={draft}
           onChange={(e) => {
             setDraft(e.target.value);
+            slash.sync();
             mention.sync();
           }}
-          onClick={mention.sync}
-          onKeyDown={(e) => mention.onKeyDown(e) || onKey(e)}
-          placeholder={running ? `${displayName(agent)} 正在工作，新消息会排在本轮之后` : `给 ${displayName(agent)} 发消息，@ 点名协作者或模型`}
+          onClick={() => {
+            slash.sync();
+            mention.sync();
+          }}
+          onKeyDown={(e) => slash.onKeyDown(e) || mention.onKeyDown(e) || onKey(e)}
+          placeholder={running ? `${displayName(agent)} 正在工作，新消息会排在本轮之后` : `给 ${displayName(agent)} 发消息，@ 点名协作者或模型，/ 看指令`}
         />
         <div className="bar">
           {agent.plugin === "external" ? (
@@ -1471,7 +1529,7 @@ function Composer({
       </div>
       <div className="composer-hint">
         {note && <span>{note} · </span>}
-        {running ? "Enter 排队 · Ctrl+Shift+Enter 打断并发送 · Esc 中断" : "Enter 发送 · Shift+Enter 换行 · agent 离线时会自动启动"}
+        {compact.busy ? "压缩中…" : running ? "Enter 排队 · Ctrl+Shift+Enter 打断并发送 · Esc 中断" : "Enter 发送 · Shift+Enter 换行 · agent 离线时会自动启动"}
       </div>
     </div>
   );
@@ -1561,3 +1619,16 @@ function PlanDock({ run, onDone, onReply }: { run: Run; onDone: () => void; onRe
   );
 }
 
+
+
+type ImageLoad = { src?: string; error?: string };
+const toolImageCache = new Map<string, Promise<ImageLoad>>();
+function loadToolImage(agent: string, path: string): Promise<ImageLoad> {
+  const key = JSON.stringify([agent, path]);
+  let pending = toolImageCache.get(key);
+  if (!pending) {
+    pending = api.agentImage(agent, path).then((image) => ({ src: `data:${image.mime};base64,${image.data}` }), (err: unknown) => ({ error: errorText(err) }));
+    toolImageCache.set(key, pending);
+  }
+  return pending;
+}

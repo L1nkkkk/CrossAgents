@@ -27,17 +27,17 @@ pub mod tool;
 
 pub use account::{
     Account, AccountProvider, AccountStatus, Credits, DataSource, LimitGroup, LoginCommand,
-    ModelInfo, RateWindow, ResetCredit, SessionUsage, TokenTotals, mask_email,
+    ModelInfo, RateWindow, RequestUsage, ResetCredit, SessionUsage, TokenTotals, mask_email,
 };
 pub use attachment::{Attachment, AttachmentKind, AttachmentSupport, Prompt};
 pub use bus::EventBus;
 pub use claim::{AgentClaim, ClaimRole};
 pub use cli::{CliSource, CliStatus, Located};
 pub use driver::{
-    Capabilities, ContextPart, Driver, DriverKind, DriverSession, ExitCause, FileChange,
-    McpServerSpec, OutputStream, PermissionDecision, PermissionHandler, PermissionPolicy,
-    PermissionRequest, RateLimits, SessionEvent, SessionEventKind, SessionSpec, StopReason,
-    TokenUsage, ToolDetail, ToolStatus, TurnOutcome,
+    AgentCommand, AgentCommandKind, Capabilities, ContextPart, Driver, DriverKind, DriverSession,
+    ExitCause, FileChange, McpServerSpec, OutputStream, PermissionDecision, PermissionHandler,
+    PermissionPolicy, PermissionRequest, RateLimits, SessionEvent, SessionEventKind, SessionSpec,
+    StopReason, TokenUsage, ToolDetail, ToolStatus, TurnOutcome,
 };
 pub use error::CoreError;
 pub use event::{

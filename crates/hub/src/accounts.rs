@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Local, Utc};
 use crossagents_api_types::{
     AccountUsageGroup, AccountUsageResponse, AccountUsageRow, CreateAccountRequest, LoginStarted,
+    UsageSeriesGroup, UsageSeriesResponse,
 };
 use crossagents_core::{
     Account, AccountProvider, AccountStatus, Agent, AgentId, AgentKey, CoreError, DataSource,
@@ -19,7 +20,8 @@ use crossagents_core::{
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, mpsc};
 
-const ORIGIN_CROSSAGENTS: &str = "crossagents";
+/// The `originator` Claude Code and Codex record for a session CrossAgents started.
+pub(crate) const ORIGIN_CROSSAGENTS: &str = "crossagents";
 const LOGIN_URL_WAIT: Duration = Duration::from_secs(20);
 /// How long a login served as a local page may take to start answering.
 const SERVE_READY_WAIT: Duration = Duration::from_secs(30);
@@ -447,6 +449,53 @@ impl Accounts {
         })
     }
 
+    /// `GET /v1/usage/series` (see [`crate::usage_series`]): token use and cost day by day,
+    /// across every account or one. An account whose logs cannot be read is reported in
+    /// `sources` with its reason; the rest of the answer stands.
+    pub(crate) async fn usage_series(
+        &self,
+        query: crate::usage_series::SeriesQuery,
+    ) -> Result<UsageSeriesResponse, CoreError> {
+        let picked: Vec<Account> = if query.source == "all" {
+            self.store().list_accounts().await?
+        } else {
+            vec![self.store().get_account(&query.source).await?]
+        };
+        let owners = if matches!(query.group, UsageSeriesGroup::Agent | UsageSeriesGroup::Run) {
+            session_owners(self.store().as_ref()).await?
+        } else {
+            HashMap::new()
+        };
+        let mut sources = Vec::with_capacity(picked.len());
+        for account in &picked {
+            // Each vendor's own logs, with every request timed where it records them.
+            let sessions = match self.provider(&account.provider) {
+                Ok(provider) => provider
+                    .usage_sessions(account)
+                    .await
+                    .map_err(|err| err.to_string()),
+                Err(err) => Err(err.to_string()),
+            };
+            sources.push(crate::usage_series::SourceData {
+                id: account.id.clone(),
+                label: if account.label.is_empty() {
+                    account.id.clone()
+                } else {
+                    account.label.clone()
+                },
+                provider: account.provider.clone(),
+                sessions,
+            });
+        }
+        Ok(crate::usage_series::build(
+            &query,
+            &sources,
+            &owners,
+            Local::now().date_naive(),
+            &|at| at.with_timezone(&Local).date_naive(),
+        ))
+    }
+
     /// Starts the provider's login tool for this account and returns the page to open.
     /// The outcome arrives later as `account.login_finished`.
     pub async fn login(&self, id: &str) -> Result<LoginStarted, CoreError> {
@@ -791,10 +840,10 @@ fn role_name(role: Role) -> String {
 }
 
 /// The agent behind a vendor session, from the event log.
-struct Owner {
-    name: String,
-    role: Role,
-    run: Option<RunId>,
+pub(crate) struct Owner {
+    pub(crate) name: String,
+    pub(crate) role: Role,
+    pub(crate) run: Option<RunId>,
 }
 
 async fn session_owners(store: &dyn Store) -> Result<HashMap<String, Owner>, CoreError> {
