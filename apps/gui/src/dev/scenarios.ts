@@ -1,3 +1,4 @@
+import { toolImagesSession } from "../views/Session.mock";
 // The scenarios `preview:mock` can show (docs/tasks/V6-GUI.md §3). Each builds a fresh state,
 // an event script to replay, and the page to open.
 
@@ -18,6 +19,7 @@ export type Scenario = {
 };
 
 export const SCENARIOS: Scenario[] = [
+  { key: "tool-images", label: "工具结果图片", hint: "图片结果与混合文字", build: () => toolImagesSession() },
   { key: "continuation-options", label: "持续推进设置", hint: "新建 Work 的持续推进开关及次数、间隔", build: () => {
     localStorage.setItem("crossagents.mode", JSON.stringify("run"));
     return { state: emptyHub(), route: "#/", script: [{ at: 300, act: () => document.querySelector<HTMLButtonElement>('button[aria-label="选项"]')?.click() }] };
