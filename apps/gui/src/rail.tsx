@@ -9,6 +9,7 @@ import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
 import type { TranscriptUsage } from "@bindings/TranscriptUsage";
 import { Avatar, Dot, Icon, VendorMark, agentTone, displayName, sessionHref, statusLabel } from "./components";
+import { ContextUsageButton } from "./contextusage";
 import { effortLabel, effortOf } from "./lib/models";
 import { taskState } from "./lib/taskState";
 import { openTool } from "./panes";
@@ -174,7 +175,7 @@ export function InfoRail({
       </Card>
 
       <Card id="context" title="上下文">
-        {usage && usage.size > 0 ? <Context usage={usage} /> : <p className="rail-empty">还没有报告用量</p>}
+        {usage && usage.size > 0 ? <Context usage={usage} agent={agent} /> : <ContextUsageButton agent={agent} usage={null} variant="rail" />}
         {recruits.length > 0 && spend != null && (
           <div className="rail-spend" title="这个对话和它招来的队友一共花了多少（各自报告的费用之和）">
             <span>对话花费（含 {recruits.length} 位队友）</span>
@@ -315,8 +316,9 @@ const partTone = (id: string, kind: string) =>
   kind === "buffer" ? "buffer" : ["messages", "system_tools", "mcp_tools", "system_prompt", "skills"].includes(id) ? id : "other";
 
 /** How full the context is: green while there is room, amber from 60%, red from 85%. With
- * the agent's breakdown (Claude Code), what fills it, by kind, as /context shows. */
-function Context({ usage }: { usage: TranscriptUsage }) {
+ * the agent's breakdown (Claude Code), what fills it, by kind, as /context shows. Its first
+ * row is the meter button: usage in words and 压缩上下文. */
+function Context({ usage, agent }: { usage: TranscriptUsage; agent: Agent }) {
   const pct = Math.min(100, Math.round((usage.used / usage.size) * 100));
   const tone = pct >= 85 ? "danger" : pct >= 60 ? "warn" : "ok";
   const t = usage.tokens;
@@ -337,12 +339,7 @@ function Context({ usage }: { usage: TranscriptUsage }) {
   const share = (n: number) => `${((n / usage.size) * 100).toFixed(1)}%`;
   return (
     <>
-      <div className="rail-context">
-        <span className="rail-main">{pct}% 已用</span>
-        <span className="rail-dim">
-          {short(usage.used)} / {short(usage.size)}
-        </span>
-      </div>
+      <ContextUsageButton agent={agent} usage={usage} variant="rail" />
       {inWindow.length > 0 ? (
         <>
           <div className="rail-bar ctx-bar" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label="上下文已用">

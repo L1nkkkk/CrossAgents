@@ -3,7 +3,7 @@
 // steps, and two of your messages wait behind it.
 
 import { emptyState, type MockState, type Step } from "../dev/MockBridge";
-import { NOTES_REPO, agent, fileDiff, planned, run, say, task, think, tool, transcript, turn, uid } from "../dev/fixtures";
+import { NOTES_REPO, agent, contextParts, fileDiff, planned, run, say, task, think, tool, transcript, turn, uid } from "../dev/fixtures";
 import { plugins } from "./Agents.mock";
 import { quota } from "./Usage.mock";
 
@@ -259,4 +259,48 @@ export function attachmentSession(): { state: MockState; script: Step[]; route: 
   ];
   t.turns = [t.turns[0], asked.turn];
   return { ...solo, script: [], route: `#/s/${nova.name}` };
+}
+
+/**
+ * The solo chat with the context meter's popup open, at 20% of the window: what it holds in
+ * words and 压缩上下文, which no longer waits for a threshold.
+ */
+export function contextUsageScene(): { state: MockState; script: Step[]; route: string } {
+  const s = failedEditSession();
+  const a = s.state.agents[0];
+  const t = s.state.transcripts.get(a.id)!;
+  const used = 40_000;
+  t.usage = {
+    ...t.usage!,
+    used,
+    tokens: { input: used * 3, cached_input: used * 2, output: Math.round(used / 4), reasoning_output: Math.round(used / 10), total: used * 3 + Math.round(used / 4) },
+    parts: contextParts(used, t.usage!.size),
+  };
+  return {
+    ...s,
+    // Either entry: the topbar meter when the rail is away, its 上下文 card when it is there.
+    script: [{ at: 600, act: () => document.querySelector<HTMLButtonElement>(".meter-btn, .ctx-rail-btn")?.click() }],
+  };
+}
+
+/** The same chat with `/` typed into the composer, so the command menu is open; a running agent
+ * shows /compact as unavailable and says why. */
+export function slashScene(kind: "idle" | "running"): { state: MockState; script: Step[]; route: string } {
+  const s = kind === "running" ? soloSession() : failedEditSession();
+  return {
+    ...s,
+    script: [
+      {
+        at: 700,
+        act: () => {
+          const box = document.querySelector<HTMLTextAreaElement>(".composer textarea");
+          if (!box) return;
+          // As a person typing would: the value React reads, then the input event it listens to.
+          Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(box, "/");
+          box.dispatchEvent(new Event("input", { bubbles: true }));
+          box.focus();
+        },
+      },
+    ],
+  };
 }
