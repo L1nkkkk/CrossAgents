@@ -57,6 +57,7 @@ export type MockState = {
   notes: Note[];
   quota: QuotaResponse;
   usage: Partial<Record<UsageGroup, UsageResponse>>;
+  usageSeriesVariant?: "normal" | "empty" | "issues" | "session";
   accountUsage?: AccountUsageResponse;
   plugins: PluginInfo[];
   /** What a mock install or upgrade does: succeed, exit non-zero, or leave nothing behind. */
@@ -410,7 +411,7 @@ export class MockBridge implements CrossAgentsBridge {
       if (p === "/v1/questions") return json(200, { items: s.questions.filter((q) => url.searchParams.get("all") || q.status === "open") });
       if (p === "/v1/notes") return json(200, { notes: s.notes });
       if (p === "/v1/quota") return json(200, s.quota);
-      if (p === "/v1/usage/series") return json(200, usageSeriesMock(url.searchParams.get("range") ?? "7d", url.searchParams.get("group") ?? "total", url.searchParams.get("source") ?? "all", new URLSearchParams(window.location.search).get("scenario")?.replace("usage-", "") ?? "normal"));
+      if (p === "/v1/usage/series") return json(200, usageSeriesMock(url.searchParams.get("range") ?? "7d", url.searchParams.get("group") ?? "total", url.searchParams.get("source") ?? "all", s.usageSeriesVariant ?? "normal"));
       if (p === "/v1/usage") {
         const by = (url.searchParams.get("by") ?? "role") as UsageGroup;
         return json(200, s.usage[by] ?? { by, rows: [], total_cost_usd: 0 });

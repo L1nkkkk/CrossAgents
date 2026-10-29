@@ -152,9 +152,9 @@ export function accountUsage(): AccountUsageResponse {
 }
 
 /** The usage page: the standing team, two accounts, a week of spend. */
-export function usageScene(): MockState {
+export function usageScene(usageSeriesVariant: "normal" | "empty" | "issues" | "session" = "normal"): MockState {
   const { ada, rex, mia, sam } = team();
-  return { ...emptyState(), agents: [ada, rex, mia, sam], plugins: plugins(), quota: quota(), usage: usage(), accountUsage: accountUsage() };
+  return { ...emptyState(), agents: [ada, rex, mia, sam], plugins: plugins(), quota: quota(), usage: usage(), accountUsage: accountUsage(), usageSeriesVariant };
 }
 
 /** Fixture for the series endpoint, with range and source filtering. */
@@ -163,12 +163,12 @@ export function usageSeriesMock(range: string, group: string, source: string, va
   const days = Array.from({length}, (_,i) => {
     const date = new Date(); date.setDate(date.getDate() - length + i + 1);
     const scale = variant === "empty" ? 0 : source === "codex-plus" ? .4 : 1;
-    const cached_input = Math.round((800000 + (i*7919%900000)) * scale);
-    const new_input = Math.round((240000 + (i*4219%300000)) * scale);
-    const output = Math.round((90000 + (i*3127%120000)) * scale);
+    const cached_input = Math.round((400000 + ((i * 7919 + i * i * 28411) % 1300000)) * scale);
+    const new_input = Math.round((100000 + ((i * 4219 + i * i * 13711) % 500000)) * scale);
+    const output = Math.round((50000 + ((i * 3127 + i * i * 7817) % 250000)) * scale);
     return {date: date.toISOString().slice(0,10), cached_input,new_input,output,reasoning:Math.round(output/3),cost_usd:scale ? (cached_input+new_input+output)/1000000*.8 : null};
   });
   const sum = (key: "cached_input" | "new_input" | "output") => days.reduce((a,d)=>a+d[key],0);
   const cached_input=sum("cached_input"), new_input=sum("new_input"), output=sum("output");
-  return {range,group,source,granularity:variant === "session" ? "session" : "request",first_day:variant === "empty" ? null : days[0].date,days,groups:group === "total" ? [] : [{key:"a",label:group === "model" ? "claude-opus-4-1" : "CrossAgents",cached_input,new_input,output,cost_usd:days.reduce((a,d)=>a+(d.cost_usd??0),0)}],total:{cached_input,new_input,output,reasoning:Math.round(output/3),sessions:variant === "empty" ? 0 : length*3,turns:variant === "session" ? null : length*8,max_request:variant === "session" ? null : 128000,cost_usd:variant === "empty" ? null : days.reduce((a,d)=>a+(d.cost_usd??0),0)},previous_total:range === "all" ? null : (cached_input+new_input+output)/1.44,unpriced_models:variant === "issues" ? ["unknown-model"] : [],sources:[{id:"claude-max",label:"工作 · Max",provider:"claude"},{id:"codex-plus",label:"个人 · Plus",provider:"codex",...(variant === "issues" ? {error:"无法读取本地日志"} : {})}],notes:[variant === "session" ? "按会话开始日统计；无法确定单次请求和轮数。" : "按请求日期统计；费用为公开 API 价格估算。"]};
+  return {range,group,source,granularity:variant === "session" ? "session" : "request",first_day:variant === "empty" ? null : days[0].date,days,groups:group === "total" ? [] : [{key:"a",label:group === "model" ? "claude-opus-4-1" : "CrossAgents",cached_input,new_input,output,cost_usd:days.reduce((a,d)=>a+(d.cost_usd??0),0)}],total:{cached_input,new_input,output,reasoning:Math.round(output/3),sessions:variant === "empty" ? 0 : length*3,turns:variant === "session" ? null : variant === "empty" ? 0 : length*8,max_request:variant === "session" || variant === "empty" ? null : 128000,cost_usd:variant === "empty" ? null : days.reduce((a,d)=>a+(d.cost_usd??0),0)},previous_total:range === "all" ? null : (cached_input+new_input+output)/1.44,unpriced_models:variant === "issues" ? ["unknown-model"] : [],sources:[{id:"claude-max",label:"工作 · Max",provider:"claude"},{id:"codex-plus",label:"个人 · Plus",provider:"codex",...(variant === "issues" ? {error:"无法读取本地日志"} : {})}],notes:[variant === "session" ? "按会话开始日统计；无法确定单次请求和轮数。" : "按请求日期统计；费用为公开 API 价格估算。"]};
 }
