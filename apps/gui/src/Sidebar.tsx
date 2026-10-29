@@ -273,7 +273,8 @@ function RunRow({
   const members = runAgents(detail, agents);
   const unread = useUnread();
   const live = ACTIVE_RUN.includes(run.status);
-  const memberActive = members.some(isSession);
+  // A lead sits in every run it led: only a live one opens for its session (workers belong to one run).
+  const memberActive = members.some((m) => isSession(m) && (live || m.id !== run.planner));
   // Live runs and the one you are in start open; your click wins after that.
   const [toggled, setToggled] = useState<boolean>();
   const open = searching || (toggled ?? (live || selected || memberActive));
