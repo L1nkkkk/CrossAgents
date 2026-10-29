@@ -905,10 +905,11 @@ function Steps({ steps, closed, live }: { steps: Step[]; closed: boolean; live?:
   const [manual, setManual] = useState<boolean>();
   const expanded = manual ?? !closed;
   const [all, setAll] = useState(false);
-  // The newest step is always among those shown while this block is open, so what it reports is
-  // just whether the block is open at all.
+  const hidden = expanded ? (all || steps.length <= OPEN_STEPS ? 0 : steps.length - OPEN_STEPS) : steps.length;
+  // What `live` reports is whether the newest step is on screen: the block open (not folded to
+  // its summary) and the newest step past the "+N 个更早的步骤" fold.
   const newest = steps[steps.length - 1];
-  const shown = expanded && newest?.type === "tool_call" ? newest.tool_call_id : null;
+  const shown = expanded && steps.length - 1 >= hidden && newest?.type === "tool_call" ? newest.tool_call_id : null;
   useEffect(() => {
     live?.(shown);
   }, [live, shown]);
@@ -930,7 +931,6 @@ function Steps({ steps, closed, live }: { steps: Step[]; closed: boolean; live?:
       </div>
     );
   }
-  const hidden = all || steps.length <= OPEN_STEPS ? 0 : steps.length - OPEN_STEPS;
   return (
     <div className="steps">
       {closed && (
