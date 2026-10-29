@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { Capabilities } from "@bindings/Capabilities";
 import type { Run } from "@bindings/Run";
@@ -26,7 +26,7 @@ import { ScrollThumb } from "../scrollthumb";
 import { TurnMap, type MapEntry } from "../turnmap";
 import { focusSession, openTool, toggleTools, useLayout } from "../panes";
 import { taskState } from "../lib/taskState";
-import { actionOf, duration, failed, liveActivity, stepLine, summarize, workGroups, type ActionTool, type Step } from "../lib/workGroups";
+import { QUIET_AFTER, actionOf, duration, failed, liveActivity, liveKey, liveNow, quietSeconds, stepLine, summarize, workGroups, type ActionTool, type Step } from "../lib/workGroups";
 import { PeerMessage, StateWord, useArmed } from "../parts";
 import { useSession, type TranscriptItem, type TranscriptTurn } from "../session";
 import { dismissNotice, useNotices } from "../notices";
@@ -603,6 +603,13 @@ function Sending({ message, agent }: { message: Outgoing; agent: Agent }) {
   );
 }
 
+/**
+ * The conversation's scroll box and whether it follows the bottom. A part that grows on its own
+ * (the live line under a running turn, once its timer has something new to say) uses this, since
+ * only the conversation itself is re-rendered when a transcript item arrives.
+ */
+const Follow = createContext<{ el: RefObject<HTMLDivElement | null>; stick: RefObject<boolean> } | null>(null);
+
 function Conversation({
   agent,
   turns,
@@ -660,6 +667,7 @@ function Conversation({
           )}
           <FileScopeProvider value={outerScope ?? { kind: "agent", agent: agent.id }}>
           <CwdContext.Provider value={agent.cwd}>
+          <Follow.Provider value={{ el: ref, stick }}>
             {byTime(turns, [...switches, ...handoffs]).map((x) =>
               "message_id" in x ? (
                 <Turn key={x.message_id} turn={x} agent={agent} agents={agents} tree={tree} />
@@ -669,6 +677,7 @@ function Conversation({
                 <SwitchNote key={x.at} change={x} />
               ),
             )}
+          </Follow.Provider>
           </CwdContext.Provider>
           </FileScopeProvider>
           {children}
@@ -750,6 +759,10 @@ function Bubble({ turn, tree }: { turn: TranscriptTurn; tree: RunDetail[] }) {
 
 function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agent; agents: Agent[]; tree: RunDetail[] }) {
   const running = !!turn.started_at && !turn.completed_at;
+  // Which step the conversation shows live, as Steps reports it: the live line leaves that step's
+  // command and output out, so the same lines are not written twice (see ShownLive).
+  const [shownLive, setShownLive] = useState<string | null>(null);
+  const blocks = workGroups(turn.items);
   return (
     <div className="turn" data-turn={turn.message_id}>
       {fromPerson(turn) ? (
@@ -767,10 +780,16 @@ function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agen
           <span className="what">{agentTitle(agent)}</span>
         </div>
       )}
-      {workGroups(turn.items).map((block, i) =>
-        block.kind === "steps" ? <Steps key={i} steps={block.steps} closed={block.closed} /> : <Item key={i} item={block.item} />,
-      )}
-      {running && <LiveLine since={turn.started_at!} items={turn.items} />}
+      <ShownLive.Provider value={{ id: shownLive, set: setShownLive }}>
+        {blocks.map((block, i) =>
+          block.kind === "steps" ? (
+            <Steps key={i} steps={block.steps} closed={block.closed} live={running && i === blocks.length - 1 ? setShownLive : undefined} />
+          ) : (
+            <Item key={i} item={block.item} />
+          ),
+        )}
+        {running && <LiveLine since={turn.started_at!} items={turn.items} />}
+      </ShownLive.Provider>
       {turn.completed_at && <TurnFoot turn={turn} />}
       {turn.completed_at && turn.diff && <TurnChanges turn={turn} agent={agent} />}
     </div>
@@ -869,13 +888,31 @@ function ActionCard({ action, call }: { action: ActionTool; call: Extract<Transc
 const OPEN_STEPS = 3;
 
 /**
+ * The tool call whose live output the conversation already shows. `Steps` reports it while it
+ * shows its newest steps; the live line under the turn then leaves that call's command and output
+ * out, so the same lines are never written twice (the step is where they belong).
+ */
+const ShownLive = createContext<{ id: string | null; set: (id: string | null) => void }>({ id: null, set: () => {} });
+
+/**
  * A run of tool calls and reasoning. Closed runs read as one summary line (failures stay
  * listed under it); open ones show the newest steps. A click overrides either.
+ *
+ * `live` is set on the turn's last block while the turn runs: the newest step's live output is on
+ * screen here, and Steps says so, so the live line does not repeat it.
  */
-function Steps({ steps, closed }: { steps: Step[]; closed: boolean }) {
+function Steps({ steps, closed, live }: { steps: Step[]; closed: boolean; live?: (id: string | null) => void }) {
   const [manual, setManual] = useState<boolean>();
   const expanded = manual ?? !closed;
   const [all, setAll] = useState(false);
+  const hidden = expanded ? (all || steps.length <= OPEN_STEPS ? 0 : steps.length - OPEN_STEPS) : steps.length;
+  // What `live` reports is whether the newest step is on screen: the block open (not folded to
+  // its summary) and the newest step past the "+N 个更早的步骤" fold.
+  const newest = steps[steps.length - 1];
+  const shown = expanded && steps.length - 1 >= hidden && newest?.type === "tool_call" ? newest.tool_call_id : null;
+  useEffect(() => {
+    live?.(shown);
+  }, [live, shown]);
 
   if (!expanded) {
     const bad = steps.filter(failed);
@@ -894,7 +931,6 @@ function Steps({ steps, closed }: { steps: Step[]; closed: boolean }) {
       </div>
     );
   }
-  const hidden = all || steps.length <= OPEN_STEPS ? 0 : steps.length - OPEN_STEPS;
   return (
     <div className="steps">
       {closed && (
@@ -1053,28 +1089,65 @@ function ToolsToggle() {
   // Open, the column's own header has the button that folds it away: one place, like Codex.
   if (state.tools.open) return null;
   return (
-    <button className="ghost icon" onClick={toggleTools} title="工具列：改动、任务、事件流" aria-label="工具列">
+    <button className="ghost icon" onClick={toggleTools} title="工具列：改动、任务、提交图" aria-label="工具列">
       <Icon name="panel" size={16} />
     </button>
   );
 }
 
-/** The bottom of a running turn: `••• 42s · 运行命令`. */
+/**
+ * The bottom of a running turn: `••• 42s · 运行命令`, and under it what it is producing now (the
+ * newest step, a running command's last lines) so a person can see it move. With nothing new for
+ * `QUIET_AFTER` seconds the line says how long, instead of pretending to work.
+ */
 function LiveLine({ since, items }: { since: string; items: TranscriptItem[] }) {
+  const cwd = useContext(CwdContext);
+  const follow = useContext(Follow);
   const [now, setNow] = useState(Date.now());
+  // When the turn was last seen to produce something. Only time on this page counts: the hub
+  // sends items, not when each one arrived.
+  const key = liveKey(items);
+  const [seen, setSeen] = useState(() => ({ key, at: Date.now() }));
+  useEffect(() => setSeen((s) => (s.key === key ? s : { key, at: Date.now() })), [key]);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
+  // This line grows on its own (a new tail line, the quiet notice) without the conversation
+  // re-rendering, so it keeps the person at the bottom itself.
+  useLayoutEffect(() => {
+    const el = follow?.el.current;
+    if (el && follow?.stick.current) el.scrollTop = el.scrollHeight;
+  });
+  const shown = useContext(ShownLive);
+  const last = items[items.length - 1];
+  // A running step whose command and output are already on screen (the open steps at the end of
+  // the turn): the status row says enough; repeating it here would write the same output twice.
+  const onScreen = last?.type === "tool_call" && shown.id === last.tool_call_id;
+  const current = onScreen ? undefined : liveNow(items, cwd);
+  const quiet = quietSeconds(seen.at, now);
   return (
-    <div className="working">
-      <span className="busy-dots" aria-hidden="true">
-        <i />
-        <i />
-        <i />
-      </span>
-      <span className="muted small">{duration(now - new Date(since).getTime())}</span>
-      <span>· {liveActivity(items)}</span>
+    <div className="working live-turn">
+      <div className="working-row">
+        <span className={`busy-dots ${quiet >= QUIET_AFTER ? "still" : ""}`} aria-hidden="true">
+          <i />
+          <i />
+          <i />
+        </span>
+        <span className="muted small">{duration(now - new Date(since).getTime())}</span>
+        <span>· {liveActivity(items)}</span>
+      </div>
+      {current && (
+        <div className="working-now" title={current.title}>
+          {current.title}
+        </div>
+      )}
+      {current?.output && (
+        <pre className="working-out" aria-label="最新输出" title={current.output.hidden ? `前面还有 ${current.output.hidden} 行` : undefined}>
+          {current.output.lines.join("\n")}
+        </pre>
+      )}
+      {quiet >= QUIET_AFTER && <div className="muted small">已 {quiet} 秒没有新输出</div>}
     </div>
   );
 }

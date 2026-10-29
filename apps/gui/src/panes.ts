@@ -3,21 +3,25 @@
 // - Two conversations side by side: the routed session on the left, one more beside it.
 //   Ctrl/⌘-click or middle-click an agent in the sidebar to open it beside.
 // - The tool column on the right (docs/tasks/V6-GUI.md §6): up to two panes stacked, each one
-//   of 改动 (per-turn diffs), 任务 (the task's details), 事件流 (raw hub events) or 提交图 (the
-//   run's branches on a run page, else the conversation's checkout). Panes follow
+//   of 改动 (per-turn diffs), 任务 (the task's details) or 提交图 (the run's branches on a run
+//   page, else the conversation's checkout). Panes follow
 //   the focused conversation: the routed one, or the one beside it once it was clicked last.
 //   Something opened on purpose (a turn's "查看变更", a task card's turn) is the pane's
 //   `target` until the focus moves to another conversation.
+//
+// 事件流 (raw hub events) is not one of them: it is for debugging, so only a development page or
+// the mock preview offers it, and a saved layout that still names it loses just that pane.
 
 import { useSyncExternalStore } from "react";
 
 export type PaneKind = "changes" | "task" | "events" | "graph";
-export const PANE_KINDS: { kind: PaneKind; label: string }[] = [
-  { kind: "changes", label: "改动" },
-  { kind: "task", label: "任务" },
-  { kind: "events", label: "事件流" },
-  { kind: "graph", label: "提交图" },
-];
+const LABELS: Record<PaneKind, string> = { changes: "改动", task: "任务", events: "事件流", graph: "提交图" };
+/** Raw hub events: shown by the dev server and `preview:mock`, not by a packaged build. */
+export const DEBUG_PANES = __BUILD__.dev || __MOCK__;
+/** What the tool column's menu offers, in order. */
+export const PANE_KINDS: { kind: PaneKind; label: string }[] = (Object.keys(LABELS) as PaneKind[])
+  .filter((k) => k !== "events" || DEBUG_PANES)
+  .map((kind) => ({ kind, label: LABELS[kind] }));
 
 /** What a pane was opened for: an agent's turn (and file), or a task. */
 export type Target = { agent?: string; turn?: string; file?: string; run?: string; task?: string };
@@ -28,7 +32,12 @@ type Panes = { beside: string | null; ratio: number; tools: Tools };
 const KEY = "crossagents.panes";
 const clamp = (r: number) => Math.min(0.75, Math.max(0.25, r));
 const clampSplit = (r: number) => Math.min(0.8, Math.max(0.2, r));
-const isKind = (k: unknown): k is PaneKind => PANE_KINDS.some((p) => p.kind === k);
+/** Any kind a saved layout may name — including a pane the menu no longer offers, so `load` can recognise it. */
+const isKind = (k: unknown): k is PaneKind => typeof k === "string" && k in LABELS;
+/** Whether the tool column offers `kind` here (事件流 only where debugging is on). */
+export const offered = (k: PaneKind) => PANE_KINDS.some((p) => p.kind === k);
+/** What a pane is called in the menu and its header. */
+export const paneLabel = (k: PaneKind) => LABELS[k];
 const DEFAULT_TOOLS: Tools = { open: false, panes: ["changes"], split: 0.5 };
 const listeners = new Set<() => void>();
 let state: Panes = load();
@@ -42,7 +51,7 @@ function load(): Panes {
     const saved = JSON.parse(localStorage.getItem(KEY) ?? "null");
     if (saved && typeof saved.ratio === "number") {
       const t = saved.tools;
-      const panes: PaneKind[] = Array.isArray(t?.panes) ? t.panes.filter(isKind).slice(0, 2) : [];
+      const panes: PaneKind[] = Array.isArray(t?.panes) ? t.panes.filter(isKind).filter(offered).slice(0, 2) : [];
       const tools: Tools = {
         open: t?.open === true,
         panes: panes.length ? [...new Set(panes)] : DEFAULT_TOOLS.panes,

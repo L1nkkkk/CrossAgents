@@ -11,6 +11,7 @@
 // folded away under a summary line (the agent's prose may say otherwise).
 
 import type { TranscriptItem } from "@bindings/TranscriptItem";
+import { tailLines } from "./diff.ts";
 import { toolFailed } from "./toolcall.ts";
 
 export type Step =
@@ -126,6 +127,63 @@ export function liveActivity(items: TranscriptItem[]): string {
     default:
       return "调用工具";
   }
+}
+
+/** After this long with nothing new, a running turn is called quiet: it may be waiting, not working. */
+export const QUIET_AFTER = 30;
+
+/** Seconds since the turn last produced anything, for "已 N 秒没有新输出" (never negative). */
+export function quietSeconds(changedAt: number, now: number): number {
+  return Math.max(0, Math.floor((now - changedAt) / 1000));
+}
+
+/** The size of one item's content: equal strings mean it produced nothing new. */
+function produced(item: TranscriptItem): string {
+  switch (item.type) {
+    case "output":
+      return `${item.stream}:${item.text.length}`;
+    case "tool_call":
+      return `${item.tool_call_id}:${item.status}:${item.output?.length ?? 0}:${item.detail?.arguments?.length ?? 0}`;
+    default:
+      return item.type;
+  }
+}
+
+/** A key that changes exactly when the turn produced something (a step, more output, more text). */
+export function liveKey(items: TranscriptItem[]): string {
+  return `${items.length}|${items.slice(-3).map(produced).join("|")}`;
+}
+
+export type LiveNow = {
+  /** The newest thing in one line: a step as `stepLine` writes it, or the last line of a stream. */
+  title: string;
+  /** A running command's newest output lines; `hidden` older ones were left out above them. */
+  output?: { lines: string[]; hidden: number };
+};
+
+/**
+ * What a running turn is producing right now: the last step's line and, while a command still
+ * runs, the tail of its output (`maxLines`, as the step itself shows while running). A stream of
+ * reasoning or text is its last line only: the whole thing is in the steps above.
+ */
+export function liveNow(items: TranscriptItem[], cwd?: string, maxLines = 3): LiveNow | undefined {
+  const last = items[items.length - 1];
+  if (!last) return undefined;
+  if (last.type === "output") {
+    const line = last.text
+      .split("\n")
+      .map((l) => l.trimEnd())
+      .filter((l) => l.length > 0)
+      .pop();
+    return line === undefined ? undefined : { title: line };
+  }
+  if (last.type !== "tool_call") return undefined;
+  const title = stepLine(last, cwd);
+  const live = last.status === "in_progress" || last.status === "pending";
+  if (!live || !last.output) return { title };
+  const tail = tailLines(last.output, maxLines);
+  const lines = tail.text.split("\n").filter((l) => l.length > 0);
+  return lines.length ? { title, output: { lines, hidden: tail.hidden } } : { title };
 }
 
 /** `text` with the working directory left out of the paths in it: `C:\w\src\a.rs` → `src\a.rs`,
