@@ -1,6 +1,8 @@
+import { Image as ImageIcon } from "lucide-react";
+import { extractToolImages } from "../lib/toolimages";
+import { ToolImages } from "../toolimages";
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import type { Agent } from "@bindings/Agent";
-import type { AgentCommand } from "@bindings/AgentCommand";
 import type { Capabilities } from "@bindings/Capabilities";
 import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
@@ -994,15 +996,16 @@ function ToolStep({ step }: { step: ToolCall }) {
   // A failed edit carries the diff the model meant to make: showing +N −M would claim a change
   // that never happened (docs/TODO.md §九).
   const changes = toolChanges(step).flatMap((c) => parseDiff(c.diff, c.path));
+  const hasImages = !!d?.result && extractToolImages(d.result).images.length > 0;
   if (bad) {
     // One line, like a result card: ✕, the call, and why it failed; the detail opens below.
-    const reason = firstLine(toolError(step));
+    const reason = firstLine(hasImages ? extractToolImages(toolError(step) ?? "").text : toolError(step));
     const more = !!(d || step.output);
     return (
       <div className="tool-step failed">
         <OneLine
           tone="danger"
-          icon={<Icon name="close" size={13} />}
+          icon={<><Icon name="close" size={13} />{hasImages && <span className="tool-image-indicator" aria-label="含图片"><ImageIcon size={14} /></span>}</>}
           title={stepLine(step, cwd)}
           summary={[code != null && code !== 0 ? `退出 ${code}` : "", reason || "失败"].filter(Boolean).join(" · ")}
         >
@@ -1019,6 +1022,7 @@ function ToolStep({ step }: { step: ToolCall }) {
       <button className="tool" onClick={() => more && setOpen(!open)} aria-expanded={more ? open : undefined} disabled={!more} title={step.title}>
         <span className={`dot ${tone}`} />
         <span className="title">{stepLine(step, cwd)}</span>
+        {hasImages && <span className="tool-image-indicator" aria-label="含图片"><ImageIcon size={14} /></span>}
         {code != null && code !== 0 ? <span className="chip danger tiny">退出 {code}</span> : null}
         {d?.duration_ms != null && <span className="muted tiny">{took(d.duration_ms)}</span>}
         {toolShowsStat(step) && changes.length > 0 && <ChangeStat files={changes} />}
@@ -1039,9 +1043,11 @@ function ToolDetailView({ step, changes }: { step: ToolCall; changes: DiffFile[]
   const output = d?.output ?? step.output;
   const shown = output != null ? tailLines(output, OPEN_LINES) : undefined;
   // A failed call says why, first: detail.error when there is one, else the tool's own words.
-  const error = toolFailed(step) ? toolError(step) : undefined;
+  const rawError = toolFailed(step) ? toolError(step) : undefined;
+  const error = rawError ? extractToolImages(rawError).text : undefined;
   // The result may be the very words shown above as the reason: one copy is enough.
-  const result = d?.result != null ? tailLines(d.result, OPEN_LINES).text : undefined;
+  const extracted = d?.result != null ? extractToolImages(d.result) : undefined;
+  const result = extracted?.text ? tailLines(extracted.text, OPEN_LINES).text : undefined;
   return (
     <div className="tool-detail">
       {d?.command && <pre className="cmd">$ {d.command}</pre>}
@@ -1066,10 +1072,11 @@ function ToolDetailView({ step, changes }: { step: ToolCall; changes: DiffFile[]
           <pre className="out">{d.arguments}</pre>
         </>
       )}
-      {result && result !== error && (
+      {d?.result != null && (
         <>
-          <div className="muted tiny">结果</div>
-          <pre className="out">{result}</pre>
+          <div className="tool-result-heading"><span className="muted tiny">结果</span><button className="ghost tiny" onClick={() => void navigator.clipboard.writeText(d.result!)}>复制原始结果</button></div>
+          <ToolImages images={(extracted?.images ?? []).map((src, i) => ({ src, alt: `${step.title} 图片 ${i + 1}` }))} />
+          {result && result !== error && <pre className="out">{result}</pre>}
         </>
       )}
     </div>
@@ -1335,7 +1342,6 @@ function Composer({
   plans,
   onPlanDone,
   mates,
-  agentCommands = [],
 }: {
   agent: Agent;
   capabilities: Capabilities | null;
@@ -1346,8 +1352,6 @@ function Composer({
   onPlanDone: () => void;
   /** Agents @ offers, besides the models. */
   mates: Agent[];
-  /** Slash commands the agent's own CLI brings: `/`'s second group (empty until wired up). */
-  agentCommands?: AgentCommand[];
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -1356,6 +1360,8 @@ function Composer({
   const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
   const mention = useMention(ref, setDraft, mentionsFor(mates, (plugins.data ?? []).filter((p) => p.models.length > 0)));
   const compact = useCompact(agent);
+  const agentCommands = useHubData(() => api.agentCommands(agent.id), [agent.id],
+    (e) => (e.type === "agent.status_changed" && e.data.id === agent.id) || (e.type === "agent.updated" && e.data.agent.id === agent.id));
   const groups: SlashMenuGroup[] = [
     {
       key: "crossagents",
@@ -1372,15 +1378,14 @@ function Composer({
         },
       ],
     },
-    ...(agentCommands.length > 0
-      ? [
-          {
-            key: "agent",
-            label: `${displayName(agent)} 自带的指令`,
-            commands: agentCommands.map((c) => ({ key: `agent/${c.name}`, group: "agent", name: c.name, title: c.description ?? (c.kind === "skill" ? "技能" : "agent 自带的指令") })),
-          },
-        ]
-      : []),
+    {
+      key: "agent",
+      label: "agent 自带",
+      note: agentCommands.error ? `获取失败：${agentCommands.error}` : agentCommands.data && !agentCommands.data.known ? (agentCommands.data.note ?? "这个驱动不报告自带指令") : undefined,
+      commands: agentCommands.error || !agentCommands.data?.known ? [] : agentCommands.data.commands
+        .filter((c) => c.name.toLowerCase() !== "compact")
+        .map((c) => ({ key: `agent/${c.name}`, group: "agent", name: c.name, title: c.description ?? "", kind: c.kind })),
+    },
   ];
   const slash = useSlash(ref, setDraft, groups);
   const running = agent.status === "running";
