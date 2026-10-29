@@ -18,6 +18,21 @@ export type Scenario = {
 };
 
 export const SCENARIOS: Scenario[] = [
+  { key: "codebuddy-sites", label: "CodeBuddy 双站点账号", hint: "独立账号和国内/国际站选择", build: () => {
+    const state = usageScene();
+    const template = state.quota.accounts.find((a) => a.account.provider === "codebuddy")!;
+    state.quota.providers = ["codebuddy"];
+    state.quota.accounts = (["china", "international"] as const).map((site) => ({
+      ...template,
+      account: { ...template.account, id: `codebuddy-${site}`, codebuddy_site: site, label: site === "china" ? "CodeBuddy 国内站" : "CodeBuddy 国际站" },
+      status: { ...template.status, logged_in: false, rate_limits: [], plan: null, note: "请完成对应站点的本人登录" },
+      agents: [],
+    }));
+    return { state, route: "#/usage", script: [
+      { at: 400, act: () => [...document.querySelectorAll("button")].find((b) => b.textContent === "添加账号")?.click() },
+      { at: 800, act: () => document.querySelector(".card.form")?.scrollIntoView({ block: "start" }) },
+    ] };
+  } },
   { key: "tool-image-paths", label: "工具参数图片路径", hint: "加载、拒绝与去重", build: () => toolImagePathsSession() },
   { key: "tool-images", label: "工具结果图片", hint: "图片结果与混合文字", build: () => toolImagesSession() },
   { key: "continuation-options", label: "持续推进设置", hint: "新建 Work 的持续推进开关及次数、间隔", build: () => {

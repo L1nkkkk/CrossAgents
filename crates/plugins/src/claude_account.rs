@@ -443,6 +443,7 @@ mod tests {
     fn the_default_directory_keeps_claude_config_dir_unset() {
         let accounts = ClaudeAccounts::default();
         let account = |home: PathBuf| Account {
+            codebuddy_site: None,
             id: "claude".into(),
             provider: "claude".into(),
             label: String::new(),

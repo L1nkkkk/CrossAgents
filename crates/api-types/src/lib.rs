@@ -1165,6 +1165,8 @@ pub struct UsageResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct CreateAccountRequest {
+    #[serde(default)]
+    pub codebuddy_site: Option<crossagents_core::CodebuddySite>,
     pub id: String,
     pub provider: String,
     #[serde(default)]

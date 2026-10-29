@@ -12,6 +12,68 @@ use serde_json::{Value, json};
 
 const ACCESS_TOKEN_MARK: &str = "very-secret-access";
 
+#[tokio::test]
+async fn codebuddy_sites_are_persisted_and_require_separate_login_homes() {
+    let t = TestHub::start().await;
+    let root = tempfile::tempdir().unwrap();
+    for (id, site) in [
+        ("codebuddy-cn", "china"),
+        ("codebuddy-intl", "international"),
+    ] {
+        let home = root.path().join(id);
+        let response = t
+            .post(
+                "/v1/accounts",
+                json!({
+                    "id": id, "provider":"codebuddy", "home":home, "codebuddy_site":site
+                }),
+            )
+            .await;
+        assert_eq!(response.status(), 201, "{}", response.text().await.unwrap());
+        let account: Value = response.json().await.unwrap();
+        assert_eq!(account["codebuddy_site"], site);
+        assert!(home.join("profile/AppData/Local").is_dir());
+        let stored = t.hub.bus.store().get_account(id).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(stored).unwrap()["codebuddy_site"],
+            site
+        );
+    }
+    for request in [
+        json!({"id":"wrong-provider", "provider":"codex", "codebuddy_site":"china"}),
+        json!({"id":"shared-login", "provider":"codebuddy", "codebuddy_site":"china", "import_default":true}),
+        json!({"id":"same-home", "provider":"codebuddy", "codebuddy_site":"international", "home":root.path().join("codebuddy-cn")}),
+    ] {
+        let response = t.post("/v1/accounts", request).await;
+        assert!(!response.status().is_success());
+    }
+    let shared = root.path().join("concurrent");
+    let request =
+        |id, site| json!({"id":id, "provider":"codebuddy", "codebuddy_site":site, "home":shared});
+    let (a, b) = tokio::join!(
+        t.post("/v1/accounts", request("race-cn", "china")),
+        t.post("/v1/accounts", request("race-intl", "international")),
+    );
+    assert_ne!(
+        a.status().is_success(),
+        b.status().is_success(),
+        "only one account can claim a profile"
+    );
+    let t = TestHub::start_in(t.restart_home().await, |_| {}).await;
+    for id in ["codebuddy-cn", "codebuddy-intl"] {
+        assert!(
+            t.hub
+                .bus
+                .store()
+                .get_account(id)
+                .await
+                .unwrap()
+                .codebuddy_site
+                .is_some()
+        );
+    }
+}
+
 fn jwt(claims: Value) -> String {
     let enc = |v: &Value| URL_SAFE_NO_PAD.encode(v.to_string());
     format!("{}.{}.sig", enc(&json!({ "alg": "none" })), enc(&claims))

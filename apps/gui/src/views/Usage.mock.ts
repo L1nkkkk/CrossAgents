@@ -16,7 +16,7 @@ const inMinutes = (m: number) => new Date(Date.now() + m * 60_000).toISOString()
 
 function account(id: string, provider: string, label: string, status: Partial<AccountQuota["status"]>, agents: string[]): AccountQuota {
   return {
-    account: { id, provider, label, home: `C:/Users/me/.crossagents/accounts/${id}`, created_at: ago(60 * 24 * 20) },
+    account: { id, provider, label, codebuddy_site: null, home: `C:/Users/me/.crossagents/accounts/${id}`, created_at: ago(60 * 24 * 20) },
     status: {
       logged_in: true,
       auth_mode: "chatgpt",
