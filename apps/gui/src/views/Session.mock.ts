@@ -285,8 +285,13 @@ export function contextUsageScene(): { state: MockState; script: Step[]; route: 
 
 /** The same chat with `/` typed into the composer, so the command menu is open; a running agent
  * shows /compact as unavailable and says why. */
-export function slashScene(kind: "idle" | "running"): { state: MockState; script: Step[]; route: string } {
+export function slashScene(kind: "idle" | "running" | "unknown"): { state: MockState; script: Step[]; route: string } {
   const s = kind === "running" ? soloSession() : failedEditSession();
+  if (kind !== "unknown") s.state.agentCommands = { [s.state.agents[0].id]: { known: true, commands: [
+    { name: "review", description: "审查当前改动", kind: "command" },
+    { name: "explain", description: "解释代码和设计", kind: "skill" },
+    { name: "compact", kind: "command" },
+  ] } };
   return {
     ...s,
     script: [

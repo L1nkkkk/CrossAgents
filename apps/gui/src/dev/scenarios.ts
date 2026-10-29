@@ -56,6 +56,7 @@ export const SCENARIOS: Scenario[] = [
   { key: "solo", label: "单聊", hint: "Claude 会话：折叠的工具步骤、一轮进行中、两条排队", build: () => soloSession() },
   { key: "ctx-menu", label: "上下文菜单（20%）", hint: "点顶栏（或右侧栏「上下文」）的用量：明细和「压缩上下文」，不必等到 50%", build: () => contextUsageScene() },
   { key: "slash-menu", label: "输入框 / 指令", hint: "Agent 空闲时打 /：CrossAgents 的指令在上，↑↓ 选，Enter 执行，Esc 关闭", build: () => slashScene("idle") },
+  { key: "slash-unknown", label: "自带指令未知", hint: "驱动不报告自带指令", build: () => slashScene("unknown") },
   { key: "slash-blocked", label: "/compact 运行中不可用", hint: "Nova 正在工作：菜单里的 /compact 写明本轮结束后才能压缩", build: () => slashScene("running") },
   { key: "long-name", label: "长名字的顶栏", hint: "名字很长、正在执行、上下文 65%：顶栏先把终端恢复/提交图收成图标、Meter 只留百分比，名字仍认得出来", build: () => longNameScene() },
   { key: "live-stream", label: "运行中：输出还在来", hint: "正在跑的命令，实时输出只在工具那一行里（一次，不重复）；约 6 秒后出现推理流，LiveLine 显示推理的最后一行", build: () => liveSession("stream") },

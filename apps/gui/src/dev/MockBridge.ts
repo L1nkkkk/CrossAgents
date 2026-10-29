@@ -4,6 +4,7 @@
 // what streamed (transcripts fold with the GUI's own session.ts). Writes that matter to the
 // look (sending, withdrawing, approving) are acted out; the rest answer 204.
 
+import type { AgentCommandsResponse } from "@bindings/AgentCommandsResponse";
 import type { AgentExecution } from "@bindings/AgentExecution";
 import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
 import type { CommitGraph } from "@bindings/CommitGraph";
@@ -35,6 +36,7 @@ const MOCK_NAMES = ["Nova", "Iris", "Atlas", "Orion", "Vega", "Lyra", "Mira", "S
 
 export type MockState = {
   agents: Agent[];
+  agentCommands?: Record<string, AgentCommandsResponse>;
   runs: RunDetail[];
   /** By agent id. */
   transcripts: Map<string, Transcript>;
@@ -335,6 +337,10 @@ export class MockBridge implements CrossAgentsBridge {
       }
       if (p === "/v1/agents") return json(200, { agents: s.agents });
       if ((m = p.match(/^\/v1\/agents\/([^/]+)$/))) return this.agent(m[1]) ? json(200, this.agent(m[1])) : notFound("agent");
+      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/commands$/))) {
+        const a = this.agent(m[1]);
+        return a ? json(200, s.agentCommands?.[a.id] ?? { commands: [], known: false, note: "这个驱动不报告自带指令" }) : notFound("agent");
+      }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/execution$/))) {
         const a = this.agent(m[1]);
         if (!a) return notFound("agent");
