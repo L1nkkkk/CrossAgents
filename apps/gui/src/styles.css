@@ -1441,6 +1441,14 @@ html, body { overflow: hidden; }
 .action-state { margin-left: auto; font-size: 12px; color: var(--muted); white-space: nowrap; }
 .action-card.refused .action-state { color: var(--danger-text); font-weight: 600; }
 .action-reason { color: var(--danger-text); font-size: 12.5px; line-height: 1.5; }
+.action-reason .fold-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Fold (components.tsx): long text cut to a few lines; opened, it scrolls inside a bounded box. */
+.fold-body { overflow: hidden; line-height: 1.5; }
+.fold.cut:not(.open) .fold-body { -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent); mask-image: linear-gradient(to bottom, #000 60%, transparent); }
+.fold.open .fold-body { max-height: min(420px, 60vh); overflow: auto; }
+.fold-toggle { border: none; background: none; padding: 2px 0 0; font: inherit; font-size: 12px; color: var(--accent-text); cursor: pointer; }
+.fold-toggle:hover { text-decoration: underline; background: none; }
 .rail-spend { display: flex; justify-content: space-between; gap: 8px; margin: 8px 4px 0; padding-top: 6px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
 .rail-spend-v { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 500; }
 

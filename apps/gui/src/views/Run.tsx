@@ -15,6 +15,7 @@ import {
   Avatar,
   ErrorBox,
   FileScopeProvider,
+  Fold,
   Icon,
   List,
   Prose,
@@ -521,9 +522,10 @@ function Ending({ run, closing, onDone }: { run: Run; closing: boolean; onDone: 
         )}
         {landable && <RunChanges run={run} />}
         {run.summary && (
-          <div className="run-summary">
+          // The lead's summary can run to pages; its opening lines are the gist.
+          <Fold lines={5} className="run-summary">
             <Prose text={run.summary} />
-          </div>
+          </Fold>
         )}
         <ErrorBox error={error} />
       </div>
