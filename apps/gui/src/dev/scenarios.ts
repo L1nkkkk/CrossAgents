@@ -1,3 +1,4 @@
+import { toolImagePathsSession } from "../views/Session.mock";
 import { toolImagesSession } from "../views/Session.mock";
 // The scenarios `preview:mock` can show (docs/tasks/V6-GUI.md §3). Each builds a fresh state,
 // an event script to replay, and the page to open.
@@ -19,6 +20,7 @@ export type Scenario = {
 };
 
 export const SCENARIOS: Scenario[] = [
+  { key: "tool-image-paths", label: "工具参数图片路径", hint: "加载、拒绝与去重", build: () => toolImagePathsSession() },
   { key: "tool-images", label: "工具结果图片", hint: "图片结果与混合文字", build: () => toolImagesSession() },
   { key: "continuation-options", label: "持续推进设置", hint: "新建 Work 的持续推进开关及次数、间隔", build: () => {
     localStorage.setItem("crossagents.mode", JSON.stringify("run"));

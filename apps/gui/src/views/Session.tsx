@@ -1,5 +1,5 @@
 import { Image as ImageIcon } from "lucide-react";
-import { extractToolImages } from "../lib/toolimages";
+import { extractToolImagePaths, extractToolImages } from "../lib/toolimages";
 import { ToolImages } from "../toolimages";
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import type { Agent } from "@bindings/Agent";
@@ -664,6 +664,7 @@ function Conversation({
             </div>
           )}
           <FileScopeProvider value={outerScope ?? { kind: "agent", agent: agent.id }}>
+          <AgentImageContext.Provider value={agent.id}>
           <CwdContext.Provider value={agent.cwd}>
           <Follow.Provider value={{ el: ref, stick }}>
             {byTime(turns, [...switches, ...handoffs]).map((x) =>
@@ -677,6 +678,7 @@ function Conversation({
             )}
           </Follow.Provider>
           </CwdContext.Provider>
+          </AgentImageContext.Provider>
           </FileScopeProvider>
           {children}
         </div>
@@ -983,6 +985,7 @@ const OPEN_LINES = 400;
 
 /** The session's working directory, for shortening paths in tool lines. */
 const CwdContext = createContext<string | undefined>(undefined);
+const AgentImageContext = createContext<string | undefined>(undefined);
 
 /** One tool call; a click opens what it did (output, exit code, diffs, arguments). */
 function ToolStep({ step }: { step: ToolCall }) {
@@ -1040,6 +1043,18 @@ function ToolStep({ step }: { step: ToolCall }) {
 
 function ToolDetailView({ step, changes }: { step: ToolCall; changes: DiffFile[] }) {
   const d = step.detail;
+  const agent = useContext(AgentImageContext);
+  const paths = useMemo(() => extractToolImagePaths(d?.arguments ?? ""), [d?.arguments]);
+  const [loaded, setLoaded] = useState<Record<string, ImageLoad>>({});
+  useEffect(() => {
+    if (!agent) return;
+    let active = true;
+    setLoaded({});
+    for (const path of paths) void loadToolImage(agent, path).then((value) => {
+      if (active) setLoaded((old) => ({ ...old, [path]: value }));
+    });
+    return () => { active = false; };
+  }, [agent, paths]);
   const output = d?.output ?? step.output;
   const shown = output != null ? tailLines(output, OPEN_LINES) : undefined;
   // A failed call says why, first: detail.error when there is one, else the tool's own words.
@@ -1047,6 +1062,8 @@ function ToolDetailView({ step, changes }: { step: ToolCall; changes: DiffFile[]
   const error = rawError ? extractToolImages(rawError).text : undefined;
   // The result may be the very words shown above as the reason: one copy is enough.
   const extracted = d?.result != null ? extractToolImages(d.result) : undefined;
+  const resultImages = (extracted?.images ?? []).map((src, i) => ({ src, alt: `${step.title} 图片 ${i + 1}`, caption: paths.filter((path) => loaded[path]?.src === src).join("、") || undefined }));
+  const pathImages = paths.flatMap((path) => loaded[path]?.src && !extracted?.images.includes(loaded[path].src!) ? [{ src: loaded[path].src!, alt: `${step.title} 图片`, caption: path }] : []);
   const result = extracted?.text ? tailLines(extracted.text, OPEN_LINES).text : undefined;
   return (
     <div className="tool-detail">
@@ -1070,12 +1087,14 @@ function ToolDetailView({ step, changes }: { step: ToolCall; changes: DiffFile[]
         <>
           <div className="muted tiny">参数</div>
           <pre className="out">{d.arguments}</pre>
+          <ToolImages images={pathImages} />
+          {paths.map((path) => loaded[path]?.error ? <div className="tool-image-error" key={path}>{path}：{loaded[path].error}</div> : !loaded[path] ? <div className="tool-image-loading" key={path}>{path}：加载中…</div> : null)}
         </>
       )}
       {d?.result != null && (
         <>
           <div className="tool-result-heading"><span className="muted tiny">结果</span><button className="ghost tiny" onClick={() => void navigator.clipboard.writeText(d.result!)}>复制原始结果</button></div>
-          <ToolImages images={(extracted?.images ?? []).map((src, i) => ({ src, alt: `${step.title} 图片 ${i + 1}` }))} />
+          <ToolImages images={resultImages} />
           {result && result !== error && <pre className="out">{result}</pre>}
         </>
       )}
@@ -1600,3 +1619,16 @@ function PlanDock({ run, onDone, onReply }: { run: Run; onDone: () => void; onRe
   );
 }
 
+
+
+type ImageLoad = { src?: string; error?: string };
+const toolImageCache = new Map<string, Promise<ImageLoad>>();
+function loadToolImage(agent: string, path: string): Promise<ImageLoad> {
+  const key = JSON.stringify([agent, path]);
+  let pending = toolImageCache.get(key);
+  if (!pending) {
+    pending = api.agentImage(agent, path).then((image) => ({ src: `data:${image.mime};base64,${image.data}` }), (err: unknown) => ({ error: errorText(err) }));
+    toolImageCache.set(key, pending);
+  }
+  return pending;
+}
