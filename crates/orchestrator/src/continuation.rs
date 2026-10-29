@@ -57,6 +57,10 @@ impl Orchestrator {
     /// Nothing is woken and no attempt is counted ([`Self::continue_run`] with `deliver`
     /// false): the lead has just finished the turn, and a due time that passed during it is
     /// left due for the clock to deliver.
+    ///
+    /// The stuck watch is not judged here either: a quiet stretch that has already run out
+    /// must reach the lead as the report it is, so only a delivery pass does the judging
+    /// (see the branch in [`Self::continue_run`]).
     pub async fn settle_continuation(&self, lead: AgentId) {
         let runs = match self.store.list_runs().await {
             Ok(runs) => runs,
@@ -308,34 +312,53 @@ impl Orchestrator {
         // reason to act (a compile may just be slow), and a busy agent's silence is not
         // evidence either: only the run's own durable facts going quiet for `stuck_minutes`
         // is. Even then the lead is only asked to decide; nothing is interrupted or replayed.
+        //
+        // Only a delivery pass judges that quiet stretch. Settling (`deliver` false) runs when
+        // the lead goes Idle and sends nothing, so judging there would write the stuck advice
+        // and re-arm `progress_at` with nothing delivered: the clock's next pass would then
+        // see a fresh stretch and send the plain advice, and the "no progress for N minutes,
+        // waiting for whom" would be lost. A settle therefore leaves the watch alone, with one
+        // exception it owes: `state.phase` is written further up, so a phase change it records
+        // here would be invisible to the next delivery pass (`changed_phase` false there) and
+        // the quiet stretch of the old phase would be charged to the new one. Re-arming the
+        // existing watch for the new phase keeps that stretch from leaking and swallows
+        // nothing: it is the same reset a delivery pass makes on a phase change, not a stuck
+        // judgement. A watch that does not exist yet is left for the delivery pass to create.
         let mut stuck = false;
         if let (Some(minutes), Some(waiting)) = (policy.stuck_minutes, step.waiting.as_ref()) {
-            let mut watch = match state.stuck_watch.clone() {
-                // A new phase starts its quiet stretch now: records written before it say
-                // nothing about what this wait is doing.
-                Some(watch) if !changed_phase => watch,
-                _ => StuckWatch {
-                    progress_at: now,
-                    event_seq: self.store.latest_event_seq().await?,
-                },
-            };
-            self.stuck_progress(&run, &mut watch, now).await?;
-            let quiet = now - watch.progress_at;
-            if quiet >= Duration::minutes(i64::from(minutes)) {
-                stuck = true;
-                eligible = true;
-                next_step = format!(
-                    "No progress for {} minutes while waiting for {}: nothing in the run changed and none of its agents reported anything. Inspect it and decide yourself whether to interrupt it, reassign it or keep waiting. Nothing was interrupted or replayed.",
-                    quiet.num_minutes().max(1),
-                    waiting.what
-                );
-                // The threshold was the wait: start the next stretch here, so a later report
-                // needs another full `stuck_minutes` instead of one interval.
+            if deliver {
+                let mut watch = match state.stuck_watch.clone() {
+                    // A new phase starts its quiet stretch now: records written before it say
+                    // nothing about what this wait is doing.
+                    Some(watch) if !changed_phase => watch,
+                    _ => StuckWatch {
+                        progress_at: now,
+                        event_seq: self.store.latest_event_seq().await?,
+                    },
+                };
+                self.stuck_progress(&run, &mut watch, now).await?;
+                let quiet = now - watch.progress_at;
+                if quiet >= Duration::minutes(i64::from(minutes)) {
+                    stuck = true;
+                    eligible = true;
+                    next_step = format!(
+                        "No progress for {} minutes while waiting for {}: nothing in the run changed and none of its agents reported anything. Inspect it and decide yourself whether to interrupt it, reassign it or keep waiting. Nothing was interrupted or replayed.",
+                        quiet.num_minutes().max(1),
+                        waiting.what
+                    );
+                    // The threshold was the wait: start the next stretch here, so a later report
+                    // needs another full `stuck_minutes` instead of one interval.
+                    watch.progress_at = now;
+                }
+                state.stuck_watch = Some(watch);
+            } else if changed_phase && let Some(watch) = state.stuck_watch.as_mut() {
                 watch.progress_at = now;
+                watch.event_seq = self.store.latest_event_seq().await?;
             }
-            state.stuck_watch = Some(watch);
-        } else {
-            // Not waiting on anyone: a quiet stretch from here says nothing.
+        } else if deliver {
+            // Not waiting on anyone: a quiet stretch from here says nothing. A settle leaves
+            // the watch for the phase it saw; nothing reads it before the delivery pass that
+            // clears it here.
             state.stuck_watch = None;
         }
         state.next_step = next_step;
