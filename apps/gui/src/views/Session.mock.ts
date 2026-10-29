@@ -3,7 +3,7 @@
 // steps, and two of your messages wait behind it.
 
 import { emptyState, type MockState, type Step } from "../dev/MockBridge";
-import { NOTES_REPO, agent, fileDiff, say, think, tool, transcript, turn, uid } from "../dev/fixtures";
+import { NOTES_REPO, agent, fileDiff, planned, run, say, task, think, tool, transcript, turn, uid } from "../dev/fixtures";
 import { plugins } from "./Agents.mock";
 import { quota } from "./Usage.mock";
 
@@ -132,6 +132,27 @@ export function liveSession(kind: "stream" | "quiet"): { state: MockState; scrip
           { at: 1_350 + i * 900, event: { type: "agent.tool_output", data: { id: nova.id, tool_call_id: build, text: `transforming (${40 + i * 8}/214) src/main.tsx\n` } } },
         ]);
   return { state, script, route: `#/s/${nova.name}` };
+}
+
+/**
+ * The same running turn as `liveSession`, seen on a run page: the run's lead is the one building,
+ * so the middle column's live line is what the run page shows while it works.
+ */
+export function liveRun(kind: "stream" | "quiet"): { state: MockState; script: Step[]; route: string } {
+  const scene = liveSession(kind);
+  const nova = scene.state.agents[0];
+  const r = run({
+    title: "三个包都构建一遍",
+    request: "先看看构建脚本，然后把三个包按 core、cli、gui 的顺序都构建一遍。",
+    planner: nova,
+    worker: nova,
+    team: [nova],
+    status: "running",
+    plan: [planned("a", "构建 core、cli、gui", "三个包都能构建通过，有报错就修。", nova.id)],
+    minutesAgo: 12,
+  });
+  scene.state.runs.push({ run: r, tasks: [task(r, r.plan[0], { status: "running", assignee: nova, minutesAgo: 10, progress: "gui 的 vite 打包还在跑" })] });
+  return { ...scene, route: `#/runs/${r.id}` };
 }
 
 /** Nova's CLI crashes mid-turn: the session shows how its process ended. */

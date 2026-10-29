@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { Capabilities } from "@bindings/Capabilities";
 import type { Run } from "@bindings/Run";
@@ -603,6 +603,13 @@ function Sending({ message, agent }: { message: Outgoing; agent: Agent }) {
   );
 }
 
+/**
+ * The conversation's scroll box and whether it follows the bottom. A part that grows on its own
+ * (the live line under a running turn, once its timer has something new to say) uses this, since
+ * only the conversation itself is re-rendered when a transcript item arrives.
+ */
+const Follow = createContext<{ el: RefObject<HTMLDivElement | null>; stick: RefObject<boolean> } | null>(null);
+
 function Conversation({
   agent,
   turns,
@@ -660,6 +667,7 @@ function Conversation({
           )}
           <FileScopeProvider value={outerScope ?? { kind: "agent", agent: agent.id }}>
           <CwdContext.Provider value={agent.cwd}>
+          <Follow.Provider value={{ el: ref, stick }}>
             {byTime(turns, [...switches, ...handoffs]).map((x) =>
               "message_id" in x ? (
                 <Turn key={x.message_id} turn={x} agent={agent} agents={agents} tree={tree} />
@@ -669,6 +677,7 @@ function Conversation({
                 <SwitchNote key={x.at} change={x} />
               ),
             )}
+          </Follow.Provider>
           </CwdContext.Provider>
           </FileScopeProvider>
           {children}
@@ -1066,6 +1075,7 @@ function ToolsToggle() {
  */
 function LiveLine({ since, items }: { since: string; items: TranscriptItem[] }) {
   const cwd = useContext(CwdContext);
+  const follow = useContext(Follow);
   const [now, setNow] = useState(Date.now());
   // When the turn was last seen to produce something. Only time on this page counts: the hub
   // sends items, not when each one arrived.
@@ -1076,6 +1086,12 @@ function LiveLine({ since, items }: { since: string; items: TranscriptItem[] }) 
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
+  // This line grows on its own (a new tail line, the quiet notice) without the conversation
+  // re-rendering, so it keeps the person at the bottom itself.
+  useLayoutEffect(() => {
+    const el = follow?.el.current;
+    if (el && follow?.stick.current) el.scrollTop = el.scrollHeight;
+  });
   const current = liveNow(items, cwd);
   const quiet = quietSeconds(seen.at, now);
   return (
