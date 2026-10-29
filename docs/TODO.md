@@ -70,7 +70,7 @@
 - [x] GUI 自动更新：electron-builder 改出 NSIS 安装包（按用户安装），electron-updater 从 GitHub Releases 后台下载、退出时安装；打包前检查 GUI 与 Cargo 版本一致
 - [x] 建公开的发布仓库 `L1nkkkk/CrossAgents-releases`（主仓库私有，见 MULTI-NODE §13.5），发布 v0.1.0（2026-10-25：`electron:build` 打包后用 `gh release create` 上传，资产名与 `latest.yml` 一致）
 - [x] 发 0.1.1 时验证真实的在线更新：装着 0.1.0 的 GUI 能在后台下载并在退出时装上新版（2026-10-28：启动 3 秒发现 0.1.1，按 blockmap 差量下载 8.4 MB / 116 MB；托盘退出后静默安装约 6 秒；重开后起 `bin/0.1.1` 的 hub 并清掉 `bin/0.1.0`）
-- [ ] 旧 hub 遇到新库时说清楚：本机跑过 dev hub 后 `state.db` 已有 0.1.0 不认识的迁移（`migration 9 was previously applied but is missing`），0.1.0 的 hub 直接退出，GUI 只显示「cannot start the local hub」，hub.log 里没有原因。至少把这句错误带进 GUI 和 hub.log，提示「数据库来自更新的版本，请升级」
+- [x] 旧 hub 遇到新库时说清楚：本机跑过 dev hub 后 `state.db` 已有 0.1.0 不认识的迁移（`migration 9 was previously applied but is missing`），0.1.0 的 hub 直接退出，GUI 只显示「cannot start the local hub」，hub.log 里没有原因。至少把这句错误带进 GUI 和 hub.log，提示「数据库来自更新的版本，请升级」（2026-10-29：`store-sqlite` 把 `MigrateError::VersionMissing` 译成「the database comes from a newer CrossAgents (it has migration N, this build knows up to M); upgrade CrossAgents to open it」；`hub run` 失败时把这句写进 `hub.log` 的 ERROR 行；`hub start` 在子进程退出后读回该文件自本次尝试之后的最后一条 ERROR，拼进报错，GUI 的离线页因此显示原因而不是只有「cannot start the local hub」）
 - [ ] 安装包与 exe 代码签名（未签名时 SmartScreen 首次运行会拦）
 - [x] 无窗口时的额度与预算上限（2026-10-24 决定，见 [tasks/DOGFOOD.md](tasks/DOGFOOD.md) §5）：hub 不在时只记账、hub 回来时结算——宿主缓存并补发用量事件，新 hub 启动时先读账并立即检查一次预算，再恢复调度；不在宿主里强制。Chat 默认上限仍未做。原记录：暂缓（2026-10-23 决定）。现状：Work run 的 `policy.budget` 只在 hub 在时检查（`crates/hub/src/budget.rs`），hub 不在时宿主里的 agent 不受限，Chat 会话没有上限。开工前要定：hub 不在时超限是宿主停在轮次之间，还是只记账等 hub 回来处理；Chat 要不要默认上限
 
@@ -354,9 +354,19 @@ B 删除 run：
 ## 十八、工作组：持续的工作空间，run 是其中一轮
 
 > 2026-10-29，设计见 [tasks/G1.md](tasks/G1.md)。起因：一轮做完想接着干，只能让主导再开一个 Work、跳到新页面，历史被切成几段。
+> 与 §十九 有冲突，以 [tasks/LEAD.md](tasks/LEAD.md) §9 为准：一轮结束不再把主导 `send_home`、不删集成工作区，同组下一轮在同一个集成 worktree 里切新分支；原地模式没有 run 分支，不适用 G1 §3.3 的分支表。G1-2 与 §十九 P1 一起做。
 
 - [ ] G1-1：`works` 表与迁移、`Run.work_id`、事件与 `/v1/works*` 接口；同一组同时只有一个未结束的 run
-- [ ] G1-2：`run_next` 与分支规则（没落地时叠在上一轮上、连带落地、`from: "base"`）；开场信息列出前几轮
+- [ ] G1-2：`run_next` 与分支规则（没落地时叠在上一轮上、连带落地、`from: "base"`）；开场信息列出前几轮。与 §十九 P1 同做：下一轮复用上一轮的集成 worktree 与 `targets/integration`，主导不搬家
 - [ ] G1-3：提示词改为一轮结束后用 `run_next` 接着干；`work_start` 对已结束一轮的主导指向 `run_next`
 - [ ] G1-4：GUI `#/work/<id>`、对话里的轮次分隔、右侧「各轮」窗格、侧栏一组一行
 - [ ] G1-5：CLI `work ls/show`
+
+## 十九、Lead 执行模式与工作区保留
+
+> 2026-10-29，设计见 [tasks/LEAD.md](tasks/LEAD.md)。起因：修个小 bug 也要建 worktree，主导搬家丢上下文、再冷编译一遍；run 一结束主导被送回、检出被删，没法接着干。Lead 可选原地或 worktree，Worker 始终独立 worktree 可并行；Run 完成、会话结束、工作区清理拆成三件事。
+> 顺序：§九 剩下的小 bug → G1-1 → P1 + G1-2 → G1-3 / G1-4 / G1-5 → P2 → P3。P3 开工前先定 LEAD §10 第 1 条（原地模式要不要后台集成 worktree）。
+
+- [ ] P1 拆分收工与清理：`finish_run` 不再 `let_go` 主导、不删集成 worktree；`checkout_vacated`、`lead_left`、`lead_returned`、`delete.rs` 按工作区归属清理；保留 / 清理策略（工作组级，默认保留）与单独的清理入口；worker worktree 在任务接受后即可清理（LEAD §8、§9）
+- [ ] P2 Lead 原地：拆开 `run.in_place` 的几层含义（Lead 模式 / 是否受版本控制 / 归属 / 保留策略）；原地主导直接认领不走 `lead_in`；按 checkout 的目录占用（落地也要遵守、Run 完成即释放）；主导自己改动的原地验收，结果绑定内容快照。不做 worker 进用户目录（LEAD §4、§7、§11）
+- [ ] P3 混合派工：独立 index + 专用 ref 的工作区快照（不推送、大小上限、密钥文件提示）；worker 从快照并行开工；结果三方应用回原目录，全部算完再写、可恢复、不重复应用、保留人的暂存区（LEAD §5、§6）

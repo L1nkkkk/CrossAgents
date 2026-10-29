@@ -6,13 +6,23 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { binRoot, cleanup, compareVersions, install, isInside, plan, shadowRoot } from "./localHub.cjs";
+import { binRoot, cleanup, compareVersions, install, isInside, plan, reasonOf, shadowRoot } from "./localHub.cjs";
 
 const EXE = process.platform === "win32" ? "crossagents.exe" : "crossagents";
 
 function tempHome(): string {
   return mkdtempSync(join(tmpdir(), "crossagents-gui-"));
 }
+
+test("a failure is shown without the command line's `error: ` prefix", () => {
+  // docs/TODO.md §一: the reason a hub could not start is what the offline page shows.
+  assert.equal(
+    reasonOf("error: hub exited during startup (exit code: 1): the database comes from a newer CrossAgents\n", "", ""),
+    "hub exited during startup (exit code: 1): the database comes from a newer CrossAgents",
+  );
+  assert.equal(reasonOf("", "  error: boom  ", ""), "boom");
+  assert.equal(reasonOf("", "", "spawn failed"), "spawn failed");
+});
 
 test("versions compare by number, a release after its pre-releases", () => {
   assert.ok(compareVersions("0.1.0", "0.2.0")! < 0);

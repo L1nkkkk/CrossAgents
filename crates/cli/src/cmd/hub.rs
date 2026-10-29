@@ -62,6 +62,18 @@ pub async fn run(ctx: &Context, cmd: HubCommand) -> Result<()> {
 
 async fn run_foreground(paths: &Paths) -> Result<()> {
     let _log_guard = init_logging(paths)?;
+    let result = serve(paths).await;
+    // `hub start` runs this process with stderr discarded, so a failure here would otherwise
+    // leave nothing behind but "hub exited during startup": say why in the log (a database
+    // from a newer version is the case that matters, docs/TODO.md §一).
+    if let Err(err) = &result {
+        let text = format!("{err:#}");
+        tracing::error!("hub could not start: {}", text.lines().next().unwrap_or(""));
+    }
+    result
+}
+
+async fn serve(paths: &Paths) -> Result<()> {
     let config = HubConfig::load(paths.clone())?;
     crossagents_hub::run(config, async {
         let _ = tokio::signal::ctrl_c().await;
@@ -116,6 +128,8 @@ async fn start(ctx: &Context) -> Result<()> {
     let exe = std::env::current_exe().context("cannot locate the crossagents executable")?;
     // Run from a copy, so the build output stays free for the next build.
     let exe = crossagents_hub::shadow::stable_exe(&ctx.paths, &exe).unwrap_or(exe);
+    // Where the log ends before this attempt: a reason written after it is this attempt's.
+    let log_from = log_tail(&ctx.paths);
     let mut command = std::process::Command::new(exe);
     command
         .args(["hub", "run"])
@@ -131,8 +145,8 @@ async fn start(ctx: &Context) -> Result<()> {
     while Instant::now() < deadline {
         if let Some(exit) = child.try_wait()? {
             bail!(
-                "hub exited during startup ({exit}); see {}",
-                ctx.paths.logs().display()
+                "hub exited during startup ({exit}){}",
+                explanation(&ctx.paths, log_from.as_ref())
             );
         }
         if let Some((hub, _)) = running_hub(&ctx.paths).await?
@@ -143,10 +157,70 @@ async fn start(ctx: &Context) -> Result<()> {
         tokio::time::sleep(POLL).await;
     }
     bail!(
-        "hub did not become ready within {}s; see {}",
+        "hub did not become ready within {}s{}",
         START_TIMEOUT.as_secs(),
-        ctx.paths.logs().display()
+        explanation(&ctx.paths, log_from.as_ref())
     )
+}
+
+/// `: <why>; see <logs>`, where `<why>` is the error the hub logged after `from`. `hub run`
+/// has its stderr discarded (it is a detached process), so the log is the only place its
+/// reason is written; without it the GUI could only say "cannot start the local hub".
+fn explanation(paths: &Paths, from: Option<&(String, u64)>) -> String {
+    let see = format!("; see {}", paths.logs().display());
+    match logged_error(paths, from) {
+        Some(why) => format!(": {why}{see}"),
+        None => see,
+    }
+}
+
+/// The last `ERROR` line written to `hub.log` after `from` (the newest file when `from` is
+/// unknown, or when the log rolled over to a new day since).
+fn logged_error(paths: &Paths, from: Option<&(String, u64)>) -> Option<String> {
+    let (text, start) = match from {
+        Some((name, len)) => match std::fs::read_to_string(paths.logs().join(name)) {
+            Ok(text) => {
+                let start = (*len as usize).min(text.len());
+                (text, start)
+            }
+            Err(_) => (std::fs::read_to_string(newest_log(paths)?).ok()?, 0),
+        },
+        None => (std::fs::read_to_string(newest_log(paths)?).ok()?, 0),
+    };
+    // One line per entry: `<time> ERROR <module>: <message>`. The message is what a user can
+    // act on; the module name only repeats this crate's layout.
+    text.get(start..)?
+        .lines()
+        .filter_map(|line| line.split_once(" ERROR ").map(|(_, rest)| rest.trim()))
+        .next_back()
+        .map(|rest| match rest.split_once(": ") {
+            Some((module, message)) if module.starts_with("crossagents") => message.to_owned(),
+            _ => rest.to_owned(),
+        })
+}
+
+/// The log file the hub is writing now: `hub.log.YYYY-MM-DD`, newest first.
+fn newest_log(paths: &Paths) -> Option<std::path::PathBuf> {
+    let mut files: Vec<_> = std::fs::read_dir(paths.logs())
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("hub.log"))
+        })
+        .collect();
+    files.sort();
+    files.pop()
+}
+
+/// Where the log ends now, so a later reason can be told apart from an earlier one.
+fn log_tail(paths: &Paths) -> Option<(String, u64)> {
+    let path = newest_log(paths)?;
+    let name = path.file_name()?.to_str()?.to_owned();
+    let len = std::fs::metadata(&path).ok()?.len();
+    Some((name, len))
 }
 
 fn report_started(ctx: &Context, hub: &HubFile, already: bool) -> Result<()> {
@@ -615,6 +689,45 @@ mod tests {
         // The archived one is stopped too, but is not counted as a state.
         assert_eq!(tally.running, 1);
         assert_eq!(tally.stopped, 1);
+    }
+
+    /// docs/TODO.md §一: a hub that cannot start says why, in the message the GUI shows.
+    #[test]
+    fn a_failed_start_takes_its_reason_from_the_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        std::fs::create_dir_all(paths.logs()).unwrap();
+        let log = paths.logs().join("hub.log.2026-10-29");
+        std::fs::write(
+            &log,
+            "2026-10-29T09:00:00Z  INFO crossagents_hub: older line\n\
+             2026-10-29T09:00:01Z ERROR crossagents_cli::cmd::hub: hub could not start: the \
+             database comes from a newer CrossAgents (it has migration 11, this build knows up \
+             to 10); upgrade CrossAgents to open it\n",
+        )
+        .unwrap();
+
+        // Only what was written after the mark counts: an older reason is not this attempt's.
+        let before = log_tail(&paths).unwrap();
+        assert!(explanation(&paths, Some(&before)).contains("see"));
+        assert!(!explanation(&paths, Some(&before)).contains("migration"));
+
+        std::fs::write(
+            &log,
+            format!(
+                "{}\n2026-10-29T09:00:02Z ERROR crossagents_cli::cmd::hub: hub could not start: \
+                 the database comes from a newer CrossAgents (it has migration 11, this build \
+                 knows up to 10); upgrade CrossAgents to open it\n",
+                std::fs::read_to_string(&log).unwrap()
+            ),
+        )
+        .unwrap();
+        let reason = explanation(&paths, Some(&before));
+        assert!(reason.contains("comes from a newer CrossAgents"), "{reason}");
+        assert!(!reason.contains("older line"), "{reason}");
+        assert!(reason.contains("logs"), "{reason}");
+        // The module name is dropped: only the reason is worth showing.
+        assert!(!reason.contains("crossagents_cli::cmd::hub"), "{reason}");
     }
 
     fn agent(name: &str, status: AgentStatus, archived: bool) -> Agent {

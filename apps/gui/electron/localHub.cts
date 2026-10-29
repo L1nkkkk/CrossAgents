@@ -90,12 +90,26 @@ export function plan(running: { file: HubFile; version: string } | undefined, ou
   return order < 0 ? { action: "replace", from: running.version } : { action: "newer", running: running.version };
 }
 
+/**
+ * What the command line said about a failure, without the `error: ` prefix it puts in front:
+ * the offline page already says which hub could not start.
+ */
+export function reasonOf(stderr: string, stdout: string, fallback: string): string {
+  const text = (stderr || stdout || fallback).trim();
+  return text.replace(/^error:\s*/, "");
+}
+
 function run(exe: string, args: string[], timeout = CLI_TIMEOUT_MS): Promise<string> {
   return new Promise((done, fail) => {
-    execFile(exe, args, { timeout, windowsHide: true }, (err, stdout, stderr) => {
-      if (err) fail(new Error(`${EXE} ${args.join(" ")} failed: ${(stderr || stdout || err.message).trim()}`));
-      else done(stdout.trim());
-    });
+    execFile(
+      exe,
+      args,
+      { timeout, windowsHide: true },
+      (err, stdout, stderr) => {
+        if (err) fail(new Error(`${args.join(" ")} failed: ${reasonOf(stderr, stdout, err.message)}`));
+        else done(stdout.trim());
+      },
+    );
   });
 }
 

@@ -73,7 +73,7 @@ impl SqliteStore {
     }
 
     async fn migrate(pool: SqlitePool) -> Result<Self, CoreError> {
-        MIGRATOR.run(&pool).await.map_err(storage)?;
+        MIGRATOR.run(&pool).await.map_err(migration_failed)?;
         Ok(Self { pool })
     }
 
@@ -84,6 +84,26 @@ impl SqliteStore {
     pub async fn close(&self) {
         self.pool.close().await;
     }
+}
+
+/// A migration that failed because the database carries one this build does not know: the file
+/// was written by a newer CrossAgents (a dev hub, or an upgraded install). Said plainly, because
+/// `hub start` runs the hub with stderr discarded: this sentence is all the user gets in
+/// `hub.log` and on the GUI's offline page.
+fn migration_failed(err: sqlx::migrate::MigrateError) -> CoreError {
+    match err {
+        sqlx::migrate::MigrateError::VersionMissing(version) => CoreError::Storage(format!(
+            "the database comes from a newer CrossAgents (it has migration {version}, this build \
+             knows up to {}); upgrade CrossAgents to open it",
+            known_migration()
+        )),
+        other => storage(other),
+    }
+}
+
+/// The highest migration this build ships.
+fn known_migration() -> i64 {
+    MIGRATOR.migrations.iter().map(|m| m.version).max().unwrap_or(0)
 }
 
 fn storage(err: impl std::fmt::Display) -> CoreError {
@@ -1753,6 +1773,40 @@ mod tests {
         let old = store.get_agent(&AgentKey::Id(id)).await.unwrap();
         assert_eq!((old.home, old.cwd), ("/w/other".into(), "/w/repo".into()));
         store.close().await;
+    }
+
+    /// docs/TODO.md §一: a database written by a newer build says so, instead of refusing to
+    /// open with "migration 11 was previously applied but is missing".
+    #[tokio::test]
+    async fn a_database_from_a_newer_build_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        // A migration this build does not ship, as a newer hub leaves behind.
+        {
+            let options = SqliteConnectOptions::new()
+                .filename(&path)
+                .create_if_missing(true);
+            let pool = SqlitePoolOptions::new()
+                .connect_with(options)
+                .await
+                .unwrap();
+            MIGRATOR.run(&pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+                 VALUES (?, 'from a newer build', TRUE, X'00', 0)",
+            )
+            .bind(known_migration() + 1)
+            .execute(&pool)
+            .await
+            .unwrap();
+            pool.close().await;
+        }
+        let err = match SqliteStore::open(&path).await {
+            Ok(_) => panic!("a database from a newer build must not open"),
+            Err(err) => err.to_string(),
+        };
+        assert!(err.contains("comes from a newer CrossAgents"), "{err}");
+        assert!(err.contains("upgrade"), "{err}");
     }
 
     #[tokio::test]
