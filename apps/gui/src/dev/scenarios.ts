@@ -3,7 +3,7 @@
 
 import { emptyHub } from "../views/Home.mock";
 import { approvalRun, deleteRun, graphRun, handoffRun, inPlaceRun, landingRun, oauthRun, rerouteRun, reuseRun, reviewRun, syncRun, traceRun } from "../views/Run.mock";
-import { attachmentSession, chatWithRecruit, crashedSession, soloSession } from "../views/Session.mock";
+import { attachmentSession, chatWithRecruit, crashedSession, failedEditSession, soloSession } from "../views/Session.mock";
 import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
 import { usageScene } from "../views/Usage.mock";
 import { agent, say, think, turn } from "./fixtures";
@@ -51,6 +51,7 @@ export const SCENARIOS: Scenario[] = [
   { key: "delete-dirty", label: "删除时工作区有改动", hint: "点「删除」后 hub 返回 409 并列出没提交的文件，可以「仍然删除」", build: () => deleteRun("dirty") },
   { key: "files", label: "文件链接与查看器", hint: "回复里的路径（确认存在的才成链接）可点开只读查看器：左侧懒加载目录树，右侧行号、高亮、跳到第 12 行", build: () => filesScene() },
   { key: "solo", label: "单聊", hint: "Claude 会话：折叠的工具步骤、一轮进行中、两条排队", build: () => soloSession() },
+  { key: "tool-fail", label: "工具调用失败", hint: "编辑失败（待替换代码块没匹配到整行）：行上没有 +N −M、带「失败」，展开是工具原话；成功的编辑照旧", build: () => failedEditSession() },
   { key: "attach", label: "消息带附件", hint: "人发的消息带了截图和日志（点缩略图看大图）；输入框可粘贴截图、拖文件或点回形针，发送前能删", build: () => attachmentSession() },
   { key: "settings-src", label: "Claude 设置源", hint: "设置 → 智能体：点 Nova 编辑，「读取 Claude 设置」三档预设（缺省 / 全部 / 都不读）；点 Vega（CodeBuddy）编辑，标签说明它不读 CLAUDE.md", build: settingSources },
   { key: "recruit", label: "对话招队友", hint: "对话里招人：一次因为用模型名当名字被拒绝（卡片写明原因），一次招到 Iris，挂在对话下面", build: () => chatWithRecruit() },

@@ -890,6 +890,9 @@ button.tool { border: none; background: none; padding: 1px 0; text-align: left; 
 button.tool:hover:not(:disabled) { background: none; color: var(--text); }
 button.tool:disabled { opacity: 1; cursor: default; }
 button.tool .chip.tiny { padding: 0 6px; line-height: 16px; font-family: var(--font-sans); }
+/* A failed call says so on the line, and shows no +N −M: the diff it carries is the one the model
+   meant to make, not a change that happened (docs/TODO.md §九). */
+.tool-step.failed .title { color: var(--danger-text); }
 .tool-step .out { font-size: 11.5px; max-height: 360px; padding: 8px 10px; color: var(--text-2); }
 .tool-step .out.live { max-height: none; margin-left: 16px; opacity: 0.85; }
 .tool-detail { display: flex; flex-direction: column; gap: 6px; margin: 2px 0 6px 16px; padding-left: 10px; border-left: 2px solid var(--border); }

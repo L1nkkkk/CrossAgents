@@ -16,6 +16,7 @@ import { Avatar, ErrorBox, FileScopeProvider, Icon, Mark, Prose, StatusChip, Ven
 import { ChangeStat, DiffView } from "../diffview";
 import { parseDiff, tailLines, type DiffFile } from "../lib/diff";
 import { errorHint } from "../lib/errors";
+import { fields, toolChanges, toolError, toolFailed, toolShowsStat } from "../lib/toolcall";
 import { supportNote } from "../lib/attachments";
 import { effortLabel, prettyModel } from "../lib/models";
 import { clock, range } from "../lib/time";
@@ -741,31 +742,6 @@ const ACTION_LABEL: Record<ActionTool, string> = {
   plan_submit: "提交计划",
 };
 
-/** The fields of a tool's JSON arguments or result, or nothing when it is not JSON. */
-/** A tool result as words: the text inside an MCP `content` wrapper (Codex reports it as is), or the result itself. */
-function plainText(text?: string): string | undefined {
-  try {
-    const content = JSON.parse(text ?? "")?.content;
-    if (Array.isArray(content)) return content.map((c: { text?: unknown }) => (typeof c?.text === "string" ? c.text : "")).join("\n");
-  } catch {
-    // Not JSON: already plain.
-  }
-  return text;
-}
-
-function fields(text?: string): Record<string, unknown> {
-  if (!text) return {};
-  try {
-    const value = JSON.parse(text);
-    // MCP results wrap the payload as content[0].text.
-    const inner = value?.content?.[0]?.text;
-    if (typeof inner === "string") return fields(inner) ?? {};
-    return value && typeof value === "object" ? value : {};
-  } catch {
-    return {};
-  }
-}
-
 /**
  * A call that changed (or tried to change) the team or the code, as a card: what was asked, and
  * what the hub did — refused calls say why, in the hub's words. This is the record to trust
@@ -774,8 +750,8 @@ function fields(text?: string): Record<string, unknown> {
 function ActionCard({ action, call }: { action: ActionTool; call: Extract<TranscriptItem, { type: "tool_call" }> }) {
   const args = fields(call.detail?.arguments);
   const result = fields(call.detail?.result);
-  const raw = call.detail?.error ?? (typeof result === "object" && !Object.keys(result).length ? plainText(call.detail?.result) : undefined);
-  const refused = call.status === "failed" || !!call.detail?.error || /^(conflict|not found|invalid|unsupported)|not recruited/i.test(raw ?? "");
+  const raw = toolError(call);
+  const refused = toolFailed(call) || /^(conflict|not found|invalid|unsupported)|not recruited/i.test(raw ?? "");
   const running = call.status === "pending" || call.status === "in_progress";
   const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
   let what = "";
@@ -890,20 +866,24 @@ function ToolStep({ step }: { step: ToolCall }) {
   const [open, setOpen] = useState(false);
   const d = step.detail;
   const running = step.status === "in_progress" || step.status === "pending";
-  const tone = step.status === "completed" ? "ok" : step.status === "failed" ? "danger" : "accent pulse";
+  // Failed, or refused with its reason in the detail: either way nothing was changed.
+  const bad = toolFailed(step);
+  const tone = bad ? "danger" : running ? "accent pulse" : "ok";
   const code = d?.exit_code;
   const live = running && step.output ? tailLines(step.output, LIVE_LINES) : undefined;
   const more = !!(d || step.output);
-  const changes = d ? d.changes.flatMap((c) => parseDiff(c.diff, c.path)) : [];
+  // A failed edit carries the diff the model meant to make: showing +N −M would claim a change
+  // that never happened (docs/TODO.md §九).
+  const changes = toolChanges(step).flatMap((c) => parseDiff(c.diff, c.path));
   const cwd = useContext(CwdContext);
   return (
-    <div className="tool-step">
+    <div className={`tool-step ${bad ? "failed" : ""}`}>
       <button className="tool" onClick={() => more && setOpen(!open)} aria-expanded={more ? open : undefined} disabled={!more} title={step.title}>
         <span className={`dot ${tone}`} />
         <span className="title">{stepLine(step, cwd)}</span>
-        {code != null && code !== 0 && <span className="chip danger tiny">退出 {code}</span>}
+        {code != null && code !== 0 ? <span className="chip danger tiny">退出 {code}</span> : bad && <span className="chip danger tiny">失败</span>}
         {d?.duration_ms != null && <span className="muted tiny">{took(d.duration_ms)}</span>}
-        {changes.length > 0 && <ChangeStat files={changes} />}
+        {toolShowsStat(step) && changes.length > 0 && <ChangeStat files={changes} />}
         {more && (
           <span className="disclosure muted" aria-hidden="true">
             {open ? "▾" : "▸"}
@@ -920,10 +900,15 @@ function ToolDetailView({ step, changes }: { step: ToolCall; changes: DiffFile[]
   const d = step.detail;
   const output = d?.output ?? step.output;
   const shown = output != null ? tailLines(output, OPEN_LINES) : undefined;
+  // A failed call says why, first: detail.error when there is one, else the tool's own words.
+  const error = toolFailed(step) ? toolError(step) : undefined;
+  // The result may be the very words shown above as the reason: one copy is enough.
+  const result = d?.result != null ? tailLines(d.result, OPEN_LINES).text : undefined;
   return (
     <div className="tool-detail">
       {d?.command && <pre className="cmd">$ {d.command}</pre>}
       {d?.cwd && <div className="muted tiny mono">{d.cwd}</div>}
+      {error && <div className="item-error">{error}</div>}
       {shown && (
         <>
           {shown.hidden > 0 && <div className="muted tiny">… 前面还有 {shown.hidden} 行</div>}
@@ -943,13 +928,12 @@ function ToolDetailView({ step, changes }: { step: ToolCall; changes: DiffFile[]
           <pre className="out">{d.arguments}</pre>
         </>
       )}
-      {d?.result && (
+      {result && result !== error && (
         <>
           <div className="muted tiny">结果</div>
-          <pre className="out">{tailLines(d.result, OPEN_LINES).text}</pre>
+          <pre className="out">{result}</pre>
         </>
       )}
-      {d?.error && <div className="item-error">{d.error}</div>}
     </div>
   );
 }
