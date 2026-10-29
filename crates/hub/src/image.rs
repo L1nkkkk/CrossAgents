@@ -41,6 +41,7 @@ impl ImageType {
         })
     }
 
+    /// The MIME type the image goes out as (`image/png`, `image/svg+xml`, …).
     pub fn content_type(self) -> &'static str {
         match self {
             Self::Png => "image/png",

@@ -7,15 +7,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Extension;
-use axum::body::Bytes;
 use axum::extract::DefaultBodyLimit;
 use axum::extract::{MatchedPath, Path, Query, Request, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Utc};
 use crossagents_api_types::{
     API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentCommandsResponse,
@@ -24,7 +25,7 @@ use crossagents_api_types::{
     CliInfo, CliInstallAccepted, CommitGraph, ConnectInfo, CreateAccountRequest,
     CreateAgentRequest, CreateRunRequest, DeleteRunResponse, DiffSide, ErrorCode,
     FileContentResponse, FileEntry, FileKind, FileTreeResponse, FinishRequest, GraphCommit,
-    GraphRef, GraphRefKind, HealthResponse, HubInfo, InitRepoRequest, LandRequest,
+    GraphRef, GraphRefKind, HealthResponse, HubInfo, ImageContent, InitRepoRequest, LandRequest,
     ListAccountsResponse, ListAgentsResponse, ListNotesResponse, ListPluginsResponse,
     ListQuestionsResponse, ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo,
     QuotaResponse, RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse,
@@ -1702,13 +1703,14 @@ async fn agent_files_content(
     files_content(&state, FilesScope::Agent(&agent), q).await
 }
 
-/// `GET /v1/agents/{key}/files/image?path=`: the bytes of an image a tool call named by
-/// path, for a client to show as a thumbnail (crate::image says what is allowed).
+/// `GET /v1/agents/{key}/files/image?path=`: an image a tool call named by path, base64 like
+/// an attachment, so a client can show it as a `data:` URL (crate::image says what is
+/// allowed; anything else is the usual error body with the reason).
 async fn agent_files_image(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
     Query(q): Query<FilesQuery>,
-) -> ApiResult<Response> {
+) -> ApiResult<Json<ImageContent>> {
     let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
     let input = q.path();
     if input.trim().is_empty() {
@@ -1722,27 +1724,12 @@ async fn agent_files_image(
         .await?;
     let abs = crate::image::locate(&root, input)?;
     let (kind, bytes) = crate::image::load(&abs, input).await?;
-    let mut response = Response::new(Bytes::from(bytes).into());
-    let headers = response.headers_mut();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static(kind.content_type()),
-    );
-    // Never let a browser read the type from the bytes: a `.png` that is not one is
-    // refused above, and this keeps any future gap from becoming a script.
-    headers.insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    if kind == crate::image::ImageType::Svg {
-        // An SVG is a document: sandbox it, so its script cannot reach the page.
-        headers.insert(
-            header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_static("sandbox"),
-        );
-    }
-    Ok(response)
+    Ok(Json(ImageContent {
+        path: abs.display().to_string(),
+        mime: kind.content_type().to_owned(),
+        size: bytes.len() as u64,
+        data: STANDARD.encode(&bytes),
+    }))
 }
 
 async fn run_files_content(

@@ -3,9 +3,11 @@
 use std::path::Path;
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use crossagents_api_types::{
     Agent, ChangesResponse, CommitGraph, FileContentResponse, FileKind, FileTreeResponse,
-    GraphRefKind, ListAgentsResponse, ResolvePathsResponse, Run,
+    GraphRefKind, ImageContent, ListAgentsResponse, ResolvePathsResponse, Run,
 };
 use crossagents_hub::{HubConfig, Paths, RunningHub};
 use futures::StreamExt;
@@ -1036,10 +1038,8 @@ async fn an_image_is_served_from_the_working_directory_or_the_temp_directory() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["content-type"], "image/png");
-    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
-    assert_eq!(response.bytes().await.unwrap().as_ref(), PNG);
+    let image = an_image(response, "image/png", PNG).await;
+    assert!(image.path.ends_with("shot.png"), "{}", image.path);
 
     // An absolute path names the same file.
     let abs = ws.join("shot.png").display().to_string();
@@ -1048,20 +1048,15 @@ async fn an_image_is_served_from_the_working_directory_or_the_temp_directory() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.bytes().await.unwrap().as_ref(), PNG);
+    an_image(response, "image/png", PNG).await;
 
-    // An svg is a document: it is sandboxed as well as nosniffed.
+    // An svg comes back too, as a `data:` URL a page shows without running its script.
     let response = t
         .get("/v1/agents/painter/files/image?path=renders/icon.svg")
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["content-type"], "image/svg+xml");
-    assert_eq!(response.headers()["content-security-policy"], "sandbox");
-    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
-    assert_eq!(response.bytes().await.unwrap().as_ref(), SVG);
+    an_image(response, "image/svg+xml", SVG).await;
 
     // A screenshot a tool wrote to the temp directory, by its absolute path.
     let temp = tempfile::tempdir_in(std::env::temp_dir()).unwrap();
@@ -1075,8 +1070,19 @@ async fn an_image_is_served_from_the_working_directory_or_the_temp_directory() {
         .send()
         .await
         .unwrap();
+    an_image(response, "image/png", PNG).await;
+}
+
+/// The image a response carries, checked: JSON with its type, size and the same bytes,
+/// base64 (what a page turns into `data:${mime};base64,${data}`).
+async fn an_image(response: reqwest::Response, mime: &str, bytes: &[u8]) -> ImageContent {
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.bytes().await.unwrap().as_ref(), PNG);
+    assert_eq!(response.headers()["content-type"], "application/json");
+    let image: ImageContent = response.json().await.unwrap();
+    assert_eq!(image.mime, mime);
+    assert_eq!(image.size, bytes.len() as u64);
+    assert_eq!(STANDARD.decode(&image.data).unwrap(), bytes);
+    image
 }
 
 /// Everything the image API does not serve: a path out of the allowed directories (through
