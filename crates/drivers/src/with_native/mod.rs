@@ -10,9 +10,13 @@
 //!   between turns needs nothing from the CLI. Thinking is asked for (`--enable-thinking`)
 //!   unless the agent's `config.thinking` is `false`.
 //! - The collaboration MCP servers go in a client configuration of the session's own
-//!   (`-c`): a copy of the user's `~/.bg-agent/bg-agent-client.yaml` whose
-//!   `mcp_config_path` names an MCP file listing the user's servers plus the session's. A
-//!   configuration given with `-c` replaces the user's whole file, hence the copy.
+//!   (`-c`): a copy of the configuration the CLI ships with
+//!   (`<install>/etc/bg-agent-client.yaml`, beside its `bin/`), else of the user's
+//!   `~/.bg-agent/bg-agent-client.yaml`, whose `mcp_config_path` names an MCP file listing
+//!   the user's servers plus the session's. A configuration given with `-c` replaces the
+//!   CLI's whole one, hence the copy. The installed one comes first because it moves with
+//!   the CLI: the user's file is written once and goes stale, and with-cli 0.33.0 given the
+//!   stale one (2026-10-29) answered every turn with `不支持该模型` for models it lists.
 //! - The opening instructions go as `--user-rules`.
 //! - Stopping a turn is `with-cli cancel --session-id --request-id`; the process then exits
 //!   without `RUN_FINISHED`. Killing it is the fallback.
@@ -290,6 +294,7 @@ impl WithSession {
         }
         let files = SessionFiles::write(
             &id,
+            command.first().map(Path::new),
             &spec.mcp_servers,
             spec.instructions.as_deref(),
             &spec.events,
@@ -585,21 +590,31 @@ struct SessionFiles {
 }
 
 impl SessionFiles {
-    /// Writes them under `~/.bg-agent/crossagents/<session id>/`: beside the configuration
-    /// they copy, which holds the user's With credentials.
+    /// Writes them under `~/.bg-agent/crossagents/<session id>/`. `cli` is the program that
+    /// runs the turns: the configuration it ships with is the one copied (`installed_config`).
     fn write(
         id: &str,
+        cli: Option<&Path>,
         mcp_servers: &[McpServerSpec],
         instructions: Option<&str>,
         events: &mpsc::UnboundedSender<SessionEvent>,
     ) -> Result<Self, CoreError> {
         let home = with_home()
             .ok_or_else(|| CoreError::Agent("cannot find the user's home folder".into()))?;
-        Self::write_in(&home, id, mcp_servers, instructions, events)
+        let installed = cli.and_then(installed_config);
+        Self::write_in(
+            &home,
+            installed.as_deref(),
+            id,
+            mcp_servers,
+            instructions,
+            events,
+        )
     }
 
     fn write_in(
         home: &Path,
+        installed: Option<&Path>,
         id: &str,
         mcp_servers: &[McpServerSpec],
         instructions: Option<&str>,
@@ -622,7 +637,12 @@ impl SessionFiles {
         if mcp_servers.is_empty() {
             return Ok(files);
         }
-        let base_path = home.join("bg-agent-client.yaml");
+        let user_path = home.join("bg-agent-client.yaml");
+        let user_base = std::fs::read_to_string(&user_path).ok();
+        let base_path = installed
+            .filter(|p| p.is_file())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| user_path.clone());
         let Ok(base) = std::fs::read_to_string(&base_path) else {
             emit(
                 events,
@@ -636,7 +656,9 @@ impl SessionFiles {
             );
             return Ok(files);
         };
-        let (yaml, user_mcp) = client_config(&base, home);
+        let (yaml, _) = client_config(&base, home);
+        // The user's servers are wherever their own file says, whichever file is copied.
+        let (_, user_mcp) = client_config(user_base.as_deref().unwrap_or_default(), home);
         let user = std::fs::read_to_string(&user_mcp).unwrap_or_default();
         let mcp_path = dir.join("mcp_config.json");
         let mcp = mcp_config(&user, mcp_servers);
@@ -668,6 +690,17 @@ impl SessionFiles {
 fn with_home() -> Option<PathBuf> {
     let user = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
     Some(PathBuf::from(user).join(".bg-agent"))
+}
+
+/// The configuration the CLI at `cli` ships with: `<install>/etc/bg-agent-client.yaml`
+/// for `<install>/bin/with-cli[.exe]`, when it is there.
+fn installed_config(cli: &Path) -> Option<PathBuf> {
+    let path = cli
+        .parent()?
+        .parent()?
+        .join("etc")
+        .join("bg-agent-client.yaml");
+    path.is_file().then_some(path)
 }
 
 /// The user's client configuration without its `mcp_config_path`, and the MCP file it
@@ -780,9 +813,15 @@ mod tests {
         )
         .unwrap();
         let (events, _rx) = mpsc::unbounded_channel();
-        let files =
-            SessionFiles::write_in(home.path(), "s1", &[server()], Some("be nice"), &events)
-                .unwrap();
+        let files = SessionFiles::write_in(
+            home.path(),
+            None,
+            "s1",
+            &[server()],
+            Some("be nice"),
+            &events,
+        )
+        .unwrap();
         let config = std::fs::read_to_string(files.config.as_ref().unwrap()).unwrap();
         assert!(config.starts_with("knot:\n  url: \"https://knot\"\n"));
         assert!(!config.contains("nowhere.json"));
@@ -804,15 +843,63 @@ mod tests {
     fn without_servers_there_is_no_configuration() {
         let home = tempfile::tempdir().unwrap();
         let (events, mut rx) = mpsc::unbounded_channel();
-        let files = SessionFiles::write_in(home.path(), "s2", &[], None, &events).unwrap();
+        let files = SessionFiles::write_in(home.path(), None, "s2", &[], None, &events).unwrap();
         assert!(files.config.is_none() && files.rules.is_none());
         // With servers but no configuration to copy: a warning, and no `-c`.
-        let files = SessionFiles::write_in(home.path(), "s3", &[server()], None, &events).unwrap();
+        let files =
+            SessionFiles::write_in(home.path(), None, "s3", &[server()], None, &events).unwrap();
         assert!(files.config.is_none());
         assert!(matches!(
             rx.try_recv().map(|e| e.kind),
             Ok(SessionEventKind::Warning { .. })
         ));
+    }
+
+    /// The CLI's own configuration is copied rather than the user's, which goes stale when
+    /// the CLI updates (with-cli 0.33.0 then refused every model); the user's MCP servers
+    /// still come along, from wherever the user's file names them.
+    #[test]
+    fn the_installed_configuration_wins_over_the_users() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join(".bg-agent");
+        let install = root.path().join("background_agent_cli");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(install.join("bin")).unwrap();
+        std::fs::create_dir_all(install.join("etc")).unwrap();
+        let cli = install.join("bin").join("with-cli.exe");
+        std::fs::write(&cli, "").unwrap();
+        std::fs::write(
+            install.join("etc").join("bg-agent-client.yaml"),
+            "knot:\n  url: \"https://new\"\n",
+        )
+        .unwrap();
+        let user_mcp = root.path().join("mine.json");
+        std::fs::write(&user_mcp, r#"{"mcpServers":{"gongfeng":{"url":"https://x"}}}"#).unwrap();
+        std::fs::write(
+            home.join("bg-agent-client.yaml"),
+            format!(
+                "knot:\n  url: \"https://old\"\nmcp_config_path: '{}'\n",
+                user_mcp.display()
+            ),
+        )
+        .unwrap();
+
+        let installed = installed_config(&cli).expect("the installed configuration");
+        let (events, _rx) = mpsc::unbounded_channel();
+        let files =
+            SessionFiles::write_in(&home, Some(&installed), "s4", &[server()], None, &events)
+                .unwrap();
+        let config = std::fs::read_to_string(files.config.as_ref().unwrap()).unwrap();
+        assert!(config.contains("https://new") && !config.contains("https://old"));
+        let mcp: Value = serde_json::from_str(
+            &std::fs::read_to_string(files.dir.join("mcp_config.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(mcp["mcpServers"]["gongfeng"]["url"], "https://x");
+        assert_eq!(mcp["mcpServers"]["crossagents"]["args"], json!(["mcp"]));
+
+        // A CLI that is not laid out as `<install>/bin`: the user's file, as before.
+        assert!(installed_config(&root.path().join("with-cli.exe")).is_none());
     }
 
     #[test]
