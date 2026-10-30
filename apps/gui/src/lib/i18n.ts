@@ -153,7 +153,9 @@ const zhCN = {
 
   "home.session": "会话",
   "home.newSession": "新会话",
-  "home.newSessionHint": "按模板新开一个，不带以前的对话",
+  "home.newSessionHint": "总是新建一个，不复用现有的",
+  "draft.filesTooBig": "图片太大，没能暂存；文本留着了",
+  "draft.notKept": "这台机器不让暂存，离开本页会丢",
   "session.existing": "已有会话",
   "session.state.idle": "空闲",
   "session.state.busy": "占用中",

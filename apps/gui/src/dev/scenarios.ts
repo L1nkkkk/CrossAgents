@@ -65,6 +65,19 @@ export const SCENARIOS: Scenario[] = [
     localStorage.setItem("crossagents.workspace", wsKey(REPO));
     return { state, route: "#/", script: [{ at: 900, act: () => document.querySelector<HTMLButtonElement>('button[title="会话"]')?.click() }] };
   } },
+  { key: "kept-draft", label: "草稿暂存", hint: "首页输入框开着上次留下的文本和图片：离开本页再回来不会丢", build: () => {
+    const { ada, rex } = team();
+    const state: MockState = { ...emptyHub(), agents: [ada, rex], quota: quota() };
+    localStorage.setItem("crossagents.mode", JSON.stringify("run"));
+    localStorage.setItem("crossagents.workspace", wsKey(REPO));
+    // A 1×1 PNG stands in for the screenshot that was pasted before leaving the page.
+    const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    localStorage.setItem(
+      "crossagents.draft.home",
+      JSON.stringify({ text: "把登录页的错误提示改成人话，顺便\n", title: "错误提示改人话", files: [{ name: "截图.png", mime: "image/png", data: png, size: 70 }] }),
+    );
+    return { state, route: "#/", script: [] };
+  } },
   { key: "plan-models", label: "批计划：别家插件的模型", hint: "计划卡的人选：所有已装插件的模型按家族分组；没有登录的 Kimi 置灰并写明原因", build: () => {
     const scene = oauthRun("plan");
     const kimi: PluginInfo = {

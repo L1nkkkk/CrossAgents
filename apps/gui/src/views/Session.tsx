@@ -21,6 +21,9 @@ import { parseDiff, tailLines, type DiffFile } from "../lib/diff";
 import { errorHint } from "../lib/errors";
 import { fields, plainText, toolChanges, toolError, toolFailed, toolShowsStat } from "../lib/toolcall";
 import { supportNote } from "../lib/attachments";
+// `draft` is this file's word for the text being typed, so the module keeps the plural.
+import * as drafts from "../lib/draft";
+import { t } from "../lib/i18n";
 import { effortLabel, prettyModel } from "../lib/models";
 import { clock, range } from "../lib/time";
 import { ModelEffortPicks } from "../modelPick";
@@ -1375,6 +1378,7 @@ function Composer({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [deferred, setDeferred] = useState<string[]>([]);
+  const [keepNote, setKeepNote] = useState<string>();
   const ref = useRef<HTMLTextAreaElement>(null);
   const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
   const mention = useMention(ref, setDraft, mentionsFor(mates, (plugins.data ?? []).filter((p) => p.models.length > 0)));
@@ -1425,6 +1429,28 @@ function Composer({
     if (!plan) ref.current?.focus();
   }, [agent.id, plan]);
 
+  // Leaving the conversation unmounts the composer, so what was typed and attached is kept
+  // under this agent's own key and comes back when you return (lib/draft.ts). Restored once
+  // per conversation: a later render must not overwrite what is being typed now.
+  const restored = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (restored.current === agent.id) return;
+    restored.current = agent.id;
+    const kept = drafts.read({ kind: "session", agent: agent.id });
+    if (!kept) return;
+    setDraft(kept.text);
+    if (kept.held.length) files.restore(kept.held);
+  }, [agent.id]);
+
+  useEffect(() => {
+    if (restored.current !== agent.id) return;
+    const timer = setTimeout(() => {
+      const out = drafts.write({ kind: "session", agent: agent.id }, { text: draft, title: "", held: files.held });
+      setKeepNote(!out.kept && files.held.length ? t("draft.notKept") : out.dropped ? t("draft.filesTooBig", { n: out.dropped }) : undefined);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [draft, files.held, agent.id]);
+
   async function send(now = false) {
     const text = draft.trim();
     const held = files.held;
@@ -1434,6 +1460,8 @@ function Composer({
     // Shown at once (outbox.ts); a failure puts the text and files back here.
     setDraft("");
     files.clear();
+    drafts.forget({ kind: "session", agent: agent.id });
+    setKeepNote(undefined);
     try {
       const attachments = held.map(({ name, mime, data }) => ({ name, mime, data }));
       await sendMessage(agent.id, text, { now, takeBack: true, attachments });
@@ -1486,6 +1514,7 @@ function Composer({
         {slash.menu}
         {mention.menu}
         <HeldFiles files={files.held} onRemove={files.remove} />
+        {keepNote && <div className="small dim">{keepNote}</div>}
         <textarea
           {...slash.textarea}
           onPaste={files.onPaste}
