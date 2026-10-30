@@ -396,6 +396,7 @@ mod tests {
         let now = Utc::now();
         let worker = AgentId::new();
         let mut run = Run {
+            work_id: None,
             continuation: None,
             id: RunId::new(),
             title: "title".into(),

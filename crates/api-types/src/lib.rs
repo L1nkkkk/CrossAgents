@@ -1124,6 +1124,36 @@ pub struct ListQuestionsResponse {
     pub items: Vec<crossagents_core::HumanItem>,
 }
 
+/// `POST /v1/works`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateWorkRequest {
+    pub title: String,
+    pub lead: String,
+}
+
+/// `POST /v1/works/{id}/runs`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateWorkRunRequest {
+    pub request: String,
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListWorksResponse {
+    pub works: Vec<crossagents_core::Work>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WorkDetail {
+    pub work: crossagents_core::Work,
+    pub runs: Vec<crossagents_core::Run>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ListRunsResponse {

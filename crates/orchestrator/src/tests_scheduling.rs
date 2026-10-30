@@ -201,6 +201,7 @@ impl Fixture {
             store.insert_agent(a).await.unwrap();
         }
         let run = Run {
+            work_id: None,
             continuation: None,
             id: RunId::new(),
             title: "a run".into(),

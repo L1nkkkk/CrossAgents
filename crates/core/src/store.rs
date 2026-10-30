@@ -178,6 +178,24 @@ pub trait Store: Send + Sync {
         }
     }
 
+    async fn insert_work(&self, work: &crate::Work) -> Result<(), CoreError> {
+        let _ = work;
+        Err(CoreError::Unsupported("works".into()))
+    }
+    async fn get_work(&self, id: crate::WorkId) -> Result<crate::Work, CoreError> {
+        Err(CoreError::NotFound {
+            kind: "work",
+            id: id.to_string(),
+        })
+    }
+    async fn list_works(&self) -> Result<Vec<crate::Work>, CoreError> {
+        Ok(Vec::new())
+    }
+    async fn update_work(&self, work: &crate::Work) -> Result<(), CoreError> {
+        let _ = work;
+        Err(CoreError::Unsupported("works".into()))
+    }
+
     async fn insert_run(&self, run: &Run) -> Result<(), CoreError>;
     async fn get_run(&self, id: RunId) -> Result<Run, CoreError>;
     /// Newest first.

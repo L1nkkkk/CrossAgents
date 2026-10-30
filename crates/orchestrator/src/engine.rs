@@ -406,6 +406,36 @@ impl Orchestrator {
         fresh: Option<bool>,
         restore: bool,
     ) -> Result<Run, CoreError> {
+        self.create_run_for_work(new, fresh, restore, None).await
+    }
+
+    pub async fn create_run_for_work(
+        &self,
+        new: NewRun,
+        fresh: Option<bool>,
+        restore: bool,
+        work_id: Option<crossagents_core::WorkId>,
+    ) -> Result<Run, CoreError> {
+        let _work_guard = if let Some(id) = work_id {
+            Some(self.lock_card(&format!("work:{id}")).await)
+        } else {
+            None
+        };
+        if let Some(id) = work_id {
+            self.store.get_work(id).await?;
+            if let Some(open) = self
+                .store
+                .list_runs()
+                .await?
+                .into_iter()
+                .find(|r| r.work_id == Some(id) && !r.status.is_terminal())
+            {
+                return Err(CoreError::Conflict(format!(
+                    "work {id} already has open run {} ({})",
+                    open.id, open.title
+                )));
+            }
+        }
         let planner = self.store.get_agent(&AgentKey::Id(new.planner)).await?;
         self.store
             .get_agent(&AgentKey::Id(new.config.worker))
@@ -438,6 +468,7 @@ impl Orchestrator {
         let id = RunId::new();
         let now = Utc::now();
         let mut run = Run {
+            work_id,
             continuation: None,
             landed: None,
             summary: None,

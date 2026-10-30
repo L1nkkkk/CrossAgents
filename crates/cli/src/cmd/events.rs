@@ -309,6 +309,9 @@ pub fn summary(kind: &EventKind) -> String {
                 .map(|m| format!(": {}", one_line(m)))
                 .unwrap_or_default()
         ),
+        EventKind::WorkCreated { work } | EventKind::WorkUpdated { work } => {
+            format!("{} {}", short_tail(&work.id), one_line(&work.title))
+        }
         EventKind::RunCreated { run } => {
             format!("{} {}", short_tail(&run.id), one_line(&run.title))
         }

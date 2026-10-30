@@ -307,6 +307,10 @@ pub enum EventKind {
     /// A login is waiting for the human to open `url`.
     #[serde(rename = "account.login_pending")]
     AccountLoginPending { id: String, url: Option<String> },
+    #[serde(rename = "work.created")]
+    WorkCreated { work: crate::Work },
+    #[serde(rename = "work.updated")]
+    WorkUpdated { work: crate::Work },
     #[serde(rename = "run.created")]
     RunCreated { run: Run },
     #[serde(rename = "run.continuation_changed")]
@@ -536,6 +540,8 @@ impl EventKind {
             Self::AccountQuotaUpdated { .. } => "account.quota_updated",
             Self::AccountLoginFinished { .. } => "account.login_finished",
             Self::AccountLoginPending { .. } => "account.login_pending",
+            Self::WorkCreated { .. } => "work.created",
+            Self::WorkUpdated { .. } => "work.updated",
             Self::RunCreated { .. } => "run.created",
             Self::RunContinuationChanged { .. } => "run.continuation_changed",
             Self::RunStatusChanged { .. } => "run.status_changed",
@@ -580,6 +586,8 @@ impl EventKind {
         match self {
             Self::HubStarted { .. }
             | Self::HubStopping
+            | Self::WorkCreated { .. }
+            | Self::WorkUpdated { .. }
             | Self::RunCreated { .. }
             | Self::RunContinuationChanged { .. }
             | Self::RunStatusChanged { .. }
