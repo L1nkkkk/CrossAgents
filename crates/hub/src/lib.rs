@@ -147,6 +147,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
             Some(command) => command.clone(),
             None => default_mcp_command()?,
         },
+        extra_mcp: config.mcp_servers.clone(),
         url: OnceLock::new(),
         worktrees: paths.home.join("worktrees"),
         shims: shims.clone(),

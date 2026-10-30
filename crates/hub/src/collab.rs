@@ -83,6 +83,9 @@ pub struct CollabSetup {
     pub accounts: Arc<crate::accounts::Accounts>,
     /// Command that runs the MCP server, e.g. `["/path/crossagents", "mcp"]`.
     pub mcp_command: Vec<String>,
+    /// Further MCP servers from `[mcp.<name>]`, mounted into every session besides the
+    /// collaboration one (docs/DESIGN.md §9.3).
+    pub extra_mcp: Vec<McpServerSpec>,
     /// The hub's API base URL, known once the listener is bound.
     pub url: OnceLock<String>,
     /// Root of run and task worktrees: agents working there build into their own target
@@ -146,11 +149,11 @@ impl SessionSetup for CollabSetup {
         let instructions = instructions(agent, lessons.as_deref());
         let Some((program, args)) = self.mcp_command.split_first() else {
             return Ok(SessionExtras {
+                mcp_servers: self.extra_mcp.clone(),
                 instructions: Some(instructions),
                 env: agent_env,
                 permission,
                 permissions,
-                ..SessionExtras::default()
             });
         };
         let url = self
@@ -160,13 +163,16 @@ impl SessionSetup for CollabSetup {
             .ok_or_else(|| CoreError::Agent("hub URL not known yet".into()))?;
         let token = self.tokens.issue(agent.id).await;
         let env = BTreeMap::from([(URL_ENV.to_owned(), url), (TOKEN_ENV.to_owned(), token)]);
+        let mut mcp_servers = vec![McpServerSpec {
+            name: "crossagents".into(),
+            command: PathBuf::from(program),
+            args: args.to_vec(),
+            env,
+        }];
+        // The hub's own tools come first: an `[mcp.<name>]` entry cannot shadow them.
+        mcp_servers.extend(self.extra_mcp.iter().cloned());
         Ok(SessionExtras {
-            mcp_servers: vec![McpServerSpec {
-                name: "crossagents".into(),
-                command: PathBuf::from(program),
-                args: args.to_vec(),
-                env,
-            }],
+            mcp_servers,
             instructions: Some(instructions),
             env: agent_env,
             permission,

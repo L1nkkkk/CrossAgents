@@ -412,6 +412,7 @@ Session（一个会话）
 - 协议留在代码里，协议以外的东西（去哪找 CLI、怎么装、模型与 effort 档位）写在 **agent 描述文件**里：内置三家在 `crates/plugins/agents/{claude,codex,codebuddy}.toml`（`include_str!` 编进 hub），外部 agent 放 `~/.crossagents/plugins/<name>/plugin.toml`，两者同一种格式。加一家 agent 不用改代码。
 - 来源与优先级：内置描述 < 插件目录 `plugin.toml` < `config.toml` 的 `[plugins.<name>]`。`locate` 与 `install` 按字段合并（只改其中一项也行），`command` / `models` / `driver` 等仍整体替换。
 - 协作工具挂载：开会话时把 `crossagents mcp`（带该会话的令牌）加入它的 MCP 列表；原生驱动用各家的 MCP 配置方式传入。
+- 其它 MCP：`config.toml` 的 `[mcp.<name>]`（`command` 是程序加参数，`env` 可选）给每个会话再挂一个 stdio MCP server，排在协作工具之后，重名不覆盖它。第三方能力由此接入，不用碰驱动——例：豆包生图 `integrations/doubao-mcp`。
 - 账号隔离沿用 M5：每个账号一个独立的 `CODEX_HOME` / Claude 配置目录，凭据不出 hub 所在机器。
 
 描述文件里与协议无关的部分：

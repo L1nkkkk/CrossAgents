@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use crossagents_core::McpServerSpec;
 use crossagents_plugins::PluginConfig;
 use serde::{Deserialize, Serialize};
 
@@ -124,6 +125,41 @@ struct ConfigFile {
     accounts: AccountsSection,
     #[serde(default)]
     plugins: BTreeMap<String, PluginConfig>,
+    /// Extra MCP servers every agent session gets besides the collaboration one.
+    #[serde(default)]
+    mcp: BTreeMap<String, McpSection>,
+}
+
+/// One `[mcp.<name>]` entry: a stdio MCP server mounted into every agent session.
+///
+/// ```toml
+/// [mcp.doubao]
+/// command = ["node", "C:/tools/doubao-mcp/server.mjs"]
+/// env = { DOUBAO_PAINTER_HOME = "C:/tools/dsh-doubao-painter" }
+/// ```
+#[derive(Debug, Default, Deserialize)]
+struct McpSection {
+    /// Program and its arguments; the first item is the executable.
+    #[serde(default)]
+    command: Vec<String>,
+    /// Environment for the server process.
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+}
+
+impl McpSection {
+    /// The spec to mount, or why this entry cannot be one.
+    fn spec(&self, name: &str) -> Result<McpServerSpec, String> {
+        let Some((program, args)) = self.command.split_first() else {
+            return Err(format!("[mcp.{name}] has no command"));
+        };
+        Ok(McpServerSpec {
+            name: name.to_owned(),
+            command: PathBuf::from(program),
+            args: args.to_vec(),
+            env: self.env.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -156,6 +192,9 @@ pub struct HubConfig {
     pub plugins: BTreeMap<String, PluginConfig>,
     /// Command for the collaboration MCP server; defaults to `<this executable> mcp`.
     pub mcp_command: Option<Vec<String>>,
+    /// `[mcp.<name>]` entries: further MCP servers every agent session gets, besides the
+    /// collaboration one (docs/DESIGN.md §9.3).
+    pub mcp_servers: Vec<McpServerSpec>,
     /// Override of the Codex usage endpoint (`[accounts] codex_usage_url`), for tests.
     pub codex_usage_url: Option<String>,
     /// Register logged-in vendor homes (e.g. `~/.codex`) as accounts at startup
@@ -181,6 +220,7 @@ impl HubConfig {
             port,
             plugins: BTreeMap::new(),
             mcp_command: None,
+            mcp_servers: Vec::new(),
             codex_usage_url: None,
             detect_accounts: false,
             runtime_host: None,
@@ -215,11 +255,21 @@ impl HubConfig {
             .hub
             .mcp_command
             .or_else(|| Some(vec![exe.display().to_string(), "mcp".into()]));
+        // An `[mcp.<name>]` entry with no command is a mistake in the file, not a reason to
+        // refuse to start: the rest of the hub works without it.
+        let mut mcp_servers = Vec::with_capacity(config.mcp.len());
+        for (name, section) in &config.mcp {
+            match section.spec(name) {
+                Ok(spec) => mcp_servers.push(spec),
+                Err(why) => tracing::warn!("skipping MCP server: {why}"),
+            }
+        }
         Ok(Self {
             paths,
             port: config.hub.port.unwrap_or(DEFAULT_PORT),
             plugins: config.plugins,
             mcp_command,
+            mcp_servers,
             codex_usage_url: config.accounts.codex_usage_url,
             detect_accounts: config.accounts.detect.unwrap_or(true),
             runtime_host,
@@ -251,5 +301,37 @@ mod tests {
         let config = HubConfig::load(paths).unwrap();
         assert_eq!(config.port, 0);
         assert_eq!(config.build_cache_limit, 8 << 30);
+    }
+
+    #[test]
+    fn extra_mcp_servers_come_from_their_own_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        std::fs::write(
+            paths.config(),
+            r#"
+[mcp.doubao]
+command = ["node", "C:/tools/doubao-mcp/server.mjs"]
+env = { DOUBAO_PAINTER_HOME = "C:/tools/dsh-doubao-painter" }
+
+[mcp.broken]
+env = { A = "b" }
+"#,
+        )
+        .unwrap();
+        let config = HubConfig::load(paths).unwrap();
+        // The entry without a command is a mistake in the file, not a failure to start.
+        assert_eq!(config.mcp_servers.len(), 1);
+        let server = &config.mcp_servers[0];
+        assert_eq!(server.name, "doubao");
+        assert_eq!(server.command, PathBuf::from("node"));
+        assert_eq!(
+            server.args,
+            vec!["C:/tools/doubao-mcp/server.mjs".to_owned()]
+        );
+        assert_eq!(
+            server.env.get("DOUBAO_PAINTER_HOME").map(String::as_str),
+            Some("C:/tools/dsh-doubao-painter")
+        );
     }
 }
