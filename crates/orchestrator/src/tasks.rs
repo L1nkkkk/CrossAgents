@@ -439,8 +439,14 @@ impl Orchestrator {
             tracing::warn!(task = %task.key, error = %err, "cannot let go of the worker before");
         }
         let worker = if a.fresh {
-            self.fresh_agent(&task, to.id, &worker_name(&run, &task), Role::Worker, &cwd)
-                .await?
+            self.fresh_agent(
+                &task,
+                to.id,
+                &worker_name(&run, &task, to.id),
+                Role::Worker,
+                &cwd,
+            )
+            .await?
         } else {
             self.store.get_agent(&AgentKey::Id(to.id)).await?
         };

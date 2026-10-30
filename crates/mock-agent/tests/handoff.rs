@@ -353,6 +353,8 @@ async fn giving_it_to_the_escalation_teammate_is_an_escalation() {
     reassign(&t, &run, "ada").await;
     let card = card(&mut w, HandoffKind::Escalate).await;
     assert_eq!(card.template.as_deref(), Some("ada"));
+    // A new execution session of the escalation teammate: an `e-` name, not `w-`.
+    assert!(card.to_name.starts_with("e-"), "{card:?}");
     assert_ne!(card.to_name, "ada");
     let session: Value = t
         .get(&format!("/v1/agents/{}", card.to))

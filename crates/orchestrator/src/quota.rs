@@ -107,7 +107,7 @@ impl Orchestrator {
             .await;
             return Ok(());
         }
-        let name = worker_name(&run, &task);
+        let name = worker_name(&run, &task, template);
         let _ = self.host.interrupt(agent).await;
         let left = self.left_by_worker(&run, &task, Some(agent)).await;
         crossagents_core::Handoff::end(

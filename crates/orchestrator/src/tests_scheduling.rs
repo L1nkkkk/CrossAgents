@@ -18,7 +18,7 @@ use crossagents_core::{
 use crossagents_store_sqlite::SqliteStore;
 use serde_json::{Value, json};
 
-use crate::engine::{Orchestrator, OrchestratorConfig};
+use crate::engine::{Orchestrator, OrchestratorConfig, worker_prefix};
 use crate::host::AgentHost;
 use crate::verify::Verifier;
 use crate::workspace::{Synced, WorkspaceProvider};
@@ -442,6 +442,26 @@ async fn an_assigned_pending_task_starts_at_once() {
     assert_eq!(task.worker_template, Some(f.max.id), "{task:?}");
 }
 
+/// A new execution session on the run's escalation teammate is named `e-`, any other worker
+/// `w-` (docs/TODO.md §九): the prefix follows the role, whichever tool hands the task over.
+#[tokio::test]
+async fn a_new_session_is_named_e_on_the_escalation_teammate() {
+    let f = Fixture::new().await;
+    let mut run = f.run.clone();
+    run.config.escalate = Some(f.max.id);
+    let task = f.insert("a", TaskStatus::Pending, &[], None).await;
+
+    assert_eq!(worker_prefix(&run, &task, f.max.id), "e");
+    assert_eq!(worker_prefix(&run, &task, f.rex.id), "w");
+
+    // Escalated by the plan rather than by a handoff: the flag alone decides it too.
+    let escalated = Task {
+        escalated: true,
+        ..task.clone()
+    };
+    assert_eq!(worker_prefix(&run, &escalated, f.max.id), "e");
+}
+
 // ---------------------------------------------------------------------------------------
 // (c) task_update
 
@@ -498,12 +518,12 @@ async fn an_escalated_task_names_its_session_with_e() {
     let f = Fixture::new().await;
     let mut task = f.insert("auth", TaskStatus::Pending, &[], None).await;
 
-    let plain = crate::engine::worker_name(&f.run, &task);
+    let plain = crate::engine::worker_name(&f.run, &task, f.rex.id);
     assert!(plain.starts_with("w-"), "{plain}");
     assert!(plain.ends_with("-auth"), "{plain}");
 
     task.escalated = true;
-    let escalated = crate::engine::worker_name(&f.run, &task);
+    let escalated = crate::engine::worker_name(&f.run, &task, f.rex.id);
     assert!(escalated.starts_with("e-"), "{escalated}");
     assert_eq!(escalated[1..], plain[1..], "only the prefix differs");
 }
