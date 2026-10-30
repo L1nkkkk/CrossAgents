@@ -305,4 +305,5 @@ B3 远程开发：
 
 - [ ] **`EventKind` 的 `large_enum_variant` 用 `#[allow]` 压住了，真修法是装箱**：变体装的是整条记录，`RunCreated { run: Run }` 约 592 字节，其余多为几十字节。装箱会牵动每一处构造与匹配，所以暂时加了带理由的 `#[allow]`，换来 `clippy --workspace -- -D warnings` 能对其余一切设闸。
 - [ ] **ts-rs 解析不了 `deserialize_with`**：`cargo test` 每次都打 `failed to parse serde attribute | deserialize_with =`。目前用显式 `#[ts(type = ...)]` 绕开（`ContinuationUpdate` 的三态字段），但下次有人加 `deserialize_with` 而忘了标类型，bindings 会静默生成错的类型。
+- [ ] **`cargo test --workspace` 在冷构建那一轮偶发失败过一次，没查到是哪条**（2026-10-30 记）：落 main 前的第一轮全量测试退出 101、有一条 `test result` 带非零失败，我当时只统计了数量没留下名字，之后连跑三轮全绿、零失败。与下面两条「与并发负载抢锁」的既有偶发是同一类条件（刚合并、整机在编译），但没有证据指向具体哪条。下次撞上要**先把输出存盘再分析**。
 - [ ] **`crates/core/tests/lock_kill_race.rs` 与并发负载抢锁，偶发失败**：和别的 crate 的测试一起跑时失败过一次，单独跑与重跑组合命令都 4/4。它测的就是抢锁，跟整个 workspace 的测试并行本就不可靠；应当标成串行或独占资源。
