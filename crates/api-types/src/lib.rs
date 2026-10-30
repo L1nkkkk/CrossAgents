@@ -565,6 +565,12 @@ pub struct CreateRunRequest {
     #[serde(default)]
     pub title: Option<String>,
     pub planner: String,
+    /// Omitted retains the existing adaptive lead selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub fresh: Option<bool>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restore: bool,
     /// Template for workers. Omitted: the lead's own model, cloned (docs/tasks/W1.md).
     #[serde(default)]
     #[ts(optional)]
@@ -593,6 +599,36 @@ pub struct CreateRunRequest {
     #[serde(default)]
     #[ts(optional)]
     pub attachments: Option<Vec<AttachmentUpload>>,
+}
+
+/// A workspace session; availability is advisory and can change before use.
+/// Only the atomic claim_agent insertion provides exclusion; chat does not claim.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SessionCandidate {
+    pub agent: Agent,
+    pub state: String,
+    pub busy_with: Option<String>,
+    pub last_execution: Option<String>,
+    /// Whether the session can be selected; archived sessions can be selected with restore: true.
+    pub can_use: bool,
+    /// busy and cannot_move block use; archived requires restore: true; null needs no action.
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListSessionCandidatesResponse {
+    pub sessions: Vec<SessionCandidate>,
+}
+
+/// Continue an existing conversation with a new human message and topic.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StartChatRequest {
+    pub text: String,
+    #[serde(default)]
+    pub restore: bool,
 }
 
 /// `POST /v1/repos/init`: put a directory under version control (`git init` and a first
