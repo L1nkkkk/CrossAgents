@@ -192,13 +192,11 @@ fn windows_round(round: u32, check: Predecessor) -> WindowsRound {
 
     // Before the kill: the job exists and holds the writer. This is also the check that the
     // name is right, so "the job is gone" below means something.
-    seen.job_while_running = win::open_job(OsStr::new(&job_name))
-        .ok()
-        .map(|job| {
-            let active = win::active_processes(job).unwrap_or(0);
-            win::close(job);
-            active
-        });
+    seen.job_while_running = win::open_job(OsStr::new(&job_name)).ok().map(|job| {
+        let active = win::active_processes(job).unwrap_or(0);
+        win::close(job);
+        active
+    });
     // Recorded like the holder record records it (§4.4), so a reused PID cannot fool the
     // `RootPid` check.
     let created_at = win::created(pid);
@@ -248,7 +246,8 @@ fn windows_round(round: u32, check: Predecessor) -> WindowsRound {
         seen.writer_alive = win::alive(pid);
         let before = length(&data_path);
         // Long enough for the job's kill to land; `None` means the child outlived it.
-        seen.writer_died_us = win::wait_exit(pid, Duration::from_secs(5)).map(|took| took.as_micros());
+        seen.writer_died_us =
+            win::wait_exit(pid, Duration::from_secs(5)).map(|took| took.as_micros());
         seen.bytes_after_lock = length(&data_path).saturating_sub(before);
         win::unlock(handle);
     }
@@ -309,7 +308,11 @@ fn windows_summary(check: Predecessor, seen: &[WindowsRound]) -> String {
         job_at_lock,
         seen.iter().map(|round| round.held_back).sum::<u32>(),
         median(seen.iter().map(|round| round.acquire_us).collect()),
-        median(seen.iter().filter_map(|round| round.writer_died_us).collect()),
+        median(
+            seen.iter()
+                .filter_map(|round| round.writer_died_us)
+                .collect()
+        ),
         had_to_kill,
     );
     println!("{summary}");
@@ -318,7 +321,9 @@ fn windows_summary(check: Predecessor, seen: &[WindowsRound]) -> String {
 
 #[cfg(windows)]
 fn run_windows(check: Predecessor, count: u32) -> String {
-    let seen: Vec<_> = (0..count).map(|round| windows_round(round, check)).collect();
+    let seen: Vec<_> = (0..count)
+        .map(|round| windows_round(round, check))
+        .collect();
     let summary = windows_summary(check, &seen);
     assert!(
         seen.iter().all(|round| round.acquired),
@@ -426,7 +431,8 @@ fn inherited_round(round: u32) -> InheritedRound {
 #[cfg(windows)]
 fn run_inherited_rounds(count: u32) -> String {
     let seen: Vec<_> = (0..count).map(inherited_round).collect();
-    let count_where = |what: fn(&InheritedRound) -> bool| seen.iter().filter(|round| what(round)).count();
+    let count_where =
+        |what: fn(&InheritedRound) -> bool| seen.iter().filter(|round| what(round)).count();
     let summary = format!(
         "Windows, inherited lock handle: {} rounds | child inherited the handle {} | lock \
          taken while the child was alive {} (it wrote under the lock {}) | lock held past the \

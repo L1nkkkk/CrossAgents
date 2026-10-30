@@ -263,6 +263,11 @@ pub enum RunStatus {
 }
 
 impl RunStatus {
+    /// Adding a terminal status here means adding it to the `runs_one_open_per_work` index
+    /// too: it spells the same three out in SQL (`crates/store-sqlite/migrations/0011_works.sql`),
+    /// and a migration that has been applied cannot be edited — sqlx checksums it — so the
+    /// new status needs a migration of its own that rebuilds the index. Until then a work
+    /// whose run ended in that status would refuse to start another round.
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
@@ -309,6 +314,8 @@ impl RunConfig {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Run {
     #[serde(default)]
+    pub work_id: Option<crate::ids::WorkId>,
+    #[serde(default)]
     pub continuation: Option<Box<ContinuationState>>,
     pub id: RunId,
     pub title: String,
@@ -351,6 +358,18 @@ pub struct Run {
     /// Whether those checks verified the run; none yet when nothing called for them.
     #[serde(default)]
     pub checks_state: Option<ChecksState>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A persistent workspace containing successive runs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Work {
+    pub id: crate::ids::WorkId,
+    pub title: String,
+    pub repo: PathBuf,
+    pub lead: AgentId,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

@@ -23,16 +23,17 @@ use crossagents_api_types::{
     AgentExecution, AgentExecutionResponse, AgentSettingsRequest, AnswerRequest, ApiError,
     ApproveRunRequest, ArchiveAgentRequest, AttachmentContent, AttachmentUpload, ChangesResponse,
     CliInfo, CliInstallAccepted, CommitGraph, ConnectInfo, CreateAccountRequest,
-    CreateAgentRequest, CreateRunRequest, DeleteRunResponse, DiffSide, ErrorCode,
-    FileContentResponse, FileEntry, FileKind, FileTreeResponse, FinishRequest, GraphCommit,
-    GraphRef, GraphRefKind, HealthResponse, HubInfo, ImageContent, InitRepoRequest, LandRequest,
-    ListAccountsResponse, ListAgentsResponse, ListNotesResponse, ListPluginsResponse,
-    ListQuestionsResponse, ListRunsResponse, ListToolsResponse, LoginStarted, PluginInfo,
-    QuotaResponse, RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse,
-    ResolvedPath, RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
+    CreateAgentRequest, CreateRunRequest, CreateWorkRequest, CreateWorkRunRequest,
+    DeleteRunResponse, DiffSide, ErrorCode, FileContentResponse, FileEntry, FileKind,
+    FileTreeResponse, FinishRequest, GraphCommit, GraphRef, GraphRefKind, HealthResponse, HubInfo,
+    ImageContent, InitRepoRequest, LandRequest, ListAccountsResponse, ListAgentsResponse,
+    ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
+    ListToolsResponse, ListWorksResponse, LoginStarted, PluginInfo, QuotaResponse,
+    RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse, ResolvedPath,
+    RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
     SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript,
     TurnDiffResponse, UpdateRunPolicyRequest, UsageGroup, UsageResponse, UsageSeriesGroup,
-    UsageSeriesRange, UsageSeriesResponse,
+    UsageSeriesRange, UsageSeriesResponse, WorkDetail,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, Attachment,
@@ -93,6 +94,8 @@ pub fn router(state: Arc<AppState>) -> Router {
     let authed = Router::new()
         .route("/v1/info", get(info))
         .route("/v1/agents", get(list_agents).post(create_agent))
+        .route("/v1/session-candidates", get(session_candidates))
+        .route("/v1/agents/{key}/chat", post(start_chat))
         .route("/v1/agents/{key}", get(get_agent).delete(delete_agent))
         .route("/v1/agents/{key}/start", post(start_agent))
         .route("/v1/agents/{key}/stop", post(stop_agent))
@@ -143,6 +146,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/accounts/{id}/usage", get(account_usage))
         .route("/v1/accounts/{id}/models", get(account_models))
         .route("/v1/accounts/{id}/login", post(account_login))
+        .route("/v1/works", get(list_works).post(create_work))
+        .route("/v1/works/{id}", get(get_work))
+        .route("/v1/works/{id}/runs", post(create_work_run))
         .route("/v1/runs", get(list_runs).post(create_run))
         .route("/v1/runs/{key}", get(get_run).delete(delete_run))
         .route("/v1/runs/{key}/approve", post(approve_run))
@@ -151,6 +157,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{key}/land", post(land_run))
         .route("/v1/runs/{key}/policy", post(update_run_policy))
         .route("/v1/runs/{key}/finish", post(finish_run))
+        .route("/v1/runs/{key}/cleanup", post(cleanup_run))
         .route("/v1/runs/{key}/diff", get(run_diff))
         .route("/v1/runs/{key}/trace", get(run_trace))
         .route("/v1/runs/{key}/tasks/{task}/diff", get(task_diff))
@@ -380,6 +387,76 @@ async fn info(State(state): State<Arc<AppState>>) -> Json<HubInfo> {
 async fn list_agents(State(state): State<Arc<AppState>>) -> ApiResult<Json<ListAgentsResponse>> {
     let agents = state.store().list_agents().await?;
     Ok(Json(ListAgentsResponse { agents }))
+}
+
+#[derive(Deserialize)]
+struct SessionCandidatesQuery {
+    repo: String,
+}
+
+async fn session_candidates(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionCandidatesQuery>,
+) -> ApiResult<Json<crossagents_api_types::ListSessionCandidatesResponse>> {
+    let sessions = state
+        .orchestrator
+        .session_candidates(std::path::Path::new(&query.repo))
+        .await?
+        .into_iter()
+        .map(|candidate| crossagents_api_types::SessionCandidate {
+            can_use: candidate.can_use(),
+            reason: candidate.reason.map(|r| r.word().to_owned()),
+            agent: candidate.agent,
+            state: candidate.state,
+            busy_with: candidate.busy_with,
+            last_execution: candidate.last_execution,
+        })
+        .collect();
+    Ok(Json(crossagents_api_types::ListSessionCandidatesResponse {
+        sessions,
+    }))
+}
+
+/// The claim lookup is advisory: a run may claim after it; only claim_agent excludes
+/// competing runs atomically. Chat itself does not claim.
+async fn start_chat(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(req): Json<crossagents_api_types::StartChatRequest>,
+) -> ApiResult<(StatusCode, Json<SendMessageResponse>)> {
+    if req.text.trim().is_empty() {
+        return Err(AppError::bad_request("text must not be empty"));
+    }
+    let key = AgentKey::parse(&key);
+    let agent = state.store().get_agent(&key).await?;
+    state.orchestrator.chat_available(&agent).await?;
+    if agent.archived_at.is_some() {
+        if !req.restore {
+            return Err(CoreError::Conflict(format!(
+                "{} is archived: restore it first with restore: true",
+                agent.name
+            ))
+            .into());
+        }
+        state.runtime.archive(&key, false).await?;
+    }
+    let text = req.text;
+    let (message_id, queued) = state
+        .runtime
+        .send_envelope(&key, Envelope::new(MessageSource::Human, text.clone()))
+        .await?;
+    let topic = text
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(60)
+        .collect();
+    state.runtime.set_topic(&key, Some(topic)).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(SendMessageResponse { message_id, queued }),
+    ))
 }
 
 async fn create_agent(
@@ -1182,6 +1259,99 @@ async fn agent_id(state: &AppState, key: &str) -> ApiResult<AgentId> {
     Ok(state.store().get_agent(&AgentKey::parse(key)).await?.id)
 }
 
+async fn create_work(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateWorkRequest>,
+) -> ApiResult<(StatusCode, Json<crossagents_core::Work>)> {
+    if req.title.trim().is_empty() {
+        return Err(CoreError::Conflict("the work title is empty".into()).into());
+    }
+    let lead = state.store().get_agent(&AgentKey::parse(&req.lead)).await?;
+    let now = Utc::now();
+    let work = crossagents_core::Work {
+        id: crossagents_core::WorkId::new(),
+        title: req.title,
+        repo: lead.home().to_path_buf(),
+        lead: lead.id,
+        created_at: now,
+        updated_at: now,
+    };
+    state.store().insert_work(&work).await?;
+    state
+        .bus
+        .publish(EventKind::WorkCreated { work: work.clone() })
+        .await?;
+    Ok((StatusCode::CREATED, Json(work)))
+}
+
+async fn list_works(State(state): State<Arc<AppState>>) -> ApiResult<Json<ListWorksResponse>> {
+    Ok(Json(ListWorksResponse {
+        works: state.store().list_works().await?,
+    }))
+}
+
+async fn get_work(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<WorkDetail>> {
+    let id = id
+        .parse::<crossagents_core::WorkId>()
+        .map_err(|_| CoreError::Conflict("invalid work id".into()))?;
+    let work = state.store().get_work(id).await?;
+    let runs = state
+        .store()
+        .list_runs()
+        .await?
+        .into_iter()
+        .filter(|r| r.work_id == Some(id))
+        .collect();
+    Ok(Json(WorkDetail { work, runs }))
+}
+
+async fn create_work_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<CreateWorkRunRequest>,
+) -> ApiResult<(StatusCode, Json<Run>)> {
+    let id = id
+        .parse::<crossagents_core::WorkId>()
+        .map_err(|_| CoreError::Conflict("invalid work id".into()))?;
+    let mut work = state.store().get_work(id).await?;
+    let previous = state
+        .store()
+        .list_runs()
+        .await?
+        .into_iter()
+        .find(|r| r.work_id == Some(id));
+    let config = previous.map(|r| r.config).unwrap_or(RunConfig {
+        worker: work.lead,
+        escalate: None,
+        reviewer: None,
+        auto_approve: false,
+        max_parallel: RunConfig::DEFAULT_MAX_PARALLEL,
+        max_attempts: RunConfig::DEFAULT_MAX_ATTEMPTS,
+        team: Vec::new(),
+        policy: Default::default(),
+    });
+    let new = NewRun {
+        request: req.request,
+        title: req.title,
+        planner: work.lead,
+        config,
+        repo: Some(work.repo.clone()),
+        base_branch: None,
+        attachments: Vec::new(),
+    };
+    let run = state
+        .orchestrator
+        .create_run_for_work(new, None, false, Some(id))
+        .await?;
+    work.updated_at = Utc::now();
+    state.store().update_work(&work).await?;
+    state.bus.publish(EventKind::WorkUpdated { work }).await?;
+    Ok((StatusCode::CREATED, Json(run)))
+}
+
 async fn create_run(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateRunRequest>,
@@ -1231,7 +1401,10 @@ async fn create_run(
             policy: req.policy.unwrap_or_default(),
         },
     };
-    let run = state.orchestrator.create_run(new).await?;
+    let run = state
+        .orchestrator
+        .create_run_with_choice(new, req.fresh, req.restore)
+        .await?;
     Ok((StatusCode::CREATED, Json(run)))
 }
 
@@ -1883,6 +2056,16 @@ async fn review_task(
 async fn init_repo(Json(req): Json<InitRepoRequest>) -> ApiResult<Json<InitRepoRequest>> {
     GitWorkspaces.init(std::path::Path::new(&req.path)).await?;
     Ok(Json(req))
+}
+
+/// Explicitly cleans a finished run's managed workspaces while retaining its history.
+async fn cleanup_run(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Query(q): Query<DeleteRunQuery>,
+) -> ApiResult<Json<crossagents_orchestrator::DeletedRun>> {
+    let id = resolve_run(&state, &key).await?;
+    Ok(Json(state.orchestrator.cleanup_run(id, q.force).await?))
 }
 
 /// The person closes a run; open tasks are cancelled.

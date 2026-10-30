@@ -20,6 +20,8 @@ import type { ResumeCommandResponse } from "@bindings/ResumeCommandResponse";
 import type { RunDetail } from "@bindings/RunDetail";
 import type { RunTrace } from "@bindings/RunTrace";
 import type { SendMessageRequest } from "@bindings/SendMessageRequest";
+import type { SessionCandidate } from "@bindings/SessionCandidate";
+import type { StartChatRequest } from "@bindings/StartChatRequest";
 import type { TaskReviewRequest } from "@bindings/TaskReviewRequest";
 import type { Transcript } from "@bindings/Transcript";
 import type { UsageGroup } from "@bindings/UsageGroup";
@@ -72,6 +74,8 @@ export type MockState = {
   executions?: Record<string, AgentExecution>;
   /** The native resume command (docs/TODO.md §十五) by agent id, when a scenario fixes it; else made up from the agent like the hub would. */
   resume?: Record<string, ResumeCommandResponse>;
+  /** A workspace's sessions as `GET /v1/session-candidates` answers; a scenario sets what it shows. */
+  sessions?: SessionCandidate[];
   /**
    * Copied leads whose run branch is gone (docs/tasks/S1.md §7 第 15 条), by agent id: restoring
    * one rebuilds its checkout from the base and says the code did not come back.
@@ -430,6 +434,7 @@ export class MockBridge implements CrossAgentsBridge {
       if ((m = p.match(/^\/v1\/accounts\/([^/]+)\/usage$/)))
         return json(200, s.accountUsage ?? { by: url.searchParams.get("by") ?? "day", rows: [], total: { sessions: 0, input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0 }, total_cache_hit_rate: 0 });
       if (p === "/v1/plugins") return json(200, { plugins: s.plugins });
+      if (p === "/v1/session-candidates") return json(200, { sessions: s.sessions ?? [] });
       if ((m = p.match(FILES_ROUTE)) && m[1] !== "resolve") {
         const at = url.searchParams.get("path") ?? "";
         if (m[1] === "tree") {
@@ -551,6 +556,23 @@ export class MockBridge implements CrossAgentsBridge {
           this.emit({ type: "agent.model_changed", data: { id: a.id, ...to, from_model: from.model, from_effort: from.effort } });
         }
         return json(200, a);
+      }
+      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/chat$/))) {
+        // Like the hub's start_chat: only a free session, an archived one with restore, and
+        // the same words for both refusals.
+        const a = this.agent(m[1]);
+        if (!a) return notFound("agent");
+        const req = body as StartChatRequest;
+        if (!req.text.trim()) return json(400, { error: { code: "bad_request", message: "text must not be empty" } });
+        const held = s.executions?.[a.id];
+        if (held) return json(409, { error: { code: "conflict", message: `${a.name} is working on run "${held.run_title}"${held.task_key ? ` #${held.task_key}` : ""}` } });
+        if (a.archived_at) {
+          if (!req.restore) return json(409, { error: { code: "conflict", message: `${a.name} is archived: restore it first with restore: true` } });
+          a.archived_at = null;
+          this.emit({ type: "agent.updated", data: { agent: { ...a } } });
+          this.restored(a);
+        }
+        return this.send(a.id, { text: req.text });
       }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/messages$/))) return this.send(m[1], body as SendMessageRequest);
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/cancel$/))) return this.cancel(m[1]);

@@ -1,14 +1,16 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { PluginInfo } from "@bindings/PluginInfo";
-import { api, errorText } from "../api";
+import type { SessionCandidate } from "@bindings/SessionCandidate";
+import { api, ApiError, errorText } from "../api";
 import { HeldFiles, useHeld } from "../attach";
 import { sendMessage } from "../outbox";
 import { navigate } from "../App";
 import { Avatar, BrandMark, ErrorBox, Field, Icon, VendorMark, agentTitle, displayName, hueOf, useAgents } from "../components";
 import { useHubData } from "../hub";
 import { t } from "../lib/i18n";
-import { chatTitle, effortLabel, effortLevels, effortOf, prettyModel, vendorLabel, workerModelFor, accountOf } from "../lib/models";
+import { effortLabel, effortLevels, effortOf, prettyModel, vendorLabel, workerModelFor, accountOf } from "../lib/models";
+import { chatBody, newChatRequest, runSessionFields, sessionStateKey, usabilityOf } from "../lib/sessionChoice";
 import { useQuota } from "./Quota";
 import { PRESETS, presetPolicy, type Preset } from "../lib/policy";
 import { ChipMenu, type MenuItem } from "../menu";
@@ -137,15 +139,35 @@ export function HomeView() {
     if (p !== "full") save(PRESET_KEY, p);
   };
   const choose = (lead: Lead) => {
+    setSessionId(undefined);
     setPicked(lead);
     save(LEAD_KEY, lead);
   };
 
   const planners = here.filter((a) => a.role === "planner");
   const offered = (plugins.data ?? []).filter((p) => p.models.length > 0);
-  // The remembered pick when it still exists here, else the first planner, else the first model.
-  const lead: Lead | undefined =
-    picked?.kind === "agent" && planners.some((a) => a.name === picked.name)
+  // The workspace whose sessions are offered: the picked one, or — for Work — the directory
+  // the first planner works in, since a run starts there without picking a workspace chip.
+  const baseLeadAgent = picked?.kind === "agent" ? planners.find((a) => a.name === picked.name) : planners[0];
+  const sessionRepo = cwd ?? (mode === "run" && picked?.kind !== "model" ? baseLeadAgent?.cwd : undefined);
+  const sessions = useHubData(
+    () => (sessionRepo ? api.sessionCandidates(sessionRepo).then((r) => r.sessions) : Promise.resolve([] as SessionCandidate[])),
+    [sessionRepo],
+    (e) => e.type.startsWith("agent.") || e.type === "run.status_changed" || e.type === "task.handed_off",
+  );
+  // The session picked to carry this start; absent: a new one, as before.
+  const [sessionId, setSessionId] = useState<string>();
+  useEffect(() => setSessionId(undefined), [sessionRepo]);
+  useEffect(() => {
+    if (sessionId && sessions.data && !sessions.data.some((s) => s.agent.id === sessionId)) setSessionId(undefined);
+  }, [sessions.data, sessionId]);
+  const chosenSession = sessionId ? sessions.data?.find((s) => s.agent.id === sessionId) : undefined;
+  const sessionUse = chosenSession ? usabilityOf(chosenSession) : undefined;
+  // A picked session decides who leads; otherwise the remembered pick when it still exists
+  // here, else the first planner, else the first model.
+  const lead: Lead | undefined = chosenSession
+    ? { kind: "agent", name: chosenSession.agent.name }
+    : picked?.kind === "agent" && planners.some((a) => a.name === picked.name)
       ? picked
       : picked?.kind === "model" && offered.some((p) => p.name === picked.plugin && p.models.includes(picked.model))
         ? picked
@@ -154,12 +176,13 @@ export function HomeView() {
           : offered[0]
             ? { kind: "model", plugin: offered[0].name, model: offered[0].models[0] }
             : undefined;
-  const leadAgent = lead?.kind === "agent" ? planners.find((a) => a.name === lead.name) : undefined;
+  const leadAgent = chosenSession?.agent ?? (lead?.kind === "agent" ? planners.find((a) => a.name === lead.name) : undefined);
   const leadPlugin = leadAgent?.plugin ?? (lead?.kind === "model" ? lead.plugin : undefined);
   const leadModel = leadAgent?.model ?? (lead?.kind === "model" ? lead.model : undefined);
   const where = leadAgent?.cwd ?? cwd;
 
-  const team = here.filter((a) => a.role !== "planner" && (!where || wsKey(a.cwd) === wsKey(where)));
+  // A session that leads must not also be the default worker.
+  const team = here.filter((a) => a.id !== chosenSession?.agent.id && a.role !== "planner" && (!where || wsKey(a.cwd) === wsKey(where)));
   const workers = team.filter((a) => a.role === "worker");
   // 自动 (none picked) is a worker on the lead's login and the cheaper sibling of its model, not whoever worked last.
   const chosenWorker = worker ? workers.find((a) => a.name === worker) : undefined;
@@ -170,10 +193,16 @@ export function HomeView() {
       : offered[0]
         ? { plugin: offered[0].name, model: offered[0].models[0] }
         : undefined;
-  const ready = !busy && !!request.trim() && (mode === "chat" ? !!chatModel : !!lead && !!where);
-  // Effort levels of the vendor picked: the chat's model, or the run's lead. A pick the
-  // vendor does not offer falls back to its default; an existing lead shows its own.
-  const levels = effortLevels(plugins.data?.find((p) => p.name === (mode === "chat" ? chatModel?.plugin : leadPlugin))?.efforts);
+  const ready =
+    !busy &&
+    !!request.trim() &&
+    (mode === "chat" ? !!chosenSession || !!chatModel : !!lead && !!where) &&
+    (!sessionUse || sessionUse.selectable);
+  // Effort levels of the vendor picked: the chat's model, or the run's lead. A picked session
+  // keeps its own, so there is nothing to choose.
+  const levels = chosenSession
+    ? []
+    : effortLevels(plugins.data?.find((p) => p.name === (mode === "chat" ? chatModel?.plugin : leadPlugin))?.efforts);
   const effortWanted = effortPick || (mode === "run" && leadAgent ? effortOf(leadAgent.config) ?? "" : "");
   const effortOn = levels.some((l) => l.value === effortWanted) ? effortWanted : "";
   const effort = effortOn || undefined;
@@ -194,7 +223,8 @@ export function HomeView() {
   /** An agent with this role, model and login in `dir`, or a new one (the hub names it: a person's name, never the model's). */
   async function agentFor(role: "planner" | "worker", choice: Choice, dir: string, effort?: string): Promise<Agent> {
     const { plugin, model, account } = choice;
-    const found = everyone.find((a) => a.role === role && a.plugin === plugin && a.model === model && accountOf(a) === account && wsKey(a.cwd) === wsKey(dir));
+    // The picked session leads this run: it cannot also be reused as the default worker.
+    const found = everyone.find((a) => a.id !== chosenSession?.agent.id && a.role === role && a.plugin === plugin && a.model === model && accountOf(a) === account && wsKey(a.cwd) === wsKey(dir));
     if (found) return withEffort(found, effort);
     return api.createAgent({
       plugin,
@@ -226,33 +256,43 @@ export function HomeView() {
     return undefined;
   }
 
-  /** A chat is a new agent (named by the hub, the conversation titled by the message) and its first message. */
+  /** The hub's words, shown as they are. A 409 means the snapshot moved (a session got held):
+   * re-read the candidates so the person can pick another one or start fresh. */
+  function fail(err: unknown) {
+    setError(errorText(err));
+    if (err instanceof ApiError && err.status === 409) sessions.reload();
+  }
+
+  /** A chat is a new agent (named by the hub, the conversation titled by the message) and its
+   * first message, or a message to a session that already exists. */
   async function startChat() {
-    if (!ready || !chatModel) return;
+    if (!ready) return;
     setBusy(true);
     setError(undefined);
     try {
       const typed = request.trim();
+      // An existing session keeps its own model and login: just carry the conversation on.
+      if (chosenSession) {
+        if (files.held.length) {
+          setError(t("session.noAttachments"));
+          return;
+        }
+        await api.chat(chosenSession.agent.id, chatBody(typed, chosenSession));
+        files.clear();
+        navigate("s", chosenSession.agent.id);
+        return;
+      }
+      if (!chatModel) return;
       const lead = leadingModel(typed);
       const choice = lead?.choice ?? chatModel;
       const text = lead?.rest || typed;
-      const agent = await api.createAgent({
-        topic: chatTitle(text, 60),
-        plugin: choice.plugin,
-        driver: null,
-        model: choice.model,
-        role: "worker",
-        // No project: the hub gives the chat its own directory.
-        cwd: cwd ?? "",
-        config: configFor(choice, lead && lead.choice.plugin !== chatModel.plugin ? undefined : effort),
-        profile: { display_name: null, title: null, avatar: null, color: null, persona: null },
-      });
+      const agent = await api.createAgent(newChatRequest(choice, text, cwd ?? "", lead && lead.choice.plugin !== chatModel.plugin ? undefined : effort));
       // Into the conversation at once; the message shows there while the agent starts.
       void sendMessage(agent.id, text, { attachments: uploads() }).catch(() => {});
       files.clear();
       navigate("s", agent.id);
     } catch (err) {
-      setError(errorText(err));
+      fail(err);
     } finally {
       setBusy(false);
     }
@@ -265,7 +305,8 @@ export function HomeView() {
     setError(undefined);
     try {
       const leadChoice: Choice = lead.kind === "model" ? lead : { plugin: leadPlugin!, model: leadModel!, account: leadAgent && accountOf(leadAgent) };
-      const planner = leadAgent ? await withEffort(leadAgent, effort) : await agentFor("planner", leadChoice, where, effort);
+      // A picked session leads as it is, with its conversation; otherwise the lead's effort applies.
+      const planner = chosenSession ? chosenSession.agent : leadAgent ? await withEffort(leadAgent, effort) : await agentFor("planner", leadChoice, where, effort);
       const models = plugins.data?.find((p) => p.name === planner.plugin)?.models ?? [];
       // Workers run on the lead's login, on the cheaper sibling of its model.
       const workerChoice: Choice = { plugin: planner.plugin, model: workerModelFor(models, planner.model ?? leadModel ?? models[0] ?? ""), account: accountOf(planner) };
@@ -274,6 +315,7 @@ export function HomeView() {
         request: request.trim(),
         title: title.trim() || null,
         planner: planner.id,
+        ...runSessionFields(chosenSession),
         worker: workerAgent.id,
         escalate: escalate || null,
         reviewer: reviewer || null,
@@ -295,7 +337,7 @@ export function HomeView() {
       files.clear();
       navigate("runs", run.id);
     } catch (err) {
-      setError(errorText(err));
+      fail(err);
     } finally {
       setBusy(false);
     }
@@ -413,6 +455,32 @@ export function HomeView() {
       save(CHAT_MODEL_KEY, c);
     },
   );
+  // A new session first, then the workspace's own; unusable ones stay listed, disabled, with
+  // the reason (the hub's words for what holds a busy one).
+  const sessionItems: MenuItem[] = [
+    { kind: "item", key: "fresh", label: t("home.newSession"), sub: t("home.newSessionHint"), on: !chosenSession, onPick: () => setSessionId(undefined) },
+    ...((sessions.data?.length ?? 0) > 0 ? [{ kind: "header", key: "h-sessions", label: t("session.existing") } satisfies MenuItem] : []),
+    ...(sessions.data ?? []).map((s): MenuItem => {
+      const use = usabilityOf(s);
+      // The reason first: read left to right, it is what the line must not truncate away.
+      const parts: string[] = [];
+      if (use.reason) parts.push(t(use.reason.key, use.reason.vars));
+      else if (use.hint) parts.push(t(use.hint.key, use.hint.vars));
+      parts.push(s.agent.model ?? s.agent.plugin, t(sessionStateKey(s.state)));
+      if (s.last_execution) parts.push(s.last_execution);
+      return {
+        kind: "item",
+        key: `s/${s.agent.id}`,
+        label: displayName(s.agent),
+        sub: parts.join(" · "),
+        subDir: "ltr",
+        icon: <Avatar agent={s.agent} size={18} />,
+        on: chosenSession?.agent.id === s.agent.id,
+        disabled: !use.selectable,
+        onPick: () => setSessionId(s.agent.id),
+      };
+    }),
+  ];
   const effortItems: MenuItem[] = [
     { kind: "header", key: "h", label: t("home.effort") },
     { kind: "item", key: "", label: t("home.effortDefault"), on: !effortOn, onPick: () => setEffort("") },
@@ -430,11 +498,13 @@ export function HomeView() {
   const missing =
     !agents.data || !plugins.data
       ? undefined
-      : !offered.length
-        ? t("home.noModels")
-        : mode === "run" && !where
-          ? t("home.needWorkspace")
-          : undefined;
+      : sessionUse && !sessionUse.selectable && sessionUse.reason
+        ? t(sessionUse.reason.key, sessionUse.reason.vars)
+        : !chosenSession && !offered.length
+          ? t("home.noModels")
+          : mode === "run" && !where
+            ? t("home.needWorkspace")
+            : undefined;
 
   return (
     <div className="page">
@@ -480,7 +550,16 @@ export function HomeView() {
               items={wsItems}
               up
             />
-            {mode === "chat" && chatModel && (
+            {(sessionRepo || chosenSession) && (
+              <ChipMenu
+                icon={chosenSession ? <Avatar agent={chosenSession.agent} size={16} /> : <Icon name="chat" size={14} />}
+                label={chosenSession ? `${displayName(chosenSession.agent)}${sessionUse?.restore ? ` · ${t("session.willRestore")}` : ""}` : t("home.newSession")}
+                title={t("home.session")}
+                items={sessionItems}
+                up
+              />
+            )}
+            {mode === "chat" && !chosenSession && chatModel && (
               <ChipMenu
                 icon={<VendorMark plugin={chatModel.plugin} size={14} />}
                 label={choiceLabel(chatModel)}
@@ -489,7 +568,7 @@ export function HomeView() {
                 up
               />
             )}
-            {mode === "run" && lead && (
+            {mode === "run" && !chosenSession && lead && (
               <ChipMenu
                 icon={leadAgent ? <Avatar agent={leadAgent} size={16} /> : <VendorMark plugin={leadPlugin!} size={14} />}
                 label={leadAgent ? displayName(leadAgent) : lead.kind === "model" ? choiceLabel(lead) : ""}
@@ -607,9 +686,9 @@ export function HomeView() {
             </div>
           </div>
         )}
-        {error && (
+        {(error || sessions.error) && (
           <div style={{ marginTop: 12 }}>
-            <ErrorBox error={error} />
+            <ErrorBox error={error ?? t("session.loadFailed", { error: sessions.error ?? "" })} />
           </div>
         )}
       </div>

@@ -6,8 +6,12 @@ import { approvalRun, deleteRun, graphRun, handoffRun, inPlaceRun, landingRun, l
 import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, failedEditSession, liveRun, liveSession, longNameScene, slashScene, soloSession, toolImagePathsSession, toolImagesSession } from "../views/Session.mock";
 import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
 import { usageScene } from "../views/Usage.mock";
-import { agent, say, think, turn } from "./fixtures";
+import { agent, ago, capabilitiesOf, REPO, say, team, think, turn } from "./fixtures";
 import { openFile } from "../FileViewer";
+import type { AccountQuota } from "@bindings/AccountQuota";
+import type { PluginInfo } from "@bindings/PluginInfo";
+import { wsKey } from "../workspace";
+import { quota } from "../views/Usage.mock";
 import type { MockState, Step } from "./MockBridge";
 
 export type Scenario = {
@@ -47,6 +51,52 @@ export const SCENARIOS: Scenario[] = [
     return { ...scene, script: [], route: `#/runs/${run.id}` };
   } },
   { key: "empty", label: "空 hub", hint: "第一次打开：没有队友、没有 run", build: () => ({ state: emptyHub(), script: [], route: "#/" }) },
+  { key: "session-choice", label: "发起时选会话", hint: "首页 Work 的「会话」：新会话或已有会话；占用写明哪个 run，归档可恢复，不能换目录的置灰", build: () => {
+    const { ada, rex, mia, sam } = team();
+    mia.archived_at = ago(60 * 24 * 2);
+    const state: MockState = { ...emptyHub(), agents: [ada, rex, mia, sam], quota: quota() };
+    state.sessions = [
+      { agent: ada, state: "idle", busy_with: null, last_execution: 'run "多租户隔离" #a (done)', can_use: true, reason: null },
+      { agent: rex, state: "busy", busy_with: 'Rex is busy: it works on #a of run "OAuth 登录" (01a1)', last_execution: 'run "OAuth 登录" #a (in progress)', can_use: false, reason: "busy" },
+      { agent: mia, state: "archived", busy_with: null, last_execution: 'run "登录页改版" #b (done)', can_use: true, reason: "archived" },
+      { agent: sam, state: "idle", busy_with: null, last_execution: null, can_use: false, reason: "cannot_move" },
+    ];
+    localStorage.setItem("crossagents.mode", JSON.stringify("run"));
+    localStorage.setItem("crossagents.workspace", wsKey(REPO));
+    return { state, route: "#/", script: [{ at: 900, act: () => document.querySelector<HTMLButtonElement>('button[title="会话"]')?.click() }] };
+  } },
+  { key: "plan-models", label: "批计划：别家插件的模型", hint: "计划卡的人选：所有已装插件的模型按家族分组；没有登录的 Kimi 置灰并写明原因", build: () => {
+    const scene = oauthRun("plan");
+    const kimi: PluginInfo = {
+      name: "kimi",
+      models: ["kimi-k3", "kimi-k2.7-code"],
+      all_models: ["kimi-k3", "kimi-k2.7-code"],
+      shown: null,
+      models_pinned: false,
+      driver: "acp-generic",
+      capabilities: capabilitiesOf("kimi"),
+      efforts: [],
+    };
+    scene.state.plugins = [...scene.state.plugins, kimi];
+    scene.state.quota.accounts = [...scene.state.quota.accounts, signedOutKimi()];
+    return {
+      ...scene,
+      route: `#/runs/${scene.state.runs[0].run.id}`,
+      // Show a cross-plugin pick taking effect: task #a's worker chosen from the With gateway.
+      script: [
+        {
+          at: 800,
+          act: () => {
+            const select = document.querySelector<HTMLSelectElement>("select.who-pick");
+            const option = select && [...select.options].find((o) => o.value === "model:with/gpt-6-sol");
+            if (!select || !option) return;
+            select.value = option.value;
+            select.dispatchEvent(new Event("change", { bubbles: true }));
+          },
+        },
+      ],
+    };
+  } },
   { key: "plan", label: "计划待审批", hint: "run 页：中间只有主导的对话和待审批的 Plan；右侧栏是计划、run 信息、策略与预算", build: () => oauthRun("plan") },
   { key: "running", label: "run 进行中", hint: "run 页：中间栏只有对话；右侧栏按任务分组（含交接链）、run 信息、策略、笔记，追溯和参与者收起", build: () => oauthRun("running") },
   { key: "paused", label: "run 已暂停", hint: "中间只有一行「已暂停」提示，展开看全文；计划、run 信息、策略都在右侧栏", build: () => pausedRun() },
@@ -111,6 +161,30 @@ export const SCENARIOS: Scenario[] = [
 ];
 
 export const DEFAULT_SCENARIO = "running";
+
+/** A Kimi login that has never signed in: its plugin's models stay listed, disabled. */
+function signedOutKimi(): AccountQuota {
+  return {
+    account: { id: "kimi-work", provider: "kimi", label: "Kimi 工作号", codebuddy_site: null, home: "C:/Users/me/.crossagents/accounts/kimi-work", created_at: ago(60 * 24 * 9) },
+    status: {
+      logged_in: false,
+      auth_mode: null,
+      email: null,
+      plan: null,
+      subscription_until: null,
+      rate_limits: [],
+      limit_reached: false,
+      credits: null,
+      limits: [],
+      reset_credits: [],
+      source: null,
+      as_of: null,
+      note: "请完成登录",
+    },
+    models: [],
+    agents: [],
+  };
+}
 
 /** Nova's reply names files; the viewer opens on main.rs at line 12. */
 function filesScene() {

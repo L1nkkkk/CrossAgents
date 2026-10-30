@@ -177,6 +177,10 @@ fn transcript_files(home: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// One reply as the scan gathers it: the line's time, the model it used, and its usage (the
+/// last line of a reply carries the whole reply's usage).
+type Reply = (Option<DateTime<Utc>>, Option<String>, Value);
+
 /// Token use of one transcript. Claude Code writes each content block of a reply as its
 /// own line with the reply's usage so far; the last line of each reply counts.
 fn scan_transcript(path: &Path) -> Option<SessionUsage> {
@@ -184,10 +188,7 @@ fn scan_transcript(path: &Path) -> Option<SessionUsage> {
     let mut started_at: Option<DateTime<Utc>> = None;
     let mut model = None;
     let mut originator = None;
-    // Per reply: the line's time, the model it used and its usage (the last line of a reply
-    // carries the whole reply's usage).
-    let mut replies: HashMap<String, (Option<DateTime<Utc>>, Option<String>, Value)> =
-        HashMap::new();
+    let mut replies: HashMap<String, Reply> = HashMap::new();
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         let Ok(entry) = serde_json::from_str::<Value>(&line) else {
             continue;

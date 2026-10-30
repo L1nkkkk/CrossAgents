@@ -11,9 +11,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use crossagents_core::{
-    Agent, AgentId, AgentStatus, CoreError, Envelope, EventBus, LandMode, MessageId,
-    MessageSource, Role, Run, RunConfig, RunId, RunPolicy, RunStatus, Store, Task, TaskId,
-    TaskReport, TaskSpec, TaskStatus,
+    Agent, AgentId, AgentStatus, CoreError, Envelope, EventBus, LandMode, MessageId, MessageSource,
+    Role, Run, RunConfig, RunId, RunPolicy, RunStatus, Store, Task, TaskId, TaskReport, TaskSpec,
+    TaskStatus,
 };
 use crossagents_store_sqlite::SqliteStore;
 use serde_json::{Value, json};
@@ -201,6 +201,7 @@ impl Fixture {
             store.insert_agent(a).await.unwrap();
         }
         let run = Run {
+            work_id: None,
             continuation: None,
             id: RunId::new(),
             title: "a run".into(),
@@ -371,7 +372,11 @@ async fn a_created_task_that_waits_on_another_stays_pending() {
 
     let id: TaskId = serde_json::from_value(out["created"][0]["task_id"].clone()).unwrap();
     let task = f.task(id).await;
-    assert_eq!(task.status, TaskStatus::Pending, "the control case: {task:?}");
+    assert_eq!(
+        task.status,
+        TaskStatus::Pending,
+        "the control case: {task:?}"
+    );
     assert_eq!(task.assignee, None, "{task:?}");
 }
 
@@ -444,4 +449,22 @@ async fn a_task_updated_while_the_run_is_paused_does_not_start() {
     assert_eq!(task.status, TaskStatus::Pending, "{task:?}");
     assert_eq!(task.depends_on, vec!["done".to_owned()], "{task:?}");
     assert_eq!(task.assignee, None, "{task:?}");
+}
+
+/// The prefix says what the session is, so an escalated task's session is `e-…`. Three places
+/// name a worker (engine's handout, `tasks.rs`'s reassignment, `quota.rs`'s move off a spent
+/// account); they all go through `worker_name`, or the name stops matching the session.
+#[tokio::test]
+async fn an_escalated_task_names_its_session_with_e() {
+    let f = Fixture::new().await;
+    let mut task = f.insert("auth", TaskStatus::Pending, &[], None).await;
+
+    let plain = crate::engine::worker_name(&f.run, &task);
+    assert!(plain.starts_with("w-"), "{plain}");
+    assert!(plain.ends_with("-auth"), "{plain}");
+
+    task.escalated = true;
+    let escalated = crate::engine::worker_name(&f.run, &task);
+    assert!(escalated.starts_with("e-"), "{escalated}");
+    assert_eq!(escalated[1..], plain[1..], "only the prefix differs");
 }

@@ -50,6 +50,7 @@ import {
   type ContinuationField,
 } from "../lib/continuation";
 import { accountOf, prettyModel } from "../lib/models";
+import { modelPickValue, parseModelPick, workerAgentRequest, workerModelGroups, workerModelLabel, workerTarget } from "../lib/workerModels";
 import { StateWord, TaskChanges } from "../parts";
 import { RunChanges, TaskReview } from "../review";
 import { RunTraceView } from "../trace";
@@ -57,6 +58,7 @@ import { RailCard } from "../rail";
 import { t, type Key } from "../lib/i18n";
 import { wsKey } from "../workspace";
 import { openTool } from "../panes";
+import { useQuota } from "./Quota";
 import { SessionView, useSideSlot } from "./Session";
 
 function concerns(runId: string, e: HubEvent): boolean {
@@ -822,10 +824,11 @@ const capOf = (text: string) => (text.trim() ? Number(text) : null);
 export function usePlanApproval(run: Run, busy: boolean) {
   const agents = useAgents();
   const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
+  const quota = useQuota();
   const policy = run.config.policy;
   const [preset, setPreset] = useState<Preset>(presetOf(policy) ?? "manual");
-  // Per task: "" is the run's default worker, `agent:<id>` a teammate, `model:<m>` a new
-  // worker on the lead's login.
+  // Per task: "" is the run's default worker, `agent:<id>` a teammate, `model:<plugin>/<model>`
+  // a new worker on the model's own plugin and a login of it.
   const [picks, setPicks] = useState<Record<string, string>>({});
   const [maxUsd, setMaxUsd] = useState(policy.budget.max_usd?.toString() ?? "");
   const [maxMinutes, setMaxMinutes] = useState(policy.budget.max_minutes?.toString() ?? "");
@@ -836,38 +839,34 @@ export function usePlanApproval(run: Run, busy: boolean) {
   const lead = everyone.find((a) => a.id === run.planner);
   const fallback = everyone.find((a) => a.id === run.config.worker);
   const teammates = everyone.filter((a) => a.role === "worker" && run.config.team.includes(a.id));
-  const models = plugins.data?.find((p) => p.name === lead?.plugin)?.models ?? [];
+  const accounts = quota.data?.accounts ?? [];
+  const leadRef = lead ? { plugin: lead.plugin, account: accountOf(lead) } : undefined;
+  // Every installed plugin's models, by family; a plugin with no signed-in login stays listed
+  // but disabled, with the reason.
+  const workerGroups = workerModelGroups(plugins.data ?? [], accounts, leadRef);
+  const workerOptions = workerGroups.flatMap((g) => g.options);
   const planned = (task: PlannedTask) => {
     const agent = task.assignee ? everyone.find((a) => isAgent(a, task.assignee!)) : undefined;
     return agent ? `agent:${agent.id}` : "";
   };
   const pickOf = (task: PlannedTask) => picks[task.key] ?? planned(task);
 
-  /** The worker a pick stands for, made on the lead's login when it is a model. */
+  /** The worker a pick stands for: a teammate, or a new agent on the model's own plugin. */
   async function workerOf(pick: string, made: Map<string, string>): Promise<string | null> {
     if (!pick) return null;
     if (pick.startsWith("agent:")) return pick.slice("agent:".length);
-    const model = pick.slice("model:".length);
-    const known = made.get(model);
+    const parsed = parseModelPick(pick);
+    if (!parsed) throw new Error(t("worker.unknownPick", { pick }));
+    const known = made.get(pick);
     if (known) return known;
-    const account = lead && accountOf(lead);
+    // The model's plugin decides, not the lead's: a DeepSeek model belongs to the plugin that
+    // offers it, and only a same-plugin worker may use the lead's login.
+    const target = workerTarget(parsed.plugin, parsed.model, accounts, leadRef);
     const found = everyone.find(
-      (a) => a.role === "worker" && a.plugin === lead?.plugin && a.model === model && accountOf(a) === account && wsKey(a.cwd) === wsKey(run.repo),
+      (a) => a.role === "worker" && a.plugin === target.plugin && a.model === target.model && accountOf(a) === target.account && wsKey(a.cwd) === wsKey(run.repo),
     );
-    const id =
-      found?.id ??
-      (
-        await api.createAgent({
-          plugin: lead!.plugin,
-          driver: null,
-          model,
-          role: "worker",
-          cwd: run.repo,
-          config: account ? { account } : {},
-          profile: { display_name: null, title: "Worker", avatar: null, color: null, persona: null },
-        })
-      ).id;
-    made.set(model, id);
+    const id = found?.id ?? (await api.createAgent(workerAgentRequest(target, run.repo))).id;
+    made.set(pick, id);
     return id;
   }
 
@@ -902,15 +901,18 @@ export function usePlanApproval(run: Run, busy: boolean) {
           ))}
         </optgroup>
       )}
-      {models.length > 0 && (
-        <optgroup label="新建（用主导的登录）">
-          {models.map((m) => (
-            <option key={m} value={`model:${m}`}>
-              {prettyModel(m)}
-            </option>
-          ))}
+      {workerGroups.map((group) => (
+        <optgroup key={group.key} label={t("plan.newWorkerFamily", { family: group.label })}>
+          {group.options.map((option) => {
+            const label = workerModelLabel(option, workerOptions);
+            return (
+              <option key={`${option.plugin}/${option.model}`} value={modelPickValue(option.plugin, option.model)} disabled={!!option.blocked}>
+                {option.blocked ? `${label} · ${t(option.blocked.key)}` : label}
+              </option>
+            );
+          })}
         </optgroup>
-      )}
+      ))}
     </select>
   );
   const capsText = budgetText({ max_usd: capOf(maxUsd), max_minutes: capOf(maxMinutes), max_tokens: maxTokens.trim() ? Number(maxTokens) * 1000 : null });

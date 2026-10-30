@@ -1,5 +1,8 @@
 //! SQLite implementation of [`crossagents_core::Store`].
 
+#[doc(hidden)]
+pub use sqlx;
+
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -103,7 +106,12 @@ fn migration_failed(err: sqlx::migrate::MigrateError) -> CoreError {
 
 /// The highest migration this build ships.
 fn known_migration() -> i64 {
-    MIGRATOR.migrations.iter().map(|m| m.version).max().unwrap_or(0)
+    MIGRATOR
+        .migrations
+        .iter()
+        .map(|m| m.version)
+        .max()
+        .unwrap_or(0)
 }
 
 fn storage(err: impl std::fmt::Display) -> CoreError {
@@ -1061,6 +1069,62 @@ impl Store for SqliteStore {
         .collect()
     }
 
+    async fn insert_work(&self, work: &crossagents_core::Work) -> Result<(), CoreError> {
+        sqlx::query("INSERT INTO works (id, created_at, updated_at, data) VALUES (?, ?, ?, ?)")
+            .bind(work.id.to_string())
+            .bind(work.created_at.to_rfc3339())
+            .bind(work.updated_at.to_rfc3339())
+            .bind(serde_json::to_string(work).map_err(storage)?)
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        Ok(())
+    }
+
+    async fn get_work(
+        &self,
+        id: crossagents_core::WorkId,
+    ) -> Result<crossagents_core::Work, CoreError> {
+        let data: Option<String> = sqlx::query_scalar("SELECT data FROM works WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?;
+        let data = data.ok_or_else(|| CoreError::NotFound {
+            kind: "work",
+            id: id.to_string(),
+        })?;
+        serde_json::from_str(&data).map_err(storage)
+    }
+
+    async fn list_works(&self) -> Result<Vec<crossagents_core::Work>, CoreError> {
+        let rows: Vec<String> =
+            sqlx::query_scalar("SELECT data FROM works ORDER BY updated_at DESC, id DESC")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(storage)?;
+        rows.iter()
+            .map(|d| serde_json::from_str(d).map_err(storage))
+            .collect()
+    }
+
+    async fn update_work(&self, work: &crossagents_core::Work) -> Result<(), CoreError> {
+        let result = sqlx::query("UPDATE works SET updated_at = ?, data = ? WHERE id = ?")
+            .bind(work.updated_at.to_rfc3339())
+            .bind(serde_json::to_string(work).map_err(storage)?)
+            .bind(work.id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        if result.rows_affected() == 0 {
+            return Err(CoreError::NotFound {
+                kind: "work",
+                id: work.id.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     async fn insert_run(&self, run: &Run) -> Result<(), CoreError> {
         sqlx::query(
             "INSERT INTO runs (id, status, created_at, updated_at, data) VALUES (?, ?, ?, ?, ?)",
@@ -1343,6 +1407,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().await.unwrap();
         let now = time_from(&Utc::now().to_rfc3339()).unwrap();
         let mut run = Run {
+            work_id: None,
             continuation: None,
             landed: None,
             lead_note: None,
@@ -1432,6 +1497,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().await.unwrap();
         let now = time_from(&Utc::now().to_rfc3339()).unwrap();
         let run = Run {
+            work_id: None,
             continuation: None,
             landed: None,
             lead_note: None,
@@ -1836,6 +1902,7 @@ mod tests {
     fn run_for(id: RunId) -> Run {
         let now = Utc::now();
         Run {
+            work_id: None,
             continuation: None,
             landed: None,
             lead_note: None,

@@ -7,6 +7,10 @@ import type { RunPolicy } from "./RunPolicy";
  */
 export type CreateRunRequest = { request: string, title: string | null, planner: string, 
 /**
+ * Omitted retains the existing adaptive lead selection.
+ */
+fresh?: boolean, restore?: boolean, 
+/**
  * Template for workers. Omitted: the lead's own model, cloned (docs/tasks/W1.md).
  */
 worker?: string, escalate: string | null, reviewer: string | null, auto_approve: boolean, max_parallel: number | null, max_attempts: number | null, 

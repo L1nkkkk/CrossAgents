@@ -150,6 +150,28 @@ const zhCN = {
   "home.continuationHint": "等待回答或暂停时不催促；仍遵守验收与落地权限。",
   "home.continuationMaxAttempts": "最多唤醒次数（整个 Work）",
   "home.continuationInterval": "等待间隔（秒）",
+
+  "home.session": "会话",
+  "home.newSession": "新会话",
+  "home.newSessionHint": "按模板新开一个，不带以前的对话",
+  "session.existing": "已有会话",
+  "session.state.idle": "空闲",
+  "session.state.busy": "占用中",
+  "session.state.archived": "已归档",
+  "session.state.other": "状态未知",
+  "session.reason.busy": "{what}",
+  "session.reason.busyFallback": "正被别的 run 或人占用",
+  "session.reason.cannotMove": "它的驱动不能在别的目录里接着原来的会话",
+  "session.reason.unavailable": "现在不能用：{reason}",
+  "session.hint.archived": "使用前会先恢复",
+  "session.willRestore": "会先恢复",
+  "session.loadFailed": "读不到已有会话：{error}",
+  "session.noAttachments": "选已有会话时不能带附件：继续对话的接口只收文字。请去掉附件，或改用新会话。",
+
+  "plan.newWorkerFamily": "新建 · {family}",
+  "worker.notLoggedIn": "未登录",
+  "worker.notInstalled": "CLI 未安装",
+  "worker.unknownPick": "认不出这个人选：{pick}",
 } as const;
 
 export type Key = keyof typeof zhCN;

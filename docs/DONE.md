@@ -118,6 +118,8 @@
 - [x] `settle_continuation` 会吞掉卡住提醒（2026-10-28 记，2026-10-29 修）：7bc3aff 在主导变 Idle 时调 `continue_run(id, false)`，`deliver=false` 只挡住计数和投递，卡住检测照跑，会写入卡住文案并把 `stuck_watch.progress_at` 重置为现在却什么都不发，下一次唤醒退回普通「继续推进」，「N 分钟没进展、在等谁」丢了。修法：`crates/orchestrator/src/continuation.rs` 的卡住判定放进 `if deliver` 分支，只在投递那一趟跑；settle 不判定安静时长，不写 `stuck_watch` 的 `progress_at` / `event_seq`，不新建也不清空（非等待阶段的清空也只在 `deliver` 时做）。连带问题：settle 会写 `state.phase`，下一次投递那一趟的 `changed_phase` 就成了 false，上一阶段的安静时长会被算进新阶段；所以 settle 在 phase 真的变了时把已存在的 watch 按换阶段的规则重置（`progress_at=now`、`event_seq=最新`），这是「新阶段从现在起算」而非卡住判定，不吞提醒，watch 不存在时留给投递那一趟创建。测试：`crates/mock-agent/tests/continuation.rs::settling_the_checkpoint_at_idle_does_not_swallow_a_stuck_report`（`quiet(&t, id, 5)` 拨到安静满阈值后调 `settle_continuation`，断言 `progress_at` 未重置、`attempts` 仍为 0、没有投递；随后 `continue_runs()` 的唯一唤醒含 `No progress for 5 minutes` 与等待对象），把 `if deliver` 改回旧行为时该测试失败
 - [x] 收尾检查和主导自己的构建抢同一个编译目录（2026-10-28 修）：run `01a182ed…27bd5f0e` 的主导 22:33 自己开了 `cargo test --workspace`，没跑完就调 `run_finish`；hub 在同一个 `<run>/targets/integration` 里再跑一遍，先是 `Blocking waiting for file lock`，再是 Windows 不让覆盖正在执行的测试程序（`LNK1104 adopt-….exe`），被报成「Fix it in your checkout」，主导会去找不存在的 bug。修法三处：orchestrator 从工具调用事件跟踪每个 agent 正在跑的命令（`crates/orchestrator/src/running.rs`，回合结束或进程退出即清空，超过 2 小时没报结束的不算），检查开始前若检出里还有命令在跑就拒绝并说清是谁的哪条命令、从几点开始；检查失败里有 `LNK1104`、`os error 32`、文件锁等「文件被占用」特征时改报环境冲突而不是代码错误；开场说明的 checks 一句加上「hub 自己会跑，只跑和改动相关的测试，收尾前等自己开的构建结束」。测试：`lead.rs::the_checks_wait_for_the_leads_own_build`（mock 的 `[running]` 模拟没结束的命令）、`running.rs` 两条单测
 - [x] with 主导每一轮都报「不支持该模型: claude-opus-5.5」（2026-10-29 修）：with-cli 当天自动更新到 0.33.0 后，hub 起的 with 会话全部在 1 秒内失败，而直接跑 `with-cli chat --model=claude-opus-5.5` 正常。原因是驱动用 `--config` 传的是 `~/.bg-agent/bg-agent-client.yaml` 的副本（10/15 生成后没再更新），新版 with-cli 拿到这份旧配置就不认它自己列出的模型；换成安装目录 `background_agent_cli/etc/bg-agent-client.yaml`（随 CLI 一起更新）就好。修法：`with_native::installed_config` 按 `<install>/bin/with-cli` 找 `<install>/etc/bg-agent-client.yaml`，有就复制它，没有才退回用户文件；用户自己的 MCP 服务器仍按用户文件里的 `mcp_config_path` 合进来。测试 `the_installed_configuration_wins_over_the_users`。要换上新 hub 才生效
+- [x] `team.rs::the_lead_cannot_put_a_teammate_on_a_model_nobody_runs` 依赖本机账号（2026-10-29 记，同日修 `a9d32b2`）：本机装了 with 插件时 `agent_spawn` 把 `gpt-6-luna` 解析到 `with` 并招募成功，断言「no logged-in account runs model gpt-6-luna」失败。按 TODO 当时记的办法修的——换成任何真实插件都不会提供的模型名 `no-such-model-zz`，不再依赖宿主机装了什么
+- [x] 升级会话的名字漏了 `e-` 前缀（2026-10-29 记，2026-10-30 修）：名字的前缀表示这个执行会话是什么——`w-` 普通 worker、`e-` 升级给强模型的 worker、`r-` 评审。判断只写在 `engine.rs` 派活那一处，`tasks.rs` 重新派活（`:438`）和 `quota.rs` 换账号（`:110`）两处把 `"w"` 写死了，于是任务升级后建出来的会话仍叫 `w-`，名字与它的实际身份不符。TODO 原文只记了一处，实际是两处。修法是抽出 `engine::worker_name(run, task)` 三处共用，而不是在三处各抄一遍那个三元表达式（那样还会再漂）；`r-` 那处不动，评审与升级无关。单测 `tests_scheduling.rs::an_escalated_task_names_its_session_with_e` 断言只有前缀不同
 
 ## 十、agent 描述文件
 
@@ -195,6 +197,7 @@ B 删除 run：
 
 - [x] **共享编译目录在并行 worktree 下串味**（2026-10-28 修，见 §九 ① 第二条）：`18d4f6a` 让同一仓库的所有 run 共用 `<worktrees>/targets/<仓库>-<哈希>` 作为 `CARGO_TARGET_DIR`，省下重复编译依赖的时间。但 workspace 成员的包名和版本号在各个 worktree 里完全相同，产物会互相覆盖：A 的 worktree 会拿到 B 编译出的 `crossagents-core` / `crossagents-api-types`。实测两种假错误——A 报 `unresolved import crossagents_api_types::UpdateRunPolicyRequest`（代码里明明有），B 报 `missing field stuck_minutes`；换成独立 `CARGO_TARGET_DIR` 两边都干净通过。hub 跑 task 验收时撞上这个会把好改动判成失败。现在每个 worktree 一份 `<root>/<run>/targets/<tree>`，用完随 checkout 一起回收（细则见 §九 ①）
 - [x] **`schedule()` 不被 `task_create` / `task_assign` / `task_update` 触发**（2026-10-28 修）：`crates/orchestrator/src/engine.rs` 的 `schedule_reporting` 只在计划批准、任务合并/失败这些时刻跑。所以在一个跑着的 run 里新建或改派一条任务，它会一直停在 pending、没有 assignee、也没有任何错误记录，直到别的任务事件顺带触发一次调度。实测等了十几分钟都不动，直到另一条任务合并。核实时 `task_create`（含 worker delegate 拆子任务）和 `task_assign` 的 pending 分支已经在写完后调用 `schedule_reporting`，只剩 `task_update` 没调。现在 `task_update` 也在锁内重新读 run、写完后 `schedule`，返回的任务是调度后的状态，返回结构不变；run 不在 Running 时照旧不派活。测试在 `crates/orchestrator/src/tests_scheduling.rs`：新建无依赖任务、改派 pending 任务、把依赖改成已合并的任务，三种情况都会当场派出，run 暂停时不会派出。当时 run `01a17e22` 的数据已经不在库里，没法确认那次卡住是不是只因为 `task_update`，也可能是旧代码，或者是 `max_parallel` / scope 冲突造成的正常排队
+- [x] **`work_start.rs::a_proposer_that_can_move_leads_the_work_itself` 在重负载下偶发失败**（2026-10-27 记，2026-10-30 修）：根因是测试辅助函数 `propose()` 只等到 Work 卡片出现（`HumanAsked`）就返回，而此时提议者那一轮**还在跑**；紧接着 `start()` 去答卡片，hub 按规矩回 `409 busy: lyra is answering a person's message`。修法是卡片之后再等一个 `AgentStatusChanged → Idle`（照 `rules.rs:85` 现成的写法），让答卡片变成确定的时序。没有改成「撞 409 就重试」（那是盖症状），也没有动 hub 那条「正在答人的话就忙」的规则（那条是对的）。实测连跑三遍各 8/8。注意产品侧还有一笔账：人在 GUI 里卡片刚出现时点「开始」会撞上同一个 409，已记进 [TODO.md](TODO.md) 同名一节
 
 ## 十七、本地资源锁与通用执行器
 
@@ -205,3 +208,38 @@ B 删除 run：
 - [x] L2：hub 检查、任务验收、`workspace_run` 改走执行器；删掉 `refuse_while_running` 的拒绝；`protocol.rs` 加一句（LOCKS §6）
 - [x] L3：Rust 预设的 cargo shim（`crossagents.exe` 硬链接，按 `argv[0]` 识别）
 - [x] 执行器在根进程退出后被残留进程无限拖住（2026-10-29 记，同日修）：run `041aba99` 的 worker 跑 `cargo test`，真正的 cargo 早已退出，shim 却挂了十几分钟不返回，worker 一直显示“运行命令”，当天卡了三次。原因是 MSVC `link.exe` 会拉起遥测进程 `VCTIP.EXE`，它在父进程退出后还会挂很久，又在同一个 Job 里，而 `exec::run::wait_tree_empty` 要等 Job 清空才放锁、返回，没有上限。修法：新增 `exec::end_tree(tree, grace)`，根进程退出后最多再等 `LEFTOVER_GRACE`（10 秒），到点 `Tree::end`（Windows 用 `TerminateJobObject`，保留句柄以便确认清空；Unix 结束进程组）后再等树空、放锁，仍满足 LOCKS §4.3“锁持有到树结束”；结束了残留进程时 shim 在 stderr 说明。hub 检查的 `verify.rs::end_tree` 同样改为最多宽限 10 秒（之前会一直等到这条检查的超时）。测试 `exec_tree.rs::exec_what_a_command_leaves_running_is_ended_after_the_grace`、`exec_a_tree_that_ends_within_the_grace_is_left_alone`；实测：隔离环境里经 shim 编译小项目，链接留下的 VCTIP.EXE 在 10 秒后被结束，命令 10.9 秒返回。部署：没有重启 hub，只把 `<home>/shims/0.1.6/cargo.exe` 换成新构建（旧文件移到 `shims/retired/`），之后启动的 cargo 立即生效；hub 自身的检查要等下次换 hub 才用上新逻辑
+
+## 十八、工作组：持续的工作空间，run 是其中一轮
+
+> 2026-10-29 设计见 [tasks/G1.md](tasks/G1.md)，2026-10-30 run `01a18a4a` 做了第一层。
+> 与 §十九 冲突处以 [tasks/LEAD.md](tasks/LEAD.md) §9 为准。
+
+- [x] G1-1：`works` 表与迁移、`Run.work_id`、事件与 `/v1/works*` 接口；同一组同时只有一个未结束的 run。迁移 `0011_works.sql` 建 `works(id, created_at, updated_at, data JSON)`，`runs` 上按 `json_extract(data,'$.work_id')` 建**部分唯一索引**作为库一级的保证；`create_run_for_work` 另在进程内按 `work:<id>` 取现成的 `lock_card` 互斥，查到未结束的 run 就回 409 并点明是哪个 run（id 与标题）。`work_id` 在 `RunCreated` 发出**之前**就随 `Run` 落定，不是事后关联——API 层事后补既不原子、事件也发不对。`Run.work_id` 带 `#[serde(default)]`，旧库的 run 读出来就是未分组，不自动归组，原有流程一字不变。`Store` 的四个新方法都带默认实现，其他实现者不受影响。接口：`POST /v1/works`、`GET /v1/works`、`GET /v1/works/{id}`（work 与它的 run，最新在前）、`POST /v1/works/{id}/runs`（首轮默认配置，后续沿用最近一轮的）。两条集成测试走真实 hub 与真实 SQLite，其中一条真的模拟旧库——剥掉 `work_id`、删掉索引、表和迁移记录再重开——并把迁移 SQL 再执行一遍证明幂等
+  - 留了个隐患并写在 `RunStatus::is_terminal()` 上：索引里的三个终态是 SQL 字面量，和 `is_terminal()` 是**两份名单**。以后加终态只改 Rust 那边，那个工作组就再也开不出新一轮，症状隐蔽（不是报错，是 409 说「还有一个开着的 run」）。而且**已应用的迁移一个字都不能改**（sqlx 校验和，哪怕只加注释），真要改索引得另起 `0012_*.sql`
+
+## 二十、发起时选会话
+
+> 2026-10-30，run `01a18a4a`。人的原话：「我发起 work/chat 的时候，可以选择新的 session 或者已有 session」。
+
+- [x] 后端：`POST /v1/runs` 加 `fresh?: boolean` 与 `restore?: boolean`。**不说 `fresh` 保持原有的自适应**（主导能移动就用它本人带着对话、否则复制），`false` 要求就用本人、过不了检查回 409 而不悄悄退化成复制（人点了「用已有会话」却拿到一个没有对话的新会话是错的），`true` 一律新建。就地运行时主导不换目录，所以 `fresh: false` 不再要求驱动能换目录——`may_take_self` 加 `needs_move` 入参，任务侧照旧要求；否则「显式选用这个会话」会比不选更严格，而且严在恰好不需要移动的情况上。新增 `POST /v1/agents/{key}/chat` 在已有会话上继续对话（只读查 `claim_of` + `held_by` 报 409，**不动 `deliver`**——run 给自己占着的 agent 投递是正常的，在 `deliver` 里加 claim 检查会把整个 hub 的派活打死），`GET /v1/session-candidates?repo=<工作区>` 复用现成的 `workspace_sessions` 列候选。会话可用性是**参考快照**：chat 不 claim，查到发之间状态可变，真正的互斥只有 `claim_agent` 那条原子插入
+  - 关键一条：**归档的会话 `can_use` 为真**、`reason` 为 `archived`，因为它配上 `restore` 是能用的。若按「有 reason 就禁用」来写，`restore` 这条路从界面上永远点不到——复审时返工过一轮才改对。不可用的原因用 `NotReady` 枚举而不是字符串，`can_use()` 和它长在一起，新增变体时编译器会要求说明算不算可用
+- [x] GUI：首页发起 Work / Chat 都能选「新会话」或某个已有会话（`apps/gui/src/lib/sessionChoice.ts`）。没选时 `fresh`/`restore` 一个都不发，请求与从前逐字节相同；禁用只看 `can_use` 不看 `reason`；409 不是异常而是常态（候选是快照），显示 hub 的原话并重新拉一次候选让人改选。已有会话开 Chat 走 `/chat` 不再建新 agent。另一半修掉了批计划时「除已有队友只剩主导同家模型」：`Run.tsx` 原先 `plugins.data?.find(p => p.name === lead?.plugin)?.models` 只取主导那个插件的模型，数据本来是齐的只是被筛掉了；改为列所有已装插件的模型按家族分组，**新 worker 的插件与账号从模型所属插件来，不再跟主导一致**（这是之前 Kiran 起不来的病根：只给 model 不给 plugin，deepseek 被配到 claude 插件上，任务永远 pending），测试里有正向加一条反向断言「不许用主导的账号」。同名模型被多家提供时标签带插件名，未登录或 CLI 未安装的插件其模型仍列出但禁用并写明原因
+
+## 二十二、仓库卫生
+
+> 2026-10-30，run `01a18a4a` 里顺手修掉的。
+
+- [x] `cargo fmt --all -- --check` 在**没人改动过的文件**上失败：本地 rustfmt 升到 1.10.0-stable（2026-10-13）后换行取舍变了，仓库上次全量格式化用的是更旧的版本，九个文件有漂移。这让每条任务的格式检查都挂在与它无关的文件上，噪声盖掉真问题，还逼得我 force 接受了一条本来合格的任务。已用 rustfmt 1.10 统一重排（纯机械，不改行为）
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` 在干净分支上也通不过：仓库一直有五处告警。这是我给 works-table 写验收命令时没核实造成的——**给 worker 设了一道过不去的关**，它照实报告被挡住，我才发现。修掉四处（多余的 `.into_iter()`、嵌套 `if` 合 let-chain、三元组起名 `Reply`、多余的 `mut`），`EventKind` 的 `large_enum_variant` 加带理由的 `#[allow]`（真修法是装箱，见 [TODO.md](TODO.md) 同名一节）。教训：**写验收命令前要先在基线上自己跑一遍**
+
+## 十九、Lead 执行模式与工作区保留
+
+> 2026-10-29 设计见 [tasks/LEAD.md](tasks/LEAD.md)，2026-10-30 run `01a18a4a` 做了 P1。
+> 顺序：G1-1 → P1 + G1-2 → G1-3 / G1-4 / G1-5 → P2 → P3。
+
+- [x] P1 拆分收工与清理：`finish_run` 只释放调度占用并落 `Completed`/`Failed`，不再 `let_go` 主导、不删集成检出；删掉 `checkout_vacated` 那条「移动即清理」的路径（会话搬走不再顺手收掉保留的工作区）。新增 `Orchestrator::cleanup_run(id, force)` 与 `POST /v1/runs/{key}/cleanup`（人的权限），与 `delete_run` 共用 `clean_run`，清理保留 run 记录与分支。边界靠 `owns_checkout`：必须非原地、不是仓库本身、父目录正是 `<worktrees>/<run>`、名字不是 `targets`；`checkout_unused` 再排除任何以它为 home 的 agent 与任何未归档的 cwd，所以用户仓库、agent 的 home 及其子目录、别的活跃会话都碰不到，被新 run 占用的会话不动。worker 的检出在任务被接受后即可清理，但先过归属与占用检查。落地不再自动拆掉保留的工作区
+  - **无条件保留，没有策略字段。** 原计划写的是「保留 / 清理策略（工作组级，默认保留）」，核文档后发现 §9 的表指向的 §10 第 3 条把它列为待定（只写了「倾向工作组级」），所以不在这轮定。语义两句：默认保留，要收就显式收。见 [TODO.md](TODO.md) 同名一节里「要人定」那条
+  - 四条已修好的行为都保住了（见 §九），各有测试在跑：复制出来的主导仍走 `archive_agent_after_turn` + `leaving`，连「归档落在回调注册之前」的竞态复查都照 `claims::put_away` 复刻了一份；**任何 warning 都保守地同时保留检出与 `targets`**——占用记录可能已经消失，「没有 claim」不等于进程已停；`targets` 仍按 `prune_run_targets` 的规则回收，没有改回递归删整份；`Verifying` 期间的防护未动
+  - 行为上有一处人该知道的变化：`delete_run` 现在对**有未提交改动**的 run 一律拒绝（要 `force`），从前只在「未落地」时拒绝。落地之后在检出里新写的东西从前会被直接删掉，这不对——LEAD §8 要求有未保存的结果就保留现场并提示
+  - 十四条现有测试的期望按新语义逐条改过（改期望、没删断言）。新增五条，其中 `session_reuse.rs::a_finished_work_can_start_another_round_and_keeps_the_previous_workspace` 真的走了 works 接口，顺带证明 `Completed` 在那个部分唯一索引的终态名单里
+  - `run_next`（G1-2）的接点：从 `create_run_for_work` 进来，复用已保留的会话与检出、重新记录基线与任务归属；`integration_path` 与 `owns_checkout` / `checkout_unused` 就是「把按 run 的物理树映射改成共享工作区归属」的那几处

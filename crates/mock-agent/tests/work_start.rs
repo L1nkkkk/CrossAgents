@@ -4,7 +4,7 @@
 mod common;
 
 use common::{TestHub, git_repo, native_plugin};
-use crossagents_api_types::EventKind;
+use crossagents_api_types::{AgentStatus, EventKind};
 use serde_json::{Value, json};
 
 fn call(tool: &str, args: Value) -> String {
@@ -35,6 +35,19 @@ async fn propose(t: &TestHub) -> Value {
         "card",
         |e| matches!(&e.kind, EventKind::HumanAsked { item } if item.text == "Add notes"),
     )
+    .await;
+    // The card goes up while the proposer's turn is still running. Answering it then is
+    // refused — rightly: it is answering a person. Waiting for the turn to end makes
+    // starting the Work deterministic, instead of failing under load.
+    w.until("the proposer's turn ended", |e| {
+        matches!(
+            e.kind,
+            EventKind::AgentStatusChanged {
+                to: AgentStatus::Idle,
+                ..
+            }
+        )
+    })
     .await;
     card(t).await
 }
@@ -89,31 +102,6 @@ async fn agent(t: &TestHub, id: &str) -> Value {
         .json()
         .await
         .unwrap()
-}
-
-/// Waits for a lead copied for a run to be archived with its checkout gone: both land after
-/// the turn that closed the run ends, and a restore made in between finds a checkout that is
-/// still being taken away.
-async fn until_left(t: &TestHub, id: &str, dir: &str) -> Value {
-    for _ in 0..300 {
-        let a = agent(t, id).await;
-        if !a["archived_at"].is_null() && !std::path::Path::new(dir).exists() {
-            return a;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!("{id} never left {dir}");
-}
-
-/// Waits for a restored lead's checkout to be made again (`lead_returned`).
-async fn until_checkout(dir: &str) {
-    for _ in 0..300 {
-        if std::path::Path::new(dir).is_dir() {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!("{dir} never came back");
 }
 
 #[tokio::test]
@@ -261,23 +249,17 @@ async fn a_lead_whose_run_ended_starts_another_on_the_repository() {
         .to_owned();
     assert!(old_cwd.contains("integration"), "{old_cwd}");
 
-    // Ended, nothing merged, never landed. The lead is a copy made for the run (lyra cannot
-    // move), so it is archived with the run's checkout as its directory (S1 §3.4); the person
-    // restores it to go on, and gets the checkout back.
+    // Ended, nothing merged, never landed: the copied lead and its checkout stay.
     let ended = finish(&t, &first).await;
     assert_eq!(ended["status"], "completed", "{ended}");
     assert!(ended["landed"].is_null(), "{ended}");
-    let copy = until_left(&t, &old_lead, &old_cwd).await;
+    let copy = agent(&t, &old_lead).await;
+    assert!(
+        copy["archived_at"].is_null(),
+        "finish keeps the lead active"
+    );
+    assert!(std::path::Path::new(&old_cwd).is_dir());
     assert_eq!(copy["cwd"], json!(old_cwd), "{copy}");
-    let resp = t
-        .post(
-            &format!("/v1/agents/{old_lead}/archive"),
-            json!({ "archived": false }),
-        )
-        .await;
-    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
-    until_checkout(&old_cwd).await;
-
     // The lead can propose again, and the card says where the new Work starts.
     let mut w = t.watch().await;
     let proposal = call(
@@ -394,7 +376,7 @@ async fn the_home_page_starts_a_run_for_a_lead_that_ended_one() {
 }
 
 /// S1 §3.2: a proposer whose driver resumes a session elsewhere leads its Work itself, with
-/// this conversation, from the run's checkout; when the run ends it is back in the repository.
+/// this conversation, from the run's checkout; finishing keeps it there.
 #[tokio::test]
 async fn a_proposer_that_can_move_leads_the_work_itself() {
     let repo = git_repo();
@@ -420,13 +402,9 @@ async fn a_proposer_that_can_move_leads_the_work_itself() {
     assert_eq!(lead["home"], json!(lyra.home), "{lead}");
 
     finish(&t, &run).await;
-    let mut home = Value::Null;
-    for _ in 0..100 {
-        home = agent(&t, "lyra").await;
-        if home["cwd"] == home["home"] {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    assert_eq!(home["cwd"], home["home"], "{home}");
+    let retained = agent(&t, "lyra").await;
+    assert_eq!(retained["cwd"], lead["cwd"], "finish keeps its directory");
+    assert_eq!(retained["home"], json!(lyra.home));
+    assert!(retained["archived_at"].is_null());
+    assert!(std::path::Path::new(cwd).is_dir());
 }

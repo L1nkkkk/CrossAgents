@@ -537,7 +537,10 @@ async fn a_cloned_worker_does_not_carry_the_templates_recruit_marks() {
     assert!(clone["config"].get("spawned_by_agent").is_none(), "{clone}");
     assert!(clone["config"].get("spawned_by_run").is_none(), "{clone}");
     let template: Value = t.get("/v1/agents/rex").await.json().await.unwrap();
-    assert_eq!(template["config"]["spawned_by_run"], "an-old-run", "{template}");
+    assert_eq!(
+        template["config"]["spawned_by_run"], "an-old-run",
+        "{template}"
+    );
     assert_eq!(
         template["config"]["spawned_by_agent"],
         json!(boss.id),

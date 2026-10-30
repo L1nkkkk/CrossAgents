@@ -177,3 +177,25 @@ async fn a_conflict_with_main_becomes_a_task_and_lands_after_it() {
         "from both"
     );
 }
+
+#[tokio::test]
+async fn accepting_a_worker_cleans_its_tree_while_the_lead_stays() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    let id = merged_run(&t, &mut w).await;
+    let detail: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
+    let task = &detail["tasks"][0];
+    let worker_tree = Path::new(task["worktree"].as_str().unwrap());
+    for _ in 0..100 {
+        if !worker_tree.exists() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(!worker_tree.exists(), "accepted worker checkout goes");
+    let lead = t.agent(detail["run"]["planner"].as_str().unwrap()).await;
+    assert!(lead.cwd.join("a.txt").exists());
+    assert!(lead.archived_at.is_none());
+    assert_eq!(detail["run"]["status"], "running");
+}

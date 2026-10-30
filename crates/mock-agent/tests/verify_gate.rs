@@ -418,7 +418,7 @@ async fn a_report_for_a_round_that_ended_is_not_written_back() {
     // its verification id, and what it writes when its check finally returns must not land.
     let home = t.restart_home().await;
     let t = TestHub::start_in(home, |_| {}).await;
-    let mut w = t.watch().await;
+    let w = t.watch().await;
     let d = detail(&t, &id).await;
     assert_eq!(task_in(&d, "a")["status"], "passed", "{d}");
     assert_eq!(task_in(&d, "a")["report"]["interrupted"], true, "{d}");

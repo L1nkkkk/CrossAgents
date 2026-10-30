@@ -161,6 +161,8 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
                     ..Default::default()
                 }),
             attachments: None,
+            fresh: None,
+            restore: false,
         };
         let run: Run = client.post("/v1/runs", &req).await?;
         if ctx.json {

@@ -257,16 +257,7 @@ impl Orchestrator {
             return Ok(outcome);
         }
         let outcome = self.merge_run(run, mode, by, message).await?;
-        // Landed after it ended: the checkout landing needed goes again, unless someone the
-        // run still holds lives there (a lead copied for it).
-        let run = self.store.get_run(id).await?;
-        if run.status.is_terminal()
-            && !run.in_place
-            && self.store.list_claims(Some(id)).await?.is_empty()
-            && !self.lead_lives_in_integration(&run).await
-        {
-            self.remove_integration(&run).await;
-        }
+        // Landing changes the branch, not the lifetime of its retained workspace.
         Ok(outcome)
     }
 
@@ -679,7 +670,8 @@ impl Orchestrator {
             .filter(|r| {
                 r.planner == lead.id
                     && r.status.is_terminal()
-                    && !r.in_place
+                    && self.owns_checkout(r, &self.integration_path(r))
+                    && !lead.home().starts_with(self.integration_path(r))
                     && lead.cwd == self.integration_path(r)
             })
             .collect())
@@ -694,8 +686,18 @@ impl Orchestrator {
     /// so a run that other work still uses is not torn down from here.
     pub async fn lead_left(&self, lead: &Agent) -> Result<(), CoreError> {
         for run in self.runs_lived_in(lead).await? {
+            let _guard = self.lock(run.id).await;
             let dir = self.integration_path(&run);
             if !dir.exists() {
+                continue;
+            }
+            if self.store.claim_of(lead.id).await?.is_some()
+                || self.store.list_agents().await?.iter().any(|a| {
+                    a.id != lead.id
+                        && (a.home().starts_with(&dir)
+                            || (a.cwd.starts_with(&dir) && a.archived_at.is_none()))
+                })
+            {
                 continue;
             }
             let after = self
@@ -716,6 +718,7 @@ impl Orchestrator {
     /// has it now (a pull request may never have merged; a merge may have been reverted).
     pub async fn lead_returned(&self, lead: &Agent) -> Result<(), CoreError> {
         for run in self.runs_lived_in(lead).await? {
+            let _guard = self.lock(run.id).await;
             let dir = self.integration_path(&run);
             if dir.exists() {
                 continue;

@@ -46,7 +46,7 @@ pub use event::{
 };
 pub use handoff::{Handoff, HandoffKind, HandoffOutcome};
 pub use human::{HumanAction, HumanItem, HumanItemKind, HumanItemStatus};
-pub use ids::{AgentId, HandoffId, MessageId, RunId, SessionId, TaskId};
+pub use ids::{AgentId, HandoffId, MessageId, RunId, SessionId, TaskId, WorkId};
 pub use lesson::{
     Evidence, ISSUE_PREFIX, IssueRef, Lesson, LessonOutcome, LessonStatus, Project, ProjectPath,
     Triage, TriageRecord, TriageStep,
@@ -54,7 +54,7 @@ pub use lesson::{
 pub use model::{
     Agent, AgentProfile, AgentStatus, CONTEXT_LOST, CheckResult, ChecksState, ContinuationState,
     LandMode, Landing, NameSource, PlannedTask, Role, Run, RunConfig, RunStatus, Scope, Task,
-    TaskReport, TaskSpec, validate_agent_name, validate_slug,
+    TaskReport, TaskSpec, Work, validate_agent_name, validate_slug,
 };
 pub use note::{EXTERNAL_PLUGIN, Note, NoteScope};
 pub use notify::{Reminder, Watch, WatchOn, WatchTarget};
