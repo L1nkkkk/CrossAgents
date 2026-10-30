@@ -17,6 +17,9 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "GET", path: /^\/v1\/info$/, level: "read" },
   { method: "GET", path: /^\/v1\/agents$/, level: "read" },
   { method: "POST", path: /^\/v1\/agents$/, level: "write" },
+  // `?repo=` rides along; `route()` drops it before matching.
+  { method: "GET", path: /^\/v1\/session-candidates$/, level: "read" },
+  { method: "POST", path: /^\/v1\/agents\/[^/]+\/chat$/, level: "write" },
   { method: "DELETE", path: /^\/v1\/agents\/[^/]+$/, level: "write" },
   {
     method: "POST",

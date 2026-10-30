@@ -5,7 +5,20 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Icon } from "./components";
 
-export type MenuItem = { kind: "item"; key: string; label: ReactNode; sub?: ReactNode; icon?: ReactNode; on?: boolean; onPick: () => void } | { kind: "header"; key: string; label: ReactNode };
+export type MenuItem =
+  | {
+      kind: "item";
+      key: string;
+      label: ReactNode;
+      sub?: ReactNode;
+      /** A sub-line of sentences reads left to right; model ids keep their tail by default. */
+      subDir?: "ltr";
+      icon?: ReactNode;
+      on?: boolean;
+      disabled?: boolean;
+      onPick: () => void;
+    }
+  | { kind: "header"; key: string; label: ReactNode };
 
 export function ChipMenu({ icon, label, title, items, align = "left", up }: { icon?: ReactNode; label: ReactNode; title?: string; items: MenuItem[]; align?: "left" | "right"; up?: boolean }) {
   const [open, setOpen] = useState(false);
@@ -21,11 +34,21 @@ export function ChipMenu({ icon, label, title, items, align = "left", up }: { ic
   }, [open]);
 
   const show = () => {
-    setCursor(Math.max(0, picks.findIndex((i) => i.on)));
+    const on = picks.findIndex((i) => i.on && !i.disabled);
+    setCursor(on >= 0 ? on : Math.max(0, picks.findIndex((i) => !i.disabled)));
     setOpen(true);
   };
+  const step = (from: number, delta: number) => {
+    for (let n = 1; n <= picks.length; n++) {
+      const i = (from + delta * n + picks.length * 2) % picks.length;
+      if (!picks[i]?.disabled) return i;
+    }
+    return from;
+  };
   const pick = (i: number) => {
-    picks[i]?.onPick();
+    const item = picks[i];
+    if (!item || item.disabled) return;
+    item.onPick();
     setOpen(false);
   };
 
@@ -42,8 +65,8 @@ export function ChipMenu({ icon, label, title, items, align = "left", up }: { ic
           return;
         }
         if (e.key === "Escape") setOpen(false);
-        else if (e.key === "ArrowDown") setCursor((c) => (c + 1) % picks.length);
-        else if (e.key === "ArrowUp") setCursor((c) => (c - 1 + picks.length) % picks.length);
+        else if (e.key === "ArrowDown") setCursor((c) => step(c, 1));
+        else if (e.key === "ArrowUp") setCursor((c) => step(c, -1));
         else if (e.key === "Enter") pick(cursor);
         else return;
         e.preventDefault();
@@ -65,14 +88,16 @@ export function ChipMenu({ icon, label, title, items, align = "left", up }: { ic
                 key={item.key}
                 role="option"
                 aria-selected={!!item.on}
-                className={`menu-item ${i === cursor ? "cursor" : ""}`}
-                onMouseEnter={() => setCursor(i)}
+                aria-disabled={item.disabled || undefined}
+                disabled={item.disabled}
+                className={`menu-item ${i === cursor ? "cursor" : ""} ${item.disabled ? "disabled" : ""}`}
+                onMouseEnter={() => !item.disabled && setCursor(i)}
                 onClick={() => pick(i)}
               >
                 {item.icon && <span className="menu-icon">{item.icon}</span>}
                 <span className="menu-text">
                   <span className="menu-label">{item.label}</span>
-                  {item.sub && <span className="menu-sub">{item.sub}</span>}
+                  {item.sub && <span className={`menu-sub ${item.subDir === "ltr" ? "ltr" : ""}`}>{item.sub}</span>}
                 </span>
                 {item.on && <Icon name="check" size={14} />}
               </button>
