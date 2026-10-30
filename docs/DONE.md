@@ -255,3 +255,11 @@ B 删除 run：
   - 行为上有一处人该知道的变化：`delete_run` 现在对**有未提交改动**的 run 一律拒绝（要 `force`），从前只在「未落地」时拒绝。落地之后在检出里新写的东西从前会被直接删掉，这不对——LEAD §8 要求有未保存的结果就保留现场并提示
   - 十四条现有测试的期望按新语义逐条改过（改期望、没删断言）。新增五条，其中 `session_reuse.rs::a_finished_work_can_start_another_round_and_keeps_the_previous_workspace` 真的走了 works 接口，顺带证明 `Completed` 在那个部分唯一索引的终态名单里
   - `run_next`（G1-2）的接点：从 `create_run_for_work` 进来，复用已保留的会话与检出、重新记录基线与任务归属；`integration_path` 与 `owns_checkout` / `checkout_unused` 就是「把按 run 的物理树映射改成共享工作区归属」的那几处
+
+## 二十三、发布
+
+> 2026-10-30。
+
+- [x] **0.1.17 发出去的安装包里没有 hub**（同日修，`614af13` + 0.1.18 重发）：`build.extraResources` 从 `../../target/release/crossagents.exe` 把 hub 打进安装包，而那次 `cargo build --release` 跑在设了 `CARGO_TARGET_DIR` 的 shell 里（run 的构建目录），产物落到别处，源文件根本不存在；**electron-builder 不因缺少 `extraResources` 而失败**，照样打包。后果：更新到 0.1.17 的 GUI 没有新 hub 可装进 `<home>/bin/<版本>/`，只能继续用旧 hub（界面显示「界面 v0.1.17 · hub v0.1.16」）；全新安装则完全没有 hub。修法：`apps/gui/scripts/check-version.mjs` 除了比对两处版本号，还要求那个二进制存在、且 `--version` 报的就是本版本，失败时说明该怎么办与 `CARGO_TARGET_DIR` 这个坑。0.1.17 的安装包、blockmap 与 `latest.yml` 已从发布仓库删除并写明原因，保留其正常的独立 hub 二进制
+  - 发布流程里同时暴露的两处，都是**发完之后逐项核验**才发现的（命令本身全是退出 0）：electron-builder 的并发上传**建了两个同 tag 的 release**，安装包进了一个、手动补传的 hub 进了另一个，合并后删掉重复的那个，并重新标 Latest（Latest 随被删的那个一起没了）；手动 `gh release upload` 时文件名里的空格被换成点（`CrossAgents.Setup.0.1.18.exe`），而 `latest.yml` 指向连字符的名字，自动更新会 404，用 `PATCH .../releases/assets/<id>` 改名而不必重传 119MB
+  - 教训：**打包和发布都要先在干净的工作树里做**（主检出常有未提交改动，会被编进二进制），而且那棵树里要显式清掉 `CARGO_TARGET_DIR`；**发完要逐项核对资产名、大小与 `latest.yml` 的一致性**，退出码为 0 不等于发对了
