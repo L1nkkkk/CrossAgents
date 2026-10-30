@@ -297,7 +297,7 @@ impl Orchestrator {
     /// Lets go of everything `run` holds.
     pub(crate) async fn let_go_run(&self, run: RunId) -> (Vec<LetGo>, Vec<String>) {
         let claims = self.store.list_claims(Some(run)).await.unwrap_or_default();
-        self.let_go_each(run, claims.into_iter()).await
+        self.let_go_each(run, claims).await
     }
 
     async fn let_go_each(
