@@ -161,3 +161,19 @@ export function layoutGraph(graph: Pick<CommitGraph, "refs" | "commits">): Graph
   const used = rows.reduce((m, r) => Math.max(m, r.lane + 1, ...r.top.map((e) => Math.max(e.from, e.to) + 1), ...r.bottom.map((e) => Math.max(e.from, e.to) + 1)), 0);
   return { rows, lanes: Math.min(used, width), colors };
 }
+
+/**
+ * Which rows a scrolled list of fixed-height rows is showing: `[start, end)`.
+ *
+ * `height` must be the height of something the result cannot change. The legend above the
+ * list names the branches on the rows in this window, so measuring the list itself would
+ * feed back: one more branch makes the legend a line taller, the list a line shorter, the
+ * window a row smaller, the branch leaves again. Measuring the panel that holds both is
+ * stable, at the cost of a row or two of over-scan, which only adds a branch to the legend
+ * slightly before it scrolls in.
+ */
+export function windowOf(scrollTop: number, height: number, row: number): { start: number; end: number } {
+  if (!(row > 0)) return { start: 0, end: 0 };
+  const top = Math.max(0, scrollTop);
+  return { start: Math.floor(top / row), end: Math.ceil((top + Math.max(0, height)) / row) };
+}

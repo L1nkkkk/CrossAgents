@@ -11,7 +11,7 @@ import { ChangeStat, DiffView } from "./diffview";
 import { openFile } from "./FileViewer";
 import { useHubData, type HubEvent } from "./hub";
 import { parseDiff } from "./lib/diff";
-import { layoutGraph, type GraphEdge, type GraphRow } from "./lib/graphlayout";
+import { layoutGraph, windowOf, type GraphEdge, type GraphRow } from "./lib/graphlayout";
 import "./commitgraph.css";
 
 /** Whose commits: a run's branches, or a session's checkout. */
@@ -38,14 +38,26 @@ export function CommitGraphView({ scope, limit = 200 }: { scope: GraphScope; lim
   const layout = useMemo(() => (graph.data ? layoutGraph(graph.data) : undefined), [graph.data]);
   const [picked, setPicked] = useState<string>();
   const listRef = useRef<HTMLDivElement>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState({ start: 0, end: 0 });
+  // Which rows the legend describes. Measured against the whole panel, never against the
+  // list: the legend sits above the list and grows a line when a scrolled-in branch joins it,
+  // which shortens the list. Measuring the list would then show fewer rows, drop the branch,
+  // shrink the legend, lengthen the list — back and forth forever. It showed up as the panel
+  // shaking, full screen only, where the extra height put a row with refs right on the edge.
+  // The panel's own height comes from the layout, so the legend cannot move it.
   useEffect(() => {
     const el = listRef.current;
-    if (!el) return;
-    const update = () => setVisible({ start: Math.floor(el.scrollTop / ROW), end: Math.ceil((el.scrollTop + el.clientHeight) / ROW) });
+    const box = boxRef.current;
+    if (!el || !box) return;
+    const update = () => {
+      const next = windowOf(el.scrollTop, box.clientHeight, ROW);
+      // Same window, same legend: a new object here would re-render for nothing.
+      setVisible((now) => (now.start === next.start && now.end === next.end ? now : next));
+    };
     update();
     const observer = new ResizeObserver(update);
-    observer.observe(el);
+    observer.observe(box);
     el.addEventListener("scroll", update);
     return () => { observer.disconnect(); el.removeEventListener("scroll", update); };
   }, [layout, picked]);
@@ -56,7 +68,7 @@ export function CommitGraphView({ scope, limit = 200 }: { scope: GraphScope; lim
   const width = x(Math.max(layout.lanes, 1) - 1) + PAD;
 
   return (
-    <div className="cgraph">
+    <div className="cgraph" ref={boxRef}>
       <Legend refs={graph.data.refs} colors={layout.colors} rows={layout.rows.slice(visible.start, visible.end)} base={graph.data.base_branch} />
       <div className="cgraph-list" ref={listRef} role="listbox" aria-label="提交">
         {layout.rows.map((row) => (
