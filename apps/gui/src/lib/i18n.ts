@@ -166,7 +166,6 @@ const zhCN = {
   "session.hint.archived": "使用前会先恢复",
   "session.willRestore": "会先恢复",
   "session.loadFailed": "读不到已有会话：{error}",
-  "session.noAttachments": "选已有会话时不能带附件：继续对话的接口只收文字。请去掉附件，或改用新会话。",
 
   "plan.newWorkerFamily": "新建 · {family}",
   "worker.notLoggedIn": "未登录",

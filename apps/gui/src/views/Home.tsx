@@ -150,14 +150,19 @@ export function HomeView() {
   // the first planner works in, since a run starts there without picking a workspace chip.
   const baseLeadAgent = picked?.kind === "agent" ? planners.find((a) => a.name === picked.name) : planners[0];
   const sessionRepo = cwd ?? (mode === "run" && picked?.kind !== "model" ? baseLeadAgent?.cwd : undefined);
+  // A chat with no workspace carries on one of the standalone chats, each in its own directory.
+  const chatsOnly = !sessionRepo && mode === "chat";
   const sessions = useHubData(
-    () => (sessionRepo ? api.sessionCandidates(sessionRepo).then((r) => r.sessions) : Promise.resolve([] as SessionCandidate[])),
-    [sessionRepo],
+    () =>
+      sessionRepo || chatsOnly
+        ? api.sessionCandidates(sessionRepo).then((r) => r.sessions)
+        : Promise.resolve([] as SessionCandidate[]),
+    [sessionRepo, chatsOnly],
     (e) => e.type.startsWith("agent.") || e.type === "run.status_changed" || e.type === "task.handed_off",
   );
   // The session picked to carry this start; absent: a new one, as before.
   const [sessionId, setSessionId] = useState<string>();
-  useEffect(() => setSessionId(undefined), [sessionRepo]);
+  useEffect(() => setSessionId(undefined), [sessionRepo, chatsOnly]);
   useEffect(() => {
     if (sessionId && sessions.data && !sessions.data.some((s) => s.agent.id === sessionId)) setSessionId(undefined);
   }, [sessions.data, sessionId]);
@@ -273,11 +278,7 @@ export function HomeView() {
       const typed = request.trim();
       // An existing session keeps its own model and login: just carry the conversation on.
       if (chosenSession) {
-        if (files.held.length) {
-          setError(t("session.noAttachments"));
-          return;
-        }
-        await api.chat(chosenSession.agent.id, chatBody(typed, chosenSession));
+        await api.chat(chosenSession.agent.id, chatBody(typed, chosenSession, uploads()));
         files.clear();
         navigate("s", chosenSession.agent.id);
         return;
@@ -550,7 +551,7 @@ export function HomeView() {
               items={wsItems}
               up
             />
-            {(sessionRepo || chosenSession) && (
+            {(sessionRepo || chatsOnly || chosenSession) && (
               <ChipMenu
                 icon={chosenSession ? <Avatar agent={chosenSession.agent} size={16} /> : <Icon name="chat" size={14} />}
                 label={chosenSession ? `${displayName(chosenSession.agent)}${sessionUse?.restore ? ` · ${t("session.willRestore")}` : ""}` : t("home.newSession")}

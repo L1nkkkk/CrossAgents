@@ -230,3 +230,50 @@ async fn files_given_with_a_run_reach_its_lead() {
         .await;
     assert_eq!(resp.status(), 400);
 }
+
+/// A standalone chat is carried on from the start page: it is offered when no workspace is
+/// picked (each chat lives in its own `<home>/chats/<id>`, so no workspace lists it), and the
+/// message that carries it on takes files like any other.
+#[tokio::test]
+async fn a_standalone_chat_is_offered_and_carried_on_with_files() {
+    let t = TestHub::start().await;
+    // No cwd: a chat of its own.
+    let resp = t
+        .post(
+            "/v1/agents",
+            json!({ "name": "Cleo", "plugin": "mock", "model": "haiku", "role": "worker", "cwd": "" }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let chat: Value = resp.json().await.unwrap();
+    // One that works in a workspace is not a standalone chat.
+    t.add_agent("Wes", Some("haiku")).await;
+
+    let listed: Value = t.get("/v1/session-candidates").await.json().await.unwrap();
+    let names: Vec<&str> = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["agent"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Cleo"], "{listed}");
+    assert_eq!(listed["sessions"][0]["reason"], Value::Null, "{listed}");
+
+    let mut w = t.watch().await;
+    let resp = t
+        .post(
+            &format!("/v1/agents/{}/chat", chat["id"].as_str().unwrap()),
+            json!({
+                "text": "about this file",
+                "attachments": [{ "name": "notes.md", "mime": "text/markdown", "data": "bm90ZXM=" }],
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    w.until("turn completed", turn_completed).await;
+    let output = w.output();
+    assert!(
+        output.contains("<file name=\"notes.md\">\nnotes\n</file>"),
+        "{output}"
+    );
+}

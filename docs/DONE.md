@@ -224,6 +224,8 @@ B 删除 run：
 - [x] 后端：`POST /v1/runs` 加 `fresh?: boolean` 与 `restore?: boolean`。**不说 `fresh` 保持原有的自适应**（主导能移动就用它本人带着对话、否则复制），`false` 要求就用本人、过不了检查回 409 而不悄悄退化成复制（人点了「用已有会话」却拿到一个没有对话的新会话是错的），`true` 一律新建。就地运行时主导不换目录，所以 `fresh: false` 不再要求驱动能换目录——`may_take_self` 加 `needs_move` 入参，任务侧照旧要求；否则「显式选用这个会话」会比不选更严格，而且严在恰好不需要移动的情况上。新增 `POST /v1/agents/{key}/chat` 在已有会话上继续对话（只读查 `claim_of` + `held_by` 报 409，**不动 `deliver`**——run 给自己占着的 agent 投递是正常的，在 `deliver` 里加 claim 检查会把整个 hub 的派活打死），`GET /v1/session-candidates?repo=<工作区>` 复用现成的 `workspace_sessions` 列候选。会话可用性是**参考快照**：chat 不 claim，查到发之间状态可变，真正的互斥只有 `claim_agent` 那条原子插入
   - 关键一条：**归档的会话 `can_use` 为真**、`reason` 为 `archived`，因为它配上 `restore` 是能用的。若按「有 reason 就禁用」来写，`restore` 这条路从界面上永远点不到——复审时返工过一轮才改对。不可用的原因用 `NotReady` 枚举而不是字符串，`can_use()` 和它长在一起，新增变体时编译器会要求说明算不算可用
 - [x] GUI：首页发起 Work / Chat 都能选「新会话」或某个已有会话（`apps/gui/src/lib/sessionChoice.ts`）。没选时 `fresh`/`restore` 一个都不发，请求与从前逐字节相同；禁用只看 `can_use` 不看 `reason`；409 不是异常而是常态（候选是快照），显示 hub 的原话并重新拉一次候选让人改选。已有会话开 Chat 走 `/chat` 不再建新 agent。另一半修掉了批计划时「除已有队友只剩主导同家模型」：`Run.tsx` 原先 `plugins.data?.find(p => p.name === lead?.plugin)?.models` 只取主导那个插件的模型，数据本来是齐的只是被筛掉了；改为列所有已装插件的模型按家族分组，**新 worker 的插件与账号从模型所属插件来，不再跟主导一致**（这是之前 Kiran 起不来的病根：只给 model 不给 plugin，deepseek 被配到 claude 插件上，任务永远 pending），测试里有正向加一条反向断言「不许用主导的账号」。同名模型被多家提供时标签带插件名，未登录或 CLI 未安装的插件其模型仍列出但禁用并写明原因
+- [x] 已有会话开 Chat 也能带附件：`StartChatRequest` 加可选 `attachments`，`/chat` 与 `/messages` 走同一个 `store_uploads`（先按 agent 能力检查再存）；只带文件不改会话主题。界面上去掉了「选已有会话时不能带附件」那句拒绝
+- [x] Chat 没选工作区时列得出候选：`GET /v1/session-candidates` 的 `repo` 可省，省了就列独立聊天（家在 `<home>/chats/` 下的会话，按创建时间新的在前）；聊天不搬家，挡住它的只有被 run 占着或已归档。测试 `attachments::a_standalone_chat_is_offered_and_carried_on_with_files`
 
 ## 二十一、自举暴露的 hub 缺陷
 

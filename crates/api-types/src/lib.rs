@@ -629,6 +629,10 @@ pub struct StartChatRequest {
     pub text: String,
     #[serde(default)]
     pub restore: bool,
+    /// Files sent with the message, as [`SendMessageRequest::attachments`].
+    #[serde(default)]
+    #[ts(optional)]
+    pub attachments: Option<Vec<AttachmentUpload>>,
 }
 
 /// `POST /v1/repos/init`: put a directory under version control (`git init` and a first

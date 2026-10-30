@@ -33,6 +33,9 @@ test("an archived session also asks the hub to restore it", () => {
   // Chat's own body: restore is always stated there.
   assert.deepEqual(chatBody("接着改", archived), { text: "接着改", restore: true });
   assert.deepEqual(chatBody("开始", candidate({})), { text: "开始", restore: false });
+  // Files ride along with an existing session too; without them the body is unchanged.
+  const shot = { name: "a.png", mime: "image/png", data: "AAAA" };
+  assert.deepEqual(chatBody("看图", candidate({}), [shot]), { text: "看图", restore: false, attachments: [shot] });
 });
 
 test("a new chat is made as the same agent request as before", () => {

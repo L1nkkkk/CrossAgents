@@ -5,6 +5,7 @@
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
 import type { CreateRunRequest } from "@bindings/CreateRunRequest";
 import type { SessionCandidate } from "@bindings/SessionCandidate";
+import type { AttachmentUpload } from "@bindings/AttachmentUpload";
 import type { StartChatRequest } from "@bindings/StartChatRequest";
 import type { Key } from "./i18n";
 import { chatTitle } from "./models.ts";
@@ -82,8 +83,10 @@ export function runSessionFields(session: SessionCandidate | undefined): RunSess
 }
 
 /** The body of `POST /v1/agents/{key}/chat`; an archived session needs `restore: true`. */
-export function chatBody(text: string, session: SessionCandidate | undefined): StartChatRequest {
-  return { text, restore: session?.reason === "archived" };
+export function chatBody(text: string, session: SessionCandidate | undefined, attachments: AttachmentUpload[] = []): StartChatRequest {
+  const body: StartChatRequest = { text, restore: session?.reason === "archived" };
+  // Without files the body is as before, byte for byte.
+  return attachments.length ? { ...body, attachments } : body;
 }
 
 /** A model to start a brand-new chat on, and which login of its vendor pays for it. */

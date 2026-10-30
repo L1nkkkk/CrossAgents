@@ -610,6 +610,37 @@ impl Orchestrator {
         Ok(result)
     }
 
+    /// The standalone chats, each in its own directory under `chats`, newest first: where
+    /// "carry on that chat" is picked from when no workspace is chosen. A chat never moves,
+    /// so only a run holding it or its archive stands in the way.
+    pub async fn chat_candidates(&self, chats: &Path) -> Result<Vec<SessionCandidate>, CoreError> {
+        let mut result = Vec::new();
+        for agent in self.store.list_agents().await? {
+            if !agent.home().starts_with(chats) {
+                continue;
+            }
+            let claim = self.store.claim_of(agent.id).await?;
+            let busy_with = match &claim {
+                Some(claim) => Some(self.held_by(&agent, claim).await),
+                None => None,
+            };
+            let (state, reason) = match (&busy_with, agent.archived_at) {
+                (Some(_), _) => ("busy", Some(NotReady::Busy)),
+                (None, Some(_)) => ("archived", Some(NotReady::Archived)),
+                (None, None) => ("idle", None),
+            };
+            result.push(SessionCandidate {
+                agent,
+                state: state.to_owned(),
+                busy_with,
+                last_execution: None,
+                reason,
+            });
+        }
+        result.sort_by_key(|c| std::cmp::Reverse(c.agent.created_at));
+        Ok(result)
+    }
+
     /// The run's lead, working in `dir` (docs/tasks/S1.md §3.2): `planner` itself, held for
     /// the run and moved in with its conversation, when its driver resumes a session in
     /// another directory (or it never started one). Else a copy, which starts without that

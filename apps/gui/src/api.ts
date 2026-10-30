@@ -212,7 +212,9 @@ export const api = {
   createAgent: (req: CreateAgentRequest) => request<Agent>("POST", "/v1/agents", req),
   /** The workspace's sessions, most recently used first; availability is advisory (the hub
    * excludes what it knows is busy, archived or unable to move). */
-  sessionCandidates: (repo: string) => request<ListSessionCandidatesResponse>("GET", `/v1/session-candidates?repo=${enc(repo)}`),
+  /** A workspace's sessions; without `repo`, the standalone chats. */
+  sessionCandidates: (repo?: string) =>
+    request<ListSessionCandidatesResponse>("GET", `/v1/session-candidates${repo ? `?repo=${enc(repo)}` : ""}`),
   /** Continues an existing conversation; `restore` brings an archived session back first. */
   chat: (key: string, req: StartChatRequest) => request<SendMessageResponse>("POST", `/v1/agents/${enc(key)}/chat`, req),
   sendMessage: (key: string, req: SendMessageRequest) =>

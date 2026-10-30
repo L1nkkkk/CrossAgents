@@ -391,17 +391,30 @@ async fn list_agents(State(state): State<Arc<AppState>>) -> ApiResult<Json<ListA
 
 #[derive(Deserialize)]
 struct SessionCandidatesQuery {
-    repo: String,
+    /// The workspace; absent: the standalone chats, each in its own `<home>/chats/<id>`.
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 async fn session_candidates(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SessionCandidatesQuery>,
 ) -> ApiResult<Json<crossagents_api_types::ListSessionCandidatesResponse>> {
-    let sessions = state
-        .orchestrator
-        .session_candidates(std::path::Path::new(&query.repo))
-        .await?
+    let candidates = match query.repo.as_deref().filter(|r| !r.is_empty()) {
+        Some(repo) => {
+            state
+                .orchestrator
+                .session_candidates(std::path::Path::new(repo))
+                .await?
+        }
+        None => {
+            state
+                .orchestrator
+                .chat_candidates(&state.home.join("chats"))
+                .await?
+        }
+    };
+    let sessions = candidates
         .into_iter()
         .map(|candidate| crossagents_api_types::SessionCandidate {
             can_use: candidate.can_use(),
@@ -424,7 +437,8 @@ async fn start_chat(
     Path(key): Path<String>,
     Json(req): Json<crossagents_api_types::StartChatRequest>,
 ) -> ApiResult<(StatusCode, Json<SendMessageResponse>)> {
-    if req.text.trim().is_empty() {
+    let uploads = req.attachments.unwrap_or_default();
+    if req.text.trim().is_empty() && uploads.is_empty() {
         return Err(AppError::bad_request("text must not be empty"));
     }
     let key = AgentKey::parse(&key);
@@ -441,18 +455,23 @@ async fn start_chat(
         state.runtime.archive(&key, false).await?;
     }
     let text = req.text;
-    let (message_id, queued) = state
-        .runtime
-        .send_envelope(&key, Envelope::new(MessageSource::Human, text.clone()))
-        .await?;
-    let topic = text
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .chars()
-        .take(60)
-        .collect();
-    state.runtime.set_topic(&key, Some(topic)).await?;
+    let attachments = store_uploads(&state, &key, uploads).await?;
+    let envelope = Envelope {
+        attachments,
+        ..Envelope::new(MessageSource::Human, text.clone())
+    };
+    let (message_id, queued) = state.runtime.send_envelope(&key, envelope).await?;
+    // Files alone leave the topic as it was.
+    if !text.trim().is_empty() {
+        let topic = text
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(60)
+            .collect();
+        state.runtime.set_topic(&key, Some(topic)).await?;
+    }
     Ok((
         StatusCode::ACCEPTED,
         Json(SendMessageResponse { message_id, queued }),
