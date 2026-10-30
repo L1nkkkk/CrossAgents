@@ -70,6 +70,15 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "GET", path: /^\/v1\/(runs|agents)\/[^/]+\/commits\/[^/]+\/diff$/, level: "read" },
 ];
 
+/** How long the main process waits for an answer before giving up on the hub. */
+export const REQUEST_TIMEOUT_MS = 30_000;
+/** Compacting answers when the summary is written: minutes for a long history. */
+export const COMPACT_TIMEOUT_MS = 15 * 60_000;
+
+export function timeoutFor(method: string, path: string): number {
+  return method === "POST" && /^\/v1\/agents\/[^/]+\/compact$/.test(route(path)) ? COMPACT_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+}
+
 /** The path without its query string: `/v1/notes?scope=run` matches `/v1/notes`. */
 export function route(path: string): string {
   const i = path.indexOf("?");
