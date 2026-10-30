@@ -703,3 +703,25 @@ async fn a_forced_accept_reports_the_commit_it_merged() {
     );
     assert_eq!(f.ws.merged().await, vec!["crossagents/run-a".to_owned()]);
 }
+
+#[tokio::test]
+async fn deleting_after_release_failure_keeps_checkout_and_targets() {
+    let f = Fixture::new(&[]).await;
+    let dir = f.task().await.worktree.unwrap();
+    let target = f.worktrees.join(short(&f.run.id)).join("targets/a");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("cache"), "compiled").unwrap();
+    f.host.will_not_go_home.store(true, Ordering::SeqCst);
+    let mut run = f.run().await;
+    run.status = RunStatus::Cancelled;
+    f.store.update_run(&run).await.unwrap();
+    let done = f
+        .orchestrator
+        .delete_run(run.id, crate::DeleteRun::default())
+        .await
+        .unwrap();
+    assert!(!done.warnings.is_empty());
+    assert!(f.ws.removed().await.is_empty());
+    assert!(dir.exists());
+    assert!(target.join("cache").exists());
+}

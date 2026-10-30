@@ -157,6 +157,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{key}/land", post(land_run))
         .route("/v1/runs/{key}/policy", post(update_run_policy))
         .route("/v1/runs/{key}/finish", post(finish_run))
+        .route("/v1/runs/{key}/cleanup", post(cleanup_run))
         .route("/v1/runs/{key}/diff", get(run_diff))
         .route("/v1/runs/{key}/trace", get(run_trace))
         .route("/v1/runs/{key}/tasks/{task}/diff", get(task_diff))
@@ -2055,6 +2056,16 @@ async fn review_task(
 async fn init_repo(Json(req): Json<InitRepoRequest>) -> ApiResult<Json<InitRepoRequest>> {
     GitWorkspaces.init(std::path::Path::new(&req.path)).await?;
     Ok(Json(req))
+}
+
+/// Explicitly cleans a finished run's managed workspaces while retaining its history.
+async fn cleanup_run(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Query(q): Query<DeleteRunQuery>,
+) -> ApiResult<Json<crossagents_orchestrator::DeletedRun>> {
+    let id = resolve_run(&state, &key).await?;
+    Ok(Json(state.orchestrator.cleanup_run(id, q.force).await?))
 }
 
 /// The person closes a run; open tasks are cancelled.
