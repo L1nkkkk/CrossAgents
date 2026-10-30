@@ -38,23 +38,17 @@ async fn agent(t: &TestHub, id: &str) -> Value {
         .unwrap()
 }
 
-/// Waits until `name` works in `dir` again (a lead the run let go of goes home once its turn
-/// is over).
-async fn until_home(t: &TestHub, name: &str, dir: &Path) {
-    for _ in 0..100 {
-        let cwd = agent(t, name).await["cwd"].as_str().unwrap().to_owned();
-        if std::fs::canonicalize(&cwd).ok() == std::fs::canonicalize(dir).ok() {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    panic!("{name} never went back to {}", dir.display());
-}
-
-/// Waits for a lead copied for a run to leave (S1 §3.4): archived once the turn that closed
-/// the run has ended, the run's checkout gone with it (`lead_left`). Both land after the
-/// run's status changes, so a test that wants them waits rather than reads straight away.
-async fn until_left(t: &TestHub, id: &str, dir: &Path) {
+/// Finishing retains the lead and tree; explicit archival removes the managed checkout.
+async fn archive_and_wait(t: &TestHub, id: &str, dir: &Path) {
+    assert!(agent(t, id).await["archived_at"].is_null());
+    assert!(dir.exists(), "finish retains the checkout");
+    let resp = t
+        .post(
+            &format!("/v1/agents/{id}/archive"),
+            json!({ "archived": true }),
+        )
+        .await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     for _ in 0..300 {
         let a = agent(t, id).await;
         if !a["archived_at"].is_null() && !dir.exists() {
@@ -138,9 +132,13 @@ async fn the_lead_changes_the_run_branch_and_it_lands() {
         .await;
 
     // boss led it itself, in the run's checkout rather than the person's (the change is on
-    // the run branch only); the run let go of it, so it is back in the repository.
+    // the run branch only); finishing keeps it there.
     assert_eq!(run["planner"], agent(&t, "boss").await["id"], "{run}");
-    until_home(&t, "boss", repo.path()).await;
+    let retained = agent(&t, "boss").await;
+    assert!(retained["archived_at"].is_null());
+    let checkout = std::path::PathBuf::from(retained["cwd"].as_str().unwrap());
+    assert!(checkout.join("notes.txt").exists());
+    assert_ne!(checkout, repo.path());
     // With no worker given, tasks would go to copies of the lead: no teammates listed.
     assert_eq!(run["config"]["team"], json!([]), "{run}");
     assert!(!repo.path().join("notes.txt").exists());
@@ -339,13 +337,12 @@ async fn archiving_the_lead_clears_its_checkout_and_restoring_brings_it_back() {
         .await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
 
-    // The lead is a copy: archived once the turn that closed the run has ended (S1 §3.4),
-    // keeping the checkout's path as its directory, while the checkout itself went.
+    // The retained copy stays after finish. Explicit archival removes its checkout.
     let lead = agent(&t, landed["planner"].as_str().unwrap()).await;
     let lead_id = lead["id"].as_str().unwrap().to_owned();
     let dir = std::path::PathBuf::from(lead["cwd"].as_str().unwrap());
     let branch = landed["branch"].as_str().unwrap().to_owned();
-    until_left(&t, &lead_id, &dir).await;
+    archive_and_wait(&t, &lead_id, &dir).await;
     // Whether the branch went with the checkout is `lead_left`'s call, and it races the
     // landing: a landed run's branch goes, one read before the landing may stay. Drop it
     // here so the restore is the same either way: built from the base.
@@ -446,8 +443,8 @@ async fn restoring_a_lead_whose_branch_is_gone_says_the_code_did_not_come_back()
     let lead_id = lead["id"].as_str().unwrap().to_owned();
     let dir = std::path::PathBuf::from(lead["cwd"].as_str().unwrap());
     let branch = run["branch"].as_str().unwrap().to_owned();
-    // Archived once the turn that closed the run has ended, its checkout gone then.
-    until_left(&t, &lead_id, &dir).await;
+    // Explicitly archive before testing recovery from a missing branch.
+    archive_and_wait(&t, &lead_id, &dir).await;
     let out = std::process::Command::new("git")
         .args(["branch", "-D", &branch])
         .current_dir(repo.path())

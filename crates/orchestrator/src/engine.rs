@@ -1188,8 +1188,14 @@ The person changed: {}",
             self.transition(&mut task, TaskStatus::Cancelled).await?;
         }
         // Its lead goes home (or is archived, a copy) before its checkout goes.
-        self.let_go_run(id).await;
-        self.remove_integration(&run).await;
+        let (_, problems) = self.let_go_run(id).await;
+        if problems.is_empty()
+            && self
+                .checkout_unused(&run, &self.integration_path(&run))
+                .await?
+        {
+            self.remove_integration(&run).await;
+        }
         self.set_run_status(&mut run, RunStatus::Cancelled, Some("cancelled".into()))
             .await?;
         Ok(run)
@@ -1498,6 +1504,10 @@ The person changed: {}",
             return;
         }
         let Some(path) = &task.worktree else { return };
+        if !self.checkout_unused(run, path).await.unwrap_or(false) {
+            tracing::warn!(task = %task.key, "keeping a checkout that is not unused and hub-owned");
+            return;
+        }
         let branch = task.branch.as_deref().filter(|_| delete_branch);
         match self.ws_for(run).remove(&run.repo, path, branch).await {
             Ok(()) => {
@@ -1515,6 +1525,9 @@ The person changed: {}",
     }
 
     pub(crate) async fn remove_integration(&self, run: &Run) {
+        if !self.owns_checkout(run, &self.integration_path(run)) {
+            return;
+        }
         let removed = self
             .ws_for(run)
             .remove(&run.repo, &self.integration_path(run), None)
@@ -1630,67 +1643,14 @@ The person changed: {}",
                 Some(format!("{missed} of {} tasks did not merge", tasks.len())),
             ),
         };
-        // The run lets go of everyone it holds: the lead itself goes home, and its checkout
-        // goes once it has left (`checkout_vacated`); a lead copied for it is archived, its
-        // history kept, once the turn that closed the run ends (it may still be answering
-        // the person), and the checkout goes then (`lead_left`), or now when it is already
-        // archived (the callers committed what it left). Restoring the copy brings the
-        // checkout back (`lead_returned`).
-        self.let_go_run(run.id).await;
-        if !self.lead_lives_in_integration(run).await {
-            self.remove_integration(run).await;
+        // Ending scheduling does not end the conversation or discard its workspace.
+        // Release occupancy without moving or archiving the lead. Explicit cleanup owns
+        // those operations; a future run_next can claim this session and reuse its tree.
+        for claim in self.store.list_claims(Some(run.id)).await? {
+            self.store.release_agent(claim.agent_id, run.id).await?;
         }
         self.set_run_status(run, status, note).await?;
         Ok(())
-    }
-
-    /// `agent` moved: the ended runs it led keep no checkout for it any more, unless the run
-    /// still holds someone (a lead copied for it, who lives there). What was left
-    /// uncommitted there is committed first.
-    async fn checkout_vacated(&self, agent: &Agent) {
-        let Ok(runs) = self.store.list_runs().await else {
-            return;
-        };
-        for run in runs {
-            if run.planner != agent.id || !run.status.is_terminal() || run.in_place {
-                continue;
-            }
-            let dir = self.integration_path(&run);
-            if !dir.exists() || agent.cwd == dir {
-                continue;
-            }
-            let _guard = self.lock(run.id).await;
-            if !self
-                .store
-                .list_claims(Some(run.id))
-                .await
-                .unwrap_or_default()
-                .is_empty()
-            {
-                continue;
-            }
-            if let Err(err) = self
-                .commit_lead(&run, &format!("crossagents: {} (after the run)", run.title))
-                .await
-            {
-                tracing::warn!(run = %run.id, error = %err, "cannot commit the run's checkout");
-                continue;
-            }
-            self.remove_integration(&run).await;
-        }
-    }
-
-    /// Whether the run's lead is in its checkout and about: an archived copy keeps the
-    /// directory as its own, but nobody works there until it is restored.
-    pub(crate) async fn lead_lives_in_integration(&self, run: &Run) -> bool {
-        !run.in_place
-            && self
-                .store
-                .get_agent(&AgentKey::Id(run.planner))
-                .await
-                .is_ok_and(|lead| {
-                    lead.archived_at.is_none() && lead.cwd == self.integration_path(run)
-                })
     }
 
     /// Commits what the lead left uncommitted in the run's checkout, so that branching off
@@ -1789,17 +1749,14 @@ The person changed: {}",
                             tokio::spawn(async move {
                                 let left = agent.archived_at.is_some()
                                     && this.leaving.lock().unwrap().remove(&agent.id);
-                                if left {
-                                    if let Err(err) = this.lead_left(&agent).await {
-                                        tracing::warn!(
-                                            agent = %agent.name,
-                                            error = %err,
-                                            "cannot remove the run checkout"
-                                        );
-                                    }
-                                    return;
+                                if left && let Err(err) = this.lead_left(&agent).await {
+                                    tracing::warn!(
+                                        agent = %agent.name,
+                                        error = %err,
+                                        "cannot remove the run checkout"
+                                    );
                                 }
-                                this.checkout_vacated(&agent).await
+                                // A move alone leaves retained workspaces intact.
                             });
                         }
                         EventKind::AgentUsage { id, used, .. } => this.record_context(id, used),

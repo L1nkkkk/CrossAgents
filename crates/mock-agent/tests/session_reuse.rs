@@ -53,6 +53,35 @@ async fn back_home(w: &mut Watcher, agent: AgentId, home: &Path) {
     .await;
 }
 
+async fn idle_lead(t: &TestHub, id: AgentId) {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let a = t.agent(&id.to_string()).await;
+            if a.status == crossagents_api_types::AgentStatus::Idle
+                && !t.hub.runtime.is_busy(id).await
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("lead did not finish its queued turns");
+}
+
+async fn retained_lead(t: &TestHub, w: &mut Watcher, id: AgentId, repo: &Path) {
+    w.find("lead finished its turn", |e| {
+        matches!(&e.kind,
+        EventKind::AgentTurnCompleted { id: ended, .. } if *ended == id)
+    })
+    .await;
+    idle_lead(t, id).await;
+    let retained = t.agent(&id.to_string()).await;
+    assert!(retained.archived_at.is_none());
+    assert!(retained.cwd.is_dir());
+    assert!(!same_dir(&retained.cwd, repo));
+}
+
 async fn agent_count(t: &TestHub) -> usize {
     let all: Value = t
         .get("/v1/agents?archived=true")
@@ -77,8 +106,8 @@ async fn run_b_is_led_by_run_as_lead_itself() {
     let a = start_run(&t, "Pia", &format!("Run A. [session] {}", finish())).await;
     assert_eq!(a["planner"], json!(pia.id), "the lead is Pia, not a copy");
     run_ends(&mut w, &a).await;
-    // Run A ended and let go of her: she is back in the workspace.
-    back_home(&mut w, pia.id, repo.path()).await;
+    // Run A ended and released occupancy while keeping her session and checkout.
+    retained_lead(&t, &mut w, pia.id, repo.path()).await;
     let first = w.output();
     let session = first
         .split("session=")
@@ -112,7 +141,7 @@ async fn run_b_is_led_by_run_as_lead_itself() {
         cwd.contains(&short(b["id"].as_str().unwrap())) && cwd.contains("integration"),
         "{cwd}"
     );
-    back_home(&mut w, pia.id, repo.path()).await;
+    retained_lead(&t, &mut w, pia.id, repo.path()).await;
     let claims = t.hub.bus.store().list_claims(None).await.unwrap();
     assert!(claims.is_empty(), "{claims:?}");
 }
@@ -126,7 +155,7 @@ async fn deleting_an_old_run_leaves_the_run_that_holds_its_lead_now() {
 
     let a = start_run(&t, "Pia", &format!("Run A. {}", finish())).await;
     run_ends(&mut w, &a).await;
-    back_home(&mut w, pia.id, repo.path()).await;
+    retained_lead(&t, &mut w, pia.id, repo.path()).await;
 
     // Run B holds her now, working in its checkout.
     let b = start_run(&t, "Pia", "Run B. Wait for my word.").await;
@@ -167,7 +196,7 @@ async fn deleting_an_old_run_leaves_the_run_that_holds_its_lead_now() {
     // Run B goes on and finishes as usual.
     t.send("Pia", &format!("Go ahead. {}", finish())).await;
     run_ends(&mut w, &b).await;
-    back_home(&mut w, pia.id, repo.path()).await;
+    retained_lead(&t, &mut w, pia.id, repo.path()).await;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -320,7 +349,7 @@ async fn fresh_false_gives_a_task_to_the_session_run_a_used() {
     run_ends(&mut w, &a).await;
     back_home(&mut w, rex.id, repo.path()).await;
     // Pia leads run B too: once run A has let go of her.
-    back_home(&mut w, pia.id, repo.path()).await;
+    retained_lead(&t, &mut w, pia.id, repo.path()).await;
     let session = after(&said(&w, rex.id), "session=").to_owned();
     let before = agent_count(&t).await;
 
@@ -417,7 +446,7 @@ async fn a_new_execution_session_is_archived_and_can_be_used_again_once_restored
     )
     .await;
     run_ends(&mut w, &a).await;
-    back_home(&mut w, pia.id, repo.path()).await;
+    retained_lead(&t, &mut w, pia.id, repo.path()).await;
     let tasks = tasks_of(&t, &a).await;
     let exec_id: AgentId = tasks[0]["handoffs"][0]["to"]
         .as_str()
@@ -514,7 +543,7 @@ async fn an_execution_session_restored_after_its_run_is_deleted_carries_on() {
     )
     .await;
     run_ends(&mut w, &a).await;
-    back_home(&mut w, pia.id, repo.path()).await;
+    retained_lead(&t, &mut w, pia.id, repo.path()).await;
     let tasks = tasks_of(&t, &a).await;
     let exec_id: AgentId = tasks[0]["handoffs"][0]["to"]
         .as_str()
@@ -840,8 +869,8 @@ async fn a_session_whose_driver_cannot_move_is_refused() {
 }
 
 /// Ivy's CLI resumes a session only where it ran (`move_cwd = false`) and she has a session,
-/// so the run gets a copy of her as lead (S1 §3.2). Run starts it, the run ends and archives
-/// it, its checkout goes; restored, the checkout is rebuilt at the same path, and the copy
+/// so the run gets a copy of her as lead. Finish retains it; explicit archival removes
+/// its checkout. Restoring rebuilds at the same path, and the copy
 /// carries on its own session there, with what it was told.
 async fn pinned_run(
     t: &TestHub,
@@ -874,6 +903,16 @@ async fn pinned_run(
         |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if *id == lead),
     )
     .await;
+    let retained = t.agent(&lead.to_string()).await;
+    assert!(retained.archived_at.is_none());
+    assert!(retained.cwd.is_dir(), "finish retains the checkout");
+    let resp = t
+        .post(
+            &format!("/v1/agents/{lead}/archive"),
+            json!({ "archived": true }),
+        )
+        .await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     let mut copy = t.agent(&lead.to_string()).await;
     for _ in 0..300 {
         if copy.archived_at.is_some() && !copy.cwd.exists() {
@@ -981,4 +1020,50 @@ async fn a_copy_that_resumes_only_where_it_ran_starts_over_after_its_run_is_dele
             && warned.iter().any(|m| m.contains("这是新会话")),
         "{warned:?}"
     );
+}
+
+#[tokio::test]
+async fn a_finished_work_can_start_another_round_and_keeps_the_previous_workspace() {
+    let repo = git_repo();
+    let t = TestHub::start_with(native_plugin).await;
+    let pia = t.add_native("Pia", "planner", repo.path()).await;
+    let resp = t
+        .post("/v1/works", json!({ "title": "Two rounds", "lead": "Pia" }))
+        .await;
+    assert_eq!(resp.status(), 201);
+    let work: Value = resp.json().await.unwrap();
+    let route = format!("/v1/works/{}/runs", work["id"].as_str().unwrap());
+    let mut w = t.watch().await;
+    let resp = t
+        .post(
+            &route,
+            json!({ "request": format!("First. [session] {}", finish()) }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let first: Value = resp.json().await.unwrap();
+    run_ends(&mut w, &first).await;
+    turn_of(&mut w, pia.id).await;
+    idle_lead(&t, pia.id).await;
+    let retained = t.agent("Pia").await;
+    let checkout = retained.cwd;
+    assert!(checkout.is_dir());
+    assert!(retained.archived_at.is_none());
+    let targets = checkout.parent().unwrap().join("targets/integration");
+    std::fs::create_dir_all(&targets).unwrap();
+    std::fs::write(targets.join("cache"), "compiled").unwrap();
+    // This exercises the SQL partial unique index too: completed releases the group.
+    let resp = t
+        .post(&route, json!({ "request": "Second. [session]" }))
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let second: Value = resp.json().await.unwrap();
+    assert_ne!(first["id"], second["id"]);
+    assert_eq!(first["work_id"], second["work_id"]);
+    assert_eq!(second["planner"], json!(pia.id));
+    assert!(
+        checkout.is_dir(),
+        "a move does not discard the previous workspace"
+    );
+    assert!(targets.join("cache").exists());
 }
