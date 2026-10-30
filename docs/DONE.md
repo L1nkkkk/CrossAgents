@@ -231,3 +231,15 @@ B 删除 run：
 
 - [x] `cargo fmt --all -- --check` 在**没人改动过的文件**上失败：本地 rustfmt 升到 1.10.0-stable（2026-10-13）后换行取舍变了，仓库上次全量格式化用的是更旧的版本，九个文件有漂移。这让每条任务的格式检查都挂在与它无关的文件上，噪声盖掉真问题，还逼得我 force 接受了一条本来合格的任务。已用 rustfmt 1.10 统一重排（纯机械，不改行为）
 - [x] `cargo clippy --workspace --all-targets -- -D warnings` 在干净分支上也通不过：仓库一直有五处告警。这是我给 works-table 写验收命令时没核实造成的——**给 worker 设了一道过不去的关**，它照实报告被挡住，我才发现。修掉四处（多余的 `.into_iter()`、嵌套 `if` 合 let-chain、三元组起名 `Reply`、多余的 `mut`），`EventKind` 的 `large_enum_variant` 加带理由的 `#[allow]`（真修法是装箱，见 [TODO.md](TODO.md) 同名一节）。教训：**写验收命令前要先在基线上自己跑一遍**
+
+## 十九、Lead 执行模式与工作区保留
+
+> 2026-10-29 设计见 [tasks/LEAD.md](tasks/LEAD.md)，2026-10-30 run `01a18a4a` 做了 P1。
+> 顺序：G1-1 → P1 + G1-2 → G1-3 / G1-4 / G1-5 → P2 → P3。
+
+- [x] P1 拆分收工与清理：`finish_run` 只释放调度占用并落 `Completed`/`Failed`，不再 `let_go` 主导、不删集成检出；删掉 `checkout_vacated` 那条「移动即清理」的路径（会话搬走不再顺手收掉保留的工作区）。新增 `Orchestrator::cleanup_run(id, force)` 与 `POST /v1/runs/{key}/cleanup`（人的权限），与 `delete_run` 共用 `clean_run`，清理保留 run 记录与分支。边界靠 `owns_checkout`：必须非原地、不是仓库本身、父目录正是 `<worktrees>/<run>`、名字不是 `targets`；`checkout_unused` 再排除任何以它为 home 的 agent 与任何未归档的 cwd，所以用户仓库、agent 的 home 及其子目录、别的活跃会话都碰不到，被新 run 占用的会话不动。worker 的检出在任务被接受后即可清理，但先过归属与占用检查。落地不再自动拆掉保留的工作区
+  - **无条件保留，没有策略字段。** 原计划写的是「保留 / 清理策略（工作组级，默认保留）」，核文档后发现 §9 的表指向的 §10 第 3 条把它列为待定（只写了「倾向工作组级」），所以不在这轮定。语义两句：默认保留，要收就显式收。见 [TODO.md](TODO.md) 同名一节里「要人定」那条
+  - 四条已修好的行为都保住了（见 §九），各有测试在跑：复制出来的主导仍走 `archive_agent_after_turn` + `leaving`，连「归档落在回调注册之前」的竞态复查都照 `claims::put_away` 复刻了一份；**任何 warning 都保守地同时保留检出与 `targets`**——占用记录可能已经消失，「没有 claim」不等于进程已停；`targets` 仍按 `prune_run_targets` 的规则回收，没有改回递归删整份；`Verifying` 期间的防护未动
+  - 行为上有一处人该知道的变化：`delete_run` 现在对**有未提交改动**的 run 一律拒绝（要 `force`），从前只在「未落地」时拒绝。落地之后在检出里新写的东西从前会被直接删掉，这不对——LEAD §8 要求有未保存的结果就保留现场并提示
+  - 十四条现有测试的期望按新语义逐条改过（改期望、没删断言）。新增五条，其中 `session_reuse.rs::a_finished_work_can_start_another_round_and_keeps_the_previous_workspace` 真的走了 works 接口，顺带证明 `Completed` 在那个部分唯一索引的终态名单里
+  - `run_next`（G1-2）的接点：从 `create_run_for_work` 进来，复用已保留的会话与检出、重新记录基线与任务归属；`integration_path` 与 `owns_checkout` / `checkout_unused` 就是「把按 run 的物理树映射改成共享工作区归属」的那几处
