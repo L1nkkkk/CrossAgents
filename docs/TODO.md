@@ -45,7 +45,9 @@
 
 ## 四、可观测性
 
-全部完成，见 [DONE.md](DONE.md) 同名一节。
+已完成的条目见 [DONE.md](DONE.md) 同名一节。
+
+- [ ] 每个会话都显示进度，不只 run（2026-10-30 记，人提出）：现在只有 run 有进度（`apps/gui/src/lib/taskState.ts:98` 的「3/5 已合并 · 2 进行中」，用在 `strips.tsx:233`、`views/Run.tsx:269`），任务卡片上的 `task.progress` 只是 worker 自己写的一句话，会话本身（侧栏、会话页、`agent_list` / `agent_get`）看不出它在不在干活、干到哪。起因：run f87e53d3 里主导看 `usage_get` 的 `peak_context`（codebuddy 轮末才上报，轮中一直是 0）和 `workspace_diff`（对未提交改动返回空 stat）误判 `w-f87e53-p1-g1-2` 卡住并中断了它，其实它已写了 28 个文件。要做：① hub 给每个会话一份「轮次中」的活动信号：本轮开始时间、最近一次输出 / 工具调用的时间与种类（读、改、跑命令）、本轮改过的文件数，不依赖插件的 usage 上报；`agent_get` / `agent_list` 返回它，主导判断卡没卡住看这个。② GUI 在侧栏会话行和会话页头部显示：本轮已跑多久、最近活动（复用 `lib/workGroups.ts` 的 `liveActivity`）、多久没动静；会话在 run 里干某个任务时，再带上任务的 `progress` 和检查结果（几项通过）。③ 可选：worker 在报告里给出步骤数（如 `task_progress` 带 `step/total`），有就画进度条，没有就只显示活动，不编百分比。另：`workspace_diff` 对有未提交改动的 worktree 返回空 stat，单独查
 
 ## 五、Claude 运行时（对照 Cutex 的借鉴项）
 
