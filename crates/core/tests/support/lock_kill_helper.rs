@@ -265,7 +265,11 @@ mod win {
         BufReader::new(writer.stdout.take().expect("piped stdout"))
             .read_line(&mut line)
             .expect("read the writer's ready line");
-        println!("ready writer={pid} in_job={} {}", u8::from(in_job), line.trim());
+        println!(
+            "ready writer={pid} in_job={} {}",
+            u8::from(in_job),
+            line.trim()
+        );
         let _ = std::io::stdout().flush();
 
         // The job handle must stay open, or closing it kills the writer.
@@ -311,8 +315,18 @@ mod unix {
         let path = CString::new(lock_path.as_bytes()).expect("lock path without NUL");
         // SAFETY: plain syscalls; the fd is checked before use and deliberately kept
         // inheritable, which is what items 2 and 3 of §5 are about.
-        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CREAT, 0o644 as libc::c_uint) };
-        assert!(fd >= 0, "open the lock file: {}", std::io::Error::last_os_error());
+        let fd = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT,
+                0o644 as libc::c_uint,
+            )
+        };
+        assert!(
+            fd >= 0,
+            "open the lock file: {}",
+            std::io::Error::last_os_error()
+        );
         // SAFETY: `fd` was just opened.
         assert_eq!(
             unsafe { libc::flock(fd, libc::LOCK_EX) },

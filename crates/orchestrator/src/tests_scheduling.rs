@@ -11,9 +11,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use crossagents_core::{
-    Agent, AgentId, AgentStatus, CoreError, Envelope, EventBus, LandMode, MessageId,
-    MessageSource, Role, Run, RunConfig, RunId, RunPolicy, RunStatus, Store, Task, TaskId,
-    TaskReport, TaskSpec, TaskStatus,
+    Agent, AgentId, AgentStatus, CoreError, Envelope, EventBus, LandMode, MessageId, MessageSource,
+    Role, Run, RunConfig, RunId, RunPolicy, RunStatus, Store, Task, TaskId, TaskReport, TaskSpec,
+    TaskStatus,
 };
 use crossagents_store_sqlite::SqliteStore;
 use serde_json::{Value, json};
@@ -371,7 +371,11 @@ async fn a_created_task_that_waits_on_another_stays_pending() {
 
     let id: TaskId = serde_json::from_value(out["created"][0]["task_id"].clone()).unwrap();
     let task = f.task(id).await;
-    assert_eq!(task.status, TaskStatus::Pending, "the control case: {task:?}");
+    assert_eq!(
+        task.status,
+        TaskStatus::Pending,
+        "the control case: {task:?}"
+    );
     assert_eq!(task.assignee, None, "{task:?}");
 }
 

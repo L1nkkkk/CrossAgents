@@ -16,8 +16,8 @@ use std::mem::zeroed;
 use std::os::windows::ffi::OsStrExt;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, FILETIME, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
-    WAIT_TIMEOUT,
+    CloseHandle, FILETIME, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
@@ -156,7 +156,11 @@ pub fn file_id(handle: HANDLE) -> Option<(u32, u64)> {
 pub fn alive(pid: u32) -> bool {
     // SAFETY: the process handle is checked and closed; a zero timeout never blocks.
     unsafe {
-        let process = OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        let process = OpenProcess(
+            PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid,
+        );
         if process.is_null() {
             return false;
         }
@@ -180,7 +184,11 @@ pub fn wait_exit(pid: u32, timeout: std::time::Duration) -> Option<std::time::Du
         let state = WaitForSingleObject(process, millis);
         let elapsed = started.elapsed();
         CloseHandle(process);
-        if state == WAIT_OBJECT_0 { Some(elapsed) } else { None }
+        if state == WAIT_OBJECT_0 {
+            Some(elapsed)
+        } else {
+            None
+        }
     }
 }
 

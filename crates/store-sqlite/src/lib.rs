@@ -103,7 +103,12 @@ fn migration_failed(err: sqlx::migrate::MigrateError) -> CoreError {
 
 /// The highest migration this build ships.
 fn known_migration() -> i64 {
-    MIGRATOR.migrations.iter().map(|m| m.version).max().unwrap_or(0)
+    MIGRATOR
+        .migrations
+        .iter()
+        .map(|m| m.version)
+        .max()
+        .unwrap_or(0)
 }
 
 fn storage(err: impl std::fmt::Display) -> CoreError {

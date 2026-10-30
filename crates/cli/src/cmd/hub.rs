@@ -723,7 +723,10 @@ mod tests {
         )
         .unwrap();
         let reason = explanation(&paths, Some(&before));
-        assert!(reason.contains("comes from a newer CrossAgents"), "{reason}");
+        assert!(
+            reason.contains("comes from a newer CrossAgents"),
+            "{reason}"
+        );
         assert!(!reason.contains("older line"), "{reason}");
         assert!(reason.contains("logs"), "{reason}");
         // The module name is dropped: only the reason is worth showing.
