@@ -136,8 +136,6 @@ B3 远程开发：
 
 - [ ] 2026-10-27 trace run `01a17c78…dccf42e8` 发现的问题（未修）
   - [ ] 批准时建的模板会话（如 Orion、Zara）没有用到，一直留在名单里（未修，原属上一条的后半句，归 §十八 / §十九 的会话归属一起处理）
-  - [ ] `team.rs::the_lead_cannot_put_a_teammate_on_a_model_nobody_runs` 依赖本机账号（2026-10-29 记，未修）：本机装了 with 插件时 `agent_spawn` 把 `gpt-6-luna` 解析到 `with` 并招募成功，断言「no logged-in account runs model gpt-6-luna」失败；在 run 041aba99 的基线（未合入 #handoff-name）上同样复现，与业务改动无关。测试应换一个任何真实插件都不会提供的模型名，或让 TestHub 不发现宿主机上的插件
-  - [ ] `task_assign` 把任务交给 escalation 队友时，新执行会话名是 `w-` 前缀而不是 `e-`（2026-10-29 记，未修，#handoff-name 的 worker 发现；`handoff.rs` 的测试目前只断言它是会话名而不是模板名）
 - [ ] plan_approval=required 时主导可以不提计划就动手（2026-10-28 记，未修，要不要拦由人定）：run `43af3611` 的 `plan_approval` 是 `required`，主导一跳过 `plan_submit`，直接在 `planning` 状态下改代码、`git commit` 并调用 `run_finish`，hub 没有拦。现在只在「有计划待批」时卡住流程，主导自己不提计划就绕过了审批门禁；可选做法是 `planning` + `required` 时拒绝改文件的工具与 `run_finish`（或先要求 `plan_submit`），但这会改变主导能干的事，先记下来等决定
 
 ## 十、agent 描述文件
@@ -248,7 +246,7 @@ B3 远程开发：
 
 > 2026-10-27，run `01a17e22`（补齐持续推进的 5 个缺口）里三个 worker 并行跑的时候实测出来的，都已核实到具体原因，均未在那个 run 里修。
 
-- [ ] **`crates/mock-agent/tests/work_start.rs::a_proposer_that_can_move_leads_the_work_itself` 在重负载下偶发失败**：提案者还在应答时 work_start 被拒（`409 busy: lyra is answering a person's message`）。机器空闲时连跑三次 8/8 过，整机重编译时复现过一次。是测试自身的竞态，不是功能问题。
+- [ ] **GUI 里卡片刚出现就点「开始」会撞上同一个 409**（2026-10-30 记，未修）：上面那条测试竞态按测试侧修掉了（等提议者那一轮真的结束），但产品侧的问题是另一笔——Work 卡片在提议者还在应答时就出现在界面上，人这时点「开始」会拿到 `409 busy: … is answering a person's message`。要么卡片在那一轮结束前显示为「还不能开始」，要么答卡片时自动等它结束。
 - [ ] **持续推进「唤醒投递失败」那条 Notice 没有集成测试**：实现和代码审查都做了（首次失败发一条、投递成功清标记、再失败再发一条），但真实 hub 下让 `host.notify` 稳定失败做不到——store 只有 INSERT 没有改插件的接口，删 agent 又会先被 `continuation_step` 的 `get_agent` 挡住。要覆盖得加一个可注入失败的 Host 测试替身。
 
 ## 十七、本地资源锁与通用执行器
@@ -265,7 +263,8 @@ B3 远程开发：
 > 2026-10-29，设计见 [tasks/G1.md](tasks/G1.md)。起因：一轮做完想接着干，只能让主导再开一个 Work、跳到新页面，历史被切成几段。
 > 与 §十九 有冲突，以 [tasks/LEAD.md](tasks/LEAD.md) §9 为准：一轮结束不再把主导 `send_home`、不删集成工作区，同组下一轮在同一个集成 worktree 里切新分支；原地模式没有 run 分支，不适用 G1 §3.3 的分支表。G1-2 与 §十九 P1 一起做。
 
-- [ ] G1-1：`works` 表与迁移、`Run.work_id`、事件与 `/v1/works*` 接口；同一组同时只有一个未结束的 run
+已完成 1 条（G1-1），见 [DONE.md](DONE.md) 同名一节。
+
 - [ ] G1-2：`run_next` 与分支规则（没落地时叠在上一轮上、连带落地、`from: "base"`）；开场信息列出前几轮。与 §十九 P1 同做：下一轮复用上一轮的集成 worktree 与 `targets/integration`，主导不搬家
 - [ ] G1-3：提示词改为一轮结束后用 `run_next` 接着干；`work_start` 对已结束一轮的主导指向 `run_next`
 - [ ] G1-4：GUI `#/work/<id>`、对话里的轮次分隔、右侧「各轮」窗格、侧栏一组一行
@@ -276,6 +275,33 @@ B3 远程开发：
 > 2026-10-29，设计见 [tasks/LEAD.md](tasks/LEAD.md)。起因：修个小 bug 也要建 worktree，主导搬家丢上下文、再冷编译一遍；run 一结束主导被送回、检出被删，没法接着干。Lead 可选原地或 worktree，Worker 始终独立 worktree 可并行；Run 完成、会话结束、工作区清理拆成三件事。
 > 顺序：§九 剩下的小 bug → G1-1 → P1 + G1-2 → G1-3 / G1-4 / G1-5 → P2 → P3。P3 开工前先定 LEAD §10 第 1 条（原地模式要不要后台集成 worktree）。
 
-- [ ] P1 拆分收工与清理：`finish_run` 不再 `let_go` 主导、不删集成 worktree；`checkout_vacated`、`lead_left`、`lead_returned`、`delete.rs` 按工作区归属清理；保留 / 清理策略（工作组级，默认保留）与单独的清理入口；worker worktree 在任务接受后即可清理（LEAD §8、§9）
+- [ ] P1 拆分收工与清理：`finish_run` 不再 `let_go` 主导、不删集成 worktree；`checkout_vacated`、`lead_left`、`lead_returned`、`delete.rs` 按工作区归属清理；**无条件保留**加一个单独的清理入口；worker worktree 在任务接受后即可清理（LEAD §8、§9）
+- [ ] **要人定：LEAD §10 第 3 条——完成后保留 / 清理是工作组级设置还是每轮可改**（2026-10-30 记）。§9 的表里说该做成工作组的设置，但 §10 第 3 条把它列为待定、只写了「倾向工作组级」。P1 按**无条件保留 + 显式清理入口**做，不加任何策略字段：那个字段会被序列化进 `works.data` 成为兼容负担，而现在没有任何地方能改它（没 GUI、没 CLI 子命令），永远等于默认值。定下来之后加一个 `#[serde(default)]` 字段是向后兼容的，不会因为现在不做而变难
 - [ ] P2 Lead 原地：拆开 `run.in_place` 的几层含义（Lead 模式 / 是否受版本控制 / 归属 / 保留策略）；原地主导直接认领不走 `lead_in`；按 checkout 的目录占用（落地也要遵守、Run 完成即释放）；主导自己改动的原地验收，结果绑定内容快照。不做 worker 进用户目录（LEAD §4、§7、§11）
 - [ ] P3 混合派工：独立 index + 专用 ref 的工作区快照（不推送、大小上限、密钥文件提示）；worker 从快照并行开工；结果三方应用回原目录，全部算完再写、可恢复、不重复应用、保留人的暂存区（LEAD §5、§6）
+
+## 二十、发起时选会话（已做）与它暴露的缺口
+
+> 2026-10-30，run `01a18a4a`。人的原话：「我发起 work/chat 的时候，可以选择新的 session 或者已有 session」。
+> 已完成 2 条，见 [DONE.md](DONE.md) 同名一节。
+
+- [ ] **已有会话开 Chat 不支持附件**：`POST /v1/agents/{key}/chat` 的请求体只有 `{text, restore}`，没有附件字段，所以界面上选了已有会话时会明确拒绝并说明。新建会话那条路是支持附件的，两条路不一致。
+- [ ] **Chat 模式未选工作区时列不出候选会话**：候选源 `workspace_sessions(repo)` 按 `agent.home() == repo` 过滤，而独立聊天各有自己的目录（`<home>/chats/<id>`），所以「接着聊我之前那个天」从选择器里点不到——而这恰好是最常见的用法。要么给 chat 另一个不按工作区过滤的候选源，要么把独立聊天也算进某个工作区。
+
+## 二十一、自举暴露的 hub 缺陷（2026-10-30）
+
+> 都是 run `01a18a4a` 里真派活时撞上的，不是读代码想出来的。前两条能让 worker 彻底卡死、白耗若干轮。
+
+- [ ] **提问超时自动回落后，worker 收不到任何答复，而且不能再问**：`#lead-stays` 的 worker 提问要放行文件，主导 `task_answer` 返回已送达；30 分钟后提问按「人的默认」自动回落，问题被标记为已解决，但**worker 手上什么都没收到**；它再 `task_ask` 被拒 `invalid task transition WaitingAnswer -> WaitingAnswer`，于是既等不到答案又不能再问，只能结束一轮变 stalled。实测连续三轮零改动。回落至少要把「按默认处理了」作为一条答复投递给 worker。
+- [ ] **同一任务，主导侧与 worker 侧看到的提问状态互相矛盾**：上面那次，主导 `task_answer` 得到 `has no open question`，而 worker 同时 `task_ask` 得到 `WaitingAnswer -> WaitingAnswer`。两句不可能同时为真。
+- [ ] **`task_drop --requeue` 不删分支，重排必然失败**：`#lead-stays` 重排时 `git worktree add -b crossagents/<run>-<key>` 撞上已存在的同名分支，任务直接判失败。requeue 要么连分支一起删（确认没有独有提交），要么复用已有分支。
+- [ ] **`task_create` 的 `assignee` 静默无效**：带 `assignee` 建任务，返回里 `assignee` 是 `null`、`not_started` 是空，任务停在 pending，必须再显式 `task_assign` 才会开工。要么让它生效，要么在返回里说明没生效。
+- [ ] **主导给 worker 的答复不一定到得手**：这一轮里出现过两次「spec 改了、消息也发了，worker 仍在重复索要同样的放行」。放行范围必须改 `task_update` 的 `scope`（机械执行的那份），光回消息不算；但更根本的是 worker 该被提示「迟迟没答复就先 `task_get` 重读 spec」。
+
+## 二十二、仓库卫生（2026-10-30）
+
+> 同一个 run 里顺手修掉的三件，记下缘由免得再犯。
+
+- [ ] **`EventKind` 的 `large_enum_variant` 用 `#[allow]` 压住了，真修法是装箱**：变体装的是整条记录，`RunCreated { run: Run }` 约 592 字节，其余多为几十字节。装箱会牵动每一处构造与匹配，所以暂时加了带理由的 `#[allow]`，换来 `clippy --workspace -- -D warnings` 能对其余一切设闸。
+- [ ] **ts-rs 解析不了 `deserialize_with`**：`cargo test` 每次都打 `failed to parse serde attribute | deserialize_with =`。目前用显式 `#[ts(type = ...)]` 绕开（`ContinuationUpdate` 的三态字段），但下次有人加 `deserialize_with` 而忘了标类型，bindings 会静默生成错的类型。
+- [ ] **`crates/core/tests/lock_kill_race.rs` 与并发负载抢锁，偶发失败**：和别的 crate 的测试一起跑时失败过一次，单独跑与重跑组合命令都 4/4。它测的就是抢锁，跟整个 workspace 的测试并行本就不可靠；应当标成串行或独占资源。
