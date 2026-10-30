@@ -353,6 +353,15 @@ impl Orchestrator {
     // Runs
 
     pub async fn create_run(&self, new: NewRun) -> Result<Run, CoreError> {
+        self.create_run_with_choice(new, None, false).await
+    }
+
+    pub async fn create_run_with_choice(
+        &self,
+        new: NewRun,
+        fresh: Option<bool>,
+        restore: bool,
+    ) -> Result<Run, CoreError> {
         let planner = self.store.get_agent(&AgentKey::Id(new.planner)).await?;
         self.store
             .get_agent(&AgentKey::Id(new.config.worker))
@@ -427,7 +436,12 @@ impl Orchestrator {
             .await?;
         // The lead works in the run's own checkout: what it changes stays on the run branch
         // until it is landed (docs/tasks/W1.md §4.1). In place, it works where it is.
-        let lead = if in_place {
+        let lead = if fresh == Some(false) {
+            self.lead_self(&run, &planner, restore).await
+        } else if fresh == Some(true) {
+            self.copy_lead(&planner, run.id, &self.integration_path(&run))
+                .await
+        } else if in_place {
             self.claim(&planner, run.id, None, ClaimRole::Lead, false)
                 .await
                 .map(|()| (planner.clone(), false))
@@ -482,6 +496,45 @@ impl Orchestrator {
         Ok(run)
     }
 
+    /// Advisory snapshot: only claim_agent provides exclusion. Chat does not claim;
+    /// availability can change between this check and delivery.
+    pub async fn chat_available(&self, agent: &Agent) -> Result<(), CoreError> {
+        if let Some(claim) = self.store.claim_of(agent.id).await? {
+            return Err(CoreError::Conflict(self.held_by(agent, &claim).await));
+        }
+        Ok(())
+    }
+
+    /// Workspace sessions in recent-use order, with advisory availability for a lead.
+    pub async fn session_candidates(
+        &self,
+        repo: &Path,
+    ) -> Result<
+        Vec<(
+            Agent,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )>,
+        CoreError,
+    > {
+        let mut result = Vec::new();
+        for s in self.workspace_sessions(repo, None).await? {
+            let reason = if s.busy_with.is_some() {
+                Some("busy".to_owned())
+            } else if !self.host.can_move(&s.agent).await {
+                Some("cannot_move".to_owned())
+            } else if s.agent.archived_at.is_some() {
+                Some("archived".to_owned())
+            } else {
+                None
+            };
+            result.push((s.agent, s.state.to_owned(), s.busy_with, s.last, reason));
+        }
+        Ok(result)
+    }
+
     /// The run's lead, working in `dir` (docs/tasks/S1.md §3.2): `planner` itself, held for
     /// the run and moved in with its conversation, when its driver resumes a session in
     /// another directory (or it never started one). Else a copy, which starts without that
@@ -505,6 +558,52 @@ impl Orchestrator {
             let lead = self.store.get_agent(&AgentKey::Id(planner.id)).await?;
             return Ok((lead, false));
         }
+        self.copy_lead(planner, run, dir).await
+    }
+
+    async fn lead_self(
+        &self,
+        run: &Run,
+        planner: &Agent,
+        restore: bool,
+    ) -> Result<(Agent, bool), CoreError> {
+        self.may_take_self(run, planner, restore).await?;
+        if self.host.serving_person(planner.id).await {
+            return Err(CoreError::Busy(format!(
+                "{} is answering a person, or a person's message waits for it: try again later",
+                planner.name
+            )));
+        }
+        self.claim(planner, run.id, None, ClaimRole::Lead, false)
+            .await?;
+        if planner.archived_at.is_some()
+            && let Err(err) = self.host.restore_agent(planner.id).await
+        {
+            let _ = self.store.release_agent(planner.id, run.id).await;
+            return Err(err);
+        }
+        if !run.in_place
+            && let Err(err) = self
+                .host
+                .place(planner.id, &self.integration_path(run), true)
+                .await
+        {
+            let _ = self.store.release_agent(planner.id, run.id).await;
+            let _ = self.host.send_home(planner.id).await;
+            return Err(err);
+        }
+        Ok((
+            self.store.get_agent(&AgentKey::Id(planner.id)).await?,
+            false,
+        ))
+    }
+
+    async fn copy_lead(
+        &self,
+        planner: &Agent,
+        run: RunId,
+        dir: &Path,
+    ) -> Result<(Agent, bool), CoreError> {
         let mut config = planner.config.clone();
         // The copy leads the run; it is nobody's recruit.
         if let Some(map) = config.as_object_mut() {
@@ -1230,7 +1329,9 @@ The person changed: {}",
         let Some(map) = agent.config.as_object_mut() else {
             return Ok(agent);
         };
-        let had = map.remove(crossagents_core::model::SPAWNED_BY_AGENT).is_some()
+        let had = map
+            .remove(crossagents_core::model::SPAWNED_BY_AGENT)
+            .is_some()
             | map.remove("spawned_by_run").is_some();
         if had {
             self.store

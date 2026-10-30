@@ -93,6 +93,8 @@ pub fn router(state: Arc<AppState>) -> Router {
     let authed = Router::new()
         .route("/v1/info", get(info))
         .route("/v1/agents", get(list_agents).post(create_agent))
+        .route("/v1/session-candidates", get(session_candidates))
+        .route("/v1/agents/{key}/chat", post(start_chat))
         .route("/v1/agents/{key}", get(get_agent).delete(delete_agent))
         .route("/v1/agents/{key}/start", post(start_agent))
         .route("/v1/agents/{key}/stop", post(stop_agent))
@@ -380,6 +382,76 @@ async fn info(State(state): State<Arc<AppState>>) -> Json<HubInfo> {
 async fn list_agents(State(state): State<Arc<AppState>>) -> ApiResult<Json<ListAgentsResponse>> {
     let agents = state.store().list_agents().await?;
     Ok(Json(ListAgentsResponse { agents }))
+}
+
+#[derive(Deserialize)]
+struct SessionCandidatesQuery {
+    repo: String,
+}
+
+async fn session_candidates(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionCandidatesQuery>,
+) -> ApiResult<Json<crossagents_api_types::ListSessionCandidatesResponse>> {
+    let sessions = state
+        .orchestrator
+        .session_candidates(std::path::Path::new(&query.repo))
+        .await?
+        .into_iter()
+        .map(|(agent, state, busy_with, last_execution, reason)| {
+            crossagents_api_types::SessionCandidate {
+                agent,
+                state,
+                busy_with,
+                last_execution,
+                can_use: reason.is_none(),
+                reason,
+            }
+        })
+        .collect();
+    Ok(Json(crossagents_api_types::ListSessionCandidatesResponse {
+        sessions,
+    }))
+}
+
+/// The claim lookup is advisory: a run may claim after it; only claim_agent excludes
+/// competing runs atomically. Chat itself does not claim.
+async fn start_chat(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(req): Json<crossagents_api_types::StartChatRequest>,
+) -> ApiResult<(StatusCode, Json<SendMessageResponse>)> {
+    if req.text.trim().is_empty() {
+        return Err(AppError::bad_request("text must not be empty"));
+    }
+    let key = AgentKey::parse(&key);
+    let agent = state.store().get_agent(&key).await?;
+    state.orchestrator.chat_available(&agent).await?;
+    if agent.archived_at.is_some() {
+        if !req.restore {
+            return Err(AppError::bad_request(
+                "session is archived; set restore: true",
+            ));
+        }
+        state.runtime.archive(&key, false).await?;
+    }
+    let text = req.text;
+    let (message_id, queued) = state
+        .runtime
+        .send_envelope(&key, Envelope::new(MessageSource::Human, text.clone()))
+        .await?;
+    let topic = text
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(60)
+        .collect();
+    state.runtime.set_topic(&key, Some(topic)).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(SendMessageResponse { message_id, queued }),
+    ))
 }
 
 async fn create_agent(
@@ -1231,7 +1303,10 @@ async fn create_run(
             policy: req.policy.unwrap_or_default(),
         },
     };
-    let run = state.orchestrator.create_run(new).await?;
+    let run = state
+        .orchestrator
+        .create_run_with_choice(new, req.fresh, req.restore)
+        .await?;
     Ok((StatusCode::CREATED, Json(run)))
 }
 
