@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { GraphCommit } from "@bindings/GraphCommit";
 import type { GraphRef } from "@bindings/GraphRef";
-import { layoutGraph, owners, refColors } from "./graphlayout.ts";
+import { layoutGraph, owners, refColors, windowOf } from "./graphlayout.ts";
 
 const c = (sha: string, parents: string[], refs: string[] = []): GraphCommit => ({ sha, parents, subject: sha, author: "a", time: "2026-10-27T00:00:00Z", refs });
 
@@ -65,4 +65,26 @@ test("a merge commit opens a lane for its second parent", () => {
   assert.equal(b0.lane, 0);
   assert.equal(b0.color, 0);
   assert.equal(layout.lanes, 2);
+});
+
+test("the row window is read off the panel, so the legend cannot shake it", () => {
+  const ROW = 28;
+  // The panel is 400px whatever the legend does with its own 22 or 44 of them.
+  const panel = windowOf(0, 400, ROW);
+  assert.deepEqual(panel, { start: 0, end: 15 });
+  // The list below a one-line legend and below a two-line one: measuring those is what used
+  // to oscillate, and the two windows really do differ by a row.
+  assert.notDeepEqual(windowOf(0, 400 - 30, ROW), windowOf(0, 400 - 52, ROW));
+  // Scrolled down, the window moves with it.
+  assert.deepEqual(windowOf(280, 400, ROW), { start: 10, end: 25 });
+  // Part of a row at the top counts as that row.
+  assert.deepEqual(windowOf(27, 28, ROW), { start: 0, end: 2 });
+});
+
+test("a window of nothing is empty rather than wrong", () => {
+  assert.deepEqual(windowOf(0, 0, 28), { start: 0, end: 0 });
+  // Before the first measurement a height can be 0 and a row height can be missing.
+  assert.deepEqual(windowOf(0, 400, 0), { start: 0, end: 0 });
+  // Overscroll (elastic scrolling reports a negative top) must not index backwards.
+  assert.deepEqual(windowOf(-50, 280, 28), { start: 0, end: 10 });
 });
