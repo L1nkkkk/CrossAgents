@@ -705,12 +705,15 @@ a.who-chip:hover { text-decoration: none; background: var(--selected); }
   background: transparent; color: var(--text); text-align: left; font-size: 13px;
 }
 .menu-item.cursor { background: var(--hover); }
+.menu-item.disabled { color: var(--muted); cursor: default; }
+.menu-item.disabled.cursor { background: transparent; }
 .menu-item[aria-selected="true"] { color: var(--accent-text); }
 .menu-item > svg:last-child { color: var(--accent); flex-shrink: 0; }
 .menu-icon { width: 18px; display: grid; place-items: center; flex-shrink: 0; }
 .menu-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .menu-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .menu-sub { font-size: 11px; color: var(--muted); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.menu-sub.ltr { direction: ltr; }
 /* A right-click menu, at the pointer (src/Sidebar.tsx): the scrim closes it from anywhere. */
 .menu-scrim { position: fixed; inset: 0; z-index: 90; }
 .context-menu {

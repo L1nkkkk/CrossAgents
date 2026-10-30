@@ -36,6 +36,8 @@ import type { ListAgentsResponse } from "@bindings/ListAgentsResponse";
 import type { ListPluginsResponse } from "@bindings/ListPluginsResponse";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import type { ListRunsResponse } from "@bindings/ListRunsResponse";
+import type { ListSessionCandidatesResponse } from "@bindings/ListSessionCandidatesResponse";
+import type { StartChatRequest } from "@bindings/StartChatRequest";
 import type { ApproveRunRequest } from "@bindings/ApproveRunRequest";
 import type { RejectRunRequest } from "@bindings/RejectRunRequest";
 import type { Run } from "@bindings/Run";
@@ -208,6 +210,11 @@ export const api = {
 
   listAgents: () => request<ListAgentsResponse>("GET", "/v1/agents"),
   createAgent: (req: CreateAgentRequest) => request<Agent>("POST", "/v1/agents", req),
+  /** The workspace's sessions, most recently used first; availability is advisory (the hub
+   * excludes what it knows is busy, archived or unable to move). */
+  sessionCandidates: (repo: string) => request<ListSessionCandidatesResponse>("GET", `/v1/session-candidates?repo=${enc(repo)}`),
+  /** Continues an existing conversation; `restore` brings an archived session back first. */
+  chat: (key: string, req: StartChatRequest) => request<SendMessageResponse>("POST", `/v1/agents/${enc(key)}/chat`, req),
   sendMessage: (key: string, req: SendMessageRequest) =>
     request<SendMessageResponse>("POST", `/v1/agents/${enc(key)}/messages`, req),
   withdrawMessage: (key: string, messageId: string) =>
