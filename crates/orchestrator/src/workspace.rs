@@ -61,6 +61,11 @@ pub trait WorkspaceProvider: Send + Sync {
     /// Deletes `branch` in `repo`, whether or not a working copy has it (a merged task's
     /// branch outlives its worktree). A branch that is already gone is not an error.
     async fn delete_branch(&self, repo: &Path, branch: &str) -> Result<(), CoreError>;
+    /// Whether `branch` exists in `repo`.
+    async fn has_branch(&self, repo: &Path, branch: &str) -> bool {
+        let _ = (repo, branch);
+        false
+    }
     /// The files `path` changed and did not commit: edits and untracked files, by path.
     async fn uncommitted(&self, path: &Path) -> Result<Vec<String>, CoreError>;
     /// The files `path` changed relative to `base`, committed or not, untracked included.
@@ -489,6 +494,20 @@ impl WorkspaceProvider for GitWorkspaces {
     async fn prune(&self, repo: &Path) -> Result<(), CoreError> {
         git(repo, &["worktree", "prune"]).await?;
         Ok(())
+    }
+
+    async fn has_branch(&self, repo: &Path, branch: &str) -> bool {
+        git(
+            repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "-q",
+                &format!("refs/heads/{branch}"),
+            ],
+        )
+        .await
+        .is_ok()
     }
 
     async fn delete_branch(&self, repo: &Path, branch: &str) -> Result<(), CoreError> {

@@ -225,6 +225,16 @@ B 删除 run：
   - 关键一条：**归档的会话 `can_use` 为真**、`reason` 为 `archived`，因为它配上 `restore` 是能用的。若按「有 reason 就禁用」来写，`restore` 这条路从界面上永远点不到——复审时返工过一轮才改对。不可用的原因用 `NotReady` 枚举而不是字符串，`can_use()` 和它长在一起，新增变体时编译器会要求说明算不算可用
 - [x] GUI：首页发起 Work / Chat 都能选「新会话」或某个已有会话（`apps/gui/src/lib/sessionChoice.ts`）。没选时 `fresh`/`restore` 一个都不发，请求与从前逐字节相同；禁用只看 `can_use` 不看 `reason`；409 不是异常而是常态（候选是快照），显示 hub 的原话并重新拉一次候选让人改选。已有会话开 Chat 走 `/chat` 不再建新 agent。另一半修掉了批计划时「除已有队友只剩主导同家模型」：`Run.tsx` 原先 `plugins.data?.find(p => p.name === lead?.plugin)?.models` 只取主导那个插件的模型，数据本来是齐的只是被筛掉了；改为列所有已装插件的模型按家族分组，**新 worker 的插件与账号从模型所属插件来，不再跟主导一致**（这是之前 Kiran 起不来的病根：只给 model 不给 plugin，deepseek 被配到 claude 插件上，任务永远 pending），测试里有正向加一条反向断言「不许用主导的账号」。同名模型被多家提供时标签带插件名，未登录或 CLI 未安装的插件其模型仍列出但禁用并写明原因
 
+## 二十一、自举暴露的 hub 缺陷
+
+> 2026-10-30，run `01a18a4a` 记下的五条。回头对着事件和 worker 的会话记录查了一遍，**当时的诊断有两处不对**，按查到的写：没有发生「30 分钟超时回落」（提问 03:16:46 发出、03:20:57 就答了，那个 run 也没开超时）；主导的答复也没丢——它排在 worker 正在跑的那一轮后面，worker 那一轮其实已经按改好的 spec 在干活，被主导两条 `now` 消息先后打断，答复始终被插队的消息挤在后面。
+
+- [x] 已有提问时再 `task_ask` 换个说法被拒（`invalid task transition WaitingAnswer -> WaitingAnswer`）：问题其实已经转给了主导，worker 却收到报错，以为问不出去，改走消息，两边从此对不上。现在新说法**替换**开着的提问，返回里 `replaces` 指向旧的那条；测试 `tests_scheduling::asking_again_replaces_the_open_question`
+- [x] 「两边看到的状态互相矛盾」：并不矛盾——主导第二次 `task_answer` 时问题已经被它第一次答掉了。`has no open question` 现在写明任务处于什么状态，并说「已经答过的会在 worker 这一轮结束后读到」；`task_answer` 的返回带 `read: now | after_current_turn`，worker 正在一轮里时明说答复在排队、打断只会让别的消息插到它前面
+- [x] `task_drop --requeue` 后重排撞上旧分支而失败：丢弃时 worker 还在跑，检出和分支按规矩保留，重排却用同一个名字建。现在派活时名字被占（目录在或分支在）就用 `<key>-2`、`-3`……另起，旧的原样不动；`WorkspaceProvider::has_branch`；测试 `pipeline::a_task_starts_beside_a_branch_a_dropped_attempt_left`
+- [x] `task_create` 的 `assignee`「静默无效」：其实生效了（任务一秒后就以 Jasper 开工），是返回里给的是排程之前的快照（`assignee: null`、`pending`），主导据此又 `task_assign` 了一次，多起了一个执行会话。返回改为排程之后的样子；测试在 `a_created_task_with_nothing_to_wait_for_starts_at_once` 里加了断言
+- [x] 答复「不一定到得手」：提示词两头补上。worker：spec 才是决定，被改过或在等答复时先 `task_get` 再问；再问会替换开着的提问。主导：改动放行范围的决定要同时写进 spec（`task_update`）；worker 在一轮里时答复会在这一轮结束后读到，打断它重复答复只会让别的消息插队
+
 ## 二十二、仓库卫生
 
 > 2026-10-30，run `01a18a4a` 里顺手修掉的。

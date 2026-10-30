@@ -788,8 +788,15 @@ impl Orchestrator {
                 }
                 let task = self.task_ref(caller, &input).await?;
                 let a: A = args(input)?;
-                self.answer(caller, task, a.answer).await?;
-                Ok(json!({ "delivered": true }))
+                if self.answer(caller, task, a.answer).await? {
+                    Ok(json!({
+                        "delivered": true,
+                        "read": "after_current_turn",
+                        "note": "The worker is in a turn: your answer waits in its line and is read when that turn ends. Interrupting it (agent_send now) puts other messages ahead of the answer."
+                    }))
+                } else {
+                    Ok(json!({ "delivered": true, "read": "now" }))
+                }
             }
             "workspace_diff" => self.workspace_diff(caller, input).await,
             "workspace_read" => self.workspace_read(caller, input).await,

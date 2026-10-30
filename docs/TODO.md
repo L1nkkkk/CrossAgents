@@ -291,13 +291,7 @@ B3 远程开发：
 
 ## 二十一、自举暴露的 hub 缺陷（2026-10-30）
 
-> 都是 run `01a18a4a` 里真派活时撞上的，不是读代码想出来的。前两条能让 worker 彻底卡死、白耗若干轮。
-
-- [ ] **提问超时自动回落后，worker 收不到任何答复，而且不能再问**：`#lead-stays` 的 worker 提问要放行文件，主导 `task_answer` 返回已送达；30 分钟后提问按「人的默认」自动回落，问题被标记为已解决，但**worker 手上什么都没收到**；它再 `task_ask` 被拒 `invalid task transition WaitingAnswer -> WaitingAnswer`，于是既等不到答案又不能再问，只能结束一轮变 stalled。实测连续三轮零改动。回落至少要把「按默认处理了」作为一条答复投递给 worker。
-- [ ] **同一任务，主导侧与 worker 侧看到的提问状态互相矛盾**：上面那次，主导 `task_answer` 得到 `has no open question`，而 worker 同时 `task_ask` 得到 `WaitingAnswer -> WaitingAnswer`。两句不可能同时为真。
-- [ ] **`task_drop --requeue` 不删分支，重排必然失败**：`#lead-stays` 重排时 `git worktree add -b crossagents/<run>-<key>` 撞上已存在的同名分支，任务直接判失败。requeue 要么连分支一起删（确认没有独有提交），要么复用已有分支。
-- [ ] **`task_create` 的 `assignee` 静默无效**：带 `assignee` 建任务，返回里 `assignee` 是 `null`、`not_started` 是空，任务停在 pending，必须再显式 `task_assign` 才会开工。要么让它生效，要么在返回里说明没生效。
-- [ ] **主导给 worker 的答复不一定到得手**：这一轮里出现过两次「spec 改了、消息也发了，worker 仍在重复索要同样的放行」。放行范围必须改 `task_update` 的 `scope`（机械执行的那份），光回消息不算；但更根本的是 worker 该被提示「迟迟没答复就先 `task_get` 重读 spec」。
+> 已完成 5 条，见 [DONE.md](DONE.md) 同名一节。
 
 ## 二十二、仓库卫生（2026-10-30）
 

@@ -77,7 +77,9 @@ results). Check the work: `workspace_diff`, `workspace_read`, `workspace_run` (t
 run branch (its message is the commit message: write it the way the project's rules ask, as \
 for `run_land`; on a conflict you get the conflicting hunks: resolve with `task_rework` or \
 `branch_sync`), `task_rework` sends it back with what to fix, `task_drop` discards it.\n\
-4. Answer worker questions with `task_answer`. A task that is \"stalled\" means its worker \
+4. Answer worker questions with `task_answer`; a decision that changes what may be touched \
+goes into the spec too (`task_update`). A worker in a turn reads your answer when that turn \
+ends; interrupting it to repeat the answer only puts other messages ahead of it. A task that is \"stalled\" means its worker \
 stopped without reporting: message it, `task_assign` it to someone else, or drop it.\n\
 5. When every task has ended, land the run branch with `run_land` if the run's policy lets you \
 (otherwise the person lands it), then close the run with `run_finish` and a short summary for \
@@ -88,10 +90,12 @@ closed run.";
 const WORKER: &str = "As a WORKER on a task: do exactly what the task's spec asks, in your \
 working directory (the task's own git worktree). Do not commit; the hub does. Report with the \
 task_id from your task: `task_progress` for a short status now and then, `task_ask` if the spec \
-is unclear (then end your turn and wait for the answer), `task_complete` with a summary of what \
+is unclear (then end your turn and wait for the answer; asking again replaces the open \
+question), `task_complete` with a summary of what \
 you changed when done, `task_fail` with the reason if it cannot be done. The task's issuer \
-checks your work and may send it back with notes; then continue and report again. When you \
-are given a task yourself (with your conversation, rather than as a new session), you work in \
+checks your work and may send it back with notes; then continue and report again. The \
+spec is the decision: when it was changed, or you wait for an answer, `task_get` it before \
+asking again, since the answer may already be there. When you are given a task yourself (with your conversation, rather than as a new session), you work in \
 the task's worktree until it ends and then go back to your own directory; a person may still \
 write to you, and comes first.";
 

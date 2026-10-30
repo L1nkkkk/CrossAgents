@@ -346,6 +346,45 @@ async fn a_created_task_with_nothing_to_wait_for_starts_at_once() {
     assert_eq!(task.status, TaskStatus::Running, "{task:?}");
     assert_eq!(task.assignee, Some(f.rex.id), "{task:?}");
     assert!(task.worktree.is_some(), "{task:?}");
+    // The answer shows it as scheduling left it: the state before read as "assignee
+    // ignored", and a lead assigned it a second time.
+    assert_eq!(out["created"][0]["status"], "running", "{out}");
+    assert_eq!(out["created"][0]["assignee"], json!(f.rex.id), "{out}");
+}
+
+#[tokio::test]
+async fn asking_again_replaces_the_open_question() {
+    let f = Fixture::new().await;
+    let mut task = f
+        .insert("a", TaskStatus::Running, &[], Some(f.rex.id))
+        .await;
+    task.assignee = Some(f.rex.id);
+    f.store.update_task(&task).await.unwrap();
+
+    let first = f
+        .orchestrator
+        .ask(&f.rex, task.id, "which file?".into())
+        .await
+        .unwrap();
+    // Asked again in other words while the first waits: it used to fail with
+    // "WaitingAnswer -> WaitingAnswer", so the worker thought it could not ask at all.
+    let second = f
+        .orchestrator
+        .ask(&f.rex, task.id, "which file, after syncing?".into())
+        .await
+        .unwrap();
+    assert_eq!(second["replaces"], first["question_id"], "{second}");
+    let task = f.task(task.id).await;
+    assert_eq!(task.status, TaskStatus::WaitingAnswer);
+    assert_eq!(
+        task.report.question.as_deref(),
+        Some("which file, after syncing?")
+    );
+    assert_eq!(
+        json!(task.report.question_message),
+        second["question_id"],
+        "{task:?}"
+    );
 }
 
 #[tokio::test]

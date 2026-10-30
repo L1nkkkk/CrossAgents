@@ -1295,8 +1295,19 @@ The person changed: {}",
         if task.worktree.is_none() && run.in_place {
             task.worktree = Some(run.repo.clone());
         } else if task.worktree.is_none() {
-            let path = worktree_path(&self.config.worktrees, &short(run.id), &task.key);
-            let branch = format!("{}-{}", run.branch, task.key);
+            // A dropped attempt may have left its branch or checkout behind (kept while its
+            // agent might still be using it): start beside them, never on top of them.
+            let mut name = task.key.clone();
+            let mut attempt = 1;
+            let (path, branch) = loop {
+                let path = worktree_path(&self.config.worktrees, &short(run.id), &name);
+                let branch = format!("{}-{name}", run.branch);
+                if !path.exists() && !self.ws_for(run).has_branch(&run.repo, &branch).await {
+                    break (path, branch);
+                }
+                attempt += 1;
+                name = format!("{}-{attempt}", task.key);
+            };
             let (base, _) = self.base_of(run, task).await?;
             if base == run.branch {
                 // The task starts from what the lead has done so far.
