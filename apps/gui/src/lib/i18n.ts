@@ -111,7 +111,6 @@ const zhCN = {
   "home.where": "在新分支 crossagents/… 上做，看过再由你合并",
   "home.whereFull": "在新分支 crossagents/… 上做，做完由主导合并",
   "home.noCaps": "没有上限",
-  "home.fullOnce": "全托管（只这一次）",
   "home.chatPlaceholder": "有什么可以帮你？输入 @ 点名协作者或模型",
   "home.model": "模型",
   "home.effort": "推理强度",

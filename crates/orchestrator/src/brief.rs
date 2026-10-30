@@ -6,7 +6,7 @@
 use std::fmt::Write;
 
 use crossagents_core::{
-    Agent, AgentId, CheckResult, ChecksState, Handoff, HandoffKind, Role, Run, Task,
+    Agent, AgentId, CheckResult, ChecksState, Handoff, HandoffKind, LandPolicy, Role, Run, Task,
 };
 
 use crate::project::{self, RunChecks, RunEnv};
@@ -40,6 +40,16 @@ pub fn kickoff(
             "{} (run_id: {}) · base branch {} · run branch {}",
             run.title, run.id, run.base_branch, run.branch
         );
+        out.push_str(match run.config.policy.land {
+            LandPolicy::Manual => {
+                "\nlanding: the person lands it; when every task has ended, close with run_finish and \
+                 do not merge into the base branch yourself"
+            }
+            LandPolicy::Auto => "\nlanding: you land it yourself with run_land, then run_finish",
+            LandPolicy::Pr => {
+                "\nlanding: you may only open a pull request (run_land mode pr), then run_finish"
+            }
+        });
         match checks {
             Ok(c) if c.checks.is_empty() => {
                 let _ = write!(

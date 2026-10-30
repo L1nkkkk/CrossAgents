@@ -6,7 +6,7 @@
 use chrono::Utc;
 use crossagents_core::{
     Agent, CoreError, EventKind, HumanAction, HumanItem, HumanItemKind, HumanItemStatus,
-    MessageSource, RunConfig, RunPolicy,
+    LandPolicy, MessageSource, PlanApproval, RunConfig, RunPolicy,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -170,7 +170,13 @@ impl Orchestrator {
                     max_parallel: RunConfig::DEFAULT_MAX_PARALLEL,
                     max_attempts: RunConfig::DEFAULT_MAX_ATTEMPTS,
                     team: Vec::new(),
-                    policy: RunPolicy::default(),
+                    // The person said go: the plan starts at once and the lead lands it, as
+                    // it would have changed the checkout itself in the conversation.
+                    policy: RunPolicy {
+                        plan_approval: PlanApproval::Auto,
+                        land: LandPolicy::Auto,
+                        ..RunPolicy::default()
+                    },
                 },
             })
             .await?;

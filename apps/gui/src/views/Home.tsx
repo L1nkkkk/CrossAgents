@@ -127,7 +127,7 @@ export function HomeView() {
   const [continuationAttempts, setContinuationAttempts] = useState(3);
   const [continuationInterval, setContinuationInterval] = useState(60);
   const [maxParallel, setMaxParallel] = useState("");
-  const [preset, setPresetState] = useState<Preset>(() => load<Preset>(PRESET_KEY, "manual", (v) => v === "manual" || v === "semi"));
+  const [preset, setPresetState] = useState<Preset>(() => load<Preset>(PRESET_KEY, "manual", (v) => v === "manual" || v === "semi" || v === "full"));
   const [maxUsd, setMaxUsd] = useState("");
   const [maxMinutes, setMaxMinutes] = useState("");
   const [maxTokens, setMaxTokens] = useState("");
@@ -163,10 +163,10 @@ export function HomeView() {
     files.clear();
   };
 
-  // 全托管 is picked anew each time: a risky choice never carries over (docs/tasks/W1.md §7).
+  // The delegation level carries over, 全托管 included (docs/tasks/W1.md §7).
   const setPreset = (p: Preset) => {
     setPresetState(p);
-    if (p !== "full") save(PRESET_KEY, p);
+    save(PRESET_KEY, p);
   };
   const choose = (lead: Lead) => {
     setSessionId(undefined);
@@ -677,7 +677,7 @@ export function HomeView() {
                 <select value={preset} onChange={(e) => setPreset(e.target.value as Preset)} title={PRESETS.find((p) => p.key === preset)?.hint}>
                   {PRESETS.map((p) => (
                     <option key={p.key} value={p.key} title={p.hint}>
-                      {p.key === "full" ? t("home.fullOnce") : p.label}
+                      {p.label}
                     </option>
                   ))}
                 </select>

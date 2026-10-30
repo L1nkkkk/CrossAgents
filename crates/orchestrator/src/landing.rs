@@ -174,7 +174,7 @@ impl Orchestrator {
         let mode = match (run.config.policy.land, a.mode) {
             (LandPolicy::Manual, _) => {
                 return Err(CoreError::Conflict(
-                    "this run leaves landing to the person: finish it with run_finish, they land it from the run page"
+                    "this run leaves landing to the person: finish it with run_finish, they land it from the run page; do not merge it into the base branch yourself"
                         .into(),
                 ));
             }
