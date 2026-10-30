@@ -1,4 +1,6 @@
-/target
+# Any crate's build directory, not only the workspace root's: a tool run inside a crate
+# (crates/mock-agent/target/ turned up with 3.4 GB in it) must not reach the index.
+target/
 *.db
 *.db-shm
 *.db-wal
