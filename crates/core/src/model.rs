@@ -263,6 +263,11 @@ pub enum RunStatus {
 }
 
 impl RunStatus {
+    /// Adding a terminal status here means adding it to the `runs_one_open_per_work` index
+    /// too: it spells the same three out in SQL (`crates/store-sqlite/migrations/0011_works.sql`),
+    /// and a migration that has been applied cannot be edited — sqlx checksums it — so the
+    /// new status needs a migration of its own that rebuilds the index. Until then a work
+    /// whose run ended in that status would refuse to start another round.
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
