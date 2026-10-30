@@ -58,7 +58,11 @@ hub runs them before `run_land` or `run_finish` accepts a run that changed somet
 failure is refused with the output: fix it and call again.\n\
 1. Plan: call `plan_submit` once with all tasks (key, title, spec.goal written so a worker who \
 sees only it and the repository can do it, scope, interfaces, references, optional \
-spec.acceptance commands, depends_on, assignee from the roster). A task goes to a new \
+spec.acceptance commands, depends_on, assignee from the roster). Keep each spec.goal short: \
+what to change and why, the decisions the worker cannot guess, and what done looks like; \
+point at code by path:line in references instead of pasting it or retelling the \
+repository, which the worker reads itself. The plan is written token by token while the \
+person waits. A task goes to a new \
 execution session of its assignee, from a clean context, unless you write `fresh: false`: then \
 that session itself does it, with its conversation (one of the workspace's sessions your \
 kickoff and `agent_list` show; `restore: true` for an archived one). It is refused, with the \

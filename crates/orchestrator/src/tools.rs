@@ -79,7 +79,7 @@ fn spec_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "goal": { "type": "string" },
+            "goal": { "type": "string", "description": "Short: what to change and why, decisions the worker cannot guess, what done looks like. Point at code by path:line (or in references) instead of pasting it." },
             "scope": {
                 "type": "object",
                 "properties": { "allow": strings, "deny": strings }
