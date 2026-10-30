@@ -154,7 +154,7 @@ B3 远程开发：
 
 > 2026-10-26，任务书见 [tasks/SELF.md](tasks/SELF.md)。按 A → B → C 顺序，A 做完再放开后面。
 
-- [ ] A1 run 共享 `node_modules`，GUI 的 `tsc --noEmit` 与 `node --test` 进 `crossagents.toml` checks
+- [~] A1 run 共享 `node_modules`，GUI 的 `tsc --noEmit` 与 `node --test` 进 `crossagents.toml` checks（2026-10-30 检查已进：`paths = ["apps/gui", "crossagents.toml"]` 依次跑 `npm --prefix apps/gui ci`、`run typecheck`、`test`，冷 worktree 里每次自己装依赖；共享 `node_modules` / 依赖缓存未做）
 - [ ] A2 mock 里无对话的 agent 也按插件给出能力
 - [ ] A3 worker 克隆合并 / 取消后归档，run 追溯保留它最后几轮
 - [ ] B1 压缩合并用 `run_finish` 的 `message`

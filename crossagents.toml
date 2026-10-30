@@ -2,10 +2,15 @@
 [run]
 # Run by the hub in the run's checkout before the lead lands or finishes a run that changed
 # something; all must pass. A check with `paths` runs only when the run changed one of them,
-# so a run that only touches the GUI or the docs does not wait for cargo. The GUI's checks
-# need `npm install` first, so they are not here.
+# so a run that only touches the GUI or the docs does not wait for cargo. Checks run in order
+# and stop at the first failure: the GUI's `npm ci` installs its dependencies into a fresh
+# worktree's `apps/gui/node_modules` before its typecheck and tests (each run installs its
+# own; a shared `node_modules` is not done, docs/TODO.md §十一 A1).
 checks = [
     { command = "cargo test --workspace", paths = ["crates", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo", "crossagents.toml"] },
+    { command = "npm --prefix apps/gui ci", paths = ["apps/gui", "crossagents.toml"] },
+    { command = "npm --prefix apps/gui run typecheck", paths = ["apps/gui", "crossagents.toml"] },
+    { command = "npm --prefix apps/gui test", paths = ["apps/gui", "crossagents.toml"] },
 ]
 # A first build of the workspace takes a while; later runs reuse the repository's shared one.
 timeout_secs = 1800
