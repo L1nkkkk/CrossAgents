@@ -11,6 +11,7 @@ import { useHubData } from "../hub";
 import { t } from "../lib/i18n";
 import { effortLabel, effortLevels, effortOf, prettyModel, vendorLabel, workerModelFor, accountOf } from "../lib/models";
 import { chatBody, newChatRequest, runSessionFields, sessionStateKey, usabilityOf } from "../lib/sessionChoice";
+import * as draft from "../lib/draft";
 import { useQuota } from "./Quota";
 import { PRESETS, presetPolicy, type Preset } from "../lib/policy";
 import { ChipMenu, type MenuItem } from "../menu";
@@ -18,6 +19,7 @@ import { mentionsFor, useMention } from "../mention";
 import { QuestionCards } from "../questions";
 import { CHATS, selectWorkspace, useSelectedWorkspace, useWorkspaces, wsKey, wsName } from "../workspace";
 
+const DRAFT: draft.Where = { kind: "home" };
 const PRESET_KEY = "crossagents.preset";
 const LEAD_KEY = "crossagents.lead";
 const MODE_KEY = "crossagents.mode";
@@ -111,8 +113,12 @@ export function HomeView() {
   const everyone = (agents.data ?? []).filter((a) => !a.archived_at);
   // In a workspace, offer only its agents (a run works in its planner's directory).
   const here = everyone.filter((a) => !cwd || wsKey(a.cwd) === wsKey(cwd));
-  const [request, setRequest] = useState("");
-  const [title, setTitle] = useState("");
+  // What was typed last time this page was open: leaving it unmounts the composer, and a
+  // half-written request with its screenshots should not go with it (lib/draft.ts).
+  const kept = useRef(draft.read(DRAFT));
+  const [request, setRequest] = useState(kept.current?.text ?? "");
+  const [title, setTitle] = useState(kept.current?.title ?? "");
+  const [draftNote, setDraftNote] = useState<string>();
   const [picked, setPicked] = useState<Lead | undefined>(() => load<Lead | undefined>(LEAD_KEY, undefined, (v) => !!v && typeof v === "object"));
   const [worker, setWorker] = useState("");
   const [escalate, setEscalate] = useState("");
@@ -132,6 +138,30 @@ export function HomeView() {
   // the agent takes is only known once it exists; the hub checks then and says why.
   const files = useHeld(setError);
   const ref = useRef<HTMLTextAreaElement>(null);
+
+  // The files come back once, after `useHeld` exists; the text was restored above.
+  useEffect(() => {
+    if (kept.current?.held.length) files.restore(kept.current.held);
+    kept.current = undefined;
+  }, []);
+
+  // Kept as you type, a moment after you stop. Images can be too big for the browser's
+  // storage: then the text is kept alone and the composer says so rather than losing it
+  // silently.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const out = draft.write(DRAFT, { text: request, title, held: files.held });
+      setDraftNote(!out.kept && files.held.length ? t("draft.notKept") : out.dropped ? t("draft.filesTooBig", { n: out.dropped }) : undefined);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [request, title, files.held]);
+
+  /** Sent: the draft is done with. */
+  const sent = () => {
+    draft.forget(DRAFT);
+    setDraftNote(undefined);
+    files.clear();
+  };
 
   // 全托管 is picked anew each time: a risky choice never carries over (docs/tasks/W1.md §7).
   const setPreset = (p: Preset) => {
@@ -225,11 +255,19 @@ export function HomeView() {
     el.style.height = `${Math.min(el.scrollHeight, 320)}px`;
   }, [request]);
 
-  /** An agent with this role, model and login in `dir`, or a new one (the hub names it: a person's name, never the model's). */
-  async function agentFor(role: "planner" | "worker", choice: Choice, dir: string, effort?: string): Promise<Agent> {
+  /**
+   * An agent with this role, model and login in `dir`, or a new one (the hub names it: a
+   * person's name, never the model's).
+   *
+   * `reuse` is false for the lead: 新会话 says a new one, so handing back an agent that
+   * already exists — with everything it has said before — is the opposite of what was asked.
+   * To carry a conversation on, pick that session by name under 已有会话. Workers are reused:
+   * one is a template each task clones, not a conversation anyone reads.
+   */
+  async function agentFor(role: "planner" | "worker", choice: Choice, dir: string, effort?: string, reuse = true): Promise<Agent> {
     const { plugin, model, account } = choice;
     // The picked session leads this run: it cannot also be reused as the default worker.
-    const found = everyone.find((a) => a.id !== chosenSession?.agent.id && a.role === role && a.plugin === plugin && a.model === model && accountOf(a) === account && wsKey(a.cwd) === wsKey(dir));
+    const found = reuse && everyone.find((a) => a.id !== chosenSession?.agent.id && a.role === role && a.plugin === plugin && a.model === model && accountOf(a) === account && wsKey(a.cwd) === wsKey(dir));
     if (found) return withEffort(found, effort);
     return api.createAgent({
       plugin,
@@ -279,7 +317,7 @@ export function HomeView() {
       // An existing session keeps its own model and login: just carry the conversation on.
       if (chosenSession) {
         await api.chat(chosenSession.agent.id, chatBody(typed, chosenSession, uploads()));
-        files.clear();
+        sent();
         navigate("s", chosenSession.agent.id);
         return;
       }
@@ -290,7 +328,7 @@ export function HomeView() {
       const agent = await api.createAgent(newChatRequest(choice, text, cwd ?? "", lead && lead.choice.plugin !== chatModel.plugin ? undefined : effort));
       // Into the conversation at once; the message shows there while the agent starts.
       void sendMessage(agent.id, text, { attachments: uploads() }).catch(() => {});
-      files.clear();
+      sent();
       navigate("s", agent.id);
     } catch (err) {
       fail(err);
@@ -307,7 +345,7 @@ export function HomeView() {
     try {
       const leadChoice: Choice = lead.kind === "model" ? lead : { plugin: leadPlugin!, model: leadModel!, account: leadAgent && accountOf(leadAgent) };
       // A picked session leads as it is, with its conversation; otherwise the lead's effort applies.
-      const planner = chosenSession ? chosenSession.agent : leadAgent ? await withEffort(leadAgent, effort) : await agentFor("planner", leadChoice, where, effort);
+      const planner = chosenSession ? chosenSession.agent : leadAgent ? await withEffort(leadAgent, effort) : await agentFor("planner", leadChoice, where, effort, false);
       const models = plugins.data?.find((p) => p.name === planner.plugin)?.models ?? [];
       // Workers run on the lead's login, on the cheaper sibling of its model.
       const workerChoice: Choice = { plugin: planner.plugin, model: workerModelFor(models, planner.model ?? leadModel ?? models[0] ?? ""), account: accountOf(planner) };
@@ -335,7 +373,7 @@ export function HomeView() {
           },
         },
       });
-      files.clear();
+      sent();
       navigate("runs", run.id);
     } catch (err) {
       fail(err);
@@ -529,6 +567,7 @@ export function HomeView() {
         <div className="composer home-composer" onDrop={files.onDrop} onDragOver={files.onDragOver}>
           {mention.menu}
           <HeldFiles files={files.held} onRemove={files.remove} />
+          {draftNote && <div className="small dim">{draftNote}</div>}
           <textarea
             onPaste={files.onPaste}
             ref={ref}
