@@ -500,6 +500,15 @@ pub struct ClaudeSession {
     adopted: Mutex<Option<oneshot::Receiver<StopReason>>>,
 }
 
+/// Turns the compaction flag off when a `/compact` ends, however it ends.
+struct CompactingReset<'a>(&'a ClaudeSession);
+
+impl Drop for CompactingReset<'_> {
+    fn drop(&mut self) {
+        self.0.set_compacting(false);
+    }
+}
+
 impl ClaudeSession {
     /// What fills the context window, by kind (`get_context_usage`, as `/context` shows
     /// it). Claude Code only: CodeBuddy does not know the request. Best effort.
@@ -520,7 +529,7 @@ impl ClaudeSession {
         self.shared
             .translator
             .lock()
-            .expect("translator lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .compacting = on;
     }
 
@@ -847,8 +856,9 @@ impl DriverSession for ClaudeSession {
     async fn compact(&self) -> Result<(), CoreError> {
         // CodeBuddy streams the summary like a reply; it is not one.
         self.set_compacting(true);
+        // Reset even when this future is dropped: a flag left on hides every later reply.
+        let _reset = CompactingReset(self);
         let outcome = self.prompt("/compact").await;
-        self.set_compacting(false);
         match outcome?.stop_reason {
             StopReason::Error => Err(CoreError::Agent("compaction failed".into())),
             _ => Ok(()),

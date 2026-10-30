@@ -1246,13 +1246,18 @@ impl Runtime {
     pub async fn compact(&self, key: &AgentKey) -> Result<(), CoreError> {
         let agent = self.store().get_agent(key).await?;
         let live = self.live.lock().await.get(&agent.id).cloned();
-        match live {
-            Some(live) => live.session.compact().await,
-            None => Err(CoreError::Conflict(format!(
+        let Some(live) = live else {
+            return Err(CoreError::Conflict(format!(
                 "agent {} is not running",
                 agent.name
-            ))),
-        }
+            )));
+        };
+        // A long history takes minutes to summarise; a caller that stops waiting (the GUI's
+        // request timeout) must not cancel it halfway and leave the session mid-compaction.
+        let session = live.session.clone();
+        tokio::spawn(async move { session.compact().await })
+            .await
+            .map_err(|err| CoreError::Agent(format!("compaction stopped: {err}")))?
     }
 
     /// Changes the agent's model and, when `effort` is given, its reasoning effort (empty:

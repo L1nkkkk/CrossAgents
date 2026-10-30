@@ -7,13 +7,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell, session, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
-import { allowed, route } from "./allowed.cjs";
+import { allowed, REQUEST_TIMEOUT_MS, route, timeoutFor } from "./allowed.cjs";
 import { manageLocalHub, type LocalHub } from "./localHub.cjs";
 import { createTray, type AppTray } from "./tray.cjs";
 import { startUpdates, type Updates } from "./updates.cjs";
 
 const METHODS = new Set(["GET", "POST", "DELETE"]);
-const REQUEST_TIMEOUT_MS = 30_000;
 const RECONNECT_MS = 2_000;
 
 /** Vite dev server, only in an unpackaged run (`npm run electron:dev`). */
@@ -108,7 +107,7 @@ ipcMain.handle("hub:request", async (event, method: unknown, path: unknown, body
         method,
         headers,
         body,
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutFor(method, path)),
       });
     } catch (err) {
       throw new Error(`cannot reach the hub: ${message(err)}`);

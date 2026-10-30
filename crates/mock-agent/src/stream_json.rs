@@ -10,6 +10,9 @@
 //! - `[sleep MS]`  keep the turn running for MS milliseconds
 //! - `[pid]`       say this process's id
 //! - `[cwd]`       say the process's working directory
+//!
+//! `--compact-ms MS` makes a `/compact` turn take MS milliseconds, as summarising a long
+//! history does.
 //! - `[session]`   say the session id, and whether it was resumed
 //! - `[crash]`     exit the process
 //! - `[write ...]` / `[call ...]` directives, see [`crate::script`]; calls go to the first
@@ -50,6 +53,8 @@ struct Mock {
     script: Scripted,
     /// `--mock-sessions`: where the session is kept.
     kept: Option<std::path::PathBuf>,
+    /// `--compact-ms`: how long a `/compact` turn takes.
+    compact_ms: u64,
 }
 
 impl Mock {
@@ -144,6 +149,12 @@ impl Mock {
             std::process::exit(3);
         }
         let mut interrupted = false;
+        if text.trim() == "/compact" && self.compact_ms > 0 {
+            tokio::select! {
+                () = self.interrupt.notified() => interrupted = true,
+                () = tokio::time::sleep(Duration::from_millis(self.compact_ms)) => {}
+            }
+        }
         if text.contains("[slow]") {
             self.say("working ").await;
             tokio::select! {
@@ -299,6 +310,9 @@ pub async fn run(args: Vec<String>) {
         turns: AtomicU64::new(0),
         resumed,
         script,
+        compact_ms: flag(&args, "--compact-ms")
+            .and_then(|ms| ms.parse().ok())
+            .unwrap_or(0),
         kept,
     });
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
