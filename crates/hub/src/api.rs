@@ -398,16 +398,13 @@ async fn session_candidates(
         .session_candidates(std::path::Path::new(&query.repo))
         .await?
         .into_iter()
-        .map(|candidate| {
-            let can_use = !matches!(candidate.reason.as_deref(), Some("busy" | "cannot_move"));
-            crossagents_api_types::SessionCandidate {
-                agent: candidate.agent,
-                state: candidate.state,
-                busy_with: candidate.busy_with,
-                last_execution: candidate.last_execution,
-                can_use,
-                reason: candidate.reason,
-            }
+        .map(|candidate| crossagents_api_types::SessionCandidate {
+            can_use: candidate.can_use(),
+            reason: candidate.reason.map(|r| r.word().to_owned()),
+            agent: candidate.agent,
+            state: candidate.state,
+            busy_with: candidate.busy_with,
+            last_execution: candidate.last_execution,
         })
         .collect();
     Ok(Json(crossagents_api_types::ListSessionCandidatesResponse {

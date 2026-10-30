@@ -66,13 +66,48 @@ pub struct NewRun {
     pub attachments: Vec<Attachment>,
 }
 
+/// Why a session cannot be picked as it is. `Archived` is not a refusal: such a session
+/// works once `restore` brings it back, which is what tells `can_use` apart from `reason`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotReady {
+    /// Held by a run, so nothing else may take it.
+    Busy,
+    /// Its driver cannot resume the session in another directory, and this workspace's runs
+    /// work in a worktree.
+    CannotMove,
+    /// Out of the lists, its conversation kept: usable with `restore`.
+    Archived,
+}
+
+impl NotReady {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Busy => "busy",
+            Self::CannotMove => "cannot_move",
+            Self::Archived => "archived",
+        }
+    }
+
+    /// Whether picking the session can still work. Only `Archived` can.
+    pub fn can_use(self) -> bool {
+        matches!(self, Self::Archived)
+    }
+}
+
 /// Advisory availability of a session in a workspace.
 pub struct SessionCandidate {
     pub agent: Agent,
     pub state: String,
     pub busy_with: Option<String>,
     pub last_execution: Option<String>,
-    pub reason: Option<String>,
+    pub reason: Option<NotReady>,
+}
+
+impl SessionCandidate {
+    /// Whether the session can be picked; an archived one can, with `restore`.
+    pub fn can_use(&self) -> bool {
+        self.reason.is_none_or(NotReady::can_use)
+    }
 }
 
 /// What the person settles when approving a plan (docs/tasks/W1.md §5.2); absent fields
@@ -522,12 +557,14 @@ impl Orchestrator {
         let mut result = Vec::new();
         let needs_move = self.workspaces.versioned(repo).await;
         for s in self.workspace_sessions(repo, None).await? {
+            // What blocks use comes first, so a session that is both busy and archived reads
+            // as busy: restoring it would not help.
             let reason = if s.busy_with.is_some() {
-                Some("busy".to_owned())
+                Some(NotReady::Busy)
             } else if needs_move && !self.host.can_move(&s.agent).await {
-                Some("cannot_move".to_owned())
+                Some(NotReady::CannotMove)
             } else if s.agent.archived_at.is_some() {
-                Some("archived".to_owned())
+                Some(NotReady::Archived)
             } else {
                 None
             };
