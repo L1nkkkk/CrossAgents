@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::brief;
-use crate::engine::{Orchestrator, agent_name};
+use crate::engine::{Orchestrator, agent_name, worker_name};
 use crate::plan;
 use crate::tools::args;
 use crate::verify::{all_passed, run_command};
@@ -432,14 +432,8 @@ impl Orchestrator {
             }
         }
         let worker = if a.fresh {
-            self.fresh_agent(
-                &task,
-                to.id,
-                &agent_name("w", &run, &task),
-                Role::Worker,
-                &cwd,
-            )
-            .await?
+            self.fresh_agent(&task, to.id, &worker_name(&run, &task), Role::Worker, &cwd)
+                .await?
         } else {
             self.store.get_agent(&AgentKey::Id(to.id)).await?
         };

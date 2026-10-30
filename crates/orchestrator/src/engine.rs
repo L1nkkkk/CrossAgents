@@ -1279,7 +1279,7 @@ The person changed: {}",
         } else {
             assigned
         };
-        let name = agent_name(if task.escalated { "e" } else { "w" }, run, task);
+        let name = worker_name(run, task);
         let left = self.left_by_issuer(run, task).await;
         let (worker, cloned, rerouted) = if !task.worker_fresh && !task.escalated {
             // The session itself, with its conversation (docs/tasks/S1.md §3.3).
@@ -1951,6 +1951,13 @@ pub(crate) fn agent_name(prefix: &str, run: &Run, task: &Task) -> String {
     let mut name = format!("{prefix}-{}-{}", &short(run.id)[..6], task.key);
     name.truncate(32);
     name.trim_end_matches('-').to_owned()
+}
+
+/// The name of the session that works on `task`: `w-…`, or `e-…` once the task was escalated
+/// to a stronger model, so the name says what the session is. Every place that names a worker
+/// goes through this, or the prefix drifts apart between them.
+pub(crate) fn worker_name(run: &Run, task: &Task) -> String {
+    agent_name(if task.escalated { "e" } else { "w" }, run, task)
 }
 
 fn role_word(role: Role) -> &'static str {

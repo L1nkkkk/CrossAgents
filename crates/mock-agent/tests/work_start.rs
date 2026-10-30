@@ -4,7 +4,7 @@
 mod common;
 
 use common::{TestHub, git_repo, native_plugin};
-use crossagents_api_types::EventKind;
+use crossagents_api_types::{AgentStatus, EventKind};
 use serde_json::{Value, json};
 
 fn call(tool: &str, args: Value) -> String {
@@ -35,6 +35,19 @@ async fn propose(t: &TestHub) -> Value {
         "card",
         |e| matches!(&e.kind, EventKind::HumanAsked { item } if item.text == "Add notes"),
     )
+    .await;
+    // The card goes up while the proposer's turn is still running. Answering it then is
+    // refused — rightly: it is answering a person. Waiting for the turn to end makes
+    // starting the Work deterministic, instead of failing under load.
+    w.until("the proposer's turn ended", |e| {
+        matches!(
+            e.kind,
+            EventKind::AgentStatusChanged {
+                to: AgentStatus::Idle,
+                ..
+            }
+        )
+    })
     .await;
     card(t).await
 }

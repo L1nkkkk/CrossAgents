@@ -449,3 +449,21 @@ async fn a_task_updated_while_the_run_is_paused_does_not_start() {
     assert_eq!(task.depends_on, vec!["done".to_owned()], "{task:?}");
     assert_eq!(task.assignee, None, "{task:?}");
 }
+
+/// The prefix says what the session is, so an escalated task's session is `e-…`. Three places
+/// name a worker (engine's handout, `tasks.rs`'s reassignment, `quota.rs`'s move off a spent
+/// account); they all go through `worker_name`, or the name stops matching the session.
+#[tokio::test]
+async fn an_escalated_task_names_its_session_with_e() {
+    let f = Fixture::new().await;
+    let mut task = f.insert("auth", TaskStatus::Pending, &[], None).await;
+
+    let plain = crate::engine::worker_name(&f.run, &task);
+    assert!(plain.starts_with("w-"), "{plain}");
+    assert!(plain.ends_with("-auth"), "{plain}");
+
+    task.escalated = true;
+    let escalated = crate::engine::worker_name(&f.run, &task);
+    assert!(escalated.starts_with("e-"), "{escalated}");
+    assert_eq!(escalated[1..], plain[1..], "only the prefix differs");
+}
