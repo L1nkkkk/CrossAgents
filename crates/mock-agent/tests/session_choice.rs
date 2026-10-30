@@ -88,6 +88,29 @@ async fn archived_requires_restore() {
             .status(),
         200
     );
+    let mut url = reqwest::Url::parse(&format!("{}/v1/session-candidates", t.base)).unwrap();
+    url.query_pairs_mut()
+        .append_pair("repo", &repo.path().to_string_lossy());
+    let candidates: Value = t
+        .client
+        .get(url)
+        .bearer_auth(&t.hub.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let pia = &candidates["sessions"][0];
+    assert_eq!(pia["can_use"], true);
+    assert_eq!(pia["reason"], "archived");
+    let chat = t.post("/v1/agents/Pia/chat", json!({"text":"hello"})).await;
+    assert_eq!(chat.status(), 409);
+    let error = chat.text().await.unwrap();
+    assert!(
+        error.contains("Pia") && error.contains("restore: true"),
+        "{error}"
+    );
     let rejected = t
         .post(
             "/v1/runs",
@@ -205,4 +228,69 @@ async fn candidates_report_why_and_filter_workspace() {
         .unwrap();
     assert_eq!(pinned["reason"], "cannot_move");
     assert_eq!(pinned["can_use"], false);
+}
+
+#[tokio::test]
+async fn in_place_pinned_session_can_lead_itself() {
+    let repo = tempfile::tempdir().unwrap();
+    let sessions = tempfile::tempdir().unwrap();
+    let t = TestHub::start_with(pinned_plugin(sessions.path())).await;
+    let pia = t.add_on("pinned", "Pia", "planner", repo.path()).await;
+    let mut watch = t.watch().await;
+    t.send("Pia", "[session]").await;
+    watch
+        .until(
+            "chat",
+            |e| matches!(e.kind, EventKind::AgentTurnCompleted { id, .. } if id == pia.id),
+        )
+        .await;
+    let session = watch
+        .output()
+        .split("session=")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_owned();
+    let mut url = reqwest::Url::parse(&format!("{}/v1/session-candidates", t.base)).unwrap();
+    url.query_pairs_mut()
+        .append_pair("repo", &repo.path().to_string_lossy());
+    let candidates: Value = t
+        .client
+        .get(url)
+        .bearer_auth(&t.hub.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(candidates["sessions"][0]["can_use"], true);
+    assert!(candidates["sessions"][0]["reason"].is_null());
+    let before: Value = t.get("/v1/agents").await.json().await.unwrap();
+    let r = run(
+        &t,
+        json!({"planner":"Pia", "request":"[session]", "fresh":false}),
+    )
+    .await;
+    assert_eq!(r["planner"], json!(pia.id));
+    assert_eq!(r["in_place"], true);
+    watch
+        .until(
+            "run",
+            |e| matches!(e.kind, EventKind::AgentTurnCompleted { id, .. } if id == pia.id),
+        )
+        .await;
+    let output = watch.output();
+    assert_eq!(
+        output.matches(&format!("session={session} ")).count(),
+        2,
+        "{output}"
+    );
+    let after: Value = t.get("/v1/agents").await.json().await.unwrap();
+    assert_eq!(
+        before["agents"].as_array().unwrap().len(),
+        after["agents"].as_array().unwrap().len()
+    );
 }

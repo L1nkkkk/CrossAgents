@@ -66,6 +66,15 @@ pub struct NewRun {
     pub attachments: Vec<Attachment>,
 }
 
+/// Advisory availability of a session in a workspace.
+pub struct SessionCandidate {
+    pub agent: Agent,
+    pub state: String,
+    pub busy_with: Option<String>,
+    pub last_execution: Option<String>,
+    pub reason: Option<String>,
+}
+
 /// What the person settles when approving a plan (docs/tasks/W1.md §5.2); absent fields
 /// keep what the run started with.
 #[derive(Debug, Clone, Default)]
@@ -509,28 +518,26 @@ impl Orchestrator {
     pub async fn session_candidates(
         &self,
         repo: &Path,
-    ) -> Result<
-        Vec<(
-            Agent,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        )>,
-        CoreError,
-    > {
+    ) -> Result<Vec<SessionCandidate>, CoreError> {
         let mut result = Vec::new();
+        let needs_move = self.workspaces.versioned(repo).await;
         for s in self.workspace_sessions(repo, None).await? {
             let reason = if s.busy_with.is_some() {
                 Some("busy".to_owned())
-            } else if !self.host.can_move(&s.agent).await {
+            } else if needs_move && !self.host.can_move(&s.agent).await {
                 Some("cannot_move".to_owned())
             } else if s.agent.archived_at.is_some() {
                 Some("archived".to_owned())
             } else {
                 None
             };
-            result.push((s.agent, s.state.to_owned(), s.busy_with, s.last, reason));
+            result.push(SessionCandidate {
+                agent: s.agent,
+                state: s.state.to_owned(),
+                busy_with: s.busy_with,
+                last_execution: s.last,
+                reason,
+            });
         }
         Ok(result)
     }
@@ -567,7 +574,8 @@ impl Orchestrator {
         planner: &Agent,
         restore: bool,
     ) -> Result<(Agent, bool), CoreError> {
-        self.may_take_self(run, planner, restore).await?;
+        self.may_take_self_with_move(run, planner, restore, !run.in_place)
+            .await?;
         if self.host.serving_person(planner.id).await {
             return Err(CoreError::Busy(format!(
                 "{} is answering a person, or a person's message waits for it: try again later",

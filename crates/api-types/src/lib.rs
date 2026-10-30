@@ -610,8 +610,9 @@ pub struct SessionCandidate {
     pub state: String,
     pub busy_with: Option<String>,
     pub last_execution: Option<String>,
+    /// Whether the session can be selected; archived sessions can be selected with restore: true.
     pub can_use: bool,
-    /// busy, archived, cannot_move, or null.
+    /// busy and cannot_move block use; archived requires restore: true; null needs no action.
     pub reason: Option<String>,
 }
 

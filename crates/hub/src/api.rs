@@ -398,14 +398,15 @@ async fn session_candidates(
         .session_candidates(std::path::Path::new(&query.repo))
         .await?
         .into_iter()
-        .map(|(agent, state, busy_with, last_execution, reason)| {
+        .map(|candidate| {
+            let can_use = !matches!(candidate.reason.as_deref(), Some("busy" | "cannot_move"));
             crossagents_api_types::SessionCandidate {
-                agent,
-                state,
-                busy_with,
-                last_execution,
-                can_use: reason.is_none(),
-                reason,
+                agent: candidate.agent,
+                state: candidate.state,
+                busy_with: candidate.busy_with,
+                last_execution: candidate.last_execution,
+                can_use,
+                reason: candidate.reason,
             }
         })
         .collect();
@@ -429,9 +430,11 @@ async fn start_chat(
     state.orchestrator.chat_available(&agent).await?;
     if agent.archived_at.is_some() {
         if !req.restore {
-            return Err(AppError::bad_request(
-                "session is archived; set restore: true",
-            ));
+            return Err(CoreError::Conflict(format!(
+                "{} is archived: restore it first with restore: true",
+                agent.name
+            ))
+            .into());
         }
         state.runtime.archive(&key, false).await?;
     }

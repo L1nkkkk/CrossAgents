@@ -329,6 +329,17 @@ impl Orchestrator {
         agent: &Agent,
         restore: bool,
     ) -> Result<(), CoreError> {
+        self.may_take_self_with_move(run, agent, restore, true)
+            .await
+    }
+
+    pub(crate) async fn may_take_self_with_move(
+        &self,
+        run: &Run,
+        agent: &Agent,
+        restore: bool,
+        needs_move: bool,
+    ) -> Result<(), CoreError> {
         if agent.home() != run.repo {
             return Err(CoreError::Conflict(format!(
                 "{} belongs to {}, not to this run's workspace {}: give the task to a new execution session (leave fresh out)",
@@ -337,7 +348,7 @@ impl Orchestrator {
                 run.repo.display()
             )));
         }
-        if !self.host.can_move(agent).await {
+        if needs_move && !self.host.can_move(agent).await {
             return Err(CoreError::Conflict(format!(
                 "{}'s driver cannot resume its session in another directory, so it cannot work on a task itself: leave fresh out, and a new execution session takes the task",
                 agent.name
