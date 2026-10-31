@@ -18,6 +18,7 @@ import { Avatar, BrandMark, Icon, Mark, agentTitle, displayName, hueOf, isAgent,
 import { DeleteRunDialog } from "./deleteRun";
 import { useConnectionStatus } from "./hub";
 import { t } from "./lib/i18n";
+import { RowLive, usePulseSeeds, useRowLive } from "./liveTurn";
 import { prettyModel } from "./lib/models";
 import { capped, childPath, groupRunsByOrigin } from "./lib/sidebarTree";
 import { startNew } from "./menubar";
@@ -50,6 +51,9 @@ export function Sidebar({ route }: { route: string[] }) {
   const [menu, setMenu] = useState<{ detail: RunDetail; x: number; y: number }>();
   const [deleting, setDeleting] = useState<RunDetail>();
   const everyone = agents.data ?? [];
+  // A running turn that began before this page loaded: ask its transcript once, so its row
+  // shows the real elapsed time (liveTurn.tsx).
+  usePulseSeeds(everyone);
   const q = query.trim().toLowerCase();
   const matchesAgent = (a: Agent) =>
     !q || a.name.toLowerCase().includes(q) || (a.topic ?? "").toLowerCase().includes(q) || (projectOf(a) ?? "").toLowerCase().includes(q);
@@ -397,6 +401,7 @@ function SessionRow({
     if (childActive) setToggled(undefined);
   }, [childActive]);
   const doing = useActivity(agent.id);
+  const live = useRowLive(agent);
   const unread = useUnread()[agent.id];
   const planWaiting = useContext(PendingPlans).has(agent.id);
   const dot: Dot =
@@ -433,6 +438,7 @@ function SessionRow({
           {note && <span className="role">{note}</span>}
         </>
       }
+      live={live && <RowLive {...live} />}
       tag={!note && project ? <span className="row-tag" title={agent.cwd}>{project}</span> : undefined}
       after={
         (recruits.length > 0 || runs.length > 0) && (
@@ -508,6 +514,7 @@ function Row({
   title,
   lead,
   label,
+  live,
   tag,
   after,
   dot,
@@ -522,6 +529,8 @@ function Row({
   title: string;
   lead?: ReactNode;
   label: ReactNode;
+  /** What a running turn does now, kept visible after the title truncates (its elapsed time). */
+  live?: ReactNode;
   /** A short label kept visible after `label`, which truncates first (a conversation's project). */
   tag?: ReactNode;
   after?: ReactNode;
@@ -552,7 +561,10 @@ function Row({
         onContextMenu={onMenu}
       >
         {lead && <span className="row-lead">{lead}</span>}
-        <span className="row-label">{label}</span>
+        <span className="row-main">
+          <span className="row-label">{label}</span>
+          {live}
+        </span>
         {tag}
         {after}
       </a>

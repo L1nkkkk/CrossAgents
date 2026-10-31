@@ -33,6 +33,7 @@ import { TurnMap, type MapEntry } from "../turnmap";
 import { focusSession, openTool, toggleTools, useLayout } from "../panes";
 import { taskState } from "../lib/taskState";
 import { QUIET_AFTER, actionOf, duration, failed, liveActivity, liveKey, liveNow, quietSeconds, stepLine, summarize, workGroups, type ActionTool, type Step } from "../lib/workGroups";
+import { TurnLive, type LiveTurn } from "../liveTurn";
 import { PeerMessage, StateWord, useArmed } from "../parts";
 import { useSession, type TranscriptItem, type TranscriptTurn } from "../session";
 import { dismissNotice, useNotices } from "../notices";
@@ -50,6 +51,11 @@ import { PlanTasks, usePlanApproval } from "./Run";
 /** A person's message, or one recorded before senders were. */
 const fromPerson = (turn: TranscriptTurn) => !turn.from || turn.from.kind === "human";
 const started = (turn: TranscriptTurn) => !!turn.started_at || !!turn.completed_at;
+
+/** Which of a session's active tasks it is on now: running, then review / verification, then the rest. */
+function rankTask(status: RunDetail["tasks"][number]["status"]): number {
+  return status === "running" ? 0 : status === "reviewing" || status === "verifying" ? 1 : 2;
+}
 
 /**
  * What the pane's own header needs to know about the side slot: whether the rail is a drawer
@@ -169,6 +175,19 @@ export function SessionView({
   const queued = turns.filter((t) => !started(t));
   const led = runs.filter((d) => d.run.planner === agent.id);
   const recruits = everyone.filter((a) => (a.config as Record<string, unknown> | null)?.spawned_by_agent === agent.id && !a.archived_at);
+  // The turn running now, and (when it works a task for a run) that task's counts: both are in
+  // the header as well as on the live line under the turn (docs/TODO.md §四 ②).
+  const runningTurn = turns.findLast((turn) => !!turn.started_at && !turn.completed_at);
+  const workingTask = tasks
+    .filter(({ task }) => taskState(task).bucket === "active")
+    .sort((a, b) => rankTask(a.task.status) - rankTask(b.task.status) || b.task.updated_at.localeCompare(a.task.updated_at))[0];
+  const live: LiveTurn | undefined = runningTurn
+    ? {
+        since: Date.parse(runningTurn.started_at!),
+        items: runningTurn.items,
+        ...(workingTask ? { task: workingTask.task, siblings: runs.find((d) => d.run.id === workingTask.run.id)?.tasks } : {}),
+      }
+    : undefined;
   // Who @ offers: this conversation's recruits, then the other agents working in its project.
   const mates = [
     ...recruits,
@@ -178,7 +197,7 @@ export function SessionView({
   return (
     <SideSlot.Provider value={{ narrow: !rail, open: drawer, toggle: () => setDrawer((d) => !d) }}>
       <section className={`pane ${rail ? "with-rail" : ""} ${side ? "run-side" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)}>
-        {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onClose={onClose} />}
+        {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} live={live} rail={rail} onClose={onClose} />}
         <ExecutionBar agent={agent} />
         <NoticeBar agent={agent} />
         <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} works={workDecisions(questions.data?.items ?? [], agent.id)} agents={everyone} tree={runs} top={top}>
@@ -383,6 +402,7 @@ function Header({
   usage,
   driver,
   tasks,
+  live,
   rail,
   onClose,
 }: {
@@ -391,6 +411,8 @@ function Header({
   usage: TranscriptUsage | null;
   driver: string | null;
   tasks: { run: Run; task: RunDetail["tasks"][number] }[];
+  /** The turn running now, shown under the title as well as on its live line below. */
+  live?: LiveTurn;
   /** The info rail is showing the model, context and tasks: the header leaves them out. */
   rail: boolean;
   onClose?: () => void;
@@ -504,6 +526,7 @@ function Header({
           </button>
         )}
       </div>
+      {live && <TurnLive {...live} />}
       {profile && (
         <div className="profile-pop">
           <ProfileEditor agent={agent} onDone={() => setProfile(false)} />
