@@ -72,8 +72,27 @@ impl Orchestrator {
         opts: DeleteRun,
         delete: bool,
     ) -> Result<DeletedRun, CoreError> {
+        let work_id = self.store.get_run(id).await?.work_id;
+        let _work_guard = if let Some(id) = work_id {
+            Some(self.lock_card(&format!("work:{id}")).await)
+        } else {
+            None
+        };
         let _guard = self.lock(id).await;
         let run = self.store.get_run(id).await?;
+        if run.work_id.is_some()
+            && self
+                .store
+                .list_runs()
+                .await?
+                .into_iter()
+                .find(|r| r.work_id == run.work_id)
+                .is_some_and(|latest| latest.id != id)
+        {
+            return Err(CoreError::Conflict(
+                "only the last round in a work group can be deleted or cleaned up".into(),
+            ));
+        }
         if !run.status.is_terminal() {
             return Err(CoreError::Conflict(format!(
                 "the run is {:?}: cancel it first",
@@ -294,7 +313,8 @@ impl Orchestrator {
     pub(crate) fn owns_checkout(&self, run: &Run, dir: &Path) -> bool {
         !run.in_place
             && dir != run.repo
-            && dir.parent() == Some(self.config.worktrees.join(short(run.id)).as_path())
+            && (dir.parent() == Some(self.config.worktrees.join(short(run.id)).as_path())
+                || dir == self.integration_path(run))
             && dir
                 .file_name()
                 .is_some_and(|n| n != "targets" && n != "target")
@@ -431,6 +451,16 @@ impl Orchestrator {
     /// `<short>/target`, then the run's directory once nothing else is in it; records what went.
     fn remove_run_build_into(&self, run: &Run, done: &mut DeletedRun) {
         let key = short(run.id);
+        let integration_key = self.integration_key(run);
+        if integration_key != key && !self.integration_path(run).exists() {
+            for (path, _) in crate::workspace::remove_target(
+                &self.config.worktrees,
+                &integration_key,
+                "integration",
+            ) {
+                done.worktrees.push(path.display().to_string());
+            }
+        }
         for (path, _size) in crate::workspace::remove_run_build_dirs(&self.config.worktrees, &key) {
             done.worktrees.push(path.display().to_string());
         }

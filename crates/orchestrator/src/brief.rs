@@ -14,6 +14,33 @@ use crate::project::{self, RunChecks, RunEnv};
 // Kept in sync with the GUI kickoff recognizer.
 const KICKOFF_SEPARATOR: &str = "\n\n---\nrun: ";
 
+pub fn previous_rounds(rounds: &[Run]) -> String {
+    let mut out = String::new();
+    if !rounds.is_empty() {
+        out.push_str("\nPrevious rounds in this work group:");
+    }
+    for run in rounds.iter().take(5) {
+        let _ = write!(
+            out,
+            "\n- {} · {:?} · {} · {}",
+            run.title,
+            run.status,
+            if run.landed.is_some() {
+                "landed"
+            } else {
+                "not landed"
+            },
+            run.summary
+                .as_deref()
+                .unwrap_or("")
+                .lines()
+                .next()
+                .unwrap_or("")
+        );
+    }
+    out
+}
+
 /// The run's request as the person wrote it, then the facts the lead needs.
 pub fn kickoff(
     run: &Run,

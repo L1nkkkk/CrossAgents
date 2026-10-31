@@ -1335,40 +1335,10 @@ async fn create_work_run(
     let id = id
         .parse::<crossagents_core::WorkId>()
         .map_err(|_| CoreError::Conflict("invalid work id".into()))?;
-    let mut work = state.store().get_work(id).await?;
-    let previous = state
-        .store()
-        .list_runs()
-        .await?
-        .into_iter()
-        .find(|r| r.work_id == Some(id));
-    let config = previous.map(|r| r.config).unwrap_or(RunConfig {
-        worker: work.lead,
-        escalate: None,
-        reviewer: None,
-        auto_approve: false,
-        max_parallel: RunConfig::DEFAULT_MAX_PARALLEL,
-        max_attempts: RunConfig::DEFAULT_MAX_ATTEMPTS,
-        team: Vec::new(),
-        policy: Default::default(),
-    });
-    let new = NewRun {
-        origin_chat_id: None,
-        request: req.request,
-        title: req.title,
-        planner: work.lead,
-        config,
-        repo: Some(work.repo.clone()),
-        base_branch: None,
-        attachments: Vec::new(),
-    };
     let run = state
         .orchestrator
-        .create_run_for_work(new, None, false, Some(id))
+        .create_work_round(id, req.request, req.title, req.from.as_deref())
         .await?;
-    work.updated_at = Utc::now();
-    state.store().update_work(&work).await?;
-    state.bus.publish(EventKind::WorkUpdated { work }).await?;
     Ok((StatusCode::CREATED, Json(run)))
 }
 
