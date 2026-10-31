@@ -192,8 +192,9 @@ export function workspaceState(): MockState {
 
   // Mia has two open questions: both must be found, and opening the session must not clear them.
   const questions = [
-    ask(mia, "按钮颜色要不要跟随系统深色设置？", ["跟随系统", "固定深色"], 12, rA.id, tA[1].id),
-    ask(mia, "旧的验证码登录入口保留吗？", ["保留", "去掉"], 30, null, null),
+    // The two oldest, so they head the list: the sidebar's first rows exercise the question route.
+    ask(mia, "按钮颜色要不要跟随系统深色设置？", ["跟随系统", "固定深色"], 420, rA.id, tA[1].id),
+    ask(mia, "旧的验证码登录入口保留吗？", ["保留", "去掉"], 400, null, null),
   ];
 
   return {
