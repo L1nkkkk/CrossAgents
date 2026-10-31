@@ -36,7 +36,8 @@ import { QUIET_AFTER, actionOf, duration, failed, liveActivity, liveKey, liveNow
 import { PeerMessage, StateWord, useArmed } from "../parts";
 import { useSession, type TranscriptItem, type TranscriptTurn } from "../session";
 import { dismissNotice, useNotices } from "../notices";
-import { QuestionCards } from "../questions";
+import { QuestionCards, useQuestions } from "../questions";
+import { workDecisions, type WorkDecision } from "../lib/workNotes";
 import { NeedsYouStrip, RunStrip } from "../strips";
 import { useHubData } from "../hub";
 import { ContextUsageButton, useCompact } from "../contextusage";
@@ -91,6 +92,7 @@ export function SessionView({
   const [draft, setDraft] = useState("");
   const agentId = transcript?.agent.id;
   const ledRuns = useRunsLedBy(agentId);
+  const questions = useQuestions();
   const outgoing = useOutbox(agentId, transcript?.turns);
   const { hidden: railOff } = useRail();
   // The run's side slot: a rail beside the conversation while it has room, else a drawer the
@@ -179,7 +181,7 @@ export function SessionView({
         {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} rail={rail} onClose={onClose} />}
         <ExecutionBar agent={agent} />
         <NoticeBar agent={agent} />
-        <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} agents={everyone} tree={runs} top={top}>
+        <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} works={workDecisions(questions.data?.items ?? [], agent.id)} agents={everyone} tree={runs} top={top}>
           {outgoing.map((m) => (
             <Sending key={m.key} message={m} agent={agent} />
           ))}
@@ -616,6 +618,7 @@ function Conversation({
   turns,
   switches,
   handoffs,
+  works = [],
   agents,
   tree,
   top,
@@ -626,6 +629,8 @@ function Conversation({
   switches: ModelSwitch[];
   /** The handoffs of the tasks in every run this agent leads. */
   handoffs: Handoff[];
+  /** What became of the Work this conversation proposed. */
+  works?: WorkDecision[];
   agents: Agent[];
   tree: RunDetail[];
   top?: ReactNode;
@@ -670,11 +675,13 @@ function Conversation({
           <AgentImageContext.Provider value={agent.id}>
           <CwdContext.Provider value={agent.cwd}>
           <Follow.Provider value={{ el: ref, stick }}>
-            {byTime(turns, [...switches, ...handoffs]).map((x) =>
+            {byTime(turns, [...switches, ...handoffs, ...works]).map((x) =>
               "message_id" in x ? (
                 <Turn key={x.message_id} turn={x} agent={agent} agents={agents} tree={tree} />
               ) : "task_key" in x ? (
                 <HandoffLine key={x.id} handoff={x} agents={agents} />
+              ) : "run_id" in x ? (
+                <WorkNote key={x.id} work={x} />
               ) : (
                 <SwitchNote key={x.at} change={x} />
               ),
@@ -701,15 +708,33 @@ function handoffsOf(runs: RunDetail[]): Handoff[] {
  * Turns, model switches and handoffs in the order they happened (a switch before the message
  * it applies to; a handoff after the turn that caused it).
  */
-function byTime(turns: TranscriptTurn[], notes: (ModelSwitch | Handoff)[]): (TranscriptTurn | ModelSwitch | Handoff)[] {
+function byTime(turns: TranscriptTurn[], notes: Note[]): (TranscriptTurn | Note)[] {
   const sorted = notes.slice().sort((a, b) => a.at.localeCompare(b.at));
-  const out: (TranscriptTurn | ModelSwitch | Handoff)[] = [];
+  const out: (TranscriptTurn | Note)[] = [];
   let i = 0;
   for (const turn of turns) {
     while (i < sorted.length && sorted[i].at <= turn.sent_at) out.push(sorted[i++]);
     out.push(turn);
   }
   return out.concat(sorted.slice(i));
+}
+
+type Note = ModelSwitch | Handoff | WorkDecision;
+
+/** A Work this conversation proposed: started (a link to its run) or not. */
+function WorkNote({ work }: { work: WorkDecision }) {
+  const title = firstLine(work.title);
+  return (
+    <div className="switch-note" title={`${time(work.at)} · 下一条消息会告诉 agent`}>
+      <Icon name="branch" size={13} />
+      {work.run_id ? (
+        <a href={`#/runs/${work.run_id}`}>开始了 Work「{title}」</a>
+      ) : (
+        <span>没有开始 Work「{title}」</span>
+      )}
+      <span className="switch-at">{clock(work.at)}</span>
+    </div>
+  );
 }
 
 /** "模型 Haiku → Sonnet · 推理 默认 → 低": only what changed. The agent is told the same with its next message. */

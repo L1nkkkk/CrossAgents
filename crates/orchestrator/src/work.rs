@@ -5,8 +5,8 @@
 
 use chrono::Utc;
 use crossagents_core::{
-    Agent, CoreError, EventKind, HumanAction, HumanItem, HumanItemKind, HumanItemStatus,
-    LandPolicy, MessageSource, PlanApproval, Run, RunConfig, RunPolicy, RunStatus,
+    Agent, AgentId, AgentKey, CoreError, EventKind, HumanAction, HumanItem, HumanItemKind,
+    HumanItemStatus, LandPolicy, PlanApproval, Run, RunConfig, RunPolicy, RunStatus,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -55,13 +55,8 @@ impl Orchestrator {
             first_line(&run.title, 90),
             run.id,
         );
-        if let Err(err) = self
-            .host
-            .tell_later(parent, &format!("run:{}", run.id), &line)
-            .await
-        {
-            tracing::warn!(%parent, run = %run.id, error = %err, "cannot keep the run's result for its source chat");
-        }
+        self.tell_quietly(parent, &format!("run:{}", run.id), &line)
+            .await;
     }
 
     pub(crate) async fn work_start(
@@ -171,11 +166,14 @@ impl Orchestrator {
         answer: Option<&str>,
     ) -> Result<(), CoreError> {
         if answer != Some(START) {
-            self.deliver(
-                item.from,
-                MessageSource::Human,
-                "The person chose not to open a Work for this: do it here in the conversation, or keep talking.".into(),
+            // A fact for its next message, not an instruction: declining a branch neither
+            // cancels the request nor asks for it to be done here now (docs/USAGE-TRIM.md §3.2).
+            let line = format!(
+                "The person did not accept your proposed Work \"{}\", so no run was created. What to do next is up to the person's next message.",
+                first_line(&item.text, 90)
             );
+            self.tell_quietly(item.from, &format!("work:{}", item.id), &line)
+                .await;
             return Ok(());
         }
         let proposer = item.from;
@@ -219,26 +217,45 @@ impl Orchestrator {
             .await?;
         item.run_id = Some(run.id);
         self.store().put_human_item(item).await?;
-        let lead = self
-            .store()
-            .get_agent(&crossagents_core::AgentKey::Id(run.planner))
-            .await?;
-        let text = if lead.id == proposer {
-            // It leads the run itself, from the run's checkout, with this conversation.
-            format!(
-                "The person started the Work \"{}\" (run {}): you lead it yourself, on branch {}, working in the run's checkout {}. Your request is the brief that follows.",
-                run.title,
-                run.id,
-                run.branch,
-                lead.cwd.display()
-            )
-        } else {
-            format!(
-                "The person started the Work \"{}\" (run {}): {} leads it on branch {}, with your request as its brief. This conversation stays as it is; the Work goes on there.",
-                run.title, run.id, lead.name, run.branch
-            )
-        };
-        self.deliver(proposer, MessageSource::Human, text);
+        self.tell_origin_started(&run).await;
         Ok(())
+    }
+
+    /// The source chat hears that its Work started with its next message, without a turn of
+    /// its own just to acknowledge it. It shares the run's topic with the closing result, so
+    /// the newest state is what it reads; a run that already ended gets its result written
+    /// again after this, since that one is written only once the run is saved as ended
+    /// (docs/USAGE-TRIM.md §3.3).
+    pub(crate) async fn tell_origin_started(&self, run: &Run) {
+        let Some(parent) = run.origin_chat_id.filter(|id| *id != run.planner) else {
+            return;
+        };
+        let lead = match self.store().get_agent(&AgentKey::Id(run.planner)).await {
+            Ok(lead) => lead.name,
+            Err(_) => run.planner.to_string(),
+        };
+        let line = format!(
+            "CrossAgents work started: \"{}\" (run {}), led by {lead} on branch {}, from your brief. This conversation stays as it is; the Work goes on there.",
+            first_line(&run.title, 90),
+            run.id,
+            run.branch
+        );
+        self.tell_quietly(parent, &format!("run:{}", run.id), &line)
+            .await;
+        match self.store().get_run(run.id).await {
+            Ok(now) if now.status.is_terminal() => self.tell_origin_later(&now).await,
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(run = %run.id, error = %err, "cannot recheck the run after its start notice")
+            }
+        }
+    }
+
+    /// A notice kept for the agent's next message. Never falls back to waking it: the GUI
+    /// shows the same fact.
+    async fn tell_quietly(&self, agent: AgentId, topic: &str, line: &str) {
+        if let Err(err) = self.host.tell_later(agent, topic, line).await {
+            tracing::warn!(%agent, topic, error = %err, "cannot keep a notice for the agent's next message");
+        }
     }
 }

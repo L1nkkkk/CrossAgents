@@ -212,6 +212,8 @@ impl Orchestrator {
             return Ok(());
         }
         item.status = HumanItemStatus::Dismissed;
+        // When it was decided, for the chat's record of a Work that did not start.
+        item.answered_at = Some(Utc::now());
         self.store().put_human_item(&item).await?;
         if item.action == Some(HumanAction::Approval) {
             self.approval_decided(&item.id, None);

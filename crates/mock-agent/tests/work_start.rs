@@ -427,29 +427,42 @@ async fn a_movable_proposer_keeps_its_conversation_and_gets_a_fresh_lead() {
 }
 
 #[tokio::test]
-async fn ending_a_child_keeps_its_summary_until_the_parent_gets_a_message() {
+async fn starting_and_ending_a_child_never_wake_the_parent() {
     let repo = git_repo();
     let t = TestHub::start_with(native_plugin).await;
     let parent = t.add_native("lyra", "worker", repo.path()).await;
     let item = propose(&t).await;
+    let turns_of = |events: &[crossagents_core::Event]| {
+        events
+            .iter()
+            .filter(|e| matches!(e.kind, EventKind::AgentTurnStarted { .. }))
+            .count()
+    };
+    let parent_turns = || async {
+        turns_of(
+            &t.hub
+                .bus
+                .store()
+                .agent_events(parent.id, 0, 1000)
+                .await
+                .unwrap(),
+        )
+    };
+    let before = parent_turns().await;
+
+    // Started: the lead goes to work at once; the parent gets no turn just to acknowledge it
+    // (docs/USAGE-TRIM.md §3).
     let mut w = t.watch().await;
     let run = start(&t, &item).await;
-    w.until("parent's startup acknowledgement", |e| {
-        matches!(e.kind,
-        EventKind::AgentTurnCompleted { id, .. } if id == parent.id)
-    })
+    let lead: crossagents_core::AgentId = run["planner"].as_str().unwrap().parse().unwrap();
+    w.until(
+        "the lead's first turn",
+        |e| matches!(e.kind, EventKind::AgentTurnCompleted { id, .. } if id == lead),
+    )
     .await;
-    let events = t
-        .hub
-        .bus
-        .store()
-        .agent_events(parent.id, 0, 1000)
-        .await
-        .unwrap();
-    let turns = events
-        .iter()
-        .filter(|e| matches!(e.kind, EventKind::AgentTurnStarted { .. }))
-        .count();
+    assert!(!t.hub.runtime.is_busy(parent.id).await);
+    assert_eq!(parent_turns().await, before, "the start woke the parent");
+
     let completed = t
         .post(
             &format!("/v1/runs/{}/finish", run["id"].as_str().unwrap()),
@@ -466,21 +479,13 @@ async fn ending_a_child_keeps_its_summary_until_the_parent_gets_a_message() {
         !t.hub.runtime.is_busy(parent.id).await,
         "the completion did not wake the parent"
     );
-    let events = t
-        .hub
-        .bus
-        .store()
-        .agent_events(parent.id, 0, 1000)
-        .await
-        .unwrap();
     assert_eq!(
-        events
-            .iter()
-            .filter(|e| matches!(e.kind, EventKind::AgentTurnStarted { .. }))
-            .count(),
-        turns
+        parent_turns().await,
+        before,
+        "the completion woke the parent"
     );
 
+    // Its next message carries the newest state only: the result replaced "started".
     let mut w = t.watch().await;
     t.send("lyra", "How did that work go?").await;
     w.until("next parent reply", |e| {
@@ -493,6 +498,7 @@ async fn ending_a_child_keeps_its_summary_until_the_parent_gets_a_message() {
     assert!(output.contains("Recorded the agreed result."), "{output}");
     assert!(output.contains(run["id"].as_str().unwrap()), "{output}");
     assert!(output.contains("not landed"), "{output}");
+    assert!(!output.contains("work started"), "{output}");
 
     let mut w = t.watch().await;
     t.send("lyra", "Next topic.").await;
@@ -505,6 +511,95 @@ async fn ending_a_child_keeps_its_summary_until_the_parent_gets_a_message() {
         !w.output().contains("CrossAgents work result:"),
         "the notice is only consumed once"
     );
+}
+
+/// USAGE-TRIM §3.2: while the Work goes on, the parent's next message says it started.
+#[tokio::test]
+async fn the_parents_next_message_says_its_work_started() {
+    let repo = git_repo();
+    let t = TestHub::start_with(native_plugin).await;
+    let parent = t.add_native("lyra", "worker", repo.path()).await;
+    let run = start(&t, &propose(&t).await).await;
+    assert!(!t.hub.runtime.is_busy(parent.id).await);
+
+    let mut w = t.watch().await;
+    t.send("lyra", "Anything new?").await;
+    w.until(
+        "parent reply",
+        |e| matches!(e.kind, EventKind::AgentTurnCompleted { id, .. } if id == parent.id),
+    )
+    .await;
+    let output = w.output();
+    assert!(output.contains("CrossAgents work started"), "{output}");
+    assert!(output.contains(run["id"].as_str().unwrap()), "{output}");
+    assert!(output.contains(run["branch"].as_str().unwrap()), "{output}");
+}
+
+/// USAGE-TRIM §3.2: declining or closing a proposal wakes nobody; the parent's next message
+/// states the fact without telling it to go ahead here.
+#[tokio::test]
+async fn declining_or_closing_a_proposal_does_not_wake_the_parent() {
+    for how in ["decline", "close"] {
+        let repo = git_repo();
+        let t = TestHub::start_with(native_plugin).await;
+        let parent = t.add_native("lyra", "worker", repo.path()).await;
+        let item = propose(&t).await;
+        let turns = || async {
+            t.hub
+                .bus
+                .store()
+                .agent_events(parent.id, 0, 1000)
+                .await
+                .unwrap()
+                .iter()
+                .filter(|e| matches!(e.kind, EventKind::AgentTurnStarted { .. }))
+                .count()
+        };
+        let before = turns().await;
+        let id = item["id"].as_str().unwrap();
+        let resp = if how == "decline" {
+            t.post(
+                &format!("/v1/questions/{id}/answer"),
+                json!({ "answer": "不用" }),
+            )
+            .await
+        } else {
+            t.post(&format!("/v1/questions/{id}/dismiss"), json!({}))
+                .await
+        };
+        assert!(
+            resp.status().is_success(),
+            "{how}: {}",
+            resp.text().await.unwrap()
+        );
+        assert!(!t.hub.runtime.is_busy(parent.id).await, "{how}");
+        assert_eq!(turns().await, before, "{how} woke the parent");
+        let all: Value = t.get("/v1/questions?all=true").await.json().await.unwrap();
+        let card = all["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["id"] == item["id"])
+            .unwrap()
+            .clone();
+        assert!(!card["answered_at"].is_null(), "{how}: {card}");
+
+        let mut w = t.watch().await;
+        t.send("lyra", "OK.").await;
+        w.until(
+            "parent reply",
+            |e| matches!(e.kind, EventKind::AgentTurnCompleted { id, .. } if id == parent.id),
+        )
+        .await;
+        let output = w.output();
+        assert!(
+            output.contains("did not accept your proposed Work"),
+            "{how}: {output}"
+        );
+        assert!(!output.contains("do it here"), "{how}: {output}");
+        let runs: Value = t.get("/v1/runs").await.json().await.unwrap();
+        assert!(runs["runs"].as_array().unwrap().is_empty(), "{how}: {runs}");
+    }
 }
 
 #[tokio::test]
