@@ -936,8 +936,8 @@ impl Orchestrator {
         let dir = Self::worktree(&task)?;
         let (base, _) = self.base_of(&run, &task).await?;
         if a.stat_only {
-            let committed = self.ws_for(&run).diff_stat(&dir, &base).await?;
-            return Ok(json!({ "base": base, "stat": committed }));
+            let stat = self.ws_for(&run).diff_stat(&dir, &base).await?;
+            return Ok(json!({ "base": base, "stat": stat }));
         }
         let diff = self.ws_for(&run).diff(&dir, &base, &a.paths).await?;
         Ok(json!({ "base": base, "diff": clip(diff, READ_LIMIT) }))
