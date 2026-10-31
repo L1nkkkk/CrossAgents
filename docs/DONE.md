@@ -211,6 +211,11 @@ B 删除 run：
 
 ## 十八、工作组：持续的工作空间，run 是其中一轮
 
+- [x] G1-2（2026-10-31）：新增 `run_next(title, request, from?)`，只有已结束且有工作组的 run 主导能调用，当场开下一轮，不出 Work 卡片，继承计划审批与落地策略。`POST /v1/works/{id}/runs` 共用规则，`CreateWorkRunRequest.from` 与 bindings 同步；`from` 只接受 `base`。
+  - worktree 续轮默认从未落地且有改动的上一轮分支开始；已落地、已取消、无改动或显式 `from: "base"` 时从真正基线开始。续轮在原集成 checkout 内切分支，复用会话与 `targets/integration`；不能搬目录的复制主导也不再复制。分组 run 取消时停主导进程、将 worktree 改动留在原轮分支、释放占用，保留会话目录供续轮；未分组 run 的取消行为不变。原地模式保留当前目录内容，没有分支链与连带落地。没有增加保留 / 清理策略字段。
+  - 落地沿同组分支链找到基线，包含所有未落地祖先，落地提交说明列轮次，祖先的 `landed.by` 为“随第 N 轮落地”，同时关闭其待落地通知。旧轮次可以单独落地，使用临时 checkout，不切换当前主导的分支；只允许清理或删除最后一轮，避免破坏共享 checkout。开场信息列最近最多五轮的标题、状态、落地状态和总结首行。
+  - `crates/mock-agent/tests/run_next.rs` 覆盖 MCP 续轮、API `from: "base"`、已落地或取消后基线续轮、进行中拒绝、目录与缓存复用、重启后三轮连带落地、原地模式、旧轮单独落地和复制主导续轮。G1-3 / G1-4 / G1-5 未在本轮实施。
+
 > 2026-10-29 设计见 [tasks/G1.md](tasks/G1.md)，2026-10-30 run `01a18a4a` 做了第一层。
 > 与 §十九 冲突处以 [tasks/LEAD.md](tasks/LEAD.md) §9 为准。
 

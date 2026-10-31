@@ -51,6 +51,11 @@ impl Orchestrator {
     /// stay on the run; a failure refuses `tool` with the output, for the lead to fix. The
     /// person is not held to them: they land or end the run from the run page.
     async fn require_run_checks(&self, run: &Run, tool: &str) -> Result<(), CoreError> {
+        let mut checked_run = run.clone();
+        if tool == "run_land" {
+            checked_run.base_branch = self.round_base(run).await?.0;
+        }
+        let run = &checked_run;
         let dir = self.integration_path(run);
         if run.landed.is_some() || !dir.exists() {
             return Ok(());
@@ -171,6 +176,11 @@ impl Orchestrator {
         }
         let a: A = args(input)?;
         let run = self.led_run(caller).await?;
+        let _work_guard = if let Some(id) = run.work_id {
+            Some(self.lock_card(&format!("work:{id}")).await)
+        } else {
+            None
+        };
         let mode = match (run.config.policy.land, a.mode) {
             (LandPolicy::Manual, _) => {
                 return Err(CoreError::Conflict(
@@ -251,6 +261,12 @@ impl Orchestrator {
         by: &str,
         message: Option<&str>,
     ) -> Result<LandOutcome, CoreError> {
+        let work_id = self.store.get_run(id).await?.work_id;
+        let _work_guard = if let Some(id) = work_id {
+            Some(self.lock_card(&format!("work:{id}")).await)
+        } else {
+            None
+        };
         let _guard = self.lock(id).await;
         let mut run = self.store.get_run(id).await?;
         if let Some(outcome) = self.ready_to_land(&mut run).await? {
@@ -278,6 +294,7 @@ impl Orchestrator {
             return Err(CoreError::Conflict(format!("the run is {:?}", run.status)));
         }
         let tasks = self.store.list_tasks(id).await?;
+        let baseline = self.round_base(run).await?.0;
         let open: Vec<&str> = tasks
             .iter()
             .filter(|t| !t.status.is_terminal())
@@ -291,29 +308,56 @@ impl Orchestrator {
         }
         self.commit_lead(run, &format!("crossagents: {}", run.title))
             .await?;
-        if !self.has_changes(run, &tasks).await? {
+        let mut compared = run.clone();
+        compared.base_branch = baseline.clone();
+        if !self.has_changes(&compared, &tasks).await? {
             return Err(CoreError::Conflict(
                 "the run branch changes nothing, so there is nothing to land".into(),
             ));
         }
         if !run.in_place {
             // A finished run has no integration worktree any more; check the branch out again.
-            let integration = self.integration_path(run);
+            let shared = self.integration_path(run);
+            // An earlier round can still be landed independently while the retained lead
+            // is on a later branch. Never commit or switch that lead's checkout for it.
+            let historical =
+                shared.exists() && self.workspaces.current_branch(&shared).await? != run.branch;
+            let integration = if historical {
+                crate::workspace::worktree_path(
+                    &self.config.worktrees,
+                    &crate::engine::short(run.id),
+                    "landing",
+                )
+            } else {
+                shared
+            };
             if !integration.exists() {
                 self.workspaces
                     .checkout(&run.repo, &run.branch, &integration)
                     .await?;
             }
-            if let Synced::Conflicts { files, detail } = self
-                .workspaces
-                .sync_base(&integration, &run.base_branch)
-                .await?
+            if let Synced::Conflicts { files, detail } =
+                self.workspaces.sync_base(&integration, &baseline).await?
             {
-                let key = self.sync_task(run, &tasks, &files, &detail).await?;
+                if historical {
+                    return Err(CoreError::Conflict(format!(
+                        "the earlier round conflicts with {baseline}; resolve {} on its branch {} before landing: {detail}",
+                        integration.display(),
+                        run.branch
+                    )));
+                }
+                let key = self
+                    .sync_task(run, &tasks, &files, &detail, &baseline)
+                    .await?;
                 return Ok(Some(LandOutcome::Deferred {
                     task: key,
                     conflicts: files,
                 }));
+            }
+            if historical {
+                self.workspaces
+                    .remove(&run.repo, &integration, None)
+                    .await?;
             }
         }
         Ok(None)
@@ -328,17 +372,42 @@ impl Orchestrator {
         message: Option<&str>,
     ) -> Result<LandOutcome, CoreError> {
         let id = run.id;
+        let stored = self.store.get_run(id).await?;
+        let (baseline, parents) = self.round_base(&stored).await?;
+        let rounds = self.store.list_runs().await?;
+        let mut group: Vec<_> = rounds
+            .iter()
+            .filter(|r| run.work_id.is_some() && r.work_id == run.work_id)
+            .collect();
+        group.sort_by_key(|r| (r.created_at, r.id));
+        let number = |id| {
+            group
+                .iter()
+                .position(|r| r.id == id)
+                .map(|n| n + 1)
+                .unwrap_or(1)
+        };
+        let carried: Vec<_> = parents.into_iter().filter(|r| r.landed.is_none()).collect();
+        let landed_ids: Vec<_> = std::iter::once(id)
+            .chain(carried.iter().map(|r| r.id))
+            .collect();
+        let mut message = message
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("crossagents: {}", run.title));
+        if !carried.is_empty() {
+            message.push_str(&format!(
+                "\n\n连带落地：{}",
+                carried
+                    .iter()
+                    .map(|r| format!("第 {} 轮（{}）", number(r.id), r.title))
+                    .collect::<Vec<_>>()
+                    .join("、")
+            ));
+        }
+        run.base_branch = baseline;
         let reference = self
             .ws_for(&run)
-            .land(
-                &run.repo,
-                &run.base_branch,
-                &run.branch,
-                mode,
-                &message
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| format!("crossagents: {}", run.title)),
-            )
+            .land(&run.repo, &run.base_branch, &run.branch, mode, &message)
             .await?;
         let landing = Landing {
             mode,
@@ -364,9 +433,35 @@ impl Orchestrator {
             landing: landing.clone(),
         })
         .await;
+        for mut parent in carried {
+            let _guard = self.lock(parent.id).await;
+            parent = self.store.get_run(parent.id).await?;
+            if parent.landed.is_some() {
+                continue;
+            }
+            parent.landed = Some(Landing {
+                by: format!("随第 {} 轮落地", number(id)),
+                ..landing.clone()
+            });
+            if parent
+                .note
+                .as_deref()
+                .is_some_and(|n| n.ends_with(SYNC_NOTE_END))
+            {
+                parent.note = None;
+            }
+            parent.updated_at = Utc::now();
+            self.store.update_run(&parent).await?;
+            self.publish(EventKind::RunLanded {
+                id: parent.id,
+                landing: parent.landed.clone().unwrap(),
+            })
+            .await;
+            self.tell_origin_later(&parent).await;
+        }
         // The closing note asked the person to land; that is done now.
         for item in self.store.list_human_items(true).await? {
-            if item.run_id == Some(id)
+            if item.run_id.is_some_and(|id| landed_ids.contains(&id))
                 && item.kind == HumanItemKind::Notice
                 && item.text.contains(AWAITING_LAND)
             {
@@ -398,8 +493,9 @@ impl Orchestrator {
         tasks: &[Task],
         files: &[String],
         detail: &str,
+        baseline: &str,
     ) -> Result<String, CoreError> {
-        let stem: String = format!("sync-{}", run.base_branch)
+        let stem: String = format!("sync-{baseline}")
             .to_lowercase()
             .chars()
             .map(|c| {
@@ -421,7 +517,7 @@ impl Orchestrator {
             })
             .find(|k| !tasks.iter().any(|t| &t.key == k))
             .expect("some key is free");
-        let base = &run.base_branch;
+        let base = baseline;
         let goal = format!(
             "{base} gained commits after this run started, and they conflict with the run's \
              changes, so the run cannot land. In your worktree, run `git merge {base}`, resolve \
@@ -665,6 +761,7 @@ impl Orchestrator {
 
     /// Ended runs whose checkout `lead` lives in.
     async fn runs_lived_in(&self, lead: &Agent) -> Result<Vec<Run>, CoreError> {
+        let mut seen = std::collections::HashSet::new();
         Ok(self
             .store
             .list_runs()
@@ -677,6 +774,7 @@ impl Orchestrator {
                     && !lead.home().starts_with(self.integration_path(r))
                     && lead.cwd == self.integration_path(r)
             })
+            .filter(|r| seen.insert(self.integration_path(r)))
             .collect())
     }
 

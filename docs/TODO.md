@@ -265,9 +265,8 @@ B3 远程开发：
 > 2026-10-29，设计见 [tasks/G1.md](tasks/G1.md)。起因：一轮做完想接着干，只能让主导再开一个 Work、跳到新页面，历史被切成几段。
 > 与 §十九 有冲突，以 [tasks/LEAD.md](tasks/LEAD.md) §9 为准：一轮结束不再把主导 `send_home`、不删集成工作区，同组下一轮在同一个集成 worktree 里切新分支；原地模式没有 run 分支，不适用 G1 §3.3 的分支表。G1-2 与 §十九 P1 一起做。
 
-已完成 1 条（G1-1），见 [DONE.md](DONE.md) 同名一节。
+已完成 2 条（G1-1、G1-2），见 [DONE.md](DONE.md) 同名一节。
 
-- [ ] G1-2：`run_next` 与分支规则（没落地时叠在上一轮上、连带落地、`from: "base"`）；开场信息列出前几轮。与 §十九 P1 同做：下一轮复用上一轮的集成 worktree 与 `targets/integration`，主导不搬家
 - [ ] G1-3：提示词改为一轮结束后用 `run_next` 接着干；`work_start` 对已结束一轮的主导指向 `run_next`
 - [ ] G1-4：GUI `#/work/<id>`、对话里的轮次分隔、右侧「各轮」窗格、侧栏一组一行
 - [ ] G1-5：CLI `work ls/show`
