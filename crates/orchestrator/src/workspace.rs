@@ -165,7 +165,7 @@ async fn check_checkout(repo: &Path, base: &str, branch: &str) -> Result<(), Cor
     let staged = list(run(&["diff", "--cached", "--name-only"]).await?);
     if !staged.is_empty() {
         return Err(CoreError::Conflict(format!(
-            "{} has staged changes on {base}; landing would commit them too. Commit or unstage them first:\n{}",
+            "{} has staged changes on {base}; landing would commit them too. Landing refused. Call run_finish and report that the result remains on {branch} for the person to land. Do not retry landing or commit, unstage, stash or discard the person's changes:\n{}",
             repo.display(),
             staged.join("\n")
         )));
@@ -191,7 +191,7 @@ async fn check_checkout(repo: &Path, base: &str, branch: &str) -> Result<(), Cor
         return Ok(());
     }
     Err(CoreError::Conflict(format!(
-        "{} has uncommitted changes on {base} in files that {branch} also changes; commit or stash them first:\n{}",
+        "{} has uncommitted changes on {base} in files that {branch} also changes. Landing refused. Call run_finish and report that the result remains on {branch} for the person to land. Do not retry landing or commit, stash or discard the person's changes:\n{}",
         repo.display(),
         clash.join("\n")
     )))

@@ -313,6 +313,9 @@ impl RunConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Run {
+    /// The conversation that proposed this work; its independent lead is `planner`.
+    #[serde(default)]
+    pub origin_chat_id: Option<AgentId>,
     #[serde(default)]
     pub work_id: Option<crate::ids::WorkId>,
     #[serde(default)]

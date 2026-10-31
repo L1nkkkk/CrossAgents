@@ -269,11 +269,11 @@ impl Orchestrator {
         if let Some(landing) = &run.landed {
             return Ok(Some(LandOutcome::Landed(landing.clone())));
         }
-        // A failed run may still carry work worth keeping (a task that did not merge, the
-        // rest done by the lead): the person decides; below, an empty branch is refused.
+        // A solo lead stays in Planning until it finishes; it can land its own work first.
+        // A failed run may still carry work worth keeping. Empty branches are refused below.
         if !matches!(
             run.status,
-            RunStatus::Running | RunStatus::Completed | RunStatus::Failed
+            RunStatus::Planning | RunStatus::Running | RunStatus::Completed | RunStatus::Failed
         ) {
             return Err(CoreError::Conflict(format!("the run is {:?}", run.status)));
         }
@@ -356,6 +356,9 @@ impl Orchestrator {
         }
         run.updated_at = Utc::now();
         self.store.update_run(&run).await?;
+        if run.status.is_terminal() {
+            self.tell_origin_later(&run).await;
+        }
         self.publish(EventKind::RunLanded {
             id,
             landing: landing.clone(),

@@ -200,7 +200,7 @@ pub struct Runtime {
     external: Mutex<HashMap<AgentId, Vec<Waiting>>>,
     /// What changed about the agent that it has not been told yet (its model or effort, its
     /// name), by topic: said at the top of the next message it gets.
-    notices: Mutex<HashMap<AgentId, BTreeMap<&'static str, String>>>,
+    notices: Mutex<HashMap<AgentId, BTreeMap<String, String>>>,
     /// Agents to send back to their workspace once their turn ends ([`Self::send_home`]
     /// while they were busy).
     going_home: Mutex<HashSet<AgentId>>,
@@ -1126,6 +1126,7 @@ impl Runtime {
                 },
             )
             .await;
+            let text = self.with_notices(stored.id, text).await;
             self.external
                 .lock()
                 .await
@@ -1166,13 +1167,7 @@ impl Runtime {
         .await;
         // What changed since the last message (model, effort, name) is told before it; the
         // conversation shows it as a note of its own (e.g. `agent.model_changed`).
-        let text = match self.notices.lock().await.remove(&agent.id) {
-            Some(notes) => {
-                let notes: Vec<String> = notes.into_values().collect();
-                format!("{}\n\n{text}", notes.join("\n"))
-            }
-            None => text,
-        };
+        let text = self.with_notices(agent.id, text).await;
         if from == MessageSource::Human {
             live.inbox.from_person.lock().unwrap().insert(message_id);
         }
@@ -1182,6 +1177,16 @@ impl Runtime {
             let _ = live.session.interrupt().await;
         }
         Ok((message_id, queued))
+    }
+
+    async fn with_notices(&self, agent: AgentId, text: String) -> String {
+        match self.notices.lock().await.remove(&agent) {
+            Some(notes) => {
+                let notes: Vec<String> = notes.into_values().collect();
+                format!("{}\n\n{text}", notes.join("\n"))
+            }
+            None => text,
+        }
     }
 
     /// Takes back a message that is still waiting for its turn.
@@ -1359,13 +1364,13 @@ impl Runtime {
     }
 
     /// Keeps `note` for the agent's next message (a newer note on the same topic replaces it).
-    async fn tell_later(&self, id: AgentId, topic: &'static str, note: String) {
+    pub async fn tell_later(&self, id: AgentId, topic: &str, note: String) {
         self.notices
             .lock()
             .await
             .entry(id)
             .or_default()
-            .insert(topic, note);
+            .insert(topic.to_owned(), note);
     }
 
     /// Renames the agent (people chose the name). It hears its new name with its next message;

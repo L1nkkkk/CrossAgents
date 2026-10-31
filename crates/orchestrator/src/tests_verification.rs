@@ -276,6 +276,7 @@ impl Fixture {
             store.insert_agent(a).await.unwrap();
         }
         let run = Run {
+            origin_chat_id: None,
             work_id: None,
             continuation: None,
             id: RunId::new(),

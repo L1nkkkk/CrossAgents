@@ -406,6 +406,7 @@ mod tests {
         let now = Utc::now();
         let worker = AgentId::new();
         let mut run = Run {
+            origin_chat_id: None,
             work_id: None,
             continuation: None,
             id: RunId::new(),

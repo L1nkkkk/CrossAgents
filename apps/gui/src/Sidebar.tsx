@@ -1,8 +1,8 @@
 // The sidebar, managed like Claude Code's: search, a short nav, pinned rows, then 对话 (every
 // conversation, in a project or not, tagged with its project) and one group per project holding
-// its Work. In a group, runs and conversations are plain rows, newest first; a run's teammates
-// (the ones it started with and the ones its lead recruited) nest under it, and so do the
-// teammates a conversation recruited. Archived conversations wait at the bottom to be restored.
+// its standalone Work. Runs proposed by a conversation nest under it, with their execution
+// members one level below; direct recruits stay under their conversation too. Archived or
+// missing sources leave their runs visible in the project. Archived chats can be restored.
 
 import { createContext, useContext, useEffect, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import type { Agent } from "@bindings/Agent";
@@ -19,6 +19,7 @@ import { DeleteRunDialog } from "./deleteRun";
 import { useConnectionStatus } from "./hub";
 import { t } from "./lib/i18n";
 import { prettyModel } from "./lib/models";
+import { groupRunsByOrigin } from "./lib/sidebarTree";
 import { startNew } from "./menubar";
 import { level, tightest, windowLabel } from "./lib/quota";
 import { openBeside } from "./panes";
@@ -58,38 +59,53 @@ export function Sidebar({ route }: { route: string[] }) {
   const matchesRun = (d: RunDetail) => !q || d.run.title.toLowerCase().includes(q) || runAgents(d, everyone).some(matchesAgent);
 
   const inRuns = new Set((tree.data ?? []).flatMap((d) => runAgents(d, everyone).map((a) => a.id)));
+  const { children: childRuns, standalone } = groupRunsByOrigin(
+    tree.data ?? [],
+    new Set(live.filter((a) => !inRuns.has(a.id) && !recruiterOf(a)).map((a) => a.id)),
+  );
+  const runsOf = (a: Agent) => childRuns.get(a.id) ?? [];
+  const standaloneIds = new Set(standalone.map((d) => d.run.id));
   const itemsOf = (w: Workspace): Item[] =>
     [
-      ...w.runs.filter(matchesRun).map((detail): Item => ({ kind: "run", key: runKey(detail), at: detail.run.updated_at, detail })),
+      ...w.runs.filter((d) => standaloneIds.has(d.run.id) && matchesRun(d)).map((detail): Item => ({ kind: "run", key: runKey(detail), at: detail.run.updated_at, detail })),
       ...w.agents
-        .filter((a) => !inRuns.has(a.id) && !a.archived_at && !recruiterOf(a) && (matchesAgent(a) || recruitsOf(a).some(matchesAgent)))
+        .filter((a) => !inRuns.has(a.id) && !a.archived_at && !recruiterOf(a) && (matchesAgent(a) || recruitsOf(a).some(matchesAgent) || runsOf(a).some(matchesRun)))
         .map((agent): Item => ({ kind: "session", key: sessionKey(agent), at: agent.created_at, agent })),
     ].sort((a, b) => b.at.localeCompare(a.at));
 
   const groups = workspaces.map((w) => ({ w, items: itemsOf(w) }));
-  const pins = groups.flatMap((g) => g.items).filter((i) => pinned.has(i.key));
-  const shown = groups.map((g) => ({ ...g, items: g.items.filter((i) => !pinned.has(i.key)) })).filter((g) => g.items.length || (!q && g.w.agents.length));
+  const nestedItems: Item[] = [...childRuns.values()].flat().filter(matchesRun).map((detail) => ({ kind: "run", key: runKey(detail), at: detail.run.updated_at, detail }));
+  const pins = [...groups.flatMap((g) => g.items), ...nestedItems].filter((i) => pinned.has(i.key));
+  const shown = groups.map((g) => ({ ...g, items: g.items.filter((i) => !pinned.has(i.key)) }))
+    .filter((g) => g.items.length || (!q && g.w.agents.some((a) => !a.archived_at && !inRuns.has(a.id) && !recruiterOf(a))));
   const isRun = (d: RunDetail) => section === "runs" && selected === d.run.id;
   const isSession = (a: Agent) => section === "s" && isAgent(a, selected);
   const pendingPlans = new Set((tree.data ?? []).filter((d) => d.run.status === "awaiting_approval").map((d) => d.run.planner));
   const loaded = !!tree.data && !!agents.data;
+  const childSelected = (a: Agent) => runsOf(a).some((d) => isRun(d) || runAgents(d, everyone).some(isSession));
 
+  const runRow = (detail: RunDetail) => (
+    <RunRow
+      key={runKey(detail)}
+      detail={detail}
+      agents={everyone}
+      selected={isRun(detail)}
+      isSession={isSession}
+      searching={!!q}
+      onMenu={(e) => {
+        e.preventDefault();
+        setMenu({ detail, x: e.clientX, y: e.clientY });
+      }}
+    />
+  );
   const row = (item: Item) =>
-    item.kind === "run" ? (
-      <RunRow
-        key={item.key}
-        detail={item.detail}
-        agents={everyone}
-        selected={isRun(item.detail)}
-        isSession={isSession}
-        searching={!!q}
-        onMenu={(e) => {
-          e.preventDefault();
-          setMenu({ detail: item.detail, x: e.clientX, y: e.clientY });
-        }}
+    item.kind === "run" ? runRow(item.detail) : (
+      <SessionRow
+        key={item.key} agent={item.agent} active={isSession(item.agent)} pinKey={item.key}
+        recruits={recruitsOf(item.agent)} isSession={isSession} searching={!!q}
+        runs={runsOf(item.agent).filter((d) => !pinned.has(runKey(d)) && matchesRun(d))}
+        renderRun={runRow} childActive={childSelected(item.agent)}
       />
-    ) : (
-      <SessionRow key={item.key} agent={item.agent} active={isSession(item.agent)} pinKey={item.key} recruits={recruitsOf(item.agent)} isSession={isSession} searching={!!q} />
     );
 
   return (
@@ -135,7 +151,7 @@ export function Sidebar({ route }: { route: string[] }) {
           {shown.map(({ w, items }) => (
             <Group key={w.key} workspace={w} searching={!!q}>
               <InChats.Provider value={w.key === CHATS}>
-                <Capped items={items} keep={(i) => (i.kind === "run" ? isRun(i.detail) || runAgents(i.detail, everyone).some(isSession) : isSession(i.agent) || recruitsOf(i.agent).some(isSession))} searching={!!q}>
+                <Capped items={items} keep={(i) => (i.kind === "run" ? isRun(i.detail) || runAgents(i.detail, everyone).some(isSession) : isSession(i.agent) || recruitsOf(i.agent).some(isSession) || childSelected(i.agent))} searching={!!q}>
                   {row}
                 </Capped>
               </InChats.Provider>
@@ -352,6 +368,9 @@ function SessionRow({
   isSession,
   searching,
   ended,
+  runs = [],
+  renderRun,
+  childActive = false,
 }: {
   agent: Agent;
   active: boolean;
@@ -362,10 +381,16 @@ function SessionRow({
   searching?: boolean;
   /** A member row of a run that is over: the agent may be busy elsewhere (a lead runs many), not here. */
   ended?: boolean;
+  runs?: RunDetail[];
+  renderRun?: (detail: RunDetail) => ReactNode;
+  childActive?: boolean;
 }) {
   const [toggled, setToggled] = useState<boolean>();
   const recruitActive = !!isSession && recruits.some(isSession);
-  const open = !!searching || (toggled ?? (active || recruitActive || recruits.some((r) => r.status === "running")));
+  const open = !!searching || (toggled ?? (active || recruitActive || childActive || recruits.some((r) => r.status === "running")));
+  useEffect(() => {
+    if (childActive) setToggled(undefined);
+  }, [childActive]);
   const doing = useActivity(agent.id);
   const unread = useUnread()[agent.id];
   const planWaiting = useContext(PendingPlans).has(agent.id);
@@ -405,7 +430,7 @@ function SessionRow({
       }
       tag={!note && project ? <span className="row-tag" title={agent.cwd}>{project}</span> : undefined}
       after={
-        recruits.length > 0 && (
+        (recruits.length > 0 || runs.length > 0) && (
           <button
             className={`disclose ${open ? "open" : ""}`}
             onClick={(e) => {
@@ -421,12 +446,13 @@ function SessionRow({
       }
     />
   );
-  if (!recruits.length) return row;
+  if (!recruits.length && !runs.length) return row;
   return (
     <div className="tree">
       {row}
       {open && (
         <div className="children">
+          {runs.map((d) => renderRun?.(d))}
           {recruits.map((r) => (
             <SessionRow key={r.id} agent={r} active={!!isSession?.(r)} note={r.profile?.title || (r.model ? prettyModel(r.model) : r.plugin)} />
           ))}

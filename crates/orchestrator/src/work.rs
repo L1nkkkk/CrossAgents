@@ -6,7 +6,7 @@
 use chrono::Utc;
 use crossagents_core::{
     Agent, CoreError, EventKind, HumanAction, HumanItem, HumanItemKind, HumanItemStatus,
-    LandPolicy, MessageSource, PlanApproval, RunConfig, RunPolicy,
+    LandPolicy, MessageSource, PlanApproval, Run, RunConfig, RunPolicy, RunStatus,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -31,6 +31,39 @@ fn brief_of(item: &HumanItem) -> String {
 }
 
 impl Orchestrator {
+    /// The parent's next message carries this result; recording it never wakes the parent.
+    pub(crate) async fn tell_origin_later(&self, run: &Run) {
+        let Some(parent) = run.origin_chat_id.filter(|id| *id != run.planner) else {
+            return;
+        };
+        let status = match run.status {
+            RunStatus::Completed => "completed",
+            RunStatus::Failed => "failed",
+            RunStatus::Cancelled => "cancelled",
+            _ => return,
+        };
+        let result = first_line(
+            run.summary.as_deref().or(run.note.as_deref()).unwrap_or(""),
+            240,
+        );
+        let landing = match &run.landed {
+            Some(landed) => format!("landed on {} ({})", run.base_branch, landed.reference),
+            None => format!("not landed; run branch: {}", run.branch),
+        };
+        let line = format!(
+            "CrossAgents work result: \"{}\" (run {}) {status}. {result} {landing}.",
+            first_line(&run.title, 90),
+            run.id,
+        );
+        if let Err(err) = self
+            .host
+            .tell_later(parent, &format!("run:{}", run.id), &line)
+            .await
+        {
+            tracing::warn!(%parent, run = %run.id, error = %err, "cannot keep the run's result for its source chat");
+        }
+    }
+
     pub(crate) async fn work_start(
         &self,
         caller: &Agent,
@@ -123,12 +156,11 @@ impl Orchestrator {
         caller: &Agent,
     ) -> Result<Option<crossagents_core::Run>, CoreError> {
         // Newest first.
-        let last = self
-            .store()
-            .list_runs()
-            .await?
-            .into_iter()
-            .find(|r| r.planner == caller.id && r.repo == caller.home() && !r.in_place);
+        let last = self.store().list_runs().await?.into_iter().find(|r| {
+            (r.planner == caller.id || r.origin_chat_id == Some(caller.id))
+                && r.repo == caller.home()
+                && !r.in_place
+        });
         Ok(last.filter(|r| r.status.is_terminal() && r.landed.is_none()))
     }
 
@@ -155,30 +187,35 @@ impl Orchestrator {
         // branch there.
         let (repo, base_branch) = (agent.home().to_path_buf(), None);
         let run = self
-            .create_run(NewRun {
-                request: brief_of(item),
-                title: Some(item.text.clone()),
-                planner: proposer,
-                repo: Some(repo),
-                base_branch,
-                attachments: Vec::new(),
-                config: RunConfig {
-                    worker: proposer,
-                    escalate: None,
-                    reviewer: None,
-                    auto_approve: false,
-                    max_parallel: RunConfig::DEFAULT_MAX_PARALLEL,
-                    max_attempts: RunConfig::DEFAULT_MAX_ATTEMPTS,
-                    team: Vec::new(),
-                    // The person said go: the plan starts at once and the lead lands it, as
-                    // it would have changed the checkout itself in the conversation.
-                    policy: RunPolicy {
-                        plan_approval: PlanApproval::Auto,
-                        land: LandPolicy::Auto,
-                        ..RunPolicy::default()
+            .create_run_with_choice(
+                NewRun {
+                    origin_chat_id: Some(proposer),
+                    request: brief_of(item),
+                    title: Some(item.text.clone()),
+                    planner: proposer,
+                    repo: Some(repo),
+                    base_branch,
+                    attachments: Vec::new(),
+                    config: RunConfig {
+                        worker: proposer,
+                        escalate: None,
+                        reviewer: None,
+                        auto_approve: false,
+                        max_parallel: RunConfig::DEFAULT_MAX_PARALLEL,
+                        max_attempts: RunConfig::DEFAULT_MAX_ATTEMPTS,
+                        team: Vec::new(),
+                        // The person said go: the plan starts at once and the lead lands it, as
+                        // it would have changed the checkout itself in the conversation.
+                        policy: RunPolicy {
+                            plan_approval: PlanApproval::Auto,
+                            land: LandPolicy::Auto,
+                            ..RunPolicy::default()
+                        },
                     },
                 },
-            })
+                Some(true),
+                false,
+            )
             .await?;
         item.run_id = Some(run.id);
         self.store().put_human_item(item).await?;

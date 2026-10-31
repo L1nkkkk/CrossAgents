@@ -1407,6 +1407,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().await.unwrap();
         let now = time_from(&Utc::now().to_rfc3339()).unwrap();
         let mut run = Run {
+            origin_chat_id: Some(AgentId::new()),
             work_id: None,
             continuation: None,
             landed: None,
@@ -1443,6 +1444,17 @@ mod tests {
         store.update_run(&run).await.unwrap();
         assert_eq!(store.get_run(run.id).await.unwrap(), run);
         assert_eq!(store.list_runs().await.unwrap(), vec![run.clone()]);
+
+        // Older JSON has no source field; no schema migration is required.
+        let mut old = serde_json::to_value(&run).unwrap();
+        old.as_object_mut().unwrap().remove("origin_chat_id");
+        sqlx::query("UPDATE runs SET data = ? WHERE id = ?")
+            .bind(old.to_string())
+            .bind(run.id.to_string())
+            .execute(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(store.get_run(run.id).await.unwrap().origin_chat_id, None);
 
         let mut tasks = Vec::new();
         for key in ["a", "b"] {
@@ -1497,6 +1509,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().await.unwrap();
         let now = time_from(&Utc::now().to_rfc3339()).unwrap();
         let run = Run {
+            origin_chat_id: None,
             work_id: None,
             continuation: None,
             landed: None,
@@ -1902,6 +1915,7 @@ mod tests {
     fn run_for(id: RunId) -> Run {
         let now = Utc::now();
         Run {
+            origin_chat_id: None,
             work_id: None,
             continuation: None,
             landed: None,

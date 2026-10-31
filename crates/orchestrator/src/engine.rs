@@ -53,6 +53,7 @@ pub const DEFAULT_BUILD_CACHE_LIMIT: u64 = 120 << 30;
 /// Everything needed to start a run.
 #[derive(Debug, Clone)]
 pub struct NewRun {
+    pub origin_chat_id: Option<AgentId>,
     pub request: String,
     pub title: Option<String>,
     pub planner: AgentId,
@@ -361,6 +362,9 @@ impl Orchestrator {
         run.updated_at = Utc::now();
         self.store.update_run(run).await?;
         if from != to {
+            if to.is_terminal() {
+                self.tell_origin_later(run).await;
+            }
             self.publish(EventKind::RunStatusChanged {
                 id: run.id,
                 from,
@@ -406,6 +410,11 @@ impl Orchestrator {
         fresh: Option<bool>,
         restore: bool,
     ) -> Result<Run, CoreError> {
+        if new.origin_chat_id == Some(new.planner) && fresh != Some(true) {
+            return Err(CoreError::Conflict(
+                "a conversation's child run needs a fresh lead".into(),
+            ));
+        }
         self.create_run_for_work(new, fresh, restore, None).await
     }
 
@@ -468,6 +477,7 @@ impl Orchestrator {
         let id = RunId::new();
         let now = Utc::now();
         let mut run = Run {
+            origin_chat_id: new.origin_chat_id,
             work_id,
             continuation: None,
             landed: None,
@@ -712,11 +722,14 @@ impl Orchestrator {
         dir: &Path,
     ) -> Result<(Agent, bool), CoreError> {
         let mut config = planner.config.clone();
-        // The copy leads the run; it is nobody's recruit.
+        // Its own execution identity, not a standalone conversation or the parent's recruit.
         if let Some(map) = config.as_object_mut() {
             map.remove("spawned_by_agent");
-            map.remove("spawned_by_run");
         }
+        if !config.is_object() {
+            config = serde_json::json!({});
+        }
+        config["spawned_by_run"] = serde_json::json!(run);
         let copy = self
             .host
             .spawn_agent(Agent {

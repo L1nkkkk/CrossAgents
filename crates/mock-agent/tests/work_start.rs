@@ -232,10 +232,10 @@ async fn a_dismissal_and_a_start_at_once_settle_one_way() {
     }
 }
 
-/// R1 §2.3: a lead whose run ended proposes another Work; it starts in the repository the
-/// old run worked in, from its base branch, with a lead in its own checkout.
+/// R1 §2.3 (session-first): after a child run ended unlanded, its source conversation proposes
+/// another Work; it starts in the same repository, from its base branch, with a new lead.
 #[tokio::test]
-async fn a_lead_whose_run_ended_starts_another_on_the_repository() {
+async fn a_chat_whose_child_ended_starts_another_on_the_repository() {
     let repo = git_repo();
     let t = TestHub::start().await;
     t.add_agent_in("lyra", Some("opus"), "worker", repo.path())
@@ -260,13 +260,13 @@ async fn a_lead_whose_run_ended_starts_another_on_the_repository() {
     );
     assert!(std::path::Path::new(&old_cwd).is_dir());
     assert_eq!(copy["cwd"], json!(old_cwd), "{copy}");
-    // The lead can propose again, and the card says where the new Work starts.
+    // The source conversation proposes again, and the card says where the new Work starts.
     let mut w = t.watch().await;
     let proposal = call(
         "work_start",
         json!({ "request": "Add the Git view.", "title": "Git view" }),
     );
-    t.send(&old_lead, &format!("Another one. {proposal}")).await;
+    t.send("lyra", &format!("Another one. {proposal}")).await;
     w.until(
         "card",
         |e| matches!(&e.kind, EventKind::HumanAsked { item } if item.text == "Git view"),
@@ -280,6 +280,8 @@ async fn a_lead_whose_run_ended_starts_another_on_the_repository() {
 
     let second = start(&t, &item).await;
     assert_ne!(second["id"], first["id"]);
+    assert_eq!(second["origin_chat_id"], first["origin_chat_id"]);
+    assert_ne!(second["planner"], json!(old_lead));
     // The repository the old run worked in, not its worktree; main, not its branch.
     assert_eq!(second["repo"], json!(repo.path().display().to_string()));
     assert_eq!(second["base_branch"], "main");
@@ -298,17 +300,18 @@ async fn a_lead_whose_run_ended_starts_another_on_the_repository() {
     assert!(std::path::Path::new(cwd).is_dir(), "{lead}");
 }
 
-/// R1 §2.3: while the run is open, the lead is refused, with the same words as before.
+/// Session-first: a child run's lead cannot propose Work (only conversations can), while its
+/// source conversation can start another child alongside the open one.
 #[tokio::test]
-async fn a_lead_whose_run_is_open_is_still_refused() {
+async fn only_the_source_conversation_proposes_work_while_a_child_is_open() {
     let repo = git_repo();
     let t = TestHub::start().await;
     t.add_agent_in("lyra", Some("opus"), "worker", repo.path())
         .await;
 
-    let run = start(&t, &propose(&t).await).await;
-    assert_eq!(run["status"], "planning");
-    let lead = run["planner"].as_str().unwrap().to_owned();
+    let first = start(&t, &propose(&t).await).await;
+    assert_eq!(first["status"], "planning");
+    let lead = first["planner"].as_str().unwrap().to_owned();
 
     let mut w = t.watch().await;
     let proposal = call(
@@ -316,27 +319,34 @@ async fn a_lead_whose_run_is_open_is_still_refused() {
         json!({ "request": "Something else.", "title": "Else" }),
     );
     t.send(&lead, &format!("Another one. {proposal}")).await;
-    let refusal = format!(
-        "you lead run {} already: work there (task_create, plan_submit) instead",
-        run["id"].as_str().unwrap()
-    );
     w.until(
         "refusal",
-        |e| matches!(&e.kind, EventKind::AgentOutput { text, .. } if text.contains(&refusal)),
+        |e| matches!(&e.kind, EventKind::AgentOutput { text, .. } if text.contains("work_start is not available to you")),
     )
     .await;
-
-    let all: Value = t.get("/v1/questions?all=true").await.json().await.unwrap();
-    assert!(
-        all["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|i| i["text"] != "Else"),
-        "{all}"
-    );
     let runs: Value = t.get("/v1/runs").await.json().await.unwrap();
     assert_eq!(runs["runs"].as_array().unwrap().len(), 1, "{runs}");
+
+    let mut w = t.watch().await;
+    t.send("lyra", &format!("Another one. {proposal}")).await;
+    w.until(
+        "card",
+        |e| matches!(&e.kind, EventKind::HumanAsked { item } if item.text == "Else"),
+    )
+    .await;
+    w.until("the proposer's turn ended", |e| {
+        matches!(
+            e.kind,
+            EventKind::AgentStatusChanged {
+                to: AgentStatus::Idle,
+                ..
+            }
+        )
+    })
+    .await;
+    let second = start(&t, &card(&t).await).await;
+    assert_eq!(second["origin_chat_id"], first["origin_chat_id"]);
+    assert_ne!(second["planner"], first["planner"]);
 }
 
 /// R1 §2.3: the same for a run the person starts from the home page, with the old lead as
@@ -375,25 +385,32 @@ async fn the_home_page_starts_a_run_for_a_lead_that_ended_one() {
     assert!(std::path::Path::new(cwd).is_dir(), "{lead}");
 }
 
-/// S1 §3.2: a proposer whose driver resumes a session elsewhere leads its Work itself, with
-/// this conversation, from the run's checkout; finishing keeps it there.
+/// Even a movable conversation stays home: a fresh, independently named lead does the work.
 #[tokio::test]
-async fn a_proposer_that_can_move_leads_the_work_itself() {
+async fn a_movable_proposer_keeps_its_conversation_and_gets_a_fresh_lead() {
     let repo = git_repo();
     let t = TestHub::start_with(native_plugin).await;
     let lyra = t.add_native("lyra", "worker", repo.path()).await;
     let before: Value = t.get("/v1/agents").await.json().await.unwrap();
 
     let run = start(&t, &propose(&t).await).await;
-    assert_eq!(run["planner"], json!(lyra.id), "{run}");
-    assert!(run["lead_note"].is_null(), "{run}");
+    assert_ne!(run["planner"], json!(lyra.id), "{run}");
+    assert_eq!(run["origin_chat_id"], json!(lyra.id));
+    assert_eq!(run["config"]["policy"]["land"], "auto");
+    assert_eq!(run["config"]["policy"]["plan_approval"], "auto");
     let after: Value = t.get("/v1/agents").await.json().await.unwrap();
     assert_eq!(
         after["agents"].as_array().unwrap().len(),
-        before["agents"].as_array().unwrap().len(),
-        "no copy was made"
+        before["agents"].as_array().unwrap().len() + 1,
+        "one independent lead was made"
     );
-    let lead = agent(&t, "lyra").await;
+    let lead = agent(&t, run["planner"].as_str().unwrap()).await;
+    assert_ne!(lead["name"], "lyra");
+    assert_eq!(lead["name_source"], "generated");
+    assert_eq!(lead["config"]["spawned_by_run"], run["id"]);
+    let parent = agent(&t, "lyra").await;
+    assert_eq!(parent["cwd"], json!(lyra.cwd));
+    assert!(t.hub.bus.store().claim_of(lyra.id).await.unwrap().is_none());
     let cwd = lead["cwd"].as_str().unwrap();
     assert!(
         cwd.contains("integration") && cwd.contains(&short(run["id"].as_str().unwrap())),
@@ -402,9 +419,235 @@ async fn a_proposer_that_can_move_leads_the_work_itself() {
     assert_eq!(lead["home"], json!(lyra.home), "{lead}");
 
     finish(&t, &run).await;
-    let retained = agent(&t, "lyra").await;
+    let retained = agent(&t, run["planner"].as_str().unwrap()).await;
     assert_eq!(retained["cwd"], lead["cwd"], "finish keeps its directory");
     assert_eq!(retained["home"], json!(lyra.home));
     assert!(retained["archived_at"].is_null());
     assert!(std::path::Path::new(cwd).is_dir());
+}
+
+#[tokio::test]
+async fn ending_a_child_keeps_its_summary_until_the_parent_gets_a_message() {
+    let repo = git_repo();
+    let t = TestHub::start_with(native_plugin).await;
+    let parent = t.add_native("lyra", "worker", repo.path()).await;
+    let item = propose(&t).await;
+    let mut w = t.watch().await;
+    let run = start(&t, &item).await;
+    w.until("parent's startup acknowledgement", |e| {
+        matches!(e.kind,
+        EventKind::AgentTurnCompleted { id, .. } if id == parent.id)
+    })
+    .await;
+    let events = t
+        .hub
+        .bus
+        .store()
+        .agent_events(parent.id, 0, 1000)
+        .await
+        .unwrap();
+    let turns = events
+        .iter()
+        .filter(|e| matches!(e.kind, EventKind::AgentTurnStarted { .. }))
+        .count();
+    let completed = t
+        .post(
+            &format!("/v1/runs/{}/finish", run["id"].as_str().unwrap()),
+            json!({"summary":"Recorded the agreed result."}),
+        )
+        .await;
+    assert_eq!(
+        completed.status(),
+        200,
+        "{}",
+        completed.text().await.unwrap()
+    );
+    assert!(
+        !t.hub.runtime.is_busy(parent.id).await,
+        "the completion did not wake the parent"
+    );
+    let events = t
+        .hub
+        .bus
+        .store()
+        .agent_events(parent.id, 0, 1000)
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e.kind, EventKind::AgentTurnStarted { .. }))
+            .count(),
+        turns
+    );
+
+    let mut w = t.watch().await;
+    t.send("lyra", "How did that work go?").await;
+    w.until("next parent reply", |e| {
+        matches!(e.kind,
+        EventKind::AgentTurnCompleted { id, .. } if id == parent.id)
+    })
+    .await;
+    let output = w.output();
+    assert!(output.contains("CrossAgents work result:"), "{output}");
+    assert!(output.contains("Recorded the agreed result."), "{output}");
+    assert!(output.contains(run["id"].as_str().unwrap()), "{output}");
+    assert!(output.contains("not landed"), "{output}");
+
+    let mut w = t.watch().await;
+    t.send("lyra", "Next topic.").await;
+    w.until("another reply", |e| {
+        matches!(e.kind,
+        EventKind::AgentTurnCompleted { id, .. } if id == parent.id)
+    })
+    .await;
+    assert!(
+        !w.output().contains("CrossAgents work result:"),
+        "the notice is only consumed once"
+    );
+}
+
+#[tokio::test]
+async fn a_child_cannot_borrow_its_source_conversation_as_a_worker() {
+    let repo = git_repo();
+    let t = TestHub::start_with(native_plugin).await;
+    t.add_native("lyra", "worker", repo.path()).await;
+    let run = start(&t, &propose(&t).await).await;
+    let mut w = t.watch().await;
+    t.send(
+        run["planner"].as_str().unwrap(),
+        &call(
+            "plan_submit",
+            json!({"tasks":[{
+                "key":"borrow", "title":"borrow parent", "spec":{"goal":"do something"},
+                "assignee":"lyra", "fresh":false
+            }]}),
+        ),
+    )
+    .await;
+    w.until("source protection", |e| {
+        matches!(&e.kind,
+        EventKind::AgentOutput { text, .. } if text.contains("source conversation"))
+    })
+    .await;
+    let parent = agent(&t, "lyra").await;
+    assert_eq!(parent["cwd"], json!(repo.path()));
+}
+
+#[tokio::test]
+async fn dirty_parent_checkout_refuses_landing_and_the_child_can_finish_on_its_branch() {
+    for staged in [false, true] {
+        let repo = git_repo();
+        let t = TestHub::start_with(native_plugin).await;
+        t.add_native("lyra", "worker", repo.path()).await;
+        let run = start(&t, &propose(&t).await).await;
+        let lead_id = run["planner"].as_str().unwrap();
+        let lead = agent(&t, lead_id).await;
+        let checkout = std::path::Path::new(lead["cwd"].as_str().unwrap());
+        std::fs::write(checkout.join("README.md"), "child result\n").unwrap();
+        std::fs::write(repo.path().join("README.md"), "parent's unfinished work\n").unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap()
+        };
+        if staged {
+            git(&["add", "README.md"]);
+        }
+        let head = git(&["rev-parse", "HEAD"]);
+        let status = git(&["status", "--porcelain"]);
+        let mut w = t.watch().await;
+        t.send(
+            lead_id,
+            &format!(
+                "{} {}",
+                call("run_land", json!({})),
+                call(
+                    "run_finish",
+                    json!({"summary":"Landing refused; result remains on the run branch."})
+                )
+            ),
+        )
+        .await;
+        w.until("closed without landing", |e| {
+            matches!(&e.kind,
+            EventKind::RunStatusChanged { id, to: crossagents_api_types::RunStatus::Completed, .. }
+                if id.to_string() == run["id"].as_str().unwrap())
+        })
+        .await;
+        w.until("lead's final reply", |e| {
+            matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if id.to_string() == lead_id)
+        })
+        .await;
+        assert!(w.output().contains("Call run_finish"), "{}", w.output());
+        assert!(
+            w.output().contains("Do not retry landing"),
+            "{}",
+            w.output()
+        );
+        let detail: Value = t
+            .get(&format!("/v1/runs/{}", run["id"].as_str().unwrap()))
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert!(detail["run"]["landed"].is_null());
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("README.md")).unwrap(),
+            "parent's unfinished work\n"
+        );
+        assert_eq!(git(&["rev-parse", "HEAD"]), head);
+        assert_eq!(git(&["status", "--porcelain"]), status);
+        assert!(git(&["stash", "list"]).is_empty());
+        assert!(checkout.exists(), "the result's checkout stays available");
+    }
+}
+
+#[tokio::test]
+async fn a_solo_child_can_land_before_finishing() {
+    let repo = git_repo();
+    let t = TestHub::start_with(native_plugin).await;
+    t.add_native("lyra", "worker", repo.path()).await;
+    let run = start(&t, &propose(&t).await).await;
+    let lead_id = run["planner"].as_str().unwrap();
+    let lead = agent(&t, lead_id).await;
+    std::fs::write(
+        std::path::Path::new(lead["cwd"].as_str().unwrap()).join("README.md"),
+        "solo result\n",
+    )
+    .unwrap();
+    let mut w = t.watch().await;
+    t.send(
+        lead_id,
+        &format!(
+            "{} {}",
+            call("run_land", json!({})),
+            call("run_finish", json!({"summary":"Landed the solo result."}))
+        ),
+    )
+    .await;
+    w.until("solo run completed", |e| {
+        matches!(&e.kind,
+        EventKind::RunStatusChanged { id, to: crossagents_api_types::RunStatus::Completed, .. }
+            if id.to_string() == run["id"].as_str().unwrap())
+    })
+    .await;
+    let detail: Value = t
+        .get(&format!("/v1/runs/{}", run["id"].as_str().unwrap()))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(detail["run"]["landed"].is_object(), "{detail}");
+    assert!(detail["tasks"].as_array().unwrap().is_empty());
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("README.md"))
+            .unwrap()
+            .replace("\r\n", "\n"),
+        "solo result\n"
+    );
 }

@@ -340,6 +340,12 @@ impl Orchestrator {
         restore: bool,
         needs_move: bool,
     ) -> Result<(), CoreError> {
+        if run.origin_chat_id == Some(agent.id) {
+            return Err(CoreError::Conflict(format!(
+                "{} is this run's source conversation; use a fresh execution session instead",
+                agent.name
+            )));
+        }
         if agent.home() != run.repo {
             return Err(CoreError::Conflict(format!(
                 "{} belongs to {}, not to this run's workspace {}: give the task to a new execution session (leave fresh out)",

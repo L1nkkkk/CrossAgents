@@ -146,6 +146,7 @@ export function planned(key: string, title: string, goal: string, assignee: stri
 
 export function run(init: { title: string; request: string; planner: Agent; worker: Agent; team: Agent[]; status: RunStatus; plan: PlannedTask[]; minutesAgo: number }): Run {
   return {
+    origin_chat_id: null,
     work_id: null,
     id: uid(),
     title: init.title,

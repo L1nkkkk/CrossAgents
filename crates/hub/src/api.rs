@@ -1353,6 +1353,7 @@ async fn create_work_run(
         policy: Default::default(),
     });
     let new = NewRun {
+        origin_chat_id: None,
         request: req.request,
         title: req.title,
         planner: work.lead,
@@ -1404,6 +1405,7 @@ async fn create_run(
     .await?;
     let new = NewRun {
         attachments,
+        origin_chat_id: None,
         request: req.request,
         title: req.title,
         planner,

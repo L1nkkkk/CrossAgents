@@ -85,7 +85,10 @@ stopped without reporting: message it, `task_assign` it to someone else, or drop
 (otherwise the person lands it), then close the run with `run_finish` and a short summary for \
 the person: what changed, what did not, anything they should check.\n\
 The person may keep talking to you after the run is closed; answer, but start no new work in a \
-closed run.";
+closed run. If run_land refuses because the base checkout has the person's uncommitted or \
+staged changes, leave those changes alone: do not commit, unstage, stash or discard them, \
+and do not retry landing. Call run_finish, say that the result remains on the run branch, \
+and leave landing to the person.";
 
 const WORKER: &str = "As a WORKER on a task: do exactly what the task's spec asks, in your \
 working directory (the task's own git worktree). Do not commit; the hub does. Report with the \

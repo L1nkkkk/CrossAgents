@@ -231,6 +231,11 @@ pub struct HubHost {
 
 #[async_trait]
 impl AgentHost for HubHost {
+    async fn tell_later(&self, agent: AgentId, topic: &str, line: &str) -> Result<(), CoreError> {
+        self.bus.store().get_agent(&AgentKey::Id(agent)).await?;
+        self.runtime.tell_later(agent, topic, line.to_owned()).await;
+        Ok(())
+    }
     async fn send(
         &self,
         agent: AgentId,
