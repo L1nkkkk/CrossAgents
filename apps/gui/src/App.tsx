@@ -3,7 +3,7 @@ import type { Agent } from "@bindings/Agent";
 import type { RunDetail } from "@bindings/RunDetail";
 import { api, getBridge } from "./api";
 import { useHubData, useVersionMismatch, type VersionMismatch } from "./hub";
-import { closeBeside, closeTools, focusedOf, openTool, setRatio, useLayout, usePanes } from "./panes";
+import { closeBeside, closeTools, focusSession, focusedOf, openTool, setRatio, useLayout, usePanes } from "./panes";
 import { FileViewerHost } from "./FileViewer";
 import { startNew } from "./menubar";
 import { toggleRail } from "./rail";
@@ -88,10 +88,12 @@ export function runAgents(detail: RunDetail, agents: Agent[]): Agent[] {
 }
 
 /** The routed session, and a second one beside it when one is open. */
-function Sessions({ primary }: { primary: string }) {
+function Sessions({ primary, question }: { primary: string; question?: string }) {
   const { beside, ratio } = usePanes();
+  const { focus } = useLayout();
   const ref = useRef<HTMLDivElement>(null);
-  if (!beside || beside === primary) return <SessionView key={primary} name={primary} />;
+  useEffect(() => { if (question) focusSession(primary); }, [primary, question]);
+  if (!beside || beside === primary) return <SessionView key={primary} name={primary} questionId={question} />;
 
   const drag = (e: ReactPointerEvent<HTMLDivElement>) => {
     const box = ref.current?.getBoundingClientRect();
@@ -107,10 +109,10 @@ function Sessions({ primary }: { primary: string }) {
   };
 
   return (
-    <div className="split" ref={ref} style={{ gridTemplateColumns: `minmax(0, ${ratio}fr) 6px minmax(0, ${1 - ratio}fr)` }}>
-      <SessionView key={primary} name={primary} />
+    <div className={`split ${focusedOf(primary, beside, focus) === beside ? "split-focus-beside" : "split-focus-primary"}`} ref={ref} style={{ gridTemplateColumns: `minmax(0, ${ratio}fr) 6px minmax(0, ${1 - ratio}fr)` }}>
+      <div className="split-session split-primary"><SessionView key={primary} name={primary} questionId={question} /><button className="split-switch" onClick={() => focusSession(beside)}>切换到另一会话</button></div>
       <div className="divider" onPointerDown={drag} onDoubleClick={() => setRatio(0.5)} title="拖动调整宽度，双击平分" role="separator" aria-orientation="vertical" />
-      <SessionView key={beside} name={beside} onClose={closeBeside} />
+      <div className="split-session split-beside"><SessionView key={beside} name={beside} onClose={closeBeside} /><button className="split-switch" onClick={() => focusSession(primary)}>切换到另一会话</button></div>
     </div>
   );
 }
@@ -201,7 +203,7 @@ export function App() {
       else if (a && state.tools.open) drawer = <ToolColumn run={a} onClose={closeTools} />;
       break;
     case "s":
-      main = a ? <Sessions primary={a} /> : <HomeView />;
+      main = a ? <Sessions primary={a} question={b === "questions" ? c : undefined} /> : <HomeView />;
       if (a && state.tools.open) drawer = <ToolColumn follow={focusedOf(a, state.beside, focus)} onClose={closeTools} />;
       break;
     case "w":

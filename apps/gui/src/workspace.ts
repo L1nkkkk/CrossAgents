@@ -5,7 +5,11 @@
 import { useSyncExternalStore } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { RunDetail } from "@bindings/RunDetail";
-import { ACTIVE_RUN, runAgents, useRunTree } from "./App";
+import { ACTIVE_RUN, useRunTree } from "./App";
+import { api } from "./api";
+import { useHubData } from "./hub";
+import { homeOf, isChat, projectMembers, standaloneSessions, wsKey, wsName } from "./lib/projectView";
+export { homeOf, isChat, wsKey, wsName } from "./lib/projectView";
 import { useAgents } from "./components";
 
 export type Workspace = {
@@ -16,14 +20,6 @@ export type Workspace = {
   runs: RunDetail[];
   agents: Agent[];
 };
-
-/** The workspace an agent belongs to; its cwd in records from before homes. */
-export const homeOf = (agent: Agent) => agent.home || agent.cwd;
-
-/** Paths compare case-insensitively with either slash (Windows). */
-export const wsKey = (path: string) => path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
-
-export const wsName = (path: string) => path.replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop() || path;
 
 export const wsHref = (key: string) => `#/w/${encodeURIComponent(key)}`;
 
@@ -43,48 +39,28 @@ export function useWorkspaces() {
     return ws;
   };
 
-  const placed = new Set<string>();
-  for (const d of runs) {
-    const ws = get(d.run.repo);
-    ws.runs.push(d);
-    for (const agent of runAgents(d, all)) {
-      if (placed.has(agent.id)) continue;
-      placed.add(agent.id);
-      ws.agents.push(agent);
-    }
+  for (const d of runs) get(d.run.repo).runs.push(d);
+  const members = projectMembers(all, runs);
+  for (const agent of all) if (!isChat(agent) && homeOf(agent)) get(homeOf(agent));
+  for (const [key, rows] of members) {
+    const ws = map.get(key);
+    if (ws) ws.agents = rows.map((row) => row.agent);
   }
-  // Every conversation is listed under 对话, in a project or not; a project group holds only
-  // its Work (runs, and the planners and workers they use). The project still counts as one
-  // the hub works in, so it is offered when starting something.
-  const chats: Workspace = { key: CHATS, path: "", name: "对话", runs: [], agents: [] };
-  const byId = new Map(all.map((a) => [a.id, a]));
-  for (const agent of all) {
-    if (placed.has(agent.id)) continue;
-    const group = isConversation(agent, byId) ? chats : get(homeOf(agent));
-    if (!isChat(agent)) get(homeOf(agent));
-    group.agents.push(agent);
-  }
+  const list = [...map.values()].sort((a, b) => a.key.localeCompare(b.key));
+  return { list, standalone: standaloneSessions(all), loaded: !!tree.data && !!agents.data, tree, agents };
+}
 
-  // Busiest first, then by name; chats outside any project come first, like Claude Code's.
-  const list = [...map.values()].sort((a, b) => liveRuns(b) - liveRuns(a) || a.name.localeCompare(b.name));
-  if (chats.agents.length) list.unshift(chats);
-  return { list, loaded: !!tree.data && !!agents.data, tree, agents };
+/** All project runs, including old runs and those without a source or plan. */
+export function useProjectRuns(key: string) {
+  return useHubData(async () => {
+    if (!key) return [];
+    const { runs } = await api.listRuns();
+    return Promise.all(runs.filter((run) => wsKey(run.repo) === wsKey(key)).map((run) => api.getRun(run.id)));
+  }, [key], (e) => e.type.startsWith("run.") || e.type === "task.status_changed" || e.type === "task.handed_off");
 }
 
 /** The group of chats outside any project; not a repository, so never offered as a workspace. */
 export const CHATS = "__chats";
-
-/**
- * A chat outside any project: the hub made its directory, `<home>/chats/<id>`. Older chats were
- * named by the agent's name, which may since have changed; under the default home
- * (`.crossagents`) any directory there is one.
- */
-export function isChat(agent: Agent): boolean {
-  const parts = homeOf(agent).replace(/\\/g, "/").replace(/\/+$/, "").split("/");
-  const [home, chats, last] = parts.slice(-3);
-  if (chats !== "chats") return false;
-  return home === ".crossagents" || last === agent.id || last.toLowerCase() === agent.name.toLowerCase();
-}
 
 /**
  * A conversation rather than Work: a chat outside any project, one started in a project (chats
