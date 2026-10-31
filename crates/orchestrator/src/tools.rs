@@ -387,7 +387,8 @@ const TOOLS: &[ToolDef] = &[
             object(
                 json!({
                     "request": { "type": "string", "description": "The brief for the Work: what to do, and what was agreed in this conversation." },
-                    "title": { "type": "string", "description": "A short title for the card and the run." }
+                    "title": { "type": "string", "description": "A short title for the card and the run." },
+                    "separate": { "type": "boolean", "description": "Set this when you already led a round in a work group and the person asked for a separate, independent Work rather than the next round there (which is run_next's job)." }
                 }),
                 &["request"],
             )

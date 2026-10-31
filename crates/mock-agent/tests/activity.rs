@@ -1,6 +1,6 @@
 mod common;
 
-use common::TestHub;
+use common::{TestHub, git_repo};
 use crossagents_core::{EventKind, FileChange, ToolDetail, ToolStatus};
 use serde_json::json;
 
@@ -62,7 +62,7 @@ async fn activity_is_visible_during_a_turn_and_cleared_afterwards() {
         "{out}"
     );
     assert!(
-        out.contains("修改文件") && out.contains("\"files_touched\": 2"),
+        out.contains("edit_files") && out.contains("\"files_touched\": 2"),
         "{out}"
     );
     assert!(out.matches("\"files_touched\": 2").count() >= 2, "{out}");
@@ -86,4 +86,74 @@ async fn activity_is_visible_during_a_turn_and_cleared_afterwards() {
         "{}",
         after.output()
     );
+}
+
+#[tokio::test]
+async fn closed_lead_is_directed_to_next_round_while_chat_can_propose_work() {
+    let repo = git_repo();
+    let t = TestHub::start().await;
+    let lead = t.add_agent_in("Pia", None, "planner", repo.path()).await;
+    let chat = t.add_agent_in("chat", None, "worker", repo.path()).await;
+    let work: serde_json::Value = t
+        .post("/v1/works", json!({"title":"rounds", "lead":"Pia"}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let mut w = t.watch().await;
+    let response = t
+        .post(
+            &format!("/v1/works/{}/runs", work["id"].as_str().unwrap()),
+            json!({"request":"[call run_finish {\"summary\":\"done\"}]"}),
+        )
+        .await;
+    assert_eq!(response.status(), 201);
+    w.until(
+        "turn ended",
+        |e| matches!(e.kind, EventKind::AgentTurnCompleted { id, .. } if id == lead.id),
+    )
+    .await;
+    let err = t
+        .hub
+        .orchestrator
+        .call_tool(
+            &t.agent("Pia").await,
+            "work_start",
+            json!({"request":"new goal"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(&err, crossagents_core::CoreError::Conflict(_)));
+    assert!(err.to_string().contains("run_next"), "{err}");
+    assert!(err.to_string().contains("separate: true"), "{err}");
+    assert!(
+        t.hub
+            .orchestrator
+            .call_tool(&chat, "work_start", json!({"request":"new work"}))
+            .await
+            .is_ok()
+    );
+    // The way out the refusal names has to work, or it sends the lead round in circles: the
+    // person really did ask for a Work of its own, and saying so gets past the check.
+    assert!(
+        t.hub
+            .orchestrator
+            .call_tool(
+                &t.agent("Pia").await,
+                "work_start",
+                json!({"request":"an unrelated Work", "separate": true}),
+            )
+            .await
+            .is_ok()
+    );
+    t.send(
+        "Pia",
+        r#"[call run_next {"title":"next", "request":"new goal"}]"#,
+    )
+    .await;
+    w.until(
+        "next round",
+        |e| matches!(&e.kind, EventKind::RunCreated { run } if run.title == "next"),
+    )
+    .await;
 }

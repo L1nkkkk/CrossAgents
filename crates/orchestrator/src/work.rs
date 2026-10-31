@@ -148,6 +148,10 @@ impl Orchestrator {
             request: String,
             #[serde(default)]
             title: Option<String>,
+            /// The caller saying it means a Work of its own, not the next round of the work
+            /// group it already leads: the one way past the check below.
+            #[serde(default)]
+            separate: bool,
         }
         let a: A = crate::tools::args(input)?;
         if a.request.trim().is_empty() {
@@ -164,6 +168,23 @@ impl Orchestrator {
                 "you lead run {} already: work there (task_create, plan_submit) instead",
                 run.id
             )));
+        }
+        // A lead whose round ended keeps `work_start`, but has to say it means a Work of its
+        // own: the next round of the group it is in belongs to `run_next`. The hub does not
+        // judge which one the person's words are (docs/tasks/G1.md §3.6) — it only makes the
+        // choice explicit, and `separate` is how the caller states it.
+        if !a.separate {
+            if let Some((run, _)) = self.run_of(caller.id).await? {
+                if run.planner == caller.id && run.status.is_terminal() {
+                    if let Some(work) = run.work_id {
+                        return Err(CoreError::Conflict(format!(
+                            "you are in work group {work}: to carry on there call run_next \
+                             instead; if the person really asked for a separate, independent \
+                             Work, call work_start again with separate: true"
+                        )));
+                    }
+                }
+            }
         }
         if !self.workspaces.versioned(&caller.cwd).await {
             return Err(CoreError::Conflict(format!(
