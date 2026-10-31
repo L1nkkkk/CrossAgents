@@ -165,6 +165,15 @@ impl Orchestrator {
                 run.id
             )));
         }
+        if let Some((run, _)) = self.run_of(caller.id).await? {
+            if run.planner == caller.id && run.status.is_terminal() {
+                if let Some(work) = run.work_id {
+                    return Err(CoreError::Conflict(format!(
+                        "you are in work group {work}: use run_next to continue; use work_start only for a separate, independent Work"
+                    )));
+                }
+            }
+        }
         if !self.workspaces.versioned(&caller.cwd).await {
             return Err(CoreError::Conflict(format!(
                 "{} is not a git repository, so there is no branch to work on: do the work here",
