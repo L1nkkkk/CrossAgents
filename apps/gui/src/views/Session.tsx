@@ -37,7 +37,9 @@ import { TurnLive, type LiveTurn } from "../liveTurn";
 import { PeerMessage, StateWord, useArmed } from "../parts";
 import { useSession, type TranscriptItem, type TranscriptTurn } from "../session";
 import { dismissNotice, useNotices } from "../notices";
-import { QuestionCards, useQuestions } from "../questions";
+import { QuestionCards, pending, useQuestions } from "../questions";
+import { executorOf } from "../lib/projectView";
+import "./sessiontools.css";
 import { workDecisions, type WorkDecision } from "../lib/workNotes";
 import { NeedsYouStrip, RunStrip } from "../strips";
 import { useHubData } from "../hub";
@@ -80,12 +82,14 @@ export const useSideSlot = () => useContext(SideSlot);
 export function SessionView({
   name,
   onClose,
+  questionId,
   header,
   top,
   bottom,
   side,
 }: {
   name: string;
+  questionId?: string;
   onClose?: () => void;
   header?: ReactNode;
   top?: ReactNode;
@@ -98,7 +102,38 @@ export function SessionView({
   const [draft, setDraft] = useState("");
   const agentId = transcript?.agent.id;
   const ledRuns = useRunsLedBy(agentId);
+  const associated = useHubData(async () => {
+    if (!agentId) return [];
+    const { runs } = await api.listRuns();
+    const details = await Promise.all(runs.map((run) => api.getRun(run.id)));
+    return details.filter((d) => d.run.planner === agentId || d.tasks.some((task) => task.assignee === agentId || task.reviewer === agentId));
+  }, [agentId], (e) => e.type.startsWith("run.") || e.type === "task.status_changed" || e.type === "task.handed_off");
   const questions = useQuestions();
+  const questionArea = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!questionId || !questions.data || !agentId) return;
+    const index = pending(questions.data.items).findIndex((item) => item.id === questionId && item.from === agentId);
+    if (index < 0) return;
+    const area = questionArea.current;
+    if (!area) return;
+    let done = false;
+    const locate = () => {
+      if (done) return;
+      const card = area.querySelectorAll<HTMLElement>(".asks > .ask")[index];
+      if (!card) {
+        if (index >= 3) area.querySelector<HTMLButtonElement>(".tools-more")?.click();
+        return;
+      }
+      done = true;
+      card.id = `human-item-${questionId}`;
+      card.scrollIntoView({ block: "nearest" });
+      (card.querySelector<HTMLElement>("input, textarea, button") ?? card).focus();
+    };
+    const observer = new MutationObserver(locate);
+    observer.observe(area, { childList: true, subtree: true });
+    locate();
+    return () => observer.disconnect();
+  }, [questionId, questions.data, agentId]);
   const outgoing = useOutbox(agentId, transcript?.turns);
   const { hidden: railOff } = useRail();
   // The run's side slot: a rail beside the conversation while it has room, else a drawer the
@@ -171,9 +206,9 @@ export function SessionView({
   const everyone = agents.data ?? [];
   const pendingPlans = runs.filter((d) => d.run.planner === agent.id && d.run.status === "awaiting_approval");
   const liveRuns = runs.filter((d) => d.run.planner === agent.id && ACTIVE_RUN.includes(d.run.status) && d.run.status !== "awaiting_approval");
-  const tasks = runs.flatMap((d) => d.tasks.filter((t) => t.assignee === agent.id || t.reviewer === agent.id).map((t) => ({ run: d.run, task: t })));
+  const tasks = (associated.data ?? []).flatMap((d) => d.tasks.filter((t) => t.assignee === agent.id || t.reviewer === agent.id).map((t) => ({ run: d.run, task: t })));
   const queued = turns.filter((t) => !started(t));
-  const led = runs.filter((d) => d.run.planner === agent.id);
+  const led = ledRuns.data ?? [];
   const recruits = everyone.filter((a) => (a.config as Record<string, unknown> | null)?.spawned_by_agent === agent.id && !a.archived_at);
   // The turn running now, and (when it works a task for a run) that task's counts: both are in
   // the header as well as on the live line under the turn (docs/TODO.md §四 ②).
@@ -196,8 +231,9 @@ export function SessionView({
 
   return (
     <SideSlot.Provider value={{ narrow: !rail, open: drawer, toggle: () => setDrawer((d) => !d) }}>
-      <section className={`pane ${rail ? "with-rail" : ""} ${side ? "run-side" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)}>
+      <section className={`pane ${rail ? "with-rail" : ""} ${side ? "run-side" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)} onFocusCapture={() => focusSession(name)}>
         {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} live={live} rail={rail} onClose={onClose} />}
+        <WorkContext name={name} agent={agent} tasks={tasks} led={led} agents={everyone} />
         <ExecutionBar agent={agent} />
         <NoticeBar agent={agent} />
         <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} works={workDecisions(questions.data?.items ?? [], agent.id)} agents={everyone} tree={runs} top={top}>
@@ -230,7 +266,7 @@ export function SessionView({
         )}
         <div className="dock">
           {/* One strip is enough: the pane beside leaves it to the main one. */}
-          {!onClose && <QuestionCards agents={everyone} />}
+          {!onClose && <div ref={questionArea}><QuestionCards agents={everyone} />{questionId && !questions.loading && (!questions.data || !pending(questions.data.items).some((item) => item.id === questionId && item.from === agent.id)) && <p role="alert" className="question-missing">找不到这条待办：它可能已处理、已过期或不属于此会话。{questions.error && ` ${questions.error}`}</p>}</div>}
           {!onClose && <NeedsYouStrip agents={everyone} tree={runs} />}
           <RunStrip runs={liveRuns} agents={everyone} />
           <QueuePanel agent={agent} queued={queued} onEdit={setDraft} />
@@ -253,6 +289,23 @@ export function SessionView({
       </section>
     </SideSlot.Provider>
   );
+}
+
+function WorkContext({ name, agent, tasks, led, agents }: { name: string; agent: Agent; tasks: { run: Run; task: RunDetail["tasks"][number] }[]; led: RunDetail[]; agents: Agent[] }) {
+  const now = useHubData(() => api.agentExecution(agent.id), [agent.id], (e) => ["agent.updated", "agent.status_changed", "task.status_changed", "task.handed_off", "run.status_changed"].includes(e.type));
+  const x = now.data?.execution;
+  const current = tasks.find(({ task }) => task.id === x?.task_id);
+  const lead = led.find(({ run }) => run.id === x?.run_id);
+  const source = current ? executorOf(current.task, agents, current.task.reviewer === agent.id ? "reviewer" : "worker") : undefined;
+  return <div className="session-work-context">
+    <span>{x ? <>当前工作：{x.run_title}{x.task_key && ` · ${x.task_key}`}{current && ` ${current.task.title}`}</> : "当前没有执行中的任务"}</span>
+    {source?.fresh && <span>{source.template ? `使用 ${displayName(source.template)} 的配置创建` : "新建的执行会话"}</span>}
+    {lead?.run.lead_note && <span>{lead.run.lead_note}</span>}
+    {(tasks.length > 0 || led.length > 0) && <details><summary>关联工作</summary><div className="session-work-list">
+      {led.map(({ run }) => <button key={run.id} onClick={() => { focusSession(name); openTool("task", { agent: name, run: run.id }); }}>{run.title} · 计划</button>)}
+      {tasks.map(({ run, task }) => <button key={task.id} onClick={() => { focusSession(name); openTool("task", { agent: name, run: run.id, task: task.id }); }}>{task.key} {task.title} · {run.title}</button>)}
+    </div></details>}
+  </div>;
 }
 
 /**
