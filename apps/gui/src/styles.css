@@ -250,8 +250,7 @@ body.col-resizing iframe, body.col-resizing webview { pointer-events: none; }
   border: 1px solid var(--panel-edge); border-radius: var(--radius-lg); overflow: hidden;
 }
 
-/* Sidebar, managed like Claude Code's: search, a short nav, pinned rows, then a group per
-   workspace. Rows are plain text with a status dot at the end; a run's team nests under it. */
+/* Sidebar: search, shortcuts and project/member navigation. */
 .sidebar {
   background: var(--sidebar); border-right: 1px solid var(--border);
   display: flex; flex-direction: column; min-height: 0; user-select: none;
@@ -1686,3 +1685,35 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
   font-size: 11.5px; line-height: 15px; color: var(--muted); font-variant-numeric: tabular-nums;
 }
 .row-live.quiet { color: var(--warn-text); }
+
+/* Flat project/member navigation: keep the name readable at the 226px default. */
+.flat-sidebar .project-head { padding-left: 0; gap: 2px; }
+.flat-sidebar .project-name { flex: 1; display: block; color: var(--text-2); font-weight: 600; }
+.flat-sidebar .project-head.active { background: var(--accent-bg); border-radius: var(--radius); }
+.flat-sidebar .group-order { opacity: 0; }
+.flat-sidebar .project-head:hover .group-order, .flat-sidebar .project-head:focus-within .group-order { opacity: 1; }
+.flat-sidebar .project-head .group-add { margin-left: 0; }
+.flat-sidebar .row-link { padding: 7px 6px; }
+.flat-sidebar .row-lead { align-self: flex-start; margin-top: 1px; margin-right: 3px; }
+.flat-sidebar .row-label { overflow: hidden; }
+.member-top { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.member-name { flex: 1; min-width: 45px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-status { display: inline-flex; align-items: center; gap: 3px; flex: 0 0 auto; max-width: 50%; font-size: 10px; color: var(--muted); white-space: nowrap; }
+.member-status.attention { color: var(--warn-text); }
+.member-status.working { color: var(--text-2); }
+.working-dot { width: 5px; height: 5px; background: var(--accent); border-radius: 50%; }
+.member-summary { display: flex; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 17px; }
+.member-summary-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-unread { flex-shrink: 0; color: var(--text-2); }
+.flat-sidebar .row-actions { display: flex; position: absolute; right: 2px; bottom: 1px; background: var(--surface); border-radius: 4px; opacity: 0; pointer-events: none; }
+.flat-sidebar .nav-row:hover .row-actions, .flat-sidebar .nav-row:focus-within .row-actions { opacity: 1; pointer-events: auto; }
+.flat-sidebar :is(a, button, input):focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.sidebar-unread { color: var(--muted); font-size: 11px; margin: 10px 8px 0; }
+.needs-you .group-name { color: var(--warn-text); }
+.todo-row { display: block; padding: 7px 8px; margin: 3px 0; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
+.todo-row:hover { background: var(--hover); text-decoration: none; }
+.todo-top { display: flex; justify-content: space-between; gap: 6px; font-size: 11px; }
+.todo-top strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.todo-top > span { flex-shrink: 0; color: var(--link); }
+.todo-summary { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 11px; line-height: 1.6; margin-top: 2px; overflow-wrap: anywhere; }
+.todo-reason { display: block; font-size: 11px; color: var(--warn-text); margin-top: 4px; }
