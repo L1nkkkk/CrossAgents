@@ -102,12 +102,11 @@ export function SessionView({
   const [draft, setDraft] = useState("");
   const agentId = transcript?.agent.id;
   const ledRuns = useRunsLedBy(agentId);
-  const associated = useHubData(async () => {
-    if (!agentId) return [];
-    const { runs } = await api.listRuns();
-    const details = await Promise.all(runs.map((run) => api.getRun(run.id)));
-    return details.filter((d) => d.run.planner === agentId || d.tasks.some((task) => task.assignee === agentId || task.reviewer === agentId));
-  }, [agentId], (e) => e.type.startsWith("run.") || e.type === "task.status_changed" || e.type === "task.handed_off");
+  const execution = useHubData(
+    () => agentId ? api.agentExecution(agentId) : Promise.resolve(null),
+    [agentId],
+    (e) => ["agent.updated", "agent.status_changed", "task.status_changed", "task.handed_off", "run.status_changed"].includes(e.type),
+  );
   const questions = useQuestions();
   const questionArea = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -121,13 +120,16 @@ export function SessionView({
       if (done) return;
       const card = area.querySelectorAll<HTMLElement>(".asks > .ask")[index];
       if (!card) {
+        // 3 is questions.tsx's FIT; update both if its visible-card limit changes.
         if (index >= 3) area.querySelector<HTMLButtonElement>(".tools-more")?.click();
         return;
       }
       done = true;
       card.id = `human-item-${questionId}`;
       card.scrollIntoView({ block: "nearest" });
-      (card.querySelector<HTMLElement>("input, textarea, button") ?? card).focus();
+      const input = card.querySelector<HTMLElement>("input, textarea");
+      if (!input) card.tabIndex = -1;
+      (input ?? card).focus();
     };
     const observer = new MutationObserver(locate);
     observer.observe(area, { childList: true, subtree: true });
@@ -206,7 +208,10 @@ export function SessionView({
   const everyone = agents.data ?? [];
   const pendingPlans = runs.filter((d) => d.run.planner === agent.id && d.run.status === "awaiting_approval");
   const liveRuns = runs.filter((d) => d.run.planner === agent.id && ACTIVE_RUN.includes(d.run.status) && d.run.status !== "awaiting_approval");
-  const tasks = (associated.data ?? []).flatMap((d) => d.tasks.filter((t) => t.assignee === agent.id || t.reviewer === agent.id).map((t) => ({ run: d.run, task: t })));
+  // First iteration: recent runs plus all runs led by this agent. Older assigned tasks may be
+  // absent; fetching every run's detail for every session and event would be too expensive.
+  const associated = [...new Map([...runs, ...(ledRuns.data ?? [])].map((d) => [d.run.id, d])).values()];
+  const tasks = associated.flatMap((d) => d.tasks.filter((t) => t.assignee === agent.id || t.reviewer === agent.id).map((t) => ({ run: d.run, task: t })));
   const queued = turns.filter((t) => !started(t));
   const led = ledRuns.data ?? [];
   const recruits = everyone.filter((a) => (a.config as Record<string, unknown> | null)?.spawned_by_agent === agent.id && !a.archived_at);
@@ -233,8 +238,8 @@ export function SessionView({
     <SideSlot.Provider value={{ narrow: !rail, open: drawer, toggle: () => setDrawer((d) => !d) }}>
       <section className={`pane ${rail ? "with-rail" : ""} ${side ? "run-side" : ""}`} ref={measure} onPointerDownCapture={() => focusSession(name)} onFocusCapture={() => focusSession(name)}>
         {header ?? <Header agent={agent} capabilities={capabilities} usage={usage} driver={transcript.driver} tasks={tasks} live={live} rail={rail} onClose={onClose} />}
-        <WorkContext name={name} agent={agent} tasks={tasks} led={led} agents={everyone} />
-        <ExecutionBar agent={agent} />
+        <WorkContext name={name} agent={agent} tasks={tasks} led={led} agents={everyone} execution={execution.data?.execution} />
+        <ExecutionBar agent={agent} execution={execution.data?.execution} reload={execution.reload} />
         <NoticeBar agent={agent} />
         <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} works={workDecisions(questions.data?.items ?? [], agent.id)} agents={everyone} tree={runs} top={top}>
           {outgoing.map((m) => (
@@ -291,14 +296,14 @@ export function SessionView({
   );
 }
 
-function WorkContext({ name, agent, tasks, led, agents }: { name: string; agent: Agent; tasks: { run: Run; task: RunDetail["tasks"][number] }[]; led: RunDetail[]; agents: Agent[] }) {
-  const now = useHubData(() => api.agentExecution(agent.id), [agent.id], (e) => ["agent.updated", "agent.status_changed", "task.status_changed", "task.handed_off", "run.status_changed"].includes(e.type));
-  const x = now.data?.execution;
+type Execution = Awaited<ReturnType<typeof api.agentExecution>>["execution"];
+
+function WorkContext({ name, agent, tasks, led, agents, execution: x }: { name: string; agent: Agent; tasks: { run: Run; task: RunDetail["tasks"][number] }[]; led: RunDetail[]; agents: Agent[]; execution?: Execution }) {
   const current = tasks.find(({ task }) => task.id === x?.task_id);
   const lead = led.find(({ run }) => run.id === x?.run_id);
   const source = current ? executorOf(current.task, agents, current.task.reviewer === agent.id ? "reviewer" : "worker") : undefined;
+  if (!source?.fresh && !lead?.run.lead_note && !tasks.length && !led.length) return null;
   return <div className="session-work-context">
-    <span>{x ? <>当前工作：{x.run_title}{x.task_key && ` · ${x.task_key}`}{current && ` ${current.task.title}`}</> : "当前没有执行中的任务"}</span>
     {source?.fresh && <span>{source.template ? `使用 ${displayName(source.template)} 的配置创建` : "新建的执行会话"}</span>}
     {lead?.run.lead_note && <span>{lead.run.lead_note}</span>}
     {(tasks.length > 0 || led.length > 0) && <details><summary>关联工作</summary><div className="session-work-list">
@@ -313,22 +318,16 @@ function WorkContext({ name, agent, tasks, led, agents }: { name: string; agent:
  * with 中断 — the person's messages still wait their turn behind it, so this is how they take
  * the session back. Nothing when no run holds it.
  */
-function ExecutionBar({ agent }: { agent: Agent }) {
-  const now = useHubData(
-    () => api.agentExecution(agent.id),
-    [agent.id],
-    (e) => ["agent.updated", "agent.status_changed", "task.status_changed", "task.handed_off", "run.status_changed"].includes(e.type),
-  );
+function ExecutionBar({ agent, execution: x, reload }: { agent: Agent; execution?: Execution; reload: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
-  const x = now.data?.execution;
   if (!x) return null;
   async function interrupt() {
     setBusy(true);
     setError(undefined);
     try {
       await api.interruptExecution(agent.id);
-      now.reload();
+      reload();
     } catch (err) {
       setError(errorText(err));
     } finally {

@@ -107,7 +107,7 @@ export function focusSession(name: string) {
 /** Opens the tool column showing `kind` (in the first pane unless it is already shown). */
 export function openTool(kind: PaneKind, what?: Target) {
   const panes = state.tools.panes.includes(kind) ? state.tools.panes : [kind, ...state.tools.panes.slice(1)];
-  target = what ?? null;
+  target = what ?? target;
   set({ ...state, tools: { ...state.tools, open: true, panes: [...new Set(panes)] } });
 }
 
