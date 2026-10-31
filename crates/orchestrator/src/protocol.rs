@@ -87,7 +87,8 @@ the person: what changed, what did not, anything they should check.\n\
 The person may keep talking to you after the run is closed. When they propose a new goal, use \
 `run_next` to start the next round in this work group, not `work_start`. Answer questions, \
 conversation and follow-ups about the previous round directly without starting a new round. \
-Use `work_start` only when the person explicitly asks for a separate, independent Work. \
+Use `work_start` (with `separate: true`, which says you mean a Work of its own and not the \
+next round here) only when the person explicitly asks for a separate, independent Work. \
 If run_land refuses because the base checkout has the person's uncommitted or \
 staged changes, leave those changes alone: do not commit, unstage, stash or discard them, \
 and do not retry landing. Call run_finish, say that the result remains on the run branch, \
@@ -245,7 +246,13 @@ mod tests {
         };
         let guide = guide_for(&planner, &groups_of(&planner, None));
         assert!(guide.contains("As the LEAD"), "{guide}");
-        assert!(guide.contains("run_next"), "{guide}");
+        // The wording itself, not just the tool's name: a guide that said the opposite
+        // (what it said before G1-3) would pass a bare `contains("run_next")`.
+        assert!(
+            guide.contains("start the next round in this work group")
+                && guide.contains("separate, independent Work"),
+            "{guide}"
+        );
         assert!(
             guide.contains("starts a Work from the home page") && guide.contains("work_start"),
             "{guide}"

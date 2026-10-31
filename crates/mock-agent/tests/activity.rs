@@ -125,10 +125,24 @@ async fn closed_lead_is_directed_to_next_round_while_chat_can_propose_work() {
         .unwrap_err();
     assert!(matches!(&err, crossagents_core::CoreError::Conflict(_)));
     assert!(err.to_string().contains("run_next"), "{err}");
+    assert!(err.to_string().contains("separate: true"), "{err}");
     assert!(
         t.hub
             .orchestrator
             .call_tool(&chat, "work_start", json!({"request":"new work"}))
+            .await
+            .is_ok()
+    );
+    // The way out the refusal names has to work, or it sends the lead round in circles: the
+    // person really did ask for a Work of its own, and saying so gets past the check.
+    assert!(
+        t.hub
+            .orchestrator
+            .call_tool(
+                &t.agent("Pia").await,
+                "work_start",
+                json!({"request":"an unrelated Work", "separate": true}),
+            )
             .await
             .is_ok()
     );

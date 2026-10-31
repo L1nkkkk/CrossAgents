@@ -18,6 +18,11 @@ pub struct AgentActivity {
     by_agent: HashMap<AgentId, TurnActivity>,
 }
 
+/// Two hours without any activity suggests an end event that never arrived, while a turn that
+/// is long but alive keeps its activity: that is why this counts from the last event and not
+/// from the turn's start.
+const ACTIVITY_STALE_AFTER_HOURS: i64 = 2;
+
 #[derive(Debug)]
 struct TurnActivity {
     started: DateTime<Utc>,
@@ -130,9 +135,6 @@ impl AgentActivity {
             })
     }
 }
-
-// Two hours without any activity suggests a lost end event, while long active turns remain visible.
-const ACTIVITY_STALE_AFTER_HOURS: i64 = 2;
 
 /// A command still going.
 #[derive(Debug, Clone, PartialEq)]

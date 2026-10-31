@@ -263,9 +263,8 @@ B3 远程开发：
 > 2026-10-29，设计见 [tasks/G1.md](tasks/G1.md)。起因：一轮做完想接着干，只能让主导再开一个 Work、跳到新页面，历史被切成几段。
 > 与 §十九 有冲突，以 [tasks/LEAD.md](tasks/LEAD.md) §9 为准：一轮结束不再把主导 `send_home`、不删集成工作区，同组下一轮在同一个集成 worktree 里切新分支；原地模式没有 run 分支，不适用 G1 §3.3 的分支表。G1-2 与 §十九 P1 一起做。
 
-已完成 2 条（G1-1、G1-2），见 [DONE.md](DONE.md) 同名一节。
+已完成 3 条（G1-1、G1-2、G1-3），见 [DONE.md](DONE.md) 同名一节。
 
-- [ ] G1-3：提示词改为一轮结束后用 `run_next` 接着干；`work_start` 对已结束一轮的主导指向 `run_next`
 - [ ] G1-4：GUI `#/work/<id>`、对话里的轮次分隔、右侧「各轮」窗格、侧栏一组一行
 - [ ] G1-5：CLI `work ls/show`
 
@@ -297,3 +296,7 @@ B3 远程开发：
 - [ ] **ts-rs 解析不了 `deserialize_with`**：`cargo test` 每次都打 `failed to parse serde attribute | deserialize_with =`。目前用显式 `#[ts(type = ...)]` 绕开（`ContinuationUpdate` 的三态字段），但下次有人加 `deserialize_with` 而忘了标类型，bindings 会静默生成错的类型。
 - [ ] **`cargo test --workspace` 在冷构建那一轮偶发失败过一次，没查到是哪条**（2026-10-30 记）：落 main 前的第一轮全量测试退出 101、有一条 `test result` 带非零失败，我当时只统计了数量没留下名字，之后连跑三轮全绿、零失败。与下面两条「与并发负载抢锁」的既有偶发是同一类条件（刚合并、整机在编译），但没有证据指向具体哪条。下次撞上要**先把输出存盘再分析**。2026-10-31 run `6d85f696` 撞上一次并留下了名字：`crates/mock-agent/tests/continuation.rs` 的 `settling_the_checkpoint_at_idle_does_not_swallow_a_stuck_report`（19 项里只它一条失败，当时同一台机器上另一个任务在全量编译；单独重跑该测试与同文件 19 项全绿）。它等的是「空闲时结算检查点」的时序，和下面两条一样属于与并发负载抢时间的一类，应当标成串行或独占资源。
 - [ ] **`crates/core/tests/lock_kill_race.rs` 与并发负载抢锁，偶发失败**：和别的 crate 的测试一起跑时失败过一次，单独跑与重跑组合命令都 4/4。它测的就是抢锁，跟整个 workspace 的测试并行本就不可靠；应当标成串行或独占资源。
+
+- [ ] **`switch_round` 直接 shell 调 `git checkout -b`，绕过 `WorkspaceProvider` trait**（2026-10-31 run `bb28e32e` 记）：`crates/orchestrator/src/engine.rs` 里同组续轮切分支那一处不走 `WorkspaceProvider`，而是自己起一个 git 进程。是分层瑕疵不是 bug——行为正确，测试也过——但它绕开了唯一该知道工作区怎么操作的那一层：换别的 provider（非 git、或远端检出）时这一处会静默失效，而且它拿不到 trait 那边的分支名占用检查（见 §二十二 上面那条 `-2`/`-3` 另起名字的规矩）。真修法是给 trait 加一个开分支的方法，让这一处调它。
+- [ ] **`lead_self` 里 `continuing` 跳过 `serving_person` 检查，把 §十六 第一条那个 409 换了个位置**（2026-10-31 run `bb28e32e` 记）：`run_next` 必须跳过这个检查——主导正是在应答人的时候调它，不跳过就永远 409。但 `continuing` 这个口子同时也放过了 HTTP `POST /v1/works/{id}/runs` 那条路，于是「人正在和主导说话时不能给它派活」这道保护在 API 侧也没了，等于 §十六 第一条那个问题从工具侧搬到了 API 侧。真修法是把「这是续轮」和「免除 serving_person」分开表达，只让工具那条路免除。
+- [ ] **`AgentActivity::push` 开头的 `retain` 会让「超过 2 小时没有任何中间事件的工具调用」把计数归零**（2026-10-31 run `bb28e32e` 记，审阅时 Leo 发现）：`crates/orchestrator/src/running.rs` 的 `push` 在 match 之前先清过期条目。某个工具调用连续两小时没发出任何中间事件（没有 `AgentToolDetail` / `AgentToolOutput` / `AgentTurnCompleted`），等它终于发事件时条目已被清，match 里 `get_mut` 拿不到，下一个事件便用 `TurnActivity::new` 重建，`started` 归零、`files_touched` 清零——主导会看到「本轮刚开始、改过 0 个文件」。和同文件 `RunningCommands` 的 `STALE_AFTER_HOURS` 是同一种取舍，方向安全（宁可少报不多报），所以没在本轮改。真修法是让过期判断只影响 `of()` 的读，清理走单独一条按 `AgentTurnStarted` 触发的路，而不是每个事件都先清。
