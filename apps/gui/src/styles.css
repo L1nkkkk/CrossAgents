@@ -1709,7 +1709,8 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
 .flat-sidebar .nav-row:hover .row-actions, .flat-sidebar .nav-row:focus-within .row-actions { opacity: 1; pointer-events: auto; }
 .flat-sidebar :is(a, button, input):focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .sidebar-unread { color: var(--muted); font-size: 11px; margin: 10px 8px 0; }
-.needs-you .group-name { color: var(--warn-text); }
+/* The sidebar section, not the dock strip above the composer, which .needs-you lays out in a row. */
+.needs-you-group .group-name { color: var(--warn-text); }
 .todo-row { display: block; padding: 7px 8px; margin: 3px 0; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
 .todo-row:hover { background: var(--hover); text-decoration: none; }
 .todo-top { display: flex; justify-content: space-between; gap: 6px; font-size: 11px; }

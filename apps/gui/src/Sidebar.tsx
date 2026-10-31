@@ -77,7 +77,7 @@ export function Sidebar({ route }: { route: string[] }) {
               <span>{t("sidebar.new")}</span>
               <kbd>Ctrl N</kbd>
             </a>
-            <a className="nav-usage" href="#/usage">
+            <a className={"nav-usage " + (route[0] === "usage" ? "active" : "")} href="#/usage">
               <Icon name="chart" size={16} />
               <span>{t("nav.usage")}</span>
             </a>
@@ -136,7 +136,7 @@ export function Sidebar({ route }: { route: string[] }) {
             <QuotaMini />
             <div className="foot-row">
               <Connection />
-              <a className="icon-btn" href="#/settings" title={t("nav.settings")} aria-label={t("nav.settings")}>
+              <a className={"icon-btn " + (route[0] === "settings" ? "on" : "")} href="#/settings" title={t("nav.settings")} aria-label={t("nav.settings")}>
                 <Icon name="settings" size={15} />
               </a>
             </div>
@@ -154,7 +154,7 @@ function NeedsYou({ items, agents }: { items: TodoItem[]; agents: Agent[] }) {
   const visible = visibleTodos(items, { expanded: all });
   if (!items.length) return null;
   return (
-    <section className="group needs-you">
+    <section className="group needs-you-group">
       <div className="group-head">
         <button className="group-name" aria-expanded={!closed} onClick={() => toggleCollapsed("__needs_you")}>
           <Icon name={closed ? "chevronRight" : "chevron"} size={13} />
