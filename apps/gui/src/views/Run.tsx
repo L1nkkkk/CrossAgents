@@ -838,7 +838,11 @@ export function usePlanApproval(run: Run, busy: boolean) {
   const everyone = agents.data ?? [];
   const lead = everyone.find((a) => a.id === run.planner);
   const fallback = everyone.find((a) => a.id === run.config.worker);
-  const teammates = everyone.filter((a) => a.role === "worker" && run.config.team.includes(a.id));
+  // The run's team and the workspace's other sessions, chats included: any session may take a
+  // task (docs/AGENT-WORKSPACE.md §2.1). Not its lead, nor the conversation that started it.
+  const teammates = everyone.filter(
+    (a) => a.id !== run.planner && a.id !== run.origin_chat_id && !a.archived_at && (run.config.team.includes(a.id) || wsKey(a.cwd) === wsKey(run.repo)),
+  );
   const accounts = quota.data?.accounts ?? [];
   const leadRef = lead ? { plugin: lead.plugin, account: accountOf(lead) } : undefined;
   // Every installed plugin's models, by family; a plugin with no signed-in login stays listed
@@ -863,7 +867,7 @@ export function usePlanApproval(run: Run, busy: boolean) {
     // offers it, and only a same-plugin worker may use the lead's login.
     const target = workerTarget(parsed.plugin, parsed.model, accounts, leadRef);
     const found = everyone.find(
-      (a) => a.role === "worker" && a.plugin === target.plugin && a.model === target.model && accountOf(a) === target.account && wsKey(a.cwd) === wsKey(run.repo),
+      (a) => a.id !== run.planner && a.plugin === target.plugin && a.model === target.model && accountOf(a) === target.account && wsKey(a.cwd) === wsKey(run.repo),
     );
     const id = found?.id ?? (await api.createAgent(workerAgentRequest(target, run.repo))).id;
     made.set(pick, id);

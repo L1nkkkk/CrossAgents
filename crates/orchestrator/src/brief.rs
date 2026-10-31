@@ -6,7 +6,7 @@
 use std::fmt::Write;
 
 use crossagents_core::{
-    Agent, AgentId, CheckResult, ChecksState, Handoff, HandoffKind, LandPolicy, Role, Run, Task,
+    Agent, AgentId, CheckResult, ChecksState, Handoff, HandoffKind, LandPolicy, Run, Task,
 };
 
 use crate::project::{self, RunChecks, RunEnv};
@@ -116,10 +116,10 @@ pub fn kickoff(
         }
     }
     out.push_str(&roster(team, default_worker));
-    if !team.iter().any(|a| a.role == Role::Worker) {
+    if !team.iter().any(|a| a.id == default_worker) {
         // No worker was picked: tasks, if any, run on the lead's model.
         out.push_str(
-            "\nworkers: none on the team; a task you assign to nobody goes to a copy of you",
+            "\nno default worker on the team: a task you assign to nobody goes to a copy of you",
         );
     }
     // The workspace's sessions, for working with one of them itself (docs/tasks/S1.md §3.6).
@@ -184,14 +184,16 @@ pub fn roster(team: &[Agent], default_worker: AgentId) -> String {
         }
         s
     };
-    let mut out = String::new();
-    for (role, title) in [(Role::Worker, "workers"), (Role::Reviewer, "reviewers")] {
-        let lines: Vec<String> = team.iter().filter(|a| a.role == role).map(line).collect();
-        if !lines.is_empty() {
-            let _ = write!(out, "\n{title}:\n{}", lines.join("\n"));
-        }
+    // One list: who works on a task and who reviews one is decided per task, not by how a
+    // session was made.
+    if team.is_empty() {
+        return String::new();
     }
-    out
+    let lines: Vec<String> = team.iter().map(line).collect();
+    format!(
+        "\nteam (name one as a task's assignee or reviewer):\n{}",
+        lines.join("\n")
+    )
 }
 
 fn list(out: &mut String, title: &str, items: &[String]) {

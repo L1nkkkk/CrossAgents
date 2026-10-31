@@ -892,9 +892,11 @@ impl Orchestrator {
         Ok((copy, true))
     }
 
-    /// The run's team: the given teammates, or every worker and reviewer registered in the
-    /// repository (clones live in worktrees, so they are not picked up). The run's worker and
-    /// reviewer always belong to it, first.
+    /// The run's team: the given teammates, any session at all, or else the workspace's
+    /// sessions made as workers or reviewers (clones live in worktrees, so they are not picked
+    /// up). Chat sessions are left out of that default only to keep the roster short: the
+    /// kickoff lists them as the workspace's sessions, and the lead may name any of them. The
+    /// run's worker and reviewer always belong to it, first.
     async fn gather_team(&self, config: &RunConfig, repo: &Path) -> Result<Vec<Agent>, CoreError> {
         let mut team: Vec<Agent> = Vec::new();
         let mut add = |agent: Agent| {
@@ -927,14 +929,7 @@ impl Orchestrator {
             }
         } else {
             for id in &config.team {
-                let agent = self.store.get_agent(&AgentKey::Id(*id)).await?;
-                if agent.role == Role::Planner {
-                    return Err(CoreError::Conflict(format!(
-                        "{} is a planner and cannot be on a run's team",
-                        agent.name
-                    )));
-                }
-                add(agent);
+                add(self.store.get_agent(&AgentKey::Id(*id)).await?);
             }
         }
         Ok(team)

@@ -216,9 +216,10 @@ export function HomeView() {
   const leadModel = leadAgent?.model ?? (lead?.kind === "model" ? lead.model : undefined);
   const where = leadAgent?.cwd ?? cwd;
 
-  // A session that leads must not also be the default worker.
-  const team = here.filter((a) => a.id !== chosenSession?.agent.id && a.role !== "planner" && (!where || wsKey(a.cwd) === wsKey(where)));
-  const workers = team.filter((a) => a.role === "worker");
+  // A session that leads must not also be the default worker. Any other may work or review:
+  // a role says how a session was made, not what it may do (docs/AGENT-WORKSPACE.md §2.1).
+  const team = here.filter((a) => a.id !== chosenSession?.agent.id && a.id !== leadAgent?.id && (!where || wsKey(a.cwd) === wsKey(where)));
+  const workers = team;
   // 自动 (none picked) is a worker on the lead's login and the cheaper sibling of its model, not whoever worked last.
   const chosenWorker = worker ? workers.find((a) => a.name === worker) : undefined;
   // A chat needs only a model: the remembered one if the hub still offers it, else the first.
@@ -694,7 +695,7 @@ export function HomeView() {
                 <AgentSelect agents={workers} value={escalate} onChange={setEscalate} empty={t("home.notUsed")} />
               </Field>
               <Field label={t("home.reviewer")}>
-                <AgentSelect agents={team.filter((a) => a.role === "reviewer")} value={reviewer} onChange={setReviewer} empty={t("home.notUsed")} />
+                <AgentSelect agents={team} value={reviewer} onChange={setReviewer} empty={t("home.notUsed")} />
               </Field>
             </div>
             <div className="row row-top">

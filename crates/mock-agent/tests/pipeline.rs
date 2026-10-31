@@ -659,7 +659,12 @@ async fn chat_sessions_can_take_tasks_and_review() {
     );
     let mut g = task("g", worker, &[]);
     g["assignee"] = json!("pal");
-    let id = start_run(&t, request(json!([g])), json!({ "auto_approve": true })).await;
+    let id = start_run(
+        &t,
+        request(json!([g])),
+        json!({ "auto_approve": true, "team": ["coder", "pal", "leo"] }),
+    )
+    .await;
     w.until("run completed", run_status_is(&id, RunStatus::Completed))
         .await;
     assert!(w.seen.iter().any(task_is("g", TaskStatus::Reviewing)));
@@ -669,6 +674,25 @@ async fn chat_sessions_can_take_tasks_and_review() {
             .as_str()
             .is_some_and(|r| r.starts_with("lgtm")),
         "{detail}"
+    );
+    // Named in the team, they are on the lead's roster like anyone else.
+    let lead: Value = t
+        .get("/v1/agents/boss/transcript")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let kickoff = lead["turns"][0]["input"].as_str().unwrap();
+    assert!(
+        kickoff.contains(
+            "
+team (name one as a task's assignee or reviewer):"
+        ),
+        "{kickoff}"
+    );
+    assert!(
+        kickoff.contains("- pal — no title · haiku") && kickoff.contains("- leo — no title · opus"),
+        "{kickoff}"
     );
 }
 

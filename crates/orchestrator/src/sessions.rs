@@ -100,7 +100,7 @@ impl Orchestrator {
             return String::new();
         }
         let mut out = String::from(
-            "\nsessions in this workspace (by default a task gets a new execution session started from its teammate's settings, fresh: true; to have one of these work on it itself, with its conversation, name it as assignee with fresh: false, and restore: true for an archived one):",
+            "\nsessions in this workspace (any of them can be named as a task's assignee or reviewer: by default a new execution session starts from its settings, fresh: true; to have it work on the task itself, with its conversation, add fresh: false, and restore: true for an archived one):",
         );
         for s in sessions.iter().take(KICKOFF_SESSIONS) {
             let model = s.agent.model.as_deref().unwrap_or(&s.agent.plugin);
