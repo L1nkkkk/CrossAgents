@@ -44,6 +44,7 @@ let state: Panes = load();
 /** The conversation clicked last, and what a pane was opened for: not kept across reloads. */
 let focus: string | null = null;
 let target: Target | null = null;
+const sessionTools = new Map<string, { panes: PaneKind[]; target: Target | null }>();
 let view: { state: Panes; focus: string | null; target: Target | null } = { state, focus, target };
 
 function load(): Panes {
@@ -95,8 +96,11 @@ export const setRatio = (ratio: number) => set({ ...state, ratio: clamp(ratio) }
 /** A conversation was clicked: the tool panes follow it. */
 export function focusSession(name: string) {
   if (focus === name) return;
+  if (focus) sessionTools.set(focus, { panes: state.tools.panes, target });
   focus = name;
-  if (target?.agent && target.agent !== name) target = null;
+  const saved = sessionTools.get(name);
+  target = saved?.target ?? null;
+  state = { ...state, tools: { ...state.tools, panes: saved?.panes ?? DEFAULT_TOOLS.panes } };
   changed();
 }
 
