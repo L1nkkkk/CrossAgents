@@ -1,4 +1,4 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Agent } from "@bindings/Agent";
 import type { Task } from "@bindings/Task";

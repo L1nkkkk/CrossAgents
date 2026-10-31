@@ -1,4 +1,4 @@
-﻿import type { Agent } from "@bindings/Agent";
+import type { Agent } from "@bindings/Agent";
 import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
 import type { Task } from "@bindings/Task";
@@ -51,6 +51,7 @@ export function projectMembers(agents: Agent[], runs: RunDetail[], pinned: Reado
   return new Map([...groups].sort(([a], [b]) => a.localeCompare(b)).map(([key, members]) => [key, [...members.values()].sort((a, b) => Number(pinned.has(b.agent.id)) - Number(pinned.has(a.agent.id)) || a.agent.created_at.localeCompare(b.agent.created_at) || a.agent.id.localeCompare(b.agent.id))]));
 }
 
+/** Sessions outside any project: chats, and records with no home or cwd, which belong nowhere else. */
 export function standaloneSessions(agents: Agent[]): Agent[] {
-  return agents.filter(isChat).slice().sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
+  return agents.filter((a) => isChat(a) || !homeOf(a)).slice().sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
 }
