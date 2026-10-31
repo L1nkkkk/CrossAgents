@@ -67,6 +67,11 @@
 - [x] `cli` 增加状态命令：`hub status` 除后台 agent 进程（pid、启动时间、隔离方式）外，汇总各会话——总数、归档数、各状态计数、正在干活的名单；处于 error 的会话逐个读 transcript 的 `error`，截成一行显示（最多 20 个）。`--json` 同步给出 `sessions` 与 `errors`
 - [x] 事件日志落盘：每条事件一行 JSON 写进 `logs/events-<date>.jsonl`，与 `GET /v1/events` 同格式；独立线程无缓冲写入（读方立即可见，`Get-Content -Wait` 可跟），队列满时丢弃并计数、不拖慢 hub；按天滚动，启动时删 14 天前的文件（只认 `events-*.jsonl`，不动别人的文件）。可关：`[hub] event_log = false`。读：`crossagents events --log [--since N]`，hub 没在跑也能读
 - [x] GUI 显示"hub 离线"时的诊断信息：侧栏未连接时显示 `offline: <原因>`，原因来自 Electron 主进程且带修复指引（如 `hub is not running (…); start it with crossagents hub start`）
+- [x] 每个会话都显示进度，不只 run（2026-10-31）：起因是 run f87e53d3 里主导看 `usage_get` 的 `peak_context`（codebuddy 轮末才上报，轮中一直是 0）和 `workspace_diff`（对未提交改动返回空 stat）误判一个 worker 卡住并中断了它，其实它已写了 28 个文件。
+  - ① hub 侧活动信号：`crates/orchestrator/src/running.rs` 新增独立的 `AgentActivity`，挂在 `RunningCommands` 内、由它现有的 `push` 转发事件（`engine.rs` 无需改动），记录本轮开始时间、最近一次输出 / 工具调用的时间与种类（运行命令 / 修改文件 / 读取文件 / 搜索 / 回复中 / 推理中）、本轮按路径去重的改动文件数；只在内存里，重启后一无所知，轮末或进程退出即清空。`agent_get` / `agent_list` 返回 `activity` 段（`turn_elapsed_seconds`、`last_activity_kind`、`last_activity_ago_seconds`、`files_touched`），不在轮次中为 null——主导判断卡没卡住看这个，不再依赖插件的 usage 上报。
+  - ② GUI：侧栏会话行在轮次中显示本轮已跑多久 + 最近活动，安静超过 `QUIET_AFTER` 显示「X 分钟没动静」；会话页头部加一条 `TurnLive`，带本轮时长、最近活动、所在任务与其 `progress`、run 的任务计数（复用 `lib/taskState.ts` 的 `progress`）、acceptance 检查通过数、安静提示。活动三项出自 `lib/workGroups.ts` 新增的 `liveProgress` / `quietLabel`，与轮次下方的实时行同源。
+  - ③ 不编百分比：没有步骤总数就只显示活动，不画进度条；只显示 hub 真有的计数（run 的任务数、acceptance 检查）。worker 自报 `step/total` 仍未做，等需要时再说。
+  - 顺带修了 `workspace_diff` 对有未提交改动的 worktree 返回空 stat：`workspace.rs` 的 `diff_stat` 原先用 `git diff --stat {base}...HEAD`，只算已提交的，改成与同文件 `diff` 一致的做法（`--intent-to-add` 后 `git diff --stat <merge_base>`），`tasks.rs` 里的 `committed` 变量随之改名为 `stat`。
 
 ## 五、Claude 运行时（对照 Cutex 的借鉴项）
 

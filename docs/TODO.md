@@ -45,9 +45,7 @@
 
 ## 四、可观测性
 
-已完成的条目见 [DONE.md](DONE.md) 同名一节。
-
-- [ ] 每个会话都显示进度，不只 run（2026-10-30 记，人提出）：现在只有 run 有进度（`apps/gui/src/lib/taskState.ts:98` 的「3/5 已合并 · 2 进行中」，用在 `strips.tsx:233`、`views/Run.tsx:269`），任务卡片上的 `task.progress` 只是 worker 自己写的一句话，会话本身（侧栏、会话页、`agent_list` / `agent_get`）看不出它在不在干活、干到哪。起因：run f87e53d3 里主导看 `usage_get` 的 `peak_context`（codebuddy 轮末才上报，轮中一直是 0）和 `workspace_diff`（对未提交改动返回空 stat）误判 `w-f87e53-p1-g1-2` 卡住并中断了它，其实它已写了 28 个文件。要做：① hub 给每个会话一份「轮次中」的活动信号：本轮开始时间、最近一次输出 / 工具调用的时间与种类（读、改、跑命令）、本轮改过的文件数，不依赖插件的 usage 上报；`agent_get` / `agent_list` 返回它，主导判断卡没卡住看这个。② GUI 在侧栏会话行和会话页头部显示：本轮已跑多久、最近活动（复用 `lib/workGroups.ts` 的 `liveActivity`）、多久没动静；会话在 run 里干某个任务时，再带上任务的 `progress` 和检查结果（几项通过）。③ 可选：worker 在报告里给出步骤数（如 `task_progress` 带 `step/total`），有就画进度条，没有就只显示活动，不编百分比。另：`workspace_diff` 对有未提交改动的 worktree 返回空 stat，单独查
+已完成的条目见 [DONE.md](DONE.md) 同名一节。本节暂无待办。
 
 ## 五、Claude 运行时（对照 Cutex 的借鉴项）
 
@@ -297,5 +295,5 @@ B3 远程开发：
 
 - [ ] **`EventKind` 的 `large_enum_variant` 用 `#[allow]` 压住了，真修法是装箱**：变体装的是整条记录，`RunCreated { run: Run }` 约 592 字节，其余多为几十字节。装箱会牵动每一处构造与匹配，所以暂时加了带理由的 `#[allow]`，换来 `clippy --workspace -- -D warnings` 能对其余一切设闸。
 - [ ] **ts-rs 解析不了 `deserialize_with`**：`cargo test` 每次都打 `failed to parse serde attribute | deserialize_with =`。目前用显式 `#[ts(type = ...)]` 绕开（`ContinuationUpdate` 的三态字段），但下次有人加 `deserialize_with` 而忘了标类型，bindings 会静默生成错的类型。
-- [ ] **`cargo test --workspace` 在冷构建那一轮偶发失败过一次，没查到是哪条**（2026-10-30 记）：落 main 前的第一轮全量测试退出 101、有一条 `test result` 带非零失败，我当时只统计了数量没留下名字，之后连跑三轮全绿、零失败。与下面两条「与并发负载抢锁」的既有偶发是同一类条件（刚合并、整机在编译），但没有证据指向具体哪条。下次撞上要**先把输出存盘再分析**。
+- [ ] **`cargo test --workspace` 在冷构建那一轮偶发失败过一次，没查到是哪条**（2026-10-30 记）：落 main 前的第一轮全量测试退出 101、有一条 `test result` 带非零失败，我当时只统计了数量没留下名字，之后连跑三轮全绿、零失败。与下面两条「与并发负载抢锁」的既有偶发是同一类条件（刚合并、整机在编译），但没有证据指向具体哪条。下次撞上要**先把输出存盘再分析**。2026-10-31 run `6d85f696` 撞上一次并留下了名字：`crates/mock-agent/tests/continuation.rs` 的 `settling_the_checkpoint_at_idle_does_not_swallow_a_stuck_report`（19 项里只它一条失败，当时同一台机器上另一个任务在全量编译；单独重跑该测试与同文件 19 项全绿）。它等的是「空闲时结算检查点」的时序，和下面两条一样属于与并发负载抢时间的一类，应当标成串行或独占资源。
 - [ ] **`crates/core/tests/lock_kill_race.rs` 与并发负载抢锁，偶发失败**：和别的 crate 的测试一起跑时失败过一次，单独跑与重跑组合命令都 4/4。它测的就是抢锁，跟整个 workspace 的测试并行本就不可靠；应当标成串行或独占资源。
