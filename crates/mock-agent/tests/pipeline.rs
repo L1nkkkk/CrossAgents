@@ -631,6 +631,47 @@ async fn planner_assigns_tasks_by_specialty() {
     assert_eq!(briefs, 2);
 }
 
+/// A chat session is a `planner` by role, yet the lead may give it a task or ask it for a
+/// review like anyone: a role is how a session was made, not what it may do.
+#[tokio::test]
+async fn chat_sessions_can_take_tasks_and_review() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    t.add_agent_in("pal", Some("haiku"), "planner", repo.path())
+        .await;
+    t.add_agent_in("leo", Some("opus"), "planner", repo.path())
+        .await;
+    let mut w = t.watch().await;
+
+    let request_review = call("review_request", json!({ "task": "g", "reviewer": "leo" }));
+    let verdict = call(
+        "review_submit",
+        json!({ "task_id": "{task_id}", "approve": true, "notes": format!("lgtm {}", accept_last("g")) }),
+    )
+    .replacen("[call ", "[call#mock-opus ", 1);
+    let worker = format!(
+        "[write#mock-haiku g.txt=v1] {} {verdict}",
+        call(
+            "task_complete",
+            json!({ "task_id": "{task_id}", "summary": format!("wrote g {request_review}") })
+        )
+        .replacen("[call ", "[call#mock-haiku ", 1),
+    );
+    let mut g = task("g", worker, &[]);
+    g["assignee"] = json!("pal");
+    let id = start_run(&t, request(json!([g])), json!({ "auto_approve": true })).await;
+    w.until("run completed", run_status_is(&id, RunStatus::Completed))
+        .await;
+    assert!(w.seen.iter().any(task_is("g", TaskStatus::Reviewing)));
+    let detail = detail(&t, &id).await;
+    assert!(
+        detail["tasks"][0]["report"]["review"]
+            .as_str()
+            .is_some_and(|r| r.starts_with("lgtm")),
+        "{detail}"
+    );
+}
+
 #[tokio::test]
 async fn unknown_assignee_rejects_the_plan() {
     let repo = git_repo();

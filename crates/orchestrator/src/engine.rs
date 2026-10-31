@@ -961,9 +961,11 @@ impl Orchestrator {
         Ok(team)
     }
 
-    /// Resolves each planned task's `assignee` and `reviewer` to agents of the right role:
-    /// teammates for a new execution session (`fresh`, the default), or, with `fresh: false`,
-    /// any session of the run's workspace that may work on it itself (docs/tasks/S1.md §3.3).
+    /// Resolves each planned task's `assignee` and `reviewer` to sessions: for a new execution
+    /// session (`fresh`, the default) a teammate or any other session to copy, or, with
+    /// `fresh: false`, any session of the run's workspace that may work on it itself
+    /// (docs/tasks/S1.md §3.3). A session's role is how it was made, not what it may do: a
+    /// chat session (a `planner`) can review or take a task like anyone.
     pub(crate) async fn resolve_assignments(
         &self,
         run: &Run,
@@ -1036,17 +1038,16 @@ impl Orchestrator {
             return None;
         };
         if fresh {
-            if let Some(agent) = team.iter().find(|a| a.name == name && a.role == role) {
+            if let Some(agent) = team.iter().find(|a| a.name == name) {
                 return Some(agent.id);
             }
-            let known: Vec<&str> = team
-                .iter()
-                .filter(|a| a.role == role)
-                .map(|a| a.name.as_str())
-                .collect();
+            // A new execution session copies the named one's model and login: any session will do.
+            if let Ok(agent) = self.store.get_agent(&AgentKey::Name(name.to_owned())).await {
+                return Some(agent.id);
+            }
+            let known: Vec<&str> = team.iter().map(|a| a.name.as_str()).collect();
             problems.push(format!(
-                "task {task:?}: {field} {name:?} is not a {} on the team (available: {})",
-                role_word(role),
+                "task {task:?}: no session named {name:?} for {field} (team: {}; agent_list lists the rest)",
                 if known.is_empty() {
                     "none".to_owned()
                 } else {
@@ -1057,13 +1058,6 @@ impl Orchestrator {
         }
         // The session itself: any of the workspace's, archived ones too.
         match self.store.get_agent(&AgentKey::Name(name.to_owned())).await {
-            Ok(agent) if agent.role != role => {
-                problems.push(format!(
-                    "task {task:?}: {field} {name:?} is not a {}",
-                    role_word(role)
-                ));
-                None
-            }
             Ok(agent) => match self.may_take_self(run, &agent, restore).await {
                 Ok(()) => Some(agent.id),
                 Err(CoreError::Conflict(why)) => {
@@ -1178,12 +1172,6 @@ impl Orchestrator {
                 None => None,
                 Some(id) => {
                     let agent = self.store.get_agent(&AgentKey::Id(id)).await?;
-                    if agent.role != Role::Worker {
-                        return Err(CoreError::Conflict(format!(
-                            "{} is not a worker and cannot take task {key:?}",
-                            agent.name
-                        )));
-                    }
                     if run.config.team.is_empty() {
                         // Runs created before teams existed: make the implicit team explicit
                         // (a lead standing in as the default worker is no teammate).
@@ -2164,14 +2152,6 @@ pub(crate) fn agent_name(prefix: &str, run: &Run, task: &Task) -> String {
 /// between them.
 pub(crate) fn worker_name(run: &Run, task: &Task, template: AgentId) -> String {
     agent_name(worker_prefix(run, task, template), run, task)
-}
-
-fn role_word(role: Role) -> &'static str {
-    match role {
-        Role::Planner => "planner",
-        Role::Worker => "worker",
-        Role::Reviewer => "reviewer",
-    }
 }
 
 /// What a person's new policy changes, in words the lead acts on.

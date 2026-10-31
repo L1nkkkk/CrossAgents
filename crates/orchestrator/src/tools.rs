@@ -66,10 +66,10 @@ fn planned_task_schema() -> Value {
             "title": { "type": "string" },
             "spec": spec_schema(),
             "depends_on": { "type": "array", "items": { "type": "string" } },
-            "assignee": { "type": "string", "description": "Name of the worker on your team whose specialty fits this task; omit for the default worker. With fresh: false, any session of this workspace (see agent_list or your kickoff's sessions)" },
+            "assignee": { "type": "string", "description": "Name of a teammate whose specialty fits this task, or of any session (a new execution session copies its model); omit for the default worker. With fresh: false, any session of this workspace (see agent_list or your kickoff's sessions)" },
             "fresh": { "type": "boolean", "description": "Default true: a new execution session of the assignee takes the task, from a clean context. false: the assignee itself does it, with its conversation; refused (with the reason) when it is busy with a person or another run, archived, or cannot move" },
             "restore": { "type": "boolean", "description": "With fresh: false, restore the assignee first if it is archived" },
-            "reviewer": { "type": "string", "description": "Name of a reviewer on your team (e.g. a security reviewer)" },
+            "reviewer": { "type": "string", "description": "Name of a session to review it: a reviewer on your team (e.g. a security reviewer) or any other session" },
             "reviewer_fresh": { "type": "boolean", "description": "Like fresh, for the reviewer (default true)" }
         },
         "required": ["key", "title", "spec"]
@@ -465,7 +465,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_assign",
-        description: "Give a task you issued to another worker (by name). By default a new execution session of `to` takes it (fresh: true); fresh: false gives it to `to` itself, with its conversation (a session of this workspace; restore: true brings back an archived one), and is refused with the reason when it cannot take it now. A started task keeps its worktree; the new worker continues from it and gets a handoff card (files changed, last word, rework notes, open questions). reason says why it changes hands.",
+        description: "Give a task you issued to another session (by name). By default a new execution session of `to` takes it (fresh: true); fresh: false gives it to `to` itself, with its conversation (a session of this workspace; restore: true brings back an archived one), and is refused with the reason when it cannot take it now. A started task keeps its worktree; the new worker continues from it and gets a handoff card (files changed, last word, rework notes, open questions). reason says why it changes hands.",
         groups: RUN,
         schema: || {
             task_schema(json!({
@@ -544,7 +544,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "review_request",
-        description: "Ask a reviewer (by name, else the task's or run's reviewer) for a verdict on a task reported done; its verdict comes back to you. A new execution session of the reviewer reviews by default; fresh: false has the reviewer itself do it, with its conversation.",
+        description: "Ask a reviewer (any session by name, else the task's or run's reviewer) for a verdict on a task reported done; its verdict comes back to you. A new execution session of the reviewer reviews by default; fresh: false has the reviewer itself do it, with its conversation.",
         groups: RUN,
         schema: || {
             task_schema(json!({

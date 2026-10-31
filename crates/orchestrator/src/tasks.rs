@@ -377,9 +377,6 @@ impl Orchestrator {
         Self::require_issuer(&run, &task, caller)?;
         let a: A = args(input)?;
         let to = self.store.get_agent(&AgentKey::parse(&a.to)).await?;
-        if to.role != Role::Worker {
-            return Err(CoreError::Conflict(format!("{} is not a worker", to.name)));
-        }
         if !a.fresh {
             self.may_take_self(&run, &to, a.restore).await?;
         }
@@ -1083,16 +1080,9 @@ impl Orchestrator {
         Self::require_issuer(&run, &task, caller)?;
         let a: A = args(input)?;
         let template = match &a.reviewer {
-            Some(name) => {
-                let agent = self.store.get_agent(&AgentKey::parse(name)).await?;
-                if agent.role != Role::Reviewer {
-                    return Err(CoreError::Conflict(format!(
-                        "{} is not a reviewer",
-                        agent.name
-                    )));
-                }
-                agent.id
-            }
+            // Any session may review: its role is how it was made, not what it may do
+            // (whether it can take this one itself is checked below).
+            Some(name) => self.store.get_agent(&AgentKey::parse(name)).await?.id,
             None => task
                 .reviewer_template
                 .or(run.config.reviewer)
