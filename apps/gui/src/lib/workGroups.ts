@@ -137,6 +137,37 @@ export function quietSeconds(changedAt: number, now: number): number {
   return Math.max(0, Math.floor((now - changedAt) / 1000));
 }
 
+/** "45 秒没动静", "5 分钟没动静", "1 小时 5 分钟没动静" — how long a quiet turn has been quiet. */
+export function quietLabel(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  if (s < 60) return `${s} 秒没动静`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} 分钟没动静`;
+  const hours = Math.floor(m / 60);
+  const rest = m % 60;
+  return `${hours} 小时${rest ? ` ${rest} 分钟` : ""}没动静`;
+}
+
+/**
+ * A running turn in three facts, for the places that show it away from its conversation (a
+ * sidebar row, the session header). `since` is when the turn started and `at` when this page
+ * last saw it produce something; either may be unknown — then its line is left out rather than
+ * guessed (a turn that began before the page loaded has no start time here).
+ */
+export function liveProgress(
+  items: TranscriptItem[],
+  { since, at, now }: { since?: number; at?: number; now: number },
+): { elapsed?: string; activity: string; quiet: number; quietText?: string } {
+  const quiet = at === undefined ? 0 : quietSeconds(at, now);
+  const elapsed = since === undefined ? undefined : duration(now - since);
+  return {
+    ...(elapsed === undefined ? {} : { elapsed }),
+    activity: liveActivity(items),
+    quiet,
+    ...(quiet >= QUIET_AFTER ? { quietText: quietLabel(quiet) } : {}),
+  };
+}
+
 /** The size of one item's content: equal strings mean it produced nothing new. */
 function produced(item: TranscriptItem): string {
   switch (item.type) {

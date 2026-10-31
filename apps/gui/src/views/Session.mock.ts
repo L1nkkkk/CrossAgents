@@ -3,7 +3,7 @@
 // steps, and two of your messages wait behind it.
 
 import { emptyState, type MockState, type Step } from "../dev/MockBridge";
-import { NOTES_REPO, agent, contextParts, fileDiff, planned, run, say, task, think, tool, transcript, turn, uid } from "../dev/fixtures";
+import { NOTES_REPO, REPO, agent, ago, contextParts, fileDiff, planned, run, say, task, think, tool, transcript, turn, uid } from "../dev/fixtures";
 import { plugins } from "./Agents.mock";
 import { quota } from "./Usage.mock";
 
@@ -359,4 +359,54 @@ export function toolImagePathsSession(): { state: MockState; script: Step[]; rou
     { at: 300, act: () => document.querySelector<HTMLButtonElement>(".steps-summary")?.click() },
     { at: 500, act: () => document.querySelectorAll<HTMLButtonElement>(".tool-step > button.tool").forEach((button) => button.click()) },
   ] };
+}
+
+/**
+ * A session working a task for a run while its checks are in (docs/TODO.md §四 ②): Nova reviews
+ * #b, so the session header — and its sidebar row — say how long this turn has run, what it does,
+ * the task's own progress and how many of its checks passed, and the run's progress. Every count
+ * is the hub's; there is no step total, so no percentage or bar is drawn.
+ */
+export function liveTaskSession(): { state: MockState; script: Step[]; route: string } {
+  const nova = agent({ name: "nova", plugin: "claude", model: "claude-sonnet-4-5", role: "reviewer", status: "running", cwd: `${REPO}/.crossagents/worktrees/b`, topic: "审查 #b 登录页 OAuth 按钮", profile: { display_name: "Nova", title: "审查", color: "violet" } });
+  const rex = agent({ name: "rex", plugin: "codex", model: "gpt-5-codex", role: "worker", status: "running", cwd: `${REPO}/.crossagents/worktrees/a`, topic: "回调与令牌交换", profile: { display_name: "Rex", title: "Coder", color: "sky" } });
+  const state: MockState = { ...emptyState(), agents: [nova, rex], plugins: plugins(), quota: quota() };
+  const plan = [
+    planned("a", "OAuth 回调与令牌交换", "实现 /auth/callback/{provider}，GitHub 和 Google 两家。", rex.name),
+    planned("b", "登录页加 OAuth 按钮", "登录页加两个按钮，密码表单保留。", rex.name, ["a"]),
+    planned("c", "会话存储迁到 Redis", "SessionStore 换成 Redis 实现。", rex.name),
+  ];
+  const r = run({ title: "登录页改 OAuth", request: "把登录页改成 OAuth（GitHub 和 Google），旧的密码登录保留。", planner: rex, worker: rex, team: [nova, rex], status: "running", plan, minutesAgo: 40 });
+  const check = (passed: boolean, command: string) => ({ command, exit_code: passed ? 0 : 1, passed, output: passed ? "" : "error: unused import `Session`" });
+  const merged = task(r, plan[0], { status: "merged", assignee: rex, minutesAgo: 30, summary: "两家都通了，回调有集成测试。", checks: [check(true, "cargo test -p auth"), check(true, "npm test")] });
+  const review = task(r, plan[1], { status: "reviewing", assignee: rex, minutesAgo: 20, progress: "两个按钮加好了，深浅色都看过", checks: [check(true, "cargo test -p auth"), check(true, "npm test"), check(false, "npx eslint web/src/pages/Login.tsx"), check(true, "npm run typecheck")] });
+  review.reviewer = nova.id;
+  const failed = task(r, plan[2], { status: "failed", assignee: rex, minutesAgo: 12, failure: "本地没有 Redis，连不上，先停在这里。" });
+  state.runs.push({ run: r, tasks: [merged, review, failed] });
+  state.executions = {
+    [nova.id]: { run_id: r.id, run_title: r.title, task_id: review.id, task_key: review.key, role: "reviewer", fresh: true, since: ago(22) },
+    [rex.id]: { run_id: r.id, run_title: r.title, task_id: null, task_key: null, role: "lead", fresh: false, since: ago(40) },
+  };
+
+  const t = turn({
+    input: "看看 #b 的登录页改动，检查没过的那条 lint 是不是真问题。",
+    minutesAgo: 3,
+    running: true,
+    items: [think("先看 diff，再对着 lint 的报错找那一行。"), tool(`Read ${REPO}/web/src/pages/Login.tsx`, "read", "in_progress")],
+  });
+  state.transcripts.set(nova.id, transcript(nova, [t], 24_000));
+  const rexTurn = turn({ input: "回调写完了，跑一下测试。", minutesAgo: 6, running: true, items: [tool("cargo test -p auth", "execute", "in_progress", { command: "cargo test -p auth" }, "running 12 tests\n")] });
+  state.transcripts.set(rex.id, transcript(rex, [rexTurn], 18_000));
+
+  const read = t.turn.items[1];
+  const lint = uid();
+  return {
+    state,
+    script: [
+      ...(read?.type === "tool_call" ? [{ at: 900, event: { type: "agent.tool_call_updated" as const, data: { id: nova.id, tool_call_id: read.tool_call_id, title: null, status: "completed" as const } } }] : []),
+      { at: 1_400, event: { type: "agent.tool_call", data: { id: nova.id, tool_call_id: lint, title: "npx eslint web/src/pages/Login.tsx", kind: "execute", status: "in_progress" } } },
+      { at: 1_900, event: { type: "agent.tool_output", data: { id: nova.id, tool_call_id: lint, text: "web/src/pages/Login.tsx\n  18:9  error  'Session' is defined but never used\n" } } },
+    ],
+    route: `#/s/${nova.name}`,
+  };
 }
