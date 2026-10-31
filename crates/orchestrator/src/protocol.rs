@@ -4,7 +4,7 @@
 
 use crossagents_core::{Agent, Role};
 
-use crate::messaging::{Group, groups_of};
+use crate::messaging::Group;
 
 const COMMON: &str = "You work in CrossAgents, a hub where agents from different vendors \
 collaborate. Use the `crossagents` tools to see your teammates (whoami, agent_list), message \
@@ -122,10 +122,26 @@ const CODEX_TOOLS: &str = "In Codex the `crossagents` tools are named \
 `exec`, call them from it: `text(await tools.mcp__crossagents__task_complete({task_id, \
 summary}))`.";
 
-/// The guide for `agent`: its role's, and what a conversation outside any run may do.
-pub fn guide_for(agent: &Agent) -> String {
-    let mut text = guide(agent.role);
-    if groups_of(agent).contains(&Group::Conversation) {
+/// The guide for `agent` in `groups` ([`crate::Orchestrator::groups`]): the role's it holds,
+/// and what a conversation outside any run may do. A plain chat holds no role and gets no
+/// run workflow (docs/SESSION-FIRST.md §7).
+pub fn guide_for(agent: &Agent, groups: &[Group]) -> String {
+    let role = groups.iter().find_map(|g| match g {
+        Group::Lead => Some(Role::Planner),
+        Group::Assignee => Some(Role::Worker),
+        Group::Reviewer => Some(Role::Reviewer),
+        Group::Everyone | Group::Conversation => None,
+    });
+    let mut text = match role {
+        Some(role) => guide(role),
+        // It builds in its own checkout like anyone else.
+        None => format!(
+            "{COMMON}
+
+{LOCKS}"
+        ),
+    };
+    if groups.contains(&Group::Conversation) {
         text.push_str("\n\n");
         text.push_str(CONVERSATION);
     }
@@ -158,6 +174,7 @@ mod tests {
     use crossagents_core::{AgentId, AgentProfile, AgentStatus, NameSource};
 
     use super::*;
+    use crate::messaging::groups_of;
 
     fn worker(plugin: &str) -> Agent {
         Agent {
@@ -208,12 +225,12 @@ mod tests {
 
     #[test]
     fn codex_agents_learn_how_their_tools_are_named() {
-        let codex = guide_for(&worker("codex"));
+        let codex = guide_for(&worker("codex"), &groups_of(&worker("codex"), None));
         assert!(
             codex.contains("tools.mcp__crossagents__task_complete"),
             "{codex}"
         );
-        let claude = guide_for(&worker("claude"));
+        let claude = guide_for(&worker("claude"), &groups_of(&worker("claude"), None));
         assert!(!claude.contains("mcp__crossagents__"), "{claude}");
     }
 
@@ -223,7 +240,7 @@ mod tests {
             role: Role::Planner,
             ..worker("claude")
         };
-        let guide = guide_for(&planner);
+        let guide = guide_for(&planner, &groups_of(&planner, None));
         assert!(guide.contains("As the LEAD"), "{guide}");
         assert!(
             guide.contains("starts a Work from the home page") && guide.contains("work_start"),
@@ -234,6 +251,26 @@ mod tests {
             config: serde_json::json!({ "spawned_by_run": "r1" }),
             ..worker("claude")
         };
-        assert!(!guide_for(&recruit).contains("Outside a run"));
+        assert!(!guide_for(&recruit, &groups_of(&recruit, None)).contains("Outside a run"));
+    }
+
+    #[test]
+    fn a_plain_chat_gets_no_run_workflow_until_a_run_holds_it() {
+        let chat = worker("claude");
+        let groups = groups_of(&chat, None);
+        assert_eq!(groups, [Group::Everyone, Group::Conversation]);
+        let guide = guide_for(&chat, &groups);
+        assert!(
+            !guide.contains("As a WORKER") && !guide.contains("task_complete"),
+            "{guide}"
+        );
+        assert!(
+            guide.contains("Outside a run") && guide.contains("crossagents exec"),
+            "{guide}"
+        );
+        // Taken into a run as a worker, it is told how to report.
+        let held = groups_of(&chat, Some(crossagents_core::ClaimRole::Worker));
+        assert!(held.contains(&Group::Assignee));
+        assert!(guide_for(&chat, &held).contains("As a WORKER"));
     }
 }

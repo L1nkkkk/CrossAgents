@@ -10,9 +10,11 @@ use serde_json::{Value, json};
 
 use crate::engine::Orchestrator;
 use crate::lessons::outcome_schema;
-use crate::messaging::{Group, groups_of};
+use crate::messaging::Group;
 
 const ALL: &[Group] = &[Group::Everyone];
+/// Anyone a run holds: tasks, their worktrees and checks exist only in a run.
+const RUN: &[Group] = &[Group::Lead, Group::Assignee, Group::Reviewer];
 const PLANNER: &[Group] = &[Group::Lead];
 const WORKER: &[Group] = &[Group::Assignee];
 const REVIEWER: &[Group] = &[Group::Reviewer];
@@ -399,7 +401,7 @@ const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "task_create",
         description: "Add tasks to your running run (same fields as plan_submit's tasks). They start once their dependencies are merged. Keys already in the run are left as they are. If the run lets workers delegate, a worker can split parts off its own task this way: they branch from it and merge back into it, and the worker accepts them. Like plan_submit, each task goes to a new execution session unless it says fresh: false; tasks that could not start are listed in not_started with the reason.",
-        groups: ALL,
+        groups: RUN,
         schema: || {
             object(
                 json!({ "tasks": { "type": "array", "items": planned_task_schema() } }),
@@ -410,7 +412,7 @@ const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "task_list",
         description: "Tasks of your run: key, title, status, issuer, assignee, progress, open question. Filter with status, or mine (tasks you issued or work on).",
-        groups: ALL,
+        groups: RUN,
         schema: || {
             object(
                 json!({ "status": { "type": "string" }, "mine": { "type": "boolean" } }),
@@ -421,13 +423,13 @@ const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "task_get",
         description: "One task in full: spec, report (worker summary, checks, diff stat, failure, question, review), branch, worktree, run branch.",
-        groups: ALL,
+        groups: RUN,
         schema: || task_schema(json!({})),
     },
     ToolDef {
         name: "task_update",
         description: "Change a task you issued: title, spec, depends_on. Its worker gets the new version.",
-        groups: ALL,
+        groups: RUN,
         schema: || {
             task_schema(json!({
                 "title": { "type": "string" },
@@ -439,7 +441,7 @@ const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "task_assign",
         description: "Give a task you issued to another worker (by name). By default a new execution session of `to` takes it (fresh: true); fresh: false gives it to `to` itself, with its conversation (a session of this workspace; restore: true brings back an archived one), and is refused with the reason when it cannot take it now. A started task keeps its worktree; the new worker continues from it and gets a handoff card (files changed, last word, rework notes, open questions). reason says why it changes hands.",
-        groups: ALL,
+        groups: RUN,
         schema: || {
             task_schema(json!({
                 "to": { "type": "string" },
@@ -452,19 +454,19 @@ const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "task_cancel",
         description: "Cancel a task you issued. keep_branch keeps its branch for inspection.",
-        groups: ALL,
+        groups: RUN,
         schema: || task_schema(json!({ "keep_branch": { "type": "boolean" } })),
     },
     ToolDef {
         name: "task_answer",
         description: "Answer the open question on a task you issued (replying to the question message with agent_send works too).",
-        groups: ALL,
+        groups: RUN,
         schema: || task_schema(json!({ "answer": { "type": "string" } })),
     },
     ToolDef {
         name: "workspace_diff",
         description: "What a task changed against the run branch, committed or not: a unified diff (paths to narrow it; stat_only for a summary).",
-        groups: ALL,
+        groups: RUN,
         schema: || {
             task_schema(
                 json!({ "paths": { "type": "array", "items": { "type": "string" } }, "stat_only": { "type": "boolean" } }),
@@ -474,7 +476,7 @@ const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "workspace_read",
         description: "Read a file in a task's worktree (path relative to it), optionally a line range.",
-        groups: ALL,
+        groups: RUN,
         schema: || {
             task_schema(
                 json!({ "path": { "type": "string" }, "from_line": { "type": "integer" }, "to_line": { "type": "integer" } }),
@@ -484,7 +486,7 @@ const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "workspace_run",
         description: "Run a shell command in a task's worktree (tests, builds) and get exit code and output. Default limit 300 s, at most 1800.",
-        groups: ALL,
+        groups: RUN,
         schema: || {
             task_schema(
                 json!({ "command": { "type": "string" }, "timeout_secs": { "type": "integer" } }),
@@ -512,13 +514,13 @@ const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "checks_run",
         description: "Run a task's spec.acceptance commands and get the results.",
-        groups: ALL,
+        groups: RUN,
         schema: || task_schema(json!({})),
     },
     ToolDef {
         name: "review_request",
         description: "Ask a reviewer (by name, else the task's or run's reviewer) for a verdict on a task reported done; its verdict comes back to you. A new execution session of the reviewer reviews by default; fresh: false has the reviewer itself do it, with its conversation.",
-        groups: ALL,
+        groups: RUN,
         schema: || {
             task_schema(json!({
                 "reviewer": { "type": "string" },
@@ -531,7 +533,7 @@ const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "task_accept",
         description: "Merge a task you issued into the run branch. Only a verified task is accepted plainly: every check passed, and nothing changed after they ran; only the verified commit is merged (nothing the worker wrote afterwards). Refused while the task is still being verified (force does not bypass that). Accepting without a verification - checks that failed or never ran, a task with no checks, a verification the hub restarted out of, a stalled task, or work done after the checks - takes force: true and a non-empty reason, which is recorded. On a conflict nothing changes and you get the conflicting files and hunks. message is the commit message, written the way the project's rules ask (default: \"<key>: <title>\").",
-        groups: ALL,
+        groups: RUN,
         schema: || {
             task_schema(json!({
                 "message": { "type": "string" },
@@ -543,19 +545,19 @@ const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "task_verify",
         description: "Run a task's acceptance checks again on its current worktree, or for the first time after the hub restarted before they finished; the result comes back to you as a message. For a task whose report is ready (passed).",
-        groups: ALL,
+        groups: RUN,
         schema: || task_schema(json!({})),
     },
     ToolDef {
         name: "task_rework",
         description: "Send a task you issued back to its worker with notes on what to fix.",
-        groups: ALL,
+        groups: RUN,
         schema: || task_schema(json!({ "notes": { "type": "string" } })),
     },
     ToolDef {
         name: "task_drop",
         description: "Discard a task's result and branch. requeue starts it over (task_assign first for another worker); otherwise it is cancelled.",
-        groups: ALL,
+        groups: RUN,
         schema: || {
             task_schema(json!({ "requeue": { "type": "boolean" }, "reason": { "type": "string" } }))
         },
@@ -563,7 +565,7 @@ const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "branch_sync",
         description: "Merge the run branch (work merged since the task started) into a task's worktree; returns conflicts if any.",
-        groups: ALL,
+        groups: RUN,
         schema: || task_schema(json!({})),
     },
     ToolDef {
@@ -685,8 +687,8 @@ pub(crate) fn args<T: DeserializeOwned>(value: Value) -> Result<T, CoreError> {
 
 impl Orchestrator {
     /// The tools `agent` may call, by its permission groups.
-    pub fn tools_for(&self, agent: &Agent) -> Vec<ToolInfo> {
-        let groups = groups_of(agent);
+    pub async fn tools_for(&self, agent: &Agent) -> Vec<ToolInfo> {
+        let groups = self.groups(agent).await;
         TOOLS
             .iter()
             .filter(|t| t.groups.iter().any(|g| groups.contains(g)))
@@ -711,7 +713,7 @@ impl Orchestrator {
                 kind: "tool",
                 id: name.to_owned(),
             })?;
-        let groups = groups_of(caller);
+        let groups = self.groups(caller).await;
         if !tool.groups.iter().any(|g| groups.contains(g)) {
             return Err(CoreError::Conflict(format!(
                 "{name} is not available to you (your groups: {})",
@@ -724,7 +726,12 @@ impl Orchestrator {
         }
         match name {
             "whoami" => {
-                let tools = self.tools_for(caller).into_iter().map(|t| t.name).collect();
+                let tools = self
+                    .tools_for(caller)
+                    .await
+                    .into_iter()
+                    .map(|t| t.name)
+                    .collect();
                 self.whoami(caller, tools).await
             }
             "agent_list" => self.agent_list(caller).await,

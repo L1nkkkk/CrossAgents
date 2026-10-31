@@ -142,11 +142,17 @@ impl SessionSetup for CollabSetup {
     async fn prepare(&self, agent: &Agent) -> Result<SessionExtras, CoreError> {
         let agent_env = self.agent_env(agent).await?;
         let (permission, permissions) = self.permissions(agent).await;
-        let lessons = match self.orchestrator.get() {
-            Some(orchestrator) => orchestrator.lessons_hint(agent).await,
-            None => None,
+        let (lessons, groups) = match self.orchestrator.get() {
+            Some(orchestrator) => (
+                orchestrator.lessons_hint(agent).await,
+                orchestrator.groups(agent).await,
+            ),
+            None => (
+                None,
+                crossagents_orchestrator::messaging::groups_of(agent, None),
+            ),
         };
-        let instructions = instructions(agent, lessons.as_deref());
+        let instructions = instructions(agent, &groups, lessons.as_deref());
         let Some((program, args)) = self.mcp_command.split_first() else {
             return Ok(SessionExtras {
                 mcp_servers: self.extra_mcp.clone(),
@@ -206,8 +212,12 @@ impl SessionSetup for CollabSetup {
 /// Who the agent is (name, model, card), then how it works with the hub (its role's guide),
 /// then the project's rules when its own CLI would not read them (docs/tasks/DOGFOOD.md §6),
 /// then the line saying its project has troubleshooting records (docs/tasks/LESSONS.md §4.5).
-fn instructions(agent: &Agent, lessons: Option<&str>) -> String {
-    let guide = crossagents_orchestrator::protocol::guide_for(agent);
+fn instructions(
+    agent: &Agent,
+    groups: &[crossagents_orchestrator::messaging::Group],
+    lessons: Option<&str>,
+) -> String {
+    let guide = crossagents_orchestrator::protocol::guide_for(agent, groups);
     let mut text = format!("{}\n\n{guide}", agent.identity());
     for section in [crate::rules::for_agent(agent).as_deref(), lessons]
         .into_iter()
