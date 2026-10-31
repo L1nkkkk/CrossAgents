@@ -205,3 +205,13 @@ cargo test --workspace
 
 端到端测试用 `crates/mock-agent`：一个可编程的 ACP agent，按提示里的 `[write …]`、`[call …]` 指令行事，
 不需要任何 LLM 或账号就能跑通完整流水线。
+
+发版（在干净的 main 上）：
+
+```sh
+node scripts/release.mjs --dry-run   # 只跑检查
+node scripts/release.mjs             # 补丁位 +1，也可以写死 node scripts/release.mjs 0.2.0
+```
+
+对齐 `Cargo.toml` 与 `apps/gui/package.json` 的版本号、提交、打 tag、打包发到
+`CrossAgents-releases`，发布成功之后才 push，最后核对安装包和 `latest.yml` 在不在。
