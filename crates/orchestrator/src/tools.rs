@@ -331,9 +331,18 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "lesson_get",
-        description: "A troubleshooting record in full: conditions, resolution, every time it was tried, and the runs it came from.",
+        description: "A troubleshooting record in full: conditions, resolution, how often it was tried and with what outcome, the latest tries, the latest failure, and the runs it came from.",
         groups: ALL,
-        schema: || object(json!({ "id": { "type": "string" } }), &["id"]),
+        schema: || {
+            object(
+                json!({
+                    "id": { "type": "string" },
+                    "evidence_offset": { "type": "integer", "description": "Skip this many of the newest tries, to page back. Default 0." },
+                    "evidence_limit": { "type": "integer", "description": "1-50, default 5." }
+                }),
+                &["id"],
+            )
+        },
     },
     ToolDef {
         name: "lesson_report",

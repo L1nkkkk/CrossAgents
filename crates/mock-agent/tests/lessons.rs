@@ -192,6 +192,19 @@ async fn a_problem_from_a_cancelled_run_is_sorted_elsewhere_and_found_later() {
     )
     .await;
     assert!(out.contains("\"status\": \"review\""), "{out}");
+    let out = turn(
+        &t,
+        "rex",
+        rex.id,
+        &call("lesson_get", json!({ "id": lesson_id(&once) })),
+    )
+    .await;
+    assert!(out.contains("no longer works"), "{out}");
+    assert!(
+        out.contains("\"last_failure\"") && out.contains("python 是真的"),
+        "{out}"
+    );
+    assert!(out.contains("\"total\": 2"), "{out}");
 
     // Another project: the run is not its to read, and the record is not there.
     let olga = t

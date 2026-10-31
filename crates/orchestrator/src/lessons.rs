@@ -22,6 +22,13 @@ const TITLE_MAX: usize = 200;
 const FIELD_MAX: usize = 4 * 1024;
 const KEYWORDS_MAX: usize = 20;
 const SEARCH_LIMIT: usize = 10;
+/// Evidence `lesson_get` shows unless asked for a page, and the most it shows at once.
+const EVIDENCE_SHOWN: usize = 5;
+const EVIDENCE_PAGE_MAX: usize = 50;
+/// Sources `lesson_get` names; the rest are counted.
+const SOURCES_SHOWN: usize = 3;
+/// Longest excerpt of a field in a search result, in bytes.
+const EXCERPT_MAX: usize = 300;
 
 pub(crate) fn outcome_schema() -> Value {
     json!({ "type": "string", "enum": ["resolved", "workaround", "unresolved"] })
@@ -85,6 +92,105 @@ pub fn search_terms(query: &str) -> Vec<String> {
     }
     terms.truncate(12);
     terms
+}
+
+/// The start of `text` for a search result: its first paragraph, at most [`EXCERPT_MAX`]
+/// bytes, and whether anything was left out.
+fn excerpt(text: &str) -> (String, bool) {
+    let text = text.trim();
+    let mut cut = text.find("\n\n").unwrap_or(text.len()).min(EXCERPT_MAX);
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let short = text[..cut].trim_end();
+    if short.len() == text.len() {
+        (text.to_owned(), false)
+    } else {
+        (format!("{short}…"), true)
+    }
+}
+
+/// One search hit: enough to tell whether it is worth reading in full (USAGE-TRIM §4.2).
+fn search_hit(l: &Lesson) -> Value {
+    let (conditions, a) = excerpt(&l.conditions);
+    let (symptom, b) = excerpt(&l.symptom);
+    let (resolution, c) = excerpt(&l.resolution);
+    let mut hit = json!({
+        "id": l.id,
+        "title": l.title,
+        "status": l.status,
+        "outcome": l.outcome,
+        "conditions": conditions,
+        "symptom": symptom,
+        "resolution": resolution,
+        "last_checked": l.evidence.last().map(|e| e.at),
+    });
+    if a || b || c {
+        hit["truncated"] = json!(true);
+    }
+    hit
+}
+
+/// A lesson as `lesson_get` gives it (USAGE-TRIM §4.1): every field of its own, but of its
+/// evidence only counts, a page (newest first, `offset` from the newest) and the latest
+/// failure however old, and of its sources a count and the latest few.
+fn lesson_view(l: &Lesson, offset: usize, limit: usize) -> Value {
+    let count = |o: LessonOutcome| l.evidence.iter().filter(|e| e.outcome == o).count();
+    let page: Vec<&Evidence> = l.evidence.iter().rev().skip(offset).take(limit).collect();
+    let rest = l.evidence.len().saturating_sub(offset + page.len());
+    let last_failure = l
+        .evidence
+        .iter()
+        .rev()
+        .find(|e| e.outcome == LessonOutcome::Unresolved);
+    let mut view = json!({
+        "lesson": {
+            "id": l.id,
+            "title": l.title,
+            "status": l.status,
+            "superseded_by": l.superseded_by,
+            "outcome": l.outcome,
+            "symptom": l.symptom,
+            "keywords": l.keywords,
+            "conditions": l.conditions,
+            "resolution": l.resolution,
+            "created_at": l.created_at,
+            "updated_at": l.updated_at,
+        },
+        "evidence": {
+            "total": l.evidence.len(),
+            "resolved": count(LessonOutcome::Resolved),
+            "workaround": count(LessonOutcome::Workaround),
+            "unresolved": count(LessonOutcome::Unresolved),
+            "first_at": l.evidence.first().map(|e| e.at),
+            "last_at": l.evidence.last().map(|e| e.at),
+            "offset": offset,
+            "newest_first": page,
+        },
+        "last_failure": last_failure,
+        "sources": {
+            "total": l.sources.len(),
+            "latest": l.sources.iter().rev().take(SOURCES_SHOWN).collect::<Vec<_>>(),
+        },
+    });
+    if rest > 0 {
+        view["evidence"]["more"] = json!(format!(
+            "{rest} older; lesson_get with evidence_offset {} for the next page",
+            offset + page.len()
+        ));
+    }
+    match l.status {
+        LessonStatus::Review => {
+            view["review"] = json!(
+                "Someone reported this no longer works: see last_failure before relying on it."
+            )
+        }
+        LessonStatus::Superseded => {
+            view["review"] = json!("Replaced by superseded_by; kept for its history.")
+        }
+        LessonStatus::Active => {}
+    }
+    view
 }
 
 impl Orchestrator {
@@ -400,22 +506,9 @@ impl Orchestrator {
             .store
             .search_lessons(&project.id, &terms, a.include_superseded, limit)
             .await?;
-        let lessons: Vec<Value> = found
-            .iter()
-            .map(|l| {
-                json!({
-                    "id": l.id,
-                    "title": l.title,
-                    "status": l.status,
-                    "outcome": l.outcome,
-                    "symptom": l.symptom,
-                    "resolution": l.resolution,
-                    "last_checked": l.evidence.last().map(|e| e.at),
-                })
-            })
-            .collect();
+        let lessons: Vec<Value> = found.iter().map(search_hit).collect();
         Ok(
-            json!({ "lessons": lessons, "note": "A match may not apply here: check its conditions and evidence (lesson_get) before relying on it." }),
+            json!({ "lessons": lessons, "note": "A match may not apply here: check its conditions and evidence (lesson_get) before relying on it. Text ending in … is cut; lesson_get has it in full." }),
         )
     }
 
@@ -427,10 +520,18 @@ impl Orchestrator {
         #[derive(Deserialize)]
         struct A {
             id: String,
+            #[serde(default)]
+            evidence_offset: usize,
+            #[serde(default)]
+            evidence_limit: Option<usize>,
         }
         let a: A = args(input)?;
         let lesson = self.own_lesson(caller, &a.id).await?;
-        Ok(json!({ "lesson": lesson }))
+        let limit = a
+            .evidence_limit
+            .unwrap_or(EVIDENCE_SHOWN)
+            .clamp(1, EVIDENCE_PAGE_MAX);
+        Ok(lesson_view(&lesson, a.evidence_offset, limit))
     }
 
     /// How a lesson went when the caller used it: one more piece of evidence; one that did
@@ -506,6 +607,7 @@ impl Orchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossagents_core::AgentId;
 
     #[test]
     fn a_pasted_error_becomes_search_terms() {
@@ -524,5 +626,131 @@ mod tests {
         );
         assert_eq!(search_terms("连接超时，走代理"), vec!["连接超时", "走代理"]);
         assert!(search_terms("  ,; ").is_empty());
+    }
+
+    fn lesson_with(outcomes: &[LessonOutcome], sources: usize) -> Lesson {
+        let start = Utc::now() - chrono::Duration::hours(outcomes.len() as i64);
+        let run = RunId::new();
+        Lesson {
+            id: "l1".into(),
+            project_id: "p".into(),
+            title: "t".into(),
+            symptom: "s".into(),
+            keywords: vec![],
+            conditions: "c".into(),
+            resolution: "r".into(),
+            outcome: LessonOutcome::Resolved,
+            status: LessonStatus::Active,
+            superseded_by: None,
+            evidence: outcomes
+                .iter()
+                .enumerate()
+                .map(|(i, o)| Evidence {
+                    run_id: None,
+                    agent: AgentId::new(),
+                    node: LOCAL_NODE.into(),
+                    at: start + chrono::Duration::hours(i as i64),
+                    commit: None,
+                    dirty: None,
+                    outcome: *o,
+                    note: format!("try {i}"),
+                })
+                .collect(),
+            sources: (0..sources)
+                .map(|i| IssueRef {
+                    run_id: run,
+                    key: format!("issue/{i}"),
+                })
+                .collect(),
+            created_at: start,
+            updated_at: start,
+        }
+    }
+
+    fn notes(page: &Value) -> Vec<String> {
+        page["evidence"]["newest_first"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["note"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_long_history_shows_counts_and_the_latest_tries() {
+        let mut outcomes = vec![LessonOutcome::Resolved; 12];
+        outcomes[3] = LessonOutcome::Unresolved;
+        let lesson = lesson_with(&outcomes, 7);
+        let view = lesson_view(&lesson, 0, EVIDENCE_SHOWN);
+        assert_eq!(view["evidence"]["total"], 12);
+        assert_eq!(view["evidence"]["resolved"], 11);
+        assert_eq!(view["evidence"]["unresolved"], 1);
+        assert_eq!(
+            notes(&view),
+            ["try 11", "try 10", "try 9", "try 8", "try 7"]
+        );
+        assert!(
+            view["evidence"]["more"]
+                .as_str()
+                .unwrap()
+                .contains("evidence_offset 5"),
+            "{view}"
+        );
+        // The old failure is not on this page but is shown anyway.
+        assert_eq!(view["last_failure"]["note"], "try 3");
+        assert_eq!(view["sources"]["total"], 7);
+        assert_eq!(view["sources"]["latest"][0]["key"], "issue/6");
+        assert_eq!(view["sources"]["latest"].as_array().unwrap().len(), 3);
+        assert_eq!(view["lesson"]["resolution"], "r");
+        assert!(view.get("review").is_none());
+
+        // Paging back reaches every try, then says there is no more.
+        let mut seen = notes(&view);
+        let mut offset = 5;
+        loop {
+            let page = lesson_view(&lesson, offset, EVIDENCE_SHOWN);
+            let got = notes(&page);
+            if got.is_empty() {
+                break;
+            }
+            offset += got.len();
+            seen.extend(got);
+            if page["evidence"].get("more").is_none() {
+                break;
+            }
+        }
+        assert_eq!(seen.len(), 12);
+        assert_eq!(seen.last().unwrap(), "try 0");
+    }
+
+    #[test]
+    fn a_lesson_under_review_says_why_up_front() {
+        let mut lesson = lesson_with(&[LessonOutcome::Resolved, LessonOutcome::Unresolved], 1);
+        lesson.status = LessonStatus::Review;
+        let view = lesson_view(&lesson, 0, EVIDENCE_SHOWN);
+        assert!(view["review"].as_str().unwrap().contains("last_failure"));
+        assert_eq!(view["last_failure"]["note"], "try 1");
+        assert_eq!(view["lesson"]["status"], "review");
+        assert!(view["evidence"].get("more").is_none());
+
+        let clean = lesson_with(&[LessonOutcome::Resolved], 0);
+        assert!(lesson_view(&clean, 0, EVIDENCE_SHOWN)["last_failure"].is_null());
+    }
+
+    #[test]
+    fn a_search_hit_cuts_long_text_and_says_so() {
+        let mut lesson = lesson_with(&[LessonOutcome::Resolved], 0);
+        let hit = search_hit(&lesson);
+        assert_eq!(hit["resolution"], "r");
+        assert!(hit.get("truncated").is_none());
+
+        lesson.resolution = format!("第一段{}\n\n第二段", "长".repeat(40));
+        lesson.symptom = "错".repeat(200);
+        let hit = search_hit(&lesson);
+        let resolution = hit["resolution"].as_str().unwrap();
+        assert!(resolution.ends_with('…') && !resolution.contains("第二段"));
+        let symptom = hit["symptom"].as_str().unwrap();
+        assert!(symptom.ends_with('…') && symptom.len() <= EXCERPT_MAX + '…'.len_utf8());
+        assert_eq!(hit["truncated"], true);
     }
 }

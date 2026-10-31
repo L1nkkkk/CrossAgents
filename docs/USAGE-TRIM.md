@@ -1,6 +1,6 @@
 # CrossAgents：减少额度消耗（第二轮）
 
-> 日期：2026-10-31 · 基线：0.1.20 · 状态：阶段 1 已实现，阶段 2 待做，阶段 3 暂缓。  
+> 日期：2026-10-31 · 基线：0.1.20 · 状态：阶段 1、2 已实现，阶段 3 暂缓。  
 > 前一轮见 [SESSION-FIRST.md](SESSION-FIRST.md)（独立 lead、普通聊天精简）。
 
 ## 1. 原则
@@ -14,7 +14,7 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | 1 | Work 提案的开始、拒绝、关闭通知静默化 | 已实现 |
-| 2 | `lesson_get` 证据分页；随后精简 `lesson_search` 返回 | 待做 |
+| 2 | `lesson_get` 证据分页；随后精简 `lesson_search` 返回 | 已实现 |
 | 3 | hub 工具的长结果按需展开 | 暂缓，先看实际用量 |
 
 不做：缩短常驻工具说明、给队友列表加分页、另造通知合并机制（§6）。
@@ -126,6 +126,8 @@ lesson 机制保留。常驻部分只有一行提示（[lessons.rs:101](../crate
 | 早期有失败、近期都成功 | 最近一次失败仍在默认返回里 |
 | 状态为 review | 默认返回里看得到状态和导致复核的那条证据 |
 | 搜索 | 条数不变；单条长度有上限，截断有标记 |
+
+实现：证据按新到旧排，`evidence_offset` 从最新一条数起；状态说明放在顶层 `review` 字段（JSON 键序不固定，所以不靠排在前面）；搜索每个字段取第一段、至多 300 字节。测试：`lessons.rs` 的 `a_long_history_shows_counts_and_the_latest_tries`、`a_lesson_under_review_says_why_up_front`、`a_search_hit_cuts_long_text_and_says_so`；mock-agent `lessons.rs` 在报告失败后用 `lesson_get` 看到复核说明和那条失败。
 
 ## 5. 阶段 3：长结果按需展开（暂缓）
 
