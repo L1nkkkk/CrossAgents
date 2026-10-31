@@ -5,7 +5,7 @@
 import { useSyncExternalStore, type PointerEvent as ReactPointerEvent } from "react";
 
 const KEY = "crossagents.widths";
-export const SIDEBAR = { min: 200, max: 420, initial: 264 };
+export const SIDEBAR = { min: 200, max: 420, initial: 226 };
 export const TOOLS = { min: 300, max: 960, initial: 420 };
 /** The narrowest the conversation gets beside docked columns, gaps between panels included. */
 export const MIN_MAIN = 500;
