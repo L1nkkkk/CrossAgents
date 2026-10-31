@@ -2,6 +2,7 @@
 //! `work_start`, the person starts it or declines with the card that puts in front of them.
 //! Opening a branch and a worktree is something the person sees, so the agent never does it
 //! on its own.
+//! `run_next` continues an existing work group immediately from the person's new request.
 
 use chrono::Utc;
 use crossagents_core::{
@@ -31,6 +32,84 @@ fn brief_of(item: &HumanItem) -> String {
 }
 
 impl Orchestrator {
+    pub(crate) async fn run_next(&self, caller: &Agent, input: Value) -> Result<Value, CoreError> {
+        #[derive(Deserialize)]
+        struct A {
+            title: String,
+            request: String,
+            from: Option<String>,
+        }
+        let a: A = crate::tools::args(input)?;
+        let run = self
+            .run_of(caller.id)
+            .await?
+            .map(|(r, _)| r)
+            .filter(|r| r.planner == caller.id)
+            .ok_or_else(|| CoreError::Conflict("run_next requires a run's lead".into()))?;
+        if !run.status.is_terminal() {
+            return Err(CoreError::Conflict(
+                "run_next requires a terminal run; this run is still in progress".into(),
+            ));
+        }
+        let work = run
+            .work_id
+            .ok_or_else(|| CoreError::Conflict("this run has no work group".into()))?;
+        let next = self
+            .create_work_round(work, a.request, Some(a.title), a.from.as_deref())
+            .await?;
+        Ok(json!({ "run_id": next.id, "work_id": work, "status": next.status }))
+    }
+
+    /// Shared by the conversation tool and the work group's next-round API.
+    pub async fn create_work_round(
+        &self,
+        id: crossagents_core::WorkId,
+        request: String,
+        title: Option<String>,
+        from: Option<&str>,
+    ) -> Result<Run, CoreError> {
+        if from.is_some_and(|from| from != "base") {
+            return Err(CoreError::Conflict("from only accepts base".into()));
+        }
+        let work = self.store().get_work(id).await?;
+        let previous = self
+            .store()
+            .list_runs()
+            .await?
+            .into_iter()
+            .find(|r| r.work_id == Some(id));
+        let config = previous
+            .as_ref()
+            .map(|r| r.config.clone())
+            .unwrap_or(RunConfig {
+                worker: work.lead,
+                escalate: None,
+                reviewer: None,
+                auto_approve: false,
+                max_parallel: RunConfig::DEFAULT_MAX_PARALLEL,
+                max_attempts: RunConfig::DEFAULT_MAX_ATTEMPTS,
+                team: Vec::new(),
+                policy: RunPolicy::default(),
+            });
+        self.create_run_for_work_from(
+            NewRun {
+                origin_chat_id: None,
+                request,
+                title,
+                planner: work.lead,
+                config,
+                repo: Some(work.repo),
+                base_branch: None,
+                attachments: Vec::new(),
+            },
+            None,
+            false,
+            Some(id),
+            from == Some("base"),
+        )
+        .await
+    }
+
     /// The parent's next message carries this result; recording it never wakes the parent.
     pub(crate) async fn tell_origin_later(&self, run: &Run) {
         let Some(parent) = run.origin_chat_id.filter(|id| *id != run.planner) else {

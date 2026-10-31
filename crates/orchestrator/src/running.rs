@@ -7,10 +7,124 @@
 //! decides whether a check may start. Kept in memory only; after a restart nothing is known
 //! to be running.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
-use crossagents_core::{AgentId, Event, EventKind, ToolStatus};
+use crossagents_core::{AgentId, Event, EventKind, OutputStream, ToolStatus};
+
+/// Activity for current turns only. Kept in memory; after a restart nothing is known.
+#[derive(Debug, Default)]
+pub struct AgentActivity {
+    by_agent: HashMap<AgentId, TurnActivity>,
+}
+
+#[derive(Debug)]
+struct TurnActivity {
+    started: DateTime<Utc>,
+    last: DateTime<Utc>,
+    kind: &'static str,
+    files: HashSet<String>,
+    calls: HashMap<String, &'static str>,
+}
+
+impl TurnActivity {
+    fn new(ts: DateTime<Utc>) -> Self {
+        Self {
+            started: ts,
+            last: ts,
+            kind: "推理中",
+            files: HashSet::new(),
+            calls: HashMap::new(),
+        }
+    }
+}
+
+impl AgentActivity {
+    pub fn push(&mut self, event: &Event) {
+        match &event.kind {
+            EventKind::AgentTurnCompleted { id, .. } | EventKind::AgentExited { id, .. } => {
+                self.by_agent.remove(id);
+            }
+            EventKind::AgentTurnStarted { id, .. } => {
+                self.by_agent.insert(*id, TurnActivity::new(event.ts));
+            }
+            EventKind::AgentOutput { id, stream, .. } => {
+                let turn = self
+                    .by_agent
+                    .entry(*id)
+                    .or_insert_with(|| TurnActivity::new(event.ts));
+                turn.last = event.ts;
+                turn.kind = match stream {
+                    OutputStream::Thought => "推理中",
+                    OutputStream::Text => "回复中",
+                };
+            }
+            EventKind::AgentToolCall {
+                id,
+                tool_call_id,
+                kind,
+                ..
+            } => {
+                let turn = self
+                    .by_agent
+                    .entry(*id)
+                    .or_insert_with(|| TurnActivity::new(event.ts));
+                let kind = match kind.as_deref() {
+                    Some("execute") => "运行命令",
+                    Some("edit" | "delete" | "move") => "修改文件",
+                    Some("read") => "读取文件",
+                    Some("search" | "fetch") => "搜索",
+                    Some("think") => "推理中",
+                    _ => "调用工具",
+                };
+                turn.calls.insert(tool_call_id.clone(), kind);
+                turn.last = event.ts;
+                turn.kind = kind;
+            }
+            EventKind::AgentToolDetail {
+                id,
+                tool_call_id,
+                detail,
+            } => {
+                if let Some(turn) = self.by_agent.get_mut(id) {
+                    if let Some(kind) = turn.calls.get(tool_call_id).copied() {
+                        turn.last = event.ts;
+                        turn.kind = kind;
+                        if kind == "修改文件" {
+                            turn.files
+                                .extend(detail.changes.iter().map(|change| change.path.clone()));
+                        }
+                    }
+                }
+            }
+            EventKind::AgentToolOutput {
+                id, tool_call_id, ..
+            }
+            | EventKind::AgentToolCallUpdated {
+                id, tool_call_id, ..
+            } => {
+                if let Some(turn) = self.by_agent.get_mut(id) {
+                    if let Some(kind) = turn.calls.get(tool_call_id).copied() {
+                        turn.last = event.ts;
+                        turn.kind = kind;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn of(&self, agent: AgentId, now: DateTime<Utc>) -> Option<serde_json::Value> {
+        self.by_agent.get(&agent).map(|turn| {
+            serde_json::json!({
+                "turn_elapsed_seconds": (now - turn.started).num_seconds().max(0),
+                "last_activity_kind": turn.kind,
+                "last_activity_ago_seconds": (now - turn.last).num_seconds().max(0),
+                "files_touched": turn.files.len(),
+            })
+        })
+    }
+}
 
 /// A command still going.
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +138,7 @@ pub struct Running {
 #[derive(Debug, Default)]
 pub struct RunningCommands {
     by_agent: HashMap<AgentId, Vec<Running>>,
+    pub activity: AgentActivity,
 }
 
 /// Past it a command whose end was never reported is taken as gone: a command put in the
@@ -32,6 +147,7 @@ const STALE_AFTER_HOURS: i64 = 2;
 
 impl RunningCommands {
     pub fn push(&mut self, event: &Event) {
+        self.activity.push(event);
         match &event.kind {
             EventKind::AgentToolCall {
                 id,

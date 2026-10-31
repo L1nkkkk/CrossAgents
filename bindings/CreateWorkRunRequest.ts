@@ -3,4 +3,4 @@
 /**
  * `POST /v1/works/{id}/runs`.
  */
-export type CreateWorkRunRequest = { request: string, title: string | null, };
+export type CreateWorkRunRequest = { request: string, title: string | null, from: string | null, };

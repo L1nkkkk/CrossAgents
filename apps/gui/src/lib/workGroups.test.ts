@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { TranscriptItem } from "@bindings/TranscriptItem";
-import { actionOf, duration, liveActivity, liveKey, liveNow, quietSeconds, relativeTo, stepLine, summarize, workGroups, type Step } from "./workGroups.ts";
+import { QUIET_AFTER, actionOf, duration, liveActivity, liveKey, liveNow, liveProgress, quietLabel, quietSeconds, relativeTo, stepLine, summarize, workGroups, type Step } from "./workGroups.ts";
 
 const tool = (kind: string, status: "in_progress" | "completed" | "failed" = "completed", title = kind): TranscriptItem => ({
   type: "tool_call",
@@ -104,6 +104,37 @@ test("time without new output counts up, and never goes back", () => {
   assert.equal(quietSeconds(at, at), 0);
   assert.equal(quietSeconds(at, at + 45_900), 45);
   assert.equal(quietSeconds(at, at - 5_000), 0);
+});
+
+test("a quiet turn says how long, in the unit that reads best", () => {
+  assert.equal(quietLabel(0), "0 秒没动静");
+  assert.equal(quietLabel(45), "45 秒没动静");
+  assert.equal(quietLabel(59), "59 秒没动静");
+  assert.equal(quietLabel(60), "1 分钟没动静");
+  assert.equal(quietLabel(299), "4 分钟没动静");
+  assert.equal(quietLabel(3_600), "1 小时没动静");
+  assert.equal(quietLabel(3_900), "1 小时 5 分钟没动静");
+  assert.equal(quietLabel(-3), "0 秒没动静");
+});
+
+test("a running turn reads as elapsed, activity, and how long since it moved", () => {
+  const t0 = 1_000_000;
+  // Both times known: "1m 05s · 运行命令", quiet only past the threshold.
+  const moving = liveProgress([tool("execute", "in_progress")], { since: t0, at: t0 + 63_000, now: t0 + 65_000 });
+  assert.deepEqual(moving, { elapsed: "1m 05s", activity: "运行命令", quiet: 2 });
+  const quiet = liveProgress([tool("read", "completed")], { since: t0, at: t0, now: t0 + 90_000 });
+  assert.equal(quiet.elapsed, "1m 30s");
+  assert.equal(quiet.activity, "工作中");
+  assert.equal(quiet.quiet, 90);
+  assert.equal(quiet.quietText, "1 分钟没动静");
+  // Under the threshold it is still moving: no quiet line at all.
+  assert.equal(liveProgress([text("…")], { since: t0, at: t0, now: t0 + (QUIET_AFTER - 1) * 1000 }).quietText, undefined);
+  // An unknown start is left out rather than guessed.
+  const fresh = liveProgress([text("…")], { now: t0 });
+  assert.equal(fresh.elapsed, undefined);
+  assert.equal(fresh.activity, "回复中");
+  assert.equal(fresh.quiet, 0);
+  assert.equal(fresh.quietText, undefined);
 });
 
 test("the live key changes only when the turn produced something", () => {

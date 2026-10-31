@@ -394,6 +394,21 @@ const TOOLS: &[ToolDef] = &[
         },
     },
     ToolDef {
+        name: "run_next",
+        description: "Start the next round in your work group after your run ended. Write the person's request verbatim. Starts immediately, using this group's plan policy. Set from to base to leave the previous round's unlanded changes behind.",
+        groups: RECRUITERS,
+        schema: || {
+            object(
+                json!({
+                    "title": { "type": "string" },
+                    "request": { "type": "string" },
+                    "from": { "type": "string", "enum": ["base"] }
+                }),
+                &["title", "request"],
+            )
+        },
+    },
+    ToolDef {
         name: "plan_submit",
         description: "Submit the plan for your current run: the full list of tasks for workers. Each task goes to a new execution session of its assignee by default (fresh: true); write fresh: false to have that session itself, with its conversation, do it. Depending on the run's policy the person approves it first, or it starts at once.",
         groups: PLANNER,
@@ -775,6 +790,7 @@ impl Orchestrator {
             "human_ask" => self.human_ask(caller, input).await,
             "human_notify" => self.human_notify(caller, input).await,
             "work_start" => self.work_start(caller, input).await,
+            "run_next" => self.run_next(caller, input).await,
             "plan_submit" => {
                 #[derive(Deserialize)]
                 struct A {

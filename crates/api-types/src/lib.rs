@@ -1143,6 +1143,9 @@ pub struct CreateWorkRunRequest {
     pub request: String,
     #[serde(default)]
     pub title: Option<String>,
+    // Start from the baseline instead of carrying the previous round's changes.
+    #[serde(default)]
+    pub from: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

@@ -67,6 +67,11 @@
 - [x] `cli` 增加状态命令：`hub status` 除后台 agent 进程（pid、启动时间、隔离方式）外，汇总各会话——总数、归档数、各状态计数、正在干活的名单；处于 error 的会话逐个读 transcript 的 `error`，截成一行显示（最多 20 个）。`--json` 同步给出 `sessions` 与 `errors`
 - [x] 事件日志落盘：每条事件一行 JSON 写进 `logs/events-<date>.jsonl`，与 `GET /v1/events` 同格式；独立线程无缓冲写入（读方立即可见，`Get-Content -Wait` 可跟），队列满时丢弃并计数、不拖慢 hub；按天滚动，启动时删 14 天前的文件（只认 `events-*.jsonl`，不动别人的文件）。可关：`[hub] event_log = false`。读：`crossagents events --log [--since N]`，hub 没在跑也能读
 - [x] GUI 显示"hub 离线"时的诊断信息：侧栏未连接时显示 `offline: <原因>`，原因来自 Electron 主进程且带修复指引（如 `hub is not running (…); start it with crossagents hub start`）
+- [x] 每个会话都显示进度，不只 run（2026-10-31）：起因是 run f87e53d3 里主导看 `usage_get` 的 `peak_context`（codebuddy 轮末才上报，轮中一直是 0）和 `workspace_diff`（对未提交改动返回空 stat）误判一个 worker 卡住并中断了它，其实它已写了 28 个文件。
+  - ① hub 侧活动信号：`crates/orchestrator/src/running.rs` 新增独立的 `AgentActivity`，挂在 `RunningCommands` 内、由它现有的 `push` 转发事件（`engine.rs` 无需改动），记录本轮开始时间、最近一次输出 / 工具调用的时间与种类（运行命令 / 修改文件 / 读取文件 / 搜索 / 回复中 / 推理中）、本轮按路径去重的改动文件数；只在内存里，重启后一无所知，轮末或进程退出即清空。`agent_get` / `agent_list` 返回 `activity` 段（`turn_elapsed_seconds`、`last_activity_kind`、`last_activity_ago_seconds`、`files_touched`），不在轮次中为 null——主导判断卡没卡住看这个，不再依赖插件的 usage 上报。
+  - ② GUI：侧栏会话行在轮次中显示本轮已跑多久 + 最近活动，安静超过 `QUIET_AFTER` 显示「X 分钟没动静」；会话页头部加一条 `TurnLive`，带本轮时长、最近活动、所在任务与其 `progress`、run 的任务计数（复用 `lib/taskState.ts` 的 `progress`）、acceptance 检查通过数、安静提示。活动三项出自 `lib/workGroups.ts` 新增的 `liveProgress` / `quietLabel`，与轮次下方的实时行同源。
+  - ③ 不编百分比：没有步骤总数就只显示活动，不画进度条；只显示 hub 真有的计数（run 的任务数、acceptance 检查）。worker 自报 `step/total` 仍未做，等需要时再说。
+  - 顺带修了 `workspace_diff` 对有未提交改动的 worktree 返回空 stat：`workspace.rs` 的 `diff_stat` 原先用 `git diff --stat {base}...HEAD`，只算已提交的，改成与同文件 `diff` 一致的做法（`--intent-to-add` 后 `git diff --stat <merge_base>`），`tasks.rs` 里的 `committed` 变量随之改名为 `stat`。
 
 ## 五、Claude 运行时（对照 Cutex 的借鉴项）
 
@@ -210,6 +215,11 @@ B 删除 run：
 - [x] 执行器在根进程退出后被残留进程无限拖住（2026-10-29 记，同日修）：run `041aba99` 的 worker 跑 `cargo test`，真正的 cargo 早已退出，shim 却挂了十几分钟不返回，worker 一直显示“运行命令”，当天卡了三次。原因是 MSVC `link.exe` 会拉起遥测进程 `VCTIP.EXE`，它在父进程退出后还会挂很久，又在同一个 Job 里，而 `exec::run::wait_tree_empty` 要等 Job 清空才放锁、返回，没有上限。修法：新增 `exec::end_tree(tree, grace)`，根进程退出后最多再等 `LEFTOVER_GRACE`（10 秒），到点 `Tree::end`（Windows 用 `TerminateJobObject`，保留句柄以便确认清空；Unix 结束进程组）后再等树空、放锁，仍满足 LOCKS §4.3“锁持有到树结束”；结束了残留进程时 shim 在 stderr 说明。hub 检查的 `verify.rs::end_tree` 同样改为最多宽限 10 秒（之前会一直等到这条检查的超时）。测试 `exec_tree.rs::exec_what_a_command_leaves_running_is_ended_after_the_grace`、`exec_a_tree_that_ends_within_the_grace_is_left_alone`；实测：隔离环境里经 shim 编译小项目，链接留下的 VCTIP.EXE 在 10 秒后被结束，命令 10.9 秒返回。部署：没有重启 hub，只把 `<home>/shims/0.1.6/cargo.exe` 换成新构建（旧文件移到 `shims/retired/`），之后启动的 cargo 立即生效；hub 自身的检查要等下次换 hub 才用上新逻辑
 
 ## 十八、工作组：持续的工作空间，run 是其中一轮
+
+- [x] G1-2（2026-10-31）：新增 `run_next(title, request, from?)`，只有已结束且有工作组的 run 主导能调用，当场开下一轮，不出 Work 卡片，继承计划审批与落地策略。`POST /v1/works/{id}/runs` 共用规则，`CreateWorkRunRequest.from` 与 bindings 同步；`from` 只接受 `base`。
+  - worktree 续轮默认从未落地且有改动的上一轮分支开始；已落地、已取消、无改动或显式 `from: "base"` 时从真正基线开始。续轮在原集成 checkout 内切分支，复用会话与 `targets/integration`；不能搬目录的复制主导也不再复制。分组 run 取消时停主导进程、将 worktree 改动留在原轮分支、释放占用，保留会话目录供续轮；未分组 run 的取消行为不变。原地模式保留当前目录内容，没有分支链与连带落地。没有增加保留 / 清理策略字段。
+  - 落地沿同组分支链找到基线，包含所有未落地祖先，落地提交说明列轮次，祖先的 `landed.by` 为“随第 N 轮落地”，同时关闭其待落地通知。旧轮次可以单独落地，使用临时 checkout，不切换当前主导的分支；只允许清理或删除最后一轮，避免破坏共享 checkout。开场信息列最近最多五轮的标题、状态、落地状态和总结首行。
+  - `crates/mock-agent/tests/run_next.rs` 覆盖 MCP 续轮、API `from: "base"`、已落地或取消后基线续轮、进行中拒绝、目录与缓存复用、重启后三轮连带落地、原地模式、旧轮单独落地和复制主导续轮。G1-3 / G1-4 / G1-5 未在本轮实施。
 
 > 2026-10-29 设计见 [tasks/G1.md](tasks/G1.md)，2026-10-30 run `01a18a4a` 做了第一层。
 > 与 §十九 冲突处以 [tasks/LEAD.md](tasks/LEAD.md) §9 为准。

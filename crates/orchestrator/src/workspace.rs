@@ -340,7 +340,9 @@ impl WorkspaceProvider for GitWorkspaces {
     }
 
     async fn diff_stat(&self, path: &Path, base: &str) -> Result<String, CoreError> {
-        git(path, &["diff", "--stat", &format!("{base}...HEAD")]).await
+        add_changes(path, &["--intent-to-add"]).await?;
+        let merge_base = git(path, &["merge-base", base, "HEAD"]).await?;
+        git(path, &["diff", "--stat", &merge_base]).await
     }
 
     async fn diff(&self, path: &Path, base: &str, paths: &[String]) -> Result<String, CoreError> {
@@ -1418,6 +1420,16 @@ mod tests {
         // The integration tree is clean again.
         let status = git(&integration, &["status", "--porcelain"]).await.unwrap();
         assert!(status.is_empty(), "{status}");
+    }
+
+    #[tokio::test]
+    async fn diff_stat_includes_uncommitted_and_untracked_changes() {
+        let repo = repo().await;
+        std::fs::write(repo.path().join("README"), "changed\n").unwrap();
+        std::fs::write(repo.path().join("new.txt"), "new\n").unwrap();
+        let stat = GitWorkspaces.diff_stat(repo.path(), "HEAD").await.unwrap();
+        assert!(stat.contains("README"), "{stat}");
+        assert!(stat.contains("new.txt"), "{stat}");
     }
 
     #[tokio::test]
