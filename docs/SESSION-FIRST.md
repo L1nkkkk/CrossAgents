@@ -234,7 +234,7 @@ lead 不重复尝试，不替用户 commit、unstage、stash 或丢弃改动，�
 | 小任务直接完成 | 不新增 run、分类模型或摘要轮次 |
 | 工具精简（若本次包含） | run/task 工具正确分组，招募与消息能力可用 |
 
-**目前的测试覆盖。** 已有测试：独立 lead 与父会话保留、同一聊天再发起（含子 run 打开时）、lead 无 `work_start`、静默结束摘要、借用父聊天被拒、父工作区未提交改动时结束在分支、无计划 run 先落地、未落地提示、来源字段 round trip 与旧 JSON 读取、侧边栏建树（`sidebarTree.test.ts`）。尚未有测试：首条 `RunCreated` 事件即带来源（现有测试经 API 事后读取）、跨 hub 重启的端到端读取、删除子 run 不删父对话、侧边栏搜索/选中/“更多”截断时父路径可见（建树测试只覆盖分组函数）。
+**目前的测试覆盖。** §9 表中各项都有测试：独立 lead 与父会话保留、首条 `RunCreated` 即带来源、跨 hub 重启读取来源、同一聊天再发起（含子 run 打开时）、lead 无 `work_start`、静默结束摘要、借用父聊天被拒、父工作区未提交改动时结束在分支、无计划 run 先落地、未落地提示、删除子 run 后父对话仍在并能回复、来源字段 round trip 与旧 JSON 读取、普通聊天不带 run 工具（`whoami_lists_groups_and_tools`）。侧边栏的建树、搜索命中子 run 保留父对话、选中子 run 展开父对话并越过“更多”截断、置顶不重复，由 `sidebarTree.test.ts` 覆盖抽出的纯函数（`groupRunsByOrigin`、`childPath`、`capped`），`Sidebar.tsx` 直接使用它们；渲染本身没有组件级测试。
 
 优先更新已有 `work_start` 测试，尤其是原来断言“可移动的提议者亲自领导”的测试；它现在应验证独立 lead 和父会话保留。
 

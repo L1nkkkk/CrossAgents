@@ -651,3 +651,83 @@ async fn a_solo_child_can_land_before_finishing() {
         "solo result\n"
     );
 }
+
+/// SESSION-FIRST §4.2: the source is on the run from its first record, so the first
+/// `RunCreated` already names it; nothing writes it in afterwards.
+#[tokio::test]
+async fn the_first_run_created_event_names_the_source_chat() {
+    let repo = git_repo();
+    let t = TestHub::start().await;
+    let lyra = t
+        .add_agent_in("lyra", Some("opus"), "worker", repo.path())
+        .await;
+
+    let item = propose(&t).await;
+    let mut w = t.watch().await;
+    let run = start(&t, &item).await;
+    let created = w
+        .find("run created", |e| {
+            matches!(&e.kind, EventKind::RunCreated { run: r } if r.id.to_string() == run["id"])
+        })
+        .await;
+    let EventKind::RunCreated { run: created } = created.kind else {
+        unreachable!()
+    };
+    assert_eq!(created.origin_chat_id, Some(lyra.id));
+    assert_ne!(created.planner, lyra.id);
+}
+
+/// SESSION-FIRST §9: the source is kept with the run, so a restarted hub still knows it.
+#[tokio::test]
+async fn the_source_chat_survives_a_hub_restart() {
+    let repo = git_repo();
+    let t = TestHub::start().await;
+    let lyra = t
+        .add_agent_in("lyra", Some("opus"), "worker", repo.path())
+        .await;
+    let run = start(&t, &propose(&t).await).await;
+    let id = run["id"].as_str().unwrap().to_owned();
+
+    let t = TestHub::start_in(t.restart_home().await, |_| {}).await;
+    let detail: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
+    assert_eq!(detail["run"]["origin_chat_id"], json!(lyra.id), "{detail}");
+    assert_eq!(detail["run"]["planner"], run["planner"], "{detail}");
+    let runs: Value = t.get("/v1/runs").await.json().await.unwrap();
+    assert!(
+        runs["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == json!(id) && r["origin_chat_id"] == json!(lyra.id)),
+        "{runs}"
+    );
+}
+
+/// SESSION-FIRST §5.2: deleting a child run leaves its source conversation as it was.
+#[tokio::test]
+async fn deleting_a_child_run_keeps_its_source_chat() {
+    let repo = git_repo();
+    let t = TestHub::start().await;
+    let lyra = t
+        .add_agent_in("lyra", Some("opus"), "worker", repo.path())
+        .await;
+    let run = start(&t, &propose(&t).await).await;
+    let id = run["id"].as_str().unwrap();
+
+    let resp = t.post(&format!("/v1/runs/{id}/cancel"), json!({})).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let resp = t.delete(&format!("/v1/runs/{id}")).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    let chat = agent(&t, &lyra.id.to_string()).await;
+    assert!(chat["archived_at"].is_null(), "{chat}");
+    assert_eq!(chat["cwd"], json!(lyra.cwd), "{chat}");
+    // Its conversation is still there and still answers.
+    let mut w = t.watch().await;
+    t.send("lyra", "Still here?").await;
+    w.until(
+        "the source chat answered",
+        |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if *id == lyra.id),
+    )
+    .await;
+}

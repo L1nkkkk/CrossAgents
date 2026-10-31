@@ -19,7 +19,7 @@ import { DeleteRunDialog } from "./deleteRun";
 import { useConnectionStatus } from "./hub";
 import { t } from "./lib/i18n";
 import { prettyModel } from "./lib/models";
-import { groupRunsByOrigin } from "./lib/sidebarTree";
+import { capped, childPath, groupRunsByOrigin } from "./lib/sidebarTree";
 import { startNew } from "./menubar";
 import { level, tightest, windowLabel } from "./lib/quota";
 import { openBeside } from "./panes";
@@ -64,12 +64,20 @@ export function Sidebar({ route }: { route: string[] }) {
     new Set(live.filter((a) => !inRuns.has(a.id) && !recruiterOf(a)).map((a) => a.id)),
   );
   const runsOf = (a: Agent) => childRuns.get(a.id) ?? [];
+  const isRun = (d: RunDetail) => section === "runs" && selected === d.run.id;
+  const isSession = (a: Agent) => section === "s" && isAgent(a, selected);
+  const pathOf = (a: Agent) =>
+    childPath(runsOf(a), {
+      matching: matchesRun,
+      selected: (d) => isRun(d) || runAgents(d, everyone).some(isSession),
+      pinned: (d) => pinned.has(runKey(d)),
+    });
   const standaloneIds = new Set(standalone.map((d) => d.run.id));
   const itemsOf = (w: Workspace): Item[] =>
     [
       ...w.runs.filter((d) => standaloneIds.has(d.run.id) && matchesRun(d)).map((detail): Item => ({ kind: "run", key: runKey(detail), at: detail.run.updated_at, detail })),
       ...w.agents
-        .filter((a) => !inRuns.has(a.id) && !a.archived_at && !recruiterOf(a) && (matchesAgent(a) || recruitsOf(a).some(matchesAgent) || runsOf(a).some(matchesRun)))
+        .filter((a) => !inRuns.has(a.id) && !a.archived_at && !recruiterOf(a) && (matchesAgent(a) || recruitsOf(a).some(matchesAgent) || pathOf(a).matched))
         .map((agent): Item => ({ kind: "session", key: sessionKey(agent), at: agent.created_at, agent })),
     ].sort((a, b) => b.at.localeCompare(a.at));
 
@@ -78,11 +86,8 @@ export function Sidebar({ route }: { route: string[] }) {
   const pins = [...groups.flatMap((g) => g.items), ...nestedItems].filter((i) => pinned.has(i.key));
   const shown = groups.map((g) => ({ ...g, items: g.items.filter((i) => !pinned.has(i.key)) }))
     .filter((g) => g.items.length || (!q && g.w.agents.some((a) => !a.archived_at && !inRuns.has(a.id) && !recruiterOf(a))));
-  const isRun = (d: RunDetail) => section === "runs" && selected === d.run.id;
-  const isSession = (a: Agent) => section === "s" && isAgent(a, selected);
   const pendingPlans = new Set((tree.data ?? []).filter((d) => d.run.status === "awaiting_approval").map((d) => d.run.planner));
   const loaded = !!tree.data && !!agents.data;
-  const childSelected = (a: Agent) => runsOf(a).some((d) => isRun(d) || runAgents(d, everyone).some(isSession));
 
   const runRow = (detail: RunDetail) => (
     <RunRow
@@ -103,8 +108,8 @@ export function Sidebar({ route }: { route: string[] }) {
       <SessionRow
         key={item.key} agent={item.agent} active={isSession(item.agent)} pinKey={item.key}
         recruits={recruitsOf(item.agent)} isSession={isSession} searching={!!q}
-        runs={runsOf(item.agent).filter((d) => !pinned.has(runKey(d)) && matchesRun(d))}
-        renderRun={runRow} childActive={childSelected(item.agent)}
+        runs={pathOf(item.agent).shown}
+        renderRun={runRow} childActive={pathOf(item.agent).selected}
       />
     );
 
@@ -151,7 +156,7 @@ export function Sidebar({ route }: { route: string[] }) {
           {shown.map(({ w, items }) => (
             <Group key={w.key} workspace={w} searching={!!q}>
               <InChats.Provider value={w.key === CHATS}>
-                <Capped items={items} keep={(i) => (i.kind === "run" ? isRun(i.detail) || runAgents(i.detail, everyone).some(isSession) : isSession(i.agent) || recruitsOf(i.agent).some(isSession) || childSelected(i.agent))} searching={!!q}>
+                <Capped items={items} keep={(i) => (i.kind === "run" ? isRun(i.detail) || runAgents(i.detail, everyone).some(isSession) : isSession(i.agent) || recruitsOf(i.agent).some(isSession) || pathOf(i.agent).selected)} searching={!!q}>
                   {row}
                 </Capped>
               </InChats.Provider>
@@ -243,7 +248,7 @@ const CAP = 5;
 function Capped<T>({ items, keep, searching, children }: { items: T[]; keep: (item: T) => boolean; searching: boolean; children: (item: T) => ReactNode }) {
   const [all, setAll] = useState(false);
   if (!items.length) return null;
-  const shown = all || searching ? items : items.filter((item, i) => i < CAP || keep(item));
+  const shown = capped(items, keep, CAP, all || searching);
   const hidden = items.length - shown.length;
   return (
     <>

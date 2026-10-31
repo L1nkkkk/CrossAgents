@@ -38,7 +38,12 @@ async fn whoami_lists_groups_and_tools() {
         out.contains("remind_set") && out.contains("work_start") && out.contains("agent_spawn"),
         "{out}"
     );
-    for run_tool in ["plan_submit", "task_complete", "task_create", "workspace_run"] {
+    for run_tool in [
+        "plan_submit",
+        "task_complete",
+        "task_create",
+        "workspace_run",
+    ] {
         assert!(!out.contains(run_tool), "{run_tool}: {out}");
     }
 }
