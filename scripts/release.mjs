@@ -146,6 +146,24 @@ if (skipPublish) {
 
 // ---------------------------------------------------------------------------- 打包发布
 
+// 先把 release 建出来再让 electron-builder 上传。0.1.22 那次踩到的坑：`--publish always`
+// 配 `releaseType: "release"` 时，多个产物会并发去建同一个 release，一个建成、另一个撞上
+// `422 Published releases must have a valid tag`，整条命令按失败退出——可安装包其实已经传上去了，
+// latest.yml 和 blockmap 却没传。没有 latest.yml，已装的 GUI 根本发现不了新版本。
+// release 事先存在就不会有这个竞态。
+step(`在 ${RELEASES_REPO} 建 ${tag}`);
+const ghEnv = { ...process.env, GH_TOKEN: token };
+try {
+  execFileSync("gh", ["release", "view", tag, "--repo", RELEASES_REPO], { stdio: "pipe", env: ghEnv });
+  console.log("  已存在，直接用");
+} catch {
+  execFileSync(
+    "gh",
+    ["release", "create", tag, "--repo", RELEASES_REPO, "--title", version, "--notes", `CrossAgents ${version}`],
+    { stdio: "inherit", env: ghEnv },
+  );
+}
+
 step("打包并发到 " + RELEASES_REPO + "（几分钟）");
 try {
   runLoud("npm run electron:release", {
@@ -160,36 +178,47 @@ try {
   );
 }
 
-// ---------------------------------------------------------------------------- push 与核对
+// ---------------------------------------------------------------------------- 核对与 push
+
+// 核对在 push 之前：发不全的时候，源仓库还没留下一个指向半成品的 tag。
+step("核对 " + RELEASES_REPO);
+const view = execFileSync(
+  "gh",
+  ["release", "view", tag, "--repo", RELEASES_REPO, "--json", "name,isDraft,assets"],
+  { encoding: "utf8", env: ghEnv },
+);
+const release = JSON.parse(view);
+for (const a of release.assets) console.log(`  · ${a.name} (${(a.size / 1048576).toFixed(1)} MB)`);
+
+// 一个完整的 release 是这三样。少任何一样都算没发好，所以这里是硬失败而不是提醒：
+// 缺 latest.yml 时已装的 GUI 不会发现新版本，而 release 页面看上去是好的，最容易漏掉。
+const want = [`${name(version)}.exe`, `${name(version)}.exe.blockmap`, "latest.yml"];
+const missing = want.filter((w) => !release.assets.some((a) => a.name === w));
+if (missing.length) {
+  die(
+    `release 缺少：${missing.join("、")}\n` +
+      `  产物在 apps/gui/release/，补传：\n` +
+      `  gh release upload ${tag} <文件> --repo ${RELEASES_REPO} --clobber\n` +
+      `  （latest.yml 若没生成，照 electron-builder 的格式写：version / files[url,sha512,size] / path / sha512 / releaseDate，\n` +
+      `   sha512 是安装包的 base64 摘要）`,
+  );
+}
+if (release.isDraft) {
+  die(`还是草稿，没人能下载：gh release edit ${tag} --repo ${RELEASES_REPO} --draft=false`);
+}
 
 step("推 main 和 tag");
 runLoud(`git push origin main ${tag}`);
 
-step("核对 " + RELEASES_REPO);
-try {
-  const view = execFileSync(
-    "gh",
-    ["release", "view", tag, "--repo", RELEASES_REPO, "--json", "name,isDraft,assets"],
-    { encoding: "utf8", env: { ...process.env, GH_TOKEN: token } },
-  );
-  const release = JSON.parse(view);
-  const assets = release.assets.map((a) => `${a.name} (${(a.size / 1048576).toFixed(1)} MB)`);
-  console.log(`  ${release.name}${release.isDraft ? " \x1b[33m[草稿]\x1b[0m" : ""}`);
-  for (const a of assets) console.log(`  · ${a}`);
-  // electron-updater 靠 latest.yml 找新版本；缺了它，装好的 GUI 不会发现这一版。
-  if (!release.assets.some((a) => a.name === "latest.yml")) {
-    console.log("\n\x1b[33m⚠ 没有 latest.yml：已装的 GUI 不会自动发现这一版，去仓库里看看\x1b[0m");
-  }
-  if (release.isDraft) {
-    console.log(`\n\x1b[33m⚠ 还是草稿，要手动发布：gh release edit ${tag} --repo ${RELEASES_REPO} --draft=false\x1b[0m`);
-  }
-} catch {
-  console.log(`  读不到（权限或网络），自己看一眼： https://github.com/${RELEASES_REPO}/releases/tag/${tag}`);
-}
-
 console.log(`\n\x1b[32m✓ ${version} 发完了\x1b[0m`);
+console.log(`  https://github.com/${RELEASES_REPO}/releases/tag/${tag}`);
 
 // ---------------------------------------------------------------------------- 小工具
+
+/** 安装包在 release 上的名字：electron-builder 上传时把产物名里的空格换成连字符。 */
+function name(v) {
+  return `CrossAgents-Setup-${v}`;
+}
 
 function bumpPatch(v) {
   const [major, minor, patch] = v.split(".").map(Number);
