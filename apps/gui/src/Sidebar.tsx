@@ -31,6 +31,66 @@ const Runs = createContext<readonly RunDetail[]>([]);
 const DONE_FLASH = 1800;
 /** A pointer passing through the list shows no card. */
 const PEEK_DELAY = 350;
+const CRAWL_DELAY = 200;
+const CRAWL_PX_PER_MS = 0.04;
+/** Clipped by less than this, moving reads as jitter, not as showing more. */
+const CRAWL_MIN_PX = 8;
+/** How long a row's archive can be taken back from the sidebar. */
+const UNDO_WINDOW = 8000;
+const Archiving = createContext<(agent: Agent) => void>(() => {});
+const actionWord = (action: TodoItem["action"]) => t(action === "answer" ? "sidebar.answer" : action === "confirm" ? "sidebar.confirm" : "sidebar.view");
+
+/**
+ * Moves a row's clipped line to its end while the row is hovered, past the hover actions that sit
+ * over its right side; the returned function puts it back in one step.
+ */
+function crawl(row: HTMLElement): () => void {
+  const line = row.querySelector<HTMLElement>("[data-crawl]");
+  if (!line || matchMedia("(prefers-reduced-motion: reduce)").matches) return () => {};
+  const actions = row.querySelector(".row-actions");
+  const covered = actions ? Math.max(0, line.getBoundingClientRect().right - actions.getBoundingClientRect().left) : 0;
+  line.style.textOverflow = "clip";
+  line.style.paddingRight = `${covered}px`;
+  const range = line.scrollWidth - line.clientWidth;
+  let frame = 0;
+  if (range > CRAWL_MIN_PX) {
+    const start = performance.now();
+    const move = (now: number) => {
+      line.scrollLeft = Math.min(range, (now - start) * CRAWL_PX_PER_MS);
+      if (line.scrollLeft < range) frame = requestAnimationFrame(move);
+    };
+    frame = requestAnimationFrame(move);
+  }
+  return () => {
+    cancelAnimationFrame(frame);
+    line.scrollLeft = 0;
+    line.style.textOverflow = "";
+    line.style.paddingRight = "";
+  };
+}
+
+/** Archives from a row, then offers it back for a moment; a failure stays until it is closed. */
+function useArchiveNote() {
+  const [note, setNote] = useState<{ agent: Agent; error?: string } | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const show = (next: { agent: Agent; error?: string } | null) => {
+    clearTimeout(timer.current);
+    setNote(next);
+    if (next && !next.error) timer.current = setTimeout(() => setNote(null), UNDO_WINDOW);
+  };
+  const archive = (agent: Agent) => {
+    api.archiveAgent(agent.id, true).then(
+      () => show({ agent }),
+      (err) => show({ agent, error: t("sidebar.archiveFailed", { name: displayName(agent), reason: errorText(err) }) }),
+    );
+  };
+  const undo = (agent: Agent) => {
+    show(null);
+    api.archiveAgent(agent.id, false).catch((err) => show({ agent, error: t("sidebar.undoFailed", { name: displayName(agent), reason: errorText(err) }) }));
+  };
+  return { note, archive, undo, close: () => show(null) };
+}
 const sessionKey = (a: Agent) => "s:" + a.id;
 const labelOf = (a: Agent) => displayName(a);
 
@@ -43,6 +103,7 @@ export function Sidebar({ route }: { route: string[] }) {
   const [query, setQuery] = useState("");
   const everyone = agents.data ?? [];
   usePulseSeeds(everyone);
+  const archiving = useArchiveNote();
   const runs = tree.data ?? [];
   const todos = todoItems({
     items: questions.data?.items ?? [],
@@ -68,6 +129,7 @@ export function Sidebar({ route }: { route: string[] }) {
     <Confirmed.Provider value={loaded && !!questions.data && !agents.error && !tree.error && !questions.error}>
       <Needs.Provider value={todos}>
         <Runs.Provider value={runs}>
+        <Archiving.Provider value={archiving.archive}>
         <nav className="sidebar flat-sidebar">
           <div className="brand">
             <BrandMark size={18} />
@@ -145,6 +207,19 @@ export function Sidebar({ route }: { route: string[] }) {
             {query.trim() && !shown.length && <p className="sidebar-empty">{t("sidebar.noMatch", { query })}</p>}
             {!query && loaded && !groups.length && <p className="sidebar-empty">{t("sidebar.empty")}</p>}
           </div>
+          {archiving.note && (
+            <div className={"archive-note " + (archiving.note.error ? "failed" : "")} role="status">
+              <span className="archive-note-text">{archiving.note.error ?? t("sidebar.archivedOne", { name: displayName(archiving.note.agent) })}</span>
+              {!archiving.note.error && (
+                <button className="link" onClick={() => archiving.undo(archiving.note!.agent)}>
+                  {t("sidebar.undo")}
+                </button>
+              )}
+              <button className="icon-btn" onClick={archiving.close} aria-label={t("common.clear")}>
+                <Icon name="close" size={12} />
+              </button>
+            </div>
+          )}
           <div className="foot">
             <UpdateNotice />
             <DevHubNotice />
@@ -157,6 +232,7 @@ export function Sidebar({ route }: { route: string[] }) {
             </div>
           </div>
         </nav>
+        </Archiving.Provider>
         </Runs.Provider>
       </Needs.Provider>
     </Confirmed.Provider>
@@ -187,7 +263,7 @@ function NeedsYou({ items, agents }: { items: TodoItem[]; agents: Agent[] }) {
               <>
                 {agent ? <Avatar agent={agent} size={20} /> : <strong className="todo-who">{who}</strong>}
                 <span className="todo-summary">{item.summary}</span>
-                <span className="todo-action">{t(item.action === "answer" ? "sidebar.answer" : item.action === "confirm" ? "sidebar.confirm" : "sidebar.view")}</span>
+                <span className="todo-action">{actionWord(item.action)}</span>
               </>
             );
             return item.href && !reason ? (
@@ -426,10 +502,10 @@ function SessionRow({ member, active }: { member: SidebarMember; active: boolean
         <span className="member-top">
           <span className={"member-name " + (flagged ? "strong" : "")}>{displayName(agent)}</span>
           <ModelMark plugin={agent.plugin} model={agent.model} />
-          {compact ? <span className="member-inline">{summary}</span> : <span className="member-gap" />}
-          {plan.length > 0 && !running && <span className="member-count">{plan.filter((task) => task.status === "merged").length}/{plan.length}</span>}
+          {compact ? <span className="member-inline" data-crawl="">{summary}</span> : <span className="member-gap" />}
+          {plan.length > 0 && !running && !(!uncertain && needs > 0) && <span className="member-count">{plan.filter((task) => task.status === "merged").length}/{plan.length}</span>}
           {quiet && !plan.length && member.lastAt && <span className="member-time" title={ago(member.lastAt)}>{shortSince(member.lastAt, Date.now())}</span>}
-          {!uncertain && needs > 0 && !plan.length && <time className="member-time attention" title={ago(waitingOn[0].since)}>{shortSince(waitingOn[0].since, Date.now())}</time>}
+          {!uncertain && needs > 0 && <time className="member-time attention" title={ago(waitingOn[0].since)}>{[actionWord(waitingOn[0].action), shortSince(waitingOn[0].since, Date.now())].filter(Boolean).join(" · ")}</time>}
           {running && <RowElapsed since={turn?.since} at={turn?.at} items={turn?.items ?? []} />}
           {uncertain && <span className="member-status quiet">{status}</span>}
         </span>
@@ -439,7 +515,7 @@ function SessionRow({ member, active }: { member: SidebarMember; active: boolean
           {!compact && (
             <span className={"member-summary " + tone + (step ? " step" : "") + (running ? " running" : "")}>
               {running && <span className="step-mark">⎿</span>}
-              <span className="member-summary-text">{line}</span>
+              <span className="member-summary-text" data-crawl="">{line}</span>
             </span>
           )}
           {plan.length > 0 && <TaskSegments tasks={plan} />}
@@ -532,6 +608,7 @@ function Row({
   onMenu?: (e: ReactMouseEvent) => void;
 }) {
   const pinned = usePinned();
+  const archiveRow = useContext(Archiving);
   const isPinned = !!pinKey && pinned.has(pinKey);
   const openAside = (e: ReactMouseEvent) => {
     e.preventDefault();
@@ -548,10 +625,31 @@ function Row({
     clearTimeout(timer.current);
     timer.current = setTimeout(() => setAnchor(el.getBoundingClientRect()), delay);
   };
-  useEffect(() => () => clearTimeout(timer.current), []);
+  const crawlTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const uncrawl = useRef<() => void>(undefined);
+  const stopCrawl = () => {
+    clearTimeout(crawlTimer.current);
+    uncrawl.current?.();
+    uncrawl.current = undefined;
+  };
+  useEffect(
+    () => () => {
+      clearTimeout(timer.current);
+      stopCrawl();
+    },
+    [],
+  );
   const hover = peek && {
-    onMouseEnter: (e: ReactMouseEvent<HTMLDivElement>) => showPeek(e.currentTarget, PEEK_DELAY),
-    onMouseLeave: hidePeek,
+    onMouseEnter: (e: ReactMouseEvent<HTMLDivElement>) => {
+      const row = e.currentTarget;
+      showPeek(row, PEEK_DELAY);
+      stopCrawl();
+      crawlTimer.current = setTimeout(() => (uncrawl.current = crawl(row)), CRAWL_DELAY);
+    },
+    onMouseLeave: () => {
+      hidePeek();
+      stopCrawl();
+    },
     onMouseDown: hidePeek,
     onFocus: (e: ReactFocusEvent<HTMLDivElement>) => e.target.matches(":focus-visible") && showPeek(e.currentTarget, 0),
     onBlur: hidePeek,
@@ -589,7 +687,7 @@ function Row({
             className="icon-btn"
             onClick={(e) => {
               e.preventDefault();
-              void api.archiveAgent(archive.id, true);
+              archiveRow(archive);
             }}
             title={t("sidebar.archive")}
             aria-label={t("sidebar.archive")}

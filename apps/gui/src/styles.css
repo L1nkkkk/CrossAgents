@@ -1830,6 +1830,11 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
 .peek-task code { font-family: var(--font-mono); font-size: 11px; background: none; padding: 0; }
 .peek-branch { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .peek-foot { padding-top: 6px; border-top: 1px solid var(--border); color: var(--muted); font-size: 11px; }
+/* Just archived from a row: the one moment it can be taken back here. */
+.archive-note { display: flex; align-items: center; gap: 8px; margin: 0 8px 6px; padding: 5px 4px 5px 10px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border-strong); font-size: 12px; line-height: 17px; color: var(--text-2); }
+.archive-note-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.archive-note .link { flex: none; font-size: 12px; }
+.archive-note.failed .archive-note-text { color: var(--danger); }
 /* The active row marks its place on the guide line. */
 .flat-sidebar .group:not(.needs-you-group):not(.archived-group) > .nav-row.active::before { width: 2px; left: -1.5px; background: var(--accent); }
 /* A project's head: folder until the pointer asks for the fold, counts until it asks for actions. */
