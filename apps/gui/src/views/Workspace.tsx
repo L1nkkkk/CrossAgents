@@ -8,8 +8,8 @@ import type { Task } from "@bindings/Task";
 import { ACTIVE_RUN } from "../App";
 import { Avatar, CopyCommand, Dot, ErrorBox, Icon, Vendor, agentTitle, agentTone, ago, displayName, isAgent, sessionHref, time, useAgents } from "../components";
 import { KIND_LABEL, OUTCOME_LABEL, OUTCOME_TONE, freshLabel } from "../handoff";
-import { executorOf } from "../lib/projectView";
-import { checksPassed, runState, taskState, type StateTone } from "../lib/taskState";
+import { executorOf, shortTitle } from "../lib/projectView";
+import { checksPassed, runState, taskState, type State, type StateTone } from "../lib/taskState";
 import { StateWord } from "../parts";
 import { selectWorkspace, useProjectRuns, useWorkspaces, type Workspace } from "../workspace";
 import "./workspace.css";
@@ -88,7 +88,7 @@ function Overview({ ws }: { ws: Workspace }) {
       <div className="topbar">
         <Icon name="folder" size={16} />
         <span className="title">{ws.name}</span>
-        <span className="chip mono" title={ws.path}>
+        <span className="ws-path mono" title={ws.path}>
           {ws.path}
         </span>
         <div className="spacer" />
@@ -149,11 +149,6 @@ function Overview({ ws }: { ws: Workspace }) {
 
 function PlanView({ runs, agents }: { runs: RunDetail[]; agents: Agent[] }) {
   const noPlan = runs.filter((d) => !d.tasks.length && !d.run.plan.length).length;
-  const noOrigin = runs.filter((d) => !d.run.origin_chat_id).length;
-  const archivedOrigin = runs.filter((d) => {
-    const origin = d.run.origin_chat_id ? agents.find((a) => a.id === d.run.origin_chat_id) : undefined;
-    return !!origin?.archived_at;
-  }).length;
   const ordered = runs
     .slice()
     .sort(
@@ -162,147 +157,157 @@ function PlanView({ runs, agents }: { runs: RunDetail[]; agents: Agent[] }) {
         b.run.updated_at.localeCompare(a.run.updated_at),
     );
 
-  return (
+  return ordered.length ? (
     <>
-      <p className="ws-hint">按 run / 工作目标组织。项目里的每个 run 都在这里：旧记录、来源会话已归档、还没提交计划的也算。</p>
-      <div className="ws-flags">
-        <span className="chip">共 {runs.length} 个 run</span>
-        {noPlan > 0 && <span className="chip warn">还没提交计划 · {noPlan}</span>}
-        {noOrigin > 0 && <span className="chip">没有来源记录 · {noOrigin}</span>}
-        {archivedOrigin > 0 && <span className="chip">来源会话已归档 · {archivedOrigin}</span>}
+      <p className="ws-count-line">
+        {runs.length} 个 run{noPlan > 0 && ` · ${noPlan} 个还没提交计划`}
+      </p>
+      <div className="ws-runs">
+        {ordered.map((detail) => (
+          <PlanRun key={detail.run.id} detail={detail} agents={agents} />
+        ))}
       </div>
-      {ordered.length ? (
-        <div className="ws-runs">
-          {ordered.map((detail) => (
-            <PlanRun key={detail.run.id} detail={detail} agents={agents} />
-          ))}
-        </div>
-      ) : (
-        <div className="empty">这个项目还没有 run。</div>
-      )}
     </>
+  ) : (
+    <div className="empty">这个项目还没有 run。</div>
   );
 }
 
+/** One word for where a run ended up: failed, unlanded and landed each say so, never just 「完成」. */
+function runOutcome(run: Run): State {
+  const state = runState(run.status);
+  const kind = resultKind(run);
+  if (kind === "pending") return state;
+  const meta = RESULT_META[kind];
+  return { ...state, glyph: meta.glyph as State["glyph"], tone: meta.tone, word: kind === "landed" && run.landed?.mode === "pr" ? "已开 PR" : meta.word };
+}
+
+/** One row per run. A run still in progress starts open; a finished one stays a line until asked. */
 function PlanRun({ detail, agents }: { detail: RunDetail; agents: Agent[] }) {
   const { run, tasks } = detail;
-  const state = runState(run.status);
   const origin = run.origin_chat_id ? agents.find((a) => a.id === run.origin_chat_id) : undefined;
-  const unlanded = run.status === "completed" && !run.landed && !run.in_place;
+  const { executor, template } = executorOf(run, agents, "worker");
+  const lead = executor ?? template;
+  const merged = tasks.filter((task) => task.status === "merged").length;
+  const total = tasks.length || run.plan.length;
 
   return (
-    <article className="ws-run">
-      <div className="ws-run-head">
-        <a className="ws-run-name" href={`#/runs/${run.id}`} title="打开 run：任务、交接、追溯和执行记录">
-          {run.title}
+    <details className="ws-run" open={ACTIVE_RUN.includes(run.status)}>
+      <summary className="ws-run-head">
+        <Icon name="chevronRight" size={13} />
+        <a className="ws-run-name" href={`#/runs/${run.id}`} title={run.title} onClick={(e) => e.stopPropagation()}>
+          {shortTitle(run.title)}
         </a>
-        <StateWord state={state} />
-        {unlanded && <span className="chip warn">结果还没落地</span>}
-        {run.status === "completed" && run.landed && <span className="chip ok">{run.landed.mode === "pr" ? "已开 PR" : "已落地"}</span>}
-        {!run.origin_chat_id && <span className="chip" title="这条记录没有来源对话，仍然属于这个项目">旧记录 · 没有来源会话</span>}
-        {origin?.archived_at && (
-          <a className="chip" href={sessionHref(origin)} title="来源会话已归档；打开它仍能看记录并恢复">
-            来源会话已归档 · {displayName(origin)}
-          </a>
-        )}
-        <span className="spacer" />
-        <a className="ws-record-link" href={`#/runs/${run.id}`} title="在 run 页右侧栏看任务、交接和追溯">
-          执行记录
-        </a>
-      </div>
-
-      <div className="ws-run-meta">
-        <span className="ws-field">
-          <span className="ws-label">协调</span>
-          <Actor work={run} agents={agents} copied={!!run.lead_note} />
+        {lead && <Avatar agent={lead} size={16} />}
+        <span className="ws-run-count" title={tasks.length ? `${merged}/${total} 个任务已合并` : `计划 ${total} 个任务`}>
+          {total > 0 && (tasks.length ? `${merged}/${total}` : total)}
         </span>
-        <span className="ws-field">
-          <span className="ws-label">分支</span>
-          {run.in_place ? (
-            <span className="muted">直接改文件</span>
-          ) : (
-            <span className="ws-branch">
-              <code>{run.branch}</code>
-              <span className="muted" aria-hidden="true">
-                →
-              </span>
-              <code>{run.base_branch}</code>
-            </span>
-          )}
+        <span className="ws-run-state">
+          <StateWord state={runOutcome(run)} />
         </span>
-        <span className="ws-field" title={`创建于 ${time(run.created_at)}`}>
-          <span className="ws-label">创建</span>
-          {ago(run.created_at)}
-        </span>
-        <span className="ws-field" title={`最后更新 ${time(run.updated_at)}`}>
-          <span className="ws-label">更新</span>
+        <span className="ws-run-when" title={`创建于 ${time(run.created_at)}，最后更新 ${time(run.updated_at)}`}>
           {ago(run.updated_at)}
         </span>
-      </div>
+      </summary>
 
-      <p className="ws-goal" title={run.request}>
-        {run.request}
-      </p>
-      {run.note && <p className={`ws-note ${run.status === "failed" ? "danger" : ""}`}>{run.note}</p>}
+      <div className="ws-run-body">
+        {run.request.trim() !== run.title.trim() && (
+          <p className="ws-goal" title={run.request}>
+            {run.request}
+          </p>
+        )}
+        {run.note && <p className={`ws-note ${run.status === "failed" ? "danger" : ""}`}>{run.note}</p>}
 
-      {tasks.length > 0 ? (
-        <>
-          <div className="ws-section-label">任务 · {tasks.length}</div>
+        <div className="ws-run-meta">
+          <span className="ws-field">
+            <span className="ws-label">协调</span>
+            <Actor work={run} agents={agents} copied={!!run.lead_note} />
+          </span>
+          <span className="ws-field">
+            <span className="ws-label">分支</span>
+            {run.in_place ? <span className="muted">直接改文件</span> : <BranchName run={run} />}
+          </span>
+          {origin?.archived_at && (
+            <span className="ws-field">
+              <span className="ws-label">来源</span>
+              <a href={sessionHref(origin)} title="来源会话已归档；打开它仍能看记录并恢复">
+                {displayName(origin)}（已归档）
+              </a>
+            </span>
+          )}
+          {!run.origin_chat_id && <span className="ws-field muted">没有来源会话</span>}
+        </div>
+
+        {tasks.length > 0 ? (
           <ul className="ws-tasks">
             {tasks.map((task) => (
               <TaskLine key={task.id} run={run} task={task} siblings={tasks} agents={agents} />
             ))}
           </ul>
-        </>
-      ) : run.plan.length > 0 ? (
-        <>
-          <div className="ws-section-label">
-            计划 · {run.plan.length} 个任务，{run.status === "awaiting_approval" ? "等审批后拆成任务" : run.status === "planning" ? "等拆成任务" : "还没有任务记录"}
-          </div>
+        ) : run.plan.length > 0 ? (
           <ul className="ws-tasks">
             {run.plan.map((task) => (
               <PlannedLine key={task.key} run={run} task={task} agents={agents} />
             ))}
           </ul>
-        </>
-      ) : (
-        <div className="ws-no-plan">
-          <div className="ws-no-plan-title">还没提交计划 · 当前 {state.word}</div>
-          <p>工作目标见上。计划提交后，这里会列出每个任务的负责人、评审者、依赖和状态。</p>
-        </div>
-      )}
-    </article>
+        ) : (
+          <p className="ws-no-plan">还没提交计划。提交后这里会列出每个任务的负责人、评审者、依赖和状态。</p>
+        )}
+      </div>
+    </details>
+  );
+}
+
+function BranchName({ run }: { run: Run }) {
+  return (
+    <span className="ws-branch" title={`${run.branch} → ${run.base_branch}`}>
+      <code>{run.branch}</code>
+      <span className="muted" aria-hidden="true">
+        →
+      </span>
+      <code>{run.base_branch}</code>
+    </span>
   );
 }
 
 function TaskLine({ run, task, siblings, agents }: { run: Run; task: Task; siblings: Task[]; agents: Agent[] }) {
   const reviewer = !!(task.reviewer ?? task.reviewer_template);
+  const progress = task.progress && !task.status.match(/merged|failed|cancelled/) ? task.progress : "";
   return (
     <li className="ws-task">
-      <code className="ws-task-key">#{task.key}</code>
+      <span className="ws-task-key" title={`#${task.key}`}>
+        #{task.key}
+      </span>
       <a className="ws-task-title" href={`#/runs/${run.id}/tasks/${task.id}`} title="查看规格、交付和执行记录">
         {task.title}
       </a>
-      <StateWord state={taskState(task, siblings)} />
-      <div className="ws-task-meta">
-        <span className="ws-field">
-          <span className="ws-label">负责人</span>
-          <Actor work={task} agents={agents} />
-        </span>
-        <span className="ws-field">
-          <span className="ws-label">评审</span>
-          {reviewer ? <Actor work={task} agents={agents} side="reviewer" /> : <span className="muted">—</span>}
-        </span>
-        <span className="ws-field">
-          <span className="ws-label">依赖</span>
-          {task.depends_on.length ? task.depends_on.map((key) => `#${key}`).join("、") : <span className="muted">无</span>}
-        </span>
-        {task.progress && !task.status.match(/merged|failed|cancelled/) && (
-          <span className="ws-progress" title={task.progress}>
-            {task.progress}
-          </span>
-        )}
-      </div>
+      <span className="ws-task-who">
+        <Actor work={task} agents={agents} />
+      </span>
+      <span className="ws-task-state">
+        <StateWord state={taskState(task, siblings)} />
+      </span>
+      {(reviewer || task.depends_on.length > 0 || progress) && (
+        <div className="ws-task-meta">
+          {reviewer && (
+            <span className="ws-field">
+              <span className="ws-label">评审</span>
+              <Actor work={task} agents={agents} side="reviewer" />
+            </span>
+          )}
+          {task.depends_on.length > 0 && (
+            <span className="ws-field">
+              <span className="ws-label">依赖</span>
+              {task.depends_on.map((key) => `#${key}`).join("、")}
+            </span>
+          )}
+          {progress && (
+            <span className="ws-progress" title={progress}>
+              {progress}
+            </span>
+          )}
+        </div>
+      )}
     </li>
   );
 }
@@ -311,25 +316,32 @@ function PlannedLine({ run, task, agents }: { run: Run; task: PlannedTask; agent
   const open = ["planning", "awaiting_approval", "paused"].includes(run.status);
   return (
     <li className="ws-task">
-      <code className="ws-task-key">#{task.key}</code>
+      <span className="ws-task-key" title={`#${task.key}`}>
+        #{task.key}
+      </span>
       <a className="ws-task-title" href={`#/runs/${run.id}`} title="打开 run 看计划和执行记录">
         {task.title}
       </a>
-      <span className="chip">{open ? "还没开始" : "没有任务记录"}</span>
-      <div className="ws-task-meta">
-        <span className="ws-field">
-          <span className="ws-label">负责人</span>
-          <PlannedActor name={task.assignee} fresh={task.fresh} agents={agents} />
-        </span>
-        <span className="ws-field">
-          <span className="ws-label">评审</span>
-          {task.reviewer ? <PlannedActor name={task.reviewer} fresh={task.reviewer_fresh} agents={agents} /> : <span className="muted">—</span>}
-        </span>
-        <span className="ws-field">
-          <span className="ws-label">依赖</span>
-          {task.depends_on.length ? task.depends_on.map((key) => `#${key}`).join("、") : <span className="muted">无</span>}
-        </span>
-      </div>
+      <span className="ws-task-who">
+        <PlannedActor name={task.assignee} fresh={task.fresh} agents={agents} />
+      </span>
+      <span className="ws-task-state state muted">{open ? "还没开始" : "没有任务记录"}</span>
+      {(task.reviewer || task.depends_on.length > 0) && (
+        <div className="ws-task-meta">
+          {task.reviewer && (
+            <span className="ws-field">
+              <span className="ws-label">评审</span>
+              <PlannedActor name={task.reviewer} fresh={task.reviewer_fresh} agents={agents} />
+            </span>
+          )}
+          {task.depends_on.length > 0 && (
+            <span className="ws-field">
+              <span className="ws-label">依赖</span>
+              {task.depends_on.map((key) => `#${key}`).join("、")}
+            </span>
+          )}
+        </div>
+      )}
     </li>
   );
 }
@@ -368,11 +380,13 @@ function Actor({
             ? "独立执行会话"
             : "本人执行";
   return (
-    <a className="ws-actor" href={sessionHref(who)} title={`${displayName(who)} · ${agentTitle(who)} · 打开会话`}>
+    <a
+      className={`ws-actor ${who.archived_at ? "archived" : ""}`}
+      href={sessionHref(who)}
+      title={`${displayName(who)} · ${agentTitle(who)} · ${note}${who.archived_at ? " · 已归档" : ""} · 打开会话`}
+    >
       <Avatar agent={who} size={16} />
       <span>{displayName(who)}</span>
-      <span className="ws-actor-note">{note}</span>
-      {who.archived_at && <span className="chip">已归档</span>}
     </a>
   );
 }
@@ -383,10 +397,9 @@ function PlannedActor({ name, fresh, agents }: { name: string | null; fresh: boo
   const who = agents.find((a) => isAgent(a, name));
   if (!who) return <span className="muted">{name}（没找到会话）</span>;
   return (
-    <a className="ws-actor" href={sessionHref(who)} title={`${displayName(who)} · ${agentTitle(who)} · 打开会话`}>
+    <a className="ws-actor" href={sessionHref(who)} title={`${displayName(who)} · ${agentTitle(who)} · ${fresh ? "计划新会话" : "计划本人"} · 打开会话`}>
       <Avatar agent={who} size={16} />
       <span>{displayName(who)}</span>
-      <span className="ws-actor-note">{fresh ? "计划新会话" : "计划本人"}</span>
     </a>
   );
 }
@@ -452,7 +465,6 @@ function MembersView({ members, runs, agents }: { members: Agent[]; runs: RunDet
   const archived = members.filter((a) => a.archived_at);
   return (
     <>
-      <p className="ws-hint">全部成员和这次的分工。职责来自 run / plan / task，不是永久身份；点名字进入那个会话。</p>
       {active.length ? (
         <div className="ws-members">
           {active.map((member) => (
@@ -693,9 +705,6 @@ function ActivityView({ runs, agents }: { runs: RunDetail[]; agents: Agent[] }) 
   const events = timelineOf(runs, agents);
   return (
     <>
-      <p className="ws-hint">
-        协作事件来自 run 记录和任务交接（派活、改派、落地、状态）。完整的轮次、命令和花费在 run 页的「追溯」里，这里不为每个会话再拉一遍全文。
-      </p>
       {events.length ? (
         <ol className="ws-events">
           {events.map((event) => (
@@ -715,7 +724,6 @@ function ActivityView({ runs, agents }: { runs: RunDetail[]; agents: Agent[] }) 
                       任务 #{event.task.key}
                     </a>
                   )}
-                  <a href={`#/runs/${event.run.id}`} title="在 run 页右侧栏打开追溯">追溯</a>
                   {event.note}
                 </div>
               </div>
@@ -793,29 +801,27 @@ function ResultsView({ runs, agents }: { runs: RunDetail[]; agents: Agent[] }) {
   );
   return (
     <>
-      <p className="ws-hint">交付、验证和落地分开写：完成但没落地、失败、已取消各有各的说法，不会都说成「完成」。</p>
       <div className="ws-results">
-        {ordered.map(({ kind, items }) => {
-          const meta = kind === "pending" ? undefined : RESULT_META[kind];
-          return (
-            <section className="ws-result-group" key={kind}>
-              <h2 className="ws-result-heading">
-                {meta?.label ?? "还没有结果"}
-                <span className="ws-count">{items.length}</span>
-              </h2>
-              <p className="ws-group-hint">{meta?.hint ?? "规划、待审批、执行中或已暂停的 run 还没有可落地的东西。"}</p>
-              {items.length ? (
+        {ordered
+          .filter(({ items }) => items.length > 0)
+          .map(({ kind, items }) => {
+            const meta = kind === "pending" ? undefined : RESULT_META[kind];
+            return (
+              <section className="ws-result-group" key={kind}>
+                <h2 className="ws-result-heading">
+                  {meta?.label ?? "还没有结果"}
+                  <span className="ws-count">{items.length}</span>
+                </h2>
+                {kind === "unlanded" && <p className="ws-group-hint">{meta?.hint}</p>}
                 <div className="ws-results-list">
                   {items.map((detail) => (
                     <ResultRow key={detail.run.id} detail={detail} agents={agents} kind={kind} />
                   ))}
                 </div>
-              ) : (
-                <p className="ws-group-empty">没有。</p>
-              )}
-            </section>
-          );
-        })}
+              </section>
+            );
+          })}
+        {!runs.length && <div className="empty">这个项目还没有结果。</div>}
       </div>
     </>
   );
@@ -835,7 +841,7 @@ function ResultRow({ detail, agents, kind }: { detail: RunDetail; agents: Agent[
     <article className={`ws-result ${kind}`}>
       <div className="ws-result-row">
         <a className="ws-result-title" href={`#/runs/${run.id}`} title="打开 run：任务、交接、追溯和执行记录">
-          {run.title}
+          {shortTitle(run.title)}
         </a>
         <span className={`ws-outcome ${state.tone}`}>
           <span className="ws-glyph" aria-hidden="true">
@@ -843,16 +849,11 @@ function ResultRow({ detail, agents, kind }: { detail: RunDetail; agents: Agent[
           </span>
           {kind === "pending" ? runState(run.status).word : kind === "landed" && run.landed?.mode === "pr" ? "已开 PR" : meta!.word}
         </span>
-        {!run.origin_chat_id && <span className="chip">旧记录</span>}
         {origin?.archived_at && (
           <a className="chip" href={sessionHref(origin)} title="来源会话已归档；打开它仍能看记录并恢复">
             来源已归档 · {displayName(origin)}
           </a>
         )}
-        <span className="spacer" />
-        <a className="ws-record-link" href={`#/runs/${run.id}`} title="在 run 页右侧栏看任务、交接和追溯">
-          执行记录
-        </a>
       </div>
 
       {summary && <p className="ws-summary">{summary}</p>}
@@ -888,17 +889,7 @@ function ResultRow({ detail, agents, kind }: { detail: RunDetail; agents: Agent[
         </dd>
         <dt>分支</dt>
         <dd>
-          {run.in_place ? (
-            <span className="muted">没有分支（直接改文件）</span>
-          ) : (
-            <span className="ws-branch">
-              <code>{run.branch}</code>
-              <span className="muted" aria-hidden="true">
-                →
-              </span>
-              <code>{run.base_branch}</code>
-            </span>
-          )}
+          {run.in_place ? <span className="muted">没有分支（直接改文件）</span> : <BranchName run={run} />}
         </dd>
       </dl>
 

@@ -101,6 +101,18 @@ export function RowLive({ since, at, items }: { since?: number; at?: number; ite
   );
 }
 
+/** The end of a sidebar row's first line: how long the turn has run, or how long it has been quiet. */
+export function RowElapsed({ since, at, items }: { since?: number; at?: number; items: TranscriptItem[] }) {
+  const now = useNow();
+  const p = liveProgress(items, { since, at: at ?? now, now });
+  return (
+    <span className={`member-elapsed ${p.quietText ? "quiet" : ""}`} title={[p.elapsed, p.activity, p.quietText].filter(Boolean).join(" · ")}>
+      <i className="working-dot" />
+      {p.quietText ?? p.elapsed}
+    </span>
+  );
+}
+
 /**
  * The row of an agent whose status says it is running, with the facts its pulse has. Undefined
  * while there is nothing live to show (the turn ended, or this page has not seen it yet).

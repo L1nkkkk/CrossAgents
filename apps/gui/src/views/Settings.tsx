@@ -15,6 +15,7 @@ import { useUpdateState } from "../lib/updates";
 import { groupModels, onlyModels, prettyModel, switchModels, vendorLabel } from "../lib/models";
 import { MODES, PAPERS, resolve, setTheme, useTheme } from "../lib/theme";
 import { AgentsPage } from "./Agents";
+import { AvatarGallery } from "./AvatarGallery";
 
 const PAGES: { key: string; label: string; icon: IconName }[] = [
   { key: "appearance", label: "外观", icon: "settings" },
@@ -86,6 +87,7 @@ function AppearancePage() {
           </div>
         </div>
       </div>
+      <AvatarGallery />
     </section>
   );
 }

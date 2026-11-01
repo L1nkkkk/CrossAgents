@@ -361,8 +361,10 @@ impl AgentHost for HubHost {
             &self.denied_name_words(),
         )
         .await?;
+        let mut profile = agent.profile.normalized()?;
+        crate::avatars::assign_new(&self.home, self.bus.store(), &mut profile).await?;
         let agent = Agent {
-            profile: agent.profile.normalized()?,
+            profile,
             name,
             name_source,
             ..agent

@@ -27,13 +27,13 @@ use crossagents_api_types::{
     DeleteRunResponse, DiffSide, ErrorCode, FileContentResponse, FileEntry, FileKind,
     FileTreeResponse, FinishRequest, GraphCommit, GraphRef, GraphRefKind, HealthResponse, HubInfo,
     ImageContent, InitRepoRequest, LandRequest, ListAccountsResponse, ListAgentsResponse,
-    ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
-    ListToolsResponse, ListWorksResponse, LoginStarted, PluginInfo, QuotaResponse,
-    RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse, ResolvedPath,
-    RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
+    ListAvatarsResponse, ListNotesResponse, ListPluginsResponse, ListQuestionsResponse,
+    ListRunsResponse, ListToolsResponse, ListWorksResponse, LoginStarted, PluginInfo,
+    QuotaResponse, RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse,
+    ResolvedPath, RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
     SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript,
-    TurnDiffResponse, UpdateRunPolicyRequest, UsageGroup, UsageResponse, UsageSeriesGroup,
-    UsageSeriesRange, UsageSeriesResponse, WorkDetail,
+    TurnDiffResponse, UpdateRunPolicyRequest, UploadAvatarsRequest, UploadAvatarsResponse,
+    UsageGroup, UsageResponse, UsageSeriesGroup, UsageSeriesRange, UsageSeriesResponse, WorkDetail,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, Attachment,
@@ -57,6 +57,11 @@ use tokio_util::sync::CancellationToken;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const EVENT_PAGE: u32 = 500;
+/// A full upload of avatars, base64.
+const AVATAR_BODY_LIMIT: usize =
+    crossagents_api_types::MAX_AVATAR_UPLOAD * crossagents_api_types::MAX_AVATAR_BYTES / 3 * 4
+        + 1024 * 1024;
+
 /// A message with its files, base64 (a third larger than the files themselves).
 const MESSAGE_BODY_LIMIT: usize =
     crossagents_api_types::MAX_ATTACHMENTS_TOTAL / 3 * 4 + 1024 * 1024;
@@ -126,6 +131,13 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/agents/{key}/resume-command", get(resume_command))
         .route("/v1/agents/{key}/connect", post(connect_agent))
+        .route(
+            "/v1/avatars",
+            get(list_avatars)
+                .post(upload_avatars)
+                .layer(DefaultBodyLimit::max(AVATAR_BODY_LIMIT)),
+        )
+        .route("/v1/avatars/{id}", get(get_avatar).delete(delete_avatar))
         .route("/v1/notes", get(list_notes))
         .route("/v1/plugins", get(list_plugins))
         .route("/v1/plugins/{name}/models", post(set_plugin_models))
@@ -501,7 +513,8 @@ async fn create_agent(
     if let Some(driver) = &req.driver {
         driver.parse::<DriverKind>()?;
     }
-    let profile = req.profile.normalized()?;
+    let mut profile = req.profile.normalized()?;
+    crate::avatars::assign_new(&state.home, state.store(), &mut profile).await?;
     if let Some(account) = req.config.get("account").and_then(|v| v.as_str()) {
         state.accounts.check_binding(&req.plugin, account).await?;
     }
@@ -1074,6 +1087,54 @@ async fn get_attachment(
             }
             .into()
         })
+}
+
+async fn list_avatars(State(state): State<Arc<AppState>>) -> Json<ListAvatarsResponse> {
+    Json(ListAvatarsResponse {
+        avatars: crate::avatars::list(&state.home),
+    })
+}
+
+/// Adds pictures to the gallery, then gives them to every session without an avatar.
+async fn upload_avatars(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UploadAvatarsRequest>,
+) -> ApiResult<Json<UploadAvatarsResponse>> {
+    let added = crate::avatars::store(&state.home, &req.images)
+        .map_err(|refused| AppError::bad_request(refused.0))?;
+    let assigned =
+        crate::avatars::assign_missing(&state.home, state.store(), state.bus.as_ref()).await?;
+    Ok(Json(UploadAvatarsResponse {
+        added,
+        assigned: assigned as u32,
+    }))
+}
+
+async fn get_avatar(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<AttachmentContent>> {
+    crate::avatars::read(&state.home, &id)
+        .map(Json)
+        .ok_or_else(|| CoreError::NotFound { kind: "avatar", id }.into())
+}
+
+async fn delete_avatar(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    crate::avatars::release(state.store(), state.bus.as_ref(), &id).await?;
+    let removed = crate::avatars::remove(&state.home, &id).map_err(|e| {
+        AppError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::Internal,
+            format!("removing the picture: {e}"),
+        )
+    })?;
+    if !removed {
+        return Err(CoreError::NotFound { kind: "avatar", id }.into());
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_plugins(State(state): State<Arc<AppState>>) -> Json<ListPluginsResponse> {

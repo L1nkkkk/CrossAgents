@@ -164,7 +164,7 @@ hub（控制面，可重启）
 
 每个会话在 hub 有一张名片：名字、角色、Profile、所属项目与 Run、状态、用途说明（Planner 开 Worker 时填写）、当前任务。
 
-名片还带一份人设（`AgentProfile`，可选）：显示名（如 Ada）、头衔（设计师、安全审核专员、Coder…）、头像（emoji 或字母）、颜色、人设说明。
+名片还带一份人设（`AgentProfile`，可选）：显示名（如 Ada）、头衔（设计师、安全审核专员、Coder…）、头像（emoji 或字母，或头像图库里的一张图）、颜色、人设说明。图库由人在设置里上传，存在 `<home>/avatars/`；没有自己头像的会话从中分到使用最少的一张，分到后不再变（复制出来的执行会话沿用原会话的头像）。
 角色（planner / worker / reviewer）仍只决定工具集；头衔和人设让同一角色下分出不同的「人」。人设说明写进该会话的开场说明（`You are Ada, the team's 设计师.` 加人设正文），
 改动在下次开会话时生效；Worker 克隆继承模板的整张名片。接口：`POST /v1/agents` 的 `profile`、`POST /v1/agents/{key}/profile`（整体替换，发 `agent.updated`）；CLI `agent add --display-name/--title/--avatar/--color/--persona`。
 

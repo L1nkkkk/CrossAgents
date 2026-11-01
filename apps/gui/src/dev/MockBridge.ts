@@ -136,6 +136,7 @@ const FILES_ROUTE = /^\/v1\/(?:agents\/[^/]+|runs\/[^/]+(?:\/tasks\/[^/]+)?)\/fi
 
 export class MockBridge implements CrossAgentsBridge {
   private seq = 1000;
+  private avatars = new Map<string, string>();
   private events = new Set<(data: string) => void>();
   private statuses = new Set<(status: string) => void>();
   private timers: ReturnType<typeof setTimeout>[] = [];
@@ -335,6 +336,37 @@ export class MockBridge implements CrossAgentsBridge {
     const p = url.pathname;
     let m: RegExpMatchArray | null;
 
+    if (p === "/v1/avatars" && method === "GET") return json(200, { avatars: [...this.avatars.keys()] });
+    if (p === "/v1/avatars" && method === "POST") {
+      const added: string[] = [];
+      for (const image of (body as { images: string[] }).images) {
+        const id = Array.from(image.slice(-48), (c) => c.charCodeAt(0).toString(16).padStart(2, "0")).join("").slice(0, 64).padEnd(64, "0");
+        if (!this.avatars.has(id)) added.push(id);
+        this.avatars.set(id, image);
+      }
+      const ids = [...this.avatars.keys()];
+      let assigned = 0;
+      for (const a of s.agents) {
+        if (a.profile.avatar || a.profile.avatar_image || !ids.length) continue;
+        a.profile = { ...a.profile, avatar_image: ids[assigned++ % ids.length] };
+        this.emit({ type: "agent.updated", data: { agent: { ...a } } });
+      }
+      return json(200, { added, assigned });
+    }
+    if ((m = p.match(/^\/v1\/avatars\/([^/]+)$/))) {
+      const image = this.avatars.get(m[1]);
+      if (image === undefined) return notFound("avatar");
+      if (method === "GET") return json(200, { id: m[1], mime: "image/webp", size: image.length, data: image });
+      if (method === "DELETE") {
+        this.avatars.delete(m[1]);
+        for (const a of s.agents) {
+          if (a.profile.avatar_image !== m[1]) continue;
+          a.profile = { ...a.profile, avatar_image: null };
+          this.emit({ type: "agent.updated", data: { agent: { ...a } } });
+        }
+        return { status: 204, body: "" };
+      }
+    }
     if (method === "GET" && /^\/v1\/agents\/[^/]+\/files\/image$/.test(p)) {
       const imagePath = url.searchParams.get("path") ?? "";
       if (imagePath.startsWith("/outside/")) return json(403, { error: { code: "forbidden", message: "不在工作目录或临时目录下" } });

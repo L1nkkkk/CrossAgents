@@ -2,6 +2,7 @@ import type { Agent } from "@bindings/Agent";
 import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
 import type { Task } from "@bindings/Task";
+import { runState } from "./taskState.ts";
 
 export const homeOf = (agent: Agent) => agent.home || agent.cwd;
 export const wsKey = (path: string) => path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
@@ -11,6 +12,44 @@ export function isChat(agent: Agent): boolean {
   const parts = homeOf(agent).replace(/\\/g, "/").replace(/\/+$/, "").split("/");
   const [home, chats, last] = parts.slice(-3);
   return chats === "chats" && (home === ".crossagents" || last === agent.id || last.toLowerCase() === agent.name.toLowerCase());
+}
+
+/** A title made from the request often opens with a whole file path; the file's name says enough in a one-line row. */
+export function shortTitle(title: string): string {
+  return title.replace(/(?:[A-Za-z]:[\\/]|\\\\)\S*[\\/]/g, "");
+}
+
+/**
+ * What this session did last in these runs, newest first: a run it coordinated, a task it took or
+ * reviewed. Read from the records, so it survives a restart and needs no transcript.
+ */
+export function lastWork(agentId: string, runs: readonly RunDetail[]): { text: string; at: string } | null {
+  let last: { text: string; at: string } | null = null;
+  const consider = (text: string | null | undefined, at: string | null | undefined) => {
+    if (text && (!last || (at ?? "") > last.at)) last = { text, at: at ?? "" };
+  };
+  for (const { run, tasks } of runs) {
+    for (const task of tasks) {
+      const took = task.assignee === agentId || task.handoffs?.some((hand) => hand.to === agentId);
+      if (took) consider(task.title, task.updated_at);
+    }
+    for (const task of tasks) if (task.reviewer === agentId) consider(`评审：${task.title}`, task.updated_at);
+    if (run.planner === agentId) consider(run.title && shortTitle(run.title), run.updated_at);
+  }
+  return last;
+}
+
+/** The run this session leads now, and the task it last took or reviewed; what its row can add. */
+export type SessionWork = { lead: RunDetail | null; task: { task: Task; tasks: Task[] } | null };
+export function sessionWork(agentId: string, runs: readonly RunDetail[]): SessionWork {
+  const out: SessionWork = { lead: null, task: null };
+  for (const detail of runs) {
+    if (detail.run.planner === agentId && runState(detail.run.status).bucket !== "ended" && detail.run.created_at > (out.lead?.run.created_at ?? "")) out.lead = detail;
+    for (const task of detail.tasks) {
+      if ((task.assignee === agentId || task.reviewer === agentId) && task.updated_at > (out.task?.task.updated_at ?? "")) out.task = { task, tasks: detail.tasks };
+    }
+  }
+  return out;
 }
 
 export type Executor = { executor: Agent | undefined; template: Agent | undefined; fresh: boolean };

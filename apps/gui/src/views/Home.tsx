@@ -277,7 +277,7 @@ export function HomeView() {
       role,
       cwd: dir,
       config: configFor(choice, effort),
-      profile: { display_name: null, title: role === "planner" ? t("home.leadTitle") : "Worker", avatar: null, color: null, persona: null },
+      profile: { display_name: null, title: role === "planner" ? t("home.leadTitle") : "Worker", avatar: null, avatar_image: null, color: null, persona: null },
     });
   }
 

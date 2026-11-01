@@ -9,6 +9,9 @@ import type { ChangesResponse } from "@bindings/ChangesResponse";
 import type { CommitGraph } from "@bindings/CommitGraph";
 import type { CliInstallAccepted } from "@bindings/CliInstallAccepted";
 import type { AttachmentContent } from "@bindings/AttachmentContent";
+import type { ListAvatarsResponse } from "@bindings/ListAvatarsResponse";
+import type { UploadAvatarsRequest } from "@bindings/UploadAvatarsRequest";
+import type { UploadAvatarsResponse } from "@bindings/UploadAvatarsResponse";
 import type { ImageContent } from "@bindings/ImageContent";
 import type { Task } from "@bindings/Task";
 import type { TaskReviewRequest } from "@bindings/TaskReviewRequest";
@@ -209,6 +212,10 @@ export const api = {
   info: () => request<HubInfo>("GET", "/v1/info"),
 
   listAgents: () => request<ListAgentsResponse>("GET", "/v1/agents"),
+  listAvatars: () => request<ListAvatarsResponse>("GET", "/v1/avatars"),
+  avatar: (id: string) => request<AttachmentContent>("GET", `/v1/avatars/${enc(id)}`),
+  uploadAvatars: (req: UploadAvatarsRequest) => request<UploadAvatarsResponse>("POST", "/v1/avatars", req),
+  deleteAvatar: (id: string) => request<void>("DELETE", `/v1/avatars/${enc(id)}`),
   createAgent: (req: CreateAgentRequest) => request<Agent>("POST", "/v1/agents", req),
   /** The workspace's sessions, most recently used first; availability is advisory (the hub
    * excludes what it knows is busy, archived or unable to move). */

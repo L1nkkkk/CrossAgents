@@ -154,7 +154,7 @@ pub fn read(home: &Path, agent: AgentId, id: &str) -> Option<AttachmentContent> 
 }
 
 /// The type of stored bytes, from their first bytes (the store keeps bytes only).
-fn sniff(bytes: &[u8]) -> &'static str {
+pub(crate) fn sniff(bytes: &[u8]) -> &'static str {
     match bytes {
         [0x89, b'P', b'N', b'G', ..] => "image/png",
         [0xFF, 0xD8, 0xFF, ..] => "image/jpeg",

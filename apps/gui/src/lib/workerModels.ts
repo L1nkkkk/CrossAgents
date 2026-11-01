@@ -115,6 +115,6 @@ export function workerAgentRequest(target: WorkerTarget, cwd: string): CreateAge
     role: "worker",
     cwd,
     config: target.account ? { account: target.account } : {},
-    profile: { display_name: null, title: "Worker", avatar: null, color: null, persona: null },
+    profile: { display_name: null, title: "Worker", avatar: null, avatar_image: null, color: null, persona: null },
   };
 }

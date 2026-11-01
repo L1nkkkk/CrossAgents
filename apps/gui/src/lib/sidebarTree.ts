@@ -1,11 +1,14 @@
 import type { Agent } from "@bindings/Agent";
 import type { RunDetail } from "@bindings/RunDetail";
-import { projectMembers, standaloneSessions, type ProjectMember } from "./projectView.ts";
+import { lastWork, projectMembers, standaloneSessions, wsKey, type ProjectMember } from "./projectView.ts";
+
+/** A sidebar row: the member, and when the work its summary names last moved. */
+export type SidebarMember = ProjectMember & { lastAt: string | null };
 
 export type SidebarGroup = {
   key: string;
   name: string;
-  members: ProjectMember[];
+  members: SidebarMember[];
 };
 
 /** Domain views own membership and stable ordering; this adds presentation preferences. */
@@ -20,17 +23,29 @@ export function sidebarGroups(
   const members = projectMembers(agents, runs, pinned);
   const assigned = new Set([...members.values()].flat().map((m) => m.agent.id));
   const rank = (key: string) => (order.includes(key) ? order.indexOf(key) : order.length);
-  const taskTitles = new Map(runs.flatMap((d) => d.tasks).map((task) => [`${task.key} ${task.title}`.trim(), task.title]));
-  const clean = (m: ProjectMember): ProjectMember => ({ ...m, summary: taskTitles.get(m.summary ?? "") ?? null });
+  // Newest first, and only pins move a row: a recent session is not buried under old ones behind
+  // 更多, and neither streaming nor a status change reorders the list.
+  const newestFirst = (a: Agent, b: Agent) =>
+    Number(pinned.has(b.id)) - Number(pinned.has(a.id)) || b.created_at.localeCompare(a.created_at) || a.id.localeCompare(b.id);
+  const withWork = (m: ProjectMember, project: readonly RunDetail[]): SidebarMember => {
+    const work = lastWork(m.agent.id, project);
+    return { ...m, summary: work?.text ?? null, lastAt: work?.at || null };
+  };
   const groups = projects
-    .map((p) => ({
-      ...p,
-      members: (members.get(p.key) ?? []).filter((m) => !m.agent.archived_at).map(clean),
-    }))
+    .map((p) => {
+      const project = runs.filter((d) => wsKey(d.run.repo) === p.key);
+      return {
+        ...p,
+        members: (members.get(p.key) ?? [])
+          .filter((m) => !m.agent.archived_at)
+          .sort((a, b) => newestFirst(a.agent, b.agent))
+          .map((m) => withWork(m, project)),
+      };
+    })
     .sort((a, b) => rank(a.key) - rank(b.key) || a.key.localeCompare(b.key));
   const standalone = standaloneSessions(agents)
     .filter((a) => !assigned.has(a.id) && !a.archived_at)
-    .sort((a, b) => Number(pinned.has(b.id)) - Number(pinned.has(a.id)));
+    .sort(newestFirst);
   if (standalone.length)
     groups.push({
       key: "__chats",
@@ -40,6 +55,7 @@ export function sidebarGroups(
         project: "",
         status: agent.status,
         summary: null,
+        lastAt: null,
       })),
     });
   return groups;
@@ -61,6 +77,16 @@ export const groupClosed = (collapsed: ReadonlySet<string>, key: string, searchi
 
 export function capped<T>(items: T[], keep: (item: T) => boolean, cap: number, all: boolean): T[] {
   return all ? items : items.filter((item, i) => i < Math.max(0, cap) || keep(item));
+}
+
+/** How long since `iso`, in the few characters a row's end has: 刚刚, 40 分, 3 时, 2 天. */
+export function shortSince(iso: string, now: number): string {
+  const minutes = (now - Date.parse(iso)) / 60_000;
+  if (!Number.isFinite(minutes)) return "";
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${Math.floor(minutes)} 分`;
+  if (minutes < 60 * 24) return `${Math.floor(minutes / 60)} 时`;
+  return `${Math.floor(minutes / (60 * 24))} 天`;
 }
 
 /** Filesystem paths and old role-only labels do not describe useful work. */

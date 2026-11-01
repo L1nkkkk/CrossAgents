@@ -30,7 +30,7 @@ export function ConnectExternal({ onDone }: { onDone: () => void }) {
         role,
         cwd: cwd.trim(),
         config: {},
-        profile: { display_name: displayName.trim() || null, title: null, avatar: null, color: null, persona: null },
+        profile: { display_name: displayName.trim() || null, title: null, avatar: null, avatar_image: null, color: null, persona: null },
       });
       setInfo(await api.connectAgent(name.trim()));
     } catch (err) {

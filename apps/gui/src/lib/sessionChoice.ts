@@ -106,6 +106,6 @@ export function newChatRequest(choice: ChatChoice, text: string, cwd: string, ef
     role: "worker",
     cwd,
     config: { ...(choice.account ? { account: choice.account } : {}), ...(effort ? { effort } : {}) },
-    profile: { display_name: null, title: null, avatar: null, color: null, persona: null },
+    profile: { display_name: null, title: null, avatar: null, avatar_image: null, color: null, persona: null },
   };
 }

@@ -4,6 +4,7 @@ pub mod access;
 pub mod accounts;
 pub mod api;
 pub mod attachments;
+pub mod avatars;
 pub mod budget;
 pub mod collab;
 pub mod event_log;

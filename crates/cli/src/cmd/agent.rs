@@ -106,6 +106,7 @@ pub async fn run(ctx: &Context, cmd: AgentCommand) -> Result<()> {
                     display_name: args.display_name,
                     title: args.title,
                     avatar: args.avatar,
+                    avatar_image: None,
                     color: args.color,
                     persona: args.persona,
                 },

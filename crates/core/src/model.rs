@@ -150,6 +150,9 @@ pub struct AgentProfile {
     /// An emoji or up to two letters; clients fall back to initials.
     #[serde(default)]
     pub avatar: Option<String>,
+    /// A picture from the hub's avatar gallery (its content hash); shown instead of `avatar`.
+    #[serde(default)]
+    pub avatar_image: Option<String>,
     /// Avatar colour, one of [`AgentProfile::COLORS`].
     #[serde(default)]
     pub color: Option<String>,
@@ -173,6 +176,7 @@ impl AgentProfile {
             display_name: clean(self.display_name),
             title: clean(self.title),
             avatar: clean(self.avatar),
+            avatar_image: clean(self.avatar_image),
             color: clean(self.color),
             persona: clean(self.persona),
         };
@@ -190,6 +194,13 @@ impl AgentProfile {
             return Err(CoreError::Unsupported(format!(
                 "avatar is at most {} characters (an emoji or initials)",
                 Self::MAX_AVATAR
+            )));
+        }
+        if let Some(image) = &profile.avatar_image
+            && !(image.len() == 64 && image.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err(CoreError::Unsupported(format!(
+                "avatar image {image:?} is not a gallery picture"
             )));
         }
         if too_long(&profile.persona, Self::MAX_PERSONA) {

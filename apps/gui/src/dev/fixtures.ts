@@ -109,7 +109,7 @@ export function agent(init: AgentInit): Agent {
     config: init.recruitedBy ? { spawned_by_agent: init.recruitedBy } : {},
     status: init.status ?? "idle",
     created_at: ago(init.createdMinutesAgo ?? 60 * 24 * 3),
-    profile: { title: null, avatar: null, color: null, persona: null, ...init.profile, display_name: null },
+    profile: { title: null, avatar: null, avatar_image: null, color: null, persona: null, ...init.profile, display_name: null },
   };
 }
 

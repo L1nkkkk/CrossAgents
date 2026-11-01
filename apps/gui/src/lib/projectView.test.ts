@@ -3,7 +3,7 @@ import { test } from "node:test";
 import type { Agent } from "@bindings/Agent";
 import type { Task } from "@bindings/Task";
 import type { RunDetail } from "@bindings/RunDetail";
-import { executorOf, projectMembers, standaloneSessions } from "./projectView.ts";
+import { executorOf, projectMembers, sessionWork, standaloneSessions } from "./projectView.ts";
 
 const agent = (id: string, home = "/repo", created_at = id): Agent => ({ id, name: id, home, cwd: home, created_at, status: "idle", profile: { title: `Profile ${id}` } } as Agent);
 const task = (fields: Partial<Task>): Task => ({ id: "task", key: "A", title: "Build", created_at: "1", assignee: null, reviewer: null, worker_template: null, reviewer_template: null, worker_fresh: false, reviewer_fresh: false, ...fields } as Task);
@@ -17,6 +17,16 @@ test("members deduplicate stable IDs and prefer assigned responsibility over rev
   assert.equal(rows[0].status, "idle");
   assert.equal(rows[0].project, "/repo");
   assert.equal(projectMembers([leo], []).get("/repo")![0].summary, "Profile leo");
+});
+
+test("a session's work is the live run it leads and the task it touched last", () => {
+  const run = (id: string, status: string, created_at: string, tasks: Task[] = []): RunDetail => ({ run: { id, repo: "/repo", planner: "lead", status, created_at } as RunDetail["run"], tasks });
+  const old = task({ id: "old", assignee: "leo", updated_at: "1" }), recent = task({ id: "recent", reviewer: "leo", updated_at: "2" });
+  const runs = [run("done", "completed", "9"), run("a", "running", "1"), run("b", "paused", "2", [old, recent])];
+  assert.equal(sessionWork("lead", runs).lead?.run.id, "b");
+  assert.equal(sessionWork("lead", [runs[0]]).lead, null);
+  assert.equal(sessionWork("leo", runs).task?.task.id, "recent");
+  assert.deepEqual(sessionWork("nobody", runs), { lead: null, task: null });
 });
 
 test("actual execution and configuration templates remain distinct", () => {

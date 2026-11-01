@@ -1,18 +1,22 @@
 // Flat project/member navigation. Domain grouping and human work live in pure views.
-import { createContext, useContext, useEffect, useState, useSyncExternalStore, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FocusEvent as ReactFocusEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { HubInfo } from "@bindings/HubInfo";
-import { useActivity, useUnread } from "./activity";
+import type { RunDetail } from "@bindings/RunDetail";
+import { lastError, useActivity, useUnread } from "./activity";
 import { api, errorText } from "./api";
 import type { DevHub } from "./bridge";
 import { buildTag, compareBuilds } from "./lib/build";
 import { useUpdateState } from "./lib/updates";
-import { Avatar, BrandMark, Icon, displayName, isAgent, sessionHref } from "./components";
+import { Avatar, BrandMark, Icon, ModelMark, ago, displayName, isAgent, sessionHref } from "./components";
 import { useConnectionStatus } from "./hub";
+import { RowElapsed, usePulseSeeds, useRowLive } from "./liveTurn";
 import { t } from "./lib/i18n";
-import { capped, sidebarGroups, searchGroups, groupClosed, summaryText, type SidebarGroup } from "./lib/sidebarTree";
+import { sessionWork } from "./lib/projectView";
+import { stepLine } from "./lib/workGroups";
+import { SessionPeek, TaskSegments, type PeekFacts } from "./SessionPeek";
+import { capped, sidebarGroups, searchGroups, groupClosed, shortSince, summaryText, type SidebarGroup, type SidebarMember } from "./lib/sidebarTree";
 import { todoItems, visibleTodos, type TodoItem } from "./lib/todos";
-import type { ProjectMember } from "./lib/projectView";
 import { useQuestions } from "./questions";
 import { startNew } from "./menubar";
 import { level, tightest, windowLabel } from "./lib/quota";
@@ -22,6 +26,11 @@ import { CHATS, selectWorkspace, useWorkspaces, wsHref } from "./workspace";
 
 const Confirmed = createContext(true);
 const Needs = createContext<readonly TodoItem[]>([]);
+const Runs = createContext<readonly RunDetail[]>([]);
+/** How long a row stays lit after its turn ends. */
+const DONE_FLASH = 1800;
+/** A pointer passing through the list shows no card. */
+const PEEK_DELAY = 350;
 const sessionKey = (a: Agent) => "s:" + a.id;
 const labelOf = (a: Agent) => displayName(a);
 
@@ -33,6 +42,7 @@ export function Sidebar({ route }: { route: string[] }) {
   const unread = useUnread();
   const [query, setQuery] = useState("");
   const everyone = agents.data ?? [];
+  usePulseSeeds(everyone);
   const runs = tree.data ?? [];
   const todos = todoItems({
     items: questions.data?.items ?? [],
@@ -43,7 +53,7 @@ export function Sidebar({ route }: { route: string[] }) {
   const shown = searchGroups(groups, query);
   const archived = everyone.filter((a) => a.archived_at);
   const isSession = (a: Agent) => route[0] === "s" && isAgent(a, route[1]);
-  const row = (member: ProjectMember) => <SessionRow key={member.agent.id} member={member} active={isSession(member.agent)} />;
+  const row = (member: SidebarMember) => <SessionRow key={member.agent.id} member={member} active={isSession(member.agent)} />;
   const pinnedMembers = [
     ...new Map(
       groups
@@ -57,6 +67,7 @@ export function Sidebar({ route }: { route: string[] }) {
   return (
     <Confirmed.Provider value={loaded && !!questions.data && !agents.error && !tree.error && !questions.error}>
       <Needs.Provider value={todos}>
+        <Runs.Provider value={runs}>
         <nav className="sidebar flat-sidebar">
           <div className="brand">
             <BrandMark size={18} />
@@ -121,7 +132,11 @@ export function Sidebar({ route }: { route: string[] }) {
                       }
                 }
               >
-                <Capped items={g.members} keep={(m) => isSession(m.agent)} searching={!!query.trim()}>
+                <Capped
+                  items={g.members}
+                  keep={(m) => isSession(m.agent) || m.agent.status === "running" || m.agent.status === "error" || !!unread[m.agent.id] || todos.some((item) => item.agent === m.agent.id)}
+                  searching={!!query.trim()}
+                >
                   {row}
                 </Capped>
               </Group>
@@ -142,6 +157,7 @@ export function Sidebar({ route }: { route: string[] }) {
             </div>
           </div>
         </nav>
+        </Runs.Provider>
       </Needs.Provider>
     </Confirmed.Provider>
   );
@@ -166,21 +182,20 @@ function NeedsYou({ items, agents }: { items: TodoItem[]; agents: Agent[] }) {
           {visible.items.map((item) => {
             const agent = agents.find((a) => a.id === item.agent);
             const reason = item.reason || (!agent && item.href?.startsWith("#/s/") ? t("sidebar.missingAgent") : undefined);
+            const who = agent ? displayName(agent) : t("sidebar.unknownAgent");
             const body = (
               <>
-                <span className="todo-top">
-                  <strong>{agent ? displayName(agent) : t("sidebar.unknownAgent")}</strong>
-                  <span>{t(item.action === "answer" ? "sidebar.answer" : item.action === "confirm" ? "sidebar.confirm" : "sidebar.view")}</span>
-                </span>
+                {agent ? <Avatar agent={agent} size={20} /> : <strong className="todo-who">{who}</strong>}
                 <span className="todo-summary">{item.summary}</span>
+                <span className="todo-action">{t(item.action === "answer" ? "sidebar.answer" : item.action === "confirm" ? "sidebar.confirm" : "sidebar.view")}</span>
               </>
             );
             return item.href && !reason ? (
-              <a key={item.kind + item.id} className="todo-row" href={item.href} title={item.summary}>
+              <a key={item.kind + item.id} className="todo-row" href={item.href} title={who + "：" + item.summary}>
                 {body}
               </a>
             ) : (
-              <div key={item.kind + item.id} className="todo-row unavailable">
+              <div key={item.kind + item.id} className="todo-row unavailable" title={who + "：" + item.summary}>
                 {body}
                 <span className="todo-reason">{reason || t("sidebar.unavailable")}</span>
               </div>
@@ -218,6 +233,13 @@ function Group({
   const collapsed = useCollapsed();
   const closed = groupClosed(collapsed, group.key, searching);
   const name = group.key === CHATS ? t("sidebar.standalone") : group.name;
+  const needs = useContext(Needs);
+  const confirmed = useContext(Confirmed);
+  const waits = (m: SidebarMember) => m.agent.status === "error" || needs.some((item) => item.agent === m.agent.id);
+  const waiting = group.members.filter(waits);
+  const busy = group.members.filter((m) => m.agent.status === "running");
+  // Folded, the faces say who is inside: whoever wants attention first.
+  const faces = [...waiting, ...busy, ...group.members].filter((m, i, all) => all.indexOf(m) === i).slice(0, 3);
   return (
     <section className="group">
       <div className={"group-head project-head " + (active ? "active" : "")}>
@@ -228,7 +250,12 @@ function Group({
           disabled={searching}
           onClick={() => toggleCollapsed(group.key)}
         >
-          <Icon name={closed ? "chevronRight" : "chevron"} size={13} />
+          <span className="project-glyph">
+            <Icon name={group.key === CHATS ? "chat" : "folder"} size={14} />
+          </span>
+          <span className="project-fold">
+            <Icon name={closed ? "chevronRight" : "chevron"} size={13} />
+          </span>
         </button>
         {group.key === CHATS ? (
           <span className="group-name project-name">{name}</span>
@@ -237,23 +264,46 @@ function Group({
             {name}
           </a>
         )}
-        {onMove && (
-          <button className="icon-btn group-order" onClick={onMove} title={t("sidebar.moveUp")} aria-label={t("sidebar.moveUp")}>
-            ↑
-          </button>
-        )}
-        <a
-          className="icon-btn group-add"
-          href="#/"
-          onClick={() => {
-            selectWorkspace(group.key === CHATS ? "" : group.key);
-            startNew(group.key === CHATS ? "chat" : "run");
-          }}
-          title={t("sidebar.newIn", { name })}
-          aria-label={t("sidebar.newIn", { name })}
-        >
-          <Icon name="plus" size={14} />
-        </a>
+        <span className="project-stat">
+          {closed && (
+            <span className="face-pile" aria-hidden="true">
+              {faces.map((m) => (
+                <Avatar key={m.agent.id} agent={m.agent} size={16} />
+              ))}
+            </span>
+          )}
+          {confirmed && waiting.length > 0 && (
+            <span className="stat-waiting" title={t("sidebar.needsAction", { n: waiting.length })}>
+              <Icon name="info" size={11} />
+              {waiting.length}
+            </span>
+          )}
+          {confirmed && busy.length > 0 && (
+            <span className="stat-busy" title={`${busy.length} ${t("sidebar.working")}`}>
+              <i className="working-dot" />
+              {busy.length}
+            </span>
+          )}
+        </span>
+        <span className="project-actions">
+          {onMove && (
+            <button className="icon-btn group-order" onClick={onMove} title={t("sidebar.moveUp")} aria-label={t("sidebar.moveUp")}>
+              ↑
+            </button>
+          )}
+          <a
+            className="icon-btn group-add"
+            href="#/"
+            onClick={() => {
+              selectWorkspace(group.key === CHATS ? "" : group.key);
+              startNew(group.key === CHATS ? "chat" : "run");
+            }}
+            title={t("sidebar.newIn", { name })}
+            aria-label={t("sidebar.newIn", { name })}
+          >
+            <Icon name="plus" size={14} />
+          </a>
+        </span>
       </div>
       {!closed && children}
     </section>
@@ -292,12 +342,13 @@ function Capped<T>({
 }
 
 type Dot = "live" | "warn" | "danger" | "unread" | undefined;
-function SessionRow({ member, active }: { member: ProjectMember; active: boolean }) {
+function SessionRow({ member, active }: { member: SidebarMember; active: boolean }) {
   const { agent } = member;
   const doing = useActivity(agent.id);
   const unread = useUnread()[agent.id];
   const connection = useConnectionStatus();
-  const needs = useContext(Needs).filter((item) => item.agent === agent.id).length;
+  const waitingOn = useContext(Needs).filter((item) => item.agent === agent.id);
+  const needs = waitingOn.length;
   const confirmed = useContext(Confirmed);
   const uncertain = connection !== "connected" || !confirmed || !agent.status;
   const running = !uncertain && agent.status === "running";
@@ -313,36 +364,86 @@ function SessionRow({ member, active }: { member: ProjectMember; active: boolean
           : agent.status === "stopped"
             ? t("sidebar.stopped")
             : t("sidebar.idle");
-  const summary = summaryText(member.summary) || summaryText(doing) || summaryText(agent.topic) || t("sidebar.noActivity");
+  const turn = useRowLive(agent);
+  const summary = summaryText(member.summary) || summaryText(agent.topic);
+  const fresh = unread?.kind === "done";
+  const failed = unread?.kind === "error";
+  const flagged = !uncertain && (needs > 0 || error || fresh || failed);
+  // Nothing to do here: the row stays quiet, the tooltip still says which state it is.
+  const quiet = !uncertain && !needs && !error && !running;
+  // Only news earns a second line: the rest is one small row, so what is alive stands out by size.
+  const compact = quiet && !fresh && !failed;
+  const newest = turn?.items.at(-1);
+  const step = running && newest?.type === "tool_call" ? stepLine(newest) : "";
+  // The second line is the row's latest news: what it asks, what went wrong, what it does now.
+  const line = !uncertain && needs ? waitingOn[0].summary : error ? lastError(agent.id) || summary || status : running ? step || summaryText(doing) || summary || status : summary || status;
+  const tone = uncertain ? "" : needs ? "attention" : error || failed ? "danger" : "";
+  const runs = useContext(Runs);
+  const work = useMemo(() => sessionWork(agent.id, runs), [agent.id, runs]);
+  const plan = work.lead?.tasks ?? [];
+  // A turn that just ended lights its row once: finishing is worth noticing, not worth keeping.
+  const wasRunning = useRef(running);
+  const [justDone, setJustDone] = useState(false);
+  useEffect(() => {
+    const ended = wasRunning.current && !running && !uncertain && !error;
+    wasRunning.current = running;
+    if (!ended) return;
+    setJustDone(true);
+    const timer = setTimeout(() => setJustDone(false), DONE_FLASH);
+    return () => clearTimeout(timer);
+  }, [running, uncertain, error]);
+  const peek: PeekFacts = {
+    agent,
+    status: uncertain ? status : fresh || failed ? status + " · " + t("sidebar.unread") : status,
+    summary,
+    waiting: uncertain ? [] : waitingOn,
+    error: !uncertain && error ? lastError(agent.id) : undefined,
+    turn: running ? turn : undefined,
+    work,
+  };
   return (
     <Row
       href={sessionHref(agent)}
       active={active}
-      title={displayName(agent) + " · " + status + "\n" + summary + "\n" + t("sidebar.besideHint")}
+      dim={compact && agent.status === "stopped"}
+      compact={compact}
+      flash={justDone}
+      peek={peek}
+      title={displayName(agent) + " · " + status + (fresh || failed ? " · " + t("sidebar.unread") : "") + (agent.model ? " · " + agent.model : "") + "\n" + (summary || t("sidebar.noActivity")) + "\n" + t("sidebar.besideHint")}
       dot={undefined}
       pinKey={sessionKey(agent)}
       beside={agent.id}
       archive={agent}
-      lead={<Avatar agent={agent} size={18} />}
+      lead={
+        <span className={"face " + (running ? "running" : "")}>
+          <Avatar agent={agent} size={compact ? 18 : 24} />
+          {!uncertain && needs > 0 && <span className="face-badge warn">{needs}</span>}
+          {!uncertain && !needs && (error || failed) && <span className="face-badge danger">!</span>}
+          {!uncertain && !needs && !error && fresh && <span className="face-badge fresh" />}
+        </span>
+      }
       label={
         <span className="member-top">
-          <span className="member-name">{displayName(agent)}</span>
-          <span className={"member-status " + (needs || error ? "attention" : running ? "working" : "quiet")} title={status}>
-            {!uncertain && (needs || error) ? <Icon name="info" size={11} /> : running ? <i className="working-dot" /> : null}
-            {status}
-          </span>
+          <span className={"member-name " + (flagged ? "strong" : "")}>{displayName(agent)}</span>
+          <ModelMark plugin={agent.plugin} model={agent.model} />
+          {compact ? <span className="member-inline">{summary}</span> : <span className="member-gap" />}
+          {plan.length > 0 && !running && <span className="member-count">{plan.filter((task) => task.status === "merged").length}/{plan.length}</span>}
+          {quiet && !plan.length && member.lastAt && <span className="member-time" title={ago(member.lastAt)}>{shortSince(member.lastAt, Date.now())}</span>}
+          {!uncertain && needs > 0 && !plan.length && <time className="member-time attention" title={ago(waitingOn[0].since)}>{shortSince(waitingOn[0].since, Date.now())}</time>}
+          {running && <RowElapsed since={turn?.since} at={turn?.at} items={turn?.items ?? []} />}
+          {uncertain && <span className="member-status quiet">{status}</span>}
         </span>
       }
       live={
-        <span className="member-summary" title={summary}>
-          <span className="member-summary-text">{summary}</span>
-          {unread?.kind === "done" && (
-            <span className="member-unread" title={t("sidebar.doneUnread", { n: 1 })}>
-              {" "}
-              · {t("sidebar.unread")}
+        <>
+          {!compact && (
+            <span className={"member-summary " + tone + (step ? " step" : "") + (running ? " running" : "")}>
+              {running && <span className="step-mark">⎿</span>}
+              <span className="member-summary-text">{line}</span>
             </span>
           )}
-        </span>
+          {plan.length > 0 && <TaskSegments tasks={plan} />}
+        </>
       }
     />
   );
@@ -391,6 +492,9 @@ function Row({
   href,
   active,
   dim,
+  compact,
+  flash,
+  peek,
   title,
   lead,
   label,
@@ -406,6 +510,11 @@ function Row({
   href: string;
   active: boolean;
   dim?: boolean;
+  compact?: boolean;
+  /** Its turn just ended. */
+  flash?: boolean;
+  /** What the hover card says; the card then stands in for the tooltip. */
+  peek?: PeekFacts;
   title: string;
   lead?: ReactNode;
   label: ReactNode;
@@ -429,12 +538,32 @@ function Row({
     e.stopPropagation();
     if (beside) openBeside(beside);
   };
+  const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const hidePeek = () => {
+    clearTimeout(timer.current);
+    setAnchor(null);
+  };
+  const showPeek = (el: HTMLElement, delay: number) => {
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setAnchor(el.getBoundingClientRect()), delay);
+  };
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const hover = peek && {
+    onMouseEnter: (e: ReactMouseEvent<HTMLDivElement>) => showPeek(e.currentTarget, PEEK_DELAY),
+    onMouseLeave: hidePeek,
+    onMouseDown: hidePeek,
+    onFocus: (e: ReactFocusEvent<HTMLDivElement>) => e.target.matches(":focus-visible") && showPeek(e.currentTarget, 0),
+    onBlur: hidePeek,
+  };
   return (
-    <div className={`nav-row ${active ? "active" : ""} ${dim ? "dim" : ""}`}>
+    <div className={`nav-row ${active ? "active" : ""} ${dim ? "dim" : ""} ${compact ? "compact" : ""} ${flash ? "just-done" : ""}`} {...hover}>
+      {peek && anchor && <SessionPeek anchor={anchor} facts={peek} />}
       <a
         className="row-link"
         href={href}
-        title={title}
+        title={peek ? undefined : title}
+        aria-label={peek ? title : undefined}
         onClick={(e) => beside && (e.ctrlKey || e.metaKey) && openAside(e)}
         onMouseDown={(e) => e.button === 1 && beside && e.preventDefault()}
         onAuxClick={(e) => e.button === 1 && beside && openAside(e)}

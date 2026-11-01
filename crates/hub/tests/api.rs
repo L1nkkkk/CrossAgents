@@ -226,6 +226,102 @@ async fn an_agent_without_cwd_gets_a_chat_directory() {
     assert_eq!(agent["topic"], "写个冒泡排序");
 }
 
+/// The gallery reaches sessions that exist and sessions to come; text avatars and a person's own
+/// choice stay, and a removed picture leaves no session pointing at it.
+#[tokio::test]
+async fn the_avatar_gallery_gives_every_session_a_stable_picture() {
+    use base64::Engine as _;
+    let picture =
+        |n: u8| base64::engine::general_purpose::STANDARD.encode([0x89, b'P', b'N', b'G', n]);
+    let t = TestHub::start().await;
+    let agent = |t: &TestHub, name: &str| {
+        let request = t.get(&format!("/v1/agents/{name}"));
+        async move { request.send().await.unwrap().json::<Value>().await.unwrap() }
+    };
+
+    // An empty gallery changes nothing.
+    assert_eq!(t.create("old").await.status(), StatusCode::CREATED);
+    assert!(agent(&t, "old").await["profile"]["avatar_image"].is_null());
+    let cwd = t._home.path().display().to_string();
+    let emoji = t
+        .post("/v1/agents")
+        .json(&json!({ "name": "emoji", "plugin": "claude", "role": "worker", "cwd": cwd, "profile": { "avatar": "🎨" } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(emoji.status(), StatusCode::CREATED);
+
+    // An upload reaches the existing session, and only it.
+    let done: Value = t
+        .post("/v1/avatars")
+        .json(&json!({ "images": [picture(1), picture(2)] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(done["added"].as_array().unwrap().len(), 2);
+    assert_eq!(done["assigned"], 1);
+    let old = agent(&t, "old").await["profile"]["avatar_image"].clone();
+    assert!(old.is_string());
+    assert!(agent(&t, "emoji").await["profile"]["avatar_image"].is_null());
+
+    // A new session takes the least used picture, and another upload moves nobody.
+    assert_eq!(t.create("new").await.status(), StatusCode::CREATED);
+    let new = agent(&t, "new").await["profile"]["avatar_image"].clone();
+    assert!(new.is_string());
+    assert_ne!(old, new);
+    let again: Value = t
+        .post("/v1/avatars")
+        .json(&json!({ "images": [picture(1), picture(3)] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(again["added"].as_array().unwrap().len(), 1);
+    assert_eq!(again["assigned"], 0);
+    assert_eq!(agent(&t, "old").await["profile"]["avatar_image"], old);
+
+    // The picture reads back; other types are refused by their bytes.
+    let id = old.as_str().unwrap();
+    let read: Value = t
+        .get(&format!("/v1/avatars/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(read["mime"], "image/png");
+    let svg = base64::engine::general_purpose::STANDARD.encode("<svg/>");
+    let refused = t
+        .post("/v1/avatars")
+        .json(&json!({ "images": [svg] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+
+    // Removing it returns its session to a letter.
+    let removed = t.delete(&format!("/v1/avatars/{id}")).send().await.unwrap();
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+    assert!(agent(&t, "old").await["profile"]["avatar_image"].is_null());
+    let gallery: Value = t
+        .get("/v1/avatars")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(gallery["avatars"].as_array().unwrap().len(), 2);
+    let gone = t.get(&format!("/v1/avatars/{id}")).send().await.unwrap();
+    assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+}
+
 /// The commands an agent's CLI brings are unknown until a session reports them.
 #[tokio::test]
 async fn commands_are_unknown_until_a_session_reports_them() {

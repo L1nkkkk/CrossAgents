@@ -56,6 +56,10 @@ function ask(from: Agent, text: string, options: string[], minutesAgo: number, r
 /** The workspace as the sidebar, the overview and the edge runs see it. */
 export function workspaceState(): MockState {
   const { ada, rex, mia, sam } = team();
+  // A stopped session, and a model its plugin did not make: the row dims and shows the model's mark.
+  sam.plugin = "codebuddy";
+  sam.model = "deepseek-v4.1-flash";
+  sam.status = "stopped";
 
   // REPO: the standing team, and an archived member.
   const lin = agent({ name: "lin", plugin: "codebuddy", model: "glm-5.1", role: "worker", status: "stopped", home: REPO, cwd: REPO, profile: { display_name: "Lin", title: "测试", color: "violet" } });

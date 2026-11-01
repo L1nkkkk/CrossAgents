@@ -47,7 +47,7 @@ test("a new chat is made as the same agent request as before", () => {
     role: "worker",
     cwd: "",
     config: {},
-    profile: { display_name: null, title: null, avatar: null, color: null, persona: null },
+    profile: { display_name: null, title: null, avatar: null, avatar_image: null, color: null, persona: null },
   });
   assert.deepEqual(newChatRequest({ plugin: "claude", model: "claude-opus-4-1", account: "claude-max" }, "hi", "C:/work/shop", "high").config, {
     account: "claude-max",

@@ -1,4 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { useAvatarImage } from "./avatarImages";
+import { modelFamily } from "./lib/modelFamily";
+import { MODEL_ICONS, VENDOR_ICONS, type BrandIcon } from "./modelIcons";
 import {
   Activity,
   Archive,
@@ -553,36 +556,35 @@ export function vendorName(plugin: string): string {
   return v === "claude" ? "Claude" : v === "codex" ? "Codex" : v === "codebuddy" ? "CodeBuddy" : plugin;
 }
 
-/** The vendor's mark: a clay asterisk for Claude, an ink prompt for Codex, blue braces for CodeBuddy, a ring otherwise. */
+/** An official mark: as an image, or as a mask over the text colour when it is one-colour. */
+function BrandImage({ icon, size, className = "" }: { icon: BrandIcon; size: number; className?: string }) {
+  if (icon.mono) {
+    const mask = `url("${icon.src}")`;
+    return <span className={`brand-mono ${className}`} style={{ width: size, height: size, maskImage: mask, WebkitMaskImage: mask }} aria-hidden="true" />;
+  }
+  return <img className={className} src={icon.src} width={size} height={size} alt="" aria-hidden="true" draggable={false} />;
+}
+
+/** The vendor's official mark, or a ring for a plugin we have none for. */
 export function VendorMark({ plugin, size = 12 }: { plugin: string; size?: number }) {
   const vendor = vendorOf(plugin);
+  const icon = VENDOR_ICONS[vendor];
+  if (icon) return <BrandImage icon={icon} size={size} className={`vendor-mark ${vendor}`} />;
   return (
-    <svg className={`vendor-mark ${vendor}`} width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
-      {vendor === "claude" && (
-        <g stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-          {[0, 30, 60, 90, 120, 150].map((a) => (
-            <line key={a} x1="8" y1="1.6" x2="8" y2="14.4" transform={`rotate(${a} 8 8)`} />
-          ))}
-        </g>
-      )}
-      {vendor === "codex" && (
-        <g fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="1.5" y="1.5" width="13" height="13" rx="3.5" />
-          <path d="M5 6l2.2 2L5 10M8.8 10.5h2.4" />
-        </g>
-      )}
-      {vendor === "codebuddy" && (
-        <path
-          d="M6 2.5C4.4 2.5 4.6 4.6 4.6 6S4 8 2.8 8c1.2 0 1.8.6 1.8 2s-.2 3.5 1.4 3.5M10 2.5c1.6 0 1.4 2.1 1.4 3.5s.6 2 1.8 2c-1.2 0-1.8.6-1.8 2s.2 3.5-1.4 3.5"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      )}
-      {vendor === "other" && <circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.5" />}
+    <svg className="vendor-mark other" width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
+      <circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
     </svg>
+  );
+}
+
+/** The mark of the model behind a session; the vendor's when the model's family is not known. */
+export function ModelMark({ plugin, model, size = 13 }: { plugin: string; model?: string | null; size?: number }) {
+  const family = modelFamily(plugin, model);
+  const icon = family && MODEL_ICONS[family.key];
+  return (
+    <span className="model-mark" title={[family?.name ?? vendorName(plugin), model].filter(Boolean).join(" · ")}>
+      {icon ? <BrandImage icon={icon} size={size} /> : <VendorMark plugin={plugin} size={size} />}
+    </span>
   );
 }
 
@@ -616,13 +618,14 @@ export function Avatar({ agent, size = 20, status = false }: { agent: Agent; siz
   const text = avatar || Array.from(displayName(agent))[0]?.toUpperCase() || "?";
   const emoji = !!avatar && /\p{Extended_Pictographic}/u.test(avatar);
   const tone = agentTone(agent.status);
+  const image = useAvatarImage(agent.profile?.avatar_image);
   return (
     <span
       className={`avatar av-${colorOf(agent)} ${emoji ? "emoji" : ""}`}
       style={{ width: size, height: size, fontSize: Math.round(size * (emoji ? 0.6 : text.length > 1 ? 0.4 : 0.5)) }}
       aria-hidden="true"
     >
-      {text}
+      {image ? <img className="avatar-img" src={image} alt="" draggable={false} /> : text}
       {status && tone.color !== "off" && <span className={`presence ${tone.color} ${tone.live ? "live" : ""}`} />}
     </span>
   );

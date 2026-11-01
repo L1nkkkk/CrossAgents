@@ -77,6 +77,35 @@ pub struct CreateAgentRequest {
     pub profile: crossagents_core::AgentProfile,
 }
 
+/// How many pictures the avatar gallery holds, and how many one upload may add.
+pub const MAX_AVATARS: usize = 200;
+pub const MAX_AVATAR_UPLOAD: usize = 50;
+/// One picture; clients scale them down to a small square first.
+pub const MAX_AVATAR_BYTES: usize = 256 * 1024;
+
+/// `GET /v1/avatars`: the gallery's pictures, by id; `GET /v1/avatars/{id}` reads one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListAvatarsResponse {
+    pub avatars: Vec<String>,
+}
+
+/// `POST /v1/avatars`: PNG, JPEG or WebP pictures, base64.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UploadAvatarsRequest {
+    pub images: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UploadAvatarsResponse {
+    /// The pictures that were not in the gallery yet.
+    pub added: Vec<String>,
+    /// How many sessions without an avatar got one.
+    pub assigned: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ListAgentsResponse {

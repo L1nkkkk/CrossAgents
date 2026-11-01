@@ -3,7 +3,7 @@ import { test } from "node:test";
 import type { Agent } from "@bindings/Agent";
 import type { RunDetail } from "@bindings/RunDetail";
 import type { Task } from "@bindings/Task";
-import { capped, sidebarGroups, searchGroups, groupClosed, summaryText } from "./sidebarTree.ts";
+import { capped, sidebarGroups, searchGroups, groupClosed, shortSince, summaryText } from "./sidebarTree.ts";
 import { todoItems, visibleTodos } from "./todos.ts";
 import type { HumanItem } from "@bindings/HumanItem";
 
@@ -53,9 +53,32 @@ test("one canonical member per project despite multiple responsibilities, no ori
   );
   assert.deepEqual(
     view.find((g) => g.key === "/repo")!.members.map((m) => m.agent.id),
-    ["a", "b"],
+    ["b", "a"],
   );
-  assert.equal(view.find((g) => g.key === "/repo")!.members[1].summary, "实现长中文任务标题");
+  assert.equal(view.find((g) => g.key === "/repo")!.members[0].summary, "实现长中文任务标题");
+});
+
+test("a row's time fits its end, and a bad record says nothing", () => {
+  const now = Date.parse("2026-11-02T12:00:00Z");
+  const since = (minutes: number) => shortSince(new Date(now - minutes * 60_000).toISOString(), now);
+  assert.deepEqual([since(0), since(40), since(180), since(60 * 48)], ["刚刚", "40 分", "3 时", "2 天"]);
+  assert.equal(shortSince("not a date", now), "");
+});
+
+test("a member's summary is its newest work: coordinating, taking or reviewing", () => {
+  const [lead, worker, reviewer] = [agent("lead"), agent("worker"), agent("reviewer")];
+  const old = run([task("old", { assignee: "worker", updated_at: "1" })], { id: "old", planner: "x", title: "旧", updated_at: "1" });
+  const recent = run([task("new", { title: "新任务", assignee: "worker", reviewer: "reviewer", updated_at: "5" })], {
+    planner: "lead",
+    title: "C:\\Users\\me\\docs\\任务书.md 拆一下",
+    updated_at: "6",
+  });
+  const members = groups([lead, worker, reviewer, agent("idle")], [old, recent]).find((g) => g.key === "/repo")!.members;
+  const of = (id: string) => members.find((m) => m.agent.id === id)!;
+  assert.deepEqual([of("lead").summary, of("lead").lastAt], ["任务书.md 拆一下", "6"]);
+  assert.deepEqual([of("worker").summary, of("worker").lastAt], ["新任务", "5"]);
+  assert.equal(of("reviewer").summary, "评审：新任务");
+  assert.deepEqual([of("idle").summary, of("idle").lastAt], [null, null]);
 });
 
 test("project-linked chats are not duplicated as standalone; archived members leave empty projects reachable", () => {
@@ -81,10 +104,10 @@ test("pins move members within their group without copying or archiving; status 
     groups(rows, [], pins)
       .find((g) => g.key === "/repo")!
       .members.map((m) => m.agent.id);
-  assert.deepEqual(ids([b, a]), ["a", "b"]);
-  assert.deepEqual(ids([{ ...b, status: "running" }, a]), ["a", "b"]);
-  assert.deepEqual(ids([a, b], new Set(["s:b"])), ["b", "a"]);
-  assert.deepEqual(ids([a, b]), ["a", "b"]);
+  assert.deepEqual(ids([b, a]), ["b", "a"]);
+  assert.deepEqual(ids([{ ...a, status: "running" }, b]), ["b", "a"]);
+  assert.deepEqual(ids([a, b], new Set(["s:a"])), ["a", "b"]);
+  assert.deepEqual(ids([a, b]), ["b", "a"]);
   assert.deepEqual(
     groups([a], [], new Set(), ["/repo", "/other"]).map((g) => g.key),
     ["/repo", "/other"],
