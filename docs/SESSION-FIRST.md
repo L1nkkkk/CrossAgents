@@ -51,7 +51,7 @@ Session 指 CrossAgents 的稳定 `AgentId`，父子关系不绑定厂商原生 
 
 | 项目 | 本版行为 |
 |---|---|
-| `policy.plan_approval` | 保持 `PlanApproval::Auto` |
+| `policy.plan_approval` | 保持 `PlanApproval::Auto`（**2026-11-02 已修订为 `Required`**，见下） |
 | `policy.land` | 保持 `LandPolicy::Auto` |
 | `policy.spawn` | 沿用当前默认 `true` 及已有用户策略 |
 | `policy.delegate`、模型限制、预算、并发、重试 | 沿用现有设置和语义 |
@@ -59,6 +59,8 @@ Session 指 CrossAgents 的稳定 `AgentId`，父子关系不绑定厂商原生 
 | lead 的模型、账号、思考强度和人设 | 复用已有复制配置的行为，不自动降级或升级模型 |
 
 `RunConfig.auto_approve` 是旧兼容字段；不要只看它当前为 `false` 就推断计划需要人工批准。有效行为还取决于 `policy.plan_approval`。
+
+> **2026-11-02 修订**：从对话发起的 Work 改为 `PlanApproval::Required`——拆任务的 lead 写清每个 session 做什么，人在计划审批里选每个任务的执行模型。`land` 仍为 `Auto`。原因、配套的 kickoff 说明和代价见 [AGENT-WORKSPACE.md](AGENT-WORKSPACE.md) §6.1。本节其余内容（自动落地、父聊天保留招募与消息能力、lead 复用复制配置）仍是当前行为。
 
 自动落地继续经过已有的检查、冲突处理和操作权限机制。Home 的独立 run 按原入口的策略创建，不统一改成聊天路径的默认值。
 

@@ -397,7 +397,9 @@ async fn a_movable_proposer_keeps_its_conversation_and_gets_a_fresh_lead() {
     assert_ne!(run["planner"], json!(lyra.id), "{run}");
     assert_eq!(run["origin_chat_id"], json!(lyra.id));
     assert_eq!(run["config"]["policy"]["land"], "auto");
-    assert_eq!(run["config"]["policy"]["plan_approval"], "auto");
+    // The lead writes what each session must do; the person approves the plan and picks the
+    // model for every task (AGENT-WORKSPACE §6.1).
+    assert_eq!(run["config"]["policy"]["plan_approval"], "required");
     let after: Value = t.get("/v1/agents").await.json().await.unwrap();
     assert_eq!(
         after["agents"].as_array().unwrap().len(),

@@ -14,6 +14,15 @@ use crate::project::{self, RunChecks, RunEnv};
 // Kept in sync with the GUI kickoff recognizer.
 const KICKOFF_SEPARATOR: &str = "\n\n---\nrun: ";
 
+/// A run whose plan waits for the person: the lead writes the tasks, the person staffs them.
+/// Without this the lead reads its guide's "do it yourself" as permission to skip the plan,
+/// and no plan ever reaches the person (docs/AGENT-WORKSPACE.md §6.1).
+const PLAN_WAITS: &str = "\nplan: the person approves it and picks who runs each task. Before you \
+     change anything, call `plan_submit` with every task and what its session must do — write \
+     each spec.goal so a worker who sees only it and the repository can do the work. Do not \
+     start the work yourself. Answering a question, or reporting that nothing needs changing, \
+     needs no plan.";
+
 pub fn previous_rounds(rounds: &[Run]) -> String {
     let mut out = String::new();
     if !rounds.is_empty() {
@@ -61,6 +70,9 @@ pub fn kickoff(
             run.id,
             run.repo.display()
         );
+        if !run.config.auto_approves() {
+            out.push_str(PLAN_WAITS);
+        }
     } else {
         let _ = write!(
             out,
@@ -77,6 +89,9 @@ pub fn kickoff(
                 "\nlanding: you may only open a pull request (run_land mode pr), then run_finish"
             }
         });
+        if !run.config.auto_approves() {
+            out.push_str(PLAN_WAITS);
+        }
         match checks {
             Ok(c) if c.checks.is_empty() => {
                 let _ = write!(
@@ -431,7 +446,7 @@ mod tests {
 
     #[test]
     fn kickoff_keeps_request_and_context_boundary() {
-        use crossagents_core::{RunConfig, RunPolicy, RunStatus};
+        use crossagents_core::{PlanApproval, RunConfig, RunPolicy, RunStatus};
         let now = Utc::now();
         let worker = AgentId::new();
         let mut run = Run {
@@ -482,6 +497,17 @@ mod tests {
                 "{text}"
             );
             assert!(text.contains("\nsessions: test"));
+            // The plan waits for the person: the lead is told to write the tasks and stop,
+            // not to do the work itself.
+            assert!(
+                text.contains("plan_submit") && text.contains("picks who runs each task"),
+                "{text}"
+            );
+            // Under automatic approval nothing is added: the guide already covers it.
+            run.config.policy.plan_approval = PlanApproval::Auto;
+            let auto = kickoff(&run, &[], worker, &Err("test".into()), None, "");
+            assert!(!auto.contains("plan_submit"), "{auto}");
+            run.config.policy.plan_approval = PlanApproval::Required;
         }
     }
 

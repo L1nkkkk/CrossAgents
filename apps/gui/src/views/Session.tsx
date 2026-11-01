@@ -206,7 +206,11 @@ export function SessionView({
   const { agent, capabilities, turns, usage } = transcript;
   const runs = tree.data ?? [];
   const everyone = agents.data ?? [];
-  const pendingPlans = runs.filter((d) => d.run.planner === agent.id && d.run.status === "awaiting_approval");
+  // A plan waits in the lead's own conversation and in the chat that started the Work: the
+  // person said 开始 there, so that is where they pick who runs each task (AGENT-WORKSPACE §6.1).
+  const pendingPlans = runs.filter(
+    (d) => (d.run.planner === agent.id || d.run.origin_chat_id === agent.id) && d.run.status === "awaiting_approval",
+  );
   const liveRuns = runs.filter((d) => d.run.planner === agent.id && ACTIVE_RUN.includes(d.run.status) && d.run.status !== "awaiting_approval");
   // First iteration: recent runs plus all runs led by this agent. Older assigned tasks may be
   // absent; fetching every run's detail for every session and event would be too expensive.

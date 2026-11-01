@@ -302,10 +302,12 @@ impl Orchestrator {
                         max_parallel: RunConfig::DEFAULT_MAX_PARALLEL,
                         max_attempts: RunConfig::DEFAULT_MAX_ATTEMPTS,
                         team: Vec::new(),
-                        // The person said go: the plan starts at once and the lead lands it, as
-                        // it would have changed the checkout itself in the conversation.
+                        // The person said go on doing it, not on how: the lead writes what each
+                        // session must do, and the person approves that plan and picks the model
+                        // for every task before anything starts (AGENT-WORKSPACE §6.1). Landing
+                        // stays automatic unless they pick 我审批 on the plan.
                         policy: RunPolicy {
-                            plan_approval: PlanApproval::Auto,
+                            plan_approval: PlanApproval::Required,
                             land: LandPolicy::Auto,
                             ..RunPolicy::default()
                         },
