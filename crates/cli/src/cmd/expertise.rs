@@ -44,6 +44,11 @@ async fn export(ctx: &Context, args: ExportArgs) -> Result<()> {
     if ctx.json {
         return print_json(&serde_json::json!({ "markdown": markdown }));
     }
+    if markdown.trim().is_empty() {
+        // An empty profile exports nothing, so say why instead of printing nothing.
+        println!("no expertise entry has been written yet");
+        return Ok(());
+    }
     print!("{markdown}");
     Ok(())
 }

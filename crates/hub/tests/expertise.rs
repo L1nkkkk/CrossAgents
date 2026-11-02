@@ -243,6 +243,33 @@ async fn pinned_entry(t: &TestHub, domain: &str, title: &str) -> ExpertiseEntry 
         .await
 }
 
+/// An entry written straight into the store, for what the API cannot set: an entry created
+/// long ago is the one the maintenance scan should flag.
+async fn old_entry(t: &TestHub, domain: &str, title: &str, days_ago: i64) -> ExpertiseEntry {
+    let created = Utc::now() - chrono::Duration::days(days_ago);
+    let entry = ExpertiseEntry {
+        id: format!("old-{title}"),
+        owner_kind: OwnerKind::Person,
+        owner_id: PERSON_OWNER_ID.into(),
+        domain: domain.into(),
+        kind: EntryKind::Judgment,
+        title: title.into(),
+        text: "很久以前写下的一条".into(),
+        example: None,
+        applies_when: String::new(),
+        evidence: 0,
+        last_confirmed_at: None,
+        status: EntryStatus::Active,
+        superseded_by: None,
+        stats: EntryStats::default(),
+        sources: Vec::new(),
+        created_at: created,
+        updated_at: created,
+    };
+    t.hub.bus.store().expertise_put(&entry).await.unwrap();
+    entry
+}
+
 #[tokio::test]
 async fn expertise_accept_refuses_a_conflict_without_a_verdict() {
     let t = TestHub::start().await;
@@ -414,8 +441,9 @@ async fn expertise_card_maintenance_and_export_describe_the_profile() {
     let card: ExpertiseCard = t
         .ok(t.get("/v1/expertise/card").send().await.unwrap())
         .await;
-    assert_eq!(card.entries.judgment, 0);
+    assert_eq!(card.entries, 0);
     assert_eq!(card.first_try_rate, None);
+    assert_eq!(card.first_try_rate_30d_ago, None);
     let empty: ExpertiseMaintenance = t
         .ok(t.get("/v1/expertise/maintenance").send().await.unwrap())
         .await;
@@ -429,7 +457,8 @@ async fn expertise_card_maintenance_and_export_describe_the_profile() {
             .unwrap()
             .starts_with("text/markdown")
     );
-    assert!(text.text().await.unwrap().contains("no entries yet"));
+    // An empty profile exports nothing, so a caller can skip the section.
+    assert!(text.text().await.unwrap().trim().is_empty());
 
     // One entry, one pending candidate with a conflict.
     let old = pinned_entry(&t, "rust", "测试先于实现").await;
@@ -438,9 +467,11 @@ async fn expertise_card_maintenance_and_export_describe_the_profile() {
     let card: ExpertiseCard = t
         .ok(t.get("/v1/expertise/card").send().await.unwrap())
         .await;
-    assert_eq!(card.entries.judgment, 1);
+    assert_eq!(card.entries, 1);
+    assert_eq!(card.judgments, 1);
+    assert_eq!(card.active, 1);
     assert_eq!(card.judgment_budget, 1500);
-    assert!(card.low_sample);
+    assert!(card.small_sample);
 
     let maintenance: ExpertiseMaintenance = t
         .ok(t.get("/v1/expertise/maintenance").send().await.unwrap())
@@ -450,11 +481,35 @@ async fn expertise_card_maintenance_and_export_describe_the_profile() {
         .iter()
         .find(|b| b.domain == "rust")
         .expect("the rust domain has a budget");
-    assert!(budget.tokens > 0 && budget.over == 0);
+    assert!(budget.judgment_tokens > 0 && !budget.over);
+    assert_eq!(budget.judgment_count, 1);
     assert_eq!(
         maintenance.conflicts[0].candidate_id, "c4",
         "a pending candidate with conflicts is listed"
     );
+    assert_eq!(maintenance.conflicts[0].entry_id, old.id);
+    assert_eq!(maintenance.conflicts[0].title, "一次合并的写法");
+
+    // An entry nobody has used for two months is suggested as stale, and left alone.
+    let cold = old_entry(&t, "testing", "两个月前的判断", 61).await;
+    let maintenance: ExpertiseMaintenance = t
+        .ok(t.get("/v1/expertise/maintenance").send().await.unwrap())
+        .await;
+    let hint = maintenance
+        .stale
+        .iter()
+        .find(|h| h.entry_id == cold.id)
+        .expect("an unused entry is flagged");
+    assert_eq!(hint.suggested, EntryStatus::Stale);
+    assert!(hint.days_unused >= 60, "{}", hint.days_unused);
+    let untouched: ExpertiseEntry = t
+        .ok(t
+            .get(&format!("/v1/expertise/{}", cold.id))
+            .send()
+            .await
+            .unwrap())
+        .await;
+    assert_eq!(untouched.status, EntryStatus::Active);
 
     let markdown = t
         .get("/v1/expertise/export?domain=rust")
@@ -464,8 +519,9 @@ async fn expertise_card_maintenance_and_export_describe_the_profile() {
         .text()
         .await
         .unwrap();
-    assert!(markdown.contains("# Expertise profile: person me"));
+    assert!(markdown.starts_with("# 专长档案"));
     assert!(markdown.contains("## rust"));
+    assert!(markdown.contains("### 判断"));
     assert!(markdown.contains("测试先于实现"));
 }
 

@@ -2,10 +2,18 @@
 import type { EntryStatus } from "./EntryStatus";
 
 /**
- * A suggestion to change an entry's status (EXPERTISE §4.4). Nothing is changed by it.
+ * A suggestion to re-flag an entry (EXPERTISE §4.4). Nothing is changed by it.
  */
-export type StaleHint = { entry_id: string, suggested: EntryStatus, 
+export type StaleHint = { entry_id: string, domain: string, title: string, 
 /**
- * Why, in words: unused for 60 days, or a high rework rate.
+ * What the scan would set it to: `stale` or `review`.
  */
-reason: string, };
+suggested: EntryStatus, reason: string, 
+/**
+ * Days since it was last used, confirmed or created.
+ */
+days_unused: number, 
+/**
+ * `stats.reworked / stats.used`, `null` when it was never used.
+ */
+rework_rate: number | null, };

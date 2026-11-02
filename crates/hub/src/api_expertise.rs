@@ -2,7 +2,7 @@
 //! entries, searching them, the candidates waiting for the person, the card, the maintenance
 //! suggestions and the Markdown export. Mounted under the authed router in [`crate::api`].
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -10,29 +10,19 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::{DateTime, Duration, Utc};
+use chrono::Utc;
 use crossagents_api_types::{
     AcceptCandidateRequest, AcceptCandidateResponse, ApiError, ConflictDecision, ConflictPair,
-    ConflictVerdict, DomainBudget, EntryCounts, EntryKind, EntryPair, EntryStatus, ErrorCode,
-    ExpertiseCard, ExpertiseEntry, ExpertiseMaintenance, ListCandidatesResponse,
-    ListExpertiseResponse, SaveExpertiseRequest, StaleHint,
+    ConflictVerdict, DomainBudget, EntryStatus, ErrorCode, ExpertiseCard, ExpertiseEntry,
+    ExpertiseMaintenance, ListCandidatesResponse, ListExpertiseResponse, MergeSuggestion,
+    SaveExpertiseRequest, StaleHint,
 };
-use crossagents_core::{
-    Candidate, CandidateStatus, CoreError, OwnerKind, PERSON_OWNER_ID, estimate_tokens,
-};
+use crossagents_core::{Candidate, CandidateStatus, CoreError, OwnerKind, PERSON_OWNER_ID};
+use crossagents_orchestrator::expertise::maintain;
 use crossagents_orchestrator::lessons::search_terms;
 use serde::Deserialize;
 
 use crate::api::AppState;
-
-/// The judgement budget of one domain (EXPERTISE §4.3).
-const JUDGMENT_BUDGET: u32 = 1500;
-/// Entries not used for this long are a `stale` suggestion (EXPERTISE §4.4).
-const STALE_DAYS: i64 = 60;
-/// Below this many results the card says the rate is built on little.
-const LOW_SAMPLE: u32 = 10;
-/// The window the card compares against (EXPERTISE §4.8).
-const COMPARE_DAYS: i64 = 30;
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -61,6 +51,7 @@ pub fn router() -> Router<Arc<AppState>> {
 
 #[derive(Debug)]
 struct Refusal(StatusCode, ApiError);
+
 impl Refusal {
     fn bad_request(message: impl Into<String>) -> Self {
         Self(
@@ -433,7 +424,7 @@ async fn reject_candidate(
 }
 
 // ---------------------------------------------------------------------------------------
-// Card, maintenance, export
+// Card, maintenance, export (the views of `crossagents_orchestrator::expertise::maintain`)
 
 async fn card(
     State(state): State<Arc<AppState>>,
@@ -442,7 +433,11 @@ async fn card(
     let (kind, id) = scope(&query)?;
     let entries = profile(&state, kind, &id, query.domain.as_deref()).await?;
     let usages = usages_of(&state, &entries).await?;
-    Ok(Json(expertise_card(&entries, &usages, Utc::now())))
+    Ok(Json(card_view(maintain::expertise_card(
+        &entries,
+        &usages,
+        Utc::now(),
+    ))))
 }
 
 async fn maintenance(
@@ -458,13 +453,23 @@ async fn maintenance(
         .candidate_list(Some((kind, id.clone())), Some(CandidateStatus::Pending))
         .await?;
     Ok(Json(ExpertiseMaintenance {
-        budgets: budget_report(&entries),
-        stale: stale_scan(&entries, &usages, Utc::now()),
-        conflicts: conflict_list(&pending),
+        budgets: maintain::budget_report(&entries)
+            .into_iter()
+            .map(budget_view)
+            .collect(),
+        stale: maintain::stale_scan(&entries, &usages, Utc::now())
+            .into_iter()
+            .map(hint_view)
+            .collect(),
+        conflicts: maintain::conflict_list(&pending)
+            .into_iter()
+            .map(conflict_view)
+            .collect(),
     }))
 }
 
-/// The profile as Markdown, for a person to read or paste elsewhere.
+/// The profile as Markdown, for a person to read or paste elsewhere. Empty when the profile
+/// has no entries: `export_markdown` says so by returning nothing.
 async fn export(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ScopeQuery>,
@@ -473,458 +478,128 @@ async fn export(
     let entries = profile(&state, kind, &id, query.domain.as_deref()).await?;
     Ok((
         [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
-        export_markdown(&entries),
+        maintain::export_markdown(&entries),
     )
         .into_response())
 }
 
-// ---------------------------------------------------------------------------------------
-// Maintenance views
-//
-// Temporary: `crates/orchestrator/src/expertise/maintain.rs` (task exp-maintain, EXPERTISE
-// §6.5) is still empty, so the same five functions live here, over the API's own result
-// types. When exp-maintain merges, these go and the handlers call
-// `crossagents_orchestrator::expertise::maintain` instead.
+// The maintain types belong to the orchestrator and carry no bindings derives; the hub maps
+// them onto the API response shapes field by field. Same names, same order, so a change in
+// one is easy to carry over.
 
-/// Judgement tokens per domain, and pairs that look like they say the same thing.
-fn budget_report(entries: &[ExpertiseEntry]) -> Vec<DomainBudget> {
-    let mut domains: BTreeMap<&str, Vec<&ExpertiseEntry>> = BTreeMap::new();
-    for entry in entries
-        .iter()
-        .filter(|e| e.kind == EntryKind::Judgment && e.status != EntryStatus::Superseded)
-    {
-        domains
-            .entry(entry.domain.as_str())
-            .or_default()
-            .push(entry);
+fn budget_view(budget: maintain::DomainBudget) -> DomainBudget {
+    DomainBudget {
+        domain: budget.domain,
+        judgment_tokens: budget.judgment_tokens,
+        budget: budget.budget,
+        over: budget.over,
+        over_by: budget.over_by,
+        judgment_count: budget.judgment_count,
+        merge_suggestions: budget
+            .merge_suggestions
+            .into_iter()
+            .map(|pair| MergeSuggestion {
+                a: pair.a,
+                b: pair.b,
+                reason: pair.reason,
+            })
+            .collect(),
     }
-    domains
-        .into_iter()
-        .map(|(domain, list)| {
-            let tokens: u32 = list
-                .iter()
-                .map(|e| (estimate_tokens(&e.title) + estimate_tokens(&e.text)) as u32)
-                .sum();
-            let mut pairs = Vec::new();
-            for (i, a) in list.iter().enumerate() {
-                for b in &list[i + 1..] {
-                    if looks_alike(a, b) {
-                        pairs.push(EntryPair {
-                            a: a.id.clone(),
-                            b: b.id.clone(),
-                        });
-                    }
-                }
-            }
-            DomainBudget {
-                domain: domain.to_owned(),
-                tokens,
-                budget: JUDGMENT_BUDGET,
-                over: tokens.saturating_sub(JUDGMENT_BUDGET),
-                merge_candidates: pairs,
-            }
-        })
-        .collect()
 }
 
-/// The same `applies_when` (or one covering the other), and a word the titles share.
-fn looks_alike(a: &ExpertiseEntry, b: &ExpertiseEntry) -> bool {
-    let (one, other) = (a.applies_when.trim(), b.applies_when.trim());
-    let reach = one.is_empty() || other.is_empty() || one.contains(other) || other.contains(one);
-    reach && shares_word(&a.title, &b.title)
-}
-
-fn shares_word(a: &str, b: &str) -> bool {
-    let words = |text: &str| -> Vec<String> {
-        text.split(|c: char| {
-            c.is_whitespace()
-                || c.is_ascii_punctuation()
-                || matches!(c, '，' | '。' | '、' | '：' | '；' | '（' | '）')
-        })
-        .filter(|w| w.chars().count() >= 2)
-        .map(str::to_owned)
-        .collect()
-    };
-    let theirs = words(b);
-    words(a).iter().any(|w| theirs.contains(w))
-}
-
-/// Entries unused for a long time, or whose results got worse; nothing is changed here.
-fn stale_scan(
-    entries: &[ExpertiseEntry],
-    usages: &[crossagents_core::UsageRecord],
-    now: DateTime<Utc>,
-) -> Vec<StaleHint> {
-    let mut hints = Vec::new();
-    for entry in entries.iter().filter(|e| e.status == EntryStatus::Active) {
-        let used = entry.stats.used;
-        let reworked = entry.stats.reworked;
-        if used > 0 && reworked * 10 >= used * 4 {
-            hints.push(StaleHint {
-                entry_id: entry.id.clone(),
-                suggested: EntryStatus::Review,
-                reason: format!("used {used} times, reworked {reworked}"),
-            });
-            continue;
-        }
-        let last = usages
-            .iter()
-            .filter(|u| u.entry_id == entry.id)
-            .map(|u| u.at)
-            .chain(entry.last_confirmed_at)
-            .max()
-            .unwrap_or(entry.updated_at);
-        let idle = now.signed_duration_since(last).num_days();
-        if idle >= STALE_DAYS {
-            hints.push(StaleHint {
-                entry_id: entry.id.clone(),
-                suggested: EntryStatus::Stale,
-                reason: format!("not used for {idle} days"),
-            });
-        }
+fn hint_view(hint: maintain::StaleHint) -> StaleHint {
+    StaleHint {
+        entry_id: hint.entry_id,
+        domain: hint.domain,
+        title: hint.title,
+        suggested: hint.suggested,
+        reason: hint.reason,
+        days_unused: hint.days_unused,
+        rework_rate: hint.rework_rate,
     }
-    hints
 }
 
-/// Pending candidates that need a verdict per conflicting entry.
-fn conflict_list(candidates: &[Candidate]) -> Vec<ConflictPair> {
-    candidates
-        .iter()
-        .filter(|c| c.status == CandidateStatus::Pending && !c.conflicts_with.is_empty())
-        .map(|c| ConflictPair {
-            candidate_id: c.id.clone(),
-            entry_ids: c.conflicts_with.clone(),
-        })
-        .collect()
-}
-
-fn expertise_card(
-    entries: &[ExpertiseEntry],
-    usages: &[crossagents_core::UsageRecord],
-    now: DateTime<Utc>,
-) -> ExpertiseCard {
-    let live: Vec<&ExpertiseEntry> = entries
-        .iter()
-        .filter(|e| e.status != EntryStatus::Superseded)
-        .collect();
-    let count = |kind: EntryKind| live.iter().filter(|e| e.kind == kind).count() as u32;
-    let budgets = budget_report(entries);
-    let judgment_tokens: u32 = live
-        .iter()
-        .filter(|e| e.kind == EntryKind::Judgment)
-        .map(|e| (estimate_tokens(&e.title) + estimate_tokens(&e.text)) as u32)
-        .sum();
-    let sum = |pick: fn(&crossagents_core::EntryStats) -> u32| -> u32 {
-        entries.iter().map(|e| pick(&e.stats)).sum()
-    };
-    let (merged, reworked, dropped) = (
-        sum(|s| s.merged_first_try),
-        sum(|s| s.reworked),
-        sum(|s| s.dropped),
-    );
-    let first_try_rate = rate(merged, reworked, dropped);
-
-    // The same count over the usage that already existed 30 days ago (EXPERTISE §4.8).
-    let before = now - Duration::days(COMPARE_DAYS);
-    let (mut old_merged, mut old_reworked, mut old_dropped) = (0, 0, 0);
-    for usage in usages.iter().filter(|u| u.at < before) {
-        match usage.outcome {
-            Some(crossagents_core::UsageOutcome::MergedFirstTry) => old_merged += 1,
-            Some(crossagents_core::UsageOutcome::Reworked) => old_reworked += 1,
-            Some(crossagents_core::UsageOutcome::Dropped) => old_dropped += 1,
-            None => {}
-        }
+fn conflict_view(pair: maintain::ConflictPair) -> ConflictPair {
+    ConflictPair {
+        candidate_id: pair.candidate_id,
+        entry_id: pair.entry_id,
+        domain: pair.domain,
+        title: pair.title,
+        note: pair.note,
     }
-    let rate_30d = rate(old_merged, old_reworked, old_dropped);
-    let delta_points = match (first_try_rate, rate_30d) {
-        (Some(now), Some(then)) => Some((now - then) * 100.0),
-        _ => None,
-    };
+}
 
+fn card_view(card: maintain::ExpertiseCard) -> ExpertiseCard {
     ExpertiseCard {
-        entries: EntryCounts {
-            judgment: count(EntryKind::Judgment),
-            example: count(EntryKind::Example),
-            limit: count(EntryKind::Limit),
-        },
-        judgment_tokens,
-        judgment_budget: JUDGMENT_BUDGET,
-        over_budget_domains: budgets.iter().filter(|b| b.over > 0).count() as u32,
-        stale: live
-            .iter()
-            .filter(|e| e.status == EntryStatus::Stale)
-            .count() as u32,
-        review: live
-            .iter()
-            .filter(|e| e.status == EntryStatus::Review)
-            .count() as u32,
-        used: sum(|s| s.used),
-        merged_first_try: merged,
-        reworked,
-        dropped,
-        first_try_rate,
-        first_try_rate_30d_ago: rate_30d,
-        delta_points,
-        low_sample: merged + reworked + dropped < LOW_SAMPLE,
+        first_try_rate: card.first_try_rate,
+        first_try_rate_30d_ago: card.first_try_rate_30d_ago,
+        delta_points: card.delta_points,
+        sample: card.sample,
+        small_sample: card.small_sample,
+        merged_first_try: card.merged_first_try,
+        reworked: card.reworked,
+        dropped: card.dropped,
+        entries: card.entries,
+        judgments: card.judgments,
+        examples: card.examples,
+        limits: card.limits,
+        active: card.active,
+        stale: card.stale,
+        review: card.review,
+        superseded: card.superseded,
+        judgment_tokens: card.judgment_tokens,
+        judgment_budget: card.judgment_budget,
+        over_budget_domains: card.over_budget_domains,
     }
-}
-
-fn rate(merged: u32, reworked: u32, dropped: u32) -> Option<f64> {
-    let total = merged + reworked + dropped;
-    (total > 0).then(|| f64::from(merged) / f64::from(total))
-}
-
-/// The profile as Markdown: a heading per domain, one section per kind.
-fn export_markdown(entries: &[ExpertiseEntry]) -> String {
-    let mut out = String::new();
-    match entries.first() {
-        Some(first) => out.push_str(&format!(
-            "# Expertise profile: {} {}\n",
-            owner_word(first.owner_kind),
-            first.owner_id
-        )),
-        None => out.push_str("# Expertise profile\n"),
-    }
-    let live: Vec<&ExpertiseEntry> = entries
-        .iter()
-        .filter(|e| e.status != EntryStatus::Superseded)
-        .collect();
-    if live.is_empty() {
-        out.push_str("\n(no entries yet)\n");
-        return out;
-    }
-
-    let mut domains: BTreeMap<&str, Vec<&ExpertiseEntry>> = BTreeMap::new();
-    for entry in &live {
-        domains
-            .entry(entry.domain.as_str())
-            .or_default()
-            .push(entry);
-    }
-    for (domain, list) in domains {
-        out.push_str(&format!("\n## {domain}\n"));
-        let mut tokens = 0u32;
-        for (kind, heading) in [
-            (EntryKind::Judgment, "Judgments"),
-            (EntryKind::Example, "Examples"),
-            (EntryKind::Limit, "Limits"),
-        ] {
-            let group: Vec<&&ExpertiseEntry> = list.iter().filter(|e| e.kind == kind).collect();
-            if group.is_empty() {
-                continue;
-            }
-            out.push_str(&format!("\n### {heading}\n\n"));
-            for entry in group {
-                if kind == EntryKind::Judgment {
-                    tokens += (estimate_tokens(&entry.title) + estimate_tokens(&entry.text)) as u32;
-                }
-                out.push_str(&format!("- **{}**", entry.title));
-                if let Some(note) = status_note(entry) {
-                    out.push_str(&format!(" ({note})"));
-                }
-                out.push('\n');
-                if !entry.applies_when.trim().is_empty() {
-                    out.push_str(&format!(
-                        "  - applies when: {}\n",
-                        entry.applies_when.trim()
-                    ));
-                }
-                match &entry.example {
-                    Some(example) if kind == EntryKind::Example => {
-                        for (label, value) in [
-                            ("situation", &example.situation),
-                            ("rejected", &example.rejected),
-                            ("why", &example.rejected_why),
-                            ("chosen", &example.chosen),
-                        ] {
-                            if !value.trim().is_empty() {
-                                out.push_str(&format!("  - {label}: {}\n", value.trim()));
-                            }
-                        }
-                    }
-                    _ => {
-                        if !entry.text.trim().is_empty() {
-                            out.push_str(&format!("  - {}\n", one_line(&entry.text)));
-                        }
-                    }
-                }
-            }
-        }
-        if tokens > 0 {
-            out.push_str(&format!(
-                "\n_judgement budget: {tokens} / {JUDGMENT_BUDGET} tokens_\n"
-            ));
-        }
-    }
-    out
-}
-
-fn owner_word(kind: OwnerKind) -> &'static str {
-    match kind {
-        OwnerKind::Person => "person",
-        OwnerKind::Project => "project",
-    }
-}
-
-/// The warning a person needs next to the title, if any.
-fn status_note(entry: &ExpertiseEntry) -> Option<String> {
-    let mut notes = Vec::new();
-    match entry.status {
-        EntryStatus::Stale => notes.push("stale".to_owned()),
-        EntryStatus::Review => notes.push("under review".to_owned()),
-        EntryStatus::Active | EntryStatus::Superseded => {}
-    }
-    if entry.stats.used > 0 {
-        notes.push(format!(
-            "used {}, merged first try {}, reworked {}, dropped {}",
-            entry.stats.used,
-            entry.stats.merged_first_try,
-            entry.stats.reworked,
-            entry.stats.dropped
-        ));
-    }
-    (!notes.is_empty()).then(|| notes.join("; "))
-}
-
-/// The body on one line, for a bullet.
-fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossagents_core::{EntryStats, SourceRef, TaskId};
+    use crossagents_core::{EntryKind, EntryStats, SourceRef};
 
-    fn entry(
-        id: &str,
-        kind: EntryKind,
-        status: EntryStatus,
-        title: &str,
-        text: &str,
-    ) -> ExpertiseEntry {
-        let now = Utc::now();
-        ExpertiseEntry {
-            id: id.into(),
-            owner_kind: OwnerKind::Person,
-            owner_id: PERSON_OWNER_ID.into(),
-            domain: "rust".into(),
-            kind,
-            title: title.into(),
-            text: text.into(),
-            example: None,
-            applies_when: String::new(),
-            evidence: 0,
-            last_confirmed_at: None,
-            status,
-            superseded_by: None,
-            stats: EntryStats::default(),
-            sources: Vec::new(),
-            created_at: now,
-            updated_at: now,
-        }
-    }
-
-    fn candidate(id: &str, conflicts: &[&str]) -> Candidate {
+    fn candidate(conflicts: &[&str]) -> Candidate {
         let now = Utc::now();
         Candidate {
-            id: id.into(),
+            id: "c1".into(),
             owner_kind: OwnerKind::Person,
             owner_id: PERSON_OWNER_ID.into(),
             domain: "rust".into(),
-            proposed: entry("p", EntryKind::Judgment, EntryStatus::Active, "t", "body"),
+            proposed: ExpertiseEntry {
+                id: "p".into(),
+                owner_kind: OwnerKind::Person,
+                owner_id: PERSON_OWNER_ID.into(),
+                domain: "rust".into(),
+                kind: EntryKind::Judgment,
+                title: "t".into(),
+                text: "body".into(),
+                example: None,
+                applies_when: String::new(),
+                evidence: 0,
+                last_confirmed_at: None,
+                status: EntryStatus::Active,
+                superseded_by: None,
+                stats: EntryStats::default(),
+                sources: vec![SourceRef::Run {
+                    run_id: crossagents_core::RunId::new(),
+                }],
+                created_at: now,
+                updated_at: now,
+            },
             conflicts_with: conflicts.iter().map(|c| (*c).to_owned()).collect(),
             origin: crossagents_core::CandidateOrigin::Manual,
             status: CandidateStatus::Pending,
             suggested_by_lead: false,
             note: String::new(),
-            sources: vec![SourceRef::Run {
-                run_id: crossagents_core::RunId::new(),
-            }],
+            sources: Vec::new(),
             created_at: now,
             decided_at: None,
         }
     }
 
     #[test]
-    fn expertise_budget_adds_up_per_domain_and_flags_the_overflow() {
-        let long = "先写一个会失败的测试".repeat(90); // 900 tokens
-        let mut entries = vec![
-            entry(
-                "e1",
-                EntryKind::Judgment,
-                EntryStatus::Active,
-                "测试先于实现",
-                &long,
-            ),
-            entry(
-                "e2",
-                EntryKind::Judgment,
-                EntryStatus::Active,
-                "别过度设计",
-                &long,
-            ),
-            // Examples do not count against the judgement budget.
-            entry(
-                "e3",
-                EntryKind::Example,
-                EntryStatus::Active,
-                "某个例子",
-                &long,
-            ),
-            entry(
-                "e4",
-                EntryKind::Judgment,
-                EntryStatus::Active,
-                "旧判断",
-                &long,
-            ),
-        ];
-        entries[3].status = EntryStatus::Superseded;
-        let budgets = budget_report(&entries);
-        assert_eq!(budgets.len(), 1);
-        assert_eq!(budgets[0].domain, "rust");
-        assert_eq!(budgets[0].budget, JUDGMENT_BUDGET);
-        assert!(budgets[0].tokens > JUDGMENT_BUDGET);
-        assert_eq!(
-            budgets[0].over,
-            budgets[0].tokens.saturating_sub(JUDGMENT_BUDGET)
-        );
-    }
-
-    #[test]
-    fn expertise_stale_scan_flags_long_unused_and_reworked() {
-        let mut old = entry(
-            "e1",
-            EntryKind::Judgment,
-            EntryStatus::Active,
-            "旧判断",
-            "正文",
-        );
-        old.updated_at = Utc::now() - Duration::days(STALE_DAYS + 1);
-        let hints = stale_scan(&[old], &[], Utc::now());
-        assert_eq!(hints.len(), 1);
-        assert_eq!(hints[0].suggested, EntryStatus::Stale);
-
-        let mut bad = entry(
-            "e2",
-            EntryKind::Judgment,
-            EntryStatus::Active,
-            "常返工",
-            "正文",
-        );
-        bad.stats = EntryStats {
-            used: 5,
-            reworked: 3,
-            ..EntryStats::default()
-        };
-        let hints = stale_scan(&[bad], &[], Utc::now());
-        assert_eq!(hints[0].suggested, EntryStatus::Review);
-    }
-
-    #[test]
     fn expertise_every_conflict_needs_a_verdict() {
-        let candidate = candidate("c1", &["e1", "e2"]);
+        let candidate = candidate(&["e1", "e2"]);
         let missing = verdicts(
             &candidate,
             &[ConflictDecision {
@@ -948,109 +623,8 @@ mod tests {
             ],
         )
         .unwrap();
-        // The candidate's order, not the body's.
+        // The candidate order, not the body order.
         assert_eq!(all[0].0, "e1");
         assert_eq!(all[1].0, "e2");
-    }
-
-    #[test]
-    fn expertise_conflict_list_is_pending_with_conflicts() {
-        let mut settled = candidate("c2", &["e1"]);
-        settled.status = CandidateStatus::Accepted;
-        let pairs = conflict_list(&[
-            candidate("c1", &["e1", "e2"]),
-            settled,
-            candidate("c3", &[]),
-        ]);
-        assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0].entry_ids, vec!["e1", "e2"]);
-    }
-
-    #[test]
-    fn expertise_card_is_null_without_results_and_compares_30_days_ago() {
-        let mut used = entry(
-            "e1",
-            EntryKind::Judgment,
-            EntryStatus::Active,
-            "判断",
-            "正文",
-        );
-        used.stats = EntryStats {
-            used: 3,
-            merged_first_try: 2,
-            reworked: 1,
-            dropped: 0,
-        };
-        let card = expertise_card(&[used.clone()], &[], Utc::now());
-        assert_eq!(card.entries.judgment, 1);
-        assert_eq!(card.first_try_rate, Some(2.0 / 3.0));
-        assert_eq!(card.first_try_rate_30d_ago, None);
-        assert_eq!(card.delta_points, None);
-        assert!(card.low_sample);
-
-        let old = Utc::now() - Duration::days(COMPARE_DAYS + 1);
-        let usage = |outcome: crossagents_core::UsageOutcome| crossagents_core::UsageRecord {
-            id: uuid::Uuid::new_v4().to_string(),
-            entry_id: "e1".into(),
-            run_id: None,
-            task_id: Some(TaskId::new()),
-            agent: None,
-            source: crossagents_core::UsageSource::Declared,
-            outcome: Some(outcome),
-            at: old,
-        };
-        let usages = vec![
-            usage(crossagents_core::UsageOutcome::MergedFirstTry),
-            usage(crossagents_core::UsageOutcome::Reworked),
-        ];
-        let card = expertise_card(&[used], &usages, Utc::now());
-        assert_eq!(card.first_try_rate_30d_ago, Some(0.5));
-        assert_eq!(card.delta_points, Some((2.0 / 3.0 - 0.5) * 100.0));
-    }
-
-    #[test]
-    fn expertise_export_sections_by_domain_and_kind() {
-        let mut example = entry(
-            "e2",
-            EntryKind::Example,
-            EntryStatus::Active,
-            "一次取舍",
-            "",
-        );
-        example.applies_when = "crates/hub/**".into();
-        example.example = Some(crossagents_core::Example {
-            situation: "要给路由加鉴权".into(),
-            rejected: "每个 handler 各写一遍".into(),
-            rejected_why: "漏掉一个就开口子".into(),
-            chosen: "中间件".into(),
-        });
-        let mut gone = entry(
-            "e3",
-            EntryKind::Limit,
-            EntryStatus::Superseded,
-            "旧边界",
-            "x",
-        );
-        gone.superseded_by = Some("e2".into());
-        let markdown = export_markdown(&[
-            entry(
-                "e1",
-                EntryKind::Judgment,
-                EntryStatus::Active,
-                "测试先行",
-                "先红后绿",
-            ),
-            example,
-            gone,
-        ]);
-        assert!(markdown.starts_with("# Expertise profile: person me"));
-        assert!(markdown.contains("## rust"));
-        assert!(markdown.contains("### Judgments"));
-        assert!(markdown.contains("- **测试先行**"));
-        assert!(markdown.contains("### Examples"));
-        assert!(markdown.contains("chosen: 中间件"));
-        assert!(!markdown.contains("旧边界"));
-
-        assert!(export_markdown(&[]).contains("(no entries yet)"));
     }
 }

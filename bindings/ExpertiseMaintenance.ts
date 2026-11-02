@@ -4,7 +4,7 @@ import type { DomainBudget } from "./DomainBudget";
 import type { StaleHint } from "./StaleHint";
 
 /**
- * `GET /v1/expertise/maintenance`.
+ * `GET /v1/expertise/maintenance`: the three views of `maintain` in one answer.
  */
 export type ExpertiseMaintenance = { budgets: Array<DomainBudget>, 
 /**

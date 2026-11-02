@@ -1616,83 +1616,103 @@ pub struct AcceptCandidateResponse {
     pub entry: ExpertiseEntry,
 }
 
-/// Two entries that look like they say the same thing (EXPERTISE §4.3).
+/// Two judgements in one domain that read alike, so they could be one entry
+/// (`crossagents_orchestrator::expertise::maintain::MergeSuggestion`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
-pub struct EntryPair {
+pub struct MergeSuggestion {
+    /// The two entry ids, in the order they appeared in the profile.
     pub a: String,
     pub b: String,
-}
-
-/// One domain's judgement budget (EXPERTISE §4.3).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct DomainBudget {
-    pub domain: String,
-    /// Judgement tokens in use, by `estimate_tokens`.
-    pub tokens: u32,
-    pub budget: u32,
-    /// `tokens - budget` when over, else 0.
-    pub over: u32,
-    /// Pairs the person or the lead could merge into one entry.
-    pub merge_candidates: Vec<EntryPair>,
-}
-
-/// A suggestion to change an entry's status (EXPERTISE §4.4). Nothing is changed by it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct StaleHint {
-    pub entry_id: String,
-    pub suggested: EntryStatus,
-    /// Why, in words: unused for 60 days, or a high rework rate.
+    /// Why they could be one entry.
     pub reason: String,
 }
 
-/// A pending candidate with entries to rule on (EXPERTISE §4.4).
+/// One domain's judgement budget (EXPERTISE §4.3). The fields are the ones
+/// `maintain::budget_report` produces; the hub maps them straight across.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DomainBudget {
+    pub domain: String,
+    /// Sum of `estimate_tokens` over the domain's non-superseded judgements.
+    pub judgment_tokens: usize,
+    pub budget: usize,
+    pub over: bool,
+    /// By how much the domain is over, `0` when it is not.
+    pub over_by: usize,
+    pub judgment_count: usize,
+    /// Pairs worth merging; only filled when the domain is over budget.
+    pub merge_suggestions: Vec<MergeSuggestion>,
+}
+
+/// A suggestion to re-flag an entry (EXPERTISE §4.4). Nothing is changed by it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StaleHint {
+    pub entry_id: String,
+    pub domain: String,
+    pub title: String,
+    /// What the scan would set it to: `stale` or `review`.
+    pub suggested: EntryStatus,
+    pub reason: String,
+    /// Days since it was last used, confirmed or created.
+    #[ts(type = "number")]
+    pub days_unused: i64,
+    /// `stats.reworked / stats.used`, `null` when it was never used.
+    pub rework_rate: Option<f64>,
+}
+
+/// A pending candidate and one existing entry it may contradict (EXPERTISE §4.4): one pair
+/// per conflicting entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ConflictPair {
     pub candidate_id: String,
-    pub entry_ids: Vec<String>,
+    /// The existing entry the candidate may conflict with.
+    pub entry_id: String,
+    pub domain: String,
+    /// The proposed entry's title, so the pair can be shown side by side.
+    pub title: String,
+    pub note: String,
 }
 
-/// Entries by kind (EXPERTISE §4.8); superseded ones are not counted.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct EntryCounts {
-    pub judgment: u32,
-    pub example: u32,
-    pub limit: u32,
-}
-
-/// The card (EXPERTISE §4.8): how the profile is doing, not how an agent is doing.
+/// The card (EXPERTISE §4.8): how the profile is doing, not how an agent is doing. Computed
+/// from decided usage, so a task that pushed three entries counts three times.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ExpertiseCard {
-    pub entries: EntryCounts,
-    /// Judgement tokens over every domain.
-    pub judgment_tokens: u32,
-    /// The per-domain budget (`JUDGMENT_BUDGET`).
-    pub judgment_budget: u32,
-    pub over_budget_domains: u32,
-    pub stale: u32,
-    pub review: u32,
-    pub used: u32,
-    pub merged_first_try: u32,
-    pub reworked: u32,
-    pub dropped: u32,
     /// `merged_first_try / (merged_first_try + reworked + dropped)`, 0–1; `null` without a
-    /// result yet.
+    /// decided usage yet.
     pub first_try_rate: Option<f64>,
-    /// The same rate over the usage older than 30 days.
+    /// The same figure over usages decided before 30 days ago.
     pub first_try_rate_30d_ago: Option<f64>,
     /// The two rates in percentage points, when both exist.
     pub delta_points: Option<f64>,
-    /// Fewer than 10 results: the rate is shown, but it says little.
-    pub low_sample: bool,
+    /// Decided usages behind `first_try_rate`.
+    pub sample: usize,
+    /// The sample is under ten: the rate is shown, but not to be trusted yet.
+    pub small_sample: bool,
+    pub merged_first_try: usize,
+    pub reworked: usize,
+    pub dropped: usize,
+    /// All entries, by kind.
+    pub entries: usize,
+    pub judgments: usize,
+    pub examples: usize,
+    pub limits: usize,
+    /// Entries by status.
+    pub active: usize,
+    pub stale: usize,
+    pub review: usize,
+    pub superseded: usize,
+    /// Judgement tokens over the whole profile, and the per-domain budget.
+    pub judgment_tokens: usize,
+    pub judgment_budget: usize,
+    /// Domains whose judgements are over budget (shown red).
+    pub over_budget_domains: usize,
 }
 
-/// `GET /v1/expertise/maintenance`.
+/// `GET /v1/expertise/maintenance`: the three views of `maintain` in one answer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ExpertiseMaintenance {
