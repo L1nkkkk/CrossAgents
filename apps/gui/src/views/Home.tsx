@@ -1,14 +1,17 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { PluginInfo } from "@bindings/PluginInfo";
-import { api, errorText } from "../api";
+import type { SessionCandidate } from "@bindings/SessionCandidate";
+import { api, ApiError, errorText } from "../api";
 import { HeldFiles, useHeld } from "../attach";
 import { sendMessage } from "../outbox";
 import { navigate } from "../App";
 import { Avatar, BrandMark, ErrorBox, Field, Icon, VendorMark, agentTitle, displayName, hueOf, useAgents } from "../components";
 import { useHubData } from "../hub";
 import { t } from "../lib/i18n";
-import { chatTitle, effortLabel, effortLevels, effortOf, prettyModel, vendorLabel, workerModelFor, accountOf } from "../lib/models";
+import { effortLabel, effortLevels, effortOf, prettyModel, vendorLabel, workerModelFor, accountOf } from "../lib/models";
+import { chatBody, newChatRequest, runSessionFields, sessionStateKey, usabilityOf } from "../lib/sessionChoice";
+import * as draft from "../lib/draft";
 import { useQuota } from "./Quota";
 import { PRESETS, presetPolicy, type Preset } from "../lib/policy";
 import { ChipMenu, type MenuItem } from "../menu";
@@ -16,6 +19,7 @@ import { mentionsFor, useMention } from "../mention";
 import { QuestionCards } from "../questions";
 import { CHATS, selectWorkspace, useSelectedWorkspace, useWorkspaces, wsKey, wsName } from "../workspace";
 
+const DRAFT: draft.Where = { kind: "home" };
 const PRESET_KEY = "crossagents.preset";
 const LEAD_KEY = "crossagents.lead";
 const MODE_KEY = "crossagents.mode";
@@ -109,8 +113,12 @@ export function HomeView() {
   const everyone = (agents.data ?? []).filter((a) => !a.archived_at);
   // In a workspace, offer only its agents (a run works in its planner's directory).
   const here = everyone.filter((a) => !cwd || wsKey(a.cwd) === wsKey(cwd));
-  const [request, setRequest] = useState("");
-  const [title, setTitle] = useState("");
+  // What was typed last time this page was open: leaving it unmounts the composer, and a
+  // half-written request with its screenshots should not go with it (lib/draft.ts).
+  const kept = useRef(draft.read(DRAFT));
+  const [request, setRequest] = useState(kept.current?.text ?? "");
+  const [title, setTitle] = useState(kept.current?.title ?? "");
+  const [draftNote, setDraftNote] = useState<string>();
   const [picked, setPicked] = useState<Lead | undefined>(() => load<Lead | undefined>(LEAD_KEY, undefined, (v) => !!v && typeof v === "object"));
   const [worker, setWorker] = useState("");
   const [escalate, setEscalate] = useState("");
@@ -119,7 +127,7 @@ export function HomeView() {
   const [continuationAttempts, setContinuationAttempts] = useState(3);
   const [continuationInterval, setContinuationInterval] = useState(60);
   const [maxParallel, setMaxParallel] = useState("");
-  const [preset, setPresetState] = useState<Preset>(() => load<Preset>(PRESET_KEY, "manual", (v) => v === "manual" || v === "semi"));
+  const [preset, setPresetState] = useState<Preset>(() => load<Preset>(PRESET_KEY, "manual", (v) => v === "manual" || v === "semi" || v === "full"));
   const [maxUsd, setMaxUsd] = useState("");
   const [maxMinutes, setMaxMinutes] = useState("");
   const [maxTokens, setMaxTokens] = useState("");
@@ -131,21 +139,70 @@ export function HomeView() {
   const files = useHeld(setError);
   const ref = useRef<HTMLTextAreaElement>(null);
 
-  // 全托管 is picked anew each time: a risky choice never carries over (docs/tasks/W1.md §7).
+  // The files come back once, after `useHeld` exists; the text was restored above.
+  useEffect(() => {
+    if (kept.current?.held.length) files.restore(kept.current.held);
+    kept.current = undefined;
+  }, []);
+
+  // Kept as you type, a moment after you stop. Images can be too big for the browser's
+  // storage: then the text is kept alone and the composer says so rather than losing it
+  // silently.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const out = draft.write(DRAFT, { text: request, title, held: files.held });
+      setDraftNote(!out.kept && files.held.length ? t("draft.notKept") : out.dropped ? t("draft.filesTooBig", { n: out.dropped }) : undefined);
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [request, title, files.held]);
+
+  /** Sent: the draft is done with. */
+  const sent = () => {
+    draft.forget(DRAFT);
+    setDraftNote(undefined);
+    files.clear();
+  };
+
+  // The delegation level carries over, 全托管 included (docs/tasks/W1.md §7).
   const setPreset = (p: Preset) => {
     setPresetState(p);
-    if (p !== "full") save(PRESET_KEY, p);
+    save(PRESET_KEY, p);
   };
   const choose = (lead: Lead) => {
+    setSessionId(undefined);
     setPicked(lead);
     save(LEAD_KEY, lead);
   };
 
   const planners = here.filter((a) => a.role === "planner");
   const offered = (plugins.data ?? []).filter((p) => p.models.length > 0);
-  // The remembered pick when it still exists here, else the first planner, else the first model.
-  const lead: Lead | undefined =
-    picked?.kind === "agent" && planners.some((a) => a.name === picked.name)
+  // The workspace whose sessions are offered: the picked one, or — for Work — the directory
+  // the first planner works in, since a run starts there without picking a workspace chip.
+  const baseLeadAgent = picked?.kind === "agent" ? planners.find((a) => a.name === picked.name) : planners[0];
+  const sessionRepo = cwd ?? (mode === "run" && picked?.kind !== "model" ? baseLeadAgent?.cwd : undefined);
+  // A chat with no workspace carries on one of the standalone chats, each in its own directory.
+  const chatsOnly = !sessionRepo && mode === "chat";
+  const sessions = useHubData(
+    () =>
+      sessionRepo || chatsOnly
+        ? api.sessionCandidates(sessionRepo).then((r) => r.sessions)
+        : Promise.resolve([] as SessionCandidate[]),
+    [sessionRepo, chatsOnly],
+    (e) => e.type.startsWith("agent.") || e.type === "run.status_changed" || e.type === "task.handed_off",
+  );
+  // The session picked to carry this start; absent: a new one, as before.
+  const [sessionId, setSessionId] = useState<string>();
+  useEffect(() => setSessionId(undefined), [sessionRepo, chatsOnly]);
+  useEffect(() => {
+    if (sessionId && sessions.data && !sessions.data.some((s) => s.agent.id === sessionId)) setSessionId(undefined);
+  }, [sessions.data, sessionId]);
+  const chosenSession = sessionId ? sessions.data?.find((s) => s.agent.id === sessionId) : undefined;
+  const sessionUse = chosenSession ? usabilityOf(chosenSession) : undefined;
+  // A picked session decides who leads; otherwise the remembered pick when it still exists
+  // here, else the first planner, else the first model.
+  const lead: Lead | undefined = chosenSession
+    ? { kind: "agent", name: chosenSession.agent.name }
+    : picked?.kind === "agent" && planners.some((a) => a.name === picked.name)
       ? picked
       : picked?.kind === "model" && offered.some((p) => p.name === picked.plugin && p.models.includes(picked.model))
         ? picked
@@ -154,13 +211,15 @@ export function HomeView() {
           : offered[0]
             ? { kind: "model", plugin: offered[0].name, model: offered[0].models[0] }
             : undefined;
-  const leadAgent = lead?.kind === "agent" ? planners.find((a) => a.name === lead.name) : undefined;
+  const leadAgent = chosenSession?.agent ?? (lead?.kind === "agent" ? planners.find((a) => a.name === lead.name) : undefined);
   const leadPlugin = leadAgent?.plugin ?? (lead?.kind === "model" ? lead.plugin : undefined);
   const leadModel = leadAgent?.model ?? (lead?.kind === "model" ? lead.model : undefined);
   const where = leadAgent?.cwd ?? cwd;
 
-  const team = here.filter((a) => a.role !== "planner" && (!where || wsKey(a.cwd) === wsKey(where)));
-  const workers = team.filter((a) => a.role === "worker");
+  // A session that leads must not also be the default worker. Any other may work or review:
+  // a role says how a session was made, not what it may do (docs/AGENT-WORKSPACE.md §2.1).
+  const team = here.filter((a) => a.id !== chosenSession?.agent.id && a.id !== leadAgent?.id && (!where || wsKey(a.cwd) === wsKey(where)));
+  const workers = team;
   // 自动 (none picked) is a worker on the lead's login and the cheaper sibling of its model, not whoever worked last.
   const chosenWorker = worker ? workers.find((a) => a.name === worker) : undefined;
   // A chat needs only a model: the remembered one if the hub still offers it, else the first.
@@ -170,10 +229,16 @@ export function HomeView() {
       : offered[0]
         ? { plugin: offered[0].name, model: offered[0].models[0] }
         : undefined;
-  const ready = !busy && !!request.trim() && (mode === "chat" ? !!chatModel : !!lead && !!where);
-  // Effort levels of the vendor picked: the chat's model, or the run's lead. A pick the
-  // vendor does not offer falls back to its default; an existing lead shows its own.
-  const levels = effortLevels(plugins.data?.find((p) => p.name === (mode === "chat" ? chatModel?.plugin : leadPlugin))?.efforts);
+  const ready =
+    !busy &&
+    !!request.trim() &&
+    (mode === "chat" ? !!chosenSession || !!chatModel : !!lead && !!where) &&
+    (!sessionUse || sessionUse.selectable);
+  // Effort levels of the vendor picked: the chat's model, or the run's lead. A picked session
+  // keeps its own, so there is nothing to choose.
+  const levels = chosenSession
+    ? []
+    : effortLevels(plugins.data?.find((p) => p.name === (mode === "chat" ? chatModel?.plugin : leadPlugin))?.efforts);
   const effortWanted = effortPick || (mode === "run" && leadAgent ? effortOf(leadAgent.config) ?? "" : "");
   const effortOn = levels.some((l) => l.value === effortWanted) ? effortWanted : "";
   const effort = effortOn || undefined;
@@ -191,10 +256,19 @@ export function HomeView() {
     el.style.height = `${Math.min(el.scrollHeight, 320)}px`;
   }, [request]);
 
-  /** An agent with this role, model and login in `dir`, or a new one (the hub names it: a person's name, never the model's). */
-  async function agentFor(role: "planner" | "worker", choice: Choice, dir: string, effort?: string): Promise<Agent> {
+  /**
+   * An agent with this role, model and login in `dir`, or a new one (the hub names it: a
+   * person's name, never the model's).
+   *
+   * `reuse` is false for the lead: 新会话 says a new one, so handing back an agent that
+   * already exists — with everything it has said before — is the opposite of what was asked.
+   * To carry a conversation on, pick that session by name under 已有会话. Workers are reused:
+   * one is a template each task clones, not a conversation anyone reads.
+   */
+  async function agentFor(role: "planner" | "worker", choice: Choice, dir: string, effort?: string, reuse = true): Promise<Agent> {
     const { plugin, model, account } = choice;
-    const found = everyone.find((a) => a.role === role && a.plugin === plugin && a.model === model && accountOf(a) === account && wsKey(a.cwd) === wsKey(dir));
+    // The picked session leads this run: it cannot also be reused as the default worker.
+    const found = reuse && everyone.find((a) => a.id !== chosenSession?.agent.id && a.role === role && a.plugin === plugin && a.model === model && accountOf(a) === account && wsKey(a.cwd) === wsKey(dir));
     if (found) return withEffort(found, effort);
     return api.createAgent({
       plugin,
@@ -203,7 +277,7 @@ export function HomeView() {
       role,
       cwd: dir,
       config: configFor(choice, effort),
-      profile: { display_name: null, title: role === "planner" ? t("home.leadTitle") : "Worker", avatar: null, color: null, persona: null },
+      profile: { display_name: null, title: role === "planner" ? t("home.leadTitle") : "Worker", avatar: null, avatar_image: null, color: null, persona: null },
     });
   }
 
@@ -226,33 +300,39 @@ export function HomeView() {
     return undefined;
   }
 
-  /** A chat is a new agent (named by the hub, the conversation titled by the message) and its first message. */
+  /** The hub's words, shown as they are. A 409 means the snapshot moved (a session got held):
+   * re-read the candidates so the person can pick another one or start fresh. */
+  function fail(err: unknown) {
+    setError(errorText(err));
+    if (err instanceof ApiError && err.status === 409) sessions.reload();
+  }
+
+  /** A chat is a new agent (named by the hub, the conversation titled by the message) and its
+   * first message, or a message to a session that already exists. */
   async function startChat() {
-    if (!ready || !chatModel) return;
+    if (!ready) return;
     setBusy(true);
     setError(undefined);
     try {
       const typed = request.trim();
+      // An existing session keeps its own model and login: just carry the conversation on.
+      if (chosenSession) {
+        await api.chat(chosenSession.agent.id, chatBody(typed, chosenSession, uploads()));
+        sent();
+        navigate("s", chosenSession.agent.id);
+        return;
+      }
+      if (!chatModel) return;
       const lead = leadingModel(typed);
       const choice = lead?.choice ?? chatModel;
       const text = lead?.rest || typed;
-      const agent = await api.createAgent({
-        topic: chatTitle(text, 60),
-        plugin: choice.plugin,
-        driver: null,
-        model: choice.model,
-        role: "worker",
-        // No project: the hub gives the chat its own directory.
-        cwd: cwd ?? "",
-        config: configFor(choice, lead && lead.choice.plugin !== chatModel.plugin ? undefined : effort),
-        profile: { display_name: null, title: null, avatar: null, color: null, persona: null },
-      });
+      const agent = await api.createAgent(newChatRequest(choice, text, cwd ?? "", lead && lead.choice.plugin !== chatModel.plugin ? undefined : effort));
       // Into the conversation at once; the message shows there while the agent starts.
       void sendMessage(agent.id, text, { attachments: uploads() }).catch(() => {});
-      files.clear();
+      sent();
       navigate("s", agent.id);
     } catch (err) {
-      setError(errorText(err));
+      fail(err);
     } finally {
       setBusy(false);
     }
@@ -265,7 +345,8 @@ export function HomeView() {
     setError(undefined);
     try {
       const leadChoice: Choice = lead.kind === "model" ? lead : { plugin: leadPlugin!, model: leadModel!, account: leadAgent && accountOf(leadAgent) };
-      const planner = leadAgent ? await withEffort(leadAgent, effort) : await agentFor("planner", leadChoice, where, effort);
+      // A picked session leads as it is, with its conversation; otherwise the lead's effort applies.
+      const planner = chosenSession ? chosenSession.agent : leadAgent ? await withEffort(leadAgent, effort) : await agentFor("planner", leadChoice, where, effort, false);
       const models = plugins.data?.find((p) => p.name === planner.plugin)?.models ?? [];
       // Workers run on the lead's login, on the cheaper sibling of its model.
       const workerChoice: Choice = { plugin: planner.plugin, model: workerModelFor(models, planner.model ?? leadModel ?? models[0] ?? ""), account: accountOf(planner) };
@@ -274,6 +355,7 @@ export function HomeView() {
         request: request.trim(),
         title: title.trim() || null,
         planner: planner.id,
+        ...runSessionFields(chosenSession),
         worker: workerAgent.id,
         escalate: escalate || null,
         reviewer: reviewer || null,
@@ -292,10 +374,10 @@ export function HomeView() {
           },
         },
       });
-      files.clear();
+      sent();
       navigate("runs", run.id);
     } catch (err) {
-      setError(errorText(err));
+      fail(err);
     } finally {
       setBusy(false);
     }
@@ -413,6 +495,32 @@ export function HomeView() {
       save(CHAT_MODEL_KEY, c);
     },
   );
+  // A new session first, then the workspace's own; unusable ones stay listed, disabled, with
+  // the reason (the hub's words for what holds a busy one).
+  const sessionItems: MenuItem[] = [
+    { kind: "item", key: "fresh", label: t("home.newSession"), sub: t("home.newSessionHint"), on: !chosenSession, onPick: () => setSessionId(undefined) },
+    ...((sessions.data?.length ?? 0) > 0 ? [{ kind: "header", key: "h-sessions", label: t("session.existing") } satisfies MenuItem] : []),
+    ...(sessions.data ?? []).map((s): MenuItem => {
+      const use = usabilityOf(s);
+      // The reason first: read left to right, it is what the line must not truncate away.
+      const parts: string[] = [];
+      if (use.reason) parts.push(t(use.reason.key, use.reason.vars));
+      else if (use.hint) parts.push(t(use.hint.key, use.hint.vars));
+      parts.push(s.agent.model ?? s.agent.plugin, t(sessionStateKey(s.state)));
+      if (s.last_execution) parts.push(s.last_execution);
+      return {
+        kind: "item",
+        key: `s/${s.agent.id}`,
+        label: displayName(s.agent),
+        sub: parts.join(" · "),
+        subDir: "ltr",
+        icon: <Avatar agent={s.agent} size={18} />,
+        on: chosenSession?.agent.id === s.agent.id,
+        disabled: !use.selectable,
+        onPick: () => setSessionId(s.agent.id),
+      };
+    }),
+  ];
   const effortItems: MenuItem[] = [
     { kind: "header", key: "h", label: t("home.effort") },
     { kind: "item", key: "", label: t("home.effortDefault"), on: !effortOn, onPick: () => setEffort("") },
@@ -430,11 +538,13 @@ export function HomeView() {
   const missing =
     !agents.data || !plugins.data
       ? undefined
-      : !offered.length
-        ? t("home.noModels")
-        : mode === "run" && !where
-          ? t("home.needWorkspace")
-          : undefined;
+      : sessionUse && !sessionUse.selectable && sessionUse.reason
+        ? t(sessionUse.reason.key, sessionUse.reason.vars)
+        : !chosenSession && !offered.length
+          ? t("home.noModels")
+          : mode === "run" && !where
+            ? t("home.needWorkspace")
+            : undefined;
 
   return (
     <div className="page">
@@ -458,6 +568,7 @@ export function HomeView() {
         <div className="composer home-composer" onDrop={files.onDrop} onDragOver={files.onDragOver}>
           {mention.menu}
           <HeldFiles files={files.held} onRemove={files.remove} />
+          {draftNote && <div className="small dim">{draftNote}</div>}
           <textarea
             onPaste={files.onPaste}
             ref={ref}
@@ -480,7 +591,16 @@ export function HomeView() {
               items={wsItems}
               up
             />
-            {mode === "chat" && chatModel && (
+            {(sessionRepo || chatsOnly || chosenSession) && (
+              <ChipMenu
+                icon={chosenSession ? <Avatar agent={chosenSession.agent} size={16} /> : <Icon name="chat" size={14} />}
+                label={chosenSession ? `${displayName(chosenSession.agent)}${sessionUse?.restore ? ` · ${t("session.willRestore")}` : ""}` : t("home.newSession")}
+                title={t("home.session")}
+                items={sessionItems}
+                up
+              />
+            )}
+            {mode === "chat" && !chosenSession && chatModel && (
               <ChipMenu
                 icon={<VendorMark plugin={chatModel.plugin} size={14} />}
                 label={choiceLabel(chatModel)}
@@ -489,7 +609,7 @@ export function HomeView() {
                 up
               />
             )}
-            {mode === "run" && lead && (
+            {mode === "run" && !chosenSession && lead && (
               <ChipMenu
                 icon={leadAgent ? <Avatar agent={leadAgent} size={16} /> : <VendorMark plugin={leadPlugin!} size={14} />}
                 label={leadAgent ? displayName(leadAgent) : lead.kind === "model" ? choiceLabel(lead) : ""}
@@ -558,7 +678,7 @@ export function HomeView() {
                 <select value={preset} onChange={(e) => setPreset(e.target.value as Preset)} title={PRESETS.find((p) => p.key === preset)?.hint}>
                   {PRESETS.map((p) => (
                     <option key={p.key} value={p.key} title={p.hint}>
-                      {p.key === "full" ? t("home.fullOnce") : p.label}
+                      {p.label}
                     </option>
                   ))}
                 </select>
@@ -575,7 +695,7 @@ export function HomeView() {
                 <AgentSelect agents={workers} value={escalate} onChange={setEscalate} empty={t("home.notUsed")} />
               </Field>
               <Field label={t("home.reviewer")}>
-                <AgentSelect agents={team.filter((a) => a.role === "reviewer")} value={reviewer} onChange={setReviewer} empty={t("home.notUsed")} />
+                <AgentSelect agents={team} value={reviewer} onChange={setReviewer} empty={t("home.notUsed")} />
               </Field>
             </div>
             <div className="row row-top">
@@ -607,9 +727,9 @@ export function HomeView() {
             </div>
           </div>
         )}
-        {error && (
+        {(error || sessions.error) && (
           <div style={{ marginTop: 12 }}>
-            <ErrorBox error={error} />
+            <ErrorBox error={error ?? t("session.loadFailed", { error: sessions.error ?? "" })} />
           </div>
         )}
       </div>

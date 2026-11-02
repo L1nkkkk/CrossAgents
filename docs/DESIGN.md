@@ -2,6 +2,8 @@
 
 > 状态：草案 · 2026-10-21 · 取代 v1（v1 内容在 git 历史里，§15 列出两版差异）
 
+> 2026-11-01 设计更新：[平等 Agent 与项目侧栏](AGENT-WORKSPACE.md)。Planner / Worker / Reviewer 改为具体工作的职责，不作为固定身份或指派资格；项目导航采用项目 → 成员。该方案待实现，旧协议字段和执行策略按新文档的兼容边界处理。
+
 ## 1. 定位
 
 CrossAgents 是一个多 agent 编码的「操作系统」。你和一个强模型的会话（Planner）对话，布置目标；
@@ -162,7 +164,7 @@ hub（控制面，可重启）
 
 每个会话在 hub 有一张名片：名字、角色、Profile、所属项目与 Run、状态、用途说明（Planner 开 Worker 时填写）、当前任务。
 
-名片还带一份人设（`AgentProfile`，可选）：显示名（如 Ada）、头衔（设计师、安全审核专员、Coder…）、头像（emoji 或字母）、颜色、人设说明。
+名片还带一份人设（`AgentProfile`，可选）：显示名（如 Ada）、头衔（设计师、安全审核专员、Coder…）、头像（emoji 或字母，或头像图库里的一张图）、颜色、人设说明。图库由人在设置里上传，存在 `<home>/avatars/`；没有自己头像的会话从中分到使用最少的一张，分到后不再变（复制出来的执行会话沿用原会话的头像）。
 角色（planner / worker / reviewer）仍只决定工具集；头衔和人设让同一角色下分出不同的「人」。人设说明写进该会话的开场说明（`You are Ada, the team's 设计师.` 加人设正文），
 改动在下次开会话时生效；Worker 克隆继承模板的整张名片。接口：`POST /v1/agents` 的 `profile`、`POST /v1/agents/{key}/profile`（整体替换，发 `agent.updated`）；CLI `agent add --display-name/--title/--avatar/--color/--persona`。
 
@@ -412,6 +414,7 @@ Session（一个会话）
 - 协议留在代码里，协议以外的东西（去哪找 CLI、怎么装、模型与 effort 档位）写在 **agent 描述文件**里：内置三家在 `crates/plugins/agents/{claude,codex,codebuddy}.toml`（`include_str!` 编进 hub），外部 agent 放 `~/.crossagents/plugins/<name>/plugin.toml`，两者同一种格式。加一家 agent 不用改代码。
 - 来源与优先级：内置描述 < 插件目录 `plugin.toml` < `config.toml` 的 `[plugins.<name>]`。`locate` 与 `install` 按字段合并（只改其中一项也行），`command` / `models` / `driver` 等仍整体替换。
 - 协作工具挂载：开会话时把 `crossagents mcp`（带该会话的令牌）加入它的 MCP 列表；原生驱动用各家的 MCP 配置方式传入。
+- 其它 MCP：`config.toml` 的 `[mcp.<name>]`（`command` 是程序加参数，`env` 可选）给每个会话再挂一个 stdio MCP server，排在协作工具之后，重名不覆盖它。第三方能力由此接入，不用碰驱动——例：豆包生图 `integrations/doubao-mcp`。
 - 账号隔离沿用 M5：每个账号一个独立的 `CODEX_HOME` / Claude 配置目录，凭据不出 hub 所在机器。
 
 描述文件里与协议无关的部分：

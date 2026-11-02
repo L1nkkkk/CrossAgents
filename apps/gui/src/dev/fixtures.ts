@@ -109,7 +109,7 @@ export function agent(init: AgentInit): Agent {
     config: init.recruitedBy ? { spawned_by_agent: init.recruitedBy } : {},
     status: init.status ?? "idle",
     created_at: ago(init.createdMinutesAgo ?? 60 * 24 * 3),
-    profile: { title: null, avatar: null, color: null, persona: null, ...init.profile, display_name: null },
+    profile: { title: null, avatar: null, avatar_image: null, color: null, persona: null, ...init.profile, display_name: null },
   };
 }
 
@@ -146,6 +146,8 @@ export function planned(key: string, title: string, goal: string, assignee: stri
 
 export function run(init: { title: string; request: string; planner: Agent; worker: Agent; team: Agent[]; status: RunStatus; plan: PlannedTask[]; minutesAgo: number }): Run {
   return {
+    origin_chat_id: null,
+    work_id: null,
     id: uid(),
     title: init.title,
     request: init.request,
@@ -280,7 +282,7 @@ export function turn(init: {
 }
 
 /** A /context-like breakdown of `used` tokens, shaped like Claude Code 2.1.308 answers it. */
-function contextParts(used: number, size: number) {
+export function contextParts(used: number, size: number) {
   const fixed = { system_prompt: 2_848, system_tools: 14_200, mcp_tools: 3_100, skills: 2_505 };
   const messages = Math.max(0, used - Object.values(fixed).reduce((a, b) => a + b, 0));
   const buffer = 33_000;

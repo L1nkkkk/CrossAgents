@@ -18,9 +18,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use crossagents_core::{
-    AttachmentSupport, Capabilities, CliStatus, CoreError, Driver, DriverKind, DriverSession,
-    PermissionHandler, PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec,
-    StopReason, TurnOutcome,
+    AgentCommand, AttachmentSupport, Capabilities, CliStatus, CoreError, Driver, DriverKind,
+    DriverSession, PermissionHandler, PermissionPolicy, Prompt, SessionEvent, SessionEventKind,
+    SessionSpec, StopReason, TurnOutcome,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -231,6 +231,8 @@ struct Shared {
     pending: Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>,
     turn: Mutex<Turn>,
     translator: Mutex<Translator>,
+    /// The CLI's own slash commands and skills, from its `system`/`init` message.
+    commands: Mutex<Option<Vec<AgentCommand>>>,
     /// The last assistant message of each finished turn, by the turn's user message uuid:
     /// where a fork "up to and including this turn" cuts.
     turn_ends: Mutex<HashMap<String, String>>,
@@ -266,6 +268,7 @@ impl Shared {
             pending: Mutex::default(),
             turn: Mutex::default(),
             translator: Mutex::default(),
+            commands: Mutex::default(),
             turn_ends: Mutex::default(),
             events: spec.events.clone(),
             permission: spec.permission,
@@ -327,6 +330,10 @@ impl Shared {
     }
 
     fn handle(self: &Arc<Self>, message: Value) {
+        // Before the replay filter: a resumed CodeBuddy session's init is still the CLI's.
+        if let Some(commands) = wire::commands(&message) {
+            *self.commands.lock().expect("commands lock") = Some(commands);
+        }
         let kind = message.get("type").and_then(Value::as_str);
         if !matches!(kind, Some("control_response" | "control_request")) {
             let mut replay = self.replay.lock().expect("replay lock");
@@ -493,6 +500,15 @@ pub struct ClaudeSession {
     adopted: Mutex<Option<oneshot::Receiver<StopReason>>>,
 }
 
+/// Turns the compaction flag off when a `/compact` ends, however it ends.
+struct CompactingReset<'a>(&'a ClaudeSession);
+
+impl Drop for CompactingReset<'_> {
+    fn drop(&mut self) {
+        self.0.set_compacting(false);
+    }
+}
+
 impl ClaudeSession {
     /// What fills the context window, by kind (`get_context_usage`, as `/context` shows
     /// it). Claude Code only: CodeBuddy does not know the request. Best effort.
@@ -513,7 +529,7 @@ impl ClaudeSession {
         self.shared
             .translator
             .lock()
-            .expect("translator lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .compacting = on;
     }
 
@@ -696,6 +712,10 @@ impl DriverSession for ClaudeSession {
         &self.shared.session_id
     }
 
+    fn commands(&self) -> Option<Vec<AgentCommand>> {
+        self.shared.commands.lock().expect("commands lock").clone()
+    }
+
     async fn prompt(&self, text: &str) -> Result<TurnOutcome, CoreError> {
         self.prompt_with(&Prompt::text(text)).await
     }
@@ -836,8 +856,9 @@ impl DriverSession for ClaudeSession {
     async fn compact(&self) -> Result<(), CoreError> {
         // CodeBuddy streams the summary like a reply; it is not one.
         self.set_compacting(true);
+        // Reset even when this future is dropped: a flag left on hides every later reply.
+        let _reset = CompactingReset(self);
         let outcome = self.prompt("/compact").await;
-        self.set_compacting(false);
         match outcome?.stop_reason {
             StopReason::Error => Err(CoreError::Agent("compaction failed".into())),
             _ => Ok(()),

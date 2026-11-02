@@ -17,6 +17,9 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "GET", path: /^\/v1\/info$/, level: "read" },
   { method: "GET", path: /^\/v1\/agents$/, level: "read" },
   { method: "POST", path: /^\/v1\/agents$/, level: "write" },
+  // `?repo=` rides along; `route()` drops it before matching.
+  { method: "GET", path: /^\/v1\/session-candidates$/, level: "read" },
+  { method: "POST", path: /^\/v1\/agents\/[^/]+\/chat$/, level: "write" },
   { method: "DELETE", path: /^\/v1\/agents\/[^/]+$/, level: "write" },
   {
     method: "POST",
@@ -28,9 +31,14 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "GET", path: /^\/v1\/agents\/[^/]+\/execution$/, level: "read" },
   { method: "POST", path: /^\/v1\/agents\/[^/]+\/execution\/interrupt$/, level: "write" },
   { method: "GET", path: /^\/v1\/agents\/[^/]+\/resume-command$/, level: "read" },
+  { method: "GET", path: /^\/v1\/agents\/[^/]+\/commands$/, level: "read" },
   { method: "GET", path: /^\/v1\/agents\/[^/]+\/transcript$/, level: "read" },
   { method: "GET", path: /^\/v1\/agents\/[^/]+\/turns\/[^/]+\/diff$/, level: "read" },
   { method: "GET", path: /^\/v1\/agents\/[^/]+\/attachments\/[^/]+$/, level: "read" },
+  { method: "GET", path: /^\/v1\/avatars$/, level: "read" },
+  { method: "POST", path: /^\/v1\/avatars$/, level: "write" },
+  { method: "GET", path: /^\/v1\/avatars\/[^/]+$/, level: "read" },
+  { method: "DELETE", path: /^\/v1\/avatars\/[^/]+$/, level: "write" },
   { method: "GET", path: /^\/v1\/notes$/, level: "read" },
   { method: "GET", path: /^\/v1\/plugins$/, level: "read" },
   { method: "POST", path: /^\/v1\/plugins\/[^/]+\/models$/, level: "write" },
@@ -47,6 +55,8 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "POST", path: /^\/v1\/runs\/[^/]+\/tasks\/[^/]+\/review$/, level: "write" },
   { method: "POST", path: /^\/v1\/repos\/init$/, level: "write" },
   { method: "GET", path: /^\/v1\/usage$/, level: "read" },
+  // `?range=&group=&source=` rides along; `route()` drops it before matching.
+  { method: "GET", path: /^\/v1\/usage\/series$/, level: "read" },
   { method: "GET", path: /^\/v1\/questions$/, level: "read" },
   { method: "POST", path: /^\/v1\/questions\/[^/]+\/(answer|dismiss)$/, level: "write" },
   { method: "GET", path: /^\/v1\/quota$/, level: "read" },
@@ -57,10 +67,21 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   // Files of a scope: a session's cwd, a run's checkout, a task's worktree.
   { method: "GET", path: /^\/v1\/(agents\/[^/]+|runs\/[^/]+(\/tasks\/[^/]+)?)\/files\/(tree|content)$/, level: "read" },
   { method: "POST", path: /^\/v1\/(agents\/[^/]+|runs\/[^/]+(\/tasks\/[^/]+)?)\/files\/resolve$/, level: "read" },
+  // An image a tool call named by path, for a thumbnail (agents only: it is the agent's cwd).
+  { method: "GET", path: /^\/v1\/agents\/[^/]+\/files\/image$/, level: "read" },
   // The commit graph and one commit's diff.
   { method: "GET", path: /^\/v1\/(runs|agents)\/[^/]+\/graph$/, level: "read" },
   { method: "GET", path: /^\/v1\/(runs|agents)\/[^/]+\/commits\/[^/]+\/diff$/, level: "read" },
 ];
+
+/** How long the main process waits for an answer before giving up on the hub. */
+export const REQUEST_TIMEOUT_MS = 30_000;
+/** Compacting answers when the summary is written: minutes for a long history. */
+export const COMPACT_TIMEOUT_MS = 15 * 60_000;
+
+export function timeoutFor(method: string, path: string): number {
+  return method === "POST" && /^\/v1\/agents\/[^/]+\/compact$/.test(route(path)) ? COMPACT_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+}
 
 /** The path without its query string: `/v1/notes?scope=run` matches `/v1/notes`. */
 export function route(path: string): string {

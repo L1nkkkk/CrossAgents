@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::brief;
-use crate::engine::{Orchestrator, agent_name};
+use crate::engine::{Orchestrator, agent_name, worker_name};
 use crate::plan;
 use crate::tools::args;
 use crate::verify::{all_passed, run_command};
@@ -289,9 +289,16 @@ impl Orchestrator {
                 assignee: None,
             })
             .await;
-            created.push(task_json(&task));
+            created.push(task.id);
         }
         let not_started = self.schedule_reporting(&mut run).await?;
+        // As scheduling left them: a task that started has its worker and is running. The
+        // state before it read as "assignee ignored", and the lead assigned it a second time.
+        let mut shown = Vec::with_capacity(created.len());
+        for id in created {
+            shown.push(task_json(&self.store.get_task(id).await?));
+        }
+        let created = shown;
         let repeated: Vec<String> = repeated.into_iter().map(|t| t.key).collect();
         Ok(json!({ "created": created, "repeated": repeated, "not_started": not_started }))
     }
@@ -370,9 +377,6 @@ impl Orchestrator {
         Self::require_issuer(&run, &task, caller)?;
         let a: A = args(input)?;
         let to = self.store.get_agent(&AgentKey::parse(&a.to)).await?;
-        if to.role != Role::Worker {
-            return Err(CoreError::Conflict(format!("{} is not a worker", to.name)));
-        }
         if !a.fresh {
             self.may_take_self(&run, &to, a.restore).await?;
         }
@@ -426,16 +430,16 @@ impl Orchestrator {
             task.assignee,
             HandoffOutcome::Reassigned,
         );
-        if let Some(old) = task.assignee.take() {
-            if let Err(err) = self.let_go(run.id, old).await {
-                tracing::warn!(task = %task.key, error = %err, "cannot let go of the worker before");
-            }
+        if let Some(old) = task.assignee.take()
+            && let Err(err) = self.let_go(run.id, old).await
+        {
+            tracing::warn!(task = %task.key, error = %err, "cannot let go of the worker before");
         }
         let worker = if a.fresh {
             self.fresh_agent(
                 &task,
                 to.id,
-                &agent_name("w", &run, &task),
+                &worker_name(&run, &task, to.id),
                 Role::Worker,
                 &cwd,
             )
@@ -803,6 +807,12 @@ impl Orchestrator {
         {
             return Ok(json!({ "question_id": task.report.question_message, "repeated": true }));
         }
+        // Asked again while the first waits: the worker learned more (it synced, it read
+        // further). The new wording replaces the open question; refusing it left the worker
+        // unable to ask while its answer sat behind its own turn.
+        let replaces = (task.status == TaskStatus::WaitingAnswer)
+            .then_some(task.report.question_message)
+            .flatten();
         let message = self.relay(
             task.issuer_or(run.planner),
             caller.id,
@@ -815,34 +825,45 @@ impl Orchestrator {
         );
         task.report.question = Some(question);
         task.report.question_message = Some(message);
-        self.transition(&mut task, TaskStatus::WaitingAnswer)
-            .await?;
-        Ok(
-            json!({ "question_id": message, "next": "End your turn; the answer arrives as a message." }),
-        )
+        if replaces.is_some() {
+            self.store_task(&mut task).await?;
+        } else {
+            self.transition(&mut task, TaskStatus::WaitingAnswer)
+                .await?;
+        }
+        let mut out = json!({ "question_id": message, "next": "End your turn; the answer arrives as a message." });
+        if let Some(old) = replaces {
+            out["replaces"] = json!(old);
+        }
+        Ok(out)
     }
 
     /// The issuer answers the open question (or replies to the message that carried it).
+    /// `true` when the worker reads it only after the turn it is in: it waits in its line.
     pub(crate) async fn answer(
         &self,
         caller: &Agent,
         id: TaskId,
         answer: String,
-    ) -> Result<(), CoreError> {
+    ) -> Result<bool, CoreError> {
         let (run, _) = self.task_of(id).await?;
         let _guard = self.lock(run.id).await;
         let mut task = self.store.get_task(id).await?;
         Self::require_issuer(&run, &task, caller)?;
         if task.status != TaskStatus::WaitingAnswer {
+            // An answer already given is not lost when the worker seems not to have it: it
+            // waits behind the worker's running turn.
             return Err(CoreError::Conflict(format!(
-                "#{} has no open question",
-                task.key
+                "#{} has no open question (it is {:?}); an answer you already gave reaches the worker when its current turn ends",
+                task.key, task.status
             )));
         }
         let question = task.report.question_message.take();
         task.report.question = None;
         self.transition(&mut task, TaskStatus::Running).await?;
+        let mut queued = false;
         if let Some(worker) = task.assignee {
+            queued = self.host.is_busy(worker).await;
             self.relay(
                 worker,
                 caller.id,
@@ -855,7 +876,7 @@ impl Orchestrator {
                 question,
             );
         }
-        Ok(())
+        Ok(queued)
     }
 
     /// Closes an open question when the issuer answered with a plain reply to it.
@@ -912,8 +933,8 @@ impl Orchestrator {
         let dir = Self::worktree(&task)?;
         let (base, _) = self.base_of(&run, &task).await?;
         if a.stat_only {
-            let committed = self.ws_for(&run).diff_stat(&dir, &base).await?;
-            return Ok(json!({ "base": base, "stat": committed }));
+            let stat = self.ws_for(&run).diff_stat(&dir, &base).await?;
+            return Ok(json!({ "base": base, "stat": stat }));
         }
         let diff = self.ws_for(&run).diff(&dir, &base, &a.paths).await?;
         Ok(json!({ "base": base, "diff": clip(diff, READ_LIMIT) }))
@@ -1059,16 +1080,9 @@ impl Orchestrator {
         Self::require_issuer(&run, &task, caller)?;
         let a: A = args(input)?;
         let template = match &a.reviewer {
-            Some(name) => {
-                let agent = self.store.get_agent(&AgentKey::parse(name)).await?;
-                if agent.role != Role::Reviewer {
-                    return Err(CoreError::Conflict(format!(
-                        "{} is not a reviewer",
-                        agent.name
-                    )));
-                }
-                agent.id
-            }
+            // Any session may review: its role is how it was made, not what it may do
+            // (whether it can take this one itself is checked below).
+            Some(name) => self.store.get_agent(&AgentKey::parse(name)).await?.id,
             None => task
                 .reviewer_template
                 .or(run.config.reviewer)

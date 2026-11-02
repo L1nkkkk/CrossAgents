@@ -4,15 +4,18 @@ pub mod access;
 pub mod accounts;
 pub mod api;
 pub mod attachments;
+pub mod avatars;
 pub mod budget;
 pub mod collab;
 pub mod event_log;
 pub mod guard;
 pub mod identity;
+pub mod image;
 pub mod install;
 pub mod models;
 pub mod notices;
 pub mod paths;
+pub mod prices;
 pub mod resume;
 pub mod routing;
 pub mod rules;
@@ -23,6 +26,7 @@ pub mod snapshot;
 pub mod trace;
 pub mod transcript;
 pub mod usage;
+pub mod usage_series;
 
 use std::fs::{File, TryLockError};
 use std::net::SocketAddr;
@@ -144,6 +148,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
             Some(command) => command.clone(),
             None => default_mcp_command()?,
         },
+        extra_mcp: config.mcp_servers.clone(),
         url: OnceLock::new(),
         worktrees: paths.home.join("worktrees"),
         shims: shims.clone(),

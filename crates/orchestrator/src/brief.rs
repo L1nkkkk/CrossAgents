@@ -6,13 +6,49 @@
 use std::fmt::Write;
 
 use crossagents_core::{
-    Agent, AgentId, CheckResult, ChecksState, Handoff, HandoffKind, Role, Run, Task,
+    Agent, AgentId, CheckResult, ChecksState, Handoff, HandoffKind, LandPolicy, Run, Task,
 };
 
 use crate::project::{self, RunChecks, RunEnv};
 
 // Kept in sync with the GUI kickoff recognizer.
 const KICKOFF_SEPARATOR: &str = "\n\n---\nrun: ";
+
+/// A run whose plan waits for the person: the lead writes the tasks, the person staffs them.
+/// Without this the lead reads its guide's "do it yourself" as permission to skip the plan,
+/// and no plan ever reaches the person (docs/AGENT-WORKSPACE.md §6.1).
+const PLAN_WAITS: &str = "\nplan: the person approves it and picks who runs each task. Before you \
+     change anything, call `plan_submit` with every task and what its session must do — write \
+     each spec.goal so a worker who sees only it and the repository can do the work. Do not \
+     start the work yourself. Answering a question, or reporting that nothing needs changing, \
+     needs no plan.";
+
+pub fn previous_rounds(rounds: &[Run]) -> String {
+    let mut out = String::new();
+    if !rounds.is_empty() {
+        out.push_str("\nPrevious rounds in this work group:");
+    }
+    for run in rounds.iter().take(5) {
+        let _ = write!(
+            out,
+            "\n- {} · {:?} · {} · {}",
+            run.title,
+            run.status,
+            if run.landed.is_some() {
+                "landed"
+            } else {
+                "not landed"
+            },
+            run.summary
+                .as_deref()
+                .unwrap_or("")
+                .lines()
+                .next()
+                .unwrap_or("")
+        );
+    }
+    out
+}
 
 /// The run's request as the person wrote it, then the facts the lead needs.
 pub fn kickoff(
@@ -34,12 +70,28 @@ pub fn kickoff(
             run.id,
             run.repo.display()
         );
+        if !run.config.auto_approves() {
+            out.push_str(PLAN_WAITS);
+        }
     } else {
         let _ = write!(
             out,
             "{} (run_id: {}) · base branch {} · run branch {}",
             run.title, run.id, run.base_branch, run.branch
         );
+        out.push_str(match run.config.policy.land {
+            LandPolicy::Manual => {
+                "\nlanding: the person lands it; when every task has ended, close with run_finish and \
+                 do not merge into the base branch yourself"
+            }
+            LandPolicy::Auto => "\nlanding: you land it yourself with run_land, then run_finish",
+            LandPolicy::Pr => {
+                "\nlanding: you may only open a pull request (run_land mode pr), then run_finish"
+            }
+        });
+        if !run.config.auto_approves() {
+            out.push_str(PLAN_WAITS);
+        }
         match checks {
             Ok(c) if c.checks.is_empty() => {
                 let _ = write!(
@@ -79,10 +131,10 @@ pub fn kickoff(
         }
     }
     out.push_str(&roster(team, default_worker));
-    if !team.iter().any(|a| a.role == Role::Worker) {
+    if !team.iter().any(|a| a.id == default_worker) {
         // No worker was picked: tasks, if any, run on the lead's model.
         out.push_str(
-            "\nworkers: none on the team; a task you assign to nobody goes to a copy of you",
+            "\nno default worker on the team: a task you assign to nobody goes to a copy of you",
         );
     }
     // The workspace's sessions, for working with one of them itself (docs/tasks/S1.md §3.6).
@@ -147,14 +199,16 @@ pub fn roster(team: &[Agent], default_worker: AgentId) -> String {
         }
         s
     };
-    let mut out = String::new();
-    for (role, title) in [(Role::Worker, "workers"), (Role::Reviewer, "reviewers")] {
-        let lines: Vec<String> = team.iter().filter(|a| a.role == role).map(line).collect();
-        if !lines.is_empty() {
-            let _ = write!(out, "\n{title}:\n{}", lines.join("\n"));
-        }
+    // One list: who works on a task and who reviews one is decided per task, not by how a
+    // session was made.
+    if team.is_empty() {
+        return String::new();
     }
-    out
+    let lines: Vec<String> = team.iter().map(line).collect();
+    format!(
+        "\nteam (name one as a task's assignee or reviewer):\n{}",
+        lines.join("\n")
+    )
 }
 
 fn list(out: &mut String, title: &str, items: &[String]) {
@@ -392,10 +446,12 @@ mod tests {
 
     #[test]
     fn kickoff_keeps_request_and_context_boundary() {
-        use crossagents_core::{RunConfig, RunPolicy, RunStatus};
+        use crossagents_core::{PlanApproval, RunConfig, RunPolicy, RunStatus};
         let now = Utc::now();
         let worker = AgentId::new();
         let mut run = Run {
+            origin_chat_id: None,
+            work_id: None,
             continuation: None,
             id: RunId::new(),
             title: "title".into(),
@@ -441,6 +497,17 @@ mod tests {
                 "{text}"
             );
             assert!(text.contains("\nsessions: test"));
+            // The plan waits for the person: the lead is told to write the tasks and stop,
+            // not to do the work itself.
+            assert!(
+                text.contains("plan_submit") && text.contains("picks who runs each task"),
+                "{text}"
+            );
+            // Under automatic approval nothing is added: the guide already covers it.
+            run.config.policy.plan_approval = PlanApproval::Auto;
+            let auto = kickoff(&run, &[], worker, &Err("test".into()), None, "");
+            assert!(!auto.contains("plan_submit"), "{auto}");
+            run.config.policy.plan_approval = PlanApproval::Required;
         }
     }
 

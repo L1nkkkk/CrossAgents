@@ -7,6 +7,9 @@
 //! with the login's token, which goes nowhere else), each model's multiplier from the model
 //! list the CLI caches. Its CLI logs in only inside its TUI, so a login serves the CLI's web
 //! UI locally (`--serve`) and the login is done on that page.
+//!
+//! Explicit site accounts additionally move the child process's user-data profile, so
+//! mainland and international credentials cannot overwrite the machine's shared login.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader};
@@ -17,8 +20,8 @@ use std::time::{Duration, Instant, SystemTime};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use crossagents_core::{
-    Account, AccountProvider, AccountStatus, CoreError, DataSource, LoginCommand, ModelInfo,
-    RateWindow, SessionUsage, TokenTotals,
+    Account, AccountProvider, AccountStatus, CodebuddySite, CoreError, DataSource, LoginCommand,
+    ModelInfo, RateWindow, RequestUsage, SessionUsage, TokenTotals,
 };
 use crossagents_drivers::codebuddy_native;
 use crossagents_drivers::process::system_proxy_env;
@@ -62,6 +65,46 @@ impl CodebuddyAccounts {
 
     /// `CODEBUDDY_CONFIG_DIR` for an account, except for the default directory.
     fn env_for(&self, account: &Account) -> Vec<(String, String)> {
+        if let Some(site) = account.codebuddy_site {
+            let profile = account.home.join("profile");
+            // The CLI's auth lives in CodeBuddyExtension outside CONFIG_DIR. Move the
+            // child process's user profile too, without changing the hub's environment.
+            return vec![
+                (
+                    "CODEBUDDY_CONFIG_DIR".into(),
+                    account.home.display().to_string(),
+                ),
+                ("USERPROFILE".into(), profile.display().to_string()),
+                ("HOME".into(), profile.display().to_string()),
+                (
+                    "APPDATA".into(),
+                    profile.join("AppData/Roaming").display().to_string(),
+                ),
+                (
+                    "LOCALAPPDATA".into(),
+                    profile.join("AppData/Local").display().to_string(),
+                ),
+                (
+                    "XDG_DATA_HOME".into(),
+                    profile.join(".local/share").display().to_string(),
+                ),
+                (
+                    "XDG_CONFIG_HOME".into(),
+                    profile.join(".config").display().to_string(),
+                ),
+                (
+                    "CODEBUDDY_INTERNET_ENVIRONMENT".into(),
+                    site.environment().into(),
+                ),
+                (
+                    "CODEBUDDY_COPILOT_INTERNET_ENVIRONMENT".into(),
+                    site.environment().into(),
+                ),
+                // A parent WorkBuddy/API login must not silently win over this login.
+                ("CODEBUDDY_API_KEY".into(), String::new()),
+                ("CODEBUDDY_AUTH_TOKEN".into(), String::new()),
+            ];
+        }
         if self
             .default_home()
             .is_some_and(|home| same_path(&home, &account.home))
@@ -104,7 +147,11 @@ impl CodebuddyAccounts {
                 return (status, Vec::new());
             }
         };
-        read_initialize(&mut status, &init, !self.env_for(account).is_empty());
+        read_initialize(
+            &mut status,
+            &init,
+            account.codebuddy_site.is_none() && !self.env_for(account).is_empty(),
+        );
         let mut models = models_of(&init);
         let login = init.get("account").filter(|a| a.is_object());
         if let Some(uid) = login.and_then(|a| a.get("uid")).and_then(Value::as_str) {
@@ -117,8 +164,12 @@ impl CodebuddyAccounts {
                 model.credit_multiplier = rates.get(&model.id).copied();
             }
         }
-        if let Some((token, uid)) =
-            login.and_then(|a| Some((a.get("token")?.as_str()?, a.get("uid")?.as_str()?)))
+        if account.codebuddy_site == Some(CodebuddySite::International) && status.logged_in {
+            // Do not send an international credential to the mainland billing API.
+            status.note = Some("International CodeBuddy login and models are available; its billing endpoint is not integrated".into());
+        } else if account.codebuddy_site != Some(CodebuddySite::International)
+            && let Some((token, uid)) =
+                login.and_then(|a| Some((a.get("token")?.as_str()?, a.get("uid")?.as_str()?)))
         {
             match billing_summary(token, uid).await {
                 Ok(summary) => read_summary(&mut status, &summary),
@@ -365,31 +416,35 @@ fn scan_transcript(path: &Path) -> Option<SessionUsage> {
     let file = std::fs::File::open(path).ok()?;
     let mut started_at: Option<DateTime<Utc>> = None;
     let mut model = None;
-    let mut calls: HashMap<String, Value> = HashMap::new();
+    // Per call: when the line was written, the model it used and its usage.
+    let mut calls: HashMap<String, (DateTime<Utc>, Option<String>, Value)> = HashMap::new();
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         let Ok(entry) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        let at = entry
+            .get("timestamp")
+            .and_then(Value::as_i64)
+            .and_then(DateTime::from_timestamp_millis);
         if started_at.is_none() {
-            started_at = entry
-                .get("timestamp")
-                .and_then(Value::as_i64)
-                .and_then(DateTime::from_timestamp_millis);
+            started_at = at;
         }
         let Some(provider) = entry.get("providerData") else {
             continue;
         };
+        let asked = provider
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         if model.is_none() {
-            model = provider
-                .get("model")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
+            model = asked.clone();
         }
         if let (Some(id), Some(usage)) = (
             provider.get("messageId").and_then(Value::as_str),
             provider.get("rawUsage"),
         ) {
-            calls.insert(id.to_owned(), usage.clone());
+            let at = at.or(started_at).unwrap_or_default();
+            calls.insert(id.to_owned(), (at, asked, usage.clone()));
         }
     }
     if calls.is_empty() {
@@ -399,14 +454,27 @@ fn scan_transcript(path: &Path) -> Option<SessionUsage> {
         sessions: 1,
         ..TokenTotals::default()
     };
-    for usage in calls.values() {
+    let mut requests = Vec::with_capacity(calls.len());
+    for (at, asked, usage) in calls.into_values() {
+        let mut call = TokenTotals::default();
         let num = |pointer: &str| usage.pointer(pointer).and_then(Value::as_u64).unwrap_or(0);
-        totals.input_tokens += num("/prompt_tokens");
-        totals.cached_input_tokens += num("/prompt_tokens_details/cached_tokens");
-        totals.output_tokens += num("/completion_tokens");
-        totals.reasoning_output_tokens += num("/completion_tokens_details/reasoning_tokens");
-        totals.credits += usage.get("credit").and_then(Value::as_f64).unwrap_or(0.0);
+        call.input_tokens += num("/prompt_tokens");
+        call.cached_input_tokens += num("/prompt_tokens_details/cached_tokens");
+        call.output_tokens += num("/completion_tokens");
+        call.reasoning_output_tokens += num("/completion_tokens_details/reasoning_tokens");
+        call.credits += usage.get("credit").and_then(Value::as_f64).unwrap_or(0.0);
+        totals.input_tokens += call.input_tokens;
+        totals.cached_input_tokens += call.cached_input_tokens;
+        totals.output_tokens += call.output_tokens;
+        totals.reasoning_output_tokens += call.reasoning_output_tokens;
+        totals.credits += call.credits;
+        requests.push(RequestUsage {
+            at,
+            model: asked.clone().or_else(|| model.clone()),
+            totals: call,
+        });
     }
+    requests.sort_by_key(|r| r.at);
     Some(SessionUsage {
         session_id: path.file_stem()?.to_string_lossy().into_owned(),
         started_at: started_at.unwrap_or_default(),
@@ -414,6 +482,7 @@ fn scan_transcript(path: &Path) -> Option<SessionUsage> {
         // Transcripts do not say who started the session.
         originator: None,
         totals,
+        requests,
     })
 }
 
@@ -530,6 +599,48 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn site_logins_probes_and_agents_share_private_profiles() {
+        let provider = CodebuddyAccounts::new(None);
+        let accounts = [CodebuddySite::China, CodebuddySite::International].map(|site| Account {
+            id: site.environment().into(),
+            provider: "codebuddy".into(),
+            label: String::new(),
+            home: PathBuf::from(format!("/accounts/{}", site.environment())),
+            codebuddy_site: Some(site),
+            created_at: Utc::now(),
+        });
+        for account in &accounts {
+            let env: BTreeMap<_, _> = provider.agent_env(account).into_iter().collect();
+            let login = provider.login_command(account);
+            for (key, value) in &env {
+                assert_eq!(login.env.get(key), Some(value), "{key}");
+            }
+            assert_eq!(
+                env["CODEBUDDY_CONFIG_DIR"],
+                account.home.display().to_string()
+            );
+            assert_eq!(
+                env["USERPROFILE"],
+                account.home.join("profile").display().to_string()
+            );
+            assert!(env["LOCALAPPDATA"].starts_with(&env["USERPROFILE"]));
+            assert_eq!(env["CODEBUDDY_API_KEY"], "");
+            assert_eq!(env["CODEBUDDY_AUTH_TOKEN"], "");
+            assert_eq!(
+                env["CODEBUDDY_INTERNET_ENVIRONMENT"],
+                account.codebuddy_site.unwrap().environment()
+            );
+        }
+        let a: BTreeMap<_, _> = provider.agent_env(&accounts[0]).into_iter().collect();
+        let b: BTreeMap<_, _> = provider.agent_env(&accounts[1]).into_iter().collect();
+        assert_ne!(a["USERPROFILE"], b["USERPROFILE"]);
+        assert_ne!(
+            a["CODEBUDDY_INTERNET_ENVIRONMENT"],
+            b["CODEBUDDY_INTERNET_ENVIRONMENT"]
+        );
+    }
+
+    #[test]
     fn counts_each_model_call_once_from_transcripts() {
         let home = tempfile::tempdir().unwrap();
         let dir = home.path().join("projects").join("c-w");
@@ -566,6 +677,16 @@ mod tests {
         assert_eq!(usage.totals.reasoning_output_tokens, 4);
         // Two calls, each counted once.
         assert!((usage.totals.credits - 2.5).abs() < 1e-9);
+        // Each call is one timed request.
+        assert_eq!(usage.requests.len(), 2);
+        assert!(
+            usage
+                .requests
+                .iter()
+                .all(|r| r.model.as_deref() == Some("hy4-preview"))
+        );
+        let outputs: u64 = usage.requests.iter().map(|r| r.totals.output_tokens).sum();
+        assert_eq!(outputs, 35);
         assert!(scan_transcript(&dir.join("empty.jsonl")).is_none());
     }
 
@@ -694,6 +815,7 @@ mod tests {
     fn the_default_directory_keeps_codebuddy_config_dir_unset() {
         let accounts = CodebuddyAccounts::new(None);
         let account = |home: PathBuf| Account {
+            codebuddy_site: None,
             id: "codebuddy".into(),
             provider: "codebuddy".into(),
             label: String::new(),

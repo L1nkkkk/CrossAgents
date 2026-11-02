@@ -102,3 +102,12 @@ export function progress(tasks: Reported[]): string {
   const failed = tasks.filter((t) => t.status === "failed").length;
   return [`${merged}/${tasks.length} 已合并`, active && `${active} 进行中`, failed && `${failed} 失败`].filter(Boolean).join(" · ");
 }
+
+/**
+ * "3/4 检查通过", from a task's latest acceptance. Empty when no check has run: the task has not
+ * been verified, and counting its spec's commands as failures would say something untrue.
+ */
+export function checksPassed(checks: { passed: boolean }[]): string {
+  if (!checks.length) return "";
+  return `${checks.filter((c) => c.passed).length}/${checks.length} 检查通过`;
+}

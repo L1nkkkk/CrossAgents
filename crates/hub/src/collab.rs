@@ -83,6 +83,9 @@ pub struct CollabSetup {
     pub accounts: Arc<crate::accounts::Accounts>,
     /// Command that runs the MCP server, e.g. `["/path/crossagents", "mcp"]`.
     pub mcp_command: Vec<String>,
+    /// Further MCP servers from `[mcp.<name>]`, mounted into every session besides the
+    /// collaboration one (docs/DESIGN.md §9.3).
+    pub extra_mcp: Vec<McpServerSpec>,
     /// The hub's API base URL, known once the listener is bound.
     pub url: OnceLock<String>,
     /// Root of run and task worktrees: agents working there build into their own target
@@ -139,18 +142,24 @@ impl SessionSetup for CollabSetup {
     async fn prepare(&self, agent: &Agent) -> Result<SessionExtras, CoreError> {
         let agent_env = self.agent_env(agent).await?;
         let (permission, permissions) = self.permissions(agent).await;
-        let lessons = match self.orchestrator.get() {
-            Some(orchestrator) => orchestrator.lessons_hint(agent).await,
-            None => None,
+        let (lessons, groups) = match self.orchestrator.get() {
+            Some(orchestrator) => (
+                orchestrator.lessons_hint(agent).await,
+                orchestrator.groups(agent).await,
+            ),
+            None => (
+                None,
+                crossagents_orchestrator::messaging::groups_of(agent, None),
+            ),
         };
-        let instructions = instructions(agent, lessons.as_deref());
+        let instructions = instructions(agent, &groups, lessons.as_deref());
         let Some((program, args)) = self.mcp_command.split_first() else {
             return Ok(SessionExtras {
+                mcp_servers: self.extra_mcp.clone(),
                 instructions: Some(instructions),
                 env: agent_env,
                 permission,
                 permissions,
-                ..SessionExtras::default()
             });
         };
         let url = self
@@ -160,13 +169,16 @@ impl SessionSetup for CollabSetup {
             .ok_or_else(|| CoreError::Agent("hub URL not known yet".into()))?;
         let token = self.tokens.issue(agent.id).await;
         let env = BTreeMap::from([(URL_ENV.to_owned(), url), (TOKEN_ENV.to_owned(), token)]);
+        let mut mcp_servers = vec![McpServerSpec {
+            name: "crossagents".into(),
+            command: PathBuf::from(program),
+            args: args.to_vec(),
+            env,
+        }];
+        // The hub's own tools come first: an `[mcp.<name>]` entry cannot shadow them.
+        mcp_servers.extend(self.extra_mcp.iter().cloned());
         Ok(SessionExtras {
-            mcp_servers: vec![McpServerSpec {
-                name: "crossagents".into(),
-                command: PathBuf::from(program),
-                args: args.to_vec(),
-                env,
-            }],
+            mcp_servers,
             instructions: Some(instructions),
             env: agent_env,
             permission,
@@ -200,8 +212,12 @@ impl SessionSetup for CollabSetup {
 /// Who the agent is (name, model, card), then how it works with the hub (its role's guide),
 /// then the project's rules when its own CLI would not read them (docs/tasks/DOGFOOD.md §6),
 /// then the line saying its project has troubleshooting records (docs/tasks/LESSONS.md §4.5).
-fn instructions(agent: &Agent, lessons: Option<&str>) -> String {
-    let guide = crossagents_orchestrator::protocol::guide_for(agent);
+fn instructions(
+    agent: &Agent,
+    groups: &[crossagents_orchestrator::messaging::Group],
+    lessons: Option<&str>,
+) -> String {
+    let guide = crossagents_orchestrator::protocol::guide_for(agent, groups);
     let mut text = format!("{}\n\n{guide}", agent.identity());
     for section in [crate::rules::for_agent(agent).as_deref(), lessons]
         .into_iter()
@@ -225,6 +241,11 @@ pub struct HubHost {
 
 #[async_trait]
 impl AgentHost for HubHost {
+    async fn tell_later(&self, agent: AgentId, topic: &str, line: &str) -> Result<(), CoreError> {
+        self.bus.store().get_agent(&AgentKey::Id(agent)).await?;
+        self.runtime.tell_later(agent, topic, line.to_owned()).await;
+        Ok(())
+    }
     async fn send(
         &self,
         agent: AgentId,
@@ -340,8 +361,10 @@ impl AgentHost for HubHost {
             &self.denied_name_words(),
         )
         .await?;
+        let mut profile = agent.profile.normalized()?;
+        crate::avatars::assign_new(&self.home, self.bus.store(), &mut profile).await?;
         let agent = Agent {
-            profile: agent.profile.normalized()?,
+            profile,
             name,
             name_source,
             ..agent

@@ -15,21 +15,25 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Utc};
 use crossagents_api_types::{
-    API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentExecution,
-    AgentExecutionResponse, AgentSettingsRequest, AnswerRequest, ApiError, ApproveRunRequest,
-    ArchiveAgentRequest, AttachmentContent, AttachmentUpload, ChangesResponse, CliInfo,
-    CliInstallAccepted, CommitGraph, ConnectInfo, CreateAccountRequest, CreateAgentRequest,
-    CreateRunRequest, DeleteRunResponse, DiffSide, ErrorCode, FileContentResponse, FileEntry,
-    FileKind, FileTreeResponse, FinishRequest, GraphCommit, GraphRef, GraphRefKind, HealthResponse,
-    HubInfo, InitRepoRequest, LandRequest, ListAccountsResponse, ListAgentsResponse,
-    ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
-    ListToolsResponse, LoginStarted, PluginInfo, QuotaResponse, RejectRunRequest,
-    RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse, ResolvedPath, RunDetail,
-    RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest, SetPluginModelsRequest,
-    SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse,
-    UpdateRunPolicyRequest, UsageGroup, UsageResponse,
+    API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentCommandsResponse,
+    AgentExecution, AgentExecutionResponse, AgentSettingsRequest, AnswerRequest, ApiError,
+    ApproveRunRequest, ArchiveAgentRequest, AttachmentContent, AttachmentUpload, ChangesResponse,
+    CliInfo, CliInstallAccepted, CommitGraph, ConnectInfo, CreateAccountRequest,
+    CreateAgentRequest, CreateRunRequest, CreateWorkRequest, CreateWorkRunRequest,
+    DeleteRunResponse, DiffSide, ErrorCode, FileContentResponse, FileEntry, FileKind,
+    FileTreeResponse, FinishRequest, GraphCommit, GraphRef, GraphRefKind, HealthResponse, HubInfo,
+    ImageContent, InitRepoRequest, LandRequest, ListAccountsResponse, ListAgentsResponse,
+    ListAvatarsResponse, ListNotesResponse, ListPluginsResponse, ListQuestionsResponse,
+    ListRunsResponse, ListToolsResponse, ListWorksResponse, LoginStarted, PluginInfo,
+    QuotaResponse, RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse,
+    ResolvedPath, RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
+    SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript,
+    TurnDiffResponse, UpdateRunPolicyRequest, UploadAvatarsRequest, UploadAvatarsResponse,
+    UsageGroup, UsageResponse, UsageSeriesGroup, UsageSeriesRange, UsageSeriesResponse, WorkDetail,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, Attachment,
@@ -53,6 +57,11 @@ use tokio_util::sync::CancellationToken;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const EVENT_PAGE: u32 = 500;
+/// A full upload of avatars, base64.
+const AVATAR_BODY_LIMIT: usize =
+    crossagents_api_types::MAX_AVATAR_UPLOAD * crossagents_api_types::MAX_AVATAR_BYTES / 3 * 4
+        + 1024 * 1024;
+
 /// A message with its files, base64 (a third larger than the files themselves).
 const MESSAGE_BODY_LIMIT: usize =
     crossagents_api_types::MAX_ATTACHMENTS_TOTAL / 3 * 4 + 1024 * 1024;
@@ -90,11 +99,14 @@ pub fn router(state: Arc<AppState>) -> Router {
     let authed = Router::new()
         .route("/v1/info", get(info))
         .route("/v1/agents", get(list_agents).post(create_agent))
+        .route("/v1/session-candidates", get(session_candidates))
+        .route("/v1/agents/{key}/chat", post(start_chat))
         .route("/v1/agents/{key}", get(get_agent).delete(delete_agent))
         .route("/v1/agents/{key}/start", post(start_agent))
         .route("/v1/agents/{key}/stop", post(stop_agent))
         .route("/v1/agents/{key}/cancel", post(cancel_agent))
         .route("/v1/agents/{key}/compact", post(compact_agent))
+        .route("/v1/agents/{key}/commands", get(agent_commands))
         .route(
             "/v1/agents/{key}/messages",
             post(send_message).layer(DefaultBodyLimit::max(MESSAGE_BODY_LIMIT)),
@@ -119,12 +131,20 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/agents/{key}/resume-command", get(resume_command))
         .route("/v1/agents/{key}/connect", post(connect_agent))
+        .route(
+            "/v1/avatars",
+            get(list_avatars)
+                .post(upload_avatars)
+                .layer(DefaultBodyLimit::max(AVATAR_BODY_LIMIT)),
+        )
+        .route("/v1/avatars/{id}", get(get_avatar).delete(delete_avatar))
         .route("/v1/notes", get(list_notes))
         .route("/v1/plugins", get(list_plugins))
         .route("/v1/plugins/{name}/models", post(set_plugin_models))
         .route("/v1/plugins/{name}/install", post(install_plugin))
         .route("/v1/plugins/{name}/upgrade", post(upgrade_plugin))
         .route("/v1/usage", get(usage))
+        .route("/v1/usage/series", get(usage_series))
         .route("/v1/accounts", get(list_accounts).post(create_account))
         .route("/v1/quota", get(quota))
         .route("/v1/questions", get(list_questions))
@@ -138,6 +158,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/accounts/{id}/usage", get(account_usage))
         .route("/v1/accounts/{id}/models", get(account_models))
         .route("/v1/accounts/{id}/login", post(account_login))
+        .route("/v1/works", get(list_works).post(create_work))
+        .route("/v1/works/{id}", get(get_work))
+        .route("/v1/works/{id}/runs", post(create_work_run))
         .route("/v1/runs", get(list_runs).post(create_run))
         .route("/v1/runs/{key}", get(get_run).delete(delete_run))
         .route("/v1/runs/{key}/approve", post(approve_run))
@@ -146,12 +169,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{key}/land", post(land_run))
         .route("/v1/runs/{key}/policy", post(update_run_policy))
         .route("/v1/runs/{key}/finish", post(finish_run))
+        .route("/v1/runs/{key}/cleanup", post(cleanup_run))
         .route("/v1/runs/{key}/diff", get(run_diff))
         .route("/v1/runs/{key}/trace", get(run_trace))
         .route("/v1/runs/{key}/tasks/{task}/diff", get(task_diff))
         .route("/v1/runs/{key}/tasks/{task}/review", post(review_task))
         .route("/v1/agents/{key}/files/tree", get(agent_files_tree))
         .route("/v1/agents/{key}/files/content", get(agent_files_content))
+        .route("/v1/agents/{key}/files/image", get(agent_files_image))
         .route("/v1/agents/{key}/files/resolve", post(agent_files_resolve))
         .route("/v1/runs/{key}/files/tree", get(run_files_tree))
         .route("/v1/runs/{key}/files/content", get(run_files_content))
@@ -376,6 +401,95 @@ async fn list_agents(State(state): State<Arc<AppState>>) -> ApiResult<Json<ListA
     Ok(Json(ListAgentsResponse { agents }))
 }
 
+#[derive(Deserialize)]
+struct SessionCandidatesQuery {
+    /// The workspace; absent: the standalone chats, each in its own `<home>/chats/<id>`.
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+async fn session_candidates(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<SessionCandidatesQuery>,
+) -> ApiResult<Json<crossagents_api_types::ListSessionCandidatesResponse>> {
+    let candidates = match query.repo.as_deref().filter(|r| !r.is_empty()) {
+        Some(repo) => {
+            state
+                .orchestrator
+                .session_candidates(std::path::Path::new(repo))
+                .await?
+        }
+        None => {
+            state
+                .orchestrator
+                .chat_candidates(&state.home.join("chats"))
+                .await?
+        }
+    };
+    let sessions = candidates
+        .into_iter()
+        .map(|candidate| crossagents_api_types::SessionCandidate {
+            can_use: candidate.can_use(),
+            reason: candidate.reason.map(|r| r.word().to_owned()),
+            agent: candidate.agent,
+            state: candidate.state,
+            busy_with: candidate.busy_with,
+            last_execution: candidate.last_execution,
+        })
+        .collect();
+    Ok(Json(crossagents_api_types::ListSessionCandidatesResponse {
+        sessions,
+    }))
+}
+
+/// The claim lookup is advisory: a run may claim after it; only claim_agent excludes
+/// competing runs atomically. Chat itself does not claim.
+async fn start_chat(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Json(req): Json<crossagents_api_types::StartChatRequest>,
+) -> ApiResult<(StatusCode, Json<SendMessageResponse>)> {
+    let uploads = req.attachments.unwrap_or_default();
+    if req.text.trim().is_empty() && uploads.is_empty() {
+        return Err(AppError::bad_request("text must not be empty"));
+    }
+    let key = AgentKey::parse(&key);
+    let agent = state.store().get_agent(&key).await?;
+    state.orchestrator.chat_available(&agent).await?;
+    if agent.archived_at.is_some() {
+        if !req.restore {
+            return Err(CoreError::Conflict(format!(
+                "{} is archived: restore it first with restore: true",
+                agent.name
+            ))
+            .into());
+        }
+        state.runtime.archive(&key, false).await?;
+    }
+    let text = req.text;
+    let attachments = store_uploads(&state, &key, uploads).await?;
+    let envelope = Envelope {
+        attachments,
+        ..Envelope::new(MessageSource::Human, text.clone())
+    };
+    let (message_id, queued) = state.runtime.send_envelope(&key, envelope).await?;
+    // Files alone leave the topic as it was.
+    if !text.trim().is_empty() {
+        let topic = text
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(60)
+            .collect();
+        state.runtime.set_topic(&key, Some(topic)).await?;
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(SendMessageResponse { message_id, queued }),
+    ))
+}
+
 async fn create_agent(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateAgentRequest>,
@@ -399,7 +513,8 @@ async fn create_agent(
     if let Some(driver) = &req.driver {
         driver.parse::<DriverKind>()?;
     }
-    let profile = req.profile.normalized()?;
+    let mut profile = req.profile.normalized()?;
+    crate::avatars::assign_new(&state.home, state.store(), &mut profile).await?;
     if let Some(account) = req.config.get("account").and_then(|v| v.as_str()) {
         state.accounts.check_binding(&req.plugin, account).await?;
     }
@@ -878,6 +993,14 @@ async fn compact_agent(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The slash commands and skills the agent's own CLI brings, when it reports them.
+async fn agent_commands(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<AgentCommandsResponse>> {
+    Ok(Json(state.runtime.commands(&AgentKey::parse(&key)).await?))
+}
+
 /// Takes back a message that is still waiting for its turn.
 async fn withdraw_message(
     State(state): State<Arc<AppState>>,
@@ -964,6 +1087,54 @@ async fn get_attachment(
             }
             .into()
         })
+}
+
+async fn list_avatars(State(state): State<Arc<AppState>>) -> Json<ListAvatarsResponse> {
+    Json(ListAvatarsResponse {
+        avatars: crate::avatars::list(&state.home),
+    })
+}
+
+/// Adds pictures to the gallery, then gives them to every session without an avatar.
+async fn upload_avatars(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UploadAvatarsRequest>,
+) -> ApiResult<Json<UploadAvatarsResponse>> {
+    let added = crate::avatars::store(&state.home, &req.images)
+        .map_err(|refused| AppError::bad_request(refused.0))?;
+    let assigned =
+        crate::avatars::assign_missing(&state.home, state.store(), state.bus.as_ref()).await?;
+    Ok(Json(UploadAvatarsResponse {
+        added,
+        assigned: assigned as u32,
+    }))
+}
+
+async fn get_avatar(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<AttachmentContent>> {
+    crate::avatars::read(&state.home, &id)
+        .map(Json)
+        .ok_or_else(|| CoreError::NotFound { kind: "avatar", id }.into())
+}
+
+async fn delete_avatar(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    crate::avatars::release(state.store(), state.bus.as_ref(), &id).await?;
+    let removed = crate::avatars::remove(&state.home, &id).map_err(|e| {
+        AppError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::Internal,
+            format!("removing the picture: {e}"),
+        )
+    })?;
+    if !removed {
+        return Err(CoreError::NotFound { kind: "avatar", id }.into());
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_plugins(State(state): State<Arc<AppState>>) -> Json<ListPluginsResponse> {
@@ -1168,6 +1339,70 @@ async fn agent_id(state: &AppState, key: &str) -> ApiResult<AgentId> {
     Ok(state.store().get_agent(&AgentKey::parse(key)).await?.id)
 }
 
+async fn create_work(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateWorkRequest>,
+) -> ApiResult<(StatusCode, Json<crossagents_core::Work>)> {
+    if req.title.trim().is_empty() {
+        return Err(CoreError::Conflict("the work title is empty".into()).into());
+    }
+    let lead = state.store().get_agent(&AgentKey::parse(&req.lead)).await?;
+    let now = Utc::now();
+    let work = crossagents_core::Work {
+        id: crossagents_core::WorkId::new(),
+        title: req.title,
+        repo: lead.home().to_path_buf(),
+        lead: lead.id,
+        created_at: now,
+        updated_at: now,
+    };
+    state.store().insert_work(&work).await?;
+    state
+        .bus
+        .publish(EventKind::WorkCreated { work: work.clone() })
+        .await?;
+    Ok((StatusCode::CREATED, Json(work)))
+}
+
+async fn list_works(State(state): State<Arc<AppState>>) -> ApiResult<Json<ListWorksResponse>> {
+    Ok(Json(ListWorksResponse {
+        works: state.store().list_works().await?,
+    }))
+}
+
+async fn get_work(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<WorkDetail>> {
+    let id = id
+        .parse::<crossagents_core::WorkId>()
+        .map_err(|_| CoreError::Conflict("invalid work id".into()))?;
+    let work = state.store().get_work(id).await?;
+    let runs = state
+        .store()
+        .list_runs()
+        .await?
+        .into_iter()
+        .filter(|r| r.work_id == Some(id))
+        .collect();
+    Ok(Json(WorkDetail { work, runs }))
+}
+
+async fn create_work_run(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<CreateWorkRunRequest>,
+) -> ApiResult<(StatusCode, Json<Run>)> {
+    let id = id
+        .parse::<crossagents_core::WorkId>()
+        .map_err(|_| CoreError::Conflict("invalid work id".into()))?;
+    let run = state
+        .orchestrator
+        .create_work_round(id, req.request, req.title, req.from.as_deref())
+        .await?;
+    Ok((StatusCode::CREATED, Json(run)))
+}
+
 async fn create_run(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateRunRequest>,
@@ -1201,6 +1436,7 @@ async fn create_run(
     .await?;
     let new = NewRun {
         attachments,
+        origin_chat_id: None,
         request: req.request,
         title: req.title,
         planner,
@@ -1217,7 +1453,10 @@ async fn create_run(
             policy: req.policy.unwrap_or_default(),
         },
     };
-    let run = state.orchestrator.create_run(new).await?;
+    let run = state
+        .orchestrator
+        .create_run_with_choice(new, req.fresh, req.restore)
+        .await?;
     Ok((StatusCode::CREATED, Json(run)))
 }
 
@@ -1689,6 +1928,35 @@ async fn agent_files_content(
     files_content(&state, FilesScope::Agent(&agent), q).await
 }
 
+/// `GET /v1/agents/{key}/files/image?path=`: an image a tool call named by path, base64 like
+/// an attachment, so a client can show it as a `data:` URL (crate::image says what is
+/// allowed; anything else is the usual error body with the reason).
+async fn agent_files_image(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Query(q): Query<FilesQuery>,
+) -> ApiResult<Json<ImageContent>> {
+    let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    let input = q.path();
+    if input.trim().is_empty() {
+        return Err(AppError::bad_request(
+            "path is missing: `?path=<an image inside the agent's working directory or the system temp directory>`",
+        ));
+    }
+    let root = state
+        .orchestrator
+        .files_root(FilesScope::Agent(&agent))
+        .await?;
+    let abs = crate::image::locate(&root, input)?;
+    let (kind, bytes) = crate::image::load(&abs, input).await?;
+    Ok(Json(ImageContent {
+        path: abs.display().to_string(),
+        mime: kind.content_type().to_owned(),
+        size: bytes.len() as u64,
+        data: STANDARD.encode(&bytes),
+    }))
+}
+
 async fn run_files_content(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
@@ -1842,6 +2110,16 @@ async fn init_repo(Json(req): Json<InitRepoRequest>) -> ApiResult<Json<InitRepoR
     Ok(Json(req))
 }
 
+/// Explicitly cleans a finished run's managed workspaces while retaining its history.
+async fn cleanup_run(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Query(q): Query<DeleteRunQuery>,
+) -> ApiResult<Json<crossagents_orchestrator::DeletedRun>> {
+    let id = resolve_run(&state, &key).await?;
+    Ok(Json(state.orchestrator.cleanup_run(id, q.force).await?))
+}
+
 /// The person closes a run; open tasks are cancelled.
 async fn finish_run(
     State(state): State<Arc<AppState>>,
@@ -1865,7 +2143,7 @@ async fn my_tools(
     Extension(agent): Extension<Agent>,
 ) -> Json<ListToolsResponse> {
     Json(ListToolsResponse {
-        tools: state.orchestrator.tools_for(&agent),
+        tools: state.orchestrator.tools_for(&agent).await,
     })
 }
 
@@ -2040,6 +2318,53 @@ async fn usage(
     Ok(Json(
         crate::usage::compute(state.store().as_ref(), query.by).await?,
     ))
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageSeriesParams {
+    #[serde(default)]
+    range: Option<String>,
+    #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+/// `GET /v1/usage/series`: token use and cost day by day, across accounts (see
+/// [`crate::usage_series`]). Defaults: the last 30 days, one total, every account.
+async fn usage_series(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<UsageSeriesParams>,
+) -> ApiResult<Json<UsageSeriesResponse>> {
+    let range = match params.range.as_deref().unwrap_or("30d") {
+        "7d" => UsageSeriesRange::Days7,
+        "30d" => UsageSeriesRange::Days30,
+        "90d" => UsageSeriesRange::Days90,
+        "all" => UsageSeriesRange::All,
+        other => {
+            return Err(AppError::bad_request(format!(
+                "range must be 7d, 30d, 90d or all, not {other:?}"
+            )));
+        }
+    };
+    let group = match params.group.as_deref().unwrap_or("total") {
+        "total" => UsageSeriesGroup::Total,
+        "model" => UsageSeriesGroup::Model,
+        "origin" => UsageSeriesGroup::Origin,
+        "agent" => UsageSeriesGroup::Agent,
+        "run" => UsageSeriesGroup::Run,
+        other => {
+            return Err(AppError::bad_request(format!(
+                "group must be total, model, origin, agent or run, not {other:?}"
+            )));
+        }
+    };
+    let query = crate::usage_series::SeriesQuery {
+        range,
+        group,
+        source: params.source.unwrap_or_else(|| "all".into()),
+    };
+    Ok(Json(state.accounts.usage_series(query).await?))
 }
 
 #[derive(Debug, Default, serde::Deserialize)]

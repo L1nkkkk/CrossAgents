@@ -590,9 +590,16 @@ checks = [
             cargo
         );
         assert_eq!(checks.commands_for(&changed(&["Cargo.lock"])), cargo);
+        // A GUI change waits for the GUI's own checks, not cargo.
+        let gui = checks.commands_for(&changed(&["apps/gui/src/styles.css"]));
+        assert!(
+            !gui.is_empty() && gui.iter().all(|c| c.starts_with("npm ")),
+            "{gui:?}"
+        );
+        // Docs alone run nothing.
         assert!(
             checks
-                .commands_for(&changed(&["apps/gui/src/styles.css", "docs/DESIGN.md"]))
+                .commands_for(&changed(&["docs/DESIGN.md"]))
                 .is_empty()
         );
     }

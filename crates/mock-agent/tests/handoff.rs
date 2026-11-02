@@ -353,6 +353,8 @@ async fn giving_it_to_the_escalation_teammate_is_an_escalation() {
     reassign(&t, &run, "ada").await;
     let card = card(&mut w, HandoffKind::Escalate).await;
     assert_eq!(card.template.as_deref(), Some("ada"));
+    // A new execution session of the escalation teammate: an `e-` name, not `w-`.
+    assert!(card.to_name.starts_with("e-"), "{card:?}");
     assert_ne!(card.to_name, "ada");
     let session: Value = t
         .get(&format!("/v1/agents/{}", card.to))
@@ -537,7 +539,10 @@ async fn a_cloned_worker_does_not_carry_the_templates_recruit_marks() {
     assert!(clone["config"].get("spawned_by_agent").is_none(), "{clone}");
     assert!(clone["config"].get("spawned_by_run").is_none(), "{clone}");
     let template: Value = t.get("/v1/agents/rex").await.json().await.unwrap();
-    assert_eq!(template["config"]["spawned_by_run"], "an-old-run", "{template}");
+    assert_eq!(
+        template["config"]["spawned_by_run"], "an-old-run",
+        "{template}"
+    );
     assert_eq!(
         template["config"]["spawned_by_agent"],
         json!(boss.id),

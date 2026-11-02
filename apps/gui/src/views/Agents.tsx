@@ -21,6 +21,7 @@ import {
 } from "../components";
 import { onHubEvent, useHubData } from "../hub";
 import { useArmed } from "../parts";
+import { AvatarChoice } from "./AvatarGallery";
 import { ConnectExternal, ConnectInstructions } from "./External";
 import { vendorLabel } from "../lib/models";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
@@ -455,9 +456,15 @@ export function ProfileEditor({ agent, onDone }: { agent: Agent; onDone: () => v
               <input value={profile.title ?? ""} onChange={(e) => set({ title: e.target.value })} placeholder="设计师" />
             </Field>
             <Field label="头像（emoji 或两个字母）">
-              <input value={profile.avatar ?? ""} onChange={(e) => set({ avatar: e.target.value })} placeholder="🎨" maxLength={8} />
+              <input value={profile.avatar ?? ""} onChange={(e) => set(e.target.value.trim() ? { avatar: e.target.value, avatar_image: null } : { avatar: e.target.value })} placeholder="🎨" maxLength={8} />
             </Field>
           </div>
+          {/* Text with no picture also keeps the next upload from handing this session one. */}
+          <AvatarChoice
+            current={profile.avatar_image}
+            onChoose={(id) => set({ avatar_image: id })}
+            onText={() => set({ avatar_image: null, avatar: profile.avatar || Array.from(name.trim() || agent.name)[0]?.toUpperCase() || null })}
+          />
           <div className="swatches" role="radiogroup" aria-label="头像颜色">
             {AVATAR_COLORS.map((c) => (
               <button

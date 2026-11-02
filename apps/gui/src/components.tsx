@@ -1,4 +1,7 @@
-import { createContext, useContext, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { useAvatarImage } from "./avatarImages";
+import { modelFamily } from "./lib/modelFamily";
+import { MODEL_ICONS, VENDOR_ICONS, type BrandIcon } from "./modelIcons";
 import {
   Activity,
   Archive,
@@ -23,6 +26,7 @@ import {
   ListChecks,
   Menu,
   MessageCircle,
+  Minimize2,
   PanelLeft,
   Paperclip,
   PanelRight,
@@ -33,6 +37,7 @@ import {
   Settings,
   SlidersHorizontal,
   Square,
+  Terminal,
   UserPlus,
   Users,
   X,
@@ -171,6 +176,94 @@ export const sessionHref = (agent: Agent | string) => `#/s/${encodeURIComponent(
  */
 export function Prose({ text }: { text: string }) {
   return <div className="prose">{renderBlocks(parseBlocks(text))}</div>;
+}
+
+/**
+ * Long text kept to one line until asked for: a refused call's reason with a whole check log in
+ * it, a run's summary, a failed step. The line reads as status icon · what it was · a one-line
+ * gist; the icon — or the line — opens the whole thing below, in a bounded box that scrolls
+ * rather than pushing the conversation away.
+ */
+export type OneLineTone = "ok" | "danger" | "warn" | "running";
+
+export function OneLine({
+  tone,
+  icon,
+  title,
+  summary,
+  className,
+  children,
+}: {
+  tone: OneLineTone;
+  icon?: ReactNode;
+  title: string;
+  summary?: string;
+  className?: string;
+  /** The full content. Without it the line cannot be opened and the icon is not a control. */
+  children?: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  // Opened near the bottom of the conversation, the body would start off-screen: bring it in.
+  const root = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (open) root.current?.scrollIntoView({ block: "nearest" });
+  }, [open]);
+  const more = children != null && children !== false;
+  const toggle = () => more && setOpen(!open);
+  const label = open ? "收起详情" : "展开详情";
+  const words = (
+    <>
+      <span className="oneline-title">{title}</span>
+      {summary && <span className="oneline-summary">{summary}</span>}
+    </>
+  );
+  return (
+    <div ref={root} className={`oneline ${tone} ${open ? "open" : ""} ${className ?? ""}`}>
+      <div className="oneline-head">
+        {more ? (
+          <button className="oneline-icon" onClick={toggle} aria-expanded={open} aria-label={label} title={label}>
+            {icon}
+          </button>
+        ) : (
+          <span className="oneline-icon" aria-hidden="true">
+            {icon}
+          </span>
+        )}
+        {more ? (
+          <button className="oneline-main" onClick={toggle} aria-expanded={open} title={summary}>
+            {words}
+          </button>
+        ) : (
+          <span className="oneline-main" title={summary}>
+            {words}
+          </span>
+        )}
+      </div>
+      {open && <div className="oneline-body">{children}</div>}
+    </div>
+  );
+}
+
+/** The first non-empty line of `text`, trimmed. */
+export function firstLine(text?: string | null): string {
+  for (const line of (text ?? "").split(/\r?\n/)) {
+    const s = line.trim();
+    if (s) return s;
+  }
+  return "";
+}
+
+/** That first line cut at its first sentence, so a gist fits one line. */
+export function firstSentence(text?: string | null): string {
+  const line = firstLine(text);
+  const match = line.match(/^.*?[。！？]|^.*?\.(?=\s|$)/);
+  return (match ? match[0] : line).trim();
+}
+
+/** `text` when it says more than its first line (so there is something to open), else nothing. */
+export function beyondFirstLine(text?: string | null): string | undefined {
+  const full = (text ?? "").trim();
+  return full && full !== firstLine(full) ? full : undefined;
 }
 
 /**
@@ -355,6 +448,8 @@ const ICONS = {
   chat: MessageCircle,
   brain: Brain,
   archive: Archive,
+  shrink: Minimize2,
+  terminal: Terminal,
   restore: ArchiveRestore,
   account: CircleUserRound,
   addMate: UserPlus,
@@ -461,37 +556,43 @@ export function vendorName(plugin: string): string {
   return v === "claude" ? "Claude" : v === "codex" ? "Codex" : v === "codebuddy" ? "CodeBuddy" : plugin;
 }
 
-/** The vendor's mark: a clay asterisk for Claude, an ink prompt for Codex, blue braces for CodeBuddy, a ring otherwise. */
+/** An official mark: as an image, or as a mask over the text colour when it is one-colour. */
+function BrandImage({ icon, size, className = "" }: { icon: BrandIcon; size: number; className?: string }) {
+  if (icon.mono) {
+    const mask = `url("${icon.src}")`;
+    return <span className={`brand-mono ${className}`} style={{ width: size, height: size, maskImage: mask, WebkitMaskImage: mask }} aria-hidden="true" />;
+  }
+  return <img className={className} src={icon.src} width={size} height={size} alt="" aria-hidden="true" draggable={false} />;
+}
+
+/** The vendor's official mark, or a ring for a plugin we have none for. */
 export function VendorMark({ plugin, size = 12 }: { plugin: string; size?: number }) {
   const vendor = vendorOf(plugin);
+  const icon = VENDOR_ICONS[vendor];
+  if (icon) return <BrandImage icon={icon} size={size} className={`vendor-mark ${vendor}`} />;
   return (
-    <svg className={`vendor-mark ${vendor}`} width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
-      {vendor === "claude" && (
-        <g stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-          {[0, 30, 60, 90, 120, 150].map((a) => (
-            <line key={a} x1="8" y1="1.6" x2="8" y2="14.4" transform={`rotate(${a} 8 8)`} />
-          ))}
-        </g>
-      )}
-      {vendor === "codex" && (
-        <g fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <rect x="1.5" y="1.5" width="13" height="13" rx="3.5" />
-          <path d="M5 6l2.2 2L5 10M8.8 10.5h2.4" />
-        </g>
-      )}
-      {vendor === "codebuddy" && (
-        <path
-          d="M6 2.5C4.4 2.5 4.6 4.6 4.6 6S4 8 2.8 8c1.2 0 1.8.6 1.8 2s-.2 3.5 1.4 3.5M10 2.5c1.6 0 1.4 2.1 1.4 3.5s.6 2 1.8 2c-1.2 0-1.8.6-1.8 2s.2 3.5-1.4 3.5"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      )}
-      {vendor === "other" && <circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.5" />}
+    <svg className="vendor-mark other" width={size} height={size} viewBox="0 0 16 16" aria-hidden="true">
+      <circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
     </svg>
   );
+}
+
+/** The mark of the model behind a session; the vendor's when the model's family is not known. */
+export function ModelMark({ plugin, model, size = 13 }: { plugin: string; model?: string | null; size?: number }) {
+  const family = modelFamily(plugin, model);
+  const icon = family && MODEL_ICONS[family.key];
+  return (
+    <span className="model-mark" title={[family?.name ?? vendorName(plugin), model].filter(Boolean).join(" · ")}>
+      {icon ? <BrandImage icon={icon} size={size} /> : <VendorMark plugin={plugin} size={size} />}
+    </span>
+  );
+}
+
+/** A family's mark where the family itself is known (a settings group head); a ring when it has none. */
+export function FamilyMark({ familyKey, size = 14 }: { familyKey: string; size?: number }) {
+  const icon = MODEL_ICONS[familyKey];
+  if (icon) return <BrandImage icon={icon} size={size} className="family-mark" />;
+  return <VendorMark plugin="" size={size} />;
 }
 
 /** Who runs an agent: the vendor's mark, then the model (or the vendor's name). */
@@ -524,13 +625,14 @@ export function Avatar({ agent, size = 20, status = false }: { agent: Agent; siz
   const text = avatar || Array.from(displayName(agent))[0]?.toUpperCase() || "?";
   const emoji = !!avatar && /\p{Extended_Pictographic}/u.test(avatar);
   const tone = agentTone(agent.status);
+  const image = useAvatarImage(agent.profile?.avatar_image);
   return (
     <span
       className={`avatar av-${colorOf(agent)} ${emoji ? "emoji" : ""}`}
       style={{ width: size, height: size, fontSize: Math.round(size * (emoji ? 0.6 : text.length > 1 ? 0.4 : 0.5)) }}
       aria-hidden="true"
     >
-      {text}
+      {image ? <img className="avatar-img" src={image} alt="" draggable={false} /> : text}
       {status && tone.color !== "off" && <span className={`presence ${tone.color} ${tone.live ? "live" : ""}`} />}
     </span>
   );

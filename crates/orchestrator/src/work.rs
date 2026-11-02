@@ -2,11 +2,12 @@
 //! `work_start`, the person starts it or declines with the card that puts in front of them.
 //! Opening a branch and a worktree is something the person sees, so the agent never does it
 //! on its own.
+//! `run_next` continues an existing work group immediately from the person's new request.
 
 use chrono::Utc;
 use crossagents_core::{
-    Agent, CoreError, EventKind, HumanAction, HumanItem, HumanItemKind, HumanItemStatus,
-    MessageSource, RunConfig, RunPolicy,
+    Agent, AgentId, AgentKey, CoreError, EventKind, HumanAction, HumanItem, HumanItemKind,
+    HumanItemStatus, LandPolicy, PlanApproval, Run, RunConfig, RunPolicy, RunStatus,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -31,6 +32,112 @@ fn brief_of(item: &HumanItem) -> String {
 }
 
 impl Orchestrator {
+    pub(crate) async fn run_next(&self, caller: &Agent, input: Value) -> Result<Value, CoreError> {
+        #[derive(Deserialize)]
+        struct A {
+            title: String,
+            request: String,
+            from: Option<String>,
+        }
+        let a: A = crate::tools::args(input)?;
+        let run = self
+            .run_of(caller.id)
+            .await?
+            .map(|(r, _)| r)
+            .filter(|r| r.planner == caller.id)
+            .ok_or_else(|| CoreError::Conflict("run_next requires a run's lead".into()))?;
+        if !run.status.is_terminal() {
+            return Err(CoreError::Conflict(
+                "run_next requires a terminal run; this run is still in progress".into(),
+            ));
+        }
+        let work = run
+            .work_id
+            .ok_or_else(|| CoreError::Conflict("this run has no work group".into()))?;
+        let next = self
+            .create_work_round(work, a.request, Some(a.title), a.from.as_deref())
+            .await?;
+        Ok(json!({ "run_id": next.id, "work_id": work, "status": next.status }))
+    }
+
+    /// Shared by the conversation tool and the work group's next-round API.
+    pub async fn create_work_round(
+        &self,
+        id: crossagents_core::WorkId,
+        request: String,
+        title: Option<String>,
+        from: Option<&str>,
+    ) -> Result<Run, CoreError> {
+        if from.is_some_and(|from| from != "base") {
+            return Err(CoreError::Conflict("from only accepts base".into()));
+        }
+        let work = self.store().get_work(id).await?;
+        let previous = self
+            .store()
+            .list_runs()
+            .await?
+            .into_iter()
+            .find(|r| r.work_id == Some(id));
+        let config = previous
+            .as_ref()
+            .map(|r| r.config.clone())
+            .unwrap_or(RunConfig {
+                worker: work.lead,
+                escalate: None,
+                reviewer: None,
+                auto_approve: false,
+                max_parallel: RunConfig::DEFAULT_MAX_PARALLEL,
+                max_attempts: RunConfig::DEFAULT_MAX_ATTEMPTS,
+                team: Vec::new(),
+                policy: RunPolicy::default(),
+            });
+        self.create_run_for_work_from(
+            NewRun {
+                origin_chat_id: None,
+                request,
+                title,
+                planner: work.lead,
+                config,
+                repo: Some(work.repo),
+                base_branch: None,
+                attachments: Vec::new(),
+            },
+            None,
+            false,
+            Some(id),
+            from == Some("base"),
+        )
+        .await
+    }
+
+    /// The parent's next message carries this result; recording it never wakes the parent.
+    pub(crate) async fn tell_origin_later(&self, run: &Run) {
+        let Some(parent) = run.origin_chat_id.filter(|id| *id != run.planner) else {
+            return;
+        };
+        let status = match run.status {
+            RunStatus::Completed => "completed",
+            RunStatus::Failed => "failed",
+            RunStatus::Cancelled => "cancelled",
+            _ => return,
+        };
+        let result = first_line(
+            run.summary.as_deref().or(run.note.as_deref()).unwrap_or(""),
+            240,
+        );
+        let landing = match &run.landed {
+            Some(landed) => format!("landed on {} ({})", run.base_branch, landed.reference),
+            None => format!("not landed; run branch: {}", run.branch),
+        };
+        let line = format!(
+            "CrossAgents work result: \"{}\" (run {}) {status}. {result} {landing}.",
+            first_line(&run.title, 90),
+            run.id,
+        );
+        self.tell_quietly(parent, &format!("run:{}", run.id), &line)
+            .await;
+    }
+
     pub(crate) async fn work_start(
         &self,
         caller: &Agent,
@@ -41,6 +148,10 @@ impl Orchestrator {
             request: String,
             #[serde(default)]
             title: Option<String>,
+            /// The caller saying it means a Work of its own, not the next round of the work
+            /// group it already leads: the one way past the check below.
+            #[serde(default)]
+            separate: bool,
         }
         let a: A = crate::tools::args(input)?;
         if a.request.trim().is_empty() {
@@ -57,6 +168,23 @@ impl Orchestrator {
                 "you lead run {} already: work there (task_create, plan_submit) instead",
                 run.id
             )));
+        }
+        // A lead whose round ended keeps `work_start`, but has to say it means a Work of its
+        // own: the next round of the group it is in belongs to `run_next`. The hub does not
+        // judge which one the person's words are (docs/tasks/G1.md §3.6) — it only makes the
+        // choice explicit, and `separate` is how the caller states it.
+        if !a.separate {
+            if let Some((run, _)) = self.run_of(caller.id).await? {
+                if run.planner == caller.id && run.status.is_terminal() {
+                    if let Some(work) = run.work_id {
+                        return Err(CoreError::Conflict(format!(
+                            "you are in work group {work}: to carry on there call run_next \
+                             instead; if the person really asked for a separate, independent \
+                             Work, call work_start again with separate: true"
+                        )));
+                    }
+                }
+            }
         }
         if !self.workspaces.versioned(&caller.cwd).await {
             return Err(CoreError::Conflict(format!(
@@ -123,12 +251,11 @@ impl Orchestrator {
         caller: &Agent,
     ) -> Result<Option<crossagents_core::Run>, CoreError> {
         // Newest first.
-        let last = self
-            .store()
-            .list_runs()
-            .await?
-            .into_iter()
-            .find(|r| r.planner == caller.id && r.repo == caller.home() && !r.in_place);
+        let last = self.store().list_runs().await?.into_iter().find(|r| {
+            (r.planner == caller.id || r.origin_chat_id == Some(caller.id))
+                && r.repo == caller.home()
+                && !r.in_place
+        });
         Ok(last.filter(|r| r.status.is_terminal() && r.landed.is_none()))
     }
 
@@ -139,11 +266,14 @@ impl Orchestrator {
         answer: Option<&str>,
     ) -> Result<(), CoreError> {
         if answer != Some(START) {
-            self.deliver(
-                item.from,
-                MessageSource::Human,
-                "The person chose not to open a Work for this: do it here in the conversation, or keep talking.".into(),
+            // A fact for its next message, not an instruction: declining a branch neither
+            // cancels the request nor asks for it to be done here now (docs/USAGE-TRIM.md §3.2).
+            let line = format!(
+                "The person did not accept your proposed Work \"{}\", so no run was created. What to do next is up to the person's next message.",
+                first_line(&item.text, 90)
             );
+            self.tell_quietly(item.from, &format!("work:{}", item.id), &line)
+                .await;
             return Ok(());
         }
         let proposer = item.from;
@@ -155,47 +285,79 @@ impl Orchestrator {
         // branch there.
         let (repo, base_branch) = (agent.home().to_path_buf(), None);
         let run = self
-            .create_run(NewRun {
-                request: brief_of(item),
-                title: Some(item.text.clone()),
-                planner: proposer,
-                repo: Some(repo),
-                base_branch,
-                attachments: Vec::new(),
-                config: RunConfig {
-                    worker: proposer,
-                    escalate: None,
-                    reviewer: None,
-                    auto_approve: false,
-                    max_parallel: RunConfig::DEFAULT_MAX_PARALLEL,
-                    max_attempts: RunConfig::DEFAULT_MAX_ATTEMPTS,
-                    team: Vec::new(),
-                    policy: RunPolicy::default(),
+            .create_run_with_choice(
+                NewRun {
+                    origin_chat_id: Some(proposer),
+                    request: brief_of(item),
+                    title: Some(item.text.clone()),
+                    planner: proposer,
+                    repo: Some(repo),
+                    base_branch,
+                    attachments: Vec::new(),
+                    config: RunConfig {
+                        worker: proposer,
+                        escalate: None,
+                        reviewer: None,
+                        auto_approve: false,
+                        max_parallel: RunConfig::DEFAULT_MAX_PARALLEL,
+                        max_attempts: RunConfig::DEFAULT_MAX_ATTEMPTS,
+                        team: Vec::new(),
+                        // The person said go on doing it, not on how: the lead writes what each
+                        // session must do, and the person approves that plan and picks the model
+                        // for every task before anything starts (AGENT-WORKSPACE §6.1). Landing
+                        // stays automatic unless they pick 我审批 on the plan.
+                        policy: RunPolicy {
+                            plan_approval: PlanApproval::Required,
+                            land: LandPolicy::Auto,
+                            ..RunPolicy::default()
+                        },
+                    },
                 },
-            })
+                Some(true),
+                false,
+            )
             .await?;
         item.run_id = Some(run.id);
         self.store().put_human_item(item).await?;
-        let lead = self
-            .store()
-            .get_agent(&crossagents_core::AgentKey::Id(run.planner))
-            .await?;
-        let text = if lead.id == proposer {
-            // It leads the run itself, from the run's checkout, with this conversation.
-            format!(
-                "The person started the Work \"{}\" (run {}): you lead it yourself, on branch {}, working in the run's checkout {}. Your request is the brief that follows.",
-                run.title,
-                run.id,
-                run.branch,
-                lead.cwd.display()
-            )
-        } else {
-            format!(
-                "The person started the Work \"{}\" (run {}): {} leads it on branch {}, with your request as its brief. This conversation stays as it is; the Work goes on there.",
-                run.title, run.id, lead.name, run.branch
-            )
-        };
-        self.deliver(proposer, MessageSource::Human, text);
+        self.tell_origin_started(&run).await;
         Ok(())
+    }
+
+    /// The source chat hears that its Work started with its next message, without a turn of
+    /// its own just to acknowledge it. It shares the run's topic with the closing result, so
+    /// the newest state is what it reads; a run that already ended gets its result written
+    /// again after this, since that one is written only once the run is saved as ended
+    /// (docs/USAGE-TRIM.md §3.3).
+    pub(crate) async fn tell_origin_started(&self, run: &Run) {
+        let Some(parent) = run.origin_chat_id.filter(|id| *id != run.planner) else {
+            return;
+        };
+        let lead = match self.store().get_agent(&AgentKey::Id(run.planner)).await {
+            Ok(lead) => lead.name,
+            Err(_) => run.planner.to_string(),
+        };
+        let line = format!(
+            "CrossAgents work started: \"{}\" (run {}), led by {lead} on branch {}, from your brief. This conversation stays as it is; the Work goes on there.",
+            first_line(&run.title, 90),
+            run.id,
+            run.branch
+        );
+        self.tell_quietly(parent, &format!("run:{}", run.id), &line)
+            .await;
+        match self.store().get_run(run.id).await {
+            Ok(now) if now.status.is_terminal() => self.tell_origin_later(&now).await,
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(run = %run.id, error = %err, "cannot recheck the run after its start notice")
+            }
+        }
+    }
+
+    /// A notice kept for the agent's next message. Never falls back to waking it: the GUI
+    /// shows the same fact.
+    async fn tell_quietly(&self, agent: AgentId, topic: &str, line: &str) {
+        if let Err(err) = self.host.tell_later(agent, topic, line).await {
+            tracing::warn!(%agent, topic, error = %err, "cannot keep a notice for the agent's next message");
+        }
     }
 }

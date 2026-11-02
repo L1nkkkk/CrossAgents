@@ -200,7 +200,7 @@ pub struct Runtime {
     external: Mutex<HashMap<AgentId, Vec<Waiting>>>,
     /// What changed about the agent that it has not been told yet (its model or effort, its
     /// name), by topic: said at the top of the next message it gets.
-    notices: Mutex<HashMap<AgentId, BTreeMap<&'static str, String>>>,
+    notices: Mutex<HashMap<AgentId, BTreeMap<String, String>>>,
     /// Agents to send back to their workspace once their turn ends ([`Self::send_home`]
     /// while they were busy).
     going_home: Mutex<HashSet<AgentId>>,
@@ -1126,6 +1126,7 @@ impl Runtime {
                 },
             )
             .await;
+            let text = self.with_notices(stored.id, text).await;
             self.external
                 .lock()
                 .await
@@ -1166,13 +1167,7 @@ impl Runtime {
         .await;
         // What changed since the last message (model, effort, name) is told before it; the
         // conversation shows it as a note of its own (e.g. `agent.model_changed`).
-        let text = match self.notices.lock().await.remove(&agent.id) {
-            Some(notes) => {
-                let notes: Vec<String> = notes.into_values().collect();
-                format!("{}\n\n{text}", notes.join("\n"))
-            }
-            None => text,
-        };
+        let text = self.with_notices(agent.id, text).await;
         if from == MessageSource::Human {
             live.inbox.from_person.lock().unwrap().insert(message_id);
         }
@@ -1182,6 +1177,16 @@ impl Runtime {
             let _ = live.session.interrupt().await;
         }
         Ok((message_id, queued))
+    }
+
+    async fn with_notices(&self, agent: AgentId, text: String) -> String {
+        match self.notices.lock().await.remove(&agent) {
+            Some(notes) => {
+                let notes: Vec<String> = notes.into_values().collect();
+                format!("{}\n\n{text}", notes.join("\n"))
+            }
+            None => text,
+        }
     }
 
     /// Takes back a message that is still waiting for its turn.
@@ -1219,17 +1224,45 @@ impl Runtime {
         }
     }
 
+    /// The slash commands and skills the agent's own CLI reports for its live session
+    /// (Claude Code's `system/init`). `known` is false when nothing has started, or the
+    /// driver does not report them, and `note` says which.
+    pub async fn commands(
+        &self,
+        key: &AgentKey,
+    ) -> Result<crossagents_api_types::AgentCommandsResponse, CoreError> {
+        let agent = self.store().get_agent(key).await?;
+        let live = self.live.lock().await.get(&agent.id).cloned();
+        let (commands, note) = match live {
+            Some(live) => match live.session.commands() {
+                Some(commands) => (commands, None),
+                None => (Vec::new(), Some("这个驱动不报告自带指令".to_owned())),
+            },
+            None => (Vec::new(), Some("还没启动过会话".to_owned())),
+        };
+        Ok(crossagents_api_types::AgentCommandsResponse {
+            known: note.is_none(),
+            commands,
+            note,
+        })
+    }
+
     /// Summarises the running session's history to free context.
     pub async fn compact(&self, key: &AgentKey) -> Result<(), CoreError> {
         let agent = self.store().get_agent(key).await?;
         let live = self.live.lock().await.get(&agent.id).cloned();
-        match live {
-            Some(live) => live.session.compact().await,
-            None => Err(CoreError::Conflict(format!(
+        let Some(live) = live else {
+            return Err(CoreError::Conflict(format!(
                 "agent {} is not running",
                 agent.name
-            ))),
-        }
+            )));
+        };
+        // A long history takes minutes to summarise; a caller that stops waiting (the GUI's
+        // request timeout) must not cancel it halfway and leave the session mid-compaction.
+        let session = live.session.clone();
+        tokio::spawn(async move { session.compact().await })
+            .await
+            .map_err(|err| CoreError::Agent(format!("compaction stopped: {err}")))?
     }
 
     /// Changes the agent's model and, when `effort` is given, its reasoning effort (empty:
@@ -1331,13 +1364,13 @@ impl Runtime {
     }
 
     /// Keeps `note` for the agent's next message (a newer note on the same topic replaces it).
-    async fn tell_later(&self, id: AgentId, topic: &'static str, note: String) {
+    pub async fn tell_later(&self, id: AgentId, topic: &str, note: String) {
         self.notices
             .lock()
             .await
             .entry(id)
             .or_default()
-            .insert(topic, note);
+            .insert(topic.to_owned(), note);
     }
 
     /// Renames the agent (people chose the name). It hears its new name with its next message;

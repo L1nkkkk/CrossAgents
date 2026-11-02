@@ -8,8 +8,13 @@ import type { PlannedTask } from "./PlannedTask";
 import type { RunConfig } from "./RunConfig";
 import type { RunId } from "./RunId";
 import type { RunStatus } from "./RunStatus";
+import type { WorkId } from "./WorkId";
 
-export type Run = { continuation: ContinuationState | null, id: RunId, title: string, 
+export type Run = { 
+/**
+ * The conversation that proposed this work; its independent lead is `planner`.
+ */
+origin_chat_id: AgentId | null, work_id: WorkId | null, continuation: ContinuationState | null, id: RunId, title: string, 
 /**
  * What the human asked for.
  */

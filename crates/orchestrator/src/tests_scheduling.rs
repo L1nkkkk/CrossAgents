@@ -11,14 +11,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use crossagents_core::{
-    Agent, AgentId, AgentStatus, CoreError, Envelope, EventBus, LandMode, MessageId,
-    MessageSource, Role, Run, RunConfig, RunId, RunPolicy, RunStatus, Store, Task, TaskId,
-    TaskReport, TaskSpec, TaskStatus,
+    Agent, AgentId, AgentStatus, CoreError, Envelope, EventBus, LandMode, MessageId, MessageSource,
+    Role, Run, RunConfig, RunId, RunPolicy, RunStatus, Store, Task, TaskId, TaskReport, TaskSpec,
+    TaskStatus,
 };
 use crossagents_store_sqlite::SqliteStore;
 use serde_json::{Value, json};
 
-use crate::engine::{Orchestrator, OrchestratorConfig};
+use crate::engine::{Orchestrator, OrchestratorConfig, worker_prefix};
 use crate::host::AgentHost;
 use crate::verify::Verifier;
 use crate::workspace::{Synced, WorkspaceProvider};
@@ -201,6 +201,8 @@ impl Fixture {
             store.insert_agent(a).await.unwrap();
         }
         let run = Run {
+            origin_chat_id: None,
+            work_id: None,
             continuation: None,
             id: RunId::new(),
             title: "a run".into(),
@@ -345,6 +347,45 @@ async fn a_created_task_with_nothing_to_wait_for_starts_at_once() {
     assert_eq!(task.status, TaskStatus::Running, "{task:?}");
     assert_eq!(task.assignee, Some(f.rex.id), "{task:?}");
     assert!(task.worktree.is_some(), "{task:?}");
+    // The answer shows it as scheduling left it: the state before read as "assignee
+    // ignored", and a lead assigned it a second time.
+    assert_eq!(out["created"][0]["status"], "running", "{out}");
+    assert_eq!(out["created"][0]["assignee"], json!(f.rex.id), "{out}");
+}
+
+#[tokio::test]
+async fn asking_again_replaces_the_open_question() {
+    let f = Fixture::new().await;
+    let mut task = f
+        .insert("a", TaskStatus::Running, &[], Some(f.rex.id))
+        .await;
+    task.assignee = Some(f.rex.id);
+    f.store.update_task(&task).await.unwrap();
+
+    let first = f
+        .orchestrator
+        .ask(&f.rex, task.id, "which file?".into())
+        .await
+        .unwrap();
+    // Asked again in other words while the first waits: it used to fail with
+    // "WaitingAnswer -> WaitingAnswer", so the worker thought it could not ask at all.
+    let second = f
+        .orchestrator
+        .ask(&f.rex, task.id, "which file, after syncing?".into())
+        .await
+        .unwrap();
+    assert_eq!(second["replaces"], first["question_id"], "{second}");
+    let task = f.task(task.id).await;
+    assert_eq!(task.status, TaskStatus::WaitingAnswer);
+    assert_eq!(
+        task.report.question.as_deref(),
+        Some("which file, after syncing?")
+    );
+    assert_eq!(
+        json!(task.report.question_message),
+        second["question_id"],
+        "{task:?}"
+    );
 }
 
 #[tokio::test]
@@ -371,7 +412,11 @@ async fn a_created_task_that_waits_on_another_stays_pending() {
 
     let id: TaskId = serde_json::from_value(out["created"][0]["task_id"].clone()).unwrap();
     let task = f.task(id).await;
-    assert_eq!(task.status, TaskStatus::Pending, "the control case: {task:?}");
+    assert_eq!(
+        task.status,
+        TaskStatus::Pending,
+        "the control case: {task:?}"
+    );
     assert_eq!(task.assignee, None, "{task:?}");
 }
 
@@ -396,6 +441,26 @@ async fn an_assigned_pending_task_starts_at_once() {
     assert_eq!(task.status, TaskStatus::Running, "{task:?}");
     assert_eq!(task.assignee, Some(f.max.id), "{task:?}");
     assert_eq!(task.worker_template, Some(f.max.id), "{task:?}");
+}
+
+/// A new execution session on the run's escalation teammate is named `e-`, any other worker
+/// `w-` (docs/TODO.md §九): the prefix follows the role, whichever tool hands the task over.
+#[tokio::test]
+async fn a_new_session_is_named_e_on_the_escalation_teammate() {
+    let f = Fixture::new().await;
+    let mut run = f.run.clone();
+    run.config.escalate = Some(f.max.id);
+    let task = f.insert("a", TaskStatus::Pending, &[], None).await;
+
+    assert_eq!(worker_prefix(&run, &task, f.max.id), "e");
+    assert_eq!(worker_prefix(&run, &task, f.rex.id), "w");
+
+    // Escalated by the plan rather than by a handoff: the flag alone decides it too.
+    let escalated = Task {
+        escalated: true,
+        ..task.clone()
+    };
+    assert_eq!(worker_prefix(&run, &escalated, f.max.id), "e");
 }
 
 // ---------------------------------------------------------------------------------------
@@ -444,4 +509,22 @@ async fn a_task_updated_while_the_run_is_paused_does_not_start() {
     assert_eq!(task.status, TaskStatus::Pending, "{task:?}");
     assert_eq!(task.depends_on, vec!["done".to_owned()], "{task:?}");
     assert_eq!(task.assignee, None, "{task:?}");
+}
+
+/// The prefix says what the session is, so an escalated task's session is `e-…`. Three places
+/// name a worker (engine's handout, `tasks.rs`'s reassignment, `quota.rs`'s move off a spent
+/// account); they all go through `worker_name`, or the name stops matching the session.
+#[tokio::test]
+async fn an_escalated_task_names_its_session_with_e() {
+    let f = Fixture::new().await;
+    let mut task = f.insert("auth", TaskStatus::Pending, &[], None).await;
+
+    let plain = crate::engine::worker_name(&f.run, &task, f.rex.id);
+    assert!(plain.starts_with("w-"), "{plain}");
+    assert!(plain.ends_with("-auth"), "{plain}");
+
+    task.escalated = true;
+    let escalated = crate::engine::worker_name(&f.run, &task, f.rex.id);
+    assert!(escalated.starts_with("e-"), "{escalated}");
+    assert_eq!(escalated[1..], plain[1..], "only the prefix differs");
 }

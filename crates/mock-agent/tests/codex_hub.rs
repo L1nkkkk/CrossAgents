@@ -4,7 +4,7 @@ mod common;
 
 use common::{MOCK_AGENT, TestHub};
 use crossagents_api_types::EventKind;
-use crossagents_core::DriverKind;
+use crossagents_core::{DriverKind, McpServerSpec};
 use crossagents_plugins::PluginConfig;
 use serde_json::{Value, json};
 
@@ -93,5 +93,51 @@ async fn codex_native_through_the_hub() {
         )
         .await;
     assert_eq!(resp.status(), 400);
+    t.hub.shutdown();
+}
+
+/// `[mcp.<name>]` servers are mounted into every session, after the collaboration one.
+#[tokio::test]
+async fn extra_mcp_servers_ride_along_with_the_collaboration_one() {
+    let t = TestHub::start_with(|config| {
+        config.plugins.insert(
+            "codex".into(),
+            PluginConfig {
+                driver: Some(DriverKind::CodexNative),
+                native_command: vec![MOCK_AGENT.into(), "app-server".into()],
+                ..PluginConfig::default()
+            },
+        );
+        config.mcp_servers = vec![McpServerSpec {
+            name: "doubao".into(),
+            command: std::path::PathBuf::from("node"),
+            args: vec!["server.mjs".into()],
+            env: std::collections::BTreeMap::from([(
+                "DOUBAO_PAINTER_HOME".to_owned(),
+                "D:/tools/dsh-doubao-painter".to_owned(),
+            )]),
+        }];
+    })
+    .await;
+
+    let resp = t
+        .post(
+            "/v1/agents",
+            json!({ "name": "painter", "plugin": "codex", "model": "mock-codex", "role": "worker",
+                    "cwd": t.home.path().display().to_string() }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+
+    let mut w = t.watch().await;
+    t.send("painter", "hi [mcp]").await;
+    w.until("turn completed", |e| {
+        matches!(e.kind, EventKind::AgentTurnCompleted { .. })
+    })
+    .await;
+    let output = w.output();
+    // The hub's own tools keep their URL and token; the extra one carries its own env.
+    assert!(output.contains("crossagents:approve:2"), "{output}");
+    assert!(output.contains("doubao:approve:1"), "{output}");
     t.hub.shutdown();
 }

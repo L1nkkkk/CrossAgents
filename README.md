@@ -1,5 +1,7 @@
 # CrossAgents
 
+CodeBuddy 国内站与国际站的独立登录设置见 [使用说明](docs/CODEBUDDY-SITES.md)。
+
 CrossAgents 是一个分层的多 agent 编码编排器：**强模型（Opus / GPT-5 级）负责设计、拆解和验收，
 便宜模型（Haiku / mini 级）并行写代码**。每个任务在独立的 git worktree 里完成，由 hub 亲自跑验收命令，
 失败自动打回重试、必要时升级到更强的模型，通过后合并到一个集成分支，最终是否合入由你决定。
@@ -90,8 +92,10 @@ crossagents run cancel <id>
 
 `apps/gui/` 是桌面 GUI（Electron + React），和 CLI 一样只是 hub 的客户端：先 `crossagents hub start`，
 GUI 读取 `~/.crossagents/hub.json` 与 `token` 连接（同样遵循 `CROSSAGENTS_HOME`）。
-界面以对话为中心：侧边栏按 run 列出各个会话，点进去就是和它的对话；Planner 的计划卡片直接出现在对话里，
-批准后任务实时推进。每轮回复下有一行改动摘要（改了哪些文件、增删多少行），右侧工具列可以按轮看 diff、看任务详情和原始事件流。
+界面以对话为中心：聊天通过 `work_start` 发起的 run 使用独立主导，原聊天保留；侧边栏按「对话 → run → 成员」展开，
+从首页发起和没有来源的旧 run 仍独立显示。聊天中开始的 Work 默认自动批准计划、自动落地；落地遇到主工作区未提交的改动时，
+结果保留在 run 分支，交给你之后处理。结束摘要不唤醒父聊天，随它的下一次消息带入。设计见 [会话优先设计](docs/SESSION-FIRST.md)。
+每轮回复下有一行改动摘要（改了哪些文件、增删多少行），右侧工具列可以按轮看 diff、看任务详情和原始事件流。
 主题在「设置」里选：跟随系统、浅色（素白 / 纸 / 雾）、深色。
 
 ```sh
@@ -201,3 +205,13 @@ cargo test --workspace
 
 端到端测试用 `crates/mock-agent`：一个可编程的 ACP agent，按提示里的 `[write …]`、`[call …]` 指令行事，
 不需要任何 LLM 或账号就能跑通完整流水线。
+
+发版（在干净的 main 上）：
+
+```sh
+node scripts/release.mjs --dry-run   # 只跑检查
+node scripts/release.mjs             # 补丁位 +1，也可以写死 node scripts/release.mjs 0.2.0
+```
+
+对齐 `Cargo.toml` 与 `apps/gui/package.json` 的版本号、提交、打 tag、打包发到
+`CrossAgents-releases`，发布成功之后才 push，最后核对安装包和 `latest.yml` 在不在。

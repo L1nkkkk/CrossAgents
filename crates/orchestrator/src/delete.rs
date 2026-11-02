@@ -48,9 +48,51 @@ pub struct DeletedRunAgents {
 }
 
 impl Orchestrator {
+    /// Explicitly releases a finished run's sessions and managed checkouts, keeping its
+    /// history and branches. This is the lifecycle boundary for future cleanup policies.
+    pub async fn cleanup_run(&self, id: RunId, force: bool) -> Result<DeletedRun, CoreError> {
+        self.clean_run(
+            id,
+            DeleteRun {
+                branches: false,
+                force,
+            },
+            false,
+        )
+        .await
+    }
+
     pub async fn delete_run(&self, id: RunId, opts: DeleteRun) -> Result<DeletedRun, CoreError> {
+        self.clean_run(id, opts, true).await
+    }
+
+    async fn clean_run(
+        &self,
+        id: RunId,
+        opts: DeleteRun,
+        delete: bool,
+    ) -> Result<DeletedRun, CoreError> {
+        let work_id = self.store.get_run(id).await?.work_id;
+        let _work_guard = if let Some(id) = work_id {
+            Some(self.lock_card(&format!("work:{id}")).await)
+        } else {
+            None
+        };
         let _guard = self.lock(id).await;
         let run = self.store.get_run(id).await?;
+        if run.work_id.is_some()
+            && self
+                .store
+                .list_runs()
+                .await?
+                .into_iter()
+                .find(|r| r.work_id == run.work_id)
+                .is_some_and(|latest| latest.id != id)
+        {
+            return Err(CoreError::Conflict(
+                "only the last round in a work group can be deleted or cleaned up".into(),
+            ));
+        }
         if !run.status.is_terminal() {
             return Err(CoreError::Conflict(format!(
                 "the run is {:?}: cancel it first",
@@ -74,12 +116,27 @@ impl Orchestrator {
             )));
         }
         // a. Work that is only in the checkout's files would go with it; the branch keeps
-        // what was committed, so only an unlanded run has anything to lose.
-        let dirty = self.checkout_changes(&run).await?;
-        if !dirty.is_empty() && run.landed.is_none() && !opts.force {
+        // what was committed. Later edits and unfinished worker results must survive too.
+        let mut dirty = self.checkout_changes(&run).await?;
+        for task in self.store.list_tasks(id).await? {
+            if let Some(path) = task.worktree.as_deref()
+                && self.owns_checkout(&run, path)
+                && path.exists()
+                && self.workspaces.versioned(path).await
+            {
+                dirty.extend(
+                    self.workspaces
+                        .uncommitted(path)
+                        .await?
+                        .into_iter()
+                        .map(|file| format!("task #{}: {file}", task.key)),
+                );
+            }
+        }
+        if !dirty.is_empty() && !opts.force {
             return Err(CoreError::ConflictFiles {
                 message: format!(
-                    "{} has uncommitted changes and the run never landed, so deleting it would \
+                    "{} has uncommitted changes, so cleaning it up would \
                      throw them away:\n{}\nCommit them, or delete it with force.",
                     self.integration_path(&run).display(),
                     dirty.join("\n")
@@ -102,11 +159,91 @@ impl Orchestrator {
             }
         }
 
+        // Finished runs released their scheduling claims without ending the conversation.
+        // Only their own retained lead, still in their managed checkout and not claimed
+        // elsewhere, belongs to this cleanup. Never take a session from a newer run.
+        let dir = self.integration_path(&run);
+        if self.owns_checkout(&run, &dir)
+            && let Ok(lead) = self.store.get_agent(&AgentKey::Id(run.planner)).await
+            && lead.cwd == dir
+            && lead.archived_at.is_none()
+        {
+            if self.store.claim_of(lead.id).await?.is_some() {
+                done.warnings.push(format!(
+                    "{} is still claimed; keeping its checkout",
+                    lead.name
+                ));
+            } else if run
+                .lead_note
+                .as_deref()
+                .is_some_and(|n| n.contains(crate::engine::COPIED_LEAD_NOTE))
+            {
+                match self.host.archive_agent_after_turn(lead.id).await {
+                    Ok(true) => {
+                        if !done.agents.archived.contains(&lead.name) {
+                            done.agents.archived.push(lead.name);
+                        }
+                    }
+                    Ok(false) => {
+                        self.leaving.lock().unwrap().insert(lead.id);
+                        // Archival may have landed between the host call and registering
+                        // the callback, exactly as in claims::put_away.
+                        let archived = self
+                            .store
+                            .get_agent(&AgentKey::Id(lead.id))
+                            .await?
+                            .archived_at
+                            .is_some();
+                        if archived {
+                            self.leaving.lock().unwrap().remove(&lead.id);
+                            if !done.agents.archived.contains(&lead.name) {
+                                done.agents.archived.push(lead.name);
+                            }
+                        } else {
+                            done.warnings.push(format!(
+                                "{} is finishing its turn; keeping its checkout",
+                                lead.name
+                            ));
+                        }
+                    }
+                    Err(err) => done
+                        .warnings
+                        .push(format!("cannot archive {}: {err}", lead.name)),
+                }
+            } else {
+                match self.host.send_home(lead.id).await {
+                    Ok(true) => {
+                        if !done.agents.returned.contains(&lead.name) {
+                            done.agents.returned.push(lead.name);
+                        }
+                    }
+                    Ok(false) => done.warnings.push(format!(
+                        "{} is finishing its turn; keeping its checkout",
+                        lead.name
+                    )),
+                    Err(err) => done
+                        .warnings
+                        .push(format!("cannot send {} home: {err}", lead.name)),
+                }
+            }
+        }
+        // Any release failure conservatively keeps all checkouts and targets. Claims may
+        // already have gone, so absence of a claim is not evidence that a process stopped.
+        let released = done.warnings.is_empty();
+
         // c. What is left of the tasks' checkouts (a merged task's went when it merged).
         let tasks = self.store.list_tasks(id).await?;
         for task in &tasks {
             let Some(path) = &task.worktree else { continue };
             if !path.exists() {
+                continue;
+            }
+            if !released || !self.checkout_unused(&run, path).await? {
+                done.warnings.push(format!(
+                    "keeping task #{} checkout {}",
+                    task.key,
+                    path.display()
+                ));
                 continue;
             }
             match self.remove_worktree(&run, path).await {
@@ -123,9 +260,11 @@ impl Orchestrator {
         // run works in the repository itself, which stays. An archived lead copied for the run
         // kept it as its directory; with the run gone nothing can bring it back, so the copy
         // goes back to its workspace, marked as unable to carry on its conversation there.
-        if !run.in_place {
+        if released && self.checkout_unused(&run, &dir).await? {
             let dir = self.integration_path(&run);
-            self.move_out_of(&run, &dir).await;
+            if delete {
+                self.move_out_of(&run, &dir).await;
+            }
             if dir.exists() {
                 match self.remove_worktree(&run, &dir).await {
                     Ok(()) => done.worktrees.push(dir.display().to_string()),
@@ -135,11 +274,22 @@ impl Orchestrator {
                 }
             }
         }
-        self.remove_run_build_into(&run, &mut done);
+        if dir.exists()
+            && self.owns_checkout(&run, &dir)
+            && !self.checkout_unused(&run, &dir).await?
+        {
+            done.warnings
+                .push(format!("keeping occupied checkout {}", dir.display()));
+        }
+        if done.warnings.is_empty() {
+            self.remove_run_build_into(&run, &mut done);
+        } else {
+            self.prune_run_build(&run).await;
+        }
 
         // e. The branches, when they are the person's to lose: a landed run's carry nothing
         // that is not on the base branch, an unlanded one's carry everything.
-        if opts.branches || run.landed.is_some() {
+        if delete && (opts.branches || run.landed.is_some()) {
             for branch in self.run_branches(&run, &tasks) {
                 match self.ws_for(&run).delete_branch(&run.repo, &branch).await {
                     Ok(()) => done.branches.push(branch),
@@ -151,9 +301,37 @@ impl Orchestrator {
         }
 
         // f. The run itself, then the word that it is gone.
-        self.store.delete_run(id).await?;
-        self.publish(EventKind::RunDeleted { run_id: id }).await;
+        if delete {
+            self.store.delete_run(id).await?;
+            self.publish(EventKind::RunDeleted { run_id: id }).await;
+        }
         Ok(done)
+    }
+
+    /// Ownership is an exact managed tree of this run, never the user's repository or an
+    /// agent's home. Future shared workspaces/run_next must resolve their owner here.
+    pub(crate) fn owns_checkout(&self, run: &Run, dir: &Path) -> bool {
+        !run.in_place
+            && dir != run.repo
+            && (dir.parent() == Some(self.config.worktrees.join(short(run.id)).as_path())
+                || dir == self.integration_path(run))
+            && dir
+                .file_name()
+                .is_some_and(|n| n != "targets" && n != "target")
+    }
+
+    pub(crate) async fn checkout_unused(&self, run: &Run, dir: &Path) -> Result<bool, CoreError> {
+        if !self.owns_checkout(run, dir) {
+            return Ok(false);
+        }
+        for agent in self.store.list_agents().await? {
+            if agent.home().starts_with(dir)
+                || (agent.cwd.starts_with(dir) && agent.archived_at.is_none())
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Puts the sessions whose directory is `dir` back in their workspace. One whose driver
@@ -273,6 +451,16 @@ impl Orchestrator {
     /// `<short>/target`, then the run's directory once nothing else is in it; records what went.
     fn remove_run_build_into(&self, run: &Run, done: &mut DeletedRun) {
         let key = short(run.id);
+        let integration_key = self.integration_key(run);
+        if integration_key != key && !self.integration_path(run).exists() {
+            for (path, _) in crate::workspace::remove_target(
+                &self.config.worktrees,
+                &integration_key,
+                "integration",
+            ) {
+                done.worktrees.push(path.display().to_string());
+            }
+        }
         for (path, _size) in crate::workspace::remove_run_build_dirs(&self.config.worktrees, &key) {
             done.worktrees.push(path.display().to_string());
         }

@@ -150,6 +150,9 @@ pub struct AgentProfile {
     /// An emoji or up to two letters; clients fall back to initials.
     #[serde(default)]
     pub avatar: Option<String>,
+    /// A picture from the hub's avatar gallery (its content hash); shown instead of `avatar`.
+    #[serde(default)]
+    pub avatar_image: Option<String>,
     /// Avatar colour, one of [`AgentProfile::COLORS`].
     #[serde(default)]
     pub color: Option<String>,
@@ -173,6 +176,7 @@ impl AgentProfile {
             display_name: clean(self.display_name),
             title: clean(self.title),
             avatar: clean(self.avatar),
+            avatar_image: clean(self.avatar_image),
             color: clean(self.color),
             persona: clean(self.persona),
         };
@@ -190,6 +194,13 @@ impl AgentProfile {
             return Err(CoreError::Unsupported(format!(
                 "avatar is at most {} characters (an emoji or initials)",
                 Self::MAX_AVATAR
+            )));
+        }
+        if let Some(image) = &profile.avatar_image
+            && !(image.len() == 64 && image.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err(CoreError::Unsupported(format!(
+                "avatar image {image:?} is not a gallery picture"
             )));
         }
         if too_long(&profile.persona, Self::MAX_PERSONA) {
@@ -263,6 +274,11 @@ pub enum RunStatus {
 }
 
 impl RunStatus {
+    /// Adding a terminal status here means adding it to the `runs_one_open_per_work` index
+    /// too: it spells the same three out in SQL (`crates/store-sqlite/migrations/0011_works.sql`),
+    /// and a migration that has been applied cannot be edited — sqlx checksums it — so the
+    /// new status needs a migration of its own that rebuilds the index. Until then a work
+    /// whose run ended in that status would refuse to start another round.
     pub fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
@@ -308,6 +324,11 @@ impl RunConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Run {
+    /// The conversation that proposed this work; its independent lead is `planner`.
+    #[serde(default)]
+    pub origin_chat_id: Option<AgentId>,
+    #[serde(default)]
+    pub work_id: Option<crate::ids::WorkId>,
     #[serde(default)]
     pub continuation: Option<Box<ContinuationState>>,
     pub id: RunId,
@@ -351,6 +372,18 @@ pub struct Run {
     /// Whether those checks verified the run; none yet when nothing called for them.
     #[serde(default)]
     pub checks_state: Option<ChecksState>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A persistent workspace containing successive runs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Work {
+    pub id: crate::ids::WorkId,
+    pub title: String,
+    pub repo: PathBuf,
+    pub lead: AgentId,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

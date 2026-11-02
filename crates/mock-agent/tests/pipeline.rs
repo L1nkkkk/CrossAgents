@@ -631,6 +631,71 @@ async fn planner_assigns_tasks_by_specialty() {
     assert_eq!(briefs, 2);
 }
 
+/// A chat session is a `planner` by role, yet the lead may give it a task or ask it for a
+/// review like anyone: a role is how a session was made, not what it may do.
+#[tokio::test]
+async fn chat_sessions_can_take_tasks_and_review() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    t.add_agent_in("pal", Some("haiku"), "planner", repo.path())
+        .await;
+    t.add_agent_in("leo", Some("opus"), "planner", repo.path())
+        .await;
+    let mut w = t.watch().await;
+
+    let request_review = call("review_request", json!({ "task": "g", "reviewer": "leo" }));
+    let verdict = call(
+        "review_submit",
+        json!({ "task_id": "{task_id}", "approve": true, "notes": format!("lgtm {}", accept_last("g")) }),
+    )
+    .replacen("[call ", "[call#mock-opus ", 1);
+    let worker = format!(
+        "[write#mock-haiku g.txt=v1] {} {verdict}",
+        call(
+            "task_complete",
+            json!({ "task_id": "{task_id}", "summary": format!("wrote g {request_review}") })
+        )
+        .replacen("[call ", "[call#mock-haiku ", 1),
+    );
+    let mut g = task("g", worker, &[]);
+    g["assignee"] = json!("pal");
+    let id = start_run(
+        &t,
+        request(json!([g])),
+        json!({ "auto_approve": true, "team": ["coder", "pal", "leo"] }),
+    )
+    .await;
+    w.until("run completed", run_status_is(&id, RunStatus::Completed))
+        .await;
+    assert!(w.seen.iter().any(task_is("g", TaskStatus::Reviewing)));
+    let detail = detail(&t, &id).await;
+    assert!(
+        detail["tasks"][0]["report"]["review"]
+            .as_str()
+            .is_some_and(|r| r.starts_with("lgtm")),
+        "{detail}"
+    );
+    // Named in the team, they are on the lead's roster like anyone else.
+    let lead: Value = t
+        .get("/v1/agents/boss/transcript")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let kickoff = lead["turns"][0]["input"].as_str().unwrap();
+    assert!(
+        kickoff.contains(
+            "
+team (name one as a task's assignee or reviewer):"
+        ),
+        "{kickoff}"
+    );
+    assert!(
+        kickoff.contains("- pal — no title · haiku") && kickoff.contains("- leo — no title · opus"),
+        "{kickoff}"
+    );
+}
+
 #[tokio::test]
 async fn unknown_assignee_rejects_the_plan() {
     let repo = git_repo();
@@ -1069,4 +1134,120 @@ async fn the_approval_settles_policy_caps_and_who_does_each_task() {
     // One at a time: b waits while a runs.
     let running = tasks.iter().filter(|t| t["status"] == "running").count();
     assert_eq!(running, 1, "{tasks:?}");
+}
+
+#[tokio::test]
+async fn asking_again_replaces_the_open_question() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+
+    // The worker asks, learns more in the same turn and asks again in other words. The second
+    // wording replaces the first (it used to be refused: "WaitingAnswer -> WaitingAnswer"),
+    // and the answer to it gets the task done.
+    let complete = call(
+        "task_complete",
+        json!({ "task_id": "{task_id}", "summary": format!("green {}", accept_last("q")) }),
+    );
+    let answer = call(
+        "task_answer",
+        json!({ "task": "q", "answer": format!("[write color.txt=green] {complete}") }),
+    );
+    let asks = format!(
+        "{} {}",
+        call(
+            "task_ask",
+            json!({ "task_id": "{task_id}", "question": "which color?" })
+        ),
+        call(
+            "task_ask",
+            json!({ "task_id": "{task_id}", "question": format!("which color, now that I synced? {answer}") })
+        ),
+    );
+    let id = start_run(
+        &t,
+        request(json!([task("q", asks, &[])])),
+        json!({ "auto_approve": true }),
+    )
+    .await;
+    w.until("run completed", run_status_is(&id, RunStatus::Completed))
+        .await;
+    let detail = detail(&t, &id).await;
+    let branch = detail["run"]["branch"].as_str().unwrap();
+    assert_eq!(
+        git_show(repo.path(), &format!("{branch}:color.txt")),
+        "green"
+    );
+    // The issuer was asked the second wording: the re-ask went through.
+    let boss = t
+        .get("/v1/agents/boss/transcript")
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(boss.contains("now that I synced"), "{boss}");
+    let coder = t
+        .get("/v1/agents/coder/transcript")
+        .await
+        .text()
+        .await
+        .unwrap();
+    assert!(!coder.contains("invalid task transition"), "{coder}");
+}
+
+#[tokio::test]
+async fn a_task_starts_beside_a_branch_a_dropped_attempt_left() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+
+    // `a` never reports, so `r` waits; meanwhile a branch is left where `r`'s would go, as a
+    // dropped attempt whose checkout was kept leaves it. `r` must start beside it, not fail.
+    let r = task(
+        "r",
+        goal("[write r.txt=ok]", &format!("r done {}", accept_last("r"))),
+        &["a"],
+    );
+    let plan = json!([task("a", "[write a.txt=alpha]".into(), &[]), r]);
+    let id = start_run(&t, request(plan), json!({ "auto_approve": true })).await;
+    w.until("a stalled", task_is("a", TaskStatus::Stalled))
+        .await;
+    let branch = detail(&t, &id).await["run"]["branch"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let leftover = format!("{branch}-r");
+    let out = std::process::Command::new("git")
+        .args(["branch", &leftover, &branch])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+
+    t.send("boss", &accept("a")).await;
+    w.until("run completed", run_status_is(&id, RunStatus::Completed))
+        .await;
+    let detail = detail(&t, &id).await;
+    let r = detail["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["key"] == "r")
+        .unwrap();
+    assert_eq!(r["status"], "merged", "{detail}");
+    assert_eq!(git_show(repo.path(), &format!("{branch}:r.txt")), "ok");
+    // The branch it found is left as it was.
+    assert!(
+        std::process::Command::new("git")
+            .args([
+                "rev-parse",
+                "--verify",
+                "-q",
+                &format!("refs/heads/{leftover}")
+            ])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success()
+    );
 }

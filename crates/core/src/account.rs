@@ -16,6 +16,10 @@ use crate::error::CoreError;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Account {
+    /// Explicit CodeBuddy site: uses a private login profile as well as settings.
+    /// None preserves the existing machine login behavior.
+    #[serde(default)]
+    pub codebuddy_site: Option<CodebuddySite>,
     /// Unique, same rules as agent names (e.g. `codex-main`).
     pub id: String,
     /// The provider that manages it, e.g. `codex`.
@@ -24,6 +28,23 @@ pub struct Account {
     /// The provider's home for this account (for Codex: its `CODEX_HOME`).
     pub home: PathBuf,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum CodebuddySite {
+    China,
+    International,
+}
+
+impl CodebuddySite {
+    pub fn environment(self) -> &'static str {
+        match self {
+            Self::China => "internal",
+            Self::International => "external",
+        }
+    }
 }
 
 /// Where a status figure came from.
@@ -172,6 +193,23 @@ pub struct SessionUsage {
     /// Who started it, e.g. `crossagents` or the vendor's own CLI.
     pub originator: Option<String>,
     pub totals: TokenTotals,
+    /// Each model call of the session, oldest first, when the vendor's logs time them.
+    /// Empty when only the session total is known: a session is then counted on the day it
+    /// started, while a session with requests is counted per request (see
+    /// [`crate::AccountProvider::usage_sessions`]).
+    #[serde(default)]
+    pub requests: Vec<RequestUsage>,
+}
+
+/// One model call (one request to the vendor), timed by the vendor's own log.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RequestUsage {
+    /// When the request was made (UTC; a usage series buckets it by local time).
+    pub at: DateTime<Utc>,
+    /// The model it asked for, when the log says (a session may switch models mid-way).
+    pub model: Option<String>,
+    /// What it used. `sessions` stays 0: a request is not a session.
+    pub totals: TokenTotals,
 }
 
 /// A model the account may use.
@@ -216,6 +254,12 @@ pub trait AccountProvider: Send + Sync {
     async fn status(&self, account: &Account) -> AccountStatus;
     /// Per-session token use from the vendor's local logs, newest first.
     async fn sessions(&self, account: &Account) -> Result<Vec<SessionUsage>, CoreError>;
+    /// The same, with each request's own time and tokens (`SessionUsage::requests`) for the
+    /// vendors whose logs record them. The default drops that detail, so a caller falls back
+    /// to session-day figures.
+    async fn usage_sessions(&self, account: &Account) -> Result<Vec<SessionUsage>, CoreError> {
+        self.sessions(account).await
+    }
     /// Models this account may use, best first. Empty if unknown.
     async fn models(&self, account: &Account) -> Vec<ModelInfo>;
     /// The command that logs this account in (interactive, usually opens a browser).
@@ -252,6 +296,22 @@ mod tests {
     fn masks_email() {
         assert_eq!(mask_email("zhang@gmail.com"), "z***@gmail.com");
         assert_eq!(mask_email("nope"), "***");
+    }
+
+    #[test]
+    fn codebuddy_accounts_keep_old_logins_and_sites_round_trip() {
+        let old = serde_json::json!({"id":"codebuddy", "provider":"codebuddy", "label":"old", "home":"/old", "created_at":"2026-10-30T00:00:00Z"});
+        let account: Account = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(account.codebuddy_site, None);
+        for site in ["china", "international"] {
+            let mut data = old.clone();
+            data["codebuddy_site"] = site.into();
+            let account: Account = serde_json::from_value(data).unwrap();
+            assert_eq!(
+                serde_json::to_value(account).unwrap()["codebuddy_site"],
+                site
+            );
+        }
     }
 
     #[test]

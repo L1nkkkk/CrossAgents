@@ -6,7 +6,7 @@ test("models fall into their family, whatever gateway prefix they carry", () => 
   const family = (m: string) => modelFamily(m).key;
   assert.equal(family("claude-4.6-opus-1m-context"), "claude");
   assert.equal(family("opus"), "claude");
-  assert.equal(family("gpt-6.1-sol"), "gpt");
+  assert.equal(family("gpt-6.1-sol"), "openai");
   assert.equal(family("tokenhub_deepseek-v4-flash"), "deepseek");
   assert.equal(family("ext-glm-5.2"), "glm");
   assert.equal(family("tokenhub_kimi-k3"), "kimi");
@@ -15,14 +15,16 @@ test("models fall into their family, whatever gateway prefix they carry", () => 
   assert.equal(family("hy4-preview-ioa"), "hunyuan");
   assert.equal(family("minimax-m3-ioa"), "minimax");
   assert.equal(family("echo"), "other");
-  assert.equal(family("mimo-v2.6-pro"), "other");
+  assert.equal(family("mimo-v2.6-pro"), "mimo");
+  assert.equal(family("grok-4.2"), "grok");
+  assert.equal(family("doubao-seed-1.6"), "doubao");
 });
 
 test("groups come in a fixed order, newest model first", () => {
   const groups = groupModels(["echo", "glm-5", "claude-opus-5", "glm-5.3", "claude-4.6-sonnet", "gpt-5.4"]);
   assert.deepEqual(
     groups.map((g) => g.key),
-    ["claude", "gpt", "glm", "other"],
+    ["claude", "openai", "glm", "other"],
   );
   assert.deepEqual(groups.find((g) => g.key === "glm")?.models, ["glm-5.3", "glm-5"]);
   const glm = groupModels(["ext-glm-5.2", "glm-5.2", "tokenhub_glm-5.3-flash", "glm-4.7", "glm-5.3-flash"])[0].models;

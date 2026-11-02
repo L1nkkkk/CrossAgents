@@ -1,7 +1,7 @@
 /* The commit graph (commitgraph.tsx). Branch colours come from theme variables, so light and
    dark both read: base grey, run branch the accent, tasks in turn. */
 
-.cgraph { --g0: var(--text-2); --g1: var(--accent); --g2: var(--codex); --g3: var(--claude); --g4: var(--warn); --g5: var(--danger); --g6: var(--codebuddy); --g7: var(--ok); --gx: var(--muted); display: flex; flex-direction: column; gap: 8px; }
+.cgraph { --g0: var(--text-2); --g1: var(--accent); --g2: var(--codex); --g3: var(--claude); --g4: var(--warn); --g5: var(--danger); --g6: var(--codebuddy); --g7: var(--ok); --gx: var(--muted); display: flex; flex-direction: column; gap: 8px; min-height: 0; min-width: 0; flex: 1; container-type: inline-size; }
 .cgraph .g-c0 { --g: var(--g0); }
 .cgraph .g-c1 { --g: var(--g1); }
 .cgraph .g-c2 { --g: var(--g2); }
@@ -12,11 +12,17 @@
 .cgraph .g-c7 { --g: var(--g7); }
 .cgraph .g-cx { --g: var(--gx); }
 
-.cgraph-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--text-2); }
+.tool-body-graph { display: flex; flex-direction: column; overflow: hidden; }
+.cgraph-legend-wrap { display: flex; align-items: flex-start; gap: 8px; position: relative; flex: none; min-width: 0; }
+.cgraph-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--text-2); max-height: 44px; overflow: auto; flex: 1; }
+.cgraph-legend-more { position: relative; flex: none; }
+.cgraph-legend-popover { position: absolute; right: 0; top: 100%; z-index: 10; width: min(300px, 75vw); padding: 8px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 4px 16px #0004; }
+.cgraph-legend-popover input { width: 100%; }
+.cgraph-legend-results { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow: auto; padding-top: 8px; }
 .cgraph-legend-item { display: inline-flex; align-items: center; gap: 5px; }
 .cgraph-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--g); }
 
-.cgraph-list { border: 1px solid var(--border); border-radius: var(--radius); overflow: auto; max-height: 420px; background: var(--surface); }
+.cgraph-list { border: 1px solid var(--border); border-radius: var(--radius); overflow: auto; flex: 1 1 0; min-height: 0; background: var(--surface); }
 .cgraph-row { display: flex; align-items: center; gap: 10px; width: 100%; height: 28px; padding: 0 10px 0 2px; border: 0; border-radius: 0; background: none; color: var(--text); text-align: left; font: inherit; font-size: 13px; cursor: pointer; }
 .cgraph-row:hover { background: var(--hover); }
 .cgraph-row.active { background: var(--selected); box-shadow: inset 2px 0 0 var(--accent); }
@@ -35,11 +41,21 @@
 .cgraph-sha { flex: none; font-size: 11.5px; color: var(--muted); background: none; }
 .cgraph-more { padding: 6px 12px; border-top: 1px solid var(--border); text-align: center; }
 
-.cgraph-diff { display: flex; flex-direction: column; gap: 8px; }
+.cgraph-diff { display: flex; flex-direction: column; gap: 8px; flex: 1 1 0; min-height: 0; overflow: auto; }
 .cgraph-diff-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .cgraph-diff-head .cgraph-subject { font-weight: 600; }
 .diff-head button.file-link { font-size: 12px; }
 
-/* The panel the session's toolbar opens. */
-/* In the tool column the list takes up to half the window, so the picked commit's diff stays in view. */
-.tool-body .cgraph-list { max-height: 45vh; }
+
+.cgraph-ref-count, .cgraph-time-short { display: none; }
+@container (max-width: 559px) {
+  .cgraph-row { gap: 6px; }
+  .cgraph-author, .cgraph-sha, .cgraph-time-full { display: none; }
+  .cgraph-time-short { display: inline; }
+  .cgraph-time { width: 36px; }
+  .cgraph-ref { max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cgraph-ref ~ .cgraph-ref { display: none; }
+  .cgraph-ref-count { display: inline; flex: none; font-size: 11px; color: var(--muted); }
+  .cgraph-row .cgraph-subject { flex: 1; min-width: 0; }
+  .cgraph-merge-tag { display: none; }
+}

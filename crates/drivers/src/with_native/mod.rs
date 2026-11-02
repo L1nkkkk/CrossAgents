@@ -874,7 +874,11 @@ mod tests {
         )
         .unwrap();
         let user_mcp = root.path().join("mine.json");
-        std::fs::write(&user_mcp, r#"{"mcpServers":{"gongfeng":{"url":"https://x"}}}"#).unwrap();
+        std::fs::write(
+            &user_mcp,
+            r#"{"mcpServers":{"gongfeng":{"url":"https://x"}}}"#,
+        )
+        .unwrap();
         std::fs::write(
             home.join("bg-agent-client.yaml"),
             format!(

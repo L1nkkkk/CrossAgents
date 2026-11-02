@@ -39,6 +39,9 @@ pub enum AccountCommand {
 
 #[derive(Debug, Args)]
 pub struct AddArgs {
+    /// New independent CodeBuddy site login; cannot import the machine login.
+    #[arg(long, value_parser = ["china", "international"], conflicts_with = "import_default")]
+    pub codebuddy_site: Option<String>,
     /// Short id, e.g. `codex-work`.
     pub id: String,
     #[arg(long, default_value = "codex")]
@@ -104,6 +107,10 @@ pub async fn run(ctx: &Context, cmd: AccountCommand) -> Result<()> {
         }
         AccountCommand::Add(args) => {
             let req = CreateAccountRequest {
+                codebuddy_site: args
+                    .codebuddy_site
+                    .map(|s| serde_json::from_value(serde_json::Value::String(s)))
+                    .transpose()?,
                 id: args.id,
                 provider: args.provider,
                 label: args.label,
@@ -111,6 +118,14 @@ pub async fn run(ctx: &Context, cmd: AccountCommand) -> Result<()> {
                 import_default: args.import_default,
             };
             let account: Account = client.post("/v1/accounts", &req).await?;
+            if req.codebuddy_site.is_some() && account.codebuddy_site != req.codebuddy_site {
+                client
+                    .delete(&format!("/v1/accounts/{}", account.id))
+                    .await?;
+                anyhow::bail!(
+                    "the hub does not support independent CodeBuddy sites; update the hub and CLI together. The new registration was removed and no login was started"
+                );
+            }
             if ctx.json {
                 return print_json(&account);
             }

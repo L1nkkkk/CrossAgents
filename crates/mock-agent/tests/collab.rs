@@ -28,15 +28,24 @@ async fn whoami_lists_groups_and_tools() {
     })
     .await;
     let out = w.output();
+    // A plain chat outside any run: no role's group, no run tools (docs/SESSION-FIRST.md §7).
     assert!(
-        out.contains(r#""everyone","#) && out.contains(r#""assignee""#),
+        out.contains(r#""everyone","#) && out.contains(r#""conversation""#),
         "{out}"
     );
+    assert!(!out.contains(r#""assignee""#), "{out}");
     assert!(
-        out.contains("remind_set") && out.contains("task_complete"),
+        out.contains("remind_set") && out.contains("work_start") && out.contains("agent_spawn"),
         "{out}"
     );
-    assert!(!out.contains("plan_submit"), "{out}");
+    for run_tool in [
+        "plan_submit",
+        "task_complete",
+        "task_create",
+        "workspace_run",
+    ] {
+        assert!(!out.contains(run_tool), "{run_tool}: {out}");
+    }
 }
 
 #[tokio::test]

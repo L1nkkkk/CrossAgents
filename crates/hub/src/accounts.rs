@@ -4,13 +4,14 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use crossagents_core::process::NoWindow;
+use crossagents_core::process::{NoWindow, Tree, spawn_tree};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local, Utc};
 use crossagents_api_types::{
     AccountUsageGroup, AccountUsageResponse, AccountUsageRow, CreateAccountRequest, LoginStarted,
+    UsageSeriesGroup, UsageSeriesResponse,
 };
 use crossagents_core::{
     Account, AccountProvider, AccountStatus, Agent, AgentId, AgentKey, CoreError, DataSource,
@@ -19,19 +20,35 @@ use crossagents_core::{
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, mpsc};
 
-const ORIGIN_CROSSAGENTS: &str = "crossagents";
+/// The `originator` Claude Code and Codex record for a session CrossAgents started.
+pub(crate) const ORIGIN_CROSSAGENTS: &str = "crossagents";
 const LOGIN_URL_WAIT: Duration = Duration::from_secs(20);
 /// How long a login served as a local page may take to start answering.
 const SERVE_READY_WAIT: Duration = Duration::from_secs(30);
 /// How often the account is read while its login page is up.
 const SERVE_LOGIN_POLL: Duration = Duration::from_secs(3);
-/// When a login page nobody finishes is closed.
-const SERVE_LOGIN_LIMIT: Duration = Duration::from_secs(15 * 60);
+/// When a login nobody finishes is stopped, page or not.
+const LOGIN_LIMIT: Duration = Duration::from_secs(15 * 60);
 /// A status older than this is refreshed in the background while it is still served.
 const STATUS_TTL: Duration = Duration::from_secs(60);
 
 /// The last status read per account, with when.
 type Statuses = Arc<std::sync::Mutex<HashMap<String, (Instant, AccountStatus)>>>;
+
+/// A running login tool with everything it started. On Windows a tool found as a `.cmd`
+/// runs under `cmd.exe`, so killing the child alone would leave the real tool (`node`)
+/// running; the [`Tree`] ends them all, and does when the hub exits too.
+struct LoginProcess {
+    child: tokio::process::Child,
+    tree: Tree,
+}
+
+impl LoginProcess {
+    fn kill(&mut self) {
+        self.tree.end();
+        let _ = self.child.start_kill();
+    }
+}
 
 pub struct Accounts {
     bus: Arc<EventBus>,
@@ -39,7 +56,7 @@ pub struct Accounts {
     /// Where new accounts' homes go: `<crossagents home>/accounts`.
     root: PathBuf,
     /// Running login processes by account id.
-    logins: Arc<Mutex<HashMap<String, tokio::process::Child>>>,
+    logins: Arc<Mutex<HashMap<String, LoginProcess>>>,
     /// The quota agents last reported per account, with when.
     observed: std::sync::Mutex<HashMap<String, (DateTime<Utc>, RateLimits)>>,
     /// Status reads, served at once: a provider read can take seconds (it may start the
@@ -47,6 +64,8 @@ pub struct Accounts {
     statuses: Statuses,
     /// Accounts whose status is being read in the background.
     refreshing: Arc<std::sync::Mutex<HashSet<String>>>,
+    /// Serialize directory claims so concurrent site accounts cannot share a profile.
+    creating: Mutex<()>,
 }
 
 impl Accounts {
@@ -66,6 +85,7 @@ impl Accounts {
             observed: std::sync::Mutex::default(),
             statuses: Arc::default(),
             refreshing: Arc::default(),
+            creating: Mutex::new(()),
         }
     }
 
@@ -81,6 +101,7 @@ impl Accounts {
                 continue;
             }
             let probe = Account {
+                codebuddy_site: None,
                 id: name.clone(),
                 provider: name.clone(),
                 label: String::new(),
@@ -175,7 +196,11 @@ impl Accounts {
     }
 
     pub async fn create(&self, req: CreateAccountRequest) -> Result<Account, CoreError> {
+        let _creating = self.creating.lock().await;
         validate_slug(&req.id)?;
+        if req.codebuddy_site.is_some() && (req.provider != "codebuddy" || req.import_default) {
+            return Err(CoreError::Conflict("a CodeBuddy site requires a new, independent CodeBuddy login; it cannot import the machine login".into()));
+        }
         let provider = self.provider(&req.provider)?;
         let home = match (req.home, req.import_default) {
             (Some(home), _) => PathBuf::from(home),
@@ -186,7 +211,34 @@ impl Accounts {
         };
         std::fs::create_dir_all(&home)
             .map_err(|e| CoreError::Storage(format!("cannot create {}: {e}", home.display())))?;
+        let home = if req.codebuddy_site.is_some() {
+            let home = dunce::canonicalize(&home)
+                .map_err(|e| CoreError::Storage(format!("cannot resolve account home: {e}")))?;
+            if provider
+                .default_home()
+                .is_some_and(|default| same_path(&default, &home))
+                || self
+                    .store()
+                    .list_accounts()
+                    .await?
+                    .iter()
+                    .any(|a| same_path(&a.home, &home))
+            {
+                return Err(CoreError::Conflict(
+                    "use a separate home for each CodeBuddy site account".into(),
+                ));
+            }
+            for directory in ["profile/AppData/Roaming", "profile/AppData/Local"] {
+                std::fs::create_dir_all(home.join(directory)).map_err(|e| {
+                    CoreError::Storage(format!("cannot create private login profile: {e}"))
+                })?;
+            }
+            home
+        } else {
+            home
+        };
         let account = Account {
+            codebuddy_site: req.codebuddy_site,
             label: req.label.unwrap_or_else(|| req.id.clone()),
             id: req.id,
             provider: req.provider,
@@ -206,8 +258,8 @@ impl Accounts {
     pub async fn remove(&self, id: &str) -> Result<(), CoreError> {
         self.store().delete_account(id).await?;
         self.statuses.lock().unwrap().remove(id);
-        if let Some(mut child) = self.logins.lock().await.remove(id) {
-            let _ = child.start_kill();
+        if let Some(mut login) = self.logins.lock().await.remove(id) {
+            login.kill();
         }
         self.bus
             .publish(EventKind::AccountRemoved { id: id.to_owned() })
@@ -447,6 +499,53 @@ impl Accounts {
         })
     }
 
+    /// `GET /v1/usage/series` (see [`crate::usage_series`]): token use and cost day by day,
+    /// across every account or one. An account whose logs cannot be read is reported in
+    /// `sources` with its reason; the rest of the answer stands.
+    pub(crate) async fn usage_series(
+        &self,
+        query: crate::usage_series::SeriesQuery,
+    ) -> Result<UsageSeriesResponse, CoreError> {
+        let picked: Vec<Account> = if query.source == "all" {
+            self.store().list_accounts().await?
+        } else {
+            vec![self.store().get_account(&query.source).await?]
+        };
+        let owners = if matches!(query.group, UsageSeriesGroup::Agent | UsageSeriesGroup::Run) {
+            session_owners(self.store().as_ref()).await?
+        } else {
+            HashMap::new()
+        };
+        let mut sources = Vec::with_capacity(picked.len());
+        for account in &picked {
+            // Each vendor's own logs, with every request timed where it records them.
+            let sessions = match self.provider(&account.provider) {
+                Ok(provider) => provider
+                    .usage_sessions(account)
+                    .await
+                    .map_err(|err| err.to_string()),
+                Err(err) => Err(err.to_string()),
+            };
+            sources.push(crate::usage_series::SourceData {
+                id: account.id.clone(),
+                label: if account.label.is_empty() {
+                    account.id.clone()
+                } else {
+                    account.label.clone()
+                },
+                provider: account.provider.clone(),
+                sessions,
+            });
+        }
+        Ok(crate::usage_series::build(
+            &query,
+            &sources,
+            &owners,
+            Local::now().date_naive(),
+            &|at| at.with_timezone(&Local).date_naive(),
+        ))
+    }
+
     /// Starts the provider's login tool for this account and returns the page to open.
     /// The outcome arrives later as `account.login_finished`.
     pub async fn login(&self, id: &str) -> Result<LoginStarted, CoreError> {
@@ -466,28 +565,30 @@ impl Accounts {
             .ok_or_else(|| CoreError::Agent("empty login command".into()))?;
         let display = login.command.join(" ");
         if let Some(mut old) = self.logins.lock().await.remove(id) {
-            let _ = old.start_kill();
+            old.kill();
         }
         let mut command = tokio::process::Command::new(resolve_program(program));
         command.args(args).no_window();
         for key in &login.env_remove {
             command.env_remove(key);
         }
-        let mut child = command
+        command
             .envs(&login.env)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
+            .kill_on_drop(true);
+        let (mut child, tree) = spawn_tree(&mut command)
             .map_err(|e| CoreError::Agent(format!("cannot start `{display}`: {e}")))?;
         let mut lines_rx = output_lines(&mut child);
+        let process = LoginProcess { child, tree };
         if let Some(page) = login.serves {
             return self
-                .serve_login(account, provider.clone(), child, lines_rx, page, display)
+                .serve_login(account, provider.clone(), process, lines_rx, page, display)
                 .await;
         }
-        self.logins.lock().await.insert(id.to_owned(), child);
+        let pid = process.child.id();
+        self.logins.lock().await.insert(id.to_owned(), process);
 
         let mut url = None;
         let mut tail = Vec::new();
@@ -516,13 +617,33 @@ impl Accounts {
         let statuses = self.statuses.clone();
         tokio::spawn(async move {
             let mut rest = Vec::new();
-            while let Some(line) = lines_rx.recv().await {
-                rest.push(line);
-            }
-            let exit = match logins.lock().await.remove(&id_owned) {
-                Some(mut child) => child.wait().await.ok(),
-                None => None, // replaced or cancelled
+            let limit = tokio::time::sleep(LOGIN_LIMIT);
+            tokio::pin!(limit);
+            let timed_out = loop {
+                tokio::select! {
+                    line = lines_rx.recv() => match line {
+                        Some(line) => rest.push(line),
+                        None => break false,
+                    },
+                    () = &mut limit => break true,
+                }
             };
+            let login = {
+                let mut logins = logins.lock().await;
+                match logins.get(&id_owned) {
+                    Some(login) if login.child.id() == pid => logins.remove(&id_owned),
+                    _ => None, // replaced or cancelled
+                }
+            };
+            let Some(mut login) = login else { return };
+            if timed_out {
+                login.kill();
+                rest.push(format!(
+                    "not logged in after {} minutes; the login was stopped",
+                    LOGIN_LIMIT.as_secs() / 60
+                ));
+            }
+            let exit = login.child.wait().await.ok();
             let status = provider.status(&account).await;
             record_status(&statuses, &id_owned, status.clone());
             let ok = exit.is_some_and(|e| e.success()) && status.logged_in;
@@ -550,13 +671,13 @@ impl Accounts {
     /// A login whose tool serves its page locally ([`LoginCommand::serves`]): waits until
     /// the page answers and returns it, then watches the account in the background and
     /// stops the server once it reports the login, the server stops, or
-    /// [`SERVE_LOGIN_LIMIT`] passes. Logging in again an account that already is logged in
+    /// [`LOGIN_LIMIT`] passes. Logging in again an account that already is logged in
     /// counts as done once a read sees it logged out and then in, else at the limit.
     async fn serve_login(
         &self,
         account: Account,
         provider: Arc<dyn AccountProvider>,
-        mut child: tokio::process::Child,
+        mut login: LoginProcess,
         lines: mpsc::UnboundedReceiver<String>,
         page: String,
         display: String,
@@ -571,7 +692,7 @@ impl Accounts {
                 None => break,
                 Some(_) => {}
             }
-            if let Ok(Some(exit)) = child.try_wait() {
+            if let Ok(Some(exit)) = login.child.try_wait() {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 return Err(CoreError::Agent(format!(
                     "`{display}` stopped ({exit}) before serving its login page{}",
@@ -579,7 +700,7 @@ impl Accounts {
                 )));
             }
             if Instant::now() >= deadline {
-                let _ = child.start_kill();
+                login.kill();
                 return Err(CoreError::Agent(format!(
                     "`{display}` did not serve its login page within {} s{}",
                     SERVE_READY_WAIT.as_secs(),
@@ -594,8 +715,8 @@ impl Accounts {
             .unwrap()
             .get(&id)
             .is_some_and(|(_, status)| status.logged_in);
-        let pid = child.id();
-        self.logins.lock().await.insert(id.clone(), child);
+        let pid = login.child.id();
+        self.logins.lock().await.insert(id.clone(), login);
         self.bus
             .publish(EventKind::AccountLoginPending {
                 id: id.clone(),
@@ -614,10 +735,10 @@ impl Accounts {
                 tokio::time::sleep(SERVE_LOGIN_POLL).await;
                 let stopped = {
                     let mut logins = logins.lock().await;
-                    let Some(child) = logins.get_mut(&id).filter(|child| child.id() == pid) else {
+                    let Some(login) = logins.get_mut(&id).filter(|l| l.child.id() == pid) else {
                         return; // replaced or cancelled
                     };
-                    let stopped = child.try_wait().ok().flatten();
+                    let stopped = login.child.try_wait().ok().flatten();
                     if stopped.is_some() {
                         logins.remove(&id);
                     }
@@ -627,16 +748,16 @@ impl Accounts {
                 let status = provider.status(&account).await;
                 seen_logged_out |= !status.logged_in;
                 let done = status.logged_in && seen_logged_out;
-                if done || stopped.is_some() || started.elapsed() >= SERVE_LOGIN_LIMIT {
+                if done || stopped.is_some() || started.elapsed() >= LOGIN_LIMIT {
                     break (status, stopped);
                 }
             };
             {
                 let mut logins = logins.lock().await;
-                if logins.get(&id).is_some_and(|child| child.id() == pid)
-                    && let Some(mut child) = logins.remove(&id)
+                if logins.get(&id).is_some_and(|l| l.child.id() == pid)
+                    && let Some(mut login) = logins.remove(&id)
                 {
-                    let _ = child.start_kill();
+                    login.kill();
                 }
             }
             record_status(&statuses, &id, status.clone());
@@ -645,7 +766,7 @@ impl Accounts {
                 Some(exit) => format!("`{shown}` stopped ({exit}){}", tail_text(&tail)),
                 None => format!(
                     "not logged in after {} minutes; the login page was closed",
-                    SERVE_LOGIN_LIMIT.as_secs() / 60
+                    LOGIN_LIMIT.as_secs() / 60
                 ),
             });
             let _ = bus
@@ -791,10 +912,10 @@ fn role_name(role: Role) -> String {
 }
 
 /// The agent behind a vendor session, from the event log.
-struct Owner {
-    name: String,
-    role: Role,
-    run: Option<RunId>,
+pub(crate) struct Owner {
+    pub(crate) name: String,
+    pub(crate) role: Role,
+    pub(crate) run: Option<RunId>,
 }
 
 async fn session_owners(store: &dyn Store) -> Result<HashMap<String, Owner>, CoreError> {
@@ -1015,6 +1136,39 @@ mod tests {
             Some("https://x.test/a")
         );
         assert!(find_url("no link here").is_none());
+    }
+
+    /// A login tool found as a `.cmd` runs under `cmd.exe`; stopping it must end what
+    /// that started too (the leftover `codebuddy --serve` node processes of 10-30).
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn stopping_a_login_ends_what_its_wrapper_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let tool = dir.path().join("fake-login.cmd");
+        std::fs::write(
+            &tool,
+            "@ping -n 60 127.0.0.1 >NUL
+",
+        )
+        .unwrap();
+        let mut command = tokio::process::Command::new(&tool);
+        command.stdout(Stdio::null()).kill_on_drop(true);
+        let (child, tree) = spawn_tree(&mut command).unwrap();
+        let mut login = LoginProcess { child, tree };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while login.tree.active_processes().unwrap() < 2 {
+            assert!(Instant::now() < deadline, "ping never started");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        login.kill();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !login.tree.is_empty().unwrap() {
+            assert!(
+                Instant::now() < deadline,
+                "something of the login is still running"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     #[test]

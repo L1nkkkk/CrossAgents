@@ -9,6 +9,7 @@ import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
 import type { TranscriptUsage } from "@bindings/TranscriptUsage";
 import { Avatar, Dot, Icon, VendorMark, agentTone, displayName, sessionHref, statusLabel } from "./components";
+import { ContextUsageButton } from "./contextusage";
 import { effortLabel, effortOf } from "./lib/models";
 import { taskState } from "./lib/taskState";
 import { openTool } from "./panes";
@@ -20,6 +21,8 @@ import { isChat, wsHref, wsKey, wsName } from "./workspace";
 
 const HIDDEN_KEY = "crossagents.railHidden";
 const FOLDED_KEY = "crossagents.railFolded";
+/** Cards the person opened that are folded by default (the run's trace, its participants). */
+const OPENED_KEY = "crossagents.railOpened";
 const listeners = new Set<() => void>();
 
 function read<T>(key: string, fallback: T): T {
@@ -38,18 +41,35 @@ function write(key: string, value: unknown) {
   }
 }
 
-let rail = { hidden: read<boolean>(HIDDEN_KEY, false), folded: read<string[]>(FOLDED_KEY, []) };
+let rail = {
+  hidden: read<boolean>(HIDDEN_KEY, false),
+  folded: read<string[]>(FOLDED_KEY, []),
+  opened: read<string[]>(OPENED_KEY, []),
+};
 
 function update(next: typeof rail) {
   rail = next;
   write(HIDDEN_KEY, rail.hidden);
   write(FOLDED_KEY, rail.folded);
+  write(OPENED_KEY, rail.opened);
   listeners.forEach((l) => l());
 }
 
 export const toggleRail = () => update({ ...rail, hidden: !rail.hidden });
-const toggleFold = (card: string) =>
-  update({ ...rail, folded: rail.folded.includes(card) ? rail.folded.filter((c) => c !== card) : [...rail.folded, card] });
+
+/** Whether a card shows: the person's last choice wins over the card's own default. */
+const isOpen = (card: string, defaultOpen: boolean) =>
+  rail.folded.includes(card) ? false : rail.opened.includes(card) ? true : defaultOpen;
+
+const toggleFold = (card: string, defaultOpen: boolean) => {
+  const open = isOpen(card, defaultOpen);
+  const without = (list: string[]) => list.filter((c) => c !== card);
+  update({
+    ...rail,
+    folded: open ? [...rail.folded, card] : without(rail.folded),
+    opened: open ? without(rail.opened) : [...rail.opened, card],
+  });
+};
 
 export const useRail = () =>
   useSyncExternalStore(
@@ -64,6 +84,13 @@ export const useRail = () =>
 
 /** A conversation at least this wide has room for the rail beside it. */
 export const RAIL_ROOM = 1060;
+
+/**
+ * A run's rail carries what the person otherwise has to go looking for — its tasks, who took
+ * part, the plan, the policy — so it stays beside the conversation as long as the conversation
+ * keeps its own room; narrower than this, it becomes a drawer the header opens.
+ */
+export const SIDE_ROOM = 820;
 
 const short = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
 
@@ -148,7 +175,7 @@ export function InfoRail({
       </Card>
 
       <Card id="context" title="上下文">
-        {usage && usage.size > 0 ? <Context usage={usage} /> : <p className="rail-empty">还没有报告用量</p>}
+        {usage && usage.size > 0 ? <Context usage={usage} agent={agent} /> : <ContextUsageButton agent={agent} usage={null} variant="rail" />}
         {recruits.length > 0 && spend != null && (
           <div className="rail-spend" title="这个对话和它招来的队友一共花了多少（各自报告的费用之和）">
             <span>对话花费（含 {recruits.length} 位队友）</span>
@@ -213,17 +240,46 @@ export function InfoRail({
   );
 }
 
-function Card({ id, title, children }: { id: string; title: string; children: ReactNode }) {
-  const { folded } = useRail();
-  const open = !folded.includes(id);
+/**
+ * One panel of a rail: its heading folds it, and it says what is inside (a count, the progress)
+ * beside the title. The heading lives in the panel, not in a window bar, so a rail carries many
+ * sections without a second title bar.
+ */
+export function RailCard({
+  id,
+  title,
+  aside,
+  defaultOpen = true,
+  children,
+}: {
+  id: string;
+  title: string;
+  /** What the section holds, right of its title: "2/4", "3 个任务". */
+  aside?: ReactNode;
+  /** Collapsed until opened (the trace, the participants). */
+  defaultOpen?: boolean;
+  children: ReactNode;
+}) {
+  // Subscribed, so a fold anywhere re-renders every panel; the rule itself is isOpen's.
+  useRail();
+  const open = isOpen(id, defaultOpen);
   return (
-    <section className="rail-card">
-      <button className="rail-head" onClick={() => toggleFold(id)} aria-expanded={open}>
-        {title}
+    <section className="rail-card" data-card={id}>
+      <button className="rail-head" onClick={() => toggleFold(id, defaultOpen)} aria-expanded={open}>
+        <span className="rail-head-title">{title}</span>
+        {aside && <span className="rail-head-aside">{aside}</span>}
         <Icon name={open ? "chevron" : "chevronRight"} size={13} />
       </button>
       {open && <div className="rail-body">{children}</div>}
     </section>
+  );
+}
+
+function Card({ id, title, children }: { id: string; title: string; children: ReactNode }) {
+  return (
+    <RailCard id={id} title={title}>
+      {children}
+    </RailCard>
   );
 }
 
@@ -260,8 +316,9 @@ const partTone = (id: string, kind: string) =>
   kind === "buffer" ? "buffer" : ["messages", "system_tools", "mcp_tools", "system_prompt", "skills"].includes(id) ? id : "other";
 
 /** How full the context is: green while there is room, amber from 60%, red from 85%. With
- * the agent's breakdown (Claude Code), what fills it, by kind, as /context shows. */
-function Context({ usage }: { usage: TranscriptUsage }) {
+ * the agent's breakdown (Claude Code), what fills it, by kind, as /context shows. Its first
+ * row is the meter button: usage in words and 压缩上下文. */
+function Context({ usage, agent }: { usage: TranscriptUsage; agent: Agent }) {
   const pct = Math.min(100, Math.round((usage.used / usage.size) * 100));
   const tone = pct >= 85 ? "danger" : pct >= 60 ? "warn" : "ok";
   const t = usage.tokens;
@@ -282,12 +339,7 @@ function Context({ usage }: { usage: TranscriptUsage }) {
   const share = (n: number) => `${((n / usage.size) * 100).toFixed(1)}%`;
   return (
     <>
-      <div className="rail-context">
-        <span className="rail-main">{pct}% 已用</span>
-        <span className="rail-dim">
-          {short(usage.used)} / {short(usage.size)}
-        </span>
-      </div>
+      <ContextUsageButton agent={agent} usage={usage} variant="rail" />
       {inWindow.length > 0 ? (
         <>
           <div className="rail-bar ctx-bar" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100} aria-label="上下文已用">

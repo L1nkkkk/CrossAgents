@@ -19,6 +19,10 @@ title: string | null,
  */
 avatar: string | null, 
 /**
+ * A picture from the hub's avatar gallery (its content hash); shown instead of `avatar`.
+ */
+avatar_image: string | null, 
+/**
  * Avatar colour, one of [`AgentProfile::COLORS`].
  */
 color: string | null, 

@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use crossagents_core::{
-    Agent, AgentId, AgentKey, CoreError, Envelope, MessageId, MessageSource, Reminder, Role, Run,
-    Task, TaskId, TaskStatus, Watch, WatchOn, WatchTarget,
+    Agent, AgentId, AgentKey, ClaimRole, CoreError, Envelope, MessageId, MessageSource, Reminder,
+    Role, Run, Task, TaskId, TaskStatus, Watch, WatchOn, WatchTarget,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -44,19 +44,46 @@ impl Group {
     }
 }
 
-pub fn groups_of(agent: &Agent) -> Vec<Group> {
+/// The agent's groups; `held` is the role a run holds it in now, if any. A conversation
+/// gets a role's group only while a run holds it in that role, except a planner or reviewer
+/// chat, which keeps its own (a run may take it in place, without a new session that would
+/// list the tools again). A plain chat, a worker, carries no run tools (docs/SESSION-FIRST.md
+/// §7).
+pub fn groups_of(agent: &Agent, held: Option<ClaimRole>) -> Vec<Group> {
     let mut groups = vec![Group::Everyone];
-    groups.push(match agent.role {
-        Role::Planner => Group::Lead,
-        Role::Worker => Group::Assignee,
-        Role::Reviewer => Group::Reviewer,
-    });
     // Whether it is in a run right now is checked when it recruits. A planner the person
     // talks to in a chat leads no run there: it is a conversation too.
-    if agent.recruiter().is_none() && agent.config.get("spawned_by_run").is_none() {
+    let conversation = agent.recruiter().is_none() && agent.config.get("spawned_by_run").is_none();
+    let role = match (conversation, held) {
+        (true, Some(ClaimRole::Lead)) => Some(Group::Lead),
+        (true, Some(ClaimRole::Worker)) => Some(Group::Assignee),
+        (true, Some(ClaimRole::Reviewer)) => Some(Group::Reviewer),
+        (true, None) if agent.role == Role::Worker => None,
+        _ => Some(match agent.role {
+            Role::Planner => Group::Lead,
+            Role::Worker => Group::Assignee,
+            Role::Reviewer => Group::Reviewer,
+        }),
+    };
+    groups.extend(role);
+    if conversation {
         groups.push(Group::Conversation);
     }
     groups
+}
+
+impl Orchestrator {
+    /// [`groups_of`], with the role a run holds the agent in now.
+    pub async fn groups(&self, agent: &Agent) -> Vec<Group> {
+        let held = match self.store.claim_of(agent.id).await {
+            Ok(claim) => claim.map(|c| c.role),
+            Err(err) => {
+                tracing::warn!(agent = %agent.id, error = %err, "cannot read the agent's claim");
+                None
+            }
+        };
+        groups_of(agent, held)
+    }
 }
 
 /// Memory for retries: idempotency keys, recent messages, and who sent what.
@@ -189,7 +216,7 @@ impl Orchestrator {
             "display_name": caller.profile.display_name,
             "title": caller.profile.title,
             "role": caller.role,
-            "groups": groups_of(caller).iter().map(|g| g.name()).collect::<Vec<_>>(),
+            "groups": self.groups(caller).await.iter().map(|g| g.name()).collect::<Vec<_>>(),
             "plugin": caller.plugin,
             "model": caller.model,
             "cwd": caller.cwd,
@@ -241,6 +268,7 @@ impl Orchestrator {
                     "specialty": a.profile.persona.as_deref().map(|p| first_line(p, 160)),
                     "role": a.role,
                     "status": a.status,
+                    "activity": self.running.lock().unwrap().activity.of(a.id, Utc::now()),
                     "plugin": a.plugin,
                     "model": a.model,
                     "current_tasks": tasks.get(&a.id).cloned().unwrap_or_default(),
@@ -302,6 +330,7 @@ impl Orchestrator {
             "profile": agent.profile,
             "role": agent.role,
             "status": agent.status,
+            "activity": self.running.lock().unwrap().activity.of(agent.id, Utc::now()),
             "plugin": agent.plugin,
             "driver": agent.driver,
             "model": agent.model,

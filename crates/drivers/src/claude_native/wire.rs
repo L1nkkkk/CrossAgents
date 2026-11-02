@@ -6,9 +6,9 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use crossagents_core::{
-    ContextPart, Credits, FileChange, LimitGroup, McpServerSpec, OutputStream, PermissionDecision,
-    PermissionRequest, RateLimits, RateWindow, SessionEventKind, StopReason, TokenUsage,
-    ToolDetail, ToolStatus,
+    AgentCommand, AgentCommandKind, ContextPart, Credits, FileChange, LimitGroup, McpServerSpec,
+    OutputStream, PermissionDecision, PermissionRequest, RateLimits, RateWindow, SessionEventKind,
+    StopReason, TokenUsage, ToolDetail, ToolStatus,
 };
 use serde_json::{Map, Value, json};
 
@@ -106,7 +106,19 @@ impl Flavor {
         }
         match self {
             Self::Claude => "api.anthropic.com".to_owned(),
-            Self::Codebuddy => "www.codebuddy.ai".to_owned(),
+            Self::Codebuddy => {
+                let region = env
+                    .iter()
+                    .rev()
+                    .find(|(key, _)| key.eq_ignore_ascii_case("CODEBUDDY_INTERNET_ENVIRONMENT"))
+                    .map(|(_, value)| value.clone())
+                    .or_else(|| std::env::var("CODEBUDDY_INTERNET_ENVIRONMENT").ok());
+                if region.as_deref() == Some("internal") {
+                    "www.workbuddy.cn".to_owned()
+                } else {
+                    "www.codebuddy.ai".to_owned()
+                }
+            }
         }
     }
 }
@@ -987,6 +999,47 @@ pub fn rate_limit_event(info: &Value) -> RateLimits {
     }
 }
 
+/// The slash commands and skills a `system`/`init` message declares (Claude Code's own:
+/// `slash_commands` and `skills`, arrays of names). `None` for any other message, so callers
+/// can tell "the CLI reported none" from "the CLI said nothing".
+pub fn commands(message: &Value) -> Option<Vec<AgentCommand>> {
+    if message.get("type").and_then(Value::as_str) != Some("system")
+        || message.get("subtype").and_then(Value::as_str) != Some("init")
+    {
+        return None;
+    }
+    let names = |key: &str| {
+        message
+            .get(key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+    };
+    let mut commands = Vec::new();
+    for name in names("slash_commands") {
+        // The field carries names without `/`; a fork may keep it.
+        let name = name.trim_start_matches('/');
+        if !name.is_empty() {
+            commands.push(AgentCommand {
+                name: name.to_owned(),
+                description: None,
+                kind: AgentCommandKind::Command,
+            });
+        }
+    }
+    for name in names("skills") {
+        if !name.is_empty() {
+            commands.push(AgentCommand {
+                name: name.to_owned(),
+                description: None,
+                kind: AgentCommandKind::Skill,
+            });
+        }
+    }
+    Some(commands)
+}
+
 /// The categories of a `get_context_usage` answer; `None` without any.
 pub fn context_parts(answer: &Value) -> Option<Vec<ContextPart>> {
     let parts: Vec<ContextPart> = answer
@@ -1113,6 +1166,21 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+
+    #[test]
+    fn codebuddy_site_selects_its_own_proxy_probe_host() {
+        for (region, host) in [
+            ("internal", "www.workbuddy.cn"),
+            ("external", "www.codebuddy.ai"),
+        ] {
+            let env = vec![
+                ("ANTHROPIC_BASE_URL".into(), String::new()),
+                ("CODEBUDDY_INTERNET_ENVIRONMENT".into(), region.into()),
+            ];
+            assert_eq!(Flavor::Codebuddy.api_host(&env), host);
+            assert_eq!(Flavor::Claude.api_host(&env), "api.anthropic.com");
+        }
+    }
 
     #[test]
     fn launch_args_for_new_resumed_and_forked_sessions() {
@@ -1264,7 +1332,10 @@ mod tests {
     #[test]
     fn the_api_host_follows_the_gateway_an_agent_points_the_cli_at() {
         // An empty value keeps the process environment out of these: it means "unset".
-        let unset = vec![("ANTHROPIC_BASE_URL".to_owned(), String::new())];
+        let unset = vec![
+            ("ANTHROPIC_BASE_URL".to_owned(), String::new()),
+            ("CODEBUDDY_INTERNET_ENVIRONMENT".to_owned(), String::new()),
+        ];
         assert_eq!(Flavor::Claude.api_host(&unset), "api.anthropic.com");
         assert_eq!(Flavor::Codebuddy.api_host(&unset), "www.codebuddy.ai");
 
@@ -1416,6 +1487,38 @@ mod tests {
         assert_eq!(used(&mut t, summed.clone()), 400_120);
         // Taken once: a turn without deltas falls back to the result's own figure.
         assert_eq!(used(&mut t, summed), 1_200_300);
+    }
+
+    #[test]
+    fn an_init_message_brings_the_cli_s_own_commands_and_skills() {
+        // As Claude Code 2.1 prints it (trimmed; names carry no `/`).
+        let init = json!({
+            "type": "system", "subtype": "init", "session_id": "s1",
+            "slash_commands": ["compact", "clear", "/review"],
+            "skills": ["deploy-check", "notes"],
+        });
+        let parsed = commands(&init).unwrap();
+        let names: Vec<(&str, AgentCommandKind)> =
+            parsed.iter().map(|c| (c.name.as_str(), c.kind)).collect();
+        assert_eq!(
+            names,
+            [
+                ("compact", AgentCommandKind::Command),
+                ("clear", AgentCommandKind::Command),
+                ("review", AgentCommandKind::Command),
+                ("deploy-check", AgentCommandKind::Skill),
+                ("notes", AgentCommandKind::Skill),
+            ]
+        );
+        assert!(parsed.iter().all(|c| c.description.is_none()));
+
+        // An init that names none still counts as a report; other system messages do not.
+        assert_eq!(
+            commands(&json!({ "type": "system", "subtype": "init" })),
+            Some(Vec::new())
+        );
+        assert!(commands(&json!({ "type": "system", "subtype": "api_retry" })).is_none());
+        assert!(commands(&json!({ "type": "assistant" })).is_none());
     }
 
     #[test]

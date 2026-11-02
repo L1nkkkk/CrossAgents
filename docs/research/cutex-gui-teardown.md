@@ -3,6 +3,8 @@
 > 来源：[senxiu-official/cutex-desktop](https://github.com/senxiu-official/cutex-desktop) `79e716b`（0.1.5 "First Take"，2026-10-21）· 2026-10-22
 > 方法：读它的 `docs/DESIGN.md`（§4 UI 每条决定都写了日期和理由）、`CHANGELOG.md`，以及 `apps/desktop/src/renderer` 里关键组件和 `lib/` 纯函数的头注释。没有运行，下面没有截图。
 
+> 版本提示（2026-11-01）：本文保留 0.1.5 的历史拆解，不代表新版界面。0.2.0（`6216e67`）已增加默认花名册 / 可选「现在与全部」布局、项目视图及会话工具区；本项目的新版采用方案和固定提交来源见 [平等 Agent 与项目侧栏](../AGENT-WORKSPACE.md) §9。
+
 ## 0. 先说结论
 
 Cutex 和 CrossAgents 要解决的是同一件事：**守护进程管着一群 agent，桌面端只是客户端，agent 之间互相派活**。它是 Electron + React 19 + Tailwind 4 + Zustand，参考 ZCode 的组件，走得比我们远很多。

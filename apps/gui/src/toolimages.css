@@ -1,0 +1,8 @@
+.tool-images { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+.tool-images figure { margin: 0; }
+.tool-images figcaption { color: var(--muted); font-size: 12px; }
+.tool-result-heading { display: flex; align-items: center; gap: 8px; }
+.tool-image-indicator { display: inline-flex; color: var(--muted); }
+
+.tool-image-error, .tool-image-loading { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; margin: 6px 0; }
+.tool-images figcaption { overflow-wrap: anywhere; max-width: 280px; }

@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { allowed } from "./allowed.cjs";
+import { allowed, COMPACT_TIMEOUT_MS, REQUEST_TIMEOUT_MS, timeoutFor } from "./allowed.cjs";
 
 /** `src/api.ts`, next to the compiled test in `dist-electron/`. */
 const API_TS = join(__dirname, "..", "src", "api.ts");
@@ -107,4 +107,11 @@ test("what the GUI never calls stays refused", () => {
   assert.ok(!allowed("POST", "/v1/me/tools/task_complete"));
   assert.ok(!allowed("DELETE", "/v1/runs/x/tasks/y"));
   assert.ok(!allowed("GET", "/v1/agents/x/execution/interrupt"));
+});
+
+test("compacting gets minutes, everything else the usual timeout", () => {
+  // A 600k-token history took 148 s to summarise; at 30 s the GUI gave up halfway.
+  assert.equal(timeoutFor("POST", "/v1/agents/Ravi/compact"), COMPACT_TIMEOUT_MS);
+  assert.equal(timeoutFor("POST", "/v1/agents/Ravi/messages"), REQUEST_TIMEOUT_MS);
+  assert.equal(timeoutFor("GET", "/v1/agents/Ravi/compact"), REQUEST_TIMEOUT_MS);
 });

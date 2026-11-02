@@ -81,6 +81,11 @@ async fn a_rate_limited_worker_hands_its_task_to_another_account() {
         .unwrap();
     assert_eq!(worker["config"]["account"], "codex-b", "{worker}");
     assert_eq!(worker["plugin"], "codex");
+    // Not an escalation: the new session keeps the plain worker name.
+    assert!(
+        worker["name"].as_str().unwrap().starts_with("w-"),
+        "{worker}"
+    );
 
     // The run says why: on the task's card.
     let runs: Value = t.get("/v1/runs").await.json().await.unwrap();

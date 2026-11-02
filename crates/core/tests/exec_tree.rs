@@ -404,7 +404,10 @@ async fn exec_what_a_command_leaves_running_is_ended_after_the_grace() {
     let ended = end_tree(&mut tree, millis(300))
         .await
         .expect("the tree is ended");
-    assert!(ended >= 1, "the grandchild was still running and had to be ended");
+    assert!(
+        ended >= 1,
+        "the grandchild was still running and had to be ended"
+    );
     assert!(
         started.elapsed() < Duration::from_secs(10),
         "it must not wait out the grandchild's minute: {:?}",
@@ -439,7 +442,10 @@ async fn exec_a_tree_that_ends_within_the_grace_is_left_alone() {
     let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_exec_tree_helper"));
     cmd.arg("300");
     let (mut child, mut tree) = spawn(&mut held, &mut cmd).expect("start the tree");
-    assert_eq!(child.wait().await.expect("wait for the root").code(), Some(0));
+    assert_eq!(
+        child.wait().await.expect("wait for the root").code(),
+        Some(0)
+    );
     assert_eq!(
         end_tree(&mut tree, millis(10_000))
             .await

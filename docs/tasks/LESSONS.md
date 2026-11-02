@@ -159,7 +159,8 @@ projects
    - 字段说明里写清楚：命中只表示「可能相关」，不代表历史解法已确认适用。
 3. **主动搜索**：
    - `lesson_search { query, limit? }`：搜本项目的 `active` 和 `review`；带 `include_superseded` 时，也包括已被替代的。
-   - `lesson_get { id }`：返回全文，包括 evidence。
+   - `lesson_search` 每条只给标题、状态、适用条件和症状、方案的第一段（各至多 300 字节，截断处以 `…` 结尾并标 `truncated`），全文用 `lesson_get`。
+   - `lesson_get { id, evidence_offset?, evidence_limit? }`：返回 lesson 的全部字段；evidence 给统计（总数、按 outcome 计数、最早和最近时间）和最近 5 条（新的在前，`evidence_limit` 至多 50，`evidence_offset` 往前翻页）；最近一次失败无论多早都单独给出（`last_failure`），状态为 `review` 时开头说明；`sources` 给数量和最近 3 条。见 [USAGE-TRIM.md](../USAGE-TRIM.md) §4。
    - `lesson_report { id, outcome, note }`：worker 用了某条 lesson 以后回报结果，追加一条 evidence；失效时把状态改成 `review`。
 
 所有查询都限定在调用者所属的项目内，跨项目查不到。

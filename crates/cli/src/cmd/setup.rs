@@ -292,6 +292,7 @@ async fn choose_account(client: &Client, prompt: &Prompt, wanted: Option<&str>) 
         .post(
             "/v1/accounts",
             &CreateAccountRequest {
+                codebuddy_site: None,
                 id,
                 provider: "codex".into(),
                 label: None,

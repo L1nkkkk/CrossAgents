@@ -8,7 +8,7 @@ use crossagents_core::{
 };
 
 use crate::brief;
-use crate::engine::{Orchestrator, agent_name};
+use crate::engine::{Orchestrator, worker_name};
 use crate::host::Route;
 
 impl Orchestrator {
@@ -107,7 +107,7 @@ impl Orchestrator {
             .await;
             return Ok(());
         }
-        let name = agent_name("w", &run, &task);
+        let name = worker_name(&run, &task, template);
         let _ = self.host.interrupt(agent).await;
         let left = self.left_by_worker(&run, &task, Some(agent)).await;
         crossagents_core::Handoff::end(

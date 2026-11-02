@@ -37,6 +37,8 @@ struct FakeHost {
     busy: AtomicBool,
     notices: Mutex<Vec<String>>,
     delivered: Mutex<Vec<(AgentId, String)>>,
+    /// Kept for the agent's next message, by topic; a newer one on a topic replaces it.
+    later: Mutex<std::collections::HashMap<(AgentId, String), String>>,
 }
 
 impl FakeHost {
@@ -53,6 +55,13 @@ impl FakeHost {
 
 #[async_trait]
 impl AgentHost for FakeHost {
+    async fn tell_later(&self, agent: AgentId, topic: &str, line: &str) -> Result<(), CoreError> {
+        self.later
+            .lock()
+            .await
+            .insert((agent, topic.to_owned()), line.to_owned());
+        Ok(())
+    }
     async fn send(&self, agent: AgentId, _: MessageSource, text: String) -> Result<(), CoreError> {
         self.delivered.lock().await.push((agent, text));
         Ok(())
@@ -276,6 +285,8 @@ impl Fixture {
             store.insert_agent(a).await.unwrap();
         }
         let run = Run {
+            origin_chat_id: None,
+            work_id: None,
             continuation: None,
             id: RunId::new(),
             title: "a run".into(),
@@ -701,4 +712,76 @@ async fn a_forced_accept_reports_the_commit_it_merged() {
         "the commit the merge brought in, not the verified one: {accepted}"
     );
     assert_eq!(f.ws.merged().await, vec!["crossagents/run-a".to_owned()]);
+}
+
+#[tokio::test]
+async fn deleting_after_release_failure_keeps_checkout_and_targets() {
+    let f = Fixture::new(&[]).await;
+    let dir = f.task().await.worktree.unwrap();
+    let target = f.worktrees.join(short(&f.run.id)).join("targets/a");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("cache"), "compiled").unwrap();
+    f.host.will_not_go_home.store(true, Ordering::SeqCst);
+    let mut run = f.run().await;
+    run.status = RunStatus::Cancelled;
+    f.store.update_run(&run).await.unwrap();
+    let done = f
+        .orchestrator
+        .delete_run(run.id, crate::DeleteRun::default())
+        .await
+        .unwrap();
+    assert!(!done.warnings.is_empty());
+    assert!(f.ws.removed().await.is_empty());
+    assert!(dir.exists());
+    assert!(target.join("cache").exists());
+}
+
+/// USAGE-TRIM §3.3: a child run that ended before its start notice was written still leaves
+/// its result for the source chat, not a stale "started"; nothing wakes the chat.
+#[tokio::test]
+async fn a_run_that_ended_before_its_start_notice_leaves_its_result() {
+    let f = Fixture::new(&[]).await;
+    let chat = AgentId::new();
+    let mut run = f.run.clone();
+    run.origin_chat_id = Some(chat);
+    let started = run.clone();
+    run.status = RunStatus::Completed;
+    run.summary = Some("Added notes.txt".into());
+    f.store.update_run(&run).await.unwrap();
+
+    f.orchestrator.tell_origin_started(&started).await;
+
+    let later = f.host.later.lock().await;
+    let line = &later[&(chat, format!("run:{}", run.id))];
+    assert!(
+        line.contains("completed") && line.contains("Added notes.txt"),
+        "{line}"
+    );
+    assert!(!line.contains("started"), "{line}");
+    assert!(f.host.delivered_to(chat).await.is_empty());
+}
+
+/// USAGE-TRIM §3.3: while the run goes on the chat keeps the start notice, and the closing
+/// result replaces it on the same topic.
+#[tokio::test]
+async fn the_closing_result_replaces_the_start_notice() {
+    let f = Fixture::new(&[]).await;
+    let chat = AgentId::new();
+    let mut run = f.run.clone();
+    run.origin_chat_id = Some(chat);
+    f.store.update_run(&run).await.unwrap();
+
+    f.orchestrator.tell_origin_started(&run).await;
+    let key = (chat, format!("run:{}", run.id));
+    assert!(f.host.later.lock().await[&key].contains("work started"));
+
+    run.status = RunStatus::Completed;
+    run.summary = Some("Added notes.txt".into());
+    f.orchestrator.tell_origin_later(&run).await;
+    let line = f.host.later.lock().await[&key].clone();
+    assert!(
+        line.contains("completed") && !line.contains("work started"),
+        "{line}"
+    );
+    assert!(f.host.delivered_to(chat).await.is_empty());
 }

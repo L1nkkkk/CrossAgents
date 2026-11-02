@@ -1,14 +1,14 @@
 // The tool column (docs/tasks/V6-GUI.md §6): up to two panes stacked on the right — 改动 (what
-// each turn changed), 任务 (a task's details), 事件流 (raw hub events, for debugging). Panes
-// show the focused conversation, or what was opened on purpose (panes.ts `target`); nothing
-// from another conversation mixes in. When docking it would squeeze the conversation it is a
-// one-pane drawer over the page.
+// each turn changed), 任务 (a task's details), and 提交图 (commits). 事件流 (raw hub events, for
+// debugging) is offered only where debugging is on (panes.ts `PANE_KINDS`). Panes show the
+// focused conversation, or what was opened on purpose (panes.ts `target`); nothing from another
+// conversation mixes in. When docking it would squeeze the conversation it is a one-pane drawer
+// over the page.
 
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { TurnDiffResponse } from "@bindings/TurnDiffResponse";
 import { api, errorText } from "./api";
-import { useRunTree } from "./App";
 import { Avatar, ErrorBox, Icon, displayName, isAgent, useAgents } from "./components";
 import { CommitGraphView } from "./commitgraph";
 import { ChangeStat, DiffView } from "./diffview";
@@ -16,11 +16,12 @@ import { useEventLog } from "./eventlog";
 import type { HubEvent } from "./hub";
 import { parseDiff } from "./lib/diff";
 import { clock, full } from "./lib/time";
-import { PANE_KINDS, addPane, clearTarget, removePane, setPane, setSplit, useLayout, type PaneKind, type Target } from "./panes";
+import { PANE_KINDS, addPane, clearTarget, offered, paneLabel, removePane, setPane, setSplit, useLayout, type PaneKind, type Target } from "./panes";
 import { useWidths } from "./lib/widths";
 import { useSession, type TranscriptTurn } from "./session";
 import { useSidebar } from "./titlebar";
-import { TaskDetail } from "./views/Run";
+import { TaskDetail, PlanTasks } from "./views/Run";
+import { useHubData } from "./hub";
 
 /**
  * Whether the tool column floats over the page as a drawer: when docking it would leave the
@@ -42,6 +43,10 @@ export function ToolColumn({ follow, task, run, onClose }: { follow?: string; ta
   const ref = useRef<HTMLDivElement>(null);
   const tools = state.tools;
   let panes: PaneKind[] = task ? [...new Set<PaneKind>(["task", ...(tools.open ? tools.panes : [])])] : tools.panes;
+  // A saved layout may name a pane this build does not offer (事件流): drop it, and never leave
+  // the column with nothing to show.
+  panes = panes.filter(offered);
+  if (!panes.length) panes = ["changes"];
   panes = panes.slice(0, narrow ? 1 : 2);
 
   const drag = (e: ReactPointerEvent<HTMLDivElement>) => {
@@ -103,8 +108,11 @@ function PaneSlot({
   divider: React.ReactNode;
 }) {
   // An agent opened on purpose wins over the focused conversation.
-  const agent = target?.agent ?? follow;
-  const pinned = !!target?.agent && target.agent !== follow;
+  const agents = useAgents();
+  const sameAgent = follow && target?.agent && agents.data?.some((a) => isAgent(a, follow) && isAgent(a, target.agent!));
+  const safeTarget = follow && target?.agent !== follow && !sameAgent ? null : target;
+  const agent = safeTarget?.agent ?? follow;
+  const pinned = !!safeTarget?.agent && safeTarget.agent !== follow;
   const head = (
     <>
       <div className="segmented small" role="tablist">
@@ -140,11 +148,11 @@ function PaneSlot({
   return (
     <>
       {divider}
-      <section className="tool-pane" aria-label={PANE_KINDS.find((p) => p.kind === kind)!.label}>
+      <section className="tool-pane" aria-label={paneLabel(kind)}>
         <header className="tool-head">{head}</header>
-        <div className="tool-body">
+        <div className={`tool-body ${kind === "graph" ? "tool-body-graph" : ""}`}>
           {kind === "changes" && (agent ? <ChangesPane key={agent} agent={agent} target={target?.agent === agent ? target : null} /> : <Blank text="打开一个会话，这里显示它每一轮改了什么。" />)}
-          {kind === "task" && <TaskPane follow={follow} target={target} routeTask={routeTask} />}
+          {kind === "task" && <TaskPane key={follow} follow={follow} target={safeTarget} routeTask={routeTask} />}
           {kind === "events" && (agent ? <EventsPane key={agent} agent={agent} /> : <Blank text="打开一个会话，这里显示它的原始 hub 事件。" />)}
           {kind === "graph" &&
             (routeRun ? (
@@ -239,19 +247,20 @@ function TurnDiff({ agent, turn, file }: { agent: string; turn: TranscriptTurn; 
   return <DiffView files={files} focus={file} />;
 }
 
-/** The routed task, else the one opened on purpose, else the focused agent's latest task. */
+/** The routed or explicitly selected work, otherwise the execution reported by the hub. */
 function TaskPane({ follow, target, routeTask }: { follow?: string; target: Target | null; routeTask?: { run: string; task: string } }) {
-  const tree = useRunTree();
   const agents = useAgents();
-  let found = routeTask ?? (target?.run && target.task ? { run: target.run, task: target.task } : undefined);
-  if (!found && follow) {
-    const agent = agents.data?.find((a) => isAgent(a, follow));
-    const tasks = (tree.data ?? []).flatMap((d) => d.tasks.filter((t) => agent && (t.assignee === agent.id || t.reviewer === agent.id)));
-    const latest = tasks.sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0];
-    if (latest) found = { run: latest.run_id, task: latest.id };
-  }
-  if (!found) return <Blank text="这个会话没有任务。Worker 和 Reviewer 的会话会在这里显示它们的任务。" />;
-  return <TaskDetail key={found.task} runId={found.run} taskId={found.task} />;
+  const agent = agents.data?.find((a) => follow && isAgent(a, follow));
+  const execution = useHubData(() => agent ? api.agentExecution(agent.id) : Promise.resolve(null), [agent?.id], (e) => ["agent.updated", "agent.status_changed", "task.status_changed", "task.handed_off", "run.status_changed"].includes(e.type));
+  const x = execution.data?.execution;
+  const run = routeTask?.run ?? target?.run ?? x?.run_id;
+  const task = routeTask?.task ?? target?.task ?? (target?.run ? undefined : x?.task_id);
+  const detail = useHubData(() => run ? api.getRun(run) : Promise.resolve(null), [run], (e) => e.type.startsWith("run.") || e.type === "task.status_changed");
+  if (run && task) return <TaskDetail key={task} runId={run} taskId={task} />;
+  if (detail.data && detail.data.run.id === run) return <div className="session-plan"><a href={`#/runs/${encodeURIComponent(detail.data.run.id)}`}>{detail.data.run.title}</a><PlanTasks run={detail.data.run} /></div>;
+  if (detail.error) return <ErrorBox error={detail.error} />;
+  if (run) return <Blank text="正在读取关联工作。" />;
+  return <Blank text="当前没有执行中的任务。请从会话的关联工作中选择计划或任务。" />;
 }
 
 /** The agent's raw events since the page loaded, newest first, with a filter. */

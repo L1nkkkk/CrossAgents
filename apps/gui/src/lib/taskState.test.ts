@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Task } from "@bindings/Task";
 import type { TaskStatus } from "@bindings/TaskStatus";
-import { groupTasks, progress, runState, taskState } from "./taskState.ts";
+import { checksPassed, groupTasks, progress, runState, taskState } from "./taskState.ts";
 
 const check = (passed: boolean) => ({ command: "cargo test", exit_code: passed ? 0 : 1, passed, output: "" });
 
@@ -82,4 +82,11 @@ test("plans awaiting approval need you; tasks are grouped in bucket order", () =
 test("progress reads as one phrase", () => {
   assert.equal(progress([task("merged"), task("running"), task("failed")]), "1/3 已合并 · 1 进行中 · 1 失败");
   assert.equal(progress([]), "");
+});
+
+test("checks say how many passed, and nothing before any ran", () => {
+  // None ran: not "0/0 检查通过" — nothing verified the task yet.
+  assert.equal(checksPassed([]), "");
+  assert.equal(checksPassed([check(true)]), "1/1 检查通过");
+  assert.equal(checksPassed([check(true), check(false), check(true), check(true)]), "3/4 检查通过");
 });

@@ -236,13 +236,52 @@ export function oauthRun(phase: "plan" | "running"): { state: MockState; script:
     };
     state.questions.push(ask);
 
+    // The agents' notes for each other, shown in the run's rail.
+    state.notes = [
+      {
+        scope: "run",
+        run_id: r.id,
+        key: "oauth-约定",
+        text: "回调地址统一用 `/auth/callback/{provider}`；错误提示写中文，别把 provider 的原文抛给用户。",
+        author: ada.id,
+        updated_at: ago(26),
+      },
+      {
+        scope: "run",
+        run_id: r.id,
+        key: "redis-回落",
+        text: "本地没有 Redis 时回落到内存；`REDIS_URL` 没设就不要在启动日志里警告。",
+        author: rexC.id,
+        updated_at: ago(18),
+      },
+      {
+        scope: "run",
+        run_id: r.id,
+        key: "迁移脚本",
+        text: "旧会话里的过期条目直接丢掉，不迁。",
+        author: rexD.id,
+        updated_at: ago(7),
+      },
+    ];
+
     state.transcripts.set(ada.id, transcript(ada, adaTurns, 92_000));
-    return { state, script: runningScript(rexA.id, a2.turn.message_id, editId, ta.id, r.id, miaB.id), route: `#/s/${ada.name}` };
+    return { state, script: runningScript(rexA.id, a2.turn.message_id, editId, ta.id, r.id, miaB.id), route: `#/runs/${r.id}` };
   }
 
   state.runs.push({ run: r, tasks: [] });
   state.transcripts.set(ada.id, transcript(ada, adaTurns, 52_000));
-  return { state, script: [], route: `#/s/${ada.name}` };
+  return { state, script: [], route: `#/runs/${r.id}` };
+}
+
+/**
+ * Stopped for the person: the budget ran out mid-run. The conversation keeps one line saying
+ * so (and the questions above the composer); the run's plan and facts stay in the rail.
+ */
+export function pausedRun(): { state: MockState; script: Step[]; route: string } {
+  const scene = oauthRun("plan");
+  const d = scene.state.runs[0];
+  d.run = { ...d.run, status: "paused", note: "预算上限 $8 已经用完：先停在这里，加预算或取消这个 run。" };
+  return { ...scene, script: [], route: `#/runs/${d.run.id}` };
 }
 
 /** The plan of a run in a folder without git: it works in place, one task at a time. */
@@ -331,7 +370,8 @@ export function syncRun(): { state: MockState; script: Step[]; route: string } {
   );
   d.tasks.push(sync);
   d.run = { ...d.run, note: "main moved and conflicts with the run in src/auth/session.rs; task #sync-main resolves it, land again once it is merged" };
-  return { ...scene, route: `#/runs/${d.run.id}` };
+  // The note is the point of this scene: the conversation starts at the top, where it is.
+  return { ...scene, script: [{ at: 400, act: () => document.querySelector<HTMLElement>(".convo")?.scrollTo({ top: 0 }) }], route: `#/runs/${d.run.id}` };
 }
 
 /**
@@ -403,6 +443,62 @@ export function deleteRun(kind: "landed" | "unlanded" | "dirty"): { state: MockS
 }
 
 /**
+ * Long results kept short: Ada's first `run_land` was refused with the whole `cargo test` log in
+ * the reason, and her closing summary runs to many lines. Both show their opening lines and
+ * 展开全文; the route is Ada's conversation, the run page has the summary.
+ */
+export function longResultsRun(): { state: MockState; script: Step[]; route: string } {
+  const scene = oauthRun("running");
+  const d = scene.state.runs[0];
+  for (const t of d.tasks) {
+    t.status = "merged";
+    t.assignee = null;
+  }
+  const deps = "C:\\Users\\me\\.crossagents\\worktrees\\ab12cd34\\targets\\integration\\cargo\\debug\\deps";
+  const log = [
+    "    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 13s",
+    ...["api_types", "e2e", "exec", "shim", "core", "exec_locks", "exec_tree", "lock_kill_race", "drivers", "hub", "api", "accounts", "acp", "landing"].map(
+      (name, i) => `     Running tests\\${name}.rs (${deps}\\${name}-${(i * 7919).toString(16).padStart(16, "0")}.exe)`,
+    ),
+    "test the_checks_wait_for_the_leads_own_build ... FAILED",
+    "error: test failed, to rerun pass `-p crossagents-mock-agent --test lead`",
+  ].join("\n");
+  const refused = `conflict: the project's checks (crossagents.toml) failed: 0/1 passed; failed: $ cargo test --workspace (exit 101)\n${log}\nFix it in your checkout and call run_land again. If a check itself is wrong, tell the person: they can still land or end the run from the run page.`;
+  const ada = scene.state.agents.find((a) => a.id === d.run.planner)!;
+  const t = scene.state.transcripts.get(ada.id)!;
+  const landing = turn({
+    input: "所有任务都合并了，落地吧。",
+    minutesAgo: 2,
+    took: 2,
+    items: [
+      tool("crossagents.run_land", "mcp", "failed", { arguments: JSON.stringify({ message: "feat: OAuth 登录" }), error: refused, changes: [] }),
+      say("检查挂在 `lead.rs` 一个断言旧行为的测试上，我改写后再落地。"),
+    ],
+  });
+  t.turns = [...t.turns, landing.turn];
+  d.run = {
+    ...d.run,
+    status: "completed",
+    landed: { mode: "merge", by: ada.name, reference: "4a19c00", at: ago(1) },
+    summary: [
+      "OAuth 登录已落地到 main（4a19c00，检查通过）。",
+      "",
+      "做了什么：",
+      "- #a：/auth/callback/{provider} 用授权码换 token、取用户信息、建立会话，GitHub 和 Google 两家。",
+      "- #b：登录页加了两个 OAuth 按钮，密码表单保留在下面，深浅色都核对过。",
+      "- #c：SessionStore 换成 RedisStore，接口不变；`REDIS_URL` 没设置时回落到 MemoryStore。",
+      "- #d：一次性迁移脚本，可重复执行。",
+      "",
+      "需要你知道的：",
+      "- Google 的回调地址要在控制台里加上生产域名。",
+      "- Redis 连接池默认 16，压测前可能要调。",
+      "- 落地前检查挂在一个断言旧行为的测试上，已改写。",
+    ].join("\n"),
+  };
+  return { ...scene, script: [], route: `#/s/${ada.name}` };
+}
+
+/**
  * Tracing a failure (docs/tasks/DOGFOOD.md §8): the run page's 追溯 shows #d's first failure
  * (its tests exited 101), every turn and command, and what each task cost.
  */
@@ -437,7 +533,10 @@ export function traceRun(): { state: MockState; script: Step[]; route: string } 
     first_failure: t.key === "d" || t.key === "c" ? "`cargo test -p auth` exited 101" : null,
   }));
   scene.state.traces.set(d.run.id, { run_id: d.run.id, lead: lane(d.run.planner, 3, 0.41), tasks, spent: { tokens: 120_000, cost_usd: 1.32 } });
-  return { ...scene, script: [], route: `#/runs/${d.run.id}` };
+  // The trace starts folded at the rail's end: this scene opens it and scrolls down to it.
+  const open: Step = { at: 400, act: () => document.querySelector<HTMLButtonElement>('[data-card="run-trace"] .rail-head')?.click() };
+  const show: Step = { at: 800, act: () => document.querySelector<HTMLElement>(".rail")?.scrollTo({ top: 99999 }) };
+  return { ...scene, script: [open, show], route: `#/runs/${d.run.id}` };
 }
 
 /**
@@ -618,7 +717,9 @@ export function reuseRun(page: "b" | "a" | "rex" = "b"): { state: MockState; scr
   );
   state.transcripts.set(rexB.id, transcript(rexB, [turn({ input: "task #b：登录页按钮", minutesAgo: 280, took: 20, items: [say("按钮加好了。")] })], 0));
   const route = page === "a" ? `#/runs/${runA.id}` : page === "rex" ? `#/s/${rex.id}` : `#/runs/${runB.id}`;
-  return { state, script: [], route };
+  // The participants start folded in the rail: these scenes open them.
+  const open: Step = { at: 400, act: () => document.querySelector<HTMLButtonElement>('[data-card="run-participants"] .rail-head')?.click() };
+  return { state, script: page === "rex" ? [] : [open], route };
 }
 
 /** A fake 40-hex sha, stable for a seed. */
@@ -670,6 +771,11 @@ export function graphRun(page: "run" | "session" = "run"): { state: MockState; s
     { id: "p0", parents: [], subject: "初始化项目", author: "Sam", minutesAgo: 60 * 24 * 9, diff: fileDiff("README.md", 0, [], ["# shop", "", "## 本地启动", "", "cargo run -- serve"]) },
   ];
 
+  // Long history and many local refs exercise scrolling and the collapsed legend.
+  list[list.length - 1].parents = ["history-0"];
+  for (let i = 0; i < 45; i++) list.push({ id: `history-${i}`, parents: i < 44 ? [`history-${i + 1}`] : [], subject: `历史提交 ${i + 1}`, author: "Sam", minutesAgo: 60 * (250 + i) });
+  const extraRefs: GraphRef[] = Array.from({ length: 36 }, (_, i) => ({ name: `feature/archive-${i + 1}`, kind: "other", sha: s(`history-${i}`) }));
+
   const graphWith = (refs: GraphRef[], extra: Partial<CommitGraph> = {}): CommitGraph => ({
     ...extra,
     refs,
@@ -691,6 +797,7 @@ export function graphRun(page: "run" | "session" = "run"): { state: MockState; s
       taskRef(ta, "a2"),
       taskRef(tb, "b2"),
       taskRef(tc, "c2"),
+      ...extraRefs,
     ],
     { base_branch: base, run_branch: runBranch },
   );
@@ -703,6 +810,7 @@ export function graphRun(page: "run" | "session" = "run"): { state: MockState; s
       { name: branchOf("c"), kind: "other", sha: s("c2") },
       { name: runBranch, kind: "other", sha: s("m2") },
       { name: base, kind: "other", sha: s("x1") },
+      ...extraRefs,
     ]),
   );
   scene.state.graphs = graphs;

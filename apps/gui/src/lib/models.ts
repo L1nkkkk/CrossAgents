@@ -2,6 +2,8 @@
 // the composer is enough to start a run: the page reuses an agent with that plugin, model and
 // role in the workspace, or creates one named after the model.
 
+import { bareModel, familyKeys, modelFamily as familyOf } from "./modelFamily.ts";
+
 /** "claude-opus-4-1" → "Opus 4.1", "gpt-5-codex" → "GPT-5 Codex", "mock-haiku" → "Haiku". */
 export function prettyModel(model: string): string {
   const words = model.split(/[-_]/).filter(Boolean);
@@ -59,34 +61,13 @@ export function chatNameFor(model: string, taken: Set<string>): string {
   return free(`chat-${slugOf(model)}`.slice(0, 28), taken);
 }
 
-/** Model families, in the order the settings page lists them; the first match wins. */
-const FAMILIES: { key: string; label: string; test: RegExp }[] = [
-  { key: "claude", label: "Claude", test: /^(claude|opus|sonnet|haiku)\b/ },
-  { key: "gpt", label: "GPT", test: /^(gpt|o\d)\b|^codex/ },
-  { key: "gemini", label: "Gemini", test: /^gemini/ },
-  { key: "deepseek", label: "DeepSeek", test: /^deepseek/ },
-  { key: "glm", label: "GLM", test: /^glm/ },
-  { key: "kimi", label: "Kimi", test: /^kimi/ },
-  { key: "hunyuan", label: "混元", test: /^(hy\d|hunyuan)/ },
-  { key: "minimax", label: "MiniMax", test: /^minimax/ },
-  { key: "qwen", label: "Qwen", test: /^qwen/ },
-];
+/** The group models no family claims; the family table itself lives in lib/modelFamily.ts. */
 const OTHER = { key: "other", label: "其他" };
-
-/**
- * Gateways put their own prefix on a model (`tokenhub_deepseek-v4`, `ext-glm-5.2`); the
- * family is the model's, not the gateway's.
- */
-const GATEWAY_PREFIX = /^(tokenhub|ext|azure|bedrock|vertex|openrouter)[_-]/;
-
-/** The model's own name, without a gateway's prefix. */
-const bareModel = (model: string) => model.toLowerCase().replace(GATEWAY_PREFIX, "");
 
 /** "tokenhub_deepseek-v4-flash" → DeepSeek, "hy3-preview" → 混元; anything unknown → 其他. */
 export function modelFamily(model: string): { key: string; label: string } {
-  const bare = bareModel(model);
-  const found = FAMILIES.find((f) => f.test.test(bare));
-  return found ? { key: found.key, label: found.label } : OTHER;
+  const family = familyOf("", model);
+  return family ? { key: family.key, label: family.name } : OTHER;
 }
 
 /** The first version number in a name: "claude-4.8-opus" → [4, 8], "kimi-k2.7-code" → [2, 7]. */
@@ -117,7 +98,7 @@ export function groupModels(models: readonly string[]): { key: string; label: st
     g.models.push(m);
     groups.set(f.key, g);
   }
-  const order = [...FAMILIES.map((f) => f.key), OTHER.key];
+  const order = [...familyKeys(), OTHER.key];
   return order.flatMap((k) => {
     const g = groups.get(k);
     if (!g) return [];

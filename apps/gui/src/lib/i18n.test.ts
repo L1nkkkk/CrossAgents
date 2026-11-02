@@ -40,7 +40,7 @@ const CONTINUATION_SOURCE: [file: string, from: string, to: string][] = [
   ["../views/Home.tsx", 't("home.continuation")', 't("home.parallel")'],
   ["../strips.tsx", 'run.continuation?.phase === "exhausted"', 'className="rs-link"'],
   ["../views/Run.tsx", "const CONTINUATION_LABELS", "export function RunView"],
-  ["../views/Run.tsx", "<ContinuationMeta", "<span title={time(run.created_at)}>"],
+  ["../views/Run.tsx", "<ContinuationMeta", "onDone={onPolicyChange} />"],
   ["../views/Run.tsx", "function ContinuationMeta", "function Ending"],
 ];
 

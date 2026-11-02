@@ -61,6 +61,11 @@ pub trait WorkspaceProvider: Send + Sync {
     /// Deletes `branch` in `repo`, whether or not a working copy has it (a merged task's
     /// branch outlives its worktree). A branch that is already gone is not an error.
     async fn delete_branch(&self, repo: &Path, branch: &str) -> Result<(), CoreError>;
+    /// Whether `branch` exists in `repo`.
+    async fn has_branch(&self, repo: &Path, branch: &str) -> bool {
+        let _ = (repo, branch);
+        false
+    }
     /// The files `path` changed and did not commit: edits and untracked files, by path.
     async fn uncommitted(&self, path: &Path) -> Result<Vec<String>, CoreError>;
     /// The files `path` changed relative to `base`, committed or not, untracked included.
@@ -160,7 +165,7 @@ async fn check_checkout(repo: &Path, base: &str, branch: &str) -> Result<(), Cor
     let staged = list(run(&["diff", "--cached", "--name-only"]).await?);
     if !staged.is_empty() {
         return Err(CoreError::Conflict(format!(
-            "{} has staged changes on {base}; landing would commit them too. Commit or unstage them first:\n{}",
+            "{} has staged changes on {base}; landing would commit them too. Landing refused. Call run_finish and report that the result remains on {branch} for the person to land. Do not retry landing or commit, unstage, stash or discard the person's changes:\n{}",
             repo.display(),
             staged.join("\n")
         )));
@@ -186,7 +191,7 @@ async fn check_checkout(repo: &Path, base: &str, branch: &str) -> Result<(), Cor
         return Ok(());
     }
     Err(CoreError::Conflict(format!(
-        "{} has uncommitted changes on {base} in files that {branch} also changes; commit or stash them first:\n{}",
+        "{} has uncommitted changes on {base} in files that {branch} also changes. Landing refused. Call run_finish and report that the result remains on {branch} for the person to land. Do not retry landing or commit, stash or discard the person's changes:\n{}",
         repo.display(),
         clash.join("\n")
     )))
@@ -335,7 +340,9 @@ impl WorkspaceProvider for GitWorkspaces {
     }
 
     async fn diff_stat(&self, path: &Path, base: &str) -> Result<String, CoreError> {
-        git(path, &["diff", "--stat", &format!("{base}...HEAD")]).await
+        add_changes(path, &["--intent-to-add"]).await?;
+        let merge_base = git(path, &["merge-base", base, "HEAD"]).await?;
+        git(path, &["diff", "--stat", &merge_base]).await
     }
 
     async fn diff(&self, path: &Path, base: &str, paths: &[String]) -> Result<String, CoreError> {
@@ -489,6 +496,20 @@ impl WorkspaceProvider for GitWorkspaces {
     async fn prune(&self, repo: &Path) -> Result<(), CoreError> {
         git(repo, &["worktree", "prune"]).await?;
         Ok(())
+    }
+
+    async fn has_branch(&self, repo: &Path, branch: &str) -> bool {
+        git(
+            repo,
+            &[
+                "rev-parse",
+                "--verify",
+                "-q",
+                &format!("refs/heads/{branch}"),
+            ],
+        )
+        .await
+        .is_ok()
     }
 
     async fn delete_branch(&self, repo: &Path, branch: &str) -> Result<(), CoreError> {
@@ -1399,6 +1420,16 @@ mod tests {
         // The integration tree is clean again.
         let status = git(&integration, &["status", "--porcelain"]).await.unwrap();
         assert!(status.is_empty(), "{status}");
+    }
+
+    #[tokio::test]
+    async fn diff_stat_includes_uncommitted_and_untracked_changes() {
+        let repo = repo().await;
+        std::fs::write(repo.path().join("README"), "changed\n").unwrap();
+        std::fs::write(repo.path().join("new.txt"), "new\n").unwrap();
+        let stat = GitWorkspaces.diff_stat(repo.path(), "HEAD").await.unwrap();
+        assert!(stat.contains("README"), "{stat}");
+        assert!(stat.contains("new.txt"), "{stat}");
     }
 
     #[tokio::test]

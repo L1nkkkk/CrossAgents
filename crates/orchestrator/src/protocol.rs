@@ -4,7 +4,7 @@
 
 use crossagents_core::{Agent, Role};
 
-use crate::messaging::{Group, groups_of};
+use crate::messaging::Group;
 
 const COMMON: &str = "You work in CrossAgents, a hub where agents from different vendors \
 collaborate. Use the `crossagents` tools to see your teammates (whoami, agent_list), message \
@@ -58,7 +58,11 @@ hub runs them before `run_land` or `run_finish` accepts a run that changed somet
 failure is refused with the output: fix it and call again.\n\
 1. Plan: call `plan_submit` once with all tasks (key, title, spec.goal written so a worker who \
 sees only it and the repository can do it, scope, interfaces, references, optional \
-spec.acceptance commands, depends_on, assignee from the roster). A task goes to a new \
+spec.acceptance commands, depends_on, assignee from the roster). Keep each spec.goal short: \
+what to change and why, the decisions the worker cannot guess, and what done looks like; \
+point at code by path:line in references instead of pasting it or retelling the \
+repository, which the worker reads itself. The plan is written token by token while the \
+person waits. A task goes to a new \
 execution session of its assignee, from a clean context, unless you write `fresh: false`: then \
 that session itself does it, with its conversation (one of the workspace's sessions your \
 kickoff and `agent_list` show; `restore: true` for an archived one). It is refused, with the \
@@ -73,21 +77,32 @@ results). Check the work: `workspace_diff`, `workspace_read`, `workspace_run` (t
 run branch (its message is the commit message: write it the way the project's rules ask, as \
 for `run_land`; on a conflict you get the conflicting hunks: resolve with `task_rework` or \
 `branch_sync`), `task_rework` sends it back with what to fix, `task_drop` discards it.\n\
-4. Answer worker questions with `task_answer`. A task that is \"stalled\" means its worker \
+4. Answer worker questions with `task_answer`; a decision that changes what may be touched \
+goes into the spec too (`task_update`). A worker in a turn reads your answer when that turn \
+ends; interrupting it to repeat the answer only puts other messages ahead of it. A task that is \"stalled\" means its worker \
 stopped without reporting: message it, `task_assign` it to someone else, or drop it.\n\
 5. When every task has ended, land the run branch with `run_land` if the run's policy lets you \
 (otherwise the person lands it), then close the run with `run_finish` and a short summary for \
 the person: what changed, what did not, anything they should check.\n\
-The person may keep talking to you after the run is closed; answer, but start no new work in a \
-closed run.";
+The person may keep talking to you after the run is closed. When they propose a new goal, use \
+`run_next` to start the next round in this work group, not `work_start`. Answer questions, \
+conversation and follow-ups about the previous round directly without starting a new round. \
+Use `work_start` (with `separate: true`, which says you mean a Work of its own and not the \
+next round here) only when the person explicitly asks for a separate, independent Work. \
+If run_land refuses because the base checkout has the person's uncommitted or \
+staged changes, leave those changes alone: do not commit, unstage, stash or discard them, \
+and do not retry landing. Call run_finish, say that the result remains on the run branch, \
+and leave landing to the person.";
 
 const WORKER: &str = "As a WORKER on a task: do exactly what the task's spec asks, in your \
 working directory (the task's own git worktree). Do not commit; the hub does. Report with the \
 task_id from your task: `task_progress` for a short status now and then, `task_ask` if the spec \
-is unclear (then end your turn and wait for the answer), `task_complete` with a summary of what \
+is unclear (then end your turn and wait for the answer; asking again replaces the open \
+question), `task_complete` with a summary of what \
 you changed when done, `task_fail` with the reason if it cannot be done. The task's issuer \
-checks your work and may send it back with notes; then continue and report again. When you \
-are given a task yourself (with your conversation, rather than as a new session), you work in \
+checks your work and may send it back with notes; then continue and report again. The \
+spec is the decision: when it was changed, or you wait for an answer, `task_get` it before \
+asking again, since the answer may already be there. When you are given a task yourself (with your conversation, rather than as a new session), you work in \
 the task's worktree until it ends and then go back to your own directory; a person may still \
 write to you, and comes first.";
 
@@ -111,10 +126,26 @@ const CODEX_TOOLS: &str = "In Codex the `crossagents` tools are named \
 `exec`, call them from it: `text(await tools.mcp__crossagents__task_complete({task_id, \
 summary}))`.";
 
-/// The guide for `agent`: its role's, and what a conversation outside any run may do.
-pub fn guide_for(agent: &Agent) -> String {
-    let mut text = guide(agent.role);
-    if groups_of(agent).contains(&Group::Conversation) {
+/// The guide for `agent` in `groups` ([`crate::Orchestrator::groups`]): the role's it holds,
+/// and what a conversation outside any run may do. A plain chat holds no role and gets no
+/// run workflow (docs/SESSION-FIRST.md §7).
+pub fn guide_for(agent: &Agent, groups: &[Group]) -> String {
+    let role = groups.iter().find_map(|g| match g {
+        Group::Lead => Some(Role::Planner),
+        Group::Assignee => Some(Role::Worker),
+        Group::Reviewer => Some(Role::Reviewer),
+        Group::Everyone | Group::Conversation => None,
+    });
+    let mut text = match role {
+        Some(role) => guide(role),
+        // It builds in its own checkout like anyone else.
+        None => format!(
+            "{COMMON}
+
+{LOCKS}"
+        ),
+    };
+    if groups.contains(&Group::Conversation) {
         text.push_str("\n\n");
         text.push_str(CONVERSATION);
     }
@@ -147,6 +178,7 @@ mod tests {
     use crossagents_core::{AgentId, AgentProfile, AgentStatus, NameSource};
 
     use super::*;
+    use crate::messaging::groups_of;
 
     fn worker(plugin: &str) -> Agent {
         Agent {
@@ -197,12 +229,12 @@ mod tests {
 
     #[test]
     fn codex_agents_learn_how_their_tools_are_named() {
-        let codex = guide_for(&worker("codex"));
+        let codex = guide_for(&worker("codex"), &groups_of(&worker("codex"), None));
         assert!(
             codex.contains("tools.mcp__crossagents__task_complete"),
             "{codex}"
         );
-        let claude = guide_for(&worker("claude"));
+        let claude = guide_for(&worker("claude"), &groups_of(&worker("claude"), None));
         assert!(!claude.contains("mcp__crossagents__"), "{claude}");
     }
 
@@ -212,8 +244,15 @@ mod tests {
             role: Role::Planner,
             ..worker("claude")
         };
-        let guide = guide_for(&planner);
+        let guide = guide_for(&planner, &groups_of(&planner, None));
         assert!(guide.contains("As the LEAD"), "{guide}");
+        // The wording itself, not just the tool's name: a guide that said the opposite
+        // (what it said before G1-3) would pass a bare `contains("run_next")`.
+        assert!(
+            guide.contains("start the next round in this work group")
+                && guide.contains("separate, independent Work"),
+            "{guide}"
+        );
         assert!(
             guide.contains("starts a Work from the home page") && guide.contains("work_start"),
             "{guide}"
@@ -223,6 +262,26 @@ mod tests {
             config: serde_json::json!({ "spawned_by_run": "r1" }),
             ..worker("claude")
         };
-        assert!(!guide_for(&recruit).contains("Outside a run"));
+        assert!(!guide_for(&recruit, &groups_of(&recruit, None)).contains("Outside a run"));
+    }
+
+    #[test]
+    fn a_plain_chat_gets_no_run_workflow_until_a_run_holds_it() {
+        let chat = worker("claude");
+        let groups = groups_of(&chat, None);
+        assert_eq!(groups, [Group::Everyone, Group::Conversation]);
+        let guide = guide_for(&chat, &groups);
+        assert!(
+            !guide.contains("As a WORKER") && !guide.contains("task_complete"),
+            "{guide}"
+        );
+        assert!(
+            guide.contains("Outside a run") && guide.contains("crossagents exec"),
+            "{guide}"
+        );
+        // Taken into a run as a worker, it is told how to report.
+        let held = groups_of(&chat, Some(crossagents_core::ClaimRole::Worker));
+        assert!(held.contains(&Group::Assignee));
+        assert!(guide_for(&chat, &held).contains("As a WORKER"));
     }
 }

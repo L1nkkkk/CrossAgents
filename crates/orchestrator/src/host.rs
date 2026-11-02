@@ -23,6 +23,12 @@ pub enum Route {
 
 #[async_trait]
 pub trait AgentHost: Send + Sync {
+    /// Keeps a contextual notice for the next message without starting an agent or a turn.
+    /// Replaces an earlier notice on the same topic.
+    async fn tell_later(&self, agent: AgentId, topic: &str, line: &str) -> Result<(), CoreError> {
+        let _ = (agent, topic, line);
+        Err(CoreError::Unsupported("passive notices".into()))
+    }
     /// Delivers a message to an agent, starting it if needed.
     async fn send(
         &self,

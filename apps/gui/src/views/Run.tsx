@@ -17,12 +17,15 @@ import {
   FileScopeProvider,
   Icon,
   List,
+  OneLine,
   Prose,
   StatusChip,
   agentName,
   agentTitle,
   ago,
+  beyondFirstLine,
   displayName,
+  firstSentence,
   isAgent,
   runTone,
   sessionHref,
@@ -47,13 +50,16 @@ import {
   type ContinuationField,
 } from "../lib/continuation";
 import { accountOf, prettyModel } from "../lib/models";
+import { modelPickValue, parseModelPick, workerAgentRequest, workerModelGroups, workerModelLabel, workerTarget } from "../lib/workerModels";
 import { StateWord, TaskChanges } from "../parts";
 import { RunChanges, TaskReview } from "../review";
 import { RunTraceView } from "../trace";
+import { RailCard } from "../rail";
 import { t, type Key } from "../lib/i18n";
 import { wsKey } from "../workspace";
 import { openTool } from "../panes";
-import { SessionView } from "./Session";
+import { useQuota } from "./Quota";
+import { SessionView, useSideSlot } from "./Session";
 
 function concerns(runId: string, e: HubEvent): boolean {
   switch (e.type) {
@@ -88,9 +94,11 @@ const CONTINUATION_LABELS: Record<string, Key> = {
 const continuationLabel = (phase: string) => (CONTINUATION_LABELS[phase] ? t(CONTINUATION_LABELS[phase]) : phase);
 
 /**
- * A run is its lead's conversation (docs/tasks/W1.md §8): the run's header, its facts above
- * the messages, how it ended after them, and the task board beside them. The plan waits
- * for approval in the dock above the composer, as in the lead's own conversation.
+ * A run is its lead's conversation (docs/tasks/W1.md §8). The conversation keeps only what the
+ * person has to answer — the questions above the composer, the plan waiting for approval, the
+ * landing buttons, a run that paused or failed. The run's structure — tasks and their hands, the
+ * plan before it is split, who takes part, the notes, the trace, the policy — is in the rail
+ * beside it (a drawer when the window is too narrow for one).
  */
 export function RunView({
   runId,
@@ -125,19 +133,16 @@ export function RunView({
   const { run, tasks } = detail.data;
   const planner = agentName(agents.data, run.planner);
   const plannerAgent = agents.data?.find((a) => a.id === run.planner);
-  const done = tasks.filter((t) => t.status === "merged").length;
   const allEnded = tasks.length > 0 && tasks.every((t) => ["merged", "failed", "cancelled"].includes(t.status));
 
   const header = (
     <div className="topbar">
       <span className="title">{run.title}</span>
       <StatusChip status={run.status} tone={runTone(run.status)} />
-      {tasks.length > 0 && (
-        <span className="chip">
-          {done}/{tasks.length} merged
-        </span>
-      )}
+      {/* Narrow, the header's panel button already carries the progress: one copy. */}
+      <ProgressChip tasks={tasks} />
       <div className="spacer" />
+      <SidePanelToggle tasks={tasks} />
       {!run.in_place && (
         <button className="ghost small graph-toggle" onClick={() => openTool("graph")} title="在右侧工具列看这个 run 的分支和提交">
           <span className="row" style={{ gap: 5 }}>
@@ -146,7 +151,7 @@ export function RunView({
           </span>
         </button>
       )}
-      {plannerAgent ? <Who agent={plannerAgent} label="主导" /> : <a className="chip" href={sessionHref(run.planner)}>主导 · {planner}</a>}
+      <LeadChip agent={plannerAgent} name={planner} href={sessionHref(run.planner)} />
       <button
         className="danger"
         title={ACTIVE.includes(run.status) ? "先取消，再删除它的一切" : "删除这个 run、它的任务、agent 和工作区"}
@@ -157,31 +162,28 @@ export function RunView({
     </div>
   );
 
+  // Only what needs the person: a run that paused, one that ended badly. Both read as one line
+  // and open for the whole note; everything else about the run is in the rail.
   const top = (
     <div className="run-head">
-      <RunMeta run={run} agents={agents.data} onPolicyChange={detail.reload} />
-      <ErrorBox error={detail.error} />
-      {run.status === "paused" && <div className="item-warn">已暂停：{run.note ?? "等你决定"}。在「问你」里选择加预算继续，或取消这个 run。</div>}
-      {run.note && !["awaiting_approval", "paused", "planning"].includes(run.status) && <div className="item-error">{run.note}</div>}
-    </div>
-  );
-
-  const bottom = (
-    <div className="run-foot">
-      {run.status !== "awaiting_approval" && tasks.length === 0 && run.plan.length > 0 && <PlanList run={run} />}
-      {(run.status === "completed" || (run.status === "running" && allEnded)) && <Ending run={run} closing={run.status === "running"} onDone={detail.reload} />}
-      <Participants tasks={tasks} agents={agents.data} />
-      <RunNotes runId={run.id} />
-      {tasks.length > 0 && (
-        <details className="notes-panel">
-          <summary>追溯</summary>
-          <RunTraceView runId={run.id} />
-        </details>
+      {run.status === "paused" && (
+        <OneLine tone="warn" icon={<span aria-hidden="true">❚❚</span>} title="已暂停" summary={firstSentence(run.note ?? "等你决定")}>
+          {`${run.note ?? "等你决定"}。在「问你」里选择加预算继续，或取消这个 run。`}
+        </OneLine>
       )}
+      {run.note && !["awaiting_approval", "paused", "planning"].includes(run.status) && (
+        <OneLine tone="danger" icon={<Icon name="close" size={13} />} title="run 的说明" summary={firstSentence(run.note)}>
+          {beyondFirstLine(run.note)}
+        </OneLine>
+      )}
+      <ErrorBox error={detail.error} />
     </div>
   );
 
-  const side = tasks.length ? <TaskBoard run={run} tasks={tasks} agents={agents.data} selectedTask={selectedTask} /> : undefined;
+  const bottom =
+    run.status === "completed" || (run.status === "running" && allEnded) ? <Ending run={run} closing={run.status === "running"} onDone={detail.reload} /> : undefined;
+
+  const side = <RunRail run={run} tasks={tasks} agents={agents.data} selectedTask={selectedTask} onPolicyChange={detail.reload} />;
 
   return (
     <FileScopeProvider value={{ kind: "run", run: run.id }}>
@@ -218,8 +220,7 @@ function Participants({ tasks, agents }: { tasks: Task[]; agents?: Agent[] }) {
     }
   }
   return (
-    <details className="notes-panel participants" open>
-      <summary>参与者</summary>
+    <div className="participants">
       <ErrorBox error={error} />
       {worked.map((task) => (
         <div key={task.id} className="part-task">
@@ -257,7 +258,7 @@ function Participants({ tasks, agents }: { tasks: Task[]; agents?: Agent[] }) {
           </ul>
         </div>
       ))}
-    </details>
+    </div>
   );
 }
 
@@ -265,9 +266,6 @@ function Participants({ tasks, agents }: { tasks: Task[]; agents?: Agent[] }) {
 function TaskBoard({ run, tasks, agents, selectedTask }: { run: Run; tasks: Task[]; agents?: Agent[]; selectedTask?: string }) {
   return (
     <section className="task-board">
-      <div className="task-board-head">
-        任务 <span className="muted small">{progress(tasks)}</span>
-      </div>
       {groupTasks(tasks).map((group) => (
         <div key={group.bucket} className="board-group">
           <div className="board-label">
@@ -302,29 +300,133 @@ function TaskBoard({ run, tasks, agents, selectedTask }: { run: Run; tasks: Task
   );
 }
 
-function RunMeta({ run, agents, onPolicyChange }: { run: Run; agents?: Parameters<typeof agentName>[0]; onPolicyChange: () => void }) {
+/** "2/4 merged", while the rail beside the conversation shows the tasks anyway. */
+function ProgressChip({ tasks }: { tasks: Task[] }) {
+  const { narrow } = useSideSlot();
+  if (narrow || !tasks.length) return null;
+  const done = tasks.filter((t) => t.status === "merged").length;
   return (
-    <div className="row small secondary" style={{ gap: 14 }}>
+    <span className="chip">
+      {done}/{tasks.length} merged
+    </span>
+  );
+}
+
+/** The lead, when the header has room for it: the conversation is the lead's anyway. */
+function LeadChip({ agent, name, href }: { agent?: Agent; name: string; href: string }) {
+  const { narrow } = useSideSlot();
+  if (narrow) return null;
+  return agent ? <Who agent={agent} label="主导" /> : <a className="chip" href={href}>主导 · {name}</a>;
+}
+
+/**
+ * The header's way into the run's panels: when the window is too narrow (or the rail is turned
+ * off) to keep them beside the conversation, this opens them over it — with the task progress, so
+ * the header still says how the run is doing without them.
+ */
+function SidePanelToggle({ tasks }: { tasks: Task[] }) {
+  const { narrow, open, toggle } = useSideSlot();
+  if (!narrow) return null;
+  const done = tasks.filter((t) => t.status === "merged").length;
+  return (
+    <button
+      className={`ghost small side-toggle ${open ? "on" : ""}`}
+      onClick={toggle}
+      aria-label={open ? "收起 run 的面板" : "打开 run 的面板"}
+      aria-expanded={open}
+      title="任务、计划、参与者、笔记、追溯和策略"
+    >
+      <Icon name="panel" size={14} />
+      {tasks.length > 0 ? `任务 ${done}/${tasks.length}` : "面板"}
+    </button>
+  );
+}
+
+/**
+ * The run's structure, in the rail beside its conversation: what the tasks are doing (and whose
+ * hands they passed through), the plan while it is not split into tasks yet, where the run works
+ * and on what policy, who took part, what the agents noted, and the trace. Each section is a
+ * panel that folds by its heading; the trace and the participants start folded.
+ */
+function RunRail({
+  run,
+  tasks,
+  agents,
+  selectedTask,
+  onPolicyChange,
+}: {
+  run: Run;
+  tasks: Task[];
+  agents?: Agent[];
+  selectedTask?: string;
+  onPolicyChange: () => void;
+}) {
+  return (
+    <>
+      {tasks.length > 0 ? (
+        <RailCard id="run-tasks" title="任务" aside={progress(tasks)}>
+          <TaskBoard run={run} tasks={tasks} agents={agents} selectedTask={selectedTask} />
+        </RailCard>
+      ) : (
+        run.plan.length > 0 && (
+          <RailCard id="run-plan" title="计划" aside={`${run.plan.length} 个任务`}>
+            <PlanList run={run} />
+          </RailCard>
+        )
+      )}
+      <RailCard id="run-facts" title="run">
+        <RunFacts run={run} agents={agents} />
+      </RailCard>
+      <RailCard id="run-policy" title="策略与预算">
+        <PolicyChip run={run} />
+        <ContinuationMeta key={run.id} run={run} agents={agents} onDone={onPolicyChange} />
+      </RailCard>
+      {tasks.some((t) => t.handoffs.length > 0) && (
+        <RailCard id="run-participants" title="参与者" defaultOpen={false}>
+          <Participants tasks={tasks} agents={agents} />
+        </RailCard>
+      )}
+      <RunNotes runId={run.id} />
+      {tasks.length > 0 && (
+        <RailCard id="run-trace" title="追溯" defaultOpen={false}>
+          <RunTraceView runId={run.id} />
+        </RailCard>
+      )}
+    </>
+  );
+}
+
+/** Where the run works and who works in it, one line each. */
+function RunFacts({ run, agents }: { run: Run; agents?: Agent[] }) {
+  return (
+    <div className="rail-facts">
       {run.in_place ? (
         <InPlaceNote run={run} />
       ) : (
-        <span className="row" style={{ gap: 5 }}>
+        <div className="rail-line" title={`${run.base_branch} → ${run.branch}`}>
           <Icon name="branch" size={14} />
-          <code>{run.base_branch}</code> → <code>{run.branch}</code>
-        </span>
+          <span className="rail-main">
+            <code>{run.base_branch}</code> → <code>{run.branch}</code>
+          </span>
+        </div>
       )}
-      <span className="row" style={{ gap: 5 }} title={run.repo}>
+      <div className="rail-line" title={run.repo}>
         <Icon name="folder" size={14} />
-        <span style={{ maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{run.repo}</span>
-      </span>
-      <TeamStack ids={run.config.team.length ? run.config.team : [run.config.worker]} agents={agents} />
-      <span>
-        默认 {agentName(agents, run.config.worker)}
-        {run.config.escalate && ` → 升级 ${agentName(agents, run.config.escalate)}`} · 并行 {run.config.max_parallel}
-      </span>
-      <PolicyChip run={run} />
-      <ContinuationMeta key={run.id} run={run} agents={agents} onDone={onPolicyChange} />
-      <span title={time(run.created_at)}>{ago(run.created_at)}</span>
+        <span className="rail-main">{run.repo}</span>
+      </div>
+      <div className="rail-line">
+        <Icon name="team" size={14} />
+        <span className="rail-main">
+          默认 {agentName(agents, run.config.worker)}
+          {run.config.escalate && ` → 升级 ${agentName(agents, run.config.escalate)}`} · 并行 {run.config.max_parallel}
+        </span>
+      </div>
+      <div className="rail-line">
+        <TeamStack ids={run.config.team.length ? run.config.team : [run.config.worker]} agents={agents} />
+      </div>
+      <div className="rail-line" title={time(run.created_at)}>
+        <span className="rail-main muted">创建于 {ago(run.created_at)}</span>
+      </div>
     </div>
   );
 }
@@ -474,8 +576,9 @@ function ContinuationMeta({ run, agents, onDone }: { run: Run; agents?: Agent[];
 }
 
 /**
- * The end of a run: while the lead wraps up (every task ended), or once it is done. Shows the
- * lead's summary and where the result landed; lands or closes it for the person.
+ * The end of a run: while the lead wraps up (every task ended), or once it is done. One line says
+ * how it went and carries the buttons the person has to press — land it, close it; the summary,
+ * where the result landed and the whole diff open under it.
  */
 function Ending({ run, closing, onDone }: { run: Run; closing: boolean; onDone: () => void }) {
   const [busy, setBusy] = useState(false);
@@ -497,12 +600,21 @@ function Ending({ run, closing, onDone }: { run: Run; closing: boolean; onDone: 
   const diff = useHubData(() => (landed || run.in_place ? Promise.resolve(undefined) : api.runDiff(run.id)), [run.id, !!landed], () => false);
   const empty = !!diff.data && !diff.data.diff.trim();
   const landable = !landed && !run.in_place && !empty;
+  // The line's gist: what the lead concluded, else where it ended.
+  const gist = run.summary
+    ? firstSentence(run.summary)
+    : closing
+      ? "所有任务都已结束，等主导落地和写总结"
+      : landed
+        ? `已落地到 ${run.base_branch}`
+        : run.in_place
+          ? "改动已直接写在文件夹里"
+          : empty
+            ? "没有改动，不用落地"
+            : `结果在 ${run.branch}，还没进 ${run.base_branch}`;
   return (
-    <div className="done-card">
-      <span className="done-check">{closing ? "○" : "✓"}</span>
-      <div className="done-text" style={{ flex: 1 }}>
-        <strong>{closing ? "收尾中" : "完成"}</strong>
-        {closing ? " · 所有任务都已结束，等主导落地和写总结" : ""}
+    <div className="done-line">
+      <OneLine tone={closing ? "warn" : "ok"} icon={<span className="done-glyph" aria-hidden="true">{closing ? "○" : "✓"}</span>} title={closing ? "收尾中" : "完成"} summary={gist}>
         {run.in_place ? (
           <div className="small muted">
             改动已直接写在 <code>{run.repo}</code>
@@ -520,14 +632,10 @@ function Ending({ run, closing, onDone }: { run: Run; closing: boolean; onDone: 
           </div>
         )}
         {landable && <RunChanges run={run} />}
-        {run.summary && (
-          <div className="run-summary">
-            <Prose text={run.summary} />
-          </div>
-        )}
+        {run.summary && <Prose text={run.summary} />}
         <ErrorBox error={error} />
-      </div>
-      <div className="row" style={{ gap: 6, alignSelf: "flex-start" }}>
+      </OneLine>
+      <div className="done-actions">
         {landable && (
           <>
             <button className="primary small" disabled={busy} onClick={() => act(() => api.landRun(run.id, "merge"))} title={`在 ${run.base_branch} 上生成一个合并提交`}>
@@ -555,15 +663,14 @@ function RunNotes({ runId }: { runId: string }) {
   const list = notes.data?.notes ?? [];
   if (!list.length) return null;
   return (
-    <details className="notes-panel">
-      <summary>这个 run 的笔记 · {list.length}</summary>
+    <RailCard id="run-notes" title="笔记" aside={String(list.length)}>
       {list.map((n) => (
         <div key={n.key} className="note">
           <code>{n.key}</code>
           <Prose text={n.text} />
         </div>
       ))}
-    </details>
+    </RailCard>
   );
 }
 
@@ -717,10 +824,11 @@ const capOf = (text: string) => (text.trim() ? Number(text) : null);
 export function usePlanApproval(run: Run, busy: boolean) {
   const agents = useAgents();
   const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
+  const quota = useQuota();
   const policy = run.config.policy;
   const [preset, setPreset] = useState<Preset>(presetOf(policy) ?? "manual");
-  // Per task: "" is the run's default worker, `agent:<id>` a teammate, `model:<m>` a new
-  // worker on the lead's login.
+  // Per task: "" is the run's default worker, `agent:<id>` a teammate, `model:<plugin>/<model>`
+  // a new worker on the model's own plugin and a login of it.
   const [picks, setPicks] = useState<Record<string, string>>({});
   const [maxUsd, setMaxUsd] = useState(policy.budget.max_usd?.toString() ?? "");
   const [maxMinutes, setMaxMinutes] = useState(policy.budget.max_minutes?.toString() ?? "");
@@ -730,39 +838,39 @@ export function usePlanApproval(run: Run, busy: boolean) {
   const everyone = agents.data ?? [];
   const lead = everyone.find((a) => a.id === run.planner);
   const fallback = everyone.find((a) => a.id === run.config.worker);
-  const teammates = everyone.filter((a) => a.role === "worker" && run.config.team.includes(a.id));
-  const models = plugins.data?.find((p) => p.name === lead?.plugin)?.models ?? [];
+  // The run's team and the workspace's other sessions, chats included: any session may take a
+  // task (docs/AGENT-WORKSPACE.md §2.1). Not its lead, nor the conversation that started it.
+  const teammates = everyone.filter(
+    (a) => a.id !== run.planner && a.id !== run.origin_chat_id && !a.archived_at && (run.config.team.includes(a.id) || wsKey(a.cwd) === wsKey(run.repo)),
+  );
+  const accounts = quota.data?.accounts ?? [];
+  const leadRef = lead ? { plugin: lead.plugin, account: accountOf(lead) } : undefined;
+  // Every installed plugin's models, by family; a plugin with no signed-in login stays listed
+  // but disabled, with the reason.
+  const workerGroups = workerModelGroups(plugins.data ?? [], accounts, leadRef);
+  const workerOptions = workerGroups.flatMap((g) => g.options);
   const planned = (task: PlannedTask) => {
     const agent = task.assignee ? everyone.find((a) => isAgent(a, task.assignee!)) : undefined;
     return agent ? `agent:${agent.id}` : "";
   };
   const pickOf = (task: PlannedTask) => picks[task.key] ?? planned(task);
 
-  /** The worker a pick stands for, made on the lead's login when it is a model. */
+  /** The worker a pick stands for: a teammate, or a new agent on the model's own plugin. */
   async function workerOf(pick: string, made: Map<string, string>): Promise<string | null> {
     if (!pick) return null;
     if (pick.startsWith("agent:")) return pick.slice("agent:".length);
-    const model = pick.slice("model:".length);
-    const known = made.get(model);
+    const parsed = parseModelPick(pick);
+    if (!parsed) throw new Error(t("worker.unknownPick", { pick }));
+    const known = made.get(pick);
     if (known) return known;
-    const account = lead && accountOf(lead);
+    // The model's plugin decides, not the lead's: a DeepSeek model belongs to the plugin that
+    // offers it, and only a same-plugin worker may use the lead's login.
+    const target = workerTarget(parsed.plugin, parsed.model, accounts, leadRef);
     const found = everyone.find(
-      (a) => a.role === "worker" && a.plugin === lead?.plugin && a.model === model && accountOf(a) === account && wsKey(a.cwd) === wsKey(run.repo),
+      (a) => a.id !== run.planner && a.plugin === target.plugin && a.model === target.model && accountOf(a) === target.account && wsKey(a.cwd) === wsKey(run.repo),
     );
-    const id =
-      found?.id ??
-      (
-        await api.createAgent({
-          plugin: lead!.plugin,
-          driver: null,
-          model,
-          role: "worker",
-          cwd: run.repo,
-          config: account ? { account } : {},
-          profile: { display_name: null, title: "Worker", avatar: null, color: null, persona: null },
-        })
-      ).id;
-    made.set(model, id);
+    const id = found?.id ?? (await api.createAgent(workerAgentRequest(target, run.repo))).id;
+    made.set(pick, id);
     return id;
   }
 
@@ -797,15 +905,18 @@ export function usePlanApproval(run: Run, busy: boolean) {
           ))}
         </optgroup>
       )}
-      {models.length > 0 && (
-        <optgroup label="新建（用主导的登录）">
-          {models.map((m) => (
-            <option key={m} value={`model:${m}`}>
-              {prettyModel(m)}
-            </option>
-          ))}
+      {workerGroups.map((group) => (
+        <optgroup key={group.key} label={t("plan.newWorkerFamily", { family: group.label })}>
+          {group.options.map((option) => {
+            const label = workerModelLabel(option, workerOptions);
+            return (
+              <option key={`${option.plugin}/${option.model}`} value={modelPickValue(option.plugin, option.model)} disabled={!!option.blocked}>
+                {option.blocked ? `${label} · ${t(option.blocked.key)}` : label}
+              </option>
+            );
+          })}
         </optgroup>
-      )}
+      ))}
     </select>
   );
   const capsText = budgetText({ max_usd: capOf(maxUsd), max_minutes: capOf(maxMinutes), max_tokens: maxTokens.trim() ? Number(maxTokens) * 1000 : null });

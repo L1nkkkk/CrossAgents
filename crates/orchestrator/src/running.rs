@@ -7,10 +7,134 @@
 //! decides whether a check may start. Kept in memory only; after a restart nothing is known
 //! to be running.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Duration, Utc};
-use crossagents_core::{AgentId, Event, EventKind, ToolStatus};
+use crossagents_core::{AgentId, Event, EventKind, OutputStream, ToolStatus};
+
+/// Activity for current turns only. Kept in memory; after a restart nothing is known.
+#[derive(Debug, Default)]
+pub struct AgentActivity {
+    by_agent: HashMap<AgentId, TurnActivity>,
+}
+
+/// Two hours without any activity suggests an end event that never arrived, while a turn that
+/// is long but alive keeps its activity: that is why this counts from the last event and not
+/// from the turn's start.
+const ACTIVITY_STALE_AFTER_HOURS: i64 = 2;
+
+#[derive(Debug)]
+struct TurnActivity {
+    started: DateTime<Utc>,
+    last: DateTime<Utc>,
+    kind: &'static str,
+    files: HashSet<String>,
+    calls: HashMap<String, &'static str>,
+}
+
+impl TurnActivity {
+    fn new(ts: DateTime<Utc>) -> Self {
+        Self {
+            started: ts,
+            last: ts,
+            kind: "thinking",
+            files: HashSet::new(),
+            calls: HashMap::new(),
+        }
+    }
+}
+
+impl AgentActivity {
+    pub fn push(&mut self, event: &Event) {
+        self.by_agent
+            .retain(|_, turn| event.ts - turn.last < Duration::hours(ACTIVITY_STALE_AFTER_HOURS));
+        match &event.kind {
+            EventKind::AgentTurnCompleted { id, .. } | EventKind::AgentExited { id, .. } => {
+                self.by_agent.remove(id);
+            }
+            EventKind::AgentTurnStarted { id, .. } => {
+                self.by_agent.insert(*id, TurnActivity::new(event.ts));
+            }
+            EventKind::AgentOutput { id, stream, .. } => {
+                let turn = self
+                    .by_agent
+                    .entry(*id)
+                    .or_insert_with(|| TurnActivity::new(event.ts));
+                turn.last = event.ts;
+                turn.kind = match stream {
+                    OutputStream::Thought => "thinking",
+                    OutputStream::Text => "replying",
+                };
+            }
+            EventKind::AgentToolCall {
+                id,
+                tool_call_id,
+                kind,
+                ..
+            } => {
+                let turn = self
+                    .by_agent
+                    .entry(*id)
+                    .or_insert_with(|| TurnActivity::new(event.ts));
+                let kind = match kind.as_deref() {
+                    Some("execute") => "run_command",
+                    Some("edit" | "delete" | "move") => "edit_files",
+                    Some("read") => "read_files",
+                    Some("search" | "fetch") => "search",
+                    Some("think") => "thinking",
+                    _ => "tool_call",
+                };
+                turn.calls.insert(tool_call_id.clone(), kind);
+                turn.last = event.ts;
+                turn.kind = kind;
+            }
+            EventKind::AgentToolDetail {
+                id,
+                tool_call_id,
+                detail,
+            } => {
+                if let Some(turn) = self.by_agent.get_mut(id) {
+                    if let Some(kind) = turn.calls.get(tool_call_id).copied() {
+                        turn.last = event.ts;
+                        turn.kind = kind;
+                        if kind == "edit_files" {
+                            turn.files
+                                .extend(detail.changes.iter().map(|change| change.path.clone()));
+                        }
+                    }
+                }
+            }
+            EventKind::AgentToolOutput {
+                id, tool_call_id, ..
+            }
+            | EventKind::AgentToolCallUpdated {
+                id, tool_call_id, ..
+            } => {
+                if let Some(turn) = self.by_agent.get_mut(id) {
+                    if let Some(kind) = turn.calls.get(tool_call_id).copied() {
+                        turn.last = event.ts;
+                        turn.kind = kind;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn of(&self, agent: AgentId, now: DateTime<Utc>) -> Option<serde_json::Value> {
+        self.by_agent
+            .get(&agent)
+            .filter(|turn| now - turn.last < Duration::hours(ACTIVITY_STALE_AFTER_HOURS))
+            .map(|turn| {
+                serde_json::json!({
+                    "turn_elapsed_seconds": (now - turn.started).num_seconds().max(0),
+                    "last_activity_kind": turn.kind,
+                    "last_activity_ago_seconds": (now - turn.last).num_seconds().max(0),
+                    "files_touched": turn.files.len(),
+                })
+            })
+    }
+}
 
 /// A command still going.
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +148,7 @@ pub struct Running {
 #[derive(Debug, Default)]
 pub struct RunningCommands {
     by_agent: HashMap<AgentId, Vec<Running>>,
+    pub activity: AgentActivity,
 }
 
 /// Past it a command whose end was never reported is taken as gone: a command put in the
@@ -32,6 +157,7 @@ const STALE_AFTER_HOURS: i64 = 2;
 
 impl RunningCommands {
     pub fn push(&mut self, event: &Event) {
+        self.activity.push(event);
         match &event.kind {
             EventKind::AgentToolCall {
                 id,
@@ -156,6 +282,42 @@ mod tests {
             schema: EVENT_SCHEMA_VERSION,
             kind,
         }
+    }
+
+    #[test]
+    fn activity_expires_from_last_event_and_is_pruned_on_push() {
+        let agent = AgentId::new();
+        let other = AgentId::new();
+        let now = Utc::now();
+        let mut activity = AgentActivity::default();
+        let mut start = event(EventKind::AgentOutput {
+            id: agent,
+            stream: OutputStream::Thought,
+            text: "work".into(),
+        });
+        start.ts = now - Duration::hours(3);
+        activity.push(&start);
+        let mut recent = event(EventKind::AgentOutput {
+            id: agent,
+            stream: OutputStream::Text,
+            text: "still working".into(),
+        });
+        recent.ts = now - Duration::minutes(90);
+        activity.push(&recent);
+        assert_eq!(
+            activity.of(agent, now).unwrap()["last_activity_kind"],
+            "replying"
+        );
+        assert!(activity.of(agent, now + Duration::minutes(30)).is_none());
+        let mut next = event(EventKind::AgentOutput {
+            id: other,
+            stream: OutputStream::Thought,
+            text: "new".into(),
+        });
+        next.ts = now + Duration::minutes(30);
+        activity.push(&next);
+        assert!(!activity.by_agent.contains_key(&agent));
+        assert!(activity.of(other, next.ts).is_some());
     }
 
     #[test]
