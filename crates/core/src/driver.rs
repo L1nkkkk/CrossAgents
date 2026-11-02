@@ -38,6 +38,8 @@ pub enum DriverKind {
     /// With's `with-cli chat -o stream-json`: one process per turn, the conversation kept
     /// by its session id.
     WithNative,
+    /// Cursor's `agent -p`: one process per turn, with a persistent chat id.
+    CursorNative,
     /// Any ACP agent; the fallback for everything else. The default, so configurations
     /// written before drivers existed keep their behaviour.
     #[default]
@@ -45,11 +47,12 @@ pub enum DriverKind {
 }
 
 impl DriverKind {
-    pub const ALL: [DriverKind; 5] = [
+    pub const ALL: [DriverKind; 6] = [
         Self::CodexNative,
         Self::ClaudeNative,
         Self::CodebuddyNative,
         Self::WithNative,
+        Self::CursorNative,
         Self::AcpGeneric,
     ];
 
@@ -59,6 +62,7 @@ impl DriverKind {
             Self::ClaudeNative => "claude-native",
             Self::CodebuddyNative => "codebuddy-native",
             Self::WithNative => "with-native",
+            Self::CursorNative => "cursor-native",
             Self::AcpGeneric => "acp-generic",
         }
     }
@@ -79,7 +83,7 @@ impl FromStr for DriverKind {
             .find(|k| k.as_str() == s)
             .ok_or_else(|| {
                 CoreError::Unsupported(format!(
-                    "driver {s:?} (known: codex-native, claude-native, codebuddy-native, with-native, acp-generic)"
+                    "driver {s:?} (known: codex-native, claude-native, codebuddy-native, with-native, cursor-native, acp-generic)"
                 ))
             })
     }

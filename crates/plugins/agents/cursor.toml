@@ -1,0 +1,24 @@
+# Cursor CLI: one process per turn, with conversations persisted by chat id.
+name = "cursor"
+driver = "cursor-native"
+command = ["agent", "acp"]
+
+[models]
+# CLI model aliases; availability depends on the signed-in account.
+fallback = ["auto", "sonnet-4-thinking", "gpt-5"]
+efforts = []
+
+[locate]
+commands = ["agent", "cursor-agent"]
+paths = ["~/.local/bin/agent", "~/.local/bin/cursor-agent"]
+version = ["--version"]
+
+[install]
+label = "Cursor CLI"
+hint = "irm 'https://cursor.com/install?win32=true' | iex"
+docs = "https://cursor.com/docs/cli/installation"
+
+[[install.methods]]
+id = "native"
+os = ["windows"]
+run = ["powershell", "-NoProfile", "-Command", "irm 'https://cursor.com/install?win32=true' | iex"]
