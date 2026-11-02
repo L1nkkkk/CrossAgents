@@ -8,6 +8,7 @@ pub mod claims;
 pub mod continuation;
 pub mod delete;
 pub mod engine;
+pub mod expertise;
 pub mod files;
 pub mod graph;
 pub mod handoff;

@@ -154,6 +154,10 @@ export function Sidebar({ route }: { route: string[] }) {
               <Icon name="chart" size={16} />
               <span>{t("nav.usage")}</span>
             </a>
+            <a className={"nav-expertise " + (route[0] === "expertise" ? "active" : "")} href="#/expertise">
+              <Icon name="brain" size={16} />
+              <span>{t("nav.expertise")}</span>
+            </a>
           </div>
           <div className="scroll">
             <NeedsYou items={todos} agents={everyone} />

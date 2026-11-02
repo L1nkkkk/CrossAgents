@@ -80,7 +80,9 @@ impl Orchestrator {
     }
 
     /// The person's remarks on `task`, sent to its worker as its next turn. With `rework` the
-    /// task goes back to running, as if its issuer had called `task_rework`.
+    /// task goes back to running, as if its issuer had called `task_rework`. A reviewer's
+    /// numbered checklist is answered in `review_submit.checklist` (docs/tasks/EXPERTISE.md
+    /// §6.3); here the person can only say in words what they want the worker to go by.
     pub async fn review_task(
         &self,
         run: RunId,

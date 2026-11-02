@@ -84,6 +84,12 @@ impl Client {
         Ok(())
     }
 
+    /// A GET whose answer is text rather than JSON (the expertise export).
+    pub async fn get_text(&self, path: &str) -> Result<String> {
+        let resp = self.send(self.request(Method::GET, path)).await?;
+        resp.text().await.context("invalid response from hub")
+    }
+
     /// A delete whose answer says what it did (deleting a run lists what it cleaned up).
     pub async fn delete_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let resp = self.send(self.request(Method::DELETE, path)).await?;

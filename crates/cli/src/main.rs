@@ -50,6 +50,9 @@ pub enum Command {
     Run(cmd::run::RunArgs),
     /// Reported cost and context use, grouped by role, model, run or agent.
     Usage(cmd::usage::UsageArgs),
+    /// Expertise profiles: what good work looks like for this person and this project.
+    #[command(subcommand)]
+    Expertise(cmd::expertise::ExpertiseCommand),
     /// Vendor accounts: login, plan, quota, token use.
     #[command(subcommand)]
     Account(cmd::account::AccountCommand),
@@ -157,6 +160,33 @@ mod tests {
         };
         assert_eq!(args.name, "alice");
         assert_eq!(args.model.as_deref(), Some("haiku"));
+    }
+
+    #[test]
+    fn parses_expertise_export() {
+        let cli = Cli::try_parse_from([
+            "crossagents",
+            "expertise",
+            "export",
+            "--owner",
+            "project:p1",
+            "--domain",
+            "rust",
+        ])
+        .unwrap();
+        let Command::Expertise(cmd::expertise::ExpertiseCommand::Export(args)) = cli.command else {
+            panic!("wrong command");
+        };
+        assert_eq!(args.owner, "project:p1");
+        assert_eq!(args.domain.as_deref(), Some("rust"));
+
+        // The person's profile by default.
+        let cli = Cli::try_parse_from(["crossagents", "expertise", "export"]).unwrap();
+        let Command::Expertise(cmd::expertise::ExpertiseCommand::Export(args)) = cli.command else {
+            panic!("wrong command");
+        };
+        assert_eq!(args.owner, "person:me");
+        assert_eq!(args.domain, None);
     }
 
     #[test]

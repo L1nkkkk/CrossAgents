@@ -52,6 +52,10 @@ import type { Transcript } from "@bindings/Transcript";
 import type { TurnDiffResponse } from "@bindings/TurnDiffResponse";
 import type { UpdateRunPolicyRequest } from "@bindings/UpdateRunPolicyRequest";
 import type { UsageGroup } from "@bindings/UsageGroup";
+import type { AcceptCandidateResponse } from "@bindings/AcceptCandidateResponse";
+import type { ListCandidatesResponse } from "@bindings/ListCandidatesResponse";
+import type { ListExpertiseResponse } from "@bindings/ListExpertiseResponse";
+import type { AcceptRequest, Candidate, CandidateStatus, ConflictDecision, ExpertiseCard, ExpertiseEntry, Maintenance, OwnerKind } from "./lib/expertise";
 import type { UsageResponse } from "@bindings/UsageResponse";
 import type { UsageSeriesGroup } from "@bindings/UsageSeriesGroup";
 import type { UsageSeriesRange } from "@bindings/UsageSeriesRange";
@@ -140,7 +144,7 @@ export function refuseRequests(reason: string | undefined) {
   refusal = reason;
 }
 
-async function request<T>(method: Method, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: Method, path: string, body?: unknown, opts: { text?: boolean } = {}): Promise<T> {
   if (refusal && path !== "/v1/info") throw new ApiError(0, "version_mismatch", refusal);
   const response = await send(method, path, body);
   if (response.status >= 400) {
@@ -157,10 +161,15 @@ async function request<T>(method: Method, path: string, body?: unknown): Promise
       parsed?.error.files ?? [],
     );
   }
+  if (opts.text) return response.body as T;
   return (response.body ? JSON.parse(response.body) : undefined) as T;
 }
 
 const enc = encodeURIComponent;
+
+function expertiseQuery(owner_kind: OwnerKind, owner_id: string): string {
+  return `owner_kind=${owner_kind}&owner_id=${enc(owner_id)}`;
+}
 
 function treeQuery(path: string, all: boolean, ref?: string): string {
   return `path=${enc(path)}${all ? "&all=true" : ""}${ref ? `&ref=${enc(ref)}` : ""}`;
@@ -310,6 +319,30 @@ export const api = {
       "GET",
       `/v1/usage/series?range=${range}&group=${group}&source=${enc(source)}`,
     ),
+
+  /** One owner's expertise profile (person: owner_id "me"; project: the repo key). */
+  expertise: async (owner_kind: OwnerKind, owner_id: string): Promise<ExpertiseEntry[]> =>
+    (await request<ListExpertiseResponse>("GET", `/v1/expertise?${expertiseQuery(owner_kind, owner_id)}`)).entries,
+  /** Candidates by status; with an owner, only that owner's. */
+  expertiseCandidates: async (status: CandidateStatus = "pending", owner?: { kind: OwnerKind; id: string }): Promise<Candidate[]> =>
+    (
+      await request<ListCandidatesResponse>(
+        "GET",
+        `/v1/expertise/candidates?status=${status}${owner ? `&${expertiseQuery(owner.kind, owner.id)}` : ""}`,
+      )
+    ).candidates,
+  /** Every conflict of the candidate needs a verdict, else 400 and nothing changes; always adds
+   * a new entry (keep_old too), replace/merge supersede the old one. */
+  acceptCandidate: (id: string, decisions: ConflictDecision[]) =>
+    request<AcceptCandidateResponse>("POST", `/v1/expertise/candidates/${enc(id)}/accept`, { decisions } satisfies AcceptRequest),
+  rejectCandidate: (id: string) => request<Candidate>("POST", `/v1/expertise/candidates/${enc(id)}/reject`),
+  expertiseCard: (owner_kind: OwnerKind, owner_id: string) =>
+    request<ExpertiseCard>("GET", `/v1/expertise/card?${expertiseQuery(owner_kind, owner_id)}`),
+  expertiseMaintenance: (owner_kind: OwnerKind, owner_id: string) =>
+    request<Maintenance>("GET", `/v1/expertise/maintenance?${expertiseQuery(owner_kind, owner_id)}`),
+  /** The profile as Markdown (text/markdown); empty when it has no entries. */
+  expertiseExport: (owner_kind: OwnerKind, owner_id: string) =>
+    request<string>("GET", `/v1/expertise/export?${expertiseQuery(owner_kind, owner_id)}`, undefined, { text: true }),
 
   questions: (all = false) => request<ListQuestionsResponse>("GET", `/v1/questions${all ? "?all=true" : ""}`),
   answer: (id: string, answer: string) => request<HumanItem>("POST", `/v1/questions/${enc(id)}/answer`, { answer }),

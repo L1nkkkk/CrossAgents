@@ -6,6 +6,7 @@ import { approvalRun, deleteRun, graphRun, handoffRun, inPlaceRun, landingRun, l
 import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, failedEditSession, liveRun, liveSession, liveTaskSession, longNameScene, slashScene, soloSession, toolImagePathsSession, toolImagesSession } from "../views/Session.mock";
 import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
 import { usageScene } from "../views/Usage.mock";
+import { expertiseScene } from "../views/Expertise.mock";
 import { agent, ago, capabilitiesOf, NOTES_REPO, REPO, say, team, think, turn } from "./fixtures";
 import { openFile } from "../FileViewer";
 import type { AccountQuota } from "@bindings/AccountQuota";
@@ -181,6 +182,7 @@ export const SCENARIOS: Scenario[] = [
   { key: "usage-issues", label: "用量：来源错误", hint: "未计价模型及来源读取失败", build: () => ({ state: usageScene("issues"), script: [], route: "#/usage" }) },
   { key: "usage-session", label: "用量：会话口径", hint: "无法确定单次请求", build: () => ({ state: usageScene("session"), script: [], route: "#/usage" }) },
   { key: "usage", label: "用量", hint: "两个账号，一个快到 5 小时限额，一个每周限额用完", build: () => ({ state: usageScene(), script: [], route: "#/usage" }) },
+  { key: "expertise", label: "专长档案", hint: "个人/项目档案、超预算与黄红标记、带冲突的候选；脚本：派活推送 → 交活填结果 → 返工出候选 → 接受 → 专长卡变化", build: () => ({ ...expertiseScene(), route: "#/expertise" }) },
   { key: "cli-install-ok", label: "安装 CLI 成功", hint: "设置 → 智能体：CodeBuddy 没装，点「安装」先看确认框里的命令和来源；执行后输出滚动，装完提示去登录账号", build: () => cliScene("ok") },
   { key: "cli-install-fail", label: "安装 CLI 失败", hint: "安装命令以非 0 退出：滚动的输出和写明退出码的原因", build: () => cliScene("fail") },
   { key: "cli-install-missing", label: "装完但找不到", hint: "命令成功，但这台机器上找不到装好的程序：原因里列出找过的位置", build: () => cliScene("missing") },

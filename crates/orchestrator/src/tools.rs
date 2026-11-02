@@ -345,6 +345,48 @@ const TOOLS: &[ToolDef] = &[
         },
     },
     ToolDef {
+        name: "expertise_search",
+        description: "Search what this project and the person consider good work: judgements, worked examples and limits, by keyword. A match is a lead, not a rule: check its status and applies_when before going by it.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({
+                    "query": { "type": "string" },
+                    "domain": { "type": "string", "description": "Only this area (rust, gui, windows, testing, …)." },
+                    "kind": { "type": "string", "enum": ["judgment", "example", "limit"] },
+                    "limit": { "type": "integer", "description": "1-10, default 5." }
+                }),
+                &["query"],
+            )
+        },
+    },
+    ToolDef {
+        name: "expertise_get",
+        description: "One expertise entry in full: its text, and for an example the situation, what was rejected and why, and what was chosen. Give its id or the short tag a brief showed (the id's first 8 characters).",
+        groups: ALL,
+        schema: || object(json!({ "id": { "type": "string" } }), &["id"]),
+    },
+    ToolDef {
+        name: "expertise_pending",
+        description: "The expertise candidates waiting for the person in this project and in the person's profile: what a rework, a first-try merge or a reviewer's fail proposed, with the entries each may conflict with. Only the person accepts or rejects one; a lead may flag one with expertise_triage.",
+        groups: PLANNER,
+        schema: || object(json!({}), &[]),
+    },
+    ToolDef {
+        name: "expertise_triage",
+        description: "Flag one pending expertise candidate for the person: sets suggested_by_lead and adds your reason to its note. That is all a lead can do — accept and reject belong to the person alone, and asking for either is refused.",
+        groups: PLANNER,
+        schema: || {
+            object(
+                json!({
+                    "candidate": { "type": "string", "description": "The candidate's id, or the start of it." },
+                    "reason": { "type": "string", "description": "Why the person should look at it." }
+                }),
+                &["candidate", "reason"],
+            )
+        },
+    },
+    ToolDef {
         name: "lesson_report",
         description: "Say how a troubleshooting record went when you used it. One that did not work is put up for review; its history stays.",
         groups: ALL,
@@ -672,12 +714,19 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_complete",
-        description: "Report your task done with a summary of what you changed. The hub commits your work, runs the task's checks and passes your summary to the task's issuer only once they are done, so the issuer sees checked work.",
+        description: "Report your task done with a summary of what you changed. The hub commits your work, runs the task's checks and passes your summary to the task's issuer only once they are done, so the issuer sees checked work. Name the expertise entries you went by in `used`; the result of this task is counted on them.",
         groups: WORKER,
         schema: || {
-            task_id_schema(
+            let mut schema = task_id_schema(
                 json!({ "summary": { "type": "string", "description": "What you changed." } }),
-            )
+            );
+            // Optional, unlike the fields `task_id_schema` lists as required.
+            schema["properties"]["used"] = json!({
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "The expertise entries you went by: their ids, or the short tag a brief showed (the id's first 8 characters, e.g. 01a19b48). A tag that names no entry, or several, is skipped and comes back in unrecognized_used."
+            });
+            schema
         },
     },
     ToolDef {
@@ -694,13 +743,28 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "review_submit",
-        description: "Give your verdict on the change you are reviewing; it goes to whoever asked for the review.",
+        description: "Give your verdict on the change you are reviewing; it goes to whoever asked for the review. Answer the numbered checklist too when your brief has one: a fail proposes a replacement to the person.",
         groups: REVIEWER,
         schema: || {
-            task_id_schema(json!({
+            let mut schema = task_id_schema(json!({
                 "approve": { "type": "boolean" },
                 "notes": { "type": "string", "description": "For a rejection: exactly what to fix." }
-            }))
+            }));
+            // Optional, unlike the fields `task_id_schema` lists as required.
+            schema["properties"]["checklist"] = json!({
+                "type": "array",
+                "description": "One verdict per numbered item of the reviewer checklist.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "entry_id": { "type": "string", "description": "The item's tag or entry id." },
+                        "verdict": { "type": "string", "enum": ["pass", "fail", "na"] },
+                        "note": { "type": "string", "description": "Why it failed, or anything to add." }
+                    },
+                    "required": ["entry_id", "verdict"]
+                }
+            });
+            schema
         },
     },
 ];
@@ -785,6 +849,10 @@ impl Orchestrator {
             }
             "lesson_search" => self.lesson_search(caller, input).await,
             "lesson_get" => self.lesson_get(caller, input).await,
+            "expertise_search" => self.expertise_search(caller, input).await,
+            "expertise_get" => self.expertise_get(caller, input).await,
+            "expertise_pending" => self.expertise_pending(caller).await,
+            "expertise_triage" => self.expertise_triage(caller, input).await,
             "lesson_report" => self.lesson_report(caller, input).await,
             "usage_get" => self.usage_get(caller).await,
             "inbox_read" => self.inbox_read(caller).await,
@@ -854,12 +922,28 @@ impl Orchestrator {
                 struct A {
                     #[serde(default)]
                     summary: String,
+                    /// The expertise entries the worker went by (EXPERTISE §4.5).
+                    #[serde(default)]
+                    used: Vec<String>,
                 }
                 let task = self.task_ref(caller, &input).await?;
                 let a: A = args(input)?;
                 self.complete(caller, task, a.summary).await?;
+                // Tags that named no entry of this project or the person come back, so the
+                // worker can name them again properly. The report is already in: a store that
+                // cannot record them must not make task_complete fail and be retried, so they
+                // all count as unplaced.
+                let (used, unrecognized) = match self.declare_used(caller, task, &a.used).await {
+                    Ok(placed) => placed,
+                    Err(err) => {
+                        tracing::warn!(task = %task, error = %err, "cannot record declared expertise usage");
+                        (0, a.used.clone())
+                    }
+                };
                 Ok(json!({
                     "status": "verifying",
+                    "used": used,
+                    "unrecognized_used": unrecognized,
                     "next": "The hub commits your work and runs the task's checks; your summary reaches the task's issuer once they are done. End your turn; if it comes back with notes, continue and report again."
                 }))
             }
@@ -888,11 +972,33 @@ impl Orchestrator {
                     approve: bool,
                     #[serde(default)]
                     notes: String,
+                    #[serde(default)]
+                    checklist: Vec<crate::expertise::review::ChecklistItem>,
                 }
-                let task = self.task_ref(caller, &input).await?;
+                let id = self.task_ref(caller, &input).await?;
                 let a: A = args(input)?;
-                self.review(caller, task, a.approve, a.notes).await?;
-                Ok(json!({ "recorded": true, "next": "End your turn." }))
+                self.review(caller, id, a.approve, a.notes).await?;
+                // A failed item proposes a replacement to the person (EXPERTISE §6.3). The
+                // review is already in, so a store that cannot keep candidates must not make
+                // this call fail and be retried.
+                let candidates = match self.store.get_task(id).await {
+                    Ok(task) => match self.review_candidates(caller, &task, &a.checklist).await {
+                        Ok(candidates) => candidates.len(),
+                        Err(err) => {
+                            tracing::warn!(task = %id, error = %err, "cannot propose expertise candidates");
+                            0
+                        }
+                    },
+                    Err(err) => {
+                        tracing::warn!(task = %id, error = %err, "cannot read the reviewed task");
+                        0
+                    }
+                };
+                Ok(json!({
+                    "recorded": true,
+                    "candidates": candidates,
+                    "next": "End your turn."
+                }))
             }
             _ => unreachable!("every tool in TOOLS is handled"),
         }

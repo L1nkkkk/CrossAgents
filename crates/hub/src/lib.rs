@@ -3,6 +3,7 @@
 pub mod access;
 pub mod accounts;
 pub mod api;
+pub mod api_expertise;
 pub mod attachments;
 pub mod avatars;
 pub mod budget;

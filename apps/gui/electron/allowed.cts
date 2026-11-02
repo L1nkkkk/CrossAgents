@@ -57,6 +57,9 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "GET", path: /^\/v1\/usage$/, level: "read" },
   // `?range=&group=&source=` rides along; `route()` drops it before matching.
   { method: "GET", path: /^\/v1\/usage\/series$/, level: "read" },
+  { method: "GET", path: /^\/v1\/expertise$/, level: "read" },
+  { method: "GET", path: /^\/v1\/expertise\/(candidates|card|maintenance|export)$/, level: "read" },
+  { method: "POST", path: /^\/v1\/expertise\/candidates\/[^/]+\/(accept|reject)$/, level: "write" },
   { method: "GET", path: /^\/v1\/questions$/, level: "read" },
   { method: "POST", path: /^\/v1\/questions\/[^/]+\/(answer|dismiss)$/, level: "write" },
   { method: "GET", path: /^\/v1\/quota$/, level: "read" },

@@ -10,6 +10,7 @@ use chrono::Utc;
 use crossagents_core::{
     Agent, AgentId, AgentKey, ClaimRole, CoreError, EventKind, HandoffKind, HandoffOutcome,
     PlannedTask, Role, Run, RunStatus, Task, TaskId, TaskReport, TaskSpec, TaskStatus,
+    UsageOutcome,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -469,7 +470,11 @@ impl Orchestrator {
             )
             .await?;
         self.notify_dispatched(caller.id, &task, &card).await;
-        self.relay(worker.id, caller.id, brief::handover(&task, &card), None);
+        let mut opening = brief::handover(&task, &card);
+        if let Some(pushed) = self.expertise_brief(&worker, &task).await {
+            opening = format!("{opening}\n\n{pushed}");
+        }
+        self.relay(worker.id, caller.id, opening, None);
         Ok(task_json(&task))
     }
 
@@ -1129,11 +1134,17 @@ impl Orchestrator {
             .focus
             .map(|f| format!("{}\n\n", f.trim()))
             .unwrap_or_default();
+        // The judgements the reviewer is asked to answer pass/fail/na (EXPERTISE §6.3).
+        let checklist = self
+            .checklist_for(&reviewer, &task)
+            .await
+            .map(|text| format!("\n\n{text}"))
+            .unwrap_or_default();
         self.relay(
             reviewer.id,
             caller.id,
             format!(
-                "{focus}Review branch {} against {} (your working directory has it checked out).\n\n{}\n\n{}",
+                "{focus}Review branch {} against {} (your working directory has it checked out).\n\n{}{checklist}\n\n{}",
                 task.branch.as_deref().unwrap_or("?"),
                 run.branch,
                 brief::task(&task),
@@ -1365,6 +1376,24 @@ impl Orchestrator {
         } else {
             json!("forced")
         };
+        // How this task ended lands on the expertise entries it used (EXPERTISE §4.6). The
+        // merge is done: a profile that cannot be updated must not make an accepted task look
+        // refused to its issuer.
+        let outcome = if crate::expertise::tools::was_reworked(&task) {
+            UsageOutcome::Reworked
+        } else {
+            UsageOutcome::MergedFirstTry
+        };
+        if let Err(err) = self.settle_usage(&task, outcome).await {
+            tracing::warn!(task = %task.key, error = %err, "cannot settle expertise usage");
+        }
+        // What it did right is worth keeping: an example for the person (EXPERTISE §6.4). The
+        // merge stands even when the profile cannot hold the candidate.
+        if outcome == UsageOutcome::MergedFirstTry
+            && let Err(err) = self.candidate_from_first_try(&task).await
+        {
+            tracing::warn!(task = %task.key, error = %err, "cannot propose an expertise candidate");
+        }
         Ok(json!({
             "merged": true,
             "task": task_json(&task),
@@ -1431,6 +1460,12 @@ impl Orchestrator {
             ),
             None,
         );
+        // What went wrong, in the issuer's words, becomes a draft for the person (EXPERTISE
+        // §6.4). The task is already back with its worker: a profile that cannot hold the
+        // candidate only warns.
+        if let Err(err) = self.candidate_from_rework(&task, a.notes.trim()).await {
+            tracing::warn!(task = %task.key, error = %err, "cannot propose an expertise candidate");
+        }
         Ok(json!({ "task": task_json(&task) }))
     }
 
@@ -1481,6 +1516,11 @@ impl Orchestrator {
             TaskStatus::Cancelled
         };
         self.transition(&mut task, to).await?;
+        // What it used counts as dropped, requeued or not (EXPERTISE §4.6), and the drop
+        // itself stands even when the profile cannot be updated.
+        if let Err(err) = self.settle_usage(&task, UsageOutcome::Dropped).await {
+            tracing::warn!(task = %task.key, error = %err, "cannot settle expertise usage");
+        }
         self.schedule(&mut run).await?;
         Ok(json!({ "task": task_json(&task) }))
     }
