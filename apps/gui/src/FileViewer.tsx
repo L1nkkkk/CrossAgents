@@ -1,10 +1,13 @@
-// The read-only file viewer: a lazily loaded tree on the left, the file with line numbers and
-// light highlighting on the right. Opened from anywhere with `openFile({ scope, path, line })`.
+// Read-only files: a lazily loaded tree and the file with line numbers and light highlighting; a
+// Markdown file shows rendered, with its source a click away. Two places show them: the viewer
+// over the page, opened from anywhere with `openFile({ scope, path, line })`, and the 文件 pane
+// of the tool column (`FilesPane`), where the tree and the file take turns because it is narrow.
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { ChevronDown, ChevronRight, Copy, ExternalLink, File, FileCode, Folder, FolderOpen, X } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, Copy, ExternalLink, File, FileCode, Folder, FolderOpen, RefreshCw, X } from "lucide-react";
 import type { FileContentResponse } from "@bindings/FileContentResponse";
 import type { FileEntry } from "@bindings/FileEntry";
 import { api, errorText, getBridge, scopeKey, scopePath, type FileScope } from "./api";
+import { DocLinksProvider, FileScopeProvider, Prose } from "./components";
 import { resolvePath } from "./fileResolve";
 import { highlight, langOf, type Lang } from "./lib/highlight";
 import "./files.css";
@@ -65,18 +68,20 @@ export function FileViewerHost() {
 }
 
 type Dir = FileEntry[] | "loading" | { error: string };
+type FileState = FileContentResponse | "loading" | { error: string } | null;
+/** A file asked for from outside the tree; `nonce` tells asking again from the same file. */
+type Target = { path: string; line?: number; nonce: number };
 
-function FileViewer({ target }: { target: Current }) {
-  const { scope } = target;
-  const [showAll, setShowAll] = useState(false);
+/** The tree, the file shown and how they load, shared by the viewer and the pane. */
+function useFileBrowser(scope: FileScope, target: Target | null, initial?: { open: Set<string>; showAll: boolean }) {
+  const [showAll, setShowAll] = useState(initial?.showAll ?? false);
   const [dirs, setDirs] = useState<Map<string, Dir>>(new Map());
-  const [open, setOpen] = useState<Set<string>>(new Set([""]));
+  const [open, setOpen] = useState<Set<string>>(initial?.open ?? new Set([""]));
   const [root, setRoot] = useState("");
   const [path, setPath] = useState<string | null>(null);
-  const [line, setLine] = useState<number | undefined>(target.line);
-  const [file, setFile] = useState<FileContentResponse | "loading" | { error: string } | null>(null);
-  const [copied, setCopied] = useState(false);
-  const bridge = getBridge();
+  const [line, setLine] = useState<number | undefined>(target?.line);
+  const [file, setFile] = useState<FileState>(null);
+  const [reloads, setReloads] = useState(0);
 
   const loadDir = (dir: string, all = showAll) => {
     setDirs((m) => new Map(m).set(dir, m.get(dir) && m.get(dir) !== "loading" ? m.get(dir)! : "loading"));
@@ -91,6 +96,7 @@ function FileViewer({ target }: { target: Current }) {
 
   // The target: resolve it (it may be absolute or `./`), open its folders, load it.
   useEffect(() => {
+    if (!target) return;
     let live = true;
     setLine(target.line);
     setFile("loading");
@@ -110,7 +116,7 @@ function FileViewer({ target }: { target: Current }) {
       live = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [target.nonce]);
+  }, [target?.nonce]);
 
   // The tree's root, and everything again when ignored files are shown or hidden.
   useEffect(() => {
@@ -132,18 +138,7 @@ function FileViewer({ target }: { target: Current }) {
       live = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, target.nonce]);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation();
-        closeFile();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [path, target?.nonce, reloads]);
 
   const toggle = (dir: string) => {
     setOpen((s) => {
@@ -162,6 +157,41 @@ function FileViewer({ target }: { target: Current }) {
     setPath(p);
   };
 
+  /** Back to the tree alone. */
+  const clear = () => {
+    setPath(null);
+    setLine(undefined);
+    setFile(null);
+  };
+
+  /** The tree's open folders and the file again: an agent may have changed them. */
+  const reload = () => {
+    for (const d of open) loadDir(d);
+    setReloads((n) => n + 1);
+  };
+
+  return { showAll, setShowAll, dirs, open, root, path, line, setLine, file, setFile, toggle, pick, clear, reload };
+}
+
+const loadedOf = (file: FileState) => (file && file !== "loading" && !("error" in file) ? file : null);
+
+function FileViewer({ target }: { target: Current }) {
+  const { scope } = target;
+  const { showAll, setShowAll, dirs, open, root, path, line, setLine, file, setFile, toggle, pick } = useFileBrowser(scope, target);
+  const [copied, setCopied] = useState(false);
+  const bridge = getBridge();
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        closeFile();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const copy = () => {
     if (!path) return;
     navigator.clipboard?.writeText(path).then(() => {
@@ -170,7 +200,7 @@ function FileViewer({ target }: { target: Current }) {
     });
   };
 
-  const loaded = file && file !== "loading" && !("error" in file) ? file : null;
+  const loaded = loadedOf(file);
 
   return (
     <div className="fv-backdrop" onMouseDown={(e) => e.target === e.currentTarget && closeFile()}>
@@ -235,9 +265,117 @@ function FileViewer({ target }: { target: Current }) {
             </div>
           </nav>
           <section className="fv-code-pane">
-            <FileBody file={file} line={line} onLine={setLine} nonce={target.nonce} />
+            <FileBody scope={scope} file={file} line={line} onLine={setLine} nonce={target.nonce} onFollow={(p, l) => openFile({ scope, path: p, line: l })} />
           </section>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** What the 文件 pane had open for a scope: switching tabs or conversations unmounts it. */
+const remembered = new Map<string, { path: string | null; open: Set<string>; showAll: boolean }>();
+
+/** The 文件 pane: the scope's tree; a file picked from it takes its place until going back. */
+export function FilesPane({ scope }: { scope: FileScope }) {
+  const key = scopeKey(scope);
+  const [saved] = useState(() => remembered.get(key));
+  const [target, setTarget] = useState<Target | null>(saved?.path ? { path: saved.path, nonce: 0 } : null);
+  const { showAll, setShowAll, dirs, open, root, path, line, setLine, file, setFile, toggle, pick, clear, reload } = useFileBrowser(scope, target, saved);
+  const bridge = getBridge();
+
+  useEffect(() => {
+    remembered.set(key, { path, open, showAll });
+  }, [key, path, open, showAll]);
+
+  const follow = (p: string, l?: number) => setTarget((t) => ({ path: p, line: l, nonce: (t?.nonce ?? 0) + 1 }));
+  const refresh = (
+    <button className="ghost icon" onClick={reload} title="重新读取" aria-label="重新读取">
+      <RefreshCw size={14} />
+    </button>
+  );
+
+  // A remembered file is on its way: `path` is not set until it has been resolved.
+  if (!path && !target)
+    return <FilesTree root={root} showAll={showAll} onShowAll={setShowAll} refresh={refresh} dirs={dirs} open={open} onToggle={toggle} onPick={pick} />;
+  if (!path) return <div className="fv-empty">正在读取文件…</div>;
+
+  const loaded = loadedOf(file);
+  const slash = path.lastIndexOf("/");
+  return (
+    <div className="fp">
+      <div className="fp-file-head">
+        <button
+          className="ghost icon"
+          onClick={() => {
+            clear();
+            setTarget(null);
+          }}
+          title="回到文件列表"
+          aria-label="回到文件列表"
+        >
+          <ChevronLeft size={15} />
+        </button>
+        <span className="fp-path" title={loaded?.abs_path ?? path}>
+          {slash >= 0 && <span className="fp-dir">{path.slice(0, slash + 1)}</span>}
+          <span className="leaf">{path.slice(slash + 1)}</span>
+        </span>
+        {refresh}
+        {bridge?.openPath && (
+          <button
+            className="ghost icon"
+            disabled={!loaded}
+            title="用系统默认程序打开这个文件"
+            aria-label="用系统默认程序打开"
+            onClick={() => bridge.openPath!(scopePath(scope), path).catch((e) => setFile({ error: errorText(e) }))}
+          >
+            <ExternalLink size={14} />
+          </button>
+        )}
+      </div>
+      <section className="fv-code-pane">
+        <FileBody scope={scope} file={file} line={line} onLine={setLine} nonce={target?.nonce ?? 0} onFollow={follow} />
+      </section>
+    </div>
+  );
+}
+
+function FilesTree({
+  root,
+  showAll,
+  onShowAll,
+  refresh,
+  dirs,
+  open,
+  onToggle,
+  onPick,
+}: {
+  root: string;
+  showAll: boolean;
+  onShowAll: (update: (v: boolean) => boolean) => void;
+  refresh: React.ReactNode;
+  dirs: Map<string, Dir>;
+  open: Set<string>;
+  onToggle: (dir: string) => void;
+  onPick: (path: string) => void;
+}) {
+  return (
+    <div className="fp">
+      <div className="fv-tree-head">
+        <span className="fp-root" title={root}>
+          {root.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "文件"}
+        </span>
+        <span className="spacer" />
+        <div className="fv-ignored" title="显示被 .gitignore 忽略的文件">
+          <span>忽略的文件</span>
+          <button className={`toggle ${showAll ? "on" : ""}`} role="switch" aria-checked={showAll} aria-label="显示被 .gitignore 忽略的文件" onClick={() => onShowAll((v) => !v)}>
+            <span />
+          </button>
+        </div>
+        {refresh}
+      </div>
+      <div className="fv-tree-scroll">
+        <TreeLevel dir="" depth={0} dirs={dirs} open={open} selected={null} onToggle={onToggle} onPick={onPick} />
       </div>
     </div>
   );
@@ -299,27 +437,42 @@ function TreeLevel(props: {
 }
 
 function FileBody({
+  scope,
   file,
   line,
   onLine,
   nonce,
+  onFollow,
 }: {
-  file: FileContentResponse | "loading" | { error: string } | null;
+  scope: FileScope;
+  file: FileState;
   line?: number;
   onLine: (n: number) => void;
   nonce: number;
+  /** A link in a rendered document was clicked; the path is from the workspace root. */
+  onFollow: (path: string, line?: number) => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const text = file && file !== "loading" && !("error" in file) && !file.binary ? (file.text ?? "") : null;
   const lang = file && file !== "loading" && !("error" in file) ? langOf(file.path) : "text";
   const lines = useMemo(() => (text === null ? [] : highlight(text, lang)), [text, lang]);
+  // A link to a line is about the source; otherwise the person's choice holds from file to file.
+  const [choice, setSource] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (line) setSource(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nonce]);
+  const source = choice ?? !!line;
+  const rendered = lang === "md" && !source;
+  const filePath = loadedOf(file)?.path ?? "";
+  const docLinks = { dir: filePath.slice(0, Math.max(0, filePath.lastIndexOf("/"))), open: onFollow };
 
   // Bring the wanted line into view once the file is there.
   useEffect(() => {
     if (!line || !lines.length) return;
     const el = scroller.current?.querySelector<HTMLElement>(`[data-line="${line}"]`);
     el?.scrollIntoView({ block: "center" });
-  }, [line, lines, nonce]);
+  }, [line, lines, nonce, source]);
 
   if (!file || file === "loading") return <div className="fv-empty">正在读取文件…</div>;
   if ("error" in file) return <div className="fv-empty err">{file.error}</div>;
@@ -340,6 +493,27 @@ function FileBody({
         </div>
       )}
       {line && line > lines.length && <div className="fv-banner">文件只有 {lines.length} 行，没有第 {line} 行。</div>}
+      {lang === "md" && (
+        <div className="fv-md-bar">
+          <div className="segmented small" role="tablist" aria-label="Markdown 显示方式">
+            <button role="tab" aria-selected={rendered} className={rendered ? "active" : ""} onClick={() => setSource(false)}>
+              预览
+            </button>
+            <button role="tab" aria-selected={!rendered} className={rendered ? "" : "active"} onClick={() => setSource(true)}>
+              源码
+            </button>
+          </div>
+        </div>
+      )}
+      {rendered ? (
+        <div className="fv-md">
+          <FileScopeProvider value={scope}>
+            <DocLinksProvider value={docLinks}>
+              <Prose doc text={text ?? ""} />
+            </DocLinksProvider>
+          </FileScopeProvider>
+        </div>
+      ) : (
       <div className="fv-code" ref={scroller}>
         <table>
           <tbody>
@@ -366,6 +540,7 @@ function FileBody({
           </tbody>
         </table>
       </div>
+      )}
     </div>
   );
 }

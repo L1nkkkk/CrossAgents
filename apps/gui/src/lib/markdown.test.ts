@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseBlocks, parseInline } from "./markdown.ts";
+import { parseBlocks, parseInline, softBreaks } from "./markdown.ts";
+
+test("a document's hard-wrapped lines join into one paragraph", () => {
+  assert.equal(softBreaks("one line"), "one line");
+  assert.equal(softBreaks("wrapped\n  here"), "wrapped here");
+  assert.equal(softBreaks("中文换行\n接着写"), "中文换行接着写");
+  assert.equal(softBreaks("中文 end\nnext"), "中文 end next");
+  assert.equal(softBreaks("hard  \nbreak"), "hard\nbreak");
+  assert.equal(softBreaks("hard\\\nbreak"), "hard\nbreak");
+});
 
 test("a bullet list with bold and code, like the model list in a reply", () => {
   const blocks = parseBlocks("我能确认的是：\n\n- **Fable 5.1**（`claude-fable-5-1`）\n- **Opus 5.5**（`claude-opus-5-5`）");

@@ -3,8 +3,8 @@
 // - Two conversations side by side: the routed session on the left, one more beside it.
 //   Ctrl/⌘-click or middle-click an agent in the sidebar to open it beside.
 // - The tool column on the right (docs/tasks/V6-GUI.md §6): up to two panes stacked, each one
-//   of 改动 (per-turn diffs), 任务 (the task's details) or 提交图 (the run's branches on a run
-//   page, else the conversation's checkout). Panes follow
+//   of 改动 (per-turn diffs), 文件 (browsing the workspace), 任务 (the task's details) or 提交图
+//   (the run's branches on a run page, else the conversation's checkout). Panes follow
 //   the focused conversation: the routed one, or the one beside it once it was clicked last.
 //   Something opened on purpose (a turn's "查看变更", a task card's turn) is the pane's
 //   `target` until the focus moves to another conversation.
@@ -14,8 +14,8 @@
 
 import { useSyncExternalStore } from "react";
 
-export type PaneKind = "changes" | "task" | "events" | "graph";
-const LABELS: Record<PaneKind, string> = { changes: "改动", task: "任务", events: "事件流", graph: "提交图" };
+export type PaneKind = "changes" | "files" | "task" | "events" | "graph";
+const LABELS: Record<PaneKind, string> = { changes: "改动", files: "文件", task: "任务", events: "事件流", graph: "提交图" };
 /** Raw hub events: shown by the dev server and `preview:mock`, not by a packaged build. */
 export const DEBUG_PANES = __BUILD__.dev || __MOCK__;
 /** What the tool column's menu offers, in order. */
@@ -96,7 +96,13 @@ export const setRatio = (ratio: number) => set({ ...state, ratio: clamp(ratio) }
 /** A conversation was clicked: the tool panes follow it. */
 export function focusSession(name: string) {
   if (focus === name) return;
-  if (focus) sessionTools.set(focus, { panes: state.tools.panes, target });
+  // The first click since the page loaded moves nothing: the panes already show this one.
+  if (!focus) {
+    focus = name;
+    changed();
+    return;
+  }
+  sessionTools.set(focus, { panes: state.tools.panes, target });
   focus = name;
   const saved = sessionTools.get(name);
   target = saved?.target ?? null;

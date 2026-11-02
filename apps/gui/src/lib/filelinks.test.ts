@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { codeFileTarget, fileLinkTarget, isAbsolutePath, splitLine } from "./filelinks.ts";
+import { codeFileTarget, docLinkPath, fileLinkTarget, isAbsolutePath, splitLine } from "./filelinks.ts";
+
+test("a document's links are relative to its folder", () => {
+  assert.equal(docLinkPath("docs", "DESIGN.md"), "docs/DESIGN.md");
+  assert.equal(docLinkPath("docs", "./tasks/U1.md"), "docs/tasks/U1.md");
+  assert.equal(docLinkPath("docs/tasks", "../DESIGN.md"), "docs/DESIGN.md");
+  assert.equal(docLinkPath("", "README.md"), "README.md");
+  assert.equal(docLinkPath("docs", "DESIGN.md#goals"), "docs/DESIGN.md");
+  assert.equal(docLinkPath("docs", "..\\README.md"), "README.md");
+  assert.equal(docLinkPath("docs", "C:/work/x.md"), "C:/work/x.md");
+  assert.equal(docLinkPath("docs", "../../secret.md"), "../secret.md");
+});
 
 test("line suffixes split off: :line, :line:col, #Lline", () => {
   assert.deepEqual(splitLine("src/main.rs:12"), { path: "src/main.rs", line: 12 });

@@ -1,5 +1,5 @@
 // The tool column (docs/tasks/V6-GUI.md §6): up to two panes stacked on the right — 改动 (what
-// each turn changed), 任务 (a task's details), and 提交图 (commits). 事件流 (raw hub events, for
+// each turn changed), 文件 (the workspace's files), 任务 (a task's details), and 提交图 (commits). 事件流 (raw hub events, for
 // debugging) is offered only where debugging is on (panes.ts `PANE_KINDS`). Panes show the
 // focused conversation, or what was opened on purpose (panes.ts `target`); nothing from another
 // conversation mixes in. When docking it would squeeze the conversation it is a one-pane drawer
@@ -13,6 +13,7 @@ import { Avatar, ErrorBox, Icon, displayName, isAgent, useAgents } from "./compo
 import { CommitGraphView } from "./commitgraph";
 import { ChangeStat, DiffView } from "./diffview";
 import { useEventLog } from "./eventlog";
+import { FilesPane } from "./FileViewer";
 import type { HubEvent } from "./hub";
 import { parseDiff } from "./lib/diff";
 import { clock, full } from "./lib/time";
@@ -150,8 +151,16 @@ function PaneSlot({
       {divider}
       <section className="tool-pane" aria-label={paneLabel(kind)}>
         <header className="tool-head">{head}</header>
-        <div className={`tool-body ${kind === "graph" ? "tool-body-graph" : ""}`}>
+        <div className={`tool-body ${kind === "graph" ? "tool-body-graph" : kind === "files" ? "tool-body-files" : ""}`}>
           {kind === "changes" && (agent ? <ChangesPane key={agent} agent={agent} target={target?.agent === agent ? target : null} /> : <Blank text="打开一个会话，这里显示它每一轮改了什么。" />)}
+          {kind === "files" &&
+            (routeRun ? (
+              <FilesPane key={routeRun} scope={{ kind: "run", run: routeRun }} />
+            ) : agent ? (
+              <FilesPane key={agent} scope={{ kind: "agent", agent }} />
+            ) : (
+              <Blank text="打开一个会话或 run，这里显示它工作目录里的文件。" />
+            ))}
           {kind === "task" && <TaskPane key={follow} follow={follow} target={safeTarget} routeTask={routeTask} />}
           {kind === "events" && (agent ? <EventsPane key={agent} agent={agent} /> : <Blank text="打开一个会话，这里显示它的原始 hub 事件。" />)}
           {kind === "graph" &&

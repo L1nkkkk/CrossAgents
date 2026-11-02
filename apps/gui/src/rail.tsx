@@ -164,6 +164,12 @@ export function InfoRail({
             <span className="rail-dim">{parentOf(agent.cwd)}</span>
           </a>
         )}
+        {!isChat(agent) && (
+          <button className="rail-line link" onClick={() => openTool("files", { agent: agent.name })} title="在工具列里浏览工作目录的文件">
+            <Icon name="diff" size={14} />
+            <span className="rail-main">浏览文件</span>
+          </button>
+        )}
         {checkout && (
           <Line icon={<Icon name="branch" size={14} />}>
             <code>{checkout.branch}</code>

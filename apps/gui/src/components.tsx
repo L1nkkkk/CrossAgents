@@ -49,8 +49,8 @@ import type { RunStatus } from "@bindings/RunStatus";
 import type { TaskStatus } from "@bindings/TaskStatus";
 import { api } from "./api";
 import { useHubData } from "./hub";
-import { parseBlocks, parseInline, type Block, type Inline } from "./lib/markdown";
-import { codeFileTarget } from "./lib/filelinks";
+import { parseBlocks, parseInline, softBreaks, type Block, type Inline } from "./lib/markdown";
+import { codeFileTarget, docLinkPath } from "./lib/filelinks";
 import type { FileScope } from "./api";
 import { openFile } from "./FileViewer";
 import { useResolved } from "./fileResolve";
@@ -172,10 +172,11 @@ export const sessionHref = (agent: Agent | string) => `#/s/${encodeURIComponent(
 
 /**
  * Agent prose: fenced code blocks become `<pre>`, inline backticks `<code>`, blank lines
- * split paragraphs. Deliberately small; no HTML is ever interpreted.
+ * split paragraphs. Deliberately small; no HTML is ever interpreted. `doc`: a Markdown file
+ * rather than a reply, so it keeps its heading levels and its lines wrap freely.
  */
-export function Prose({ text }: { text: string }) {
-  return <div className="prose">{renderBlocks(parseBlocks(text))}</div>;
+export function Prose({ text, doc = false }: { text: string; doc?: boolean }) {
+  return <div className={doc ? "prose prose-doc" : "prose"}>{renderBlocks(parseBlocks(text), doc)}</div>;
 }
 
 /**
@@ -274,12 +275,20 @@ const FileScopeContext = createContext<FileScope | null>(null);
 export const FileScopeProvider = FileScopeContext.Provider;
 export const useFileScope = () => useContext(FileScopeContext);
 
+/**
+ * The document the prose below is: its links are relative to its folder and open where it is
+ * shown, rather than in the viewer over the page.
+ */
+const DocLinksContext = createContext<{ dir: string; open: (path: string, line?: number) => void } | null>(null);
+export const DocLinksProvider = DocLinksContext.Provider;
+
 /** A markdown link to a file: a button opening the viewer (plain text without a scope). */
 function FileLink({ path, line, children }: { path: string; line?: number; children: ReactNode }) {
   const scope = useFileScope();
+  const doc = useContext(DocLinksContext);
   if (!scope) return <>{children}</>;
   return (
-    <button className="file-link" title={line ? `${path} 第 ${line} 行` : path} onClick={() => openFile({ scope, path, line })}>
+    <button className="file-link" title={line ? `${path} 第 ${line} 行` : path} onClick={() => (doc ? doc.open(docLinkPath(doc.dir, path), line) : openFile({ scope, path, line }))}>
       {children}
     </button>
   );
@@ -289,26 +298,32 @@ function FileLink({ path, line, children }: { path: string; line?: number; child
 function InlineCode({ text }: { text: string }) {
   const scope = useFileScope();
   const target = scope ? codeFileTarget(text) : undefined;
+  const doc = useContext(DocLinksContext);
   const found = useResolved(target ? scope : null, target?.path);
   if (!scope || !target || !found) return <code>{text}</code>;
   return (
     <button
       className="file-link code"
       title={target.line ? `打开 ${found} 第 ${target.line} 行` : `打开 ${found}`}
-      onClick={() => openFile({ scope, path: found, line: target.line })}
+      onClick={() => (doc ? doc.open(found, target.line) : openFile({ scope, path: found, line: target.line }))}
     >
       {text}
     </button>
   );
 }
 
-function renderBlocks(blocks: Block[]): ReactNode[] {
+/** A reply's headings sit inside a conversation, so they start small; a document's do not. */
+const REPLY_HEADINGS = ["h3", "h3", "h4", "h5", "h6", "h6"] as const;
+const DOC_HEADINGS = ["h1", "h2", "h3", "h4", "h5", "h6"] as const;
+
+function renderBlocks(blocks: Block[], doc = false): ReactNode[] {
+  const flowing = (text: string) => renderInline(parseInline(doc ? softBreaks(text) : text));
   return blocks.map((b, i) => {
     switch (b.t) {
       case "p":
-        return <p key={i}>{renderInline(parseInline(b.text))}</p>;
+        return <p key={i}>{flowing(b.text)}</p>;
       case "h": {
-        const H = (["h3", "h3", "h4", "h5", "h6", "h6"] as const)[b.level - 1];
+        const H = (doc ? DOC_HEADINGS : REPLY_HEADINGS)[b.level - 1];
         return <H key={i}>{renderInline(parseInline(b.text))}</H>;
       }
       case "code":
@@ -316,8 +331,8 @@ function renderBlocks(blocks: Block[]): ReactNode[] {
       case "list": {
         const items = b.items.map((item, j) => (
           <li key={j}>
-            {renderInline(parseInline(item.text))}
-            {item.children.length > 0 && renderBlocks(item.children)}
+            {flowing(item.text)}
+            {item.children.length > 0 && renderBlocks(item.children, doc)}
           </li>
         ));
         return b.ordered ? (
@@ -329,7 +344,7 @@ function renderBlocks(blocks: Block[]): ReactNode[] {
         );
       }
       case "quote":
-        return <blockquote key={i}>{renderBlocks(b.blocks)}</blockquote>;
+        return <blockquote key={i}>{renderBlocks(b.blocks, doc)}</blockquote>;
       case "hr":
         return <hr key={i} />;
       case "table":

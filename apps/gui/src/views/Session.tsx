@@ -1218,7 +1218,7 @@ function ToolsToggle() {
   // Open, the column's own header has the button that folds it away: one place, like Codex.
   if (state.tools.open) return null;
   return (
-    <button className="ghost icon" onClick={toggleTools} title="工具列：改动、任务、提交图" aria-label="工具列">
+    <button className="ghost icon" onClick={toggleTools} title="工具列：改动、文件、任务、提交图" aria-label="工具列">
       <Icon name="panel" size={16} />
     </button>
   );
