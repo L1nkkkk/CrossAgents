@@ -367,6 +367,26 @@ const TOOLS: &[ToolDef] = &[
         schema: || object(json!({ "id": { "type": "string" } }), &["id"]),
     },
     ToolDef {
+        name: "expertise_pending",
+        description: "The expertise candidates waiting for the person in this project and in the person's profile: what a rework, a first-try merge or a reviewer's fail proposed, with the entries each may conflict with. Only the person accepts or rejects one; a lead may flag one with expertise_triage.",
+        groups: PLANNER,
+        schema: || object(json!({}), &[]),
+    },
+    ToolDef {
+        name: "expertise_triage",
+        description: "Flag one pending expertise candidate for the person: sets suggested_by_lead and adds your reason to its note. That is all a lead can do — accept and reject belong to the person alone, and asking for either is refused.",
+        groups: PLANNER,
+        schema: || {
+            object(
+                json!({
+                    "candidate": { "type": "string", "description": "The candidate's id, or the start of it." },
+                    "reason": { "type": "string", "description": "Why the person should look at it." }
+                }),
+                &["candidate", "reason"],
+            )
+        },
+    },
+    ToolDef {
         name: "lesson_report",
         description: "Say how a troubleshooting record went when you used it. One that did not work is put up for review; its history stays.",
         groups: ALL,
@@ -831,6 +851,8 @@ impl Orchestrator {
             "lesson_get" => self.lesson_get(caller, input).await,
             "expertise_search" => self.expertise_search(caller, input).await,
             "expertise_get" => self.expertise_get(caller, input).await,
+            "expertise_pending" => self.expertise_pending(caller).await,
+            "expertise_triage" => self.expertise_triage(caller, input).await,
             "lesson_report" => self.lesson_report(caller, input).await,
             "usage_get" => self.usage_get(caller).await,
             "inbox_read" => self.inbox_read(caller).await,

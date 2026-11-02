@@ -1387,6 +1387,13 @@ impl Orchestrator {
         if let Err(err) = self.settle_usage(&task, outcome).await {
             tracing::warn!(task = %task.key, error = %err, "cannot settle expertise usage");
         }
+        // What it did right is worth keeping: an example for the person (EXPERTISE §6.4). The
+        // merge stands even when the profile cannot hold the candidate.
+        if outcome == UsageOutcome::MergedFirstTry
+            && let Err(err) = self.candidate_from_first_try(&task).await
+        {
+            tracing::warn!(task = %task.key, error = %err, "cannot propose an expertise candidate");
+        }
         Ok(json!({
             "merged": true,
             "task": task_json(&task),
@@ -1453,6 +1460,12 @@ impl Orchestrator {
             ),
             None,
         );
+        // What went wrong, in the issuer's words, becomes a draft for the person (EXPERTISE
+        // §6.4). The task is already back with its worker: a profile that cannot hold the
+        // candidate only warns.
+        if let Err(err) = self.candidate_from_rework(&task, a.notes.trim()).await {
+            tracing::warn!(task = %task.key, error = %err, "cannot propose an expertise candidate");
+        }
         Ok(json!({ "task": task_json(&task) }))
     }
 
