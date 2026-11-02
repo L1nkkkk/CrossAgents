@@ -273,10 +273,6 @@ impl Orchestrator {
         if checklist.is_empty() {
             return Ok(Vec::new());
         }
-        let Ok(run) = self.store.get_run(task.run_id).await else {
-            return Ok(Vec::new());
-        };
-        let project = self.project_for(Path::new(&run.repo)).await?;
         let now = Utc::now();
         let mut candidates = Vec::new();
         for item in checklist {
@@ -307,8 +303,10 @@ impl Orchestrator {
             }];
             let candidate = Candidate {
                 id: Uuid::new_v4().to_string(),
-                owner_kind: OwnerKind::Project,
-                owner_id: project.id.clone(),
+                // The replacement stays in the entry's own profile: a person's judgement is
+                // proposed back to the person, a project's to the project.
+                owner_kind: entry.owner_kind,
+                owner_id: entry.owner_id.clone(),
                 domain: entry.domain.clone(),
                 proposed,
                 conflicts_with: vec![entry.id.clone()],

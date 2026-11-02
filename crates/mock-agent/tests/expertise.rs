@@ -10,8 +10,8 @@ use chrono::Utc;
 use common::{TestHub, Watcher, git_repo};
 use crossagents_api_types::{EventKind, TaskStatus};
 use crossagents_core::{
-    EntryKind, EntryStats, EntryStatus, ExpertiseEntry, OwnerKind, PERSON_OWNER_ID, Store,
-    UsageOutcome, UsageSource,
+    CandidateOrigin, CandidateStatus, EntryKind, EntryStats, EntryStatus, ExpertiseEntry,
+    OwnerKind, PERSON_OWNER_ID, SourceRef, Store, UsageOutcome, UsageSource,
 };
 use crossagents_hub::Paths;
 use crossagents_store_sqlite::SqliteStore;
@@ -22,6 +22,9 @@ const MINE: &str = "01a19b48-0000-4000-8000-00000000a001";
 const MINE_TAG: &str = "01a19b48";
 /// An entry of another project: the same search terms, out of this caller's reach.
 const OTHERS: &str = "02b28c34-0000-4000-8000-00000000b002";
+/// The project's judgement (EXPERTISE §6.3): a `fail` on it must land under the project.
+const PROJECT_ENTRY: &str = "03c39d45-0000-4000-8000-00000000c003";
+const PROJECT_TAG: &str = "03c39d45";
 
 fn call(tool: &str, args: Value) -> String {
     format!("[call {tool} {args}]")
@@ -38,13 +41,10 @@ fn task_is(key: &'static str, want: TaskStatus) -> impl Fn(&crossagents_api_type
     move |e| matches!(&e.kind, EventKind::TaskStatusChanged { key: k, to, .. } if k == key && *to == want)
 }
 
-fn entry(owner: (OwnerKind, &str), title: &str, text: &str) -> ExpertiseEntry {
+fn judgment(id: &str, owner: (OwnerKind, &str), title: &str, text: &str) -> ExpertiseEntry {
     let now = Utc::now();
     ExpertiseEntry {
-        id: match owner.0 {
-            OwnerKind::Person => MINE.to_owned(),
-            OwnerKind::Project => OTHERS.to_owned(),
-        },
+        id: id.to_owned(),
         owner_kind: owner.0,
         owner_id: owner.1.to_owned(),
         domain: "testing".into(),
@@ -62,6 +62,14 @@ fn entry(owner: (OwnerKind, &str), title: &str, text: &str) -> ExpertiseEntry {
         created_at: now,
         updated_at: now,
     }
+}
+
+fn entry(owner: (OwnerKind, &str), title: &str, text: &str) -> ExpertiseEntry {
+    let id = match owner.0 {
+        OwnerKind::Person => MINE,
+        OwnerKind::Project => OTHERS,
+    };
+    judgment(id, owner, title, text)
 }
 
 /// The person's judgement, and one of another project that must stay out of reach.
@@ -284,5 +292,205 @@ async fn a_dropped_task_counts_as_dropped_without_evidence() {
             .all(|u| u.outcome == Some(UsageOutcome::Dropped)),
         "{usages:?}"
     );
+    store.close().await;
+}
+
+/// The person's judgement, seeded before the hub starts. The project's own is seeded later,
+/// once a first run has bound this checkout to a project and its id is known.
+async fn person_profile(home: &std::path::Path) {
+    let store = SqliteStore::open(&Paths::new(home).db()).await.unwrap();
+    store
+        .expertise_put(&judgment(
+            MINE,
+            (OwnerKind::Person, PERSON_OWNER_ID),
+            "先写会失败的测试",
+            "flaky 的用例先红后绿，再实现",
+        ))
+        .await
+        .unwrap();
+    store.close().await;
+}
+
+#[tokio::test]
+async fn a_reviewers_failed_item_proposes_a_candidate_under_the_entries_owner() {
+    let repo = git_repo();
+    let home = tempfile::tempdir().unwrap();
+    person_profile(home.path()).await;
+    let t = TestHub::start_in(home, |_| {}).await;
+    t.add_agent_in("boss", Some("opus"), "planner", repo.path())
+        .await;
+    t.add_agent_in("coder", Some("haiku"), "worker", repo.path())
+        .await;
+    t.add_agent_in("critic", Some("opus"), "reviewer", repo.path())
+        .await;
+    let mut w = t.watch().await;
+
+    // A first run binds the checkout to a project; then its own judgement is seeded.
+    let bind = format!(
+        "[write a.txt=alpha] {}",
+        call(
+            "task_complete",
+            json!({ "task_id": "{task_id}", "summary": "wrote a" })
+        )
+    );
+    let plan = json!([{ "key": "a", "title": "task a", "spec": { "goal": bind } }]);
+    let req = format!(
+        "Build it. {}",
+        call("plan_submit", json!({ "tasks": plan }))
+    );
+    let resp = t
+        .post(
+            "/v1/runs",
+            json!({ "request": req, "planner": "boss", "worker": "coder", "policy": { "plan_approval": "auto" } }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    w.until("a reported", task_is("a", TaskStatus::Passed))
+        .await;
+
+    let store = SqliteStore::open(&Paths::new(t.home.path()).db())
+        .await
+        .unwrap();
+    let projects = store.list_projects().await.unwrap();
+    assert_eq!(projects.len(), 1, "{projects:?}");
+    let project_id = projects[0].id.clone();
+    store
+        .expertise_put(&judgment(
+            PROJECT_ENTRY,
+            (OwnerKind::Project, &project_id),
+            "项目的判断",
+            "不要为了复用抽第三个调用点的抽象",
+        ))
+        .await
+        .unwrap();
+    store.close().await;
+
+    // A verdict only the reviewer (opus) runs; the worker is haiku. It sits in the reviewer's
+    // focus, nested out of the planner's and the worker's own directives.
+    let submit = |entry_id: &str, note: &str, notes: &str| {
+        call(
+            "review_submit",
+            json!({
+                "task_id": "{task_id}",
+                "approve": false,
+                "notes": notes,
+                "checklist": [
+                    { "entry_id": entry_id, "verdict": "fail", "note": note },
+                    { "entry_id": PROJECT_TAG, "verdict": "pass" },
+                    { "entry_id": MINE_TAG, "verdict": "na" },
+                    { "entry_id": "deadbeef", "verdict": "fail", "note": "names nothing" }
+                ]
+            }),
+        )
+        .replacen("[call ", "[call#mock-opus ", 1)
+    };
+    // The first review's notes carry the second request: the planner reads them as its turn.
+    let again = call(
+        "review_request",
+        json!({
+            "task": "g",
+            "reviewer": "critic",
+            "focus": submit(MINE_TAG, "人的判断也没做到", ""),
+        }),
+    );
+    let first = call(
+        "review_request",
+        json!({
+            "task": "g",
+            "reviewer": "critic",
+            "focus": submit(PROJECT_TAG, "又抽了第三个调用点", &again),
+        }),
+    );
+    let goal = format!(
+        "[write#mock-haiku g.txt=v1] {}",
+        call(
+            "task_complete",
+            json!({ "task_id": "{task_id}", "summary": format!("wrote g {first}") })
+        )
+        .replacen("[call ", "[call#mock-haiku ", 1)
+    );
+    let plan = json!([{ "key": "g", "title": "task g", "spec": { "goal": goal } }]);
+    let req = format!(
+        "Build it. {}",
+        call("plan_submit", json!({ "tasks": plan }))
+    );
+    let resp = t
+        .post(
+            "/v1/runs",
+            json!({ "request": req, "planner": "boss", "worker": "coder", "policy": { "plan_approval": "auto" } }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+
+    w.until("g in review", task_is("g", TaskStatus::Reviewing))
+        .await;
+    w.until("g reviewed", task_is("g", TaskStatus::Passed))
+        .await;
+    w.until("g in review again", task_is("g", TaskStatus::Reviewing))
+        .await;
+    w.until("g reviewed again", task_is("g", TaskStatus::Passed))
+        .await;
+
+    // The reviewer's brief carried both judgements as numbered items.
+    let brief = w
+        .seen
+        .iter()
+        .find_map(|e| match &e.kind {
+            EventKind::AgentInput { text, .. } if text.contains("Reviewer checklist") => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .expect("the reviewer got a checklist");
+    assert!(brief.contains("[01a19b48] 先写会失败的测试"), "{brief}");
+    assert!(brief.contains("[03c39d45] 项目的判断"), "{brief}");
+    assert!(brief.contains("review_submit.checklist"), "{brief}");
+
+    // A verdict is written after the task's status changes: wait until both are in the store.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let (store, candidates) = loop {
+        let store = SqliteStore::open(&Paths::new(t.home.path()).db())
+            .await
+            .unwrap();
+        let candidates = store
+            .candidate_list(None, Some(CandidateStatus::Pending))
+            .await
+            .unwrap();
+        if candidates.len() == 2 || tokio::time::Instant::now() > deadline {
+            break (store, candidates);
+        }
+        store.close().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    // One fail on the project's judgement and one on the person's: nothing for pass, na, or
+    // an id that names no entry.
+    assert_eq!(candidates.len(), 2, "{candidates:?}");
+    let under = |kind: OwnerKind| {
+        candidates
+            .iter()
+            .find(|c| c.owner_kind == kind)
+            .unwrap_or_else(|| panic!("no candidate under {kind:?}: {candidates:?}"))
+    };
+
+    let project = under(OwnerKind::Project);
+    assert_eq!(project.owner_id, project_id);
+    assert_eq!(project.conflicts_with, [PROJECT_ENTRY.to_owned()]);
+    assert_eq!(project.origin, CandidateOrigin::Review);
+    assert_eq!(project.status, CandidateStatus::Pending);
+    assert_eq!(project.note, "又抽了第三个调用点");
+    assert!(project.proposed.text.contains("又抽了第三个调用点"));
+    assert!(matches!(
+        project.sources.as_slice(),
+        [SourceRef::Task { .. }]
+    ));
+
+    let person = under(OwnerKind::Person);
+    assert_eq!(person.owner_id, PERSON_OWNER_ID);
+    assert_eq!(person.conflicts_with, [MINE.to_owned()]);
+    assert_eq!(person.note, "人的判断也没做到");
+    assert!(matches!(
+        person.sources.as_slice(),
+        [SourceRef::Task { .. }]
+    ));
     store.close().await;
 }
