@@ -1,5 +1,8 @@
 //! Files sent with messages (docs/tasks/DOGFOOD.md §3): checked, stored once per session by
 //! content hash under `<home>/attachments/<agent id>/`, read back for clients.
+//!
+//! A file is kept as `<sha256>.<ext>`: some CLIs (with-cli, Codex) are handed the path and
+//! open it by its extension, dropping a file that has none. The id stays the bare hash.
 
 use std::path::{Path, PathBuf};
 
@@ -110,7 +113,8 @@ pub fn store(
         .into_iter()
         .map(|(name, mime, bytes)| {
             let id = format!("{:x}", Sha256::digest(&bytes));
-            let path = dir.join(&id);
+            let ext = crossagents_core::attachment::ext_for(&mime, &name);
+            let path = dir.join(format!("{id}.{ext}"));
             if !path.exists() {
                 std::fs::write(&path, &bytes)
                     .map_err(|e| Refused(format!("cannot store {name}: {e}")))?;
@@ -139,18 +143,45 @@ pub fn read(home: &Path, agent: AgentId, id: &str) -> Option<AttachmentContent> 
     if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
+    let id = id.to_ascii_lowercase();
     let dir = dir(home, agent);
-    let path = dir.join(id.to_ascii_lowercase());
+    let path = stored_path(&dir, &id)?;
     if !crossagents_core::attachment::is_within(&dir, &path) {
         return None;
     }
     let bytes = std::fs::read(&path).ok()?;
     Some(AttachmentContent {
-        id: id.to_ascii_lowercase(),
+        id,
         mime: sniff(&bytes).to_owned(),
         size: bytes.len() as u64,
         data: STANDARD.encode(bytes),
     })
+}
+
+/// Where `id`'s bytes are: `<id>.<ext>`, else the bare `<id>` files stored before the
+/// extension was added.
+fn stored_path(dir: &Path, id: &str) -> Option<PathBuf> {
+    let prefixed = format!("{id}.");
+    let mut suffixed: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix(&prefixed))
+                .is_some_and(|ext| {
+                    !ext.is_empty() && ext.bytes().all(|b| b.is_ascii_alphanumeric())
+                })
+        })
+        .collect();
+    // One file per content, so at most one; sorted to keep the choice stable.
+    suffixed.sort();
+    let bare = dir.join(id);
+    suffixed
+        .into_iter()
+        .next()
+        .or_else(|| bare.exists().then_some(bare))
 }
 
 /// The type of stored bytes, from their first bytes (the store keeps bytes only).
@@ -238,6 +269,50 @@ mod tests {
         assert!(!dir(home.path(), agent).exists());
         assert!(read(home.path(), other, &stored[0].id).is_some());
         remove(home.path(), agent).unwrap();
+    }
+
+    /// A CLI handed the path opens a file by its extension (with-cli says "unsupported
+    /// image format" and drops one that has none), so a file is stored as `<id>.<ext>`; the
+    /// id is still the hash, and files stored before that are still read.
+    #[test]
+    fn stores_with_an_extension_and_reads_files_without_one() {
+        const PNG: &[u8] = &[0x89, b'P', b'N', b'G'];
+        let home = tempfile::tempdir().unwrap();
+        let agent = AgentId::new();
+        let stored = store(
+            home.path(),
+            agent,
+            vec![upload("shot.png", "image/png", PNG)],
+        )
+        .unwrap();
+        assert!(
+            stored[0].path.ends_with(format!("{}.png", stored[0].id)),
+            "{}",
+            stored[0].path.display()
+        );
+        // Same bytes under another name: the same one file, under the same name.
+        let again = store(
+            home.path(),
+            agent,
+            vec![upload("other-name.png", "image/png", PNG)],
+        )
+        .unwrap();
+        assert_eq!(again[0].id, stored[0].id);
+        assert_eq!(again[0].path, stored[0].path);
+        assert_eq!(
+            std::fs::read_dir(dir(home.path(), agent)).unwrap().count(),
+            1
+        );
+        assert!(read(home.path(), agent, &stored[0].id).is_some());
+
+        // A file an older hub stored as the bare id is still read.
+        const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0x01];
+        let id = format!("{:x}", Sha256::digest(JPEG));
+        std::fs::write(dir(home.path(), agent).join(&id), JPEG).unwrap();
+        let back = read(home.path(), agent, &id).unwrap();
+        assert_eq!(back.id, id);
+        assert_eq!(back.mime, "image/jpeg");
+        assert_eq!(STANDARD.decode(back.data).unwrap(), JPEG);
     }
 
     #[test]
