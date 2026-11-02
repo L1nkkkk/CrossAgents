@@ -1,11 +1,10 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { api } from "../api";
 import { ErrorBox, Icon } from "../components";
 import { useHubData } from "../hub";
 import {
   entryFlags,
   estimateTokens,
-  exportMarkdown,
   groupProfile,
   judgmentCopy,
   KIND_LABEL,
@@ -27,6 +26,8 @@ import "../expertise.css";
 const VERDICTS: Verdict[] = ["keep_old", "replace", "merge", "both"];
 const relevant = (e: { type: string }) => e.type === "task.progress" || e.type === "task.status_changed";
 const pct = (r: number | null) => (r === null ? "—" : `${Math.round(r * 100)}%`);
+/** How an entry's number is shown: the first 8 characters of its id. */
+const shortId = (id: string) => id.slice(0, 8);
 
 /** The expertise card: first-try rate, its change, counts. */
 function Card({ card }: { card: ExpertiseCard }) {
@@ -82,6 +83,9 @@ function EntryRow({ e, hints }: { e: ExpertiseEntry; hints: StaleHint[] }) {
   return (
     <li className={`exp-entry ${level} ${e.status === "superseded" ? "superseded" : ""}`}>
       <div className="exp-entry-head">
+        <code className="muted exp-id" title={e.id}>
+          {shortId(e.id)}
+        </code>
         <b>{e.title}</b>
         {e.status === "superseded" && <span className="exp-tag">已被替换</span>}
         {flags.map((f, i) => (
@@ -137,6 +141,17 @@ function Profile({ entries, hints }: { entries: ExpertiseEntry[]; hints: StaleHi
               </span>
             )}
           </div>
+          {g.budget?.over && g.budget.merge_suggestions.length > 0 && (
+            <ul className="exp-merge">
+              {g.budget.merge_suggestions.map((s) => (
+                <li key={`${s.a}:${s.b}`}>
+                  <span className="exp-tag red">可合并</span>
+                  <code title={s.a}>{shortId(s.a)}</code> + <code title={s.b}>{shortId(s.b)}</code>
+                  <span className="muted">{s.reason}</span>
+                </li>
+              ))}
+            </ul>
+          )}
           {g.kinds.map(({ kind, entries }) => (
             <div key={kind} className="exp-kind">
               <h4>
@@ -162,7 +177,15 @@ function Profile({ entries, hints }: { entries: ExpertiseEntry[]; hints: StaleHi
 function Side({ e, label }: { e: ExpertiseEntry; label: string }) {
   return (
     <div className="exp-side">
-      <span className="muted">{label}</span>
+      <span className="muted">
+        {label}
+        {e.id && (
+          <>
+            {" "}
+            <code title={e.id}>{shortId(e.id)}</code>
+          </>
+        )}
+      </span>
       <b>{e.title}</b>
       {e.text && <p>{e.text}</p>}
       {e.kind === "judgment" && <small className="muted">{estimateTokens(judgmentCopy(e))} token</small>}
@@ -248,7 +271,13 @@ function Candidates({ list, entries, onDone }: { list: Candidate[]; entries: Exp
                     return (
                       <div key={id} className={`exp-conflict ${!v ? "undecided" : ""}`}>
                         <div className="exp-pair">
-                          {old ? <Side e={old} label="旧条目" /> : <div className="exp-side muted">旧条目 {id}（不在当前档案里）</div>}
+                          {old ? (
+                            <Side e={old} label="旧条目" />
+                          ) : (
+                            <div className="exp-side muted">
+                              旧条目 <code title={id}>{shortId(id)}</code>（不在当前档案里）
+                            </div>
+                          )}
                           <Side e={c.proposed} label="新条目" />
                         </div>
                         <div className="exp-verdict">
@@ -279,10 +308,12 @@ function Candidates({ list, entries, onDone }: { list: Candidate[]; entries: Exp
   );
 }
 
-function Export({ entries }: { entries: ExpertiseEntry[] }) {
+/** The profile as the hub exports it (`GET /v1/expertise/export`); an empty body means no entries. */
+function Export({ kind, owner }: { kind: OwnerKind; owner: string }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
-  const text = useMemo(() => exportMarkdown(entries), [entries]);
+  const exported = useHubData(() => api.expertiseExport(kind, owner), [kind, owner], relevant);
+  const text = exported.data ?? "";
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(text);
@@ -304,7 +335,8 @@ function Export({ entries }: { entries: ExpertiseEntry[] }) {
           <Icon name={copied ? "check" : "copy"} size={14} /> {copied ? "已复制" : "复制"}
         </button>
       </div>
-      {!text && <div className="empty">没有可导出的条目。</div>}
+      <ErrorBox error={exported.error} />
+      {exported.data !== undefined && !text && <div className="empty">还没有条目。</div>}
       {open && text && <pre className="exp-md">{text}</pre>}
     </section>
   );
@@ -366,7 +398,7 @@ export function ExpertiseView() {
                 </div>
                 {entries.data && <Profile entries={list} hints={maint.data?.stale ?? []} />}
               </section>
-              <Export entries={list} />
+              <Export kind={kind} owner={owner} />
             </>
           )}
         </div>

@@ -120,6 +120,14 @@ function entries(): ExpertiseEntry[] {
       applies_when: "apps/gui/src/**/*.css",
       stats: [7, 6, 1, 0],
     }),
+    person("p-dark", {
+      domain: "前端",
+      kind: "judgment",
+      title: "深色主题别写死颜色",
+      text: "新样式里的颜色和边框取自主题变量，这样浅色与深色主题能同时生效。",
+      applies_when: "apps/gui/src/**/*.css",
+      stats: [2, 1, 1, 0],
+    }),
     person("p-state", {
       domain: "前端",
       kind: "judgment",

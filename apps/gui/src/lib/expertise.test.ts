@@ -73,6 +73,22 @@ test("budget counts live judgements per domain and flags the one over 1500", () 
   assert.equal(budgets[1].over, true);
   assert.equal(budgets[1].over_by, 103);
   assert.equal(budgets[1].judgment_count, 1);
+  assert.deepEqual(budgets[1].merge_suggestions, []);
+});
+
+test("an over-budget domain suggests merging close judgements whose areas overlap", () => {
+  const filler = "x".repeat(6000);
+  const a = entry("a", "rust", "judgment", "cargo test before commit", filler);
+  a.applies_when = "crates/**";
+  const b = entry("b", "rust", "judgment", "cargo test before commit always", "");
+  b.applies_when = "crates/hub";
+  const c = entry("c", "rust", "judgment", "cargo test before commit", "");
+  c.applies_when = "apps/gui";
+  const [budget] = budgetReport([a, b, c]);
+  assert.equal(budget.over, true);
+  assert.deepEqual(budget.merge_suggestions, [
+    { a: "a", b: "b", reason: "同一 domain，适用条件有交集，4 个用词相同" },
+  ]);
 });
 
 test("stale scan: recent rework, high rate, then long unused", () => {
@@ -129,8 +145,8 @@ test("card compares the first-try rate with thirty days ago", () => {
   assert.equal(card.merged_first_try, 5);
   assert.equal(card.reworked, 3);
   assert.equal(card.dropped, 0);
-  assert.equal(card.entries, 5, "superseded entries are history, not counted");
-  assert.equal(card.judgments, 3);
+  assert.equal(card.entries, 6);
+  assert.equal(card.judgments, 4);
   assert.equal(card.examples, 1);
   assert.equal(card.limits, 1);
   assert.equal(card.stale, 1);
@@ -213,15 +229,24 @@ test("outcomes update stats; accepting needs a verdict for every conflict", () =
   };
   assert.deepEqual(missingVerdicts(c, []), ["e"]);
   assert.throws(() => acceptCandidate([e], c, [], "n", daysAgo(0)));
-  assert.equal(conflictList([c], [e])[0].title, "先跑测试");
+  assert.equal(conflictList([c])[0].title, "先跑全量测试");
+  assert.equal(conflictList([{ ...c, status: "accepted" }]).length, 0);
 
   const replaced = acceptCandidate([e], c, [{ entry_id: "e", verdict: "replace" }], "n", daysAgo(0));
   assert.equal(replaced.length, 2);
   assert.equal(replaced[0].status, "superseded");
   assert.equal(replaced[0].superseded_by, "n");
   assert.equal(replaced[1].id, "n");
+  assert.deepEqual(replaced[1].stats, { used: 0, merged_first_try: 0, reworked: 0, dropped: 0 });
+  assert.equal(replaced[1].evidence, 0);
+  assert.equal(replaced[1].last_confirmed_at, null);
   const kept = acceptCandidate([e], c, [{ entry_id: "e", verdict: "keep_old" }], "n", daysAgo(0));
-  assert.deepEqual(kept, [e]);
+  assert.equal(kept.length, 2, "keep_old still adds the new entry");
+  assert.equal(kept[0].status, "active");
+  const old = { ...e, text: "旧的理由" };
+  const merged2 = acceptCandidate([old], { ...c, proposed: { ...c.proposed, text: "新的理由" } }, [{ entry_id: "e", verdict: "merge" }], "n", daysAgo(0));
+  assert.equal(merged2[0].status, "superseded");
+  assert.equal(merged2[1].text, "新的理由\n\n旧的理由");
   const both = acceptCandidate([e], c, [{ entry_id: "e", verdict: "both" }], "n", daysAgo(0));
   assert.equal(both[0].status, "active");
   assert.equal(both.length, 2);

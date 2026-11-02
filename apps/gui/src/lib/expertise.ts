@@ -2,55 +2,43 @@
 // functions mirror crates/orchestrator/src/expertise/maintain.rs so the GUI and its mock agree
 // with the hub on budgets, warnings, the card and the export.
 
-export type OwnerKind = "person" | "project";
+import type { Candidate } from "@bindings/Candidate";
+import type { CandidateOrigin } from "@bindings/CandidateOrigin";
+import type { ConflictDecision } from "@bindings/ConflictDecision";
+import type { ConflictPair } from "@bindings/ConflictPair";
+import type { ConflictVerdict } from "@bindings/ConflictVerdict";
+import type { DomainBudget } from "@bindings/DomainBudget";
+import type { EntryKind } from "@bindings/EntryKind";
+import type { EntryStatus } from "@bindings/EntryStatus";
+import type { ExpertiseCard } from "@bindings/ExpertiseCard";
+import type { ExpertiseEntry } from "@bindings/ExpertiseEntry";
+import type { ExpertiseMaintenance } from "@bindings/ExpertiseMaintenance";
+import type { MergeSuggestion } from "@bindings/MergeSuggestion";
+import type { StaleHint } from "@bindings/StaleHint";
+
+export type { AcceptCandidateRequest as AcceptRequest } from "@bindings/AcceptCandidateRequest";
+export type { CandidateStatus } from "@bindings/CandidateStatus";
+export type { EntryStats } from "@bindings/EntryStats";
+export type { Example } from "@bindings/Example";
+export type { OwnerKind } from "@bindings/OwnerKind";
+export type { SourceRef } from "@bindings/SourceRef";
+export type {
+  Candidate,
+  CandidateOrigin,
+  ConflictDecision,
+  ConflictPair,
+  ConflictVerdict,
+  DomainBudget,
+  EntryKind,
+  EntryStatus,
+  ExpertiseCard,
+  ExpertiseEntry,
+  ExpertiseMaintenance,
+  MergeSuggestion,
+  StaleHint,
+};
+
 export const PERSON_OWNER_ID = "me";
-export type EntryKind = "judgment" | "example" | "limit";
-export type EntryStatus = "active" | "stale" | "review" | "superseded";
-
-export type EntryStats = { used: number; merged_first_try: number; reworked: number; dropped: number };
-export type Example = { situation: string; rejected: string; rejected_why: string; chosen: string };
-export type SourceRef =
-  | { kind: "run"; run_id: string }
-  | { kind: "task"; run_id: string; task_id: string }
-  | { kind: "message"; message_id: string };
-
-export type ExpertiseEntry = {
-  id: string;
-  owner_kind: OwnerKind;
-  owner_id: string;
-  domain: string;
-  kind: EntryKind;
-  title: string;
-  text: string;
-  example: Example | null;
-  applies_when: string;
-  evidence: number;
-  last_confirmed_at: string | null;
-  status: EntryStatus;
-  superseded_by: string | null;
-  stats: EntryStats;
-  sources: SourceRef[];
-  created_at: string;
-  updated_at: string;
-};
-
-export type CandidateOrigin = "rework" | "review" | "merged_first_try" | "manual";
-export type CandidateStatus = "pending" | "accepted" | "rejected";
-export type Candidate = {
-  id: string;
-  owner_kind: OwnerKind;
-  owner_id: string;
-  domain: string;
-  proposed: ExpertiseEntry;
-  conflicts_with: string[];
-  origin: CandidateOrigin;
-  status: CandidateStatus;
-  suggested_by_lead: boolean;
-  note: string;
-  sources: SourceRef[];
-  created_at: string;
-  decided_at: string | null;
-};
 
 export type UsageSource = "pushed" | "pulled" | "declared";
 export type UsageOutcome = "merged_first_try" | "reworked" | "dropped";
@@ -65,53 +53,8 @@ export type UsageRecord = {
   at: string;
 };
 
-export type Verdict = "keep_old" | "replace" | "merge" | "both";
-export type ConflictDecision = { entry_id: string; verdict: Verdict };
-export type AcceptRequest = { decisions: ConflictDecision[] };
-
-export type MergeSuggestion = { a: string; b: string; reason: string };
-export type DomainBudget = {
-  domain: string;
-  judgment_tokens: number;
-  budget: number;
-  over: boolean;
-  over_by: number;
-  judgment_count: number;
-  merge_suggestions: MergeSuggestion[];
-};
-export type StaleHint = {
-  entry_id: string;
-  domain: string;
-  title: string;
-  suggested: "stale" | "review";
-  reason: string;
-  days_unused: number;
-  rework_rate: number | null;
-};
-export type ConflictPair = { candidate_id: string; entry_id: string; domain: string; title: string; note: string };
-export type Maintenance = { budgets: DomainBudget[]; stale: StaleHint[]; conflicts: ConflictPair[] };
-
-export type ExpertiseCard = {
-  first_try_rate: number | null;
-  first_try_rate_30d_ago: number | null;
-  delta_points: number | null;
-  sample: number;
-  small_sample: boolean;
-  merged_first_try: number;
-  reworked: number;
-  dropped: number;
-  entries: number;
-  judgments: number;
-  examples: number;
-  limits: number;
-  active: number;
-  stale: number;
-  review: number;
-  superseded: number;
-  judgment_tokens: number;
-  judgment_budget: number;
-  over_budget_domains: number;
-};
+export type Verdict = ConflictVerdict;
+export type Maintenance = ExpertiseMaintenance;
 
 export const JUDGMENT_BUDGET = 1500;
 export const STALE_AFTER_DAYS = 60;
@@ -176,16 +119,82 @@ export function budgetReport(entries: ExpertiseEntry[]): DomainBudget[] {
   return [...by.keys()].sort(byText).map((domain) => {
     const list = by.get(domain)!;
     const tokens = list.reduce((n, e) => n + estimateTokens(judgmentCopy(e)), 0);
+    const over = tokens > JUDGMENT_BUDGET;
     return {
       domain,
       judgment_tokens: tokens,
       budget: JUDGMENT_BUDGET,
-      over: tokens > JUDGMENT_BUDGET,
+      over,
       over_by: Math.max(0, tokens - JUDGMENT_BUDGET),
       judgment_count: list.length,
-      merge_suggestions: [],
+      merge_suggestions: over ? mergeSuggestions(list) : [],
     };
   });
+}
+
+/** Pairs of judgements in one domain whose applicability overlaps and whose wording is close. */
+export function mergeSuggestions(judgments: ExpertiseEntry[]): MergeSuggestion[] {
+  const items = judgments.map((e) => ({ e, w: words(judgmentCopy(e)) }));
+  const out: MergeSuggestion[] = [];
+  items.forEach((left, i) => {
+    for (const right of items.slice(i + 1)) {
+      if (!appliesOverlap(left.e.applies_when, right.e.applies_when)) continue;
+      let shared = 0;
+      for (const w of left.w) if (right.w.has(w)) shared++;
+      const smaller = Math.min(left.w.size, right.w.size);
+      if (shared < 3 || shared * 2 < smaller) continue;
+      out.push({ a: left.e.id, b: right.e.id, reason: `同一 domain，适用条件有交集，${shared} 个用词相同` });
+    }
+  });
+  return out;
+}
+
+/** Do two `applies_when` values cover anything in common? Empty means anywhere. */
+export function appliesOverlap(a: string, b: string): boolean {
+  const left = scopes(a);
+  const right = scopes(b);
+  if (!left.length || !right.length) return true;
+  const under = (p: string, parent: string) => p.startsWith(parent) && p.slice(parent.length).startsWith("/");
+  return left.some((l) => right.some((r) => l === r || under(l, r) || under(r, l)));
+}
+
+function scopes(value: string): string[] {
+  return value
+    .split(/[,;\s]/)
+    .filter(Boolean)
+    .map((p) => p.replace(/(\*\*)+$/, "").replace(/\/+$/, "").toLowerCase())
+    .filter(Boolean);
+}
+
+/** Latin runs of three or more characters, and CJK bigrams (a lone CJK character on its own). */
+function words(text: string): Set<string> {
+  const set = new Set<string>();
+  let latin = "";
+  let cjk: string[] = [];
+  const flushLatin = () => {
+    if (latin.length >= 3) set.add(latin);
+    latin = "";
+  };
+  const flushCjk = () => {
+    if (cjk.length === 1) set.add(cjk[0]);
+    else for (let i = 0; i + 1 < cjk.length; i++) set.add(cjk[i] + cjk[i + 1]);
+    cjk = [];
+  };
+  for (const ch of text.toLowerCase()) {
+    if (isCjk(ch.codePointAt(0)!)) {
+      flushLatin();
+      cjk.push(ch);
+    } else if (/^[a-z0-9_]$/.test(ch)) {
+      flushCjk();
+      latin += ch;
+    } else {
+      flushLatin();
+      flushCjk();
+    }
+  }
+  flushLatin();
+  flushCjk();
+  return set;
 }
 
 /** Active entries that should turn yellow (stale or review), and why. */
@@ -216,13 +225,12 @@ export function staleScan(entries: ExpertiseEntry[], usages: UsageRecord[], now:
 }
 
 /** One pair per pending candidate and entry it conflicts with. */
-export function conflictList(candidates: Candidate[], entries: ExpertiseEntry[]): ConflictPair[] {
+export function conflictList(candidates: Candidate[]): ConflictPair[] {
   const pairs: ConflictPair[] = [];
   for (const c of candidates) {
     if (c.status !== "pending") continue;
     for (const id of c.conflicts_with) {
-      const e = entries.find((x) => x.id === id);
-      pairs.push({ candidate_id: c.id, entry_id: id, domain: c.domain, title: e?.title ?? id, note: c.note });
+      pairs.push({ candidate_id: c.id, entry_id: id, domain: c.domain, title: c.proposed.title, note: c.note });
     }
   }
   return pairs;
@@ -243,7 +251,7 @@ export function expertiseCard(entries: ExpertiseEntry[], usages: UsageRecord[], 
   const first = rate(all.merged_first_try, sample);
   const before = rate(then.merged_first_try, sampleThen);
   const budgets = budgetReport(entries);
-  const kind = (k: EntryKind) => entries.filter((e) => e.kind === k && e.status !== "superseded").length;
+  const kind = (k: EntryKind) => entries.filter((e) => e.kind === k).length;
   const status = (s: EntryStatus) => entries.filter((e) => e.status === s).length;
   return {
     first_try_rate: first,
@@ -252,7 +260,7 @@ export function expertiseCard(entries: ExpertiseEntry[], usages: UsageRecord[], 
     sample,
     small_sample: sample < 10,
     ...all,
-    entries: entries.length - status("superseded"),
+    entries: entries.length,
     judgments: kind("judgment"),
     examples: kind("example"),
     limits: kind("limit"),
@@ -280,18 +288,21 @@ export function exportMarkdown(entries: ExpertiseEntry[]): string {
       for (const e of list) {
         out += `- **${oneLine(e.title)}**`;
         const text = oneLine(e.text);
-        if (text) out += ` — ${text}`;
+        if (e.text) out += ` — ${text}`;
         if (e.status === "stale") out += "（待确认）";
         if (e.status === "review") out += "（需复核）";
         out += "\n";
         if (e.example) {
           const x = e.example;
-          out += `  - 情况：${oneLine(x.situation)}\n`;
-          out += `  - 否掉的方案：${oneLine(x.rejected)}（原因：${oneLine(x.rejected_why)}）\n`;
-          out += `  - 采用：${oneLine(x.chosen)}\n`;
+          if (x.situation) out += `  - 情况：${oneLine(x.situation)}\n`;
+          if (x.rejected) {
+            out += `  - 否掉的方案：${oneLine(x.rejected)}`;
+            if (x.rejected_why) out += `（原因：${oneLine(x.rejected_why)}）`;
+            out += "\n";
+          }
+          if (x.chosen) out += `  - 采用：${oneLine(x.chosen)}\n`;
         }
-        const when = oneLine(e.applies_when);
-        if (when) out += `  - 适用：\`${when}\`\n`;
+        if (e.applies_when) out += `  - 适用：\`${oneLine(e.applies_when)}\`\n`;
       }
     }
   }
@@ -352,8 +363,9 @@ export function applyOutcome(e: ExpertiseEntry, outcome: UsageOutcome, at: strin
   };
 }
 
-/** Accept a candidate: the new entry (unless every verdict keeps the old one), and the old
- * entries with replace/merge marked superseded by it. Throws when a conflict has no verdict. */
+/** Accept a candidate as the hub does: always a new entry (fresh stats, no evidence yet); old
+ * entries with replace/merge are superseded by it, and merge appends their text to it.
+ * Throws when a conflict has no verdict. */
 export function acceptCandidate(
   entries: ExpertiseEntry[],
   c: Candidate,
@@ -363,13 +375,18 @@ export function acceptCandidate(
 ): ExpertiseEntry[] {
   const missing = missingVerdicts(c, decisions);
   if (missing.length) throw new Error(`冲突没有裁决：${missing.join(", ")}`);
-  const keepOnly = c.conflicts_with.length > 0 && decisions.every((d) => d.verdict === "keep_old");
+  let text = c.proposed.text;
+  for (const id of c.conflicts_with) {
+    const old = entries.find((e) => e.id === id);
+    const kept = old?.text.trim() ?? "";
+    const merge = decisions.find((d) => d.entry_id === id)?.verdict === "merge";
+    if (merge && kept && !text.includes(kept)) text = `${text.trimEnd()}\n\n${kept}`;
+  }
   const next = entries.map((e) => {
     const d = decisions.find((x) => x.entry_id === e.id);
-    if (!d || keepOnly || (d.verdict !== "replace" && d.verdict !== "merge")) return e;
+    if (!d || !c.conflicts_with.includes(e.id) || (d.verdict !== "replace" && d.verdict !== "merge")) return e;
     return { ...e, status: "superseded" as const, superseded_by: newId, updated_at: at };
   });
-  if (keepOnly) return next;
   return [
     ...next,
     {
@@ -378,8 +395,16 @@ export function acceptCandidate(
       owner_kind: c.owner_kind,
       owner_id: c.owner_id,
       domain: c.domain,
+      text,
+      sources: [
+        ...c.sources,
+        ...c.proposed.sources.filter((s) => !c.sources.some((x) => JSON.stringify(x) === JSON.stringify(s))),
+      ],
+      evidence: 0,
+      last_confirmed_at: null,
       status: "active",
       superseded_by: null,
+      stats: { used: 0, merged_first_try: 0, reworked: 0, dropped: 0 },
       created_at: at,
       updated_at: at,
     },

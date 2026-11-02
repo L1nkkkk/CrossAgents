@@ -34,6 +34,7 @@ import {
   budgetReport,
   conflictList,
   expertiseCard,
+  exportMarkdown,
   missingVerdicts,
   staleScan,
   type Candidate,
@@ -475,21 +476,28 @@ export class MockBridge implements CrossAgentsBridge {
       if (p === "/v1/notes") return json(200, { notes: s.notes });
       if (p === "/v1/quota") return json(200, s.quota);
       if (p === "/v1/usage/series") return json(200, usageSeriesMock(url.searchParams.get("range") ?? "7d", url.searchParams.get("group") ?? "total", url.searchParams.get("source") ?? "all", s.usageSeriesVariant ?? "normal"));
-      if (p === "/v1/expertise" || p === "/v1/expertise/card" || p === "/v1/expertise/maintenance") {
+      if (p === "/v1/expertise" || p === "/v1/expertise/card" || p === "/v1/expertise/maintenance" || p === "/v1/expertise/export") {
         const x = s.expertise ?? { entries: [], candidates: [], usages: [] };
         const kind = url.searchParams.get("owner_kind") ?? "person";
         const owner = url.searchParams.get("owner_id") ?? "";
         const entries = x.entries.filter((e) => e.owner_kind === kind && e.owner_id === owner);
         const ids = new Set(entries.map((e) => e.id));
         const usages = x.usages.filter((u) => ids.has(u.entry_id));
-        if (p === "/v1/expertise") return json(200, entries);
+        if (p === "/v1/expertise") return json(200, { entries });
+        // Like the hub: plain Markdown, an empty body when nothing is left to export.
+        if (p === "/v1/expertise/export") return { status: 200, body: exportMarkdown(entries) };
         if (p === "/v1/expertise/card") return json(200, expertiseCard(entries, usages, new Date()));
         const candidates = x.candidates.filter((c) => c.owner_kind === kind && c.owner_id === owner);
-        return json(200, { budgets: budgetReport(entries), stale: staleScan(entries, usages, new Date()), conflicts: conflictList(candidates, entries) });
+        return json(200, { budgets: budgetReport(entries), stale: staleScan(entries, usages, new Date()), conflicts: conflictList(candidates) });
       }
       if (p === "/v1/expertise/candidates") {
         const status = url.searchParams.get("status") ?? "pending";
-        return json(200, (s.expertise?.candidates ?? []).filter((c) => c.status === status));
+        const kind = url.searchParams.get("owner_kind");
+        const owner = url.searchParams.get("owner_id");
+        const candidates = (s.expertise?.candidates ?? []).filter(
+          (c) => c.status === status && (kind === null || c.owner_kind === kind) && (owner === null || c.owner_id === owner),
+        );
+        return json(200, { candidates });
       }
       if (p === "/v1/usage") {
         const by = (url.searchParams.get("by") ?? "role") as UsageGroup;
@@ -527,10 +535,11 @@ export class MockBridge implements CrossAgentsBridge {
         const decisions = (body as { decisions?: ConflictDecision[] } | null)?.decisions ?? [];
         const missing = missingVerdicts(c, decisions);
         if (missing.length) return json(400, { error: { code: "bad_request", message: `冲突没有裁决：${missing.join(", ")}` } });
-        x.entries = acceptCandidate(x.entries, c, decisions, uid(), now);
+        const newId = uid();
+        x.entries = acceptCandidate(x.entries, c, decisions, newId, now);
         c.status = "accepted";
         c.decided_at = now;
-        return json(200, c);
+        return json(200, { candidate: c, entry: x.entries.find((e) => e.id === newId) });
       }
       if (p === "/v1/agents") {
         const req = body as CreateAgentRequest;
