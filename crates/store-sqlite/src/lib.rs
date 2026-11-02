@@ -9,10 +9,11 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use crossagents_core::{
-    Account, Agent, AgentClaim, AgentId, AgentKey, AgentProfile, AgentStatus, CoreError,
-    EVENT_SCHEMA_VERSION, Event, EventKind, HumanItem, IssueRef, Lesson, LessonStatus, MessageId,
-    NameSource, Note, NoteScope, Project, Reminder, Run, RunId, Store, Task, TaskId, Triage,
-    TriageRecord, TriageStep, Watch,
+    Account, Agent, AgentClaim, AgentId, AgentKey, AgentProfile, AgentStatus, Candidate,
+    CandidateStatus, CoreError, EVENT_SCHEMA_VERSION, Event, EventKind, ExpertiseEntry, HumanItem,
+    IssueRef, Lesson, LessonStatus, MessageId, NameSource, Note, NoteScope, OwnerKind, Project,
+    Reminder, Run, RunId, Store, Task, TaskId, Triage, TriageRecord, TriageStep, UsageOutcome,
+    UsageRecord, Watch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -234,6 +235,50 @@ async fn insert_lesson(
     .bind(&lesson.symptom)
     .bind(lesson.keywords.join(" "))
     .bind(&lesson.resolution)
+    .execute(&mut **tx)
+    .await
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// Writes an expertise entry and its search entry, replacing the stored one by id.
+async fn insert_expertise(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    entry: &ExpertiseEntry,
+) -> Result<(), CoreError> {
+    let status = enum_str(&entry.status)?;
+    let data = serde_json::to_string(entry).map_err(storage)?;
+    sqlx::query(
+        "INSERT INTO expertise_entries (id, owner_kind, owner_id, domain, kind, status, updated_at, data)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(id) DO UPDATE SET owner_kind = ?2, owner_id = ?3, domain = ?4, kind = ?5,
+             status = ?6, updated_at = ?7, data = ?8",
+    )
+    .bind(&entry.id)
+    .bind(enum_str(&entry.owner_kind)?)
+    .bind(&entry.owner_id)
+    .bind(&entry.domain)
+    .bind(enum_str(&entry.kind)?)
+    .bind(status)
+    .bind(entry.updated_at.to_rfc3339())
+    .bind(data)
+    .execute(&mut **tx)
+    .await
+    .map_err(storage)?;
+    sqlx::query("DELETE FROM expertise_fts WHERE id = ?")
+        .bind(&entry.id)
+        .execute(&mut **tx)
+        .await
+        .map_err(storage)?;
+    sqlx::query(
+        "INSERT INTO expertise_fts (id, title, domain, applies_when, text)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+    .bind(&entry.id)
+    .bind(&entry.title)
+    .bind(&entry.domain)
+    .bind(&entry.applies_when)
+    .bind(&entry.text)
     .execute(&mut **tx)
     .await
     .map_err(storage)?;
@@ -966,6 +1011,343 @@ impl Store for SqliteStore {
             .collect()
     }
 
+    async fn expertise_put(&self, entry: &ExpertiseEntry) -> Result<(), CoreError> {
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        insert_expertise(&mut tx, entry).await?;
+        tx.commit().await.map_err(storage)
+    }
+
+    async fn expertise_get(&self, id: &str) -> Result<ExpertiseEntry, CoreError> {
+        let data: Option<String> =
+            sqlx::query_scalar("SELECT data FROM expertise_entries WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(storage)?;
+        match data {
+            Some(d) => serde_json::from_str(&d).map_err(storage),
+            None => Err(CoreError::NotFound {
+                kind: "expertise entry",
+                id: id.to_owned(),
+            }),
+        }
+    }
+
+    async fn expertise_list(
+        &self,
+        owner_kind: OwnerKind,
+        owner_id: &str,
+        domain: Option<&str>,
+    ) -> Result<Vec<ExpertiseEntry>, CoreError> {
+        let rows: Vec<String> = match domain {
+            Some(domain) => {
+                sqlx::query_scalar(
+                    "SELECT data FROM expertise_entries
+                     WHERE owner_kind = ?1 AND owner_id = ?2 AND domain = ?3
+                     ORDER BY updated_at DESC",
+                )
+                .bind(enum_str(&owner_kind)?)
+                .bind(owner_id)
+                .bind(domain)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(storage)?
+            }
+            None => sqlx::query_scalar(
+                "SELECT data FROM expertise_entries
+                 WHERE owner_kind = ?1 AND owner_id = ?2 ORDER BY updated_at DESC",
+            )
+            .bind(enum_str(&owner_kind)?)
+            .bind(owner_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage)?,
+        };
+        rows.iter()
+            .map(|d| serde_json::from_str(d).map_err(storage))
+            .collect()
+    }
+
+    async fn expertise_search(
+        &self,
+        owners: &[(OwnerKind, String)],
+        terms: &[String],
+        limit: usize,
+    ) -> Result<Vec<ExpertiseEntry>, CoreError> {
+        let terms: Vec<&str> = terms
+            .iter()
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if terms.is_empty() || limit == 0 || owners.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Only entries of these owners; history (superseded) is not searched.
+        let owner_clause = owners
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let kind = 2 + i * 2;
+                format!("(e.owner_kind = ?{kind} AND e.owner_id = ?{})", kind + 1)
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let limit_at = 2 + owners.len() * 2;
+        // Trigrams need three characters; shorter terms ("代理") are looked up as substrings.
+        let (long, short): (Vec<&str>, Vec<&str>) =
+            terms.into_iter().partition(|t| t.chars().count() >= 3);
+        let mut found: Vec<String> = Vec::new();
+        if !long.is_empty() {
+            let query = long
+                .iter()
+                .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(" OR ");
+            let sql = format!(
+                "SELECT e.data FROM expertise_fts f JOIN expertise_entries e ON e.id = f.id
+                 WHERE expertise_fts MATCH ?1 AND e.status != 'superseded' AND ({owner_clause})
+                 ORDER BY bm25(expertise_fts) LIMIT ?{limit_at}"
+            );
+            let mut q = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str())).bind(query);
+            for (kind, owner_id) in owners {
+                q = q.bind(enum_str(kind)?).bind(owner_id);
+            }
+            let rows: Vec<String> = q
+                .bind(limit as i64)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(storage)?;
+            found.extend(rows);
+        }
+        for term in short {
+            if found.len() >= limit {
+                break;
+            }
+            let pattern = format!(
+                "%{}%",
+                term.replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            );
+            let sql = format!(
+                "SELECT e.data FROM expertise_fts f JOIN expertise_entries e ON e.id = f.id
+                 WHERE e.status != 'superseded' AND ({owner_clause})
+                   AND (f.title LIKE ?1 ESCAPE '\\' OR f.domain LIKE ?1 ESCAPE '\\'
+                        OR f.applies_when LIKE ?1 ESCAPE '\\' OR f.text LIKE ?1 ESCAPE '\\')
+                 ORDER BY e.updated_at DESC LIMIT ?{limit_at}"
+            );
+            let mut q = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str())).bind(pattern);
+            for (kind, owner_id) in owners {
+                q = q.bind(enum_str(kind)?).bind(owner_id);
+            }
+            let rows: Vec<String> = q
+                .bind(limit as i64)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(storage)?;
+            for row in rows {
+                if !found.contains(&row) {
+                    found.push(row);
+                }
+            }
+        }
+        found.truncate(limit);
+        found
+            .iter()
+            .map(|d| serde_json::from_str(d).map_err(storage))
+            .collect()
+    }
+
+    async fn expertise_delete(&self, id: &str) -> Result<(), CoreError> {
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let result = sqlx::query("DELETE FROM expertise_entries WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        if result.rows_affected() == 0 {
+            return Err(CoreError::NotFound {
+                kind: "expertise entry",
+                id: id.to_owned(),
+            });
+        }
+        sqlx::query("DELETE FROM expertise_fts WHERE id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        tx.commit().await.map_err(storage)
+    }
+
+    async fn candidate_put(&self, candidate: &Candidate) -> Result<(), CoreError> {
+        let status = enum_str(&candidate.status)?;
+        sqlx::query(
+            "INSERT INTO expertise_candidates (id, owner_kind, owner_id, status, created_at, data)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET owner_kind = ?2, owner_id = ?3, status = ?4,
+                 created_at = ?5, data = ?6",
+        )
+        .bind(&candidate.id)
+        .bind(enum_str(&candidate.owner_kind)?)
+        .bind(&candidate.owner_id)
+        .bind(status)
+        .bind(candidate.created_at.to_rfc3339())
+        .bind(serde_json::to_string(candidate).map_err(storage)?)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    async fn candidate_list(
+        &self,
+        owner: Option<(OwnerKind, String)>,
+        status: Option<CandidateStatus>,
+    ) -> Result<Vec<Candidate>, CoreError> {
+        let mut sql = String::from("SELECT data FROM expertise_candidates WHERE 1 = 1");
+        let mut at = 1;
+        if owner.is_some() {
+            sql.push_str(&format!(
+                " AND owner_kind = ?{} AND owner_id = ?{}",
+                at,
+                at + 1
+            ));
+            at += 2;
+        }
+        if status.is_some() {
+            sql.push_str(&format!(" AND status = ?{at}"));
+        }
+        sql.push_str(" ORDER BY created_at");
+
+        let mut q = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()));
+        if let Some((kind, id)) = &owner {
+            q = q.bind(enum_str(kind)?).bind(id);
+        }
+        if let Some(status) = status {
+            q = q.bind(enum_str(&status)?);
+        }
+        let rows: Vec<String> = q.fetch_all(&self.pool).await.map_err(storage)?;
+        rows.iter()
+            .map(|d| serde_json::from_str(d).map_err(storage))
+            .collect()
+    }
+
+    async fn candidate_set_status(
+        &self,
+        id: &str,
+        status: CandidateStatus,
+    ) -> Result<(), CoreError> {
+        let data: Option<String> =
+            sqlx::query_scalar("SELECT data FROM expertise_candidates WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(storage)?;
+        let Some(data) = data else {
+            return Err(CoreError::NotFound {
+                kind: "expertise candidate",
+                id: id.to_owned(),
+            });
+        };
+        let mut candidate: Candidate = serde_json::from_str(&data).map_err(storage)?;
+        candidate.status = status;
+        if status != CandidateStatus::Pending {
+            candidate.decided_at = Some(Utc::now());
+        }
+        sqlx::query("UPDATE expertise_candidates SET status = ?2, data = ?3 WHERE id = ?1")
+            .bind(id)
+            .bind(enum_str(&status)?)
+            .bind(serde_json::to_string(&candidate).map_err(storage)?)
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        Ok(())
+    }
+
+    async fn usage_record(&self, usage: &UsageRecord) -> Result<(), CoreError> {
+        let outcome = match usage.outcome {
+            Some(o) => Some(enum_str(&o)?),
+            None => None,
+        };
+        sqlx::query(
+            "INSERT INTO expertise_usage (id, entry_id, task_id, outcome, at, data)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET entry_id = ?2, task_id = ?3, outcome = ?4, at = ?5,
+                 data = ?6",
+        )
+        .bind(&usage.id)
+        .bind(&usage.entry_id)
+        .bind(
+            usage
+                .task_id
+                .map(|t| t.to_string())
+                .unwrap_or_default(),
+        )
+        .bind(outcome)
+        .bind(usage.at.to_rfc3339())
+        .bind(serde_json::to_string(usage).map_err(storage)?)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    async fn usage_set_outcome(
+        &self,
+        task: TaskId,
+        outcome: UsageOutcome,
+    ) -> Result<usize, CoreError> {
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT id, data FROM expertise_usage WHERE task_id = ?1 AND outcome IS NULL",
+        )
+        .bind(task.to_string())
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(storage)?;
+        for (id, data) in &rows {
+            let mut usage: UsageRecord = serde_json::from_str(data).map_err(storage)?;
+            usage.outcome = Some(outcome);
+            sqlx::query("UPDATE expertise_usage SET outcome = ?2, data = ?3 WHERE id = ?1")
+                .bind(id)
+                .bind(enum_str(&outcome)?)
+                .bind(serde_json::to_string(&usage).map_err(storage)?)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage)?;
+        }
+        tx.commit().await.map_err(storage)?;
+        Ok(rows.len())
+    }
+
+    async fn usage_list(
+        &self,
+        entry: Option<&str>,
+        task: Option<TaskId>,
+    ) -> Result<Vec<UsageRecord>, CoreError> {
+        let mut sql = String::from("SELECT data FROM expertise_usage WHERE 1 = 1");
+        let mut at = 1;
+        if entry.is_some() {
+            sql.push_str(&format!(" AND entry_id = ?{at}"));
+            at += 1;
+        }
+        if task.is_some() {
+            sql.push_str(&format!(" AND task_id = ?{at}"));
+        }
+        sql.push_str(" ORDER BY at");
+        let mut q = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()));
+        if let Some(entry) = entry {
+            q = q.bind(entry);
+        }
+        if let Some(task) = task {
+            q = q.bind(task.to_string());
+        }
+        let rows: Vec<String> = q.fetch_all(&self.pool).await.map_err(storage)?;
+        rows.iter()
+            .map(|d| serde_json::from_str(d).map_err(storage))
+            .collect()
+    }
+
     async fn put_human_item(&self, item: &HumanItem) -> Result<(), CoreError> {
         sqlx::query(
             "INSERT INTO human_items (id, status, created_at, data) VALUES (?1, ?2, ?3, ?4)
@@ -1653,6 +2035,7 @@ mod tests {
     }
 
     use super::*;
+    use crossagents_core::{CandidateOrigin, EntryKind, EntryStats, EntryStatus, UsageSource};
 
     fn agent(name: &str) -> Agent {
         Agent {
@@ -2081,5 +2464,294 @@ mod tests {
         store.update_lesson(&old).await.unwrap();
         assert!(search(&["9009"], false).await.is_empty());
         assert_eq!(search(&["9009"], true).await, vec!["l1"]);
+    }
+
+    fn entry(
+        id: &str,
+        owner: (OwnerKind, &str),
+        domain: &str,
+        kind: EntryKind,
+        title: &str,
+        text: &str,
+    ) -> ExpertiseEntry {
+        let now = Utc::now();
+        ExpertiseEntry {
+            id: id.into(),
+            owner_kind: owner.0,
+            owner_id: owner.1.into(),
+            domain: domain.into(),
+            kind,
+            title: title.into(),
+            text: text.into(),
+            example: None,
+            applies_when: String::new(),
+            evidence: 1,
+            last_confirmed_at: Some(now),
+            status: EntryStatus::Active,
+            superseded_by: None,
+            stats: EntryStats::default(),
+            sources: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// Entries of one owner and domain are listed; searches see the owners asked for, in
+    /// either language, and never history.
+    #[tokio::test]
+    async fn expertise_entries_are_listed_and_searched_by_owner() {
+        let store = SqliteStore::open_in_memory().await.unwrap();
+        let me = (OwnerKind::Person, "me");
+        let project = (OwnerKind::Project, "p1");
+        let entries = [
+            entry(
+                "e1",
+                me,
+                "rust",
+                EntryKind::Judgment,
+                "提交前先跑单元测试",
+                "一个会先失败的测试比事后补的更有用",
+            ),
+            entry(
+                "e2",
+                me,
+                "gui",
+                EntryKind::Example,
+                "窄屏下拉到单列",
+                "表格在 800px 以下改成卡片",
+            ),
+            entry(
+                "e3",
+                project,
+                "rust",
+                EntryKind::Limit,
+                "不要给 windows 加软链",
+                "软链在 windows 上要管理员权限",
+            ),
+        ];
+        for e in &entries {
+            store.expertise_put(e).await.unwrap();
+        }
+        store
+            .expertise_put(&entry(
+                "e4",
+                me,
+                "rust",
+                EntryKind::Judgment,
+                "旧判断",
+                "已被替代",
+            ))
+            .await
+            .unwrap();
+        let mut old = store.expertise_get("e4").await.unwrap();
+        old.status = EntryStatus::Superseded;
+        old.superseded_by = Some("e1".into());
+        store.expertise_put(&old).await.unwrap();
+
+        let ids = |es: Vec<ExpertiseEntry>| es.into_iter().map(|e| e.id).collect::<Vec<_>>();
+        // Listing is per owner (and domain), newest first, history included.
+        let mut mine = ids(store
+            .expertise_list(OwnerKind::Person, "me", None)
+            .await
+            .unwrap());
+        mine.sort();
+        assert_eq!(mine, vec!["e1", "e2", "e4"]);
+        assert_eq!(
+            ids(store
+                .expertise_list(OwnerKind::Person, "me", Some("gui"))
+                .await
+                .unwrap()),
+            vec!["e2"]
+        );
+        assert_eq!(
+            ids(store
+                .expertise_list(OwnerKind::Project, "p1", None)
+                .await
+                .unwrap()),
+            vec!["e3"]
+        );
+
+        let search = |owners: &[(OwnerKind, String)], terms: &[&str]| {
+            let owners = owners.to_vec();
+            let terms: Vec<String> = terms.iter().map(|t| t.to_string()).collect();
+            let store = &store;
+            async move {
+                ids(store
+                    .expertise_search(&owners, &terms, 5)
+                    .await
+                    .unwrap())
+            }
+        };
+        let both = [me, project].map(|(k, id)| (k, id.to_string()));
+        // Chinese with no spaces, matched inside a longer sentence.
+        assert_eq!(search(&both, &["单元测试"]).await, vec!["e1"]);
+        // Shorter than a trigram: looked up as a substring.
+        assert_eq!(search(&both, &["软链"]).await, vec!["e3"]);
+        // Only the owners asked for.
+        assert!(search(&[(me.0, me.1.to_string())], &["软链"])
+            .await
+            .is_empty());
+        assert_eq!(
+            search(&[(me.0, me.1.to_string())], &["卡片"]).await,
+            vec!["e2"]
+        );
+        // Superseded entries are history: not searched, still listed.
+        assert!(search(&both, &["旧判断"]).await.is_empty());
+        assert!(search(&both, &["nothing like it"]).await.is_empty());
+        // FTS syntax in what an agent types is taken as text.
+        assert!(search(&both, &["\" OR x"]).await.is_empty());
+
+        // Deleting takes the search entry with it.
+        store.expertise_delete("e1").await.unwrap();
+        assert!(search(&both, &["单元测试"]).await.is_empty());
+        assert!(matches!(
+            store.expertise_get("e1").await,
+            Err(CoreError::NotFound { .. })
+        ));
+        assert!(matches!(
+            store.expertise_delete("e1").await,
+            Err(CoreError::NotFound { .. })
+        ));
+    }
+
+    fn candidate(id: &str, owner: (OwnerKind, &str), status: CandidateStatus) -> Candidate {
+        let now = Utc::now();
+        Candidate {
+            id: id.into(),
+            owner_kind: owner.0,
+            owner_id: owner.1.into(),
+            domain: "rust".into(),
+            proposed: entry(
+                "proposed",
+                owner,
+                "rust",
+                EntryKind::Judgment,
+                "先写测试",
+                "再写实现",
+            ),
+            conflicts_with: vec!["e1".into()],
+            origin: CandidateOrigin::Rework,
+            status,
+            suggested_by_lead: false,
+            note: "返工两次都是没先写测试".into(),
+            sources: Vec::new(),
+            created_at: now,
+            decided_at: None,
+        }
+    }
+
+    /// Candidates wait for a decision; usage records follow a task and get its outcome once.
+    #[tokio::test]
+    async fn candidates_wait_for_a_decision_and_usage_follows_the_task() {
+        let store = SqliteStore::open_in_memory().await.unwrap();
+        let me = (OwnerKind::Person, "me");
+        let project = (OwnerKind::Project, "p1");
+        store
+            .candidate_put(&candidate("c1", me, CandidateStatus::Pending))
+            .await
+            .unwrap();
+        store
+            .candidate_put(&candidate("c2", project, CandidateStatus::Pending))
+            .await
+            .unwrap();
+        let ids = |cs: Vec<Candidate>| cs.into_iter().map(|c| c.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(store.candidate_list(None, None).await.unwrap()),
+            vec!["c1", "c2"]
+        );
+        assert_eq!(
+            ids(store
+                .candidate_list(Some((OwnerKind::Person, "me".into())), None)
+                .await
+                .unwrap()),
+            vec!["c1"]
+        );
+        assert_eq!(
+            ids(store
+                .candidate_list(None, Some(CandidateStatus::Pending))
+                .await
+                .unwrap()),
+            vec!["c1", "c2"]
+        );
+        // Accepting is not overwriting: the conflict it names stays for the person to settle.
+        store
+            .candidate_set_status("c1", CandidateStatus::Accepted)
+            .await
+            .unwrap();
+        let accepted = store
+            .candidate_list(Some((OwnerKind::Person, "me".into())), None)
+            .await
+            .unwrap();
+        assert_eq!(accepted[0].status, CandidateStatus::Accepted);
+        assert!(accepted[0].decided_at.is_some());
+        assert_eq!(accepted[0].conflicts_with, vec!["e1"]);
+        assert_eq!(
+            ids(store
+                .candidate_list(None, Some(CandidateStatus::Pending))
+                .await
+                .unwrap()),
+            vec!["c2"]
+        );
+        assert!(matches!(
+            store
+                .candidate_set_status("nope", CandidateStatus::Rejected)
+                .await,
+            Err(CoreError::NotFound { .. })
+        ));
+
+        // Usage: two entries used by one task, one pulled by another.
+        let task = TaskId::new();
+        let run = RunId::new();
+        let agent = AgentId::new();
+        let usage = |id: &str, entry: &str, task: Option<TaskId>| UsageRecord {
+            id: id.into(),
+            entry_id: entry.into(),
+            run_id: Some(run),
+            task_id: task,
+            agent: Some(agent),
+            source: UsageSource::Declared,
+            outcome: None,
+            at: Utc::now(),
+        };
+        for record in [
+            usage("u1", "e1", Some(task)),
+            usage("u2", "e2", Some(task)),
+            usage("u3", "e1", None),
+        ] {
+            store.usage_record(&record).await.unwrap();
+        }
+        assert_eq!(store.usage_list(Some("e1"), None).await.unwrap().len(), 2);
+        assert_eq!(store.usage_list(None, Some(task)).await.unwrap().len(), 2);
+        // Deciding the task settles both of its records, once.
+        assert_eq!(
+            store
+                .usage_set_outcome(task, UsageOutcome::MergedFirstTry)
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .usage_set_outcome(task, UsageOutcome::Dropped)
+                .await
+                .unwrap(),
+            0
+        );
+        let settled = store.usage_list(None, Some(task)).await.unwrap();
+        assert!(settled
+            .iter()
+            .all(|u| u.outcome == Some(UsageOutcome::MergedFirstTry)));
+        // The one with no task keeps no outcome until its own task ends.
+        assert!(
+            store
+                .usage_list(Some("e1"), None)
+                .await
+                .unwrap()
+                .iter()
+                .find(|u| u.id == "u3")
+                .unwrap()
+                .outcome
+                .is_none()
+        );
     }
 }
