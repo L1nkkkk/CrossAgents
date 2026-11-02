@@ -143,7 +143,11 @@ impl Orchestrator {
             .await?;
         let issuer = task.issuer_or(run.planner);
         self.notify_dispatched(issuer, &task, &card).await;
-        self.relay(worker.id, issuer, brief::handover(&task, &card), None);
+        let mut opening = brief::handover(&task, &card);
+        if let Some(pushed) = self.expertise_brief(&worker, &task).await {
+            opening = format!("{opening}\n\n{pushed}");
+        }
+        self.relay(worker.id, issuer, opening, None);
         Ok(())
     }
 }
