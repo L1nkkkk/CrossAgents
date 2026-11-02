@@ -12,7 +12,7 @@
 |---|---|
 | `-p` | 非交互，读 prompt、打印结果后退出 |
 | `--output-format stream-json` | NDJSON 事件流，一行一个 JSON |
-| `--stream-partial-output` | 文本增量（见下节，需要按 `timestamp_ms` + `model_call_id` 去重） |
+| `--stream-partial-output` | 文本增量（见下节，按 `timestamp_ms` / `model_call_id` 的有无区分增量与重复） |
 | `--resume <chatId>` | 接着某个 chat 跑，上下文延续 |
 | `--force` / `--yolo` | 放行工具调用，不再询问 |
 | `--sandbox` | 沙箱内执行 |
@@ -36,7 +36,15 @@
 
 ### `--stream-partial-output` 的去重
 
-开了增量之后，`assistant` 事件会以三类形态反复出现，其中**只有同时带 `timestamp_ms` 与 `model_call_id` 的那些才是新文本**，其余是同一段文本的重复投递。驱动按这两字段过滤即可，不要按 `content` 内容去重。
+开了增量之后，`assistant` 事件会以三类形态反复出现，按官方文档（`cursor.com/docs/cli/reference/output-format`）的表格区分：
+
+| `timestamp_ms` | `model_call_id` | 是什么 | 处理 |
+|---|---|---|---|
+| 有 | 无 | 流式增量，含新文本 | 取，追加 `message.content[].text` |
+| 有 | 有 | 工具调用前的缓冲 flush，与已收到的文本重复 | 跳过 |
+| 无 | 无 | 轮末的最终 flush，同样是重复 | 跳过 |
+
+即**只有带 `timestamp_ms` 且不带 `model_call_id` 的才是新文本**。驱动按这两个字段的有无过滤，不要按 `content` 内容去重，也不要用末尾 `result.result` 再补一遍文本（它等于全部增量拼接，会重复）。
 
 ## 会话
 
