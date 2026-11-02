@@ -87,6 +87,8 @@ pub struct AppState {
     pub url: String,
     /// Runs the description's install and upgrade commands, one job per plugin at a time.
     pub installer: Arc<crate::install::Installer>,
+    /// The person's terminals on this machine.
+    pub terminals: Arc<crate::terminal::Terminals>,
 }
 
 impl AppState {
@@ -204,6 +206,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/events", get(events))
         .route("/v1/shutdown", post(shutdown))
         .merge(crate::api_expertise::router())
+        .merge(crate::api_terminal::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
     // Routes for agents, authenticated with their per-session token.
     let me = Router::new()
@@ -283,7 +286,7 @@ impl IntoResponse for AppError {
     }
 }
 
-type ApiResult<T> = Result<T, AppError>;
+pub(crate) type ApiResult<T> = Result<T, AppError>;
 
 // ---------------------------------------------------------------------------------------
 // Auth

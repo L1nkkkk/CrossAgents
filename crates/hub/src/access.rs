@@ -43,7 +43,7 @@ pub fn required(method: &Method, pattern: &str) -> Level {
             // They run a program on this machine (docs/DESIGN.md §9.3).
             | ("POST", "/v1/plugins/{name}/install")
             | ("POST", "/v1/plugins/{name}/upgrade")
-    );
+    ) || is_terminal(pattern);
     if admin {
         Level::Admin
     } else if *method == Method::GET || reads_only(pattern) {
@@ -51,6 +51,12 @@ pub fn required(method: &Method, pattern: &str) -> Level {
     } else {
         Level::Write
     }
+}
+
+/// A terminal runs what is typed into it as this machine's user, and reading one shows whatever
+/// that printed, tokens included: every route, reading too, is admin.
+fn is_terminal(pattern: &str) -> bool {
+    pattern == "/v1/terminals" || pattern.starts_with("/v1/terminals/")
 }
 
 /// POSTs that only read: `files/resolve` answers which paths name something inside a
@@ -116,6 +122,25 @@ mod tests {
             required(&Method::GET, "/v1/runs/{key}/files/content"),
             Level::Read
         );
+    }
+
+    #[test]
+    fn every_terminal_route_is_admin_even_reading() {
+        for (method, pattern) in [
+            (Method::GET, "/v1/terminals"),
+            (Method::POST, "/v1/terminals"),
+            (Method::DELETE, "/v1/terminals/{id}"),
+            (Method::GET, "/v1/terminals/{id}/output"),
+            (Method::POST, "/v1/terminals/{id}/input"),
+            (Method::POST, "/v1/terminals/{id}/resize"),
+            (Method::POST, "/v1/terminals/{id}/takeover"),
+        ] {
+            assert_eq!(
+                required(&method, pattern),
+                Level::Admin,
+                "{method} {pattern}"
+            );
+        }
     }
 
     #[test]

@@ -4,6 +4,7 @@ pub mod access;
 pub mod accounts;
 pub mod api;
 pub mod api_expertise;
+pub mod api_terminal;
 pub mod attachments;
 pub mod avatars;
 pub mod budget;
@@ -24,6 +25,7 @@ pub mod runtime;
 pub mod shadow;
 pub mod shims;
 pub mod snapshot;
+pub mod terminal;
 pub mod trace;
 pub mod transcript;
 pub mod usage;
@@ -287,6 +289,8 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         budgets,
     })
     .start(shutdown.clone());
+    let terminals = terminal::Terminals::new(config.terminal_shell.clone(), config.terminal_idle);
+    terminals.start_reclaiming(shutdown.clone());
     let state = Arc::new(api::AppState {
         bus: bus.clone(),
         runtime: runtime.clone(),
@@ -303,6 +307,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         mcp_command: setup.mcp_command.clone(),
         url: format!("http://{addr}"),
         installer: Arc::new(install::Installer::new()),
+        terminals: terminals.clone(),
     });
     bus.publish(EventKind::HubStarted {
         version: VERSION.into(),
@@ -321,6 +326,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
                 .await;
             // Make sure SSE streams end even if serve failed.
             shutdown.cancel();
+            terminals.stop_all();
             if stop_agents.load(Ordering::SeqCst) {
                 runtime.stop_all().await;
             } else {

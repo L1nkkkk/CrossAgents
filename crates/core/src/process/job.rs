@@ -175,7 +175,7 @@ pub(super) use imp::resume;
 /// Kills process group `group` (SIGKILL); a group that is already gone is fine.
 #[cfg(unix)]
 #[allow(unsafe_code)]
-pub(super) fn kill_group(group: u32) {
+pub fn kill_group(group: u32) {
     // SAFETY: killpg only sends a signal; it touches no memory of ours.
     unsafe {
         libc::killpg(group as libc::pid_t, libc::SIGKILL);

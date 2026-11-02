@@ -10,6 +10,8 @@
 mod job;
 
 pub use job::Job;
+#[cfg(unix)]
+pub use job::kill_group;
 
 use std::io;
 
