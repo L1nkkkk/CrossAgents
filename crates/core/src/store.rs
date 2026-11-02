@@ -6,6 +6,9 @@ use crate::account::Account;
 use crate::claim::AgentClaim;
 use crate::error::CoreError;
 use crate::event::{Event, EventKind};
+use crate::expertise::{
+    Candidate, CandidateStatus, ExpertiseEntry, OwnerKind, UsageOutcome, UsageRecord,
+};
 use crate::human::HumanItem;
 use crate::ids::{AgentId, MessageId, RunId, TaskId};
 use crate::lesson::{IssueRef, Lesson, Project, TriageRecord, TriageStep};
@@ -338,6 +341,92 @@ pub trait Store: Send + Sync {
         let _ = (project, terms, superseded, limit);
         Ok(Vec::new())
     }
+    /// Inserts or replaces (by id) an expertise entry and its search entry.
+    async fn expertise_put(&self, entry: &ExpertiseEntry) -> Result<(), CoreError> {
+        let _ = entry;
+        Err(CoreError::Unsupported("expertise".into()))
+    }
+    async fn expertise_get(&self, id: &str) -> Result<ExpertiseEntry, CoreError> {
+        Err(CoreError::NotFound {
+            kind: "expertise entry",
+            id: id.to_owned(),
+        })
+    }
+    /// The owner's entries, newest first; only `domain`'s when given.
+    async fn expertise_list(
+        &self,
+        owner_kind: OwnerKind,
+        owner_id: &str,
+        domain: Option<&str>,
+    ) -> Result<Vec<ExpertiseEntry>, CoreError> {
+        let _ = (owner_kind, owner_id, domain);
+        Ok(Vec::new())
+    }
+    /// Entries of `owners` matching any of `terms`, best first (FTS5 `bm25`), at most `limit`.
+    /// Superseded entries are left out: they are history (`expertise_list` has them).
+    async fn expertise_search(
+        &self,
+        owners: &[(OwnerKind, String)],
+        terms: &[String],
+        limit: usize,
+    ) -> Result<Vec<ExpertiseEntry>, CoreError> {
+        let _ = (owners, terms, limit);
+        Ok(Vec::new())
+    }
+    /// Fails with [`CoreError::NotFound`] when there is no such entry; its usage records stay.
+    async fn expertise_delete(&self, id: &str) -> Result<(), CoreError> {
+        let _ = id;
+        Err(CoreError::Unsupported("expertise".into()))
+    }
+
+    /// Inserts or replaces (by id) a candidate.
+    async fn candidate_put(&self, candidate: &Candidate) -> Result<(), CoreError> {
+        let _ = candidate;
+        Err(CoreError::Unsupported("expertise candidates".into()))
+    }
+    /// Candidates, oldest first; only one owner's and/or one status' when given.
+    async fn candidate_list(
+        &self,
+        owner: Option<(OwnerKind, String)>,
+        status: Option<CandidateStatus>,
+    ) -> Result<Vec<Candidate>, CoreError> {
+        let _ = (owner, status);
+        Ok(Vec::new())
+    }
+    /// Fails with [`CoreError::NotFound`] when there is no such candidate.
+    async fn candidate_set_status(
+        &self,
+        id: &str,
+        status: CandidateStatus,
+    ) -> Result<(), CoreError> {
+        let _ = (id, status);
+        Err(CoreError::Unsupported("expertise candidates".into()))
+    }
+
+    /// Appends one usage record.
+    async fn usage_record(&self, usage: &UsageRecord) -> Result<(), CoreError> {
+        let _ = usage;
+        Err(CoreError::Unsupported("expertise usage".into()))
+    }
+    /// Sets the outcome on every usage record of `task` that has none yet; returns how many.
+    async fn usage_set_outcome(
+        &self,
+        task: TaskId,
+        outcome: UsageOutcome,
+    ) -> Result<usize, CoreError> {
+        let _ = (task, outcome);
+        Err(CoreError::Unsupported("expertise usage".into()))
+    }
+    /// Usage records of one entry and/or one task, oldest first.
+    async fn usage_list(
+        &self,
+        entry: Option<&str>,
+        task: Option<TaskId>,
+    ) -> Result<Vec<UsageRecord>, CoreError> {
+        let _ = (entry, task);
+        Ok(Vec::new())
+    }
+
     /// Inserts or replaces (by id) an item for the person.
     async fn put_human_item(&self, item: &HumanItem) -> Result<(), CoreError> {
         let _ = item;

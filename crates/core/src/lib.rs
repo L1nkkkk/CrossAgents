@@ -11,6 +11,7 @@ pub mod driver;
 pub mod error;
 pub mod event;
 pub mod exec;
+pub mod expertise;
 pub mod handoff;
 pub mod human;
 pub mod ids;
@@ -43,6 +44,11 @@ pub use driver::{
 pub use error::CoreError;
 pub use event::{
     DiffSource, EVENT_SCHEMA_VERSION, Envelope, Event, EventKind, EventSink, MessageSource,
+};
+pub use expertise::{
+    Candidate, CandidateOrigin, CandidateStatus, EntryKind, EntryStats, EntryStatus, Example,
+    ExpertiseEntry, OwnerKind, PERSON_OWNER_ID, SourceRef, UsageOutcome, UsageRecord, UsageSource,
+    estimate_tokens,
 };
 pub use handoff::{Handoff, HandoffKind, HandoffOutcome};
 pub use human::{HumanAction, HumanItem, HumanItemKind, HumanItemStatus};
