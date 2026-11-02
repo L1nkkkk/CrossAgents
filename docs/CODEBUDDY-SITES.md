@@ -31,6 +31,8 @@ CLI 启动的 shell 工具也会看到这个独立资料目录，原用户目录
 
 本机安装的 CodeBuddy 2.178.1，使用两个全新的临时资料目录并发执行真实 `initialize`：两个子进程的用户目录均正确隔离，均返回未登录，国内站返回 17 个模型条目，国际站返回 21 个。此结果证明没有借用当前机器的登录，并证明两个站点的模型列表可以分别读取；模型条目不等于账号已获使用权限。
 
-自动测试覆盖两站点的登录/探测/agent 环境一致、父进程身份覆盖、站点对应的网络探测主机、账号站点持久化，以及禁止导入默认登录或复用目录。未替用户完成两次真实扫码授权，也未进行付费模型调用。
+自动测试覆盖两站点的登录/探测/agent 环境一致、父进程身份覆盖、站点对应的网络探测主机、账号站点持久化，以及禁止导入默认登录或复用目录。上述隔离验证未替用户完成两次真实扫码授权，也未进行付费模型调用。
+
+2026-11-02 补充真实请求回归：使用已登录的国际站独立账号与 `deepseek-v4.1-flash`，经修复后的 CrossAgents 驱动启动会话，在传入空认证覆盖标记的情况下成功收到 `PONG`。该测试实际调用模型、会消耗少量额度，默认忽略；显式设置 `CROSSAGENTS_SMOKE_CODEBUDDY_HOME`、`CROSSAGENTS_SMOKE_CODEBUDDY` 和 `CROSSAGENTS_SMOKE_MODEL` 后，运行 `cargo test -p crossagents-drivers --test codebuddy_smoke smoke_international_profile_with_empty_auth_overrides -- --ignored --exact`。
 
 官方参考：[CLI 安装与配置目录](https://www.codebuddy.cn/docs/cli/installation)、[登录方式](https://www.codebuddy.ai/docs/cli/quickstart)。配置目录与凭据位置的区别依据本机 CLI 实现核对，不能仅从配置目录文档推断。

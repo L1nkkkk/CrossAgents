@@ -11,7 +11,7 @@
 //! Explicit site accounts additionally move the child process's user-data profile, so
 //! mainland and international credentials cannot overwrite the machine's shared login.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -598,6 +598,8 @@ impl AccountProvider for CodebuddyAccounts {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use serde_json::json;
 
