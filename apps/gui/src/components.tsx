@@ -588,6 +588,13 @@ export function ModelMark({ plugin, model, size = 13 }: { plugin: string; model?
   );
 }
 
+/** A family's mark where the family itself is known (a settings group head); a ring when it has none. */
+export function FamilyMark({ familyKey, size = 14 }: { familyKey: string; size?: number }) {
+  const icon = MODEL_ICONS[familyKey];
+  if (icon) return <BrandImage icon={icon} size={size} className="family-mark" />;
+  return <VendorMark plugin="" size={size} />;
+}
+
 /** Who runs an agent: the vendor's mark, then the model (or the vendor's name). */
 export function Vendor({ plugin, model, title }: { plugin: string; model?: string | null; title?: string }) {
   return (

@@ -8,7 +8,7 @@ import type { HubInfo } from "@bindings/HubInfo";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import { api, errorText } from "../api";
 import { navigate } from "../App";
-import { ErrorBox, Icon, VendorMark, type IconName } from "../components";
+import { ErrorBox, FamilyMark, Icon, VendorMark, type IconName } from "../components";
 import { useConnectionStatus, useHubData } from "../hub";
 import { buildTag } from "../lib/build";
 import { useUpdateState } from "../lib/updates";
@@ -301,6 +301,7 @@ function VendorModels({ plugin, query, onSaved }: { plugin: PluginInfo; query: s
                 <div className="model-family-head">
                   <button className="model-family-name" aria-expanded={!folded} onClick={flip} disabled={!!query}>
                     <Icon name={folded ? "chevronRight" : "chevron"} size={14} />
+                    <FamilyMark familyKey={f.key} size={14} />
                     <span className="setting-label">{f.label}</span>
                     <span className={`chip small ${count ? "" : "muted"}`}>
                       {count} / {f.models.length}
