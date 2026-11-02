@@ -16,6 +16,7 @@ import { RunView } from "./views/Run";
 import { SessionView } from "./views/Session";
 import { SettingsView } from "./views/Settings";
 import { UsageView } from "./views/Usage";
+import { ExpertiseView } from "./views/Expertise";
 import { WorkspaceView } from "./views/Workspace";
 
 /** `#/runs/<id>` → `["runs", "<id>"]`. */
@@ -215,6 +216,9 @@ export function App() {
       break;
     case "usage":
       main = <UsageView />;
+      break;
+    case "expertise":
+      main = <ExpertiseView />;
       break;
     case "settings":
       main = <SettingsView page={a} />;
