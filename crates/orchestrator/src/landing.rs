@@ -624,11 +624,20 @@ impl Orchestrator {
         let run = self.finish(run.id, Some(a.summary), a.cancel_open).await?;
         // Sorting is its own state: it never holds up the end, it is only counted.
         let unsorted = self.unsorted_issues(run.id).await;
+        // So do the expertise candidates waiting for the person (EXPERTISE §6.4).
+        let pending_expertise = match self.project_for(&run.repo).await {
+            Ok(project) => self.pending_candidates(&project.id).await.unwrap_or(0),
+            Err(err) => {
+                tracing::warn!(run = %run.id, error = %err, "cannot count expertise candidates");
+                0
+            }
+        };
         Ok(json!({
             "status": run.status,
             "landed": run.landed,
             "checks": brief::verification(&run),
             "unsorted_issues": unsorted,
+            "pending_expertise": pending_expertise,
         }))
     }
 
