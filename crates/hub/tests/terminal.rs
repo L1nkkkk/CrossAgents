@@ -299,6 +299,37 @@ async fn a_batch_sent_twice_is_typed_once() {
 }
 
 #[tokio::test]
+async fn ctrl_c_stops_what_is_running_and_not_the_shell() {
+    let hub = TestHub::start(LONG).await;
+    let term = hub.create().await;
+    let mut out = hub.read(&term.id, "win-1").await;
+    let forever = if cfg!(windows) {
+        "ping -t 127.0.0.1"
+    } else {
+        "while :; do echo TTL=; sleep 1; done"
+    };
+    assert_eq!(
+        hub.type_line(&term.id, "win-1", 1, forever).await,
+        StatusCode::OK
+    );
+    out.until("TTL=").await;
+    let stop = hub
+        .post(&format!("/v1/terminals/{}/input", term.id))
+        .json(&json!({ "connection": "win-1", "seq": 2, "data": "\u{3}" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stop.status(), StatusCode::OK);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        hub.type_line(&term.id, "win-1", 3, "echo still-here-marker")
+            .await,
+        StatusCode::OK
+    );
+    out.until("still-here-marker\r\n").await;
+}
+
+#[tokio::test]
 async fn a_shell_that_exits_keeps_its_output_and_code() {
     let hub = TestHub::start(LONG).await;
     let term = hub.create().await;

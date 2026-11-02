@@ -10,6 +10,7 @@ import { expertiseScene } from "../views/Expertise.mock";
 import { agent, ago, capabilitiesOf, NOTES_REPO, REPO, say, team, think, turn } from "./fixtures";
 import { openFile } from "../FileViewer";
 import { openTool } from "../panes";
+import { newTerminal } from "../terminal";
 import type { AccountQuota } from "@bindings/AccountQuota";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import { wsKey } from "../workspace";
@@ -149,6 +150,7 @@ export const SCENARIOS: Scenario[] = [
   { key: "delete-unlanded", label: "删除未落地的 run", hint: "未落地：分支默认不勾，写明「未落地的改动会丢失」", build: () => deleteRun("unlanded") },
   { key: "delete-dirty", label: "删除时工作区有改动", hint: "点「删除」后 hub 返回 409 并列出没提交的文件，可以「仍然删除」", build: () => deleteRun("dirty") },
   { key: "files", label: "文件链接与查看器", hint: "回复里的路径（确认存在的才成链接）可点开只读查看器：左侧懒加载目录树，右侧行号、高亮、跳到第 12 行", build: () => filesScene() },
+  { key: "terminal", label: "内置终端", hint: "对话下方的终端标签：回显输入；标签可拖到右侧，Ctrl+` 收起和打开，输入 exit 看退出后的样子", build: () => ({ ...filesScene(), script: [{ at: 600, act: () => void newTerminal() }] }) },
   { key: "files-pane", label: "文件面板", hint: "工具列的「文件」：目录树，点开 docs/cli.md 是渲染后的 Markdown，可切回源码；文档里的相对链接在面板里打开", build: () => filesPaneScene() },
   { key: "solo", label: "单聊", hint: "Claude 会话：折叠的工具步骤、一轮进行中、两条排队", build: () => soloSession() },
   { key: "ctx-menu", label: "上下文菜单（20%）", hint: "点顶栏（或右侧栏「上下文」）的用量：明细和「压缩上下文」，不必等到 50%", build: () => contextUsageScene() },

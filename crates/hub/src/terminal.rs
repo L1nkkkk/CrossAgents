@@ -503,6 +503,7 @@ fn spawn(
     builder.env("TERM", "xterm-256color");
     builder.env("COLORTERM", "truecolor");
 
+    crossagents_core::process::children_stop_on_ctrl_c();
     let mut child = pair.slave.spawn_command(builder)?;
     // The shell holds the only slave that should stay open: end-of-file then means it went.
     drop(pair.slave);

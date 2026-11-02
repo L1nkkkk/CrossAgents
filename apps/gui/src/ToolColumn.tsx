@@ -17,9 +17,10 @@ import { FilesPane } from "./FileViewer";
 import type { HubEvent } from "./hub";
 import { parseDiff } from "./lib/diff";
 import { clock, full } from "./lib/time";
-import { clearTarget, closeBottom, paneLabel, useLayout, type PaneKind, type Target } from "./panes";
+import { clearTarget, closeBottom, isTermTab, paneLabel, useLayout, type PaneKind, type TabId, type Target } from "./panes";
 import { shownTab, type Dock, type DockId } from "./lib/docks";
 import { TabRow } from "./tabs";
+import { TerminalBody, useTabShows } from "./terminal";
 import { useWidths } from "./lib/widths";
 import { useSession, type TranscriptTurn } from "./session";
 import { useSidebar } from "./titlebar";
@@ -45,14 +46,17 @@ export function ToolColumn({ dock, follow, task, run, onClose, onCloseTask }: { 
   const narrow = useToolsFloat();
   const { right, bottom } = state.docks;
   // Floating, there is one row: the bottom dock's tabs follow the right dock's.
-  const shown: Dock<PaneKind> = narrow ? { tabs: [...right.tabs, ...bottom.tabs], active: floatTab ?? right.active, open: true } : state.docks[dock];
+  const all: Dock<TabId> = narrow ? { tabs: [...right.tabs, ...bottom.tabs], active: floatTab ?? right.active, open: true } : state.docks[dock];
+  // Another project's terminals keep their place in the row, out of sight.
+  const shows = useTabShows();
+  const shown = { ...all, tabs: all.tabs.filter(shows) };
   const kind = shownTab(shown);
   return (
     <div className={`tool-column ${narrow ? "narrow" : ""}`} data-tabdock={dock}>
-      <section className="tool-pane" aria-label={kind ? paneLabel(kind) : undefined}>
+      <section className="tool-pane" aria-label={kind && !isTermTab(kind) ? paneLabel(kind) : undefined}>
         <header className="tool-head">
           <TabRow dock={dock} tabs={shown.tabs} active={kind} narrow={narrow} onCloseTask={task ? onCloseTask : undefined} />
-          {kind && <FollowButton kind={kind} follow={follow} target={target} />}
+          {kind && !isTermTab(kind) && <FollowButton kind={kind} follow={follow} target={target} />}
           {dock === "right" ? (
             <button className="ghost icon" onClick={onClose} title="收起工具列" aria-label="收起工具列">
               <Icon name="panel" size={15} />
@@ -63,7 +67,7 @@ export function ToolColumn({ dock, follow, task, run, onClose, onCloseTask }: { 
             </button>
           )}
         </header>
-        {kind && <PaneBody kind={kind} follow={follow} target={target} routeTask={task} routeRun={run} />}
+        {kind && (isTermTab(kind) ? <TerminalBody tab={kind} dock={dock} /> : <PaneBody kind={kind} follow={follow} target={target} routeTask={task} routeRun={run} />)}
       </section>
     </div>
   );

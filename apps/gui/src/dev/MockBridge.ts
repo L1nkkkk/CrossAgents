@@ -151,6 +151,9 @@ const notFound = (what: string) => json(404, { error: { code: "not_found", messa
 /** `{scope}/files/{tree|content|resolve}`; every scope answers from the same mock workspace. */
 const FILES_ROUTE = /^\/v1\/(?:agents\/[^/]+|runs\/[^/]+(?:\/tasks\/[^/]+)?)\/files\/(tree|content|resolve)$/;
 
+/** Text as a frame's base64. */
+const encode = (text: string) => btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+
 export class MockBridge implements CrossAgentsBridge {
   private seq = 1000;
   private avatars = new Map<string, string>();
@@ -256,6 +259,106 @@ export class MockBridge implements CrossAgentsBridge {
     // No window frame to follow in a browser.
   }
 
+  // ---- Terminals: an echo, with the hub's frames ------------------------------------------
+
+  private terminals = new Map<string, { info: Record<string, unknown>; log: string; line: string; connection?: string; relayed: boolean }>();
+  private terminalListeners = new Set<(id: string, data: string) => void>();
+
+  private terminalFrame(id: string, frame: unknown) {
+    for (const listener of this.terminalListeners) listener(id, JSON.stringify(frame));
+  }
+
+  private terminalPrint(id: string, text: string) {
+    const term = this.terminals.get(id);
+    if (!term) return;
+    term.log += text;
+    if (term.relayed) this.terminalFrame(id, { type: "output", data: encode(text) });
+  }
+
+  onTerminal(listener: (id: string, data: string) => void) {
+    this.terminalListeners.add(listener);
+    return () => {
+      this.terminalListeners.delete(listener);
+    };
+  }
+
+  terminalStart(id: string, connection: string) {
+    const term = this.terminals.get(id);
+    if (!term) return this.terminalFrame(id, { type: "gone" });
+    term.relayed = true;
+    term.connection = connection;
+    setTimeout(() => {
+      this.terminalFrame(id, { type: "snapshot", data: encode(term.log), cols: term.info.cols, rows: term.info.rows });
+      this.terminalFrame(id, { type: "writer", connection });
+    }, 30);
+  }
+
+  terminalStop(id: string) {
+    const term = this.terminals.get(id);
+    if (term) term.relayed = false;
+  }
+
+  /** Undefined: not a terminal route. */
+  private terminalRoute(method: string, p: string, body: unknown): HubResponse | undefined {
+    if (p === "/v1/terminals" && method === "GET") return json(200, { terminals: [...this.terminals.values()].map((t) => t.info) });
+    if (p === "/v1/terminals" && method === "POST") {
+      const req = body as { cwd: string; project?: string; cols: number; rows: number };
+      const id = crypto.randomUUID();
+      const info = { id, project: req.project ?? null, cwd: req.cwd, shell: "mock", cols: req.cols, rows: req.rows, created_at: new Date().toISOString(), exited: false, exit_code: null, connections: 0, node: null };
+      const prompt = `${req.cwd}> `;
+      this.terminals.set(id, { info, log: `\x1b[2mmock 终端：只回显，不执行。输入 exit 退出。\x1b[m\r\n${prompt}`, line: "", relayed: false });
+      return json(201, info);
+    }
+    const m = /^\/v1\/terminals\/([^/]+)(?:\/(input|resize|takeover))?$/.exec(p);
+    if (!m) return undefined;
+    const [, id, action] = m;
+    const term = this.terminals.get(id);
+    if (!term) return json(404, { error: { code: "not_found", message: "no such terminal" } });
+    if (method === "DELETE" && !action) {
+      this.terminals.delete(id);
+      return { status: 204, body: "" };
+    }
+    if (action === "resize") {
+      const { cols, rows } = body as { cols: number; rows: number };
+      term.info = { ...term.info, cols, rows };
+      return { status: 204, body: "" };
+    }
+    if (action === "takeover") {
+      term.connection = (body as { connection: string }).connection;
+      this.terminalFrame(id, { type: "writer", connection: term.connection });
+      return { status: 204, body: "" };
+    }
+    if (action === "input") {
+      const { data, seq } = body as { data: string; seq: number };
+      for (const c of data) this.terminalKey(id, c);
+      return json(200, { acked: seq });
+    }
+    return undefined;
+  }
+
+  private terminalKey(id: string, c: string) {
+    const term = this.terminals.get(id)!;
+    const prompt = `${term.info.cwd}> `;
+    if (c === "\r") {
+      const line = term.line;
+      term.line = "";
+      if (line.trim() === "exit") {
+        term.info = { ...term.info, exited: true, exit_code: 0 };
+        this.terminalPrint(id, "\r\n");
+        return this.terminalFrame(id, { type: "exit", code: 0 });
+      }
+      this.terminalPrint(id, `\r\n${line ? `echo: ${line}\r\n` : ""}${prompt}`);
+    } else if (c === "\x7f") {
+      if (term.line) {
+        term.line = term.line.slice(0, -1);
+        this.terminalPrint(id, "\b \b");
+      }
+    } else if (c >= " ") {
+      term.line += c;
+      this.terminalPrint(id, c);
+    }
+  }
+
   // ---- Events ---------------------------------------------------------------------------
 
   private status(s: string) {
@@ -353,6 +456,8 @@ export class MockBridge implements CrossAgentsBridge {
     const p = url.pathname;
     let m: RegExpMatchArray | null;
 
+    const terminal = this.terminalRoute(method, p, body);
+    if (terminal) return terminal;
     if (p === "/v1/avatars" && method === "GET") return json(200, { avatars: [...this.avatars.keys()] });
     if (p === "/v1/avatars" && method === "POST") {
       const added: string[] = [];

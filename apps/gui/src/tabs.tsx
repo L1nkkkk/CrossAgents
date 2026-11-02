@@ -6,12 +6,13 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from "react";
 import { Icon } from "./components";
 import { dropTarget, type DockId, type Drop, type Rect, type Strip } from "./lib/docks";
-import { closedKinds, dropTab, openTool, paneLabel, pickTab, shutTab, useLayout, type PaneKind } from "./panes";
+import { closedKinds, dropTab, isTermTab, openTool, paneLabel, pickTab, shutTab, useLayout, type TabId } from "./panes";
+import { closeTerminal, newTerminal, terminalsAvailable, useTabLabel, useTerminalScope } from "./terminal";
 
 /** Pixels a pointer moves before a press on a tab becomes a drag. */
 const DRAG_FROM = 5;
 
-type Drag = { tab: PaneKind; x: number; y: number; drop: Drop | null };
+type Drag = { tab: TabId; x: number; y: number; drop: Drop | null };
 let drag: Drag | null = null;
 const listeners = new Set<() => void>();
 const setDrag = (next: Drag | null) => {
@@ -34,7 +35,7 @@ const rectOf = (el: Element | null): Rect | null => {
 };
 
 /** What is on screen now, for `dropTarget`. */
-function measure(x: number, y: number, tab: PaneKind): Drop | null {
+function measure(x: number, y: number, tab: TabId): Drop | null {
   const center = rectOf(document.querySelector(".center-col > .main"));
   if (!center) return null;
   const strips: Strip[] = [...document.querySelectorAll<HTMLElement>("[data-tabstrip]")].map((el) => ({
@@ -49,7 +50,7 @@ function measure(x: number, y: number, tab: PaneKind): Drop | null {
 }
 
 /** Press on a tab: past DRAG_FROM it is a drag, and letting go drops it; Escape calls it off. */
-function startDrag(e: ReactPointerEvent, tab: PaneKind, onDragged: () => void) {
+function startDrag(e: ReactPointerEvent, tab: TabId, onDragged: () => void) {
   if (e.button !== 0) return;
   const x0 = e.clientX;
   const y0 = e.clientY;
@@ -87,11 +88,19 @@ function startDrag(e: ReactPointerEvent, tab: PaneKind, onDragged: () => void) {
   window.addEventListener("keydown", key, true);
 }
 
-export function TabRow({ dock, tabs, active, narrow, onCloseTask }: { dock: DockId; tabs: PaneKind[]; active: PaneKind | null; narrow: boolean; onCloseTask?: () => void }) {
+/** What a tab is called. */
+function useLabel() {
+  const termLabel = useTabLabel();
+  return (tab: TabId) => (isTermTab(tab) ? termLabel(tab) : paneLabel(tab));
+}
+
+export function TabRow({ dock, tabs, active, narrow, onCloseTask }: { dock: DockId; tabs: TabId[]; active: TabId | null; narrow: boolean; onCloseTask?: () => void }) {
   const dragging = useDrag();
+  const label = useLabel();
   // A drag ends in a click on whatever it let go over: that click is not a pick.
   const dragged = useRef(false);
-  const shut = (tab: PaneKind) => {
+  const shut = (tab: TabId) => {
+    if (isTermTab(tab)) return closeTerminal(tab);
     shutTab(tab);
     if (tab === "task") onCloseTask?.();
   };
@@ -119,9 +128,10 @@ export function TabRow({ dock, tabs, active, narrow, onCloseTask }: { dock: Dock
               if (!dragged.current) pickTab(dock, tab);
             }}
           >
-            {paneLabel(tab)}
+            {isTermTab(tab) && <Icon name="terminal" size={13} />}
+            {label(tab)}
           </button>
-          <button type="button" className="dock-tab-x" onClick={() => shut(tab)} title={`关闭${paneLabel(tab)}`} aria-label={`关闭${paneLabel(tab)}`}>
+          <button type="button" className="dock-tab-x" onClick={() => shut(tab)} title={`关闭${label(tab)}`} aria-label={`关闭${label(tab)}`}>
             <Icon name="close" size={12} />
           </button>
         </div>
@@ -131,19 +141,21 @@ export function TabRow({ dock, tabs, active, narrow, onCloseTask }: { dock: Dock
   );
 }
 
-/** + : what has no tab now. */
+/** + : a new terminal, and what has no tab now. */
 function AddTab({ dock }: { dock: DockId }) {
   const { state } = useLayout();
   const [at, setAt] = useState<{ left: number; top: number } | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const closed = closedKinds(state.docks);
+  const canTerminal = terminalsAvailable() && !!useTerminalScope();
   useEffect(() => {
     if (!at) return;
     const close = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setAt(null);
     window.addEventListener("mousedown", close);
     return () => window.removeEventListener("mousedown", close);
   }, [at]);
-  if (!closed.length) return null;
+  if (!closed.length && !canTerminal) return null;
+  const rows = closed.length + (canTerminal ? 1 : 0);
   return (
     <div className="dock-add" ref={ref}>
       <button
@@ -157,13 +169,31 @@ function AddTab({ dock }: { dock: DockId }) {
           if (at) return setAt(null);
           // The row scrolls sideways, which would clip a menu inside it.
           const box = e.currentTarget.getBoundingClientRect();
-          setAt({ left: Math.min(box.left, window.innerWidth - 160), top: dock === "bottom" ? box.top - 8 - 38 * closed.length : box.bottom + 4 });
+          setAt({ left: Math.min(box.left, window.innerWidth - 160), top: dock === "bottom" ? box.top - 8 - 36 * rows : box.bottom + 4 });
         }}
       >
         <Icon name="plus" size={15} />
       </button>
       {at && (
         <div className="menu" role="menu" style={{ left: at.left, top: at.top, right: "auto", bottom: "auto" }}>
+          {canTerminal && (
+            <button
+              type="button"
+              role="menuitem"
+              className="menu-item"
+              onClick={() => {
+                setAt(null);
+                void newTerminal(dock);
+              }}
+            >
+              <span className="menu-icon">
+                <Icon name="terminal" size={14} />
+              </span>
+              <span className="menu-text">
+                <span className="menu-label">新建终端</span>
+              </span>
+            </button>
+          )}
           {closed.map((p) => (
             <button
               type="button"
@@ -191,6 +221,7 @@ function AddTab({ dock }: { dock: DockId }) {
 /** While a tab is dragged: where it would land, and the tab under the pointer. */
 export function TabDragLayer() {
   const d = useDrag();
+  const label = useLabel();
   if (!d) return null;
   const zone = d.drop?.zone;
   return (
@@ -198,7 +229,7 @@ export function TabDragLayer() {
       {zone && d.drop?.marker === undefined && <div className="drop-zone" style={{ left: zone.left, top: zone.top, width: zone.right - zone.left, height: zone.bottom - zone.top }} />}
       {zone && d.drop?.marker !== undefined && <div className="drop-marker" style={{ left: d.drop.marker - 1, top: zone.top + 6, height: zone.bottom - zone.top - 12 }} />}
       <div className="tab-ghost" style={{ left: d.x, top: d.y }}>
-        {paneLabel(d.tab)}
+        {label(d.tab)}
       </div>
     </>
   );

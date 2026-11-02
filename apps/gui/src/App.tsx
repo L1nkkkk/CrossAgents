@@ -3,9 +3,11 @@ import type { Agent } from "@bindings/Agent";
 import type { RunDetail } from "@bindings/RunDetail";
 import { api, getBridge } from "./api";
 import { useHubData, useVersionMismatch, type VersionMismatch } from "./hub";
-import { closeBeside, closeTools, focusSession, focusedOf, openTool, routeTool, setRatio, useLayout, usePanes } from "./panes";
+import { closeBeside, closeTools, focusSession, focusedOf, isTermTab, openTool, routeTool, setRatio, useLayout, usePanes } from "./panes";
+import { shownTab } from "./lib/docks";
 import { FileViewerHost } from "./FileViewer";
 import { TabDragLayer } from "./tabs";
+import { TerminalHydrate, TerminalProblem, TerminalScope, toggleTerminal, useTabShows } from "./terminal";
 import { startNew } from "./menubar";
 import { toggleRail } from "./rail";
 import { Sidebar } from "./Sidebar";
@@ -156,12 +158,22 @@ export function App() {
   const where = window.location.hash;
   useEffect(closeSidebarPeek, [where]);
 
+  const shows = useTabShows();
+  const docks = state.docks;
+  const bottomShows = docks.bottom.open && docks.bottom.tabs.some(shows);
+  const bottomTab = shownTab({ ...docks.bottom, tabs: docks.bottom.tabs.filter(shows) });
+  const terminalKey = useRef(() => {});
+  terminalKey.current = () => toggleTerminal(bottomTab && isTermTab(bottomTab) ? bottomTab : null, bottomShows);
+
   // Ctrl+N (Cmd+N): new, as the sidebar advertises; Ctrl+B: the sidebar; Ctrl+I: the info rail;
-  // Alt+←/→: history.
+  // Ctrl+`: the terminal; Alt+←/→: history.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey;
-      if (mod && e.key.toLowerCase() === "n") {
+      if (mod && e.key === "`") {
+        e.preventDefault();
+        terminalKey.current();
+      } else if (mod && e.key.toLowerCase() === "n") {
         e.preventDefault();
         startNew("chat");
       } else if (mod && e.key === ",") {
@@ -233,11 +245,11 @@ export function App() {
       main = <HomeView />;
   }
 
-  const { right, bottom } = state.docks;
+  const { right, bottom } = docks;
   // The route's task opens the right dock while the route lasts, unless its tab went below.
   const taskOnRight = !!routeTask && right.tabs.includes("task");
-  const drawer = !!tools && (floatTools ? right.open || peek || taskOnRight : (right.open || taskOnRight) && right.tabs.length > 0);
-  const below = !!tools && !floatTools && bottom.open && bottom.tabs.length > 0;
+  const drawer = !!tools && (floatTools ? right.open || peek || taskOnRight : (right.open || taskOnRight) && right.tabs.some(shows));
+  const below = !!tools && !floatTools && bottom.open && bottom.tabs.some(shows);
   const app = (
     <div
       className={`app ${drawer ? (floatTools ? "drawer-float" : "with-drawer") : ""} ${sidebar.docked ? "" : "no-sidebar"}`}
@@ -298,6 +310,9 @@ export function App() {
       )}
       <FileViewerHost />
       <TabDragLayer />
+      <TerminalHydrate />
+      {tools && <TerminalScope follow={tools.follow} run={tools.run} />}
+      <TerminalProblem />
     </div>
   );
   if (!inDesktop) return app;

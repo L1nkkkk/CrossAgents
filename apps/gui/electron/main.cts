@@ -330,6 +330,83 @@ async function streamOnce(emit: (channel: string, value: string) => void, last: 
   }
 }
 
+/** Terminal output being relayed, per window and terminal. */
+const terminalRelays = new Map<number, Map<string, AbortController>>();
+const TERMINAL_ID = /^[0-9a-f-]{36}$/;
+
+ipcMain.on("terminal:start", (event, id: unknown, reader: unknown) => {
+  if (!fromApp(event) || typeof id !== "string" || !TERMINAL_ID.test(id)) return;
+  if (typeof reader !== "string" || !TERMINAL_ID.test(reader)) return;
+  const contents = event.sender;
+  let mine = terminalRelays.get(contents.id);
+  if (!mine) {
+    const relaying = new Map<string, AbortController>();
+    mine = relaying;
+    terminalRelays.set(contents.id, relaying);
+    contents.once("destroyed", () => {
+      for (const controller of relaying.values()) controller.abort();
+      terminalRelays.delete(contents.id);
+    });
+  }
+  mine.get(id)?.abort();
+  const controller = new AbortController();
+  mine.set(id, controller);
+  void relayTerminal(contents, id, reader, controller.signal);
+});
+
+ipcMain.on("terminal:stop", (event, id: unknown) => {
+  if (!fromApp(event) || typeof id !== "string") return;
+  const mine = terminalRelays.get(event.sender.id);
+  mine?.get(id)?.abort();
+  mine?.delete(id);
+});
+
+/** Until the shell finishes or the hub no longer has it: a dropped stream only reconnects. */
+async function relayTerminal(contents: WebContents, id: string, reader: string, signal: AbortSignal) {
+  const emit = (data: string) => {
+    if (!signal.aborted && !contents.isDestroyed()) contents.send("terminal:frame", id, data);
+  };
+  while (!signal.aborted) {
+    await localHub?.ready();
+    try {
+      if (await terminalStreamOnce(id, reader, emit, signal)) return;
+    } catch {
+      // Below: said the same way as a stream that simply ended.
+    }
+    if (signal.aborted) return;
+    emit(JSON.stringify({ type: "reconnecting" }));
+    localHub?.recheck();
+    await new Promise((r) => setTimeout(r, RECONNECT_MS));
+  }
+}
+
+/** Whether there is nothing more to come: the shell finished, or the hub no longer has it. */
+async function terminalStreamOnce(id: string, reader: string, emit: (data: string) => void, signal: AbortSignal): Promise<boolean> {
+  const { base, token } = await connection();
+  const headers = { authorization: `Bearer ${token}`, accept: "text/event-stream" };
+  const url = `${base}/v1/terminals/${encodeURIComponent(id)}/output?connection=${encodeURIComponent(reader)}`;
+  const response = await fetch(url, { headers, signal });
+  if (response.status === 404) {
+    emit(JSON.stringify({ type: "gone" }));
+    return true;
+  }
+  if (!response.ok || !response.body) throw new Error(`hub answered ${response.status}`);
+  const decoder = new TextDecoder();
+  let buf = "";
+  for await (const chunk of response.body) {
+    buf += decoder.decode(chunk, { stream: true }).replace(/\r/g, "");
+    let end;
+    while ((end = buf.indexOf("\n\n")) >= 0) {
+      const { data } = parseSse(buf.slice(0, end));
+      buf = buf.slice(end + 2);
+      if (data === undefined) continue;
+      emit(data);
+      if ((JSON.parse(data) as { type?: string }).type === "exit") return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Parses one SSE block. Comments (keep-alives) and the `event:` field are ignored: the
  * event type is also inside the JSON data.

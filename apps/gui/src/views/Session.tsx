@@ -30,7 +30,9 @@ import { ModelEffortPicks } from "../modelPick";
 import { InfoRail, RAIL_ROOM, SIDE_ROOM, useRail } from "../rail";
 import { ScrollThumb } from "../scrollthumb";
 import { TurnMap, type MapEntry } from "../turnmap";
-import { focusSession, openTool, toggleBottom, toggleTools, useLayout } from "../panes";
+import { focusSession, isTermTab, openTool, toggleTools, useLayout } from "../panes";
+import { shownTab } from "../lib/docks";
+import { terminalsAvailable, toggleTerminal, useTabShows } from "../terminal";
 import { useWidths } from "../lib/widths";
 import { useSidebar } from "../titlebar";
 import { taskState } from "../lib/taskState";
@@ -1220,12 +1222,15 @@ function ToolsToggle() {
   const { right, bottom } = state.docks;
   const { docked } = useSidebar();
   const float = useWidths(docked).float;
+  const shows = useTabShows();
+  const bottomShows = !float && bottom.open && bottom.tabs.some(shows);
+  const below = shownTab({ ...bottom, tabs: bottom.tabs.filter(shows) });
   return (
     <>
-      {/* Folded docks only. Open, a dock's own header has the button that folds it away: one place, like Codex. */}
-      {!float && !bottom.open && bottom.tabs.length > 0 && (
-        <button className="ghost icon flip-y" onClick={toggleBottom} title="下方面板" aria-label="下方面板">
-          <Icon name="chevron" size={16} />
+      {/* Only what is folded. Open, a dock's own header has the button that folds it away: one place, like Codex. */}
+      {terminalsAvailable() && !bottomShows && (
+        <button className="ghost icon" onClick={() => toggleTerminal(below && isTermTab(below) ? below : null, bottomShows)} title="终端（Ctrl+`）" aria-label="终端">
+          <Icon name="terminal" size={16} />
         </button>
       )}
       {!(right.open || (float && peek)) && (

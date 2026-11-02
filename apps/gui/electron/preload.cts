@@ -23,6 +23,15 @@ const bridge: CrossAgentsBridge = {
   startEvents: () => ipcRenderer.send("hub:events-start"),
   onEvent: (listener) => subscribe("hub:event", listener),
   onStatus: (listener) => subscribe("hub:status", listener),
+  terminalStart: (id, connection) => ipcRenderer.send("terminal:start", id, connection),
+  terminalStop: (id) => ipcRenderer.send("terminal:stop", id),
+  onTerminal(listener) {
+    const wrapped = (_event: IpcRendererEvent, id: string, data: string) => listener(id, data);
+    ipcRenderer.on("terminal:frame", wrapped);
+    return () => {
+      ipcRenderer.removeListener("terminal:frame", wrapped);
+    };
+  },
   devHub: () => ipcRenderer.invoke("hub:dev"),
   async useShippedHub() {
     const error: string | null = await ipcRenderer.invoke("hub:use-shipped");

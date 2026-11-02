@@ -7,7 +7,8 @@
 //   run's branches on a run page, else the conversation's checkout). Which dock holds what is
 //   the same everywhere; what a tab shows follows the focused conversation: the routed one, or
 //   the one beside it once it was clicked last. Something opened on purpose (a turn's "查看变更",
-//   a task card's turn) is `target` until the focus moves to another conversation.
+//   a task card's turn) is `target` until the focus moves to another conversation. Terminals
+//   (terminal.tsx) are tabs too, with their own project instead.
 //
 // 事件流 (raw hub events) is for debugging, so only a development page or the mock preview offers
 // it, and a saved layout that still names it loses just that tab.
@@ -16,6 +17,12 @@ import { useSyncExternalStore } from "react";
 import { closeTab, dockOf, moveTab, restoreDocks, showTab, type DockId, type Docks } from "./lib/docks";
 
 export type PaneKind = "changes" | "files" | "task" | "events" | "graph";
+/** A terminal's tab, by its id in the hub. */
+export type TermTab = `term:${string}`;
+export type TabId = PaneKind | TermTab;
+export const isTermTab = (tab: TabId): tab is TermTab => tab.startsWith("term:");
+export const termTab = (id: string): TermTab => `term:${id}`;
+export type DockTarget = DockId;
 const LABELS: Record<PaneKind, string> = { changes: "改动", files: "文件", task: "任务", events: "事件流", graph: "提交图" };
 /** Raw hub events: shown by the dev server and `preview:mock`, not by a packaged build. */
 export const DEBUG_PANES = __BUILD__.dev || __MOCK__;
@@ -27,7 +34,7 @@ export const PANE_KINDS: { kind: PaneKind; label: string }[] = (Object.keys(LABE
 /** What a pane was opened for: an agent's turn (and file), or a task. */
 export type Target = { agent?: string; turn?: string; file?: string; run?: string; task?: string };
 
-type Panes = { beside: string | null; ratio: number; docks: Docks<PaneKind> };
+type Panes = { beside: string | null; ratio: number; docks: Docks<TabId> };
 
 const KEY = "crossagents.panes";
 const clamp = (r: number) => Math.min(0.75, Math.max(0.25, r));
@@ -35,11 +42,11 @@ const clamp = (r: number) => Math.min(0.75, Math.max(0.25, r));
 const isKind = (k: unknown): k is PaneKind => typeof k === "string" && k in LABELS;
 /** Whether this build offers `kind` (事件流 only where debugging is on). */
 export const offered = (k: PaneKind) => PANE_KINDS.some((p) => p.kind === k);
-const isTab = (k: unknown): k is PaneKind => isKind(k) && offered(k);
+const isTab = (k: unknown): k is TabId => (typeof k === "string" && k.startsWith("term:")) || (isKind(k) && offered(k));
 /** What a tab is called. */
 export const paneLabel = (k: PaneKind) => LABELS[k];
 /** The tabs a first start has, all on the right. */
-const FRESH: PaneKind[] = PANE_KINDS.map((p) => p.kind).filter((k) => k !== "events");
+const FRESH: TabId[] = PANE_KINDS.map((p) => p.kind).filter((k) => k !== "events");
 const listeners = new Set<() => void>();
 let state: Panes = load();
 /** The conversation clicked last, and what a tab was opened for: not kept across reloads. */
@@ -49,10 +56,10 @@ let target: Target | null = null;
  * In the floating drawer both docks are one row of tabs: the one showing, and whether something
  * opened on purpose asked for the drawer (its tab may be in the bottom dock, which floating hides).
  */
-let floatTab: PaneKind | null = null;
+let floatTab: TabId | null = null;
 let peek = false;
 const sessionTargets = new Map<string, Target | null>();
-let view: { state: Panes; focus: string | null; target: Target | null; floatTab: PaneKind | null; peek: boolean } = { state, focus, target, floatTab, peek };
+let view: { state: Panes; focus: string | null; target: Target | null; floatTab: TabId | null; peek: boolean } = { state, focus, target, floatTab, peek };
 
 function load(): Panes {
   try {
@@ -80,7 +87,7 @@ function set(next: Panes) {
   changed();
 }
 
-const setDocks = (docks: Docks<PaneKind>) => set({ ...state, docks });
+const setDocks = (docks: Docks<TabId>) => set({ ...state, docks });
 
 /** Opens `name` beside the routed session; without one, just goes to it. */
 export function openBeside(name: string) {
@@ -144,20 +151,38 @@ export const clearTarget = () => {
   changed();
 };
 
-export function pickTab(dock: DockId, tab: PaneKind) {
+/** Shows `tab` where it is, and asks for the drawer when docking does not fit. */
+export function peekTab(tab: TabId) {
+  floatTab = tab;
+  peek = true;
+  setDocks(showTab(state.docks, tab));
+}
+
+/** Puts a new tab in `dock`. `show`: it comes to the front; else it just joins the row. */
+export function placeTab(tab: TabId, dock: DockId, show = true) {
+  if (show) {
+    floatTab = tab;
+    peek = true;
+    return setDocks(moveTab(state.docks, tab, dock));
+  }
+  const { tabs, active, open } = state.docks[dock];
+  setDocks({ ...state.docks, [dock]: { tabs: [...tabs, tab], active: active ?? tab, open: open || tabs.length === 0 } });
+}
+
+export function pickTab(dock: DockId, tab: TabId) {
   floatTab = tab;
   setDocks({ ...state.docks, [dock]: { ...state.docks[dock], active: tab } });
 }
 
-export const dropTab = (tab: PaneKind, dock: DockId, index?: number) => setDocks(moveTab(state.docks, tab, dock, index));
+export const dropTab = (tab: TabId, dock: DockId, index?: number) => setDocks(moveTab(state.docks, tab, dock, index));
 
-export function shutTab(tab: PaneKind) {
+export function shutTab(tab: TabId) {
   if (floatTab === tab) floatTab = null;
   setDocks(closeTab(state.docks, tab));
 }
 
 /** Kinds with no tab now, for a dock's + menu. */
-export const closedKinds = (docks: Docks<PaneKind>) => PANE_KINDS.filter((p) => !dockOf(docks, p.kind));
+export const closedKinds = (docks: Docks<TabId>) => PANE_KINDS.filter((p) => !dockOf(docks, p.kind));
 
 const subscribe = (l: () => void) => {
   listeners.add(l);
