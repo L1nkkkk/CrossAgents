@@ -10,3 +10,6 @@ target/
 
 # WorkBuddy agent notes
 .workbuddy-ai/
+
+# Browser debugging output (console logs, page snapshots)
+.playwright-cli/
