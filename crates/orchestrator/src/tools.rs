@@ -893,8 +893,16 @@ impl Orchestrator {
                 let a: A = args(input)?;
                 self.complete(caller, task, a.summary).await?;
                 // Tags that named no entry of this project or the person come back, so the
-                // worker can name them again properly.
-                let (used, unrecognized) = self.declare_used(caller, task, &a.used).await?;
+                // worker can name them again properly. The report is already in: a store that
+                // cannot record them must not make task_complete fail and be retried, so they
+                // all count as unplaced.
+                let (used, unrecognized) = match self.declare_used(caller, task, &a.used).await {
+                    Ok(placed) => placed,
+                    Err(err) => {
+                        tracing::warn!(task = %task, error = %err, "cannot record declared expertise usage");
+                        (0, a.used.clone())
+                    }
+                };
                 Ok(json!({
                     "status": "verifying",
                     "used": used,

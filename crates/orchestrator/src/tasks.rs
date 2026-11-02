@@ -1370,13 +1370,17 @@ impl Orchestrator {
         } else {
             json!("forced")
         };
-        // How this task ended lands on the expertise entries it used (EXPERTISE §4.6).
+        // How this task ended lands on the expertise entries it used (EXPERTISE §4.6). The
+        // merge is done: a profile that cannot be updated must not make an accepted task look
+        // refused to its issuer.
         let outcome = if crate::expertise::tools::was_reworked(&task) {
             UsageOutcome::Reworked
         } else {
             UsageOutcome::MergedFirstTry
         };
-        self.settle_usage(&task, outcome).await?;
+        if let Err(err) = self.settle_usage(&task, outcome).await {
+            tracing::warn!(task = %task.key, error = %err, "cannot settle expertise usage");
+        }
         Ok(json!({
             "merged": true,
             "task": task_json(&task),
@@ -1493,8 +1497,11 @@ impl Orchestrator {
             TaskStatus::Cancelled
         };
         self.transition(&mut task, to).await?;
-        // What it used counts as dropped, requeued or not (EXPERTISE §4.6).
-        self.settle_usage(&task, UsageOutcome::Dropped).await?;
+        // What it used counts as dropped, requeued or not (EXPERTISE §4.6), and the drop
+        // itself stands even when the profile cannot be updated.
+        if let Err(err) = self.settle_usage(&task, UsageOutcome::Dropped).await {
+            tracing::warn!(task = %task.key, error = %err, "cannot settle expertise usage");
+        }
         self.schedule(&mut run).await?;
         Ok(json!({ "task": task_json(&task) }))
     }
