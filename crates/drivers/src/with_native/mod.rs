@@ -37,9 +37,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
-    AttachmentKind, AttachmentSupport, Capabilities, CliStatus, CoreError, Driver, DriverKind,
-    DriverSession, McpServerSpec, PermissionPolicy, Prompt, SessionEvent, SessionEventKind,
-    SessionSpec, StopReason, TokenUsage, TurnOutcome,
+    Attachment, AttachmentKind, AttachmentSupport, Capabilities, CliStatus, CoreError, Driver,
+    DriverKind, DriverSession, McpServerSpec, PermissionPolicy, Prompt, SessionEvent,
+    SessionEventKind, SessionSpec, StopReason, TokenUsage, TurnOutcome,
 };
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -349,7 +349,9 @@ impl WithSession {
         let mut files = Vec::new();
         for attachment in &prompt.attachments {
             match attachment.kind() {
-                Some(AttachmentKind::Image) => images.push(attachment.path.clone()),
+                Some(AttachmentKind::Image) => {
+                    images.push(image_path(&self.files.dir, attachment, &self.events))
+                }
                 _ => files.push(attachment.path.clone()),
             }
         }
@@ -578,6 +580,53 @@ impl DriverSession for WithSession {
         self.stop().await;
         let _guard = self.turn.lock().await;
         self.files.remove();
+    }
+}
+
+/// The path to hand `--images`. with-cli opens an image by its extension and drops one it
+/// cannot name (`unsupported image format: , only PNG/JPG/...`), so a path without an
+/// extension -- an attachment an older hub kept as its bare content hash -- is copied into
+/// the session's own folder as `<id>.<ext>`, which goes away with the session. When the copy
+/// cannot be made a warning is sent and the path is used as it came.
+fn image_path(
+    dir: &Path,
+    attachment: &Attachment,
+    events: &mpsc::UnboundedSender<SessionEvent>,
+) -> PathBuf {
+    if attachment.path.extension().is_some() {
+        return attachment.path.clone();
+    }
+    let ext = crossagents_core::attachment::ext_for(&attachment.mime, &attachment.name);
+    let stem =
+        if !attachment.id.is_empty() && attachment.id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            attachment.id.clone()
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
+    let copy = dir.join(format!("{stem}.{ext}"));
+    let copied = std::fs::create_dir_all(dir).and_then(|()| {
+        if copy.exists() {
+            Ok(())
+        } else {
+            std::fs::copy(&attachment.path, &copy).map(|_| ())
+        }
+    });
+    match copied {
+        Ok(()) => copy,
+        Err(err) => {
+            emit(
+                events,
+                SessionEventKind::Warning {
+                    message: format!(
+                        "with-cli reads an image by its extension and {} has none; cannot \
+                         copy it to {}: {err}",
+                        attachment.path.display(),
+                        copy.display()
+                    ),
+                },
+            );
+            attachment.path.clone()
+        }
     }
 }
 
@@ -904,6 +953,53 @@ mod tests {
 
         // A CLI that is not laid out as `<install>/bin`: the user's file, as before.
         assert!(installed_config(&root.path().join("with-cli.exe")).is_none());
+    }
+
+    /// with-cli drops an image whose format it cannot tell from the path, and an attachment
+    /// stored before the hub added extensions has none: it is copied into the session's own
+    /// folder as `<id>.<ext>`, which goes away with the session.
+    #[test]
+    fn an_image_without_an_extension_is_copied_into_the_session() {
+        const PNG: &[u8] = &[0x89, b'P', b'N', b'G'];
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("session");
+        let (events, mut rx) = mpsc::unbounded_channel();
+        let bare = root.path().join("9f2c8a");
+        std::fs::write(&bare, PNG).unwrap();
+        let image = Attachment {
+            id: "9f2c8a".into(),
+            name: "shot.png".into(),
+            mime: "image/png".into(),
+            size: PNG.len() as u64,
+            path: bare,
+        };
+        let path = image_path(&dir, &image, &events);
+        assert_eq!(path, dir.join("9f2c8a.png"));
+        assert_eq!(std::fs::read(&path).unwrap(), PNG);
+        // Nothing worth a warning, and the copy already there is used again.
+        assert!(rx.try_recv().is_err());
+        assert_eq!(image_path(&dir, &image, &events), path);
+
+        // A path that already has its extension goes as it is.
+        let with_ext = root.path().join("shot.png");
+        std::fs::write(&with_ext, PNG).unwrap();
+        let already = Attachment {
+            path: with_ext.clone(),
+            ..image.clone()
+        };
+        assert_eq!(image_path(&dir, &already, &events), with_ext);
+
+        // A copy that cannot be made: a warning, and the path as it came.
+        let gone = Attachment {
+            id: "aabbcc".into(),
+            path: root.path().join("gone"),
+            ..image.clone()
+        };
+        assert_eq!(image_path(&dir, &gone, &events), gone.path);
+        assert!(matches!(
+            rx.try_recv().map(|e| e.kind),
+            Ok(SessionEventKind::Warning { .. })
+        ));
     }
 
     #[test]
