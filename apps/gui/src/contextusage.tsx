@@ -88,7 +88,9 @@ export function ContextUsageButton({ agent, usage, variant }: { agent: Agent; us
   }, [open]);
 
   return (
-    <div className={`ctx-pop ${variant}`} ref={ref}>
+    // Not the bare variant name as a class: `rail` is the info rail's own class (absolute, top
+    // right of the pane), and the button would leave its card for the rail's corner.
+    <div className={`ctx-pop ${variant === "rail" ? "ctx-pop-rail" : "topbar"}`} ref={ref}>
       {variant === "topbar" ? (
         has ? (
           <button className={`meter-btn ${open ? "open" : ""} ${pct >= 50 ? "attention" : ""}`} onClick={() => setOpen(!open)} aria-haspopup="dialog" aria-expanded={open} title="上下文用量与压缩上下文">

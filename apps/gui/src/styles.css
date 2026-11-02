@@ -497,6 +497,8 @@ body.col-resizing iframe, body.col-resizing webview { pointer-events: none; }
 
 /* The meter is a button (src/contextusage.tsx): the popup holds the breakdown and 压缩上下文. */
 .ctx-pop { position: relative; display: inline-flex; }
+/* In the rail it is the 上下文 card's first row, as wide as the card. */
+.ctx-pop.ctx-pop-rail { display: flex; width: 100%; min-width: 0; }
 .meter-btn {
   display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border: 1px solid transparent;
   border-radius: 999px; background: transparent; color: var(--text-2); font-size: 12px;
