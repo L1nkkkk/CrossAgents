@@ -723,13 +723,28 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "review_submit",
-        description: "Give your verdict on the change you are reviewing; it goes to whoever asked for the review.",
+        description: "Give your verdict on the change you are reviewing; it goes to whoever asked for the review. Answer the numbered checklist too when your brief has one: a fail proposes a replacement to the person.",
         groups: REVIEWER,
         schema: || {
-            task_id_schema(json!({
+            let mut schema = task_id_schema(json!({
                 "approve": { "type": "boolean" },
                 "notes": { "type": "string", "description": "For a rejection: exactly what to fix." }
-            }))
+            }));
+            // Optional, unlike the fields `task_id_schema` lists as required.
+            schema["properties"]["checklist"] = json!({
+                "type": "array",
+                "description": "One verdict per numbered item of the reviewer checklist.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "entry_id": { "type": "string", "description": "The item's tag or entry id." },
+                        "verdict": { "type": "string", "enum": ["pass", "fail", "na"] },
+                        "note": { "type": "string", "description": "Why it failed, or anything to add." }
+                    },
+                    "required": ["entry_id", "verdict"]
+                }
+            });
+            schema
         },
     },
 ];
@@ -935,11 +950,33 @@ impl Orchestrator {
                     approve: bool,
                     #[serde(default)]
                     notes: String,
+                    #[serde(default)]
+                    checklist: Vec<crate::expertise::review::ChecklistItem>,
                 }
-                let task = self.task_ref(caller, &input).await?;
+                let id = self.task_ref(caller, &input).await?;
                 let a: A = args(input)?;
-                self.review(caller, task, a.approve, a.notes).await?;
-                Ok(json!({ "recorded": true, "next": "End your turn." }))
+                self.review(caller, id, a.approve, a.notes).await?;
+                // A failed item proposes a replacement to the person (EXPERTISE §6.3). The
+                // review is already in, so a store that cannot keep candidates must not make
+                // this call fail and be retried.
+                let candidates = match self.store.get_task(id).await {
+                    Ok(task) => match self.review_candidates(caller, &task, &a.checklist).await {
+                        Ok(candidates) => candidates.len(),
+                        Err(err) => {
+                            tracing::warn!(task = %id, error = %err, "cannot propose expertise candidates");
+                            0
+                        }
+                    },
+                    Err(err) => {
+                        tracing::warn!(task = %id, error = %err, "cannot read the reviewed task");
+                        0
+                    }
+                };
+                Ok(json!({
+                    "recorded": true,
+                    "candidates": candidates,
+                    "next": "End your turn."
+                }))
             }
             _ => unreachable!("every tool in TOOLS is handled"),
         }

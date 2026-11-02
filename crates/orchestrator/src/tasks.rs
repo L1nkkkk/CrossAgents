@@ -1134,11 +1134,17 @@ impl Orchestrator {
             .focus
             .map(|f| format!("{}\n\n", f.trim()))
             .unwrap_or_default();
+        // The judgements the reviewer is asked to answer pass/fail/na (EXPERTISE §6.3).
+        let checklist = self
+            .checklist_for(&reviewer, &task)
+            .await
+            .map(|text| format!("\n\n{text}"))
+            .unwrap_or_default();
         self.relay(
             reviewer.id,
             caller.id,
             format!(
-                "{focus}Review branch {} against {} (your working directory has it checked out).\n\n{}\n\n{}",
+                "{focus}Review branch {} against {} (your working directory has it checked out).\n\n{}{checklist}\n\n{}",
                 task.branch.as_deref().unwrap_or("?"),
                 run.branch,
                 brief::task(&task),
