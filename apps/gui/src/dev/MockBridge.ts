@@ -29,6 +29,18 @@ import type { UsageResponse } from "@bindings/UsageResponse";
 import type { CrossAgentsBridge, HubResponse, UpdateState } from "../bridge";
 import type { HubEvent } from "../hub";
 import { turnStat } from "../lib/diff";
+import {
+  acceptCandidate,
+  budgetReport,
+  conflictList,
+  expertiseCard,
+  missingVerdicts,
+  staleScan,
+  type Candidate,
+  type ConflictDecision,
+  type ExpertiseEntry,
+  type UsageRecord,
+} from "../lib/expertise";
 import { effortOf } from "../lib/models";
 import { applyEvent } from "../session";
 import { capabilitiesOf, contextParts, driverOf, transcript, uid } from "./fixtures";
@@ -81,7 +93,11 @@ export type MockState = {
    * one rebuilds its checkout from the base and says the code did not come back.
    */
   codeLost?: Record<string, { branch: string; base: string; landed?: { mode: LandMode; reference: string } }>;
+  /** Expertise profiles (docs EXPERTISE.md): entries of every owner, candidates, usages. */
+  expertise?: ExpertiseMock;
 };
+
+export type ExpertiseMock = { entries: ExpertiseEntry[]; candidates: Candidate[]; usages: UsageRecord[] };
 
 /**
  * The hub's own words, filled in the same way, for what the mock acts out. Keep them equal to
@@ -459,6 +475,22 @@ export class MockBridge implements CrossAgentsBridge {
       if (p === "/v1/notes") return json(200, { notes: s.notes });
       if (p === "/v1/quota") return json(200, s.quota);
       if (p === "/v1/usage/series") return json(200, usageSeriesMock(url.searchParams.get("range") ?? "7d", url.searchParams.get("group") ?? "total", url.searchParams.get("source") ?? "all", s.usageSeriesVariant ?? "normal"));
+      if (p === "/v1/expertise" || p === "/v1/expertise/card" || p === "/v1/expertise/maintenance") {
+        const x = s.expertise ?? { entries: [], candidates: [], usages: [] };
+        const kind = url.searchParams.get("owner_kind") ?? "person";
+        const owner = url.searchParams.get("owner_id") ?? "";
+        const entries = x.entries.filter((e) => e.owner_kind === kind && e.owner_id === owner);
+        const ids = new Set(entries.map((e) => e.id));
+        const usages = x.usages.filter((u) => ids.has(u.entry_id));
+        if (p === "/v1/expertise") return json(200, entries);
+        if (p === "/v1/expertise/card") return json(200, expertiseCard(entries, usages, new Date()));
+        const candidates = x.candidates.filter((c) => c.owner_kind === kind && c.owner_id === owner);
+        return json(200, { budgets: budgetReport(entries), stale: staleScan(entries, usages, new Date()), conflicts: conflictList(candidates, entries) });
+      }
+      if (p === "/v1/expertise/candidates") {
+        const status = url.searchParams.get("status") ?? "pending";
+        return json(200, (s.expertise?.candidates ?? []).filter((c) => c.status === status));
+      }
       if (p === "/v1/usage") {
         const by = (url.searchParams.get("by") ?? "role") as UsageGroup;
         return json(200, s.usage[by] ?? { by, rows: [], total_cost_usd: 0 });
@@ -481,6 +513,25 @@ export class MockBridge implements CrossAgentsBridge {
 
     if (method === "POST") {
       if ((m = p.match(FILES_ROUTE)) && m[1] === "resolve") return json(200, { entries: mockResolve((body as { paths: string[] }).paths ?? []) });
+      if ((m = p.match(/^\/v1\/expertise\/candidates\/([^/]+)\/(accept|reject)$/))) {
+        const x = s.expertise;
+        const c = x?.candidates.find((k) => k.id === decodeURIComponent(m![1]));
+        if (!x || !c) return notFound("candidate");
+        if (c.status !== "pending") return json(409, { error: { code: "conflict", message: `候选已经${c.status === "accepted" ? "接受" : "拒绝"}` } });
+        const now = new Date().toISOString();
+        if (m[2] === "reject") {
+          c.status = "rejected";
+          c.decided_at = now;
+          return json(200, c);
+        }
+        const decisions = (body as { decisions?: ConflictDecision[] } | null)?.decisions ?? [];
+        const missing = missingVerdicts(c, decisions);
+        if (missing.length) return json(400, { error: { code: "bad_request", message: `冲突没有裁决：${missing.join(", ")}` } });
+        x.entries = acceptCandidate(x.entries, c, decisions, uid(), now);
+        c.status = "accepted";
+        c.decided_at = now;
+        return json(200, c);
+      }
       if (p === "/v1/agents") {
         const req = body as CreateAgentRequest;
         const taken = (n: string) => s.agents.some((a) => a.name.toLowerCase() === n.toLowerCase());

@@ -31,6 +31,7 @@ const zhCN = {
   "common.none": "无",
 
   "nav.usage": "用量",
+  "nav.expertise": "专长",
   "nav.settings": "设置",
 
   "state.awaitingApproval": "待审批",
