@@ -3,7 +3,7 @@ import type { MergeSuggestion } from "./MergeSuggestion";
 
 /**
  * One domain's judgement budget (EXPERTISE §4.3). The fields are the ones
- * `maintain::budget_report` produces; the hub maps them straight across.
+ * `maintain::budget_report` produces, narrowed to what the wire needs.
  */
 export type DomainBudget = { domain: string, 
 /**

@@ -1629,18 +1629,18 @@ pub struct MergeSuggestion {
 }
 
 /// One domain's judgement budget (EXPERTISE §4.3). The fields are the ones
-/// `maintain::budget_report` produces; the hub maps them straight across.
+/// `maintain::budget_report` produces, narrowed to what the wire needs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DomainBudget {
     pub domain: String,
     /// Sum of `estimate_tokens` over the domain's non-superseded judgements.
-    pub judgment_tokens: usize,
-    pub budget: usize,
+    pub judgment_tokens: u32,
+    pub budget: u32,
     pub over: bool,
     /// By how much the domain is over, `0` when it is not.
-    pub over_by: usize,
-    pub judgment_count: usize,
+    pub over_by: u32,
+    pub judgment_count: u32,
     /// Pairs worth merging; only filled when the domain is over budget.
     pub merge_suggestions: Vec<MergeSuggestion>,
 }
@@ -1656,8 +1656,7 @@ pub struct StaleHint {
     pub suggested: EntryStatus,
     pub reason: String,
     /// Days since it was last used, confirmed or created.
-    #[ts(type = "number")]
-    pub days_unused: i64,
+    pub days_unused: i32,
     /// `stats.reworked / stats.used`, `null` when it was never used.
     pub rework_rate: Option<f64>,
 }
@@ -1689,27 +1688,27 @@ pub struct ExpertiseCard {
     /// The two rates in percentage points, when both exist.
     pub delta_points: Option<f64>,
     /// Decided usages behind `first_try_rate`.
-    pub sample: usize,
+    pub sample: u32,
     /// The sample is under ten: the rate is shown, but not to be trusted yet.
     pub small_sample: bool,
-    pub merged_first_try: usize,
-    pub reworked: usize,
-    pub dropped: usize,
+    pub merged_first_try: u32,
+    pub reworked: u32,
+    pub dropped: u32,
     /// All entries, by kind.
-    pub entries: usize,
-    pub judgments: usize,
-    pub examples: usize,
-    pub limits: usize,
+    pub entries: u32,
+    pub judgments: u32,
+    pub examples: u32,
+    pub limits: u32,
     /// Entries by status.
-    pub active: usize,
-    pub stale: usize,
-    pub review: usize,
-    pub superseded: usize,
+    pub active: u32,
+    pub stale: u32,
+    pub review: u32,
+    pub superseded: u32,
     /// Judgement tokens over the whole profile, and the per-domain budget.
-    pub judgment_tokens: usize,
-    pub judgment_budget: usize,
+    pub judgment_tokens: u32,
+    pub judgment_budget: u32,
     /// Domains whose judgements are over budget (shown red).
-    pub over_budget_domains: usize,
+    pub over_budget_domains: u32,
 }
 
 /// `GET /v1/expertise/maintenance`: the three views of `maintain` in one answer.

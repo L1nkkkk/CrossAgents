@@ -433,7 +433,7 @@ async fn card(
     let (kind, id) = scope(&query)?;
     let entries = profile(&state, kind, &id, query.domain.as_deref()).await?;
     let usages = usages_of(&state, &entries).await?;
-    Ok(Json(card_view(maintain::expertise_card(
+    Ok(Json(card_from(maintain::expertise_card(
         &entries,
         &usages,
         Utc::now(),
@@ -455,15 +455,15 @@ async fn maintenance(
     Ok(Json(ExpertiseMaintenance {
         budgets: maintain::budget_report(&entries)
             .into_iter()
-            .map(budget_view)
+            .map(budget_from)
             .collect(),
         stale: maintain::stale_scan(&entries, &usages, Utc::now())
             .into_iter()
-            .map(hint_view)
+            .map(hint_from)
             .collect(),
         conflicts: maintain::conflict_list(&pending)
             .into_iter()
-            .map(conflict_view)
+            .map(conflict_from)
             .collect(),
     }))
 }
@@ -483,18 +483,19 @@ async fn export(
         .into_response())
 }
 
-// The maintain types belong to the orchestrator and carry no bindings derives; the hub maps
-// them onto the API response shapes field by field. Same names, same order, so a change in
-// one is easy to carry over.
+// The maintain types belong to the orchestrator and carry no bindings derives, so the hub
+// carries them onto the API response shapes field by field, in the same order. Not `impl
+// From`: both types are foreign to this crate, so the orphan rule rules it out. The counts
+// are narrowed to `u32`, which is all a profile of this size needs.
 
-fn budget_view(budget: maintain::DomainBudget) -> DomainBudget {
+fn budget_from(budget: maintain::DomainBudget) -> DomainBudget {
     DomainBudget {
         domain: budget.domain,
-        judgment_tokens: budget.judgment_tokens,
-        budget: budget.budget,
+        judgment_tokens: budget.judgment_tokens as u32,
+        budget: budget.budget as u32,
         over: budget.over,
-        over_by: budget.over_by,
-        judgment_count: budget.judgment_count,
+        over_by: budget.over_by as u32,
+        judgment_count: budget.judgment_count as u32,
         merge_suggestions: budget
             .merge_suggestions
             .into_iter()
@@ -507,19 +508,19 @@ fn budget_view(budget: maintain::DomainBudget) -> DomainBudget {
     }
 }
 
-fn hint_view(hint: maintain::StaleHint) -> StaleHint {
+fn hint_from(hint: maintain::StaleHint) -> StaleHint {
     StaleHint {
         entry_id: hint.entry_id,
         domain: hint.domain,
         title: hint.title,
         suggested: hint.suggested,
         reason: hint.reason,
-        days_unused: hint.days_unused,
+        days_unused: hint.days_unused as i32,
         rework_rate: hint.rework_rate,
     }
 }
 
-fn conflict_view(pair: maintain::ConflictPair) -> ConflictPair {
+fn conflict_from(pair: maintain::ConflictPair) -> ConflictPair {
     ConflictPair {
         candidate_id: pair.candidate_id,
         entry_id: pair.entry_id,
@@ -529,27 +530,27 @@ fn conflict_view(pair: maintain::ConflictPair) -> ConflictPair {
     }
 }
 
-fn card_view(card: maintain::ExpertiseCard) -> ExpertiseCard {
+fn card_from(card: maintain::ExpertiseCard) -> ExpertiseCard {
     ExpertiseCard {
         first_try_rate: card.first_try_rate,
         first_try_rate_30d_ago: card.first_try_rate_30d_ago,
         delta_points: card.delta_points,
-        sample: card.sample,
+        sample: card.sample as u32,
         small_sample: card.small_sample,
-        merged_first_try: card.merged_first_try,
-        reworked: card.reworked,
-        dropped: card.dropped,
-        entries: card.entries,
-        judgments: card.judgments,
-        examples: card.examples,
-        limits: card.limits,
-        active: card.active,
-        stale: card.stale,
-        review: card.review,
-        superseded: card.superseded,
-        judgment_tokens: card.judgment_tokens,
-        judgment_budget: card.judgment_budget,
-        over_budget_domains: card.over_budget_domains,
+        merged_first_try: card.merged_first_try as u32,
+        reworked: card.reworked as u32,
+        dropped: card.dropped as u32,
+        entries: card.entries as u32,
+        judgments: card.judgments as u32,
+        examples: card.examples as u32,
+        limits: card.limits as u32,
+        active: card.active as u32,
+        stale: card.stale as u32,
+        review: card.review as u32,
+        superseded: card.superseded as u32,
+        judgment_tokens: card.judgment_tokens as u32,
+        judgment_budget: card.judgment_budget as u32,
+        over_budget_domains: card.over_budget_domains as u32,
     }
 }
 
