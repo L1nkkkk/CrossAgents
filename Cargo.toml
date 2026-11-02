@@ -56,3 +56,6 @@ all = { level = "warn", priority = -1 }
 # rustc 1.99 on Windows crashes (STATUS_ACCESS_VIOLATION) on incremental builds of
 # crossagents-core; full rebuilds of our crates are fast enough.
 incremental = false
+# Full debug info made target/ reach 100 GB (every test binary has its own .pdb). File and line
+# numbers in backtraces are what we use.
+debug = "line-tables-only"
