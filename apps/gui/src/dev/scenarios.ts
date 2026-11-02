@@ -98,17 +98,30 @@ export const SCENARIOS: Scenario[] = [
       route: `#/runs/${scene.state.runs[0].run.id}`,
       // Show a cross-plugin pick taking effect: task #a's worker chosen from the With gateway.
       script: [
+        { at: 800, act: () => document.querySelector<HTMLButtonElement>('.who-pick[data-task="a"] .chip-pick')?.click() },
         {
-          at: 800,
-          act: () => {
-            const select = document.querySelector<HTMLSelectElement>("select.who-pick");
-            const option = select && [...select.options].find((o) => o.value === "model:with/gpt-6-sol");
-            if (!select || !option) return;
-            select.value = option.value;
-            select.dispatchEvent(new Event("change", { bubbles: true }));
-          },
+          at: 1000,
+          act: () =>
+            [...document.querySelectorAll<HTMLButtonElement>(".who-pick .menu-item")]
+              .find((b) => b.querySelector(".menu-sub")?.textContent === "gpt-6-sol" && !b.disabled)
+              ?.click(),
         },
       ],
+    };
+  } },
+  { key: "plan-picker", label: "批计划：挑执行者", hint: "计划卡 #a 的执行者菜单展开：队友带头像，副行是模型 · 状态 · 最近一次执行；下面是各家的新建模型", build: () => {
+    const scene = oauthRun("plan");
+    // Fixture agents are named by their display name ("Rex"); match any case.
+    const byName = (n: string) => scene.state.agents.find((a) => a.name.toLowerCase() === n)!;
+    scene.state.sessions = [
+      { agent: byName("rex"), state: "idle", busy_with: null, last_execution: 'run "多租户隔离" #a (done)', can_use: true, reason: null },
+      { agent: byName("mia"), state: "busy", busy_with: 'Mia is busy: it works on #b of run "登录页改版" (01a2)', last_execution: 'run "登录页改版" #b (in progress)', can_use: false, reason: "busy" },
+      { agent: byName("sam"), state: "idle", busy_with: null, last_execution: null, can_use: true, reason: null },
+    ];
+    return {
+      ...scene,
+      route: `#/runs/${scene.state.runs[0].run.id}`,
+      script: [{ at: 900, act: () => document.querySelector<HTMLButtonElement>('.who-pick[data-task="a"] .chip-pick')?.click() }],
     };
   } },
   { key: "plan", label: "计划待审批", hint: "run 页：中间只有主导的对话和待审批的 Plan；右侧栏是计划、run 信息、策略与预算", build: () => oauthRun("plan") },
