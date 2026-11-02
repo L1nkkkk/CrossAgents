@@ -21,7 +21,7 @@ CodeBuddy CLI 的 `CODEBUDDY_CONFIG_DIR` 控制配置和会话目录，但在本
 
 - 自己的 CodeBuddy 配置和会话目录。
 - `<账号目录>/profile` 下的子进程用户资料目录，登录、状态探测和 agent 运行都使用相同环境。只改变子进程的 `HOME`、`USERPROFILE`、AppData 和 XDG 数据目录，不改变 hub 或系统用户的环境。
-- 指向对应站点的 CodeBuddy 环境选择，并清空子进程继承的 CodeBuddy API key/auth token，避免父进程的身份覆盖独立登录。
+- 指向对应站点的 CodeBuddy 环境选择，并移除子进程继承的 `CODEBUDDY_API_KEY` / `CODEBUDDY_AUTH_TOKEN`，避免父进程的身份覆盖独立登录。不能把这两个变量设为空字符串：本机 CLI 会将空的认证覆盖当作显式凭据，出现账号探测已登录、实际请求却提示 `Authentication required` 的情况。登录服务、状态探测和 agent 启动共用同一套移除处理。
 
 CLI 启动的 shell 工具也会看到这个独立资料目录，原用户目录中的 Git、SSH 等配置不会自动复制进来；需要时显式配置。这个机制用于分开 CLI 的资料和登录，不是文件访问沙箱。
 

@@ -263,6 +263,25 @@ pub fn withheld_env() -> Vec<String> {
         .collect()
 }
 
+/// Prepare a CodeBuddy child's environment. Empty auth overrides mean "use this
+/// profile's saved login", but the CLI treats even an empty AUTH_TOKEN as an
+/// explicit credential. Remove those variables, including inherited values,
+/// rather than passing empty strings. Nonempty credentials remain supported.
+pub fn prepare_env(env: &mut Vec<(String, String)>) -> Vec<String> {
+    let mut remove = withheld_env();
+    env.retain(|(key, value)| {
+        let empty_auth = value.is_empty()
+            && ["CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"]
+                .iter()
+                .any(|auth| key.eq_ignore_ascii_case(auth));
+        if empty_auth {
+            remove.push(key.clone());
+        }
+        !empty_auth
+    });
+    remove
+}
+
 /// The arguments that make the CLI serve its web UI on `port` of this machine without a
 /// password. The UI carries the login (the CLI itself logs in only inside its TUI).
 pub fn serve_args(port: u16) -> Vec<String> {
@@ -286,11 +305,12 @@ pub async fn probe(command: &[String], env: &[(String, String)]) -> Result<Value
     // The CLI cannot answer `initialize` without reaching its API through the proxy.
     let api_host = Flavor::Codebuddy.api_host(env);
     let direct = check_proxy(env, Some(&api_host)).await?;
+    let mut process_env = system_proxy_env();
+    process_env.extend(env.iter().cloned());
+    process_env.extend(direct);
     let mut child = Command::new(program);
-    for (key, _) in std::env::vars_os() {
-        if Flavor::Codebuddy.withholds(&key.to_string_lossy()) {
-            child.env_remove(key);
-        }
+    for key in prepare_env(&mut process_env) {
+        child.env_remove(key);
     }
     child
         .args(extra)
@@ -303,9 +323,7 @@ pub async fn probe(command: &[String], env: &[(String, String)]) -> Result<Value
             "--verbose",
             "--strict-mcp-config",
         ])
-        .envs(system_proxy_env())
-        .envs(env.iter().cloned())
-        .envs(direct)
+        .envs(process_env)
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -364,6 +382,65 @@ fn project_folder(cwd: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_auth_overrides_remove_credentials_instead_of_setting_empty_values() {
+        let mut env = vec![
+            ("CODEBUDDY_API_KEY".into(), String::new()),
+            ("codebuddy_auth_token".into(), String::new()),
+            ("CODEBUDDY_CONFIG_DIR".into(), "/private/login".into()),
+            ("OTHER_EMPTY".into(), String::new()),
+        ];
+        let remove = prepare_env(&mut env);
+        let mut command = std::process::Command::new("unused");
+        // Simulate credentials inherited from the parent without mutating this
+        // test process's environment (other account tests run concurrently).
+        command.env("CODEBUDDY_API_KEY", "parent-key");
+        command.env("codebuddy_auth_token", "parent-token");
+        for key in remove {
+            command.env_remove(key);
+        }
+        command.envs(env);
+        let overrides: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+        for key in ["CODEBUDDY_API_KEY", "codebuddy_auth_token"] {
+            assert_eq!(overrides.get(std::ffi::OsStr::new(key)), Some(&None));
+        }
+        assert_eq!(
+            overrides[std::ffi::OsStr::new("CODEBUDDY_CONFIG_DIR")],
+            Some(std::ffi::OsStr::new("/private/login"))
+        );
+        assert_eq!(
+            overrides[std::ffi::OsStr::new("OTHER_EMPTY")],
+            Some(std::ffi::OsStr::new(""))
+        );
+    }
+
+    #[test]
+    fn explicit_and_default_api_logins_are_preserved() {
+        let mut env = vec![
+            ("CODEBUDDY_API_KEY".into(), "explicit-key".into()),
+            ("CODEBUDDY_AUTH_TOKEN".into(), "explicit-token".into()),
+        ];
+        let original = env.clone();
+        let remove = prepare_env(&mut env);
+        assert_eq!(env, original);
+        for key in ["CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"] {
+            assert!(
+                !remove
+                    .iter()
+                    .any(|removed| removed.eq_ignore_ascii_case(key))
+            );
+        }
+        // No account overrides: the machine's normal API login is inherited.
+        let remove = prepare_env(&mut Vec::new());
+        for key in ["CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"] {
+            assert!(
+                !remove
+                    .iter()
+                    .any(|removed| removed.eq_ignore_ascii_case(key))
+            );
+        }
+    }
 
     #[test]
     fn runs_on_the_codebuddy_driver_and_has_a_command() {
