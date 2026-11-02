@@ -43,6 +43,33 @@ impl AttachmentKind {
     }
 }
 
+/// The extension a stored file is kept under, from its type: images, PDF and JSON by their
+/// `mime`, text by the suffix its name carries (`txt` when it has none). Only the
+/// extension is taken from the name, never the name itself, so nothing a person calls a
+/// file can decide where it is written.
+///
+/// It matters because some CLIs (with-cli, Codex) open a file handed to them by its
+/// extension and drop one that has none: `unsupported image format: , only PNG/JPG/...`.
+pub fn ext_for<'a>(mime: &str, name: &'a str) -> &'a str {
+    match mime {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "application/pdf" => "pdf",
+        "application/json" => "json",
+        _ if mime.starts_with("text/") => name
+            .rsplit_once('.')
+            .map(|(_, ext)| ext)
+            .filter(|ext| {
+                !ext.is_empty() && ext.len() <= 16 && ext.bytes().all(|b| b.is_ascii_alphanumeric())
+            })
+            .unwrap_or("txt"),
+        // Not offered for messages; named all the same rather than left bare.
+        _ => "bin",
+    }
+}
+
 /// Which kinds of file an agent takes (docs/TODO.md §7). Other kinds are refused rather
 /// than passed as a reference the agent cannot use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,6 +259,26 @@ mod tests {
         );
         assert!(prompt.attachments[1].is_image());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A stored file is named from its type: from the `mime` for images and documents, from
+    /// the name's suffix for text, and only ever an extension, never the name itself.
+    #[test]
+    fn a_stored_file_gets_a_safe_extension() {
+        assert_eq!(ext_for("image/png", "shot"), "png");
+        assert_eq!(ext_for("image/jpeg", "x.png"), "jpg");
+        assert_eq!(ext_for("image/gif", "x"), "gif");
+        assert_eq!(ext_for("image/webp", "x"), "webp");
+        assert_eq!(ext_for("application/pdf", "notes"), "pdf");
+        assert_eq!(ext_for("application/json", "x"), "json");
+        assert_eq!(ext_for("text/markdown", "notes.md"), "md");
+        assert_eq!(ext_for("text/plain", "plain"), "txt");
+        assert_eq!(ext_for("text/plain", "notes.txt"), "txt");
+        // A name cannot decide where the file goes, nor what its extension looks like.
+        assert_eq!(ext_for("text/plain", "../../etc/passwd"), "txt");
+        assert_eq!(ext_for("text/plain", "trailing."), "txt");
+        assert_eq!(ext_for("text/plain", "a.b c"), "txt");
+        assert_eq!(ext_for("application/x-msdownload", "a.exe"), "bin");
     }
 
     #[test]

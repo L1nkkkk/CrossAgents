@@ -435,7 +435,10 @@ body.col-resizing iframe, body.col-resizing webview { pointer-events: none; }
 .plan-settings .caps { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin-top: 8px; }
 .plan-settings .caps label { display: flex; flex-direction: column; gap: 2px; }
 .plan-settings .caps input { width: 100%; }
-.who-pick { max-width: 220px; font-size: 12px; padding: 2px 6px; }
+/* The executor picker on a planned task (src/views/Run.tsx usePlanApproval): a chip menu. */
+.who-pick { display: inline-flex; min-width: 0; }
+.who-pick .chip-pick { height: 26px; max-width: 220px; font-size: 12px; }
+.who-pick .menu { min-width: 280px; max-width: 380px; }
 .plan-card footer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); flex-wrap: wrap; align-items: flex-start; }
 .plan-card footer textarea { flex: 1; min-width: 220px; }
 
@@ -494,6 +497,8 @@ body.col-resizing iframe, body.col-resizing webview { pointer-events: none; }
 
 /* The meter is a button (src/contextusage.tsx): the popup holds the breakdown and 压缩上下文. */
 .ctx-pop { position: relative; display: inline-flex; }
+/* In the rail it is the 上下文 card's first row, as wide as the card. */
+.ctx-pop.ctx-pop-rail { display: flex; width: 100%; min-width: 0; }
 .meter-btn {
   display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border: 1px solid transparent;
   border-radius: 999px; background: transparent; color: var(--text-2); font-size: 12px;
