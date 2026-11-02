@@ -1518,6 +1518,209 @@ pub struct ListToolsResponse {
     pub tools: Vec<crossagents_core::ToolInfo>,
 }
 
+// ---------------------------------------------------------------------------------------
+// Expertise profiles (docs/tasks/EXPERTISE.md)
+
+pub use crossagents_core::{
+    Candidate, CandidateOrigin, CandidateStatus, EntryKind, EntryStats, EntryStatus, Example,
+    ExpertiseEntry, OwnerKind, SourceRef,
+};
+
+/// `POST /v1/expertise`: writes an entry, replacing the one with the same `id` when there is
+/// one. Fields the request leaves out keep what the stored entry had (evidence, stats,
+/// sources, creation time).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SaveExpertiseRequest {
+    /// The entry to replace; a new entry is made when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub id: Option<String>,
+    pub owner_kind: OwnerKind,
+    pub owner_id: String,
+    /// The area it belongs to (`rust`, `gui`, …); the judgement budget is counted per domain.
+    pub domain: String,
+    pub kind: EntryKind,
+    /// One line: the judgement, the case, or the limit.
+    pub title: String,
+    #[serde(default)]
+    pub text: String,
+    /// The worked example, for `kind: "example"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub example: Option<Example>,
+    /// Where it applies; empty means anywhere.
+    #[serde(default)]
+    pub applies_when: String,
+    /// Defaults to `active`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub status: Option<EntryStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub superseded_by: Option<String>,
+}
+
+/// `GET /v1/expertise`, `GET /v1/expertise/search`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListExpertiseResponse {
+    pub entries: Vec<ExpertiseEntry>,
+}
+
+/// `GET /v1/expertise/candidates`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListCandidatesResponse {
+    pub candidates: Vec<Candidate>,
+}
+
+/// What the person decided about one entry a candidate conflicts with (§4.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictVerdict {
+    /// The old entry stays as it is.
+    KeepOld,
+    /// The old entry is superseded by the accepted one.
+    Replace,
+    /// The accepted entry takes the old one's text over, and supersedes it.
+    Merge,
+    /// Both apply; the old entry stays active.
+    Both,
+}
+
+/// One verdict of an accept request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ConflictDecision {
+    /// The conflicting entry's id (one of the candidate's `conflicts_with`).
+    pub entry_id: String,
+    pub verdict: ConflictVerdict,
+}
+
+/// `POST /v1/expertise/candidates/{id}/accept`: every id in `conflicts_with` needs a verdict,
+/// or the call is refused with 400 and nothing changes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AcceptCandidateRequest {
+    #[serde(default)]
+    pub decisions: Vec<ConflictDecision>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AcceptCandidateResponse {
+    pub candidate: Candidate,
+    /// The entry the acceptance added.
+    pub entry: ExpertiseEntry,
+}
+
+/// Two judgements in one domain that read alike, so they could be one entry
+/// (`crossagents_orchestrator::expertise::maintain::MergeSuggestion`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MergeSuggestion {
+    /// The two entry ids, in the order they appeared in the profile.
+    pub a: String,
+    pub b: String,
+    /// Why they could be one entry.
+    pub reason: String,
+}
+
+/// One domain's judgement budget (EXPERTISE §4.3). The fields are the ones
+/// `maintain::budget_report` produces, narrowed to what the wire needs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DomainBudget {
+    pub domain: String,
+    /// Sum of `estimate_tokens` over the domain's non-superseded judgements.
+    pub judgment_tokens: u32,
+    pub budget: u32,
+    pub over: bool,
+    /// By how much the domain is over, `0` when it is not.
+    pub over_by: u32,
+    pub judgment_count: u32,
+    /// Pairs worth merging; only filled when the domain is over budget.
+    pub merge_suggestions: Vec<MergeSuggestion>,
+}
+
+/// A suggestion to re-flag an entry (EXPERTISE §4.4). Nothing is changed by it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StaleHint {
+    pub entry_id: String,
+    pub domain: String,
+    pub title: String,
+    /// What the scan would set it to: `stale` or `review`.
+    pub suggested: EntryStatus,
+    pub reason: String,
+    /// Days since it was last used, confirmed or created.
+    pub days_unused: i32,
+    /// `stats.reworked / stats.used`, `null` when it was never used.
+    pub rework_rate: Option<f64>,
+}
+
+/// A pending candidate and one existing entry it may contradict (EXPERTISE §4.4): one pair
+/// per conflicting entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ConflictPair {
+    pub candidate_id: String,
+    /// The existing entry the candidate may conflict with.
+    pub entry_id: String,
+    pub domain: String,
+    /// The proposed entry's title, so the pair can be shown side by side.
+    pub title: String,
+    pub note: String,
+}
+
+/// The card (EXPERTISE §4.8): how the profile is doing, not how an agent is doing. Computed
+/// from decided usage, so a task that pushed three entries counts three times.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExpertiseCard {
+    /// `merged_first_try / (merged_first_try + reworked + dropped)`, 0–1; `null` without a
+    /// decided usage yet.
+    pub first_try_rate: Option<f64>,
+    /// The same figure over usages decided before 30 days ago.
+    pub first_try_rate_30d_ago: Option<f64>,
+    /// The two rates in percentage points, when both exist.
+    pub delta_points: Option<f64>,
+    /// Decided usages behind `first_try_rate`.
+    pub sample: u32,
+    /// The sample is under ten: the rate is shown, but not to be trusted yet.
+    pub small_sample: bool,
+    pub merged_first_try: u32,
+    pub reworked: u32,
+    pub dropped: u32,
+    /// All entries, by kind.
+    pub entries: u32,
+    pub judgments: u32,
+    pub examples: u32,
+    pub limits: u32,
+    /// Entries by status.
+    pub active: u32,
+    pub stale: u32,
+    pub review: u32,
+    pub superseded: u32,
+    /// Judgement tokens over the whole profile, and the per-domain budget.
+    pub judgment_tokens: u32,
+    pub judgment_budget: u32,
+    /// Domains whose judgements are over budget (shown red).
+    pub over_budget_domains: u32,
+}
+
+/// `GET /v1/expertise/maintenance`: the three views of `maintain` in one answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExpertiseMaintenance {
+    pub budgets: Vec<DomainBudget>,
+    /// Suggested status changes; the person (or the GUI) applies them.
+    pub stale: Vec<StaleHint>,
+    pub conflicts: Vec<ConflictPair>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "snake_case")]
@@ -1575,6 +1778,8 @@ mod tests {
         Event::export_all(&cfg).unwrap();
         crossagents_core::Task::export_all(&cfg).unwrap();
         crossagents_core::Run::export_all(&cfg).unwrap();
+        crossagents_core::ExpertiseEntry::export_all(&cfg).unwrap();
+        crossagents_core::Candidate::export_all(&cfg).unwrap();
     }
 
     #[test]
