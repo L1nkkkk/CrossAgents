@@ -32,7 +32,10 @@ import {
   taskTone,
   time,
   useAgents,
+  VendorMark,
 } from "../components";
+import { ChipMenu, type MenuItem } from "../menu";
+import { sessionStateKey } from "../lib/sessionChoice";
 import { onHubEvent, useHubData, type HubEvent } from "../hub";
 import { BUCKET_LABEL, groupTasks, progress, taskState } from "../lib/taskState";
 import { PRESETS, budgetText, presetOf, presetPolicy, type Preset } from "../lib/policy";
@@ -825,6 +828,12 @@ export function usePlanApproval(run: Run, busy: boolean) {
   const agents = useAgents();
   const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
   const quota = useQuota();
+  // What each workspace session is doing and did last, so the person can pick by it.
+  const candidates = useHubData(
+    () => api.sessionCandidates(run.repo).then((r) => r.sessions),
+    [run.repo],
+    (e) => e.type.startsWith("agent.") || e.type === "run.status_changed" || e.type === "task.handed_off",
+  );
   const policy = run.config.policy;
   const [preset, setPreset] = useState<Preset>(presetOf(policy) ?? "manual");
   // Per task: "" is the run's default worker, `agent:<id>` a teammate, `model:<plugin>/<model>`
@@ -893,32 +902,81 @@ export function usePlanApproval(run: Run, busy: boolean) {
     });
   }
 
-  const pick = (task: PlannedTask) => (
-    <select className="who-pick" value={pickOf(task)} disabled={busy} onChange={(e) => setPicks({ ...picks, [task.key]: e.target.value })}>
-      <option value="">自动{fallback ? ` · ${displayName(fallback)}` : ""}</option>
-      {teammates.length > 0 && (
-        <optgroup label="队友">
-          {teammates.map((a) => (
-            <option key={a.id} value={`agent:${a.id}`}>
-              {displayName(a)} · {prettyModel(a.model ?? a.plugin)}
-            </option>
-          ))}
-        </optgroup>
-      )}
-      {workerGroups.map((group) => (
-        <optgroup key={group.key} label={t("plan.newWorkerFamily", { family: group.label })}>
-          {group.options.map((option) => {
-            const label = workerModelLabel(option, workerOptions);
-            return (
-              <option key={`${option.plugin}/${option.model}`} value={modelPickValue(option.plugin, option.model)} disabled={!!option.blocked}>
-                {option.blocked ? `${label} · ${t(option.blocked.key)}` : label}
-              </option>
-            );
-          })}
-        </optgroup>
-      ))}
-    </select>
-  );
+  /** "Glm 5.3 Flash · 空闲 · run "…" #a (done)"; only the model when the hub says nothing. */
+  const teammateSub = (a: Agent) => {
+    const parts = [prettyModel(a.model ?? a.plugin)];
+    const c = candidates.data?.find((s) => s.agent?.id === a.id);
+    if (c) {
+      parts.push(t(sessionStateKey(c.state)));
+      if (c.last_execution) parts.push(c.last_execution);
+    }
+    return parts.join(" · ");
+  };
+  const autoLabel = `自动${fallback ? ` · ${displayName(fallback)}` : ""}`;
+
+  const pick = (task: PlannedTask) => {
+    const value = pickOf(task);
+    const set = (v: string) => setPicks({ ...picks, [task.key]: v });
+    const items: MenuItem[] = [
+      { kind: "item", key: "auto", label: autoLabel, sub: "默认 worker", subDir: "ltr", icon: fallback ? <Avatar agent={fallback} size={18} /> : undefined, on: value === "", onPick: () => set("") },
+      ...(teammates.length ? [{ kind: "header", key: "h-team", label: "队友" } satisfies MenuItem] : []),
+      ...teammates.map(
+        (a): MenuItem => ({
+          kind: "item",
+          key: `agent:${a.id}`,
+          label: displayName(a),
+          sub: teammateSub(a),
+          subDir: "ltr",
+          icon: <Avatar agent={a} size={18} />,
+          on: value === `agent:${a.id}`,
+          onPick: () => set(`agent:${a.id}`),
+        }),
+      ),
+      ...workerGroups.flatMap((group): MenuItem[] => [
+        { kind: "header", key: `h-${group.key}`, label: t("plan.newWorkerFamily", { family: group.label }) },
+        ...group.options.map((option): MenuItem => {
+          const v = modelPickValue(option.plugin, option.model);
+          return {
+            kind: "item",
+            key: v,
+            label: workerModelLabel(option, workerOptions),
+            sub: option.blocked ? t(option.blocked.key) : option.model,
+            ...(option.blocked ? { subDir: "ltr" as const } : {}),
+            icon: <VendorMark plugin={option.plugin} size={14} />,
+            on: value === v,
+            disabled: !!option.blocked,
+            onPick: () => set(v),
+          };
+        }),
+      ]),
+    ];
+    // The trigger shows the pick: a teammate's face and name, a new model's vendor and model.
+    const chosen = value.startsWith("agent:") ? everyone.find((a) => a.id === value.slice("agent:".length)) : undefined;
+    const model = parseModelPick(value);
+    const option = model && workerOptions.find((o) => o.plugin === model.plugin && o.model === model.model);
+    const icon = chosen ? (
+      <Avatar agent={chosen} size={16} />
+    ) : model ? (
+      <VendorMark plugin={model.plugin} size={14} />
+    ) : fallback ? (
+      <Avatar agent={fallback} size={16} />
+    ) : undefined;
+    const label = chosen ? displayName(chosen) : model ? (option ? workerModelLabel(option, workerOptions) : prettyModel(model.model)) : autoLabel;
+    if (busy)
+      return (
+        <span className="who-pick">
+          <button type="button" className="chip-pick" disabled>
+            {icon}
+            <span className="chip-label">{label}</span>
+          </button>
+        </span>
+      );
+    return (
+      <span className="who-pick" data-task={task.key}>
+        <ChipMenu icon={icon} label={label} title="执行者" items={items} align="right" />
+      </span>
+    );
+  };
   const capsText = budgetText({ max_usd: capOf(maxUsd), max_minutes: capOf(maxMinutes), max_tokens: maxTokens.trim() ? Number(maxTokens) * 1000 : null });
 
   const settings = (
