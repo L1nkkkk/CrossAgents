@@ -244,16 +244,18 @@ impl Orchestrator {
         Ok(json!({ "entry": entry, "tag": tag(&entry) }))
     }
 
-    /// `task_complete.used`: the entries the worker says it went by. An id it cannot read, or
-    /// one already named on this task, is left out rather than refused.
+    /// `task_complete.used`: the entries the worker says it went by, each a full id or the
+    /// short tag a brief showed. A tag that names none or several entries, or one of another
+    /// project, is not recorded: it comes back in the list of what could not be placed.
+    /// Returns how many were recorded, and what could not be placed.
     pub(crate) async fn declare_used(
         &self,
         caller: &Agent,
         task_id: TaskId,
         used: &[String],
-    ) -> Result<(), CoreError> {
+    ) -> Result<(usize, Vec<String>), CoreError> {
         if used.is_empty() {
-            return Ok(());
+            return Ok((0, Vec::new()));
         }
         let task = self.store.get_task(task_id).await?;
         let mut declared: Vec<String> = self
@@ -265,14 +267,24 @@ impl Orchestrator {
             .filter(|u| u.source == UsageSource::Declared)
             .map(|u| u.entry_id)
             .collect();
+        let mut unrecognized: Vec<String> = Vec::new();
+        let mut recorded = 0usize;
         for id in used {
-            let Some(entry) = self.own_entry(caller, id).await? else {
+            let given = id.trim();
+            if given.is_empty() {
+                continue;
+            }
+            let Some(entry) = self.own_entry(caller, given).await? else {
+                if !unrecognized.iter().any(|u| u == given) {
+                    unrecognized.push(given.to_owned());
+                }
                 continue;
             };
             if declared.contains(&entry.id) {
                 continue;
             }
             declared.push(entry.id.clone());
+            recorded += 1;
             self.record_usage(
                 &entry.id,
                 caller,
@@ -282,7 +294,7 @@ impl Orchestrator {
             )
             .await;
         }
-        Ok(())
+        Ok((recorded, unrecognized))
     }
 
     /// The task's result lands on the entries it used: its undecided usage records get

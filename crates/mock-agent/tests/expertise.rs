@@ -18,8 +18,10 @@ use crossagents_store_sqlite::SqliteStore;
 use serde_json::{Value, json};
 
 const MINE: &str = "01a19b48-0000-4000-8000-00000000a001";
+/// The tag a brief shows for [`MINE`]: its id's first eight characters (push.rs `tag`).
+const MINE_TAG: &str = "01a19b48";
 /// An entry of another project: the same search terms, out of this caller's reach.
-const OTHERS: &str = "01a19b48-0000-4000-8000-00000000b002";
+const OTHERS: &str = "02b28c34-0000-4000-8000-00000000b002";
 
 fn call(tool: &str, args: Value) -> String {
     format!("[call {tool} {args}]")
@@ -69,7 +71,7 @@ async fn profiles(home: &std::path::Path) {
         .expertise_put(&entry(
             (OwnerKind::Person, PERSON_OWNER_ID),
             "先写会失败的测试",
-            "flaky 的用例先红后绿，再实现；只有改错字可以跳",
+            "flaky 的用例先红后绿，再实现\n\n只有改错字或纯重命名可以跳",
         ))
         .await
         .unwrap();
@@ -128,15 +130,18 @@ async fn reopened(t: TestHub) -> SqliteStore {
 #[tokio::test]
 async fn a_worker_searches_names_an_entry_and_a_first_try_accept_counts_it() {
     let (t, _repo) = hub_with_profiles().await;
+    // The worker searches, reads one in full by the short tag a brief would show, then names
+    // it by that same tag (plus one tag that names nothing) when it reports.
     let goal = format!(
-        "{} {}",
+        "{} {} {}",
         call("expertise_search", json!({ "query": "flaky" })),
+        call("expertise_get", json!({ "id": MINE_TAG })),
         call(
             "task_complete",
             json!({
                 "task_id": "{task_id}",
                 "summary": format!("wrote a.txt {}", accept("a")),
-                "used": [MINE],
+                "used": [MINE_TAG, "deadbeef"],
             })
         ),
     );
@@ -144,6 +149,16 @@ async fn a_worker_searches_names_an_entry_and_a_first_try_accept_counts_it() {
     w.until("a merged", task_is("a", TaskStatus::Merged)).await;
     let output = w.output();
     assert!(output.contains("先写会失败的测试"), "{output}");
+    // The hit carries the same short tag the brief shows...
+    assert!(output.contains("\"tag\": \"01a19b48\""), "{output}");
+    // ...and only the full entry has the second paragraph.
+    assert!(output.contains("只有改错字或纯重命名可以跳"), "{output}");
+    // The tag that names no entry is skipped and listed back, the good one is taken.
+    assert!(
+        output.contains("unrecognized_used") && output.contains("deadbeef"),
+        "{output}"
+    );
+    assert!(output.contains("\"used\": 1"), "{output}");
     assert!(
         !output.contains("别的项目的判断"),
         "another project's entry is out of reach: {output}"
@@ -160,6 +175,8 @@ async fn a_worker_searches_names_an_entry_and_a_first_try_accept_counts_it() {
     assert!(mine.last_confirmed_at.is_some(), "{mine:?}");
 
     let usages = store.usage_list(Some(MINE), None).await.unwrap();
+    // Whatever the worker typed, the usage names the entry by its full id.
+    assert!(usages.iter().all(|u| u.entry_id == MINE), "{usages:?}");
     let sources: Vec<UsageSource> = usages.iter().map(|u| u.source).collect();
     assert!(sources.contains(&UsageSource::Pulled), "{sources:?}");
     assert!(sources.contains(&UsageSource::Declared), "{sources:?}");
@@ -194,7 +211,7 @@ async fn a_task_sent_back_once_counts_as_reworked() {
             json!({
                 "task_id": "{task_id}",
                 "summary": format!("wrote beta {}", accept("a")),
-                "used": [MINE],
+                "used": [MINE_TAG],
             })
         )
     );
@@ -208,7 +225,7 @@ async fn a_task_sent_back_once_counts_as_reworked() {
                     "wrote alpha {}",
                     call("task_rework", json!({ "task": "a", "notes": format!("say beta instead {again}") }))
                 ),
-                "used": [MINE],
+                "used": [MINE_TAG],
             })
         )
     );
@@ -244,7 +261,7 @@ async fn a_dropped_task_counts_as_dropped_without_evidence() {
                     "wrote alpha {}",
                     call("task_drop", json!({ "task": "a", "reason": "not what was wanted" }))
                 ),
-                "used": [MINE],
+                "used": [MINE_TAG],
             })
         )
     );

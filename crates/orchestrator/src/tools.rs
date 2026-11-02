@@ -362,7 +362,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "expertise_get",
-        description: "One expertise entry in full: its text, and for an example the situation, what was rejected and why, and what was chosen.",
+        description: "One expertise entry in full: its text, and for an example the situation, what was rejected and why, and what was chosen. Give its id or the short tag a brief showed (the id's first 8 characters).",
         groups: ALL,
         schema: || object(json!({ "id": { "type": "string" } }), &["id"]),
     },
@@ -704,7 +704,7 @@ const TOOLS: &[ToolDef] = &[
             schema["properties"]["used"] = json!({
                 "type": "array",
                 "items": { "type": "string" },
-                "description": "Ids (or the tags a brief showed, like [01a19b48]) of the expertise entries you went by. Entries you cannot read are left out."
+                "description": "The expertise entries you went by: their ids, or the short tag a brief showed (the id's first 8 characters, e.g. 01a19b48). A tag that names no entry, or several, is skipped and comes back in unrecognized_used."
             });
             schema
         },
@@ -892,9 +892,13 @@ impl Orchestrator {
                 let task = self.task_ref(caller, &input).await?;
                 let a: A = args(input)?;
                 self.complete(caller, task, a.summary).await?;
-                self.declare_used(caller, task, &a.used).await?;
+                // Tags that named no entry of this project or the person come back, so the
+                // worker can name them again properly.
+                let (used, unrecognized) = self.declare_used(caller, task, &a.used).await?;
                 Ok(json!({
                     "status": "verifying",
+                    "used": used,
+                    "unrecognized_used": unrecognized,
                     "next": "The hub commits your work and runs the task's checks; your summary reaches the task's issuer once they are done. End your turn; if it comes back with notes, continue and report again."
                 }))
             }
