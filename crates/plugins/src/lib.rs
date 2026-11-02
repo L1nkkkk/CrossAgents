@@ -35,6 +35,7 @@ use crossagents_drivers::acp::AcpDriver;
 use crossagents_drivers::claude_native::ClaudeNativeDriver;
 use crossagents_drivers::codebuddy_native::CodebuddyNativeDriver;
 use crossagents_drivers::codex_native::CodexNativeDriver;
+use crossagents_drivers::cursor_native::CursorNativeDriver;
 use crossagents_drivers::locate::{Cli, Install, Locator};
 use crossagents_drivers::with_native::WithNativeDriver;
 use serde::Deserialize;
@@ -204,6 +205,11 @@ impl Profile {
                 WithNativeDriver::new(&self.name, self.config.cli(), self.config.models.clone())
                     .pinned(self.pinned_models),
             ),
+            DriverKind::CursorNative => Arc::new(CursorNativeDriver::new(
+                &self.name,
+                self.config.cli(),
+                self.config.models.clone(),
+            )),
         };
         drivers.insert(kind, driver.clone());
         Ok(Resolved { driver, warning })
@@ -326,7 +332,7 @@ mod tests {
     /// here changes behaviour, not formatting.
     #[test]
     fn the_built_in_descriptions_say_what_the_functions_said() {
-        assert_eq!(builtin::all().len(), 4);
+        assert_eq!(builtin::all().len(), 5);
 
         let claude = builtin::config("claude").unwrap();
         assert_eq!(
@@ -408,7 +414,7 @@ mod tests {
         let registry = PluginRegistry::with_config(&configs);
         assert_eq!(
             registry.names(),
-            ["claude", "codebuddy", "codex", "mock", "with"]
+            ["claude", "codebuddy", "codex", "cursor", "mock", "with"]
         );
         assert_eq!(
             registry.get("claude").unwrap().models(),
@@ -542,5 +548,26 @@ mod tests {
         // `with-cli acp` stays available as the fallback.
         let acp = registry.driver("with", Some("acp-generic")).unwrap();
         assert_eq!(acp.driver.kind(), DriverKind::AcpGeneric);
+    }
+
+    #[test]
+    fn cursor_is_built_in_and_keeps_acp_as_a_fallback() {
+        let registry = PluginRegistry::with_config(&BTreeMap::new());
+        let driver = registry.get("cursor").unwrap();
+        assert_eq!(driver.kind(), DriverKind::CursorNative);
+        assert!(driver.capabilities().resume && driver.capabilities().mcp);
+        assert!(!driver.capabilities().permission_callback && !driver.capabilities().usage);
+        assert!(!driver.models().is_empty());
+        let config = registry.config("cursor").unwrap();
+        assert!(config.efforts.is_empty());
+        assert_eq!(config.command, ["agent", "acp"]);
+        assert_eq!(
+            registry
+                .driver("cursor", Some("acp-generic"))
+                .unwrap()
+                .driver
+                .kind(),
+            DriverKind::AcpGeneric
+        );
     }
 }
