@@ -469,7 +469,11 @@ impl Orchestrator {
             )
             .await?;
         self.notify_dispatched(caller.id, &task, &card).await;
-        self.relay(worker.id, caller.id, brief::handover(&task, &card), None);
+        let mut opening = brief::handover(&task, &card);
+        if let Some(pushed) = self.expertise_brief(&worker, &task).await {
+            opening = format!("{opening}\n\n{pushed}");
+        }
+        self.relay(worker.id, caller.id, opening, None);
         Ok(task_json(&task))
     }
 
