@@ -29,7 +29,7 @@ test("every installed plugin's models are listed, grouped by family", () => {
   const groups = workerModelGroups([plugin("claude", ["claude-opus-4-1"]), plugin("codex", ["gpt-5-codex"]), plugin("with", ["glm-5.3", "claude-sonnet-4-5"])]);
   assert.deepEqual(
     groups.map((g) => g.key),
-    ["claude", "gpt", "glm"],
+    ["claude", "openai", "glm"],
   );
   assert.deepEqual(
     groups.flatMap((g) => g.options.map((o) => `${o.plugin}/${o.model}`)),

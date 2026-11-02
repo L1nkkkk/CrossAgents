@@ -1148,6 +1148,7 @@ a.button.small { font-size: 12.5px; padding: 4px 10px; background: var(--surface
 .model-family-name { display: flex; align-items: center; gap: 8px; padding: 0; border: 0; background: none; color: var(--text); cursor: pointer; }
 .model-family-name:disabled { cursor: default; }
 .model-family-name .chip.muted { color: var(--muted); }
+.model-family-name .family-mark { flex-shrink: 0; }
 .model-family .model-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 @media (max-width: 760px) {
   .page-inner.settings-layout { grid-template-columns: 1fr; gap: 16px; }
