@@ -245,8 +245,19 @@ a.chip:hover { text-decoration: none; background: var(--selected); }
 .sidebar-edge { left: calc(var(--panel-gap) + var(--sidebar-width) + var(--panel-gap) / 2 - 4px); }
 .tools-edge { right: calc(var(--panel-gap) + var(--tools-width) + var(--panel-gap) / 2 - 4px); }
 body.col-resizing { cursor: col-resize; user-select: none; }
+/* The conversations and, under them, the bottom dock. */
+.center-col { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.center-col > .main { flex: 1; }
+.row-edge { position: relative; flex: none; height: var(--panel-gap); z-index: 30; }
+.row-edge::before { content: ""; position: absolute; left: 0; right: 0; top: -4px; bottom: -4px; cursor: row-resize; touch-action: none; }
+.row-edge::after { content: ""; position: absolute; left: 0; right: 0; top: calc(50% - 1px); height: 2px; background: transparent; transition: background 0.12s; pointer-events: none; }
+.row-edge:hover::after, body.row-resizing .row-edge::after { background: var(--accent); }
+body.row-resizing { cursor: row-resize; user-select: none; }
+.bottom-dock { flex: none; height: var(--bottom-height, 280px); display: flex; flex-direction: column; min-height: 0; background: var(--surface); border-top: 1px solid var(--border); }
+.bottom-dock .tool-head { height: 38px; min-height: 38px; padding: 0 8px 0 6px; }
+.flip-y .icon { transform: rotate(180deg); }
 body.col-resizing iframe, body.col-resizing webview { pointer-events: none; }
-:root[data-theme="dark"] .sidebar, :root[data-theme="dark"] .main, :root[data-theme="dark"] .drawer {
+:root[data-theme="dark"] .sidebar, :root[data-theme="dark"] .main, :root[data-theme="dark"] .drawer, :root[data-theme="dark"] .bottom-dock {
   border: 1px solid var(--panel-edge); border-radius: var(--radius-lg); overflow: hidden;
 }
 
@@ -1083,10 +1094,28 @@ a.button.small { font-size: 12.5px; padding: 4px 10px; background: var(--surface
 .tt-stat summary { cursor: pointer; margin: 4px 0; }
 
 /* The tool column: one or two panes stacked; a drawer over the page when narrow. */
-.tool-column { flex: 1; display: grid; min-height: 0; }
-.tool-pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
-.tool-head { display: flex; align-items: center; gap: 4px; padding: 8px 10px 8px 12px; border-bottom: 1px solid var(--border); min-height: 49px; }
-.tool-head .segmented button { padding: 3px 10px; font-size: 12.5px; }
+.tool-column { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.tool-pane { flex: 1; display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.tool-head { display: flex; align-items: center; gap: 4px; padding: 0 10px 0 6px; border-bottom: 1px solid var(--border); min-height: 49px; }
+/* A dock's tabs, browser-like: drag to reorder or to the other dock. */
+.tab-row { flex: 1; min-width: 0; align-self: stretch; display: flex; align-items: stretch; gap: 1px; overflow-x: auto; scrollbar-width: none; }
+.tab-row::-webkit-scrollbar { display: none; }
+.dock-tab { position: relative; flex: none; display: inline-flex; align-items: center; gap: 2px; padding: 0 4px 0 10px; font-size: 12.5px; color: var(--text-2); cursor: default; user-select: none; touch-action: none; white-space: nowrap; }
+.dock-tab:hover { color: var(--text); }
+.dock-tab.active { color: var(--text); font-weight: 500; }
+.dock-tab.active::after { content: ""; position: absolute; left: 6px; right: 6px; bottom: 0; height: 2px; background: var(--accent); border-radius: 1px; }
+.dock-tab.dragged { opacity: 0.4; }
+.dock-tab-pick { border: none; background: transparent; padding: 0; color: inherit; font: inherit; cursor: inherit; }
+.dock-tab-pick:hover { background: transparent; }
+.dock-tab-x { display: inline-grid; place-items: center; width: 18px; height: 18px; padding: 0; border: none; border-radius: 4px; background: transparent; color: var(--muted); opacity: 0; }
+.dock-tab:hover .dock-tab-x, .dock-tab.active .dock-tab-x, .dock-tab-x:focus-visible { opacity: 1; }
+.dock-tab-x:hover { background: var(--hover); color: var(--text); }
+.dock-add { position: relative; flex: none; display: inline-flex; align-items: center; margin-left: 2px; }
+.dock-add .menu { position: fixed; min-width: 140px; }
+.tab-ghost { position: fixed; z-index: 60; pointer-events: none; padding: 4px 10px; font-size: 12.5px; border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-float); transform: translate(-50%, -120%); }
+.drop-zone { position: fixed; z-index: 55; pointer-events: none; background: var(--accent-bg); outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--radius); opacity: 0.75; }
+.drop-marker { position: fixed; z-index: 56; pointer-events: none; width: 2px; background: var(--accent); }
+body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; user-select: none; }
 .tool-body { flex: 1; overflow: auto; padding: 12px 14px 16px; min-height: 0; }
 .tool-blank { padding: 24px 6px; text-align: center; line-height: 1.6; }
 .tool-whose { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 500; white-space: nowrap; }
@@ -1415,8 +1444,6 @@ button.ghost.icon, .icon-btn { background: transparent; border-color: transparen
 .rail-rows div { display: flex; justify-content: space-between; gap: 8px; }
 .rail-rows dt { color: var(--muted); }
 .rail-rows dd { margin: 0; font-variant-numeric: tabular-nums; color: var(--text-2); }
-.tool-head .segmented { flex-shrink: 0; }
-.tool-head .segmented button { white-space: nowrap; }
 
 /* Each panel's first row (a page's header, the tool column's tabs) is the same height, so the
    rows line up across the window like Codex's; they keep to one line. */
