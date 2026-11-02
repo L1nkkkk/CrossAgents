@@ -345,6 +345,28 @@ const TOOLS: &[ToolDef] = &[
         },
     },
     ToolDef {
+        name: "expertise_search",
+        description: "Search what this project and the person consider good work: judgements, worked examples and limits, by keyword. A match is a lead, not a rule: check its status and applies_when before going by it.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({
+                    "query": { "type": "string" },
+                    "domain": { "type": "string", "description": "Only this area (rust, gui, windows, testing, …)." },
+                    "kind": { "type": "string", "enum": ["judgment", "example", "limit"] },
+                    "limit": { "type": "integer", "description": "1-10, default 5." }
+                }),
+                &["query"],
+            )
+        },
+    },
+    ToolDef {
+        name: "expertise_get",
+        description: "One expertise entry in full: its text, and for an example the situation, what was rejected and why, and what was chosen.",
+        groups: ALL,
+        schema: || object(json!({ "id": { "type": "string" } }), &["id"]),
+    },
+    ToolDef {
         name: "lesson_report",
         description: "Say how a troubleshooting record went when you used it. One that did not work is put up for review; its history stays.",
         groups: ALL,
@@ -672,12 +694,19 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_complete",
-        description: "Report your task done with a summary of what you changed. The hub commits your work, runs the task's checks and passes your summary to the task's issuer only once they are done, so the issuer sees checked work.",
+        description: "Report your task done with a summary of what you changed. The hub commits your work, runs the task's checks and passes your summary to the task's issuer only once they are done, so the issuer sees checked work. Name the expertise entries you went by in `used`; the result of this task is counted on them.",
         groups: WORKER,
         schema: || {
-            task_id_schema(
+            let mut schema = task_id_schema(
                 json!({ "summary": { "type": "string", "description": "What you changed." } }),
-            )
+            );
+            // Optional, unlike the fields `task_id_schema` lists as required.
+            schema["properties"]["used"] = json!({
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Ids (or the tags a brief showed, like [01a19b48]) of the expertise entries you went by. Entries you cannot read are left out."
+            });
+            schema
         },
     },
     ToolDef {
@@ -785,6 +814,8 @@ impl Orchestrator {
             }
             "lesson_search" => self.lesson_search(caller, input).await,
             "lesson_get" => self.lesson_get(caller, input).await,
+            "expertise_search" => self.expertise_search(caller, input).await,
+            "expertise_get" => self.expertise_get(caller, input).await,
             "lesson_report" => self.lesson_report(caller, input).await,
             "usage_get" => self.usage_get(caller).await,
             "inbox_read" => self.inbox_read(caller).await,
@@ -854,10 +885,14 @@ impl Orchestrator {
                 struct A {
                     #[serde(default)]
                     summary: String,
+                    /// The expertise entries the worker went by (EXPERTISE §4.5).
+                    #[serde(default)]
+                    used: Vec<String>,
                 }
                 let task = self.task_ref(caller, &input).await?;
                 let a: A = args(input)?;
                 self.complete(caller, task, a.summary).await?;
+                self.declare_used(caller, task, &a.used).await?;
                 Ok(json!({
                     "status": "verifying",
                     "next": "The hub commits your work and runs the task's checks; your summary reaches the task's issuer once they are done. End your turn; if it comes back with notes, continue and report again."
