@@ -835,9 +835,11 @@ export class MockBridge implements CrossAgentsBridge {
         ? ["CODEX_HOME", "C:\\Users\\me\\AppData\\Roaming\\npm\\codex.cmd", "'resume'"]
         : driver === "codebuddy-native"
           ? ["CODEBUDDY_CONFIG_DIR", "C:\\Users\\me\\AppData\\Roaming\\npm\\codebuddy.cmd", "--resume"]
-          : ["CLAUDE_CONFIG_DIR", "C:\\Users\\me\\.local\\bin\\claude.exe", "--resume"];
+          : driver === "cursor-native"
+            ? [null, "C:\\Users\\me\\.local\\bin\\agent.exe", "--resume"]
+            : ["CLAUDE_CONFIG_DIR", "C:\\Users\\me\\.local\\bin\\claude.exe", "--resume"];
     const env = [
-      { name, value: `C:\\Users\\me\\.crossagents\\accounts\\${a.plugin}-work` },
+      ...(name ? [{ name, value: `C:\\Users\\me\\.crossagents\\accounts\\${a.plugin}-work` }] : []),
       { name: "HTTPS_PROXY", value: "http://127.0.0.1:7890" },
     ];
     const q = (v: string) => `'${v.replace(/'/g, "''")}'`;
