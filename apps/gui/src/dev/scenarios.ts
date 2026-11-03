@@ -7,7 +7,7 @@ import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, 
 import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
 import { usageScene } from "../views/Usage.mock";
 import { expertiseScene } from "../views/Expertise.mock";
-import { agent, ago, capabilitiesOf, NOTES_REPO, REPO, say, team, think, turn } from "./fixtures";
+import { agent, ago, capabilitiesOf, NOTES_REPO, planned, REPO, say, team, think, turn } from "./fixtures";
 import { openFile } from "../FileViewer";
 import type { AccountQuota } from "@bindings/AccountQuota";
 import type { PluginInfo } from "@bindings/PluginInfo";
@@ -103,7 +103,7 @@ export const SCENARIOS: Scenario[] = [
         {
           at: 1000,
           act: () =>
-            [...document.querySelectorAll<HTMLButtonElement>(".who-pick .menu-item")]
+            [...document.querySelectorAll<HTMLButtonElement>(".who-pick-menu .menu-item")]
               .find((b) => b.querySelector(".menu-sub")?.textContent === "gpt-6-sol" && !b.disabled)
               ?.click(),
         },
@@ -126,6 +126,22 @@ export const SCENARIOS: Scenario[] = [
     };
   } },
   { key: "plan", label: "计划待审批", hint: "run 页：中间只有主导的对话和待审批的 Plan；右侧栏是计划、run 信息、策略与预算", build: () => oauthRun("plan") },
+  { key: "plan-long", label: "批计划：长列表里挑执行者", hint: "计划有九个任务、标题很长：最后一个任务的执行者菜单在可滚动的计划区里展开，不被裁掉，放不下时向上翻", build: () => {
+    const scene = oauthRun("plan");
+    const r = scene.state.runs[0].run;
+    const more = ["e", "f", "g", "h", "i"].map((k, i) =>
+      planned(k, `第 ${i + 5} 步：把登录相关的旧接口逐个迁到新的会话层并补齐回归测试（${k}）`, "接口不变，旧调用方逐个改过来，每改一个补一条回归测试。", i % 2 ? "mia" : "rex", ["c"], [`src/legacy/${k}/**`]),
+    );
+    r.plan = [...r.plan, ...more];
+    return {
+      ...scene,
+      route: `#/runs/${r.id}`,
+      script: [
+        { at: 700, act: () => document.querySelector('.who-pick[data-task="i"]')?.scrollIntoView({ block: "end" }) },
+        { at: 1000, act: () => document.querySelector<HTMLButtonElement>('.who-pick[data-task="i"] .chip-pick')?.click() },
+      ],
+    };
+  } },
   { key: "running", label: "run 进行中", hint: "run 页：中间栏只有对话；右侧栏按任务分组（含交接链）、run 信息、策略、笔记，追溯和参与者收起", build: () => oauthRun("running") },
   { key: "paused", label: "run 已暂停", hint: "中间只有一行「已暂停」提示，展开看全文；计划、run 信息、策略都在右侧栏", build: () => pausedRun() },
   { key: "review", label: "审查任务", hint: "#c 已报告完成：整个任务的 diff 带行号，点行号写意见，可发给 worker 或打回重做", build: () => reviewRun() },

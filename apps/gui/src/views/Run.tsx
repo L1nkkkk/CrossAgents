@@ -973,7 +973,7 @@ export function usePlanApproval(run: Run, busy: boolean) {
       );
     return (
       <span className="who-pick" data-task={task.key}>
-        <ChipMenu icon={icon} label={label} title="执行者" items={items} align="right" />
+        <ChipMenu icon={icon} label={label} title="执行者" items={items} align="right" menuClassName="who-pick-menu" />
       </span>
     );
   };
