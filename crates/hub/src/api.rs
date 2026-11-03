@@ -1164,6 +1164,13 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
     } else {
         Vec::new()
     };
+    // What this plugin's install or upgrade is doing now, if one is running (in memory only:
+    // after a restart nothing is, so this is `None`).
+    let installing = state
+        .installer
+        .installing(name)
+        .await
+        .map(|action| action.as_str().to_owned());
     let cli = d.cli_status().await.map(|status| CliInfo {
         installed: status.located.is_some(),
         probing: status.probing,
@@ -1185,6 +1192,7 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
         install_command: status.install_command,
         upgrade_command: status.upgrade_command,
         can_upgrade: status.can_upgrade,
+        installing,
         described_by: status.described_by,
     });
     PluginInfo {

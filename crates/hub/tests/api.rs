@@ -7,7 +7,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use crossagents_api_types::{
     Agent, ChangesResponse, CommitGraph, FileContentResponse, FileKind, FileTreeResponse,
-    GraphRefKind, ImageContent, ListAgentsResponse, ResolvePathsResponse, Run,
+    GraphRefKind, ImageContent, ListAgentsResponse, ListPluginsResponse, ResolvePathsResponse, Run,
 };
 use crossagents_hub::{HubConfig, Paths, RunningHub};
 use futures::StreamExt;
@@ -1303,4 +1303,79 @@ fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
         let _ = (target, link);
         Err(std::io::Error::other("no symlinks here"))
     }
+}
+
+/// What `GET /v1/plugins` says is running now for `claude`, if anything.
+async fn installing(t: &TestHub) -> Option<String> {
+    let list: ListPluginsResponse = t
+        .get("/v1/plugins")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    list.plugins
+        .iter()
+        .find(|p| p.name == "claude")
+        .and_then(|p| p.cli.as_ref())
+        .and_then(|cli| cli.installing.clone())
+}
+
+/// docs/DESIGN.md §9.3 / crates/hub/src/install.rs: the list says which CLI has an install or
+/// upgrade in progress, so the GUI disables its button instead of meeting the 409; once the
+/// job ends the field is empty again (it is kept in memory only).
+#[tokio::test]
+async fn plugins_report_an_install_in_progress_and_forget_it_afterwards() {
+    // A description whose install command only waits: nothing is installed, and the state
+    // can be read while it runs. `ping` and `sleep` are there wherever the tests run.
+    let slow: Vec<String> = if cfg!(windows) {
+        ["cmd", "/c", "ping", "-n", "3", "127.0.0.1"]
+            .map(str::to_owned)
+            .to_vec()
+    } else {
+        ["sleep", "2"].map(str::to_owned).to_vec()
+    };
+    let t = TestHub::start_with(|config| {
+        config.plugins.insert(
+            "claude".into(),
+            crossagents_plugins::PluginConfig {
+                install: crossagents_drivers::locate::Install {
+                    methods: vec![crossagents_drivers::locate::InstallMethod {
+                        id: "native".into(),
+                        run: slow,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+    })
+    .await;
+
+    assert_eq!(installing(&t).await, None, "nothing runs at start");
+
+    let accepted = t.post("/v1/plugins/claude/install").send().await.unwrap();
+    assert_eq!(
+        accepted.status(),
+        StatusCode::ACCEPTED,
+        "{}",
+        accepted.text().await.unwrap()
+    );
+
+    // While it runs, the list says so -- and a second request is refused, as the button was
+    // meant to prevent.
+    assert_eq!(installing(&t).await.as_deref(), Some("install"));
+    let again = t.post("/v1/plugins/claude/install").send().await.unwrap();
+    assert_eq!(again.status(), StatusCode::CONFLICT);
+
+    // When it ends the field is empty again: nothing is running any more.
+    for _ in 0..100 {
+        if installing(&t).await.is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(installing(&t).await, None);
 }

@@ -25,6 +25,7 @@ import { useArmed } from "../parts";
 import { AvatarChoice } from "./AvatarGallery";
 import { ConnectExternal, ConnectInstructions } from "./External";
 import { vendorLabel } from "../lib/models";
+import { installBusy, installingLabel, installingOf, installRefusedText } from "../lib/installState";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
 import type { CliInfo } from "@bindings/CliInfo";
 
@@ -127,6 +128,8 @@ function VendorClis() {
   );
   const [confirm, setConfirm] = useState<Job>();
   const [jobs, setJobs] = useState<Record<string, Progress>>({});
+  // A click the hub refused because that plugin already has a job: said in words, per row.
+  const [refused, setRefused] = useState<{ plugin: string; text: string }>();
   // The POST is out; the probes themselves show in each row's `probing`.
   const [asking, setAsking] = useState(false);
   const [askError, setAskError] = useState<string>();
@@ -184,6 +187,8 @@ function VendorClis() {
           });
         } else if (e.type === "cli.install.finished") {
           const { plugin, ok, reason, code } = e.data;
+          // The job it said to wait for ended: the note has nothing left to say.
+          setRefused((said) => (said?.plugin === plugin ? undefined : said));
           setJobs((all) => {
             const job = all[plugin];
             if (!job) return all;
@@ -218,10 +223,18 @@ function VendorClis() {
 
   async function start(job: Job) {
     setConfirm(undefined);
+    setRefused(undefined);
     try {
       if (job.action === "install") await api.installPlugin(job.plugin);
       else await api.upgradePlugin(job.plugin);
     } catch (err) {
+      // Already running (409): no job of ours to show. Say to wait, and read the list again
+      // so the row says what the hub is doing and keeps its buttons disabled.
+      if (installBusy(err)) {
+        setRefused({ plugin: job.plugin, text: installRefusedText(err, job.action) });
+        reload();
+        return;
+      }
       setJobs((all) => ({
         ...all,
         [job.plugin]: { plugin: job.plugin, action: job.action, lines: [], dropped: 0, done: { ok: false, reason: errorText(err) } },
@@ -258,6 +271,9 @@ function VendorClis() {
         {list.map((p) => {
           const cli = p.cli!;
           const job = jobs[p.name];
+          // What the hub is doing for this CLI now: a job of this window, or one started
+          // elsewhere and reported on `GET /v1/plugins`. Its buttons stay disabled either way.
+          const busy = installingOf(cli, job);
           return (
             <div className="setting-line cli-line" key={p.name}>
               <div className="model-name">
@@ -274,61 +290,73 @@ function VendorClis() {
               <div className="cli-actions">
                 {job ? (
                   <InstallProgress job={job} />
-                ) : cli.installed ? (
+                ) : (
                   <>
-                    {cli.can_upgrade ? (
-                      <button
-                        className="ghost"
-                        onClick={() =>
-                          setConfirm({
-                            plugin: p.name,
-                            action: "upgrade",
-                            argv: cli.upgrade_command ?? [],
-                            described_by: cli.described_by,
-                          })
-                        }
-                      >
-                        升级
-                      </button>
-                    ) : (
-                      upgradeNote(cli) && <span className="setting-hint">{upgradeNote(cli)}</span>
-                    )}
-                    {p.name === "claude" && cli.installed_via === "npm" && (
-                      <span className="setting-hint">
-                        npm 版已弃用，可以运行 <code>claude install</code> 迁到原生安装
+                    {busy && (
+                      <span className="chip small" title="hub 正在执行它的安装命令，等它结束">
+                        {installingLabel(busy)}…
                       </span>
                     )}
-                    {cli.docs && (
-                      <a href={cli.docs} target="_blank" rel="noreferrer" className="small">
-                        文档
-                      </a>
+                    {cli.installed ? (
+                      <>
+                        {cli.can_upgrade ? (
+                          <button
+                            className="ghost"
+                            disabled={!!busy}
+                            onClick={() =>
+                              setConfirm({
+                                plugin: p.name,
+                                action: "upgrade",
+                                argv: cli.upgrade_command ?? [],
+                                described_by: cli.described_by,
+                              })
+                            }
+                          >
+                            升级
+                          </button>
+                        ) : (
+                          upgradeNote(cli) && <span className="setting-hint">{upgradeNote(cli)}</span>
+                        )}
+                        {p.name === "claude" && cli.installed_via === "npm" && (
+                          <span className="setting-hint">
+                            npm 版已弃用，可以运行 <code>claude install</code> 迁到原生安装
+                          </span>
+                        )}
+                        {cli.docs && (
+                          <a href={cli.docs} target="_blank" rel="noreferrer" className="small">
+                            文档
+                          </a>
+                        )}
+                      </>
+                    ) : cli.install_command ? (
+                      <>
+                        <button
+                          className="primary"
+                          disabled={!!busy}
+                          onClick={() =>
+                            setConfirm({
+                              plugin: p.name,
+                              action: "install",
+                              argv: cli.install_command ?? [],
+                              described_by: cli.described_by,
+                            })
+                          }
+                        >
+                          安装
+                        </button>
+                        {cli.docs && (
+                          <a href={cli.docs} target="_blank" rel="noreferrer" className="small">
+                            文档
+                          </a>
+                        )}
+                      </>
+                    ) : (
+                      cli.install_hint && <CopyCommand command={cli.install_hint} />
                     )}
                   </>
-                ) : cli.install_command ? (
-                  <>
-                    <button
-                      className="primary"
-                      onClick={() =>
-                        setConfirm({
-                          plugin: p.name,
-                          action: "install",
-                          argv: cli.install_command ?? [],
-                          described_by: cli.described_by,
-                        })
-                      }
-                    >
-                      安装
-                    </button>
-                    {cli.docs && (
-                      <a href={cli.docs} target="_blank" rel="noreferrer" className="small">
-                        文档
-                      </a>
-                    )}
-                  </>
-                ) : (
-                  cli.install_hint && <CopyCommand command={cli.install_hint} />
                 )}
               </div>
+              {refused?.plugin === p.name && <div className="cli-done">{refused.text}</div>}
               {job?.done?.ok && (
                 <div className="cli-done ok">
                   {job.action === "install" ? (

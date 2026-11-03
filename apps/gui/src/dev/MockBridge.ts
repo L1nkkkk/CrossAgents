@@ -1021,6 +1021,11 @@ export class MockBridge implements CrossAgentsBridge {
     const plugin = this.state.plugins.find((p) => p.name === name);
     const cli = plugin?.cli;
     if (!plugin || !cli) return notFound("plugin");
+    // Like the hub's 409 (`crates/hub/src/install.rs` `claim`): one job per plugin at a time.
+    if (cli.installing) {
+      const running = cli.installing === "upgrade" ? "upgraded" : "installed";
+      return json(409, { error: { code: "conflict", message: `${name} is already being ${running}; wait for it to finish` } });
+    }
     const argv = action === "install" ? cli.install_command : cli.upgrade_command;
     if (!argv?.length) return json(409, { error: { code: "conflict", message: `${name} cannot be ${action}ed here` } });
     const mode = this.state.install ?? "ok";
@@ -1030,6 +1035,9 @@ export class MockBridge implements CrossAgentsBridge {
         : mode === "missing"
           ? [`$ ${argv.join(" ")}`, `installed ${name} into a directory the hub does not look in`]
           : [`$ ${argv.join(" ")}`, "added 1 package in 3s", `${name} ${action === "install" ? "installed" : "upgraded"}`];
+    // What `GET /v1/plugins` reports while it runs; the hub keeps this in memory only, and so
+    // does the mock (a scenario starting fresh has nothing running).
+    cli.installing = action;
     this.emit({ type: "cli.install.started", data: { plugin: name, action, argv, described_by: cli.described_by } });
     lines.forEach((line, i) =>
       this.timers.push(
@@ -1050,6 +1058,7 @@ export class MockBridge implements CrossAgentsBridge {
     this.timers.push(
       setTimeout(
         () => {
+          delete cli.installing;
           if (ok) {
             cli.installed = true;
             cli.version = action === "install" ? "1.0.6" : "0.159.0";
