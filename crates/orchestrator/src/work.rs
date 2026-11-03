@@ -41,7 +41,7 @@ impl Orchestrator {
             from: Option<String>,
         }
         let a: A = crate::tools::args(input)?;
-        let run = self
+        let mut run = self
             .run_of(caller.id)
             .await?
             .map(|(r, _)| r)
@@ -54,11 +54,7 @@ impl Orchestrator {
         }
         // Every run belongs to a work group. One without (from before groups existed) gets
         // the group that carries it on, so the next round reuses its checkout and branch.
-        let work = {
-            let _guard = self.lock(run.id).await;
-            let mut run = self.store().get_run(run.id).await?;
-            self.work_of_run(&mut run).await?.id
-        };
+        let work = self.work_of_run(&mut run).await?.id;
         let next = self
             .create_work_round(work, a.request, Some(a.title), a.from.as_deref())
             .await?;
@@ -91,16 +87,24 @@ impl Orchestrator {
     /// The group `run` is in, made for it when it has none (a run from before groups
     /// existed, or one whose lead carries on from it): the round that follows then reuses
     /// its checkout and branch instead of starting over from the base branch.
+    /// `run` is left as the stored one, so recording the group never writes the fields a
+    /// caller read earlier over what the run has become since (its status, its lead).
     pub async fn work_of_run(&self, run: &mut Run) -> Result<Work, CoreError> {
-        if let Some(id) = run.work_id {
-            return self.store().get_work(id).await;
-        }
-        let work = self
-            .create_work_group(&run.title, run.repo.clone(), run.planner)
-            .await?;
-        run.work_id = Some(work.id);
-        run.updated_at = Utc::now();
-        self.store().update_run(run).await?;
+        let _guard = self.lock(run.id).await;
+        let mut latest = self.store().get_run(run.id).await?;
+        let work = match latest.work_id {
+            Some(id) => self.store().get_work(id).await?,
+            None => {
+                let work = self
+                    .create_work_group(&latest.title, latest.repo.clone(), latest.planner)
+                    .await?;
+                latest.work_id = Some(work.id);
+                latest.updated_at = Utc::now();
+                self.store().update_run(&latest).await?;
+                work
+            }
+        };
+        *run = latest;
         Ok(work)
     }
 
