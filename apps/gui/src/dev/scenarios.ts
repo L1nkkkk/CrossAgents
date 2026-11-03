@@ -26,6 +26,42 @@ export type Scenario = {
 };
 
 export const SCENARIOS: Scenario[] = [
+  { key: "model-search", label: "模型搜索", hint: "CLI 别名显示名与平台筛选", build: () => {
+    const state = usageScene();
+    const claude = state.plugins.find((p) => p.name === "claude")!;
+    claude.models = ["opus", "sonnet", "claude-opus-5"];
+    claude.all_models = claude.models;
+    const account = state.quota.accounts.find((a) => a.account.provider === "claude")!;
+    state.quota.accounts = state.quota.accounts.filter((a) => a.account.provider !== "claude" || a === account);
+    account.models = [
+      { id: "opus", name: "Opus 5.5", description: "For complex work", context_window: null },
+      { id: "sonnet", name: "Sonnet 5.5", description: null, context_window: null },
+      { id: "claude-opus-5", name: "Opus 5", description: null, context_window: null },
+    ];
+    return { state, route: "#/", script: [
+      { at: 200, act: () => {
+        localStorage.setItem("crossagents.mode", JSON.stringify("chat"));
+        window.dispatchEvent(new CustomEvent("crossagents:mode", { detail: "chat" }));
+      } },
+      { at: 600, act: () => document.querySelector<HTMLButtonElement>('button[title="模型"]')?.click() },
+      { at: 900, act: () => {
+        const input = document.querySelector<HTMLInputElement>(".menu-search");
+        if (!input) throw new Error("model search input missing");
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "claude opus");
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      } },
+      { at: 1100, act: () => {
+        const labels = [...document.querySelectorAll(".menu-options .menu-label")].map((el) => el.textContent);
+        if (JSON.stringify(labels) !== JSON.stringify(["Opus 5.5", "Opus 5"])) throw new Error(`unexpected model matches: ${labels}`);
+        const input = document.querySelector<HTMLInputElement>(".menu-search")!;
+        if (document.activeElement !== input) throw new Error("search input should have focus");
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+      } },
+      { at: 1300, act: () => {
+        if (document.querySelector(".menu-item.cursor .menu-label")?.textContent !== "Opus 5") throw new Error("arrow navigation did not move to the filtered option");
+      } },
+    ] };
+  } },
   { key: "codebuddy-sites", label: "CodeBuddy 双站点账号", hint: "独立账号和国内/国际站选择", build: () => {
     const state = usageScene();
     const template = state.quota.accounts.find((a) => a.account.provider === "codebuddy")!;

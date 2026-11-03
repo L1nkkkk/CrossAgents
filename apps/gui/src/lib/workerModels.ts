@@ -6,7 +6,8 @@ import type { AccountQuota } from "@bindings/AccountQuota";
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import type { Key } from "./i18n";
-import { groupModels, prettyModel, vendorLabel } from "./models.ts";
+import { groupModels, vendorLabel } from "./models.ts";
+import { modelDisplay } from "./modelDisplay.ts";
 
 /** The lead, when one is known: its plugin decides whose login a new worker uses. */
 export type LeadRef = { plugin?: string; account?: string };
@@ -79,9 +80,10 @@ export function workerModelGroups(plugins: readonly PluginInfo[], accounts: read
  * "Sonnet 5.5", plus the plugin when another plugin offers a model of the same name: the
  * person must be able to tell the two apart rather than have one guessed for them.
  */
-export function workerModelLabel(option: WorkerModelOption, all: readonly WorkerModelOption[]): string {
+export function workerModelLabel(option: WorkerModelOption, all: readonly WorkerModelOption[], accounts: readonly AccountQuota[] = []): string {
   const shared = all.some((o) => o.model === option.model && o.plugin !== option.plugin);
-  return shared ? `${prettyModel(option.model)} · ${vendorLabel(option.plugin)}` : prettyModel(option.model);
+  const label = modelDisplay(option.plugin, option.model, accounts, option.account).label;
+  return shared ? `${label} · ${vendorLabel(option.plugin)}` : label;
 }
 
 /** The `<option>` value for a model: the plugin and the model, unambiguous across vendors. */
