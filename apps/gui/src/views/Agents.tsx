@@ -112,9 +112,9 @@ const PROBE_POLLS = 40;
  * program came from, a button that installs or upgrades it, and why there is no button when
  * there is none. Nothing runs before the person confirms the exact command.
  *
- * The list is not only what the hub saw when it started: entering the page asks the hub to
- * look again and probe the versions, and coming back to the window reads the list again, so
- * a CLI installed in a terminal shows up without restarting the hub.
+ * The list is not only what the hub saw when it started: entering the page and coming back to
+ * the window read it again, and the button asks the hub to look again and probe the versions,
+ * so a CLI installed in a terminal shows up without restarting the hub.
  */
 function VendorClis() {
   const plugins = useHubData(
@@ -132,8 +132,10 @@ function VendorClis() {
   const [askError, setAskError] = useState<string>();
   const reload = plugins.reload;
 
-  // Asking the hub to look again forgets what it remembered for every CLI, so only the person
-  // asks: entering the page and the button. It is not what the poll below does.
+  // Asking the hub to look again (`POST /v1/plugins/refresh`) forgets what it remembered for
+  // every CLI -- including "this one could not answer just now", whose 60 s retry window is
+  // what keeps a broken CLI from being asked again and again. So only the person asks: the
+  // "重新检测" button. Nothing else on this page calls it.
   const refresh = useCallback(() => {
     setAsking(true);
     api
@@ -148,12 +150,11 @@ function VendorClis() {
       });
   }, [reload]);
 
-  // Entering the page asks for a fresh look, once; coming back to the window only re-reads
-  // the list. A full look forgets what the hub remembered, including "this CLI could not
-  // answer just now" -- doing that on every focus asked the CLI again and again, and its row
-  // said "probing" for as long as the person kept clicking in the window. Reading the list is
-  // enough for a CLI installed in a terminal to appear: a miss is never cached, and a file
-  // that changed is asked its version again.
+  // Entering the page and coming back to the window only read the list. Reading it is enough
+  // for a CLI installed in a terminal to appear: a miss is never cached, and a file that
+  // changed is asked its version again. Triggering a full look here instead kept asking the
+  // CLIs -- and kept their rows saying "probing" for as long as the person kept alt-tabbing
+  // back to the window.
   useEffect(() => {
     const onFocus = () => reload();
     const onVisible = () => {
@@ -161,12 +162,11 @@ function VendorClis() {
     };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisible);
-    refresh();
     return () => {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [refresh, reload]);
+  }, [reload]);
 
   useEffect(
     () =>
