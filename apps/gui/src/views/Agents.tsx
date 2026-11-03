@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { AgentProfile } from "@bindings/AgentProfile";
 import { RefreshCw } from "lucide-react";
@@ -104,17 +104,17 @@ const CLI_SOURCE: Record<string, string> = {
   bundled: "桌面版自带",
 };
 
-/** How often the CLI list is looked for again on its own: at least this far apart. */
-const REFRESH_EVERY_MS = 10_000;
+/** How many times a row that says it is asking is read again before the poll gives up. */
+const PROBE_POLLS = 40;
 
 /**
  * The agent CLIs this machine has (docs/DESIGN.md §9.3): each vendor's version and where its
  * program came from, a button that installs or upgrades it, and why there is no button when
  * there is none. Nothing runs before the person confirms the exact command.
  *
- * The list is not only what the hub saw when it started: entering the page, and coming back
- * to a window that lost focus, makes the hub look again and probe the versions, so a CLI
- * installed in a terminal shows up without restarting the hub.
+ * The list is not only what the hub saw when it started: entering the page and coming back to
+ * the window read it again, and the button asks the hub to look again and probe the versions,
+ * so a CLI installed in a terminal shows up without restarting the hub.
  */
 function VendorClis() {
   const plugins = useHubData(
@@ -130,43 +130,43 @@ function VendorClis() {
   // The POST is out; the probes themselves show in each row's `probing`.
   const [asking, setAsking] = useState(false);
   const [askError, setAskError] = useState<string>();
-  const lastRefresh = useRef(0);
   const reload = plugins.reload;
 
-  const refresh = useCallback(
-    (force = false) => {
-      const now = Date.now();
-      if (!force && now - lastRefresh.current < REFRESH_EVERY_MS) return;
-      lastRefresh.current = now;
-      setAsking(true);
-      api
-        .refreshPlugins()
-        .then(() => setAskError(undefined))
-        .catch((err) => setAskError(errorText(err)))
-        // The probes answer one at a time on the event stream; this read picks up the ones
-        // already out, so their rows say "asking" meanwhile.
-        .finally(() => {
-          setAsking(false);
-          reload();
-        });
-    },
-    [reload],
-  );
+  // Asking the hub to look again (`POST /v1/plugins/refresh`) forgets what it remembered for
+  // every CLI -- including "this one could not answer just now", whose 60 s retry window is
+  // what keeps a broken CLI from being asked again and again. So only the person asks: the
+  // "重新检测" button. Nothing else on this page calls it.
+  const refresh = useCallback(() => {
+    setAsking(true);
+    api
+      .refreshPlugins()
+      .then(() => setAskError(undefined))
+      .catch((err) => setAskError(errorText(err)))
+      // The probes answer one at a time on the event stream; this read picks up the ones
+      // already out, so their rows say "asking" meanwhile.
+      .finally(() => {
+        setAsking(false);
+        reload();
+      });
+  }, [reload]);
 
-  // Entering the page, and coming back to the window (docs/DESIGN.md §9.3).
+  // Entering the page and coming back to the window only read the list. Reading it is enough
+  // for a CLI installed in a terminal to appear: a miss is never cached, and a file that
+  // changed is asked its version again. Triggering a full look here instead kept asking the
+  // CLIs -- and kept their rows saying "probing" for as long as the person kept alt-tabbing
+  // back to the window.
   useEffect(() => {
-    const onFocus = () => refresh();
+    const onFocus = () => reload();
     const onVisible = () => {
-      if (document.visibilityState === "visible") refresh();
+      if (document.visibilityState === "visible") reload();
     };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisible);
-    refresh(true);
     return () => {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [refresh]);
+  }, [reload]);
 
   useEffect(
     () =>
@@ -201,10 +201,12 @@ function VendorClis() {
   const detecting = asking || probing;
 
   // A probe the hub started on its own (at startup) can end without an event reaching this
-  // window; while a row still says it is asking, read the list again now and then.
+  // window; while a row still says it is asking, read the list again now and then. This only
+  // reads: asking the hub to look again would start a new probe. The hub ends a probe within
+  // five seconds (its timeout), so this stops by itself; the count is a safety net only.
   useEffect(() => {
     if (!probing) return;
-    let left = 8;
+    let left = PROBE_POLLS;
     const timer = setInterval(() => {
       reload();
       if (--left <= 0) clearInterval(timer);
@@ -237,7 +239,7 @@ function VendorClis() {
         <div className="spacer" />
         <button
           className="ghost"
-          onClick={() => refresh(true)}
+          onClick={() => refresh()}
           disabled={detecting}
           title="重新在 PATH 和安装目录里查找这些 CLI，并重新探测版本"
         >
