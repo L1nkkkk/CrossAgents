@@ -1379,3 +1379,153 @@ async fn plugins_report_an_install_in_progress_and_forget_it_afterwards() {
     }
     assert_eq!(installing(&t).await, None);
 }
+
+/// What a run did stays in its workspace after the run is gone (docs/tasks/R1.md §3):
+/// `GET /v1/history?repo=` and the work group's `history` both keep a deleted round.
+#[tokio::test]
+async fn run_history_outlives_the_run() {
+    use std::path::PathBuf;
+
+    use crossagents_api_types::{ListHistoryResponse, WorkDetail};
+    use crossagents_core::{
+        AgentId, HistoryTask, RunConfig, RunHistory, RunStatus, TaskStatus, Work, WorkId,
+    };
+
+    let t = TestHub::start().await;
+    let store = t.hub.bus.store().clone();
+    let now = chrono::Utc::now();
+    let work = Work {
+        id: WorkId::new(),
+        title: "登录页".into(),
+        repo: PathBuf::from("/repo"),
+        lead: AgentId::new(),
+        created_at: now,
+        updated_at: now,
+    };
+    store.insert_work(&work).await.unwrap();
+    let run = Run {
+        origin_chat_id: None,
+        work_id: Some(work.id),
+        continuation: None,
+        landed: None,
+        lead_note: None,
+        summary: None,
+        checks: Vec::new(),
+        checks_state: None,
+        id: crossagents_core::RunId::new(),
+        title: "登录页改版".into(),
+        request: "登录页改版：布局和错误提示文案。".into(),
+        planner: AgentId::new(),
+        status: RunStatus::Completed,
+        config: RunConfig {
+            worker: AgentId::new(),
+            escalate: None,
+            reviewer: None,
+            auto_approve: false,
+            max_parallel: 3,
+            max_attempts: 3,
+            team: Vec::new(),
+            policy: Default::default(),
+        },
+        repo: PathBuf::from("/repo"),
+        base_branch: "main".into(),
+        branch: "crossagents/login".into(),
+        in_place: false,
+        note: None,
+        plan: Vec::new(),
+        created_at: now,
+        updated_at: now,
+    };
+    store.insert_run(&run).await.unwrap();
+    let history = RunHistory {
+        run_id: run.id,
+        work_id: run.work_id,
+        repo: run.repo.clone(),
+        title: run.title.clone(),
+        request: run.request.clone(),
+        status: run.status,
+        summary: Some("两个按钮加好了。".into()),
+        note: None,
+        base_branch: run.base_branch.clone(),
+        branch: run.branch.clone(),
+        landed: None,
+        tasks: vec![HistoryTask {
+            key: "a".into(),
+            title: "布局与按钮".into(),
+            assignee: Some("Rex".into()),
+            model: Some("claude-haiku-4-5".into()),
+            status: TaskStatus::Merged,
+        }],
+        merged_commits: vec!["c0ffee1".into()],
+        created_at: run.created_at,
+        ended_at: Some(now),
+        deleted: false,
+    };
+    store.upsert_run_history(&history).await.unwrap();
+    // One in another workspace, which must not show up in this one's history.
+    store
+        .upsert_run_history(&RunHistory {
+            run_id: crossagents_core::RunId::new(),
+            work_id: None,
+            repo: PathBuf::from("/other"),
+            title: "别的".into(),
+            ..history.clone()
+        })
+        .await
+        .unwrap();
+
+    let listed: ListHistoryResponse = t
+        .get("/v1/history?repo=%2Frepo")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed.history.len(), 1);
+    assert_eq!(listed.history[0].run_id, run.id);
+    assert_eq!(
+        listed.history[0].summary.as_deref(),
+        Some("两个按钮加好了。")
+    );
+    assert_eq!(listed.history[0].tasks[0].assignee.as_deref(), Some("Rex"));
+    assert!(!listed.history[0].deleted);
+
+    // No repo: every workspace's history.
+    let all: ListHistoryResponse = t
+        .get("/v1/history")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(all.history.len(), 2);
+
+    // The work group carries its rounds' history, deleted ones too.
+    let detail: WorkDetail = t
+        .get(&format!("/v1/works/{}", work.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail.runs.len(), 1);
+    assert_eq!(detail.history.len(), 1);
+    assert_eq!(detail.history[0].run_id, run.id);
+
+    // The run goes; the record stays, marked as deleted.
+    store.delete_run(run.id).await.unwrap();
+    let listed: ListHistoryResponse = t
+        .get("/v1/history?repo=%2Frepo")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed.history.len(), 1);
+    assert!(listed.history[0].deleted);
+    assert_eq!(listed.history[0].tasks.len(), 1);
+}

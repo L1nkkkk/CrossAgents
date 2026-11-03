@@ -39,6 +39,7 @@ import type { ListAgentsResponse } from "@bindings/ListAgentsResponse";
 import type { ListPluginsResponse } from "@bindings/ListPluginsResponse";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import type { ListRunsResponse } from "@bindings/ListRunsResponse";
+import type { ListHistoryResponse } from "@bindings/ListHistoryResponse";
 import type { ListSessionCandidatesResponse } from "@bindings/ListSessionCandidatesResponse";
 import type { StartChatRequest } from "@bindings/StartChatRequest";
 import type { ApproveRunRequest } from "@bindings/ApproveRunRequest";
@@ -283,6 +284,9 @@ export const api = {
   upgradePlugin: (name: string) => request<CliInstallAccepted>("POST", `/v1/plugins/${enc(name)}/upgrade`),
 
   listRuns: () => request<ListRunsResponse>("GET", "/v1/runs"),
+  /** What runs left in a workspace, including the ones since deleted; every workspace's
+   * without `repo`. Read-only: a deleted run's record never goes away. */
+  history: (repo?: string) => request<ListHistoryResponse>("GET", `/v1/history${repo ? `?repo=${enc(repo)}` : ""}`),
   getRun: (key: string) => request<RunDetail>("GET", `/v1/runs/${enc(key)}`),
   createRun: (req: CreateRunRequest) => request<Run>("POST", "/v1/runs", req),
   approveRun: (key: string, req: ApproveRunRequest = { policy: null, max_parallel: null, assignees: null }) =>

@@ -2,8 +2,6 @@
 
 mod common;
 
-use std::time::Duration;
-
 use common::{TestHub, types};
 use crossagents_api_types::{AgentStatus, EventKind, StopReason};
 use serde_json::{Value, json};
@@ -302,7 +300,10 @@ async fn unknown_plugin_is_rejected_and_plugins_are_listed() {
         .iter()
         .map(|p| p["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["claude", "codebuddy", "codex", "cursor", "mock", "with"]);
+    assert_eq!(
+        names,
+        ["claude", "codebuddy", "codex", "cursor", "mock", "with"]
+    );
 }
 
 #[tokio::test]
@@ -331,7 +332,7 @@ async fn hub_shutdown_stops_sessions() {
     t.add_agent("frank", None).await;
     t.post("/v1/agents/frank/start", json!({})).await;
     t.hub.shutdown();
-    tokio::time::timeout(Duration::from_secs(10), t.hub.wait())
+    tokio::time::timeout(common::wait_limit(), t.hub.wait())
         .await
         .expect("hub did not stop")
         .unwrap();

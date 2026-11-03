@@ -48,6 +48,7 @@ use crate::collab::{AgentTokens, CollabSetup, HubHost};
 use crossagents_plugins::claude_account::ClaudeAccounts;
 use crossagents_plugins::codebuddy_account::CodebuddyAccounts;
 use crossagents_plugins::codex_account::CodexAccounts;
+use crossagents_plugins::cursor_account::CursorAccounts;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -134,6 +135,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
             Arc::new(codex_accounts),
             Arc::new(ClaudeAccounts::default()),
             Arc::new(CodebuddyAccounts::default()),
+            Arc::new(CursorAccounts::default()),
         ],
         paths.accounts(),
     ));

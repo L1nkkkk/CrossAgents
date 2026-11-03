@@ -1566,7 +1566,8 @@ impl Store for SqliteStore {
     }
 
     /// Deletes the run, its tasks, and the human items and notes that name it, in one
-    /// transaction (docs/tasks/R1.md §3.3). `tasks` are deleted explicitly rather than by
+    /// transaction (docs/tasks/R1.md §3.3). Its `run_history` row stays, marked deleted: the
+    /// workspace's history outlives the run. `tasks` are deleted explicitly rather than by
     /// `ON DELETE CASCADE`: a connection need not have `foreign_keys` on. Events stay.
     async fn delete_run(&self, id: RunId) -> Result<(), CoreError> {
         // Takes the write lock first: a deferred transaction that reads and then writes is
@@ -1617,6 +1618,12 @@ impl Store for SqliteStore {
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
+        // What the run did in its workspace stays, marked as a run that is gone.
+        sqlx::query("UPDATE run_history SET deleted = 1 WHERE run_id = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
         sqlx::query("DELETE FROM runs WHERE id = ?")
             .bind(id.to_string())
             .execute(&mut *tx)
@@ -1624,6 +1631,77 @@ impl Store for SqliteStore {
             .map_err(storage)?;
         tx.commit().await.map_err(storage)?;
         Ok(())
+    }
+
+    async fn upsert_run_history(
+        &self,
+        history: &crossagents_core::RunHistory,
+    ) -> Result<(), CoreError> {
+        // The deleted flag is the store's, not the record's: a later write never brings a
+        // deleted run back. `ended_at` keeps the first time the run ended.
+        sqlx::query(
+            "INSERT INTO run_history (run_id, work_id, repo, status, deleted, created_at, ended_at, data)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(run_id) DO UPDATE SET
+                 work_id = excluded.work_id,
+                 repo = excluded.repo,
+                 status = excluded.status,
+                 created_at = excluded.created_at,
+                 ended_at = COALESCE(run_history.ended_at, excluded.ended_at),
+                 data = excluded.data",
+        )
+        .bind(history.run_id.to_string())
+        .bind(history.work_id.map(|id| id.to_string()))
+        .bind(history.repo.to_string_lossy().into_owned())
+        .bind(enum_str(&history.status)?)
+        .bind(i64::from(history.deleted))
+        .bind(history.created_at.to_rfc3339())
+        .bind(history.ended_at.map(|t| t.to_rfc3339()))
+        .bind(serde_json::to_string(history).map_err(storage)?)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(())
+    }
+
+    async fn list_run_history(
+        &self,
+        repo: Option<&Path>,
+    ) -> Result<Vec<crossagents_core::RunHistory>, CoreError> {
+        let rows: Vec<(String, i64, Option<String>)> = match repo {
+            Some(repo) => {
+                sqlx::query_as(
+                    "SELECT data, deleted, ended_at FROM run_history WHERE repo = ?
+                     ORDER BY created_at DESC, run_id DESC",
+                )
+                .bind(repo.to_string_lossy().into_owned())
+                .fetch_all(&self.pool)
+                .await
+            }
+            None => {
+                sqlx::query_as(
+                    "SELECT data, deleted, ended_at FROM run_history
+                     ORDER BY created_at DESC, run_id DESC",
+                )
+                .fetch_all(&self.pool)
+                .await
+            }
+        }
+        .map_err(storage)?;
+        // The columns, not the JSON, say whether the run is gone and when it first ended:
+        // later writes leave both alone.
+        rows.iter()
+            .map(|(data, deleted, ended_at)| {
+                let mut history: crossagents_core::RunHistory =
+                    serde_json::from_str(data).map_err(storage)?;
+                history.deleted = *deleted != 0;
+                history.ended_at = match ended_at {
+                    Some(ended) => Some(time_from(ended)?),
+                    None => None,
+                };
+                Ok(history)
+            })
+            .collect()
     }
 
     async fn insert_task(&self, task: &Task) -> Result<(), CoreError> {
@@ -2753,5 +2831,132 @@ mod tests {
                 .outcome
                 .is_none()
         );
+    }
+
+    /// A run to hang a history record on; only the fields the record reads matter here.
+    fn finished_run() -> Run {
+        let now = time_from(&Utc::now().to_rfc3339()).unwrap();
+        Run {
+            origin_chat_id: None,
+            work_id: None,
+            continuation: None,
+            landed: None,
+            lead_note: None,
+            summary: None,
+            checks: Vec::new(),
+            checks_state: None,
+            id: RunId::new(),
+            title: "登录页改版".into(),
+            request: "登录页改版：布局和错误提示文案。".into(),
+            planner: AgentId::new(),
+            status: RunStatus::Completed,
+            config: RunConfig {
+                worker: AgentId::new(),
+                escalate: None,
+                reviewer: None,
+                auto_approve: false,
+                max_parallel: 3,
+                max_attempts: 3,
+                team: vec![],
+                policy: Default::default(),
+            },
+            repo: PathBuf::from("/repo"),
+            base_branch: "main".into(),
+            branch: "crossagents/login".into(),
+            in_place: false,
+            note: None,
+            plan: vec![],
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn history_of(run: &Run) -> crossagents_core::RunHistory {
+        crossagents_core::RunHistory {
+            run_id: run.id,
+            work_id: run.work_id,
+            repo: run.repo.clone(),
+            title: run.title.clone(),
+            request: run.request.clone(),
+            status: run.status,
+            summary: None,
+            note: None,
+            base_branch: run.base_branch.clone(),
+            branch: run.branch.clone(),
+            landed: None,
+            tasks: vec![crossagents_core::HistoryTask {
+                key: "a".into(),
+                title: "布局与按钮".into(),
+                assignee: Some("Rex".into()),
+                model: Some("claude-haiku-4-5".into()),
+                status: TaskStatus::Merged,
+            }],
+            merged_commits: vec!["c0ffee1".into()],
+            created_at: run.created_at,
+            ended_at: Some(run.updated_at),
+            deleted: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn run_history_round_trip() {
+        let store = SqliteStore::open_in_memory().await.unwrap();
+        let run = finished_run();
+        let mut history = history_of(&run);
+        store.upsert_run_history(&history).await.unwrap();
+        // Idempotent: the same run writes its record again, in place, with what it now says.
+        history.summary = Some("两个按钮加好了。".into());
+        let ended = history.ended_at.unwrap();
+        history.ended_at = Some(ended + chrono::Duration::hours(1));
+        store.upsert_run_history(&history).await.unwrap();
+
+        let stored = store.list_run_history(None).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].summary.as_deref(), Some("两个按钮加好了。"));
+        assert_eq!(stored[0].tasks, history.tasks);
+        assert_eq!(stored[0].merged_commits, vec!["c0ffee1".to_owned()]);
+        // The first time it ended is the one kept.
+        assert_eq!(stored[0].ended_at, Some(ended));
+        assert!(!stored[0].deleted);
+        assert_eq!(
+            store
+                .list_run_history(Some(Path::new("/repo")))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .list_run_history(Some(Path::new("/elsewhere")))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_run_keeps_its_history() {
+        let store = SqliteStore::open_in_memory().await.unwrap();
+        let run = finished_run();
+        store.insert_run(&run).await.unwrap();
+        store.upsert_run_history(&history_of(&run)).await.unwrap();
+
+        store.delete_run(run.id).await.unwrap();
+        assert!(matches!(
+            store.get_run(run.id).await,
+            Err(CoreError::NotFound { .. })
+        ));
+        let history = store
+            .list_run_history(Some(Path::new("/repo")))
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].run_id, run.id);
+        assert_eq!(history[0].title, run.title);
+        assert!(history[0].deleted, "the run is gone, its record says so");
+        // A write after the delete does not bring the run back.
+        store.upsert_run_history(&history_of(&run)).await.unwrap();
+        assert!(store.list_run_history(None).await.unwrap()[0].deleted);
     }
 }

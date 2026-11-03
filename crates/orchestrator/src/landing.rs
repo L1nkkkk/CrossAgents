@@ -425,6 +425,8 @@ impl Orchestrator {
         }
         run.updated_at = Utc::now();
         self.store.update_run(&run).await?;
+        // The landing is part of what the run did: its history says so too.
+        self.record_history(&run).await;
         if run.status.is_terminal() {
             self.tell_origin_later(&run).await;
         }
@@ -452,6 +454,7 @@ impl Orchestrator {
             }
             parent.updated_at = Utc::now();
             self.store.update_run(&parent).await?;
+            self.record_history(&parent).await;
             self.publish(EventKind::RunLanded {
                 id: parent.id,
                 landing: parent.landed.clone().unwrap(),

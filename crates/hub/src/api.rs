@@ -27,13 +27,14 @@ use crossagents_api_types::{
     DeleteRunResponse, DiffSide, ErrorCode, FileContentResponse, FileEntry, FileKind,
     FileTreeResponse, FinishRequest, GraphCommit, GraphRef, GraphRefKind, HealthResponse, HubInfo,
     ImageContent, InitRepoRequest, LandRequest, ListAccountsResponse, ListAgentsResponse,
-    ListAvatarsResponse, ListNotesResponse, ListPluginsResponse, ListQuestionsResponse,
-    ListRunsResponse, ListToolsResponse, ListWorksResponse, LoginStarted, PluginInfo,
-    QuotaResponse, RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse,
-    ResolvedPath, RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
-    SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript,
-    TurnDiffResponse, UpdateRunPolicyRequest, UploadAvatarsRequest, UploadAvatarsResponse,
-    UsageGroup, UsageResponse, UsageSeriesGroup, UsageSeriesRange, UsageSeriesResponse, WorkDetail,
+    ListAvatarsResponse, ListHistoryResponse, ListNotesResponse, ListPluginsResponse,
+    ListQuestionsResponse, ListRunsResponse, ListToolsResponse, ListWorksResponse, LoginStarted,
+    PluginInfo, QuotaResponse, RejectRunRequest, RenameAgentRequest, ResolvePathsRequest,
+    ResolvePathsResponse, ResolvedPath, RunDetail, RunTrace, SendMessageRequest,
+    SendMessageResponse, SetModelRequest, SetPluginModelsRequest, SetTopicRequest,
+    TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse, UpdateRunPolicyRequest,
+    UploadAvatarsRequest, UploadAvatarsResponse, UsageGroup, UsageResponse, UsageSeriesGroup,
+    UsageSeriesRange, UsageSeriesResponse, WorkDetail,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, Attachment,
@@ -167,6 +168,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/works", get(list_works).post(create_work))
         .route("/v1/works/{id}", get(get_work))
         .route("/v1/works/{id}/runs", post(create_work_run))
+        .route("/v1/history", get(list_history))
         .route("/v1/runs", get(list_runs).post(create_run))
         .route("/v1/runs/{key}", get(get_run).delete(delete_run))
         .route("/v1/runs/{key}/approve", post(approve_run))
@@ -1394,19 +1396,9 @@ async fn create_work(
         return Err(CoreError::Conflict("the work title is empty".into()).into());
     }
     let lead = state.store().get_agent(&AgentKey::parse(&req.lead)).await?;
-    let now = Utc::now();
-    let work = crossagents_core::Work {
-        id: crossagents_core::WorkId::new(),
-        title: req.title,
-        repo: lead.home().to_path_buf(),
-        lead: lead.id,
-        created_at: now,
-        updated_at: now,
-    };
-    state.store().insert_work(&work).await?;
-    state
-        .bus
-        .publish(EventKind::WorkCreated { work: work.clone() })
+    let work = state
+        .orchestrator
+        .create_work_group(&req.title, lead.home().to_path_buf(), lead.id)
         .await?;
     Ok((StatusCode::CREATED, Json(work)))
 }
@@ -1432,7 +1424,42 @@ async fn get_work(
         .into_iter()
         .filter(|r| r.work_id == Some(id))
         .collect();
-    Ok(Json(WorkDetail { work, runs }))
+    // Its rounds that ended, including the ones since deleted: what the group did outlives
+    // the runs in it.
+    let history = state
+        .store()
+        .list_run_history(None)
+        .await?
+        .into_iter()
+        .filter(|entry| entry.work_id == Some(id))
+        .collect();
+    Ok(Json(WorkDetail {
+        work,
+        runs,
+        history,
+    }))
+}
+
+/// `GET /v1/history?repo=<path>`: what runs left in a workspace, the deleted ones too. Without
+/// `repo`, every workspace's.
+#[derive(Debug, Deserialize)]
+struct HistoryQuery {
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+async fn list_history(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<HistoryQuery>,
+) -> ApiResult<Json<ListHistoryResponse>> {
+    let repo = q
+        .repo
+        .map(|repo| repo.trim().to_owned())
+        .filter(|repo| !repo.is_empty())
+        .map(PathBuf::from);
+    Ok(Json(ListHistoryResponse {
+        history: state.store().list_run_history(repo.as_deref()).await?,
+    }))
 }
 
 async fn create_work_run(
@@ -1500,10 +1527,12 @@ async fn create_run(
             policy: req.policy.unwrap_or_default(),
         },
     };
-    let run = state
+    let mut run = state
         .orchestrator
         .create_run_with_choice(new, req.fresh, req.restore)
         .await?;
+    // Every run belongs to a work group: its next round continues from this one.
+    state.orchestrator.work_of_run(&mut run).await?;
     Ok((StatusCode::CREATED, Json(run)))
 }
 

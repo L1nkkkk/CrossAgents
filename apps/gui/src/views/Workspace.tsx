@@ -4,14 +4,17 @@ import type { Handoff } from "@bindings/Handoff";
 import type { PlannedTask } from "@bindings/PlannedTask";
 import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
+import type { RunHistory } from "@bindings/RunHistory";
 import type { Task } from "@bindings/Task";
 import { ACTIVE_RUN } from "../App";
 import { Avatar, CopyCommand, Dot, ErrorBox, Icon, Vendor, agentTitle, agentTone, ago, displayName, isAgent, sessionHref, time, useAgents } from "../components";
 import { KIND_LABEL, OUTCOME_LABEL, OUTCOME_TONE, freshLabel } from "../handoff";
+import { useHubData } from "../hub";
+import { api } from "../api";
 import { executorOf, shortTitle } from "../lib/projectView";
 import { checksPassed, runState, taskState, type State, type StateTone } from "../lib/taskState";
 import { StateWord } from "../parts";
-import { selectWorkspace, useProjectRuns, useWorkspaces, type Workspace } from "../workspace";
+import { selectWorkspace, useProjectRuns, useWorkspaces, wsKey, type Workspace } from "../workspace";
 import "./workspace.css";
 
 /**
@@ -38,6 +41,7 @@ const TABS = [
   { key: "members", label: "成员" },
   { key: "activity", label: "动态" },
   { key: "results", label: "结果" },
+  { key: "history", label: "历史" },
 ] as const;
 type TabKey = (typeof TABS)[number]["key"];
 const TAB_STORAGE = "crossagents.workspace.tab";
@@ -135,6 +139,8 @@ function Overview({ ws }: { ws: Workspace }) {
               <MembersView members={members} runs={runs} agents={agents} />
             ) : tab === "activity" ? (
               <ActivityView runs={runs} agents={agents} />
+            ) : tab === "history" ? (
+              <HistoryView ws={ws} />
             ) : (
               <ResultsView runs={runs} agents={agents} />
             )}
@@ -963,4 +969,159 @@ function LandingLine({ run, kind }: { run: Run; kind: ResultKind }) {
   }
   if (kind === "failed" || kind === "cancelled") return <span className="muted">没有落地</span>;
   return <span className="muted">还没有结果可落地</span>;
+}
+
+// ---- 历史 ------------------------------------------------------------------------------------
+
+/**
+ * What the workspace's runs did, kept by the hub after the runs themselves are gone
+ * (`RunHistory`, crates/orchestrator/src/history.rs): a run is hard-deleted, its record is not.
+ * Read-only — a deleted round has no page left to open, so it shows what it was here.
+ *
+ * The hub's `?repo=` matches the path as recorded; a workspace groups runs by `wsKey`, so the
+ * filtering is done the same way here instead of trusting one spelling of the path.
+ */
+function useHistory(key: string) {
+  return useHubData(
+    async () => (key ? (await api.history()).history.filter((entry) => wsKey(entry.repo) === key) : []),
+    [key],
+    (e) => e.type.startsWith("run.") || e.type.startsWith("work."),
+  );
+}
+
+function HistoryView({ ws }: { ws: Workspace }) {
+  const history = useHistory(ws.key);
+  const entries = history.data ?? [];
+  const gone = entries.filter((entry) => entry.deleted).length;
+  return (
+    <>
+      <ErrorBox error={history.error} />
+      {!history.data && history.loading ? (
+        <p className="muted">加载历史…</p>
+      ) : entries.length === 0 ? (
+        <div className="empty">这个工作区还没有结束的 run。run 结束后，它做过什么会留在这里，删掉 run 也不会丢。</div>
+      ) : (
+        <>
+          <p className="ws-count-line">
+            {entries.length} 轮已结束的 run
+            {gone > 0 && ` · 其中 ${gone} 轮已删除`}
+          </p>
+          <div className="ws-runs">
+            {entries.map((entry) => (
+              <HistoryRow key={entry.run_id} entry={entry} />
+            ))}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+/** A task that ended as `passed` never got accepted: nobody can accept it now, so it says so. */
+function historyTaskState(task: RunHistory["tasks"][number]): State {
+  if (task.status === "passed") return { glyph: "○", word: "未合并", tone: "muted", bucket: "ended", live: false };
+  return taskState({ status: task.status, attempts: 0, depends_on: [] });
+}
+
+function HistoryRow({ entry }: { entry: RunHistory }) {
+  const ended = entry.ended_at ?? entry.created_at;
+  return (
+    <details className="ws-run">
+      <summary className="ws-run-head">
+        <Icon name="chevronRight" size={13} />
+        {entry.deleted ? (
+          <span className="ws-run-name" title={`${entry.title}（run 已删除）`}>
+            {shortTitle(entry.title)}
+          </span>
+        ) : (
+          <a className="ws-run-name" href={`#/runs/${entry.run_id}`} title={entry.title} onClick={(e) => e.stopPropagation()}>
+            {shortTitle(entry.title)}
+          </a>
+        )}
+        {entry.deleted && (
+          <span className="ws-history-deleted" title="run 已删除，这里只留下它做过的记录">
+            已删除
+          </span>
+        )}
+        <span className="ws-run-count" title={entry.tasks.length ? `${entry.tasks.length} 个任务` : "没有任务记录"}>
+          {entry.tasks.length || ""}
+        </span>
+        <span className="ws-run-state">
+          <StateWord state={runState(entry.status)} />
+        </span>
+        <span className="ws-run-when" title={`${entry.deleted ? "删除于" : "结束于"} ${time(ended)}`}>
+          {ago(ended)}
+        </span>
+      </summary>
+
+      <div className="ws-run-body">
+        {entry.request.trim() !== "" && entry.request.trim() !== entry.title.trim() && (
+          <p className="ws-goal" title={entry.request}>
+            {entry.request}
+          </p>
+        )}
+        {entry.summary && <p className="ws-history-summary">{entry.summary}</p>}
+        {entry.note && <p className="ws-note">{entry.note}</p>}
+
+        <div className="ws-run-meta">
+          <span className="ws-field">
+            <span className="ws-label">分支</span>
+            <span className="ws-branch" title={`${entry.branch} → ${entry.base_branch}`}>
+              <code>{entry.branch}</code>
+              <span className="muted" aria-hidden="true">
+                →
+              </span>
+              <code>{entry.base_branch}</code>
+            </span>
+          </span>
+          <span className="ws-field">
+            <span className="ws-label">落地</span>
+            {entry.landed ? (
+              <code title={entry.landed.mode === "pr" ? "开了 PR" : `合并进 ${entry.base_branch}`}>{entry.landed.reference}</code>
+            ) : (
+              <span className="muted">没有落地</span>
+            )}
+          </span>
+          {entry.merged_commits.length > 0 && (
+            <span className="ws-field">
+              <span className="ws-label">合并提交</span>
+              <span className="ws-history-commits">
+                {entry.merged_commits.map((sha) => (
+                  <code key={sha}>{sha.slice(0, 7)}</code>
+                ))}
+              </span>
+            </span>
+          )}
+          <span className="ws-field">
+            <span className="ws-label">创建</span>
+            <span className="muted">{time(entry.created_at)}</span>
+          </span>
+        </div>
+
+        {entry.tasks.length > 0 ? (
+          <ul className="ws-tasks">
+            {entry.tasks.map((task) => (
+              <li className="ws-task" key={task.key}>
+                <span className="ws-task-key" title={`#${task.key}`}>
+                  #{task.key}
+                </span>
+                <span className="ws-task-title" title={task.title}>
+                  {task.title}
+                </span>
+                <span className="ws-task-who">
+                  {task.assignee ?? <span className="muted">未记录</span>}
+                  {task.assignee && task.model && <span className="muted"> · {task.model}</span>}
+                </span>
+                <span className="ws-task-state">
+                  <StateWord state={historyTaskState(task)} />
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="ws-no-plan">没有任务记录。</p>
+        )}
+      </div>
+    </details>
+  );
 }

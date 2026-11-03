@@ -225,6 +225,141 @@ async fn stacked_rounds_survive_restart_and_land_transitively() {
 }
 
 #[tokio::test]
+async fn run_without_a_work_group_gets_one_and_carries_on() {
+    let repo = git_repo();
+    let t = TestHub::start().await;
+    t.add_agent_in("Pia", None, "planner", repo.path()).await;
+    let mut w = t.watch().await;
+    let response = t
+        .post(
+            "/v1/runs",
+            json!({"planner":"Pia", "title":"first goal", "request":change("first.txt")}),
+        )
+        .await;
+    assert_eq!(response.status(), 201, "{}", response.text().await.unwrap());
+    let first: Value = response.json().await.unwrap();
+    let run_id = first["id"].as_str().unwrap().to_owned();
+    completed(&mut w, &first).await;
+
+    // A run from before groups existed: its row has no work group.
+    let home = t.restart_home().await;
+    let paths = crossagents_hub::Paths::new(home.path());
+    let store = crossagents_store_sqlite::SqliteStore::open(&paths.db())
+        .await
+        .unwrap();
+    crossagents_store_sqlite::sqlx::query(
+        "UPDATE runs SET data = json_remove(data, '$.work_id') WHERE id = ?",
+    )
+    .bind(&run_id)
+    .execute(store.pool())
+    .await
+    .unwrap();
+    store.close().await;
+
+    let t = TestHub::start_in(home, |_| {}).await;
+    let mut w = t.watch().await;
+    assert!(detail(&t, &first).await["work_id"].is_null());
+    t.send(
+        "Pia",
+        &call(
+            "run_next",
+            json!({"title":"second", "request":change("second.txt")}),
+        ),
+    )
+    .await;
+    let event = w
+        .until(
+            "next round",
+            |e| matches!(&e.kind, EventKind::RunCreated { run } if run.title == "second"),
+        )
+        .await;
+    let EventKind::RunCreated { run } = event.kind else {
+        unreachable!()
+    };
+    let second = serde_json::to_value(run).unwrap();
+    let work = second["work_id"]
+        .as_str()
+        .expect("the round joins a work group")
+        .to_owned();
+    let old = detail(&t, &first).await;
+    assert_eq!(old["work_id"], json!(work));
+    let group: Value = t
+        .get(&format!("/v1/works/{work}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(group["work"]["title"], "first goal");
+    assert_eq!(group["work"]["lead"], old["planner"]);
+    assert!(
+        group["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == run_id.as_str())
+    );
+    completed(&mut w, &second).await;
+    // The tool's answer names the group it made for the run that had none.
+    assert!(w.output().contains("called run_next:"), "{}", w.output());
+    assert!(w.output().contains(&work), "{}", w.output());
+    assert_eq!(second["base_branch"], first["branch"]);
+    assert!(t.agent("Pia").await.cwd.join("first.txt").exists());
+    assert!(t.agent("Pia").await.cwd.join("second.txt").exists());
+}
+
+#[tokio::test]
+async fn run_next_after_cleanup_builds_a_new_checkout_from_the_unlanded_branch() {
+    let repo = git_repo();
+    let t = TestHub::start().await;
+    let work = setup(&t, repo.path()).await;
+    let mut w = t.watch().await;
+    let first = round(&t, &work, change("first.txt"), None).await;
+    completed(&mut w, &first).await;
+    let checkout = t.agent("Pia").await.cwd;
+    let cleanup = t
+        .post(
+            &format!("/v1/runs/{}/cleanup", first["id"].as_str().unwrap()),
+            json!({}),
+        )
+        .await;
+    assert_eq!(cleanup.status(), 200, "{}", cleanup.text().await.unwrap());
+    assert!(!checkout.exists(), "cleanup took the checkout away");
+    t.send(
+        "Pia",
+        &call(
+            "run_next",
+            json!({"title":"second", "request":change("second.txt")}),
+        ),
+    )
+    .await;
+    let event = w
+        .until(
+            "next round",
+            |e| matches!(&e.kind, EventKind::RunCreated { run } if run.title == "second"),
+        )
+        .await;
+    let EventKind::RunCreated { run } = event.kind else {
+        unreachable!()
+    };
+    let second = serde_json::to_value(run).unwrap();
+    assert_eq!(second["work_id"], first["work_id"]);
+    assert_eq!(
+        second["base_branch"], first["branch"],
+        "the unlanded round's branch is what the new checkout starts from"
+    );
+    completed(&mut w, &second).await;
+    // The checkout went with the cleanup, and so did the directory the lead's session lived
+    // in: the round works in a new checkout, led by a copy.
+    assert_eq!(t.agent("Pia").await.cwd, repo.path());
+    let lead = t.agent(second["planner"].as_str().unwrap()).await;
+    assert_ne!(lead.id, t.agent("Pia").await.id);
+    assert_eq!(lead.cwd, checkout);
+    assert!(checkout.exists(), "the round made itself a checkout");
+    assert!(checkout.join("first.txt").exists());
+    assert!(checkout.join("second.txt").exists());
+}
+
+#[tokio::test]
 async fn in_place_rounds_keep_the_current_directory_contents() {
     let t = TestHub::start().await;
     let repo = tempfile::tempdir().unwrap();

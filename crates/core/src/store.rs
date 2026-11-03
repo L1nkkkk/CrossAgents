@@ -206,11 +206,29 @@ pub trait Store: Send + Sync {
     /// Replaces the stored run with `run` (matched by id).
     async fn update_run(&self, run: &Run) -> Result<(), CoreError>;
     /// Deletes the run and everything the store keeps for it: its tasks, the human items and
-    /// notes that name it (docs/tasks/R1.md §3.3). Events stay. Fails with
+    /// notes that name it (docs/tasks/R1.md §3.3). Events stay, and so does its record in the
+    /// workspace's history ([`Store::upsert_run_history`]), marked deleted. Fails with
     /// [`CoreError::NotFound`] when there is no such run.
     async fn delete_run(&self, id: RunId) -> Result<(), CoreError> {
         let _ = id;
         Err(CoreError::Unsupported("deleting runs".into()))
+    }
+
+    /// Saves what the run left behind in its workspace's history, or updates the record a
+    /// previous write made (idempotent, matched by run id). History outlives the run:
+    /// [`Store::delete_run`] never deletes it.
+    async fn upsert_run_history(&self, history: &crate::RunHistory) -> Result<(), CoreError> {
+        let _ = history;
+        Err(CoreError::Unsupported("run history".into()))
+    }
+    /// What runs left in their workspaces, newest first: one workspace's when `repo` is given,
+    /// every workspace's otherwise. Includes runs since deleted.
+    async fn list_run_history(
+        &self,
+        repo: Option<&std::path::Path>,
+    ) -> Result<Vec<crate::RunHistory>, CoreError> {
+        let _ = repo;
+        Ok(Vec::new())
     }
 
     async fn insert_task(&self, task: &Task) -> Result<(), CoreError>;

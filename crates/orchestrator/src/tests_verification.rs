@@ -785,3 +785,54 @@ async fn the_closing_result_replaces_the_start_notice() {
     );
     assert!(f.host.delivered_to(chat).await.is_empty());
 }
+
+/// A run that ends leaves its history in the workspace, and deleting it afterwards keeps that
+/// record (docs/tasks/R1.md §3): runs do not come back, what they did stays readable.
+#[tokio::test]
+async fn a_finished_run_leaves_its_history_behind() {
+    let f = Fixture::new(&[]).await;
+    let mut run = f.run().await;
+    run.summary = Some("did a".into());
+    f.store.update_run(&run).await.unwrap();
+
+    f.orchestrator
+        .set_run_status(&mut run, RunStatus::Completed, None)
+        .await
+        .unwrap();
+
+    let history = f.store.list_run_history(Some(&run.repo)).await.unwrap();
+    assert_eq!(history.len(), 1);
+    let entry = &history[0];
+    assert_eq!(entry.run_id, run.id);
+    assert_eq!(entry.status, RunStatus::Completed);
+    assert_eq!(entry.summary.as_deref(), Some("did a"));
+    assert!(entry.ended_at.is_some(), "{entry:?}");
+    // Its task as it was, with the worker's name rather than an id that would mean nothing.
+    assert_eq!(entry.tasks.len(), 1);
+    assert_eq!(entry.tasks[0].key, "a");
+    assert_eq!(entry.tasks[0].assignee.as_deref(), Some("Rex"));
+    assert!(!entry.deleted);
+
+    // The landing is part of what it did: a later write keeps the record, with the landing.
+    run.landed = Some(crossagents_core::Landing {
+        mode: crossagents_core::LandMode::Merge,
+        by: "Ada".into(),
+        reference: "c0ffee1".into(),
+        at: Utc::now(),
+    });
+    f.store.update_run(&run).await.unwrap();
+    f.orchestrator.record_history(&run).await;
+    let history = f.store.list_run_history(Some(&run.repo)).await.unwrap();
+    assert_eq!(history.len(), 1, "one record, updated in place");
+    assert_eq!(
+        history[0].landed.as_ref().map(|l| l.reference.as_str()),
+        Some("c0ffee1")
+    );
+
+    // Deleting the run keeps the record, marked as a run that is gone.
+    f.store.delete_run(run.id).await.unwrap();
+    let history = f.store.list_run_history(Some(&run.repo)).await.unwrap();
+    assert_eq!(history.len(), 1);
+    assert!(history[0].deleted);
+    assert_eq!(history[0].tasks.len(), 1);
+}
