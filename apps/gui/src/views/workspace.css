@@ -124,6 +124,23 @@
 .ws-progress { flex: 1 1 220px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
 .ws-no-plan { margin: 0; font-size: 12.5px; color: var(--muted); }
 
+/* ---- 历史：runs that ended, kept after the run itself is deleted --------------------------- */
+
+/* A deleted round is read-only: it reads a little quieter than the live ones above. */
+.ws-history-deleted {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--muted-bg, var(--hover));
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 17px;
+  white-space: nowrap;
+}
+.ws-history-summary { margin: 0; font-size: 13px; line-height: 1.55; color: var(--text); overflow-wrap: anywhere; white-space: pre-wrap; }
+.ws-history-commits { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.ws-history-commits code { padding: 0; background: none; font-size: 11.5px; color: var(--text-2); }
+
 /* The executor link: the person, then how their session came to be. */
 .ws-actor {
   display: inline-flex;

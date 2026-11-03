@@ -66,7 +66,7 @@ async fn get(t: &TestHub, id: RunId) -> Run {
 }
 
 async fn idle(t: &TestHub, id: AgentId) {
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(common::wait_limit(), async {
         loop {
             let a = t
                 .hub
@@ -92,7 +92,7 @@ async fn idle(t: &TestHub, id: AgentId) {
 /// as `working` for a moment and is not what a test asking for a settled phase means.
 async fn phase(t: &TestHub, run: &Run, expected: &str) {
     let mut last = None;
-    let settled = tokio::time::timeout(Duration::from_secs(20), async {
+    let settled = tokio::time::timeout(common::wait_limit(), async {
         loop {
             t.hub.orchestrator.continue_runs().await;
             let state = get(t, run.id).await.continuation.unwrap();

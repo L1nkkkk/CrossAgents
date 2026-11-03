@@ -88,6 +88,12 @@ export function failedEditSession(): { state: MockState; script: Step[]; route: 
       tool(`Edit ${NOTES_REPO}/docs/cli.md`, "edit", "completed", {
         changes: [{ path: "docs/cli.md", kind: "update", diff: fileDiff("docs/cli.md", 30, ["`--json` 输出 JSON。"], ["`--json`：所有命令都支持，输出一行一个 JSON 对象。"]) }],
       }),
+      // A long command that failed: its line is cut with an ellipsis, not pushed out of the bubble.
+      tool(`cmd /c "dir /b ${NOTES_REPO}\\docs\\reference\\commands\\generated\\*.md ${NOTES_REPO}\\docs\\reference\\flags\\generated\\*.md 2>nul | findstr /i json"`, "execute", "failed", {
+        command: `cmd /c "dir /b ${NOTES_REPO}\\docs\\reference\\commands\\generated\\*.md ${NOTES_REPO}\\docs\\reference\\flags\\generated\\*.md 2>nul | findstr /i json"`,
+        exit_code: 1,
+        error: "找不到文件",
+      }),
       say("`docs/cli.md` 补好了。README 的标题改了两次都没成：with-cli 两次都回「模型返回的待替换代码块未匹配到整行」，文件没动，现在还是 `## Quick start`。"),
     ],
   });

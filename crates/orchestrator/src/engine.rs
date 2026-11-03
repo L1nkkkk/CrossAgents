@@ -416,6 +416,11 @@ impl Orchestrator {
         }
         run.updated_at = Utc::now();
         self.store.update_run(run).await?;
+        // What wound up did stays in its workspace's history, where deleting the run cannot
+        // take it (history.rs).
+        if to.is_terminal() {
+            self.record_history(run).await;
+        }
         if from != to {
             if to.is_terminal() {
                 self.tell_origin_later(run).await;
@@ -604,6 +609,12 @@ impl Orchestrator {
         let reused = previous
             .as_ref()
             .is_some_and(|old| !old.in_place && self.integration_path(old).exists());
+        // The previous round's checkout can be gone (an explicit cleanup released it): the
+        // round still starts from its branch, but the lead's session lived in a directory
+        // that no longer exists, so a copy continues there instead of moving it.
+        let previous_home = previous
+            .as_ref()
+            .is_some_and(|old| self.integration_path(old).exists());
         if reused {
             // Claim the same session before touching its checkout. No place/copy is needed.
             self.lead_self(&run, &planner, restore).await?;
@@ -628,7 +639,7 @@ impl Orchestrator {
         // until it is landed (docs/tasks/W1.md §4.1). In place, it works where it is.
         let lead = if reused {
             Ok((planner.clone(), false))
-        } else if previous.is_some() || fresh == Some(false) {
+        } else if (previous.is_some() && previous_home) || fresh == Some(false) {
             self.lead_self(&run, &planner, restore).await
         } else if fresh == Some(true) {
             self.copy_lead(&planner, run.id, &self.integration_path(&run))

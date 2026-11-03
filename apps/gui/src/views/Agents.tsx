@@ -1,6 +1,7 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { AgentProfile } from "@bindings/AgentProfile";
+import { RefreshCw } from "lucide-react";
 import { api, errorText } from "../api";
 import {
   AVATAR_COLORS,
@@ -24,6 +25,7 @@ import { useArmed } from "../parts";
 import { AvatarChoice } from "./AvatarGallery";
 import { ConnectExternal, ConnectInstructions } from "./External";
 import { vendorLabel } from "../lib/models";
+import { installBusy, installingLabel, installingOf, installRefusedText } from "../lib/installState";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
 import type { CliInfo } from "@bindings/CliInfo";
 
@@ -103,10 +105,17 @@ const CLI_SOURCE: Record<string, string> = {
   bundled: "桌面版自带",
 };
 
+/** How many times a row that says it is asking is read again before the poll gives up. */
+const PROBE_POLLS = 40;
+
 /**
  * The agent CLIs this machine has (docs/DESIGN.md §9.3): each vendor's version and where its
  * program came from, a button that installs or upgrades it, and why there is no button when
  * there is none. Nothing runs before the person confirms the exact command.
+ *
+ * The list is not only what the hub saw when it started: entering the page and coming back to
+ * the window read it again, and the button asks the hub to look again and probe the versions,
+ * so a CLI installed in a terminal shows up without restarting the hub.
  */
 function VendorClis() {
   const plugins = useHubData(
@@ -119,6 +128,48 @@ function VendorClis() {
   );
   const [confirm, setConfirm] = useState<Job>();
   const [jobs, setJobs] = useState<Record<string, Progress>>({});
+  // A click the hub refused because that plugin already has a job: said in words, per row.
+  const [refused, setRefused] = useState<{ plugin: string; text: string }>();
+  // The POST is out; the probes themselves show in each row's `probing`.
+  const [asking, setAsking] = useState(false);
+  const [askError, setAskError] = useState<string>();
+  const reload = plugins.reload;
+
+  // Asking the hub to look again (`POST /v1/plugins/refresh`) forgets what it remembered for
+  // every CLI -- including "this one could not answer just now", whose 60 s retry window is
+  // what keeps a broken CLI from being asked again and again. So only the person asks: the
+  // "重新检测" button. Nothing else on this page calls it.
+  const refresh = useCallback(() => {
+    setAsking(true);
+    api
+      .refreshPlugins()
+      .then(() => setAskError(undefined))
+      .catch((err) => setAskError(errorText(err)))
+      // The probes answer one at a time on the event stream; this read picks up the ones
+      // already out, so their rows say "asking" meanwhile.
+      .finally(() => {
+        setAsking(false);
+        reload();
+      });
+  }, [reload]);
+
+  // Entering the page and coming back to the window only read the list. Reading it is enough
+  // for a CLI installed in a terminal to appear: a miss is never cached, and a file that
+  // changed is asked its version again. Triggering a full look here instead kept asking the
+  // CLIs -- and kept their rows saying "probing" for as long as the person kept alt-tabbing
+  // back to the window.
+  useEffect(() => {
+    const onFocus = () => reload();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") reload();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [reload]);
 
   useEffect(
     () =>
@@ -136,6 +187,8 @@ function VendorClis() {
           });
         } else if (e.type === "cli.install.finished") {
           const { plugin, ok, reason, code } = e.data;
+          // The job it said to wait for ended: the note has nothing left to say.
+          setRefused((said) => (said?.plugin === plugin ? undefined : said));
           setJobs((all) => {
             const job = all[plugin];
             if (!job) return all;
@@ -147,15 +200,41 @@ function VendorClis() {
   );
 
   const list = (plugins.data ?? []).filter((p) => p.cli);
-  if (!list.length) return null;
   const installed = list.filter((p) => p.cli?.installed).length;
+  // Asking, either because the request is out or because a row's version is being probed.
+  const probing = list.some((p) => p.cli?.probing);
+  const detecting = asking || probing;
+
+  // A probe the hub started on its own (at startup) can end without an event reaching this
+  // window; while a row still says it is asking, read the list again now and then. This only
+  // reads: asking the hub to look again would start a new probe. The hub ends a probe within
+  // five seconds (its timeout), so this stops by itself; the count is a safety net only.
+  useEffect(() => {
+    if (!probing) return;
+    let left = PROBE_POLLS;
+    const timer = setInterval(() => {
+      reload();
+      if (--left <= 0) clearInterval(timer);
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [probing, reload]);
+
+  if (!list.length) return null;
 
   async function start(job: Job) {
     setConfirm(undefined);
+    setRefused(undefined);
     try {
       if (job.action === "install") await api.installPlugin(job.plugin);
       else await api.upgradePlugin(job.plugin);
     } catch (err) {
+      // Already running (409): no job of ours to show. Say to wait, and read the list again
+      // so the row says what the hub is doing and keeps its buttons disabled.
+      if (installBusy(err)) {
+        setRefused({ plugin: job.plugin, text: installRefusedText(err, job.action) });
+        reload();
+        return;
+      }
       setJobs((all) => ({
         ...all,
         [job.plugin]: { plugin: job.plugin, action: job.action, lines: [], dropped: 0, done: { ok: false, reason: errorText(err) } },
@@ -170,12 +249,31 @@ function VendorClis() {
         <span className="chip">
           {installed} / {list.length} 已安装
         </span>
+        <div className="spacer" />
+        <button
+          className="ghost"
+          onClick={() => refresh()}
+          disabled={detecting}
+          title="重新在 PATH 和安装目录里查找这些 CLI，并重新探测版本"
+        >
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <RefreshCw
+              size={13}
+              aria-hidden
+              style={detecting ? { animation: "spin 1s linear infinite" } : undefined}
+            />
+            {detecting ? "检测中…" : "重新检测"}
+          </span>
+        </button>
       </div>
-      <ErrorBox error={plugins.error} />
+      <ErrorBox error={plugins.error ?? askError} />
       <div className="setting-card">
         {list.map((p) => {
           const cli = p.cli!;
           const job = jobs[p.name];
+          // What the hub is doing for this CLI now: a job of this window, or one started
+          // elsewhere and reported on `GET /v1/plugins`. Its buttons stay disabled either way.
+          const busy = installingOf(cli, job);
           return (
             <div className="setting-line cli-line" key={p.name}>
               <div className="model-name">
@@ -185,68 +283,80 @@ function VendorClis() {
                 </div>
                 <div className="setting-hint" title={cli.path ?? undefined}>
                   {cli.installed
-                    ? `${cli.version ?? "版本未知"} · ${CLI_SOURCE[cli.source ?? ""] ?? cli.source ?? "来源未知"}`
+                    ? `${cli.probing ? "检测版本中…" : (cli.version ?? "版本未知")} · ${CLI_SOURCE[cli.source ?? ""] ?? cli.source ?? "来源未知"}`
                     : "没装"}
                 </div>
               </div>
               <div className="cli-actions">
                 {job ? (
                   <InstallProgress job={job} />
-                ) : cli.installed ? (
+                ) : (
                   <>
-                    {cli.can_upgrade ? (
-                      <button
-                        className="ghost"
-                        onClick={() =>
-                          setConfirm({
-                            plugin: p.name,
-                            action: "upgrade",
-                            argv: cli.upgrade_command ?? [],
-                            described_by: cli.described_by,
-                          })
-                        }
-                      >
-                        升级
-                      </button>
-                    ) : (
-                      upgradeNote(cli) && <span className="setting-hint">{upgradeNote(cli)}</span>
-                    )}
-                    {p.name === "claude" && cli.installed_via === "npm" && (
-                      <span className="setting-hint">
-                        npm 版已弃用，可以运行 <code>claude install</code> 迁到原生安装
+                    {busy && (
+                      <span className="chip small" title="hub 正在执行它的安装命令，等它结束">
+                        {installingLabel(busy)}…
                       </span>
                     )}
-                    {cli.docs && (
-                      <a href={cli.docs} target="_blank" rel="noreferrer" className="small">
-                        文档
-                      </a>
+                    {cli.installed ? (
+                      <>
+                        {cli.can_upgrade ? (
+                          <button
+                            className="ghost"
+                            disabled={!!busy}
+                            onClick={() =>
+                              setConfirm({
+                                plugin: p.name,
+                                action: "upgrade",
+                                argv: cli.upgrade_command ?? [],
+                                described_by: cli.described_by,
+                              })
+                            }
+                          >
+                            升级
+                          </button>
+                        ) : (
+                          upgradeNote(cli) && <span className="setting-hint">{upgradeNote(cli)}</span>
+                        )}
+                        {p.name === "claude" && cli.installed_via === "npm" && (
+                          <span className="setting-hint">
+                            npm 版已弃用，可以运行 <code>claude install</code> 迁到原生安装
+                          </span>
+                        )}
+                        {cli.docs && (
+                          <a href={cli.docs} target="_blank" rel="noreferrer" className="small">
+                            文档
+                          </a>
+                        )}
+                      </>
+                    ) : cli.install_command ? (
+                      <>
+                        <button
+                          className="primary"
+                          disabled={!!busy}
+                          onClick={() =>
+                            setConfirm({
+                              plugin: p.name,
+                              action: "install",
+                              argv: cli.install_command ?? [],
+                              described_by: cli.described_by,
+                            })
+                          }
+                        >
+                          安装
+                        </button>
+                        {cli.docs && (
+                          <a href={cli.docs} target="_blank" rel="noreferrer" className="small">
+                            文档
+                          </a>
+                        )}
+                      </>
+                    ) : (
+                      cli.install_hint && <CopyCommand command={cli.install_hint} />
                     )}
                   </>
-                ) : cli.install_command ? (
-                  <>
-                    <button
-                      className="primary"
-                      onClick={() =>
-                        setConfirm({
-                          plugin: p.name,
-                          action: "install",
-                          argv: cli.install_command ?? [],
-                          described_by: cli.described_by,
-                        })
-                      }
-                    >
-                      安装
-                    </button>
-                    {cli.docs && (
-                      <a href={cli.docs} target="_blank" rel="noreferrer" className="small">
-                        文档
-                      </a>
-                    )}
-                  </>
-                ) : (
-                  cli.install_hint && <CopyCommand command={cli.install_hint} />
                 )}
               </div>
+              {refused?.plugin === p.name && <div className="cli-done">{refused.text}</div>}
               {job?.done?.ok && (
                 <div className="cli-done ok">
                   {job.action === "install" ? (

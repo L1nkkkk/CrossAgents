@@ -18,6 +18,7 @@ pub mod models;
 pub mod notices;
 pub mod paths;
 pub mod prices;
+pub mod refresh;
 pub mod resume;
 pub mod routing;
 pub mod rules;
@@ -47,6 +48,7 @@ use crate::collab::{AgentTokens, CollabSetup, HubHost};
 use crossagents_plugins::claude_account::ClaudeAccounts;
 use crossagents_plugins::codebuddy_account::CodebuddyAccounts;
 use crossagents_plugins::codex_account::CodexAccounts;
+use crossagents_plugins::cursor_account::CursorAccounts;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -133,6 +135,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
             Arc::new(codex_accounts),
             Arc::new(ClaudeAccounts::default()),
             Arc::new(CodebuddyAccounts::default()),
+            Arc::new(CursorAccounts::default()),
         ],
         paths.accounts(),
     ));
@@ -165,9 +168,12 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     runtime.watch_moves();
     // Each CLI is asked its version in the background, in parallel: `GET /v1/plugins`
     // reports it once it answers and never waits for a subprocess (docs/DESIGN.md §9.3).
+    // Asking again later (an install, `POST /v1/plugins/refresh`) goes through `Refresher`,
+    // which also says `plugin.changed` when a probe ends.
     for driver in runtime.plugins().defaults() {
         tokio::spawn(async move { driver.probe_cli().await });
     }
+    let refresher = Arc::new(refresh::Refresher::new());
     let model_choice = Arc::new(models::ModelChoice::load(paths.models()));
     // Agents from before names were for people get a name and (chats) a title.
     if let Err(err) = identity::fix_up(
@@ -307,6 +313,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         mcp_command: setup.mcp_command.clone(),
         url: format!("http://{addr}"),
         installer: Arc::new(install::Installer::new()),
+        refresher,
         terminals: terminals.clone(),
     });
     bus.publish(EventKind::HubStarted {

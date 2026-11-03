@@ -7,7 +7,7 @@ import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, 
 import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
 import { usageScene } from "../views/Usage.mock";
 import { expertiseScene } from "../views/Expertise.mock";
-import { agent, ago, capabilitiesOf, NOTES_REPO, REPO, say, team, think, turn } from "./fixtures";
+import { agent, ago, capabilitiesOf, NOTES_REPO, planned, REPO, say, team, think, turn } from "./fixtures";
 import { openFile } from "../FileViewer";
 import { openTool } from "../panes";
 import { newTerminal } from "../terminal";
@@ -26,6 +26,27 @@ export type Scenario = {
 };
 
 export const SCENARIOS: Scenario[] = [
+  { key: "plan-long-search", label: "长计划中的模型搜索", hint: "浮层防裁切、筛选与清空后恢复高度", build: () => {
+    const scene = SCENARIOS.find((s) => s.key === "plan-long")!.build();
+    const search = (value: string) => {
+      const input = document.querySelector<HTMLInputElement>(".who-pick-menu .menu-search");
+      if (!input) throw new Error("long plan search missing");
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    const verify = () => {
+      const menu = document.querySelector<HTMLElement>(".who-pick-menu")!;
+      const rect = menu.getBoundingClientRect();
+      if (menu.parentElement !== document.body || rect.top < 0 || rect.bottom > window.innerHeight || rect.left < 0 || rect.right > window.innerWidth) throw new Error("long plan menu clipped");
+      if (document.activeElement !== menu.querySelector(".menu-search")) throw new Error("long plan search lost focus");
+    };
+    return { ...scene, script: [...scene.script,
+      { at: 1300, act: () => search("cursor") },
+      { at: 1550, act: verify },
+      { at: 1700, act: () => search("") },
+      { at: 1950, act: () => { verify(); console.info("long plan portal search verified"); } },
+    ] };
+  } },
   { key: "cursor-reasoning", label: "Cursor 推理控件", hint: "基础模型与 Thinking / 强度 / Fast", build: () => {
     const state = usageScene();
     const cursor: PluginInfo = { ...state.plugins.find((p) => p.name === "codex")!, name: "cursor", driver: "cursor-native", efforts: [],
@@ -43,7 +64,7 @@ export const SCENARIOS: Scenario[] = [
     const cursor: PluginInfo = { ...state.plugins.find((p) => p.name === "codex")!, name: "cursor", driver: "cursor-native", efforts: [],
       models: ["claude-opus-5-high", "claude-opus-5-thinking-high", "claude-opus-5-thinking-max", "claude-opus-5-thinking-high-fast"], all_models: [] };
     cursor.all_models = cursor.models;
-    state.plugins.push(cursor);
+    state.plugins = [...state.plugins.filter((p) => p.name !== "cursor"), cursor];
     const worker = state.agents.find((a) => a.name.toLowerCase() === "rex")!;
     worker.plugin = "cursor";
     worker.model = "claude-opus-5-high";
@@ -89,7 +110,7 @@ export const SCENARIOS: Scenario[] = [
       } },
       { at: 1100, act: () => {
         const labels = [...document.querySelectorAll(".menu-options .menu-label")].map((el) => el.textContent);
-        if (JSON.stringify(labels) !== JSON.stringify(["Opus 5.5", "Opus 5"])) throw new Error(`unexpected model matches: ${labels}`);
+        if (labels[0] !== "Opus 5.5" || labels[1] !== "Opus 5" || labels.some((label) => label?.includes("Sonnet"))) throw new Error(`unexpected model matches: ${labels}`);
         const input = document.querySelector<HTMLInputElement>(".menu-search")!;
         if (document.activeElement !== input) throw new Error("search input should have focus");
         input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
@@ -112,6 +133,12 @@ export const SCENARIOS: Scenario[] = [
     return { state, route: "#/usage", script: [
       { at: 400, act: () => [...document.querySelectorAll("button")].find((b) => b.textContent === "添加账号")?.click() },
       { at: 800, act: () => document.querySelector(".card.form")?.scrollIntoView({ block: "start" }) },
+    ] };
+  } },
+  { key: "cursor-account", label: "Cursor 账号", hint: "登录后读状态、邮箱和模型；额度留空，显示暂无额度数据", build: () => {
+    const state = usageScene();
+    return { state, route: "#/usage", script: [
+      { at: 700, act: () => [...document.querySelectorAll<HTMLButtonElement>(".account-who")].find((b) => b.textContent?.includes("Cursor"))?.click() },
     ] };
   } },
   { key: "tool-image-paths", label: "工具参数图片路径", hint: "加载、拒绝与去重", build: () => toolImagePathsSession() },
@@ -178,7 +205,7 @@ export const SCENARIOS: Scenario[] = [
         {
           at: 1000,
           act: () =>
-            [...document.querySelectorAll<HTMLButtonElement>(".who-pick .menu-item")]
+            [...document.querySelectorAll<HTMLButtonElement>(".who-pick-menu .menu-item")]
               .find((b) => b.querySelector(".menu-sub")?.textContent === "gpt-6-sol" && !b.disabled)
               ?.click(),
         },
@@ -201,6 +228,22 @@ export const SCENARIOS: Scenario[] = [
     };
   } },
   { key: "plan", label: "计划待审批", hint: "run 页：中间只有主导的对话和待审批的 Plan；右侧栏是计划、run 信息、策略与预算", build: () => oauthRun("plan") },
+  { key: "plan-long", label: "批计划：长列表里挑执行者", hint: "计划有九个任务、标题很长：最后一个任务的执行者菜单在可滚动的计划区里展开，不被裁掉，放不下时向上翻", build: () => {
+    const scene = oauthRun("plan");
+    const r = scene.state.runs[0].run;
+    const more = ["e", "f", "g", "h", "i"].map((k, i) =>
+      planned(k, `第 ${i + 5} 步：把登录相关的旧接口逐个迁到新的会话层并补齐回归测试（${k}）`, "接口不变，旧调用方逐个改过来，每改一个补一条回归测试。", i % 2 ? "mia" : "rex", ["c"], [`src/legacy/${k}/**`]),
+    );
+    r.plan = [...r.plan, ...more];
+    return {
+      ...scene,
+      route: `#/runs/${r.id}`,
+      script: [
+        { at: 700, act: () => document.querySelector('.who-pick[data-task="i"]')?.scrollIntoView({ block: "end" }) },
+        { at: 1000, act: () => document.querySelector<HTMLButtonElement>('.who-pick[data-task="i"] .chip-pick')?.click() },
+      ],
+    };
+  } },
   { key: "running", label: "run 进行中", hint: "run 页：中间栏只有对话；右侧栏按任务分组（含交接链）、run 信息、策略、笔记，追溯和参与者收起", build: () => oauthRun("running") },
   { key: "paused", label: "run 已暂停", hint: "中间只有一行「已暂停」提示，展开看全文；计划、run 信息、策略都在右侧栏", build: () => pausedRun() },
   { key: "review", label: "审查任务", hint: "#c 已报告完成：整个任务的 diff 带行号，点行号写意见，可发给 worker 或打回重做", build: () => reviewRun() },
@@ -268,6 +311,10 @@ export const SCENARIOS: Scenario[] = [
   { key: "agent-workspace-sidebar", label: "项目侧栏：成员与待办", hint: "项目 → 成员（Lin 已归档），独立会话，「需要你」两条（都是 Mia 的）；Rex 既是 #a 的执行者又是 #b 的评审，只出现一行", build: () => ({ state: workspaceState(), script: [], route: "#/" }) },
   { key: "agent-workspace-overview", label: "项目总览", hint: "点项目名进入总览：待审批、进行中、旧的已落地 run 各一个；Nova-c 是用 Nova 的配置新建的执行会话，#a 是 Rex 本人", build: () => ({ state: workspaceState(), script: [], route: `#/w/${encodeURIComponent(wsKey(REPO))}` }) },
   { key: "agent-workspace-edges", label: "边界 run", hint: "NOTES_REPO：失败的 run 和完成但未落地的 run（不能显示成完成）；REPO 里还有没提交 plan 的登录限流和来源已归档的多租户隔离", build: () => ({ state: workspaceState(), script: [], route: `#/w/${encodeURIComponent(wsKey(NOTES_REPO))}` }) },
+  { key: "agent-workspace-history", label: "项目历史：删掉的 run", hint: "工作区「历史」：删掉的两轮标「已删除」、只读，摘要和任务仍在；没删的已结束 run 从这里也能打开", build: () => {
+    localStorage.setItem("crossagents.workspace.tab", "history");
+    return { state: workspaceState(), script: [], route: `#/w/${encodeURIComponent(wsKey(REPO))}` };
+  } },
   { key: "agent-workspace-narrow", label: "窄窗口与长标题", hint: "Atlas 的长话题和 #b 的长中文标题：226px 侧栏下名字、状态和摘要仍可辨认，截断不挤坏布局；窄窗口请用截图调整宽度", build: () => ({ state: workspaceState(), script: [], route: "#/s/Atlas" }) },
 ];
 

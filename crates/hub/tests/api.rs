@@ -7,7 +7,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use crossagents_api_types::{
     Agent, ChangesResponse, CommitGraph, FileContentResponse, FileKind, FileTreeResponse,
-    GraphRefKind, ImageContent, ListAgentsResponse, ResolvePathsResponse, Run,
+    GraphRefKind, ImageContent, ListAgentsResponse, ListPluginsResponse, ResolvePathsResponse, Run,
 };
 use crossagents_hub::{HubConfig, Paths, RunningHub};
 use futures::StreamExt;
@@ -1303,4 +1303,229 @@ fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
         let _ = (target, link);
         Err(std::io::Error::other("no symlinks here"))
     }
+}
+
+/// What `GET /v1/plugins` says is running now for `claude`, if anything.
+async fn installing(t: &TestHub) -> Option<String> {
+    let list: ListPluginsResponse = t
+        .get("/v1/plugins")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    list.plugins
+        .iter()
+        .find(|p| p.name == "claude")
+        .and_then(|p| p.cli.as_ref())
+        .and_then(|cli| cli.installing.clone())
+}
+
+/// docs/DESIGN.md §9.3 / crates/hub/src/install.rs: the list says which CLI has an install or
+/// upgrade in progress, so the GUI disables its button instead of meeting the 409; once the
+/// job ends the field is empty again (it is kept in memory only).
+#[tokio::test]
+async fn plugins_report_an_install_in_progress_and_forget_it_afterwards() {
+    // A description whose install command only waits: nothing is installed, and the state
+    // can be read while it runs. `ping` and `sleep` are there wherever the tests run.
+    let slow: Vec<String> = if cfg!(windows) {
+        ["cmd", "/c", "ping", "-n", "3", "127.0.0.1"]
+            .map(str::to_owned)
+            .to_vec()
+    } else {
+        ["sleep", "2"].map(str::to_owned).to_vec()
+    };
+    let t = TestHub::start_with(|config| {
+        config.plugins.insert(
+            "claude".into(),
+            crossagents_plugins::PluginConfig {
+                install: crossagents_drivers::locate::Install {
+                    methods: vec![crossagents_drivers::locate::InstallMethod {
+                        id: "native".into(),
+                        run: slow,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+    })
+    .await;
+
+    assert_eq!(installing(&t).await, None, "nothing runs at start");
+
+    let accepted = t.post("/v1/plugins/claude/install").send().await.unwrap();
+    assert_eq!(
+        accepted.status(),
+        StatusCode::ACCEPTED,
+        "{}",
+        accepted.text().await.unwrap()
+    );
+
+    // While it runs, the list says so -- and a second request is refused, as the button was
+    // meant to prevent.
+    assert_eq!(installing(&t).await.as_deref(), Some("install"));
+    let again = t.post("/v1/plugins/claude/install").send().await.unwrap();
+    assert_eq!(again.status(), StatusCode::CONFLICT);
+
+    // When it ends the field is empty again: nothing is running any more.
+    for _ in 0..100 {
+        if installing(&t).await.is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(installing(&t).await, None);
+}
+
+/// What a run did stays in its workspace after the run is gone (docs/tasks/R1.md §3):
+/// `GET /v1/history?repo=` and the work group's `history` both keep a deleted round.
+#[tokio::test]
+async fn run_history_outlives_the_run() {
+    use std::path::PathBuf;
+
+    use crossagents_api_types::{ListHistoryResponse, WorkDetail};
+    use crossagents_core::{
+        AgentId, HistoryTask, RunConfig, RunHistory, RunStatus, TaskStatus, Work, WorkId,
+    };
+
+    let t = TestHub::start().await;
+    let store = t.hub.bus.store().clone();
+    let now = chrono::Utc::now();
+    let work = Work {
+        id: WorkId::new(),
+        title: "登录页".into(),
+        repo: PathBuf::from("/repo"),
+        lead: AgentId::new(),
+        created_at: now,
+        updated_at: now,
+    };
+    store.insert_work(&work).await.unwrap();
+    let run = Run {
+        origin_chat_id: None,
+        work_id: Some(work.id),
+        continuation: None,
+        landed: None,
+        lead_note: None,
+        summary: None,
+        checks: Vec::new(),
+        checks_state: None,
+        id: crossagents_core::RunId::new(),
+        title: "登录页改版".into(),
+        request: "登录页改版：布局和错误提示文案。".into(),
+        planner: AgentId::new(),
+        status: RunStatus::Completed,
+        config: RunConfig {
+            worker: AgentId::new(),
+            escalate: None,
+            reviewer: None,
+            auto_approve: false,
+            max_parallel: 3,
+            max_attempts: 3,
+            team: Vec::new(),
+            policy: Default::default(),
+        },
+        repo: PathBuf::from("/repo"),
+        base_branch: "main".into(),
+        branch: "crossagents/login".into(),
+        in_place: false,
+        note: None,
+        plan: Vec::new(),
+        created_at: now,
+        updated_at: now,
+    };
+    store.insert_run(&run).await.unwrap();
+    let history = RunHistory {
+        run_id: run.id,
+        work_id: run.work_id,
+        repo: run.repo.clone(),
+        title: run.title.clone(),
+        request: run.request.clone(),
+        status: run.status,
+        summary: Some("两个按钮加好了。".into()),
+        note: None,
+        base_branch: run.base_branch.clone(),
+        branch: run.branch.clone(),
+        landed: None,
+        tasks: vec![HistoryTask {
+            key: "a".into(),
+            title: "布局与按钮".into(),
+            assignee: Some("Rex".into()),
+            model: Some("claude-haiku-4-5".into()),
+            status: TaskStatus::Merged,
+        }],
+        merged_commits: vec!["c0ffee1".into()],
+        created_at: run.created_at,
+        ended_at: Some(now),
+        deleted: false,
+    };
+    store.upsert_run_history(&history).await.unwrap();
+    // One in another workspace, which must not show up in this one's history.
+    store
+        .upsert_run_history(&RunHistory {
+            run_id: crossagents_core::RunId::new(),
+            work_id: None,
+            repo: PathBuf::from("/other"),
+            title: "别的".into(),
+            ..history.clone()
+        })
+        .await
+        .unwrap();
+
+    let listed: ListHistoryResponse = t
+        .get("/v1/history?repo=%2Frepo")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed.history.len(), 1);
+    assert_eq!(listed.history[0].run_id, run.id);
+    assert_eq!(
+        listed.history[0].summary.as_deref(),
+        Some("两个按钮加好了。")
+    );
+    assert_eq!(listed.history[0].tasks[0].assignee.as_deref(), Some("Rex"));
+    assert!(!listed.history[0].deleted);
+
+    // No repo: every workspace's history.
+    let all: ListHistoryResponse = t
+        .get("/v1/history")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(all.history.len(), 2);
+
+    // The work group carries its rounds' history, deleted ones too.
+    let detail: WorkDetail = t
+        .get(&format!("/v1/works/{}", work.id))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail.runs.len(), 1);
+    assert_eq!(detail.history.len(), 1);
+    assert_eq!(detail.history[0].run_id, run.id);
+
+    // The run goes; the record stays, marked as deleted.
+    store.delete_run(run.id).await.unwrap();
+    let listed: ListHistoryResponse = t
+        .get("/v1/history?repo=%2Frepo")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed.history.len(), 1);
+    assert!(listed.history[0].deleted);
+    assert_eq!(listed.history[0].tasks.len(), 1);
 }

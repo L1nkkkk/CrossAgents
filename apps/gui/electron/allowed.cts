@@ -48,7 +48,12 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "GET", path: /^\/v1\/plugins$/, level: "read" },
   { method: "POST", path: /^\/v1\/plugins\/[^/]+\/models$/, level: "write" },
   { method: "POST", path: /^\/v1\/plugins\/[^/]+\/(install|upgrade)$/, level: "admin" },
+  // Looking for the CLIs again runs their version commands, as install and upgrade do.
+  // `?plugin=` rides along; `route()` drops it before matching.
+  { method: "POST", path: /^\/v1\/plugins\/refresh$/, level: "admin" },
   { method: "GET", path: /^\/v1\/runs$/, level: "read" },
+  // What ended runs left in a workspace, deleted rounds too; `?repo=` rides along.
+  { method: "GET", path: /^\/v1\/history$/, level: "read" },
   { method: "POST", path: /^\/v1\/runs$/, level: "write" },
   { method: "GET", path: /^\/v1\/runs\/[^/]+$/, level: "read" },
   // `?branches=&force=` rides along; `route()` drops it before matching.

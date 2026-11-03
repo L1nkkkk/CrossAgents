@@ -490,6 +490,8 @@ mod tests {
             vec![
                 "powershell".into(),
                 "-NoProfile".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
                 "-File".into(),
                 path.display().to_string(),
             ]

@@ -447,7 +447,7 @@ async fn a_reviewers_failed_item_proposes_a_candidate_under_the_entries_owner() 
     assert!(brief.contains("review_submit.checklist"), "{brief}");
 
     // A verdict is written after the task's status changes: wait until both are in the store.
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = tokio::time::Instant::now() + common::wait_limit();
     let (store, candidates) = loop {
         let store = SqliteStore::open(&Paths::new(t.home.path()).db())
             .await

@@ -426,6 +426,62 @@ pub struct Landing {
     pub at: DateTime<Utc>,
 }
 
+/// What a run left behind in its workspace, kept after the run itself was deleted: a run is
+/// hard-deleted, its history is not. Written when the run ends and again when it lands.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct RunHistory {
+    pub run_id: RunId,
+    /// The work group the run was a round of.
+    #[serde(default)]
+    pub work_id: Option<crate::ids::WorkId>,
+    /// The repository the run worked on: the history is kept per workspace.
+    pub repo: PathBuf,
+    pub title: String,
+    #[serde(default)]
+    pub request: String,
+    pub status: RunStatus,
+    /// The lead's closing summary, when it gave one.
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// Why the run failed or was cancelled, or the last plan rejection.
+    #[serde(default)]
+    pub note: Option<String>,
+    pub base_branch: String,
+    pub branch: String,
+    /// How the run's result reached the base branch, once it did.
+    #[serde(default)]
+    pub landed: Option<Landing>,
+    /// Its tasks as they ended: key, title, who did it, and how it ended.
+    #[serde(default)]
+    pub tasks: Vec<HistoryTask>,
+    /// The commits the merged tasks brought into the run branch, in merge order.
+    #[serde(default)]
+    pub merged_commits: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    /// When the run reached a terminal state; later writes keep the first one.
+    #[serde(default)]
+    pub ended_at: Option<DateTime<Utc>>,
+    /// The run itself is gone (deleted); the record stays, read-only.
+    #[serde(default)]
+    pub deleted: bool,
+}
+
+/// One task as a workspace's history keeps it (`RunHistory.tasks`): the name and model of who
+/// did it, not the id, because the agents may be gone by the time the history is read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct HistoryTask {
+    pub key: String,
+    pub title: String,
+    /// The worker's name; whoever the task was assigned to, or the teammate it was cloned from.
+    #[serde(default)]
+    pub assignee: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    pub status: TaskStatus,
+}
+
 /// Files a task may or may not touch, as glob patterns relative to the workspace root.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]

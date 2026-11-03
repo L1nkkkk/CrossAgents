@@ -700,6 +700,8 @@ struct CliInner {
     install: Install,
     /// Where the description came from, reported with the status.
     described_by: Option<String>,
+    /// How long a version probe gets: [`VERSION_TIMEOUT`], shorter in tests.
+    version_timeout: Duration,
     cache: std::sync::Mutex<Cache>,
 }
 
@@ -710,13 +712,26 @@ struct Cache {
     found: Option<Located>,
     /// What the version probe last answered, for one (path, modification time).
     version: Option<VersionEntry>,
-    /// The file a version probe is running for.
-    probing: Option<PathBuf>,
+    /// The probe running for a file, if one is.
+    probing: Option<Probe>,
+    /// Hands out [`Probe::id`]: a probe that was forgotten while it ran must not clear the
+    /// flag of the probe that replaced it, or a status read would see no probe and start yet
+    /// another one.
+    probes: u64,
+}
+
+/// A version probe that is out.
+struct Probe {
+    id: u64,
+    path: PathBuf,
 }
 
 struct VersionEntry {
     path: PathBuf,
-    modified: SystemTime,
+    /// `None` when the file's modification time cannot be read: the entry is then keyed by
+    /// path alone. A failure is still remembered for [`VERSION_RETRY`] — not remembering it
+    /// made every status read start another probe.
+    modified: Option<SystemTime>,
     value: Option<String>,
     /// When a failed probe was made; `None` when it answered.
     failed_at: Option<Instant>,
@@ -730,6 +745,7 @@ impl Cli {
                 locator,
                 install,
                 described_by: None,
+                version_timeout: VERSION_TIMEOUT,
                 cache: std::sync::Mutex::default(),
             }),
         }
@@ -740,6 +756,15 @@ impl Cli {
         std::sync::Arc::get_mut(&mut self.inner)
             .expect("a fresh Cli has no other owner")
             .described_by = described_by;
+        self
+    }
+
+    /// A shorter version timeout, so a test that waits for one does not wait five seconds.
+    #[cfg(test)]
+    fn with_version_timeout(mut self, timeout: Duration) -> Self {
+        std::sync::Arc::get_mut(&mut self.inner)
+            .expect("a fresh Cli has no other owner")
+            .version_timeout = timeout;
         self
     }
 
@@ -790,6 +815,10 @@ impl Cli {
 
     /// Drops what the last lookup and the version cache remember: after an install or an
     /// upgrade the next lookup looks again, and the version is asked for the new file.
+    ///
+    /// A probe that is out is not cancelled, but it stops owning the "probing" flag: the next
+    /// status read asks the file as it is now, and that older answer must not clear the flag
+    /// of the newer probe.
     pub fn forget(&self) {
         let mut cache = self.cache();
         cache.found = None;
@@ -890,7 +919,11 @@ impl Cli {
         let upgrade_command = located
             .as_ref()
             .and_then(|found| install.upgrade_for(found.source, &found.path, machine));
+        // Read after the lookup: a version nobody asked for yet was asked for above, and the
+        // answer says whether that probe is still out.
+        let probing = located.as_ref().is_some_and(|found| self.probing(found));
         CliStatus {
+            probing,
             installed_via: located.as_ref().and_then(|found| {
                 install
                     .method_of(&found.path, machine)
@@ -918,19 +951,24 @@ impl Cli {
         if let Some(value) = self.known_version(&found) {
             return value;
         }
-        self.ask(found).await
+        // Asked here and waited for, but a status read meanwhile must say a probe is out.
+        // When one is already out for this file it is not repeated: this answer is the one it
+        // will give, and only the probe that owns the flag clears it.
+        let probe = self.mark_probing(&found);
+        self.ask(probe, found).await
     }
 
     /// The version last asked for this very file: `None` when it has not been asked for this
     /// (path, modification time) yet, or when a failed answer is old enough to ask again.
     ///
     /// A success is kept. A failure is not kept for good: a CLI that could not answer while
-    /// it was being installed, or whose runtime was busy, may answer a minute later.
+    /// it was being installed, or whose runtime was busy, may answer a minute later. A file
+    /// whose modification time cannot be read is keyed by its path alone, and its failure is
+    /// remembered the same way -- otherwise every status read would ask again at once.
     fn known_version(&self, found: &Located) -> Option<Option<String>> {
         let cache = self.cache();
         let entry = cache.version.as_ref()?;
-        let modified = modified(&found.path)?;
-        if entry.path != found.path || entry.modified != modified {
+        if entry.path != found.path || entry.modified != modified(&found.path) {
             return None;
         }
         if entry.value.is_some() {
@@ -942,41 +980,76 @@ impl Cli {
 
     /// Asks the version without waiting for it: `/v1/plugins` reports it once it answers.
     fn ask_in_background(&self, found: &Located) {
-        {
-            let mut cache = self.cache();
-            if cache.probing.as_deref() == Some(found.path.as_path()) {
-                return;
-            }
-            cache.probing = Some(found.path.clone());
-        }
+        let Some(probe) = self.mark_probing(found) else {
+            return;
+        };
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             // No runtime to ask from (a lookup-only test): nothing to wait for.
-            self.cache().probing = None;
+            self.release(probe);
             return;
         };
         let cli = self.clone();
         let found = found.clone();
         runtime.spawn(async move {
-            cli.ask(found).await;
+            cli.ask(Some(probe), found).await;
         });
     }
 
-    /// Asks the version and keeps it with the file it came from.
-    async fn ask(&self, found: Located) -> Option<String> {
-        let value = self.read_version(&found).await;
+    /// Whether a version probe for `found` is running now.
+    fn probing(&self, found: &Located) -> bool {
+        self.cache()
+            .probing
+            .as_ref()
+            .is_some_and(|probe| probe.path == found.path)
+    }
+
+    /// Notes that `found` is being asked its version; `None` when it already is, so no second
+    /// probe is started for the same file.
+    fn mark_probing(&self, found: &Located) -> Option<u64> {
         let mut cache = self.cache();
-        if cache.probing.as_deref() == Some(found.path.as_path()) {
+        if cache
+            .probing
+            .as_ref()
+            .is_some_and(|probe| probe.path == found.path)
+        {
+            return None;
+        }
+        cache.probes += 1;
+        let id = cache.probes;
+        cache.probing = Some(Probe {
+            id,
+            path: found.path.clone(),
+        });
+        Some(id)
+    }
+
+    /// Clears the flag `id` set, unless a newer probe owns it now.
+    fn release(&self, id: u64) {
+        let mut cache = self.cache();
+        if cache.probing.as_ref().is_some_and(|probe| probe.id == id) {
             cache.probing = None;
         }
-        // The modification time now, not before: what the answer is about.
-        if let Some(modified) = modified(&found.path) {
-            cache.version = Some(VersionEntry {
-                path: found.path,
-                modified,
-                failed_at: value.is_none().then(Instant::now),
-                value: value.clone(),
-            });
+    }
+
+    /// Asks the version and keeps it with the file it came from.
+    ///
+    /// Whatever the answer -- a version, nothing, a timeout -- the flag this probe set is
+    /// cleared here, so a status read never reports a probe that is over. An answer is kept
+    /// even when a refresh forgot this probe meanwhile: it is about the same (path, time).
+    async fn ask(&self, probe: Option<u64>, found: Located) -> Option<String> {
+        let value = self.read_version(&found).await;
+        if let Some(id) = probe {
+            self.release(id);
         }
+        let mut cache = self.cache();
+        // The modification time now, not before: what the answer is about.
+        let modified = modified(&found.path);
+        cache.version = Some(VersionEntry {
+            path: found.path,
+            modified,
+            failed_at: value.is_none().then(Instant::now),
+            value: value.clone(),
+        });
         value
     }
 
@@ -992,15 +1065,49 @@ impl Cli {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         hide_console(&mut command);
-        let output = tokio::time::timeout(VERSION_TIMEOUT, command.output())
-            .await
-            .ok()?
-            .ok()?;
+        let child = command.spawn().ok()?;
+        let pid = child.id();
+        let output = match tokio::time::timeout(
+            self.inner.version_timeout,
+            child.wait_with_output(),
+        )
+        .await
+        {
+            Ok(output) => output.ok()?,
+            Err(_) => {
+                // A `.cmd` is started through `cmd.exe`, which starts the real program: killing
+                // the wrapper alone would leave that program running with the pipes it was
+                // given, so the whole tree goes. Waiting for none of it: this must return.
+                kill_tree(pid);
+                return None;
+            }
+        };
         let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
         text.push('\n');
         text.push_str(&String::from_utf8_lossy(&output.stderr));
         parse_version(&text)
     }
+}
+
+/// Kills `pid` and the programs it started, without waiting for any of them.
+fn kill_tree(pid: Option<u32>) {
+    #[cfg(windows)]
+    if let Some(pid) = pid {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // `std::process`, not tokio's: this is started and left alone, and a dropped tokio
+        // child with `kill_on_drop` would kill the killer.
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+    }
+    // Elsewhere the child is the program itself, and `kill_on_drop` is enough.
+    #[cfg(not(windows))]
+    let _ = pid;
 }
 
 /// When `path` was last changed: the other half of the version cache's key.
@@ -1180,19 +1287,30 @@ fn expand(pattern: &str, machine: &Machine) -> Vec<PathBuf> {
         }
     }
     if cfg!(windows) {
-        // `~/.local/bin/claude` names `claude.exe` there.
-        paths = paths
-            .into_iter()
-            .flat_map(|path| {
-                if path.extension().is_none() {
-                    vec![path.with_extension("exe"), path]
-                } else {
-                    vec![path]
-                }
-            })
-            .collect();
+        paths = paths.into_iter().flat_map(windows_candidates).collect();
     }
     paths
+}
+
+/// The files one `paths` entry names on Windows: an entry point is an `.exe`, a `.cmd` or a
+/// `.bat`, so an extensionless entry names all three before the file itself.
+///
+/// A `.ps1` is never one: Cursor's agent installs `agent.ps1` beside `agent.cmd`, and the
+/// PowerShell execution policy refuses to run the script, which reads as "no version"
+/// (docs/DESIGN.md §9.3).
+fn windows_candidates(path: PathBuf) -> Vec<PathBuf> {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        None => {
+            let mut candidates = Vec::with_capacity(4);
+            for ext in ["exe", "cmd", "bat"] {
+                candidates.push(path.with_extension(ext));
+            }
+            candidates.push(path);
+            candidates
+        }
+        Some(ext) if ext.eq_ignore_ascii_case("ps1") => Vec::new(),
+        Some(_) => vec![path],
+    }
 }
 
 fn first_file(pattern: &str, machine: &Machine) -> Option<PathBuf> {
@@ -1258,20 +1376,37 @@ fn parse_version(text: &str) -> Option<String> {
     text.split_whitespace().find_map(|word| {
         let word = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.');
         let digits = word.strip_prefix('v').unwrap_or(word);
-        let mut parts = digits.split('.');
-        let major = parts.next()?;
-        if major.is_empty() || !major.chars().all(|c| c.is_ascii_digit()) {
-            return None;
-        }
-        let rest: Vec<&str> = parts.collect();
-        if rest.is_empty() {
-            return None;
-        }
-        let ok = rest
-            .iter()
-            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
-        ok.then(|| digits.to_owned())
+        version_word(digits).then(|| digits.to_owned())
     })
+}
+
+/// Whether `word` is a version: dotted numbers, and optionally a build or prerelease suffix
+/// after `-` or `+` — Cursor prints `2026.10.22-27dcf5f`, and `1.2.3-beta.1` is as much a
+/// version as `1.2.3`. The whole word is kept: the suffix is part of the version.
+///
+/// Two numbers are the least a version has: `10-20` is a range, `1` is a count.
+fn version_word(word: &str) -> bool {
+    let (numbers, suffix) = match word.find(['-', '+']) {
+        Some(at) => (&word[..at], Some(&word[at + 1..])),
+        None => (word, None),
+    };
+    let parts: Vec<&str> = numbers.split('.').collect();
+    if parts.len() < 2
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.chars().all(|c| c.is_ascii_digit()))
+    {
+        return false;
+    }
+    match suffix {
+        None => true,
+        Some(suffix) => {
+            suffix.chars().any(|c| c.is_ascii_alphanumeric())
+                && suffix
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1306,6 +1441,81 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, format!("#!/bin/sh\necho {version}\n")).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A stand-in CLI that records each `--version` run in `runs`, then prints `version` (or
+    /// nothing, when `version` is empty).
+    #[cfg(windows)]
+    fn counting_script(path: &Path, runs: &Path, version: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let answer = if version.is_empty() {
+            String::new()
+        } else {
+            format!("echo {version}\r\n")
+        };
+        std::fs::write(
+            path,
+            format!(
+                "@echo off\r\necho run>>\"{}\"\r\n{answer}",
+                runs.display()
+            ),
+        )
+        .unwrap();
+    }
+
+    #[cfg(not(windows))]
+    fn counting_script(path: &Path, runs: &Path, version: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let answer = if version.is_empty() {
+            String::new()
+        } else {
+            format!("echo {version}\n")
+        };
+        std::fs::write(
+            path,
+            format!("#!/bin/sh\necho run >> '{}'\n{answer}", runs.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A stand-in CLI whose `--version` takes far longer than any timeout a test sets.
+    #[cfg(windows)]
+    fn slow_script(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            "@echo off\r\nping -n 30 127.0.0.1 >nul\r\necho 9.9.9\r\n",
+        )
+        .unwrap();
+    }
+
+    #[cfg(not(windows))]
+    fn slow_script(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "#!/bin/sh\nsleep 30\necho 9.9.9\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// How many times a [`counting_script`] was run.
+    fn run_count(log: &Path) -> usize {
+        std::fs::read_to_string(log)
+            .map(|text| text.lines().count())
+            .unwrap_or(0)
+    }
+
+    /// Reads the status until no probe is out, as a client polling `GET /v1/plugins` does.
+    async fn settled(cli: &Cli, machine: &Machine) -> CliStatus {
+        for _ in 0..400 {
+            let status = cli.status_in(machine).await;
+            if !status.probing {
+                return status;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("the version probe never ended");
     }
 
     fn set_modified(path: &Path, when: SystemTime) {
@@ -1732,8 +1942,27 @@ mod tests {
             Some("0.158.0")
         );
         assert_eq!(parse_version("v1.2.3").as_deref(), Some("1.2.3"));
+        assert_eq!(parse_version("1.2").as_deref(), Some("1.2"));
         assert_eq!(parse_version("no version here"), None);
         assert_eq!(parse_version(""), None);
+        // What Cursor prints: a build id after a `-` is part of the version, not the end of it.
+        assert_eq!(
+            parse_version("2026.10.22-27dcf5f\n").as_deref(),
+            Some("2026.10.22-27dcf5f")
+        );
+        // A prerelease may carry dots of its own, and a build may come after a `+`.
+        assert_eq!(
+            parse_version("1.2.3-beta.1").as_deref(),
+            Some("1.2.3-beta.1")
+        );
+        assert_eq!(
+            parse_version("v2.0.0-rc.1+build.7 shipped").as_deref(),
+            Some("2.0.0-rc.1+build.7")
+        );
+        // No dot between numbers, no version: a range and a date are not versions.
+        assert_eq!(parse_version("10-20"), None);
+        assert_eq!(parse_version("2026-10-22"), None);
+        assert_eq!(parse_version("1.-2"), None);
     }
 
     /// The first method this machine can use wins: its `os` has to match and everything it
@@ -1892,7 +2121,7 @@ mod tests {
 
         let fail_at = |when: Instant| VersionEntry {
             path: found.path.clone(),
-            modified,
+            modified: Some(modified),
             value: None,
             failed_at: Some(when),
         };
@@ -1905,11 +2134,20 @@ mod tests {
         // A success is kept with the file it came from.
         cli.cache().version = Some(VersionEntry {
             path: found.path.clone(),
-            modified,
+            modified: Some(modified),
             value: Some("1.2.3".into()),
             failed_at: None,
         });
         assert_eq!(cli.known_version(&found), Some(Some("1.2.3".into())));
+        // A file whose modification time cannot be read is keyed by its path alone; one read
+        // now is a different key, so it is asked again rather than answered from the cache.
+        cli.cache().version = Some(VersionEntry {
+            path: found.path.clone(),
+            modified: None,
+            value: None,
+            failed_at: Some(Instant::now()),
+        });
+        assert_eq!(cli.known_version(&found), None, "a different key: ask");
     }
 
     /// The registry's `PATH` is merged with the process's: a CLI installed while the hub
@@ -1958,5 +2196,240 @@ mod tests {
             Some("%USERPROFILE%\\bin;C:\\tools")
         );
         assert_eq!(parse_reg_path("no value here"), None);
+    }
+
+    /// Windows names an entry point by extension, and never by `.ps1`: Cursor's agent puts
+    /// `agent.ps1` beside `agent.cmd`, and the execution policy refuses the script
+    /// (docs/DESIGN.md §9.3).
+    #[test]
+    fn windows_names_an_entry_point_by_its_extensions() {
+        let bare = PathBuf::from(r"C:\Users\me\.local\bin\agent");
+        assert_eq!(
+            windows_candidates(bare.clone()),
+            vec![
+                PathBuf::from(r"C:\Users\me\.local\bin\agent.exe"),
+                PathBuf::from(r"C:\Users\me\.local\bin\agent.cmd"),
+                PathBuf::from(r"C:\Users\me\.local\bin\agent.bat"),
+                bare,
+            ]
+        );
+        // A script is dropped, whatever case its extension is written in.
+        assert!(windows_candidates(PathBuf::from(r"C:\bin\agent.ps1")).is_empty());
+        assert!(windows_candidates(PathBuf::from(r"C:\bin\agent.PS1")).is_empty());
+        assert_eq!(
+            windows_candidates(PathBuf::from(r"C:\bin\agent.CMD")),
+            vec![PathBuf::from(r"C:\bin\agent.CMD")]
+        );
+    }
+
+    /// One `paths` entry names the batch wrapper when that is all there is, and names
+    /// nothing when the only file left is the PowerShell script beside it.
+    #[cfg(windows)]
+    #[test]
+    fn a_batch_entry_point_is_found_and_a_powershell_script_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        touch(&bin.join("agent.ps1"));
+        touch(&bin.join("agent.cmd"));
+        let locator: Locator = toml::from_str(r#"paths = ["~/bin/agent"]"#).unwrap();
+        let found = locator.locate_in(&machine(dir.path())).unwrap();
+        assert_eq!(found.path, bin.join("agent.cmd"));
+
+        std::fs::remove_file(bin.join("agent.cmd")).unwrap();
+        assert!(
+            locator.locate_in(&machine(dir.path())).is_none(),
+            "agent.ps1 must never be run as the CLI"
+        );
+    }
+
+    /// On `PATH`, the batch wrapper is picked over the script beside it.
+    #[cfg(windows)]
+    #[test]
+    fn path_lookup_skips_the_powershell_script() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(&dir.path().join("agent.ps1"));
+        touch(&dir.path().join("agent.cmd"));
+        let locator: Locator = toml::from_str(r#"commands = ["agent"]"#).unwrap();
+        let found = locator.locate_in(&machine(dir.path())).unwrap();
+        assert_eq!(found.path, dir.path().join("agent.cmd"));
+
+        std::fs::remove_file(dir.path().join("agent.cmd")).unwrap();
+        assert!(locator.locate_in(&machine(dir.path())).is_none());
+    }
+
+    /// A status says a version probe is out while it is, so a client shows "asking" rather
+    /// than "unknown"; once the answer is in, it says no.
+    #[tokio::test]
+    async fn status_says_a_version_probe_is_running_until_it_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir
+            .path()
+            .join(if cfg!(windows) { "agent.cmd" } else { "agent" });
+        version_script(&program, "1.0.0");
+        let locator: Locator = toml::from_str(
+            r#"
+            commands = ["agent"]
+            version = ["--version"]
+            "#,
+        )
+        .unwrap();
+        let cli = Cli::new(Vec::new(), locator, Install::default());
+        let machine = machine(dir.path());
+
+        let status = cli.status_in(&machine).await;
+        assert!(status.located.as_ref().unwrap().version.is_none());
+        assert!(
+            status.probing,
+            "the version was just asked for in the background"
+        );
+        assert_eq!(cli.version_in(&machine).await.as_deref(), Some("1.0.0"));
+        // The probe the status started is still out for a moment; it ends on its own.
+        let status = settled(&cli, &machine).await;
+        assert_eq!(
+            status.located.unwrap().version.as_deref(),
+            Some("1.0.0"),
+            "the answer the probe found is what the row shows"
+        );
+    }
+
+    /// A probe that came back without a version is done asking: the client says "unknown",
+    /// not "asking" for ever.
+    #[tokio::test]
+    async fn a_probe_that_answered_nothing_stops_asking() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir
+            .path()
+            .join(if cfg!(windows) { "agent.cmd" } else { "agent" });
+        version_script(&program, "no version here");
+        let locator: Locator = toml::from_str(
+            r#"
+            commands = ["agent"]
+            version = ["--version"]
+            "#,
+        )
+        .unwrap();
+        let cli = Cli::new(Vec::new(), locator, Install::default());
+        let machine = machine(dir.path());
+
+        assert_eq!(cli.version_in(&machine).await, None);
+        let status = cli.status_in(&machine).await;
+        assert!(status.located.is_some());
+        assert!(!status.probing);
+    }
+
+    /// The version the bug started with: Cursor's build id is part of the version, and it is
+    /// reported rather than read as "no version".
+    #[tokio::test]
+    async fn a_version_with_a_build_suffix_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir
+            .path()
+            .join(if cfg!(windows) { "agent.cmd" } else { "agent" });
+        version_script(&program, "2026.10.22-27dcf5f");
+        let locator: Locator = toml::from_str(
+            r#"
+            commands = ["agent"]
+            version = ["--version"]
+            "#,
+        )
+        .unwrap();
+        let cli = Cli::new(Vec::new(), locator, Install::default());
+        let machine = machine(dir.path());
+
+        let status = settled(&cli, &machine).await;
+        assert_eq!(
+            status.located.unwrap().version.as_deref(),
+            Some("2026.10.22-27dcf5f")
+        );
+        assert!(!cli.status_in(&machine).await.probing);
+    }
+
+    /// A probe that has to be killed is still a probe that ended: the status stops saying one
+    /// is out, and no answer is kept.
+    #[tokio::test]
+    async fn a_probe_that_times_out_stops_saying_it_is_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir
+            .path()
+            .join(if cfg!(windows) { "agent.cmd" } else { "agent" });
+        slow_script(&program);
+        let locator: Locator = toml::from_str(
+            r#"
+            commands = ["agent"]
+            version = ["--version"]
+            "#,
+        )
+        .unwrap();
+        let cli = Cli::new(Vec::new(), locator, Install::default())
+            .with_version_timeout(Duration::from_millis(300));
+        let machine = machine(dir.path());
+
+        assert!(
+            cli.status_in(&machine).await.probing,
+            "the probe was just started"
+        );
+        let status = settled(&cli, &machine).await;
+        assert!(!status.probing, "a timed out probe is over");
+        assert_eq!(status.located.unwrap().version, None);
+        // And it is not asked again at once: the failure is remembered like any other.
+        assert!(!cli.status_in(&machine).await.probing);
+    }
+
+    /// A failed probe is remembered for a minute: the status reads a client makes meanwhile
+    /// ask nothing. An explicit refresh forgets the failure and asks again.
+    #[tokio::test]
+    async fn a_failed_probe_is_not_asked_again_until_the_retry_window_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("runs.txt");
+        let program = dir
+            .path()
+            .join(if cfg!(windows) { "agent.cmd" } else { "agent" });
+        counting_script(&program, &log, "");
+        let locator: Locator = toml::from_str(
+            r#"
+            commands = ["agent"]
+            version = ["--version"]
+            "#,
+        )
+        .unwrap();
+        let cli = Cli::new(Vec::new(), locator, Install::default());
+        let machine = machine(dir.path());
+
+        assert!(cli.status_in(&machine).await.probing);
+        assert!(!settled(&cli, &machine).await.probing);
+        assert_eq!(run_count(&log), 1, "asked once");
+        // What the GUI's poll does: read the status again and again.
+        for _ in 0..3 {
+            assert!(!cli.status_in(&machine).await.probing);
+        }
+        assert_eq!(run_count(&log), 1, "nothing was asked again within the window");
+        // The person clicks "detect again": the failure is forgotten and the CLI is asked.
+        cli.forget();
+        assert!(cli.status_in(&machine).await.probing);
+        assert!(!settled(&cli, &machine).await.probing);
+        assert_eq!(run_count(&log), 2, "an explicit refresh asks again");
+    }
+
+    /// A probe forgotten while it ran must not clear the flag of the probe that replaced it:
+    /// doing so made a status read start yet another probe, so "probing" was almost always
+    /// true.
+    #[test]
+    fn a_forgotten_probe_does_not_clear_the_newer_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join(if cfg!(windows) { "agent.cmd" } else { "agent" });
+        touch(&program);
+        let locator: Locator = toml::from_str(r#"commands = ["agent"]"#).unwrap();
+        let cli = Cli::new(Vec::new(), locator, Install::default());
+        let machine = machine(dir.path());
+        let found = cli.found_in(&machine).unwrap();
+
+        let old = cli.mark_probing(&found).expect("the first probe claimed");
+        cli.forget();
+        let new = cli.mark_probing(&found).expect("the second probe claimed");
+        assert_ne!(old, new);
+        cli.release(old);
+        assert!(cli.probing(&found), "the newer probe is still out");
+        cli.release(new);
+        assert!(!cli.probing(&found));
     }
 }
