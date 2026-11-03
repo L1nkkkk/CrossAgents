@@ -46,7 +46,7 @@ async fn get(t: &TestHub, id: RunId) -> Run {
 }
 
 async fn idle(t: &TestHub, id: AgentId) {
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(common::wait_limit(), async {
         loop {
             let a = t
                 .hub
