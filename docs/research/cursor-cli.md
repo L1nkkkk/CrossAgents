@@ -119,15 +119,21 @@ Tip: use --model <id> ...
 
 - Windows：`%APPDATA%\Cursor\auth.json`（实测：把 `{"accessToken":"dummy","refreshToken":"dummy"}` 写进临时 `APPDATA\Cursor\auth.json` 后，`agent status` 报 `authenticated`；只写 accessToken 报 `partially-authenticated`）。
 - macOS：`~/.cursor/auth.json`；Linux：`$XDG_CONFIG_HOME/cursor/auth.json`（bundle 证据：`getAuthFilePath` 按平台拼，域名是 `cursor`，Windows 上做 Title Case → `Cursor`）。
+- macOS 的登录文件是**写死的 `~/.cursor/auth.json`**，不跟 `CURSOR_DATA_DIR` 走（bundle 证据：`case "darwin": join(homedir(), ".cursor", "auth.json")`），所以 macOS 上隔离登录只能改 `HOME`。
 - `~/.cursor/cli-config.json` 只是设置（权限、沙箱、编辑器偏好），**不含 token**（实测看过本机文件）。
 - `AGENT_CLI_CREDENTIAL_STORE=file|memory|default` 选存储：`file` 强制上面那个 `auth.json`，`default` 在 macOS 走钥匙串。
 
 ### 多账号隔离
 
 - `CURSOR_DATA_DIR` 换数据目录（默认 `~/.cursor`：设置、`chats/`、`projects/`）。改它**不动登录**。
-- 登录文件跟着平台的配置目录走，所以隔离登录要改 `APPDATA`（Windows）/ `HOME`（macOS）/ `XDG_CONFIG_HOME`（Linux），再加 `AGENT_CLI_CREDENTIAL_STORE=file` 把 macOS 的钥匙串也换成文件。
-- provider 的 `agent_env` 因此给独立账号一组：`CURSOR_DATA_DIR=<home>`，`USERPROFILE`/`HOME`/`APPDATA`/`LOCALAPPDATA`/`XDG_CONFIG_HOME` 指到 `<home>/profile`，`AGENT_CLI_CREDENTIAL_STORE=file`，并把 `CURSOR_API_KEY`/`CURSOR_AUTH_TOKEN` 置空（CLI 按真值判断，空串等于没设）；登录命令里这两项改成 `env_remove`。本机登录（`default_home` = `~/.cursor`）不加任何变量，用机器上那一个登录。
-- 实测：用两个不同的临时 `APPDATA` 跑 `agent status`，一个放了假凭据报 `authenticated`、另一个报 `unauthenticated`，互不影响；provider 对独立 home 的 status 走的也是这条路。
+- 登录文件跟着平台的配置目录走，但**只需要改那一个变量**：
+  - Windows：`APPDATA` → `%APPDATA%\Cursor\auth.json` 跟着走；
+  - Linux：`XDG_CONFIG_HOME` → `$XDG_CONFIG_HOME/cursor/auth.json`；
+  - macOS：`HOME`（因为上面的路径写死，`CURSOR_DATA_DIR` 搬不动它）。
+- 再加 `AGENT_CLI_CREDENTIAL_STORE=file`（macOS 上把钥匙串也换成文件）。
+- 其余一律不动：Windows 的 `USERPROFILE`/`HOME`/`LOCALAPPDATA`、Linux 的 `HOME` 都保持用户自己的，agent 在任务里跑的 git、ssh、npm 仍看到真实的 `~/.gitconfig`、`~/.ssh`、缓存。**只有 macOS 例外**：`HOME` 被挪到账号 profile 下，随它跑的 git/ssh/npm 也会看到 profile 里的文件，这是 macOS 上第二个登录的代价。
+- provider 的 `agent_env` 因此给独立账号只有：`CURSOR_DATA_DIR=<home>`、上面那一个平台变量（指向 `<home>/profile...`）、`AGENT_CLI_CREDENTIAL_STORE=file`，外加把 `CURSOR_API_KEY`/`CURSOR_AUTH_TOKEN` 置空（CLI 按真值判断，空串等于没设）；登录命令里这两项改成 `env_remove`。本机登录（`default_home` = `~/.cursor`）不加任何变量，用机器上那一个登录。
+- 实测（两个临时目录，只改 `APPDATA` + `CURSOR_DATA_DIR`，`USERPROFILE`/`HOME`/`LOCALAPPDATA` 保持用户自己的）：一个放了假凭据报 `authenticated`、另一个报 `unauthenticated`，互不影响。provider 层再验一次（两个独立 home 各跑一次 `status`）：放了假凭据的那个 `logged_in=true`、另一个 `false`，`agent_env` 只有 5 个变量，没有 `USERPROFILE`/`HOME`/`LOCALAPPDATA`。
 - 没能实测：真正两个 Cursor 账号同时登录时的行为（没有账号）。从 bundle 看凭据路径只由平台目录决定，没有别的全局单例；风险在于 CLI 自己的后台进程（若有）可能仍读用户目录。
 
 ### 额度与 token

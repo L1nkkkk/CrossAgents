@@ -9,11 +9,13 @@
 //! done, then exits. Models are `agent models`, whose text list the description's fallback
 //! list stands in for when the login cannot list them.
 //!
-//! An explicit account moves the CLI's files: `CURSOR_DATA_DIR` (settings, chats) and, with
-//! `AGENT_CLI_CREDENTIAL_STORE=file`, the login file the CLI keeps beside the platform's
-//! config directory (`%APPDATA%\Cursor\auth.json` on Windows, `~/.cursor/auth.json` on
-//! macOS, `$XDG_CONFIG_HOME/cursor/auth.json` elsewhere) — so a profile's home and its
-//! `APPDATA`/`HOME`/`XDG_CONFIG_HOME` keep two Cursor logins apart.
+//! An explicit account moves only the CLI's own files: `CURSOR_DATA_DIR` (settings, chats)
+//! and, with `AGENT_CLI_CREDENTIAL_STORE=file`, the login file beside the platform's config
+//! directory — `%APPDATA%\Cursor\auth.json` on Windows (only `APPDATA` moves), and
+//! `$XDG_CONFIG_HOME/cursor/auth.json` on Linux (only `XDG_CONFIG_HOME` moves). On macOS the
+//! login file is `~/.cursor/auth.json`, which `CURSOR_DATA_DIR` does not move, so a second
+//! login there has to move `HOME` too (and with it the git/ssh/npm files of the agent). The
+//! agent's own profile stays the user's everywhere else.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -27,6 +29,7 @@ use crossagents_core::{
     Account, AccountProvider, AccountStatus, CoreError, DataSource, LoginCommand, ModelInfo,
     SessionUsage, mask_email,
 };
+use crossagents_drivers::locate::os_name;
 use crossagents_drivers::process::{hide_console, resolve_program, system_proxy_env};
 use serde_json::Value;
 
@@ -73,33 +76,7 @@ impl CursorAccounts {
         {
             return Vec::new();
         }
-        let profile = account.home.join("profile");
-        let appdata = profile.join("AppData");
-        vec![
-            (
-                "CURSOR_DATA_DIR".to_owned(),
-                account.home.display().to_string(),
-            ),
-            ("USERPROFILE".to_owned(), profile.display().to_string()),
-            ("HOME".to_owned(), profile.display().to_string()),
-            (
-                "APPDATA".to_owned(),
-                appdata.join("Roaming").display().to_string(),
-            ),
-            (
-                "LOCALAPPDATA".to_owned(),
-                appdata.join("Local").display().to_string(),
-            ),
-            (
-                "XDG_CONFIG_HOME".to_owned(),
-                profile.join(".config").display().to_string(),
-            ),
-            // The login file, rather than the system credential store, so it is this
-            // profile's to keep (and to delete).
-            ("AGENT_CLI_CREDENTIAL_STORE".to_owned(), "file".to_owned()),
-            ("CURSOR_API_KEY".to_owned(), String::new()),
-            ("CURSOR_AUTH_TOKEN".to_owned(), String::new()),
-        ]
+        isolated_env(&account.home, os_name())
     }
 
     /// The CLI's answer to `args`, as text. An empty-value env entry means "do not let the
@@ -331,6 +308,37 @@ fn same_path(a: &Path, b: &Path) -> bool {
     canon(a) == canon(b)
 }
 
+/// The variables that keep a second Cursor login in `home`: the data directory, the file
+/// credential store, and — only where the CLI's login file follows it — the platform's
+/// config directory:
+///
+/// - Windows: `APPDATA`, because the login file is `%APPDATA%\Cursor\auth.json`. The agent's
+///   `USERPROFILE`/`HOME`/`LOCALAPPDATA` stay the user's, so the git, ssh and npm it runs
+///   still see the real `~/.gitconfig`, `~/.ssh` and caches (measured).
+/// - Linux: `XDG_CONFIG_HOME`, because the login file is `$XDG_CONFIG_HOME/cursor/auth.json`.
+///   `HOME` stays the user's.
+/// - macOS: `HOME`, because the login file is `~/.cursor/auth.json` and `CURSOR_DATA_DIR`
+///   does not move it (the CLI hard-codes the home directory; see docs/research/cursor-cli.md).
+///   With `HOME` moved, the agent's git/ssh/npm also see the profile rather than the user's
+///   files: that is the price of a second login on macOS, and the only case where it is paid.
+fn isolated_env(home: &Path, os: &str) -> Vec<(String, String)> {
+    let profile = home.join("profile");
+    let (key, value) = match os {
+        "windows" => ("APPDATA", profile.join("AppData").join("Roaming")),
+        "macos" => ("HOME", profile),
+        _ => ("XDG_CONFIG_HOME", profile.join(".config")),
+    };
+    vec![
+        ("CURSOR_DATA_DIR".to_owned(), home.display().to_string()),
+        (key.to_owned(), value.display().to_string()),
+        // The login file, rather than the system credential store, so it is this profile's
+        // to keep (and to delete); on macOS this is what keeps it out of the keychain.
+        ("AGENT_CLI_CREDENTIAL_STORE".to_owned(), "file".to_owned()),
+        ("CURSOR_API_KEY".to_owned(), String::new()),
+        ("CURSOR_AUTH_TOKEN".to_owned(), String::new()),
+    ]
+}
+
 #[async_trait]
 impl AccountProvider for CursorAccounts {
     fn name(&self) -> &str {
@@ -519,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn a_private_login_moves_the_cli_files_and_keeps_the_machine_one() {
+    fn a_private_login_moves_only_the_variable_the_login_file_follows() {
         let provider = CursorAccounts::new(None);
         let Some(default) = provider.default_home() else {
             return;
@@ -537,15 +545,36 @@ mod tests {
         let private = account(&home);
         let env: BTreeMap<_, _> = provider.agent_env(&private).into_iter().collect();
         assert_eq!(env["CURSOR_DATA_DIR"], home.display().to_string());
-        assert_eq!(
-            PathBuf::from(&env["APPDATA"]),
-            home.join("profile").join("AppData/Roaming")
-        );
         assert_eq!(env["AGENT_CLI_CREDENTIAL_STORE"], "file");
         // Empty overrides reach an agent as empty strings, which the CLI reads as unset;
         // a login command drops them from the environment altogether.
         assert_eq!(env["CURSOR_API_KEY"], "");
         assert_eq!(env["CURSOR_AUTH_TOKEN"], "");
+        // The agent's own git/ssh/npm files stay the user's: only the config directory the
+        // login file lives in moves.
+        if cfg!(windows) {
+            assert_eq!(
+                PathBuf::from(&env["APPDATA"]),
+                home.join("profile").join("AppData").join("Roaming")
+            );
+            for untouched in ["USERPROFILE", "HOME", "LOCALAPPDATA", "XDG_CONFIG_HOME"] {
+                assert!(!env.contains_key(untouched), "{untouched}");
+            }
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(PathBuf::from(&env["HOME"]), home.join("profile"));
+            for untouched in ["APPDATA", "USERPROFILE", "LOCALAPPDATA", "XDG_CONFIG_HOME"] {
+                assert!(!env.contains_key(untouched), "{untouched}");
+            }
+        } else {
+            assert_eq!(
+                PathBuf::from(&env["XDG_CONFIG_HOME"]),
+                home.join("profile").join(".config")
+            );
+            for untouched in ["HOME", "APPDATA", "USERPROFILE", "LOCALAPPDATA"] {
+                assert!(!env.contains_key(untouched), "{untouched}");
+            }
+        }
+
         let login = provider.login_command(&private);
         assert_eq!(login.command.last().map(String::as_str), Some("login"));
         assert_eq!(
@@ -566,8 +595,56 @@ mod tests {
             .agent_env(&account(Path::new("/accounts/cursor-home")))
             .into_iter()
             .collect();
-        assert_ne!(env["APPDATA"], other["APPDATA"]);
         assert_ne!(env["CURSOR_DATA_DIR"], other["CURSOR_DATA_DIR"]);
+        // Windows keeps the login beside APPDATA; the others keep it beside the home.
+        let where_login = |env: &BTreeMap<String, String>| {
+            ["APPDATA", "HOME", "XDG_CONFIG_HOME"]
+                .iter()
+                .find_map(|key| env.get(*key).map(|v| (key.to_string(), v.clone())))
+                .expect("one variable for the login file")
+        };
+        assert_ne!(where_login(&env), where_login(&other));
+    }
+
+    /// Each system moves exactly one variable, and the one its login file follows:
+    /// `%APPDATA%\Cursor\auth.json`, `$XDG_CONFIG_HOME/cursor/auth.json`, and on macOS
+    /// `~/.cursor/auth.json` (which `CURSOR_DATA_DIR` does not move, hence `HOME` there).
+    #[test]
+    fn only_the_platform_variable_the_login_file_follows_moves() {
+        let home = Path::new("/accounts/cursor-work");
+        let profile = home.join("profile");
+        let env =
+            |os: &str| -> BTreeMap<String, String> { isolated_env(home, os).into_iter().collect() };
+        for os in ["windows", "macos", "linux"] {
+            let env = env(os);
+            assert_eq!(env["CURSOR_DATA_DIR"], home.display().to_string());
+            assert_eq!(env["AGENT_CLI_CREDENTIAL_STORE"], "file");
+            assert_eq!(env["CURSOR_API_KEY"], "");
+            assert_eq!(env["CURSOR_AUTH_TOKEN"], "");
+            let moved: Vec<&str> = ["APPDATA", "HOME", "XDG_CONFIG_HOME"]
+                .into_iter()
+                .filter(|key| env.contains_key(*key))
+                .collect();
+            assert_eq!(moved.len(), 1, "{os}: {moved:?}");
+            for untouched in ["USERPROFILE", "LOCALAPPDATA"] {
+                assert!(!env.contains_key(untouched), "{os}: {untouched}");
+            }
+        }
+        let windows = env("windows");
+        assert_eq!(
+            PathBuf::from(&windows["APPDATA"]),
+            profile.join("AppData").join("Roaming")
+        );
+        assert!(!windows.contains_key("HOME"));
+        let macos = env("macos");
+        assert_eq!(PathBuf::from(&macos["HOME"]), profile);
+        assert!(!macos.contains_key("APPDATA"));
+        let linux = env("linux");
+        assert_eq!(
+            PathBuf::from(&linux["XDG_CONFIG_HOME"]),
+            profile.join(".config")
+        );
+        assert!(!linux.contains_key("HOME"));
     }
 
     #[tokio::test]
