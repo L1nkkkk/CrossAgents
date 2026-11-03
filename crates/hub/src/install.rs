@@ -8,7 +8,7 @@
 //! Success is what the lookup says, not the exit code: a command that exits 0 but leaves no
 //! program behind is a failure, and the reason lists everywhere the description looked.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -30,6 +30,14 @@ impl Action {
             Self::Upgrade => "upgrade",
         }
     }
+
+    /// The past participle, for the 409 a person reads: `installed`, `upgraded`.
+    pub fn past(self) -> &'static str {
+        match self {
+            Self::Install => "installed",
+            Self::Upgrade => "upgraded",
+        }
+    }
 }
 
 /// One install or upgrade the API accepted: what to run, and where that came from.
@@ -44,14 +52,23 @@ pub struct JobSpec {
 }
 
 /// The installs and upgrades running now, by plugin.
+///
+/// Only in memory, by design: an install runs in a child of this process, so after a restart
+/// nothing is running and `GET /v1/plugins` reports no install in progress.
 #[derive(Default)]
 pub struct Installer {
-    running: Mutex<HashSet<String>>,
+    /// What each plugin's job is doing now.
+    running: Mutex<HashMap<String, Action>>,
 }
 
 impl Installer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// What is running for `plugin` now, or `None`: what `CliInfo.installing` reports.
+    pub async fn installing(&self, plugin: &str) -> Option<Action> {
+        self.running.lock().await.get(plugin).copied()
     }
 
     /// Starts `job`, or refuses (409) when that plugin already has one running.
@@ -85,12 +102,13 @@ impl Installer {
     /// Reserves a plugin; `Err(Conflict)` when it already has a job running.
     async fn claim(&self, plugin: &str, action: Action) -> Result<(), CoreError> {
         let mut running = self.running.lock().await;
-        if !running.insert(plugin.to_owned()) {
+        if let Some(current) = running.get(plugin) {
             return Err(CoreError::Conflict(format!(
-                "{plugin} is already being {}ed; wait for it to finish",
-                action.as_str()
+                "{plugin} is already being {}; wait for it to finish",
+                current.past()
             )));
         }
+        running.insert(plugin.to_owned(), action);
         Ok(())
     }
 
@@ -208,16 +226,23 @@ mod tests {
     #[tokio::test]
     async fn one_job_per_plugin() {
         let installer = Installer::new();
+        assert_eq!(installer.installing("claude").await, None);
         installer.claim("claude", Action::Install).await.unwrap();
+        assert_eq!(installer.installing("claude").await, Some(Action::Install));
         let err = installer
             .claim("claude", Action::Upgrade)
             .await
             .expect_err("already running");
         assert!(matches!(err, CoreError::Conflict(_)), "{err:?}");
+        // The conflict says what is running, and that is an install.
+        assert!(err.to_string().contains("installed"), "{err}");
         // Another plugin is not held up by it.
         installer.claim("codex", Action::Install).await.unwrap();
         installer.release("claude").await;
+        assert_eq!(installer.installing("claude").await, None);
+        assert_eq!(installer.installing("codex").await, Some(Action::Install));
         installer.claim("claude", Action::Upgrade).await.unwrap();
+        assert_eq!(installer.installing("claude").await, Some(Action::Upgrade));
     }
 
     #[test]
