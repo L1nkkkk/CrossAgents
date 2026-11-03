@@ -43,6 +43,8 @@ pub fn required(method: &Method, pattern: &str) -> Level {
             // They run a program on this machine (docs/DESIGN.md §9.3).
             | ("POST", "/v1/plugins/{name}/install")
             | ("POST", "/v1/plugins/{name}/upgrade")
+            // It runs the CLIs' version commands, as those do.
+            | ("POST", "/v1/plugins/refresh")
     );
     if admin {
         Level::Admin
@@ -103,6 +105,8 @@ mod tests {
             required(&Method::POST, "/v1/plugins/{name}/upgrade"),
             Level::Admin
         );
+        // Looking for the CLIs again runs their version commands.
+        assert_eq!(required(&Method::POST, "/v1/plugins/refresh"), Level::Admin);
         // Asking which paths are inside a workspace reads; nothing changes.
         assert_eq!(
             required(&Method::POST, "/v1/agents/{key}/files/resolve"),

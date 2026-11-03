@@ -5,6 +5,11 @@
  */
 export type CliInfo = { installed: boolean, 
 /**
+ * A version probe is running now: `version` is empty until it answers, so a client says
+ * "asking" rather than "unknown" (docs/DESIGN.md §9.3).
+ */
+probing: boolean, 
+/**
  * The file that was found: the CLI's own entry point, even when it is run through
  * `node`.
  */
