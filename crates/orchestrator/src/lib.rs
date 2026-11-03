@@ -12,6 +12,7 @@ pub mod expertise;
 pub mod files;
 pub mod graph;
 pub mod handoff;
+pub mod history;
 pub mod host;
 pub mod human;
 pub mod landing;

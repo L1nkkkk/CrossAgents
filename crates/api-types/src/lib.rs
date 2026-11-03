@@ -10,9 +10,9 @@ use ts_rs::TS;
 pub use crossagents_core::{
     Account, AccountStatus, Agent, AgentCommand, AgentCommandKind, AgentId, AgentProfile,
     AgentStatus, Capabilities, CheckResult, ClaimRole, ContinuationPolicy, DataSource, DiffSource,
-    DriverKind, Event, EventKind, Handoff, HandoffKind, MessageId, MessageSource, ModelInfo,
-    OutputStream, PlannedTask, Role, Run, RunId, RunPolicy, RunStatus, StopReason, Task, TaskId,
-    TaskStatus, TokenTotals, ToolInfo, ToolStatus,
+    DriverKind, Event, EventKind, Handoff, HandoffKind, HistoryTask, MessageId, MessageSource,
+    ModelInfo, OutputStream, PlannedTask, Role, Run, RunHistory, RunId, RunPolicy, RunStatus,
+    StopReason, Task, TaskId, TaskStatus, TokenTotals, ToolInfo, ToolStatus,
 };
 
 /// Handoff cards and how a task's chain of them reads.
@@ -1299,6 +1299,17 @@ pub struct ListWorksResponse {
 pub struct WorkDetail {
     pub work: crossagents_core::Work,
     pub runs: Vec<crossagents_core::Run>,
+    /// What the work group's rounds left behind, including the ones since deleted
+    /// (`RunHistory.deleted`): the work's history outlives its runs.
+    #[serde(default)]
+    pub history: Vec<crossagents_core::RunHistory>,
+}
+
+/// `GET /v1/history`: what runs left in a workspace, including the ones since deleted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListHistoryResponse {
+    pub history: Vec<crossagents_core::RunHistory>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -1889,6 +1900,7 @@ mod tests {
         Event::export_all(&cfg).unwrap();
         crossagents_core::Task::export_all(&cfg).unwrap();
         crossagents_core::Run::export_all(&cfg).unwrap();
+        crossagents_core::RunHistory::export_all(&cfg).unwrap();
         crossagents_core::ExpertiseEntry::export_all(&cfg).unwrap();
         crossagents_core::Candidate::export_all(&cfg).unwrap();
     }

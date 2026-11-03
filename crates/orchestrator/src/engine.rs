@@ -416,6 +416,11 @@ impl Orchestrator {
         }
         run.updated_at = Utc::now();
         self.store.update_run(run).await?;
+        // What wound up did stays in its workspace's history, where deleting the run cannot
+        // take it (history.rs).
+        if to.is_terminal() {
+            self.record_history(run).await;
+        }
         if from != to {
             if to.is_terminal() {
                 self.tell_origin_later(run).await;
