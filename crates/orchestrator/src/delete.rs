@@ -2,7 +2,8 @@
 //! when the person says so, its branches. A hard delete — runs do not come back — so only a
 //! run that ended can go, and a checkout with work that never landed asks first. Sessions
 //! are not the run's (docs/tasks/S1.md §3.4): what it still holds is let go, nothing is
-//! deleted. Events stay: the log only grows, and the trace outlives the run.
+//! deleted. Events stay: the log only grows, and the trace outlives the run. So does the
+//! record of what it did in its workspace (`history.rs`), which the delete marks, never drops.
 
 use std::path::Path;
 
@@ -300,8 +301,11 @@ impl Orchestrator {
             }
         }
 
-        // f. The run itself, then the word that it is gone.
+        // f. The run itself, then the word that it is gone. What it did stays in the
+        // workspace's history (history.rs): a run deleted from before that record existed
+        // leaves one now.
         if delete {
+            self.record_history(&run).await;
             self.store.delete_run(id).await?;
             self.publish(EventKind::RunDeleted { run_id: id }).await;
         }
