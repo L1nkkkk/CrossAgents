@@ -24,6 +24,7 @@ pub mod builtin;
 pub mod claude_account;
 pub mod codebuddy_account;
 pub mod codex_account;
+pub mod cursor_account;
 pub mod manifest;
 
 use std::collections::{BTreeMap, HashMap};
