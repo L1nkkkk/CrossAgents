@@ -62,6 +62,9 @@ pub struct Located {
 pub struct CliStatus {
     /// `None`: not found, so nothing can be launched.
     pub located: Option<Located>,
+    /// A version probe is running now: `located.version` is empty until it answers. A client
+    /// shows "asking" rather than "unknown" while this holds.
+    pub probing: bool,
     /// The command that installs it (shown, never run).
     pub install_hint: Option<String>,
     /// Where to read more about installing and signing in.

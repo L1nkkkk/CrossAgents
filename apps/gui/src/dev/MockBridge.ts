@@ -720,6 +720,7 @@ export class MockBridge implements CrossAgentsBridge {
         return json(m[2] === "answer" ? 200 : 204, q);
       }
       if (p === "/v1/repos/init") return json(200, body);
+      if (p === "/v1/plugins/refresh") return this.refreshClis();
       if ((m = p.match(/^\/v1\/plugins\/([^/]+)\/(install|upgrade)$/)))
         return this.installCli(decodeURIComponent(m[1]), m[2] as "install" | "upgrade");
       if ((m = p.match(/^\/v1\/plugins\/([^/]+)\/models$/))) {
@@ -889,6 +890,23 @@ export class MockBridge implements CrossAgentsBridge {
     const parts = [req.note ?? "", lines.length ? `Review comments on #${task.key}:\n${lines.join("\n")}` : "", `---\nfrom: the person, reviewing task #${task.key}`];
     this.emit({ type: "agent.input", data: { id: task.assignee, message_id: uid(), text: parts.filter(Boolean).join("\n\n"), queued: true, from: { kind: "human" } } });
     return json(200, task);
+  }
+
+  /** Looking for the CLIs again: `202` at once, then each row's version is probed and the
+   * event stream says the row changed, as the hub does (docs/DESIGN.md §9.3). */
+  private refreshClis(): HubResponse {
+    for (const plugin of this.state.plugins) {
+      if (!plugin.cli) continue;
+      plugin.cli.probing = true;
+      this.timers.push(
+        setTimeout(() => {
+          if (!plugin.cli) return;
+          plugin.cli.probing = false;
+          this.emit({ type: "plugin.changed", data: { name: plugin.name } });
+        }, 700),
+      );
+    }
+    return json(202);
   }
 
   /** Like the hub: the description's command runs, and the event stream says how it went. */

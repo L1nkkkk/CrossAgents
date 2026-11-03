@@ -515,6 +515,10 @@ pub struct PluginInfo {
 #[ts(export)]
 pub struct CliInfo {
     pub installed: bool,
+    /// A version probe is running now: `version` is empty until it answers, so a client says
+    /// "asking" rather than "unknown" (docs/DESIGN.md §9.3).
+    #[serde(default)]
+    pub probing: bool,
     /// The file that was found: the CLI's own entry point, even when it is run through
     /// `node`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

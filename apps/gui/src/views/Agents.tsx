@@ -1,6 +1,7 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { AgentProfile } from "@bindings/AgentProfile";
+import { RefreshCw } from "lucide-react";
 import { api, errorText } from "../api";
 import {
   AVATAR_COLORS,
@@ -103,10 +104,17 @@ const CLI_SOURCE: Record<string, string> = {
   bundled: "桌面版自带",
 };
 
+/** How often the CLI list is looked for again on its own: at least this far apart. */
+const REFRESH_EVERY_MS = 10_000;
+
 /**
  * The agent CLIs this machine has (docs/DESIGN.md §9.3): each vendor's version and where its
  * program came from, a button that installs or upgrades it, and why there is no button when
  * there is none. Nothing runs before the person confirms the exact command.
+ *
+ * The list is not only what the hub saw when it started: entering the page, and coming back
+ * to a window that lost focus, makes the hub look again and probe the versions, so a CLI
+ * installed in a terminal shows up without restarting the hub.
  */
 function VendorClis() {
   const plugins = useHubData(
@@ -119,6 +127,46 @@ function VendorClis() {
   );
   const [confirm, setConfirm] = useState<Job>();
   const [jobs, setJobs] = useState<Record<string, Progress>>({});
+  // The POST is out; the probes themselves show in each row's `probing`.
+  const [asking, setAsking] = useState(false);
+  const [askError, setAskError] = useState<string>();
+  const lastRefresh = useRef(0);
+  const reload = plugins.reload;
+
+  const refresh = useCallback(
+    (force = false) => {
+      const now = Date.now();
+      if (!force && now - lastRefresh.current < REFRESH_EVERY_MS) return;
+      lastRefresh.current = now;
+      setAsking(true);
+      api
+        .refreshPlugins()
+        .then(() => setAskError(undefined))
+        .catch((err) => setAskError(errorText(err)))
+        // The probes answer one at a time on the event stream; this read picks up the ones
+        // already out, so their rows say "asking" meanwhile.
+        .finally(() => {
+          setAsking(false);
+          reload();
+        });
+    },
+    [reload],
+  );
+
+  // Entering the page, and coming back to the window (docs/DESIGN.md §9.3).
+  useEffect(() => {
+    const onFocus = () => refresh();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
+    refresh(true);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [refresh]);
 
   useEffect(
     () =>
@@ -147,8 +195,24 @@ function VendorClis() {
   );
 
   const list = (plugins.data ?? []).filter((p) => p.cli);
-  if (!list.length) return null;
   const installed = list.filter((p) => p.cli?.installed).length;
+  // Asking, either because the request is out or because a row's version is being probed.
+  const probing = list.some((p) => p.cli?.probing);
+  const detecting = asking || probing;
+
+  // A probe the hub started on its own (at startup) can end without an event reaching this
+  // window; while a row still says it is asking, read the list again now and then.
+  useEffect(() => {
+    if (!probing) return;
+    let left = 8;
+    const timer = setInterval(() => {
+      reload();
+      if (--left <= 0) clearInterval(timer);
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [probing, reload]);
+
+  if (!list.length) return null;
 
   async function start(job: Job) {
     setConfirm(undefined);
@@ -170,8 +234,24 @@ function VendorClis() {
         <span className="chip">
           {installed} / {list.length} 已安装
         </span>
+        <div className="spacer" />
+        <button
+          className="ghost"
+          onClick={() => refresh(true)}
+          disabled={detecting}
+          title="重新在 PATH 和安装目录里查找这些 CLI，并重新探测版本"
+        >
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <RefreshCw
+              size={13}
+              aria-hidden
+              style={detecting ? { animation: "spin 1s linear infinite" } : undefined}
+            />
+            {detecting ? "检测中…" : "重新检测"}
+          </span>
+        </button>
       </div>
-      <ErrorBox error={plugins.error} />
+      <ErrorBox error={plugins.error ?? askError} />
       <div className="setting-card">
         {list.map((p) => {
           const cli = p.cli!;
@@ -185,7 +265,7 @@ function VendorClis() {
                 </div>
                 <div className="setting-hint" title={cli.path ?? undefined}>
                   {cli.installed
-                    ? `${cli.version ?? "版本未知"} · ${CLI_SOURCE[cli.source ?? ""] ?? cli.source ?? "来源未知"}`
+                    ? `${cli.probing ? "检测版本中…" : (cli.version ?? "版本未知")} · ${CLI_SOURCE[cli.source ?? ""] ?? cli.source ?? "来源未知"}`
                     : "没装"}
                 </div>
               </div>
