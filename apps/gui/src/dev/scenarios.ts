@@ -41,6 +41,12 @@ export const SCENARIOS: Scenario[] = [
       { at: 800, act: () => document.querySelector(".card.form")?.scrollIntoView({ block: "start" }) },
     ] };
   } },
+  { key: "cursor-account", label: "Cursor 账号", hint: "登录后读状态、邮箱和模型；额度留空，显示暂无额度数据", build: () => {
+    const state = usageScene();
+    return { state, route: "#/usage", script: [
+      { at: 700, act: () => [...document.querySelectorAll<HTMLButtonElement>(".account-who")].find((b) => b.textContent?.includes("Cursor"))?.click() },
+    ] };
+  } },
   { key: "tool-image-paths", label: "工具参数图片路径", hint: "加载、拒绝与去重", build: () => toolImagePathsSession() },
   { key: "tool-images", label: "工具结果图片", hint: "图片结果与混合文字", build: () => toolImagesSession() },
   { key: "continuation-options", label: "持续推进设置", hint: "新建 Work 的持续推进开关及次数、间隔", build: () => {

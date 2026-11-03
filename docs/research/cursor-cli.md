@@ -65,3 +65,74 @@
 - 没有逐次权限询问。工具调用要么放行（`--force` / `--yolo`），要么在沙箱里跑（`--sandbox`），没有中间档，因此驱动的 `permission_callback` 能力只能报不支持。
 - 打断：没有 cancel 子命令，`interrupt()` 只能杀进程，按 `killed` 上报退出原因。
 - 用量：stream-json 不带 token 数，只有 `duration_ms`，`usage` 能力只能报不支持（或只给时长）。
+
+## 账号接入（2026-11-03 实测）
+
+本机：Windows 11，Cursor CLI `2026.10.22-27dcf5f`，装在 `%LOCALAPPDATA%\cursor-agent\`（`agent.cmd` 调 `cursor-agent.ps1`，加 `-NoProfile -ExecutionPolicy Bypass -File`），该目录在用户 PATH 里；`builtin::cli("cursor").command()` 找到的就是 `...\AppData\Local\cursor-agent\agent.cmd`。下面带「实测」的是这台机器上跑过的；标「bundle 证据」的是从 CLI 打包代码里读出来的，没有可用的 Cursor 账号，跑不到那一步。
+
+### `agent status --format json`
+
+未登录（实测）：
+
+```json
+{ "status": "unauthenticated", "isAuthenticated": false, "hasAccessToken": false, "hasRefreshToken": false, "message": "Not logged in" }
+```
+
+已登录（bundle 证据 + 伪造凭据实测字段名）：`status: "authenticated"`、`isAuthenticated: true`、`hasAccessToken`、`hasRefreshToken`、`message`（拿不到资料时是 `Logged in (unable to fetch user details)`，否则缺省）、`userInfo: { email, userId, firstName, lastName, teamId, teamName, createdAt }`。只有 access token、缺 refresh token 时报 `partially-authenticated`，`isAuthenticated: false`。
+
+一个坑（实测）：带 `userInfo` 的那条路径会去 `getMe` 拉资料，离线或 token 失效时仍报 `authenticated`，只是没有 `userInfo`、`message` 写「unable to fetch user details」。账号页据此显示「已登录、邮箱未知」并把 CLI 的话放进 note。
+
+`CURSOR_API_KEY` / `CURSOR_AUTH_TOKEN` 只用于单次请求，不写进凭据库（实测：设 `CURSOR_API_KEY=dummy` 后 `status` 仍是 `unauthenticated`）。所以靠环境变量 API key 跑的 CLI 在账号页会显示未登录——这一版只认浏览器登录。
+
+### `agent login`
+
+`NO_OPEN_BROWSER=1 agent login` 实测（stdout 重定向到文件，非 TTY）：
+
+```
+Starting login process...
+Authenticating with Cursor...
+Waiting for browser authentication...
+Open a browser and navigate to this link: https://cursor.com/loginDeepControl?challenge=...&uuid=...&mode=login&redirectTarget=cli&supportsSelectedTeamLogin=true
+```
+
+链接打在 **stdout**，不是只有 TTY 才有（上面就是管道里的输出；用 tokio 的 `Stdio::piped()` 读同样拿得到，provider 里临时验证过）。之后进程不退出，轮询 `https://api2.cursor.sh/auth/poll`（bundle 证据：`loginDeepControl` + `/auth/poll`），**没有本地回调端口**，所以不需要 `serves`。hub 的普通登录流程（抓链接 → 交 GUI 打开 → 等进程结束 → 读一次 status → 发 `account.login_finished`）正好对得上：链接约 2 秒内出现，进程在浏览器里点完之后自己退出。
+
+没做到的实测：手上没有 Cursor 账号，浏览器那一步没人点，所以「登录完成后进程退出码为 0」这一条没跑到；hub 那边按 `退出码成功 && status.logged_in` 判断，没完成会报失败并带上 CLI 最后几行输出。
+
+### `agent models`
+
+需要**有效**登录（实测：假 token 也是 `Error: Authentication required...`，退出码 1，错误在 stderr）。输出是文本，不是 JSON（`agent models --help` 只有 `-h`）：
+
+```
+Available models
+
+auto - Auto (default)
+gpt-5
+sonnet-4-thinking - Sonnet 4 Thinking (current, default)
+
+Tip: use --model <id> ...
+```
+
+格式来自 bundle 里的 `models.ts`；本机没有登录，完整列表没实际看到过，所以 provider 只取「`Available models` 之后、空行之前」每行的首个词当 id（去掉颜色码和 `(current, default)` 标记），拿不到就退回 `crates/plugins/agents/cursor.toml` 的 `fallback = ["auto", "sonnet-4-thinking", "gpt-5"]`（实测：未登录时 `agent models` 失败，账号页给出的正是这三个）。
+
+### 凭据放在哪
+
+- Windows：`%APPDATA%\Cursor\auth.json`（实测：把 `{"accessToken":"dummy","refreshToken":"dummy"}` 写进临时 `APPDATA\Cursor\auth.json` 后，`agent status` 报 `authenticated`；只写 accessToken 报 `partially-authenticated`）。
+- macOS：`~/.cursor/auth.json`；Linux：`$XDG_CONFIG_HOME/cursor/auth.json`（bundle 证据：`getAuthFilePath` 按平台拼，域名是 `cursor`，Windows 上做 Title Case → `Cursor`）。
+- `~/.cursor/cli-config.json` 只是设置（权限、沙箱、编辑器偏好），**不含 token**（实测看过本机文件）。
+- `AGENT_CLI_CREDENTIAL_STORE=file|memory|default` 选存储：`file` 强制上面那个 `auth.json`，`default` 在 macOS 走钥匙串。
+
+### 多账号隔离
+
+- `CURSOR_DATA_DIR` 换数据目录（默认 `~/.cursor`：设置、`chats/`、`projects/`）。改它**不动登录**。
+- 登录文件跟着平台的配置目录走，所以隔离登录要改 `APPDATA`（Windows）/ `HOME`（macOS）/ `XDG_CONFIG_HOME`（Linux），再加 `AGENT_CLI_CREDENTIAL_STORE=file` 把 macOS 的钥匙串也换成文件。
+- provider 的 `agent_env` 因此给独立账号一组：`CURSOR_DATA_DIR=<home>`，`USERPROFILE`/`HOME`/`APPDATA`/`LOCALAPPDATA`/`XDG_CONFIG_HOME` 指到 `<home>/profile`，`AGENT_CLI_CREDENTIAL_STORE=file`，并把 `CURSOR_API_KEY`/`CURSOR_AUTH_TOKEN` 置空（CLI 按真值判断，空串等于没设）；登录命令里这两项改成 `env_remove`。本机登录（`default_home` = `~/.cursor`）不加任何变量，用机器上那一个登录。
+- 实测：用两个不同的临时 `APPDATA` 跑 `agent status`，一个放了假凭据报 `authenticated`、另一个报 `unauthenticated`，互不影响；provider 对独立 home 的 status 走的也是这条路。
+- 没能实测：真正两个 Cursor 账号同时登录时的行为（没有账号）。从 bundle 看凭据路径只由平台目录决定，没有别的全局单例；风险在于 CLI 自己的后台进程（若有）可能仍读用户目录。
+
+### 额度与 token
+
+- 没有本地额度记录：`~/.cursor` 下没有 usage/token 文件（`ai-tracking/ai-code-tracking.db` 是 IDE 的补全统计，不含 token）；`cli-config.json`、`statsig-cache.json` 也不含。
+- `stream-json` 不带 token 数（见上文「用量」），`status` 也不报额度。
+- 因此账号页对 Cursor 只显示登录状态、打码邮箱与模型列表，额度区为空 → GUI 显示「暂无额度数据」；`AccountProvider::sessions` 返回空，额度/用量页不会有 Cursor 的 token 数字。
+- 以后要接：`~/.cursor/chats/<md5(项目路径)>/<chatId>/store.db`（SQLite）里可能有会话记录，需要另做协议解析，本版没做。
