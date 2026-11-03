@@ -1394,19 +1394,9 @@ async fn create_work(
         return Err(CoreError::Conflict("the work title is empty".into()).into());
     }
     let lead = state.store().get_agent(&AgentKey::parse(&req.lead)).await?;
-    let now = Utc::now();
-    let work = crossagents_core::Work {
-        id: crossagents_core::WorkId::new(),
-        title: req.title,
-        repo: lead.home().to_path_buf(),
-        lead: lead.id,
-        created_at: now,
-        updated_at: now,
-    };
-    state.store().insert_work(&work).await?;
-    state
-        .bus
-        .publish(EventKind::WorkCreated { work: work.clone() })
+    let work = state
+        .orchestrator
+        .create_work_group(&req.title, lead.home().to_path_buf(), lead.id)
         .await?;
     Ok((StatusCode::CREATED, Json(work)))
 }
@@ -1500,10 +1490,12 @@ async fn create_run(
             policy: req.policy.unwrap_or_default(),
         },
     };
-    let run = state
+    let mut run = state
         .orchestrator
         .create_run_with_choice(new, req.fresh, req.restore)
         .await?;
+    // Every run belongs to a work group: its next round continues from this one.
+    state.orchestrator.work_of_run(&mut run).await?;
     Ok((StatusCode::CREATED, Json(run)))
 }
 
