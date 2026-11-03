@@ -54,7 +54,7 @@ async fn back_home(w: &mut Watcher, agent: AgentId, home: &Path) {
 }
 
 async fn idle_lead(t: &TestHub, id: AgentId) {
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(common::wait_limit(), async {
         loop {
             let a = t.agent(&id.to_string()).await;
             if a.status == crossagents_api_types::AgentStatus::Idle

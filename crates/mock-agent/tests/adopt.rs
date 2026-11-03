@@ -7,7 +7,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{MOCK_AGENT, TestHub, crossagents_bin, mock_plugins};
+use common::{MOCK_AGENT, TestHub, crossagents_bin, hub_permit, mock_plugins, wait_limit};
 use crossagents_api_types::{Event, EventKind, StopReason};
 use crossagents_core::DriverKind;
 use crossagents_hub::{HubConfig, Paths};
@@ -52,6 +52,7 @@ fn config(paths: &Paths) -> HubConfig {
 
 async fn start(home: tempfile::TempDir) -> TestHub {
     let paths = Paths::new(home.path());
+    let permit = hub_permit().await;
     let hub = crossagents_hub::start(config(&paths)).await.unwrap();
     let base = format!("http://{}", hub.addr);
     TestHub {
@@ -60,6 +61,7 @@ async fn start(home: tempfile::TempDir) -> TestHub {
         base,
         paths,
         home,
+        permit,
     }
 }
 
@@ -182,7 +184,7 @@ async fn takes_over(plugin: &str, model: &str, echo: &str) {
         .await
         .unwrap();
     assert_eq!(agent["status"], "running", "{agent}");
-    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + wait_limit();
     let (events, completed) = loop {
         let events = history(&t).await;
         let completed = events.iter().find_map(|e| match &e.kind {
@@ -231,7 +233,7 @@ async fn takes_over(plugin: &str, model: &str, echo: &str) {
     assert_eq!(resp.status(), 202);
     let runtimes = t.paths.runtimes();
     t.hub.wait().await.unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let deadline = std::time::Instant::now() + wait_limit();
     while !crossagents_drivers::host::records(&runtimes).is_empty() {
         assert!(std::time::Instant::now() < deadline, "host still running");
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -296,7 +298,7 @@ async fn a_turn_whose_host_died_is_interrupted() {
     let resp = t.post("/v1/shutdown?stop_agents=true", json!({})).await;
     assert_eq!(resp.status(), 202);
     t.hub.wait().await.unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let deadline = std::time::Instant::now() + wait_limit();
     while !crossagents_drivers::host::records(&runtimes).is_empty() {
         assert!(std::time::Instant::now() < deadline, "host still running");
         tokio::time::sleep(Duration::from_millis(100)).await;

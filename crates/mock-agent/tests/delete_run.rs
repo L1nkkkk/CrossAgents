@@ -26,7 +26,7 @@ async fn agent(t: &TestHub, id: &str) -> Value {
 
 async fn idle(t: &TestHub, id: &str) {
     let id = id.parse().unwrap();
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(common::wait_limit(), async {
         while t.hub.runtime.is_busy(id).await {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -399,7 +399,7 @@ async fn a_lead_moved_into_the_run_goes_back_home() {
     let resp = t.post(&format!("/v1/runs/{id}/finish"), json!({})).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     // Finishing keeps the session and checkout; deletion explicitly sends it home.
-    tokio::time::timeout(Duration::from_secs(20), async {
+    tokio::time::timeout(common::wait_limit(), async {
         while t.hub.runtime.is_busy(pia.id).await {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
