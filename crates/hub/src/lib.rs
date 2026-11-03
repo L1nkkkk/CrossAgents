@@ -140,12 +140,6 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         paths.accounts(),
     ));
     accounts.watch();
-    if config.detect_accounts
-        && let Err(err) = accounts.detect_defaults().await
-    {
-        tracing::warn!(error = %err, "cannot register local logins as accounts");
-    }
-    accounts.warm();
     let tokens = Arc::new(AgentTokens::load(paths.agent_tokens()));
     let setup = Arc::new(CollabSetup {
         tokens: tokens.clone(),
@@ -287,6 +281,25 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         .context("cannot write hub.json")?;
 
     let shutdown = CancellationToken::new();
+    // Vendor status/model probes can take tens of seconds. Serve first; account.created
+    // events refresh clients as local logins are discovered, without delaying hub readiness.
+    let account_start = tokio::spawn({
+        let accounts = accounts.clone();
+        let shutdown = shutdown.clone();
+        let detect = config.detect_accounts;
+        async move {
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {}
+                _ = async {
+                    if detect && let Err(err) = accounts.detect_defaults().await {
+                        tracing::warn!(error = %err, "cannot register local logins as accounts");
+                    }
+                    accounts.warm();
+                } => {}
+            }
+        }
+    });
     let stop_agents = Arc::new(AtomicBool::new(!hosted));
     Arc::new(notices::Notices {
         bus: bus.clone(),
@@ -333,6 +346,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
                 .await;
             // Make sure SSE streams end even if serve failed.
             shutdown.cancel();
+            let _ = account_start.await;
             terminals.stop_all();
             if stop_agents.load(Ordering::SeqCst) {
                 runtime.stop_all().await;
