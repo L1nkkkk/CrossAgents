@@ -601,16 +601,18 @@ impl ClaudeSession {
         let api_host = flavor.api_host(&spec.env);
         // A host the proxy cannot reach but a direct connection can is exempted instead.
         env.extend(check_proxy(&spec.env, Some(&api_host)).await?);
+        let env_remove = if flavor == Flavor::Codebuddy {
+            crate::codebuddy_native::prepare_env(&mut env)
+        } else {
+            Vec::new()
+        };
         let launched = launch::launch(LaunchSpec {
             program,
             args,
             // Claude Code works in its own working directory.
             cwd: spec.agent.cwd.clone(),
             env,
-            env_remove: std::env::vars_os()
-                .map(|(key, _)| key.to_string_lossy().into_owned())
-                .filter(|key| flavor.withholds(key))
-                .collect(),
+            env_remove,
             owner: Some(owner_of(flavor, &session_id)),
             label: format!("{} session {session_id}", flavor.program()),
         })

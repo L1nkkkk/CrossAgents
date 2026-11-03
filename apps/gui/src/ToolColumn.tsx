@@ -1,11 +1,11 @@
-// The tool column (docs/tasks/V6-GUI.md §6): up to two panes stacked on the right — 改动 (what
-// each turn changed), 任务 (a task's details), and 提交图 (commits). 事件流 (raw hub events, for
-// debugging) is offered only where debugging is on (panes.ts `PANE_KINDS`). Panes show the
-// focused conversation, or what was opened on purpose (panes.ts `target`); nothing from another
-// conversation mixes in. When docking it would squeeze the conversation it is a one-pane drawer
-// over the page.
+// The tabs around conversations (panes.ts): a browser-like row of them in each dock, on the right
+// and under the conversations — 改动 (what each turn changed), 文件 (the workspace's files), 任务
+// (a task's details), and 提交图 (commits). 事件流 (raw hub events, for debugging) is offered only
+// where debugging is on (panes.ts `PANE_KINDS`). Tabs show the focused conversation, or what was
+// opened on purpose (panes.ts `target`); nothing from another conversation mixes in. When docking
+// would squeeze the conversation, both docks are one row in a drawer over the page.
 
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { TurnDiffResponse } from "@bindings/TurnDiffResponse";
 import { api, errorText } from "./api";
@@ -13,10 +13,14 @@ import { Avatar, ErrorBox, Icon, displayName, isAgent, useAgents } from "./compo
 import { CommitGraphView } from "./commitgraph";
 import { ChangeStat, DiffView } from "./diffview";
 import { useEventLog } from "./eventlog";
+import { FilesPane } from "./FileViewer";
 import type { HubEvent } from "./hub";
 import { parseDiff } from "./lib/diff";
 import { clock, full } from "./lib/time";
-import { PANE_KINDS, addPane, clearTarget, offered, paneLabel, removePane, setPane, setSplit, useLayout, type PaneKind, type Target } from "./panes";
+import { clearTarget, closeBottom, isTermTab, paneLabel, useLayout, type PaneKind, type TabId, type Target } from "./panes";
+import { shownTab, type Dock, type DockId } from "./lib/docks";
+import { TabRow } from "./tabs";
+import { TerminalBody, useTabShows } from "./terminal";
 import { useWidths } from "./lib/widths";
 import { useSession, type TranscriptTurn } from "./session";
 import { useSidebar } from "./titlebar";
@@ -33,138 +37,84 @@ export function useToolsFloat() {
 }
 
 /**
- * `follow`: the conversation the panes follow (session routes). `task`: the task the route
- * opened (run routes), shown in the first pane. `run`: the routed run, whose branches 提交图
- * shows. `onClose` closes the whole column.
+ * `dock`: which dock this is. `follow`: the conversation the tabs follow (session routes).
+ * `task`: the task the route opened (run routes). `run`: the routed run, whose branches 提交图
+ * shows. `onClose` folds the right dock; `onCloseTask` is for closing the route's task's tab.
  */
-export function ToolColumn({ follow, task, run, onClose }: { follow?: string; task?: { run: string; task: string }; run?: string; onClose: () => void }) {
-  const { state, target } = useLayout();
+export function ToolColumn({ dock, follow, task, run, onClose, onCloseTask }: { dock: DockId; follow?: string; task?: { run: string; task: string }; run?: string; onClose: () => void; onCloseTask?: () => void }) {
+  const { state, target, floatTab } = useLayout();
   const narrow = useToolsFloat();
-  const ref = useRef<HTMLDivElement>(null);
-  const tools = state.tools;
-  let panes: PaneKind[] = task ? [...new Set<PaneKind>(["task", ...(tools.open ? tools.panes : [])])] : tools.panes;
-  // A saved layout may name a pane this build does not offer (事件流): drop it, and never leave
-  // the column with nothing to show.
-  panes = panes.filter(offered);
-  if (!panes.length) panes = ["changes"];
-  panes = panes.slice(0, narrow ? 1 : 2);
-
-  const drag = (e: ReactPointerEvent<HTMLDivElement>) => {
-    const box = ref.current?.getBoundingClientRect();
-    if (!box) return;
-    e.preventDefault();
-    const move = (ev: PointerEvent) => setSplit((ev.clientY - box.top) / box.height);
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-  };
-
-  const rows = panes.length === 2 ? `minmax(0, ${tools.split}fr) 6px minmax(0, ${1 - tools.split}fr)` : "minmax(0, 1fr)";
+  const { right, bottom } = state.docks;
+  // Floating, there is one row: the bottom dock's tabs follow the right dock's.
+  const all: Dock<TabId> = narrow ? { tabs: [...right.tabs, ...bottom.tabs], active: floatTab ?? right.active, open: true } : state.docks[dock];
+  // Another project's terminals keep their place in the row, out of sight.
+  const shows = useTabShows();
+  const shown = { ...all, tabs: all.tabs.filter(shows) };
+  const kind = shownTab(shown);
   return (
-    <div className={`tool-column ${narrow ? "narrow" : ""}`} ref={ref} style={{ gridTemplateRows: rows }}>
-      {panes.map((kind, i) => (
-        <PaneSlot
-          key={i}
-          index={i}
-          kind={kind}
-          count={panes.length}
-          narrow={narrow}
-          follow={follow}
-          target={target}
-          routeTask={task}
-          routeRun={run}
-          onCloseColumn={onClose}
-          divider={i === 1 ? <div className="divider horizontal" onPointerDown={drag} onDoubleClick={() => setSplit(0.5)} role="separator" aria-orientation="horizontal" /> : null}
-        />
-      ))}
+    <div className={`tool-column ${narrow ? "narrow" : ""}`} data-tabdock={dock}>
+      <section className="tool-pane" aria-label={kind && !isTermTab(kind) ? paneLabel(kind) : undefined}>
+        <header className="tool-head">
+          <TabRow dock={dock} tabs={shown.tabs} active={kind} narrow={narrow} onCloseTask={task ? onCloseTask : undefined} />
+          {kind && !isTermTab(kind) && <FollowButton kind={kind} follow={follow} target={target} />}
+          {dock === "right" ? (
+            <button className="ghost icon" onClick={onClose} title="收起工具列" aria-label="收起工具列">
+              <Icon name="panel" size={15} />
+            </button>
+          ) : (
+            <button className="ghost icon" onClick={closeBottom} title="收起下方面板" aria-label="收起下方面板">
+              <Icon name="chevron" size={15} />
+            </button>
+          )}
+        </header>
+        {kind && (isTermTab(kind) ? <TerminalBody tab={kind} dock={dock} /> : <PaneBody kind={kind} follow={follow} target={target} routeTask={task} routeRun={run} />)}
+      </section>
     </div>
   );
 }
 
-function PaneSlot({
-  index,
-  kind,
-  count,
-  narrow,
-  follow,
-  target,
-  routeTask,
-  routeRun,
-  onCloseColumn,
-  divider,
-}: {
-  index: number;
-  kind: PaneKind;
-  count: number;
-  narrow: boolean;
-  follow?: string;
-  target: Target | null;
-  routeTask?: { run: string; task: string };
-  routeRun?: string;
-  onCloseColumn: () => void;
-  divider: React.ReactNode;
-}) {
-  // An agent opened on purpose wins over the focused conversation.
+/** The target if it may show here: an agent opened on purpose wins over the focused conversation. */
+function useSafeTarget(follow: string | undefined, target: Target | null) {
   const agents = useAgents();
   const sameAgent = follow && target?.agent && agents.data?.some((a) => isAgent(a, follow) && isAgent(a, target.agent!));
-  const safeTarget = follow && target?.agent !== follow && !sameAgent ? null : target;
-  const agent = safeTarget?.agent ?? follow;
-  const pinned = !!safeTarget?.agent && safeTarget.agent !== follow;
-  const head = (
-    <>
-      <div className="segmented small" role="tablist">
-        {PANE_KINDS.map((p) => (
-          <button key={p.kind} role="tab" aria-selected={p.kind === kind} className={p.kind === kind ? "active" : ""} onClick={() => setPane(index, p.kind)}>
-            {p.label}
-          </button>
-        ))}
-      </div>
-      <span className="spacer" />
-      {pinned && kind !== "task" && (
-        <button className="ghost small" onClick={clearTarget} title="回到当前对话">
-          跟随对话
-        </button>
-      )}
-      {!narrow && count === 1 && (
-        <button className="ghost icon" onClick={addPane} title="再加一个窗格" aria-label="再加一个窗格">
-          <Icon name="plus" size={15} />
-        </button>
-      )}
-      {count === 2 && (
-        <button className="ghost icon" onClick={() => removePane(index)} title="关闭这个窗格" aria-label="关闭这个窗格">
-          <Icon name="close" size={15} />
-        </button>
-      )}
-      {index === 0 && (
-        <button className="ghost icon" onClick={onCloseColumn} title="收起工具列" aria-label="收起工具列">
-          <Icon name="panel" size={15} />
-        </button>
-      )}
-    </>
-  );
+  return follow && target?.agent !== follow && !sameAgent ? null : target;
+}
+
+function FollowButton({ kind, follow, target }: { kind: PaneKind; follow?: string; target: Target | null }) {
+  const safeTarget = useSafeTarget(follow, target);
+  if (kind === "task" || !safeTarget?.agent || safeTarget.agent === follow) return null;
   return (
-    <>
-      {divider}
-      <section className="tool-pane" aria-label={paneLabel(kind)}>
-        <header className="tool-head">{head}</header>
-        <div className={`tool-body ${kind === "graph" ? "tool-body-graph" : ""}`}>
-          {kind === "changes" && (agent ? <ChangesPane key={agent} agent={agent} target={target?.agent === agent ? target : null} /> : <Blank text="打开一个会话，这里显示它每一轮改了什么。" />)}
-          {kind === "task" && <TaskPane key={follow} follow={follow} target={safeTarget} routeTask={routeTask} />}
-          {kind === "events" && (agent ? <EventsPane key={agent} agent={agent} /> : <Blank text="打开一个会话，这里显示它的原始 hub 事件。" />)}
-          {kind === "graph" &&
-            (routeRun ? (
-              <CommitGraphView key={routeRun} scope={{ kind: "run", run: routeRun }} />
-            ) : agent ? (
-              <CommitGraphView key={agent} scope={{ kind: "agent", agent }} />
-            ) : (
-              <Blank text="打开一个会话或 run，这里显示它的提交图。" />
-            ))}
-        </div>
-      </section>
-    </>
+    <button className="ghost small" onClick={clearTarget} title="回到当前对话">
+      跟随对话
+    </button>
+  );
+}
+
+function PaneBody({ kind, follow, target, routeTask, routeRun }: { kind: PaneKind; follow?: string; target: Target | null; routeTask?: { run: string; task: string }; routeRun?: string }) {
+  const safeTarget = useSafeTarget(follow, target);
+  const agent = safeTarget?.agent ?? follow;
+  return (
+    <div className={`tool-body ${kind === "graph" ? "tool-body-graph" : kind === "files" ? "tool-body-files" : ""}`}>
+      {kind === "changes" && (agent ? <ChangesPane key={agent} agent={agent} target={target?.agent === agent ? target : null} /> : <Blank text="打开一个会话，这里显示它每一轮改了什么。" />)}
+      {kind === "files" &&
+        (routeRun ? (
+          <FilesPane key={routeRun} scope={{ kind: "run", run: routeRun }} />
+        ) : agent ? (
+          <FilesPane key={agent} scope={{ kind: "agent", agent }} />
+        ) : (
+          <Blank text="打开一个会话或 run，这里显示它工作目录里的文件。" />
+        ))}
+      {kind === "task" && <TaskPane key={follow} follow={follow} target={safeTarget} routeTask={routeTask} />}
+      {kind === "events" && (agent ? <EventsPane key={agent} agent={agent} /> : <Blank text="打开一个会话，这里显示它的原始 hub 事件。" />)}
+      {kind === "graph" &&
+        (routeRun ? (
+          <CommitGraphView key={routeRun} scope={{ kind: "run", run: routeRun }} />
+        ) : agent ? (
+          <CommitGraphView key={agent} scope={{ kind: "agent", agent }} />
+        ) : (
+          <Blank text="打开一个会话或 run，这里显示它的提交图。" />
+        ))}
+    </div>
   );
 }
 

@@ -62,6 +62,13 @@ import type { UsageSeriesRange } from "@bindings/UsageSeriesRange";
 import type { UsageSeriesResponse } from "@bindings/UsageSeriesResponse";
 import type { FileTreeResponse } from "@bindings/FileTreeResponse";
 import type { FileContentResponse } from "@bindings/FileContentResponse";
+import type { CreateTerminalRequest } from "@bindings/CreateTerminalRequest";
+import type { ListTerminalsResponse } from "@bindings/ListTerminalsResponse";
+import type { TerminalInfo } from "@bindings/TerminalInfo";
+import type { TerminalInputRequest } from "@bindings/TerminalInputRequest";
+import type { TerminalInputResponse } from "@bindings/TerminalInputResponse";
+import type { TerminalResizeRequest } from "@bindings/TerminalResizeRequest";
+import type { TerminalTakeoverRequest } from "@bindings/TerminalTakeoverRequest";
 import type { ResolvePathsRequest } from "@bindings/ResolvePathsRequest";
 import type { ResolvePathsResponse } from "@bindings/ResolvePathsResponse";
 
@@ -351,6 +358,13 @@ export const api = {
   questions: (all = false) => request<ListQuestionsResponse>("GET", `/v1/questions${all ? "?all=true" : ""}`),
   answer: (id: string, answer: string) => request<HumanItem>("POST", `/v1/questions/${enc(id)}/answer`, { answer }),
   dismiss: (id: string) => request<void>("POST", `/v1/questions/${enc(id)}/dismiss`),
+
+  listTerminals: () => request<ListTerminalsResponse>("GET", "/v1/terminals"),
+  createTerminal: (req: CreateTerminalRequest) => request<TerminalInfo>("POST", "/v1/terminals", req),
+  closeTerminal: (id: string) => request<void>("DELETE", `/v1/terminals/${enc(id)}`),
+  terminalInput: (id: string, req: TerminalInputRequest) => request<TerminalInputResponse>("POST", `/v1/terminals/${enc(id)}/input`, req),
+  resizeTerminal: (id: string, req: TerminalResizeRequest) => request<void>("POST", `/v1/terminals/${enc(id)}/resize`, req),
+  takeoverTerminal: (id: string, req: TerminalTakeoverRequest) => request<void>("POST", `/v1/terminals/${enc(id)}/takeover`, req),
 
   quota: () => request<QuotaResponse>("GET", "/v1/quota"),
   createAccount: (req: CreateAccountRequest) => request<Account>("POST", "/v1/accounts", req),

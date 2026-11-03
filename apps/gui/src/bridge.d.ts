@@ -24,6 +24,17 @@ export interface CrossAgentsBridge {
   onEvent(listener: (data: string) => void): () => void;
   /** "connecting", "connected" or "offline: <reason>". Returns an unsubscribe function. */
   onStatus(listener: (status: string) => void): () => void;
+  /**
+   * (Re)starts relaying a terminal's output (`GET /v1/terminals/{id}/output`) as `connection`,
+   * reconnecting after a drop. A plain browser page has no relay, and so no terminals.
+   */
+  terminalStart?(id: string, connection: string): void;
+  terminalStop?(id: string): void;
+  /**
+   * Each frame's raw `data` (`TerminalFrame`), and the relay's own `{"type":"reconnecting"}`
+   * and `{"type":"gone"}`. Returns an unsubscribe function.
+   */
+  onTerminal?(listener: (id: string, data: string) => void): () => void;
   /** The development hub running instead of the shipped one; null when it is ours. Packaged GUI only. */
   devHub?(): Promise<DevHub | null>;
   /** Stops the development hub and starts the shipped one. Rejects with the reason it could not. */

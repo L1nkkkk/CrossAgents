@@ -15,6 +15,11 @@ export type Level = "read" | "write" | "admin";
  */
 export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] = [
   { method: "GET", path: /^\/v1\/info$/, level: "read" },
+  // The person's own terminals. `output` is not here: main.cts relays it, as it does events.
+  { method: "GET", path: /^\/v1\/terminals$/, level: "admin" },
+  { method: "POST", path: /^\/v1\/terminals$/, level: "admin" },
+  { method: "DELETE", path: /^\/v1\/terminals\/[^/]+$/, level: "admin" },
+  { method: "POST", path: /^\/v1\/terminals\/[^/]+\/(input|resize|takeover)$/, level: "admin" },
   { method: "GET", path: /^\/v1\/agents$/, level: "read" },
   { method: "POST", path: /^\/v1\/agents$/, level: "write" },
   // `?repo=` rides along; `route()` drops it before matching.

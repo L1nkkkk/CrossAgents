@@ -146,6 +146,7 @@ fn command(f: &Facts, shell: Shell, env: &[ResumeEnv]) -> Result<String, String>
     let resume: Vec<String> = match kind {
         DriverKind::ClaudeNative | DriverKind::CodebuddyNative => vec!["--resume".into()],
         DriverKind::CodexNative => vec!["resume".into()],
+        DriverKind::CursorNative => vec!["--resume".into()],
         DriverKind::WithNative | DriverKind::AcpGeneric => {
             return Err(format!(
                 "{kind} 驱动的 CLI 没有在终端里按 session id 接着聊的命令"
@@ -408,6 +409,19 @@ mod tests {
         assert_eq!(
             r.command.as_deref(),
             Some("cd '/w' && CODEX_HOME='/h/.codex-2' 'codex' 'resume' '0b5c-11'")
+        );
+    }
+
+    #[test]
+    fn cursor_is_resumed_with_its_chat_id() {
+        let mut f = claude(Path::new("/w"));
+        f.kind = Some(DriverKind::CursorNative);
+        f.program = Some(vec!["agent".into()]);
+        f.env.clear();
+        let r = build(&f, Shell::Sh);
+        assert_eq!(
+            r.command.as_deref(),
+            Some("cd '/w' && 'agent' --resume '0b5c-11'")
         );
     }
 

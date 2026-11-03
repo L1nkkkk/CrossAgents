@@ -71,6 +71,24 @@ export function fileLinkTarget(href: string): FileTarget | undefined {
   return target;
 }
 
+/**
+ * Where a link in a document points, from the workspace root: a document's links are relative
+ * to its own folder, and may end in a heading (`DESIGN.md#goals`). A path that climbs out of the
+ * root keeps its `..`, for the hub to refuse.
+ */
+export function docLinkPath(dir: string, path: string): string {
+  const file = path.replace(/\\/g, "/").replace(/#.*$/, "");
+  if (isAbsolutePath(file)) return file;
+  const parts = dir ? dir.split("/") : [];
+  for (const seg of file.split("/")) {
+    if (seg === "..") {
+      if (parts.length && parts[parts.length - 1] !== "..") parts.pop();
+      else parts.push(seg);
+    } else if (seg && seg !== ".") parts.push(seg);
+  }
+  return parts.join("/");
+}
+
 /** A file extension: `.rs`, `.tsx`, `.d.ts`; not `1.2` nor a sentence's `.` */
 const EXTENSION = /\.[a-zA-Z][a-zA-Z0-9]{0,9}$/;
 

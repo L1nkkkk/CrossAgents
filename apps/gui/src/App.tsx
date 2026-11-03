@@ -3,14 +3,17 @@ import type { Agent } from "@bindings/Agent";
 import type { RunDetail } from "@bindings/RunDetail";
 import { api, getBridge } from "./api";
 import { useHubData, useVersionMismatch, type VersionMismatch } from "./hub";
-import { closeBeside, closeTools, focusSession, focusedOf, openTool, setRatio, useLayout, usePanes } from "./panes";
+import { closeBeside, closeTools, focusSession, focusedOf, isTermTab, openTool, routeTool, setRatio, useLayout, usePanes } from "./panes";
+import { shownTab } from "./lib/docks";
 import { FileViewerHost } from "./FileViewer";
+import { TabDragLayer } from "./tabs";
+import { TerminalHydrate, TerminalProblem, TerminalScope, toggleTerminal, useTabShows } from "./terminal";
 import { startNew } from "./menubar";
 import { toggleRail } from "./rail";
 import { Sidebar } from "./Sidebar";
 import { Titlebar, closeSidebarPeek, hoverSidebar, inDesktop, toggleSidebar, unhoverSidebar, useSidebar } from "./titlebar";
 import { ToolColumn, useToolsFloat } from "./ToolColumn";
-import { SIDEBAR, TOOLS, dragEdge, setSidebarWidth, setToolsWidth, useWidths } from "./lib/widths";
+import { BOTTOM, SIDEBAR, TOOLS, dragBottom, dragEdge, setBottomHeight, setSidebarWidth, setToolsWidth, useWidths } from "./lib/widths";
 import { HomeView } from "./views/Home";
 import { RunView } from "./views/Run";
 import { SessionView } from "./views/Session";
@@ -134,7 +137,7 @@ function VersionMismatchView({ hub, gui }: VersionMismatch) {
 export function App() {
   const route = useRoute();
   const [section, a, b, c] = route;
-  const { state, focus } = useLayout();
+  const { state, focus, peek } = useLayout();
 
   const sidebar = useSidebar();
   const floatTools = useToolsFloat();
@@ -144,18 +147,33 @@ export function App() {
   useEffect(() => {
     if (graphRoute) openTool("graph");
   }, [graphRoute]);
+  // `#/runs/<id>/tasks/<task>` shows the 任务 tab; leaving the route puts the right dock back.
+  const routeTask = section === "runs" && a && b === "tasks" ? c : undefined;
+  useEffect(() => {
+    if (routeTask) routeTool("task");
+  }, [routeTask]);
   const mismatch = useVersionMismatch();
 
   // Picking something in the floating sidebar puts it away.
   const where = window.location.hash;
   useEffect(closeSidebarPeek, [where]);
 
+  const shows = useTabShows();
+  const docks = state.docks;
+  const bottomShows = docks.bottom.open && docks.bottom.tabs.some(shows);
+  const bottomTab = shownTab({ ...docks.bottom, tabs: docks.bottom.tabs.filter(shows) });
+  const terminalKey = useRef(() => {});
+  terminalKey.current = () => toggleTerminal(bottomTab && isTermTab(bottomTab) ? bottomTab : null, bottomShows);
+
   // Ctrl+N (Cmd+N): new, as the sidebar advertises; Ctrl+B: the sidebar; Ctrl+I: the info rail;
-  // Alt+←/→: history.
+  // Ctrl+`: the terminal; Alt+←/→: history.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey;
-      if (mod && e.key.toLowerCase() === "n") {
+      if (mod && e.key === "`") {
+        e.preventDefault();
+        terminalKey.current();
+      } else if (mod && e.key.toLowerCase() === "n") {
         e.preventDefault();
         startNew("chat");
       } else if (mod && e.key === ",") {
@@ -186,26 +204,26 @@ export function App() {
   }, []);
 
   let main;
-  let drawer = null;
+  /** What the tabs follow here; pages with neither conversation nor run have no docks. */
+  let tools: Pick<Parameters<typeof ToolColumn>[0], "follow" | "task" | "run" | "onClose" | "onCloseTask"> | null = null;
   switch (section) {
     case "runs":
       main = a ? <RunView runId={a} selectedTask={b === "tasks" ? c : undefined} confirmDelete={b === "delete"} /> : <HomeView />;
-      if (a && b === "tasks" && c)
-        drawer = (
-          <ToolColumn
-            task={{ run: a, task: c }}
-            run={a}
-            onClose={() => {
-              closeTools();
-              navigate("runs", a);
-            }}
-          />
-        );
-      else if (a && state.tools.open) drawer = <ToolColumn run={a} onClose={closeTools} />;
+      if (a && routeTask)
+        tools = {
+          task: { run: a, task: routeTask },
+          run: a,
+          onClose: () => {
+            closeTools();
+            navigate("runs", a);
+          },
+          onCloseTask: () => navigate("runs", a),
+        };
+      else if (a) tools = { run: a, onClose: closeTools };
       break;
     case "s":
       main = a ? <Sessions primary={a} question={b === "questions" ? c : undefined} /> : <HomeView />;
-      if (a && state.tools.open) drawer = <ToolColumn follow={focusedOf(a, state.beside, focus)} onClose={closeTools} />;
+      if (a) tools = { follow: focusedOf(a, state.beside, focus), onClose: closeTools };
       break;
     case "w":
       main = a ? <WorkspaceView key={a} wsKey={a} /> : <HomeView />;
@@ -227,10 +245,15 @@ export function App() {
       main = <HomeView />;
   }
 
+  const { right, bottom } = docks;
+  // The route's task opens the right dock while the route lasts, unless its tab went below.
+  const taskOnRight = !!routeTask && right.tabs.includes("task");
+  const drawer = !!tools && (floatTools ? right.open || peek || taskOnRight : (right.open || taskOnRight) && right.tabs.some(shows));
+  const below = !!tools && !floatTools && bottom.open && bottom.tabs.some(shows);
   const app = (
     <div
       className={`app ${drawer ? (floatTools ? "drawer-float" : "with-drawer") : ""} ${sidebar.docked ? "" : "no-sidebar"}`}
-      style={{ "--sidebar-width": `${widths.sidebar}px`, "--tools-width": `${widths.tools}px` } as CSSProperties}
+      style={{ "--sidebar-width": `${widths.sidebar}px`, "--tools-width": `${widths.tools}px`, "--bottom-height": `${widths.bottom}px` } as CSSProperties}
     >
       {sidebar.docked && <Sidebar route={route} />}
       {sidebar.docked && (
@@ -252,10 +275,27 @@ export function App() {
           </div>
         </>
       )}
-      <main className="main">{mismatch ? <VersionMismatchView {...mismatch} /> : main}</main>
-      {drawer && (
+      <div className="center-col">
+        <main className="main">{mismatch ? <VersionMismatchView {...mismatch} /> : main}</main>
+        {below && tools && (
+          <>
+            <div
+              className="row-edge"
+              role="separator"
+              aria-orientation="horizontal"
+              title="拖动调整高度，双击还原"
+              onPointerDown={(e) => dragBottom(e, widths.bottom)}
+              onDoubleClick={() => setBottomHeight(BOTTOM.initial)}
+            />
+            <section className="bottom-dock">
+              <ToolColumn dock="bottom" {...tools} />
+            </section>
+          </>
+        )}
+      </div>
+      {drawer && tools && (
         <aside className="drawer">
-          {drawer}
+          <ToolColumn dock="right" {...tools} />
         </aside>
       )}
       {drawer && !floatTools && (
@@ -269,6 +309,10 @@ export function App() {
         />
       )}
       <FileViewerHost />
+      <TabDragLayer />
+      <TerminalHydrate />
+      {tools && <TerminalScope follow={tools.follow} run={tools.run} />}
+      <TerminalProblem />
     </div>
   );
   if (!inDesktop) return app;

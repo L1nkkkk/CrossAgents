@@ -788,6 +788,107 @@ pub struct FileContentResponse {
     pub git_ref: Option<String>,
 }
 
+/// A terminal on the hub's machine (`GET /v1/terminals`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TerminalInfo {
+    pub id: String,
+    /// What the client grouped it under when creating it; the hub only keeps this.
+    pub project: Option<String>,
+    pub cwd: String,
+    pub shell: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub created_at: DateTime<Utc>,
+    /// The shell finished; the output stays readable until the terminal is closed.
+    pub exited: bool,
+    pub exit_code: Option<i32>,
+    /// Connections reading its output now.
+    pub connections: u32,
+    /// Which node it runs on; `None` is the hub's own machine, the only one yet.
+    pub node: Option<String>,
+}
+
+/// `GET /v1/terminals`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListTerminalsResponse {
+    pub terminals: Vec<TerminalInfo>,
+}
+
+/// `POST /v1/terminals`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateTerminalRequest {
+    pub cwd: String,
+    #[serde(default)]
+    pub project: Option<String>,
+    pub cols: u16,
+    pub rows: u16,
+    /// Reserved for cross-node terminals: anything but none is refused for now.
+    #[serde(default)]
+    pub node: Option<String>,
+}
+
+/// `POST /v1/terminals/{id}/input`: one batch of keystrokes. `seq` rises per connection; a batch
+/// whose `seq` was already typed is not typed again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TerminalInputRequest {
+    pub connection: String,
+    pub seq: u32,
+    pub data: String,
+}
+
+/// The newest batch typed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TerminalInputResponse {
+    pub acked: u32,
+}
+
+/// `POST /v1/terminals/{id}/resize`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TerminalResizeRequest {
+    pub connection: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// `POST /v1/terminals/{id}/takeover`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct TerminalTakeoverRequest {
+    pub connection: String,
+}
+
+/// What `GET /v1/terminals/{id}/output` streams, one per SSE event. `data` is base64: output
+/// comes in chunks that can end inside a UTF-8 character.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(export)]
+pub enum TerminalFrame {
+    /// Clear the terminal, then write this: the screen now. First on every connection, and again
+    /// if a connection falls behind.
+    Snapshot {
+        data: String,
+        cols: u16,
+        rows: u16,
+    },
+    Output {
+        data: String,
+    },
+    /// This connection types from now on; every other only watches.
+    Writer {
+        connection: String,
+    },
+    /// The shell finished, and this stream ends here.
+    Exit {
+        code: Option<i32>,
+    },
+}
+
 /// `POST {scope}/files/resolve`: which of these strings (relative or absolute paths,
 /// without a `:line` suffix) name something inside the workspace.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]

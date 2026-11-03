@@ -11,7 +11,7 @@
 //! Explicit site accounts additionally move the child process's user-data profile, so
 //! mainland and international credentials cannot overwrite the machine's shared login.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -100,7 +100,8 @@ impl CodebuddyAccounts {
                     "CODEBUDDY_COPILOT_INTERNET_ENVIRONMENT".into(),
                     site.environment().into(),
                 ),
-                // A parent WorkBuddy/API login must not silently win over this login.
+                // Empty overrides are removal markers; prepare_env turns them into
+                // env_remove so a parent WorkBuddy/API login cannot win over this login.
                 ("CODEBUDDY_API_KEY".into(), String::new()),
                 ("CODEBUDDY_AUTH_TOKEN".into(), String::new()),
             ];
@@ -573,13 +574,15 @@ impl AccountProvider for CodebuddyAccounts {
             .clone()
             .unwrap_or_else(|| vec!["codebuddy".into()]);
         command.extend(codebuddy_native::serve_args(port));
+        let mut env: Vec<_> = system_proxy_env()
+            .into_iter()
+            .chain(self.env_for(account))
+            .collect();
+        let env_remove = codebuddy_native::prepare_env(&mut env);
         LoginCommand {
             command,
-            env: system_proxy_env()
-                .into_iter()
-                .chain(self.env_for(account))
-                .collect::<BTreeMap<_, _>>(),
-            env_remove: codebuddy_native::withheld_env(),
+            env: env.into_iter().collect(),
+            env_remove,
             serves: Some(format!("http://localhost:{port}/")),
         }
     }
@@ -595,6 +598,8 @@ impl AccountProvider for CodebuddyAccounts {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::*;
     use serde_json::json;
 
@@ -613,7 +618,12 @@ mod tests {
             let env: BTreeMap<_, _> = provider.agent_env(account).into_iter().collect();
             let login = provider.login_command(account);
             for (key, value) in &env {
-                assert_eq!(login.env.get(key), Some(value), "{key}");
+                if ["CODEBUDDY_API_KEY", "CODEBUDDY_AUTH_TOKEN"].contains(&key.as_str()) {
+                    assert!(!login.env.contains_key(key), "{key}");
+                    assert!(login.env_remove.contains(key), "{key}");
+                } else {
+                    assert_eq!(login.env.get(key), Some(value), "{key}");
+                }
             }
             assert_eq!(
                 env["CODEBUDDY_CONFIG_DIR"],

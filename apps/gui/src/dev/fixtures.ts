@@ -64,6 +64,11 @@ const CAPS: Record<DriverKind, Capabilities> = {
     revert_files: false, set_model: true, structured_diff: false, usage: true, rate_limits: false, permission_callback: false, compaction: false,
     attachments: { image: true, pdf: false, text: true },
   },
+  "cursor-native": {
+    streaming: true, interrupt: true, mcp: true, multi_session: false, resume: true, move_cwd: false, fork: false, rollback: false,
+    revert_files: false, set_model: true, structured_diff: false, usage: false, rate_limits: false, permission_callback: false, compaction: false,
+    attachments: null,
+  },
   "acp-generic": {
     streaming: true, interrupt: true, mcp: true, multi_session: false, resume: false, move_cwd: false, fork: false, rollback: false,
     revert_files: false, set_model: false, structured_diff: false, usage: true, rate_limits: false, permission_callback: true, compaction: false,
@@ -73,11 +78,11 @@ const CAPS: Record<DriverKind, Capabilities> = {
 
 export const capabilitiesOf = (plugin: string): Capabilities => CAPS[driverOf(plugin)];
 export const driverOf = (plugin: string): DriverKind =>
-  plugin === "codex" ? "codex-native" : plugin === "claude" ? "claude-native" : plugin === "codebuddy" ? "codebuddy-native" : plugin === "with" ? "with-native" : "acp-generic";
+  plugin === "codex" ? "codex-native" : plugin === "claude" ? "claude-native" : plugin === "codebuddy" ? "codebuddy-native" : plugin === "with" ? "with-native" : plugin === "cursor" ? "cursor-native" : "acp-generic";
 
 type AgentInit = {
   name: string;
-  plugin: "claude" | "codex" | "codebuddy" | "mock";
+  plugin: "claude" | "codex" | "codebuddy" | "cursor" | "mock";
   model?: string;
   role: Role;
   status?: AgentStatus;

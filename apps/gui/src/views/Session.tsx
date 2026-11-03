@@ -30,7 +30,11 @@ import { ModelEffortPicks } from "../modelPick";
 import { InfoRail, RAIL_ROOM, SIDE_ROOM, useRail } from "../rail";
 import { ScrollThumb } from "../scrollthumb";
 import { TurnMap, type MapEntry } from "../turnmap";
-import { focusSession, openTool, toggleTools, useLayout } from "../panes";
+import { focusSession, isTermTab, openTool, toggleTools, useLayout } from "../panes";
+import { shownTab } from "../lib/docks";
+import { terminalsAvailable, toggleTerminal, useTabShows } from "../terminal";
+import { useWidths } from "../lib/widths";
+import { useSidebar } from "../titlebar";
 import { taskState } from "../lib/taskState";
 import { QUIET_AFTER, actionOf, duration, failed, liveActivity, liveKey, liveNow, quietSeconds, stepLine, summarize, workGroups, type ActionTool, type Step } from "../lib/workGroups";
 import { TurnLive, type LiveTurn } from "../liveTurn";
@@ -1212,15 +1216,29 @@ function ToolDetailView({ step, changes }: { step: ToolCall; changes: DiffFile[]
 /** "70ms" under a second, else like `duration`. */
 const took = (ms: number) => (ms < 1000 ? `${ms}ms` : duration(ms));
 
-/** The tool column's switch, in each conversation's header. */
+/** The docks' switches, in each conversation's header. */
 function ToolsToggle() {
-  const { state } = useLayout();
-  // Open, the column's own header has the button that folds it away: one place, like Codex.
-  if (state.tools.open) return null;
+  const { state, peek } = useLayout();
+  const { right, bottom } = state.docks;
+  const { docked } = useSidebar();
+  const float = useWidths(docked).float;
+  const shows = useTabShows();
+  const bottomShows = !float && bottom.open && bottom.tabs.some(shows);
+  const below = shownTab({ ...bottom, tabs: bottom.tabs.filter(shows) });
   return (
-    <button className="ghost icon" onClick={toggleTools} title="工具列：改动、任务、提交图" aria-label="工具列">
-      <Icon name="panel" size={16} />
-    </button>
+    <>
+      {/* Only what is folded. Open, a dock's own header has the button that folds it away: one place, like Codex. */}
+      {terminalsAvailable() && !bottomShows && (
+        <button className="ghost icon" onClick={() => toggleTerminal(below && isTermTab(below) ? below : null, bottomShows)} title="终端（Ctrl+`）" aria-label="终端">
+          <Icon name="terminal" size={16} />
+        </button>
+      )}
+      {!(right.open || (float && peek)) && (
+        <button className="ghost icon" onClick={toggleTools} title="工具列：改动、文件、任务、提交图" aria-label="工具列">
+          <Icon name="panel" size={16} />
+        </button>
+      )}
+    </>
   );
 }
 

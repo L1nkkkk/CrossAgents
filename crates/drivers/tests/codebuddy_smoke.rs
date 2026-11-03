@@ -5,6 +5,7 @@
 //! ```text
 //! CROSSAGENTS_SMOKE_MODEL=<model>                optional, default the account's default
 //! CROSSAGENTS_SMOKE_CODEBUDDY=<launch command>   optional, default `codebuddy` on PATH
+//! CROSSAGENTS_SMOKE_CODEBUDDY_HOME=<account>    required for the private-profile regression
 //! cargo test -p crossagents-drivers --test codebuddy_smoke -- --ignored --test-threads=1
 //! ```
 //!
@@ -105,6 +106,59 @@ async fn turn(
         "turn failed: {errors:?}"
     );
     (outcome, streamed, others)
+}
+
+/// Exercise the same empty auth removal markers that explicit site accounts use.
+/// A successful initialize alone is insufficient: the old environment could report
+/// a personal account and still reject every prompt with Authentication required.
+#[tokio::test]
+#[ignore = "needs an explicitly selected, signed-in international account profile"]
+async fn smoke_international_profile_with_empty_auth_overrides() {
+    let home = std::path::PathBuf::from(
+        std::env::var("CROSSAGENTS_SMOKE_CODEBUDDY_HOME")
+            .expect("set CROSSAGENTS_SMOKE_CODEBUDDY_HOME to a signed-in account directory"),
+    );
+    let profile = home.join("profile");
+    let dir = tempfile::tempdir().unwrap();
+    let (mut spec, mut rx) = spec(dir.path(), PermissionPolicy::Deny);
+    spec.env = vec![
+        ("CODEBUDDY_CONFIG_DIR".into(), home.display().to_string()),
+        ("USERPROFILE".into(), profile.display().to_string()),
+        ("HOME".into(), profile.display().to_string()),
+        (
+            "APPDATA".into(),
+            profile.join("AppData/Roaming").display().to_string(),
+        ),
+        (
+            "LOCALAPPDATA".into(),
+            profile.join("AppData/Local").display().to_string(),
+        ),
+        (
+            "XDG_DATA_HOME".into(),
+            profile.join(".local/share").display().to_string(),
+        ),
+        (
+            "XDG_CONFIG_HOME".into(),
+            profile.join(".config").display().to_string(),
+        ),
+        ("CODEBUDDY_INTERNET_ENVIRONMENT".into(), "external".into()),
+        (
+            "CODEBUDDY_COPILOT_INTERNET_ENVIRONMENT".into(),
+            "external".into(),
+        ),
+        ("CODEBUDDY_API_KEY".into(), String::new()),
+        ("CODEBUDDY_AUTH_TOKEN".into(), String::new()),
+    ];
+    let session = driver().open(spec).await.unwrap();
+    let (outcome, text, events) = run(
+        &*session,
+        &mut rx,
+        "Do not use any tools. Reply with exactly: PONG",
+    )
+    .await;
+    session.shutdown().await;
+    assert_eq!(outcome.stop_reason, StopReason::EndTurn, "{events:?}");
+    assert!(text.contains("PONG"), "{text}");
 }
 
 #[tokio::test]

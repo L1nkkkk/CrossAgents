@@ -10,8 +10,27 @@
 mod job;
 
 pub use job::Job;
+#[cfg(unix)]
+pub use job::kill_group;
 
 use std::io;
+
+/// Lets programs started from now on stop on Ctrl+C. A process started in a new process group,
+/// as a detached hub is, ignores it, and its children inherit that: a person's `ping -t` in a
+/// terminal could then not be stopped. Harmless to the hub itself: it has its own handler, and
+/// mostly no console.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub fn children_stop_on_ctrl_c() {
+    // SAFETY: a plain Win32 call with no pointers: a null handler means "the default one".
+    let ok = unsafe { windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 0) };
+    if ok == 0 {
+        tracing::debug!(error = %io::Error::last_os_error(), "cannot restore Ctrl+C for children");
+    }
+}
+
+#[cfg(not(windows))]
+pub fn children_stop_on_ctrl_c() {}
 
 /// Starts the command without a console window (Windows' `CREATE_NO_WINDOW`).
 pub trait NoWindow {

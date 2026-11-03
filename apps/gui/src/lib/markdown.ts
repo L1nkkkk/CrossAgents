@@ -151,6 +151,22 @@ function parseList(lines: string[], start: number): [Block, number] {
   return [{ t: "list", ordered, start: ordered ? parseInt(first[2], 10) : 1, items }, i];
 }
 
+const CJK = /[　-鿿＀-￯]/;
+
+/**
+ * A document's hard-wrapped lines as one paragraph: a line break reads as a space (nothing
+ * between Chinese characters), unless the line ends in two spaces or `\`. A reply's line breaks
+ * are meant, so only documents go through this.
+ */
+export function softBreaks(text: string): string {
+  return text.split("\n").reduce((out, line) => {
+    const hard = out.match(/( {2,}|\\)$/);
+    if (hard) return `${out.slice(0, -hard[0].length)}\n${line.trimStart()}`;
+    const next = line.trimStart();
+    return out + (CJK.test(out.slice(-1)) && CJK.test(next.charAt(0)) ? "" : " ") + next;
+  });
+}
+
 const INLINE = /(`+)([\s\S]*?[^`])\1(?!`)|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|~~([\s\S]+?)~~|\*([^\s*](?:[\s\S]*?[^\s*])?)\*|(?<![\w])_([^\s_](?:[\s\S]*?[^\s_])?)_(?![\w])|\[([^\]]+)\]\(([^)\s]+)\)|\n/;
 
 /** Inline spans of `text`. Links keep only http(s) and mailto targets and local files; others stay text. */

@@ -181,6 +181,11 @@ struct HubSection {
     /// nothing uses is reclaimed first (default 120). See
     /// `OrchestratorConfig::build_cache_limit`.
     build_cache_gb: Option<u64>,
+    /// The command a new terminal runs (default: `pwsh`, else `powershell`, on Windows; `$SHELL`
+    /// elsewhere).
+    terminal_shell: Option<Vec<String>>,
+    /// Minutes a terminal nobody is connected to, with nothing running, stays (default 120).
+    terminal_idle_minutes: Option<u64>,
 }
 
 /// Hub settings. `port = 0` binds a random free port.
@@ -210,6 +215,10 @@ pub struct HubConfig {
     pub event_log: bool,
     /// `[hub] build_cache_gb`, in bytes: see `OrchestratorConfig::build_cache_limit`.
     pub build_cache_limit: u64,
+    /// `[hub] terminal_shell`; `None` is the system's usual shell.
+    pub terminal_shell: Option<Vec<String>>,
+    /// How long a terminal nobody is connected to, with nothing running, stays.
+    pub terminal_idle: std::time::Duration,
 }
 
 impl HubConfig {
@@ -226,6 +235,8 @@ impl HubConfig {
             runtime_host: None,
             event_log: false,
             build_cache_limit: crossagents_orchestrator::DEFAULT_BUILD_CACHE_LIMIT,
+            terminal_shell: None,
+            terminal_idle: crate::terminal::DEFAULT_IDLE,
         }
     }
 }
@@ -279,6 +290,16 @@ impl HubConfig {
                 .build_cache_gb
                 .map_or(crossagents_orchestrator::DEFAULT_BUILD_CACHE_LIMIT, |gb| {
                     gb << 30
+                }),
+            terminal_shell: config
+                .hub
+                .terminal_shell
+                .filter(|command| !command.is_empty()),
+            terminal_idle: config
+                .hub
+                .terminal_idle_minutes
+                .map_or(crate::terminal::DEFAULT_IDLE, |minutes| {
+                    std::time::Duration::from_secs(minutes * 60)
                 }),
         })
     }
