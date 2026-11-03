@@ -70,6 +70,7 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 | POST | `/v1/plugins/{name}/models` | write | GUI |
 | POST | `/v1/plugins/{name}/install` | admin | GUI |
 | POST | `/v1/plugins/{name}/upgrade` | admin | GUI |
+| POST | `/v1/plugins/refresh` | admin | GUI |
 | GET | `/v1/usage` | read | GUI、CLI |
 | GET | `/v1/accounts` | read | GUI、CLI |
 | POST | `/v1/accounts` | admin | GUI、CLI |
@@ -127,7 +128,7 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 
 `/v1/terminals*` 全部归 admin，读也一样：终端以这台机器的用户身份执行输入的内容，读输出能看到里面打印过的任何东西（包括 token）。agent 的会话 token 到不了这里，终端输出也不进模型。
 
-`POST /v1/plugins/{name}/install` 与 `/upgrade` 也归 admin：它们会在这台机器上执行程序。执行的命令只来自描述文件（`[[install.methods]]` 的 `run` / `upgrade`），请求只给插件名和动作，传不了命令；一次插件只跑一个任务，第二个请求返回 409。
+`POST /v1/plugins/{name}/install` 与 `/upgrade` 也归 admin：它们会在这台机器上执行程序。执行的命令只来自描述文件（`[[install.methods]]` 的 `run` / `upgrade`），请求只给插件名和动作，传不了命令；一次插件只跑一个任务，第二个请求返回 409。`POST /v1/plugins/refresh` 同理：它会在后台运行各 CLI 的版本命令（`locate.version`），只是重新查找和探测，不接受任何命令。
 
 两个边界判断：
 

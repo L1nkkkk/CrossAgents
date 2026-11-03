@@ -5,6 +5,11 @@
  */
 export type CliInfo = { installed: boolean, 
 /**
+ * A version probe is running now: `version` is empty until it answers, so a client says
+ * "asking" rather than "unknown" (docs/DESIGN.md §9.3).
+ */
+probing: boolean, 
+/**
  * The file that was found: the CLI's own entry point, even when it is run through
  * `node`.
  */
@@ -45,6 +50,12 @@ upgrade_command?: Array<string>,
  * Whether the GUI offers an upgrade button.
  */
 can_upgrade: boolean, 
+/**
+ * `install` or `upgrade` while one is running for this plugin now; absent when nothing
+ * is. The hub keeps it in memory only: after a restart nothing is running, so it is
+ * empty again (docs/DESIGN.md §9.3).
+ */
+installing?: string, 
 /**
  * Where the description came from: `built-in`, a manifest's path, or `config.toml`.
  */

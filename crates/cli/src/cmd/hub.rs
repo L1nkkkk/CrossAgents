@@ -17,8 +17,8 @@ use super::Context;
 use crate::client::Client;
 use crate::output::{duration, print_json};
 
-/// Startup detects the vendors' logins (their CLIs, proxy probes) before the hub answers,
-/// which takes several seconds on some machines.
+/// Startup opens the database and restores runtime state; vendor login probes run in the
+/// background so they cannot exhaust this readiness deadline.
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(100);

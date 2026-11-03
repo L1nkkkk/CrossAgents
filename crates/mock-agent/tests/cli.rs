@@ -70,7 +70,7 @@ fn send_wait_prints_the_answer() {
 
 /// Polls `run show` until the run reaches `status`.
 fn wait_run(home: &Home, id: &str, status: &str) -> serde_json::Value {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let deadline = std::time::Instant::now() + common::wait_limit();
     loop {
         let detail: serde_json::Value =
             serde_json::from_str(&home.stdout(&["run", "show", id, "--json"])).unwrap();

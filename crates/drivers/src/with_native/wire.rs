@@ -35,6 +35,9 @@ pub const PROMPT_ARG_LIMIT: usize = 24_000;
 /// A command's output kept in a tool call's detail, from its end.
 const OUTPUT_TAIL: usize = 8_000;
 
+/// How much of a `RUN_ERROR`'s own JSON is kept when it names no reason.
+const ERROR_JSON: usize = 2_000;
+
 /// The arguments of one turn, after the program.
 #[derive(Debug)]
 pub struct ChatArgs<'a> {
@@ -231,8 +234,7 @@ impl Turn {
                 Vec::new()
             }
             "RUN_ERROR" => {
-                let message =
-                    error_text(raw).unwrap_or_else(|| "with-cli reported an error".into());
+                let message = run_error_text(message, raw);
                 self.error = Some(message.clone());
                 vec![SessionEventKind::Error { message }]
             }
@@ -413,6 +415,38 @@ fn error_text(raw: &Value) -> Option<String> {
     ["message", "error", "content", "detail"]
         .iter()
         .find_map(|key| raw.get(*key).filter(|v| !v.is_null()).map(value_text))
+}
+
+/// Why a `RUN_ERROR` ended the turn. AG-UI puts `code` and `message` on the event itself
+/// (`{"type": "RUN_ERROR", "code": ..., "message": ...}`), and with-cli's rawEvent may
+/// repeat or elaborate them; when neither says anything, the event's own JSON goes in
+/// instead of a fixed line, so the transcript shows what actually arrived.
+fn run_error_text(message: &Value, raw: &Value) -> String {
+    let text = str_of(message, "message").filter(|t| !t.is_empty());
+    let code = str_of(message, "code").filter(|c| !c.is_empty());
+    match (code, text) {
+        (Some(code), Some(text)) => format!("{code}: {text}"),
+        (Some(code), None) => code.to_owned(),
+        (None, Some(text)) => text.to_owned(),
+        (None, None) => error_text(raw).unwrap_or_else(|| {
+            format!(
+                "with-cli reported an error: {}",
+                head(&message.to_string(), ERROR_JSON)
+            )
+        }),
+    }
+}
+
+/// The first `max` bytes of `text`, on a character boundary.
+fn head(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
 }
 
 fn detail(
@@ -868,6 +902,28 @@ mod tests {
     #[test]
     fn run_errors_are_reported() {
         let mut turn = Turn::default();
+        // AG-UI puts the reason at the top level of the event, beside `type`.
+        assert_eq!(
+            events(
+                &mut turn,
+                r#"{"type":"RUN_ERROR","message":"quota exceeded"}"#
+            ),
+            [SessionEventKind::Error {
+                message: "quota exceeded".into()
+            }]
+        );
+        assert_eq!(turn.error.as_deref(), Some("quota exceeded"));
+        // A code is kept too, ahead of the message.
+        assert_eq!(
+            events(
+                &mut turn,
+                r#"{"type":"RUN_ERROR","code":"rate_limit","message":"quota exceeded"}"#
+            ),
+            [SessionEventKind::Error {
+                message: "rate_limit: quota exceeded".into()
+            }]
+        );
+        // Some events only say it inside rawEvent.
         assert_eq!(
             events(
                 &mut turn,
@@ -878,5 +934,35 @@ mod tests {
             }]
         );
         assert_eq!(turn.error.as_deref(), Some("quota exceeded"));
+        // Saying nothing at all still shows what arrived, not a fixed line.
+        let bare = r#"{"type":"RUN_ERROR","rawEvent":{"unknown":7}}"#;
+        let error = events(&mut turn, bare);
+        let [SessionEventKind::Error { message }] = error.as_slice() else {
+            panic!("{error:?}");
+        };
+        assert!(message.contains(r#""unknown":7"#), "{message}");
+        assert!(message.contains("RUN_ERROR"), "{message}");
+        assert_ne!(message, "with-cli reported an error");
+    }
+
+    /// A long event is kept from its head, cut on a character boundary.
+    #[test]
+    fn run_error_json_is_truncated() {
+        let mut turn = Turn::default();
+        let filler = "错".repeat(2_000);
+        let line = format!(r#"{{"type":"RUN_ERROR","rawEvent":{{"blob":"{filler}"}}}}"#);
+        events(&mut turn, &line);
+        let error = turn.error.expect("an error");
+        let kept = error
+            .strip_prefix("with-cli reported an error: ")
+            .and_then(|text| text.strip_suffix('…'))
+            .expect("the raw JSON, cut");
+        let json = serde_json::from_str::<Value>(&line).unwrap().to_string();
+        assert!(json.starts_with(kept), "{kept}");
+        assert!(
+            kept.len() <= ERROR_JSON && kept.len() > ERROR_JSON - 4,
+            "{}",
+            kept.len()
+        );
     }
 }

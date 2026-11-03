@@ -97,7 +97,7 @@ async fn open(t: &TestHub) -> SqliteStore {
 }
 /// Waits until `wanted` candidates are in the store, then reads them.
 async fn candidates(t: &TestHub, wanted: usize) -> Vec<Candidate> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    let deadline = tokio::time::Instant::now() + common::wait_limit();
     loop {
         let store = open(t).await;
         let found = store.candidate_list(None, None).await.unwrap();

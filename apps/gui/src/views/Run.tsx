@@ -999,7 +999,7 @@ export function usePlanApproval(run: Run, busy: boolean) {
       );
     return (
       <span className="who-pick" data-task={task.key}>
-        <ChipMenu icon={icon} label={label} title="执行者" items={items} align="right" searchable />
+        <ChipMenu icon={icon} label={label} title="执行者" items={items} align="right" searchable menuClassName="who-pick-menu" />
         {task.fresh || model ? <ReasoningPicks plugin={plugin} model={setting.model} effort={setting.effort} onChange={(model, effort) => setReasoning({ ...reasoning, [task.key]: { model, effort } })} />
           : <span className="small muted" title="该任务复用原会话及其推理设置，可在原会话的输入框旁调整">沿用会话推理设置</span>}
       </span>

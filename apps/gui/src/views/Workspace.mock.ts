@@ -7,6 +7,7 @@ import type { Agent } from "@bindings/Agent";
 import type { HumanItem } from "@bindings/HumanItem";
 import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
+import type { RunHistory } from "@bindings/RunHistory";
 import type { Task } from "@bindings/Task";
 import { emptyState, type MockState } from "../dev/MockBridge";
 import { NOTES_REPO, REPO, agent, ago, clone, planned, run, say, task, team, transcript, turn, uid } from "../dev/fixtures";
@@ -194,6 +195,68 @@ export function workspaceState(): MockState {
     { run: rE4, tasks: [tE4] },
   ];
 
+  // Rounds whose run was deleted: the workspace's history keeps what they did (read-only),
+  // while the runs themselves are gone. The ended runs above are recorded on request too.
+  const history: RunHistory[] = [
+    {
+      run_id: uid(),
+      work_id: null,
+      repo: REPO,
+      title: "登录文案统一",
+      request: "把登录、注册、找回密码的错误提示统一成一套文案。",
+      status: "completed",
+      summary: "三处文案统一到 i18n，中英文都补上了；已合并进 main。",
+      note: null,
+      base_branch: "main",
+      branch: "crossagents/login-copy",
+      landed: { mode: "merge", by: ada.name, reference: "1a2b3c4", at: ago(60 * 24 * 3) },
+      tasks: [
+        { key: "a", title: "梳理现有错误文案", assignee: rex.name, model: rex.model, status: "merged" },
+        { key: "b", title: "补中英文词条", assignee: mia.name, model: mia.model, status: "merged" },
+      ],
+      merged_commits: ["1a2b3c4", "5d6e7f8"],
+      created_at: ago(60 * 24 * 4),
+      ended_at: ago(60 * 24 * 3),
+      deleted: true,
+    },
+    {
+      run_id: uid(),
+      work_id: null,
+      repo: REPO,
+      title: "登录验证码",
+      request: "登录页加图形验证码，连续失败三次才出现。",
+      status: "failed",
+      summary: null,
+      note: "计划被拒：任务 a 没有写验收命令，run 停在规划阶段。",
+      base_branch: "main",
+      branch: "crossagents/login-captcha",
+      landed: null,
+      tasks: [{ key: "a", title: "验证码接口与前端接入", assignee: rex.name, model: rex.model, status: "cancelled" }],
+      merged_commits: [],
+      created_at: ago(60 * 24 * 10),
+      ended_at: ago(60 * 24 * 9),
+      deleted: true,
+    },
+    {
+      run_id: uid(),
+      work_id: null,
+      repo: NOTES_REPO,
+      title: "索引增量更新",
+      request: "笔记保存后只更新受影响的那部分索引。",
+      status: "cancelled",
+      summary: null,
+      note: "cancelled",
+      base_branch: "main",
+      branch: "crossagents/index-incremental",
+      landed: null,
+      tasks: [{ key: "a", title: "增量索引", assignee: pax.name, model: pax.model, status: "cancelled" }],
+      merged_commits: [],
+      created_at: ago(60 * 24 * 6),
+      ended_at: ago(60 * 24 * 5),
+      deleted: true,
+    },
+  ];
+
   // Mia has two open questions: both must be found, and opening the session must not clear them.
   const questions = [
     // The two oldest, so they head the list: the sidebar's first rows exercise the question route.
@@ -205,6 +268,7 @@ export function workspaceState(): MockState {
     ...emptyState(),
     agents: [ada, rex, mia, sam, lin, nora, pax, nova, iris, atlas, orion, lyra, novaC, rexD],
     runs,
+    history,
     transcripts: new Map([
       [nova.id, transcript(nova, [turn({ input: "登录页的错误提示太生硬，能改成人话吗？", minutesAgo: 90, took: 2, items: [say("可以。我先看一下现在的错误文案在哪里，再给你几版。")] })])],
       [atlas.id, transcript(atlas, [turn({ input: LONG_TOPIC, minutesAgo: 200, took: 3, items: [say("好，我先通读一遍文档，再逐条对照代码。")] })])],

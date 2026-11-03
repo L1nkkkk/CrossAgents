@@ -39,6 +39,7 @@ import type { ListAgentsResponse } from "@bindings/ListAgentsResponse";
 import type { ListPluginsResponse } from "@bindings/ListPluginsResponse";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import type { ListRunsResponse } from "@bindings/ListRunsResponse";
+import type { ListHistoryResponse } from "@bindings/ListHistoryResponse";
 import type { ListSessionCandidatesResponse } from "@bindings/ListSessionCandidatesResponse";
 import type { StartChatRequest } from "@bindings/StartChatRequest";
 import type { ApproveRunRequest } from "@bindings/ApproveRunRequest";
@@ -272,6 +273,10 @@ export const api = {
   turnDiff: (key: string, messageId: string) =>
     request<TurnDiffResponse>("GET", `/v1/agents/${enc(key)}/turns/${enc(messageId)}/diff`),
   listPlugins: () => request<ListPluginsResponse>("GET", "/v1/plugins"),
+  /** Looks for the CLIs again and asks their versions, in the background: 202 at once, and
+   * `plugin.changed` as each probe ends. `name` narrows it to one plugin. */
+  refreshPlugins: (name?: string) =>
+    request<void>("POST", `/v1/plugins/refresh${name ? `?plugin=${enc(name)}` : ""}`),
   setPluginModels: (name: string, shown: string[] | null) => request<PluginInfo>("POST", `/v1/plugins/${enc(name)}/models`, { shown }),
   /** Runs the description's install command on this machine; progress comes on the event stream. */
   installPlugin: (name: string) => request<CliInstallAccepted>("POST", `/v1/plugins/${enc(name)}/install`),
@@ -279,6 +284,9 @@ export const api = {
   upgradePlugin: (name: string) => request<CliInstallAccepted>("POST", `/v1/plugins/${enc(name)}/upgrade`),
 
   listRuns: () => request<ListRunsResponse>("GET", "/v1/runs"),
+  /** What runs left in a workspace, including the ones since deleted; every workspace's
+   * without `repo`. Read-only: a deleted run's record never goes away. */
+  history: (repo?: string) => request<ListHistoryResponse>("GET", `/v1/history${repo ? `?repo=${enc(repo)}` : ""}`),
   getRun: (key: string) => request<RunDetail>("GET", `/v1/runs/${enc(key)}`),
   createRun: (req: CreateRunRequest) => request<Run>("POST", "/v1/runs", req),
   approveRun: (key: string, req: ApproveRunRequest = { policy: null, max_parallel: null, assignees: null }) =>

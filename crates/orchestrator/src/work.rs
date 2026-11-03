@@ -2,12 +2,13 @@
 //! `work_start`, the person starts it or declines with the card that puts in front of them.
 //! Opening a branch and a worktree is something the person sees, so the agent never does it
 //! on its own.
-//! `run_next` continues an existing work group immediately from the person's new request.
+//! `run_next` continues an existing work group immediately from the person's new request;
+//! a run that has no group yet (from before groups existed) gets the one that carries it on.
 
 use chrono::Utc;
 use crossagents_core::{
     Agent, AgentId, AgentKey, CoreError, EventKind, HumanAction, HumanItem, HumanItemKind,
-    HumanItemStatus, LandPolicy, PlanApproval, Run, RunConfig, RunPolicy, RunStatus,
+    HumanItemStatus, LandPolicy, PlanApproval, Run, RunConfig, RunPolicy, RunStatus, Work, WorkId,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -40,7 +41,7 @@ impl Orchestrator {
             from: Option<String>,
         }
         let a: A = crate::tools::args(input)?;
-        let run = self
+        let mut run = self
             .run_of(caller.id)
             .await?
             .map(|(r, _)| r)
@@ -51,13 +52,60 @@ impl Orchestrator {
                 "run_next requires a terminal run; this run is still in progress".into(),
             ));
         }
-        let work = run
-            .work_id
-            .ok_or_else(|| CoreError::Conflict("this run has no work group".into()))?;
+        // Every run belongs to a work group. One without (from before groups existed) gets
+        // the group that carries it on, so the next round reuses its checkout and branch.
+        let work = self.work_of_run(&mut run).await?.id;
         let next = self
             .create_work_round(work, a.request, Some(a.title), a.from.as_deref())
             .await?;
         Ok(json!({ "run_id": next.id, "work_id": work, "status": next.status }))
+    }
+
+    /// Records a work group. Every run is in one: a group of its own when it starts, the
+    /// same group as the rounds that follow it.
+    pub async fn create_work_group(
+        &self,
+        title: &str,
+        repo: std::path::PathBuf,
+        lead: AgentId,
+    ) -> Result<Work, CoreError> {
+        let now = Utc::now();
+        let work = Work {
+            id: WorkId::new(),
+            title: title.to_owned(),
+            repo,
+            lead,
+            created_at: now,
+            updated_at: now,
+        };
+        self.store().insert_work(&work).await?;
+        self.publish(EventKind::WorkCreated { work: work.clone() })
+            .await;
+        Ok(work)
+    }
+
+    /// The group `run` is in, made for it when it has none (a run from before groups
+    /// existed, or one whose lead carries on from it): the round that follows then reuses
+    /// its checkout and branch instead of starting over from the base branch.
+    /// `run` is left as the stored one, so recording the group never writes the fields a
+    /// caller read earlier over what the run has become since (its status, its lead).
+    pub async fn work_of_run(&self, run: &mut Run) -> Result<Work, CoreError> {
+        let _guard = self.lock(run.id).await;
+        let mut latest = self.store().get_run(run.id).await?;
+        let work = match latest.work_id {
+            Some(id) => self.store().get_work(id).await?,
+            None => {
+                let work = self
+                    .create_work_group(&latest.title, latest.repo.clone(), latest.planner)
+                    .await?;
+                latest.work_id = Some(work.id);
+                latest.updated_at = Utc::now();
+                self.store().update_run(&latest).await?;
+                work
+            }
+        };
+        *run = latest;
+        Ok(work)
     }
 
     /// Shared by the conversation tool and the work group's next-round API.
@@ -284,7 +332,7 @@ impl Orchestrator {
         // The proposer's workspace, wherever it works now; the run starts from the current
         // branch there.
         let (repo, base_branch) = (agent.home().to_path_buf(), None);
-        let run = self
+        let mut run = self
             .create_run_with_choice(
                 NewRun {
                     origin_chat_id: Some(proposer),
@@ -317,6 +365,8 @@ impl Orchestrator {
                 false,
             )
             .await?;
+        // The work group this Work starts: its next rounds call run_next from the lead.
+        self.work_of_run(&mut run).await?;
         item.run_id = Some(run.id);
         self.store().put_human_item(item).await?;
         self.tell_origin_started(&run).await;

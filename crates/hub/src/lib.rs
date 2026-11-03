@@ -18,6 +18,7 @@ pub mod models;
 pub mod notices;
 pub mod paths;
 pub mod prices;
+pub mod refresh;
 pub mod resume;
 pub mod routing;
 pub mod rules;
@@ -47,6 +48,7 @@ use crate::collab::{AgentTokens, CollabSetup, HubHost};
 use crossagents_plugins::claude_account::ClaudeAccounts;
 use crossagents_plugins::codebuddy_account::CodebuddyAccounts;
 use crossagents_plugins::codex_account::CodexAccounts;
+use crossagents_plugins::cursor_account::CursorAccounts;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -133,16 +135,11 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
             Arc::new(codex_accounts),
             Arc::new(ClaudeAccounts::default()),
             Arc::new(CodebuddyAccounts::default()),
+            Arc::new(CursorAccounts::default()),
         ],
         paths.accounts(),
     ));
     accounts.watch();
-    if config.detect_accounts
-        && let Err(err) = accounts.detect_defaults().await
-    {
-        tracing::warn!(error = %err, "cannot register local logins as accounts");
-    }
-    accounts.warm();
     let tokens = Arc::new(AgentTokens::load(paths.agent_tokens()));
     let setup = Arc::new(CollabSetup {
         tokens: tokens.clone(),
@@ -165,9 +162,12 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     runtime.watch_moves();
     // Each CLI is asked its version in the background, in parallel: `GET /v1/plugins`
     // reports it once it answers and never waits for a subprocess (docs/DESIGN.md §9.3).
+    // Asking again later (an install, `POST /v1/plugins/refresh`) goes through `Refresher`,
+    // which also says `plugin.changed` when a probe ends.
     for driver in runtime.plugins().defaults() {
         tokio::spawn(async move { driver.probe_cli().await });
     }
+    let refresher = Arc::new(refresh::Refresher::new());
     let model_choice = Arc::new(models::ModelChoice::load(paths.models()));
     // Agents from before names were for people get a name and (chats) a title.
     if let Err(err) = identity::fix_up(
@@ -281,6 +281,25 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         .context("cannot write hub.json")?;
 
     let shutdown = CancellationToken::new();
+    // Vendor status/model probes can take tens of seconds. Serve first; account.created
+    // events refresh clients as local logins are discovered, without delaying hub readiness.
+    let account_start = tokio::spawn({
+        let accounts = accounts.clone();
+        let shutdown = shutdown.clone();
+        let detect = config.detect_accounts;
+        async move {
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {}
+                _ = async {
+                    if detect && let Err(err) = accounts.detect_defaults().await {
+                        tracing::warn!(error = %err, "cannot register local logins as accounts");
+                    }
+                    accounts.warm();
+                } => {}
+            }
+        }
+    });
     let stop_agents = Arc::new(AtomicBool::new(!hosted));
     Arc::new(notices::Notices {
         bus: bus.clone(),
@@ -307,6 +326,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         mcp_command: setup.mcp_command.clone(),
         url: format!("http://{addr}"),
         installer: Arc::new(install::Installer::new()),
+        refresher,
         terminals: terminals.clone(),
     });
     bus.publish(EventKind::HubStarted {
@@ -326,6 +346,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
                 .await;
             // Make sure SSE streams end even if serve failed.
             shutdown.cancel();
+            let _ = account_start.await;
             terminals.stop_all();
             if stop_agents.load(Ordering::SeqCst) {
                 runtime.stop_all().await;

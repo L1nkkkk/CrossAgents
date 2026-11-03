@@ -40,7 +40,7 @@ function account(id: string, provider: string, label: string, status: Partial<Ac
 
 export function quota(): QuotaResponse {
   return {
-    providers: ["claude", "codex", "codebuddy"],
+    providers: ["claude", "codex", "codebuddy", "cursor"],
     accounts: [
       account(
         "claude-max",
@@ -98,6 +98,22 @@ export function quota(): QuotaResponse {
           { id: "glm-5.3", name: "GLM-5.3", description: null, context_window: null, credit_multiplier: 0.69 },
           { id: "hy4-preview", name: "Hy4 preview", description: null, context_window: null, credit_multiplier: 0.29 },
           { id: "hy3", name: "Hy3", description: null, context_window: null, credit_multiplier: 0 },
+        ],
+      },
+      // Cursor's CLI reports the login, the email and the models; its quota lives on the
+      // vendor's web pages, so the row has none to show.
+      {
+        ...account(
+          "cursor-work",
+          "cursor",
+          "Cursor 工作号",
+          { auth_mode: "cursor", email: "z***@cursor.com" },
+          ["nova"],
+        ),
+        models: [
+          { id: "auto", name: "auto", description: null, context_window: null },
+          { id: "sonnet-4-thinking", name: "sonnet-4-thinking", description: null, context_window: null },
+          { id: "gpt-5", name: "gpt-5", description: null, context_window: null },
         ],
       },
     ],
@@ -170,5 +186,5 @@ export function usageSeriesMock(range: string, group: string, source: string, va
   });
   const sum = (key: "cached_input" | "new_input" | "output") => days.reduce((a,d)=>a+d[key],0);
   const cached_input=sum("cached_input"), new_input=sum("new_input"), output=sum("output");
-  return {range,group,source,granularity:variant === "session" ? "session" : "request",first_day:variant === "empty" ? null : days[0].date,days,groups:group === "total" ? [] : [{key:"a",label:group === "model" ? "claude-opus-4-1" : "CrossAgents",cached_input,new_input,output,cost_usd:days.reduce((a,d)=>a+(d.cost_usd??0),0)}],total:{cached_input,new_input,output,reasoning:Math.round(output/3),sessions:variant === "empty" ? 0 : length*3,turns:variant === "session" ? null : variant === "empty" ? 0 : length*8,max_request:variant === "session" || variant === "empty" ? null : 128000,cost_usd:variant === "empty" ? null : days.reduce((a,d)=>a+(d.cost_usd??0),0)},previous_total:range === "all" ? null : (cached_input+new_input+output)/1.44,unpriced_models:variant === "issues" ? ["unknown-model"] : [],sources:[{id:"claude-max",label:"工作 · Max",provider:"claude"},{id:"codex-plus",label:"个人 · Plus",provider:"codex",...(variant === "issues" ? {error:"无法读取本地日志"} : {})}],notes:[variant === "session" ? "按会话开始日统计；无法确定单次请求和轮数。" : "按请求日期统计；费用为公开 API 价格估算。"]};
+  return {range,group,source,granularity:variant === "session" ? "session" : "request",first_day:variant === "empty" ? null : days[0].date,days,groups:group === "total" ? [] : [{key:"a",label:group === "model" ? "claude-opus-4-1" : "CrossAgents",cached_input,new_input,output,cost_usd:days.reduce((a,d)=>a+(d.cost_usd??0),0)}],total:{cached_input,new_input,output,reasoning:Math.round(output/3),sessions:variant === "empty" ? 0 : length*3,turns:variant === "session" ? null : variant === "empty" ? 0 : length*8,max_request:variant === "session" || variant === "empty" ? null : 128000,cost_usd:variant === "empty" ? null : days.reduce((a,d)=>a+(d.cost_usd??0),0)},previous_total:range === "all" ? null : (cached_input+new_input+output)/1.44,unpriced_models:variant === "issues" ? ["unknown-model"] : [],sources:[{id:"claude-max",label:"工作 · Max",provider:"claude"},{id:"codex-plus",label:"个人 · Plus",provider:"codex",...(variant === "issues" ? {error:"无法读取本地日志"} : {})},{id:"cursor-work",label:"Cursor 工作号",provider:"cursor"}],notes:[variant === "session" ? "按会话开始日统计；无法确定单次请求和轮数。" : "按请求日期统计；费用为公开 API 价格估算。"]};
 }

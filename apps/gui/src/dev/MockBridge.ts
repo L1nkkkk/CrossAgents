@@ -18,6 +18,7 @@ import type { PluginInfo } from "@bindings/PluginInfo";
 import type { QuotaResponse } from "@bindings/QuotaResponse";
 import type { ResumeCommandResponse } from "@bindings/ResumeCommandResponse";
 import type { RunDetail } from "@bindings/RunDetail";
+import type { RunHistory } from "@bindings/RunHistory";
 import type { RunTrace } from "@bindings/RunTrace";
 import type { SendMessageRequest } from "@bindings/SendMessageRequest";
 import type { SessionCandidate } from "@bindings/SessionCandidate";
@@ -54,6 +55,9 @@ export type MockState = {
   agents: Agent[];
   agentCommands?: Record<string, AgentCommandsResponse>;
   runs: RunDetail[];
+  /** What ended runs left in their workspaces (`GET /v1/history`), deleted rounds included;
+   * the ended runs still in `runs` are answered for on request, as the hub records them. */
+  history?: RunHistory[];
   /** By agent id. */
   transcripts: Map<string, Transcript>;
   /** Unified diff of each turn that changed files, by message id. */
@@ -137,7 +141,7 @@ export function emptyState(): MockState {
     traces: new Map(),
     questions: [],
     notes: [],
-    quota: { accounts: [], providers: ["claude", "codex"] },
+    quota: { accounts: [], providers: ["claude", "codex", "codebuddy", "cursor"] },
     usage: {},
     plugins: [],
   };
@@ -423,9 +427,16 @@ export class MockBridge implements CrossAgentsBridge {
         }
         break;
       }
-      case "run.deleted":
+      case "run.deleted": {
+        // Its record stays, marked as a run that is gone (as the hub's store does).
+        const detail = s.runs.find((d) => d.run.id === e.data.run_id);
+        const record = historyOf(s).find((h) => h.run_id === e.data.run_id) ?? (detail && runHistory(s, detail));
+        if (record) {
+          s.history = [...(s.history ?? []).filter((h) => h.run_id !== record.run_id), { ...record, deleted: true }];
+        }
         s.runs = s.runs.filter((d) => d.run.id !== e.data.run_id);
         break;
+      }
       case "human.asked":
         s.questions.push(e.data.item);
         break;
@@ -573,6 +584,10 @@ export class MockBridge implements CrossAgentsBridge {
         return file ? json(200, { id: m[2], mime: file.mime, size: file.data.length, data: file.data }) : notFound("attachment");
       }
       if (p === "/v1/runs") return json(200, { runs: s.runs.map((d) => d.run) });
+      if (p === "/v1/history") {
+        const repo = url.searchParams.get("repo");
+        return json(200, { history: historyOf(s).filter((h) => !repo || h.repo === repo) });
+      }
       if ((m = p.match(/^\/v1\/runs\/([^/]+)$/))) {
         const d = s.runs.find((x) => x.run.id === m![1]);
         return d ? json(200, d) : notFound("run");
@@ -825,6 +840,7 @@ export class MockBridge implements CrossAgentsBridge {
         return json(m[2] === "answer" ? 200 : 204, q);
       }
       if (p === "/v1/repos/init") return json(200, body);
+      if (p === "/v1/plugins/refresh") return this.refreshClis();
       if ((m = p.match(/^\/v1\/plugins\/([^/]+)\/(install|upgrade)$/)))
         return this.installCli(decodeURIComponent(m[1]), m[2] as "install" | "upgrade");
       if ((m = p.match(/^\/v1\/plugins\/([^/]+)\/models$/))) {
@@ -998,11 +1014,33 @@ export class MockBridge implements CrossAgentsBridge {
     return json(200, task);
   }
 
+  /** Looking for the CLIs again: `202` at once, then each row's version is probed and the
+   * event stream says the row changed, as the hub does (docs/DESIGN.md §9.3). */
+  private refreshClis(): HubResponse {
+    for (const plugin of this.state.plugins) {
+      if (!plugin.cli) continue;
+      plugin.cli.probing = true;
+      this.timers.push(
+        setTimeout(() => {
+          if (!plugin.cli) return;
+          plugin.cli.probing = false;
+          this.emit({ type: "plugin.changed", data: { name: plugin.name } });
+        }, 700),
+      );
+    }
+    return json(202);
+  }
+
   /** Like the hub: the description's command runs, and the event stream says how it went. */
   private installCli(name: string, action: "install" | "upgrade"): HubResponse {
     const plugin = this.state.plugins.find((p) => p.name === name);
     const cli = plugin?.cli;
     if (!plugin || !cli) return notFound("plugin");
+    // Like the hub's 409 (`crates/hub/src/install.rs` `claim`): one job per plugin at a time.
+    if (cli.installing) {
+      const running = cli.installing === "upgrade" ? "upgraded" : "installed";
+      return json(409, { error: { code: "conflict", message: `${name} is already being ${running}; wait for it to finish` } });
+    }
     const argv = action === "install" ? cli.install_command : cli.upgrade_command;
     if (!argv?.length) return json(409, { error: { code: "conflict", message: `${name} cannot be ${action}ed here` } });
     const mode = this.state.install ?? "ok";
@@ -1012,6 +1050,9 @@ export class MockBridge implements CrossAgentsBridge {
         : mode === "missing"
           ? [`$ ${argv.join(" ")}`, `installed ${name} into a directory the hub does not look in`]
           : [`$ ${argv.join(" ")}`, "added 1 package in 3s", `${name} ${action === "install" ? "installed" : "upgraded"}`];
+    // What `GET /v1/plugins` reports while it runs; the hub keeps this in memory only, and so
+    // does the mock (a scenario starting fresh has nothing running).
+    cli.installing = action;
     this.emit({ type: "cli.install.started", data: { plugin: name, action, argv, described_by: cli.described_by } });
     lines.forEach((line, i) =>
       this.timers.push(
@@ -1032,6 +1073,7 @@ export class MockBridge implements CrossAgentsBridge {
     this.timers.push(
       setTimeout(
         () => {
+          delete cli.installing;
           if (ok) {
             cli.installed = true;
             cli.version = action === "install" ? "1.0.6" : "0.159.0";
@@ -1089,6 +1131,10 @@ export class MockBridge implements CrossAgentsBridge {
       copied.status = "stopped";
       this.emit({ type: "agent.updated", data: { agent: copied } });
     }
+    // What it did stays in the workspace's history, as a run that is gone (crates/store-sqlite
+    // `delete_run`). Recorded before the run leaves the state, so its round is still readable.
+    const record = historyOf(s).find((h) => h.run_id === run.id) ?? runHistory(s, d);
+    s.history = [...(s.history ?? []).filter((h) => h.run_id !== run.id), { ...record, deleted: true }];
     s.runs = s.runs.filter((x) => x.run.id !== run.id);
     this.emit({ type: "run.deleted", data: { run_id: run.id } });
     return json(200, {
@@ -1103,3 +1149,49 @@ export class MockBridge implements CrossAgentsBridge {
   static withDiff(s: MockState, messageId: string, diff: string | undefined) {
     if (diff && turnStat(diff)) s.diffs.set(messageId, diff);
   }}
+
+/** The end states whose runs are recorded in their workspace's history. */
+const HISTORY_STATUSES = ["completed", "failed", "cancelled"];
+
+/**
+ * What runs left in their workspaces: the records a scenario wrote (`state.history`, where a
+ * deleted round lives) plus one for each ended run still in `state.runs` — the hub writes that
+ * record when the run ends, so the mock derives it the same way. Newest first.
+ */
+function historyOf(s: MockState): RunHistory[] {
+  const recorded = s.history ?? [];
+  const seen = new Set(recorded.map((h) => h.run_id));
+  const live = s.runs
+    .filter((d) => HISTORY_STATUSES.includes(d.run.status) && !seen.has(d.run.id))
+    .map((d) => runHistory(s, d));
+  return [...recorded, ...live].sort((a, b) => (b.ended_at ?? b.created_at).localeCompare(a.ended_at ?? a.created_at));
+}
+
+/** A run as its workspace's history keeps it (crates/orchestrator/src/history.rs): agents by
+ * name and model, so the record still reads when they are gone. */
+function runHistory(s: MockState, detail: RunDetail): RunHistory {
+  const run = detail.run;
+  return {
+    run_id: run.id,
+    work_id: run.work_id,
+    repo: run.repo,
+    title: run.title,
+    request: run.request,
+    status: run.status,
+    summary: run.summary,
+    note: run.note,
+    base_branch: run.base_branch,
+    branch: run.branch,
+    landed: run.landed,
+    tasks: detail.tasks.map((task) => {
+      const worker = s.agents.find((a) => a.id === (task.assignee ?? task.worker_template));
+      return { key: task.key, title: task.title, assignee: worker?.name ?? null, model: worker?.model ?? null, status: task.status };
+    }),
+    merged_commits: detail.tasks.flatMap((task) =>
+      task.status === "merged" && task.report.verified_sha ? [task.report.verified_sha] : [],
+    ),
+    created_at: run.created_at,
+    ended_at: run.updated_at,
+    deleted: false,
+  };
+}

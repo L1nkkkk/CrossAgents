@@ -214,7 +214,9 @@ export function OneLine({
   const label = open ? "收起详情" : "展开详情";
   const words = (
     <>
-      <span className="oneline-title">{title}</span>
+      <span className="oneline-title" title={title}>
+        {title}
+      </span>
       {summary && <span className="oneline-summary">{summary}</span>}
     </>
   );

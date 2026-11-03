@@ -29,6 +29,7 @@ export const plugins = (): PluginInfo[] => [
     efforts: ["low", "medium", "high", "xhigh", "max"],
     cli: {
       installed: true,
+      probing: false,
       path: "C:/Users/me/AppData/Local/Claude-Data/Claude/claude-code/2.1.304/build/claude.exe",
       source: "bundled",
       version: "2.1.304",
@@ -51,6 +52,7 @@ export const plugins = (): PluginInfo[] => [
     efforts: ["low", "medium", "high"],
     cli: {
       installed: true,
+      probing: false,
       path: "C:/Users/me/AppData/Local/Programs/nodejs/node-v24.21.0-win-x64/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe",
       source: "path",
       install_hint: "npm install -g @openai/codex",
@@ -74,6 +76,7 @@ export const plugins = (): PluginInfo[] => [
     efforts: ["minimal", "low", "medium", "high", "xhigh", "max"],
     cli: {
       installed: false,
+      probing: false,
       install_hint: "npm install -g @tencent-ai/codebuddy-code",
       docs: "https://www.codebuddy.ai/",
       install_command: ["npm", "install", "-g", "@tencent-ai/codebuddy-code"],
@@ -94,6 +97,7 @@ export const plugins = (): PluginInfo[] => [
     efforts: ["low", "medium", "high", "xhigh", "max"],
     cli: {
       installed: true,
+      probing: false,
       path: "C:/Users/me/AppData/Roaming/npm/with-cli.cmd",
       source: "path",
       version: "0.31.0",

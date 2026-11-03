@@ -63,7 +63,7 @@ fn piped_output_ends_with_the_hub_while_agents_keep_running() {
     drain(hub.stdout.take().unwrap(), done_tx.clone(), "stdout");
     drain(hub.stderr.take().unwrap(), done_tx, "stderr");
 
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + common::wait_limit();
     while !home.path().join("hub.json").exists() {
         assert!(Instant::now() < deadline, "the hub did not start");
         std::thread::sleep(Duration::from_millis(100));
@@ -90,7 +90,7 @@ fn piped_output_ends_with_the_hub_while_agents_keep_running() {
     assert_eq!(crossagents_drivers::host::records(&runtimes).len(), 1);
 
     cli(home.path(), &["hub", "stop"]);
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + common::wait_limit();
     while hub.try_wait().unwrap().is_none() {
         assert!(Instant::now() < deadline, "the hub did not exit");
         std::thread::sleep(Duration::from_millis(100));
@@ -100,7 +100,7 @@ fn piped_output_ends_with_the_hub_while_agents_keep_running() {
     let records = crossagents_drivers::host::records(&runtimes);
     assert_eq!(records.len(), 1, "the agent's host keeps running");
     let ended: Vec<_> = (0..2)
-        .map_while(|_| done.recv_timeout(Duration::from_secs(10)).ok())
+        .map_while(|_| done.recv_timeout(common::wait_limit()).ok())
         .collect();
 
     for record in &records {

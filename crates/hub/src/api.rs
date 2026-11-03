@@ -27,13 +27,14 @@ use crossagents_api_types::{
     DeleteRunResponse, DiffSide, ErrorCode, FileContentResponse, FileEntry, FileKind,
     FileTreeResponse, FinishRequest, GraphCommit, GraphRef, GraphRefKind, HealthResponse, HubInfo,
     ImageContent, InitRepoRequest, LandRequest, ListAccountsResponse, ListAgentsResponse,
-    ListAvatarsResponse, ListNotesResponse, ListPluginsResponse, ListQuestionsResponse,
-    ListRunsResponse, ListToolsResponse, ListWorksResponse, LoginStarted, PluginInfo,
-    QuotaResponse, RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse,
-    ResolvedPath, RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
-    SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript,
-    TurnDiffResponse, UpdateRunPolicyRequest, UploadAvatarsRequest, UploadAvatarsResponse,
-    UsageGroup, UsageResponse, UsageSeriesGroup, UsageSeriesRange, UsageSeriesResponse, WorkDetail,
+    ListAvatarsResponse, ListHistoryResponse, ListNotesResponse, ListPluginsResponse,
+    ListQuestionsResponse, ListRunsResponse, ListToolsResponse, ListWorksResponse, LoginStarted,
+    PluginInfo, QuotaResponse, RejectRunRequest, RenameAgentRequest, ResolvePathsRequest,
+    ResolvePathsResponse, ResolvedPath, RunDetail, RunTrace, SendMessageRequest,
+    SendMessageResponse, SetModelRequest, SetPluginModelsRequest, SetTopicRequest,
+    TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse, UpdateRunPolicyRequest,
+    UploadAvatarsRequest, UploadAvatarsResponse, UsageGroup, UsageResponse, UsageSeriesGroup,
+    UsageSeriesRange, UsageSeriesResponse, WorkDetail,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, Attachment,
@@ -87,6 +88,9 @@ pub struct AppState {
     pub url: String,
     /// Runs the description's install and upgrade commands, one job per plugin at a time.
     pub installer: Arc<crate::install::Installer>,
+    /// Looks for the CLIs again and asks their versions, in the background; one probe per
+    /// plugin at a time.
+    pub refresher: Arc<crate::refresh::Refresher>,
     /// The person's terminals on this machine.
     pub terminals: Arc<crate::terminal::Terminals>,
 }
@@ -142,6 +146,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/avatars/{id}", get(get_avatar).delete(delete_avatar))
         .route("/v1/notes", get(list_notes))
         .route("/v1/plugins", get(list_plugins))
+        .route("/v1/plugins/refresh", post(refresh_plugins))
         .route("/v1/plugins/{name}/models", post(set_plugin_models))
         .route("/v1/plugins/{name}/install", post(install_plugin))
         .route("/v1/plugins/{name}/upgrade", post(upgrade_plugin))
@@ -163,6 +168,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/works", get(list_works).post(create_work))
         .route("/v1/works/{id}", get(get_work))
         .route("/v1/works/{id}/runs", post(create_work_run))
+        .route("/v1/history", get(list_history))
         .route("/v1/runs", get(list_runs).post(create_run))
         .route("/v1/runs/{key}", get(get_run).delete(delete_run))
         .route("/v1/runs/{key}/approve", post(approve_run))
@@ -1160,8 +1166,16 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
     } else {
         Vec::new()
     };
+    // What this plugin's install or upgrade is doing now, if one is running (in memory only:
+    // after a restart nothing is, so this is `None`).
+    let installing = state
+        .installer
+        .installing(name)
+        .await
+        .map(|action| action.as_str().to_owned());
     let cli = d.cli_status().await.map(|status| CliInfo {
         installed: status.located.is_some(),
+        probing: status.probing,
         path: status
             .located
             .as_ref()
@@ -1180,6 +1194,7 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
         install_command: status.install_command,
         upgrade_command: status.upgrade_command,
         can_upgrade: status.can_upgrade,
+        installing,
         described_by: status.described_by,
     });
     PluginInfo {
@@ -1218,6 +1233,36 @@ async fn set_plugin_models(
         })?;
     state.models.set(&name, req.shown)?;
     Ok(Json(plugin_info(&state, driver.as_ref()).await))
+}
+
+/// `POST /v1/plugins/refresh`: looks for the CLIs again and asks each its version, in the
+/// background (docs/DESIGN.md §9.3). `202` at once, never waiting for a subprocess; every
+/// probe that ends publishes `plugin.changed`, so a client re-reads `GET /v1/plugins` and
+/// its rows turn into what the machine has now. `?plugin=<name>` looks for just that one.
+///
+/// Admin: it runs the CLIs' version commands here, as install and upgrade do.
+async fn refresh_plugins(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<RefreshPluginsQuery>,
+) -> ApiResult<StatusCode> {
+    let registry = state.runtime.plugins();
+    let drivers = match &query.plugin {
+        Some(name) => vec![registry.get(name).ok_or_else(|| CoreError::NotFound {
+            kind: "plugin",
+            id: name.clone(),
+        })?],
+        None => registry.defaults(),
+    };
+    for driver in drivers {
+        state.refresher.start(state.bus.clone(), driver).await;
+    }
+    Ok(StatusCode::ACCEPTED)
+}
+
+#[derive(Debug, Deserialize)]
+struct RefreshPluginsQuery {
+    /// One plugin to look for again; every plugin when absent.
+    plugin: Option<String>,
 }
 
 /// `POST /v1/plugins/{name}/install`: runs the description's install command on this machine
@@ -1351,19 +1396,9 @@ async fn create_work(
         return Err(CoreError::Conflict("the work title is empty".into()).into());
     }
     let lead = state.store().get_agent(&AgentKey::parse(&req.lead)).await?;
-    let now = Utc::now();
-    let work = crossagents_core::Work {
-        id: crossagents_core::WorkId::new(),
-        title: req.title,
-        repo: lead.home().to_path_buf(),
-        lead: lead.id,
-        created_at: now,
-        updated_at: now,
-    };
-    state.store().insert_work(&work).await?;
-    state
-        .bus
-        .publish(EventKind::WorkCreated { work: work.clone() })
+    let work = state
+        .orchestrator
+        .create_work_group(&req.title, lead.home().to_path_buf(), lead.id)
         .await?;
     Ok((StatusCode::CREATED, Json(work)))
 }
@@ -1389,7 +1424,42 @@ async fn get_work(
         .into_iter()
         .filter(|r| r.work_id == Some(id))
         .collect();
-    Ok(Json(WorkDetail { work, runs }))
+    // Its rounds that ended, including the ones since deleted: what the group did outlives
+    // the runs in it.
+    let history = state
+        .store()
+        .list_run_history(None)
+        .await?
+        .into_iter()
+        .filter(|entry| entry.work_id == Some(id))
+        .collect();
+    Ok(Json(WorkDetail {
+        work,
+        runs,
+        history,
+    }))
+}
+
+/// `GET /v1/history?repo=<path>`: what runs left in a workspace, the deleted ones too. Without
+/// `repo`, every workspace's.
+#[derive(Debug, Deserialize)]
+struct HistoryQuery {
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+async fn list_history(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<HistoryQuery>,
+) -> ApiResult<Json<ListHistoryResponse>> {
+    let repo = q
+        .repo
+        .map(|repo| repo.trim().to_owned())
+        .filter(|repo| !repo.is_empty())
+        .map(PathBuf::from);
+    Ok(Json(ListHistoryResponse {
+        history: state.store().list_run_history(repo.as_deref()).await?,
+    }))
 }
 
 async fn create_work_run(
@@ -1457,10 +1527,12 @@ async fn create_run(
             policy: req.policy.unwrap_or_default(),
         },
     };
-    let run = state
+    let mut run = state
         .orchestrator
         .create_run_with_choice(new, req.fresh, req.restore)
         .await?;
+    // Every run belongs to a work group: its next round continues from this one.
+    state.orchestrator.work_of_run(&mut run).await?;
     Ok((StatusCode::CREATED, Json(run)))
 }
 

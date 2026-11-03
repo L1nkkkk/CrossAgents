@@ -1186,6 +1186,164 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod login_tests {
+    use super::*;
+    use crossagents_core::{LoginCommand, ModelInfo, SessionUsage};
+    use crossagents_store_sqlite::SqliteStore;
+
+    /// A provider whose login tool prints a page and stops, as `agent login` does once the
+    /// page is done. `logged_in` is what its account reports afterwards.
+    struct PrintLogin {
+        logged_in: bool,
+        url: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl AccountProvider for PrintLogin {
+        fn name(&self) -> &str {
+            "cursor"
+        }
+        fn default_home(&self) -> Option<PathBuf> {
+            None
+        }
+        async fn status(&self, _account: &Account) -> AccountStatus {
+            AccountStatus {
+                logged_in: self.logged_in,
+                auth_mode: None,
+                email: None,
+                plan: None,
+                subscription_until: None,
+                rate_limits: Vec::new(),
+                limit_reached: false,
+                credits: None,
+                limits: Vec::new(),
+                reset_credits: Vec::new(),
+                source: Some(DataSource::Live),
+                as_of: Some(Utc::now()),
+                note: None,
+            }
+        }
+        async fn sessions(&self, _account: &Account) -> Result<Vec<SessionUsage>, CoreError> {
+            Ok(Vec::new())
+        }
+        async fn models(&self, _account: &Account) -> Vec<ModelInfo> {
+            Vec::new()
+        }
+        fn login_command(&self, _account: &Account) -> LoginCommand {
+            // `echo` on either system: the tool writes the link to stdout and exits.
+            let command = if cfg!(windows) {
+                vec![
+                    "cmd.exe".into(),
+                    "/c".into(),
+                    format!("echo Open this page: {}", self.url),
+                ]
+            } else {
+                vec![
+                    "sh".into(),
+                    "-c".into(),
+                    format!("echo 'Open this page: {}'", self.url),
+                ]
+            };
+            LoginCommand {
+                command,
+                env: BTreeMap::new(),
+                env_remove: Vec::new(),
+                serves: None,
+            }
+        }
+        fn agent_env(&self, _account: &Account) -> Vec<(String, String)> {
+            Vec::new()
+        }
+    }
+
+    async fn wait_for_login(
+        events: &mut tokio::sync::broadcast::Receiver<Event>,
+    ) -> (Option<String>, Option<bool>) {
+        let mut url = None;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let event = tokio::time::timeout_at(deadline, events.recv())
+                .await
+                .expect("the login should finish")
+                .expect("the bus should stay up");
+            match event.kind {
+                EventKind::AccountLoginPending { url: pending, .. } => url = pending,
+                EventKind::AccountLoginFinished { ok, message, .. } => {
+                    if !ok {
+                        eprintln!("login failed: {message:?}");
+                    }
+                    return (url, Some(ok));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    async fn accounts_with(
+        provider: PrintLogin,
+    ) -> (Arc<Accounts>, Arc<EventBus>, tempfile::TempDir, Account) {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().await.unwrap());
+        let bus = Arc::new(EventBus::new(store.clone()));
+        let accounts = Arc::new(Accounts::new(
+            bus.clone(),
+            vec![Arc::new(provider)],
+            dir.path().join("accounts"),
+        ));
+        let account = Account {
+            codebuddy_site: None,
+            id: "cursor-work".into(),
+            provider: "cursor".into(),
+            label: "work".into(),
+            home: dir.path().join("accounts/cursor-work"),
+            created_at: Utc::now(),
+        };
+        store.insert_account(&account).await.unwrap();
+        (accounts, bus, dir, account)
+    }
+
+    /// `agent login` prints its page on stdout and keeps running; the hub hands the link to
+    /// the GUI at once and says how the login ended when the tool stops.
+    #[tokio::test]
+    async fn a_login_prints_its_page_and_finishes() {
+        let url = "https://cursor.com/loginDeepControl?challenge=abc";
+        let (accounts, bus, _dir, account) = accounts_with(PrintLogin {
+            logged_in: true,
+            url,
+        })
+        .await;
+        let mut events = bus.subscribe();
+        let started = accounts.login(&account.id).await.unwrap();
+        assert_eq!(started.url.as_deref(), Some(url));
+        assert!(started.manual.is_none());
+        assert!(started.command.contains("cmd.exe") || started.command.contains("sh"));
+        assert_eq!(
+            wait_for_login(&mut events).await,
+            (Some(url.to_owned()), Some(true))
+        );
+    }
+
+    /// The same tool that ends logged out ends the login as a failure, with what it said.
+    #[tokio::test]
+    async fn a_login_that_ends_logged_out_fails() {
+        let (accounts, bus, _dir, account) = accounts_with(PrintLogin {
+            logged_in: false,
+            url: "https://cursor.com/loginDeepControl?challenge=def",
+        })
+        .await;
+        let mut events = bus.subscribe();
+        accounts.login(&account.id).await.unwrap();
+        assert_eq!(
+            wait_for_login(&mut events).await,
+            (
+                Some("https://cursor.com/loginDeepControl?challenge=def".to_owned()),
+                Some(false)
+            )
+        );
+    }
+}
+
 /// Whether an account has quota left.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Health {
