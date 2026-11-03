@@ -52,8 +52,10 @@ import {
   resetBody,
   type ContinuationField,
 } from "../lib/continuation";
-import { accountOf, prettyModel } from "../lib/models";
-import { modelPickValue, parseModelPick, workerAgentRequest, workerModelGroups, workerModelLabel, workerTarget } from "../lib/workerModels";
+import { accountOf, effortOf, prettyModel } from "../lib/models";
+import { modelPickValue, parseModelPick, reasoningWorkerRequest, workerAgentRequest, workerModelGroups, workerModelLabel, workerTarget, type ReasoningChoice } from "../lib/workerModels";
+import { ReasoningPicks } from "../reasoningPicks";
+import { cursorMode, reasoningModels } from "../lib/reasoning";
 import { StateWord, TaskChanges } from "../parts";
 import { RunChanges, TaskReview } from "../review";
 import { RunTraceView } from "../trace";
@@ -839,6 +841,7 @@ export function usePlanApproval(run: Run, busy: boolean) {
   // Per task: "" is the run's default worker, `agent:<id>` a teammate, `model:<plugin>/<model>`
   // a new worker on the model's own plugin and a login of it.
   const [picks, setPicks] = useState<Record<string, string>>({});
+  const [reasoning, setReasoning] = useState<Record<string, ReasoningChoice>>({});
   const [maxUsd, setMaxUsd] = useState(policy.budget.max_usd?.toString() ?? "");
   const [maxMinutes, setMaxMinutes] = useState(policy.budget.max_minutes?.toString() ?? "");
   const [maxTokens, setMaxTokens] = useState(policy.budget.max_tokens != null ? String(policy.budget.max_tokens / 1000) : "");
@@ -865,7 +868,22 @@ export function usePlanApproval(run: Run, busy: boolean) {
   const pickOf = (task: PlannedTask) => picks[task.key] ?? planned(task);
 
   /** The worker a pick stands for: a teammate, or a new agent on the model's own plugin. */
-  async function workerOf(pick: string, made: Map<string, string>): Promise<string | null> {
+  async function workerOf(task: PlannedTask, made: Map<string, string>): Promise<string | null> {
+    const pick = pickOf(task);
+    const override = task.fresh || parseModelPick(pick) ? reasoning[task.key] : undefined;
+    if (override) {
+      const parsed = parseModelPick(pick);
+      const template = pick.startsWith("agent:") ? everyone.find((a) => a.id === pick.slice(6)) : !pick ? fallback : undefined;
+      const base = template ?? (parsed ? workerAgentRequest(workerTarget(parsed.plugin, parsed.model, accounts, leadRef), run.repo) : undefined);
+      if (!base) throw new Error("无法确定任务执行者，请重新选择");
+      const body = reasoningWorkerRequest(base, run.repo, override);
+      const key = JSON.stringify([pick, body]);
+      const known = made.get(key);
+      if (known) return known;
+      const id = (await api.createAgent(body)).id;
+      made.set(key, id);
+      return id;
+    }
     if (!pick) return null;
     if (pick.startsWith("agent:")) return pick.slice("agent:".length);
     const parsed = parseModelPick(pick);
@@ -886,7 +904,7 @@ export function usePlanApproval(run: Run, busy: boolean) {
   async function approve(): Promise<RunDetail> {
     const made = new Map<string, string>();
     const assignees: Record<string, string | null> = {};
-    for (const task of run.plan) assignees[task.key] = await workerOf(pickOf(task), made);
+    for (const task of run.plan) assignees[task.key] = await workerOf(task, made);
     const settled: RunPolicy = {
       ...presetPolicy(preset, policy),
       budget: {
@@ -916,7 +934,12 @@ export function usePlanApproval(run: Run, busy: boolean) {
 
   const pick = (task: PlannedTask) => {
     const value = pickOf(task);
-    const set = (v: string) => setPicks({ ...picks, [task.key]: v });
+    const selectedModel = parseModelPick(value);
+    const offered = new Set((plugins.data ?? []).flatMap((p) => reasoningModels(p.name, p.models, selectedModel?.plugin === p.name ? selectedModel.model : undefined).map((m) => modelPickValue(p.name, m))));
+    const set = (v: string) => {
+      setPicks({ ...picks, [task.key]: v });
+      setReasoning((prev) => { const next = { ...prev }; delete next[task.key]; return next; });
+    };
     const items: MenuItem[] = [
       { kind: "item", key: "auto", label: autoLabel, sub: "默认 worker", subDir: "ltr", icon: fallback ? <Avatar agent={fallback} size={18} /> : undefined, on: value === "", onPick: () => set("") },
       ...(teammates.length ? [{ kind: "header", key: "h-team", label: "队友" } satisfies MenuItem] : []),
@@ -934,12 +957,12 @@ export function usePlanApproval(run: Run, busy: boolean) {
       ),
       ...workerGroups.flatMap((group): MenuItem[] => [
         { kind: "header", key: `h-${group.key}`, label: t("plan.newWorkerFamily", { family: group.label }) },
-        ...group.options.map((option): MenuItem => {
+        ...group.options.filter((o) => offered.has(modelPickValue(o.plugin, o.model))).map((option): MenuItem => {
           const v = modelPickValue(option.plugin, option.model);
           return {
             kind: "item",
             key: v,
-            label: workerModelLabel(option, workerOptions, accounts),
+            label: option.plugin === "cursor" ? `${prettyModel(cursorMode(option.model).base)} · Cursor` : workerModelLabel(option, workerOptions, accounts),
             sub: option.blocked ? t(option.blocked.key) : option.model,
             ...(option.blocked ? { subDir: "ltr" as const } : {}),
             icon: <VendorMark plugin={option.plugin} size={14} />,
@@ -954,6 +977,9 @@ export function usePlanApproval(run: Run, busy: boolean) {
     const chosen = value.startsWith("agent:") ? everyone.find((a) => a.id === value.slice("agent:".length)) : undefined;
     const model = parseModelPick(value);
     const option = model && workerOptions.find((o) => o.plugin === model.plugin && o.model === model.model);
+    const template = chosen ?? (!value ? fallback : undefined);
+    const plugin = plugins.data?.find((p) => p.name === (model?.plugin ?? template?.plugin));
+    const setting = reasoning[task.key] ?? { model: model?.model ?? template?.model ?? null, effort: template ? effortOf(template.config) ?? "" : "" };
     const icon = chosen ? (
       <Avatar agent={chosen} size={16} />
     ) : model ? (
@@ -961,7 +987,7 @@ export function usePlanApproval(run: Run, busy: boolean) {
     ) : fallback ? (
       <Avatar agent={fallback} size={16} />
     ) : undefined;
-    const label = chosen ? displayName(chosen) : model ? (option ? workerModelLabel(option, workerOptions, accounts) : prettyModel(model.model)) : autoLabel;
+    const label = chosen ? displayName(chosen) : model ? model.plugin === "cursor" ? `${prettyModel(cursorMode(model.model).base)} · Cursor` : (option ? workerModelLabel(option, workerOptions, accounts) : prettyModel(model.model)) : autoLabel;
     if (busy)
       return (
         <span className="who-pick">
@@ -974,6 +1000,8 @@ export function usePlanApproval(run: Run, busy: boolean) {
     return (
       <span className="who-pick" data-task={task.key}>
         <ChipMenu icon={icon} label={label} title="执行者" items={items} align="right" searchable />
+        {task.fresh || model ? <ReasoningPicks plugin={plugin} model={setting.model} effort={setting.effort} onChange={(model, effort) => setReasoning({ ...reasoning, [task.key]: { model, effort } })} />
+          : <span className="small muted" title="该任务复用原会话及其推理设置，可在原会话的输入框旁调整">沿用会话推理设置</span>}
       </span>
     );
   };

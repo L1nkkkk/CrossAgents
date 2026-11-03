@@ -5,7 +5,7 @@ import type { AccountStatus } from "@bindings/AccountStatus";
 import type { Capabilities } from "@bindings/Capabilities";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import { hasKey, t } from "./i18n.ts";
-import { modelPickValue, parseModelPick, pluginBlock, workerAgentRequest, workerModelGroups, workerModelLabel, workerTarget } from "./workerModels.ts";
+import { modelPickValue, parseModelPick, pluginBlock, reasoningWorkerRequest, workerAgentRequest, workerModelGroups, workerModelLabel, workerTarget } from "./workerModels.ts";
 
 const plugin = (name: string, models: string[]): PluginInfo => ({
   name,
@@ -23,6 +23,24 @@ const account = (id: string, provider: string, logged_in: boolean): AccountQuota
   status: { logged_in } as AccountStatus,
   models: [],
   agents: [],
+});
+
+test("task reasoning overrides are isolated and preserve login, driver and persona", () => {
+  const template = workerAgentRequest({ plugin: "codex", model: "gpt-6.1-sol", account: "work" }, "/repo");
+  template.driver = "codex-native";
+  template.config = { account: "work", effort: "high", setting_sources: ["project"] };
+  template.profile.persona = "Review carefully";
+  const low = reasoningWorkerRequest(template, "/task", { model: template.model, effort: "low" });
+  const max = reasoningWorkerRequest(template, "/task", { model: template.model, effort: "max" });
+  assert.deepEqual(low.config, { account: "work", effort: "low", setting_sources: ["project"] });
+  assert.deepEqual(max.config, { account: "work", effort: "max", setting_sources: ["project"] });
+  assert.deepEqual(template.config, { account: "work", effort: "high", setting_sources: ["project"] });
+  assert.equal(low.driver, "codex-native");
+  assert.equal(low.profile.persona, "Review carefully");
+  assert.deepEqual(reasoningWorkerRequest(template, "/task", { model: template.model, effort: "" }).config, { account: "work", setting_sources: ["project"] });
+  const cursor = reasoningWorkerRequest({ ...template, plugin: "cursor" }, "/task", { model: "claude-opus-5-thinking-max", effort: "max" });
+  assert.equal(cursor.model, "claude-opus-5-thinking-max");
+  assert.deepEqual(cursor.config, { account: "work", setting_sources: ["project"] });
 });
 
 test("every installed plugin's models are listed, grouped by family", () => {

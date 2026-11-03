@@ -10,7 +10,10 @@ import { Avatar, BrandMark, ErrorBox, Field, Icon, VendorMark, agentTitle, displ
 import { useHubData } from "../hub";
 import { t } from "../lib/i18n";
 import { modelDisplay } from "../lib/modelDisplay";
-import { effortLabel, effortLevels, effortOf, vendorLabel, workerModelFor, accountOf } from "../lib/models";
+import { cursorMode, reasoningModels } from "../lib/reasoning";
+import { ReasoningPicks } from "../reasoningPicks";
+import { reasoningWorkerRequest, type ReasoningChoice } from "../lib/workerModels";
+import { effortLabel, effortLevels, effortOf, prettyModel, vendorLabel, workerModelFor, accountOf } from "../lib/models";
 import { chatBody, newChatRequest, runSessionFields, sessionStateKey, usabilityOf } from "../lib/sessionChoice";
 import * as draft from "../lib/draft";
 import { useQuota } from "./Quota";
@@ -122,6 +125,7 @@ export function HomeView() {
   const [draftNote, setDraftNote] = useState<string>();
   const [picked, setPicked] = useState<Lead | undefined>(() => load<Lead | undefined>(LEAD_KEY, undefined, (v) => !!v && typeof v === "object"));
   const [worker, setWorker] = useState("");
+  const [workerReasoning, setWorkerReasoning] = useState<{ key: string; choice: ReasoningChoice }>();
   const [escalate, setEscalate] = useState("");
   const [reviewer, setReviewer] = useState("");
   const [continuation, setContinuation] = useState(false);
@@ -243,6 +247,13 @@ export function HomeView() {
   const effortWanted = effortPick || (mode === "run" && leadAgent ? effortOf(leadAgent.config) ?? "" : "");
   const effortOn = levels.some((l) => l.value === effortWanted) ? effortWanted : "";
   const effort = effortOn || undefined;
+  const activeChoice: Choice | undefined = mode === "chat" ? chatModel : lead?.kind === "model" ? lead : leadAgent?.model ? { plugin: leadAgent.plugin, model: leadAgent.model, account: accountOf(leadAgent) } : undefined;
+  const activePlugin = plugins.data?.find((p) => p.name === activeChoice?.plugin);
+  const workerPlugin = plugins.data?.find((p) => p.name === (chosenWorker?.plugin ?? leadPlugin));
+  const workerModel = chosenWorker?.model ?? workerModelFor(workerPlugin?.models ?? [], leadModel ?? "");
+  const workerKey = JSON.stringify([chosenWorker?.id, workerPlugin?.name, workerModel]);
+  const workerOverride = workerReasoning?.key === workerKey ? workerReasoning.choice : undefined;
+  const workerSetting = workerOverride ?? { model: workerModel, effort: chosenWorker ? effortOf(chosenWorker.config) ?? "" : "" };
 
   /** `agent` on `effort`: switched to it first when it asks for another (none means as it is). */
   async function withEffort(agent: Agent, effort: string | undefined): Promise<Agent> {
@@ -351,7 +362,8 @@ export function HomeView() {
       const models = plugins.data?.find((p) => p.name === planner.plugin)?.models ?? [];
       // Workers run on the lead's login, on the cheaper sibling of its model.
       const workerChoice: Choice = { plugin: planner.plugin, model: workerModelFor(models, planner.model ?? leadModel ?? models[0] ?? ""), account: accountOf(planner) };
-      const workerAgent = chosenWorker ?? (await agentFor("worker", workerChoice, where));
+      const workerTemplate = chosenWorker ?? (await agentFor("worker", workerChoice, where));
+      const workerAgent = workerOverride ? await api.createAgent(reasoningWorkerRequest(workerTemplate, where, workerOverride)) : workerTemplate;
       const run = await api.createRun({
         request: request.trim(),
         title: title.trim() || null,
@@ -462,10 +474,10 @@ export function HomeView() {
       const groups = logins.length > 1 ? logins.map((a) => ({ account: a.account.id, title: `${vendorLabel(p.name)} · ${a.account.label || a.account.id}` })) : [{ account: undefined, title: vendorLabel(p.name) }];
       return groups.flatMap(({ account, title }): MenuItem[] => [
         { kind: "header", key: `h-${p.name}-${account ?? ""}`, label: title },
-        ...modelsFor(p, account).map((m): MenuItem => {
+        ...reasoningModels(p.name, modelsFor(p, account), modelsFor(p, account).find((m) => isOn({ plugin: p.name, model: m, ...(account ? { account } : {}) }))).map((m): MenuItem => {
           const choice: Choice = { plugin: p.name, model: m, ...(account ? { account } : {}) };
           const display = modelDisplay(p.name, m, quota.data?.accounts ?? [], account);
-          return { kind: "item", key: `${p.name}/${account ?? ""}/${m}`, label: display.label, sub: m, searchText: display.description ?? undefined, icon: <VendorMark plugin={p.name} size={14} />, on: isOn(choice), onPick: () => onPick(choice) };
+          return { kind: "item", key: `${p.name}/${account ?? ""}/${m}`, label: p.name === "cursor" ? prettyModel(cursorMode(m).base) : display.label, sub: m, searchText: display.description ?? undefined, icon: <VendorMark plugin={p.name} size={14} />, on: isOn(choice), onPick: () => onPick(choice) };
         }),
       ]);
     });
@@ -531,7 +543,8 @@ export function HomeView() {
   /** "Claude Opus 5.5", plus the login when the vendor has more than one. */
   const choiceLabel = (c: Choice) => {
     const login = accountsOf(c.plugin).length > 1 ? accountLabel(c.account) ?? t("home.defaultLogin") : undefined;
-    return `${vendorLabel(c.plugin)} ${modelDisplay(c.plugin, c.model, quota.data?.accounts ?? [], c.account).label}${login ? ` · ${login}` : ""}`;
+    const label = c.plugin === "cursor" ? prettyModel(cursorMode(c.model).base) : modelDisplay(c.plugin, c.model, quota.data?.accounts ?? [], c.account).label;
+    return `${vendorLabel(c.plugin)} ${label}${login ? ` · ${login}` : ""}`;
   };
 
   const wsLabel = folder ? wsName(folder) : current?.name;
@@ -623,6 +636,12 @@ export function HomeView() {
               />
             )}
             {/* After the model it applies to: the chat's, or the run lead's. */}
+            {!chosenSession && activeChoice && activePlugin?.name === "cursor" && <ReasoningPicks plugin={activePlugin} model={activeChoice.model} onChange={(model) => {
+              if (!model) return;
+              const next = { ...activeChoice, model };
+              if (mode === "chat") { setChatPick(next); save(CHAT_MODEL_KEY, next); }
+              else choose({ kind: "model", ...next });
+            }} />}
             {levels.length > 0 && (
               <ChipMenu
                 icon={<Icon name="brain" size={13} />}
@@ -694,6 +713,7 @@ export function HomeView() {
             <div className="row" style={{ alignItems: "flex-start" }}>
               <Field label={t("home.worker")}>
                 <AgentSelect agents={workers} value={chosenWorker?.name ?? ""} onChange={setWorker} empty={t("home.auto")} />
+                <div className="reasoning-picks"><ReasoningPicks plugin={workerPlugin} model={workerSetting.model} effort={workerSetting.effort} onChange={(model, effort) => setWorkerReasoning({ key: workerKey, choice: { model, effort } })} /></div>
               </Field>
               <Field label={t("home.escalate")}>
                 <AgentSelect agents={workers} value={escalate} onChange={setEscalate} empty={t("home.notUsed")} />
