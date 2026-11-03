@@ -9,6 +9,9 @@ import { Icon, VendorMark } from "./components";
 import { useHubData } from "./hub";
 import { accountOf, effortLabel, effortLevels, effortOf } from "./lib/models";
 import { modelDisplay } from "./lib/modelDisplay";
+import { cursorMode, reasoningModels } from "./lib/reasoning";
+import { prettyModel } from "./lib/models";
+import { ReasoningPicks } from "./reasoningPicks";
 import { useQuota } from "./views/Quota";
 import { ChipMenu, type MenuItem } from "./menu";
 
@@ -30,11 +33,11 @@ export function ModelEffortPicks({ agent }: { agent: Agent }) {
     );
 
   const modelItems: MenuItem[] = [
-    ...(agent.model && !models.includes(agent.model) ? [agent.model] : []).concat(models).map(
+    ...reasoningModels(agent.plugin, (agent.model && !models.includes(agent.model) ? [agent.model] : []).concat(models), agent.model).map(
       (m): MenuItem => ({
         kind: "item",
         key: m,
-        label: display(m).label,
+        label: agent.plugin === "cursor" ? prettyModel(cursorMode(m).base) : display(m).label,
         sub: m,
         searchText: display(m).description ?? undefined,
         icon: <VendorMark plugin={agent.plugin} size={14} />,
@@ -64,12 +67,13 @@ export function ModelEffortPicks({ agent }: { agent: Agent }) {
     <>
       <ChipMenu
         icon={<VendorMark plugin={agent.plugin} size={13} />}
-        label={agent.model ? display(agent.model).label : "插件默认"}
+        label={agent.model ? agent.plugin === "cursor" ? prettyModel(cursorMode(agent.model).base) : display(agent.model).label : "插件默认"}
         title={`模型：${agent.model ?? "插件默认"} · 下一轮起生效`}
         items={modelItems}
         searchable
         up
       />
+      {agent.plugin === "cursor" && <ReasoningPicks plugin={info} model={agent.model} onChange={(model) => void apply(model)} />}
       {levels.length > 0 && (
         <ChipMenu icon={<Icon name="brain" size={13} />} label={label ? `推理 ${label}` : "推理 默认"} title="推理强度" items={effortItems} up />
       )}

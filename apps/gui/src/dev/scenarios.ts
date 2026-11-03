@@ -26,6 +26,43 @@ export type Scenario = {
 };
 
 export const SCENARIOS: Scenario[] = [
+  { key: "cursor-reasoning", label: "Cursor 推理控件", hint: "基础模型与 Thinking / 强度 / Fast", build: () => {
+    const state = usageScene();
+    const cursor: PluginInfo = { ...state.plugins.find((p) => p.name === "codex")!, name: "cursor", driver: "cursor-native", efforts: [],
+      models: ["claude-opus-5-high", "claude-opus-5-thinking-high", "claude-opus-5-thinking-max", "claude-opus-5-thinking-high-fast"], all_models: [] };
+    cursor.all_models = cursor.models;
+    state.plugins = [cursor];
+    state.quota.accounts = [];
+    localStorage.setItem("crossagents.mode", JSON.stringify("chat"));
+    localStorage.setItem("crossagents.chatModel", JSON.stringify({ plugin: "cursor", model: "claude-opus-5-thinking-high" }));
+    return { state, route: "#/", script: [] };
+  } },
+  { key: "plan-reasoning", label: "任务推理设置", hint: "Cursor 模式与逐任务强度", build: () => {
+    const scene = oauthRun("plan");
+    const state = scene.state;
+    const cursor: PluginInfo = { ...state.plugins.find((p) => p.name === "codex")!, name: "cursor", driver: "cursor-native", efforts: [],
+      models: ["claude-opus-5-high", "claude-opus-5-thinking-high", "claude-opus-5-thinking-max", "claude-opus-5-thinking-high-fast"], all_models: [] };
+    cursor.all_models = cursor.models;
+    state.plugins.push(cursor);
+    const worker = state.agents.find((a) => a.name.toLowerCase() === "rex")!;
+    worker.plugin = "cursor";
+    worker.model = "claude-opus-5-high";
+    const originalIds = new Set(state.agents.map((a) => a.id));
+    return { ...scene, script: [
+      { at: 400, act: () => document.querySelector<HTMLButtonElement>('[data-task="a"] button[title^="Cursor 思考模式"]')?.click() },
+      { at: 650, act: () => [...document.querySelectorAll<HTMLButtonElement>(".menu-item")].find((b) => b.querySelector(".menu-label")?.textContent === "Thinking")?.click() },
+      { at: 900, act: () => document.querySelector<HTMLButtonElement>('[data-task="b"] button[title="推理强度"]')?.click() },
+      { at: 1150, act: () => [...document.querySelectorAll<HTMLButtonElement>(".menu-item")].find((b) => b.querySelector(".menu-label")?.textContent === "高")?.click() },
+      { at: 2100, act: () => [...document.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.includes("Approve · 开工"))?.click() },
+      { at: 2600, act: () => {
+        const made = state.agents.filter((a) => !originalIds.has(a.id));
+        if (!made.some((a) => a.plugin === "cursor" && a.model === "claude-opus-5-thinking-high")) throw new Error("Cursor task mode was not saved");
+        if (!made.some((a) => a.plugin === "claude" && a.config && typeof a.config === "object" && !Array.isArray(a.config) && a.config.effort === "high")) throw new Error("native task effort was not saved");
+        if (worker.model !== "claude-opus-5-high") throw new Error("task override mutated the shared worker");
+        console.info("reasoning approval verified: Cursor mode and native effort saved in isolated workers");
+      } },
+    ] };
+  } },
   { key: "model-search", label: "模型搜索", hint: "CLI 别名显示名与平台筛选", build: () => {
     const state = usageScene();
     const claude = state.plugins.find((p) => p.name === "claude")!;

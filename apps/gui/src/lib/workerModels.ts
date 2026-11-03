@@ -3,6 +3,7 @@
 // and to a login of that plugin. Pure, tested in workerModels.test.ts.
 
 import type { AccountQuota } from "@bindings/AccountQuota";
+import type { Agent } from "@bindings/Agent";
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import type { Key } from "./i18n";
@@ -118,5 +119,18 @@ export function workerAgentRequest(target: WorkerTarget, cwd: string): CreateAge
     cwd,
     config: target.account ? { account: target.account } : {},
     profile: { display_name: null, title: "Worker", avatar: null, avatar_image: null, color: null, persona: null },
+  };
+}
+
+export type ReasoningChoice = { model: string | null; effort: string };
+
+/** A task-specific template preserves the worker's persona/config without changing it. */
+export function reasoningWorkerRequest(template: Agent | CreateAgentRequest, cwd: string, choice: ReasoningChoice): CreateAgentRequest {
+  const config = template.config && typeof template.config === "object" && !Array.isArray(template.config) ? { ...template.config } : {};
+  if (choice.effort && template.plugin !== "cursor") config.effort = choice.effort;
+  else delete config.effort;
+  return {
+    plugin: template.plugin, driver: template.driver, model: choice.model, role: "worker", cwd, config,
+    profile: { ...template.profile, display_name: null },
   };
 }

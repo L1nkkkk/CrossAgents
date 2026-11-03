@@ -134,7 +134,7 @@ export function chatTitle(text: string, max = 24): string {
 }
 
 /** Names for the effort levels CLIs use; any other level shows as itself. */
-const EFFORT_LABELS: Record<string, string> = { minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "超高", max: "最高" };
+const EFFORT_LABELS: Record<string, string> = { none: "不推理", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "超高", max: "最高" };
 
 /** "high" → "高"; a level no CLI here uses yet keeps its own name. */
 export function effortLabel(value: string): string {
