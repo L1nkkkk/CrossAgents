@@ -729,6 +729,9 @@ a.who-chip:hover { text-decoration: none; background: var(--selected); }
 .menu.left { left: 0; }
 .menu.right { right: 0; }
 .menu.up { top: auto; bottom: calc(100% + 6px); }
+.chip-menu > .menu { overflow: hidden; }
+.menu-options { min-height: 0; overflow-y: auto; }
+.menu-search { flex-shrink: 0; width: 100%; box-sizing: border-box; padding: 8px; margin-bottom: 4px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; }
 .menu-head { font-size: 11px; color: var(--muted); padding: 8px 8px 3px; }
 .menu-item {
   display: flex; align-items: center; gap: 9px; width: 100%; padding: 6px 8px; border: none; border-radius: 6px;

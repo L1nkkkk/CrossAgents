@@ -7,12 +7,16 @@ import type { Agent } from "@bindings/Agent";
 import { api, errorText } from "./api";
 import { Icon, VendorMark } from "./components";
 import { useHubData } from "./hub";
-import { effortLabel, effortLevels, effortOf, prettyModel } from "./lib/models";
+import { accountOf, effortLabel, effortLevels, effortOf } from "./lib/models";
+import { modelDisplay } from "./lib/modelDisplay";
+import { useQuota } from "./views/Quota";
 import { ChipMenu, type MenuItem } from "./menu";
 
 export function ModelEffortPicks({ agent }: { agent: Agent }) {
   const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
   const [error, setError] = useState<string>();
+  const quota = useQuota();
+  const display = (m: string) => modelDisplay(agent.plugin, m, quota.data?.accounts ?? [], accountOf(agent));
   const info = plugins.data?.find((p) => p.name === agent.plugin);
   const models = info?.models ?? [];
   const levels = effortLevels(info?.efforts);
@@ -30,8 +34,9 @@ export function ModelEffortPicks({ agent }: { agent: Agent }) {
       (m): MenuItem => ({
         kind: "item",
         key: m,
-        label: prettyModel(m),
+        label: display(m).label,
         sub: m,
+        searchText: display(m).description ?? undefined,
         icon: <VendorMark plugin={agent.plugin} size={14} />,
         on: agent.model === m,
         onPick: () => void apply(m),
@@ -59,9 +64,10 @@ export function ModelEffortPicks({ agent }: { agent: Agent }) {
     <>
       <ChipMenu
         icon={<VendorMark plugin={agent.plugin} size={13} />}
-        label={agent.model ? prettyModel(agent.model) : "插件默认"}
+        label={agent.model ? display(agent.model).label : "插件默认"}
         title={`模型：${agent.model ?? "插件默认"} · 下一轮起生效`}
         items={modelItems}
+        searchable
         up
       />
       {levels.length > 0 && (

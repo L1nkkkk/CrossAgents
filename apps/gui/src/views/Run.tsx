@@ -939,7 +939,7 @@ export function usePlanApproval(run: Run, busy: boolean) {
           return {
             kind: "item",
             key: v,
-            label: workerModelLabel(option, workerOptions),
+            label: workerModelLabel(option, workerOptions, accounts),
             sub: option.blocked ? t(option.blocked.key) : option.model,
             ...(option.blocked ? { subDir: "ltr" as const } : {}),
             icon: <VendorMark plugin={option.plugin} size={14} />,
@@ -961,7 +961,7 @@ export function usePlanApproval(run: Run, busy: boolean) {
     ) : fallback ? (
       <Avatar agent={fallback} size={16} />
     ) : undefined;
-    const label = chosen ? displayName(chosen) : model ? (option ? workerModelLabel(option, workerOptions) : prettyModel(model.model)) : autoLabel;
+    const label = chosen ? displayName(chosen) : model ? (option ? workerModelLabel(option, workerOptions, accounts) : prettyModel(model.model)) : autoLabel;
     if (busy)
       return (
         <span className="who-pick">
@@ -973,7 +973,7 @@ export function usePlanApproval(run: Run, busy: boolean) {
       );
     return (
       <span className="who-pick" data-task={task.key}>
-        <ChipMenu icon={icon} label={label} title="执行者" items={items} align="right" />
+        <ChipMenu icon={icon} label={label} title="执行者" items={items} align="right" searchable />
       </span>
     );
   };

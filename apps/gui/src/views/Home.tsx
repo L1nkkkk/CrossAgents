@@ -9,7 +9,8 @@ import { navigate } from "../App";
 import { Avatar, BrandMark, ErrorBox, Field, Icon, VendorMark, agentTitle, displayName, hueOf, useAgents } from "../components";
 import { useHubData } from "../hub";
 import { t } from "../lib/i18n";
-import { effortLabel, effortLevels, effortOf, prettyModel, vendorLabel, workerModelFor, accountOf } from "../lib/models";
+import { modelDisplay } from "../lib/modelDisplay";
+import { effortLabel, effortLevels, effortOf, vendorLabel, workerModelFor, accountOf } from "../lib/models";
 import { chatBody, newChatRequest, runSessionFields, sessionStateKey, usabilityOf } from "../lib/sessionChoice";
 import * as draft from "../lib/draft";
 import { useQuota } from "./Quota";
@@ -463,7 +464,8 @@ export function HomeView() {
         { kind: "header", key: `h-${p.name}-${account ?? ""}`, label: title },
         ...modelsFor(p, account).map((m): MenuItem => {
           const choice: Choice = { plugin: p.name, model: m, ...(account ? { account } : {}) };
-          return { kind: "item", key: `${p.name}/${account ?? ""}/${m}`, label: prettyModel(m), sub: m, icon: <VendorMark plugin={p.name} size={14} />, on: isOn(choice), onPick: () => onPick(choice) };
+          const display = modelDisplay(p.name, m, quota.data?.accounts ?? [], account);
+          return { kind: "item", key: `${p.name}/${account ?? ""}/${m}`, label: display.label, sub: m, searchText: display.description ?? undefined, icon: <VendorMark plugin={p.name} size={14} />, on: isOn(choice), onPick: () => onPick(choice) };
         }),
       ]);
     });
@@ -529,7 +531,7 @@ export function HomeView() {
   /** "Claude Opus 5.5", plus the login when the vendor has more than one. */
   const choiceLabel = (c: Choice) => {
     const login = accountsOf(c.plugin).length > 1 ? accountLabel(c.account) ?? t("home.defaultLogin") : undefined;
-    return `${vendorLabel(c.plugin)} ${prettyModel(c.model)}${login ? ` · ${login}` : ""}`;
+    return `${vendorLabel(c.plugin)} ${modelDisplay(c.plugin, c.model, quota.data?.accounts ?? [], c.account).label}${login ? ` · ${login}` : ""}`;
   };
 
   const wsLabel = folder ? wsName(folder) : current?.name;
@@ -606,6 +608,7 @@ export function HomeView() {
                 label={choiceLabel(chatModel)}
                 title={t("home.model")}
                 items={chatItems}
+                searchable
                 up
               />
             )}
@@ -615,6 +618,7 @@ export function HomeView() {
                 label={leadAgent ? displayName(leadAgent) : lead.kind === "model" ? choiceLabel(lead) : ""}
                 title={t("home.lead")}
                 items={leadItems}
+                searchable
                 up
               />
             )}
