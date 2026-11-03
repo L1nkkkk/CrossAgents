@@ -452,15 +452,17 @@ fallback = ["opus", "sonnet", "haiku"]   # 就是原来的 models
 efforts = ["low", "medium", "high"]
 ```
 
-`paths` / `bundled` / `commands` / `version` / `env` 都可以按系统给（`[locate.paths] windows = [...] macos = [...] linux = [...]`）。`paths` 支持 `~`、`%VAR%`、`$VAR` 和 `*`（一段目录），无扩展名的项在 Windows 上也会试 `.exe`；`bundled` 多个命中取修改时间最新的。
+`paths` / `bundled` / `commands` / `version` / `env` 都可以按系统给（`[locate.paths] windows = [...] macos = [...] linux = [...]`）。`paths` 支持 `~`、`%VAR%`、`$VAR` 和 `*`（一段目录），无扩展名的项在 Windows 上依次试 `.exe`、`.cmd`、`.bat`，最后才是原样的文件；`.ps1` 永远不当作入口——PowerShell 执行策略会拒绝运行它（Cursor 的 agent 就在 `agent.cmd` 旁边放了个 `agent.ps1`，选中它只会得到「版本未知」）。`PATH` 上的查找同样只认 `.exe` / `.cmd` / `.bat`。`bundled` 多个命中取修改时间最新的。
 
 **查找优先级**：`config.toml` 的 `native_command` > `locate.env` > `locate.commands`（PATH）> `locate.paths` > `locate.bundled`。命中后再过一次 `locate.shim`，因为有两件事路径表达不了：npm 的 `.cmd` / `.ps1` 外壳必须解到 vendor 里的真实二进制（`codex-vendor`，杀外壳会留下子进程），以及 npm 的 CodeBuddy 外壳要改成 `node <script>` 直接跑（`node-script`，否则 `--mcp-config` 的 JSON 过不了 `cmd.exe` 的引号）。shim 的名字写在描述里，逻辑留在代码里（`crates/drivers/src/locate.rs`）。
 
-**结果**统一成 `Located { argv, path, source, version }`（`crates/core/src/cli.rs`）：`source` 是 `config | env | path | native | bundled`；`Driver::installed()` 由它推出，三家驱动不再各自写查找逻辑。`GET /v1/plugins` 的 `PluginInfo.cli` 把它交给客户端（`installed`、`path`、`source`、`version`、`install_hint`、`docs`；新增可选字段，不升 `API_VERSION`）。
+**结果**统一成 `Located { argv, path, source, version }`（`crates/core/src/cli.rs`）：`source` 是 `config | env | path | native | bundled`；`Driver::installed()` 由它推出，三家驱动不再各自写查找逻辑。`GET /v1/plugins` 的 `PluginInfo.cli` 把它交给客户端（`installed`、`probing`、`path`、`source`、`version`、`install_hint`、`docs`；新增可选字段，不升 `API_VERSION`）。
 
 **查找不缓存**：hub 活得比安装和升级长，`installed()`、开会话、`/v1/plugins` 都要当下的结果。留下的只有命中，用之前还要校验路径还在——桌面版自动更新会删掉被替换那一版的构建目录；上次没找到则每次都重查，hub 运行期间装上的 CLI 立刻能发现。`bundled` 的命中不复用：桌面版更新后旧构建目录可能还在，每次重扫才能切到最新那份，之后又在 `PATH` 上装了一份也能切过去。查找只是一次文件系统走查，比起它后面的开会话可以忽略。
 
-**版本按 (path, 修改时间) 缓存**：两者任一变了就重新探测（就地升级会改文件时间）。探测要起子进程（`locate.version` 的命令，5 秒超时），所以不挡请求：hub 启动时后台并行探一遍（`Driver::probe_cli()`），正在探测时 `/v1/plugins` 的 `version` 为空但仍算已安装，下一次请求就带上答案。只缓存成功的结果：失败（没答上来、超时）60 秒内不重问，之后允许重试——正在安装的 CLI 当时可能还没准备好。
+**版本按 (path, 修改时间) 缓存**：两者任一变了就重新探测（就地升级会改文件时间）。探测要起子进程（`locate.version` 的命令，5 秒超时），所以不挡请求：hub 启动时后台并行探一遍（`Driver::probe_cli()`），正在探测时 `/v1/plugins` 的 `version` 为空、`probing` 为 true，客户端据此显示「检测版本中…」而不是「版本未知」，下一次请求就带上答案。只缓存成功的结果：失败（没答上来、超时）60 秒内不重问，之后允许重试——正在安装的 CLI 当时可能还没准备好。
+
+**随时重新检测**（`POST /v1/plugins/refresh`，管理级，`?plugin=<name>` 只查一个）：清掉查找与版本缓存后在后台并行 `probe_cli()`，接口立刻回 202，不等子进程；每个探完发 `plugin.changed`，客户端据此重读 `/v1/plugins`。同一插件正在探时不再起第二个。GUI 的「本机的 CLI」在进入页面、窗口重新获得焦点 / 变为可见时自动调用（10 秒内不重复），所以终端里装好或修好一个 CLI 后回到窗口，几秒内该行就变成已安装并带版本，不用重启 hub；标题行的「重新检测」按钮做同样的事。
 
 **命令在开会话时取**（`claude` / `codebuddy`）：构造时定死的话，hub 运行期间的安装和更新都看不见。`codex` 的进程键保持未解析的 `codex app-server`——接管进程按它匹配，解析过的路径一升级就对不上了。
 

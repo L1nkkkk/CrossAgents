@@ -70,6 +70,7 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 | POST | `/v1/plugins/{name}/models` | write | GUI |
 | POST | `/v1/plugins/{name}/install` | admin | GUI |
 | POST | `/v1/plugins/{name}/upgrade` | admin | GUI |
+| POST | `/v1/plugins/refresh` | admin | GUI |
 | GET | `/v1/usage` | read | GUI、CLI |
 | GET | `/v1/accounts` | read | GUI、CLI |
 | POST | `/v1/accounts` | admin | GUI、CLI |
@@ -118,7 +119,7 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 
 **admin**：能碰凭据或 hub 生命周期——`/v1/shutdown`、账号增删与登录。这些要么能中断所有人的工作，要么能写入新的 API 凭据。
 
-`POST /v1/plugins/{name}/install` 与 `/upgrade` 也归 admin：它们会在这台机器上执行程序。执行的命令只来自描述文件（`[[install.methods]]` 的 `run` / `upgrade`），请求只给插件名和动作，传不了命令；一次插件只跑一个任务，第二个请求返回 409。
+`POST /v1/plugins/{name}/install` 与 `/upgrade` 也归 admin：它们会在这台机器上执行程序。执行的命令只来自描述文件（`[[install.methods]]` 的 `run` / `upgrade`），请求只给插件名和动作，传不了命令；一次插件只跑一个任务，第二个请求返回 409。`POST /v1/plugins/refresh` 同理：它会在后台运行各 CLI 的版本命令（`locate.version`），只是重新查找和探测，不接受任何命令。
 
 两个边界判断：
 

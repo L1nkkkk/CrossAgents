@@ -265,6 +265,10 @@ export const api = {
   turnDiff: (key: string, messageId: string) =>
     request<TurnDiffResponse>("GET", `/v1/agents/${enc(key)}/turns/${enc(messageId)}/diff`),
   listPlugins: () => request<ListPluginsResponse>("GET", "/v1/plugins"),
+  /** Looks for the CLIs again and asks their versions, in the background: 202 at once, and
+   * `plugin.changed` as each probe ends. `name` narrows it to one plugin. */
+  refreshPlugins: (name?: string) =>
+    request<void>("POST", `/v1/plugins/refresh${name ? `?plugin=${enc(name)}` : ""}`),
   setPluginModels: (name: string, shown: string[] | null) => request<PluginInfo>("POST", `/v1/plugins/${enc(name)}/models`, { shown }),
   /** Runs the description's install command on this machine; progress comes on the event stream. */
   installPlugin: (name: string) => request<CliInstallAccepted>("POST", `/v1/plugins/${enc(name)}/install`),

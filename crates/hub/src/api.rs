@@ -87,6 +87,9 @@ pub struct AppState {
     pub url: String,
     /// Runs the description's install and upgrade commands, one job per plugin at a time.
     pub installer: Arc<crate::install::Installer>,
+    /// Looks for the CLIs again and asks their versions, in the background; one probe per
+    /// plugin at a time.
+    pub refresher: Arc<crate::refresh::Refresher>,
 }
 
 impl AppState {
@@ -140,6 +143,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/avatars/{id}", get(get_avatar).delete(delete_avatar))
         .route("/v1/notes", get(list_notes))
         .route("/v1/plugins", get(list_plugins))
+        .route("/v1/plugins/refresh", post(refresh_plugins))
         .route("/v1/plugins/{name}/models", post(set_plugin_models))
         .route("/v1/plugins/{name}/install", post(install_plugin))
         .route("/v1/plugins/{name}/upgrade", post(upgrade_plugin))
@@ -1159,6 +1163,7 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
     };
     let cli = d.cli_status().await.map(|status| CliInfo {
         installed: status.located.is_some(),
+        probing: status.probing,
         path: status
             .located
             .as_ref()
@@ -1215,6 +1220,36 @@ async fn set_plugin_models(
         })?;
     state.models.set(&name, req.shown)?;
     Ok(Json(plugin_info(&state, driver.as_ref()).await))
+}
+
+/// `POST /v1/plugins/refresh`: looks for the CLIs again and asks each its version, in the
+/// background (docs/DESIGN.md §9.3). `202` at once, never waiting for a subprocess; every
+/// probe that ends publishes `plugin.changed`, so a client re-reads `GET /v1/plugins` and
+/// its rows turn into what the machine has now. `?plugin=<name>` looks for just that one.
+///
+/// Admin: it runs the CLIs' version commands here, as install and upgrade do.
+async fn refresh_plugins(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<RefreshPluginsQuery>,
+) -> ApiResult<StatusCode> {
+    let registry = state.runtime.plugins();
+    let drivers = match &query.plugin {
+        Some(name) => vec![registry.get(name).ok_or_else(|| CoreError::NotFound {
+            kind: "plugin",
+            id: name.clone(),
+        })?],
+        None => registry.defaults(),
+    };
+    for driver in drivers {
+        state.refresher.start(state.bus.clone(), driver).await;
+    }
+    Ok(StatusCode::ACCEPTED)
+}
+
+#[derive(Debug, Deserialize)]
+struct RefreshPluginsQuery {
+    /// One plugin to look for again; every plugin when absent.
+    plugin: Option<String>,
 }
 
 /// `POST /v1/plugins/{name}/install`: runs the description's install command on this machine

@@ -890,7 +890,11 @@ impl Cli {
         let upgrade_command = located
             .as_ref()
             .and_then(|found| install.upgrade_for(found.source, &found.path, machine));
+        // Read after the lookup: a version nobody asked for yet was asked for above, and the
+        // answer says whether that probe is still out.
+        let probing = located.as_ref().is_some_and(|found| self.probing(found));
         CliStatus {
+            probing,
             installed_via: located.as_ref().and_then(|found| {
                 install
                     .method_of(&found.path, machine)
@@ -918,6 +922,8 @@ impl Cli {
         if let Some(value) = self.known_version(&found) {
             return value;
         }
+        // Asked here and waited for, but a status read meanwhile must say a probe is out.
+        self.mark_probing(&found);
         self.ask(found).await
     }
 
@@ -942,12 +948,8 @@ impl Cli {
 
     /// Asks the version without waiting for it: `/v1/plugins` reports it once it answers.
     fn ask_in_background(&self, found: &Located) {
-        {
-            let mut cache = self.cache();
-            if cache.probing.as_deref() == Some(found.path.as_path()) {
-                return;
-            }
-            cache.probing = Some(found.path.clone());
+        if !self.mark_probing(found) {
+            return;
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             // No runtime to ask from (a lookup-only test): nothing to wait for.
@@ -959,6 +961,22 @@ impl Cli {
         runtime.spawn(async move {
             cli.ask(found).await;
         });
+    }
+
+    /// Whether a version probe for `found` is running now.
+    fn probing(&self, found: &Located) -> bool {
+        self.cache().probing.as_deref() == Some(found.path.as_path())
+    }
+
+    /// Notes that `found` is being asked its version; false when it already is, so no second
+    /// probe is started for the same file.
+    fn mark_probing(&self, found: &Located) -> bool {
+        let mut cache = self.cache();
+        if cache.probing.as_deref() == Some(found.path.as_path()) {
+            return false;
+        }
+        cache.probing = Some(found.path.clone());
+        true
     }
 
     /// Asks the version and keeps it with the file it came from.
@@ -1180,19 +1198,30 @@ fn expand(pattern: &str, machine: &Machine) -> Vec<PathBuf> {
         }
     }
     if cfg!(windows) {
-        // `~/.local/bin/claude` names `claude.exe` there.
-        paths = paths
-            .into_iter()
-            .flat_map(|path| {
-                if path.extension().is_none() {
-                    vec![path.with_extension("exe"), path]
-                } else {
-                    vec![path]
-                }
-            })
-            .collect();
+        paths = paths.into_iter().flat_map(windows_candidates).collect();
     }
     paths
+}
+
+/// The files one `paths` entry names on Windows: an entry point is an `.exe`, a `.cmd` or a
+/// `.bat`, so an extensionless entry names all three before the file itself.
+///
+/// A `.ps1` is never one: Cursor's agent installs `agent.ps1` beside `agent.cmd`, and the
+/// PowerShell execution policy refuses to run the script, which reads as "no version"
+/// (docs/DESIGN.md §9.3).
+fn windows_candidates(path: PathBuf) -> Vec<PathBuf> {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        None => {
+            let mut candidates = Vec::with_capacity(4);
+            for ext in ["exe", "cmd", "bat"] {
+                candidates.push(path.with_extension(ext));
+            }
+            candidates.push(path);
+            candidates
+        }
+        Some(ext) if ext.eq_ignore_ascii_case("ps1") => Vec::new(),
+        Some(_) => vec![path],
+    }
 }
 
 fn first_file(pattern: &str, machine: &Machine) -> Option<PathBuf> {
@@ -1958,5 +1987,118 @@ mod tests {
             Some("%USERPROFILE%\\bin;C:\\tools")
         );
         assert_eq!(parse_reg_path("no value here"), None);
+    }
+
+    /// Windows names an entry point by extension, and never by `.ps1`: Cursor's agent puts
+    /// `agent.ps1` beside `agent.cmd`, and the execution policy refuses the script
+    /// (docs/DESIGN.md §9.3).
+    #[test]
+    fn windows_names_an_entry_point_by_its_extensions() {
+        let bare = PathBuf::from(r"C:\Users\me\.local\bin\agent");
+        assert_eq!(
+            windows_candidates(bare.clone()),
+            vec![
+                PathBuf::from(r"C:\Users\me\.local\bin\agent.exe"),
+                PathBuf::from(r"C:\Users\me\.local\bin\agent.cmd"),
+                PathBuf::from(r"C:\Users\me\.local\bin\agent.bat"),
+                bare,
+            ]
+        );
+        // A script is dropped, whatever case its extension is written in.
+        assert!(windows_candidates(PathBuf::from(r"C:\bin\agent.ps1")).is_empty());
+        assert!(windows_candidates(PathBuf::from(r"C:\bin\agent.PS1")).is_empty());
+        assert_eq!(
+            windows_candidates(PathBuf::from(r"C:\bin\agent.CMD")),
+            vec![PathBuf::from(r"C:\bin\agent.CMD")]
+        );
+    }
+
+    /// One `paths` entry names the batch wrapper when that is all there is, and names
+    /// nothing when the only file left is the PowerShell script beside it.
+    #[cfg(windows)]
+    #[test]
+    fn a_batch_entry_point_is_found_and_a_powershell_script_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        touch(&bin.join("agent.ps1"));
+        touch(&bin.join("agent.cmd"));
+        let locator: Locator = toml::from_str(r#"paths = ["~/bin/agent"]"#).unwrap();
+        let found = locator.locate_in(&machine(dir.path())).unwrap();
+        assert_eq!(found.path, bin.join("agent.cmd"));
+
+        std::fs::remove_file(bin.join("agent.cmd")).unwrap();
+        assert!(
+            locator.locate_in(&machine(dir.path())).is_none(),
+            "agent.ps1 must never be run as the CLI"
+        );
+    }
+
+    /// On `PATH`, the batch wrapper is picked over the script beside it.
+    #[cfg(windows)]
+    #[test]
+    fn path_lookup_skips_the_powershell_script() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(&dir.path().join("agent.ps1"));
+        touch(&dir.path().join("agent.cmd"));
+        let locator: Locator = toml::from_str(r#"commands = ["agent"]"#).unwrap();
+        let found = locator.locate_in(&machine(dir.path())).unwrap();
+        assert_eq!(found.path, dir.path().join("agent.cmd"));
+
+        std::fs::remove_file(dir.path().join("agent.cmd")).unwrap();
+        assert!(locator.locate_in(&machine(dir.path())).is_none());
+    }
+
+    /// A status says a version probe is out while it is, so a client shows "asking" rather
+    /// than "unknown"; once the answer is in, it says no.
+    #[tokio::test]
+    async fn status_says_a_version_probe_is_running_until_it_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir
+            .path()
+            .join(if cfg!(windows) { "agent.cmd" } else { "agent" });
+        version_script(&program, "1.0.0");
+        let locator: Locator = toml::from_str(
+            r#"
+            commands = ["agent"]
+            version = ["--version"]
+            "#,
+        )
+        .unwrap();
+        let cli = Cli::new(Vec::new(), locator, Install::default());
+        let machine = machine(dir.path());
+
+        let status = cli.status_in(&machine).await;
+        assert!(status.located.as_ref().unwrap().version.is_none());
+        assert!(
+            status.probing,
+            "the version was just asked for in the background"
+        );
+        assert_eq!(cli.version_in(&machine).await.as_deref(), Some("1.0.0"));
+        assert!(!cli.status_in(&machine).await.probing);
+    }
+
+    /// A probe that came back without a version is done asking: the client says "unknown",
+    /// not "asking" for ever.
+    #[tokio::test]
+    async fn a_probe_that_answered_nothing_stops_asking() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir
+            .path()
+            .join(if cfg!(windows) { "agent.cmd" } else { "agent" });
+        version_script(&program, "no version here");
+        let locator: Locator = toml::from_str(
+            r#"
+            commands = ["agent"]
+            version = ["--version"]
+            "#,
+        )
+        .unwrap();
+        let cli = Cli::new(Vec::new(), locator, Install::default());
+        let machine = machine(dir.path());
+
+        assert_eq!(cli.version_in(&machine).await, None);
+        let status = cli.status_in(&machine).await;
+        assert!(status.located.is_some());
+        assert!(!status.probing);
     }
 }
