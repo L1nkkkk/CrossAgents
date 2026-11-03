@@ -559,6 +559,12 @@ pub struct CliInfo {
     /// Whether the GUI offers an upgrade button.
     #[serde(default)]
     pub can_upgrade: bool,
+    /// `install` or `upgrade` while one is running for this plugin now; absent when nothing
+    /// is. The hub keeps it in memory only: after a restart nothing is running, so it is
+    /// empty again (docs/DESIGN.md §9.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub installing: Option<String>,
     /// Where the description came from: `built-in`, a manifest's path, or `config.toml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
