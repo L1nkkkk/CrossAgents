@@ -45,6 +45,8 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "GET", path: /^\/v1\/avatars\/[^/]+$/, level: "read" },
   { method: "DELETE", path: /^\/v1\/avatars\/[^/]+$/, level: "write" },
   { method: "GET", path: /^\/v1\/notes$/, level: "read" },
+  { method: "GET", path: /^\/v1\/background$/, level: "read" },
+  { method: "DELETE", path: /^\/v1\/background\/reminders\/[^/]+$/, level: "write" },
   { method: "GET", path: /^\/v1\/plugins$/, level: "read" },
   { method: "POST", path: /^\/v1\/plugins\/[^/]+\/models$/, level: "write" },
   { method: "POST", path: /^\/v1\/plugins\/[^/]+\/(install|upgrade)$/, level: "admin" },

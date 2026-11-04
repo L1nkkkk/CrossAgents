@@ -3,6 +3,7 @@
 
 import { emptyHub } from "../views/Home.mock";
 import { approvalRun, deleteRun, graphRun, handoffRun, inPlaceRun, landingRun, longResultsRun, oauthRun, pausedRun, rerouteRun, reuseRun, reviewRun, syncRun, traceRun } from "../views/Run.mock";
+import type { BackgroundResponse } from "@bindings/BackgroundResponse";
 import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, failedEditSession, liveRun, liveSession, liveTaskSession, longNameScene, slashScene, soloSession, toolImagePathsSession, toolImagesSession } from "../views/Session.mock";
 import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
 import { usageScene } from "../views/Usage.mock";
@@ -258,6 +259,7 @@ export const SCENARIOS: Scenario[] = [
   { key: "trace", label: "失败追溯", hint: "run 页右侧栏的「追溯」：#d 失败、首个失败标红展开；#c 途中出错后通过，灰色折叠；每一轮、每条命令和花费", build: () => traceRun() },
   { key: "graph", label: "提交图", hint: "run 页的工具列「提交图」：main、run 分支和 #a #b #c 三个任务分支，合并提交是空心点；选中了 #b 的合并，下面是它的 diff，点文件名打开文件", build: () => graphRun() },
   { key: "graph-session", label: "会话的提交图", hint: "Rex 在 #c 的会话页：顶栏「提交图」在右侧工具列打开，HEAD 和本地分支，选中了最新的提交", build: () => graphRun("session") },
+  { key: "background", label: "后台看板", hint: "run 页工具列的「后台」：这个 run 的提醒（倒计时、备注、关联任务，可取消）、关注和验收中的 #c 排在前面；Nova 在别处的提醒和关注折叠在下面；约 8 秒后 Rex 的一条提醒到期，从看板上消失", build: () => backgroundScene() },
   { key: "inplace", label: "无 git 的 run", hint: "文件夹没有 git：run 直接改文件、一次一个任务，可一键初始化 git", build: () => inPlaceRun() },
   { key: "workcard", label: "会话提议 Work", hint: "Nova 在单聊里用 work_start 提议到独立分支上做：卡片可展开交给 Work 的说明，开始 / 不用", build: () => workProposal() },
   { key: "long-results", label: "长结果折叠", hint: "Ada 第一次落地被拒、理由里是整段 cargo test 日志：卡片只留一行（✕ · 落地 run · 对象和理由第一句），点图标或整行看完整理由和调用参数；run 页的总结同样只留一行", build: () => longResultsRun() },
@@ -366,6 +368,54 @@ function filesScene() {
     ...solo,
     script: [{ at: 600, act: () => openFile({ scope: { kind: "agent", agent: nova.id }, path: "crates/cli/src/main.rs", line: 12 }) }],
     route: `#/s/${nova.name}`,
+  };
+}
+
+/** The OAuth run with the 后台 pane open: reminders, watches and #c under verification; Rex's reminder fires after ~8s. */
+function backgroundScene() {
+  const scene = oauthRun("running");
+  const d = scene.state.runs[0];
+  const runId = d.run.id;
+  const byKey = (k: string) => d.tasks.find((t) => t.key === k)!;
+  const [tb, tc] = [byKey("b"), byKey("c")];
+  const named = (n: string) => scene.state.agents.find((a) => a.name === n)!;
+  const [ada, rex, mia] = [named("Ada"), named("Rex"), named("Mia")];
+  tc.status = "verifying";
+  tc.updated_at = ago(2);
+  const soon = (minutes: number) => new Date(Date.now() + minutes * 60_000).toISOString();
+  const nova = "0190aaaa-0000-7000-8000-00000000n0va";
+  const fires = "rem-rex-ci";
+  const background: BackgroundResponse = {
+    reminders: [
+      { reminder: { id: fires, owner: rex.id, due_at: new Date(Date.now() + 8_000).toISOString(), note: "看一眼 CI 有没有跑完", task: tc.id, only_if_open: true, created_at: ago(5) }, owner_name: rex.name, task_key: tc.key, run_id: runId },
+      { reminder: { id: "rem-ada-check", owner: ada.id, due_at: soon(25), note: "#b 还没交就去问 Mia 卡在哪", task: tb.id, only_if_open: true, created_at: ago(20) }, owner_name: ada.name, task_key: tb.key, run_id: runId },
+      { reminder: { id: "rem-mia-dark", owner: mia.id, due_at: soon(60 * 3 + 12), note: "深色模式的截图发给设计确认", task: null, only_if_open: false, created_at: ago(40) }, owner_name: mia.name, task_key: null, run_id: runId },
+      { reminder: { id: "rem-nova-docs", owner: nova, due_at: soon(60 * 26), note: "明早把 docs/cli.md 的 --json 例子再核对一遍", task: null, only_if_open: false, created_at: ago(90) }, owner_name: "Nova", task_key: null, run_id: null },
+    ],
+    watches: [
+      { watch: { id: "w-ada-c", owner: ada.id, target: { kind: "task", task_id: tc.id }, on: ["done", "failed"], created_at: ago(30) }, owner_name: ada.name, target_name: `#${tc.key}`, run_id: runId },
+      { watch: { id: "w-ada-mia", owner: ada.id, target: { kind: "agent", agent_id: mia.id }, on: ["idle", "stalled"], created_at: ago(28) }, owner_name: ada.name, target_name: mia.name, run_id: runId },
+      { watch: { id: "w-nova-iris", owner: nova, target: { kind: "agent", agent_id: "0190aaaa-0000-7000-8000-00000000iris" }, on: [], created_at: ago(70) }, owner_name: "Nova", target_name: "Iris", run_id: null },
+    ],
+    verifying: [
+      { task_id: tc.id, run_id: runId, run_title: d.run.title, key: tc.key, title: tc.title, assignee: tc.assignee, assignee_name: rex.name, checks: 3, since: tc.updated_at },
+    ],
+  };
+  scene.state.background = background;
+  return {
+    ...scene,
+    route: `#/runs/${runId}`,
+    script: [
+      ...scene.script,
+      { at: 600, act: () => openTool("background") },
+      {
+        at: 8_500,
+        act: (s: MockState) => {
+          if (s.background) s.background = { ...s.background, reminders: s.background.reminders.filter((r) => r.reminder.id !== fires) };
+        },
+        event: { type: "reminder.fired", data: { owner: rex.id, reminder_id: fires, note: "看一眼 CI 有没有跑完" } },
+      },
+    ] as Step[],
   };
 }
 

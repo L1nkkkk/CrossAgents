@@ -23,6 +23,7 @@ import type { HumanItem } from "@bindings/HumanItem";
 import type { InitRepoRequest } from "@bindings/InitRepoRequest";
 import type { LandMode } from "@bindings/LandMode";
 import type { ListNotesResponse } from "@bindings/ListNotesResponse";
+import type { BackgroundResponse } from "@bindings/BackgroundResponse";
 import type { ListQuestionsResponse } from "@bindings/ListQuestionsResponse";
 import type { LoginStarted } from "@bindings/LoginStarted";
 import type { QuotaResponse } from "@bindings/QuotaResponse";
@@ -264,6 +265,10 @@ export const api = {
   connectAgent: (key: string) => request<ConnectInfo>("POST", `/v1/agents/${enc(key)}/connect`),
   notes: (scope: "run" | "team", run?: string) =>
     request<ListNotesResponse>("GET", `/v1/notes?scope=${scope}${run ? `&run=${enc(run)}` : ""}`),
+  /** The agents' reminders and watches, and the tasks being verified now (the 后台 tab). */
+  background: () => request<BackgroundResponse>("GET", "/v1/background"),
+  /** Cancels an agent's reminder, as `remind_cancel` does. */
+  cancelReminder: (id: string) => request<void>("DELETE", `/v1/background/reminders/${enc(id)}`),
   updateProfile: (key: string, profile: AgentProfile) => request<Agent>("POST", `/v1/agents/${enc(key)}/profile`, profile),
   /** Which Claude settings the agent loads, from its next session. */
   agentSettings: (key: string, req: AgentSettingsRequest) => request<Agent>("POST", `/v1/agents/${enc(key)}/settings`, req),
