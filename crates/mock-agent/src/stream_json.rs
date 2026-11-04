@@ -15,6 +15,8 @@
 //! history does.
 //! `--steer-merge` reads a message written while a turn runs at that turn's next boundary
 //! (Claude Code); without it the message opens another turn after it, as CodeBuddy does.
+//! `--replay-user-messages` echoes each message with `isReplay` and the uuid it was written
+//! under when the CLI reads it.
 //! - `[session]`   say the session id, and whether it was resumed
 //! - `[crash]`     exit the process
 //! - `[write ...]` / `[call ...]` directives, see [`crate::script`]; calls go to the first
@@ -65,6 +67,8 @@ struct Mock {
     running: AtomicBool,
     /// Messages delivered into the running turn, by the model's next request.
     steers: Mutex<Vec<(String, String)>>,
+    /// `--replay-user-messages`: echo each user message as the CLI reads it.
+    replay: bool,
 }
 
 impl Mock {
@@ -149,19 +153,42 @@ impl Mock {
         }
     }
 
+    /// Echo a user message as the CLI reads it, with the uuid it was written under
+    /// (`--replay-user-messages`, as Claude Code does).
+    async fn echo_user(&self, uuid: &str, text: &str) {
+        if !self.replay {
+            return;
+        }
+        self.send(json!({
+            "type": "user",
+            "uuid": uuid,
+            "isReplay": true,
+            "session_id": self.session_id,
+            "parent_tool_use_id": null,
+            "message": { "role": "user", "content": [{ "type": "text", "text": text }] },
+        }))
+        .await;
+    }
+
     /// Appends what the model read at this boundary.
     async fn take_steers(&self, text: &mut String) {
-        for (_, steer) in std::mem::take(&mut *self.steers.lock().await) {
+        for (uuid, steer) in std::mem::take(&mut *self.steers.lock().await) {
+            self.echo_user(&uuid, &steer).await;
             text.push_str("\n[steered] ");
             text.push_str(&steer);
         }
     }
 
-    async fn run_turn(&self, message: Value) {
+    async fn run_turn(&self, message: Value, consumed: bool) {
         let _turn = self.turn.lock().await;
         self.running.store(true, Ordering::SeqCst);
         let uuid = message["uuid"].as_str().unwrap_or_default().to_owned();
         let mut text = message_text(&message);
+        // A message queued during a turn was read (and echoed) when it was queued; one
+        // that starts a turn is read now.
+        if !consumed {
+            self.echo_user(&uuid, &text).await;
+        }
         if text.contains("[crash]") {
             std::process::exit(3);
         }
@@ -351,6 +378,7 @@ pub async fn run(args: Vec<String>) {
         steer_merge: args.iter().any(|a| a == "--steer-merge"),
         running: AtomicBool::new(false),
         steers: Mutex::default(),
+        replay: args.iter().any(|a| a == "--replay-user-messages"),
         kept,
     });
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
@@ -366,7 +394,8 @@ pub async fn run(args: Vec<String>) {
             Some("user") => {
                 let mock = mock.clone();
                 tokio::spawn(async move {
-                    if mock.running.load(Ordering::SeqCst) {
+                    let queued = mock.running.load(Ordering::SeqCst);
+                    if queued {
                         if mock.steer_merge {
                             // Read at the running turn's next boundary.
                             let uuid = message["uuid"].as_str().unwrap_or_default().to_owned();
@@ -374,10 +403,12 @@ pub async fn run(args: Vec<String>) {
                             mock.steers.lock().await.push((uuid, text));
                             return;
                         }
-                        // Another turn opens for it, announced as the CLI does.
+                        // Another turn opens for it, announced and read as the CLI does.
                         mock.init_notice().await;
+                        let uuid = message["uuid"].as_str().unwrap_or_default().to_owned();
+                        mock.echo_user(&uuid, &message_text(&message)).await;
                     }
-                    mock.run_turn(message).await;
+                    mock.run_turn(message, queued).await;
                 });
             }
             _ => {}

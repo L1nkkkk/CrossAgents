@@ -162,6 +162,10 @@ pub fn args(launch: &Launch, start: &Start, flavor: Flavor) -> Vec<String> {
     args.push(launch.setting_sources.clone());
     if flavor == Flavor::Claude {
         args.extend(["--permission-prompt-tool".into(), "stdio".into()]);
+        // A steered message is echoed with `isReplay` and the uuid we gave it when the CLI
+        // reads it (verified against claude 2.1.317): that is how the driver tells the
+        // model has seen it.
+        args.push("--replay-user-messages".into());
     }
     if !launch.mcp_servers.is_empty() {
         args.push("--mcp-config".into());
