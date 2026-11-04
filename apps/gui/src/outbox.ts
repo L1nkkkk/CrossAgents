@@ -12,6 +12,8 @@ export type Outgoing = {
   agent: string;
   text: string;
   now?: boolean;
+  /** Handed to the running turn instead of queued (`steer`). */
+  steer?: boolean;
   /** Files sent with it. */
   attachments?: AttachmentUpload[];
   /** The hub's id for it, once it took it. */
@@ -37,7 +39,9 @@ function subscribe(listener: () => void) {
 async function deliver(item: Outgoing): Promise<void> {
   try {
     const attachments = item.attachments?.length ? item.attachments : undefined;
-    const sent = await api.sendMessage(item.agent, { text: item.text, now: item.now || undefined, attachments });
+    // `steered: false` in the answer is not a failure: the hub queued the message instead (no
+    // turn runs, or the driver cannot steer), and the queue is where it shows up.
+    const sent = await api.sendMessage(item.agent, { text: item.text, now: item.now || undefined, steer: item.steer || undefined, attachments });
     set((xs) => xs.map((x) => (x.key === item.key ? { ...x, id: sent.message_id, error: undefined } : x)));
   } catch (err) {
     set((xs) => xs.map((x) => (x.key === item.key ? { ...x, error: errorText(err) } : x)));
@@ -47,10 +51,11 @@ async function deliver(item: Outgoing): Promise<void> {
 
 /**
  * Sends `text` to `agent`, showing it in that conversation right away. A failure stays there
- * with a retry, unless `takeBack` (the caller puts the text back where it was typed).
+ * with a retry, unless `takeBack` (the caller puts the text back where it was typed). `steer`
+ * hands it to the running turn, which the hub may still queue.
  */
-export async function sendMessage(agent: string, text: string, opts: { now?: boolean; takeBack?: boolean; attachments?: AttachmentUpload[] } = {}): Promise<void> {
-  const item: Outgoing = { key: ++next, agent, text, now: opts.now, attachments: opts.attachments };
+export async function sendMessage(agent: string, text: string, opts: { now?: boolean; steer?: boolean; takeBack?: boolean; attachments?: AttachmentUpload[] } = {}): Promise<void> {
+  const item: Outgoing = { key: ++next, agent, text, now: opts.now, steer: opts.steer, attachments: opts.attachments };
   set((xs) => [...xs, item]);
   try {
     await deliver(item);
@@ -74,7 +79,9 @@ export function dismiss(key: number) {
 /** What `agent`'s conversation shows from here: messages its transcript does not have yet. */
 export function useOutbox(agent: string | undefined, turns: TranscriptTurn[] | undefined): Outgoing[] {
   const all = useSyncExternalStore(subscribe, () => items);
-  const arrived = (x: Outgoing) => !!x.id && !!turns?.some((t) => t.message_id === x.id);
+  // A steered message is no turn of its own: it arrives as a `steer` item inside the running one.
+  const arrived = (x: Outgoing) =>
+    !!x.id && !!turns?.some((t) => t.message_id === x.id || t.items.some((i) => i.type === "steer" && i.message_id === x.id));
   // Once the hub's copy is in, ours goes for good (even if that message is withdrawn later).
   useEffect(() => {
     if (all.some((x) => x.agent === agent && arrived(x))) set((xs) => xs.filter((x) => !(x.agent === agent && arrived(x))));
