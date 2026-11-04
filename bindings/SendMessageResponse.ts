@@ -9,4 +9,8 @@ message_id: MessageId,
 /**
  * `true` if the message waits behind the agent's current work.
  */
-queued: boolean, };
+queued: boolean, 
+/**
+ * `true` if it went into the running turn (`agent.steered`); `queued` is then `false`.
+ */
+steered: boolean, };

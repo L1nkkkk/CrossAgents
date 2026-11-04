@@ -122,6 +122,19 @@ pub enum EventKind {
     /// A queued message was taken back before its turn started.
     #[serde(rename = "agent.input_withdrawn")]
     AgentInputWithdrawn { id: AgentId, message_id: MessageId },
+    /// A message went into the running turn instead of waiting for it to end.
+    #[serde(rename = "agent.steered")]
+    AgentSteered {
+        id: AgentId,
+        message_id: MessageId,
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[cfg_attr(feature = "ts", ts(as = "Option<Vec<crate::Attachment>>", optional))]
+        attachments: Vec<crate::Attachment>,
+    },
+    /// The model has read a message from [`Self::AgentSteered`].
+    #[serde(rename = "agent.steer_read")]
+    AgentSteerRead { id: AgentId, message_id: MessageId },
     #[serde(rename = "agent.turn_started")]
     AgentTurnStarted { id: AgentId, message_id: MessageId },
     /// Coalesced output text.
@@ -506,6 +519,8 @@ impl EventKind {
             Self::AgentStatusChanged { .. } => "agent.status_changed",
             Self::AgentInput { .. } => "agent.input",
             Self::AgentInputWithdrawn { .. } => "agent.input_withdrawn",
+            Self::AgentSteered { .. } => "agent.steered",
+            Self::AgentSteerRead { .. } => "agent.steer_read",
             Self::AgentInputUpdated { .. } => "agent.input_updated",
             Self::AgentModelChanged { .. } => "agent.model_changed",
             Self::ReminderFired { .. } => "reminder.fired",
@@ -621,6 +636,8 @@ impl EventKind {
             | Self::AgentStatusChanged { id, .. }
             | Self::AgentInput { id, .. }
             | Self::AgentInputWithdrawn { id, .. }
+            | Self::AgentSteered { id, .. }
+            | Self::AgentSteerRead { id, .. }
             | Self::AgentInputUpdated { id, .. }
             | Self::AgentModelChanged { id, .. }
             | Self::AgentTurnStarted { id, .. }

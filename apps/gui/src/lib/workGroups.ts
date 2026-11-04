@@ -111,7 +111,7 @@ export function liveActivity(items: TranscriptItem[]): string {
   const last = items[items.length - 1];
   if (!last) return "思考中";
   if (last.type === "output") return last.stream === "thought" ? "推理中" : "回复中";
-  if (last.type === "error" || last.type === "warning" || last.type === "permission") return "工作中";
+  if (last.type === "error" || last.type === "warning" || last.type === "permission" || last.type === "steer") return "工作中";
   if (last.status === "completed" || last.status === "failed") return "工作中";
   switch (category(last)) {
     case "command":
@@ -217,18 +217,25 @@ export function liveNow(items: TranscriptItem[], cwd?: string, maxLines = 3): Li
   return lines.length ? { title, output: { lines, hidden: tail.hidden } } : { title };
 }
 
-/** `text` with the working directory left out of the paths in it: `C:\w\src\a.rs` → `src\a.rs`,
- * and the directory itself as `.`. */
+/** `text` with the working directory left out of the paths in it: `C:\w\src\a.rs` → `src/a.rs`,
+ * and the directory itself as `.`. Only the path's own separators become `/`: a command's
+ * backslashes (outside the matched path) are left as they are. */
 export function relativeTo(text: string, cwd?: string): string {
   const dir = cwd?.replace(/[\\/]+$/, "");
   if (!dir) return text;
-  // Either slash, any case on Windows paths; then a separator, or the end of the path.
+  // Either slash, any case on Windows paths; then a separator, or the end of the path. What
+  // follows the separator is the rest of the path, up to a space, a quote or the end.
   const pattern = dir
     .split(/[\\/]/)
     .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
     .join("[\\\\/]");
   const flags = /^[a-z]:/i.test(dir) ? "gi" : "g";
-  return text.replace(new RegExp(`${pattern}(?:[\\\\/]|(?=["'\\s]|$))`, flags), (m) => (/[\\/]$/.test(m) ? "" : "."));
+  // A shell separator ends it too, so a second path in the same word is shortened as well.
+  const path = "(?:[\\\\/]([^\\s\"',;|&<>]*)|(?=[\"',;|&<>\\s]|$))";
+  return text.replace(new RegExp(`${pattern}${path}`, flags), (_m, rest?: string) => {
+    const tail = (rest ?? "").replace(/[\\/]+$/, "");
+    return tail ? tail.replace(/\\/g, "/") : ".";
+  });
 }
 
 /** A tool step as one short line: `$ cmd`, `✎ file`, else its title; paths inside `cwd` are shortened. */

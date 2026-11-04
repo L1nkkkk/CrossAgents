@@ -9,7 +9,7 @@ import type { Task } from "@bindings/Task";
 import type { TranscriptTurn } from "@bindings/TranscriptTurn";
 import { useActivity } from "./activity";
 import { api } from "./api";
-import { Avatar, DiffStat, FileScopeProvider, Prose, agentTitle, ago, displayName, sessionHref } from "./components";
+import { Avatar, CopyButton, DiffStat, FileScopeProvider, Prose, agentTitle, ago, displayName, sessionHref } from "./components";
 import { ChangeStat } from "./diffview";
 import { useHubData } from "./hub";
 import { sumStats } from "./lib/diff";
@@ -303,6 +303,9 @@ export function PeerMessage({ turn, agents, tree }: { turn: TranscriptTurn; agen
         <div className="peer-body">
           {found && <TaskCard task={found.task} run={found.run} agents={agents} siblings={found.tasks} />}
           <div className="peer-text">{turn.input}</div>
+          <div className="copy-row">
+            <CopyButton className="msg-copy" text={turn.input} title="复制这条消息的 markdown 原文" />
+          </div>
           {sender && (
             <div className="small muted">
               {displayName(sender)} · {agentTitle(sender)} · <a href={sessionHref(sender)}>打开</a>

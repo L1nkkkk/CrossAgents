@@ -7,6 +7,11 @@ export type SendMessageRequest = { text: string,
  */
 now?: boolean, 
 /**
+ * Hand the message to the running turn: the model reads it at its next tool boundary.
+ * Falls back to the queue when no turn runs or the driver cannot steer.
+ */
+steer?: boolean, 
+/**
  * Files sent with the message (docs/tasks/DOGFOOD.md §3): at most
  * [`MAX_ATTACHMENTS`], each at most [`MAX_ATTACHMENT_BYTES`], of [`attachment_mime_ok`]
  * types.

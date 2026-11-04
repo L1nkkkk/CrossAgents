@@ -9,9 +9,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use crossagents_core::{
-    Agent, AgentId, AgentStatus, CoreError, Driver, DriverSession, McpServerSpec, OutputStream,
-    PermissionDecision, PermissionHandler, PermissionPolicy, PermissionRequest, Role, SessionEvent,
-    SessionEventKind, SessionSpec, StopReason, ToolStatus, TurnOutcome,
+    Agent, AgentId, AgentStatus, CoreError, Driver, DriverSession, McpServerSpec, MessageId,
+    OutputStream, PermissionDecision, PermissionHandler, PermissionPolicy, PermissionRequest,
+    Prompt, Role, SessionEvent, SessionEventKind, SessionSpec, StopReason, ToolStatus, TurnOutcome,
 };
 use crossagents_drivers::codex_native::CodexNativeDriver;
 use crossagents_drivers::locate::Cli;
@@ -265,6 +265,49 @@ async fn interrupt_cancels_the_running_turn() {
     session.interrupt().await.unwrap();
     let (outcome, _, _) = turn(&*session, &mut rx, "after").await;
     assert_eq!(outcome.stop_reason, StopReason::EndTurn);
+    session.shutdown().await;
+}
+
+#[tokio::test]
+async fn steering_into_a_running_turn() {
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let driver = driver();
+    assert!(driver.capabilities().steer, "codex steers once verified");
+    let (spec, mut rx) = spec(Opts::new(home.path(), work.path()));
+    let session: Arc<dyn DriverSession> = Arc::from(driver.open(spec).await.unwrap());
+
+    let running = tokio::spawn({
+        let session = session.clone();
+        async move { session.prompt("[sleep 800]").await }
+    });
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let message_id = MessageId::new();
+    session
+        .steer(message_id, &Prompt::text("STEER BANANA"))
+        .await
+        .unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(10), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome.stop_reason, StopReason::EndTurn);
+    let (text, events) = drain(&mut rx);
+    assert!(text.contains("STEER BANANA"), "{text}");
+    assert!(
+        kinds(&events)
+            .iter()
+            .any(|kind| matches!(kind, SessionEventKind::SteerRead { message_id: id } if *id == message_id)),
+        "{:?}",
+        kinds(&events)
+    );
+
+    // Nothing runs: the driver refuses, and the hub queues the message.
+    assert!(matches!(
+        session.steer(MessageId::new(), &Prompt::text("late")).await,
+        Err(CoreError::Conflict(_))
+    ));
     session.shutdown().await;
 }
 

@@ -65,6 +65,20 @@ test("paths inside the working directory are shortened", () => {
   assert.equal(stepLine(tool("edit", "completed", "Write /w/a/n.txt") as never, "/w/a"), "✎ n.txt");
 });
 
+test("the shortened path uses /, and only inside the path", () => {
+  const cwd = "C:\\Users\\x\\repo";
+  // The bug from run-cleanup: the rest of the path kept Windows separators.
+  assert.equal(relativeTo("Read C:\\Users\\x\\repo\\crates\\orchestrator\\src", cwd), "Read crates/orchestrator/src");
+  assert.equal(stepLine(tool("read", "completed", "C:\\Users\\x\\repo\\crates\\orchestrator\\src\\main.rs") as never, cwd), "crates/orchestrator/src/main.rs");
+  // A command's own backslashes are not path separators to rewrite.
+  assert.equal(relativeTo("cd C:\\Users\\x\\repo && echo a\\b", cwd), "cd . && echo a\\b");
+  assert.equal(relativeTo("echo C:\\Users\\x\\note.txt", cwd), "echo C:\\Users\\x\\note.txt");
+  // Paths joined in one word are each shortened.
+  assert.equal(relativeTo("C:\\Users\\x\\repo\\a\\b,C:\\Users\\x\\repo\\c;C:\\Users\\x\\repo", cwd), "a/b,c;.");
+  // A trailing separator is dropped, so the file name reads as itself.
+  assert.equal(relativeTo("Read C:\\Users\\x\\repo\\sub\\", cwd), "Read sub");
+});
+
 test("calls that change the team or the code are cards, not folded steps", () => {
   const spawn = tool("mcp", "completed", "crossagents.agent_spawn");
   const claudeSpawn = tool("mcp", "completed", "mcp__crossagents__agent_spawn");

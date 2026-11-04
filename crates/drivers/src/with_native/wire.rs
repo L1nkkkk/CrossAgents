@@ -251,10 +251,12 @@ impl Turn {
             self.hidden.insert(id.to_owned());
             return Vec::new();
         }
-        let title = str_of(raw, "ch_name")
-            .or_else(|| str_of(raw, "display_name"))
-            .unwrap_or(&name)
-            .to_owned();
+        let title = tool_title(&name).map(str::to_owned).unwrap_or_else(|| {
+            str_of(raw, "ch_name")
+                .or_else(|| str_of(raw, "display_name"))
+                .unwrap_or(&name)
+                .to_owned()
+        });
         let kind = tool_kind(&name).to_owned();
         self.tools.insert(
             id.to_owned(),
@@ -360,6 +362,22 @@ fn tool_kind(name: &str) -> &'static str {
         "web_fetch" => "fetch",
         _ if name.starts_with("browser_") => "fetch",
         _ => "other",
+    }
+}
+
+/// The title a call starts with: named by what it does, not by what with-cli calls it
+/// (`ch_name` says "查找文件" for a search, which reads as the wrong thing). `None` for
+/// `other`: those keep with-cli's name.
+fn tool_title(name: &str) -> Option<&'static str> {
+    match tool_kind(name) {
+        "search" => Some("搜索"),
+        "read" if name == "list_dir" => Some("列出目录"),
+        "read" => Some("读取文件"),
+        "execute" => Some("执行命令"),
+        "edit" => Some("修改文件"),
+        "delete" => Some("删除文件"),
+        "fetch" => Some("获取网页"),
+        _ => None,
     }
 }
 
@@ -495,8 +513,9 @@ fn detail(
             }
         }
         _ => {
+            let args = without_repeated_query(args);
             if args.as_object().is_some_and(|a| !a.is_empty()) {
-                detail.arguments = serde_json::to_string_pretty(args).ok();
+                detail.arguments = serde_json::to_string_pretty(&args).ok();
             }
             detail.result = str_of(message, "content")
                 .filter(|c| !c.is_empty())
@@ -506,6 +525,22 @@ fn detail(
     }
     detail.error = failure.map(str::to_owned);
     detail
+}
+
+/// The arguments with `sub_content` / `sub_content_tip` dropped when they only repeat
+/// `query` word for word: the panel needs one copy, not three.
+fn without_repeated_query(args: &Value) -> Value {
+    let mut kept = args.clone();
+    let Some(query) = str_of(args, "query").map(str::to_owned) else {
+        return kept;
+    };
+    if let Some(map) = kept.as_object_mut() {
+        map.retain(|key, value| {
+            !matches!(key.as_str(), "sub_content" | "sub_content_tip")
+                || value.as_str() != Some(query.as_str())
+        });
+    }
+    kept
 }
 
 /// The last `max` bytes of `text`, on a character boundary.
@@ -829,6 +864,91 @@ mod tests {
         assert_eq!(detail.changes[0].path, r"C:\a.txt");
         assert_eq!(detail.changes[0].kind, "update");
         assert!(detail.changes[0].diff.contains("-hello\n+hello world"));
+    }
+
+    /// with-cli's own names say the wrong thing ("查找文件" for a search); a call is titled
+    /// by what it does. Only an `other` call keeps with-cli's name.
+    #[test]
+    fn a_call_is_titled_by_what_it_does() {
+        let cases = [
+            ("read_file", "读取文件", "读取文件"),
+            ("list_dir", "读取文件", "列出目录"),
+            ("grep_search", "查找文件", "搜索"),
+            ("web_search", "搜索网页", "搜索"),
+            ("terminal", "执行命令", "执行命令"),
+            ("replace_in_file", "编辑文件", "修改文件"),
+            ("delete_file", "删除文件", "删除文件"),
+            ("web_fetch", "抓取网页", "获取网页"),
+        ];
+        for (i, (name, ch_name, title)) in cases.into_iter().enumerate() {
+            let mut turn = Turn::default();
+            let line = format!(
+                r#"{{"type":"TOOL_CALL_START","rawEvent":{{"tool_call_id":"t{i}","name":"{name}","ch_name":"{ch_name}","display_name":"{ch_name}中","default_show":true}}}}"#
+            );
+            let started = events(&mut turn, &line);
+            let [SessionEventKind::ToolCall { title: shown, .. }] = started.as_slice() else {
+                panic!("{name}: {started:?}");
+            };
+            assert_eq!(shown.as_str(), title, "{name}");
+        }
+        let mut turn = Turn::default();
+        assert_eq!(
+            events(
+                &mut turn,
+                r#"{"type":"TOOL_CALL_START","rawEvent":{"tool_call_id":"m","name":"use_mcp_tool","ch_name":"调用 MCP","display_name":"调用中","default_show":true}}"#
+            ),
+            [SessionEventKind::ToolCall {
+                tool_call_id: "m".into(),
+                title: "调用 MCP".into(),
+                kind: Some("other".into()),
+                status: ToolStatus::InProgress,
+            }]
+        );
+    }
+
+    /// with-cli repeats a search's query in `sub_content` and `sub_content_tip`; the argument
+    /// panel shows it once. Text that says something new is kept.
+    #[test]
+    fn a_search_shows_its_query_once() {
+        fn arguments(args: &str) -> Value {
+            let mut turn = Turn::default();
+            events(
+                &mut turn,
+                r#"{"type":"TOOL_CALL_START","rawEvent":{"tool_call_id":"s","name":"grep_search","default_show":true}}"#,
+            );
+            events(
+                &mut turn,
+                &format!(
+                    r#"{{"type":"TOOL_CALL_ARGS","rawEvent":{{"tool_call_id":"s","document":{args}}}}}"#
+                ),
+            );
+            let result = events(
+                &mut turn,
+                r#"{"type":"TOOL_CALL_RESULT","rawEvent":{"tool_call_id":"s","result":{"status":"SUCCESS"}}}"#,
+            );
+            let SessionEventKind::ToolDetail { detail, .. } = &result[0] else {
+                panic!("{result:?}");
+            };
+            serde_json::from_str(detail.arguments.as_deref().expect("arguments")).expect("json")
+        }
+
+        let same = arguments(
+            r#"{"query":"relativeTo","sub_content":"relativeTo","sub_content_tip":"relativeTo","search_directory":"apps/gui/src/lib"}"#,
+        );
+        let mut keys: Vec<&str> = same
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["query", "search_directory"]);
+        assert_eq!(same["query"], "relativeTo");
+
+        let different =
+            arguments(r#"{"query":"q","sub_content":"other","sub_content_tip":"hint"}"#);
+        assert_eq!(different["sub_content"], "other");
+        assert_eq!(different["sub_content_tip"], "hint");
     }
 
     #[test]

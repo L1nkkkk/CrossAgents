@@ -672,22 +672,67 @@ function LeadFlag({ size }: { size: number }) {
   );
 }
 
-/** A shell command with a copy button. */
-export function CopyCommand({ command }: { command: string }) {
-  const [copied, setCopied] = useState(false);
+/**
+ * Copies `text` and says what happened: "已复制" when the clipboard took it, "复制失败" when it
+ * refused (no permission, no secure context) — a failed copy never reads as a success. `children`
+ * replaces the icon in front of the word, for a control that shows what it copies.
+ */
+export function CopyButton({
+  text,
+  label = "复制原文",
+  title = "复制 markdown 原文",
+  className,
+  children,
+}: {
+  text: string;
+  /** The word before anything is copied; the state words replace it. */
+  label?: string;
+  title?: string;
+  className?: string;
+  children?: ReactNode;
+}) {
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
   const copy = async () => {
+    clearTimeout(timer.current);
     try {
-      await navigator.clipboard.writeText(command);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      await navigator.clipboard.writeText(text);
+      setState("copied");
+      timer.current = setTimeout(() => setState("idle"), 1500);
     } catch {
-      // Clipboard may be unavailable; the command is visible to copy by hand.
+      // The words stay up longer: a failure has to be readable, and the text is still on screen.
+      setState("failed");
+      timer.current = setTimeout(() => setState("idle"), 4000);
     }
   };
+  const words = state === "copied" ? "已复制" : state === "failed" ? "复制失败" : label;
   return (
-    <button className="copy" onClick={copy} title="复制命令">
-      <span className="mono">{command}</span>
-      <span className="copy-state">{copied ? "已复制" : "复制"}</span>
+    <button
+      type="button"
+      className={[className, state === "idle" ? "" : state].filter(Boolean).join(" ")}
+      onClick={copy}
+      title={
+        state === "copied"
+          ? "已复制到剪贴板"
+          : state === "failed"
+            ? `${title}失败：剪贴板不可用，请选中文字手动复制`
+            : title
+      }
+    >
+      {children ?? (state === "copied" ? <Check size={12} aria-hidden="true" /> : state === "failed" ? <X size={12} aria-hidden="true" /> : <Copy size={12} aria-hidden="true" />)}
+      <span className="copy-state" role="status" aria-live="polite">
+        {words}
+      </span>
     </button>
+  );
+}
+
+/** A shell command with a copy button. */
+export function CopyCommand({ command }: { command: string }) {
+  return (
+    <CopyButton className="copy" text={command} label="复制" title="复制命令">
+      <span className="mono">{command}</span>
+    </CopyButton>
   );
 }

@@ -163,6 +163,11 @@ pub struct SendMessageRequest {
     #[serde(default)]
     #[ts(optional)]
     pub now: Option<bool>,
+    /// Hand the message to the running turn: the model reads it at its next tool boundary.
+    /// Falls back to the queue when no turn runs or the driver cannot steer.
+    #[serde(default)]
+    #[ts(optional)]
+    pub steer: Option<bool>,
     /// Files sent with the message (docs/tasks/DOGFOOD.md §3): at most
     /// [`MAX_ATTACHMENTS`], each at most [`MAX_ATTACHMENT_BYTES`], of [`attachment_mime_ok`]
     /// types.
@@ -234,6 +239,9 @@ pub struct SendMessageResponse {
     pub message_id: crossagents_core::MessageId,
     /// `true` if the message waits behind the agent's current work.
     pub queued: bool,
+    /// `true` if it went into the running turn (`agent.steered`); `queued` is then `false`.
+    #[serde(default)]
+    pub steered: bool,
 }
 
 /// A session's conversation, rebuilt from its events and grouped by turn.
@@ -449,6 +457,15 @@ pub enum TranscriptItem {
         kind: String,
         title: String,
         decision: crossagents_core::PermissionDecision,
+    },
+    /// A message put into this turn while it ran. `read` once the model has seen it.
+    Steer {
+        message_id: crossagents_core::MessageId,
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(as = "Option<Vec<crossagents_core::Attachment>>", optional)]
+        attachments: Vec<crossagents_core::Attachment>,
+        read: bool,
     },
     /// Worth showing, but nothing failed.
     Warning {

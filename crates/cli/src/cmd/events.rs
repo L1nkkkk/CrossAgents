@@ -116,6 +116,12 @@ pub fn summary(kind: &EventKind) -> String {
         EventKind::AgentInputWithdrawn { id, message_id } => {
             format!("{} withdrew {}", short(id), short(message_id))
         }
+        EventKind::AgentSteered { id, text, .. } => {
+            format!("{} steered {}", short(id), one_line(text))
+        }
+        EventKind::AgentSteerRead { id, message_id } => {
+            format!("{} read {}", short(id), short(message_id))
+        }
         EventKind::AgentInputUpdated { id, text, .. } => {
             format!("{} digest {}", short(id), one_line(text))
         }

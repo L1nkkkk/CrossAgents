@@ -1,0 +1,36 @@
+/* A message in the conversation (views/SessionMessage.tsx, parts.tsx PeerMessage): a person's
+   words as markdown inside their bubble, and the copy control a message carries. styles.css
+   loads after some component CSS, so anything overriding one of its rules is scoped to .turn. */
+
+/* A person's message rendered as markdown: the bubble's own voice and size, the writer's line
+   breaks kept, and code and quotes set against the sunk bubble rather than blending into it. */
+.turn .bubble-md { white-space: normal; }
+.turn .bubble-md .prose { font-size: inherit; line-height: 1.6; white-space: normal; }
+.turn .bubble-md .prose p { margin: 0 0 0.55em; white-space: pre-wrap; }
+.turn .bubble-md .prose > :first-child { margin-top: 0; }
+.turn .bubble-md .prose > :last-child { margin-bottom: 0; }
+.turn .bubble-md .prose pre { background: var(--surface); border: 1px solid var(--border); }
+.turn .bubble-md .prose code { background: var(--surface); }
+.turn .bubble-md .prose a { text-decoration: underline; text-underline-offset: 2px; }
+
+/* The copy control and the fold toggles sit under the text, on their own row, so neither a long
+   message nor a narrow window has its text squeezed by them. */
+.turn .bubble-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 4px; white-space: normal; }
+.turn .bubble-foot .tools-more { padding: 0; margin: 0; }
+.turn .bubble-foot .msg-copy { margin-left: auto; }
+.copy-row { display: flex; justify-content: flex-end; min-width: 0; margin-top: 2px; }
+
+/* Quiet until looked at: faded at rest, clear on hover and on keyboard focus, and it keeps its
+   place either way (opacity, not visibility), so nothing shifts and Tab always reaches it. */
+.turn .msg-copy {
+  display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px;
+  border-color: transparent; background: none; color: var(--muted);
+  font-size: 11.5px; line-height: 1.6;
+  opacity: 0.45; transition: opacity 0.12s, color 0.12s, background-color 0.12s;
+}
+.turn .msg-copy:hover:not(:disabled), .turn .msg-copy:focus-visible { opacity: 1; background: var(--hover); color: var(--text-2); }
+.turn .msg-copy:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.turn .msg-copy .copy-state { padding: 0; background: none; color: inherit; font-size: inherit; }
+.turn .msg-copy.copied { opacity: 1; color: var(--ok-text); }
+/* The clipboard refused: say so in the danger colour, never in the success one. */
+.turn .msg-copy.failed { opacity: 1; color: var(--danger-text); }

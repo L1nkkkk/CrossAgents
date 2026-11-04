@@ -95,7 +95,8 @@ and do not retry landing. Call run_finish, say that the result remains on the ru
 and leave landing to the person.";
 
 const WORKER: &str = "As a WORKER on a task: do exactly what the task's spec asks, in your \
-working directory (the task's own git worktree). Do not commit; the hub does. Report with the \
+working directory (the task's own git worktree). Do not commit; the hub does. For a big file, \
+grep for what you need, then read that range; do not read it whole. Report with the \
 task_id from your task: `task_progress` for a short status now and then, `task_ask` if the spec \
 is unclear (then end your turn and wait for the answer; asking again replaces the open \
 question), `task_complete` with a summary of what \
