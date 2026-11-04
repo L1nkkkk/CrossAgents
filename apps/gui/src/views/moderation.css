@@ -1,0 +1,72 @@
+/* The gateway-moderation reminder over the composer (src/views/SessionModeration.tsx). */
+
+.moderation-bar {
+  max-width: 780px;
+  width: calc(100% - 48px);
+  margin: 0 auto 8px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--warn) 42%, transparent);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--warn) 8%, var(--surface));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.moderation-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--warn-text);
+}
+
+.moderation-head .spacer {
+  flex: 1;
+}
+
+.moderation-bar p {
+  margin: 0;
+  color: var(--text-2);
+  line-height: 1.55;
+}
+
+.moderation-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+.moderation-why {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.moderation-error {
+  color: var(--danger-text);
+}
+
+/* Inside the transcript's error line: normal paragraphs, then the gateway's own words. */
+.moderation-why-text {
+  white-space: normal;
+  color: var(--text);
+}
+
+.moderation-why-text p {
+  margin: 0 0 6px;
+}
+
+.moderation-raw {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+  background: var(--surface-sunk);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
