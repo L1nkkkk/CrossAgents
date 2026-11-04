@@ -849,6 +849,89 @@ async fn deleting_after_release_failure_keeps_checkout_and_targets() {
     assert!(target.join("cache").exists());
 }
 
+/// run-cleanup ①: a run that ended loses its build directories, except the tree of a task
+/// still being verified, whose checks may be writing there.
+#[tokio::test]
+async fn a_finished_run_loses_its_targets_but_not_a_verifying_tree() {
+    let f = Fixture::new(&[]).await;
+    let targets = f.worktrees.join(short(&f.run.id)).join("targets");
+    for tree in ["a", "integration", "gone"] {
+        std::fs::create_dir_all(targets.join(tree)).unwrap();
+        std::fs::write(targets.join(tree).join("cache"), "compiled").unwrap();
+    }
+    let mut task = f.task().await;
+    task.status = TaskStatus::Verifying;
+    f.store.update_task(&task).await.unwrap();
+
+    // Still open: nothing goes.
+    f.orchestrator.remove_finished_targets(&f.run().await).await;
+    assert!(targets.join("integration/cache").exists());
+
+    let mut run = f.run().await;
+    run.status = RunStatus::Completed;
+    f.store.update_run(&run).await.unwrap();
+    f.orchestrator.remove_finished_targets(&run).await;
+    assert!(targets.join("a/cache").exists(), "#a is being verified");
+    assert!(!targets.join("integration").exists());
+    assert!(!targets.join("gone").exists());
+    assert!(
+        task.worktree.unwrap().exists(),
+        "only build directories go, not checkouts"
+    );
+
+    // Its checks done, the last one goes too.
+    let mut task = f.task().await;
+    task.status = TaskStatus::Passed;
+    f.store.update_task(&task).await.unwrap();
+    f.orchestrator.remove_finished_targets(&run).await;
+    assert!(!targets.exists());
+}
+
+/// run-cleanup ③: at startup, a `<short>` directory no run owns (a delete Windows did not let
+/// finish) goes, and so do the build directories of runs that ended; an open run's, an
+/// agent's directory and a tree being verified stay.
+#[tokio::test]
+async fn the_startup_sweep_retries_what_a_cleanup_left_behind() {
+    let f = Fixture::new(&[]).await;
+    let orphan = f.worktrees.join("deadbeef");
+    std::fs::create_dir_all(orphan.join("integration/src")).unwrap();
+    std::fs::create_dir_all(orphan.join("targets/integration")).unwrap();
+    // An agent still lives in another orphaned directory: never pulled out from under it.
+    let lived_in = f.worktrees.join("cafef00d").join("integration");
+    std::fs::create_dir_all(&lived_in).unwrap();
+    let mut resident = agent("Mo", Role::Worker, &f.run.repo);
+    resident.cwd = lived_in.clone();
+    f.store.insert_agent(&resident).await.unwrap();
+    // The fixture's run is open: its build directory stays.
+    let open_target = f.worktrees.join(short(&f.run.id)).join("targets/a");
+    std::fs::create_dir_all(&open_target).unwrap();
+    // A run that ended, with one tree still being verified.
+    let mut ended = f.run().await;
+    ended.id = RunId::new();
+    ended.status = RunStatus::Failed;
+    ended.branch = "crossagents/ended".into();
+    f.store.insert_run(&ended).await.unwrap();
+    let ended_targets = f.worktrees.join(short(&ended.id)).join("targets");
+    let mut verifying = f.task().await;
+    verifying.id = TaskId::new();
+    verifying.run_id = ended.id;
+    verifying.key = "v".into();
+    verifying.status = TaskStatus::Verifying;
+    verifying.worktree = Some(f.worktrees.join(short(&ended.id)).join("v"));
+    f.store.insert_task(&verifying).await.unwrap();
+    for tree in ["v", "integration"] {
+        std::fs::create_dir_all(ended_targets.join(tree)).unwrap();
+    }
+
+    f.orchestrator.sweep_worktrees().await;
+
+    assert!(!orphan.exists(), "no run owns it");
+    assert!(lived_in.exists(), "an agent's directory stays");
+    assert!(open_target.exists(), "an open run's build directory stays");
+    assert!(ended_targets.join("v").exists(), "a tree being verified stays");
+    assert!(!ended_targets.join("integration").exists());
+}
+
 /// USAGE-TRIM §3.3: a child run that ended before its start notice was written still leaves
 /// its result for the source chat, not a stale "started"; nothing wakes the chat.
 #[tokio::test]

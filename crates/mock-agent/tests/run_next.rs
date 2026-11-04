@@ -108,7 +108,8 @@ async fn unlanded_round_stacks_and_lands_ancestors_without_moving_lead() {
     assert_eq!(t.agent("Pia").await.id, before.id);
     assert!(checkout.join("first.txt").exists());
     assert!(checkout.join("second.txt").exists());
-    assert!(marker.exists());
+    // Each round's finish reclaims the build trees; the checkout stays for the next round.
+    assert!(!marker.exists(), "finish reclaims the group's targets");
     assert!(!repo.path().join("first.txt").exists());
     assert!(w.output().contains("Previous rounds in this work group"));
     assert!(w.output().contains("Added first.txt"));
@@ -144,11 +145,16 @@ async fn landed_round_and_explicit_base_start_from_current_baseline() {
         let checkout = t.agent("Pia").await.cwd;
         if landed {
             land(&t, &first).await;
+            // Landed into base, last round, clean, lead idle: the checkout goes and Pia is
+            // back in the repository; the next round builds a new checkout.
+            assert!(!checkout.exists(), "landing removed the checkout");
+            assert_eq!(t.agent("Pia").await.cwd, repo.path());
         }
         let second = round(&t, &work, change("second.txt"), (!landed).then_some("base")).await;
         completed(&mut w, &second).await;
         assert_eq!(second["base_branch"], "main");
-        assert_eq!(t.agent("Pia").await.cwd, checkout);
+        let lead = t.agent(second["planner"].as_str().unwrap()).await;
+        assert_eq!(lead.cwd, checkout);
         assert_eq!(checkout.join("first.txt").exists(), landed);
         land(&t, &second).await;
         assert_eq!(repo.path().join("first.txt").exists(), landed);
@@ -357,6 +363,49 @@ async fn run_next_after_cleanup_builds_a_new_checkout_from_the_unlanded_branch()
     assert!(checkout.exists(), "the round made itself a checkout");
     assert!(checkout.join("first.txt").exists());
     assert!(checkout.join("second.txt").exists());
+}
+
+#[tokio::test]
+async fn after_landing_the_checkout_is_deleted_then_run_next_works() {
+    let repo = git_repo();
+    let t = TestHub::start().await;
+    let work = setup(&t, repo.path()).await;
+    let mut w = t.watch().await;
+    let first = round(&t, &work, change("first.txt"), None).await;
+    completed(&mut w, &first).await;
+    let checkout = t.agent("Pia").await.cwd;
+    land(&t, &first).await;
+    assert!(repo.path().join("first.txt").exists());
+    assert!(!checkout.exists(), "landing took the checkout away");
+    assert_eq!(t.agent("Pia").await.cwd, repo.path());
+    t.send(
+        "Pia",
+        &call(
+            "run_next",
+            json!({"title":"second", "request":change("second.txt")}),
+        ),
+    )
+    .await;
+    let event = w
+        .until(
+            "next round",
+            |e| matches!(&e.kind, EventKind::RunCreated { run } if run.title == "second"),
+        )
+        .await;
+    let EventKind::RunCreated { run } = event.kind else {
+        unreachable!()
+    };
+    let second = serde_json::to_value(run).unwrap();
+    assert_eq!(second["work_id"], first["work_id"]);
+    assert_eq!(second["base_branch"], "main", "a landed round starts from base");
+    completed(&mut w, &second).await;
+    let lead = t.agent(second["planner"].as_str().unwrap()).await;
+    assert_eq!(lead.cwd, checkout);
+    assert!(checkout.exists(), "the round made itself a new checkout");
+    assert!(checkout.join("first.txt").exists());
+    assert!(checkout.join("second.txt").exists());
+    land(&t, &second).await;
+    assert!(repo.path().join("second.txt").exists());
 }
 
 #[tokio::test]

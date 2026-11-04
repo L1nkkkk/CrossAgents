@@ -171,7 +171,9 @@ async fn a_run_that_is_still_open_must_be_cancelled_first() {
 }
 
 /// R1 §3.4: a landed run takes its branches with it, leaves `/v1/runs`, and says so on the
-/// event stream. Finishing retains the lead; deleting archives it and removes the tree.
+/// event stream. Finishing retains the lead and its checkout but reclaims the build trees;
+/// landing (last round, clean checkout, idle lead) archives the copy and removes the
+/// checkout, so deleting is left with the branches.
 #[tokio::test]
 async fn a_landed_run_goes_with_its_worktrees_branches_and_lead() {
     let (repo, t) = setup().await;
@@ -189,8 +191,9 @@ async fn a_landed_run_goes_with_its_worktrees_branches_and_lead() {
     assert_eq!(branches(repo.path()), vec![branch.clone()]);
 
     finish_with_a_change(&t, &run).await;
-    // Finishing retains both the lead and its checkout.
+    // Finishing retains both the lead and its checkout; the build trees are reclaimed.
     assert!(Path::new(&checkout).is_dir(), "finish retains the checkout");
+    assert!(!targets.exists(), "finish reclaims every tree's targets");
     let copy = agent(&t, &lead).await;
     assert!(copy["archived_at"].is_null(), "{copy}");
     assert_eq!(
@@ -204,6 +207,10 @@ async fn a_landed_run_goes_with_its_worktrees_branches_and_lead() {
         .await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     assert!(repo.path().join("notes.txt").exists(), "landed on main");
+    // Landed into base: the checkout has nothing left to give, so it goes with the copy.
+    assert!(!Path::new(&checkout).exists(), "landing removes the checkout");
+    let landed = agent(&t, &lead).await;
+    assert!(!landed["archived_at"].is_null(), "{landed}");
 
     let mut w = t.watch().await;
     let resp = t.delete(&format!("/v1/runs/{id}")).await;
@@ -216,8 +223,8 @@ async fn a_landed_run_goes_with_its_worktrees_branches_and_lead() {
         !targets.exists(),
         "delete reclaims every tree's targets in one call"
     );
-    // Deletion, rather than finishing, archives the retained copy.
-    assert_eq!(done["agents"]["archived"], json!([copy["name"]]), "{done}");
+    // Landing already archived the copy; deleting has no session left to release.
+    assert_eq!(done["agents"]["archived"], json!([]), "{done}");
     assert_eq!(done["agents"]["returned"], json!([]), "{done}");
 
     w.until(
@@ -477,6 +484,10 @@ async fn a_copy_restored_after_its_run_is_deleted_says_its_context_is_gone() {
     assert!(copy["config"].get("context_lost").is_none(), "{copy}");
 }
 
+/// A finished, unlanded run keeps its checkout and lead: the person may still talk to the lead
+/// there, and the branch is all its changes exist in. Only the build trees under `targets/`
+/// go at finish (they are rebuilt on demand and are what fills the disk); the checkout waits
+/// for landing or for an explicit cleanup.
 #[tokio::test]
 async fn finished_workspace_stays_usable_until_explicit_cleanup() {
     let (_repo, t) = setup().await;
@@ -494,7 +505,8 @@ async fn finished_workspace_stays_usable_until_explicit_cleanup() {
     finish_with_a_change(&t, &run).await;
     assert!(agent(&t, lead).await["archived_at"].is_null());
     assert!(checkout.join("notes.txt").exists());
-    assert!(targets.join("cache").exists());
+    // Finishing reclaimed the build trees (no task is Verifying), not the checkout.
+    assert!(!targets.exists(), "finish reclaims the run's targets");
     assert!(
         t.hub
             .bus

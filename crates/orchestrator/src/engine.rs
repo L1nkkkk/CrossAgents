@@ -167,6 +167,9 @@ pub struct Orchestrator {
     /// Leads copied for a run, to be archived once the turn that closed it ends; their
     /// checkout goes when they are (`lead_left`).
     pub(crate) leaving: std::sync::Mutex<std::collections::HashSet<AgentId>>,
+    /// Landed runs whose checkout goes once their lead's turn ends (`cleanup_after_land`),
+    /// by lead: a lead that lands with `run_land` is mid-turn in that very checkout.
+    pub(crate) land_cleanup: std::sync::Mutex<HashMap<AgentId, RunId>>,
     /// Commands agents are running now (`crate::running`).
     pub(crate) running: std::sync::Mutex<crate::running::RunningCommands>,
     /// What an agent's current turn failed with, until the turn ends: the stalled notice
@@ -192,7 +195,9 @@ pub(crate) fn tree_name(path: &Path) -> String {
 /// The build directories tasks being verified may still be using, by run (`short` id) and tree:
 /// their checkouts can go while the checks run (a run cancelled mid-verification, say), and
 /// deleting what a check is writing to breaks it.
-async fn targets_in_use(store: &dyn Store) -> HashMap<String, std::collections::HashSet<String>> {
+pub(crate) async fn targets_in_use(
+    store: &dyn Store,
+) -> HashMap<String, std::collections::HashSet<String>> {
     let mut keep: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     let Ok(runs) = store.list_runs().await else {
         return keep;
@@ -206,9 +211,18 @@ async fn targets_in_use(store: &dyn Store) -> HashMap<String, std::collections::
             .filter(|t| t.status == TaskStatus::Verifying)
         {
             if let Some(path) = &task.worktree {
+                let tree = tree_name(path);
                 keep.entry(short(run.id))
                     .or_default()
-                    .insert(tree_name(path));
+                    .insert(tree.clone());
+                // A later round's checkouts live under the first round's directory.
+                if let Some(dir) = path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                {
+                    keep.entry(dir).or_default().insert(tree);
+                }
             }
         }
     }
@@ -238,6 +252,7 @@ impl Orchestrator {
             contexts: std::sync::Mutex::default(),
             projects_lock: Mutex::default(),
             leaving: std::sync::Mutex::default(),
+            land_cleanup: std::sync::Mutex::default(),
             running: std::sync::Mutex::default(),
             turn_errors: std::sync::Mutex::default(),
         })
@@ -1783,6 +1798,120 @@ The person changed: {}",
             .collect()
     }
 
+    /// A run that ended needs no build directory: every tree's under its `targets` goes (its
+    /// own key's and, for a later round, the first round's key it builds under), except the
+    /// trees of tasks still being verified, whose checks may be writing there. A key an open
+    /// run builds under is left alone. Whatever cannot go now (Windows holding a file) is
+    /// logged and retried by [`Self::sweep_worktrees`] at the next start.
+    pub(crate) async fn remove_finished_targets(&self, run: &Run) {
+        if run.in_place || !run.status.is_terminal() {
+            return;
+        }
+        let runs = self.store.list_runs().await.unwrap_or_default();
+        let open: std::collections::HashSet<String> = runs
+            .iter()
+            .filter(|r| !r.status.is_terminal() && !r.in_place)
+            .flat_map(|r| [short(r.id), self.integration_key(r)])
+            .collect();
+        let mut keys = vec![short(run.id)];
+        let key = self.integration_key(run);
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+        keys.retain(|k| !open.contains(k));
+        if keys.is_empty() {
+            return;
+        }
+        let in_use = targets_in_use(self.store.as_ref()).await;
+        let root = self.config.worktrees.clone();
+        let removed = tokio::task::spawn_blocking(move || {
+            let mut gone = Vec::new();
+            for key in keys {
+                let keep = in_use.get(&key).cloned().unwrap_or_default();
+                gone.extend(crate::workspace::remove_run_targets_except(&root, &key, &keep));
+            }
+            gone
+        })
+        .await;
+        for (dir, size) in removed.unwrap_or_default() {
+            tracing::info!(run = %run.id, dir = %dir.display(), gb = size >> 30, "removed a finished run's build directory");
+        }
+        self.prune_build_cache();
+    }
+
+    /// At startup: what an earlier cleanup could not delete (Windows holds files an agent's
+    /// process had open) is tried again. Beyond what [`Self::prune_build_cache`] already
+    /// reclaims, this removes
+    /// - `<worktrees>/<short>` directories no run owns any more (a delete that could not
+    ///   finish), unless an agent lives in one;
+    /// - the build directories of runs that ended ([`Self::remove_finished_targets`]);
+    /// - the checkout of a landed run that is the last of its group
+    ///   ([`Self::cleanup_after_land`]), which keeps it when it has uncommitted changes.
+    ///
+    /// It never touches an open run, an agent's directory or home, or a tree being verified.
+    pub async fn sweep_worktrees(&self) {
+        let root = self.config.worktrees.clone();
+        let (Ok(runs), Ok(agents)) = (self.store.list_runs().await, self.store.list_agents().await)
+        else {
+            return;
+        };
+        let known: std::collections::HashSet<String> = runs
+            .iter()
+            .flat_map(|r| [short(r.id), self.integration_key(r)])
+            .collect();
+        let entries = std::fs::read_dir(&root)
+            .map(|d| d.flatten().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut removed_any = false;
+        for entry in entries {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let path = entry.path();
+            if !path.is_dir()
+                || name == "targets"
+                || name.starts_with('.')
+                || known.contains(&name)
+                || agents
+                    .iter()
+                    .any(|a| a.cwd.starts_with(&path) || a.home().starts_with(&path))
+            {
+                continue;
+            }
+            let gone = path.clone();
+            match tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&gone)).await {
+                Ok(Ok(())) => {
+                    removed_any = true;
+                    tracing::info!(dir = %path.display(), "removed a directory no run owns");
+                }
+                Ok(Err(err)) => tracing::warn!(
+                    dir = %path.display(),
+                    error = %err,
+                    "cannot remove a directory no run owns; retrying at the next startup"
+                ),
+                Err(_) => {}
+            }
+        }
+        if removed_any {
+            // Git still lists the working copies that were in them.
+            let mut repos: Vec<&Path> = runs.iter().map(|r| r.repo.as_path()).collect();
+            repos.sort();
+            repos.dedup();
+            for repo in repos {
+                if let Err(err) = self.workspaces.prune(repo).await {
+                    tracing::debug!(repo = %repo.display(), error = %err, "cannot prune worktrees");
+                }
+            }
+        }
+        for run in runs
+            .iter()
+            .filter(|r| r.status.is_terminal() && !r.in_place)
+        {
+            if run.landed.is_some() {
+                self.cleanup_after_land(run.id).await;
+            }
+            self.remove_finished_targets(run).await;
+        }
+    }
+
     /// Removes build directories nothing can be using, in the background (it walks gigabytes),
     /// then says whether what is left is over the soft budget: what is still in use is never
     /// deleted for the budget's sake, so being over it is a warning, not an action.
@@ -1976,7 +2105,14 @@ The person changed: {}",
                             ..
                         } => {
                             let this = this.clone();
-                            tokio::spawn(async move { this.settle_continuation(id).await });
+                            tokio::spawn(async move {
+                                this.settle_continuation(id).await;
+                                // A landing waited for this turn to end to remove its checkout.
+                                let landed = this.land_cleanup.lock().unwrap().remove(&id);
+                                if let Some(run) = landed {
+                                    this.cleanup_after_land(run).await;
+                                }
+                            });
                         }
                         EventKind::AgentStatusChanged {
                             id,

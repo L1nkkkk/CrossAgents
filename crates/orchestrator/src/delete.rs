@@ -67,6 +67,117 @@ impl Orchestrator {
         self.clean_run(id, opts, true).await
     }
 
+    /// A run that ended and landed in its base has nothing left in its checkout that is not
+    /// on the base: the checkout goes, the way [`Self::cleanup_run`] does it (the lead goes
+    /// home, or is archived when it was copied for the run). Only for the last round of its
+    /// group: a later round may still live there. It waits for the lead's turn to end (the
+    /// lead lands mid-turn, from that very checkout), and keeps a checkout with uncommitted
+    /// changes, saying so in the log. The branch stays; `run_next` builds a new checkout from
+    /// it. Called after the run's locks are let go: it takes them itself.
+    pub(crate) async fn cleanup_after_land(&self, id: RunId) {
+        if let Err(err) = self.try_cleanup_after_land(id).await {
+            tracing::warn!(run = %id, error = %err, "cannot clean up the landed run's checkout");
+        }
+    }
+
+    async fn try_cleanup_after_land(&self, id: RunId) -> Result<(), CoreError> {
+        let run = self.store.get_run(id).await?;
+        if run.in_place || run.landed.is_none() || !run.status.is_terminal() {
+            return Ok(());
+        }
+        if run.work_id.is_some()
+            && self
+                .store
+                .list_runs()
+                .await?
+                .into_iter()
+                .find(|r| r.work_id == run.work_id)
+                .is_some_and(|latest| latest.id != id)
+        {
+            return Ok(());
+        }
+        let dir = self.integration_path(&run);
+        if !dir.exists() || !self.owns_checkout(&run, &dir) {
+            return Ok(());
+        }
+        let dirty = self.checkout_changes(&run).await?;
+        if !dirty.is_empty() {
+            tracing::warn!(
+                run = %id,
+                dir = %dir.display(),
+                files = %dirty.join(", "),
+                "the landed run's checkout has uncommitted changes; keeping it"
+            );
+            return Ok(());
+        }
+        let lead = self
+            .store
+            .get_agent(&AgentKey::Id(run.planner))
+            .await
+            .ok()
+            .filter(|l| l.cwd == dir && l.archived_at.is_none());
+        let copied = run
+            .lead_note
+            .as_deref()
+            .is_some_and(|n| n.contains(crate::engine::COPIED_LEAD_NOTE));
+        let mut lost = false;
+        if let Some(lead) = &lead {
+            if self.host.is_busy(lead.id).await {
+                self.land_cleanup.lock().unwrap().insert(lead.id, id);
+                // Its turn may have ended in between, with nobody left to notice.
+                if self.host.is_busy(lead.id).await
+                    || self.land_cleanup.lock().unwrap().remove(&lead.id).is_none()
+                {
+                    tracing::info!(run = %id, lead = %lead.name, "the landed run's checkout goes once its lead's turn ends");
+                    return Ok(());
+                }
+            }
+            lost = !copied
+                && self.store.last_session_id(lead.id).await?.is_some()
+                && !self.host.can_move(lead).await;
+        }
+        let done = self.cleanup_run(id, false).await?;
+        for warning in &done.warnings {
+            tracing::warn!(run = %id, warning = %warning, "after landing: keeping part of the run's checkout");
+        }
+        if !done.worktrees.is_empty() {
+            tracing::info!(run = %id, removed = %done.worktrees.join(", "), "removed the landed run's checkout");
+        }
+        if lost && let Some(lead) = lead {
+            let moved = self.store.get_agent(&AgentKey::Id(lead.id)).await?;
+            if moved.cwd != dir {
+                self.mark_context_lost(
+                    moved,
+                    format!(
+                        "run「{}」落地后清理了执行目录 {}，{} 的驱动只能在原目录延续会话",
+                        run.title,
+                        dir.display(),
+                        lead.name
+                    ),
+                )
+                .await;
+            }
+        }
+        Ok(())
+    }
+
+    /// Marks that `agent`'s next session cannot carry on its conversation
+    /// ([`crossagents_core::CONTEXT_LOST`]), saying why.
+    async fn mark_context_lost(&self, mut agent: crossagents_core::Agent, why: String) {
+        if !agent.config.is_object() {
+            agent.config = serde_json::json!({});
+        }
+        let config = agent.config.as_object_mut().expect("an object");
+        config.insert(crossagents_core::CONTEXT_LOST.into(), why.into());
+        if let Err(err) = self
+            .store
+            .update_agent_config(agent.id, &agent.config)
+            .await
+        {
+            tracing::warn!(agent = %agent.name, error = %err, "cannot mark the lost context");
+        }
+    }
+
     async fn clean_run(
         &self,
         id: RunId,

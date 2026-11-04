@@ -240,6 +240,12 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     let _ = setup.orchestrator.set(orchestrator.clone());
     orchestrator.watch();
     orchestrator.prune_build_cache();
+    // Retry what an earlier hub could not delete (a Windows lock on a build directory, a
+    // checkout whose lead was mid-turn when the hub stopped).
+    {
+        let orchestrator = orchestrator.clone();
+        tokio::spawn(async move { orchestrator.sweep_worktrees().await });
+    }
     // Settle what runs spent while no hub was there (agents' replayed usage included) before
     // anything is dispatched: an over-budget run pauses first (docs/tasks/DOGFOOD.md §5).
     let budgets = Arc::new(

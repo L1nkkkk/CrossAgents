@@ -922,7 +922,9 @@ fn remove_build_dir(dir: &Path, size: u64) -> Option<(PathBuf, u64)> {
         .parent()?
         .join(format!(".trash-{name}-{}", std::process::id()));
     if let Err(err) = std::fs::rename(dir, &trash) {
-        tracing::debug!(dir = %dir.display(), error = %err, "build directory busy; keeping it");
+        // Not silent: on Windows a process still holding a file refuses the rename. The
+        // directory stays, and the hub's startup sweep (`prune_build_cache`) tries again.
+        tracing::warn!(dir = %dir.display(), error = %err, "build directory busy; keeping it, retrying at the next startup");
         return None;
     }
     if let Err(err) = std::fs::remove_dir_all(&trash) {
@@ -1071,6 +1073,48 @@ pub fn remove_run_build_dirs(root: &Path, run: &str) -> Vec<(PathBuf, u64)> {
         }
     }
     let _ = std::fs::remove_dir(root.join(run));
+    removed
+}
+
+/// The build directories of a run that has ended: every `<run>/targets/*` except the trees
+/// `keep` names (a task still being verified builds there), whether or not their checkout is
+/// still there - a finished run builds nothing more, and a build directory is rebuilt by the
+/// next build that needs it. Leftovers of an earlier delete (`.trash-*`) go too, and
+/// `targets` itself once it is empty. The checkouts and the run's directory stay. What could
+/// not be removed is logged ([`remove_build_dir`]) and retried at the next startup. Blocking:
+/// sizes what it removes.
+pub fn remove_run_targets_except(
+    root: &Path,
+    run: &str,
+    keep: &std::collections::HashSet<String>,
+) -> Vec<(PathBuf, u64)> {
+    let mut removed = Vec::new();
+    let targets = worktree_path(root, run, SHARED_TARGETS);
+    let Ok(entries) = std::fs::read_dir(&targets) else {
+        return removed;
+    };
+    for dir in entries.flatten().map(|e| e.path()) {
+        if is_trash(&dir) {
+            if let Err(err) = std::fs::remove_dir_all(&dir) {
+                tracing::warn!(dir = %dir.display(), error = %err, "cannot finish removing a build directory; retrying at the next startup");
+            }
+            continue;
+        }
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(tree) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        if keep.contains(&tree) {
+            continue;
+        }
+        let size = dir_size(&dir);
+        if let Some(gone) = remove_build_dir(&dir, size) {
+            removed.push(gone);
+        }
+    }
+    let _ = std::fs::remove_dir(&targets);
     removed
 }
 
@@ -1290,6 +1334,41 @@ mod tests {
         );
         assert!(task.exists(), "a task still builds there");
         assert!(integration.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn a_finished_run_loses_every_build_directory_but_the_verifying_ones() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("worktrees");
+        let run = "ab12cd34";
+        let (integration, task, verifying) = (
+            target_dir(&root, run, "integration"),
+            target_dir(&root, run, "auth"),
+            target_dir(&root, run, "api"),
+        );
+        for dir in [&integration, &task, &verifying] {
+            built(dir, 10);
+        }
+        // The checkouts are still there: a finished run's build dirs go regardless.
+        std::fs::create_dir_all(worktree_path(&root, run, "integration")).unwrap();
+        std::fs::create_dir_all(worktree_path(&root, run, "auth")).unwrap();
+
+        let keep = std::collections::HashSet::from(["api".to_owned()]);
+        let mut gone = remove_run_targets_except(&root, run, &keep);
+        gone.sort();
+        let mut want = vec![(task.clone(), 10), (integration.clone(), 10)];
+        want.sort();
+        assert_eq!(gone, want);
+        assert!(verifying.exists(), "a tree being verified is kept");
+        assert!(worktree_path(&root, run, "integration").exists());
+
+        // Its checks done, the last one goes, and `targets` with it.
+        assert_eq!(
+            remove_run_targets_except(&root, run, &std::collections::HashSet::new()),
+            [(verifying.clone(), 10)]
+        );
+        assert!(!verifying.parent().unwrap().exists());
+        assert!(worktree_path(&root, run, "auth").exists());
     }
 
     #[test]

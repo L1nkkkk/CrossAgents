@@ -167,6 +167,17 @@ impl Orchestrator {
         caller: &Agent,
         input: Value,
     ) -> Result<Value, CoreError> {
+        let id = self.led_run(caller).await?.id;
+        let out = self.land_as_lead(caller, input).await?;
+        // Out of the run's locks: the cleanup takes them. The lead is mid-turn here, so a
+        // finished run's checkout goes once that turn ends.
+        if !out["landed"].is_null() {
+            self.cleanup_after_land(id).await;
+        }
+        Ok(out)
+    }
+
+    async fn land_as_lead(&self, caller: &Agent, input: Value) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
         struct A {
             #[serde(default)]
@@ -261,6 +272,22 @@ impl Orchestrator {
         by: &str,
         message: Option<&str>,
     ) -> Result<LandOutcome, CoreError> {
+        let outcome = self.land_locked(id, mode, by, message).await?;
+        // What landed is on the base now: a finished run's checkout goes (cleanup_after_land),
+        // out of the run's locks, which the cleanup takes itself.
+        if matches!(outcome, LandOutcome::Landed(_)) {
+            self.cleanup_after_land(id).await;
+        }
+        Ok(outcome)
+    }
+
+    async fn land_locked(
+        &self,
+        id: RunId,
+        mode: LandMode,
+        by: &str,
+        message: Option<&str>,
+    ) -> Result<LandOutcome, CoreError> {
         let work_id = self.store.get_run(id).await?.work_id;
         let _work_guard = if let Some(id) = work_id {
             Some(self.lock_card(&format!("work:{id}")).await)
@@ -272,9 +299,7 @@ impl Orchestrator {
         if let Some(outcome) = self.ready_to_land(&mut run).await? {
             return Ok(outcome);
         }
-        let outcome = self.merge_run(run, mode, by, message).await?;
-        // Landing changes the branch, not the lifetime of its retained workspace.
-        Ok(outcome)
+        self.merge_run(run, mode, by, message).await
     }
 
     /// Everything before merging, under the run's lock: refuses a run that cannot land,
@@ -647,7 +672,28 @@ impl Orchestrator {
     /// Closes the run: completed if anything merged, else failed. Open tasks are refused
     /// unless `cancel_open`. The person gets the summary, with every decision that was a
     /// default rather than theirs.
+    ///
+    /// Once it ended, what it built goes (`remove_finished_targets`): every build directory
+    /// of the run but those of tasks still being verified. A run that has landed already loses
+    /// its checkout too (`cleanup_after_land`); one that has not keeps it for the person.
     pub async fn finish(
+        &self,
+        id: RunId,
+        summary: Option<String>,
+        cancel_open: bool,
+    ) -> Result<Run, CoreError> {
+        let was_open = !self.store.get_run(id).await?.status.is_terminal();
+        let run = self.finish_locked(id, summary, cancel_open).await?;
+        if was_open && run.status.is_terminal() {
+            self.remove_finished_targets(&run).await;
+            if run.landed.is_some() {
+                self.cleanup_after_land(id).await;
+            }
+        }
+        Ok(run)
+    }
+
+    async fn finish_locked(
         &self,
         id: RunId,
         summary: Option<String>,
