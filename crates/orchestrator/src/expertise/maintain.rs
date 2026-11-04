@@ -549,8 +549,10 @@ fn is_cjk(ch: char) -> bool {
     )
 }
 
+/// One line for the Markdown export: every run of whitespace (a blank line between two
+/// paragraphs, a merge's `\n\n`, a wrapped body) becomes one space.
 fn one_line(text: &str) -> String {
-    text.replace(['\r', '\n'], " ").trim().to_string()
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn rate(numerator: usize, denominator: usize) -> Option<f64> {
@@ -944,6 +946,18 @@ mod tests {
         assert!(!text.contains("已替代"), "superseded entries are history");
 
         assert_eq!(export_markdown(&[]), "");
+    }
+
+    #[test]
+    fn export_puts_a_multi_line_body_on_one_line() {
+        let text = export_markdown(&[entry(
+            "m",
+            "rust",
+            EntryKind::Judgment,
+            "标题",
+            "第一段\n\n第二段",
+        )]);
+        assert!(text.contains("- **标题** — 第一段 第二段\n"), "{text}");
     }
 
     #[test]

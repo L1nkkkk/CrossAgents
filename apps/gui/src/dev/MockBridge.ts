@@ -591,6 +591,14 @@ export class MockBridge implements CrossAgentsBridge {
         const repo = url.searchParams.get("repo");
         return json(200, { history: historyOf(s).filter((h) => !repo || h.repo === repo) });
       }
+      // The mock's projects are the owners its project entries already have: the preview uses
+      // the workspace path as the id, where the hub has a Project.id.
+      if (p === "/v1/projects") {
+        const ids = new Set((s.expertise?.entries ?? []).filter((e) => e.owner_kind === "project").map((e) => e.owner_id));
+        return json(200, {
+          projects: [...ids].map((id) => ({ id, name: id.split("/").pop() || id, remotes: [], paths: [{ node: "local", path: id }] })),
+        });
+      }
       if ((m = p.match(/^\/v1\/runs\/([^/]+)$/))) {
         const d = s.runs.find((x) => x.run.id === m![1]);
         return d ? json(200, d) : notFound("run");

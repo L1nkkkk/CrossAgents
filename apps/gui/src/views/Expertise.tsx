@@ -11,6 +11,7 @@ import {
   missingVerdicts,
   ORIGIN_LABEL,
   PERSON_OWNER_ID,
+  projectForWorkspace,
   VERDICT_LABEL,
   type Candidate,
   type ConflictDecision,
@@ -221,33 +222,37 @@ function Candidates({ list, entries, onDone }: { list: Candidate[]; entries: Exp
       onDone();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      // Some of the batch may have gone through before the failure: show what the hub has.
+      onDone();
     } finally {
       setBusy(false);
     }
   };
-  if (!list.length) return <div className="empty">没有待处理的候选。</div>;
   return (
     <>
-      <div className="exp-batch">
-        <label>
-          <input
-            type="checkbox"
-            checked={selected.length === list.length}
-            onChange={(e) => setPicked(new Set(e.target.checked ? list.map((c) => c.id) : []))}
-          />
-          全选
-        </label>
-        <span className="muted">已选 {selected.length}</span>
-        <span className="spacer" />
-        {undecided.length > 0 && <span className="exp-tag yellow">还有 {undecided.length} 个候选的冲突没选裁决</span>}
-        <button disabled={busy || !selected.length} onClick={() => run(false)}>
-          拒绝所选
-        </button>
-        <button className="primary" disabled={busy || !selected.length || undecided.length > 0} onClick={() => run(true)}>
-          接受所选
-        </button>
-      </div>
+      {list.length > 0 && (
+        <div className="exp-batch">
+          <label>
+            <input
+              type="checkbox"
+              checked={selected.length === list.length}
+              onChange={(e) => setPicked(new Set(e.target.checked ? list.map((c) => c.id) : []))}
+            />
+            全选
+          </label>
+          <span className="muted">已选 {selected.length}</span>
+          <span className="spacer" />
+          {undecided.length > 0 && <span className="exp-tag yellow">还有 {undecided.length} 个候选的冲突没选裁决</span>}
+          <button disabled={busy || !selected.length} onClick={() => run(false)}>
+            拒绝所选
+          </button>
+          <button className="primary" disabled={busy || !selected.length || undecided.length > 0} onClick={() => run(true)}>
+            接受所选
+          </button>
+        </div>
+      )}
       <ErrorBox error={error} />
+      {!list.length && <div className="empty">没有待处理的候选。</div>}
       <ul className="exp-candidates">
         {list.map((c) => {
           const missing = missingVerdicts(c, decisions(c));
@@ -346,7 +351,15 @@ function Export({ kind, owner }: { kind: OwnerKind; owner: string }) {
 export function ExpertiseView() {
   const [kind, setKind] = useState<OwnerKind>("person");
   const workspace = useSelectedWorkspace();
-  const owner = kind === "person" ? PERSON_OWNER_ID : workspace;
+  // A project's profile is keyed by Project.id (EXPERTISE §4.1), not by the directory: find
+  // the project this workspace is a checkout of, and fall back to the path while it is new.
+  const projects = useHubData(
+    () => (kind === "project" ? api.projects() : Promise.resolve([])),
+    [kind],
+    (e) => e.type === "run.created",
+  );
+  const project = projectForWorkspace(projects.data, workspace);
+  const owner = kind === "person" ? PERSON_OWNER_ID : project?.id ?? workspace;
   const deps = [kind, owner];
   const entries = useHubData(() => (owner ? api.expertise(kind, owner) : Promise.resolve([])), deps, relevant);
   const card = useHubData(() => (owner ? api.expertiseCard(kind, owner) : Promise.resolve(undefined)), deps, relevant);
@@ -376,13 +389,15 @@ export function ExpertiseView() {
                 项目
               </button>
             </div>
-            <span className="muted">{kind === "person" ? "你的判断，跟着你到每个项目" : owner ? `项目 ${wsName(owner)}` : ""}</span>
+            <span className="muted">
+              {kind === "person" ? "你的判断，跟着你到每个项目" : workspace ? `项目 ${project?.name ?? wsName(workspace)}` : ""}
+            </span>
           </div>
           {!owner ? (
             <div className="empty">先在侧边栏选一个项目，再看它的专长档案。</div>
           ) : (
             <>
-              <ErrorBox error={entries.error ?? card.error ?? maint.error ?? cands.error} />
+              <ErrorBox error={entries.error ?? card.error ?? maint.error ?? cands.error ?? projects.error} />
               {card.data && <Card card={card.data} />}
               <section className="settings-section">
                 <div className="settings-head">

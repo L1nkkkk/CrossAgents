@@ -546,3 +546,22 @@ async fn expertise_routes_need_the_token() {
     let anon = t.client.get(t.url("/v1/expertise")).send().await.unwrap();
     assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
 }
+
+/// A project's profile is keyed by `Project.id`; a client that works in a directory finds it
+/// among the project's checkouts (`GET /v1/projects`).
+#[tokio::test]
+async fn projects_list_the_checkouts_a_profile_is_keyed_by() {
+    let t = TestHub::start().await;
+    let repo = tempfile::tempdir().unwrap();
+    let project = t.hub.orchestrator.project_for(repo.path()).await.unwrap();
+    let list: crossagents_api_types::ListProjectsResponse =
+        t.ok(t.get("/v1/projects").send().await.unwrap()).await;
+    let found = list
+        .projects
+        .iter()
+        .find(|p| p.id == project.id)
+        .expect("the project is listed");
+    assert_eq!(found.paths.len(), 1);
+    assert_eq!(found.paths[0].node, "local");
+    assert!(std::path::Path::new(&found.paths[0].path).exists());
+}

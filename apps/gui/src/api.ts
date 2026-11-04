@@ -41,6 +41,7 @@ import type { ListPluginsResponse } from "@bindings/ListPluginsResponse";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import type { ListRunsResponse } from "@bindings/ListRunsResponse";
 import type { ListHistoryResponse } from "@bindings/ListHistoryResponse";
+import type { ListProjectsResponse } from "@bindings/ListProjectsResponse";
 import type { ListSessionCandidatesResponse } from "@bindings/ListSessionCandidatesResponse";
 import type { StartChatRequest } from "@bindings/StartChatRequest";
 import type { ApproveRunRequest } from "@bindings/ApproveRunRequest";
@@ -57,7 +58,7 @@ import type { UsageGroup } from "@bindings/UsageGroup";
 import type { AcceptCandidateResponse } from "@bindings/AcceptCandidateResponse";
 import type { ListCandidatesResponse } from "@bindings/ListCandidatesResponse";
 import type { ListExpertiseResponse } from "@bindings/ListExpertiseResponse";
-import type { AcceptRequest, Candidate, CandidateStatus, ConflictDecision, ExpertiseCard, ExpertiseEntry, Maintenance, OwnerKind } from "./lib/expertise";
+import type { AcceptRequest, Candidate, CandidateStatus, ConflictDecision, ExpertiseCard, ExpertiseEntry, Maintenance, OwnerKind, ProjectInfo } from "./lib/expertise";
 import type { UsageResponse } from "@bindings/UsageResponse";
 import type { UsageSeriesGroup } from "@bindings/UsageSeriesGroup";
 import type { UsageSeriesRange } from "@bindings/UsageSeriesRange";
@@ -292,6 +293,9 @@ export const api = {
   /** What runs left in a workspace, including the ones since deleted; every workspace's
    * without `repo`. Read-only: a deleted run's record never goes away. */
   history: (repo?: string) => request<ListHistoryResponse>("GET", `/v1/history${repo ? `?repo=${enc(repo)}` : ""}`),
+  /** The projects the hub knows, with the checkouts that identify them: a project's
+   * expertise profile is keyed by its id, and the page works from a directory. */
+  projects: async (): Promise<ProjectInfo[]> => (await request<ListProjectsResponse>("GET", "/v1/projects")).projects,
   getRun: (key: string) => request<RunDetail>("GET", `/v1/runs/${enc(key)}`),
   createRun: (req: CreateRunRequest) => request<Run>("POST", "/v1/runs", req),
   approveRun: (key: string, req: ApproveRunRequest = { policy: null, max_parallel: null, assignees: null }) =>
