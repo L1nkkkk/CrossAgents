@@ -21,6 +21,11 @@
   color: var(--muted);
 }
 
+/* The turn ended and the model never read it: not waiting any more. */
+.steer-note.steer-lost {
+  color: var(--warn-text);
+}
+
 /* Files under a steer bubble, on the same edge as it. */
 .steer-files {
   justify-content: flex-end;

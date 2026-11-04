@@ -16,8 +16,9 @@ use std::time::Duration;
 
 use chrono::Utc;
 use crossagents_core::{
-    Agent, AgentId, AgentStatus, Driver, DriverSession, OutputStream, PermissionDecision,
-    PermissionPolicy, Role, SessionEvent, SessionEventKind, SessionSpec, StopReason, TurnOutcome,
+    Agent, AgentId, AgentStatus, Driver, DriverSession, MessageId, OutputStream,
+    PermissionDecision, PermissionPolicy, Prompt, Role, SessionEvent, SessionEventKind,
+    SessionSpec, StopReason, TurnOutcome,
 };
 use crossagents_drivers::claude_native::ClaudeNativeDriver;
 use crossagents_drivers::locate::Cli;
@@ -234,6 +235,128 @@ async fn smoke_interrupt() {
         .unwrap()
         .unwrap();
     assert_eq!(outcome.stop_reason, StopReason::Cancelled);
+    session.shutdown().await;
+}
+
+/// A message written while a tool runs reaches the model in the same turn: its read is
+/// reported, it changes the answer, and the turn ends once.
+#[tokio::test]
+#[ignore = "needs a signed-in Claude Code"]
+async fn smoke_steer_during_a_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let (spec, mut rx) = spec(dir.path(), PermissionPolicy::Bypass);
+    let session: Arc<dyn DriverSession> = Arc::from(driver().open(spec).await.unwrap());
+    let running = tokio::spawn({
+        let session = session.clone();
+        async move {
+            session
+                .prompt("Use the Bash tool to run `sleep 8`, then answer with the word FINISHED.")
+                .await
+        }
+    });
+    let id = MessageId::new();
+    let prompt = Prompt {
+        text: "Change of plan: answer with the single word STEERED instead.".into(),
+        attachments: vec![],
+    };
+    let (mut steered, mut read, mut text) = (false, false, String::new());
+    tokio::time::timeout(TURN_TIMEOUT, async {
+        while !running.is_finished() {
+            let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+            else {
+                continue;
+            };
+            match event.kind {
+                SessionEventKind::ToolCall { .. } if !steered => {
+                    steered = true;
+                    session.steer(id, &prompt).await.unwrap();
+                }
+                SessionEventKind::SteerRead { message_id } => {
+                    assert_eq!(message_id, id);
+                    read = true;
+                }
+                SessionEventKind::Output {
+                    stream: OutputStream::Text,
+                    text: more,
+                } if read => text.push_str(&more),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("turn timed out");
+    while let Ok(event) = rx.try_recv() {
+        match event.kind {
+            SessionEventKind::SteerRead { .. } => read = true,
+            SessionEventKind::Output {
+                stream: OutputStream::Text,
+                text: more,
+            } if read => text.push_str(&more),
+            _ => {}
+        }
+    }
+    let outcome = running.await.unwrap().unwrap();
+    assert_eq!(outcome.stop_reason, StopReason::EndTurn);
+    assert!(steered, "no tool call to steer into");
+    assert!(read, "the read was never reported");
+    assert!(
+        text.contains("STEERED"),
+        "the answer did not change: {text}"
+    );
+    session.shutdown().await;
+}
+
+/// A message written once the final answer has started gets a CLI turn of its own, with a
+/// `result` of its own. That result stays with this turn: the next one ends on its own.
+#[tokio::test]
+#[ignore = "needs a signed-in Claude Code"]
+async fn smoke_steer_too_late_leaves_no_orphan_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let (spec, mut rx) = spec(dir.path(), PermissionPolicy::Bypass);
+    let session: Arc<dyn DriverSession> = Arc::from(driver().open(spec).await.unwrap());
+    let running = tokio::spawn({
+        let session = session.clone();
+        async move { session.prompt("Answer with the word ONE.").await }
+    });
+    let id = MessageId::new();
+    let prompt = Prompt {
+        text: "Also answer with the word TWO.".into(),
+        attachments: vec![],
+    };
+    let (mut steered, mut read) = (false, false);
+    tokio::time::timeout(TURN_TIMEOUT, async {
+        while !running.is_finished() {
+            let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+            else {
+                continue;
+            };
+            match event.kind {
+                SessionEventKind::Output {
+                    stream: OutputStream::Text,
+                    ..
+                } if !steered => {
+                    steered = true;
+                    session.steer(id, &prompt).await.unwrap();
+                }
+                SessionEventKind::SteerRead { .. } => read = true,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("turn timed out");
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event.kind, SessionEventKind::SteerRead { .. }) {
+            read = true;
+        }
+    }
+    let outcome = running.await.unwrap().unwrap();
+    assert_eq!(outcome.stop_reason, StopReason::EndTurn);
+    assert!(steered, "no output to steer after");
+    assert!(read, "the read was never reported");
+    let (next, text, _) = turn(&*session, &mut rx, "Answer with the word THREE.").await;
+    assert_eq!(next.stop_reason, StopReason::EndTurn);
+    assert!(text.contains("THREE"), "the next turn got: {text}");
     session.shutdown().await;
 }
 

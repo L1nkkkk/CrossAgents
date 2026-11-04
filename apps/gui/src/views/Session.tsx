@@ -48,7 +48,7 @@ import { homeOf, isChat, wsKey } from "../workspace";
 import { ProfileEditor } from "./Agents";
 import { Composer, QueuePanel } from "./SessionComposer";
 import { AgentText, Bubble, fromPerson } from "./SessionMessage";
-import { SteerItem } from "./SessionSteer";
+import { SteerItem, TurnEnded } from "./SessionSteer";
 import { SessionModeration } from "./SessionModeration";
 
 const started = (turn: TranscriptTurn) => !!turn.started_at || !!turn.completed_at;
@@ -869,6 +869,7 @@ function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agen
           <span className="what">{agentTitle(agent)}</span>
         </div>
       )}
+      <TurnEnded.Provider value={!!turn.completed_at}>
       <ShownLive.Provider value={{ id: shownLive, set: setShownLive }}>
         {blocks.map((block, i) =>
           block.kind === "steps" ? (
@@ -879,6 +880,7 @@ function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agen
         )}
         {running && <LiveLine since={turn.started_at!} items={turn.items} />}
       </ShownLive.Provider>
+      </TurnEnded.Provider>
       {turn.completed_at && <TurnFoot turn={turn} />}
       {turn.completed_at && turn.diff && <TurnChanges turn={turn} agent={agent} />}
     </div>

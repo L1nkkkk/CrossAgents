@@ -1,3 +1,4 @@
+import { createContext, useContext } from "react";
 import type { Attachment } from "@bindings/Attachment";
 import { TurnFiles } from "../attach";
 import { CopyButton, Prose, useFileScope } from "../components";
@@ -6,12 +7,17 @@ import "./steer.css";
 
 type Steer = Extract<TranscriptItem, { type: "steer" }>;
 
+/** The turn around this item has ended: a message still unread will not be read in it. */
+export const TurnEnded = createContext(false);
+
 /**
  * A message handed to the running turn (docs/research/cutex-gui-teardown.md §2.1). Until the
  * model reads it, it is a pale dashed bubble — inserted, not yet part of the conversation; once
- * read it is an ordinary message of yours, with its files.
+ * read it is an ordinary message of yours, with its files. A turn that ended without reading it
+ * says so, and the text can be copied to send again.
  */
 export function SteerItem({ item }: { item: TranscriptItem }) {
+  const ended = useContext(TurnEnded);
   if (item.type !== "steer") return null;
   return (
     <>
@@ -31,8 +37,13 @@ export function SteerItem({ item }: { item: TranscriptItem }) {
             <div className="bubble-text">
               <Prose text={item.text} />
             </div>
+            {ended && (
+              <div className="bubble-foot">
+                <CopyButton className="msg-copy" text={item.text} title="复制这条消息的 markdown 原文" />
+              </div>
+            )}
           </div>
-          <span className="steer-note">已插入，等待模型读取</span>
+          <span className={ended ? "steer-note steer-lost" : "steer-note"}>{ended ? "模型没有读到这条插话，需要的话请重新发送" : "已插入，等待模型读取"}</span>
         </div>
       )}
       <SteerFiles item={item} />
