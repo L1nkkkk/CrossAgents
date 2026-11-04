@@ -560,6 +560,15 @@ pub struct Translator {
     streamed: HashSet<String>,
     streaming: Option<String>,
     tokens: TokenUsage,
+    /// Output tokens this turn's finished messages reported, and the count the message being
+    /// streamed has reached. `tokens` only grows when a turn ends, so the live rate reads the
+    /// two on top of it.
+    turn_output: u64,
+    message_output: u64,
+    /// The context in use and the window size as last reported, so a mid-turn usage event
+    /// carries them instead of zeroing the header.
+    context_used: u64,
+    context_size: u64,
     /// `total_cost_usd` counts from the start of the process.
     cost_so_far: f64,
     /// The context the turn's latest request used, from its `message_delta`: the result's
@@ -620,6 +629,9 @@ impl Translator {
     fn stream_event(&mut self, event: &Value) -> Vec<SessionEventKind> {
         match event.get("type").and_then(Value::as_str) {
             Some("message_start") => {
+                // The message before this one is done: its output belongs to the turn now.
+                self.turn_output += self.message_output;
+                self.message_output = 0;
                 self.streaming = event
                     .pointer("/message/id")
                     .and_then(Value::as_str)
@@ -627,17 +639,36 @@ impl Translator {
                 Vec::new()
             }
             Some("message_delta") => {
-                if let Some(usage) = event.get("usage") {
-                    let num = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
-                    let used = num("input_tokens")
-                        + num("cache_read_input_tokens")
-                        + num("cache_creation_input_tokens")
-                        + num("output_tokens");
-                    if used > 0 {
-                        self.last_request = Some(used);
-                    }
+                let Some(usage) = event.get("usage") else {
+                    return Vec::new();
+                };
+                let num = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+                let input = num("input_tokens")
+                    + num("cache_read_input_tokens")
+                    + num("cache_creation_input_tokens");
+                let output = num("output_tokens");
+                // Only a delta that carries the request's input says how much context is in
+                // use; one with the output alone would show a handful of tokens.
+                if input > 0 {
+                    self.last_request = Some(input + output);
+                    self.context_used = input + output;
                 }
-                Vec::new()
+                if output <= self.message_output {
+                    return Vec::new();
+                }
+                // The message's count is cumulative, so the latest is what it has reached: a
+                // usage event now lets the GUI show the turn's output rate while it runs.
+                self.message_output = output;
+                vec![SessionEventKind::Usage {
+                    used: self.context_used,
+                    size: self.context_size,
+                    cost_usd: None,
+                    tokens: Some(TokenUsage {
+                        output: self.tokens.output + self.turn_output + output,
+                        total: self.tokens.total + self.turn_output + output,
+                        ..self.tokens.clone()
+                    }),
+                }]
             }
             Some("content_block_delta") => {
                 let delta = event.get("delta").unwrap_or(&Value::Null);
@@ -761,7 +792,11 @@ impl Translator {
         let input = num(usage, "input_tokens")
             + num(usage, "cache_read_input_tokens")
             + num(usage, "cache_creation_input_tokens");
-        let output = num(usage, "output_tokens");
+        // What the messages reported during the turn is the floor: a result that sums them
+        // (or omits them, interrupted) must not make the total go backwards.
+        let streamed =
+            std::mem::take(&mut self.turn_output) + std::mem::take(&mut self.message_output);
+        let output = num(usage, "output_tokens").max(streamed);
         self.tokens.input += input;
         self.tokens.cached_input += num(usage, "cache_read_input_tokens");
         self.tokens.output += output;
@@ -797,7 +832,9 @@ impl Translator {
             .flat_map(|m| m.values())
             .filter_map(|m| m.get("contextWindow").and_then(Value::as_u64))
             .max()
-            .unwrap_or(0);
+            .unwrap_or(self.context_size);
+        self.context_used = used;
+        self.context_size = size;
         let total_cost = result.get("total_cost_usd").and_then(Value::as_f64);
         let cost_usd = total_cost.map(|total| {
             let turn = (total - self.cost_so_far).max(0.0);
@@ -1465,6 +1502,59 @@ mod tests {
         );
         assert_eq!(mcp.result.as_deref(), Some("[]"));
         assert!(mcp.arguments.unwrap().contains("\"all\": true"));
+    }
+
+    /// The GUI reads the turn's output rate from usage events: the deltas of a streaming turn
+    /// report each message's count, and the result must not count them again.
+    #[test]
+    fn a_message_delta_reports_the_turn_s_output_as_it_streams() {
+        let start = |id: &str| json!({ "type": "stream_event", "event": { "type": "message_start", "message": { "id": id } } });
+        let delta = |input: u64, output: u64| {
+            json!({ "type": "stream_event", "event": { "type": "message_delta",
+                "usage": { "input_tokens": input, "output_tokens": output } } })
+        };
+        let output_of = |events: &[SessionEventKind]| match &events[0] {
+            SessionEventKind::Usage { tokens, .. } => tokens.as_ref().unwrap().output,
+            other => panic!("{other:?}"),
+        };
+
+        let mut t = Translator::default();
+        t.translate(&start("m1"));
+        let events = t.translate(&delta(1_000, 40));
+        assert_eq!(output_of(&events), 40);
+        let SessionEventKind::Usage { used, .. } = &events[0] else {
+            panic!("{events:?}")
+        };
+        assert_eq!(*used, 1_040);
+
+        // A growing count for the same message is one message, not two.
+        assert_eq!(output_of(&t.translate(&delta(1_000, 60))), 60);
+
+        // The next message adds to the first.
+        t.translate(&start("m2"));
+        assert_eq!(output_of(&t.translate(&delta(1_200, 25))), 85);
+
+        // The result sums the turn: counted once, not twice.
+        let (_, end) = t.turn_end(
+            &json!({ "type": "result", "usage": { "input_tokens": 2_200, "output_tokens": 85 } }),
+            false,
+        );
+        let SessionEventKind::Usage { tokens, .. } = &end[0] else {
+            panic!("{end:?}")
+        };
+        assert_eq!(tokens.as_ref().unwrap().output, 85);
+
+        // An interrupted turn has no result to sum: what the messages reported stays.
+        t.translate(&start("m3"));
+        t.translate(&delta(0, 10));
+        let (_, end) = t.turn_end(
+            &json!({ "type": "result", "subtype": "error_during_execution" }),
+            true,
+        );
+        let SessionEventKind::Usage { tokens, .. } = &end[0] else {
+            panic!("{end:?}")
+        };
+        assert_eq!(tokens.as_ref().unwrap().output, 95);
     }
 
     /// CodeBuddy's `usage` sums the turn's requests (three of ~400k made "1.2M of 1M"); the
