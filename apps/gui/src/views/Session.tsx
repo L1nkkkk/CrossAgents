@@ -8,7 +8,7 @@ import type { ModelSwitch } from "@bindings/ModelSwitch";
 import type { TranscriptUsage } from "@bindings/TranscriptUsage";
 import { view } from "../activity";
 import { api, errorText } from "../api";
-import { HeldFiles, TurnFiles, useHeld } from "../attach";
+import { HeldFiles, MiniFiles, TurnFiles, useHeld } from "../attach";
 import { HandoffLine } from "../handoff";
 import { dismiss as dismissMessage, retry as retryMessage, sendMessage, useOutbox, type Outgoing } from "../outbox";
 import { ACTIVE_RUN, useRunTree, useRunsLedBy } from "../App";
@@ -1421,6 +1421,10 @@ function QueuePanel({ agent, queued, onEdit }: { agent: Agent; queued: Transcrip
     }
   };
   const withdraw = (turn: TranscriptTurn) => api.withdrawMessage(agent.id, turn.message_id);
+  // A queued message's files, back in the shape the send API takes: "send now" re-sends it
+  // as a whole, text and files, so an image-only message does not go out empty.
+  const uploads = (turn: TranscriptTurn) =>
+    Promise.all((turn.attachments ?? []).map(async (f) => ({ name: f.name, mime: f.mime, data: (await api.attachment(agent.id, f.id)).data })));
 
   return (
     <div className="queue">
@@ -1439,7 +1443,8 @@ function QueuePanel({ agent, queued, onEdit }: { agent: Agent; queued: Transcrip
               <span className="queue-kind" title={mine ? "你发的" : "编排"}>
                 {mine ? "你" : "编排"}
               </span>
-              <span className="queue-text">{turn.input.split("\n")[0]}</span>
+              {!!turn.attachments?.length && <MiniFiles agent={agent.id} files={turn.attachments} />}
+              {turn.input && <span className="queue-text">{turn.input.split("\n")[0]}</span>}
               {mine && (
                 <span className="queue-actions">
                   <button
@@ -1447,24 +1452,27 @@ function QueuePanel({ agent, queued, onEdit }: { agent: Agent; queued: Transcrip
                     title="打断当前这一轮，先发这条"
                     onClick={() =>
                       act(async () => {
+                        const attachments = await uploads(turn);
                         await withdraw(turn);
-                        await api.sendMessage(agent.id, { text: turn.input, now: true });
+                        await api.sendMessage(agent.id, { text: turn.input, now: true, ...(attachments.length ? { attachments } : {}) });
                       })
                     }
                   >
                     立即发送
                   </button>
-                  <button
-                    className="link"
-                    onClick={() =>
-                      act(async () => {
-                        await withdraw(turn);
-                        onEdit(turn.input);
-                      })
-                    }
-                  >
-                    编辑
-                  </button>
+                  {!turn.attachments?.length && (
+                    <button
+                      className="link"
+                      onClick={() =>
+                        act(async () => {
+                          await withdraw(turn);
+                          onEdit(turn.input);
+                        })
+                      }
+                    >
+                      编辑
+                    </button>
+                  )}
                   <button className="link" onClick={() => act(() => withdraw(turn))}>
                     删除
                   </button>

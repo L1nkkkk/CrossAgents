@@ -128,6 +128,16 @@ export function TurnFiles({ agent, files }: { agent: string; files: Attachment[]
   );
 }
 
+/** Files a queued message carries, small enough for a queue row: a thumbnail, or its kind. */
+export function MiniFiles({ agent, files }: { agent: string; files: Attachment[] }) {
+  if (!files.length) return null;
+  return (
+    <span className="mini-files">
+      {files.map((f) => (isImage(f.mime) ? <Thumb key={f.id + f.name} agent={agent} file={f} /> : <FileCard key={f.id + f.name} file={f} />))}
+    </span>
+  );
+}
+
 function FileCard({ file }: { file: Attachment }) {
   return (
     <span className="file-chip" title={`${file.path}`}>
