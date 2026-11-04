@@ -502,6 +502,11 @@ pub enum SessionEventKind {
         turn_id: Option<String>,
         stop_reason: StopReason,
     },
+    /// The model has read a message put into the running turn with
+    /// [`DriverSession::steer`].
+    SteerRead {
+        message_id: crate::MessageId,
+    },
     /// A non-fatal problem worth surfacing (e.g. the requested model was not found).
     Warning {
         message: String,
@@ -553,8 +558,13 @@ pub trait DriverSession: Send + Sync {
     }
 
     /// Hands a message to the running turn, without starting a new one. Fails when the
-    /// driver cannot, or no turn runs: the hub then queues the message.
-    async fn steer(&self, _prompt: &crate::Prompt) -> Result<(), CoreError> {
+    /// driver cannot, or no turn runs: the hub then queues the message. The driver reports
+    /// [`SessionEventKind::SteerRead`] once the model has read it.
+    async fn steer(
+        &self,
+        _message_id: crate::MessageId,
+        _prompt: &crate::Prompt,
+    ) -> Result<(), CoreError> {
         Err(unsupported("steer"))
     }
 

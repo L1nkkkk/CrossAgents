@@ -32,6 +32,8 @@ use tokio::sync::{Mutex, Notify};
 struct Active {
     turn_id: String,
     interrupt: Arc<Notify>,
+    /// Inputs steered into the turn, read at its next boundary.
+    steers: Arc<Mutex<Vec<String>>>,
 }
 
 struct MockAppServer {
@@ -224,20 +226,47 @@ impl MockAppServer {
         }
         let turn_id = self.new_id("turn");
         let interrupt = Arc::new(Notify::new());
+        let steers = Arc::new(Mutex::new(Vec::new()));
         active.insert(
             thread_id.clone(),
             Active {
                 turn_id: turn_id.clone(),
                 interrupt: interrupt.clone(),
+                steers: steers.clone(),
             },
         );
         drop(active);
         tokio::spawn({
             let this = self.clone();
             let turn_id = turn_id.clone();
-            async move { this.run_turn(thread_id, turn_id, text, interrupt).await }
+            async move {
+                this.run_turn(thread_id, turn_id, text, interrupt, steers)
+                    .await
+            }
         });
         Ok(json!({ "turn": { "id": turn_id, "status": "inProgress", "items": [] } }))
+    }
+
+    /// `turn/steer`: more input for the running turn, which reads it at its next boundary.
+    async fn turn_steer(&self, params: Value) -> Result<Value, RpcError> {
+        let thread_id = params["threadId"].as_str().unwrap_or_default();
+        let text = params
+            .pointer("/input/0/text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let active = self.active.lock().await;
+        let Some(running) = active.get(thread_id) else {
+            return Err(rpc_error("no active turn to steer"));
+        };
+        // Codex refuses a steer meant for a turn that has ended.
+        if let Some(expected) = params["expectedTurnId"].as_str()
+            && expected != running.turn_id
+        {
+            return Err(rpc_error(format!("turn {expected} has ended")));
+        }
+        running.steers.lock().await.push(text);
+        Ok(json!({ "turnId": running.turn_id }))
     }
 
     async fn say(&self, thread_id: &str, turn_id: &str, text: &str) {
@@ -252,8 +281,9 @@ impl MockAppServer {
         &self,
         thread_id: String,
         turn_id: String,
-        text: String,
+        mut text: String,
         interrupt: Arc<Notify>,
+        steers: Arc<Mutex<Vec<String>>>,
     ) {
         let tid = thread_id.as_str();
         let uid = turn_id.as_str();
@@ -296,6 +326,15 @@ impl MockAppServer {
             tokio::select! {
                 _ = interrupt.notified() => status = "interrupted",
                 _ = tokio::time::sleep(Duration::from_millis(ms)) => {}
+            }
+        }
+        if status == "completed" {
+            // The model reads what was steered in at this boundary.
+            let read: Vec<String> = steers.lock().await.drain(..).collect();
+            for steer in read {
+                self.say(tid, uid, &format!("steered {steer} ")).await;
+                text.push_str("\n[steered] ");
+                text.push_str(&steer);
             }
         }
         let tool = text
@@ -517,6 +556,7 @@ impl RpcHandler for Handler {
             }
             "thread/compact/start" => Ok(json!({})),
             "turn/start" => server.turn_start(params).await,
+            "turn/steer" => server.turn_steer(params).await,
             "turn/interrupt" => {
                 let thread_id = params["threadId"].as_str().unwrap_or_default();
                 if let Some(active) = server.active.lock().await.get(thread_id)

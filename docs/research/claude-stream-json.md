@@ -61,3 +61,87 @@ Agent SDK 不是另一套接口。它（`sdk.mjs` / `core.mjs`）做的就是启
 3. `plugins`：`claude` 的默认驱动从 `acp-generic` 改为 `claude-native`；账号 provider `claude`（读 `get_usage`，按 `CLAUDE_CONFIG_DIR` 区分账号；本机 `~/.claude` 已登录时自动登记）。
 4. 代理配置（hub 层，Codex 和 Claude 共用）。
 5. 分叉与回退的 API 和界面（N2 剩下的一项）可以在这之后一起做。
+
+## 5. 轮中插话（steer）实测
+
+> 2026-11-05 · Claude Code **2.1.317**（本机 bundled CLI：`C:\Users\Link\AppData\Local\Claude-Data\claude_pzs8sxrjxfjjc\claude-code\2.1.317\a33aa5518497\claude.exe`）· 模型 `haiku` · `HTTPS_PROXY=http://127.0.0.1:7890`
+>
+> 探针：`python -I <scratchpad>\claude_steer_probe.py <claude路径> during|boundary|late`；另用同结构的 Node 探针复跑了全部场景，以及一个 interrupt 场景。下面的秒数是相对进程启动的时间，事件做了字段裁剪。
+
+启动参数（与 `claude_native` 驱动一致）：
+
+```
+claude -p --input-format stream-json --output-format stream-json --verbose \
+  --replay-user-messages --permission-prompt-tool stdio --include-partial-messages \
+  --strict-mcp-config --setting-sources project,local --model haiku --session-id <uuid>
+```
+
+stdin 每条消息（`uuid` 由我们指定）：
+
+```json
+{"type":"user","uuid":"<我们的>","session_id":"<session>","parent_tool_use_id":null,
+ "message":{"role":"user","content":"…"}}
+```
+
+### 5.1 `during`：工具执行中写入
+
+第一轮让模型调用 Bash 运行 `sleep 12; echo LONGDONE`；工具执行中写入「立刻停止剩余步骤，只回复一行：STEERED-OK」。
+
+```
+ 0.01 >>> 写第一条 prompt
+ 4.85 <<< assistant tool_use:Bash                 ← 工具开始
+ 7.86 >>> 写 steer（工具还在跑）
+17.63 <<< user tool_result LONGDONE
+17.64 <<< user isReplay=true uuid=804eed79…      ← 正是我们写的 uuid
+19.75 <<< assistant text STEERED-OK
+19.76 <<< result success result=STEERED-OK user_message_uuid=90f33ec1…（第一条 prompt）
+```
+
+**工具边界读到**，本轮最终答案被改写，**只有一个 result**。
+
+### 5.2 `boundary`：第一个工具结果回来时写入
+
+```
+ 4.92 >>> 写 steer（第一个 tool_result 那一刻）
+ 6.25 <<< assistant tool_use:Bash                 ← 还会继续发工具
+ 9.35 <<< user isReplay=true uuid=<steer>
+ 9.xx <<< assistant text STEERED-OK
+     <<< result success user_message_uuid=<第一条 prompt>   ← 一个 result
+```
+
+写入后还会有一个工具调用，**回显要等下一次模型请求**，不是「写下就生效」。因此读到检测不能用「下一条 assistant 输出」——那条输出可能属于上一请求。
+
+### 5.3 `late`：最后一次模型调用之后写入
+
+```
+11.44 <<< assistant text 最终答案                  ← 本轮答案已出
+11.44 >>> 写 steer
+11.46 <<< result success user_message_uuid=<第一条 prompt>   ← 本轮结束，答案未变
+11.49 <<< system/init                              ← 新一轮
+12.57 <<< user isReplay=true uuid=<steer>
+12.58 <<< assistant text STEERED-OK user_message_uuid=<steer>
+12.59 <<< result success user_message_uuid=<steer> result_index=1
+```
+
+**共 2 个 result**：旧的归第一条 prompt，新的归 steer。下一轮的 `system/init`/回显可能先于或晚于上一轮 `result`（本机这次是晚于；CodeBuddy 上是早于），所以 hub 不能只用「waiter 为空」判断结果归属。`result.user_message_uuid` 是可靠的归属字段。
+
+### 5.4 `interrupt`：有未读插话时中断
+
+```
+ 6.80 >>> 写 steer（工具还在跑）
+ 7.80 >>> control_request{subtype:"interrupt"}
+ 7.83 <<< control_response {subtype:"success", response:{still_queued:["4dcd732e…"]}}
+ 7.85 <<< result error_during_execution is_error=true user_message_uuid=<第一条 prompt>
+       >>> 写一条新 prompt
+19.89 <<< user isReplay=true uuid=4dcd732e…        ← 未读的 steer 仍被消费
+19.92 <<< result success user_message_uuid=4dcd732e…
+```
+
+`interrupt` 的应答带 `still_queued`：**stdin 里未读的消息不会丢**，本轮结束后仍会被下一条运行读到。驱动因此不能在中断时直接把它标成已读或结束本轮：要像 `late` 一样等它被读、收到它自己的 result；否则那条 result 会变成孤儿，可能结束下一轮。若进程已经退出、`still_queued` 为空或没有这个字段，则无法保证会读，发一条 Warning 说明「这条插话没有被读取」。
+
+### 5.5 对 `claude_native` 的含义
+
+- `--replay-user-messages` 的回显（`isReplay: true`）**保留我们写的 uuid**，是唯一精确的「模型已读到」信号；CodeBuddy 不保留。
+- `result.user_message_uuid` 标出这条 result 结束的是哪条用户消息；一条用户消息一个 result。
+- 工具执行中写入：下一模型请求读到，改本轮答案；最后一次模型调用之后写入：另起一轮，属于同一次插话，驱动要把那一轮折进同一个 hub 轮次。
+- 中断不丢未读消息（`still_queued`）；读到前不能谎报已读。

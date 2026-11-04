@@ -110,15 +110,25 @@ pub fn mock_plugins() -> BTreeMap<String, PluginConfig> {
 /// Plugin `native`: the mock speaking Claude Code's stream-json through `claude-native`, a
 /// driver that resumes a session in another directory (`move_cwd`).
 pub fn native_plugin(config: &mut HubConfig) {
-    config.plugins.insert(
-        "native".to_owned(),
-        PluginConfig {
-            driver: Some(crossagents_core::DriverKind::ClaudeNative),
-            native_command: vec![MOCK_AGENT.to_owned(), "stream-json".to_owned()],
-            models: vec!["mock-native".into()],
-            ..PluginConfig::default()
-        },
-    );
+    native_plugin_with(&[])(config);
+}
+
+/// Like [`native_plugin`], with extra arguments for the mock (e.g. `--steer-merge`).
+pub fn native_plugin_with(args: &[&str]) -> impl FnOnce(&mut HubConfig) + use<> {
+    let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+    move |config: &mut HubConfig| {
+        let mut command = vec![MOCK_AGENT.to_owned(), "stream-json".to_owned()];
+        command.extend(args.clone());
+        config.plugins.insert(
+            "native".to_owned(),
+            PluginConfig {
+                driver: Some(crossagents_core::DriverKind::ClaudeNative),
+                native_command: command,
+                models: vec!["mock-native".into()],
+                ..PluginConfig::default()
+            },
+        );
+    }
 }
 
 /// Plugin `pinned`: like `native`, but the mock keeps each session in `sessions` with the

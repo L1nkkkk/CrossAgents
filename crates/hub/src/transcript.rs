@@ -1,6 +1,6 @@
 //! A session's conversation, rebuilt from its events (`GET /v1/agents/{key}/transcript`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crossagents_api_types::{
     AgentExit, ModelSwitch, TranscriptItem, TranscriptTurn, TranscriptUsage, TurnDiffStat,
@@ -23,6 +23,9 @@ pub struct Fold {
     /// `agent.exited` was just folded; the `agent.error` the runtime sends after it says the
     /// same thing.
     exit_pending: bool,
+    /// Steers whose read came before their `agent.steered` (the driver reports the read and
+    /// the runtime publishes the steer): the item starts out read.
+    read_early: HashSet<MessageId>,
     /// The turn the agent is working on.
     current: Option<MessageId>,
 }
@@ -213,6 +216,40 @@ impl Fold {
                     }
                     if let Some(new_status) = new_status {
                         *status = *new_status;
+                    }
+                }
+            }
+            EventKind::AgentSteered {
+                message_id,
+                text,
+                attachments,
+                ..
+            } => {
+                let read = self.read_early.remove(message_id);
+                if let Some(items) = self.active_items() {
+                    items.push(TranscriptItem::Steer {
+                        message_id: *message_id,
+                        text: text.clone(),
+                        attachments: attachments.clone(),
+                        read,
+                    });
+                }
+            }
+            EventKind::AgentSteerRead { message_id, .. } => {
+                let found = self
+                    .turns
+                    .iter_mut()
+                    .rev()
+                    .flat_map(|turn| turn.items.iter_mut())
+                    .find(|item| {
+                        matches!(item, TranscriptItem::Steer { message_id: id, .. } if id == message_id)
+                    });
+                match found {
+                    Some(TranscriptItem::Steer { read, .. }) => *read = true,
+                    // The events come from different tasks: the read may be published
+                    // before the steer it belongs to.
+                    _ => {
+                        self.read_early.insert(*message_id);
                     }
                 }
             }
@@ -457,6 +494,91 @@ mod tests {
         assert_eq!(second.input, "next");
         assert!(second.started_at.is_none() && second.items.is_empty());
         assert_eq!(fold.usage.as_ref().map(|u| u.used), Some(10));
+    }
+
+    #[test]
+    fn a_steered_message_is_read_in_the_turn_it_joined() {
+        let id = AgentId::new();
+        let (m1, s1, s2, s3) = (
+            MessageId::new(),
+            MessageId::new(),
+            MessageId::new(),
+            MessageId::new(),
+        );
+        let kinds = vec![
+            EventKind::AgentInput {
+                id,
+                message_id: m1,
+                text: "start".into(),
+                queued: false,
+                from: Some(MessageSource::Human),
+                reply_to: None,
+                thread: None,
+                reply_excerpt: None,
+                attachments: Vec::new(),
+            },
+            EventKind::AgentTurnStarted { id, message_id: m1 },
+            EventKind::AgentSteered {
+                id,
+                message_id: s1,
+                text: "read me".into(),
+                attachments: Vec::new(),
+            },
+            EventKind::AgentSteered {
+                id,
+                message_id: s2,
+                text: "still waiting".into(),
+                attachments: Vec::new(),
+            },
+            EventKind::AgentOutput {
+                id,
+                stream: OutputStream::Text,
+                text: "working".into(),
+            },
+            EventKind::AgentSteerRead { id, message_id: s1 },
+            // The driver reports the read and the runtime publishes the steer: the read
+            // can come first and must not leave a stale unread bubble.
+            EventKind::AgentSteerRead { id, message_id: s3 },
+            EventKind::AgentSteered {
+                id,
+                message_id: s3,
+                text: "read before it landed".into(),
+                attachments: Vec::new(),
+            },
+        ];
+        let mut fold = Fold::default();
+        for (i, kind) in kinds.into_iter().enumerate() {
+            fold.push(&ev(i as u64 + 1, kind));
+        }
+        assert_eq!(fold.turns.len(), 1);
+        let items = &fold.turns[0].items;
+        assert_eq!(
+            items.as_slice(),
+            [
+                TranscriptItem::Steer {
+                    message_id: s1,
+                    text: "read me".into(),
+                    attachments: Vec::new(),
+                    read: true,
+                },
+                TranscriptItem::Steer {
+                    message_id: s2,
+                    text: "still waiting".into(),
+                    attachments: Vec::new(),
+                    read: false,
+                },
+                TranscriptItem::Output {
+                    stream: OutputStream::Text,
+                    text: "working".into(),
+                },
+                TranscriptItem::Steer {
+                    message_id: s3,
+                    text: "read before it landed".into(),
+                    attachments: Vec::new(),
+                    read: true,
+                },
+            ]
+        );
     }
 
     #[test]

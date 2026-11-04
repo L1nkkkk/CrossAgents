@@ -1156,6 +1156,16 @@ async fn send_message(
     };
     let (message_id, queued) = if req.now == Some(true) {
         state.runtime.send_now_envelope(&key, envelope).await?
+    } else if req.steer == Some(true) {
+        let (message_id, queued, steered) = state.runtime.steer_envelope(&key, envelope).await?;
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(SendMessageResponse {
+                message_id,
+                queued,
+                steered,
+            }),
+        ));
     } else {
         state.runtime.send_envelope(&key, envelope).await?
     };

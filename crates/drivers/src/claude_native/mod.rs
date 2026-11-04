@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use crossagents_core::{
     AgentCommand, AttachmentSupport, Capabilities, CliStatus, CoreError, Driver, DriverKind,
-    DriverSession, PermissionHandler, PermissionPolicy, Prompt, SessionEvent, SessionEventKind,
-    SessionSpec, StopReason, TurnOutcome,
+    DriverSession, MessageId, PermissionHandler, PermissionPolicy, Prompt, SessionEvent,
+    SessionEventKind, SessionSpec, StopReason, TurnOutcome,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -136,7 +136,11 @@ impl Driver for ClaudeNativeDriver {
         Capabilities {
             streaming: true,
             interrupt: true,
-            steer: false,
+            // Claude Code reads a message written while a turn runs at its next tool
+            // boundary: measured with claude 2.1.317, a steer written during a 12 s tool
+            // was read right after the tool result and changed the turn's answer. CodeBuddy
+            // only reads between turns, so its flavor stays off.
+            steer: self.flavor == Flavor::Claude,
             mcp: true,
             multi_session: false,
             resume: true,
@@ -250,6 +254,10 @@ struct Shared {
     /// `initialize`: old messages and a `result` closing them, which would otherwise end
     /// the first real turn. Taken (and sent) at that `result`.
     replay: Mutex<Option<oneshot::Sender<()>>>,
+    /// Steers whose own turn may still report a `result` after the hub turn they belonged
+    /// to ended. Such a result ends that steer's turn, never the next one (`user_message_uuid`
+    /// names it).
+    stale_steers: Mutex<Vec<MessageId>>,
 }
 
 #[derive(Default)]
@@ -259,6 +267,30 @@ struct Turn {
     waiter: Option<oneshot::Sender<StopReason>>,
     interrupted: bool,
     last_assistant: Option<String>,
+    /// Messages put into this turn with `steer` that the model has not read yet.
+    steers: Vec<PendingSteer>,
+    /// Every message steered into this turn, read or not: a `result` names the message
+    /// whose turn it ends with `user_message_uuid`.
+    steered: Vec<MessageId>,
+    /// The prompt's own result arrived.
+    prompt_done: bool,
+    /// The CLI opened a turn of its own for steered messages (a `system/init` while they
+    /// waited): its result ends this turn, not the next one.
+    separate_steer_turn: bool,
+    /// Steers whose own turn reported its `result`.
+    steer_results: Vec<MessageId>,
+    /// The prompt's result, kept until that separate turn has reported.
+    held_stop: Option<StopReason>,
+    /// The interrupt left the unread steers queued (`still_queued`): they will still be
+    /// read, so the turn waits for them like a late message.
+    keep_queued: bool,
+}
+
+/// A message written into the running turn, waiting for the model to read it.
+struct PendingSteer {
+    id: MessageId,
+    /// Its opening words, for a warning when it never gets read.
+    snippet: String,
 }
 
 impl Shared {
@@ -279,6 +311,7 @@ impl Shared {
             program: flavor.program(),
             flavor,
             replay: Mutex::default(),
+            stale_steers: Mutex::default(),
         }
     }
 
@@ -330,12 +363,79 @@ impl Shared {
         }
     }
 
+    /// Says these steers were not read, and remembers them: the CLI may still run them,
+    /// and their results must not end a later turn.
+    fn warn_unread(&self, unread: Vec<PendingSteer>) {
+        if unread.is_empty() {
+            return;
+        }
+        let mut stale = self.stale_steers.lock().expect("stale lock");
+        for steer in &unread {
+            self.emit(
+                SessionEventKind::Warning {
+                    message: format!("这条插话没有被读取：「{}」", steer.snippet),
+                },
+                None,
+            );
+            if !stale.contains(&steer.id) {
+                stale.push(steer.id);
+            }
+        }
+        if stale.len() > 16 {
+            let extra = stale.len() - 16;
+            stale.drain(..extra);
+        }
+    }
+
+    /// Ends the running turn. A message still unread was not read: say so, and do not
+    /// claim otherwise. Its own turn may still report later (an interrupted turn keeps its
+    /// queued messages), so its id is remembered as stale.
+    fn finish_turn(&self, turn: &mut Turn, stop: StopReason) {
+        let stop = turn.held_stop.take().unwrap_or(stop);
+        let unread: Vec<PendingSteer> = std::mem::take(&mut turn.steers);
+        self.warn_unread(unread);
+        let mut stale = self.stale_steers.lock().expect("stale lock");
+        if turn.separate_steer_turn {
+            for id in &turn.steered {
+                if !turn.steer_results.contains(id) && !stale.contains(id) {
+                    stale.push(*id);
+                }
+            }
+        }
+        if stale.len() > 16 {
+            let extra = stale.len() - 16;
+            stale.drain(..extra);
+        }
+        drop(stale);
+        if let (Some(id), Some(last)) = (turn.id.take(), turn.last_assistant.take()) {
+            self.turn_ends
+                .lock()
+                .expect("turn_ends lock")
+                .insert(id, last);
+        }
+        if let Some(waiter) = turn.waiter.take() {
+            let _ = waiter.send(stop);
+        }
+        *turn = Turn::default();
+    }
+
     fn handle(self: &Arc<Self>, message: Value) {
         // Before the replay filter: a resumed CodeBuddy session's init is still the CLI's.
         if let Some(commands) = wire::commands(&message) {
             *self.commands.lock().expect("commands lock") = Some(commands);
         }
         let kind = message.get("type").and_then(Value::as_str);
+        // The CLI opens a turn of its own for a message written too late (`system/init`
+        // while it waits): that turn's result belongs to this one, not to the next. A
+        // steer already read in this turn is not one of those: a later init (compaction,
+        // say) must not make the turn wait for a result that will never come.
+        if kind == Some("system") && message.get("subtype").and_then(Value::as_str) == Some("init")
+        {
+            let mut turn = self.turn.lock().expect("turn lock");
+            if !turn.steers.is_empty() {
+                turn.separate_steer_turn = true;
+            }
+        }
         if !matches!(kind, Some("control_response" | "control_request")) {
             let mut replay = self.replay.lock().expect("replay lock");
             if replay.is_some() {
@@ -361,6 +461,30 @@ impl Shared {
                 tokio::spawn(async move { this.answer(message).await });
             }
             Some("result") => {
+                // Each user message gets exactly one `result`, naming it in
+                // `user_message_uuid` (verified against claude 2.1.317).
+                let ended: Option<MessageId> = message
+                    .get("user_message_uuid")
+                    .and_then(Value::as_str)
+                    .and_then(|uuid| uuid.parse().ok());
+                // An error result cannot leave the turn waiting: a steered message that
+                // never reached the model must not keep the agent running forever.
+                let failed = message.get("is_error").and_then(Value::as_bool) == Some(true)
+                    || message.get("subtype").and_then(Value::as_str) != Some("success");
+                // A steer's own turn may report after the hub turn it belonged to ended.
+                // Absorb its result: it must never end the next prompt's turn.
+                if let Some(id) = ended {
+                    let mut stale = self.stale_steers.lock().expect("stale lock");
+                    if stale.contains(&id) {
+                        stale.retain(|stale| *stale != id);
+                        drop(stale);
+                        self.emit(
+                            SessionEventKind::SteerRead { message_id: id },
+                            Some(&message),
+                        );
+                        return;
+                    }
+                }
                 let mut turn = self.turn.lock().expect("turn lock");
                 let (stop, events) = self
                     .translator
@@ -370,16 +494,42 @@ impl Shared {
                 for kind in events {
                     self.emit(kind, Some(&message));
                 }
-                if let (Some(id), Some(last)) = (turn.id.take(), turn.last_assistant.take()) {
-                    self.turn_ends
-                        .lock()
-                        .expect("turn_ends lock")
-                        .insert(id, last);
+                if ended.is_some_and(|id| turn.steered.contains(&id)) {
+                    // The follow-up turn for a late message: it read it, and ends here.
+                    let id = ended.expect("checked");
+                    if turn.steers.iter().any(|steer| steer.id == id) {
+                        turn.steers.retain(|steer| steer.id != id);
+                        self.emit(
+                            SessionEventKind::SteerRead { message_id: id },
+                            Some(&message),
+                        );
+                    }
+                    turn.steer_results.push(id);
+                    if !turn.prompt_done {
+                        // It came before the prompt's own result: wait for that.
+                        return;
+                    }
+                    // More late messages wait for their turn to read them, unless this one
+                    // failed: then nothing more will run for them.
+                    if !failed && !turn.steers.is_empty() {
+                        return;
+                    }
+                } else {
+                    // The prompt's result. A steer still unread, or a separate turn that
+                    // has not reported, keeps this turn open so no stray result ends the
+                    // next one. An interrupted turn is kept open because its queued
+                    // messages are still read (`still_queued`, verified with claude
+                    // 2.1.317); a failure without an interrupt ends now.
+                    turn.prompt_done = true;
+                    turn.held_stop.get_or_insert(stop);
+                    let unread = !turn.steers.is_empty();
+                    let separate = turn.separate_steer_turn && turn.steer_results.is_empty();
+                    let survives = turn.interrupted && turn.keep_queued;
+                    if (survives || !failed) && (unread || separate) {
+                        return;
+                    }
                 }
-                if let Some(waiter) = turn.waiter.take() {
-                    let _ = waiter.send(stop);
-                }
-                *turn = Turn::default();
+                self.finish_turn(&mut turn, stop);
             }
             // CodeBuddy reports a turn it cannot run at all (a session it cannot find, say)
             // as a bare `error` message and then waits: no `result` follows, so this ends
@@ -402,9 +552,47 @@ impl Shared {
                     );
                     let _ = waiter.send(StopReason::Error);
                 }
+                let unread: Vec<PendingSteer> = std::mem::take(&mut turn.steers);
                 *turn = Turn::default();
+                drop(turn);
+                self.warn_unread(unread);
             }
             Some(kind) => {
+                // The CLI echoes a user message with `isReplay` and the uuid we gave it
+                // when it reads it into the running turn (`--replay-user-messages`). That,
+                // and only that, says the model has seen a steer: the next assistant output
+                // may still belong to the turn before it (verified with claude 2.1.317).
+                if message.get("isReplay").and_then(Value::as_bool) == Some(true)
+                    && let Some(id) = message
+                        .get("uuid")
+                        .and_then(Value::as_str)
+                        .and_then(|uuid| uuid.parse::<MessageId>().ok())
+                {
+                    let read = {
+                        let mut turn = self.turn.lock().expect("turn lock");
+                        match turn.steers.iter().position(|steer| steer.id == id) {
+                            Some(index) => {
+                                turn.steers.remove(index);
+                                true
+                            }
+                            // Warned about when an earlier turn ended, still queued: its
+                            // turn has started now.
+                            None => {
+                                drop(turn);
+                                let mut stale = self.stale_steers.lock().expect("stale lock");
+                                let found = stale.contains(&id);
+                                stale.retain(|stale| *stale != id);
+                                found
+                            }
+                        }
+                    };
+                    if read {
+                        self.emit(
+                            SessionEventKind::SteerRead { message_id: id },
+                            Some(&message),
+                        );
+                    }
+                }
                 if kind == "assistant"
                     && message.get("parent_tool_use_id").is_none_or(Value::is_null)
                     && let Some(uuid) = message.get("uuid").and_then(Value::as_str)
@@ -459,7 +647,22 @@ impl Shared {
     fn ended(&self) -> bool {
         self.exited.store(true, Ordering::SeqCst);
         self.pending.lock().expect("pending lock").clear();
-        *self.turn.lock().expect("turn lock") = Turn::default();
+        let unread = {
+            let mut turn = self.turn.lock().expect("turn lock");
+            let unread: Vec<PendingSteer> = std::mem::take(&mut turn.steers);
+            *turn = Turn::default();
+            unread
+        };
+        // The process is gone: these were never read. Say so rather than mark them read.
+        for steer in unread {
+            self.emit(
+                SessionEventKind::Warning {
+                    message: format!("这条插话没有被读取：「{}」", steer.snippet),
+                },
+                None,
+            );
+        }
+        self.stale_steers.lock().expect("stale lock").clear();
         !self.closing.load(Ordering::SeqCst)
     }
 }
@@ -764,22 +967,70 @@ impl DriverSession for ClaudeSession {
         })
     }
 
-    async fn interrupt(&self) -> Result<(), CoreError> {
+    /// Writes the message into the running turn's stdin, naming it with the hub's message
+    /// id. No new turn, and no waiter: the running `prompt_with` still awaits its result.
+    async fn steer(&self, message_id: MessageId, prompt: &Prompt) -> Result<(), CoreError> {
+        self.check_open()?;
+        let snippet: String = prompt
+            .text
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(40)
+            .collect();
         {
+            let mut turn = self.shared.turn.lock().expect("turn lock");
+            if turn.waiter.is_none() {
+                return Err(CoreError::Conflict("no turn is running".into()));
+            }
+            turn.steers.push(PendingSteer {
+                id: message_id,
+                snippet,
+            });
+            turn.steered.push(message_id);
+        }
+        let message = wire::user_message(
+            &self.shared.session_id,
+            &message_id.to_string(),
+            wire::user_content(prompt),
+        );
+        if let Err(err) = self.shared.write(&message).await {
+            let mut turn = self.shared.turn.lock().expect("turn lock");
+            turn.steers.retain(|steer| steer.id != message_id);
+            turn.steered.retain(|steer| *steer != message_id);
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    async fn interrupt(&self) -> Result<(), CoreError> {
+        let unread = {
             let mut turn = self.shared.turn.lock().expect("turn lock");
             if turn.waiter.is_none() {
                 return Ok(());
             }
             turn.interrupted = true;
-        }
-        match self
+            !turn.steers.is_empty()
+        };
+        let answer = self
             .shared
             .control(json!({ "subtype": "interrupt" }), CLEANUP_TIMEOUT)
-            .await
-        {
-            // The turn may have ended meanwhile, or the process is gone.
-            Ok(_) | Err(_) => Ok(()),
+            .await;
+        if unread {
+            // Claude Code keeps unread stdin messages queued across an interrupt: it
+            // answers with `still_queued` (verified with claude 2.1.317), and the next
+            // turn reads them. The turn then waits for them like a late message.
+            let queued = answer.as_ref().is_ok_and(|answer| {
+                answer
+                    .get("still_queued")
+                    .and_then(Value::as_array)
+                    .is_some_and(|queued| !queued.is_empty())
+            });
+            self.shared.turn.lock().expect("turn lock").keep_queued = queued;
         }
+        // The turn may have ended meanwhile, or the process is gone.
+        Ok(())
     }
 
     async fn suspend(&self) -> Result<(), CoreError> {
