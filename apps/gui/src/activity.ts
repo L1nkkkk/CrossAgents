@@ -9,12 +9,16 @@
 //   at that agent. Turns started by the orchestrator do not count, or every worker step would.
 //   Kept in localStorage; opening the agent clears it.
 // - Viewing: the agents open in a pane right now (one, or two side by side).
+// - Output speed: the running turn's cumulative output tokens as `agent.usage` reported them,
+//   with when, so a row can say `42 tok/s` (lib/tokenRate.ts). Empty for a driver that reports
+//   no token counts; a new turn starts over.
 
 import { useSyncExternalStore } from "react";
 import type { AgentExit } from "@bindings/AgentExit";
 import type { TranscriptItem } from "@bindings/TranscriptItem";
 import { onHubEvent } from "./hub";
 import { stepLine } from "./lib/workGroups";
+import { addSample, type RateSample } from "./lib/tokenRate";
 
 export type Unread = { kind: "done" | "error"; at: string };
 
@@ -41,6 +45,8 @@ const activity = new Map<string, string>();
 /** How many items a pulse keeps: `liveActivity` reads the last one, a little history is enough. */
 const PULSE_ITEMS = 6;
 const pulses = new Map<string, Pulse>();
+/** Each running turn's output-token samples (replaced, never mutated, for `useRateSamples`). */
+const rates = new Map<string, RateSample[]>();
 /** Each agent's latest `agent.error` since the page loaded. */
 const errors = new Map<string, string>();
 /** How its process ended, while that is its latest error (`agent.exited`). */
@@ -150,17 +156,27 @@ export function startActivity() {
         return changed();
       case "agent.turn_started":
         pulses.set(e.data.id, { since: Date.parse(e.ts), at: Date.parse(e.ts), items: [], over: false });
+        rates.delete(e.data.id);
         return changed();
+      case "agent.usage": {
+        const tokens = e.data.tokens;
+        if (!tokens) return;
+        // `reasoning_output` is part of `output` already (crates/core/src/driver.rs TokenUsage).
+        rates.set(e.data.id, addSample(rates.get(e.data.id) ?? [], Date.parse(e.ts), tokens.output));
+        return changed();
+      }
       case "agent.status_changed": {
         const id = e.data.id;
         const p = pulses.get(id);
         if (e.data.to === "running" && (!p || p.over)) {
           pulses.set(id, { since: Date.parse(e.ts), at: Date.parse(e.ts), items: [], over: false });
+          rates.delete(id);
           return changed();
         }
         // Idle, stopped or in error: the row has nothing live left to say.
         if (e.data.to !== "running" && p && !p.over) {
           pulses.set(id, { ...p, over: true });
+          rates.delete(id);
           return changed();
         }
         return;
@@ -169,6 +185,7 @@ export function startActivity() {
         const { id, message_id, stop_reason } = e.data;
         const p = pulses.get(id);
         if (p && !p.over) pulses.set(id, { ...p, over: true });
+        rates.delete(id);
         const mine = fromHuman.delete(message_id);
         // An interrupted turn needs someone to decide whether to run it again.
         const bad = stop_reason === "error" || stop_reason === "interrupted";
@@ -189,6 +206,7 @@ export function startActivity() {
       case "agent.removed":
         activity.delete(e.data.id);
         pulses.delete(e.data.id);
+        rates.delete(e.data.id);
         if (unread[e.data.id]) markSeen(e.data.id);
         return;
     }
@@ -223,6 +241,9 @@ function subscribe(l: () => void) {
 export const useActivity = (agentId: string) => useSyncExternalStore(subscribe, () => activity.get(agentId));
 /** The agent's running turn as this page has seen it (see `Pulse`). */
 export const usePulse = (agentId: string) => useSyncExternalStore(subscribe, () => pulses.get(agentId));
+/** The running turn's output-token samples, for `tokenRate`; undefined when none were reported. */
+export const useRateSamples = (agentId: string | undefined) =>
+  useSyncExternalStore(subscribe, () => (agentId ? rates.get(agentId) : undefined));
 /** Whether this page knows a turn's start, so a row can show its elapsed time. */
 export const pulseKnown = (agentId: string) => {
   const p = pulses.get(agentId);

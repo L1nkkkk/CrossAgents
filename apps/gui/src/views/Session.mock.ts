@@ -132,10 +132,19 @@ export function liveSession(kind: "stream" | "quiet"): { state: MockState; scrip
   // "推理", so the live line is the only place its words show), then output again.
   const lines = ["transforming (38/214) src/views/Session.tsx", "transforming (74/214) src/ToolColumn.tsx", "rendering chunks...", "computing gzip size...", "dist/assets/index-8ac14f2e.js  412.61 kB │ gzip: 128.40 kB"];
   const output = (at: number, text: string): Step => ({ at, event: { type: "agent.tool_output", data: { id: nova.id, tool_call_id: build, text: `${text}\n` } } });
+  // The turn's cumulative token counts rising (~40 output tokens a second), so the sidebar row and
+  // the live line show an output speed (lib/tokenRate.ts) next to the working dot.
+  const base = state.transcripts.get(nova.id)!.usage!;
+  const usage = (at: number, i: number): Step => {
+    const out = 1_200 + i * 28;
+    const tokens = { input: 38_000 + i * 120, cached_input: 30_000, output: out, reasoning_output: Math.round(out / 3), total: 38_000 + i * 120 + out };
+    return { at, event: { type: "agent.usage", data: { id: nova.id, used: base.used + i * 150, size: base.size, cost_usd: base.cost_usd, tokens } } };
+  };
   const script: Step[] =
     kind === "quiet"
       ? []
       : [
+          ...Array.from({ length: 12 }, (_, i) => usage(300 + i * 700, i)),
           ...lines.flatMap((line, i) => [output(900 + i * 900, line), output(1_350 + i * 900, `transforming (${40 + i * 8}/214) src/main.tsx`)]),
           { at: 5_200, event: { type: "agent.output", data: { id: nova.id, stream: "thought", text: "这次比上次慢，" } } },
           { at: 5_700, event: { type: "agent.output", data: { id: nova.id, stream: "thought", text: "大概是 chunk 变多了，跑完再看一眼 dist。" } } },
@@ -152,6 +161,8 @@ export function liveSession(kind: "stream" | "quiet"): { state: MockState; scrip
 export function liveRun(kind: "stream" | "quiet"): { state: MockState; script: Step[]; route: string } {
   const scene = liveSession(kind);
   const nova = scene.state.agents[0];
+  // The run's lead: its avatar carries the lead's flag wherever it shows (components.tsx Avatar).
+  nova.role = "planner";
   const r = run({
     title: "三个包都构建一遍",
     request: "先看看构建脚本，然后把三个包按 core、cli、gui 的顺序都构建一遍。",

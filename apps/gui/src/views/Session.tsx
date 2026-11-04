@@ -231,6 +231,7 @@ export function SessionView({
     .sort((a, b) => rankTask(a.task.status) - rankTask(b.task.status) || b.task.updated_at.localeCompare(a.task.updated_at))[0];
   const live: LiveTurn | undefined = runningTurn
     ? {
+        agentId: agent.id,
         since: Date.parse(runningTurn.started_at!),
         items: runningTurn.items,
         ...(workingTask ? { task: workingTask.task, siblings: runs.find((d) => d.run.id === workingTask.run.id)?.tasks } : {}),
