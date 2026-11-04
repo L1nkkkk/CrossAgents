@@ -137,6 +137,8 @@ impl AgentHost for FakeHost {
 struct FakeWorkspaces {
     cannot_commit: AtomicBool,
     head: Mutex<Option<String>>,
+    /// What `uncommitted` reports: work left in the checkout, not committed.
+    dirty: Mutex<Vec<String>>,
     merged: Mutex<Vec<String>>,
     removed: Mutex<Vec<PathBuf>>,
 }
@@ -205,31 +207,38 @@ impl WorkspaceProvider for FakeWorkspaces {
         Ok(())
     }
     async fn uncommitted(&self, _: &Path) -> Result<Vec<String>, CoreError> {
-        Ok(Vec::new())
+        Ok(self.dirty.lock().await.clone())
     }
     async fn head(&self, _: &Path) -> Result<String, CoreError> {
         Ok(self.head.lock().await.clone().unwrap_or_default())
     }
 }
 
-/// Answers every check the way the test says.
+/// Answers every check the way the test says, and counts the rounds it ran.
 #[derive(Default)]
-struct FixedChecks(Vec<bool>);
+struct FixedChecks {
+    answers: Vec<bool>,
+    rounds: Mutex<u32>,
+}
 
 #[async_trait]
 impl Verifier for FixedChecks {
     async fn check(&self, _: &Path, commands: &[String]) -> Vec<crossagents_core::CheckResult> {
+        {
+            let mut rounds = self.rounds.lock().await;
+            *rounds += 1;
+        }
         commands
             .iter()
             .enumerate()
             .map(|(i, command)| crossagents_core::CheckResult {
                 command: command.clone(),
-                exit_code: Some(if self.0.get(i).copied().unwrap_or(true) {
+                exit_code: Some(if self.answers.get(i).copied().unwrap_or(true) {
                     0
                 } else {
                     1
                 }),
-                passed: self.0.get(i).copied().unwrap_or(true),
+                passed: self.answers.get(i).copied().unwrap_or(true),
                 output: String::new(),
             })
             .collect()
@@ -244,6 +253,7 @@ struct Fixture {
     orchestrator: Arc<Orchestrator>,
     host: Arc<FakeHost>,
     ws: Arc<FakeWorkspaces>,
+    checks: Arc<FixedChecks>,
     worktrees: PathBuf,
     run: Run,
     task: Task,
@@ -265,12 +275,16 @@ impl Fixture {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().await.unwrap());
         let host = Arc::new(FakeHost::default());
         let ws = Arc::new(FakeWorkspaces::default());
+        let checks = Arc::new(FixedChecks {
+            answers: checks,
+            rounds: Mutex::new(0),
+        });
         let orchestrator = Orchestrator::new(
             store.clone(),
             Arc::new(EventBus::new(store.clone())),
             host.clone(),
             ws.clone(),
-            Arc::new(FixedChecks(checks)),
+            checks.clone(),
             OrchestratorConfig {
                 worktrees: worktrees.clone(),
                 locks: home.path().join("locks"),
@@ -380,6 +394,7 @@ impl Fixture {
             orchestrator,
             host,
             ws,
+            checks,
             worktrees,
             run,
             task,
@@ -712,6 +727,104 @@ async fn a_forced_accept_reports_the_commit_it_merged() {
         "the commit the merge brought in, not the verified one: {accepted}"
     );
     assert_eq!(f.ws.merged().await, vec!["crossagents/run-a".to_owned()]);
+}
+
+// ---------------------------------------------------------------------------------------
+// 6. Reporting again after a pass: a new round of work, or the same report again
+
+#[tokio::test]
+async fn reporting_new_work_after_a_pass_checks_it_again_and_relays_the_new_summary() {
+    let f = Fixture::new(&["cargo test"]).await;
+    *f.ws.head.lock().await = Some("1111111".into());
+    f.orchestrator
+        .complete(&f.worker, f.task.id, "wrote a".into())
+        .await
+        .unwrap();
+    let first = f.settled().await;
+    assert_eq!(first.status, TaskStatus::Passed, "{first:?}");
+    assert_eq!(first.report.verified_sha.as_deref(), Some("1111111"));
+    assert_eq!(*f.checks.rounds.lock().await, 1);
+    let told_before = f.host.delivered_to(f.lead.id).await.len();
+
+    // The worker keeps working and reports the work it did after the checks.
+    *f.ws.head.lock().await = Some("2222222".into());
+    f.orchestrator
+        .complete(&f.worker, f.task.id, "also fixed b".into())
+        .await
+        .unwrap();
+    let second = f.settled().await;
+
+    assert_eq!(second.status, TaskStatus::Passed, "{second:?}");
+    assert_eq!(second.report.summary.as_deref(), Some("also fixed b"));
+    assert_eq!(
+        second.report.verified_sha.as_deref(),
+        Some("2222222"),
+        "the new work is what was checked"
+    );
+    assert!(second.report.failure.is_none(), "{second:?}");
+    assert_eq!(
+        *f.checks.rounds.lock().await,
+        2,
+        "a new round, checked again"
+    );
+    let told = f.host.delivered_to(f.lead.id).await;
+    assert_eq!(told.len(), told_before + 1, "{told:?}");
+    assert!(
+        told.last().unwrap().contains("also fixed b"),
+        "the issuer sees the new summary: {told:?}"
+    );
+}
+
+#[tokio::test]
+async fn reporting_the_same_report_again_does_not_check_it_again() {
+    let f = Fixture::new(&["cargo test"]).await;
+    *f.ws.head.lock().await = Some("1111111".into());
+    f.orchestrator
+        .complete(&f.worker, f.task.id, "wrote a".into())
+        .await
+        .unwrap();
+    let first = f.settled().await;
+    assert_eq!(first.status, TaskStatus::Passed, "{first:?}");
+    let told_before = f.host.delivered_to(f.lead.id).await.len();
+
+    // The same call again, with nothing done since: a retried call, not a new round.
+    f.orchestrator
+        .complete(&f.worker, f.task.id, "wrote a".into())
+        .await
+        .unwrap();
+    let again = f.task().await;
+
+    assert_eq!(again.status, TaskStatus::Passed, "{again:?}");
+    assert_eq!(again.report.summary.as_deref(), Some("wrote a"));
+    assert_eq!(again.report.verified_sha.as_deref(), Some("1111111"));
+    assert_eq!(*f.checks.rounds.lock().await, 1, "nothing to check again");
+    assert_eq!(
+        f.host.delivered_to(f.lead.id).await.len(),
+        told_before,
+        "its issuer is not told the same report twice"
+    );
+}
+
+#[tokio::test]
+async fn uncommitted_work_after_a_pass_is_checked_again_even_with_the_same_summary() {
+    let f = Fixture::new(&["cargo test"]).await;
+    *f.ws.head.lock().await = Some("1111111".into());
+    f.orchestrator
+        .complete(&f.worker, f.task.id, "wrote a".into())
+        .await
+        .unwrap();
+    assert_eq!(f.settled().await.status, TaskStatus::Passed);
+
+    // A fix left in the checkout, not committed: the old checks did not see it.
+    f.ws.dirty.lock().await.push("src/lib.rs".into());
+    f.orchestrator
+        .complete(&f.worker, f.task.id, "wrote a".into())
+        .await
+        .unwrap();
+    let second = f.settled().await;
+
+    assert_eq!(second.status, TaskStatus::Passed, "{second:?}");
+    assert_eq!(*f.checks.rounds.lock().await, 2);
 }
 
 #[tokio::test]

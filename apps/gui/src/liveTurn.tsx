@@ -10,10 +10,11 @@ import { useEffect, useState } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { Task } from "@bindings/Task";
 import type { TranscriptItem } from "@bindings/TranscriptItem";
-import { noteTurn, pulseKnown, usePulse } from "./activity";
+import { noteTurn, pulseKnown, usePulse, useRateSamples } from "./activity";
 import { api } from "./api";
 import { StateWord } from "./parts";
 import { checksPassed, progress, taskState } from "./lib/taskState";
+import { formatRate, tokenRate } from "./lib/tokenRate";
 import { liveKey, liveProgress } from "./lib/workGroups";
 
 /** Seconds-resolution time, so a duration counts up while the turn runs. */
@@ -34,7 +35,19 @@ function useSeen(items: TranscriptItem[]): number {
   return seen.at;
 }
 
+/**
+ * How fast the running turn writes, `42 tok/s`, over the last ~10 seconds of the agent's
+ * `agent.usage` counts. Nothing at all when it is not known (a driver without token counts, a
+ * turn just started) or nothing came out lately: the pulsing dot beside it still says it runs.
+ */
+function useTokenRate(agentId: string | undefined, now: number): string | undefined {
+  const samples = useRateSamples(agentId);
+  return samples ? formatRate(tokenRate(samples, now)) : undefined;
+}
+
 export type LiveTurn = {
+  /** The session, whose output speed the line shows when its driver reports tokens. */
+  agentId?: string;
   /** The turn's start, ms. */
   since: number;
   items: TranscriptItem[];
@@ -47,13 +60,14 @@ export type LiveTurn = {
  * The session header's line: `••• 2m 31s · 运行命令 · #p1 运行中 · 3/5 已合并 · 2/3 检查通过`.
  * A quiet turn says how long in place of nothing else, in warning colour.
  */
-export function TurnLive({ since, items, task, siblings }: LiveTurn) {
+export function TurnLive({ agentId, since, items, task, siblings }: LiveTurn) {
   const now = useNow();
   const at = useSeen(items);
+  const rate = useTokenRate(agentId, now);
   const p = liveProgress(items, { since, at, now });
   const run = task && siblings?.length ? progress(siblings) : "";
   const checks = task ? checksPassed(task.report.checks) : "";
-  const line = [p.elapsed && `已跑 ${p.elapsed}`, p.activity, task && `#${task.key}`, task?.progress, run, checks, p.quietText].filter(Boolean).join(" · ");
+  const line = [p.elapsed && `已跑 ${p.elapsed}`, rate, p.activity, task && `#${task.key}`, task?.progress, run, checks, p.quietText].filter(Boolean).join(" · ");
   return (
     <div className={`live-bar ${p.quietText ? "quiet" : ""}`} role="group" aria-label="本轮进度" title={line}>
       <span className="busy-dots" aria-hidden="true">
@@ -62,6 +76,11 @@ export function TurnLive({ since, items, task, siblings }: LiveTurn) {
         <i />
       </span>
       {p.elapsed && <span className="live-elapsed">{p.elapsed}</span>}
+      {rate && (
+        <span className="live-rate" title="最近约 10 秒的输出速度">
+          {rate}
+        </span>
+      )}
       <span className="live-what">{p.activity}</span>
       {task && (
         <a className="chip live-task" href={`#/runs/${task.run_id}/tasks/${task.id}`} title={task.title}>
@@ -101,13 +120,18 @@ export function RowLive({ since, at, items }: { since?: number; at?: number; ite
   );
 }
 
-/** The end of a sidebar row's first line: how long the turn has run, or how long it has been quiet. */
-export function RowElapsed({ since, at, items }: { since?: number; at?: number; items: TranscriptItem[] }) {
+/**
+ * The end of a sidebar row's first line: how long the turn has run, or how long it has been
+ * quiet; beside the pulsing dot, how fast it writes when that is known (`42 tok/s`).
+ */
+export function RowElapsed({ agentId, since, at, items }: { agentId?: string; since?: number; at?: number; items: TranscriptItem[] }) {
   const now = useNow();
+  const rate = useTokenRate(agentId, now);
   const p = liveProgress(items, { since, at: at ?? now, now });
   return (
-    <span className={`member-elapsed ${p.quietText ? "quiet" : ""}`} title={[p.elapsed, p.activity, p.quietText].filter(Boolean).join(" · ")}>
+    <span className={`member-elapsed ${p.quietText ? "quiet" : ""}`} title={[p.elapsed, rate, p.activity, p.quietText].filter(Boolean).join(" · ")}>
       <i className="working-dot" />
+      {rate && !p.quietText && <span className="member-rate">{rate}</span>}
       {p.quietText ?? p.elapsed}
     </span>
   );

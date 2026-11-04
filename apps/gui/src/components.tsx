@@ -651,6 +651,23 @@ export function Avatar({ agent, size = 20, status = false }: { agent: Agent; siz
     >
       {image ? <img className="avatar-img" src={image} alt="" draggable={false} /> : text}
       {status && tone.color !== "off" && <span className={`presence ${tone.color} ${tone.live ? "live" : ""}`} />}
+      {agent.role === "planner" && <LeadFlag size={size} />}
+    </span>
+  );
+}
+
+/**
+ * The small flag at the top-right of a lead's (planner's) avatar. It scales with the avatar
+ * and has a dark outline so it reads on any avatar colour and in both themes.
+ */
+function LeadFlag({ size }: { size: number }) {
+  const px = Math.max(8, Math.round(size * 0.45));
+  return (
+    <span className="avatar-flag" title="主导" style={{ width: px, height: px }}>
+      <svg viewBox="0 0 12 12" width={px} height={px} aria-hidden="true">
+        <path d="M2.5 11V1.5" className="flag-pole" />
+        <path d="M3 1.8h6.8l-1.7 2.4 1.7 2.4H3z" className="flag-cloth" />
+      </svg>
     </span>
   );
 }

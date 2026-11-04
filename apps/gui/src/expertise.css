@@ -64,3 +64,6 @@
 .exp-verdict { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 
 .exp-md { max-height: 360px; overflow: auto; padding: 12px; border-radius: 6px; background: var(--surface-sunk); border: 1px solid var(--border); font-size: 12px; white-space: pre-wrap; }
+
+/* A section's empty state is one muted line, not the 60px of a whole-page notice. */
+.exp-page .empty { padding: 8px 0; text-align: left; font-size: 13px; }

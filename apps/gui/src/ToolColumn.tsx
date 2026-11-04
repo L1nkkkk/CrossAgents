@@ -1,6 +1,7 @@
 // The tabs around conversations (panes.ts): a browser-like row of them in each dock, on the right
 // and under the conversations — 改动 (what each turn changed), 文件 (the workspace's files), 任务
-// (a task's details), and 提交图 (commits). 事件流 (raw hub events, for debugging) is offered only
+// (a task's details), 提交图 (commits), and 后台 (the agents' reminders and watches, the tasks being
+// verified). 事件流 (raw hub events, for debugging) is offered only
 // where debugging is on (panes.ts `PANE_KINDS`). Tabs show the focused conversation, or what was
 // opened on purpose (panes.ts `target`); nothing from another conversation mixes in. When docking
 // would squeeze the conversation, both docks are one row in a drawer over the page.
@@ -8,8 +9,13 @@
 import { useEffect, useMemo, useState } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { TurnDiffResponse } from "@bindings/TurnDiffResponse";
+import type { BackgroundReminder } from "@bindings/BackgroundReminder";
+import type { BackgroundResponse } from "@bindings/BackgroundResponse";
+import type { BackgroundWatch } from "@bindings/BackgroundWatch";
+import type { VerifyingTask } from "@bindings/VerifyingTask";
 import { api, errorText } from "./api";
-import { Avatar, ErrorBox, Icon, displayName, isAgent, useAgents } from "./components";
+import { Avatar, ErrorBox, Icon, displayName, isAgent, sessionHref, useAgents } from "./components";
+import { board, countdown, elapsed, watchOn, withoutReminder, type Split } from "./lib/background";
 import { CommitGraphView } from "./commitgraph";
 import { ChangeStat, DiffView } from "./diffview";
 import { useEventLog } from "./eventlog";
@@ -25,7 +31,7 @@ import { useWidths } from "./lib/widths";
 import { useSession, type TranscriptTurn } from "./session";
 import { useSidebar } from "./titlebar";
 import { TaskDetail, PlanTasks } from "./views/Run";
-import { useHubData } from "./hub";
+import { onHubEvent, useHubData } from "./hub";
 
 /**
  * Whether the tool column floats over the page as a drawer: when docking it would leave the
@@ -114,6 +120,7 @@ function PaneBody({ kind, follow, target, routeTask, routeRun }: { kind: PaneKin
         ) : (
           <Blank text="打开一个会话或 run，这里显示它的提交图。" />
         ))}
+      {kind === "background" && <BackgroundPane follow={agent} routeRun={routeRun ?? routeTask?.run} />}
     </div>
   );
 }
@@ -211,6 +218,185 @@ function TaskPane({ follow, target, routeTask }: { follow?: string; target: Targ
   if (detail.error) return <ErrorBox error={detail.error} />;
   if (run) return <Blank text="正在读取关联工作。" />;
   return <Blank text="当前没有执行中的任务。请从会话的关联工作中选择计划或任务。" />;
+}
+
+/** Events after which the board is read again: what may add, end or rename one of its items. */
+const backgroundRelevant = (e: HubEvent) =>
+  e.type === "reminder.fired" ||
+  e.type === "watch.triggered" ||
+  e.type === "task.status_changed" ||
+  e.type === "task.checked" ||
+  e.type === "run.status_changed" ||
+  e.type === "run.deleted" ||
+  e.type === "agent.created" ||
+  e.type === "agent.updated" ||
+  e.type === "agent.removed";
+
+/** A clock that ticks every second while the tab shows, for the countdowns. */
+function useNow(): Date {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return now;
+}
+
+const runHref = (run: string) => `#/runs/${encodeURIComponent(run)}`;
+
+/**
+ * What the hub keeps going behind the conversations: the agents' reminders, their watches and
+ * the tasks being verified. What concerns the followed conversation or the routed run comes first;
+ * the rest is folded. Agents set these with their own tools; here a reminder can only be cancelled.
+ */
+function BackgroundPane({ follow, routeRun }: { follow?: string; routeRun?: string }) {
+  const agents = useAgents();
+  const agentId = agents.data?.find((a) => follow && isAgent(a, follow))?.id;
+  const loaded = useHubData(() => api.background(), [], backgroundRelevant);
+  // Reminders gone here before the board is read again: fired (the event) or cancelled from here.
+  const [gone, setGone] = useState<Set<string>>(() => new Set());
+  const [failed, setFailed] = useState<string>();
+  const now = useNow();
+  useEffect(
+    () =>
+      onHubEvent((e) => {
+        if (e.type === "reminder.fired") setGone((g) => new Set(g).add(e.data.reminder_id));
+      }),
+    [],
+  );
+  const bg = useMemo<BackgroundResponse | undefined>(() => {
+    if (!loaded.data) return undefined;
+    let out = loaded.data;
+    for (const id of gone) out = withoutReminder(out, id);
+    return out;
+  }, [loaded.data, gone]);
+  const split = useMemo(() => (bg ? board(bg, { agent: agentId, run: routeRun }) : undefined), [bg, agentId, routeRun]);
+
+  const cancel = (r: BackgroundReminder) => {
+    setFailed(undefined);
+    setGone((g) => new Set(g).add(r.reminder.id));
+    api.cancelReminder(r.reminder.id).then(
+      () => loaded.reload(),
+      (err) => {
+        // Already gone in the hub (fired or cancelled meanwhile): that is what was wanted.
+        if ((err as { status?: number }).status === 404) return loaded.reload();
+        setGone((g) => {
+          const next = new Set(g);
+          next.delete(r.reminder.id);
+          return next;
+        });
+        setFailed(`没能取消提醒：${errorText(err)}`);
+      },
+    );
+  };
+
+  if (!bg || !split) return loaded.error ? <ErrorBox error={loaded.error} /> : <Blank text="加载中…" />;
+  const total = bg.reminders.length + bg.watches.length + bg.verifying.length;
+  if (!total) return <Blank text="后台现在没有东西：没有 agent 设的提醒或关注，也没有正在验收的任务。" />;
+  const others = split.reminders.other.length + split.watches.other.length + split.verifying.other.length;
+  return (
+    <div className="bg-pane">
+      {failed && <ErrorBox error={failed} />}
+      {others === total ? <p className="muted small">当前对话和 run 没有后台条目。</p> : <BgSections board={split} pick="near" now={now} onCancel={cancel} />}
+      {others > 0 && (
+        <details className="bg-others">
+          <summary className="small muted">其他会话和 run 的 {others} 项</summary>
+          <BgSections board={split} pick="other" now={now} onCancel={cancel} />
+        </details>
+      )}
+    </div>
+  );
+}
+
+type Picked = { reminders: Split<BackgroundReminder>; watches: Split<BackgroundWatch>; verifying: Split<VerifyingTask> };
+
+function BgSections({ board, pick, now, onCancel }: { board: Picked; pick: "near" | "other"; now: Date; onCancel: (r: BackgroundReminder) => void }) {
+  const reminders = board.reminders[pick];
+  const watches = board.watches[pick];
+  const verifying = board.verifying[pick];
+  return (
+    <>
+      {reminders.length > 0 && (
+        <section className="bg-section">
+          <h4>提醒 · {reminders.length}</h4>
+          {reminders.map((r) => {
+            const task = r.task_key ?? r.reminder.task;
+            return (
+              <div key={r.reminder.id} className="bg-item">
+                <div className="bg-line">
+                  <a href={sessionHref(r.reminder.owner)} className="bg-who">
+                    {r.owner_name}
+                  </a>
+                  <span className="bg-when" title={full(r.reminder.due_at)}>
+                    {clock(r.reminder.due_at, now)} · {countdown(r.reminder.due_at, now)}
+                  </span>
+                  <button className="ghost small bg-cancel" onClick={() => onCancel(r)} title="取消这个提醒，它不会再叫醒 agent">
+                    取消
+                  </button>
+                </div>
+                {r.reminder.note && <div className="bg-note">{r.reminder.note}</div>}
+                {task && (
+                  <div className="bg-meta small muted">
+                    关联任务 {r.run_id ? <a href={runHref(r.run_id)}>#{task}</a> : <span>#{task}</span>}
+                    {r.reminder.only_if_open && " · 任务结束就不再提醒"}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </section>
+      )}
+      {watches.length > 0 && (
+        <section className="bg-section">
+          <h4>关注 · {watches.length}</h4>
+          {watches.map((w) => (
+            <div key={w.watch.id} className="bg-item">
+              <div className="bg-line">
+                <a href={sessionHref(w.watch.owner)} className="bg-who">
+                  {w.owner_name}
+                </a>
+                <span className="muted">在看</span>
+                {w.watch.target.kind === "agent" ? (
+                  <a href={sessionHref(w.watch.target.agent_id)}>{w.target_name}</a>
+                ) : w.run_id ? (
+                  <a href={runHref(w.run_id)}>{w.target_name}</a>
+                ) : (
+                  <span>{w.target_name}</span>
+                )}
+              </div>
+              <div className="bg-meta small muted" title={full(w.watch.created_at)}>
+                关注：{watchOn(w.watch.on)} · {clock(w.watch.created_at, now)} 起
+              </div>
+            </div>
+          ))}
+        </section>
+      )}
+      {verifying.length > 0 && (
+        <section className="bg-section">
+          <h4>验收中 · {verifying.length}</h4>
+          {verifying.map((v) => (
+            <div key={v.task_id} className="bg-item">
+              <div className="bg-line">
+                <a href={runHref(v.run_id)} className="bg-who">
+                  #{v.key}
+                </a>
+                <span className="bg-title">{v.title}</span>
+                <span className="bg-when" title={full(v.since)}>
+                  已跑 {elapsed(v.since, now)}
+                </span>
+              </div>
+              <div className="bg-meta small muted">
+                {v.run_title}
+                {v.assignee_name && " · "}
+                {v.assignee_name && (v.assignee ? <a href={sessionHref(v.assignee)}>{v.assignee_name}</a> : v.assignee_name)}
+                {` · ${v.checks} 项检查`}
+              </div>
+            </div>
+          ))}
+        </section>
+      )}
+    </>
+  );
 }
 
 /** The agent's raw events since the page loaded, newest first, with a filter. */

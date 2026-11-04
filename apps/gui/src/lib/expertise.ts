@@ -14,6 +14,7 @@ import type { ExpertiseCard } from "@bindings/ExpertiseCard";
 import type { ExpertiseEntry } from "@bindings/ExpertiseEntry";
 import type { ExpertiseMaintenance } from "@bindings/ExpertiseMaintenance";
 import type { MergeSuggestion } from "@bindings/MergeSuggestion";
+import type { ProjectInfo } from "@bindings/ProjectInfo";
 import type { StaleHint } from "@bindings/StaleHint";
 
 export type { AcceptCandidateRequest as AcceptRequest } from "@bindings/AcceptCandidateRequest";
@@ -21,6 +22,7 @@ export type { CandidateStatus } from "@bindings/CandidateStatus";
 export type { EntryStats } from "@bindings/EntryStats";
 export type { Example } from "@bindings/Example";
 export type { OwnerKind } from "@bindings/OwnerKind";
+export type { ProjectInfo } from "@bindings/ProjectInfo";
 export type { SourceRef } from "@bindings/SourceRef";
 export type {
   Candidate,
@@ -39,6 +41,20 @@ export type {
 };
 
 export const PERSON_OWNER_ID = "me";
+
+/** A path as a workspace key: separators unified, no trailing slash, lower case. */
+const pathKey = (path: string) => path.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+
+/**
+ * The project a workspace belongs to. A project's profile is keyed by `Project.id`, not by
+ * the directory it works in, so the client looks the directory up among the project's
+ * checkouts first (`GET /v1/projects`).
+ */
+export function projectForWorkspace(projects: ProjectInfo[] | undefined, workspace: string): ProjectInfo | undefined {
+  if (!workspace) return undefined;
+  const key = pathKey(workspace);
+  return projects?.find((project) => project.paths.some((at) => pathKey(at.path) === key));
+}
 
 export type UsageSource = "pushed" | "pulled" | "declared";
 export type UsageOutcome = "merged_first_try" | "reworked" | "dropped";
@@ -101,7 +117,7 @@ const roundTo = (n: number, places: number) => {
   return Math.round(n * f) / f;
 };
 const rate = (n: number, d: number) => (d > 0 ? roundTo(n / d, 3) : null);
-const oneLine = (s: string) => s.replace(/\r?\n/g, " ").trim();
+const oneLine = (s: string) => s.replace(/\s+/g, " ").trim();
 const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /** The text of a judgement as it is pushed: title, then text when there is one. */

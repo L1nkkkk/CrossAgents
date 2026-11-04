@@ -510,7 +510,7 @@ function SessionRow({ member, active }: { member: SidebarMember; active: boolean
           {plan.length > 0 && !running && !(!uncertain && needs > 0) && <span className="member-count">{plan.filter((task) => task.status === "merged").length}/{plan.length}</span>}
           {quiet && !plan.length && member.lastAt && <span className="member-time" title={ago(member.lastAt)}>{shortSince(member.lastAt, Date.now())}</span>}
           {!uncertain && needs > 0 && <time className="member-time attention" title={ago(waitingOn[0].since)}>{[actionWord(waitingOn[0].action), shortSince(waitingOn[0].since, Date.now())].filter(Boolean).join(" · ")}</time>}
-          {running && <RowElapsed since={turn?.since} at={turn?.at} items={turn?.items ?? []} />}
+          {running && <RowElapsed agentId={agent.id} since={turn?.since} at={turn?.at} items={turn?.items ?? []} />}
           {uncertain && <span className="member-status quiet">{status}</span>}
         </span>
       }

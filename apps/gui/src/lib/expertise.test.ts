@@ -11,6 +11,7 @@ import {
   exportMarkdown,
   groupProfile,
   missingVerdicts,
+  projectForWorkspace,
   staleScan,
   type Candidate,
   type EntryKind,
@@ -188,6 +189,8 @@ test("export groups by domain then kind and marks warnings", () => {
   assert.ok(text.includes("- **别这么做**（需复核）\n"));
   assert.ok(text.includes("  - 否掉的方案：抽抽象（原因：只有两个调用点）\n"));
   assert.ok(!text.includes("已替代"));
+  const wrapped = exportMarkdown([entry("w", "rust", "judgment", "标题", "第一段\n\n第二段")]);
+  assert.ok(wrapped.includes("- **标题** — 第一段 第二段\n"), "a blank line becomes one space");
   assert.equal(exportMarkdown([gone]), "");
 });
 
@@ -250,4 +253,17 @@ test("outcomes update stats; accepting needs a verdict for every conflict", () =
   const both = acceptCandidate([e], c, [{ entry_id: "e", verdict: "both" }], "n", daysAgo(0));
   assert.equal(both[0].status, "active");
   assert.equal(both.length, 2);
+});
+
+test("a workspace finds its project by checkout path, not by the path as a key", () => {
+  const projects = [
+    { id: "p1", name: "one", remotes: [], paths: [{ node: "local", path: "C:\\work\\one" }] },
+    { id: "p2", name: "two", remotes: ["github.com/acme/two"], paths: [{ node: "local", path: "/home/me/two/" }] },
+  ];
+  assert.equal(projectForWorkspace(projects, "c:/work/one")?.id, "p1");
+  assert.equal(projectForWorkspace(projects, "C:\\Work\\One\\")?.id, "p1");
+  assert.equal(projectForWorkspace(projects, "/home/me/two")?.id, "p2");
+  assert.equal(projectForWorkspace(projects, "c:/work/three"), undefined);
+  assert.equal(projectForWorkspace(undefined, "c:/work/one"), undefined);
+  assert.equal(projectForWorkspace(projects, ""), undefined);
 });

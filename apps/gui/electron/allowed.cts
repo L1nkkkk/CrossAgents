@@ -45,6 +45,8 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "GET", path: /^\/v1\/avatars\/[^/]+$/, level: "read" },
   { method: "DELETE", path: /^\/v1\/avatars\/[^/]+$/, level: "write" },
   { method: "GET", path: /^\/v1\/notes$/, level: "read" },
+  { method: "GET", path: /^\/v1\/background$/, level: "read" },
+  { method: "DELETE", path: /^\/v1\/background\/reminders\/[^/]+$/, level: "write" },
   { method: "GET", path: /^\/v1\/plugins$/, level: "read" },
   { method: "POST", path: /^\/v1\/plugins\/[^/]+\/models$/, level: "write" },
   { method: "POST", path: /^\/v1\/plugins\/[^/]+\/(install|upgrade)$/, level: "admin" },
@@ -54,6 +56,8 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "GET", path: /^\/v1\/runs$/, level: "read" },
   // What ended runs left in a workspace, deleted rounds too; `?repo=` rides along.
   { method: "GET", path: /^\/v1\/history$/, level: "read" },
+  // Projects and their checkouts: the id a project's expertise profile is keyed by.
+  { method: "GET", path: /^\/v1\/projects$/, level: "read" },
   { method: "POST", path: /^\/v1\/runs$/, level: "write" },
   { method: "GET", path: /^\/v1\/runs\/[^/]+$/, level: "read" },
   // `?branches=&force=` rides along; `route()` drops it before matching.

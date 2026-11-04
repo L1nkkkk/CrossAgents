@@ -1255,6 +1255,61 @@ pub struct ListNotesResponse {
     pub notes: Vec<crossagents_core::Note>,
 }
 
+/// `GET /v1/background`: what the hub is keeping going behind the conversations: the
+/// agents' reminders, their watches, and the tasks whose checks are running now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BackgroundResponse {
+    /// Soonest first.
+    pub reminders: Vec<BackgroundReminder>,
+    /// Newest first.
+    pub watches: Vec<BackgroundWatch>,
+    /// Tasks in `verifying`, longest-running first.
+    pub verifying: Vec<VerifyingTask>,
+}
+
+/// A reminder an agent set (`remind_set`), with what the board shows about it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BackgroundReminder {
+    pub reminder: crossagents_core::Reminder,
+    /// The owner's name, or its id when it is gone.
+    pub owner_name: String,
+    /// The linked task's key, when there is one.
+    pub task_key: Option<String>,
+    /// The run it belongs to: the linked task's, else the owner's.
+    pub run_id: Option<RunId>,
+}
+
+/// A watch an agent keeps (`watch`) on a task or a teammate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BackgroundWatch {
+    pub watch: crossagents_core::Watch,
+    pub owner_name: String,
+    /// The watched task's `#key` or the watched agent's name; its id when it is gone.
+    pub target_name: String,
+    /// The run it belongs to: the watched task's, else the owner's.
+    pub run_id: Option<RunId>,
+}
+
+/// A task whose acceptance checks the hub is running.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct VerifyingTask {
+    pub task_id: TaskId,
+    pub run_id: RunId,
+    pub run_title: String,
+    pub key: String,
+    pub title: String,
+    pub assignee: Option<AgentId>,
+    pub assignee_name: Option<String>,
+    /// How many checks it runs.
+    pub checks: u32,
+    /// When it entered `verifying` (its last update).
+    pub since: DateTime<Utc>,
+}
+
 /// `POST /v1/questions/{id}/answer`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -1638,6 +1693,38 @@ pub struct LoginStarted {
 #[ts(export)]
 pub struct ListToolsResponse {
     pub tools: Vec<crossagents_core::ToolInfo>,
+}
+
+// ---------------------------------------------------------------------------------------
+// Projects (docs/tasks/LESSONS.md §4.2)
+
+/// One checkout of a project on a node (paths are strings, for clients that cannot read
+/// `PathBuf`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectPathInfo {
+    pub node: String,
+    pub path: String,
+}
+
+/// A project as clients see it: its stable id, and the checkouts and remotes that identify
+/// it. A project's expertise profile is keyed by [`ProjectInfo::id`], which is what a client
+/// finds here from the directory it works in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectInfo {
+    pub id: String,
+    pub name: String,
+    /// Normalised `host/owner/repo` remotes.
+    pub remotes: Vec<String>,
+    pub paths: Vec<ProjectPathInfo>,
+}
+
+/// `GET /v1/projects`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListProjectsResponse {
+    pub projects: Vec<ProjectInfo>,
 }
 
 // ---------------------------------------------------------------------------------------

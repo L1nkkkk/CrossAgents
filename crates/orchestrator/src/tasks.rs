@@ -558,6 +558,11 @@ impl Orchestrator {
     /// on it) and the hub commits, runs any checks, records the verified commit and only then
     /// makes it `Passed` and relays the worker's summary. Nothing the issuer sees as done has
     /// been unchecked (docs/TODO.md §九 ①).
+    ///
+    /// A task already `Passed` and not yet accepted can be reported again: the worker kept
+    /// working, so the new report is a new round, checked like the first one. Only a call
+    /// that brings nothing new - the same summary and nothing changed in the worktree since
+    /// the verified commit, uncommitted work included - is the retried call it looks like.
     pub(crate) async fn complete(
         self: &Arc<Self>,
         caller: &Agent,
@@ -572,9 +577,17 @@ impl Orchestrator {
             return Ok(()); // a retried call: its checks are still running
         }
         if task.status == TaskStatus::Passed {
-            return Ok(());
-        }
-        if !matches!(task.status, TaskStatus::Running | TaskStatus::Stalled) {
+            if !self.brings_new_work(&run, &task, &summary).await {
+                tracing::debug!(task = %task.key, "the same report again; the one it has stands");
+                return Ok(());
+            }
+            // What the previous report said about the work no longer holds: the checks, the
+            // commit they ran on and the diff they saw are about the work before this.
+            task.report.checks.clear();
+            task.report.diff_stat = None;
+            task.report.verified_sha = None;
+            task.report.unchecked = false;
+        } else if !matches!(task.status, TaskStatus::Running | TaskStatus::Stalled) {
             return Err(CoreError::Conflict(format!(
                 "#{} is {:?}; only a task being worked on can be completed",
                 task.key, task.status
@@ -591,6 +604,39 @@ impl Orchestrator {
         let worker = caller.id;
         tokio::spawn(async move { this.report_done(id, worker, token).await });
         Ok(())
+    }
+
+    /// Whether a report on a `Passed` task carries work its checks did not see: a summary
+    /// that is new, a worktree with an uncommitted change or a commit after the verified one,
+    /// or nothing verified at all (the checks could not run). Only when all of that says no
+    /// is the report the same one again.
+    async fn brings_new_work(&self, run: &Run, task: &Task, summary: &str) -> bool {
+        if task.report.summary.as_deref().map(str::trim) != Some(summary.trim()) {
+            return true;
+        }
+        let Some(dir) = task.worktree.as_deref().filter(|dir| dir.exists()) else {
+            // No worktree to have worked in: nothing can have changed.
+            return false;
+        };
+        let ws = self.ws_for(run);
+        if !ws.uncommitted(dir).await.unwrap_or_default().is_empty() {
+            return true;
+        }
+        let Some(verified) = task
+            .report
+            .verified_sha
+            .as_deref()
+            .map(str::trim)
+            .filter(|sha| !sha.is_empty())
+        else {
+            // Nothing verified what it stands on: report again to have it checked.
+            return true;
+        };
+        match ws.head(dir).await {
+            Ok(head) => head.trim() != verified,
+            // Cannot tell what is there: let the checks run again rather than drop it.
+            Err(_) => true,
+        }
     }
 
     /// Commits, checks and records the report of `worker`, for the verification `token` only:

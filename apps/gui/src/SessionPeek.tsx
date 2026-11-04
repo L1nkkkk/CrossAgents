@@ -81,7 +81,7 @@ export function SessionPeek({ anchor, facts }: { anchor: DOMRect; facts: PeekFac
       {error && <p className="peek-line danger">{error}</p>}
       {turn && (
         <div className="peek-turn">
-          <RowElapsed since={turn.since} at={turn.at} items={turn.items} />
+          <RowElapsed agentId={agent.id} since={turn.since} at={turn.at} items={turn.items} />
           {steps.map((step, i) => (
             <code key={i}>⎿ {stepLine(step)}</code>
           ))}

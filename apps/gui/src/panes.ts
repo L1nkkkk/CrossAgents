@@ -4,7 +4,8 @@
 //   Ctrl/⌘-click or middle-click an agent in the sidebar to open it beside.
 // - Tabs in two docks (lib/docks.ts), one on the right and one under the conversations: 改动
 //   (per-turn diffs), 文件 (browsing the workspace), 任务 (the task's details) and 提交图 (the
-//   run's branches on a run page, else the conversation's checkout). Which dock holds what is
+//   run's branches on a run page, else the conversation's checkout) and 后台 (the agents' reminders,
+//   watches and the tasks being verified). Which dock holds what is
 //   the same everywhere; what a tab shows follows the focused conversation: the routed one, or
 //   the one beside it once it was clicked last. Something opened on purpose (a turn's "查看变更",
 //   a task card's turn) is `target` until the focus moves to another conversation. Terminals
@@ -16,14 +17,14 @@
 import { useSyncExternalStore } from "react";
 import { closeTab, dockOf, moveTab, restoreDocks, showTab, type DockId, type Docks } from "./lib/docks";
 
-export type PaneKind = "changes" | "files" | "task" | "events" | "graph";
+export type PaneKind = "changes" | "files" | "task" | "events" | "graph" | "background";
 /** A terminal's tab, by its id in the hub. */
 export type TermTab = `term:${string}`;
 export type TabId = PaneKind | TermTab;
 export const isTermTab = (tab: TabId): tab is TermTab => tab.startsWith("term:");
 export const termTab = (id: string): TermTab => `term:${id}`;
 export type DockTarget = DockId;
-const LABELS: Record<PaneKind, string> = { changes: "改动", files: "文件", task: "任务", events: "事件流", graph: "提交图" };
+const LABELS: Record<PaneKind, string> = { changes: "改动", files: "文件", task: "任务", events: "事件流", graph: "提交图", background: "后台" };
 /** Raw hub events: shown by the dev server and `preview:mock`, not by a packaged build. */
 export const DEBUG_PANES = __BUILD__.dev || __MOCK__;
 /** What the tool column's menu offers, in order. */

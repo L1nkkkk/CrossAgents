@@ -647,6 +647,15 @@ a.button.primary:hover { background: var(--accent-hover); }
 .presence.warn { background: var(--warn); }
 .presence.danger { background: var(--danger); }
 .presence.live { animation: breathe-seg 1.6s ease-in-out infinite; }
+/* The lead's (planner's) flag at the avatar's top-right (components.tsx LeadFlag): an amber
+   cloth with a dark outline and pole, readable on every avatar colour and in both themes. */
+.avatar-flag {
+  position: absolute; top: -22%; right: -22%; display: block; line-height: 0; pointer-events: auto;
+  filter: drop-shadow(0 0 1px var(--surface));
+}
+.avatar-flag svg { display: block; overflow: visible; }
+.avatar-flag .flag-pole { fill: none; stroke: #3a2a10; stroke-width: 1.4; stroke-linecap: round; }
+.avatar-flag .flag-cloth { fill: #f5b82e; stroke: #3a2a10; stroke-width: 0.9; stroke-linejoin: round; }
 
 /* Team: agents as colleagues. */
 .team-page { display: flex; flex-direction: column; gap: 16px; max-width: 980px; }
@@ -1154,6 +1163,20 @@ body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; user-selec
 .ev-type { color: var(--text); white-space: nowrap; }
 .ev-sum { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .ev-json { font-size: 11px; max-height: 320px; margin: 2px 0 6px; }
+/* 后台: reminders, watches, verifying tasks. */
+.bg-pane { display: flex; flex-direction: column; gap: 12px; }
+.bg-section { display: flex; flex-direction: column; gap: 6px; }
+.bg-section h4 { margin: 0; font-size: 12px; font-weight: 600; color: var(--text-2); }
+.bg-item { display: flex; flex-direction: column; gap: 3px; padding: 7px 9px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.bg-line { display: flex; align-items: baseline; gap: 6px; min-width: 0; font-size: 13px; }
+.bg-who { font-weight: 500; white-space: nowrap; }
+.bg-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bg-when { margin-left: auto; color: var(--text-2); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.bg-cancel { flex: none; padding: 1px 6px; }
+.bg-note { font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bg-meta { overflow-wrap: anywhere; }
+.bg-others > summary { cursor: pointer; padding: 2px 0 8px; }
+.bg-others[open] > summary { margin-bottom: 4px; }
 /* Floating (App adds .drawer-float when docking would squeeze the conversation). */
 .app.drawer-float .drawer {
   position: fixed; z-index: 40; top: var(--panel-gap); right: var(--panel-gap); bottom: var(--panel-gap);
@@ -1729,6 +1752,8 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
   font-size: 12.5px; line-height: 18px; min-width: 0;
 }
 .live-bar .live-elapsed { color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* Output speed over the last ~10 s (activity.ts, lib/tokenRate.ts); absent while nothing comes out. */
+.live-bar .live-rate { color: var(--text-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .live-bar .live-what { color: var(--text); white-space: nowrap; }
 .live-bar .live-note, .live-bar .live-run, .live-bar .live-checks {
   min-width: 0; max-width: 40ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted);
@@ -1818,6 +1843,7 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
 .member-elapsed { display: inline-flex; align-items: center; gap: 4px; flex: none; font-size: 11px; color: var(--accent-text); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .member-elapsed.quiet { color: var(--warn-text); }
 .member-elapsed .working-dot { animation: pulse 1.4s ease-in-out infinite; }
+.member-elapsed .member-rate { color: var(--text-2); }
 .face { position: relative; display: inline-grid; place-items: center; border-radius: 50%; }
 .face.running::after { content: ""; position: absolute; inset: -3px; border-radius: 50%; border: 2px solid color-mix(in srgb, var(--accent) 25%, transparent); border-top-color: var(--accent); animation: face-spin 1.4s linear infinite; }
 @keyframes face-spin { to { transform: rotate(360deg); } }
