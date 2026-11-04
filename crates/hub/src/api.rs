@@ -21,7 +21,8 @@ use chrono::{DateTime, Utc};
 use crossagents_api_types::{
     API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentCommandsResponse,
     AgentExecution, AgentExecutionResponse, AgentSettingsRequest, AnswerRequest, ApiError,
-    ApproveRunRequest, ArchiveAgentRequest, AttachmentContent, AttachmentUpload, ChangesResponse,
+    ApproveRunRequest, ArchiveAgentRequest, AttachmentContent, AttachmentUpload, BackgroundReminder,
+    BackgroundResponse, BackgroundWatch, ChangesResponse,
     CliInfo, CliInstallAccepted, CommitGraph, ConnectInfo, CreateAccountRequest,
     CreateAgentRequest, CreateRunRequest, CreateWorkRequest, CreateWorkRunRequest,
     DeleteRunResponse, DiffSide, ErrorCode, FileContentResponse, FileEntry, FileKind,
@@ -34,7 +35,7 @@ use crossagents_api_types::{
     SendMessageResponse, SetModelRequest, SetPluginModelsRequest, SetTopicRequest,
     TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse, UpdateRunPolicyRequest,
     UploadAvatarsRequest, UploadAvatarsResponse, UsageGroup, UsageResponse, UsageSeriesGroup,
-    UsageSeriesRange, UsageSeriesResponse, WorkDetail,
+    UsageSeriesRange, UsageSeriesResponse, VerifyingTask, WorkDetail,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, Attachment,
@@ -145,6 +146,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/v1/avatars/{id}", get(get_avatar).delete(delete_avatar))
         .route("/v1/notes", get(list_notes))
+        .route("/v1/background", get(background))
+        .route("/v1/background/reminders/{id}", delete(cancel_reminder))
         .route("/v1/plugins", get(list_plugins))
         .route("/v1/plugins/refresh", post(refresh_plugins))
         .route("/v1/plugins/{name}/models", post(set_plugin_models))
@@ -976,6 +979,111 @@ async fn list_notes(
     Ok(Json(ListNotesResponse {
         notes: state.store().list_notes(query.scope, run_id, "").await?,
     }))
+}
+
+/// The background board: every agent's reminders and watches, and the tasks being verified.
+async fn background(State(state): State<Arc<AppState>>) -> ApiResult<Json<BackgroundResponse>> {
+    use std::collections::HashMap;
+    let store = state.store();
+    let names: HashMap<AgentId, String> = store
+        .list_agents()
+        .await?
+        .into_iter()
+        .map(|a| (a.id, a.name))
+        .collect();
+    let name_of = |id: &AgentId| names.get(id).cloned().unwrap_or_else(|| id.to_string());
+
+    let mut tasks: HashMap<TaskId, Task> = HashMap::new();
+    let mut runs: HashMap<RunId, Run> = HashMap::new();
+    // The run each agent works in: as a lead, a worker or a reviewer (the newest run wins).
+    let mut agent_run: HashMap<AgentId, (DateTime<Utc>, RunId)> = HashMap::new();
+    let mut note_agent = |agent: AgentId, at: DateTime<Utc>, run: RunId| {
+        let slot = agent_run.entry(agent).or_insert((at, run));
+        if at >= slot.0 {
+            *slot = (at, run);
+        }
+    };
+    for run in store.list_runs().await? {
+        note_agent(run.planner, run.created_at, run.id);
+        for task in store.list_tasks(run.id).await? {
+            for agent in [task.assignee, task.reviewer].into_iter().flatten() {
+                note_agent(agent, run.created_at, run.id);
+            }
+            tasks.insert(task.id, task);
+        }
+        runs.insert(run.id, run);
+    }
+    let run_of_agent = |id: &AgentId| agent_run.get(id).map(|(_, run)| *run);
+
+    let reminders = store
+        .list_reminders(None)
+        .await?
+        .into_iter()
+        .map(|reminder| {
+            let task = reminder.task.and_then(|id| tasks.get(&id));
+            BackgroundReminder {
+                owner_name: name_of(&reminder.owner),
+                task_key: task.map(|t| t.key.clone()),
+                run_id: task.map(|t| t.run_id).or_else(|| run_of_agent(&reminder.owner)),
+                reminder,
+            }
+        })
+        .collect();
+
+    let mut watches: Vec<BackgroundWatch> = store
+        .list_watches(None)
+        .await?
+        .into_iter()
+        .map(|watch| {
+            let (target_name, run_id) = match &watch.target {
+                crossagents_core::WatchTarget::Task { task_id } => match tasks.get(task_id) {
+                    Some(t) => (format!("#{}", t.key), Some(t.run_id)),
+                    None => (task_id.to_string(), None),
+                },
+                crossagents_core::WatchTarget::Agent { agent_id } => (name_of(agent_id), None),
+            };
+            BackgroundWatch {
+                owner_name: name_of(&watch.owner),
+                target_name,
+                run_id: run_id.or_else(|| run_of_agent(&watch.owner)),
+                watch,
+            }
+        })
+        .collect();
+    watches.sort_by(|a, b| b.watch.created_at.cmp(&a.watch.created_at));
+
+    let mut verifying: Vec<VerifyingTask> = tasks
+        .values()
+        .filter(|t| t.status == crossagents_core::TaskStatus::Verifying)
+        .map(|t| VerifyingTask {
+            task_id: t.id,
+            run_id: t.run_id,
+            run_title: runs.get(&t.run_id).map(|r| r.title.clone()).unwrap_or_default(),
+            key: t.key.clone(),
+            title: t.title.clone(),
+            assignee: t.assignee,
+            assignee_name: t.assignee.as_ref().map(&name_of),
+            checks: t.spec.acceptance.len() as u32,
+            since: t.updated_at,
+        })
+        .collect();
+    verifying.sort_by(|a, b| a.since.cmp(&b.since));
+
+    Ok(Json(BackgroundResponse {
+        reminders,
+        watches,
+        verifying,
+    }))
+}
+
+/// Cancels an agent's reminder from the board, as `remind_cancel` does for its owner.
+async fn cancel_reminder(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    // The same deletion `remind_cancel` makes, for any owner; an unknown id is a 404.
+    state.store().delete_reminder(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn stop_agent(

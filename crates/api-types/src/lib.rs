@@ -1255,6 +1255,61 @@ pub struct ListNotesResponse {
     pub notes: Vec<crossagents_core::Note>,
 }
 
+/// `GET /v1/background`: what the hub is keeping going behind the conversations: the
+/// agents' reminders, their watches, and the tasks whose checks are running now.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BackgroundResponse {
+    /// Soonest first.
+    pub reminders: Vec<BackgroundReminder>,
+    /// Newest first.
+    pub watches: Vec<BackgroundWatch>,
+    /// Tasks in `verifying`, longest-running first.
+    pub verifying: Vec<VerifyingTask>,
+}
+
+/// A reminder an agent set (`remind_set`), with what the board shows about it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BackgroundReminder {
+    pub reminder: crossagents_core::Reminder,
+    /// The owner's name, or its id when it is gone.
+    pub owner_name: String,
+    /// The linked task's key, when there is one.
+    pub task_key: Option<String>,
+    /// The run it belongs to: the linked task's, else the owner's.
+    pub run_id: Option<RunId>,
+}
+
+/// A watch an agent keeps (`watch`) on a task or a teammate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BackgroundWatch {
+    pub watch: crossagents_core::Watch,
+    pub owner_name: String,
+    /// The watched task's `#key` or the watched agent's name; its id when it is gone.
+    pub target_name: String,
+    /// The run it belongs to: the watched task's, else the owner's.
+    pub run_id: Option<RunId>,
+}
+
+/// A task whose acceptance checks the hub is running.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct VerifyingTask {
+    pub task_id: TaskId,
+    pub run_id: RunId,
+    pub run_title: String,
+    pub key: String,
+    pub title: String,
+    pub assignee: Option<AgentId>,
+    pub assignee_name: Option<String>,
+    /// How many checks it runs.
+    pub checks: u32,
+    /// When it entered `verifying` (its last update).
+    pub since: DateTime<Utc>,
+}
+
 /// `POST /v1/questions/{id}/answer`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]

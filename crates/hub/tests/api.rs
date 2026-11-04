@@ -1529,3 +1529,94 @@ async fn run_history_outlives_the_run() {
     assert!(listed.history[0].deleted);
     assert_eq!(listed.history[0].tasks.len(), 1);
 }
+
+/// `GET /v1/background` lists every agent's reminders and watches by name, and
+/// `DELETE /v1/background/reminders/{id}` cancels one as `remind_cancel` would.
+#[tokio::test]
+async fn the_background_board_lists_reminders_and_watches_and_cancels_a_reminder() {
+    use crossagents_api_types::BackgroundResponse;
+    use crossagents_core::{AgentId, Reminder, Watch, WatchOn, WatchTarget};
+
+    let t = TestHub::start().await;
+    let luna: Agent = t.create("Luna").await.json().await.unwrap();
+    let vega: Agent = t.create("Vega").await.json().await.unwrap();
+    let store = t.hub.bus.store().clone();
+    let now = chrono::Utc::now();
+    let later = |id: &str, minutes: i64| Reminder {
+        id: id.into(),
+        owner: luna.id,
+        due_at: now + chrono::Duration::minutes(minutes),
+        note: format!("check {id}"),
+        task: None,
+        only_if_open: false,
+        created_at: now,
+    };
+    store.insert_reminder(&later("r-late", 90)).await.unwrap();
+    store.insert_reminder(&later("r-soon", 30)).await.unwrap();
+    store
+        .insert_watch(&Watch {
+            id: "w-1".into(),
+            owner: luna.id,
+            target: WatchTarget::Agent { agent_id: vega.id },
+            on: vec![WatchOn::Done, WatchOn::Failed],
+            created_at: now,
+        })
+        .await
+        .unwrap();
+    store
+        .insert_watch(&Watch {
+            id: "w-gone".into(),
+            owner: luna.id,
+            target: WatchTarget::Agent {
+                agent_id: AgentId::new(),
+            },
+            on: vec![WatchOn::Any],
+            created_at: now,
+        })
+        .await
+        .unwrap();
+
+    let board: BackgroundResponse = t
+        .get("/v1/background")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let ids: Vec<_> = board.reminders.iter().map(|r| r.reminder.id.as_str()).collect();
+    assert_eq!(ids, ["r-soon", "r-late"], "soonest first");
+    assert!(board.reminders.iter().all(|r| r.owner_name == "Luna"));
+    assert_eq!(board.watches.len(), 2);
+    let w = board.watches.iter().find(|w| w.watch.id == "w-1").unwrap();
+    assert_eq!(w.owner_name, "Luna");
+    assert_eq!(w.target_name, "Vega");
+    assert!(board.verifying.is_empty());
+
+    // The read token may look, not cancel.
+    let refused = t
+        .client
+        .delete(t.url("/v1/background/reminders/r-soon"))
+        .bearer_auth(&t.hub.read_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+
+    let cancelled = t
+        .delete("/v1/background/reminders/r-soon")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status(), StatusCode::NO_CONTENT);
+    let left = store.list_reminders(Some(luna.id)).await.unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].id, "r-late");
+
+    let again = t
+        .delete("/v1/background/reminders/r-soon")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(again.status(), StatusCode::NOT_FOUND);
+}

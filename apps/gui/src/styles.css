@@ -1154,6 +1154,20 @@ body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; user-selec
 .ev-type { color: var(--text); white-space: nowrap; }
 .ev-sum { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .ev-json { font-size: 11px; max-height: 320px; margin: 2px 0 6px; }
+/* 后台: reminders, watches, verifying tasks. */
+.bg-pane { display: flex; flex-direction: column; gap: 12px; }
+.bg-section { display: flex; flex-direction: column; gap: 6px; }
+.bg-section h4 { margin: 0; font-size: 12px; font-weight: 600; color: var(--text-2); }
+.bg-item { display: flex; flex-direction: column; gap: 3px; padding: 7px 9px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.bg-line { display: flex; align-items: baseline; gap: 6px; min-width: 0; font-size: 13px; }
+.bg-who { font-weight: 500; white-space: nowrap; }
+.bg-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bg-when { margin-left: auto; color: var(--text-2); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.bg-cancel { flex: none; padding: 1px 6px; }
+.bg-note { font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.bg-meta { overflow-wrap: anywhere; }
+.bg-others > summary { cursor: pointer; padding: 2px 0 8px; }
+.bg-others[open] > summary { margin-bottom: 4px; }
 /* Floating (App adds .drawer-float when docking would squeeze the conversation). */
 .app.drawer-float .drawer {
   position: fixed; z-index: 40; top: var(--panel-gap); right: var(--panel-gap); bottom: var(--panel-gap);

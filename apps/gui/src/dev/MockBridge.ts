@@ -8,6 +8,7 @@ import { usageSeriesMock } from "../views/Usage.mock";
 import type { AgentCommandsResponse } from "@bindings/AgentCommandsResponse";
 import type { AgentExecution } from "@bindings/AgentExecution";
 import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
+import type { BackgroundResponse } from "@bindings/BackgroundResponse";
 import type { CommitGraph } from "@bindings/CommitGraph";
 import type { Agent } from "@bindings/Agent";
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
@@ -76,6 +77,8 @@ export type MockState = {
   files: Map<string, { mime: string; data: string }>;
   questions: HumanItem[];
   notes: Note[];
+  /** Reminders, watches and verifying tasks (`GET /v1/background`); absent: none. */
+  background?: BackgroundResponse;
   quota: QuotaResponse;
   usage: Partial<Record<UsageGroup, UsageResponse>>;
   usageSeriesVariant?: "normal" | "empty" | "issues" | "session";
@@ -594,6 +597,7 @@ export class MockBridge implements CrossAgentsBridge {
       }
       if (p === "/v1/questions") return json(200, { items: s.questions.filter((q) => url.searchParams.get("all") || q.status === "open") });
       if (p === "/v1/notes") return json(200, { notes: s.notes });
+      if (p === "/v1/background") return json(200, s.background ?? { reminders: [], watches: [], verifying: [] });
       if (p === "/v1/quota") return json(200, s.quota);
       if (p === "/v1/usage/series") return json(200, usageSeriesMock(url.searchParams.get("range") ?? "7d", url.searchParams.get("group") ?? "total", url.searchParams.get("source") ?? "all", s.usageSeriesVariant ?? "normal"));
       if (p === "/v1/expertise" || p === "/v1/expertise/card" || p === "/v1/expertise/maintenance" || p === "/v1/expertise/export") {
@@ -866,6 +870,13 @@ export class MockBridge implements CrossAgentsBridge {
         return json(204);
       }
       if ((m = p.match(/^\/v1\/runs\/([^/]+)$/))) return this.deleteRun(m[1], url);
+      if ((m = p.match(/^\/v1\/background\/reminders\/([^/]+)$/))) {
+        const id = decodeURIComponent(m[1]);
+        const bg = s.background;
+        if (!bg || !bg.reminders.some((r) => r.reminder.id === id)) return notFound("reminder");
+        s.background = { ...bg, reminders: bg.reminders.filter((r) => r.reminder.id !== id) };
+        return json(204);
+      }
       return json(204);
     }
     return json(405, { error: { code: "bad_request", message: `${method} ${p}` } });
