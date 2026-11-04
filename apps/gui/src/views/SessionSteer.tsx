@@ -1,6 +1,6 @@
 import type { Attachment } from "@bindings/Attachment";
 import { TurnFiles } from "../attach";
-import { useFileScope } from "../components";
+import { CopyButton, Prose, useFileScope } from "../components";
 import type { TranscriptItem } from "../session";
 import "./steer.css";
 
@@ -16,11 +16,22 @@ export function SteerItem({ item }: { item: TranscriptItem }) {
   return (
     <>
       {item.read ? (
-        // Read: an ordinary message of yours.
-        <div className="bubble">{item.text}</div>
+        // Read: an ordinary message of yours, the same as Bubble's.
+        <div className="bubble bubble-md">
+          <div className="bubble-text">
+            <Prose text={item.text} />
+          </div>
+          <div className="bubble-foot">
+            <CopyButton className="msg-copy" text={item.text} title="复制这条消息的 markdown 原文" />
+          </div>
+        </div>
       ) : (
         <div className="steer-inserted">
-          <div className="bubble steer-waiting">{item.text}</div>
+          <div className="bubble bubble-md steer-waiting">
+            <div className="bubble-text">
+              <Prose text={item.text} />
+            </div>
+          </div>
           <span className="steer-note">已插入，等待模型读取</span>
         </div>
       )}
