@@ -4,7 +4,7 @@
 import { emptyHub } from "../views/Home.mock";
 import { approvalRun, deleteRun, graphRun, handoffRun, inPlaceRun, landingRun, longResultsRun, oauthRun, pausedRun, rerouteRun, reuseRun, reviewRun, syncRun, traceRun } from "../views/Run.mock";
 import type { BackgroundResponse } from "@bindings/BackgroundResponse";
-import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, failedEditSession, liveRun, liveSession, liveTaskSession, longNameScene, slashScene, soloSession, toolImagePathsSession, toolImagesSession } from "../views/Session.mock";
+import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, failedEditSession, liveRun, liveSession, liveTaskSession, longNameScene, moderationSession, slashScene, soloSession, toolImagePathsSession, toolImagesSession } from "../views/Session.mock";
 import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
 import { usageScene } from "../views/Usage.mock";
 import { expertiseScene } from "../views/Expertise.mock";
@@ -286,6 +286,7 @@ export const SCENARIOS: Scenario[] = [
   { key: "settings-src", label: "Claude 设置源", hint: "设置 → 智能体：点 Nova 编辑，「读取 Claude 设置」三档预设（缺省 / 全部 / 都不读）；点 Vega（CodeBuddy）编辑，标签说明它不读 CLAUDE.md", build: settingSources },
   { key: "recruit", label: "对话招队友", hint: "对话里招人：一次因为用模型名当名字被拒绝（一行写明对象和理由第一句，点 ✕ 看完整理由），一次招到 Iris，挂在对话下面", build: () => chatWithRecruit() },
   { key: "crash", label: "进程崩溃", hint: "单聊里 Claude CLI 崩溃退出：错误条和「需要你」写明怎么退出的", build: () => crashedSession() },
+  { key: "moderation", label: "上下文被内容审查拦下", hint: "网关拒绝整段上下文：错误行写「上下文已被污染」，输入框上方给「新开会话」「压缩上下文」「仍要发送」", build: () => moderationSession() },
   { key: "context-lost", label: "上下文没延续（手动）", hint: "Pia 已归档、带 context_lost：自己点「恢复对话」，再发一条消息；顶部提示条要手动关", build: () => contextLost() },
   { key: "context-lost-restored", label: "恢复后：上下文带不回来", hint: "自动恢复 Pia：顶部提示「对话记录恢复了，但……下一条消息会开新会话」", build: () => contextLost([]) },
   { key: "context-lost-new", label: "发消息：这是新会话", hint: "恢复后发一条消息：再提示「这是新会话，没有带上之前的上下文」，标记随之清掉", build: () => contextLost(["接着把回调页的错误处理补上"]) },

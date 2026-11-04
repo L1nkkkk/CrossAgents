@@ -19,6 +19,7 @@ import { ToolImages } from "../toolimages";
 import { ChangeStat, DiffView } from "../diffview";
 import { parseDiff, tailLines, type DiffFile } from "../lib/diff";
 import { errorHint } from "../lib/errors";
+import { isModerationError } from "../lib/moderation";
 import { fields, plainText, toolChanges, toolError, toolFailed, toolShowsStat } from "../lib/toolcall";
 import { effortLabel, prettyModel } from "../lib/models";
 import { clock, range } from "../lib/time";
@@ -48,8 +49,21 @@ import { ProfileEditor } from "./Agents";
 import { Composer, QueuePanel } from "./SessionComposer";
 import { AgentText, Bubble, fromPerson } from "./SessionMessage";
 import { SteerItem } from "./SessionSteer";
+import { SessionModeration } from "./SessionModeration";
 
 const started = (turn: TranscriptTurn) => !!turn.started_at || !!turn.completed_at;
+
+/**
+ * The latest started turn, when it failed because the gateway's content moderation refused the
+ * context: its error item says so, or the agent's own error does while it is in error. A later
+ * turn that went through means the reminder has done its job and is gone.
+ */
+function moderationTurn(turns: TranscriptTurn[], status: Agent["status"], error?: string): TranscriptTurn | undefined {
+  const last = turns.filter((turn) => !!turn.started_at).at(-1);
+  if (!last) return undefined;
+  const fromItems = last.items.some((item) => item.type === "error" && isModerationError(item.message));
+  return fromItems || (status === "error" && isModerationError(error)) ? last : undefined;
+}
 
 /** Which of a session's active tasks it is on now: running, then review / verification, then the rest. */
 function rankTask(status: RunDetail["tasks"][number]["status"]): number {
@@ -214,6 +228,7 @@ export function SessionView({
   const associated = [...new Map([...runs, ...(ledRuns.data ?? [])].map((d) => [d.run.id, d])).values()];
   const tasks = associated.flatMap((d) => d.tasks.filter((t) => t.assignee === agent.id || t.reviewer === agent.id).map((t) => ({ run: d.run, task: t })));
   const queued = turns.filter((t) => !started(t));
+  const poisoned = moderationTurn(turns, agent.status, transcript.error);
   const led = ledRuns.data ?? [];
   const recruits = everyone.filter((a) => (a.config as Record<string, unknown> | null)?.spawned_by_agent === agent.id && !a.archived_at);
   // The turn running now, and (when it works a task for a run) that task's counts: both are in
@@ -277,12 +292,13 @@ export function SessionView({
           {!onClose && <NeedsYouStrip agents={everyone} tree={runs} />}
           <RunStrip runs={liveRuns} agents={everyone} />
           <QueuePanel agent={agent} queued={queued} onEdit={setDraft} />
-          {agent.status === "error" && transcript.error && (
+          {agent.status === "error" && transcript.error && !isModerationError(transcript.error) && (
             <div className="error-bar" role="alert" title={transcript.error}>
               <strong>{errorHint(transcript.error, transcript.exit)}</strong>
               <span className="mono small">{transcript.error}</span>
             </div>
           )}
+          {poisoned && !agent.archived_at && <SessionModeration agent={agent} turn={poisoned} />}
           {agent.archived_at ? (
             <div className="archived-bar">
               <Icon name="archive" size={14} />
@@ -876,6 +892,18 @@ function Item({ item }: { item: TranscriptItem }) {
     case "output":
       return <AgentText text={item.text} />;
     case "error":
+      // The gateway refused the whole context, not this request: retrying re-sends the same
+      // history and burns the same tokens, so the line says that instead of "报错".
+      if (isModerationError(item.message))
+        return (
+          <OneLine tone="warn" icon={<Icon name="info" size={13} />} title="上下文已被污染" summary={firstLine(item.message)}>
+            <div className="moderation-why-text">
+              <p>网关的内容审查拦下了这一轮：它扫的是整段上下文，不只是你最后那句话。触发的内容还在历史里，原样重试只会再烧一次 token。</p>
+              <p>可以新开一个会话，或先把历史压缩成摘要再继续；仍然要发也可以，只是很可能再被拒一次。</p>
+              <pre className="moderation-raw">{item.message}</pre>
+            </div>
+          </OneLine>
+        );
       // One line; the whole message opens under it (a stack trace can be long).
       return (
         <OneLine tone="danger" icon={<Icon name="close" size={13} />} title="报错" summary={firstLine(item.message)}>
