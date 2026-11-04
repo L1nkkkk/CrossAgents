@@ -177,10 +177,19 @@ impl Mock {
 
     /// Appends what the model read at this boundary.
     async fn take_steers(&self, text: &mut String) {
+        let mut later_init = false;
         for (uuid, steer) in std::mem::take(&mut *self.steers.lock().await) {
             self.echo_user(&uuid, &steer).await;
+            if steer.contains("[init-after-read]") {
+                later_init = true;
+            }
             text.push_str("\n[steered] ");
             text.push_str(&steer);
+        }
+        // A `system/init` after the steer was read, as compaction or a new request emits;
+        // it must not make the turn wait for a result that never comes.
+        if later_init {
+            self.init_notice().await;
         }
     }
 

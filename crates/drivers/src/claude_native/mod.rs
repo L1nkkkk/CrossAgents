@@ -426,11 +426,13 @@ impl Shared {
         }
         let kind = message.get("type").and_then(Value::as_str);
         // The CLI opens a turn of its own for a message written too late (`system/init`
-        // after it): that turn's result belongs to this one, not to the next.
+        // while it waits): that turn's result belongs to this one, not to the next. A
+        // steer already read in this turn is not one of those: a later init (compaction,
+        // say) must not make the turn wait for a result that will never come.
         if kind == Some("system") && message.get("subtype").and_then(Value::as_str) == Some("init")
         {
             let mut turn = self.turn.lock().expect("turn lock");
-            if !turn.steered.is_empty() {
+            if !turn.steers.is_empty() {
                 turn.separate_steer_turn = true;
             }
         }

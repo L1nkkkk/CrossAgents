@@ -295,3 +295,60 @@ async fn an_interrupt_keeps_the_unread_steer() {
     t.send(&agent.id.to_string(), "after interrupt").await;
     output_with(&mut w, "after interrupt").await;
 }
+
+/// A steer read inside the turn, then another `system/init` (compaction, say): the turn
+/// must still end normally, not wait for a second result that never comes.
+#[tokio::test]
+async fn an_init_after_a_read_steer_does_not_hold_the_turn() {
+    let t = TestHub::start_with(native_plugin_with(&["--steer-merge"])).await;
+    let agent = t.add_native("Mina", "worker", t.home.path()).await;
+    let mut w = t.watch().await;
+
+    t.send(&agent.id.to_string(), "first [sleep 2000]").await;
+    output_with(&mut w, "sleeping").await;
+
+    let resp = t
+        .post(
+            &format!("/v1/agents/{}/messages", agent.id),
+            json!({ "text": "[init-after-read] STEER MINT", "steer": true }),
+        )
+        .await;
+    assert_eq!(resp.status(), 202, "{}", resp.text().await.unwrap());
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["steered"], true, "{body}");
+    let message_id: MessageId = body["message_id"].as_str().unwrap().parse().unwrap();
+
+    w.until(
+        "steered",
+        |e| matches!(&e.kind, EventKind::AgentSteered { message_id: id, .. } if *id == message_id),
+    )
+    .await;
+    w.until("steer read", |e| {
+        matches!(&e.kind, EventKind::AgentSteerRead { message_id: id, .. } if *id == message_id)
+    })
+    .await;
+    let ended = w
+        .until(
+            "turn completed",
+            |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if *id == agent.id),
+        )
+        .await;
+    let EventKind::AgentTurnCompleted { stop_reason, .. } = &ended.kind else {
+        unreachable!()
+    };
+    assert_eq!(*stop_reason, StopReason::EndTurn, "{ended:?}");
+
+    let transcript: Value = t
+        .get(&format!("/v1/agents/{}/transcript", agent.id))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let items = transcript["turns"][0]["items"].as_array().unwrap();
+    let steer = items.iter().find(|item| item["type"] == "steer").unwrap();
+    assert_eq!(steer["read"], true, "{steer}");
+
+    // The session goes on.
+    t.send(&agent.id.to_string(), "after init").await;
+    output_with(&mut w, "after init").await;
+}
