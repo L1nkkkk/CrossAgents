@@ -12,6 +12,7 @@ import { supportNote } from "../lib/attachments";
 // `draft` is this file's word for the text being typed, so the module keeps the plural.
 import * as drafts from "../lib/draft";
 import { t } from "../lib/i18n";
+import { canSteer, composerAction, composerHint, composerPlaceholder } from "../lib/steer";
 import { mentionsFor, useMention } from "../mention";
 import { ModelEffortPicks } from "../modelPick";
 import { sendMessage } from "../outbox";
@@ -179,6 +180,7 @@ export function Composer({
   const slash = useSlash(ref, setDraft, groups);
   const running = agent.status === "running";
   const canInterrupt = running && capabilities?.interrupt !== false;
+  const steer = canSteer(capabilities);
   const plan = plans.find((d) => !deferred.includes(d.run.id));
   const support = capabilities?.attachments ?? null;
   const files = useHeld(setError, support, driver);
@@ -217,7 +219,8 @@ export function Composer({
     return () => clearTimeout(timer);
   }, [draft, files.held, agent.id]);
 
-  async function send(now = false) {
+  /** `queue`: behind the running turn. `now`: interrupt it and send this. `steer`: into it. */
+  async function send(mode: "queue" | "now" | "steer" = "queue") {
     const text = draft.trim();
     const held = files.held;
     if ((!text && !held.length) || busy) return;
@@ -230,7 +233,7 @@ export function Composer({
     setKeepNote(undefined);
     try {
       const attachments = held.map(({ name, mime, data }) => ({ name, mime, data }));
-      await sendMessage(agent.id, text, { now, takeBack: true, attachments });
+      await sendMessage(agent.id, text, { now: mode === "now", steer: mode === "steer", takeBack: true, attachments });
     } catch (err) {
       setDraft(text);
       files.restore(held);
@@ -250,14 +253,18 @@ export function Composer({
 
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.nativeEvent.isComposing) return;
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      // Ctrl+Shift+Enter: stop the current turn and send this instead.
-      void send(e.ctrlKey && running);
-    } else if (e.key === "Escape" && canInterrupt) {
-      e.preventDefault();
-      void interrupt();
+    if (e.key === "Escape") {
+      if (canInterrupt) {
+        e.preventDefault();
+        void interrupt();
+      }
+      return;
     }
+    const action = composerAction({ key: e.key, ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey, running, steer });
+    if (!action) return;
+    e.preventDefault();
+    // A driver that cannot steer answers Ctrl+Enter with "queue" (lib/steer.ts).
+    void send(action === "interrupt-send" ? "now" : action === "steer" ? "steer" : "queue");
   }
 
   if (plan) {
@@ -297,7 +304,7 @@ export function Composer({
             mention.sync();
           }}
           onKeyDown={(e) => slash.onKeyDown(e) || mention.onKeyDown(e) || onKey(e)}
-          placeholder={running ? `${displayName(agent)} 正在工作，新消息会排在本轮之后` : `给 ${displayName(agent)} 发消息，@ 点名协作者或模型，/ 看指令`}
+          placeholder={composerPlaceholder({ name: displayName(agent), running, steer })}
         />
         <div className="bar">
           {agent.plugin === "external" ? (
@@ -324,7 +331,7 @@ export function Composer({
       </div>
       <div className="composer-hint">
         {note && <span>{note} · </span>}
-        {compact.busy ? "压缩中…" : running ? "Enter 排队 · Ctrl+Shift+Enter 打断并发送 · Esc 中断" : "Enter 发送 · Shift+Enter 换行 · agent 离线时会自动启动"}
+        {compact.busy ? "压缩中…" : composerHint({ running, steer, interrupt: canInterrupt })}
       </div>
     </div>
   );

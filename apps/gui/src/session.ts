@@ -113,6 +113,21 @@ export function applyEvent(t: Transcript, event: HubEvent): Transcript {
       const mid = event.data.message_id;
       return { ...t, turns: turns.filter((x) => x.message_id !== mid || !!x.started_at), last_seq: seq };
     }
+    case "agent.steered": {
+      // Handed to the turn running now: it reads this at its next tool boundary. Shown inside
+      // that turn, dashed until `agent.steer_read` says the model has it.
+      if (event.data.id !== id) return t;
+      const { message_id, text, attachments } = event.data;
+      const item: TranscriptItem = { type: "steer", message_id, text, read: false, ...(attachments?.length ? { attachments } : {}) };
+      return withActive(t, seq, (items) => [...items, item]);
+    }
+    case "agent.steer_read": {
+      if (event.data.id !== id) return t;
+      const mid = event.data.message_id;
+      const read = (items: TranscriptItem[]): TranscriptItem[] =>
+        items.map((x) => (x.type === "steer" && x.message_id === mid && !x.read ? { ...x, read: true } : x));
+      return { ...t, turns: turns.map((x) => ({ ...x, items: read(x.items) })), last_seq: seq };
+    }
     case "agent.turn_started": {
       if (event.data.id !== id) return t;
       const mid = event.data.message_id;

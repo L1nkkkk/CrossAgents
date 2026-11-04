@@ -904,7 +904,7 @@ export class MockBridge implements CrossAgentsBridge {
     return json(204);
   }
 
-  /** A message: queued behind a running turn, else answered by a short made-up turn. */
+  /** A message: steered into a running turn, else queued behind one, else answered by a short made-up turn. */
   private send(key: string, req: SendMessageRequest): HubResponse {
     const a = this.agent(key);
     if (!a) return notFound("agent");
@@ -916,10 +916,19 @@ export class MockBridge implements CrossAgentsBridge {
       this.state.files.set(id, { mime: f.mime, data: f.data });
       return { id, name: f.name, mime: f.mime, size: Math.floor((f.data.length * 3) / 4), path: `C:/Users/me/.crossagents/attachments/${a.id}/${id}` };
     });
+    // Like the hub: a steer needs a turn to go into and a driver that takes one; otherwise it
+    // queues, and the answer says `steered: false` rather than failing.
+    if (req.steer && busy && capabilitiesOf(a.plugin).steer) {
+      this.emit({ type: "agent.steered", data: { id: a.id, message_id, text: req.text, ...(attachments.length ? { attachments } : {}) } });
+      // The model reads it at its next tool boundary; the mock has it read a moment later, so a
+      // preview shows both the dashed bubble and the ordinary one it becomes.
+      this.timers.push(setTimeout(() => this.emit({ type: "agent.steer_read", data: { id: a.id, message_id } }), 1_500));
+      return json(202, { message_id, queued: false, steered: true });
+    }
     this.emit({ type: "agent.input", data: { id: a.id, message_id, text: req.text, queued: busy, from: { kind: "human" }, ...(attachments.length ? { attachments } : {}) } });
     this.freshSession(a);
     if (!busy) this.answer(a, message_id, req.text);
-    return json(202, { message_id, queued: busy });
+    return json(202, { message_id, queued: busy, steered: false });
   }
 
   /** Like the hub's `archive` (and `lead_returned` for a copied lead): what restoring could not bring back is said. */
