@@ -98,6 +98,9 @@ pub struct Capabilities {
     pub streaming: bool,
     /// [`DriverSession::interrupt`] stops a running turn.
     pub interrupt: bool,
+    /// [`DriverSession::steer`] gives a running turn another message.
+    #[serde(default)]
+    pub steer: bool,
     /// Collaboration tools can be mounted as MCP servers.
     pub mcp: bool,
     /// One agent process serves several sessions.
@@ -547,6 +550,12 @@ pub trait DriverSession: Send + Sync {
     /// report them, or the session has not said yet.
     fn commands(&self) -> Option<Vec<AgentCommand>> {
         None
+    }
+
+    /// Hands a message to the running turn, without starting a new one. Fails when the
+    /// driver cannot, or no turn runs: the hub then queues the message.
+    async fn steer(&self, _prompt: &crate::Prompt) -> Result<(), CoreError> {
+        Err(unsupported("steer"))
     }
 
     /// Stops the running turn; `prompt` then returns [`StopReason::Cancelled`]. Does

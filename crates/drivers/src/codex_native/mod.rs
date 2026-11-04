@@ -183,6 +183,7 @@ impl Driver for CodexNativeDriver {
         Capabilities {
             streaming: true,
             interrupt: true,
+            steer: false,
             mcp: true,
             multi_session: true,
             resume: true,

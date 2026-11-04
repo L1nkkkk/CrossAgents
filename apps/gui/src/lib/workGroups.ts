@@ -111,7 +111,7 @@ export function liveActivity(items: TranscriptItem[]): string {
   const last = items[items.length - 1];
   if (!last) return "思考中";
   if (last.type === "output") return last.stream === "thought" ? "推理中" : "回复中";
-  if (last.type === "error" || last.type === "warning" || last.type === "permission") return "工作中";
+  if (last.type === "error" || last.type === "warning" || last.type === "permission" || last.type === "steer") return "工作中";
   if (last.status === "completed" || last.status === "failed") return "工作中";
   switch (category(last)) {
     case "command":

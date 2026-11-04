@@ -15,6 +15,10 @@ streaming: boolean,
  */
 interrupt: boolean, 
 /**
+ * [`DriverSession::steer`] gives a running turn another message.
+ */
+steer: boolean, 
+/**
  * Collaboration tools can be mounted as MCP servers.
  */
 mcp: boolean, 

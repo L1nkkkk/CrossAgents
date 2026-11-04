@@ -136,6 +136,7 @@ impl Driver for ClaudeNativeDriver {
         Capabilities {
             streaming: true,
             interrupt: true,
+            steer: false,
             mcp: true,
             multi_session: false,
             resume: true,

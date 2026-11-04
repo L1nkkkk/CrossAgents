@@ -500,7 +500,11 @@ async fn start_chat(
     }
     Ok((
         StatusCode::ACCEPTED,
-        Json(SendMessageResponse { message_id, queued }),
+        Json(SendMessageResponse {
+            message_id,
+            queued,
+            steered: false,
+        }),
     ))
 }
 
@@ -1157,7 +1161,11 @@ async fn send_message(
     };
     Ok((
         StatusCode::ACCEPTED,
-        Json(SendMessageResponse { message_id, queued }),
+        Json(SendMessageResponse {
+            message_id,
+            queued,
+            steered: false,
+        }),
     ))
 }
 
