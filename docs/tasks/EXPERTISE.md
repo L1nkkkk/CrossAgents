@@ -397,7 +397,10 @@ POST   /v1/expertise/candidates/{id}/reject
 GET    /v1/expertise/card
 GET    /v1/expertise/maintenance         预算 + 标黄建议 + 冲突
 GET    /v1/expertise/export              文本 Markdown（Content-Type: text/markdown）
+GET    /v1/projects                      项目 id 与它的 checkout 路径：客户端从工作目录找到项目档案
 ```
+
+- 项目档案的 `owner_id` 是 `Project.id`，不是目录路径（§4.1）。客户端在一个目录里工作，所以先查 `/v1/projects` 的 `paths` 找到项目，再用它的 `id` 查专长档案；页面在 `Project` 还不存在时退回目录路径（此时档案本来就是空的）。
 
 - `accept` 且有 `conflicts_with` 时，`decisions` 必须覆盖每一个冲突 id，`verdict` ∈ `keep_old` / `replace` / `merge` / `both`；缺一个返回 400（`CoreError` → 现有错误形状），候选不变。
 - 请求/响应类型放 `crates/api-types`；`cargo test -p crossagents-api-types` 重新生成 `bindings/`。

@@ -215,6 +215,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/events", get(events))
         .route("/v1/shutdown", post(shutdown))
         .merge(crate::api_expertise::router())
+        .merge(crate::api_projects::router())
         .merge(crate::api_terminal::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
     // Routes for agents, authenticated with their per-session token.

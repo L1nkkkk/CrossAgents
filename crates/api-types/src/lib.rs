@@ -1696,6 +1696,38 @@ pub struct ListToolsResponse {
 }
 
 // ---------------------------------------------------------------------------------------
+// Projects (docs/tasks/LESSONS.md §4.2)
+
+/// One checkout of a project on a node (paths are strings, for clients that cannot read
+/// `PathBuf`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectPathInfo {
+    pub node: String,
+    pub path: String,
+}
+
+/// A project as clients see it: its stable id, and the checkouts and remotes that identify
+/// it. A project's expertise profile is keyed by [`ProjectInfo::id`], which is what a client
+/// finds here from the directory it works in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ProjectInfo {
+    pub id: String,
+    pub name: String,
+    /// Normalised `host/owner/repo` remotes.
+    pub remotes: Vec<String>,
+    pub paths: Vec<ProjectPathInfo>,
+}
+
+/// `GET /v1/projects`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListProjectsResponse {
+    pub projects: Vec<ProjectInfo>,
+}
+
+// ---------------------------------------------------------------------------------------
 // Expertise profiles (docs/tasks/EXPERTISE.md)
 
 pub use crossagents_core::{
