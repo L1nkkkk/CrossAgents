@@ -1051,21 +1051,51 @@ impl Runtime {
         let live =
             live.filter(|live| live.steer && !live.inbox.is_closed() && live.inbox.is_running());
         if let Some(live) = live {
-            // Said here so the running turn is told what changed; a queued copy below
-            // carries the same text instead.
-            let text = self.with_notices(stored.id, envelope.text.clone()).await;
+            // What changed since the last message (model, effort, name) goes with the
+            // steered text, but the bubble shows what the person wrote, not the notes.
+            // The notes are only consumed if the message really goes in: a queued copy
+            // below gets them from `deliver`.
+            let (display, sent, consumed) = {
+                let notices = self.notices.lock().await;
+                match notices.get(&stored.id).filter(|notes| !notes.is_empty()) {
+                    Some(notes) => {
+                        let lines: Vec<&str> = notes.values().map(String::as_str).collect();
+                        (
+                            envelope.text.clone(),
+                            format!("{}\n\n{}", lines.join("\n"), envelope.text),
+                            notes.clone(),
+                        )
+                    }
+                    None => (
+                        envelope.text.clone(),
+                        envelope.text.clone(),
+                        BTreeMap::new(),
+                    ),
+                }
+            };
             let prompt = Prompt {
-                text: text.clone(),
+                text: sent,
                 attachments: envelope.attachments.clone(),
             };
             match live.session.steer(message_id, &prompt).await {
                 Ok(()) => {
+                    if !consumed.is_empty() {
+                        let mut notices = self.notices.lock().await;
+                        if let Some(notes) = notices.get_mut(&stored.id) {
+                            for topic in consumed.keys() {
+                                notes.remove(topic);
+                            }
+                            if notes.is_empty() {
+                                notices.remove(&stored.id);
+                            }
+                        }
+                    }
                     publish(
                         &self.bus,
                         EventKind::AgentSteered {
                             id: stored.id,
                             message_id,
-                            text,
+                            text: display,
                             attachments: envelope.attachments,
                         },
                     )
@@ -1078,9 +1108,7 @@ impl Runtime {
                     tracing::debug!(%message_id, %err, "cannot steer; queueing the message")
                 }
             }
-            let (message_id, queued) = self
-                .deliver(key, Envelope { text, ..envelope }, false)
-                .await?;
+            let (message_id, queued) = self.deliver(key, envelope, false).await?;
             return Ok((message_id, queued, false));
         }
         let (message_id, queued) = self.deliver(key, envelope, false).await?;

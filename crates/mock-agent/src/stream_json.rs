@@ -69,6 +69,8 @@ struct Mock {
     steers: Mutex<Vec<(String, String)>>,
     /// `--replay-user-messages`: echo each user message as the CLI reads it.
     replay: bool,
+    /// User messages queued behind the running turn, by uuid (an interrupt reports them).
+    queued: Mutex<Vec<String>>,
 }
 
 impl Mock {
@@ -140,7 +142,10 @@ impl Mock {
             }
             "interrupt" => {
                 self.interrupt.notify_waiters();
-                self.answer(id, json!({})).await;
+                // As Claude Code: the messages queued behind the turn survive it.
+                let still_queued = self.queued.lock().await.clone();
+                self.answer(id, json!({ "still_queued": still_queued }))
+                    .await;
             }
             "set_model" => {
                 if let Some(model) = request["model"].as_str() {
@@ -184,11 +189,28 @@ impl Mock {
         self.running.store(true, Ordering::SeqCst);
         let uuid = message["uuid"].as_str().unwrap_or_default().to_owned();
         let mut text = message_text(&message);
-        // A message queued during a turn was read (and echoed) when it was queued; one
-        // that starts a turn is read now.
-        if !consumed {
-            self.echo_user(&uuid, &text).await;
+        // A queued message opens its turn after the previous result, as the CLI does:
+        // `system/init`, then the read echo, then the answer.
+        if consumed {
+            self.queued.lock().await.retain(|queued| *queued != uuid);
+            self.init_notice().await;
+            if text.contains("[fail-before-read]") {
+                // The turn fails before it reads anything: no echo, and a result that
+                // names no message (as a CLI that never got to it does).
+                self.running.store(false, Ordering::SeqCst);
+                self.send(json!({
+                    "type": "result",
+                    "subtype": "error_max_turns",
+                    "is_error": true,
+                    "session_id": self.session_id,
+                    "usage": { "input_tokens": 10, "output_tokens": 0 },
+                    "total_cost_usd": 0.01,
+                }))
+                .await;
+                return;
+            }
         }
+        self.echo_user(&uuid, &text).await;
         if text.contains("[crash]") {
             std::process::exit(3);
         }
@@ -379,6 +401,7 @@ pub async fn run(args: Vec<String>) {
         running: AtomicBool::new(false),
         steers: Mutex::default(),
         replay: args.iter().any(|a| a == "--replay-user-messages"),
+        queued: Mutex::default(),
         kept,
     });
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
@@ -395,18 +418,16 @@ pub async fn run(args: Vec<String>) {
                 let mock = mock.clone();
                 tokio::spawn(async move {
                     let queued = mock.running.load(Ordering::SeqCst);
-                    if queued {
-                        if mock.steer_merge {
-                            // Read at the running turn's next boundary.
-                            let uuid = message["uuid"].as_str().unwrap_or_default().to_owned();
-                            let text = message_text(&message);
-                            mock.steers.lock().await.push((uuid, text));
-                            return;
-                        }
-                        // Another turn opens for it, announced and read as the CLI does.
-                        mock.init_notice().await;
+                    if queued && mock.steer_merge {
+                        // Read at the running turn's next boundary.
                         let uuid = message["uuid"].as_str().unwrap_or_default().to_owned();
-                        mock.echo_user(&uuid, &message_text(&message)).await;
+                        let text = message_text(&message);
+                        mock.steers.lock().await.push((uuid, text));
+                        return;
+                    }
+                    if queued {
+                        let uuid = message["uuid"].as_str().unwrap_or_default().to_owned();
+                        mock.queued.lock().await.push(uuid);
                     }
                     mock.run_turn(message, queued).await;
                 });

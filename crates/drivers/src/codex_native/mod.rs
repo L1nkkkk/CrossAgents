@@ -660,8 +660,9 @@ fn route(router: &Router, sink: &ThreadSink, method: &str, params: &Value) {
     for kind in wire::translate(method, params) {
         sink.emit(kind, Some(params));
     }
-    // A steered message is read by the model's next request; any output of the running
-    // turn is the first sign of it.
+    // A steered message is read by the model's next request; the first output of the
+    // running turn is the earliest sign of it. Approximate: `app-server` has no finer
+    // "read" signal (no echo like Claude Code's `--replay-user-messages`).
     if matches!(
         method,
         method::ITEM_STARTED

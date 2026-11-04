@@ -66,7 +66,18 @@ async fn a_message_steers_into_the_running_turn() {
         .json()
         .await
         .unwrap();
+    // The echo of the messages (both are replayed) must not add a turn or a second item.
+    assert_eq!(
+        transcript["turns"].as_array().unwrap().len(),
+        1,
+        "{transcript:#?}"
+    );
     let items = transcript["turns"][0]["items"].as_array().unwrap();
+    assert_eq!(
+        items.iter().filter(|item| item["type"] == "steer").count(),
+        1,
+        "{items:#?}"
+    );
     let steer = items
         .iter()
         .find(|item| item["type"] == "steer")
