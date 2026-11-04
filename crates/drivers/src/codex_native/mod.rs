@@ -17,7 +17,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use crossagents_core::{
     AttachmentSupport, Capabilities, CliStatus, CoreError, Driver, DriverKind, DriverSession,
-    PermissionDecision, PermissionHandler, PermissionPolicy, Prompt, SessionEvent,
+    MessageId, PermissionDecision, PermissionHandler, PermissionPolicy, Prompt, SessionEvent,
     SessionEventKind, SessionSpec, TurnOutcome,
 };
 use serde_json::{Value, json};
@@ -183,7 +183,9 @@ impl Driver for CodexNativeDriver {
         Capabilities {
             streaming: true,
             interrupt: true,
-            steer: false,
+            // `turn/steer` with the running turn's id (verified against codex-cli
+            // 0.166.0-alpha.5.1, see docs/research/codex-app-server.md §3.1).
+            steer: true,
             mcp: true,
             multi_session: true,
             resume: true,
@@ -556,6 +558,8 @@ struct TurnState {
     waiter: Option<oneshot::Sender<TurnEnd>>,
     /// `interrupt` came before the turn id did.
     interrupt_requested: bool,
+    /// Messages steered into the turn that the model has not read yet.
+    steers: Vec<MessageId>,
 }
 
 impl ThreadSink {
@@ -576,6 +580,7 @@ impl ThreadSink {
         let mut turn = self.turn();
         turn.active = None;
         turn.waiter = None;
+        turn.steers.clear();
     }
 }
 
@@ -655,11 +660,36 @@ fn route(router: &Router, sink: &ThreadSink, method: &str, params: &Value) {
     for kind in wire::translate(method, params) {
         sink.emit(kind, Some(params));
     }
+    // A steered message is read by the model's next request; any output of the running
+    // turn is the first sign of it.
+    if matches!(
+        method,
+        method::ITEM_STARTED
+            | method::ITEM_COMPLETED
+            | method::AGENT_MESSAGE_DELTA
+            | method::REASONING_SUMMARY_DELTA
+            | method::REASONING_TEXT_DELTA
+            | method::COMMAND_OUTPUT_DELTA
+            | method::TURN_COMPLETED
+    ) {
+        let read = {
+            let mut turn = sink.turn();
+            if turn.waiter.is_some() && !turn.steers.is_empty() {
+                Some(std::mem::take(&mut turn.steers))
+            } else {
+                None
+            }
+        };
+        for message_id in read.into_iter().flatten() {
+            sink.emit(SessionEventKind::SteerRead { message_id }, Some(params));
+        }
+    }
     if method == method::TURN_COMPLETED
         && let Some(end) = wire::turn_end(params)
     {
         let mut turn = sink.turn();
         turn.active = None;
+        turn.steers.clear();
         if let Some(waiter) = turn.waiter.take() {
             let _ = waiter.send(end);
         }
@@ -861,6 +891,28 @@ impl DriverSession for CodexSession {
             stop_reason: wire::stop_reason(&end.status),
             turn_id: Some(end.turn_id),
         })
+    }
+
+    /// `turn/steer` into the running turn. `expectedTurnId` makes Codex refuse a message
+    /// meant for a turn that already ended, which the hub then queues.
+    async fn steer(&self, message_id: MessageId, prompt: &Prompt) -> Result<(), CoreError> {
+        self.check_open()?;
+        let turn_id = {
+            let mut turn = self.sink.turn();
+            // The turn's id comes from `turn/started`; without it Codex cannot be told
+            // which turn is meant, so the message waits for the next one.
+            let Some(turn_id) = turn.active.clone().filter(|_| turn.waiter.is_some()) else {
+                return Err(CoreError::Conflict("no turn is running".into()));
+            };
+            turn.steers.push(message_id);
+            turn_id
+        };
+        let params = wire::turn_steer(&self.thread_id, prompt, &turn_id);
+        let result = self.server.request(method::TURN_STEER, params).await;
+        if result.is_err() {
+            self.sink.turn().steers.retain(|steer| *steer != message_id);
+        }
+        result.map(|_| ())
     }
 
     async fn interrupt(&self) -> Result<(), CoreError> {

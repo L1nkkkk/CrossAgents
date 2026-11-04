@@ -13,6 +13,8 @@
 //!
 //! `--compact-ms MS` makes a `/compact` turn take MS milliseconds, as summarising a long
 //! history does.
+//! `--steer-merge` reads a message written while a turn runs at that turn's next boundary
+//! (Claude Code); without it the message opens another turn after it, as CodeBuddy does.
 //! - `[session]`   say the session id, and whether it was resumed
 //! - `[crash]`     exit the process
 //! - `[write ...]` / `[call ...]` directives, see [`crate::script`]; calls go to the first
@@ -30,7 +32,7 @@
 //! and what `[remember]` kept comes back with the session.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -55,6 +57,14 @@ struct Mock {
     kept: Option<std::path::PathBuf>,
     /// `--compact-ms`: how long a `/compact` turn takes.
     compact_ms: u64,
+    /// `--steer-merge`: a user message written while a turn runs is read by that turn at
+    /// its next boundary (Claude Code's steer), instead of the queued turn the CLI runs
+    /// after it (what CodeBuddy does).
+    steer_merge: bool,
+    /// A turn runs.
+    running: AtomicBool,
+    /// Messages delivered into the running turn, by the model's next request.
+    steers: Mutex<Vec<(String, String)>>,
 }
 
 impl Mock {
@@ -93,6 +103,22 @@ impl Mock {
         .await;
     }
 
+    /// The CLI's own init notice: at start, and again when it opens another turn for a
+    /// message written while one ran.
+    async fn init_notice(&self) {
+        self.send(json!({
+            "type": "system",
+            "subtype": "init",
+            "uuid": self.new_id("system"),
+            "session_id": self.session_id,
+            "cwd": std::env::current_dir().unwrap_or_default(),
+            "model": self.model.lock().await.clone(),
+            "slash_commands": ["compact", "clear", "review"],
+            "skills": ["mock-skill"],
+        }))
+        .await;
+    }
+
     async fn control(&self, message: &Value) {
         let id = message["request_id"].as_str().unwrap_or_default();
         let request = &message["request"];
@@ -100,17 +126,7 @@ impl Mock {
             "initialize" => {
                 // As Claude Code does once it is up: the CLI's own slash commands and
                 // skills, before the handshake's answer so a caller that has it has these.
-                self.send(json!({
-                    "type": "system",
-                    "subtype": "init",
-                    "uuid": self.new_id("system"),
-                    "session_id": self.session_id,
-                    "cwd": std::env::current_dir().unwrap_or_default(),
-                    "model": self.model.lock().await.clone(),
-                    "slash_commands": ["compact", "clear", "review"],
-                    "skills": ["mock-skill"],
-                }))
-                .await;
+                self.init_notice().await;
                 let model = self.model.lock().await.clone();
                 self.answer(
                     id,
@@ -133,18 +149,19 @@ impl Mock {
         }
     }
 
+    /// Appends what the model read at this boundary.
+    async fn take_steers(&self, text: &mut String) {
+        for (_, steer) in std::mem::take(&mut *self.steers.lock().await) {
+            text.push_str("\n[steered] ");
+            text.push_str(&steer);
+        }
+    }
+
     async fn run_turn(&self, message: Value) {
         let _turn = self.turn.lock().await;
+        self.running.store(true, Ordering::SeqCst);
         let uuid = message["uuid"].as_str().unwrap_or_default().to_owned();
-        let text = match &message["message"]["content"] {
-            Value::String(text) => text.clone(),
-            Value::Array(blocks) => blocks
-                .iter()
-                .filter_map(|b| b["text"].as_str())
-                .collect::<Vec<_>>()
-                .join("\n"),
-            _ => String::new(),
-        };
+        let mut text = message_text(&message);
         if text.contains("[crash]") {
             std::process::exit(3);
         }
@@ -174,6 +191,9 @@ impl Mock {
                 () = self.interrupt.notified() => interrupted = true,
                 () = tokio::time::sleep(Duration::from_millis(ms)) => {}
             }
+        }
+        if !interrupted {
+            self.take_steers(&mut text).await;
         }
         if !interrupted {
             if text.contains("[pid]") {
@@ -220,6 +240,8 @@ impl Mock {
         }
         // `total_cost_usd` counts from the start of the process.
         let turns = self.turns.fetch_add(1, Ordering::Relaxed) + 1;
+        // The model is done: a message from here on starts a turn of its own.
+        self.running.store(false, Ordering::SeqCst);
         self.send(json!({
             "type": "result",
             "subtype": if interrupted { "error_during_execution" } else { "success" },
@@ -236,6 +258,19 @@ impl Mock {
 
 fn read_kept(path: &std::path::Path) -> Option<Value> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// The text of a stream-json user message.
+fn message_text(message: &Value) -> String {
+    match &message["message"]["content"] {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| b["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
 }
 
 /// The value after `flag` in `args`.
@@ -313,6 +348,9 @@ pub async fn run(args: Vec<String>) {
         compact_ms: flag(&args, "--compact-ms")
             .and_then(|ms| ms.parse().ok())
             .unwrap_or(0),
+        steer_merge: args.iter().any(|a| a == "--steer-merge"),
+        running: AtomicBool::new(false),
+        steers: Mutex::default(),
         kept,
     });
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
@@ -327,7 +365,20 @@ pub async fn run(args: Vec<String>) {
             }
             Some("user") => {
                 let mock = mock.clone();
-                tokio::spawn(async move { mock.run_turn(message).await });
+                tokio::spawn(async move {
+                    if mock.running.load(Ordering::SeqCst) {
+                        if mock.steer_merge {
+                            // Read at the running turn's next boundary.
+                            let uuid = message["uuid"].as_str().unwrap_or_default().to_owned();
+                            let text = message_text(&message);
+                            mock.steers.lock().await.push((uuid, text));
+                            return;
+                        }
+                        // Another turn opens for it, announced as the CLI does.
+                        mock.init_notice().await;
+                    }
+                    mock.run_turn(message).await;
+                });
             }
             _ => {}
         }

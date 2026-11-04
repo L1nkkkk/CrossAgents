@@ -64,6 +64,8 @@ struct Live {
     /// What the session's agent declared it takes as files (ACP `promptCapabilities`);
     /// `None` when only its driver's static answer is known.
     attachments: Option<AttachmentSupport>,
+    /// The driver can hand a message to the running turn (`DriverSession::steer`).
+    steer: bool,
 }
 
 impl Drop for Live {
@@ -169,6 +171,11 @@ impl Inbox {
     fn is_idle(&self) -> bool {
         let waiting = self.waiting.lock().unwrap();
         waiting.is_empty() && !self.busy.load(Ordering::SeqCst)
+    }
+
+    /// A turn runs: a message can be steered into it.
+    fn is_running(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
     }
 
     fn is_closed(&self) -> bool {
@@ -478,6 +485,7 @@ impl Runtime {
             },
             diff_dir,
             running,
+            resolved.driver.capabilities().steer,
         )
         .await;
         let status = if running.is_some() {
@@ -768,6 +776,7 @@ impl Runtime {
             },
             diff_dir,
             None,
+            resolved.driver.capabilities().steer,
         )
         .await;
         set_status(&self.bus, agent.id, AgentStatus::Idle).await;
@@ -955,6 +964,7 @@ impl Runtime {
         channels: Channels,
         diff_dir: Option<PathBuf>,
         adopted: Option<MessageId>,
+        steer: bool,
     ) -> Arc<Inbox> {
         let Channels {
             events,
@@ -969,6 +979,7 @@ impl Runtime {
             inbox: inbox.clone(),
             control: control_tx.clone(),
             attachments: session.attachment_support(),
+            steer,
         });
         tokio::spawn(forward_events(
             self.bus.clone(),
@@ -1020,6 +1031,60 @@ impl Runtime {
         envelope: Envelope,
     ) -> Result<(MessageId, bool), CoreError> {
         self.deliver(key, envelope, true).await
+    }
+
+    /// Hands a message to the agent's running turn when its driver can steer, else queues
+    /// it as [`Self::send_envelope`] would. Returns the message id, whether it was queued,
+    /// and whether it was steered (then `queued` is false).
+    pub async fn steer_envelope(
+        &self,
+        key: &AgentKey,
+        envelope: Envelope,
+    ) -> Result<(MessageId, bool, bool), CoreError> {
+        let message_id = envelope.id;
+        let stored = self.store().get_agent(key).await?;
+        let live = if stored.archived_at.is_none() && stored.plugin != EXTERNAL_PLUGIN {
+            self.live.lock().await.get(&stored.id).cloned()
+        } else {
+            None
+        };
+        let live =
+            live.filter(|live| live.steer && !live.inbox.is_closed() && live.inbox.is_running());
+        if let Some(live) = live {
+            // Said here so the running turn is told what changed; a queued copy below
+            // carries the same text instead.
+            let text = self.with_notices(stored.id, envelope.text.clone()).await;
+            let prompt = Prompt {
+                text: text.clone(),
+                attachments: envelope.attachments.clone(),
+            };
+            match live.session.steer(message_id, &prompt).await {
+                Ok(()) => {
+                    publish(
+                        &self.bus,
+                        EventKind::AgentSteered {
+                            id: stored.id,
+                            message_id,
+                            text,
+                            attachments: envelope.attachments,
+                        },
+                    )
+                    .await;
+                    return Ok((message_id, false, true));
+                }
+                // Unsupported, no turn any more, or the message never reached the CLI:
+                // it must not be lost, so it goes through the queue.
+                Err(err) => {
+                    tracing::debug!(%message_id, %err, "cannot steer; queueing the message")
+                }
+            }
+            let (message_id, queued) = self
+                .deliver(key, Envelope { text, ..envelope }, false)
+                .await?;
+            return Ok((message_id, queued, false));
+        }
+        let (message_id, queued) = self.deliver(key, envelope, false).await?;
+        Ok((message_id, queued, false))
     }
 
     /// Adds a line to the agent's notification digest: one waiting message that gathers
@@ -1891,6 +1956,7 @@ async fn handle_session_event(
         },
         SessionEventKind::Warning { message } => EventKind::AgentWarning { id, message },
         SessionEventKind::Error { message } => EventKind::AgentError { id, message },
+        SessionEventKind::SteerRead { message_id } => EventKind::AgentSteerRead { id, message_id },
         // Turn boundaries come from the runtime's own control messages.
         SessionEventKind::TurnStarted { .. } | SessionEventKind::TurnCompleted { .. } => {
             return false;

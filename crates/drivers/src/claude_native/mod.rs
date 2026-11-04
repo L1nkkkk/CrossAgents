@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use crossagents_core::{
     AgentCommand, AttachmentSupport, Capabilities, CliStatus, CoreError, Driver, DriverKind,
-    DriverSession, PermissionHandler, PermissionPolicy, Prompt, SessionEvent, SessionEventKind,
-    SessionSpec, StopReason, TurnOutcome,
+    DriverSession, MessageId, PermissionHandler, PermissionPolicy, Prompt, SessionEvent,
+    SessionEventKind, SessionSpec, StopReason, TurnOutcome,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -136,7 +136,10 @@ impl Driver for ClaudeNativeDriver {
         Capabilities {
             streaming: true,
             interrupt: true,
-            steer: false,
+            // Claude Code reads a message written while a turn runs at its next tool
+            // boundary. CodeBuddy queues it as another turn instead (verified), so it does
+            // not steer until that is made to work.
+            steer: self.flavor == Flavor::Claude,
             mcp: true,
             multi_session: false,
             resume: true,
@@ -259,6 +262,20 @@ struct Turn {
     waiter: Option<oneshot::Sender<StopReason>>,
     interrupted: bool,
     last_assistant: Option<String>,
+    /// Messages put into this turn with `steer` that the model has not read yet.
+    steers: Vec<PendingSteer>,
+    /// The CLI opened another turn for messages written after its last model call (a
+    /// `system/init` came while they waited): results belong to that turn until they are
+    /// read.
+    separate_steer_turn: bool,
+    /// A result arrived while `steers` were unread. Kept until they are read, so the extra
+    /// turn's result does not end the next one.
+    held_stop: Option<StopReason>,
+}
+
+/// A message written into the running turn, waiting for the model to read it.
+struct PendingSteer {
+    id: MessageId,
 }
 
 impl Shared {
@@ -336,6 +353,16 @@ impl Shared {
             *self.commands.lock().expect("commands lock") = Some(commands);
         }
         let kind = message.get("type").and_then(Value::as_str);
+        // CodeBuddy (and Claude Code when a message arrives after its last model call)
+        // opens another turn for a message written too late, announced by another
+        // `system/init`. Its result must not end the turn that is waiting.
+        if kind == Some("system") && message.get("subtype").and_then(Value::as_str) == Some("init")
+        {
+            let mut turn = self.turn.lock().expect("turn lock");
+            if !turn.steers.is_empty() {
+                turn.separate_steer_turn = true;
+            }
+        }
         if !matches!(kind, Some("control_response" | "control_request")) {
             let mut replay = self.replay.lock().expect("replay lock");
             if replay.is_some() {
@@ -370,6 +397,22 @@ impl Shared {
                 for kind in events {
                     self.emit(kind, Some(&message));
                 }
+                // A message written after the turn's last model call makes the CLI run
+                // another turn for it, whose result would otherwise end the next turn.
+                // Keep this turn open until the model has read it.
+                if !turn.steers.is_empty() && !turn.interrupted {
+                    turn.held_stop.get_or_insert(stop);
+                    return;
+                }
+                let stop = turn.held_stop.take().unwrap_or(stop);
+                for steer in turn.steers.drain(..) {
+                    self.emit(
+                        SessionEventKind::SteerRead {
+                            message_id: steer.id,
+                        },
+                        None,
+                    );
+                }
                 if let (Some(id), Some(last)) = (turn.id.take(), turn.last_assistant.take()) {
                     self.turn_ends
                         .lock()
@@ -402,14 +445,33 @@ impl Shared {
                     );
                     let _ = waiter.send(StopReason::Error);
                 }
+                let read: Vec<MessageId> = turn.steers.drain(..).map(|steer| steer.id).collect();
                 *turn = Turn::default();
+                drop(turn);
+                for message_id in read {
+                    self.emit(SessionEventKind::SteerRead { message_id }, None);
+                }
             }
             Some(kind) => {
+                let mut read = Vec::new();
                 if kind == "assistant"
                     && message.get("parent_tool_use_id").is_none_or(Value::is_null)
-                    && let Some(uuid) = message.get("uuid").and_then(Value::as_str)
                 {
-                    self.turn.lock().expect("turn lock").last_assistant = Some(uuid.to_owned());
+                    let mut turn = self.turn.lock().expect("turn lock");
+                    if let Some(uuid) = message.get("uuid").and_then(Value::as_str) {
+                        turn.last_assistant = Some(uuid.to_owned());
+                    }
+                    // A message injected into this turn is read by the model at its next
+                    // request; one given a turn of its own is read when that turn speaks.
+                    if !turn.steers.is_empty()
+                        && (turn.held_stop.is_some() || !turn.separate_steer_turn)
+                    {
+                        read = turn.steers.drain(..).map(|steer| steer.id).collect();
+                        turn.separate_steer_turn = false;
+                    }
+                }
+                for message_id in read {
+                    self.emit(SessionEventKind::SteerRead { message_id }, None);
                 }
                 let events = self
                     .translator
@@ -459,7 +521,16 @@ impl Shared {
     fn ended(&self) -> bool {
         self.exited.store(true, Ordering::SeqCst);
         self.pending.lock().expect("pending lock").clear();
-        *self.turn.lock().expect("turn lock") = Turn::default();
+        let read = {
+            let mut turn = self.turn.lock().expect("turn lock");
+            let read: Vec<MessageId> = turn.steers.drain(..).map(|steer| steer.id).collect();
+            *turn = Turn::default();
+            read
+        };
+        // Nobody will read these now; the bubbles must not wait forever.
+        for message_id in read {
+            self.emit(SessionEventKind::SteerRead { message_id }, None);
+        }
         !self.closing.load(Ordering::SeqCst)
     }
 }
@@ -762,6 +833,33 @@ impl DriverSession for ClaudeSession {
             stop_reason,
             turn_id: Some(uuid),
         })
+    }
+
+    /// Writes the message into the running turn's stdin, naming it with the hub's message
+    /// id. No new turn, and no waiter: the running `prompt_with` still awaits its result.
+    async fn steer(&self, message_id: MessageId, prompt: &Prompt) -> Result<(), CoreError> {
+        self.check_open()?;
+        {
+            let mut turn = self.shared.turn.lock().expect("turn lock");
+            if turn.waiter.is_none() {
+                return Err(CoreError::Conflict("no turn is running".into()));
+            }
+            turn.steers.push(PendingSteer { id: message_id });
+        }
+        let message = wire::user_message(
+            &self.shared.session_id,
+            &message_id.to_string(),
+            wire::user_content(prompt),
+        );
+        if let Err(err) = self.shared.write(&message).await {
+            let mut turn = self.shared.turn.lock().expect("turn lock");
+            turn.steers.retain(|steer| steer.id != message_id);
+            if turn.steers.is_empty() {
+                turn.separate_steer_turn = false;
+            }
+            return Err(err);
+        }
+        Ok(())
     }
 
     async fn interrupt(&self) -> Result<(), CoreError> {
