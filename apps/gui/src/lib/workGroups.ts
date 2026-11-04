@@ -230,7 +230,8 @@ export function relativeTo(text: string, cwd?: string): string {
     .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
     .join("[\\\\/]");
   const flags = /^[a-z]:/i.test(dir) ? "gi" : "g";
-  const path = "(?:[\\\\/]([^\\s\"']*)|(?=[\"'\\s]|$))";
+  // A shell separator ends it too, so a second path in the same word is shortened as well.
+  const path = "(?:[\\\\/]([^\\s\"',;|&<>]*)|(?=[\"',;|&<>\\s]|$))";
   return text.replace(new RegExp(`${pattern}${path}`, flags), (_m, rest?: string) => {
     const tail = (rest ?? "").replace(/[\\/]+$/, "");
     return tail ? tail.replace(/\\/g, "/") : ".";

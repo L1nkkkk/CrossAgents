@@ -73,6 +73,8 @@ test("the shortened path uses /, and only inside the path", () => {
   // A command's own backslashes are not path separators to rewrite.
   assert.equal(relativeTo("cd C:\\Users\\x\\repo && echo a\\b", cwd), "cd . && echo a\\b");
   assert.equal(relativeTo("echo C:\\Users\\x\\note.txt", cwd), "echo C:\\Users\\x\\note.txt");
+  // Paths joined in one word are each shortened.
+  assert.equal(relativeTo("C:\\Users\\x\\repo\\a\\b,C:\\Users\\x\\repo\\c;C:\\Users\\x\\repo", cwd), "a/b,c;.");
   // A trailing separator is dropped, so the file name reads as itself.
   assert.equal(relativeTo("Read C:\\Users\\x\\repo\\sub\\", cwd), "Read sub");
 });
