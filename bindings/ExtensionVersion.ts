@@ -22,7 +22,7 @@ hooks?: Array<ExtensionHookInfo>,
 /**
  * The resident process declared by this snapshot.
  */
-service?: ExtensionServiceInfo,
+service?: ExtensionServiceInfo, 
 /**
  * The GUI entry, relative to the snapshot; `None` when it has no panel.
  */
