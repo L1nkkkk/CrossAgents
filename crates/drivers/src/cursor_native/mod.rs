@@ -642,12 +642,20 @@ printf '%s\n' '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text
             bypass: false,
             plugin: None,
         });
-        assert!(!args.iter().any(|a| a == "--force"
-            || a.starts_with("--model")
-            || a.starts_with("--plugin-dir")
-            || a == "--approve-mcps"
-            || a.starts_with("--files")));
-        assert!(args.contains(&"--sandbox=enabled".into()));
+        assert_eq!(
+            args,
+            [
+                "-p",
+                "--output-format=stream-json",
+                "--stream-partial-output",
+                "--resume=chat",
+                "--trust",
+                "--sandbox=enabled",
+                "--workspace=w",
+                "--",
+                "hi"
+            ]
+        );
     }
 
     #[tokio::test]

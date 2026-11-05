@@ -31,6 +31,7 @@ pub fn chat_args(args: &ChatArgs<'_>) -> Vec<String> {
     if args.bypass {
         out.push("--force".into());
     } else {
+        out.push("--trust".into());
         out.push("--sandbox=enabled".into());
     }
     out.push(format!("--workspace={}", args.cwd.display()));

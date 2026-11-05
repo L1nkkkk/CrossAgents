@@ -142,3 +142,15 @@ Tip: use --model <id> ...
 - `stream-json` 不带 token 数（见上文「用量」），`status` 也不报额度。
 - 因此账号页对 Cursor 只显示登录状态、打码邮箱与模型列表，额度区为空 → GUI 显示「暂无额度数据」；`AccountProvider::sessions` 返回空，额度/用量页不会有 Cursor 的 token 数字。
 - 以后要接：`~/.cursor/chats/<md5(项目路径)>/<chatId>/store.db`（SQLite）里可能有会话记录，需要另做协议解析，本版没做。
+
+
+## 目录信任与沙箱（2026-11-05 本机实测）
+
+Windows 11，Cursor CLI 2026.10.22-27dcf5f，已登录。在全新临时目录执行 gent -p --output-format=stream-json --stream-partial-output --trust --sandbox=enabled --workspace=<新目录> -- <prompt>，退出码为 1，CLI 返回：
+
+`	ext
+Error: Sandbox mode is enabled but not available on this system. Sandbox requires macOS or Linux.
+Run 'agent sandbox disable' to switch to allowlist mode.
+`
+
+没有出现目录信任提示，但进程在沙箱初始化时失败，不能据此确认会话能成功启动。由于没有进入模型会话，无法实测沙箱内运行 cargo 或调用 hub MCP 工具；macOS/Linux 上的这两项以及完整启动仍需实测。驱动保留 --sandbox=enabled，不采用错误提示中的关闭沙箱建议。
