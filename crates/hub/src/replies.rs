@@ -171,6 +171,7 @@ mod tests {
             reply_excerpt: None,
             attachments: Vec::new(),
             notices: Vec::new(),
+            queued_reason: None,
         }
     }
 
@@ -314,6 +315,7 @@ mod tests {
                 reply_excerpt: None,
                 attachments: Vec::new(),
                 notices: Vec::new(),
+                queued_reason: None,
             },
             now,
         );

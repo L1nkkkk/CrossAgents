@@ -245,6 +245,7 @@ async fn post_message(
                 now: None,
                 steer: None,
                 attachments: (!attachments.is_empty()).then_some(attachments),
+                client_message_id: None,
             },
         )
         .await

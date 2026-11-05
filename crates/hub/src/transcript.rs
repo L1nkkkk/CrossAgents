@@ -365,6 +365,7 @@ mod tests {
                 reply_excerpt: None,
                 attachments: Vec::new(),
                 notices: Vec::new(),
+                queued_reason: None,
             },
             EventKind::AgentTurnStarted { id, message_id: m1 },
             out("thinking", OutputStream::Thought),
@@ -389,6 +390,7 @@ mod tests {
                 reply_excerpt: None,
                 attachments: Vec::new(),
                 notices: Vec::new(),
+                queued_reason: None,
             },
             // One taken back before it started.
             EventKind::AgentInput {
@@ -402,6 +404,7 @@ mod tests {
                 reply_excerpt: None,
                 attachments: Vec::new(),
                 notices: Vec::new(),
+                queued_reason: None,
             },
             EventKind::AgentInputWithdrawn { id, message_id: m3 },
             EventKind::AgentToolCallUpdated {
@@ -522,6 +525,7 @@ mod tests {
                 reply_excerpt: None,
                 attachments: Vec::new(),
                 notices: Vec::new(),
+                queued_reason: None,
             },
             EventKind::AgentTurnStarted { id, message_id: m1 },
             EventKind::AgentSteered {
