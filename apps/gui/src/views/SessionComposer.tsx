@@ -20,6 +20,7 @@ import { StateWord } from "../parts";
 import type { TranscriptTurn } from "../session";
 import { useSlash, type SlashMenuGroup } from "../slash";
 import { PlanTasks, usePlanApproval } from "./Run";
+import { isKickoff } from "../lib/messageText";
 import { fromPerson } from "./SessionMessage";
 
 const QUEUE_OPEN = "crossagents.queueOpen";
@@ -80,7 +81,7 @@ export function QueuePanel({ agent, queued, onEdit }: { agent: Agent; queued: Tr
                 {mine ? "你" : "编排"}
               </span>
               {!!turn.attachments?.length && <MiniFiles agent={agent.id} files={turn.attachments} />}
-              {turn.input && <span className="queue-text">{turn.input.split("\n")[0]}</span>}
+              {turn.input && <span className="queue-text">{!mine && isKickoff(turn.input) ? "开始新一轮" : turn.input.split("\n")[0]}</span>}
               {mine && (
                 <span className="queue-actions">
                   <button

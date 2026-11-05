@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseBlocks, parseInline, type Block, type Inline } from "./markdown.ts";
-import { FOLD_INPUT, foldText } from "./messageText.ts";
+import { FOLD_INPUT, foldText, isKickoff, KICKOFF_SEPARATOR } from "./messageText.ts";
+
+test("a kickoff is told from a message that only mentions a run", () => {
+  assert.equal(isKickoff(`修复下${KICKOFF_SEPARATOR}01a1\nteam: …`), true);
+  assert.equal(isKickoff("run: 01a1"), false);
+});
 
 /** Every word the blocks render, in order, so a check can say nothing was dropped. */
 function plain(blocks: Block[]): string {

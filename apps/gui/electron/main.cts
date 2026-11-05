@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell, session, protocol, net, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
 import { allowed, REQUEST_TIMEOUT_MS, route, timeoutFor } from "./allowed.cjs";
 import { manageLocalHub, type LocalHub } from "./localHub.cjs";
+import { permissionAllowed } from "./permissions.cjs";
 import { createTray, type AppTray } from "./tray.cjs";
 import { startUpdates, type Updates } from "./updates.cjs";
 import { extensionRealFile, type ExtensionVersions } from "./extProtocol.cjs";
@@ -601,8 +602,8 @@ app.whenReady().then(() => {
     updates = startUpdates(logLine);
     tray = createTray(join(process.resourcesPath, "icon.ico"), localHub, showWindow, logLine, updates, restartSafeMode);
   }
-  session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
-  session.defaultSession.setPermissionCheckHandler(() => false);
+  session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => callback(permissionAllowed(permission)));
+  session.defaultSession.setPermissionCheckHandler((_contents, permission) => permissionAllowed(permission));
   // No File / Edit / View / Window bar: everything lives in the page. Copy and paste still work.
   Menu.setApplicationMenu(null);
   void createWindow();

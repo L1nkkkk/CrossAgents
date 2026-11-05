@@ -12,7 +12,7 @@ import { TurnFiles } from "../attach";
 import { HandoffLine } from "../handoff";
 import { dismiss as dismissMessage, retry as retryMessage, useOutbox, type Outgoing } from "../outbox";
 import { ACTIVE_RUN, useRunTree, useRunsLedBy } from "../App";
-import { Avatar, ErrorBox, FileScopeProvider, Icon, Mark, OneLine, StatusChip, Vendor, agentTitle, agentTone, beyondFirstLine, displayName, firstLine, firstSentence, roleShape, time, useAgents, useFileScope, vendorName } from "../components";
+import { AgentImageContext, Avatar, ErrorBox, FileScopeProvider, Icon, loadAgentImage, Mark, type ImageLoad, OneLine, StatusChip, Vendor, agentTitle, agentTone, beyondFirstLine, displayName, firstLine, firstSentence, roleShape, time, useAgents, useFileScope, vendorName } from "../components";
 import { Image as ImageIcon } from "lucide-react";
 import { extractToolImagePaths, extractToolImages } from "../lib/toolimages";
 import { ToolImages } from "../toolimages";
@@ -1096,7 +1096,6 @@ const OPEN_LINES = 400;
 
 /** The session's working directory, for shortening paths in tool lines. */
 const CwdContext = createContext<string | undefined>(undefined);
-const AgentImageContext = createContext<string | undefined>(undefined);
 
 /** One tool call; a click opens what it did (output, exit code, diffs, arguments). */
 function ToolStep({ step }: { step: ToolCall }) {
@@ -1110,7 +1109,7 @@ function ToolStep({ step }: { step: ToolCall }) {
   // A failed edit carries the diff the model meant to make: showing +N −M would claim a change
   // that never happened (docs/TODO.md §九).
   const changes = toolChanges(step).flatMap((c) => parseDiff(c.diff, c.path));
-  const hasImages = !!d?.result && extractToolImages(d.result).images.length > 0;
+  const hasImages = (!!d?.result && extractToolImages(d.result).images.length > 0) || (!!d?.arguments && extractToolImagePaths(d.arguments).length > 0);
   if (bad) {
     // One line, like a result card: ✕, the call, and why it failed; the detail opens below.
     const reason = firstLine(hasImages ? extractToolImages(toolError(step) ?? "").text : toolError(step));
@@ -1161,7 +1160,7 @@ function ToolDetailView({ step, changes }: { step: ToolCall; changes: DiffFile[]
     if (!agent) return;
     let active = true;
     setLoaded({});
-    for (const path of paths) void loadToolImage(agent, path).then((value) => {
+    for (const path of paths) void loadAgentImage(agent, path).then((value) => {
       if (active) setLoaded((old) => ({ ...old, [path]: value }));
     });
     return () => { active = false; };
@@ -1385,14 +1384,3 @@ function TurnChanges({ turn, agent }: { turn: TranscriptTurn; agent: Agent }) {
   );
 }
 
-type ImageLoad = { src?: string; error?: string };
-const toolImageCache = new Map<string, Promise<ImageLoad>>();
-function loadToolImage(agent: string, path: string): Promise<ImageLoad> {
-  const key = JSON.stringify([agent, path]);
-  let pending = toolImageCache.get(key);
-  if (!pending) {
-    pending = api.agentImage(agent, path).then((image) => ({ src: `data:${image.mime};base64,${image.data}` }), (err: unknown) => ({ error: errorText(err) }));
-    toolImageCache.set(key, pending);
-  }
-  return pending;
-}

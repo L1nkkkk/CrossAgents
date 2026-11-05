@@ -73,6 +73,19 @@ test("inline: italic, strikethrough, safe links, snake_case stays text", () => {
   assert.deepEqual(parseInline("2 * 3 * 4"), [{ t: "text", text: "2 * 3 * 4" }]);
 });
 
+test("inline: images by local path or embedded; web addresses stay links; the rest stays text", () => {
+  assert.deepEqual(parseInline("看 ![面板](C:/tmp/shot.png) 这里"), [
+    { t: "text", text: "看 " },
+    { t: "image", alt: "面板", path: "C:/tmp/shot.png" },
+    { t: "text", text: " 这里" },
+  ]);
+  assert.deepEqual(parseInline("![](docs/a.png)"), [{ t: "image", alt: "", path: "docs/a.png" }]);
+  assert.deepEqual(parseInline("![x](data:image/png;base64,YWJj)"), [{ t: "image", alt: "x", src: "data:image/png;base64,YWJj" }]);
+  assert.deepEqual(parseInline("![x](https://a.test/b.png)"), [{ t: "link", href: "https://a.test/b.png", children: [{ t: "text", text: "x" }] }]);
+  assert.deepEqual(parseInline("![x](javascript:alert)"), [{ t: "text", text: "![x](javascript:alert)" }]);
+  assert.deepEqual(parseInline("`![x](a.png)`"), [{ t: "code", text: "![x](a.png)" }]);
+});
+
 test("inline: links to local files become file nodes, with their line", () => {
   assert.deepEqual(parseInline("见 [main.rs](crates/cli/src/main.rs:12)"), [
     { t: "text", text: "见 " },

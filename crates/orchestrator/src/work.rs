@@ -205,7 +205,13 @@ impl Orchestrator {
             return Ok(scheduled);
         }
         let next = self
-            .create_work_round(work, a.request, Some(a.title), a.from.as_deref())
+            .create_work_round_checked(
+                work,
+                a.request,
+                Some(a.title),
+                a.from.as_deref(),
+                Some((run.id, caller.id)),
+            )
             .await?;
         Ok(json!({ "run_id": next.id, "work_id": work, "status": next.status }))
     }

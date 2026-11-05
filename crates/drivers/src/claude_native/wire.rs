@@ -14,6 +14,8 @@ use serde_json::{Map, Value, json};
 
 /// Tool results longer than this are cut (the end is kept for output, the start for results).
 const RESULT_LIMIT: usize = 16 * 1024;
+/// How much base64 of a tool result's images is kept.
+const IMAGES_LIMIT: usize = 8 * 1024 * 1024;
 
 /// How to launch `claude` for a session; the same for every process of the session.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -393,8 +395,14 @@ pub fn tool_detail(
             error: error(),
             ..ToolDetail::default()
         },
-        // The file itself is not worth keeping.
+        // The file itself is not worth keeping, unless it is an image: its path lets a client
+        // show what the agent looked at.
         "read" if name == "Read" => ToolDetail {
+            arguments: input
+                .get("file_path")
+                .and_then(Value::as_str)
+                .filter(|path| is_image_path(path))
+                .map(|_| serde_json::to_string_pretty(input).unwrap_or_default()),
             error: error(),
             ..ToolDetail::default()
         },
@@ -553,6 +561,34 @@ fn result_text(content: Option<&Value>) -> String {
             .join("\n"),
         _ => String::new(),
     }
+}
+
+fn is_image_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    [
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".avif",
+    ]
+    .iter()
+    .any(|ext| lower.ends_with(ext))
+}
+
+/// A `tool_result`'s images as MCP image blocks, the shape clients read out of `result`. They
+/// are not cut like text, which would break them: what does not fit is left out.
+fn result_images(content: Option<&Value>) -> Vec<Value> {
+    let mut room = IMAGES_LIMIT;
+    content
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("image"))
+        .filter_map(|b| {
+            let source = b.get("source")?;
+            let data = source.get("data")?.as_str()?;
+            let mime = source.get("media_type")?.as_str()?;
+            room = room.checked_sub(data.len())?;
+            Some(json!({ "type": "image", "data": data, "mimeType": mime }))
+        })
+        .collect()
 }
 
 /// Turns one session's output into hub events. Keeps what later messages refer back to:
@@ -763,7 +799,19 @@ impl Translator {
             let is_error = block.get("is_error").and_then(Value::as_bool) == Some(true);
             if let Some((name, input)) = self.tools.remove(id) {
                 let text = result_text(block.get("content"));
-                let detail = tool_detail(&name, &input, structured, &text, is_error);
+                let mut detail = tool_detail(&name, &input, structured, &text, is_error);
+                // A tool with its own result text (not Read, whose path shows the image).
+                if let Some(result) = &detail.result {
+                    let images = result_images(block.get("content"));
+                    if !images.is_empty() {
+                        let mut blocks = Vec::with_capacity(images.len() + 1);
+                        if !result.is_empty() {
+                            blocks.push(json!({ "type": "text", "text": result }));
+                        }
+                        blocks.extend(images);
+                        detail.result = Some(Value::Array(blocks).to_string());
+                    }
+                }
                 if detail != ToolDetail::default() {
                     events.push(SessionEventKind::ToolDetail {
                         tool_call_id: id.to_owned(),
@@ -1301,6 +1349,71 @@ mod tests {
         ] {
             assert!(args.contains(&flag.to_owned()), "{flag}");
         }
+    }
+
+    /// The tool call, then its result with `content`; the detail that comes of them.
+    fn detail_of(name: &str, input: Value, content: Value) -> ToolDetail {
+        let mut t = Translator::default();
+        t.translate(
+            &json!({ "type": "assistant", "message": { "id": "m", "role": "assistant",
+            "content": [{ "type": "tool_use", "id": "t1", "name": name, "input": input }] } }),
+        );
+        let events = t.translate(&json!({ "type": "user", "message": { "role": "user",
+            "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": content }] } }));
+        events
+            .into_iter()
+            .find_map(|e| match e {
+                SessionEventKind::ToolDetail { detail, .. } => Some(detail),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    fn image_block(data: &str) -> Value {
+        json!({ "type": "image", "source": { "type": "base64", "media_type": "image/png", "data": data } })
+    }
+
+    #[test]
+    fn a_tool_results_images_are_kept_whole_after_its_text() {
+        let long = "x".repeat(RESULT_LIMIT + 100);
+        let detail = detail_of(
+            "mcp__crossagents__gui_screenshot",
+            json!({}),
+            json!([{ "type": "text", "text": "saved" }, image_block(&long)]),
+        );
+        let blocks: Value = serde_json::from_str(&detail.result.unwrap()).unwrap();
+        assert_eq!(blocks[0], json!({ "type": "text", "text": "saved" }));
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["data"], long.as_str());
+        assert_eq!(blocks[1]["mimeType"], "image/png");
+    }
+
+    #[test]
+    fn images_over_the_limit_are_left_out_and_the_text_stays() {
+        let huge = "x".repeat(IMAGES_LIMIT + 1);
+        let detail = detail_of(
+            "mcp__crossagents__gui_screenshot",
+            json!({}),
+            json!([{ "type": "text", "text": "saved" }, image_block(&huge)]),
+        );
+        assert_eq!(detail.result.as_deref(), Some("saved"));
+    }
+
+    #[test]
+    fn read_keeps_an_images_path_but_not_a_text_files() {
+        let image = detail_of(
+            "Read",
+            json!({ "file_path": "C:/tmp/Shot.PNG" }),
+            json!([image_block("YWJj")]),
+        );
+        assert!(image.arguments.unwrap().contains("Shot.PNG"));
+        assert_eq!(image.result, None);
+        let text = detail_of(
+            "Read",
+            json!({ "file_path": "a.rs" }),
+            json!("fn main() {}"),
+        );
+        assert_eq!(text, ToolDetail::default());
     }
 
     #[test]

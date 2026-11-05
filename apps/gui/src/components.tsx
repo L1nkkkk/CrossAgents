@@ -47,7 +47,7 @@ import type { Agent } from "@bindings/Agent";
 import type { AgentStatus } from "@bindings/AgentStatus";
 import type { RunStatus } from "@bindings/RunStatus";
 import type { TaskStatus } from "@bindings/TaskStatus";
-import { api } from "./api";
+import { api, errorText } from "./api";
 import { useHubData } from "./hub";
 import { parseBlocks, parseInline, softBreaks, type Block, type Inline } from "./lib/markdown";
 import { codeFileTarget, docLinkPath } from "./lib/filelinks";
@@ -405,10 +405,74 @@ function renderInline(spans: Inline[]): ReactNode[] {
             {renderInline(s.children)}
           </a>
         );
+      case "image":
+        return <ProseImage key={i} alt={s.alt} src={s.src} path={s.path} />;
       case "br":
         return <br key={i} />;
     }
   });
+}
+
+/** The agent whose conversation is on screen: local images are asked of the hub on its behalf. */
+export const AgentImageContext = createContext<string | undefined>(undefined);
+
+export type ImageLoad = { src?: string; error?: string };
+const agentImages = new Map<string, Promise<ImageLoad>>();
+
+/** An image an agent named by path, as a `data:` URL. A failure is not kept: the file may come later. */
+export function loadAgentImage(agent: string, path: string): Promise<ImageLoad> {
+  const key = JSON.stringify([agent, path]);
+  let pending = agentImages.get(key);
+  if (!pending) {
+    pending = api.agentImage(agent, path).then(
+      (image) => ({ src: `data:${image.mime};base64,${image.data}` }),
+      (err: unknown) => {
+        agentImages.delete(key);
+        return { error: errorText(err) };
+      },
+    );
+    agentImages.set(key, pending);
+  }
+  return pending;
+}
+
+/** A thumbnail that opens full size. */
+export function ImageThumb({ src, alt, title }: { src: string; alt: string; title?: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button className="thumb" onClick={() => setOpen(true)} title={title ?? alt}>
+        <img src={src} alt={alt} />
+      </button>
+      {open && (
+        <div className="lightbox" onClick={() => setOpen(false)} role="dialog" aria-label={alt}>
+          <img src={src} alt={alt} />
+        </div>
+      )}
+    </>
+  );
+}
+
+/** `![alt](path)` in a reply. Outside a conversation there is no agent to ask: the path stays a link. */
+function ProseImage({ alt, src, path }: { alt: string; src?: string; path?: string }) {
+  const agent = useContext(AgentImageContext);
+  const [loaded, setLoaded] = useState<ImageLoad>();
+  useEffect(() => {
+    if (!agent || !path) return;
+    let live = true;
+    setLoaded(undefined);
+    void loadAgentImage(agent, path).then((value) => {
+      if (live) setLoaded(value);
+    });
+    return () => {
+      live = false;
+    };
+  }, [agent, path]);
+  const shown = src ?? loaded?.src;
+  if (shown) return <ImageThumb src={shown} alt={alt} title={alt || path} />;
+  if (path && !agent) return <FileLink path={path}>{alt || path}</FileLink>;
+  if (loaded?.error) return <span className="tool-image-error">{path}：{loaded.error}</span>;
+  return <span className="tool-image-loading">{path}：加载中…</span>;
 }
 
 /** `git diff --stat` with the +/- bars coloured. */

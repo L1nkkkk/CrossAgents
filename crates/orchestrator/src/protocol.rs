@@ -24,7 +24,10 @@ Call \
 teammates by their names; the model a teammate runs on is an attribute that can change.\n\
 When you mention a file, write its path relative to your working directory's root, with \
 forward slashes, optionally with `:line`, e.g. `crates/x/src/a.rs:12` or \
-[a.rs](crates/x/src/a.rs:12): the person can click it to open the file.";
+[a.rs](crates/x/src/a.rs:12): the person can click it to open the file.\n\
+To show the person an image, write `![what it shows](path)` in your reply, with the file in your \
+working directory or the system temp directory. Opening an image with a tool shows it to you, \
+not to them.";
 
 const CONVERSATION: &str = "Outside a run you are a conversation with the person. Run tools \
 (plan_submit, task_create, run_land, …) work only in a run, and a run starts when the person \
@@ -221,6 +224,13 @@ mod tests {
         assert!(both.starts_with(&guide));
         assert!(both.ends_with("\n\nAlways answer in haiku."));
         assert_eq!(with_extension_prompts(guide.clone(), "  \n"), guide);
+    }
+
+    #[test]
+    fn every_role_learns_how_to_show_an_image() {
+        for role in [Role::Planner, Role::Worker, Role::Reviewer] {
+            assert!(guide(role).contains("`![what it shows](path)`"));
+        }
     }
 
     #[test]
