@@ -37,10 +37,32 @@ export function activate(ca) {
     const [open, setOpen] = useState();
     useEffect(() => {
       let live = true;
-      const refresh = () => ca.hub.request("GET", "/v1/agents").then(result => { if (live) setAgents(result.agents); }).catch(() => {});
+      let timer;
+      let delay = 1000;
+      let pending = false;
+      let refreshAgain = false;
+      const refresh = () => {
+        if (!live) return;
+        if (pending) { refreshAgain = true; return; }
+        clearTimeout(timer);
+        timer = undefined;
+        pending = true;
+        ca.hub.request("GET", "/v1/agents").then(result => {
+          if (!live) return;
+          setAgents(result.agents);
+          delay = 1000;
+        }).catch(() => {
+          if (!live) return;
+          timer = setTimeout(refresh, delay);
+          delay = Math.min(delay * 2, 30000);
+        }).finally(() => {
+          pending = false;
+          if (live && refreshAgain) { refreshAgain = false; refresh(); }
+        });
+      };
       refresh();
       const off = ca.events.on(e => { if (["agent.created", "agent.updated", "agent.removed"].includes(e.type)) refresh(); });
-      return () => { live = false; off(); };
+      return () => { live = false; clearTimeout(timer); off(); };
     }, []);
     const who = follow && agents.find(a => a.id === follow || a.name.toLowerCase() === follow.toLowerCase());
     const events = useSyncExternalStore(store.subscribe, () => store.get(who?.id));

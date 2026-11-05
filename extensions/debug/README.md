@@ -13,7 +13,7 @@
 - 异步加载并订阅之前的事件不会出现；停用后重新启用，以及批准新版本，都会丢失扩展缓存中的历史。
 - 只跟随扩展 API 的 `follow`，不能使用内置面板的 `safeTarget?.agent` 覆盖。扩展按现有 `/v1/agents` 只读接口解析会话名称和 ID。
 - 发布版启用后也可见；内置事件面板仅在开发版或 mock 中可见。未安装时没有此扩展标签。
-- 每会话保留最近 1000 条，过滤后最多展示最近 300 条。关闭和重开面板保留缓存。重连使用宿主的 Last-Event-ID，不自行回放；hub 按大于上次序号发送，并过滤重放与实时流的重叠。
+- 每会话保留最近 1000 条，过滤后最多展示最近 300 条。关闭和重开面板保留缓存。重连使用宿主的 Last-Event-ID，不自行回放；hub 按大于上次序号发送，并过滤重放与实时流的重叠。正常重启沿用数据库时 seq 持续增长；清库或换库导致 seq 回退属于宿主恢复边界，扩展不另行修复。
 
 ## 验收状态
 
@@ -21,7 +21,10 @@
 
 - 未安装时，独立会话的标签及添加菜单均没有事件流（`12-uninstalled.png`）；复制后 hub 发现待批准版本，在扩展页检查差异并批准（`02-pending.png`、`03-diff.png`）。
 - 启用后生产页面出现标签，收到事件 18；关闭并重新添加标签后事件 18 仍在（`04-event.png`、`05-reopen.png`）。断开 hub，在 GUI 离线时重启并写入事件，重连后事件 23 到达，且只显示一次（`06-reconnect.png`）。
-- 停用后标签消失（`07-disabled.png`、`08-tab-gone.png`）。为验证订阅清理，仅在隔离目录的测试副本加入计数器：停用后再发事件，旧计数保持 3；重新启用并切换到另一个计数版本后，旧计数保持 8、新计数递增，切换前事件 36 不再出现，新事件 41 出现（`09-before-switch.png`、`10-after-switch.png`）。
+- 停用后标签消失（`07-disabled.png`、`08-tab-gone.png`）。为验证订阅清理，仅在隔离目录的测试副本加入计数器：停用完成时读取 `window.__pilotA` 为 `3`，再发事件后读取仍为 `3`；重新启用并切换到另一个计数版本后，发事件前读取 `{"a":8}`，发事件后读取 `{"a":8,"b":2}`。切换前事件 36 不再出现，新事件 41 出现（`09-before-switch.png`、`10-after-switch.png`）。
 - 隔离测试副本注入渲染异常后，仅扩展区域显示错误及「停用」，会话内容和其他标签仍可用，点击「停用」生效（`11-error.png`）。展开 JSON 和过滤也检查过（`14-filter.png`、`16-final-json.png`）。计数和异常注入没有进入仓库扩展。
 
 截图位于本机临时目录 `%TEMP%/ca-events-pilot-attempt2/`。`npm run build`、`npm run typecheck` 和 `npm test` 通过；单测覆盖分组和 1000 条缓存。
+订阅计数复现：复制本扩展到隔离 home，在副本的 `ca.events.on(e => store.add(e))` 回调中先递增 `window.__pilotA`；批准后触发事件、停用，等待「未启用」再记录计数并触发另一个事件。重新启用后触发事件，再把副本的计数器名改为 `__pilotB`、批准新指纹；切换完成后通过 CDP 读取 `({a:window.__pilotA,b:window.__pilotB})`，发事件后再读取。数字包含切换相关事件，因此以变化与否为准。
+
+离线恢复回归：在真实 Electron 中，缓存已有序号 64 的 `agent.model_changed`，停止隔离 hub 后关闭并重开面板，离线查询失败，界面暂时显示空列表（`17-offline-reopen.png`）。hub 停止期间，在隔离数据库插入一条 `agent.output`（序号 66，文本 `offline-output-proof`），然后重启同一 hub；没有通过 `agent.created`、`agent.updated` 或 `agent.removed` 触发查询。退避重试后 DOM 输出 `{"status":true,"rows":["66\nagent.output\noffline-output-proof","64\nagent.model_changed"]}`，两条均显示（`18-offline-recovered.png`、`18-offline-recovered-dom.json`）。这是用数据库插入构造的补发事件，不声称启动了真实 agent。
