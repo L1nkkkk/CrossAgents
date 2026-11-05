@@ -53,6 +53,7 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   // Extensions (docs/EXTENSIONS.md §3, §5). Enabling one and switching auto-trust are the
   // person's: the hub's admin level is the real check. A GUI-side call's tool name is bare.
   { method: "GET", path: /^\/v1\/extensions$/, level: "read" },
+  { method: "GET", path: /^\/v1\/extensions\/[^/]+\/logs$/, level: "read" },
   { method: "POST", path: /^\/v1\/extensions\/[^/]+\/enable$/, level: "admin" },
   { method: "POST", path: /^\/v1\/extensions\/[^/]+\/disable$/, level: "write" },
   { method: "POST", path: /^\/v1\/extensions\/[^/]+\/auto-trust$/, level: "admin" },

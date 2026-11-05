@@ -2,6 +2,7 @@
 // an event script to replay, and the page to open.
 
 import { emptyHub } from "../views/Home.mock";
+import { extensionScene } from "./extensions.mock";
 import { approvalRun, deleteRun, graphRun, handoffRun, inPlaceRun, landingRun, longResultsRun, oauthRun, pausedRun, rerouteRun, reuseRun, reviewRun, syncRun, traceRun } from "../views/Run.mock";
 import type { BackgroundResponse } from "@bindings/BackgroundResponse";
 import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, failedEditSession, liveRun, liveSession, liveTaskSession, longNameScene, moderationSession, slashScene, soloSession, toolImagePathsSession, toolImagesSession } from "../views/Session.mock";
@@ -240,7 +241,7 @@ export const SCENARIOS: Scenario[] = [
       ...scene,
       route: `#/runs/${r.id}`,
       script: [
-        { at: 700, act: () => document.querySelector('.who-pick[data-task="i"]')?.scrollIntoView({ block: "end" }) },
+        { at: 700, act: () => document.querySelector('.who-pick[data-task="i"]')?.scrollIntoView({ block: "center" }) },
         { at: 1000, act: () => document.querySelector<HTMLButtonElement>('.who-pick[data-task="i"] .chip-pick')?.click() },
       ],
     };
@@ -319,6 +320,79 @@ export const SCENARIOS: Scenario[] = [
     return { state: workspaceState(), script: [], route: `#/w/${encodeURIComponent(wsKey(REPO))}` };
   } },
   { key: "agent-workspace-narrow", label: "窄窗口与长标题", hint: "Atlas 的长话题和 #b 的长中文标题：226px 侧栏下名字、状态和摘要仍可辨认，截断不挤坏布局；窄窗口请用截图调整宽度", build: () => ({ state: workspaceState(), script: [], route: "#/s/Atlas" }) },
+  { key: "extensions", label: "扩展：状态一栏", hint: "standup 有更新待人批准、changelog 从未启用、notes 自动信任、big-export 的源目录超了 50 MB；下面是让 agent 做一个插件", build: () => ({ state: { ...emptyHub(), ...extensionScene() }, script: [], route: "#/extensions" }) },
+  { key: "extensions-approve", label: "扩展：批准界面", hint: "待批准的一版：工具、说明、面板、access 变化和与正在运行版本的差异，按钮提交的是卡片上印出的指纹", build: () => ({ state: { ...emptyHub(), ...extensionScene() }, script: [], route: "#/extensions/standup" }) },
+  { key: "extensions-diff", label: "扩展：差异与批准按钮", hint: "滚到待批准的一版下半：逐条文件改动、unified diff，以及写着「批准并启用」的那一行", build: () => ({
+    state: { ...emptyHub(), ...extensionScene() },
+    script: [{ at: 900, act: () => document.querySelector('[data-approval="ready"] .ext-approve-actions')?.scrollIntoView({ block: "center" }) }],
+    route: "#/extensions/standup",
+  }) },
+  { key: "extensions-approved", label: "扩展：批准之后", hint: "脚本点「批准并启用」：changelog 从「待批准」变成「已启用」，跑的就是刚才那一版（它没有面板，所以预览里不会去导入一个不存在的入口）", build: () => {
+    const state: MockState = { ...emptyHub(), ...extensionScene() };
+    const expected = state.extensions?.find((x) => x.name === "changelog")?.pending?.version.fingerprint;
+    return {
+      state,
+      route: "#/extensions/changelog",
+      script: [
+        { at: 800, act: () => document.querySelector<HTMLButtonElement>('[data-action="approve"]')?.click() },
+        {
+          at: 1500,
+          act: (s) => {
+            const changelog = s.extensions?.find((x) => x.name === "changelog");
+            if (!changelog?.enabled) throw new Error("changelog was not enabled after approving");
+            if (changelog.pending) throw new Error("the pending record is still there after approving");
+            if (changelog.current?.fingerprint !== expected) throw new Error("changelog still runs the old snapshot");
+            console.info("extension approval verified: the shown fingerprint was approved");
+          },
+        },
+      ],
+    };
+  } },
+  { key: "extensions-stale", label: "扩展：待批准的一版被顶掉", hint: "看批准界面时源目录又变了：卡片改口说这一版已经不在待批准里、不再给按钮，只给「看新的一版」", build: () => ({
+    state: { ...emptyHub(), ...extensionScene() },
+    route: "#/extensions/standup",
+    script: [
+      {
+        at: 900,
+        act: (s, bridge) => {
+          const standup = s.extensions?.find((x) => x.name === "standup");
+          if (!standup?.pending) throw new Error("standup has nothing pending to replace");
+          const version = { ...standup.pending.version, fingerprint: "c0ffee12".repeat(8), taken_at: new Date().toISOString() };
+          standup.pending = { ...standup.pending, version, requested_at: new Date().toISOString() };
+          bridge.emit({ type: "extension.changed", data: { name: "standup" } });
+        },
+      },
+      {
+        at: 1500,
+        act: () => {
+          if (!document.querySelector('[data-approval="stale"]')) throw new Error("the approval card did not go stale");
+          if (document.querySelector('[data-action="approve"]')) throw new Error("the stale card still offers the approve button");
+          console.info("stale approval verified: no button for a version that moved");
+        },
+      },
+    ],
+  }) },
+  { key: "extensions-make-plugin", label: "扩展：让 agent 做一个插件", hint: "点「写进新对话」：开一个新对话，请求已经填进草稿（带 extension_api / extension_check / extension_request_enable），没有自动发送", build: () => ({
+    state: { ...emptyHub(), ...extensionScene() },
+    route: "#/extensions",
+    script: [
+      { at: 900, act: () => document.querySelector<HTMLButtonElement>('[data-action="make-plugin"]')?.click() },
+      {
+        at: 1800,
+        act: () => {
+          const text = document.querySelector<HTMLTextAreaElement>(".home-composer textarea")?.value ?? "";
+          if (!text.includes("extension_api")) throw new Error("the request was not left in the draft");
+          if (window.location.hash !== "#/") throw new Error(`the new conversation did not open: ${window.location.hash}`);
+          console.info("plugin request verified: a draft, not a sent message");
+        },
+      },
+    ],
+  }) },
+  { key: "extensions-safe", label: "扩展：安全模式", hint: "横幅写明为什么没加载扩展、怎么退出；列表里照样标出谁已启用、谁在等批准", build: () => ({
+    state: { ...emptyHub(), ...extensionScene(), safeMode: { enabled: true, reason: "上次启动在加载扩展时未能就绪，已自动进入安全模式并跳过所有扩展。" } },
+    script: [],
+    route: "#/extensions",
+  }) },
 ];
 
 export const DEFAULT_SCENARIO = "running";
