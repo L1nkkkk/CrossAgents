@@ -30,6 +30,8 @@ use crate::workspace::{Synced, WorkspaceProvider};
 #[derive(Default)]
 struct MovingHost {
     busy: std::sync::atomic::AtomicBool,
+    panic_on_busy: std::sync::atomic::AtomicBool,
+    busy_panicked: tokio::sync::Notify,
     person_waiting: std::sync::atomic::AtomicBool,
     notices: tokio::sync::Mutex<Vec<String>>,
     block_notice: std::sync::atomic::AtomicBool,
@@ -107,6 +109,13 @@ impl AgentHost for MovingHost {
         Ok(true)
     }
     async fn is_busy(&self, _: AgentId) -> bool {
+        if self
+            .panic_on_busy
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.busy_panicked.notify_one();
+            panic!("injected is_busy panic");
+        }
         self.busy.load(std::sync::atomic::Ordering::SeqCst)
     }
     async fn serving_person(&self, _: AgentId) -> bool {
@@ -571,6 +580,65 @@ async fn successful_schedule_releases_its_key_for_same_source() {
     })
     .await
     .expect("a second round was created");
+}
+
+#[tokio::test]
+async fn panicked_schedule_releases_its_key_and_can_be_started_again() {
+    let (f, work) = scheduled_fixture().await;
+    f.host
+        .panic_on_busy
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    end_lead_turn(&f).await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        f.host.busy_panicked.notified(),
+    )
+    .await
+    .expect("background reached injected panic");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while f
+            .orchestrator
+            .scheduled_rounds
+            .lock()
+            .unwrap()
+            .contains(&(work, f.run.id))
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("panic released the scheduled key");
+    let result = f
+        .orchestrator
+        .run_next(&f.lead, json!({"title":"retry", "request":"new work"}))
+        .await
+        .unwrap();
+    assert_eq!(result["status"], "scheduled");
+    assert!(
+        f.orchestrator
+            .scheduled_rounds
+            .lock()
+            .unwrap()
+            .contains(&(work, f.run.id))
+    );
+    f.host
+        .busy
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    end_lead_turn(&f).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !f
+            .store
+            .list_runs()
+            .await
+            .unwrap()
+            .iter()
+            .any(|run| run.title == "retry")
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("retry created a round");
 }
 
 #[tokio::test]

@@ -15,6 +15,23 @@ use serde_json::{Value, json};
 
 use crate::engine::{NewRun, Orchestrator, first_line};
 
+/// Owns a scheduled registration until its background task is dropped, including on
+/// panic or cancellation before the task is first polled.
+struct ScheduledRoundGuard {
+    orchestrator: std::sync::Arc<Orchestrator>,
+    key: (WorkId, crossagents_core::RunId),
+}
+
+impl Drop for ScheduledRoundGuard {
+    fn drop(&mut self) {
+        self.orchestrator
+            .scheduled_rounds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.key);
+    }
+}
+
 /// The card's answers: the first starts the Work.
 const START: &str = "开始";
 const DECLINE: &str = "不用";
@@ -86,11 +103,16 @@ impl Orchestrator {
             if !self.scheduled_rounds.lock().unwrap().insert(key) {
                 return Ok(scheduled);
             }
+            let registration = ScheduledRoundGuard {
+                orchestrator: self.clone(),
+                key,
+            };
             let mut events = self.bus.subscribe();
             let this = self.clone();
             let lead = caller.id;
             let wait_limit = self.round_wait_limit();
             tokio::spawn(async move {
+                let _registration = registration;
                 let mut deadline = tokio::time::Instant::now() + wait_limit;
                 // Observe this turn's completion before considering an idle snapshot.
                 let ended = tokio::time::timeout_at(deadline, async {
@@ -161,7 +183,6 @@ impl Orchestrator {
                         "timed out waiting for the lead's turn to end".into(),
                     ))
                 };
-                this.scheduled_rounds.lock().unwrap().remove(&key);
                 if let Err(err) = result {
                     let state = if !attempted
                         || err
