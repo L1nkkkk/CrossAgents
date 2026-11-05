@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use crossagents_api_types::*;
+use crossagents_orchestrator::messaging::Group;
 use serde::Deserialize;
 use std::{
     collections::BTreeSet,
@@ -61,6 +62,29 @@ fn entry(root: &Path, file: &str) -> Result<u64> {
     );
     Ok(meta.len())
 }
+fn check_groups(groups: &[String], human: bool) -> Result<()> {
+    let mut accepted: Vec<_> = [
+        Group::Everyone,
+        Group::Lead,
+        Group::Assignee,
+        Group::Reviewer,
+        Group::Conversation,
+    ]
+    .into_iter()
+    .map(Group::name)
+    .collect();
+    if human {
+        accepted.push("human");
+    }
+    for group in groups {
+        ensure!(
+            accepted.contains(&group.as_str()),
+            "unknown group {group:?}; accepted groups: {}",
+            accepted.join(", ")
+        );
+    }
+    Ok(())
+}
 impl Manifest {
     pub fn read(root: &Path, name: &str) -> Result<Self> {
         let m: Self = toml::from_str(&std::fs::read_to_string(root.join("extension.toml"))?)?;
@@ -74,6 +98,8 @@ impl Manifest {
         let mut names = BTreeSet::new();
         for t in &m.tools {
             extension_tool_name(name, &t.name).map_err(anyhow::Error::msg)?;
+            check_groups(&t.groups, true)
+                .map_err(|e| anyhow::anyhow!("tool {} groups: {e}", t.name))?;
             ensure!(names.insert(&t.name), "duplicate tool {}", t.name);
             ensure!(
                 !t.command.is_empty() && !t.command[0].is_empty(),
@@ -88,6 +114,8 @@ impl Manifest {
                 .map_err(|e| anyhow::anyhow!("invalid input_schema: {e}"))?;
         }
         for p in &m.prompts {
+            check_groups(&p.groups, false)
+                .map_err(|e| anyhow::anyhow!("prompt {} groups: {e}", p.file))?;
             entry(root, &p.file)?;
         }
         if let Some(gui) = &m.gui {

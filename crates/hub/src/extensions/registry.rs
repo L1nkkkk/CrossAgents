@@ -25,7 +25,7 @@ fn missing(name: &str) -> CoreError {
         id: name.into(),
     }
 }
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 struct Record {
     #[serde(default)]
     enabled: bool,
@@ -35,7 +35,7 @@ struct Record {
     previous: Option<String>,
     pending: Option<Pending>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct Pending {
     fingerprint: String,
     requested_at: chrono::DateTime<chrono::Utc>,
@@ -118,7 +118,9 @@ impl Registry {
                 s.infos.insert(name.clone(), r.info(&name, &record));
             }
         }
-        r.scan()?;
+        if let Err(error) = r.scan() {
+            tracing::warn!(%error, "initial extension scan failed");
+        }
         Ok(r)
     }
     fn version_path(&self, name: &str, fp: &str) -> PathBuf {
@@ -194,13 +196,21 @@ impl Registry {
         let mut s = self.state.lock().unwrap();
         let mut names: BTreeSet<String> = s.records.keys().cloned().collect();
         for e in fs::read_dir(self.home.join("extensions")).map_err(storage)? {
-            let e = e.map_err(storage)?;
+            let e = match e {
+                Ok(entry) => entry,
+                Err(error) => {
+                    tracing::warn!(%error, "cannot read extension directory entry");
+                    continue;
+                }
+            };
             if let Some(n) = e.file_name().to_str() {
                 names.insert(n.into());
             }
         }
         for name in names {
-            self.scan_one(&mut s, &name, false)?;
+            if let Err(error) = self.scan_one(&mut s, &name, false) {
+                tracing::warn!(extension = %name, %error, "extension scan failed");
+            }
         }
         Ok(())
     }
@@ -235,6 +245,7 @@ impl Registry {
                 .ok()
                 .is_some_and(|m| s.metadata.get(name) == Some(m))
         {
+            self.try_cleanup(s, name);
             return Ok(());
         }
         let old = s.infos.get(name).cloned();
@@ -271,7 +282,9 @@ impl Registry {
         };
         let mut records = s.records.clone();
         records.insert(name.into(), rec.clone());
-        self.save(&records)?;
+        if records != s.records {
+            self.save(&records)?;
+        }
         let mut info = self.info(name, &rec);
         // Preserve snapshot timestamps across polls when the fingerprint is unchanged.
         if let Some(old) = &old {
@@ -297,7 +310,7 @@ impl Registry {
         }
         let changed = old.as_ref() != Some(&info);
         s.infos.insert(name.into(), info);
-        self.cleanup(s, name)?;
+        self.try_cleanup(s, name);
         if changed {
             self.notify(name.into());
         }
@@ -317,13 +330,17 @@ impl Registry {
         if !s.records.contains_key(name) {
             return Err(missing(name));
         }
+        let mut rec = s.records.get(name).cloned().ok_or_else(|| missing(name))?;
+        if rec.current.as_deref() == Some(fingerprint) {
+            if self.read_version(name, fingerprint).is_none() {
+                return Err(conflict("approved snapshot is unavailable"));
+            }
+            rec.enabled = true;
+            return self.update(&mut s, name, rec);
+        }
         self.scan_one(&mut s, name, true)?;
         let mut rec = s.records.get(name).cloned().ok_or_else(|| missing(name))?;
-        let candidate = rec
-            .pending
-            .as_ref()
-            .map(|p| p.fingerprint.as_str())
-            .or(rec.current.as_deref());
+        let candidate = rec.pending.as_ref().map(|p| p.fingerprint.as_str());
         if candidate != Some(fingerprint) || s.infos[name].error.is_some() {
             return Err(conflict(
                 "fingerprint does not match the pending snapshot; refresh before approving",
@@ -364,6 +381,13 @@ impl Registry {
     ) -> Result<ExtensionInfo> {
         check_extension_name(name).map_err(CoreError::InvalidName)?;
         let mut s = self.state.lock().unwrap();
+        match fs::symlink_metadata(self.home.join("extensions").join(name)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(missing(name));
+            }
+            Err(error) => return Err(storage(error)),
+            Ok(_) => {}
+        }
         self.scan_one(&mut s, name, true)?;
         let mut rec = s.records[name].clone();
         if let Some(p) = &mut rec.pending {
@@ -374,7 +398,9 @@ impl Registry {
     fn update(&self, s: &mut State, name: &str, rec: Record) -> Result<ExtensionInfo> {
         let mut records = s.records.clone();
         records.insert(name.into(), rec.clone());
-        self.save(&records)?;
+        if records != s.records {
+            self.save(&records)?;
+        }
         let mut info = self.info(name, &rec);
         if let Some(old) = s.infos.get(name) {
             if old.error.is_some() {
@@ -383,9 +409,14 @@ impl Registry {
         }
         s.records = records;
         s.infos.insert(name.into(), info.clone());
-        self.cleanup(s, name)?;
+        self.try_cleanup(s, name);
         self.notify(name.into());
         Ok(info)
+    }
+    fn try_cleanup(&self, s: &State, name: &str) {
+        if let Err(error) = self.cleanup(s, name) {
+            tracing::warn!(extension = %name, %error, "snapshot cleanup failed; will retry");
+        }
     }
     fn cleanup(&self, s: &State, name: &str) -> Result<()> {
         let Some(rec) = s.records.get(name) else {
@@ -456,9 +487,7 @@ impl Registry {
                 s.occupied.remove(&key);
             }
         }
-        if let Err(e) = self.cleanup(&s, name) {
-            tracing::warn!("snapshot cleanup: {e}");
-        }
+        self.try_cleanup(&s, name);
     }
     pub fn start(
         self: &Arc<Self>,

@@ -336,3 +336,189 @@ fn extensions_diff_includes_binary_removals_and_access_change() {
         crossagents_api_types::ExtensionFileChangeKind::Removed
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn extensions_locked_old_snapshot_does_not_fail_approval_or_load_and_is_retried() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let home = tempfile::tempdir().unwrap();
+    source(home.path(), "first");
+    let r = Registry::load(home.path()).unwrap();
+    r.enable("demo", &pending(&r)).unwrap();
+    let old = r.enabled("demo").unwrap().path;
+    // Allow reading/writing, but deny FILE_SHARE_DELETE, as an external reader may do.
+    let handle = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(3)
+        .open(old.join("tool.txt"))
+        .unwrap();
+    for text in ["second version", "third version now"] {
+        fs::write(home.path().join("extensions/demo/tool.txt"), text).unwrap();
+        r.scan().unwrap();
+        let fp = pending(&r);
+        assert!(r.enable("demo", &fp).unwrap().enabled);
+        let state: serde_json::Value =
+            serde_json::from_slice(&fs::read(home.path().join("extensions.json")).unwrap())
+                .unwrap();
+        assert_eq!(state["demo"]["current"], fp);
+    }
+    assert!(old.exists());
+    // A failed cleanup must not prevent later extensions from being scanned.
+    let later = home.path().join("extensions/zzz");
+    fs::create_dir(&later).unwrap();
+    fs::write(later.join("extension.toml"), "name = \"zzz\"\napi = 1\n").unwrap();
+    r.scan().unwrap();
+    assert!(r.get("zzz").unwrap().pending.is_some());
+    drop(r);
+    let r = Registry::load(home.path()).unwrap();
+    assert!(r.get("demo").unwrap().enabled);
+    assert!(old.exists());
+    drop(handle);
+    // Source metadata has not changed: a later poll must still retry cleanup.
+    r.scan().unwrap();
+    assert!(!old.exists());
+}
+#[test]
+fn extensions_scan_continues_after_error_and_load_tolerates_scan_failure() {
+    let home = tempfile::tempdir().unwrap();
+    let r = Registry::load(home.path()).unwrap();
+    source(home.path(), "first");
+    // Saving demo fails, while the later invalid name needs no persistent record.
+    fs::create_dir(home.path().join("extensions.json.tmp")).unwrap();
+    fs::create_dir(home.path().join("extensions/zzz_invalid")).unwrap();
+    r.scan().unwrap();
+    assert!(r.get("zzz_invalid").unwrap().error.is_some());
+    drop(r);
+    let r = Registry::load_with_bus(home.path(), None).unwrap();
+    assert!(r.get("zzz_invalid").unwrap().error.is_some());
+}
+#[test]
+fn extensions_request_missing_does_not_create_or_modify_records() {
+    let home = tempfile::tempdir().unwrap();
+    let r = Registry::load(home.path()).unwrap();
+    let state = home.path().join("extensions.json");
+    let before = fs::read(&state).ok();
+    assert!(matches!(
+        r.request_enable("missing", None),
+        Err(crossagents_core::CoreError::NotFound { .. })
+    ));
+    assert_eq!(fs::read(&state).ok(), before);
+    assert!(r.list().is_empty());
+    // A new directory is still discovered immediately, without waiting for polling.
+    source(home.path(), "first");
+    assert!(r.request_enable("demo", None).unwrap().pending.is_some());
+    fs::remove_dir_all(home.path().join("extensions/demo")).unwrap();
+    let before = fs::read(&state).unwrap();
+    assert!(matches!(
+        r.request_enable("demo", None),
+        Err(crossagents_core::CoreError::NotFound { .. })
+    ));
+    assert_eq!(fs::read(&state).unwrap(), before);
+}
+#[test]
+fn extensions_reenable_current_preserves_pending_and_ignores_bad_or_missing_source() {
+    let home = tempfile::tempdir().unwrap();
+    source(home.path(), "first");
+    let r = Registry::load(home.path()).unwrap();
+    let current = pending(&r);
+    r.enable("demo", &current).unwrap();
+    r.disable("demo").unwrap();
+    fs::write(
+        home.path().join("extensions/demo/tool.txt"),
+        "second version",
+    )
+    .unwrap();
+    r.scan().unwrap();
+    let pending = r.get("demo").unwrap().pending;
+    let info = r.enable("demo", &current).unwrap();
+    assert!(info.enabled);
+    assert_eq!(info.pending, pending);
+    assert_eq!(info.current.unwrap().fingerprint, current);
+    for delete in [false, true] {
+        r.disable("demo").unwrap();
+        if delete {
+            fs::remove_dir_all(home.path().join("extensions/demo")).unwrap();
+        } else {
+            fs::write(home.path().join("extensions/demo/extension.toml"), "broken").unwrap();
+        }
+        r.scan().unwrap();
+        let before = r.get("demo").unwrap();
+        assert!(before.error.is_some());
+        let info = r.enable("demo", &current).unwrap();
+        assert!(info.enabled);
+        assert_eq!(info.pending, before.pending);
+        assert_eq!(r.enabled("demo").unwrap().version.fingerprint, current);
+    }
+}
+#[test]
+fn extensions_groups_validate_tools_and_prompts_with_clear_errors() {
+    use crossagents_hub::extensions::manifest::Manifest;
+    let home = tempfile::tempdir().unwrap();
+    source(home.path(), "first");
+    let root = home.path().join("extensions/demo");
+    let path = root.join("extension.toml");
+    let valid = fs::read_to_string(&path).unwrap();
+    fs::write(root.join("prompt.md"), "instructions").unwrap();
+    for group in ["everyone", "lead", "assignee", "reviewer", "conversation"] {
+        let manifest = format!(
+            "{}\n[[prompts]]\nfile = \"prompt.md\"\ngroups = [\"{group}\"]\n",
+            valid.replace(
+                "groups = [\"human\"]",
+                &format!("groups = [\"{group}\", \"human\"]")
+            )
+        );
+        fs::write(&path, manifest).unwrap();
+        Manifest::read(&root, "demo").unwrap();
+    }
+    fs::write(&path, valid.replace("human", "leadd")).unwrap();
+    let error = Manifest::read(&root, "demo").unwrap_err().to_string();
+    assert!(error.contains("tool report groups"));
+    assert!(error.contains("leadd"));
+    assert!(error.contains("accepted groups"));
+    for group in ["human", "worker", "LEAD"] {
+        fs::write(
+            &path,
+            format!("{valid}\n[[prompts]]\nfile = \"prompt.md\"\ngroups = [\"{group}\"]\n"),
+        )
+        .unwrap();
+        let error = Manifest::read(&root, "demo").unwrap_err().to_string();
+        assert!(error.contains("prompt prompt.md groups"));
+        assert!(error.contains(group));
+        assert!(error.contains("accepted groups"));
+    }
+}
+#[test]
+fn extensions_unchanged_records_do_not_rewrite_state_after_bad_or_deleted_source() {
+    let home = tempfile::tempdir().unwrap();
+    source(home.path(), "first");
+    let r = Registry::load(home.path()).unwrap();
+    r.enable("demo", &pending(&r)).unwrap();
+    let state = home.path().join("extensions.json");
+    for delete in [false, true] {
+        if delete {
+            fs::remove_dir_all(home.path().join("extensions/demo")).unwrap();
+        } else {
+            fs::write(home.path().join("extensions/demo/extension.toml"), "broken").unwrap();
+        }
+        r.scan().unwrap();
+        // Fixed timestamp detects rewrites without depending on filesystem clock resolution.
+        let sentinel =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&state)
+            .unwrap()
+            .set_modified(sentinel)
+            .unwrap();
+        let before = fs::metadata(&state).unwrap().modified().unwrap();
+        for _ in 0..3 {
+            r.scan().unwrap();
+        }
+        assert_eq!(fs::metadata(&state).unwrap().modified().unwrap(), before);
+        // No-op mutations should avoid writes too.
+        r.disable("demo").unwrap();
+        let before = fs::metadata(&state).unwrap().modified().unwrap();
+        r.disable("demo").unwrap();
+        assert_eq!(fs::metadata(&state).unwrap().modified().unwrap(), before);
+    }
+}
