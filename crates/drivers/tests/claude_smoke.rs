@@ -5,6 +5,7 @@
 //! CROSSAGENTS_SMOKE_CLAUDE_CONFIG_DIR=<dir>   optional; the default is Claude Code's own login
 //! CROSSAGENTS_SMOKE_MODEL=<model>             optional, default haiku
 //! CROSSAGENTS_SMOKE_CLAUDE=<launch command>   optional, default `claude` (or the app's copy)
+//! CROSSAGENTS_SMOKE_HOST=<crossagents exe>    optional, enables the hosted smoke test
 //! cargo test -p crossagents-drivers --test claude_smoke -- --ignored --test-threads=1
 //! ```
 //!
@@ -26,6 +27,30 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 const TURN_TIMEOUT: Duration = Duration::from_secs(300);
+
+#[tokio::test]
+#[ignore = "needs signed-in Claude and CROSSAGENTS_SMOKE_HOST"]
+async fn smoke_hosted_prompt() {
+    let Ok(exe) = std::env::var("CROSSAGENTS_SMOKE_HOST") else {
+        eprintln!("CROSSAGENTS_SMOKE_HOST not set; hosted smoke not run");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let hosts = tempfile::tempdir().unwrap();
+    crossagents_drivers::host::enable(crossagents_drivers::host::Settings {
+        command: vec![exe, "runtime-host".into()],
+        dir: hosts.path().into(),
+    });
+    let (spec, mut rx) = spec(dir.path(), PermissionPolicy::Bypass);
+    let session = driver().open(spec).await.unwrap();
+    assert!(session.outlives_hub(), "session did not use runtime host");
+    let (outcome, text, _) =
+        turn(&*session, &mut rx, "Do not use tools. Reply exactly PONG.").await;
+    assert_eq!(outcome.stop_reason, StopReason::EndTurn);
+    assert!(text.contains("PONG"), "{text}");
+    session.shutdown().await;
+    crossagents_drivers::host::disable();
+}
 
 fn driver() -> ClaudeNativeDriver {
     let command = std::env::var("CROSSAGENTS_SMOKE_CLAUDE")
