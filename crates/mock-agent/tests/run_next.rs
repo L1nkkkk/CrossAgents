@@ -397,7 +397,10 @@ async fn after_landing_the_checkout_is_deleted_then_run_next_works() {
     };
     let second = serde_json::to_value(run).unwrap();
     assert_eq!(second["work_id"], first["work_id"]);
-    assert_eq!(second["base_branch"], "main", "a landed round starts from base");
+    assert_eq!(
+        second["base_branch"], "main",
+        "a landed round starts from base"
+    );
     completed(&mut w, &second).await;
     let lead = t.agent(second["planner"].as_str().unwrap()).await;
     assert_eq!(lead.cwd, checkout);
@@ -535,4 +538,153 @@ async fn cancelled_round_keeps_its_checkout_and_next_starts_from_baseline() {
     land(&t, &second).await;
     assert!(!repo.path().join("cancelled.txt").exists());
     assert!(detail(&t, &first).await["landed"].is_null());
+}
+
+#[tokio::test]
+async fn native_lead_run_next_after_landing() {
+    let repo = git_repo();
+    let t = TestHub::start_with(common::native_plugin).await;
+    t.add_native("Pia", "planner", repo.path()).await;
+    let response = t
+        .post("/v1/works", json!({"title":"rounds", "lead":"Pia"}))
+        .await;
+    assert_eq!(response.status(), 201);
+    let work = response.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut w = t.watch().await;
+    let first = round(&t, &work, change("first.txt"), None).await;
+    completed(&mut w, &first).await;
+    let checkout = t.agent("Pia").await.cwd;
+    land(&t, &first).await;
+    assert!(repo.path().join("first.txt").exists());
+    assert!(!checkout.exists(), "landing took the checkout away");
+    assert_eq!(t.agent("Pia").await.cwd, repo.path());
+    let before = t.agent("Pia").await;
+    let session = t.hub.bus.store().last_session_id(before.id).await.unwrap();
+    t.send(
+        "Pia",
+        &call(
+            "run_next",
+            json!({"title":"second", "request":format!("[session] [cwd] {}", change("second.txt"))}),
+        ),
+    )
+    .await;
+    let event = w
+        .until(
+            "next round",
+            |e| matches!(&e.kind, EventKind::RunCreated { run } if run.title == "second"),
+        )
+        .await;
+    let EventKind::RunCreated { run } = event.kind else {
+        unreachable!()
+    };
+    let second = serde_json::to_value(run).unwrap();
+    assert_eq!(second["planner"], first["planner"]);
+    assert!(w.output().contains("scheduled"), "{}", w.output());
+    assert_eq!(second["work_id"], first["work_id"]);
+    assert_eq!(
+        second["base_branch"], "main",
+        "a landed round starts from base"
+    );
+    completed(&mut w, &second).await;
+    assert_eq!(
+        t.hub.bus.store().last_session_id(before.id).await.unwrap(),
+        session
+    );
+    assert!(w.output().contains("(resumed)"), "{}", w.output());
+    assert!(
+        w.output().contains(&format!("cwd={}", checkout.display())),
+        "{}",
+        w.output()
+    );
+    let lead = t.agent(second["planner"].as_str().unwrap()).await;
+    assert_eq!(lead.cwd, checkout);
+    assert!(checkout.exists(), "the round made itself a new checkout");
+    assert!(checkout.join("first.txt").exists());
+    assert!(checkout.join("second.txt").exists());
+    land(&t, &second).await;
+    assert!(repo.path().join("second.txt").exists());
+}
+
+#[tokio::test]
+async fn native_scheduled_round_waits_for_the_person() {
+    let repo = git_repo();
+    let t = TestHub::start_with(common::native_plugin).await;
+    t.add_native("Pia", "planner", repo.path()).await;
+    let response = t
+        .post("/v1/works", json!({"title":"rounds", "lead":"Pia"}))
+        .await;
+    let work = response.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut w = t.watch().await;
+    let first = round(&t, &work, change("first.txt"), None).await;
+    completed(&mut w, &first).await;
+    land(&t, &first).await;
+    t.send(
+        "Pia",
+        &format!(
+            "[sleep 1500] {}",
+            call(
+                "run_next",
+                json!({"title":"queued next", "request":change("next.txt")})
+            )
+        ),
+    )
+    .await;
+    w.until(
+        "sleeping",
+        |e| matches!(&e.kind, EventKind::AgentOutput { text, .. } if text.contains("sleeping")),
+    )
+    .await;
+    let queued = t.send("Pia", "person was waiting").await;
+    assert_eq!(queued["queued"], true);
+    w.until(
+        "next round",
+        |e| matches!(&e.kind, EventKind::RunCreated { run } if run.title == "queued next"),
+    )
+    .await;
+    assert!(w.output().contains("person was waiting"), "{}", w.output());
+    assert!(w.output().contains("scheduled"), "{}", w.output());
+}
+
+#[tokio::test]
+async fn native_scheduled_round_reports_creation_failure() {
+    let repo = git_repo();
+    let t = TestHub::start_with(common::native_plugin).await;
+    t.add_native("Pia", "planner", repo.path()).await;
+    let response = t
+        .post("/v1/works", json!({"title":"rounds", "lead":"Pia"}))
+        .await;
+    let work = response.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut w = t.watch().await;
+    let first = round(&t, &work, change("first.txt"), None).await;
+    completed(&mut w, &first).await;
+    let checkout = t.agent("Pia").await.cwd;
+    land(&t, &first).await;
+    t.send(
+        "Pia",
+        &format!(
+            "[sleep 1500] {}",
+            call(
+                "run_next",
+                json!({"title":"conflict", "request":"new work"})
+            )
+        ),
+    )
+    .await;
+    w.until(
+        "sleeping",
+        |e| matches!(&e.kind, EventKind::AgentOutput { text, .. } if text.contains("sleeping")),
+    )
+    .await;
+    std::fs::create_dir_all(&checkout).unwrap();
+    w.until("failure notice", |e| matches!(&e.kind, EventKind::AgentInput { from, text, .. } if *from == Some(crossagents_api_types::MessageSource::Notice) && text.contains("Scheduled next round could not start"))).await;
+    assert!(w.output().contains("scheduled"), "{}", w.output());
 }

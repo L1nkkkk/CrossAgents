@@ -438,7 +438,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "run_next",
-        description: "Start the next round in your work group after your run ended. Write the person's request verbatim. Starts immediately, using this group's plan policy. Set from to base to leave the previous round's unlanded changes behind.",
+        description: "Start the next round in your work group after your run ended. Write the person's request verbatim. Uses this group's plan policy. If moving your session must wait for this turn to end, returns status scheduled instead of a run id; the hub starts it when you are idle and notifies you if it fails. Set from to base to leave the previous round's unlanded changes behind.",
         groups: RECRUITERS,
         schema: || {
             object(

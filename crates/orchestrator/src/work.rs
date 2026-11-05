@@ -33,7 +33,11 @@ fn brief_of(item: &HumanItem) -> String {
 }
 
 impl Orchestrator {
-    pub(crate) async fn run_next(&self, caller: &Agent, input: Value) -> Result<Value, CoreError> {
+    pub(crate) async fn run_next(
+        self: &std::sync::Arc<Self>,
+        caller: &Agent,
+        input: Value,
+    ) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
         struct A {
             title: String,
@@ -41,6 +45,12 @@ impl Orchestrator {
             from: Option<String>,
         }
         let a: A = crate::tools::args(input)?;
+        if a.from.as_deref().is_some_and(|from| from != "base") {
+            return Err(CoreError::Conflict("from only accepts base".into()));
+        }
+        if a.request.trim().is_empty() {
+            return Err(CoreError::Conflict("the request is empty".into()));
+        }
         let mut run = self
             .run_of(caller.id)
             .await?
@@ -55,6 +65,67 @@ impl Orchestrator {
         // Every run belongs to a work group. One without (from before groups existed) gets
         // the group that carries it on, so the next round reuses its checkout and branch.
         let work = self.work_of_run(&mut run).await?.id;
+        if !run.in_place
+            && caller.cwd != self.integration_path(&run)
+            && self.host.can_move(caller).await
+            && self.host.is_busy(caller.id).await
+        {
+            let mut events = self.bus.subscribe();
+            let this = self.clone();
+            let lead = caller.id;
+            tokio::spawn(async move {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+                // Observe this turn's completion before considering an idle snapshot.
+                let ended = tokio::time::timeout_at(deadline, async {
+                    loop {
+                        match events.recv().await {
+                            Ok(event) if matches!(event.kind, EventKind::AgentTurnCompleted { id, .. } if id == lead) => break,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            _ => {}
+                        }
+                    }
+                }).await.is_ok();
+                let result = if ended {
+                    loop {
+                        if tokio::time::Instant::now() >= deadline {
+                            break Err(CoreError::Busy(
+                                "timed out waiting for the lead to become idle".into(),
+                            ));
+                        }
+                        if !this.host.is_busy(lead).await {
+                            match this
+                                .create_work_round(
+                                    work,
+                                    a.request.clone(),
+                                    Some(a.title.clone()),
+                                    a.from.as_deref(),
+                                )
+                                .await
+                            {
+                                Err(CoreError::Busy(_)) => {}
+                                result => break result.map(|_| ()),
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                } else {
+                    Err(CoreError::Busy(
+                        "timed out waiting for the lead's turn to end".into(),
+                    ))
+                };
+                if let Err(err) = result {
+                    this.notice(
+                        lead,
+                        &format!("run_next:{work}"),
+                        &format!("Scheduled next round could not start: {err}"),
+                    )
+                    .await;
+                }
+            });
+            return Ok(
+                json!({ "work_id": work, "status": "scheduled", "message": "The next round will start after this turn ends and the lead is idle." }),
+            );
+        }
         let next = self
             .create_work_round(work, a.request, Some(a.title), a.from.as_deref())
             .await?;
