@@ -1427,6 +1427,70 @@ mod interrupt_tests {
     }
 
     #[tokio::test]
+    async fn first_interrupt_response_then_result_precedes_second_response() {
+        let steer = MessageId::new();
+        let (shared, mut ended, mut events) = setup(Some(steer));
+        register(&shared);
+        let (tx, _rx) = oneshot::channel();
+        shared
+            .turn
+            .lock()
+            .unwrap()
+            .interrupt_requests
+            .push("req2".into());
+        shared.pending.lock().unwrap().insert("req2".into(), tx);
+
+        batch(
+            &shared,
+            &[
+                wire::control_success("req", json!({"still_queued":[steer.to_string()]})),
+                result("turn"),
+            ],
+        )
+        .await;
+        assert!(ended.try_recv().is_err());
+        assert_eq!(warnings(&mut events), 0);
+        shared.handle(wire::control_success("req2", json!({"still_queued":[]})));
+        assert!(shared.turn.lock().unwrap().keep_queued);
+        shared.handle(result(&steer.to_string()));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 0);
+    }
+
+    #[tokio::test]
+    async fn previous_turn_interrupt_response_does_not_affect_next_turn() {
+        let (shared, ended, mut events) = setup(Some(MessageId::new()));
+        register(&shared);
+        shared.handle(result("turn"));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 1);
+
+        let next_steer = MessageId::new();
+        let (tx, mut next) = oneshot::channel();
+        {
+            let mut turn = shared.turn.lock().unwrap();
+            assert!(turn.interrupt_requests.is_empty());
+            turn.id = Some("next".into());
+            turn.waiter = Some(tx);
+            turn.interrupted = true;
+            turn.steers.push(PendingSteer {
+                id: next_steer,
+                snippet: "next steer".into(),
+            });
+            turn.steered.push(next_steer);
+        }
+        shared.handle(wire::control_success(
+            "req",
+            json!({"still_queued":["old"]}),
+        ));
+        assert!(!shared.turn.lock().unwrap().keep_queued);
+        assert!(next.try_recv().is_err());
+        shared.handle(result("next"));
+        assert_eq!(next.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 1);
+    }
+
+    #[tokio::test]
     async fn result_before_response_ends_and_warns() {
         let (shared, ended, mut events) = setup(Some(MessageId::new()));
         register(&shared);
