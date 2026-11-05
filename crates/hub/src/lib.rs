@@ -21,6 +21,7 @@ pub mod notices;
 pub mod paths;
 pub mod prices;
 pub mod refresh;
+pub mod replies;
 pub mod resume;
 pub mod routing;
 pub mod rules;
@@ -170,6 +171,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     }
     let runtime = Arc::new(Runtime::new(bus.clone(), plugins).with_setup(setup.clone()));
     runtime.watch_moves();
+    runtime.watch_replies();
     // Each CLI is asked its version in the background, in parallel: `GET /v1/plugins`
     // reports it once it answers and never waits for a subprocess (docs/DESIGN.md §9.3).
     // Asking again later (an install, `POST /v1/plugins/refresh`) goes through `Refresher`,

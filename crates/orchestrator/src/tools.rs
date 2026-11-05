@@ -115,7 +115,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "agent_send",
-        description: "Send a message. `to` is a name, a list of names, or \"@team\" (everyone in your run). It arrives as a new turn, or after the recipient's current turn (`now: true` interrupts it instead). Use `reply_to` with a message id to answer a message; `task` names the task it is about. Returns the message ids. Retrying the same call is safe: identical messages within a minute, or the same idempotency_key, are sent once.",
+        description: "Send a message. `to` is a name, a list of names, or \"@team\" (everyone in your run). It arrives as a new turn, or after the recipient's current turn (`now: true` interrupts it instead). To answer a message, give `reply_to` with the id from its header (`Message from … (id …):`); `to` may then be left out, and the reply goes to whoever sent it. `task` names the task it is about. Returns the message ids. Retrying the same call is safe: identical messages within a minute, or the same idempotency_key, are sent once.",
         groups: ALL,
         schema: || {
             object(
@@ -127,7 +127,7 @@ const TOOLS: &[ToolDef] = &[
                     "now": { "type": "boolean" },
                     "idempotency_key": { "type": "string" }
                 }),
-                &["to", "text"],
+                &["text"],
             )
         },
     },

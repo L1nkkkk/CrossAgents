@@ -214,6 +214,8 @@ pub struct Runtime {
     /// Agents to archive once their turn ends ([`Self::archive_after_turn`] while they were
     /// busy).
     archiving: Mutex<HashSet<AgentId>>,
+    /// Answers to teammates that were only written, to forward (crate::replies).
+    replies: std::sync::Mutex<crate::replies::ReplyTracker>,
     generation: AtomicU64,
 }
 
@@ -268,6 +270,7 @@ impl Runtime {
             external: Mutex::default(),
             going_home: Mutex::default(),
             archiving: Mutex::default(),
+            replies: std::sync::Mutex::default(),
             generation: AtomicU64::new(0),
         }
     }
@@ -936,6 +939,83 @@ impl Runtime {
         });
     }
 
+    /// Follows turns that answer a teammate's message, and forwards the answer when the agent
+    /// only wrote it (crate::replies). Agents on a run's task are left out: they report
+    /// through the task tools, and their turn texts are not meant for the lead.
+    pub fn watch_replies(self: &Arc<Self>) {
+        let this = self.clone();
+        let mut events = self.bus.subscribe();
+        tokio::spawn(async move {
+            loop {
+                let event = match events.recv().await {
+                    Ok(event) => event,
+                    // A forward or two may be missed; nothing else depends on it.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                };
+                let forward = this
+                    .replies
+                    .lock()
+                    .unwrap()
+                    .on_event(&event.kind, std::time::Instant::now());
+                if let Some(forward) = forward {
+                    let this = this.clone();
+                    tokio::spawn(async move { this.forward_reply(forward).await });
+                }
+            }
+        });
+    }
+
+    async fn forward_reply(&self, forward: crate::replies::Forward) {
+        for id in [forward.from, forward.to] {
+            if matches!(self.store().claim_of(id).await, Ok(Some(_))) {
+                return;
+            }
+        }
+        let Ok(from) = self.store().get_agent(&AgentKey::Id(forward.from)).await else {
+            return;
+        };
+        let id = MessageId::new();
+        let text = format!(
+            "Message from {} (id {id}; its answer to your message, forwarded by the hub because it did not send one):\n{}",
+            from.name, forward.text
+        );
+        let envelope = Envelope {
+            id,
+            from: MessageSource::Agent {
+                agent_id: forward.from,
+            },
+            text,
+            reply_to: Some(forward.answers),
+            attachments: Vec::new(),
+        };
+        self.replies.lock().unwrap().mark_forwarded(id);
+        if let Err(err) = self
+            .deliver(&AgentKey::Id(forward.to), envelope, false)
+            .await
+        {
+            tracing::warn!(from = %forward.from, to = %forward.to, error = %err, "cannot forward an answer");
+        }
+    }
+
+    /// A teammate's message, as the reply tracker needs to know it was sent.
+    async fn note_send(&self, key: &AgentKey, envelope: &Envelope) {
+        let MessageSource::Agent { agent_id } = envelope.from else {
+            return;
+        };
+        let to = match key {
+            AgentKey::Id(id) => *id,
+            other => match self.store().get_agent(other).await {
+                Ok(agent) => agent.id,
+                Err(_) => return,
+            },
+        };
+        self.replies
+            .lock()
+            .unwrap()
+            .note_send(agent_id, to, std::time::Instant::now());
+    }
+
     /// Whether a person waits on the agent: its running turn answers a person's message,
     /// or one is in line. Work is not given to it ahead of them (docs/tasks/S1.md §3.3).
     pub async fn serving_person(&self, id: AgentId) -> bool {
@@ -1020,6 +1100,7 @@ impl Runtime {
         key: &AgentKey,
         envelope: Envelope,
     ) -> Result<(MessageId, bool), CoreError> {
+        self.note_send(key, &envelope).await;
         self.deliver(key, envelope, false).await
     }
 
@@ -1030,6 +1111,7 @@ impl Runtime {
         key: &AgentKey,
         envelope: Envelope,
     ) -> Result<(MessageId, bool), CoreError> {
+        self.note_send(key, &envelope).await;
         self.deliver(key, envelope, true).await
     }
 
@@ -1041,6 +1123,7 @@ impl Runtime {
         key: &AgentKey,
         envelope: Envelope,
     ) -> Result<(MessageId, bool, bool), CoreError> {
+        self.note_send(key, &envelope).await;
         let message_id = envelope.id;
         let stored = self.store().get_agent(key).await?;
         let live = if stored.archived_at.is_none() && stored.plugin != EXTERNAL_PLUGIN {

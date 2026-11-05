@@ -298,4 +298,9 @@ B 删除 run：
 - [x] 插话（11-05）：驱动、hub、转录和前端，加真实 Claude 冒烟（[research/codebuddy-steer.md](research/codebuddy-steer.md)）
 - [x] 扩展 E1–E4（11-05）：目录与批准、一次性工具、页面接口、管理页、创造工具、事件响应、常驻进程（[EXTENSIONS.md](EXTENSIONS.md)）；内置功能迁移评估和事件流面板试点（[EXTENSIONS-MIGRATION.md](EXTENSIONS-MIGRATION.md)）
 - [x] 识别内容审查拦截并提示换会话或压缩（11-05）；工具卡片相对路径和按 kind 的标题（11-05）
+- [x] 队友之间的回复不再丢（11-06）。起因：Rune 把文件浏览的报告写在自己的会话里，没调用 `agent_send`；后来补发时又写成了 `"Pia"`（另一个 agent），而不是 `"Pia 4"`，消息被静默投给了别人。现在：
+  - 只用文字回答队友消息的那一轮，hub 把它最后一段话以作者的名义转给发件人（`crates/hub/src/replies.rs`）。转发出去的消息再被文字回答时不会转回去，不会来回弹。两边有一方在做 run 的任务时不转发。
+  - 消息头带上 id（`Message from X (id …):`）；`agent_send` 只给 `reply_to` 不给 `to` 时，回给原发件人。
+  - `to` 写的名字恰好是正在和你说话的队友去掉数字后缀（比如该写 `Pia 4` 写成了 `Pia`），而你和它从没互发过消息时，拒绝发送，并说明该怎么写。
+  - 测试在 `crates/mock-agent/tests/collab.rs`（3 条）和 `replies.rs` 的单元测试（7 条）
 - [x] 驱动与 hub 修复（11-05、11-06）：Claude 驱动写入不留半帧、失败 result 不提前结束；`run_next` 在 lead 回合内不再报 busy；Codex primary 额度误判；复制失败、回复看不到图、`run_next` 重复显示人的原话

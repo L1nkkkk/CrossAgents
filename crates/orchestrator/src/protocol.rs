@@ -9,8 +9,9 @@ use crate::messaging::Group;
 const COMMON: &str = "You work in CrossAgents, a hub where agents from different vendors \
 collaborate. Use the `crossagents` tools to see your teammates (whoami, agent_list), message \
 them (agent_send), ask the person (human_ask, only when you truly need a decision) and set \
-reminders or watches for yourself. Messages from teammates start with \"Message from …\"; \
-\"CrossAgents notices\" are things you asked to hear about. Retrying a tool call is safe.\n\
+reminders or watches for yourself. Messages from teammates start with \"Message from … (id …)\": \
+answer one with agent_send and reply_to set to that id (`to` may then be left out, so the answer \
+cannot reach a namesake). \"CrossAgents notices\" are things you asked to hear about. Retrying a tool call is safe.\n\
 If you need a new tool or panel, you can write an extension: call `extension_api` first. \
 Check it with `extension_check`, then request human approval with `extension_request_enable`.\n\
 Say what really happened. When something you were asked to do is unavailable or refused (a \
