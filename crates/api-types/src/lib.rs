@@ -613,6 +613,349 @@ pub struct SetPluginModelsRequest {
     pub shown: Option<Vec<String>>,
 }
 
+// ---------------------------------------------------------------------------
+// Extensions (docs/EXTENSIONS.md)
+// ---------------------------------------------------------------------------
+
+/// The extension interface version a description file declares (`api = 1`).
+pub const EXTENSION_API: u32 = 1;
+
+/// How long `<extension>__<tool>` may be. An MCP client prefixes its own server name
+/// (`mcp__crossagents__`, 18 characters) and several cap a tool name at 64, so the hub
+/// keeps the part it controls within what is left (docs/EXTENSIONS.md §3).
+pub const EXTENSION_TOOL_NAME_MAX: usize = 46;
+
+/// Separates the extension from the tool in a qualified tool name.
+pub const EXTENSION_TOOL_SEPARATOR: &str = "__";
+
+/// Whether `name` may name an extension: `^[a-z][a-z0-9-]*$`. The `__` separator cannot
+/// occur in it (no underscore is allowed at all), so splitting a qualified name is
+/// unambiguous. Returns why not, for a 400.
+pub fn check_extension_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("an extension name cannot be empty".into());
+    }
+    let ok = name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "{name:?} is not a valid extension name: lowercase letters, digits and `-`, starting with a letter"
+        ))
+    }
+}
+
+/// Whether `name` may name a tool of an extension: `^[a-z][a-z0-9_]*$`, and never `__`,
+/// which would make `<extension>__<tool>` ambiguous. Returns why not, for a 400.
+pub fn check_extension_tool_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("a tool name cannot be empty".into());
+    }
+    let ok = name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !ok {
+        return Err(format!(
+            "{name:?} is not a valid tool name: lowercase letters, digits and `_`, starting with a letter"
+        ));
+    }
+    if name.contains(EXTENSION_TOOL_SEPARATOR) {
+        return Err(format!(
+            "{name:?} cannot contain `{EXTENSION_TOOL_SEPARATOR}`: it separates the extension from the tool"
+        ));
+    }
+    Ok(())
+}
+
+/// What models and the GUI call the tool `tool` of extension `extension`:
+/// `<extension>__<tool>`. Both names and the length are checked
+/// ([`EXTENSION_TOOL_NAME_MAX`]); returns why not, for a 400.
+pub fn extension_tool_name(extension: &str, tool: &str) -> Result<String, String> {
+    check_extension_name(extension)?;
+    check_extension_tool_name(tool)?;
+    let qualified = format!("{extension}{EXTENSION_TOOL_SEPARATOR}{tool}");
+    if qualified.len() > EXTENSION_TOOL_NAME_MAX {
+        return Err(format!(
+            "{qualified:?} is {} characters; a qualified tool name may be at most {EXTENSION_TOOL_NAME_MAX}",
+            qualified.len()
+        ));
+    }
+    Ok(qualified)
+}
+
+/// What an extension's own hub token may do. Never admin: the level only guards against
+/// mistakes, not against malicious code (docs/EXTENSIONS.md §6).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionAccess {
+    #[default]
+    Read,
+    Write,
+}
+
+/// One tool a snapshot declares.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExtensionToolInfo {
+    /// As the description file names it (`report`).
+    pub name: String,
+    /// What models and the GUI see (`standup__report`).
+    pub qualified_name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+    /// The groups that may call it; `human` lets the GUI call it.
+    #[serde(default)]
+    pub groups: Vec<String>,
+    pub timeout_secs: u32,
+}
+
+/// One block of extra instructions a snapshot declares (docs/EXTENSIONS.md §4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExtensionPromptInfo {
+    /// Relative to the snapshot.
+    pub file: String,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    #[ts(type = "number")]
+    pub bytes: u64,
+}
+
+/// One snapshot of an extension: what it declares, as the hub read it from the snapshot it
+/// took (not from the source directory, which may have changed since).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExtensionVersion {
+    /// Hash of every path and its content in the snapshot, taken after the copy finished.
+    pub fingerprint: String,
+    pub api: u32,
+    #[serde(default)]
+    pub description: String,
+    pub access: ExtensionAccess,
+    #[serde(default)]
+    pub tools: Vec<ExtensionToolInfo>,
+    #[serde(default)]
+    pub prompts: Vec<ExtensionPromptInfo>,
+    /// The GUI entry, relative to the snapshot; `None` when it has no panel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub gui_entry: Option<String>,
+    pub files: u32,
+    #[ts(type = "number")]
+    pub bytes: u64,
+    /// When the snapshot was taken.
+    pub taken_at: DateTime<Utc>,
+}
+
+/// A snapshot waiting for a person to approve it (docs/EXTENSIONS.md §6). The hub notices a
+/// changed source directory by polling and records one; `extension_request_enable` records
+/// one at once. It never times out and has no default answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExtensionPending {
+    pub version: ExtensionVersion,
+    pub requested_at: DateTime<Utc>,
+    /// The agent that asked (`extension_request_enable`); absent when the hub's poll found
+    /// the change by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub requested_by: Option<AgentId>,
+}
+
+/// One extension as `GET /v1/extensions` reports it. Everything but `error` comes from
+/// `<home>/extensions.json` and the snapshots it names, so it survives a hub restart.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExtensionInfo {
+    pub name: String,
+    /// Its source directory (`~/.crossagents/extensions/<name>`), which people and agents
+    /// edit. The hub never runs it.
+    pub source: String,
+    /// Calls run and the GUI loads only when this is true.
+    pub enabled: bool,
+    /// A changed source directory is snapshotted and switched to without asking. Only a
+    /// person can turn this on; no agent tool reaches it (docs/EXTENSIONS.md §6).
+    pub auto_trust: bool,
+    /// The snapshot calls run against; `None` until a version has been approved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub current: Option<ExtensionVersion>,
+    /// The version before it, kept so calls that started on it can finish and the GUI's
+    /// `crossagents-ext:` urls keep resolving.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub previous_fingerprint: Option<String>,
+    /// Waiting for approval; `None` when the source matches `current`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pending: Option<ExtensionPending>,
+    /// Why the source cannot be snapshotted or does not check out (a symlink, over the
+    /// 50 MB cap, a description file that does not parse). The current version keeps
+    /// running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+}
+
+/// `GET /v1/extensions`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExtensionsResponse {
+    pub extensions: Vec<ExtensionInfo>,
+}
+
+/// `POST /v1/extensions/{name}/enable`: approves one exact snapshot. A fingerprint that is
+/// not the pending one is refused with 409, so nobody approves a version other than the one
+/// they looked at. Answers with the extension's new [`ExtensionInfo`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct EnableExtensionRequest {
+    pub fingerprint: String,
+}
+
+/// `POST /v1/extensions/{name}/auto-trust`. Answers with the extension's new
+/// [`ExtensionInfo`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetExtensionAutoTrustRequest {
+    pub auto_trust: bool,
+}
+
+/// What happened to one file between two snapshots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionFileChangeKind {
+    Added,
+    Removed,
+    Modified,
+}
+
+/// One file's part of [`ExtensionDiffResponse`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExtensionFileChange {
+    /// Relative to the snapshot.
+    pub path: String,
+    pub change: ExtensionFileChangeKind,
+    pub added: u32,
+    pub removed: u32,
+    /// It carries no diff text: it is binary, or past the per-file cap.
+    #[serde(default)]
+    pub binary: bool,
+}
+
+/// `GET /v1/extensions/{name}/pending/diff`: the snapshot waiting for approval against the
+/// version running now, so the approval screen can show what changes (docs/EXTENSIONS.md
+/// §3, §6). 404 when nothing is pending.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExtensionDiffResponse {
+    pub name: String,
+    /// The pending snapshot, the `b/` side.
+    pub fingerprint: String,
+    /// The running snapshot, the `a/` side; `None` for a first version, which is all
+    /// additions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub against: Option<String>,
+    /// Unified diff of the text files.
+    pub diff: String,
+    /// The diff was longer than the hub hands out at once and was cut; `files` is still
+    /// complete.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Every changed file, binary ones included.
+    #[serde(default)]
+    pub files: Vec<ExtensionFileChange>,
+    /// The pending version's `access`, and whether it differs from the running one: it
+    /// decides what the extension's token may do, so the screen calls it out.
+    pub access: ExtensionAccess,
+    #[serde(default)]
+    pub access_changed: bool,
+}
+
+/// `POST /v1/extensions/{name}/tools/{tool}`: only the input. `caller` is not accepted
+/// here — the hub works it out from the credential (docs/EXTENSIONS.md §3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExtensionCallRequest {
+    #[serde(default)]
+    pub input: serde_json::Value,
+}
+
+/// 202 from `POST /v1/extensions/{name}/tools/{tool}`: the call started. It can run for up
+/// to ten minutes, longer than the GUI bridge waits, so the result is fetched from
+/// `GET /v1/extensions/calls/{call_id}` or awaited on `extension.call.finished`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExtensionCallAccepted {
+    /// Opaque; the hub assigns it and forgets it ten minutes after the call ends.
+    pub call_id: String,
+    pub extension: String,
+    /// The bare tool name, as the description file names it.
+    pub tool: String,
+    /// The snapshot this call was pinned to when it started: a version switch while it runs
+    /// does not move it.
+    pub fingerprint: String,
+    pub started_at: DateTime<Utc>,
+    /// When the hub will kill it.
+    pub timeout_secs: u32,
+}
+
+/// How one extension tool call ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionCallStatus {
+    Running,
+    Ok,
+    /// It exited non-zero, or its output was not the JSON the protocol asks for.
+    Failed,
+    /// `DELETE /v1/extensions/calls/{id}`, or the extension was disabled under it.
+    Cancelled,
+    TimedOut,
+}
+
+/// `GET /v1/extensions/calls/{id}`, and what `DELETE` on the same path answers. Kept in
+/// memory for ten minutes after the call ends; a hub restart loses it (the hub never
+/// retries a call, as a tool may have side effects).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExtensionCallResponse {
+    pub call_id: String,
+    pub extension: String,
+    pub tool: String,
+    pub fingerprint: String,
+    pub status: ExtensionCallStatus,
+    pub started_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub finished_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    #[ts(type = "number")]
+    pub duration_ms: Option<u64>,
+    /// The tool's parsed stdout, when it succeeded. Images follow the `tool_content`
+    /// convention, as a driver's tool output does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub output: Option<serde_json::Value>,
+    /// Why it failed, for a status other than `ok`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error: Option<String>,
+    /// The last 64 KB it wrote to stderr; the whole of it is in the extension's log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stderr: Option<String>,
+}
+
 /// Starts a run. Agents are given by name or id.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -2016,6 +2359,81 @@ mod tests {
                 .unwrap();
         assert_eq!(req.driver, None);
         assert!(req.config.is_null());
+    }
+
+    #[test]
+    fn extension_names_follow_the_contract() {
+        assert!(check_extension_name("standup").is_ok());
+        assert!(check_extension_name("stand-up-2").is_ok());
+        // No uppercase, no underscore (so `__` can never occur), no leading digit or dash.
+        for bad in [
+            "Standup", "stand_up", "2standup", "-standup", "", "stand up",
+        ] {
+            assert!(check_extension_name(bad).is_err(), "{bad:?}");
+        }
+
+        assert!(check_extension_tool_name("report").is_ok());
+        assert!(check_extension_tool_name("report_2_days").is_ok());
+        for bad in ["Report", "report-2", "_report", "", "report__x"] {
+            assert!(check_extension_tool_name(bad).is_err(), "{bad:?}");
+        }
+        // The separator is called out by name, not just rejected as a bad character.
+        assert!(
+            check_extension_tool_name("report__x")
+                .unwrap_err()
+                .contains("__")
+        );
+
+        assert_eq!(
+            extension_tool_name("standup", "report").unwrap(),
+            "standup__report"
+        );
+        // 46 characters fit, 47 do not.
+        let name = "a".repeat(EXTENSION_TOOL_NAME_MAX - "__x".len());
+        assert_eq!(
+            extension_tool_name(&name, "x").unwrap().len(),
+            EXTENSION_TOOL_NAME_MAX
+        );
+        let too_long = extension_tool_name(&format!("{name}b"), "x").unwrap_err();
+        assert!(
+            too_long.contains(&EXTENSION_TOOL_NAME_MAX.to_string()),
+            "{too_long}"
+        );
+    }
+
+    #[test]
+    fn extension_shapes_are_what_clients_read() {
+        let json = serde_json::to_value(ExtensionInfo {
+            name: "standup".into(),
+            source: "/home/.crossagents/extensions/standup".into(),
+            enabled: false,
+            auto_trust: false,
+            current: None,
+            previous_fingerprint: None,
+            pending: None,
+            error: None,
+        })
+        .unwrap();
+        // A never-approved extension carries nothing but its state.
+        assert_eq!(json["enabled"], false);
+        assert!(json.get("current").is_none());
+        assert!(json.get("pending").is_none());
+
+        assert_eq!(
+            serde_json::to_value(ExtensionAccess::Write).unwrap(),
+            "write"
+        );
+        assert_eq!(
+            serde_json::to_value(ExtensionCallStatus::TimedOut).unwrap(),
+            "timed_out"
+        );
+        assert_eq!(
+            serde_json::to_value(ExtensionFileChangeKind::Modified).unwrap(),
+            "modified"
+        );
+        // The call request takes an input and nothing else; a missing one is an empty input.
+        let req: ExtensionCallRequest = serde_json::from_str("{}").unwrap();
+        assert!(req.input.is_null());
     }
 
     #[test]

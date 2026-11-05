@@ -78,4 +78,25 @@ described_by?: string, } } | { "type": "cli.install.output", "data": { plugin: s
 /**
  * Lines past the cap that were dropped.
  */
-dropped: number, } } | { "type": "plugin.changed", "data": { name: string, } });
+dropped: number, } } | { "type": "plugin.changed", "data": { name: string, } } | { "type": "extension.changed", "data": { name: string, } } | { "type": "extension.call.finished", "data": { 
+/**
+ * The id the 202 answered with.
+ */
+call_id: string, extension: string, 
+/**
+ * The bare tool name, as the description file names it.
+ */
+tool: string, 
+/**
+ * The snapshot it ran on, which a version switch under it does not change.
+ */
+fingerprint: string, 
+/**
+ * `ok`, `failed`, `cancelled` or `timed_out`
+ * (`crossagents_api_types::ExtensionCallStatus`).
+ */
+status: string, duration_ms: number, 
+/**
+ * Why it failed, for a status other than `ok`.
+ */
+error?: string, } });
