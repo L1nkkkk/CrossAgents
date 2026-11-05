@@ -1,7 +1,7 @@
 # 内置功能搬进扩展：逐项评估
 
-> 只做评估，不改代码。证据截至 `0cec783`（E1–E3 已落地；E4「事件与常驻」不在这个基准里，
-> 见 `docs/EXTENSIONS.md:436`，合入后要重评事件响应类工具）。
+> 只做评估，不改代码。证据截至 HEAD `9dfce5fc73b4b9b5607a51b6304badcd93256039`（E1–E4 已合入）。
+> 重新计数 `crates/orchestrator/src/tools.rs:97` 的静态 `TOOLS`，共有 67 个 `ToolDef`；动态扩展工具不计入。
 > 范围：hub 的工具表 `crates/orchestrator/src/tools.rs:97` 起的 67 个内置工具，以及 GUI 的工具列面板
 > （`apps/gui/src/ToolColumn.tsx`）和其他页面上可以指认的内置界面。
 >
@@ -15,8 +15,8 @@
 | 项 | 位置 | 差异 / 条件 |
 |---|---|---|
 | `note_list` / `note_read` | `tools.rs:243` / `tools.rs:232`，`crates/orchestrator/src/notes.rs:105` | 返回值能重建；但扩展 token 是通用 read，能读别的 run 的全文（见 §2.1 的条件） |
-| `gui_screenshot` | `crates/orchestrator/src/tools.rs:564`，`crates/orchestrator/src/screenshot.rs:78` | 零新 hub 接口，但依赖 checkout + `apps/gui/node_modules`，且 1 MiB stdout 上限会把大图的 base64 截死（见 §2.1） |
-| 事件流面板 | `apps/gui/src/ToolColumn.tsx:411` | 零新接口；接受历史缺口、target 与发布版可见性差异（见 §3、§6）；要求页面级历史则需补接口 |
+| `gui_screenshot` | `crates/orchestrator/src/tools.rs:564`，`crates/orchestrator/src/screenshot.rs:78` | 零新 hub 接口，但依赖 checkout + `apps/gui/node_modules`，且 超过 1 MiB stdout 上限的 base64 会使调用失败（见 §2.1） |
+| 事件流面板 | `apps/gui/src/ToolColumn.tsx:411` | 试点进行中，差异与验收见 `extensions/debug/README.md` |
 
 **补接口才能搬**：`expertise_search`、`expertise_get`、`usage_get`、`agent_get`、`agent_list`、`whoami`、
 `watch_list`、`watch_cancel`、`remind_list`、`remind_cancel`、`message_withdraw`、`agent_send`、`inbox_read`、
@@ -30,7 +30,7 @@
 `agent_spawn`、`remind_set`、`watch`、`human_ask`、`human_notify`、
 `extension_*` 六个机制工具；GUI 侧的对话、Run 页、设置、工作区、侧栏、菜单与快捷键、终端、提问与通知、安全模式入口。
 
-**第一个试点：以普通扩展提供事件流标签页，试点期间保留内置面板。**（理由见 §6；`gui_screenshot` 因为 stdout 上限与外部依赖，从第一降到第三）
+**事件流试点进行中，差异与验收见 `extensions/debug/README.md`。** 决定：手动安装启用、默认没有、发布版启用后可见、内置面板保留、不补宿主能力。
 
 ## 1. 判定口径
 
@@ -40,7 +40,7 @@
 
 1. **接口够**：工具只用扩展工具进程拿得到的东西——manifest 里能声明的字段
    （`crates/hub/src/extensions/manifest.rs:11-20`）、stdin 里的 `caller`
-   （`crates/hub/src/extensions/runner.rs:498`）、扩展 token 能过的 REST
+   （`crates/hub/src/extensions/runner.rs:675`）、扩展 token 能过的 REST
    （`crates/hub/src/access.rs:56`）、以及本机进程和文件系统。GUI 只用 `ca`
    （`apps/gui/src/extensions/host.ts:76-110`）与 `ca.hub.request` 能过的
    `apps/gui/electron/allowed.cts`。
@@ -53,13 +53,12 @@
   （`runner.rs:82-95`）。扩展 token 是 `Grant::Extension`，级别只能是 read 或 write，
   到不了 `/v1/me*`（`crates/hub/src/api.rs:242-249`），也调不了「以人的身份调工具」的路由
   （`access.rs:118-124`）。
-- **没有事件驱动、没有常驻进程（仅限本基准）**：manifest 只有 `tools` / `prompts` / `gui`
-  （`manifest.rs:35-47`）。`[[on]]` 与 `[service]` 属于 E4，`docs/EXTENSIONS.md:436` 说它还没做；
-  E4 合入后，「事件响应型包装」这一类要重新判断，不能拿现在这份结论当永久答案。
+- **E4 改判：原结论「没有事件驱动、没有常驻进程」被推翻。** `manifest.rs:34-63` 声明 `[[on]]` 与 `[service]`。钩子按事件起进程，只观察，stdin 的 caller 是 `{kind: "event"}`，不是 agent（`crates/hub/src/extensions/hooks.rs:149-194`）；不重试、不回放，总线落后、并发满或限速都会丢事件（`hooks.rs:1-16`、`:108-125`、`:172-212`），不接受 `extension.*`（`manifest.rs:153-170`）。
+- **常驻不等于可靠调度与身份**：每个启用扩展至多一个 service，退出后退避重启；停用、换版本和 hub 退出均会停止它（`crates/hub/src/extensions/service.rs:1-9`、`:241-281`、`:313-338`）。它可自行维护定时器或消费事件，但恢复状态、补漏与幂等要扩展自己实现；扩展 token 仍非 agent 会话 token（`api.rs:242-249`）。
 - **一次调用一个进程**，超时、stdout 上限、并发上限见 `docs/EXTENSIONS.md:106-127`；
   输出走 `images` 约定（`crates/cli/src/cmd/mcp.rs:79-95`）。
 - **权限是组名的交集**：manifest 写一组组名（`manifest.rs:17`），调用时 hub 把调用者**此刻**的组
-  传进去（`tools.rs:878-891` 用 `self.groups(caller)`），运行器取交集（`runner.rs:406`）。
+  传进去（`tools.rs:878-891` 用 `self.groups(caller)`），运行器取交集（`runner.rs:591-603`）。
   所以 `[lead]` 就是「此刻是 lead」，`[lead, assignee, reviewer]` 是 OR，内置的
   `PLANNER/RUN/WORKER` 组合（`tools.rs:15-22`）都能直接表达，不需要多份 manifest。
   真正变粗的不是组名，而是 REST token：它只有 read/write，不绑定调用方，也不绑定目标归属
@@ -75,7 +74,7 @@
 - `ca.hub.request` 就是主程序自己的请求（`host.ts:464-466` → `apps/gui/src/api.ts:194` →
   `allowed.cts`），用的是人的 token。`allowed.cts` 里有 admin 级路由（终端 `allowed.cts:19-22`、
   plugin 安装 `allowed.cts:52`），所以这不是「只读面板」的能力边界（证据与范围见 §5）。
-- import 不到 `src/` 的任何模块（`docs/EXTENSIONS.md:322`），`DiffView`、`Avatar`、`useSession`、
+- import 不到 `src/` 的任何模块（`docs/EXTENSIONS.md:365`），`DiffView`、`Avatar`、`useSession`、
   `useHubData`、时间格式、i18n 都得自己重写。
 
 ## 2. hub 工具逐项
@@ -86,10 +85,12 @@
 |---|---|---|---|
 | `note_list`（`tools.rs:243` / `notes.rs:131-156`） | `GET /v1/notes`（`api.rs:151`）回 `Note` 全文（`crates/core/src/note.rs:23-32`）。重建规则：`scope` 缺省时先 run 后 team（`notes.rs:140-148`）；没有 run 就跳过 run（`notes.rs:20-25`）；`scope=team` 不带 run；key 要 `trim`；每条按 200 字符截断成 preview（`notes.rs:151`） | **权限不随包**：`list_notes` 不校验调用方，`run` 是查询参数（`api.rs:1000-1016`）；扩展的 read token 是通用 read（`access.rs:125-133`），所以它能传任意 run，读到别的 run 的全文。返回值能复现，hub 强制的「只看自己那份」复现不了 | 低-中：省不下多少核心代码；要接受这条权限缺口 |
 | `note_read`（`tools.rs:232` / `notes.rs:105-129`） | 同上，先 run 后 team（`notes.rs:113-124`），按 key 精确匹配，找不到回 `NotFound` | 同上的读取面；另外 `NotFound` 的文案要自己造 | 低：和 `note_list` 同一份实现，适合一起搬 |
-| `gui_screenshot`（`tools.rs:564` / `screenshot.rs:78-131`） | 逻辑是「跑 checkout 里的脚本，把 PNG 放进 `images`」。脚本只打印 `{path,url}`（`apps/gui/scripts/screenshot.mjs:9`、`:76`），base64 由调用方读文件（`screenshot.rs:123-128`） | **不是只依赖 cwd 和 node**：内置先要求 `caller.cwd` 是 CrossAgents checkout 且有 `apps/gui/node_modules`（`screenshot.rs:86-97`）；脚本自己起 Vite + Electron、读 `vite.config.ts` 与 mock preview（`screenshot.mjs:43-59`）。**cwd 也不同**：扩展工具的 cwd 是快照（`runner.rs:809`），包装器要显式用 `caller.cwd` 里的脚本路径并在那里启动，`--out` 给绝对路径（脚本按 `process.cwd()` 解析，`screenshot.mjs:40`）。**输出有上限**：扩展工具的 stdout 上限 1 MiB（`runner.rs:40`），超了整次失败（`runner.rs:864`）；内置没有这个限制（`screenshot.rs:124-128` 直接 base64 进结果）。**超时**：内置 180 秒（`screenshot.rs:18`），扩展默认 60 秒，manifest 要写 180 | 中：它是唯一能真的从核心删掉一块的工具。但大图必须换交付方式（只回 path、或缩图），这是设计决定，不是接口缺口 |
+| `gui_screenshot`（`tools.rs:564` / `screenshot.rs:78-131`） | 逻辑是「跑 checkout 里的脚本，把 PNG 放进 `images`」。脚本只打印 `{path,url}`（`apps/gui/scripts/screenshot.mjs:9`、`:76`），base64 由调用方读文件（`screenshot.rs:123-128`） | **不是只依赖 cwd 和 node**：内置先要求 `caller.cwd` 是 CrossAgents checkout 且有 `apps/gui/node_modules`（`screenshot.rs:86-97`）；脚本自己起 Vite + Electron、读 `vite.config.ts` 与 mock preview（`screenshot.mjs:43-59`）。**cwd 也不同**：扩展工具的 cwd 是快照（`runner.rs:1082`），包装器要显式用 `caller.cwd` 里的脚本路径并在那里启动，`--out` 给绝对路径（脚本按 `process.cwd()` 解析，`screenshot.mjs:40`）。**输出有上限**：扩展工具的 stdout 上限 1 MiB（`runner.rs:46`），超了整次失败（`runner.rs:1145`）；内置没有这个限制（`screenshot.rs:124-128` 直接 base64 进结果）。**超时**：内置 180 秒（`screenshot.rs:18`），扩展默认 60 秒，manifest 要写 180 | 中：它是唯一能真的从核心删掉一块的工具。但大图必须换交付方式（只回 path、或缩图），这是设计决定，不是接口缺口 |
 | 事件流面板（GUI） | 见 §3 | 见 §3 | 中：最适合验证 E2 |
 
 ### 2.2 补接口才能搬
+
+E4 不改变这里的身份、归属和 REST 缺口：钩子 caller 只有事件身份（`hooks.rs:181-184`），service 使用扩展 token（`service.rs:4-5`），不是被包装工具的调用者。以下 `remind_list/cancel` 与 `watch_list/cancel` 的原结论不变；扩展自建另一套数据并非读取或取消 hub 原有记录（`messaging.rs:566-585`、`:639-657`）。
 
 | 工具 | 缺什么（证据） | 值不值 | 风险 |
 |---|---|---|---|
@@ -127,8 +128,8 @@
 | `review_request`（`588`）、`review_submit`（`745`） | 审查是 run 的角色与消息投递，`review_submit` 还会生成 expertise 候选（`tools.rs:1102-1117`） |
 | `run_land`（`681`）、`run_finish`（`695`）、`run_next`（`440`）、`work_start`（`425`） | run 的落地/收尾/下一轮是状态机与策略（`docs/EXTENSIONS.md:14-17`） |
 | `agent_spawn`（`639`） | 招募名额与可用模型由 run/会话的策略限制（工具说明 `tools.rs:640`），`ExtensionHost` 只给工具列表与调用（`host.rs:171-189`） |
-| `remind_set`（`146`）、`watch`（`175`） | 定时器与事件监听是 hub 进程内的调度与投递（核心执行），不是一次调用能完成的事；E4 的 `[service]` 也不改变「调度归谁」 |
-| `human_ask`（`190`） | 是否允许提问、等多久、超时用哪个默认值，都由 **run 的策略**决定（`crates/orchestrator/src/human.rs:2-3`、`:47-62`、`:99-103`）；这是 run 的决策，不是扩展能替代的一次调用。注意：这和「启用扩展必须由人批准」是两回事（`docs/EXTENSIONS.md:400-412` 讲的是后者） |
+| `remind_set`（`146`）、`watch`（`175`） | **原结论「一次调用无法完成定时器与事件监听」不足以证明扩展不能实现；新结论：仍不建议等价迁移。** service 能自行计时，hook 能响应匹配事件（`service.rs:241-281`、`hooks.rs:149-194`），但 hook 会丢事件且不补发；service 在停用、换版和重启间断。内置持久化调用者归属、去重、每人上限与任务解析（`messaging.rs:504-562`、`:589-635`），通知投递也要保持原语义；扩展 token 不能冒充 agent。E4 没提供这些等价保证。可单独做容忍丢失的事件响应型新包装，不能称为替代内置 watch/remind |
+| `human_ask`（`190`） | 是否允许提问、等多久、超时用哪个默认值，都由 **run 的策略**决定（`crates/orchestrator/src/human.rs:2-3`、`:47-62`、`:99-103`）；这是 run 的决策，不是扩展能替代的一次调用。注意：这和「启用扩展必须由人批准」是两回事（`docs/EXTENSIONS.md:444-456` 讲的是后者） |
 | `human_notify`（`206`） | 通知摘要的合并与投递在 runtime |
 | `task_progress`（`710`）、`task_complete`（`716`）、`task_fail`（`733`）、`task_ask`（`739`） | worker 对任务状态机的写；`task_complete` 还触发提交、跑验收、记录 expertise 使用（`tools.rs:1041-1069`） |
 | `extension_api`（`771`）、`extension_check`（`777`）、`extension_request_enable`（`783`）、`extension_logs`（`789`）、`extension_tools`（`795`）、`extension_call`（`801`） | 这六个就是扩展机制本身（`tools.rs:1124-1156`）；搬走会让机制自我指涉 |
@@ -146,9 +147,11 @@
 | Usage / Quota / Expertise 整页 | `App.tsx:238-243` | 补接口才能搬 | `ca.pages.register` 能注册整页并加侧栏一行（`Sidebar.tsx:114-115`），读接口也齐；但 owner/project 解析要自己算 | 不值：核心页面，改版频繁 | 中：页面一旦是扩展，主程序改版就不再统一 |
 | 设置块 | `host.ts:97-99` | 补接口才能搬 | 注册的块只出现在「扩展」页（`extensions/page/Extensions.tsx:32`），`views/Settings.tsx` 里没有插槽 | 低 | 低 |
 | 内置工具卡（`ActionCard`、任务卡等） | `Session.tsx:896-900` | 不该搬 | `toolCards.register` 只能给自己的工具（`host.ts:436-441`），这是有意的边界 | — | 放开就等于让扩展改写别人工具调用的展示 |
-| 对话、Run 页、Home、工作区、设置页、侧栏、菜单与快捷键、终端、提问与通知、安全模式入口 | `views/Session.tsx`、`views/Run.tsx:646-667`、`Sidebar.tsx`、`menubar.tsx`、`App.tsx:173-207`、`terminal.tsx`、`questions.tsx`、`notices.ts`、`electron/main.cts` | 不该搬 | 这是宿主本身；终端还是 admin 级（`access.rs:81-83`、`allowed.cts:19-22`） | — | 扩展与主程序同页无沙箱（`docs/EXTENSIONS.md:361-363`），把这些交出去等于没有安全边界 |
+| 对话、Run 页、Home、工作区、设置页、侧栏、菜单与快捷键、终端、提问与通知、安全模式入口 | `views/Session.tsx`、`views/Run.tsx:646-667`、`Sidebar.tsx`、`menubar.tsx`、`App.tsx:173-207`、`terminal.tsx`、`questions.tsx`、`notices.ts`、`electron/main.cts` | 不该搬 | 这是宿主本身；终端还是 admin 级（`access.rs:81-83`、`allowed.cts:19-22`） | — | 扩展与主程序同页无沙箱（`docs/EXTENSIONS.md:402-406`），把这些交出去等于没有安全边界 |
 
 ## 4. 缺的接口（汇总）
+
+E4 已提供事件响应和常驻进程（`manifest.rs:34-63`），不再把它们列为缺口；可靠回放、身份与归属仍未由 E4 提供（`hooks.rs:108-125`、`api.rs:242-249`）。容忍丢失的事件响应型包装可用 `[[on]]`，需要自行计时的可用 `[service]`；两者均须逐个验证语义，不能直接等同于内置通知。
 
 hub 侧（按价值排序）：
 
@@ -167,40 +170,32 @@ GUI 侧：
 10. **面板上下文补 `run`/`task`/`target`（含 `turn`、`file`）**（`host.ts:34` 只有 `follow`；内置面板在 `ToolColumn.tsx:107-133`）。
 11. **设置页的插槽**（`views/Settings.tsx` 没有 `useExtensions`；块只落在 `Extensions.tsx:32`）。
 12. **导航/坞位 API**：扩展不能打开别的页、不能选坞、不能把自己提到前面（`panes.ts:162-175` 由宿主决定）。
-13. **共享组件与数据层的只读出口**：`DiffView`、`Avatar`、`useSession`、`useHubData`、`clock/full`、`lib/i18n`（`docs/EXTENSIONS.md:322` 明确 import 不到）。
+13. **共享组件与数据层的只读出口**：`DiffView`、`Avatar`、`useSession`、`useHubData`、`clock/full`、`lib/i18n`（`docs/EXTENSIONS.md:365` 明确 import 不到）。
 
 ## 5. 风险（跨条目）
 
-- **工具名会变**：扩展工具叫 `<扩展名>__<工具名>`（`tools.rs:916`、`docs/EXTENSIONS.md:139-151`）。而 hub 的说明直接点名内置工具（`crates/orchestrator/src/protocol.rs:11`、`:104`、`crates/orchestrator/src/brief.rs:266`）。`[[prompts]]` 只能追加、不能替换（`docs/EXTENSIONS.md:262-270`），所以旧名字会留在说明里，模型可能照着调一个不存在的工具。搬任何被说明点名的工具（`task_complete`、`agent_send`、`human_ask`）都会踩这个。
+- **工具名会变**：扩展工具叫 `<扩展名>__<工具名>`（`tools.rs:916`、`docs/EXTENSIONS.md:139-151`）。而 hub 的说明直接点名内置工具（`crates/orchestrator/src/protocol.rs:11`、`:104`、`crates/orchestrator/src/brief.rs:266`）。`[[prompts]]` 只能追加、不能替换（`docs/EXTENSIONS.md:305-315`），所以旧名字会留在说明里，模型可能照着调一个不存在的工具。搬任何被说明点名的工具（`task_complete`、`agent_send`、`human_ask`）都会踩这个。
 - **REST token 不绑定归属**：扩展的 read/write token 是通用的（`access.rs:125-133`），路由本身多半不校验「这个调用者能不能动这个目标」（notes 的 `run` 参数 `api.rs:1000-1016`、提醒删除 `api.rs:1121-1127`）。组名能表达「谁能调」，表达不了「能对谁做」。
 - **可用性绑到扩展状态**：扩展被停用会杀掉运行中的调用（`docs/EXTENSIONS.md:115-121`），内置工具不会。把常用工具搬走等于让它依赖扩展是否启用、是否加载失败、是否安全模式。
-- **审批摩擦**：改一次扩展要人批准一次（`docs/EXTENSIONS.md:367-379`），内置工具改一次发版即可。对核心工具这是负收益。
+- **审批摩擦**：改一次扩展要人批准一次（`docs/EXTENSIONS.md:402-423`），内置工具改一次发版即可。对核心工具这是负收益。
 - **GUI 扩展拿的是人的 admin token**：主进程从 `~/.crossagents/token` 读总 token（`apps/gui/electron/main.cts:70-77`），`hub:request` 用它发请求（`main.cts:141-154`），hub 把总 token 当 `Level::Admin`（`api.rs:372-373`）。`allowed.cts` 白名单里的 admin 路由（终端 `19-22`、plugin 安装/升级 `52`）因此对扩展可用。范围限定在白名单内——白名单外的 admin 路由（`/v1/shutdown`、账户创建/登录）仍然到不了（`main.cts:145-150` 的 `allowed()` 检查）。
 - **全量读接口**：`/v1/background`、`/v1/agents` 是全量；`/v1/notes` 虽然按 scope 与 run 过滤（`api.rs:1000-1016`），但不校验调用方，扩展可以自己指定 run。
 
 ## 6. 推荐顺序与第一个试点
 
-**顺序**（每步都以上一步的验收为前提）：
-
-1. 事件流 → 普通扩展标签页（零新接口，接受历史及发布版可见性差异；手动安装启用，内置面板在试点期间保留）。
-2. `note_list` + `note_read` → 扩展工具（零新接口，验证 read token 的 REST 组合与 run scope；接受 §2.1 的读取面）。
-3. `gui_screenshot` → 扩展工具（零新接口，但要先定大图怎么交回）。
-4. 改动 / 文件 / 提交图 → 等 §4 第 10 条（上下文补 `run`/`task`/`target`）落地后再做；在那之前最多迁移「跟随当前会话」的子集。
-5. 其余暂缓：等 §4 的 1–4 号接口出现后，再单独评估 `usage_get`、`agent_get/list`、后台面板。
-
-**第一个试点：普通扩展 `debug__events` 标签页，试点期间保留内置事件流面板。**
-
-- 为什么改推荐：原先首选 `gui_screenshot`，但它的验收会被两件与扩展机制无关的事挡住——1 MiB stdout 上限（`runner.rs:40`、`:864`）容不下大图的 base64，以及必须依赖 CrossAgents checkout 与 `apps/gui/node_modules`（`screenshot.rs:86-97`、`screenshot.mjs:43-59`）。用它当试点，失败时分不清是机制问题还是尺寸/环境问题。
-- 事件流的优势：在 activate 时订阅 `ca.events.on`（`host.ts:467-490`），将缓存放在扩展级而非组件级，以便面板关闭重开后保留；不碰 hub 写接口，失败只影响一块面板（`docs/EXTENSIONS.md:338-347`）。
-- 验收：activate 后即订阅，面板关闭期间继续缓存，重开仍能看到缓存；新事件按 `agentsOf` 分组（`eventlog.ts:13-22`），过滤、展开 JSON 和每会话最多 1000 条（`eventlog.ts:7`）与内置一致。停用或切版本后标签页与旧订阅清掉（`host.ts:338-362`）；测试启动缺口、停用再启用和热换版本造成的历史丢失。持续订阅期间断线恢复沿用宿主的 Last-Event-ID 补发（`hub.ts:102-103`、`electron/main.cts:358-365`），验证补发可收到；`ca.events.on` 本身不提供历史或恢复接口。渲染抛错只影响该面板并给出「停用」。
-- 产品差异及验收：由人手动安装并启用普通扩展，默认没有扩展标签页；谁启用谁才能看到，发布版也可显示。内置 events 的开发版/mock 限制（`panes.ts:33-37`）不适用于扩展注册（`host.ts:391-408`），`ExtensionCa` 和 manifest GUI 没有开发版标志或条件注册（`host.ts:76-110`、`manifest.rs:32-34`）；不补宿主能力，试点期间内置事件流面板保留。另失去从别的会话打开的 target 覆盖；订阅前、停用和版本切换期间的历史无法补齐。如需原来的页面级历史，须先补只读缓存或回放接口。
+1. 事件流试点进行中，差异与验收见 `extensions/debug/README.md`。决定：手动安装启用、默认没有、发布版启用后可见、内置面板保留、不补宿主能力。
+2. `note_list` + `note_read`：接受 §2.1 的读取面后评估。
+3. `gui_screenshot`：先确定大图交付方式与运行环境（§2.1）。
+4. 事件响应型新包装：选择容忍漏事件的非核心用途验证 E4；需要定时的可评估 service。它不是 `remind_*`/`watch` 的等价替代（§1.2、§2.3）。
+5. 改动、文件、提交图等面板等 §4 上下文缺口解决；其余核心工具按 §4 身份、归属等缺口逐项重评。
 
 ## 7. 推测与未验证
 
-- 「`gui_screenshot` 搬到扩展后，同参数能得到一致的 PNG」——**已撤回**。1 MiB stdout 上限（`runner.rs:40`）对 base64 的影响没有实测；大图会不会超限、超限后改用 path 交付是否可接受，都没有验证。
+- 「`gui_screenshot` 搬到扩展后，同参数能得到一致的 PNG」——**已撤回**。1 MiB stdout 上限（`runner.rs:46`）对 base64 的影响没有实测；大图会不会超限、超限后改用 path 交付是否可接受，都没有验证。
 - 「扩展工具一次调用一个进程，因此 `gui_screenshot` 的耗时和现在一致」——推测。Electron/Vite 启动占大头，多一层进程应当可忽略，但没测。
 - 「项目路径能唯一匹配 `caller.cwd`」——推测。`/v1/projects` 只给 paths（`api_projects.rs:26-36`），worktree 与多 checkout 场景下的匹配规则没有读到实现。
 - 「扩展面板重写 diff/文件查看器的成本」——按 `FileViewer.tsx`（1127 行）与 `commitgraph.tsx` 的体量估计，没有实际移植验证。
 - 「搬走 `note_read` 后错误文案与 `NotFound` 语义一致」——推测。REST 的 404 与 `CoreError::NotFound` 的映射在 `api.rs` 的错误转换里，未逐条比对。
 - 各 CLI 对扩展工具名长度/前缀的处理只按 `docs/EXTENSIONS.md:145-151` 的规则推断，没有新测。
-- E4（`[[on]]`、`[service]`）合入后，`remind_*`/`watch`/事件响应型包装的结论要重评——这里没有预测它会变成什么样。
+- **已按代码核对**：E4 的 hook 是尽力而为、会丢事件、不重试不回放；service 可常驻并监督重启，但停用、换版和 hub 退出会中断（`hooks.rs:1-16`、`:108-125`、`service.rs:1-9`）。内置提醒与关注按调用者持久化并检查归属（`messaging.rs:504-562`、`:566-585`、`:589-657`）。这是静态代码核对，不是本次端到端实测。
+- **未验证**：具体事件响应型包装能否容忍漏事件、补偿和去重是否满足业务，以及 service 自建定时器在重启后的恢复语义；不能据 E4 存在就推断等价替代 `remind_*`/`watch`。
