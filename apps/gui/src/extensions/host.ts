@@ -156,9 +156,9 @@ export type ExtensionHostOptions = {
   events?: (listener: (event: HubEvent) => void) => () => void;
   /** Resolved before anything is imported; `true` skips the extensions entirely. */
   safeMode?: () => boolean | Promise<boolean>;
-  /** Awaited before the first import (the shell sets its crash marker here). */
+  /** Awaited before an import, at startup and on every hot reload (the shell sets its marker). */
   onLoading?: () => void | Promise<void>;
-  /** Awaited once the first load settled, failures included (the shell clears its marker). */
+  /** Awaited once a load settled, failures included (the shell clears its marker). */
   onReady?: () => void | Promise<void>;
   timeoutMs?: number;
   pollMs?: number;
@@ -635,6 +635,24 @@ export function createExtensionHost(options: ExtensionHostOptions) {
     await withTimeout(activation, timeoutMs, `${rec.name} 的 activate 超时`);
   }
 
+  /** The entry `info` wants running, if any; `undefined` means disabled or headless. */
+  function wantedOf(info: ExtensionInfo): { fingerprint: string; entry: string } | undefined {
+    const version = info.enabled ? info.current : undefined;
+    return version?.gui_entry ? { fingerprint: version.fingerprint, entry: version.gui_entry } : undefined;
+  }
+
+  /**
+   * Whether `apply(info)` would import an entry, i.e. whether a refresh is really a load. A
+   * hot reload is marked with `onLoading`/`onReady` too: if the new entry hangs, the next start
+   * must come up in safe mode instead of hanging once more.
+   */
+  function needsImport(info: ExtensionInfo): boolean {
+    const wanted = wantedOf(info);
+    if (!wanted) return false;
+    const rec = records.get(info.name);
+    return !(rec && rec.status === "ready" && rec.fingerprint === wanted.fingerprint && rec.entry === wanted.entry);
+  }
+
   async function apply(info: ExtensionInfo) {
     let rec = records.get(info.name);
     if (!rec) {
@@ -653,8 +671,7 @@ export function createExtensionHost(options: ExtensionHostOptions) {
       };
       records.set(info.name, rec);
     }
-    const version = info.enabled ? info.current : undefined;
-    const wanted = version?.gui_entry ? { fingerprint: version.fingerprint, entry: version.gui_entry } : undefined;
+    const wanted = wantedOf(info);
 
     if (!wanted) {
       const had = rec.live || rec.tabs.length > 0 || rec.cards.length > 0 || rec.offs.length > 0 || rec.styles.length > 0;
@@ -763,7 +780,27 @@ export function createExtensionHost(options: ExtensionHostOptions) {
       return;
     }
     retryDelay = retryMs;
-    await applyList(list);
+    // Nothing new to import: no marker, exactly like a startup with no `gui_entry`.
+    if (!list.some(needsImport)) {
+      await applyList(list);
+      return;
+    }
+    try {
+      await options.onLoading?.();
+    } catch (error) {
+      if (options.log) options.log(`扩展加载开始上报失败：${textOf(error)}`);
+      else console.error("扩展加载开始上报失败", error);
+    }
+    loading = true;
+    publish();
+    try {
+      await applyList(list);
+    } finally {
+      loading = false;
+      publish();
+      // Also on a hot load: the marker goes away once this load settled, failures included.
+      await reportReady(true);
+    }
   }
 
   /** Reads the list again; runs are serialised so two `extension.changed` events cannot race. */
@@ -773,8 +810,9 @@ export function createExtensionHost(options: ExtensionHostOptions) {
     return run;
   }
 
-  async function reportReady() {
-    if (readyReported) return;
+  /** Awaits `onReady`; `force` is for a hot load, whose marker its own start did not clear. */
+  async function reportReady(force = false) {
+    if (readyReported && !force) return;
     readyReported = true;
     try {
       await options.onReady?.();

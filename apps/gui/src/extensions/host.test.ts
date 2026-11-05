@@ -383,6 +383,121 @@ test("nothing with a gui_entry: ready without a loading marker", async () => {
   host.dispose();
 });
 
+/** A host that records the shell's marker calls in `order`, with an optional loading gate. */
+function marked(initial: ExtensionInfo[], modules: Map<string, ExtensionModule>) {
+  let list = initial;
+  const order: string[] = [];
+  let gate: Promise<void> | undefined;
+  const host = createExtensionHost({
+    list: async () => list,
+    importModule: async (url) => {
+      order.push(`import ${url}${host.snapshot().loading ? " with marker" : ""}`);
+      const module = modules.get(url);
+      if (!module) throw new Error(`no module at ${url}`);
+      return module;
+    },
+    request: async () => ({}),
+    callTool: async () => {
+      throw new Error("unused");
+    },
+    getCall: async () => {
+      throw new Error("unused");
+    },
+    cancelCall: async () => ({}),
+    disable: async () => ({}),
+    timeoutMs: 60,
+    onLoading: () => {
+      order.push("loading");
+      return gate;
+    },
+    onReady: () => {
+      order.push("ready");
+    },
+    log: () => {},
+  });
+  return {
+    host,
+    order,
+    setList: (next: ExtensionInfo[]) => {
+      list = next;
+    },
+    clearOrder: () => {
+      order.length = 0;
+    },
+    /** Holds the next `onLoading` until the returned function is called. */
+    holdLoading: () => {
+      let release!: () => void;
+      gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return () => release();
+    },
+  };
+}
+
+test("a version switch after startup marks the load, then clears the marker", async () => {
+  const fp1 = extensionEntryUrl("a", "fp1", "gui/index.js");
+  const fp2 = extensionEntryUrl("a", "fp2", "gui/index.js");
+  const modules = new Map<string, ExtensionModule>([
+    [fp1, { activate: () => {} }],
+    [fp2, { activate: () => {} }],
+  ]);
+  const run = marked([info("a", "fp1")], modules);
+  await run.host.start();
+  assert.deepEqual(run.order, ["loading", `import ${fp1} with marker`, "ready"]);
+
+  run.clearOrder();
+  run.setList([info("a", "fp2")]);
+  const release = run.holdLoading();
+  const hot = run.host.refresh();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(run.order, ["loading"], "the new entry is not imported while the marker is being set");
+
+  release();
+  await hot;
+  assert.deepEqual(run.order, ["loading", `import ${fp2} with marker`, "ready"]);
+  const snapshot = run.host.snapshot();
+  assert.equal(snapshot.loading, false);
+  assert.equal(snapshot.records.get("a")!.status, "ready");
+  assert.equal(snapshot.records.get("a")!.fingerprint, "fp2");
+  run.host.dispose();
+});
+
+test("a hot load that fails still clears the marker", async () => {
+  const fp1 = extensionEntryUrl("a", "fp1", "gui/index.js");
+  const fp2 = extensionEntryUrl("a", "fp2", "gui/index.js");
+  const modules = new Map<string, ExtensionModule>([[fp1, { activate: () => {} }]]);
+  const run = marked([info("a", "fp1")], modules);
+  await run.host.start();
+
+  run.clearOrder();
+  run.setList([info("a", "fp2")]);
+  await run.host.refresh();
+  assert.deepEqual(run.order, ["loading", `import ${fp2} with marker`, "ready"]);
+  assert.equal(run.host.snapshot().records.get("a")!.status, "failed");
+  assert.equal(run.host.snapshot().loading, false);
+  run.host.dispose();
+});
+
+test("a refresh with nothing to import calls neither marker", async () => {
+  const fp1 = extensionEntryUrl("a", "fp1", "gui/index.js");
+  const modules = new Map<string, ExtensionModule>([[fp1, { activate: () => {} }]]);
+  const run = marked([info("a", "fp1")], modules);
+  await run.host.start();
+
+  run.clearOrder();
+  // Same fingerprint: nothing to import.
+  await run.host.refresh();
+  assert.deepEqual(run.order, []);
+
+  // Disabled: registrations go away, but no entry is imported.
+  run.setList([info("a", "fp1", false)]);
+  await run.host.refresh();
+  assert.deepEqual(run.order, []);
+  assert.equal(run.host.snapshot().records.get("a")!.status, "disabled");
+  run.host.dispose();
+});
+
 test("a lost call result (404) rejects instead of polling forever", async () => {
   const url = extensionEntryUrl("a", "fp1", "gui/index.js");
   let ca!: Parameters<NonNullable<ExtensionModule["activate"]>>[0];
