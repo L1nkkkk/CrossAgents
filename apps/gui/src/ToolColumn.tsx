@@ -14,6 +14,7 @@ import type { BackgroundResponse } from "@bindings/BackgroundResponse";
 import type { BackgroundWatch } from "@bindings/BackgroundWatch";
 import type { VerifyingTask } from "@bindings/VerifyingTask";
 import { api, errorText } from "./api";
+import { ActivityFeed } from "./ActivityFeed";
 import { Avatar, ErrorBox, Icon, displayName, isAgent, sessionHref, useAgents } from "./components";
 import { board, countdown, elapsed, watchOn, withoutReminder, type Split } from "./lib/background";
 import { CommitGraphView } from "./commitgraph";
@@ -96,7 +97,7 @@ function useSafeTarget(follow: string | undefined, target: Target | null) {
 
 function FollowButton({ kind, follow, target }: { kind: PaneKind; follow?: string; target: Target | null }) {
   const safeTarget = useSafeTarget(follow, target);
-  if (kind === "task" || !safeTarget?.agent || safeTarget.agent === follow) return null;
+  if (kind === "task" || kind === "activity" || !safeTarget?.agent || safeTarget.agent === follow) return null;
   return (
     <button className="ghost small" onClick={clearTarget} title="回到当前对话">
       跟随对话
@@ -129,6 +130,7 @@ function PaneBody({ kind, follow, target, routeTask, routeRun }: { kind: PaneKin
           <Blank text="打开一个会话或 run，这里显示它的提交图。" />
         ))}
       {kind === "background" && <BackgroundPane follow={agent} routeRun={routeRun ?? routeTask?.run} />}
+      {kind === "activity" && <ActivityFeed />}
     </div>
   );
 }
