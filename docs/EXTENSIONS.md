@@ -218,9 +218,9 @@ agent 和 GUI 的等待方式不同：
 |---|---|---|---|---|
 | CodeBuddy | 2.179.2 | 成功 | 成功（约 650 秒后拿到结果） | 超过工具 10 分钟上限也不超时 |
 | Codex | 0.166.0-alpha.5.1（`~/.codex/plugins/.plugin-appserver/codex.exe`，非 PATH 上的发行版） | 成功 | **失败**：`timed out awaiting tools/call after 300s` | 超时在 70 到 300 秒之间不再细分，实测只到「300 秒时已放弃」；没有试 `tool_timeout_sec` 配置 |
-| Claude | — | 没测 | 没测 | 本机没有 `claude` 命令（PATH 和常见安装位置都没有），无法测 |
+| Claude Code | 2.1.317（Claude Desktop 带的那份，`%LOCALAPPDATA%/Claude-Data/*/claude-code/*/*/claude.exe`，不在 PATH 上；`claude -p --permission-mode bypassPermissions`） | 成功 | 成功（约 650 秒后拿到结果） | 超过工具 10 分钟上限也不超时 |
 
-含义：扩展工具要超过约 5 分钟，Codex 会话里的直接调用和 `extension_call` 都会在 CLI 一侧失败，而 hub 里的进程还会跑到
+含义：Claude 和 CodeBuddy 不会先于 hub 的 10 分钟上限放弃；扩展工具要超过约 5 分钟，Codex 会话里的直接调用和 `extension_call` 都会在 CLI 一侧失败，而 hub 里的进程还会跑到
 自己的超时（结果丢失）。长任务的作者应把 `timeout_secs` 压在 300 以内，或自己拆成「启动 + 轮询」。
 `extension_api`（E3）要把这一条告诉作者。上面各数字只对测过的版本成立。
 
