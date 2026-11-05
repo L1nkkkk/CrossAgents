@@ -106,6 +106,8 @@ if (dryRun) {
 
 step(`写入版本号 ${version}`);
 
+// 先算好、查过再写，出错时不留下只改了一半的文件。
+const lockText = bumpedLock(readFileSync(guiLockPath, "utf8"), current, version);
 // 只替换 [workspace.package] 那一处，别碰依赖项自己的 version。
 writeFileSync(
   cargoPath,
@@ -115,8 +117,7 @@ writeFileSync(
   ),
 );
 bumpJson(guiPkgPath, current, version, 1);
-// package-lock 里根对象和 packages[""] 各有一份。
-bumpJson(guiLockPath, current, version, 2);
+writeFileSync(guiLockPath, lockText);
 console.log("  Cargo.toml · apps/gui/package.json · apps/gui/package-lock.json");
 
 // ---------------------------------------------------------------------------- 构建
@@ -226,6 +227,27 @@ function bumpPatch(v) {
 }
 
 /** 把 JSON 文件里的版本号换掉，并确认换到的处数和预期一致——少了多了都说明文件结构变了。 */
+/**
+ * package-lock 里属于本项目的版本号只有根对象和 packages[""] 两处，都在文件开头；依赖可能恰好
+ * 同版本（0.2.0 的 chromium-pickle-js），不能动。改完确认除这两处外内容没变。
+ */
+function bumpedLock(text, from, to) {
+  const before = JSON.parse(text);
+  if (before.version !== from || before.packages?.[""]?.version !== from) {
+    die(`package-lock.json 的版本号不是 ${from}：根对象 ${before.version}，packages[""] ${before.packages?.[""]?.version}`);
+  }
+  let left = 2;
+  const next = text.replaceAll(`"version": "${from}"`, (hit) => (left-- > 0 ? `"version": "${to}"` : hit));
+  const after = JSON.parse(next);
+  const same = after.version === to && after.packages[""].version === to;
+  after.version = from;
+  after.packages[""].version = from;
+  if (!same || JSON.stringify(after) !== JSON.stringify(before)) {
+    die("package-lock.json 改版本号时碰到了别的内容；脚本不敢继续");
+  }
+  return next;
+}
+
 function bumpJson(path, from, to, expected) {
   const text = readFileSync(path, "utf8");
   const needle = `"version": "${from}"`;
