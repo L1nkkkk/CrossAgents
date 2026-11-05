@@ -72,6 +72,8 @@ pub struct RunningHub {
     pub extensions: Arc<extensions::Registry>,
     /// Runs extension tools.
     pub extension_runner: Arc<extensions::Runner>,
+    /// Event hooks (`[[on]]`) running beside the hub.
+    pub extension_hooks: Arc<extensions::Hooks>,
     /// The agents' session tokens (`/v1/me`).
     pub agent_tokens: Arc<AgentTokens>,
     shutdown: CancellationToken,
@@ -335,6 +337,17 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     let terminals = terminal::Terminals::new(config.terminal_shell.clone(), config.terminal_idle);
     terminals.start_reclaiming(shutdown.clone());
     let extension_poll = extensions.start(shutdown.clone());
+    // Event hooks and resident services run beside the hub and end with it
+    // (docs/EXTENSIONS.md §3). A service starts here, for what the enabled snapshots declare.
+    let extension_hooks = extensions::Hooks::new(
+        extension_runner.clone(),
+        extensions.clone(),
+        Some(bus.clone()),
+    );
+    let extension_services =
+        extensions::Services::new(extension_runner.clone(), extensions.clone());
+    let hooks_task = extension_hooks.start(shutdown.clone());
+    let services_task = extension_services.start(shutdown.clone());
     let agent_tokens = tokens.clone();
     let state = Arc::new(api::AppState {
         extensions: extensions.clone(),
@@ -369,6 +382,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         let runtime = runtime.clone();
         let stop_agents = stop_agents.clone();
         let stopping_runner = extension_runner.clone();
+        let stopping_hooks = extension_hooks.clone();
         // Tool calls end the moment the hub is told to stop, not after the HTTP server has
         // drained: a request waiting for a tool's result would hold the drain up.
         tokio::spawn({
@@ -386,6 +400,12 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
             shutdown.cancel();
             let _ = account_start.await;
             let _ = extension_poll.await;
+            // Hooks and services end before the runner closes its door, so their processes
+            // are gone with the hub and none of them is restarted.
+            let _ = hooks_task.await;
+            // The listener has cancelled the hooks' token; wait for their trees to be gone.
+            stopping_hooks.shutdown().await;
+            let _ = services_task.await;
             // Running tool calls end with the hub; their results are lost (docs/EXTENSIONS.md §3).
             stopping_runner.shutdown().await;
             terminals.stop_all();
@@ -417,6 +437,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         orchestrator,
         extensions,
         extension_runner,
+        extension_hooks,
         agent_tokens,
         shutdown,
         task,

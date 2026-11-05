@@ -142,6 +142,67 @@ fn extensions_reject_invalid_manifests_and_oversize() {
     let r = Registry::load(home.path()).unwrap();
     assert!(r.get("demo").unwrap().error.unwrap().contains("50 MB"));
 }
+/// `[[on]]` and `[service]` are part of the fingerprint, so both are validated as strictly
+/// as tools and both show up in the version a person approves (docs/EXTENSIONS.md §3).
+#[test]
+fn extensions_hooks_and_service_are_validated_and_reported() {
+    let home = tempfile::tempdir().unwrap();
+    source(home.path(), "ok");
+    let manifest = home.path().join("extensions/demo/extension.toml");
+    let valid = fs::read_to_string(&manifest).unwrap();
+    let hooked = format!(
+        "{valid}\n[[on]]\nevent = \"run.landed\"\ncommand = [\"never-execute-this\"]\n\n[service]\ncommand = [\"never-execute-this\"]\n"
+    );
+    fs::write(&manifest, &hooked).unwrap();
+    let r = Registry::load(home.path()).unwrap();
+    let info = r.get("demo").unwrap();
+    assert!(info.error.is_none(), "{:?}", info.error);
+    let version = info.pending.unwrap().version;
+    assert_eq!(version.hooks.len(), 1);
+    assert_eq!(version.hooks[0].event, "run.landed");
+    assert_eq!(version.hooks[0].timeout_secs, 60);
+    assert!(version.service);
+
+    for invalid in [
+        // Extensions may not react to each other: a chain would never end.
+        hooked.replace("run.landed", "extension.changed"),
+        hooked.replace("run.landed", "run.nonexistent"),
+        format!(
+            "{valid}\n[[on]]\nevent = \"run.landed\"\ncommand = [\"x\"]\n[[on]]\nevent = \"run.landed\"\ncommand = [\"x\"]\n"
+        ),
+        format!("{valid}\n[[on]]\nevent = \"run.landed\"\ncommand = [\"x\"]\ntimeout_secs = 0\n"),
+        format!("{valid}\n[service]\ncommand = []\n"),
+    ] {
+        fs::write(&manifest, invalid).unwrap();
+        let r = Registry::load(home.path()).unwrap();
+        let info = r.get("demo").unwrap();
+        assert!(info.error.is_some(), "accepted an invalid hook/service");
+        assert!(info.pending.is_none());
+    }
+}
+
+/// The resident-process supervisor learns about switches from here, with the lock released.
+#[test]
+fn extensions_version_change_callback_fires_for_switch_and_disable() {
+    let home = tempfile::tempdir().unwrap();
+    source(home.path(), "first");
+    let r = Registry::load(home.path()).unwrap();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    r.on_version_changed(move |name| sink.lock().unwrap().push(name.to_owned()));
+
+    let fp = pending(&r);
+    r.enable("demo", &fp).unwrap();
+    assert_eq!(*seen.lock().unwrap(), ["demo"]);
+
+    source(home.path(), "second");
+    r.set_auto_trust("demo", true).unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 2);
+
+    r.disable("demo").unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 3);
+}
+
 #[cfg(unix)]
 #[test]
 fn extensions_reject_symlinks() {

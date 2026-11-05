@@ -1,6 +1,7 @@
 # 扩展（插件）设计稿
 
-> 状态：E1 到 E3 已实现并走过真实的端到端验收，E4 未做（见 §8）。目标是**随手定制**：在对话里让 agent 写一个工具、一段提示词或一个面板，
+> 状态：E1 到 E3 已实现并走过真实的端到端验收；E4 的约定和公共接口已定，事件响应和常驻进程的实现
+> 正在按 §8 拆开做。目标是**随手定制**：在对话里让 agent 写一个工具、一段提示词或一个面板，
 > 不编译、不重启 hub、不发版就能用上。
 >
 > 接口形状以 [crates/api-types/src/lib.rs](../crates/api-types/src/lib.rs) 的 `Extension*` 类型、
@@ -70,12 +71,13 @@ input_schema = { type = "object", properties = { days = { type = "integer" } } }
 groups = ["lead"]
 file = "lead.md"
 
-# 事件响应：同样是调一次起一个进程（E4）
+# 事件响应：同样是调一次起一个进程，只观察不拦截（E4，见 §3）
 [[on]]
-event = "run.finished"
+event = "run.landed"
 command = ["node", "notify.mjs"]
+# timeout_secs = 60
 
-# 常驻进程，确实需要时才写（E4）
+# 常驻进程，确实需要时才写（E4，见 §3）
 # [service]
 # command = ["node", "server.mjs"]
 
@@ -245,10 +247,12 @@ E1（后端）和 E2（GUI）就靠这张表对接。类型都在
 几个约定：
 
 - **`ExtensionInfo` 是唯一的状态来源。** 启用与否、自动信任、当前指纹、上一指纹、待批准记录、以及源目录为什么
-  不能用（`error`）都在里面，启用、停用、改开关都回这一份，省得客户端自己拼。
+  不能用（`error`）都在里面，启用、停用、改开关都回这一份，省得客户端自己拼。`service` 是这次 hub 运行的
+  实时状态（见下面「常驻进程」），其余字段重启后照旧。
 - **一个扩展两份快照同时存在**：`current`（跑着的）和 `pending.version`（等批准的）。两者都是
-  `ExtensionVersion`：指纹、`api`、`access`、工具表（含 `qualified_name`）、附加说明、GUI 入口、文件数和字节数。
-  GUI 的批准界面需要的「这一版有什么」就是它。
+  `ExtensionVersion`：指纹、`api`、`access`、工具表（含 `qualified_name`）、附加说明、事件钩子（`hooks`）、
+  是否声明常驻进程（`service`）、GUI 入口、文件数和字节数。
+  GUI 的批准界面需要的「这一版有什么」就是它；常驻进程的命令本身留在 `extension.toml` 里，差异视图会显示。
 - **批准界面要看差异**，所以有 `GET /v1/extensions/{name}/pending/diff`：待批准快照对当前版本的 unified diff，
   加一份逐文件的增删统计（二进制文件只出现在统计里），再单独标出 `access` 有没有变——它决定扩展的 token 能干什么，
   不能混在一堆文件改动里让人滑过去。没有待批准记录就 404；第一个版本 `against` 为空，全是新增。
@@ -258,6 +262,46 @@ E1（后端）和 E2（GUI）就靠这张表对接。类型都在
 - **事件只报「变了」**，不带状态：`extension.changed { name }` 让客户端重读 `GET /v1/extensions`，
   和现有的 `plugin.changed` 一个路子；`extension.call.finished` 带 `call_id`、指纹、`status`、耗时和错误，
   结果仍然去 `GET /v1/extensions/calls/{id}` 取。
+
+### 事件响应：`[[on]]`
+
+每条 `[[on]]` 在匹配的事件发生时起一个进程。它**只观察，不拦截**：事件先落库、广播，然后才起进程，
+进程的退出码和 stdout 都不改变事件，也不产生返回给发布者的结果。
+
+- 描述文件：`event`、`command`、可选 `timeout_secs`（默认 60，范围 1..600）。到点用 Job Object 杀掉整个进程树。
+- stdin 是一个 JSON：`{ "event": <完整事件>, "caller": { "kind": "event" } }`。`event` 就是 `Event` 本身
+  （`seq`、`id`、`ts`、`schema`、`type`、`data`）。
+- 工作目录、环境变量（`CROSSAGENTS_URL`、`CROSSAGENTS_TOKEN`、`CROSSAGENTS_EXTENSION_DATA`、hub 的代理变量）
+  和工具完全一样；token 的级别取自 `access`，进程树结束就作废。
+- stdout 和 stderr 都进 `<扩展名>.log`；**失败只记日志，不重试**。
+- **只响应 hub 运行期间的新事件**：监听从订阅那一刻开始，重启后不补发，也不回读事件日志。
+- 并发和工具**共用**同一组名额（每扩展 4、全局 16）。排满时这个事件被丢弃，并在日志里写一行原因，不排队。
+- **停用**：运行中的钩子和工具调用一样，给 5 秒宽限后结束整棵进程树；token、快照租约和并发名额随之释放，
+  不会拖到钩子自己的 `timeout_secs`。
+- **不接受 `extension.*` 事件。** 描述文件里出现就直接判为无效（`extension_check` 和批准都会被拒），
+  运行时再挡一次。这只挡住扩展之间的**直接**循环；经写接口的循环（比如 `access = "write"` 的钩子订阅
+  `agent.updated`，又去 `POST /v1/agents/{id}/topic`）它挡不住，所以另有熔断。
+- **限速熔断。** 每个扩展的钩子在 60 秒滑动窗口内最多启动 60 次；超过的事件直接丢弃，每个窗口只写一条
+  日志说明触发了熔断。这个上限单独计算，和并发名额（4/16）无关：它既不占名额，也不因为名额有空而放宽。
+- 同一个事件在一个扩展里只能有一条 `[[on]]`，重复写判为无效。
+
+### 常驻进程：`[service]`
+
+- 每个已启用扩展最多一个进程。`command` 写在描述文件里，工作目录是快照；`CROSSAGENTS_TOKEN` 按进程生命周期
+  签发，进程树结束即作废（重启后换新 token）。
+- stdin 关闭；stdout 和 stderr 全部写进 `<扩展名>.log`，不设 1 MB 上限（那是给工具结果的），日志按 10 MB 滚动。
+- 异常退出按退避重启：1 秒起，每次翻倍，最长 60 秒；连续运行满 60 秒后重置为 1 秒，重启计数清零。
+  退出码 0 视为「要求重启」，等 1 秒再起，不计入崩溃退避。
+- **切换版本**：先停旧进程，再在新快照上起新进程。**停用**：和工具调用一样给 5 秒宽限，然后杀掉进程树。
+  宽限按扩展各算各的，不同扩展的停用和版本切换并行进行，一个扩展等宽限不挡住另一个。
+  **hub 退出**：全部杀掉（正在等停用宽限的也算），不跨 hub 存活；新 hub 启动时按当时的快照重新起。
+- 常驻进程不占工具的并发名额（4/16 是给调用的）；它每扩展至多一个，本身就是上限。
+- 运行状态通过 `ExtensionInfo.service` 报告：`state`（`stopped` / `starting` / `running` / `backoff`）、
+  `restarts`（上次稳定运行 60 秒以来的重启次数）、`last_exit`（最近一次退出的原因，含启动失败）。
+  它是这次 hub 运行的状态，不写进 `extensions.json`。
+
+两项都在描述文件里，所以都计入指纹，必须由人批准那一版快照之后才运行：`ExtensionVersion.hooks` 和
+`ExtensionVersion.service` 说的就是这一版声明了什么。
 
 ## 4. 附加说明
 
@@ -395,7 +439,8 @@ export function activate(ca) {
 | 待批准记录 | `(指纹, 发起时间, 发起者)`；没有超时，重启也还在 |
 
 和 `ExtensionInfo` 一一对应（`current` 由指纹指向的快照读出），所以 `GET /v1/extensions` 不需要别的来源。
-快照本身在 `extension-versions/`，JSON 里只存指纹；指纹指向的快照不在了，就当没批准过，并在 `error` 里说明。
+唯一的例外是 `service`：它是本次 hub 运行的进程状态，重启后从零开始。快照本身在 `extension-versions/`，
+JSON 里只存指纹；指纹指向的快照不在了，就当没批准过，并在 `error` 里说明。
 
 ### 批准不走普通提问
 
@@ -415,7 +460,8 @@ GUI 可以复用提问的样式，但判定逻辑要独立。`human_ask`（`crat
 
 不是单独的模式，只是一组工具加一份说明，任何 agent 都能用：
 
-- `extension_api`：返回当前的接口版本、事件类型、group、GUI 插槽和一份完整示例。相当于 dsh 的 `cordis_inspect_*`。
+- `extension_api`：返回当前的接口版本、事件类型（并写明 `extension.*` 不能用于 `[[on]]`）、group、
+  事件钩子和常驻进程的约定、GUI 插槽和一份完整示例。相当于 dsh 的 `cordis_inspect_*`。
 - `extension_check(name)`：静态校验描述文件、schema 和入口文件，返回源目录的 `ExtensionVersion`；校验失败返回工具错误，不写启用状态。
 - `extension_request_enable(name)`：由 hub 生成快照和指纹，返回 `ExtensionInfo`，只建立待批准记录，不启用、不改自动信任。
 - `extension_logs(name)`：与 GET 日志路由返回同一份 `ExtensionLogsResponse`：当前日志末尾 64 KiB（UTF-8 容错解码），`truncated` 表示省略了更早字节；未调用过时内容为空，不包含轮转文件。
@@ -433,7 +479,7 @@ GUI 上一个入口「让 agent 做一个插件」：开一个新对话，把请
 | **E1 后端**（已完成，测试在 `crates/hub/tests/extensions_runner.rs`、`extensions_registry.rs`） | 目录扫描、描述文件校验、快照与指纹、批准流程、一次性工具与运行限制、统一权限检查、扩展 token、`extension_tools/call`、异步调用接口、附加说明 | 手写一个工具，不重启 hub，运行中的会话能调用；改文件后旧版本继续跑，批准后下一次调用用新版本；超时、超并发、无权限、输入不合法、未批准都有测试；hub 重启后启用状态和待批准记录都还在；实测各家 CLI 的 MCP 超时 |
 | **E2 GUI**（已完成） | 自定义协议、`ca` 接口与注册清理、标签页、工具卡片、错误隔离、安全模式 | 手写一个带相对 import 的面板，改依赖文件后不刷新页面就更新；渲染出错只坏这一块；`activate` 半路抛错没有残留；死循环后能进安全模式；45 秒的工具在界面上正常返回 |
 | **E3 创造流程**（已完成） | `extension_api`、检查、请求启用、GUI 入口和日志 | **在对话里说一句“做一个 X”，不编译、不重启，几分钟内能用上带面板的工具** |
-| **E4 事件与常驻** | `[[on]]`、`[service]` 及其监管 | 真有扩展需要时再做 |
+| **E4 事件与常驻**（约定与骨架已完成） | `[[on]]`、`[service]` 的描述文件字段与校验；`Runner::start_command` / `Runner::issue_token`；`Registry::on_version_changed`；`hooks.rs` / `service.rs` 的公开骨架，启动与关闭已接进 `lib.rs`；钩子的限速熔断与停用回收；服务按扩展并行协调、关闭时打断宽限 | 约定见 §3「事件响应」「常驻进程」。手写一个扩展：事件到达时起进程且不拦事件、失败只进日志、重启不补发；写接口形成的循环被熔断压在 60 次/分钟内；停用 5 秒后钩子和常驻进程都结束、token 作废；常驻进程崩溃后按退避重启，换版本停旧起新，两个扩展的宽限并行，hub 在宽限中途退出也不残留 |
 
 E1 和 E2 涉及的文件不重叠，可以并行：`/v1/extensions` 的形状已经定在 §3「接口形状」，
 类型和事件已在 `crates/api-types`、`crates/core/src/event.rs` 落地，TS 绑定已生成，两边照着写就行。

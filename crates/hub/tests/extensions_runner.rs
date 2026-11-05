@@ -13,7 +13,10 @@ use crossagents_api_types::{
 use crossagents_core::{
     Agent, AgentId, AgentProfile, AgentStatus, CoreError, EventKind, NameSource, Role,
 };
-use crossagents_hub::extensions::{CallError, Caller, Limits, Registry, Runner};
+use crossagents_hub::extensions::runner::{CommandSpec, OutputCapture};
+use crossagents_hub::extensions::{
+    CallError, Caller, HookRate, Limits, Registry, Runner, Services,
+};
 use crossagents_hub::{HubConfig, Paths};
 use crossagents_orchestrator::host::ExtensionCaller;
 use reqwest::{Client, StatusCode};
@@ -1306,4 +1309,494 @@ async fn extensions_http_stopping_the_hub_ends_a_tool_a_request_is_waiting_for()
         size,
         "the tool is still running"
     );
+}
+
+/// Hooks and services run through the same runner: the snapshot, the tree, the token and —
+/// when asked — the tool limits, without the tool's group and schema checks and without the
+/// stdin/stdout protocol mattering (docs/EXTENSIONS.md §3).
+#[tokio::test]
+async fn extensions_start_command_shares_the_limits_and_ends_its_token() {
+    let f = Fixture::new(Limits {
+        per_extension: 1,
+        ..Limits::default()
+    });
+    approve(&f.registry, "demo");
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let start = |mode: &str, limits: bool| {
+        let lease = f.registry.acquire("demo").unwrap();
+        f.runner.start_command(CommandSpec {
+            extension: "demo".into(),
+            lease,
+            command: vec![tool_exe().display().to_string()],
+            stdin: Some(format!(r#"{{"input":{{"mode":"{mode}"}}}}"#).into_bytes()),
+            timeout: Some(Duration::from_secs(10)),
+            stdout: OutputCapture::Collect,
+            limits,
+            label: "hook test".into(),
+            cancel: cancel.clone(),
+            disabled: None,
+        })
+    };
+
+    let run = start("echo", true).unwrap();
+    let done = run.wait().await;
+    assert!(done.ok(), "{done:?}");
+    let out: Value = serde_json::from_slice(&done.stdout).unwrap();
+    assert_eq!(out["request"]["input"]["mode"], "echo");
+    // The token died with the process, before the result was visible.
+    assert_eq!(f.runner.live_tokens(), 0);
+
+    // A hook takes a tool slot: with one per extension, the next one is dropped as busy.
+    let held = start("hold", true).unwrap();
+    let busy = start("echo", true).unwrap_err();
+    assert!(matches!(busy, CallError::Busy(_)), "{busy:?}");
+    // The token lives exactly while the process does.
+    until("the held process", || f.data().join("token.txt").is_file()).await;
+    let token = fs::read_to_string(f.data().join("token.txt")).unwrap();
+    assert_eq!(f.runner.token(&token).unwrap().0, "demo");
+    fs::write(f.data().join("release"), b"x").unwrap();
+    assert!(held.wait().await.ok());
+    assert!(f.runner.token(&token).is_none());
+}
+
+// ---------------------------------------------------------------------------------------
+// Hooks and services (docs/EXTENSIONS.md §3)
+
+/// A `[service]` that never exits, so a test can see whether it is still alive.
+fn service_extension(home: &Path, name: &str) {
+    write_extension(
+        home,
+        name,
+        "write",
+        "one",
+        &format!(
+            "\n[service]\ncommand = ['{}', 'heartbeat']\n",
+            tool_exe().display()
+        ),
+    );
+}
+
+fn lines(path: &Path) -> usize {
+    fs::read_to_string(path)
+        .map(|text| text.lines().count())
+        .unwrap_or(0)
+}
+
+/// Disabling an extension must end a hook that is still running, not leave it (and its
+/// token, lease and concurrency slot) until its 60 s timeout.
+#[tokio::test]
+async fn extensions_disabling_ends_a_running_hook_and_its_token() {
+    let home = tempfile::tempdir().unwrap();
+    write_extension(
+        home.path(),
+        "demo",
+        "write",
+        "one",
+        &format!(
+            "\n[[on]]\nevent = \"hub.started\"\ncommand = ['{}', 'heartbeat']\ntimeout_secs = 60\n",
+            tool_exe().display()
+        ),
+    );
+    let hub = crossagents_hub::start(HubConfig::new(Paths::new(home.path()), 0))
+        .await
+        .unwrap();
+    hub.extensions.scan().unwrap();
+    let fp = pending(&hub.extensions, "demo");
+    hub.extensions.enable("demo", &fp).unwrap();
+    // The hub is already running, so this is a new event, not the startup one.
+    hub.bus
+        .publish(EventKind::HubStarted {
+            version: "test".into(),
+        })
+        .await
+        .unwrap();
+
+    let runner = hub.extension_runner.clone();
+    until("the hook to start", || runner.live_tokens() == 1).await;
+    let beat = home.path().join("extension-data/demo/heartbeat");
+    until("the hook's heartbeat", || beat.is_file()).await;
+
+    hub.extensions.disable("demo").unwrap();
+    // The same grace a tool call gets, not the hook's 60 s timeout.
+    tokio::time::timeout(
+        Duration::from_secs(9),
+        until("the hook to end", || runner.live_tokens() == 0),
+    )
+    .await
+    .expect("disabling must end the hook");
+    let size = fs::metadata(&beat).unwrap().len();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        fs::metadata(&beat).unwrap().len(),
+        size,
+        "the hook is still running"
+    );
+}
+
+/// A hub that stops in the middle of a disable's grace period still takes the service down.
+#[tokio::test]
+async fn extensions_shutdown_during_the_disable_grace_still_stops_a_service() {
+    let home = tempfile::tempdir().unwrap();
+    service_extension(home.path(), "demo");
+    let registry = Arc::new(Registry::load(home.path()).unwrap());
+    let runner = Runner::new(registry.clone(), None, home.path().to_owned());
+    approve(&registry, "demo");
+    let services = Services::new(runner.clone(), registry.clone());
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let task = services.start(shutdown.clone());
+    until("the service to start", || runner.live_tokens() == 1).await;
+    let beat = home.path().join("extension-data/demo/heartbeat");
+    until("the service's heartbeat", || beat.is_file()).await;
+
+    registry.disable("demo").unwrap();
+    // The 5 s grace has just begun; the hub goes away in the middle of it.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(8), task)
+        .await
+        .expect("services must stop with the hub")
+        .unwrap();
+    assert_eq!(runner.live_tokens(), 0, "the service outlived the hub");
+    let size = fs::metadata(&beat).unwrap().len();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        fs::metadata(&beat).unwrap().len(),
+        size,
+        "the service is still running"
+    );
+}
+
+/// Two extensions disabled one after the other wait out their graces side by side: one
+/// extension's grace must not add to another's.
+#[tokio::test]
+async fn extensions_disabling_two_services_waits_out_their_graces_in_parallel() {
+    let home = tempfile::tempdir().unwrap();
+    service_extension(home.path(), "demo");
+    service_extension(home.path(), "beta");
+    let registry = Arc::new(Registry::load(home.path()).unwrap());
+    let runner = Runner::new(registry.clone(), None, home.path().to_owned());
+    for name in ["demo", "beta"] {
+        approve(&registry, name);
+    }
+    let services = Services::new(runner.clone(), registry.clone());
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let task = services.start(shutdown.clone());
+    until("both services", || runner.live_tokens() == 2).await;
+
+    let started = Instant::now();
+    registry.disable("demo").unwrap();
+    registry.disable("beta").unwrap();
+    // A 5 s grace each, at the same time; in series the second would end at about 10 s.
+    tokio::time::timeout(
+        Duration::from_secs(6),
+        until("both services to end", || runner.live_tokens() == 0),
+    )
+    .await
+    .expect("the two graces must run at the same time");
+    assert!(started.elapsed() < Duration::from_secs(6));
+    shutdown.cancel();
+    let _ = task.await;
+}
+
+/// A hook that goes through the write API can feed itself (`agent.updated` -> change the
+/// topic -> `agent.updated`). `extension.*` filtering does not catch that, so the circuit
+/// breaker bounds it: at most the configured number of starts per window, one log line, and
+/// nothing more once the extension is disabled.
+#[tokio::test]
+async fn extensions_a_hook_loop_through_the_write_api_is_capped_by_the_breaker() {
+    #[cfg(windows)]
+    let (command, script, text) = (
+        r#"["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "hook.ps1"]"#,
+        "hook.ps1",
+        r#"$raw = [Console]::In.ReadToEnd()
+$e = $raw | ConvertFrom-Json
+$dir = $env:CROSSAGENTS_EXTENSION_DATA
+Add-Content -LiteralPath (Join-Path $dir 'starts') -Value 'x'
+$id = $e.event.data.agent.id
+$body = @{ topic = [guid]::NewGuid().ToString() } | ConvertTo-Json -Compress
+try {
+  Invoke-RestMethod -Method Post -Uri "$env:CROSSAGENTS_URL/v1/agents/$id/topic" -Headers @{ Authorization = "Bearer $env:CROSSAGENTS_TOKEN" } -ContentType 'application/json' -Body $body | Out-Null
+} catch { }
+"#,
+    );
+    #[cfg(not(windows))]
+    let (command, script, text) = (
+        r#"["sh", "hook.sh"]"#,
+        "hook.sh",
+        r#"raw=$(cat)
+dir="$CROSSAGENTS_EXTENSION_DATA"
+echo x >> "$dir/starts"
+id=$(printf '%s' "$raw" | grep -o '"agent":{"id":"[^"]*"' | head -n 1 | cut -d'"' -f6)
+curl -s -o /dev/null -X POST -H "Authorization: Bearer $CROSSAGENTS_TOKEN" -H 'Content-Type: application/json' --data "{\"topic\":\"loop-$$-$(date +%s%N)\"}" "$CROSSAGENTS_URL/v1/agents/$id/topic"
+"#,
+    );
+    #[cfg(not(windows))]
+    if std::process::Command::new("curl")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: curl is not available");
+        return;
+    }
+
+    let home = tempfile::tempdir().unwrap();
+    write_extension(
+        home.path(),
+        "demo",
+        "write",
+        "one",
+        &format!("\n[[on]]\nevent = \"agent.updated\"\ncommand = {command}\ntimeout_secs = 60\n"),
+    );
+    fs::write(home.path().join("extensions/demo").join(script), text).unwrap();
+    let hub = crossagents_hub::start(HubConfig::new(Paths::new(home.path()), 0))
+        .await
+        .unwrap();
+    // A small limit so the loop settles quickly; the rule is the same at 60 per minute.
+    hub.extension_hooks.set_rate(HookRate {
+        limit: 5,
+        window: Duration::from_secs(60),
+    });
+    hub.extensions.scan().unwrap();
+    let fp = pending(&hub.extensions, "demo");
+    hub.extensions.enable("demo", &fp).unwrap();
+
+    // The hook changes this agent's topic, and that is what feeds it again.
+    let alice: Agent = Client::new()
+        .post(format!("http://{}/v1/agents", hub.addr))
+        .bearer_auth(&hub.token)
+        .json(&json!({
+            "name": "alice", "plugin": "claude", "model": "haiku", "role": "worker",
+            "cwd": home.path().display().to_string(),
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    hub.bus
+        .publish(EventKind::AgentUpdated { agent: alice })
+        .await
+        .unwrap();
+
+    let starts = home.path().join("extension-data/demo/starts");
+    until("the hook to start", || lines(&starts) >= 1).await;
+    // Wait for the breaker itself, rather than assuming a fixed time for five
+    // PowerShell processes and HTTP requests under parallel test load.
+    let log_path = home.path().join("extension-logs/demo.log");
+    tokio::time::timeout(Duration::from_secs(45), until("the breaker to trip", || {
+        fs::read_to_string(&log_path)
+            .is_ok_and(|log| log.contains("circuit breaker"))
+    }))
+    .await
+    .expect("the loop must reach the breaker");
+    until("all admitted hooks to finish", || hub.extension_runner.live_tokens() == 0).await;
+    let capped = lines(&starts);
+    assert!(capped >= 2, "the loop never ran: {capped} starts");
+    assert!(capped <= 5, "the breaker let {capped} hooks start");
+    // It is a breaker, not a delay: still no more starts later in the same window.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(lines(&starts), capped, "the breaker is not holding");
+
+    let log = fs::read_to_string(log_path).unwrap();
+    assert!(log.contains("circuit breaker"), "{log}");
+    assert_eq!(
+        log.matches("circuit breaker").count(),
+        1,
+        "one line per window"
+    );
+
+    hub.extensions.disable("demo").unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        lines(&starts),
+        capped,
+        "a disabled extension still ran a hook"
+    );
+}
+
+/// A hook that only leaves a marker, for tests that count starts.
+#[cfg(windows)]
+fn marker_hook() -> (&'static str, &'static str, &'static str) {
+    (
+        r#"["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "hook.ps1"]"#,
+        "hook.ps1",
+        "Add-Content -LiteralPath (Join-Path $env:CROSSAGENTS_EXTENSION_DATA 'starts') -Value 'x'\n",
+    )
+}
+#[cfg(not(windows))]
+fn marker_hook() -> (&'static str, &'static str, &'static str) {
+    (
+        r#"["sh", "hook.sh"]"#,
+        "hook.sh",
+        "echo x >> \"$CROSSAGENTS_EXTENSION_DATA/starts\"\n",
+    )
+}
+
+/// The hook's order is acquire, then register with the runner. A disable in between cannot
+/// be seen by the disable notification (the command is not registered yet), so the runner
+/// checks the lease's generation after registering: the process must not start.
+#[tokio::test]
+async fn extensions_a_disable_between_the_lease_and_the_start_does_not_let_a_hook_run() {
+    let f = Fixture::new(Limits {
+        disable_grace: Duration::from_millis(100),
+        ..Limits::default()
+    });
+    let fp = approve(&f.registry, "demo");
+    let lease = f.registry.acquire("demo").unwrap();
+    // Exactly the window: the lease is taken, then the extension is disabled, and only then
+    // does the hook reach start_command with its own disabled token.
+    f.registry.disable("demo").unwrap();
+    // Even an immediate re-enable of the same snapshot cannot revive the old lease.
+    f.registry.enable("demo", &fp).unwrap();
+    let run = f.runner.start_command(CommandSpec {
+        extension: "demo".into(),
+        lease,
+        command: vec![tool_exe().display().to_string(), "heartbeat".into()],
+        stdin: None,
+        timeout: Some(Duration::from_secs(60)),
+        stdout: OutputCapture::LogOnly,
+        limits: true,
+        label: "hook hub.started".into(),
+        cancel: tokio_util::sync::CancellationToken::new(),
+        disabled: Some(tokio_util::sync::CancellationToken::new()),
+    });
+    assert!(
+        run.is_err(),
+        "a hook must not start on a lease from before the disable"
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(f.runner.live_tokens(), 0, "a hook outlived the disable");
+}
+
+/// Disabling ends a hook that is running; re-enabling does not revive it, but the next event
+/// starts a new one.
+#[tokio::test]
+async fn extensions_a_hook_ends_on_disable_and_a_new_event_starts_after_reenable() {
+    let home = tempfile::tempdir().unwrap();
+    write_extension(
+        home.path(),
+        "demo",
+        "write",
+        "one",
+        &format!(
+            "\n[[on]]\nevent = \"hub.started\"\ncommand = ['{}', 'heartbeat']\ntimeout_secs = 60\n",
+            tool_exe().display()
+        ),
+    );
+    let hub = crossagents_hub::start(HubConfig::new(Paths::new(home.path()), 0))
+        .await
+        .unwrap();
+    hub.extensions.scan().unwrap();
+    let fp = pending(&hub.extensions, "demo");
+    hub.extensions.enable("demo", &fp).unwrap();
+    hub.bus
+        .publish(EventKind::HubStarted {
+            version: "test".into(),
+        })
+        .await
+        .unwrap();
+    let runner = hub.extension_runner.clone();
+    until("the hook to start", || runner.live_tokens() == 1).await;
+    let beat = home.path().join("extension-data/demo/heartbeat");
+    until("the hook's heartbeat", || beat.is_file()).await;
+
+    // Disable and enable again at once: the old hook still ends after its grace.
+    hub.extensions.disable("demo").unwrap();
+    hub.extensions.enable("demo", &fp).unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        until("the old hook to end", || runner.live_tokens() == 0),
+    )
+    .await
+    .expect("the old hook must end");
+
+    // A new event is not charged against the old one and starts a fresh hook.
+    hub.bus
+        .publish(EventKind::HubStarted {
+            version: "test".into(),
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(9),
+        until("a new hook to start", || runner.live_tokens() == 1),
+    )
+    .await
+    .expect("a new event must start a hook after the re-enable");
+}
+
+/// Events the concurrency limits turn away never started, so they must not use up the
+/// breaker's allowance.
+#[tokio::test]
+async fn extensions_busy_hook_events_do_not_use_up_the_breaker_allowance() {
+    let (command, script, text) = marker_hook();
+    let home = tempfile::tempdir().unwrap();
+    write_extension(
+        home.path(),
+        "demo",
+        "write",
+        "one",
+        &format!("\n[[on]]\nevent = \"hub.started\"\ncommand = {command}\ntimeout_secs = 60\n"),
+    );
+    fs::write(home.path().join("extensions/demo").join(script), text).unwrap();
+    let hub = crossagents_hub::start(HubConfig::new(Paths::new(home.path()), 0))
+        .await
+        .unwrap();
+    hub.extension_hooks.set_rate(HookRate {
+        limit: 2,
+        window: Duration::from_secs(60),
+    });
+    hub.extensions.scan().unwrap();
+    let fp = pending(&hub.extensions, "demo");
+    hub.extensions.enable("demo", &fp).unwrap();
+
+    // Four holds fill demo's per-extension limit, so the next hook is Busy.
+    for _ in 0..4 {
+        hub.extension_runner
+            .start(Caller::Human, "demo", "run", json!({ "mode": "hold" }))
+            .unwrap();
+    }
+    until("the holds to start", || {
+        hub.extension_runner.live_tokens() == 4
+    })
+    .await;
+    for _ in 0..2 {
+        hub.bus
+            .publish(EventKind::HubStarted {
+                version: "test".into(),
+            })
+            .await
+            .unwrap();
+    }
+    let log = home.path().join("extension-logs/demo.log");
+    until("both Busy drops", || {
+        fs::read_to_string(&log)
+            .map(|text| text.matches("dropped: busy").count() >= 2)
+            .unwrap_or(false)
+    })
+    .await;
+
+    // Free the slots; the breaker must still allow a hook that can really start.
+    fs::write(home.path().join("extension-data/demo/release"), b"x").unwrap();
+    until("the holds to end", || {
+        hub.extension_runner.live_tokens() == 0
+    })
+    .await;
+    hub.bus
+        .publish(EventKind::HubStarted {
+            version: "test".into(),
+        })
+        .await
+        .unwrap();
+    let starts = home.path().join("extension-data/demo/starts");
+    until("the hook to start", || lines(&starts) == 1).await;
+    assert_eq!(
+        lines(&starts),
+        1,
+        "the breaker charged events that never started"
+    );
+    let log = fs::read_to_string(&log).unwrap();
+    assert!(!log.contains("2 starts"), "{log}");
 }

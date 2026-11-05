@@ -47,6 +47,15 @@ struct State {
     infos: BTreeMap<String, ExtensionInfo>,
     metadata: BTreeMap<String, Metadata>,
     occupied: BTreeMap<(String, String), usize>,
+    /// Resident processes of this hub's run; live state, never persisted.
+    services: BTreeMap<String, ExtensionServiceStatus>,
+    /// Extensions whose enabled state or current version changed while the lock was held;
+    /// `on_version_changed` hooks run after it is released.
+    switched: Vec<String>,
+    /// Bumped whenever an extension is enabled, disabled or switched to another snapshot.
+    /// A lease carries the value it was taken at, so a command cannot start on a lease that
+    /// predates a disable.
+    generations: BTreeMap<String, u64>,
 }
 /// Serializes scan, approval and acquisition so cleanup cannot race a new call.
 pub struct Registry {
@@ -56,8 +65,13 @@ pub struct Registry {
     /// Told after an extension is disabled, with the lock released (docs/EXTENSIONS.md §3:
     /// calls already running are ended a few seconds later).
     disabled: Mutex<Vec<DisabledHook>>,
+    /// Told after the extension is enabled, disabled, or switched to another snapshot, with
+    /// the lock released. The resident-process supervisor uses it to stop the old process
+    /// and start the new one.
+    version_changed: Mutex<Vec<VersionHook>>,
 }
 type DisabledHook = Box<dyn Fn(&str) + Send + Sync>;
+type VersionHook = Box<dyn Fn(&str) + Send + Sync>;
 #[derive(Debug, Clone)]
 pub struct EnabledVersion {
     pub path: PathBuf,
@@ -68,6 +82,8 @@ pub struct EnabledVersion {
 /// Pins a snapshot until dropped. Explicit release is also available for runners.
 pub struct SnapshotLease {
     pub enabled: EnabledVersion,
+    /// The extension's generation when this lease was taken; see [`Registry::lease_is_current`].
+    pub generation: u64,
     registry: Weak<Registry>,
     name: String,
     fingerprint: String,
@@ -106,6 +122,7 @@ impl Registry {
             }),
             bus,
             disabled: Mutex::default(),
+            version_changed: Mutex::default(),
         };
         {
             let mut s = r.state.lock().unwrap();
@@ -120,7 +137,8 @@ impl Registry {
                         .all(|f| valid_fingerprint(f))
             });
             for (name, record) in s.records.clone() {
-                s.infos.insert(name.clone(), r.info(&name, &record));
+                let info = r.info(&name, &record, &s.services);
+                s.infos.insert(name, info);
             }
         }
         if let Err(error) = r.scan() {
@@ -135,7 +153,12 @@ impl Registry {
         let (_, v) = snapshot::inspect(&self.version_path(name, fp), name).ok()?;
         (v.fingerprint == fp).then_some(v)
     }
-    fn info(&self, name: &str, rec: &Record) -> ExtensionInfo {
+    fn info(
+        &self,
+        name: &str,
+        rec: &Record,
+        services: &BTreeMap<String, ExtensionServiceStatus>,
+    ) -> ExtensionInfo {
         let current = rec
             .current
             .as_ref()
@@ -166,6 +189,7 @@ impl Registry {
             current,
             previous_fingerprint: rec.previous.clone(),
             pending,
+            service: services.get(name).cloned(),
         }
     }
     fn save(&self, records: &BTreeMap<String, Record>) -> Result<()> {
@@ -217,6 +241,9 @@ impl Registry {
                 tracing::warn!(extension = %name, %error, "extension scan failed");
             }
         }
+        let switched = std::mem::take(&mut s.switched);
+        drop(s);
+        self.fire_version_changed(switched);
         Ok(())
     }
     fn scan_one(&self, s: &mut State, name: &str, force: bool) -> Result<()> {
@@ -234,6 +261,7 @@ impl Registry {
                 current: None,
                 previous_fingerprint: None,
                 pending: None,
+                service: s.services.get(name).cloned(),
                 error: Some(error),
             };
             if s.infos.get(name) != Some(&info) {
@@ -290,7 +318,7 @@ impl Registry {
         if records != s.records {
             self.save(&records)?;
         }
-        let mut info = self.info(name, &rec);
+        let mut info = self.info(name, &rec, &s.services);
         // Preserve snapshot timestamps across polls when the fingerprint is unchanged.
         if let Some(old) = &old {
             if info.current.as_ref().map(|v| &v.fingerprint)
@@ -304,6 +332,11 @@ impl Registry {
                 info.pending = old.pending.clone();
             }
         }
+        let switched = old.as_ref().is_none_or(|old| {
+            old.enabled != info.enabled
+                || old.current.as_ref().map(|v| &v.fingerprint)
+                    != info.current.as_ref().map(|v| &v.fingerprint)
+        });
         if error.is_some() {
             info.error = error;
         }
@@ -315,6 +348,10 @@ impl Registry {
         }
         let changed = old.as_ref() != Some(&info);
         s.infos.insert(name.into(), info);
+        if switched {
+            s.switched.push(name.into());
+            *s.generations.entry(name.into()).or_default() += 1;
+        }
         self.try_cleanup(s, name);
         if changed {
             self.notify(name.into());
@@ -341,7 +378,11 @@ impl Registry {
                 return Err(conflict("approved snapshot is unavailable"));
             }
             rec.enabled = true;
-            return self.update(&mut s, name, rec);
+            let info = self.update(&mut s, name, rec)?;
+            let switched = std::mem::take(&mut s.switched);
+            drop(s);
+            self.fire_version_changed(switched);
+            return Ok(info);
         }
         self.scan_one(&mut s, name, true)?;
         let mut rec = s.records.get(name).cloned().ok_or_else(|| missing(name))?;
@@ -352,7 +393,11 @@ impl Registry {
             ));
         }
         Self::switch(&mut rec, fingerprint.into());
-        self.update(&mut s, name, rec)
+        let info = self.update(&mut s, name, rec)?;
+        let switched = std::mem::take(&mut s.switched);
+        drop(s);
+        self.fire_version_changed(switched);
+        Ok(info)
     }
     pub fn disable(&self, name: &str) -> Result<ExtensionInfo> {
         check_extension_name(name).map_err(CoreError::InvalidName)?;
@@ -360,16 +405,48 @@ impl Registry {
         let mut rec = s.records.get(name).cloned().ok_or_else(|| missing(name))?;
         rec.enabled = false;
         let info = self.update(&mut s, name, rec)?;
+        let switched = std::mem::take(&mut s.switched);
         drop(s);
         for hook in self.disabled.lock().unwrap().iter() {
             hook(name);
         }
+        self.fire_version_changed(switched);
         Ok(info)
     }
     /// Calls `hook` with the extension's name whenever one is disabled, after the change is
     /// saved and the registry's lock is released. The runner uses it to end running calls.
     pub fn on_disabled(&self, hook: impl Fn(&str) + Send + Sync + 'static) {
         self.disabled.lock().unwrap().push(Box::new(hook));
+    }
+    /// Calls `hook` with the extension's name after it is enabled, disabled or switched to
+    /// another snapshot, with the lock released. Same shape as [`Self::on_disabled`]; the
+    /// resident-process supervisor uses it to stop the old process and start the new one.
+    pub fn on_version_changed(&self, hook: impl Fn(&str) + Send + Sync + 'static) {
+        self.version_changed.lock().unwrap().push(Box::new(hook));
+    }
+    fn fire_version_changed(&self, names: Vec<String>) {
+        if names.is_empty() {
+            return;
+        }
+        let hooks = self.version_changed.lock().unwrap();
+        for name in names {
+            for hook in hooks.iter() {
+                hook(&name);
+            }
+        }
+    }
+    /// Records what one extension's resident process is doing. Live state of this run only:
+    /// it reaches clients through `ExtensionInfo.service` and is never written to disk.
+    pub fn set_service_status(&self, name: &str, status: Option<ExtensionServiceStatus>) {
+        let mut s = self.state.lock().unwrap();
+        let Some(info) = s.infos.get_mut(name) else {
+            return;
+        };
+        info.service = status.clone();
+        match status {
+            Some(status) => s.services.insert(name.into(), status),
+            None => s.services.remove(name),
+        };
     }
     /// Setting this explicit human-controlled flag also accepts the current pending update.
     pub fn set_auto_trust(&self, name: &str, value: bool) -> Result<ExtensionInfo> {
@@ -387,7 +464,11 @@ impl Registry {
                 Self::switch(&mut rec, fp);
             }
         }
-        self.update(&mut s, name, rec)
+        let info = self.update(&mut s, name, rec)?;
+        let switched = std::mem::take(&mut s.switched);
+        drop(s);
+        self.fire_version_changed(switched);
+        Ok(info)
     }
     /// Where this hub reads extension sources from.
     pub fn sources(&self) -> PathBuf {
@@ -440,10 +521,17 @@ impl Registry {
         if records != s.records {
             self.save(&records)?;
         }
-        let mut info = self.info(name, &rec);
+        let mut info = self.info(name, &rec, &s.services);
         if let Some(old) = s.infos.get(name) {
             if old.error.is_some() {
                 info.error = old.error.clone();
+            }
+            if old.enabled != info.enabled
+                || old.current.as_ref().map(|v| &v.fingerprint)
+                    != info.current.as_ref().map(|v| &v.fingerprint)
+            {
+                s.switched.push(name.into());
+                *s.generations.entry(name.into()).or_default() += 1;
             }
         }
         s.records = records;
@@ -507,15 +595,32 @@ impl Registry {
         let mut s = self.state.lock().unwrap();
         let enabled = self.enabled_locked(&s, name)?;
         let fingerprint = enabled.version.fingerprint.clone();
+        let generation = s.generations.get(name).copied().unwrap_or(0);
         *s.occupied
             .entry((name.into(), fingerprint.clone()))
             .or_default() += 1;
         Ok(SnapshotLease {
             enabled,
+            generation,
             registry: Arc::downgrade(self),
             name: name.into(),
             fingerprint,
         })
+    }
+    /// Whether a lease still matches what is enabled now: the same snapshot, and no enable,
+    /// disable or version change since it was taken. A hook takes its lease before the runner
+    /// registers the command, and a disable in that window must not let the process start
+    /// (docs/EXTENSIONS.md §3).
+    pub fn lease_is_current(&self, name: &str, fingerprint: &str, generation: u64) -> bool {
+        let s = self.state.lock().unwrap();
+        s.generations.get(name).copied().unwrap_or(0) == generation
+            && s.infos.get(name).is_some_and(|info| {
+                info.enabled
+                    && info
+                        .current
+                        .as_ref()
+                        .is_some_and(|version| version.fingerprint == fingerprint)
+            })
     }
     fn unpin(&self, name: &str, fingerprint: &str) {
         let mut s = self.state.lock().unwrap();
