@@ -11,6 +11,14 @@ import { ErrorBox } from "./components";
 import { ChangeStat, DiffView, type DiffReview } from "./diffview";
 import { useHubData } from "./hub";
 import { parseDiff, type DiffFile, type DiffLine } from "./lib/diff";
+import {
+  confidencePercent,
+  findingPlace,
+  severityTone,
+  sortFindings,
+  verdictLabel,
+  verdictTone,
+} from "./lib/reviewFindings";
 
 /** Where a comment goes: a file, and a line of it (on the old side for a removed line). */
 type Spot = { path: string; line?: number; side?: "new" | "old" };
@@ -39,7 +47,7 @@ function FileList({ files, onPick }: { files: DiffFile[]; onPick: (path: string)
   );
 }
 
-/** A task's changes against its base, with the person's comments. */
+/** A task's changes against its base, with the reviewer's findings and the person's comments. */
 export function TaskReview({ run, task }: { run: Run; task: Task }) {
   const changes = useHubData(
     () => api.taskDiff(run.id, task.id),
@@ -47,6 +55,7 @@ export function TaskReview({ run, task }: { run: Run; task: Task }) {
     (e) => (e.type === "task.status_changed" && e.data.id === task.id) || (e.type === "agent.turn_completed" && e.data.id === task.assignee),
   );
   const files = useMemo(() => (changes.data ? parseDiff(changes.data.diff) : []), [changes.data]);
+  const findings = useMemo(() => sortFindings(task.report.findings ?? []), [task.report.findings]);
   const [focus, setFocus] = useState<string>();
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [editing, setEditing] = useState<Spot>();
@@ -128,6 +137,29 @@ export function TaskReview({ run, task }: { run: Run; task: Task }) {
 
   return (
     <div className="review">
+      {(findings.length > 0 || task.report.verdict) && (
+        <div className="review-findings">
+          <div className="row" style={{ gap: 6, marginBottom: 4 }}>
+            <span className={`chip ${verdictTone(task.report.verdict)}`}>结论：{verdictLabel(task.report.verdict)}</span>
+            {findings.length > 0 && <span className="small muted">{findings.length} 条评审意见，P0/P1 挡合并、排在最前</span>}
+          </div>
+          {findings.map((f, i) => (
+            <div key={i} className="review-finding" style={{ marginTop: 4 }}>
+              <div className="row" style={{ gap: 6 }}>
+                <span className={`chip ${severityTone(f.severity)}`}>{f.severity}</span>
+                <span className="small">{f.title}</span>
+                <span className="small muted">置信度 {confidencePercent(f.confidence)}%</span>
+                {f.file && <code className="small muted">{findingPlace(f)}</code>}
+              </div>
+              {f.detail && (
+                <div className="pre small muted" style={{ marginLeft: 44 }}>
+                  {f.detail}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
       {changes.error && <ErrorBox error={changes.error} />}
       {!changes.data && !changes.error && <p className="muted small">加载改动…</p>}
       {changes.data && (

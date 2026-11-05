@@ -115,7 +115,12 @@ write to you, and comes first.";
 
 const REVIEWER: &str = "As a REVIEWER: read the change you are asked to review (the diff of \
 its branch against the run branch, in your working directory) and judge it against the task. \
-Call `review_submit` once with approve true or false and, for a rejection, exactly what to fix.";
+Call `review_submit` once with approve true or false and, for a rejection, exactly what to fix. \
+Grade each finding P0-P3 with a confidence from 0 to 1 (a number, not a word) and give a \
+verdict: merge, merge_after_fixes or do_not_merge. P0 blocks the merge and must be fixed; P1 \
+should be fixed before the merge; P2 can follow it; P3 is a suggestion. List the blocking ones \
+(P0/P1) first. approve and verdict must agree: approve=true with do_not_merge, approve=false \
+with merge, or a P0 with merge is refused, so fix the call instead of sending a contradiction.";
 
 /// Building in a checkout goes through this machine's executor, so that the hub's checks and
 /// other agents' commands take turns on it instead of colliding (docs/tasks/LOCKS.md §6).

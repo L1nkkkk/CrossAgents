@@ -1,9 +1,124 @@
 //! The person reviewing work (docs/tasks/DOGFOOD.md §2): a task's diff, a run's total diff,
 //! and comments that go straight to the worker as its next turn.
 
+use crossagents_core::model::{ReviewFinding, ReviewSeverity, ReviewVerdict};
 use crossagents_core::{CoreError, MessageSource, RunId, Task, TaskId, TaskStatus};
 
 use crate::engine::Orchestrator;
+
+/// The verdict a review submits: the one it names, or — when it names none — the one its
+/// `approve` implies. Two answers that disagree are refused, so the reviewer fixes the call
+/// instead of leaving the issuer with a contradiction.
+///
+/// The rule (docs/TODO.md §二十五 第 6 条): `approve=true` cannot carry `do_not_merge`,
+/// `approve=false` cannot carry `merge`, and a P0 finding cannot carry `merge` — P0 blocks
+/// the merge. Confidence must be a number from 0 to 1.
+pub(crate) fn effective_verdict(
+    approve: bool,
+    verdict: Option<ReviewVerdict>,
+    findings: &[ReviewFinding],
+) -> Result<ReviewVerdict, CoreError> {
+    for finding in findings {
+        if !(0.0..=1.0).contains(&finding.confidence) {
+            return Err(CoreError::Conflict(format!(
+                "finding {:?} has confidence {}; it must be a number from 0 to 1",
+                finding.title, finding.confidence
+            )));
+        }
+    }
+    let effective = verdict.unwrap_or(if approve {
+        ReviewVerdict::Merge
+    } else {
+        ReviewVerdict::DoNotMerge
+    });
+    if approve && effective == ReviewVerdict::DoNotMerge {
+        return Err(CoreError::Conflict(
+            "approve=true but verdict=do_not_merge; approve and verdict must agree (pass approve=false, or verdict=merge)".into(),
+        ));
+    }
+    if !approve && effective == ReviewVerdict::Merge {
+        return Err(CoreError::Conflict(
+            "approve=false but verdict=merge; approve and verdict must agree (pass approve=true, or verdict=do_not_merge)".into(),
+        ));
+    }
+    if effective == ReviewVerdict::Merge
+        && findings.iter().any(|f| f.severity == ReviewSeverity::P0)
+    {
+        return Err(CoreError::Conflict(
+            "the review has a P0 finding but verdict=merge; P0 blocks the merge".into(),
+        ));
+    }
+    Ok(effective)
+}
+
+/// The findings most severe first, blocking ones (P0/P1) before the rest. Stable, so findings
+/// of one severity keep the reviewer's order.
+pub(crate) fn sorted_findings(findings: &[ReviewFinding]) -> Vec<ReviewFinding> {
+    let mut sorted = findings.to_vec();
+    sorted.sort_by_key(|f| f.severity);
+    sorted
+}
+
+fn severity_name(severity: ReviewSeverity) -> &'static str {
+    match severity {
+        ReviewSeverity::P0 => "P0",
+        ReviewSeverity::P1 => "P1",
+        ReviewSeverity::P2 => "P2",
+        ReviewSeverity::P3 => "P3",
+    }
+}
+
+fn verdict_name(verdict: ReviewVerdict) -> &'static str {
+    match verdict {
+        ReviewVerdict::Merge => "merge",
+        ReviewVerdict::MergeAfterFixes => "merge_after_fixes",
+        ReviewVerdict::DoNotMerge => "do_not_merge",
+    }
+}
+
+/// The reviewer's notes plus its conclusion and findings, P0 first and the blocking ones
+/// (P0/P1) before the rest. A call that gives neither a verdict nor a finding gets its notes
+/// back unchanged, so an old `review_submit` reads exactly as it did.
+pub(crate) fn review_notes(
+    notes: &str,
+    findings: &[ReviewFinding],
+    verdict: Option<ReviewVerdict>,
+) -> String {
+    let notes = notes.trim_end();
+    if findings.is_empty() && verdict.is_none() {
+        return notes.to_owned();
+    }
+    let mut out = String::from(notes);
+    if !out.is_empty() {
+        out.push_str("\n\n");
+    }
+    if let Some(verdict) = verdict {
+        out.push_str(&format!("Verdict: {}\n", verdict_name(verdict)));
+    }
+    if !findings.is_empty() {
+        out.push_str("Findings, blocking first (P0/P1 block the merge):\n");
+        for finding in sorted_findings(findings) {
+            let place = match (&finding.file, finding.line) {
+                (Some(file), Some(line)) => format!(" — {file}:{line}"),
+                (Some(file), None) => format!(" — {file}"),
+                (None, _) => String::new(),
+            };
+            out.push_str(&format!(
+                "- {} {} (confidence {:.2}){}\n",
+                severity_name(finding.severity),
+                finding.title.trim(),
+                finding.confidence,
+                place
+            ));
+            if let Some(detail) = finding.detail.as_deref().map(str::trim)
+                && !detail.is_empty()
+            {
+                out.push_str(&format!("  {}\n", detail.replace('\n', "\n  ")));
+            }
+        }
+    }
+    out.trim_end().to_owned()
+}
 
 /// Bytes of diff handed out at once; more is cut and flagged.
 pub const DIFF_LIMIT: usize = 2 * 1024 * 1024;
