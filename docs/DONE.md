@@ -309,6 +309,10 @@ B 删除 run：
 
 > 2026-11-06 run `7cfd5794`。各条的来源和依据见 [TODO.md](TODO.md) 同名一节；没做完的条目留在那里。
 
+- [x] **3. 排队的提示随人的消息一起送**（Cutex 057）：人发消息时，如果这个 agent 还排着一条没开始的通知汇总，hub 就把汇总撤回（发 `agent.input_withdrawn`），并进人的这条消息。agent 读到的是人的话在前、汇总在后，不用为汇总单独多跑一轮。`agent.input` 和转录的每一轮都多了 `notices` 字段，`text` 仍是人的原话；GUI 把提示折叠挂在人的气泡下面（「随这条消息送达 N 条提示」），重新加载转录后还在。汇总已经开始，或者人发出之后才到的通知，照原来的规则走。撤回和合并在 `digests` 锁里一次做完，加锁顺序和 `notify` 一致（评审时发现过一个丢行的竞态，已修）。
+  - 代码：`crates/hub/src/runtime.rs` `take_waiting_digest`、`crates/core/src/event.rs`、`crates/hub/src/transcript.rs`、`crates/api-types`、`apps/gui/src/views/SessionMessage.tsx`、`lib/notices.ts`。
+  - 测试：`crates/mock-agent/tests/notices_ride.rs`，2 个用例覆盖 3 种情形（合并且只多跑一轮；汇总已开始时不合并；合并之后再来的通知另起一条汇总）；`apps/gui/src/lib/notices.test.ts`。
+  - 没验证：气泡下的提示没在真窗口里看过，只测了数据处理，过了类型检查；合并之后、那一轮开始之前 hub 如果重启，恢复时只按 `text` 重新排队，带着的汇总会丢（这是原有的恢复路径，没改）；外部 agent 不合并。
 - [x] **7. 合并的活动流**（oh-my-pi agent-hub.md 的 Activity）：工具列新增「活动」标签，可放进右侧或底部 dock。所有 agent 的回复、工具调用、错误、消息（agent 之间的、人的、向人提问和人的回答）排成一条时间线，最新的在上面。类型可多选筛选（错误 / 回复 / 工具 / 消息）；范围可以是全部、某个 agent，也可以是它连同下属（按 `spawned_by_agent` 递归推算，防环）。点一条就打开那个会话，并滚到对应的那一轮；找不到那一轮时，在面板里说明。
   - 代码：`apps/gui/src/lib/activityFeed.ts`（纯函数）、`ActivityFeed.tsx`、`activityfeed.css`，在 `panes.ts` 登记标签。
   - 测试：`apps/gui/src/lib/activityFeed.test.ts`（10 条），覆盖事件折叠、流式合并、工具失败更新、轮次关联、下属推算、范围和类型筛选。

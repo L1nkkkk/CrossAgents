@@ -338,7 +338,6 @@ B3 远程开发：
   - 人自己发起的中断不弹提示。
 
   先只读核对，列出我们违反的几条，再定改哪些
-- [ ] **3. 排队的提示随人的消息一起送**（Cutex [057-notices-ride-with-owner-message.md](https://github.com/senxiu-official/cutex-desktop/blob/9fbae59caa37c09eaa89d127a233f83d49601203/docs/design/057-notices-ride-with-owner-message.md)）：我们的通知汇总是单独一条消息（`crates/hub/src/runtime.rs` 的 `notify`）。人发消息时前面如果排着汇总，agent 要多跑一轮。改成：汇总还没开始时，并进人的这条消息，人的话在前、汇总在后，界面上挂在人的气泡下面而不是混进正文；人发出之后才到的通知按现有规则走。改动小，还省额度
 - [ ] **4. hub 层的流式规则**（oh-my-pi [ttsr-injection-lifecycle.md](https://github.com/can1357/oh-my-pi/blob/b7221d994869ed36a81b44e60827786f572498ed/docs/ttsr-injection-lifecycle.md)）：规则平时不进上下文，agent 的输出或工具调用命中正则时，hub 用插话把这条规则送进去（不支持插话的驱动就中断后重发）。比把所有规则塞进系统提示省上下文。要定：规则写在哪（项目文件还是扩展）、同一条规则多久内只注入一次、压缩上下文后还算不算已注入
 - [ ] **5. 任务交结构化结果**（oh-my-pi 的 subagent：结果按 schema 校验，父 agent 按路径取字段）：`task_create` 可以带一个结果 schema，`task_complete` 按它校验并存成 JSON，主导用 `task_get` 按路径取。现在只交一段文字总结，主导得自己读
 - [ ] **6. 评审给明确结论**（oh-my-pi 的 `/review`）：`review_submit` 的每个问题按 P0–P3 分级并标置信度，最后给一个能不能合的结论；GUI 按级别排，先看挡合并的
