@@ -100,6 +100,7 @@ export function applyEvent(t: Transcript, event: HubEvent): Transcript {
         stop_reason: null,
         items: [],
         ...(event.data.attachments?.length ? { attachments: event.data.attachments } : {}),
+        ...(event.data.notices?.length ? { notices: event.data.notices } : {}),
       };
       return { ...t, turns: [...turns, turn], last_seq: seq };
     }

@@ -37,4 +37,9 @@ diff?: TurnDiffStat,
  * Files sent with the message; their contents at
  * `GET /v1/agents/{key}/attachments/{id}`.
  */
-attachments?: Array<Attachment>, };
+attachments?: Array<Attachment>, 
+/**
+ * Notices that rode along with the message (docs/TODO.md §二十五 第 3 条): in what the
+ * agent read, after `input`, but not part of it.
+ */
+notices?: Array<string>, };

@@ -100,6 +100,11 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         #[cfg_attr(feature = "ts", ts(as = "Option<Vec<crate::Attachment>>", optional))]
         attachments: Vec<crate::Attachment>,
+        /// Notices that rode along with it (docs/TODO.md §二十五 第 3 条): they are in what
+        /// the agent reads, after the person's words, but not in `text`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[cfg_attr(feature = "ts", ts(as = "Option<Vec<String>>", optional))]
+        notices: Vec<String>,
     },
     /// A waiting message got new text (the hub's notification digest gathers news while
     /// the agent is busy).

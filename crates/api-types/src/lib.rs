@@ -339,6 +339,11 @@ pub struct TranscriptTurn {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(as = "Option<Vec<crossagents_core::Attachment>>", optional)]
     pub attachments: Vec<crossagents_core::Attachment>,
+    /// Notices that rode along with the message (docs/TODO.md §二十五 第 3 条): in what the
+    /// agent read, after `input`, but not part of it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<String>>", optional)]
+    pub notices: Vec<String>,
 }
 
 /// Files a turn changed, with added and removed lines.
