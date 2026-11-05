@@ -6,11 +6,26 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell, session, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell, session, protocol, net, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
 import { allowed, REQUEST_TIMEOUT_MS, route, timeoutFor } from "./allowed.cjs";
 import { manageLocalHub, type LocalHub } from "./localHub.cjs";
 import { createTray, type AppTray } from "./tray.cjs";
 import { startUpdates, type Updates } from "./updates.cjs";
+import { extensionRealFile, type ExtensionVersions } from "./extProtocol.cjs";
+import { decideSafeMode, loadingMarker, type SafeMode } from "./safeMode.cjs";
+
+// Must run before app.ready. CORS remains enabled for module imports from file://.
+protocol.registerSchemesAsPrivileged([{ scheme: "crossagents-ext", privileges: {
+  standard: true, secure: true, supportFetchAPI: true, corsEnabled: true,
+} }]);
+let safeMode: SafeMode = { enabled: false, reason: null };
+const extensionLoading = loadingMarker(join(hubHome(), "gui-extension-loading"));
+
+function restartSafeMode() {
+  app.relaunch({ args: [...process.argv.slice(1).filter((arg) => arg !== "--safe-mode"), "--safe-mode"] });
+  // A stuck renderer must not be able to veto recovery with beforeunload.
+  app.exit(0);
+}
 
 const METHODS = new Set(["GET", "POST", "DELETE"]);
 const RECONNECT_MS = 2_000;
@@ -84,6 +99,43 @@ function message(err: unknown): string {
 function fromApp(event: IpcMainEvent | IpcMainInvokeEvent): boolean {
   const url = event.senderFrame?.url;
   return !!url && url.startsWith(appUrl);
+}
+
+ipcMain.handle("extensions:safe-mode", (event) => {
+  if (!fromApp(event)) throw new Error("request from an unknown page");
+  return safeMode;
+});
+ipcMain.handle("extensions:loading", (event) => {
+  if (!fromApp(event)) throw new Error("request from an unknown page");
+  if (!safeMode.enabled) extensionLoading.start();
+});
+ipcMain.handle("extensions:ready", (event) => {
+  if (!fromApp(event)) throw new Error("request from an unknown page");
+  extensionLoading.ready();
+});
+
+async function serveExtension(request: Request): Promise<Response> {
+  const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS" };
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
+  if (request.method !== "GET" && request.method !== "HEAD") return new Response(null, { status: 405, headers: cors });
+  if (safeMode.enabled) return new Response("Extensions are disabled in safe mode", { status: 403, headers: cors });
+  try {
+    await localHub?.ready();
+    const { base, token } = await connection();
+    const response = await fetch(`${base}/v1/extensions`, {
+      headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!response.ok) throw new Error(`extensions: HTTP ${response.status}`);
+    const { extensions } = await response.json() as { extensions: ExtensionVersions[] };
+    const file = await extensionRealFile(hubHome(), request.url, extensions);
+    const asset = await net.fetch(pathToFileURL(file).href, { method: request.method });
+    const headers = new Headers(asset.headers);
+    for (const [name, value] of Object.entries(cors)) headers.set(name, value);
+    return new Response(asset.body, { status: asset.status, headers });
+  } catch (err) {
+    logLine(`extension protocol: ${message(err)}`);
+    return new Response("Extension asset unavailable", { status: 404, headers: cors });
+  }
 }
 
 ipcMain.handle("hub:request", async (event, method: unknown, path: unknown, body: unknown) => {
@@ -459,6 +511,17 @@ async function createWindow() {
     },
   });
   win.once("ready-to-show", () => win.show());
+  let askingRecovery = false;
+  win.on("unresponsive", () => {
+    if (askingRecovery) return;
+    askingRecovery = true;
+    void dialog.showMessageBox(win, {
+      type: "warning", title: "CrossAgents", message: "窗口没有响应，要以安全模式重启吗？",
+      detail: "安全模式会跳过所有扩展，后台的 hub 和 agent 会继续运行。",
+      buttons: ["以安全模式重启", "继续等待"], defaultId: 0, cancelId: 1, noLink: true,
+    }).then(({ response }) => { if (response === 0) restartSafeMode(); })
+      .finally(() => { askingRecovery = false; });
+  });
   tray?.keep(win);
   // No native menu, so the shortcuts it carried are wired here: zoom always (the page's own
   // menu, src/menubar.tsx, lists them); reload and dev tools only in development.
@@ -524,13 +587,19 @@ app.on("second-instance", showWindow);
 
 app.whenReady().then(() => {
   if (!single) return;
+  const unfinished = extensionLoading.unfinished();
+  safeMode = decideSafeMode(process.argv, unfinished);
+  protocol.handle("crossagents-ext", serveExtension);
+  if (unfinished && safeMode.enabled) {
+    void dialog.showMessageBox({ type: "warning", title: "CrossAgents 安全模式", message: safeMode.reason!, buttons: ["确定"] });
+  }
   if (app.isPackaged) {
     const exe = process.platform === "win32" ? "crossagents.exe" : "crossagents";
     localHub = manageLocalHub(join(process.resourcesPath, "bin", exe), hubHome(), logLine);
     // Downloads a newer release in the background and installs it when the GUI quits; the
     // next launch then upgrades the local hub (package.json `build.publish`).
     updates = startUpdates(logLine);
-    tray = createTray(join(process.resourcesPath, "icon.ico"), localHub, showWindow, logLine, updates);
+    tray = createTray(join(process.resourcesPath, "icon.ico"), localHub, showWindow, logLine, updates, restartSafeMode);
   }
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   session.defaultSession.setPermissionCheckHandler(() => false);

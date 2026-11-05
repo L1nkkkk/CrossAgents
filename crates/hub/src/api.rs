@@ -69,6 +69,7 @@ const MESSAGE_BODY_LIMIT: usize =
     crossagents_api_types::MAX_ATTACHMENTS_TOTAL / 3 * 4 + 1024 * 1024;
 
 pub struct AppState {
+    pub extensions: Arc<crate::extensions::Registry>,
     pub bus: Arc<EventBus>,
     pub runtime: Arc<Runtime>,
     pub orchestrator: Arc<Orchestrator>,
@@ -148,6 +149,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/notes", get(list_notes))
         .route("/v1/background", get(background))
         .route("/v1/background/reminders/{id}", delete(cancel_reminder))
+        .route("/v1/extensions", get(list_extensions))
+        .route("/v1/extensions/{name}/enable", post(enable_extension))
+        .route("/v1/extensions/{name}/disable", post(disable_extension))
+        .route(
+            "/v1/extensions/{name}/auto-trust",
+            post(auto_trust_extension),
+        )
+        .route("/v1/extensions/{name}/pending/diff", get(extension_diff))
         .route("/v1/plugins", get(list_plugins))
         .route("/v1/plugins/refresh", post(refresh_plugins))
         .route("/v1/plugins/{name}/models", post(set_plugin_models))
@@ -2720,4 +2729,53 @@ async fn replay(state: &AppState, last: &mut u64, tx: &mpsc::Sender<Event>) -> b
             }
         }
     }
+}
+
+async fn list_extensions(
+    State(s): State<Arc<AppState>>,
+) -> Json<crossagents_api_types::ExtensionsResponse> {
+    Json(crossagents_api_types::ExtensionsResponse {
+        extensions: s.extensions.list(),
+    })
+}
+async fn enable_extension(
+    State(s): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(req): Json<crossagents_api_types::EnableExtensionRequest>,
+) -> ApiResult<Json<crossagents_api_types::ExtensionInfo>> {
+    let r = s.extensions.clone();
+    Ok(Json(
+        tokio::task::spawn_blocking(move || r.enable(&name, &req.fingerprint))
+            .await
+            .map_err(|e| CoreError::Storage(e.to_string()))??,
+    ))
+}
+async fn disable_extension(
+    State(s): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<crossagents_api_types::ExtensionInfo>> {
+    Ok(Json(s.extensions.disable(&name)?))
+}
+async fn auto_trust_extension(
+    State(s): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(req): Json<crossagents_api_types::SetExtensionAutoTrustRequest>,
+) -> ApiResult<Json<crossagents_api_types::ExtensionInfo>> {
+    let r = s.extensions.clone();
+    Ok(Json(
+        tokio::task::spawn_blocking(move || r.set_auto_trust(&name, req.auto_trust))
+            .await
+            .map_err(|e| CoreError::Storage(e.to_string()))??,
+    ))
+}
+async fn extension_diff(
+    State(s): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<crossagents_api_types::ExtensionDiffResponse>> {
+    let r = s.extensions.clone();
+    Ok(Json(
+        tokio::task::spawn_blocking(move || r.pending_diff(&name))
+            .await
+            .map_err(|e| CoreError::Storage(e.to_string()))??,
+    ))
 }
