@@ -284,6 +284,9 @@ struct Turn {
     /// The interrupt left the unread steers queued (`still_queued`): they will still be
     /// read, so the turn waits for them like a late message.
     keep_queued: bool,
+    /// The interrupt's answer is in flight: whether unread steers survive it is not
+    /// known yet, so a result must wait for that answer instead of calling them lost.
+    interrupting: bool,
 }
 
 /// A message written into the running turn, waiting for the model to read it.
@@ -291,6 +294,39 @@ struct PendingSteer {
     id: MessageId,
     /// Its opening words, for a warning when it never gets read.
     snippet: String,
+}
+
+/// Keeps `Turn::interrupting` while the interrupt's answer is on its way, and settles the
+/// turn whenever that wait ends: the answer arrived, the request failed or timed out, or
+/// the caller's future was dropped (a cancel whose client went away). A result that
+/// arrived meanwhile then ends the turn if the unread messages were not kept queued.
+struct InterruptWait<'a> {
+    shared: &'a Shared,
+    /// The turn being interrupted: an answer about any other turn is not for this one.
+    turn_id: Option<String>,
+}
+
+impl InterruptWait<'_> {
+    fn settle(&self) {
+        let mut turn = self.shared.turn.lock().expect("turn lock");
+        if !turn.interrupting || turn.id != self.turn_id {
+            return;
+        }
+        turn.interrupting = false;
+        // Nothing kept queued and no separate turn to report: those messages will not be
+        // read, so the result that waited on this answer ends the turn now.
+        let waiting_for_steer = turn.separate_steer_turn && turn.steer_results.is_empty();
+        if turn.prompt_done && !turn.keep_queued && !waiting_for_steer && !turn.steers.is_empty() {
+            let stop = turn.held_stop.unwrap_or(StopReason::Cancelled);
+            self.shared.finish_turn(&mut turn, stop);
+        }
+    }
+}
+
+impl Drop for InterruptWait<'_> {
+    fn drop(&mut self) {
+        self.settle();
+    }
 }
 
 impl Shared {
@@ -524,6 +560,12 @@ impl Shared {
                     turn.held_stop.get_or_insert(stop);
                     let unread = !turn.steers.is_empty();
                     let separate = turn.separate_steer_turn && turn.steer_results.is_empty();
+                    // The interrupt's answer is still on its way: whether these unread
+                    // messages survive it is not known, so a failed result must not call
+                    // them lost. `interrupt` ends the turn once it has the answer.
+                    if turn.interrupting && unread {
+                        return;
+                    }
                     let survives = turn.interrupted && turn.keep_queued;
                     if (survives || !failed) && (unread || separate) {
                         return;
@@ -1005,31 +1047,50 @@ impl DriverSession for ClaudeSession {
     }
 
     async fn interrupt(&self) -> Result<(), CoreError> {
-        let unread = {
+        let (turn_id, unread) = {
             let mut turn = self.shared.turn.lock().expect("turn lock");
             if turn.waiter.is_none() {
                 return Ok(());
             }
             turn.interrupted = true;
-            !turn.steers.is_empty()
+            let unread = !turn.steers.is_empty();
+            // The answer decides whether they survive the interrupt: until it is here,
+            // a result must leave the turn open rather than end it.
+            turn.interrupting = unread;
+            (turn.id.clone(), unread)
+        };
+        // However the answer ends — received, failed, timed out, or this request dropped —
+        // the turn must not stay waiting for it.
+        let wait = InterruptWait {
+            shared: &self.shared,
+            turn_id: turn_id.clone(),
         };
         let answer = self
             .shared
             .control(json!({ "subtype": "interrupt" }), CLEANUP_TIMEOUT)
             .await;
-        if unread {
-            // Claude Code keeps unread stdin messages queued across an interrupt: it
-            // answers with `still_queued` (verified with claude 2.1.317), and the next
-            // turn reads them. The turn then waits for them like a late message.
-            let queued = answer.as_ref().is_ok_and(|answer| {
-                answer
-                    .get("still_queued")
-                    .and_then(Value::as_array)
-                    .is_some_and(|queued| !queued.is_empty())
-            });
-            self.shared.turn.lock().expect("turn lock").keep_queued = queued;
+        if !unread {
+            return Ok(());
         }
-        // The turn may have ended meanwhile, or the process is gone.
+        // Claude Code keeps unread stdin messages queued across an interrupt: it
+        // answers with `still_queued` (verified with claude 2.1.317), and the next
+        // turn reads them. The turn then waits for them like a late message.
+        let queued = answer.as_ref().is_ok_and(|answer| {
+            answer
+                .get("still_queued")
+                .and_then(Value::as_array)
+                .is_some_and(|queued| !queued.is_empty())
+        });
+        {
+            let mut turn = self.shared.turn.lock().expect("turn lock");
+            // The turn may have ended meanwhile (or another one started): its messages
+            // already got their answer, and this one is not about them.
+            if turn.interrupting && turn.id == turn_id {
+                turn.keep_queued = queued;
+            }
+        }
+        // With the answer in, a result that waited for it may end the turn now.
+        wait.settle();
         Ok(())
     }
 
