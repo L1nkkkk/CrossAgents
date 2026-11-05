@@ -506,6 +506,9 @@ pub struct TaskSpec {
     pub acceptance: Vec<String>,
     #[serde(default)]
     pub references: Vec<String>,
+    /// JSON Schema for the worker?s structured result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_schema: Option<serde_json::Value>,
 }
 
 /// One task in a submitted plan. `key` is the planner's own short name for it.
@@ -551,6 +554,12 @@ pub struct CheckResult {
     pub output: String,
 }
 
+fn deserialize_result<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<serde_json::Value>, D::Error> {
+    serde_json::Value::deserialize(deserializer).map(Some)
+}
+
 /// What is known about a task's outcome so far.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -558,6 +567,13 @@ pub struct TaskReport {
     /// The worker's summary from `task_complete`.
     #[serde(default)]
     pub summary: Option<String>,
+    /// Structured result supplied by the worker.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_result"
+    )]
+    pub result: Option<serde_json::Value>,
     /// Latest acceptance results.
     #[serde(default)]
     pub checks: Vec<CheckResult>,

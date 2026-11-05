@@ -106,7 +106,7 @@ grep for what you need, then read that range; do not read it whole. Report with 
 task_id from your task: `task_progress` for a short status now and then, `task_ask` if the spec \
 is unclear (then end your turn and wait for the answer; asking again replaces the open \
 question), `task_complete` with a summary of what \
-you changed when done, `task_fail` with the reason if it cannot be done. The task's issuer \
+you changed and, when the task has a result_schema, a matching result when done, `task_fail` with the reason if it cannot be done. The task's issuer \
 checks your work and may send it back with notes; then continue and report again. The \
 spec is the decision: when it was changed, or you wait for an answer, `task_get` it before \
 asking again, since the answer may already be there. When you are given a task yourself (with your conversation, rather than as a new session), you work in \
