@@ -35,25 +35,71 @@ pub(crate) async fn write_progress<W: tokio::io::AsyncWrite + Unpin + ?Sized>(
     bytes: &[u8],
     stall: Duration,
 ) -> std::io::Result<()> {
+    write_progress_detailed(writer, bytes, stall)
+        .await
+        .map_err(|e| e.error)
+}
+
+pub(crate) struct WriteFailure {
+    pub error: std::io::Error,
+    pub written: usize,
+    pub remaining: usize,
+    pub idle: Duration,
+}
+
+pub(crate) async fn write_progress_detailed<W: tokio::io::AsyncWrite + Unpin + ?Sized>(
+    writer: &mut W,
+    bytes: &[u8],
+    stall: Duration,
+) -> Result<(), WriteFailure> {
     use tokio::io::AsyncWriteExt;
     let mut remaining = bytes;
+    let mut last_progress = tokio::time::Instant::now();
     while !remaining.is_empty() {
-        let n = tokio::time::timeout(stall, writer.write(remaining))
-            .await
-            .map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::TimedOut, "stdin write stalled")
-            })??;
+        let result = tokio::time::timeout(stall, writer.write(remaining)).await;
+        let n = match result {
+            Ok(Ok(n)) => n,
+            other => {
+                let error = match other {
+                    Err(_) => {
+                        std::io::Error::new(std::io::ErrorKind::TimedOut, "stdin write stalled")
+                    }
+                    Ok(Err(e)) => e,
+                    Ok(Ok(_)) => unreachable!(),
+                };
+                return Err(WriteFailure {
+                    error,
+                    written: bytes.len() - remaining.len(),
+                    remaining: remaining.len(),
+                    idle: last_progress.elapsed(),
+                });
+            }
+        };
         if n == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::WriteZero,
-                "stdin closed",
-            ));
+            return Err(WriteFailure {
+                error: std::io::Error::new(std::io::ErrorKind::WriteZero, "stdin closed"),
+                written: bytes.len() - remaining.len(),
+                remaining: remaining.len(),
+                idle: last_progress.elapsed(),
+            });
         }
         remaining = &remaining[n..];
+        last_progress = tokio::time::Instant::now();
     }
-    tokio::time::timeout(stall, writer.flush())
-        .await
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "stdin flush stalled"))?
+    let result = tokio::time::timeout(stall, writer.flush()).await;
+    match result {
+        Ok(Ok(())) => Ok(()),
+        other => Err(WriteFailure {
+            error: match other {
+                Err(_) => std::io::Error::new(std::io::ErrorKind::TimedOut, "stdin flush stalled"),
+                Ok(Err(e)) => e,
+                Ok(Ok(())) => unreachable!(),
+            },
+            written: bytes.len(),
+            remaining: 0,
+            idle: last_progress.elapsed(),
+        }),
+    }
 }
 
 /// How the hub starts hosts. Without settings every agent process is a direct child.
