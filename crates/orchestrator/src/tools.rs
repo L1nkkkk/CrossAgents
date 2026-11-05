@@ -438,7 +438,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "run_next",
-        description: "Start the next round in your work group after your run ended. Write the person's request verbatim. Starts immediately, using this group's plan policy. Set from to base to leave the previous round's unlanded changes behind.",
+        description: "Start the next round in your work group after your run ended. Write the person's request verbatim. Uses this group's plan policy. If moving your session must wait for this turn to end, returns status scheduled instead of a run id; the hub waits up to 120 seconds for you to be idle and notifies you if it fails. Creation then uses the GUI path and its existing bounds; after 120 seconds in creation a notice reports that it is still starting and has not been cancelled. A schedule is not persistent: a hub restart loses it, so call run_next again after restart. Set from to base to leave the previous round's unlanded changes behind.",
         groups: RECRUITERS,
         schema: || {
             object(

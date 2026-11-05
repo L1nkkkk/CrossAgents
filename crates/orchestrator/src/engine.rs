@@ -157,6 +157,13 @@ pub struct Orchestrator {
     locks: Mutex<HashMap<RunId, Arc<Mutex<()>>>>,
     /// Cards being answered or dismissed, by id ([`Self::lock_card`]).
     cards: CardLocks,
+    /// Scheduled run_next requests, keyed by the work and the terminal source run.
+    pub(crate) scheduled_rounds:
+        std::sync::Mutex<std::collections::HashSet<(crossagents_core::WorkId, RunId)>>,
+    #[cfg(test)]
+    pub(crate) round_wait_limit: std::sync::Mutex<std::time::Duration>,
+    #[cfg(test)]
+    relay_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     pub(crate) messaging: Mutex<crate::messaging::MessagingState>,
     /// Approvals waiting for the person, by question id (docs/tasks/DOGFOOD.md §7).
     pub(crate) approvals: std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
@@ -247,6 +254,11 @@ impl Orchestrator {
             config,
             locks: Mutex::default(),
             cards: CardLocks::default(),
+            scheduled_rounds: std::sync::Mutex::default(),
+            #[cfg(test)]
+            round_wait_limit: std::sync::Mutex::new(std::time::Duration::from_secs(120)),
+            #[cfg(test)]
+            relay_tasks: std::sync::Mutex::new(Vec::new()),
             messaging: Mutex::default(),
             approvals: std::sync::Mutex::default(),
             contexts: std::sync::Mutex::default(),
@@ -407,12 +419,25 @@ impl Orchestrator {
         };
         let id = envelope.id;
         let host = self.host.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             if let Err(err) = host.send_envelope(to, envelope, false).await {
                 tracing::warn!(agent = %to, error = %err, "cannot deliver message");
             }
         });
+        #[cfg(test)]
+        self.relay_tasks.lock().unwrap().push(handle);
+        #[cfg(not(test))]
+        drop(handle);
         id
+    }
+
+    /// Tests await every relay started before their producer's completion barrier.
+    #[cfg(test)]
+    pub(crate) async fn drain_relays(&self) {
+        let tasks = std::mem::take(&mut *self.relay_tasks.lock().unwrap());
+        for task in tasks {
+            task.await.expect("relay task panicked");
+        }
     }
 
     /// Sends in the background: starting an agent can take minutes.
@@ -519,13 +544,53 @@ impl Orchestrator {
         work_id: Option<crossagents_core::WorkId>,
         from_base: bool,
     ) -> Result<Run, CoreError> {
+        self.create_run_for_work_from_checked(new, fresh, restore, work_id, from_base, None)
+            .await
+    }
+
+    pub(crate) async fn create_run_for_work_from_checked(
+        &self,
+        new: NewRun,
+        fresh: Option<bool>,
+        restore: bool,
+        work_id: Option<crossagents_core::WorkId>,
+        from_base: bool,
+        source: Option<(RunId, AgentId)>,
+    ) -> Result<Run, CoreError> {
         let _work_guard = if let Some(id) = work_id {
             Some(self.lock_card(&format!("work:{id}")).await)
         } else {
             None
         };
         if let Some(id) = work_id {
-            self.store.get_work(id).await?;
+            let work = self.store.get_work(id).await?;
+            if let Some((source_id, lead)) = source {
+                let runs = self.store.list_runs().await?;
+                let latest = runs.iter().find(|run| run.work_id == Some(id));
+                if work.lead != lead
+                    || new.planner != lead
+                    || !latest.is_some_and(|run| {
+                        run.id == source_id && run.planner == lead && run.status.is_terminal()
+                    })
+                {
+                    return Err(CoreError::Conflict(
+                        "the source round or work lead changed while the next round was scheduled"
+                            .into(),
+                    ));
+                }
+                let agent = self.store.get_agent(&AgentKey::Id(lead)).await?;
+                if agent.archived_at.is_some()
+                    || !self
+                        .tools_for(&agent)
+                        .await
+                        .iter()
+                        .any(|tool| tool.name == "run_next")
+                {
+                    return Err(CoreError::Conflict(
+                        "the lead's access changed while the next round was scheduled".into(),
+                    ));
+                }
+            }
             if let Some(open) = self
                 .store
                 .list_runs()

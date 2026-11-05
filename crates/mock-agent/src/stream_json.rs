@@ -24,6 +24,7 @@
 //!
 //! - `[remember X]` keep X in the session (with `--mock-sessions`)
 //! - `[recall]`    say what the session keeps
+//! - `--mock-mobile-sessions DIR` keeps memory across cwd changes.
 //!
 //! `--resume` fails (the process exits before answering `initialize`) in a directory that
 //! has a file named `mock-no-resume`, for testing what happens when a session cannot be
@@ -357,12 +358,18 @@ pub async fn run(args: Vec<String>) {
         .unwrap_or_else(|_| cwd.clone())
         .display()
         .to_string();
-    let kept = flag(&args, "--mock-sessions")
+    let mobile = flag(&args, "--mock-mobile-sessions");
+    let kept = mobile
+        .clone()
+        .or_else(|| flag(&args, "--mock-sessions"))
         .map(|dir| std::path::PathBuf::from(dir).join(format!("{session_id}.json")));
     if let Some(kept) = &kept {
         if resumed {
             let found = read_kept(kept);
-            if found.as_ref().and_then(|s| s["cwd"].as_str()) != Some(here.as_str()) {
+            if found.is_none()
+                || (mobile.is_none()
+                    && found.as_ref().and_then(|s| s["cwd"].as_str()) != Some(here.as_str()))
+            {
                 eprintln!("No conversation found with session ID: {session_id}");
                 std::process::exit(1);
             }
