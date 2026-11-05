@@ -96,7 +96,12 @@ entry = "gui/index.js"
 - 环境变量：`CROSSAGENTS_URL`、`CROSSAGENTS_TOKEN`（见下文）、`CROSSAGENTS_EXTENSION_DATA`，
   再加 hub 自己的代理变量（`claude.com` 这类地址没代理到不了）。
 - 进程的工作目录是快照目录，调用方的目录在 `caller.cwd`。快照只读，要落盘就写数据目录。
-- 不经过 shell。
+- 不经过 shell：`command` 的第一项和其余参数原样交给操作系统。
+- hub 自己环境里的代理变量（`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY`，大小写都认）原样带给工具；
+  agent 的会话 token（`CROSSAGENTS_AGENT_TOKEN`）不带。
+- 没有 `input` 当作 `{}`，再按 `input_schema` 校验。
+- 成功时 stdout 解析出的 JSON 就是结果；退出码 0 但 stdout 不是 JSON（包括空）算失败。
+- 结果里的 `stderr` 是最后 64 KB，成功时也带。
 
 ### 运行限制
 
@@ -105,13 +110,21 @@ entry = "gui/index.js"
 | 超时 | 默认 60 秒，上限 10 分钟；到点用 Job Object 杀掉进程树，复用 [crates/core/src/process/job.rs](../crates/core/src/process/job.rs) 的 `Job`（`new` → `assign(pid)` → `terminate`，非 Windows 上是空实现，Unix 用 `kill_group`） |
 | stdout | 上限 1 MB，超过就杀掉进程并报错，不截断（截断的 JSON 没有意义） |
 | stderr | 只保留最后 64 KB，不影响进程运行；完整输出写日志，单文件 10 MB 滚动 |
-| 并发 | 每个扩展 4 个、全局 16 个；超出立刻返回“忙”，不排队（排队会让调用方的超时更难判断） |
+| 并发 | 每个扩展 4 个、全局 16 个；超出立刻返回“忙”（HTTP 429，错误码 `conflict`），不排队（排队会让调用方的超时更难判断） |
 
 正在执行的调用：
 
 - **切换版本**：已开始的调用在旧快照上跑完，新调用用新版本。调用占用的快照不会被清理。
 - **停用或卸载**：立刻拒绝新调用，已开始的调用 5 秒后杀掉。Windows 上 Job Object 只能强杀，工具不能指望收到退出通知。
+  现在只有停用（`Registry::disable`，经 `on_disabled` 通知运行器）；源目录删掉不算卸载，当前版本照旧可调。
 - **hub 退出**：全部杀掉。结果丢失，工具要自己保证重跑安全，hub 不做重试。
+- **取消**（`DELETE /v1/extensions/calls/{id}`）：立刻杀进程树，状态 `cancelled`。已经结束的调用，`DELETE` 原样回它的结果。
+
+日志在 `<home>/extension-logs/<扩展名>.log`：每次调用一行开头、一行结尾（状态和耗时），中间是 stderr 的全部内容；
+超过 10 MB 就把旧文件改名为 `<扩展名>.log.1`（覆盖更早的）再开新文件。
+
+进程用 [crates/core/src/process.rs](../crates/core/src/process.rs) 的 `spawn_tree_strict` 起：Windows 上先挂起、
+放进 Job Object 再放行（`job.rs` 的 `Job`），Unix 上自成一个进程组；起不了进程树就不运行。
 
 ### 接进 hub
 
@@ -120,8 +133,8 @@ entry = "gui/index.js"
 | `orchestrator/src/tools.rs` `TOOLS` | 静态表，`&'static str` | 不动，内置工具照旧 |
 | `tools_for` | 只读 `TOOLS` | 追加已启用扩展的工具，按 `groups` 过滤 |
 | `call_tool` | 在 `TOOLS` 里找不到就报 `NotFound` | 带 `__` 的名字转给扩展运行器 |
-| `Orchestrator` | 不知道扩展 | 注入一个 trait，运行器放在 `hub` crate |
-| 依赖 | 没有 JSON Schema 校验库 | 加一个，用于校验输入 |
+| `Orchestrator` | 不知道扩展 | 注入 `ExtensionHost`（`orchestrator/src/host.rs`，照 `AgentHost`），`Orchestrator::set_extensions` 设一次；运行器 `hub/src/extensions/runner.rs` 实现它 |
+| 依赖 | 没有 JSON Schema 校验库 | `jsonschema`（hub），描述文件校验和每次调用的输入校验共用 |
 
 ### 命名
 
@@ -149,20 +162,29 @@ entry = "gui/index.js"
 
 ### 调用方由 hub 决定
 
-`caller` 从凭据推出，请求体只能带 `input`，不能自己填身份：
+`caller` 从凭据推出，请求体只能带 `input`，不能自己填身份（请求体里多写的 `caller` 会被忽略）：
 
 - 经 `/v1/me/tools/*` 来的是 agent：`{ "kind": "agent", "id", "name", "groups", "cwd", "run", "task" }`。
+  `groups` 是调用那一刻 hub 算出来的，`run`、`task` 来自它当前持有的认领，没有就是 `null`。
 - 经 GUI 路由来的是人：`{ "kind": "human" }`。工具要在 `groups` 里写了 `human` 才能被 GUI 调用。
+- 工具的 `groups` 为空，谁都调不了（既不是 agent 的任何组，也不含 `human`）。
+
+**只有人的凭据才算 `human`。** `POST /v1/extensions/{name}/tools/{tool}` 只接受 `Grant::Level`（总 token、只读 token 里
+够 write 的那种）；扩展自己的 token（`Grant::Extension`）调这条路由一律 403，不管它是 read 还是 write。否则一个
+write 级的扩展拿着自己的 token 调这条路由，hub 会把它当成人，它就能调只开放给 `human` 的工具，等于冒充了人。
+这条在两处挡：`access::refusal`（策略点）和路由处理函数里再检查一次。agent 的会话 token 本来就只到 `/v1/me*`。
 
 同页面运行的 GUI 扩展之间互相分不开（§5），所以 `ca.tools.call` 限定“只调自己的工具”只是约定，不是安全边界。
 
 ### 扩展的 token
 
-`grant_of`（`crates/hub/src/api.rs`）现在只认总 token、只读 token 和会话 token，没有可以签发的 write 凭据，要新做：
+`grant_of`（`crates/hub/src/api.rs`）原来只认总 token、只读 token 和会话 token，没有可以签发的 write 凭据，E1 新做了：
 
-- 每次调用签发一个随机 token，只存在 hub 内存里，进程结束立刻作废；hub 重启后全部失效。
-- `Grant` 增加 `Extension { name, level }`，只能是 read 或 write，不能是 admin。走 `access.rs` 现有的策略点，
-  日志和事件记下是哪个扩展。
+- 每次调用签发一个随机 token（`ca-ext-…`），只存在 hub 内存里，进程树结束、结果可见之前就作废；hub 重启后全部失效。
+- `Grant` 增加 `Extension { name, level }`，`level` 的类型是 `ExtensionAccess`，只能是 read 或 write，不能是 admin。
+  走 `access.rs` 现有的策略点，按声明的级别放行；`Grant` 因此不再是 `Copy`，`refusal` 改成接受 `&Grant`。
+  拒绝的消息里写明是哪个扩展的 token，通过的请求也在日志里记下扩展名。
+- 扩展的 token 到不了 `/v1/me*`（那一组只认会话 token，回 401），到不了 admin 路由，也调不了上面那条「以人的身份调工具」的路由。
 - `access` 写在描述文件里，所以改它会改变指纹，需要重新批准。E4 的常驻进程按进程生命周期签发。
 
 ### 运行中的会话发现新工具
@@ -187,7 +209,20 @@ agent 和 GUI 的等待方式不同：
   `GET /v1/extensions/calls/{id}` 取（内存保留 10 分钟），`DELETE` 同一路径取消。
   `ca.tools.call` 把这些包成一个带 `cancel()` 的 Promise。它**从不自动重试**，因为工具可能有副作用。
 - **agent**：`/v1/me/tools/{name}` 照旧同步等待。这条路径用 `tokio::spawn` 脱离了请求，客户端放弃后进程还会继续跑到超时，
-  结果丢失。各家 CLI 自己的 MCP 超时还没实测，E1 要测出来写进这里，并在 `extension_api` 里告诉作者。
+  各家 CLI 自己的 MCP 超时见下。
+
+**MCP 工具调用超时实测**（2026-11-05，本机 Windows；做法：一个只有 `wait(seconds)` 一个工具的 stdio MCP 服务，
+让 CLI 非交互地调它，看 CLI 是否等到服务器答复）：
+
+| CLI | 版本 | 70 秒 | 650 秒 | 结论 |
+|---|---|---|---|---|
+| CodeBuddy | 2.179.2 | 成功 | 成功（约 650 秒后拿到结果） | 超过工具 10 分钟上限也不超时 |
+| Codex | 0.166.0-alpha.5.1（`~/.codex/plugins/.plugin-appserver/codex.exe`，非 PATH 上的发行版） | 成功 | **失败**：`timed out awaiting tools/call after 300s` | 超时在 70 到 300 秒之间不再细分，实测只到「300 秒时已放弃」；没有试 `tool_timeout_sec` 配置 |
+| Claude Code | 2.1.317（Claude Desktop 带的那份，`%LOCALAPPDATA%/Claude-Data/*/claude-code/*/*/claude.exe`，不在 PATH 上；`claude -p --permission-mode bypassPermissions`） | 成功 | 成功（约 650 秒后拿到结果） | 超过工具 10 分钟上限也不超时 |
+
+含义：Claude 和 CodeBuddy 不会先于 hub 的 10 分钟上限放弃；扩展工具要超过约 5 分钟，Codex 会话里的直接调用和 `extension_call` 都会在 CLI 一侧失败，而 hub 里的进程还会跑到
+自己的超时（结果丢失）。长任务的作者应把 `timeout_secs` 压在 300 以内，或自己拆成「启动 + 轮询」。
+`extension_api`（E3）要把这一条告诉作者。上面各数字只对测过的版本成立。
 
 ### 接口形状
 
@@ -228,7 +263,12 @@ E1（后端）和 E2（GUI）就靠这张表对接。类型都在
 `[[prompts]]` 按 group 把文件内容追加到 hub 的说明之后。hub 的说明现在是 `protocol.rs`、`brief.rs` 里的字符串，
 v1 只追加，不替换：替换后 hub 再改说明，覆盖的版本就会悄悄过时。追加已经够用来写团队约定和偏好。
 
-每次开新会话时读文件，所以改完下个会话就生效。运行中的会话不受影响。
+实现：`collab.rs` 的 `prepare` 在拼好整段说明（身份、hub 的指南、规则、教训）之后，把已启用扩展里
+`groups` 与会话所属 group 有交集的 `[[prompts]]` 文件内容按扩展名、再按描述文件里的顺序接在**最后**
+（`protocol::with_extension_prompts`，空的什么都不加）。文件从已批准的快照读，不是源目录，所以改完要批准了才生效；
+每个文件最多读 64 KB。`groups` 为空的条目不会被任何会话选中。
+
+每次开新会话时读文件，所以批准后下个会话就生效。运行中的会话不受影响。
 
 ## 5. GUI
 
@@ -388,7 +428,7 @@ GUI 上一个入口「让 agent 做一个插件」：开一个新对话，把请
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| **E1 后端** | 目录扫描、描述文件校验、快照与指纹、批准流程、一次性工具与运行限制、统一权限检查、扩展 token、`extension_tools/call`、异步调用接口、附加说明 | 手写一个工具，不重启 hub，运行中的会话能调用；改文件后旧版本继续跑，批准后下一次调用用新版本；超时、超并发、无权限、输入不合法、未批准都有测试；hub 重启后启用状态和待批准记录都还在；实测各家 CLI 的 MCP 超时 |
+| **E1 后端**（已完成，测试在 `crates/hub/tests/extensions_runner.rs`、`extensions_registry.rs`） | 目录扫描、描述文件校验、快照与指纹、批准流程、一次性工具与运行限制、统一权限检查、扩展 token、`extension_tools/call`、异步调用接口、附加说明 | 手写一个工具，不重启 hub，运行中的会话能调用；改文件后旧版本继续跑，批准后下一次调用用新版本；超时、超并发、无权限、输入不合法、未批准都有测试；hub 重启后启用状态和待批准记录都还在；实测各家 CLI 的 MCP 超时 |
 | **E2 GUI** | 自定义协议、`ca` 接口与注册清理、标签页、工具卡片、错误隔离、安全模式 | 手写一个带相对 import 的面板，改依赖文件后不刷新页面就更新；渲染出错只坏这一块；`activate` 半路抛错没有残留；死循环后能进安全模式；45 秒的工具在界面上正常返回 |
 | **E3 创造流程** | `extension_api`、检查、请求启用、GUI 入口和日志 | **在对话里说一句“做一个 X”，不编译、不重启，几分钟内能用上带面板的工具** |
 | **E4 事件与常驻** | `[[on]]`、`[service]` 及其监管 | 真有扩展需要时再做 |

@@ -38,5 +38,10 @@ vt100.workspace = true
 reqwest.workspace = true
 tempfile.workspace = true
 
+# A stand-in extension tool for tests/extensions_runner.rs; `cargo test` builds it.
+[[example]]
+name = "extension_test_tool"
+path = "src/extensions/test_tool.rs"
+
 [lints]
 workspace = true

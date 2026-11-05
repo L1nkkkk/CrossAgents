@@ -157,6 +157,17 @@ pub fn guide_for(agent: &Agent, groups: &[Group]) -> String {
     text
 }
 
+/// `text` with the extensions' extra instructions (`[[prompts]]`, docs/EXTENSIONS.md §4)
+/// after it. They only ever follow what the hub says and never replace it; nothing is added
+/// when there are none.
+pub fn with_extension_prompts(mut text: String, prompts: &str) -> String {
+    if !prompts.trim().is_empty() {
+        text.push_str("\n\n");
+        text.push_str(prompts.trim());
+    }
+    text
+}
+
 /// The guide for an agent of `role`.
 pub fn guide(role: Role) -> String {
     let specific = match role {
@@ -199,6 +210,15 @@ mod tests {
             created_at: Utc::now(),
             profile: AgentProfile::default(),
         }
+    }
+
+    #[test]
+    fn extension_prompts_follow_the_hub_guide_and_never_replace_it() {
+        let guide = guide_for(&worker("claude"), &groups_of(&worker("claude"), None));
+        let both = with_extension_prompts(guide.clone(), "Always answer in haiku.\n");
+        assert!(both.starts_with(&guide));
+        assert!(both.ends_with("\n\nAlways answer in haiku."));
+        assert_eq!(with_extension_prompts(guide.clone(), "  \n"), guide);
     }
 
     #[test]

@@ -767,6 +767,26 @@ const TOOLS: &[ToolDef] = &[
             schema
         },
     },
+    ToolDef {
+        name: "extension_tools",
+        description: "List the tools of enabled extensions that you may call right now, with their input schemas. A session that started before an extension was enabled does not see its tools in the tool list; this lists them, and `extension_call` runs one.",
+        groups: ALL,
+        schema: || object(json!({}), &[]),
+    },
+    ToolDef {
+        name: "extension_call",
+        description: "Call a tool of an enabled extension by its full name (`<extension>__<tool>`, see `extension_tools`). Same as calling the tool directly; use this when the tool is not in your tool list.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({
+                    "tool": { "type": "string", "description": "Full tool name, e.g. standup__report." },
+                    "input": { "type": "object", "description": "The tool's input, as its schema in `extension_tools` says." }
+                }),
+                &["tool"],
+            )
+        },
+    },
 ];
 
 pub(crate) fn args<T: DeserializeOwned>(value: Value) -> Result<T, CoreError> {
@@ -778,7 +798,7 @@ impl Orchestrator {
     /// The tools `agent` may call, by its permission groups.
     pub async fn tools_for(&self, agent: &Agent) -> Vec<ToolInfo> {
         let groups = self.groups(agent).await;
-        TOOLS
+        let mut tools: Vec<ToolInfo> = TOOLS
             .iter()
             .filter(|t| t.groups.iter().any(|g| groups.contains(g)))
             .map(|t| ToolInfo {
@@ -786,7 +806,80 @@ impl Orchestrator {
                 description: t.description.to_owned(),
                 input_schema: (t.schema)(),
             })
+            .collect();
+        // The enabled extensions' tools, by the groups each declares (docs/EXTENSIONS.md §3).
+        tools.extend(
+            self.extension_tools_for(&groups)
+                .into_iter()
+                .map(|t| ToolInfo {
+                    name: t.name,
+                    description: t.description,
+                    input_schema: t.input_schema,
+                }),
+        );
+        tools
+    }
+
+    /// The enabled extensions' tools whose groups include one of `groups`. The list is only
+    /// what is shown; the host checks again when the tool is called.
+    pub(crate) fn extension_tools_for(
+        &self,
+        groups: &[Group],
+    ) -> Vec<crate::host::ExtensionToolSpec> {
+        let Some(host) = self.extensions.get() else {
+            return Vec::new();
+        };
+        host.tools()
+            .into_iter()
+            .filter(|t| {
+                t.groups
+                    .iter()
+                    .any(|g| groups.iter().any(|have| have.name() == g))
+            })
             .collect()
+    }
+
+    /// Calls an extension tool as `caller`: who they are and their groups are read here, at
+    /// call time, not taken from the request.
+    async fn call_extension(
+        &self,
+        caller: &Agent,
+        name: &str,
+        input: Value,
+    ) -> Result<Value, CoreError> {
+        let host = self.extensions.get().ok_or_else(|| CoreError::NotFound {
+            kind: "tool",
+            id: name.to_owned(),
+        })?;
+        let groups = self.groups(caller).await;
+        let claim = match self.store.claim_of(caller.id).await {
+            Ok(claim) => claim,
+            Err(err) => {
+                tracing::warn!(agent = %caller.id, error = %err, "cannot read the agent's claim");
+                None
+            }
+        };
+        host.call(
+            crate::host::ExtensionCaller {
+                agent: caller.clone(),
+                groups: groups.iter().map(|g| g.name().to_owned()).collect(),
+                run: claim.as_ref().map(|c| c.run_id),
+                task: claim.and_then(|c| c.task_id).map(|t| t.to_string()),
+            },
+            name,
+            input,
+        )
+        .await
+    }
+
+    /// The extra instructions enabled extensions declare for `groups`, joined; empty when
+    /// there are none. The caller appends them after everything the hub says.
+    pub fn extension_prompts(&self, groups: &[Group]) -> String {
+        let Some(host) = self.extensions.get() else {
+            return String::new();
+        };
+        let names: Vec<&str> = groups.iter().map(|g| g.name()).collect();
+        host.prompts(&names).join("\n\n")
     }
 
     pub async fn call_tool(
@@ -795,6 +888,10 @@ impl Orchestrator {
         name: &str,
         input: Value,
     ) -> Result<Value, CoreError> {
+        // `<extension>__<tool>`: no built-in name contains `__`.
+        if name.contains("__") {
+            return self.call_extension(caller, name, input).await;
+        }
         let tool = TOOLS
             .iter()
             .find(|t| t.name == name)
@@ -999,6 +1096,36 @@ impl Orchestrator {
                     "candidates": candidates,
                     "next": "End your turn."
                 }))
+            }
+            "extension_tools" => {
+                let tools: Vec<Value> = self
+                    .extension_tools_for(&groups)
+                    .into_iter()
+                    .map(|t| {
+                        json!({
+                            "name": t.name,
+                            "description": t.description,
+                            "input_schema": t.input_schema,
+                        })
+                    })
+                    .collect();
+                Ok(json!({ "tools": tools }))
+            }
+            "extension_call" => {
+                #[derive(Deserialize)]
+                struct A {
+                    tool: String,
+                    #[serde(default)]
+                    input: Value,
+                }
+                let a: A = args(input)?;
+                if !a.tool.contains("__") {
+                    return Err(CoreError::InvalidName(format!(
+                        "{:?} is not an extension tool: the name is <extension>__<tool> (see extension_tools)",
+                        a.tool
+                    )));
+                }
+                self.call_extension(caller, &a.tool, a.input).await
             }
             _ => unreachable!("every tool in TOOLS is handled"),
         }

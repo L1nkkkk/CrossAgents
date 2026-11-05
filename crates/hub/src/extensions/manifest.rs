@@ -89,6 +89,12 @@ impl Manifest {
     pub fn read(root: &Path, name: &str) -> Result<Self> {
         let m: Self = toml::from_str(&std::fs::read_to_string(root.join("extension.toml"))?)?;
         check_extension_name(&m.name).map_err(anyhow::Error::msg)?;
+        // `/v1/extensions/calls/{id}` is a route of its own, and an extension of that name
+        // would be unreachable beside it (`/v1/extensions/{name}/enable`).
+        ensure!(
+            m.name != "calls",
+            "`calls` is reserved and cannot name an extension"
+        );
         ensure!(m.name == name, "manifest name must match directory name");
         ensure!(
             m.api == 1,
