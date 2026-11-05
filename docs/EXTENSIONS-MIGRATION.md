@@ -14,8 +14,8 @@
 
 | 项 | 位置 | 差异 / 条件 |
 |---|---|---|
-| `note_list` / `note_read` | `tools.rs:243` / `tools.rs:232`，`crates/orchestrator/src/notes.rs:105` | 返回值能重建；但扩展 token 是通用 read，能读别的 run 的全文（见 §2.1 的条件） |
-| `gui_screenshot` | `crates/orchestrator/src/tools.rs:564`，`crates/orchestrator/src/screenshot.rs:78` | 零新 hub 接口，但依赖 checkout + `apps/gui/node_modules`，且 超过 1 MiB stdout 上限的 base64 会使调用失败（见 §2.1） |
+| `note_list` / `note_read` | `tools.rs:243` / `tools.rs:232`，`crates/orchestrator/src/notes.rs:131` / `crates/orchestrator/src/notes.rs:105` | 返回值能重建；但扩展 token 是通用 read，能读别的 run 的全文（见 §2.1 的条件） |
+| `gui_screenshot` | `crates/orchestrator/src/tools.rs:564`，`crates/orchestrator/src/screenshot.rs:78` | 零新 hub 接口，但依赖 checkout + `apps/gui/node_modules`，且超过 1 MiB stdout 上限的 base64 会使调用失败（见 §2.1） |
 | 事件流面板 | `apps/gui/src/ToolColumn.tsx:411` | 试点进行中，差异与验收见 `extensions/debug/README.md` |
 
 **补接口才能搬**：`expertise_search`、`expertise_get`、`usage_get`、`agent_get`、`agent_list`、`whoami`、
@@ -50,7 +50,7 @@
 ### 1.2 扩展工具现在实际拿得到什么
 
 - **身份不是调用者**：`caller` 只给 `kind/id/name/groups/cwd/run/task`
-  （`runner.rs:82-95`）。扩展 token 是 `Grant::Extension`，级别只能是 read 或 write，
+  （`crates/hub/src/extensions/runner.rs:88-99`）。扩展 token 是 `Grant::Extension`，级别只能是 read 或 write，
   到不了 `/v1/me*`（`crates/hub/src/api.rs:242-249`），也调不了「以人的身份调工具」的路由
   （`access.rs:118-124`）。
 - **E4 改判：原结论「没有事件驱动、没有常驻进程」被推翻。** `manifest.rs:34-63` 声明 `[[on]]` 与 `[service]`。钩子按事件起进程，只观察，stdin 的 caller 是 `{kind: "event"}`，不是 agent（`crates/hub/src/extensions/hooks.rs:149-194`）；不重试、不回放，总线落后、并发满或限速都会丢事件（`hooks.rs:1-16`、`:108-125`、`:172-212`），不接受 `extension.*`（`manifest.rs:153-170`）。
@@ -95,15 +95,15 @@ E4 不改变这里的身份、归属和 REST 缺口：钩子 caller 只有事件
 | 工具 | 缺什么（证据） | 值不值 | 风险 |
 |---|---|---|---|
 | `expertise_search`（`tools.rs:348` / `crates/orchestrator/src/expertise/tools.rs:163-222`） | REST 只能查：`GET /v1/expertise/search` 按 owner 读 store（`api_expertise.rs:240-260`），返回 `ListExpertiseResponse`；工具还会给每条记一次 `UsageSource::Pulled`，带上调用者的 run 与 task（`expertise/tools.rs:213`、`:217-222`），REST 没有写使用记录的入口。返回也少包装：工具有 `note`（`expertise/tools.rs:217-222`），REST 没有 | 低：核心只需要一个通用搜索 | 要新增「记录 pull」的路由，等于把「谁在哪个 run 用了哪条」公开成 API；owner 还得自己解析（person 默认，`api_expertise.rs:106-117`；project 靠 `/v1/projects` 的 paths 匹配 cwd，`api_projects.rs:18-38`） |
-| `expertise_get`（`tools.rs:364` / `expertise/tools.rs:224-245`） | REST 的 `GET /v1/expertise/{id}` 按完整 id 直读 store，返回裸 `ExpertiseEntry`（`api_expertise.rs:154-159`）：**不做 owner 检查**（所以不会像工具那样对别的项目回 404）、**不支持唯一前缀 tag**（`own_entry` 的 tag 匹配在 `tools.rs:99-122`）、**不返回 `{entry, tag}` 包装**、**不记 usage**（`expertise/tools.rs:242-244`） | 低 | 同上；另外「按 tag 取」是 brief 里的约定，搬走会让 brief 的 tag 失效 |
+| `expertise_get`（`tools.rs:364` / `expertise/tools.rs:224-245`） | REST 的 `GET /v1/expertise/{id}` 按完整 id 直读 store，返回裸 `ExpertiseEntry`（`api_expertise.rs:154-159`）：**不做 owner 检查**（所以不会像工具那样对别的项目回 404）、**不支持唯一前缀 tag**（`own_entry` 的 tag 匹配在 `crates/orchestrator/src/expertise/tools.rs:99-122`）、**不返回 `{entry, tag}` 包装**、**不记 usage**（`expertise/tools.rs:242-244`） | 低 | 同上；另外「按 tag 取」是 brief 里的约定，搬走会让 brief 的 tag 失效 |
 | `usage_get`（`tools.rs:401` / `notes.rs:159-167`） | 现在按调用者的 run 过滤并补 `budget`/`minutes_elapsed`；`GET /v1/usage` 只有 `by` 分组（`api.rs:2548-2551`），没有 run 过滤 | 不值：核心的「这个 run 花了多少」是产品语义 | 自己按事件重算会读到全 hub 的事件 |
 | `agent_get`（`tools.rs:111` / `messaging.rs:325-341`） | 输出含 `activity`（进程内运行状态）和 `current_tasks`（跨 run 汇总，`messaging.rs:231-244`）；`GET /v1/agents/{key}` 只回 `Agent`（`api.rs:625-630`） | 不值：列表/详情是核心导航 | 用 `GET /v1/runs` 逐个拼是 O(runs)，且 `activity` 永远缺 |
 | `agent_list`（`tools.rs:105` / `messaging.rs:249-293`） | 同上，另加 archived sessions 与 claim（`busy_with`）；REST 没有等价物 | 不值 | 同上；拼出来的列表会和 GUI 的列表不一致 |
-| `whoami`（`tools.rs:99` / `messaging.rs:191-228`） | 需要 profile/model/tools/角色与「我持有哪个 run 的哪个角色」；`caller` 只有 id/name/groups/cwd/run/task（`runner.rs:82-95`） | 不值：这是协议入口工具，模型第一句就会调 | 要让扩展自己再查 3-4 个接口，慢且容易和 `groups` 不一致 |
+| `whoami`（`tools.rs:99` / `messaging.rs:191-228`） | 需要 profile/model/tools/角色与「我持有哪个 run 的哪个角色」；`caller` 只有 id/name/groups/cwd/run/task（`crates/hub/src/extensions/runner.rs:88-99`） | 不值：这是协议入口工具，模型第一句就会调 | 要让扩展自己再查 3-4 个接口，慢且容易和 `groups` 不一致 |
 | `agent_send`（`tools.rs:117` / `messaging.rs:344`） | 缺「以调用者身份发」的接口：`POST /v1/agents/{key}/messages` 固定 `MessageSource::Human`（`api.rs:1189-1192`），也没有「发送者必须是这个 agent」的检查 | 不值：发消息是协作核心 | 搬过去会变成「人发的」，接收方的 `fromPerson` 判断会错（`Session.tsx:862`） |
 | `inbox_read`（`tools.rs:407` / `notes.rs:171-174`） | `take_inbox` 是「取走」，绑定 agent 身份；没有 REST 等价物 | 低 | 身份接口一旦有了，这条也要重新判断归属 |
 | `message_withdraw`（`tools.rs:135`） | 需要「以该 agent 身份撤回」；`DELETE /v1/agents/{key}/messages/{id}` 是人的路由，也没有发送者校验 | 不值 | 中：撤回别人的排队消息 |
-| `watch_list`（`tools.rs:413` / `messaging.rs:639`） | `GET /v1/background`（`api.rs:1021`）返回**所有人**的提醒与关注，没有 owner 过滤；扩展只能客户端筛，仍会把别人的数据读进进程 | 不值 | 隐私面：扩展进程能看到全体 agent 的提醒内容 |
+| `watch_list`（`tools.rs:413` / `messaging.rs:639`） | `GET /v1/background`（`api.rs:1054-1073`）返回**所有人**的提醒与关注，没有 owner 过滤；扩展只能客户端筛，仍会把别人的数据读进进程 | 不值 | 隐私面：扩展进程能看到全体 agent 的提醒内容 |
 | `watch_cancel`（`tools.rs:419`） | 没有取消关注的路由（`/v1/background` 只提供读，`DELETE` 只对 reminder，`api.rs:152-153`）；也没有归属校验 | 不值 | 中：要么新建一条能删任何人关注的写路由，要么搬不过去 |
 | `remind_list`（`tools.rs:163`） | 同 `watch_list` | 不值 | 同上 |
 | `remind_cancel`（`tools.rs:169`） | `DELETE /v1/background/reminders/{id}` 不校验归属（`api.rs:1121-1127` 注释写明「for any owner」） | 不值 | 高：搬过去等于给扩展「删任何人的提醒」的能力 |
@@ -112,7 +112,7 @@ E4 不改变这里的身份、归属和 REST 缺口：钩子 caller 只有事件
 | `lesson_create` / `lesson_merge` / `issue_keep` / `lesson_report` / `issue_pending`（`tools.rs:265/285/303/390/254`） | 同上，且写入还涉及 run 的 issue 笔记与候选合并 | 不值 | 高：写侧没有接口，搬过去要新建一整组 API |
 | `expertise_pending`（`tools.rs:370`） | `GET /v1/expertise/candidates`（`api_expertise.rs:34`）有，但 owner 范围要按 caller 自己算（`candidates.rs:283-298`） | 低 | 中：算错 owner 会看到别人的候选 |
 | `expertise_triage`（`tools.rs:376`） | 没有 triage 路由（只有 person 的 accept/reject，`api_expertise.rs:35-42`）；`suggested_by_lead` 与 reason 的写入口在 orchestrator | 低 | 中：要让扩展改候选的展示状态，需要新路由与权限点 |
-| `task_list` / `task_get`（`tools.rs:480` / `tools.rs:491`） | 只读可拼：`GET /v1/runs/{key}` 回 `RunDetail { run, tasks }`（`api-types/src/lib.rs:1749-1752`）。但没有 `status`/`mine` 过滤，run 解析要自己做 | 不值：任务读和任务写是一体的，拆开只会让模型在两套名字间选 | 中：读搬走、写留在 hub，`task_get` 的 `report/checks/diff stat` 字段要逐一对齐 |
+| `task_list` / `task_get`（`tools.rs:480` / `tools.rs:491`） | 只读可拼：`GET /v1/runs/{key}` 回 `RunDetail { run, tasks }`（`crates/api-types/src/lib.rs:1816-1819`）。但没有 `status`/`mine` 过滤，run 解析要自己做 | 不值：任务读和任务写是一体的，拆开只会让模型在两套名字间选 | 中：读搬走、写留在 hub，`task_get` 的 `report/checks/diff stat` 字段要逐一对齐 |
 | `workspace_read` / `workspace_diff`（`tools.rs:544` / `tools.rs:534`） | `GET /v1/runs/{key}/tasks/{task}/files/content` 与 `.../diff` 存在（`api.rs:206,219-222`），但 task→worktree 的解析和路径校验在 orchestrator | 低 | 中：路径校验重写一遍容易出目录穿越 |
 | `workspace_run` / `checks_run`（`tools.rs:554` / `tools.rs:582`） | 缺「在任务 worktree 里跑命令」的接口。扩展自己能 spawn，但 worktree 解析要自己做 | 不值：验收检查是任务状态机的一部分 | 高：绕过 hub 的 Job Object 树杀与超时（`docs/EXTENSIONS.md:106-127`），失败形态会变 |
 | `agent_set_model` / `agent_interrupt` / `agent_retire`（`tools.rs:664/675/658`） | 路由存在（`api.rs:133`、`api.rs:138-141`、`api.rs:136`），组也能表达（见 §1.2），缺的是「目标归属」：read/write token 不绑定调用者，任何写 token 都能改任意队友（`access.rs:125-133`） | 低 | 高：manifest 的组只决定「谁能调」，不决定「能对谁做」 |
@@ -138,7 +138,7 @@ E4 不改变这里的身份、归属和 REST 缺口：钩子 caller 只有事件
 
 | 界面 | 位置 | 判断 | 依据 / 缺什么 | 值不值 | 风险 |
 |---|---|---|---|---|---|
-| 事件流 | `ToolColumn.tsx:411-440`（`useEventLog` `apps/gui/src/eventlog.ts:24-37`） | **现在就能搬有差异的试点**；要求页面级历史则补接口 | `ca.events.on` 只有实时回调（`host.ts:467-490`、`defaults.ts:18`），需在 activate 时订阅并使用扩展级缓存；内置日志在扩展异步加载前启动，缓存跨面板关闭重开（`main.tsx:24-26`、`eventlog.ts:8`、`:24-37`）。要保留页面级历史需只读缓存或回放接口 | 值：中，适合验证 E2 | 启动、停用再启用及热换版本产生历史缺口；失去 `safeTarget?.agent` 覆盖（`ToolColumn.tsx:108-112`、`:122`）。内置 events 仅开发版或 mock 显示（`panes.ts:33-37`），扩展注册不继承限制（`host.ts:391-408`），本试点接受发布版手动启用后可见；内置面板保留 |
+| 事件流 | `ToolColumn.tsx:411-440`（`useEventLog` `apps/gui/src/eventlog.ts:24-37`） | **现在就能搬有差异的试点**；要求页面级历史则补接口 | `ca.events.on` 只有实时回调（`host.ts:467-490`、`defaults.ts:17`），需在 activate 时订阅并使用扩展级缓存；内置日志在扩展异步加载前启动，缓存跨面板关闭重开（`main.tsx:24-26`、`eventlog.ts:8`、`:24-37`）。要保留页面级历史需只读缓存或回放接口 | 值：中，适合验证 E2 | 启动、停用再启用及热换版本产生历史缺口；失去 `safeTarget?.agent` 覆盖（`ToolColumn.tsx:108-112`、`:122`）。内置 events 仅开发版或 mock 显示（`panes.ts:33-37`），扩展注册不继承限制（`host.ts:391-408`），本试点接受发布版手动启用后可见；内置面板保留 |
 | 改动 | `ToolColumn.tsx:154-213` | 补接口才能搬 | 数据接口齐（`allowed.cts:40-41`），但内置面板要 `safeTarget.agent`（`ToolColumn.tsx:108-112`）和 `target.turn`（`:154-161`）才能打开「故意看的那一轮」，扩展只收到 `follow`（`:80-83`，`host.ts:34`） | 低：核心的「这一轮改了什么」 | 若只做跟随当前会话的子集：能看最新一轮，失去轮次选择器、`target.file` 定位、以及「查看变更」打开的指定轮次；另外 `parseDiff`/`DiffView` 不可 import，重写大 diff 渲染容易卡 |
 | 文件 | `ToolColumn.tsx:113-120`（`FileViewer.tsx:280`） | 补接口才能搬 | 同上：内置在 run 路由下用 `routeRun`（`ToolColumn.tsx:114-116`），否则用 `agent`；扩展两样都没有，只有 `follow` | 低：核心浏览 | 只做跟随会话的子集：失去 run scope（工作树/分支选择）、以及 `target.file` 定位；`FileViewer.tsx` 的路径校验、图片、高亮要重写 |
 | 提交图 | `ToolColumn.tsx:123-130`（`commitgraph.tsx:33`） | 补接口才能搬 | 内置优先 `routeRun`（`ToolColumn.tsx:124-126`）；扩展没有 run，只有 `follow` | 低 | 只做会话子集：run 页上的提交图无法迁移；`graphlayout.ts` 的布局要重写，大仓库性能由扩展承担 |
@@ -157,7 +157,7 @@ hub 侧（按价值排序）：
 
 1. **给扩展一个「我是谁」的只读视图**：`/v1/me` 只认会话 token（`api.rs:242-249`）。没有它，`whoami`/`agent_get`/`agent_list`/`agent_send`/`inbox_read` 都拼不全（缺 `activity`、`current_tasks`、`tools`，也没有发送者身份）。
 2. **`/v1/usage` 的 run 过滤**（`api.rs:2548-2551`）：否则 `usage_get` 无法等价。
-3. **按 owner 过滤的 background 视图**（`api.rs:1021`）：`watch_list`/`remind_list` 现在会读到全体。
+3. **按 owner 过滤的 background 视图**（`api.rs:1054-1073`）：`watch_list`/`remind_list` 现在会读到全体。
 4. **带归属检查的提醒删除与取消关注**（`api.rs:1121-1127` 的删除不校验归属；关注根本没有删除路由，`api.rs:152-153`）。
 5. **notes 的写路由与 key/前缀过滤**（`api.rs:151`）；读侧还要能按调用方限定 run（`api.rs:1000-1016`）。
 6. **lessons 的一组只读路由**：`api.rs` 里一个都没有。
@@ -194,7 +194,7 @@ GUI 侧：
 - 「`gui_screenshot` 搬到扩展后，同参数能得到一致的 PNG」——**已撤回**。1 MiB stdout 上限（`runner.rs:46`）对 base64 的影响没有实测；大图会不会超限、超限后改用 path 交付是否可接受，都没有验证。
 - 「扩展工具一次调用一个进程，因此 `gui_screenshot` 的耗时和现在一致」——推测。Electron/Vite 启动占大头，多一层进程应当可忽略，但没测。
 - 「项目路径能唯一匹配 `caller.cwd`」——推测。`/v1/projects` 只给 paths（`api_projects.rs:26-36`），worktree 与多 checkout 场景下的匹配规则没有读到实现。
-- 「扩展面板重写 diff/文件查看器的成本」——按 `FileViewer.tsx`（1127 行）与 `commitgraph.tsx` 的体量估计，没有实际移植验证。
+- 「扩展面板重写 diff/文件查看器的成本」——按 `FileViewer.tsx`（546 行）与 `commitgraph.tsx` 的体量估计，没有实际移植验证。
 - 「搬走 `note_read` 后错误文案与 `NotFound` 语义一致」——推测。REST 的 404 与 `CoreError::NotFound` 的映射在 `api.rs` 的错误转换里，未逐条比对。
 - 各 CLI 对扩展工具名长度/前缀的处理只按 `docs/EXTENSIONS.md:145-151` 的规则推断，没有新测。
 - **已按代码核对**：E4 的 hook 是尽力而为、会丢事件、不重试不回放；service 可常驻并监督重启，但停用、换版和 hub 退出会中断（`hooks.rs:1-16`、`:108-125`、`service.rs:1-9`）。内置提醒与关注按调用者持久化并检查归属（`messaging.rs:504-562`、`:566-585`、`:589-657`）。这是静态代码核对，不是本次端到端实测。
