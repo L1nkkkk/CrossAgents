@@ -22,6 +22,7 @@ import {
   enableState,
   pluginRequestDraft,
   seenAfter,
+  serviceStateText,
   shortFingerprint,
   versionFacts,
 } from "./page/model.ts";
@@ -78,6 +79,13 @@ const diff: ExtensionDiffResponse = {
 };
 
 const labels = (list: { label: string }[]) => list.map((b) => b.label);
+
+test("service states have readable Chinese labels", () => {
+  assert.equal(serviceStateText("stopped"), "已停止");
+  assert.equal(serviceStateText("starting"), "正在启动");
+  assert.equal(serviceStateText("running"), "运行中");
+  assert.equal(serviceStateText("backoff"), "等待重启");
+});
 
 test("each state the design names has a chip, and a problem does not hide 已启用", () => {
   assert.deepEqual(labels(badges(info(), { safeMode: false })), ["已启用"]);
