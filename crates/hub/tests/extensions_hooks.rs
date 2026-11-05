@@ -28,12 +28,12 @@ fn capture_script(version: &str) -> String {
     #[cfg(windows)]
     {
         format!(
-            "$s = [Console]::In.ReadToEnd()\n[IO.File]::WriteAllText((Join-Path $env:CROSSAGENTS_EXTENSION_DATA '{version}'), $s)\n"
+            "$s = [Console]::In.ReadToEnd()\n$tmp = Join-Path $env:CROSSAGENTS_EXTENSION_DATA '{version}.tmp'\n[IO.File]::WriteAllText($tmp, $s)\n[IO.File]::Move($tmp, (Join-Path $env:CROSSAGENTS_EXTENSION_DATA '{version}'))\n"
         )
     }
     #[cfg(not(windows))]
     {
-        format!("cat > \"$CROSSAGENTS_EXTENSION_DATA/{version}\"\n")
+        format!("cat > \"$CROSSAGENTS_EXTENSION_DATA/{version}.tmp\"\nmv \"$CROSSAGENTS_EXTENSION_DATA/{version}.tmp\" \"$CROSSAGENTS_EXTENSION_DATA/{version}\"\n")
     }
 }
 
