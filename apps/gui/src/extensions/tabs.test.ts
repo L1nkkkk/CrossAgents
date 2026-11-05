@@ -67,3 +67,38 @@ test("only a disabled extension's tabs are removed, and a removed active tab han
   // Unchanged: the same object, so callers can skip a write.
   assert.equal(filterDockTabs(dock, () => true), dock);
 });
+
+test("a registered tab opens on the right, stays closed once closed, and reopens from the + menu", () => {
+  const tab = extTabOf("standup", "report");
+  panes.setExtTabLabels([{ tab, label: "站会" }]);
+  assert.deepEqual(
+    panes.closedExtTabs().map((entry) => entry.tab),
+    [tab],
+    "registered but not docked yet",
+  );
+
+  panes.offerExtTab(tab);
+  assert.deepEqual(panes.closedExtTabs(), [], "the host put it in the right dock");
+  assert.equal(panes.paneLabel(tab), "站会");
+
+  panes.shutTab(tab);
+  assert.deepEqual(
+    panes.closedExtTabs().map((entry) => entry.tab),
+    [tab],
+    "closed by the person: offered in the + menu",
+  );
+
+  panes.offerExtTab(tab);
+  assert.deepEqual(
+    panes.closedExtTabs().map((entry) => entry.tab),
+    [tab],
+    "a host update must not reopen what the person closed",
+  );
+
+  panes.openExtTab(tab, "right");
+  assert.deepEqual(panes.closedExtTabs(), [], "reopened from the + menu");
+
+  // Disabling the extension takes the tab out of the menu too.
+  panes.setExtTabLabels([]);
+  assert.deepEqual(panes.closedExtTabs(), []);
+});

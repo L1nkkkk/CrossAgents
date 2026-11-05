@@ -173,7 +173,7 @@ test("a version switch cleans the old registrations first, then imports the new 
   const run = harness([info("a", "fp1")], modules);
   await run.host.start();
   assert.equal(run.host.snapshot().tabs.get("ext:a/panel")!.label, "v1");
-  assert.equal(run.host.snapshot().cards.size, 2, "bare name and qualified alias");
+  assert.equal(run.host.snapshot().cards.size, 1, "the bare name is stored qualified");
 
   run.setList([info("a", "fp2")]);
   run.emitChanged("a");
@@ -292,6 +292,41 @@ test("safe mode is read from the shell's awaited answer", async () => {
   };
   assert.equal(await detectSafeMode(), false);
   delete globals.window;
+});
+
+test("a v1 extension can only register cards for its own tools", async () => {
+  const url = extensionEntryUrl("a", "fp1", "gui/index.js");
+  const foreign = new Map<string, ExtensionModule>([
+    [
+      url,
+      {
+        activate: (ca) => {
+          ca.toolCards.register("b__report", () => null);
+        },
+      },
+    ],
+  ]);
+  const rejected = harness([info("a", "fp1")], foreign);
+  await rejected.host.start();
+  const record = rejected.host.snapshot().records.get("a")!;
+  assert.equal(record.status, "failed");
+  assert.match(record.error ?? "", /只能给自己的工具注册卡片/);
+  assert.equal(rejected.host.snapshot().cards.size, 0);
+
+  const own = new Map<string, ExtensionModule>([
+    [
+      url,
+      {
+        activate: (ca) => {
+          ca.toolCards.register("report", () => null);
+          ca.toolCards.register("a__other", () => null);
+        },
+      },
+    ],
+  ]);
+  const accepted = harness([info("a", "fp1")], own);
+  await accepted.host.start();
+  assert.deepEqual([...accepted.host.snapshot().cards.keys()].sort(), ["a__other", "a__report"]);
 });
 
 test("ca.tools.call can be cancelled and is not retried", async () => {

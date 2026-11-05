@@ -415,12 +415,16 @@ export function createExtensionHost(options: ExtensionHostOptions) {
       toolCards: {
         register(tool, render) {
           guard();
-          const key = normalizeToolName(String(tool));
-          if (!key || key.includes("/")) throw new Error(`工具名不能用：${tool}`);
+          const name = normalizeToolName(String(tool));
+          if (!name || name.includes("/")) throw new Error(`工具名不能用：${tool}`);
+          // v1: a card only for a tool of this extension. A bare name is qualified with it; a
+          // qualified name must already carry it, so another extension's tool is refused.
+          const key = name.includes("__") ? name : `${rec.name}__${name}`;
+          if (!key.startsWith(`${rec.name}__`) || key.length === rec.name.length + 2) {
+            throw new Error(`扩展 ${rec.name} 只能给自己的工具注册卡片：${tool}`);
+          }
           if (typeof render !== "function") throw new Error("tool card 需要一个 render 函数");
           addCard(key, render);
-          // A card registered under the bare name also answers to the qualified one.
-          if (!key.includes("__")) addCard(`${rec.name}__${key}`, render);
           publish();
         },
       },
