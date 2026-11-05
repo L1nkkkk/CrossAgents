@@ -13,6 +13,7 @@ use crossagents_api_types::{
 use crossagents_core::{
     Agent, AgentId, AgentProfile, AgentStatus, CoreError, EventKind, NameSource, Role,
 };
+use crossagents_hub::extensions::runner::{CommandSpec, OutputCapture};
 use crossagents_hub::extensions::{CallError, Caller, Limits, Registry, Runner};
 use crossagents_hub::{HubConfig, Paths};
 use crossagents_orchestrator::host::ExtensionCaller;
@@ -1306,4 +1307,51 @@ async fn extensions_http_stopping_the_hub_ends_a_tool_a_request_is_waiting_for()
         size,
         "the tool is still running"
     );
+}
+
+/// Hooks and services run through the same runner: the snapshot, the tree, the token and —
+/// when asked — the tool limits, without the tool's group and schema checks and without the
+/// stdin/stdout protocol mattering (docs/EXTENSIONS.md §3).
+#[tokio::test]
+async fn extensions_start_command_shares_the_limits_and_ends_its_token() {
+    let f = Fixture::new(Limits {
+        per_extension: 1,
+        ..Limits::default()
+    });
+    approve(&f.registry, "demo");
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let start = |mode: &str, limits: bool| {
+        let lease = f.registry.acquire("demo").unwrap();
+        f.runner.start_command(CommandSpec {
+            extension: "demo".into(),
+            lease,
+            command: vec![tool_exe().display().to_string()],
+            stdin: Some(format!(r#"{{"input":{{"mode":"{mode}"}}}}"#).into_bytes()),
+            timeout: Some(Duration::from_secs(10)),
+            stdout: OutputCapture::Collect,
+            limits,
+            label: "hook test".into(),
+            cancel: cancel.clone(),
+        })
+    };
+
+    let run = start("echo", true).unwrap();
+    let done = run.wait().await;
+    assert!(done.ok(), "{done:?}");
+    let out: Value = serde_json::from_slice(&done.stdout).unwrap();
+    assert_eq!(out["request"]["input"]["mode"], "echo");
+    // The token died with the process, before the result was visible.
+    assert_eq!(f.runner.live_tokens(), 0);
+
+    // A hook takes a tool slot: with one per extension, the next one is dropped as busy.
+    let held = start("hold", true).unwrap();
+    let busy = start("echo", true).unwrap_err();
+    assert!(matches!(busy, CallError::Busy(_)), "{busy:?}");
+    // The token lives exactly while the process does.
+    until("the held process", || f.data().join("token.txt").is_file()).await;
+    let token = fs::read_to_string(f.data().join("token.txt")).unwrap();
+    assert_eq!(f.runner.token(&token).unwrap().0, "demo");
+    fs::write(f.data().join("release"), b"x").unwrap();
+    assert!(held.wait().await.ok());
+    assert!(f.runner.token(&token).is_none());
 }

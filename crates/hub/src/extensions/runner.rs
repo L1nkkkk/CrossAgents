@@ -1,8 +1,8 @@
-//! Runs extension tools: one process per call (docs/EXTENSIONS.md §3).
+//! Runs extension processes (docs/EXTENSIONS.md §3).
 //!
-//! Every way in — an agent calling `<extension>__<tool>` or `extension_call`, a person's GUI —
-//! goes through [`Runner::start`], which checks in the order the document gives and only then
-//! spawns anything:
+//! Tool calls — an agent calling `<extension>__<tool>` or `extension_call`, a person's GUI —
+//! all go through [`Runner::start`], which checks in the order the document gives and only
+//! then spawns anything:
 //!
 //! 1. the extension exists, is enabled, and which version this call uses is fixed (the
 //!    snapshot is pinned until the call ends, so a version switch under it changes nothing);
@@ -10,9 +10,14 @@
 //! 3. the input fits the tool's `input_schema`;
 //! 4. the concurrency limits hold (otherwise "busy" at once, never queued).
 //!
-//! The process runs in the snapshot, gets one JSON on stdin and answers one JSON on stdout.
-//! It runs in a process tree ([`crossagents_core::process::Tree`], a Job Object on Windows),
-//! so a timeout, a cancel, a disable or the hub stopping ends the whole tree.
+//! Event hooks and resident services ([`Runner::start_command`]) skip the tool checks but
+//! reuse everything else: the pinned snapshot, the process tree, the token, the log and —
+//! for hooks — the same concurrency limits. The tool protocol adds only the stdin/stdout
+//! JSON and the result bookkeeping on top of this.
+//!
+//! Every process runs in the snapshot and in a process tree
+//! ([`crossagents_core::process::Tree`], a Job Object on Windows), so a timeout, a cancel, a
+//! disable or the hub stopping ends the whole tree.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -33,8 +38,9 @@ use futures::FutureExt;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Notify, watch};
+use tokio_util::sync::CancellationToken;
 
-use super::registry::{Registry, SnapshotLease};
+use super::registry::{EnabledVersion, Registry, SnapshotLease};
 
 /// stdout past this ends the call: a cut-off JSON means nothing.
 pub const STDOUT_LIMIT: usize = 1024 * 1024;
@@ -157,10 +163,10 @@ struct Call {
     started_at: DateTime<Utc>,
     timeout_secs: u32,
     /// `DELETE`, or the hub stopping: end it now.
-    cancel: Notify,
-    reason: Mutex<Option<String>>,
+    cancel: CancellationToken,
+    reason: Arc<Mutex<Option<String>>>,
     /// The extension was disabled: end it after the grace period.
-    disabled: Notify,
+    disabled: CancellationToken,
     done: watch::Sender<Option<Arc<ExtensionCallResponse>>>,
     finished: Mutex<Option<Instant>>,
 }
@@ -215,15 +221,153 @@ impl Drop for Permit {
     }
 }
 
-/// The token issued for one call, valid until the process tree is gone.
-struct TokenGuard {
-    runner: Arc<Runner>,
+/// The token issued for one process, valid until the process tree is gone.
+pub struct TokenGuard {
+    runner: Weak<Runner>,
     token: String,
+}
+
+impl TokenGuard {
+    /// The token to hand the process as `CROSSAGENTS_TOKEN`.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
 }
 
 impl Drop for TokenGuard {
     fn drop(&mut self) {
-        self.runner.tokens.write().unwrap().remove(&self.token);
+        if let Some(runner) = self.runner.upgrade() {
+            runner.tokens.write().unwrap().remove(&self.token);
+        }
+    }
+}
+
+/// Where a command's stdout goes. A tool's output is its result; a hook's or a service's is
+/// just text for the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputCapture {
+    /// Collected for the caller, up to [`STDOUT_LIMIT`]; past that the process is killed.
+    Collect,
+    /// Written to the extension log as it arrives; nothing is kept in memory.
+    LogOnly,
+}
+
+/// One command outside the tool checks: an event hook or a resident service
+/// (docs/EXTENSIONS.md §3). Everything a tool gets — snapshot cwd, hub env, token, process
+/// tree, log — is the same; only the group and schema checks and the result protocol are
+/// left out.
+pub struct CommandSpec {
+    /// Whose limits, log and token this command runs under.
+    pub extension: String,
+    /// Pins the snapshot until the process tree is gone.
+    pub lease: SnapshotLease,
+    pub command: Vec<String>,
+    /// Written to stdin and closed; `None` closes stdin at once.
+    pub stdin: Option<Vec<u8>>,
+    /// `Some` kills the tree at the deadline; `None` runs until it ends (a service).
+    pub timeout: Option<Duration>,
+    pub stdout: OutputCapture,
+    /// Take a place in the same limits as tool calls. Hooks do, so a burst of events cannot
+    /// start unbounded processes; a service is one per extension already.
+    pub limits: bool,
+    /// How the log names it (`hook run.landed`, `service`).
+    pub label: String,
+    /// Cancelling this ends the whole tree.
+    pub cancel: CancellationToken,
+}
+
+/// How a command ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandStatus {
+    /// It ended by itself; the code is `None` when a signal ended it.
+    Exited(Option<i32>),
+    /// The deadline passed and the tree was killed.
+    TimedOut,
+    /// Cancelled: a version switch, a disable or the hub stopping.
+    Cancelled,
+    /// It wrote more than [`STDOUT_LIMIT`] to stdout, which cut-off JSON would make worthless.
+    TooLarge,
+    /// It never started.
+    NotStarted,
+}
+
+/// What [`CommandRun::wait`] answers. Hooks log it; the service supervisor reads it to decide
+/// whether the exit was a crash.
+#[derive(Debug, Clone)]
+pub struct CommandResult {
+    pub status: CommandStatus,
+    pub duration: Duration,
+    /// Collected only when the spec asked for it.
+    pub stdout: Vec<u8>,
+    pub stderr: String,
+    /// Why it was cancelled, or why it never started.
+    pub error: Option<String>,
+}
+
+impl CommandResult {
+    /// Whether it exited 0. A hook's and a service's exit code decides nothing by itself,
+    /// but it is what the log and `ExtensionInfo.service.last_exit` say.
+    pub fn ok(&self) -> bool {
+        self.status == CommandStatus::Exited(Some(0))
+    }
+
+    /// One line for the log and for `last_exit`.
+    pub fn describe(&self) -> String {
+        let head = match self.status {
+            CommandStatus::Exited(Some(code)) => format!("exited {code}"),
+            CommandStatus::Exited(None) => "was ended by a signal".into(),
+            CommandStatus::TimedOut => "timed out".into(),
+            CommandStatus::Cancelled => "was cancelled".into(),
+            CommandStatus::TooLarge => "wrote too much to stdout".into(),
+            CommandStatus::NotStarted => "did not start".into(),
+        };
+        match &self.error {
+            // "cancelled" is the plain reason; a more specific one (a disable) says more.
+            Some(error) if !error.is_empty() && error != "cancelled" => {
+                format!("{head}: {error}")
+            }
+            _ => head,
+        }
+    }
+}
+
+/// A command that has been started. It ends by itself or when its cancel token is cancelled;
+/// dropping the handle leaves the process running (its supervisor owns it), so keep it.
+#[derive(Debug)]
+pub struct CommandRun {
+    id: String,
+    done: watch::Receiver<Option<Arc<CommandResult>>>,
+}
+
+impl CommandRun {
+    /// The id the log uses.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Waits for the process tree to be gone. Waiting twice is fine.
+    pub async fn wait(&self) -> CommandResult {
+        let mut done = self.done.clone();
+        match done.wait_for(|value| value.is_some()).await {
+            Ok(value) => value
+                .as_ref()
+                .map(|result| (**result).clone())
+                .unwrap_or_else(CommandResult::lost),
+            Err(_) => CommandResult::lost(),
+        }
+    }
+}
+
+impl CommandResult {
+    /// The hub went away before the command recorded an outcome.
+    fn lost() -> Self {
+        Self {
+            status: CommandStatus::Cancelled,
+            duration: Duration::ZERO,
+            stdout: Vec::new(),
+            stderr: String::new(),
+            error: Some("the runner stopped before this command ended".into()),
+        }
     }
 }
 
@@ -242,7 +386,7 @@ pub struct Runner {
     calls: Mutex<HashMap<String, Arc<Call>>>,
     /// Token -> (extension, level). Memory only: a restart voids all of them.
     tokens: RwLock<HashMap<String, (String, ExtensionAccess)>>,
-    log: Mutex<()>,
+    log_lock: Mutex<()>,
     stopping: AtomicBool,
 }
 
@@ -288,7 +432,7 @@ impl Runner {
             counts: Mutex::default(),
             calls: Mutex::default(),
             tokens: RwLock::default(),
-            log: Mutex::default(),
+            log_lock: Mutex::default(),
             stopping: AtomicBool::new(false),
         });
         let weak = Arc::downgrade(&runner);
@@ -315,10 +459,38 @@ impl Runner {
         self.tokens.read().unwrap().len()
     }
 
+    /// Issues a token for `extension` at `level`. It stops working the moment the guard is
+    /// dropped, so one guard lives exactly as long as its process tree
+    /// (docs/EXTENSIONS.md §3). Never outlives the hub: the table is memory only.
+    pub fn issue_token(&self, extension: &str, level: ExtensionAccess) -> TokenGuard {
+        let token = format!(
+            "ca-ext-{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        );
+        self.tokens
+            .write()
+            .unwrap()
+            .insert(token.clone(), (extension.to_owned(), level));
+        TokenGuard {
+            runner: self.me.clone(),
+            token,
+        }
+    }
+
+    /// Appends one line to the extension's log; hooks and services report their lifecycle
+    /// there (docs/EXTENSIONS.md §3).
+    pub fn note(&self, extension: &str, line: &str) {
+        self.write_log(
+            extension,
+            format!("--- {} {line}\n", Utc::now().to_rfc3339()).as_bytes(),
+        );
+    }
+
     fn extension_disabled(&self, name: &str) {
         for call in self.calls.lock().unwrap().values() {
             if call.extension == name && call.is_running() {
-                call.disabled.notify_one();
+                call.disabled.cancel();
             }
         }
     }
@@ -455,9 +627,9 @@ impl Runner {
             fingerprint: lease.enabled.version.fingerprint.clone(),
             started_at,
             timeout_secs,
-            cancel: Notify::new(),
-            reason: Mutex::new(None),
-            disabled: Notify::new(),
+            cancel: CancellationToken::new(),
+            reason: Arc::new(Mutex::new(None)),
+            disabled: CancellationToken::new(),
             done,
             finished: Mutex::new(None),
         });
@@ -467,19 +639,8 @@ impl Runner {
             calls.insert(id.clone(), call.clone());
         }
         let level = lease.enabled.version.access;
-        let token = format!(
-            "ca-ext-{}{}",
-            uuid::Uuid::new_v4().simple(),
-            uuid::Uuid::new_v4().simple()
-        );
-        this.tokens
-            .write()
-            .unwrap()
-            .insert(token.clone(), (extension.to_owned(), level));
-        let token_guard = TokenGuard {
-            runner: this.clone(),
-            token: token.clone(),
-        };
+        let token_guard = this.issue_token(extension, level);
+        let token = token_guard.token().to_owned();
         let accepted = ExtensionCallAccepted {
             call_id: id,
             extension: extension.to_owned(),
@@ -507,6 +668,67 @@ impl Runner {
         Ok(accepted)
     }
 
+    /// Starts one command outside the tool checks: a hook or a service
+    /// (docs/EXTENSIONS.md §3). It returns at once; await [`CommandRun::wait`]. Must run
+    /// inside a tokio runtime. A hook takes a tool-call slot, so an over-limit event is
+    /// dropped here with [`CallError::Busy`] and nothing runs; a service never waits for one.
+    pub fn start_command(&self, spec: CommandSpec) -> Result<CommandRun, CallError> {
+        let this = self
+            .me
+            .upgrade()
+            .ok_or_else(|| CallError::Internal("the runner is gone".into()))?;
+        if self.stopping.load(Ordering::SeqCst) {
+            return Err(CallError::NotEnabled("the hub is stopping".into()));
+        }
+        let CommandSpec {
+            extension,
+            lease,
+            command,
+            stdin,
+            timeout,
+            stdout,
+            limits,
+            label,
+            cancel,
+        } = spec;
+        if command.first().is_none_or(|program| program.is_empty()) {
+            return Err(CallError::Internal(format!(
+                "{label} of {extension} has no command"
+            )));
+        }
+        if cancel.is_cancelled() {
+            return Err(CallError::NotEnabled(format!(
+                "{label} of {extension} was cancelled before it started"
+            )));
+        }
+        let permit = if limits {
+            Some(this.reserve(&extension)?)
+        } else {
+            None
+        };
+        let token_guard = this.issue_token(&extension, lease.enabled.version.access);
+        let token = token_guard.token().to_owned();
+        let id = format!("cmd-{}", uuid::Uuid::new_v4().simple());
+        let (done, rx) = watch::channel(None);
+        let job = CommandJob {
+            id: id.clone(),
+            extension,
+            label,
+            lease,
+            command,
+            stdin,
+            timeout,
+            stdout,
+            cancel,
+            token,
+            token_guard,
+            permit,
+            done: done.clone(),
+        };
+        tokio::spawn(this.supervise_command(job));
+        Ok(CommandRun { id, done: rx })
+    }
+
     /// The call's current state, if the hub still has it.
     pub fn get(&self, id: &str) -> Option<ExtensionCallResponse> {
         let mut calls = self.calls.lock().unwrap();
@@ -531,7 +753,7 @@ impl Runner {
                 .lock()
                 .unwrap()
                 .get_or_insert_with(|| "cancelled".into());
-            call.cancel.notify_one();
+            call.cancel.cancel();
             let mut rx = call.done.subscribe();
             let _ =
                 tokio::time::timeout(Duration::from_secs(10), rx.wait_for(|v| v.is_some())).await;
@@ -556,7 +778,7 @@ impl Runner {
                 .lock()
                 .unwrap()
                 .get_or_insert_with(|| "the hub is stopping".into());
-            call.cancel.notify_one();
+            call.cancel.cancel();
         }
         for call in running {
             let mut rx = call.done.subscribe();
@@ -573,7 +795,7 @@ impl Runner {
         use std::io::{Read, Seek, SeekFrom};
         crossagents_api_types::check_extension_name(name).map_err(CoreError::InvalidName)?;
         self.registry.get(name)?;
-        let _guard = self.log.lock().unwrap();
+        let _guard = self.log_lock.lock().unwrap();
         let mut file = match std::fs::File::open(self.log_path(name)) {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -610,7 +832,7 @@ impl Runner {
     /// `<name>.log.1`, replacing the one before.
     fn write_log(&self, extension: &str, bytes: &[u8]) {
         use std::io::Write;
-        let _guard = self.log.lock().unwrap();
+        let _guard = self.log_lock.lock().unwrap();
         let path = self.log_path(extension);
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -662,9 +884,15 @@ impl Runner {
             .as_bytes(),
         );
         // A panic while running must still end in a result.
-        let outcome = match std::panic::AssertUnwindSafe(
-            self.execute(&call, &lease, &command, stdin, &token),
-        )
+        let control = control_of(&call, self.limits.disable_grace);
+        let outcome = match std::panic::AssertUnwindSafe(self.execute(
+            &control,
+            &lease.enabled,
+            &command,
+            Some(stdin),
+            &token,
+            true,
+        ))
         .catch_unwind()
         .await
         {
@@ -789,29 +1017,36 @@ impl Runner {
         }
     }
 
+    /// Runs one command in a pinned snapshot. What ends it and where its output goes is in
+    /// `control`; a tool wraps this with the JSON protocol, a hook or a service uses it as it
+    /// is.
     async fn execute(
         &self,
-        call: &Call,
-        lease: &SnapshotLease,
+        control: &Control,
+        enabled: &EnabledVersion,
         command: &[String],
-        stdin: Vec<u8>,
+        stdin: Option<Vec<u8>>,
         token: &str,
+        capture_stdout: bool,
     ) -> Outcome {
-        let enabled = &lease.enabled;
         let Some((program, args)) = command.split_first() else {
             return Outcome::NotStarted {
-                why: "the tool has no command".into(),
+                why: format!("{} has no command", control.label),
             };
         };
         // No shell: the program and its arguments go to the OS as they are.
         let mut cmd = tokio::process::Command::new(program);
         cmd.args(args)
             .current_dir(&enabled.path)
-            .stdin(std::process::Stdio::piped())
+            .stdin(if stdin.is_some() {
+                std::process::Stdio::piped()
+            } else {
+                std::process::Stdio::null()
+            })
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
-            // An agent's own token is not for tools.
+            // An agent's own token is not for extensions.
             .env_remove(crate::collab::TOKEN_ENV)
             .env(
                 "CROSSAGENTS_URL",
@@ -830,19 +1065,20 @@ impl Runner {
                 };
             }
         };
-        let (Some(mut stdin_pipe), Some(stdout_pipe), Some(stderr_pipe)) =
-            (child.stdin.take(), child.stdout.take(), child.stderr.take())
+        let (Some(stdout_pipe), Some(stderr_pipe)) = (child.stdout.take(), child.stderr.take())
         else {
             tree.kill();
             return Outcome::NotStarted {
-                why: "cannot open the tool's pipes".into(),
+                why: "cannot open the process's pipes".into(),
             };
         };
         // The child may never read its input, so writing must not block the supervisor.
-        tokio::spawn(async move {
-            let _ = stdin_pipe.write_all(&stdin).await;
-            let _ = stdin_pipe.shutdown().await;
-        });
+        if let (Some(mut stdin_pipe), Some(input)) = (child.stdin.take(), stdin) {
+            tokio::spawn(async move {
+                let _ = stdin_pipe.write_all(&input).await;
+                let _ = stdin_pipe.shutdown().await;
+            });
+        }
         let too_large = Arc::new(Notify::new());
         let overflow = Arc::new(AtomicBool::new(false));
         // The readers fill these as they go, so what was read survives a reader that is
@@ -852,6 +1088,8 @@ impl Runner {
         let stdout_task = tokio::spawn({
             let (too_large, overflow, buf) =
                 (too_large.clone(), overflow.clone(), stdout_buf.clone());
+            let me = self.me.clone();
+            let extension = control.extension.clone();
             async move {
                 let mut out = stdout_pipe;
                 let mut chunk = vec![0u8; 16 * 1024];
@@ -859,12 +1097,17 @@ impl Runner {
                     match out.read(&mut chunk).await {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
-                            let mut data = buf.lock().unwrap();
-                            data.extend_from_slice(&chunk[..n]);
-                            if data.len() > STDOUT_LIMIT {
-                                overflow.store(true, Ordering::SeqCst);
-                                too_large.notify_one();
-                                break;
+                            if capture_stdout {
+                                let mut data = buf.lock().unwrap();
+                                data.extend_from_slice(&chunk[..n]);
+                                if data.len() > STDOUT_LIMIT {
+                                    overflow.store(true, Ordering::SeqCst);
+                                    too_large.notify_one();
+                                    break;
+                                }
+                            } else if let Some(me) = me.upgrade() {
+                                // A service's stdout is a log, not a result: no cap, no copy.
+                                me.write_log(&extension, &chunk[..n]);
                             }
                         }
                     }
@@ -873,7 +1116,7 @@ impl Runner {
         });
         let stderr_task = tokio::spawn({
             let me = self.me.clone();
-            let name = call.extension.clone();
+            let name = control.extension.clone();
             let buf = stderr_buf.clone();
             async move {
                 let mut err = stderr_pipe;
@@ -910,21 +1153,32 @@ impl Runner {
             TooLarge,
             Cancelled(String),
         }
-        let grace = self.limits.disable_grace;
+        let disabled = match &control.disabled {
+            Some(token) => {
+                let (token, grace) = (token.clone(), control.grace);
+                futures::future::Either::Left(async move {
+                    token.cancelled().await;
+                    tokio::time::sleep(grace).await;
+                })
+            }
+            None => futures::future::Either::Right(futures::future::pending::<()>()),
+        };
+        let deadline = match control.timeout {
+            Some(timeout) => futures::future::Either::Left(tokio::time::sleep(timeout)),
+            None => futures::future::Either::Right(futures::future::pending::<()>()),
+        };
         let end = tokio::select! {
             biased;
-            _ = call.cancel.notified() => End::Cancelled(
-                call.reason.lock().unwrap().clone().unwrap_or_else(|| "cancelled".into()),
+            _ = control.cancel.cancelled() => End::Cancelled(
+                control.reason.lock().unwrap().clone().unwrap_or_else(|| "cancelled".into()),
             ),
-            _ = async { call.disabled.notified().await; tokio::time::sleep(grace).await } => {
-                End::Cancelled(format!(
-                    "extension {} was disabled; the call was ended after {}s",
-                    call.extension,
-                    grace.as_secs()
-                ))
-            }
+            _ = disabled => End::Cancelled(format!(
+                "extension {} was disabled; the process was ended after {}s",
+                control.extension,
+                control.grace.as_secs()
+            )),
             _ = too_large.notified() => End::TooLarge,
-            _ = tokio::time::sleep(Duration::from_secs(call.timeout_secs.into())) => End::Timeout,
+            _ = deadline => End::Timeout,
             exited = child.wait() => End::Exited(exited.ok().and_then(|s| s.code())),
         };
         match end {
@@ -962,6 +1216,71 @@ impl Runner {
                 }
             }
         }
+    }
+    /// Supervises one hook or service command: runs it, logs how it ended, and gives the
+    /// token and the snapshot back. The result (also on a panic) always reaches waiters.
+    async fn supervise_command(self: Arc<Self>, job: CommandJob) {
+        let CommandJob {
+            id,
+            extension,
+            label,
+            lease,
+            command,
+            stdin,
+            timeout,
+            stdout,
+            cancel,
+            token,
+            token_guard,
+            permit,
+            done,
+        } = job;
+        let _finisher = CommandFinisher(done.clone(), label.clone());
+        let started = Instant::now();
+        let fingerprint = &lease.enabled.version.fingerprint;
+        let short = &fingerprint[..fingerprint.len().min(8)];
+        self.note(&extension, &format!("{label} {id} @{short} started"));
+        let control = Control {
+            extension: extension.clone(),
+            label: label.clone(),
+            timeout,
+            cancel,
+            reason: Arc::new(Mutex::new(None)),
+            disabled: None,
+            grace: Duration::ZERO,
+        };
+        let outcome = match std::panic::AssertUnwindSafe(self.execute(
+            &control,
+            &lease.enabled,
+            &command,
+            stdin,
+            &token,
+            stdout == OutputCapture::Collect,
+        ))
+        .catch_unwind()
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => Outcome::NotStarted {
+                why: "internal error while running the command".into(),
+            },
+        };
+        let duration = started.elapsed();
+        // The tree is gone by now: the token must stop working with it.
+        drop(token_guard);
+        let result = CommandResult::from_outcome(outcome, duration, timeout);
+        let how = result.describe();
+        self.note(
+            &extension,
+            &format!("{label} {id} {how} in {} ms", duration.as_millis()),
+        );
+        tracing::info!(
+            extension = %extension, command = %label, status = %how,
+            ms = duration.as_millis() as u64, "extension command finished"
+        );
+        drop(lease);
+        drop(permit);
+        done.send_replace(Some(Arc::new(result)));
     }
 }
 
@@ -1002,6 +1321,116 @@ impl Drop for Finisher {
                 error: Some("internal error: the call's supervisor ended unexpectedly".into()),
                 stderr: None,
             })));
+        }
+    }
+}
+
+/// What ends a process tree besides it exiting, and where its log lines come from.
+struct Control {
+    /// The extension whose log, limits and token this is.
+    extension: String,
+    /// How the log names it.
+    label: String,
+    /// `None` runs until it ends (a service).
+    timeout: Option<Duration>,
+    cancel: CancellationToken,
+    /// Why it was cancelled; read when the cancel branch wins.
+    reason: Arc<Mutex<Option<String>>>,
+    /// Tools only: the extension was disabled, so end after the grace period.
+    disabled: Option<CancellationToken>,
+    grace: Duration,
+}
+
+fn control_of(call: &Call, grace: Duration) -> Control {
+    Control {
+        extension: call.extension.clone(),
+        label: format!("call {} {}__{}", call.id, call.extension, call.tool),
+        timeout: Some(Duration::from_secs(call.timeout_secs.into())),
+        cancel: call.cancel.clone(),
+        reason: call.reason.clone(),
+        disabled: Some(call.disabled.clone()),
+        grace,
+    }
+}
+
+/// Everything a started hook or service carries into its supervising task.
+struct CommandJob {
+    id: String,
+    extension: String,
+    label: String,
+    lease: SnapshotLease,
+    command: Vec<String>,
+    stdin: Option<Vec<u8>>,
+    timeout: Option<Duration>,
+    stdout: OutputCapture,
+    cancel: CancellationToken,
+    token: String,
+    token_guard: TokenGuard,
+    permit: Option<Permit>,
+    done: watch::Sender<Option<Arc<CommandResult>>>,
+}
+
+/// Makes sure a command always ends: if the supervising task is dropped before it recorded
+/// an outcome (the runtime going away), waiters still get an answer.
+struct CommandFinisher(watch::Sender<Option<Arc<CommandResult>>>, String);
+
+impl Drop for CommandFinisher {
+    fn drop(&mut self) {
+        if self.0.borrow().is_none() {
+            self.0.send_replace(Some(Arc::new(CommandResult {
+                status: CommandStatus::Cancelled,
+                duration: Duration::ZERO,
+                stdout: Vec::new(),
+                stderr: String::new(),
+                error: Some(format!("{}: the supervisor ended unexpectedly", self.1)),
+            })));
+        }
+    }
+}
+
+impl CommandResult {
+    fn from_outcome(outcome: Outcome, duration: Duration, timeout: Option<Duration>) -> Self {
+        let (status, stdout, stderr, error) = match outcome {
+            Outcome::Exited {
+                code,
+                stdout,
+                stderr,
+            } => (CommandStatus::Exited(code), stdout, stderr, None),
+            Outcome::TimedOut { stderr } => (
+                CommandStatus::TimedOut,
+                Vec::new(),
+                stderr,
+                Some(match timeout {
+                    Some(timeout) => {
+                        format!("timed out after {}s and was killed", timeout.as_secs())
+                    }
+                    None => "timed out and was killed".into(),
+                }),
+            ),
+            Outcome::TooLarge { stderr } => (
+                CommandStatus::TooLarge,
+                Vec::new(),
+                stderr,
+                Some(format!(
+                    "wrote more than {STDOUT_LIMIT} bytes to stdout and was killed"
+                )),
+            ),
+            Outcome::Cancelled { why, stderr } => {
+                (CommandStatus::Cancelled, Vec::new(), stderr, Some(why))
+            }
+            Outcome::NotStarted { why } => (
+                CommandStatus::NotStarted,
+                Vec::new(),
+                String::new(),
+                Some(why),
+            ),
+        };
+        Self {
+            status,
+            duration,
+            stdout,
+            stderr,
+            error,
         }
     }
 }

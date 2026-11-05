@@ -726,6 +726,18 @@ pub struct ExtensionPromptInfo {
     pub bytes: u64,
 }
 
+/// One `[[on]]` block in a snapshot: a process started for every new event of this type
+/// (docs/EXTENSIONS.md §3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExtensionHookInfo {
+    /// The event's wire name (`run.landed`). Never `extension.*`: an extension cannot
+    /// react to another one, directly or through a chain.
+    pub event: String,
+    /// How long the process may run; past it the tree is killed (1..600).
+    pub timeout_secs: u32,
+}
+
 /// One snapshot of an extension: what it declares, as the hub read it from the snapshot it
 /// took (not from the source directory, which may have changed since).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -741,6 +753,16 @@ pub struct ExtensionVersion {
     pub tools: Vec<ExtensionToolInfo>,
     #[serde(default)]
     pub prompts: Vec<ExtensionPromptInfo>,
+    /// Event hooks this snapshot declares, in description-file order. Absent and empty mean
+    /// the same: a version taken before E4 has none.
+    #[serde(default)]
+    #[ts(as = "Option<Vec<ExtensionHookInfo>>", optional)]
+    pub hooks: Vec<ExtensionHookInfo>,
+    /// Whether it declares a resident `[service]` process. The command itself stays in the
+    /// snapshot's `extension.toml`, which the approval diff already shows.
+    #[serde(default)]
+    #[ts(as = "Option<bool>", optional)]
+    pub service: bool,
     /// The GUI entry, relative to the snapshot; `None` when it has no panel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -767,8 +789,38 @@ pub struct ExtensionPending {
     pub requested_by: Option<AgentId>,
 }
 
-/// One extension as `GET /v1/extensions` reports it. Everything but `error` comes from
-/// `<home>/extensions.json` and the snapshots it names, so it survives a hub restart.
+/// What the resident process of one extension is doing (docs/EXTENSIONS.md §3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionServiceState {
+    /// Not running: the extension is disabled, declares no service, or was just stopped.
+    Stopped,
+    /// Being launched.
+    Starting,
+    /// Alive.
+    Running,
+    /// It exited; a restart follows when the backoff ends.
+    Backoff,
+}
+
+/// Live state of an extension's resident process. Not persisted: every hub starts its own
+/// (a service never outlives the hub that started it).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExtensionServiceStatus {
+    pub state: ExtensionServiceState,
+    /// Starts since it last ran for 60 s without exiting; reset to 0 by that.
+    pub restarts: u32,
+    /// Why it last exited (exit code, signal, or why it could not start).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_exit: Option<String>,
+}
+
+/// One extension as `GET /v1/extensions` reports it. Everything but `error` and `service`
+/// comes from `<home>/extensions.json` and the snapshots it names, so it survives a hub
+/// restart; `service` is live state of this hub's run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ExtensionInfo {
@@ -794,6 +846,11 @@ pub struct ExtensionInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub pending: Option<ExtensionPending>,
+    /// The resident process's state, when this extension declares a `[service]`. Live
+    /// state of this hub's run, not part of `extensions.json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub service: Option<ExtensionServiceStatus>,
     /// Why the source cannot be snapshotted or does not check out (a symlink, over the
     /// 50 MB cap, a description file that does not parse). The current version keeps
     /// running.
@@ -2422,6 +2479,7 @@ mod tests {
             current: None,
             previous_fingerprint: None,
             pending: None,
+            service: None,
             error: None,
         })
         .unwrap();
