@@ -260,6 +260,7 @@ B 删除 run：
 
 - [x] `cargo fmt --all -- --check` 在**没人改动过的文件**上失败：本地 rustfmt 升到 1.10.0-stable（2026-10-13）后换行取舍变了，仓库上次全量格式化用的是更旧的版本，九个文件有漂移。这让每条任务的格式检查都挂在与它无关的文件上，噪声盖掉真问题，还逼得我 force 接受了一条本来合格的任务。已用 rustfmt 1.10 统一重排（纯机械，不改行为）
 - [x] `cargo clippy --workspace --all-targets -- -D warnings` 在干净分支上也通不过：仓库一直有五处告警。这是我给 works-table 写验收命令时没核实造成的——**给 worker 设了一道过不去的关**，它照实报告被挡住，我才发现。修掉四处（多余的 `.into_iter()`、嵌套 `if` 合 let-chain、三元组起名 `Reply`、多余的 `mut`），`EventKind` 的 `large_enum_variant` 加带理由的 `#[allow]`（真修法是装箱，见 [TODO.md](TODO.md) 同名一节）。教训：**写验收命令前要先在基线上自己跑一遍**
+- [x] `cargo test --workspace` 的偶发失败 `settling_the_checkpoint_at_idle_does_not_swallow_a_stuck_report`（2026-10-30 记，2026-10-31 查到名字，2026-11-05 修，`d798e28`、`6984fb5`）：不是当时猜的「和并发负载抢时间」，而是测试的 `quiet()` 不持 run 锁改写时间戳，后台 pass 可能把旧副本写回，抹掉伪造的静默期。改为在同一把 run 锁内改写，并显式等回合结束事件落库。同日另修了 `delete_run` 和 `steer_failure` 两条不稳定测试
 
 ## 十九、Lead 执行模式与工作区保留
 
@@ -280,3 +281,21 @@ B 删除 run：
 - [x] **0.1.17 发出去的安装包里没有 hub**（同日修，`614af13` + 0.1.18 重发）：`build.extraResources` 从 `../../target/release/crossagents.exe` 把 hub 打进安装包，而那次 `cargo build --release` 跑在设了 `CARGO_TARGET_DIR` 的 shell 里（run 的构建目录），产物落到别处，源文件根本不存在；**electron-builder 不因缺少 `extraResources` 而失败**，照样打包。后果：更新到 0.1.17 的 GUI 没有新 hub 可装进 `<home>/bin/<版本>/`，只能继续用旧 hub（界面显示「界面 v0.1.17 · hub v0.1.16」）；全新安装则完全没有 hub。修法：`apps/gui/scripts/check-version.mjs` 除了比对两处版本号，还要求那个二进制存在、且 `--version` 报的就是本版本，失败时说明该怎么办与 `CARGO_TARGET_DIR` 这个坑。0.1.17 的安装包、blockmap 与 `latest.yml` 已从发布仓库删除并写明原因，保留其正常的独立 hub 二进制
   - 发布流程里同时暴露的两处，都是**发完之后逐项核验**才发现的（命令本身全是退出 0）：electron-builder 的并发上传**建了两个同 tag 的 release**，安装包进了一个、手动补传的 hub 进了另一个，合并后删掉重复的那个，并重新标 Latest（Latest 随被删的那个一起没了）；手动 `gh release upload` 时文件名里的空格被换成点（`CrossAgents.Setup.0.1.18.exe`），而 `latest.yml` 指向连字符的名字，自动更新会 404，用 `PATCH .../releases/assets/<id>` 改名而不必重传 119MB
   - 教训：**打包和发布都要先在干净的工作树里做**（主检出常有未提交改动，会被编进二进制），而且那棵树里要显式清掉 `CARGO_TARGET_DIR`；**发完要逐项核对资产名、大小与 `latest.yml` 的一致性**，退出码为 0 不等于发对了
+
+## 二十四、10-31 之后的工作
+
+> 2026-11-06 按提交记录和设计稿补记，当时没走 TODO。这里只记做过什么，没有逐条复测；细节看对应设计稿和提交。没做完的尾巴见 [TODO.md](TODO.md) 同名一节。
+
+- [x] 会话优先（10-31）：聊天发起的 run 用独立主导，普通聊天不再带 run 的工具和说明（[SESSION-FIRST.md](SESSION-FIRST.md)）
+- [x] 减少额度消耗阶段 1、2（[USAGE-TRIM.md](USAGE-TRIM.md)）
+- [x] 发版脚本 `scripts/release.mjs`，产物核对改成硬失败（10-31）；依赖恰好同版本时不再卡住（11-06）
+- [x] 平等 Agent 与项目侧栏 A–D（11-01）：任何会话都能审核和接任务，侧栏变平，加「需要你」分区和项目总览（[AGENT-WORKSPACE.md](AGENT-WORKSPACE.md)）
+- [x] 专长档案（11-02）：hub 接口、工具、reviewer 检查清单、GUI 页，11-04 接真实 hub 实测（[tasks/EXPERTISE.md](tasks/EXPERTISE.md)）
+- [x] Cursor 接入：`cursor-native` 驱动（11-02）、账号与交互登录（11-03）、模式分离和逐任务推理强度（11-04）、非 bypass 会话不卡在目录信任提示（11-05）（[research/cursor-cli.md](research/cursor-cli.md)）
+- [x] GUI 工具区（11-03、11-04）：浏览器式标签可拖到对话下方，文件面板可渲染 Markdown，内置终端（窗口关了终端还在），「后台任务」看板
+- [x] 工作区独立记录 run 实现历史，删除 run 后仍可查（11-03）；每个 run 都属于工作组（11-03）；run 结束删构建目录、合并后删 checkout、启动时清残留（11-04）
+- [x] 运行中心跳改为 token 速度（11-04）
+- [x] 插话（11-05）：驱动、hub、转录和前端，加真实 Claude 冒烟（[research/codebuddy-steer.md](research/codebuddy-steer.md)）
+- [x] 扩展 E1–E4（11-05）：目录与批准、一次性工具、页面接口、管理页、创造工具、事件响应、常驻进程（[EXTENSIONS.md](EXTENSIONS.md)）；内置功能迁移评估和事件流面板试点（[EXTENSIONS-MIGRATION.md](EXTENSIONS-MIGRATION.md)）
+- [x] 识别内容审查拦截并提示换会话或压缩（11-05）；工具卡片相对路径和按 kind 的标题（11-05）
+- [x] 驱动与 hub 修复（11-05、11-06）：Claude 驱动写入不留半帧、失败 result 不提前结束；`run_next` 在 lead 回合内不再报 busy；Codex primary 额度误判；复制失败、回复看不到图、`run_next` 重复显示人的原话
