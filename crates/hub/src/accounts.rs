@@ -35,6 +35,14 @@ const STATUS_TTL: Duration = Duration::from_secs(60);
 /// The last status read per account, with when.
 type Statuses = Arc<std::sync::Mutex<HashMap<String, (Instant, AccountStatus)>>>;
 
+#[derive(Clone)]
+struct Observation {
+    at: DateTime<Utc>,
+    limits: RateLimits,
+    top_group: Option<String>,
+    refusal: Option<String>,
+}
+
 /// A running login tool with everything it started. On Windows a tool found as a `.cmd`
 /// runs under `cmd.exe`, so killing the child alone would leave the real tool (`node`)
 /// running; the [`Tree`] ends them all, and does when the hub exits too.
@@ -58,12 +66,15 @@ pub struct Accounts {
     /// Running login processes by account id.
     logins: Arc<Mutex<HashMap<String, LoginProcess>>>,
     /// The quota agents last reported per account, with when.
-    observed: std::sync::Mutex<HashMap<String, (DateTime<Utc>, RateLimits)>>,
+    observed: std::sync::Mutex<HashMap<String, Observation>>,
     /// Status reads, served at once: a provider read can take seconds (it may start the
     /// vendor's CLI), so only an account's first one is waited for.
     statuses: Statuses,
     /// Accounts whose status is being read in the background.
     refreshing: Arc<std::sync::Mutex<HashSet<String>>>,
+    refresh_attempts: std::sync::Mutex<HashMap<String, Instant>>,
+    /// Resolved defaults, populated by provider probes, never by a blocking health read.
+    default_models: Arc<std::sync::Mutex<HashMap<String, String>>>,
     /// Serialize directory claims so concurrent site accounts cannot share a profile.
     creating: Mutex<()>,
 }
@@ -85,6 +96,8 @@ impl Accounts {
             observed: std::sync::Mutex::default(),
             statuses: Arc::default(),
             refreshing: Arc::default(),
+            refresh_attempts: std::sync::Mutex::default(),
+            default_models: Arc::default(),
             creating: Mutex::new(()),
         }
     }
@@ -151,9 +164,9 @@ impl Accounts {
         // A per-call update names only the limit in use: merge it into what a full read
         // reported, by limit id; reset credits stay until a read brings new ones.
         let merged = match observed.get(&id) {
-            Some((_, old)) => {
+            Some(old) => {
                 let mut merged = limits.clone();
-                let mut groups = old.by_limit.clone();
+                let mut groups = old.limits.by_limit.clone();
                 for group in &limits.by_limit {
                     match groups.iter_mut().find(|g| g.id == group.id) {
                         Some(slot) => *slot = group.clone(),
@@ -162,14 +175,32 @@ impl Accounts {
                 }
                 merged.by_limit = groups;
                 if merged.reset_credits.is_none() {
-                    merged.reset_credits = old.reset_credits.clone();
+                    merged.reset_credits = old.limits.reset_credits.clone();
                 }
                 merged
             }
             None => limits.clone(),
         };
-        let changed = observed.get(&id).is_none_or(|(_, old)| *old != merged);
-        observed.insert(id.clone(), (Utc::now(), merged));
+        let changed = observed
+            .get(&id)
+            .is_none_or(|old| old.limits != merged || old.refusal.is_some());
+        let top_group = if limits.by_limit.len() == 1
+            && !limits.windows.is_empty()
+            && limits.by_limit[0].windows == limits.windows
+        {
+            Some(limits.by_limit[0].id.clone())
+        } else {
+            None
+        };
+        observed.insert(
+            id.clone(),
+            Observation {
+                at: Utc::now(),
+                limits: merged,
+                top_group,
+                refusal: None,
+            },
+        );
         changed.then_some(id)
     }
 
@@ -288,9 +319,11 @@ impl Accounts {
             }
         };
         let observed = self.observed.lock().unwrap().get(id).cloned();
-        if let Some((at, limits)) = observed
-            && status.as_of.is_none_or(|as_of| at > as_of)
+        if let Some(observation) = observed
+            && status.as_of.is_none_or(|as_of| observation.at > as_of)
         {
+            let at = observation.at;
+            let limits = observation.limits;
             status.rate_limits = limits.windows;
             if limits.credits.is_some() {
                 status.credits = limits.credits;
@@ -317,32 +350,40 @@ impl Accounts {
         };
         let cached = self.statuses.lock().unwrap().get(id).cloned();
         let observed = self.observed.lock().unwrap().get(id).cloned();
-        if cached.is_none()
+        if cached
+            .as_ref()
+            .is_none_or(|(read_at, _)| read_at.elapsed() >= STATUS_TTL)
             && let Ok(provider) = self.provider(&account.provider)
         {
-            self.refresh_status(account, provider.clone());
+            self.refresh_status_throttled(account.clone(), provider.clone());
         }
         let mut windows = Vec::new();
         let mut groups = Vec::new();
         let mut reached = None;
+        let mut top_group = None;
+        let mut refusal = None;
         let mut credits = None;
         if let Some((_, status)) = &cached {
             windows.extend(status.rate_limits.iter().cloned());
             groups = status.limits.clone();
+            top_group = matching_top_group(&windows, &groups);
             if status.limit_reached {
                 reached = Some("limit reached".to_owned());
             }
             credits = status.credits.clone();
         }
         // What an agent saw last wins over an older read.
-        if let Some((at, limits)) = &observed
+        if let Some(observation) = &observed
             && cached
                 .as_ref()
-                .is_none_or(|(_, s)| s.as_of.is_none_or(|as_of| *at > as_of))
+                .is_none_or(|(_, s)| s.as_of.is_none_or(|as_of| observation.at > as_of))
         {
+            let limits = &observation.limits;
             windows = limits.windows.clone();
             groups = limits.by_limit.clone();
             reached = limits.reached.clone();
+            top_group = observation.top_group.clone();
+            refusal = observation.refusal.clone();
             if limits.credits.is_some() {
                 credits = limits.credits.clone();
             }
@@ -350,21 +391,54 @@ impl Accounts {
         if cached.is_none() && observed.is_none() {
             return Health::Unknown;
         }
-        judge_for_model(
+        let default_model = self.default_models.lock().unwrap().get(id).cloned();
+        let model = model
+            .filter(|m| !matches!(*m, "" | "default" | "auto"))
+            .or(default_model.as_deref());
+        judge_for_model_with_top(
             &windows,
             &groups,
             model,
             reached.as_deref(),
             credits.as_ref(),
+            top_group.as_deref(),
+            refusal.as_deref(),
+            &account.provider,
         )
     }
 
     /// Marks the account as out of quota now (an agent on it was refused).
     pub fn mark_reached(&self, id: &str, why: &str) {
         let mut observed = self.observed.lock().unwrap();
-        let mut limits = observed.get(id).map(|(_, l)| l.clone()).unwrap_or_default();
+        let mut limits = observed
+            .get(id)
+            .map(|o| o.limits.clone())
+            .unwrap_or_default();
+        let top_group = observed.get(id).and_then(|o| o.top_group.clone());
         limits.reached = Some(why.to_owned());
-        observed.insert(id.to_owned(), (Utc::now(), limits));
+        observed.insert(
+            id.to_owned(),
+            Observation {
+                at: Utc::now(),
+                limits,
+                top_group,
+                refusal: Some(why.to_owned()),
+            },
+        );
+    }
+
+    /// Health checks may be frequent; limit their background probes even after a failure.
+    fn refresh_status_throttled(&self, account: Account, provider: Arc<dyn AccountProvider>) {
+        let mut attempts = self.refresh_attempts.lock().unwrap();
+        if attempts
+            .get(&account.id)
+            .is_some_and(|at| at.elapsed() < STATUS_TTL)
+        {
+            return;
+        }
+        attempts.insert(account.id.clone(), Instant::now());
+        drop(attempts);
+        self.refresh_status(account, provider);
     }
 
     /// Reads `account`'s status in the background, unless a read is already running.
@@ -375,14 +449,35 @@ impl Accounts {
         let statuses = self.statuses.clone();
         let refreshing = self.refreshing.clone();
         let bus = self.bus.clone();
+        let defaults = self.default_models.clone();
         tokio::spawn(async move {
             let fresh = provider.status(&account).await;
             let (_, changed) = record_status(&statuses, &account.id, fresh);
             refreshing.lock().unwrap().remove(&account.id);
             if changed {
                 let _ = bus
-                    .publish(EventKind::AccountQuotaUpdated { id: account.id })
+                    .publish(EventKind::AccountQuotaUpdated {
+                        id: account.id.clone(),
+                    })
                     .await;
+            }
+            // Claude's initialize list is explicitly default-first; aliases such as
+            // `default` do not identify a model and must not exclude other groups.
+            if account.provider == "claude" {
+                let models = provider.models(&account).await;
+                let resolved = models
+                    .first()
+                    .map(|m| m.id.as_str())
+                    .filter(|m| !matches!(*m, "" | "default" | "auto"));
+                let mut defaults = defaults.lock().unwrap();
+                match resolved {
+                    Some(model) => {
+                        defaults.insert(account.id, model.to_owned());
+                    }
+                    None => {
+                        defaults.remove(&account.id);
+                    }
+                }
             }
         });
     }
@@ -1306,6 +1401,71 @@ mod login_tests {
         (accounts, bus, dir, account)
     }
 
+    #[tokio::test]
+    async fn health_refreshes_a_refusal_without_a_running_agent() {
+        let (accounts, _bus, _dir, account) = accounts_with(PrintLogin {
+            logged_in: true,
+            url: "",
+        })
+        .await;
+        accounts.status(&account.id).await.unwrap();
+        accounts.mark_reached(&account.id, "refused");
+        {
+            let mut statuses = accounts.statuses.lock().unwrap();
+            statuses.get_mut(&account.id).unwrap().0 = Instant::now() - STATUS_TTL;
+        }
+        assert!(matches!(
+            accounts.health(&account.id, None).await,
+            Health::Exhausted(_)
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if accounts.health(&account.id, None).await == Health::Ok {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("background status read should clear the old refusal");
+    }
+
+    #[tokio::test]
+    async fn health_uses_a_resolved_default_model() {
+        let (accounts, _bus, _dir, account) = accounts_with(PrintLogin {
+            logged_in: true,
+            url: "",
+        })
+        .await;
+        accounts.status(&account.id).await.unwrap();
+        accounts
+            .default_models
+            .lock()
+            .unwrap()
+            .insert(account.id.clone(), "claude-sonnet-4".into());
+        accounts
+            .statuses
+            .lock()
+            .unwrap()
+            .get_mut(&account.id)
+            .unwrap()
+            .1
+            .limits = vec![crossagents_core::LimitGroup {
+            id: "sonnet".into(),
+            name: Some("Sonnet".into()),
+            model: Some("sonnet".into()),
+            windows: Vec::new(),
+            reached: true,
+        }];
+        assert!(
+            matches!(accounts.health(&account.id, None).await, Health::Exhausted(reason) if reason.contains("sonnet"))
+        );
+        assert_eq!(
+            accounts.health(&account.id, Some("claude-opus-4")).await,
+            Health::Ok
+        );
+    }
+
     /// `agent login` prints its page on stdout and keeps running; the hub hands the link to
     /// the GUI at once and says how the login ended when the tool stops.
     #[tokio::test]
@@ -1380,7 +1540,9 @@ fn judge(
     reached: Option<&str>,
     credits: Option<&crossagents_core::Credits>,
 ) -> Health {
-    if let Some(why) = reached {
+    if let Some(why) = reached
+        && !windows_expired(windows)
+    {
         return Health::Exhausted(format!("its limit is reached ({why})"));
     }
     if let Some(credits) = credits
@@ -1409,6 +1571,92 @@ fn judge(
     }
 }
 
+fn windows_expired(windows: &[crossagents_core::RateWindow]) -> bool {
+    !windows.is_empty()
+        && windows
+            .iter()
+            .all(|w| w.resets_at.is_some_and(|at| at <= Utc::now()))
+}
+
+// Claude's usage parser derives reached directly from the 100% windows. Other
+// providers may report an independent refusal, so do not infer that it expired
+// while any of their windows is still active or has no reset time.
+fn reached_for_windows<'a>(
+    reached: Option<&'a str>,
+    windows: &[crossagents_core::RateWindow],
+    provider: &str,
+) -> Option<&'a str> {
+    if provider == "claude" {
+        let mut exhausted = windows
+            .iter()
+            .filter(|w| w.used_percent >= 100.0)
+            .peekable();
+        if exhausted.peek().is_some()
+            && exhausted.all(|w| w.resets_at.is_some_and(|at| at <= Utc::now()))
+        {
+            return None;
+        }
+    }
+    reached
+}
+
+fn matching_top_group(
+    windows: &[crossagents_core::RateWindow],
+    groups: &[crossagents_core::LimitGroup],
+) -> Option<String> {
+    if windows.is_empty() {
+        return None;
+    }
+    let mut matches = groups.iter().filter(|g| g.windows == windows);
+    let first = matches.next()?;
+    matches.next().is_none().then(|| first.id.clone())
+}
+
+fn group_applies(
+    group: &crossagents_core::LimitGroup,
+    model: Option<&str>,
+    provider: &str,
+) -> bool {
+    let scoped = group.model.as_deref().or_else(|| {
+        ((provider == "claude" || provider == "codebuddy") && group.id != "all")
+            .then_some(group.id.as_str())
+    });
+    let Some(scope) = scoped else {
+        return true;
+    };
+    let Some(model) = model else {
+        return true;
+    };
+    let scope = scope.to_ascii_lowercase();
+    let model = model.to_ascii_lowercase();
+    if matches!(model.as_str(), "default" | "auto" | "") {
+        return true;
+    }
+    if scope == model {
+        return true;
+    }
+    if matches!(scope.as_str(), "opus" | "sonnet" | "haiku") {
+        let parts: Vec<_> = model.split(|c: char| !c.is_ascii_alphanumeric()).collect();
+        return parts.contains(&scope.as_str())
+            || !parts
+                .iter()
+                .any(|part| matches!(*part, "opus" | "sonnet" | "haiku" | "fable" | "gpt"));
+    }
+    if (provider == "claude" || provider == "codebuddy") && group.model.is_none() {
+        let parts: Vec<_> = model.split(|c: char| !c.is_ascii_alphanumeric()).collect();
+        if parts.contains(&scope.as_str()) {
+            return true;
+        }
+        // A display name is not always a model slug. Only rule it out when
+        // both names identify distinct, known families.
+        let families = ["opus", "sonnet", "haiku", "fable"];
+        return !(families.contains(&scope.as_str())
+            && parts.iter().any(|part| families.contains(part)));
+    }
+    false
+}
+
+#[cfg(test)]
 fn judge_for_model(
     windows: &[crossagents_core::RateWindow],
     groups: &[crossagents_core::LimitGroup],
@@ -1416,22 +1664,78 @@ fn judge_for_model(
     reached: Option<&str>,
     credits: Option<&crossagents_core::Credits>,
 ) -> Health {
-    let mut result = judge(windows, reached, credits);
+    let top = matching_top_group(windows, groups);
+    judge_for_model_with_top(
+        windows,
+        groups,
+        model,
+        reached,
+        credits,
+        top.as_deref(),
+        None,
+        "",
+    )
+}
+
+fn judge_for_model_with_top(
+    windows: &[crossagents_core::RateWindow],
+    groups: &[crossagents_core::LimitGroup],
+    model: Option<&str>,
+    reached: Option<&str>,
+    credits: Option<&crossagents_core::Credits>,
+    top_group: Option<&str>,
+    refusal: Option<&str>,
+    provider: &str,
+) -> Health {
+    let top = top_group.and_then(|id| groups.iter().find(|g| g.id == id));
+    let label = |group: &crossagents_core::LimitGroup| match &group.name {
+        Some(name) if name != &group.id => format!("limit group {} ({name})", group.id),
+        _ => format!("limit group {}", group.id),
+    };
+    let tagged = |health: Health, group: &crossagents_core::LimitGroup| match health {
+        Health::Exhausted(why) => Health::Exhausted(format!("{}: {why}", label(group))),
+        Health::Low(why) => Health::Low(format!("{}: {why}", label(group))),
+        other => other,
+    };
+    if let Some(reason) = refusal {
+        let health = Health::Exhausted(format!("its limit is reached ({reason})"));
+        return match top {
+            Some(group) => tagged(health, group),
+            None => health,
+        };
+    }
+    // Credits are account-wide, including when the last update belongs to another model.
+    let mut result = judge(&[], None, credits);
     if matches!(result, Health::Exhausted(_)) {
         return result;
     }
-    for group in groups
-        .iter()
-        .filter(|g| g.model.as_deref().is_some_and(|m| Some(m) == model))
-    {
-        let health = judge(&group.windows, None, None);
+    if top.is_none_or(|g| group_applies(g, model, provider)) {
+        let health = judge(
+            windows,
+            reached_for_windows(reached, windows, provider),
+            None,
+        );
+        result = match top {
+            Some(group) => tagged(health, group),
+            None => health,
+        };
+        if matches!(result, Health::Exhausted(_)) {
+            return result;
+        }
+    }
+    for group in groups.iter().filter(|g| group_applies(g, model, provider)) {
+        let health = judge(
+            &group.windows,
+            reached_for_windows(
+                group.reached.then_some("limit reached"),
+                &group.windows,
+                provider,
+            ),
+            None,
+        );
         match health {
-            Health::Exhausted(reason) => {
-                return Health::Exhausted(format!("limit group {}: {reason}", group.id));
-            }
-            Health::Low(reason) if !matches!(result, Health::Low(_)) => {
-                result = Health::Low(format!("limit group {}: {reason}", group.id));
-            }
+            Health::Exhausted(_) => return tagged(health, group),
+            Health::Low(_) if !matches!(result, Health::Low(_)) => result = tagged(health, group),
             _ => {}
         }
     }
@@ -1484,6 +1788,166 @@ mod health_tests {
         assert!(
             matches!(judge_for_model(&[window("primary", 0.0)], &groups, Some("luna"), None, None), Health::Exhausted(reason) if reason.contains("luna-limit"))
         );
+    }
+
+    #[test]
+    fn universal_and_family_limits_are_not_lost() {
+        let group = |id: &str, model: Option<&str>| crossagents_core::LimitGroup {
+            id: id.into(),
+            name: Some(id.into()),
+            model: model.map(str::to_owned),
+            windows: vec![window("primary", 100.0)],
+            reached: false,
+        };
+        for (g, model) in [
+            (group("codex", None), Some("gpt-6")),
+            (group("sonnet", Some("sonnet")), Some("claude-sonnet-4-5")),
+            (group("fable", None), Some("fable")),
+            (group("luna", Some("luna")), None),
+        ] {
+            assert!(matches!(
+                judge_for_model(&[], &[g], model, None, None),
+                Health::Exhausted(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn group_reached_and_expired_reached() {
+        let g = crossagents_core::LimitGroup {
+            id: "codex".into(),
+            name: Some("Codex".into()),
+            model: None,
+            windows: vec![window("primary", 4.0)],
+            reached: true,
+        };
+        assert!(
+            matches!(judge_for_model(&[], &[g], Some("x"), None, None), Health::Exhausted(reason) if reason.contains("codex") && reason.contains("Codex"))
+        );
+        let mut expired = window("primary", 100.0);
+        expired.resets_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        assert_eq!(judge(&[expired], Some("rate_limited"), None), Health::Ok);
+    }
+
+    #[test]
+    fn scoped_groups_and_top_level_ownership() {
+        let make = |id: &str, model: Option<&str>, used: f64, reached: bool| {
+            crossagents_core::LimitGroup {
+                id: id.into(),
+                name: Some(format!("{id} plan")),
+                model: model.map(str::to_owned),
+                windows: vec![window("primary", used)],
+                reached,
+            }
+        };
+        let groups = [
+            make("luna", Some("gpt-6-luna"), 100.0, true),
+            make("other", Some("gpt-6"), 0.0, false),
+        ];
+        let top = &groups[0].windows;
+        assert_eq!(
+            judge_for_model_with_top(
+                top,
+                &groups,
+                Some("gpt-6"),
+                Some("rate_limited"),
+                None,
+                Some("luna"),
+                None,
+                "codex"
+            ),
+            Health::Ok
+        );
+        assert!(
+            matches!(judge_for_model_with_top(top, &groups, Some("gpt-6-luna"), Some("rate_limited"), None, Some("luna"), None, "codex"), Health::Exhausted(reason) if reason.contains("luna") && reason.contains("luna plan"))
+        );
+        assert!(matches!(
+            judge_for_model_with_top(
+                top,
+                &groups,
+                Some("gpt-6"),
+                Some("rate_limited"),
+                None,
+                Some("luna"),
+                Some("refused"),
+                "codex"
+            ),
+            Health::Exhausted(_)
+        ));
+        for provider in ["claude", "codebuddy"] {
+            let group = make("fable", None, 100.0, true);
+            assert!(matches!(
+                judge_for_model_with_top(
+                    &[],
+                    &[group.clone()],
+                    Some("claude-fable-4"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    provider
+                ),
+                Health::Exhausted(_)
+            ));
+            assert_eq!(
+                judge_for_model_with_top(
+                    &[],
+                    &[group],
+                    Some("claude-sonnet-4"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    provider
+                ),
+                Health::Ok
+            );
+        }
+    }
+
+    #[test]
+    fn reached_lives_until_all_known_windows_reset() {
+        let mut old = window("primary", 100.0);
+        old.resets_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        let mut group = crossagents_core::LimitGroup {
+            id: "codex".into(),
+            name: Some("Codex".into()),
+            model: None,
+            windows: vec![old.clone()],
+            reached: true,
+        };
+        assert_eq!(
+            judge_for_model(&[], &[group.clone()], Some("gpt"), None, None),
+            Health::Ok
+        );
+        group.windows.push(window("secondary", 1.0));
+        group.id = "all".into();
+        assert_eq!(
+            judge_for_model_with_top(
+                &[],
+                &[group.clone()],
+                Some("gpt"),
+                None,
+                None,
+                None,
+                None,
+                "claude"
+            ),
+            Health::Ok
+        );
+        assert!(matches!(
+            judge_for_model(&[], &[group.clone()], Some("gpt"), None, None),
+            Health::Exhausted(_)
+        ));
+        group.windows[1].used_percent = 100.0;
+        assert!(matches!(
+            judge_for_model(&[], &[group], Some("gpt"), None, None),
+            Health::Exhausted(_)
+        ));
+        assert!(matches!(
+            judge(&[window("primary", 100.0)], Some("reached"), None),
+            Health::Exhausted(_)
+        ));
     }
     #[test]
     fn judges_windows_limits_and_credits() {
