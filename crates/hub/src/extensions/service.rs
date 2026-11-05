@@ -192,6 +192,16 @@ impl Services {
                 return;
             }
         }
+        // The desired version may have changed while a disable grace was running.
+        // Read it again before starting anything; queued reconciles then become no-ops.
+        let desired = self.registry.get(name).ok().and_then(|info| {
+            let version = info.current.as_ref()?;
+            (info.enabled && version.service).then(|| version.fingerprint.clone())
+        });
+        if self.shutdown.is_cancelled() {
+            self.registry.set_service_status(name, None);
+            return;
+        }
         let Some(fingerprint) = desired else {
             self.registry.set_service_status(name, None);
             return;
@@ -279,7 +289,18 @@ async fn supervise(
                         last_exit.clone(),
                     )),
                 );
-                run.wait().await
+                tokio::select! {
+                    result = run.wait() => result,
+                    _ = tokio::time::sleep(STABLE_AFTER) => {
+                        restarts = 0;
+                        backoff = FIRST_BACKOFF;
+                        registry.set_service_status(
+                            &name,
+                            Some(status(ExtensionServiceState::Running, restarts, last_exit.clone())),
+                        );
+                        run.wait().await
+                    }
+                }
             }
             Err(error) => CommandResult {
                 status: CommandStatus::NotStarted,
