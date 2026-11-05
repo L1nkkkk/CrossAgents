@@ -1635,23 +1635,14 @@ fn group_applies(
     if scope == model {
         return true;
     }
-    if matches!(scope.as_str(), "opus" | "sonnet" | "haiku") {
-        let parts: Vec<_> = model.split(|c: char| !c.is_ascii_alphanumeric()).collect();
-        return parts.contains(&scope.as_str())
-            || !parts
-                .iter()
-                .any(|part| matches!(*part, "opus" | "sonnet" | "haiku" | "fable" | "gpt"));
+    if matches!(scope.as_str(), "opus" | "sonnet" | "haiku" | "fable") {
+        return model
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|part| part == scope);
     }
     if (provider == "claude" || provider == "codebuddy") && group.model.is_none() {
         let parts: Vec<_> = model.split(|c: char| !c.is_ascii_alphanumeric()).collect();
-        if parts.contains(&scope.as_str()) {
-            return true;
-        }
-        // A display name is not always a model slug. Only rule it out when
-        // both names identify distinct, known families.
-        let families = ["opus", "sonnet", "haiku", "fable"];
-        return !(families.contains(&scope.as_str())
-            && parts.iter().any(|part| families.contains(part)));
+        return parts.contains(&scope.as_str());
     }
     false
 }
@@ -1788,6 +1779,69 @@ mod health_tests {
         assert!(
             matches!(judge_for_model(&[window("primary", 0.0)], &groups, Some("luna"), None, None), Health::Exhausted(reason) if reason.contains("luna-limit"))
         );
+    }
+
+    #[test]
+    fn scoped_limits_do_not_block_unrelated_explicit_models() {
+        for scope in ["fable", "opus", "sonnet", "haiku"] {
+            for scoped_model in [None, Some(scope)] {
+                let group = crossagents_core::LimitGroup {
+                    id: scope.into(),
+                    name: Some(scope.into()),
+                    model: scoped_model.map(str::to_owned),
+                    windows: vec![window("primary", 100.0)],
+                    reached: true,
+                };
+                for model in ["hy3", "gpt-6"] {
+                    assert_eq!(
+                        judge_for_model_with_top(
+                            &[],
+                            &[group.clone()],
+                            Some(model),
+                            None,
+                            None,
+                            None,
+                            None,
+                            "codebuddy"
+                        ),
+                        Health::Ok,
+                        "{scope} must not block {model}"
+                    );
+                }
+                assert!(
+                    matches!(
+                        judge_for_model_with_top(
+                            &[],
+                            &[group.clone()],
+                            Some(&format!("claude-{scope}-4")),
+                            None,
+                            None,
+                            None,
+                            None,
+                            "codebuddy"
+                        ),
+                        Health::Exhausted(_)
+                    ),
+                    "matching family must remain exhausted for {scope}"
+                );
+                assert!(
+                    matches!(
+                        judge_for_model_with_top(
+                            &[],
+                            &[group],
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            "codebuddy"
+                        ),
+                        Health::Exhausted(_)
+                    ),
+                    "unresolved default must remain conservative for {scope}"
+                );
+            }
+        }
     }
 
     #[test]
