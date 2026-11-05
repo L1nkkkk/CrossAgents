@@ -145,3 +145,5 @@ stdin 每条消息（`uuid` 由我们指定）：
 - `result.user_message_uuid` 标出这条 result 结束的是哪条用户消息；一条用户消息一个 result。
 - 工具执行中写入：下一模型请求读到，改本轮答案；最后一次模型调用之后写入：另起一轮，属于同一次插话，驱动要把那一轮折进同一个 hub 轮次。
 - 中断不丢未读消息（`still_queued`）；读到前不能谎报已读。
+
+2026-11-05 补测 CodeBuddy 2.179.2（默认驱动参数、代理 `127.0.0.1:7890`）：流式输出开始后写入插话并立即发送 interrupt，控制应答表示已中断但没有 `still_queued`；随后看到一个 `success` result、一个新 `system/init`、再一个 `success` result。两条 result 都没有 `user_message_uuid`，也没有看到插话的 `isReplay` 回显。另用不存在的模型触发失败：第一条 `init` 后写入插话，第二条 `init` 先于 `error_during_execution` result，result 没有 `user_message_uuid`；观察 60 秒未见插话回显或第二个 result。这些事件不足以满足「已按原 uuid 回显的独立插话」的保持条件。上面的 result 归属结论针对 Claude Code。
