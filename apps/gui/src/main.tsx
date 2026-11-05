@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { startActivity } from "./activity";
 import { startEventLog } from "./eventlog";
+import { startExtensionsUi } from "./extensions/wire";
 import { startEvents } from "./hub";
 import { startTheme } from "./lib/theme";
 import "./fonts.css";
@@ -21,6 +22,8 @@ if (start) {
   startEvents();
   startActivity();
   startEventLog();
+  // Extensions load beside the app: a failure marks that one failed, the page keeps running.
+  startExtensionsUi();
 
   createRoot(document.getElementById("root")!).render(
     <StrictMode>

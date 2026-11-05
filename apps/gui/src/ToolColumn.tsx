@@ -23,7 +23,8 @@ import { FilesPane } from "./FileViewer";
 import type { HubEvent } from "./hub";
 import { parseDiff } from "./lib/diff";
 import { clock, full } from "./lib/time";
-import { clearTarget, closeBottom, isTermTab, paneLabel, useLayout, type PaneKind, type TabId, type Target } from "./panes";
+import { clearTarget, closeBottom, isExtTab, isPaneKind, isTermTab, paneLabel, useLayout, type PaneKind, type TabId, type Target } from "./panes";
+import { ExtensionTabBody } from "./extensions/ui";
 import { shownTab, type Dock, type DockId } from "./lib/docks";
 import { TabRow } from "./tabs";
 import { TerminalBody, useTabShows } from "./terminal";
@@ -62,7 +63,7 @@ export function ToolColumn({ dock, follow, task, run, onClose, onCloseTask }: { 
       <section className="tool-pane" aria-label={kind && !isTermTab(kind) ? paneLabel(kind) : undefined}>
         <header className="tool-head">
           <TabRow dock={dock} tabs={shown.tabs} active={kind} narrow={narrow} onCloseTask={task ? onCloseTask : undefined} />
-          {kind && !isTermTab(kind) && <FollowButton kind={kind} follow={follow} target={target} />}
+          {kind && isPaneKind(kind) && <FollowButton kind={kind} follow={follow} target={target} />}
           {dock === "right" ? (
             <button className="ghost icon" onClick={onClose} title="收起工具列" aria-label="收起工具列">
               <Icon name="panel" size={15} />
@@ -73,7 +74,14 @@ export function ToolColumn({ dock, follow, task, run, onClose, onCloseTask }: { 
             </button>
           )}
         </header>
-        {kind && (isTermTab(kind) ? <TerminalBody tab={kind} dock={dock} /> : <PaneBody kind={kind} follow={follow} target={target} routeTask={task} routeRun={run} />)}
+        {kind &&
+          (isTermTab(kind) ? (
+            <TerminalBody tab={kind} dock={dock} />
+          ) : isExtTab(kind) ? (
+            <ExtensionTabBody tab={kind} follow={follow} />
+          ) : (
+            <PaneBody kind={kind} follow={follow} target={target} routeTask={task} routeRun={run} />
+          ))}
       </section>
     </div>
   );
