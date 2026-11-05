@@ -822,9 +822,7 @@ export function createExtensionHost(options: ExtensionHostOptions) {
     }
   }
 
-  async function start(): Promise<void> {
-    if (started) return starting ?? Promise.resolve();
-    started = true;
+  async function doStart() {
     safeMode = (await safeModeNow()) ?? false;
     if (safeMode) {
       publish();
@@ -832,31 +830,43 @@ export function createExtensionHost(options: ExtensionHostOptions) {
       await reportReady();
       return;
     }
-    starting = (async () => {
-      // The list comes first: no marker when the hub is slow to answer (and none at all when
-      // there is nothing with a `gui_entry` to load), but the marker is always cleared after.
-      const list = await readListUntilSuccess();
-      if (!list) return;
-      if (list.some((info) => info.enabled && info.current?.gui_entry)) {
-        try {
-          await options.onLoading?.();
-        } catch (error) {
-          if (options.log) options.log(`扩展加载开始上报失败：${textOf(error)}`);
-          else console.error("扩展加载开始上报失败", error);
-        }
-        loading = true;
-        publish();
-      }
+    // The list comes first: no marker when the hub is slow to answer (and none at all when
+    // there is nothing with a `gui_entry` to load), but the marker is always cleared after.
+    const list = await readListUntilSuccess();
+    if (!list) return;
+    if (list.some((info) => info.enabled && info.current?.gui_entry)) {
       try {
-        await applyList(list);
-      } finally {
-        loading = false;
-        acceptingChanges = true;
-        publish();
-        await reportReady();
+        await options.onLoading?.();
+      } catch (error) {
+        if (options.log) options.log(`扩展加载开始上报失败：${textOf(error)}`);
+        else console.error("扩展加载开始上报失败", error);
       }
-    })();
-    await starting;
+      loading = true;
+      publish();
+    }
+    try {
+      await applyList(list);
+    } finally {
+      loading = false;
+      acceptingChanges = true;
+      publish();
+      await reportReady();
+    }
+  }
+
+  /**
+   * Startup runs on the same chain as `refresh`, so a change that arrives while the first load
+   * is still running waits for it (and for its `onReady`) instead of importing alongside it.
+   * Without that, a refresh could clear the loading marker while an `activate` from startup is
+   * still in flight, and the next crash would not come up in safe mode.
+   */
+  function start(): Promise<void> {
+    if (started) return starting ?? Promise.resolve();
+    started = true;
+    const run = chain.then(() => doStart());
+    chain = run.catch(() => {});
+    starting = run;
+    return run;
   }
 
   async function disable(name: string): Promise<void> {

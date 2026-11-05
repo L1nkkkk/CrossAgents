@@ -384,7 +384,7 @@ test("nothing with a gui_entry: ready without a loading marker", async () => {
 });
 
 /** A host that records the shell's marker calls in `order`, with an optional loading gate. */
-function marked(initial: ExtensionInfo[], modules: Map<string, ExtensionModule>) {
+function marked(initial: ExtensionInfo[], modules: Map<string, ExtensionModule>, timeoutMs = 60) {
   let list = initial;
   const order: string[] = [];
   let gate: Promise<void> | undefined;
@@ -405,7 +405,7 @@ function marked(initial: ExtensionInfo[], modules: Map<string, ExtensionModule>)
     },
     cancelCall: async () => ({}),
     disable: async () => ({}),
-    timeoutMs: 60,
+    timeoutMs,
     onLoading: () => {
       order.push("loading");
       return gate;
@@ -495,6 +495,99 @@ test("a refresh with nothing to import calls neither marker", async () => {
   await run.host.refresh();
   assert.deepEqual(run.order, []);
   assert.equal(run.host.snapshot().records.get("a")!.status, "disabled");
+  run.host.dispose();
+});
+
+test("a change during startup waits for the first load: the marker stays and B activates once", async () => {
+  const aUrl = extensionEntryUrl("a", "fp1", "gui/index.js");
+  const bUrl = extensionEntryUrl("b", "fp1", "gui/index.js");
+  let bActivations = 0;
+  let releaseB!: () => void;
+  const bGate = new Promise<void>((resolve) => {
+    releaseB = resolve;
+  });
+  const modules = new Map<string, ExtensionModule>([
+    [
+      aUrl,
+      {
+        activate: (ca) => {
+          ca.tabs.register({ id: "panel", label: "A", render: () => null });
+        },
+      },
+    ],
+    [
+      bUrl,
+      {
+        activate: () => {
+          bActivations++;
+          return bGate;
+        },
+      },
+    ],
+  ]);
+  const run = marked([info("a", "fp1"), info("b", "fp1")], modules, 500);
+  const starting = run.host.start();
+  // Startup is inside B's activate, and the marker is up.
+  await until(() => bActivations === 1, "B's first activate");
+  assert.equal(run.host.snapshot().loading, true);
+  assert.deepEqual(run.order, ["loading", `import ${aUrl} with marker`, `import ${bUrl} with marker`]);
+
+  // Disabling A now queues a refresh behind startup, which is still waiting on B.
+  run.setList([info("a", "fp1", false), info("b", "fp1")]);
+  const disabling = run.host.disable("a");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(!run.order.includes("ready"), "the marker stays up until startup settled");
+  assert.equal(bActivations, 1, "the queued refresh did not activate B a second time");
+
+  releaseB();
+  await disabling;
+  await starting;
+
+  assert.equal(bActivations, 1, "B was activated exactly once");
+  assert.deepEqual(run.order, ["loading", `import ${aUrl} with marker`, `import ${bUrl} with marker`, "ready"]);
+  const snapshot = run.host.snapshot();
+  assert.equal(snapshot.loading, false);
+  assert.equal(snapshot.records.get("a")!.status, "disabled");
+  assert.equal(snapshot.records.get("b")!.status, "ready");
+  run.host.dispose();
+});
+
+test("an activate that never settles times out, so a disable queued behind startup still completes", async () => {
+  const aUrl = extensionEntryUrl("a", "fp1", "gui/index.js");
+  const bUrl = extensionEntryUrl("b", "fp1", "gui/index.js");
+  let bActivations = 0;
+  const modules = new Map<string, ExtensionModule>([
+    [
+      aUrl,
+      {
+        activate: (ca) => {
+          ca.tabs.register({ id: "panel", label: "A", render: () => null });
+        },
+      },
+    ],
+    [
+      bUrl,
+      {
+        activate: () => {
+          bActivations++;
+          return new Promise<void>(() => {});
+        },
+      },
+    ],
+  ]);
+  const run = marked([info("a", "fp1"), info("b", "fp1")], modules, 40);
+  const starting = run.host.start();
+  await until(() => bActivations === 1, "B's first activate");
+
+  run.setList([info("a", "fp1", false), info("b", "fp1")]);
+  await run.host.disable("a");
+  await starting;
+
+  const snapshot = run.host.snapshot();
+  assert.equal(snapshot.records.get("a")!.status, "disabled");
+  assert.equal(snapshot.records.get("b")!.status, "failed");
+  assert.equal(snapshot.loading, false, "the marker is cleared after the timed-out load");
+  assert.equal(run.order[run.order.length - 1], "ready");
   run.host.dispose();
 });
 
