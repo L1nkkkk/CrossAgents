@@ -6,7 +6,9 @@ import type { Attachment } from "@bindings/Attachment";
 import type { AttachmentSupport } from "@bindings/AttachmentSupport";
 import type { AttachmentUpload } from "@bindings/AttachmentUpload";
 import { api } from "./api";
-import { Icon } from "./components";
+import { Icon, ImageThumb } from "./components";
+
+export { ImageThumb };
 import { acceptFor, bytes, isImage, mimeOf, refusal, supportNote } from "./lib/attachments";
 
 /** A file in the composer: what goes to the hub, and a preview for images. */
@@ -162,23 +164,6 @@ function Thumb({ agent, file }: { agent: string; file: Attachment }) {
   }, [agent, file.id]);
   if (!src) return <FileCard file={file} />;
   return <ImageThumb src={src} alt={file.name} title={`${file.name} ? ${bytes(file.size)}`} />;
-}
-
-/** Shared attachment thumbnail and lightbox. */
-export function ImageThumb({ src, alt, title }: { src: string; alt: string; title?: string }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <>
-      <button className="thumb" onClick={() => setOpen(true)} title={title ?? alt}>
-        <img src={src} alt={alt} />
-      </button>
-      {open && (
-        <div className="lightbox" onClick={() => setOpen(false)} role="dialog" aria-label={alt}>
-          <img src={src} alt={alt} />
-        </div>
-      )}
-    </>
-  );
 }
 
 function ext(name: string): string {

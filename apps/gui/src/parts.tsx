@@ -13,6 +13,7 @@ import { Avatar, CopyButton, DiffStat, FileScopeProvider, Prose, agentTitle, ago
 import { ChangeStat } from "./diffview";
 import { useHubData } from "./hub";
 import { sumStats } from "./lib/diff";
+import { isKickoff } from "./lib/messageText";
 import { taskState, type State } from "./lib/taskState";
 import { clock } from "./lib/time";
 import { duration } from "./lib/workGroups";
@@ -294,7 +295,7 @@ export function PeerMessage({ turn, agents, tree }: { turn: TranscriptTurn; agen
           </span>
         )}
         {!found && run && <span className="peer-run">{run.title}</span>}
-        <span className="peer-preview">{preview(turn.input)}</span>
+        <span className="peer-preview">{from.kind === "orchestrator" && isKickoff(turn.input) ? "开始新一轮" : preview(turn.input)}</span>
         <span className="disclosure" aria-hidden="true">
           {open ? "▾" : "▸"}
         </span>

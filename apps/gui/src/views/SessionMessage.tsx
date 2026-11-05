@@ -1,15 +1,12 @@
 import { useState } from "react";
 import type { RunDetail } from "@bindings/RunDetail";
 import { CopyButton, Prose, time } from "../components";
-import { FOLD_INPUT, foldText } from "../lib/messageText";
+import { FOLD_INPUT, foldText, KICKOFF_SEPARATOR } from "../lib/messageText";
 import type { TranscriptTurn } from "../session";
 import "./sessionmessage.css";
 
 /** A person's message, or one recorded before senders were. */
 export const fromPerson = (turn: TranscriptTurn) => !turn.from || turn.from.kind === "human";
-
-// Keep in sync with the kickoff separator in crates/orchestrator/src/brief.rs.
-const KICKOFF_SEPARATOR = "\n\n---\nrun: ";
 
 export function Bubble({ turn, tree }: { turn: TranscriptTurn; tree: RunDetail[] }) {
   const [open, setOpen] = useState(false);

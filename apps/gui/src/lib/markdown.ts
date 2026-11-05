@@ -13,6 +13,8 @@ export type Inline =
   | { t: "link"; href: string; children: Inline[] }
   /** A link to a local file (relative to the reply's scope, or absolute); opens the viewer. */
   | { t: "file"; path: string; line?: number; children: Inline[] }
+  /** `![alt](target)`: an embedded image, or a local file the hub is asked for. */
+  | { t: "image"; alt: string; src?: string; path?: string }
   | { t: "br" };
 
 export type ListItem = { text: string; children: Block[] };
@@ -167,7 +169,15 @@ export function softBreaks(text: string): string {
   });
 }
 
-const INLINE = /(`+)([\s\S]*?[^`])\1(?!`)|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|~~([\s\S]+?)~~|\*([^\s*](?:[\s\S]*?[^\s*])?)\*|(?<![\w])_([^\s_](?:[\s\S]*?[^\s_])?)_(?![\w])|\[([^\]]+)\]\(([^)\s]+)\)|\n/;
+const INLINE = /(`+)([\s\S]*?[^`])\1(?!`)|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|~~([\s\S]+?)~~|\*([^\s*](?:[\s\S]*?[^\s*])?)\*|(?<![\w])_([^\s_](?:[\s\S]*?[^\s_])?)_(?![\w])|!\[([^\]]*)\]\(([^)\s]+)\)|\[([^\]]+)\]\(([^)\s]+)\)|\n/;
+
+/** An image reference as a node; a web address stays a link, since the page loads no remote images. */
+function imageNode(alt: string, target: string, all: string): Inline {
+  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(target)) return { t: "image", alt, src: target };
+  if (/^https?:/i.test(target)) return { t: "link", href: target, children: [{ t: "text", text: alt || target }] };
+  const file = fileLinkTarget(target);
+  return file ? { t: "image", alt, path: file.path } : { t: "text", text: all };
+}
 
 /** Inline spans of `text`. Links keep only http(s) and mailto targets and local files; others stay text. */
 export function parseInline(text: string): Inline[] {
@@ -180,8 +190,9 @@ export function parseInline(text: string): Inline[] {
       break;
     }
     if (m.index > 0) out.push({ t: "text", text: rest.slice(0, m.index) });
-    const [all, , code, strong, strong2, del, em, em2, label, href] = m;
-    if (code !== undefined) out.push({ t: "code", text: code.trim() });
+    const [all, , code, strong, strong2, del, em, em2, imageAlt, imageTarget, label, href] = m;
+    if (imageTarget !== undefined) out.push(imageNode(imageAlt, imageTarget, all));
+    else if (code !== undefined) out.push({ t: "code", text: code.trim() });
     else if (strong !== undefined || strong2 !== undefined) out.push({ t: "strong", children: parseInline(strong ?? strong2) });
     else if (del !== undefined) out.push({ t: "del", children: parseInline(del) });
     else if (em !== undefined || em2 !== undefined) out.push({ t: "em", children: parseInline(em ?? em2) });

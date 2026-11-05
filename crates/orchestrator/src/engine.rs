@@ -782,10 +782,20 @@ impl Orchestrator {
         sessions.push_str(&brief::previous_rounds(&rounds));
         let checkout = self.integration_path(&run);
         let env = crate::workspace::worktree_run_env(&self.config.worktrees, &checkout);
+        // A round the lead started itself is not a message from the person: what they said is
+        // already in the conversation.
+        let kickoff_from = if source.is_some() {
+            MessageSource::Orchestrator {
+                run_id: run.id,
+                task_id: None,
+            }
+        } else {
+            MessageSource::Human
+        };
         let kickoff = Envelope {
             attachments: new.attachments,
             ..Envelope::new(
-                MessageSource::Human,
+                kickoff_from,
                 brief::kickoff(
                     &run,
                     &team,

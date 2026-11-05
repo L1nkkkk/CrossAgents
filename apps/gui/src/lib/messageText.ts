@@ -4,6 +4,12 @@
 // unclosed construct and keeps it as plain text rather than losing what came before it. Pure,
 // so the cutting is tested here (messageText.test.ts) rather than through React.
 
+// Keep in sync with the kickoff separator in crates/orchestrator/src/brief.rs.
+export const KICKOFF_SEPARATOR = "\n\n---\nrun: ";
+
+/** Whether a message is a run's kickoff: the request, then the run's context for the lead. */
+export const isKickoff = (text: string) => text.includes(KICKOFF_SEPARATOR);
+
 /** Inputs longer than this start folded. */
 export const FOLD_INPUT = 600;
 

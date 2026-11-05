@@ -9,6 +9,24 @@ fn call(tool: &str, args: Value) -> String {
     format!("[call {tool} {args}]")
 }
 
+/// Who a run's kickoff says it came from, in the lead's transcript.
+async fn kickoff_from(t: &TestHub, lead: &str, run: &Value) -> Value {
+    let transcript: Value = t
+        .get(&format!("/v1/agents/{lead}/transcript"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let marker = format!("(run_id: {})", run["id"].as_str().unwrap());
+    transcript["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|turn| turn["input"].as_str().unwrap().contains(&marker))
+        .unwrap_or_else(|| panic!("no kickoff of {run} in {transcript}"))["from"]
+        .clone()
+}
+
 async fn setup(t: &TestHub, repo: &std::path::Path) -> String {
     t.add_agent_in("Pia", None, "planner", repo).await;
     let response = t
@@ -308,6 +326,9 @@ async fn run_without_a_work_group_gets_one_and_carries_on() {
     // The tool's answer names the group it made for the run that had none.
     assert!(w.output().contains("called run_next:"), "{}", w.output());
     assert!(w.output().contains(&work), "{}", w.output());
+    // The person's words are already in the conversation: the lead's own round is not them again.
+    let from = kickoff_from(&t, "Pia", &second).await;
+    assert_eq!(from["kind"], "orchestrator", "{from}");
     assert_eq!(second["base_branch"], first["branch"]);
     assert!(t.agent("Pia").await.cwd.join("first.txt").exists());
     assert!(t.agent("Pia").await.cwd.join("second.txt").exists());
@@ -603,6 +624,7 @@ async fn native_lead_run_next_after_landing() {
     let second = serde_json::to_value(run).unwrap();
     assert_eq!(second["planner"], first["planner"]);
     assert!(w.output().contains("scheduled"), "{}", w.output());
+    assert_eq!(kickoff_from(&t, "Pia", &first).await["kind"], "human");
     assert_eq!(second["work_id"], first["work_id"]);
     assert_eq!(
         second["base_branch"], "main",
