@@ -315,3 +315,31 @@ B3 远程开发：
 - [ ] `role` 字段的兼容迁移（[AGENT-WORKSPACE.md](AGENT-WORKSPACE.md) §6）
 - [ ] AGENT-WORKSPACE 验收补测：场景 6（断线重连）、场景 9（自动审批策略）只有纯函数测试，没实际跑过；键盘焦点只做了代码审查（同文档 §8）
 - [>] 减少额度消耗阶段 3：暂缓（[USAGE-TRIM.md](USAGE-TRIM.md)）
+
+## 二十五、借鉴 oh-my-pi 与 Cutex 0.2.1
+
+> 2026-11-06 读源码和设计稿整理，人选了这 7 条。只读过，没运行。依据固定到核对时的提交：
+> oh-my-pi [`b7221d9`](https://github.com/can1357/oh-my-pi/tree/b7221d994869ed36a81b44e60827786f572498ed)（单 agent 编码 harness，从 Pi fork 而来；它在工具层的亮点，如按内容哈希编辑、LSP、调试器、进程内 bash，我们驱动现成 CLI 用不上，不列）；
+> Cutex desktop 0.2.1 [`9fbae59`](https://github.com/senxiu-official/cutex-desktop/tree/9fbae59caa37c09eaa89d127a233f83d49601203)（上次核对是 0.2.0 `6216e67`）。
+> 建议顺序：3 → 2 → 1（1 先单独开 Work 出设计），其余随后。
+
+- [ ] **1. 跨厂商顾问**（oh-my-pi [advisor-watchdog.md](https://github.com/can1357/oh-my-pi/blob/b7221d994869ed36a81b44e60827786f572498ed/docs/advisor-watchdog.md)）：给一个 agent 配一个别家模型当顾问，每轮读新增的转录，用 `advise` 工具插回意见。三级：`nit` 攒到回合边界、`concern` 可打断、`blocker` 一定唤醒。要照着学的规矩：
+  - 去重，以及过滤没内容的话（lgtm、done 一类）；每轮最多 4 条非 blocker；
+  - 打断之后冷却 3 轮；
+  - 人主动按停时不自动续跑，意见留成卡片，下次人发消息时一起带上；
+  - 压缩上下文后顾问状态重置；顾问自己的意见不再回喂给它。
+
+  我们有插话和中断，缺的是逐轮看转录的入口和这套投递规则。现有的 `review_request` 只能按任务审一次。先出设计：顾问是普通会话还是专门角色、额度怎么算、run 里和 run 外各怎么用
+- [ ] **2. 人的消息怎么送达：对照 Cutex 的不变式查一遍**（Cutex [050-owner-message-delivery.md](https://github.com/senxiu-official/cutex-desktop/blob/9fbae59caa37c09eaa89d127a233f83d49601203/docs/design/050-owner-message-delivery.md) §2）。他们的病和我们修过的插话、排队问题几乎一样。逐条对照：
+  - 「忙」只有一个来源，界面各处都读它，不各自推算；
+  - 每条消息在界面上只占一个固定位置，状态在原地变，不在聊天和队列之间搬；
+  - 每个原因码都有专门映射并有对照测试，不认识的如实显示，不归成「被拒绝」；
+  - 不自动换一种方式重发，超时就显示失败、可重试，重试不重复；
+  - 人自己发起的中断不弹提示。
+
+  先只读核对，列出我们违反的几条，再定改哪些
+- [ ] **3. 排队的提示随人的消息一起送**（Cutex [057-notices-ride-with-owner-message.md](https://github.com/senxiu-official/cutex-desktop/blob/9fbae59caa37c09eaa89d127a233f83d49601203/docs/design/057-notices-ride-with-owner-message.md)）：我们的通知汇总是单独一条消息（`crates/hub/src/runtime.rs` 的 `notify`）。人发消息时前面如果排着汇总，agent 要多跑一轮。改成：汇总还没开始时，并进人的这条消息，人的话在前、汇总在后，界面上挂在人的气泡下面而不是混进正文；人发出之后才到的通知按现有规则走。改动小，还省额度
+- [ ] **4. hub 层的流式规则**（oh-my-pi [ttsr-injection-lifecycle.md](https://github.com/can1357/oh-my-pi/blob/b7221d994869ed36a81b44e60827786f572498ed/docs/ttsr-injection-lifecycle.md)）：规则平时不进上下文，agent 的输出或工具调用命中正则时，hub 用插话把这条规则送进去（不支持插话的驱动就中断后重发）。比把所有规则塞进系统提示省上下文。要定：规则写在哪（项目文件还是扩展）、同一条规则多久内只注入一次、压缩上下文后还算不算已注入
+- [ ] **5. 任务交结构化结果**（oh-my-pi 的 subagent：结果按 schema 校验，父 agent 按路径取字段）：`task_create` 可以带一个结果 schema，`task_complete` 按它校验并存成 JSON，主导用 `task_get` 按路径取。现在只交一段文字总结，主导得自己读
+- [ ] **6. 评审给明确结论**（oh-my-pi 的 `/review`）：`review_submit` 的每个问题按 P0–P3 分级并标置信度，最后给一个能不能合的结论；GUI 按级别排，先看挡合并的
+- [ ] **7. 合并的活动流**（oh-my-pi [agent-hub.md](https://github.com/can1357/oh-my-pi/blob/b7221d994869ed36a81b44e60827786f572498ed/docs/agent-hub.md) 的 Activity）：所有 agent 的回复、工具调用、消息排成一条时间线，可按错误、回复、工具筛选，范围可以是全部、某个 agent 或它的下属；点一条跳到那个会话的对应位置。我们的右侧栏现在按会话分开看
