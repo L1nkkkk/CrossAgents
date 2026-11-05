@@ -956,6 +956,17 @@ pub struct ExtensionCallResponse {
     pub stderr: Option<String>,
 }
 
+/// `GET /v1/extensions/{name}/logs` and `extension_logs`: the current log's last
+/// 64 KiB, decoded as UTF-8 with replacement. Empty before the first call.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExtensionLogsResponse {
+    pub name: String,
+    pub content: String,
+    /// Earlier bytes of the current log were omitted. Rotated logs are not included.
+    pub truncated: bool,
+}
+
 /// Starts a run. Agents are given by name or id.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]

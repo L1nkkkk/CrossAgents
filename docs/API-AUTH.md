@@ -73,6 +73,7 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 | POST | `/v1/plugins/{name}/upgrade` | admin | GUI |
 | POST | `/v1/plugins/refresh` | admin | GUI |
 | GET | `/v1/extensions` | read | GUI |
+| GET | `/v1/extensions/{name}/logs` | read | GUI；与 `extension_logs` 相同的日志尾部 |
 | POST | `/v1/extensions/{name}/enable` | admin | GUI |
 | POST | `/v1/extensions/{name}/disable` | write | GUI |
 | POST | `/v1/extensions/{name}/auto-trust` | admin | GUI |
@@ -129,7 +130,7 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 扩展的接口（`/v1/extensions*`）也在它到不了的范围内：agent 调扩展工具走 `/v1/me/tools/{name}`
 或内置的 `extension_call`，由 hub 代为执行，拿不到启用和自动信任这两个开关。
 
-> `/v1/extensions*` 这八条是 [EXTENSIONS.md](EXTENSIONS.md) §3 定下的约定，级别写在 `access.rs`，路由在
+> `/v1/extensions*` 这九条是 [EXTENSIONS.md](EXTENSIONS.md) §3 定下的约定，级别写在 `access.rs`，路由在
 > `api.rs`，都有测试。
 
 ## 3. 分级口径
@@ -154,7 +155,7 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 - `POST /v1/extensions/{name}/tools/{tool}` 和 `DELETE /v1/extensions/calls/{id}` 归 write：调一个人已经批准过的
   工具是普通的状态改动。工具自己拿到的是另一套凭据——每次调用现签、只在内存里、级别最高 write（EXTENSIONS.md §3），
   和这里的路由级别是两回事。
-- `GET /v1/extensions`、`/pending/diff`、`/v1/extensions/calls/{id}` 归 read：都只是读，待批准快照的差异也只是读。
+- `GET /v1/extensions`、`/pending/diff`、`/logs`、`/v1/extensions/calls/{id}` 归 read：都只是读，日志和待批准快照的差异也只是读。
   待批准记录看得见但批不动，正是分级想要的效果。
 
 ### 扩展 token

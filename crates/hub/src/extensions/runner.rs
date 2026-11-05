@@ -565,6 +565,41 @@ impl Runner {
         }
     }
 
+    /// Shared log view for the agent tool and the GUI read route.
+    pub fn logs(
+        &self,
+        name: &str,
+    ) -> Result<crossagents_api_types::ExtensionLogsResponse, CoreError> {
+        use std::io::{Read, Seek, SeekFrom};
+        crossagents_api_types::check_extension_name(name).map_err(CoreError::InvalidName)?;
+        self.registry.get(name)?;
+        let _guard = self.log.lock().unwrap();
+        let mut file = match std::fs::File::open(self.log_path(name)) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(crossagents_api_types::ExtensionLogsResponse {
+                    name: name.into(),
+                    content: String::new(),
+                    truncated: false,
+                });
+            }
+            Err(e) => return Err(CoreError::Storage(e.to_string())),
+        };
+        let result = (|| -> std::io::Result<_> {
+            let length = file.metadata()?.len();
+            let start = length.saturating_sub(64 * 1024);
+            file.seek(SeekFrom::Start(start))?;
+            let mut bytes = Vec::new();
+            file.take(64 * 1024).read_to_end(&mut bytes)?;
+            Ok(crossagents_api_types::ExtensionLogsResponse {
+                name: name.into(),
+                content: String::from_utf8_lossy(&bytes).into_owned(),
+                truncated: start > 0,
+            })
+        })();
+        result.map_err(|e| CoreError::Storage(e.to_string()))
+    }
+
     fn log_path(&self, extension: &str) -> PathBuf {
         self.home
             .join("extension-logs")
@@ -1039,6 +1074,11 @@ impl ExtensionHost for Runner {
         tool: &str,
         input: Value,
     ) -> Result<Value, CoreError> {
+        if let Some(result) =
+            super::creator::call(self, &self.registry, &caller, tool, input.clone())
+        {
+            return result;
+        }
         let Some((extension, bare)) = tool.split_once("__") else {
             return Err(CoreError::NotFound {
                 kind: "tool",

@@ -389,6 +389,13 @@ impl Registry {
         }
         self.update(&mut s, name, rec)
     }
+    /// Static inspection of source files; no subprocess, import, approval or state change.
+    pub fn check(&self, name: &str) -> Result<ExtensionVersion> {
+        check_extension_name(name).map_err(CoreError::InvalidName)?;
+        snapshot::inspect(&self.home.join("extensions").join(name), name)
+            .map(|(_, version)| version)
+            .map_err(|e| CoreError::InvalidName(format!("{e:#}")))
+    }
     pub fn request_enable(
         &self,
         name: &str,
@@ -397,16 +404,25 @@ impl Registry {
         check_extension_name(name).map_err(CoreError::InvalidName)?;
         let mut s = self.state.lock().unwrap();
         match fs::symlink_metadata(self.home.join("extensions").join(name)) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(missing(name));
-            }
-            Err(error) => return Err(storage(error)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(missing(name)),
+            Err(e) => return Err(storage(e)),
             Ok(_) => {}
         }
-        self.scan_one(&mut s, name, true)?;
-        let mut rec = s.records[name].clone();
-        if let Some(p) = &mut rec.pending {
-            p.requested_by = requested_by;
+        let version = snapshot::create(
+            &self.home.join("extensions").join(name),
+            &self.home.join("extension-versions").join(name),
+            name,
+        )
+        .map_err(|e| CoreError::InvalidName(format!("{e:#}")))?;
+        let mut rec = s.records.get(name).cloned().unwrap_or_default();
+        rec.pending = Some(Pending {
+            fingerprint: version.fingerprint,
+            requested_at: chrono::Utc::now(),
+            requested_by,
+        });
+        // A valid fresh snapshot supersedes an earlier source validation error.
+        if let Some(info) = s.infos.get_mut(name) {
+            info.error = None;
         }
         self.update(&mut s, name, rec)
     }

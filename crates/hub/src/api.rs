@@ -152,6 +152,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/background", get(background))
         .route("/v1/background/reminders/{id}", delete(cancel_reminder))
         .route("/v1/extensions", get(list_extensions))
+        .route("/v1/extensions/{name}/logs", get(extension_logs))
         .route("/v1/extensions/{name}/enable", post(enable_extension))
         .route("/v1/extensions/{name}/disable", post(disable_extension))
         .route(
@@ -2763,6 +2764,12 @@ async fn list_extensions(
     Json(crossagents_api_types::ExtensionsResponse {
         extensions: s.extensions.list(),
     })
+}
+async fn extension_logs(
+    State(s): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<crossagents_api_types::ExtensionLogsResponse>> {
+    Ok(Json(s.runner.logs(&name)?))
 }
 async fn enable_extension(
     State(s): State<Arc<AppState>>,
