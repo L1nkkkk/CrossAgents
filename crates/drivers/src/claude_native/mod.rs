@@ -284,8 +284,8 @@ struct Turn {
     /// The interrupt left the unread steers queued (`still_queued`): they will still be
     /// read, so the turn waits for them like a late message.
     keep_queued: bool,
-    /// The interrupt request whose answer can preserve this turn's unread steers.
-    interrupt_request: Option<String>,
+    /// Interrupt requests whose answers can preserve this turn's unread steers.
+    interrupt_requests: Vec<String>,
 }
 
 /// A message written into the running turn, waiting for the model to read it.
@@ -473,9 +473,13 @@ impl Shared {
                     && let Some(tx) = self.pending.lock().expect("pending lock").remove(&id)
                 {
                     let mut turn = self.turn.lock().expect("turn lock");
-                    if turn.interrupt_request.as_deref() == Some(&id) {
-                        turn.interrupt_request = None;
-                        turn.keep_queued = interrupt_kept_queued(&answer);
+                    if let Some(index) = turn
+                        .interrupt_requests
+                        .iter()
+                        .position(|request| request == &id)
+                    {
+                        turn.interrupt_requests.remove(index);
+                        turn.keep_queued |= interrupt_kept_queued(&answer);
                     }
                     drop(turn);
                     let _ = tx.send(answer);
@@ -1038,7 +1042,7 @@ impl DriverSession for ClaudeSession {
             }
             turn.interrupted = true;
             if !turn.steers.is_empty() {
-                turn.interrupt_request = Some(id.clone());
+                turn.interrupt_requests.push(id.clone());
             }
         }
         let _ = self
@@ -1322,7 +1326,12 @@ mod interrupt_tests {
     }
     fn register(shared: &Shared) {
         let (tx, _rx) = oneshot::channel();
-        shared.turn.lock().unwrap().interrupt_request = Some("req".into());
+        shared
+            .turn
+            .lock()
+            .unwrap()
+            .interrupt_requests
+            .push("req".into());
         shared.pending.lock().unwrap().insert("req".into(), tx);
     }
     async fn batch(shared: &Arc<Shared>, messages: &[Value]) {
@@ -1390,20 +1399,63 @@ mod interrupt_tests {
     }
 
     #[tokio::test]
-    async fn review_read_before_interrupt_answer_must_wait_for_steer_result() {
+    async fn overlapping_interrupts_keep_the_first_queued_answer() {
         let steer = MessageId::new();
-        let (shared, mut ended, _) = setup(Some(steer));
+        let (shared, mut ended, mut events) = setup(Some(steer));
+        register(&shared);
+        let (tx, _rx) = oneshot::channel();
+        shared
+            .turn
+            .lock()
+            .unwrap()
+            .interrupt_requests
+            .push("req2".into());
+        shared.pending.lock().unwrap().insert("req2".into(), tx);
+        batch(
+            &shared,
+            &[
+                wire::control_success("req", json!({"still_queued":[steer.to_string()]})),
+                wire::control_success("req2", json!({"still_queued":[]})),
+                result("turn"),
+            ],
+        )
+        .await;
+        assert!(ended.try_recv().is_err());
+        assert_eq!(warnings(&mut events), 0);
+        shared.handle(result(&steer.to_string()));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn result_before_response_ends_and_warns() {
+        let (shared, ended, mut events) = setup(Some(MessageId::new()));
+        register(&shared);
+        batch(
+            &shared,
+            &[
+                result("turn"),
+                wire::control_success("req", json!({"still_queued":["steer"]})),
+            ],
+        )
+        .await;
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 1);
+    }
+
+    #[tokio::test]
+    async fn review_read_before_interrupt_answer_existing_behavior() {
+        let steer = MessageId::new();
+        let (shared, ended, _) = setup(Some(steer));
         shared.handle(json!({"type":"system", "subtype":"init"}));
         shared.handle(json!({"type":"user", "uuid":steer.to_string(), "isReplay":true}));
         register(&shared);
-        shared.handle(wire::control_success(
-            "req",
-            json!({"still_queued":[steer.to_string()]}),
-        ));
+        // The steer was already read, so the response can have an empty queue.
+        shared.handle(wire::control_success("req", json!({"still_queued":[]})));
         shared.handle(result("turn"));
-        assert!(ended.try_recv().is_err());
-        shared.handle(result(&steer.to_string()));
+        // Existing behavior: a failed prompt result ends the turn even though the
+        // separate steer result has not arrived yet.
         assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        shared.handle(result(&steer.to_string()));
     }
 
     #[tokio::test]
