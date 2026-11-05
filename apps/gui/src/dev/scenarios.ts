@@ -11,7 +11,8 @@ import { usageScene } from "../views/Usage.mock";
 import { expertiseScene } from "../views/Expertise.mock";
 import { agent, ago, capabilitiesOf, NOTES_REPO, planned, REPO, say, team, think, turn } from "./fixtures";
 import { openFile } from "../FileViewer";
-import { openTool } from "../panes";
+import { openTool, placeTab } from "../panes";
+import { setBottomHeight, setToolsWidth } from "../lib/widths";
 import { newTerminal } from "../terminal";
 import type { AccountQuota } from "@bindings/AccountQuota";
 import type { PluginInfo } from "@bindings/PluginInfo";
@@ -269,8 +270,14 @@ export const SCENARIOS: Scenario[] = [
   { key: "delete-unlanded", label: "删除未落地的 run", hint: "未落地：分支默认不勾，写明「未落地的改动会丢失」", build: () => deleteRun("unlanded") },
   { key: "delete-dirty", label: "删除时工作区有改动", hint: "点「删除」后 hub 返回 409 并列出没提交的文件，可以「仍然删除」", build: () => deleteRun("dirty") },
   { key: "files", label: "文件链接与查看器", hint: "回复里的路径（确认存在的才成链接）可点开只读查看器：左侧懒加载目录树，右侧行号、高亮、跳到第 12 行", build: () => filesScene() },
+  { key: "files-markdown", label: "文件查看器（Markdown）", hint: "中间弹窗里的 Markdown 也有同一套大纲：短横线、悬停标题列表、当前章节", build: () => filesMarkdownScene() },
   { key: "terminal", label: "内置终端", hint: "对话下方的终端标签：回显输入；标签可拖到右侧，Ctrl+` 收起和打开，输入 exit 看退出后的样子", build: () => ({ ...filesScene(), script: [{ at: 600, act: () => void newTerminal() }] }) },
   { key: "files-pane", label: "文件面板", hint: "工具列的「文件」：目录树，点开 docs/cli.md 是渲染后的 Markdown，可切回源码；文档里的相对链接在面板里打开", build: () => filesPaneScene() },
+  { key: "files-pane-narrow", label: "文件面板（窄）", hint: "窄面板退回树和文件轮流显示；标签、面包屑和大纲都不溢出", build: () => filesPaneNarrow() },
+  { key: "files-pane-wide", label: "文件面板（宽）", hint: "宽面板：左侧内容和标签、面包屑、大纲，右侧整棵文件树和过滤框；docs 与 crates 有改动标记", build: () => filesPaneWide() },
+  { key: "files-pane-bottom", label: "文件面板（底部 dock）", hint: "文件面板拖到对话下方的底部 dock，宽度足够时仍左右并排", build: () => filesPaneBottom() },
+  { key: "files-pane-search", label: "文件面板搜索", hint: "在过滤框输入 main，搜到未展开的 crates/cli/src/main.rs", build: () => filesPaneSearch() },
+  { key: "files-pane-outline", label: "文件面板大纲", hint: "聚焦大纲的一条短横线，弹出完整标题列表，当前章节高亮", build: () => filesPaneOutline() },
   { key: "solo", label: "单聊", hint: "Claude 会话：折叠的工具步骤、一轮进行中、两条排队", build: () => soloSession() },
   { key: "ctx-menu", label: "上下文菜单（20%）", hint: "点顶栏（或右侧栏「上下文」）的用量：明细和「压缩上下文」，不必等到 50%", build: () => contextUsageScene() },
   { key: "slash-menu", label: "输入框 / 指令", hint: "Agent 空闲时打 /：CrossAgents 的指令在上，↑↓ 选，Enter 执行，Esc 关闭", build: () => slashScene("idle") },
@@ -459,6 +466,16 @@ function filesScene() {
   };
 }
 
+/** The same reply, but the viewer opens a Markdown document, so its outline is on show. */
+function filesMarkdownScene() {
+  const scene = filesScene();
+  const nova = scene.state.agents[0];
+  return {
+    ...scene,
+    script: [{ at: 600, act: () => openFile({ scope: { kind: "agent", agent: nova.id }, path: "docs/RELEASE.md" }) }] as Step[],
+  };
+}
+
 /** The OAuth run with the 后台 pane open: reminders, watches and #c under verification; Rex's reminder fires after ~8s. */
 function backgroundScene() {
   const scene = oauthRun("running");
@@ -512,6 +529,87 @@ function filesPaneScene() {
   const scene = filesScene();
   const nova = scene.state.agents[0];
   return { ...scene, script: [{ at: 600, act: () => openTool("files", { agent: nova.name }) }] };
+}
+
+/** Click a tree node by its label; scenarios use it to reach files the way a person would. */
+function clickNode(name: string) {
+  const node = [...document.querySelectorAll<HTMLButtonElement>(".fv-node")].find((button) => button.querySelector(".name")?.textContent === name);
+  if (!node) throw new Error(`file tree node ${name} is missing`);
+  node.click();
+}
+
+/** Type into the pane's whole-workspace filter. */
+function searchFiles(value: string) {
+  const input = document.querySelector<HTMLInputElement>(".fp-filter input");
+  if (!input) throw new Error("file filter is missing");
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+/** The same pane in the default narrow right dock, with a Markdown file open. */
+function filesPaneNarrow() {
+  const scene = filesScene();
+  const nova = scene.state.agents[0];
+  return {
+    ...scene,
+    script: [
+      { at: 350, act: () => setToolsWidth(420, true) },
+      { at: 550, act: () => openTool("files", { agent: nova.name }) },
+      { at: 850, act: () => clickNode("docs") },
+      { at: 1150, act: () => clickNode("cli.md") },
+    ] as Step[],
+  };
+}
+
+/** The file pane opened wide enough for content and tree side by side, on two Markdown tabs. */
+function filesPaneWide() {
+  const scene = filesScene();
+  const nova = scene.state.agents[0];
+  return {
+    ...scene,
+    script: [
+      { at: 350, act: () => setToolsWidth(860, true) },
+      { at: 550, act: () => openTool("files", { agent: nova.name }) },
+      { at: 850, act: () => clickNode("docs") },
+      { at: 1150, act: () => clickNode("cli.md") },
+      { at: 1450, act: () => clickNode("RELEASE.md") },
+    ] as Step[],
+  };
+}
+
+/** The same pane in the bottom dock, where width is plentiful but height is not. */
+function filesPaneBottom() {
+  const scene = filesScene();
+  const nova = scene.state.agents[0];
+  return {
+    ...scene,
+    script: [
+      { at: 300, act: () => setBottomHeight(430) },
+      { at: 500, act: () => placeTab("files", "bottom") },
+      { at: 700, act: () => openTool("files", { agent: nova.name }) },
+      { at: 1000, act: () => clickNode("docs") },
+      { at: 1300, act: () => clickNode("cli.md") },
+      { at: 1600, act: () => clickNode("RELEASE.md") },
+    ] as Step[],
+  };
+}
+
+/** A wide pane with the filter searching the whole workspace, not just opened folders. */
+function filesPaneSearch() {
+  const scene = filesPaneWide();
+  return { ...scene, script: [...scene.script, { at: 1750, act: () => searchFiles("main") }] as Step[] };
+}
+
+/** The outline rail focused (a keyboard user's hover): the full heading list opens. */
+function filesPaneOutline() {
+  const scene = filesPaneWide();
+  return {
+    ...scene,
+    script: [
+      ...scene.script,
+      { at: 1750, act: () => document.querySelector<HTMLElement>(".md-ol-line:nth-child(3)")?.focus() },
+    ] as Step[],
+  };
 }
 
 /** The solo chat, where Nova proposes doing the rest on a branch of its own. */

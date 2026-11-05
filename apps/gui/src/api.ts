@@ -74,6 +74,8 @@ import type { UsageSeriesRange } from "@bindings/UsageSeriesRange";
 import type { UsageSeriesResponse } from "@bindings/UsageSeriesResponse";
 import type { FileTreeResponse } from "@bindings/FileTreeResponse";
 import type { FileContentResponse } from "@bindings/FileContentResponse";
+import type { FileStatusResponse } from "@bindings/FileStatusResponse";
+import type { FileSearchResponse } from "@bindings/FileSearchResponse";
 import type { CreateTerminalRequest } from "@bindings/CreateTerminalRequest";
 import type { ListTerminalsResponse } from "@bindings/ListTerminalsResponse";
 import type { TerminalInfo } from "@bindings/TerminalInfo";
@@ -242,6 +244,31 @@ function filesResolve(scope: FileScope, paths: string[]): Promise<ResolvePathsRe
       return request<ResolvePathsResponse>("POST", `/v1/runs/${enc(scope.run)}/files/resolve`, body);
     case "task":
       return request<ResolvePathsResponse>("POST", `/v1/runs/${enc(scope.run)}/tasks/${enc(scope.task)}/files/resolve`, body);
+  }
+}
+
+/** The working copy's uncommitted changes; `git: false` outside a repository. */
+function filesStatus(scope: FileScope): Promise<FileStatusResponse> {
+  switch (scope.kind) {
+    case "agent":
+      return request<FileStatusResponse>("GET", `/v1/agents/${enc(scope.agent)}/files/status`);
+    case "run":
+      return request<FileStatusResponse>("GET", `/v1/runs/${enc(scope.run)}/files/status`);
+    case "task":
+      return request<FileStatusResponse>("GET", `/v1/runs/${enc(scope.run)}/tasks/${enc(scope.task)}/files/status`);
+  }
+}
+
+/** Files across the whole workspace whose path contains `q` (at most 200). */
+function filesSearch(scope: FileScope, q: string, all = false): Promise<FileSearchResponse> {
+  const query = `q=${enc(q)}${all ? "&all=true" : ""}`;
+  switch (scope.kind) {
+    case "agent":
+      return request<FileSearchResponse>("GET", `/v1/agents/${enc(scope.agent)}/files/search?${query}`);
+    case "run":
+      return request<FileSearchResponse>("GET", `/v1/runs/${enc(scope.run)}/files/search?${query}`);
+    case "task":
+      return request<FileSearchResponse>("GET", `/v1/runs/${enc(scope.run)}/tasks/${enc(scope.task)}/files/search?${query}`);
   }
 }
 
@@ -430,6 +457,10 @@ export const api = {
   /** A file's text (up to 1 MiB), or `binary` without it. */
   filesContent,
   filesResolve,
+  /** Uncommitted changes in the scope's working copy, for the tree's M marks and dots. */
+  filesStatus,
+  /** Filename search across the whole workspace, not only the loaded folders. */
+  filesSearch,
   /** An image a tool call named by path (a `ViewImage` tool's `image_path`, say), base64:
    * show it as `data:${mime};base64,${data}`, as an attachment is shown. The hub serves only
    * png, jpg, jpeg, gif, webp, bmp and svg, at most 10 MB, inside the agent's working

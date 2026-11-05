@@ -51,7 +51,7 @@ import {
 import { effortOf } from "../lib/models";
 import { applyEvent } from "../session";
 import { capabilitiesOf, contextParts, driverOf, transcript, uid } from "./fixtures";
-import { mockContent, mockResolve, mockTree } from "./files.mock";
+import { mockContent, mockResolve, mockSearch, mockStatus, mockTree } from "./files.mock";
 
 /** Names the mock hub makes up, like the real one (see crates/core/src/names.rs). */
 const MOCK_NAMES = ["Nova", "Iris", "Atlas", "Orion", "Vega", "Lyra", "Mira", "Sage"];
@@ -167,8 +167,8 @@ const LATENCY = 40;
 const STARTUP = 2_500;
 const json = (status: number, body?: unknown): HubResponse => ({ status, body: body === undefined ? "" : JSON.stringify(body) });
 const notFound = (what: string) => json(404, { error: { code: "not_found", message: `${what} not found` } });
-/** `{scope}/files/{tree|content|resolve}`; every scope answers from the same mock workspace. */
-const FILES_ROUTE = /^\/v1\/(?:agents\/[^/]+|runs\/[^/]+(?:\/tasks\/[^/]+)?)\/files\/(tree|content|resolve)$/;
+/** `{scope}/files/{tree|content|status|search|resolve}`; every scope answers from the same mock workspace. */
+const FILES_ROUTE = /^\/v1\/(?:agents\/[^/]+|runs\/[^/]+(?:\/tasks\/[^/]+)?)\/files\/(tree|content|status|search|resolve)$/;
 
 /** Text as a frame's base64. */
 const encode = (text: string) => btoa(String.fromCharCode(...new TextEncoder().encode(text)));
@@ -731,6 +731,8 @@ export class MockBridge implements CrossAgentsBridge {
       if (p === "/v1/plugins") return json(200, { plugins: s.plugins });
       if (p === "/v1/session-candidates") return json(200, { sessions: s.sessions ?? [] });
       if ((m = p.match(FILES_ROUTE)) && m[1] !== "resolve") {
+        if (m[1] === "status") return json(200, mockStatus());
+        if (m[1] === "search") return json(200, mockSearch(url.searchParams.get("q") ?? "", url.searchParams.get("all") === "true"));
         const at = url.searchParams.get("path") ?? "";
         if (m[1] === "tree") {
           const tree = mockTree(at, url.searchParams.get("all") === "true");

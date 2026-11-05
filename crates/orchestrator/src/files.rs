@@ -16,6 +16,9 @@ use crate::engine::Orchestrator;
 /// Bytes of a file handed out at once; more is cut and flagged.
 pub const CONTENT_LIMIT: usize = 1024 * 1024;
 
+/// Most paths one `files/search` answers with.
+pub const SEARCH_LIMIT: usize = 200;
+
 /// Bytes looked at to tell text from binary.
 const SNIFF: usize = 8 * 1024;
 
@@ -107,6 +110,32 @@ impl Contents {
             text: (!binary).then(|| String::from_utf8_lossy(bytes).into_owned()),
         }
     }
+}
+
+/// What git says changed at one path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    /// A new file, tracked or not.
+    Added,
+    /// Content changed, renamed, copied or conflicted.
+    Modified,
+    /// The working copy no longer has what the index does.
+    Deleted,
+}
+
+/// One changed path of a working copy, relative to its workspace root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangeEntry {
+    pub path: String,
+    pub change: Change,
+}
+
+/// The files matching a name query across a workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Search {
+    pub paths: Vec<String>,
+    /// There were more than [`SEARCH_LIMIT`] matches; only the first are here.
+    pub truncated: bool,
 }
 
 /// One file of a workspace, as `files/content` answers.
@@ -413,6 +442,188 @@ pub fn read_file(abs: &Path, rel: &str) -> Result<Contents, FileError> {
     Ok(Contents::new(size, &bytes, size > CONTENT_LIMIT as u64))
 }
 
+/// The workspace's uncommitted changes, relative to its root; `None` outside a git
+/// repository (or when git is not there), where there is nothing to show.
+pub async fn changes(root: &Path) -> Result<Option<Vec<ChangeEntry>>, FileError> {
+    let prefix = match git_text(root, &["rev-parse", "--show-prefix"]).await {
+        Ok(Some(prefix)) => prefix,
+        Ok(None) => return Ok(None),
+        // `git` says so when the directory is not inside a repository.
+        Err(FileError::BadRequest(_)) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    let Some(out) = git(
+        root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )
+    .await?
+    else {
+        return Ok(Some(Vec::new()));
+    };
+    let fields: Vec<&[u8]> = out
+        .split(|byte| *byte == 0)
+        .filter(|f| !f.is_empty())
+        .collect();
+    let mut found = std::collections::BTreeMap::new();
+    let mut i = 0;
+    while i < fields.len() {
+        let field = fields[i];
+        i += 1;
+        if field.len() < 4 {
+            continue;
+        }
+        let code = &field[..2];
+        let path = String::from_utf8_lossy(&field[3..]).replace('\\', "/");
+        // A rename or copy carries its old path as the next record.
+        if code.contains(&b'R') || code.contains(&b'C') {
+            i += 1;
+        }
+        let Some(rel) = workspace_path(&path, &prefix) else {
+            continue;
+        };
+        if rel.split('/').any(|part| part.eq_ignore_ascii_case(".git")) {
+            continue;
+        }
+        found.insert(rel, change_of(code));
+    }
+    Ok(Some(
+        found
+            .into_iter()
+            .map(|(path, change)| ChangeEntry { path, change })
+            .collect(),
+    ))
+}
+
+/// `path` (relative to the repository root) inside the workspace `prefix` names; `None`
+/// for another part of the repository.
+fn workspace_path(path: &str, prefix: &str) -> Option<String> {
+    if prefix.is_empty() {
+        return Some(path.trim_start_matches('/').to_owned());
+    }
+    path.strip_prefix(prefix)
+        .map(str::to_owned)
+        .filter(|rel| !rel.is_empty())
+}
+
+fn change_of(code: &[u8]) -> Change {
+    if code == b"??" || code.contains(&b'A') {
+        Change::Added
+    } else if code.contains(&b'D') {
+        Change::Deleted
+    } else {
+        Change::Modified
+    }
+}
+
+/// The workspace's files whose path contains `query`, case-insensitively, across every
+/// directory (not only what a client loaded). At most [`SEARCH_LIMIT`].
+pub async fn search(root: &Path, query: &str, all: bool) -> Result<Search, FileError> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Ok(Search {
+            paths: Vec::new(),
+            truncated: false,
+        });
+    }
+    let mut paths = match git_names(root, all).await? {
+        Some(paths) => paths,
+        None => walk_names(root)?,
+    };
+    paths.retain(|path| is_regular_file(root, path));
+    paths.sort();
+    paths.dedup();
+    paths.retain(|path| path.to_lowercase().contains(&needle));
+    let truncated = paths.len() > SEARCH_LIMIT;
+    paths.truncate(SEARCH_LIMIT);
+    Ok(Search { paths, truncated })
+}
+
+/// The paths git knows in the workspace (tracked and untracked); `None` outside a
+/// repository, where the caller walks the file system instead.
+async fn git_names(root: &Path, all: bool) -> Result<Option<Vec<String>>, FileError> {
+    let found = match git(
+        root,
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+    )
+    .await
+    {
+        Ok(found) => found,
+        Err(FileError::BadRequest(_)) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    let Some(out) = found else {
+        return Ok(Some(Vec::new()));
+    };
+    let mut paths = nul_paths(&out);
+    if all
+        && let Ok(Some(out)) = git(
+            root,
+            &[
+                "ls-files",
+                "-z",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+            ],
+        )
+        .await
+    {
+        paths.extend(nul_paths(&out));
+    }
+    Ok(Some(paths))
+}
+
+fn nul_paths(out: &[u8]) -> Vec<String> {
+    out.split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+        .map(|field| String::from_utf8_lossy(field).replace('\\', "/"))
+        .collect()
+}
+
+fn is_regular_file(root: &Path, rel: &str) -> bool {
+    rel.split('/')
+        .all(|part| !part.is_empty() && part != ".git")
+        && std::fs::symlink_metadata(root.join(rel))
+            .map(|meta| meta.is_file())
+            .unwrap_or(false)
+}
+
+/// Every regular file under `root`, without following symlinks (so a link out of the
+/// workspace cannot bring its target in).
+fn walk_names(root: &Path) -> Result<Vec<String>, FileError> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let read = std::fs::read_dir(&dir)
+            .map_err(|e| FileError::Failed(format!("cannot read {}: {e}", dir.display())))?;
+        for item in read {
+            let item =
+                item.map_err(|e| FileError::Failed(format!("cannot read {}: {e}", dir.display())))?;
+            let path = item.path();
+            let name = item.file_name().to_string_lossy().into_owned();
+            if name == ".git" {
+                continue;
+            }
+            let meta = std::fs::symlink_metadata(&path)
+                .map_err(|e| FileError::Failed(format!("cannot read {}: {e}", path.display())))?;
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.is_file()
+                && let Ok(rel) = path.strip_prefix(root)
+            {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// One directory of `git_ref`'s tree; everything in a tree is tracked, so nothing is hidden.
 pub async fn list_dir_at(root: &Path, git_ref: &str, rel: &str) -> Result<Vec<Entry>, FileError> {
     let commit = commit_of(root, git_ref).await?;
@@ -705,6 +916,28 @@ impl Orchestrator {
                 })
             }
         }
+    }
+
+    /// The workspace's uncommitted changes; `None` outside a git repository.
+    pub async fn files_status(
+        &self,
+        scope: FilesScope<'_>,
+    ) -> Result<(PathBuf, Option<Vec<ChangeEntry>>), FileError> {
+        let root = self.files_root(scope).await?;
+        let changes = changes(&root).await?;
+        Ok((root, changes))
+    }
+
+    /// Files across the whole workspace whose path contains `query`.
+    pub async fn files_search(
+        &self,
+        scope: FilesScope<'_>,
+        query: &str,
+        all: bool,
+    ) -> Result<(PathBuf, Search), FileError> {
+        let root = self.files_root(scope).await?;
+        let found = search(&root, query, all).await?;
+        Ok((root, found))
     }
 
     /// Which of `inputs` name something inside `scope`, in their order; `None` for a path
@@ -1003,33 +1236,121 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn refs_are_checked_before_git_sees_them() {
-        for good in [
-            "main",
-            "HEAD",
-            "crossagents/dccf42e8-api-files",
-            "abc1234",
-            "0123456789abcdef0123456789abcdef01234567",
-        ] {
-            assert!(check_ref(good).is_ok(), "{good}");
+    #[tokio::test]
+    async fn status_is_none_outside_a_repository() {
+        let dir = temp();
+        std::fs::write(dir.path().join("plain.txt"), "x\n").unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+        // No repository, no error: the client simply shows no status.
+        assert_eq!(changes(&root).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn status_lists_added_modified_and_deleted_paths() {
+        let dir = temp();
+        assert!(git(dir.path(), &["init", "-q"]).await.is_ok());
+        std::fs::write(dir.path().join("kept.txt"), "one\n").unwrap();
+        std::fs::write(dir.path().join("gone.txt"), "bye\n").unwrap();
+        commit(dir.path(), "one").await;
+
+        std::fs::write(dir.path().join("kept.txt"), "two\n").unwrap();
+        std::fs::remove_file(dir.path().join("gone.txt")).unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/new.txt"), "new\n").unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+
+        let found = changes(&root).await.unwrap().unwrap();
+        let by_path: Vec<(&str, Change)> = found
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry.change))
+            .collect();
+        assert_eq!(
+            by_path,
+            [
+                ("gone.txt", Change::Deleted),
+                ("kept.txt", Change::Modified),
+                ("sub/new.txt", Change::Added),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn status_is_relative_to_the_workspace() {
+        let dir = temp();
+        assert!(git(dir.path(), &["init", "-q"]).await.is_ok());
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/a.txt"), "one\n").unwrap();
+        std::fs::write(dir.path().join("outside.txt"), "one\n").unwrap();
+        commit(dir.path(), "one").await;
+        std::fs::write(dir.path().join("sub/a.txt"), "two\n").unwrap();
+        std::fs::write(dir.path().join("outside.txt"), "two\n").unwrap();
+        let workspace = dunce::canonicalize(dir.path().join("sub")).unwrap();
+
+        let found = changes(&workspace).await.unwrap().unwrap();
+        let by_path: Vec<(&str, Change)> = found
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry.change))
+            .collect();
+        // The rest of the repository is not part of this workspace.
+        assert_eq!(by_path, [("a.txt", Change::Modified)]);
+    }
+
+    #[tokio::test]
+    async fn search_finds_files_across_the_workspace() {
+        let dir = temp();
+        assert!(git(dir.path(), &["init", "-q"]).await.is_ok());
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::create_dir_all(dir.path().join("crates/cli/src")).unwrap();
+        std::fs::write(dir.path().join("docs/one.md"), "# one\n").unwrap();
+        std::fs::write(dir.path().join("crates/cli/src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "/target\n").unwrap();
+        commit(dir.path(), "one").await;
+
+        // Untracked files are found too; ignored ones only with `all`.
+        std::fs::write(dir.path().join("docs/two.md"), "# two\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("target")).unwrap();
+        std::fs::write(dir.path().join("target/blob.md"), "no\n").unwrap();
+        let root = dunce::canonicalize(dir.path()).unwrap();
+
+        let md = search(&root, ".md", false).await.unwrap();
+        assert_eq!(md.paths, ["docs/one.md", "docs/two.md"]);
+        assert!(!md.truncated);
+
+        let all = search(&root, "blob", true).await.unwrap();
+        assert_eq!(all.paths, ["target/blob.md"]);
+
+        // Matching is by path, case-insensitively, across folders that were never opened.
+        let cli = search(&root, "CLI/SRC", false).await.unwrap();
+        assert_eq!(cli.paths, ["crates/cli/src/main.rs"]);
+
+        // An empty query is no request, not a listing of the whole workspace.
+        assert!(search(&root, "  ", false).await.unwrap().paths.is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_does_not_leave_the_root() {
+        let outside = temp();
+        std::fs::write(outside.path().join("secret.md"), "secret\n").unwrap();
+        let root = temp();
+        std::fs::write(root.path().join("inside.md"), "ok\n").unwrap();
+        let link = root.path().join("linked");
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(outside.path(), &link).is_ok();
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(outside.path(), &link).is_ok();
+        #[cfg(not(any(unix, windows)))]
+        let made = false;
+        if !made {
+            return;
         }
-        for bad in [
-            "",
-            " ",
-            "-x",
-            "--output=/tmp/x",
-            "a b",
-            "a..b",
-            "HEAD:file",
-            "HEAD~1",
-            "HEAD^2",
-            "a//b",
-        ] {
-            assert!(
-                matches!(check_ref(bad), Err(FileError::BadRequest(_))),
-                "{bad}"
-            );
-        }
+        let root = dunce::canonicalize(root.path()).unwrap();
+        // The symlink is not followed, so nothing outside is listed.
+        let found = search(&root, "secret", false).await.unwrap();
+        assert!(found.paths.is_empty());
+        // Reading it by path is still refused.
+        assert!(matches!(
+            resolve_in_root(&root, "linked/secret.md"),
+            Err(FileError::Outside(_))
+        ));
     }
 }

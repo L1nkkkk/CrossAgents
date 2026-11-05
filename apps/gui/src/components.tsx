@@ -175,8 +175,9 @@ export const sessionHref = (agent: Agent | string) => `#/s/${encodeURIComponent(
  * split paragraphs. Deliberately small; no HTML is ever interpreted. `doc`: a Markdown file
  * rather than a reply, so it keeps its heading levels and its lines wrap freely.
  */
-export function Prose({ text, doc = false }: { text: string; doc?: boolean }) {
-  return <div className={doc ? "prose prose-doc" : "prose"}>{renderBlocks(parseBlocks(text), doc)}</div>;
+export function Prose({ text, doc = false, headingIds }: { text: string; doc?: boolean; headingIds?: string[] }) {
+  const headings = { n: 0 };
+  return <div className={doc ? "prose prose-doc" : "prose"}>{renderBlocks(parseBlocks(text), doc, headingIds, headings)}</div>;
 }
 
 /**
@@ -318,7 +319,7 @@ function InlineCode({ text }: { text: string }) {
 const REPLY_HEADINGS = ["h3", "h3", "h4", "h5", "h6", "h6"] as const;
 const DOC_HEADINGS = ["h1", "h2", "h3", "h4", "h5", "h6"] as const;
 
-function renderBlocks(blocks: Block[], doc = false): ReactNode[] {
+function renderBlocks(blocks: Block[], doc = false, headingIds?: string[], headings?: { n: number }): ReactNode[] {
   const flowing = (text: string) => renderInline(parseInline(doc ? softBreaks(text) : text));
   return blocks.map((b, i) => {
     switch (b.t) {
@@ -326,7 +327,12 @@ function renderBlocks(blocks: Block[], doc = false): ReactNode[] {
         return <p key={i}>{flowing(b.text)}</p>;
       case "h": {
         const H = (doc ? DOC_HEADINGS : REPLY_HEADINGS)[b.level - 1];
-        return <H key={i}>{renderInline(parseInline(b.text))}</H>;
+        const heading = headingIds ? headings!.n++ : undefined;
+        return (
+          <H key={i} id={heading === undefined ? undefined : headingIds![heading]} data-heading={heading}>
+            {renderInline(parseInline(b.text))}
+          </H>
+        );
       }
       case "code":
         return <pre key={i}>{b.text}</pre>;
@@ -334,7 +340,7 @@ function renderBlocks(blocks: Block[], doc = false): ReactNode[] {
         const items = b.items.map((item, j) => (
           <li key={j}>
             {flowing(item.text)}
-            {item.children.length > 0 && renderBlocks(item.children, doc)}
+            {item.children.length > 0 && renderBlocks(item.children, doc, headingIds, headings)}
           </li>
         ));
         return b.ordered ? (
@@ -346,7 +352,7 @@ function renderBlocks(blocks: Block[], doc = false): ReactNode[] {
         );
       }
       case "quote":
-        return <blockquote key={i}>{renderBlocks(b.blocks, doc)}</blockquote>;
+        return <blockquote key={i}>{renderBlocks(b.blocks, doc, headingIds, headings)}</blockquote>;
       case "hr":
         return <hr key={i} />;
       case "table":

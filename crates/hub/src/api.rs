@@ -25,13 +25,14 @@ use crossagents_api_types::{
     BackgroundReminder, BackgroundResponse, BackgroundWatch, ChangesResponse, CliInfo,
     CliInstallAccepted, CommitGraph, ConnectInfo, CreateAccountRequest, CreateAgentRequest,
     CreateRunRequest, CreateWorkRequest, CreateWorkRunRequest, DeleteRunResponse, DiffSide,
-    ErrorCode, FileContentResponse, FileEntry, FileKind, FileTreeResponse, FinishRequest,
-    GraphCommit, GraphRef, GraphRefKind, HealthResponse, HubInfo, ImageContent, InitRepoRequest,
-    LandRequest, ListAccountsResponse, ListAgentsResponse, ListAvatarsResponse,
-    ListHistoryResponse, ListNotesResponse, ListPluginsResponse, ListQuestionsResponse,
-    ListRunsResponse, ListToolsResponse, ListWorksResponse, LoginStarted, PluginInfo,
-    QuotaResponse, RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse,
-    ResolvedPath, RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
+    ErrorCode, FileContentResponse, FileEntry, FileGitChange, FileKind, FileSearchResponse,
+    FileStatusEntry, FileStatusResponse, FileTreeResponse, FinishRequest, GraphCommit, GraphRef,
+    GraphRefKind, HealthResponse, HubInfo, ImageContent, InitRepoRequest, LandRequest,
+    ListAccountsResponse, ListAgentsResponse, ListAvatarsResponse, ListHistoryResponse,
+    ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
+    ListToolsResponse, ListWorksResponse, LoginStarted, PluginInfo, QuotaResponse,
+    RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse, ResolvedPath,
+    RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
     SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript,
     TurnDiffResponse, UpdateRunPolicyRequest, UploadAvatarsRequest, UploadAvatarsResponse,
     UsageGroup, UsageResponse, UsageSeriesGroup, UsageSeriesRange, UsageSeriesResponse,
@@ -44,6 +45,7 @@ use crossagents_core::{
 };
 use crossagents_orchestrator::{
     Approval, DeleteRun, FileError, FilesScope, GitWorkspaces, NewRun, Orchestrator,
+    files as workspace_files,
 };
 
 use crate::accounts::Accounts;
@@ -207,10 +209,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{key}/tasks/{task}/review", post(review_task))
         .route("/v1/agents/{key}/files/tree", get(agent_files_tree))
         .route("/v1/agents/{key}/files/content", get(agent_files_content))
+        .route("/v1/agents/{key}/files/status", get(agent_files_status))
+        .route("/v1/agents/{key}/files/search", get(agent_files_search))
         .route("/v1/agents/{key}/files/image", get(agent_files_image))
         .route("/v1/agents/{key}/files/resolve", post(agent_files_resolve))
         .route("/v1/runs/{key}/files/tree", get(run_files_tree))
         .route("/v1/runs/{key}/files/content", get(run_files_content))
+        .route("/v1/runs/{key}/files/status", get(run_files_status))
+        .route("/v1/runs/{key}/files/search", get(run_files_search))
         .route("/v1/runs/{key}/files/resolve", post(run_files_resolve))
         .route(
             "/v1/runs/{key}/tasks/{task}/files/tree",
@@ -219,6 +225,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/runs/{key}/tasks/{task}/files/content",
             get(task_files_content),
+        )
+        .route(
+            "/v1/runs/{key}/tasks/{task}/files/status",
+            get(task_files_status),
+        )
+        .route(
+            "/v1/runs/{key}/tasks/{task}/files/search",
+            get(task_files_search),
         )
         .route(
             "/v1/runs/{key}/tasks/{task}/files/resolve",
@@ -2130,6 +2144,24 @@ fn file_kind(kind: crossagents_orchestrator::files::Kind) -> FileKind {
     }
 }
 
+/// What `GET {scope}/files/search` takes: the name to find, and whether to search what
+/// .gitignore hides too.
+#[derive(Debug, Default, Deserialize)]
+struct FileSearchQuery {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    all: bool,
+}
+
+fn file_change(change: workspace_files::Change) -> FileGitChange {
+    match change {
+        workspace_files::Change::Added => FileGitChange::Added,
+        workspace_files::Change::Modified => FileGitChange::Modified,
+        workspace_files::Change::Deleted => FileGitChange::Deleted,
+    }
+}
+
 async fn agent_files_tree(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
@@ -2215,6 +2247,59 @@ async fn task_files_content(
     files_content(&state, FilesScope::Task { run, task }, q).await
 }
 
+async fn agent_files_status(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<FileStatusResponse>> {
+    let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    files_status(&state, FilesScope::Agent(&agent)).await
+}
+
+async fn run_files_status(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<FileStatusResponse>> {
+    let run = resolve_run(&state, &key).await?;
+    files_status(&state, FilesScope::Run(run)).await
+}
+
+async fn task_files_status(
+    State(state): State<Arc<AppState>>,
+    Path((key, task)): Path<(String, String)>,
+) -> ApiResult<Json<FileStatusResponse>> {
+    let run = resolve_run(&state, &key).await?;
+    let task = resolve_task(&state, run, &task).await?;
+    files_status(&state, FilesScope::Task { run, task }).await
+}
+
+async fn agent_files_search(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Query(q): Query<FileSearchQuery>,
+) -> ApiResult<Json<FileSearchResponse>> {
+    let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    files_search(&state, FilesScope::Agent(&agent), q).await
+}
+
+async fn run_files_search(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Query(q): Query<FileSearchQuery>,
+) -> ApiResult<Json<FileSearchResponse>> {
+    let run = resolve_run(&state, &key).await?;
+    files_search(&state, FilesScope::Run(run), q).await
+}
+
+async fn task_files_search(
+    State(state): State<Arc<AppState>>,
+    Path((key, task)): Path<(String, String)>,
+    Query(q): Query<FileSearchQuery>,
+) -> ApiResult<Json<FileSearchResponse>> {
+    let run = resolve_run(&state, &key).await?;
+    let task = resolve_task(&state, run, &task).await?;
+    files_search(&state, FilesScope::Task { run, task }, q).await
+}
+
 async fn agent_files_resolve(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
@@ -2268,6 +2353,39 @@ async fn files_tree(
                 ignored: entry.ignored,
             })
             .collect(),
+    }))
+}
+
+async fn files_status(
+    state: &AppState,
+    scope: FilesScope<'_>,
+) -> ApiResult<Json<FileStatusResponse>> {
+    let (root, changes) = state.orchestrator.files_status(scope).await?;
+    let git = changes.is_some();
+    Ok(Json(FileStatusResponse {
+        root: root.display().to_string(),
+        git,
+        entries: changes
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| FileStatusEntry {
+                path: entry.path,
+                change: file_change(entry.change),
+            })
+            .collect(),
+    }))
+}
+
+async fn files_search(
+    state: &AppState,
+    scope: FilesScope<'_>,
+    q: FileSearchQuery,
+) -> ApiResult<Json<FileSearchResponse>> {
+    let (root, found) = state.orchestrator.files_search(scope, &q.q, q.all).await?;
+    Ok(Json(FileSearchResponse {
+        root: root.display().to_string(),
+        paths: found.paths,
+        truncated: found.truncated,
     }))
 }
 

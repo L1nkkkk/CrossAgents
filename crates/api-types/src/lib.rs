@@ -1232,6 +1232,48 @@ pub struct FileContentResponse {
     pub git_ref: Option<String>,
 }
 
+/// What git says changed at one path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum FileGitChange {
+    Added,
+    Modified,
+    Deleted,
+}
+
+/// One changed path in a working copy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FileStatusEntry {
+    /// Relative to the workspace root, with `/`.
+    pub path: String,
+    pub change: FileGitChange,
+}
+
+/// `GET {scope}/files/status`: the working copy's uncommitted changes. `git` is false
+/// outside a git repository, where there are no changes to show rather than an error.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FileStatusResponse {
+    /// The workspace root, absolute.
+    pub root: String,
+    pub git: bool,
+    pub entries: Vec<FileStatusEntry>,
+}
+
+/// `GET {scope}/files/search?q=&all=`: matching paths across the whole workspace, not
+/// just the directories a client has loaded. At most 200; `truncated` says there were more.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FileSearchResponse {
+    /// The workspace root, absolute.
+    pub root: String,
+    /// Paths relative to the root, with `/`, sorted.
+    pub paths: Vec<String>,
+    pub truncated: bool,
+}
+
 /// A terminal on the hub's machine (`GET /v1/terminals`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
