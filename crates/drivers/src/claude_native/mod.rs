@@ -233,7 +233,7 @@ fn owner_of(flavor: Flavor, session_id: &str) -> String {
 struct Shared {
     session_id: String,
     stdin: tokio::sync::Mutex<Option<BoxWrite>>,
-    pending: Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>,
+    pending: Mutex<HashMap<String, (oneshot::Sender<Result<Value, String>>, Option<String>)>>,
     turn: Mutex<Turn>,
     translator: Mutex<Translator>,
     /// The CLI's own slash commands and skills, from its `system`/`init` message.
@@ -284,9 +284,6 @@ struct Turn {
     /// The interrupt left the unread steers queued (`still_queued`): they will still be
     /// read, so the turn waits for them like a late message.
     keep_queued: bool,
-    /// The interrupt's answer is in flight: whether unread steers survive it is not
-    /// known yet, so a result must wait for that answer instead of calling them lost.
-    interrupting: bool,
 }
 
 /// A message written into the running turn, waiting for the model to read it.
@@ -296,56 +293,8 @@ struct PendingSteer {
     snippet: String,
 }
 
-/// Keeps `Turn::interrupting` while the interrupt's answer is on its way, and settles the
-/// turn whenever that wait ends: the answer arrived, the request failed or timed out, or
-/// the caller's future was dropped (a cancel whose client went away). `delivered` says
-/// whether the CLI answered, which is what tells a wait for its result from a turn that
-/// nothing can wake.
-struct InterruptWait<'a> {
-    shared: &'a Shared,
-    /// The turn being interrupted: an answer about any other turn is not for this one.
-    turn_id: Option<String>,
-    /// The control request was answered: its turn's result is still on its way.
-    delivered: bool,
-}
-
-impl InterruptWait<'_> {
-    fn settle(&self) {
-        let mut turn = self.shared.turn.lock().expect("turn lock");
-        if !turn.interrupting || turn.id != self.turn_id {
-            return;
-        }
-        turn.interrupting = false;
-        self.shared.after_interrupt(&mut turn, self.delivered);
-    }
-}
-
-impl Drop for InterruptWait<'_> {
-    fn drop(&mut self) {
-        self.settle();
-    }
-}
-
 impl Shared {
     fn new(session_id: String, stdin: BoxWrite, spec: &SessionSpec, flavor: Flavor) -> Self {
-        Self::from_parts(
-            session_id,
-            stdin,
-            spec.events.clone(),
-            spec.permission,
-            spec.permissions.clone(),
-            flavor,
-        )
-    }
-
-    fn from_parts(
-        session_id: String,
-        stdin: BoxWrite,
-        events: mpsc::UnboundedSender<SessionEvent>,
-        permission: PermissionPolicy,
-        permissions: Option<Arc<dyn PermissionHandler>>,
-        flavor: Flavor,
-    ) -> Self {
         Self {
             session_id,
             stdin: tokio::sync::Mutex::new(Some(stdin)),
@@ -354,9 +303,9 @@ impl Shared {
             translator: Mutex::default(),
             commands: Mutex::default(),
             turn_ends: Mutex::default(),
-            events,
-            permission,
-            permissions,
+            events: spec.events.clone(),
+            permission: spec.permission,
+            permissions: spec.permissions.clone(),
             exited: AtomicBool::new(false),
             closing: AtomicBool::new(false),
             program: flavor.program(),
@@ -389,35 +338,38 @@ impl Shared {
     }
 
     async fn control(&self, request: Value, timeout: Duration) -> Result<Value, CoreError> {
+        self.control_for_turn(request, timeout, None).await
+    }
+
+    async fn control_for_turn(
+        &self,
+        request: Value,
+        timeout: Duration,
+        turn_id: Option<String>,
+    ) -> Result<Value, CoreError> {
         let subtype = request["subtype"].as_str().unwrap_or("request").to_owned();
         let id = new_id();
         let (tx, rx) = oneshot::channel();
         self.pending
             .lock()
             .expect("pending lock")
-            .insert(id.clone(), tx);
-        // The whole exchange is bounded, the write included: a stdin that cannot take the
-        // line (a lock held, a reader not reading) must not keep a caller, or the turn it
-        // holds, forever.
-        let exchange = async {
-            self.write(&wire::control_request(&id, request)).await?;
-            match rx.await {
-                Ok(Ok(value)) => Ok(value),
-                Ok(Err(error)) => Err(CoreError::Agent(format!("{subtype}: {error}"))),
-                Err(_) => Err(CoreError::Agent(format!(
-                    "{subtype}: {} exited",
-                    self.program
-                ))),
+            .insert(id.clone(), (tx, turn_id));
+        if let Err(err) = self.write(&wire::control_request(&id, request)).await {
+            self.pending.lock().expect("pending lock").remove(&id);
+            return Err(err);
+        }
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Ok(value))) => Ok(value),
+            Ok(Ok(Err(error))) => Err(CoreError::Agent(format!("{subtype}: {error}"))),
+            Ok(Err(_)) => Err(CoreError::Agent(format!(
+                "{subtype}: {} exited",
+                self.program
+            ))),
+            Err(_) => {
+                self.pending.lock().expect("pending lock").remove(&id);
+                Err(CoreError::Agent(format!("{subtype}: no answer")))
             }
-        };
-        let result = match tokio::time::timeout(timeout, exchange).await {
-            Ok(result) => result,
-            Err(_) => Err(CoreError::Agent(format!("{subtype}: no answer"))),
-        };
-        // Answered, failed or timed out: this entry is done, and a late answer must not
-        // find it.
-        self.pending.lock().expect("pending lock").remove(&id);
-        result
+        }
     }
 
     /// Says these steers were not read, and remembers them: the CLI may still run them,
@@ -476,121 +428,6 @@ impl Shared {
         *turn = Turn::default();
     }
 
-    /// The interrupt's answer is in, or the request was abandoned (`delivered` says
-    /// which). One rule for every way here: with a result held, the turn waits only when
-    /// the CLI said it kept a steer queued and that steer is still unread (its read or
-    /// result will wake the turn); otherwise it ends now. A delivered interrupt with no
-    /// result yet still has that result coming; an abandoned one has nothing that would
-    /// ever wake the turn, so it ends too.
-    fn after_interrupt(&self, turn: &mut Turn, delivered: bool) {
-        if !turn.prompt_done && delivered {
-            return;
-        }
-        if delivered && turn.keep_queued && !turn.steers.is_empty() {
-            return;
-        }
-        let stop = turn.held_stop.unwrap_or(StopReason::Cancelled);
-        self.finish_turn(turn, stop);
-    }
-
-    fn check_open(&self) -> Result<(), CoreError> {
-        if self.closing.load(Ordering::SeqCst) {
-            return Err(CoreError::Conflict(format!(
-                "session {} is closed",
-                self.session_id
-            )));
-        }
-        if self.exited.load(Ordering::SeqCst) {
-            return Err(CoreError::Agent(format!("{} exited", self.program)));
-        }
-        Ok(())
-    }
-
-    /// Writes the message into the running turn's stdin, naming it with the hub's message
-    /// id. No new turn, and no waiter: the running turn still awaits its result.
-    async fn steer(&self, message_id: MessageId, prompt: &Prompt) -> Result<(), CoreError> {
-        self.check_open()?;
-        let snippet: String = prompt
-            .text
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .chars()
-            .take(40)
-            .collect();
-        {
-            let mut turn = self.turn.lock().expect("turn lock");
-            if turn.waiter.is_none() {
-                return Err(CoreError::Conflict("no turn is running".into()));
-            }
-            turn.steers.push(PendingSteer {
-                id: message_id,
-                snippet,
-            });
-            turn.steered.push(message_id);
-        }
-        let message = wire::user_message(
-            &self.session_id,
-            &message_id.to_string(),
-            wire::user_content(prompt),
-        );
-        if let Err(err) = self.write(&message).await {
-            let mut turn = self.turn.lock().expect("turn lock");
-            turn.steers.retain(|steer| steer.id != message_id);
-            turn.steered.retain(|steer| *steer != message_id);
-            return Err(err);
-        }
-        Ok(())
-    }
-
-    /// Interrupts the running turn. The CLI's answer says whether unread steers survive;
-    /// until it is in, a result must not call them lost. However the request ends, the
-    /// turn is settled: a result held for the answer either waits for a steer the CLI
-    /// kept queued, or ends now.
-    async fn interrupt(&self) -> Result<(), CoreError> {
-        let turn_id = {
-            let mut turn = self.turn.lock().expect("turn lock");
-            if turn.waiter.is_none() {
-                return Ok(());
-            }
-            turn.interrupted = true;
-            // The answer decides what happens to the unread steers, and whether the
-            // interrupt reached the CLI at all.
-            turn.interrupting = true;
-            turn.id.clone()
-        };
-        // However the answer ends — received, failed, timed out, or this request dropped —
-        // the turn must not stay waiting for it.
-        let mut wait = InterruptWait {
-            shared: self,
-            turn_id: turn_id.clone(),
-            delivered: false,
-        };
-        let answer = self
-            .control(json!({ "subtype": "interrupt" }), CLEANUP_TIMEOUT)
-            .await;
-        wait.delivered = answer.is_ok();
-        // Claude Code keeps unread stdin messages queued across an interrupt: it answers
-        // with `still_queued` (verified with claude 2.1.317), and the next turn reads
-        // them. The turn then waits for them like a late message.
-        let queued = answer.as_ref().is_ok_and(|answer| {
-            answer
-                .get("still_queued")
-                .and_then(Value::as_array)
-                .is_some_and(|queued| !queued.is_empty())
-        });
-        {
-            let mut turn = self.turn.lock().expect("turn lock");
-            // The turn may have ended meanwhile (or another one started): its messages
-            // already got their answer, and this one is not about them.
-            if turn.interrupting && turn.id == turn_id {
-                turn.keep_queued = queued;
-            }
-        }
-        wait.settle();
-        Ok(())
-    }
-
     fn handle(self: &Arc<Self>, message: Value) {
         // Before the replay filter: a resumed CodeBuddy session's init is still the CLI's.
         if let Some(commands) = wire::commands(&message) {
@@ -623,8 +460,22 @@ impl Shared {
         match kind {
             Some("control_response") => {
                 if let Some((id, answer)) = wire::control_answer(&message)
-                    && let Some(tx) = self.pending.lock().expect("pending lock").remove(&id)
+                    && let Some((tx, turn_id)) =
+                        self.pending.lock().expect("pending lock").remove(&id)
                 {
+                    // The response and result are ordered on stdout. Record the answer
+                    // before waking the caller or reading the next line.
+                    if let Some(turn_id) = turn_id {
+                        let mut turn = self.turn.lock().expect("turn lock");
+                        if turn.id.as_deref() == Some(&turn_id) && turn.waiter.is_some() {
+                            turn.keep_queued = answer.as_ref().is_ok_and(|answer| {
+                                answer
+                                    .get("still_queued")
+                                    .and_then(Value::as_array)
+                                    .is_some_and(|queued| !queued.is_empty())
+                            });
+                        }
+                    }
                     let _ = tx.send(answer);
                 }
             }
@@ -681,11 +532,6 @@ impl Shared {
                         // It came before the prompt's own result: wait for that.
                         return;
                     }
-                    // The interrupt's answer is still on its way: it decides whether the
-                    // messages left are kept, and `settle` ends the turn if they are not.
-                    if turn.interrupting {
-                        return;
-                    }
                     // More late messages wait for their turn to read them, unless this one
                     // failed: then nothing more will run for them.
                     if !failed && !turn.steers.is_empty() {
@@ -694,23 +540,15 @@ impl Shared {
                 } else {
                     // The prompt's result. A steer still unread, or a separate turn that
                     // has not reported, keeps this turn open so no stray result ends the
-                    // next one.
+                    // next one. An interrupted turn is kept open because its queued
+                    // messages are still read (`still_queued`, verified with claude
+                    // 2.1.317); a failure without an interrupt ends now.
                     turn.prompt_done = true;
                     turn.held_stop.get_or_insert(stop);
-                    // The interrupt's answer is still on its way: whether the unread
-                    // messages survive it is not known, so this result must not call them
-                    // lost. `settle` runs the one decision once the answer is in.
-                    if turn.interrupting {
-                        return;
-                    }
-                    if turn.interrupted {
-                        // The answer is in: wait only for a steer it said was kept.
-                        self.after_interrupt(&mut turn, true);
-                        return;
-                    }
                     let unread = !turn.steers.is_empty();
                     let separate = turn.separate_steer_turn && turn.steer_results.is_empty();
-                    if !failed && (unread || separate) {
+                    let survives = turn.interrupted && turn.keep_queued;
+                    if (survives || !failed) && (unread || separate) {
                         return;
                     }
                 }
@@ -1052,7 +890,16 @@ impl ClaudeSession {
     }
 
     fn check_open(&self) -> Result<(), CoreError> {
-        self.shared.check_open()
+        if self.shared.closing.load(Ordering::SeqCst) {
+            return Err(CoreError::Conflict(format!(
+                "session {} is closed",
+                self.shared.session_id
+            )));
+        }
+        if self.shared.exited.load(Ordering::SeqCst) {
+            return Err(CoreError::Agent(format!("{} exited", self.shared.program)));
+        }
+        Ok(())
     }
 
     fn turn_running(&self) -> bool {
@@ -1146,11 +993,55 @@ impl DriverSession for ClaudeSession {
     /// Writes the message into the running turn's stdin, naming it with the hub's message
     /// id. No new turn, and no waiter: the running `prompt_with` still awaits its result.
     async fn steer(&self, message_id: MessageId, prompt: &Prompt) -> Result<(), CoreError> {
-        self.shared.steer(message_id, prompt).await
+        self.check_open()?;
+        let snippet: String = prompt
+            .text
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(40)
+            .collect();
+        {
+            let mut turn = self.shared.turn.lock().expect("turn lock");
+            if turn.waiter.is_none() {
+                return Err(CoreError::Conflict("no turn is running".into()));
+            }
+            turn.steers.push(PendingSteer {
+                id: message_id,
+                snippet,
+            });
+            turn.steered.push(message_id);
+        }
+        let message = wire::user_message(
+            &self.shared.session_id,
+            &message_id.to_string(),
+            wire::user_content(prompt),
+        );
+        if let Err(err) = self.shared.write(&message).await {
+            let mut turn = self.shared.turn.lock().expect("turn lock");
+            turn.steers.retain(|steer| steer.id != message_id);
+            turn.steered.retain(|steer| *steer != message_id);
+            return Err(err);
+        }
+        Ok(())
     }
 
     async fn interrupt(&self) -> Result<(), CoreError> {
-        self.shared.interrupt().await
+        let turn_id = {
+            let mut turn = self.shared.turn.lock().expect("turn lock");
+            if turn.waiter.is_none() {
+                return Ok(());
+            }
+            turn.interrupted = true;
+            turn.id.clone()
+        };
+        let _ = self
+            .shared
+            .control_for_turn(json!({ "subtype": "interrupt" }), CLEANUP_TIMEOUT, turn_id)
+            .await;
+        // The turn may have ended meanwhile, or the process is gone.
+        Ok(())
     }
 
     async fn suspend(&self) -> Result<(), CoreError> {
@@ -1365,373 +1256,137 @@ pub async fn probe_account(
 }
 
 #[cfg(test)]
-mod tests {
+mod interrupt_tests {
     use super::*;
-    use tokio::io::{AsyncBufReadExt, BufReader, DuplexStream};
 
-    fn shared(stdin: BoxWrite) -> (Arc<Shared>, mpsc::UnboundedReceiver<SessionEvent>) {
+    fn setup(
+        steer: Option<MessageId>,
+    ) -> (
+        Arc<Shared>,
+        oneshot::Receiver<StopReason>,
+        mpsc::UnboundedReceiver<SessionEvent>,
+        tokio::io::DuplexStream,
+    ) {
+        let (cli, stdin) = tokio::io::duplex(4096);
         let (events, rx) = mpsc::unbounded_channel();
-        let shared = Arc::new(Shared::from_parts(
-            "test-session".into(),
-            stdin,
+        let shared = Arc::new(Shared {
+            session_id: "test".into(),
+            stdin: tokio::sync::Mutex::new(Some(Box::new(stdin))),
+            pending: Mutex::default(),
+            turn: Mutex::default(),
+            translator: Mutex::default(),
+            commands: Mutex::default(),
+            turn_ends: Mutex::default(),
             events,
-            PermissionPolicy::Bypass,
-            None,
-            Flavor::Claude,
-        ));
-        (shared, rx)
-    }
-
-    /// Puts a turn in flight with `steers` already written into it.
-    fn start_turn(
-        shared: &Shared,
-        turn_id: &str,
-        steers: &[MessageId],
-    ) -> oneshot::Receiver<StopReason> {
-        let (tx, rx) = oneshot::channel();
-        let mut turn = shared.turn.lock().expect("turn lock");
-        turn.id = Some(turn_id.to_owned());
-        turn.waiter = Some(tx);
-        for id in steers {
-            turn.steers.push(PendingSteer {
-                id: *id,
-                snippet: "steer".into(),
-            });
-            turn.steered.push(*id);
+            permission: PermissionPolicy::Bypass,
+            permissions: None,
+            exited: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
+            program: "claude",
+            flavor: Flavor::Claude,
+            replay: Mutex::default(),
+            stale_steers: Mutex::default(),
+        });
+        let (tx, ended) = oneshot::channel();
+        {
+            let mut turn = shared.turn.lock().unwrap();
+            turn.id = Some("turn".into());
+            turn.waiter = Some(tx);
+            turn.interrupted = true;
+            if let Some(id) = steer {
+                turn.steers.push(PendingSteer {
+                    id,
+                    snippet: "steer".into(),
+                });
+                turn.steered.push(id);
+            }
         }
-        rx
+        (shared, ended, rx, cli)
     }
 
-    fn prompt_result(uuid: &str, is_error: bool) -> Value {
-        json!({
-            "type": "result",
-            "subtype": if is_error { "error_during_execution" } else { "success" },
-            "is_error": is_error,
-            "session_id": "test-session",
-            "user_message_uuid": uuid,
-        })
+    fn result(id: &str) -> Value {
+        json!({"type":"result", "subtype":"error_during_execution", "is_error":true, "user_message_uuid":id})
     }
 
-    fn steer_read(uuid: &str) -> Value {
-        json!({
-            "type": "user",
-            "uuid": uuid,
-            "isReplay": true,
-            "session_id": "test-session",
-            "parent_tool_use_id": null,
-            "message": { "role": "user", "content": [{ "type": "text", "text": "steer" }] },
-        })
+    fn warnings(events: &mut mpsc::UnboundedReceiver<SessionEvent>) -> usize {
+        let mut n = 0;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event.kind, SessionEventKind::Warning { .. }) {
+                n += 1;
+            }
+        }
+        n
     }
 
-    /// Reads the next line the driver wrote to the CLI, as the CLI would.
-    async fn next_request(cli: &mut BufReader<DuplexStream>) -> Value {
+    #[tokio::test]
+    async fn response_then_result_is_processed_before_the_waiter_runs() {
+        let steer = MessageId::new();
+        let (shared, mut ended, mut events, _cli) = setup(Some(steer));
+        let (tx, _rx) = oneshot::channel();
+        shared
+            .pending
+            .lock()
+            .unwrap()
+            .insert("req".into(), (tx, Some("turn".into())));
+        shared.handle(wire::control_success(
+            "req",
+            json!({"still_queued":[steer.to_string()]}),
+        ));
+        shared.handle(result("turn"));
+        assert!(ended.try_recv().is_err());
+        assert_eq!(warnings(&mut events), 0);
+        shared.handle(json!({"type":"user", "uuid":steer.to_string(), "isReplay":true}));
+        shared.handle(result(&steer.to_string()));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 0);
+    }
+
+    #[tokio::test]
+    async fn empty_queue_warns_and_plain_interrupt_ends() {
+        for has_steer in [true, false] {
+            let (shared, ended, mut events, _cli) = setup(has_steer.then(MessageId::new));
+            let (tx, _rx) = oneshot::channel();
+            shared
+                .pending
+                .lock()
+                .unwrap()
+                .insert("req".into(), (tx, Some("turn".into())));
+            shared.handle(wire::control_success("req", json!({"still_queued":[]})));
+            shared.handle(result("turn"));
+            assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+            assert_eq!(warnings(&mut events), usize::from(has_steer));
+        }
+    }
+
+    #[tokio::test]
+    async fn control_error_does_not_hold_the_turn() {
+        use tokio::io::AsyncBufReadExt;
+        let (shared, ended, mut events, cli) = setup(Some(MessageId::new()));
+        let request = {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                shared
+                    .control_for_turn(
+                        json!({"subtype":"interrupt"}),
+                        CLEANUP_TIMEOUT,
+                        Some("turn".into()),
+                    )
+                    .await
+            })
+        };
         let mut line = String::new();
-        cli.read_line(&mut line).await.expect("a control request");
-        serde_json::from_str(&line).expect("json")
-    }
-
-    fn drain(rx: &mut mpsc::UnboundedReceiver<SessionEvent>) -> Vec<SessionEventKind> {
-        let mut kinds = Vec::new();
-        while let Ok(event) = rx.try_recv() {
-            kinds.push(event.kind);
-        }
-        kinds
-    }
-
-    fn warnings(kinds: &[SessionEventKind]) -> Vec<String> {
-        kinds
-            .iter()
-            .filter_map(|kind| match kind {
-                SessionEventKind::Warning { message } => Some(message.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn steer_reads(kinds: &[SessionEventKind]) -> Vec<MessageId> {
-        kinds
-            .iter()
-            .filter_map(|kind| match kind {
-                SessionEventKind::SteerRead { message_id } => Some(*message_id),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// The CLI answered that the steer is still queued: the turn waits for it, and nothing
-    /// calls it unread.
-    #[tokio::test]
-    async fn a_queued_steer_keeps_the_turn_waiting_without_a_warning() {
-        let (cli, stdin) = tokio::io::duplex(64 * 1024);
-        let mut cli = BufReader::new(cli);
-        let (shared, mut events) = shared(Box::new(stdin));
-        let steer = MessageId::new();
-        let mut ended = start_turn(&shared, "turn-1", &[steer]);
-
-        let task = {
-            let shared = shared.clone();
-            tokio::spawn(async move { shared.interrupt().await })
-        };
-        let request = next_request(&mut cli).await;
-        shared.handle(prompt_result("turn-1", true));
-        let id = request["request_id"].as_str().unwrap();
-        shared.handle(wire::control_success(
-            id,
-            json!({ "still_queued": [steer.to_string()] }),
+        tokio::io::BufReader::new(cli)
+            .read_line(&mut line)
+            .await
+            .unwrap();
+        let message: Value = serde_json::from_str(&line).unwrap();
+        shared.handle(wire::control_error(
+            message["request_id"].as_str().unwrap(),
+            "failed",
         ));
-        task.await.unwrap().unwrap();
-
-        // Waiting for the steer: the turn is still open and nothing was called unread.
-        assert!(
-            ended.try_recv().is_err(),
-            "the turn must wait for the steer"
-        );
-        assert!(warnings(&drain(&mut events)).is_empty());
-
-        // The CLI reads it, and its own turn's result ends the turn.
-        shared.handle(steer_read(&steer.to_string()));
-        shared.handle(prompt_result(&steer.to_string(), false));
-        let stop = ended.try_recv().expect("the turn ends");
-        assert_eq!(stop, StopReason::Cancelled);
-        let kinds = drain(&mut events);
-        assert_eq!(steer_reads(&kinds), vec![steer]);
-        assert!(warnings(&kinds).is_empty());
-    }
-
-    /// The result arrives before the interrupt's answer (the original race), and the steer
-    /// is read afterwards: no false warning.
-    #[tokio::test]
-    async fn a_result_before_the_answer_does_not_warn_when_the_steer_is_read() {
-        let (cli, stdin) = tokio::io::duplex(64 * 1024);
-        let mut cli = BufReader::new(cli);
-        let (shared, mut events) = shared(Box::new(stdin));
-        let steer = MessageId::new();
-        let mut ended = start_turn(&shared, "turn-1", &[steer]);
-
-        let task = {
-            let shared = shared.clone();
-            tokio::spawn(async move { shared.interrupt().await })
-        };
-        let request = next_request(&mut cli).await;
-        // The prompt's failed result is held while the answer is on its way.
-        shared.handle(prompt_result("turn-1", true));
-        assert!(ended.try_recv().is_err());
-        let id = request["request_id"].as_str().unwrap();
-        shared.handle(wire::control_success(
-            id,
-            json!({ "still_queued": [steer.to_string()] }),
-        ));
-        task.await.unwrap().unwrap();
-        assert!(warnings(&drain(&mut events)).is_empty());
-
-        shared.handle(steer_read(&steer.to_string()));
-        shared.handle(prompt_result(&steer.to_string(), false));
-        assert_eq!(
-            ended.try_recv().expect("the turn ends"),
-            StopReason::Cancelled
-        );
-        let kinds = drain(&mut events);
-        assert_eq!(steer_reads(&kinds), vec![steer]);
-        assert!(warnings(&kinds).is_empty());
-    }
-
-    /// A system/init while a steer waits may be the prompt's own init; it must not make a
-    /// turn with no result coming wait forever after an interrupt fails.
-    #[tokio::test]
-    async fn a_failed_answer_ends_a_held_result_even_after_an_init() {
-        let (cli, stdin) = tokio::io::duplex(64 * 1024);
-        let mut cli = BufReader::new(cli);
-        let (shared, _events) = shared(Box::new(stdin));
-        let steer = MessageId::new();
-        let mut ended = start_turn(&shared, "turn-1", &[steer]);
-
-        let task = {
-            let shared = shared.clone();
-            tokio::spawn(async move { shared.interrupt().await })
-        };
-        let request = next_request(&mut cli).await;
-        shared.handle(json!({
-            "type": "system", "subtype": "init", "session_id": "test-session"
-        }));
-        shared.handle(prompt_result("turn-1", true));
-        assert!(ended.try_recv().is_err());
-        let id = request["request_id"].as_str().unwrap();
-        shared.handle(wire::control_error(id, "interrupt failed"));
-        task.await.unwrap().unwrap();
-
-        assert_eq!(
-            ended.try_recv().expect("the turn ends"),
-            StopReason::Cancelled
-        );
-    }
-
-    /// A steer that could not be written is removed before the interrupt's request fails:
-    /// the held result must still end the turn.
-    #[tokio::test]
-    async fn a_steer_write_failure_does_not_hold_the_turn() {
-        // A one-byte pipe no one reads: the steer's write blocks on it.
-        let (cli, stdin) = tokio::io::duplex(1);
-        let (shared, _events) = shared(Box::new(stdin));
-        let mut ended = start_turn(&shared, "turn-1", &[]);
-        let steer = MessageId::new();
-
-        let writing = {
-            let shared = shared.clone();
-            tokio::spawn(async move { shared.steer(steer, &Prompt::text("KEEP ME")).await })
-        };
-        while shared.turn.lock().unwrap().steers.is_empty() {
-            tokio::task::yield_now().await;
-        }
-        let task = {
-            let shared = shared.clone();
-            tokio::spawn(async move { shared.interrupt().await })
-        };
-        while !shared.turn.lock().unwrap().interrupting {
-            tokio::task::yield_now().await;
-        }
-        shared.handle(prompt_result("turn-1", true));
-        assert!(ended.try_recv().is_err());
-        // The pipe goes away: the steer's write fails and drops its entry, and the
-        // interrupt's control write fails too.
-        drop(cli);
-        assert!(writing.await.unwrap().is_err());
-        task.await.unwrap().unwrap();
-        assert_eq!(
-            ended.try_recv().expect("the turn ends"),
-            StopReason::Cancelled
-        );
-    }
-
-    /// A control write that blocks (a stdin no one reads) is bounded by the timeout, and
-    /// the held result ends the turn.
-    #[tokio::test(start_paused = true)]
-    async fn a_blocked_control_write_times_out_and_ends_the_turn() {
-        let (cli, stdin) = tokio::io::duplex(1);
-        let (shared, _events) = shared(Box::new(stdin));
-        let steer = MessageId::new();
-        let mut ended = start_turn(&shared, "turn-1", &[steer]);
-
-        let task = {
-            let shared = shared.clone();
-            tokio::spawn(async move { shared.interrupt().await })
-        };
-        // Let the interrupt reach the blocking write and register its timer.
-        for _ in 0..10 {
-            tokio::task::yield_now().await;
-        }
-        shared.handle(prompt_result("turn-1", true));
-        assert!(ended.try_recv().is_err());
-        tokio::time::advance(Duration::from_secs(11)).await;
-        task.await.unwrap().unwrap();
-        assert_eq!(
-            ended.try_recv().expect("the turn ends"),
-            StopReason::Cancelled
-        );
-        drop(cli);
-    }
-
-    /// The caller's future is dropped (a cancel whose client went away): the held result
-    /// still ends the turn.
-    #[tokio::test]
-    async fn a_dropped_interrupt_future_ends_the_held_result() {
-        let (cli, stdin) = tokio::io::duplex(64 * 1024);
-        let mut cli = BufReader::new(cli);
-        let (shared, _events) = shared(Box::new(stdin));
-        let steer = MessageId::new();
-        let mut ended = start_turn(&shared, "turn-1", &[steer]);
-
-        let task = {
-            let shared = shared.clone();
-            tokio::spawn(async move { shared.interrupt().await })
-        };
-        let _request = next_request(&mut cli).await;
-        shared.handle(prompt_result("turn-1", true));
-        assert!(ended.try_recv().is_err());
-        task.abort();
-        let _ = task.await;
-
-        assert_eq!(
-            ended.try_recv().expect("the turn ends"),
-            StopReason::Cancelled
-        );
-    }
-
-    #[tokio::test]
-    async fn process_exit_releases_the_held_turn_and_interrupt() {
-        let (cli, stdin) = tokio::io::duplex(64 * 1024);
-        let mut cli = BufReader::new(cli);
-        let (shared, mut events) = shared(Box::new(stdin));
-        let steer = MessageId::new();
-        let ended = start_turn(&shared, "turn-1", &[steer]);
-        let task = {
-            let shared = shared.clone();
-            tokio::spawn(async move { shared.interrupt().await })
-        };
-        let _request = next_request(&mut cli).await;
-        shared.handle(prompt_result("turn-1", true));
-        shared.ended();
-        task.await.unwrap().unwrap();
-        assert!(ended.await.is_err(), "process exit closes the turn waiter");
-        assert_eq!(warnings(&drain(&mut events)).len(), 1);
-    }
-
-    /// A failed answer warns once and ends the turn once; a late message changes nothing.
-    #[tokio::test]
-    async fn a_failed_answer_warns_and_ends_the_turn_once() {
-        let (cli, stdin) = tokio::io::duplex(64 * 1024);
-        let mut cli = BufReader::new(cli);
-        let (shared, mut events) = shared(Box::new(stdin));
-        let steer = MessageId::new();
-        let mut ended = start_turn(&shared, "turn-1", &[steer]);
-
-        let task = {
-            let shared = shared.clone();
-            tokio::spawn(async move { shared.interrupt().await })
-        };
-        let request = next_request(&mut cli).await;
-        shared.handle(prompt_result("turn-1", true));
-        let id = request["request_id"].as_str().unwrap();
-        shared.handle(wire::control_error(id, "no"));
-        task.await.unwrap().unwrap();
-
-        assert_eq!(
-            ended.try_recv().expect("the turn ends"),
-            StopReason::Cancelled
-        );
-        assert_eq!(warnings(&drain(&mut events)).len(), 1);
-
-        // A late result for the same turn must not warn or end anything again.
-        shared.handle(prompt_result("turn-1", true));
-        assert!(warnings(&drain(&mut events)).is_empty());
-        assert!(ended.try_recv().is_err());
-    }
-
-    /// A plain interrupt with no steer is unchanged: the turn waits for its result, then
-    /// ends on it.
-    #[tokio::test]
-    async fn a_plain_interrupt_still_waits_for_the_result() {
-        let (cli, stdin) = tokio::io::duplex(64 * 1024);
-        let mut cli = BufReader::new(cli);
-        let (shared, mut events) = shared(Box::new(stdin));
-        let mut ended = start_turn(&shared, "turn-1", &[]);
-
-        let task = {
-            let shared = shared.clone();
-            tokio::spawn(async move { shared.interrupt().await })
-        };
-        let request = next_request(&mut cli).await;
-        let id = request["request_id"].as_str().unwrap();
-        shared.handle(wire::control_success(id, json!({ "still_queued": [] })));
-        task.await.unwrap().unwrap();
-
-        // No result yet: the turn stays open.
-        assert!(ended.try_recv().is_err());
-
-        shared.handle(prompt_result("turn-1", true));
-        assert_eq!(
-            ended.try_recv().expect("the turn ends"),
-            StopReason::Cancelled
-        );
-        assert!(warnings(&drain(&mut events)).is_empty());
+        shared.handle(result("turn"));
+        assert!(request.await.unwrap().is_err());
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 1);
     }
 }
