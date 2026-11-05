@@ -37,8 +37,10 @@ function version(fingerprint: string, over: Partial<ExtensionVersion> = {}): Ext
     description: "汇总今天各 run 的进展",
     access: "read",
     tools: [
-      { name: "report", qualified_name: "standup__report", description: "汇总今天的进展", input_schema: { type: "object" }, groups: ["lead"], timeout_secs: 60 },
+      { name: "report", qualified_name: "standup__report", description: "汇总今天的进展", input_schema: { type: "object" }, groups: ["lead"], command: ["node", "report.mjs"], timeout_secs: 60 },
     ],
+    hooks: [{ event: "run.landed", command: ["node", "notify.mjs"], timeout_secs: 60 }],
+    service: { command: ["node", "server.mjs"] },
     prompts: [{ file: "lead.md", groups: ["lead"], bytes: 612 }],
     gui_entry: "gui/index.js",
     files: 4,
@@ -104,6 +106,7 @@ test("the approval screen submits exactly the fingerprint it shows", () => {
   assert.ok(html.includes("standup__report") || html.includes("report"));
   assert.ok(html.includes("access 变了"));
   assert.ok(html.includes("extension.toml"));
+  for (const value of ["report.mjs", "run.landed", "notify.mjs", "server.mjs"]) assert.ok(html.includes(value));
   assert.ok(html.includes("二进制"));
   assert.ok(html.includes("批准并启用"));
 });

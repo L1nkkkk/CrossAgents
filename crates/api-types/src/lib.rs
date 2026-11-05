@@ -711,6 +711,8 @@ pub struct ExtensionToolInfo {
     /// The groups that may call it; `human` lets the GUI call it.
     #[serde(default)]
     pub groups: Vec<String>,
+    #[serde(default)]
+    pub command: Vec<String>,
     pub timeout_secs: u32,
 }
 
@@ -734,8 +736,17 @@ pub struct ExtensionHookInfo {
     /// The event's wire name (`run.landed`). Never `extension.*`: an extension cannot
     /// react to another one, directly or through a chain.
     pub event: String,
+    #[serde(default)]
+    pub command: Vec<String>,
     /// How long the process may run; past it the tree is killed (1..600).
     pub timeout_secs: u32,
+}
+
+/// The resident process declared by a snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ExtensionServiceInfo {
+    pub command: Vec<String>,
 }
 
 /// One snapshot of an extension: what it declares, as the hub read it from the snapshot it
@@ -758,11 +769,10 @@ pub struct ExtensionVersion {
     #[serde(default)]
     #[ts(as = "Option<Vec<ExtensionHookInfo>>", optional)]
     pub hooks: Vec<ExtensionHookInfo>,
-    /// Whether it declares a resident `[service]` process. The command itself stays in the
-    /// snapshot's `extension.toml`, which the approval diff already shows.
-    #[serde(default)]
-    #[ts(as = "Option<bool>", optional)]
-    pub service: bool,
+    /// The resident process declared by this snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub service: Option<ExtensionServiceInfo>,
     /// The GUI entry, relative to the snapshot; `None` when it has no panel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]

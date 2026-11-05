@@ -161,7 +161,7 @@ impl Services {
         let info = self.registry.get(name).ok();
         let desired = info.as_ref().and_then(|info| {
             let version = info.current.as_ref()?;
-            (info.enabled && version.service).then(|| version.fingerprint.clone())
+            (info.enabled && version.service.is_some()).then(|| version.fingerprint.clone())
         });
         let existing = self
             .entries

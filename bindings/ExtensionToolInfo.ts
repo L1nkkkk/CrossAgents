@@ -16,4 +16,4 @@ qualified_name: string, description: string, input_schema: JsonValue,
 /**
  * The groups that may call it; `human` lets the GUI call it.
  */
-groups: Array<string>, timeout_secs: number, };
+groups: Array<string>, command: Array<string>, timeout_secs: number, };

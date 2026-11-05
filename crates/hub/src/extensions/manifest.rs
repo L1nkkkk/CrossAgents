@@ -214,6 +214,7 @@ impl Manifest {
                     description: t.description.clone(),
                     input_schema: t.input_schema.clone(),
                     groups: t.groups.clone(),
+                    command: t.command.clone(),
                     timeout_secs: t.timeout_secs,
                 })
                 .collect(),
@@ -233,10 +234,11 @@ impl Manifest {
                 .iter()
                 .map(|h| ExtensionHookInfo {
                     event: h.event.clone(),
+                    command: h.command.clone(),
                     timeout_secs: h.timeout_secs,
                 })
                 .collect(),
-            service: self.service.is_some(),
+            service: self.service.as_ref().map(|s| ExtensionServiceInfo { command: s.command.clone() }),
             gui_entry: self.gui.as_ref().map(|g| g.entry.clone()),
             files,
             bytes,

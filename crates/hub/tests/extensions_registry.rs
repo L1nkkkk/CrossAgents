@@ -161,7 +161,8 @@ fn extensions_hooks_and_service_are_validated_and_reported() {
     assert_eq!(version.hooks.len(), 1);
     assert_eq!(version.hooks[0].event, "run.landed");
     assert_eq!(version.hooks[0].timeout_secs, 60);
-    assert!(version.service);
+    assert_eq!(version.hooks[0].command, ["never-execute-this"]);
+    assert_eq!(version.service.unwrap().command, ["never-execute-this"]);
 
     for invalid in [
         // Extensions may not react to each other: a chain would never end.
@@ -246,6 +247,9 @@ async fn extensions_http_routes_poll_and_events() {
     use reqwest::{Client, StatusCode};
     let home = tempfile::tempdir().unwrap();
     source(home.path(), "initial");
+    let manifest = home.path().join("extensions/demo/extension.toml");
+    let contents = fs::read_to_string(&manifest).unwrap();
+    fs::write(&manifest, format!("{contents}\n[[on]]\nevent = \"run.landed\"\ncommand = [\"node\", \"notify.mjs\"]\n[service]\ncommand = [\"node\", \"server.mjs\"]\n")).unwrap();
     let hub = crossagents_hub::start(HubConfig::new(Paths::new(home.path()), 0))
         .await
         .unwrap();
@@ -260,6 +264,11 @@ async fn extensions_http_routes_poll_and_events() {
         .json()
         .await
         .unwrap();
+    let version = &list.extensions[0].pending.as_ref().unwrap().version;
+    assert_eq!(version.tools[0].command, ["never-execute-this"]);
+    assert_eq!(version.hooks[0].event, "run.landed");
+    assert_eq!(version.hooks[0].command, ["node", "notify.mjs"]);
+    assert_eq!(version.service.as_ref().unwrap().command, ["node", "server.mjs"]);
     let fp = list.extensions[0]
         .pending
         .as_ref()
