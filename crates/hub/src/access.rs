@@ -219,6 +219,20 @@ mod tests {
             );
         }
 
+        assert_eq!(
+            required(&Method::GET, "/v1/extensions/{name}/logs"),
+            Level::Read
+        );
+        assert!(
+            refusal(
+                &Grant::Level(Level::Read),
+                &Method::GET,
+                "/v1/extensions/{name}/logs"
+            )
+            .is_none()
+        );
+        assert!(refusal(&Grant::Agent, &Method::GET, "/v1/extensions/{name}/logs").is_some());
+        assert!(refusal(&Grant::Agent, &Method::POST, "/v1/extensions/{name}/enable").is_some());
         // Reading what is installed, and what a pending snapshot would change.
         assert_eq!(required(&Method::GET, "/v1/extensions"), Level::Read);
         assert_eq!(

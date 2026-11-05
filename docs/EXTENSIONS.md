@@ -233,6 +233,7 @@ E1（后端）和 E2（GUI）就靠这张表对接。类型都在
 | 方法 | 路径 | 级别 | 请求 | 响应 |
 |---|---|---|---|---|
 | GET | `/v1/extensions` | read | — | `ExtensionsResponse { extensions: ExtensionInfo[] }` |
+| GET | `/v1/extensions/{name}/logs` | read | — | `ExtensionLogsResponse { name, content, truncated }` |
 | POST | `/v1/extensions/{name}/enable` | admin | `EnableExtensionRequest { fingerprint }` | `ExtensionInfo` |
 | POST | `/v1/extensions/{name}/disable` | write | — | `ExtensionInfo` |
 | POST | `/v1/extensions/{name}/auto-trust` | admin | `SetExtensionAutoTrustRequest { auto_trust }` | `ExtensionInfo` |
@@ -325,11 +326,11 @@ export function activate(ca) {
 - `panes.ts`：`TabId` 加 `ext:<name>/<id>`，写法同现有的 `term:`。**注意**：`load` 现在会丢掉不认识的标签，
   而扩展是异步加载的，必须等扩展列表到齐再判断，否则每次启动都会把扩展的标签页弄丢。
 - `ToolColumn.tsx` `PaneBody`：加一个分支，渲染注册的标签页。
-- `electron/allowed.cts`：把 §3「接口形状」那张表里的八条逐条登记（`allowed.test.cts` 会从 `src/api.ts`
+- `electron/allowed.cts`：把 §3「接口形状」那张表里的九条逐条登记（`allowed.test.cts` 会从 `src/api.ts`
   反查，漏登记就失败）。扩展调用的其余接口仍受这张表限制。
 - `apps/gui/package.json`：**加 `htm` 依赖**。`ca.html` 要给扩展一个不用构建就能写模板的入口，主程序现在只有
   `react`，没有 htm。它是运行时依赖（放 `dependencies`），由宿主 import 后通过 `ca` 传给扩展，扩展自己不装包。
-- hub：§3「接口形状」的八条路由，级别写进 [crates/hub/src/access.rs](../crates/hub/src/access.rs)，
+- hub：§3「接口形状」的九条路由，级别写进 [crates/hub/src/access.rs](../crates/hub/src/access.rs)，
   口径写进 [API-AUTH.md](API-AUTH.md)。
 
 ### 能隔离什么，不能隔离什么
@@ -415,8 +416,9 @@ GUI 可以复用提问的样式，但判定逻辑要独立。`human_ask`（`crat
 不是单独的模式，只是一组工具加一份说明，任何 agent 都能用：
 
 - `extension_api`：返回当前的接口版本、事件类型、group、GUI 插槽和一份完整示例。相当于 dsh 的 `cordis_inspect_*`。
-- `extension_check(name)`：校验描述文件、schema 和入口文件，不实际启用。
-- `extension_request_enable(name)`、`extension_logs(name)`。
+- `extension_check(name)`：静态校验描述文件、schema 和入口文件，返回源目录的 `ExtensionVersion`；校验失败返回工具错误，不写启用状态。
+- `extension_request_enable(name)`：由 hub 生成快照和指纹，返回 `ExtensionInfo`，只建立待批准记录，不启用、不改自动信任。
+- `extension_logs(name)`：与 GET 日志路由返回同一份 `ExtensionLogsResponse`：当前日志末尾 64 KiB（UTF-8 容错解码），`truncated` 表示省略了更早字节；未调用过时内容为空，不包含轮转文件。
 
 **不提供试跑工具。** hub 不执行未批准的代码，这条规则不留例外。agent 本来就有 shell，写完可以自己按协议喂 stdin 跑一遍，
 这是以它自己的身份和权限在跑，不经过 hub，也拿不到扩展 token。`extension_api` 的示例里写明这种做法。

@@ -768,6 +768,30 @@ const TOOLS: &[ToolDef] = &[
         },
     },
     ToolDef {
+        name: "extension_api",
+        description: "Get the extension API, event types, groups, GUI slots, runnable example, stdin self-test and measured CLI MCP timeouts. Start here when creating a tool or panel.",
+        groups: ALL,
+        schema: || object(json!({}), &[]),
+    },
+    ToolDef {
+        name: "extension_check",
+        description: "Statically check an extension manifest, schemas and entry files. Never executes extension code or enables it.",
+        groups: ALL,
+        schema: || object(json!({ "name": { "type": "string" } }), &["name"]),
+    },
+    ToolDef {
+        name: "extension_request_enable",
+        description: "Ask the hub to snapshot an extension and create a pending human approval record. Does not approve, enable or change auto-trust.",
+        groups: ALL,
+        schema: || object(json!({ "name": { "type": "string" } }), &["name"]),
+    },
+    ToolDef {
+        name: "extension_logs",
+        description: "Read the extension log tail (last 64 KiB), including stderr and call status.",
+        groups: ALL,
+        schema: || object(json!({ "name": { "type": "string" } }), &["name"]),
+    },
+    ToolDef {
         name: "extension_tools",
         description: "List the tools of enabled extensions that you may call right now, with their input schemas. A session that started before an extension was enabled does not see its tools in the tool list; this lists them, and `extension_call` runs one.",
         groups: ALL,
@@ -1096,6 +1120,9 @@ impl Orchestrator {
                     "candidates": candidates,
                     "next": "End your turn."
                 }))
+            }
+            "extension_api" | "extension_check" | "extension_request_enable" | "extension_logs" => {
+                self.call_extension(caller, name, input).await
             }
             "extension_tools" => {
                 let tools: Vec<Value> = self
