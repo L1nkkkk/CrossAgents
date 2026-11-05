@@ -162,6 +162,8 @@ pub struct Orchestrator {
         std::sync::Mutex<std::collections::HashSet<(crossagents_core::WorkId, RunId)>>,
     #[cfg(test)]
     pub(crate) round_wait_limit: std::sync::Mutex<std::time::Duration>,
+    #[cfg(test)]
+    relay_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     pub(crate) messaging: Mutex<crate::messaging::MessagingState>,
     /// Approvals waiting for the person, by question id (docs/tasks/DOGFOOD.md §7).
     pub(crate) approvals: std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
@@ -255,6 +257,8 @@ impl Orchestrator {
             scheduled_rounds: std::sync::Mutex::default(),
             #[cfg(test)]
             round_wait_limit: std::sync::Mutex::new(std::time::Duration::from_secs(120)),
+            #[cfg(test)]
+            relay_tasks: std::sync::Mutex::new(Vec::new()),
             messaging: Mutex::default(),
             approvals: std::sync::Mutex::default(),
             contexts: std::sync::Mutex::default(),
@@ -415,12 +419,25 @@ impl Orchestrator {
         };
         let id = envelope.id;
         let host = self.host.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             if let Err(err) = host.send_envelope(to, envelope, false).await {
                 tracing::warn!(agent = %to, error = %err, "cannot deliver message");
             }
         });
+        #[cfg(test)]
+        self.relay_tasks.lock().unwrap().push(handle);
+        #[cfg(not(test))]
+        drop(handle);
         id
+    }
+
+    /// Tests await every relay started before their producer's completion barrier.
+    #[cfg(test)]
+    pub(crate) async fn drain_relays(&self) {
+        let tasks = std::mem::take(&mut *self.relay_tasks.lock().unwrap());
+        for task in tasks {
+            task.await.expect("relay task panicked");
+        }
     }
 
     /// Sends in the background: starting an agent can take minutes.

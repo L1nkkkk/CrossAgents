@@ -137,10 +137,13 @@ impl Orchestrator {
                                 result = &mut create => result,
                                 _ = tokio::time::sleep(wait_limit) => {
                                     let observer = this.clone();
-                                    tokio::spawn(async move {
+                                    let observer = tokio::spawn(async move {
                                         observer.notice(lead, &format!("run_next-start:{work}"), &format!("The next round is still starting in the creation stage; it has not been cancelled. Check work {work} and its checkout, or ask a person to investigate.")).await;
                                     });
-                                    create.await
+                                    let result = create.await;
+                                    observer.abort();
+                                    let _ = observer.await;
+                                    result
                                 }
                             };
                             match result {
@@ -158,8 +161,8 @@ impl Orchestrator {
                         "timed out waiting for the lead's turn to end".into(),
                     ))
                 };
+                this.scheduled_rounds.lock().unwrap().remove(&key);
                 if let Err(err) = result {
-                    this.scheduled_rounds.lock().unwrap().remove(&key);
                     let state = if !attempted
                         || err
                             .to_string()
