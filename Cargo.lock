@@ -594,6 +594,7 @@ dependencies = [
  "futures",
  "jsonschema",
  "portable-pty",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
