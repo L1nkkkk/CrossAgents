@@ -322,6 +322,10 @@ B 删除 run：
   - 测试：`crates/mock-agent/tests/task_result.rs`（2 条）：缺 result 和不合 schema 的 result 被拒且状态不变，合规的存下，按 path 取值，不存在的 path 报错，没有 schema 的老调用照旧；`script.rs` 补了嵌套数组解析的单测。
   - 调试时发现：mock 场景里，run 的自动标题会截进半截 `[call …` 脚本，mock 驱动把它当成指令解析，于是卡住。测试改成显式给标题；mock 的这个毛病本身没改。
   - 没验证：没有 schema 时交 `result` 的情况没单独测；GUI 的折叠 JSON 没截图看过。
+- [x] **6. 评审给明确结论**（oh-my-pi 的 `/review`）：`review_submit` 新增两个可选参数：`findings`（每条按 P0–P3 分级，带 0..1 的置信度，可以写 file、line、title、detail）和 `verdict`（`merge` / `merge_after_fixes` / `do_not_merge`）。approve 和 verdict 对不上，或者有 P0 却说能合，都会被拒，并给出修正建议；没给 verdict 时按 approve 推出来。两项存进 `TaskReport.findings` / `verdict`，发给主导的评审消息里，问题按 P0→P3 排序，挡合并的排在最前。评审的简报写明了各级的含义。只给 approve 的老调用照旧。GUI 的任务评审先显示结论，问题按级别排序，P0/P1 置顶并醒目标出，带置信度和 file:line。`TaskReport` 因为有了 f64，去掉了 `Eq`。
+  - 代码：`crates/core/src/model.rs`、`crates/orchestrator/src/review.rs`（`effective_verdict`、`sorted_findings`、`review_notes`）、`tools.rs`、`protocol.rs`、`apps/gui/src/lib/reviewFindings.ts`、`review.tsx`。
+  - 测试：`crates/mock-agent/tests/review_verdict.rs`（2 条：findings 存下并排序、矛盾的提交被拒后能改交、老调用照旧）；`apps/gui/src/lib/reviewFindings.test.ts`（7 条）。
+  - 没验证：GUI 没打开看过，只过了类型检查和纯函数测试。评审时 findings 写进任务没走 run 锁（`tools.rs` 的 `review_submit`，先读任务再写回）；同一时刻如果有别的写入，可能被覆盖。评审时任务通常没别人在写，所以暂时没改。任务返工后，上一轮的 findings 会一直显示到下一次评审覆盖为止。
 - [x] **7. 合并的活动流**（oh-my-pi agent-hub.md 的 Activity）：工具列新增「活动」标签，可放进右侧或底部 dock。所有 agent 的回复、工具调用、错误、消息（agent 之间的、人的、向人提问和人的回答）排成一条时间线，最新的在上面。类型可多选筛选（错误 / 回复 / 工具 / 消息）；范围可以是全部、某个 agent，也可以是它连同下属（按 `spawned_by_agent` 递归推算，防环）。点一条就打开那个会话，并滚到对应的那一轮；找不到那一轮时，在面板里说明。
   - 代码：`apps/gui/src/lib/activityFeed.ts`（纯函数）、`ActivityFeed.tsx`、`activityfeed.css`，在 `panes.ts` 登记标签。
   - 测试：`apps/gui/src/lib/activityFeed.test.ts`（10 条），覆盖事件折叠、流式合并、工具失败更新、轮次关联、下属推算、范围和类型筛选。
