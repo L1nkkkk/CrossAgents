@@ -734,6 +734,21 @@ impl Runner {
                     disabled: Some(disabled.clone()),
                 },
             );
+            // The watch is in place before this check, so a disable either sees the command
+            // and cancels it, or has already changed the generation and this refuses to
+            // start. Without it, a disable between the lease and the registration would let
+            // the process run with a live token until its timeout (docs/EXTENSIONS.md §3).
+            let current = this.registry.lease_is_current(
+                &extension,
+                &lease.enabled.version.fingerprint,
+                lease.generation,
+            );
+            if !current || disabled.is_cancelled() {
+                this.commands.lock().unwrap().remove(&id);
+                return Err(CallError::NotEnabled(format!(
+                    "{label} of {extension} was disabled before it started"
+                )));
+            }
         }
         let (done, rx) = watch::channel(None);
         let job = CommandJob {

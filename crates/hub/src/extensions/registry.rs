@@ -52,6 +52,10 @@ struct State {
     /// Extensions whose enabled state or current version changed while the lock was held;
     /// `on_version_changed` hooks run after it is released.
     switched: Vec<String>,
+    /// Bumped whenever an extension is enabled, disabled or switched to another snapshot.
+    /// A lease carries the value it was taken at, so a command cannot start on a lease that
+    /// predates a disable.
+    generations: BTreeMap<String, u64>,
 }
 /// Serializes scan, approval and acquisition so cleanup cannot race a new call.
 pub struct Registry {
@@ -78,6 +82,8 @@ pub struct EnabledVersion {
 /// Pins a snapshot until dropped. Explicit release is also available for runners.
 pub struct SnapshotLease {
     pub enabled: EnabledVersion,
+    /// The extension's generation when this lease was taken; see [`Registry::lease_is_current`].
+    pub generation: u64,
     registry: Weak<Registry>,
     name: String,
     fingerprint: String,
@@ -344,6 +350,7 @@ impl Registry {
         s.infos.insert(name.into(), info);
         if switched {
             s.switched.push(name.into());
+            *s.generations.entry(name.into()).or_default() += 1;
         }
         self.try_cleanup(s, name);
         if changed {
@@ -524,6 +531,7 @@ impl Registry {
                     != info.current.as_ref().map(|v| &v.fingerprint)
             {
                 s.switched.push(name.into());
+                *s.generations.entry(name.into()).or_default() += 1;
             }
         }
         s.records = records;
@@ -587,15 +595,32 @@ impl Registry {
         let mut s = self.state.lock().unwrap();
         let enabled = self.enabled_locked(&s, name)?;
         let fingerprint = enabled.version.fingerprint.clone();
+        let generation = s.generations.get(name).copied().unwrap_or(0);
         *s.occupied
             .entry((name.into(), fingerprint.clone()))
             .or_default() += 1;
         Ok(SnapshotLease {
             enabled,
+            generation,
             registry: Arc::downgrade(self),
             name: name.into(),
             fingerprint,
         })
+    }
+    /// Whether a lease still matches what is enabled now: the same snapshot, and no enable,
+    /// disable or version change since it was taken. A hook takes its lease before the runner
+    /// registers the command, and a disable in that window must not let the process start
+    /// (docs/EXTENSIONS.md §3).
+    pub fn lease_is_current(&self, name: &str, fingerprint: &str, generation: u64) -> bool {
+        let s = self.state.lock().unwrap();
+        s.generations.get(name).copied().unwrap_or(0) == generation
+            && s.infos.get(name).is_some_and(|info| {
+                info.enabled
+                    && info
+                        .current
+                        .as_ref()
+                        .is_some_and(|version| version.fingerprint == fingerprint)
+            })
     }
     fn unpin(&self, name: &str, fingerprint: &str) {
         let mut s = self.state.lock().unwrap();

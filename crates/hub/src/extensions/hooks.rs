@@ -66,6 +66,8 @@ pub struct Hooks {
     rate: RwLock<HookRate>,
     /// Starts per extension, for the breaker.
     starts: Mutex<HashMap<String, Starts>>,
+    /// Keep the breaker check and successful start accounting atomic across listeners.
+    dispatch_lock: Mutex<()>,
     /// Per-extension token that ends that extension's running hooks when it is disabled.
     disabled: Mutex<HashMap<String, CancellationToken>>,
 }
@@ -93,6 +95,7 @@ impl Hooks {
             tasks: Mutex::default(),
             rate: RwLock::new(rate),
             starts: Mutex::default(),
+            dispatch_lock: Mutex::default(),
             disabled: Mutex::default(),
         })
     }
@@ -145,6 +148,7 @@ impl Hooks {
 
     /// Starts one process per extension that declares a hook for this event.
     fn dispatch(self: &Arc<Self>, event: &Event) {
+        let _dispatch = self.dispatch_lock.lock().unwrap();
         self.prune();
         let name = event.kind.type_name();
         if name.starts_with("extension.") {
@@ -171,8 +175,10 @@ impl Hooks {
                 continue;
             };
             // Before anything is acquired: a breaker-dropped event must leave no trace but
-            // its one log line.
-            if !self.admit(&extension, name) {
+            // its one log line. A start only counts once it really started, so an event the
+            // concurrency limits turn away does not use up the allowance.
+            if !self.allows(&extension) {
+                self.refuse(&extension, name);
                 continue;
             }
             let timeout = Duration::from_secs(hook.timeout_secs.into());
@@ -201,6 +207,9 @@ impl Hooks {
             };
             match self.runner.start_command(spec) {
                 Ok(run) => {
+                    // Counted only now: a command the concurrency limits refused never ran,
+                    // and must not eat into the breaker's allowance.
+                    self.record(&extension);
                     let task = tokio::spawn(async move {
                         let _ = run.wait().await;
                     });
@@ -213,26 +222,33 @@ impl Hooks {
         }
     }
 
-    /// Counts one start against the extension's breaker. `false` means the event is dropped;
-    /// the breaker writes at most one log line per window.
-    fn admit(&self, extension: &str, event: &str) -> bool {
-        let (limit, window) = {
-            let rate = self.rate.read().unwrap();
-            (rate.limit, rate.window)
-        };
+    /// Whether another start fits in the window. It does not count anything: the start is
+    /// recorded only after it actually happened (see [`Self::record`]).
+    fn allows(&self, extension: &str) -> bool {
+        let (limit, window) = self.rate();
         let now = Instant::now();
         let mut starts = self.starts.lock().unwrap();
         let entry = starts.entry(extension.to_owned()).or_default();
-        while let Some(front) = entry.at.front() {
-            if now.duration_since(*front) < window {
-                break;
-            }
-            entry.at.pop_front();
-        }
-        if entry.at.len() < limit {
-            entry.at.push_back(now);
-            return true;
-        }
+        entry.at.retain(|at| now.duration_since(*at) < window);
+        entry.at.len() < limit
+    }
+
+    /// Counts a start that happened.
+    fn record(&self, extension: &str) {
+        let (_, window) = self.rate();
+        let now = Instant::now();
+        let mut starts = self.starts.lock().unwrap();
+        let entry = starts.entry(extension.to_owned()).or_default();
+        entry.at.retain(|at| now.duration_since(*at) < window);
+        entry.at.push_back(now);
+    }
+
+    /// Drops an event because the window is full; one log line per window.
+    fn refuse(&self, extension: &str, event: &str) {
+        let (limit, window) = self.rate();
+        let now = Instant::now();
+        let mut starts = self.starts.lock().unwrap();
+        let entry = starts.entry(extension.to_owned()).or_default();
         let log = entry
             .logged_at
             .is_none_or(|at| now.duration_since(at) >= window);
@@ -250,7 +266,11 @@ impl Hooks {
                 ),
             );
         }
-        false
+    }
+
+    fn rate(&self) -> (usize, Duration) {
+        let rate = self.rate.read().unwrap();
+        (rate.limit, rate.window)
     }
 
     /// The token that ends this extension's running hooks when it is disabled. One token per
