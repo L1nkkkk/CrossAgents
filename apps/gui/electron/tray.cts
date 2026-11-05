@@ -25,7 +25,7 @@ export type AppTray = {
  * Puts the icon in the tray. `icon` is an .ico or .png file; `show` brings the window back
  * (creating it if needed); `log` gets what the tray did to the hub.
  */
-export function createTray(icon: string, hub: LocalHub, show: () => void, log: (line: string) => void, updates: Updates): AppTray {
+export function createTray(icon: string, hub: LocalHub, show: () => void, log: (line: string) => void, updates: Updates, restartSafeMode: () => void): AppTray {
   const tray = new Tray(nativeImage.createFromPath(icon));
   tray.setToolTip("CrossAgents");
   let stopping = false;
@@ -64,6 +64,7 @@ export function createTray(icon: string, hub: LocalHub, show: () => void, log: (
       { type: "separator" },
       { label: "打开 CrossAgents", click: show, enabled: !stopping },
       update(),
+      { label: "以安全模式重启", click: restartSafeMode, enabled: !stopping },
       { type: "separator" },
       { label: "退出界面（后台继续运行）", click: () => app.quit(), enabled: !stopping },
       { label: "停止后台并退出", click: () => void stop(), enabled: !stopping },
