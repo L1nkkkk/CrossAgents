@@ -749,7 +749,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "review_submit",
-        description: "Give your verdict on the change you are reviewing; it goes to whoever asked for the review. Answer the numbered checklist too when your brief has one: a fail proposes a replacement to the person.",
+        description: "Give your verdict on the change you are reviewing; it goes to whoever asked for the review. Grade each finding P0-P3 with a confidence and give a merge verdict: P0 blocks the merge and must be fixed, P1 should be fixed before it, P2 can follow, P3 is a suggestion. Answer the numbered checklist too when your brief has one: a fail proposes a replacement to the person.",
         groups: REVIEWER,
         schema: || {
             let mut schema = task_id_schema(json!({
@@ -757,6 +757,27 @@ const TOOLS: &[ToolDef] = &[
                 "notes": { "type": "string", "description": "For a rejection: exactly what to fix." }
             }));
             // Optional, unlike the fields `task_id_schema` lists as required.
+            schema["properties"]["findings"] = json!({
+                "type": "array",
+                "description": "Problems found, most severe first when you list them. P0 blocks the merge and must be fixed; P1 should be fixed before it; P2 can follow; P3 is a suggestion.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "severity": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+                        "confidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "How sure you are: a number from 0 (a guess) to 1 (certain), not high/medium/low." },
+                        "file": { "type": "string", "description": "The file it is in, relative to the repository root." },
+                        "line": { "type": "integer", "minimum": 1, "description": "The line on the new side of the diff." },
+                        "title": { "type": "string", "description": "One line: what is wrong." },
+                        "detail": { "type": "string", "description": "Why it matters, or how to fix it." }
+                    },
+                    "required": ["severity", "confidence", "title"]
+                }
+            });
+            schema["properties"]["verdict"] = json!({
+                "type": "string",
+                "enum": ["merge", "merge_after_fixes", "do_not_merge"],
+                "description": "Whether the change can merge. It must agree with approve (true is merge, false is do_not_merge) and with the findings (a P0 cannot merge). Omit it and approve decides."
+            });
             schema["properties"]["checklist"] = json!({
                 "type": "array",
                 "description": "One verdict per numbered item of the reviewer checklist.",
@@ -1102,11 +1123,38 @@ impl Orchestrator {
                     #[serde(default)]
                     notes: String,
                     #[serde(default)]
+                    findings: Vec<crossagents_core::model::ReviewFinding>,
+                    #[serde(default)]
+                    verdict: Option<crossagents_core::model::ReviewVerdict>,
+                    #[serde(default)]
                     checklist: Vec<crate::expertise::review::ChecklistItem>,
                 }
                 let id = self.task_ref(caller, &input).await?;
                 let a: A = args(input)?;
-                self.review(caller, id, a.approve, a.notes).await?;
+                // Refuse a call whose approve and verdict disagree before anything is
+                // recorded (docs/TODO.md §二十五 第 6 条).
+                let verdict = crate::review::effective_verdict(a.approve, a.verdict, &a.findings)?;
+                let findings = crate::review::sorted_findings(&a.findings);
+                // The notes the issuer reads: the reviewer's words, then the verdict and
+                // the findings, P0 first with the blocking ones (P0/P1) on top.
+                let notes = crate::review::review_notes(
+                    &a.notes,
+                    &findings,
+                    a.verdict.or((!findings.is_empty()).then_some(verdict)),
+                );
+                // Record the structured result while the task is still Reviewing: nobody
+                // can accept it then, so this write cannot race an accept. `review` below
+                // owns the status and reviewer checks and refuses a caller that may not
+                // review; only touch the report when those checks would pass.
+                let mut stored = self.store.get_task(id).await?;
+                if stored.status == crossagents_core::TaskStatus::Reviewing
+                    && stored.reviewer == Some(caller.id)
+                {
+                    stored.report.findings = findings;
+                    stored.report.verdict = Some(verdict);
+                    self.store.update_task(&stored).await?;
+                }
+                self.review(caller, id, a.approve, notes).await?;
                 // A failed item proposes a replacement to the person (EXPERTISE §6.3). The
                 // review is already in, so a store that cannot keep candidates must not make
                 // this call fail and be retried.

@@ -560,8 +560,45 @@ fn deserialize_result<'de, D: serde::Deserializer<'de>>(
     serde_json::Value::deserialize(deserializer).map(Some)
 }
 
+/// How badly one review finding hurts: P0 blocks the merge and must be fixed; P1 should be
+/// fixed before the merge; P2 can follow it; P3 is a suggestion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub enum ReviewSeverity {
+    P0,
+    P1,
+    P2,
+    P3,
+}
+
+/// Whether the review lets the change merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewVerdict {
+    Merge,
+    MergeAfterFixes,
+    DoNotMerge,
+}
+
+/// One problem a reviewer found.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct ReviewFinding {
+    pub severity: ReviewSeverity,
+    /// `0` (a guess) to `1` (certain).
+    pub confidence: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// What is known about a task's outcome so far.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TaskReport {
     /// The worker's summary from `task_complete`.
@@ -592,6 +629,12 @@ pub struct TaskReport {
     /// The reviewer's verdict notes.
     #[serde(default)]
     pub review: Option<String>,
+    /// The reviewer's findings, most severe first (P0 before P1 before P2 before P3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<ReviewFinding>,
+    /// The reviewer's conclusion; absent in reports written before verdicts existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict: Option<ReviewVerdict>,
     /// What the issuer (or the person) wrote each time it sent the task back for rework.
     #[serde(default)]
     pub rework: Vec<String>,
