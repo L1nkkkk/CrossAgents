@@ -1439,6 +1439,36 @@ mod interrupt_tests {
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
+    /// A stdin that refuses every write, as a closed pipe does.
+    struct BrokenStdin;
+
+    impl tokio::io::AsyncWrite for BrokenStdin {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "stdin closed",
+            )))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
     struct TestKiller(tokio::sync::watch::Sender<Option<crate::launch::ExitInfo>>);
     impl crate::launch::Killer for TestKiller {
         fn kill(&self) {
@@ -2082,6 +2112,64 @@ mod interrupt_tests {
         assert_eq!(response["response"]["request_id"], "permission");
         answer.await.unwrap();
         assert!(!shared.exited.load(Ordering::SeqCst));
+    }
+
+    /// A steer whose write fails must leave no claim behind: the hub queues the same
+    /// message after `session.steer` returns an error (`runtime.rs` `steer_envelope`), so
+    /// a claim still on the turn would let two paths own one id.
+    #[tokio::test]
+    async fn failed_steer_write_leaves_no_claim_on_the_turn() {
+        let process = test_process();
+        let (shared, ended, mut events) =
+            setup_io(None, Box::new(BrokenStdin), Some(Arc::downgrade(&process)));
+        let session = test_session(shared.clone(), process.clone());
+        let id = MessageId::new();
+
+        assert!(session.steer(id, &Prompt::text("插话")).await.is_err());
+        {
+            let turn = shared.turn.lock().unwrap();
+            assert!(
+                !turn.steers.iter().any(|steer| steer.id == id),
+                "a failed write must not stay claimed as an unread steer"
+            );
+            assert!(!turn.steered.contains(&id));
+            assert!(
+                turn.waiter.is_none(),
+                "the failed session must not keep a turn"
+            );
+        }
+        // The queue copy the hub delivers afterwards must be the only owner: even a late
+        // echo of the id (the bytes did reach the CLI) is not this session's to report.
+        shared.handle(json!({"type":"user", "uuid": id.to_string(), "isReplay":true}));
+        let mut reads = 0;
+        let mut unread_warnings = 0;
+        let mut stdin_warnings = 0;
+        while let Ok(event) = events.try_recv() {
+            match event.kind {
+                SessionEventKind::SteerRead { message_id } if message_id == id => reads += 1,
+                SessionEventKind::Warning { message } if message.contains("没有被读取") => {
+                    unread_warnings += 1
+                }
+                SessionEventKind::Warning { .. } => stdin_warnings += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            reads, 0,
+            "a message the failed session never read must not be steer_read"
+        );
+        assert_eq!(
+            unread_warnings, 1,
+            "the person is told the steer was not read, once"
+        );
+        assert_eq!(stdin_warnings, 1, "the broken pipe is reported once");
+        assert!(ended.await.is_err());
+        assert!(shared.exited.load(Ordering::SeqCst));
+        assert!(process.exit_info().is_some());
+        // The dead session cannot take the same id again: only the queue carries it now.
+        let other = MessageId::new();
+        assert!(session.steer(other, &Prompt::text("again")).await.is_err());
+        assert!(!shared.turn.lock().unwrap().steered.contains(&other));
     }
 
     #[tokio::test]
