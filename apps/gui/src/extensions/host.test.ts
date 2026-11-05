@@ -383,6 +383,214 @@ test("nothing with a gui_entry: ready without a loading marker", async () => {
   host.dispose();
 });
 
+/** A host that records the shell's marker calls in `order`, with an optional loading gate. */
+function marked(initial: ExtensionInfo[], modules: Map<string, ExtensionModule>, timeoutMs = 60) {
+  let list = initial;
+  const order: string[] = [];
+  let gate: Promise<void> | undefined;
+  const host = createExtensionHost({
+    list: async () => list,
+    importModule: async (url) => {
+      order.push(`import ${url}${host.snapshot().loading ? " with marker" : ""}`);
+      const module = modules.get(url);
+      if (!module) throw new Error(`no module at ${url}`);
+      return module;
+    },
+    request: async () => ({}),
+    callTool: async () => {
+      throw new Error("unused");
+    },
+    getCall: async () => {
+      throw new Error("unused");
+    },
+    cancelCall: async () => ({}),
+    disable: async () => ({}),
+    timeoutMs,
+    onLoading: () => {
+      order.push("loading");
+      return gate;
+    },
+    onReady: () => {
+      order.push("ready");
+    },
+    log: () => {},
+  });
+  return {
+    host,
+    order,
+    setList: (next: ExtensionInfo[]) => {
+      list = next;
+    },
+    clearOrder: () => {
+      order.length = 0;
+    },
+    /** Holds the next `onLoading` until the returned function is called. */
+    holdLoading: () => {
+      let release!: () => void;
+      gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return () => release();
+    },
+  };
+}
+
+test("a version switch after startup marks the load, then clears the marker", async () => {
+  const fp1 = extensionEntryUrl("a", "fp1", "gui/index.js");
+  const fp2 = extensionEntryUrl("a", "fp2", "gui/index.js");
+  const modules = new Map<string, ExtensionModule>([
+    [fp1, { activate: () => {} }],
+    [fp2, { activate: () => {} }],
+  ]);
+  const run = marked([info("a", "fp1")], modules);
+  await run.host.start();
+  assert.deepEqual(run.order, ["loading", `import ${fp1} with marker`, "ready"]);
+
+  run.clearOrder();
+  run.setList([info("a", "fp2")]);
+  const release = run.holdLoading();
+  const hot = run.host.refresh();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(run.order, ["loading"], "the new entry is not imported while the marker is being set");
+
+  release();
+  await hot;
+  assert.deepEqual(run.order, ["loading", `import ${fp2} with marker`, "ready"]);
+  const snapshot = run.host.snapshot();
+  assert.equal(snapshot.loading, false);
+  assert.equal(snapshot.records.get("a")!.status, "ready");
+  assert.equal(snapshot.records.get("a")!.fingerprint, "fp2");
+  run.host.dispose();
+});
+
+test("a hot load that fails still clears the marker", async () => {
+  const fp1 = extensionEntryUrl("a", "fp1", "gui/index.js");
+  const fp2 = extensionEntryUrl("a", "fp2", "gui/index.js");
+  const modules = new Map<string, ExtensionModule>([[fp1, { activate: () => {} }]]);
+  const run = marked([info("a", "fp1")], modules);
+  await run.host.start();
+
+  run.clearOrder();
+  run.setList([info("a", "fp2")]);
+  await run.host.refresh();
+  assert.deepEqual(run.order, ["loading", `import ${fp2} with marker`, "ready"]);
+  assert.equal(run.host.snapshot().records.get("a")!.status, "failed");
+  assert.equal(run.host.snapshot().loading, false);
+  run.host.dispose();
+});
+
+test("a refresh with nothing to import calls neither marker", async () => {
+  const fp1 = extensionEntryUrl("a", "fp1", "gui/index.js");
+  const modules = new Map<string, ExtensionModule>([[fp1, { activate: () => {} }]]);
+  const run = marked([info("a", "fp1")], modules);
+  await run.host.start();
+
+  run.clearOrder();
+  // Same fingerprint: nothing to import.
+  await run.host.refresh();
+  assert.deepEqual(run.order, []);
+
+  // Disabled: registrations go away, but no entry is imported.
+  run.setList([info("a", "fp1", false)]);
+  await run.host.refresh();
+  assert.deepEqual(run.order, []);
+  assert.equal(run.host.snapshot().records.get("a")!.status, "disabled");
+  run.host.dispose();
+});
+
+test("a change during startup waits for the first load: the marker stays and B activates once", async () => {
+  const aUrl = extensionEntryUrl("a", "fp1", "gui/index.js");
+  const bUrl = extensionEntryUrl("b", "fp1", "gui/index.js");
+  let bActivations = 0;
+  let releaseB!: () => void;
+  const bGate = new Promise<void>((resolve) => {
+    releaseB = resolve;
+  });
+  const modules = new Map<string, ExtensionModule>([
+    [
+      aUrl,
+      {
+        activate: (ca) => {
+          ca.tabs.register({ id: "panel", label: "A", render: () => null });
+        },
+      },
+    ],
+    [
+      bUrl,
+      {
+        activate: () => {
+          bActivations++;
+          return bGate;
+        },
+      },
+    ],
+  ]);
+  const run = marked([info("a", "fp1"), info("b", "fp1")], modules, 500);
+  const starting = run.host.start();
+  // Startup is inside B's activate, and the marker is up.
+  await until(() => bActivations === 1, "B's first activate");
+  assert.equal(run.host.snapshot().loading, true);
+  assert.deepEqual(run.order, ["loading", `import ${aUrl} with marker`, `import ${bUrl} with marker`]);
+
+  // Disabling A now queues a refresh behind startup, which is still waiting on B.
+  run.setList([info("a", "fp1", false), info("b", "fp1")]);
+  const disabling = run.host.disable("a");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(!run.order.includes("ready"), "the marker stays up until startup settled");
+  assert.equal(bActivations, 1, "the queued refresh did not activate B a second time");
+
+  releaseB();
+  await disabling;
+  await starting;
+
+  assert.equal(bActivations, 1, "B was activated exactly once");
+  assert.deepEqual(run.order, ["loading", `import ${aUrl} with marker`, `import ${bUrl} with marker`, "ready"]);
+  const snapshot = run.host.snapshot();
+  assert.equal(snapshot.loading, false);
+  assert.equal(snapshot.records.get("a")!.status, "disabled");
+  assert.equal(snapshot.records.get("b")!.status, "ready");
+  run.host.dispose();
+});
+
+test("an activate that never settles times out, so a disable queued behind startup still completes", async () => {
+  const aUrl = extensionEntryUrl("a", "fp1", "gui/index.js");
+  const bUrl = extensionEntryUrl("b", "fp1", "gui/index.js");
+  let bActivations = 0;
+  const modules = new Map<string, ExtensionModule>([
+    [
+      aUrl,
+      {
+        activate: (ca) => {
+          ca.tabs.register({ id: "panel", label: "A", render: () => null });
+        },
+      },
+    ],
+    [
+      bUrl,
+      {
+        activate: () => {
+          bActivations++;
+          return new Promise<void>(() => {});
+        },
+      },
+    ],
+  ]);
+  const run = marked([info("a", "fp1"), info("b", "fp1")], modules, 40);
+  const starting = run.host.start();
+  await until(() => bActivations === 1, "B's first activate");
+
+  run.setList([info("a", "fp1", false), info("b", "fp1")]);
+  await run.host.disable("a");
+  await starting;
+
+  const snapshot = run.host.snapshot();
+  assert.equal(snapshot.records.get("a")!.status, "disabled");
+  assert.equal(snapshot.records.get("b")!.status, "failed");
+  assert.equal(snapshot.loading, false, "the marker is cleared after the timed-out load");
+  assert.equal(run.order[run.order.length - 1], "ready");
+  run.host.dispose();
+});
+
 test("a lost call result (404) rejects instead of polling forever", async () => {
   const url = extensionEntryUrl("a", "fp1", "gui/index.js");
   let ca!: Parameters<NonNullable<ExtensionModule["activate"]>>[0];
