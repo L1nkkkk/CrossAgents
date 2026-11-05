@@ -330,6 +330,7 @@ B3 远程开发：
   - 压缩上下文后顾问状态重置；顾问自己的意见不再回喂给它。
 
   我们有插话和中断，缺的是逐轮看转录的入口和这套投递规则。现有的 `review_request` 只能按任务审一次。先出设计：顾问是普通会话还是专门角色、额度怎么算、run 里和 run 外各怎么用
+  - 2026-11-06 设计稿已写好：[tasks/ADVISOR.md](tasks/ADVISOR.md)。等人看过再决定实现范围：稿子自己的最小可用版，还是主导建议的缩小版（状态放内存、预算只按次数、只做工具和卡片）。§8 有 5 个问题要人定
 - [ ] **2. 人的消息怎么送达：对照 Cutex 的不变式查一遍**（Cutex [050-owner-message-delivery.md](https://github.com/senxiu-official/cutex-desktop/blob/9fbae59caa37c09eaa89d127a233f83d49601203/docs/design/050-owner-message-delivery.md) §2）。他们的病和我们修过的插话、排队问题几乎一样。逐条对照：
   - 「忙」只有一个来源，界面各处都读它，不各自推算；
   - 每条消息在界面上只占一个固定位置，状态在原地变，不在聊天和队列之间搬；
