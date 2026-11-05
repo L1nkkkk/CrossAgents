@@ -39,6 +39,15 @@ import type { HubInfo } from "@bindings/HubInfo";
 import type { ListAgentsResponse } from "@bindings/ListAgentsResponse";
 import type { ListPluginsResponse } from "@bindings/ListPluginsResponse";
 import type { PluginInfo } from "@bindings/PluginInfo";
+import type { ExtensionsResponse } from "@bindings/ExtensionsResponse";
+import type { ExtensionInfo } from "@bindings/ExtensionInfo";
+import type { ExtensionCallAccepted } from "@bindings/ExtensionCallAccepted";
+import type { ExtensionCallRequest } from "@bindings/ExtensionCallRequest";
+import type { ExtensionCallResponse } from "@bindings/ExtensionCallResponse";
+import type { ExtensionDiffResponse } from "@bindings/ExtensionDiffResponse";
+import type { ExtensionLogsResponse } from "@bindings/ExtensionLogsResponse";
+import type { EnableExtensionRequest } from "@bindings/EnableExtensionRequest";
+import type { SetExtensionAutoTrustRequest } from "@bindings/SetExtensionAutoTrustRequest";
 import type { ListRunsResponse } from "@bindings/ListRunsResponse";
 import type { ListHistoryResponse } from "@bindings/ListHistoryResponse";
 import type { ListProjectsResponse } from "@bindings/ListProjectsResponse";
@@ -177,6 +186,15 @@ async function request<T>(method: Method, path: string, body?: unknown, opts: { 
 
 const enc = encodeURIComponent;
 
+/**
+ * Any allowed hub route, for an extension's `ca.hub.request` (docs/EXTENSIONS.md §5). The
+ * bridge's ALLOWED table (electron/allowed.cts) still decides what a page may reach, and the
+ * hub still checks the token's level.
+ */
+export function hubRequest<T = unknown>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<T> {
+  return request<T>(method, path, body);
+}
+
 function expertiseQuery(owner_kind: OwnerKind, owner_id: string): string {
   return `owner_kind=${owner_kind}&owner_id=${enc(owner_id)}`;
 }
@@ -288,6 +306,27 @@ export const api = {
   installPlugin: (name: string) => request<CliInstallAccepted>("POST", `/v1/plugins/${enc(name)}/install`),
   /** The same for its upgrade command. */
   upgradePlugin: (name: string) => request<CliInstallAccepted>("POST", `/v1/plugins/${enc(name)}/upgrade`),
+
+  /** Every extension the hub knows, enabled or not; `current` is the snapshot it runs. */
+  listExtensions: () => request<ExtensionsResponse>("GET", "/v1/extensions"),
+  /** Approves one exact snapshot (`admin`); a stale fingerprint is refused by the hub. */
+  enableExtension: (name: string, fingerprint: string) =>
+    request<ExtensionInfo>("POST", `/v1/extensions/${enc(name)}/enable`, { fingerprint } satisfies EnableExtensionRequest),
+  disableExtension: (name: string) => request<ExtensionInfo>("POST", `/v1/extensions/${enc(name)}/disable`),
+  /** Turns this one extension's auto-trust on or off (`admin`, person only). */
+  setExtensionAutoTrust: (name: string, auto_trust: boolean) =>
+    request<ExtensionInfo>("POST", `/v1/extensions/${enc(name)}/auto-trust`, { auto_trust } satisfies SetExtensionAutoTrustRequest),
+  /** The snapshot waiting for approval against the running one; 404 when nothing is pending. */
+  extensionDiff: (name: string) => request<ExtensionDiffResponse>("GET", `/v1/extensions/${enc(name)}/pending/diff`),
+  /** The current log's last 64 KiB (the extension's tool calls and stderr); empty before the first call. */
+  extensionLogs: (name: string) => request<ExtensionLogsResponse>("GET", `/v1/extensions/${enc(name)}/logs`),
+  /** Starts a call; 202 comes back at once (it may run for ten minutes), the result later. */
+  extensionCall: (name: string, tool: string, req: ExtensionCallRequest) =>
+    request<ExtensionCallAccepted>("POST", `/v1/extensions/${enc(name)}/tools/${enc(tool)}`, req),
+  /** A call's state and result; the hub keeps it for ten minutes after it ends. */
+  extensionCallResult: (id: string) => request<ExtensionCallResponse>("GET", `/v1/extensions/calls/${enc(id)}`),
+  /** Asks the hub to stop a running call; answers with `status: cancelled`. */
+  cancelExtensionCall: (id: string) => request<ExtensionCallResponse>("DELETE", `/v1/extensions/calls/${enc(id)}`),
 
   listRuns: () => request<ListRunsResponse>("GET", "/v1/runs"),
   /** What runs left in a workspace, including the ones since deleted; every workspace's

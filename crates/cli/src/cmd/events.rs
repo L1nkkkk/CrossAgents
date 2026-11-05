@@ -417,6 +417,21 @@ pub fn summary(kind: &EventKind) -> String {
             text
         }
         EventKind::PluginChanged { name } => format!("{name} re-read"),
+        EventKind::ExtensionChanged { name } => format!("{name} re-read"),
+        EventKind::ExtensionCallFinished {
+            extension,
+            tool,
+            status,
+            duration_ms,
+            error,
+            ..
+        } => {
+            let mut text = format!("{extension}__{tool} {status} ({duration_ms}ms)");
+            if let Some(error) = error {
+                text.push_str(&format!(": {}", one_line(error)));
+            }
+            text
+        }
     }
 }
 

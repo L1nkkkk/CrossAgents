@@ -21,21 +21,21 @@ use chrono::{DateTime, Utc};
 use crossagents_api_types::{
     API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentCommandsResponse,
     AgentExecution, AgentExecutionResponse, AgentSettingsRequest, AnswerRequest, ApiError,
-    ApproveRunRequest, ArchiveAgentRequest, AttachmentContent, AttachmentUpload, BackgroundReminder,
-    BackgroundResponse, BackgroundWatch, ChangesResponse,
-    CliInfo, CliInstallAccepted, CommitGraph, ConnectInfo, CreateAccountRequest,
-    CreateAgentRequest, CreateRunRequest, CreateWorkRequest, CreateWorkRunRequest,
-    DeleteRunResponse, DiffSide, ErrorCode, FileContentResponse, FileEntry, FileKind,
-    FileTreeResponse, FinishRequest, GraphCommit, GraphRef, GraphRefKind, HealthResponse, HubInfo,
-    ImageContent, InitRepoRequest, LandRequest, ListAccountsResponse, ListAgentsResponse,
-    ListAvatarsResponse, ListHistoryResponse, ListNotesResponse, ListPluginsResponse,
-    ListQuestionsResponse, ListRunsResponse, ListToolsResponse, ListWorksResponse, LoginStarted,
-    PluginInfo, QuotaResponse, RejectRunRequest, RenameAgentRequest, ResolvePathsRequest,
-    ResolvePathsResponse, ResolvedPath, RunDetail, RunTrace, SendMessageRequest,
-    SendMessageResponse, SetModelRequest, SetPluginModelsRequest, SetTopicRequest,
-    TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse, UpdateRunPolicyRequest,
-    UploadAvatarsRequest, UploadAvatarsResponse, UsageGroup, UsageResponse, UsageSeriesGroup,
-    UsageSeriesRange, UsageSeriesResponse, VerifyingTask, WorkDetail,
+    ApproveRunRequest, ArchiveAgentRequest, AttachmentContent, AttachmentUpload,
+    BackgroundReminder, BackgroundResponse, BackgroundWatch, ChangesResponse, CliInfo,
+    CliInstallAccepted, CommitGraph, ConnectInfo, CreateAccountRequest, CreateAgentRequest,
+    CreateRunRequest, CreateWorkRequest, CreateWorkRunRequest, DeleteRunResponse, DiffSide,
+    ErrorCode, FileContentResponse, FileEntry, FileKind, FileTreeResponse, FinishRequest,
+    GraphCommit, GraphRef, GraphRefKind, HealthResponse, HubInfo, ImageContent, InitRepoRequest,
+    LandRequest, ListAccountsResponse, ListAgentsResponse, ListAvatarsResponse,
+    ListHistoryResponse, ListNotesResponse, ListPluginsResponse, ListQuestionsResponse,
+    ListRunsResponse, ListToolsResponse, ListWorksResponse, LoginStarted, PluginInfo,
+    QuotaResponse, RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse,
+    ResolvedPath, RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
+    SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript,
+    TurnDiffResponse, UpdateRunPolicyRequest, UploadAvatarsRequest, UploadAvatarsResponse,
+    UsageGroup, UsageResponse, UsageSeriesGroup, UsageSeriesRange, UsageSeriesResponse,
+    VerifyingTask, WorkDetail,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, Attachment,
@@ -69,6 +69,9 @@ const MESSAGE_BODY_LIMIT: usize =
     crossagents_api_types::MAX_ATTACHMENTS_TOTAL / 3 * 4 + 1024 * 1024;
 
 pub struct AppState {
+    pub extensions: Arc<crate::extensions::Registry>,
+    /// Runs extension tools and holds the tokens issued to them.
+    pub runner: Arc<crate::extensions::Runner>,
     pub bus: Arc<EventBus>,
     pub runtime: Arc<Runtime>,
     pub orchestrator: Arc<Orchestrator>,
@@ -148,6 +151,23 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/notes", get(list_notes))
         .route("/v1/background", get(background))
         .route("/v1/background/reminders/{id}", delete(cancel_reminder))
+        .route("/v1/extensions", get(list_extensions))
+        .route("/v1/extensions/{name}/logs", get(extension_logs))
+        .route("/v1/extensions/{name}/enable", post(enable_extension))
+        .route("/v1/extensions/{name}/disable", post(disable_extension))
+        .route(
+            "/v1/extensions/{name}/auto-trust",
+            post(auto_trust_extension),
+        )
+        .route("/v1/extensions/{name}/pending/diff", get(extension_diff))
+        .route(
+            "/v1/extensions/{name}/tools/{tool}",
+            post(call_extension_tool),
+        )
+        .route(
+            "/v1/extensions/calls/{id}",
+            get(get_extension_call).delete(cancel_extension_call),
+        )
         .route("/v1/plugins", get(list_plugins))
         .route("/v1/plugins/refresh", post(refresh_plugins))
         .route("/v1/plugins/{name}/models", post(set_plugin_models))
@@ -304,7 +324,7 @@ pub(crate) type ApiResult<T> = Result<T, AppError>;
 async fn require_token(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let presented = headers
@@ -329,8 +349,16 @@ async fn require_token(
         .get::<MatchedPath>()
         .map(|p| p.as_str().to_owned())
         .unwrap_or_else(|| request.uri().path().to_owned());
-    match crate::access::refusal(grant, request.method(), &pattern) {
-        None => next.run(request).await,
+    // An extension's token is logged by name, so what it did can be traced to it.
+    if let crate::access::Grant::Extension { name, level } = &grant {
+        tracing::info!(extension = %name, ?level, method = %request.method(), route = %pattern, "extension request");
+    }
+    match crate::access::refusal(&grant, request.method(), &pattern) {
+        None => {
+            // Handlers that act as the caller read who it is from here, never from the body.
+            request.extensions_mut().insert(grant);
+            next.run(request).await
+        }
         Some(why) => {
             AppError::new(StatusCode::FORBIDDEN, ErrorCode::Forbidden, why).into_response()
         }
@@ -338,7 +366,7 @@ async fn require_token(
 }
 
 /// What a presented token may do: the hub's token everything, the read-only token read,
-/// an agent's session token nothing here.
+/// an agent's session token nothing here, an extension's token what its call was issued for.
 async fn grant_of(state: &AppState, token: &str) -> Option<crate::access::Grant> {
     use crate::access::{Grant, Level};
     if constant_time_eq(token.as_bytes(), state.token.as_bytes()) {
@@ -348,7 +376,10 @@ async fn grant_of(state: &AppState, token: &str) -> Option<crate::access::Grant>
     } else if state.tokens.agent(token).await.is_some() {
         Some(Grant::Agent)
     } else {
-        None
+        state
+            .runner
+            .token(token)
+            .map(|(name, level)| Grant::Extension { name, level })
     }
 }
 
@@ -1029,7 +1060,9 @@ async fn background(State(state): State<Arc<AppState>>) -> ApiResult<Json<Backgr
             BackgroundReminder {
                 owner_name: name_of(&reminder.owner),
                 task_key: task.map(|t| t.key.clone()),
-                run_id: task.map(|t| t.run_id).or_else(|| run_of_agent(&reminder.owner)),
+                run_id: task
+                    .map(|t| t.run_id)
+                    .or_else(|| run_of_agent(&reminder.owner)),
                 reminder,
             }
         })
@@ -1063,7 +1096,10 @@ async fn background(State(state): State<Arc<AppState>>) -> ApiResult<Json<Backgr
         .map(|t| VerifyingTask {
             task_id: t.id,
             run_id: t.run_id,
-            run_title: runs.get(&t.run_id).map(|r| r.title.clone()).unwrap_or_default(),
+            run_title: runs
+                .get(&t.run_id)
+                .map(|r| r.title.clone())
+                .unwrap_or_default(),
             key: t.key.clone(),
             title: t.title.clone(),
             assignee: t.assignee,
@@ -2720,4 +2756,128 @@ async fn replay(state: &AppState, last: &mut u64, tx: &mpsc::Sender<Event>) -> b
             }
         }
     }
+}
+
+async fn list_extensions(
+    State(s): State<Arc<AppState>>,
+) -> Json<crossagents_api_types::ExtensionsResponse> {
+    Json(crossagents_api_types::ExtensionsResponse {
+        extensions: s.extensions.list(),
+    })
+}
+async fn extension_logs(
+    State(s): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<crossagents_api_types::ExtensionLogsResponse>> {
+    Ok(Json(s.runner.logs(&name)?))
+}
+async fn enable_extension(
+    State(s): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(req): Json<crossagents_api_types::EnableExtensionRequest>,
+) -> ApiResult<Json<crossagents_api_types::ExtensionInfo>> {
+    let r = s.extensions.clone();
+    Ok(Json(
+        tokio::task::spawn_blocking(move || r.enable(&name, &req.fingerprint))
+            .await
+            .map_err(|e| CoreError::Storage(e.to_string()))??,
+    ))
+}
+async fn disable_extension(
+    State(s): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<crossagents_api_types::ExtensionInfo>> {
+    Ok(Json(s.extensions.disable(&name)?))
+}
+async fn auto_trust_extension(
+    State(s): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(req): Json<crossagents_api_types::SetExtensionAutoTrustRequest>,
+) -> ApiResult<Json<crossagents_api_types::ExtensionInfo>> {
+    let r = s.extensions.clone();
+    Ok(Json(
+        tokio::task::spawn_blocking(move || r.set_auto_trust(&name, req.auto_trust))
+            .await
+            .map_err(|e| CoreError::Storage(e.to_string()))??,
+    ))
+}
+async fn extension_diff(
+    State(s): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<crossagents_api_types::ExtensionDiffResponse>> {
+    let r = s.extensions.clone();
+    Ok(Json(
+        tokio::task::spawn_blocking(move || r.pending_diff(&name))
+            .await
+            .map_err(|e| CoreError::Storage(e.to_string()))??,
+    ))
+}
+
+fn call_error(e: crate::extensions::CallError) -> AppError {
+    use crate::extensions::CallError as E;
+    let (status, code) = match &e {
+        E::Unknown(_) => (StatusCode::NOT_FOUND, ErrorCode::NotFound),
+        E::NotEnabled(_) => (StatusCode::CONFLICT, ErrorCode::Conflict),
+        E::Forbidden(_) => (StatusCode::FORBIDDEN, ErrorCode::Forbidden),
+        E::InvalidInput(_) => (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
+        E::Busy(_) => (StatusCode::TOO_MANY_REQUESTS, ErrorCode::Conflict),
+        E::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal),
+    };
+    AppError::new(status, code, e.to_string())
+}
+
+/// A person's GUI calls an extension tool. It answers at once with 202; the result is
+/// fetched from `GET /v1/extensions/calls/{id}` (docs/EXTENSIONS.md §3).
+///
+/// The caller is a human, and only a person's credential is one: the policy point refuses an
+/// extension's token on this route, and this checks again, because the one thing this route
+/// must never do is let an extension call a `human` tool as a person.
+async fn call_extension_tool(
+    State(s): State<Arc<AppState>>,
+    Extension(grant): Extension<crate::access::Grant>,
+    Path((name, tool)): Path<(String, String)>,
+    body: Option<Json<crossagents_api_types::ExtensionCallRequest>>,
+) -> ApiResult<(
+    StatusCode,
+    Json<crossagents_api_types::ExtensionCallAccepted>,
+)> {
+    if !matches!(grant, crate::access::Grant::Level(_)) {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            ErrorCode::Forbidden,
+            "only a person's credential calls an extension tool as a person",
+        ));
+    }
+    let input = body.map(|Json(r)| r.input).unwrap_or_default();
+    let accepted = s
+        .runner
+        .start(crate::extensions::Caller::Human, &name, &tool, input)
+        .map_err(call_error)?;
+    Ok((StatusCode::ACCEPTED, Json(accepted)))
+}
+
+fn no_such_call(id: &str) -> AppError {
+    AppError::new(
+        StatusCode::NOT_FOUND,
+        ErrorCode::NotFound,
+        format!("no extension call {id}: it never existed, or it ended more than ten minutes ago"),
+    )
+}
+
+async fn get_extension_call(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crossagents_api_types::ExtensionCallResponse>> {
+    s.runner.get(&id).map(Json).ok_or_else(|| no_such_call(&id))
+}
+
+async fn cancel_extension_call(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crossagents_api_types::ExtensionCallResponse>> {
+    s.runner
+        .cancel(&id)
+        .await
+        .map(Json)
+        .ok_or_else(|| no_such_call(&id))
 }

@@ -284,6 +284,8 @@ struct Turn {
     /// The interrupt left the unread steers queued (`still_queued`): they will still be
     /// read, so the turn waits for them like a late message.
     keep_queued: bool,
+    /// Interrupt requests whose answers can preserve this turn's unread steers.
+    interrupt_requests: Vec<String>,
 }
 
 /// A message written into the running turn, waiting for the model to read it.
@@ -291,6 +293,15 @@ struct PendingSteer {
     id: MessageId,
     /// Its opening words, for a warning when it never gets read.
     snippet: String,
+}
+
+fn interrupt_kept_queued(answer: &Result<Value, String>) -> bool {
+    answer.as_ref().is_ok_and(|answer| {
+        answer
+            .get("still_queued")
+            .and_then(Value::as_array)
+            .is_some_and(|queued| !queued.is_empty())
+    })
 }
 
 impl Shared {
@@ -338,8 +349,16 @@ impl Shared {
     }
 
     async fn control(&self, request: Value, timeout: Duration) -> Result<Value, CoreError> {
+        self.control_with_id(request, timeout, new_id()).await
+    }
+
+    async fn control_with_id(
+        &self,
+        request: Value,
+        timeout: Duration,
+        id: String,
+    ) -> Result<Value, CoreError> {
         let subtype = request["subtype"].as_str().unwrap_or("request").to_owned();
-        let id = new_id();
         let (tx, rx) = oneshot::channel();
         self.pending
             .lock()
@@ -453,6 +472,16 @@ impl Shared {
                 if let Some((id, answer)) = wire::control_answer(&message)
                     && let Some(tx) = self.pending.lock().expect("pending lock").remove(&id)
                 {
+                    let mut turn = self.turn.lock().expect("turn lock");
+                    if let Some(index) = turn
+                        .interrupt_requests
+                        .iter()
+                        .position(|request| request == &id)
+                    {
+                        turn.interrupt_requests.remove(index);
+                        turn.keep_queued |= interrupt_kept_queued(&answer);
+                    }
+                    drop(turn);
                     let _ = tx.send(answer);
                 }
             }
@@ -1005,30 +1034,21 @@ impl DriverSession for ClaudeSession {
     }
 
     async fn interrupt(&self) -> Result<(), CoreError> {
-        let unread = {
+        let id = new_id();
+        {
             let mut turn = self.shared.turn.lock().expect("turn lock");
             if turn.waiter.is_none() {
                 return Ok(());
             }
             turn.interrupted = true;
-            !turn.steers.is_empty()
-        };
-        let answer = self
-            .shared
-            .control(json!({ "subtype": "interrupt" }), CLEANUP_TIMEOUT)
-            .await;
-        if unread {
-            // Claude Code keeps unread stdin messages queued across an interrupt: it
-            // answers with `still_queued` (verified with claude 2.1.317), and the next
-            // turn reads them. The turn then waits for them like a late message.
-            let queued = answer.as_ref().is_ok_and(|answer| {
-                answer
-                    .get("still_queued")
-                    .and_then(Value::as_array)
-                    .is_some_and(|queued| !queued.is_empty())
-            });
-            self.shared.turn.lock().expect("turn lock").keep_queued = queued;
+            if !turn.steers.is_empty() {
+                turn.interrupt_requests.push(id.clone());
+            }
         }
+        let _ = self
+            .shared
+            .control_with_id(json!({ "subtype": "interrupt" }), CLEANUP_TIMEOUT, id)
+            .await;
         // The turn may have ended meanwhile, or the process is gone.
         Ok(())
     }
@@ -1241,5 +1261,284 @@ pub async fn probe_account(
         Ok(Ok((Err(e), _) | (_, Err(e)))) => Err(CoreError::Agent(e)),
         Ok(Err(e)) => Err(CoreError::Agent(e.to_string())),
         Err(_) => Err(CoreError::Agent("claude did not answer".into())),
+    }
+}
+
+#[cfg(test)]
+mod interrupt_tests {
+    use super::*;
+    use tokio::io::AsyncBufReadExt;
+
+    fn setup(
+        steer: Option<MessageId>,
+    ) -> (
+        Arc<Shared>,
+        oneshot::Receiver<StopReason>,
+        mpsc::UnboundedReceiver<SessionEvent>,
+    ) {
+        let (_cli, stdin) = tokio::io::duplex(4096);
+        let (events, rx) = mpsc::unbounded_channel();
+        let shared = Arc::new(Shared {
+            session_id: "test".into(),
+            stdin: tokio::sync::Mutex::new(Some(Box::new(stdin))),
+            pending: Mutex::default(),
+            turn: Mutex::default(),
+            translator: Mutex::default(),
+            commands: Mutex::default(),
+            turn_ends: Mutex::default(),
+            events,
+            permission: PermissionPolicy::Bypass,
+            permissions: None,
+            exited: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
+            program: "claude",
+            flavor: Flavor::Claude,
+            replay: Mutex::default(),
+            stale_steers: Mutex::default(),
+        });
+        let (tx, ended) = oneshot::channel();
+        let mut turn = shared.turn.lock().unwrap();
+        turn.id = Some("turn".into());
+        turn.waiter = Some(tx);
+        turn.interrupted = true;
+        if let Some(id) = steer {
+            turn.steers.push(PendingSteer {
+                id,
+                snippet: "steer".into(),
+            });
+            turn.steered.push(id);
+        }
+        drop(turn);
+        (shared, ended, rx)
+    }
+
+    fn result(id: &str) -> Value {
+        json!({"type":"result", "subtype":"error_during_execution", "is_error":true, "user_message_uuid":id})
+    }
+    fn warnings(events: &mut mpsc::UnboundedReceiver<SessionEvent>) -> usize {
+        let mut n = 0;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event.kind, SessionEventKind::Warning { .. }) {
+                n += 1;
+            }
+        }
+        n
+    }
+    fn register(shared: &Shared) {
+        let (tx, _rx) = oneshot::channel();
+        shared
+            .turn
+            .lock()
+            .unwrap()
+            .interrupt_requests
+            .push("req".into());
+        shared.pending.lock().unwrap().insert("req".into(), tx);
+    }
+    async fn batch(shared: &Arc<Shared>, messages: &[Value]) {
+        let text = messages
+            .iter()
+            .map(|v| format!("{v}\n"))
+            .collect::<String>();
+        let mut lines = tokio::io::BufReader::new(text.as_bytes()).lines();
+        while let Some(line) = lines.next_line().await.unwrap() {
+            shared.handle(serde_json::from_str(&line).unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn adjacent_response_and_result_keep_the_steer() {
+        let steer = MessageId::new();
+        let (shared, mut ended, mut events) = setup(Some(steer));
+        register(&shared);
+        batch(
+            &shared,
+            &[
+                wire::control_success("req", json!({"still_queued":[steer.to_string()]})),
+                result("turn"),
+            ],
+        )
+        .await;
+        assert!(ended.try_recv().is_err());
+        assert_eq!(warnings(&mut events), 0);
+        shared.handle(json!({"type":"user", "uuid":steer.to_string(), "isReplay":true}));
+        shared.handle(result(&steer.to_string()));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 0);
+    }
+
+    #[tokio::test]
+    async fn empty_or_missing_queue_warns_and_plain_interrupt_ends() {
+        for answer in [json!({"still_queued":[]}), json!({})] {
+            let (shared, ended, mut events) = setup(Some(MessageId::new()));
+            register(&shared);
+            batch(
+                &shared,
+                &[wire::control_success("req", answer), result("turn")],
+            )
+            .await;
+            assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+            assert_eq!(warnings(&mut events), 1);
+        }
+        let (shared, ended, mut events) = setup(None);
+        shared.handle(result("turn"));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 0);
+    }
+
+    #[tokio::test]
+    async fn control_failure_and_result_do_not_hold_the_turn() {
+        let (shared, ended, mut events) = setup(Some(MessageId::new()));
+        register(&shared);
+        batch(
+            &shared,
+            &[wire::control_error("req", "failed"), result("turn")],
+        )
+        .await;
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 1);
+    }
+
+    #[tokio::test]
+    async fn overlapping_interrupts_keep_the_first_queued_answer() {
+        let steer = MessageId::new();
+        let (shared, mut ended, mut events) = setup(Some(steer));
+        register(&shared);
+        let (tx, _rx) = oneshot::channel();
+        shared
+            .turn
+            .lock()
+            .unwrap()
+            .interrupt_requests
+            .push("req2".into());
+        shared.pending.lock().unwrap().insert("req2".into(), tx);
+        batch(
+            &shared,
+            &[
+                wire::control_success("req", json!({"still_queued":[steer.to_string()]})),
+                wire::control_success("req2", json!({"still_queued":[]})),
+                result("turn"),
+            ],
+        )
+        .await;
+        assert!(ended.try_recv().is_err());
+        assert_eq!(warnings(&mut events), 0);
+        shared.handle(result(&steer.to_string()));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn first_interrupt_response_then_result_precedes_second_response() {
+        let steer = MessageId::new();
+        let (shared, mut ended, mut events) = setup(Some(steer));
+        register(&shared);
+        let (tx, _rx) = oneshot::channel();
+        shared
+            .turn
+            .lock()
+            .unwrap()
+            .interrupt_requests
+            .push("req2".into());
+        shared.pending.lock().unwrap().insert("req2".into(), tx);
+
+        batch(
+            &shared,
+            &[
+                wire::control_success("req", json!({"still_queued":[steer.to_string()]})),
+                result("turn"),
+            ],
+        )
+        .await;
+        assert!(ended.try_recv().is_err());
+        assert_eq!(warnings(&mut events), 0);
+        shared.handle(wire::control_success("req2", json!({"still_queued":[]})));
+        assert!(shared.turn.lock().unwrap().keep_queued);
+        shared.handle(result(&steer.to_string()));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 0);
+    }
+
+    #[tokio::test]
+    async fn previous_turn_interrupt_response_does_not_affect_next_turn() {
+        let (shared, ended, mut events) = setup(Some(MessageId::new()));
+        register(&shared);
+        shared.handle(result("turn"));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 1);
+
+        let next_steer = MessageId::new();
+        let (tx, mut next) = oneshot::channel();
+        {
+            let mut turn = shared.turn.lock().unwrap();
+            assert!(turn.interrupt_requests.is_empty());
+            turn.id = Some("next".into());
+            turn.waiter = Some(tx);
+            turn.interrupted = true;
+            turn.steers.push(PendingSteer {
+                id: next_steer,
+                snippet: "next steer".into(),
+            });
+            turn.steered.push(next_steer);
+        }
+        shared.handle(wire::control_success(
+            "req",
+            json!({"still_queued":["old"]}),
+        ));
+        assert!(!shared.turn.lock().unwrap().keep_queued);
+        assert!(next.try_recv().is_err());
+        shared.handle(result("next"));
+        assert_eq!(next.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 1);
+    }
+
+    #[tokio::test]
+    async fn result_before_response_ends_and_warns() {
+        let (shared, ended, mut events) = setup(Some(MessageId::new()));
+        register(&shared);
+        batch(
+            &shared,
+            &[
+                result("turn"),
+                wire::control_success("req", json!({"still_queued":["steer"]})),
+            ],
+        )
+        .await;
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 1);
+    }
+
+    #[tokio::test]
+    async fn review_read_before_interrupt_answer_existing_behavior() {
+        let steer = MessageId::new();
+        let (shared, ended, _) = setup(Some(steer));
+        shared.handle(json!({"type":"system", "subtype":"init"}));
+        shared.handle(json!({"type":"user", "uuid":steer.to_string(), "isReplay":true}));
+        register(&shared);
+        // The steer was already read, so the response can have an empty queue.
+        shared.handle(wire::control_success("req", json!({"still_queued":[]})));
+        shared.handle(result("turn"));
+        // Existing behavior: a failed prompt result ends the turn even though the
+        // separate steer result has not arrived yet.
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        shared.handle(result(&steer.to_string()));
+    }
+
+    #[tokio::test]
+    async fn review_plain_failed_interrupt_must_not_end_next_turn() {
+        let (shared, mut ended, _) = setup(None);
+        let (tx, _rx) = oneshot::channel();
+        shared.pending.lock().unwrap().insert("req".into(), tx);
+        shared.handle(wire::control_error("req", "failed"));
+        assert!(ended.try_recv().is_err());
+        shared.handle(result("turn"));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        let (tx, mut next) = oneshot::channel();
+        {
+            let mut turn = shared.turn.lock().unwrap();
+            turn.id = Some("next".into());
+            turn.waiter = Some(tx);
+        }
+        assert!(next.try_recv().is_err());
+        shared.handle(result("next"));
+        assert_eq!(next.await.unwrap(), StopReason::Error);
     }
 }

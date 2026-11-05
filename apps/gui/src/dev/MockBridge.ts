@@ -12,6 +12,10 @@ import type { BackgroundResponse } from "@bindings/BackgroundResponse";
 import type { CommitGraph } from "@bindings/CommitGraph";
 import type { Agent } from "@bindings/Agent";
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
+import type { ExtensionDiffResponse } from "@bindings/ExtensionDiffResponse";
+import type { ExtensionInfo } from "@bindings/ExtensionInfo";
+import type { ExtensionLogsResponse } from "@bindings/ExtensionLogsResponse";
+import type { ExtensionVersion } from "@bindings/ExtensionVersion";
 import type { HumanItem } from "@bindings/HumanItem";
 import type { LandMode } from "@bindings/LandMode";
 import type { Note } from "@bindings/Note";
@@ -103,6 +107,14 @@ export type MockState = {
   codeLost?: Record<string, { branch: string; base: string; landed?: { mode: LandMode; reference: string } }>;
   /** Expertise profiles (docs EXPERTISE.md): entries of every owner, candidates, usages. */
   expertise?: ExpertiseMock;
+  /** Extensions (`GET /v1/extensions`); absent: none. */
+  extensions?: ExtensionInfo[];
+  /** What each waiting version changes, by extension name (`GET …/pending/diff`). */
+  extensionDiffs?: Record<string, ExtensionDiffResponse>;
+  /** What each extension's last call left in its log (`GET …/logs`). */
+  extensionLogs?: Record<string, ExtensionLogsResponse>;
+  /** What the shell would answer about safe mode; absent: not in safe mode. */
+  safeMode?: { enabled: boolean; reason: string | null };
 };
 
 export type ExpertiseMock = { entries: ExpertiseEntry[]; candidates: Candidate[]; usages: UsageRecord[] };
@@ -219,6 +231,13 @@ export class MockBridge implements CrossAgentsBridge {
         this.updateListeners.delete(listener);
       };
     },
+  };
+
+  /** The shell's extension IPC (electron/preload.cts); safe mode is the scenario's word. */
+  extensions = {
+    safeMode: async () => this.state.safeMode ?? { enabled: false, reason: null },
+    loading: async () => {},
+    ready: async () => {},
   };
 
   startEvents() {
@@ -366,6 +385,76 @@ export class MockBridge implements CrossAgentsBridge {
     }
   }
 
+  // ---- Extensions: the list, approval, auto-trust and the log ---------------------------
+
+  /** Like the registry (crates/hub/src/extensions/registry.rs): a switch changes what runs. */
+  private switchTo(info: ExtensionInfo, version: ExtensionVersion) {
+    info.previous_fingerprint = info.current?.fingerprint;
+    info.current = version;
+    info.pending = undefined;
+    info.enabled = true;
+  }
+
+  /** Undefined: not an extension route. */
+  private extensionRoute(method: string, p: string, body: unknown): HubResponse | undefined {
+    const list = this.state.extensions ?? [];
+    if (p === "/v1/extensions") return method === "GET" ? json(200, { extensions: list }) : undefined;
+    const found = (name: string) => list.find((x) => x.name === name);
+    let m = /^\/v1\/extensions\/([^/]+)\/(logs|enable|disable|auto-trust)$/.exec(p);
+    if (m) {
+      const name = decodeURIComponent(m[1]);
+      const action = m[2];
+      const info = found(name);
+      if (!info) return notFound(`extension ${name}`);
+      if (action === "logs") return method === "GET" ? json(200, this.state.extensionLogs?.[name] ?? { name, content: "", truncated: false }) : undefined;
+      if (method !== "POST") return undefined;
+      if (action === "disable") {
+        info.enabled = false;
+        this.emit({ type: "extension.changed", data: { name } });
+        return json(200, info);
+      }
+      if (action === "auto-trust") {
+        const value = !!(body as { auto_trust?: boolean } | null)?.auto_trust;
+        info.auto_trust = value;
+        // Turning it on accepts what is waiting, and that also enables the extension.
+        if (value && info.pending) this.switchTo(info, info.pending.version);
+        this.emit({ type: "extension.changed", data: { name } });
+        return json(200, info);
+      }
+      const fingerprint = (body as { fingerprint?: string } | null)?.fingerprint ?? "";
+      if (info.current?.fingerprint === fingerprint) {
+        info.enabled = true;
+      } else if (info.pending?.version.fingerprint === fingerprint) {
+        this.switchTo(info, info.pending.version);
+      } else {
+        return json(409, { error: { code: "conflict", message: "fingerprint does not match the pending snapshot; refresh before approving" } });
+      }
+      this.emit({ type: "extension.changed", data: { name } });
+      return json(200, info);
+    }
+    m = /^\/v1\/extensions\/([^/]+)\/pending\/diff$/.exec(p);
+    if (m && method === "GET") {
+      const name = decodeURIComponent(m[1]);
+      const info = found(name);
+      if (!info) return notFound(`extension ${name}`);
+      if (!info.pending) return json(404, { error: { code: "not_found", message: `extension ${name} has nothing pending` } });
+      return json(
+        200,
+        this.state.extensionDiffs?.[name] ?? {
+          name,
+          fingerprint: info.pending.version.fingerprint,
+          against: info.current?.fingerprint,
+          diff: "",
+          truncated: false,
+          files: [],
+          access: info.pending.version.access,
+          access_changed: info.pending.version.access !== info.current?.access,
+        },
+      );
+    }
+    return undefined;
+  }
+
   // ---- Events ---------------------------------------------------------------------------
 
   private status(s: string) {
@@ -472,6 +561,8 @@ export class MockBridge implements CrossAgentsBridge {
 
     const terminal = this.terminalRoute(method, p, body);
     if (terminal) return terminal;
+    const extension = this.extensionRoute(method, p, body);
+    if (extension) return extension;
     if (p === "/v1/avatars" && method === "GET") return json(200, { avatars: [...this.avatars.keys()] });
     if (p === "/v1/avatars" && method === "POST") {
       const added: string[] = [];

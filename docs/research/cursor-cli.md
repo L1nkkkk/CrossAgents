@@ -142,3 +142,24 @@ Tip: use --model <id> ...
 - `stream-json` 不带 token 数（见上文「用量」），`status` 也不报额度。
 - 因此账号页对 Cursor 只显示登录状态、打码邮箱与模型列表，额度区为空 → GUI 显示「暂无额度数据」；`AccountProvider::sessions` 返回空，额度/用量页不会有 Cursor 的 token 数字。
 - 以后要接：`~/.cursor/chats/<md5(项目路径)>/<chatId>/store.db`（SQLite）里可能有会话记录，需要另做协议解析，本版没做。
+
+
+## 目录信任与沙箱（2026-11-05 本机实测）
+
+Windows 11，Cursor CLI `2026.10.22-27dcf5f`，已登录。在全新临时目录执行 `agent -p --output-format=stream-json --stream-partial-output --trust --sandbox=enabled --workspace=<新目录> -- <prompt>`，退出码为 1，CLI 返回：
+
+```text
+Error: Sandbox mode is enabled but not available on this system. Sandbox requires macOS or Linux.
+Run 'agent sandbox disable' to switch to allowlist mode.
+```
+
+没有出现目录信任提示，但进程在沙箱初始化时失败，不能据此确认会话能成功启动。由于没有进入模型会话，无法实测沙箱内运行 cargo 或调用 hub MCP 工具；macOS/Linux 上的这两项以及完整启动仍需实测。驱动保留 `--sandbox=enabled`，不采用错误提示中的关闭沙箱建议。
+
+### Windows 非沙箱模式与 bypass（2026-11-05 本机实测）
+
+同一 Windows 11 / CLI 版本，已登录，分别使用全新临时目录；以下结果只代表本次测试。
+
+- `agent -p --output-format=stream-json --trust --workspace=<新目录> -- <prompt>`，不传 `--sandbox` 或 `--force`：会话启动并以退出码 0 完成。文件读取工具成功读到目录内的 `probe.txt`；shell 工具运行 `echo CURSOR_COMMAND_PROBE_7284` 返回 `rejected`，没有输出（模型自行重试一次，仍被拒绝）。这不能推断其他命令或配置的行为。
+- 另一全新目录运行 `agent -p --output-format=stream-json --force --workspace=<新目录> -- <prompt>`，不传 `--trust`：未出现信任提示，会话返回 `FORCE_PROBE_OK`，result 为 success，退出码 0。此探针只验证启动和文本回复。
+
+驱动不因为这次非沙箱实测而改变默认权限边界：Windows 非 bypass 会话在启动前报错，须明确启用 bypass。

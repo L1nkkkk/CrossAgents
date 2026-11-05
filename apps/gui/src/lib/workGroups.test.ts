@@ -93,6 +93,28 @@ test("calls that change the team or the code are cards, not folded steps", () =>
   );
 });
 
+test("an extension tool is never mistaken for a built-in action", () => {
+  // `standup__run_land` ends in an action name but belongs to the extension, not the hub.
+  for (const title of [
+    "mcp__crossagents__standup__run_land",
+    "crossagents.standup__run_land",
+    "mcp__crossagents__standup__agent_spawn",
+    "crossagents.standup__task_accept",
+  ]) {
+    assert.equal(actionOf(tool("mcp", "completed", title)), undefined, title);
+  }
+  assert.equal(actionOf(tool("mcp", "completed", "mcp__crossagents__extension_call")), undefined);
+});
+
+test("a tool call an extension draws itself is a card, not a folded step", () => {
+  const own = tool("mcp", "completed", "mcp__crossagents__standup__report");
+  const blocks = workGroups([tool("read"), own, tool("read")], (item) => item === own);
+  assert.deepEqual(
+    blocks.map((b) => b.kind),
+    ["steps", "item", "steps"],
+  );
+});
+
 type Call = Extract<TranscriptItem, { type: "tool_call" }>;
 const running = (title: string, kind: string, output?: string): Call => ({ type: "tool_call", tool_call_id: "run-1", title, kind, status: "in_progress", ...(output !== undefined ? { output } : {}) });
 

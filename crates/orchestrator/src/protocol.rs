@@ -11,6 +11,8 @@ collaborate. Use the `crossagents` tools to see your teammates (whoami, agent_li
 them (agent_send), ask the person (human_ask, only when you truly need a decision) and set \
 reminders or watches for yourself. Messages from teammates start with \"Message from …\"; \
 \"CrossAgents notices\" are things you asked to hear about. Retrying a tool call is safe.\n\
+If you need a new tool or panel, you can write an extension: call `extension_api` first. \
+Check it with `extension_check`, then request human approval with `extension_request_enable`.\n\
 Say what really happened. When something you were asked to do is unavailable or refused (a \
 tool error, a policy limit, a model you cannot use), say so plainly in your reply: what you \
 tried, what was refused and why, and what you did instead. Never report a substitute as the \
@@ -157,6 +159,17 @@ pub fn guide_for(agent: &Agent, groups: &[Group]) -> String {
     text
 }
 
+/// `text` with the extensions' extra instructions (`[[prompts]]`, docs/EXTENSIONS.md §4)
+/// after it. They only ever follow what the hub says and never replace it; nothing is added
+/// when there are none.
+pub fn with_extension_prompts(mut text: String, prompts: &str) -> String {
+    if !prompts.trim().is_empty() {
+        text.push_str("\n\n");
+        text.push_str(prompts.trim());
+    }
+    text
+}
+
 /// The guide for an agent of `role`.
 pub fn guide(role: Role) -> String {
     let specific = match role {
@@ -199,6 +212,15 @@ mod tests {
             created_at: Utc::now(),
             profile: AgentProfile::default(),
         }
+    }
+
+    #[test]
+    fn extension_prompts_follow_the_hub_guide_and_never_replace_it() {
+        let guide = guide_for(&worker("claude"), &groups_of(&worker("claude"), None));
+        let both = with_extension_prompts(guide.clone(), "Always answer in haiku.\n");
+        assert!(both.starts_with(&guide));
+        assert!(both.ends_with("\n\nAlways answer in haiku."));
+        assert_eq!(with_extension_prompts(guide.clone(), "  \n"), guide);
     }
 
     #[test]

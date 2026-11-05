@@ -6,13 +6,14 @@
 
 ## 1. 现状
 
-hub 只监听 `127.0.0.1`（`[hub] listen` 尚未可配，A2 才放开），鉴权分三层：
+hub 只监听 `127.0.0.1`（`[hub] listen` 尚未可配，A2 才放开），鉴权分四层：
 
 | 层 | 中间件 | 凭据 | 谁用 |
 |---|---|---|---|
 | 免鉴权 | 无 | 无 | 存活探测 |
 | 总 token | `require_token` | `~/.crossagents/token` | GUI（经 Electron 主进程）、CLI |
 | 会话 token | `require_agent_token` | `~/.crossagents/agent-tokens.json` 里每 agent 一个 | 外部 agent 经 MCP 接入 |
+| 扩展 token | `require_token` | 每次扩展工具调用现签，只在 hub 内存里，进程结束作废 | 扩展工具进程回调 hub |
 
 要点：
 
@@ -71,6 +72,15 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 | POST | `/v1/plugins/{name}/install` | admin | GUI |
 | POST | `/v1/plugins/{name}/upgrade` | admin | GUI |
 | POST | `/v1/plugins/refresh` | admin | GUI |
+| GET | `/v1/extensions` | read | GUI |
+| GET | `/v1/extensions/{name}/logs` | read | GUI；与 `extension_logs` 相同的日志尾部 |
+| POST | `/v1/extensions/{name}/enable` | admin | GUI |
+| POST | `/v1/extensions/{name}/disable` | write | GUI |
+| POST | `/v1/extensions/{name}/auto-trust` | admin | GUI |
+| GET | `/v1/extensions/{name}/pending/diff` | read | GUI |
+| POST | `/v1/extensions/{name}/tools/{tool}` | write | GUI（面板） |
+| GET | `/v1/extensions/calls/{id}` | read | GUI（面板） |
+| DELETE | `/v1/extensions/calls/{id}` | write | GUI（面板） |
 | GET | `/v1/usage` | read | GUI、CLI |
 | GET | `/v1/accounts` | read | GUI、CLI |
 | POST | `/v1/accounts` | admin | GUI、CLI |
@@ -117,6 +127,11 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 | POST | `/v1/me/tools/{name}` | write | 外部 agent（MCP） |
 
 会话 token 只认自己那一个 agent，不认总 token，也不能访问 `/v1/agents` 等下表中的管理面。
+扩展的接口（`/v1/extensions*`）也在它到不了的范围内：agent 调扩展工具走 `/v1/me/tools/{name}`
+或内置的 `extension_call`，由 hub 代为执行，拿不到启用和自动信任这两个开关。
+
+> `/v1/extensions*` 这九条是 [EXTENSIONS.md](EXTENSIONS.md) §3 定下的约定，级别写在 `access.rs`，路由在
+> `api.rs`，都有测试。
 
 ## 3. 分级口径
 
@@ -129,6 +144,37 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 `/v1/terminals*` 全部归 admin，读也一样：终端以这台机器的用户身份执行输入的内容，读输出能看到里面打印过的任何东西（包括 token）。agent 的会话 token 到不了这里，终端输出也不进模型。
 
 `POST /v1/plugins/{name}/install` 与 `/upgrade` 也归 admin：它们会在这台机器上执行程序。执行的命令只来自描述文件（`[[install.methods]]` 的 `run` / `upgrade`），请求只给插件名和动作，传不了命令；一次插件只跑一个任务，第二个请求返回 409。`POST /v1/plugins/refresh` 同理：它会在后台运行各 CLI 的版本命令（`locate.version`），只是重新查找和探测，不接受任何命令。
+
+`/v1/extensions*` 分成"信任"和"使用"两半（[EXTENSIONS.md](EXTENSIONS.md) §6）：
+
+- `POST /v1/extensions/{name}/enable` 与 `/auto-trust` 归 admin：批准一份快照等于让 hub 以这台机器的用户身份
+  执行这段代码，和 `/v1/plugins/{name}/install` 同一性质；`auto-trust` 更进一步，开着就是以后每次改动都不再问。
+  这两条必须由人点，所以放在 agent 的会话 token 到不了、只读凭据也到不了的级别。
+- `POST /v1/extensions/{name}/disable` 归 write：收回信任只会让更少的代码跑起来，而面板出错时 ErrorBoundary 上那个
+  「停用」按钮不该比界面其余部分要求更高的凭据。重新启用仍然要 admin，所以拿 write 停用再启用这条路不通。
+- `POST /v1/extensions/{name}/tools/{tool}` 和 `DELETE /v1/extensions/calls/{id}` 归 write：调一个人已经批准过的
+  工具是普通的状态改动。工具自己拿到的是另一套凭据——每次调用现签、只在内存里、级别最高 write（EXTENSIONS.md §3），
+  和这里的路由级别是两回事。
+- `GET /v1/extensions`、`/pending/diff`、`/logs`、`/v1/extensions/calls/{id}` 归 read：都只是读，日志和待批准快照的差异也只是读。
+  待批准记录看得见但批不动，正是分级想要的效果。
+
+### 扩展 token
+
+扩展工具进程拿到的 `CROSSAGENTS_TOKEN` 是 `Grant::Extension { name, level }`，由 `require_token` 认出来，
+再交给同一个策略点：
+
+- 级别只有 read 或 write（取自扩展描述文件里的 `access`，类型是 `ExtensionAccess`，表达不出 admin），
+  按上面的路由表放行：read 的扩展 POST 任何东西都是 403，write 的扩展到不了 admin 路由（停 hub、账号、终端、
+  启用扩展、自动信任）。消息里写明是哪个扩展的 token。
+- 到不了 `/v1/me*`：那一组只认会话 token，扩展的 token 在那里是 401。
+- **调不了 `POST /v1/extensions/{name}/tools/{tool}`**，read 还是 write 都一样（403）。这条路由给工具的
+  `caller` 填的是 `{ "kind": "human" }`，工具声明了 `human` 才能被它调到；只有人的凭据（`Grant::Level`）才算人。
+  不拦的话，write 级的扩展拿自己的 token 调这条路由就能以人的身份调只开放给 `human` 的工具。
+  `access::refusal` 里按路由拒绝，路由处理函数里再核对一次凭据类型。
+- 进程结束就作废，每次调用一个新的；hub 重启后全部失效；每个请求在日志里记下扩展名。
+- 事件钩子（`[[on]]`）和常驻进程（`[service]`）拿到的也是同一套 `Grant::Extension`：级别同样取自 `access`。
+  钩子的 token 随那次进程结束作废；常驻进程的 token 随进程生命周期存在，进程重启换新，hub 退出后全部失效
+  （[EXTENSIONS.md](EXTENSIONS.md) §3「事件响应」「常驻进程」）。
 
 两个边界判断：
 
@@ -143,6 +189,8 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 - `ErrorCode` 增 `Forbidden`：越权返回 403 而不是 401。401 表示"没带凭据或凭据无效"，403 表示"凭据有效但级别不够"，GUI 据此置灰入口并说明原因。
 - Electron 主进程维护"方法 + 路径"白名单，只放行 GUI 实际用到的接口（已做，`apps/gui/electron/allowed.cts`；`allowed.test.cts` 从 `src/api.ts` 抽出全部调用逐条核对，漏登记就失败）。这把收窄放在主进程，页面即使被注入了也无法调用 `/v1/shutdown`。
 - A1 引入 users / devices 后，策略点换成"设备或用户 → 级别"的映射，路由表和白名单都不动。
+- `Grant` 增加了 `Extension { name, level }`（E1 已做，见上面「扩展 token」和 [EXTENSIONS.md](EXTENSIONS.md) §3）。
+  路由表不变，只是多一种凭据能走到现有的策略点；`Grant` 因带名字不再是 `Copy`，`refusal` 接受 `&Grant`。
 
 ### Windows 上的令牌文件
 

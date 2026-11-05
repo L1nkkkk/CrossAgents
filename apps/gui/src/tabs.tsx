@@ -6,7 +6,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent } from "react";
 import { Icon } from "./components";
 import { dropTarget, type DockId, type Drop, type Rect, type Strip } from "./lib/docks";
-import { closedKinds, dropTab, isTermTab, openTool, paneLabel, pickTab, shutTab, useLayout, type TabId } from "./panes";
+import { closedExtTabs, closedKinds, dropTab, isTermTab, openExtTab, openTool, paneLabel, pickTab, shutTab, useLayout, type TabId } from "./panes";
 import { closeTerminal, newTerminal, terminalsAvailable, useTabLabel, useTerminalScope } from "./terminal";
 
 /** Pixels a pointer moves before a press on a tab becomes a drag. */
@@ -147,6 +147,7 @@ function AddTab({ dock }: { dock: DockId }) {
   const [at, setAt] = useState<{ left: number; top: number } | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const closed = closedKinds(state.docks);
+  const closedExt = closedExtTabs();
   const canTerminal = terminalsAvailable() && !!useTerminalScope();
   useEffect(() => {
     if (!at) return;
@@ -154,8 +155,8 @@ function AddTab({ dock }: { dock: DockId }) {
     window.addEventListener("mousedown", close);
     return () => window.removeEventListener("mousedown", close);
   }, [at]);
-  if (!closed.length && !canTerminal) return null;
-  const rows = closed.length + (canTerminal ? 1 : 0);
+  if (!closed.length && !closedExt.length && !canTerminal) return null;
+  const rows = closed.length + closedExt.length + (canTerminal ? 1 : 0);
   return (
     <div className="dock-add" ref={ref}>
       <button
@@ -209,6 +210,23 @@ function AddTab({ dock }: { dock: DockId }) {
             >
               <span className="menu-text">
                 <span className="menu-label">{p.label}</span>
+              </span>
+            </button>
+          ))}
+          {closedExt.map(({ tab, label }) => (
+            <button
+              type="button"
+              key={tab}
+              role="menuitem"
+              className="menu-item"
+              onClick={() => {
+                setAt(null);
+                // Reopens an extension tab the person closed; it comes to the front here.
+                openExtTab(tab, dock);
+              }}
+            >
+              <span className="menu-text">
+                <span className="menu-label">{label}</span>
               </span>
             </button>
           ))}

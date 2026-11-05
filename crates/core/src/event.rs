@@ -443,6 +443,35 @@ pub enum EventKind {
     /// install or an upgrade and the lookup that followed it.
     #[serde(rename = "plugin.changed")]
     PluginChanged { name: String },
+    /// An extension changed in a way clients should re-read (`GET /v1/extensions`): its
+    /// source directory was found changed by the hub's poll, a snapshot is waiting for
+    /// approval, a version was enabled or disabled, or auto-trust was switched
+    /// (docs/EXTENSIONS.md §5, §6). The state itself is not carried: the client reads it, as
+    /// it does after `plugin.changed`.
+    #[serde(rename = "extension.changed")]
+    ExtensionChanged { name: String },
+    /// An extension tool call ended. The result is not carried: it is fetched from
+    /// `GET /v1/extensions/calls/{call_id}`, which keeps it for ten minutes
+    /// (docs/EXTENSIONS.md §3).
+    #[serde(rename = "extension.call.finished")]
+    ExtensionCallFinished {
+        /// The id the 202 answered with.
+        call_id: String,
+        extension: String,
+        /// The bare tool name, as the description file names it.
+        tool: String,
+        /// The snapshot it ran on, which a version switch under it does not change.
+        fingerprint: String,
+        /// `ok`, `failed`, `cancelled` or `timed_out`
+        /// (`crossagents_api_types::ExtensionCallStatus`).
+        status: String,
+        #[cfg_attr(feature = "ts", ts(type = "number"))]
+        duration_ms: u64,
+        /// Why it failed, for a status other than `ok`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        error: Option<String>,
+    },
 }
 
 /// A message on its way to an agent. The id is fixed before delivery, so a sender can
@@ -571,6 +600,8 @@ impl EventKind {
             Self::CliInstallOutput { .. } => "cli.install.output",
             Self::CliInstallFinished { .. } => "cli.install.finished",
             Self::PluginChanged { .. } => "plugin.changed",
+            Self::ExtensionChanged { .. } => "extension.changed",
+            Self::ExtensionCallFinished { .. } => "extension.call.finished",
         }
     }
 
@@ -622,7 +653,11 @@ impl EventKind {
             | Self::CliInstallStarted { .. }
             | Self::CliInstallOutput { .. }
             | Self::CliInstallFinished { .. }
-            | Self::PluginChanged { .. } => None,
+            | Self::PluginChanged { .. }
+            | Self::ExtensionChanged { .. }
+            // The caller is in the call record, not here: an extension's panel calls its
+            // tools as the person, with no agent to attribute them to.
+            | Self::ExtensionCallFinished { .. } => None,
             Self::AgentSessionStarted { id, .. } => Some(*id),
             Self::ReminderFired { owner, .. } | Self::WatchTriggered { owner, .. } => Some(*owner),
             Self::NoteWritten { author, .. } => Some(*author),
@@ -696,10 +731,48 @@ mod tests {
                 version: "0".into(),
             },
             EventKind::HubStopping,
+            EventKind::ExtensionChanged {
+                name: "standup".into(),
+            },
+            EventKind::ExtensionCallFinished {
+                call_id: "c1".into(),
+                extension: "standup".into(),
+                tool: "report".into(),
+                fingerprint: "f1".into(),
+                status: "ok".into(),
+                duration_ms: 12,
+                error: None,
+            },
         ];
         for kind in kinds {
             let value = serde_json::to_value(&kind).unwrap();
             assert_eq!(value["type"], kind.type_name());
         }
+    }
+
+    /// Extension events are about an extension, not an agent or a run (docs/EXTENSIONS.md §5).
+    #[test]
+    fn extension_events_belong_to_no_run_or_agent() {
+        let changed = EventKind::ExtensionChanged {
+            name: "standup".into(),
+        };
+        assert_eq!(changed.type_name(), "extension.changed");
+        assert_eq!(changed.run_id(), None);
+        assert_eq!(changed.agent_id(), None);
+
+        let finished = EventKind::ExtensionCallFinished {
+            call_id: "c1".into(),
+            extension: "standup".into(),
+            tool: "report".into(),
+            fingerprint: "f1".into(),
+            status: "timed_out".into(),
+            duration_ms: 60_000,
+            error: Some("timed out after 60s".into()),
+        };
+        let value = serde_json::to_value(&finished).unwrap();
+        assert_eq!(value["type"], "extension.call.finished");
+        assert_eq!(value["data"]["call_id"], "c1");
+        assert_eq!(value["data"]["status"], "timed_out");
+        assert_eq!(finished.agent_id(), None);
     }
 }

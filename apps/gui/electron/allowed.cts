@@ -50,6 +50,17 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "GET", path: /^\/v1\/plugins$/, level: "read" },
   { method: "POST", path: /^\/v1\/plugins\/[^/]+\/models$/, level: "write" },
   { method: "POST", path: /^\/v1\/plugins\/[^/]+\/(install|upgrade)$/, level: "admin" },
+  // Extensions (docs/EXTENSIONS.md §3, §5). Enabling one and switching auto-trust are the
+  // person's: the hub's admin level is the real check. A GUI-side call's tool name is bare.
+  { method: "GET", path: /^\/v1\/extensions$/, level: "read" },
+  { method: "GET", path: /^\/v1\/extensions\/[^/]+\/logs$/, level: "read" },
+  { method: "POST", path: /^\/v1\/extensions\/[^/]+\/enable$/, level: "admin" },
+  { method: "POST", path: /^\/v1\/extensions\/[^/]+\/disable$/, level: "write" },
+  { method: "POST", path: /^\/v1\/extensions\/[^/]+\/auto-trust$/, level: "admin" },
+  { method: "GET", path: /^\/v1\/extensions\/[^/]+\/pending\/diff$/, level: "read" },
+  { method: "POST", path: /^\/v1\/extensions\/[^/]+\/tools\/[^/]+$/, level: "write" },
+  { method: "GET", path: /^\/v1\/extensions\/calls\/[^/]+$/, level: "read" },
+  { method: "DELETE", path: /^\/v1\/extensions\/calls\/[^/]+$/, level: "write" },
   // Looking for the CLIs again runs their version commands, as install and upgrade do.
   // `?plugin=` rides along; `route()` drops it before matching.
   { method: "POST", path: /^\/v1\/plugins\/refresh$/, level: "admin" },

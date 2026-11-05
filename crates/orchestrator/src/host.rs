@@ -142,3 +142,48 @@ pub trait AgentHost: Send + Sync {
         false
     }
 }
+
+/// One tool of an enabled extension, as the orchestrator lists it for an agent
+/// (docs/EXTENSIONS.md §3).
+#[derive(Debug, Clone)]
+pub struct ExtensionToolSpec {
+    /// `<extension>__<tool>`.
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+    /// The groups that may call it, by name (`lead`, `everyone`, `human`, ...).
+    pub groups: Vec<String>,
+}
+
+/// Who calls an extension tool, as the orchestrator knows them at the moment of the call.
+#[derive(Debug, Clone)]
+pub struct ExtensionCaller {
+    pub agent: Agent,
+    /// The agent's permission groups right now, by name.
+    pub groups: Vec<String>,
+    pub run: Option<RunId>,
+    pub task: Option<String>,
+}
+
+/// What the orchestrator needs from whoever runs extension tools (the hub). It is optional:
+/// without one there are no extension tools. The orchestrator does not know how a tool runs.
+#[async_trait]
+pub trait ExtensionHost: Send + Sync {
+    /// The tools of every enabled extension, at their current version.
+    fn tools(&self) -> Vec<ExtensionToolSpec>;
+    /// Runs `tool` (`<extension>__<tool>`). The host checks, in this order: the extension is
+    /// enabled (and which version this call uses), the caller's groups allow the tool, the
+    /// input fits the schema, and the concurrency limits hold.
+    async fn call(
+        &self,
+        caller: ExtensionCaller,
+        tool: &str,
+        input: Value,
+    ) -> Result<Value, CoreError>;
+    /// The extra instructions the enabled extensions declare for `groups`, in order. Read
+    /// when a session starts; they are appended to the hub's own and never replace them.
+    fn prompts(&self, groups: &[&str]) -> Vec<String> {
+        let _ = groups;
+        Vec::new()
+    }
+}

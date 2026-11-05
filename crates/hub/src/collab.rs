@@ -152,7 +152,14 @@ impl SessionSetup for CollabSetup {
                 crossagents_orchestrator::messaging::groups_of(agent, None),
             ),
         };
-        let instructions = instructions(agent, &groups, lessons.as_deref());
+        let mut instructions = instructions(agent, &groups, lessons.as_deref());
+        // Enabled extensions' own instructions come last and only add to the hub's.
+        if let Some(orchestrator) = self.orchestrator.get() {
+            instructions = crossagents_orchestrator::protocol::with_extension_prompts(
+                instructions,
+                &orchestrator.extension_prompts(&groups),
+            );
+        }
         let Some((program, args)) = self.mcp_command.split_first() else {
             return Ok(SessionExtras {
                 mcp_servers: self.extra_mcp.clone(),
