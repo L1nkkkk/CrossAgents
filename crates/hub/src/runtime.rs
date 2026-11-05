@@ -1384,20 +1384,18 @@ impl Runtime {
 
     /// Takes the agent's notification digest if it is still waiting for its turn, so a
     /// person's message can carry it; `None` once it started or when there is none.
+    ///
+    /// The check, the withdraw and the removal happen under one `digests` lock: a concurrent
+    /// `notify` takes the same lock first, so it cannot add a line to a digest this call is
+    /// taking out (which `inbox.update` would then drop as already withdrawn). Locks go
+    /// `digests` first, then `inbox` — the order `notify` uses too (`digests` → `inbox.update`).
     async fn take_waiting_digest(&self, id: AgentId, inbox: &Inbox) -> Option<Digest> {
-        let message = {
-            let digests = self.digests.lock().await;
-            digests.get(&id).map(|digest| digest.message)?
-        };
+        let mut digests = self.digests.lock().await;
+        let message = digests.get(&id)?.message;
         if !inbox.withdraw(message) {
             return None;
         }
-        let mut digests = self.digests.lock().await;
-        match digests.get(&id) {
-            Some(digest) if digest.message == message => digests.remove(&id),
-            // News arrived in between and began a new digest: leave that one waiting.
-            _ => None,
-        }
+        digests.remove(&id)
     }
 
     async fn with_notices(&self, agent: AgentId, text: String) -> String {
