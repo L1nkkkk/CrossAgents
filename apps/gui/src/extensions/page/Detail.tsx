@@ -64,6 +64,9 @@ function ExtensionBody({ info, page, reload }: { info: ExtensionInfo; page?: Ext
   const [diff, setDiff] = useState<ExtensionDiffResponse>();
   const [diffError, setDiffError] = useState<string>();
   const pendingFp = info.pending?.version.fingerprint;
+  const requesterId = info.pending?.requested_by;
+  const agents = useHubData(() => (requesterId ? api.listAgents().then((r) => r.agents) : Promise.resolve([])), [requesterId], () => false);
+  const requester = agents.data?.find((a) => a.id === requesterId)?.name;
 
   // The fingerprint this screen opened with: it is what the approve button sends. A later
   // pending record (the source changed again) leaves `seen` behind, and the card says so — but
@@ -211,6 +214,7 @@ function ExtensionBody({ info, page, reload }: { info: ExtensionInfo; page?: Ext
           diff={diff}
           diffError={diffError}
           busy={busy}
+          requester={requester}
           onApprove={approve}
           onLook={setSeen}
         />

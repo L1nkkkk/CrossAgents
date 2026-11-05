@@ -12,7 +12,7 @@ pub fn call(
     input: Value,
 ) -> Option<Result<Value, CoreError>> {
     if tool == "extension_api" {
-        return Some(Ok(api()));
+        return Some(Ok(api_at(&registry.sources())));
     }
     if !matches!(
         tool,
@@ -38,6 +38,12 @@ pub fn call(
 }
 
 pub fn api() -> Value {
+    api_at(std::path::Path::new("<CrossAgents home>/extensions"))
+}
+
+/// The inventory, naming where this hub looks for sources: an agent that guesses
+/// `~/.crossagents` writes to a directory this hub never reads when its home is elsewhere.
+pub fn api_at(sources: &std::path::Path) -> Value {
     // Read the authoritative event wire names at compile time, keeping this inventory in sync.
     let events: Vec<_> = include_str!("../../../core/src/event.rs")
         .lines()
@@ -46,7 +52,7 @@ pub fn api() -> Value {
         .collect();
     json!({
         "api": 1,
-        "source_directory": "<CrossAgents home>/extensions/<name>/ (normally ~/.crossagents/extensions/<name>/)",
+        "source_directory": sources.join("<name>").display().to_string(),
         "events": events,
         "groups": ["everyone", "lead", "assignee", "reviewer", "conversation", "human"],
         "groups_help": "Tools may include human for GUI calls; prompts accept only agent groups. Empty groups allow nobody. Groups are checked again at call time.",
@@ -62,7 +68,7 @@ pub fn api() -> Value {
             "guidance": "Use timeout_secs below 300 or split long work into start + poll. CLI timeout does not cancel the hub process; it runs until its own deadline. GUI calls return 202 and poll /v1/extensions/calls/{id}; never automatically retry side effects."
         },
         "example": {
-            "requires": "Node.js on PATH; create all three files below in extensions/hello/",
+            "requires": "Node.js on PATH; create all three files below in source_directory, with hello as <name>",
             "files": {
                 "extension.toml": r#"name = "hello"
 api = 1

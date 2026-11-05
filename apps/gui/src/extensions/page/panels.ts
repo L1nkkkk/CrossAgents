@@ -126,6 +126,7 @@ export function ApprovalPanel({
   diff,
   diffError,
   busy,
+  requester,
   onApprove,
   onLook,
 }: {
@@ -134,6 +135,8 @@ export function ApprovalPanel({
   diff?: ExtensionDiffResponse;
   diffError?: string;
   busy: boolean;
+  /** The name of the agent that asked; the hub records only its id. */
+  requester?: string;
   onApprove: (fingerprint: string) => void;
   onLook: (fingerprint?: string) => void;
 }) {
@@ -172,7 +175,7 @@ export function ApprovalPanel({
     <div className="ext-card-head">
       <h2>待批准的版本</h2>
       <span className="muted small">
-        ${info.pending?.requested_by ? `由 ${info.pending.requested_by} 发起` : "hub 自己发现的改动"} · ${takenText(info.pending?.requested_at ?? version.taken_at)}
+        ${info.pending?.requested_by ? `由 ${requester ?? info.pending.requested_by} 发起` : "hub 自己发现的改动"} ·${takenText(info.pending?.requested_at ?? version.taken_at)}
       </span>
     </div>
     <${VersionCard} version=${version} />
@@ -351,7 +354,7 @@ export function MakePlugin({ want, onWant, onMake }: { want: string; onWant: (va
 export function RegisteredBody({ registration, handlersFor }: { registration: PageRegistration; handlersFor: HandlersFor }) {
   const handlers = handlersFor(registration.extension, registration.label);
   const children = safeElement(registration.extension, () => registration.render({ extension: registration.extension }), handlers);
-  return html`<${ExtensionBoundary} extension=${registration.extension} handlers=${handlers} children=${children} />`;
+  return html`<${ExtensionBoundary} key=${`${registration.extension}/${registration.id}@${registration.fingerprint}`} extension=${registration.extension} handlers=${handlers} children=${children} />`;
 }
 
 /** `ca.settings` blocks, shown under the extension list; each is titled inside its own card. */

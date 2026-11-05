@@ -1,8 +1,8 @@
 // One extension's component, kept from taking the page down with it (docs/EXTENSIONS.md §5).
 // Two layers, because React catches different failures at different times:
 //
-// - `safeElement` calls the registered render function itself; a throw there is recorded and
-//   replaced by the failure card, while the siblings on the page still render.
+// - `safeElement` runs the registered render function as its own component; a throw there is
+//   recorded and replaced by the failure card, while the siblings on the page still render.
 // - `ExtensionBoundary` catches errors from children the render function returned (a nested
 //   component or hook throwing later), showing the same card in that block only.
 //
@@ -36,17 +36,31 @@ export function ExtensionFailure({ extension, error, handlers }: { extension: st
   );
 }
 
+type RegisteredProps = { extension: string; render: () => ReactNode; handlers: ExtensionFailureHandlers };
+
 /**
- * Calls a registered render function, turning a throw into the failure card. Whatever the
- * function registered through `ca` is cleaned up by the host when the person disables it.
+ * A registered render function as a component of its own. Its hooks (`ca.useState`, …) belong to
+ * this fiber: called from the host's component instead, they would count as the host's, and the
+ * next tab with a different number of hooks would take the whole page down with React error 300,
+ * above any boundary.
  */
-export function safeElement(extension: string, render: () => ReactNode, handlers: ExtensionFailureHandlers): ReactNode {
+function Registered({ extension, render, handlers }: RegisteredProps): ReactNode {
   try {
     return render();
   } catch (error) {
     handlers.onError?.(error);
     return createElement(ExtensionFailure, { extension, error, handlers });
   }
+}
+
+/**
+ * A registered render function, turning a throw into the failure card. Whatever the function
+ * registered through `ca` is cleaned up by the host when the person disables it. Give the
+ * surrounding boundary a key per block and version: two blocks must not share a fiber, or their
+ * hooks would collide.
+ */
+export function safeElement(extension: string, render: () => ReactNode, handlers: ExtensionFailureHandlers): ReactNode {
+  return createElement(Registered, { extension, render, handlers });
 }
 
 type Props = {

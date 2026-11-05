@@ -323,6 +323,13 @@ fn extensions_check_validates_schema_entries_and_the_documented_example() {
     assert!(registry.check("../demo").is_err());
     assert!(!root.join("marker").exists());
 
+    // An agent is told where this hub really reads sources from, whatever its home is.
+    let told = crossagents_hub::extensions::creator::api_at(&registry.sources());
+    assert_eq!(
+        told["source_directory"].as_str().unwrap(),
+        registry.sources().join("<name>").display().to_string()
+    );
+
     let api = crossagents_hub::extensions::creator::api();
     let hello = home.path().join("extensions/hello");
     for (name, content) in api["example"]["files"].as_object().unwrap() {

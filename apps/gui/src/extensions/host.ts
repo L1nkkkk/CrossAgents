@@ -875,6 +875,15 @@ export function createExtensionHost(options: ExtensionHostOptions) {
 
 export type ExtensionHost = ReturnType<typeof createExtensionHost>;
 
+/**
+ * The tabs of extensions that finished loading. A tab registered during an `activate` that may
+ * still throw is not one yet: placing it in a dock then would outlive the failed load, in the
+ * saved layout too.
+ */
+export function readyTabs(snapshot: ExtensionsSnapshot): ExtTab[] {
+  return [...snapshot.tabs.values()].filter((tab) => snapshot.records.get(tab.extension)?.status === "ready").map((tab) => tab.tab);
+}
+
 // ---- Safe mode and the shell's loading marker --------------------------------------------
 
 const extensionsBridge = () => (typeof window === "undefined" ? undefined : window.crossagents?.extensions);

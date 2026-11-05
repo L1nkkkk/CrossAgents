@@ -4,6 +4,7 @@
 
 import { offerExtTab, setExtTabLabels, syncExtensionTabs } from "../panes";
 import { extensionHost } from "./defaults";
+import { readyTabs } from "./host.ts";
 
 /** Subscribes to the host, then starts loading; call once, before the app renders. */
 export function startExtensionsUi(): () => void {
@@ -16,7 +17,7 @@ export function startExtensionsUi(): () => void {
     syncExtensionTabs(snapshot.enabled);
     // A registered tab with no dock is offered on the right; one the person closed is
     // remembered in localStorage and waits in a dock's + menu instead.
-    for (const tab of snapshot.tabs.keys()) offerExtTab(tab);
+    for (const tab of readyTabs(snapshot)) offerExtTab(tab);
   };
   const off = extensionHost.subscribe(apply);
   void extensionHost.start();

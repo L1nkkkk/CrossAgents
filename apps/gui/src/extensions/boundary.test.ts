@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createElement } from "react";
+import { createElement, useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ExtensionBoundary, safeElement } from "./boundary.ts";
 
@@ -25,6 +25,22 @@ test("a throwing render function breaks only its own block", () => {
   assert.match(html, /boom from a panel/);
   assert.match(html, /停用/);
   assert.deepEqual(errors, [new Error("boom from a panel")]);
+});
+
+test("a registered render function is a component of its own, so its hooks are not the host's", () => {
+  let calls = 0;
+  const element = safeElement(
+    "hooks",
+    () => {
+      calls++;
+      const [text] = useState("own state");
+      return createElement("span", null, text);
+    },
+    { onDisable: () => {} },
+  );
+  assert.equal(calls, 0, "the host's component must not run it inline");
+  assert.match(renderToStaticMarkup(element as never), /own state/);
+  assert.equal(calls, 1);
 });
 
 test("the boundary turns a later render error into the same failure card", () => {

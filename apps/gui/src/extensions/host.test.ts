@@ -5,7 +5,7 @@ import type { ExtensionCallStatus } from "@bindings/ExtensionCallStatus";
 import type { ExtensionInfo } from "@bindings/ExtensionInfo";
 import type { ExtensionVersion } from "@bindings/ExtensionVersion";
 import type { HubEvent } from "../hub";
-import { createExtensionHost, detectSafeMode, extensionEntryUrl, type ExtensionHostOptions, type ExtensionModule } from "./host.ts";
+import { createExtensionHost, detectSafeMode, extensionEntryUrl, readyTabs,type ExtensionHostOptions, type ExtensionModule } from "./host.ts";
 
 const version = (fingerprint: string): ExtensionVersion => ({
   fingerprint,
@@ -117,6 +117,7 @@ async function until(check: () => boolean, label: string, ms = 1000) {
 test("an activate that throws halfway leaves nothing behind, and other extensions load", async () => {
   const a = extensionEntryUrl("a", "fp1", "gui/index.js");
   const b = extensionEntryUrl("b", "fp1", "gui/index.js");
+  let duringActivate: string[] | undefined;
   const modules = new Map<string, ExtensionModule>([
     [
       a,
@@ -126,6 +127,7 @@ test("an activate that throws halfway leaves nothing behind, and other extension
           ca.toolCards.register("report", () => null);
           ca.events.on("run.finished", () => {});
           ca.styles.add("./panel.css");
+          duringActivate = readyTabs(run.host.snapshot());
           throw new Error("halfway");
         },
       },
@@ -148,6 +150,9 @@ test("an activate that throws halfway leaves nothing behind, and other extension
   assert.match(failed.error ?? "", /halfway/);
   assert.ok(failed.logs.some((line) => line.includes("加载失败")));
   assert.deepEqual([...snapshot.tabs.keys()], ["ext:b/panel"]);
+  // A tab registered before the throw is never offered to a dock, which would outlive the load.
+  assert.deepEqual(duringActivate, []);
+  assert.deepEqual(readyTabs(snapshot), ["ext:b/panel"]);
   assert.equal(snapshot.cards.size, 0);
   assert.equal(snapshot.records.get("b")!.status, "ready");
   // The host's own event subscription is the only one left.

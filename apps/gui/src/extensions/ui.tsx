@@ -29,7 +29,7 @@ export function ExtensionTabBody({ tab, follow }: { tab: ExtTab; follow?: string
     const context: ExtensionPanelContext = { extension: registration.extension, follow };
     const handlers = handlersFor(registration.extension, registration.label);
     return (
-      <ExtensionBoundary extension={registration.extension} handlers={handlers}>
+      <ExtensionBoundary key={`${tab}@${registration.fingerprint}`} extension={registration.extension} handlers={handlers}>
         {safeElement(registration.extension, () => registration.render(context), handlers)}
       </ExtensionBoundary>
     );
@@ -59,7 +59,7 @@ export function ToolCardView({ card, call }: { card: CardRegistration; call: Too
   };
   const handlers = handlersFor(card.extension, card.key);
   return (
-    <ExtensionBoundary extension={card.extension} handlers={handlers}>
+    <ExtensionBoundary key={`${card.key}@${card.fingerprint}`} extension={card.extension} handlers={handlers}>
       {safeElement(card.extension, () => card.render(context), handlers)}
     </ExtensionBoundary>
   );

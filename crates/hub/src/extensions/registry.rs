@@ -389,6 +389,10 @@ impl Registry {
         }
         self.update(&mut s, name, rec)
     }
+    /// Where this hub reads extension sources from.
+    pub fn sources(&self) -> PathBuf {
+        self.home.join("extensions")
+    }
     /// Static inspection of source files; no subprocess, import, approval or state change.
     pub fn check(&self, name: &str) -> Result<ExtensionVersion> {
         check_extension_name(name).map_err(CoreError::InvalidName)?;
