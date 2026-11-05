@@ -569,6 +569,7 @@ impl Orchestrator {
                 interfaces: Vec::new(),
                 acceptance: Vec::new(),
                 references: vec![format!("conflict hunks when merging {base}:\n{detail}")],
+                ..TaskSpec::default()
             },
             depends_on: Vec::new(),
             issuer: Some(run.planner),

@@ -640,6 +640,7 @@ dependencies = [
  "crossagents-core",
  "crossagents-store-sqlite",
  "dunce",
+ "jsonschema",
  "serde",
  "serde_json",
  "tempfile",

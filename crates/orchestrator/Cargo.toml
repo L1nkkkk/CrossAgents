@@ -12,6 +12,7 @@ chrono.workspace = true
 uuid.workspace = true
 crossagents-core.workspace = true
 dunce.workspace = true
+jsonschema.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

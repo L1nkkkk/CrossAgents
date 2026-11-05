@@ -166,6 +166,21 @@ impl Orchestrator {
 
     pub(crate) async fn task_get(&self, caller: &Agent, input: Value) -> Result<Value, CoreError> {
         let (run, task) = self.task_arg(caller, &input).await?;
+        if let Some(path) = input.get("path") {
+            let path = path
+                .as_str()
+                .ok_or_else(|| CoreError::Conflict("path must be a JSON Pointer string".into()))?;
+            let result = task
+                .report
+                .result
+                .as_ref()
+                .ok_or_else(|| CoreError::Conflict("task has no result".into()))?;
+            return result.pointer(path).cloned().ok_or_else(|| {
+                CoreError::Conflict(format!(
+                    "result path {path:?} does not exist or is not a valid JSON Pointer"
+                ))
+            });
+        }
         let mut value = task_json(&task);
         value["spec"] = json!(task.spec);
         value["report"] = json!(task.report);
@@ -563,21 +578,45 @@ impl Orchestrator {
     /// working, so the new report is a new round, checked like the first one. Only a call
     /// that brings nothing new - the same summary and nothing changed in the worktree since
     /// the verified commit, uncommitted work included - is the retried call it looks like.
+    #[cfg(test)]
     pub(crate) async fn complete(
         self: &Arc<Self>,
         caller: &Agent,
         id: TaskId,
         summary: String,
     ) -> Result<(), CoreError> {
+        self.complete_with_result(caller, id, summary, None).await
+    }
+
+    pub(crate) async fn complete_with_result(
+        self: &Arc<Self>,
+        caller: &Agent,
+        id: TaskId,
+        summary: String,
+        result: Option<Value>,
+    ) -> Result<(), CoreError> {
         let (run, _) = self.task_of(id).await?;
         let _guard = self.lock(run.id).await;
         let mut task = self.store.get_task(id).await?;
         Self::require_assignee(&task, caller)?;
+        if let Some(schema) = &task.spec.result_schema {
+            let value = result
+                .as_ref()
+                .ok_or_else(|| CoreError::Conflict("result is required by result_schema".into()))?;
+            let validator = jsonschema::validator_for(schema)
+                .map_err(|err| CoreError::Conflict(format!("invalid result_schema: {err}")))?;
+            if let Err(err) = validator.validate(value) {
+                return Err(CoreError::Conflict(format!(
+                    "result at {}: {err}",
+                    err.instance_path
+                )));
+            }
+        }
         if task.status == TaskStatus::Verifying {
             return Ok(()); // a retried call: its checks are still running
         }
         if task.status == TaskStatus::Passed {
-            if !self.brings_new_work(&run, &task, &summary).await {
+            if task.report.result == result && !self.brings_new_work(&run, &task, &summary).await {
                 tracing::debug!(task = %task.key, "the same report again; the one it has stands");
                 return Ok(());
             }
@@ -594,6 +633,7 @@ impl Orchestrator {
             )));
         }
         task.report.summary = Some(summary);
+        task.report.result = result;
         task.report.failure = None;
         task.report.forced = None;
         task.report.interrupted = false;

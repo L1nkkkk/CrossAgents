@@ -88,7 +88,8 @@ fn spec_schema() -> Value {
             },
             "interfaces": strings,
             "acceptance": { "type": "array", "items": { "type": "string" }, "description": "Optional shell commands the hub runs when the worker reports done." },
-            "references": strings
+            "references": strings,
+            "result_schema": { "type": "object", "description": "JSON Schema for the required structured result." }
         },
         "required": ["goal"]
     })
@@ -453,7 +454,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "plan_submit",
-        description: "Submit the plan for your current run: the full list of tasks for workers. Each task goes to a new execution session of its assignee by default (fresh: true); write fresh: false to have that session itself, with its conversation, do it. Depending on the run's policy the person approves it first, or it starts at once.",
+        description: "Submit the plan for your current run: the full list of tasks for workers. A task spec may include result_schema, a JSON Schema the worker must satisfy in task_complete.result. Each task goes to a new execution session of its assignee by default (fresh: true); write fresh: false to have that session itself, with its conversation, do it. Depending on the run's policy the person approves it first, or it starts at once.",
         groups: PLANNER,
         schema: || {
             json!({
@@ -467,7 +468,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_create",
-        description: "Add tasks to your running run (same fields as plan_submit's tasks). They start once their dependencies are merged. Keys already in the run are left as they are. If the run lets workers delegate, a worker can split parts off its own task this way: they branch from it and merge back into it, and the worker accepts them. Like plan_submit, each task goes to a new execution session unless it says fresh: false; tasks that could not start are listed in not_started with the reason.",
+        description: "Add tasks to your running run (same fields as plan_submit's tasks); spec.result_schema optionally defines a JSON Schema for the worker's result. They start once their dependencies are merged. Keys already in the run are left as they are. If the run lets workers delegate, a worker can split parts off its own task this way: they branch from it and merge back into it, and the worker accepts them. Like plan_submit, each task goes to a new execution session unless it says fresh: false; tasks that could not start are listed in not_started with the reason.",
         groups: RUN,
         schema: || {
             object(
@@ -491,7 +492,11 @@ const TOOLS: &[ToolDef] = &[
         name: "task_get",
         description: "One task in full: spec, report (worker summary, checks, diff stat, failure, question, review), branch, worktree, run branch.",
         groups: RUN,
-        schema: || task_schema(json!({})),
+        schema: || {
+            task_schema(
+                json!({ "path": { "type": "string", "description": "JSON Pointer into report.result" } }),
+            )
+        },
     },
     ToolDef {
         name: "task_update",
@@ -720,6 +725,7 @@ const TOOLS: &[ToolDef] = &[
             let mut schema = task_id_schema(
                 json!({ "summary": { "type": "string", "description": "What you changed." } }),
             );
+            schema["properties"]["result"] = json!({ "description": "Structured JSON result; required when the task has a result_schema." });
             // Optional, unlike the fields `task_id_schema` lists as required.
             schema["properties"]["used"] = json!({
                 "type": "array",
@@ -1048,8 +1054,10 @@ impl Orchestrator {
                     used: Vec<String>,
                 }
                 let task = self.task_ref(caller, &input).await?;
+                let result = input.get("result").cloned();
                 let a: A = args(input)?;
-                self.complete(caller, task, a.summary).await?;
+                self.complete_with_result(caller, task, a.summary, result)
+                    .await?;
                 // Tags that named no entry of this project or the person come back, so the
                 // worker can name them again properly. The report is already in: a store that
                 // cannot record them must not make task_complete fail and be retried, so they
