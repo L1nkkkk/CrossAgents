@@ -170,6 +170,7 @@ mod tests {
             thread: None,
             reply_excerpt: None,
             attachments: Vec::new(),
+            notices: Vec::new(),
         }
     }
 
@@ -312,6 +313,7 @@ mod tests {
                 thread: None,
                 reply_excerpt: None,
                 attachments: Vec::new(),
+                notices: Vec::new(),
             },
             now,
         );

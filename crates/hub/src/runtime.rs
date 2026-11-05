@@ -1299,6 +1299,7 @@ impl Runtime {
                     thread,
                     reply_excerpt,
                     attachments: attachments.clone(),
+                    notices: Vec::new(),
                 },
             )
             .await;
@@ -1325,6 +1326,27 @@ impl Runtime {
             .filter(|l| !l.inbox.is_closed())
             .ok_or_else(|| CoreError::Agent(format!("agent {} stopped", agent.name)))?;
         let queued = !live.inbox.is_idle();
+        // A person's message takes a notice digest that is still waiting with it: the agent
+        // reads the notices right after the person's words, in the same turn, instead of
+        // spending a turn of its own on them (docs/TODO.md §二十五 第 3 条).
+        let carried = match from {
+            MessageSource::Human => self.take_waiting_digest(agent.id, &live.inbox).await,
+            _ => None,
+        };
+        if let Some(digest) = &carried {
+            publish(
+                &self.bus,
+                EventKind::AgentInputWithdrawn {
+                    id: agent.id,
+                    message_id: digest.message,
+                },
+            )
+            .await;
+        }
+        let notices: Vec<String> = carried
+            .as_ref()
+            .map(|digest| digest.lines.values().cloned().collect())
+            .unwrap_or_default();
         // Published before the message can start a turn, so clients see the input first.
         publish(
             &self.bus,
@@ -1338,12 +1360,17 @@ impl Runtime {
                 thread,
                 reply_excerpt,
                 attachments: attachments.clone(),
+                notices,
             },
         )
         .await;
         // What changed since the last message (model, effort, name) is told before it; the
         // conversation shows it as a note of its own (e.g. `agent.model_changed`).
-        let text = self.with_notices(agent.id, text).await;
+        let mut text = self.with_notices(agent.id, text).await;
+        // The notices go after the person's words, as the agent reads them.
+        if let Some(digest) = carried {
+            text = format!("{text}\n\n{}", digest.text());
+        }
         if from == MessageSource::Human {
             live.inbox.from_person.lock().unwrap().insert(message_id);
         }
@@ -1353,6 +1380,24 @@ impl Runtime {
             let _ = live.session.interrupt().await;
         }
         Ok((message_id, queued))
+    }
+
+    /// Takes the agent's notification digest if it is still waiting for its turn, so a
+    /// person's message can carry it; `None` once it started or when there is none.
+    async fn take_waiting_digest(&self, id: AgentId, inbox: &Inbox) -> Option<Digest> {
+        let message = {
+            let digests = self.digests.lock().await;
+            digests.get(&id).map(|digest| digest.message)?
+        };
+        if !inbox.withdraw(message) {
+            return None;
+        }
+        let mut digests = self.digests.lock().await;
+        match digests.get(&id) {
+            Some(digest) if digest.message == message => digests.remove(&id),
+            // News arrived in between and began a new digest: leave that one waiting.
+            _ => None,
+        }
     }
 
     async fn with_notices(&self, agent: AgentId, text: String) -> String {
