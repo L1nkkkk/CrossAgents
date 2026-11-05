@@ -151,9 +151,12 @@ export type ExtensionHostOptions = {
   disable(name: string): Promise<unknown>;
   /** The hub's `extension.changed` / `extension.call.finished` stream. */
   events?: (listener: (event: HubEvent) => void) => () => void;
-  safeMode?: () => boolean;
-  onLoading?: () => void;
-  onReady?: () => void;
+  /** Resolved before anything is imported; `true` skips the extensions entirely. */
+  safeMode?: () => boolean | Promise<boolean>;
+  /** Awaited before the first import (the shell sets its crash marker here). */
+  onLoading?: () => void | Promise<void>;
+  /** Awaited once the first load settled, failures included (the shell clears its marker). */
+  onReady?: () => void | Promise<void>;
   timeoutMs?: number;
   pollMs?: number;
   /** Where a failure goes instead of the console (tests pass one to stay quiet). */
@@ -559,7 +562,7 @@ export function createExtensionHost(options: ExtensionHostOptions) {
     return promise;
   }
 
-  function safeModeNow(): boolean {
+  function safeModeNow(): boolean | Promise<boolean> {
     return options.safeMode?.() ?? false;
   }
 
@@ -669,23 +672,25 @@ export function createExtensionHost(options: ExtensionHostOptions) {
     return run;
   }
 
-  function start(): Promise<void> {
+  async function start(): Promise<void> {
     if (started) return starting ?? Promise.resolve();
     started = true;
-    safeMode = safeModeNow();
+    safeMode = (await safeModeNow()) ?? false;
     if (safeMode) {
       publish();
-      return Promise.resolve();
+      // The shell clears the marker from the last run even when we skip loading this time.
+      await options.onReady?.();
+      return;
     }
-    options.onLoading?.();
+    await options.onLoading?.();
     loading = true;
     publish();
-    starting = refresh().finally(() => {
+    starting = refresh().finally(async () => {
       loading = false;
       publish();
-      options.onReady?.();
+      await options.onReady?.();
     });
-    return starting;
+    await starting;
   }
 
   async function disable(name: string): Promise<void> {
@@ -701,7 +706,8 @@ export function createExtensionHost(options: ExtensionHostOptions) {
 
   options.events?.((event) => {
     if (event.type === "extension.changed") {
-      void refresh();
+      // Nothing may import before start(): the shell's loading marker is awaited there.
+      if (started) void refresh();
       return;
     }
     if (event.type !== "extension.call.finished") return;
@@ -738,11 +744,18 @@ export type ExtensionHost = ReturnType<typeof createExtensionHost>;
 
 // ---- Safe mode and the shell's loading marker --------------------------------------------
 
+/** gui-shell's preload API (bridge.d.ts): `window.crossagents.extensions`. */
 type ExtensionLoadBridge = {
-  extensions?: { loading?: () => void; ready?: () => void; safeMode?: () => boolean };
+  extensions?: {
+    /** Before any extension is imported; must be awaited. */
+    loading?: () => void | Promise<void>;
+    /** After the first load settled, a safe-mode skip included; must be awaited. */
+    ready?: () => void | Promise<void>;
+    safeMode?: () => Promise<{ enabled: boolean; reason: string | null }> | { enabled: boolean; reason: string | null };
+  };
   /** Flat names, for a preload that did not group them. */
-  extensionLoading?: () => void;
-  extensionReady?: () => void;
+  extensionLoading?: () => void | Promise<void>;
+  extensionReady?: () => void | Promise<void>;
   safeMode?: () => boolean;
 };
 
@@ -750,21 +763,29 @@ function loadBridge(): ExtensionLoadBridge | undefined {
   return typeof window !== "undefined" ? (window.crossagents as unknown as ExtensionLoadBridge | undefined) : undefined;
 }
 
-/** `--safe-mode`, or a page told so by the shell; nothing loads when it is on. */
-export function detectSafeMode(): boolean {
+/** `--safe-mode`, a crash on the last run, or a page told so by the shell; nothing loads then. */
+export async function detectSafeMode(): Promise<boolean> {
   const bridge = loadBridge();
-  const fromBridge = bridge?.extensions?.safeMode?.() ?? bridge?.safeMode?.();
-  if (typeof fromBridge === "boolean") return fromBridge;
+  if (bridge?.extensions?.safeMode) {
+    try {
+      const state = await bridge.extensions.safeMode();
+      return state?.enabled === true;
+    } catch {
+      // The shell could not say; fall through to the other signals.
+    }
+  }
+  const flat = bridge?.safeMode?.();
+  if (typeof flat === "boolean") return flat;
   if (typeof window === "undefined") return false;
   const params = new URLSearchParams(window.location.search);
   return params.get("safe-mode") === "1" || params.get("safeMode") === "1";
 }
 
-/** Tells the shell the page reached loading / ready (docs/EXTENSIONS.md §5). */
-export function reportLoading(phase: "loading" | "ready") {
+/** Tells the shell the page reached loading / ready; awaited by start(). */
+export async function reportLoading(phase: "loading" | "ready"): Promise<void> {
   const bridge = loadBridge();
   if (!bridge) return;
   const nested = bridge.extensions;
-  if (phase === "loading") (nested?.loading ?? bridge.extensionLoading)?.call(nested ?? bridge);
-  else (nested?.ready ?? bridge.extensionReady)?.call(nested ?? bridge);
+  const call = phase === "loading" ? (nested?.loading ?? bridge.extensionLoading) : (nested?.ready ?? bridge.extensionReady);
+  await call?.call(nested ?? bridge);
 }

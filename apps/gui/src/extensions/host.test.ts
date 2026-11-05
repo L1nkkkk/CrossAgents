@@ -5,7 +5,7 @@ import type { ExtensionCallStatus } from "@bindings/ExtensionCallStatus";
 import type { ExtensionInfo } from "@bindings/ExtensionInfo";
 import type { ExtensionVersion } from "@bindings/ExtensionVersion";
 import type { HubEvent } from "../hub";
-import { createExtensionHost, extensionEntryUrl, type ExtensionHostOptions, type ExtensionModule } from "./host.ts";
+import { createExtensionHost, detectSafeMode, extensionEntryUrl, type ExtensionHostOptions, type ExtensionModule } from "./host.ts";
 
 const version = (fingerprint: string): ExtensionVersion => ({
   fingerprint,
@@ -230,16 +230,68 @@ test("safe mode loads nothing at all", async () => {
     cancelCall: async () => ({}),
     disable: async () => ({}),
     safeMode: () => true,
-    onLoading: () => loading++,
-    onReady: () => ready++,
+    onLoading: () => {
+      loading++;
+    },
+    onReady: () => {
+      ready++;
+    },
     log: () => {},
   });
   await host.start();
   assert.equal(listCalls, 0);
   assert.equal(loading, 0);
-  assert.equal(ready, 0);
+  assert.equal(ready, 1, "safe mode still clears the last run's crash marker");
   assert.equal(host.snapshot().safeMode, true);
   assert.equal(host.snapshot().tabs.size, 0);
+});
+
+test("the shell's loading marker is awaited before anything is imported", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let imports = 0;
+  const host = createExtensionHost({
+    list: async () => [info("a", "fp1")],
+    importModule: async () => {
+      imports++;
+      return { activate: () => {} };
+    },
+    request: async () => ({}),
+    callTool: async () => {
+      throw new Error("unused");
+    },
+    getCall: async () => {
+      throw new Error("unused");
+    },
+    cancelCall: async () => ({}),
+    disable: async () => ({}),
+    onLoading: () => gate,
+    log: () => {},
+  });
+  const started = host.start();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(imports, 0, "nothing was imported while the marker was being set");
+  release();
+  await started;
+  assert.equal(imports, 1);
+  assert.equal(host.snapshot().records.get("a")!.status, "ready");
+});
+
+test("safe mode is read from the shell's awaited answer", async () => {
+  const globals = globalThis as unknown as Record<string, unknown>;
+  globals.window = {
+    location: { search: "" },
+    crossagents: { extensions: { safeMode: async () => ({ enabled: true, reason: "上次崩溃" }) } },
+  };
+  assert.equal(await detectSafeMode(), true);
+  globals.window = {
+    location: { search: "" },
+    crossagents: { extensions: { safeMode: async () => ({ enabled: false, reason: null }) } },
+  };
+  assert.equal(await detectSafeMode(), false);
+  delete globals.window;
 });
 
 test("ca.tools.call can be cancelled and is not retried", async () => {
