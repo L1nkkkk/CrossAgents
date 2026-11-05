@@ -53,7 +53,11 @@ pub struct Registry {
     home: PathBuf,
     state: Mutex<State>,
     bus: Option<Arc<EventBus>>,
+    /// Told after an extension is disabled, with the lock released (docs/EXTENSIONS.md §3:
+    /// calls already running are ended a few seconds later).
+    disabled: Mutex<Vec<DisabledHook>>,
 }
+type DisabledHook = Box<dyn Fn(&str) + Send + Sync>;
 #[derive(Debug, Clone)]
 pub struct EnabledVersion {
     pub path: PathBuf,
@@ -101,6 +105,7 @@ impl Registry {
                 ..State::default()
             }),
             bus,
+            disabled: Mutex::default(),
         };
         {
             let mut s = r.state.lock().unwrap();
@@ -354,7 +359,17 @@ impl Registry {
         let mut s = self.state.lock().unwrap();
         let mut rec = s.records.get(name).cloned().ok_or_else(|| missing(name))?;
         rec.enabled = false;
-        self.update(&mut s, name, rec)
+        let info = self.update(&mut s, name, rec)?;
+        drop(s);
+        for hook in self.disabled.lock().unwrap().iter() {
+            hook(name);
+        }
+        Ok(info)
+    }
+    /// Calls `hook` with the extension's name whenever one is disabled, after the change is
+    /// saved and the registry's lock is released. The runner uses it to end running calls.
+    pub fn on_disabled(&self, hook: impl Fn(&str) + Send + Sync + 'static) {
+        self.disabled.lock().unwrap().push(Box::new(hook));
     }
     /// Setting this explicit human-controlled flag also accepts the current pending update.
     pub fn set_auto_trust(&self, name: &str, value: bool) -> Result<ExtensionInfo> {

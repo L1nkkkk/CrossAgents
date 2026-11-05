@@ -3,6 +3,7 @@
 //! devices) replaces how a credential gets its level, not this table.
 
 use axum::http::Method;
+use crossagents_api_types::ExtensionAccess;
 
 /// What a credential may do; each level includes the ones before it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -23,12 +24,31 @@ impl Level {
 }
 
 /// What a presented token turned out to be.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Grant {
     Level(Level),
     /// An agent's session token: it only reaches `/v1/me*`.
     Agent,
+    /// The token the hub issued for one run of an extension tool (docs/EXTENSIONS.md §3). It
+    /// is read or write, never admin, and it names the extension so the log can.
+    Extension {
+        name: String,
+        level: ExtensionAccess,
+    },
 }
+
+impl Grant {
+    /// The level this extension token has. Admin is not representable.
+    fn extension_level(level: ExtensionAccess) -> Level {
+        match level {
+            ExtensionAccess::Read => Level::Read,
+            ExtensionAccess::Write => Level::Write,
+        }
+    }
+}
+
+/// The route that calls an extension tool as the person who clicked (docs/EXTENSIONS.md §3).
+pub const EXTENSION_CALL_ROUTE: &str = "/v1/extensions/{name}/tools/{tool}";
 
 /// The level `method` on the route `pattern` (as the router names it, e.g.
 /// `/v1/accounts/{id}`) requires: reading is read; changing is write, except what touches
@@ -85,14 +105,34 @@ fn reads_only(pattern: &str) -> bool {
 }
 
 /// `None` when `grant` may call the route, else why not (for a 403).
-pub fn refusal(grant: Grant, method: &Method, pattern: &str) -> Option<String> {
+pub fn refusal(grant: &Grant, method: &Method, pattern: &str) -> Option<String> {
     let needed = required(method, pattern);
     match grant {
         Grant::Agent => Some(format!(
             "an agent's session token reaches /v1/me only; {method} {pattern} needs the {} level",
             needed.word()
         )),
-        Grant::Level(level) if level < needed => Some(format!(
+        // Only a person's credential is a human caller. The route fills `caller` with
+        // `{ kind: "human" }`, which opens the tools declared for `human`; an extension that
+        // could reach it would call them as a person (docs/EXTENSIONS.md §3).
+        Grant::Extension { name, .. }
+            if method == Method::POST && pattern == EXTENSION_CALL_ROUTE =>
+        {
+            Some(format!(
+                "the token of extension {name} cannot call {method} {pattern}: that route calls a tool as a person, and an extension is not one"
+            ))
+        }
+        Grant::Extension { name, level } => {
+            let have = Grant::extension_level(*level);
+            (have < needed).then(|| {
+                format!(
+                    "the token of extension {name} has the {} level; {method} {pattern} needs {}",
+                    have.word(),
+                    needed.word()
+                )
+            })
+        }
+        Grant::Level(level) if *level < needed => Some(format!(
             "this credential has the {} level; {method} {pattern} needs {}",
             level.word(),
             needed.word()
@@ -167,7 +207,7 @@ mod tests {
     /// docs/EXTENSIONS.md §5, §6: trusting a version is admin, calling a trusted tool is
     /// write, reading is read.
     #[test]
-    fn extension_routes_split_trust_from_use() {
+    fn extensions_routes_split_trust_from_use() {
         for (method, pattern) in [
             (Method::POST, "/v1/extensions/{name}/enable"),
             (Method::POST, "/v1/extensions/{name}/auto-trust"),
@@ -207,14 +247,14 @@ mod tests {
         // A read-only credential cannot call a tool, and a write one cannot grant trust.
         let read = Grant::Level(Level::Read);
         assert!(
-            refusal(read, &Method::POST, "/v1/extensions/{name}/tools/{tool}")
+            refusal(&read, &Method::POST, "/v1/extensions/{name}/tools/{tool}")
                 .unwrap()
                 .contains("needs write")
         );
-        assert_eq!(refusal(read, &Method::GET, "/v1/extensions"), None);
+        assert_eq!(refusal(&read, &Method::GET, "/v1/extensions"), None);
         assert!(
             refusal(
-                Grant::Level(Level::Write),
+                &Grant::Level(Level::Write),
                 &Method::POST,
                 "/v1/extensions/{name}/enable"
             )
@@ -223,7 +263,7 @@ mod tests {
         );
         assert_eq!(
             refusal(
-                Grant::Level(Level::Admin),
+                &Grant::Level(Level::Admin),
                 &Method::POST,
                 "/v1/extensions/{name}/enable"
             ),
@@ -238,30 +278,87 @@ mod tests {
             (Method::POST, "/v1/extensions/{name}/tools/{tool}"),
         ] {
             assert!(
-                refusal(Grant::Agent, &method, pattern).is_some(),
+                refusal(&Grant::Agent, &method, pattern).is_some(),
                 "{method} {pattern}"
             );
         }
     }
 
+    /// docs/EXTENSIONS.md §3, §6: an extension's token is read or write and never reaches
+    /// the route that calls a tool as a person.
+    #[test]
+    fn extensions_token_is_capped_and_cannot_pose_as_a_person() {
+        let ext = |level| Grant::Extension {
+            name: "standup".into(),
+            level,
+        };
+        let (read, write) = (ext(ExtensionAccess::Read), ext(ExtensionAccess::Write));
+        // The level it declared, no more.
+        assert_eq!(refusal(&read, &Method::GET, "/v1/agents"), None);
+        assert_eq!(refusal(&write, &Method::POST, "/v1/runs"), None);
+        let why = refusal(&read, &Method::POST, "/v1/runs").unwrap();
+        assert!(
+            why.contains("standup") && why.contains("needs write"),
+            "{why}"
+        );
+        // Admin is out of reach at either level: trust, shutdown, accounts, terminals.
+        for (method, pattern) in [
+            (Method::POST, "/v1/extensions/{name}/enable"),
+            (Method::POST, "/v1/extensions/{name}/auto-trust"),
+            (Method::POST, "/v1/shutdown"),
+            (Method::POST, "/v1/accounts"),
+            (Method::GET, "/v1/terminals"),
+        ] {
+            let why = refusal(&write, &method, pattern).expect(pattern);
+            assert!(
+                why.contains("standup") && why.contains("needs admin"),
+                "{why}"
+            );
+        }
+        // Calling a tool as a person is refused whatever the level: a write token passes the
+        // level check on this route, so the route itself is what stops it.
+        assert_eq!(required(&Method::POST, EXTENSION_CALL_ROUTE), Level::Write);
+        let why = refusal(&write, &Method::POST, EXTENSION_CALL_ROUTE).unwrap();
+        assert!(why.contains("standup") && why.contains("not one"), "{why}");
+        assert!(refusal(&read, &Method::POST, EXTENSION_CALL_ROUTE).is_some());
+        // A person's write credential does reach it.
+        assert_eq!(
+            refusal(
+                &Grant::Level(Level::Write),
+                &Method::POST,
+                EXTENSION_CALL_ROUTE
+            ),
+            None
+        );
+        // Looking at a call's result or cancelling one is not posing as anybody.
+        assert_eq!(
+            refusal(&read, &Method::GET, "/v1/extensions/calls/{id}"),
+            None
+        );
+        assert_eq!(
+            refusal(&write, &Method::DELETE, "/v1/extensions/calls/{id}"),
+            None
+        );
+    }
+
     #[test]
     fn refusals_name_the_missing_level() {
         let read = Grant::Level(Level::Read);
-        assert_eq!(refusal(read, &Method::GET, "/v1/runs"), None);
-        let why = refusal(read, &Method::POST, "/v1/runs").unwrap();
+        assert_eq!(refusal(&read, &Method::GET, "/v1/runs"), None);
+        let why = refusal(&read, &Method::POST, "/v1/runs").unwrap();
         assert!(
             why.contains("read level") && why.contains("needs write"),
             "{why}"
         );
         assert!(
-            refusal(Grant::Level(Level::Write), &Method::POST, "/v1/shutdown")
+            refusal(&Grant::Level(Level::Write), &Method::POST, "/v1/shutdown")
                 .unwrap()
                 .contains("needs admin")
         );
         assert_eq!(
-            refusal(Grant::Level(Level::Admin), &Method::POST, "/v1/shutdown"),
+            refusal(&Grant::Level(Level::Admin), &Method::POST, "/v1/shutdown"),
             None
         );
-        assert!(refusal(Grant::Agent, &Method::GET, "/v1/agents").is_some());
+        assert!(refusal(&Grant::Agent, &Method::GET, "/v1/agents").is_some());
     }
 }

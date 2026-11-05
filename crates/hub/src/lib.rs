@@ -68,6 +68,12 @@ pub struct RunningHub {
     pub bus: Arc<EventBus>,
     pub runtime: Arc<Runtime>,
     pub orchestrator: Arc<Orchestrator>,
+    /// Extension discovery and approval.
+    pub extensions: Arc<extensions::Registry>,
+    /// Runs extension tools.
+    pub extension_runner: Arc<extensions::Runner>,
+    /// The agents' session tokens (`/v1/me`).
+    pub agent_tokens: Arc<AgentTokens>,
     shutdown: CancellationToken,
     task: JoinHandle<Result<()>>,
 }
@@ -213,6 +219,15 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     }
     .save(&paths);
 
+    // Extensions come before the orchestrator starts sessions, so a new session's
+    // instructions already carry the enabled extensions' prompts.
+    let extensions = Arc::new(extensions::Registry::load_with_bus(
+        paths.home.clone(),
+        Some(bus.clone()),
+    )?);
+    let extension_runner =
+        extensions::Runner::new(extensions.clone(), Some(bus.clone()), paths.home.clone());
+    extension_runner.set_url(format!("http://{addr}"));
     let orchestrator = Orchestrator::new(
         store.clone() as Arc<dyn Store>,
         bus.clone(),
@@ -238,6 +253,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
             build_cache_limit: config.build_cache_limit,
         },
     );
+    orchestrator.set_extensions(extension_runner.clone());
     let _ = setup.orchestrator.set(orchestrator.clone());
     orchestrator.watch();
     orchestrator.prune_build_cache();
@@ -318,13 +334,11 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     .start(shutdown.clone());
     let terminals = terminal::Terminals::new(config.terminal_shell.clone(), config.terminal_idle);
     terminals.start_reclaiming(shutdown.clone());
-    let extensions = Arc::new(extensions::Registry::load_with_bus(
-        paths.home.clone(),
-        Some(bus.clone()),
-    )?);
     let extension_poll = extensions.start(shutdown.clone());
+    let agent_tokens = tokens.clone();
     let state = Arc::new(api::AppState {
-        extensions,
+        extensions: extensions.clone(),
+        runner: extension_runner.clone(),
         bus: bus.clone(),
         runtime: runtime.clone(),
         orchestrator: orchestrator.clone(),
@@ -354,6 +368,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         let bus = bus.clone();
         let runtime = runtime.clone();
         let stop_agents = stop_agents.clone();
+        let stopping_runner = extension_runner.clone();
         async move {
             let served = axum::serve(listener, api::router(state))
                 .with_graceful_shutdown(shutdown.clone().cancelled_owned())
@@ -362,6 +377,8 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
             shutdown.cancel();
             let _ = account_start.await;
             let _ = extension_poll.await;
+            // Running tool calls end with the hub; their results are lost (docs/EXTENSIONS.md §3).
+            stopping_runner.shutdown().await;
             terminals.stop_all();
             if stop_agents.load(Ordering::SeqCst) {
                 runtime.stop_all().await;
@@ -389,6 +406,9 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         bus,
         runtime,
         orchestrator,
+        extensions,
+        extension_runner,
+        agent_tokens,
         shutdown,
         task,
     })

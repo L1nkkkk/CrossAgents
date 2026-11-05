@@ -175,6 +175,8 @@ pub struct Orchestrator {
     /// What an agent's current turn failed with, until the turn ends: the stalled notice
     /// says why, or its issuer only nudges it into the same failure.
     turn_errors: std::sync::Mutex<HashMap<AgentId, String>>,
+    /// Runs extension tools (docs/EXTENSIONS.md §3); set once by the hub, after both exist.
+    pub(crate) extensions: std::sync::OnceLock<Arc<dyn crate::host::ExtensionHost>>,
 }
 
 /// What a run says about a lead copied for it (docs/tasks/S1.md §3.2).
@@ -212,9 +214,7 @@ pub(crate) async fn targets_in_use(
         {
             if let Some(path) = &task.worktree {
                 let tree = tree_name(path);
-                keep.entry(short(run.id))
-                    .or_default()
-                    .insert(tree.clone());
+                keep.entry(short(run.id)).or_default().insert(tree.clone());
                 // A later round's checkouts live under the first round's directory.
                 if let Some(dir) = path
                     .parent()
@@ -255,7 +255,14 @@ impl Orchestrator {
             land_cleanup: std::sync::Mutex::default(),
             running: std::sync::Mutex::default(),
             turn_errors: std::sync::Mutex::default(),
+            extensions: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Lets agents call the tools of enabled extensions. Takes effect once; a second call
+    /// is ignored.
+    pub fn set_extensions(&self, host: Arc<dyn crate::host::ExtensionHost>) {
+        let _ = self.extensions.set(host);
     }
 
     pub fn store(&self) -> &Arc<dyn Store> {
@@ -1828,7 +1835,9 @@ The person changed: {}",
             let mut gone = Vec::new();
             for key in keys {
                 let keep = in_use.get(&key).cloned().unwrap_or_default();
-                gone.extend(crate::workspace::remove_run_targets_except(&root, &key, &keep));
+                gone.extend(crate::workspace::remove_run_targets_except(
+                    &root, &key, &keep,
+                ));
             }
             gone
         })

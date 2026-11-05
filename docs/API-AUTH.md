@@ -6,13 +6,14 @@
 
 ## 1. 现状
 
-hub 只监听 `127.0.0.1`（`[hub] listen` 尚未可配，A2 才放开），鉴权分三层：
+hub 只监听 `127.0.0.1`（`[hub] listen` 尚未可配，A2 才放开），鉴权分四层：
 
 | 层 | 中间件 | 凭据 | 谁用 |
 |---|---|---|---|
 | 免鉴权 | 无 | 无 | 存活探测 |
 | 总 token | `require_token` | `~/.crossagents/token` | GUI（经 Electron 主进程）、CLI |
 | 会话 token | `require_agent_token` | `~/.crossagents/agent-tokens.json` 里每 agent 一个 | 外部 agent 经 MCP 接入 |
+| 扩展 token | `require_token` | 每次扩展工具调用现签，只在 hub 内存里，进程结束作废 | 扩展工具进程回调 hub |
 
 要点：
 
@@ -128,8 +129,8 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 扩展的接口（`/v1/extensions*`）也在它到不了的范围内：agent 调扩展工具走 `/v1/me/tools/{name}`
 或内置的 `extension_call`，由 hub 代为执行，拿不到启用和自动信任这两个开关。
 
-> `/v1/extensions*` 这八条是 [EXTENSIONS.md](EXTENSIONS.md) §3 定下的约定，级别已经写进
-> `access.rs` 并有测试，路由本身在 E1 / E2 里实现。
+> `/v1/extensions*` 这八条是 [EXTENSIONS.md](EXTENSIONS.md) §3 定下的约定，级别写在 `access.rs`，路由在
+> `api.rs`，都有测试。
 
 ## 3. 分级口径
 
@@ -156,6 +157,21 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 - `GET /v1/extensions`、`/pending/diff`、`/v1/extensions/calls/{id}` 归 read：都只是读，待批准快照的差异也只是读。
   待批准记录看得见但批不动，正是分级想要的效果。
 
+### 扩展 token
+
+扩展工具进程拿到的 `CROSSAGENTS_TOKEN` 是 `Grant::Extension { name, level }`，由 `require_token` 认出来，
+再交给同一个策略点：
+
+- 级别只有 read 或 write（取自扩展描述文件里的 `access`，类型是 `ExtensionAccess`，表达不出 admin），
+  按上面的路由表放行：read 的扩展 POST 任何东西都是 403，write 的扩展到不了 admin 路由（停 hub、账号、终端、
+  启用扩展、自动信任）。消息里写明是哪个扩展的 token。
+- 到不了 `/v1/me*`：那一组只认会话 token，扩展的 token 在那里是 401。
+- **调不了 `POST /v1/extensions/{name}/tools/{tool}`**，read 还是 write 都一样（403）。这条路由给工具的
+  `caller` 填的是 `{ "kind": "human" }`，工具声明了 `human` 才能被它调到；只有人的凭据（`Grant::Level`）才算人。
+  不拦的话，write 级的扩展拿自己的 token 调这条路由就能以人的身份调只开放给 `human` 的工具。
+  `access::refusal` 里按路由拒绝，路由处理函数里再核对一次凭据类型。
+- 进程结束就作废，每次调用一个新的；hub 重启后全部失效；每个请求在日志里记下扩展名。
+
 两个边界判断：
 
 - `POST /v1/agents/{key}/connect` 归 write 而非 admin：它签发的是该 agent 自己的会话 token，作用域被 `require_agent_token` 限住，拿不到别的 agent 和总 token。
@@ -169,9 +185,8 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 - `ErrorCode` 增 `Forbidden`：越权返回 403 而不是 401。401 表示"没带凭据或凭据无效"，403 表示"凭据有效但级别不够"，GUI 据此置灰入口并说明原因。
 - Electron 主进程维护"方法 + 路径"白名单，只放行 GUI 实际用到的接口（已做，`apps/gui/electron/allowed.cts`；`allowed.test.cts` 从 `src/api.ts` 抽出全部调用逐条核对，漏登记就失败）。这把收窄放在主进程，页面即使被注入了也无法调用 `/v1/shutdown`。
 - A1 引入 users / devices 后，策略点换成"设备或用户 → 级别"的映射，路由表和白名单都不动。
-- `Grant` 增加 `Extension { name, level }`：扩展工具每次调用现签一个只在 hub 内存里的 token，级别 read 或 write，
-  进程结束即作废（[EXTENSIONS.md](EXTENSIONS.md) §3）。`grant_of` 现在只认总 token、只读 token 和会话 token，
-  这一项在 E1 实现；路由表不变，只是多一种凭据能走到现有的策略点。
+- `Grant` 增加了 `Extension { name, level }`（E1 已做，见上面「扩展 token」和 [EXTENSIONS.md](EXTENSIONS.md) §3）。
+  路由表不变，只是多一种凭据能走到现有的策略点；`Grant` 因带名字不再是 `Copy`，`refusal` 接受 `&Grant`。
 
 ### Windows 上的令牌文件
 
