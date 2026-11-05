@@ -415,11 +415,15 @@ impl Registry {
         )
         .map_err(|e| CoreError::InvalidName(format!("{e:#}")))?;
         let mut rec = s.records.get(name).cloned().unwrap_or_default();
-        rec.pending = Some(Pending {
-            fingerprint: version.fingerprint,
-            requested_at: chrono::Utc::now(),
-            requested_by,
-        });
+        rec.pending = if rec.current.as_ref() == Some(&version.fingerprint) {
+            None
+        } else {
+            Some(Pending {
+                fingerprint: version.fingerprint,
+                requested_at: chrono::Utc::now(),
+                requested_by,
+            })
+        };
         // A valid fresh snapshot supersedes an earlier source validation error.
         if let Some(info) = s.infos.get_mut(name) {
             info.error = None;

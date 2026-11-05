@@ -48,6 +48,50 @@ entry = "gui/index.js"
 }
 
 #[test]
+fn extensions_request_enable_unchanged_clears_pending_and_source_errors() {
+    let home = tempfile::tempdir().unwrap();
+    source(home.path());
+    let registry = Registry::load(home.path()).unwrap();
+    let initial = registry
+        .get("demo")
+        .unwrap()
+        .pending
+        .unwrap()
+        .version
+        .fingerprint;
+    let approved = registry.enable("demo", &initial).unwrap();
+    let unchanged = registry.request_enable("demo", None).unwrap();
+    assert!(unchanged.pending.is_none());
+    assert_eq!(unchanged.current, approved.current);
+    assert_eq!(unchanged.enabled, approved.enabled);
+
+    let changed_file = home.path().join("extensions/demo/new.txt");
+    fs::write(&changed_file, "changed").unwrap();
+    let changed = registry.request_enable("demo", None).unwrap();
+    assert_ne!(changed.pending.unwrap().version.fingerprint, initial);
+    assert_eq!(changed.current, approved.current);
+    assert_eq!(changed.enabled, approved.enabled);
+
+    // Reverting to the approved files must also discard an existing pending update.
+    fs::remove_file(changed_file).unwrap();
+    let reverted = registry.request_enable("demo", None).unwrap();
+    assert!(reverted.pending.is_none());
+    assert_eq!(reverted.current, approved.current);
+    assert_eq!(reverted.enabled, approved.enabled);
+
+    let entry = home.path().join("extensions/demo/gui/index.js");
+    let original = fs::read(&entry).unwrap();
+    fs::remove_file(&entry).unwrap();
+    registry.scan().unwrap();
+    assert!(registry.get("demo").unwrap().error.is_some());
+    fs::write(entry, original).unwrap();
+    let recovered = registry.request_enable("demo", None).unwrap();
+    assert!(recovered.error.is_none() && recovered.pending.is_none());
+    assert_eq!(recovered.current, approved.current);
+    assert_eq!(recovered.enabled, approved.enabled);
+}
+
+#[test]
 fn extensions_request_enable_preserves_current_even_with_auto_trust() {
     let home = tempfile::tempdir().unwrap();
     source(home.path());
