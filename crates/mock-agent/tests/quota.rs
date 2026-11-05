@@ -6,9 +6,94 @@ mod common;
 
 use common::{MOCK_AGENT, TestHub, git_repo};
 use crossagents_api_types::EventKind;
-use crossagents_core::DriverKind;
+use crossagents_core::{
+    DriverKind, EventKind as CoreEventKind, LimitGroup, RateLimits, RateWindow,
+};
 use crossagents_plugins::PluginConfig;
 use serde_json::{Value, json};
+
+#[tokio::test]
+async fn another_models_exhausted_limit_does_not_reroute() {
+    let repo = git_repo();
+    let t = TestHub::start_with(|config| {
+        config.plugins.insert(
+            "codex".into(),
+            PluginConfig {
+                driver: Some(DriverKind::CodexNative),
+                native_command: vec![MOCK_AGENT.into(), "app-server".into()],
+                ..PluginConfig::default()
+            },
+        );
+    })
+    .await;
+    let home = tempfile::tempdir().unwrap();
+    let resp = t
+        .post(
+            "/v1/accounts",
+            json!({"id":"codex-a", "provider":"codex", "home":home.path().display().to_string()}),
+        )
+        .await;
+    assert_eq!(resp.status(), 201);
+    t.add_agent_in("boss", Some("opus"), "planner", repo.path())
+        .await;
+    let resp = t.post("/v1/agents", json!({"name":"coder", "plugin":"codex", "model":"mock-codex", "role":"worker", "cwd":repo.path().display().to_string(), "config":{"account":"codex-a"}})).await;
+    assert_eq!(resp.status(), 201);
+    let coder = t.agent("coder").await;
+    let _ = t.get("/v1/accounts/codex-a/status").await;
+    let mut w = t.watch().await;
+    let window = |used_percent| RateWindow {
+        name: "primary".into(),
+        used_percent,
+        window_seconds: None,
+        resets_at: None,
+        remaining: None,
+        total: None,
+    };
+    t.hub
+        .bus
+        .publish(CoreEventKind::AgentRateLimits {
+            id: coder.id,
+            limits: RateLimits {
+                windows: vec![window(0.0)],
+                by_limit: vec![LimitGroup {
+                    id: "other-limit".into(),
+                    name: None,
+                    model: Some("other-model".into()),
+                    windows: vec![window(100.0)],
+                    reached: false,
+                }],
+                ..RateLimits::default()
+            },
+        })
+        .await
+        .unwrap();
+    w.until("quota observed", |e| {
+        matches!(e.kind, EventKind::AccountQuotaUpdated { .. })
+    })
+    .await;
+    let plan = json!([{ "key":"a", "title":"task a", "spec":{"goal":"work on it"} }]);
+    let req = format!("Build it. [call plan_submit {}]", json!({"tasks":plan}));
+    let resp = t.post("/v1/runs", json!({"request":req, "planner":"boss", "worker":"coder", "policy":{"plan_approval":"auto"}})).await;
+    assert_eq!(resp.status(), 201);
+    let handoff = w
+        .until("task handoff", |e| {
+            matches!(
+                e.kind,
+                EventKind::TaskHandedOff { .. } | EventKind::TaskRerouted { .. }
+            )
+        })
+        .await;
+    let EventKind::TaskHandedOff { handoff, .. } = handoff.kind else {
+        panic!("task was rerouted")
+    };
+    let worker: Value = t
+        .get(&format!("/v1/agents/{}", handoff.to))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(worker["config"]["account"], "codex-a", "{worker}");
+}
 
 #[tokio::test]
 async fn a_rate_limited_worker_hands_its_task_to_another_account() {

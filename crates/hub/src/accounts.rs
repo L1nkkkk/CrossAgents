@@ -311,7 +311,7 @@ impl Accounts {
     /// Whether the account has quota left (docs/tasks/DOGFOOD.md §5), from what is already
     /// known: the cached status and what agents reported since. Never waits for a provider;
     /// an account read for the first time is `Unknown` and a read starts in the background.
-    pub async fn health(&self, id: &str) -> Health {
+    pub async fn health(&self, id: &str, model: Option<&str>) -> Health {
         let Ok(account) = self.store().get_account(id).await else {
             return Health::Unknown;
         };
@@ -323,13 +323,12 @@ impl Accounts {
             self.refresh_status(account, provider.clone());
         }
         let mut windows = Vec::new();
+        let mut groups = Vec::new();
         let mut reached = None;
         let mut credits = None;
         if let Some((_, status)) = &cached {
             windows.extend(status.rate_limits.iter().cloned());
-            for group in &status.limits {
-                windows.extend(group.windows.iter().cloned());
-            }
+            groups = status.limits.clone();
             if status.limit_reached {
                 reached = Some("limit reached".to_owned());
             }
@@ -342,9 +341,7 @@ impl Accounts {
                 .is_none_or(|(_, s)| s.as_of.is_none_or(|as_of| *at > as_of))
         {
             windows = limits.windows.clone();
-            for group in &limits.by_limit {
-                windows.extend(group.windows.iter().cloned());
-            }
+            groups = limits.by_limit.clone();
             reached = limits.reached.clone();
             if limits.credits.is_some() {
                 credits = limits.credits.clone();
@@ -353,7 +350,13 @@ impl Accounts {
         if cached.is_none() && observed.is_none() {
             return Health::Unknown;
         }
-        judge(&windows, reached.as_deref(), credits.as_ref())
+        judge_for_model(
+            &windows,
+            &groups,
+            model,
+            reached.as_deref(),
+            credits.as_ref(),
+        )
     }
 
     /// Marks the account as out of quota now (an agent on it was refused).
@@ -1392,6 +1395,7 @@ fn judge(
     }
     let fullest = windows
         .iter()
+        .filter(|w| w.resets_at.is_none_or(|at| at > Utc::now()))
         .max_by(|a, b| a.used_percent.total_cmp(&b.used_percent));
     match fullest {
         Some(w) if w.used_percent >= 100.0 => {
@@ -1403,6 +1407,35 @@ fn judge(
         )),
         _ => Health::Ok,
     }
+}
+
+fn judge_for_model(
+    windows: &[crossagents_core::RateWindow],
+    groups: &[crossagents_core::LimitGroup],
+    model: Option<&str>,
+    reached: Option<&str>,
+    credits: Option<&crossagents_core::Credits>,
+) -> Health {
+    let mut result = judge(windows, reached, credits);
+    if matches!(result, Health::Exhausted(_)) {
+        return result;
+    }
+    for group in groups
+        .iter()
+        .filter(|g| g.model.as_deref().is_some_and(|m| Some(m) == model))
+    {
+        let health = judge(&group.windows, None, None);
+        match health {
+            Health::Exhausted(reason) => {
+                return Health::Exhausted(format!("limit group {}: {reason}", group.id));
+            }
+            Health::Low(reason) if !matches!(result, Health::Low(_)) => {
+                result = Health::Low(format!("limit group {}: {reason}", group.id));
+            }
+            _ => {}
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -1421,6 +1454,37 @@ mod health_tests {
         }
     }
 
+    #[test]
+    fn expired_window_is_not_exhausted() {
+        let mut old = window("primary", 100.0);
+        old.resets_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        assert_eq!(judge(&[old], None, None), Health::Ok);
+    }
+
+    #[test]
+    fn model_groups_only_affect_the_matching_model() {
+        let group = crossagents_core::LimitGroup {
+            id: "luna-limit".into(),
+            name: None,
+            model: Some("luna".into()),
+            windows: vec![window("primary", 100.0)],
+            reached: false,
+        };
+        let groups = [group];
+        assert_eq!(
+            judge_for_model(
+                &[window("primary", 0.0)],
+                &groups,
+                Some("other"),
+                None,
+                None
+            ),
+            Health::Ok
+        );
+        assert!(
+            matches!(judge_for_model(&[window("primary", 0.0)], &groups, Some("luna"), None, None), Health::Exhausted(reason) if reason.contains("luna-limit"))
+        );
+    }
     #[test]
     fn judges_windows_limits_and_credits() {
         assert_eq!(judge(&[window("5h", 40.0)], None, None), Health::Ok);
