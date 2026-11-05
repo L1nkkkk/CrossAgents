@@ -45,6 +45,7 @@ import type { ExtensionCallAccepted } from "@bindings/ExtensionCallAccepted";
 import type { ExtensionCallRequest } from "@bindings/ExtensionCallRequest";
 import type { ExtensionCallResponse } from "@bindings/ExtensionCallResponse";
 import type { ExtensionDiffResponse } from "@bindings/ExtensionDiffResponse";
+import type { ExtensionLogsResponse } from "@bindings/ExtensionLogsResponse";
 import type { EnableExtensionRequest } from "@bindings/EnableExtensionRequest";
 import type { SetExtensionAutoTrustRequest } from "@bindings/SetExtensionAutoTrustRequest";
 import type { ListRunsResponse } from "@bindings/ListRunsResponse";
@@ -317,6 +318,8 @@ export const api = {
     request<ExtensionInfo>("POST", `/v1/extensions/${enc(name)}/auto-trust`, { auto_trust } satisfies SetExtensionAutoTrustRequest),
   /** The snapshot waiting for approval against the running one; 404 when nothing is pending. */
   extensionDiff: (name: string) => request<ExtensionDiffResponse>("GET", `/v1/extensions/${enc(name)}/pending/diff`),
+  /** The current log's last 64 KiB (the extension's tool calls and stderr); empty before the first call. */
+  extensionLogs: (name: string) => request<ExtensionLogsResponse>("GET", `/v1/extensions/${enc(name)}/logs`),
   /** Starts a call; 202 comes back at once (it may run for ten minutes), the result later. */
   extensionCall: (name: string, tool: string, req: ExtensionCallRequest) =>
     request<ExtensionCallAccepted>("POST", `/v1/extensions/${enc(name)}/tools/${enc(tool)}`, req),

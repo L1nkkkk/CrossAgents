@@ -21,6 +21,7 @@ import { useQuestions } from "./questions";
 import { startNew } from "./menubar";
 import { level, tightest, windowLabel } from "./lib/quota";
 import { openBeside } from "./panes";
+import { useExtensions } from "./extensions/defaults";
 import { useQuota } from "./views/Quota";
 import { CHATS, selectWorkspace, useWorkspaces, wsHref } from "./workspace";
 
@@ -110,6 +111,8 @@ export function Sidebar({ route }: { route: string[] }) {
     runs,
     now: Date.now(),
   });
+  // Pages an extension registered (`ca.pages`): each is one row here, and only while it loaded.
+  const extensionPages = [...useExtensions().pages.values()];
   const groups = sidebarGroups(everyone, runs, list, pinned, [...order]);
   const shown = searchGroups(groups, query);
   const archived = everyone.filter((a) => a.archived_at);
@@ -158,8 +161,33 @@ export function Sidebar({ route }: { route: string[] }) {
               <Icon name="brain" size={16} />
               <span>{t("nav.expertise")}</span>
             </a>
+            <a className={"nav-extensions " + (route[0] === "extensions" || route[0] === "ext" ? "active" : "")} href="#/extensions">
+              <Icon name="panel" size={16} />
+              <span>扩展</span>
+            </a>
           </div>
           <div className="scroll">
+            {extensionPages.length > 0 && (
+              <section className="group ext-nav-pages">
+                <div className="group-head static">
+                  <span className="group-name">扩展页面</span>
+                </div>
+                {extensionPages.map((page) => {
+                  const active = route[0] === "ext" && route[1] === page.extension && route[2] === page.id;
+                  return (
+                    <div key={`${page.extension}/${page.id}`} className={"nav-row " + (active ? "active" : "")}>
+                      <a className="row-link" href={`#/ext/${encodeURIComponent(page.extension)}/${encodeURIComponent(page.id)}`} title={`${page.label} · 扩展 ${page.extension}`}>
+                        <span className="row-lead">
+                          <Icon name="panel" size={14} />
+                        </span>
+                        <span className="row-label">{page.label}</span>
+                      </a>
+                      <span className="row-tag">{page.extension}</span>
+                    </div>
+                  );
+                })}
+              </section>
+            )}
             <NeedsYou items={todos} agents={everyone} />
             {done > 0 && <p className="sidebar-unread">{t("sidebar.doneUnread", { n: done })}</p>}
             {!query.trim() && (pinnedMembers.length > 0 || pinnedRuns.length > 0) && (
