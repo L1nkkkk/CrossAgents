@@ -11,6 +11,7 @@ pub mod avatars;
 pub mod budget;
 pub mod collab;
 pub mod event_log;
+pub mod extensions;
 pub mod guard;
 pub mod identity;
 pub mod image;
@@ -317,7 +318,13 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     .start(shutdown.clone());
     let terminals = terminal::Terminals::new(config.terminal_shell.clone(), config.terminal_idle);
     terminals.start_reclaiming(shutdown.clone());
+    let extensions = Arc::new(extensions::Registry::load_with_bus(
+        paths.home.clone(),
+        Some(bus.clone()),
+    )?);
+    let extension_poll = extensions.start(shutdown.clone());
     let state = Arc::new(api::AppState {
+        extensions,
         bus: bus.clone(),
         runtime: runtime.clone(),
         orchestrator: orchestrator.clone(),
@@ -354,6 +361,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
             // Make sure SSE streams end even if serve failed.
             shutdown.cancel();
             let _ = account_start.await;
+            let _ = extension_poll.await;
             terminals.stop_all();
             if stop_agents.load(Ordering::SeqCst) {
                 runtime.stop_all().await;

@@ -64,7 +64,20 @@ impl Paths {
     pub fn accounts(&self) -> PathBuf {
         self.home.join("accounts")
     }
-    /// External plugins: one directory with a `plugin.toml` each.
+    /// Editable sources of extensions; never executed directly.
+    pub fn extensions(&self) -> PathBuf {
+        self.home.join("extensions")
+    }
+    pub fn extension_versions(&self) -> PathBuf {
+        self.home.join("extension-versions")
+    }
+    pub fn extension_data(&self) -> PathBuf {
+        self.home.join("extension-data")
+    }
+    pub fn extensions_state(&self) -> PathBuf {
+        self.home.join("extensions.json")
+    }
+    /// External agent plugins: one directory with a `plugin.toml` each.
     pub fn plugins(&self) -> PathBuf {
         self.home.join("plugins")
     }
