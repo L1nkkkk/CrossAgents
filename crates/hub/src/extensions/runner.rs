@@ -29,6 +29,7 @@ use crossagents_api_types::{
 use crossagents_core::process::{Tree, spawn_tree_strict};
 use crossagents_core::{CoreError, EventBus, EventKind};
 use crossagents_orchestrator::host::{ExtensionCaller, ExtensionHost, ExtensionToolSpec};
+use futures::FutureExt;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Notify, watch};
@@ -611,6 +612,7 @@ impl Runner {
             token_guard,
             permit,
         } = job;
+        let _finisher = Finisher(call.clone());
         let started = Instant::now();
         let short = &call.fingerprint[..call.fingerprint.len().min(8)];
         self.write_log(
@@ -624,7 +626,18 @@ impl Runner {
             )
             .as_bytes(),
         );
-        let outcome = self.execute(&call, &lease, &command, stdin, &token).await;
+        // A panic while running must still end in a result.
+        let outcome = match std::panic::AssertUnwindSafe(
+            self.execute(&call, &lease, &command, stdin, &token),
+        )
+        .catch_unwind()
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => Outcome::NotStarted {
+                why: "internal error while running the tool".into(),
+            },
+        };
         let duration = started.elapsed();
         // The tree is gone by now: the token must stop working with it, and only then does
         // the result become visible.
@@ -797,16 +810,21 @@ impl Runner {
         });
         let too_large = Arc::new(Notify::new());
         let overflow = Arc::new(AtomicBool::new(false));
+        // The readers fill these as they go, so what was read survives a reader that is
+        // stopped because a child still holds its pipe open.
+        let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
         let stdout_task = tokio::spawn({
-            let (too_large, overflow) = (too_large.clone(), overflow.clone());
+            let (too_large, overflow, buf) =
+                (too_large.clone(), overflow.clone(), stdout_buf.clone());
             async move {
                 let mut out = stdout_pipe;
-                let mut data = Vec::new();
                 let mut chunk = vec![0u8; 16 * 1024];
                 loop {
                     match out.read(&mut chunk).await {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
+                            let mut data = buf.lock().unwrap();
                             data.extend_from_slice(&chunk[..n]);
                             if data.len() > STDOUT_LIMIT {
                                 overflow.store(true, Ordering::SeqCst);
@@ -816,15 +834,14 @@ impl Runner {
                         }
                     }
                 }
-                data
             }
         });
         let stderr_task = tokio::spawn({
             let me = self.me.clone();
             let name = call.extension.clone();
+            let buf = stderr_buf.clone();
             async move {
                 let mut err = stderr_pipe;
-                let mut tail: Vec<u8> = Vec::new();
                 let mut chunk = vec![0u8; 8 * 1024];
                 let mut last = b'\n';
                 loop {
@@ -835,9 +852,11 @@ impl Runner {
                                 me.write_log(&name, &chunk[..n]);
                             }
                             last = chunk[n - 1];
+                            let mut tail = buf.lock().unwrap();
                             tail.extend_from_slice(&chunk[..n]);
                             if tail.len() > STDERR_KEEP * 2 {
-                                tail.drain(..tail.len() - STDERR_KEEP);
+                                let cut = tail.len() - STDERR_KEEP;
+                                tail.drain(..cut);
                             }
                         }
                     }
@@ -847,10 +866,6 @@ impl Runner {
                 {
                     me.write_log(&name, b"\n");
                 }
-                if tail.len() > STDERR_KEEP {
-                    tail.drain(..tail.len() - STDERR_KEEP);
-                }
-                String::from_utf8_lossy(&tail).into_owned()
             }
         });
 
@@ -877,22 +892,18 @@ impl Runner {
             _ = tokio::time::sleep(Duration::from_secs(call.timeout_secs.into())) => End::Timeout,
             exited = child.wait() => End::Exited(exited.ok().and_then(|s| s.code())),
         };
-        let mut stdout_task = stdout_task;
-        let mut stderr_task = stderr_task;
         match end {
             End::Exited(code) => {
                 // The process ended on its own; take what it wrote. A leftover child that
                 // keeps the pipes open is ended with the tree after a short wait.
-                let readers = async { ((&mut stdout_task).await, (&mut stderr_task).await) };
-                let read = tokio::time::timeout(Duration::from_secs(2), readers).await;
+                // Each reader is awaited once, against one shared deadline: what one of
+                // them already read is kept when the other is still held open.
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+                join_reader(stdout_task, deadline).await;
+                join_reader(stderr_task, deadline).await;
                 kill_tree(&mut tree, &mut child).await;
-                let (stdout, stderr) = match read {
-                    Ok((out, err)) => (out.unwrap_or_default(), err.unwrap_or_default()),
-                    Err(_) => (
-                        stdout_task.await.unwrap_or_default(),
-                        stderr_task.await.unwrap_or_default(),
-                    ),
-                };
+                let stdout = std::mem::take(&mut *stdout_buf.lock().unwrap());
+                let stderr = tail_text(&stderr_buf);
                 if overflow.load(Ordering::SeqCst) {
                     return Outcome::TooLarge { stderr };
                 }
@@ -904,8 +915,10 @@ impl Runner {
             }
             other => {
                 kill_tree(&mut tree, &mut child).await;
-                let _ = stdout_task.await;
-                let stderr = stderr_task.await.unwrap_or_default();
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+                join_reader(stdout_task, deadline).await;
+                join_reader(stderr_task, deadline).await;
+                let stderr = tail_text(&stderr_buf);
                 match other {
                     End::Timeout => Outcome::TimedOut { stderr },
                     End::TooLarge => Outcome::TooLarge { stderr },
@@ -913,6 +926,47 @@ impl Runner {
                     End::Exited(_) => unreachable!(),
                 }
             }
+        }
+    }
+}
+
+/// A reader's result, or nothing (the reader is stopped) when it is not done by `deadline`:
+/// a child that kept the pipe open must not hold the call up.
+async fn join_reader(mut task: tokio::task::JoinHandle<()>, deadline: tokio::time::Instant) {
+    if tokio::time::timeout_at(deadline, &mut task).await.is_err() {
+        task.abort();
+    }
+}
+
+/// The last [`STDERR_KEEP`] bytes of what a reader collected, as text.
+fn tail_text(buf: &Mutex<Vec<u8>>) -> String {
+    let tail = buf.lock().unwrap();
+    let from = tail.len().saturating_sub(STDERR_KEEP);
+    String::from_utf8_lossy(&tail[from..]).into_owned()
+}
+
+/// Makes sure a call always ends: if the supervising task is dropped before it recorded an
+/// outcome (a panic, the runtime going away), the call becomes `failed` and waiters wake.
+struct Finisher(Arc<Call>);
+
+impl Drop for Finisher {
+    fn drop(&mut self) {
+        let call = &self.0;
+        if call.is_running() {
+            *call.finished.lock().unwrap() = Some(Instant::now());
+            call.done.send_replace(Some(Arc::new(ExtensionCallResponse {
+                call_id: call.id.clone(),
+                extension: call.extension.clone(),
+                tool: call.tool.clone(),
+                fingerprint: call.fingerprint.clone(),
+                status: ExtensionCallStatus::Failed,
+                started_at: call.started_at,
+                finished_at: Some(Utc::now()),
+                duration_ms: None,
+                output: None,
+                error: Some("internal error: the call's supervisor ended unexpectedly".into()),
+                stderr: None,
+            })));
         }
     }
 }

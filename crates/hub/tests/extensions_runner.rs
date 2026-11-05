@@ -1215,3 +1215,95 @@ file = "all.md"
     hub.extensions.disable("demo").unwrap();
     assert_eq!(hub.orchestrator.extension_prompts(&chat), "");
 }
+
+#[tokio::test]
+async fn extensions_a_child_holding_only_stderr_open_does_not_lose_stdout_or_hang_the_call() {
+    let f = Fixture::enabled(Limits::default());
+    let started = Instant::now();
+    let accepted = f.start("run", json!({ "mode": "stderr_child" })).unwrap();
+    let done = tokio::time::timeout(Duration::from_secs(15), f.runner.wait(&accepted.call_id))
+        .await
+        .expect("the call must end")
+        .unwrap();
+    assert_eq!(done.status, ExtensionCallStatus::Ok, "{done:?}");
+    assert_eq!(done.output, Some(json!({ "answer": 42 })));
+    assert_eq!(
+        f.runner.get(&accepted.call_id).unwrap().status,
+        ExtensionCallStatus::Ok
+    );
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(f.runner.live_tokens(), 0);
+    // The leftover child went with the process tree.
+    let beat = f.data().join("heartbeat");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let size = fs::metadata(&beat).map(|m| m.len()).unwrap_or(0);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        fs::metadata(&beat).map(|m| m.len()).unwrap_or(0),
+        size,
+        "still alive"
+    );
+}
+
+#[tokio::test]
+async fn extensions_http_stopping_the_hub_ends_a_tool_a_request_is_waiting_for() {
+    let t = TestHub::start().await;
+    let TestHub {
+        hub,
+        home,
+        client,
+        base,
+    } = t;
+    let resp = client
+        .post(format!("{base}/v1/agents"))
+        .bearer_auth(&hub.token)
+        .json(&json!({
+            "name": "alice", "plugin": "claude", "model": "haiku", "role": "worker",
+            "cwd": home.path().display().to_string(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    let alice: Agent = resp.json().await.unwrap();
+    let session = hub.agent_tokens.issue(alice.id).await;
+    let runner = hub.extension_runner.clone();
+    // The agent's request waits for the tool, which runs (with a child) for two minutes.
+    let waiting = tokio::spawn({
+        let (client, base) = (client.clone(), base.clone());
+        async move {
+            client
+                .post(format!("{base}/v1/me/tools/demo__run"))
+                .bearer_auth(&session)
+                .json(&json!({ "mode": "tree" }))
+                .send()
+                .await
+        }
+    });
+    let beat = home.path().join("extension-data/demo/heartbeat");
+    until("the tool's child to start", || {
+        beat.is_file() && runner.live_tokens() == 1
+    })
+    .await;
+
+    let stopping = Instant::now();
+    hub.shutdown();
+    tokio::time::timeout(Duration::from_secs(20), hub.wait())
+        .await
+        .expect("the hub must stop without waiting for the tool")
+        .unwrap();
+    assert!(stopping.elapsed() < Duration::from_secs(20));
+    assert_eq!(runner.live_tokens(), 0);
+    // The request got an answer (an error), and the tool's tree is gone.
+    if let Ok(Ok(resp)) = tokio::time::timeout(Duration::from_secs(5), waiting).await {
+        if let Ok(resp) = resp {
+            assert!(!resp.status().is_success());
+        }
+    }
+    let size = fs::metadata(&beat).unwrap().len();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(
+        fs::metadata(&beat).unwrap().len(),
+        size,
+        "the tool is still running"
+    );
+}

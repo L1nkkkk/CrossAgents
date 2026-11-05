@@ -13,7 +13,23 @@ fn data_dir() -> PathBuf {
     PathBuf::from(std::env::var("CROSSAGENTS_EXTENSION_DATA").unwrap_or_default())
 }
 
+fn heartbeat() -> ! {
+    loop {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(data_dir().join("heartbeat"))
+        {
+            let _ = file.write_all(b"x");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("heartbeat") {
+        heartbeat();
+    }
     let mut raw = String::new();
     std::io::stdin().read_to_string(&mut raw).unwrap();
     let request: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
@@ -68,6 +84,19 @@ fn main() {
             let _ = err.flush();
             drop(err);
             println!("{}", json!({ "ok": true }));
+        }
+        "stderr_child" => {
+            // A long-lived child that inherits only our stderr: stdout is the answer, and it
+            // is complete before the child (which keeps stderr open) is gone.
+            #[allow(clippy::zombie_processes)]
+            Command::new(std::env::current_exe().unwrap())
+                .arg("heartbeat")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap();
+            println!("{}", json!({ "answer": 42 }));
         }
         "badjson" => println!("this is not json"),
         "empty" => {}

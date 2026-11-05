@@ -369,6 +369,15 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         let runtime = runtime.clone();
         let stop_agents = stop_agents.clone();
         let stopping_runner = extension_runner.clone();
+        // Tool calls end the moment the hub is told to stop, not after the HTTP server has
+        // drained: a request waiting for a tool's result would hold the drain up.
+        tokio::spawn({
+            let (shutdown, runner) = (shutdown.clone(), extension_runner.clone());
+            async move {
+                shutdown.cancelled().await;
+                runner.shutdown().await;
+            }
+        });
         async move {
             let served = axum::serve(listener, api::router(state))
                 .with_graceful_shutdown(shutdown.clone().cancelled_owned())
