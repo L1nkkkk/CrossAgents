@@ -110,11 +110,11 @@ impl Hooks {
     /// the event log is not read back (docs/EXTENSIONS.md §3).
     pub fn start(self: &Arc<Self>, shutdown: CancellationToken) -> JoinHandle<()> {
         let this = self.clone();
+        let events = this.bus.as_ref().map(|bus| bus.subscribe());
         tokio::spawn(async move {
-            let Some(bus) = this.bus.clone() else {
+            let Some(mut events) = events else {
                 return;
             };
-            let mut events = bus.subscribe();
             loop {
                 tokio::select! {
                     _ = shutdown.cancelled() => break,
@@ -159,19 +159,14 @@ impl Hooks {
             return;
         };
         for info in self.registry.list() {
-            let wanted = info.enabled
-                && info
-                    .current
-                    .as_ref()
-                    .is_some_and(|version| version.hooks.iter().any(|hook| hook.event == name));
-            if !wanted {
+            if !info.enabled {
                 continue;
             }
             let extension = info.name.clone();
-            let Ok(enabled) = self.registry.enabled(&extension) else {
+            let Ok(lease) = self.registry.acquire(&extension) else {
                 continue;
             };
-            let Some(hook) = enabled.manifest.on.iter().find(|h| h.event == name) else {
+            let Some(hook) = lease.enabled.manifest.on.iter().find(|h| h.event == name) else {
                 continue;
             };
             // Before anything is acquired: a breaker-dropped event must leave no trace but
@@ -188,9 +183,6 @@ impl Hooks {
                 "caller": { "kind": "event" },
             }))
             .unwrap_or_default();
-            let Ok(lease) = self.registry.acquire(&extension) else {
-                continue;
-            };
             let spec = CommandSpec {
                 extension: extension.clone(),
                 lease,
