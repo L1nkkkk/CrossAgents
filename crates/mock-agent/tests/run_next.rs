@@ -403,6 +403,11 @@ async fn after_landing_the_checkout_is_deleted_then_run_next_works() {
     );
     completed(&mut w, &second).await;
     let lead = t.agent(second["planner"].as_str().unwrap()).await;
+    assert_ne!(
+        lead.id,
+        t.agent("Pia").await.id,
+        "the non-moving mock keeps its copy path"
+    );
     assert_eq!(lead.cwd, checkout);
     assert!(checkout.exists(), "the round made itself a new checkout");
     assert!(checkout.join("first.txt").exists());
@@ -543,7 +548,13 @@ async fn cancelled_round_keeps_its_checkout_and_next_starts_from_baseline() {
 #[tokio::test]
 async fn native_lead_run_next_after_landing() {
     let repo = git_repo();
-    let t = TestHub::start_with(common::native_plugin).await;
+    let sessions = tempfile::tempdir().unwrap();
+    let session_dir = sessions.path().to_str().unwrap().to_owned();
+    let t = TestHub::start_with(common::native_plugin_with(&[
+        "--mock-mobile-sessions",
+        &session_dir,
+    ]))
+    .await;
     t.add_native("Pia", "planner", repo.path()).await;
     let response = t
         .post("/v1/works", json!({"title":"rounds", "lead":"Pia"}))
@@ -554,7 +565,13 @@ async fn native_lead_run_next_after_landing() {
         .unwrap()
         .to_owned();
     let mut w = t.watch().await;
-    let first = round(&t, &work, change("first.txt"), None).await;
+    let first = round(
+        &t,
+        &work,
+        format!("[remember distinctive-amber-fox] {}", change("first.txt")),
+        None,
+    )
+    .await;
     completed(&mut w, &first).await;
     let checkout = t.agent("Pia").await.cwd;
     land(&t, &first).await;
@@ -565,10 +582,13 @@ async fn native_lead_run_next_after_landing() {
     let session = t.hub.bus.store().last_session_id(before.id).await.unwrap();
     t.send(
         "Pia",
-        &call(
-            "run_next",
-            json!({"title":"second", "request":format!("[session] [cwd] {}", change("second.txt"))}),
-        ),
+        &{
+            let next = call(
+                "run_next",
+                json!({"title":"second", "request":format!("[session] [cwd] [recall] {}", change("second.txt"))}),
+            );
+            format!("{next} {next}")
+        },
     )
     .await;
     let event = w
@@ -590,10 +610,21 @@ async fn native_lead_run_next_after_landing() {
     );
     completed(&mut w, &second).await;
     assert_eq!(
+        w.output().matches("\"status\": \"scheduled\"").count(),
+        2,
+        "{}",
+        w.output()
+    );
+    assert_eq!(
         t.hub.bus.store().last_session_id(before.id).await.unwrap(),
         session
     );
     assert!(w.output().contains("(resumed)"), "{}", w.output());
+    assert!(
+        w.output().contains("recall=distinctive-amber-fox"),
+        "{}",
+        w.output()
+    );
     assert!(
         w.output().contains(&format!("cwd={}", checkout.display())),
         "{}",
@@ -685,6 +716,67 @@ async fn native_scheduled_round_reports_creation_failure() {
     )
     .await;
     std::fs::create_dir_all(&checkout).unwrap();
-    w.until("failure notice", |e| matches!(&e.kind, EventKind::AgentInput { from, text, .. } if *from == Some(crossagents_api_types::MessageSource::Notice) && text.contains("Scheduled next round could not start"))).await;
+    w.until("failure notice", |e| matches!(&e.kind, EventKind::AgentInput { from, text, .. } if *from == Some(crossagents_api_types::MessageSource::Notice) && text.contains("Scheduled next round:"))).await;
+    assert!(w.output().contains("scheduled"), "{}", w.output());
+}
+
+#[tokio::test]
+async fn native_reused_checkout_schedules_while_gui_reports_busy() {
+    let repo = git_repo();
+    let t = TestHub::start_with(common::native_plugin).await;
+    let pia = t.add_native("Pia", "planner", repo.path()).await;
+    let response = t
+        .post("/v1/works", json!({"title":"rounds", "lead":"Pia"}))
+        .await;
+    let work = response.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut w = t.watch().await;
+    let first = round(&t, &work, change("first.txt"), None).await;
+    completed(&mut w, &first).await;
+    let checkout = t.agent("Pia").await.cwd;
+    t.hub
+        .runtime
+        .place(&crossagents_core::AgentKey::Id(pia.id), repo.path(), true)
+        .await
+        .unwrap();
+    t.send(
+        "Pia",
+        &format!(
+            "[sleep 1500] {}",
+            call(
+                "run_next",
+                json!({"title":"reused", "request":change("second.txt")})
+            )
+        ),
+    )
+    .await;
+    w.until(
+        "lead sleeping",
+        |e| matches!(&e.kind, EventKind::AgentOutput { text, .. } if text.contains("sleeping")),
+    )
+    .await;
+    let response = t
+        .post(
+            &format!("/v1/works/{work}/runs"),
+            json!({"title":"gui", "request":"other"}),
+        )
+        .await;
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    assert_eq!(status, 409, "{body}");
+    assert!(body.to_lowercase().contains("busy"), "{body}");
+    let event = w
+        .until(
+            "reused round",
+            |e| matches!(&e.kind, EventKind::RunCreated { run } if run.title == "reused"),
+        )
+        .await;
+    let EventKind::RunCreated { run } = event.kind else {
+        unreachable!()
+    };
+    assert_eq!(run.planner, pia.id);
+    assert_eq!(t.agent("Pia").await.cwd, checkout);
     assert!(w.output().contains("scheduled"), "{}", w.output());
 }
