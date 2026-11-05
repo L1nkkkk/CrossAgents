@@ -17,6 +17,7 @@ import type { MessageSource } from "./MessageSource";
 import type { NoteScope } from "./NoteScope";
 import type { OutputStream } from "./OutputStream";
 import type { PermissionDecision } from "./PermissionDecision";
+import type { QueuedReason } from "./QueuedReason";
 import type { RateLimits } from "./RateLimits";
 import type { Run } from "./Run";
 import type { RunId } from "./RunId";
@@ -58,7 +59,11 @@ attachments?: Array<Attachment>,
  * Notices that rode along with it (docs/TODO.md §二十五 第 3 条): they are in what
  * the agent reads, after the person's words, but not in `text`.
  */
-notices?: Array<string>, } } | { "type": "agent.input_updated", "data": { id: AgentId, message_id: MessageId, text: string, } } | { "type": "agent.model_changed", "data": { id: AgentId, model: string | null, effort: string | null, from_model: string | null, from_effort: string | null, } } | { "type": "agent.input_withdrawn", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.steered", "data": { id: AgentId, message_id: MessageId, text: string, attachments?: Array<Attachment>, } } | { "type": "agent.steer_read", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.turn_started", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.output", "data": { id: AgentId, stream: OutputStream, text: string, } } | { "type": "agent.tool_call", "data": { id: AgentId, tool_call_id: string, title: string, kind: string | null, status: ToolStatus, } } | { "type": "agent.tool_call_updated", "data": { id: AgentId, tool_call_id: string, title: string | null, status: ToolStatus | null, } } | { "type": "agent.tool_output", "data": { id: AgentId, tool_call_id: string, text: string, } } | { "type": "agent.tool_detail", "data": { id: AgentId, tool_call_id: string, detail: ToolDetail, } } | { "type": "agent.turn_diff", "data": { id: AgentId, diff: string, 
+notices?: Array<string>, 
+/**
+ * Why it waits, when `queued`; absent when it starts a turn at once.
+ */
+queued_reason?: QueuedReason, } } | { "type": "agent.input_refused", "data": { id: AgentId, message_id: MessageId, text: string, reason: QueuedReason, } } | { "type": "agent.input_updated", "data": { id: AgentId, message_id: MessageId, text: string, } } | { "type": "agent.model_changed", "data": { id: AgentId, model: string | null, effort: string | null, from_model: string | null, from_effort: string | null, } } | { "type": "agent.input_withdrawn", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.steered", "data": { id: AgentId, message_id: MessageId, text: string, attachments?: Array<Attachment>, } } | { "type": "agent.steer_read", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.turn_started", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.output", "data": { id: AgentId, stream: OutputStream, text: string, } } | { "type": "agent.tool_call", "data": { id: AgentId, tool_call_id: string, title: string, kind: string | null, status: ToolStatus, } } | { "type": "agent.tool_call_updated", "data": { id: AgentId, tool_call_id: string, title: string | null, status: ToolStatus | null, } } | { "type": "agent.tool_output", "data": { id: AgentId, tool_call_id: string, text: string, } } | { "type": "agent.tool_detail", "data": { id: AgentId, tool_call_id: string, detail: ToolDetail, } } | { "type": "agent.turn_diff", "data": { id: AgentId, diff: string, 
 /**
  * The turn it belongs to; absent in events written before the field existed (the
  * running turn, else the last one that started).

@@ -119,6 +119,14 @@ pub fn summary(kind: &EventKind) -> String {
         EventKind::AgentSteered { id, text, .. } => {
             format!("{} steered {}", short(id), one_line(text))
         }
+        EventKind::AgentInputRefused {
+            id, text, reason, ..
+        } => format!(
+            "{} refused ({}) {}",
+            short(id),
+            enum_name(reason),
+            one_line(text)
+        ),
         EventKind::AgentSteerRead { id, message_id } => {
             format!("{} read {}", short(id), short(message_id))
         }

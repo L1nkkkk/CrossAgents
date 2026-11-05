@@ -33,6 +33,37 @@ pub enum DiffSource {
     Hub,
 }
 
+/// Why a message waits for its turn instead of starting one, or why a steer attempt
+/// delivered nothing (docs/tasks/DELIVERY-AUDIT.md §3). Clients show a sentence per code
+/// and the raw code for one they do not know, so variants are only ever added, never
+/// renamed or removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedReason {
+    /// A turn runs; the message waits behind it.
+    TurnRunning,
+    /// A person's message is already waiting ahead of this one.
+    OwnerQueueAhead,
+    /// The agent runs outside the hub; it takes its messages when it asks for them.
+    ExternalAgent,
+    /// A steer was asked for, but the driver cannot take one.
+    RuntimeNoSteer,
+    /// A steer was asked for, but no turn runs (it just ended).
+    NoActiveTurn,
+    /// A steer was asked for, but writing it into the CLI failed: nothing was delivered
+    /// and nothing is queued; the sender decides whether to send it again.
+    SteerWriteFailed,
+    /// The conversation is archived.
+    Archived,
+    /// The message already started; it cannot be taken back or moved.
+    AlreadyStarted,
+    /// The agent or its driver refused the files sent with it.
+    AttachmentRefused,
+    /// Nothing was sent: no text and no files.
+    Empty,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Event {
@@ -105,6 +136,20 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         #[cfg_attr(feature = "ts", ts(as = "Option<Vec<String>>", optional))]
         notices: Vec<String>,
+        /// Why it waits, when `queued`; absent when it starts a turn at once.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        queued_reason: Option<QueuedReason>,
+    },
+    /// A message was not delivered: a steer asked for could not be written into the CLI.
+    /// Nothing waits for it and nothing started; the sender decides whether to send it
+    /// again (docs/tasks/DELIVERY-AUDIT.md §3).
+    #[serde(rename = "agent.input_refused")]
+    AgentInputRefused {
+        id: AgentId,
+        message_id: MessageId,
+        text: String,
+        reason: QueuedReason,
     },
     /// A waiting message got new text (the hub's notification digest gathers news while
     /// the agent is busy).
@@ -552,6 +597,7 @@ impl EventKind {
             Self::AgentRemoved { .. } => "agent.removed",
             Self::AgentStatusChanged { .. } => "agent.status_changed",
             Self::AgentInput { .. } => "agent.input",
+            Self::AgentInputRefused { .. } => "agent.input_refused",
             Self::AgentInputWithdrawn { .. } => "agent.input_withdrawn",
             Self::AgentSteered { .. } => "agent.steered",
             Self::AgentSteerRead { .. } => "agent.steer_read",
@@ -675,6 +721,7 @@ impl EventKind {
             Self::AgentRemoved { id, .. }
             | Self::AgentStatusChanged { id, .. }
             | Self::AgentInput { id, .. }
+            | Self::AgentInputRefused { id, .. }
             | Self::AgentInputWithdrawn { id, .. }
             | Self::AgentSteered { id, .. }
             | Self::AgentSteerRead { id, .. }

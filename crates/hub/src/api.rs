@@ -30,7 +30,7 @@ use crossagents_api_types::{
     GraphRefKind, HealthResponse, HubInfo, ImageContent, InitRepoRequest, LandRequest,
     ListAccountsResponse, ListAgentsResponse, ListAvatarsResponse, ListHistoryResponse,
     ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
-    ListToolsResponse, ListWorksResponse, LoginStarted, PluginInfo, QuotaResponse,
+    ListToolsResponse, ListWorksResponse, LoginStarted, PluginInfo, QueuedReason, QuotaResponse,
     RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse, ResolvedPath,
     RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
     SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript,
@@ -50,7 +50,7 @@ use crossagents_orchestrator::{
 
 use crate::accounts::Accounts;
 use crate::collab::AgentTokens;
-use crate::runtime::Runtime;
+use crate::runtime::{Delivery, Runtime, SteerFailure};
 use futures::Stream;
 use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc};
@@ -127,6 +127,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/agents/{key}/messages/{message_id}",
             delete(withdraw_message),
+        )
+        .route(
+            "/v1/agents/{key}/messages/{message_id}/send-now",
+            post(send_now_message),
         )
         .route("/v1/agents/{key}/transcript", get(transcript))
         .route("/v1/agents/{key}/turns/{message_id}/diff", get(turn_diff))
@@ -280,6 +284,11 @@ impl AppError {
 
     fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, message)
+    }
+
+    /// The same error, saying why a message was refused (docs/tasks/DELIVERY-AUDIT.md §3).
+    fn with_reason(self, reason: QueuedReason) -> Self {
+        Self(self.0, self.1.with_reason(reason))
     }
 }
 
@@ -510,18 +519,24 @@ async fn start_chat(
 ) -> ApiResult<(StatusCode, Json<SendMessageResponse>)> {
     let uploads = req.attachments.unwrap_or_default();
     if req.text.trim().is_empty() && uploads.is_empty() {
-        return Err(AppError::bad_request("text must not be empty"));
+        return Err(
+            AppError::bad_request("text must not be empty").with_reason(QueuedReason::Empty)
+        );
     }
     let key = AgentKey::parse(&key);
     let agent = state.store().get_agent(&key).await?;
     state.orchestrator.chat_available(&agent).await?;
     if agent.archived_at.is_some() {
         if !req.restore {
-            return Err(CoreError::Conflict(format!(
-                "{} is archived: restore it first with restore: true",
-                agent.name
-            ))
-            .into());
+            return Err(AppError::new(
+                StatusCode::CONFLICT,
+                ErrorCode::Conflict,
+                format!(
+                    "{} is archived: restore it first with restore: true",
+                    agent.name
+                ),
+            )
+            .with_reason(QueuedReason::Archived));
         }
         state.runtime.archive(&key, false).await?;
     }
@@ -531,7 +546,7 @@ async fn start_chat(
         attachments,
         ..Envelope::new(MessageSource::Human, text.clone())
     };
-    let (message_id, queued) = state.runtime.send_envelope(&key, envelope).await?;
+    let delivery = state.runtime.send_envelope(&key, envelope).await?;
     // Files alone leave the topic as it was.
     if !text.trim().is_empty() {
         let topic = text
@@ -543,14 +558,7 @@ async fn start_chat(
             .collect();
         state.runtime.set_topic(&key, Some(topic)).await?;
     }
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(SendMessageResponse {
-            message_id,
-            queued,
-            steered: false,
-        }),
-    ))
+    Ok((StatusCode::ACCEPTED, Json(message_response(delivery))))
 }
 
 async fn create_agent(
@@ -1196,37 +1204,106 @@ async fn send_message(
 ) -> ApiResult<(StatusCode, Json<SendMessageResponse>)> {
     let uploads = req.attachments.unwrap_or_default();
     if req.text.trim().is_empty() && uploads.is_empty() {
-        return Err(AppError::bad_request("text must not be empty"));
+        return Err(
+            AppError::bad_request("text must not be empty").with_reason(QueuedReason::Empty)
+        );
     }
     let key = AgentKey::parse(&key);
+    // Archived and refused files are said with their reason, before the message is made.
+    let stored = state.store().get_agent(&key).await?;
+    if stored.archived_at.is_some() {
+        return Err(AppError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::Conflict,
+            format!(
+                "{} is archived; its conversation has to be restored before it gets messages",
+                stored.name
+            ),
+        )
+        .with_reason(QueuedReason::Archived));
+    }
     let attachments = store_uploads(&state, &key, uploads).await?;
     let envelope = Envelope {
         attachments,
         ..Envelope::new(MessageSource::Human, req.text)
     };
-    let (message_id, queued) = if req.now == Some(true) {
-        state.runtime.send_now_envelope(&key, envelope).await?
+    let client_message_id = req.client_message_id;
+    let delivery = if req.now == Some(true) {
+        state
+            .runtime
+            .send_now_envelope_from(&key, envelope, client_message_id)
+            .await
+            .map_err(AppError::from)?
     } else if req.steer == Some(true) {
-        let (message_id, queued, steered) = state.runtime.steer_envelope(&key, envelope).await?;
-        return Ok((
-            StatusCode::ACCEPTED,
-            Json(SendMessageResponse {
-                message_id,
-                queued,
-                steered,
-            }),
-        ));
+        match state
+            .runtime
+            .steer_envelope_from(&key, envelope, client_message_id)
+            .await
+        {
+            Ok(delivery) => delivery,
+            Err(SteerFailure::Refused {
+                reason, error: why, ..
+            }) => {
+                return Err(
+                    AppError::new(StatusCode::BAD_GATEWAY, ErrorCode::AgentError, why)
+                        .with_reason(reason),
+                );
+            }
+            Err(SteerFailure::Error(err)) => return Err(err.into()),
+        }
     } else {
-        state.runtime.send_envelope(&key, envelope).await?
+        state
+            .runtime
+            .send_envelope_from(&key, envelope, client_message_id)
+            .await
+            .map_err(AppError::from)?
     };
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(SendMessageResponse {
-            message_id,
-            queued,
-            steered: false,
-        }),
-    ))
+    Ok((StatusCode::ACCEPTED, Json(message_response(delivery))))
+}
+
+/// The reply for a delivered message, saying why it waits when it does.
+fn message_response(delivery: Delivery) -> SendMessageResponse {
+    SendMessageResponse {
+        message_id: delivery.message_id,
+        queued: delivery.queued,
+        steered: delivery.steered,
+        queued_reason: delivery.queued_reason,
+    }
+}
+
+/// `POST /v1/agents/{key}/messages/{id}/send-now`: moves a waiting message to the front of
+/// the line and interrupts the running turn, keeping its id
+/// (docs/tasks/DELIVERY-AUDIT.md §2). A message that already started, or one nobody knows,
+/// is a conflict and leaves the queue as it was.
+async fn send_now_message(
+    State(state): State<Arc<AppState>>,
+    Path((key, message_id)): Path<(String, String)>,
+) -> ApiResult<(StatusCode, Json<SendMessageResponse>)> {
+    let message_id: MessageId = message_id
+        .parse()
+        .map_err(|_| AppError::bad_request("invalid message id"))?;
+    let key = AgentKey::parse(&key);
+    let stored = state.store().get_agent(&key).await?;
+    if stored.archived_at.is_some() {
+        return Err(AppError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::Conflict,
+            format!("{} is archived", stored.name),
+        )
+        .with_reason(QueuedReason::Archived));
+    }
+    let delivery = state
+        .runtime
+        .promote(&key, message_id)
+        .await
+        .map_err(|err| match err {
+            CoreError::Conflict(why) => {
+                AppError::new(StatusCode::CONFLICT, ErrorCode::Conflict, why)
+                    .with_reason(QueuedReason::AlreadyStarted)
+            }
+            other => other.into(),
+        })?;
+    Ok((StatusCode::ACCEPTED, Json(message_response(delivery))))
 }
 
 /// Checks `uploads` against what the agent takes and stores them for it; nothing to do
@@ -1253,10 +1330,12 @@ async fn store_uploads(
         .driver(&agent.plugin, agent.driver.as_deref())
         .map(|resolved| resolved.driver.kind().as_str())
         .unwrap_or("unknown");
-    crate::attachments::check_support(&uploads, support, &agent.name, driver)
-        .map_err(|refused| AppError::bad_request(refused.0))?;
-    crate::attachments::store(&state.home, agent.id, uploads)
-        .map_err(|refused| AppError::bad_request(refused.0))
+    crate::attachments::check_support(&uploads, support, &agent.name, driver).map_err(
+        |refused| AppError::bad_request(refused.0).with_reason(QueuedReason::AttachmentRefused),
+    )?;
+    crate::attachments::store(&state.home, agent.id, uploads).map_err(|refused| {
+        AppError::bad_request(refused.0).with_reason(QueuedReason::AttachmentRefused)
+    })
 }
 
 /// One file sent to the agent, for clients to show.
