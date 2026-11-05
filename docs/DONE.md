@@ -304,3 +304,13 @@ B 删除 run：
   - `to` 写的名字恰好是正在和你说话的队友去掉数字后缀（比如该写 `Pia 4` 写成了 `Pia`），而你和它从没互发过消息时，拒绝发送，并说明该怎么写。
   - 测试在 `crates/mock-agent/tests/collab.rs`（3 条）和 `replies.rs` 的单元测试（7 条）
 - [x] 驱动与 hub 修复（11-05、11-06）：Claude 驱动写入不留半帧、失败 result 不提前结束；`run_next` 在 lead 回合内不再报 busy；Codex primary 额度误判；复制失败、回复看不到图、`run_next` 重复显示人的原话
+
+## 二十五、借鉴 oh-my-pi 与 Cutex 0.2.1
+
+> 2026-11-06 run `7cfd5794`。各条的来源和依据见 [TODO.md](TODO.md) 同名一节；没做完的条目留在那里。
+
+- [x] **7. 合并的活动流**（oh-my-pi agent-hub.md 的 Activity）：工具列新增「活动」标签，可放进右侧或底部 dock。所有 agent 的回复、工具调用、错误、消息（agent 之间的、人的、向人提问和人的回答）排成一条时间线，最新的在上面。类型可多选筛选（错误 / 回复 / 工具 / 消息）；范围可以是全部、某个 agent，也可以是它连同下属（按 `spawned_by_agent` 递归推算，防环）。点一条就打开那个会话，并滚到对应的那一轮；找不到那一轮时，在面板里说明。
+  - 代码：`apps/gui/src/lib/activityFeed.ts`（纯函数）、`ActivityFeed.tsx`、`activityfeed.css`，在 `panes.ts` 登记标签。
+  - 测试：`apps/gui/src/lib/activityFeed.test.ts`（10 条），覆盖事件折叠、流式合并、工具失败更新、轮次关联、下属推算、范围和类型筛选。
+  - 截图：mock 场景 `activity`，宽、窄、浅色、深色各一张，见 `docs/screens/activity-*.png`。窄屏加深色、点工具行跳到 Rex 的会话，这两项主导另外截图看过。顺手修了场景的一个毛病：转录里预先放了同一批消息，导致同一条消息显示两次、React 报重复 key。
+  - 没验证：只在 mock 里看过，没接真实 hub 的事件流；只能看到页面加载之后的事件，界面上写明了这一点；键盘操作只确认了用的是原生 button/select 并带 aria 标签，没逐项用 Tab 走一遍。

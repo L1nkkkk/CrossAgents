@@ -559,10 +559,12 @@ function activityScene() {
     running: true,
     items: [say("收到，我先等。")],
   });
-  state.transcripts.set(lead.id, transcript(lead, [t1], 24_000));
-  state.transcripts.set(rex.id, transcript(rex, [t2], 18_000));
-  state.transcripts.set(kai.id, transcript(kai, [t3], 12_000));
-  state.transcripts.set(mia.id, transcript(mia, [t4], 9_000));
+  // The turns arrive as events below (the feed only sees what came after the page loaded), so
+  // the transcripts start empty instead of holding the same messages twice.
+  state.transcripts.set(lead.id, transcript(lead, [], 24_000));
+  state.transcripts.set(rex.id, transcript(rex, [], 18_000));
+  state.transcripts.set(kai.id, transcript(kai, [], 12_000));
+  state.transcripts.set(mia.id, transcript(mia, [], 9_000));
 
   const m1 = t1.turn.message_id;
   const m2 = t2.turn.message_id;

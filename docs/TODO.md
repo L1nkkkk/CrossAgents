@@ -342,4 +342,3 @@ B3 远程开发：
 - [ ] **4. hub 层的流式规则**（oh-my-pi [ttsr-injection-lifecycle.md](https://github.com/can1357/oh-my-pi/blob/b7221d994869ed36a81b44e60827786f572498ed/docs/ttsr-injection-lifecycle.md)）：规则平时不进上下文，agent 的输出或工具调用命中正则时，hub 用插话把这条规则送进去（不支持插话的驱动就中断后重发）。比把所有规则塞进系统提示省上下文。要定：规则写在哪（项目文件还是扩展）、同一条规则多久内只注入一次、压缩上下文后还算不算已注入
 - [ ] **5. 任务交结构化结果**（oh-my-pi 的 subagent：结果按 schema 校验，父 agent 按路径取字段）：`task_create` 可以带一个结果 schema，`task_complete` 按它校验并存成 JSON，主导用 `task_get` 按路径取。现在只交一段文字总结，主导得自己读
 - [ ] **6. 评审给明确结论**（oh-my-pi 的 `/review`）：`review_submit` 的每个问题按 P0–P3 分级并标置信度，最后给一个能不能合的结论；GUI 按级别排，先看挡合并的
-- [ ] **7. 合并的活动流**（oh-my-pi [agent-hub.md](https://github.com/can1357/oh-my-pi/blob/b7221d994869ed36a81b44e60827786f572498ed/docs/agent-hub.md) 的 Activity）：所有 agent 的回复、工具调用、消息排成一条时间线，可按错误、回复、工具筛选，范围可以是全部、某个 agent 或它的下属；点一条跳到那个会话的对应位置。我们的右侧栏现在按会话分开看
