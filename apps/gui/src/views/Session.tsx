@@ -27,6 +27,9 @@ import { InfoRail, RAIL_ROOM, SIDE_ROOM, useRail } from "../rail";
 import { ScrollThumb } from "../scrollthumb";
 import { TurnMap, type MapEntry } from "../turnmap";
 import { focusSession, isTermTab, openTool, toggleTools, useLayout } from "../panes";
+import { useToolCards } from "../extensions/defaults";
+import { cardFor } from "../extensions/toolcards";
+import { ToolCardView } from "../extensions/ui";
 import { shownTab } from "../lib/docks";
 import { terminalsAvailable, toggleTerminal, useTabShows } from "../terminal";
 import { useWidths } from "../lib/widths";
@@ -851,7 +854,9 @@ function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agen
   // Which step the conversation shows live, as Steps reports it: the live line leaves that step's
   // command and output out, so the same lines are not written twice (see ShownLive).
   const [shownLive, setShownLive] = useState<string | null>(null);
-  const blocks = workGroups(turn.items);
+  const cards = useToolCards();
+  // A tool an extension draws itself is a block of its own, never folded into a step summary.
+  const blocks = workGroups(turn.items, (item) => !!cardFor(item, cards));
   return (
     <div className="turn" data-turn={turn.message_id}>
       {fromPerson(turn) ? (
@@ -888,6 +893,9 @@ function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agen
 }
 
 function Item({ item }: { item: TranscriptItem }) {
+  const cards = useToolCards();
+  const card = cardFor(item, cards);
+  if (card && item.type === "tool_call") return <ToolCardView card={card} call={item} />;
   const action = actionOf(item);
   if (action && item.type === "tool_call") return <ActionCard action={action} call={item} />;
   switch (item.type) {
