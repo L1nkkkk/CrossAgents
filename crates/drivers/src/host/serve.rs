@@ -417,6 +417,7 @@ mod tests {
 
     #[tokio::test]
     async fn real_host_adoption_can_kill_a_child_not_reading_stdin() {
+        for close_input in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let (program, args) = if cfg!(windows) {
             (
@@ -493,8 +494,13 @@ mod tests {
             .write_all(format!("{}\n", "x".repeat(1024 * 1024)).as_bytes())
             .await
             .unwrap();
+        adopted.stdin.write_all(b"{\"type\":\"control_response\",\"request_id\":\"permission\"}\n").await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
-        adopted.process.start_kill();
+        if close_input {
+            drop(adopted.stdin);
+        } else {
+            adopted.process.start_kill();
+        }
         let exit = tokio::time::timeout(Duration::from_secs(5), adopted.process.wait())
             .await
             .unwrap()
@@ -504,6 +510,26 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn hosted_permission_frame_follows_slow_large_frame() {
+        let (reader, writer) = tokio::io::duplex(8);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (_close, close_rx) = watch::channel(false);
+        let kill = Arc::new(Notify::new());
+        let task = tokio::spawn(write_input(writer, rx, close_rx, kill.clone(), Duration::from_secs(2)));
+        let first = format!("{{\"prompt\":\"{}\"}}\n", "x".repeat(4096));
+        let permission = b"{\"type\":\"control_response\",\"request_id\":\"permission\"}\n";
+        tx.send(first.as_bytes().to_vec()).unwrap();
+        tx.send(permission.to_vec()).unwrap();
+        let mut lines = BufReader::new(reader).lines();
+        assert_eq!(lines.next_line().await.unwrap().unwrap(), first.trim_end());
+        assert_eq!(lines.next_line().await.unwrap().unwrap(), std::str::from_utf8(permission).unwrap().trim_end());
+        assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_err());
+        drop(tx);
+        task.await.unwrap();
     }
 
     #[tokio::test]
