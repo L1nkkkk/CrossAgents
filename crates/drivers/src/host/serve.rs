@@ -418,98 +418,102 @@ mod tests {
     #[tokio::test]
     async fn real_host_adoption_can_kill_a_child_not_reading_stdin() {
         for close_input in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let (program, args) = if cfg!(windows) {
-            (
-                crate::process::resolve_program("powershell"),
-                vec![
-                    "-NoProfile".into(),
-                    "-Command".into(),
-                    "Start-Sleep -Seconds 60".into(),
-                ],
+            let dir = tempfile::tempdir().unwrap();
+            let (program, args) = if cfg!(windows) {
+                (
+                    crate::process::resolve_program("powershell"),
+                    vec![
+                        "-NoProfile".into(),
+                        "-Command".into(),
+                        "Start-Sleep -Seconds 60".into(),
+                    ],
+                )
+            } else {
+                (PathBuf::from("sh"), vec!["-c".into(), "sleep 60".into()])
+            };
+            let spec = HostSpec {
+                id: "test-host".into(),
+                owner: "test".into(),
+                label: "test".into(),
+                program,
+                args,
+                cwd: dir.path().into(),
+                env: vec![],
+                env_remove: vec![],
+            };
+            std::fs::write(
+                dir.path().join("test-host.spec.json"),
+                serde_json::to_vec(&spec).unwrap(),
             )
-        } else {
-            (PathBuf::from("sh"), vec!["-c".into(), "sleep 60".into()])
-        };
-        let spec = HostSpec {
-            id: "test-host".into(),
-            owner: "test".into(),
-            label: "test".into(),
-            program,
-            args,
-            cwd: dir.path().into(),
-            env: vec![],
-            env_remove: vec![],
-        };
-        std::fs::write(
-            dir.path().join("test-host.spec.json"),
-            serde_json::to_vec(&spec).unwrap(),
-        )
-        .unwrap();
-        let mut host = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "host::serve::tests::host_process_entry",
-                "--nocapture",
-            ])
-            .env("CROSSAGENTS_TEST_HOST_DIR", dir.path())
-            .kill_on_drop(true)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
             .unwrap();
-        let record = tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                if let Ok(bytes) = tokio::fs::read(record_path(dir.path(), "test-host")).await
-                    && let Ok(record) = serde_json::from_slice::<HostRecord>(&bytes)
-                {
-                    break record;
+            let mut host = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "host::serve::tests::host_process_entry",
+                    "--nocapture",
+                ])
+                .env("CROSSAGENTS_TEST_HOST_DIR", dir.path())
+                .kill_on_drop(true)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let record = tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if let Ok(bytes) = tokio::fs::read(record_path(dir.path(), "test-host")).await
+                        && let Ok(record) = serde_json::from_slice::<HostRecord>(&bytes)
+                    {
+                        break record;
+                    }
+                    tokio::time::sleep(Duration::from_millis(30)).await;
                 }
-                tokio::time::sleep(Duration::from_millis(30)).await;
+            })
+            .await
+            .expect("host record");
+            // A prior hub connects and departs. The next connection is the adopted session.
+            let mut first = TcpStream::connect(("127.0.0.1", record.port))
+                .await
+                .unwrap();
+            first
+                .write_all(
+                    encode(&ToHost::Hello {
+                        id: record.id.clone(),
+                        token: record.token.clone(),
+                    })
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut first = BufReader::new(first);
+            let mut hello = String::new();
+            first.read_line(&mut hello).await.unwrap();
+            drop(first);
+            let mut adopted = super::super::client::connect(&record).await.unwrap();
+            adopted
+                .stdin
+                .write_all(format!("{}\n", "x".repeat(1024 * 1024)).as_bytes())
+                .await
+                .unwrap();
+            adopted
+                .stdin
+                .write_all(b"{\"type\":\"control_response\",\"request_id\":\"permission\"}\n")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if close_input {
+                drop(adopted.stdin);
+            } else {
+                adopted.process.start_kill();
             }
-        })
-        .await
-        .expect("host record");
-        // A prior hub connects and departs. The next connection is the adopted session.
-        let mut first = TcpStream::connect(("127.0.0.1", record.port))
-            .await
-            .unwrap();
-        first
-            .write_all(
-                encode(&ToHost::Hello {
-                    id: record.id.clone(),
-                    token: record.token.clone(),
-                })
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-        let mut first = BufReader::new(first);
-        let mut hello = String::new();
-        first.read_line(&mut hello).await.unwrap();
-        drop(first);
-        let mut adopted = super::super::client::connect(&record).await.unwrap();
-        adopted
-            .stdin
-            .write_all(format!("{}\n", "x".repeat(1024 * 1024)).as_bytes())
-            .await
-            .unwrap();
-        adopted.stdin.write_all(b"{\"type\":\"control_response\",\"request_id\":\"permission\"}\n").await.unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        if close_input {
-            drop(adopted.stdin);
-        } else {
-            adopted.process.start_kill();
-        }
-        let exit = tokio::time::timeout(Duration::from_secs(5), adopted.process.wait())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(exit.cause, crossagents_core::ExitCause::Killed);
-        tokio::time::timeout(Duration::from_secs(5), host.wait())
-            .await
-            .unwrap()
-            .unwrap();
+            let exit = tokio::time::timeout(Duration::from_secs(5), adopted.process.wait())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(exit.cause, crossagents_core::ExitCause::Killed);
+            tokio::time::timeout(Duration::from_secs(5), host.wait())
+                .await
+                .unwrap()
+                .unwrap();
         }
     }
 
@@ -519,15 +523,58 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let (_close, close_rx) = watch::channel(false);
         let kill = Arc::new(Notify::new());
-        let task = tokio::spawn(write_input(writer, rx, close_rx, kill.clone(), Duration::from_secs(2)));
+        let task = tokio::spawn(write_input(
+            writer,
+            rx,
+            close_rx,
+            kill.clone(),
+            Duration::from_secs(2),
+        ));
         let first = format!("{{\"prompt\":\"{}\"}}\n", "x".repeat(4096));
         let permission = b"{\"type\":\"control_response\",\"request_id\":\"permission\"}\n";
         tx.send(first.as_bytes().to_vec()).unwrap();
         tx.send(permission.to_vec()).unwrap();
         let mut lines = BufReader::new(reader).lines();
         assert_eq!(lines.next_line().await.unwrap().unwrap(), first.trim_end());
-        assert_eq!(lines.next_line().await.unwrap().unwrap(), std::str::from_utf8(permission).unwrap().trim_end());
-        assert!(tokio::time::timeout(Duration::from_millis(50), kill.notified()).await.is_err());
+        assert_eq!(
+            lines.next_line().await.unwrap().unwrap(),
+            std::str::from_utf8(permission).unwrap().trim_end()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), kill.notified())
+                .await
+                .is_err()
+        );
+        drop(tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn large_hosted_frame_survives_a_long_tool_backpressure() {
+        let (reader, writer) = tokio::io::duplex(8192);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (_close, close_rx) = watch::channel(false);
+        let kill = Arc::new(Notify::new());
+        let task = tokio::spawn(write_input(
+            writer,
+            rx,
+            close_rx,
+            kill.clone(),
+            Duration::from_secs(5),
+        ));
+        let large = format!("{{\"prompt\":\"{}\"}}\n", "x".repeat(2 * 1024 * 1024));
+        let permission = "{\"type\":\"control_response\",\"request_id\":\"permission\"}";
+        tx.send(large.as_bytes().to_vec()).unwrap();
+        tx.send(format!("{permission}\n").into_bytes()).unwrap();
+        tokio::time::sleep(Duration::from_millis(3100)).await;
+        let mut lines = BufReader::new(reader).lines();
+        assert_eq!(lines.next_line().await.unwrap().unwrap(), large.trim_end());
+        assert_eq!(lines.next_line().await.unwrap().unwrap(), permission);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), kill.notified())
+                .await
+                .is_err()
+        );
         drop(tx);
         task.await.unwrap();
     }
