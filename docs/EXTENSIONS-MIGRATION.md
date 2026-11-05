@@ -16,7 +16,7 @@
 |---|---|---|
 | `note_list` / `note_read` | `tools.rs:243` / `tools.rs:232`，`crates/orchestrator/src/notes.rs:131` / `crates/orchestrator/src/notes.rs:105` | 返回值能重建；但扩展 token 是通用 read，能读别的 run 的全文（见 §2.1 的条件） |
 | `gui_screenshot` | `crates/orchestrator/src/tools.rs:564`，`crates/orchestrator/src/screenshot.rs:78` | 零新 hub 接口，但依赖 checkout + `apps/gui/node_modules`，且超过 1 MiB stdout 上限的 base64 会使调用失败（见 §2.1） |
-| 事件流面板 | `apps/gui/src/ToolColumn.tsx:411` | 试点进行中，差异与验收见 `extensions/debug/README.md` |
+| 事件流面板 | `apps/gui/src/ToolColumn.tsx:411` | 试点已做成普通扩展并在真实 Electron 验收，内置面板保留；差异与验收见 `extensions/debug/README.md` |
 
 **补接口才能搬**：`expertise_search`、`expertise_get`、`usage_get`、`agent_get`、`agent_list`、`whoami`、
 `watch_list`、`watch_cancel`、`remind_list`、`remind_cancel`、`message_withdraw`、`agent_send`、`inbox_read`、
@@ -30,7 +30,7 @@
 `agent_spawn`、`remind_set`、`watch`、`human_ask`、`human_notify`、
 `extension_*` 六个机制工具；GUI 侧的对话、Run 页、设置、工作区、侧栏、菜单与快捷键、终端、提问与通知、安全模式入口。
 
-**事件流试点进行中，差异与验收见 `extensions/debug/README.md`。** 决定：手动安装启用、默认没有、发布版启用后可见、内置面板保留、不补宿主能力。
+**事件流试点已完成：`extensions/debug/` 是一个普通扩展，差异与验收见 `extensions/debug/README.md`。** 决定：手动安装启用、默认没有、发布版启用后可见、内置面板保留、不补宿主能力。删不删内置面板还没定。
 
 ## 1. 判定口径
 
@@ -183,7 +183,7 @@ GUI 侧：
 
 ## 6. 推荐顺序与第一个试点
 
-1. 事件流试点进行中，差异与验收见 `extensions/debug/README.md`。决定：手动安装启用、默认没有、发布版启用后可见、内置面板保留、不补宿主能力。
+1. 事件流试点已完成，差异与验收见 `extensions/debug/README.md`。决定：手动安装启用、默认没有、发布版启用后可见、内置面板保留、不补宿主能力。试点暴露一个接口缺口：`ca` 不给连接状态，内置 `useAgents` 靠 `useHubData` 在连上时重取，扩展只能自己退避重试（`extensions/debug/gui/index.js`），否则 hub 离线时打开面板，恢复后列表一直是空的。下一个做 hub 数据面板的扩展也会碰到。
 2. `note_list` + `note_read`：接受 §2.1 的读取面后评估。
 3. `gui_screenshot`：先确定大图交付方式与运行环境（§2.1）。
 4. 事件响应型新包装：选择容忍漏事件的非核心用途验证 E4；需要定时的可评估 service。它不是 `remind_*`/`watch` 的等价替代（§1.2、§2.3）。
