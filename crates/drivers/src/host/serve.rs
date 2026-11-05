@@ -14,8 +14,8 @@ use std::time::Duration;
 use crossagents_core::process::Job;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::process::{ChildStdin, Command};
-use tokio::sync::{Notify, mpsc};
+use tokio::process::Command;
+use tokio::sync::{Notify, mpsc, watch};
 
 use super::record_path;
 use super::wire::{FromHost, HostRecord, HostSpec, ToHost, encode};
@@ -185,9 +185,17 @@ pub async fn serve(dir: PathBuf, id: String) -> Result<(), String> {
     write_record(&dir, &record).map_err(|e| format!("cannot write the record: {e}"))?;
 
     let state = Arc::new(State::default());
-    let stdin = Arc::new(tokio::sync::Mutex::new(child.stdin.take()));
     let kill = Arc::new(Notify::new());
     let killed = Arc::new(AtomicBool::new(false));
+    let (input, input_rx) = mpsc::unbounded_channel();
+    let (close_input, close_rx) = watch::channel(false);
+    let writer = tokio::spawn(write_input(
+        child.stdin.take().expect("piped stdin"),
+        input_rx,
+        close_rx,
+        kill.clone(),
+        super::STDIN_STALL,
+    ));
 
     let out = tokio::spawn({
         let state = state.clone();
@@ -212,7 +220,8 @@ pub async fn serve(dir: PathBuf, id: String) -> Result<(), String> {
 
     let accept = tokio::spawn({
         let state = state.clone();
-        let stdin = stdin.clone();
+        let input = input.clone();
+        let close_input = close_input.clone();
         let kill = kill.clone();
         let (id, token, pid) = (record.id.clone(), record.token.clone(), record.child_pid);
         async move {
@@ -224,7 +233,8 @@ pub async fn serve(dir: PathBuf, id: String) -> Result<(), String> {
                     conn,
                     state.clone(),
                     (id.clone(), token.clone(), pid),
-                    stdin.clone(),
+                    input.clone(),
+                    close_input.clone(),
                     kill.clone(),
                 ));
             }
@@ -240,6 +250,7 @@ pub async fn serve(dir: PathBuf, id: String) -> Result<(), String> {
             child.wait().await
         }
     };
+    writer.abort();
     let _ = tokio::time::timeout(DRAIN, async {
         let _ = out.await;
         let _ = err.await;
@@ -301,7 +312,8 @@ async fn handle(
     conn: u64,
     state: Arc<State>,
     (id, token, pid): (String, String, Option<u32>),
-    stdin: Arc<tokio::sync::Mutex<Option<ChildStdin>>>,
+    input: mpsc::UnboundedSender<Vec<u8>>,
+    close_input: watch::Sender<bool>,
     kill: Arc<Notify>,
 ) {
     let (read, mut write) = stream.into_split();
@@ -343,22 +355,15 @@ async fn handle(
         };
         match frame {
             ToHost::In { line } => {
-                let mut stdin = stdin.lock().await;
-                if let Some(pipe) = stdin.as_mut() {
-                    let mut bytes = line.into_bytes();
-                    bytes.push(b'\n');
-                    let written = async {
-                        pipe.write_all(&bytes).await?;
-                        pipe.flush().await
-                    };
-                    if written.await.is_err() {
-                        stdin.take();
-                    }
+                let mut bytes = line.into_bytes();
+                bytes.push(b'\n');
+                if *close_input.borrow() || input.send(bytes).is_err() {
+                    kill.notify_one();
                 }
             }
             ToHost::Ack { seq } => state.ack(seq),
             ToHost::CloseStdin => {
-                stdin.lock().await.take();
+                let _ = close_input.send(true);
             }
             ToHost::Kill => kill.notify_one(),
             ToHost::Hello { .. } => {}
@@ -367,9 +372,343 @@ async fn handle(
     state.detach(conn);
 }
 
+async fn write_input<W: tokio::io::AsyncWrite + Unpin>(
+    mut stdin: W,
+    mut input: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut close: watch::Receiver<bool>,
+    kill: Arc<Notify>,
+    stall: Duration,
+) {
+    loop {
+        let frame = tokio::select! {
+            biased;
+            _ = close.changed() => {
+                if !input.is_empty() { kill.notify_one(); }
+                return;
+            }
+            frame = input.recv() => match frame { Some(frame) => frame, None => return },
+        };
+        tokio::select! {
+            biased;
+            _ = close.changed() => { drop(stdin); kill.notify_one(); return; }
+            result = super::write_progress(&mut stdin, &frame, stall) => {
+                if result.is_err() { drop(stdin); kill.notify_one(); return; }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncReadExt;
+
+    // Run the real host in a separate test process: on Windows it owns a Job Object,
+    // which must never be assigned to the parent test runner.
+    #[test]
+    fn host_process_entry() {
+        if let Ok(dir) = std::env::var("CROSSAGENTS_TEST_HOST_DIR") {
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(super::serve(PathBuf::from(dir), "test-host".into()))
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn real_host_adoption_can_kill_a_child_not_reading_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let (program, args) = if cfg!(windows) {
+            (
+                crate::process::resolve_program("powershell"),
+                vec![
+                    "-NoProfile".into(),
+                    "-Command".into(),
+                    "Start-Sleep -Seconds 60".into(),
+                ],
+            )
+        } else {
+            (PathBuf::from("sh"), vec!["-c".into(), "sleep 60".into()])
+        };
+        let spec = HostSpec {
+            id: "test-host".into(),
+            owner: "test".into(),
+            label: "test".into(),
+            program,
+            args,
+            cwd: dir.path().into(),
+            env: vec![],
+            env_remove: vec![],
+        };
+        std::fs::write(
+            dir.path().join("test-host.spec.json"),
+            serde_json::to_vec(&spec).unwrap(),
+        )
+        .unwrap();
+        let mut host = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "host::serve::tests::host_process_entry",
+                "--nocapture",
+            ])
+            .env("CROSSAGENTS_TEST_HOST_DIR", dir.path())
+            .kill_on_drop(true)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let record = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Ok(bytes) = tokio::fs::read(record_path(dir.path(), "test-host")).await
+                    && let Ok(record) = serde_json::from_slice::<HostRecord>(&bytes)
+                {
+                    break record;
+                }
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        })
+        .await
+        .expect("host record");
+        // A prior hub connects and departs. The next connection is the adopted session.
+        let mut first = TcpStream::connect(("127.0.0.1", record.port))
+            .await
+            .unwrap();
+        first
+            .write_all(
+                encode(&ToHost::Hello {
+                    id: record.id.clone(),
+                    token: record.token.clone(),
+                })
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut first = BufReader::new(first);
+        let mut hello = String::new();
+        first.read_line(&mut hello).await.unwrap();
+        drop(first);
+        let mut adopted = super::super::client::connect(&record).await.unwrap();
+        adopted
+            .stdin
+            .write_all(format!("{}\n", "x".repeat(1024 * 1024)).as_bytes())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        adopted.process.start_kill();
+        let exit = tokio::time::timeout(Duration::from_secs(5), adopted.process.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(exit.cause, crossagents_core::ExitCause::Killed);
+        tokio::time::timeout(Duration::from_secs(5), host.wait())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn progress_for_more_than_three_seconds_does_not_kill() {
+        let (mut reader, writer) = tokio::io::duplex(8);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (_close, close_rx) = watch::channel(false);
+        let kill = Arc::new(Notify::new());
+        let task = tokio::spawn(write_input(
+            writer,
+            rx,
+            close_rx,
+            kill.clone(),
+            Duration::from_secs(1),
+        ));
+        tx.send(vec![b'x'; 400]).unwrap();
+        let started = tokio::time::Instant::now();
+        let mut bytes = vec![0; 400];
+        for chunk in bytes.chunks_mut(8) {
+            reader.read_exact(chunk).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(70)).await;
+        }
+        assert!(started.elapsed() > Duration::from_secs(3));
+        assert!(bytes.iter().all(|b| *b == b'x'));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), kill.notified())
+                .await
+                .is_err()
+        );
+        drop(tx);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_input_and_close_kill_the_child() {
+        for close_during_write in [false, true] {
+            let (_reader, writer) = tokio::io::duplex(8);
+            let (tx, rx) = mpsc::unbounded_channel();
+            let (close, close_rx) = watch::channel(false);
+            let kill = Arc::new(Notify::new());
+            let task = tokio::spawn(write_input(
+                writer,
+                rx,
+                close_rx,
+                kill.clone(),
+                Duration::from_millis(200),
+            ));
+            tx.send(vec![b'x'; 1024]).unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            if close_during_write {
+                close.send(true).unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(1), kill.notified())
+                .await
+                .unwrap();
+            task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnected_host_handles_kill_while_stdin_is_blocked() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let state = Arc::new(State::default());
+        let kill = Arc::new(Notify::new());
+        let (_reader, stdin) = tokio::io::duplex(8);
+        let (input, rx) = mpsc::unbounded_channel();
+        let (close, close_rx) = watch::channel(false);
+        let writer = tokio::spawn(write_input(
+            stdin,
+            rx,
+            close_rx,
+            kill.clone(),
+            Duration::from_secs(5),
+        ));
+        let server = tokio::spawn({
+            let state = state.clone();
+            let kill = kill.clone();
+            async move {
+                for conn in 0..2 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    tokio::spawn(handle(
+                        stream,
+                        conn,
+                        state.clone(),
+                        ("id".into(), "token".into(), None),
+                        input.clone(),
+                        close.clone(),
+                        kill.clone(),
+                    ));
+                }
+            }
+        });
+        async fn connect(
+            address: std::net::SocketAddr,
+        ) -> (
+            tokio::net::tcp::OwnedWriteHalf,
+            BufReader<tokio::net::tcp::OwnedReadHalf>,
+        ) {
+            let (read, mut write) = TcpStream::connect(address).await.unwrap().into_split();
+            write
+                .write_all(
+                    encode(&ToHost::Hello {
+                        id: "id".into(),
+                        token: "token".into(),
+                    })
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut read = BufReader::new(read);
+            let mut hello = String::new();
+            read.read_line(&mut hello).await.unwrap();
+            (write, read)
+        }
+        let (mut first, first_read) = connect(address).await;
+        first
+            .write_all(
+                encode(&ToHost::In {
+                    line: "x".repeat(1024),
+                })
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(first);
+        drop(first_read);
+        let (mut adopted, _read) = connect(address).await;
+        adopted
+            .write_all(encode(&ToHost::Kill).as_bytes())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), kill.notified())
+            .await
+            .unwrap();
+        server.await.unwrap();
+        writer.abort();
+    }
+
+    #[tokio::test]
+    async fn adopted_client_observes_exit_after_hosted_stdin_stalls() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let state = Arc::new(State::default());
+        let kill = Arc::new(Notify::new());
+        let (_reader, stdin) = tokio::io::duplex(8);
+        let (input, rx) = mpsc::unbounded_channel();
+        let (close, close_rx) = watch::channel(false);
+        let writer = tokio::spawn(write_input(
+            stdin,
+            rx,
+            close_rx,
+            kill.clone(),
+            Duration::from_millis(300),
+        ));
+        let server = tokio::spawn({
+            let state = state.clone();
+            let kill = kill.clone();
+            async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(handle(
+                    stream,
+                    0,
+                    state.clone(),
+                    ("id".into(), "token".into(), None),
+                    input,
+                    close,
+                    kill.clone(),
+                ));
+                kill.notified().await;
+                state.push(|seq| FromHost::Exit {
+                    seq,
+                    code: None,
+                    killed: true,
+                });
+            }
+        });
+        let record = HostRecord {
+            id: "id".into(),
+            owner: "test".into(),
+            label: "test".into(),
+            host_pid: 0,
+            child_pid: None,
+            port: address.port(),
+            token: "token".into(),
+            started_at: chrono::Utc::now(),
+            isolation: "test".into(),
+            exited: false,
+            error: None,
+        };
+        let mut adopted = super::super::client::connect(&record).await.unwrap();
+        adopted
+            .stdin
+            .write_all(format!("{}\n", "x".repeat(4096)).as_bytes())
+            .await
+            .unwrap();
+        let exit = tokio::time::timeout(Duration::from_secs(2), adopted.process.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(exit.cause, crossagents_core::ExitCause::Killed);
+        server.await.unwrap();
+        writer.await.unwrap();
+    }
 
     #[test]
     fn replays_what_was_not_acknowledged() {

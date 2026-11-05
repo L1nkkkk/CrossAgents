@@ -26,6 +26,36 @@ pub use wire::{HostRecord, HostSpec};
 
 pub(crate) use client::{connect, spawn};
 
+/// Maximum time without a byte of stdin progress. See the CLI measurements in
+/// docs/research/claude-stream-json.md; this is not a deadline for a whole frame.
+pub(crate) const STDIN_STALL: Duration = Duration::from_secs(20);
+
+pub(crate) async fn write_progress<W: tokio::io::AsyncWrite + Unpin + ?Sized>(
+    writer: &mut W,
+    bytes: &[u8],
+    stall: Duration,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut remaining = bytes;
+    while !remaining.is_empty() {
+        let n = tokio::time::timeout(stall, writer.write(remaining))
+            .await
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "stdin write stalled")
+            })??;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "stdin closed",
+            ));
+        }
+        remaining = &remaining[n..];
+    }
+    tokio::time::timeout(stall, writer.flush())
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "stdin flush stalled"))?
+}
+
 /// How the hub starts hosts. Without settings every agent process is a direct child.
 #[derive(Debug, Clone)]
 pub struct Settings {

@@ -147,3 +147,9 @@ stdin 每条消息（`uuid` 由我们指定）：
 - 中断不丢未读消息（`still_queued`）；读到前不能谎报已读。
 
 2026-11-05 补测 CodeBuddy 2.179.2（默认驱动参数、代理 `127.0.0.1:7890`）：流式输出开始后写入插话并立即发送 interrupt，控制应答表示已中断但没有 `still_queued`；随后看到一个 `success` result、一个新 `system/init`、再一个 `success` result。两条 result 都没有 `user_message_uuid`，也没有看到插话的 `isReplay` 回显。另用不存在的模型触发失败：第一条 `init` 后写入插话，第二条 `init` 先于 `error_during_execution` result，result 没有 `user_message_uuid`；观察 60 秒未见插话回显或第二个 result。这些事件不足以满足「已按原 uuid 回显的独立插话」的保持条件。上面的 result 归属结论针对 Claude Code。
+
+### 5.6 stdin 背压与停滞
+
+2026-11-05，Windows 本机、同一代理：让 Claude Code 2.1.317（haiku）和 CodeBuddy 2.179.2 调用 PowerShell `Start-Sleep -Seconds 15`，观察到 tool_use 后，向各自 stdin 以 4096 字节分块写入约 1 MiB 的 JSON 插话。Claude 写完用时 0.06 秒、相邻进展的最大间隔 0.05 秒；CodeBuddy 写完用时 0.01 秒、最大间隔小于 0.01 秒。这仅是这两版 CLI、这次运行的测量，不能保证所有版本和环境的延迟。驱动和 runtime host 采用 20 秒无字节进展期限，覆盖实测 15 秒工具执行并留有余量；每次写入进展都重置期限，整帧总耗时可以更长。停滞时关闭管道并杀进程，避免半帧之后继续使用流。
+
+新 hub 接管升级前已运行的旧 runtime host 时，仍使用旧 host 的写入实现：其真实 stdin 卡住时可能无法处理 Kill/CloseStdin，也不会按新期限报告退出。协议没有版本协商，hub 无法远程给旧进程补上此保证；需要结束旧 host 并用新版本重新启动会话。新建 host 才有上述进展式停滞保护。
