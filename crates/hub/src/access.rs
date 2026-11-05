@@ -45,7 +45,8 @@ pub fn required(method: &Method, pattern: &str) -> Level {
             | ("POST", "/v1/plugins/{name}/upgrade")
             // It runs the CLIs' version commands, as those do.
             | ("POST", "/v1/plugins/refresh")
-    ) || is_terminal(pattern);
+    ) || is_terminal(pattern)
+        || is_extension_trust(method, pattern);
     if admin {
         Level::Admin
     } else if *method == Method::GET || reads_only(pattern) {
@@ -59,6 +60,22 @@ pub fn required(method: &Method, pattern: &str) -> Level {
 /// that printed, tokens included: every route, reading too, is admin.
 fn is_terminal(pattern: &str) -> bool {
     pattern == "/v1/terminals" || pattern.starts_with("/v1/terminals/")
+}
+
+/// Granting an extension trust is admin, and only a person reaches it (docs/EXTENSIONS.md
+/// §6): enabling a snapshot makes the hub run code on this machine as this user, and
+/// auto-trust makes it do so again on every change without asking anyone.
+///
+/// `disable` is not here: taking trust away only ever narrows what runs, and the panel's
+/// own "disable" button (the error boundary, §5) must not need more than the rest of the
+/// GUI. So it is write, like any other change, and re-enabling still costs admin. Reading
+/// the listing and the pending diff is read; calling a tool of an extension a person
+/// already trusted is write.
+fn is_extension_trust(method: &Method, pattern: &str) -> bool {
+    matches!(
+        (method.as_str(), pattern),
+        ("POST", "/v1/extensions/{name}/enable") | ("POST", "/v1/extensions/{name}/auto-trust")
+    )
 }
 
 /// POSTs that only read: `files/resolve` answers which paths name something inside a
@@ -142,6 +159,86 @@ mod tests {
             assert_eq!(
                 required(&method, pattern),
                 Level::Admin,
+                "{method} {pattern}"
+            );
+        }
+    }
+
+    /// docs/EXTENSIONS.md §5, §6: trusting a version is admin, calling a trusted tool is
+    /// write, reading is read.
+    #[test]
+    fn extension_routes_split_trust_from_use() {
+        for (method, pattern) in [
+            (Method::POST, "/v1/extensions/{name}/enable"),
+            (Method::POST, "/v1/extensions/{name}/auto-trust"),
+        ] {
+            assert_eq!(
+                required(&method, pattern),
+                Level::Admin,
+                "{method} {pattern}"
+            );
+        }
+
+        // Reading what is installed, and what a pending snapshot would change.
+        assert_eq!(required(&Method::GET, "/v1/extensions"), Level::Read);
+        assert_eq!(
+            required(&Method::GET, "/v1/extensions/{name}/pending/diff"),
+            Level::Read
+        );
+        assert_eq!(
+            required(&Method::GET, "/v1/extensions/calls/{id}"),
+            Level::Read
+        );
+
+        // Using one, and taking trust away, are ordinary changes.
+        assert_eq!(
+            required(&Method::POST, "/v1/extensions/{name}/tools/{tool}"),
+            Level::Write
+        );
+        assert_eq!(
+            required(&Method::POST, "/v1/extensions/{name}/disable"),
+            Level::Write
+        );
+        assert_eq!(
+            required(&Method::DELETE, "/v1/extensions/calls/{id}"),
+            Level::Write
+        );
+
+        // A read-only credential cannot call a tool, and a write one cannot grant trust.
+        let read = Grant::Level(Level::Read);
+        assert!(
+            refusal(read, &Method::POST, "/v1/extensions/{name}/tools/{tool}")
+                .unwrap()
+                .contains("needs write")
+        );
+        assert_eq!(refusal(read, &Method::GET, "/v1/extensions"), None);
+        assert!(
+            refusal(
+                Grant::Level(Level::Write),
+                &Method::POST,
+                "/v1/extensions/{name}/enable"
+            )
+            .unwrap()
+            .contains("needs admin")
+        );
+        assert_eq!(
+            refusal(
+                Grant::Level(Level::Admin),
+                &Method::POST,
+                "/v1/extensions/{name}/enable"
+            ),
+            None
+        );
+        // An agent's session token reaches /v1/me only: no extension route, so no agent can
+        // approve a version or flip auto-trust.
+        for (method, pattern) in [
+            (Method::GET, "/v1/extensions"),
+            (Method::POST, "/v1/extensions/{name}/enable"),
+            (Method::POST, "/v1/extensions/{name}/auto-trust"),
+            (Method::POST, "/v1/extensions/{name}/tools/{tool}"),
+        ] {
+            assert!(
+                refusal(Grant::Agent, &method, pattern).is_some(),
                 "{method} {pattern}"
             );
         }
