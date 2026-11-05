@@ -196,7 +196,7 @@ impl Services {
         // Read it again before starting anything; queued reconciles then become no-ops.
         let desired = self.registry.get(name).ok().and_then(|info| {
             let version = info.current.as_ref()?;
-            (info.enabled && version.service).then(|| version.fingerprint.clone())
+            (info.enabled && version.service.is_some()).then(|| version.fingerprint.clone())
         });
         if self.shutdown.is_cancelled() {
             self.registry.set_service_status(name, None);
