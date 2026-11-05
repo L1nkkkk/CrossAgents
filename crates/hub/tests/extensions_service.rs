@@ -206,6 +206,7 @@ async fn extensions_service_token_cannot_reach_admin_and_dies_on_hub_shutdown() 
 
 #[tokio::test]
 async fn extensions_service_crash_restart_emits_change_events() {
+    use crossagents_api_types::ExtensionsResponse;
     use crossagents_core::EventKind;
 
     let home = tempfile::tempdir().unwrap();
@@ -216,34 +217,37 @@ async fn extensions_service_crash_restart_emits_change_events() {
     ))
     .await
     .unwrap();
-    approve(&hub.extensions);
-    until(|| {
-        hub.extensions
-            .get("demo")
-            .unwrap()
-            .service
-            .as_ref()
-            .is_some_and(|s| s.state == ExtensionServiceState::Backoff && s.restarts == 1)
-    })
-    .await;
     let mut events = hub.bus.subscribe();
+    approve(&hub.extensions);
+    let client = reqwest::Client::new();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let event = events.recv().await.unwrap();
-            if matches!(event.kind, EventKind::ExtensionChanged { ref name } if name == "demo")
-                && hub
-                    .extensions
-                    .get("demo")
+            if matches!(event.kind, EventKind::ExtensionChanged { ref name } if name == "demo") {
+                let list: ExtensionsResponse = client
+                    .get(format!("http://{}/v1/extensions", hub.addr))
+                    .bearer_auth(&hub.read_token)
+                    .send()
+                    .await
                     .unwrap()
-                    .service
-                    .as_ref()
+                    .error_for_status()
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                if list
+                    .extensions
+                    .iter()
+                    .find(|e| e.name == "demo")
+                    .and_then(|e| e.service.as_ref())
                     .is_some_and(|s| {
                         s.state == ExtensionServiceState::Backoff
                             && s.restarts >= 2
                             && s.last_exit.is_some()
                     })
-            {
-                break;
+                {
+                    break;
+                }
             }
         }
     })
