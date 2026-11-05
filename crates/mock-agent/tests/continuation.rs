@@ -141,23 +141,15 @@ async fn wake_texts(t: &TestHub, run: &Run) -> Vec<String> {
 }
 
 /// Stands in for minutes of real waiting: moves the run's records and the arm of its stuck
-/// watch back, so the next tick sees a quiet stretch instead of sleeping.
+/// watch back, so the next tick sees a quiet stretch instead of sleeping. The rewrite goes
+/// through the orchestrator, which holds the run's lock: a continuation pass that read the
+/// record just before it would otherwise write that copy back and undo the stretch.
 async fn quiet(t: &TestHub, id: RunId, minutes: i64) {
-    let ago = chrono::Duration::minutes(minutes);
-    let mut run = get(t, id).await;
-    run.updated_at -= ago;
-    if let Some(watch) = run
-        .continuation
-        .as_mut()
-        .and_then(|continuation| continuation.stuck_watch.as_mut())
-    {
-        watch.progress_at -= ago;
-    }
-    t.hub.orchestrator.store().update_run(&run).await.unwrap();
-    for mut task in t.hub.orchestrator.store().list_tasks(id).await.unwrap() {
-        task.updated_at -= ago;
-        t.hub.orchestrator.store().update_task(&task).await.unwrap();
-    }
+    t.hub
+        .orchestrator
+        .age_run_records_for_test(id, chrono::Duration::minutes(minutes))
+        .await
+        .unwrap();
 }
 
 /// Ages the run past the threshold and ticks until the lead is woken. The hub clock may land
@@ -175,6 +167,35 @@ async fn quiet_until_woken(t: &TestHub, run: &Run) {
         "the lead was never told the busy run is stuck; state: {:?}",
         get(t, run.id).await.continuation
     );
+}
+
+/// Waits until the lead's finished turn is durable, not just its status: [`idle`] polls the
+/// status the hub stores, and the hub appends the `Idle` status change a moment later. A
+/// stuck watch reads any event of the run's agents as progress, so a pass that runs before
+/// that event is recorded leaves its sequence out of the checkpoint's bookmark; a test that
+/// then fabricates a quiet stretch (rewriting timestamps the event is not part of) counts the
+/// lead's own turn end as fresh progress and its stretch is lost.
+async fn turn_end_recorded(t: &TestHub, lead: AgentId) {
+    tokio::time::timeout(common::wait_limit(), async {
+        loop {
+            let events = t.hub.bus.store().events_since(0, 10_000).await.unwrap();
+            let idle = events.iter().rposition(|event| {
+                matches!(
+                    &event.kind,
+                    EventKind::AgentStatusChanged { id, to: AgentStatus::Idle, .. } if *id == lead
+                )
+            });
+            let ended = events.iter().rposition(|event| {
+                matches!(&event.kind, EventKind::AgentTurnCompleted { id, .. } if *id == lead)
+            });
+            if matches!((idle, ended), (Some(idle), Some(ended)) if idle > ended) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the lead's turn end was never recorded");
 }
 
 /// A run whose only task waits on a worker with an open `[slow]` turn, so the phase is
@@ -202,6 +223,7 @@ async fn waiting_task_run(t: &TestHub, policy: Value) -> (Run, crossagents_core:
     )
     .await;
     idle(t, run.planner).await;
+    turn_end_recorded(t, run.planner).await;
     let task = t
         .hub
         .orchestrator

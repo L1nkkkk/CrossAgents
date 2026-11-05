@@ -79,6 +79,35 @@ impl Orchestrator {
         }
     }
 
+    /// The run's durable facts, and the arm of its stuck watch, moved back by `ago`: the
+    /// stand-in a test uses for elapsed time, since the hub itself never moves these
+    /// backwards. Nothing outside such a test has a use for it.
+    ///
+    /// It holds the run's lock — the one every continuation pass takes around its whole
+    /// read-modify-write — while it rewrites the record. A rewrite from outside that lock
+    /// races a pass that read the run just before it and writes that copy back a few
+    /// milliseconds later, silently undoing the fabricated stretch; the test then sees no
+    /// overdue watch for a reason nothing in the run shows.
+    #[doc(hidden)]
+    pub async fn age_run_records_for_test(&self, id: RunId, ago: Duration) -> Result<(), CoreError> {
+        let _guard = self.lock(id).await;
+        let mut run = self.store.get_run(id).await?;
+        run.updated_at -= ago;
+        if let Some(watch) = run
+            .continuation
+            .as_mut()
+            .and_then(|continuation| continuation.stuck_watch.as_mut())
+        {
+            watch.progress_at -= ago;
+        }
+        self.store.update_run(&run).await?;
+        for mut task in self.store.list_tasks(id).await? {
+            task.updated_at -= ago;
+            self.store.update_task(&task).await?;
+        }
+        Ok(())
+    }
+
     /// The agent, when it counts as busy: its turn is starting or running, or the host holds
     /// queued messages for it. This says a process holds the agent, nothing about whether it
     /// is getting anywhere.
