@@ -9,7 +9,7 @@ export type ExtensionHookInfo = {
  * The event's wire name (`run.landed`). Never `extension.*`: an extension cannot
  * react to another one, directly or through a chain.
  */
-event: string, 
+event: string, command: Array<string>,
 /**
  * How long the process may run; past it the tree is killed (1..600).
  */

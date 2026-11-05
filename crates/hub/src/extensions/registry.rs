@@ -442,11 +442,16 @@ impl Registry {
         let Some(info) = s.infos.get_mut(name) else {
             return;
         };
+        if info.service == status {
+            return;
+        }
         info.service = status.clone();
         match status {
             Some(status) => s.services.insert(name.into(), status),
             None => s.services.remove(name),
         };
+        drop(s);
+        self.notify(name.into());
     }
     /// Setting this explicit human-controlled flag also accepts the current pending update.
     pub fn set_auto_trust(&self, name: &str, value: bool) -> Result<ExtensionInfo> {

@@ -96,10 +96,22 @@ export function VersionCard({ version }: { version: ExtensionVersion }) {
                 <span className="mono">${tool.name}</span>
                 <span className="ext-item-desc">${tool.description || "没有说明"}</span>
                 <span className="ext-item-meta small muted">${groupsText(tool.groups)} · 最长 ${tool.timeout_secs} 秒</span>
+                <code className="ext-command">${JSON.stringify(tool.command ?? [])}</code>
               </li>`,
             )}
           </ul>`
         : html`<p className="muted small">这一版没有工具。</p>`}
+    </div>
+    <div className="ext-list-block">
+      <div className="ext-list-head"><span>事件响应（${version.hooks?.length ?? 0}）</span></div>
+      ${version.hooks?.length ? html`<ul className="ext-items">${version.hooks.map((hook) => html`<li key=${hook.event} className="ext-item">
+        <span className="mono">${hook.event}</span><span className="small muted">最长 ${hook.timeout_secs} 秒</span>
+        <code className="ext-command">${JSON.stringify(hook.command ?? [])}</code>
+      </li>`)}</ul>` : html`<p className="muted small">没有事件响应。</p>`}
+    </div>
+    <div className="ext-list-block">
+      <div className="ext-list-head"><span>常驻进程</span></div>
+      ${version.service ? html`<code className="ext-command">${JSON.stringify(version.service.command ?? [])}</code>` : html`<p className="muted small">没有常驻进程。</p>`}
     </div>
     <div className="ext-list-block">
       <div className="ext-list-head">

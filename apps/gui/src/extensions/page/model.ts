@@ -10,7 +10,19 @@ import type { ExtensionAccess } from "@bindings/ExtensionAccess";
 import type { ExtensionDiffResponse } from "@bindings/ExtensionDiffResponse";
 import type { ExtensionFileChange } from "@bindings/ExtensionFileChange";
 import type { ExtensionInfo } from "@bindings/ExtensionInfo";
+import type { ExtensionServiceState } from "@bindings/ExtensionServiceState";
 import type { ExtensionVersion } from "@bindings/ExtensionVersion";
+
+const serviceStateLabels: Record<ExtensionServiceState, string> = {
+  stopped: "已停止",
+  starting: "正在启动",
+  running: "运行中",
+  backoff: "等待重启",
+};
+
+export function serviceStateText(state: ExtensionServiceState): string {
+  return serviceStateLabels[state];
+}
 
 /** How the page itself sees an extension: the host's status, not the hub's. */
 export type PageState = { status?: "loading" | "ready" | "failed" | "disabled"; error?: string };

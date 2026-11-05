@@ -203,3 +203,96 @@ async fn extensions_service_token_cannot_reach_admin_and_dies_on_hub_shutdown() 
     hub.shutdown_token().cancel();
     until(|| hub.extension_runner.token(&token).is_none()).await;
 }
+
+#[tokio::test]
+async fn extensions_service_crash_restart_emits_change_events() {
+    use crossagents_api_types::ExtensionsResponse;
+    use crossagents_core::EventKind;
+
+    let home = tempfile::tempdir().unwrap();
+    extension(home.path(), script("crash"));
+    let hub = crossagents_hub::start(crossagents_hub::HubConfig::new(
+        crossagents_hub::Paths::new(home.path()),
+        0,
+    ))
+    .await
+    .unwrap();
+    let mut events = hub.bus.subscribe();
+    approve(&hub.extensions);
+    let client = reqwest::Client::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let event = events.recv().await.unwrap();
+            if matches!(event.kind, EventKind::ExtensionChanged { ref name } if name == "demo") {
+                let list: ExtensionsResponse = client
+                    .get(format!("http://{}/v1/extensions", hub.addr))
+                    .bearer_auth(&hub.read_token)
+                    .send()
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                if list
+                    .extensions
+                    .iter()
+                    .find(|e| e.name == "demo")
+                    .and_then(|e| e.service.as_ref())
+                    .is_some_and(|s| {
+                        s.state == ExtensionServiceState::Backoff
+                            && s.restarts >= 2
+                            && s.last_exit.is_some()
+                    })
+                {
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .expect("restart must emit extension.changed");
+    hub.shutdown_token().cancel();
+}
+
+#[tokio::test]
+async fn extensions_service_unchanged_status_does_not_emit() {
+    use crossagents_api_types::{ExtensionServiceState, ExtensionServiceStatus};
+    use crossagents_core::EventKind;
+
+    let home = tempfile::tempdir().unwrap();
+    extension(home.path(), script("one"));
+    let hub = crossagents_hub::start(crossagents_hub::HubConfig::new(
+        crossagents_hub::Paths::new(home.path()),
+        0,
+    ))
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut events = hub.bus.subscribe();
+    let status = ExtensionServiceStatus {
+        state: ExtensionServiceState::Stopped,
+        restarts: 0,
+        last_exit: None,
+    };
+    hub.extensions
+        .set_service_status("demo", Some(status.clone()));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(events.recv().await.unwrap().kind, EventKind::ExtensionChanged { ref name } if name == "demo") {
+                break;
+            }
+        }
+    }).await.unwrap();
+    while events.try_recv().is_ok() {}
+    hub.extensions.set_service_status("demo", Some(status));
+    assert!(tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            if matches!(events.recv().await.unwrap().kind, EventKind::ExtensionChanged { ref name } if name == "demo") {
+                break;
+            }
+        }
+    }).await.is_err(), "unchanged status must not emit");
+    hub.shutdown_token().cancel();
+}

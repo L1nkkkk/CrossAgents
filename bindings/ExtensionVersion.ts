@@ -2,6 +2,7 @@
 import type { ExtensionAccess } from "./ExtensionAccess";
 import type { ExtensionHookInfo } from "./ExtensionHookInfo";
 import type { ExtensionPromptInfo } from "./ExtensionPromptInfo";
+import type { ExtensionServiceInfo } from "./ExtensionServiceInfo";
 import type { ExtensionToolInfo } from "./ExtensionToolInfo";
 
 /**
@@ -19,10 +20,9 @@ fingerprint: string, api: number, description: string, access: ExtensionAccess, 
  */
 hooks?: Array<ExtensionHookInfo>, 
 /**
- * Whether it declares a resident `[service]` process. The command itself stays in the
- * snapshot's `extension.toml`, which the approval diff already shows.
+ * The resident process declared by this snapshot.
  */
-service?: boolean, 
+service?: ExtensionServiceInfo,
 /**
  * The GUI entry, relative to the snapshot; `None` when it has no panel.
  */
