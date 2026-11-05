@@ -80,6 +80,10 @@ test("a registered tab opens on the right, stays closed once closed, and reopens
   panes.offerExtTab(tab);
   assert.deepEqual(panes.closedExtTabs(), [], "the host put it in the right dock");
   assert.equal(panes.paneLabel(tab), "站会");
+  const stored = JSON.parse(
+    (globalThis as unknown as { localStorage: { getItem(key: string): string | null } }).localStorage.getItem("crossagents.extTabs") ?? "[]",
+  ) as string[];
+  assert.deepEqual(stored, [tab], "the offered tab is remembered across reloads");
 
   panes.shutTab(tab);
   assert.deepEqual(

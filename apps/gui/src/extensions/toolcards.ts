@@ -56,15 +56,11 @@ export function cardToolName(item: ToolCallItem): string | undefined {
 }
 
 /**
- * The card for `item`, if any. An exact match wins; a card registered bare (`report`) also
- * answers to its qualified name (`standup__report`).
+ * The card for `item`, if any. Exact name only: a card is stored as `<extension>__<tool>` and
+ * must not answer for a built-in of the same bare name (`task_list`, `task_accept`).
  */
 export function cardFor<V>(item: TranscriptItem, cards: ReadonlyMap<string, V>): V | undefined {
   if (item.type !== "tool_call") return undefined;
   const name = cardToolName(item);
-  if (!name) return undefined;
-  const exact = cards.get(name);
-  if (exact) return exact;
-  for (const [key, card] of cards) if (key.endsWith(`__${name}`)) return card;
-  return undefined;
+  return name ? cards.get(name) : undefined;
 }

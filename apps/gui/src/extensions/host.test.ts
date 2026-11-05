@@ -31,7 +31,9 @@ const info = (name: string, fingerprint: string, enabled = true): ExtensionInfo 
 function harness(initial: ExtensionInfo[], modules: Map<string, ExtensionModule>) {
   let list = initial;
   let callStatus: ExtensionCallStatus = "running";
+  let callError: number | undefined;
   let listCalls = 0;
+  const logs: string[] = [];
   const events = new Set<(event: HubEvent) => void>();
   const imported: string[] = [];
   const counters = { calls: 0, cancels: 0 };
@@ -60,7 +62,10 @@ function harness(initial: ExtensionInfo[], modules: Map<string, ExtensionModule>
       counters.calls++;
       return { call_id: "c1", extension: "a", tool: "report", fingerprint: "fp1", started_at: "2026-01-01T00:00:00Z", timeout_secs: 60 };
     },
-    getCall: async () => response(callStatus),
+    getCall: async () => {
+      if (callError !== undefined) throw Object.assign(new Error(`HTTP ${callError}`), { status: callError });
+      return response(callStatus);
+    },
     cancelCall: async () => {
       counters.cancels++;
       callStatus = "cancelled";
@@ -73,7 +78,8 @@ function harness(initial: ExtensionInfo[], modules: Map<string, ExtensionModule>
     },
     timeoutMs: 60,
     pollMs: 5,
-    log: () => {},
+    retryMs: 5,
+    log: (line) => logs.push(line),
   };
 
   const host = createExtensionHost(options);
@@ -82,12 +88,16 @@ function harness(initial: ExtensionInfo[], modules: Map<string, ExtensionModule>
     events,
     imported,
     counters,
+    logs,
     listCalls: () => listCalls,
     setList: (next: ExtensionInfo[]) => {
       list = next;
     },
     setCallStatus: (next: ExtensionCallStatus) => {
       callStatus = next;
+    },
+    setCallError: (status?: number) => {
+      callError = status;
     },
     emitChanged: (name: string) => {
       const event = { type: "extension.changed", data: { name } } as unknown as HubEvent;
@@ -292,6 +302,155 @@ test("safe mode is read from the shell's awaited answer", async () => {
   };
   assert.equal(await detectSafeMode(), false);
   delete globals.window;
+});
+
+test("a list that fails at first is retried until the hub answers, then loading is reported", async () => {
+  let listCalls = 0;
+  const order: string[] = [];
+  const host = createExtensionHost({
+    list: async () => {
+      listCalls++;
+      order.push("list");
+      if (listCalls < 3) throw new Error("hub down");
+      return [info("a", "fp1")];
+    },
+    importModule: async () => {
+      order.push("import");
+      return { activate: () => { order.push("activate"); } };
+    },
+    request: async () => ({}),
+    callTool: async () => {
+      throw new Error("unused");
+    },
+    getCall: async () => {
+      throw new Error("unused");
+    },
+    cancelCall: async () => ({}),
+    disable: async () => ({}),
+    retryMs: 2,
+    onLoading: () => {
+      order.push("loading");
+    },
+    onReady: () => {
+      order.push("ready");
+    },
+    log: () => {},
+  });
+  await host.start();
+  assert.equal(listCalls, 3);
+  assert.deepEqual(order, ["list", "list", "list", "loading", "import", "activate", "ready"]);
+  assert.equal(host.snapshot().records.get("a")!.status, "ready");
+  host.dispose();
+});
+
+test("nothing with a gui_entry: ready without a loading marker", async () => {
+  const headless: ExtensionInfo = { ...info("a", "fp1"), current: { ...version("fp1"), gui_entry: undefined } };
+  let loading = 0;
+  let ready = 0;
+  let imports = 0;
+  const host = createExtensionHost({
+    list: async () => [headless],
+    importModule: async () => {
+      imports++;
+      return {};
+    },
+    request: async () => ({}),
+    callTool: async () => {
+      throw new Error("unused");
+    },
+    getCall: async () => {
+      throw new Error("unused");
+    },
+    cancelCall: async () => ({}),
+    disable: async () => ({}),
+    onLoading: () => {
+      loading++;
+    },
+    onReady: () => {
+      ready++;
+    },
+    log: () => {},
+  });
+  await host.start();
+  assert.equal(imports, 0);
+  assert.equal(loading, 0);
+  assert.equal(ready, 1, "the last run's marker is still cleared");
+  host.dispose();
+});
+
+test("a lost call result (404) rejects instead of polling forever", async () => {
+  const url = extensionEntryUrl("a", "fp1", "gui/index.js");
+  let ca!: Parameters<NonNullable<ExtensionModule["activate"]>>[0];
+  const modules = new Map<string, ExtensionModule>([
+    [
+      url,
+      {
+        activate: (given) => {
+          ca = given;
+        },
+      },
+    ],
+  ]);
+  const run = harness([info("a", "fp1")], modules);
+  await run.host.start();
+  run.setCallError(404);
+  await assert.rejects(ca.tools.call("report"), /调用结果已丢失/);
+  assert.equal(run.counters.calls, 1);
+  run.host.dispose();
+});
+
+test("a call result failing with another error keeps polling", async () => {
+  const url = extensionEntryUrl("a", "fp1", "gui/index.js");
+  let ca!: Parameters<NonNullable<ExtensionModule["activate"]>>[0];
+  const modules = new Map<string, ExtensionModule>([
+    [
+      url,
+      {
+        activate: (given) => {
+          ca = given;
+        },
+      },
+    ],
+  ]);
+  const run = harness([info("a", "fp1")], modules);
+  await run.host.start();
+  run.setCallError(500);
+  const call = ca.tools.call("report");
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  run.setCallError(undefined);
+  run.setCallStatus("ok");
+  await call;
+  assert.equal(run.counters.calls, 1);
+  run.host.dispose();
+});
+
+test("a cleanup returned after activate timed out is run, not dropped", async () => {
+  const url = extensionEntryUrl("a", "fp1", "gui/index.js");
+  let release!: (cleanup: () => void) => void;
+  const late = new Promise<() => void>((resolve) => {
+    release = resolve;
+  });
+  const modules = new Map<string, ExtensionModule>([
+    [
+      url,
+      {
+        activate: () => late,
+      },
+    ],
+  ]);
+  const run = harness([info("a", "fp1")], modules);
+  await run.host.start();
+  assert.equal(run.host.snapshot().records.get("a")!.status, "failed");
+  release(() => {
+    throw new Error("late cleanup");
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(
+    run.logs.some((line) => line.includes("超时后返回的清理函数出错")),
+    run.logs.join("\n"),
+  );
+  run.host.dispose();
 });
 
 test("a v1 extension can only register cards for its own tools", async () => {

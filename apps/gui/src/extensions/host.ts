@@ -24,6 +24,9 @@ import { normalizeToolName, type ToolCallItem } from "./toolcards.ts";
 export const ACTIVATE_TIMEOUT_MS = 10_000;
 /** How often a running call is checked when the event stream has not said it finished. */
 export const CALL_POLL_MS = 2_000;
+/** First wait before reading the extension list again when the hub was not up yet. */
+export const RETRY_MS = 1_000;
+export const MAX_RETRY_MS = 30_000;
 
 export type ExtensionStatus = "loading" | "ready" | "failed" | "disabled";
 
@@ -159,6 +162,9 @@ export type ExtensionHostOptions = {
   onReady?: () => void | Promise<void>;
   timeoutMs?: number;
   pollMs?: number;
+  /** First wait before reading the list again; doubles up to `maxRetryMs`. */
+  retryMs?: number;
+  maxRetryMs?: number;
   /** Where a failure goes instead of the console (tests pass one to stay quiet). */
   log?: (line: string) => void;
 };
@@ -233,6 +239,8 @@ const STATUS_TEXT: Record<ExtensionCallStatus, string> = {
 export function createExtensionHost(options: ExtensionHostOptions) {
   const timeoutMs = options.timeoutMs ?? ACTIVATE_TIMEOUT_MS;
   const pollMs = options.pollMs ?? CALL_POLL_MS;
+  const retryMs = options.retryMs ?? RETRY_MS;
+  const maxRetryMs = options.maxRetryMs ?? MAX_RETRY_MS;
   const records = new Map<string, Rec>();
   const finished = new Set<string>();
   const waiters = new Map<string, Set<() => void>>();
@@ -244,8 +252,13 @@ export function createExtensionHost(options: ExtensionHostOptions) {
   let listed = false;
   let listError: string | undefined;
   let started = false;
+  let acceptingChanges = false;
+  let readyReported = false;
+  let disposed = false;
   let starting: Promise<void> | undefined;
   let chain: Promise<void> = Promise.resolve();
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let retryDelay = retryMs;
   let snapshot = build();
 
   function build(): ExtensionsSnapshot {
@@ -309,6 +322,15 @@ export function createExtensionHost(options: ExtensionHostOptions) {
     else console.error(`[extension ${name}] ${what}`, error);
   }
 
+  /** Runs a cleanup an extension returned; a throw is the extension's log, not the page's. */
+  function runOwnCleanup(rec: Rec, cleanup: () => void, what = "扩展自己的清理函数出错") {
+    try {
+      cleanup();
+    } catch (error) {
+      logTo(rec, what, error);
+    }
+  }
+
   /**
    * Removes everything `rec` registered: event subscriptions, styles, tabs, cards, pages,
    * settings and the cleanup an extension returned itself. Safe to call any number of times.
@@ -336,13 +358,7 @@ export function createExtensionHost(options: ExtensionHostOptions) {
     rec.settings = [];
     const own = rec.cleanup;
     rec.cleanup = undefined;
-    if (own) {
-      try {
-        own();
-      } catch (error) {
-        logTo(rec, "扩展自己的清理函数出错", error);
-      }
-    }
+    if (own) runOwnCleanup(rec, own);
   }
 
   function makeCa(rec: Rec, generation: number): ExtensionCa {
@@ -478,23 +494,41 @@ export function createExtensionHost(options: ExtensionHostOptions) {
     };
   }
 
-  /** The result of one call, awaited through the event stream with a poll as the fallback. */
+  /**
+   * The result of one call, awaited through the event stream with a poll as the fallback. A 404
+   * means the hub forgot the call (it was restarted): that is reported, never polled forever.
+   */
   function awaitResult(callId: string): { promise: Promise<ExtensionCallResponse>; cancel(): void } {
     let settle!: (response: ExtensionCallResponse) => void;
+    let fail!: (error: unknown) => void;
     let unsub: () => void = () => {};
-    const promise = new Promise<ExtensionCallResponse>((resolve) => {
+    const lost = () => new ExtensionCallError("failed", "调用结果已丢失（hub 可能重启过）；这次调用不会重试");
+    const statusOf = (error: unknown) => (error as { status?: unknown } | null)?.status;
+    const promise = new Promise<ExtensionCallResponse>((resolve, reject) => {
       let done = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
+      const stop = () => {
+        if (timer) clearTimeout(timer);
+        unsub();
+      };
       const finish = (response: ExtensionCallResponse) => {
         if (done) return;
         done = true;
-        if (timer) clearTimeout(timer);
-        unsub();
+        stop();
         resolve(response);
       };
+      const error = (reason: unknown) => {
+        if (done) return;
+        done = true;
+        stop();
+        reject(reason);
+      };
       settle = finish;
+      fail = error;
       unsub = subscribeFinished(callId, () => {
-        void options.getCall(callId).then(finish, () => {});
+        options.getCall(callId).then(finish, (reason) => {
+          if (statusOf(reason) === 404) error(lost());
+        });
       });
       const check = () => {
         options.getCall(callId).then(
@@ -502,8 +536,10 @@ export function createExtensionHost(options: ExtensionHostOptions) {
             if (response.status === "running") timer = setTimeout(check, pollMs);
             else finish(response);
           },
-          () => {
-            timer = setTimeout(check, pollMs);
+          (reason) => {
+            // Only "gone" ends the wait; a dropped connection is retried.
+            if (statusOf(reason) === 404) error(lost());
+            else timer = setTimeout(check, pollMs);
           },
         );
       };
@@ -514,7 +550,7 @@ export function createExtensionHost(options: ExtensionHostOptions) {
       cancel: () => {
         void options.cancelCall(callId).then(
           (response) => settle(response as ExtensionCallResponse),
-          () => settle({ status: "cancelled" } as ExtensionCallResponse),
+          () => fail(new ExtensionCallError("cancelled", "调用已取消")),
         );
       },
     };
@@ -581,8 +617,22 @@ export function createExtensionHost(options: ExtensionHostOptions) {
     const activate = typeof module.activate === "function" ? module.activate : typeof module.default === "function" ? module.default : undefined;
     if (!activate) throw new Error("入口没有导出 activate(ca)");
     const ca = makeCa(rec, generation);
-    const own = await withTimeout(Promise.resolve(activate(ca)), timeoutMs, `${rec.name} 的 activate 超时`);
-    if (generation === rec.generation && rec.live && typeof own === "function") rec.cleanup = own as () => void;
+    // A sync throw becomes a rejection, so both paths are handled alike.
+    const activation = Promise.resolve().then(() => activate(ca));
+    activation.then(
+      (own) => {
+        if (typeof own !== "function") return;
+        // Normally the load below is still current and keeps it for cleanup(). After a timeout
+        // or a version switch the generation moved on: run it now instead of dropping it, or a
+        // timer the extension opened would never be cleared.
+        if (generation === rec.generation && rec.live) rec.cleanup = own as () => void;
+        else runOwnCleanup(rec, own as () => void, "超时后返回的清理函数出错");
+      },
+      () => {
+        // The timeout (or the error itself) is reported by the await below.
+      },
+    );
+    await withTimeout(activation, timeoutMs, `${rec.name} 的 activate 超时`);
   }
 
   async function apply(info: ExtensionInfo) {
@@ -647,15 +697,9 @@ export function createExtensionHost(options: ExtensionHostOptions) {
     publish();
   }
 
-  async function doRefresh() {
-    let list: ExtensionInfo[];
-    try {
-      list = await options.list();
-    } catch (error) {
-      listError = textOf(error);
-      publish();
-      return;
-    }
+  /** Reads the hub's list and reconciles `enabled`/records; throws when the hub cannot answer. */
+  async function readList(): Promise<ExtensionInfo[]> {
+    const list = await options.list();
     listError = undefined;
     listed = true;
     enabled = new Set(list.filter((info) => info.enabled).map((info) => info.name));
@@ -665,8 +709,61 @@ export function createExtensionHost(options: ExtensionHostOptions) {
       cleanup(rec);
       records.delete(name);
     }
+    return list;
+  }
+
+  async function applyList(list: ExtensionInfo[]) {
     for (const info of list) await apply(info);
     publish();
+  }
+
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  /**
+   * Startup: keep reading until the hub answers once. It may start after the page, and
+   * `extension.changed` only comes when something changes, so nothing else would retry.
+   */
+  async function readListUntilSuccess(): Promise<ExtensionInfo[] | undefined> {
+    for (;;) {
+      try {
+        const list = await readList();
+        retryDelay = retryMs;
+        return list;
+      } catch (error) {
+        if (disposed) return undefined;
+        listError = textOf(error);
+        publish();
+        await sleep(retryDelay);
+        retryDelay = Math.min(retryDelay * 2, maxRetryMs);
+        if (disposed) return undefined;
+      }
+    }
+  }
+
+  /** One retry of a failed re-read, later, without piling timers up. */
+  function scheduleRetry() {
+    if (disposed || retryTimer) return;
+    const delay = retryDelay;
+    retryDelay = Math.min(retryDelay * 2, maxRetryMs);
+    retryTimer = setTimeout(() => {
+      retryTimer = undefined;
+      void refresh();
+    }, delay);
+    (retryTimer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  async function doRefresh() {
+    let list: ExtensionInfo[];
+    try {
+      list = await readList();
+    } catch (error) {
+      listError = textOf(error);
+      publish();
+      scheduleRetry();
+      return;
+    }
+    retryDelay = retryMs;
+    await applyList(list);
   }
 
   /** Reads the list again; runs are serialised so two `extension.changed` events cannot race. */
@@ -676,6 +773,17 @@ export function createExtensionHost(options: ExtensionHostOptions) {
     return run;
   }
 
+  async function reportReady() {
+    if (readyReported) return;
+    readyReported = true;
+    try {
+      await options.onReady?.();
+    } catch (error) {
+      if (options.log) options.log(`扩展加载就绪上报失败：${textOf(error)}`);
+      else console.error("扩展加载就绪上报失败", error);
+    }
+  }
+
   async function start(): Promise<void> {
     if (started) return starting ?? Promise.resolve();
     started = true;
@@ -683,17 +791,33 @@ export function createExtensionHost(options: ExtensionHostOptions) {
     if (safeMode) {
       publish();
       // The shell clears the marker from the last run even when we skip loading this time.
-      await options.onReady?.();
+      await reportReady();
       return;
     }
-    await options.onLoading?.();
-    loading = true;
-    publish();
-    starting = refresh().finally(async () => {
-      loading = false;
-      publish();
-      await options.onReady?.();
-    });
+    starting = (async () => {
+      // The list comes first: no marker when the hub is slow to answer (and none at all when
+      // there is nothing with a `gui_entry` to load), but the marker is always cleared after.
+      const list = await readListUntilSuccess();
+      if (!list) return;
+      if (list.some((info) => info.enabled && info.current?.gui_entry)) {
+        try {
+          await options.onLoading?.();
+        } catch (error) {
+          if (options.log) options.log(`扩展加载开始上报失败：${textOf(error)}`);
+          else console.error("扩展加载开始上报失败", error);
+        }
+        loading = true;
+        publish();
+      }
+      try {
+        await applyList(list);
+      } finally {
+        loading = false;
+        acceptingChanges = true;
+        publish();
+        await reportReady();
+      }
+    })();
     await starting;
   }
 
@@ -710,8 +834,8 @@ export function createExtensionHost(options: ExtensionHostOptions) {
 
   options.events?.((event) => {
     if (event.type === "extension.changed") {
-      // Nothing may import before start(): the shell's loading marker is awaited there.
-      if (started) void refresh();
+      // Not before startup settled: that would import ahead of the shell's loading marker.
+      if (acceptingChanges) void refresh();
       return;
     }
     if (event.type !== "extension.call.finished") return;
@@ -737,6 +861,11 @@ export function createExtensionHost(options: ExtensionHostOptions) {
     },
     /** Takes everything down (used when leaving the page in tests). */
     dispose() {
+      disposed = true;
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = undefined;
+      }
       for (const rec of records.values()) cleanup(rec);
       records.clear();
       publish();
@@ -748,48 +877,23 @@ export type ExtensionHost = ReturnType<typeof createExtensionHost>;
 
 // ---- Safe mode and the shell's loading marker --------------------------------------------
 
-/** gui-shell's preload API (bridge.d.ts): `window.crossagents.extensions`. */
-type ExtensionLoadBridge = {
-  extensions?: {
-    /** Before any extension is imported; must be awaited. */
-    loading?: () => void | Promise<void>;
-    /** After the first load settled, a safe-mode skip included; must be awaited. */
-    ready?: () => void | Promise<void>;
-    safeMode?: () => Promise<{ enabled: boolean; reason: string | null }> | { enabled: boolean; reason: string | null };
-  };
-  /** Flat names, for a preload that did not group them. */
-  extensionLoading?: () => void | Promise<void>;
-  extensionReady?: () => void | Promise<void>;
-  safeMode?: () => boolean;
-};
+const extensionsBridge = () => (typeof window === "undefined" ? undefined : window.crossagents?.extensions);
 
-function loadBridge(): ExtensionLoadBridge | undefined {
-  return typeof window !== "undefined" ? (window.crossagents as unknown as ExtensionLoadBridge | undefined) : undefined;
-}
-
-/** `--safe-mode`, a crash on the last run, or a page told so by the shell; nothing loads then. */
+/** `--safe-mode` or a crash on the last run, as the shell decides it; nothing loads then. */
 export async function detectSafeMode(): Promise<boolean> {
-  const bridge = loadBridge();
-  if (bridge?.extensions?.safeMode) {
-    try {
-      const state = await bridge.extensions.safeMode();
-      return state?.enabled === true;
-    } catch {
-      // The shell could not say; fall through to the other signals.
-    }
+  const extensions = extensionsBridge();
+  if (!extensions) return false;
+  try {
+    return (await extensions.safeMode()).enabled;
+  } catch {
+    // The shell could not say: loading is the normal path.
+    return false;
   }
-  const flat = bridge?.safeMode?.();
-  if (typeof flat === "boolean") return flat;
-  if (typeof window === "undefined") return false;
-  const params = new URLSearchParams(window.location.search);
-  return params.get("safe-mode") === "1" || params.get("safeMode") === "1";
 }
 
-/** Tells the shell the page reached loading / ready; awaited by start(). */
+/** Tells the shell the page reached loading / ready. `createExtensionHost` awaits both. */
 export async function reportLoading(phase: "loading" | "ready"): Promise<void> {
-  const bridge = loadBridge();
-  if (!bridge) return;
-  const nested = bridge.extensions;
-  const call = phase === "loading" ? (nested?.loading ?? bridge.extensionLoading) : (nested?.ready ?? bridge.extensionReady);
-  await call?.call(nested ?? bridge);
+  const extensions = extensionsBridge();
+  if (!extensions) return;
+  await (phase === "loading" ? extensions.loading() : extensions.ready());
 }

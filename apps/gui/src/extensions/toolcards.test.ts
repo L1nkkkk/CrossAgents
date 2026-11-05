@@ -37,10 +37,28 @@ test("extension_call is matched by the real tool in input.tool", () => {
   assert.equal(cardToolName(item), "standup__report");
   assert.equal(cardFor(item, new Map([["standup__report", "card"]])), "card");
 
-  // Dotted prefix too, and a bare tool name from the same extension.
+  // Dotted prefix too. A bare tool name is not matched to someone else's card: exact only.
   const dotted = call("crossagents.extension_call", JSON.stringify({ tool: "report" }));
   assert.equal(cardToolName(dotted), "report");
-  assert.equal(cardFor(dotted, new Map([["standup__report", "card"]])), "card", "a bare name still finds its qualified card");
+  assert.equal(cardFor(dotted, new Map([["standup__report", "card"]])), undefined);
+});
+
+test("extension cards never hijack built-in tools of the same bare name", () => {
+  const cards = new Map([
+    ["standup__task_list", "list card"],
+    ["standup__task_accept", "accept card"],
+  ]);
+  for (const title of [
+    "crossagents.task_list",
+    "mcp__crossagents__task_list",
+    "crossagents.task_accept",
+    "mcp__crossagents__task_accept",
+  ]) {
+    assert.equal(cardFor(call(title), cards), undefined, title);
+  }
+  // Its own tool still matches, exactly.
+  assert.equal(cardFor(call("mcp__crossagents__standup__task_list"), cards), "list card");
+  assert.equal(cardFor(call("mcp__crossagents__extension_call", JSON.stringify({ tool: "standup__task_accept" })), cards), "accept card");
 });
 
 test("extension_call without a usable tool falls back to its own name", () => {

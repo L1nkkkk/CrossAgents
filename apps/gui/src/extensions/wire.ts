@@ -10,10 +10,12 @@ export function startExtensionsUi(): () => void {
   const apply = () => {
     const snapshot = extensionHost.snapshot();
     setExtTabLabels([...snapshot.tabs.values()].map((tab) => ({ tab: tab.tab, label: tab.label })));
-    // Before the list arrives there is nothing to judge a saved `ext:` tab by: keep it.
-    if (snapshot.listed) syncExtensionTabs(snapshot.enabled);
-    // A registered tab with no dock is offered on the right; one the person closed is not
-    // reopened here (it waits in a dock's + menu).
+    // Safe mode and a list that has not arrived leave the docks alone: an extension tab may
+    // still be valid, and there is no registered tab to place yet.
+    if (!snapshot.listed || snapshot.safeMode) return;
+    syncExtensionTabs(snapshot.enabled);
+    // A registered tab with no dock is offered on the right; one the person closed is
+    // remembered in localStorage and waits in a dock's + menu instead.
     for (const tab of snapshot.tabs.keys()) offerExtTab(tab);
   };
   const off = extensionHost.subscribe(apply);

@@ -131,27 +131,46 @@ export function syncExtensionTabs(enabled: ReadonlySet<string>) {
   setDocks({ right, bottom });
 }
 
-/** Extension tabs the person closed: the host must not put them back until the + menu does. */
-const dismissedExtTabs = new Set<ExtTab>();
+/** Extension tabs the host already put in a dock; kept in localStorage so closing one sticks. */
+const OFFERED_KEY = "crossagents.extTabs";
+function readOffered(): Set<ExtTab> {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(OFFERED_KEY) ?? "[]");
+    return new Set(Array.isArray(saved) ? saved.filter(isExtTab) : []);
+  } catch {
+    return new Set();
+  }
+}
+const offeredExtTabs = readOffered();
+function saveOffered() {
+  try {
+    localStorage.setItem(OFFERED_KEY, JSON.stringify([...offeredExtTabs]));
+  } catch {
+    // This page still remembers them.
+  }
+}
 
 /** Every registered extension tab with no dock now, for a dock's + menu (tabs.tsx `AddTab`). */
 export const closedExtTabs = (): { tab: ExtTab; label: string }[] =>
   [...extLabels].filter(([tab]) => !dockOf(state.docks, tab)).map(([tab, label]) => ({ tab, label }));
 
 /**
- * Puts a tab an extension just registered into the right dock without taking the front: the
- * dock's active tab stays, and a folded dock stays folded. A tab the person closed is left to
- * the + menu rather than reopened by itself.
+ * Puts a tab an extension just registered in the right dock without taking the front
+ * (`placeTab(…, false)`): the dock's active tab stays. Only the first time: once offered, the
+ * tab is remembered in localStorage, so one the person closed is not reopened by the host.
  */
 export function offerExtTab(tab: ExtTab) {
-  if (dockOf(state.docks, tab) || dismissedExtTabs.has(tab)) return;
-  const right = state.docks.right;
-  setDocks({ ...state.docks, right: { ...right, tabs: [...right.tabs, tab], active: right.active ?? tab } });
+  if (offeredExtTabs.has(tab)) return;
+  offeredExtTabs.add(tab);
+  saveOffered();
+  if (dockOf(state.docks, tab)) return;
+  placeTab(tab, "right", false);
 }
 
 /** Opens a tab picked from a dock's + menu; it comes to the front there. */
 export function openExtTab(tab: ExtTab, dock: DockId) {
-  dismissedExtTabs.delete(tab);
+  offeredExtTabs.add(tab);
+  saveOffered();
   setDocks(moveTab(state.docks, tab, dock));
 }
 
@@ -243,7 +262,10 @@ export function pickTab(dock: DockId, tab: TabId) {
 export const dropTab = (tab: TabId, dock: DockId, index?: number) => setDocks(moveTab(state.docks, tab, dock, index));
 
 export function shutTab(tab: TabId) {
-  if (isExtTab(tab)) dismissedExtTabs.add(tab);
+  if (isExtTab(tab)) {
+    offeredExtTabs.add(tab);
+    saveOffered();
+  }
   if (floatTab === tab) floatTab = null;
   setDocks(closeTab(state.docks, tab));
 }
