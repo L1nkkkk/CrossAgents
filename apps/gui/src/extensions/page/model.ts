@@ -100,6 +100,18 @@ export function approveFingerprint(view: ApprovalView): string | undefined {
   return view.kind === "ready" ? view.version.fingerprint : undefined;
 }
 
+/**
+ * Which fingerprint the screen should hold on to. It keeps what it already has (so a version
+ * that moved still reads as `stale`), takes the waiting one when it has looked at none yet, and
+ * ignores a version this window just approved (`approved`): otherwise the version that arrives
+ * after an approval would read as "the one you saw is gone", when the person had approved it.
+ */
+export function seenAfter(seen: string | undefined, approved: string | undefined, info: ExtensionInfo): string | undefined {
+  const pending = info.pending?.version.fingerprint;
+  if (!pending || pending === approved) return seen;
+  return seen ?? pending;
+}
+
 /** Why the approve button cannot be used, or undefined when it can. */
 export function approveBlockedReason(info: ExtensionInfo, view: ApprovalView): string | undefined {
   switch (view.kind) {
@@ -116,15 +128,23 @@ export function approveBlockedReason(info: ExtensionInfo, view: ApprovalView): s
 
 /**
  * Turning a stopped extension back on. This only ever re-enables a version already approved —
- * `info.current.fingerprint`; a waiting version goes through the approval card, so no click here
- * can run code nobody has read.
+ * `info.current.fingerprint` — even while another version waits for approval: the hub does the
+ * same (a fingerprint equal to `current` is re-enabled and leaves the pending record alone), and
+ * a person who stopped an extension should not have to approve code they have not read to get
+ * the old one back. A waiting version still only runs through the approval card.
  */
 export type EnableState = { fingerprint: string; title: string } | { reason: string };
 
 export function enableState(info: ExtensionInfo): EnableState {
   if (info.enabled) return { reason: "这个扩展已经启用了。" };
-  if (info.pending) return { reason: "下面有等待批准的一版：批准并启用在那里，先看它是什么。" };
-  if (info.current) return { fingerprint: info.current.fingerprint, title: `重新启用已批准的 ${shortFingerprint(info.current.fingerprint)}（不换版本）` };
+  if (info.current) {
+    const fingerprint = info.current.fingerprint;
+    return {
+      fingerprint,
+      title: `重新启用已批准的 ${shortFingerprint(fingerprint)}（不换版本）${info.pending ? "；待批准的那一版不会因此启用" : ""}`,
+    };
+  }
+  if (info.pending) return { reason: "还没有批准过任何版本：先把下面待批准的一版看过再批准。" };
   return { reason: "还没有批准过任何版本：等 hub 扫到源目录里的改动，再批准那一版。" };
 }
 

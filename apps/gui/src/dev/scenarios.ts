@@ -320,7 +320,20 @@ export const SCENARIOS: Scenario[] = [
     return { state: workspaceState(), script: [], route: `#/w/${encodeURIComponent(wsKey(REPO))}` };
   } },
   { key: "agent-workspace-narrow", label: "窄窗口与长标题", hint: "Atlas 的长话题和 #b 的长中文标题：226px 侧栏下名字、状态和摘要仍可辨认，截断不挤坏布局；窄窗口请用截图调整宽度", build: () => ({ state: workspaceState(), script: [], route: "#/s/Atlas" }) },
-  { key: "extensions", label: "扩展：状态一栏", hint: "standup 有更新待人批准、changelog 从未启用、notes 自动信任、big-export 的源目录超了 50 MB；下面是让 agent 做一个插件", build: () => ({ state: { ...emptyHub(), ...extensionScene() }, script: [], route: "#/extensions" }) },
+  { key: "extensions", label: "扩展：状态一栏", hint: "standup 有更新待人批准、changelog 从未启用、notes 停用了但可回到已批准的版本（还有一版等着）、big-export 的源目录超了 50 MB；下面是让 agent 做一个插件", build: () => {
+    const state: MockState = { ...emptyHub(), ...extensionScene() };
+    // Stopped, with a newer version waiting: 启用 re-enables the approved snapshot, 查看并启用 is
+    // still the way to the waiting one.
+    const notes = state.extensions?.find((x) => x.name === "notes");
+    if (notes?.current) {
+      notes.enabled = false;
+      notes.pending = {
+        version: { ...notes.current, fingerprint: "aa11bb22".repeat(8), description: "把对话里的决定记到 run 的笔记上，并带一份摘要", taken_at: "2026-11-05T10:05:00Z" },
+        requested_at: "2026-11-05T10:05:03Z",
+      };
+    }
+    return { state, script: [], route: "#/extensions" };
+  } },
   { key: "extensions-approve", label: "扩展：批准界面", hint: "待批准的一版：工具、说明、面板、access 变化和与正在运行版本的差异，按钮提交的是卡片上印出的指纹", build: () => ({ state: { ...emptyHub(), ...extensionScene() }, script: [], route: "#/extensions/standup" }) },
   { key: "extensions-diff", label: "扩展：差异与批准按钮", hint: "滚到待批准的一版下半：逐条文件改动、unified diff，以及写着「批准并启用」的那一行", build: () => ({
     state: { ...emptyHub(), ...extensionScene() },

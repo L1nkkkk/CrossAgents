@@ -26,6 +26,7 @@ import {
   badges,
   disableBlockedReason,
   enableState,
+  seenAfter,
   shortFingerprint,
 } from "./model.ts";
 
@@ -65,10 +66,13 @@ function ExtensionBody({ info, page, reload }: { info: ExtensionInfo; page?: Ext
   const pendingFp = info.pending?.version.fingerprint;
 
   // The fingerprint this screen opened with: it is what the approve button sends. A later
-  // pending record (the source changed again) leaves `seen` behind, and the card says so.
+  // pending record (the source changed again) leaves `seen` behind, and the card says so — but
+  // one this window just approved is not "seen" at all, or the version after it would read as
+  // "the one you looked at is gone" even though the person had approved it (model.ts seenAfter).
   useEffect(() => {
-    if (pendingFp && !seen) setSeen(pendingFp);
-  }, [pendingFp, seen]);
+    const next = seenAfter(seen, approved, info);
+    if (next !== seen) setSeen(next);
+  }, [info, seen, approved]);
 
   useEffect(() => {
     if (!pendingFp) {
@@ -112,8 +116,10 @@ function ExtensionBody({ info, page, reload }: { info: ExtensionInfo; page?: Ext
     void run(async () => {
       await api.enableExtension(info.name, fingerprint);
       // Approved: the card goes at once, rather than waiting for the list to come back (and
-      // rather than inviting a second click at a record the hub has already consumed).
+      // rather than inviting a second click at a record the hub has already consumed). `seen` is
+      // cleared too, so the next version opens as something to read rather than as a replacement.
       setApproved(fingerprint);
+      setSeen(undefined);
     }, `已批准并启用 ${shortFingerprint(fingerprint)}。`);
   };
   const disable = () => void run(() => api.disableExtension(info.name), "已停用：它注册的面板、页面和卡片都收了。");

@@ -312,17 +312,15 @@ export function ExtensionRow({
       <a className="ext-link" href=${`#/extensions/${encodeURIComponent(info.name)}`} data-action="review">
         ${pending ? "查看并启用" : "查看"}
       </a>
-      ${pending
-        ? null
-        : html`<button
-            className=${info.enabled ? "ghost danger small" : "small"}
-            data-action=${info.enabled ? "disable" : "enable"}
-            disabled=${busy || (info.enabled ? !!disableReason : !("fingerprint" in enable))}
-            title=${info.enabled ? disableReason : "reason" in enable ? enable.reason : enable.title}
-            onClick=${info.enabled ? onDisable : onEnable}
-          >
-            ${info.enabled ? "停用" : "启用"}
-          </button>`}
+      <button
+        className=${info.enabled ? "ghost danger small" : "small"}
+        data-action=${info.enabled ? "disable" : "enable"}
+        disabled=${busy || (info.enabled ? !!disableReason : !("fingerprint" in enable))}
+        title=${info.enabled ? disableReason : "reason" in enable ? enable.reason : enable.title}
+        onClick=${info.enabled ? onDisable : onEnable}
+      >
+        ${info.enabled ? "停用" : "启用"}
+      </button>
     </div>
   </article>`;
 }

@@ -21,6 +21,7 @@ import {
   badges,
   enableState,
   pluginRequestDraft,
+  seenAfter,
   shortFingerprint,
   versionFacts,
 } from "./page/model.ts";
@@ -130,16 +131,50 @@ test("a pending record that is gone says so instead of approving the next thing"
   assert.ok(!html.includes('data-action="approve"'));
 });
 
-test("re-enabling reuses the approved snapshot, never a waiting one", () => {
-  const stopped = info({ enabled: false, pending: pending(FP_NEW) });
+test("a stopped extension can be re-enabled on its approved version while a new one waits", () => {
+  // stopped, source changed, and the person only wants the version they already approved back:
+  // the hub re-enables `current` without touching the pending record, so the page must offer it.
+  const stopped = info({ enabled: false, current: version(FP_OLD), pending: pending(FP_NEW) });
   const state = enableState(stopped);
-  assert.ok("reason" in state, "with a version waiting, 启用 is not the way in");
-  assert.match(state.reason, /批准并启用/);
+  assert.ok("fingerprint" in state, "with a version waiting, re-enabling the approved one is still offered");
+  assert.equal(state.fingerprint, FP_OLD, "the fingerprint submitted is the approved one, not the waiting one");
+  assert.match(state.title, /不换版本/);
+  assert.match(state.title, /待批准的那一版不会因此启用/);
 
   const approved = enableState(info({ enabled: false }));
   assert.ok("fingerprint" in approved);
   assert.equal(approved.fingerprint, FP_OLD);
-  assert.match(approved.title, /不换版本/);
+
+  // Nothing approved yet: there is nothing to re-enable, and the waiting version is only reachable
+  // through the approval card.
+  const never = enableState(info({ enabled: false, current: undefined, pending: pending(FP_NEW) }));
+  assert.ok("reason" in never);
+  assert.match(never.reason, /还没有批准过任何版本/);
+
+  const on = enableState(info({ enabled: true }));
+  assert.ok("reason" in on);
+  assert.match(on.reason, /已经启用/);
+});
+
+test("after approving A, a new B opens as ready and submits B", () => {
+  // What the screen does while A is approved: seen is cleared, so A is not "what the person saw".
+  const approvedA = info({ pending: pending(FP_NEW) });
+  assert.equal(seenAfter(undefined, FP_NEW, approvedA), undefined);
+
+  // B arrives: it is the version to look at, not a replacement for something seen.
+  const pendingB = info({ pending: pending(FP_NEWER) });
+  const seen = seenAfter(undefined, FP_NEW, pendingB);
+  const view = approvalView(pendingB, seen);
+  assert.equal(view.kind, "ready");
+  assert.equal(approveFingerprint(view), FP_NEWER, "the card prints and submits B");
+  const html = renderToStaticMarkup(createElement(ApprovalPanel, { info: pendingB, view, diff, busy: false, onApprove: () => {}, onLook: () => {} }));
+  assert.ok(html.includes('data-approval="ready"'));
+  assert.equal(/data-fingerprint="([^"]+)"/.exec(html)?.[1], FP_NEWER);
+
+  // Looking at B and then getting C is still a replacement: that is what stale is for.
+  const third = "1d7f5c31".repeat(8);
+  assert.equal(seenAfter(FP_NEWER, FP_NEW, info({ pending: pending(third) })), FP_NEWER);
+  assert.equal(approvalView(info({ pending: pending(third) }), FP_NEWER).kind, "stale");
 });
 
 test("auto-trust says what turning it on does, and is refused while the source is broken", () => {
@@ -163,8 +198,25 @@ test("the list shows the waiting fingerprint and why a switch is off", () => {
   assert.ok(html.includes("查看并启用"));
   assert.ok(html.includes(shortFingerprint(FP_NEW)));
   assert.ok(html.includes(shortFingerprint(FP_OLD)));
-  // No quick enable while a version waits: approving happens on the extension's own page.
+  // No enable while it is already running: 停用 is the action here, and approving happens on
+  // the extension's own page.
+  assert.ok(html.includes('data-action="disable"'));
   assert.ok(!html.includes('data-action="enable"'));
+});
+
+test("a stopped extension offers 启用 next to 查看并启用, but approving still goes through the card", () => {
+  const html = renderToStaticMarkup(
+    createElement(ExtensionRow, {
+      info: info({ enabled: false, pending: pending(FP_NEW) }),
+      safeMode: false,
+      busy: false,
+      onEnable: () => {},
+      onDisable: () => {},
+    }),
+  );
+  assert.ok(html.includes("查看并启用"), "the approval card is still the way to the waiting version");
+  assert.ok(html.includes('data-action="enable"'), "the approved version can be turned back on");
+  assert.match(html, /title="重新启用已批准的 3f9a1c02…/, "it says it re-enables the approved one");
 });
 
 test("an extension's settings block is wrapped, and its failure stays in that block", () => {
