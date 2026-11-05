@@ -27,7 +27,18 @@ use crate::workspace::{Synced, WorkspaceProvider};
 // Doubles
 
 /// Delivers nothing anywhere; its agents move into a task's worktree when asked.
-struct MovingHost;
+#[derive(Default)]
+struct MovingHost {
+    busy: std::sync::atomic::AtomicBool,
+    panic_on_busy: std::sync::atomic::AtomicBool,
+    busy_panicked: tokio::sync::Notify,
+    person_waiting: std::sync::atomic::AtomicBool,
+    notices: tokio::sync::Mutex<Vec<String>>,
+    block_notice: std::sync::atomic::AtomicBool,
+    notice_started: tokio::sync::Notify,
+    notice_release: tokio::sync::Notify,
+    notice_dropped: tokio::sync::Notify,
+}
 
 #[async_trait]
 impl AgentHost for MovingHost {
@@ -43,7 +54,19 @@ impl AgentHost for MovingHost {
     async fn withdraw(&self, _: AgentId, _: MessageId) -> Result<(), CoreError> {
         Ok(())
     }
-    async fn notify(&self, _: AgentId, _: &str, _: &str) -> Result<(), CoreError> {
+    async fn notify(&self, _: AgentId, _: &str, line: &str) -> Result<(), CoreError> {
+        struct DropNotice<'a>(&'a tokio::sync::Notify);
+        impl Drop for DropNotice<'_> {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+        if self.block_notice.load(std::sync::atomic::Ordering::SeqCst) {
+            let _dropped = DropNotice(&self.notice_dropped);
+            self.notice_started.notify_one();
+            self.notice_release.notified().await;
+        }
+        self.notices.lock().await.push(line.to_owned());
         Ok(())
     }
     async fn clone_agent(
@@ -86,7 +109,18 @@ impl AgentHost for MovingHost {
         Ok(true)
     }
     async fn is_busy(&self, _: AgentId) -> bool {
-        false
+        if self
+            .panic_on_busy
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.busy_panicked.notify_one();
+            panic!("injected is_busy panic");
+        }
+        self.busy.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    async fn serving_person(&self, _: AgentId) -> bool {
+        self.person_waiting
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
     async fn can_move(&self, _: &Agent) -> bool {
         true
@@ -167,6 +201,7 @@ impl Verifier for NoChecks {
 struct Fixture {
     store: Arc<dyn Store>,
     orchestrator: Arc<Orchestrator>,
+    host: Arc<MovingHost>,
     run: Run,
     lead: Agent,
     rex: Agent,
@@ -180,10 +215,11 @@ impl Fixture {
         let repo = home.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().await.unwrap());
+        let host = Arc::new(MovingHost::default());
         let orchestrator = Orchestrator::new(
             store.clone(),
             Arc::new(EventBus::new(store.clone())),
-            Arc::new(MovingHost),
+            host.clone(),
             Arc::new(NoopWorkspaces),
             Arc::new(NoChecks),
             OrchestratorConfig {
@@ -237,6 +273,7 @@ impl Fixture {
         Self {
             store,
             orchestrator,
+            host,
             run,
             lead,
             rex,
@@ -316,6 +353,321 @@ fn agent(name: &str, role: Role, home: &Path) -> Agent {
         profile: Default::default(),
         topic: None,
         archived_at: None,
+    }
+}
+
+async fn scheduled_fixture() -> (Fixture, crossagents_core::WorkId) {
+    let f = Fixture::new().await;
+    let work = f
+        .orchestrator
+        .create_work_group("rounds", f.run.repo.clone(), f.lead.id)
+        .await
+        .unwrap();
+    let mut old = f.run.clone();
+    old.work_id = Some(work.id);
+    old.status = RunStatus::Completed;
+    f.store.update_run(&old).await.unwrap();
+    *f.orchestrator.round_wait_limit.lock().unwrap() = std::time::Duration::from_millis(250);
+    f.host.busy.store(true, std::sync::atomic::Ordering::SeqCst);
+    let result = f
+        .orchestrator
+        .run_next(&f.lead, json!({"title":"next", "request":"new work"}))
+        .await
+        .unwrap();
+    assert_eq!(result["status"], "scheduled");
+    (f, work.id)
+}
+
+async fn end_lead_turn(f: &Fixture) {
+    f.orchestrator
+        .publish(crossagents_core::EventKind::AgentTurnCompleted {
+            id: f.lead.id,
+            message_id: MessageId::new(),
+            stop_reason: crossagents_core::StopReason::EndTurn,
+        })
+        .await;
+}
+
+async fn scheduled_notice(f: &Fixture) -> String {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(line) = f.host.notices.lock().await.first().cloned() {
+                return line;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("scheduled notice")
+}
+
+#[tokio::test]
+async fn scheduled_long_turn_is_cancelled_with_notice() {
+    let (f, _) = scheduled_fixture().await;
+    let line = scheduled_notice(&f).await;
+    assert!(
+        line.contains("cancelled") && line.contains("turn to end"),
+        "{line}"
+    );
+    assert_eq!(f.store.list_runs().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn scheduled_when_lead_cwd_names_a_missing_checkout() {
+    let f = Fixture::new().await;
+    let work = f
+        .orchestrator
+        .create_work_group("rounds", f.run.repo.clone(), f.lead.id)
+        .await
+        .unwrap();
+    let mut old = f.run.clone();
+    old.work_id = Some(work.id);
+    old.status = RunStatus::Completed;
+    f.store.update_run(&old).await.unwrap();
+    let mut caller = f.lead.clone();
+    caller.cwd = f.orchestrator.integration_path(&old);
+    assert!(!caller.cwd.exists());
+    f.store
+        .update_agent_cwd(caller.id, &caller.cwd)
+        .await
+        .unwrap();
+    f.host.busy.store(true, std::sync::atomic::Ordering::SeqCst);
+    let result = f
+        .orchestrator
+        .run_next(&caller, json!({"title":"next", "request":"new work"}))
+        .await
+        .unwrap();
+    assert_eq!(result["status"], "scheduled");
+    f.host
+        .busy
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    end_lead_turn(&f).await;
+    let next = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(run) = f
+                .store
+                .list_runs()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|run| run.id != old.id)
+            {
+                break run;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the lead_in path started the new round");
+    assert_eq!(next.planner, caller.id);
+}
+
+#[tokio::test]
+async fn scheduled_waiting_person_is_cancelled_with_notice() {
+    let (f, _) = scheduled_fixture().await;
+    f.host
+        .person_waiting
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    end_lead_turn(&f).await;
+    let line = scheduled_notice(&f).await;
+    assert!(
+        line.contains("cancelled") && line.contains("idle"),
+        "{line}"
+    );
+    assert_eq!(f.store.list_runs().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn scheduled_creation_watchdog_does_not_cancel() {
+    let (f, work) = scheduled_fixture().await;
+    let guard = f.orchestrator.lock_card(&format!("work:{work}")).await;
+    f.host
+        .busy
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    end_lead_turn(&f).await;
+    let line = scheduled_notice(&f).await;
+    assert!(
+        line.contains("still starting") && line.contains("not been cancelled"),
+        "{line}"
+    );
+    drop(guard);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while f.store.list_runs().await.unwrap().len() != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("creation continued after watchdog");
+}
+
+#[tokio::test]
+async fn completed_creation_cancels_a_blocked_watchdog_notice() {
+    let (f, work) = scheduled_fixture().await;
+    let guard = f.orchestrator.lock_card(&format!("work:{work}")).await;
+    f.host
+        .block_notice
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    f.host
+        .busy
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    end_lead_turn(&f).await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        f.host.notice_started.notified(),
+    )
+    .await
+    .expect("watchdog entered notify");
+    drop(guard);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        f.host.notice_dropped.notified(),
+    )
+    .await
+    .expect("blocked notice cancelled");
+    f.host.notice_release.notify_one();
+    assert!(f.host.notices.lock().await.is_empty());
+    assert_eq!(f.store.list_runs().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn successful_schedule_releases_its_key_for_same_source() {
+    let (f, work) = scheduled_fixture().await;
+    f.host
+        .busy
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    end_lead_turn(&f).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while f
+            .orchestrator
+            .scheduled_rounds
+            .lock()
+            .unwrap()
+            .contains(&(work, f.run.id))
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first schedule finished");
+    let next = f
+        .store
+        .list_runs()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.id != f.run.id)
+        .expect("first round was created");
+    f.store.delete_run(next.id).await.unwrap();
+    f.host.busy.store(true, std::sync::atomic::Ordering::SeqCst);
+    let result = f
+        .orchestrator
+        .run_next(&f.lead, json!({"title":"again", "request":"new work"}))
+        .await
+        .unwrap();
+    assert_eq!(result["status"], "scheduled");
+    f.host
+        .busy
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    end_lead_turn(&f).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let runs = f.store.list_runs().await.unwrap();
+            if runs.iter().any(|r| r.id != f.run.id && r.id != next.id) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("a second round was created");
+}
+
+#[tokio::test]
+async fn panicked_schedule_releases_its_key_and_can_be_started_again() {
+    let (f, work) = scheduled_fixture().await;
+    f.host
+        .panic_on_busy
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    end_lead_turn(&f).await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        f.host.busy_panicked.notified(),
+    )
+    .await
+    .expect("background reached injected panic");
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while f
+            .orchestrator
+            .scheduled_rounds
+            .lock()
+            .unwrap()
+            .contains(&(work, f.run.id))
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("panic released the scheduled key");
+    let result = f
+        .orchestrator
+        .run_next(&f.lead, json!({"title":"retry", "request":"new work"}))
+        .await
+        .unwrap();
+    assert_eq!(result["status"], "scheduled");
+    assert!(
+        f.orchestrator
+            .scheduled_rounds
+            .lock()
+            .unwrap()
+            .contains(&(work, f.run.id))
+    );
+    f.host
+        .busy
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    end_lead_turn(&f).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !f
+            .store
+            .list_runs()
+            .await
+            .unwrap()
+            .iter()
+            .any(|run| run.title == "retry")
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("retry created a round");
+}
+
+#[tokio::test]
+async fn scheduled_source_deleted_or_superseded_is_cancelled() {
+    for deleted in [true, false] {
+        let (f, work) = scheduled_fixture().await;
+        if deleted {
+            f.store.delete_run(f.run.id).await.unwrap();
+        } else {
+            let mut newer = f.run.clone();
+            newer.id = RunId::new();
+            newer.work_id = Some(work);
+            newer.status = RunStatus::Completed;
+            newer.created_at = chrono::Utc::now() + chrono::Duration::seconds(1);
+            f.store.insert_run(&newer).await.unwrap();
+        }
+        f.host
+            .busy
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        end_lead_turn(&f).await;
+        let line = scheduled_notice(&f).await;
+        assert!(
+            line.contains("cancelled") && line.contains("source round"),
+            "{line}"
+        );
+        assert_eq!(
+            f.store.list_runs().await.unwrap().len(),
+            if deleted { 0 } else { 2 }
+        );
     }
 }
 

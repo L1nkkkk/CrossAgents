@@ -51,6 +51,16 @@ impl FakeHost {
             .map(|(_, text)| text.clone())
             .collect()
     }
+
+    async fn wait_for_delivery(&self, agent: AgentId) {
+        tokio::time::timeout(std::time::Duration::from_secs(4), async {
+            while self.delivered_to(agent).await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the report was not delivered");
+    }
 }
 
 #[async_trait]
@@ -547,7 +557,13 @@ async fn a_second_verification_that_fails_also_leaves_verifying() {
         "{task:?}"
     );
     // Its issuer was told, so the report does not sit there silently.
-    let told = f.host.delivered_to(f.lead.id).await.join("\n");
+    f.host.wait_for_delivery(f.lead.id).await;
+    // The verification holds the run lock until it has queued all its relays.
+    drop(f.orchestrator.lock(f.run.id).await);
+    f.orchestrator.drain_relays().await;
+    let deliveries = f.host.delivered_to(f.lead.id).await;
+    assert_eq!(deliveries.len(), 1, "{deliveries:?}");
+    let told = deliveries.join("\n");
     assert!(told.contains("nothing verified this report"), "{told}");
     assert!(told.contains("task_verify"), "{told}");
 }
@@ -785,13 +801,17 @@ async fn reporting_the_same_report_again_does_not_check_it_again() {
         .unwrap();
     let first = f.settled().await;
     assert_eq!(first.status, TaskStatus::Passed, "{first:?}");
-    let told_before = f.host.delivered_to(f.lead.id).await.len();
+    // The status is stored before the asynchronous issuer notification is delivered.
+    // Wait for that first notification before measuring whether a retry sends another.
+    f.host.wait_for_delivery(f.lead.id).await;
 
     // The same call again, with nothing done since: a retried call, not a new round.
     f.orchestrator
         .complete(&f.worker, f.task.id, "wrote a".into())
         .await
         .unwrap();
+    // The retry takes the run lock after the verifier has queued its relays.
+    f.orchestrator.drain_relays().await;
     let again = f.task().await;
 
     assert_eq!(again.status, TaskStatus::Passed, "{again:?}");
@@ -800,7 +820,7 @@ async fn reporting_the_same_report_again_does_not_check_it_again() {
     assert_eq!(*f.checks.rounds.lock().await, 1, "nothing to check again");
     assert_eq!(
         f.host.delivered_to(f.lead.id).await.len(),
-        told_before,
+        1,
         "its issuer is not told the same report twice"
     );
 }
@@ -928,7 +948,10 @@ async fn the_startup_sweep_retries_what_a_cleanup_left_behind() {
     assert!(!orphan.exists(), "no run owns it");
     assert!(lived_in.exists(), "an agent's directory stays");
     assert!(open_target.exists(), "an open run's build directory stays");
-    assert!(ended_targets.join("v").exists(), "a tree being verified stays");
+    assert!(
+        ended_targets.join("v").exists(),
+        "a tree being verified stays"
+    );
     assert!(!ended_targets.join("integration").exists());
 }
 
