@@ -274,6 +274,10 @@ pub struct CommandSpec {
     pub label: String,
     /// Cancelling this ends the whole tree.
     pub cancel: CancellationToken,
+    /// The extension was disabled: end the tree after [`Limits::disable_grace`]. Hooks pass
+    /// one so disabling ends a hook that is still running; a service passes `None` and stops
+    /// itself (its supervisor owns the grace, and restarting is not wanted).
+    pub disabled: Option<CancellationToken>,
 }
 
 /// How a command ended.
@@ -384,6 +388,8 @@ pub struct Runner {
     proxy: Vec<(String, String)>,
     counts: Mutex<Counts>,
     calls: Mutex<HashMap<String, Arc<Call>>>,
+    /// Commands that can be told the extension was disabled (hooks); removed when they end.
+    commands: Mutex<HashMap<String, CommandWatch>>,
     /// Token -> (extension, level). Memory only: a restart voids all of them.
     tokens: RwLock<HashMap<String, (String, ExtensionAccess)>>,
     log_lock: Mutex<()>,
@@ -431,6 +437,7 @@ impl Runner {
             proxy,
             counts: Mutex::default(),
             calls: Mutex::default(),
+            commands: Mutex::default(),
             tokens: RwLock::default(),
             log_lock: Mutex::default(),
             stopping: AtomicBool::new(false),
@@ -491,6 +498,15 @@ impl Runner {
         for call in self.calls.lock().unwrap().values() {
             if call.extension == name && call.is_running() {
                 call.disabled.cancel();
+            }
+        }
+        // Hooks are not calls but still have to end: a disabled extension must not keep a
+        // process (and its token) running for its full timeout (docs/EXTENSIONS.md §3).
+        for command in self.commands.lock().unwrap().values() {
+            if command.extension == name
+                && let Some(disabled) = &command.disabled
+            {
+                disabled.cancel();
             }
         }
     }
@@ -690,6 +706,7 @@ impl Runner {
             limits,
             label,
             cancel,
+            disabled,
         } = spec;
         if command.first().is_none_or(|program| program.is_empty()) {
             return Err(CallError::Internal(format!(
@@ -709,6 +726,15 @@ impl Runner {
         let token_guard = this.issue_token(&extension, lease.enabled.version.access);
         let token = token_guard.token().to_owned();
         let id = format!("cmd-{}", uuid::Uuid::new_v4().simple());
+        if let Some(disabled) = &disabled {
+            this.commands.lock().unwrap().insert(
+                id.clone(),
+                CommandWatch {
+                    extension: extension.clone(),
+                    disabled: Some(disabled.clone()),
+                },
+            );
+        }
         let (done, rx) = watch::channel(None);
         let job = CommandJob {
             id: id.clone(),
@@ -720,6 +746,7 @@ impl Runner {
             timeout,
             stdout,
             cancel,
+            disabled,
             token,
             token_guard,
             permit,
@@ -1230,12 +1257,18 @@ impl Runner {
             timeout,
             stdout,
             cancel,
+            disabled,
             token,
             token_guard,
             permit,
             done,
         } = job;
-        let _finisher = CommandFinisher(done.clone(), label.clone());
+        let _finisher = CommandFinisher {
+            done: done.clone(),
+            label: label.clone(),
+            runner: self.me.clone(),
+            id: id.clone(),
+        };
         let started = Instant::now();
         let fingerprint = &lease.enabled.version.fingerprint;
         let short = &fingerprint[..fingerprint.len().min(8)];
@@ -1246,8 +1279,8 @@ impl Runner {
             timeout,
             cancel,
             reason: Arc::new(Mutex::new(None)),
-            disabled: None,
-            grace: Duration::ZERO,
+            disabled,
+            grace: self.limits.disable_grace,
         };
         let outcome = match std::panic::AssertUnwindSafe(self.execute(
             &control,
@@ -1336,7 +1369,8 @@ struct Control {
     cancel: CancellationToken,
     /// Why it was cancelled; read when the cancel branch wins.
     reason: Arc<Mutex<Option<String>>>,
-    /// Tools only: the extension was disabled, so end after the grace period.
+    /// The extension was disabled: end after the grace period. Tools and hooks have one; a
+    /// service's supervisor stops it instead.
     disabled: Option<CancellationToken>,
     grace: Duration,
 }
@@ -1364,25 +1398,41 @@ struct CommandJob {
     timeout: Option<Duration>,
     stdout: OutputCapture,
     cancel: CancellationToken,
+    disabled: Option<CancellationToken>,
     token: String,
     token_guard: TokenGuard,
     permit: Option<Permit>,
     done: watch::Sender<Option<Arc<CommandResult>>>,
 }
 
+/// A running command the disable callback can reach (hooks; services handle it themselves).
+struct CommandWatch {
+    extension: String,
+    disabled: Option<CancellationToken>,
+}
+
 /// Makes sure a command always ends: if the supervising task is dropped before it recorded
-/// an outcome (the runtime going away), waiters still get an answer.
-struct CommandFinisher(watch::Sender<Option<Arc<CommandResult>>>, String);
+/// an outcome (the runtime going away), waiters still get an answer, and the command stops
+/// being reachable for a disable that arrives too late.
+struct CommandFinisher {
+    done: watch::Sender<Option<Arc<CommandResult>>>,
+    label: String,
+    runner: Weak<Runner>,
+    id: String,
+}
 
 impl Drop for CommandFinisher {
     fn drop(&mut self) {
-        if self.0.borrow().is_none() {
-            self.0.send_replace(Some(Arc::new(CommandResult {
+        if let Some(runner) = self.runner.upgrade() {
+            runner.commands.lock().unwrap().remove(&self.id);
+        }
+        if self.done.borrow().is_none() {
+            self.done.send_replace(Some(Arc::new(CommandResult {
                 status: CommandStatus::Cancelled,
                 duration: Duration::ZERO,
                 stdout: Vec::new(),
                 stderr: String::new(),
-                error: Some(format!("{}: the supervisor ended unexpectedly", self.1)),
+                error: Some(format!("{}: the supervisor ended unexpectedly", self.label)),
             })));
         }
     }

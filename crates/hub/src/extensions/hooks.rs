@@ -6,13 +6,19 @@
 //! restart — only events published while this hub runs are seen.
 //!
 //! `extension.*` events are refused when the description file is read (manifest.rs), and
-//! skipped here as well, so two extensions cannot trigger each other in a loop.
+//! skipped here as well. That stops a hook from reacting to another extension's event, but it
+//! cannot stop a loop that goes through the write API (a `write` hook on `agent.updated` that
+//! changes an agent's topic). Those are bounded instead: one extension may start at most
+//! [`HookRate::limit`] hooks per [`HookRate::window`], and the excess is dropped with a single
+//! log line per window.
 //!
 //! Hook processes share the tool concurrency limits: when they are full the event is dropped
-//! and the log says so, rather than queued.
+//! and the log says so, rather than queued. A disabled extension's running hook ends after
+//! the same grace a tool call gets (the runner cancels it; see [`super::runner::CommandSpec`]).
 
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use crossagents_core::{Event, EventBus};
 use serde_json::json;
@@ -23,6 +29,30 @@ use tokio_util::sync::CancellationToken;
 use super::runner::{CommandSpec, OutputCapture};
 use super::{Registry, Runner};
 
+/// How many hook processes one extension may start in one sliding window. It is separate
+/// from the tool concurrency limits and applies to every extension on its own.
+#[derive(Debug, Clone)]
+pub struct HookRate {
+    pub limit: usize,
+    pub window: Duration,
+}
+
+impl Default for HookRate {
+    fn default() -> Self {
+        Self {
+            limit: 60,
+            window: Duration::from_secs(60),
+        }
+    }
+}
+
+/// One extension's starts inside the window, and when the breaker last wrote its line.
+#[derive(Default)]
+struct Starts {
+    at: VecDeque<Instant>,
+    logged_at: Option<Instant>,
+}
+
 /// Runs the enabled extensions' `[[on]]` hooks for events this hub publishes.
 pub struct Hooks {
     runner: Arc<Runner>,
@@ -32,6 +62,12 @@ pub struct Hooks {
     stop: CancellationToken,
     /// Hook processes still running, so shutdown can wait for them.
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// The circuit breaker's limit; a test can shrink it.
+    rate: RwLock<HookRate>,
+    /// Starts per extension, for the breaker.
+    starts: Mutex<HashMap<String, Starts>>,
+    /// Per-extension token that ends that extension's running hooks when it is disabled.
+    disabled: Mutex<HashMap<String, CancellationToken>>,
 }
 
 impl Hooks {
@@ -40,13 +76,30 @@ impl Hooks {
         registry: Arc<Registry>,
         bus: Option<Arc<EventBus>>,
     ) -> Arc<Self> {
+        Self::with_rate(runner, registry, bus, HookRate::default())
+    }
+
+    pub fn with_rate(
+        runner: Arc<Runner>,
+        registry: Arc<Registry>,
+        bus: Option<Arc<EventBus>>,
+        rate: HookRate,
+    ) -> Arc<Self> {
         Arc::new(Self {
             runner,
             registry,
             bus,
             stop: CancellationToken::new(),
             tasks: Mutex::default(),
+            rate: RwLock::new(rate),
+            starts: Mutex::default(),
+            disabled: Mutex::default(),
         })
+    }
+
+    /// Changes the breaker's limit. The hub uses the default; a test needs a small one.
+    pub fn set_rate(&self, rate: HookRate) {
+        *self.rate.write().unwrap() = rate;
     }
 
     /// Listens from now on and returns the listening task. Subscribing is what makes a
@@ -117,6 +170,11 @@ impl Hooks {
             let Some(hook) = enabled.manifest.on.iter().find(|h| h.event == name) else {
                 continue;
             };
+            // Before anything is acquired: a breaker-dropped event must leave no trace but
+            // its one log line.
+            if !self.admit(&extension, name) {
+                continue;
+            }
             let timeout = Duration::from_secs(hook.timeout_secs.into());
             let command = hook.command.clone();
             let stdin = serde_json::to_vec(&json!({
@@ -138,6 +196,8 @@ impl Hooks {
                 limits: true,
                 label: format!("hook {name}"),
                 cancel: self.stop.clone(),
+                // A disable ends a running hook after the tool grace, not at its timeout.
+                disabled: Some(self.disable_token(&extension)),
             };
             match self.runner.start_command(spec) {
                 Ok(run) => {
@@ -149,6 +209,60 @@ impl Hooks {
                 Err(error) => self
                     .runner
                     .note(&extension, &format!("hook {name} dropped: {error}")),
+            }
+        }
+    }
+
+    /// Counts one start against the extension's breaker. `false` means the event is dropped;
+    /// the breaker writes at most one log line per window.
+    fn admit(&self, extension: &str, event: &str) -> bool {
+        let (limit, window) = {
+            let rate = self.rate.read().unwrap();
+            (rate.limit, rate.window)
+        };
+        let now = Instant::now();
+        let mut starts = self.starts.lock().unwrap();
+        let entry = starts.entry(extension.to_owned()).or_default();
+        while let Some(front) = entry.at.front() {
+            if now.duration_since(*front) < window {
+                break;
+            }
+            entry.at.pop_front();
+        }
+        if entry.at.len() < limit {
+            entry.at.push_back(now);
+            return true;
+        }
+        let log = entry
+            .logged_at
+            .is_none_or(|at| now.duration_since(at) >= window);
+        if log {
+            entry.logged_at = Some(now);
+        }
+        drop(starts);
+        if log {
+            self.runner.note(
+                extension,
+                &format!(
+                    "hook {event} dropped: {} starts in {}s is the limit (the circuit breaker); this line is written once per window",
+                    limit,
+                    window.as_secs()
+                ),
+            );
+        }
+        false
+    }
+
+    /// The token that ends this extension's running hooks when it is disabled. One token per
+    /// extension; after it was cancelled (the extension was disabled) a fresh one is made.
+    fn disable_token(&self, extension: &str) -> CancellationToken {
+        let mut tokens = self.disabled.lock().unwrap();
+        match tokens.get(extension) {
+            Some(token) if !token.is_cancelled() => token.clone(),
+            _ => {
+                let token = self.stop.child_token();
+                tokens.insert(extension.to_owned(), token.clone());
+                token
             }
         }
     }
