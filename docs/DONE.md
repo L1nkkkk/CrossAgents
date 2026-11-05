@@ -313,6 +313,10 @@ B 删除 run：
   - 代码：`crates/hub/src/runtime.rs` `take_waiting_digest`、`crates/core/src/event.rs`、`crates/hub/src/transcript.rs`、`crates/api-types`、`apps/gui/src/views/SessionMessage.tsx`、`lib/notices.ts`。
   - 测试：`crates/mock-agent/tests/notices_ride.rs`，2 个用例覆盖 3 种情形（合并且只多跑一轮；汇总已开始时不合并；合并之后再来的通知另起一条汇总）；`apps/gui/src/lib/notices.test.ts`。
   - 没验证：气泡下的提示没在真窗口里看过，只测了数据处理，过了类型检查；合并之后、那一轮开始之前 hub 如果重启，恢复时只按 `text` 重新排队，带着的汇总会丢（这是原有的恢复路径，没改）；外部 agent 不合并。
+- [x] **4. hub 层的流式规则**（oh-my-pi ttsr）：人定的是「先做项目文件，扩展留接口」。规则写在仓库根的 `.crossagents/rules/*.md`，frontmatter 写 `id`、`match`（正则，可以写多条）和 `on: output|tool|both`，正文是要送进去的规则（格式见 [tasks/STREAM-RULES.md](tasks/STREAM-RULES.md)）。规则平时不进上下文；agent 的输出（4 KB 滑动窗口，跨分片也能命中）或工具调用（名字和参数）命中时，驱动支持插话就插进当前这一轮；不支持就中断这一轮，把规则排在最前面先跑。同一条规则在同一个会话里 20 轮之内只送一次，hub 发起的 compact 成功后重置。坏文件、坏正则只记 warn 并跳过。`RuleSource` trait 留给以后接扩展。
+  - 代码：`crates/hub/src/stream_rules.rs`（新）；`runtime.rs` 的 `install`、`forward_events`、`inject`、`Control::Compacted`。
+  - 测试：`cargo test -p crossagents-hub stream_rules`（13 条单元测试）；`crates/mock-agent/tests/stream_rules.rs`（4 条：插话路径、20 轮去重、compact 后再送、不支持插话时中断再跑）。
+  - 没做 / 没验证：只用 mock agent 跑过，没在真实 Claude/Codex 上看过插话；驱动自己压缩上下文时没有事件，去重状态不会重置；中断路径不重发被中断那一轮的提示，只跑规则（agent 的会话上下文还在，能接着做）；如果被中断的是人的消息那一轮，人会看到这一轮被中断；插话事件没有 `from` 字段，只能靠正文开头的规则 id 认出是规则；只匹配工具名和参数，不匹配工具的输出；扩展那一侧没接。`inject` 在事件泵里同步等待 steer/interrupt 返回，ACP 驱动的 interrupt 最多等 5 秒，这段时间输出转发会停住。
 - [x] **5. 任务交结构化结果**（oh-my-pi 的 subagent）：任务的 spec（`plan_submit` 和 `task_create` 里的）可以带 `result_schema`（JSON Schema）。`task_complete` 新增 `result` 参数：任务有 schema 时 `result` 必填，并按 schema 校验（`jsonschema` 0.33，锁文件里本来就有）；不通过就报出哪条路径不符，任务状态不变，worker 可以改了再交；通过就存进 `TaskReport.result`。`task_get` 新增 `path` 参数（JSON Pointer），只返回那一处的值，路径不存在时报错。worker 的简报里会写出 schema。GUI 的任务详情把 result 折叠显示成 JSON。
   - 代码：`crates/core/src/model.rs`、`crates/orchestrator/src/tasks.rs` 的 `complete_with_result` 和 `task_get`、`tools.rs`、`brief.rs`、`apps/gui/src/views/Run.tsx`。
   - 测试：`crates/mock-agent/tests/task_result.rs`（2 条）：缺 result 和不合 schema 的 result 被拒且状态不变，合规的存下，按 path 取值，不存在的 path 报错，没有 schema 的老调用照旧；`script.rs` 补了嵌套数组解析的单测。
