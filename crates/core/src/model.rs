@@ -506,7 +506,7 @@ pub struct TaskSpec {
     pub acceptance: Vec<String>,
     #[serde(default)]
     pub references: Vec<String>,
-    /// JSON Schema for the worker?s structured result.
+    /// JSON Schema for the worker's structured result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_schema: Option<serde_json::Value>,
 }

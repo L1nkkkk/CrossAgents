@@ -313,6 +313,11 @@ B 删除 run：
   - 代码：`crates/hub/src/runtime.rs` `take_waiting_digest`、`crates/core/src/event.rs`、`crates/hub/src/transcript.rs`、`crates/api-types`、`apps/gui/src/views/SessionMessage.tsx`、`lib/notices.ts`。
   - 测试：`crates/mock-agent/tests/notices_ride.rs`，2 个用例覆盖 3 种情形（合并且只多跑一轮；汇总已开始时不合并；合并之后再来的通知另起一条汇总）；`apps/gui/src/lib/notices.test.ts`。
   - 没验证：气泡下的提示没在真窗口里看过，只测了数据处理，过了类型检查；合并之后、那一轮开始之前 hub 如果重启，恢复时只按 `text` 重新排队，带着的汇总会丢（这是原有的恢复路径，没改）；外部 agent 不合并。
+- [x] **5. 任务交结构化结果**（oh-my-pi 的 subagent）：任务的 spec（`plan_submit` 和 `task_create` 里的）可以带 `result_schema`（JSON Schema）。`task_complete` 新增 `result` 参数：任务有 schema 时 `result` 必填，并按 schema 校验（`jsonschema` 0.33，锁文件里本来就有）；不通过就报出哪条路径不符，任务状态不变，worker 可以改了再交；通过就存进 `TaskReport.result`。`task_get` 新增 `path` 参数（JSON Pointer），只返回那一处的值，路径不存在时报错。worker 的简报里会写出 schema。GUI 的任务详情把 result 折叠显示成 JSON。
+  - 代码：`crates/core/src/model.rs`、`crates/orchestrator/src/tasks.rs` 的 `complete_with_result` 和 `task_get`、`tools.rs`、`brief.rs`、`apps/gui/src/views/Run.tsx`。
+  - 测试：`crates/mock-agent/tests/task_result.rs`（2 条）：缺 result 和不合 schema 的 result 被拒且状态不变，合规的存下，按 path 取值，不存在的 path 报错，没有 schema 的老调用照旧；`script.rs` 补了嵌套数组解析的单测。
+  - 调试时发现：mock 场景里，run 的自动标题会截进半截 `[call …` 脚本，mock 驱动把它当成指令解析，于是卡住。测试改成显式给标题；mock 的这个毛病本身没改。
+  - 没验证：没有 schema 时交 `result` 的情况没单独测；GUI 的折叠 JSON 没截图看过。
 - [x] **7. 合并的活动流**（oh-my-pi agent-hub.md 的 Activity）：工具列新增「活动」标签，可放进右侧或底部 dock。所有 agent 的回复、工具调用、错误、消息（agent 之间的、人的、向人提问和人的回答）排成一条时间线，最新的在上面。类型可多选筛选（错误 / 回复 / 工具 / 消息）；范围可以是全部、某个 agent，也可以是它连同下属（按 `spawned_by_agent` 递归推算，防环）。点一条就打开那个会话，并滚到对应的那一轮；找不到那一轮时，在面板里说明。
   - 代码：`apps/gui/src/lib/activityFeed.ts`（纯函数）、`ActivityFeed.tsx`、`activityfeed.css`，在 `panes.ts` 登记标签。
   - 测试：`apps/gui/src/lib/activityFeed.test.ts`（10 条），覆盖事件折叠、流式合并、工具失败更新、轮次关联、下属推算、范围和类型筛选。

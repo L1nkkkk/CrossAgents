@@ -11,6 +11,6 @@ export type TaskSpec = { goal: string, scope: Scope, interfaces: Array<string>,
  */
 acceptance: Array<string>, references: Array<string>, 
 /**
- * JSON Schema for the worker?s structured result.
+ * JSON Schema for the worker's structured result.
  */
 result_schema?: JsonValue | null, };
