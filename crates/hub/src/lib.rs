@@ -29,6 +29,7 @@ pub mod runtime;
 pub mod shadow;
 pub mod shims;
 pub mod snapshot;
+pub mod stream_rules;
 pub mod terminal;
 pub mod trace;
 pub mod transcript;

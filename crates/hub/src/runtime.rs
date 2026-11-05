@@ -17,6 +17,8 @@ use crossagents_core::{
 use crossagents_plugins::PluginRegistry;
 use tokio::sync::{Mutex, Notify, mpsc};
 
+use crate::stream_rules::{self, Injection, StreamRules};
+
 const FLUSH_INTERVAL: Duration = Duration::from_millis(150);
 
 /// Extra per-session setup supplied by higher layers (collaboration MCP server, role
@@ -224,6 +226,8 @@ enum Control {
     TurnStarted(MessageId),
     /// The turn's outcome, and what it changed when the hub works that out itself.
     TurnFinished(MessageId, Result<StopReason, String>, Option<String>),
+    /// The session's context was compacted (`Runtime::compact`): stream rules may repeat.
+    Compacted,
     Stopped,
 }
 
@@ -1061,6 +1065,11 @@ impl Runtime {
             attachments: session.attachment_support(),
             steer,
         });
+        // The stream rules of the agent's workspace, read as its session starts.
+        let rules = match self.store().get_agent(&AgentKey::Id(id)).await {
+            Ok(agent) => StreamRules::new(stream_rules::load(&agent.cwd)),
+            Err(_) => StreamRules::default(),
+        };
         tokio::spawn(forward_events(
             self.bus.clone(),
             id,
@@ -1068,6 +1077,7 @@ impl Runtime {
             control_rx,
             self.live.clone(),
             generation,
+            rules,
         ));
         if adopted.is_some() {
             inbox.busy.store(true, Ordering::SeqCst);
@@ -1479,9 +1489,17 @@ impl Runtime {
         // A long history takes minutes to summarise; a caller that stops waiting (the GUI's
         // request timeout) must not cancel it halfway and leave the session mid-compaction.
         let session = live.session.clone();
-        tokio::spawn(async move { session.compact().await })
-            .await
-            .map_err(|err| CoreError::Agent(format!("compaction stopped: {err}")))?
+        let control = live.control.clone();
+        tokio::spawn(async move {
+            let result = session.compact().await;
+            if result.is_ok() {
+                // The stream rules sent before are no longer in the context.
+                let _ = control.send(Control::Compacted);
+            }
+            result
+        })
+        .await
+        .map_err(|err| CoreError::Agent(format!("compaction stopped: {err}")))?
     }
 
     /// Changes the agent's model and, when `effort` is given, its reasoning effort (empty:
@@ -1945,6 +1963,7 @@ async fn forward_events(
     mut control: mpsc::UnboundedReceiver<Control>,
     live: LiveMap,
     generation: u64,
+    mut rules: StreamRules,
 ) {
     let mut out = Coalescer::default();
     let mut tick = tokio::time::interval(FLUSH_INTERVAL);
@@ -1953,7 +1972,7 @@ async fn forward_events(
         tokio::select! {
             event = events.recv(), if events_open => match event {
                 Some(event) => {
-                    if handle_session_event(&bus, id, event, &mut out, &live, generation).await {
+                    if handle_session_event(&bus, id, event, &mut out, &live, generation, &mut rules).await {
                         return;
                     }
                 }
@@ -1962,16 +1981,18 @@ async fn forward_events(
             ctl = control.recv() => {
                 // Everything the session emitted before this point is already queued.
                 while let Ok(event) = events.try_recv() {
-                    if handle_session_event(&bus, id, event, &mut out, &live, generation).await {
+                    if handle_session_event(&bus, id, event, &mut out, &live, generation, &mut rules).await {
                         return;
                     }
                 }
                 out.flush(&bus, id).await;
                 match ctl {
                     Some(Control::TurnStarted(message_id)) => {
+                        rules.turn_started();
                         set_status(&bus, id, AgentStatus::Running).await;
                         publish(&bus, EventKind::AgentTurnStarted { id, message_id }).await;
                     }
+                    Some(Control::Compacted) => rules.compacted(),
                     Some(Control::TurnFinished(message_id, result, diff)) => {
                         let stop_reason = match result {
                             Ok(reason) => reason,
@@ -2030,11 +2051,18 @@ async fn handle_session_event(
     out: &mut Coalescer,
     live: &LiveMap,
     generation: u64,
+    rules: &mut StreamRules,
 ) -> bool {
     let SessionEvent { kind: event, .. } = event;
     match event {
         SessionEventKind::Output { stream, text } => {
+            let injections = rules.on_output(&text);
             out.push(bus, id, Stream::Output(stream), text).await;
+            if !injections.is_empty() {
+                // The output that matched goes out before the rule that answers it.
+                out.flush(bus, id).await;
+                inject(bus, id, live, generation, injections).await;
+            }
             return false;
         }
         SessionEventKind::ToolOutput { tool_call_id, text } => {
@@ -2044,6 +2072,18 @@ async fn handle_session_event(
         _ => {}
     }
     out.flush(bus, id).await;
+    // What a tool call says, for the stream rules: its name and kind, then its arguments.
+    let tool_text = match &event {
+        SessionEventKind::ToolCall { title, kind, .. } => {
+            Some(format!("{} {title}", kind.as_deref().unwrap_or_default()))
+        }
+        SessionEventKind::ToolDetail { detail, .. } => Some(format!(
+            "{} {}",
+            detail.command.as_deref().unwrap_or_default(),
+            detail.arguments.as_deref().unwrap_or_default()
+        )),
+        _ => None,
+    };
     let kind = match event {
         SessionEventKind::Output { .. } | SessionEventKind::ToolOutput { .. } => unreachable!(),
         SessionEventKind::Started { session_id } => {
@@ -2157,7 +2197,106 @@ async fn handle_session_event(
         }
     };
     publish(bus, kind).await;
+    if let Some(text) = tool_text {
+        let injections = rules.on_tool(&text);
+        inject(bus, id, live, generation, injections).await;
+    }
     false
+}
+
+/// Sends stream rules into the session's running turn: steered when the driver can take
+/// them in; otherwise the turn is interrupted and the rules run next, ahead of what waits.
+/// Only the session that matched is served; a session already replaced gets nothing.
+async fn inject(
+    bus: &EventBus,
+    id: AgentId,
+    live: &LiveMap,
+    generation: u64,
+    injections: Vec<Injection>,
+) {
+    if injections.is_empty() {
+        return;
+    }
+    let Some(live) = live
+        .lock()
+        .await
+        .get(&id)
+        .filter(|l| l.generation == generation)
+        .cloned()
+    else {
+        return;
+    };
+    if live.inbox.is_closed() {
+        return;
+    }
+    let mut queued = Vec::new();
+    for injection in injections {
+        let message_id = MessageId::new();
+        if live.steer && live.inbox.is_running() {
+            let prompt = Prompt {
+                text: injection.text.clone(),
+                attachments: Vec::new(),
+            };
+            if live.session.steer(message_id, &prompt).await.is_ok() {
+                tracing::debug!(rule = %injection.rule, "stream rule steered into the turn");
+                publish(
+                    bus,
+                    EventKind::AgentSteered {
+                        id,
+                        message_id,
+                        text: injection.text,
+                        attachments: Vec::new(),
+                    },
+                )
+                .await;
+                continue;
+            }
+        }
+        queued.push(injection);
+    }
+    if queued.is_empty() {
+        return;
+    }
+    // The driver cannot take them into the turn: interrupt it, and run the rules next.
+    let text = queued
+        .iter()
+        .map(|injection| injection.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let message_id = MessageId::new();
+    if live.inbox.is_running() {
+        let _ = live.session.interrupt().await;
+    }
+    live.inbox.push(
+        (
+            message_id,
+            Prompt {
+                text: text.clone(),
+                attachments: Vec::new(),
+            },
+        ),
+        true,
+    );
+    tracing::debug!(
+        rules = queued.len(),
+        "stream rules interrupt the turn and run next"
+    );
+    publish(
+        bus,
+        EventKind::AgentInput {
+            id,
+            message_id,
+            text,
+            queued: true,
+            from: Some(MessageSource::Notice),
+            reply_to: None,
+            thread: None,
+            reply_excerpt: None,
+            attachments: Vec::new(),
+            notices: Vec::new(),
+        },
+    )
+    .await;
 }
 
 /// A notification digest waiting for its turn.
