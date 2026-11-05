@@ -16,7 +16,7 @@
 |---|---|---|
 | `note_list` / `note_read` | `tools.rs:243` / `tools.rs:232`，`crates/orchestrator/src/notes.rs:105` | 返回值能重建；但扩展 token 是通用 read，能读别的 run 的全文（见 §2.1 的条件） |
 | `gui_screenshot` | `crates/orchestrator/src/tools.rs:564`，`crates/orchestrator/src/screenshot.rs:78` | 零新 hub 接口，但依赖 checkout + `apps/gui/node_modules`，且 1 MiB stdout 上限会把大图的 base64 截死（见 §2.1） |
-| 事件流面板 | `apps/gui/src/ToolColumn.tsx:411` | 零 hub 调用；失去「从别的会话打开」的 target 覆盖，只看得到扩展加载之后的事件 |
+| 事件流面板 | `apps/gui/src/ToolColumn.tsx:411` | 零新接口；接受历史缺口、target 与发布版可见性差异（见 §3、§6）；要求页面级历史则需补接口 |
 
 **补接口才能搬**：`expertise_search`、`expertise_get`、`usage_get`、`agent_get`、`agent_list`、`whoami`、
 `watch_list`、`watch_cancel`、`remind_list`、`remind_cancel`、`message_withdraw`、`agent_send`、`inbox_read`、
@@ -30,7 +30,7 @@
 `agent_spawn`、`remind_set`、`watch`、`human_ask`、`human_notify`、
 `extension_*` 六个机制工具；GUI 侧的对话、Run 页、设置、工作区、侧栏、菜单与快捷键、终端、提问与通知、安全模式入口。
 
-**第一个试点：把事件流面板搬成扩展标签页。**（理由见 §6；`gui_screenshot` 因为 stdout 上限与外部依赖，从第一降到第三）
+**第一个试点：以普通扩展提供事件流标签页，试点期间保留内置面板。**（理由见 §6；`gui_screenshot` 因为 stdout 上限与外部依赖，从第一降到第三）
 
 ## 1. 判定口径
 
@@ -137,7 +137,7 @@
 
 | 界面 | 位置 | 判断 | 依据 / 缺什么 | 值不值 | 风险 |
 |---|---|---|---|---|---|
-| 事件流 | `ToolColumn.tsx:411-440`（`useEventLog` `apps/gui/src/eventlog.ts:24-37`） | **现在就能搬** | `ca.events.on`（`host.ts:467-490`）拿的是同一条流，零 hub 调用；调试页只在 `__BUILD__.dev`/`__MOCK__` 出现（`panes.ts:33`） | 值：中。它是最不像核心的面板，适合验证 E2 | 低。功能损失两条：只能看扩展加载之后的事件（和现在 `eventlog.ts:24` 的「页面打开以来」一样）；失去「从别的会话打开」——内置面板用 `safeTarget?.agent ?? follow`（`ToolColumn.tsx:108-112`、`:122`），扩展只有 `follow` |
+| 事件流 | `ToolColumn.tsx:411-440`（`useEventLog` `apps/gui/src/eventlog.ts:24-37`） | **现在就能搬有差异的试点**；要求页面级历史则补接口 | `ca.events.on` 只有实时回调（`host.ts:467-490`、`defaults.ts:18`），需在 activate 时订阅并使用扩展级缓存；内置日志在扩展异步加载前启动，缓存跨面板关闭重开（`main.tsx:24-26`、`eventlog.ts:8`、`:24-37`）。要保留页面级历史需只读缓存或回放接口 | 值：中，适合验证 E2 | 启动、停用再启用及热换版本产生历史缺口；失去 `safeTarget?.agent` 覆盖（`ToolColumn.tsx:108-112`、`:122`）。内置 events 仅开发版或 mock 显示（`panes.ts:33-37`），扩展注册不继承限制（`host.ts:391-408`），本试点接受发布版手动启用后可见；内置面板保留 |
 | 改动 | `ToolColumn.tsx:154-213` | 补接口才能搬 | 数据接口齐（`allowed.cts:40-41`），但内置面板要 `safeTarget.agent`（`ToolColumn.tsx:108-112`）和 `target.turn`（`:154-161`）才能打开「故意看的那一轮」，扩展只收到 `follow`（`:80-83`，`host.ts:34`） | 低：核心的「这一轮改了什么」 | 若只做跟随当前会话的子集：能看最新一轮，失去轮次选择器、`target.file` 定位、以及「查看变更」打开的指定轮次；另外 `parseDiff`/`DiffView` 不可 import，重写大 diff 渲染容易卡 |
 | 文件 | `ToolColumn.tsx:113-120`（`FileViewer.tsx:280`） | 补接口才能搬 | 同上：内置在 run 路由下用 `routeRun`（`ToolColumn.tsx:114-116`），否则用 `agent`；扩展两样都没有，只有 `follow` | 低：核心浏览 | 只做跟随会话的子集：失去 run scope（工作树/分支选择）、以及 `target.file` 定位；`FileViewer.tsx` 的路径校验、图片、高亮要重写 |
 | 提交图 | `ToolColumn.tsx:123-130`（`commitgraph.tsx:33`） | 补接口才能搬 | 内置优先 `routeRun`（`ToolColumn.tsx:124-126`）；扩展没有 run，只有 `follow` | 低 | 只做会话子集：run 页上的提交图无法迁移；`graphlayout.ts` 的布局要重写，大仓库性能由扩展承担 |
@@ -182,18 +182,18 @@ GUI 侧：
 
 **顺序**（每步都以上一步的验收为前提）：
 
-1. 事件流 → 扩展标签页（零新接口）。
+1. 事件流 → 普通扩展标签页（零新接口，接受历史及发布版可见性差异；手动安装启用，内置面板在试点期间保留）。
 2. `note_list` + `note_read` → 扩展工具（零新接口，验证 read token 的 REST 组合与 run scope；接受 §2.1 的读取面）。
 3. `gui_screenshot` → 扩展工具（零新接口，但要先定大图怎么交回）。
 4. 改动 / 文件 / 提交图 → 等 §4 第 10 条（上下文补 `run`/`task`/`target`）落地后再做；在那之前最多迁移「跟随当前会话」的子集。
 5. 其余暂缓：等 §4 的 1–4 号接口出现后，再单独评估 `usage_get`、`agent_get/list`、后台面板。
 
-**第一个试点：事件流面板搬成 `debug__events` 标签页。**
+**第一个试点：普通扩展 `debug__events` 标签页，试点期间保留内置事件流面板。**
 
 - 为什么改推荐：原先首选 `gui_screenshot`，但它的验收会被两件与扩展机制无关的事挡住——1 MiB stdout 上限（`runner.rs:40`、`:864`）容不下大图的 base64，以及必须依赖 CrossAgents checkout 与 `apps/gui/node_modules`（`screenshot.rs:86-97`、`screenshot.mjs:43-59`）。用它当试点，失败时分不清是机制问题还是尺寸/环境问题。
-- 事件流的优势：只订阅 `ca.events.on`（`host.ts:467-490`），不碰 hub 写接口，没有输出上限和外部依赖，失败只影响一块面板（`docs/EXTENSIONS.md:338-347`）。
-- 验收：打开面板后，新事件按 `agentsOf` 的分组规则（`eventlog.ts:13-22`）落到对应会话；过滤框、展开 JSON、最多 1000 条（`eventlog.ts:7`）与现在一致；停用或切版本后标签页与订阅都被清掉（`host.ts:338-362`）；渲染抛错只坏这一块并给出「停用」。
-- 已知损失（写进验收，不当缺陷）：失去「从别的会话打开」的 target 覆盖；只看得到扩展加载之后的事件。
+- 事件流的优势：在 activate 时订阅 `ca.events.on`（`host.ts:467-490`），将缓存放在扩展级而非组件级，以便面板关闭重开后保留；不碰 hub 写接口，失败只影响一块面板（`docs/EXTENSIONS.md:338-347`）。
+- 验收：activate 后即订阅，面板关闭期间继续缓存，重开仍能看到缓存；新事件按 `agentsOf` 分组（`eventlog.ts:13-22`），过滤、展开 JSON 和每会话最多 1000 条（`eventlog.ts:7`）与内置一致。停用或切版本后标签页与旧订阅清掉（`host.ts:338-362`）；测试启动缺口、停用再启用和热换版本造成的历史丢失。持续订阅期间断线恢复沿用宿主的 Last-Event-ID 补发（`hub.ts:102-103`、`electron/main.cts:358-365`），验证补发可收到；`ca.events.on` 本身不提供历史或恢复接口。渲染抛错只影响该面板并给出「停用」。
+- 产品差异及验收：由人手动安装并启用普通扩展，默认没有扩展标签页；谁启用谁才能看到，发布版也可显示。内置 events 的开发版/mock 限制（`panes.ts:33-37`）不适用于扩展注册（`host.ts:391-408`），`ExtensionCa` 和 manifest GUI 没有开发版标志或条件注册（`host.ts:76-110`、`manifest.rs:32-34`）；不补宿主能力，试点期间内置事件流面板保留。另失去从别的会话打开的 target 覆盖；订阅前、停用和版本切换期间的历史无法补齐。如需原来的页面级历史，须先补只读缓存或回放接口。
 
 ## 7. 推测与未验证
 
