@@ -17,6 +17,10 @@
 //! # Programs the run worktree's PATH sends through the executor (docs/tasks/LOCKS.md §4.6);
 //! # left out, those the enabled presets carry (Rust: `cargo`); `[]`, none.
 //! shims = ["cargo"]
+//! # Run by the hub in a fresh worktree before an agent gets it, for dependencies
+//! # (docs/tasks/TOOLCHAIN.md §7). `dir` is relative to the checkout; `paths` are what the
+//! # worktree has to have for the command to be worth running (left out: every worktree).
+//! setup = [{ command = "npm ci", dir = "apps/gui", paths = ["apps/gui/package.json"] }]
 //!
 //! [run.env]
 //! # For agents and checks in the run's worktrees (docs/tasks/TOOLCHAIN.md §3), over a
@@ -112,6 +116,9 @@ struct Run {
     shims: Option<Vec<String>>,
     #[serde(default)]
     env: BTreeMap<String, EnvValue>,
+    /// Worktree setup commands (`setup.rs`, docs/tasks/TOOLCHAIN.md §7).
+    #[serde(default)]
+    setup: Vec<crate::setup::SetupDecl>,
 }
 
 /// One entry of `[resources]`: where the resource is (placeholders as in `[run.env]`), how it
@@ -308,6 +315,12 @@ pub fn run_shims(dir: &Path) -> Result<Vec<String>, String> {
     let file = read(dir)?;
     let presets = presets_for(&file, dir)?;
     Ok(shims_from(&file, &presets))
+}
+
+/// `dir`'s `[run] setup`, as written: the commands the hub runs in a fresh worktree before an
+/// agent gets it (`setup.rs`, docs/tasks/TOOLCHAIN.md §7).
+pub fn run_setup(dir: &Path) -> Result<Vec<crate::setup::SetupDecl>, String> {
+    Ok(read(dir)?.run.setup)
 }
 
 /// [`run_shims`] for a file already read: `[run] shims` if the project says, else the presets'.
@@ -585,8 +598,16 @@ checks = [
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let checks = run_checks(&root).unwrap();
         let cargo = ["cargo test --workspace"];
+        // A change under `crates/hub` also runs the sandbox smoke that starts a hub build.
+        let hub = checks.commands_for(&changed(&["crates/hub/src/api.rs"]));
+        assert_eq!(hub.first().map(String::as_str), Some(cargo[0]), "{hub:?}");
+        assert!(
+            hub.iter().skip(1).all(|c| c.contains("hub sandbox smoke")),
+            "{hub:?}"
+        );
+        // Any other Rust change runs cargo and nothing else.
         assert_eq!(
-            checks.commands_for(&changed(&["crates/hub/src/api.rs"])),
+            checks.commands_for(&changed(&["crates/core/src/lib.rs"])),
             cargo
         );
         assert_eq!(checks.commands_for(&changed(&["Cargo.lock"])), cargo);

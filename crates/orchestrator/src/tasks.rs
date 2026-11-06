@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use crossagents_core::{
     Agent, AgentId, AgentKey, ClaimRole, CoreError, EventKind, HandoffKind, HandoffOutcome,
-    PlannedTask, Role, Run, RunStatus, Task, TaskId, TaskReport, TaskSpec, TaskStatus,
-    UsageOutcome,
+    PlannedTask, Role, Run, RunStatus, Task, TaskId, TaskReport, TaskRunOutcome, TaskSpec,
+    TaskStatus, UsageOutcome,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -49,6 +49,7 @@ fn task_json(task: &Task) -> Value {
         "issuer": task.issuer,
         "assignee": task.assignee,
         "depends_on": task.depends_on,
+        "stage": task.spec.stage,
         "progress": task.progress,
         "open_question": task.report.question,
     })
@@ -188,6 +189,7 @@ impl Orchestrator {
         value["worktree"] = json!(task.worktree);
         value["run_branch"] = json!(run.branch);
         value["reviewer"] = json!(task.reviewer);
+        value["runs"] = json!(task.runs);
         Ok(value)
     }
 
@@ -285,6 +287,7 @@ impl Orchestrator {
                 reviewer_fresh: planned.reviewer_fresh,
                 status: TaskStatus::Pending,
                 attempts: 0,
+                runs: Vec::new(),
                 escalated: false,
                 nudges: 0,
                 branch: None,
@@ -489,7 +492,11 @@ impl Orchestrator {
         if let Some(pushed) = self.expertise_brief(&worker, &task).await {
             opening = format!("{opening}\n\n{pushed}");
         }
-        self.relay(worker.id, caller.id, opening, None);
+        // Handing the task over starts the new worker's run (multica §2.4).
+        let envelope = self.relay_envelope(caller.id, opening);
+        crate::attempts::begin(&mut task, Some(worker.id), Some(envelope.id));
+        self.store_task(&mut task).await?;
+        self.send_in_background(worker.id, envelope);
         Ok(task_json(&task))
     }
 
@@ -530,6 +537,11 @@ impl Orchestrator {
         self.cleanup_worktree(&run, &task, !a.keep_branch, released.is_empty())
             .await;
         task.report.failure = Some(format!("cancelled by {}", caller.name));
+        crate::attempts::close_open(
+            &mut task,
+            TaskRunOutcome::Cancelled,
+            Some(format!("cancelled by {}", caller.name)),
+        );
         self.transition(&mut task, TaskStatus::Cancelled).await?;
         self.schedule(&mut run).await?;
         Ok(json!({ "task": task_json(&task) }))
@@ -642,6 +654,8 @@ impl Orchestrator {
         task.report.failure = None;
         task.report.forced = None;
         task.report.interrupted = false;
+        // The run ends here, with a report; the task does not (multica §2.4).
+        crate::attempts::close(&mut task, TaskRunOutcome::Reported, None, false);
         let token = uuid::Uuid::new_v4().to_string();
         task.report.verification = Some(token.clone());
         self.transition(&mut task, TaskStatus::Verifying).await?;
@@ -870,6 +884,12 @@ impl Orchestrator {
             return Err(CoreError::Conflict(format!("#{} has ended", task.key)));
         }
         task.report.failure = Some(reason.clone());
+        crate::attempts::close(
+            &mut task,
+            TaskRunOutcome::GaveUp,
+            Some(reason.clone()),
+            false,
+        );
         if task.status != TaskStatus::Stalled {
             self.transition(&mut task, TaskStatus::Stalled).await?;
         } else {
@@ -921,6 +941,8 @@ impl Orchestrator {
         );
         task.report.question = Some(question);
         task.report.question_message = Some(message);
+        // The turn ended with a question; the answer starts the next run (multica §2.4).
+        crate::attempts::close(&mut task, TaskRunOutcome::Asked, None, false);
         if replaces.is_some() {
             self.store_task(&mut task).await?;
         } else {
@@ -960,8 +982,8 @@ impl Orchestrator {
         let mut queued = false;
         if let Some(worker) = task.assignee {
             queued = self.host.is_busy(worker).await;
-            self.relay(
-                worker,
+            // The answer starts the worker's next run (multica §2.4).
+            let envelope = self.relay_envelope(
                 caller.id,
                 format!(
                     "{}\n\n---\nanswer about task #{}\ntask_id: {}",
@@ -969,8 +991,14 @@ impl Orchestrator {
                     task.key,
                     task.id
                 ),
-                question,
             );
+            let envelope = crossagents_core::Envelope {
+                reply_to: question,
+                ..envelope
+            };
+            crate::attempts::begin(&mut task, Some(worker), Some(envelope.id));
+            self.store_task(&mut task).await?;
+            self.send_in_background(worker, envelope);
         }
         Ok(queued)
     }
@@ -1539,8 +1567,8 @@ impl Orchestrator {
         task.report.failure = None;
         task.report.rework.push(a.notes.trim().to_owned());
         self.transition(&mut task, TaskStatus::Running).await?;
-        self.relay(
-            worker,
+        // The rework is the worker's next run (multica §2.4).
+        let envelope = self.relay_envelope(
             caller.id,
             format!(
                 "{}\n\n---\nrework of task #{}\ntask_id: {}\nattempt: {}",
@@ -1549,8 +1577,10 @@ impl Orchestrator {
                 task.id,
                 task.attempts
             ),
-            None,
         );
+        crate::attempts::begin(&mut task, Some(worker), Some(envelope.id));
+        self.store_task(&mut task).await?;
+        self.send_in_background(worker, envelope);
         // What went wrong, in the issuer's words, becomes a draft for the person (EXPERTISE
         // §6.4). The task is already back with its worker: a profile that cannot hold the
         // candidate only warns.
@@ -1606,6 +1636,7 @@ impl Orchestrator {
         } else {
             TaskStatus::Cancelled
         };
+        crate::attempts::close_open(&mut task, TaskRunOutcome::Cancelled, a.reason.clone());
         self.transition(&mut task, to).await?;
         // What it used counts as dropped, requeued or not (EXPERTISE §4.6), and the drop
         // itself stands even when the profile cannot be updated.

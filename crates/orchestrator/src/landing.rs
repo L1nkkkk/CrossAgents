@@ -429,6 +429,12 @@ impl Orchestrator {
                     .join("、")
             ));
         }
+        // Who the commit credits: the hub's identity says nothing about the agents that did
+        // the work, so they go in trailers (docs/tasks/SELF.md B2). A pull request has no
+        // commit of ours to put them in, and its title is this message.
+        if mode != LandMode::Pr {
+            message = self.coauthored(&run, message).await;
+        }
         run.base_branch = baseline;
         let reference = self
             .ws_for(&run)
@@ -583,6 +589,7 @@ impl Orchestrator {
             reviewer_fresh: true,
             status: TaskStatus::Pending,
             attempts: 0,
+            runs: Vec::new(),
             escalated: false,
             nudges: 0,
             branch: None,

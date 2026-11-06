@@ -403,6 +403,7 @@ mod tests {
             reviewer_fresh: true,
             status: TaskStatus::Passed,
             attempts: 1,
+            runs: Vec::new(),
             escalated: false,
             nudges: 0,
             branch: None,

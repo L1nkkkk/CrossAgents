@@ -7,6 +7,10 @@ import type { AccountUsageGroup } from "@bindings/AccountUsageGroup";
 import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
 import type { ChangesResponse } from "@bindings/ChangesResponse";
 import type { CommitGraph } from "@bindings/CommitGraph";
+import type { GitBranchesResponse } from "@bindings/GitBranchesResponse";
+import type { GitCommitResponse } from "@bindings/GitCommitResponse";
+import type { GitGraph } from "@bindings/GitGraph";
+import type { GitStatusResponse } from "@bindings/GitStatusResponse";
 import type { CliInstallAccepted } from "@bindings/CliInstallAccepted";
 import type { AttachmentContent } from "@bindings/AttachmentContent";
 import type { ListAvatarsResponse } from "@bindings/ListAvatarsResponse";
@@ -58,6 +62,7 @@ import type { StartChatRequest } from "@bindings/StartChatRequest";
 import type { ApproveRunRequest } from "@bindings/ApproveRunRequest";
 import type { RejectRunRequest } from "@bindings/RejectRunRequest";
 import type { Run } from "@bindings/Run";
+import type { RunCostResponse } from "@bindings/RunCostResponse";
 import type { RunDetail } from "@bindings/RunDetail";
 import type { RunTrace } from "@bindings/RunTrace";
 import type { SendMessageRequest } from "@bindings/SendMessageRequest";
@@ -415,8 +420,18 @@ export const api = {
   /** The same for a commit of the session's checkout. */
   agentCommitDiff: (agent: string, sha: string) =>
     request<ChangesResponse>("GET", `/v1/agents/${enc(agent)}/commits/${enc(sha)}/diff`),
+  /** The Git view of a project directory (an agent's cwd or a run's repo), read-only. */
+  gitBranches: (path: string) => request<GitBranchesResponse>("GET", `/v1/git/branches?path=${enc(path)}`),
+  gitStatus: (path: string) => request<GitStatusResponse>("GET", `/v1/git/status?path=${enc(path)}`),
+  gitGraph: (path: string, limit?: number) =>
+    request<GitGraph>("GET", `/v1/git/graph?path=${enc(path)}${limit ? `&limit=${limit}` : ""}`),
+  gitCommit: (path: string, sha: string) => request<GitCommitResponse>("GET", `/v1/git/commits/${enc(sha)}?path=${enc(path)}`),
+  gitCommitDiff: (path: string, sha: string) =>
+    request<ChangesResponse>("GET", `/v1/git/commits/${enc(sha)}/diff?path=${enc(path)}`),
   /** What happened in a run, by task, from its events. */
   runTrace: (run: string) => request<RunTrace>("GET", `/v1/runs/${enc(run)}/trace`),
+  /** What the run spent, split by agent and model: its cost bar (docs/research/multica.md §十三). */
+  runCost: (run: string) => request<RunCostResponse>("GET", `/v1/runs/${enc(run)}/cost`),
   /** The person's comments, to the task's worker as its next turn; `rework` sends the task back. */
   reviewTask: (run: string, task: string, req: TaskReviewRequest) => request<Task>("POST", `/v1/runs/${enc(run)}/tasks/${enc(task)}/review`, req),
   /** `git init` and a first commit in `path`, so later runs there get worktrees. */

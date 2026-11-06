@@ -113,9 +113,13 @@ fn launch_for(spec: &SessionSpec) -> Launch {
         bypass: spec.permission == PermissionPolicy::Bypass && permission_mode.is_none(),
         permission_mode,
         mcp_servers: spec.mcp_servers.clone(),
+        env: spec.env.clone(),
         instructions: spec.instructions.clone(),
         setting_sources: text("setting_sources")
             .unwrap_or_else(|| wire::DEFAULT_SETTING_SOURCES.into()),
+        // Off unless `config.allow_hooks` says so: the project settings the sources above
+        // load can run hooks, and only the person may turn that on (crate::hooks).
+        allow_hooks: crate::hooks::allowed(config),
     }
 }
 
@@ -2190,5 +2194,60 @@ mod interrupt_tests {
         assert!(next.try_recv().is_err());
         shared.handle(result("next"));
         assert_eq!(next.await.unwrap(), StopReason::Error);
+    }
+}
+
+/// The switches on `config` are read when the launch is built, together.
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+    use crossagents_core::{Agent, AgentId, AgentStatus, NameSource, Role};
+
+    fn spec(config: Value) -> SessionSpec {
+        let (events, _rx) = mpsc::unbounded_channel();
+        SessionSpec {
+            agent: Agent {
+                id: AgentId::new(),
+                name_source: NameSource::Chosen,
+                topic: None,
+                archived_at: None,
+                home: PathBuf::new(),
+                name: "ada".into(),
+                plugin: "claude".into(),
+                driver: Some("claude-native".into()),
+                model: None,
+                role: Role::Worker,
+                cwd: PathBuf::from("/tmp/ada"),
+                config,
+                status: AgentStatus::Stopped,
+                created_at: chrono::Utc::now(),
+                profile: Default::default(),
+            },
+            mcp_servers: vec![],
+            permission: PermissionPolicy::Bypass,
+            permissions: None,
+            command: None,
+            instructions: None,
+            env: vec![],
+            events,
+        }
+    }
+
+    /// An agent that never chose: hooks off, and the launch says so.
+    #[test]
+    fn default_config_keeps_hooks_off() {
+        let launch = launch_for(&spec(json!({})));
+        assert!(!launch.allow_hooks);
+        assert_eq!(launch.setting_sources, wire::DEFAULT_SETTING_SOURCES);
+        let args = wire::args(&launch, &Start::New("s1".into()), Flavor::Claude);
+        assert!(args.iter().any(|a| a == "--settings"), "{args:?}");
+    }
+
+    /// The switch only reads `true`, and only from `allow_hooks`.
+    #[test]
+    fn config_allow_hooks_turns_them_on() {
+        assert!(launch_for(&spec(json!({ "allow_hooks": true }))).allow_hooks);
+        assert!(!launch_for(&spec(json!({ "allow_hooks": false }))).allow_hooks);
+        assert!(!launch_for(&spec(json!({ "allow_hooks": "yes" }))).allow_hooks);
     }
 }
