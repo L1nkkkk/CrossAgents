@@ -1033,18 +1033,23 @@ function DevHubNotice() {
 }
 
 /**
- * A hub built before `HubInfo.features`: its entries would just be missing, so say which and
- * how to get them. Reloading reconnects and asks `/v1/info` again, which is also how a refused
- * entry gets another try.
+ * A hub built before `HubInfo.features`: its entries would just be missing, so say which — and
+ * that the version is what says so, since 0.2.6 already has some of them — and how to get the
+ * rest. Reloading reconnects and asks `/v1/info` again, which is also how a refused entry gets
+ * another try.
  */
 function OldHubNotice() {
   const features = useHubFeatures();
   const hidden = hiddenByHub(features);
   if (features.listed !== null || !hidden.length) return null;
   const names = hidden.map((f) => FEATURE_LABELS[f]).join("、");
+  const version = features.version ?? "未知";
   return (
-    <div className="dev-hub" title={`旧版 hub 的 /v1/info 不带功能清单，所以这些入口没有显示：${names}。换成同一版本的新 hub 后会自己出现。`}>
-      <span>旧版 hub：{names} 已隐藏</span>
+    <div
+      className="dev-hub"
+      title={`旧版 hub 的 /v1/info 不带功能清单，按版本 ${version} 推断这些入口不可用：${names}。换成同一版本的新 hub 后会自己出现。`}
+    >
+      <span>旧版 hub：按版本推断 {names} 不可用</span>
       <button className="link" onClick={() => window.location.reload()}>
         重新连接
       </button>

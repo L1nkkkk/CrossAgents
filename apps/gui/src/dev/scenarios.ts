@@ -508,20 +508,24 @@ export const SCENARIOS: Scenario[] = [
     script: [],
     route: "#/extensions",
   }) },
-  { key: "hub-old", label: "旧 hub：功能清单缺失", hint: "旧版 hub 的 /v1/info 不带 features：Git、排障记录、工作组入口隐藏，侧栏底部写明原因，版本号 tooltip 里也有；「重新连接」重新问一次", build: () => {
+  { key: "hub-old", label: "旧 hub 0.2.5：没有功能清单", hint: "0.2.5 的 /v1/info 不带 features：Git、排障记录、工作组、应用到原目录都隐藏；侧栏底部和版本号 tooltip 写明「按版本推断」", build: () => {
     const scene = workRounds();
-    return { ...scene, state: { ...scene.state, features: null } };
+    return { ...scene, state: { ...scene.state, features: null, version: "0.2.5" } };
+  } },
+  { key: "hub-old-0.2.6", label: "旧 hub 0.2.6：只藏较晚的功能", hint: "0.2.6 的 /v1/info 不带 features，但 0.2.6 已有 Git 页和排障记录：只隐藏工作组、应用到原目录，提示写明是按版本推断的", build: () => {
+    const scene = workRounds();
+    return { ...scene, state: { ...scene.state, features: null, version: "0.2.6" } };
   } },
   { key: "hub-new", label: "新 hub：功能清单", hint: "新 hub 列出 features：Git、排障记录、工作组入口都在，工作组照常列出", build: () => {
     const scene = workRounds();
     return { ...scene, state: { ...scene.state, features: [...FEATURES] } };
   } },
-  { key: "hub-old-apply", label: "旧 hub：没有「应用到原目录」", hint: "旧版 hub 的 run 页不显示「应用到原目录」，其余照旧；界面不崩", build: () => {
+  { key: "hub-old-apply", label: "旧 hub：没有「应用到原目录」", hint: "0.2.6 的 hub 不带功能清单，应用到原目录在 0.2.6 之后才有、从不按版本推断，所以仍隐藏；Git 和排障记录照常", build: () => {
     const scene = inPlaceRun();
     // The apply control also needs a git working copy in place (LEAD.md §11): the mock's
     // in-place run is a plain folder, so say it is a repository to put the button on screen.
     scene.state.runs[0].run.mode = { lead: "in_place", vcs: "git", owner: "person", retain: "keep" };
-    return { ...scene, state: { ...scene.state, features: null } };
+    return { ...scene, state: { ...scene.state, features: null, version: "0.2.6" } };
   } },
   { key: "hub-refused", label: "403：入口置灰", hint: "hub 用 403 拒绝（凭据级别不够）：「应用到原目录」变灰，用 hub 的话说明原因，不弹报错", build: () => {
     const scene = inPlaceRun();

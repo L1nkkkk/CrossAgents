@@ -312,10 +312,11 @@ function filesSearch(scope: FileScope, q: string, all = false): Promise<FileSear
 
 export const api = {
   /** Also what the hub has beyond older ones (`features`, docs/TODO.md §二): every caller of
-   * `/v1/info` is a fresh connection check, so this is where the page learns it. */
+   * `/v1/info` is a fresh connection check, so this is where the page learns it. A hub without
+   * the list is read by version (`lib/features.ts` `WITHOUT_LIST`). */
   info: async () => {
     const info = await request<HubInfo>("GET", "/v1/info");
-    noteHub(info.features);
+    noteHub(info.features, info.version);
     return info;
   },
 
