@@ -142,8 +142,12 @@ async fn queued_messages_can_be_withdrawn_or_sent_now() {
         .iter()
         .map(|turn| turn["input"].as_str().unwrap())
         .collect();
-    assert_eq!(inputs, ["[slow] first", "third", "urgent"]);
-    assert_eq!(transcript["turns"][2]["from"]["kind"], "human");
+    // Taken back before it started: the row stays where it was sent and says so, instead of
+    // vanishing on a reload (docs/TODO.md §二十五「2 的尾巴」).
+    assert_eq!(inputs, ["[slow] first", "second", "third", "urgent"]);
+    assert_eq!(transcript["turns"][1]["withdrawn"], true);
+    assert!(transcript["turns"][1]["started_at"].is_null());
+    assert_eq!(transcript["turns"][3]["from"]["kind"], "human");
 }
 
 #[tokio::test]

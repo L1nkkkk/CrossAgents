@@ -319,6 +319,9 @@ impl From<CoreError> for AppError {
             | CoreError::InvalidTransition { .. }
             | CoreError::Unsupported(_) => (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
             CoreError::Agent(_) => (StatusCode::BAD_GATEWAY, ErrorCode::AgentError),
+            CoreError::OutcomeUnknown(_) => {
+                (StatusCode::GATEWAY_TIMEOUT, ErrorCode::OutcomeUnknown)
+            }
             CoreError::Storage(_) => {
                 tracing::error!(error = %err, "storage error");
                 (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal)
@@ -1320,6 +1323,15 @@ async fn send_message(
                     AppError::new(StatusCode::BAD_GATEWAY, ErrorCode::AgentError, why)
                         .with_reason(reason),
                 );
+            }
+            // The write timed out: it may or may not have arrived. The GUI shows this code
+            // as "不确定发没发出去，先别重发" (docs/tasks/DELIVERY-AUDIT.md §3).
+            Err(SteerFailure::Unknown { error: why, .. }) => {
+                return Err(AppError::new(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    ErrorCode::OutcomeUnknown,
+                    why,
+                ));
             }
             Err(SteerFailure::Error(err)) => return Err(err.into()),
         }

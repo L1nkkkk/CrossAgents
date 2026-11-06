@@ -24,6 +24,7 @@ const REASON_TEXT: Record<QueuedReason, string> = {
   runtime_no_steer: "这个驱动不能插话，已排到下一轮",
   no_active_turn: "这一轮刚结束，已排到下一轮",
   steer_write_failed: "没插进去，也没有排队；要发送请重发一次",
+  outcome_unknown: "不确定插没插进去，先别重发：可能已经送到，再发会让模型读两次",
   archived: "这个对话已归档，恢复后才能发送",
   already_started: "这条已经开始，不能再移动或撤回",
   attachment_refused: "附件没有被接收，换一种或去掉再发",

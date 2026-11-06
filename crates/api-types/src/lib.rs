@@ -368,6 +368,17 @@ pub struct TranscriptTurn {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(as = "Option<Vec<String>>", optional)]
     pub notices: Vec<String>,
+    /// Why the message waits, while it has not started: the `agent.input`'s
+    /// `queued_reason`, kept so a reloaded transcript says the same thing the live events
+    /// did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub queued_reason: Option<QueuedReason>,
+    /// Taken back before it started: the row stays where it was sent and says so
+    /// (`agent.input_withdrawn`), instead of vanishing on a reload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub withdrawn: Option<bool>,
 }
 
 /// Files a turn changed, with added and removed lines.
@@ -2873,6 +2884,10 @@ pub enum ErrorCode {
     Conflict,
     /// The agent process or its protocol failed.
     AgentError,
+    /// A request reached the hub but its outcome with the agent is unknown: a write timed
+    /// out with no answer, so it may or may not have arrived. Clients must not offer to
+    /// resend it blindly (docs/tasks/DELIVERY-AUDIT.md §3, §4).
+    OutcomeUnknown,
     Internal,
 }
 
@@ -3045,6 +3060,7 @@ mod tests {
             (QueuedReason::RuntimeNoSteer, "runtime_no_steer"),
             (QueuedReason::NoActiveTurn, "no_active_turn"),
             (QueuedReason::SteerWriteFailed, "steer_write_failed"),
+            (QueuedReason::OutcomeUnknown, "outcome_unknown"),
             (QueuedReason::Archived, "archived"),
             (QueuedReason::AlreadyStarted, "already_started"),
             (QueuedReason::AttachmentRefused, "attachment_refused"),

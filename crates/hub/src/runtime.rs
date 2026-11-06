@@ -104,6 +104,13 @@ pub enum SteerFailure {
         reason: QueuedReason,
         error: String,
     },
+    /// The write timed out: it may or may not have reached the CLI. Nothing is queued and
+    /// it is not sent again; the sender is told the outcome is unknown
+    /// (docs/tasks/DELIVERY-AUDIT.md §3, §4).
+    Unknown {
+        message_id: MessageId,
+        error: String,
+    },
     /// Nothing was delivered for another reason (the agent is archived, it stopped, ...).
     Error(CoreError),
 }
@@ -118,12 +125,19 @@ impl From<CoreError> for SteerFailure {
 enum ClientEntry {
     Pending(Arc<Notify>),
     Done(Delivery),
+    /// The write may have reached the agent: a repeat must not write it again.
+    Unknown(MessageId),
 }
 
 /// How many finished deliveries one agent keeps by client id. A hub runs for weeks, so the
 /// ids it will never see again are dropped oldest first instead of piling up; a send still
 /// in flight (`Pending`) is never dropped (docs/tasks/DELIVERY-AUDIT.md §4).
 const CLIENT_HISTORY: usize = 256;
+
+/// The answer to a repeat of a message whose earlier write timed out: it may already be in,
+/// so writing it again could make the model read it twice.
+const UNKNOWN_REPEAT: &str = "the earlier attempt may or may not have reached the agent; \
+                              it was not sent again";
 
 /// Deliveries by fixed client id, per agent, bounded to [`CLIENT_HISTORY`] each.
 #[derive(Default)]
@@ -153,17 +167,27 @@ impl ClientLog {
             .insert(client, ClientEntry::Pending(wait));
     }
 
-    /// Keeps the delivery for repeats (dropping this agent's oldest kept one once they pass
-    /// [`CLIENT_HISTORY`]), or frees the id when nothing was delivered.
-    fn settle(&mut self, agent: AgentId, client: MessageId, delivery: Option<Delivery>) {
-        let Some(delivery) = delivery else {
-            if let Some(entries) = self.agents.get_mut(&agent) {
-                entries.entries.remove(&client);
+    /// Keeps what the first send on an id turned into (dropping this agent's oldest kept one
+    /// once they pass [`CLIENT_HISTORY`]), or frees the id when nothing was delivered.
+    fn settle(&mut self, agent: AgentId, client: MessageId, settled: Settled<'_>) {
+        match settled {
+            Settled::Delivery(delivery) => {
+                self.keep(agent, client, ClientEntry::Done(delivery.clone()));
             }
-            return;
-        };
+            Settled::Unknown(message_id) => {
+                self.keep(agent, client, ClientEntry::Unknown(message_id));
+            }
+            Settled::Nothing => {
+                if let Some(entries) = self.agents.get_mut(&agent) {
+                    entries.entries.remove(&client);
+                }
+            }
+        }
+    }
+
+    fn keep(&mut self, agent: AgentId, client: MessageId, entry: ClientEntry) {
         let entries = self.agents.entry(agent).or_default();
-        entries.entries.insert(client, ClientEntry::Done(delivery));
+        entries.entries.insert(client, entry);
         entries.order.push_back(client);
         while entries.order.len() > CLIENT_HISTORY {
             if let Some(oldest) = entries.order.pop_front() {
@@ -183,8 +207,20 @@ impl ClientLog {
 enum ClientClaim {
     /// This id was already delivered: answer with that delivery.
     Repeat(Delivery),
+    /// This id's earlier write may have reached the agent: answer "unknown" again and do
+    /// not write it twice.
+    RepeatUnknown(MessageId),
     /// The first send on this id: deliver, then [`Runtime::settle_client`] it.
     First(Option<(MessageId, Arc<Notify>)>),
+}
+
+/// What a first send on a client id settled to, for repeats.
+enum Settled<'a> {
+    Delivery(&'a Delivery),
+    /// The write may or may not have arrived; the id must not send it again.
+    Unknown(MessageId),
+    /// Refused before delivery: the same id may try again.
+    Nothing,
 }
 
 impl Drop for Live {
@@ -1418,13 +1454,24 @@ impl Runtime {
         let claim = self.claim_client(stored.id, client_message_id).await;
         let claimed = match claim {
             ClientClaim::Repeat(delivery) => return Ok(delivery),
+            ClientClaim::RepeatUnknown(message_id) => {
+                return Err(SteerFailure::Unknown {
+                    message_id,
+                    error: UNKNOWN_REPEAT.into(),
+                });
+            }
             ClientClaim::First(claimed) => claimed,
         };
         let outcome = self.steer_once(key, envelope).await;
-        // A steer that went in or was queued is this client id's answer from now on; a
-        // refused one is not, so the same id can try again.
-        self.settle_client(stored.id, claimed, outcome.as_ref().ok())
-            .await;
+        // A steer that went in or was queued is this client id's answer from now on; one
+        // whose write timed out is answered "unknown" again, never written twice; a refused
+        // one frees the id, so the same id can try again.
+        let settled = match &outcome {
+            Ok(delivery) => Settled::Delivery(delivery),
+            Err(SteerFailure::Unknown { message_id, .. }) => Settled::Unknown(*message_id),
+            Err(_) => Settled::Nothing,
+        };
+        self.settle_client(stored.id, claimed, settled).await;
         outcome
     }
 
@@ -1534,6 +1581,27 @@ impl Runtime {
                             .await
                             .map_err(Into::into)
                     }
+                    // No answer came before the timeout: the CLI may or may not have the
+                    // message. It is neither queued nor sent again, and the sender is told
+                    // the outcome is unknown, not that it failed
+                    // (docs/tasks/DELIVERY-AUDIT.md §3, §4).
+                    CoreError::OutcomeUnknown(_) => {
+                        tracing::warn!(%message_id, %err, "a steered message may not have arrived");
+                        publish(
+                            &self.bus,
+                            EventKind::AgentInputRefused {
+                                id: stored.id,
+                                message_id,
+                                text: envelope.text,
+                                reason: QueuedReason::OutcomeUnknown,
+                            },
+                        )
+                        .await;
+                        Err(SteerFailure::Unknown {
+                            message_id,
+                            error: err.to_string(),
+                        })
+                    }
                     // The write failed: nobody can tell whether the CLI saw it, so it is
                     // neither steered nor queued. The sender decides whether to send it
                     // again, and sees the failure.
@@ -1569,6 +1637,9 @@ impl Runtime {
             let mut clients = self.clients.lock().await;
             match clients.get(agent, client) {
                 Some(ClientEntry::Done(delivery)) => return ClientClaim::Repeat(delivery.clone()),
+                Some(ClientEntry::Unknown(message_id)) => {
+                    return ClientClaim::RepeatUnknown(*message_id);
+                }
                 Some(ClientEntry::Pending(wait)) => {
                     let wait = wait.clone();
                     drop(clients);
@@ -1585,18 +1656,19 @@ impl Runtime {
         }
     }
 
-    /// Keeps a client id's delivery for repeats, or frees the id when nothing was delivered.
+    /// Keeps what a client id's first send settled to, or frees the id when nothing was
+    /// delivered.
     async fn settle_client(
         &self,
         agent: AgentId,
         claimed: Option<(MessageId, Arc<Notify>)>,
-        delivery: Option<&Delivery>,
+        settled: Settled<'_>,
     ) {
         let Some((client, wait)) = claimed else {
             return;
         };
         let mut clients = self.clients.lock().await;
-        clients.settle(agent, client, delivery.cloned());
+        clients.settle(agent, client, settled);
         drop(clients);
         wait.notify_one();
     }
@@ -1677,11 +1749,17 @@ impl Runtime {
         let stored = self.store().get_agent(key).await?;
         let claimed = match self.claim_client(stored.id, client_message_id).await {
             ClientClaim::Repeat(delivery) => return Ok(delivery),
+            ClientClaim::RepeatUnknown(_) => {
+                return Err(CoreError::OutcomeUnknown(UNKNOWN_REPEAT.into()));
+            }
             ClientClaim::First(claimed) => claimed,
         };
         let outcome = self.deliver_once(key, envelope, first, queued_reason).await;
-        self.settle_client(stored.id, claimed, outcome.as_ref().ok())
-            .await;
+        let settled = match &outcome {
+            Ok(delivery) => Settled::Delivery(delivery),
+            Err(_) => Settled::Nothing,
+        };
+        self.settle_client(stored.id, claimed, settled).await;
         outcome
     }
 
@@ -2980,7 +3058,7 @@ mod tests {
         let agent = AgentId::new();
         let ids: Vec<MessageId> = (0..CLIENT_HISTORY + 8).map(|_| MessageId::new()).collect();
         for id in &ids {
-            log.settle(agent, *id, Some(delivery(*id)));
+            log.settle(agent, *id, Settled::Delivery(&delivery(*id)));
         }
         assert!(log.get(agent, ids[0]).is_none(), "the oldest went");
         assert!(log.get(agent, ids[7]).is_none(), "up to the excess went");
@@ -2994,7 +3072,7 @@ mod tests {
         log.pending(agent, pending, Arc::new(Notify::new()));
         for _ in 0..8 {
             let id = MessageId::new();
-            log.settle(agent, id, Some(delivery(id)));
+            log.settle(agent, id, Settled::Delivery(&delivery(id)));
         }
         assert!(matches!(
             log.get(agent, pending),
@@ -3002,11 +3080,30 @@ mod tests {
         ));
         // Another agent's history is untouched.
         let other = AgentId::new();
-        log.settle(other, ids[0], Some(delivery(ids[0])));
+        log.settle(other, ids[0], Settled::Delivery(&delivery(ids[0])));
         assert!(log.get(other, ids[0]).is_some());
         // Forgetting an agent clears just its records.
         log.forget(agent);
         assert!(log.get(agent, pending).is_none());
         assert!(log.get(other, ids[0]).is_some());
+    }
+
+    /// A send whose write timed out is remembered as "may have arrived": a repeat must answer
+    /// with that, not start over (docs/TODO.md §二十五「2 的尾巴」).
+    #[test]
+    fn a_timed_out_send_is_answered_unknown_on_a_repeat() {
+        let mut log = ClientLog::default();
+        let agent = AgentId::new();
+        let client = MessageId::new();
+        let sent = MessageId::new();
+        log.settle(agent, client, Settled::Unknown(sent));
+        assert!(
+            matches!(log.get(agent, client), Some(ClientEntry::Unknown(id)) if *id == sent),
+            "a repeat must not write the message again"
+        );
+        // A refused send frees the id, so the same one can try again.
+        let retried = MessageId::new();
+        log.settle(agent, retried, Settled::Nothing);
+        assert!(log.get(agent, retried).is_none());
     }
 }

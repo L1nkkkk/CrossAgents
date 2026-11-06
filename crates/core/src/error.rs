@@ -35,4 +35,10 @@ pub enum CoreError {
     /// The driver cannot do this (check its capabilities first).
     #[error("unsupported: {0}")]
     Unsupported(String),
+
+    /// Whether the agent received this cannot be told: the write timed out with no answer,
+    /// so it may or may not have arrived. Never retried on its own; the sender is told the
+    /// outcome is unknown rather than failed (docs/tasks/DELIVERY-AUDIT.md §3).
+    #[error("outcome unknown: {0}")]
+    OutcomeUnknown(String),
 }

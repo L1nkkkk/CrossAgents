@@ -43,6 +43,7 @@ impl Fold {
                 reply_excerpt,
                 attachments,
                 notices,
+                queued_reason,
                 ..
             } => self.turns.push(TranscriptTurn {
                 message_id: *message_id,
@@ -59,6 +60,8 @@ impl Fold {
                 diff: None,
                 attachments: attachments.clone(),
                 notices: notices.clone(),
+                queued_reason: *queued_reason,
+                withdrawn: None,
             }),
             EventKind::AgentInputUpdated {
                 message_id, text, ..
@@ -83,8 +86,15 @@ impl Fold {
                 from_effort: from_effort.clone(),
             }),
             EventKind::AgentInputWithdrawn { message_id, .. } => {
-                self.turns
-                    .retain(|t| t.message_id != *message_id || t.started_at.is_some());
+                // Kept, marked — not deleted: the live view leaves the row where it was
+                // sent and says "已撤回", and a reloaded transcript must say the same
+                // (docs/tasks/DELIVERY-AUDIT.md §2, §8 P0-1). One that already started
+                // cannot be withdrawn (the hub refuses), so it stays a started turn.
+                if let Some(turn) = self.turn_mut(*message_id)
+                    && turn.started_at.is_none()
+                {
+                    turn.withdrawn = Some(true);
+                }
             }
             EventKind::AgentTurnStarted { message_id, .. } => {
                 self.current = Some(*message_id);
@@ -327,8 +337,8 @@ impl Fold {
 mod tests {
     use chrono::Utc;
     use crossagents_core::{
-        AgentId, EVENT_SCHEMA_VERSION, MessageSource, OutputStream, StopReason, ToolDetail,
-        ToolStatus,
+        AgentId, EVENT_SCHEMA_VERSION, MessageSource, OutputStream, QueuedReason, StopReason,
+        ToolDetail, ToolStatus,
     };
     use uuid::Uuid;
 
@@ -457,7 +467,7 @@ mod tests {
         }
 
         assert_eq!(fold.last_seq, 17);
-        assert_eq!(fold.turns.len(), 2);
+        assert_eq!(fold.turns.len(), 3);
         let first = &fold.turns[0];
         assert_eq!(first.stop_reason, Some(StopReason::EndTurn));
         assert_eq!(first.from, Some(MessageSource::Human));
@@ -501,7 +511,61 @@ mod tests {
         let second = &fold.turns[1];
         assert_eq!(second.input, "next");
         assert!(second.started_at.is_none() && second.items.is_empty());
+        // Taken back before it started: the row stays, marked, as the live events show it.
+        let third = &fold.turns[2];
+        assert_eq!(third.input, "never mind");
+        assert_eq!(third.withdrawn, Some(true));
+        assert!(third.started_at.is_none());
         assert_eq!(fold.usage.as_ref().map(|u| u.used), Some(10));
+    }
+
+    /// The snapshot carries what the live events said: why a waiting message waits, and
+    /// that one taken back stays as a marked row instead of vanishing on a reload
+    /// (docs/TODO.md §二十五「2 的尾巴」).
+    #[test]
+    fn a_reload_keeps_the_queued_reason_and_the_withdrawal() {
+        let id = AgentId::new();
+        let (m1, m2) = (MessageId::new(), MessageId::new());
+        let input = |message_id: MessageId, text: &str, queued_reason: Option<QueuedReason>| {
+            EventKind::AgentInput {
+                id,
+                message_id,
+                text: text.into(),
+                queued: queued_reason.is_some(),
+                from: Some(MessageSource::Human),
+                reply_to: None,
+                thread: None,
+                reply_excerpt: None,
+                attachments: Vec::new(),
+                notices: Vec::new(),
+                queued_reason,
+            }
+        };
+        let mut fold = Fold::default();
+        fold.push(&ev(1, input(m1, "first", None)));
+        fold.push(&ev(2, EventKind::AgentTurnStarted { id, message_id: m1 }));
+        fold.push(&ev(3, input(m2, "second", Some(QueuedReason::TurnRunning))));
+        assert_eq!(
+            fold.turns[1].queued_reason,
+            Some(QueuedReason::TurnRunning),
+            "the reason the live event carried is missing from the snapshot"
+        );
+
+        fold.push(&ev(
+            4,
+            EventKind::AgentInputWithdrawn { id, message_id: m2 },
+        ));
+        assert_eq!(fold.turns.len(), 2, "the withdrawn row must stay");
+        assert_eq!(fold.turns[1].withdrawn, Some(true));
+        assert!(fold.turns[1].started_at.is_none());
+
+        // A turn that already started cannot be withdrawn; it stays a started turn.
+        fold.push(&ev(
+            5,
+            EventKind::AgentInputWithdrawn { id, message_id: m1 },
+        ));
+        assert_eq!(fold.turns[0].withdrawn, None);
+        assert!(fold.turns[0].started_at.is_some());
     }
 
     #[test]
