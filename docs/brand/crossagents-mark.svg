@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="512" height="512" role="img" aria-labelledby="title">
+  <title id="title">CrossAgents</title>
+  <g fill="#5b5bd6">
+    <polygon points="32,4 41,13 32,22 23,13"/>
+    <polygon points="20,16 29,25 15,39 26,50 18,58 2,42 2,34"/>
+    <polygon points="44,16 62,34 62,42 46,58 38,50 49,39 35,25"/>
+  </g>
+</svg>
