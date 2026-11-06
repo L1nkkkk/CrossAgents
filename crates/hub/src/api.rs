@@ -215,6 +215,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{key}/cleanup", post(cleanup_run))
         .route("/v1/runs/{key}/diff", get(run_diff))
         .route("/v1/runs/{key}/trace", get(run_trace))
+        .route("/v1/runs/{key}/retro", post(run_retro))
         .route("/v1/runs/{key}/cost", get(run_cost))
         .route("/v1/runs/{key}/tasks/{task}/diff", get(task_diff))
         .route("/v1/runs/{key}/tasks/{task}/review", post(review_task))
@@ -2056,6 +2057,25 @@ async fn update_run_policy(
         tracing::error!(%error, run = %id, "cannot publish a policy change");
     }
     run_detail(&state, id).await
+}
+
+/// `POST /v1/runs/{key}/retro`: write the run's retro to `docs/tasks/RETRO-<id>.md` in its
+/// repository, and say where it went (docs/tasks/SELF.md C1). It writes that document only.
+/// A run that has not ended has none.
+async fn run_retro(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let id = resolve_run(&state, &key).await?;
+    let run = state.store().get_run(id).await?;
+    let doc = crate::retro::document(&**state.store(), &run).await?;
+    let path = crate::retro::write(&run.repo, run.id, &doc)?;
+    Ok(Json(serde_json::json!({
+        "run": run.id,
+        "path": path.display().to_string(),
+        "findings": doc.findings,
+        "issues": doc.issues,
+    })))
 }
 
 /// What happened in a run, by task, from its events (docs/tasks/DOGFOOD.md §8).

@@ -712,6 +712,19 @@ const TOOLS: &[ToolDef] = &[
         },
     },
     ToolDef {
+        name: "run_retro",
+        description: "Write the retro of a finished run (yours unless `run` names another of your project): read its trace and its `issue/` notes, and write docs/tasks/RETRO-<run>.md in the repository — a 现象 / 影响 / 方向 table in the shape of docs/tasks/DOGFOOD.md §9. It writes that document only, never code. The run must have ended.",
+        groups: PLANNER,
+        schema: || {
+            object(
+                json!({
+                    "run": { "type": "string", "description": "Run id, or the start or end of one; default: your own." }
+                }),
+                &[],
+            )
+        },
+    },
+    ToolDef {
         name: "task_progress",
         description: "One line on how your task is going; shown on the task card.",
         groups: WORKER,
@@ -1065,6 +1078,7 @@ impl Orchestrator {
             "agent_set_model" => self.agent_set_model(caller, input).await,
             "agent_interrupt" => self.agent_interrupt(caller, input).await,
             "run_finish" => self.run_finish_tool(caller, input).await,
+            "run_retro" => self.run_retro(caller, input).await,
             "task_complete" => {
                 #[derive(Deserialize)]
                 struct A {

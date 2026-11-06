@@ -123,6 +123,9 @@ pub enum RunCommand {
         #[arg(long)]
         log: bool,
     },
+    /// Review a finished run: write its 现象 / 影响 / 方向 table (DOGFOOD §9) to
+    /// `docs/tasks/RETRO-<run>.md`, from its trace and its issue notes.
+    Retro { run: String },
 }
 
 pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
@@ -298,6 +301,7 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
             println!("run {run} deleted");
             print_cleanup(&done);
         }
+        RunCommand::Retro { run } => super::retro::run(ctx, &run).await?,
     }
     Ok(())
 }
