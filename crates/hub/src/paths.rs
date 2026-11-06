@@ -169,6 +169,33 @@ pub fn confine(root: &Path, input: &str, source: PathSource) -> Result<Confined,
     Ok(Confined { abs, rel, source })
 }
 
+/// [`confine`] for an agent against several roots, in order: the first root the path is
+/// inside wins, and its [`Confined::rel`] is relative to that root. Each root is judged on
+/// its own, the same way (a `..` above it, another drive or share, a link that leads out of
+/// it are refused), so a path is never let through by mixing them. Refused, the error is
+/// [`FileError::Outside`] if any root found the path outside it, else the first root's.
+///
+/// The image endpoint uses it for "the working directory or the system temp directory"
+/// (agents are told to leave images for the person in the temp directory).
+pub fn confine_any(roots: &[&Path], input: &str) -> Result<Confined, FileError> {
+    let mut first = None;
+    let mut outside = None;
+    for root in roots {
+        match confine(root, input, PathSource::Agent) {
+            Ok(found) => return Ok(found),
+            Err(err @ FileError::Outside(_)) => {
+                outside.get_or_insert(err);
+            }
+            Err(err) => {
+                first.get_or_insert(err);
+            }
+        }
+    }
+    Err(outside
+        .or(first)
+        .unwrap_or_else(|| FileError::Outside(input.to_owned())))
+}
+
 /// The part of [`confine`] made before the file system is asked, for an entry that resolves
 /// the path itself afterwards (canonically, as `resolve_in_root` does): refuses a NUL byte,
 /// a `..` above `root`, and an absolute path on another drive or share than `root`'s, so a
@@ -755,6 +782,64 @@ env = { A = "b" }
         assert!(outside(confine(&root, "link/s.txt", PathSource::Agent)));
         assert!(outside(confine(&root, "link\\s.txt", PathSource::Agent)));
         assert!(outside(confine(&root, "link", PathSource::Agent)));
+    }
+
+    /// Several roots: inside any of them is fine; `..` or a link out of all of them is not.
+    #[test]
+    fn confine_any_takes_either_root_and_nothing_between() {
+        let (dir, root) = workspace();
+        let second = dir.path().join("tmp");
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(second.join("b.png"), "b").unwrap();
+        let roots = [root.as_path(), second.as_path()];
+        assert_eq!(
+            confine_any(&roots, "src/a.txt").unwrap().rel.as_deref(),
+            Some("src/a.txt")
+        );
+        // A relative path is tried from each root in turn.
+        assert_eq!(
+            confine_any(&roots, "b.png").unwrap().rel.as_deref(),
+            Some("b.png")
+        );
+        let abs = second.join("b.png").display().to_string();
+        assert!(confine_any(&roots, &abs).is_ok());
+        // `..` from either root to the parent of both is refused.
+        for input in ["../secret.txt", "../tmp/../secret.txt", "src/../../secret.txt"] {
+            assert!(
+                matches!(confine_any(&roots, input), Err(FileError::Outside(_))),
+                "{input}"
+            );
+        }
+        let secret = dir.path().join("secret.txt").display().to_string();
+        assert!(matches!(
+            confine_any(&roots, &secret),
+            Err(FileError::Outside(_))
+        ));
+        #[cfg(windows)]
+        assert!(matches!(
+            confine_any(&roots, "\\\\no-such-host.invalid\\share\\x.png"),
+            Err(FileError::Outside(_))
+        ));
+        // A link inside the second root that leads out is refused too.
+        let link = second.join("out");
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(dir.path(), &link).is_ok();
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(dir.path(), &link).is_ok()
+            || std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(dir.path())
+                .output()
+                .is_ok_and(|o| o.status.success());
+        if made {
+            assert!(matches!(
+                confine_any(&roots, "out/secret.txt"),
+                Err(FileError::Outside(_))
+            ));
+        } else {
+            eprintln!("skipped the link case: cannot create a link or junction here");
+        }
     }
 
     /// The one exception: a file the person picked may be anywhere, and says so.
