@@ -368,7 +368,34 @@ impl Orchestrator {
             }
         }
 
-        // d. The run's own checkout and the build directory its worktrees shared. An in-place
+        // d. The background integration worktree an in-place run gathered its workers'
+        // results in: the hub's own, never the person's directory. An unfinished apply keeps
+        // it, so recovery can finish from its record.
+        if released {
+            match self.cleanup_inplace_base(&run).await {
+                Ok(crate::inplace::InplaceCleanup::Removed(path)) => {
+                    if delete {
+                        self.forget_inplace_state(&run);
+                    }
+                    done.worktrees.push(path.display().to_string())
+                }
+                Ok(crate::inplace::InplaceCleanup::Kept(why)) => done.warnings.push(why),
+                Ok(crate::inplace::InplaceCleanup::Nothing) => {
+                    if delete {
+                        self.forget_inplace_state(&run);
+                    }
+                }
+                Err(err) => done.warnings.push(format!(
+                    "cannot remove the run's integration workspace: {err}"
+                )),
+            }
+        } else if self.inplace_base(&run).await?.is_some() {
+            done.warnings.push(
+                "keeping the run's integration workspace: its sessions were not released".into(),
+            );
+        }
+
+        // e. The run's own checkout and the build directory its worktrees shared. An in-place
         // run works in the repository itself, which stays. An archived lead copied for the run
         // kept it as its directory; with the run gone nothing can bring it back, so the copy
         // goes back to its workspace, marked as unable to carry on its conversation there.
@@ -506,7 +533,12 @@ impl Orchestrator {
         if run.in_place {
             return Vec::new();
         }
-        let mut branches = vec![run.branch.clone()];
+        let mut branches = Vec::new();
+        // A lead in place has no branch of the run's; only its task branches and the hub's
+        // integration branch (removed with its worktree) exist.
+        if !run.branch.is_empty() {
+            branches.push(run.branch.clone());
+        }
         for task in tasks {
             if let Some(branch) = &task.branch
                 && !branches.contains(branch)
@@ -520,7 +552,8 @@ impl Orchestrator {
     /// The files the run's checkout changed and did not commit (docs/tasks/R1.md §3.2). Empty
     /// for a run working in the repository itself: that directory is not deleted.
     async fn checkout_changes(&self, run: &Run) -> Result<Vec<String>, CoreError> {
-        if run.in_place {
+        if run.in_place || run.leads_in_place() {
+            // The person's own directory is not a checkout this delete may touch.
             return Ok(Vec::new());
         }
         let dir = self.integration_path(run);

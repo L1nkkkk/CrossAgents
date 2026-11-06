@@ -41,13 +41,25 @@ const CONFLICT_DETAIL: usize = 4_000;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum Outcome {
-    /// Written: `files` were added, changed or deleted in the directory.
-    Applied { result: String, files: Vec<String> },
+    /// Written: `files` were added, changed or deleted in the directory. `own_changes` are
+    /// the applied files the person had changed themselves since the base (the merge was not
+    /// a plain fast-forward there), so checks run on the integration result did not see the
+    /// content now in the directory; `checked_in_dir` is false then.
+    Applied {
+        result: String,
+        files: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        own_changes: Vec<String>,
+        checked_in_dir: bool,
+    },
     /// This very result was applied before; nothing was written.
     AlreadyApplied { result: String },
     /// The directory already held the result (someone applied it, or the result changes
     /// nothing); recorded as applied.
-    UpToDate { result: String },
+    UpToDate {
+        result: String,
+        checked_in_dir: bool,
+    },
     /// Nothing was written: the person's directory changed the same files.
     Conflict { files: Vec<String>, detail: String },
 }
@@ -85,6 +97,9 @@ pub struct Pending {
     pub merged: String,
     pub at: DateTime<Utc>,
     pub files: Vec<String>,
+    /// The applied files the person had changed themselves; kept for the resumed outcome.
+    #[serde(default)]
+    pub own_changes: Vec<String>,
 }
 
 impl State {
@@ -200,8 +215,22 @@ pub async fn apply(
         record_applied(&mut state, state_path, result, &merged, Vec::new())?;
         return Ok(Outcome::UpToDate {
             result: result.to_owned(),
+            checked_in_dir: true,
         });
     }
+    // Which applied files the person had changed themselves: base against the directory.
+    // The integration checks saw the worker's side only; on these the merged content is not
+    // what they ran on (docs/tasks/LEAD.md §6).
+    let base_entries = entries(dir, base).await?;
+    let ours_entries = entries(dir, &current).await?;
+    let own_changes: Vec<String> = ops
+        .iter()
+        .filter(|op| {
+            base_entries.get(&op.path).map(|entry| &entry.oid)
+                != ours_entries.get(&op.path).map(|entry| &entry.oid)
+        })
+        .map(|op| op.path.clone())
+        .collect();
     // The directory was read a moment ago; if it moved since (an editor, a build), what was
     // merged is about other content: stop before writing anything.
     let now = crate::inplace::snapshot(dir).await?;
@@ -233,6 +262,7 @@ pub async fn apply(
         merged: merged.clone(),
         at: Utc::now(),
         files: files.clone(),
+        own_changes: own_changes.clone(),
     };
     state.pending = Some(pending.clone());
     state.write(state_path)?;
@@ -251,6 +281,8 @@ pub async fn apply(
     Ok(Outcome::Applied {
         result: result.to_owned(),
         files,
+        checked_in_dir: own_changes.is_empty(),
+        own_changes,
     })
 }
 
@@ -313,6 +345,7 @@ async fn resume(dir: &Path, state_path: &Path, state: &mut State) -> Result<Outc
         });
     }
     let files = pending.files.clone();
+    let own_changes = pending.own_changes.clone();
     record_applied(
         state,
         state_path,
@@ -323,6 +356,8 @@ async fn resume(dir: &Path, state_path: &Path, state: &mut State) -> Result<Outc
     Ok(Outcome::Applied {
         result: pending.result,
         files,
+        checked_in_dir: own_changes.is_empty(),
+        own_changes,
     })
 }
 
@@ -1096,6 +1131,7 @@ mod tests {
             merged: merged.clone(),
             at: Utc::now(),
             files: ops.iter().map(|op| op.path.clone()).collect(),
+            own_changes: Vec::new(),
         });
         state.write(&state_path).unwrap();
         // Write only a.txt out of the three.
@@ -1180,6 +1216,37 @@ mod tests {
         );
         assert_eq!(personal_state(dir.path()), before);
         assert!(State::read(&state_path).unwrap().applied.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_file_both_sides_changed_is_merged_and_marked_as_the_persons_own() {
+        let dir = repo();
+        std::fs::write(dir.path().join("notes.txt"), "one\ntwo\nthree\n").unwrap();
+        git_out(dir.path(), &["add", "-A"]);
+        git_out(dir.path(), &["commit", "-q", "-m", "notes"]);
+        let base = snapshot_commit(dir.path(), "snapshot");
+        // The worker edits the first line; the person edits the last one meanwhile.
+        std::fs::write(dir.path().join("notes.txt"), "ONE\ntwo\nthree\n").unwrap();
+        let result = result_commit(dir.path(), &base, "worker");
+        std::fs::write(dir.path().join("notes.txt"), "one\ntwo\nTHREE\n").unwrap();
+
+        let outcome = apply(dir.path(), &base, &result, &dir.path().join("state.json"))
+            .await
+            .unwrap();
+        let Outcome::Applied {
+            own_changes,
+            checked_in_dir,
+            ..
+        } = outcome
+        else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("notes.txt")).unwrap(),
+            "ONE\ntwo\nTHREE\n"
+        );
+        assert_eq!(own_changes, ["notes.txt"]);
+        assert!(!checked_in_dir, "the checks saw the worker's side only");
     }
 
     #[tokio::test]

@@ -1282,3 +1282,100 @@ async fn a_command_seen_running_does_not_refuse_the_checks() {
     let run: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
     assert_eq!(run["run"]["checks"].as_array().unwrap().len(), 1, "{run}");
 }
+
+/// docs/tasks/LEAD.md §6: deleting an in-place run takes the hub-owned integration worktree
+/// and its branch with it — and only those: the person's directory and the dispatch snapshot
+/// stay.
+#[tokio::test]
+async fn deleting_an_in_place_run_removes_its_integration_workspace_and_branch() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    t.add_agent_in("coder", Some("haiku"), "worker", repo.path())
+        .await;
+    let mut w = t.watch().await;
+    let goal = format!(
+        "[write notes.txt=worker] {}",
+        call(
+            "task_complete",
+            json!({
+                "task_id": "{task_id}",
+                "summary": format!("done {}", call("task_accept", json!({ "task": "a", "force": true, "reason": "no checks configured" })))
+            })
+        )
+    );
+    let plan = json!([{ "key": "a", "title": "A", "spec": { "goal": goal } }]);
+    let resp = t
+        .post(
+            "/v1/runs",
+            json!({
+                "request": format!("Change it. {}", call("plan_submit", json!({ "tasks": plan }))),
+                "planner": "boss", "worker": "coder", "lead_place": "in_place",
+                "policy": { "plan_approval": "auto" },
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let id: Value = resp.json().await.unwrap();
+    let id = id["id"].as_str().unwrap().to_owned();
+    w.find("a merged", task_is("a", TaskStatus::Merged)).await;
+    let resp = t.post(&format!("/v1/runs/{id}/finish"), json!({})).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    w.find("run completed", run_status_is(&id, RunStatus::Completed))
+        .await;
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("notes.txt")).unwrap(),
+        "worker"
+    );
+
+    let compact: String = id.chars().filter(|c| *c != '-').collect();
+    let short = &compact[compact.len() - 8..];
+    let integration = t
+        .paths
+        .home
+        .join("worktrees")
+        .join(short)
+        .join("integration");
+    let branch = format!("crossagents/{short}");
+    assert!(integration.is_dir(), "{}", integration.display());
+    assert!(
+        branches(repo.path()).contains(&branch),
+        "{}",
+        branches(repo.path())
+    );
+    let snapshots = git_out(
+        repo.path(),
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/crossagents/snapshots",
+        ],
+    );
+    assert!(snapshots.contains(short), "{snapshots}");
+
+    let resp = t.delete(&format!("/v1/runs/{id}")).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    assert!(!integration.exists(), "{}", integration.display());
+    assert!(
+        !branches(repo.path()).contains(&branch),
+        "{}",
+        branches(repo.path())
+    );
+    // What was not the delete's: the person's directory, the applied file, the snapshot.
+    assert!(repo.path().is_dir());
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("notes.txt")).unwrap(),
+        "worker"
+    );
+    assert_eq!(
+        git_out(
+            repo.path(),
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/crossagents/snapshots",
+            ],
+        ),
+        snapshots,
+        "the dispatch snapshot is the recovery record, not the delete's"
+    );
+}

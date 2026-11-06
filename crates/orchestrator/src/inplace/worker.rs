@@ -314,10 +314,11 @@ impl Orchestrator {
         .await?;
         match &outcome {
             apply::Outcome::Applied { files, .. } => {
+                let note = apply_note(run, &outcome).unwrap_or_default();
                 self.tell_about(
                     run,
                     format!(
-                        "Worker 结果已应用到 {}：{} 个文件。修改未提交，你的暂存区和分支没有动；检查通过与否以 Run 页为准。",
+                        "Worker 结果已应用到 {}：{} 个文件。修改未提交，你的暂存区和分支没有动。{note}",
                         run.repo.display(),
                         files.len()
                     ),
@@ -337,8 +338,15 @@ impl Orchestrator {
             }
             apply::Outcome::AlreadyApplied { .. } | apply::Outcome::UpToDate { .. } => {}
         }
-        serde_json::to_value(outcome)
-            .map_err(|err| CoreError::Storage(format!("cannot describe the apply: {err}")))
+        let mut value = serde_json::to_value(&outcome)
+            .map_err(|err| CoreError::Storage(format!("cannot describe the apply: {err}")))?;
+        if let Some(map) = value.as_object_mut() {
+            map.insert("checks".into(), json!(checks_word(run)));
+            if let Some(note) = apply_note(run, &outcome) {
+                map.insert("note".into(), json!(note));
+            }
+        }
+        Ok(value)
     }
 
     /// After a run ends: write what its workers did into the person's directory, once
@@ -424,11 +432,128 @@ impl Orchestrator {
         }
     }
 
+    /// Forgets the run's in-place records after its integration workspace went: the run
+    /// itself is gone, so nothing will recover from them (the snapshot ref stays).
+    pub(crate) fn forget_inplace_state(&self, run: &Run) {
+        let _ = std::fs::remove_file(self.inplace_state_path(run));
+        let _ = std::fs::remove_file(self.inplace_apply_path(run));
+    }
+
     /// A notice for the person about this run (docs/tasks/LEAD.md §5, §6).
     async fn tell_about(&self, run: &Run, text: String) {
         if let Err(err) = self.tell_person(run.planner, Some(run.id), text).await {
             tracing::warn!(run = %run.id, error = %err, "cannot tell the person about the apply");
         }
+    }
+
+    /// Removes the hub-owned integration worktree and its branch once a run is gone or its
+    /// lead left (docs/tasks/LEAD.md §6). The person's directory and the snapshot refs are
+    /// not touched. An apply that is half-written keeps the workspace: its journal is what
+    /// [`Self::recover_inplace_applies`] finishes after a restart.
+    pub(crate) async fn cleanup_inplace_base(
+        &self,
+        run: &Run,
+    ) -> Result<InplaceCleanup, CoreError> {
+        if !(run.leads_in_place() && run.versioned()) {
+            return Ok(InplaceCleanup::Nothing);
+        }
+        let state_path = self.inplace_state_path(run);
+        let mut state = state::read(&state_path)?;
+        let Some(integration) = state.integration.clone() else {
+            // A hub that stopped between making the branch and recording it leaves only the
+            // branch; it is the hub's own name, never a user's.
+            let branch = self.inplace_branch(run);
+            if self.ws_for(run).has_branch(&run.repo, &branch).await {
+                self.ws_for(run).delete_branch(&run.repo, &branch).await?;
+            }
+            return Ok(InplaceCleanup::Nothing);
+        };
+        let apply_state = apply::State::read(&self.inplace_apply_path(run))?;
+        if let Some(pending) = &apply_state.pending {
+            return Ok(InplaceCleanup::Kept(format!(
+                "keeping the integration workspace {}: an apply ({}) is unfinished and is resumed from its record",
+                integration.path.display(),
+                pending.result
+            )));
+        }
+        if integration.path.exists() {
+            if !self.checkout_unused(run, &integration.path).await? {
+                return Ok(InplaceCleanup::Kept(format!(
+                    "keeping the integration workspace {}: it is in use",
+                    integration.path.display()
+                )));
+            }
+            self.ws_for(run)
+                .remove(&run.repo, &integration.path, Some(&integration.branch))
+                .await?;
+        } else if self
+            .ws_for(run)
+            .has_branch(&run.repo, &integration.branch)
+            .await
+        {
+            self.ws_for(run)
+                .delete_branch(&run.repo, &integration.branch)
+                .await?;
+        }
+        state.integration = None;
+        state::write(&state_path, &state)?;
+        Ok(InplaceCleanup::Removed(integration.path))
+    }
+}
+
+/// What [`Orchestrator::cleanup_inplace_base`] did with a run's integration workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InplaceCleanup {
+    /// The run never had one, or it was already gone.
+    Nothing,
+    /// The worktree and its branch were removed.
+    Removed(PathBuf),
+    /// Kept, for the reason given: an unfinished apply, or a worktree still in use.
+    Kept(String),
+}
+
+/// What the run's checks were, as the apply report says it: they ran on the integration
+/// result, not in the person's directory (docs/tasks/LEAD.md §6).
+fn checks_word(run: &Run) -> &'static str {
+    match run.checks_state {
+        Some(crossagents_core::ChecksState::Ran) if run.checks.iter().all(|check| check.passed) => {
+            "integration_passed"
+        }
+        Some(crossagents_core::ChecksState::Ran) => "integration_failed",
+        Some(crossagents_core::ChecksState::NotConfigured) => "not_configured",
+        Some(crossagents_core::ChecksState::NotApplicable { .. }) => "not_applicable",
+        None => "not_run",
+    }
+}
+
+/// What the person should know about the checks after an apply.
+fn apply_note(run: &Run, outcome: &apply::Outcome) -> Option<String> {
+    match outcome {
+        apply::Outcome::Applied {
+            own_changes,
+            checked_in_dir,
+            ..
+        } => Some(if !*checked_in_dir {
+            format!(
+                "项目检查是在集成工作区对集成结果跑的；这些文件你在目录里也有改动（三方合并不是纯快进），现在的内容没有被检查覆盖，请在原目录再跑一次：{}。",
+                own_changes.join("、")
+            )
+        } else {
+            match run.checks_state {
+                Some(crossagents_core::ChecksState::Ran) => {
+                    "项目检查是在集成工作区对集成结果跑的；这次写入与其一致，无需复跑。".to_owned()
+                }
+                Some(crossagents_core::ChecksState::NotConfigured) => {
+                    "项目没有在 crossagents.toml 里声明检查，无需复跑。".to_owned()
+                }
+                Some(crossagents_core::ChecksState::NotApplicable { .. }) => {
+                    "改动不涉及声明的检查，未执行验证；按项目规则判断是否需要复跑。".to_owned()
+                }
+                None => "这次运行没有执行项目检查；如需验证，请在原目录跑一遍项目检查。".to_owned(),
+            }
+        }),
+        apply::Outcome::UpToDate { .. } => Some("目录里已经是集成结果，无需复跑检查。".to_owned()),
+        _ => None,
     }
 }
 

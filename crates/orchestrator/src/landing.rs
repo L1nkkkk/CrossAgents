@@ -1020,6 +1020,29 @@ impl Orchestrator {
             }
             self.prune_run_build(&run).await;
         }
+        // A lead that worked in its own directory kept no checkout of the hub's, but its run
+        // gathered the workers' results in one: leaving takes that with it (LEAD §6).
+        for run in self.store.list_runs().await? {
+            if run.planner != lead.id
+                || !run.status.is_terminal()
+                || !(run.leads_in_place() && run.versioned())
+            {
+                continue;
+            }
+            let _guard = self.lock(run.id).await;
+            match self.cleanup_inplace_base(&run).await {
+                Ok(crate::inplace::InplaceCleanup::Removed(path)) => {
+                    tracing::info!(run = %run.id, dir = %path.display(), "removed the run's integration workspace")
+                }
+                Ok(crate::inplace::InplaceCleanup::Kept(why)) => {
+                    tracing::info!(run = %run.id, why = %why, "keeping the run's integration workspace")
+                }
+                Ok(crate::inplace::InplaceCleanup::Nothing) => {}
+                Err(err) => {
+                    tracing::warn!(run = %run.id, error = %err, "cannot remove the run's integration workspace")
+                }
+            }
+        }
         Ok(())
     }
 
