@@ -70,6 +70,10 @@ input_schema = { type = "object", properties = { days = { type = "integer" } } }
 groups = ["lead"]
 file = "lead.md"
 
+# 流式规则：和项目 .crossagents/rules/*.md 同一种文件，会话开始时读
+[[rules]]
+file = "rules/no-sleep.md"
+
 # 事件响应：同样是调一次起一个进程，只观察不拦截（E4，见 §3）
 [[on]]
 event = "run.landed"
@@ -313,6 +317,21 @@ v1 只追加，不替换：替换后 hub 再改说明，覆盖的版本就会悄
 每个文件最多读 64 KB。`groups` 为空的条目不会被任何会话选中。
 
 每次开新会话时读文件，所以批准后下个会话就生效。运行中的会话不受影响。
+
+### 流式规则：`[[rules]]`
+
+`[[rules]]` 让扩展像项目自己的 `.crossagents/rules/*.md` 一样提供流式规则（文件格式见
+[tasks/STREAM-RULES.md](tasks/STREAM-RULES.md)）：规则平时不进上下文，agent 的输出或工具调用命中 `match`
+时，才在它正在跑的这一轮里送进去。每条规则带 `id`、`match`（正则）和 `on`（`output` / `tool` / `both`）。
+
+和 `[[prompts]]` 一样，文件从已批准的快照读，不读源目录，所以改完要批准了才生效；每个文件最多 64 KB，
+路径必须是快照里的普通文件（写错、指向目录外，启用时就拒绝）。规则 id 前面加上扩展名
+（`standup/no-sleep`），两个扩展可以有同名规则。文件里 frontmatter 坏了、正则编译不过，只记 warn 并跳过
+这一条，和项目规则一样，不影响会话。
+
+实现：`extensions/rules.rs` 的 `ExtensionRuleFiles` 实现 `stream_rules::RuleSource`；
+`stream_rules::load` 在会话开始时把项目规则和 `enabled_snapshots` 找到的已启用快照里的 `[[rules]]`
+一起读进来，id 重复的后者跳过。改 `[[rules]]` 不影响已经在跑的会话，下个会话才生效。
 
 ## 5. GUI
 

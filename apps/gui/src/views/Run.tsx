@@ -8,6 +8,7 @@ import type { PlannedTask } from "@bindings/PlannedTask";
 import type { RunPolicy } from "@bindings/RunPolicy";
 import type { UpdateRunPolicyRequest } from "@bindings/UpdateRunPolicyRequest";
 import { navigate } from "../App";
+import { ApplyButton } from "../apply";
 import { ApiError, api, errorText } from "../api";
 import { DeleteRunDialog } from "../deleteRun";
 import { HandoffChain, OutcomeChip, freshLabel, isEscalated } from "../handoff";
@@ -69,6 +70,7 @@ import { RunCostBar } from "../costbar";
 import { RailCard } from "../rail";
 import { t, type Key } from "../lib/i18n";
 import { wsKey } from "../workspace";
+import { RunModeTag } from "../runmode";
 import { openTool } from "../panes";
 import { RelatedLessons, RunIssues } from "../lessons/RunIssues";
 import { useQuota } from "./Quota";
@@ -159,9 +161,11 @@ export function RunView({
     <div className="topbar">
       <span className="title">{run.title}</span>
       <StatusChip status={run.status} tone={runTone(run.status)} />
+      <RunModeTag run={run} />
       {/* Narrow, the header's panel button already carries the progress: one copy. */}
       <ProgressChip tasks={tasks} />
       <div className="spacer" />
+      <ApplyButton run={run} />
       <SidePanelToggle tasks={tasks} />
       {!run.in_place && (
         <button className="ghost small graph-toggle" onClick={() => openTool("graph")} title="在右侧工具列看这个 run 的分支和提交">

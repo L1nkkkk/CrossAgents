@@ -21,6 +21,20 @@ pub use crossagents_core::handoff;
 
 pub const API_VERSION: &str = "v1";
 
+/// Entry points this hub has that a hub from before the list did not (docs/TODO.md §二): the
+/// GUI hides what a hub does not list, and a hub built before this field sends no list at all,
+/// which the GUI reads as "an older hub" (`apps/gui/src/lib/features.ts`). Names are stable ids;
+/// adding one is not an API break (docs/API-AUTH.md §5), removing one is.
+pub const FEATURES: [&str; 4] = ["git", "lessons", "work", "apply"];
+
+/// Checks rerun in the person's directory after applying merged files.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ApplyRerun {
+    pub results: Vec<CheckResult>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 /// `GET /v1/health`: answers without a token, so it says as little as possible. Version,
@@ -47,6 +61,10 @@ pub struct HubInfo {
     pub pid: u32,
     pub home: String,
     pub started_at: DateTime<Utc>,
+    /// The `FEATURES` this build has. Missing from a hub built before the field: the GUI then
+    /// treats it as an older hub and hides those entries (the sidebar's version tooltip says so).
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -368,6 +386,17 @@ pub struct TranscriptTurn {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(as = "Option<Vec<String>>", optional)]
     pub notices: Vec<String>,
+    /// Why the message waits, while it has not started: the `agent.input`'s
+    /// `queued_reason`, kept so a reloaded transcript says the same thing the live events
+    /// did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub queued_reason: Option<QueuedReason>,
+    /// Taken back before it started: the row stays where it was sent and says so
+    /// (`agent.input_withdrawn`), instead of vanishing on a reload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub withdrawn: Option<bool>,
 }
 
 /// Files a turn changed, with added and removed lines.
@@ -2873,6 +2902,10 @@ pub enum ErrorCode {
     Conflict,
     /// The agent process or its protocol failed.
     AgentError,
+    /// A request reached the hub but its outcome with the agent is unknown: a write timed
+    /// out with no answer, so it may or may not have arrived. Clients must not offer to
+    /// resend it blindly (docs/tasks/DELIVERY-AUDIT.md §3, §4).
+    OutcomeUnknown,
     Internal,
 }
 
@@ -2933,6 +2966,37 @@ mod tests {
         crossagents_core::RunHistory::export_all(&cfg).unwrap();
         crossagents_core::ExpertiseEntry::export_all(&cfg).unwrap();
         crossagents_core::Candidate::export_all(&cfg).unwrap();
+    }
+
+    /// The list `/v1/info` carries: a hub that predates the field omits it, and the GUI hides
+    /// these entries rather than guessing (docs/TODO.md §二).
+    #[test]
+    fn hub_info_lists_the_entries_older_hubs_lacked() {
+        let info = HubInfo {
+            version: "0.2.6".into(),
+            commit: None,
+            debug: false,
+            api: API_VERSION.into(),
+            pid: 1,
+            home: "/tmp".into(),
+            started_at: Utc::now(),
+            features: FEATURES.iter().map(|f| (*f).to_owned()).collect(),
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(
+            json["features"],
+            serde_json::json!(["git", "lessons", "work", "apply"])
+        );
+        // An older hub's `/v1/info`, without the field, still parses (that is the whole point).
+        let old: HubInfo = serde_json::from_value(serde_json::json!({
+            "version": "0.2.5",
+            "api": "v1",
+            "pid": 1,
+            "home": "/tmp",
+            "started_at": Utc::now(),
+        }))
+        .unwrap();
+        assert!(old.features.is_empty());
     }
 
     #[test]
@@ -3045,6 +3109,7 @@ mod tests {
             (QueuedReason::RuntimeNoSteer, "runtime_no_steer"),
             (QueuedReason::NoActiveTurn, "no_active_turn"),
             (QueuedReason::SteerWriteFailed, "steer_write_failed"),
+            (QueuedReason::OutcomeUnknown, "outcome_unknown"),
             (QueuedReason::Archived, "archived"),
             (QueuedReason::AlreadyStarted, "already_started"),
             (QueuedReason::AttachmentRefused, "attachment_refused"),

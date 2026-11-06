@@ -21,7 +21,7 @@ fn conflict(e: impl std::fmt::Display) -> CoreError {
 }
 fn missing(name: &str) -> CoreError {
     CoreError::NotFound {
-        kind: "extension".into(),
+        kind: "extension",
         id: name.into(),
     }
 }
@@ -463,11 +463,9 @@ impl Registry {
         self.scan_one(&mut s, name, true)?;
         let mut rec = s.records[name].clone();
         rec.auto_trust = value;
-        if value {
-            if let Some(p) = &rec.pending {
-                let fp = p.fingerprint.clone();
-                Self::switch(&mut rec, fp);
-            }
+        if value && let Some(p) = &rec.pending {
+            let fp = p.fingerprint.clone();
+            Self::switch(&mut rec, fp);
         }
         let info = self.update(&mut s, name, rec)?;
         let switched = std::mem::take(&mut s.switched);
@@ -667,6 +665,31 @@ impl Registry {
 }
 fn valid_fingerprint(fp: &str) -> bool {
     fp.len() == 64 && fp.bytes().all(|c| c.is_ascii_hexdigit())
+}
+
+/// The approved snapshot of every enabled extension under `home`, in name order.
+///
+/// Read straight from `extensions.json`, with the same name and fingerprint checks
+/// [`Registry::load`] applies, for callers that run beside a session and have no registry:
+/// the stream rules are read when an agent's session starts (docs/EXTENSIONS.md §4).
+pub fn enabled_snapshots(home: &Path) -> Vec<(String, PathBuf)> {
+    let records: BTreeMap<String, Record> = fs::read(home.join("extensions.json"))
+        .ok()
+        .and_then(|s| serde_json::from_slice(&s).ok())
+        .unwrap_or_default();
+    let versions = home.join("extension-versions");
+    records
+        .into_iter()
+        .filter(|(name, record)| {
+            record.enabled
+                && check_extension_name(name).is_ok()
+                && record.current.as_deref().is_some_and(valid_fingerprint)
+        })
+        .filter_map(|(name, record)| {
+            let fingerprint = record.current?;
+            Some((name.clone(), snapshot::path(&versions, &name, &fingerprint)))
+        })
+        .collect()
 }
 fn diff(
     name: &str,

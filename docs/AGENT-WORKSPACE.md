@@ -1,6 +1,6 @@
 # CrossAgents：平等 Agent 与项目侧栏设计
 
-> 日期：2026-11-01 · 状态：§7 的 A–D 四个阶段已实现（见 §7 的实施记录）。§6 的 role 字段迁移仍未做。  
+> 日期：2026-11-01 · 状态：§7 的 A–D 四个阶段已实现（见 §7 的实施记录）。§6 的 role 字段兼容迁移已做（见 §6.2）。  
 > 依据：本次讨论与第二版交互概念图；Cutex desktop 0.2.0（`6216e67`，2026-10-29）的设计文档和源码。  
 > 本文替代 [SESSION-FIRST.md](SESSION-FIRST.md) §1 第 3 项、§2 的侧栏示意和 §5 的父子导航树方案；保留它的来源关系、独立 lead、执行隔离、静默回传及自动策略。  
 > [DESIGN.md](DESIGN.md) 中 Planner / Worker / Reviewer 的固定身份表述，以本文的任务职责模型为准。旧字段的兼容迁移另行实施。
@@ -147,7 +147,7 @@ run 不再嵌在来源聊天下。项目内全部 run（包括旧记录、无来
 - 保留独立 lead、`origin_chat_id`、来源会话保护、静默回传和现有执行隔离。**导航变平不代表执行关系消失。**
 - 沿用 SESSION-FIRST 的自动落地及权限配置。**计划审批已于 2026-11-02 改回人工**：从对话发起的 Work 一律 `plan_approval: required`，见 §6.1。概念图中的「方案待确认」不再是特例，而是每次 Work 的常态。
 - 每个任务的执行模型由人在计划审批里选：lead 用 `plan_submit` 写清每个 session 要做什么，PlanDock 每行给出队友与「某插件 · 某模型」候选。lead 可以预填 `assignee` 作为建议，但由人最终决定。不新增模型排名、能力评分或自动选型。
-- 不直接删除数据库或协议中的旧 role 字段。先停止用它判定职责资格，再检查创建默认值、提示词、工具作用域、配置、存储和旧客户端兼容；迁移另列任务。
+- 不直接删除数据库或协议中的旧 role 字段。先停止用它判定职责资格，再检查创建默认值、提示词、工具作用域、配置、存储和旧客户端兼容；迁移另列任务（实施记录见 §6.2）。
 - 不照搬 Cutex 的 Director / Operator 固定角色、头饰、桌面托盘、任意拖拽工作区、多窗口及大量外观开关。
 - 不新增模型判断任务大小、Agent 能力排名或角色评分。
 
@@ -163,6 +163,27 @@ run 不再嵌在来源聊天下。项目内全部 run（包括旧记录、无来
 **代价**：小改动也要先过一张计划。要绕开就在计划审批里选「全托管」，或从 Home 发起。
 
 **未改**：自动落地、任务并行度、预算默认值（仍为空，没有上限）。
+
+### 6.2 role 字段兼容迁移（2026-11-07）
+
+**结论**：role 只剩「这个会话是怎么创建的」这一层含义。存储、API 和界面继续读写它，旧客户端不受影响；它不再决定谁能接哪个职责。逐项盘点与处理如下。
+
+**改了**：
+
+- `crates/orchestrator/src/team.rs`：`agent_spawn` 不再以 `role: planner` 拒绝招募。一个 run 只有一个 lead 是 run 里的关系（claim），不是角色标签；planner 角色的会话被招募成队友后，按 claim 拿 worker / reviewer 的工具。
+- `crates/orchestrator/src/messaging.rs`：执行会话（不是对话）不再按 role 取权限组。它没有 claim 时只剩 `everyone`，所以 planner 角色的执行会话空闲时拿不到 lead 工具。普通对话仍从创建时的角色对应的组开始（planner 聊天从 lead 组开始，那里通常是 run 的起点）；run 内的职责仍只看 claim。
+- `crates/orchestrator/src/notes.rs`：删除团队便签不再看调用者是不是 planner。团队便签没有 lead，只有作者能删；run 便签仍允许该 run 的 lead 删。
+- `crates/core/src/model.rs`、`crates/drivers/src/hooks/mod.rs`：把「role 决定工具」的注释改成事实。
+
+**留了，以及为什么**：
+
+- **存储**：`agents.role` 列仍是 `NOT NULL`，`Agent.role`、`CreateAgentRequest.role`、CLI `--role` 与界面角色标签都保留。旧客户端继续发送和读取它；删列或改协议会破坏旧客户端与旧记录。
+- **创建默认值**：CLI、GUI、招募和 run 的 lead 副本仍写 role（默认 worker，lead 副本写 planner）。它只决定记录和展示，不决定权限。
+- **提示词**：`protocol::guide(role)` 仍按角色给不同的开篇说明（lead 的任务、worker 的汇报、reviewer 的评审），`hub/src/api.rs` 的 `/v1/agents/{key}/connect` 仍用它。这是「会话被创建成什么」，不是资格；run 内的会话走 `guide_for(groups)`，按 claim 选说明。
+- **自动组队**：`crates/orchestrator/src/engine.rs` 的 `gather_team` 与审批补 team 共三处 `role != Planner` 保留。它是「不把聊天会话塞进默认队友列表」的默认组合，不是资格——kickoff 的工作区会话一节仍列出全部会话，lead 可以点名任何一个。该文件不在本轮可改范围。
+- **展示与统计**：`hub/src/usage.rs` 的按角色分组、`accounts.rs` 的账号用途、界面的 role 标签与 `LeadFlag` 都保留，属于展示。
+
+**没做**：没有删 role 列，没有改 `CreateAgentRequest`（role 仍必填，旧客户端行为不变），没有改 `docs/TODO.md`。
 
 ## 7. 实施顺序
 
@@ -187,7 +208,7 @@ run 不再嵌在来源聊天下。项目内全部 run（包括旧记录、无来
 
 现有落点包括 `apps/gui/src/Sidebar.tsx`、`lib/sidebarTree.ts`、`workspace.ts`、`activity` / `liveTurn`、`views/Run.tsx`、`views/Session.tsx` 和 `panes`。这些是接入位置，不预先承诺接口无需变化。
 
-角色资格检查已在后端和界面候选列表中删除（§2.1）；剩下的 role 用法只是创建默认值，随 §6 迁移。
+角色资格检查已在后端和界面候选列表中删除（§2.1），role 也不再判定任何资格（§6.2）；剩下的用法是创建默认值、对话的起始权限组、提示词与展示。
 
 ## 8. 验收场景
 
@@ -204,7 +225,28 @@ run 不再嵌在来源聊天下。项目内全部 run（包括旧记录、无来
 
 实现时优先为分组、去重、状态和资格规则做有意义的回归测试；界面在 mock 场景下检查。
 
-本轮实际核对情况：场景 2、3、5、7、8 在 mock 下看过（点侧栏里同一个 Agent 的第二条待办，进入会话后定位到的是第二张提问卡片、计数不变；计划页同时显示没提交 plan、没有来源记录和来源已归档的 run；`#c` 写「使用 Nova 的配置新建」而 `#a` 写「本人执行」；结果页把「完成 · 未落地」与「完成」分开）。场景 4 的 226px 可辨认性、场景 10 的浅色/深色/窄窗口/长中文标题看过截图；键盘焦点只做了代码审查，没有实测。场景 6 的断线重连、场景 9 的自动审批策略只有纯函数测试覆盖数据行为，没有实际跑过。
+本轮实际核对情况：场景 2、3、5、7、8 在 mock 下看过（点侧栏里同一个 Agent 的第二条待办，进入会话后定位到的是第二张提问卡片、计数不变；计划页同时显示没提交 plan、没有来源记录和来源已归档的 run；`#c` 写「使用 Nova 的配置新建」而 `#a` 写「本人执行」；结果页把「完成 · 未落地」与「完成」分开）。场景 4 的 226px 可辨认性、场景 10 的浅色/深色/窄窗口/长中文标题看过截图；键盘焦点、场景 6 的断线重连和场景 9 的自动审批策略已在 2026-11-07 补测，见 §8.1。
+
+### 8.1 补充验收：断线重连、自动审批与键盘（2026-11-07）
+
+在 Windows 上用真实 Electron 44.6.0 跑 GUI：与 `apps/gui/scripts/screenshot.mjs` 同一套启动方式（Vite 的 mock 预览 + 真窗口），另用 CDP 发真实键盘事件、读 DOM 并截图。**口径**：这里没有停真实 hub 进程——数据与事件流都来自 mock 预览，「断开」是直接驱动 Electron 桥的 `onStatus`（事件流断掉时走的就是这条路），所以场景 6 的「待办和工作记录不丢」检查的是渲染层保留与重连重取；停/启真实 hub 后的补发仍以 `extensions/debug/README.md` 的 06-reconnect 为准。自动审批的开关只验证到 GUI 发出的 `POST /v1/runs` 请求体（mock 拒绝真的发起 run），没有真起 run。
+
+| 场景 | 做法 | 结果 |
+|---|---|---|
+| 6 断线重连 | `agent-workspace-sidebar`：记下「需要你」6 项（3 项可见 + 还有 3 项）；把状态切成 `offline: event stream ended`，再经 `connecting` 回到 `connected` | 通过。离线时底部写「未连接：event stream ended」，成员行改为「状态未确认」，待办文本和计数一项不少；重连后回到「hub 已连接」，待办仍是同一批。`work-rounds` 里离线再恢复，工作组「登录与会话 · 3 轮」也一直在 |
+| 6 折叠与搜索 | 收起 notes → 搜索 Nora → 清空搜索 | 通过。搜索时该组临时展开、折叠按钮 `disabled`；清空后回到收起，折叠状态没有被搜索改写 |
+| 9 自动审批 | 新场景 `agent-workspace-auto`：三个 run 都在 `awaiting_approval`，分别是「我审批」、`plan_approval: auto` 和旧的 `auto_approve: true`；另有一个人工待办的完成未读 | 通过（修复后）。「需要你」的 6 项里只有「登录页改版 确认」一条审批，两个自动记录都不出现；主导会话里只有人工那条开出「Plan 待审批」，自动记录所在的会话没有卡片；Ada 会话顶部胶囊只剩「出错」「完成」（修复前多一条「Atlas 待审批」，点进去没有卡片）；未读独立显示「完成未读 · 1」 |
+| 9 审批开关 | Work 表单切「我审批 / 半托管 / 全托管」，每次提交并读请求体 | 通过。请求分别是 `plan_approval: required · land: manual · human_ask: allow`、`auto · manual · timeout`、`auto · auto · timeout`；`auto_approve` 恒为 `false`。表单提示也从「看过再由你合并」切到「看过再由你合并 · 半托管」「做完由主导合并 · 全托管 · 没有上限」 |
+| 10 键盘 | 从标题栏开始逐次 Tab 走完侧栏并进入主区；方向键/Home/End 走项目页签；在审批框内 Tab；用 Enter 展开「还有 3 项」、成员「更多」，用 Enter 打开待办 | 通过（修复后）。这份 mock 数据下侧栏 73 个可 Tab 项顺序正确、无焦点陷阱，每一项都有 2px 焦点环（主输入框由容器的 `focus-within` 边框表示焦点）；行内「在旁边打开 / 归档 / 置顶」在聚焦时出现并可继续 Tab；项目页签是 roving tabindex，方向键与 Home/End 同时改选中和焦点；审批框自动聚焦后，「1 开工 / 2 驳回 / 3 先回复」都在 Tab 序列里；待办按 Enter 直达问题卡片并聚焦回答框；「还有 N 项」和「更多」展开/收起后焦点都留在原按钮上 |
+
+补测发现并修掉的小问题（都在 GUI 内）：
+
+1. `views/Session.tsx` 的待批计划只看 `run.status === "awaiting_approval"`，不看策略：自动审批（或旧 `auto_approve`）的记录会在主导会话里开出「Plan 待审批」卡片，和 `lib/todos.ts` 的判断不一致。抽出 `lib/policy.ts` 的 `planWaitsForPerson`，会话卡片和待办共用它。
+2. `strips.tsx` 的「需要你」胶囊同样只看状态，会显示「Atlas 待审批」并跳到一张（修复后）不存在的卡片；改用同一判断。
+3. `.plan-dock:focus-visible` 用 `--warn-bg` 描边，深色是 `#30271a`、浅色是 `#f8eedb`，自动聚焦的审批框几乎看不出焦点；改成 `3px var(--focus)`（截图里已可见）。
+4. 侧栏「还有 N 项」和成员列表「更多」原来是两个按钮：展开时按钮被替换，键盘激活后焦点掉到 `body`，下一次 Tab 从页面开头开始。改成同一个按钮原地切换（带 `aria-expanded`），展开后焦点留在按钮上（文字变为「收起」）。
+
+没改的已知情况：侧栏很长时从第一个成员走到主区要按很多次 Tab（顺序正确、没有陷阱，本轮不改成跳转链接）；进入目标页后焦点落在该页自己的输入框或正文，没有额外的路由聚焦管理。
 
 ## 9. Cutex 参考范围
 

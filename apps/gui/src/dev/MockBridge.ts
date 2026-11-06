@@ -38,6 +38,7 @@ import type { TaskReviewRequest } from "@bindings/TaskReviewRequest";
 import type { Transcript } from "@bindings/Transcript";
 import type { UsageGroup } from "@bindings/UsageGroup";
 import type { UsageResponse } from "@bindings/UsageResponse";
+import type { Work } from "@bindings/Work";
 import type { CrossAgentsBridge, HubResponse, UpdateState } from "../bridge";
 import type { HubEvent } from "../hub";
 import { turnStat } from "../lib/diff";
@@ -58,6 +59,7 @@ import {
 import { exportLessons, lessonMatches, type Lesson, type RunIssue } from "../lessons/lessons";
 import { effortOf } from "../lib/models";
 import { applyEvent } from "../session";
+import { FEATURES, featureOf } from "../lib/features";
 import { capabilitiesOf, contextParts, driverOf, transcript, uid } from "./fixtures";
 import { mockContent, mockResolve, mockSearch, mockStatus, mockTree } from "./files.mock";
 import { mockGit } from "./git.mock";
@@ -69,6 +71,8 @@ export type MockState = {
   agents: Agent[];
   agentCommands?: Record<string, AgentCommandsResponse>;
   runs: RunDetail[];
+  /** The work groups (`GET /v1/works`): a continuous conversation whose rounds are runs. */
+  works?: Work[];
   /** What ended runs left in their workspaces (`GET /v1/history`), deleted rounds included;
    * the ended runs still in `runs` are answered for on request, as the hub records them. */
   history?: RunHistory[];
@@ -105,6 +109,15 @@ export type MockState = {
   dirty?: Record<string, string[]>;
   /** The API version `/v1/info` reports; `v1` when unset. */
   api?: string;
+  /** The feature list `/v1/info` reports (docs/TODO.md §二); `null` is a hub built before it,
+   * which sends none. Unset: this hub has all `FEATURES`, as the real one does. */
+  features?: string[] | null;
+  /** The version `/v1/info` reports; `__BUILD__` ours when unset. With `features: null` this is
+   * what the GUI infers the hub's entries from (0.2.6 has git and lessons). */
+  version?: string;
+  /** Features whose requests answer 403, by feature, with the hub's message: 凭据的级别不够
+   * (docs/API-AUTH.md §3), so the entry greys instead of the page erroring. */
+  forbidden?: Partial<Record<string, string>>;
   /** What holds each session now (docs/tasks/S1.md §3.3), by agent id. */
   executions?: Record<string, AgentExecution>;
   /** The native resume command (docs/TODO.md §十五) by agent id, when a scenario fixes it; else made up from the agent like the hub would. */
@@ -195,6 +208,7 @@ const encode = (text: string) => btoa(String.fromCharCode(...new TextEncoder().e
 
 export class MockBridge implements CrossAgentsBridge {
   private seq = 1000;
+  private appliedRuns = new Set<string>();
   private avatars = new Map<string, string>();
   private events = new Set<(data: string) => void>();
   private statuses = new Set<(status: string) => void>();
@@ -600,6 +614,18 @@ export class MockBridge implements CrossAgentsBridge {
     const p = url.pathname;
     let m: RegExpMatchArray | null;
 
+    // A feature this hub refuses (docs/TODO.md §二): the same 403 `access.rs` answers with,
+    // so a scenario can show the greyed entry and the hub's own words.
+    const refused = s.forbidden?.[featureOf(p) ?? ""];
+    if (refused) return json(403, { error: { code: "forbidden", message: refused } });
+
+    const integration = /^\/v1\/runs\/([^/]+)\/integration$/.exec(p);
+    if (integration && method === "GET") return json(200, { outcome: "ok", snapshot: "base", integration: "worker", applied: this.appliedRuns.has(integration[1]) ? "worker" : null });
+    const apply = /^\/v1\/runs\/([^/]+)\/apply$/.exec(p);
+    if (apply && method === "POST") {
+      this.appliedRuns.add(apply[1]);
+      return json(200, { outcome: "applied", files: ["src/example.ts"], own_changes: ["src/example.ts"], rerun: { results: [{ command: "npm test", passed: true, exit_code: 0, output: "检查通过" }], error: null } });
+    }
     const terminal = this.terminalRoute(method, p, body);
     if (terminal) return terminal;
     const extension = this.extensionRoute(method, p, body);
@@ -644,7 +670,10 @@ export class MockBridge implements CrossAgentsBridge {
       if (p === "/v1/info") {
         // `?hubcommit=abc1234`: a hub built from another commit than the page.
         const commit = new URLSearchParams(location.search).get("hubcommit") ?? __BUILD__.commit;
-        return json(200, { version: __BUILD__.version, commit, debug: false, api: s.api ?? "v1", pid: 0, home: "（mock 模式，无 hub）", started_at: new Date().toISOString() });
+        // `features: null` is an older hub: it answers without the list at all, and `version`
+        // is then what the GUI infers its entries from.
+        const features = s.features === null ? undefined : (s.features ?? FEATURES);
+        return json(200, { version: s.version ?? __BUILD__.version, commit, debug: false, api: s.api ?? "v1", pid: 0, home: "（mock 模式，无 hub）", started_at: new Date().toISOString(), ...(features ? { features } : {}) });
       }
       if (p === "/v1/agents") return json(200, { agents: s.agents });
       if ((m = p.match(/^\/v1\/agents\/([^/]+)$/))) return this.agent(m[1]) ? json(200, this.agent(m[1])) : notFound("agent");
@@ -729,6 +758,15 @@ export class MockBridge implements CrossAgentsBridge {
         return file ? json(200, { id: m[2], mime: file.mime, size: file.data.length, data: file.data }) : notFound("attachment");
       }
       if (p === "/v1/runs") return json(200, { runs: s.runs.map((d) => d.run) });
+      if (p === "/v1/works") return json(200, { works: s.works ?? [] });
+      if ((m = p.match(/^\/v1\/works\/([^/]+)$/))) {
+        const id = decodeURIComponent(m[1]);
+        const work = (s.works ?? []).find((w) => w.id === id);
+        if (!work) return notFound("work");
+        // Its rounds, oldest first, and what ended ones left behind (deleted rounds too).
+        const runs = s.runs.filter((d) => d.run.work_id === id).map((d) => d.run).sort((a, b) => a.created_at.localeCompare(b.created_at));
+        return json(200, { work, runs, history: historyOf(s).filter((h) => h.work_id === id) });
+      }
       if (p === "/v1/history") {
         const repo = url.searchParams.get("repo");
         return json(200, { history: historyOf(s).filter((h) => !repo || h.repo === repo) });

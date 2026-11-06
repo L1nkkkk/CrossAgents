@@ -146,7 +146,7 @@ pub fn guide_for(agent: &Agent, groups: &[Group]) -> String {
         Group::Lead => Some(Role::Planner),
         Group::Assignee => Some(Role::Worker),
         Group::Reviewer => Some(Role::Reviewer),
-        Group::Everyone | Group::Conversation => None,
+        Group::Everyone | Group::Conversation | Group::ContinueRun => None,
     });
     let mut text = match role {
         Some(role) => guide(role),
@@ -322,5 +322,24 @@ mod tests {
         let held = groups_of(&chat, Some(crossagents_core::ClaimRole::Worker));
         assert!(held.contains(&Group::Assignee));
         assert!(guide_for(&chat, &held).contains("As a WORKER"));
+    }
+
+    #[test]
+    fn a_planner_role_execution_session_gets_no_lead_tools_without_a_claim() {
+        // Recruited as a teammate, a session whose role says planner works by its claim: the
+        // role is how it was made, not what it may do.
+        let recruit = Agent {
+            role: Role::Planner,
+            config: serde_json::json!({ "spawned_by_run": "r1" }),
+            ..worker("claude")
+        };
+        assert_eq!(groups_of(&recruit, None), [Group::Everyone]);
+        assert!(
+            !guide_for(&recruit, &groups_of(&recruit, None)).contains("As the LEAD"),
+            "no lead workflow before a run holds it"
+        );
+        let held = groups_of(&recruit, Some(crossagents_core::ClaimRole::Worker));
+        assert!(held.contains(&Group::Assignee));
+        assert!(guide_for(&recruit, &held).contains("As a WORKER"));
     }
 }

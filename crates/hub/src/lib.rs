@@ -178,7 +178,11 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         shims: shims.clone(),
         orchestrator: Arc::new(OnceLock::new()),
     });
-    let runtime = Arc::new(Runtime::new(bus.clone(), plugins).with_setup(setup.clone()));
+    let runtime = Arc::new(
+        Runtime::new(bus.clone(), plugins)
+            .with_setup(setup.clone())
+            .with_home(paths.home.clone()),
+    );
     runtime.watch_moves();
     runtime.watch_replies();
     // Each CLI is asked its version in the background, in parallel: `GET /v1/plugins`
@@ -319,7 +323,8 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         started_at,
         exe: std::env::current_exe().ok(),
     };
-    std::fs::write(paths.hub_file(), serde_json::to_vec_pretty(&hub_file)?)
+    // Atomic: `hub start` polls this file and must never read it half-written.
+    crate::paths::write_atomic(&paths.hub_file(), &serde_json::to_vec_pretty(&hub_file)?)
         .context("cannot write hub.json")?;
 
     let shutdown = CancellationToken::new();

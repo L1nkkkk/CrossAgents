@@ -48,6 +48,9 @@ pub enum Command {
     Plugin(cmd::plugin::PluginCommand),
     /// Plan, approve and follow orchestrated runs.
     Run(cmd::run::RunArgs),
+    /// Work groups: the rounds (runs) each one has, one after another.
+    #[command(subcommand)]
+    Work(cmd::work::WorkCommand),
     /// Reported cost and context use, grouped by role, model, run or agent.
     Usage(cmd::usage::UsageArgs),
     /// Expertise profiles: what good work looks like for this person and this project.

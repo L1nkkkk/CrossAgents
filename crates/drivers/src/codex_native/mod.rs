@@ -542,6 +542,45 @@ impl Router {
     }
 }
 
+/// A `turn/steer` write that did not succeed. Codex answering with an error proves it did
+/// not take the message; no answer at all proves nothing.
+#[derive(Debug)]
+enum SteerWriteFailure {
+    /// Codex answered with an error: the message is definitely not in.
+    Refused(String),
+    /// No answer came in time: it may or may not have arrived.
+    NoAnswer(String),
+}
+
+impl SteerWriteFailure {
+    fn into_error(self) -> CoreError {
+        match self {
+            Self::Refused(what) => CoreError::Agent(what),
+            Self::NoAnswer(what) => CoreError::OutcomeUnknown(what),
+        }
+    }
+}
+
+/// A `turn/steer` write, with the timeout here rather than in the generic request path: an
+/// answer from Codex settles it either way, while no answer proves nothing.
+async fn steer_write<F>(timeout: Duration, write: F) -> Result<Value, SteerWriteFailure>
+where
+    F: std::future::Future<Output = Result<Value, RpcError>>,
+{
+    match tokio::time::timeout(timeout, write).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(err)) => Err(SteerWriteFailure::Refused(format!(
+            "{}: {err}",
+            method::TURN_STEER
+        ))),
+        Err(_) => Err(SteerWriteFailure::NoAnswer(format!(
+            "{}: no answer within {}s; it may or may not have reached codex",
+            method::TURN_STEER,
+            timeout.as_secs()
+        ))),
+    }
+}
+
 /// One session's end of the router.
 struct ThreadSink {
     events: mpsc::UnboundedSender<SessionEvent>,
@@ -573,6 +612,14 @@ impl ThreadSink {
 
     fn turn(&self) -> std::sync::MutexGuard<'_, TurnState> {
         self.turn.lock().expect("turn lock")
+    }
+
+    /// Forgets a steer whose write failed. Codex refusing it means it is not in; no answer
+    /// means it may be, so the id stays and a later read is still reported.
+    fn steer_failed(&self, message_id: MessageId, failure: &SteerWriteFailure) {
+        if matches!(failure, SteerWriteFailure::Refused(_)) {
+            self.turn().steers.retain(|steer| *steer != message_id);
+        }
     }
 
     /// Forgets the running turn; a waiting `prompt` fails.
@@ -909,11 +956,23 @@ impl DriverSession for CodexSession {
             turn_id
         };
         let params = wire::turn_steer(&self.thread_id, prompt, &turn_id);
-        let result = self.server.request(method::TURN_STEER, params).await;
-        if result.is_err() {
-            self.sink.turn().steers.retain(|steer| *steer != message_id);
+        // A timeout here is not a refusal: the write may have reached Codex, and if it did a
+        // resend would make the model read the message twice. Only an answer from Codex
+        // proves the steer is not in (docs/TODO.md §二十五「2 的尾巴」).
+        match steer_write(
+            REQUEST_TIMEOUT,
+            self.server
+                .peer
+                .request::<_, Value>(method::TURN_STEER, params),
+        )
+        .await
+        {
+            Ok(_) => Ok(()),
+            Err(failure) => {
+                self.sink.steer_failed(message_id, &failure);
+                Err(failure.into_error())
+            }
         }
-        result.map(|_| ())
     }
 
     async fn interrupt(&self) -> Result<(), CoreError> {
@@ -1113,6 +1172,64 @@ pub fn cached_models(home: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `turn/steer` that times out says the outcome is unknown, not that it failed: the
+    /// message must not be sent again (it may already be in), unlike a refusal from Codex.
+    #[tokio::test]
+    async fn a_steer_without_an_answer_is_an_unknown_outcome() {
+        let silent = steer_write(Duration::from_millis(5), std::future::pending()).await;
+        let silent = silent.expect_err("no answer");
+        assert!(
+            matches!(silent.into_error(), CoreError::OutcomeUnknown(_)),
+            "a timed-out steer is not a plain failure"
+        );
+
+        let refused = steer_write(Duration::from_secs(5), async {
+            Err(RpcError::new(-32603, "no active turn"))
+        })
+        .await;
+        let refused = refused.expect_err("Codex refused it");
+        assert!(
+            matches!(refused.into_error(), CoreError::Agent(_)),
+            "an answer from Codex is a plain failure"
+        );
+    }
+
+    /// The steer stays claimed after a timeout (a later read proves it arrived) but is
+    /// forgotten when Codex says it refused it.
+    #[test]
+    fn a_timed_out_steer_is_kept_for_a_later_read() {
+        let (events, _rx) = mpsc::unbounded_channel();
+        let message_id = MessageId::new();
+        let sink = ThreadSink {
+            events,
+            permission: PermissionPolicy::default(),
+            permissions: None,
+            turn: Mutex::new(TurnState {
+                steers: vec![message_id],
+                ..TurnState::default()
+            }),
+        };
+
+        sink.steer_failed(
+            message_id,
+            &SteerWriteFailure::NoAnswer("turn/steer: no answer".into()),
+        );
+        assert_eq!(
+            sink.turn().steers,
+            vec![message_id],
+            "it may have arrived; a read must still be reported"
+        );
+
+        sink.steer_failed(
+            message_id,
+            &SteerWriteFailure::Refused("turn/steer: no active turn".into()),
+        );
+        assert!(
+            sink.turn().steers.is_empty(),
+            "a refusal from Codex proves it is not in"
+        );
+    }
 
     #[test]
     fn lists_picker_models_from_the_cache() {

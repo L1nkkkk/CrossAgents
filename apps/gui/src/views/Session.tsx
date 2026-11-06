@@ -3,6 +3,7 @@ import type { Agent } from "@bindings/Agent";
 import type { Capabilities } from "@bindings/Capabilities";
 import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
+import type { RunStatus } from "@bindings/RunStatus";
 import type { Handoff } from "@bindings/Handoff";
 import type { ModelSwitch } from "@bindings/ModelSwitch";
 import type { TranscriptUsage } from "@bindings/TranscriptUsage";
@@ -36,7 +37,8 @@ import { shownTab } from "../lib/docks";
 import { terminalsAvailable, toggleTerminal, useTabShows } from "../terminal";
 import { useWidths } from "../lib/widths";
 import { useSidebar } from "../titlebar";
-import { taskState } from "../lib/taskState";
+import { planWaitsForPerson } from "../lib/policy";
+import { runState, taskState } from "../lib/taskState";
 import { QUIET_AFTER, actionOf, duration, failed, liveActivity, liveKey, liveNow, quietSeconds, stepLine, workGroups, type ActionTool, type Step } from "../lib/workGroups";
 import { TurnLive, type LiveTurn } from "../liveTurn";
 import { PeerMessage, StateWord, useArmed } from "../parts";
@@ -101,10 +103,17 @@ const SideSlot = createContext<{ narrow: boolean; open: boolean; toggle: () => v
 export const useSideSlot = () => useContext(SideSlot);
 
 /**
+ * One round of a work group, marked where it began in the continuous conversation
+ * (docs/tasks/G1.md §3.5): `n` counts from 1, `at` is the round's `created_at`.
+ */
+export type RoundMark = { id: string; n: number; title: string; status: RunStatus; at: string };
+
+/**
  * A conversation with one agent. The run page shows its lead's conversation through this
  * view (docs/tasks/W1.md §8): `header` replaces the agent's header, `top` comes before the
  * messages, `bottom` after them, and `side` takes the rail beside them — or, when the window
  * is too narrow for that, a drawer the header opens. `side` never joins the conversation.
+ * `rounds` draws a separator where each of a work group's rounds began.
  */
 export function SessionView({
   name,
@@ -114,6 +123,8 @@ export function SessionView({
   top,
   bottom,
   side,
+  sideLabel = "run 的面板",
+  rounds,
 }: {
   name: string;
   questionId?: string;
@@ -122,6 +133,9 @@ export function SessionView({
   top?: ReactNode;
   bottom?: ReactNode;
   side?: ReactNode;
+  /** What the side slot's drawer calls itself when the rail does not fit. */
+  sideLabel?: string;
+  rounds?: RoundMark[];
 }) {
   const { transcript, error, reload } = useSession(name);
   const tree = useRunTree();
@@ -235,8 +249,10 @@ export function SessionView({
   const everyone = agents.data ?? [];
   // A plan waits in the lead's own conversation and in the chat that started the Work: the
   // person said 开始 there, so that is where they pick who runs each task (AGENT-WORKSPACE §6.1).
+  // A run the policy approves on its own never gets a card, even while a stale
+  // `awaiting_approval` status is still on record (lib/policy.ts planWaitsForPerson).
   const pendingPlans = runs.filter(
-    (d) => (d.run.planner === agent.id || d.run.origin_chat_id === agent.id) && d.run.status === "awaiting_approval",
+    (d) => (d.run.planner === agent.id || d.run.origin_chat_id === agent.id) && d.run.status === "awaiting_approval" && planWaitsForPerson(d.run),
   );
   const liveRuns = runs.filter((d) => d.run.planner === agent.id && ACTIVE_RUN.includes(d.run.status) && d.run.status !== "awaiting_approval");
   // First iteration: recent runs plus all runs led by this agent. Older assigned tasks may be
@@ -274,14 +290,14 @@ export function SessionView({
         <WorkContext name={name} agent={agent} tasks={tasks} led={led} agents={everyone} execution={execution.data?.execution} />
         <ExecutionBar agent={agent} execution={execution.data?.execution} reload={execution.reload} />
         <NoticeBar agent={agent} />
-        <Conversation agent={agent} turns={turns.filter(inConversation)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} works={workDecisions(questions.data?.items ?? [], agent.id)} agents={everyone} tree={runs} top={top}>
+        <Conversation agent={agent} turns={turns.filter(inConversation)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} works={workDecisions(questions.data?.items ?? [], agent.id)} agents={everyone} tree={runs} top={top} rounds={rounds}>
           {outgoing.map((m) => (
             <Sending key={m.key} message={m} agent={agent} />
           ))}
           {bottom}
         </Conversation>
         {rail && side && (
-          <aside className="rail rail-run" aria-label="run 的面板">
+          <aside className="rail rail-run" aria-label={sideLabel}>
             {side}
           </aside>
         )}
@@ -290,9 +306,9 @@ export function SessionView({
         {!rail && side && drawer && (
           <>
             <div className="rail-scrim" onClick={() => setDrawer(false)} />
-            <aside className="rail rail-run rail-drawer" role="dialog" aria-label="run 的面板" ref={drawerRef} tabIndex={-1}>
+            <aside className="rail rail-run rail-drawer" role="dialog" aria-label={sideLabel} ref={drawerRef} tabIndex={-1}>
               <div className="rail-drawer-head">
-                <strong>run 的面板</strong>
+                <strong>{sideLabel}</strong>
                 <span className="spacer" />
                 <button className="ghost icon" onClick={() => setDrawer(false)} aria-label="关闭面板" title="关闭面板">
                   <Icon name="close" size={14} />
@@ -768,6 +784,7 @@ function Conversation({
   agents,
   tree,
   top,
+  rounds,
   children,
 }: {
   agent: Agent;
@@ -780,6 +797,8 @@ function Conversation({
   agents: Agent[];
   tree: RunDetail[];
   top?: ReactNode;
+  /** A work group's rounds, marked where each began (docs/tasks/G1.md §3.5). */
+  rounds?: RoundMark[];
   children?: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -821,9 +840,11 @@ function Conversation({
           <AgentImageContext.Provider value={agent.id}>
           <CwdContext.Provider value={agent.cwd}>
           <Follow.Provider value={{ el: ref, stick }}>
-            {byTime(turns, [...switches, ...handoffs, ...works]).map((x) =>
+            {byTime(turns, [...switches, ...handoffs, ...works, ...(rounds ?? []).map((r) => ({ ...r, round_id: r.id }))]).map((x) =>
               "message_id" in x ? (
                 <Turn key={x.message_id} turn={x} agent={agent} agents={agents} tree={tree} />
+              ) : "round_id" in x ? (
+                <RoundDivider key={x.round_id} round={x} />
               ) : "task_key" in x ? (
                 <HandoffLine key={x.id} handoff={x} agents={agents} />
               ) : "run_id" in x ? (
@@ -865,7 +886,31 @@ function byTime(turns: TranscriptTurn[], notes: Note[]): (TranscriptTurn | Note)
   return out.concat(sorted.slice(i));
 }
 
-type Note = ModelSwitch | Handoff | WorkDecision;
+type Note = ModelSwitch | Handoff | WorkDecision | (RoundMark & { round_id: string });
+
+/**
+ * Where a round of the work group began: 第 N 轮 · title · its state. The id is what the
+ * rounds pane scrolls to, so a round picked there comes into view here.
+ */
+function RoundDivider({ round }: { round: RoundMark & { round_id?: string } }) {
+  const state = runState(round.status);
+  return (
+    <div className="round-note" id={`round-${round.id}`} data-round={round.id} role="separator" aria-label={`第 ${round.n} 轮 · ${round.title}`}>
+      <span className="round-rule" aria-hidden="true" />
+      <span className="round-label">第 {round.n} 轮</span>
+      <span className="round-title" title={round.title}>
+        {round.title}
+      </span>
+      <span className={`round-state ${state.tone}`}>
+        <span aria-hidden="true">{state.glyph}</span> {state.word}
+      </span>
+      <span className="round-at" title={time(round.at)}>
+        {clock(round.at)}
+      </span>
+      <span className="round-rule" aria-hidden="true" />
+    </div>
+  );
+}
 
 /** A Work this conversation proposed: started (a link to its run) or not. */
 function WorkNote({ work }: { work: WorkDecision }) {

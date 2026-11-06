@@ -107,16 +107,16 @@ pub fn error_terms(output: &str) -> (Vec<String>, Vec<String>) {
     for line in output.lines() {
         let words: Vec<&str> = line.split(|c: char| !ident_char(c)).filter(|w| !w.is_empty()).collect();
         for (i, word) in words.iter().enumerate() {
-            if is_error_code(word) || is_exception(word) {
-                push_unique(&mut strong, word, STRONG_MAX);
-            } else if word.len() >= 3
-                && word.chars().all(|c| c.is_ascii_digit())
-                && !word.chars().all(|c| c == '0')
-                && i > 0
-                && matches!(
-                    words[i - 1].to_ascii_lowercase().as_str(),
-                    "code" | "status" | "exitcode" | "errno"
-                )
+            if is_error_code(word)
+                || is_exception(word)
+                || (word.len() >= 3
+                    && word.chars().all(|c| c.is_ascii_digit())
+                    && !word.chars().all(|c| c == '0')
+                    && i > 0
+                    && matches!(
+                        words[i - 1].to_ascii_lowercase().as_str(),
+                        "code" | "status" | "exitcode" | "errno"
+                    ))
             {
                 push_unique(&mut strong, word, STRONG_MAX);
             }
@@ -650,14 +650,14 @@ pub async fn bind_project(
         })?;
         if let Some(other) = projects
             .iter()
-            .find(|p| p.id != project.id && p.remotes.iter().any(|r| *r == remote))
+            .find(|p| p.id != project.id && p.remotes.contains(&remote))
         {
             return Err(CoreError::Conflict(format!(
                 "{remote} already belongs to project {} ({}); merge the two projects instead",
                 other.id, other.name
             )));
         }
-        if !project.remotes.iter().any(|r| *r == remote) {
+        if !project.remotes.contains(&remote) {
             project.remotes.push(remote.clone());
         }
         if project.unconfirmed_remote.as_deref() == Some(remote.as_str()) {

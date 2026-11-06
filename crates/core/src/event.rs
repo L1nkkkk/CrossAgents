@@ -54,6 +54,10 @@ pub enum QueuedReason {
     /// A steer was asked for, but writing it into the CLI failed: nothing was delivered
     /// and nothing is queued; the sender decides whether to send it again.
     SteerWriteFailed,
+    /// A steer was written but the CLI did not answer in time: it may or may not have
+    /// arrived. Nothing is queued and it is not sent again; the sender is told the outcome
+    /// is unknown (docs/tasks/DELIVERY-AUDIT.md §3).
+    OutcomeUnknown,
     /// The conversation is archived.
     Archived,
     /// The message already started; it cannot be taken back or moved.
@@ -116,12 +120,6 @@ pub struct Event {
     pub kind: EventKind,
 }
 
-// The variants carry whole records, so they differ a lot in size: `RunCreated { run: Run }`
-// is some 592 bytes against a few dozen for most. Boxing the big ones is the real fix, and it
-// touches every place that builds or matches an event (docs/TODO.md); until then this lint is
-// the one thing standing between the repository and `clippy -D warnings`, which is worth more
-// as a gate on everything else.
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "type", content = "data")]
@@ -441,7 +439,7 @@ pub enum EventKind {
     #[serde(rename = "work.updated")]
     WorkUpdated { work: crate::Work },
     #[serde(rename = "run.created")]
-    RunCreated { run: Run },
+    RunCreated { run: Box<Run> },
     #[serde(rename = "run.continuation_changed")]
     RunContinuationChanged {
         id: RunId,

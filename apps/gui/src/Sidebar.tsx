@@ -1,15 +1,18 @@
 // Flat project/member navigation. Domain grouping and human work live in pure views.
-import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FocusEvent as ReactFocusEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type FocusEvent as ReactFocusEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { HubInfo } from "@bindings/HubInfo";
 import type { RunDetail } from "@bindings/RunDetail";
+import type { WorkDetail } from "@bindings/WorkDetail";
 import { deliveryOf, lastError, useActivity, useDelivery, useUnread } from "./activity";
 import { api, errorText } from "./api";
 import type { DevHub } from "./bridge";
 import { buildTag, compareBuilds } from "./lib/build";
 import { useUpdateState } from "./lib/updates";
 import { Avatar, BrandMark, Icon, ModelMark, ago, displayName, isAgent, sessionHref } from "./components";
-import { useConnectionStatus } from "./hub";
+import { useConnectionStatus, useHubData } from "./hub";
+import { RunModeMark, RunModeTag, modeWords } from "./runmode";
+import { runState } from "./lib/taskState";
 import { RowElapsed, usePulseSeeds, useRowLive } from "./liveTurn";
 import { t } from "./lib/i18n";
 import { sessionWork } from "./lib/projectView";
@@ -19,6 +22,7 @@ import { capped, sidebarGroups, searchGroups, groupClosed, shortSince, summaryTe
 import { todoItems, visibleTodos, type TodoItem } from "./lib/todos";
 import { useUnsortedIssues } from "./lessons/unsorted";
 import { useUnboundProjects } from "./lessons/projects";
+import { FEATURE_LABELS, hiddenByHub, missingText, useFeatureSupport, useHubFeatures } from "./lib/features";
 import { useQuestions } from "./questions";
 import { startNew } from "./menubar";
 import { level, tightest, windowLabel } from "./lib/quota";
@@ -32,6 +36,8 @@ const Needs = createContext<readonly TodoItem[]>([]);
 const Runs = createContext<readonly RunDetail[]>([]);
 /** How long a row stays lit after its turn ends. */
 const DONE_FLASH = 1800;
+/** An entry the hub refused (403): still readable, so its reason shows, but not clickable. */
+const REFUSED: CSSProperties = { opacity: 0.5, cursor: "default" };
 /** A pointer passing through the list shows no card. */
 const PEEK_DELAY = 350;
 const CRAWL_DELAY = 200;
@@ -96,6 +102,87 @@ function useArchiveNote() {
 }
 const sessionKey = (a: Agent) => "s:" + a.id;
 const labelOf = (a: Agent) => displayName(a);
+/** How many work groups the sidebar lists before the list gets too long to scan. */
+const SIDEBAR_WORKS = 8;
+
+/**
+ * The work groups (docs/tasks/G1.md §3.5): one row each, however many rounds they have had.
+ * Each row needs its rounds — the current one's state, and the list behind the fold — so the
+ * recent groups are read whole. `enabled` is false on a hub that does not have the page (an
+ * older hub, or one whose token may not read it), which this then does not even ask.
+ */
+function useWorks(enabled: boolean) {
+  return useHubData(
+    async () => {
+      if (!enabled) return [];
+      const { works } = await api.listWorks();
+      const recent = works
+        .slice()
+        .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+        .slice(0, SIDEBAR_WORKS);
+      const details = await Promise.all(recent.map((w) => api.getWork(w.id).catch(() => null)));
+      return details.filter((d): d is WorkDetail => d !== null);
+    },
+    [enabled],
+    (e) => e.type.startsWith("work.") || e.type.startsWith("run."),
+  );
+}
+
+/** One work group: its title, the current round's state and mode; its rounds fold out below. */
+function WorkRow({ detail, active, selected }: { detail: WorkDetail; active: boolean; selected?: string }) {
+  const [open, setOpen] = useState(false);
+  const { work } = detail;
+  const rounds = detail.runs.slice().sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const current = rounds[rounds.length - 1];
+  const state = current ? runState(current.status) : undefined;
+  const dot: Dot = !state ? undefined : state.bucket === "active" ? "live" : state.bucket === "needs_you" ? "warn" : state.tone === "danger" ? "danger" : undefined;
+  const href = `#/work/${encodeURIComponent(work.id)}`;
+  return (
+    <div className="work-row-wrap">
+      <div className={`nav-row work-row ${active ? "active" : ""}`}>
+        <button
+          className="icon-btn work-fold"
+          aria-expanded={open}
+          aria-label={t(open ? "sidebar.collapseRounds" : "sidebar.expandRounds", { name: work.title })}
+          onClick={() => setOpen(!open)}
+        >
+          <Icon name={open ? "chevron" : "chevronRight"} size={12} />
+        </button>
+        <a className="row-link" href={href} title={t("sidebar.workTitle", { title: work.title, n: rounds.length })} aria-current={active ? "page" : undefined}>
+          <span className="row-main">
+            <span className="row-label">{work.title}</span>
+          </span>
+          {current && <RunModeTag run={current} compact className="row-mode" />}
+        </a>
+        {dot && <span className={`row-dot ${dot}`} aria-hidden="true" />}
+      </div>
+      {open && (
+        <ul className="work-round-list">
+          {rounds.map((round, i) => {
+            const state = runState(round.status);
+            return (
+              <li key={round.id}>
+                <a
+                  className={`work-round-link ${selected === round.id ? "active" : ""}`}
+                  href={`${href}/${encodeURIComponent(round.id)}`}
+                  title={round.title}
+                  aria-current={selected === round.id ? "true" : undefined}
+                >
+                  <span className="work-round-line">
+                    <span className="work-round-n">{t("sidebar.roundN", { n: i + 1 })}</span>
+                    <span className={`work-round-state ${state.tone}`}>{state.word}</span>
+                  </span>
+                  <span className="work-round-title">{round.title}</span>
+                </a>
+              </li>
+            );
+          })}
+          {!rounds.length && <li className="muted small work-round-empty">{t("sidebar.noRounds")}</li>}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 export function Sidebar({ route }: { route: string[] }) {
   const { list, tree, agents, loaded } = useWorkspaces();
@@ -103,11 +190,17 @@ export function Sidebar({ route }: { route: string[] }) {
   const pinned = usePinned();
   const order = projectOrder.use();
   const unread = useUnread();
+  // What this hub has, and what it refused (docs/TODO.md §二): entries it did not list are
+  // hidden, and one whose request came back 403 stays, greyed, with the hub's message.
+  const git = useFeatureSupport("git");
+  const lessons = useFeatureSupport("lessons");
+  const work = useFeatureSupport("work");
   const [query, setQuery] = useState("");
   const everyone = agents.data ?? [];
   usePulseSeeds(everyone);
   const archiving = useArchiveNote();
   const runs = tree.data ?? [];
+  const works = useWorks(work.show && !work.disabled);
   const todos = todoItems({
     items: questions.data?.items ?? [],
     runs,
@@ -165,10 +258,32 @@ export function Sidebar({ route }: { route: string[] }) {
               <Icon name="brain" size={16} />
               <span>{t("nav.expertise")}</span>
             </a>
-            <a className={"nav-lessons " + (route[0] === "lessons" ? "active" : "")} href="#/lessons">
-              <Icon name="tasks" size={16} />
-              <span>{t("nav.lessons")}</span>
-            </a>
+            {git.show && (
+              <a
+                className={"nav-git " + (route[0] === "git" ? "active" : "")}
+                href="#/git"
+                title={git.disabled ? git.reason : "一个项目的分支、提交与未提交的改动"}
+                aria-disabled={git.disabled || undefined}
+                style={git.disabled ? REFUSED : undefined}
+                onClick={git.disabled ? (e) => e.preventDefault() : undefined}
+              >
+                <Icon name="branch" size={16} />
+                <span>Git</span>
+              </a>
+            )}
+            {lessons.show && (
+              <a
+                className={"nav-lessons " + (route[0] === "lessons" ? "active" : "")}
+                href="#/lessons"
+                title={lessons.disabled ? lessons.reason : undefined}
+                aria-disabled={lessons.disabled || undefined}
+                style={lessons.disabled ? REFUSED : undefined}
+                onClick={lessons.disabled ? (e) => e.preventDefault() : undefined}
+              >
+                <Icon name="tasks" size={16} />
+                <span>{t("nav.lessons")}</span>
+              </a>
+            )}
             <a className={"nav-extensions " + (route[0] === "extensions" || route[0] === "ext" ? "active" : "")} href="#/extensions">
               <Icon name="panel" size={16} />
               <span>扩展</span>
@@ -198,6 +313,29 @@ export function Sidebar({ route }: { route: string[] }) {
             )}
             <NeedsYou items={[...todos, ...unsortedIssues, ...unboundProjects]} agents={everyone} />
             {done > 0 && <p className="sidebar-unread">{t("sidebar.doneUnread", { n: done })}</p>}
+            {!query.trim() && work.show && (work.disabled || (works.data && works.data.length > 0)) && (
+              <section className="group works-group">
+                <div className="group-head static">
+                  <span className="group-name">{t("sidebar.works")}</span>
+                </div>
+                {work.disabled ? (
+                  <div className="nav-row" aria-disabled="true" title={work.reason} style={REFUSED}>
+                    <span className="row-link">
+                      <span className="row-label">{work.reason ?? "hub 不允许读取工作组"}</span>
+                    </span>
+                  </div>
+                ) : (
+                  works.data!.map((detail) => (
+                    <WorkRow
+                      key={detail.work.id}
+                      detail={detail}
+                      active={route[0] === "work" && route[1] === detail.work.id}
+                      selected={route[0] === "work" && route[1] === detail.work.id ? route[2] : undefined}
+                    />
+                  ))
+                )}
+              </section>
+            )}
             {!query.trim() && (pinnedMembers.length > 0 || pinnedRuns.length > 0) && (
               <section className="group">
                 <div className="group-head static">
@@ -263,6 +401,7 @@ export function Sidebar({ route }: { route: string[] }) {
           <div className="foot">
             <UpdateNotice />
             <DevHubNotice />
+            <OldHubNotice />
             <QuotaMini />
             <div className="foot-row">
               <Connection />
@@ -317,14 +456,11 @@ function NeedsYou({ items, agents }: { items: TodoItem[]; agents: Agent[] }) {
               </div>
             );
           })}
-          {visible.remaining > 0 && (
-            <button className="more" onClick={() => setAll(true)}>
-              {t("sidebar.moreTodos", { n: visible.remaining })}
-            </button>
-          )}
-          {all && items.length > 3 && (
-            <button className="more" onClick={() => setAll(false)}>
-              {t("common.less")}
+          {/* One toggle, in place: splitting it into 展开/收起 unmounts the focused button and
+              drops keyboard focus to the page top when it changes. */}
+          {items.length > 3 && (
+            <button className="more" onClick={() => setAll(!all)} aria-expanded={all}>
+              {all ? t("common.less") : t("sidebar.moreTodos", { n: visible.remaining })}
             </button>
           )}
         </>
@@ -445,17 +581,16 @@ function Capped<T>({
 }) {
   const [all, setAll] = useState(false);
   const shown = capped(items, keep, CAP, all || searching);
+  // Whether folding to CAP actually hides any row; a list whose rows are all kept shows none.
+  const collapsible = capped(items, keep, CAP, false).length < items.length;
   return (
     <>
       {shown.map(children)}
-      {items.length > shown.length && (
-        <button className="more" onClick={() => setAll(true)}>
-          {t("common.more", { n: items.length - shown.length })}
-        </button>
-      )}
-      {all && items.length > CAP && !searching && (
-        <button className="more" onClick={() => setAll(false)}>
-          {t("common.less")}
+      {/* One toggle, in place: splitting it into 更多/收起 unmounts the focused button and
+          drops keyboard focus to the page top when it changes. */}
+      {!searching && collapsible && (
+        <button className="more" onClick={() => setAll(!all)} aria-expanded={all}>
+          {all ? t("common.less") : t("common.more", { n: items.length - shown.length })}
         </button>
       )}
     </>
@@ -508,6 +643,8 @@ function SessionRow({ member, active }: { member: SidebarMember; active: boolean
   const runs = useContext(Runs);
   const work = useMemo(() => sessionWork(agent.id, runs), [agent.id, runs]);
   const plan = work.lead?.tasks ?? [];
+  // Where the run it leads works: one small glyph, since the name has to stay readable here.
+  const mode = work.lead ? modeWords(work.lead.run) : undefined;
   // A turn that just ended lights its row once: finishing is worth noticing, not worth keeping.
   const wasRunning = useRef(running);
   const [justDone, setJustDone] = useState(false);
@@ -536,7 +673,19 @@ function SessionRow({ member, active }: { member: SidebarMember; active: boolean
       compact={compact}
       flash={justDone}
       peek={peek}
-      title={displayName(agent) + " · " + status + (fresh || failed ? " · " + t("sidebar.unread") : "") + (agent.model ? " · " + agent.model : "") + "\n" + (summary || t("sidebar.noActivity")) + "\n" + t("sidebar.besideHint")}
+      title={
+        displayName(agent) +
+        " · " +
+        status +
+        (fresh || failed ? " · " + t("sidebar.unread") : "") +
+        (agent.model ? " · " + agent.model : "") +
+        (mode ? " · " + mode.label : "") +
+        "\n" +
+        (summary || t("sidebar.noActivity")) +
+        (mode ? "\n" + mode.title : "") +
+        "\n" +
+        t("sidebar.besideHint")
+      }
       dot={undefined}
       pinKey={sessionKey(agent)}
       beside={agent.id}
@@ -553,6 +702,7 @@ function SessionRow({ member, active }: { member: SidebarMember; active: boolean
         <span className="member-top">
           <span className={"member-name " + (flagged ? "strong" : "")}>{displayName(agent)}</span>
           <ModelMark plugin={agent.plugin} model={agent.model} />
+          {work.lead && <RunModeMark run={work.lead.run} className="row-mode" />}
           {compact ? <span className="member-inline" data-crawl="">{summary}</span> : <span className="member-gap" />}
           {plan.length > 0 && !running && !(!uncertain && needs > 0) && <span className="member-count">{plan.filter((task) => task.status === "merged").length}/{plan.length}</span>}
           {quiet && !plan.length && member.lastAt && <span className="member-time" title={ago(member.lastAt)}>{shortSince(member.lastAt, Date.now())}</span>}
@@ -878,6 +1028,31 @@ function DevHubNotice() {
   );
 }
 
+/**
+ * A hub built before `HubInfo.features`: its entries would just be missing, so say which — and
+ * that the version is what says so, since 0.2.6 already has some of them — and how to get the
+ * rest. Reloading reconnects and asks `/v1/info` again, which is also how a refused entry gets
+ * another try.
+ */
+function OldHubNotice() {
+  const features = useHubFeatures();
+  const hidden = hiddenByHub(features);
+  if (features.listed !== null || !hidden.length) return null;
+  const names = hidden.map((f) => FEATURE_LABELS[f]).join("、");
+  const version = features.version ?? "未知";
+  return (
+    <div
+      className="dev-hub"
+      title={`旧版 hub 的 /v1/info 不带功能清单，按版本 ${version} 推断这些入口不可用：${names}。换成同一版本的新 hub 后会自己出现。`}
+    >
+      <span>旧版 hub：按版本推断 {names} 不可用</span>
+      <button className="link" onClick={() => window.location.reload()}>
+        重新连接
+      </button>
+    </div>
+  );
+}
+
 function Connection() {
   const status = useConnectionStatus();
   const [info, setInfo] = useState<HubInfo>();
@@ -910,6 +1085,8 @@ function Versions({ hub }: { hub: HubInfo }) {
   const page = __BUILD__;
   const cmp = compareBuilds(page, hub);
   const dev = page.dev || hub.debug;
+  const features = useHubFeatures();
+  const why = missingText(features);
   const title = [
     t("build.page", {
       tag: buildTag(page),
@@ -919,6 +1096,7 @@ function Versions({ hub }: { hub: HubInfo }) {
       tag: buildTag(hub),
       dev: hub.debug ? t("build.dev") : "",
     }),
+    ...(why ? [why] : []),
     hub.home,
   ].join("\n");
   return (

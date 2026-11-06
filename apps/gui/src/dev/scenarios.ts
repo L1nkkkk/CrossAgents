@@ -5,6 +5,7 @@ import { emptyHub } from "../views/Home.mock";
 import { extensionScene } from "./extensions.mock";
 import { approvalRun, deleteRun, graphRun, handoffRun, inPlaceRun, landingRun, longResultsRun, oauthRun, pausedRun, rerouteRun, reuseRun, reviewRun, syncRun, traceRun } from "../views/Run.mock";
 import { relayScene } from "../views/RunRelay.mock";
+import { workRounds } from "../views/Work.mock";
 import { swimlaneScene } from "../views/RunSwimlane.mock";
 import { runCostScene } from "../views/RunCost.mock";
 import type { BackgroundResponse } from "@bindings/BackgroundResponse";
@@ -25,6 +26,7 @@ import { wsKey } from "../workspace";
 import { quota } from "../views/Usage.mock";
 import { workspaceState } from "../views/Workspace.mock";
 import type { MockState, Step } from "./MockBridge";
+import { FEATURES } from "../lib/features";
 
 export type Scenario = {
   key: string;
@@ -34,6 +36,7 @@ export type Scenario = {
 };
 
 export const SCENARIOS: Scenario[] = [
+  { key: "work-rounds", label: "工作组：三轮", hint: "同一个对话里连着三轮：第一轮已落地，第二轮没落地，第三轮叠在它上面；右侧「各轮」切换，对话里的分隔跟着走；侧栏一个工作组只占一行", build: () => workRounds() },
   { key: "swimlane", label: "Run 泳道图", hint: "一个 Worker 一根线：交接、提交、测试 ✓/✗、重试、改派（分叉）、合入、上下文压缩、模型切换、等你；点名字只看一根线", build: () => swimlaneScene() },
   { key: "swimlane-landed", label: "Run 泳道图 · 已落地", hint: "三条线都合入后落地，泳道以「落地」收尾", build: () => swimlaneScene(true) },
   { key: "swimlane-focus", label: "Run 泳道图 · 聚焦", hint: "只看 Rex 一根线，节点带时间", build: () => {
@@ -419,6 +422,43 @@ export const SCENARIOS: Scenario[] = [
     return { state: workspaceState(), script: [], route: `#/w/${encodeURIComponent(wsKey(REPO))}` };
   } },
   { key: "agent-workspace-narrow", label: "窄窗口与长标题", hint: "Atlas 的长话题和 #b 的长中文标题：226px 侧栏下名字、状态和摘要仍可辨认，截断不挤坏布局；窄窗口请用截图调整宽度", build: () => ({ state: workspaceState(), script: [], route: "#/s/Atlas" }) },
+  { key: "agent-workspace-auto", label: "自动审批：不出现待批卡片", hint: "三个 run 都在 awaiting_approval：登录页改版是我审批（进「需要你」），另两个是半托管与 auto_approve 的旧记录，都不该开审批卡片；Atlas 的会话里还该有一个完成未读（与待办分开计数）", build: () => {
+    const state = workspaceState();
+    const manual = state.runs.find((d) => d.run.status === "awaiting_approval");
+    const atlas = state.agents.find((a) => a.name.toLowerCase() === "atlas");
+    const iris = state.agents.find((a) => a.name.toLowerCase() === "iris");
+    if (!manual || !atlas || !iris) throw new Error("agent-workspace-auto needs an awaiting run, Atlas and Iris");
+    // The control plan stays in its lead's conversation; Atlas's session then holds only the
+    // auto-approved records, so a card there can only be a phantom one.
+    manual.run.origin_chat_id = null;
+    // Two records the hub would not leave waiting: the plan policy is auto, or the legacy
+    // auto_approve flag is set. They are planned by Atlas so its session has no manual plan to
+    // show: any card there is the phantom one this scenario is about.
+    const variant = (title: string, patch: (run: NonNullable<typeof manual>["run"]) => void) => {
+      const copy = structuredClone(manual);
+      copy.run.id = uid();
+      copy.run.planner = atlas.id;
+      copy.run.title = title;
+      copy.run.branch = `crossagents/${title}`;
+      copy.tasks = [];
+      patch(copy.run);
+      return copy;
+    };
+    const autoPolicy = variant("发布说明：半托管", (run) => {
+      run.config.policy = { ...run.config.policy, plan_approval: "auto", land: "manual", human_ask: "timeout" };
+    });
+    const autoApprove = variant("发布说明：auto_approve", (run) => {
+      run.config.auto_approve = true;
+    });
+    state.runs = [...state.runs, autoPolicy, autoApprove];
+    // A turn the person asked for ends in a conversation they are not in: an unread mark, not a todo.
+    const asked = uid();
+    const script: Step[] = [
+      { at: 650, event: { type: "agent.input", data: { id: iris.id, message_id: asked, text: "CSV 导出的编码问题查到了吗？", queued: true, from: { kind: "human" } } } },
+      { at: 900, event: { type: "agent.turn_completed", data: { id: iris.id, message_id: asked, stop_reason: "end_turn" } } },
+    ];
+    return { state, script, route: `#/s/${atlas.id}` };
+  } },
   { key: "extensions", label: "扩展：状态一栏", hint: "standup 有更新待人批准、changelog 从未启用、notes 停用了但可回到已批准的版本（还有一版等着）、big-export 的源目录超了 50 MB；下面是让 agent 做一个插件", build: () => {
     const state: MockState = { ...emptyHub(), ...extensionScene() };
     // Stopped, with a newer version waiting: 启用 re-enables the approved snapshot, 查看并启用 is
@@ -505,6 +545,49 @@ export const SCENARIOS: Scenario[] = [
     script: [],
     route: "#/extensions",
   }) },
+  { key: "hub-old", label: "旧 hub 0.2.5：没有功能清单", hint: "0.2.5 的 /v1/info 不带 features：Git、排障记录、工作组、应用到原目录都隐藏；侧栏底部和版本号 tooltip 写明「按版本推断」", build: () => {
+    const scene = workRounds();
+    return { ...scene, state: { ...scene.state, features: null, version: "0.2.5" } };
+  } },
+  { key: "hub-old-0.2.6", label: "旧 hub 0.2.6：只藏较晚的功能", hint: "0.2.6 的 /v1/info 不带 features，但 0.2.6 已有 Git 页和排障记录：只隐藏工作组、应用到原目录，提示写明是按版本推断的", build: () => {
+    const scene = workRounds();
+    return { ...scene, state: { ...scene.state, features: null, version: "0.2.6" } };
+  } },
+  { key: "hub-new", label: "新 hub：功能清单", hint: "新 hub 列出 features：Git、排障记录、工作组入口都在，工作组照常列出", build: () => {
+    const scene = workRounds();
+    return { ...scene, state: { ...scene.state, features: [...FEATURES] } };
+  } },
+  { key: "hub-old-apply", label: "旧 hub：没有「应用到原目录」", hint: "0.2.6 的 hub 不带功能清单，应用到原目录在 0.2.6 之后才有、从不按版本推断，所以仍隐藏；Git 和排障记录照常", build: () => {
+    const scene = inPlaceRun();
+    // The apply control also needs a git working copy in place (LEAD.md §11): the mock's
+    // in-place run is a plain folder, so say it is a repository to put the button on screen.
+    scene.state.runs[0].run.mode = { lead: "in_place", vcs: "git", owner: "person", retain: "keep" };
+    return { ...scene, state: { ...scene.state, features: null, version: "0.2.6" } };
+  } },
+  { key: "hub-refused", label: "403：入口置灰", hint: "hub 用 403 拒绝（凭据级别不够）：「应用到原目录」变灰，用 hub 的话说明原因，不弹报错", build: () => {
+    const scene = inPlaceRun();
+    scene.state.runs[0].run.mode = { lead: "in_place", vcs: "git", owner: "person", retain: "keep" };
+    return {
+      ...scene,
+      state: {
+        ...scene.state,
+        features: [...FEATURES],
+        forbidden: { apply: "this credential has the read level; POST /v1/runs/…/apply needs write" },
+      },
+    };
+  } },
+  { key: "hub-refused-git", label: "403：Git 入口置灰", hint: "Git 页的请求被 403 拒绝：侧栏 Git 变灰、页面写明 hub 的原因，不弹报错", build: () => {
+    const scene = workRounds();
+    return {
+      ...scene,
+      route: "#/git",
+      state: {
+        ...scene.state,
+        features: [...FEATURES],
+        forbidden: { git: "an agent's session token reaches /v1/me only; GET /v1/git/branches needs the read level" },
+      },
+    };
+  } },
   { key: "git", label: "Git 页", hint: "一个项目的分支（本地/远程）、带泳道的提交图（HEAD、分支、tag）、选中提交的详情和 diff，顶部是未提交改动数", build: () => ({
     state: { ...emptyHub(), agents: [agent({ name: "Ada", plugin: "claude", role: "worker", cwd: REPO })] },
     script: [],

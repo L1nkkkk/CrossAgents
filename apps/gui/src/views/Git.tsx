@@ -7,7 +7,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { GitBranch } from "@bindings/GitBranch";
 import type { GitStatusEntry } from "@bindings/GitStatusEntry";
-import { api, type FileScope } from "../api";
+import { api, ApiError, type FileScope } from "../api";
 import { navigate } from "../App";
 import { ErrorBox, ago, time } from "../components";
 import { ChangeStat, DiffView } from "../diffview";
@@ -21,6 +21,18 @@ const same = (a: string, b: string) => a.replace(/\\/g, "/").replace(/\/+$/, "")
 
 /** Work in the repository may have moved it on: a turn ended, a task changed state. */
 const relevant = (e: HubEvent) => e.type === "agent.turn_completed" || e.type === "task.status_changed" || e.type === "run.status_changed";
+
+async function gitRequest<T>(request: Promise<T>): Promise<T> {
+  try {
+    return await request;
+  } catch (err) {
+    if (err instanceof ApiError) {
+      if (err.code === "forbidden") throw new Error("路径不在 hub 已知的项目中。");
+      if (err.code === "conflict") throw new Error("这个项目不是 git 仓库。");
+    }
+    throw err;
+  }
+}
 
 type Projects = { paths: string[]; agents: Agent[] };
 
@@ -68,10 +80,10 @@ function entryWord(e: GitStatusEntry): string {
 
 /** Branch, upstream, ahead/behind, and how many changes are not committed. */
 function StatusBar({ path }: { path: string }) {
-  const status = useHubData(() => api.gitStatus(path), [path], relevant);
+  const status = useHubData(() => gitRequest(api.gitStatus(path)), [path], relevant);
   const [open, setOpen] = useState(false);
   useEffect(() => setOpen(false), [path]);
-  if (status.error && !status.data) return <span className="chip warn small" title={status.error}>不是可读的 git 仓库</span>;
+  if (status.error && !status.data) return <span className="chip warn small" title={status.error}>{status.error}</span>;
   if (!status.data) return <span className="muted small">读取状态…</span>;
   const s = status.data;
   const n = s.entries.length;
@@ -103,8 +115,8 @@ function StatusBar({ path }: { path: string }) {
 }
 
 function Repository({ path, agents }: { path: string; agents: Agent[] }) {
-  const branches = useHubData(() => api.gitBranches(path), [path], relevant);
-  const graph = useHubData(() => api.gitGraph(path, 300), [path], relevant);
+  const branches = useHubData(() => gitRequest(api.gitBranches(path)), [path], relevant);
+  const graph = useHubData(() => gitRequest(api.gitGraph(path, 300)), [path], relevant);
   const [picked, setPicked] = useState<string>();
   // Until something is picked, the commit HEAD is at.
   const shown = picked ?? branches.data?.head_sha ?? graph.data?.commits[0]?.sha;
@@ -155,8 +167,8 @@ function BranchList({ title, list, picked, onPick }: { title: string; list: GitB
 }
 
 function CommitDetail({ path, sha, known, onPick, fileScope }: { path: string; sha: string; known: Set<string>; onPick: (sha: string) => void; fileScope?: FileScope }) {
-  const commit = useHubData(() => api.gitCommit(path, sha), [path, sha], () => false);
-  const changes = useHubData(() => api.gitCommitDiff(path, sha), [path, sha], () => false);
+  const commit = useHubData(() => gitRequest(api.gitCommit(path, sha)), [path, sha], () => false);
+  const changes = useHubData(() => gitRequest(api.gitCommitDiff(path, sha)), [path, sha], () => false);
   const files = useMemo(() => (changes.data ? parseDiff(changes.data.diff) : []), [changes.data]);
   const c = commit.data;
   const body = c ? c.message.slice(c.subject.length).trim() : "";

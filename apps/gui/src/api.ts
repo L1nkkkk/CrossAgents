@@ -1,3 +1,4 @@
+import type { ApplyRerun } from "@bindings/ApplyRerun";
 // Typed client for the hub's local API (docs/DESIGN.md §11). Inside Electron requests go
 // through the preload bridge to the main process, which adds the bearer token; in a plain
 // browser they go to the same origin (the Vite dev server forwards them, see vite.config.ts).
@@ -55,6 +56,8 @@ import type { ExtensionLogsResponse } from "@bindings/ExtensionLogsResponse";
 import type { EnableExtensionRequest } from "@bindings/EnableExtensionRequest";
 import type { SetExtensionAutoTrustRequest } from "@bindings/SetExtensionAutoTrustRequest";
 import type { ListRunsResponse } from "@bindings/ListRunsResponse";
+import type { ListWorksResponse } from "@bindings/ListWorksResponse";
+import type { WorkDetail } from "@bindings/WorkDetail";
 import type { ListHistoryResponse } from "@bindings/ListHistoryResponse";
 import type { ListProjectsResponse } from "@bindings/ListProjectsResponse";
 import type { ListSessionCandidatesResponse } from "@bindings/ListSessionCandidatesResponse";
@@ -99,6 +102,7 @@ import type { TerminalResizeRequest } from "@bindings/TerminalResizeRequest";
 import type { TerminalTakeoverRequest } from "@bindings/TerminalTakeoverRequest";
 import type { ResolvePathsRequest } from "@bindings/ResolvePathsRequest";
 import type { ResolvePathsResponse } from "@bindings/ResolvePathsResponse";
+import { noteForbidden, noteHub } from "./lib/features";
 
 /**
  * Whose files a path is relative to: a session's working directory, a run's integration
@@ -209,7 +213,13 @@ export function refuseRequests(reason: string | undefined) {
 async function request<T>(method: Method, path: string, body?: unknown, opts: { text?: boolean } = {}): Promise<T> {
   if (refusal && path !== "/v1/info") throw new ApiError(0, "version_mismatch", refusal);
   const response = await send(method, path, body);
-  if (response.status >= 400) throw errorFromBody(response.status, response.body);
+  if (response.status >= 400) {
+    const error = errorFromBody(response.status, response.body);
+    // 403: the token's level is too low for this route (docs/API-AUTH.md §3). The entry that
+    // asked is greyed with the hub's message instead of raising it at the person.
+    if (response.status === 403) noteForbidden(path, error.message);
+    throw error;
+  }
   if (opts.text) return response.body as T;
   return (response.body ? JSON.parse(response.body) : undefined) as T;
 }
@@ -301,7 +311,14 @@ function filesSearch(scope: FileScope, q: string, all = false): Promise<FileSear
 }
 
 export const api = {
-  info: () => request<HubInfo>("GET", "/v1/info"),
+  /** Also what the hub has beyond older ones (`features`, docs/TODO.md §二): every caller of
+   * `/v1/info` is a fresh connection check, so this is where the page learns it. A hub without
+   * the list is read by version (`lib/features.ts` `WITHOUT_LIST`). */
+  info: async () => {
+    const info = await request<HubInfo>("GET", "/v1/info");
+    noteHub(info.features, info.version);
+    return info;
+  },
 
   listAgents: () => request<ListAgentsResponse>("GET", "/v1/agents"),
   listAvatars: () => request<ListAvatarsResponse>("GET", "/v1/avatars"),
@@ -388,12 +405,18 @@ export const api = {
   cancelExtensionCall: (id: string) => request<ExtensionCallResponse>("DELETE", `/v1/extensions/calls/${enc(id)}`),
 
   listRuns: () => request<ListRunsResponse>("GET", "/v1/runs"),
+  /** The work groups: a persistent conversation whose rounds are runs (docs/tasks/G1.md §3.1). */
+  listWorks: () => request<ListWorksResponse>("GET", "/v1/works"),
+  /** One work group with its rounds, and what ended rounds left behind (deleted ones too). */
+  getWork: (id: string) => request<WorkDetail>("GET", `/v1/works/${enc(id)}`),
   /** What runs left in a workspace, including the ones since deleted; every workspace's
    * without `repo`. Read-only: a deleted run's record never goes away. */
   history: (repo?: string) => request<ListHistoryResponse>("GET", `/v1/history${repo ? `?repo=${enc(repo)}` : ""}`),
   /** The projects the hub knows, with the checkouts that identify them: a project's
    * expertise profile is keyed by its id, and the page works from a directory. */
   projects: async (): Promise<ProjectInfo[]> => (await request<ListProjectsResponse>("GET", "/v1/projects")).projects,
+  getIntegration: (key: string) => request<IntegrationStatus>("GET", `/v1/runs/${enc(key)}/integration`),
+  applyRun: (key: string) => request<ApplyReport>("POST", `/v1/runs/${enc(key)}/apply`),
   getRun: (key: string) => request<RunDetail>("GET", `/v1/runs/${enc(key)}`),
   createRun: (req: CreateRunRequest) => request<Run>("POST", "/v1/runs", req),
   approveRun: (key: string, req: ApproveRunRequest = { policy: null, max_parallel: null, assignees: null }) =>
@@ -537,3 +560,6 @@ export const api = {
 export function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+export type IntegrationStatus = { outcome: string; snapshot?: string; integration?: string; applied?: string | null; diff?: string };
+export type ApplyReport = { outcome: string; reason?: string; detail?: string; files?: string[]; own_changes?: string[]; note?: string; rerun?: ApplyRerun | null };

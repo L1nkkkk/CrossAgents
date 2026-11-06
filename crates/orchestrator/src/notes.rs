@@ -51,9 +51,11 @@ impl Orchestrator {
                 let Some(note) = existing else {
                     return Ok(json!({ "deleted": false, "repeated": true }));
                 };
+                // A run's lead may remove what a teammate left; a team note has no lead, so
+                // only its author may delete it — the role says nothing about who may.
                 let lead = match run_id {
                     Some(run) => self.store.get_run(run).await?.planner == caller.id,
-                    None => caller.role == crossagents_core::Role::Planner,
+                    None => false,
                 };
                 if note.author != caller.id && !lead {
                     return Err(CoreError::Conflict(

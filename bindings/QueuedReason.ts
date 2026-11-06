@@ -6,4 +6,4 @@
  * and the raw code for one they do not know, so variants are only ever added, never
  * renamed or removed.
  */
-export type QueuedReason = "turn_running" | "owner_queue_ahead" | "external_agent" | "runtime_no_steer" | "no_active_turn" | "steer_write_failed" | "archived" | "already_started" | "attachment_refused" | "empty";
+export type QueuedReason = "turn_running" | "owner_queue_ahead" | "external_agent" | "runtime_no_steer" | "no_active_turn" | "steer_write_failed" | "outcome_unknown" | "archived" | "already_started" | "attachment_refused" | "empty";

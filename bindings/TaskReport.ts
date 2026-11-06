@@ -4,7 +4,6 @@ import type { MessageId } from "./MessageId";
 import type { RelatedLesson } from "./RelatedLesson";
 import type { ReviewFinding } from "./ReviewFinding";
 import type { ReviewVerdict } from "./ReviewVerdict";
-import type { JsonValue } from "./serde_json/JsonValue";
 
 /**
  * What is known about a task's outcome so far.
@@ -17,7 +16,7 @@ summary: string | null,
 /**
  * Structured result supplied by the worker.
  */
-result?: JsonValue | null, 
+result?: import("./serde_json/JsonValue").JsonValue | null, 
 /**
  * Latest acceptance results.
  */

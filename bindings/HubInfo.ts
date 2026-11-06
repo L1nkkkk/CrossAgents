@@ -8,4 +8,9 @@ commit?: string,
 /**
  * Built without optimizations (`cargo build`), i.e. a development build.
  */
-debug: boolean, api: string, pid: number, home: string, started_at: string, };
+debug: boolean, api: string, pid: number, home: string, started_at: string, 
+/**
+ * The `FEATURES` this build has. Missing from a hub built before the field: the GUI then
+ * treats it as an older hub and hides those entries (the sidebar's version tooltip says so).
+ */
+features: Array<string>, };

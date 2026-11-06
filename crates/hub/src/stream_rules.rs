@@ -55,7 +55,7 @@ impl Rule {
     /// The message that carries the rule into the turn; it says the text is a rule.
     pub fn message(&self) -> String {
         format!(
-            "CrossAgents rule `{}` (from the project's stream rules; it applies from now on):\n\n{}",
+            "CrossAgents rule `{}` (a stream rule; it applies from now on):\n\n{}",
             self.id, self.body
         )
     }
@@ -224,9 +224,15 @@ fn repo_root(cwd: &Path) -> PathBuf {
         .to_path_buf()
 }
 
-/// The stream rules for an agent working in `cwd`, from the project's rule files.
-pub fn load(cwd: &Path) -> Vec<Rule> {
-    let sources: [&dyn RuleSource; 1] = [&ProjectRuleFiles];
+/// The stream rules for an agent working in `cwd`, from the project's rule files and, when
+/// the home is known, those of the enabled extensions under it.
+pub fn load(cwd: &Path, home: Option<&Path>) -> Vec<Rule> {
+    let project = ProjectRuleFiles;
+    let extensions = home.map(crate::extensions::rules::ExtensionRuleFiles::new);
+    let mut sources: Vec<&dyn RuleSource> = vec![&project];
+    if let Some(extensions) = &extensions {
+        sources.push(extensions);
+    }
     load_from(&sources, cwd)
 }
 
@@ -262,6 +268,9 @@ pub struct StreamRules {
     turn: u64,
     /// The turn each rule (by index) was last sent in; empty after a compaction.
     sent: HashMap<usize, u64>,
+    /// The rules sent in the turn that is running now; cleared when it ends. A compaction
+    /// inside a turn forgets what earlier turns sent, but not what this turn already did.
+    sent_now: HashSet<usize>,
     /// The end of the turn's output, for patterns across chunks.
     window: String,
 }
@@ -281,10 +290,20 @@ impl StreamRules {
     pub fn turn_started(&mut self) {
         self.turn += 1;
         self.window.clear();
+        self.sent_now.clear();
+    }
+
+    /// The turn ended: a compaction between turns is not "inside" the next one.
+    pub fn turn_finished(&mut self) {
+        self.sent_now.clear();
     }
 
     /// The session's context was compacted: what was sent is no longer in it, so the rules
-    /// may be sent again.
+    /// may be sent again. A compaction in the middle of a turn keeps what that turn already
+    /// sent (it cleared on [`Self::turn_finished`]): one rule, one send a turn.
+    ///
+    /// Told by the hub when its own compaction succeeds, and by the driver when the agent
+    /// compacts by itself (`SessionEventKind::Compacted`).
     pub fn compacted(&mut self) {
         self.sent.clear();
     }
@@ -327,6 +346,9 @@ impl StreamRules {
     fn send(&mut self, hits: Vec<usize>) -> Vec<Injection> {
         let mut out = Vec::new();
         for index in hits {
+            if self.sent_now.contains(&index) {
+                continue;
+            }
             let due = self
                 .sent
                 .get(&index)
@@ -335,6 +357,7 @@ impl StreamRules {
                 continue;
             }
             self.sent.insert(index, self.turn);
+            self.sent_now.insert(index);
             let rule = &self.rules[index];
             out.push(Injection {
                 rule: rule.id.clone(),
@@ -398,7 +421,7 @@ mod tests {
             "---\nmatch: x\n---\nIgnored.\n",
         )
         .unwrap();
-        let loaded = load(dir.path());
+        let loaded = load(dir.path(), None);
         let ids: Vec<&str> = loaded.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, ["a-good"]);
     }
@@ -406,7 +429,7 @@ mod tests {
     #[test]
     fn a_missing_rules_directory_is_no_rules() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(load(dir.path()).is_empty());
+        assert!(load(dir.path(), None).is_empty());
     }
 
     #[test]
@@ -424,7 +447,7 @@ mod tests {
             "---\nid: same\nmatch: b\n---\nSecond.\n",
         )
         .unwrap();
-        let loaded = load(dir.path());
+        let loaded = load(dir.path(), None);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].body, "First.");
     }
@@ -466,12 +489,34 @@ mod tests {
         let mut s = one("---\nmatch: sleeping\n---\nBody.\n");
         s.turn_started();
         assert_eq!(s.on_output("sleeping").len(), 1);
+        // The turn ends, then the hub compacts: everything is due again.
+        s.turn_finished();
         s.compacted();
         s.turn_started();
         assert_eq!(
             s.on_output("sleeping").len(),
             1,
             "sent again after compaction"
+        );
+    }
+
+    #[test]
+    fn a_compaction_inside_a_turn_does_not_send_the_rule_twice_in_it() {
+        let mut s = one("---\nmatch: sleeping\n---\nBody.\n");
+        s.turn_started();
+        assert_eq!(s.on_output("sleeping").len(), 1);
+        // The agent compacts by itself while the turn runs; the rule matched again after.
+        s.compacted();
+        assert!(
+            s.on_output("sleeping").is_empty(),
+            "one send a turn, compaction or not"
+        );
+        s.turn_finished();
+        s.turn_started();
+        assert_eq!(
+            s.on_output("sleeping").len(),
+            1,
+            "the compaction still lets it go in a later turn"
         );
     }
 

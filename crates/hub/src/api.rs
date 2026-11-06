@@ -25,19 +25,20 @@ use crossagents_api_types::{
     BackgroundReminder, BackgroundResponse, BackgroundWatch, ChangesResponse, CliInfo,
     CliInstallAccepted, CommitGraph, ConnectInfo, CreateAccountRequest, CreateAgentRequest,
     CreateRunRequest, CreateWorkRequest, CreateWorkRunRequest, DeleteRunResponse, DiffSide,
-    ErrorCode, FileContentResponse, FileEntry, FileGitChange, FileKind, FileSearchResponse,
-    FileStatusEntry, FileStatusResponse, FileTreeResponse, FinishRequest, GitBranch,
-    GitBranchesResponse, GitCommitResponse, GitFileState, GitGraph, GitGraphRef, GitRefKind,
-    GitStatusEntry, GitStatusResponse, GraphCommit, GraphRef, GraphRefKind, HealthResponse,
-    HubInfo, ImageContent, InitRepoRequest, LandRequest, ListAccountsResponse, ListAgentsResponse,
-    ListAvatarsResponse, ListHistoryResponse, ListNotesResponse, ListPluginsResponse,
-    ListQuestionsResponse, ListRunsResponse, ListToolsResponse, ListWorksResponse, LoginStarted,
-    PluginInfo, QueuedReason, QuotaResponse, RejectRunRequest, RenameAgentRequest,
-    ResolvePathsRequest, ResolvePathsResponse, ResolvedPath, RunCostResponse, RunDetail, RunTrace,
-    SendMessageRequest, SendMessageResponse, SetModelRequest, SetPluginModelsRequest,
-    SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse,
-    UpdateRunPolicyRequest, UploadAvatarsRequest, UploadAvatarsResponse, UsageGroup, UsageResponse,
-    UsageSeriesGroup, UsageSeriesRange, UsageSeriesResponse, VerifyingTask, WorkDetail,
+    ErrorCode, FEATURES, FileContentResponse, FileEntry, FileGitChange, FileKind,
+    FileSearchResponse, FileStatusEntry, FileStatusResponse, FileTreeResponse, FinishRequest,
+    GitBranch, GitBranchesResponse, GitCommitResponse, GitFileState, GitGraph, GitGraphRef,
+    GitRefKind, GitStatusEntry, GitStatusResponse, GraphCommit, GraphRef, GraphRefKind,
+    HealthResponse, HubInfo, ImageContent, InitRepoRequest, LandRequest, ListAccountsResponse,
+    ListAgentsResponse, ListAvatarsResponse, ListHistoryResponse, ListNotesResponse,
+    ListPluginsResponse, ListQuestionsResponse, ListRunsResponse, ListToolsResponse,
+    ListWorksResponse, LoginStarted, PluginInfo, QueuedReason, QuotaResponse, RejectRunRequest,
+    RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse, ResolvedPath, RunCostResponse,
+    RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
+    SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript,
+    TurnDiffResponse, UpdateRunPolicyRequest, UploadAvatarsRequest, UploadAvatarsResponse,
+    UsageGroup, UsageResponse, UsageSeriesGroup, UsageSeriesRange, UsageSeriesResponse,
+    VerifyingTask, WorkDetail,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, Attachment,
@@ -319,6 +320,9 @@ impl From<CoreError> for AppError {
             | CoreError::InvalidTransition { .. }
             | CoreError::Unsupported(_) => (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
             CoreError::Agent(_) => (StatusCode::BAD_GATEWAY, ErrorCode::AgentError),
+            CoreError::OutcomeUnknown(_) => {
+                (StatusCode::GATEWAY_TIMEOUT, ErrorCode::OutcomeUnknown)
+            }
             CoreError::Storage(_) => {
                 tracing::error!(error = %err, "storage error");
                 (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal)
@@ -355,6 +359,7 @@ impl From<GitError> for AppError {
             // A directory the hub does not know is refused, not read.
             GitError::Outside(_) => (StatusCode::FORBIDDEN, ErrorCode::Forbidden),
             GitError::NotFound(_) => (StatusCode::NOT_FOUND, ErrorCode::NotFound),
+            GitError::Conflict(_) => (StatusCode::CONFLICT, ErrorCode::Conflict),
             GitError::BadRequest(_) => (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
             GitError::Failed(_) => {
                 tracing::error!(error = %err, "cannot read the git view");
@@ -493,6 +498,7 @@ async fn info(State(state): State<Arc<AppState>>) -> Json<HubInfo> {
         pid: std::process::id(),
         home: state.home.display().to_string(),
         started_at: state.started_at,
+        features: FEATURES.iter().map(|f| (*f).to_owned()).collect(),
     })
 }
 
@@ -1181,7 +1187,7 @@ async fn background(State(state): State<Arc<AppState>>) -> ApiResult<Json<Backgr
             }
         })
         .collect();
-    watches.sort_by(|a, b| b.watch.created_at.cmp(&a.watch.created_at));
+    watches.sort_by_key(|a| std::cmp::Reverse(a.watch.created_at));
 
     let mut verifying: Vec<VerifyingTask> = tasks
         .values()
@@ -1196,12 +1202,12 @@ async fn background(State(state): State<Arc<AppState>>) -> ApiResult<Json<Backgr
             key: t.key.clone(),
             title: t.title.clone(),
             assignee: t.assignee,
-            assignee_name: t.assignee.as_ref().map(&name_of),
+            assignee_name: t.assignee.as_ref().map(name_of),
             checks: t.spec.acceptance.len() as u32,
             since: t.updated_at,
         })
         .collect();
-    verifying.sort_by(|a, b| a.since.cmp(&b.since));
+    verifying.sort_by_key(|a| a.since);
 
     Ok(Json(BackgroundResponse {
         reminders,
@@ -1319,6 +1325,15 @@ async fn send_message(
                     AppError::new(StatusCode::BAD_GATEWAY, ErrorCode::AgentError, why)
                         .with_reason(reason),
                 );
+            }
+            // The write timed out: it may or may not have arrived. The GUI shows this code
+            // as "不确定发没发出去，先别重发" (docs/tasks/DELIVERY-AUDIT.md §3).
+            Err(SteerFailure::Unknown { error: why, .. }) => {
+                return Err(AppError::new(
+                    StatusCode::GATEWAY_TIMEOUT,
+                    ErrorCode::OutcomeUnknown,
+                    why,
+                ));
             }
             Err(SteerFailure::Error(err)) => return Err(err.into()),
         }
@@ -2432,7 +2447,7 @@ async fn git_commit_diff(
     Query(q): Query<GitQuery>,
 ) -> ApiResult<Json<ChangesResponse>> {
     let sha = commit_sha(&sha)?;
-    let root = state.orchestrator.git_root(q.path()).await?;
+    let root = state.orchestrator.git_repo(q.path()).await?;
     Ok(changes_response(
         crossagents_orchestrator::graph::commit_diff(&root, sha).await?,
     ))

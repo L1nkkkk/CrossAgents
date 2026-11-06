@@ -30,6 +30,8 @@ pub enum Group {
     /// A conversation of its own (not a run's lead, not anyone's recruit): may recruit
     /// teammates for itself, within its policy.
     Conversation,
+    /// A finished run's lead can start its next round without holding a claim.
+    ContinueRun,
 }
 
 impl Group {
@@ -40,6 +42,7 @@ impl Group {
             Self::Assignee => "assignee",
             Self::Reviewer => "reviewer",
             Self::Conversation => "conversation",
+            Self::ContinueRun => "continue_run",
         }
     }
 }
@@ -48,22 +51,28 @@ impl Group {
 /// gets a role's group only while a run holds it in that role, except a planner or reviewer
 /// chat, which keeps its own (a run may take it in place, without a new session that would
 /// list the tools again). A plain chat, a worker, carries no run tools (docs/SESSION-FIRST.md
-/// §7).
+/// §7). This function derives execution-session groups from the claim, not the creation role.
+/// `Orchestrator::groups` also grants a finished lead the separate continuation permission.
 pub fn groups_of(agent: &Agent, held: Option<ClaimRole>) -> Vec<Group> {
     let mut groups = vec![Group::Everyone];
     // Whether it is in a run right now is checked when it recruits. A planner the person
     // talks to in a chat leads no run there: it is a conversation too.
     let conversation = agent.recruiter().is_none() && agent.config.get("spawned_by_run").is_none();
-    let role = match (conversation, held) {
-        (true, Some(ClaimRole::Lead)) => Some(Group::Lead),
-        (true, Some(ClaimRole::Worker)) => Some(Group::Assignee),
-        (true, Some(ClaimRole::Reviewer)) => Some(Group::Reviewer),
-        (true, None) if agent.role == Role::Worker => None,
-        _ => Some(match agent.role {
-            Role::Planner => Group::Lead,
-            Role::Worker => Group::Assignee,
-            Role::Reviewer => Group::Reviewer,
-        }),
+    // A run's claim is what gives run tools, whatever the agent was made as.
+    let role = match held {
+        Some(ClaimRole::Lead) => Some(Group::Lead),
+        Some(ClaimRole::Worker) => Some(Group::Assignee),
+        Some(ClaimRole::Reviewer) => Some(Group::Reviewer),
+        // A conversation starts in the group its creation role names — a planner chat is
+        // where a run usually begins — but a run's claim is what gives it run duties.
+        None if conversation => match agent.role {
+            Role::Planner => Some(Group::Lead),
+            Role::Worker => None,
+            Role::Reviewer => Some(Group::Reviewer),
+        },
+        // An execution session's role is how it was made, not what it may do: outside a claim
+        // it holds no run tools, so a planner-role recruit cannot lead by accident.
+        None => None,
     };
     groups.extend(role);
     if conversation {
@@ -79,10 +88,22 @@ impl Orchestrator {
             Ok(claim) => claim.map(|c| c.role),
             Err(err) => {
                 tracing::warn!(agent = %agent.id, error = %err, "cannot read the agent's claim");
-                None
+                return groups_of(agent, None);
             }
         };
-        groups_of(agent, held)
+        let mut groups = groups_of(agent, held);
+        if held.is_none() {
+            match self.run_of(agent.id).await {
+                Ok(Some((run, _))) if run.planner == agent.id && run.status.is_terminal() => {
+                    groups.push(Group::ContinueRun);
+                }
+                Err(err) => {
+                    tracing::warn!(agent = %agent.id, error = %err, "cannot read the agent's run");
+                }
+                _ => {}
+            }
+        }
+        groups
     }
 }
 

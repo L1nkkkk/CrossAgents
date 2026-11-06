@@ -48,6 +48,52 @@ async fn a_queued_send_says_what_it_waits_for() {
     assert_eq!(third["queued_reason"], "owner_queue_ahead", "{third}");
 }
 
+/// Reloading the transcript keeps what the live events said: why a waiting message waits,
+/// and one taken back is still there, marked, instead of vanishing
+/// (docs/TODO.md §二十五「2 的尾巴」).
+#[tokio::test]
+async fn a_reloaded_transcript_keeps_the_queue_reason_and_the_withdrawal() {
+    let t = TestHub::start().await;
+    let agent = t.add_agent("Vera", None).await;
+    let mut w = t.watch().await;
+
+    t.send(&agent.id.to_string(), "first [slow]").await;
+    output_with(&mut w, "working").await;
+    let waiting = t.send(&agent.id.to_string(), "SECOND PEAR").await;
+    let waiting_id = message_id(&waiting);
+    let taken_back = t.send(&agent.id.to_string(), "THIRD PLUM").await;
+    let taken_back_id = message_id(&taken_back);
+
+    let resp = t
+        .delete(&format!("/v1/agents/{}/messages/{taken_back_id}", agent.id))
+        .await;
+    assert_eq!(resp.status(), 204, "{}", resp.text().await.unwrap());
+
+    let transcript: Value = t
+        .get(&format!("/v1/agents/{}/transcript", agent.id))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let turns = transcript["turns"].as_array().unwrap();
+    let waiting_turn = turns
+        .iter()
+        .find(|turn| turn["message_id"] == json!(waiting_id))
+        .unwrap_or_else(|| panic!("no waiting turn in {transcript:#?}"));
+    assert_eq!(
+        waiting_turn["queued_reason"], "turn_running",
+        "the reason the live events showed is missing after a reload: {transcript:#?}"
+    );
+    assert!(waiting_turn["withdrawn"].is_null(), "{waiting_turn}");
+
+    let withdrawn = turns
+        .iter()
+        .find(|turn| turn["message_id"] == json!(taken_back_id))
+        .unwrap_or_else(|| panic!("the withdrawn row vanished on a reload: {transcript:#?}"));
+    assert_eq!(withdrawn["withdrawn"], true, "{withdrawn}");
+    assert!(withdrawn["started_at"].is_null(), "{withdrawn}");
+}
+
 /// A driver that cannot steer (ACP) queues a `steer: true` message behind the running
 /// turn, and says why: `runtime_no_steer`, never a silent queue.
 #[tokio::test]

@@ -399,24 +399,10 @@ impl Orchestrator {
     }
 
     async fn switch_round(&self, path: &Path, branch: &str, base: &str) -> Result<(), CoreError> {
-        use crossagents_core::process::NoWindow;
         if !self.workspaces.uncommitted(path).await?.is_empty() {
             return Err(CoreError::Conflict("the retained checkout has uncommitted changes; commit them on the previous round before starting the next round".into()));
         }
-        let out = tokio::process::Command::new("git")
-            .no_window()
-            .args(["checkout", "-b", branch, base])
-            .current_dir(path)
-            .output()
-            .await
-            .map_err(|e| CoreError::Agent(format!("cannot switch round: {e}")))?;
-        if !out.status.success() {
-            return Err(CoreError::Conflict(format!(
-                "cannot switch round: {}",
-                String::from_utf8_lossy(&out.stderr)
-            )));
-        }
-        Ok(())
+        self.workspaces.create_branch(path, branch, base).await
     }
 
     /// Where `run`'s tasks work: git worktrees, or the directory itself. By what the
@@ -745,6 +731,14 @@ impl Orchestrator {
             created_at: now,
             updated_at: now,
         };
+        if versioned && !run.branch.is_empty() {
+            let original = run.branch.clone();
+            let mut suffix = 2;
+            while self.workspaces.has_branch(&repo, &run.branch).await {
+                run.branch = format!("{original}-{suffix}");
+                suffix += 1;
+            }
+        }
         // A directory without version control is one place, so one task at a time there. A
         // lead in place in a repository dispatches workers into worktrees of their own (P3),
         // so its tasks may run side by side as any run's do.
@@ -766,7 +760,7 @@ impl Orchestrator {
             .is_some_and(|old| old.works_in_checkout() && self.integration_path(old).exists());
         if reused {
             // Claim the same session before touching its checkout. No place/copy is needed.
-            self.lead_self(&run, &planner, restore).await?;
+            self.lead_self(&run, &planner, restore, source.is_some()).await?;
             if let Err(err) = self
                 .switch_round(&self.integration_path(&run), &run.branch, &base_branch)
                 .await
@@ -818,7 +812,7 @@ impl Orchestrator {
         } else if reused {
             Ok((planner.clone(), false))
         } else if (previous.is_some() && previous_home) || fresh == Some(false) {
-            self.lead_self(&run, &planner, restore).await
+            self.lead_self(&run, &planner, restore, source.is_some()).await
         } else if fresh == Some(true) {
             self.copy_lead(&planner, run.id, &self.integration_path(&run))
                 .await
@@ -847,7 +841,7 @@ impl Orchestrator {
             }
             return Err(err);
         }
-        self.publish(EventKind::RunCreated { run: run.clone() })
+        self.publish(EventKind::RunCreated { run: Box::new(run.clone()) })
             .await;
         if let Some(id) = work_id {
             let mut work = self.store.get_work(id).await?;
@@ -1008,6 +1002,7 @@ impl Orchestrator {
         run: &Run,
         planner: &Agent,
         restore: bool,
+        allow_serving_person: bool,
     ) -> Result<(Agent, bool), CoreError> {
         let same_checkout = planner.cwd == self.integration_path(run);
         let continuing = same_checkout
@@ -1017,7 +1012,7 @@ impl Orchestrator {
             });
         self.may_take_self_with_move(run, planner, restore, !run.in_place && !same_checkout)
             .await?;
-        if !continuing && self.host.serving_person(planner.id).await {
+        if !allow_serving_person && self.host.serving_person(planner.id).await {
             return Err(CoreError::Busy(format!(
                 "{} is answering a person, or a person's message waits for it: try again later",
                 planner.name

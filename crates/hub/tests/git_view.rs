@@ -377,6 +377,14 @@ async fn a_commit_has_its_author_message_and_parents() {
             .status(),
         StatusCode::NOT_FOUND
     );
+    assert_eq!(
+        t.git_get("/v1/git/commits/deadbeef/diff", repo.path())
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
 }
 
 // ---------------------------------------------------------------------------------------
@@ -477,16 +485,27 @@ async fn only_project_directories_the_hub_knows_are_read() {
         StatusCode::OK
     );
 
-    // A path the hub does not know, even an existing repository, is refused.
+    // Every endpoint refuses unknown projects and known non-repositories alike.
     let (stranger, _) = repository();
-    assert_eq!(
-        t.git_get("/v1/git/branches", stranger.path())
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::FORBIDDEN
-    );
+    let plain = tempfile::tempdir().unwrap();
+    t.create_agent("plain", plain.path()).await;
+    for route in [
+        "/v1/git/branches",
+        "/v1/git/status",
+        "/v1/git/graph",
+        "/v1/git/commits/deadbeef",
+        "/v1/git/commits/deadbeef/diff",
+    ] {
+        for (path, expected, code) in [
+            (stranger.path(), StatusCode::FORBIDDEN, "forbidden"),
+            (plain.path(), StatusCode::CONFLICT, "conflict"),
+        ] {
+            let response = t.git_get(route, path).send().await.unwrap();
+            assert_eq!(response.status(), expected, "{route}");
+            let body: serde_json::Value = response.json().await.unwrap();
+            assert_eq!(body["error"]["code"], code, "{route}");
+        }
+    }
 
     // `..` may not lead out of a project.
     let escape = format!("{}/../stranger", repo.path().display());
@@ -540,18 +559,6 @@ async fn only_project_directories_the_hub_knows_are_read() {
     }
     #[cfg(unix)]
     assert!(linked, "a symlink could not be created");
-
-    // A directory the hub knows but that is not a repository is a bad request.
-    let plain = tempfile::tempdir().unwrap();
-    t.create_agent("plain", plain.path()).await;
-    assert_eq!(
-        t.git_get("/v1/git/status", plain.path())
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::BAD_REQUEST
-    );
 
     // Reading is all the read-only token may do here.
     let status = t

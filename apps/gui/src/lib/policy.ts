@@ -45,6 +45,16 @@ export function presetOf(policy: RunPolicy): Preset | undefined {
   });
 }
 
+/**
+ * Whether a plan waits for the person: the policy asks for it, and the legacy `auto_approve`
+ * flag is not set. An auto-approved run that is still recorded in `awaiting_approval` (a race,
+ * or a record from before the policy took effect) gets no approval card anywhere.
+ */
+export function planWaitsForPerson(run: { config: { auto_approve: boolean; policy?: RunPolicy | null } }): boolean {
+  const policy = run.config.policy ?? DEFAULT_POLICY;
+  return policy.plan_approval === "required" && !run.config.auto_approve;
+}
+
 /** "$5 · 2 小时" for the caps that are set; empty when none is. */
 export function budgetText(budget: RunPolicy["budget"]): string {
   const parts: string[] = [];

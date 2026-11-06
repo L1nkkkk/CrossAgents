@@ -645,6 +645,10 @@ impl Translator {
                 })
                 .unwrap_or_default(),
             Some("system") => match message.get("subtype").and_then(Value::as_str) {
+                // Claude Code compacted the conversation by itself (its context filled up):
+                // the earlier messages are gone from the model's context. A `/compact` the
+                // hub asked for does not show here, because `compacting` filters it.
+                Some("compact_boundary") => vec![SessionEventKind::Compacted],
                 Some("api_retry") => vec![SessionEventKind::Warning {
                     message: format!(
                         "API request failed ({}); retrying, attempt {}",
@@ -1787,6 +1791,24 @@ mod tests {
             .is_empty());
         t.compacting = false;
         assert_eq!(t.translate(&delta).len(), 1);
+    }
+
+    #[test]
+    fn an_auto_compaction_says_the_context_was_compacted() {
+        // As Claude Code prints an automatic compaction, in the middle of a turn (trimmed).
+        let boundary = json!({
+            "type": "system", "subtype": "compact_boundary",
+            "compact_metadata": { "trigger": "auto", "pre_tokens": 167219, "post_tokens": 15092 },
+        });
+        let mut t = Translator::default();
+        let events = t.translate(&boundary);
+        assert!(
+            matches!(events.as_slice(), [SessionEventKind::Compacted]),
+            "{events:?}"
+        );
+        // A `/compact` the hub asked for is the hub's own business: no second event.
+        t.compacting = true;
+        assert!(t.translate(&boundary).is_empty());
     }
 
     #[test]

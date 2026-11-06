@@ -16,6 +16,11 @@ pub trait WorkspaceProvider: Send + Sync {
     async fn versioned(&self, dir: &Path) -> bool;
     /// The branch `repo` currently has checked out.
     async fn current_branch(&self, repo: &Path) -> Result<String, CoreError>;
+    /// Create and check out a branch in an existing checkout.
+    async fn create_branch(&self, path: &Path, branch: &str, base: &str) -> Result<(), CoreError> {
+        let _ = (path, branch, base);
+        Err(CoreError::Conflict("branch creation is unsupported by this workspace provider".into()))
+    }
     /// Creates `branch` from `base` in a new working copy at `path`.
     async fn create(
         &self,
@@ -304,6 +309,10 @@ async fn merge_or_undo(
 
 #[async_trait]
 impl WorkspaceProvider for GitWorkspaces {
+    async fn create_branch(&self, path: &Path, branch: &str, base: &str) -> Result<(), CoreError> {
+        git_locked(path, &["checkout", "-b", branch, base]).await?;
+        Ok(())
+    }
     async fn versioned(&self, dir: &Path) -> bool {
         git(dir, &["rev-parse", "--verify", "-q", "HEAD"])
             .await
@@ -1264,6 +1273,16 @@ mod tests {
         let ws = GitWorkspaces;
         assert!(ws.commit_all(dir.path(), "init").await.unwrap());
         dir
+    }
+
+    #[tokio::test]
+    async fn creates_round_branch_in_existing_checkout_without_overwriting() {
+        let repo = repo().await;
+        let ws = GitWorkspaces;
+        ws.create_branch(repo.path(), "round", "main").await.unwrap();
+        assert_eq!(ws.current_branch(repo.path()).await.unwrap(), "round");
+        assert!(ws.create_branch(repo.path(), "round", "main").await.is_err());
+        assert_eq!(ws.current_branch(repo.path()).await.unwrap(), "round");
     }
 
     #[tokio::test]

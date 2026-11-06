@@ -19,6 +19,7 @@ const PLANNER: &[Group] = &[Group::Lead];
 const WORKER: &[Group] = &[Group::Assignee];
 const REVIEWER: &[Group] = &[Group::Reviewer];
 const RECRUITERS: &[Group] = &[Group::Lead, Group::Conversation];
+const NEXT_ROUND: &[Group] = &[Group::Lead, Group::Conversation, Group::ContinueRun];
 const CONVERSATION: &[Group] = &[Group::Conversation];
 
 struct ToolDef {
@@ -444,7 +445,7 @@ const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "run_next",
         description: "Start the next round in your work group after your run ended. Write the person's request verbatim. Uses this group's plan policy. If moving your session must wait for this turn to end, returns status scheduled instead of a run id; the hub waits up to 120 seconds for you to be idle and notifies you if it fails. Creation then uses the GUI path and its existing bounds; after 120 seconds in creation a notice reports that it is still starting and has not been cancelled. A schedule is not persistent: a hub restart loses it, so call run_next again after restart. Set from to base to leave the previous round's unlanded changes behind.",
-        groups: RECRUITERS,
+        groups: NEXT_ROUND,
         schema: || {
             object(
                 json!({
@@ -652,13 +653,13 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "agent_spawn",
-        description: "Recruit a teammate: a new agent you can then give work. As a run's lead, for the run (default plugin and model: the run's default worker's); in a conversation outside any run, for this conversation (default: your own plugin and model; it works in your folder and is archived with the conversation). Give a model (as agent_list or the person names it: haiku, sonnet, gpt-6-luna) to choose what it runs on; the plugin follows from the model, whichever vendor it is; name is what it is called (a person's name, not a model's; leave it out to get one). Optional: role (worker or reviewer), title, persona. The policy caps how many you may recruit and which models; when it refuses, the error says why: tell the person, do not substitute another agent and report it as done.",
+        description: "Recruit a teammate: a new agent you can then give work. As a run's lead, for the run (default plugin and model: the run's default worker's); in a conversation outside any run, for this conversation (default: your own plugin and model; it works in your folder and is archived with the conversation). Give a model (as agent_list or the person names it: haiku, sonnet, gpt-6-luna) to choose what it runs on; the plugin follows from the model, whichever vendor it is; name is what it is called (a person's name, not a model's; leave it out to get one). Optional: role (a label for the record: planner, worker or reviewer; it does not decide what the recruit may do), title, persona. The policy caps how many you may recruit and which models; when it refuses, the error says why: tell the person, do not substitute another agent and report it as done.",
         groups: RECRUITERS,
         schema: || {
             object(
                 json!({
                     "name": { "type": "string" },
-                    "role": { "type": "string", "enum": ["worker", "reviewer"] },
+                    "role": { "type": "string", "enum": ["planner", "worker", "reviewer"] },
                     "plugin": { "type": "string" },
                     "model": { "type": "string" },
                     "display_name": { "type": "string" },
@@ -1272,6 +1273,10 @@ mod tests {
         let reviewer = names(Group::Reviewer);
         assert!(reviewer.contains(&"review_submit") && reviewer.contains(&"whoami"));
         assert!(!reviewer.contains(&"task_complete"));
+        let continuation = names(Group::ContinueRun);
+        assert!(continuation.contains(&"run_next"));
+        assert!(!continuation.contains(&"plan_submit"));
+        assert!(!continuation.contains(&"agent_spawn"));
         for tool in TOOLS {
             let schema = (tool.schema)();
             assert_eq!(schema["type"], "object", "{}", tool.name);

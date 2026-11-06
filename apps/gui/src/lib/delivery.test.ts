@@ -13,6 +13,7 @@ const ALL: QueuedReason[] = [
   "runtime_no_steer",
   "no_active_turn",
   "steer_write_failed",
+  "outcome_unknown",
   "archived",
   "already_started",
   "attachment_refused",

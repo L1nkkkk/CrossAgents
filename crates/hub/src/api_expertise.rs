@@ -72,6 +72,9 @@ impl From<CoreError> for Refusal {
             | CoreError::InvalidTransition { .. }
             | CoreError::Unsupported(_) => (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
             CoreError::Agent(_) => (StatusCode::BAD_GATEWAY, ErrorCode::AgentError),
+            CoreError::OutcomeUnknown(_) => {
+                (StatusCode::GATEWAY_TIMEOUT, ErrorCode::OutcomeUnknown)
+            }
             CoreError::Storage(_) => {
                 tracing::error!(error = %err, "storage error");
                 (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal)

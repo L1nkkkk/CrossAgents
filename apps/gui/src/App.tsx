@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { RunDetail } from "@bindings/RunDetail";
 import { api, getBridge } from "./api";
@@ -22,10 +22,12 @@ import { UsageView } from "./views/Usage";
 import { ExpertiseView } from "./views/Expertise";
 import { LessonsView } from "./views/Lessons/Lessons";
 import { WorkspaceView } from "./views/Workspace";
+import { WorkView } from "./views/Work";
 import { GitView } from "./views/Git";
 import { ExtensionDetail } from "./extensions/page/Detail";
 import { ExtensionsView } from "./extensions/page/Extensions";
 import { ExtensionPageView } from "./extensions/page/Host";
+import { FEATURE_LABELS, useFeatureSupport, type FeatureSupport } from "./lib/features";
 
 /** `#/runs/<id>` → `["runs", "<id>"]`. */
 function useRoute(): string[] {
@@ -139,6 +141,30 @@ function VersionMismatchView({ hub, gui }: VersionMismatch) {
   );
 }
 
+/**
+ * A page this hub does not have: an older hub that listed no features, or one that refused the
+ * page's request (403) and said why (`support.reason`). The entry is hidden or greyed in the
+ * sidebar; a link that still leads here gets this in place of a view that would only error.
+ */
+function UnavailablePage({ label, support }: { label: string; support: FeatureSupport }) {
+  const why = support.reason ?? "这个 hub 是较早的版本，没有这个功能。把 hub 换成同一版本后重新连接即可。";
+  // A refusal is about this credential and the hub has just said why; an old hub's reason is
+  // in the version tooltip, which is where a person compares versions anyway.
+  const where = support.reason
+    ? "侧栏里这个入口已经变灰，悬停可以再看一次这条消息。"
+    : "侧栏版本号的提示里写着原因。";
+  return (
+    <div className="version-mismatch" role="alert">
+      <h2>{label}{support.reason ? "现在不可用" : "在这个 hub 上不可用"}</h2>
+      <p>{why}</p>
+      <p>
+        {where}
+        <a href="#/">回到首页</a>。
+      </p>
+    </div>
+  );
+}
+
 export function App() {
   const route = useRoute();
   const [section, a, b, c] = route;
@@ -158,6 +184,13 @@ export function App() {
     if (routeTask) routeTool("task");
   }, [routeTask]);
   const mismatch = useVersionMismatch();
+  // Pages an older hub does not have, and pages whose request it refused (docs/TODO.md §二).
+  const git = useFeatureSupport("git");
+  const lessons = useFeatureSupport("lessons");
+  const work = useFeatureSupport("work");
+  /** The page itself when the hub has it; the explanation when it does not or refused it. */
+  const orOff = (support: FeatureSupport, label: string, page: ReactNode) =>
+    support.known && (!support.show || support.disabled) ? <UnavailablePage label={label} support={support} /> : page;
 
   // Picking something in the floating sidebar puts it away.
   const where = window.location.hash;
@@ -233,6 +266,10 @@ export function App() {
     case "w":
       main = a ? <WorkspaceView key={a} wsKey={a} /> : <HomeView />;
       break;
+    // 一个工作组：主导的对话连续不断，各轮是其中的分隔（docs/tasks/G1.md §3.5）。
+    case "work":
+      main = orOff(work, FEATURE_LABELS.work, a ? <WorkView key={a} workId={a} roundId={b} /> : <HomeView />);
+      break;
     case "agents":
       // The old 队友 page lives on as 设置 → 智能体.
       main = <SettingsView page="agents" />;
@@ -244,7 +281,7 @@ export function App() {
       main = <ExpertiseView />;
       break;
     case "lessons":
-      main = <LessonsView />;
+      main = orOff(lessons, FEATURE_LABELS.lessons, <LessonsView />);
       break;
     case "settings":
       main = <SettingsView page={a} />;
@@ -257,7 +294,7 @@ export function App() {
       main = a && b ? <ExtensionPageView extension={a} id={b} /> : <ExtensionsView />;
       break;
     case "git":
-      main = <GitView path={a} />;
+      main = orOff(git, FEATURE_LABELS.git, <GitView path={a} />);
       break;
     default:
       main = <HomeView />;
@@ -270,7 +307,7 @@ export function App() {
   const below = !!tools && !floatTools && bottom.open && bottom.tabs.some(shows);
   const app = (
     <div
-      className={`app ${drawer ? (floatTools ? "drawer-float" : "with-drawer") : ""} ${sidebar.docked ? "" : "no-sidebar"}`}
+      className={`app ${drawer ? (floatTools ? "drawer-float" : "with-drawer") : ""} ${sidebar.docked ? "" : "no-sidebar"} ${widths.sidebar < 215 ? "sidebar-tight" : ""}`}
       style={{ "--sidebar-width": `${widths.sidebar}px`, "--tools-width": `${widths.tools}px`, "--bottom-height": `${widths.bottom}px` } as CSSProperties}
     >
       {sidebar.docked && <Sidebar route={route} />}

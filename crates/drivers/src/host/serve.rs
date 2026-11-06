@@ -341,8 +341,7 @@ pub async fn serve(dir: PathBuf, id: String) -> Result<(), String> {
                     (id.clone(), token.clone(), pid),
                     input.clone(),
                     close_input.clone(),
-                    kill.clone(),
-                    hub_kill.clone(),
+                    (kill.clone(), hub_kill.clone()),
                 ));
             }
         }
@@ -437,8 +436,7 @@ async fn handle(
     (id, token, pid): (String, String, Option<u32>),
     input: InputSender,
     close_input: watch::Sender<bool>,
-    kill: Arc<Notify>,
-    hub_kill: Arc<AtomicBool>,
+    (kill, hub_kill): (Arc<Notify>, Arc<AtomicBool>),
 ) {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read);
@@ -612,8 +610,7 @@ mod tests {
                     ("id".into(), "token".into(), None),
                     input,
                     close,
-                    kill,
-                    Arc::new(AtomicBool::new(false)),
+                    (kill, Arc::new(AtomicBool::new(false))),
                 )
                 .await;
             }
@@ -1077,8 +1074,7 @@ mod tests {
                         ("id".into(), "token".into(), None),
                         input.clone(),
                         close.clone(),
-                        kill.clone(),
-                        Arc::new(AtomicBool::new(false)),
+                        (kill.clone(), Arc::new(AtomicBool::new(false))),
                     ));
                 }
             }
@@ -1159,8 +1155,7 @@ mod tests {
                     ("id".into(), "token".into(), None),
                     input,
                     close,
-                    kill.clone(),
-                    Arc::new(AtomicBool::new(false)),
+                    (kill.clone(), Arc::new(AtomicBool::new(false))),
                 ));
                 kill.notified().await;
                 state.push(|seq| FromHost::Exit {

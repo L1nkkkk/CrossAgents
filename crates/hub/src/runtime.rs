@@ -104,6 +104,13 @@ pub enum SteerFailure {
         reason: QueuedReason,
         error: String,
     },
+    /// The write timed out: it may or may not have reached the CLI. Nothing is queued and
+    /// it is not sent again; the sender is told the outcome is unknown
+    /// (docs/tasks/DELIVERY-AUDIT.md §3, §4).
+    Unknown {
+        message_id: MessageId,
+        error: String,
+    },
     /// Nothing was delivered for another reason (the agent is archived, it stopped, ...).
     Error(CoreError),
 }
@@ -118,12 +125,19 @@ impl From<CoreError> for SteerFailure {
 enum ClientEntry {
     Pending(Arc<Notify>),
     Done(Delivery),
+    /// The write may have reached the agent: a repeat must not write it again.
+    Unknown(MessageId),
 }
 
 /// How many finished deliveries one agent keeps by client id. A hub runs for weeks, so the
 /// ids it will never see again are dropped oldest first instead of piling up; a send still
 /// in flight (`Pending`) is never dropped (docs/tasks/DELIVERY-AUDIT.md §4).
 const CLIENT_HISTORY: usize = 256;
+
+/// The answer to a repeat of a message whose earlier write timed out: it may already be in,
+/// so writing it again could make the model read it twice.
+const UNKNOWN_REPEAT: &str = "the earlier attempt may or may not have reached the agent; \
+                              it was not sent again";
 
 /// Deliveries by fixed client id, per agent, bounded to [`CLIENT_HISTORY`] each.
 #[derive(Default)]
@@ -153,17 +167,27 @@ impl ClientLog {
             .insert(client, ClientEntry::Pending(wait));
     }
 
-    /// Keeps the delivery for repeats (dropping this agent's oldest kept one once they pass
-    /// [`CLIENT_HISTORY`]), or frees the id when nothing was delivered.
-    fn settle(&mut self, agent: AgentId, client: MessageId, delivery: Option<Delivery>) {
-        let Some(delivery) = delivery else {
-            if let Some(entries) = self.agents.get_mut(&agent) {
-                entries.entries.remove(&client);
+    /// Keeps what the first send on an id turned into (dropping this agent's oldest kept one
+    /// once they pass [`CLIENT_HISTORY`]), or frees the id when nothing was delivered.
+    fn settle(&mut self, agent: AgentId, client: MessageId, settled: Settled<'_>) {
+        match settled {
+            Settled::Delivery(delivery) => {
+                self.keep(agent, client, ClientEntry::Done(delivery.clone()));
             }
-            return;
-        };
+            Settled::Unknown(message_id) => {
+                self.keep(agent, client, ClientEntry::Unknown(message_id));
+            }
+            Settled::Nothing => {
+                if let Some(entries) = self.agents.get_mut(&agent) {
+                    entries.entries.remove(&client);
+                }
+            }
+        }
+    }
+
+    fn keep(&mut self, agent: AgentId, client: MessageId, entry: ClientEntry) {
         let entries = self.agents.entry(agent).or_default();
-        entries.entries.insert(client, ClientEntry::Done(delivery));
+        entries.entries.insert(client, entry);
         entries.order.push_back(client);
         while entries.order.len() > CLIENT_HISTORY {
             if let Some(oldest) = entries.order.pop_front() {
@@ -183,8 +207,20 @@ impl ClientLog {
 enum ClientClaim {
     /// This id was already delivered: answer with that delivery.
     Repeat(Delivery),
+    /// This id's earlier write may have reached the agent: answer "unknown" again and do
+    /// not write it twice.
+    RepeatUnknown(MessageId),
     /// The first send on this id: deliver, then [`Runtime::settle_client`] it.
     First(Option<(MessageId, Arc<Notify>)>),
+}
+
+/// What a first send on a client id settled to, for repeats.
+enum Settled<'a> {
+    Delivery(&'a Delivery),
+    /// The write may or may not have arrived; the id must not send it again.
+    Unknown(MessageId),
+    /// Refused before delivery: the same id may try again.
+    Nothing,
 }
 
 impl Drop for Live {
@@ -374,6 +410,10 @@ pub struct Runtime {
     bus: Arc<EventBus>,
     plugins: PluginRegistry,
     setup: Option<Arc<dyn SessionSetup>>,
+    /// The CrossAgents home, for what a session reads from it as it starts (an extension's
+    /// stream rules). `None` when the runtime was built without one: then only the
+    /// project's own rules are read.
+    home: Option<PathBuf>,
     live: LiveMap,
     /// Serializes start/stop per agent without blocking other agents.
     locks: Mutex<HashMap<AgentId, Arc<Mutex<()>>>>,
@@ -407,6 +447,7 @@ enum Control {
     /// The session's context was compacted (`Runtime::compact`): stream rules may repeat.
     Compacted,
     Stopped,
+    Detached,
 }
 
 /// A session's event and control channels.
@@ -445,6 +486,7 @@ impl Runtime {
             bus,
             plugins,
             setup: None,
+            home: None,
             live: LiveMap::default(),
             locks: Mutex::default(),
             digests: Mutex::default(),
@@ -460,6 +502,12 @@ impl Runtime {
 
     pub fn with_setup(mut self, setup: Arc<dyn SessionSetup>) -> Self {
         self.setup = Some(setup);
+        self
+    }
+
+    /// The home whose enabled extensions contribute stream rules to a new session.
+    pub fn with_home(mut self, home: PathBuf) -> Self {
+        self.home = Some(home);
         self
     }
 
@@ -721,7 +769,7 @@ impl Runtime {
         let lives: Vec<(AgentId, Arc<Live>)> = self.live.lock().await.drain().collect();
         for (id, live) in lives {
             if live.session.outlives_hub() {
-                let _ = live.control.send(Control::Stopped);
+                let _ = live.control.send(Control::Detached);
                 continue;
             }
             self.withdraw_waiting(id, &live).await;
@@ -1297,7 +1345,7 @@ impl Runtime {
         });
         // The stream rules of the agent's workspace, read as its session starts.
         let rules = match self.store().get_agent(&AgentKey::Id(id)).await {
-            Ok(agent) => StreamRules::new(stream_rules::load(&agent.cwd)),
+            Ok(agent) => StreamRules::new(stream_rules::load(&agent.cwd, self.home.as_deref())),
             Err(_) => StreamRules::default(),
         };
         tokio::spawn(forward_events(
@@ -1406,13 +1454,24 @@ impl Runtime {
         let claim = self.claim_client(stored.id, client_message_id).await;
         let claimed = match claim {
             ClientClaim::Repeat(delivery) => return Ok(delivery),
+            ClientClaim::RepeatUnknown(message_id) => {
+                return Err(SteerFailure::Unknown {
+                    message_id,
+                    error: UNKNOWN_REPEAT.into(),
+                });
+            }
             ClientClaim::First(claimed) => claimed,
         };
         let outcome = self.steer_once(key, envelope).await;
-        // A steer that went in or was queued is this client id's answer from now on; a
-        // refused one is not, so the same id can try again.
-        self.settle_client(stored.id, claimed, outcome.as_ref().ok())
-            .await;
+        // A steer that went in or was queued is this client id's answer from now on; one
+        // whose write timed out is answered "unknown" again, never written twice; a refused
+        // one frees the id, so the same id can try again.
+        let settled = match &outcome {
+            Ok(delivery) => Settled::Delivery(delivery),
+            Err(SteerFailure::Unknown { message_id, .. }) => Settled::Unknown(*message_id),
+            Err(_) => Settled::Nothing,
+        };
+        self.settle_client(stored.id, claimed, settled).await;
         outcome
     }
 
@@ -1522,6 +1581,27 @@ impl Runtime {
                             .await
                             .map_err(Into::into)
                     }
+                    // No answer came before the timeout: the CLI may or may not have the
+                    // message. It is neither queued nor sent again, and the sender is told
+                    // the outcome is unknown, not that it failed
+                    // (docs/tasks/DELIVERY-AUDIT.md §3, §4).
+                    CoreError::OutcomeUnknown(_) => {
+                        tracing::warn!(%message_id, %err, "a steered message may not have arrived");
+                        publish(
+                            &self.bus,
+                            EventKind::AgentInputRefused {
+                                id: stored.id,
+                                message_id,
+                                text: envelope.text,
+                                reason: QueuedReason::OutcomeUnknown,
+                            },
+                        )
+                        .await;
+                        Err(SteerFailure::Unknown {
+                            message_id,
+                            error: err.to_string(),
+                        })
+                    }
                     // The write failed: nobody can tell whether the CLI saw it, so it is
                     // neither steered nor queued. The sender decides whether to send it
                     // again, and sees the failure.
@@ -1557,6 +1637,9 @@ impl Runtime {
             let mut clients = self.clients.lock().await;
             match clients.get(agent, client) {
                 Some(ClientEntry::Done(delivery)) => return ClientClaim::Repeat(delivery.clone()),
+                Some(ClientEntry::Unknown(message_id)) => {
+                    return ClientClaim::RepeatUnknown(*message_id);
+                }
                 Some(ClientEntry::Pending(wait)) => {
                     let wait = wait.clone();
                     drop(clients);
@@ -1573,18 +1656,19 @@ impl Runtime {
         }
     }
 
-    /// Keeps a client id's delivery for repeats, or frees the id when nothing was delivered.
+    /// Keeps what a client id's first send settled to, or frees the id when nothing was
+    /// delivered.
     async fn settle_client(
         &self,
         agent: AgentId,
         claimed: Option<(MessageId, Arc<Notify>)>,
-        delivery: Option<&Delivery>,
+        settled: Settled<'_>,
     ) {
         let Some((client, wait)) = claimed else {
             return;
         };
         let mut clients = self.clients.lock().await;
-        clients.settle(agent, client, delivery.cloned());
+        clients.settle(agent, client, settled);
         drop(clients);
         wait.notify_one();
     }
@@ -1665,11 +1749,17 @@ impl Runtime {
         let stored = self.store().get_agent(key).await?;
         let claimed = match self.claim_client(stored.id, client_message_id).await {
             ClientClaim::Repeat(delivery) => return Ok(delivery),
+            ClientClaim::RepeatUnknown(_) => {
+                return Err(CoreError::OutcomeUnknown(UNKNOWN_REPEAT.into()));
+            }
             ClientClaim::First(claimed) => claimed,
         };
         let outcome = self.deliver_once(key, envelope, first, queued_reason).await;
-        self.settle_client(stored.id, claimed, outcome.as_ref().ok())
-            .await;
+        let settled = match &outcome {
+            Ok(delivery) => Settled::Delivery(delivery),
+            Err(_) => Settled::Nothing,
+        };
+        self.settle_client(stored.id, claimed, settled).await;
         outcome
     }
 
@@ -2449,11 +2539,16 @@ async fn forward_events(
     let mut out = Coalescer::default();
     let mut tick = tokio::time::interval(FLUSH_INTERVAL);
     let mut events_open = true;
+    let mut running = None;
     loop {
         tokio::select! {
             event = events.recv(), if events_open => match event {
                 Some(event) => {
+                    let reason = if matches!(&event.kind, SessionEventKind::Exited { cause: Some(crossagents_core::ExitCause::Killed), .. }) { StopReason::Cancelled } else { StopReason::Error };
                     if handle_session_event(&bus, id, event, &mut out, &live, generation, &mut rules).await {
+                        if let Some(message_id) = running.take() {
+                            publish(&bus, EventKind::AgentTurnCompleted { id, message_id, stop_reason: reason }).await;
+                        }
                         return;
                     }
                 }
@@ -2462,13 +2557,18 @@ async fn forward_events(
             ctl = control.recv() => {
                 // Everything the session emitted before this point is already queued.
                 while let Ok(event) = events.try_recv() {
+                    let reason = if matches!(&event.kind, SessionEventKind::Exited { cause: Some(crossagents_core::ExitCause::Killed), .. }) { StopReason::Cancelled } else { StopReason::Error };
                     if handle_session_event(&bus, id, event, &mut out, &live, generation, &mut rules).await {
+                        if let Some(message_id) = running.take() {
+                            publish(&bus, EventKind::AgentTurnCompleted { id, message_id, stop_reason: reason }).await;
+                        }
                         return;
                     }
                 }
                 out.flush(&bus, id).await;
                 match ctl {
                     Some(Control::TurnStarted(message_id)) => {
+                        running = Some(message_id);
                         rules.turn_started();
                         set_status(&bus, id, AgentStatus::Running).await;
                         publish(&bus, EventKind::AgentTurnStarted { id, message_id }).await;
@@ -2476,6 +2576,10 @@ async fn forward_events(
                     }
                     Some(Control::Compacted) => rules.compacted(),
                     Some(Control::TurnFinished(message_id, result, diff)) => {
+                        if running == Some(message_id) {
+                            running = None;
+                        }
+                        rules.turn_finished();
                         let stop_reason = match result {
                             Ok(reason) => reason,
                             Err(message) => {
@@ -2518,7 +2622,13 @@ async fn forward_events(
                         }
                         announce_inbox(&bus, id, &live, generation).await;
                     }
-                    Some(Control::Stopped) | None => return,
+                    Some(Control::Stopped) | None => {
+                        if let Some(message_id) = running.take() {
+                            publish(&bus, EventKind::AgentTurnCompleted { id, message_id, stop_reason: StopReason::Cancelled }).await;
+                        }
+                        return;
+                    }
+                    Some(Control::Detached) => return,
                 }
             },
             _ = tick.tick() => out.flush(&bus, id).await,
@@ -2528,7 +2638,7 @@ async fn forward_events(
 
 /// Returns `true` when the session is gone and forwarding should end.
 async fn handle_session_event(
-    bus: &EventBus,
+    bus: &Arc<EventBus>,
     id: AgentId,
     event: SessionEvent,
     out: &mut Coalescer,
@@ -2544,7 +2654,10 @@ async fn handle_session_event(
             if !injections.is_empty() {
                 // The output that matched goes out before the rule that answers it.
                 out.flush(bus, id).await;
-                inject(bus, id, live, generation, injections).await;
+                // Handing the rule in may wait on the driver (a steer is a request, and an
+                // interrupt is not always instant), so it runs beside the pump: output keeps
+                // flowing while it does (docs/TODO.md §二十五「4 的尾巴」).
+                tokio::spawn(inject(bus.clone(), id, live.clone(), generation, injections));
             }
             return false;
         }
@@ -2634,6 +2747,12 @@ async fn handle_session_event(
         SessionEventKind::Warning { message } => EventKind::AgentWarning { id, message },
         SessionEventKind::Error { message } => EventKind::AgentError { id, message },
         SessionEventKind::SteerRead { message_id } => EventKind::AgentSteerRead { id, message_id },
+        // The agent compacted its own context: what the rules said is no longer in it, so
+        // they may be sent again (docs/tasks/STREAM-RULES.md).
+        SessionEventKind::Compacted => {
+            rules.compacted();
+            return false;
+        }
         // Turn boundaries come from the runtime's own control messages.
         SessionEventKind::TurnStarted { .. } | SessionEventKind::TurnCompleted { .. } => {
             return false;
@@ -2682,7 +2801,9 @@ async fn handle_session_event(
     publish(bus, kind).await;
     if let Some(text) = tool_text {
         let injections = rules.on_tool(&text);
-        inject(bus, id, live, generation, injections).await;
+        if !injections.is_empty() {
+            tokio::spawn(inject(bus.clone(), id, live.clone(), generation, injections));
+        }
     }
     false
 }
@@ -2690,10 +2811,14 @@ async fn handle_session_event(
 /// Sends stream rules into the session's running turn: steered when the driver can take
 /// them in; otherwise the turn is interrupted and the rules run next, ahead of what waits.
 /// Only the session that matched is served; a session already replaced gets nothing.
+///
+/// Runs as its own task: the driver's steer and interrupt are calls that can take seconds
+/// (an ACP interrupt may wait on the agent's process), and the event pump must not wait for
+/// them.
 async fn inject(
-    bus: &EventBus,
+    bus: Arc<EventBus>,
     id: AgentId,
-    live: &LiveMap,
+    live: LiveMap,
     generation: u64,
     injections: Vec<Injection>,
 ) {
@@ -2723,7 +2848,7 @@ async fn inject(
             if live.session.steer(message_id, &prompt).await.is_ok() {
                 tracing::debug!(rule = %injection.rule, "stream rule steered into the turn");
                 publish(
-                    bus,
+                    &bus,
                     EventKind::AgentSteered {
                         id,
                         message_id,
@@ -2765,7 +2890,7 @@ async fn inject(
         "stream rules interrupt the turn and run next"
     );
     publish(
-        bus,
+        &bus,
         EventKind::AgentInput {
             id,
             message_id,
@@ -2783,7 +2908,7 @@ async fn inject(
     .await;
     // What waits changed: say the new state with it.
     publish(
-        bus,
+        &bus,
         EventKind::AgentDeliveryChanged {
             id,
             delivery: live.inbox.delivery(),
@@ -2933,7 +3058,7 @@ mod tests {
         let agent = AgentId::new();
         let ids: Vec<MessageId> = (0..CLIENT_HISTORY + 8).map(|_| MessageId::new()).collect();
         for id in &ids {
-            log.settle(agent, *id, Some(delivery(*id)));
+            log.settle(agent, *id, Settled::Delivery(&delivery(*id)));
         }
         assert!(log.get(agent, ids[0]).is_none(), "the oldest went");
         assert!(log.get(agent, ids[7]).is_none(), "up to the excess went");
@@ -2947,7 +3072,7 @@ mod tests {
         log.pending(agent, pending, Arc::new(Notify::new()));
         for _ in 0..8 {
             let id = MessageId::new();
-            log.settle(agent, id, Some(delivery(id)));
+            log.settle(agent, id, Settled::Delivery(&delivery(id)));
         }
         assert!(matches!(
             log.get(agent, pending),
@@ -2955,11 +3080,30 @@ mod tests {
         ));
         // Another agent's history is untouched.
         let other = AgentId::new();
-        log.settle(other, ids[0], Some(delivery(ids[0])));
+        log.settle(other, ids[0], Settled::Delivery(&delivery(ids[0])));
         assert!(log.get(other, ids[0]).is_some());
         // Forgetting an agent clears just its records.
         log.forget(agent);
         assert!(log.get(agent, pending).is_none());
         assert!(log.get(other, ids[0]).is_some());
+    }
+
+    /// A send whose write timed out is remembered as "may have arrived": a repeat must answer
+    /// with that, not start over (docs/TODO.md §二十五「2 的尾巴」).
+    #[test]
+    fn a_timed_out_send_is_answered_unknown_on_a_repeat() {
+        let mut log = ClientLog::default();
+        let agent = AgentId::new();
+        let client = MessageId::new();
+        let sent = MessageId::new();
+        log.settle(agent, client, Settled::Unknown(sent));
+        assert!(
+            matches!(log.get(agent, client), Some(ClientEntry::Unknown(id)) if *id == sent),
+            "a repeat must not write the message again"
+        );
+        // A refused send frees the id, so the same one can try again.
+        let retried = MessageId::new();
+        log.settle(agent, retried, Settled::Nothing);
+        assert!(log.get(agent, retried).is_none());
     }
 }
