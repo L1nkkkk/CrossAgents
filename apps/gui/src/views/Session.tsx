@@ -37,6 +37,7 @@ import { shownTab } from "../lib/docks";
 import { terminalsAvailable, toggleTerminal, useTabShows } from "../terminal";
 import { useWidths } from "../lib/widths";
 import { useSidebar } from "../titlebar";
+import { planWaitsForPerson } from "../lib/policy";
 import { runState, taskState } from "../lib/taskState";
 import { QUIET_AFTER, actionOf, duration, failed, liveActivity, liveKey, liveNow, quietSeconds, stepLine, workGroups, type ActionTool, type Step } from "../lib/workGroups";
 import { TurnLive, type LiveTurn } from "../liveTurn";
@@ -248,8 +249,10 @@ export function SessionView({
   const everyone = agents.data ?? [];
   // A plan waits in the lead's own conversation and in the chat that started the Work: the
   // person said 开始 there, so that is where they pick who runs each task (AGENT-WORKSPACE §6.1).
+  // A run the policy approves on its own never gets a card, even while a stale
+  // `awaiting_approval` status is still on record (lib/policy.ts planWaitsForPerson).
   const pendingPlans = runs.filter(
-    (d) => (d.run.planner === agent.id || d.run.origin_chat_id === agent.id) && d.run.status === "awaiting_approval",
+    (d) => (d.run.planner === agent.id || d.run.origin_chat_id === agent.id) && d.run.status === "awaiting_approval" && planWaitsForPerson(d.run),
   );
   const liveRuns = runs.filter((d) => d.run.planner === agent.id && ACTIVE_RUN.includes(d.run.status) && d.run.status !== "awaiting_approval");
   // First iteration: recent runs plus all runs led by this agent. Older assigned tasks may be

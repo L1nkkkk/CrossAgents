@@ -10,6 +10,7 @@ import { api } from "./api";
 import { Avatar, displayName, sessionHref } from "./components";
 import { errorHint } from "./lib/errors";
 import { BUCKET_LABEL, groupTasks, progress, runState } from "./lib/taskState";
+import { planWaitsForPerson } from "./lib/policy";
 import { t } from "./lib/i18n";
 import { StateWord, TaskCard } from "./parts";
 
@@ -27,7 +28,9 @@ function attention(agents: Agent[], tree: RunDetail[], unread: ReturnType<typeof
   };
   const byId = (id: string) => agents.find((a) => a.id === id);
   for (const d of tree) {
-    const planner = d.run.status === "awaiting_approval" ? byId(d.run.planner) : undefined;
+    // Only a plan the person has to approve needs them; an auto-approved run left in
+    // awaiting_approval would otherwise point at a session with no card (lib/policy.ts).
+    const planner = d.run.status === "awaiting_approval" && planWaitsForPerson(d.run) ? byId(d.run.planner) : undefined;
     if (planner) add({ agent: planner, word: t("state.awaitingApproval"), tone: "warn", key: `plan:${d.run.id}:${d.run.updated_at}`, done: false, href: sessionHref(planner) });
   }
   for (const agent of agents) {

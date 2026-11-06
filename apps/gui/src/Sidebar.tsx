@@ -456,14 +456,11 @@ function NeedsYou({ items, agents }: { items: TodoItem[]; agents: Agent[] }) {
               </div>
             );
           })}
-          {visible.remaining > 0 && (
-            <button className="more" onClick={() => setAll(true)}>
-              {t("sidebar.moreTodos", { n: visible.remaining })}
-            </button>
-          )}
-          {all && items.length > 3 && (
-            <button className="more" onClick={() => setAll(false)}>
-              {t("common.less")}
+          {/* One toggle, in place: splitting it into 展开/收起 unmounts the focused button and
+              drops keyboard focus to the page top when it changes. */}
+          {items.length > 3 && (
+            <button className="more" onClick={() => setAll(!all)} aria-expanded={all}>
+              {all ? t("common.less") : t("sidebar.moreTodos", { n: visible.remaining })}
             </button>
           )}
         </>
@@ -584,17 +581,16 @@ function Capped<T>({
 }) {
   const [all, setAll] = useState(false);
   const shown = capped(items, keep, CAP, all || searching);
+  // Whether folding to CAP actually hides any row; a list whose rows are all kept shows none.
+  const collapsible = capped(items, keep, CAP, false).length < items.length;
   return (
     <>
       {shown.map(children)}
-      {items.length > shown.length && (
-        <button className="more" onClick={() => setAll(true)}>
-          {t("common.more", { n: items.length - shown.length })}
-        </button>
-      )}
-      {all && items.length > CAP && !searching && (
-        <button className="more" onClick={() => setAll(false)}>
-          {t("common.less")}
+      {/* One toggle, in place: splitting it into 更多/收起 unmounts the focused button and
+          drops keyboard focus to the page top when it changes. */}
+      {!searching && collapsible && (
+        <button className="more" onClick={() => setAll(!all)} aria-expanded={all}>
+          {all ? t("common.less") : t("common.more", { n: items.length - shown.length })}
         </button>
       )}
     </>

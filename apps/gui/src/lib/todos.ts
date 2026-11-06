@@ -8,7 +8,7 @@ import type { AgentId } from "@bindings/AgentId";
 import type { HumanItem } from "@bindings/HumanItem";
 import type { Run } from "@bindings/Run";
 import type { Task } from "@bindings/Task";
-import { DEFAULT_POLICY } from "./policy.ts";
+import { planWaitsForPerson } from "./policy.ts";
 import { runState } from "./taskState.ts";
 
 export type TodoKind = "question" | "notice" | "approval" | "acceptance" | "failure";
@@ -66,12 +66,11 @@ export function todoItems({ items, runs, now }: TodoInput): TodoItem[] {
     });
   }
   for (const { run, tasks } of runs) {
-    const policy = run.config.policy ?? DEFAULT_POLICY;
     // An actual open HumanItem remains actionable under any policy (e.g. a tool
     // approval). Only synthetic plan approvals are gated by the plan policy.
     const hasApproval = items.some((item) => item.status === "open" && item.action === "approval" && item.run_id === run.id && !item.task_id);
     if (run.status === "awaiting_approval" && runState(run.status).bucket === "needs_you"
-      && policy.plan_approval === "required" && !run.config.auto_approve && !hasApproval) {
+      && planWaitsForPerson(run) && !hasApproval) {
       add(`run:${run.id}`, { id: run.id, agent: run.planner, kind: "approval", summary: run.title,
         action: "confirm", href: path("runs", run.id), since: run.pending_since ?? run.created_at });
     }
