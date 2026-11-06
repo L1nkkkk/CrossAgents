@@ -113,6 +113,7 @@ fn launch_for(spec: &SessionSpec) -> Launch {
         bypass: spec.permission == PermissionPolicy::Bypass && permission_mode.is_none(),
         permission_mode,
         mcp_servers: spec.mcp_servers.clone(),
+        env: spec.env.clone(),
         instructions: spec.instructions.clone(),
         setting_sources: text("setting_sources")
             .unwrap_or_else(|| wire::DEFAULT_SETTING_SOURCES.into()),

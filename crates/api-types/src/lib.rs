@@ -610,6 +610,24 @@ pub struct CliInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub described_by: Option<String>,
+    /// The oldest CLI the description accepts; absent when it names none
+    /// (docs/research/multica.md §2.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub min_version: Option<String>,
+    /// The CLI found here is older than `min_version`: its agent is not registered, so no
+    /// models are offered and the row says the version is too low.
+    #[serde(default)]
+    pub below_minimum: bool,
+    /// The upstream version series the driver was checked against (`"2.1"`); absent when
+    /// the description names none (docs/DESIGN.md §9.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub verified: Option<Vec<String>>,
+    /// The CLI's version is outside those series: it still runs, the row says it is
+    /// unverified. False when no series is named or the version is unknown.
+    #[serde(default)]
+    pub unverified: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -2375,6 +2393,42 @@ pub struct UsageSeriesResponse {
     pub sources: Vec<UsageSeriesSource>,
     /// In plain words: the granularity, and what cannot be known (why `turns` or
     /// `max_request` are missing), and how cost is counted.
+    pub notes: Vec<String>,
+}
+
+/// One agent's spend on one model within a run: a segment of the run's cost bar
+/// (docs/research/multica.md §十三).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RunCostSlice {
+    pub agent: AgentId,
+    /// The agent's name as it reported, so the segment still reads after a rename.
+    pub name: String,
+    /// The model it ran on; `default` when it never said.
+    pub model: String,
+    #[ts(type = "number")]
+    pub cached_input: u64,
+    #[ts(type = "number")]
+    pub new_input: u64,
+    #[ts(type = "number")]
+    pub output: u64,
+    /// What the agent reported for this stretch; `null` when it reported tokens but no cost.
+    pub cost_usd: Option<f64>,
+}
+
+/// `GET /v1/runs/{key}/cost`: what a run spent, split by agent and model — the run's cost
+/// bar. An agent that switched models has one slice per model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RunCostResponse {
+    pub run_id: RunId,
+    /// Biggest spender first; one agent's slices next to each other, its largest first.
+    pub slices: Vec<RunCostSlice>,
+    #[ts(type = "number")]
+    pub tokens: u64,
+    /// Sum of the costs the agents reported; `null` when none did.
+    pub cost_usd: Option<f64>,
+    /// In plain words: how the figures are counted, and what is missing.
     pub notes: Vec<String>,
 }
 

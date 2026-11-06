@@ -287,6 +287,29 @@ function VendorClis() {
                     ? `${cli.probing ? "检测版本中…" : (cli.version ?? "版本未知")} · ${CLI_SOURCE[cli.source ?? ""] ?? cli.source ?? "来源未知"}`
                     : "没装"}
                 </div>
+                {/* What its description says about that version (docs/DESIGN.md §9.4):
+                    below the minimum no agent is registered at all; outside the series the
+                    driver was checked against it still runs, marked. */}
+                {cli.below_minimum && (
+                  <div>
+                    <span
+                      className="chip small danger"
+                      title={`低于描述文件的最低版本，这个 agent 不会被注册；升级到 ${cli.min_version} 或更新后才能用`}
+                    >
+                      版本过低（需 ≥ {cli.min_version}）
+                    </span>
+                  </div>
+                )}
+                {cli.unverified && !cli.below_minimum && (
+                  <div>
+                    <span
+                      className="chip small warn"
+                      title={`驱动只在 ${(cli.verified ?? []).join("、")} 上验证过，这个版本仍可运行，但可能对不上它的接口`}
+                    >
+                      未验证版本
+                    </span>
+                  </div>
+                )}
               </div>
               <div className="cli-actions">
                 {job ? (

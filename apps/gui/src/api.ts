@@ -58,6 +58,7 @@ import type { StartChatRequest } from "@bindings/StartChatRequest";
 import type { ApproveRunRequest } from "@bindings/ApproveRunRequest";
 import type { RejectRunRequest } from "@bindings/RejectRunRequest";
 import type { Run } from "@bindings/Run";
+import type { RunCostResponse } from "@bindings/RunCostResponse";
 import type { RunDetail } from "@bindings/RunDetail";
 import type { RunTrace } from "@bindings/RunTrace";
 import type { SendMessageRequest } from "@bindings/SendMessageRequest";
@@ -417,6 +418,8 @@ export const api = {
     request<ChangesResponse>("GET", `/v1/agents/${enc(agent)}/commits/${enc(sha)}/diff`),
   /** What happened in a run, by task, from its events. */
   runTrace: (run: string) => request<RunTrace>("GET", `/v1/runs/${enc(run)}/trace`),
+  /** What the run spent, split by agent and model: its cost bar (docs/research/multica.md §十三). */
+  runCost: (run: string) => request<RunCostResponse>("GET", `/v1/runs/${enc(run)}/cost`),
   /** The person's comments, to the task's worker as its next turn; `rework` sends the task back. */
   reviewTask: (run: string, task: string, req: TaskReviewRequest) => request<Task>("POST", `/v1/runs/${enc(run)}/tasks/${enc(task)}/review`, req),
   /** `git init` and a first commit in `path`, so later runs there get worktrees. */
