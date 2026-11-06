@@ -2,6 +2,7 @@
 import type { Agent } from "./Agent";
 import type { AgentExit } from "./AgentExit";
 import type { Capabilities } from "./Capabilities";
+import type { DeliveryStatus } from "./DeliveryStatus";
 import type { DriverKind } from "./DriverKind";
 import type { ModelSwitch } from "./ModelSwitch";
 import type { TranscriptTurn } from "./TranscriptTurn";
@@ -20,6 +21,14 @@ driver: DriverKind | null,
  * What that driver can do; clients show operations by these flags.
  */
 capabilities: Capabilities | null, 
+/**
+ * What the session is doing with messages right now, from the same inbox the hub
+ * admits them into: `state` is `idle`, `starting`, `turn` or `held`, and `queued`
+ * counts the messages that have not started. A client shows "busy" as
+ * `state != idle` and "next" as `queued`, instead of working either out itself
+ * (docs/tasks/DELIVERY-AUDIT.md §8 P1-4).
+ */
+delivery: DeliveryStatus, 
 /**
  * Oldest first. A message still waiting for its turn is the last turn, not started.
  */

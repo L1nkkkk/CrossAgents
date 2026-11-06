@@ -780,10 +780,14 @@ async fn transcript(
     let error = in_error.then_some(fold.last_error).flatten();
     let exit = in_error.then_some(fold.last_exit).flatten();
     let capabilities = state.runtime.capabilities(&agent).await;
+    // What the session does with messages, from the hub's inbox: one answer for "busy" and
+    // "next" (docs/tasks/DELIVERY-AUDIT.md §8 P1-4).
+    let delivery = state.runtime.delivery_state(&agent).await;
     Ok(Json(Transcript {
         agent,
         driver: resolved.as_ref().map(|r| r.driver.kind()),
         capabilities,
+        delivery,
         turns: fold.turns,
         usage: fold.usage,
         switches: fold.switches,

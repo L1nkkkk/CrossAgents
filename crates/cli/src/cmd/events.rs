@@ -105,6 +105,12 @@ pub fn summary(kind: &EventKind) -> String {
         EventKind::AgentStatusChanged { id, from, to } => {
             format!("{} {} -> {}", short(id), enum_name(from), enum_name(to))
         }
+        EventKind::AgentDeliveryChanged { id, delivery } => format!(
+            "{} {} ({} waiting)",
+            short(id),
+            enum_name(&delivery.state),
+            delivery.queued
+        ),
         EventKind::AgentInput {
             id, text, queued, ..
         } => format!(
