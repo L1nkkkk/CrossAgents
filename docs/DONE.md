@@ -291,7 +291,7 @@ B 删除 run：
 - [x] 发版脚本 `scripts/release.mjs`，产物核对改成硬失败（10-31）；依赖恰好同版本时不再卡住（11-06）
 - [x] 平等 Agent 与项目侧栏 A–D（11-01）：任何会话都能审核和接任务，侧栏变平，加「需要你」分区和项目总览（[AGENT-WORKSPACE.md](AGENT-WORKSPACE.md)）
 - [x] 专长档案（11-02）：hub 接口、工具、reviewer 检查清单、GUI 页，11-04 接真实 hub 实测（[tasks/EXPERTISE.md](tasks/EXPERTISE.md)）
-- [x] Cursor 接入：`cursor-native` 驱动（11-02）、账号与交互登录（11-03）、模式分离和逐任务推理强度（11-04）、非 bypass 会话不卡在目录信任提示（11-05）（[research/cursor-cli.md](research/cursor-cli.md)）
+- [x] Cursor 接入：`cursor-native` 驱动（11-02）、账号与交互登录（11-03）、模式分离和逐任务推理强度（11-04）、非 bypass 会话不卡在目录信任提示（11-05）（[research/cursor-cli.md](research/cursor-cli.md)）；0.2.5 起模型统一按「基础模型 + 推理」显示：设置页一行一个基础模型（开关整组变体），会话旁只留一个「推理」菜单，列出 CLI 真实提供的变体，编辑 Agent、`@模型`、账号页和任务执行者同步
 - [x] GUI 工具区（11-03、11-04）：浏览器式标签可拖到对话下方，文件面板可渲染 Markdown，内置终端（窗口关了终端还在），「后台任务」看板
 - [x] 工作区独立记录 run 实现历史，删除 run 后仍可查（11-03）；每个 run 都属于工作组（11-03）；run 结束删构建目录、合并后删 checkout、启动时清残留（11-04）
 - [x] 运行中心跳改为 token 速度（11-04）
@@ -303,7 +303,7 @@ B 删除 run：
   - 消息头带上 id（`Message from X (id …):`）；`agent_send` 只给 `reply_to` 不给 `to` 时，回给原发件人。
   - `to` 写的名字恰好是正在和你说话的队友去掉数字后缀（比如该写 `Pia 4` 写成了 `Pia`），而你和它从没互发过消息时，拒绝发送，并说明该怎么写。
   - 测试在 `crates/mock-agent/tests/collab.rs`（3 条）和 `replies.rs` 的单元测试（7 条）
-- [x] 驱动与 hub 修复（11-05、11-06）：Claude 驱动写入不留半帧、失败 result 不提前结束；`run_next` 在 lead 回合内不再报 busy；Codex primary 额度误判；复制失败、回复看不到图、`run_next` 重复显示人的原话
+- [x] 驱动与 hub 修复（11-05、11-06）：Claude 驱动写入不留半帧、失败 result 不提前结束；`run_next` 在 lead 回合内不再报 busy；Codex primary 额度误判；复制失败、回复看不到图、`run_next` 重复显示人的原话；Cursor `create-chat` 在 stdout 是管道时不退出导致的启动超时与 powershell/node 孤儿进程（0.2.4，改为 `spawn_tree` 启动、读到第一行 id 后结束整棵进程树）
 
 ## 二十五、借鉴 oh-my-pi 与 Cutex 0.2.1
 
