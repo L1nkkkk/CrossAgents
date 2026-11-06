@@ -260,6 +260,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/git/branches", get(git_branches))
         .route("/v1/git/status", get(git_status))
         .route("/v1/git/commits/{sha}", get(git_commit))
+        .route("/v1/git/commits/{sha}/diff", get(git_commit_diff))
         .route("/v1/git/graph", get(git_graph))
         .route("/v1/repos/init", post(init_repo))
         .route("/v1/events", get(events))
@@ -1854,6 +1855,9 @@ async fn create_run(
         planner,
         repo: Some(repo),
         base_branch,
+        lead_place: req
+            .lead_place
+            .unwrap_or(crossagents_core::LeadPlace::Worktree),
         config: RunConfig {
             worker,
             escalate,
@@ -2038,6 +2042,9 @@ async fn update_run_policy(
         // was told the old one ran out is forgotten, so the next exhaustion tells again.
         continuation.attempts = 0;
         continuation.exhausted_notified = false;
+        // Re-arming also lifts a pause the automation breaker set: the person has looked at
+        // the failing stretch and asked for it to run again, so the counts start over.
+        continuation.health = Default::default();
         // The clock arms the next wakeup from the interval it reads; it does not fire
         // one immediately.
         continuation.next_at = None;
@@ -2415,6 +2422,19 @@ async fn git_commit(
     }))
 }
 
+/// What one commit of a project changed, against its first parent.
+async fn git_commit_diff(
+    State(state): State<Arc<AppState>>,
+    Path(sha): Path<String>,
+    Query(q): Query<GitQuery>,
+) -> ApiResult<Json<ChangesResponse>> {
+    let sha = commit_sha(&sha)?;
+    let root = state.orchestrator.git_root(q.path()).await?;
+    Ok(changes_response(
+        crossagents_orchestrator::graph::commit_diff(&root, sha).await?,
+    ))
+}
+
 /// The whole repository's graph (`git log --all`).
 async fn git_graph(
     State(state): State<Arc<AppState>>,
@@ -2563,6 +2583,7 @@ async fn agent_files_image(
         .orchestrator
         .files_root(FilesScope::Agent(&agent))
         .await?;
+    crate::paths::refuse_remote(&root, input)?;
     let abs = crate::image::locate(&root, input)?;
     let (kind, bytes) = crate::image::load(&abs, input).await?;
     Ok(Json(ImageContent {
@@ -2678,6 +2699,7 @@ async fn files_tree(
     scope: FilesScope<'_>,
     q: FilesQuery,
 ) -> ApiResult<Json<FileTreeResponse>> {
+    crate::paths::refuse_remote_in(&state.orchestrator, scope, q.path()).await?;
     let git_ref = q.git_ref().map(str::to_owned);
     let tree = state
         .orchestrator
@@ -2739,6 +2761,7 @@ async fn files_content(
     scope: FilesScope<'_>,
     q: FilesQuery,
 ) -> ApiResult<Json<FileContentResponse>> {
+    crate::paths::refuse_remote_in(&state.orchestrator, scope, q.path()).await?;
     let git_ref = q.git_ref().map(str::to_owned);
     let file = state
         .orchestrator
@@ -2762,7 +2785,8 @@ async fn files_resolve(
     scope: FilesScope<'_>,
     req: ResolvePathsRequest,
 ) -> ApiResult<Json<ResolvePathsResponse>> {
-    let found = state.orchestrator.files_resolve(scope, &req.paths).await?;
+    let inputs = crate::paths::without_remote(&state.orchestrator, scope, &req.paths).await?;
+    let found = state.orchestrator.files_resolve(scope, &inputs).await?;
     Ok(Json(ResolvePathsResponse {
         entries: req
             .paths

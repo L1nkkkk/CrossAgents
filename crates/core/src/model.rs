@@ -342,12 +342,19 @@ pub struct Run {
     pub repo: PathBuf,
     /// Branch the run started from.
     pub base_branch: String,
-    /// Integration branch that collects every merged task.
+    /// Integration branch that collects every merged task. Empty when the run works in the
+    /// person's own directory: there is no branch of the hub's there (docs/tasks/LEAD.md §9).
     pub branch: String,
     /// The directory is not under version control: tasks run one at a time in it directly,
-    /// with no branches, worktrees, diffs or merges (and nothing to roll back to).
+    /// with no branches, worktrees, diffs or merges (and nothing to roll back to). Kept for
+    /// runs recorded before the meanings were split; read [`Self::versioned`] instead.
     #[serde(default)]
     pub in_place: bool,
+    /// Where the lead works, whether the workspace is versioned, who owns it and whether it
+    /// is kept afterwards (docs/tasks/LEAD.md §11). Absent in runs recorded before the split,
+    /// which [`Self::mode`] reads out of `in_place`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<RunMode>,
     /// Why the run failed or was cancelled, or the last plan rejection.
     #[serde(default)]
     pub note: Option<String>,
@@ -372,8 +379,131 @@ pub struct Run {
     /// Whether those checks verified the run; none yet when nothing called for them.
     #[serde(default)]
     pub checks_state: Option<ChecksState>,
+    /// What those checks ran on, for a run whose lead works in the person's own directory:
+    /// a fingerprint of the directory's content at that moment (docs/tasks/LEAD.md §7). When
+    /// the content changed since, the result is about other content and does not count
+    /// either way. Absent when nothing was checked, or for a run with a checkout of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks_snapshot: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Where the lead works (docs/tasks/LEAD.md §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum LeadPlace {
+    /// In the person's own directory, with the session, branch and staging area as they are.
+    InPlace,
+    /// In the run's own checkout, which the hub made and may remove.
+    Worktree,
+}
+
+/// Whether the workspace is under version control (docs/tasks/LEAD.md §11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceVcs {
+    Git,
+    /// No repository: nothing to snapshot, branch, diff or roll back to.
+    None,
+}
+
+/// Whose directory the workspace is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceOwner {
+    /// The person's: the hub never deletes it, and never commits into it.
+    Person,
+    /// Made and kept by the hub (`<worktrees>/<run>/…`).
+    Hub,
+}
+
+/// What becomes of the workspace once the run has ended (docs/tasks/LEAD.md §8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum Retention {
+    /// Kept for the person and for the lead's session (the default, and all there is yet).
+    Keep,
+    /// Goes once the run ended and nothing is using it.
+    Cleanup,
+}
+
+/// The four layers one `in_place` flag used to carry (docs/tasks/LEAD.md §11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct RunMode {
+    /// Where the lead works.
+    pub lead: LeadPlace,
+    /// Whether the workspace is a git repository.
+    pub vcs: WorkspaceVcs,
+    /// Whose it is.
+    pub owner: WorkspaceOwner,
+    /// What happens to it after the run.
+    pub retain: Retention,
+}
+
+impl RunMode {
+    /// A run in the person's own directory (a lead that works there), versioned or not.
+    pub fn in_place(vcs: WorkspaceVcs) -> Self {
+        Self {
+            lead: LeadPlace::InPlace,
+            vcs,
+            owner: WorkspaceOwner::Person,
+            retain: Retention::Keep,
+        }
+    }
+
+    /// A run with a checkout of its own.
+    pub fn worktree() -> Self {
+        Self {
+            lead: LeadPlace::Worktree,
+            vcs: WorkspaceVcs::Git,
+            owner: WorkspaceOwner::Hub,
+            retain: Retention::Keep,
+        }
+    }
+}
+
+impl Run {
+    /// How the run is carried out. Runs from before the split say it with `in_place` alone:
+    /// one flag meant a directory outside version control, with its lead and tasks in it.
+    pub fn mode(&self) -> RunMode {
+        self.mode.unwrap_or_else(|| {
+            if self.in_place {
+                RunMode::in_place(WorkspaceVcs::None)
+            } else {
+                RunMode::worktree()
+            }
+        })
+    }
+
+    /// The lead works in the person's own directory, not in a checkout the hub made.
+    pub fn leads_in_place(&self) -> bool {
+        self.mode().lead == LeadPlace::InPlace
+    }
+
+    /// The workspace is a git repository (its own, or the person's).
+    pub fn versioned(&self) -> bool {
+        self.mode().vcs == WorkspaceVcs::Git
+    }
+
+    /// The lead works in a checkout of the run's own: its edits are committed on a branch
+    /// and landed, and it is the hub's directory to remove.
+    pub fn works_in_checkout(&self) -> bool {
+        self.versioned() && !self.leads_in_place()
+    }
+
+    pub fn owner(&self) -> WorkspaceOwner {
+        self.mode().owner
+    }
+
+    pub fn retention(&self) -> Retention {
+        self.mode().retain
+    }
 }
 
 /// A persistent workspace containing successive runs.
@@ -509,6 +639,13 @@ pub struct TaskSpec {
     /// JSON Schema for the worker's structured result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_schema: Option<serde_json::Value>,
+    /// The stage the task belongs to, if any (docs/research/multica.md §2.2): tasks of a
+    /// later stage start only once every task of an earlier stage has ended, and the lead is
+    /// woken when each stage's batch ends. `None` is no staging, as in plans written before
+    /// stages existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub stage: Option<u32>,
 }
 
 /// One task in a submitted plan. `key` is the planner's own short name for it.
@@ -658,6 +795,63 @@ pub struct TaskReport {
     pub forced: Option<String>,
 }
 
+/// How one run (attempt) of a task ended. A run ends when the worker's turn does; the task
+/// does not (multica §2.4): its issuer still decides what happens to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum TaskRunOutcome {
+    /// The worker's turn is in it: no end yet.
+    Running,
+    /// The worker reported the task done (`task_complete`).
+    Reported,
+    /// The worker asked a question (`task_ask`); a new run follows its answer.
+    Asked,
+    /// The worker said it cannot finish (`task_fail`).
+    GaveUp,
+    /// The turn ended without reporting anything.
+    NoReport,
+    /// The turn failed on something the platform can fix by trying again: offline, a
+    /// timeout, a directory that could not be prepared, the network (multica §2.5).
+    Infrastructure,
+    /// The turn failed where a retry does not help (auth, quota, model): the task stops
+    /// and says why (multica §2.5).
+    AgentError,
+    /// The turn failed and left its session unfit to carry on (context overflow): retried
+    /// in a new session, in the same directory (multica §2.5).
+    SessionLost,
+    /// The task was cancelled or dropped while this run was going.
+    Cancelled,
+}
+
+/// One run (attempt) of a task, oldest first on [`Task::runs`]: when it started, when it
+/// ended and how. A task may have several (a rework, a retry after a platform fault) and
+/// ends when its issuer says so, not when a run does (multica §2.4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct TaskRun {
+    /// 1-based: the task's first run is 1.
+    pub index: u32,
+    pub started_at: DateTime<Utc>,
+    /// Absent while the run is going (see [`TaskRunOutcome::Running`]).
+    #[serde(default)]
+    pub ended_at: Option<DateTime<Utc>>,
+    pub outcome: TaskRunOutcome,
+    /// The worker it was handed to; a new one when its session was replaced.
+    #[serde(default)]
+    pub agent: Option<AgentId>,
+    /// The message that started the turn, so an end-of-turn event can be told apart from a
+    /// duplicate (and from the turn of another run).
+    #[serde(default)]
+    pub message: Option<crate::ids::MessageId>,
+    /// Why it ended as it did, when that is more than the outcome says.
+    #[serde(default)]
+    pub note: Option<String>,
+    /// The hub retried after this run failed: the run after it is that try.
+    #[serde(default)]
+    pub retried: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Task {
@@ -697,6 +891,11 @@ pub struct Task {
     pub status: TaskStatus,
     /// Attempts by the current worker.
     pub attempts: u32,
+    /// Its runs (attempts), oldest first: one per hand-over and turn, with how each ended.
+    /// A run ending is not the task ending (multica §2.4). Empty in tasks recorded before
+    /// runs were kept.
+    #[serde(default)]
+    pub runs: Vec<TaskRun>,
     /// Whether the task moved to the escalation template.
     #[serde(default)]
     pub escalated: bool,
@@ -758,6 +957,56 @@ pub struct ContinuationState {
     /// set and the run is in such a phase; old records read it back as absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stuck_watch: Option<StuckWatch>,
+    /// What the wakeups have done lately. The automation breaker pauses the continuation when
+    /// it ran at least 50 times in 7 days and failed 90% of them
+    /// (docs/research/multica.md §2.14); a paused run is not woken again.
+    #[serde(default, skip_serializing_if = "Health::is_empty")]
+    pub health: Health,
+}
+
+/// One run of an automation: when, and whether it did what it was for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct RunRecord {
+    pub at: DateTime<Utc>,
+    pub ok: bool,
+}
+
+/// What an automation (a repeating rule, a run's continuation) has done lately, and whether it
+/// paused itself. Kept in the rule's or the run's own record, so a restarted hub reads the same
+/// counts instead of forgetting them. Counting, and the trip itself, live in the orchestrator's
+/// breaker; this is only the record.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Health {
+    /// One entry per run inside the window; older ones are pruned as it is written.
+    #[serde(default)]
+    pub runs: Vec<RunRecord>,
+    /// Set when the automation stopped itself; it stays paused until a person clears it.
+    #[serde(default)]
+    pub paused_at: Option<DateTime<Utc>>,
+    /// Why it paused, for the note the person gets.
+    #[serde(default)]
+    pub pause_reason: Option<String>,
+}
+
+impl Health {
+    pub fn is_paused(&self) -> bool {
+        self.paused_at.is_some()
+    }
+
+    /// Nothing has run and nothing is paused: the field stays out of the record.
+    fn is_empty(&self) -> bool {
+        self.runs.is_empty() && self.paused_at.is_none()
+    }
+
+    /// Stops the automation, with the reason the person is told.
+    pub fn pause(&mut self, now: DateTime<Utc>, reason: String) {
+        if self.paused_at.is_none() {
+            self.paused_at = Some(now);
+            self.pause_reason = Some(reason);
+        }
+    }
 }
 
 /// Progress bookmark of the stuck watch. It lives in the run record, so a restarted hub
@@ -787,6 +1036,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_run_recorded_before_the_split_reads_its_layers_out_of_in_place() {
+        let now = Utc::now();
+        let old = |in_place: bool| {
+            serde_json::json!({
+                "id": RunId::new(), "title": "t", "request": "r", "planner": AgentId::new(),
+                "status": "planning",
+                "config": { "worker": AgentId::new(), "max_parallel": 1, "max_attempts": 1 },
+                "repo": "C:/work", "base_branch": if in_place { "" } else { "main" },
+                "branch": if in_place { "" } else { "crossagents/run" },
+                "in_place": in_place, "created_at": now, "updated_at": now,
+            })
+        };
+        let plain: Run = serde_json::from_value(old(false)).unwrap();
+        assert!(plain.mode.is_none() && plain.checks_snapshot.is_none());
+        assert!(!plain.leads_in_place() && plain.versioned() && plain.works_in_checkout());
+        assert_eq!(plain.owner(), WorkspaceOwner::Hub);
+        assert_eq!(plain.retention(), Retention::Keep);
+
+        let inside: Run = serde_json::from_value(old(true)).unwrap();
+        assert!(inside.leads_in_place() && !inside.versioned());
+        assert_eq!(inside.owner(), WorkspaceOwner::Person);
+        // Serialized back, the old record keeps the shape it had.
+        let json = serde_json::to_value(&inside).unwrap();
+        assert!(json.get("mode").is_none(), "{json}");
+        assert!(json.get("checks_snapshot").is_none(), "{json}");
+        assert_eq!(json["in_place"], true);
+    }
+
+    #[test]
+    fn a_versioned_workspace_whose_lead_works_in_it_is_the_persons() {
+        let mode = RunMode::in_place(WorkspaceVcs::Git);
+        assert_eq!(mode.lead, LeadPlace::InPlace);
+        assert_eq!(mode.owner, WorkspaceOwner::Person);
+    }
+
+    #[test]
     fn tasks_recorded_before_handoffs_load_with_none() {
         let now = Utc::now();
         let old = serde_json::json!({
@@ -797,6 +1082,72 @@ mod tests {
         let task: Task = serde_json::from_value(old).unwrap();
         assert!(task.handoffs.is_empty());
         assert!(task.report.rework.is_empty());
+        assert!(
+            task.runs.is_empty(),
+            "a task recorded before runs were kept has none"
+        );
+    }
+
+    #[test]
+    fn a_task_keeps_how_each_of_its_runs_ended() {
+        let now = Utc::now();
+        let task = Task {
+            id: TaskId::new(),
+            run_id: RunId::new(),
+            key: "a".into(),
+            title: "t".into(),
+            spec: TaskSpec::default(),
+            depends_on: Vec::new(),
+            issuer: None,
+            assignee: None,
+            reviewer: None,
+            worker_template: None,
+            reviewer_template: None,
+            worker_fresh: true,
+            worker_restore: false,
+            reviewer_fresh: true,
+            status: TaskStatus::Running,
+            attempts: 1,
+            runs: vec![
+                TaskRun {
+                    index: 1,
+                    started_at: now,
+                    ended_at: Some(now),
+                    outcome: TaskRunOutcome::Infrastructure,
+                    agent: Some(AgentId::new()),
+                    message: None,
+                    note: Some("timed out".into()),
+                    retried: true,
+                },
+                TaskRun {
+                    index: 2,
+                    started_at: now,
+                    ended_at: None,
+                    outcome: TaskRunOutcome::Running,
+                    agent: None,
+                    message: None,
+                    note: None,
+                    retried: false,
+                },
+            ],
+            escalated: false,
+            nudges: 0,
+            branch: None,
+            worktree: None,
+            report: TaskReport::default(),
+            parent: None,
+            progress: None,
+            handoffs: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        let json = serde_json::to_value(&task).unwrap();
+        assert_eq!(json["runs"][0]["outcome"], "infrastructure");
+        assert_eq!(json["runs"][0]["retried"], true);
+        assert_eq!(
+            serde_json::from_value::<Task>(json).unwrap().runs,
+            task.runs
+        );
     }
 
     #[test]
@@ -908,6 +1259,7 @@ mod tests {
                 progress_at: now,
                 event_seq: 42,
             }),
+            health: Health::default(),
         };
         let json = serde_json::to_value(&state).unwrap();
         assert_eq!(json["stuck_watch"]["event_seq"], 42);

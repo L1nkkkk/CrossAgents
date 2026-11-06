@@ -259,6 +259,7 @@ impl Fixture {
             base_branch: "main".into(),
             branch: "crossagents/run".into(),
             in_place: false,
+            mode: None,
             note: None,
             plan: Vec::new(),
             lead_note: None,
@@ -266,6 +267,7 @@ impl Fixture {
             summary: None,
             checks: Vec::new(),
             checks_state: None,
+            checks_snapshot: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -310,6 +312,7 @@ impl Fixture {
             reviewer_fresh: true,
             status,
             attempts: 0,
+            runs: Vec::new(),
             escalated: false,
             nudges: 0,
             branch: None,

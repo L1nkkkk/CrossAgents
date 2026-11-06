@@ -192,6 +192,140 @@ async fn what_the_agent_does_not_take_is_refused_not_dropped() {
     assert!(resp.text().await.unwrap().contains("PDFs"));
 }
 
+/// A query value with everything but letters and digits percent-encoded.
+fn encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+/// Paths an agent names (an image a tool call showed, a path in its output) are read only
+/// inside its working directory: `..`, absolute paths elsewhere, other drives and shares are
+/// refused at every entry (docs/tasks/SELF.md B6), while attachments are read by id only.
+#[tokio::test]
+async fn paths_an_agent_names_stay_in_its_working_directory() {
+    let t = TestHub::start().await;
+    let outer = tempfile::tempdir().unwrap();
+    let ws = outer.path().join("ws");
+    std::fs::create_dir_all(ws.join("sub")).unwrap();
+    const PNG: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    std::fs::write(ws.join("shot.png"), PNG).unwrap();
+    std::fs::write(ws.join("notes.txt"), "notes").unwrap();
+    std::fs::write(outer.path().join("secret.png"), PNG).unwrap();
+    std::fs::write(outer.path().join("secret.txt"), "secret").unwrap();
+    t.add_agent_in("vera", Some("haiku"), "worker", &ws).await;
+
+    let secret_txt = outer.path().join("secret.txt").display().to_string();
+    let mut refused = vec![
+        "../secret.png".to_owned(),
+        "..\\secret.png".to_owned(),
+        "sub/../../secret.png".to_owned(),
+    ];
+    if cfg!(windows) {
+        refused.extend(
+            [
+                "\\\\no-such-host.invalid\\share\\x.png",
+                "//no-such-host.invalid/share/x.png",
+                "\\\\?\\UNC\\no-such-host.invalid\\share\\x.png",
+                "\\\\.\\C:\\Windows\\x.png",
+                "\\\\?\\GLOBALROOT\\Device\\x.png",
+            ]
+            .map(str::to_owned),
+        );
+    }
+
+    // The image a tool call named: inside is read, everything else is 403.
+    let ok = t
+        .get(&format!(
+            "/v1/agents/vera/files/image?path={}",
+            encode("shot.png")
+        ))
+        .await;
+    assert_eq!(ok.status(), 200, "{}", ok.text().await.unwrap());
+    // An image may also be in the system temp directory (where tools leave screenshots, and
+    // where this test's directories are), so the absolute path out is the executable's.
+    let exe = std::env::current_exe().unwrap().display().to_string();
+    let mut refused_image = refused.clone();
+    refused_image.push(exe.clone());
+    refused_image.push(exe.replace('\\', "/"));
+    for path in &refused_image {
+        let resp = t
+            .get(&format!(
+                "/v1/agents/vera/files/image?path={}",
+                encode(path)
+            ))
+            .await;
+        assert_eq!(resp.status(), 403, "{path}: {}", resp.text().await.unwrap());
+    }
+
+    // The file browser's reads: the same.
+    let ok = t
+        .get(&format!(
+            "/v1/agents/vera/files/content?path={}",
+            encode("notes.txt")
+        ))
+        .await;
+    assert_eq!(ok.status(), 200, "{}", ok.text().await.unwrap());
+    let mut refused_text: Vec<String> = refused.iter().map(|p| p.replace(".png", ".txt")).collect();
+    refused_text.push(secret_txt.clone());
+    refused_text.push(secret_txt.replace('\\', "/"));
+    refused_text.push(exe);
+    for path in &refused_text {
+        let resp = t
+            .get(&format!(
+                "/v1/agents/vera/files/content?path={}",
+                encode(path)
+            ))
+            .await;
+        assert_eq!(resp.status(), 403, "{path}: {}", resp.text().await.unwrap());
+        let resp = t
+            .get(&format!("/v1/agents/vera/files/tree?path={}", encode(path)))
+            .await;
+        assert_eq!(resp.status(), 403, "{path}: {}", resp.text().await.unwrap());
+    }
+
+    // Paths in an agent's output are made links only inside; the rest answer nothing.
+    let mut inputs = vec!["notes.txt".to_owned()];
+    inputs.extend(refused_text.iter().cloned());
+    let resolved: Value = t
+        .post("/v1/agents/vera/files/resolve", json!({ "paths": inputs }))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let entries = resolved["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), inputs.len());
+    assert_eq!(entries[0]["path"], "notes.txt", "{resolved}");
+    for (entry, input) in entries.iter().zip(&inputs).skip(1) {
+        assert!(entry["path"].is_null(), "{input}: {entry}");
+        // The answer names the input as it was sent.
+        assert_eq!(entry["input"], input.as_str());
+    }
+
+    // Attachments are read by id only: a path in its place is not found.
+    for id in [
+        "..%2Ftoken",
+        "..%5Ctoken",
+        "C%3A%5Cx",
+        "%5C%5Cs%5Cshare%5Cx",
+    ] {
+        assert_eq!(
+            t.get(&format!("/v1/agents/vera/attachments/{id}"))
+                .await
+                .status(),
+            404,
+            "{id}"
+        );
+    }
+}
+
 /// Files given when a run starts go to its lead with the kickoff.
 #[tokio::test]
 async fn files_given_with_a_run_reach_its_lead() {

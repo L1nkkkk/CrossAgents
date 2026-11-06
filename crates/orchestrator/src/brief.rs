@@ -23,6 +23,15 @@ const PLAN_WAITS: &str = "\nplan: the person approves it and picks who runs each
      start the work yourself. Answering a question, or reporting that nothing needs changing, \
      needs no plan.";
 
+/// The dispatch protocol, appended to the lead's kickoff as a fixed section: the lead runs the
+/// work by delegating, and each time it is woken to evaluate it leaves one line saying what it
+/// decided (docs/research/multica.md §2.3). The person cannot edit it away.
+pub const DISPATCH: &str = "\ndispatch: you run the work by delegating it, not by doing a \
+     member's task yourself. Hand a task over with `task_create` or `task_assign` and stop \
+     there: the member works it and reports back, and you check the report. Whenever you are \
+     woken to look at progress, leave one line in your reply saying what you decided and what \
+     comes next.";
+
 pub fn previous_rounds(rounds: &[Run]) -> String {
     let mut out = String::new();
     if !rounds.is_empty() {
@@ -59,19 +68,58 @@ pub fn kickoff(
     env: Option<&RunEnv>,
     sessions: &str,
 ) -> String {
+    kickoff_with(
+        run,
+        team,
+        default_worker,
+        checks,
+        env,
+        sessions,
+        &crate::machine::current(),
+    )
+}
+
+/// [`kickoff`] with the machine its toolchain line describes (docs/tasks/SELF.md B4): a test
+/// gives a fake one, and the hub gives what it probed.
+pub fn kickoff_with(
+    run: &Run,
+    team: &[Agent],
+    default_worker: AgentId,
+    checks: &Result<RunChecks, String>,
+    env: Option<&RunEnv>,
+    sessions: &str,
+    machine: &crate::machine::Machine,
+) -> String {
     let mut out = run.request.trim().to_owned();
     out.push_str(KICKOFF_SEPARATOR);
-    if run.in_place {
-        let _ = write!(
-            out,
-            "{} (run_id: {}) · {} is not under version control: tasks run one at a \
-             time directly in it, with no branches, diffs or merges, and nothing can be rolled back",
-            run.title,
-            run.id,
-            run.repo.display()
-        );
+    if run.leads_in_place() {
+        if run.versioned() {
+            // The lead's own directory, which the hub leaves alone (docs/tasks/LEAD.md §4).
+            let _ = write!(
+                out,
+                "{} (run_id: {}) · you work in {} itself, on branch {}: the hub keeps no branch \
+                 of its own for the run, and does not commit, stage or switch branches there",
+                run.title,
+                run.id,
+                run.repo.display(),
+                run.base_branch
+            );
+        } else {
+            let _ = write!(
+                out,
+                "{} (run_id: {}) · {} is not under version control: tasks run one at a \
+                 time directly in it, with no branches, diffs or merges, and nothing can be rolled back",
+                run.title,
+                run.id,
+                run.repo.display()
+            );
+        }
         if !run.config.auto_approves() {
             out.push_str(PLAN_WAITS);
+        }
+        if run.versioned() {
+            // The checks still run — in that very directory.
+            describe_checks(&mut out, checks);
         }
     } else {
         let _ = write!(
@@ -92,44 +140,17 @@ pub fn kickoff(
         if !run.config.auto_approves() {
             out.push_str(PLAN_WAITS);
         }
-        match checks {
-            Ok(c) if c.checks.is_empty() => {
-                let _ = write!(
-                    out,
-                    "\nchecks: none declared in {}; the hub will not verify this run",
-                    project::FILE
-                );
-            }
-            Ok(c) => {
-                let list: Vec<String> = c
-                    .checks
-                    .iter()
-                    .map(|c| match c.paths.as_slice() {
-                        [] => format!("`{}`", c.command),
-                        paths => format!("`{}` (when {} changes)", c.command, paths.join(", ")),
-                    })
-                    .collect();
-                let _ = write!(
-                    out,
-                    "\nchecks ({}): before you land or finish with changes, the hub runs {} in \
-                     your checkout; they must pass. It runs them itself, in your build \
-                     directory: run only the tests your change needs, and let any build or test \
-                     you started finish before you call run_finish or run_land",
-                    project::FILE,
-                    list.join(", ")
-                );
-            }
-            Err(e) => {
-                let _ = write!(
-                    out,
-                    "\nchecks: {e}; landing and finishing are refused until it is fixed"
-                );
-            }
-        }
+        describe_checks(&mut out, checks);
         if let Some(env) = env {
             out.push_str(&environment(env));
         }
     }
+    // What the machine the session runs on offers: a fact, so that a turn is not spent finding
+    // out that `python` here is Windows' Store placeholder (docs/tasks/SELF.md B4).
+    if let Some(line) = machine.line() {
+        let _ = write!(out, "\n{line}");
+    }
+    out.push_str(DISPATCH);
     out.push_str(&roster(team, default_worker));
     if !team.iter().any(|a| a.id == default_worker) {
         // No worker was picked: tasks, if any, run on the lead's model.
@@ -140,6 +161,44 @@ pub fn kickoff(
     // The workspace's sessions, for working with one of them itself (docs/tasks/S1.md §3.6).
     out.push_str(sessions);
     out
+}
+
+/// What the project's checks are, as the lead is told before it starts.
+fn describe_checks(out: &mut String, checks: &Result<RunChecks, String>) {
+    match checks {
+        Ok(c) if c.checks.is_empty() => {
+            let _ = write!(
+                out,
+                "\nchecks: none declared in {}; the hub will not verify this run",
+                project::FILE
+            );
+        }
+        Ok(c) => {
+            let list: Vec<String> = c
+                .checks
+                .iter()
+                .map(|c| match c.paths.as_slice() {
+                    [] => format!("`{}`", c.command),
+                    paths => format!("`{}` (when {} changes)", c.command, paths.join(", ")),
+                })
+                .collect();
+            let _ = write!(
+                out,
+                "\nchecks ({}): before you land or finish with changes, the hub runs {} in \
+                 your checkout; they must pass. It runs them itself, in your build \
+                 directory: run only the tests your change needs, and let any build or test \
+                 you started finish before you call run_finish or run_land",
+                project::FILE,
+                list.join(", ")
+            );
+        }
+        Err(e) => {
+            let _ = write!(
+                out,
+                "\nchecks: {e}; landing and finishing are refused until it is fixed"
+            );
+        }
+    }
 }
 
 /// What the run's checkout sets in its agents' and checks' environment, and from where; a
@@ -268,18 +327,34 @@ pub fn task(task: &Task) -> String {
 /// worker that learned it only from its session instructions may forget it after a long
 /// turn.
 pub fn assignment(task: &Task) -> String {
-    format!(
+    assignment_with(task, &crate::machine::current())
+}
+
+/// [`assignment`] with the machine its toolchain line describes (docs/tasks/SELF.md B4): a
+/// test gives a fake one, and the hub gives what it probed.
+pub fn assignment_with(task: &Task, machine: &crate::machine::Machine) -> String {
+    let mut out = format!(
         "{}\n\nWhen done, report with `task_complete` (this task_id and a summary); a turn that \
          ends without a report leaves the task stalled.",
         self::task(task)
-    )
+    );
+    // What the machine the worker runs on offers (docs/tasks/SELF.md B4).
+    if let Some(line) = machine.line() {
+        let _ = write!(out, "\n\n{line}");
+    }
+    out
 }
 
 /// A task as the worker it was handed to gets it: the assignment, then the handoff card —
 /// who had it, why it moved, what they changed and left open. A first assignment is the
 /// assignment alone.
 pub fn handover(task: &Task, card: &Handoff) -> String {
-    let mut out = assignment(task);
+    handover_with(task, card, &crate::machine::current())
+}
+
+/// [`handover`] with the machine its toolchain line describes (docs/tasks/SELF.md B4).
+pub fn handover_with(task: &Task, card: &Handoff, machine: &crate::machine::Machine) -> String {
+    let mut out = assignment_with(task, machine);
     if card.kind == HandoffKind::Assign && card.reason.is_none() {
         return out;
     }
@@ -412,6 +487,7 @@ mod tests {
             reviewer_fresh: true,
             status: TaskStatus::Running,
             attempts: 1,
+            runs: Vec::new(),
             escalated: false,
             nudges: 0,
             branch: None,
@@ -422,6 +498,30 @@ mod tests {
             handoffs: Vec::new(),
             created_at: now,
             updated_at: now,
+        }
+    }
+
+    fn agent(name: &str) -> Agent {
+        Agent {
+            id: AgentId::new(),
+            name_source: crossagents_core::NameSource::Chosen,
+            topic: None,
+            archived_at: None,
+            home: std::path::PathBuf::new(),
+            name: name.into(),
+            plugin: "claude".into(),
+            driver: None,
+            model: None,
+            role: crossagents_core::Role::Worker,
+            cwd: ".".into(),
+            config: serde_json::Value::Null,
+            status: crossagents_core::AgentStatus::Stopped,
+            created_at: Utc::now(),
+            profile: crossagents_core::AgentProfile {
+                display_name: Some(name.into()),
+                title: Some("builds things".into()),
+                ..crossagents_core::AgentProfile::default()
+            },
         }
     }
 
@@ -478,6 +578,7 @@ mod tests {
             base_branch: "main".into(),
             branch: "run".into(),
             in_place: false,
+            mode: None,
             note: None,
             plan: vec![],
             lead_note: None,
@@ -485,6 +586,7 @@ mod tests {
             summary: None,
             checks: vec![],
             checks_state: None,
+            checks_snapshot: None,
             created_at: now,
             updated_at: now,
         };
@@ -515,6 +617,24 @@ mod tests {
             assert!(!auto.contains("plan_submit"), "{auto}");
             run.config.policy.plan_approval = PlanApproval::Required;
         }
+        // The dispatch protocol and the roster are fixed sections, in that order, whatever the
+        // team is (multica §2.3).
+        let team = vec![agent("Rex")];
+        let text = kickoff(&run, &team, worker, &Err("test".into()), None, "");
+        let dispatch = text
+            .find("dispatch: you run the work by delegating")
+            .unwrap_or_else(|| panic!("no dispatch protocol:\n{text}"));
+        let roster = text
+            .find("team (name one as a task's assignee or reviewer)")
+            .unwrap_or_else(|| panic!("no roster:\n{text}"));
+        assert!(
+            dispatch < roster,
+            "the roster must follow the protocol:\n{text}"
+        );
+        assert!(text.contains("- Rex — Rex, builds things"), "{text}");
+        // A run with nobody on the team still gets the protocol.
+        let alone = kickoff(&run, &[], worker, &Err("test".into()), None, "");
+        assert!(alone.contains("dispatch: you run the work"), "{alone}");
     }
 
     #[test]

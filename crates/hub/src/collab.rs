@@ -14,6 +14,7 @@ use crossagents_core::{
 };
 use crossagents_orchestrator::workspace::worktree_env;
 use crossagents_orchestrator::{AgentHost, RouteDecision, RouteMode};
+use crossagents_plugins::PluginRegistry;
 use tokio::sync::RwLock;
 
 use crate::runtime::{Runtime, SessionExtras, SessionSetup};
@@ -81,6 +82,9 @@ impl AgentTokens {
 pub struct CollabSetup {
     pub tokens: Arc<AgentTokens>,
     pub accounts: Arc<crate::accounts::Accounts>,
+    /// The plugins the hub knows: their descriptions' CLI floors and the drivers that report
+    /// a CLI's version (docs/research/multica.md §2.9).
+    pub plugins: PluginRegistry,
     /// Command that runs the MCP server, e.g. `["/path/crossagents", "mcp"]`.
     pub mcp_command: Vec<String>,
     /// Further MCP servers from `[mcp.<name>]`, mounted into every session besides the
@@ -140,6 +144,11 @@ impl SessionSetup for CollabSetup {
     }
 
     async fn prepare(&self, agent: &Agent) -> Result<SessionExtras, CoreError> {
+        // An existing agent does not open a session on a CLI below its description's floor
+        // either: the same gate `POST /v1/agents` puts on new ones, for agents made before it
+        // (docs/research/multica.md §2.9). A CLI that has not answered its version starts as
+        // before.
+        crate::version_gate::check(agent, &self.plugins).await?;
         let agent_env = self.agent_env(agent).await?;
         let (permission, permissions) = self.permissions(agent).await;
         let (lessons, groups) = match self.orchestrator.get() {

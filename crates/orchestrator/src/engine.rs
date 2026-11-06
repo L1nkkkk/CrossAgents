@@ -13,8 +13,9 @@ use std::sync::Arc;
 use chrono::Utc;
 use crossagents_core::{
     Agent, AgentId, AgentKey, AgentStatus, Attachment, ClaimRole, CoreError, Envelope, EventBus,
-    EventKind, HandoffKind, MessageSource, PlannedTask, Role, Run, RunConfig, RunId, RunPolicy,
-    RunStatus, StopReason, Store, Task, TaskId, TaskReport, TaskStatus,
+    EventKind, HandoffKind, LeadPlace, MessageId, MessageSource, PlannedTask, Role, Run, RunConfig,
+    RunId, RunMode, RunPolicy, RunStatus, StopReason, Store, Task, TaskId, TaskReport,
+    TaskRunOutcome, TaskStatus, WorkspaceVcs,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -63,6 +64,9 @@ pub struct NewRun {
     /// The branch the run's branch starts from and lands on; `None` is the repository's
     /// current branch.
     pub base_branch: Option<String>,
+    /// Where the lead works (docs/tasks/LEAD.md §2). A directory outside version control
+    /// gets one in place whatever this says: there is no checkout to make.
+    pub lead_place: LeadPlace,
     /// Files that came with the request, already stored; they go with the lead's kickoff.
     pub attachments: Vec<Attachment>,
 }
@@ -179,6 +183,11 @@ pub struct Orchestrator {
     pub(crate) land_cleanup: std::sync::Mutex<HashMap<AgentId, RunId>>,
     /// Commands agents are running now (`crate::running`).
     pub(crate) running: std::sync::Mutex<crate::running::RunningCommands>,
+    /// Stages whose batch has ended and whose wakeup the lead already got, by run
+    /// (`crate::stage`, docs/research/multica.md §2.2). In memory: after a restart a stage
+    /// that ended meanwhile is reported once more, never lost.
+    pub(crate) stage_wakeups:
+        std::sync::Mutex<HashMap<RunId, std::collections::HashSet<u32>>>,
     /// What an agent's current turn failed with, until the turn ends: the stalled notice
     /// says why, or its issuer only nudges it into the same failure.
     turn_errors: std::sync::Mutex<HashMap<AgentId, String>>,
@@ -266,6 +275,7 @@ impl Orchestrator {
             leaving: std::sync::Mutex::default(),
             land_cleanup: std::sync::Mutex::default(),
             running: std::sync::Mutex::default(),
+            stage_wakeups: std::sync::Mutex::default(),
             turn_errors: std::sync::Mutex::default(),
             extensions: std::sync::OnceLock::new(),
         })
@@ -312,7 +322,7 @@ impl Orchestrator {
         run: &Run,
         task: &Task,
     ) -> Result<(String, PathBuf), CoreError> {
-        if run.in_place {
+        if !run.versioned() {
             return Ok((String::new(), run.repo.clone()));
         }
         if let Some(parent) = task.parent {
@@ -329,7 +339,9 @@ impl Orchestrator {
     }
 
     pub(crate) fn integration_path(&self, run: &Run) -> PathBuf {
-        if run.in_place {
+        if run.leads_in_place() {
+            // There is no checkout of the hub's: the directory the lead works in is the one
+            // the run is about (the person's, or a directory outside version control).
             return run.repo.clone();
         }
         worktree_path(
@@ -351,7 +363,7 @@ impl Orchestrator {
 
     /// Walk only this group's branch chain. The last base is the actual landing target.
     pub(crate) async fn round_base(&self, run: &Run) -> Result<(String, Vec<Run>), CoreError> {
-        if run.in_place {
+        if run.leads_in_place() {
             return Ok((run.base_branch.clone(), Vec::new()));
         }
         let rounds = self.store.list_runs().await?;
@@ -390,12 +402,14 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// Where `run`'s tasks work: git worktrees, or the directory itself.
+    /// Where `run`'s tasks work: git worktrees, or the directory itself. By what the
+    /// workspace is, not where the lead works: a lead in place in a repository still needs
+    /// git to read the content its checks ran on (docs/tasks/LEAD.md §11).
     pub(crate) fn ws_for(&self, run: &Run) -> &dyn WorkspaceProvider {
-        if run.in_place {
-            &InPlaceWorkspaces
-        } else {
+        if run.versioned() {
             self.workspaces.as_ref()
+        } else {
+            &InPlaceWorkspaces
         }
     }
 
@@ -418,6 +432,19 @@ impl Orchestrator {
             ..Envelope::new(MessageSource::Agent { agent_id: from }, text)
         };
         let id = envelope.id;
+        self.send_in_background(to, envelope);
+        id
+    }
+
+    /// The message [`Self::relay`] would send, built but not sent: a caller that keeps a
+    /// record of it (a run's turn, `crate::attempts`) has its id before it goes.
+    pub(crate) fn relay_envelope(&self, from: AgentId, text: String) -> Envelope {
+        Envelope::new(MessageSource::Agent { agent_id: from }, text)
+    }
+
+    /// Sends an envelope built by [`Self::relay_envelope`], in the background: starting an
+    /// agent can take minutes.
+    pub(crate) fn send_in_background(&self, to: AgentId, envelope: Envelope) {
         let host = self.host.clone();
         let handle = tokio::spawn(async move {
             if let Err(err) = host.send_envelope(to, envelope, false).await {
@@ -428,7 +455,6 @@ impl Orchestrator {
         self.relay_tasks.lock().unwrap().push(handle);
         #[cfg(not(test))]
         drop(handle);
-        id
     }
 
     /// Tests await every relay started before their producer's completion barrier.
@@ -631,8 +657,21 @@ impl Orchestrator {
         let mut new = new;
         let team = self.gather_team(&new.config, &repo).await?;
         new.config.team = team.iter().map(|a| a.id).collect();
-        let in_place = !self.workspaces.versioned(&repo).await;
-        let base_branch = if let Some(old) = previous.as_ref().filter(|r| !r.in_place) {
+        // The layers one flag used to carry (docs/tasks/LEAD.md §11): a directory outside
+        // version control has its lead and its work in it; a repository follows the
+        // person's choice. `in_place` stays the flag runs were recorded with: a directory
+        // with no branch of the hub's at all.
+        let versioned = self.workspaces.versioned(&repo).await;
+        let mode = if versioned {
+            match new.lead_place {
+                LeadPlace::InPlace => RunMode::in_place(WorkspaceVcs::Git),
+                LeadPlace::Worktree => RunMode::worktree(),
+            }
+        } else {
+            RunMode::in_place(WorkspaceVcs::None)
+        };
+        let in_place = mode.vcs == WorkspaceVcs::None;
+        let base_branch = if let Some(old) = previous.as_ref().filter(|r| r.works_in_checkout()) {
             let tasks = self.store.list_tasks(old.id).await?;
             if !from_base
                 && old.landed.is_none()
@@ -643,7 +682,7 @@ impl Orchestrator {
             } else {
                 self.round_base(old).await?.0
             }
-        } else if in_place {
+        } else if !versioned {
             String::new()
         } else if let Some(base) = new.base_branch.clone() {
             base
@@ -668,7 +707,8 @@ impl Orchestrator {
             config: new.config,
             repo: repo.clone(),
             base_branch: base_branch.clone(),
-            branch: if in_place {
+            branch: if !versioned || mode.lead == LeadPlace::InPlace {
+                // In place, the person's own branch is the branch: the hub makes none.
                 String::new()
             } else if let Some(old) = &previous {
                 format!(
@@ -680,14 +720,16 @@ impl Orchestrator {
                 format!("crossagents/{}", short(id))
             },
             in_place,
+            mode: Some(mode),
             note: None,
             plan: Vec::new(),
             lead_note: previous.as_ref().and_then(|r| r.lead_note.clone()),
+            checks_snapshot: None,
             created_at: now,
             updated_at: now,
         };
         // One directory, so one task at a time.
-        run.config.max_parallel = if in_place {
+        run.config.max_parallel = if mode.lead == LeadPlace::InPlace {
             1
         } else {
             run.config.max_parallel.max(1)
@@ -695,13 +737,13 @@ impl Orchestrator {
         run.config.max_attempts = run.config.max_attempts.max(1);
         let reused = previous
             .as_ref()
-            .is_some_and(|old| !old.in_place && self.integration_path(old).exists());
+            .is_some_and(|old| old.works_in_checkout() && self.integration_path(old).exists());
         // The previous round's checkout can be gone (an explicit cleanup released it): the
         // round still starts from its branch, but the lead's session lived in a directory
         // that no longer exists, so a copy continues there instead of moving it.
         let previous_home = previous
             .as_ref()
-            .is_some_and(|old| self.integration_path(old).exists());
+            .is_some_and(|old| old.works_in_checkout() && self.integration_path(old).exists());
         if reused {
             // Claim the same session before touching its checkout. No place/copy is needed.
             self.lead_self(&run, &planner, restore).await?;
@@ -712,7 +754,7 @@ impl Orchestrator {
                 self.store.release_agent(planner.id, run.id).await?;
                 return Err(err);
             }
-        } else {
+        } else if mode.lead == LeadPlace::Worktree {
             self.ws_for(&run)
                 .create(
                     &repo,
@@ -723,9 +765,10 @@ impl Orchestrator {
                 .await?;
         }
         // What the project says a fresh checkout needs before anyone works in it
-        // (dependencies, docs/tasks/TOOLCHAIN.md §7). A reused checkout and an in-place run
-        // are not fresh: nothing to prepare.
-        let setup = if in_place || reused {
+        // (dependencies, docs/tasks/TOOLCHAIN.md §7). A reused checkout and a run whose lead
+        // works in the person's own directory are not fresh: nothing to prepare, and nothing
+        // of the hub's to run there (docs/tasks/LEAD.md §4).
+        let setup = if mode.lead == LeadPlace::InPlace || reused {
             None
         } else {
             Some(
@@ -739,18 +782,26 @@ impl Orchestrator {
             )
         };
         // The lead works in the run's own checkout: what it changes stays on the run branch
-        // until it is landed (docs/tasks/W1.md §4.1). In place, it works where it is.
-        let lead = if reused {
+        // until it is landed (docs/tasks/W1.md §4.1). In place, it works where it is: the
+        // agent itself, claimed as it is, no copy and no move (docs/tasks/LEAD.md §4).
+        let _dir_guard = if mode.lead == LeadPlace::InPlace {
+            // Read the directory's occupancy and record this run in it as one step, so that
+            // a second run for the same checkout cannot find it free meanwhile.
+            let guard = Some(self.dir_gate(&repo).await);
+            self.dir_free(&repo, None).await?;
+            guard
+        } else {
+            None
+        };
+        let lead = if mode.lead == LeadPlace::InPlace {
+            self.claim_in_place(&run, &planner).await
+        } else if reused {
             Ok((planner.clone(), false))
         } else if (previous.is_some() && previous_home) || fresh == Some(false) {
             self.lead_self(&run, &planner, restore).await
         } else if fresh == Some(true) {
             self.copy_lead(&planner, run.id, &self.integration_path(&run))
                 .await
-        } else if in_place {
-            self.claim(&planner, run.id, None, ClaimRole::Lead, false)
-                .await
-                .map(|()| (planner.clone(), false))
         } else {
             self.lead_in(&planner, run.id, &self.integration_path(&run))
                 .await
@@ -1281,7 +1332,7 @@ impl Orchestrator {
             run.config.policy = policy;
         }
         if let Some(n) = approval.max_parallel {
-            let n = if run.in_place { 1 } else { n.max(1) };
+            let n = if run.leads_in_place() { 1 } else { n.max(1) };
             if n != run.config.max_parallel {
                 changes.push(format!("at most {n} task(s) run at a time"));
             }
@@ -1378,6 +1429,7 @@ impl Orchestrator {
                 reviewer_fresh: planned.reviewer_fresh,
                 status: TaskStatus::Pending,
                 attempts: 0,
+                runs: Vec::new(),
                 escalated: false,
                 nudges: 0,
                 branch: None,
@@ -1479,6 +1531,11 @@ The person changed: {}",
             self.cleanup_worktree(&run, &task, false, released.is_empty())
                 .await;
             task.report.failure = Some("run cancelled".into());
+            crate::attempts::close_open(
+                &mut task,
+                TaskRunOutcome::Cancelled,
+                Some("the run was cancelled".into()),
+            );
             self.transition(&mut task, TaskStatus::Cancelled).await?;
         }
         if run.work_id.is_some() {
@@ -1528,19 +1585,37 @@ The person changed: {}",
             self.transition(&mut task, TaskStatus::Cancelled).await?;
         }
         let tasks = self.store.list_tasks(run.id).await?;
+        // A stage whose tasks have all ended wakes the lead, before the next one is
+        // released (docs/research/multica.md §2.2, `crate::stage`).
+        self.wake_stages(run, &tasks).await?;
         let ready: Vec<Task> = plan::ready_tasks(&tasks, run.config.max_parallel)
             .into_iter()
             .cloned()
             .collect();
         for mut task in ready {
             let itself = !task.worker_fresh && !task.escalated;
-            if let Err(err) = self.dispatch(run, &mut task).await {
+            let mut tries = 0u32;
+            loop {
+                let Err(err) = self.dispatch(run, &mut task).await else {
+                    break;
+                };
                 if itself && task.status == TaskStatus::Pending {
                     refused.push(self.not_started(run, &mut task, err).await?);
+                    break;
+                }
+                let why = format!("cannot start the task: {err}");
+                // Offline, a timeout, a directory that could not be prepared: the platform's,
+                // and worth another try at once (multica §2.5). Nothing was handed over yet.
+                if tries < crate::attempts::MAX_INFRA_RETRIES
+                    && task.assignee.is_none()
+                    && crate::attempts::start_is_retryable(&why)
+                {
+                    tries += 1;
+                    crate::attempts::record_start_failure(&mut task, &why, true);
                     continue;
                 }
-                self.fail_task(run, &mut task, format!("cannot start the task: {err}"))
-                    .await?;
+                crate::attempts::record_start_failure(&mut task, &why, false);
+                self.fail_task(run, &mut task, why).await?;
                 // fail_task schedules again.
                 return Ok(refused);
             }
@@ -1596,8 +1671,19 @@ The person changed: {}",
     }
 
     pub(crate) async fn dispatch(&self, run: &Run, task: &mut Task) -> Result<(), CoreError> {
+        // No worker in the person's directory (docs/tasks/LEAD.md §12 P2): it would write
+        // where the lead is writing, with no checkout between them. A versioned workspace
+        // gets workers once their starting point is a snapshot of the directory (P3).
+        if run.leads_in_place() && run.versioned() {
+            return Err(CoreError::Conflict(
+                "this run's lead works in your own directory, so the hub gives no task out: a \
+                 worker would write there too. Do the work yourself, or start a run in a \
+                 checkout of its own"
+                    .into(),
+            ));
+        }
         let mut setup = None;
-        if task.worktree.is_none() && run.in_place {
+        if task.worktree.is_none() && !run.versioned() {
             task.worktree = Some(run.repo.clone());
         } else if task.worktree.is_none() {
             // A dropped attempt may have left its branch or checkout behind (kept while its
@@ -1715,7 +1801,13 @@ The person changed: {}",
         if let Some(pushed) = self.expertise_brief(&worker, task).await {
             opening = format!("{opening}\n\n{pushed}");
         }
-        self.relay(worker.id, issuer, opening, None);
+        // The run this dispatch starts: the opening message is its turn, and a run that ends
+        // without a report is not the task ending (multica §2.4).
+        let envelope = self.relay_envelope(issuer, opening);
+        crate::attempts::begin(task, Some(worker.id), Some(envelope.id));
+        task.updated_at = Utc::now();
+        self.store.update_task(task).await?;
+        self.send_in_background(worker.id, envelope);
         Ok(())
     }
 
@@ -1927,13 +2019,13 @@ The person changed: {}",
     /// run builds under is left alone. Whatever cannot go now (Windows holding a file) is
     /// logged and retried by [`Self::sweep_worktrees`] at the next start.
     pub(crate) async fn remove_finished_targets(&self, run: &Run) {
-        if run.in_place || !run.status.is_terminal() {
+        if !run.works_in_checkout() || !run.status.is_terminal() {
             return;
         }
         let runs = self.store.list_runs().await.unwrap_or_default();
         let open: std::collections::HashSet<String> = runs
             .iter()
-            .filter(|r| !r.status.is_terminal() && !r.in_place)
+            .filter(|r| !r.status.is_terminal() && r.works_in_checkout())
             .flat_map(|r| [short(r.id), self.integration_key(r)])
             .collect();
         let mut keys = vec![short(run.id)];
@@ -2028,7 +2120,7 @@ The person changed: {}",
         }
         for run in runs
             .iter()
-            .filter(|r| r.status.is_terminal() && !r.in_place)
+            .filter(|r| r.status.is_terminal() && r.works_in_checkout())
         {
             if run.landed.is_some() {
                 self.cleanup_after_land(run.id).await;
@@ -2111,10 +2203,11 @@ The person changed: {}",
 
     /// Commits what the lead left uncommitted in the run's checkout, so that branching off
     /// the run branch, merging into it and landing it see the lead's work. `false` when there
-    /// was nothing (or no checkout).
+    /// was nothing (or no checkout) — and never in the person's own directory, which the hub
+    /// neither commits nor stages (docs/tasks/LEAD.md §4).
     pub(crate) async fn commit_lead(&self, run: &Run, message: &str) -> Result<bool, CoreError> {
         let dir = self.integration_path(run);
-        if run.in_place
+        if !run.works_in_checkout()
             || !dir.exists()
             || (run.work_id.is_some() && self.workspaces.current_branch(&dir).await? != run.branch)
         {
@@ -2123,14 +2216,25 @@ The person changed: {}",
         self.ws_for(run).commit_all(&dir, message).await
     }
 
-    /// Whether the run branch brings anything into its base: a merged task, or the lead's
-    /// own commits.
+    /// Whether the run brings anything into its base: a merged task, or the lead's own
+    /// commits — or, for a lead working in the person's directory, what differs there.
     pub(crate) async fn has_changes(&self, run: &Run, tasks: &[Task]) -> Result<bool, CoreError> {
         if tasks.iter().any(|t| t.status == TaskStatus::Merged) {
             return Ok(true);
         }
-        if run.in_place {
-            return Ok(false);
+        if run.leads_in_place() {
+            if !run.versioned() {
+                return Ok(false);
+            }
+            let dir = self.integration_path(run);
+            if !dir.exists() {
+                return Ok(false);
+            }
+            return Ok(!self
+                .ws_for(run)
+                .changed_files(&dir, &run.base_branch)
+                .await?
+                .is_empty());
         }
         let diff = self
             .ws_for(run)
@@ -2197,11 +2301,13 @@ The person changed: {}",
                             this.turn_errors.lock().unwrap().insert(id, message);
                         }
                         EventKind::AgentTurnCompleted {
-                            id, stop_reason, ..
+                            id,
+                            message_id,
+                            stop_reason,
                         } => {
                             let error = this.turn_errors.lock().unwrap().remove(&id);
                             let error = error.filter(|_| stop_reason == StopReason::Error);
-                            this.on_idle(id, error).await
+                            this.on_idle(id, Some(message_id), error).await
                         }
                         EventKind::AgentUpdated { agent } => {
                             let this = this.clone();
@@ -2245,7 +2351,8 @@ The person changed: {}",
                             ..
                         } => {
                             let error = this.turn_errors.lock().unwrap().remove(&id);
-                            this.on_idle(id, error).await
+                            // A process that died says nothing about its turn: no id to match.
+                            this.on_idle(id, None, error).await
                         }
                         _ => {}
                     },
@@ -2274,9 +2381,10 @@ The person changed: {}",
     }
 
     /// An agent's turn ended (or it crashed) while its task still waits for its report. The
-    /// hub does not nudge: the task shows as stalled and its issuer decides, told what the
-    /// turn failed with when it did.
-    async fn on_idle(&self, agent: AgentId, error: Option<String>) {
+    /// run is recorded; a platform fault is retried where trying again may help, and one that
+    /// a retry cannot fix (`agent_error`) stops the task and says why. The task itself never
+    /// counts as done because a run ended (multica §2.4–2.5).
+    async fn on_idle(&self, agent: AgentId, turn: Option<MessageId>, error: Option<String>) {
         let Some((run, task)) = self.task_for_agent(agent).await else {
             return;
         };
@@ -2306,24 +2414,7 @@ The person changed: {}",
         if task.assignee != Some(agent) || task.status != TaskStatus::Running {
             return;
         }
-        if let Err(err) = self.transition(&mut task, TaskStatus::Stalled).await {
-            return tracing::error!(error = %err, "cannot mark a task stalled");
-        }
-        self.notice(
-            issuer,
-            &format!("task:{}", task.id),
-            &match error {
-                Some(error) => format!(
-                    "Task {} is stalled: {name}'s turn failed before it could report: {error}\nA nudge fails the same way while the cause stays: fix it, or task_assign the task to someone else.",
-                    brief::task_ref(&task)
-                ),
-                None => format!(
-                    "Task {} is stalled: {name} ended a turn without reporting.",
-                    brief::task_ref(&task)
-                ),
-            },
-        )
-        .await;
+        self.turn_ended(&run, &mut task, agent, turn, error).await;
     }
 
     /// After a hub restart sessions resume where the driver can, but nothing is running:
@@ -2373,6 +2464,11 @@ The person changed: {}",
                     continue;
                 }
                 if task.status == TaskStatus::Running {
+                    crate::attempts::close_open(
+                        &mut task,
+                        TaskRunOutcome::NoReport,
+                        Some("the hub restarted while this run was going".into()),
+                    );
                     self.transition(&mut task, TaskStatus::Stalled).await?;
                 } else {
                     // Left over from the fixed pipeline: hand it to the issuer as done.

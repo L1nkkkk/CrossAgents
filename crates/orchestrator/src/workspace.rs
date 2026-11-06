@@ -52,6 +52,25 @@ pub trait WorkspaceProvider: Send + Sync {
     ) -> Result<String, CoreError>;
     /// A working copy of the existing `branch` at `path`.
     async fn checkout(&self, repo: &Path, branch: &str, path: &Path) -> Result<(), CoreError>;
+    /// [`Self::land`], in a directory another run's lead is working in (`held`): refused
+    /// before anything is written there, so that a merge never starts in a working copy
+    /// someone else is changing (docs/tasks/LEAD.md §7). This is the check
+    /// [`check_checkout`] makes for the person's own uncommitted work, taken first: the
+    /// person's directory is held by the hub, which a working copy's git state cannot say.
+    async fn land_held(
+        &self,
+        repo: &Path,
+        base: &str,
+        branch: &str,
+        mode: LandMode,
+        message: &str,
+        held: Option<&crossagents_core::Run>,
+    ) -> Result<String, CoreError> {
+        if let Some(holder) = held {
+            return Err(CoreError::Conflict(crate::dirlock::busy(holder, repo)));
+        }
+        self.land(repo, base, branch, mode, message).await
+    }
     /// Merges what `base` gained into the branch checked out at `into`, before landing
     /// (docs/tasks/DOGFOOD.md §4). On conflict nothing changes and the conflicts are told.
     async fn sync_base(&self, into: &Path, base: &str) -> Result<Synced, CoreError>;

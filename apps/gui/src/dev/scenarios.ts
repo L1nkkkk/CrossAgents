@@ -201,6 +201,19 @@ export const SCENARIOS: Scenario[] = [
     run.continuation = { owner: run.planner, phase: "exhausted", next_step: "已达到自动唤醒次数上限。请检查任务状态，或向主管发送进一步指示。", attempts: 3, next_at: null, last_attempt_at: new Date().toISOString(), delivery_error: null };
     return { ...scene, script: [], route: `#/runs/${run.id}` };
   } },
+  { key: "task-runs", label: "任务的多轮运行", hint: "任务详情：共 3 次运行，平台故障与会话失效各自动重试一次，agent_error 停下并写明原因", build: () => {
+    const scene = oauthRun("running");
+    const detail = scene.state.runs[0];
+    const task = detail.tasks[0];
+    task.runs = [
+      { index: 1, started_at: ago(40), ended_at: ago(36), outcome: "infrastructure", agent: task.assignee, message: null, note: "request timed out after 600s", retried: true },
+      { index: 2, started_at: ago(35), ended_at: ago(31), outcome: "session_lost", agent: task.assignee, message: null, note: "context length exceeded: 400000 > 200000", retried: true },
+      { index: 3, started_at: ago(30), ended_at: ago(26), outcome: "agent_error", agent: task.assignee, message: null, note: "agent_error: invalid api key", retried: false },
+    ];
+    task.status = "stalled";
+    task.report.failure = "agent_error: invalid api key";
+    return { ...scene, script: [], route: `#/runs/${detail.run.id}/tasks/${task.id}` };
+  } },
   { key: "empty", label: "空 hub", hint: "第一次打开：没有队友、没有 run", build: () => ({ state: emptyHub(), script: [], route: "#/" }) },
   { key: "session-choice", label: "发起时选会话", hint: "首页 Work 的「会话」：新会话或已有会话；占用写明哪个 run，归档可恢复，不能换目录的置灰", build: () => {
     const { ada, rex, mia, sam } = team();
@@ -486,6 +499,11 @@ export const SCENARIOS: Scenario[] = [
     script: [],
     route: "#/extensions",
   }) },
+  { key: "git", label: "Git 页", hint: "一个项目的分支（本地/远程）、带泳道的提交图（HEAD、分支、tag）、选中提交的详情和 diff，顶部是未提交改动数", build: () => ({
+    state: { ...emptyHub(), agents: [agent({ name: "Ada", plugin: "claude", role: "worker", cwd: REPO })] },
+    script: [],
+    route: "#/git",
+  }) },
 ];
 
 export const DEFAULT_SCENARIO = "running";
@@ -563,17 +581,18 @@ function backgroundScene() {
   const soon = (minutes: number) => new Date(Date.now() + minutes * 60_000).toISOString();
   const nova = "0190aaaa-0000-7000-8000-00000000n0va";
   const fires = "rem-rex-ci";
+  const noHealth = { runs: [], paused_at: null, pause_reason: null };
   const background: BackgroundResponse = {
     reminders: [
-      { reminder: { id: fires, owner: rex.id, due_at: new Date(Date.now() + 8_000).toISOString(), note: "看一眼 CI 有没有跑完", task: tc.id, only_if_open: true, created_at: ago(5) }, owner_name: rex.name, task_key: tc.key, run_id: runId },
-      { reminder: { id: "rem-ada-check", owner: ada.id, due_at: soon(25), note: "#b 还没交就去问 Mia 卡在哪", task: tb.id, only_if_open: true, created_at: ago(20) }, owner_name: ada.name, task_key: tb.key, run_id: runId },
-      { reminder: { id: "rem-mia-dark", owner: mia.id, due_at: soon(60 * 3 + 12), note: "深色模式的截图发给设计确认", task: null, only_if_open: false, created_at: ago(40) }, owner_name: mia.name, task_key: null, run_id: runId },
-      { reminder: { id: "rem-nova-docs", owner: nova, due_at: soon(60 * 26), note: "明早把 docs/cli.md 的 --json 例子再核对一遍", task: null, only_if_open: false, created_at: ago(90) }, owner_name: "Nova", task_key: null, run_id: null },
+      { reminder: { id: fires, owner: rex.id, due_at: new Date(Date.now() + 8_000).toISOString(), note: "看一眼 CI 有没有跑完", task: tc.id, only_if_open: true, wait_expired: false, created_at: ago(5) }, owner_name: rex.name, task_key: tc.key, run_id: runId },
+      { reminder: { id: "rem-ada-check", owner: ada.id, due_at: soon(25), note: "#b 还没交就去问 Mia 卡在哪", task: tb.id, only_if_open: true, wait_expired: false, created_at: ago(20) }, owner_name: ada.name, task_key: tb.key, run_id: runId },
+      { reminder: { id: "rem-mia-dark", owner: mia.id, due_at: soon(60 * 3 + 12), note: "深色模式的截图发给设计确认", task: null, only_if_open: false, wait_expired: false, created_at: ago(40) }, owner_name: mia.name, task_key: null, run_id: runId },
+      { reminder: { id: "rem-nova-docs", owner: nova, due_at: soon(60 * 26), note: "明早把 docs/cli.md 的 --json 例子再核对一遍", task: null, only_if_open: false, wait_expired: false, created_at: ago(90) }, owner_name: "Nova", task_key: null, run_id: null },
     ],
     watches: [
-      { watch: { id: "w-ada-c", owner: ada.id, target: { kind: "task", task_id: tc.id }, on: ["done", "failed"], created_at: ago(30) }, owner_name: ada.name, target_name: `#${tc.key}`, run_id: runId },
-      { watch: { id: "w-ada-mia", owner: ada.id, target: { kind: "agent", agent_id: mia.id }, on: ["idle", "stalled"], created_at: ago(28) }, owner_name: ada.name, target_name: mia.name, run_id: runId },
-      { watch: { id: "w-nova-iris", owner: nova, target: { kind: "agent", agent_id: "0190aaaa-0000-7000-8000-00000000iris" }, on: [], created_at: ago(70) }, owner_name: "Nova", target_name: "Iris", run_id: null },
+      { watch: { id: "w-ada-c", owner: ada.id, target: { kind: "task", task_id: tc.id }, on: ["done", "failed"], created_at: ago(30), expires_at: null, chain: 0, health: noHealth }, owner_name: ada.name, target_name: `#${tc.key}`, run_id: runId },
+      { watch: { id: "w-ada-mia", owner: ada.id, target: { kind: "agent", agent_id: mia.id }, on: ["idle", "stalled"], created_at: ago(28), expires_at: null, chain: 0, health: noHealth }, owner_name: ada.name, target_name: mia.name, run_id: runId },
+      { watch: { id: "w-nova-iris", owner: nova, target: { kind: "agent", agent_id: "0190aaaa-0000-7000-8000-00000000iris" }, on: [], created_at: ago(70), expires_at: null, chain: 0, health: noHealth }, owner_name: "Nova", target_name: "Iris", run_id: null },
     ],
     verifying: [
       { task_id: tc.id, run_id: runId, run_title: d.run.title, key: tc.key, title: tc.title, assignee: tc.assignee, assignee_name: rex.name, checks: 3, since: tc.updated_at },

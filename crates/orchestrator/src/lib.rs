@@ -3,10 +3,14 @@
 //! in agents through [`AgentHost`].
 
 pub mod approval;
+pub mod attempts;
+pub mod breaker;
 pub mod brief;
 pub mod claims;
+pub mod coauthor;
 pub mod continuation;
 pub mod delete;
+pub mod dirlock;
 pub mod engine;
 pub mod expertise;
 pub mod files;
@@ -16,8 +20,10 @@ pub mod handoff;
 pub mod history;
 pub mod host;
 pub mod human;
+pub mod inplace;
 pub mod landing;
 pub mod lessons;
+pub mod machine;
 pub mod messaging;
 pub mod notes;
 pub mod plan;
@@ -32,10 +38,12 @@ pub mod running;
 pub mod screenshot;
 mod sessions;
 pub mod setup;
+pub mod stage;
 pub mod tasks;
 pub mod team;
 pub mod tools;
 pub mod verify;
+pub mod watch;
 pub mod work;
 pub mod workspace;
 

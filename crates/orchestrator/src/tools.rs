@@ -89,7 +89,8 @@ fn spec_schema() -> Value {
             "interfaces": strings,
             "acceptance": { "type": "array", "items": { "type": "string" }, "description": "Optional shell commands the hub runs when the worker reports done." },
             "references": strings,
-            "result_schema": { "type": "object", "description": "JSON Schema for the required structured result." }
+            "result_schema": { "type": "object", "description": "JSON Schema for the required structured result." },
+            "stage": { "type": "integer", "description": "Optional stage: tasks of a later stage start only once every task of an earlier stage has ended, and you are woken when each stage's batch ends. Omit for no staging." }
         },
         "required": ["goal"]
     })
@@ -145,7 +146,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "remind_set",
-        description: "Wake yourself later with a note: after_minutes, or at (RFC 3339). With task and only_if_open, it fires only if that task has not ended by then. The reminder arrives in your notices. At most 20 at a time.",
+        description: "Wake yourself later with a note: after_minutes, or at (RFC 3339). With task and only_if_open, it fires only if that task has not ended by then. A wait is cut to 7 days; when it was, the wake says the thing you waited for did not happen. The reminder arrives in your notices. At most 20 at a time.",
         groups: ALL,
         schema: || {
             object(
@@ -174,7 +175,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "watch",
-        description: "Hear about a task (by key or id) or a teammate (by name) when something happens: on = done, failed, asked, stalled, idle or any (default any). News arrives in your notices, merged while you are busy. At most 20 at a time.",
+        description: "Hear about a task (by key or id) or a teammate (by name) when something happens: on = done, failed, asked, stalled, idle or any (default any). News arrives in your notices, merged while you are busy. It never wakes you about your own turns or changes, lasts at most 7 days (then wakes you once that the wait ran out), closes when the task or run ends, and pauses itself after 3 triggers in a row with nobody in between or more than 12 in an hour (the person is told). At most 20 at a time.",
         groups: ALL,
         schema: || {
             object(
@@ -727,7 +728,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_progress",
-        description: "One line on how your task is going; shown on the task card.",
+        description: "One line on how your task is going; shown on the task card. Unless it addresses a teammate with @name, it also wakes the run's lead to look at it, so say what changed and what comes next.",
         groups: WORKER,
         schema: || task_schema(json!({ "text": { "type": "string" } })),
     },

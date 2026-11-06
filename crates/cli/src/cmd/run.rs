@@ -58,6 +58,11 @@ pub struct StartArgs {
     /// every worker and reviewer registered in the planner's repository.
     #[arg(long, value_delimiter = ',')]
     pub team: Vec<String>,
+    /// Have the lead work in your own directory, with the session and branch you have, and
+    /// no commit, checkout or branch switch of the hub's (docs/tasks/LEAD.md §2). The
+    /// default is a checkout of the run's own.
+    #[arg(long)]
+    pub in_place: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -170,6 +175,9 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
                     ..Default::default()
                 }),
             attachments: None,
+            lead_place: start
+                .in_place
+                .then_some(crossagents_api_types::LeadPlace::InPlace),
             fresh: None,
             restore: false,
         };

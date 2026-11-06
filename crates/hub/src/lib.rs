@@ -38,6 +38,7 @@ pub mod trace;
 pub mod transcript;
 pub mod usage;
 pub mod usage_series;
+pub mod version_gate;
 
 use std::fs::{File, TryLockError};
 use std::net::SocketAddr;
@@ -156,9 +157,16 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     ));
     accounts.watch();
     let tokens = Arc::new(AgentTokens::load(paths.agent_tokens()));
+    let (plugins, plugin_warnings) = PluginRegistry::load(&config.plugins, &paths.plugins());
+    for warning in &plugin_warnings {
+        tracing::warn!("skipping plugin: {warning}");
+    }
     let setup = Arc::new(CollabSetup {
         tokens: tokens.clone(),
         accounts: accounts.clone(),
+        // Cheap to clone: clones share the descriptions and the drivers, so a session's
+        // version gate reads the same CLI status `/v1/plugins` reports.
+        plugins: plugins.clone(),
         mcp_command: match &config.mcp_command {
             Some(command) => command.clone(),
             None => default_mcp_command()?,
@@ -169,10 +177,6 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         shims: shims.clone(),
         orchestrator: Arc::new(OnceLock::new()),
     });
-    let (plugins, plugin_warnings) = PluginRegistry::load(&config.plugins, &paths.plugins());
-    for warning in &plugin_warnings {
-        tracing::warn!("skipping plugin: {warning}");
-    }
     let runtime = Arc::new(Runtime::new(bus.clone(), plugins).with_setup(setup.clone()));
     runtime.watch_moves();
     runtime.watch_replies();
