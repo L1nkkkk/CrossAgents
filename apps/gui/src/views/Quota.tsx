@@ -5,6 +5,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { AccountQuota } from "@bindings/AccountQuota";
 import type { AccountUsageGroup } from "@bindings/AccountUsageGroup";
+import type { ImportableAccount } from "@bindings/ImportableAccount";
 import type { LoginStarted } from "@bindings/LoginStarted";
 import type { ModelInfo } from "@bindings/ModelInfo";
 import type { RateWindow } from "@bindings/RateWindow";
@@ -475,24 +476,46 @@ function AddAccount({ providers, onDone }: { providers: string[]; onDone: () => 
   const [provider, setProvider] = useState("");
   const [id, setId] = useState("");
   const [label, setLabel] = useState("");
-  const [source, setSource] = useState<"import" | "new">("new");
+  const [source, setSource] = useState<"local" | "new" | "copy">("new");
   const [site, setSite] = useState<"china" | "international">("china");
+  const [candidates, setCandidates] = useState<ImportableAccount[]>();
+  const [confirmed, setConfirmed] = useState(false);
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const chosen = provider || providers[0] || "";
+  const candidate = candidates?.find((c) => c.provider === chosen);
+
+  // The logins this machine has are only needed once copying is picked.
+  useEffect(() => {
+    if (source !== "copy" || candidates) return;
+    let live = true;
+    api.importCandidates().then(
+      (found) => live && setCandidates(found.candidates),
+      (err) => live && setError(errorText(err)),
+    );
+    return () => {
+      live = false;
+    };
+  }, [source, candidates]);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(undefined);
     try {
+      // A copy gets its own home; the original login file is left as it is.
+      if (source === "copy") {
+        await api.importAccount({ provider: chosen, id: id.trim(), label: label.trim() || null, confirm: confirmed });
+        onDone();
+        return;
+      }
       const account = await api.createAccount({
         codebuddy_site: chosen === "codebuddy" && source === "new" ? site : null,
         id: id.trim(),
         provider: chosen,
         label: label.trim() || null,
         home: null,
-        import_default: source === "import",
+        import_default: source === "local",
       });
       if (chosen === "codebuddy" && source === "new" && account.codebuddy_site !== site) {
         await api.deleteAccount(account.id);
@@ -515,14 +538,20 @@ function AddAccount({ providers, onDone }: { providers: string[]; onDone: () => 
     <form className="card form" onSubmit={submit}>
       <div className="row" style={{ alignItems: "flex-start" }}>
         <Field label="服务">
-          <select value={chosen} onChange={(e) => setProvider(e.target.value)}>
+          <select
+            value={chosen}
+            onChange={(e) => {
+              setProvider(e.target.value);
+              setConfirmed(false);
+            }}
+          >
             {providers.map((p) => (
               <option key={p}>{p}</option>
             ))}
           </select>
         </Field>
         <Field label="账号 id（小写）">
-          <input value={id} onChange={(e) => setId(e.target.value)} required placeholder={`${chosen}-work`} />
+          <input value={id} onChange={(e) => setId(e.target.value)} required placeholder={`${chosen}-${source === "copy" ? "import" : "work"}`} />
         </Field>
         <Field label="显示名">
           <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="工作账号" />
@@ -533,9 +562,33 @@ function AddAccount({ providers, onDone }: { providers: string[]; onDone: () => 
           <input type="radio" checked={source === "new"} onChange={() => setSource("new")} /> 新的独立登录（会打开浏览器登录）
         </label>
         <label>
-          <input type="radio" checked={source === "import"} onChange={() => setSource("import")} /> 使用本机已有的登录
+          <input type="radio" checked={source === "local"} onChange={() => setSource("local")} /> 使用本机已有的登录（与本机共用）
+        </label>
+        <label>
+          <input type="radio" checked={source === "copy"} onChange={() => setSource("copy")} /> 从本机登录复制一份到独立目录
         </label>
       </div>
+      {source === "copy" && (
+        <div className="choice">
+          {!candidates ? (
+            <p className="muted small">正在查找本机的 Codex 与 Claude 登录…</p>
+          ) : !candidate ? (
+            <p className="muted small">
+              本机没有找到 {chosen} 的登录。可以导入 Codex（~/.codex/auth.json）与 Claude（~/.claude/.credentials.json）的登录。
+            </p>
+          ) : (
+            <>
+              <p className="small">
+                找到 <code>{candidate.source}</code>，将复制到 CrossAgents 的账号目录。
+              </p>
+              <div className="notice">{candidate.warning}</div>
+              <label className="check">
+                <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} /> 我知道了，仍然导入
+              </label>
+            </>
+          )}
+        </div>
+      )}
       {chosen === "codebuddy" && source === "new" && (
         <Field label="CodeBuddy 站点">
           <select value={site} onChange={(e) => setSite(e.target.value as "china" | "international")}>
@@ -547,7 +600,7 @@ function AddAccount({ providers, onDone }: { providers: string[]; onDone: () => 
       )}
       <ErrorBox error={error} />
       <div className="row">
-        <button type="submit" className="primary" disabled={busy || !id.trim() || !chosen}>
+        <button type="submit" className="primary" disabled={busy || !id.trim() || !chosen || (source === "copy" && (!candidate || !confirmed))}>
           添加
         </button>
         <button type="button" className="ghost" onClick={onDone}>

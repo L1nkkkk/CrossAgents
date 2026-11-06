@@ -43,8 +43,8 @@ pub use driver::{
 };
 pub use error::CoreError;
 pub use event::{
-    DeliveryState, DeliveryStatus, DiffSource, EVENT_SCHEMA_VERSION, Envelope, Event, EventKind,
-    EventSink, MessageSource, QueuedReason,
+    AccountCandidate, DeliveryState, DeliveryStatus, DiffSource, EVENT_SCHEMA_VERSION, Envelope,
+    Event, EventKind, EventSink, MessageSource, QueuedReason,
 };
 pub use expertise::{
     Candidate, CandidateOrigin, CandidateStatus, EntryKind, EntryStats, EntryStatus, Example,
@@ -56,12 +56,14 @@ pub use human::{HumanAction, HumanItem, HumanItemKind, HumanItemStatus};
 pub use ids::{AgentId, HandoffId, MessageId, RunId, SessionId, TaskId, WorkId};
 pub use lesson::{
     Evidence, ISSUE_PREFIX, IssueRef, Lesson, LessonOutcome, LessonStatus, Project, ProjectPath,
-    Triage, TriageRecord, TriageStep,
+    RelatedLesson, Triage, TriageRecord, TriageStep,
 };
 pub use model::{
     Agent, AgentProfile, AgentStatus, CONTEXT_LOST, CheckResult, ChecksState, ContinuationState,
-    HistoryTask, LandMode, Landing, NameSource, PlannedTask, Role, Run, RunConfig, RunHistory,
-    RunStatus, Scope, Task, TaskReport, TaskSpec, Work, validate_agent_name, validate_slug,
+    Health, HistoryTask, LandMode, Landing, LeadPlace, NameSource, PlannedTask, Retention, Role,
+    Run, RunConfig, RunHistory, RunMode, RunRecord, RunStatus, Scope, Task, TaskReport, TaskRun,
+    TaskRunOutcome, TaskSpec, Work, WorkspaceOwner, WorkspaceVcs, validate_agent_name,
+    validate_slug,
 };
 pub use note::{EXTERNAL_PLUGIN, Note, NoteScope};
 pub use notify::{Reminder, Watch, WatchOn, WatchTarget};

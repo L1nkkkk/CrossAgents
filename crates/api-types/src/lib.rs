@@ -11,9 +11,9 @@ pub use crossagents_core::{
     Account, AccountStatus, Agent, AgentCommand, AgentCommandKind, AgentId, AgentProfile,
     AgentStatus, Capabilities, CheckResult, ClaimRole, ContinuationPolicy, DataSource,
     DeliveryState, DeliveryStatus, DiffSource, DriverKind, Event, EventKind, Handoff, HandoffKind,
-    HistoryTask, MessageId, MessageSource, ModelInfo, OutputStream, PlannedTask, QueuedReason,
-    Role, Run, RunHistory, RunId, RunPolicy, RunStatus, StopReason, Task, TaskId, TaskStatus,
-    TokenTotals, ToolInfo, ToolStatus,
+    HistoryTask, LeadPlace, MessageId, MessageSource, ModelInfo, OutputStream, PlannedTask,
+    QueuedReason, Role, Run, RunHistory, RunId, RunPolicy, RunStatus, StopReason, Task, TaskId,
+    TaskStatus, TokenTotals, ToolInfo, ToolStatus,
 };
 
 /// Handoff cards and how a task's chain of them reads.
@@ -137,11 +137,16 @@ pub struct ArchiveAgentRequest {
 
 /// `POST /v1/agents/{key}/settings` (docs/tasks/DOGFOOD.md §6). `setting_sources`: which
 /// of Claude Code's settings it loads, comma-separated from `user`, `project`, `local`
-/// (empty: none); `None` goes back to the default (`project,local`).
+/// (empty: none); `None` goes back to the default (`project,local`). `allow_hooks`: whether
+/// hooks from those files may run, default off (SELF.md §B5); `None` leaves it as it is.
+/// Both are read only at launch, so an idle session is restarted after a change.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AgentSettingsRequest {
     pub setting_sources: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub allow_hooks: Option<bool>,
 }
 
 /// `POST /v1/agents/{key}/model`. `None` leaves the model to the agent's own default.
@@ -610,6 +615,24 @@ pub struct CliInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub described_by: Option<String>,
+    /// The oldest CLI the description accepts; absent when it names none
+    /// (docs/research/multica.md §2.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub min_version: Option<String>,
+    /// The CLI found here is older than `min_version`: its agent is not registered, so no
+    /// models are offered and the row says the version is too low.
+    #[serde(default)]
+    pub below_minimum: bool,
+    /// The upstream version series the driver was checked against (`"2.1"`); absent when
+    /// the description names none (docs/DESIGN.md §9.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub verified: Option<Vec<String>>,
+    /// The CLI's version is outside those series: it still runs, the row says it is
+    /// unverified. False when no series is named or the version is unknown.
+    #[serde(default)]
+    pub unverified: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -1095,6 +1118,12 @@ pub struct CreateRunRequest {
     #[serde(default)]
     #[ts(optional)]
     pub policy: Option<crossagents_core::RunPolicy>,
+    /// Where the lead works (docs/tasks/LEAD.md §2): in the person's own directory
+    /// (`in_place`), or in a checkout the hub makes (the default). A directory outside
+    /// version control gets one in place whatever this says.
+    #[serde(default)]
+    #[ts(optional)]
+    pub lead_place: Option<crossagents_core::LeadPlace>,
     /// Files that come with the request (screenshots, specs), handed to the lead with its
     /// kickoff; the same limits as [`SendMessageRequest::attachments`].
     #[serde(default)]
@@ -1486,6 +1515,159 @@ pub struct CommitGraph {
     pub truncated: bool,
 }
 
+/// One branch of a project, as `GET /v1/git/branches?path=` lists it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GitBranch {
+    /// The short name: `main`, `origin/main`.
+    pub name: String,
+    /// A remote-tracking branch (`refs/remotes/…`) rather than a local one.
+    pub remote: bool,
+    pub sha: String,
+    /// What it tracks, by short name (`origin/main`).
+    #[serde(default)]
+    #[ts(optional)]
+    pub upstream: Option<String>,
+    /// Commits on the branch that its upstream does not have.
+    #[serde(default)]
+    pub ahead: u32,
+    /// Commits the upstream has that the branch does not.
+    #[serde(default)]
+    pub behind: u32,
+    /// HEAD points at this branch.
+    #[serde(default)]
+    pub current: bool,
+}
+
+/// `GET /v1/git/branches?path=`: a project's local and remote-tracking branches.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GitBranchesResponse {
+    /// The project directory, absolute, as the hub names it.
+    pub root: String,
+    pub branches: Vec<GitBranch>,
+    /// The branch HEAD is on; absent when HEAD is detached or the repository is unborn.
+    #[serde(default)]
+    #[ts(optional)]
+    pub head: Option<String>,
+    /// The commit HEAD names; absent in a repository without commits.
+    #[serde(default)]
+    #[ts(optional)]
+    pub head_sha: Option<String>,
+}
+
+/// One side of a file's state in `git status --porcelain=v2`: the index (`X`) or the
+/// working tree (`Y`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum GitFileState {
+    Unchanged,
+    Modified,
+    Added,
+    Deleted,
+    Renamed,
+    Copied,
+    TypeChanged,
+    Unmerged,
+    Unknown,
+}
+
+/// One changed path in a project's working copy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GitStatusEntry {
+    /// Relative to the project root, with `/`.
+    pub path: String,
+    /// The path before a rename or copy.
+    #[serde(default)]
+    #[ts(optional)]
+    pub orig_path: Option<String>,
+    pub index: GitFileState,
+    pub worktree: GitFileState,
+    /// Git does not track the file (the `?` record).
+    #[serde(default)]
+    pub untracked: bool,
+    /// An unresolved merge (the `u` record).
+    #[serde(default)]
+    pub conflicted: bool,
+}
+
+/// `GET /v1/git/status?path=`: a project's working copy, parsed from
+/// `git status --porcelain=v2`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GitStatusResponse {
+    /// The project directory, absolute, as the hub names it.
+    pub root: String,
+    /// The commit HEAD is at; absent in a repository without commits.
+    #[serde(default)]
+    #[ts(optional)]
+    pub head: Option<String>,
+    /// The branch HEAD is on; absent when HEAD is detached.
+    #[serde(default)]
+    #[ts(optional)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub upstream: Option<String>,
+    #[serde(default)]
+    pub ahead: u32,
+    #[serde(default)]
+    pub behind: u32,
+    pub entries: Vec<GitStatusEntry>,
+}
+
+/// `GET /v1/git/commits/{sha}?path=`: one commit's author, time, whole message and parents.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GitCommitResponse {
+    /// The project directory, absolute, as the hub names it.
+    pub root: String,
+    pub sha: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    pub author_email: String,
+    pub time: DateTime<Utc>,
+    /// The subject line.
+    pub subject: String,
+    /// The whole message, subject line and body.
+    pub message: String,
+}
+
+/// What a ref of the whole-repository graph is: HEAD, a local branch, a remote-tracking
+/// branch, or a tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum GitRefKind {
+    Head,
+    Local,
+    Remote,
+    Tag,
+}
+
+/// A ref shown in the whole-repository graph.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GitGraphRef {
+    pub name: String,
+    pub kind: GitRefKind,
+    pub sha: String,
+}
+
+/// `GET /v1/git/graph?path=&limit=`: the whole repository (`git log --all`), newest first
+/// (topological), at most `limit` (200), with every ref and what it points at.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GitGraph {
+    /// The project directory, absolute, as the hub names it.
+    pub root: String,
+    pub refs: Vec<GitGraphRef>,
+    pub commits: Vec<GraphCommit>,
+    pub truncated: bool,
+}
+
 /// `GET /v1/runs/{key}/trace` (docs/tasks/DOGFOOD.md §8): what happened in a run, by task,
 /// folded from the events (so it outlives the workers).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
@@ -1496,6 +1678,10 @@ pub struct RunTrace {
     pub lead: LaneTrace,
     pub tasks: Vec<TaskTrace>,
     pub spent: Spent,
+    /// When the run's branch reached its base (`run.landed`), for the swimlane's 落地 node.
+    #[serde(default)]
+    #[ts(optional)]
+    pub landed: Option<crossagents_core::Landing>,
 }
 
 /// Tokens and dollars the agents reported.
@@ -1505,6 +1691,18 @@ pub struct Spent {
     #[ts(type = "number")]
     pub tokens: u64,
     pub cost_usd: f64,
+}
+
+/// One dispatch of a task's worker: the accounts weighed for it, best first, and the one it
+/// got (magpie-lancer §2.8).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DispatchTrace {
+    pub at: DateTime<Utc>,
+    /// The account the worker runs on; `None` when routing knew no account.
+    pub account: Option<String>,
+    /// The same vendor's accounts, best first, each with why it ranks there.
+    pub candidates: Vec<crossagents_core::AccountCandidate>,
 }
 
 /// One task's story.
@@ -1521,11 +1719,55 @@ pub struct TaskTrace {
     pub checks: Vec<CheckTrace>,
     /// Each time quota moved it (`task.rerouted`).
     pub rerouted: Vec<String>,
+    /// Each dispatch of a worker for it (`task.routed`), with the accounts weighed and why.
+    #[serde(default)]
+    #[ts(as = "Option<Vec<DispatchTrace>>", optional)]
+    pub dispatches: Vec<DispatchTrace>,
     /// Each time it changed hands (`task.handed_off`), oldest first.
     #[serde(default)]
     pub handoffs: Vec<Handoff>,
     /// The earliest thing that went wrong: a failed check, a failed command, a failed turn.
     pub first_failure: Option<String>,
+    /// Each status change, oldest first (the swimlane's 提交, 重试, 合并 nodes).
+    #[serde(default)]
+    #[ts(as = "Option<Vec<StatusTrace>>", optional)]
+    pub statuses: Vec<StatusTrace>,
+}
+
+/// A task moved from one status to another (`task.status_changed`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StatusTrace {
+    pub at: DateTime<Utc>,
+    pub from: crossagents_core::TaskStatus,
+    pub to: crossagents_core::TaskStatus,
+    /// The worker it was with.
+    pub agent: Option<AgentId>,
+}
+
+/// Something that happened to a lane's session rather than its task (magpie-lancer §2.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum LaneMarkKind {
+    /// The model or effort was switched (`agent.model_changed`).
+    ModelChanged,
+    /// The context shrank by much between two usage reports: it was compacted.
+    Compacted,
+    /// The agent asked the person (`human.asked`, a question).
+    Asked,
+    /// The person answered, or the default was taken.
+    Answered,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LaneMark {
+    pub at: DateTime<Utc>,
+    pub agent: AgentId,
+    pub kind: LaneMarkKind,
+    /// In words: `sonnet → opus`, `180k → 40k`, the question, the answer.
+    pub text: Option<String>,
 }
 
 /// The agents that worked on something, and what they did.
@@ -1536,6 +1778,10 @@ pub struct LaneTrace {
     pub turns: Vec<TurnTrace>,
     pub commands: Vec<CommandTrace>,
     pub spent: Spent,
+    /// Model switches, compactions, questions to the person and their answers, oldest first.
+    #[serde(default)]
+    #[ts(as = "Option<Vec<LaneMark>>", optional)]
+    pub marks: Vec<LaneMark>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -1966,6 +2212,38 @@ pub struct ListAccountsResponse {
     pub accounts: Vec<crossagents_core::Account>,
 }
 
+/// A login already on this machine that can be copied into an account of its own
+/// (docs/research/magpie-lancer.md §2.11). Importing reads the file and never changes it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportableAccount {
+    pub provider: String,
+    /// The file the login is read from, as the person would look for it.
+    pub source: String,
+    /// What refreshing the copied token does to the tool the login came from.
+    pub warning: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportAccountsResponse {
+    /// The logins found; empty when the machine has none.
+    pub candidates: Vec<ImportableAccount>,
+}
+
+/// Copies a login already on this machine into a new account's own home. `confirm` must be
+/// true: the person has been told that refreshing the copied token may sign the original
+/// tool out.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportAccountRequest {
+    pub provider: String,
+    pub id: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    pub confirm: bool,
+}
+
 /// One account with its live status and models. `GET /v1/quota` lists every account.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -2178,6 +2456,42 @@ pub struct UsageSeriesResponse {
     pub notes: Vec<String>,
 }
 
+/// One agent's spend on one model within a run: a segment of the run's cost bar
+/// (docs/research/multica.md §十三).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RunCostSlice {
+    pub agent: AgentId,
+    /// The agent's name as it reported, so the segment still reads after a rename.
+    pub name: String,
+    /// The model it ran on; `default` when it never said.
+    pub model: String,
+    #[ts(type = "number")]
+    pub cached_input: u64,
+    #[ts(type = "number")]
+    pub new_input: u64,
+    #[ts(type = "number")]
+    pub output: u64,
+    /// What the agent reported for this stretch; `null` when it reported tokens but no cost.
+    pub cost_usd: Option<f64>,
+}
+
+/// `GET /v1/runs/{key}/cost`: what a run spent, split by agent and model — the run's cost
+/// bar. An agent that switched models has one slice per model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RunCostResponse {
+    pub run_id: RunId,
+    /// Biggest spender first; one agent's slices next to each other, its largest first.
+    pub slices: Vec<RunCostSlice>,
+    #[ts(type = "number")]
+    pub tokens: u64,
+    /// Sum of the costs the agents reported; `null` when none did.
+    pub cost_usd: Option<f64>,
+    /// In plain words: how the figures are counted, and what is missing.
+    pub notes: Vec<String>,
+}
+
 /// A login was started; the human finishes it in the browser.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -2222,6 +2536,44 @@ pub struct ProjectInfo {
     /// Normalised `host/owner/repo` remotes.
     pub remotes: Vec<String>,
     pub paths: Vec<ProjectPathInfo>,
+    /// A remote seen at one of the project's checkouts that is not one of its own: the
+    /// directory may hold another repository now, so the person decides (LESSONS §4.2).
+    /// Nothing is bound automatically until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub unconfirmed_remote: Option<String>,
+}
+
+/// `POST /v1/projects/{id}/bind`: the person says a remote or a checkout belongs to this
+/// project. A remote becomes an alias; a checkout moves to it from wherever it was bound.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BindProjectRequest {
+    /// A remote URL, written any way git writes it (`git@host:owner/repo`,
+    /// `https://host/owner/repo.git`); normalised before storing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub remote: Option<String>,
+    /// A checkout on this node (canonicalised before storing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub path: Option<String>,
+    /// With `path`: that checkout is another project, not this one. It is taken out of this
+    /// project into a new one, which takes the remote that was waiting to be confirmed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub split: Option<bool>,
+}
+
+/// `POST /v1/projects/merge`: the person says two projects are one. `from` keeps its id but
+/// loses its checkouts, remotes and records; `into` gains them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MergeProjectsRequest {
+    /// The project whose records move.
+    pub from: String,
+    /// The project that keeps them.
+    pub into: String,
 }
 
 /// `GET /v1/projects`.
@@ -2229,6 +2581,81 @@ pub struct ProjectInfo {
 #[ts(export)]
 pub struct ListProjectsResponse {
     pub projects: Vec<ProjectInfo>,
+}
+
+// ---------------------------------------------------------------------------------------
+// Troubleshooting records (docs/tasks/LESSONS.md L2)
+
+pub use crossagents_core::{
+    Evidence, IssueRef, Lesson, LessonOutcome, LessonStatus, RelatedLesson, Triage, TriageRecord,
+};
+
+/// `GET /v1/projects/{id}/lessons`: newest first, narrowed by `q` and `status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListLessonsResponse {
+    pub lessons: Vec<Lesson>,
+    /// Review clues (LESSONS §4.4): by lesson id, the record's files changed after its last
+    /// check. A clue, not a verdict — the record may still hold.
+    #[serde(default)]
+    pub changed: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+/// `PATCH /v1/lessons/{id}`: the fields given replace the stored ones; the rest is kept.
+/// Evidence and sources are never set this way.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UpdateLessonRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub symptom: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub keywords: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub conditions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub resolution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub outcome: Option<LessonOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub status: Option<LessonStatus>,
+    /// With `status: "superseded"`: the lesson that replaces it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub superseded_by: Option<String>,
+}
+
+/// A problem recorded in a run (a run note under `issue/`) and, once sorted, what became
+/// of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RunIssue {
+    pub key: String,
+    pub author: AgentId,
+    pub text: String,
+    pub updated_at: DateTime<Utc>,
+    /// Absent while nobody has sorted it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub triage: Option<TriageRecord>,
+}
+
+/// `GET /v1/runs/{key}/issues`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListRunIssuesResponse {
+    pub run_id: RunId,
+    pub issues: Vec<RunIssue>,
+    /// How many of `issues` nobody has sorted yet.
+    pub unsorted: u32,
 }
 
 // ---------------------------------------------------------------------------------------

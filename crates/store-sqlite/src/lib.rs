@@ -1834,7 +1834,8 @@ fn scope_name(scope: NoteScope) -> &'static str {
 #[cfg(test)]
 mod tests {
     use crossagents_core::{
-        ClaimRole, Role, RunConfig, RunStatus, TaskId, TaskReport, TaskSpec, TaskStatus,
+        ClaimRole, Role, RunConfig, RunStatus, TaskId, TaskReport, TaskRun, TaskRunOutcome,
+        TaskSpec, TaskStatus,
     };
 
     #[tokio::test]
@@ -1894,8 +1895,10 @@ mod tests {
             base_branch: "main".into(),
             branch: "crossagents/x".into(),
             in_place: false,
+            mode: None,
             note: None,
             plan: vec![],
+            checks_snapshot: None,
             created_at: now,
             updated_at: now,
         };
@@ -1941,6 +1944,7 @@ mod tests {
                 reviewer_fresh: true,
                 status: TaskStatus::Pending,
                 attempts: 0,
+                runs: Vec::new(),
                 escalated: false,
                 nudges: 0,
                 branch: None,
@@ -1960,6 +1964,33 @@ mod tests {
             store.get_task(TaskId::new()).await,
             Err(CoreError::NotFound { .. })
         ));
+
+        // A task's runs are part of its record: when each started, ended and how it went
+        // (multica §2.4). They survive the round trip without a schema change.
+        let mut with_runs = tasks[0].clone();
+        with_runs.runs.push(TaskRun {
+            index: 1,
+            started_at: now,
+            ended_at: Some(now),
+            outcome: TaskRunOutcome::Infrastructure,
+            agent: Some(AgentId::new()),
+            message: None,
+            note: Some("request timed out".into()),
+            retried: true,
+        });
+        store.update_task(&with_runs).await.unwrap();
+        assert_eq!(store.get_task(with_runs.id).await.unwrap(), with_runs);
+
+        // Older JSON has no runs: it reads as none, and no migration is needed.
+        let mut old = serde_json::to_value(&tasks[1]).unwrap();
+        old.as_object_mut().unwrap().remove("runs");
+        sqlx::query("UPDATE tasks SET data = ? WHERE id = ?")
+            .bind(old.to_string())
+            .bind(tasks[1].id.to_string())
+            .execute(store.pool())
+            .await
+            .unwrap();
+        assert!(store.get_task(tasks[1].id).await.unwrap().runs.is_empty());
     }
 
     /// docs/tasks/R1.md §3.4: what the run owned goes with it; the log and other runs' things
@@ -1996,8 +2027,10 @@ mod tests {
             base_branch: "main".into(),
             branch: "crossagents/x".into(),
             in_place: false,
+            mode: None,
             note: None,
             plan: vec![],
+            checks_snapshot: None,
             created_at: now,
             updated_at: now,
         };
@@ -2025,6 +2058,7 @@ mod tests {
             reviewer_fresh: true,
             status: TaskStatus::Merged,
             attempts: 0,
+            runs: Vec::new(),
             escalated: false,
             nudges: 0,
             branch: None,
@@ -2403,8 +2437,10 @@ mod tests {
             base_branch: "main".into(),
             branch: "crossagents/x".into(),
             in_place: false,
+            mode: None,
             note: None,
             plan: vec![],
+            checks_snapshot: None,
             created_at: now,
             updated_at: now,
         }
@@ -2419,6 +2455,7 @@ mod tests {
             symptom: symptom.into(),
             keywords: Vec::new(),
             conditions: String::new(),
+            files: Vec::new(),
             resolution: "use node".into(),
             outcome: crossagents_core::LessonOutcome::Workaround,
             status: LessonStatus::Active,
@@ -2864,8 +2901,10 @@ mod tests {
             base_branch: "main".into(),
             branch: "crossagents/login".into(),
             in_place: false,
+            mode: None,
             note: None,
             plan: vec![],
+            checks_snapshot: None,
             created_at: now,
             updated_at: now,
         }

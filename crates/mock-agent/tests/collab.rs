@@ -381,3 +381,240 @@ async fn a_namesake_of_the_teammate_talking_to_you_is_refused() {
     });
     assert!(!reached_pia, "the namesake got the message");
 }
+
+// ---------------------------------------------------------------------------------------
+// Wake rules (docs/research/multica.md §2.1): the owner's own turn never wakes it, a chain
+// with nobody in between pauses it, a person's word starts the chain over, a wait lasts at
+// most seven days, and a reminder asking for longer is cut to that.
+
+/// A notice in `to`'s digest that mentions `needle`.
+fn notice_to(event: &crossagents_core::Event, to: crossagents_core::AgentId, needle: &str) -> bool {
+    event.kind.agent_id() == Some(to)
+        && input_of(event)
+            .is_some_and(|(text, from)| *from == MessageSource::Notice && text.contains(needle))
+}
+
+/// A watch `owner` set on `agent`, with how far its chain already went.
+fn seeded_watch(
+    owner: crossagents_core::AgentId,
+    agent: crossagents_core::AgentId,
+    chain: u32,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> crossagents_core::Watch {
+    crossagents_core::Watch {
+        id: format!("w-{chain}-{}", created_at.timestamp()),
+        owner,
+        target: crossagents_core::WatchTarget::Agent { agent_id: agent },
+        on: vec![crossagents_core::WatchOn::Done],
+        created_at,
+        expires_at: None,
+        chain,
+        health: Default::default(),
+    }
+}
+
+#[tokio::test]
+async fn a_watch_never_wakes_its_owner_about_itself() {
+    let t = TestHub::start().await;
+    let alice = t.add_agent("alice", None).await;
+    let bob = t.add_agent("bob", None).await;
+    let mut w = t.watch().await;
+
+    // Alice watching Bob hears about his turns...
+    t.send("alice", r#"[call watch {"agent":"bob","on":["done"]}]"#)
+        .await;
+    w.until(
+        "alice's turn ended",
+        |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if *id == alice.id),
+    )
+    .await;
+    t.send("bob", "one").await;
+    w.until("alice hears about bob", |e| {
+        notice_to(e, alice.id, "bob finished a turn")
+    })
+    .await;
+
+    // ...but an agent watching itself does not: its own turn is not news it asked for.
+    t.send("bob", r#"[call watch {"agent":"bob","on":["done"]}]"#)
+        .await;
+    w.until(
+        "bob's turn ended",
+        |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if *id == bob.id),
+    )
+    .await;
+    t.send("bob", "two").await;
+    w.until(
+        "bob's turn ended again",
+        |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if *id == bob.id),
+    )
+    .await;
+    let heard = w
+        .seen
+        .iter()
+        .filter(|e| notice_to(e, bob.id, "bob finished a turn"))
+        .count();
+    assert_eq!(heard, 0, "an agent was woken by its own turn");
+}
+
+#[tokio::test]
+async fn a_chain_with_nobody_in_between_pauses_the_rule_and_tells_the_person() {
+    let t = TestHub::start().await;
+    let alice = t.add_agent("alice", None).await;
+    let bob = t.add_agent("bob", None).await;
+    let mut w = t.watch().await;
+    let store = t.hub.bus.store().clone();
+    // Two triggers already went by with nobody taking part; the next is the third.
+    store
+        .insert_watch(&seeded_watch(alice.id, bob.id, 2, chrono::Utc::now()))
+        .await
+        .unwrap();
+
+    t.send("bob", "one").await;
+    let paused = w
+        .until("the person is told the rule paused", |e| {
+            matches!(&e.kind, EventKind::HumanAsked { item }
+                if item.kind == crossagents_core::HumanItemKind::Notice
+                    && item.text.contains("已自动暂停"))
+        })
+        .await;
+    if let EventKind::HumanAsked { item } = &paused.kind {
+        assert!(
+            item.text.contains(&alice.name),
+            "the notice names the rule's owner: {}",
+            item.text
+        );
+    }
+    let watch = store.list_watches(None).await.unwrap().remove(0);
+    assert!(watch.health.is_paused(), "{watch:?}");
+    assert!(
+        !w.seen
+            .iter()
+            .any(|e| notice_to(e, alice.id, "bob finished a turn")),
+        "the third trigger woke the owner before pausing"
+    );
+
+    // Paused means paused: Bob's next turn wakes nobody.
+    t.send("bob", "two").await;
+    w.until(
+        "bob's next turn",
+        |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if *id == bob.id),
+    )
+    .await;
+    assert!(
+        !w.seen
+            .iter()
+            .any(|e| notice_to(e, alice.id, "bob finished a turn")),
+        "a paused rule woke its owner again"
+    );
+}
+
+#[tokio::test]
+async fn a_person_speaking_to_the_owner_starts_the_chain_over() {
+    let t = TestHub::start().await;
+    let alice = t.add_agent("alice", None).await;
+    let bob = t.add_agent("bob", None).await;
+    let mut w = t.watch().await;
+    let store = t.hub.bus.store().clone();
+    store
+        .insert_watch(&seeded_watch(alice.id, bob.id, 2, chrono::Utc::now()))
+        .await
+        .unwrap();
+
+    // A person speaks to Alice: the chain she was on had human involvement, so it restarts.
+    t.send("alice", "still there?").await;
+    w.until(
+        "alice answered the person",
+        |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if *id == alice.id),
+    )
+    .await;
+    let reset = store.list_watches(None).await.unwrap().remove(0);
+    assert_eq!(reset.chain, 0, "{reset:?}");
+
+    // The next trigger is a first one again, not a third.
+    t.send("bob", "one").await;
+    w.until("alice hears about bob", |e| {
+        notice_to(e, alice.id, "bob finished a turn")
+    })
+    .await;
+    let watch = store.list_watches(None).await.unwrap().remove(0);
+    assert!(!watch.health.is_paused(), "{watch:?}");
+    assert_eq!(watch.chain, 1, "{watch:?}");
+}
+
+#[tokio::test]
+async fn a_waiting_watch_expires_after_seven_days() {
+    let t = TestHub::start().await;
+    let alice = t.add_agent("alice", None).await;
+    let bob = t.add_agent("bob", None).await;
+    let mut w = t.watch().await;
+    let store = t.hub.bus.store().clone();
+    store
+        .insert_watch(&seeded_watch(
+            alice.id,
+            bob.id,
+            0,
+            chrono::Utc::now() - chrono::Duration::days(8),
+        ))
+        .await
+        .unwrap();
+
+    let expired = w
+        .until("the wait ran out", |e| notice_to(e, alice.id, "expired"))
+        .await;
+    if let EventKind::AgentInput { text, .. } = &expired.kind {
+        assert!(
+            text.contains("did not happen") && text.contains("7 days"),
+            "the wake says what did not happen: {text}"
+        );
+    }
+    assert!(
+        store.list_watches(None).await.unwrap().is_empty(),
+        "an expired watch is closed, not left waiting"
+    );
+}
+
+#[tokio::test]
+async fn a_reminder_asking_for_more_than_a_week_is_cut_to_it() {
+    let t = TestHub::start().await;
+    let alice = t.add_agent("alice", None).await;
+    let mut w = t.watch().await;
+    let store = t.hub.bus.store().clone();
+
+    // Twenty thousand minutes is almost fourteen days: the wait is cut to seven.
+    t.send(
+        "alice",
+        r#"[call remind_set {"after_minutes":20000,"note":"far away"}]"#,
+    )
+    .await;
+    w.until(
+        "alice's turn ended",
+        |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if *id == alice.id),
+    )
+    .await;
+    let reminder = store.list_reminders(None).await.unwrap().remove(0);
+    assert!(reminder.wait_expired, "{reminder:?}");
+    let cut = reminder.created_at + chrono::Duration::days(7);
+    assert!(
+        (reminder.due_at - cut).num_seconds().abs() < 60,
+        "the due time was not cut to the cap: {reminder:?}"
+    );
+
+    // When it comes due it says the thing waited for did not happen.
+    let soon = crossagents_core::Reminder {
+        due_at: chrono::Utc::now() - chrono::Duration::seconds(1),
+        ..reminder
+    };
+    store.delete_reminder(&soon.id).await.unwrap();
+    store.insert_reminder(&soon).await.unwrap();
+    let fired = w
+        .until("the cut reminder fired", |e| {
+            notice_to(e, alice.id, "far away")
+        })
+        .await;
+    if let EventKind::AgentInput { text, .. } = &fired.kind {
+        assert!(
+            text.contains("did not happen"),
+            "a cut wait says so when it fires: {text}"
+        );
+    }
+}

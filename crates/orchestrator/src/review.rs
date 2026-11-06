@@ -180,13 +180,19 @@ impl Orchestrator {
         Ok(Changes::new(base, head, diff))
     }
 
-    /// What landing the run would bring into its base branch.
+    /// What landing the run would bring into its base branch — and, for a lead working in the
+    /// person's own directory, what differs there now, since the run has no branch of its own
+    /// (docs/tasks/LEAD.md §9). Read-only: the person's staging area is not the hub's, so the
+    /// diff never stages an intent to add (`crate::inplace::diff`).
     pub async fn run_changes(&self, run: RunId) -> Result<Changes, CoreError> {
         let run = self.store.get_run(run).await?;
-        let diff = self
-            .ws_for(&run)
-            .branch_diff(&run.repo, &run.base_branch, &run.branch)
-            .await?;
+        let diff = if run.leads_in_place() && run.versioned() {
+            crate::inplace::diff(&run.repo, &run.base_branch).await?
+        } else {
+            self.ws_for(&run)
+                .branch_diff(&run.repo, &run.base_branch, &run.branch)
+                .await?
+        };
         Ok(Changes::new(
             run.base_branch.clone(),
             run.branch.clone(),
@@ -241,6 +247,7 @@ impl Orchestrator {
             );
             task.attempts += 1;
             task.report.failure = None;
+            task.report.related_lessons.clear();
             let said: Vec<&str> = note
                 .as_deref()
                 .into_iter()
@@ -285,6 +292,32 @@ impl Orchestrator {
             });
         }
         Ok((found, task))
+    }
+
+    /// A review that says changes are needed, on a task whose spec routes it back
+    /// (docs/research/multica.md §2.12): `spec.on_reject` sends it to the step or teammate
+    /// it names, with the reviewer's notes as what to fix. `Some(who)` when it went there;
+    /// `None` when the spec sets no route, names the task's own worker, or has already taken
+    /// the work back as often as it may — then the review stands as it did before, and the
+    /// issuer decides.
+    pub(crate) async fn review_sent_back(
+        &self,
+        run: &crossagents_core::Run,
+        task: &mut Task,
+        notes: &str,
+        reviewer: &crossagents_core::Agent,
+    ) -> Result<Option<String>, CoreError> {
+        // Checked before anything changes: at the limit the work stays where it is.
+        if self.reject_stopped(run, task).await? || !self.rejects_elsewhere(run, task).await? {
+            return Ok(None);
+        }
+        // A new round: an older verification's report must not land on it.
+        task.report.verification = None;
+        task.attempts += 1;
+        task.report.failure = None;
+        task.report.rework.push(notes.trim().to_owned());
+        let why = format!("a review by {} said changes are needed", reviewer.name);
+        self.send_back(run, task, notes, &why).await
     }
 }
 

@@ -16,6 +16,8 @@ import { AgentImageContext, Avatar, ErrorBox, FileScopeProvider, Icon, loadAgent
 import { Image as ImageIcon } from "lucide-react";
 import { extractToolImagePaths, extractToolImages } from "../lib/toolimages";
 import { ToolImages } from "../toolimages";
+import { StepProducts } from "../stepproducts";
+import { outcomeOf } from "../lib/stepOutcome";
 import { ChangeStat, DiffView } from "../diffview";
 import { parseDiff, tailLines, type DiffFile } from "../lib/diff";
 import { errorHint } from "../lib/errors";
@@ -35,7 +37,7 @@ import { terminalsAvailable, toggleTerminal, useTabShows } from "../terminal";
 import { useWidths } from "../lib/widths";
 import { useSidebar } from "../titlebar";
 import { taskState } from "../lib/taskState";
-import { QUIET_AFTER, actionOf, duration, failed, liveActivity, liveKey, liveNow, quietSeconds, stepLine, summarize, workGroups, type ActionTool, type Step } from "../lib/workGroups";
+import { QUIET_AFTER, actionOf, duration, failed, liveActivity, liveKey, liveNow, quietSeconds, stepLine, workGroups, type ActionTool, type Step } from "../lib/workGroups";
 import { TurnLive, type LiveTurn } from "../liveTurn";
 import { PeerMessage, StateWord, useArmed } from "../parts";
 import { useSession, turnExtras, type TranscriptItem, type TranscriptTurn } from "../session";
@@ -301,8 +303,10 @@ export function SessionView({
           </>
         )}
         <div className="dock">
-          {/* One strip is enough: the pane beside leaves it to the main one. */}
-          {!onClose && <div ref={questionArea}><QuestionCards agents={everyone} />{questionId && !questions.loading && (!questions.data || !pending(questions.data.items).some((item) => item.id === questionId && item.from === agent.id)) && <p role="alert" className="question-missing">找不到这条待办：它可能已处理、已过期或不属于此会话。{questions.error && ` ${questions.error}`}</p>}</div>}
+          {/* One strip is enough: the pane beside leaves it to the main one. A run page passes its
+              own strip (`top`), scoped to that run, so the dock's list would add every other run's
+              「告诉你」 (docs/tasks/SELF.md B3). */}
+          {!onClose && !side && <div ref={questionArea}><QuestionCards agents={everyone} />{questionId && !questions.loading && (!questions.data || !pending(questions.data.items).some((item) => item.id === questionId && item.from === agent.id)) && <p role="alert" className="question-missing">找不到这条待办：它可能已处理、已过期或不属于此会话。{questions.error && ` ${questions.error}`}</p>}</div>}
           {!onClose && <NeedsYouStrip agents={everyone} tree={runs} />}
           <RunStrip runs={liveRuns} agents={everyone} />
           <QueuePanel agent={agent} queued={queued} delivery={transcript.delivery} />
@@ -1074,15 +1078,17 @@ function Steps({ steps, closed, live }: { steps: Step[]; closed: boolean; live?:
 
   if (!expanded) {
     const bad = steps.filter(failed);
+    // Named by what it produced, with what it left under the line (§2.7).
     return (
       <div className="steps">
-        <button className="steps-summary" onClick={() => setManual(true)} aria-expanded={false}>
+        <button className="steps-summary" onClick={() => setManual(true)} aria-expanded={false} title="展开这一轮做了什么">
           <span className="disclosure" aria-hidden="true">
             ▸
           </span>
           <span className={bad.length ? "fail" : "pass"}>{bad.length ? "✕" : "✓"}</span>
-          {summarize(steps)}
+          {outcomeOf(steps).title}
         </button>
+        <StepProducts steps={steps} />
         {bad.map((s, i) => (
           <StepRow key={i} step={s} />
         ))}
@@ -1096,7 +1102,7 @@ function Steps({ steps, closed, live }: { steps: Step[]; closed: boolean; live?:
           <span className="disclosure" aria-hidden="true">
             ▾
           </span>
-          {summarize(steps)}
+          {outcomeOf(steps).title}
         </button>
       )}
       {hidden > 0 && (

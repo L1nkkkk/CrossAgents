@@ -318,6 +318,9 @@ pub enum SandboxCommand {
         #[arg(long)]
         dir: Option<std::path::PathBuf>,
     },
+    /// Start a throwaway hub from this build, have a mock agent answer a message, stop it:
+    /// the check a build of the hub has to pass (docs/tasks/SELF.md §C3).
+    Smoke(super::smoke::SmokeArgs),
 }
 
 /// Refuses to stop the hub this process runs under (an agent's shell inherits
@@ -338,7 +341,7 @@ fn refuse_own_hub(paths: &Paths, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+pub(crate) fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
     let canon = |p: &std::path::Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     canon(a) == canon(b)
 }
@@ -370,6 +373,7 @@ pub fn sandbox_config(detect: bool) -> String {
 
 async fn sandbox(ctx: &Context, cmd: SandboxCommand) -> Result<()> {
     let (dir, action) = match cmd {
+        SandboxCommand::Smoke(args) => return super::smoke::run(ctx, args).await,
         SandboxCommand::Start { dir, detect } => (dir, Some(detect)),
         SandboxCommand::Stop { dir } => (dir, None),
         SandboxCommand::Status { dir } => {

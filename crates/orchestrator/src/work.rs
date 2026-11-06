@@ -315,6 +315,11 @@ impl Orchestrator {
                 config,
                 repo: Some(work.repo),
                 base_branch: None,
+                // A group whose lead works in place keeps doing so (docs/tasks/LEAD.md §9).
+                lead_place: previous
+                    .as_ref()
+                    .map(|r| r.mode().lead)
+                    .unwrap_or(crossagents_core::LeadPlace::Worktree),
                 attachments: Vec::new(),
             },
             None,
@@ -470,7 +475,7 @@ impl Orchestrator {
         let last = self.store().list_runs().await?.into_iter().find(|r| {
             (r.planner == caller.id || r.origin_chat_id == Some(caller.id))
                 && r.repo == caller.home()
-                && !r.in_place
+                && !r.leads_in_place()
         });
         Ok(last.filter(|r| r.status.is_terminal() && r.landed.is_none()))
     }
@@ -509,6 +514,9 @@ impl Orchestrator {
                     planner: proposer,
                     repo: Some(repo),
                     base_branch,
+                    // A run proposed from a conversation gets a checkout of its own: the
+                    // conversation stays where the person has it.
+                    lead_place: crossagents_core::LeadPlace::Worktree,
                     attachments: Vec::new(),
                     config: RunConfig {
                         worker: proposer,

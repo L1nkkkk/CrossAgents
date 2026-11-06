@@ -78,6 +78,7 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "POST", path: /^\/v1\/runs\/[^/]+\/(approve|reject|cancel|land|finish|policy)$/, level: "write" },
   { method: "GET", path: /^\/v1\/runs\/[^/]+\/diff$/, level: "read" },
   { method: "GET", path: /^\/v1\/runs\/[^/]+\/trace$/, level: "read" },
+  { method: "GET", path: /^\/v1\/runs\/[^/]+\/cost$/, level: "read" },
   { method: "GET", path: /^\/v1\/runs\/[^/]+\/tasks\/[^/]+\/diff$/, level: "read" },
   { method: "POST", path: /^\/v1\/runs\/[^/]+\/tasks\/[^/]+\/review$/, level: "write" },
   { method: "POST", path: /^\/v1\/repos\/init$/, level: "write" },
@@ -87,10 +88,20 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "GET", path: /^\/v1\/expertise$/, level: "read" },
   { method: "GET", path: /^\/v1\/expertise\/(candidates|card|maintenance|export)$/, level: "read" },
   { method: "POST", path: /^\/v1\/expertise\/candidates\/[^/]+\/(accept|reject)$/, level: "write" },
+  // Troubleshooting records of a project and the problems a run recorded (read-only here).
+  { method: "GET", path: /^\/v1\/projects\/[^/]+\/lessons(\/export)?$/, level: "read" },
+  { method: "GET", path: /^\/v1\/lessons\/[^/]+$/, level: "read" },
+  { method: "GET", path: /^\/v1\/runs\/[^/]+\/issues$/, level: "read" },
+  // The person settles what a project is: a remote or checkout bound to it, or two projects
+  // merged (LESSONS §4.2). Only a person does this; no agent tool reaches it.
+  { method: "POST", path: /^\/v1\/projects\/[^/]+\/bind$/, level: "write" },
+  { method: "POST", path: /^\/v1\/projects\/merge$/, level: "write" },
   { method: "GET", path: /^\/v1\/questions$/, level: "read" },
   { method: "POST", path: /^\/v1\/questions\/[^/]+\/(answer|dismiss)$/, level: "write" },
   { method: "GET", path: /^\/v1\/quota$/, level: "read" },
   { method: "POST", path: /^\/v1\/accounts$/, level: "admin" },
+  { method: "GET", path: /^\/v1\/accounts\/import$/, level: "read" },
+  { method: "POST", path: /^\/v1\/accounts\/import$/, level: "admin" },
   { method: "DELETE", path: /^\/v1\/accounts\/[^/]+$/, level: "admin" },
   { method: "GET", path: /^\/v1\/accounts\/[^/]+\/usage$/, level: "read" },
   { method: "POST", path: /^\/v1\/accounts\/[^/]+\/login$/, level: "admin" },
@@ -102,6 +113,9 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   // The commit graph and one commit's diff.
   { method: "GET", path: /^\/v1\/(runs|agents)\/[^/]+\/graph$/, level: "read" },
   { method: "GET", path: /^\/v1\/(runs|agents)\/[^/]+\/commits\/[^/]+\/diff$/, level: "read" },
+  // The Git page of a project (`?path=` rides along).
+  { method: "GET", path: /^\/v1\/git\/(branches|status|graph)$/, level: "read" },
+  { method: "GET", path: /^\/v1\/git\/commits\/[^/]+(\/diff)?$/, level: "read" },
 ];
 
 /** How long the main process waits for an answer before giving up on the hub. */

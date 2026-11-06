@@ -93,6 +93,16 @@ pub struct DeliveryStatus {
     pub queued: usize,
 }
 
+/// One account weighed for a dispatch, with why it ranks where it does: the accounts are
+/// listed best first (magpie-lancer §2.8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct AccountCandidate {
+    pub account: String,
+    /// Why it is where it is in the order, in words.
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Event {
@@ -376,6 +386,25 @@ pub enum EventKind {
         author: AgentId,
         text: Option<String>,
     },
+    /// A problem was recorded: a run note under `issue/` was written (derived from
+    /// `note.written`, docs/tasks/LESSONS.md §4.6).
+    #[serde(rename = "issue.recorded")]
+    IssueRecorded {
+        run_id: RunId,
+        key: String,
+        author: AgentId,
+    },
+    /// Recorded problems were sorted: into a lesson, merged into one, or kept in the run.
+    #[serde(rename = "issue.triaged")]
+    IssueTriaged {
+        run_id: RunId,
+        records: Vec<crate::lesson::TriageRecord>,
+    },
+    #[serde(rename = "lesson.created")]
+    LessonCreated { lesson: crate::lesson::Lesson },
+    /// A lesson changed: evidence added, a new resolution or status, or a person's edit.
+    #[serde(rename = "lesson.updated")]
+    LessonUpdated { lesson: crate::lesson::Lesson },
     /// A reminder an agent set came due.
     #[serde(rename = "reminder.fired")]
     ReminderFired {
@@ -454,6 +483,20 @@ pub enum EventKind {
         key: String,
         to: AgentId,
         reason: String,
+    },
+    /// A worker was dispatched for the task: the same-vendor accounts weighed, best first,
+    /// and the one it got. Sent for every dispatch, not only when quota moved it
+    /// (magpie-lancer §2.8).
+    #[serde(rename = "task.routed")]
+    TaskRouted {
+        run_id: RunId,
+        id: TaskId,
+        key: String,
+        /// The account the worker runs on; `None` when routing knew no account.
+        #[serde(default)]
+        account: Option<String>,
+        #[serde(default)]
+        candidates: Vec<AccountCandidate>,
     },
     /// The task changed hands; `handoff` is the card, also stored on the task. Published
     /// before the new worker gets its first message.
@@ -644,6 +687,10 @@ impl EventKind {
             Self::ReminderFired { .. } => "reminder.fired",
             Self::HumanAsked { .. } => "human.asked",
             Self::NoteWritten { .. } => "note.written",
+            Self::IssueRecorded { .. } => "issue.recorded",
+            Self::IssueTriaged { .. } => "issue.triaged",
+            Self::LessonCreated { .. } => "lesson.created",
+            Self::LessonUpdated { .. } => "lesson.updated",
             Self::HumanAnswered { .. } => "human.answered",
             Self::HumanDismissed { .. } => "human.dismissed",
             Self::RunBudget { .. } => "run.budget",
@@ -683,6 +730,7 @@ impl EventKind {
             Self::TaskChecked { .. } => "task.checked",
             Self::TaskProgress { .. } => "task.progress",
             Self::TaskRerouted { .. } => "task.rerouted",
+            Self::TaskRouted { .. } => "task.routed",
             Self::TaskHandedOff { .. } => "task.handed_off",
             Self::TaskCommand { .. } => "task.command",
             Self::CliInstallStarted { .. } => "cli.install.started",
@@ -705,11 +753,13 @@ impl EventKind {
             | Self::RunLanded { id, .. } => Some(*id),
             Self::RunDeleted { run_id } => Some(*run_id),
             Self::NoteWritten { run_id, .. } => *run_id,
+            Self::IssueRecorded { run_id, .. } | Self::IssueTriaged { run_id, .. } => Some(*run_id),
             Self::HumanAsked { item } | Self::HumanAnswered { item } => item.run_id,
             Self::TaskStatusChanged { run_id, .. }
             | Self::TaskChecked { run_id, .. }
             | Self::TaskProgress { run_id, .. }
             | Self::TaskRerouted { run_id, .. }
+            | Self::TaskRouted { run_id, .. }
             | Self::TaskHandedOff { run_id, .. }
             | Self::TaskCommand { run_id, .. } => Some(*run_id),
             _ => None,
@@ -729,6 +779,7 @@ impl EventKind {
             | Self::RunPlanSubmitted { .. }
             | Self::TaskChecked { .. }
             | Self::TaskProgress { .. }
+            | Self::TaskRouted { .. }
             | Self::AccountCreated { .. }
             | Self::AccountRemoved { .. }
             | Self::AccountQuotaUpdated { .. }
@@ -744,12 +795,16 @@ impl EventKind {
             | Self::CliInstallFinished { .. }
             | Self::PluginChanged { .. }
             | Self::ExtensionChanged { .. }
+            | Self::IssueTriaged { .. }
+            | Self::LessonCreated { .. }
+            | Self::LessonUpdated { .. }
             // The caller is in the call record, not here: an extension's panel calls its
             // tools as the person, with no agent to attribute them to.
             | Self::ExtensionCallFinished { .. } => None,
             Self::AgentSessionStarted { id, .. } => Some(*id),
             Self::ReminderFired { owner, .. } | Self::WatchTriggered { owner, .. } => Some(*owner),
             Self::NoteWritten { author, .. } => Some(*author),
+            Self::IssueRecorded { author, .. } => Some(*author),
             Self::HumanAsked { item } | Self::HumanAnswered { item } => Some(item.from),
             Self::TaskStatusChanged { assignee, .. } => *assignee,
             Self::TaskCommand { by, .. } => Some(*by),

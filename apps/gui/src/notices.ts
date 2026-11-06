@@ -8,6 +8,7 @@
 // opening the session afterwards still shows them. Kept in localStorage across restarts.
 
 import { useSyncExternalStore } from "react";
+import type { HumanItem } from "@bindings/HumanItem";
 import { onHubEvent } from "./hub";
 
 /**
@@ -77,4 +78,26 @@ export function dismissNotice(agent: string, id: string) {
   else delete next[agent];
   notices = next;
   save();
+}
+
+// ---- Which items a run page shows (docs/tasks/SELF.md B3, DOGFOOD §9 第 4 条) -----------------
+
+/**
+ * Whether a 「告诉你」 notice or a question belongs on `run`'s page. It belongs to the run it was
+ * posted from and nowhere else: whoever reads `runs/<id>` is looking at that run, and everything
+ * else waits on the home page, which lists them all.
+ *
+ * The hub tags each item with the run its author works in (`HumanItem.run_id`, from
+ * `crates/orchestrator/src/human.rs`). When it did not — the author wrote from a conversation
+ * rather than from a run — the tag is filled in here from the author: the run's lead speaks for
+ * the run, so the lead's untagged items are the run's own. Matching on the run, not just on the
+ * author, is what keeps another run's item, posted from a session this run shares, off the page.
+ */
+export function inRun(item: Pick<HumanItem, "run_id" | "from">, run: { id: string; planner: string }): boolean {
+  return item.run_id ? item.run_id === run.id : item.from === run.planner;
+}
+
+/** The run's open items, in the order the hub listed them: what the run's conversation shows. */
+export function openInRun(items: readonly HumanItem[], run: { id: string; planner: string }): HumanItem[] {
+  return items.filter((item) => item.status === "open" && inRun(item, run));
 }

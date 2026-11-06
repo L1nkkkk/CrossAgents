@@ -7,6 +7,10 @@ import type { AccountUsageGroup } from "@bindings/AccountUsageGroup";
 import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
 import type { ChangesResponse } from "@bindings/ChangesResponse";
 import type { CommitGraph } from "@bindings/CommitGraph";
+import type { GitBranchesResponse } from "@bindings/GitBranchesResponse";
+import type { GitCommitResponse } from "@bindings/GitCommitResponse";
+import type { GitGraph } from "@bindings/GitGraph";
+import type { GitStatusResponse } from "@bindings/GitStatusResponse";
 import type { CliInstallAccepted } from "@bindings/CliInstallAccepted";
 import type { AttachmentContent } from "@bindings/AttachmentContent";
 import type { ListAvatarsResponse } from "@bindings/ListAvatarsResponse";
@@ -19,6 +23,8 @@ import type { Agent } from "@bindings/Agent";
 import type { AgentSettingsRequest } from "@bindings/AgentSettingsRequest";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
 import type { CreateAccountRequest } from "@bindings/CreateAccountRequest";
+import type { ImportAccountRequest } from "@bindings/ImportAccountRequest";
+import type { ImportAccountsResponse } from "@bindings/ImportAccountsResponse";
 import type { HumanItem } from "@bindings/HumanItem";
 import type { InitRepoRequest } from "@bindings/InitRepoRequest";
 import type { LandMode } from "@bindings/LandMode";
@@ -56,6 +62,7 @@ import type { StartChatRequest } from "@bindings/StartChatRequest";
 import type { ApproveRunRequest } from "@bindings/ApproveRunRequest";
 import type { RejectRunRequest } from "@bindings/RejectRunRequest";
 import type { Run } from "@bindings/Run";
+import type { RunCostResponse } from "@bindings/RunCostResponse";
 import type { RunDetail } from "@bindings/RunDetail";
 import type { RunTrace } from "@bindings/RunTrace";
 import type { SendMessageRequest } from "@bindings/SendMessageRequest";
@@ -68,6 +75,12 @@ import type { UsageGroup } from "@bindings/UsageGroup";
 import type { AcceptCandidateResponse } from "@bindings/AcceptCandidateResponse";
 import type { ListCandidatesResponse } from "@bindings/ListCandidatesResponse";
 import type { ListExpertiseResponse } from "@bindings/ListExpertiseResponse";
+import type { Lesson } from "@bindings/Lesson";
+import type { LessonStatus } from "@bindings/LessonStatus";
+import type { ListLessonsResponse } from "@bindings/ListLessonsResponse";
+import type { BindProjectRequest } from "@bindings/BindProjectRequest";
+import type { MergeProjectsRequest } from "@bindings/MergeProjectsRequest";
+import type { ListRunIssuesResponse } from "@bindings/ListRunIssuesResponse";
 import type { AcceptRequest, Candidate, CandidateStatus, ConflictDecision, ExpertiseCard, ExpertiseEntry, Maintenance, OwnerKind, ProjectInfo } from "./lib/expertise";
 import type { UsageResponse } from "@bindings/UsageResponse";
 import type { UsageSeriesGroup } from "@bindings/UsageSeriesGroup";
@@ -413,8 +426,18 @@ export const api = {
   /** The same for a commit of the session's checkout. */
   agentCommitDiff: (agent: string, sha: string) =>
     request<ChangesResponse>("GET", `/v1/agents/${enc(agent)}/commits/${enc(sha)}/diff`),
+  /** The Git view of a project directory (an agent's cwd or a run's repo), read-only. */
+  gitBranches: (path: string) => request<GitBranchesResponse>("GET", `/v1/git/branches?path=${enc(path)}`),
+  gitStatus: (path: string) => request<GitStatusResponse>("GET", `/v1/git/status?path=${enc(path)}`),
+  gitGraph: (path: string, limit?: number) =>
+    request<GitGraph>("GET", `/v1/git/graph?path=${enc(path)}${limit ? `&limit=${limit}` : ""}`),
+  gitCommit: (path: string, sha: string) => request<GitCommitResponse>("GET", `/v1/git/commits/${enc(sha)}?path=${enc(path)}`),
+  gitCommitDiff: (path: string, sha: string) =>
+    request<ChangesResponse>("GET", `/v1/git/commits/${enc(sha)}/diff?path=${enc(path)}`),
   /** What happened in a run, by task, from its events. */
   runTrace: (run: string) => request<RunTrace>("GET", `/v1/runs/${enc(run)}/trace`),
+  /** What the run spent, split by agent and model: its cost bar (docs/research/multica.md §十三). */
+  runCost: (run: string) => request<RunCostResponse>("GET", `/v1/runs/${enc(run)}/cost`),
   /** The person's comments, to the task's worker as its next turn; `rework` sends the task back. */
   reviewTask: (run: string, task: string, req: TaskReviewRequest) => request<Task>("POST", `/v1/runs/${enc(run)}/tasks/${enc(task)}/review`, req),
   /** `git init` and a first commit in `path`, so later runs there get worktrees. */
@@ -453,6 +476,27 @@ export const api = {
   expertiseExport: (owner_kind: OwnerKind, owner_id: string) =>
     request<string>("GET", `/v1/expertise/export?${expertiseQuery(owner_kind, owner_id)}`, undefined, { text: true }),
 
+  /** A project's troubleshooting records, newest first; `q` searches them, `status` narrows.
+   * `changed` holds the review clues: by record id, the files that moved on after its last
+   * check (docs/tasks/LESSONS.md §4.4). */
+  lessons: async (project: string, q = "", status?: LessonStatus): Promise<ListLessonsResponse> =>
+    await request<ListLessonsResponse>(
+      "GET",
+      `/v1/projects/${enc(project)}/lessons?q=${enc(q)}${status ? `&status=${status}` : ""}`,
+    ),
+  /** The person settles what a project is: a remote it has, or the checkout bound to it. */
+  bindProject: (id: string, req: BindProjectRequest) =>
+    request<ProjectInfo>("POST", `/v1/projects/${enc(id)}/bind`, req),
+  /** Two projects are one: `from`'s records, checkouts and remotes join `into`. */
+  mergeProjects: (req: MergeProjectsRequest) =>
+    request<ProjectInfo>("POST", "/v1/projects/merge", req),
+  lesson: (id: string) => request<Lesson>("GET", `/v1/lessons/${enc(id)}`),
+  /** The project's records as Markdown. */
+  lessonsExport: (project: string) =>
+    request<string>("GET", `/v1/projects/${enc(project)}/lessons/export`, undefined, { text: true }),
+  /** The problems a run recorded (run notes under issue/) and how each was sorted. */
+  runIssues: (run: string) => request<ListRunIssuesResponse>("GET", `/v1/runs/${enc(run)}/issues`),
+
   questions: (all = false) => request<ListQuestionsResponse>("GET", `/v1/questions${all ? "?all=true" : ""}`),
   answer: (id: string, answer: string) => request<HumanItem>("POST", `/v1/questions/${enc(id)}/answer`, { answer }),
   dismiss: (id: string) => request<void>("POST", `/v1/questions/${enc(id)}/dismiss`),
@@ -466,6 +510,8 @@ export const api = {
 
   quota: () => request<QuotaResponse>("GET", "/v1/quota"),
   createAccount: (req: CreateAccountRequest) => request<Account>("POST", "/v1/accounts", req),
+  importCandidates: () => request<ImportAccountsResponse>("GET", "/v1/accounts/import"),
+  importAccount: (req: ImportAccountRequest) => request<Account>("POST", "/v1/accounts/import", req),
   deleteAccount: (id: string) => request<void>("DELETE", `/v1/accounts/${enc(id)}`),
   accountUsage: (id: string, by: AccountUsageGroup) =>
     request<AccountUsageResponse>("GET", `/v1/accounts/${enc(id)}/usage?by=${by}`),

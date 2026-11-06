@@ -89,7 +89,10 @@ fn spec_schema() -> Value {
             "interfaces": strings,
             "acceptance": { "type": "array", "items": { "type": "string" }, "description": "Optional shell commands the hub runs when the worker reports done." },
             "references": strings,
-            "result_schema": { "type": "object", "description": "JSON Schema for the required structured result." }
+            "result_schema": { "type": "object", "description": "JSON Schema for the required structured result." },
+            "stage": { "type": "integer", "description": "Optional stage: tasks of a later stage start only once every task of an earlier stage has ended, and you are woken when each stage's batch ends. Omit for no staging." },
+            "next": { "type": "string", "description": "Optional: where the work goes when this task is accepted — a task key of this run (released then), or a teammate's name (the hub opens the next step for them). Omit for no routing." },
+            "on_reject": { "type": "string", "description": "Optional: where work goes back when it is sent back (task_rework, or a review that fails) — a task key (its worker takes it again) or a teammate's name. Omit to leave it with its own worker." }
         },
         "required": ["goal"]
     })
@@ -145,7 +148,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "remind_set",
-        description: "Wake yourself later with a note: after_minutes, or at (RFC 3339). With task and only_if_open, it fires only if that task has not ended by then. The reminder arrives in your notices. At most 20 at a time.",
+        description: "Wake yourself later with a note: after_minutes, or at (RFC 3339). With task and only_if_open, it fires only if that task has not ended by then. A wait is cut to 7 days; when it was, the wake says the thing you waited for did not happen. The reminder arrives in your notices. At most 20 at a time.",
         groups: ALL,
         schema: || {
             object(
@@ -174,7 +177,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "watch",
-        description: "Hear about a task (by key or id) or a teammate (by name) when something happens: on = done, failed, asked, stalled, idle or any (default any). News arrives in your notices, merged while you are busy. At most 20 at a time.",
+        description: "Hear about a task (by key or id) or a teammate (by name) when something happens: on = done, failed, asked, stalled, idle or any (default any). News arrives in your notices, merged while you are busy. It never wakes you about your own turns or changes, lasts at most 7 days (then wakes you once that the wait ran out), closes when the task or run ends, and pauses itself after 3 triggers in a row with nobody in between or more than 12 in an hour (the person is told). At most 20 at a time.",
         groups: ALL,
         schema: || {
             object(
@@ -275,6 +278,7 @@ const TOOLS: &[ToolDef] = &[
                     "symptom": { "type": "string" },
                     "keywords": { "type": "array", "items": { "type": "string" } },
                     "conditions": { "type": "string", "description": "Where it applies: system, tool versions, node, files." },
+                    "files": { "type": "array", "items": { "type": "string" }, "description": "The files the problem is about, repository-relative (crates/hub/src/api.rs). Later searches mark the record when one of them changed after its last check; a clue only, nothing is invalidated." },
                     "resolution": { "type": "string" },
                     "outcome": outcome_schema()
                 }),
@@ -490,7 +494,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_get",
-        description: "One task in full: spec, report (worker summary, checks, diff stat, failure, question, review), branch, worktree, run branch.",
+        description: "One task in full: spec, report (worker summary, checks, diff stat, failure, question, review), branch, worktree, run branch, and handoff (where its work goes next and back, with the brief the receiver would get).",
         groups: RUN,
         schema: || {
             task_schema(
@@ -604,7 +608,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_accept",
-        description: "Merge a task you issued into the run branch. Only a verified task is accepted plainly: every check passed, and nothing changed after they ran; only the verified commit is merged (nothing the worker wrote afterwards). Refused while the task is still being verified (force does not bypass that). Accepting without a verification - checks that failed or never ran, a task with no checks, a verification the hub restarted out of, a stalled task, or work done after the checks - takes force: true and a non-empty reason, which is recorded. On a conflict nothing changes and you get the conflicting files and hunks. message is the commit message, written the way the project's rules ask (default: \"<key>: <title>\").",
+        description: "Merge a task you issued into the run branch. Only a verified task is accepted plainly: every check passed, and nothing changed after they ran; only the verified commit is merged (nothing the worker wrote afterwards). Refused while the task is still being verified (force does not bypass that). Accepting without a verification - checks that failed or never ran, a task with no checks, a verification the hub restarted out of, a stalled task, or work done after the checks - takes force: true and a non-empty reason, which is recorded. On a conflict nothing changes and you get the conflicting files and hunks. message is the commit message, written the way the project's rules ask (default: \"<key>: <title>\"). With spec.next set on the task, accepting also releases the next step it names (next_step says which).",
         groups: RUN,
         schema: || {
             task_schema(json!({
@@ -625,6 +629,12 @@ const TOOLS: &[ToolDef] = &[
         description: "Send a task you issued back to its worker with notes on what to fix.",
         groups: RUN,
         schema: || task_schema(json!({ "notes": { "type": "string" } })),
+    },
+    ToolDef {
+        name: "handoff_preview",
+        description: "Preview the workflow handoff a task's spec sets, before it moves: where its work goes when you accept it (spec.next — a step's key, which is released, or a teammate's name, for whom the hub opens the next step), where it goes back when it is sent back (spec.on_reject, by task_rework or a review that fails), who receives it, and the brief that receiver will get. Read-only: nothing moves, nothing is sent, nothing changes.",
+        groups: PLANNER,
+        schema: || task_schema(json!({})),
     },
     ToolDef {
         name: "task_drop",
@@ -712,8 +722,28 @@ const TOOLS: &[ToolDef] = &[
         },
     },
     ToolDef {
+        name: "run_apply",
+        description: "Write the workers' accepted results into the person's own directory, when your lead works there in place. Three-way against what the directory holds now: a conflict writes nothing and names the files; a clean result is written whole, never committed, and their staging area and branch are untouched. This also happens once when the run ends; calling it again is a no-op.",
+        groups: PLANNER,
+        schema: || object(json!({}), &[]),
+    },
+    ToolDef {
+        name: "run_retro",
+        description: "Write the retro of a finished run (yours unless `run` names another of your project): read its trace and its `issue/` notes, and write docs/tasks/RETRO-<run>.md in your own checkout — a 现象 / 影响 / 方向 table in the shape of docs/tasks/DOGFOOD.md §9, plus the project's troubleshooting records this run's problems became or look like and the ones nobody sorted yet. It writes that document only, never code, and does not commit. The run must have ended; an existing document is kept unless force.",
+        groups: PLANNER,
+        schema: || {
+            object(
+                json!({
+                    "run": { "type": "string", "description": "Run id, or the start or end of one; default: your own." },
+                    "force": { "type": "boolean", "description": "Write again over a retro that is already there." }
+                }),
+                &[],
+            )
+        },
+    },
+    ToolDef {
         name: "task_progress",
-        description: "One line on how your task is going; shown on the task card.",
+        description: "One line on how your task is going; shown on the task card. Unless it addresses a teammate with @name, it also wakes the run's lead to look at it, so say what changed and what comes next.",
         groups: WORKER,
         schema: || task_schema(json!({ "text": { "type": "string" } })),
     },
@@ -1056,6 +1086,7 @@ impl Orchestrator {
             "task_accept" => self.task_accept(caller, input).await,
             "task_verify" => self.task_verify(caller, input).await,
             "task_rework" => self.task_rework(caller, input).await,
+            "handoff_preview" => self.handoff_preview_tool(caller, input).await,
             "task_drop" => self.task_drop(caller, input).await,
             "branch_sync" => self.branch_sync(caller, input).await,
             "task_progress" => self.task_progress(caller, input).await,
@@ -1065,6 +1096,8 @@ impl Orchestrator {
             "agent_set_model" => self.agent_set_model(caller, input).await,
             "agent_interrupt" => self.agent_interrupt(caller, input).await,
             "run_finish" => self.run_finish_tool(caller, input).await,
+            "run_apply" => self.run_apply_tool(caller, input).await,
+            "run_retro" => self.run_retro(caller, input).await,
             "task_complete" => {
                 #[derive(Deserialize)]
                 struct A {
@@ -1104,8 +1137,13 @@ impl Orchestrator {
                 }
                 let task = self.task_ref(caller, &input).await?;
                 let a: A = args(input)?;
-                self.give_up(caller, task, a.reason).await?;
-                Ok(json!({ "status": "stalled", "next": "End your turn." }))
+                let related = self.give_up(caller, task, a.reason).await?;
+                let mut out = json!({ "status": "stalled", "next": "End your turn." });
+                if !related.is_empty() {
+                    out["related_lessons"] = json!(related);
+                    out["related_note"] = json!(crate::lessons::RELATED_NOTE);
+                }
+                Ok(out)
             }
             "task_ask" => {
                 #[derive(Deserialize)]

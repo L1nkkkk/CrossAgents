@@ -159,8 +159,8 @@ async fn local_branches(dir: &Path) -> Result<Vec<(String, String)>, CoreError> 
 }
 
 /// `git log` over `revs`, at most `limit` commits: newest first (topological), and whether
-/// there were more.
-async fn log(
+/// there were more. The Git view's whole-repository graph reads `--all` through it.
+pub(crate) async fn log(
     dir: &Path,
     revs: &[String],
     limit: usize,

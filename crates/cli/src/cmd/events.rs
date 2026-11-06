@@ -166,6 +166,10 @@ pub fn summary(kind: &EventKind) -> String {
         ),
         EventKind::TaskProgress { key, text, .. } => format!("#{key} {}", one_line(text)),
         EventKind::TaskRerouted { key, reason, .. } => format!("#{key} {}", one_line(reason)),
+        EventKind::TaskRouted { key, account, .. } => format!(
+            "#{key} on {}",
+            account.as_deref().unwrap_or("its own account")
+        ),
         EventKind::TaskHandedOff { handoff, .. } => format!(
             "#{} {} → {}",
             handoff.task_key,
@@ -199,6 +203,11 @@ pub fn summary(kind: &EventKind) -> String {
             limit >> 30
         ),
         EventKind::RunDeleted { run_id } => short_tail(run_id),
+        EventKind::IssueRecorded { key, author, .. } => format!("{key} by {}", short(author)),
+        EventKind::IssueTriaged { records, .. } => format!("{} issue(s) sorted", records.len()),
+        EventKind::LessonCreated { lesson } | EventKind::LessonUpdated { lesson } => {
+            format!("{} {}", lesson.id.get(..8).unwrap_or(&lesson.id), one_line(&lesson.title))
+        }
         EventKind::ReminderFired { owner, note, .. } => {
             format!("{} {}", short(owner), one_line(note))
         }

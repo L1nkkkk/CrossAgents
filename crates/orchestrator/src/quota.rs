@@ -9,7 +9,7 @@ use crossagents_core::{
 
 use crate::brief;
 use crate::engine::{Orchestrator, worker_name};
-use crate::host::Route;
+use crate::host::{Route, RouteMode};
 
 impl Orchestrator {
     /// A fresh worker for `task`, cloned from `template` where quota allows, else from the
@@ -28,8 +28,11 @@ impl Orchestrator {
         if !team.contains(&run.config.worker) {
             team.push(run.config.worker);
         }
-        let route = self.host.route(template, &team, limited).await;
-        let (template, account, reason) = match route {
+        // A task that came back for rework keeps its worker's prompt cache: it only moves
+        // when there is hardly any quota left (magpie-lancer §2.2).
+        let mode = route_mode(task);
+        let decision = self.host.route(template, &team, limited, mode).await;
+        let (template, account, reason) = match decision.route.clone() {
             Route::Same => (template, None, None),
             Route::Exhausted { reason } => (template, None, Some(reason)),
             Route::Account { account, reason } => (template, Some(account), Some(reason)),
@@ -44,6 +47,24 @@ impl Orchestrator {
         let worker = self.unmark_recruit(worker).await?;
         self.claim(&worker, run.id, Some(task.id), ClaimRole::Worker, true)
             .await?;
+        // How this dispatch chose its account, for `run trace` (magpie-lancer §2.8).
+        self.publish(EventKind::TaskRouted {
+            run_id: run.id,
+            id: task.id,
+            key: task.key.clone(),
+            account: decision.chosen.clone(),
+            candidates: decision.candidates.clone(),
+        })
+        .await;
+        // Quota that resets soon with much of it unused is worth more work now (§2.5).
+        for tip in &decision.expiring {
+            self.notice(
+                run.planner,
+                &format!("quota:expiring:{}", tip.account),
+                &tip.line(),
+            )
+            .await;
+        }
         if let Some(reason) = &reason {
             // Stored before it is announced: whoever reads the task on the event sees why.
             task.progress = Some(reason.clone());
@@ -92,10 +113,11 @@ impl Orchestrator {
         let template = task.worker_template.unwrap_or(run.config.worker);
         let mut team: Vec<AgentId> = run.config.team.clone();
         team.push(run.config.worker);
-        if matches!(
-            self.host.route(template, &team, Some(agent)).await,
-            Route::Same | Route::Exhausted { .. }
-        ) {
+        let decision = self
+            .host
+            .route(template, &team, Some(agent), route_mode(&task))
+            .await;
+        if matches!(decision.route, Route::Same | Route::Exhausted { .. }) {
             self.notice(
                 run.planner,
                 &format!("task:{}:route", task.id),
@@ -149,5 +171,15 @@ impl Orchestrator {
         }
         self.relay(worker.id, issuer, opening, None);
         Ok(())
+    }
+}
+
+/// A task that came back for rework keeps its worker's conversation (and prompt cache), so
+/// routing holds on to its account longer (magpie-lancer §2.2).
+fn route_mode(task: &Task) -> RouteMode {
+    if task.attempts > 1 || !task.report.rework.is_empty() {
+        RouteMode::Rework
+    } else {
+        RouteMode::Fresh
     }
 }

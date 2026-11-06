@@ -10,7 +10,7 @@ use crossagents_core::{
 
 use crate::brief;
 use crate::engine::{Orchestrator, short};
-use crate::host::Route;
+use crate::host::{Route, RouteMode};
 
 /// Agent config key from before homes: the directory a lead lived in before a run moved it
 /// into its checkout. Read once, by [`Orchestrator::migrate_homes`], and dropped.
@@ -397,8 +397,15 @@ impl Orchestrator {
             .await?;
         let mut team: Vec<AgentId> = run.config.team.clone();
         team.push(run.config.worker);
-        if let Route::Account { reason, .. } | Route::Teammate { reason, .. } =
-            self.host.route(agent.id, &team, None).await
+        // Taking the task with its conversation keeps the prompt cache, so the rework
+        // threshold applies. Moving because another account resets sooner is not a reason
+        // to refuse: only an account that cannot take the work at all is.
+        let decision = self
+            .host
+            .route(agent.id, &team, None, RouteMode::Rework)
+            .await;
+        if !decision.current_usable
+            && let Route::Account { reason, .. } | Route::Teammate { reason, .. } = &decision.route
         {
             let _ = self.store.release_agent(agent.id, run.id).await;
             return Err(CoreError::Conflict(format!(
@@ -419,6 +426,50 @@ impl Orchestrator {
             });
         }
         Ok(())
+    }
+}
+
+impl Orchestrator {
+    /// The run's lead works in the person's own directory (docs/tasks/LEAD.md §4): the agent
+    /// itself, held for the run as it is. No copy of it, no checkout, no move: its session,
+    /// its branch and its staging area stay where the person left them. It is put back in
+    /// its workspace only when it was working somewhere else (`cwd` is a run's checkout),
+    /// and then with its conversation, not as a new session.
+    ///
+    /// Busy when another run holds it, or it is archived (restoring it is the person's call).
+    pub(crate) async fn claim_in_place(
+        &self,
+        run: &Run,
+        planner: &Agent,
+    ) -> Result<(Agent, bool), CoreError> {
+        if planner.archived_at.is_some() {
+            return Err(CoreError::Conflict(format!(
+                "{} is archived: restore it before it leads a run in your directory",
+                planner.name
+            )));
+        }
+        if planner.home() != run.repo {
+            return Err(CoreError::Conflict(format!(
+                "{} belongs to {}, not to {}: a run in place works in its lead's own directory",
+                planner.name,
+                planner.home().display(),
+                run.repo.display()
+            )));
+        }
+        self.claim(planner, run.id, None, ClaimRole::Lead, false)
+            .await?;
+        // Back in its own workspace only when it was working somewhere else; with its
+        // conversation, never as a new session.
+        if planner.cwd != run.repo
+            && let Err(err) = self.host.place(planner.id, &run.repo, true).await
+        {
+            let _ = self.store.release_agent(planner.id, run.id).await;
+            return Err(err);
+        }
+        Ok((
+            self.store.get_agent(&AgentKey::Id(planner.id)).await?,
+            false,
+        ))
     }
 }
 

@@ -5,24 +5,29 @@
 // look (sending, withdrawing, approving) are acted out; the rest answer 204.
 
 import { usageSeriesMock } from "../views/Usage.mock";
+import { importCandidates } from "../views/AccountImport.mock";
+import type { Account } from "@bindings/Account";
 import type { AgentCommandsResponse } from "@bindings/AgentCommandsResponse";
 import type { AgentExecution } from "@bindings/AgentExecution";
 import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
 import type { BackgroundResponse } from "@bindings/BackgroundResponse";
 import type { CommitGraph } from "@bindings/CommitGraph";
 import type { Agent } from "@bindings/Agent";
+import type { AgentSettingsRequest } from "@bindings/AgentSettingsRequest";
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
 import type { ExtensionDiffResponse } from "@bindings/ExtensionDiffResponse";
 import type { ExtensionInfo } from "@bindings/ExtensionInfo";
 import type { ExtensionLogsResponse } from "@bindings/ExtensionLogsResponse";
 import type { ExtensionVersion } from "@bindings/ExtensionVersion";
 import type { HumanItem } from "@bindings/HumanItem";
+import type { ImportAccountRequest } from "@bindings/ImportAccountRequest";
 import type { LandMode } from "@bindings/LandMode";
 import type { Note } from "@bindings/Note";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import type { QuotaResponse } from "@bindings/QuotaResponse";
 import type { ResumeCommandResponse } from "@bindings/ResumeCommandResponse";
 import type { RunDetail } from "@bindings/RunDetail";
+import type { RunCostResponse } from "@bindings/RunCostResponse";
 import type { RunHistory } from "@bindings/RunHistory";
 import type { RunTrace } from "@bindings/RunTrace";
 import type { SendMessageRequest } from "@bindings/SendMessageRequest";
@@ -47,12 +52,15 @@ import {
   type Candidate,
   type ConflictDecision,
   type ExpertiseEntry,
+  type ProjectInfo,
   type UsageRecord,
 } from "../lib/expertise";
+import { exportLessons, lessonMatches, type Lesson, type RunIssue } from "../lessons/lessons";
 import { effortOf } from "../lib/models";
 import { applyEvent } from "../session";
 import { capabilitiesOf, contextParts, driverOf, transcript, uid } from "./fixtures";
 import { mockContent, mockResolve, mockSearch, mockStatus, mockTree } from "./files.mock";
+import { mockGit } from "./git.mock";
 
 /** Names the mock hub makes up, like the real one (see crates/core/src/names.rs). */
 const MOCK_NAMES = ["Nova", "Iris", "Atlas", "Orion", "Vega", "Lyra", "Mira", "Sage"];
@@ -78,6 +86,8 @@ export type MockState = {
   commitDiffs?: Map<string, string>;
   /** Run traces (docs/tasks/DOGFOOD.md §8), by run id; absent: tasks only. */
   traces: Map<string, RunTrace>;
+  /** Cost bars (`GET /v1/runs/{key}/cost`), by run id; absent: nothing reported yet. */
+  runCost?: Record<string, RunCostResponse>;
   /** Files sent with messages, by id: type and base64 bytes. */
   files: Map<string, { mime: string; data: string }>;
   questions: HumanItem[];
@@ -108,6 +118,15 @@ export type MockState = {
   codeLost?: Record<string, { branch: string; base: string; landed?: { mode: LandMode; reference: string } }>;
   /** Expertise profiles (docs EXPERTISE.md): entries of every owner, candidates, usages. */
   expertise?: ExpertiseMock;
+  /** Troubleshooting records (docs/tasks/LESSONS.md) and the problems each run recorded. */
+  lessons?: {
+    lessons: Lesson[];
+    issues: Record<string, RunIssue[]>;
+    /** Records whose files changed after their last check, by id (LESSONS §4.4). */
+    changed?: Record<string, string[]>;
+    /** Projects the records do not imply: a checkout whose identity waits for a person. */
+    projects?: ProjectInfo[];
+  };
   /** Extensions (`GET /v1/extensions`); absent: none. */
   extensions?: ExtensionInfo[];
   /** What each waiting version changes, by extension name (`GET …/pending/diff`). */
@@ -554,6 +573,27 @@ export class MockBridge implements CrossAgentsBridge {
     return this.state.agents.find((a) => a.id === k || a.name.toLowerCase() === k.toLowerCase());
   }
 
+  /** The projects the preview knows: one per project its records or expertise belong to (the
+   * workspace path is the id, where the hub has a Project.id), the ones a scene names, and
+   * whatever a bind or merge changed here. */
+  private projectCache?: ProjectInfo[];
+  private projects(): ProjectInfo[] {
+    if (this.projectCache) return this.projectCache;
+    const s = this.state;
+    const byId = new Map<string, ProjectInfo>();
+    for (const p of s.lessons?.projects ?? []) {
+      byId.set(p.id, { ...p, remotes: [...p.remotes], paths: p.paths.map((at) => ({ ...at })) });
+    }
+    const ids = new Set((s.expertise?.entries ?? []).filter((e) => e.owner_kind === "project").map((e) => e.owner_id));
+    for (const l of s.lessons?.lessons ?? []) ids.add(l.project_id);
+    for (const id of ids) {
+      if (byId.has(id)) continue;
+      byId.set(id, { id, name: id.split("/").pop() || id, remotes: [], paths: [{ node: "local", path: id }] });
+    }
+    this.projectCache = [...byId.values()];
+    return this.projectCache;
+  }
+
   private route(method: string, path: string, body: unknown): HubResponse {
     const s = this.state;
     const url = new URL(path, "http://mock");
@@ -625,7 +665,9 @@ export class MockBridge implements CrossAgentsBridge {
         const a = this.agent(m[1]);
         const t = a && s.transcripts.get(a.id);
         if (!a) return notFound(`agent ${decodeURIComponent(m[1])}`);
-        const base: Transcript = t ?? { agent: a, driver: null, capabilities: null, delivery: { state: a.plugin === "external" ? "held" : "idle", queued: 0 }, turns: [], usage: null, switches: [], last_seq: 0 };
+        // An agent whose conversation the mock never opened still has its driver's capabilities:
+        // the hub reports them from the plugin (DOGFOOD §10 第 5 条).
+        const base: Transcript = t ?? { agent: a, driver: driverOf(a.plugin), capabilities: capabilitiesOf(a.plugin), delivery: { state: a.plugin === "external" ? "held" : "idle", queued: 0 }, turns: [], usage: null, switches: [], last_seq: 0 };
         return json(200, { ...base, agent: a, last_seq: this.seq });
       }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/turns\/([^/]+)\/diff$/))) {
@@ -643,13 +685,19 @@ export class MockBridge implements CrossAgentsBridge {
         if (diff === undefined) return json(409, { error: { code: "conflict", message: `#${found.task.key} has no worktree (not started, or ended)` } });
         return json(200, { base: found.run.run.branch, head: found.task.branch ?? "", diff, truncated: false });
       }
+      if ((m = p.match(/^\/v1\/runs\/([^/]+)\/cost$/))) {
+        const d = s.runs.find((x) => x.run.id === m![1]);
+        if (!d) return notFound("run");
+        return json(200, s.runCost?.[d.run.id] ?? { run_id: d.run.id, slices: [], tokens: 0, cost_usd: null, notes: ["这个 run 还没有 agent 上报用量。"] });
+      }
       if ((m = p.match(/^\/v1\/runs\/([^/]+)\/trace$/))) {
         const trace = s.traces.get(m[1]);
         const d = s.runs.find((x) => x.run.id === m![1]);
         if (!d) return notFound("run");
         const empty = { agents: [], turns: [], commands: [], spent: { tokens: 0, cost_usd: 0 } };
-        // Without a scripted trace, each task as stored and nothing more.
-        const tasks = d.tasks.map((t) => ({ task_id: t.id, key: t.key, title: t.title, status: t.status, failure: t.report.failure, lane: empty, checks: [], rerouted: [], first_failure: null }));
+        // Without a scripted trace, each task as stored and nothing more (`handoffs` is part of
+        // TaskTrace; leaving it out left the swimlane with nothing to iterate).
+        const tasks = d.tasks.map((t) => ({ task_id: t.id, key: t.key, title: t.title, status: t.status, failure: t.report.failure, lane: empty, checks: [], rerouted: [], handoffs: t.handoffs ?? [], first_failure: null }));
         return json(200, trace ?? { run_id: d.run.id, lead: empty, tasks, spent: { tokens: 0, cost_usd: 0 } });
       }
       if ((m = p.match(/^\/v1\/runs\/([^/]+)\/diff$/))) {
@@ -658,6 +706,8 @@ export class MockBridge implements CrossAgentsBridge {
         if (d.run.in_place) return json(409, { error: { code: "conflict", message: "this directory is not under version control, so there is no diff" } });
         return json(200, { base: d.run.base_branch, head: d.run.branch, diff: s.runDiffs.get(d.run.id) ?? "", truncated: false });
       }
+      const git = mockGit(p, url.searchParams, [...s.agents.map((a) => a.cwd), ...s.runs.map((d) => d.run.repo)]);
+      if (git) return json(git.status, git.body);
       if ((m = p.match(/^\/v1\/(runs|agents)\/([^/]+)\/graph$/))) {
         const id = m[1] === "runs" ? s.runs.find((x) => x.run.id === m![2])?.run.id : this.agent(m[2])?.id;
         if (!id) return notFound(m[1] === "runs" ? "run" : "agent");
@@ -683,13 +733,80 @@ export class MockBridge implements CrossAgentsBridge {
         const repo = url.searchParams.get("repo");
         return json(200, { history: historyOf(s).filter((h) => !repo || h.repo === repo) });
       }
-      // The mock's projects are the owners its project entries already have: the preview uses
-      // the workspace path as the id, where the hub has a Project.id.
-      if (p === "/v1/projects") {
-        const ids = new Set((s.expertise?.entries ?? []).filter((e) => e.owner_kind === "project").map((e) => e.owner_id));
-        return json(200, {
-          projects: [...ids].map((id) => ({ id, name: id.split("/").pop() || id, remotes: [], paths: [{ node: "local", path: id }] })),
-        });
+      // The mock's projects are the owners its project entries and records already have, plus
+      // the ones a scene names (a checkout whose remote nobody confirmed yet). A bind or a
+      // merge changes the preview's copy.
+      const writes = (method as string) === "POST";
+      if ((m = p.match(/^\/v1\/projects\/([^/]+)\/bind$/)) && writes) {
+        const project = this.projects().find((x) => x.id === decodeURIComponent(m![1]));
+        if (!project) return notFound("project");
+        const req = (body ?? {}) as { remote?: string; path?: string; split?: boolean };
+        const remote = req.remote?.trim();
+        const path = req.path?.trim();
+        if (!remote && !path) return json(400, { error: "name a remote or a path" });
+        if (path && req.split) {
+          // The directory is another repository: it leaves with the remote that was waiting.
+          const peeled: ProjectInfo = {
+            id: `p-${path}`,
+            name: path.split(/[\\/]/).pop() || path,
+            remotes: project.unconfirmed_remote ? [project.unconfirmed_remote] : [],
+            paths: [{ node: "local", path }],
+          };
+          project.paths = project.paths.filter((at) => at.path !== path);
+          project.unconfirmed_remote = undefined;
+          this.projects().push(peeled);
+          return json(200, peeled);
+        }
+        if (remote) {
+          if (!project.remotes.includes(remote)) project.remotes.push(remote);
+          if (project.unconfirmed_remote === remote) project.unconfirmed_remote = undefined;
+        }
+        if (path) {
+          // A checkout is bound to one project: take it from wherever else it was.
+          for (const other of this.projects()) {
+            if (other.id !== project.id) other.paths = other.paths.filter((at) => at.path !== path);
+          }
+          if (!project.paths.some((at) => at.path === path)) project.paths.push({ node: "local", path });
+          project.unconfirmed_remote = undefined;
+        }
+        return json(200, project);
+      }
+      if (p === "/v1/projects/merge" && writes) {
+        const req = (body ?? {}) as { from: string; into: string };
+        const list = this.projects();
+        const source = list.find((x) => x.id === req.from);
+        const target = list.find((x) => x.id === req.into);
+        if (!source) return notFound("project");
+        if (!target) return notFound("project");
+        if (source.id === target.id) return json(400, { error: "a project cannot be merged into itself" });
+        for (const l of s.lessons?.lessons ?? []) if (l.project_id === source.id) l.project_id = target.id;
+        for (const at of source.paths) if (!target.paths.some((t) => t.path === at.path)) target.paths.push(at);
+        for (const r of source.remotes) if (!target.remotes.includes(r)) target.remotes.push(r);
+        source.paths = [];
+        source.remotes = [];
+        return json(200, target);
+      }
+      if (p === "/v1/projects" && method === "GET") {
+        return json(200, { projects: this.projects() });
+      }
+      if ((m = p.match(/^\/v1\/projects\/([^/]+)\/lessons(\/export)?$/))) {
+        const project = decodeURIComponent(m[1]);
+        const status = url.searchParams.get("status");
+        const list = (s.lessons?.lessons ?? []).filter(
+          (l) => l.project_id === project && (!status || l.status === status) && lessonMatches(l, url.searchParams.get("q") ?? ""),
+        );
+        if (m[2]) return { status: 200, body: exportLessons(list) };
+        const changed = Object.fromEntries(Object.entries(s.lessons?.changed ?? {}).filter(([id]) => list.some((l) => l.id === id)));
+        return json(200, { lessons: list, changed });
+      }
+      if ((m = p.match(/^\/v1\/lessons\/([^/]+)$/))) {
+        const id = decodeURIComponent(m[1]);
+        const l = (s.lessons?.lessons ?? []).find((x) => x.id === id || x.id.startsWith(id));
+        return l ? json(200, l) : notFound("lesson");
+      }
+      if ((m = p.match(/^\/v1\/runs\/([^/]+)\/issues$/))) {
+        const issues = s.lessons?.issues[m[1]] ?? [];
+        return json(200, { run_id: m[1], issues, unsorted: issues.filter((i) => !i.triage).length });
       }
       if ((m = p.match(/^\/v1\/runs\/([^/]+)$/))) {
         const d = s.runs.find((x) => x.run.id === m![1]);
@@ -699,6 +816,7 @@ export class MockBridge implements CrossAgentsBridge {
       if (p === "/v1/notes") return json(200, { notes: s.notes });
       if (p === "/v1/background") return json(200, s.background ?? { reminders: [], watches: [], verifying: [] });
       if (p === "/v1/quota") return json(200, s.quota);
+      if (p === "/v1/accounts/import") return json(200, { candidates: importCandidates() });
       if (p === "/v1/usage/series") return json(200, usageSeriesMock(url.searchParams.get("range") ?? "7d", url.searchParams.get("group") ?? "total", url.searchParams.get("source") ?? "all", s.usageSeriesVariant ?? "normal"));
       if (p === "/v1/expertise" || p === "/v1/expertise/card" || p === "/v1/expertise/maintenance" || p === "/v1/expertise/export") {
         const x = s.expertise ?? { entries: [], candidates: [], usages: [] };
@@ -809,9 +927,14 @@ export class MockBridge implements CrossAgentsBridge {
         const a = this.agent(m[1]);
         if (!a) return notFound("agent");
         const config = { ...((a.config as Record<string, unknown>) ?? {}) };
-        const sources = (body as { setting_sources: string | null }).setting_sources;
+        const { setting_sources: sources, allow_hooks: hooks } = body as AgentSettingsRequest;
         if (sources === null) delete config.setting_sources;
         else config.setting_sources = sources;
+        // Off is stored as absence, as the hub does; an absent field leaves it alone.
+        if (hooks !== undefined) {
+          if (hooks) config.allow_hooks = true;
+          else delete config.allow_hooks;
+        }
         a.config = config as Agent["config"];
         this.emit({ type: "agent.updated", data: { agent: { ...a } } });
         return json(200, a);
@@ -960,6 +1083,49 @@ export class MockBridge implements CrossAgentsBridge {
       }
       if (p === "/v1/repos/init") return json(200, body);
       if (p === "/v1/plugins/refresh") return this.refreshClis();
+      if (p === "/v1/accounts/import") {
+        const req = body as ImportAccountRequest;
+        if (!req.confirm)
+          return json(400, { error: { code: "bad_request", message: "导入前需要确认：刷新令牌会让原来的工具登出" } });
+        const candidate = importCandidates().find((c) => c.provider === req.provider);
+        if (!candidate) return notFound(`${req.provider} 的本机登录`);
+        const id = req.id.trim();
+        if (s.quota.accounts.some((a) => a.account.id === id))
+          return json(409, { error: { code: "conflict", message: `account ${id} already exists` } });
+        const account: Account = {
+          codebuddy_site: null,
+          id,
+          provider: req.provider,
+          label: req.label || id,
+          home: `C:/Users/me/.crossagents/accounts/${id}`,
+          created_at: new Date().toISOString(),
+        };
+        s.quota.accounts = [
+          ...s.quota.accounts,
+          {
+            account,
+            status: {
+              logged_in: true,
+              auth_mode: req.provider === "codex" ? "chatgpt" : "oauth",
+              email: null,
+              plan: null,
+              subscription_until: null,
+              rate_limits: [],
+              limit_reached: false,
+              credits: null,
+              limits: [],
+              reset_credits: [],
+              source: "live",
+              as_of: new Date().toISOString(),
+              note: `从 ${candidate.source} 复制`,
+            },
+            models: [],
+            agents: [],
+          },
+        ];
+        this.emit({ type: "account.created", data: { account } });
+        return json(201, account);
+      }
       if ((m = p.match(/^\/v1\/plugins\/([^/]+)\/(install|upgrade)$/)))
         return this.installCli(decodeURIComponent(m[1]), m[2] as "install" | "upgrade");
       if ((m = p.match(/^\/v1\/plugins\/([^/]+)\/models$/))) {

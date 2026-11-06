@@ -58,6 +58,11 @@ pub struct StartArgs {
     /// every worker and reviewer registered in the planner's repository.
     #[arg(long, value_delimiter = ',')]
     pub team: Vec<String>,
+    /// Have the lead work in your own directory, with the session and branch you have, and
+    /// no commit, checkout or branch switch of the hub's (docs/tasks/LEAD.md §2). The
+    /// default is a checkout of the run's own.
+    #[arg(long)]
+    pub in_place: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -123,6 +128,15 @@ pub enum RunCommand {
         #[arg(long)]
         log: bool,
     },
+    /// Review a finished run: write its 现象 / 影响 / 方向 table (DOGFOOD §9) to
+    /// `docs/tasks/RETRO-<run>.md` in this directory's repository, from its trace and its
+    /// issue notes.
+    Retro {
+        run: String,
+        /// Write again over a retro that is already there.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
@@ -161,6 +175,9 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
                     ..Default::default()
                 }),
             attachments: None,
+            lead_place: start
+                .in_place
+                .then_some(crossagents_api_types::LeadPlace::InPlace),
             fresh: None,
             restore: false,
         };
@@ -298,6 +315,7 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
             println!("run {run} deleted");
             print_cleanup(&done);
         }
+        RunCommand::Retro { run, force } => super::retro::run(ctx, &run, force).await?,
     }
     Ok(())
 }
@@ -576,6 +594,16 @@ fn print_trace(ctx: &Context, trace: &RunTrace) -> Result<()> {
         }
         for reason in &task.rerouted {
             println!("  rerouted: {reason}");
+        }
+        // Each dispatch and the accounts weighed for it, best first (magpie-lancer §2.8).
+        for dispatch in &task.dispatches {
+            println!(
+                "  account: {}",
+                dispatch.account.as_deref().unwrap_or("(its own)")
+            );
+            for candidate in &dispatch.candidates {
+                println!("    {} — {}", candidate.account, candidate.reason);
+            }
         }
         if !task.handoffs.is_empty() {
             println!("  handoffs: {}", handoff::chain(&task.handoffs));

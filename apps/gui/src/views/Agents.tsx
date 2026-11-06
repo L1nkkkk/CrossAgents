@@ -287,6 +287,29 @@ function VendorClis() {
                     ? `${cli.probing ? "检测版本中…" : (cli.version ?? "版本未知")} · ${CLI_SOURCE[cli.source ?? ""] ?? cli.source ?? "来源未知"}`
                     : "没装"}
                 </div>
+                {/* What its description says about that version (docs/DESIGN.md §9.4):
+                    below the minimum no agent is registered at all; outside the series the
+                    driver was checked against it still runs, marked. */}
+                {cli.below_minimum && (
+                  <div>
+                    <span
+                      className="chip small danger"
+                      title={`低于描述文件的最低版本，这个 agent 不会被注册；升级到 ${cli.min_version} 或更新后才能用`}
+                    >
+                      版本过低（需 ≥ {cli.min_version}）
+                    </span>
+                  </div>
+                )}
+                {cli.unverified && !cli.below_minimum && (
+                  <div>
+                    <span
+                      className="chip small warn"
+                      title={`驱动只在 ${(cli.verified ?? []).join("、")} 上验证过，这个版本仍可运行，但可能对不上它的接口`}
+                    >
+                      未验证版本
+                    </span>
+                  </div>
+                )}
               </div>
               <div className="cli-actions">
                 {job ? (
@@ -533,6 +556,8 @@ export function ProfileEditor({ agent, onDone }: { agent: Agent; onDone: () => v
   const claudeLike = agent.plugin === "claude" || agent.plugin === "codebuddy";
   const savedSources = settingSourcesOf(agent);
   const [sources, setSources] = useState<string | null>(savedSources);
+  const savedHooks = allowHooksOf(agent);
+  const [hooks, setHooks] = useState(savedHooks);
   const set = (patch: Partial<AgentProfile>) => setProfile((p) => ({ ...p, ...patch }));
   const preview = { ...agent, name: name.trim() || agent.name, profile } as Agent;
 
@@ -545,7 +570,7 @@ export function ProfileEditor({ agent, onDone }: { agent: Agent; onDone: () => v
       if (name.trim() && name.trim() !== agent.name) await api.renameAgent(agent.id, name.trim());
       await api.updateProfile(agent.id, { ...profile, display_name: null });
       if ((modelValue.trim() || null) !== agent.model) await api.setModel(agent.id, modelValue.trim() || null);
-      if (claudeLike && sources !== savedSources) await api.agentSettings(agent.id, { setting_sources: sources });
+      if (claudeLike && (sources !== savedSources || hooks !== savedHooks)) await api.agentSettings(agent.id, { setting_sources: sources, allow_hooks: hooks });
       onDone();
     } catch (err) {
       setError(errorText(err));
@@ -608,6 +633,12 @@ export function ProfileEditor({ agent, onDone }: { agent: Agent; onDone: () => v
           </select>
         </Field>
       )}
+      {claudeLike && (
+        <label className="field-check" title="hooks 是设置文件里让 CLI 自己跑的命令，不经过 hub 的审批">
+          <input type="checkbox" checked={hooks} onChange={(e) => setHooks(e.target.checked)} />
+          允许 hooks（默认关闭）：打开后设置文件里的 hooks 会在它的会话里运行；关闭时随 --settings 一起关掉，其余设置照读
+        </label>
+      )}
       <p className="muted small" style={{ margin: 0 }}>
         @{agent.name} · {agent.role} · {agent.plugin}
         {agent.driver ? ` · ${agent.driver}` : ""} · 新的人设在它下次开会话时生效；模型从下一轮起生效。
@@ -667,6 +698,11 @@ const SOURCES_LABEL = {
 function settingSourcesOf(agent: Agent): string | null {
   const value = (agent.config as Record<string, unknown> | null)?.setting_sources;
   return typeof value === "string" ? value : null;
+}
+
+/** `config.allow_hooks` (SELF.md §B5): off unless someone turned it on for this agent. */
+function allowHooksOf(agent: Agent): boolean {
+  return (agent.config as Record<string, unknown> | null)?.allow_hooks === true;
 }
 
 /**

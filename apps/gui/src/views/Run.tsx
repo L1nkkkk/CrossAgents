@@ -11,6 +11,7 @@ import { navigate } from "../App";
 import { ApiError, api, errorText } from "../api";
 import { DeleteRunDialog } from "../deleteRun";
 import { HandoffChain, OutcomeChip, freshLabel, isEscalated } from "../handoff";
+import { TaskRuns } from "../attempts";
 import {
   Avatar,
   ErrorBox,
@@ -58,11 +59,18 @@ import { ReasoningPicks } from "../reasoningPicks";
 import { cursorMode, reasoningModels } from "../lib/reasoning";
 import { StateWord, TaskChanges } from "../parts";
 import { RunChanges, TaskReview } from "../review";
+import { InlineNeeds } from "../inlineask";
+import { RelayBanner } from "../relay";
+import { useQuestions } from "../questions";
+import { openInRun } from "../notices";
 import { RunTraceView } from "../trace";
+import { RunSwimlane } from "../swimlane";
+import { RunCostBar } from "../costbar";
 import { RailCard } from "../rail";
 import { t, type Key } from "../lib/i18n";
 import { wsKey } from "../workspace";
 import { openTool } from "../panes";
+import { RelatedLessons, RunIssues } from "../lessons/RunIssues";
 import { useQuota } from "./Quota";
 import { SessionView, useSideSlot } from "./Session";
 
@@ -76,6 +84,8 @@ function concerns(runId: string, e: HubEvent): boolean {
     case "task.checked":
     case "task.rerouted":
     case "task.handed_off":
+    // A retry says so in the task's progress and adds a run to it (multica §2.5).
+    case "task.progress":
       return e.data.run_id === runId;
     default:
       return false;
@@ -117,6 +127,9 @@ export function RunView({
   const detail = useRun(runId);
   const agents = useAgents();
   const [deleting, setDeleting] = useState(false);
+  // What waits on the person here, like the strip above the composer: it also stands where it
+  // happened, in the timeline (docs/research/magpie-lancer.md §2.6).
+  const questions = useQuestions();
 
   // `#/runs/<id>/delete` opens the confirmation (a link the person can be sent; also how the
   // mock previews show the dialog).
@@ -136,6 +149,8 @@ export function RunView({
     return <div className="page-inner">{detail.error ? <ErrorBox error={detail.error} /> : <p className="muted">加载中…</p>}</div>;
   }
   const { run, tasks } = detail.data;
+  // This run's open questions and 「告诉你」 notices, and no other run's (docs/tasks/SELF.md B3).
+  const asks = openInRun(questions.data?.items ?? [], run);
   const planner = agentName(agents.data, run.planner);
   const plannerAgent = agents.data?.find((a) => a.id === run.planner);
   const allEnded = tasks.length > 0 && tasks.every((t) => ["merged", "failed", "cancelled"].includes(t.status));
@@ -171,6 +186,8 @@ export function RunView({
   // and open for the whole note; everything else about the run is in the rail.
   const top = (
     <div className="run-head">
+      <RelayBanner run={run} tasks={tasks} agents={agents.data} />
+      <InlineNeeds items={asks} agents={agents.data ?? []} />
       {run.status === "paused" && (
         <OneLine tone="warn" icon={<span aria-hidden="true">❚❚</span>} title="已暂停" summary={firstSentence(run.note ?? "等你决定")}>
           {`${run.note ?? "等你决定"}。在「问你」里选择加预算继续，或取消这个 run。`}
@@ -379,6 +396,7 @@ function RunRail({
           </RailCard>
         )
       )}
+      {tasks.length > 0 && <RailCard id="run-swimlane" title="泳道"><RunSwimlane runId={run.id} /></RailCard>}
       <RailCard id="run-facts" title="run">
         <RunFacts run={run} agents={agents} />
       </RailCard>
@@ -386,12 +404,16 @@ function RunRail({
         <PolicyChip run={run} />
         <ContinuationMeta key={run.id} run={run} agents={agents} onDone={onPolicyChange} />
       </RailCard>
+      <RailCard id="run-cost" title="费用">
+        <RunCostBar runId={run.id} />
+      </RailCard>
       {tasks.some((t) => t.handoffs.length > 0) && (
         <RailCard id="run-participants" title="参与者" defaultOpen={false}>
           <Participants tasks={tasks} agents={agents} />
         </RailCard>
       )}
       <RunNotes runId={run.id} />
+      <RunIssues runId={run.id} lead={run.planner} />
       {tasks.length > 0 && (
         <RailCard id="run-trace" title="追溯" defaultOpen={false}>
           <RunTraceView runId={run.id} />
@@ -1141,12 +1163,20 @@ export function TaskDetail({ runId, taskId }: { runId: string; taskId: string })
             <dd title={time(task.updated_at)}>{ago(task.updated_at)}</dd>
           </dl>
 
+          {/* Run count and how each run ended (multica §2.4–2.5). */}
+          <TaskRuns task={task} />
+
           {task.handoffs.length > 0 && (
             <Section title="交接">
               <HandoffChain handoffs={task.handoffs} agents={agents.data} open={task.handoffs[task.handoffs.length - 1].id} />
             </Section>
           )}
           {task.report.failure && <Section title="失败原因">{<div className="item-error">{task.report.failure}</div>}</Section>}
+          {!!task.report.related_lessons?.length && (
+            <Section title="可能相关的排障记录">
+              <RelatedLessons list={task.report.related_lessons} />
+            </Section>
+          )}
           {task.report.question && (
             <Section title="Worker 的问题">
               <div className="msg-card">

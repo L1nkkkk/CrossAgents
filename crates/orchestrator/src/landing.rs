@@ -56,20 +56,31 @@ impl Orchestrator {
             checked_run.base_branch = self.round_base(run).await?.0;
         }
         let run = &checked_run;
-        let dir = self.integration_path(run);
+        // Where the workers' results are, when there are any: checks about a run whose lead
+        // works in the person's directory are about the integration workspace it gathered
+        // them in, not the directory the results have not reached yet (LEAD §6).
+        let dir = self
+            .inplace_checks_dir(run)
+            .await
+            .unwrap_or_else(|| self.integration_path(run));
         if run.landed.is_some() || !dir.exists() {
             return Ok(());
         }
         let tasks = self.store.list_tasks(run.id).await?;
         if !self.has_changes(run, &tasks).await? {
-            return Ok(());
+            // Nothing to check, so nothing for a result to be about: an older result must not
+            // stand for what is here now (docs/tasks/LEAD.md §7).
+            return self.bound_checks_to(run.id, None).await;
         }
+        // What the checks are about, taken before they run: for a lead in the person's
+        // directory that is the content, since there is no commit to bind them to.
+        let snapshot = self.checks_snapshot_of(run).await;
         let checks = project::run_checks(&dir)
             .map_err(|e| CoreError::Conflict(format!("{e}; fix it, then call {tool} again")))?;
         // Not checked is said as such, never left to read as passed.
         if checks.checks.is_empty() {
             return self
-                .record_checks(run.id, ChecksState::NotConfigured, Vec::new())
+                .record_checks(run.id, ChecksState::NotConfigured, Vec::new(), snapshot)
                 .await;
         }
         // What the run changes against its base, so that a check scoped to other paths is
@@ -86,14 +97,19 @@ impl Orchestrator {
         if commands.is_empty() {
             let declared = u32::try_from(checks.checks.len()).unwrap_or(u32::MAX);
             return self
-                .record_checks(run.id, ChecksState::NotApplicable { declared }, Vec::new())
+                .record_checks(
+                    run.id,
+                    ChecksState::NotApplicable { declared },
+                    Vec::new(),
+                    snapshot,
+                )
                 .await;
         }
         let results = self
             .verifier
             .check_within(&dir, &commands, checks.timeout)
             .await;
-        self.record_checks(run.id, ChecksState::Ran, results.clone())
+        self.record_checks(run.id, ChecksState::Ran, results.clone(), snapshot)
             .await?;
         if all_passed(&results) {
             return Ok(());
@@ -138,8 +154,12 @@ impl Orchestrator {
                 hints.join(", ")
             )
         };
+        let related = self.related_lessons(&run.repo, &bad.output).await;
+        let related = crate::lessons::related_text(&related)
+            .map(|t| format!("\n{t}"))
+            .unwrap_or_default();
         Err(CoreError::Conflict(format!(
-            "the project's checks ({}) failed: {}{maybe}\nFix it in your checkout and call {tool} \
+            "the project's checks ({}) failed: {}{maybe}{related}\nFix it in your checkout and call {tool} \
              again. If a check itself is wrong, tell the person: they can still land or end the \
              run from the run page.",
             project::FILE,
@@ -147,19 +167,82 @@ impl Orchestrator {
         )))
     }
 
-    /// Keeps on the run how its checks went.
+    /// Keeps on the run how its checks went, and what content they were about (`snapshot`,
+    /// for a lead in the person's own directory).
     async fn record_checks(
         &self,
         id: RunId,
         state: ChecksState,
         results: Vec<CheckResult>,
+        snapshot: Option<String>,
     ) -> Result<(), CoreError> {
         let _guard = self.lock(id).await;
         let mut stored = self.store.get_run(id).await?;
         stored.checks = results;
         stored.checks_state = Some(state);
+        stored.checks_snapshot = snapshot;
         stored.updated_at = Utc::now();
         self.store.update_run(&stored).await
+    }
+
+    /// Unbinds the checks on record: nothing they found is about what is there now.
+    async fn bound_checks_to(&self, id: RunId, snapshot: Option<String>) -> Result<(), CoreError> {
+        let _guard = self.lock(id).await;
+        let mut stored = self.store.get_run(id).await?;
+        if stored.checks_snapshot == snapshot {
+            return Ok(());
+        }
+        stored.checks_snapshot = snapshot;
+        stored.updated_at = Utc::now();
+        self.store.update_run(&stored).await
+    }
+
+    /// What a run's checks are about: the content of the person's directory for a lead that
+    /// works there, since no commit stands for it. `None` when a commit does (a checkout of
+    /// the run's own), when the directory is not versioned (nothing binds a result), or when
+    /// the content cannot be read (said, not turned into a pass).
+    async fn checks_snapshot_of(&self, run: &Run) -> Option<String> {
+        if !(run.leads_in_place() && run.versioned()) {
+            return None;
+        }
+        // With an integration workspace the checks ran on a commit there, which binds them
+        // as any checkout does; only checks run in the person's directory need a content
+        // fingerprint (LEAD §6, §7).
+        if self.inplace_checks_dir(run).await.is_some() {
+            return None;
+        }
+        let dir = self.integration_path(run);
+        match crate::inplace::snapshot(&dir).await {
+            Ok(snapshot) => Some(snapshot),
+            Err(err) => {
+                tracing::warn!(run = %run.id, error = %err, "cannot fingerprint the directory the checks ran on");
+                None
+            }
+        }
+    }
+
+    /// Refuses to close a run whose lead works in the person's directory when the content
+    /// moved since its checks ran: the result on record is about other content, so it counts
+    /// neither as passed nor as failed — the checks run again (docs/tasks/LEAD.md §7).
+    async fn require_checks_current(&self, run: &Run) -> Result<(), CoreError> {
+        if !(run.leads_in_place() && run.versioned()) || run.checks_state != Some(ChecksState::Ran)
+        {
+            return Ok(());
+        }
+        let Some(recorded) = run.checks_snapshot.as_deref() else {
+            return Ok(());
+        };
+        let dir = self.integration_path(run);
+        let now = crate::inplace::snapshot(&dir).await?;
+        if now == recorded {
+            return Ok(());
+        }
+        Err(CoreError::Conflict(format!(
+            "the content of {} changed after the checks ran, so their result is about other \
+             content and counts neither way. Run them again (run_finish does) and then close the \
+             run",
+            dir.display()
+        )))
     }
 
     pub(crate) async fn run_land_tool(
@@ -310,6 +393,26 @@ impl Orchestrator {
         if let Some(landing) = &run.landed {
             return Ok(Some(LandOutcome::Landed(landing.clone())));
         }
+        // A lead in the person's directory has no branch of the hub's: its changes are
+        // already where the person works, and there is nothing to merge anywhere
+        // (docs/tasks/LEAD.md §9).
+        if run.leads_in_place() && run.versioned() {
+            return Err(CoreError::Conflict(
+                "this run's lead works in your own directory and the hub keeps no branch for \
+                 it: the changes are already there, so there is nothing to land. Close the run \
+                 with run_finish"
+                    .into(),
+            ));
+        }
+        // Another run whose lead works in this directory holds it: a merge into it would
+        // write under that lead (docs/tasks/LEAD.md §7).
+        if let Some(holder) = self.dir_holder(&run.repo).await?
+            && holder.id != id
+        {
+            return Err(CoreError::Conflict(crate::dirlock::busy(
+                &holder, &run.repo,
+            )));
+        }
         // A solo lead stays in Planning until it finishes; it can land its own work first.
         // A failed run may still carry work worth keeping. Empty branches are refused below.
         if !matches!(
@@ -429,10 +532,27 @@ impl Orchestrator {
                     .join("、")
             ));
         }
+        // Who the commit credits: the hub's identity says nothing about the agents that did
+        // the work, so they go in trailers (docs/tasks/SELF.md B2). A pull request has no
+        // commit of ours to put them in, and its title is this message.
+        if mode != LandMode::Pr {
+            message = self.coauthored(&run, message).await;
+        }
         run.base_branch = baseline;
+        // Read again here, right before the merge: a run may have taken the directory since
+        // the checks above (docs/tasks/LEAD.md §7). Landing refuses rather than merge there.
+        let holder = self.dir_holder(&run.repo).await?;
+        let holder = holder.filter(|h| h.id != id);
         let reference = self
             .ws_for(&run)
-            .land(&run.repo, &run.base_branch, &run.branch, mode, &message)
+            .land_held(
+                &run.repo,
+                &run.base_branch,
+                &run.branch,
+                mode,
+                &message,
+                holder.as_ref(),
+            )
             .await?;
         let landing = Landing {
             mode,
@@ -583,6 +703,7 @@ impl Orchestrator {
             reviewer_fresh: true,
             status: TaskStatus::Pending,
             attempts: 0,
+            runs: Vec::new(),
             escalated: false,
             nudges: 0,
             branch: None,
@@ -691,6 +812,11 @@ impl Orchestrator {
                 self.cleanup_after_land(id).await;
             }
         }
+        // Workers' results reach the person's directory once the run has ended
+        // (docs/tasks/LEAD.md §10 item 2). Idempotent: a second close writes nothing.
+        if run.status.is_terminal() {
+            self.apply_in_place_after_finish(&run).await;
+        }
         Ok(run)
     }
 
@@ -742,6 +868,9 @@ impl Orchestrator {
             .await?;
         let tasks = self.store.list_tasks(id).await?;
         let changed = self.has_changes(&run, &tasks).await?;
+        // Closing is the person's usual way out, and it does not run the checks itself: a
+        // result about other content cannot close the run (docs/tasks/LEAD.md §7).
+        self.require_checks_current(&run).await?;
         self.finish_run(&mut run, &tasks, changed).await?;
 
         // The closing note for the person: the lead's words, then what the hub knows.
@@ -756,7 +885,7 @@ impl Orchestrator {
             text.push_str(&format!("{merged}/{} 个任务已合并，", tasks.len()));
         }
         match &run.landed {
-            _ if run.in_place && changed => {
+            _ if run.leads_in_place() && changed => {
                 text.push_str(&format!("改动已直接写在 {}", run.repo.display()))
             }
             Some(l) => text.push_str(&format!("已落地到 {}（{}）", run.base_branch, l.reference)),
@@ -866,8 +995,53 @@ impl Orchestrator {
             let tasks = self.store.list_tasks(run.id).await?;
             let waiting = after || (run.landed.is_none() && self.has_changes(&run, &tasks).await?);
             let branch = (!waiting).then_some(run.branch.as_str());
-            self.ws_for(&run).remove(&run.repo, &dir, branch).await?;
+            // Windows lets go of a directory a moment after the process that had it ends, and
+            // the agent was archived just now: a working copy that cannot be removed yet is
+            // tried again before this is said to have failed, as `delete.rs` does for the same
+            // reason. The branch goes after it, and only once (deleting it twice would fail).
+            let mut failure = None;
+            for attempt in 0..3 {
+                if attempt > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                match self.ws_for(&run).remove(&run.repo, &dir, None).await {
+                    Ok(()) => {
+                        failure = None;
+                        break;
+                    }
+                    Err(err) => failure = Some(err),
+                }
+            }
+            if let Some(err) = failure {
+                return Err(err);
+            }
+            if let Some(branch) = branch {
+                self.ws_for(&run).delete_branch(&run.repo, branch).await?;
+            }
             self.prune_run_build(&run).await;
+        }
+        // A lead that worked in its own directory kept no checkout of the hub's, but its run
+        // gathered the workers' results in one: leaving takes that with it (LEAD §6).
+        for run in self.store.list_runs().await? {
+            if run.planner != lead.id
+                || !run.status.is_terminal()
+                || !(run.leads_in_place() && run.versioned())
+            {
+                continue;
+            }
+            let _guard = self.lock(run.id).await;
+            match self.cleanup_inplace_base(&run).await {
+                Ok(crate::inplace::InplaceCleanup::Removed(path)) => {
+                    tracing::info!(run = %run.id, dir = %path.display(), "removed the run's integration workspace")
+                }
+                Ok(crate::inplace::InplaceCleanup::Kept(why)) => {
+                    tracing::info!(run = %run.id, why = %why, "keeping the run's integration workspace")
+                }
+                Ok(crate::inplace::InplaceCleanup::Nothing) => {}
+                Err(err) => {
+                    tracing::warn!(run = %run.id, error = %err, "cannot remove the run's integration workspace")
+                }
+            }
         }
         Ok(())
     }

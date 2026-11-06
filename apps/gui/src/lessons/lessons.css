@@ -1,0 +1,38 @@
+/* Troubleshooting records (views/Lessons/Lessons.tsx) and the run's issue card (views/Run.tsx). */
+.lessons-filter { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.lessons-filter input[type="search"] { flex: 1; min-width: 220px; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; }
+.exp-entries { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.lesson-head { cursor: pointer; }
+.lesson-keywords { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+.lesson-keywords code { font-size: 11px; padding: 0 5px; border-radius: 4px; background: var(--surface-sunk); }
+.lesson-body h4 { margin: 10px 0 4px; font-size: 12px; font-weight: 600; color: var(--text-2); }
+.lesson-pre { white-space: pre-wrap; }
+.lesson-evidence, .lesson-sources { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.lesson-evidence li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.lesson-note { color: var(--text-2); }
+
+.run-issues { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.run-issue { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); }
+.run-issue.unsorted { border-left: 3px solid var(--warn); }
+.run-issue-head { display: flex; align-items: center; gap: 6px; }
+.run-issue-head b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.run-issue-actions { display: flex; align-items: center; gap: 8px; }
+.related-lessons { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.related-lessons li { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+/* Projects: what a record is shared with, and the two decisions a person makes (L3). */
+.project-panel .project-note { margin: 0 0 8px; font-size: 12px; max-width: 720px; }
+.project-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.project-row { padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); font-size: 12px; }
+.project-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.project-head code { font-size: 11px; padding: 0 5px; border-radius: 4px; background: var(--surface-sunk); }
+.project-paths { margin-top: 2px; overflow-wrap: anywhere; }
+.project-ask { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 6px; color: var(--warn-text); }
+.project-bind { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.project-bind input { flex: 1; min-width: 200px; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; }
+.project-merge { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; }
+.project-merge select { flex: 0 1 240px; min-width: 160px; }
+.project-notice { font-size: 12px; color: var(--text-2); margin: 4px 0; }
+.lesson-files { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.lesson-files li { display: flex; align-items: center; gap: 6px; }
+.lesson-clue { font-size: 12px; }

@@ -1,10 +1,12 @@
 //! The CrossAgents hub: owns all state and serves the local API.
 
 pub mod access;
+pub mod account_import;
 pub mod accounts;
 pub mod api;
 pub mod api_expertise;
 pub mod api_projects;
+pub mod lessons;
 pub mod api_terminal;
 pub mod attachments;
 pub mod avatars;
@@ -23,8 +25,10 @@ pub mod prices;
 pub mod refresh;
 pub mod replies;
 pub mod resume;
+pub mod retro;
 pub mod routing;
 pub mod rules;
+pub mod run_cost;
 pub mod runtime;
 pub mod shadow;
 pub mod shims;
@@ -35,6 +39,7 @@ pub mod trace;
 pub mod transcript;
 pub mod usage;
 pub mod usage_series;
+pub mod version_gate;
 
 use std::fs::{File, TryLockError};
 use std::net::SocketAddr;
@@ -153,9 +158,16 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     ));
     accounts.watch();
     let tokens = Arc::new(AgentTokens::load(paths.agent_tokens()));
+    let (plugins, plugin_warnings) = PluginRegistry::load(&config.plugins, &paths.plugins());
+    for warning in &plugin_warnings {
+        tracing::warn!("skipping plugin: {warning}");
+    }
     let setup = Arc::new(CollabSetup {
         tokens: tokens.clone(),
         accounts: accounts.clone(),
+        // Cheap to clone: clones share the descriptions and the drivers, so a session's
+        // version gate reads the same CLI status `/v1/plugins` reports.
+        plugins: plugins.clone(),
         mcp_command: match &config.mcp_command {
             Some(command) => command.clone(),
             None => default_mcp_command()?,
@@ -166,10 +178,6 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         shims: shims.clone(),
         orchestrator: Arc::new(OnceLock::new()),
     });
-    let (plugins, plugin_warnings) = PluginRegistry::load(&config.plugins, &paths.plugins());
-    for warning in &plugin_warnings {
-        tracing::warn!("skipping plugin: {warning}");
-    }
     let runtime = Arc::new(Runtime::new(bus.clone(), plugins).with_setup(setup.clone()));
     runtime.watch_moves();
     runtime.watch_replies();
@@ -266,7 +274,12 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     // checkout whose lead was mid-turn when the hub stopped).
     {
         let orchestrator = orchestrator.clone();
-        tokio::spawn(async move { orchestrator.sweep_worktrees().await });
+        tokio::spawn(async move {
+            orchestrator.sweep_worktrees().await;
+            // An apply the last hub was in the middle of, or owed when it stopped, is
+            // finished (docs/tasks/LEAD.md §6).
+            orchestrator.recover_inplace_applies().await;
+        });
     }
     // Settle what runs spent while no hub was there (agents' replayed usage included) before
     // anything is dispatched: an over-budget run pauses first (docs/tasks/DOGFOOD.md §5).
