@@ -6,6 +6,7 @@ pub mod expertise;
 pub mod hub;
 pub mod mcp;
 pub mod plugin;
+pub mod retro;
 pub mod run;
 pub mod session;
 pub mod setup;
