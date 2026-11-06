@@ -263,6 +263,11 @@ pub trait Store: Send + Sync {
         let _ = watch;
         Err(CoreError::Unsupported("watches".into()))
     }
+    /// Replaces a watch by id: its chain and health move as it fires.
+    async fn update_watch(&self, watch: &Watch) -> Result<(), CoreError> {
+        let _ = watch;
+        Err(CoreError::Unsupported("watches".into()))
+    }
     async fn list_watches(&self, owner: Option<AgentId>) -> Result<Vec<Watch>, CoreError> {
         let _ = owner;
         Ok(Vec::new())

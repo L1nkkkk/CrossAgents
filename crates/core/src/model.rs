@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::automation::Health;
 use crate::policy::{PlanApproval, RunPolicy};
 
 use crate::error::CoreError;
@@ -758,6 +759,18 @@ pub struct ContinuationState {
     /// set and the run is in such a phase; old records read it back as absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stuck_watch: Option<StuckWatch>,
+    /// What the wakeups have done lately. The automation breaker pauses the continuation when
+    /// it ran at least 50 times in 7 days and failed 90% of them
+    /// (docs/research/multica.md §2.14); a paused run is not woken again.
+    #[serde(default, skip_serializing_if = "Health::is_empty")]
+    pub health: Health,
+}
+
+impl Health {
+    /// Nothing has run and nothing is paused: the field stays out of the run JSON.
+    fn is_empty(&self) -> bool {
+        self.runs.is_empty() && self.paused_at.is_none()
+    }
 }
 
 /// Progress bookmark of the stuck watch. It lives in the run record, so a restarted hub
@@ -908,6 +921,7 @@ mod tests {
                 progress_at: now,
                 event_seq: 42,
             }),
+            health: Health::default(),
         };
         let json = serde_json::to_value(&state).unwrap();
         assert_eq!(json["stuck_watch"]["event_seq"], 42);

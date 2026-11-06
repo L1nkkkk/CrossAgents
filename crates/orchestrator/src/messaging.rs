@@ -595,7 +595,7 @@ impl Orchestrator {
             only_if_open: bool,
         }
         let a: A = crate::tools::args(input)?;
-        let due_at = match (a.after_minutes, a.at) {
+        let requested = match (a.after_minutes, a.at) {
             (Some(m), None) if m > 0.0 => Utc::now() + chrono::Duration::seconds((m * 60.0) as i64),
             (None, Some(at)) => at,
             _ => {
@@ -604,6 +604,11 @@ impl Orchestrator {
                 ));
             }
         };
+        // A wait lasts at most `WAIT_MAX_DAYS` (multica §2.1): longer is cut to that, and the
+        // wake says the thing waited for did not happen instead of staying silent for weeks.
+        let cap = Utc::now() + crossagents_core::automation::wait_max();
+        let wait_expired = requested > cap;
+        let due_at = if wait_expired { cap } else { requested };
         let existing = self.store().list_reminders(Some(caller.id)).await?;
         if existing.len() >= crossagents_core::notify::MAX_PER_AGENT {
             return Err(CoreError::Conflict(format!(
@@ -633,6 +638,7 @@ impl Orchestrator {
             note: a.note,
             task,
             only_if_open: a.only_if_open && task.is_some(),
+            wait_expired,
             created_at: Utc::now(),
         };
         self.store().insert_reminder(&reminder).await?;
@@ -707,6 +713,11 @@ impl Orchestrator {
             target,
             on,
             created_at: Utc::now(),
+            // The default wait; a rule that never fires is woken once when it runs out
+            // (multica §2.1).
+            expires_at: None,
+            chain: 0,
+            health: crossagents_core::Health::default(),
         };
         self.store().insert_watch(&watch).await?;
         Ok(json!({ "watch": watch }))

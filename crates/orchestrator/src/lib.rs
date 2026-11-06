@@ -33,6 +33,7 @@ pub mod tasks;
 pub mod team;
 pub mod tools;
 pub mod verify;
+pub mod wake;
 pub mod work;
 pub mod workspace;
 

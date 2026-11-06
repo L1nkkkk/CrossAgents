@@ -316,6 +316,15 @@ impl Orchestrator {
         let Some(policy) = run.config.policy.continuation.clone() else {
             return Ok(());
         };
+        // The automation breaker stopped these wakeups (docs/research/multica.md §2.14): only a
+        // person re-arming the run (`reset_attempts`, which clears the health) starts them again.
+        if run
+            .continuation
+            .as_deref()
+            .is_some_and(|state| state.health.is_paused())
+        {
+            return Ok(());
+        }
         let now = Utc::now();
         let step = self.continuation_step(&run).await?;
         let observed_phase = step.phase;
@@ -331,6 +340,7 @@ impl Orchestrator {
             exhausted_notified: false,
             delivery_error_notified: false,
             stuck_watch: None,
+            health: crossagents_core::Health::default(),
         });
         state.owner = run.planner;
         let changed_phase = state.phase != step.phase;
@@ -461,11 +471,21 @@ impl Orchestrator {
                 "Run continuation {}/{}: {} First re-read run/task state and the checkout. Respect pending human decisions, budget, project checks and landing permissions. Report a concrete next step or complete the run only when verified.",
                 state.attempts, policy.max_attempts, state.next_step
             );
-            if let Err(error) = self
+            let delivered = self
                 .host
                 .notify(run.planner, &format!("continuation:{}", run.id), &line)
-                .await
-            {
+                .await;
+            // Every wakeup is a run of this automation; the breaker counts it whichever way it
+            // went (multica §2.14). A pause is written with the rest before anyone is told.
+            let tripped = state.health.record(now, delivered.is_ok());
+            if let Some(reason) = &tripped {
+                state.phase = "automation_paused".into();
+                state.next_step = format!(
+                    "Automatic continuation paused itself ({reason}). A person must inspect the run and re-enable it."
+                );
+                state.next_at = None;
+            }
+            if let Err(error) = delivered {
                 let reason = error.to_string();
                 state.delivery_error = Some(reason.clone());
                 let first_failure = !state.delivery_error_notified;
@@ -488,16 +508,46 @@ impl Orchestrator {
                         tracing::warn!(%notice, run = %id, "cannot report a failed continuation delivery");
                     }
                 }
+                if let Some(reason) = tripped {
+                    self.report_automation_pause(&run, &state, &reason).await?;
+                }
                 return Err(error);
-            } else if state.delivery_error_notified {
+            }
+            let mut changed = tripped.is_some();
+            if state.delivery_error_notified {
                 // Delivered after all: a later failure is a new fact worth one notice.
                 state.delivery_error_notified = false;
+                changed = true;
+            }
+            if changed {
                 run.continuation = Some(Box::new(state.clone()));
                 self.store.update_run(&run).await?;
-                self.publish(EventKind::RunContinuationChanged { id, state })
-                    .await;
+                self.publish(EventKind::RunContinuationChanged {
+                    id,
+                    state: state.clone(),
+                })
+                .await;
+            }
+            if let Some(reason) = tripped {
+                self.report_automation_pause(&run, &state, &reason).await?;
             }
         }
         Ok(())
+    }
+
+    /// Tells the person that the continuation stopped itself, once: the pause is already in the
+    /// run record, so a restart reads it back and never reports it again.
+    async fn report_automation_pause(
+        &self,
+        run: &Run,
+        state: &ContinuationState,
+        reason: &str,
+    ) -> Result<(), CoreError> {
+        let (total, failed) = state.health.counts(Utc::now());
+        let text = format!(
+            "「{}」（run {}）的自动持续推进已自动暂停：{}（7 天内运行 {} 次，失败 {} 次，失败率 ≥90%）。多半是主导长期叫不醒或账号额度用尽；检查账号和 run 状态后，用人用 run policy 的 reset_attempts 重新放开，才会继续。",
+            run.title, run.id, reason, total, failed
+        );
+        self.continuation_notice(run, text).await
     }
 }

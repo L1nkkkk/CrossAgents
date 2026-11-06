@@ -4,6 +4,7 @@
 
 pub mod account;
 pub mod attachment;
+pub mod automation;
 pub mod bus;
 pub mod claim;
 pub mod cli;
@@ -32,6 +33,7 @@ pub use account::{
     mask_email,
 };
 pub use attachment::{Attachment, AttachmentKind, AttachmentSupport, Prompt};
+pub use automation::{Health, RunRecord, Trigger};
 pub use bus::EventBus;
 pub use claim::{AgentClaim, ClaimRole};
 pub use cli::{CliSource, CliStatus, Located};

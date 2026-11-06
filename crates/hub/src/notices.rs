@@ -1,13 +1,18 @@
-//! Reminders that come due and watches that match (docs/tasks/H1.md §5.3). Both end up as a
-//! line in the owner's notification digest (`Runtime::notify`); the hub says nothing else.
+//! Reminders that come due and watches that match (docs/tasks/H1.md §5.3, docs/research/multica.md
+//! §2.1). Both end up as a line in the owner's notification digest (`Runtime::notify`); the hub
+//! says nothing else.
+//!
+//! A watch is bounded by the rules in [`crossagents_core::automation`]: it never wakes its owner
+//! about the owner's own turn or change, a chain with nobody in between (or a burst within an
+//! hour) pauses it with a notice to the person, and its wait runs out after seven days.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
 use crossagents_core::{
-    AgentId, AgentKey, AgentStatus, CoreError, Event, EventBus, EventKind, StopReason, TaskStatus,
-    WatchOn, WatchTarget,
+    AgentId, AgentKey, AgentStatus, CoreError, Event, EventBus, EventKind, MessageSource,
+    StopReason, TaskStatus, Trigger, WatchOn, WatchTarget, automation,
 };
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
@@ -42,6 +47,10 @@ impl Notices {
                 ticks = ticks.wrapping_add(1);
                 if let Err(err) = clock.fire_due().await {
                     tracing::warn!(error = %err, "cannot check reminders");
+                }
+                // A waiting rule that ran out wakes its owner once and closes (multica §2.1).
+                if let Err(err) = clock.orchestrator.expire_watches().await {
+                    tracing::warn!(error = %err, "cannot expire watches");
                 }
                 if let Err(err) = clock.orchestrator.expire_questions().await {
                     tracing::warn!(error = %err, "cannot time out questions");
@@ -79,8 +88,22 @@ impl Notices {
                                 }
                             });
                         }
+                        // A person taking part ends any chain of wakeups with nobody in between.
+                        if let EventKind::AgentInput {
+                            id,
+                            from: Some(MessageSource::Human),
+                            ..
+                        } = &event.kind
+                            && let Err(err) = matcher.orchestrator.reset_rule_chains(*id).await
+                        {
+                            tracing::warn!(%id, error = %err, "cannot reset wakeup chains");
+                        }
                         if let Err(err) = matcher.on_event(&event).await {
                             tracing::warn!(error = %err, "cannot match watches");
+                        }
+                        // A task or run that ended closes the rules that follow it (multica §2.1).
+                        if let Err(err) = matcher.orchestrator.close_rules_for_event(&event).await {
+                            tracing::warn!(error = %err, "cannot close the rules of an ended task or run");
                         }
                     }
                     Err(RecvError::Lagged(_)) => continue,
@@ -112,7 +135,18 @@ impl Notices {
                     note: reminder.note.clone(),
                 })
                 .await?;
-            let line = format!("Reminder ({}): {}", reminder.id, reminder.note);
+            // A wait longer than the cap was cut to it: say that the thing waited for did not
+            // happen rather than pretend it did (multica §2.1).
+            let line = if reminder.wait_expired {
+                format!(
+                    "Reminder ({}): {} — the wait was cut to {} days: what you were waiting for did not happen.",
+                    reminder.id,
+                    reminder.note,
+                    automation::WAIT_MAX_DAYS
+                )
+            } else {
+                format!("Reminder ({}): {}", reminder.id, reminder.note)
+            };
             self.tell(reminder.owner, &format!("reminder:{}", reminder.id), &line)
                 .await;
         }
@@ -134,15 +168,30 @@ impl Notices {
             return Ok(());
         };
         let store = self.bus.store();
+        let orchestrator = self.orchestrator.clone();
+        let now = Utc::now();
         for watch in store.list_watches(None).await? {
             if watch.target != target || !watch.wants(what) {
                 continue;
             }
-            if let WatchTarget::Agent { agent_id } = &watch.target
-                && *agent_id == watch.owner
-            {
-                continue; // nobody needs news about themselves
+            // Nobody needs news about their own turn or their own change (multica §2.1, §2.3).
+            if event.kind.agent_id() == Some(watch.owner) {
+                continue;
             }
+            if watch.health.is_paused() {
+                continue;
+            }
+            let mut watch = watch;
+            // A chain with nobody in between, or a burst within an hour, stops the rule before
+            // it wakes anyone again.
+            if let Trigger::Pause(reason) = watch.account_trigger(now) {
+                store.update_watch(&watch).await?;
+                orchestrator.warn_rule_paused(&watch, &reason).await?;
+                continue;
+            }
+            // The count is durable before anyone is woken: a crash cannot forget that this
+            // rule passed its chain again.
+            store.update_watch(&watch).await?;
             self.bus
                 .publish(EventKind::WatchTriggered {
                     owner: watch.owner,
@@ -150,16 +199,29 @@ impl Notices {
                     line: line.clone(),
                 })
                 .await?;
-            // One line per watch: newer news on it replaces older in the digest.
-            self.tell(watch.owner, &format!("watch:{}", watch.id), &line)
+            // One line per watch: newer news on it replaces older in the digest, and a wakeup
+            // already queued is updated in place instead of starting another turn.
+            let delivered = self
+                .tell(watch.owner, &format!("watch:{}", watch.id), &line)
                 .await;
+            // The breaker counts every run of the rule, delivered or not (multica §2.14).
+            let tripped = watch.health.record(now, delivered);
+            store.update_watch(&watch).await?;
+            if let Some(reason) = tripped {
+                orchestrator.warn_rule_paused(&watch, &reason).await?;
+            }
         }
         Ok(())
     }
 
-    async fn tell(&self, owner: AgentId, topic: &str, line: &str) {
-        if let Err(err) = self.runtime.notify(&AgentKey::Id(owner), topic, line).await {
-            tracing::warn!(%owner, error = %err, "cannot deliver a notice");
+    /// Adds a line to the owner's digest; `false` when it could not be delivered.
+    async fn tell(&self, owner: AgentId, topic: &str, line: &str) -> bool {
+        match self.runtime.notify(&AgentKey::Id(owner), topic, line).await {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::warn!(%owner, error = %err, "cannot deliver a notice");
+                false
+            }
         }
     }
 }

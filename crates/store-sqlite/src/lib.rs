@@ -661,6 +661,22 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    async fn update_watch(&self, watch: &Watch) -> Result<(), CoreError> {
+        let result = sqlx::query("UPDATE watches SET data = ? WHERE id = ?")
+            .bind(serde_json::to_string(watch).map_err(storage)?)
+            .bind(&watch.id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        if result.rows_affected() == 0 {
+            return Err(CoreError::NotFound {
+                kind: "watch",
+                id: watch.id.clone(),
+            });
+        }
+        Ok(())
+    }
+
     async fn list_watches(&self, owner: Option<AgentId>) -> Result<Vec<Watch>, CoreError> {
         let rows: Vec<String> = sqlx::query_scalar(
             "SELECT data FROM watches WHERE ?1 IS NULL OR owner = ?1 ORDER BY id",
