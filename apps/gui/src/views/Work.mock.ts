@@ -6,14 +6,19 @@ import type { Agent } from "@bindings/Agent";
 import type { Landing } from "@bindings/Landing";
 import type { PlannedTask } from "@bindings/PlannedTask";
 import type { Run } from "@bindings/Run";
+import type { RunDetail } from "@bindings/RunDetail";
 import type { RunStatus } from "@bindings/RunStatus";
 import type { Work } from "@bindings/Work";
 import { emptyState, type MockState, type Step } from "../dev/MockBridge";
-import { REPO, ago, planned, run, say, task, team, think, tool, transcript, turn, uid } from "../dev/fixtures";
+import { NOTES_REPO, REPO, agent, ago, planned, run, say, task, team, think, tool, transcript, turn, uid } from "../dev/fixtures";
 import { plugins } from "./Agents.mock";
 import { quota, usage } from "./Usage.mock";
 
 const DAY = 60 * 24;
+/** A third project, so the scene has more than one place a work group can sit under. */
+const SITE_REPO = "C:/work/site";
+/** Work that belongs to no project here: no round has ever named its repo, so no project claims it. */
+const LEDGER_REPO = "C:/work/ledger";
 
 type RoundInit = {
   title: string;
@@ -52,6 +57,48 @@ function round(work: Work, planner: Agent, init: RoundInit, worker: Agent, membe
     created_at: ago(init.minutesAgo + 1),
     updated_at: ago(Math.max(0, init.minutesAgo - 45)),
   };
+}
+
+/** One more work group for the sidebar: its work, and one round that names the project. */
+function sideWork(init: {
+  title: string;
+  repo: string;
+  lead: Agent;
+  worker: Agent;
+  members: Agent[];
+  minutesAgo: number;
+  status?: RunStatus;
+  inPlace?: boolean;
+}): { work: Work; detail: RunDetail } {
+  const work: Work = {
+    id: uid(),
+    title: init.title,
+    repo: init.repo,
+    lead: init.lead.id,
+    created_at: ago(init.minutesAgo + 120),
+    updated_at: ago(init.minutesAgo),
+  };
+  const base = round(
+    work,
+    init.lead,
+    {
+      title: init.title,
+      request: `接着做「${init.title}」。`,
+      minutesAgo: init.minutesAgo + 60,
+      status: init.status ?? "completed",
+      branch: `crossagents/work-${work.id.slice(0, 8)}`,
+      base: "main",
+      plan: [],
+    },
+    init.worker,
+    init.members,
+  );
+  const run: Run = {
+    ...base,
+    repo: init.repo,
+    ...(init.inPlace ? { in_place: true, mode: { lead: "in_place" as const, vcs: "none" as const, owner: "person" as const, retain: "keep" as const } } : {}),
+  };
+  return { work, detail: { run, tasks: [] } };
 }
 
 /** Three rounds of 登录与会话: landed, landed-nothing-yet, and one still running. */
@@ -120,9 +167,28 @@ export function workRounds(): { state: MockState; script: Step[]; route: string 
     [rex, mia, sam],
   );
 
+  // More projects, so the sidebar shows work groups under each one: shop keeps its three newest
+  // (the fourth waits behind 更多), notes and site have one each, and 旧账本迁移 has no round at
+  // all, so no project claims it and it goes last, in 其他.
+  const nova = agent({ name: "nova", plugin: "claude", model: "claude-sonnet-4-5", role: "worker", cwd: NOTES_REPO, profile: { display_name: "Nova", title: "文档", color: "violet" } });
+  const ivy = agent({ name: "ivy", plugin: "codex", model: "gpt-5-codex", role: "worker", cwd: SITE_REPO, profile: { display_name: "Ivy", title: "前端", color: "amber" } });
+  const paid = sideWork({ title: "支付回执邮件", repo: REPO, lead: ada, worker: rex, members: [rex, mia, sam], minutesAgo: 3 * 60, status: "completed" });
+  const suggest = sideWork({ title: "搜索联想", repo: REPO, lead: ada, worker: mia, members: [rex, mia, sam], minutesAgo: DAY, status: "completed" });
+  const invoice = sideWork({ title: "导出账单 CSV", repo: REPO, lead: ada, worker: rex, members: [rex, mia, sam], minutesAgo: DAY * 2, status: "completed" });
+  const readme = sideWork({ title: "README 快速开始", repo: NOTES_REPO, lead: nova, worker: nova, members: [nova], minutesAgo: 5 * 60, status: "completed" });
+  const homepage = sideWork({ title: "首页改版", repo: SITE_REPO, lead: ivy, worker: ivy, members: [ivy], minutesAgo: 90, status: "completed", inPlace: true });
+  const ledger: Work = {
+    id: uid(),
+    title: "旧账本迁移",
+    repo: LEDGER_REPO,
+    lead: ada.id,
+    created_at: ago(300),
+    updated_at: ago(60),
+  };
+
   const state: MockState = { ...emptyState(), plugins: plugins(), quota: quota(), usage: usage() };
-  state.works = [work];
-  state.agents.push(ada, rex, mia, sam);
+  state.works = [work, paid.work, suggest.work, invoice.work, readme.work, homepage.work, ledger];
+  state.agents.push(ada, rex, mia, sam, nova, ivy);
   ada.status = "running";
 
   const t1 = turn({
@@ -207,6 +273,11 @@ export function workRounds(): { state: MockState; script: Step[]; route: string 
         }),
       ],
     },
+    paid.detail,
+    suggest.detail,
+    invoice.detail,
+    readme.detail,
+    homepage.detail,
   ];
   state.runCost = {
     [first.id]: { run_id: first.id, slices: [], tokens: 184_000, cost_usd: 1.42, notes: [] },

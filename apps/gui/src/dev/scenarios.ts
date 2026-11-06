@@ -17,7 +17,7 @@ import { lessonsScene } from "../views/Lessons/Lessons.mock";
 import { agent, ago, capabilitiesOf, NOTES_REPO, planned, REPO, say, team, think, transcript, turn, uid } from "./fixtures";
 import { openFile } from "../FileViewer";
 import { openTool, placeTab } from "../panes";
-import { setBottomHeight, setToolsWidth } from "../lib/widths";
+import { setBottomHeight, setSidebarWidth, setToolsWidth, SIDEBAR } from "../lib/widths";
 import { newTerminal } from "../terminal";
 import type { AccountQuota } from "@bindings/AccountQuota";
 import type { HumanItem } from "@bindings/HumanItem";
@@ -36,7 +36,16 @@ export type Scenario = {
 };
 
 export const SCENARIOS: Scenario[] = [
-  { key: "work-rounds", label: "工作组：三轮", hint: "同一个对话里连着三轮：第一轮已落地，第二轮没落地，第三轮叠在它上面；右侧「各轮」切换，对话里的分隔跟着走；侧栏一个工作组只占一行", build: () => workRounds() },
+  { key: "work-rounds", label: "工作组：三轮", hint: "同一个对话里连着三轮：第一轮已落地，第二轮没落地，第三轮叠在它上面；右侧「各轮」切换，对话里的分隔跟着走；侧栏里工作组落在各自的项目下，一个项目只列最近三个", build: () => {
+    const scene = workRounds();
+    // A work group lives under its project now, so the width has to leave its name readable:
+    // start from the default whatever the last preview left behind.
+    return { ...scene, script: [{ at: 200, act: () => setSidebarWidth(SIDEBAR.initial) }, ...scene.script] as Step[] };
+  } },
+  { key: "work-rounds-tight", label: "工作组：最窄侧栏", hint: "同一个场景在 200px 的侧栏里：项目下的工作组只标原地，worktree 只在 tooltip 里说，名字仍然读得出来", build: () => {
+    const scene = workRounds();
+    return { ...scene, script: [{ at: 200, act: () => setSidebarWidth(SIDEBAR.min) }, ...scene.script] as Step[] };
+  } },
   { key: "swimlane", label: "Run 泳道图", hint: "一个 Worker 一根线：交接、提交、测试 ✓/✗、重试、改派（分叉）、合入、上下文压缩、模型切换、等你；点名字只看一根线", build: () => swimlaneScene() },
   { key: "swimlane-landed", label: "Run 泳道图 · 已落地", hint: "三条线都合入后落地，泳道以「落地」收尾", build: () => swimlaneScene(true) },
   { key: "swimlane-focus", label: "Run 泳道图 · 聚焦", hint: "只看 Rex 一根线，节点带时间", build: () => {
