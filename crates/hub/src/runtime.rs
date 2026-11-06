@@ -2278,8 +2278,8 @@ impl Runtime {
         // Nothing can repeat a send to a session that is gone.
         self.clients.lock().await.forget(agent.id);
         let Some(live) = self.live.lock().await.remove(&agent.id) else {
+            // No session: what it does with messages did not change, so nothing is announced.
             set_status(&self.bus, agent.id, AgentStatus::Stopped).await;
-            self.announce_delivery(agent.id).await;
             return Ok(());
         };
         self.withdraw_waiting(agent.id, &live).await;
