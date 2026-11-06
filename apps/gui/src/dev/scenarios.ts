@@ -6,6 +6,7 @@ import { extensionScene } from "./extensions.mock";
 import { approvalRun, deleteRun, graphRun, handoffRun, inPlaceRun, landingRun, longResultsRun, oauthRun, pausedRun, rerouteRun, reuseRun, reviewRun, syncRun, traceRun } from "../views/Run.mock";
 import { relayScene } from "../views/RunRelay.mock";
 import { swimlaneScene } from "../views/RunSwimlane.mock";
+import { runCostScene } from "../views/RunCost.mock";
 import type { BackgroundResponse } from "@bindings/BackgroundResponse";
 import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, failedEditSession, liveRun, liveSession, liveTaskSession, longNameScene, moderationSession, slashScene, soloSession, toolImagePathsSession, toolImagesSession } from "../views/Session.mock";
 import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
@@ -290,6 +291,7 @@ export const SCENARIOS: Scenario[] = [
     };
   } },
   { key: "running", label: "run 进行中", hint: "run 页：中间栏只有对话；右侧栏按任务分组（含交接链）、run 信息、策略、笔记，追溯和参与者收起", build: () => oauthRun("running") },
+  { key: "run-cost", label: "run 的费用条", hint: "右侧栏「费用」：一根横条按 agent 与模型分段，同一 agent 的模型深浅分开；悬停一段看金额和 token，下面一行一段", build: () => runCostScene() },
   { key: "paused", label: "run 已暂停", hint: "中间只有一行「已暂停」提示，展开看全文；计划、run 信息、策略都在右侧栏", build: () => pausedRun() },
   { key: "review", label: "审查任务", hint: "#c 已报告完成：整个任务的 diff 带行号，点行号写意见，可发给 worker 或打回重做", build: () => reviewRun() },
   { key: "landing", label: "落地前总 diff", hint: "所有任务都已合并、等落地：展开「查看全部改动」看 run 分支对 main 的总 diff", build: () => landingRun() },
@@ -362,6 +364,7 @@ export const SCENARIOS: Scenario[] = [
   { key: "cli-install-missing", label: "装完但找不到", hint: "命令成功，但这台机器上找不到装好的程序：原因里列出找过的位置", build: () => cliScene("missing") },
   { key: "cli-upgrade", label: "升级 CLI", hint: "Codex 是 npm 装的：点「升级」，完成后版本号变化", build: () => cliScene("ok", "upgrade") },
   { key: "cli-bundled", label: "桌面版自带不可升级", hint: "Claude 来自桌面版：显示「随桌面版更新」，没有升级按钮", build: () => cliScene("ok", "install", false) },
+  { key: "cli-versions", label: "CLI 版本过低与未验证", hint: "设置 → 智能体：Codex 低于描述文件的最低版本（不注册、不提供模型），With 的版本不在验证过的范围内（仍可运行），Claude 在范围内", build: () => ({ state: emptyHub(), script: [], route: "#/agents" }) },
   { key: "agent-workspace-sidebar", label: "项目侧栏：成员与待办", hint: "项目 → 成员（Lin 已归档），独立会话，「需要你」两条（都是 Mia 的）；Rex 既是 #a 的执行者又是 #b 的评审，只出现一行", build: () => ({ state: workspaceState(), script: [], route: "#/" }) },
   { key: "agent-workspace-overview", label: "项目总览", hint: "点项目名进入总览：待审批、进行中、旧的已落地 run 各一个；Nova-c 是用 Nova 的配置新建的执行会话，#a 是 Rex 本人", build: () => ({ state: workspaceState(), script: [], route: `#/w/${encodeURIComponent(wsKey(REPO))}` }) },
   { key: "agent-workspace-edges", label: "边界 run", hint: "NOTES_REPO：失败的 run 和完成但未落地的 run（不能显示成完成）；REPO 里还有没提交 plan 的登录限流和来源已归档的多租户隔离", build: () => ({ state: workspaceState(), script: [], route: `#/w/${encodeURIComponent(wsKey(NOTES_REPO))}` }) },

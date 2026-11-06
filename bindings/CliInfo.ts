@@ -59,4 +59,24 @@ installing?: string,
 /**
  * Where the description came from: `built-in`, a manifest's path, or `config.toml`.
  */
-described_by?: string, };
+described_by?: string, 
+/**
+ * The oldest CLI the description accepts; absent when it names none
+ * (docs/research/multica.md §2.9).
+ */
+min_version?: string, 
+/**
+ * The CLI found here is older than `min_version`: its agent is not registered, so no
+ * models are offered and the row says the version is too low.
+ */
+below_minimum: boolean, 
+/**
+ * The upstream version series the driver was checked against (`"2.1"`); absent when
+ * the description names none (docs/DESIGN.md §9.4).
+ */
+verified?: Array<string>, 
+/**
+ * The CLI's version is outside those series: it still runs, the row says it is
+ * unverified. False when no series is named or the version is unknown.
+ */
+unverified: boolean, };

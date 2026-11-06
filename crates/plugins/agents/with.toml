@@ -11,6 +11,9 @@
 name = "with"
 driver = "with-native"
 command = ["with-cli", "acp", "--no-update"]
+# What the driver was checked against (docs/DESIGN.md §9.4): `with-cli chat -o stream-json`
+# on v0.31.0 (docs/research/with-cli.md). Outside this series it runs, marked unverified.
+verified = ["0.31"]
 
 [models]
 fallback = [

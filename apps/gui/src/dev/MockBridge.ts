@@ -26,6 +26,7 @@ import type { PluginInfo } from "@bindings/PluginInfo";
 import type { QuotaResponse } from "@bindings/QuotaResponse";
 import type { ResumeCommandResponse } from "@bindings/ResumeCommandResponse";
 import type { RunDetail } from "@bindings/RunDetail";
+import type { RunCostResponse } from "@bindings/RunCostResponse";
 import type { RunHistory } from "@bindings/RunHistory";
 import type { RunTrace } from "@bindings/RunTrace";
 import type { SendMessageRequest } from "@bindings/SendMessageRequest";
@@ -81,6 +82,8 @@ export type MockState = {
   commitDiffs?: Map<string, string>;
   /** Run traces (docs/tasks/DOGFOOD.md §8), by run id; absent: tasks only. */
   traces: Map<string, RunTrace>;
+  /** Cost bars (`GET /v1/runs/{key}/cost`), by run id; absent: nothing reported yet. */
+  runCost?: Record<string, RunCostResponse>;
   /** Files sent with messages, by id: type and base64 bytes. */
   files: Map<string, { mime: string; data: string }>;
   questions: HumanItem[];
@@ -645,6 +648,11 @@ export class MockBridge implements CrossAgentsBridge {
         if (!found) return notFound("task");
         if (diff === undefined) return json(409, { error: { code: "conflict", message: `#${found.task.key} has no worktree (not started, or ended)` } });
         return json(200, { base: found.run.run.branch, head: found.task.branch ?? "", diff, truncated: false });
+      }
+      if ((m = p.match(/^\/v1\/runs\/([^/]+)\/cost$/))) {
+        const d = s.runs.find((x) => x.run.id === m![1]);
+        if (!d) return notFound("run");
+        return json(200, s.runCost?.[d.run.id] ?? { run_id: d.run.id, slices: [], tokens: 0, cost_usd: null, notes: ["这个 run 还没有 agent 上报用量。"] });
       }
       if ((m = p.match(/^\/v1\/runs\/([^/]+)\/trace$/))) {
         const trace = s.traces.get(m[1]);
