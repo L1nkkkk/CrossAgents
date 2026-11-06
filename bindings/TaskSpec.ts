@@ -20,4 +20,17 @@ result_schema?: JsonValue | null,
  * woken when each stage's batch ends. `None` is no staging, as in plans written before
  * stages existed.
  */
-stage?: number, };
+stage?: number, 
+/**
+ * Where the work goes once this task is accepted (docs/research/multica.md §2.12): a
+ * step of the same run (a task key, `b` or `#b`), which the hub releases; or a teammate
+ * (a name), for whom the hub opens the next step and hands it over. `None` is no
+ * routing: the run moves on as it did before.
+ */
+next?: string, 
+/**
+ * Where it goes back when it is sent back (`task_rework`, or a review that fails): a
+ * step of the same run, whose worker takes it again, or a teammate's name. `None`
+ * leaves it with its own worker, as before.
+ */
+on_reject?: string, };
