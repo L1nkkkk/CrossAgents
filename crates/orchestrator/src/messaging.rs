@@ -299,6 +299,7 @@ impl Orchestrator {
                     "activity": self.running.lock().unwrap().activity.of(a.id, Utc::now()),
                     "plugin": a.plugin,
                     "model": a.model,
+                    "unguarded": crate::approval::unguarded(&a, run.as_ref().map(|r| &r.config.policy)),
                     "unusable": crate::approval::unusable_for(self.store().as_ref(), &a, run.as_ref().map(|r| &r.config.policy)).await?,
                     "current_tasks": tasks.get(&a.id).cloned().unwrap_or_default(),
                     "home": a.home(),
@@ -324,6 +325,10 @@ impl Orchestrator {
                 )
                 .await?
             );
+            entry["unguarded"] = json!(crate::approval::unguarded(
+                &s.agent,
+                run.as_ref().map(|r| &r.config.policy)
+            ));
             entry["note"] = json!("archived: assign with fresh: false and restore: true to use it");
             agents.push(entry);
         }

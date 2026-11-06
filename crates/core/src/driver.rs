@@ -136,6 +136,7 @@ pub struct Capabilities {
 
 /// How to answer permission requests when no [`PermissionHandler`] is given.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionPolicy {
     /// Approve everything; isolation comes from the workspace (docs/DESIGN.md §4.4).
