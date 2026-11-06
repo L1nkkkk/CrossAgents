@@ -675,6 +675,7 @@ impl Orchestrator {
             task.report.diff_stat = None;
             task.report.verified_sha = None;
             task.report.unchecked = false;
+            task.report.related_lessons.clear();
         } else if !matches!(task.status, TaskStatus::Running | TaskStatus::Stalled) {
             return Err(CoreError::Conflict(format!(
                 "#{} is {:?}; only a task being worked on can be completed",
@@ -773,6 +774,7 @@ impl Orchestrator {
         } else {
             self.verifier.check(&dir, &task.spec.acceptance).await
         };
+        let related = self.related_to_checks(&run.repo, &checks).await;
         let _guard = self.lock(run.id).await;
         let mut task = self.store.get_task(id).await?;
         if !Self::still_verifying(&task, token) {
@@ -784,6 +786,7 @@ impl Orchestrator {
         task.report.verified_sha = sha;
         task.report.unchecked = unchecked;
         task.report.verification = None;
+        task.report.related_lessons = related;
         self.transition(&mut task, TaskStatus::Passed).await?;
         if !checks.is_empty() {
             self.publish(EventKind::TaskChecked {
@@ -796,13 +799,33 @@ impl Orchestrator {
             .await;
         }
         let summary = task.report.summary.clone().unwrap_or_default();
+        let related = crate::lessons::related_text(&task.report.related_lessons)
+            .map(|t| format!("\n{t}"))
+            .unwrap_or_default();
         self.relay(
             task.issuer_or(run.planner),
             worker,
-            format!("{}\n\n{}", summary.trim(), brief::facts(&task)),
+            format!("{}\n\n{}{related}", summary.trim(), brief::facts(&task)),
             None,
         );
         Ok(())
+    }
+
+    /// Lessons related to the output of the checks that failed; none when all passed.
+    async fn related_to_checks(
+        &self,
+        repo: &std::path::Path,
+        checks: &[crossagents_core::CheckResult],
+    ) -> Vec<crossagents_core::RelatedLesson> {
+        let output: Vec<&str> = checks
+            .iter()
+            .filter(|c| !c.passed)
+            .map(|c| c.output.as_str())
+            .collect();
+        if output.is_empty() {
+            return Vec::new();
+        }
+        self.related_lessons(repo, &output.join("\n")).await
     }
 
     /// A verification that failed on the way: the task is `Passed` at once, with the error as
@@ -888,6 +911,7 @@ impl Orchestrator {
         task.report.interrupted = false;
         task.report.forced = None;
         task.report.checks.clear();
+        task.report.related_lessons.clear();
         let token = uuid::Uuid::new_v4().to_string();
         task.report.verification = Some(token.clone());
         self.transition(&mut task, TaskStatus::Verifying).await?;
@@ -901,13 +925,16 @@ impl Orchestrator {
         }))
     }
 
-    /// The assignee cannot finish: the task stalls and its issuer reads why.
+    /// The assignee cannot finish: the task stalls and its issuer reads why, with the lessons
+    /// that may bear on it (also on its report, and returned).
     pub(crate) async fn give_up(
         &self,
         caller: &Agent,
         id: TaskId,
         reason: String,
-    ) -> Result<(), CoreError> {
+    ) -> Result<Vec<crossagents_core::RelatedLesson>, CoreError> {
+        // Looked up before the run's lock: a slow lookup holds up nobody else.
+        let related = self.related_lessons(&caller.cwd, &reason).await;
         let (run, _) = self.task_of(id).await?;
         let _guard = self.lock(run.id).await;
         let mut task = self.store.get_task(id).await?;
@@ -916,6 +943,7 @@ impl Orchestrator {
             return Err(CoreError::Conflict(format!("#{} has ended", task.key)));
         }
         task.report.failure = Some(reason.clone());
+        task.report.related_lessons = related.clone();
         crate::attempts::close(
             &mut task,
             TaskRunOutcome::GaveUp,
@@ -927,17 +955,20 @@ impl Orchestrator {
         } else {
             self.store_task(&mut task).await?;
         }
+        let hint = crate::lessons::related_text(&related)
+            .map(|t| format!("\n\n{t}"))
+            .unwrap_or_default();
         self.relay(
             task.issuer_or(run.planner),
             caller.id,
             format!(
-                "I cannot finish this: {}\n\n{}",
+                "I cannot finish this: {}\n\n{}{hint}",
                 reason.trim(),
                 brief::facts(&task)
             ),
             None,
         );
-        Ok(())
+        Ok(related)
     }
 
     pub(crate) async fn ask(
@@ -1533,6 +1564,7 @@ impl Orchestrator {
         self.cleanup_worktree(&run, &task, true, released.is_empty())
             .await;
         task.report.failure = None;
+        task.report.related_lessons.clear();
         // Accepting a stalled task stands in for the report its worker never sent.
         if task.status == TaskStatus::Stalled {
             self.transition(&mut task, TaskStatus::Passed).await?;
@@ -1632,6 +1664,7 @@ impl Orchestrator {
         crossagents_core::Handoff::end(&mut task.handoffs, Some(worker), HandoffOutcome::Reworked);
         task.attempts += 1;
         task.report.failure = None;
+        task.report.related_lessons.clear();
         task.report.rework.push(a.notes.trim().to_owned());
         self.transition(&mut task, TaskStatus::Running).await?;
         // Where it goes back to (multica §2.12): `spec.on_reject` names a step or a teammate

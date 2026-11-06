@@ -6,6 +6,7 @@ pub mod accounts;
 pub mod api;
 pub mod api_expertise;
 pub mod api_projects;
+pub mod lessons;
 pub mod api_terminal;
 pub mod attachments;
 pub mod avatars;

@@ -36,6 +36,24 @@ async fn turn(t: &TestHub, agent: &str, id: AgentId, text: &str) -> String {
     w.output()
 }
 
+/// Like [`turn`], for an agent that may still be busy with notices: waits through its turns
+/// until what it printed holds `needle`.
+async fn turn_until(t: &TestHub, agent: &str, id: AgentId, text: &str, needle: &str) -> String {
+    let mut w = t.watch().await;
+    t.send(agent, text).await;
+    loop {
+        w.until(
+            "turn completed",
+            |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id: done, .. } if *done == id),
+        )
+        .await;
+        let out = w.output();
+        if out.contains(needle) {
+            return out;
+        }
+    }
+}
+
 /// Starts a run led by `lead` and waits for its kickoff turn to end.
 async fn run_led_by(t: &TestHub, lead: &str, lead_id: AgentId) -> String {
     let mut w = t.watch().await;
@@ -256,4 +274,193 @@ async fn a_problem_from_a_cancelled_run_is_sorted_elsewhere_and_found_later() {
     assert!(out.contains("\"lessons\": []"), "{out}");
     let out = instructions_in(other.path(), "cy").await;
     assert!(!out.contains("troubleshooting record"), "{out}");
+}
+
+/// L2: a worker's `task_fail` whose reason holds a record's error code gets that record back
+/// as possibly related; the records, the run's problems with what became of them, and an
+/// export are there over REST, and a record can be corrected there.
+#[tokio::test]
+async fn a_failure_carries_related_records_and_rest_shows_them() {
+    let repo = git_repo();
+    git(
+        repo.path(),
+        &["remote", "add", "origin", "git@github.com:o/l2.git"],
+    );
+    let t = TestHub::start().await;
+    let boss = t
+        .add_agent_in("boss", Some("opus"), "planner", repo.path())
+        .await;
+    t.add_agent_in("rex", Some("haiku"), "worker", repo.path())
+        .await;
+    let mut w = t.watch().await;
+    let plan = json!([{ "key": "a", "title": "task a", "spec": { "goal": "Write a." } }]);
+    let request = format!("Build it. {}", call("plan_submit", json!({ "tasks": plan })));
+    let resp = t
+        .post(
+            "/v1/runs",
+            json!({ "request": request, "planner": "boss", "worker": "rex",
+                    "policy": { "plan_approval": "auto" } }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let run: Value = resp.json().await.unwrap();
+    let run_id = run["id"].as_str().unwrap().to_owned();
+    let card = w
+        .until(
+            "task handed off",
+            |e| matches!(&e.kind, EventKind::TaskHandedOff { .. }),
+        )
+        .await;
+    let EventKind::TaskHandedOff { handoff, .. } = card.kind else {
+        unreachable!()
+    };
+    let worker = handoff.to;
+    w.until(
+        "kickoff answered",
+        |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if *id == boss.id),
+    )
+    .await;
+
+    // The lead records a problem and sorts it into a record; both are announced.
+    let mut events = t.watch().await;
+    let issue = json!({
+        "key": "issue/a/7f1e",
+        "text": "问题：python exited with code 9009\n处理：改用 node\n结果：临时绕过",
+    });
+    turn_until(&t, "boss", boss.id, &call("note_write", issue), "\"written\": true").await;
+    events
+        .find(
+            "issue.recorded",
+            |e| matches!(&e.kind, EventKind::IssueRecorded { key, .. } if key == "issue/a/7f1e"),
+        )
+        .await;
+    let resp: Value = t
+        .get(&format!("/v1/runs/{run_id}/issues"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp["unsorted"], 1, "{resp}");
+    assert!(resp["issues"][0].get("triage").is_none(), "{resp}");
+
+    let create = call(
+        "lesson_create",
+        json!({
+            "issues": ["issue/a/7f1e"],
+            "title": "python 是 Windows Store 的占位程序",
+            "symptom": "python exited with code 9009",
+            "keywords": ["9009", "WindowsApps"],
+            "resolution": "改用 node 写脚本",
+            "outcome": "workaround",
+        }),
+    );
+    let out = turn_until(&t, "boss", boss.id, &create, "\"lesson\": \"").await;
+    let at = out.find("\"lesson\": \"").unwrap_or_else(|| panic!("{out}")) + 11;
+    let lesson_id = out[at..at + 36].to_owned();
+    events
+        .find("lesson.created", |e| {
+            matches!(&e.kind, EventKind::LessonCreated { lesson } if lesson.id == lesson_id)
+        })
+        .await;
+    events
+        .find(
+            "issue.triaged",
+            |e| matches!(&e.kind, EventKind::IssueTriaged { records, .. } if records.len() == 1),
+        )
+        .await;
+
+    // The worker gives up with the same error: the record comes back, marked possibly related.
+    let reason = "cannot run the generator: python exited with exit code 9009";
+    let out = turn_until(
+        &t,
+        &worker.to_string(),
+        worker,
+        &call("task_fail", json!({ "task": "a", "reason": reason })),
+        "\"status\": \"stalled\"",
+    )
+    .await;
+    assert!(out.contains("\"related_lessons\""), "{out}");
+    assert!(out.contains(&lesson_id), "{out}");
+    assert!(out.contains("\"9009\""), "{out}");
+    assert!(out.contains("possibly related"), "{out}");
+
+    // REST: the run's problems with what became of them.
+    let resp: Value = t
+        .get(&format!("/v1/runs/{run_id}/issues"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp["unsorted"], 0, "{resp}");
+    assert_eq!(resp["issues"][0]["triage"]["result"], "lesson", "{resp}");
+    assert_eq!(resp["issues"][0]["triage"]["lesson_id"], json!(lesson_id), "{resp}");
+
+    // The project's records: listed, searched, filtered, exported, read and corrected.
+    let projects: Value = t.get("/v1/projects").await.json().await.unwrap();
+    let project = projects["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["remotes"].to_string().contains("o/l2"))
+        .unwrap_or_else(|| panic!("{projects}"))["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let list: Value = t
+        .get(&format!("/v1/projects/{project}/lessons?q=9009"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list["lessons"][0]["id"], json!(lesson_id), "{list}");
+    let list: Value = t
+        .get(&format!("/v1/projects/{project}/lessons?q=ENOENT"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list["lessons"], json!([]), "{list}");
+    let list: Value = t
+        .get(&format!("/v1/projects/{project}/lessons?status=review"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list["lessons"], json!([]), "{list}");
+    let resp = t
+        .get(&format!("/v1/projects/{project}/lessons/export"))
+        .await;
+    assert_eq!(resp.status(), 200);
+    let markdown = resp.text().await.unwrap();
+    assert!(markdown.contains("## python 是 Windows Store 的占位程序"), "{markdown}");
+    assert!(markdown.contains("改用 node 写脚本"), "{markdown}");
+
+    let patch = |body: Value| {
+        t.client
+            .patch(format!("{}/v1/lessons/{lesson_id}", t.base))
+            .bearer_auth(&t.hub.token)
+            .json(&body)
+            .send()
+    };
+    let resp = patch(json!({ "title": "  " })).await.unwrap();
+    assert_eq!(resp.status(), 400, "{}", resp.text().await.unwrap());
+    let resp = patch(json!({ "status": "review", "keywords": ["9009", " python "] }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    events
+        .find("lesson.updated", |e| {
+            matches!(&e.kind, EventKind::LessonUpdated { lesson } if lesson.id == lesson_id)
+        })
+        .await;
+    let lesson: Value = t
+        .get(&format!("/v1/lessons/{lesson_id}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(lesson["status"], "review", "{lesson}");
+    assert_eq!(lesson["keywords"], json!(["9009", "python"]), "{lesson}");
+    let resp = t.get("/v1/lessons/00000000-0000-7000-8000-000000000000").await;
+    assert_eq!(resp.status(), 404);
 }

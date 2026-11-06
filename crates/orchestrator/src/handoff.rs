@@ -355,6 +355,7 @@ impl Orchestrator {
         // one says something, the task's line says why it changed hands.
         task.report.summary = None;
         task.report.failure = None;
+        task.report.related_lessons.clear();
         task.progress = card.reason.clone();
         task.updated_at = Utc::now();
         self.store.update_task(task).await?;

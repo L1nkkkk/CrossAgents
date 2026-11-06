@@ -75,6 +75,10 @@ import type { UsageGroup } from "@bindings/UsageGroup";
 import type { AcceptCandidateResponse } from "@bindings/AcceptCandidateResponse";
 import type { ListCandidatesResponse } from "@bindings/ListCandidatesResponse";
 import type { ListExpertiseResponse } from "@bindings/ListExpertiseResponse";
+import type { Lesson } from "@bindings/Lesson";
+import type { LessonStatus } from "@bindings/LessonStatus";
+import type { ListLessonsResponse } from "@bindings/ListLessonsResponse";
+import type { ListRunIssuesResponse } from "@bindings/ListRunIssuesResponse";
 import type { AcceptRequest, Candidate, CandidateStatus, ConflictDecision, ExpertiseCard, ExpertiseEntry, Maintenance, OwnerKind, ProjectInfo } from "./lib/expertise";
 import type { UsageResponse } from "@bindings/UsageResponse";
 import type { UsageSeriesGroup } from "@bindings/UsageSeriesGroup";
@@ -469,6 +473,21 @@ export const api = {
   /** The profile as Markdown (text/markdown); empty when it has no entries. */
   expertiseExport: (owner_kind: OwnerKind, owner_id: string) =>
     request<string>("GET", `/v1/expertise/export?${expertiseQuery(owner_kind, owner_id)}`, undefined, { text: true }),
+
+  /** A project's troubleshooting records, newest first; `q` searches them, `status` narrows. */
+  lessons: async (project: string, q = "", status?: LessonStatus): Promise<Lesson[]> =>
+    (
+      await request<ListLessonsResponse>(
+        "GET",
+        `/v1/projects/${enc(project)}/lessons?q=${enc(q)}${status ? `&status=${status}` : ""}`,
+      )
+    ).lessons,
+  lesson: (id: string) => request<Lesson>("GET", `/v1/lessons/${enc(id)}`),
+  /** The project's records as Markdown. */
+  lessonsExport: (project: string) =>
+    request<string>("GET", `/v1/projects/${enc(project)}/lessons/export`, undefined, { text: true }),
+  /** The problems a run recorded (run notes under issue/) and how each was sorted. */
+  runIssues: (run: string) => request<ListRunIssuesResponse>("GET", `/v1/runs/${enc(run)}/issues`),
 
   questions: (all = false) => request<ListQuestionsResponse>("GET", `/v1/questions${all ? "?all=true" : ""}`),
   answer: (id: string, answer: string) => request<HumanItem>("POST", `/v1/questions/${enc(id)}/answer`, { answer }),

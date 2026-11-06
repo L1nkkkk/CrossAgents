@@ -54,6 +54,7 @@ import {
   type ExpertiseEntry,
   type UsageRecord,
 } from "../lib/expertise";
+import { exportLessons, lessonMatches, type Lesson, type RunIssue } from "../lessons/lessons";
 import { effortOf } from "../lib/models";
 import { applyEvent } from "../session";
 import { capabilitiesOf, contextParts, driverOf, transcript, uid } from "./fixtures";
@@ -116,6 +117,8 @@ export type MockState = {
   codeLost?: Record<string, { branch: string; base: string; landed?: { mode: LandMode; reference: string } }>;
   /** Expertise profiles (docs EXPERTISE.md): entries of every owner, candidates, usages. */
   expertise?: ExpertiseMock;
+  /** Troubleshooting records (docs/tasks/LESSONS.md) and the problems each run recorded. */
+  lessons?: { lessons: Lesson[]; issues: Record<string, RunIssue[]> };
   /** Extensions (`GET /v1/extensions`); absent: none. */
   extensions?: ExtensionInfo[];
   /** What each waiting version changes, by extension name (`GET …/pending/diff`). */
@@ -705,9 +708,27 @@ export class MockBridge implements CrossAgentsBridge {
       // the workspace path as the id, where the hub has a Project.id.
       if (p === "/v1/projects") {
         const ids = new Set((s.expertise?.entries ?? []).filter((e) => e.owner_kind === "project").map((e) => e.owner_id));
+        for (const l of s.lessons?.lessons ?? []) ids.add(l.project_id);
         return json(200, {
           projects: [...ids].map((id) => ({ id, name: id.split("/").pop() || id, remotes: [], paths: [{ node: "local", path: id }] })),
         });
+      }
+      if ((m = p.match(/^\/v1\/projects\/([^/]+)\/lessons(\/export)?$/))) {
+        const project = decodeURIComponent(m[1]);
+        const status = url.searchParams.get("status");
+        const list = (s.lessons?.lessons ?? []).filter(
+          (l) => l.project_id === project && (!status || l.status === status) && lessonMatches(l, url.searchParams.get("q") ?? ""),
+        );
+        return m[2] ? { status: 200, body: exportLessons(list) } : json(200, { lessons: list });
+      }
+      if ((m = p.match(/^\/v1\/lessons\/([^/]+)$/))) {
+        const id = decodeURIComponent(m[1]);
+        const l = (s.lessons?.lessons ?? []).find((x) => x.id === id || x.id.startsWith(id));
+        return l ? json(200, l) : notFound("lesson");
+      }
+      if ((m = p.match(/^\/v1\/runs\/([^/]+)\/issues$/))) {
+        const issues = s.lessons?.issues[m[1]] ?? [];
+        return json(200, { run_id: m[1], issues, unsorted: issues.filter((i) => !i.triage).length });
       }
       if ((m = p.match(/^\/v1\/runs\/([^/]+)$/))) {
         const d = s.runs.find((x) => x.run.id === m![1]);

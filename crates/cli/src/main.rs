@@ -53,6 +53,9 @@ pub enum Command {
     /// Expertise profiles: what good work looks like for this person and this project.
     #[command(subcommand)]
     Expertise(cmd::expertise::ExpertiseCommand),
+    /// Troubleshooting records: problems earlier agents hit in a project and what they did.
+    #[command(subcommand)]
+    Lessons(cmd::lesson::LessonsCommand),
     /// Vendor accounts: login, plan, quota, token use.
     #[command(subcommand)]
     Account(cmd::account::AccountCommand),

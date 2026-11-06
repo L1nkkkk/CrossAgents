@@ -137,6 +137,21 @@ pub struct TriageRecord {
     pub at: DateTime<Utc>,
 }
 
+/// A lesson that may bear on a failure the hub saw (LESSONS §4.5 ②): attached as
+/// `related_lessons` to a failed run check, a `task_fail` and a task whose checks failed.
+/// A match only means *possibly related*: the words of the error were found in the record,
+/// not that its resolution was confirmed to apply here. Read it with `lesson_get` and check
+/// its conditions before going by it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct RelatedLesson {
+    pub id: String,
+    pub title: String,
+    /// The words of the error output found in the record, the strong ones (error codes,
+    /// exception names) first. At least one of them is strong.
+    pub matched: Vec<String>,
+}
+
 /// One sorting step, applied by the store in a single transaction together with marking its
 /// issues (LESSONS §4.3): issues already sorted are left as they are, and a step whose issues
 /// are all sorted already writes nothing, so a retry after a crash does not duplicate.

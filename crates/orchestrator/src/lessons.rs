@@ -3,12 +3,15 @@
 //! of that project searches when it runs into trouble. Reference, never rules: nothing here
 //! goes into an agent's instructions beyond one line saying the records exist.
 
+use std::future::Future;
 use std::path::Path;
+use std::time::Duration;
 
 use chrono::Utc;
 use crossagents_core::{
-    Agent, CoreError, Evidence, ISSUE_PREFIX, IssueRef, Lesson, LessonOutcome, LessonStatus,
-    NoteScope, Project, Run, RunId, Triage, TriageStep,
+    Agent, AgentId, CoreError, EventKind, Evidence, ISSUE_PREFIX, IssueRef, Lesson,
+    LessonOutcome, LessonStatus, NoteScope, Project, RelatedLesson, Run, RunId, Task, Triage,
+    TriageStep,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -29,6 +32,219 @@ const EVIDENCE_PAGE_MAX: usize = 50;
 const SOURCES_SHOWN: usize = 3;
 /// Longest excerpt of a field in a search result, in bytes.
 const EXCERPT_MAX: usize = 300;
+/// Most related lessons attached to a failure, and most words taken from its output.
+pub const RELATED_MAX: usize = 3;
+const STRONG_MAX: usize = 8;
+const WEAK_MAX: usize = 8;
+/// Longest a failure waits for its related lessons; past it, it goes without them.
+const RELATED_TIMEOUT: Duration = Duration::from_secs(2);
+/// What `related_lessons` means, said wherever it is attached (LESSONS §4.5 ②).
+pub const RELATED_NOTE: &str = "related_lessons are possibly related only: words of this error were found in them, which does not confirm their resolution applies here. Read one with lesson_get and check its conditions before going by it.";
+
+/// Words of an `error:` line too common to tell one problem from another.
+const WEAK_STOP: &[&str] = &[
+    "the", "and", "for", "not", "with", "from", "this", "that", "was", "were", "are", "has",
+    "have", "had", "but", "can", "cannot", "could", "error", "errors", "failed", "failure",
+    "fatal", "warning", "found", "into", "when", "while", "file", "line", "column", "exit",
+    "exited", "code", "status", "process", "command", "returned", "note", "help",
+];
+
+fn ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Whether `word` is an error code: `E0277`, `TS2345`, `MSB3073`, `LNK2019`, `0x80070005`,
+/// or an errno name such as `ENOENT`, `EADDRINUSE`.
+fn is_error_code(word: &str) -> bool {
+    let letters = word.chars().take_while(|c| c.is_ascii_uppercase()).count();
+    let rest = &word[letters..];
+    if (1..=5).contains(&letters)
+        && (3..=6).contains(&rest.len())
+        && rest.chars().all(|c| c.is_ascii_digit())
+    {
+        return true;
+    }
+    if let Some(hex) = word.strip_prefix("0x").or_else(|| word.strip_prefix("0X")) {
+        return hex.len() >= 4 && hex.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    ERRNO.contains(&word)
+}
+
+/// Errno names tools print (Node, libc, npm); a list, since `ERROR` or `EXPECTED` look alike.
+const ERRNO: &[&str] = &[
+    "ENOENT", "EACCES", "EPERM", "EEXIST", "EADDRINUSE", "EADDRNOTAVAIL", "ECONNREFUSED",
+    "ECONNRESET", "ECONNABORTED", "ETIMEDOUT", "ENOTFOUND", "EPIPE", "EMFILE", "ENFILE",
+    "ENOSPC", "EBUSY", "ENOTDIR", "EISDIR", "ENOTEMPTY", "EAI_AGAIN", "EINVAL", "EAGAIN",
+    "ELIFECYCLE", "ERESOLVE", "EINTEGRITY", "ENOTSUP", "EROFS", "EXDEV", "ELOOP", "ENAMETOOLONG",
+    "EHOSTUNREACH", "ENETUNREACH", "ECANCELED", "ENOMEM", "ESRCH", "ECHILD",
+];
+
+/// Whether `word` names an exception or error type: `ModuleNotFoundError`,
+/// `NullPointerException`, `IOError` (not the bare word).
+fn is_exception(word: &str) -> bool {
+    ["Error", "Exception"].iter().any(|suffix| {
+        word.len() > suffix.len()
+            && word.ends_with(suffix)
+            && word.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+fn push_unique(terms: &mut Vec<String>, word: &str, max: usize) {
+    if terms.len() < max && !terms.iter().any(|t| t.eq_ignore_ascii_case(word)) {
+        terms.push(word.to_owned());
+    }
+}
+
+/// The words of a failure's output worth looking up (LESSONS §4.5 ②): strong ones, error
+/// codes and exception names, which tell one problem from another; and weak ones, the words
+/// of the lines after `error:`. Exit codes count as strong when the output says so
+/// (`exit code 9009`) and they have at least three digits.
+pub fn error_terms(output: &str) -> (Vec<String>, Vec<String>) {
+    let mut strong: Vec<String> = Vec::new();
+    let mut weak: Vec<String> = Vec::new();
+    for line in output.lines() {
+        let words: Vec<&str> = line.split(|c: char| !ident_char(c)).filter(|w| !w.is_empty()).collect();
+        for (i, word) in words.iter().enumerate() {
+            if is_error_code(word) || is_exception(word) {
+                push_unique(&mut strong, word, STRONG_MAX);
+            } else if word.len() >= 3
+                && word.chars().all(|c| c.is_ascii_digit())
+                && !word.chars().all(|c| c == '0')
+                && i > 0
+                && matches!(
+                    words[i - 1].to_ascii_lowercase().as_str(),
+                    "code" | "status" | "exitcode" | "errno"
+                )
+            {
+                push_unique(&mut strong, word, STRONG_MAX);
+            }
+        }
+        let lower = line.to_ascii_lowercase();
+        let Some(at) = lower.find("error") else {
+            continue;
+        };
+        let Some(colon) = line[at..].find(':') else {
+            continue;
+        };
+        // `error:` or `error[E0277]:`, not a colon far along the line.
+        if colon > 16 {
+            continue;
+        }
+        for word in line[at + colon + 1..].split(|c: char| !ident_char(c) && c != '.' && c != '-') {
+            let word = word.trim_matches(|c: char| c == '.' || c == '-');
+            if word.chars().count() < 3
+                || word.chars().all(|c| c.is_ascii_digit())
+                || WEAK_STOP.contains(&word.to_ascii_lowercase().as_str())
+                || strong.iter().any(|s| s.eq_ignore_ascii_case(word))
+            {
+                continue;
+            }
+            push_unique(&mut weak, word, WEAK_MAX);
+        }
+    }
+    (strong, weak)
+}
+
+/// Whether `needle` stands as a word of its own in `hay` (both lower case).
+fn has_word(hay: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let mut from = 0;
+    while let Some(i) = hay[from..].find(needle) {
+        let start = from + i;
+        let end = start + needle.len();
+        let before = hay[..start].chars().next_back();
+        let after = hay[end..].chars().next();
+        if !before.is_some_and(ident_char) && !after.is_some_and(ident_char) {
+            return true;
+        }
+        from = start + hay[start..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}
+
+/// The lessons that hold at least one strong word of a failure, the most strong words first
+/// (then the most weak ones, then the order given), at most [`RELATED_MAX`]; none when no
+/// lesson holds a strong word. Superseded lessons are left out. How well a lesson ranks in a
+/// full-text search is not used: it says nothing about whether the lesson applies.
+pub fn match_lessons(lessons: &[Lesson], strong: &[String], weak: &[String]) -> Vec<RelatedLesson> {
+    let mut found: Vec<(usize, usize, usize, RelatedLesson)> = Vec::new();
+    for (order, l) in lessons.iter().enumerate() {
+        if l.status == LessonStatus::Superseded || found.iter().any(|f| f.3.id == l.id) {
+            continue;
+        }
+        let hay = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            l.title,
+            l.symptom,
+            l.keywords.join("\n"),
+            l.conditions,
+            l.resolution
+        )
+        .to_lowercase();
+        let strong_hits: Vec<&String> = strong
+            .iter()
+            .filter(|w| has_word(&hay, &w.to_lowercase()))
+            .collect();
+        if strong_hits.is_empty() {
+            continue;
+        }
+        let weak_hits: Vec<&String> = weak
+            .iter()
+            .filter(|w| has_word(&hay, &w.to_lowercase()))
+            .collect();
+        let matched = strong_hits
+            .iter()
+            .chain(weak_hits.iter())
+            .map(|w| (*w).clone())
+            .collect();
+        found.push((
+            strong_hits.len(),
+            weak_hits.len(),
+            order,
+            RelatedLesson {
+                id: l.id.clone(),
+                title: l.title.clone(),
+                matched,
+            },
+        ));
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
+    found.into_iter().take(RELATED_MAX).map(|f| f.3).collect()
+}
+
+/// Waits at most `limit` for a lookup of related lessons. A lookup that fails or is too slow
+/// gives none and a warning: the failure it is for is reported as it would be without it.
+pub async fn bounded_related(
+    lookup: impl Future<Output = Result<Vec<RelatedLesson>, CoreError>>,
+    limit: Duration,
+) -> Vec<RelatedLesson> {
+    match tokio::time::timeout(limit, lookup).await {
+        Ok(Ok(found)) => found,
+        Ok(Err(err)) => {
+            tracing::warn!(error = %err, "cannot look up related lessons; the failure goes without them");
+            Vec::new()
+        }
+        Err(_) => {
+            tracing::warn!(
+                limit_ms = limit.as_millis() as u64,
+                "looking up related lessons took too long; the failure goes without them"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// A paragraph naming related lessons, to add to a failure's text; nothing when none.
+pub fn related_text(related: &[RelatedLesson]) -> Option<String> {
+    if related.is_empty() {
+        return None;
+    }
+    let list = serde_json::to_string(related).unwrap_or_default();
+    Some(format!("related_lessons: {list}\n({RELATED_NOTE})"))
+}
 
 pub(crate) fn outcome_schema() -> Value {
     json!({ "type": "string", "enum": ["resolved", "workaround", "unresolved"] })
@@ -193,7 +409,111 @@ fn lesson_view(l: &Lesson, offset: usize, limit: usize) -> Value {
     view
 }
 
+/// A project's lessons as Markdown, for a person to read or keep (LESSONS L2): one section
+/// per lesson, newest first as given, superseded ones marked. Empty for no lessons.
+pub fn export_markdown(project: &str, lessons: &[Lesson]) -> String {
+    if lessons.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("# Troubleshooting records: {project}\n\n");
+    out.push_str("Reference, not rules: check a record's conditions before going by it.\n");
+    for l in lessons {
+        let status = match l.status {
+            LessonStatus::Active => "active",
+            LessonStatus::Review => "review",
+            LessonStatus::Superseded => "superseded",
+        };
+        let outcome = match l.outcome {
+            LessonOutcome::Resolved => "resolved",
+            LessonOutcome::Workaround => "workaround",
+            LessonOutcome::Unresolved => "unresolved",
+        };
+        out.push_str(&format!("\n## {}\n\n", l.title.trim()));
+        out.push_str(&format!(
+            "- id: `{}`\n- status: {status}\n- outcome: {outcome}\n",
+            l.id
+        ));
+        if let Some(by) = &l.superseded_by {
+            out.push_str(&format!("- superseded by: `{by}`\n"));
+        }
+        if !l.keywords.is_empty() {
+            out.push_str(&format!("- keywords: {}\n", l.keywords.join(", ")));
+        }
+        out.push_str(&format!(
+            "- tried: {} time(s), last {}\n- updated: {}\n",
+            l.evidence.len(),
+            l.evidence
+                .last()
+                .map(|e| e.at.format("%Y-%m-%d").to_string())
+                .unwrap_or_else(|| "never".into()),
+            l.updated_at.format("%Y-%m-%d"),
+        ));
+        for (name, text) in [
+            ("Symptom", &l.symptom),
+            ("Conditions", &l.conditions),
+            ("Resolution", &l.resolution),
+        ] {
+            if !text.trim().is_empty() {
+                out.push_str(&format!("\n### {name}\n\n{}\n", text.trim()));
+            }
+        }
+    }
+    out
+}
+
 impl Orchestrator {
+    /// Lessons of `dir`'s project that may bear on a failure whose output is `output`
+    /// (LESSONS §4.5 ②): see [`match_lessons`]. Empty when the project is unknown, the
+    /// output holds no strong word, or the lookup fails or takes longer than
+    /// [`RELATED_TIMEOUT`] (then with a warning): this never fails or holds up the failure.
+    pub async fn related_lessons(&self, dir: &Path, output: &str) -> Vec<RelatedLesson> {
+        bounded_related(self.find_related(dir, output), RELATED_TIMEOUT).await
+    }
+
+    async fn find_related(&self, dir: &Path, output: &str) -> Result<Vec<RelatedLesson>, CoreError> {
+        let (strong, weak) = error_terms(output);
+        if strong.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(project) = self.known_project(dir).await? else {
+            return Ok(Vec::new());
+        };
+        // Superseded records are left out of the search, and again by `match_lessons`.
+        let found = self
+            .store
+            .search_lessons(&project.id, &strong, false, SEARCH_LIMIT * 2)
+            .await?;
+        Ok(match_lessons(&found, &strong, &weak))
+    }
+
+    /// Puts the lessons related to a failure on the task's report, next to its `failure`
+    /// (replacing earlier ones), and gives the lines to add to the message that reports it:
+    /// empty when there are none. A hint for whoever reads it; nothing is run or reported.
+    pub(crate) async fn attach_related(&self, dir: &Path, task: &mut Task, output: &str) -> String {
+        task.report.related_lessons = self.related_lessons(dir, output).await;
+        related_text(&task.report.related_lessons)
+            .map(|t| format!("\n{t}"))
+            .unwrap_or_default()
+    }
+
+    /// Says a problem was recorded: a run note under `issue/` was written (LESSONS §4.1).
+    pub(crate) async fn issue_recorded(
+        &self,
+        scope: NoteScope,
+        run_id: Option<RunId>,
+        key: &str,
+        author: AgentId,
+    ) {
+        if let (NoteScope::Run, Some(run_id), true) = (scope, run_id, key.starts_with(ISSUE_PREFIX)) {
+            self.publish(EventKind::IssueRecorded {
+                run_id,
+                key: key.to_owned(),
+                author,
+            })
+            .await;
+        }
+    }
+
     /// The project of `dir` if the hub knows it already; nothing is made or bound.
     async fn known_project(&self, dir: &Path) -> Result<Option<Project>, CoreError> {
         let root = main_repo(dir).unwrap_or_else(|| dir.to_path_buf());
@@ -476,7 +796,30 @@ impl Orchestrator {
                 why: checked("why", &a.why, FIELD_MAX)?,
             },
         };
+        let created = matches!(step, TriageStep::Create(_));
         let (records, lesson) = self.store.triage(&issues, step, caller.id).await?;
+        // Records written now, not those of an earlier call this one repeats.
+        let fresh: Vec<_> = records
+            .iter()
+            .filter(|r| r.at >= now && r.by == caller.id)
+            .cloned()
+            .collect();
+        if !fresh.is_empty() {
+            self.publish(EventKind::IssueTriaged {
+                run_id: run.id,
+                records: fresh,
+            })
+            .await;
+            if let Some(lesson) = &lesson {
+                let lesson = lesson.clone();
+                self.publish(if created {
+                    EventKind::LessonCreated { lesson }
+                } else {
+                    EventKind::LessonUpdated { lesson }
+                })
+                .await;
+            }
+        }
         let sorted: Vec<Value> = records
             .iter()
             .map(|r| {
@@ -594,6 +937,10 @@ impl Orchestrator {
         }
         lesson.updated_at = now;
         self.store.update_lesson(&lesson).await?;
+        self.publish(EventKind::LessonUpdated {
+            lesson: lesson.clone(),
+        })
+        .await;
         Ok(json!({ "id": lesson.id, "status": lesson.status, "evidence": lesson.evidence.len() }))
     }
 
@@ -614,7 +961,95 @@ impl Orchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossagents_core::AgentId;
+
+    fn record(id: &str, title: &str, symptom: &str, keywords: &[&str]) -> Lesson {
+        let mut l = lesson_with(&[LessonOutcome::Resolved], 0);
+        l.id = id.into();
+        l.title = title.into();
+        l.symptom = symptom.into();
+        l.keywords = keywords.iter().map(|k| (*k).to_owned()).collect();
+        l
+    }
+
+    #[test]
+    fn the_words_of_an_error_are_split_into_strong_and_weak() {
+        let (strong, weak) = error_terms(
+            "Compiling x\nerror[E0277]: the trait bound `Foo: Serialize` is not satisfied\n  --> src/a.rs:12\n`python` exited with code 9009 on line 120\nModuleNotFoundError: No module named 'yaml'\nENOENT at 0x80070005",
+        );
+        assert_eq!(
+            strong,
+            ["E0277", "9009", "ModuleNotFoundError", "ENOENT", "0x80070005"]
+        );
+        assert!(weak.contains(&"trait".to_owned()) && weak.contains(&"Serialize".to_owned()));
+        assert!(!weak.iter().any(|w| w == "the" || w == "120"));
+        // Line numbers, ports and plain words are not strong.
+        let (strong, _) = error_terms("listening on 8080\nat line 1234\nError: something went wrong");
+        assert!(strong.is_empty(), "{strong:?}");
+    }
+
+    #[test]
+    fn failed_checks_that_name_a_recorded_error_get_its_record() {
+        let lessons = vec![
+            record("a", "python 9009 on Windows", "`python` exited with code 9009", &["WindowsApps"]),
+            record("b", "trait bound", "error[E0277] when deriving", &["E0277", "Serialize"]),
+        ];
+        let output = "error[E0277]: the trait bound `Foo: Serialize` is not satisfied";
+        let (strong, weak) = error_terms(output);
+        let related = match_lessons(&lessons, &strong, &weak);
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0].id, "b");
+        assert_eq!(related[0].title, "trait bound");
+        assert_eq!(related[0].matched[0], "E0277");
+        assert!(related[0].matched.contains(&"Serialize".to_owned()));
+        let text = related_text(&related).unwrap();
+        assert!(text.contains("possibly related") && text.contains(r#""id":"b""#));
+    }
+
+    #[test]
+    fn unrelated_output_gets_no_records() {
+        let lessons = vec![record("a", "python 9009", "exited with code 9009", &[])];
+        // Shared weak words alone are not enough.
+        let (strong, weak) = error_terms("error: python not found\nlistening on 9009");
+        assert!(match_lessons(&lessons, &strong, &weak).is_empty());
+        let (strong, weak) = error_terms("error[E0599]: no method named `python`");
+        assert!(match_lessons(&lessons, &strong, &weak).is_empty());
+        // A code inside a longer word is not a match.
+        let lessons = vec![record("c", "x", "see E02771", &[])];
+        let (strong, weak) = error_terms("error[E0277]: x");
+        assert!(match_lessons(&lessons, &strong, &weak).is_empty());
+        assert!(related_text(&[]).is_none());
+    }
+
+    #[test]
+    fn at_most_three_records_the_closest_first() {
+        let mut lessons: Vec<Lesson> = (0..5)
+            .map(|i| record(&format!("l{i}"), &format!("r{i}"), "ENOENT", &[]))
+            .collect();
+        lessons[4].symptom = "ENOENT and EACCES".into();
+        lessons[1].status = LessonStatus::Superseded;
+        let (strong, weak) = error_terms("ENOENT then EACCES");
+        let related = match_lessons(&lessons, &strong, &weak);
+        assert_eq!(related.len(), RELATED_MAX);
+        let ids: Vec<&str> = related.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["l4", "l0", "l2"]);
+        assert_eq!(related[0].matched, ["ENOENT", "EACCES"]);
+    }
+
+    #[tokio::test]
+    async fn a_lookup_that_fails_or_hangs_gives_no_records() {
+        let failed = bounded_related(
+            async { Err(CoreError::Conflict("index is locked".into())) },
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(failed.is_empty());
+        let slow = bounded_related(
+            std::future::pending::<Result<Vec<RelatedLesson>, CoreError>>(),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(slow.is_empty());
+    }
 
     #[test]
     fn a_pasted_error_becomes_search_terms() {
