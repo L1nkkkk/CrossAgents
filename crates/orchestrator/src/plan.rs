@@ -253,6 +253,7 @@ mod tests {
             reviewer_fresh: true,
             status,
             attempts: 0,
+            runs: Vec::new(),
             escalated: false,
             nudges: 0,
             branch: None,

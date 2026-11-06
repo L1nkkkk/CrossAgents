@@ -658,6 +658,63 @@ pub struct TaskReport {
     pub forced: Option<String>,
 }
 
+/// How one run (attempt) of a task ended. A run ends when the worker's turn does; the task
+/// does not (multica §2.4): its issuer still decides what happens to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum TaskRunOutcome {
+    /// The worker's turn is in it: no end yet.
+    Running,
+    /// The worker reported the task done (`task_complete`).
+    Reported,
+    /// The worker asked a question (`task_ask`); a new run follows its answer.
+    Asked,
+    /// The worker said it cannot finish (`task_fail`).
+    GaveUp,
+    /// The turn ended without reporting anything.
+    NoReport,
+    /// The turn failed on something the platform can fix by trying again: offline, a
+    /// timeout, a directory that could not be prepared, the network (multica §2.5).
+    Infrastructure,
+    /// The turn failed where a retry does not help (auth, quota, model): the task stops
+    /// and says why (multica §2.5).
+    AgentError,
+    /// The turn failed and left its session unfit to carry on (context overflow): retried
+    /// in a new session, in the same directory (multica §2.5).
+    SessionLost,
+    /// The task was cancelled or dropped while this run was going.
+    Cancelled,
+}
+
+/// One run (attempt) of a task, oldest first on [`Task::runs`]: when it started, when it
+/// ended and how. A task may have several (a rework, a retry after a platform fault) and
+/// ends when its issuer says so, not when a run does (multica §2.4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct TaskRun {
+    /// 1-based: the task's first run is 1.
+    pub index: u32,
+    pub started_at: DateTime<Utc>,
+    /// Absent while the run is going (see [`TaskRunOutcome::Running`]).
+    #[serde(default)]
+    pub ended_at: Option<DateTime<Utc>>,
+    pub outcome: TaskRunOutcome,
+    /// The worker it was handed to; a new one when its session was replaced.
+    #[serde(default)]
+    pub agent: Option<AgentId>,
+    /// The message that started the turn, so an end-of-turn event can be told apart from a
+    /// duplicate (and from the turn of another run).
+    #[serde(default)]
+    pub message: Option<crate::ids::MessageId>,
+    /// Why it ended as it did, when that is more than the outcome says.
+    #[serde(default)]
+    pub note: Option<String>,
+    /// The hub retried after this run failed: the run after it is that try.
+    #[serde(default)]
+    pub retried: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Task {
@@ -697,6 +754,11 @@ pub struct Task {
     pub status: TaskStatus,
     /// Attempts by the current worker.
     pub attempts: u32,
+    /// Its runs (attempts), oldest first: one per hand-over and turn, with how each ended.
+    /// A run ending is not the task ending (multica §2.4). Empty in tasks recorded before
+    /// runs were kept.
+    #[serde(default)]
+    pub runs: Vec<TaskRun>,
     /// Whether the task moved to the escalation template.
     #[serde(default)]
     pub escalated: bool,
@@ -797,6 +859,72 @@ mod tests {
         let task: Task = serde_json::from_value(old).unwrap();
         assert!(task.handoffs.is_empty());
         assert!(task.report.rework.is_empty());
+        assert!(
+            task.runs.is_empty(),
+            "a task recorded before runs were kept has none"
+        );
+    }
+
+    #[test]
+    fn a_task_keeps_how_each_of_its_runs_ended() {
+        let now = Utc::now();
+        let task = Task {
+            id: TaskId::new(),
+            run_id: RunId::new(),
+            key: "a".into(),
+            title: "t".into(),
+            spec: TaskSpec::default(),
+            depends_on: Vec::new(),
+            issuer: None,
+            assignee: None,
+            reviewer: None,
+            worker_template: None,
+            reviewer_template: None,
+            worker_fresh: true,
+            worker_restore: false,
+            reviewer_fresh: true,
+            status: TaskStatus::Running,
+            attempts: 1,
+            runs: vec![
+                TaskRun {
+                    index: 1,
+                    started_at: now,
+                    ended_at: Some(now),
+                    outcome: TaskRunOutcome::Infrastructure,
+                    agent: Some(AgentId::new()),
+                    message: None,
+                    note: Some("timed out".into()),
+                    retried: true,
+                },
+                TaskRun {
+                    index: 2,
+                    started_at: now,
+                    ended_at: None,
+                    outcome: TaskRunOutcome::Running,
+                    agent: None,
+                    message: None,
+                    note: None,
+                    retried: false,
+                },
+            ],
+            escalated: false,
+            nudges: 0,
+            branch: None,
+            worktree: None,
+            report: TaskReport::default(),
+            parent: None,
+            progress: None,
+            handoffs: Vec::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        let json = serde_json::to_value(&task).unwrap();
+        assert_eq!(json["runs"][0]["outcome"], "infrastructure");
+        assert_eq!(json["runs"][0]["retried"], true);
+        assert_eq!(
+            serde_json::from_value::<Task>(json).unwrap().runs,
+            task.runs
+        );
     }
 
     #[test]

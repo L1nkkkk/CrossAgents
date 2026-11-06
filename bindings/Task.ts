@@ -4,6 +4,7 @@ import type { Handoff } from "./Handoff";
 import type { RunId } from "./RunId";
 import type { TaskId } from "./TaskId";
 import type { TaskReport } from "./TaskReport";
+import type { TaskRun } from "./TaskRun";
 import type { TaskSpec } from "./TaskSpec";
 import type { TaskStatus } from "./TaskStatus";
 
@@ -46,6 +47,12 @@ reviewer_fresh: boolean, status: TaskStatus,
  * Attempts by the current worker.
  */
 attempts: number, 
+/**
+ * Its runs (attempts), oldest first: one per hand-over and turn, with how each ended.
+ * A run ending is not the task ending (multica §2.4). Empty in tasks recorded before
+ * runs were kept.
+ */
+runs: Array<TaskRun>, 
 /**
  * Whether the task moved to the escalation template.
  */

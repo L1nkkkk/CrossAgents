@@ -201,6 +201,19 @@ export const SCENARIOS: Scenario[] = [
     run.continuation = { owner: run.planner, phase: "exhausted", next_step: "已达到自动唤醒次数上限。请检查任务状态，或向主管发送进一步指示。", attempts: 3, next_at: null, last_attempt_at: new Date().toISOString(), delivery_error: null };
     return { ...scene, script: [], route: `#/runs/${run.id}` };
   } },
+  { key: "task-runs", label: "任务的多轮运行", hint: "任务详情：共 3 次运行，平台故障与会话失效各自动重试一次，agent_error 停下并写明原因", build: () => {
+    const scene = oauthRun("running");
+    const detail = scene.state.runs[0];
+    const task = detail.tasks[0];
+    task.runs = [
+      { index: 1, started_at: ago(40), ended_at: ago(36), outcome: "infrastructure", agent: task.assignee, message: null, note: "request timed out after 600s", retried: true },
+      { index: 2, started_at: ago(35), ended_at: ago(31), outcome: "session_lost", agent: task.assignee, message: null, note: "context length exceeded: 400000 > 200000", retried: true },
+      { index: 3, started_at: ago(30), ended_at: ago(26), outcome: "agent_error", agent: task.assignee, message: null, note: "agent_error: invalid api key", retried: false },
+    ];
+    task.status = "stalled";
+    task.report.failure = "agent_error: invalid api key";
+    return { ...scene, script: [], route: `#/runs/${detail.run.id}/tasks/${task.id}` };
+  } },
   { key: "empty", label: "空 hub", hint: "第一次打开：没有队友、没有 run", build: () => ({ state: emptyHub(), script: [], route: "#/" }) },
   { key: "session-choice", label: "发起时选会话", hint: "首页 Work 的「会话」：新会话或已有会话；占用写明哪个 run，归档可恢复，不能换目录的置灰", build: () => {
     const { ada, rex, mia, sam } = team();

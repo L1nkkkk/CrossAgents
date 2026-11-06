@@ -197,7 +197,7 @@ export function run(init: { title: string; request: string; planner: Agent; work
   };
 }
 
-export function task(r: Run, p: PlannedTask, init: { status: TaskStatus; assignee?: Agent; template?: Agent; minutesAgo: number; summary?: string; failure?: string; diffStat?: string; progress?: string; checks?: Task["report"]["checks"]; interrupted?: boolean; unchecked?: boolean; forced?: string }): Task {
+export function task(r: Run, p: PlannedTask, init: { status: TaskStatus; assignee?: Agent; template?: Agent; minutesAgo: number; summary?: string; failure?: string; diffStat?: string; progress?: string; checks?: Task["report"]["checks"]; interrupted?: boolean; unchecked?: boolean; forced?: string; runs?: Task["runs"] }): Task {
   return {
     id: uid(),
     run_id: r.id,
@@ -215,6 +215,7 @@ export function task(r: Run, p: PlannedTask, init: { status: TaskStatus; assigne
     reviewer_fresh: true,
     status: init.status,
     attempts: 1,
+    runs: init.runs ?? [],
     escalated: false,
     nudges: 0,
     branch: `crossagents/oauth-login/${p.key}`,
