@@ -13,6 +13,7 @@ import { useConnectionStatus, useHubData } from "../hub";
 import { buildTag } from "../lib/build";
 import { useUpdateState } from "../lib/updates";
 import { groupModels, onlyModels, prettyModel, switchModels, vendorLabel } from "../lib/models";
+import { cursorFamilies } from "../lib/reasoning";
 import { MODES, PAPERS, resolve, setTheme, useTheme } from "../lib/theme";
 import { AgentsPage } from "./Agents";
 import { AvatarGallery } from "./AvatarGallery";
@@ -211,6 +212,9 @@ const GROUP_FROM = 12;
 /** Above this many, families with nothing on start folded. */
 const FOLD_FROM = 20;
 
+/** One line of the list: a model, or (Cursor) every variant of one base model. */
+type ModelRows = { key: string; label: string; id: string; models: string[] };
+
 function VendorModels({ plugin, query, onSaved }: { plugin: PluginInfo; query: string; onSaved: () => void }) {
   const [saved, setSaved] = useState<PluginInfo>();
   const [error, setError] = useState<string>();
@@ -220,8 +224,19 @@ function VendorModels({ plugin, query, onSaved }: { plugin: PluginInfo; query: s
   const all = p.all_models;
   const on = new Set(p.models);
   const allOn = !p.shown;
+  // Cursor offers every mode of a model as its own ID; list them as one line per base model,
+  // turned on and off together (the hub still needs the exact variant IDs).
+  const cursor = p.name === "cursor";
+  const rows: ModelRows[] = cursor
+    ? cursorFamilies(all).map((f) => ({ key: f.base, label: prettyModel(f.base), id: f.base, models: f.variants }))
+    : all.map((m) => ({ key: m, label: prettyModel(m), id: m, models: [m] }));
+  const byKey = new Map(rows.map((r) => [r.key, r]));
   const matches = (m: string) => !query || m.toLowerCase().includes(query) || prettyModel(m).toLowerCase().includes(query);
-  const shownModels = all.filter(matches);
+  // A Cursor line matches through its base or any variant; the others through themselves.
+  const matchesRow = (r: ModelRows) => matches(r.key) || r.models.some(matches);
+  const checked = (r: ModelRows) => r.models.every((m) => on.has(m));
+  const shown = rows.filter(matchesRow);
+  const onRows = rows.filter(checked);
 
   /** `undefined` is a list that would leave nothing on, which is refused. */
   async function save(next: string[] | null | undefined) {
@@ -238,35 +253,35 @@ function VendorModels({ plugin, query, onSaved }: { plugin: PluginInfo; query: s
     }
   }
 
-  const toggle = (model: string) => void save(switchModels(all, on, [model], !on.has(model)));
+  const toggle = (r: ModelRows) => void save(switchModels(all, on, r.models, !checked(r)));
 
-  if (query && !shownModels.length) return null;
+  if (query && !shown.length) return null;
 
-  const offAmongShown = shownModels.filter((m) => !on.has(m)).length;
-  const onlyShown = shownModels.length === on.size && shownModels.every((m) => on.has(m));
-  const families = all.length > GROUP_FROM ? groupModels(all) : [];
+  const offAmongShown = shown.filter((r) => !checked(r)).length;
+  const onlyShown = shown.length === onRows.length && shown.every(checked);
+  const families = (rows.length > GROUP_FROM ? groupModels(rows.map((r) => r.key)) : []).map((f) => ({ ...f, rows: f.models.map((k) => byKey.get(k)!) }));
   const grouped = families.length > 1;
-  const row = (m: string) => <ModelRow key={m} model={m} checked={on.has(m)} last={on.has(m) && on.size === 1} isDefault={m === p.models[0]} onToggle={toggle} />;
+  const row = (r: ModelRows) => (
+    <ModelRow key={r.key} label={r.label} model={r.id} checked={checked(r)} last={checked(r) && onRows.length === 1} isDefault={r.models.includes(p.models[0])} onToggle={() => toggle(r)} />
+  );
 
   return (
     <section className="settings-section">
       <div className="settings-head">
         <VendorMark plugin={p.name} size={16} />
         <h2>{vendorLabel(p.name)}</h2>
-        <span className="chip">
-          {on.size} / {all.length}
-        </span>
+        <span className="chip">{cursor ? `${onRows.length} / ${rows.length}` : `${on.size} / ${all.length}`}</span>
         <span className="spacer" />
         {query ? (
           <>
             {offAmongShown > 0 && (
-              <button className="ghost small" onClick={() => void save(switchModels(all, on, shownModels, true))} title="把搜到的模型都打开，其余不动">
-                打开这 {shownModels.length} 个
+              <button className="ghost small" onClick={() => void save(switchModels(all, on, shown.flatMap((r) => r.models), true))} title="把搜到的模型都打开，其余不动">
+                打开这 {shown.length} 个
               </button>
             )}
             {!onlyShown && (
-              <button className="ghost small" onClick={() => void save(onlyModels(all, shownModels))} title="只留搜到的模型，其余全部关闭">
-                只留这 {shownModels.length} 个
+              <button className="ghost small" onClick={() => void save(onlyModels(all, shown.flatMap((r) => r.models)))} title="只留搜到的模型，其余全部关闭">
+                只留这 {shown.length} 个
               </button>
             )}
           </>
@@ -277,8 +292,8 @@ function VendorModels({ plugin, query, onSaved }: { plugin: PluginInfo; query: s
                 全部打开
               </button>
             )}
-            {on.size > 1 && (
-              <button className="ghost small" onClick={() => void save([p.models[0]])} title="只留第一个，再逐个打开想要的">
+            {(cursor ? onRows.length > 1 : on.size > 1) && (
+              <button className="ghost small" onClick={() => void save(cursor ? onlyModels(all, rows[0].models) : [p.models[0]])} title="只留第一个，再逐个打开想要的">
                 只留第一个
               </button>
             )}
@@ -290,11 +305,11 @@ function VendorModels({ plugin, query, onSaved }: { plugin: PluginInfo; query: s
       {grouped ? (
         <div className="setting-card model-families">
           {families.map((f) => {
-            const visible = f.models.filter(matches);
+            const visible = f.rows.filter(matchesRow);
             if (!visible.length) return null;
-            const count = f.models.filter((m) => on.has(m)).length;
-            const full = count === f.models.length;
-            const folded = query ? false : (folds[f.key] ?? (all.length > FOLD_FROM && count === 0));
+            const count = f.rows.filter(checked).length;
+            const full = count === f.rows.length;
+            const folded = query ? false : (folds[f.key] ?? (rows.length > FOLD_FROM && count === 0));
             const flip = () => setFolds((s) => ({ ...s, [f.key]: !folded }));
             return (
               <div key={f.key} className="model-family">
@@ -304,16 +319,16 @@ function VendorModels({ plugin, query, onSaved }: { plugin: PluginInfo; query: s
                     <FamilyMark familyKey={f.key} size={14} />
                     <span className="setting-label">{f.label}</span>
                     <span className={`chip small ${count ? "" : "muted"}`}>
-                      {count} / {f.models.length}
+                      {count} / {f.rows.length}
                     </span>
                   </button>
                   <button
                     role="switch"
                     aria-checked={full ? true : count ? "mixed" : false}
-                    aria-label={`${full ? "关闭" : "打开"} ${f.label} 全部 ${f.models.length} 个模型`}
+                    aria-label={`${full ? "关闭" : "打开"} ${f.label} 全部 ${f.rows.length} 个模型`}
                     className={`toggle ${full ? "on" : count ? "mixed" : ""}`}
                     title={full ? "整组关闭" : "整组打开"}
-                    onClick={() => void save(switchModels(all, on, f.models, !full))}
+                    onClick={() => void save(switchModels(all, on, f.rows.flatMap((r) => r.models), !full))}
                   >
                     <span />
                   </button>
@@ -324,18 +339,18 @@ function VendorModels({ plugin, query, onSaved }: { plugin: PluginInfo; query: s
           })}
         </div>
       ) : (
-        <div className="setting-card model-grid">{shownModels.map(row)}</div>
+        <div className="setting-card model-grid">{shown.map(row)}</div>
       )}
     </section>
   );
 }
 
-function ModelRow({ model, checked, last, isDefault, onToggle }: { model: string; checked: boolean; last: boolean; isDefault: boolean; onToggle: (m: string) => void }) {
+function ModelRow({ label, model, checked, last, isDefault, onToggle }: { label: string; model: string; checked: boolean; last: boolean; isDefault: boolean; onToggle: () => void }) {
   return (
     <div className="setting-line">
       <div className="model-name">
         <div className="setting-label">
-          {prettyModel(model)}
+          {label}
           {isDefault && <span className="chip small">默认</span>}
         </div>
         <div className="setting-hint mono">{model}</div>
@@ -347,7 +362,7 @@ function ModelRow({ model, checked, last, isDefault, onToggle }: { model: string
         className={`toggle ${checked ? "on" : ""}`}
         disabled={last}
         title={last ? "至少留一个" : undefined}
-        onClick={() => onToggle(model)}
+        onClick={onToggle}
       >
         <span />
       </button>
