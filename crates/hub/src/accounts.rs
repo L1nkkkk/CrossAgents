@@ -1782,6 +1782,8 @@ fn judge_for_model(
     )
 }
 
+// The health decision combines independent account and model quota inputs.
+#[allow(clippy::too_many_arguments)]
 fn judge_for_model_with_top(
     windows: &[crossagents_core::RateWindow],
     groups: &[crossagents_core::LimitGroup],

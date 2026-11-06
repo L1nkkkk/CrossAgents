@@ -194,7 +194,7 @@ async fn run_issues(
             updated_at: n.updated_at,
         })
         .collect();
-    issues.sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
+    issues.sort_by_key(|a| a.updated_at);
     let unsorted = issues.iter().filter(|i| i.triage.is_none()).count() as u32;
     Ok(Json(ListRunIssuesResponse {
         run_id,

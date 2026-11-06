@@ -94,14 +94,14 @@ impl AgentActivity {
                 tool_call_id,
                 detail,
             } => {
-                if let Some(turn) = self.by_agent.get_mut(id) {
-                    if let Some(kind) = turn.calls.get(tool_call_id).copied() {
-                        turn.last = event.ts;
-                        turn.kind = kind;
-                        if kind == "edit_files" {
-                            turn.files
-                                .extend(detail.changes.iter().map(|change| change.path.clone()));
-                        }
+                if let Some(turn) = self.by_agent.get_mut(id)
+                    && let Some(kind) = turn.calls.get(tool_call_id).copied()
+                {
+                    turn.last = event.ts;
+                    turn.kind = kind;
+                    if kind == "edit_files" {
+                        turn.files
+                            .extend(detail.changes.iter().map(|change| change.path.clone()));
                     }
                 }
             }
@@ -111,11 +111,11 @@ impl AgentActivity {
             | EventKind::AgentToolCallUpdated {
                 id, tool_call_id, ..
             } => {
-                if let Some(turn) = self.by_agent.get_mut(id) {
-                    if let Some(kind) = turn.calls.get(tool_call_id).copied() {
-                        turn.last = event.ts;
-                        turn.kind = kind;
-                    }
+                if let Some(turn) = self.by_agent.get_mut(id)
+                    && let Some(kind) = turn.calls.get(tool_call_id).copied()
+                {
+                    turn.last = event.ts;
+                    turn.kind = kind;
                 }
             }
             _ => {}

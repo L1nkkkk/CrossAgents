@@ -1187,7 +1187,7 @@ async fn background(State(state): State<Arc<AppState>>) -> ApiResult<Json<Backgr
             }
         })
         .collect();
-    watches.sort_by(|a, b| b.watch.created_at.cmp(&a.watch.created_at));
+    watches.sort_by_key(|a| std::cmp::Reverse(a.watch.created_at));
 
     let mut verifying: Vec<VerifyingTask> = tasks
         .values()
@@ -1202,12 +1202,12 @@ async fn background(State(state): State<Arc<AppState>>) -> ApiResult<Json<Backgr
             key: t.key.clone(),
             title: t.title.clone(),
             assignee: t.assignee,
-            assignee_name: t.assignee.as_ref().map(&name_of),
+            assignee_name: t.assignee.as_ref().map(name_of),
             checks: t.spec.acceptance.len() as u32,
             since: t.updated_at,
         })
         .collect();
-    verifying.sort_by(|a, b| a.since.cmp(&b.since));
+    verifying.sort_by_key(|a| a.since);
 
     Ok(Json(BackgroundResponse {
         reminders,

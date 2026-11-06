@@ -366,6 +366,8 @@ impl Orchestrator {
 
     /// The fault is one the platform can fix: the same session gets the task again, with what
     /// went wrong. The run after this one is the retry.
+    // Retry context is already assembled by the caller and shared with this operation.
+    #[allow(clippy::too_many_arguments)]
     async fn retry_same(
         &self,
         run: &Run,
@@ -417,6 +419,8 @@ impl Orchestrator {
 
     /// The session is unfit to carry on (context overflow): a new one takes the task in the
     /// same directory, and the worktree is kept as it is (multica §2.5).
+    // Retry context is already assembled by the caller and shared with this operation.
+    #[allow(clippy::too_many_arguments)]
     async fn retry_new_session(
         &self,
         run: &Run,

@@ -759,6 +759,10 @@ pub struct TaskReport {
     #[serde(default)]
     pub summary: Option<String>,
     /// Structured result supplied by the worker.
+    #[cfg_attr(
+        feature = "ts",
+        ts(type = "import(\"./serde_json/JsonValue\").JsonValue | null")
+    )]
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",

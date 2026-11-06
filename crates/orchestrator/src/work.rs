@@ -394,18 +394,16 @@ impl Orchestrator {
         // own: the next round of the group it is in belongs to `run_next`. The hub does not
         // judge which one the person's words are (docs/tasks/G1.md §3.6) — it only makes the
         // choice explicit, and `separate` is how the caller states it.
-        if !a.separate {
-            if let Some((run, _)) = self.run_of(caller.id).await? {
-                if run.planner == caller.id && run.status.is_terminal() {
-                    if let Some(work) = run.work_id {
-                        return Err(CoreError::Conflict(format!(
-                            "you are in work group {work}: to carry on there call run_next \
-                             instead; if the person really asked for a separate, independent \
-                             Work, call work_start again with separate: true"
-                        )));
-                    }
-                }
-            }
+        if !a.separate
+            && let Some((run, _)) = self.run_of(caller.id).await?
+            && run.planner == caller.id && run.status.is_terminal()
+            && let Some(work) = run.work_id
+        {
+            return Err(CoreError::Conflict(format!(
+                "you are in work group {work}: to carry on there call run_next \
+                 instead; if the person really asked for a separate, independent \
+                 Work, call work_start again with separate: true"
+            )));
         }
         if !self.workspaces.versioned(&caller.cwd).await {
             return Err(CoreError::Conflict(format!(

@@ -21,7 +21,7 @@ fn conflict(e: impl std::fmt::Display) -> CoreError {
 }
 fn missing(name: &str) -> CoreError {
     CoreError::NotFound {
-        kind: "extension".into(),
+        kind: "extension",
         id: name.into(),
     }
 }
@@ -463,11 +463,9 @@ impl Registry {
         self.scan_one(&mut s, name, true)?;
         let mut rec = s.records[name].clone();
         rec.auto_trust = value;
-        if value {
-            if let Some(p) = &rec.pending {
-                let fp = p.fingerprint.clone();
-                Self::switch(&mut rec, fp);
-            }
+        if value && let Some(p) = &rec.pending {
+            let fp = p.fingerprint.clone();
+            Self::switch(&mut rec, fp);
         }
         let info = self.update(&mut s, name, rec)?;
         let switched = std::mem::take(&mut s.switched);

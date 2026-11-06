@@ -169,11 +169,11 @@ impl Orchestrator {
         }
         if !ready {
             // A directory left on no branch is the hub's own (never the person's); it goes.
-            if dir.exists() {
-                if let Err(err) = self.ws_for(run).remove(&run.repo, &dir, None).await {
-                    tracing::warn!(run = %run.id, error = %err, "cannot remove a half-made integration worktree");
-                    let _ = std::fs::remove_dir_all(&dir);
-                }
+            if dir.exists()
+                && let Err(err) = self.ws_for(run).remove(&run.repo, &dir, None).await
+            {
+                tracing::warn!(run = %run.id, error = %err, "cannot remove a half-made integration worktree");
+                let _ = std::fs::remove_dir_all(&dir);
             }
             if self.ws_for(run).has_branch(&run.repo, &branch).await {
                 self.ws_for(run).delete_branch(&run.repo, &branch).await?;
