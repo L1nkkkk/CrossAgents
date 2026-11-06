@@ -12,12 +12,13 @@ import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, 
 import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
 import { usageScene } from "../views/Usage.mock";
 import { expertiseScene } from "../views/Expertise.mock";
-import { agent, ago, capabilitiesOf, NOTES_REPO, planned, REPO, say, team, think, transcript, turn } from "./fixtures";
+import { agent, ago, capabilitiesOf, NOTES_REPO, planned, REPO, say, team, think, transcript, turn, uid } from "./fixtures";
 import { openFile } from "../FileViewer";
 import { openTool, placeTab } from "../panes";
 import { setBottomHeight, setToolsWidth } from "../lib/widths";
 import { newTerminal } from "../terminal";
 import type { AccountQuota } from "@bindings/AccountQuota";
+import type { HumanItem } from "@bindings/HumanItem";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import { wsKey } from "../workspace";
 import { quota } from "../views/Usage.mock";
@@ -291,6 +292,31 @@ export const SCENARIOS: Scenario[] = [
     };
   } },
   { key: "running", label: "run 进行中", hint: "run 页：中间栏只有对话；右侧栏按任务分组（含交接链）、run 信息、策略、笔记，追溯和参与者收起", build: () => oauthRun("running") },
+  // B3 (docs/tasks/SELF.md): the run page keeps this run's 「告诉你」 notices; the workspace has
+  // another run's too, and that one must not appear below the conversation.
+  { key: "run-notices", label: "run 页只显示本 run 的通知", hint: "工作区里还有另一个 run 的「告诉你」：这个 run 页只列本 run 的那一条", build: () => {
+    const scene = oauthRun("running");
+    const d = scene.state.runs[0];
+    const notice = (from: string, run: string | null, text: string, minutesAgo: number): HumanItem => ({
+      id: uid(), kind: "notice", from, run_id: run, task_id: null, text, detail: null, options: [], default: null,
+      timeout_at: null, status: "open", answer: null, answered_at: null, action: null, created_at: ago(minutesAgo),
+    });
+    const someoneElse = scene.state.agents.find((a) => a.id !== d.run.planner)?.id ?? d.run.planner;
+    scene.state.questions.push(
+      notice(d.run.planner, d.run.id, "这个 run 的「告诉你」：落地前我会把 run 分支上的提交按任务归好，你只要看一眼总 diff。", 3),
+      notice(someoneElse, uid(), "别的 run 的「告诉你」：这条只该出现在首页，不该出现在这个 run 页。", 2),
+    );
+    return scene;
+  } },
+  { key: "capability-no-turns", label: "没有对话的 agent 也报能力", hint: "这个 codex 队友在 mock 里没开过会话：输入框下面照样写明只收图片和文本，PDF 发不了（codex-native）", build: () => {
+    const scene = soloSession();
+    const nova = scene.state.agents[0];
+    // No transcript: the mock's fallback is what the hub answers for a session never opened.
+    const codex = { ...nova, plugin: "codex" as const, model: "gpt-5-codex", status: "idle" as const, topic: null };
+    scene.state.agents = [codex];
+    scene.state.transcripts.clear();
+    return { state: scene.state, script: [], route: `#/s/${codex.name}` };
+  } },
   { key: "run-cost", label: "run 的费用条", hint: "右侧栏「费用」：一根横条按 agent 与模型分段，同一 agent 的模型深浅分开；悬停一段看金额和 token，下面一行一段", build: () => runCostScene() },
   { key: "paused", label: "run 已暂停", hint: "中间只有一行「已暂停」提示，展开看全文；计划、run 信息、策略都在右侧栏", build: () => pausedRun() },
   { key: "review", label: "审查任务", hint: "#c 已报告完成：整个任务的 diff 带行号，点行号写意见，可发给 worker 或打回重做", build: () => reviewRun() },

@@ -61,6 +61,7 @@ import { RunChanges, TaskReview } from "../review";
 import { InlineNeeds } from "../inlineask";
 import { RelayBanner } from "../relay";
 import { useQuestions } from "../questions";
+import { openInRun } from "../notices";
 import { RunTraceView } from "../trace";
 import { RunSwimlane } from "../swimlane";
 import { RunCostBar } from "../costbar";
@@ -144,7 +145,8 @@ export function RunView({
     return <div className="page-inner">{detail.error ? <ErrorBox error={detail.error} /> : <p className="muted">加载中…</p>}</div>;
   }
   const { run, tasks } = detail.data;
-  const asks = (questions.data?.items ?? []).filter((i) => i.status === "open" && (i.run_id === run.id || i.from === run.planner));
+  // This run's open questions and 「告诉你」 notices, and no other run's (docs/tasks/SELF.md B3).
+  const asks = openInRun(questions.data?.items ?? [], run);
   const planner = agentName(agents.data, run.planner);
   const plannerAgent = agents.data?.find((a) => a.id === run.planner);
   const allEnded = tasks.length > 0 && tasks.every((t) => ["merged", "failed", "cancelled"].includes(t.status));

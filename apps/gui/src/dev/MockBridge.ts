@@ -631,7 +631,9 @@ export class MockBridge implements CrossAgentsBridge {
         const a = this.agent(m[1]);
         const t = a && s.transcripts.get(a.id);
         if (!a) return notFound(`agent ${decodeURIComponent(m[1])}`);
-        const base: Transcript = t ?? { agent: a, driver: null, capabilities: null, delivery: { state: a.plugin === "external" ? "held" : "idle", queued: 0 }, turns: [], usage: null, switches: [], last_seq: 0 };
+        // An agent whose conversation the mock never opened still has its driver's capabilities:
+        // the hub reports them from the plugin (DOGFOOD §10 第 5 条).
+        const base: Transcript = t ?? { agent: a, driver: driverOf(a.plugin), capabilities: capabilitiesOf(a.plugin), delivery: { state: a.plugin === "external" ? "held" : "idle", queued: 0 }, turns: [], usage: null, switches: [], last_seq: 0 };
         return json(200, { ...base, agent: a, last_seq: this.seq });
       }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/turns\/([^/]+)\/diff$/))) {
@@ -659,8 +661,9 @@ export class MockBridge implements CrossAgentsBridge {
         const d = s.runs.find((x) => x.run.id === m![1]);
         if (!d) return notFound("run");
         const empty = { agents: [], turns: [], commands: [], spent: { tokens: 0, cost_usd: 0 } };
-        // Without a scripted trace, each task as stored and nothing more.
-        const tasks = d.tasks.map((t) => ({ task_id: t.id, key: t.key, title: t.title, status: t.status, failure: t.report.failure, lane: empty, checks: [], rerouted: [], first_failure: null }));
+        // Without a scripted trace, each task as stored and nothing more (`handoffs` is part of
+        // TaskTrace; leaving it out left the swimlane with nothing to iterate).
+        const tasks = d.tasks.map((t) => ({ task_id: t.id, key: t.key, title: t.title, status: t.status, failure: t.report.failure, lane: empty, checks: [], rerouted: [], handoffs: t.handoffs ?? [], first_failure: null }));
         return json(200, trace ?? { run_id: d.run.id, lead: empty, tasks, spent: { tokens: 0, cost_usd: 0 } });
       }
       if ((m = p.match(/^\/v1\/runs\/([^/]+)\/diff$/))) {
