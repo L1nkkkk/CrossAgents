@@ -134,16 +134,18 @@ const HOOKS_ON: &str = "hooks_on_for_agents_from_before_the_switch";
 
 async fn apply_data_migrations(pool: &SqlitePool) -> Result<(), CoreError> {
     for name in DATA_MIGRATIONS {
+        // Reserve the writer before reading: this migration may update the rows it reads.
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.map_err(storage)?;
         let applied: Option<i64> =
             sqlx::query_scalar("SELECT 1 FROM applied_migrations WHERE name = ?")
                 .bind(name)
-                .fetch_optional(pool)
+                .fetch_optional(&mut *tx)
                 .await
                 .map_err(storage)?;
         if applied.is_some() {
+            tx.rollback().await.map_err(storage)?;
             continue;
         }
-        let mut tx = pool.begin().await.map_err(storage)?;
         match *name {
             HOOKS_ON => hooks_on_for_agents_that_never_chose(&mut tx).await?,
             other => {
@@ -990,7 +992,12 @@ impl Store for SqliteStore {
     }
 
     async fn update_lesson(&self, lesson: &Lesson) -> Result<(), CoreError> {
-        let mut tx = self.pool.begin().await.map_err(storage)?;
+        // Acquire the write lock before reading, avoiding a failed WAL snapshot upgrade.
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
         let stored: Option<String> = sqlx::query_scalar("SELECT id FROM lessons WHERE id = ?")
             .bind(&lesson.id)
             .fetch_optional(&mut *tx)
@@ -1382,7 +1389,11 @@ impl Store for SqliteStore {
         task: TaskId,
         outcome: UsageOutcome,
     ) -> Result<usize, CoreError> {
-        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
         let rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT id, data FROM expertise_usage WHERE task_id = ?1 AND outcome IS NULL",
         )
@@ -2632,6 +2643,37 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[tokio::test]
+    async fn lesson_update_waits_for_another_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(&dir.path().join("store.db"))
+            .await
+            .unwrap();
+        let mut record = lesson("l1", "p", "original", "symptom");
+        let mut tx = store.pool.begin().await.unwrap();
+        insert_lesson(&mut tx, &record, true).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut writer = store.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query("UPDATE lessons SET status = status WHERE id = 'l1'")
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        record.title = "updated".into();
+        let update = store.update_lesson(&record);
+        tokio::pin!(update);
+        // A deferred transaction reads while the writer holds the lock, then fails
+        // immediately when it attempts to upgrade. An immediate one waits here.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), &mut update)
+                .await
+                .is_err()
+        );
+        writer.commit().await.unwrap();
+        update.await.unwrap();
+        assert_eq!(store.get_lesson("l1").await.unwrap().title, "updated");
     }
 
     /// Sorting is one transaction and safe to repeat: a retry writes nothing new, and only
