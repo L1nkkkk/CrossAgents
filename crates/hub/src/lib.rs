@@ -178,7 +178,11 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         shims: shims.clone(),
         orchestrator: Arc::new(OnceLock::new()),
     });
-    let runtime = Arc::new(Runtime::new(bus.clone(), plugins).with_setup(setup.clone()));
+    let runtime = Arc::new(
+        Runtime::new(bus.clone(), plugins)
+            .with_setup(setup.clone())
+            .with_home(paths.home.clone()),
+    );
     runtime.watch_moves();
     runtime.watch_replies();
     // Each CLI is asked its version in the background, in parallel: `GET /v1/plugins`

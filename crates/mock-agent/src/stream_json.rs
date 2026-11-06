@@ -10,6 +10,8 @@
 //! - `[sleep MS]`  keep the turn running for MS milliseconds
 //! - `[pid]`       say this process's id
 //! - `[cwd]`       say the process's working directory
+//! - `[compact]`   print the `compact_boundary` notice, as the CLI does when it compacts its
+//!   own context
 //!
 //! `--compact-ms MS` makes a `/compact` turn take MS milliseconds, as summarising a long
 //! history does.
@@ -257,6 +259,16 @@ impl Mock {
                 () = self.interrupt.notified() => interrupted = true,
                 () = tokio::time::sleep(Duration::from_millis(ms)) => {}
             }
+        }
+        if text.contains("[compact]") {
+            // Claude Code compacting the context by itself: the notice it prints, after
+            // whatever the turn said before it.
+            self.send(json!({
+                "type": "system",
+                "subtype": "compact_boundary",
+                "compact_metadata": { "trigger": "auto", "pre_tokens": 167219, "post_tokens": 15092 },
+            }))
+            .await;
         }
         if !interrupted {
             self.take_steers(&mut text).await;
