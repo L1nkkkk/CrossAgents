@@ -59,7 +59,7 @@ fn unusable_on_platform(
             _ => PermissionPolicy::Bypass,
         });
     if windows && agent.plugin == "cursor" && permission != PermissionPolicy::Bypass {
-        Some("Cursor cannot use this permission on Windows: set this agent's permission to ???? (bypass), or set the run's approvals to off (全托管).".into())
+        Some("Cursor cannot use this permission on Windows: set this agent's permission to 自动执行 (bypass), or set the run's approvals to off (全托管).".into())
     } else {
         None
     }
@@ -282,7 +282,7 @@ mod tests {
         };
         let mut policy = RunPolicy::default();
         let reason = unusable_on_platform(&agent, Some(&policy), true).unwrap();
-        assert!(reason.contains("???? (bypass)") && reason.contains("off"));
+        assert!(reason.contains("自动执行 (bypass)") && reason.contains("off"));
         assert!(!unguarded(&agent, Some(&policy)));
         assert!(guards_with_run(&agent, true));
         assert!(!guards_with_run(&agent, false));

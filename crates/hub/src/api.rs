@@ -845,7 +845,7 @@ async fn agent_settings(
             && permission == Some(crossagents_core::PermissionPolicy::Guard)
         {
             return Err(AppError::bad_request(
-                "Cursor cannot ask before each action on Windows; set this agent's permission to ???? (bypass)",
+                "Cursor cannot ask before each action on Windows; set this agent's permission to 自动执行 (bypass)",
             ));
         }
         match permission {
