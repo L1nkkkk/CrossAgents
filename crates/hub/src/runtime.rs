@@ -407,6 +407,7 @@ enum Control {
     /// The session's context was compacted (`Runtime::compact`): stream rules may repeat.
     Compacted,
     Stopped,
+    Detached,
 }
 
 /// A session's event and control channels.
@@ -721,7 +722,7 @@ impl Runtime {
         let lives: Vec<(AgentId, Arc<Live>)> = self.live.lock().await.drain().collect();
         for (id, live) in lives {
             if live.session.outlives_hub() {
-                let _ = live.control.send(Control::Stopped);
+                let _ = live.control.send(Control::Detached);
                 continue;
             }
             self.withdraw_waiting(id, &live).await;
@@ -2449,11 +2450,16 @@ async fn forward_events(
     let mut out = Coalescer::default();
     let mut tick = tokio::time::interval(FLUSH_INTERVAL);
     let mut events_open = true;
+    let mut running = None;
     loop {
         tokio::select! {
             event = events.recv(), if events_open => match event {
                 Some(event) => {
+                    let reason = if matches!(&event.kind, SessionEventKind::Exited { cause: Some(crossagents_core::ExitCause::Killed), .. }) { StopReason::Cancelled } else { StopReason::Error };
                     if handle_session_event(&bus, id, event, &mut out, &live, generation, &mut rules).await {
+                        if let Some(message_id) = running.take() {
+                            publish(&bus, EventKind::AgentTurnCompleted { id, message_id, stop_reason: reason }).await;
+                        }
                         return;
                     }
                 }
@@ -2462,13 +2468,18 @@ async fn forward_events(
             ctl = control.recv() => {
                 // Everything the session emitted before this point is already queued.
                 while let Ok(event) = events.try_recv() {
+                    let reason = if matches!(&event.kind, SessionEventKind::Exited { cause: Some(crossagents_core::ExitCause::Killed), .. }) { StopReason::Cancelled } else { StopReason::Error };
                     if handle_session_event(&bus, id, event, &mut out, &live, generation, &mut rules).await {
+                        if let Some(message_id) = running.take() {
+                            publish(&bus, EventKind::AgentTurnCompleted { id, message_id, stop_reason: reason }).await;
+                        }
                         return;
                     }
                 }
                 out.flush(&bus, id).await;
                 match ctl {
                     Some(Control::TurnStarted(message_id)) => {
+                        running = Some(message_id);
                         rules.turn_started();
                         set_status(&bus, id, AgentStatus::Running).await;
                         publish(&bus, EventKind::AgentTurnStarted { id, message_id }).await;
@@ -2476,6 +2487,9 @@ async fn forward_events(
                     }
                     Some(Control::Compacted) => rules.compacted(),
                     Some(Control::TurnFinished(message_id, result, diff)) => {
+                        if running == Some(message_id) {
+                            running = None;
+                        }
                         let stop_reason = match result {
                             Ok(reason) => reason,
                             Err(message) => {
@@ -2518,7 +2532,13 @@ async fn forward_events(
                         }
                         announce_inbox(&bus, id, &live, generation).await;
                     }
-                    Some(Control::Stopped) | None => return,
+                    Some(Control::Stopped) | None => {
+                        if let Some(message_id) = running.take() {
+                            publish(&bus, EventKind::AgentTurnCompleted { id, message_id, stop_reason: StopReason::Cancelled }).await;
+                        }
+                        return;
+                    }
+                    Some(Control::Detached) => return,
                 }
             },
             _ = tick.tick() => out.flush(&bus, id).await,
