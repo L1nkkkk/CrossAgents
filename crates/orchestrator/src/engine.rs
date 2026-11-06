@@ -1411,6 +1411,9 @@ impl Orchestrator {
             };
             self.store.insert_task(&task).await?;
         }
+        // `spec.next` says which step follows which (multica §2.12): the step it names waits
+        // for the task that names it, so the plan writes the workflow once.
+        self.link_next(run).await?;
         self.set_run_status(run, RunStatus::Running, None).await?;
         let mut text = format!(
             "The plan of run {} was approved: {} task(s) start as their dependencies allow.

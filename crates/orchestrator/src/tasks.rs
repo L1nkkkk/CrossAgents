@@ -190,6 +190,9 @@ impl Orchestrator {
         value["run_branch"] = json!(run.branch);
         value["reviewer"] = json!(task.reviewer);
         value["runs"] = json!(task.runs);
+        // Where the workflow goes next and back, and the words it would be started with
+        // (docs/research/multica.md §2.12).
+        value["handoff"] = self.handoff_preview(&run, &task).await?;
         Ok(value)
     }
 
@@ -310,6 +313,8 @@ impl Orchestrator {
             .await;
             created.push(task.id);
         }
+        // A new task's `spec.next` says which step follows which (multica §2.12).
+        self.link_next(&run).await?;
         let not_started = self.schedule_reporting(&mut run).await?;
         // As scheduling left them: a task that started has its worker and is running. The
         // state before it read as "assignee ignored", and the lead assigned it a second time.
@@ -1291,6 +1296,25 @@ impl Orchestrator {
             .await;
         task.report.review = Some(notes.clone());
         self.transition(&mut task, TaskStatus::Passed).await?;
+        // A review that says changes are needed sends the task back where its spec says
+        // (docs/research/multica.md §2.12); with none, the issuer decides, as before.
+        if !approve
+            && let Some(name) = self
+                .review_sent_back(&run, &mut task, &notes, caller)
+                .await?
+        {
+            self.relay(
+                task.issuer_or(run.planner),
+                caller.id,
+                format!(
+                    "Review of {}: changes needed; it went back to {name}\n{}",
+                    brief::task_ref(&task),
+                    notes.trim()
+                ),
+                None,
+            );
+            return Ok(());
+        }
         self.relay(
             task.issuer_or(run.planner),
             caller.id,
@@ -1484,6 +1508,9 @@ impl Orchestrator {
         // Before the merge is announced, so whoever reads the run on that event sees it.
         self.sync_resolved(&mut run, &task).await?;
         self.transition(&mut task, TaskStatus::Merged).await?;
+        // Where the workflow goes next (multica §2.12): the step `spec.next` names is
+        // released, or opened for the teammate it names, before the schedule pass starts it.
+        let next = self.after_accept(&run, &task).await?;
         self.schedule(&mut run).await?;
         let verified_word = if unchecked.is_empty() {
             json!("verified")
@@ -1515,6 +1542,7 @@ impl Orchestrator {
             "as": verified_word,
             "merged_sha": merged_sha,
             "unverified": unchecked,
+            "next_step": next.as_ref().map(crate::handoff::NextStep::json),
         }))
     }
 
@@ -1562,6 +1590,15 @@ impl Orchestrator {
         task.report.failure = None;
         task.report.rework.push(a.notes.trim().to_owned());
         self.transition(&mut task, TaskStatus::Running).await?;
+        // Where it goes back to (multica §2.12): `spec.on_reject` names a step or a teammate
+        // whose fresh session takes it over; unset, or naming its own worker, it goes back to
+        // its worker here, exactly as before.
+        if let Some(name) = self
+            .send_back(&run, &mut task, a.notes.trim(), "sent back for rework")
+            .await?
+        {
+            return Ok(json!({ "task": task_json(&task), "sent_back_to": name }));
+        }
         // The rework is the worker's next run (multica §2.4).
         let envelope = self.relay_envelope(
             caller.id,

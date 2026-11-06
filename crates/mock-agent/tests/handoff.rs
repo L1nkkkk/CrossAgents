@@ -30,6 +30,11 @@ async fn setup(repo: &Path) -> TestHub {
 /// Starts a run of one task `a` with `spec`, worked by rex; returns the run.
 async fn start(t: &TestHub, spec: Value) -> Value {
     let plan = json!([{ "key": "a", "title": "task a", "spec": spec }]);
+    start_plan(t, plan).await
+}
+
+/// Starts a run of `tasks`, worked by rex; returns the run.
+async fn start_plan(t: &TestHub, plan: Value) -> Value {
     let request = format!(
         "Build it. {}",
         call("plan_submit", json!({ "tasks": plan }))
@@ -46,7 +51,28 @@ async fn start(t: &TestHub, spec: Value) -> Value {
 }
 
 fn task_is(want: TaskStatus) -> impl Fn(&Event) -> bool {
-    move |e| matches!(&e.kind, EventKind::TaskStatusChanged { key, to, .. } if key == "a" && *to == want)
+    reached("a", want)
+}
+
+/// `task` reached `want`.
+fn reached(task: &'static str, want: TaskStatus) -> impl Fn(&Event) -> bool {
+    move |e| matches!(&e.kind, EventKind::TaskStatusChanged { key, to, .. } if key == task && *to == want)
+}
+
+/// A worker goal: do `directives`, then report done with `summary`.
+fn goal(directives: &str, summary: &str) -> String {
+    format!(
+        "{directives} {}",
+        call(
+            "task_complete",
+            json!({ "task_id": "{task_id}", "summary": summary })
+        )
+    )
+}
+
+/// Passes when `file` is tracked and holds `word`.
+fn has(file: &str, word: &str) -> String {
+    format!("git grep -q {word} -- {file}")
 }
 
 async fn card(w: &mut Watcher, kind: HandoffKind) -> Handoff {
@@ -548,4 +574,233 @@ async fn a_cloned_worker_does_not_carry_the_templates_recruit_marks() {
         json!(boss.id),
         "{template}"
     );
+}
+
+// -------------------------------------------------------------------------------------
+// Workflow handoffs (docs/research/multica.md §2.12): `spec.next` and `spec.on_reject`.
+
+/// The task with `key` in the run's detail.
+async fn task_by_key(t: &TestHub, run: &Value, key: &str) -> Value {
+    let id = run["id"].as_str().unwrap();
+    let detail: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
+    detail["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["key"] == key)
+        .unwrap_or_else(|| panic!("no task {key} in {detail}"))
+        .clone()
+}
+
+/// A plan of two tasks: `a` reports done and accepts itself, `next` says where it goes; `b`
+/// waits for it — its `depends_on` is left out on purpose, since `next` is the plan.
+fn two_steps(next: &str) -> Value {
+    json!([
+        {
+            "key": "a",
+            "title": "task a",
+            "spec": {
+                "goal": goal(
+                    "[write a.txt=alpha]",
+                    &format!("wrote a {}", call("task_accept", json!({ "task": "a" })))
+                ),
+                "acceptance": [has("a.txt", "alpha")],
+                "scope": { "allow": ["a.txt"] },
+                "next": next,
+            },
+        },
+        {
+            "key": "b",
+            "title": "task b",
+            "spec": { "goal": goal("[write b.txt=beta]", "wrote b"), "scope": { "allow": ["b.txt"] } },
+        },
+    ])
+}
+
+#[tokio::test]
+async fn next_releases_the_step_it_names_once_the_task_is_accepted() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    let run = start_plan(&t, two_steps("b")).await;
+
+    // `b` waits for `a` although the plan gave it no depends_on: `next` is the edge.
+    w.until(
+        "a handed out",
+        |e| matches!(&e.kind, EventKind::TaskHandedOff { handoff, .. } if handoff.task_key == "a"),
+    )
+    .await;
+    w.until("a reported", reached("a", TaskStatus::Passed))
+        .await;
+    let b_before = task_by_key(&t, &run, "b").await;
+    assert_eq!(b_before["status"], "pending", "{b_before}");
+    assert_eq!(b_before["depends_on"], json!(["a"]), "{b_before}");
+
+    w.until("a merged", reached("a", TaskStatus::Merged)).await;
+    let merged = w.seen.len() - 1;
+    let to_b = w
+        .until("b handed out", |e| {
+            matches!(&e.kind, EventKind::TaskHandedOff { handoff, .. } if handoff.task_key == "b")
+        })
+        .await;
+    let at = w.seen.iter().position(|e| e.seq == to_b.seq).unwrap();
+    assert!(merged < at, "b started before a was merged");
+
+    let b = task_by_key(&t, &run, "b").await;
+    assert_eq!(b["status"], "running", "{b}");
+    // The lead is told what accepting released.
+    w.until("the accept's answer", |e| {
+        matches!(&e.kind, EventKind::AgentOutput { text, .. }
+            if text.contains("\"next_step\"") && text.contains("#b is released"))
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn next_naming_a_teammate_opens_the_step_for_them() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    let run = start_plan(&t, two_steps("ada")).await;
+    w.until("a reported", reached("a", TaskStatus::Passed))
+        .await;
+    w.until("a merged", reached("a", TaskStatus::Merged)).await;
+
+    // The step was not in the plan: the hub opened it and a new session of ada takes it.
+    let event = w
+        .until("the opened step handed out", |e| {
+            matches!(&e.kind, EventKind::TaskHandedOff { handoff, .. } if handoff.task_key == "a-next")
+        })
+        .await;
+    let EventKind::TaskHandedOff { handoff: card, .. } = event.kind else {
+        unreachable!()
+    };
+    assert_eq!(card.kind, HandoffKind::Assign);
+    assert_eq!(card.template.as_deref(), Some("ada"));
+    assert!(card.to_name.starts_with("w-"), "{card:?}");
+
+    let (_, text) = first_input(&mut w, card.to).await;
+    assert!(text.contains("Task #a-next"), "{text}");
+    assert!(text.contains("the step before this one, merged"), "{text}");
+
+    let step = task_by_key(&t, &run, "a-next").await;
+    assert_eq!(step["depends_on"], json!(["a"]), "{step}");
+    assert_eq!(step["spec"]["next"], Value::Null, "{step}");
+    assert_eq!(
+        step["spec"]["goal"],
+        task_by_key(&t, &run, "a").await["spec"]["goal"],
+        "the step takes over this task's contract"
+    );
+    // The lead hears of a step it did not plan.
+    w.find("the lead's notice", |e| {
+        matches!(&e.kind, EventKind::AgentInput { text, .. }
+            if text.contains("#a was accepted") && text.contains("#a-next is a new step for ada"))
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn on_reject_sends_the_work_back_to_the_teammate_it_names() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    let run = start(
+        &t,
+        json!({
+            "goal": goal("[write a.txt=alpha]", "wrote a"),
+            "acceptance": [has("a.txt", "alpha")],
+            "on_reject": "ada",
+        }),
+    )
+    .await;
+    let first = card(&mut w, HandoffKind::Assign).await;
+    w.until("reported", task_is(TaskStatus::Passed)).await;
+
+    let lead = run["planner"].as_str().unwrap();
+    t.send(
+        lead,
+        &call(
+            "task_rework",
+            json!({ "task": "a", "notes": "the API is wrong; keep the old one" }),
+        ),
+    )
+    .await;
+    let back = card(&mut w, HandoffKind::Reassign).await;
+    assert_eq!(back.from, Some(first.to), "the worker before gives it back");
+    assert_eq!(back.template.as_deref(), Some("ada"));
+    assert_ne!(back.to, first.to);
+    let reason = back.reason.expect("a send-back says why");
+    assert!(reason.contains("keep the old one"), "{reason}");
+    assert!(
+        back.decisions
+            .contains(&"the API is wrong; keep the old one".to_owned()),
+        "{:?}",
+        back.decisions
+    );
+    let (_, text) = first_input(&mut w, back.to).await;
+    assert!(text.contains("keep the old one"), "{text}");
+    assert!(text.contains(&first.to_name), "{text}");
+}
+
+#[tokio::test]
+async fn the_lead_previews_where_the_work_goes() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    let mut plan = two_steps("b");
+    plan[0]["spec"]["on_reject"] = json!("ada");
+    let run = start_plan(&t, plan).await;
+    let lead = run["planner"].as_str().unwrap().to_owned();
+
+    t.send(
+        lead.as_str(),
+        &call("handoff_preview", json!({ "task": "a" })),
+    )
+    .await;
+    let seen = w
+        .until("the preview", |e| {
+            matches!(&e.kind, EventKind::AgentOutput { text, .. } if text.contains("called handoff_preview"))
+        })
+        .await;
+    let EventKind::AgentOutput { text, .. } = seen.kind else {
+        unreachable!()
+    };
+    let preview = json_in(&text, "called handoff_preview: ");
+    assert_eq!(preview["next"]["goes_to"], "#b", "{preview}");
+    assert_eq!(preview["next"]["when"], "when this task is accepted");
+    let brief = preview["next"]["brief"].as_str().unwrap();
+    assert!(brief.contains("Task #b"), "{brief}");
+    assert!(brief.contains("b.txt"), "{brief}");
+    assert_eq!(preview["on_reject"]["goes_to"], "ada", "{preview}");
+    assert!(
+        preview["on_reject"]["who"]
+            .as_str()
+            .unwrap()
+            .contains("ada"),
+        "{preview}"
+    );
+
+    // The same section comes back from task_get.
+    t.send(lead.as_str(), &call("task_get", json!({ "task": "a" })))
+        .await;
+    let seen = w
+        .until("task_get", |e| {
+            matches!(&e.kind, EventKind::AgentOutput { text, .. } if text.contains("called task_get"))
+        })
+        .await;
+    let EventKind::AgentOutput { text, .. } = seen.kind else {
+        unreachable!()
+    };
+    let detail = json_in(&text, "called task_get: ");
+    assert_eq!(detail["handoff"]["next"]["goes_to"], "#b", "{detail}");
+}
+
+/// The first JSON value after `marker` in an agent's output.
+fn json_in(text: &str, marker: &str) -> Value {
+    let rest = text.split_once(marker).expect("the tool's answer").1;
+    serde_json::Deserializer::from_str(rest)
+        .into_iter()
+        .next()
+        .unwrap()
+        .unwrap()
 }
