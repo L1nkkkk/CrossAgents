@@ -208,14 +208,22 @@ pub async fn apply(
     if now != fingerprint {
         let latest = current_tree(dir).await?;
         let files = changed_between(dir, &current, &latest).await?;
-        return Ok(Outcome::Conflict {
-            detail: format!(
-                "{} changed while the result was being prepared; nothing was written. Apply \
-                 again when the directory stands still.",
+        let detail = if files.is_empty() {
+            // The content a tree sees did not move; the index or the branch did.
+            format!(
+                "{} changed (its staging area or branch moved) while the result was being \
+                 prepared; nothing was written. Apply again when the directory stands still.",
                 dir.display()
-            ),
-            files,
-        });
+            )
+        } else {
+            format!(
+                "{} changed while the result was being prepared; nothing was written. Changed \
+                 since: {}",
+                dir.display(),
+                files.join(", ")
+            )
+        };
+        return Ok(Outcome::Conflict { detail, files });
     }
     let files: Vec<String> = ops.iter().map(|op| op.path.clone()).collect();
     let pending = Pending {
