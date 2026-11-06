@@ -114,11 +114,19 @@ pub fn store(
         .map(|(name, mime, bytes)| {
             let id = format!("{:x}", Sha256::digest(&bytes));
             let ext = crossagents_core::attachment::ext_for(&mime, &name);
-            let path = dir.join(format!("{id}.{ext}"));
+            let file_name = format!("{id}.{ext}");
+            // The name is a hash and an alphanumeric extension, so it cannot climb out; the
+            // check is kept anyway, before anything is written (docs/tasks/SELF.md B6).
+            crate::paths::precheck(&dir, &file_name)
+                .map_err(|_| Refused(format!("cannot store {name}: bad file name")))?;
+            let path = dir.join(&file_name);
             if !path.exists() {
                 std::fs::write(&path, &bytes)
                     .map_err(|e| Refused(format!("cannot store {name}: {e}")))?;
             }
+            // A file already there may be a link someone planted that leads out.
+            crate::paths::confine(&dir, &file_name, crate::paths::PathSource::Agent)
+                .map_err(|_| Refused(format!("cannot store {name}: outside the store")))?;
             Ok(Attachment {
                 id,
                 name,
@@ -149,7 +157,11 @@ pub fn read(home: &Path, agent: AgentId, id: &str) -> Option<AttachmentContent> 
     if !crossagents_core::attachment::is_within(&dir, &path) {
         return None;
     }
-    let bytes = std::fs::read(&path).ok()?;
+    // The same rule as every path the hub reads for an agent: inside after `..`, links and
+    // junctions are resolved, never another drive or share.
+    let file_name = path.file_name()?.to_str()?;
+    let confined = crate::paths::confine(&dir, file_name, crate::paths::PathSource::Agent).ok()?;
+    let bytes = std::fs::read(&confined.abs).ok()?;
     Some(AttachmentContent {
         id,
         mime: sniff(&bytes).to_owned(),
@@ -313,6 +325,55 @@ mod tests {
         assert_eq!(back.id, id);
         assert_eq!(back.mime, "image/jpeg");
         assert_eq!(STANDARD.decode(back.data).unwrap(), JPEG);
+    }
+
+    /// An id is 64 hex digits and nothing else: no `..`, separator, drive or share gets into
+    /// the path read.
+    #[test]
+    fn read_refuses_ids_that_name_a_path() {
+        const PNG: &[u8] = &[0x89, b'P', b'N', b'G'];
+        let home = tempfile::tempdir().unwrap();
+        let agent = AgentId::new();
+        let stored = store(home.path(), agent, vec![upload("a.png", "image/png", PNG)]).unwrap();
+        let id = &stored[0].id;
+        for bad in [
+            format!("../{}", &id[3..]),
+            format!("..\\{}", &id[3..]),
+            format!("C:\\{}", &id[3..]),
+            format!("\\\\s\\{}", &id[4..]),
+            format!("//s/{}", &id[4..]),
+            format!("{}.png", &id[4..]),
+            "../../../../../../../../../../../../../../../../../../../../../token".to_owned(),
+        ] {
+            assert!(read(home.path(), agent, &bad).is_none(), "{bad}");
+        }
+        assert!(read(home.path(), agent, id).is_some());
+        assert!(read(home.path(), agent, &id.to_ascii_uppercase()).is_some());
+    }
+
+    /// A stored file that is a link leading out of the store is neither read nor reused.
+    #[test]
+    fn a_link_out_of_the_store_is_refused() {
+        const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 1];
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.png");
+        std::fs::write(&secret, PNG).unwrap();
+        let agent = AgentId::new();
+        let dir = dir(home.path(), agent);
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = format!("{:x}", Sha256::digest(PNG));
+        let link = dir.join(format!("{id}.png"));
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&secret, &link).is_ok();
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&secret, &link).is_ok();
+        if !made {
+            eprintln!("skipped: cannot create a symlink here");
+            return;
+        }
+        assert!(read(home.path(), agent, &id).is_none());
+        assert!(store(home.path(), agent, vec![upload("a.png", "image/png", PNG)]).is_err());
     }
 
     #[test]
