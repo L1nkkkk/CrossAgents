@@ -16,13 +16,13 @@ use crossagents_core::{
     PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec, StopReason, TurnOutcome,
 };
 use serde_json::{Map, json};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use crate::launch::{LaunchSpec, Launched, ProcessHandle};
 use crate::locate::Cli;
-use crate::process::{hide_console, resolve_program};
+use crate::process::resolve_program;
 use wire::{ChatArgs, Line, Turn};
 
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
@@ -105,22 +105,73 @@ impl Driver for CursorNativeDriver {
             .current_dir(&spec.agent.cwd)
             .envs(spec.env.iter().cloned())
             .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
-        hide_console(&mut create);
-        let output = tokio::time::timeout(PROCESS_TIMEOUT, create.output())
-            .await
-            .map_err(|_| CoreError::Agent("Cursor create-chat timed out".into()))?
+        // spawn_tree also hides the console window on Windows.
+        let (mut child, mut tree) = crossagents_core::process::spawn_tree(&mut create)
             .map_err(|e| CoreError::Agent(format!("Cursor create-chat failed: {e}")))?;
-        if !output.status.success() {
-            return Err(CoreError::Agent(format!(
-                "Cursor create-chat {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
-        let id = String::from_utf8(output.stdout).map_err(|e| {
-            CoreError::Agent(format!("Cursor create-chat returned invalid UTF-8: {e}"))
-        })?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let stderr = tokio::spawn(async move {
+            let mut text = Vec::new();
+            if let Some(mut stderr) = stderr {
+                let _ = stderr.read_to_end(&mut text).await;
+            }
+            String::from_utf8_lossy(&text).trim().to_owned()
+        });
+        // The Cursor CLI prints the chat id but does not exit while its stdout is a pipe (it
+        // only exits promptly on a TTY), so take the first non-empty line as the id and then
+        // end the whole cmd/powershell/node tree instead of waiting for it to exit.
+        let created = tokio::time::timeout(PROCESS_TIMEOUT, async {
+            let mut first = None;
+            if let Some(stdout) = stdout {
+                let mut lines = BufReader::new(stdout).lines();
+                loop {
+                    match lines.next_line().await {
+                        Ok(Some(line)) if line.trim().is_empty() => continue,
+                        Ok(Some(line)) => {
+                            first = Some(line);
+                            break;
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            return Err(CoreError::Agent(format!(
+                                "Cursor create-chat returned unreadable output: {e}"
+                            )));
+                        }
+                    }
+                }
+            }
+            if let Some(line) = first {
+                // A CLI that printed an error and already exited still reports failure.
+                if let Ok(Some(status)) = child.try_wait()
+                    && !status.success()
+                {
+                    let stderr = stderr.await.unwrap_or_default();
+                    return Err(CoreError::Agent(format!(
+                        "Cursor create-chat {status}: {stderr}"
+                    )));
+                }
+                return Ok(line);
+            }
+            let status = child
+                .wait()
+                .await
+                .map_err(|e| CoreError::Agent(format!("Cursor create-chat failed: {e}")))?;
+            if !status.success() {
+                let stderr = stderr.await.unwrap_or_default();
+                return Err(CoreError::Agent(format!(
+                    "Cursor create-chat {status}: {stderr}"
+                )));
+            }
+            Ok(String::new())
+        })
+        .await;
+        tree.kill();
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+        let id = created.map_err(|_| CoreError::Agent("Cursor create-chat timed out".into()))??;
         let id = id.trim();
         if id.is_empty() || id.split_whitespace().count() != 1 {
             return Err(CoreError::Agent(
@@ -576,6 +627,67 @@ printf '%s\n' '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text
                 Err(CoreError::Agent(_))
             ));
         }
+    }
+
+    fn alive(pid: &str) -> bool {
+        if cfg!(windows) {
+            let out = std::process::Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
+        } else {
+            std::process::Command::new("kill")
+                .args(["-0", pid])
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        }
+    }
+
+    // The real CLI prints the id but keeps running while stdout is a pipe.
+    #[tokio::test]
+    async fn create_chat_that_keeps_running_is_killed_after_the_id() {
+        let root = tempfile::tempdir().unwrap();
+        let pid_file = root.path().join("pid.txt");
+        let command = mock_cli(
+            root.path(),
+            r#"
+Set-Content -LiteralPath $env:CROSSAGENTS_CURSOR_TEST_PID -Value $PID
+Write-Output 'lingering-chat'
+Start-Sleep -Seconds 60
+"#,
+            r#"
+echo $$ > "$CROSSAGENTS_CURSOR_TEST_PID"
+printf 'lingering-chat\n'
+sleep 60
+"#,
+        );
+        let driver = CursorNativeDriver::new("cursor", Cli::at(command), vec![]);
+        let (mut spec, _rx) = spec(root.path());
+        spec.env.push((
+            "CROSSAGENTS_CURSOR_TEST_PID".into(),
+            pid_file.display().to_string(),
+        ));
+        let started = std::time::Instant::now();
+        let session = tokio::time::timeout(Duration::from_secs(20), driver.open(spec))
+            .await
+            .expect("open must not wait for create-chat to exit")
+            .unwrap();
+        assert!(started.elapsed() < PROCESS_TIMEOUT / 2);
+        assert_eq!(session.session_id(), "lingering-chat");
+        let pid = std::fs::read_to_string(&pid_file).unwrap().trim().to_owned();
+        assert!(!pid.is_empty());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while alive(&pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "create-chat process {pid} is still alive"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        session.shutdown().await;
     }
 
     #[tokio::test]
