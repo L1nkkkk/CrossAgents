@@ -335,6 +335,18 @@ impl Orchestrator {
                 parent.key
             )));
         }
+        // A lead in place gathers results in the hub's integration worktree, never in the
+        // person's own directory (docs/tasks/LEAD.md §5, §6).
+        if run.leads_in_place() {
+            let Some((branch, dir)) = self.inplace_base(run).await? else {
+                return Err(CoreError::Conflict(format!(
+                    "run {} has no integration workspace yet: no worker was dispatched, or it \
+                     was removed",
+                    run.id
+                )));
+            };
+            return Ok((branch, dir));
+        }
         Ok((run.branch.clone(), self.integration_path(run)))
     }
 
@@ -728,12 +740,15 @@ impl Orchestrator {
             created_at: now,
             updated_at: now,
         };
-        // One directory, so one task at a time.
-        run.config.max_parallel = if mode.lead == LeadPlace::InPlace {
-            1
-        } else {
-            run.config.max_parallel.max(1)
-        };
+        // A directory without version control is one place, so one task at a time there. A
+        // lead in place in a repository dispatches workers into worktrees of their own (P3),
+        // so its tasks may run side by side as any run's do.
+        run.config.max_parallel =
+            if mode.lead == LeadPlace::InPlace && mode.vcs == WorkspaceVcs::None {
+                1
+            } else {
+                run.config.max_parallel.max(1)
+            };
         run.config.max_attempts = run.config.max_attempts.max(1);
         let reused = previous
             .as_ref()
@@ -1332,7 +1347,11 @@ impl Orchestrator {
             run.config.policy = policy;
         }
         if let Some(n) = approval.max_parallel {
-            let n = if run.leads_in_place() { 1 } else { n.max(1) };
+            let n = if run.leads_in_place() && !run.versioned() {
+                1
+            } else {
+                n.max(1)
+            };
             if n != run.config.max_parallel {
                 changes.push(format!("at most {n} task(s) run at a time"));
             }
@@ -1634,7 +1653,7 @@ The person changed: {}",
                     "All {} task(s) of run {} have ended: {merged} merged into {}.",
                     tasks.len(),
                     run.id,
-                    run.branch
+                    self.task_base_branch(run)
                 ),
             )
             .await;
@@ -1671,16 +1690,17 @@ The person changed: {}",
     }
 
     pub(crate) async fn dispatch(&self, run: &Run, task: &mut Task) -> Result<(), CoreError> {
-        // No worker in the person's directory (docs/tasks/LEAD.md §12 P2): it would write
-        // where the lead is writing, with no checkout between them. A versioned workspace
-        // gets workers once their starting point is a snapshot of the directory (P3).
-        if run.leads_in_place() && run.versioned() {
-            return Err(CoreError::Conflict(
-                "this run's lead works in your own directory, so the hub gives no task out: a \
-                 worker would write there too. Do the work yourself, or start a run in a \
-                 checkout of its own"
-                    .into(),
-            ));
+        // A lead in the person's directory gives work out from a snapshot and a hub-owned
+        // integration worktree: the worker never writes where the lead works (LEAD §5).
+        if run.leads_in_place() {
+            if !run.versioned() {
+                return Err(CoreError::Conflict(
+                    "this run's lead works in a directory outside version control: nothing there \
+                     can be snapshotted, so the hub gives no task out. Do the work yourself"
+                        .into(),
+                ));
+            }
+            self.ensure_inplace_base(run).await?;
         }
         let mut setup = None;
         if task.worktree.is_none() && !run.versioned() {
@@ -1692,7 +1712,7 @@ The person changed: {}",
             let mut attempt = 1;
             let (path, branch) = loop {
                 let path = worktree_path(&self.config.worktrees, &short(run.id), &name);
-                let branch = format!("{}-{name}", run.branch);
+                let branch = format!("{}-{name}", self.task_base_branch(run));
                 if !path.exists() && !self.ws_for(run).has_branch(&run.repo, &branch).await {
                     break (path, branch);
                 }

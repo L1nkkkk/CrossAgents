@@ -212,6 +212,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{key}/land", post(land_run))
         .route("/v1/runs/{key}/policy", post(update_run_policy))
         .route("/v1/runs/{key}/finish", post(finish_run))
+        .route("/v1/runs/{key}/apply", post(apply_run))
+        .route("/v1/runs/{key}/integration", get(run_integration))
         .route("/v1/runs/{key}/cleanup", post(cleanup_run))
         .route("/v1/runs/{key}/diff", get(run_diff))
         .route("/v1/runs/{key}/trace", get(run_trace))
@@ -2835,6 +2837,28 @@ async fn finish_run(
     let id = resolve_run(&state, &key).await?;
     state.orchestrator.finish(id, req.summary, true).await?;
     run_detail(&state, id).await
+}
+
+/// `POST /v1/runs/{key}/apply` — write the workers' results into the person's own directory
+/// (docs/tasks/LEAD.md §6, §10): three-way, once, and never a commit there. Safe to call
+/// again: a result already applied writes nothing.
+async fn apply_run(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let id = resolve_run(&state, &key).await?;
+    Ok(Json(state.orchestrator.apply_in_place(id).await?))
+}
+
+/// `GET /v1/runs/{key}/integration` — what the workers did, which the person's own directory
+/// does not hold until an apply (docs/tasks/LEAD.md §6): the diff against the dispatch
+/// snapshot, and the integration commit already applied, if any.
+async fn run_integration(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let id = resolve_run(&state, &key).await?;
+    Ok(Json(state.orchestrator.inplace_changes(id).await?))
 }
 
 // ---------------------------------------------------------------------------------------

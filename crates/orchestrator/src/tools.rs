@@ -713,6 +713,12 @@ const TOOLS: &[ToolDef] = &[
         },
     },
     ToolDef {
+        name: "run_apply",
+        description: "Write the workers' accepted results into the person's own directory, when your lead works there in place. Three-way against what the directory holds now: a conflict writes nothing and names the files; a clean result is written whole, never committed, and their staging area and branch are untouched. This also happens once when the run ends; calling it again is a no-op.",
+        groups: PLANNER,
+        schema: || object(json!({}), &[]),
+    },
+    ToolDef {
         name: "task_progress",
         description: "One line on how your task is going; shown on the task card. Unless it addresses a teammate with @name, it also wakes the run's lead to look at it, so say what changed and what comes next.",
         groups: WORKER,
@@ -1066,6 +1072,7 @@ impl Orchestrator {
             "agent_set_model" => self.agent_set_model(caller, input).await,
             "agent_interrupt" => self.agent_interrupt(caller, input).await,
             "run_finish" => self.run_finish_tool(caller, input).await,
+            "run_apply" => self.run_apply_tool(caller, input).await,
             "task_complete" => {
                 #[derive(Deserialize)]
                 struct A {

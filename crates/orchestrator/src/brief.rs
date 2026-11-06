@@ -98,7 +98,10 @@ pub fn kickoff_with(
             let _ = write!(
                 out,
                 "{} (run_id: {}) · you work in {} itself, on branch {}: the hub keeps no branch \
-                 of its own for the run, and does not commit, stage or switch branches there",
+                 of its own for the run, and does not commit, stage or switch branches there. \
+                 Workers you dispatch start from a snapshot of this directory in worktrees of \
+                 their own; their results gather in a hub-owned integration workspace and are \
+                 applied back here when the run ends (run_apply does it sooner), never committed",
                 run.title,
                 run.id,
                 run.repo.display(),

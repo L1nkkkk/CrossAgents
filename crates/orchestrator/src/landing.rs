@@ -56,7 +56,13 @@ impl Orchestrator {
             checked_run.base_branch = self.round_base(run).await?.0;
         }
         let run = &checked_run;
-        let dir = self.integration_path(run);
+        // Where the workers' results are, when there are any: checks about a run whose lead
+        // works in the person's directory are about the integration workspace it gathered
+        // them in, not the directory the results have not reached yet (LEAD §6).
+        let dir = self
+            .inplace_checks_dir(run)
+            .await
+            .unwrap_or_else(|| self.integration_path(run));
         if run.landed.is_some() || !dir.exists() {
             return Ok(());
         }
@@ -193,6 +199,12 @@ impl Orchestrator {
     /// the content cannot be read (said, not turned into a pass).
     async fn checks_snapshot_of(&self, run: &Run) -> Option<String> {
         if !(run.leads_in_place() && run.versioned()) {
+            return None;
+        }
+        // With an integration workspace the checks ran on a commit there, which binds them
+        // as any checkout does; only checks run in the person's directory need a content
+        // fingerprint (LEAD §6, §7).
+        if self.inplace_checks_dir(run).await.is_some() {
             return None;
         }
         let dir = self.integration_path(run);
@@ -795,6 +807,11 @@ impl Orchestrator {
             if run.landed.is_some() {
                 self.cleanup_after_land(id).await;
             }
+        }
+        // Workers' results reach the person's directory once the run has ended
+        // (docs/tasks/LEAD.md §10 item 2). Idempotent: a second close writes nothing.
+        if run.status.is_terminal() {
+            self.apply_in_place_after_finish(&run).await;
         }
         Ok(run)
     }

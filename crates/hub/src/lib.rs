@@ -272,7 +272,12 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     // checkout whose lead was mid-turn when the hub stopped).
     {
         let orchestrator = orchestrator.clone();
-        tokio::spawn(async move { orchestrator.sweep_worktrees().await });
+        tokio::spawn(async move {
+            orchestrator.sweep_worktrees().await;
+            // An apply the last hub was in the middle of, or owed when it stopped, is
+            // finished (docs/tasks/LEAD.md §6).
+            orchestrator.recover_inplace_applies().await;
+        });
     }
     // Settle what runs spent while no hub was there (agents' replayed usage included) before
     // anything is dispatched: an over-budget run pauses first (docs/tasks/DOGFOOD.md §5).
