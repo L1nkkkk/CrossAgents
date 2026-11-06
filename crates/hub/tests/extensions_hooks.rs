@@ -5,7 +5,7 @@ use crossagents_hub::{HubConfig, Paths, extensions::manifest::Manifest};
 use serde_json::Value;
 
 #[cfg(windows)]
-const COMMAND: &str = r#"["powershell", "-NoProfile", "-NonInteractive", "-File", "hook.ps1"]"#;
+const COMMAND: &str = r#"["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "hook.ps1"]"#;
 #[cfg(not(windows))]
 const COMMAND: &str = r#"["sh", "hook.sh"]"#;
 #[cfg(windows)]

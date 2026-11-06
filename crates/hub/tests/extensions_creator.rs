@@ -11,7 +11,7 @@ fn source(home: &Path) {
     fs::create_dir_all(root.join("gui")).unwrap();
     #[cfg(windows)]
     let (command, script) = (
-        r#"["powershell", "-NoProfile", "-File", "marker.ps1"]"#,
+        r#"["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "marker.ps1"]"#,
         (
             "marker.ps1",
             "Set-Content -LiteralPath marker -Value executed\nWrite-Output '{}'\n",
@@ -132,7 +132,13 @@ async fn extensions_creator_http_static_check_request_and_logs() {
     let root = home.path().join("extensions/demo");
     #[cfg(windows)]
     let status = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-File", "marker.ps1"])
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "marker.ps1",
+        ])
         .current_dir(&root)
         .status()
         .unwrap();
