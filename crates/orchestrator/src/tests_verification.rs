@@ -365,6 +365,7 @@ impl Fixture {
             reviewer_fresh: true,
             status: TaskStatus::Running,
             attempts: 1,
+            runs: Vec::new(),
             escalated: false,
             nudges: 0,
             branch: Some("crossagents/run-a".into()),

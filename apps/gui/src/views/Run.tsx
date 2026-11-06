@@ -11,6 +11,7 @@ import { navigate } from "../App";
 import { ApiError, api, errorText } from "../api";
 import { DeleteRunDialog } from "../deleteRun";
 import { HandoffChain, OutcomeChip, freshLabel, isEscalated } from "../handoff";
+import { TaskRuns } from "../attempts";
 import {
   Avatar,
   ErrorBox,
@@ -79,6 +80,8 @@ function concerns(runId: string, e: HubEvent): boolean {
     case "task.checked":
     case "task.rerouted":
     case "task.handed_off":
+    // A retry says so in the task's progress and adds a run to it (multica §2.5).
+    case "task.progress":
       return e.data.run_id === runId;
     default:
       return false;
@@ -1149,6 +1152,9 @@ export function TaskDetail({ runId, taskId }: { runId: string; taskId: string })
             <dt>更新</dt>
             <dd title={time(task.updated_at)}>{ago(task.updated_at)}</dd>
           </dl>
+
+          {/* Run count and how each run ended (multica §2.4–2.5). */}
+          <TaskRuns task={task} />
 
           {task.handoffs.length > 0 && (
             <Section title="交接">

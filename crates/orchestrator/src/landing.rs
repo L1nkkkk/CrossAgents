@@ -583,6 +583,7 @@ impl Orchestrator {
             reviewer_fresh: true,
             status: TaskStatus::Pending,
             attempts: 0,
+            runs: Vec::new(),
             escalated: false,
             nudges: 0,
             branch: None,

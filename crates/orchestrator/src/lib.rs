@@ -3,6 +3,7 @@
 //! in agents through [`AgentHost`].
 
 pub mod approval;
+pub mod attempts;
 pub mod brief;
 pub mod claims;
 pub mod continuation;
