@@ -13,6 +13,7 @@ import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
 import type { BackgroundResponse } from "@bindings/BackgroundResponse";
 import type { CommitGraph } from "@bindings/CommitGraph";
 import type { Agent } from "@bindings/Agent";
+import type { AgentSettingsRequest } from "@bindings/AgentSettingsRequest";
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
 import type { ExtensionDiffResponse } from "@bindings/ExtensionDiffResponse";
 import type { ExtensionInfo } from "@bindings/ExtensionInfo";
@@ -821,9 +822,14 @@ export class MockBridge implements CrossAgentsBridge {
         const a = this.agent(m[1]);
         if (!a) return notFound("agent");
         const config = { ...((a.config as Record<string, unknown>) ?? {}) };
-        const sources = (body as { setting_sources: string | null }).setting_sources;
+        const { setting_sources: sources, allow_hooks: hooks } = body as AgentSettingsRequest;
         if (sources === null) delete config.setting_sources;
         else config.setting_sources = sources;
+        // Off is stored as absence, as the hub does; an absent field leaves it alone.
+        if (hooks !== undefined) {
+          if (hooks) config.allow_hooks = true;
+          else delete config.allow_hooks;
+        }
         a.config = config as Agent["config"];
         this.emit({ type: "agent.updated", data: { agent: { ...a } } });
         return json(200, a);

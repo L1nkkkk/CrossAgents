@@ -137,11 +137,16 @@ pub struct ArchiveAgentRequest {
 
 /// `POST /v1/agents/{key}/settings` (docs/tasks/DOGFOOD.md §6). `setting_sources`: which
 /// of Claude Code's settings it loads, comma-separated from `user`, `project`, `local`
-/// (empty: none); `None` goes back to the default (`project,local`).
+/// (empty: none); `None` goes back to the default (`project,local`). `allow_hooks`: whether
+/// hooks from those files may run, default off (SELF.md §B5); `None` leaves it as it is.
+/// Both are read only at launch, so an idle session is restarted after a change.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct AgentSettingsRequest {
     pub setting_sources: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub allow_hooks: Option<bool>,
 }
 
 /// `POST /v1/agents/{key}/model`. `None` leaves the model to the agent's own default.
