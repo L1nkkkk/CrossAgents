@@ -2,15 +2,23 @@
 //! (docs/tasks/SELF.md §C3). A build that cannot start a hub, run an agent or carry a message
 //! is not one to land changes with, and this says so with a non-zero exit.
 //!
-//! It runs the same commands a person would, in the same order: `hub sandbox start`, create a
-//! mock agent, send it a message, read the events it answers with, `hub sandbox stop`. The
-//! mock is `crates/mock-agent`, which needs no account and no model.
+//! What it does, in the order a person would: `hub sandbox start` (its own home, its own port),
+//! create a mock agent, send it a message, read the events it answers with, `hub sandbox stop`.
+//! The mock is `crates/mock-agent`, which needs no account and no model.
+//!
+//! The build under test is this very executable (`std::env::current_exe`), never a `crossagents`
+//! found on `PATH`; `hub sandbox start` then runs a copy of it under the sandbox's own home.
+//!
+//! Nothing here touches the person's hub: the sandbox has its own home and a random port, and
+//! the only use of the person's home is comparing paths, so that the sandbox is never put
+//! there. On every way out - done, failed, timed out, Ctrl+C - the sandbox is stopped, and its
+//! home removed unless `--keep` or the stop itself failed.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use clap::Args;
 use crossagents_api_types::{Agent, AgentStatus, EventKind, Transcript};
 use crossagents_hub::Paths;
@@ -26,6 +34,13 @@ const PLUGIN: &str = "mock";
 const MODEL: &str = "mock-haiku";
 /// The agent's name, so that a failure names it.
 const NAME: &str = "smoke";
+/// How much of the sandbox hub's log a failed smoke shows.
+const LOG_TAIL_LINES: usize = 40;
+/// A smoke given less than this is not worth starting: a hub alone takes seconds.
+const MIN_BUDGET: Duration = Duration::from_secs(30);
+/// Stopping has its own budget: it must happen even after the smoke's own time ran out, and a
+/// stop that waits for agents takes up to 30 s.
+const STOP_BUDGET: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Args)]
 pub struct SmokeArgs {
@@ -39,9 +54,9 @@ pub struct SmokeArgs {
     /// Keep the throwaway home, whose log says what happened.
     #[arg(long)]
     pub keep: bool,
-    /// How long the whole smoke may take. Starting a hub, an agent and a turn is seconds; a
-    /// first run on a cold machine is not much more.
-    #[arg(long, default_value_t = 180)]
+    /// How long the whole smoke may take. Under a loaded machine several hubs start at once
+    /// (a run of eight tasks starts eight checks), so this is generous: 8 s is typical.
+    #[arg(long, default_value_t = 240)]
     pub timeout_secs: u64,
 }
 
@@ -67,20 +82,38 @@ pub async fn run(ctx: &Context, args: SmokeArgs) -> Result<()> {
     std::fs::write(paths.config(), config(&mock))
         .with_context(|| format!("cannot write {}", paths.config().display()))?;
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(args.timeout_secs.max(1));
+    // Every step is bounded, and so is their sum: a build that hangs must fail the check
+    // rather than hold it.
+    let budget = Duration::from_secs(args.timeout_secs).max(MIN_BUDGET);
+    let deadline = tokio::time::Instant::now() + budget;
     let mut report = Report::default();
-    let outcome = exercise(&exe, &paths, deadline, &mut report).await;
-    // A hub left behind would hold the port and the home, so it is stopped even when a step
-    // before failed: the next smoke must be about the next build.
-    let stopped = sandbox_command(&exe, "stop", &dir).await;
+    let outcome = tokio::select! {
+        biased;
+        _ = tokio::signal::ctrl_c() => Err(anyhow!("interrupted")),
+        done = tokio::time::timeout_at(deadline, exercise(&exe, &paths, deadline, &mut report)) => {
+            match done {
+                Ok(done) => done,
+                Err(_) => Err(anyhow!("no step finished within {}s", budget.as_secs())),
+            }
+        }
+    };
+
+    // A hub left behind would hold its port and its home, and the next smoke would be about
+    // the wrong build: it is stopped however the step before ended.
+    let stopped = sandbox_command(&exe, "stop", &dir, STOP_BUDGET).await;
     let stopped_ok = stopped.is_ok();
     let result = outcome.and_then(|()| stopped.map(|_| ()));
+    if result.is_err() {
+        print_log_tail(&paths);
+    }
 
     if ctx.json {
         print_json(&json!({
             "ok": result.is_ok(),
             "dir": dir.display().to_string(),
             "kept": args.keep || !stopped_ok,
+            "exe": exe.display().to_string(),
+            "hub_exe": report.hub_exe.as_ref().map(|p| p.display().to_string()),
             "mock_agent": mock.display().to_string(),
             "port": report.port,
             "events": report.events,
@@ -92,6 +125,10 @@ pub async fn run(ctx: &Context, args: SmokeArgs) -> Result<()> {
                 .collect::<Vec<_>>(),
         }))?;
     } else {
+        println!("build:   {}", exe.display());
+        if let Some(ran) = &report.hub_exe {
+            println!("hub:     {}", ran.display());
+        }
         for step in &report.steps {
             println!("  {:<34} {:>6.2}s", step.name, step.took.as_secs_f64());
         }
@@ -120,8 +157,29 @@ async fn exercise(
     report: &mut Report,
 ) -> Result<()> {
     let mut since = Instant::now();
-    sandbox_command(exe, "start", &paths.home).await?;
-    report.port = paths.read_hub_file()?.map_or(0, |hub| hub.port);
+    sandbox_command(exe, "start", &paths.home, left(deadline)).await?;
+    let hub = paths.read_hub_file()?.ok_or_else(|| {
+        anyhow!(
+            "`hub sandbox start` returned but {} has no hub.json",
+            paths.home.display()
+        )
+    })?;
+    report.port = hub.port;
+    if let Some(ran) = hub.exe.as_ref() {
+        // Normally a copy of this binary inside the sandbox (`hub sandbox start` copies it so a
+        // rebuild can replace the build output); a build that already lives under a hub's
+        // `bin/` or `shadow/` runs as it is, and that is still this build.
+        if !inside(ran, &paths.home) && !super::hub::same_dir(ran, exe) {
+            bail!(
+                "the sandbox hub runs {}, which is neither this executable ({}) nor its copy \
+                 inside {}: that is not the build under test",
+                ran.display(),
+                exe.display(),
+                paths.home.display()
+            );
+        }
+        report.hub_exe = Some(ran.clone());
+    }
     report.step("hub started", &mut since);
 
     let client = Client::connect(paths).context("cannot talk to the hub it started")?;
@@ -183,15 +241,27 @@ async fn exercise(
 }
 
 /// `<exe> hub sandbox <action> --dir <dir>`, the command a person runs, so that the smoke
-/// covers the same path (and the same messages) they do.
-async fn sandbox_command(exe: &Path, action: &str, dir: &Path) -> Result<String> {
-    let output = tokio::process::Command::new(exe)
+/// covers the same path (and the same messages) they do. Ends by `budget` at the latest.
+async fn sandbox_command(
+    exe: &Path,
+    action: &str,
+    dir: &Path,
+    budget: Duration,
+) -> Result<String> {
+    let mut command = tokio::process::Command::new(exe);
+    command
         .args(["hub", "sandbox", action, "--dir"])
         .arg(dir)
         .stdin(Stdio::null())
-        .output()
-        .await
-        .with_context(|| format!("cannot run {} hub sandbox {action}", exe.display()))?;
+        .kill_on_drop(true);
+    let output = match tokio::time::timeout(budget, command.output()).await {
+        Ok(output) => output
+            .with_context(|| format!("cannot run {} hub sandbox {action}", exe.display()))?,
+        Err(_) => bail!(
+            "`crossagents hub sandbox {action}` did not finish within {}s",
+            budget.as_secs()
+        ),
+    };
     let mut text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     let errors = String::from_utf8_lossy(&output.stderr);
     let errors = errors.trim();
@@ -213,6 +283,51 @@ async fn sandbox_command(exe: &Path, action: &str, dir: &Path) -> Result<String>
         );
     }
     Ok(text)
+}
+
+/// The end of the sandbox hub's log on stderr: the hub writes its reasons there, and the
+/// smoke's own message only carries what the API answered.
+fn print_log_tail(paths: &Paths) {
+    match tail_of(paths, LOG_TAIL_LINES) {
+        Some((log, lines)) => {
+            eprintln!("--- {} (last {} lines) ---", log.display(), lines.len());
+            for line in lines {
+                eprintln!("{line}");
+            }
+            eprintln!("--- end of {} ---", log.display());
+        }
+        None => eprintln!(
+            "no hub log under {}; the hub may have failed before it could write one",
+            paths.logs().display()
+        ),
+    }
+}
+
+/// The last `lines` lines of the newest `hub.log*` under `paths`, if there is one.
+fn tail_of(paths: &Paths, lines: usize) -> Option<(PathBuf, Vec<String>)> {
+    let mut logs: Vec<PathBuf> = std::fs::read_dir(paths.logs())
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("hub.log"))
+        })
+        .collect();
+    logs.sort();
+    let log = logs.pop()?;
+    let text = std::fs::read_to_string(&log).ok()?;
+    let tail: Vec<String> = text
+        .lines()
+        .rev()
+        .take(lines)
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    Some((log, tail))
 }
 
 /// Why the agent is where it is: its transcript's error (a CLI that could not be started),
@@ -302,6 +417,17 @@ async fn remove(dir: &Path) {
     tracing::debug!(dir = %dir.display(), "cannot remove the smoke's home; it stays");
 }
 
+/// Whether `path` is `dir` or below it (both as written, resolved where they exist).
+fn inside(path: &Path, dir: &Path) -> bool {
+    let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canon(path).starts_with(canon(dir))
+}
+
+/// What is left of the smoke's own budget.
+fn left(deadline: tokio::time::Instant) -> Duration {
+    deadline.saturating_duration_since(tokio::time::Instant::now())
+}
+
 fn round(time: Duration) -> f64 {
     (time.as_secs_f64() * 100.0).round() / 100.0
 }
@@ -316,6 +442,8 @@ struct Step {
 struct Report {
     port: u16,
     events: usize,
+    /// The executable the sandbox hub actually runs (a copy of the build under test).
+    hub_exe: Option<PathBuf>,
     steps: Vec<Step>,
 }
 
@@ -365,7 +493,9 @@ mod tests {
     #[test]
     fn a_missing_mock_agent_says_how_to_build_it() {
         let dir = tempfile::tempdir().unwrap();
-        let err = mock_agent(Some(dir.path().join("nope"))).unwrap_err().to_string();
+        let err = mock_agent(Some(dir.path().join("nope")))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("crossagents-mock-agent"), "{err}");
         assert!(err.contains("cargo build -p crossagents-mock-agent"), "{err}");
 
@@ -383,5 +513,37 @@ mod tests {
             dir.display()
         );
         assert!(dir.starts_with(super::super::hub::sandbox_dir(None).unwrap()));
+    }
+
+    /// A failed smoke shows the end of the sandbox hub's log, from the newest file it wrote.
+    #[test]
+    fn the_log_tail_is_the_end_of_the_newest_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::new(dir.path());
+        std::fs::create_dir_all(paths.logs()).unwrap();
+        std::fs::write(paths.logs().join("hub.log.2026-01-01"), "old\n").unwrap();
+        let newest = paths.logs().join("hub.log.2026-01-02");
+        let lines: Vec<String> = (1..=100).map(|n| format!("line {n}")).collect();
+        std::fs::write(&newest, format!("{}\n", lines.join("\n"))).unwrap();
+
+        let (log, tail) = tail_of(&paths, 3).unwrap();
+        assert_eq!(log, newest);
+        assert_eq!(tail, ["line 98", "line 99", "line 100"]);
+        // Asking for more than there is gives what there is.
+        assert_eq!(tail_of(&paths, 1000).unwrap().1.len(), 100);
+        // No log at all is said so, not a failure.
+        std::fs::remove_dir_all(paths.logs()).unwrap();
+        assert!(tail_of(&paths, 3).is_none());
+    }
+
+    #[test]
+    fn a_hub_outside_the_sandbox_is_not_the_build_under_test() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let shadow = home.join("shadow").join("abc").join("crossagents.exe");
+        std::fs::create_dir_all(shadow.parent().unwrap()).unwrap();
+        std::fs::write(&shadow, b"copy").unwrap();
+        assert!(inside(&shadow, &home));
+        assert!(!inside(Path::new(r"C:\somewhere\crossagents.exe"), &home));
     }
 }
