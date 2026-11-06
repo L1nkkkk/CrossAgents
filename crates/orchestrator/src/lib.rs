@@ -29,6 +29,7 @@ pub mod review;
 pub mod running;
 pub mod screenshot;
 mod sessions;
+pub mod stage;
 pub mod tasks;
 pub mod team;
 pub mod tools;
