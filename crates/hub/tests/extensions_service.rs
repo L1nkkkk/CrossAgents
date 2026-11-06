@@ -9,7 +9,7 @@ fn extension(home: &Path, script: &str) {
     fs::create_dir_all(&dir).unwrap();
     #[cfg(windows)]
     let (command, file) = (
-        "['powershell', '-NoProfile', '-File', 'service.ps1']",
+        "['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'service.ps1']",
         "service.ps1",
     );
     #[cfg(not(windows))]
@@ -34,7 +34,7 @@ fn script(kind: &str) -> &'static str {
                 "$env:CROSSAGENTS_TOKEN | Set-Content (Join-Path $env:CROSSAGENTS_EXTENSION_DATA 'token'); 'two' | Set-Content (Join-Path $env:CROSSAGENTS_EXTENSION_DATA 'version'); while ($true) { Start-Sleep -Milliseconds 100 }"
             }
             "tree" => {
-                "if ($args[0] -eq 'child') { while ($true) { Add-Content (Join-Path $env:CROSSAGENTS_EXTENSION_DATA child) x; Start-Sleep -Milliseconds 100 } }; Start-Process powershell -ArgumentList '-NoProfile','-File','service.ps1','child' -WindowStyle Hidden; while ($true) { Add-Content (Join-Path $env:CROSSAGENTS_EXTENSION_DATA parent) x; Start-Sleep -Milliseconds 100 }"
+                "if ($args[0] -eq 'child') { while ($true) { Add-Content (Join-Path $env:CROSSAGENTS_EXTENSION_DATA child) x; Start-Sleep -Milliseconds 100 } }; Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','service.ps1','child' -WindowStyle Hidden; while ($true) { Add-Content (Join-Path $env:CROSSAGENTS_EXTENSION_DATA parent) x; Start-Sleep -Milliseconds 100 }"
             }
             _ => unreachable!(),
         }
