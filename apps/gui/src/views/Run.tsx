@@ -69,6 +69,7 @@ import { RunCostBar } from "../costbar";
 import { RailCard } from "../rail";
 import { t, type Key } from "../lib/i18n";
 import { wsKey } from "../workspace";
+import { RunModeTag } from "../runmode";
 import { openTool } from "../panes";
 import { RelatedLessons, RunIssues } from "../lessons/RunIssues";
 import { useQuota } from "./Quota";
@@ -159,6 +160,7 @@ export function RunView({
     <div className="topbar">
       <span className="title">{run.title}</span>
       <StatusChip status={run.status} tone={runTone(run.status)} />
+      <RunModeTag run={run} />
       {/* Narrow, the header's panel button already carries the progress: one copy. */}
       <ProgressChip tasks={tasks} />
       <div className="spacer" />

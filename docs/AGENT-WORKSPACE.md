@@ -1,6 +1,6 @@
 # CrossAgents：平等 Agent 与项目侧栏设计
 
-> 日期：2026-11-01 · 状态：§7 的 A–D 四个阶段已实现（见 §7 的实施记录）。§6 的 role 字段迁移仍未做。  
+> 日期：2026-11-01 · 状态：§7 的 A–D 四个阶段已实现（见 §7 的实施记录）。§6 的 role 字段兼容迁移已做（见 §6.2）。  
 > 依据：本次讨论与第二版交互概念图；Cutex desktop 0.2.0（`6216e67`，2026-10-29）的设计文档和源码。  
 > 本文替代 [SESSION-FIRST.md](SESSION-FIRST.md) §1 第 3 项、§2 的侧栏示意和 §5 的父子导航树方案；保留它的来源关系、独立 lead、执行隔离、静默回传及自动策略。  
 > [DESIGN.md](DESIGN.md) 中 Planner / Worker / Reviewer 的固定身份表述，以本文的任务职责模型为准。旧字段的兼容迁移另行实施。
@@ -147,7 +147,7 @@ run 不再嵌在来源聊天下。项目内全部 run（包括旧记录、无来
 - 保留独立 lead、`origin_chat_id`、来源会话保护、静默回传和现有执行隔离。**导航变平不代表执行关系消失。**
 - 沿用 SESSION-FIRST 的自动落地及权限配置。**计划审批已于 2026-11-02 改回人工**：从对话发起的 Work 一律 `plan_approval: required`，见 §6.1。概念图中的「方案待确认」不再是特例，而是每次 Work 的常态。
 - 每个任务的执行模型由人在计划审批里选：lead 用 `plan_submit` 写清每个 session 要做什么，PlanDock 每行给出队友与「某插件 · 某模型」候选。lead 可以预填 `assignee` 作为建议，但由人最终决定。不新增模型排名、能力评分或自动选型。
-- 不直接删除数据库或协议中的旧 role 字段。先停止用它判定职责资格，再检查创建默认值、提示词、工具作用域、配置、存储和旧客户端兼容；迁移另列任务。
+- 不直接删除数据库或协议中的旧 role 字段。先停止用它判定职责资格，再检查创建默认值、提示词、工具作用域、配置、存储和旧客户端兼容；迁移另列任务（实施记录见 §6.2）。
 - 不照搬 Cutex 的 Director / Operator 固定角色、头饰、桌面托盘、任意拖拽工作区、多窗口及大量外观开关。
 - 不新增模型判断任务大小、Agent 能力排名或角色评分。
 
@@ -163,6 +163,27 @@ run 不再嵌在来源聊天下。项目内全部 run（包括旧记录、无来
 **代价**：小改动也要先过一张计划。要绕开就在计划审批里选「全托管」，或从 Home 发起。
 
 **未改**：自动落地、任务并行度、预算默认值（仍为空，没有上限）。
+
+### 6.2 role 字段兼容迁移（2026-11-07）
+
+**结论**：role 只剩「这个会话是怎么创建的」这一层含义。存储、API 和界面继续读写它，旧客户端不受影响；它不再决定谁能接哪个职责。逐项盘点与处理如下。
+
+**改了**：
+
+- `crates/orchestrator/src/team.rs`：`agent_spawn` 不再以 `role: planner` 拒绝招募。一个 run 只有一个 lead 是 run 里的关系（claim），不是角色标签；planner 角色的会话被招募成队友后，按 claim 拿 worker / reviewer 的工具。
+- `crates/orchestrator/src/messaging.rs`：执行会话（不是对话）不再按 role 取权限组。它没有 claim 时只剩 `everyone`，所以 planner 角色的执行会话空闲时拿不到 lead 工具。普通对话仍从创建时的角色对应的组开始（planner 聊天从 lead 组开始，那里通常是 run 的起点）；run 内的职责仍只看 claim。
+- `crates/orchestrator/src/notes.rs`：删除团队便签不再看调用者是不是 planner。团队便签没有 lead，只有作者能删；run 便签仍允许该 run 的 lead 删。
+- `crates/core/src/model.rs`、`crates/drivers/src/hooks/mod.rs`：把「role 决定工具」的注释改成事实。
+
+**留了，以及为什么**：
+
+- **存储**：`agents.role` 列仍是 `NOT NULL`，`Agent.role`、`CreateAgentRequest.role`、CLI `--role` 与界面角色标签都保留。旧客户端继续发送和读取它；删列或改协议会破坏旧客户端与旧记录。
+- **创建默认值**：CLI、GUI、招募和 run 的 lead 副本仍写 role（默认 worker，lead 副本写 planner）。它只决定记录和展示，不决定权限。
+- **提示词**：`protocol::guide(role)` 仍按角色给不同的开篇说明（lead 的任务、worker 的汇报、reviewer 的评审），`hub/src/api.rs` 的 `/v1/agents/{key}/connect` 仍用它。这是「会话被创建成什么」，不是资格；run 内的会话走 `guide_for(groups)`，按 claim 选说明。
+- **自动组队**：`crates/orchestrator/src/engine.rs` 的 `gather_team` 与审批补 team 共三处 `role != Planner` 保留。它是「不把聊天会话塞进默认队友列表」的默认组合，不是资格——kickoff 的工作区会话一节仍列出全部会话，lead 可以点名任何一个。该文件不在本轮可改范围。
+- **展示与统计**：`hub/src/usage.rs` 的按角色分组、`accounts.rs` 的账号用途、界面的 role 标签与 `LeadFlag` 都保留，属于展示。
+
+**没做**：没有删 role 列，没有改 `CreateAgentRequest`（role 仍必填，旧客户端行为不变），没有改 `docs/TODO.md`。
 
 ## 7. 实施顺序
 
@@ -187,7 +208,7 @@ run 不再嵌在来源聊天下。项目内全部 run（包括旧记录、无来
 
 现有落点包括 `apps/gui/src/Sidebar.tsx`、`lib/sidebarTree.ts`、`workspace.ts`、`activity` / `liveTurn`、`views/Run.tsx`、`views/Session.tsx` 和 `panes`。这些是接入位置，不预先承诺接口无需变化。
 
-角色资格检查已在后端和界面候选列表中删除（§2.1）；剩下的 role 用法只是创建默认值，随 §6 迁移。
+角色资格检查已在后端和界面候选列表中删除（§2.1），role 也不再判定任何资格（§6.2）；剩下的用法是创建默认值、对话的起始权限组、提示词与展示。
 
 ## 8. 验收场景
 

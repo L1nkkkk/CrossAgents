@@ -18,7 +18,7 @@ use crossagents_core::{
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow};
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
@@ -78,6 +78,7 @@ impl SqliteStore {
 
     async fn migrate(pool: SqlitePool) -> Result<Self, CoreError> {
         MIGRATOR.run(&pool).await.map_err(migration_failed)?;
+        apply_data_migrations(&pool).await?;
         Ok(Self { pool })
     }
 
@@ -113,6 +114,92 @@ fn known_migration() -> i64 {
         .map(|m| m.version)
         .max()
         .unwrap_or(0)
+}
+
+/// One-off data migrations, run after the schema migrations. Each name is recorded in
+/// `applied_migrations` in the same transaction as its change, so it runs exactly once per
+/// database: an upgrade runs what is missing, a fresh install runs it on an empty database
+/// (where it changes nothing) and then leaves it alone.
+const DATA_MIGRATIONS: &[&str] = &[HOOKS_ON];
+
+/// Hooks became opt-in in B5 (docs/tasks/SELF.md §B5): a session passes `disableAllHooks`
+/// unless `config.allow_hooks` is `true`. That silently turned off hooks for everyone who
+/// already had them on, so this writes `allow_hooks: true` for the agents that never chose.
+///
+/// Every agent in the database when this runs was made before this build; agents made after
+/// the switch and before this upgrade cannot be told apart from older ones (both have no
+/// `allow_hooks` key), so they are enabled too. New agents are made after the mark is set and
+/// stay off by default, which is what the switch promises.
+const HOOKS_ON: &str = "hooks_on_for_agents_from_before_the_switch";
+
+async fn apply_data_migrations(pool: &SqlitePool) -> Result<(), CoreError> {
+    for name in DATA_MIGRATIONS {
+        // Reserve the writer before reading: this migration may update the rows it reads.
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.map_err(storage)?;
+        let applied: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM applied_migrations WHERE name = ?")
+                .bind(name)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage)?;
+        if applied.is_some() {
+            tx.rollback().await.map_err(storage)?;
+            continue;
+        }
+        match *name {
+            HOOKS_ON => hooks_on_for_agents_that_never_chose(&mut tx).await?,
+            other => {
+                return Err(storage(format!(
+                    "unknown data migration {other:?}: this database comes from a newer build"
+                )));
+            }
+        }
+        // Ignore a mark another process wrote meanwhile: the change above is the same one.
+        sqlx::query("INSERT OR IGNORE INTO applied_migrations (name, applied_at) VALUES (?, ?)")
+            .bind(name)
+            .bind(Utc::now().to_rfc3339())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        tx.commit().await.map_err(storage)?;
+    }
+    Ok(())
+}
+
+/// [`HOOKS_ON`]: claude agents whose config has no `allow_hooks` key keep the hooks they had.
+/// Any other plugin never ran hooks through this switch, and an agent that chose (even
+/// `false`) is left as it is.
+async fn hooks_on_for_agents_that_never_chose(
+    tx: &mut Transaction<'_, Sqlite>,
+) -> Result<(), CoreError> {
+    let rows = sqlx::query("SELECT id, config FROM agents WHERE plugin = 'claude'")
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(storage)?;
+    for row in rows {
+        let id: String = row.try_get("id").map_err(storage)?;
+        let raw: String = row.try_get("config").map_err(storage)?;
+        let mut config: serde_json::Value =
+            serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+        if !config.is_object() {
+            // The same shape the settings API gives a config it cannot use.
+            config = serde_json::json!({});
+        }
+        let object = config
+            .as_object_mut()
+            .expect("config was made an object just above");
+        if object.contains_key("allow_hooks") {
+            continue;
+        }
+        object.insert("allow_hooks".into(), true.into());
+        sqlx::query("UPDATE agents SET config = ? WHERE id = ?")
+            .bind(config.to_string())
+            .bind(&id)
+            .execute(&mut **tx)
+            .await
+            .map_err(storage)?;
+    }
+    Ok(())
 }
 
 fn storage(err: impl std::fmt::Display) -> CoreError {
@@ -905,7 +992,12 @@ impl Store for SqliteStore {
     }
 
     async fn update_lesson(&self, lesson: &Lesson) -> Result<(), CoreError> {
-        let mut tx = self.pool.begin().await.map_err(storage)?;
+        // Acquire the write lock before reading, avoiding a failed WAL snapshot upgrade.
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
         let stored: Option<String> = sqlx::query_scalar("SELECT id FROM lessons WHERE id = ?")
             .bind(&lesson.id)
             .fetch_optional(&mut *tx)
@@ -1297,7 +1389,11 @@ impl Store for SqliteStore {
         task: TaskId,
         outcome: UsageOutcome,
     ) -> Result<usize, CoreError> {
-        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
         let rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT id, data FROM expertise_usage WHERE task_id = ?1 AND outcome IS NULL",
         )
@@ -2242,6 +2338,88 @@ mod tests {
         ));
     }
 
+    fn with_config(mut agent: Agent, config: serde_json::Value) -> Agent {
+        agent.config = config;
+        agent
+    }
+
+    async fn config_of(store: &SqliteStore, name: &str) -> serde_json::Value {
+        store
+            .get_agent(&AgentKey::Name(name.into()))
+            .await
+            .unwrap()
+            .config
+    }
+
+    /// The migration ran when the store opened, on an empty database. Clearing its mark is
+    /// what an upgrade from a build without it looks like, with agents already in place.
+    async fn unmark_hooks_migration(store: &SqliteStore) {
+        sqlx::query("DELETE FROM applied_migrations WHERE name = ?")
+            .bind(HOOKS_ON)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn upgrading_keeps_hooks_on_for_claude_agents_that_never_chose() {
+        let store = SqliteStore::open_in_memory().await.unwrap();
+        let chose_off = with_config(agent("chose"), serde_json::json!({ "allow_hooks": false }));
+        let codex = {
+            let mut a = with_config(agent("codex"), serde_json::json!({}));
+            a.plugin = "codex".into();
+            a
+        };
+        store.insert_agent(&agent("old")).await.unwrap();
+        store.insert_agent(&chose_off).await.unwrap();
+        store.insert_agent(&codex).await.unwrap();
+
+        unmark_hooks_migration(&store).await;
+        apply_data_migrations(store.pool()).await.unwrap();
+
+        // An agent made before the switch, whose config never named the key, keeps its hooks.
+        assert_eq!(
+            config_of(&store, "old").await,
+            serde_json::json!({ "k": 1, "allow_hooks": true })
+        );
+        // Someone who chose (even "off") is left alone, and another plugin is not ours.
+        assert_eq!(
+            config_of(&store, "chose").await,
+            serde_json::json!({ "allow_hooks": false })
+        );
+        assert_eq!(config_of(&store, "codex").await, serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn the_hooks_migration_runs_once_and_new_agents_stay_off() {
+        let store = SqliteStore::open_in_memory().await.unwrap();
+        // A fresh database: the mark is already there, and nothing was turned on.
+        let marked: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM applied_migrations WHERE name = ?")
+                .bind(HOOKS_ON)
+                .fetch_optional(store.pool())
+                .await
+                .unwrap();
+        assert!(marked.is_some());
+
+        // Agents made after it are new agents: off unless they turn it on themselves.
+        store.insert_agent(&agent("new")).await.unwrap();
+        apply_data_migrations(store.pool()).await.unwrap();
+        assert_eq!(
+            config_of(&store, "new").await,
+            serde_json::json!({ "k": 1 })
+        );
+
+        // Running it again does not reach back and enable anything either.
+        unmark_hooks_migration(&store).await;
+        apply_data_migrations(store.pool()).await.unwrap();
+        assert_eq!(
+            config_of(&store, "new").await,
+            serde_json::json!({ "k": 1, "allow_hooks": true }),
+            "a database that never ran the migration treats every agent in it as old"
+        );
+    }
+
     #[tokio::test]
     async fn events_are_sequenced_and_paged() {
         let store = SqliteStore::open_in_memory().await.unwrap();
@@ -2465,6 +2643,37 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[tokio::test]
+    async fn lesson_update_waits_for_another_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(&dir.path().join("store.db"))
+            .await
+            .unwrap();
+        let mut record = lesson("l1", "p", "original", "symptom");
+        let mut tx = store.pool.begin().await.unwrap();
+        insert_lesson(&mut tx, &record, true).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mut writer = store.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query("UPDATE lessons SET status = status WHERE id = 'l1'")
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        record.title = "updated".into();
+        let update = store.update_lesson(&record);
+        tokio::pin!(update);
+        // A deferred transaction reads while the writer holds the lock, then fails
+        // immediately when it attempts to upgrade. An immediate one waits here.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), &mut update)
+                .await
+                .is_err()
+        );
+        writer.commit().await.unwrap();
+        update.await.unwrap();
+        assert_eq!(store.get_lesson("l1").await.unwrap().title, "updated");
     }
 
     /// Sorting is one transaction and safe to repeat: a retry writes nothing new, and only

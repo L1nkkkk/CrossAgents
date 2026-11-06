@@ -22,6 +22,7 @@ import { UsageView } from "./views/Usage";
 import { ExpertiseView } from "./views/Expertise";
 import { LessonsView } from "./views/Lessons/Lessons";
 import { WorkspaceView } from "./views/Workspace";
+import { WorkView } from "./views/Work";
 import { GitView } from "./views/Git";
 import { ExtensionDetail } from "./extensions/page/Detail";
 import { ExtensionsView } from "./extensions/page/Extensions";
@@ -233,6 +234,10 @@ export function App() {
     case "w":
       main = a ? <WorkspaceView key={a} wsKey={a} /> : <HomeView />;
       break;
+    // 一个工作组：主导的对话连续不断，各轮是其中的分隔（docs/tasks/G1.md §3.5）。
+    case "work":
+      main = a ? <WorkView key={a} workId={a} roundId={b} /> : <HomeView />;
+      break;
     case "agents":
       // The old 队友 page lives on as 设置 → 智能体.
       main = <SettingsView page="agents" />;
@@ -270,7 +275,7 @@ export function App() {
   const below = !!tools && !floatTools && bottom.open && bottom.tabs.some(shows);
   const app = (
     <div
-      className={`app ${drawer ? (floatTools ? "drawer-float" : "with-drawer") : ""} ${sidebar.docked ? "" : "no-sidebar"}`}
+      className={`app ${drawer ? (floatTools ? "drawer-float" : "with-drawer") : ""} ${sidebar.docked ? "" : "no-sidebar"} ${widths.sidebar < 215 ? "sidebar-tight" : ""}`}
       style={{ "--sidebar-width": `${widths.sidebar}px`, "--tools-width": `${widths.tools}px`, "--bottom-height": `${widths.bottom}px` } as CSSProperties}
     >
       {sidebar.docked && <Sidebar route={route} />}

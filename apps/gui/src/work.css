@@ -1,0 +1,316 @@
+/* A work group's page (views/Work.tsx) and the run-mode tag (runmode.tsx): the conversation
+   stays one, and each round — a run — is a separator in it and a row in the 各轮 pane. */
+
+/* ---- Where the lead works: 原地 or worktree ------------------------------------------- */
+
+.mode-tag {
+  border: 1px solid transparent;
+  font-size: 11.5px;
+}
+.mode-tag.worktree {
+  background: var(--surface-sunk);
+  color: var(--text-2);
+}
+/* The lead writes in the person's own directory: worth noticing, not an error. */
+.mode-tag.in-place {
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  border-color: color-mix(in srgb, var(--warn) 35%, transparent);
+}
+.mode-tag.compact {
+  padding: 0 5px;
+  font-size: 11px;
+}
+
+/* Where a row has no room for the word: the same fact as a glyph, with its tooltip. */
+.mode-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
+}
+.mode-mark.in-place {
+  color: var(--warn-text);
+}
+/* At the sidebar's narrowest the name must stay readable: the glyph gives way (the work group
+   row above still carries the word, and the row's tooltip keeps the explanation). */
+.app.sidebar-tight .mode-mark {
+  display: none;
+}
+
+/* ---- The page's header --------------------------------------------------------------- */
+
+.work-topbar .title {
+  max-width: 30ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The selected round, under the header: its target and what it left behind. */
+.work-round-head {
+  margin: 12px 0 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+.work-round-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+.work-round-n {
+  font-weight: 600;
+}
+.work-round-request {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.work-round-note {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  color: var(--warn-text);
+  white-space: pre-wrap;
+}
+
+/* ---- The separator where a round began, in the conversation --------------------------- */
+
+.round-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 20px 0 6px;
+  font-size: 12px;
+  color: var(--text-2);
+  scroll-margin-top: 10px;
+}
+.round-note .round-rule {
+  flex: 1;
+  height: 1px;
+  min-width: 12px;
+  background: var(--border);
+}
+.round-label {
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+.round-title {
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.round-state {
+  white-space: nowrap;
+}
+.round-state.accent {
+  color: var(--accent-text);
+}
+.round-state.ok {
+  color: var(--ok-text);
+}
+.round-state.warn {
+  color: var(--warn-text);
+}
+.round-state.danger {
+  color: var(--danger-text);
+}
+.round-state.muted {
+  color: var(--muted);
+}
+.round-at {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ---- The 各轮 pane -------------------------------------------------------------------- */
+
+.round-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.round-row {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.round-row:hover {
+  background: var(--surface-sunk);
+}
+.round-row.selected {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: var(--accent-bg);
+}
+.round-row-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.round-n {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.round-when {
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.round-row-title {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.round-row-facts {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+.round-row-facts .ok {
+  color: var(--ok-text);
+}
+.round-row-facts .muted {
+  color: var(--muted);
+}
+.round-deleted {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+.round-deleted ul {
+  margin: 4px 0 0;
+}
+.round-deleted-row {
+  padding: 2px 0;
+  font-size: 12px;
+  color: var(--muted);
+  text-decoration: line-through;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- A work group's row in the sidebar ------------------------------------------------- */
+
+.work-row .work-fold {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-left: 2px;
+  color: var(--muted);
+}
+.work-row .row-link {
+  padding-left: 4px;
+}
+.work-row .row-mode {
+  flex: none;
+  margin-left: 4px;
+}
+.work-round-list {
+  list-style: none;
+  margin: 1px 0 4px;
+  padding: 0 0 0 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.work-round-link {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-2);
+}
+.work-round-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+}
+.work-round-link:hover {
+  background: var(--hover);
+  text-decoration: none;
+}
+.work-round-link.active {
+  background: var(--accent-bg);
+  color: var(--text);
+}
+.work-round-link .work-round-n {
+  flex: none;
+  color: var(--muted);
+}
+.work-round-link .work-round-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.work-round-state {
+  flex: none;
+  margin-left: auto;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.work-round-state.accent {
+  color: var(--accent-text);
+}
+.work-round-state.ok {
+  color: var(--ok-text);
+}
+.work-round-state.warn {
+  color: var(--warn-text);
+}
+.work-round-state.danger {
+  color: var(--danger-text);
+}
+.work-round-state.muted {
+  color: var(--muted);
+}
+.work-round-empty {
+  padding: 3px 8px;
+}
+
+/* Narrow: the header keeps the work's name, the round's state and its mode; the rest folds
+   into the drawer the 各轮 button opens. */
+@media (max-width: 900px) {
+  .work-topbar .title {
+    max-width: 18ch;
+  }
+  .work-topbar > .chip:not(.mode-tag):not(.state-chip) {
+    display: none;
+  }
+  .work-topbar > a.chip {
+    display: none;
+  }
+}

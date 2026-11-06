@@ -5,6 +5,7 @@ import { emptyHub } from "../views/Home.mock";
 import { extensionScene } from "./extensions.mock";
 import { approvalRun, deleteRun, graphRun, handoffRun, inPlaceRun, landingRun, longResultsRun, oauthRun, pausedRun, rerouteRun, reuseRun, reviewRun, syncRun, traceRun } from "../views/Run.mock";
 import { relayScene } from "../views/RunRelay.mock";
+import { workRounds } from "../views/Work.mock";
 import { swimlaneScene } from "../views/RunSwimlane.mock";
 import { runCostScene } from "../views/RunCost.mock";
 import type { BackgroundResponse } from "@bindings/BackgroundResponse";
@@ -34,6 +35,7 @@ export type Scenario = {
 };
 
 export const SCENARIOS: Scenario[] = [
+  { key: "work-rounds", label: "工作组：三轮", hint: "同一个对话里连着三轮：第一轮已落地，第二轮没落地，第三轮叠在它上面；右侧「各轮」切换，对话里的分隔跟着走；侧栏一个工作组只占一行", build: () => workRounds() },
   { key: "swimlane", label: "Run 泳道图", hint: "一个 Worker 一根线：交接、提交、测试 ✓/✗、重试、改派（分叉）、合入、上下文压缩、模型切换、等你；点名字只看一根线", build: () => swimlaneScene() },
   { key: "swimlane-landed", label: "Run 泳道图 · 已落地", hint: "三条线都合入后落地，泳道以「落地」收尾", build: () => swimlaneScene(true) },
   { key: "swimlane-focus", label: "Run 泳道图 · 聚焦", hint: "只看 Rex 一根线，节点带时间", build: () => {

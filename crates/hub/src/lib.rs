@@ -323,7 +323,8 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         started_at,
         exe: std::env::current_exe().ok(),
     };
-    std::fs::write(paths.hub_file(), serde_json::to_vec_pretty(&hub_file)?)
+    // Atomic: `hub start` polls this file and must never read it half-written.
+    crate::paths::write_atomic(&paths.hub_file(), &serde_json::to_vec_pretty(&hub_file)?)
         .context("cannot write hub.json")?;
 
     let shutdown = CancellationToken::new();

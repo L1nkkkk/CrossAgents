@@ -355,6 +355,7 @@ impl From<GitError> for AppError {
             // A directory the hub does not know is refused, not read.
             GitError::Outside(_) => (StatusCode::FORBIDDEN, ErrorCode::Forbidden),
             GitError::NotFound(_) => (StatusCode::NOT_FOUND, ErrorCode::NotFound),
+            GitError::Conflict(_) => (StatusCode::CONFLICT, ErrorCode::Conflict),
             GitError::BadRequest(_) => (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
             GitError::Failed(_) => {
                 tracing::error!(error = %err, "cannot read the git view");
@@ -2432,7 +2433,7 @@ async fn git_commit_diff(
     Query(q): Query<GitQuery>,
 ) -> ApiResult<Json<ChangesResponse>> {
     let sha = commit_sha(&sha)?;
-    let root = state.orchestrator.git_root(q.path()).await?;
+    let root = state.orchestrator.git_repo(q.path()).await?;
     Ok(changes_response(
         crossagents_orchestrator::graph::commit_diff(&root, sha).await?,
     ))

@@ -502,6 +502,18 @@ impl Orchestrator {
             .store()
             .get_agent(&crossagents_core::AgentKey::Id(proposer))
             .await?;
+        let deadline = tokio::time::Instant::now() + self.round_wait_limit();
+        loop {
+            let busy = tokio::time::timeout_at(deadline, self.host.is_busy(proposer))
+                .await
+                .map_err(|_| CoreError::Busy("timed out waiting for the proposer to finish answering and become idle".into()))?;
+            if !busy {
+                break;
+            }
+            tokio::time::timeout_at(deadline, tokio::time::sleep(std::time::Duration::from_millis(100)))
+                .await
+                .map_err(|_| CoreError::Busy("timed out waiting for the proposer to finish answering and become idle".into()))?;
+        }
         // The proposer's workspace, wherever it works now; the run starts from the current
         // branch there.
         let (repo, base_branch) = (agent.home().to_path_buf(), None);

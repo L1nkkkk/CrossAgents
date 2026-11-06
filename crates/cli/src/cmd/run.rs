@@ -212,6 +212,7 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
                 );
                 return Ok(());
             }
+            // The work group each run is a round of (`crossagents work show <id>`).
             let rows: Vec<Vec<String>> = list
                 .runs
                 .iter()
@@ -219,12 +220,15 @@ pub async fn run(ctx: &Context, args: RunArgs) -> Result<()> {
                     vec![
                         short_tail(&r.id),
                         enum_name(&r.status),
+                        r.work_id
+                            .map(|id| short_tail(&id))
+                            .unwrap_or_else(|| "-".into()),
                         local_time(r.created_at),
                         r.title.clone(),
                     ]
                 })
                 .collect();
-            print_table(&["RUN", "STATUS", "CREATED", "TITLE"], &rows);
+            print_table(&["RUN", "STATUS", "WORK", "CREATED", "TITLE"], &rows);
         }
         RunCommand::Show { run, verbose } => {
             let detail: RunDetail = client.get(&format!("/v1/runs/{run}")).await?;

@@ -138,12 +138,9 @@ impl Orchestrator {
                 policy.max_agents
             )));
         }
+        // The role is what the recruit is made as, not what it may do: a run's lead is the
+        // claim it holds, so any session can be recruited as a teammate.
         let role = a.role.unwrap_or(Role::Worker);
-        if role == Role::Planner {
-            return Err(CoreError::Conflict(
-                "a run has one lead: recruit workers or reviewers".into(),
-            ));
-        }
         // Defaults: the run's default worker's plugin (and model, unless one is named); a
         // model it cannot run goes to the plugin that can.
         let default = self
@@ -288,12 +285,8 @@ impl Orchestrator {
                 names.join(", ")
             )));
         }
+        // Like a run's recruit: the role is a default for the record, not a limit.
         let role = a.role.unwrap_or(Role::Worker);
-        if role == Role::Planner {
-            return Err(CoreError::Conflict(
-                "not recruited: recruit a worker or a reviewer; planners lead runs".into(),
-            ));
-        }
         let (plugin, model) = self.recruit_target(caller, &a).await?;
         if let Some(model) = &model
             && let Some(allowed) = &policy.spawn_models

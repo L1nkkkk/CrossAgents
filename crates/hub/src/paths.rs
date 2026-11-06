@@ -359,6 +359,43 @@ fn lexically_within(root: &Path, path: &Path) -> Option<()> {
     Some(())
 }
 
+/// Writes `bytes` to `path` so a reader sees either the old file or the new one, never a
+/// half-written one: the bytes go to a temporary file beside it, which is flushed and then
+/// renamed over `path`. On Windows the rename replaces an existing file (MoveFileEx with
+/// MOVEFILE_REPLACE_EXISTING); a reader holding the old file open can make it fail for a
+/// moment, so it is retried briefly.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("no file name to write"))?
+        .to_string_lossy();
+    // The process id keeps two writers from sharing one temporary file.
+    let temporary = path.with_file_name(format!("{name}.{}.tmp", std::process::id()));
+    let result = (|| {
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        let mut attempt = 0;
+        loop {
+            match std::fs::rename(&temporary, path) {
+                Ok(()) => return Ok(()),
+                Err(_) if attempt < 10 && cfg!(windows) => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
 fn read_json_if_exists<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(
@@ -880,5 +917,49 @@ env = { A = "b" }
         assert_eq!(picked.rel.as_deref(), Some("src/a.txt"));
         // The same paths for an agent are refused.
         assert!(outside(confine(&root, &secret, PathSource::Agent)));
+    }
+
+    #[test]
+    fn write_atomic_replaces_the_file_and_leaves_no_temporary() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hub.json");
+        write_atomic(&file, b"{\"a\":1}").unwrap();
+        write_atomic(&file, b"{\"a\":2}").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "{\"a\":2}");
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["hub.json".to_owned()]);
+    }
+
+    /// The race `hub start` hit: a reader polling `hub.json` while the hub writes it must
+    /// never see an empty or half-written file.
+    #[test]
+    fn a_reader_never_sees_a_half_written_hub_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hub.json");
+        let big = |n: usize| format!("{{\"n\":{n},\"pad\":\"{}\"}}", "x".repeat(64 * 1024));
+        write_atomic(&file, big(0).as_bytes()).unwrap();
+
+        let reader = {
+            let file = file.clone();
+            std::thread::spawn(move || {
+                let mut parsed = 0;
+                for _ in 0..2000 {
+                    // A read can fail while a rename is in flight on Windows; a read that
+                    // succeeds must be a whole file.
+                    if let Ok(text) = std::fs::read_to_string(&file) {
+                        serde_json::from_str::<serde_json::Value>(&text).expect("a whole hub file");
+                        parsed += 1;
+                    }
+                }
+                parsed
+            })
+        };
+        for n in 1..300 {
+            write_atomic(&file, big(n).as_bytes()).unwrap();
+        }
+        assert!(reader.join().unwrap() > 0);
     }
 }

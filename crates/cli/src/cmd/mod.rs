@@ -14,6 +14,7 @@ pub mod setup;
 pub mod shim;
 pub mod smoke;
 pub mod usage;
+pub mod work;
 
 use anyhow::Result;
 use crossagents_hub::Paths;
@@ -44,6 +45,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Session(cmd) => session::run(&ctx, cmd).await,
         Command::Plugin(cmd) => plugin::run(&ctx, cmd).await,
         Command::Run(args) => run::run(&ctx, args).await,
+        Command::Work(cmd) => work::run(&ctx, cmd).await,
         Command::Usage(args) => usage::run(&ctx, args).await,
         Command::Expertise(cmd) => expertise::run(&ctx, cmd).await,
         Command::Lessons(cmd) => lesson::run(&ctx, cmd).await,

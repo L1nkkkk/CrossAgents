@@ -17,15 +17,16 @@ use crate::engine::Orchestrator;
 use crate::files::rel_of;
 use crate::graph::{CommitNode, GRAPH_LIMIT, GRAPH_MAX, valid_sha};
 
-/// Why a Git view request was refused. The API answers 403, 404, 400 and 500 for these.
+/// Why a Git view request was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitError {
     /// The path does not name a project the hub knows.
     Outside(String),
     /// Nothing of that name is there: a missing directory, or a commit no ref reaches.
     NotFound(String),
-    /// Not something the Git view reads: a path that is not absolute, or a directory that
-    /// is not in a git repository.
+    /// A known project directory is not in a git repository.
+    Conflict(String),
+    /// An invalid request.
     BadRequest(String),
     /// The file system or git failed.
     Failed(String),
@@ -36,6 +37,7 @@ impl std::fmt::Display for GitError {
         match self {
             Self::Outside(what) => write!(f, "not a project the hub knows: {what}"),
             Self::NotFound(what) => write!(f, "not found: {what}"),
+            Self::Conflict(what) => write!(f, "{what}"),
             Self::BadRequest(what) => write!(f, "{what}"),
             Self::Failed(what) => write!(f, "{what}"),
         }
@@ -640,10 +642,10 @@ impl Orchestrator {
     }
 
     /// [`Self::git_root`], and then a check that git can read it.
-    async fn git_repo(&self, input: &str) -> Result<PathBuf, GitError> {
+    pub async fn git_repo(&self, input: &str) -> Result<PathBuf, GitError> {
         let root = self.git_root(input).await?;
         if !is_repo(&root).await? {
-            return Err(GitError::BadRequest(format!(
+            return Err(GitError::Conflict(format!(
                 "{} is not in a git repository",
                 root.display()
             )));
