@@ -1486,6 +1486,159 @@ pub struct CommitGraph {
     pub truncated: bool,
 }
 
+/// One branch of a project, as `GET /v1/git/branches?path=` lists it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GitBranch {
+    /// The short name: `main`, `origin/main`.
+    pub name: String,
+    /// A remote-tracking branch (`refs/remotes/…`) rather than a local one.
+    pub remote: bool,
+    pub sha: String,
+    /// What it tracks, by short name (`origin/main`).
+    #[serde(default)]
+    #[ts(optional)]
+    pub upstream: Option<String>,
+    /// Commits on the branch that its upstream does not have.
+    #[serde(default)]
+    pub ahead: u32,
+    /// Commits the upstream has that the branch does not.
+    #[serde(default)]
+    pub behind: u32,
+    /// HEAD points at this branch.
+    #[serde(default)]
+    pub current: bool,
+}
+
+/// `GET /v1/git/branches?path=`: a project's local and remote-tracking branches.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GitBranchesResponse {
+    /// The project directory, absolute, as the hub names it.
+    pub root: String,
+    pub branches: Vec<GitBranch>,
+    /// The branch HEAD is on; absent when HEAD is detached or the repository is unborn.
+    #[serde(default)]
+    #[ts(optional)]
+    pub head: Option<String>,
+    /// The commit HEAD names; absent in a repository without commits.
+    #[serde(default)]
+    #[ts(optional)]
+    pub head_sha: Option<String>,
+}
+
+/// One side of a file's state in `git status --porcelain=v2`: the index (`X`) or the
+/// working tree (`Y`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum GitFileState {
+    Unchanged,
+    Modified,
+    Added,
+    Deleted,
+    Renamed,
+    Copied,
+    TypeChanged,
+    Unmerged,
+    Unknown,
+}
+
+/// One changed path in a project's working copy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GitStatusEntry {
+    /// Relative to the project root, with `/`.
+    pub path: String,
+    /// The path before a rename or copy.
+    #[serde(default)]
+    #[ts(optional)]
+    pub orig_path: Option<String>,
+    pub index: GitFileState,
+    pub worktree: GitFileState,
+    /// Git does not track the file (the `?` record).
+    #[serde(default)]
+    pub untracked: bool,
+    /// An unresolved merge (the `u` record).
+    #[serde(default)]
+    pub conflicted: bool,
+}
+
+/// `GET /v1/git/status?path=`: a project's working copy, parsed from
+/// `git status --porcelain=v2`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GitStatusResponse {
+    /// The project directory, absolute, as the hub names it.
+    pub root: String,
+    /// The commit HEAD is at; absent in a repository without commits.
+    #[serde(default)]
+    #[ts(optional)]
+    pub head: Option<String>,
+    /// The branch HEAD is on; absent when HEAD is detached.
+    #[serde(default)]
+    #[ts(optional)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub upstream: Option<String>,
+    #[serde(default)]
+    pub ahead: u32,
+    #[serde(default)]
+    pub behind: u32,
+    pub entries: Vec<GitStatusEntry>,
+}
+
+/// `GET /v1/git/commits/{sha}?path=`: one commit's author, time, whole message and parents.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GitCommitResponse {
+    /// The project directory, absolute, as the hub names it.
+    pub root: String,
+    pub sha: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    pub author_email: String,
+    pub time: DateTime<Utc>,
+    /// The subject line.
+    pub subject: String,
+    /// The whole message, subject line and body.
+    pub message: String,
+}
+
+/// What a ref of the whole-repository graph is: HEAD, a local branch, a remote-tracking
+/// branch, or a tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum GitRefKind {
+    Head,
+    Local,
+    Remote,
+    Tag,
+}
+
+/// A ref shown in the whole-repository graph.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GitGraphRef {
+    pub name: String,
+    pub kind: GitRefKind,
+    pub sha: String,
+}
+
+/// `GET /v1/git/graph?path=&limit=`: the whole repository (`git log --all`), newest first
+/// (topological), at most `limit` (200), with every ref and what it points at.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GitGraph {
+    /// The project directory, absolute, as the hub names it.
+    pub root: String,
+    pub refs: Vec<GitGraphRef>,
+    pub commits: Vec<GraphCommit>,
+    pub truncated: bool,
+}
+
 /// `GET /v1/runs/{key}/trace` (docs/tasks/DOGFOOD.md §8): what happened in a run, by task,
 /// folded from the events (so it outlives the workers).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
