@@ -309,6 +309,23 @@ B 删除 run：
 
 > 2026-11-06 run `7cfd5794`。各条的来源和依据见 [TODO.md](TODO.md) 同名一节；没做完的条目留在那里。
 
+- [x] **2. 人的消息怎么送达：对照 Cutex 050 §2**：先只读核对，写成 [tasks/DELIVERY-AUDIT.md](tasks/DELIVERY-AUDIT.md)：「一条消息一个位置」「原因码」「重试不重复」三条违反，「忙」只有一个来源这条部分符合，「人自己发起的中断不弹提示」符合。人选了 8 条全做：
+  - hub（`crates/hub/src/runtime.rs`、`api.rs`、`crates/core/src/event.rs`、`api-types`）：
+    - 原因码 `QueuedReason` 进响应、`agent.input` 和错误体。插话写失败不再静默改成排队，返回 502 并发 `agent.input_refused`。
+    - `client_message_id` 去重：每个 agent 保留最近 256 条，停止时清掉。
+    - `POST …/messages/{id}/send-now`：同一个 id 原地提升。
+    - 「判定排队」和「入队」放进同一段临界区。
+    - 转录快照加 `delivery { state, queued }`，状态变化时发 `agent.delivery_changed`。
+  - GUI：
+    - 人的消息只占一行，状态原地变，撤回后留「已撤回」一行；「接下来」只列编排消息。
+    - `lib/delivery.ts` 把每个原因码映射成一句中文。
+    - 重试复用 client id；超时显示「不确定发没发出去」。
+    - 输入框、「接下来」和侧栏读同一份「忙」。
+    - 「立即发送」走 send-now。
+    - 失败文案经 `errors.ts` 映射。
+  - P3-8 先确认：Claude 驱动插话写失败时，`ended()` 已经清空整个 Turn，不会读到两次。怀疑不成立，没改逻辑，只加测试锁住。
+  - 测试：`crates/mock-agent/tests/delivery.rs`（8 条）、`delivery_state.rs`（4 条），`runtime.rs` 的去重上限单测，`api-types` 的原因码穷举测试，`claude_native` 的 `failed_steer_write_leaves_no_claim_on_the_turn`；GUI 有 `lib/delivery.test.ts`、`lib/activity.test.ts`，`errors.test.ts`、`steer.test.ts` 补了用例。mock 场景 `delivery`，截图 `docs/screens/delivery-queued.png`（深色、宽屏；mock 里两条排队消息的原因码是反着配的，只是演示数据）。
+  - 没验证 / 没做完：见 TODO.md 同名一节的「2 的尾巴」。
 - [x] **3. 排队的提示随人的消息一起送**（Cutex 057）：人发消息时，如果这个 agent 还排着一条没开始的通知汇总，hub 就把汇总撤回（发 `agent.input_withdrawn`），并进人的这条消息。agent 读到的是人的话在前、汇总在后，不用为汇总单独多跑一轮。`agent.input` 和转录的每一轮都多了 `notices` 字段，`text` 仍是人的原话；GUI 把提示折叠挂在人的气泡下面（「随这条消息送达 N 条提示」），重新加载转录后还在。汇总已经开始，或者人发出之后才到的通知，照原来的规则走。撤回和合并在 `digests` 锁里一次做完，加锁顺序和 `notify` 一致（评审时发现过一个丢行的竞态，已修）。
   - 代码：`crates/hub/src/runtime.rs` `take_waiting_digest`、`crates/core/src/event.rs`、`crates/hub/src/transcript.rs`、`crates/api-types`、`apps/gui/src/views/SessionMessage.tsx`、`lib/notices.ts`。
   - 测试：`crates/mock-agent/tests/notices_ride.rs`，2 个用例覆盖 3 种情形（合并且只多跑一轮；汇总已开始时不合并；合并之后再来的通知另起一条汇总）；`apps/gui/src/lib/notices.test.ts`。
