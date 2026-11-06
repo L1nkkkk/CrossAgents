@@ -516,6 +516,12 @@ impl Orchestrator {
                     .join("、")
             ));
         }
+        // Who the commit credits: the hub's identity says nothing about the agents that did
+        // the work, so they go in trailers (docs/tasks/SELF.md B2). A pull request has no
+        // commit of ours to put them in, and its title is this message.
+        if mode != LandMode::Pr {
+            message = self.coauthored(&run, message).await;
+        }
         run.base_branch = baseline;
         // Read again here, right before the merge: a run may have taken the directory since
         // the checks above (docs/tasks/LEAD.md §7). Landing refuses rather than merge there.

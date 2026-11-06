@@ -183,6 +183,11 @@ pub struct Orchestrator {
     pub(crate) land_cleanup: std::sync::Mutex<HashMap<AgentId, RunId>>,
     /// Commands agents are running now (`crate::running`).
     pub(crate) running: std::sync::Mutex<crate::running::RunningCommands>,
+    /// Stages whose batch has ended and whose wakeup the lead already got, by run
+    /// (`crate::stage`, docs/research/multica.md §2.2). In memory: after a restart a stage
+    /// that ended meanwhile is reported once more, never lost.
+    pub(crate) stage_wakeups:
+        std::sync::Mutex<HashMap<RunId, std::collections::HashSet<u32>>>,
     /// What an agent's current turn failed with, until the turn ends: the stalled notice
     /// says why, or its issuer only nudges it into the same failure.
     turn_errors: std::sync::Mutex<HashMap<AgentId, String>>,
@@ -270,6 +275,7 @@ impl Orchestrator {
             leaving: std::sync::Mutex::default(),
             land_cleanup: std::sync::Mutex::default(),
             running: std::sync::Mutex::default(),
+            stage_wakeups: std::sync::Mutex::default(),
             turn_errors: std::sync::Mutex::default(),
             extensions: std::sync::OnceLock::new(),
         })
@@ -1579,6 +1585,9 @@ The person changed: {}",
             self.transition(&mut task, TaskStatus::Cancelled).await?;
         }
         let tasks = self.store.list_tasks(run.id).await?;
+        // A stage whose tasks have all ended wakes the lead, before the next one is
+        // released (docs/research/multica.md §2.2, `crate::stage`).
+        self.wake_stages(run, &tasks).await?;
         let ready: Vec<Task> = plan::ready_tasks(&tasks, run.config.max_parallel)
             .into_iter()
             .cloned()

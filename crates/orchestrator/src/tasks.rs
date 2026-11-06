@@ -49,6 +49,7 @@ fn task_json(task: &Task) -> Value {
         "issuer": task.issuer,
         "assignee": task.assignee,
         "depends_on": task.depends_on,
+        "stage": task.spec.stage,
         "progress": task.progress,
         "open_question": task.report.question,
     })

@@ -59,6 +59,28 @@ pub fn kickoff(
     env: Option<&RunEnv>,
     sessions: &str,
 ) -> String {
+    kickoff_with(
+        run,
+        team,
+        default_worker,
+        checks,
+        env,
+        sessions,
+        &crate::machine::current(),
+    )
+}
+
+/// [`kickoff`] with the machine its toolchain line describes (docs/tasks/SELF.md B4): a test
+/// gives a fake one, and the hub gives what it probed.
+pub fn kickoff_with(
+    run: &Run,
+    team: &[Agent],
+    default_worker: AgentId,
+    checks: &Result<RunChecks, String>,
+    env: Option<&RunEnv>,
+    sessions: &str,
+    machine: &crate::machine::Machine,
+) -> String {
     let mut out = run.request.trim().to_owned();
     out.push_str(KICKOFF_SEPARATOR);
     if run.leads_in_place() {
@@ -113,6 +135,11 @@ pub fn kickoff(
         if let Some(env) = env {
             out.push_str(&environment(env));
         }
+    }
+    // What the machine the session runs on offers: a fact, so that a turn is not spent finding
+    // out that `python` here is Windows' Store placeholder (docs/tasks/SELF.md B4).
+    if let Some(line) = machine.line() {
+        let _ = write!(out, "\n{line}");
     }
     out.push_str(&roster(team, default_worker));
     if !team.iter().any(|a| a.id == default_worker) {
@@ -290,18 +317,34 @@ pub fn task(task: &Task) -> String {
 /// worker that learned it only from its session instructions may forget it after a long
 /// turn.
 pub fn assignment(task: &Task) -> String {
-    format!(
+    assignment_with(task, &crate::machine::current())
+}
+
+/// [`assignment`] with the machine its toolchain line describes (docs/tasks/SELF.md B4): a
+/// test gives a fake one, and the hub gives what it probed.
+pub fn assignment_with(task: &Task, machine: &crate::machine::Machine) -> String {
+    let mut out = format!(
         "{}\n\nWhen done, report with `task_complete` (this task_id and a summary); a turn that \
          ends without a report leaves the task stalled.",
         self::task(task)
-    )
+    );
+    // What the machine the worker runs on offers (docs/tasks/SELF.md B4).
+    if let Some(line) = machine.line() {
+        let _ = write!(out, "\n\n{line}");
+    }
+    out
 }
 
 /// A task as the worker it was handed to gets it: the assignment, then the handoff card —
 /// who had it, why it moved, what they changed and left open. A first assignment is the
 /// assignment alone.
 pub fn handover(task: &Task, card: &Handoff) -> String {
-    let mut out = assignment(task);
+    handover_with(task, card, &crate::machine::current())
+}
+
+/// [`handover`] with the machine its toolchain line describes (docs/tasks/SELF.md B4).
+pub fn handover_with(task: &Task, card: &Handoff, machine: &crate::machine::Machine) -> String {
+    let mut out = assignment_with(task, machine);
     if card.kind == HandoffKind::Assign && card.reason.is_none() {
         return out;
     }

@@ -49,6 +49,28 @@ pub fn validate(tasks: &[PlannedTask]) -> Result<(), String> {
             }
         }
     }
+    // A later stage starts only once this one has ended, so waiting for a task in it would
+    // never end (docs/research/multica.md §2.2).
+    let stages: HashMap<&str, Option<u32>> = tasks
+        .iter()
+        .map(|t| (t.key.as_str(), t.spec.stage))
+        .collect();
+    for task in tasks {
+        let Some(own) = task.spec.stage else {
+            continue;
+        };
+        for dep in &task.depends_on {
+            let Some(Some(dep_stage)) = stages.get(dep.as_str()).copied() else {
+                continue;
+            };
+            if dep_stage > own {
+                problems.push(format!(
+                    "task {:?} (stage {own}) depends on {dep:?} (stage {dep_stage}), which starts only after stage {own} has ended",
+                    task.key
+                ));
+            }
+        }
+    }
     if problems.is_empty()
         && let Some(cycle) = find_cycle(tasks)
     {
@@ -134,8 +156,9 @@ pub fn scopes_overlap(a: &Scope, b: &Scope) -> bool {
     })
 }
 
-/// Tasks that can start now: pending, every dependency merged, no scope overlap with work in
-/// progress or with each other, and within the parallelism limit.
+/// Tasks that can start now: pending, every dependency merged, every earlier stage ended (see
+/// [`crate::stage`]), no scope overlap with work in progress or with each other, and within the
+/// parallelism limit.
 pub fn ready_tasks(tasks: &[Task], max_parallel: u32) -> Vec<&Task> {
     let merged: HashSet<&str> = tasks
         .iter()
@@ -161,7 +184,7 @@ pub fn ready_tasks(tasks: &[Task], max_parallel: u32) -> Vec<&Task> {
         let clashes = others
             .iter()
             .any(|other| scopes_overlap(&task.spec.scope, &other.spec.scope));
-        if deps_done && !clashes {
+        if deps_done && !clashes && crate::stage::released(tasks, task.spec.stage) {
             active.push(task);
             ready.push(task);
         }
@@ -322,6 +345,42 @@ mod tests {
         let mut running = tasks.clone();
         running[1].status = TaskStatus::Running;
         assert_eq!(keys(ready_tasks(&running, 3)), ["e"]);
+    }
+
+    #[test]
+    fn later_stages_wait_for_earlier_ones() {
+        let mut tasks = vec![
+            task("a", TaskStatus::Pending, &["a/**"], &[]),
+            task("b", TaskStatus::Pending, &["b/**"], &[]),
+            task("c", TaskStatus::Pending, &["c/**"], &[]),
+        ];
+        tasks[0].spec.stage = Some(1);
+        tasks[1].spec.stage = Some(1);
+        tasks[2].spec.stage = Some(2);
+        let keys = |v: Vec<&Task>| v.iter().map(|t| t.key.clone()).collect::<Vec<_>>();
+        // c depends on nothing and shares no files, but stage 1 has not ended.
+        assert_eq!(keys(ready_tasks(&tasks, 3)), ["a", "b"]);
+        tasks[0].status = TaskStatus::Merged;
+        assert_eq!(keys(ready_tasks(&tasks, 3)), ["b"]);
+        // Ended is enough, whatever it came to.
+        tasks[1].status = TaskStatus::Cancelled;
+        assert_eq!(keys(ready_tasks(&tasks, 3)), ["c"]);
+    }
+
+    #[test]
+    fn rejects_a_dependency_on_a_later_stage() {
+        let mut first = planned("a", &["b"]);
+        first.spec.stage = Some(1);
+        let mut second = planned("b", &[]);
+        second.spec.stage = Some(2);
+        let err = validate(&[first, second]).unwrap_err();
+        assert!(err.contains("stage 1") && err.contains("stage 2"), "{err}");
+
+        let mut first = planned("a", &[]);
+        first.spec.stage = Some(1);
+        let mut second = planned("b", &["a"]);
+        second.spec.stage = Some(2);
+        assert!(validate(&[first, second]).is_ok());
     }
 
     #[test]

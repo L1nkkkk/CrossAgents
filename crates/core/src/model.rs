@@ -639,6 +639,13 @@ pub struct TaskSpec {
     /// JSON Schema for the worker's structured result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_schema: Option<serde_json::Value>,
+    /// The stage the task belongs to, if any (docs/research/multica.md §2.2): tasks of a
+    /// later stage start only once every task of an earlier stage has ended, and the lead is
+    /// woken when each stage's batch ends. `None` is no staging, as in plans written before
+    /// stages existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub stage: Option<u32>,
 }
 
 /// One task in a submitted plan. `key` is the planner's own short name for it.
