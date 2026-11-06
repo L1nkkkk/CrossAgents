@@ -957,6 +957,56 @@ pub struct ContinuationState {
     /// set and the run is in such a phase; old records read it back as absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stuck_watch: Option<StuckWatch>,
+    /// What the wakeups have done lately. The automation breaker pauses the continuation when
+    /// it ran at least 50 times in 7 days and failed 90% of them
+    /// (docs/research/multica.md §2.14); a paused run is not woken again.
+    #[serde(default, skip_serializing_if = "Health::is_empty")]
+    pub health: Health,
+}
+
+/// One run of an automation: when, and whether it did what it was for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct RunRecord {
+    pub at: DateTime<Utc>,
+    pub ok: bool,
+}
+
+/// What an automation (a repeating rule, a run's continuation) has done lately, and whether it
+/// paused itself. Kept in the rule's or the run's own record, so a restarted hub reads the same
+/// counts instead of forgetting them. Counting, and the trip itself, live in the orchestrator's
+/// breaker; this is only the record.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct Health {
+    /// One entry per run inside the window; older ones are pruned as it is written.
+    #[serde(default)]
+    pub runs: Vec<RunRecord>,
+    /// Set when the automation stopped itself; it stays paused until a person clears it.
+    #[serde(default)]
+    pub paused_at: Option<DateTime<Utc>>,
+    /// Why it paused, for the note the person gets.
+    #[serde(default)]
+    pub pause_reason: Option<String>,
+}
+
+impl Health {
+    pub fn is_paused(&self) -> bool {
+        self.paused_at.is_some()
+    }
+
+    /// Nothing has run and nothing is paused: the field stays out of the record.
+    fn is_empty(&self) -> bool {
+        self.runs.is_empty() && self.paused_at.is_none()
+    }
+
+    /// Stops the automation, with the reason the person is told.
+    pub fn pause(&mut self, now: DateTime<Utc>, reason: String) {
+        if self.paused_at.is_none() {
+            self.paused_at = Some(now);
+            self.pause_reason = Some(reason);
+        }
+    }
 }
 
 /// Progress bookmark of the stuck watch. It lives in the run record, so a restarted hub
@@ -1209,6 +1259,7 @@ mod tests {
                 progress_at: now,
                 event_seq: 42,
             }),
+            health: Health::default(),
         };
         let json = serde_json::to_value(&state).unwrap();
         assert_eq!(json["stuck_watch"]["event_seq"], 42);

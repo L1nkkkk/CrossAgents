@@ -4,17 +4,19 @@ import type { BackgroundResponse } from "@bindings/BackgroundResponse";
 import { board, countdown, elapsed, watchOn, withoutReminder } from "./background.ts";
 
 const reminder = (id: string, owner: string, run: string | null, task: string | null = null) => ({
-  reminder: { id, owner, due_at: "2026-11-04T10:30:00Z", note: id, task, only_if_open: false, created_at: "2026-11-04T10:00:00Z" },
+  reminder: { id, owner, due_at: "2026-11-04T10:30:00Z", note: id, task, only_if_open: false, wait_expired: false, created_at: "2026-11-04T10:00:00Z" },
   owner_name: owner,
   task_key: task,
   run_id: run,
 });
 
+const noHealth = { runs: [], paused_at: null, pause_reason: null };
+
 const bg: BackgroundResponse = {
   reminders: [reminder("r-luna", "luna", "run-a"), reminder("r-vega", "vega", "run-b"), reminder("r-solo", "solo", null)],
   watches: [
-    { watch: { id: "w-1", owner: "vega", target: { kind: "agent", agent_id: "luna" }, on: ["done"], created_at: "2026-11-04T10:00:00Z" }, owner_name: "vega", target_name: "luna", run_id: null },
-    { watch: { id: "w-2", owner: "solo", target: { kind: "task", task_id: "t-9" }, on: [], created_at: "2026-11-04T10:00:00Z" }, owner_name: "solo", target_name: "#auth", run_id: "run-b" },
+    { watch: { id: "w-1", owner: "vega", target: { kind: "agent", agent_id: "luna" }, on: ["done"], created_at: "2026-11-04T10:00:00Z", expires_at: null, chain: 0, health: noHealth }, owner_name: "vega", target_name: "luna", run_id: null },
+    { watch: { id: "w-2", owner: "solo", target: { kind: "task", task_id: "t-9" }, on: [], created_at: "2026-11-04T10:00:00Z", expires_at: null, chain: 0, health: noHealth }, owner_name: "solo", target_name: "#auth", run_id: "run-b" },
   ],
   verifying: [
     { task_id: "t-1", run_id: "run-a", run_title: "A", key: "api", title: "API", assignee: "mia", assignee_name: "mia", checks: 2, since: "2026-11-04T10:00:00Z" },

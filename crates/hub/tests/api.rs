@@ -1587,6 +1587,7 @@ async fn the_background_board_lists_reminders_and_watches_and_cancels_a_reminder
         note: format!("check {id}"),
         task: None,
         only_if_open: false,
+        wait_expired: false,
         created_at: now,
     };
     store.insert_reminder(&later("r-late", 90)).await.unwrap();
@@ -1598,6 +1599,9 @@ async fn the_background_board_lists_reminders_and_watches_and_cancels_a_reminder
             target: WatchTarget::Agent { agent_id: vega.id },
             on: vec![WatchOn::Done, WatchOn::Failed],
             created_at: now,
+            expires_at: None,
+            chain: 0,
+            health: Default::default(),
         })
         .await
         .unwrap();
@@ -1610,6 +1614,9 @@ async fn the_background_board_lists_reminders_and_watches_and_cancels_a_reminder
             },
             on: vec![WatchOn::Any],
             created_at: now,
+            expires_at: None,
+            chain: 0,
+            health: Default::default(),
         })
         .await
         .unwrap();

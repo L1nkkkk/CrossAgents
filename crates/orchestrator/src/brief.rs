@@ -23,6 +23,15 @@ const PLAN_WAITS: &str = "\nplan: the person approves it and picks who runs each
      start the work yourself. Answering a question, or reporting that nothing needs changing, \
      needs no plan.";
 
+/// The dispatch protocol, appended to the lead's kickoff as a fixed section: the lead runs the
+/// work by delegating, and each time it is woken to evaluate it leaves one line saying what it
+/// decided (docs/research/multica.md §2.3). The person cannot edit it away.
+pub const DISPATCH: &str = "\ndispatch: you run the work by delegating it, not by doing a \
+     member's task yourself. Hand a task over with `task_create` or `task_assign` and stop \
+     there: the member works it and reports back, and you check the report. Whenever you are \
+     woken to look at progress, leave one line in your reply saying what you decided and what \
+     comes next.";
+
 pub fn previous_rounds(rounds: &[Run]) -> String {
     let mut out = String::new();
     if !rounds.is_empty() {
@@ -141,6 +150,7 @@ pub fn kickoff_with(
     if let Some(line) = machine.line() {
         let _ = write!(out, "\n{line}");
     }
+    out.push_str(DISPATCH);
     out.push_str(&roster(team, default_worker));
     if !team.iter().any(|a| a.id == default_worker) {
         // No worker was picked: tasks, if any, run on the lead's model.
@@ -491,6 +501,30 @@ mod tests {
         }
     }
 
+    fn agent(name: &str) -> Agent {
+        Agent {
+            id: AgentId::new(),
+            name_source: crossagents_core::NameSource::Chosen,
+            topic: None,
+            archived_at: None,
+            home: std::path::PathBuf::new(),
+            name: name.into(),
+            plugin: "claude".into(),
+            driver: None,
+            model: None,
+            role: crossagents_core::Role::Worker,
+            cwd: ".".into(),
+            config: serde_json::Value::Null,
+            status: crossagents_core::AgentStatus::Stopped,
+            created_at: Utc::now(),
+            profile: crossagents_core::AgentProfile {
+                display_name: Some(name.into()),
+                title: Some("builds things".into()),
+                ..crossagents_core::AgentProfile::default()
+            },
+        }
+    }
+
     fn card(kind: HandoffKind) -> Handoff {
         Handoff {
             id: HandoffId::new(),
@@ -583,6 +617,24 @@ mod tests {
             assert!(!auto.contains("plan_submit"), "{auto}");
             run.config.policy.plan_approval = PlanApproval::Required;
         }
+        // The dispatch protocol and the roster are fixed sections, in that order, whatever the
+        // team is (multica §2.3).
+        let team = vec![agent("Rex")];
+        let text = kickoff(&run, &team, worker, &Err("test".into()), None, "");
+        let dispatch = text
+            .find("dispatch: you run the work by delegating")
+            .unwrap_or_else(|| panic!("no dispatch protocol:\n{text}"));
+        let roster = text
+            .find("team (name one as a task's assignee or reviewer)")
+            .unwrap_or_else(|| panic!("no roster:\n{text}"));
+        assert!(
+            dispatch < roster,
+            "the roster must follow the protocol:\n{text}"
+        );
+        assert!(text.contains("- Rex — Rex, builds things"), "{text}");
+        // A run with nobody on the team still gets the protocol.
+        let alone = kickoff(&run, &[], worker, &Err("test".into()), None, "");
+        assert!(alone.contains("dispatch: you run the work"), "{alone}");
     }
 
     #[test]

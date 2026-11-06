@@ -2041,6 +2041,9 @@ async fn update_run_policy(
         // was told the old one ran out is forgotten, so the next exhaustion tells again.
         continuation.attempts = 0;
         continuation.exhausted_notified = false;
+        // Re-arming also lifts a pause the automation breaker set: the person has looked at
+        // the failing stretch and asked for it to run again, so the counts start over.
+        continuation.health = Default::default();
         // The clock arms the next wakeup from the interval it reads; it does not fire
         // one immediately.
         continuation.next_at = None;
