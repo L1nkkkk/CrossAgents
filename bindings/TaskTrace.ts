@@ -3,6 +3,7 @@ import type { CheckTrace } from "./CheckTrace";
 import type { DispatchTrace } from "./DispatchTrace";
 import type { Handoff } from "./Handoff";
 import type { LaneTrace } from "./LaneTrace";
+import type { StatusTrace } from "./StatusTrace";
 import type { TaskId } from "./TaskId";
 import type { TaskStatus } from "./TaskStatus";
 
@@ -21,7 +22,7 @@ rerouted: Array<string>,
 /**
  * Each dispatch of a worker for it (`task.routed`), with the accounts weighed and why.
  */
-dispatches: Array<DispatchTrace>, 
+dispatches?: Array<DispatchTrace>, 
 /**
  * Each time it changed hands (`task.handed_off`), oldest first.
  */
@@ -29,4 +30,8 @@ handoffs: Array<Handoff>,
 /**
  * The earliest thing that went wrong: a failed check, a failed command, a failed turn.
  */
-first_failure: string | null, };
+first_failure: string | null, 
+/**
+ * Each status change, oldest first (the swimlane's 提交, 重试, 合并 nodes).
+ */
+statuses?: Array<StatusTrace>, };

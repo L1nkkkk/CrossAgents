@@ -5,6 +5,7 @@ import { emptyHub } from "../views/Home.mock";
 import { extensionScene } from "./extensions.mock";
 import { approvalRun, deleteRun, graphRun, handoffRun, inPlaceRun, landingRun, longResultsRun, oauthRun, pausedRun, rerouteRun, reuseRun, reviewRun, syncRun, traceRun } from "../views/Run.mock";
 import { relayScene } from "../views/RunRelay.mock";
+import { swimlaneScene } from "../views/RunSwimlane.mock";
 import { runCostScene } from "../views/RunCost.mock";
 import type { BackgroundResponse } from "@bindings/BackgroundResponse";
 import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, failedEditSession, liveRun, liveSession, liveTaskSession, longNameScene, moderationSession, slashScene, soloSession, toolImagePathsSession, toolImagesSession } from "../views/Session.mock";
@@ -31,6 +32,13 @@ export type Scenario = {
 };
 
 export const SCENARIOS: Scenario[] = [
+  { key: "swimlane", label: "Run 泳道图", hint: "一个 Worker 一根线：交接、提交、测试 ✓/✗、重试、改派（分叉）、合入、上下文压缩、模型切换、等你；点名字只看一根线", build: () => swimlaneScene() },
+  { key: "swimlane-landed", label: "Run 泳道图 · 已落地", hint: "三条线都合入后落地，泳道以「落地」收尾", build: () => swimlaneScene(true) },
+  { key: "swimlane-focus", label: "Run 泳道图 · 聚焦", hint: "只看 Rex 一根线，节点带时间", build: () => {
+    const scene = swimlaneScene();
+    const focus: Step = { at: 900, act: () => document.querySelector<HTMLButtonElement>('[data-card="run-swimlane"] .swim-head')?.click() };
+    return { ...scene, script: [...scene.script, focus] };
+  } },
   { key: "relay-needyou", label: "接力链 · 需要你 · 按产出命名", hint: "每条任务线一行接力链；问题在时间线里点选回答；折叠的步骤按产出命名，产物在下面", build: () => relayScene() },
   { key: "relay-needyou-steps", label: "按产出命名的步骤", hint: "折叠的步骤读作「改了 3 个文件 · 跑了测试：通过 · 出了 1 张图」，缩略图和路径就在那一行下面（这个问题已在别处答完，好让对话有地方）", build: () => {
     const scene = relayScene();

@@ -1,0 +1,236 @@
+/* Run 泳道图 (§十三): a column per worker, time running down. Colours come from the theme's
+   variables, so light and dark both hold. */
+
+.swim {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.swim-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.swim-back {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--link);
+  cursor: pointer;
+  font: inherit;
+}
+
+.swim-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-sunk);
+  overflow: hidden;
+}
+
+.swim-head {
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  min-width: 0;
+  padding: 6px 4px 5px 8px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.swim-head + .swim-head {
+  border-left: 1px solid var(--border);
+}
+
+.swim-head:hover {
+  background: var(--hover);
+}
+
+.swim-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.swim-tasks {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+.swim-body {
+  grid-row: 2;
+  grid-column: 1 / -1;
+  position: relative;
+  margin: 6px 0;
+}
+
+.swim-line {
+  position: absolute;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--border-strong);
+  border-radius: 1px;
+}
+
+.swim-fork {
+  position: absolute;
+  height: 0;
+  border-top: 2px dashed var(--warn);
+  opacity: 0.7;
+}
+
+.swim-node {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: calc(100% / var(--cols) - 10px);
+  margin: -9px 0 0 -9px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+  z-index: 1;
+}
+
+.swim-grid.focused .swim-node {
+  max-width: calc(100% - 24px);
+}
+
+.swim-dot {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1;
+}
+
+.swim-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.swim-node:hover .swim-label,
+.swim-node.picked .swim-label {
+  color: var(--text);
+}
+
+.swim-node.picked .swim-dot {
+  box-shadow: 0 0 0 3px var(--focus);
+}
+
+.swim-node.ok .swim-dot {
+  border-color: var(--ok);
+  background: var(--ok-bg);
+  color: var(--ok-text);
+}
+
+.swim-node.bad .swim-dot {
+  border-color: var(--danger);
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+.swim-node.warn .swim-dot {
+  border-color: var(--warn);
+  background: var(--warn-bg);
+  color: var(--warn-text);
+}
+
+.swim-node.accent .swim-dot {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--accent-text);
+}
+
+.swim-node.muted .swim-dot {
+  border-style: dashed;
+}
+
+.swim-node.open .swim-dot {
+  animation: swim-pulse 1.6s ease-in-out infinite;
+}
+
+.swim-node.open .swim-label {
+  color: var(--warn-text);
+  font-weight: 600;
+}
+
+@keyframes swim-pulse {
+  50% {
+    box-shadow: 0 0 0 4px var(--warn-bg);
+  }
+}
+
+.swim-land {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  height: 22px;
+  border: 1px solid var(--ok);
+  border-radius: 999px;
+  background: var(--ok-bg);
+  color: var(--ok-text);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  z-index: 1;
+}
+
+.swim-land.picked {
+  box-shadow: 0 0 0 2px var(--focus);
+}
+
+.swim-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.swim-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono);
+  color: var(--text-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .swim-node.open .swim-dot {
+    animation: none;
+  }
+}
