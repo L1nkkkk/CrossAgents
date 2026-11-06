@@ -54,6 +54,10 @@ pub enum QueuedReason {
     /// A steer was asked for, but writing it into the CLI failed: nothing was delivered
     /// and nothing is queued; the sender decides whether to send it again.
     SteerWriteFailed,
+    /// A steer was written but the CLI did not answer in time: it may or may not have
+    /// arrived. Nothing is queued and it is not sent again; the sender is told the outcome
+    /// is unknown (docs/tasks/DELIVERY-AUDIT.md §3).
+    OutcomeUnknown,
     /// The conversation is archived.
     Archived,
     /// The message already started; it cannot be taken back or moved.

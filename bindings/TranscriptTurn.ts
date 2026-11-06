@@ -2,6 +2,7 @@
 import type { Attachment } from "./Attachment";
 import type { MessageId } from "./MessageId";
 import type { MessageSource } from "./MessageSource";
+import type { QueuedReason } from "./QueuedReason";
 import type { StopReason } from "./StopReason";
 import type { TranscriptItem } from "./TranscriptItem";
 import type { TurnDiffStat } from "./TurnDiffStat";
@@ -42,4 +43,15 @@ attachments?: Array<Attachment>,
  * Notices that rode along with the message (docs/TODO.md §二十五 第 3 条): in what the
  * agent read, after `input`, but not part of it.
  */
-notices?: Array<string>, };
+notices?: Array<string>, 
+/**
+ * Why the message waits, while it has not started: the `agent.input`'s
+ * `queued_reason`, kept so a reloaded transcript says the same thing the live events
+ * did.
+ */
+queued_reason?: QueuedReason, 
+/**
+ * Taken back before it started: the row stays where it was sent and says so
+ * (`agent.input_withdrawn`), instead of vanishing on a reload.
+ */
+withdrawn?: boolean, };
