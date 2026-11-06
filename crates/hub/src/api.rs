@@ -2560,6 +2560,7 @@ async fn agent_files_image(
         .orchestrator
         .files_root(FilesScope::Agent(&agent))
         .await?;
+    crate::paths::refuse_remote(&root, input)?;
     let abs = crate::image::locate(&root, input)?;
     let (kind, bytes) = crate::image::load(&abs, input).await?;
     Ok(Json(ImageContent {
@@ -2675,6 +2676,7 @@ async fn files_tree(
     scope: FilesScope<'_>,
     q: FilesQuery,
 ) -> ApiResult<Json<FileTreeResponse>> {
+    crate::paths::refuse_remote_in(&state.orchestrator, scope, q.path()).await?;
     let git_ref = q.git_ref().map(str::to_owned);
     let tree = state
         .orchestrator
@@ -2736,6 +2738,7 @@ async fn files_content(
     scope: FilesScope<'_>,
     q: FilesQuery,
 ) -> ApiResult<Json<FileContentResponse>> {
+    crate::paths::refuse_remote_in(&state.orchestrator, scope, q.path()).await?;
     let git_ref = q.git_ref().map(str::to_owned);
     let file = state
         .orchestrator
@@ -2759,7 +2762,8 @@ async fn files_resolve(
     scope: FilesScope<'_>,
     req: ResolvePathsRequest,
 ) -> ApiResult<Json<ResolvePathsResponse>> {
-    let found = state.orchestrator.files_resolve(scope, &req.paths).await?;
+    let inputs = crate::paths::without_remote(&state.orchestrator, scope, &req.paths).await?;
+    let found = state.orchestrator.files_resolve(scope, &inputs).await?;
     Ok(Json(ResolvePathsResponse {
         entries: req
             .paths
