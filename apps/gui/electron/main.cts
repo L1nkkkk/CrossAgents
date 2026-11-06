@@ -97,6 +97,29 @@ function message(err: unknown): string {
   return String(err);
 }
 
+/**
+ * What a failed request to the hub means for the message it carried (docs/tasks/DELIVERY-AUDIT.md
+ * §3, §4). A timeout or a connection that dropped mid-flight may already have delivered it, so
+ * that is `outcome_unknown` — never "unreachable", which invites a duplicate send. Only a
+ * connection that was refused (or never resolved) means it certainly did not get there.
+ */
+function transportCode(err: unknown): "outcome_unknown" | "unreachable" {
+  const e = err as { name?: unknown; code?: unknown; cause?: { name?: unknown; code?: unknown } };
+  const name = `${String(e?.name ?? "")} ${String(e?.cause?.name ?? "")}`;
+  if (/AbortError|TimeoutError/.test(name)) return "outcome_unknown";
+  const code = String(e?.code ?? e?.cause?.code ?? "");
+  if (/ECONNREFUSED|ENOTFOUND|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|ENOENT/.test(code)) return "unreachable";
+  // A reset or a silently dropped connection: nobody can say whether the hub saw it.
+  return "outcome_unknown";
+}
+
+/** A request that got no hub answer: `status` 0 with the error body `src/api.ts` reads. */
+function transportFailure(err: unknown) {
+  const code = transportCode(err);
+  const what = code === "outcome_unknown" ? "the request may or may not have reached the hub" : "cannot reach the hub";
+  return { ok: true as const, response: { status: 0, body: JSON.stringify({ error: { code, message: `${what}: ${message(err)}` } }) } };
+}
+
 function fromApp(event: IpcMainEvent | IpcMainInvokeEvent): boolean {
   const url = event.senderFrame?.url;
   return !!url && url.startsWith(appUrl);
@@ -163,7 +186,7 @@ ipcMain.handle("hub:request", async (event, method: unknown, path: unknown, body
         signal: AbortSignal.timeout(timeoutFor(method, path)),
       });
     } catch (err) {
-      throw new Error(`cannot reach the hub: ${message(err)}`);
+      return transportFailure(err);
     }
     return { ok: true, response: { status: response.status, body: await response.text() } };
   } catch (err) {

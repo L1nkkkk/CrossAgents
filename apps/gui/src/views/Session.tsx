@@ -6,7 +6,7 @@ import type { RunDetail } from "@bindings/RunDetail";
 import type { Handoff } from "@bindings/Handoff";
 import type { ModelSwitch } from "@bindings/ModelSwitch";
 import type { TranscriptUsage } from "@bindings/TranscriptUsage";
-import { view } from "../activity";
+import { useDelivery, view } from "../activity";
 import { api, errorText } from "../api";
 import { TurnFiles } from "../attach";
 import { HandoffLine } from "../handoff";
@@ -38,7 +38,8 @@ import { taskState } from "../lib/taskState";
 import { QUIET_AFTER, actionOf, duration, failed, liveActivity, liveKey, liveNow, quietSeconds, stepLine, summarize, workGroups, type ActionTool, type Step } from "../lib/workGroups";
 import { TurnLive, type LiveTurn } from "../liveTurn";
 import { PeerMessage, StateWord, useArmed } from "../parts";
-import { useSession, type TranscriptItem, type TranscriptTurn } from "../session";
+import { useSession, turnExtras, type TranscriptItem, type TranscriptTurn } from "../session";
+import { reasonText } from "../lib/delivery";
 import { dismissNotice, useNotices } from "../notices";
 import { QuestionCards, pending, useQuestions } from "../questions";
 import { executorOf } from "../lib/projectView";
@@ -55,6 +56,16 @@ import { SteerItem, TurnEnded } from "./SessionSteer";
 import { SessionModeration } from "./SessionModeration";
 
 const started = (turn: TranscriptTurn) => !!turn.started_at || !!turn.completed_at;
+
+/**
+ * Whether a turn is drawn in the conversation. A person's own message keeps its row from
+ * submit to end, queued or running or withdrawn, so it never moves to 接下来 and back
+ * (docs/tasks/DELIVERY-AUDIT.md §2, §8 P0-1).
+ */
+const inConversation = (turn: TranscriptTurn) => started(turn) || fromPerson(turn) || !!turnExtras(turn).withdrawn;
+
+/** What 接下来 lists: orchestration messages, waiting; the person's own stay in the chat. */
+const inNextUp = (turn: TranscriptTurn) => !started(turn) && !fromPerson(turn) && !turnExtras(turn).withdrawn;
 
 /**
  * The latest started turn, when it failed because the gateway's content moderation refused the
@@ -230,7 +241,7 @@ export function SessionView({
   // absent; fetching every run's detail for every session and event would be too expensive.
   const associated = [...new Map([...runs, ...(ledRuns.data ?? [])].map((d) => [d.run.id, d])).values()];
   const tasks = associated.flatMap((d) => d.tasks.filter((t) => t.assignee === agent.id || t.reviewer === agent.id).map((t) => ({ run: d.run, task: t })));
-  const queued = turns.filter((t) => !started(t));
+  const queued = turns.filter(inNextUp);
   const poisoned = moderationTurn(turns, agent.status, transcript.error);
   const led = ledRuns.data ?? [];
   const recruits = everyone.filter((a) => (a.config as Record<string, unknown> | null)?.spawned_by_agent === agent.id && !a.archived_at);
@@ -261,7 +272,7 @@ export function SessionView({
         <WorkContext name={name} agent={agent} tasks={tasks} led={led} agents={everyone} execution={execution.data?.execution} />
         <ExecutionBar agent={agent} execution={execution.data?.execution} reload={execution.reload} />
         <NoticeBar agent={agent} />
-        <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} works={workDecisions(questions.data?.items ?? [], agent.id)} agents={everyone} tree={runs} top={top}>
+        <Conversation agent={agent} turns={turns.filter(inConversation)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} works={workDecisions(questions.data?.items ?? [], agent.id)} agents={everyone} tree={runs} top={top}>
           {outgoing.map((m) => (
             <Sending key={m.key} message={m} agent={agent} />
           ))}
@@ -294,7 +305,7 @@ export function SessionView({
           {!onClose && <div ref={questionArea}><QuestionCards agents={everyone} />{questionId && !questions.loading && (!questions.data || !pending(questions.data.items).some((item) => item.id === questionId && item.from === agent.id)) && <p role="alert" className="question-missing">找不到这条待办：它可能已处理、已过期或不属于此会话。{questions.error && ` ${questions.error}`}</p>}</div>}
           {!onClose && <NeedsYouStrip agents={everyone} tree={runs} />}
           <RunStrip runs={liveRuns} agents={everyone} />
-          <QueuePanel agent={agent} queued={queued} onEdit={setDraft} />
+          <QueuePanel agent={agent} queued={queued} delivery={transcript.delivery} />
           {agent.status === "error" && transcript.error && !isModerationError(transcript.error) && (
             <div className="error-bar" role="alert" title={transcript.error}>
               <strong>{errorHint(transcript.error, transcript.exit)}</strong>
@@ -309,7 +320,7 @@ export function SessionView({
               <button onClick={() => void api.archiveAgent(agent.id, false)}>恢复对话</button>
             </div>
           ) : (
-            <Composer agent={agent} capabilities={capabilities} driver={transcript.driver} draft={draft} setDraft={setDraft} plans={pendingPlans} onPlanDone={reload} mates={mates} />
+            <Composer agent={agent} capabilities={capabilities} driver={transcript.driver} delivery={transcript.delivery} draft={draft} setDraft={setDraft} plans={pendingPlans} onPlanDone={reload} mates={mates} />
           )}
         </div>
       </section>
@@ -673,15 +684,23 @@ function AgentName({ agent }: { agent: Agent }) {
 
 /** A message sent from here, while the hub wakes the agent up and takes it (or why it did not). */
 function Sending({ message, agent }: { message: Outgoing; agent: Agent }) {
-  const waking = agent.status === "stopped" || agent.status === "starting" || agent.status === "error";
+  // The row's state changes in place (P0-1). "Waking" is about the process; whether the message
+  // waits, and why, is the hub's own delivery state (P1-4) — an external agent is never woken.
+  const delivery = useDelivery(agent.id);
+  const state =
+    message.steered ? "已插入本轮，等模型读取"
+    : message.queued ? `排队中 · ${reasonText(message.queued)}`
+    : delivery?.state === "held" ? `等 ${displayName(agent)} 自己来取`
+    : delivery?.state === "starting" || agent.status === "stopped" || agent.status === "starting" || agent.status === "error" ? `正在唤起 ${displayName(agent)}…`
+    : "发送中…";
   return (
     <div className="turn sending">
       {(message.text || !message.attachments?.length) && <div className="bubble">{message.text}</div>}
       {!!message.attachments?.length && <div className="turn-note small muted">附件：{message.attachments.map((a) => a.name).join("、")}</div>}
       {message.error ? (
-        <div className="turn-note danger row" style={{ gap: 8 }} title={message.error}>
-          <span>没发出去：{message.error}</span>
-          <button className="ghost small" onClick={() => retryMessage(message.key)}>
+        <div className="turn-note danger row" style={{ alignSelf: "flex-end", gap: 8 }} title={message.errorRaw ?? message.error}>
+          <span>{message.outcomeUnknown ? message.error : `没发出去：${message.error}`}</span>
+          <button className="ghost small" title="用同一条消息重试，hub 不会重复发送" onClick={() => retryMessage(message.key)}>
             重试
           </button>
           <button className="ghost small" onClick={() => dismissMessage(message.key)}>
@@ -695,9 +714,36 @@ function Sending({ message, agent }: { message: Outgoing; agent: Agent }) {
             <i />
             <i />
           </span>
-          <span className="muted small">{waking ? `正在唤起 ${displayName(agent)}…` : "发送中…"}</span>
+          <span className="muted small">{state}</span>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * A person's message that has not started: it waits, and this row says why — no other panel
+ * holds a copy of it (P0-1). "立即发送" promotes this very message (same id) instead of
+ * withdrawing it and sending another (P1-5); a failure leaves it waiting.
+ */
+function WaitingTurn({ turn, agent }: { turn: TranscriptTurn; agent: Agent }) {
+  const [error, setError] = useState<string>();
+  const extras = turnExtras(turn);
+  if (extras.withdrawn) return <div className="turn-note" style={{ alignSelf: "flex-end" }}>— 已撤回，没有发给 {displayName(agent)}</div>;
+  const act = (action: () => Promise<unknown>) => {
+    setError(undefined);
+    action().catch((err) => setError(errorText(err)));
+  };
+  return (
+    <div className="turn-note row" style={{ alignSelf: "flex-end", gap: 8 }}>
+      <span>排队中{extras.queued_reason ? ` · ${reasonText(extras.queued_reason)}` : ""}</span>
+      <button className="ghost small" title="打断当前这一轮，先发这条（还是同一条消息）" onClick={() => act(() => api.sendMessageNow(agent.id, turn.message_id))}>
+        立即发送
+      </button>
+      <button className="ghost small" onClick={() => act(() => api.withdrawMessage(agent.id, turn.message_id))}>
+        撤回
+      </button>
+      {error && <span className="danger small" title={error}>{error}</span>}
     </div>
   );
 }
@@ -863,6 +909,7 @@ function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agen
         <>
           {(turn.input || !turn.attachments?.length) && <Bubble turn={turn} tree={tree} />}
           <TurnFiles agent={agent.id} files={turn.attachments ?? []} />
+          {!turn.started_at && <WaitingTurn turn={turn} agent={agent} />}
         </>
       ) : (
         <PeerMessage turn={turn} agents={agents} tree={tree} />

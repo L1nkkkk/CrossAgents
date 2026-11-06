@@ -9,7 +9,7 @@ import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, 
 import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
 import { usageScene } from "../views/Usage.mock";
 import { expertiseScene } from "../views/Expertise.mock";
-import { agent, ago, capabilitiesOf, NOTES_REPO, planned, REPO, say, team, think, turn } from "./fixtures";
+import { agent, ago, capabilitiesOf, NOTES_REPO, planned, REPO, say, team, think, transcript, turn } from "./fixtures";
 import { openFile } from "../FileViewer";
 import { openTool, placeTab } from "../panes";
 import { setBottomHeight, setToolsWidth } from "../lib/widths";
@@ -29,6 +29,33 @@ export type Scenario = {
 };
 
 export const SCENARIOS: Scenario[] = [
+  { key: "delivery", label: "消息送达状态", hint: "自己发的消息一行到底：排队原因、已撤回、失败可重试", build: () => {
+    // A session with one turn running and messages waiting. The person's messages stay in the
+    // chat with their state on the bubble (P0-1); only the orchestrator's waits list 接下来.
+    const scene = soloSession();
+    const nova = scene.state.agents[0];
+    const t = scene.state.transcripts.get(nova.id)!;
+    const waiting = t.turns.filter((x) => !x.started_at && !x.completed_at);
+    Object.assign(waiting[0], { queued_reason: "owner_queue_ahead" });
+    Object.assign(waiting[1], { queued_reason: "turn_running" });
+    // One the person took back: the row stays, marked (P0-1).
+    const back = turn({ input: "这条算了，撤回吧。", minutesAgo: 0.15, queued: true, items: [] });
+    Object.assign(back.turn, { withdrawn: true });
+    // An orchestration message waiting: this is what 接下来 lists.
+    const orch = turn({ input: "再核对一遍文档里的命令。", from: { kind: "orchestrator", run_id: "run-delivery-preview" }, minutesAgo: 0.05, queued: true, items: [] });
+    Object.assign(orch.turn, { queued_reason: "turn_running" });
+    t.turns = [...t.turns, back.turn, orch.turn];
+    t.delivery = { state: "turn", queued: 4 };
+    // Type a message the mock refuses: its row says 失败 and offers 重试 (P2-6).
+    const type = (text: string) => {
+      const el = document.querySelector<HTMLTextAreaElement>(".composer textarea");
+      if (!el) throw new Error("composer missing");
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(el, text);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    };
+    return { state: scene.state, route: scene.route, script: [{ at: 900, act: () => type("[fail] 这条发不出去：看文案和重试") }] };
+  } },
   { key: "plan-long-search", label: "长计划中的模型搜索", hint: "浮层防裁切、筛选与清空后恢复高度", build: () => {
     const scene = SCENARIOS.find((s) => s.key === "plan-long")!.build();
     const search = (value: string) => {
@@ -262,6 +289,7 @@ export const SCENARIOS: Scenario[] = [
   { key: "graph", label: "提交图", hint: "run 页的工具列「提交图」：main、run 分支和 #a #b #c 三个任务分支，合并提交是空心点；选中了 #b 的合并，下面是它的 diff，点文件名打开文件", build: () => graphRun() },
   { key: "graph-session", label: "会话的提交图", hint: "Rex 在 #c 的会话页：顶栏「提交图」在右侧工具列打开，HEAD 和本地分支，选中了最新的提交", build: () => graphRun("session") },
   { key: "background", label: "后台看板", hint: "run 页工具列的「后台」：这个 run 的提醒（倒计时、备注、关联任务，可取消）、关注和验收中的 #c 排在前面；Nova 在别处的提醒和关注折叠在下面；约 8 秒后 Rex 的一条提醒到期，从看板上消失", build: () => backgroundScene() },
+  { key: "activity", label: "活动流", hint: "工具列的「活动」：所有 agent 的回复、工具和消息排成一条时间线；类型和范围（某个 agent 及它的下属）可筛，点一条打开对应会话并定位到那一轮", build: () => activityScene() },
   { key: "inplace", label: "无 git 的 run", hint: "文件夹没有 git：run 直接改文件、一次一个任务，可一键初始化 git", build: () => inPlaceRun() },
   { key: "workcard", label: "会话提议 Work", hint: "Nova 在单聊里用 work_start 提议到独立分支上做：卡片可展开交给 Work 的说明，开始 / 不用", build: () => workProposal() },
   { key: "long-results", label: "长结果折叠", hint: "Ada 第一次落地被拒、理由里是整段 cargo test 日志：卡片只留一行（✕ · 落地 run · 对象和理由第一句），点图标或整行看完整理由和调用参数；run 页的总结同样只留一行", build: () => longResultsRun() },
@@ -520,6 +548,107 @@ function backgroundScene() {
         },
         event: { type: "reminder.fired", data: { owner: rex.id, reminder_id: fires, note: "看一眼 CI 有没有跑完" } },
       },
+    ] as Step[],
+  };
+}
+
+/** The 活动 pane: Ada leads, Rex and Mia were recruited by Ada, Kai by Rex; errors, tools and messages interleave. */
+function activityScene() {
+  const lead = agent({ name: "ada", plugin: "claude", model: "claude-opus-4-1", role: "planner", profile: { display_name: "Ada", title: "架构师", color: "indigo" } });
+  const rex = agent({ name: "rex", plugin: "codex", model: "gpt-5-codex", role: "worker", recruitedBy: lead.id, profile: { display_name: "Rex", title: "Coder", color: "sky" } });
+  const mia = agent({ name: "mia", plugin: "claude", model: "claude-sonnet-4-5", role: "worker", recruitedBy: lead.id, profile: { display_name: "Mia", title: "设计师", color: "rose" } });
+  const kai = agent({ name: "kai", plugin: "claude", model: "claude-sonnet-4-5", role: "worker", recruitedBy: rex.id, profile: { display_name: "Kai", title: "测试", color: "teal" } });
+  const state: MockState = { ...emptyHub(), agents: [lead, rex, mia, kai], quota: quota() };
+
+  const t1 = turn({
+    input: "把活动的接口补上，顺便看看 Rex 那边的进度。",
+    minutesAgo: 8,
+    took: 3,
+    items: [say("我先看右侧栏的结构，再让 Rex 补筛选。")],
+  });
+  const t2 = turn({
+    input: "先把类型筛选和范围筛选补上，错误单独标出来。",
+    from: { kind: "agent", agent_id: lead.id },
+    minutesAgo: 5,
+    running: true,
+    items: [say("筛选做成纯函数，先写测试。")],
+  });
+  const t3 = turn({
+    input: "Rex 卡在测试上了，去帮它看一下。",
+    minutesAgo: 2,
+    running: true,
+    items: [say("我去看构建日志。")],
+  });
+  const t4 = turn({
+    input: "文档先不用动，等我这边接口定下来。",
+    from: { kind: "agent", agent_id: lead.id },
+    minutesAgo: 1,
+    running: true,
+    items: [say("收到，我先等。")],
+  });
+  // The turns arrive as events below (the feed only sees what came after the page loaded), so
+  // the transcripts start empty instead of holding the same messages twice.
+  state.transcripts.set(lead.id, transcript(lead, [], 24_000));
+  state.transcripts.set(rex.id, transcript(rex, [], 18_000));
+  state.transcripts.set(kai.id, transcript(kai, [], 12_000));
+  state.transcripts.set(mia.id, transcript(mia, [], 9_000));
+
+  const m1 = t1.turn.message_id;
+  const m2 = t2.turn.message_id;
+  const m3 = t3.turn.message_id;
+  const m4 = t4.turn.message_id;
+
+  return {
+    state,
+    route: `#/s/${lead.name}`,
+    script: [
+      { at: 300, act: () => openTool("activity") },
+      { at: 500, event: { type: "agent.input", data: { id: lead.id, message_id: m1, text: "把活动的接口补上，顺便看看 Rex 那边的进度。", queued: false, from: { kind: "human" } } } },
+      { at: 540, event: { type: "agent.turn_started", data: { id: lead.id, message_id: m1 } } },
+      { at: 600, event: { type: "agent.output", data: { id: lead.id, stream: "thought", text: "先看 ToolColumn 和 panes。" } } },
+      { at: 640, event: { type: "agent.output", data: { id: lead.id, stream: "text", text: "我先看右侧栏的结构，" } } },
+      { at: 680, event: { type: "agent.output", data: { id: lead.id, stream: "text", text: "再让 Rex 补筛选。" } } },
+      { at: 720, event: { type: "agent.tool_call", data: { id: lead.id, tool_call_id: "a-read", title: "Read apps/gui/src/ToolColumn.tsx", kind: "read", status: "in_progress" } } },
+      { at: 760, event: { type: "agent.tool_call_updated", data: { id: lead.id, tool_call_id: "a-read", title: null, status: "completed" } } },
+      { at: 800, event: { type: "agent.input", data: { id: rex.id, message_id: m2, text: "先把类型筛选和范围筛选补上，错误单独标出来。", queued: false, from: { kind: "agent", agent_id: lead.id } } } },
+      { at: 840, event: { type: "agent.turn_started", data: { id: rex.id, message_id: m2 } } },
+      { at: 880, event: { type: "agent.output", data: { id: rex.id, stream: "text", text: "筛选做成纯函数，先写测试。" } } },
+      { at: 920, event: { type: "agent.tool_call", data: { id: rex.id, tool_call_id: "r-edit", title: "Edit apps/gui/src/lib/activityFeed.ts", kind: "edit", status: "completed" } } },
+      { at: 960, event: { type: "agent.tool_call", data: { id: rex.id, tool_call_id: "r-test", title: "Run npm --prefix apps/gui test", kind: "execute", status: "in_progress" } } },
+      { at: 1000, event: { type: "agent.tool_call_updated", data: { id: rex.id, tool_call_id: "r-test", title: null, status: "failed" } } },
+      { at: 1040, event: { type: "agent.error", data: { id: rex.id, message: "活动测试失败：expected 2 entries, got 3" } } },
+      { at: 1080, event: { type: "agent.input", data: { id: kai.id, message_id: m3, text: "Rex 卡在测试上了，去帮它看一下。", queued: false, from: { kind: "human" } } } },
+      { at: 1120, event: { type: "agent.turn_started", data: { id: kai.id, message_id: m3 } } },
+      { at: 1160, event: { type: "agent.output", data: { id: kai.id, stream: "text", text: "我去看构建日志。" } } },
+      { at: 1200, event: { type: "agent.input", data: { id: mia.id, message_id: m4, text: "文档先不用动，等我这边接口定下来。", queued: false, from: { kind: "agent", agent_id: lead.id } } } },
+      { at: 1240, event: { type: "agent.turn_started", data: { id: mia.id, message_id: m4 } } },
+      { at: 1280, event: { type: "agent.output", data: { id: mia.id, stream: "text", text: "收到，我先等。" } } },
+      {
+        at: 1320,
+        event: {
+          type: "human.asked",
+          data: {
+            item: {
+              id: "q-activity",
+              kind: "question",
+              from: lead.id,
+              run_id: null,
+              task_id: null,
+              text: "活动流要不要默认只看错误？",
+              detail: null,
+              options: ["要", "不要"],
+              default: null,
+              timeout_at: null,
+              status: "open",
+              answer: null,
+              answered_at: null,
+              action: null,
+              created_at: ago(0),
+            },
+          },
+        },
+      },
+      { at: 1360, event: { type: "agent.error", data: { id: lead.id, message: "hub 断开了 3 秒（已自动重连）" } } },
     ] as Step[],
   };
 }

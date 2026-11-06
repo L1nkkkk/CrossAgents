@@ -13,6 +13,17 @@
 .turn .bubble-md .prose code { background: var(--surface); }
 .turn .bubble-md .prose a { text-decoration: underline; text-underline-offset: 2px; }
 
+/* Notices the message carried to the agent (lib/notices.ts): small and folded away by default,
+   under the bubble so they never read as part of what the person wrote. */
+.turn .bubble-notices {
+  margin-top: 6px; padding-top: 5px; border-top: 1px solid var(--border);
+  color: var(--muted); font-size: 11.5px; line-height: 1.55; white-space: normal;
+}
+.turn .bubble-notices summary { cursor: pointer; list-style-position: outside; }
+.turn .bubble-notices ul { margin: 4px 0 0; padding-left: 16px; }
+.turn .bubble-notices li { margin: 0 0 2px; }
+.turn .bubble-notices li:last-child { margin-bottom: 0; }
+
 /* The copy control and the fold toggles sit under the text, on their own row, so neither a long
    message nor a narrow window has its text squeezed by them. */
 .turn .bubble-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 4px; white-space: normal; }

@@ -105,6 +105,12 @@ pub fn summary(kind: &EventKind) -> String {
         EventKind::AgentStatusChanged { id, from, to } => {
             format!("{} {} -> {}", short(id), enum_name(from), enum_name(to))
         }
+        EventKind::AgentDeliveryChanged { id, delivery } => format!(
+            "{} {} ({} waiting)",
+            short(id),
+            enum_name(&delivery.state),
+            delivery.queued
+        ),
         EventKind::AgentInput {
             id, text, queued, ..
         } => format!(
@@ -119,6 +125,14 @@ pub fn summary(kind: &EventKind) -> String {
         EventKind::AgentSteered { id, text, .. } => {
             format!("{} steered {}", short(id), one_line(text))
         }
+        EventKind::AgentInputRefused {
+            id, text, reason, ..
+        } => format!(
+            "{} refused ({}) {}",
+            short(id),
+            enum_name(reason),
+            one_line(text)
+        ),
         EventKind::AgentSteerRead { id, message_id } => {
             format!("{} read {}", short(id), short(message_id))
         }

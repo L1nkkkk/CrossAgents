@@ -2,11 +2,28 @@ import { useState } from "react";
 import type { RunDetail } from "@bindings/RunDetail";
 import { CopyButton, Prose, time } from "../components";
 import { FOLD_INPUT, foldText, KICKOFF_SEPARATOR } from "../lib/messageText";
+import { noticeLines } from "../lib/notices";
 import type { TranscriptTurn } from "../session";
 import "./sessionmessage.css";
 
 /** A person's message, or one recorded before senders were. */
 export const fromPerson = (turn: TranscriptTurn) => !turn.from || turn.from.kind === "human";
+
+/** What the message carried to the agent besides the person's words, kept out of the bubble's text. */
+export function RideAlong({ notices }: { notices?: string[] }) {
+  const lines = noticeLines(notices);
+  if (!lines.length) return null;
+  return (
+    <details className="bubble-notices">
+      <summary>随这条消息送达 {lines.length} 条提示</summary>
+      <ul>
+        {lines.map((line, i) => (
+          <li key={i}>{line}</li>
+        ))}
+      </ul>
+    </details>
+  );
+}
 
 export function Bubble({ turn, tree }: { turn: TranscriptTurn; tree: RunDetail[] }) {
   const [open, setOpen] = useState(false);
@@ -21,6 +38,7 @@ export function Bubble({ turn, tree }: { turn: TranscriptTurn; tree: RunDetail[]
       <div className="bubble-text">
         <Prose text={shown} />
       </div>
+      <RideAlong notices={turn.notices} />
       <div className="bubble-foot">
         {request !== undefined && (
           <button className="tools-more" aria-expanded={open} onClick={() => setOpen(!open)}>

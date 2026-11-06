@@ -9,13 +9,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, AgentStatus, AttachmentSupport, Capabilities, CoreError, DiffSource,
-    DriverSession, EXTERNAL_PLUGIN, Envelope, EventBus, EventKind, McpServerSpec, MessageId,
-    MessageSource, NameSource, OutputStream, PermissionPolicy, Prompt, SessionEvent,
-    SessionEventKind, SessionSpec, StopReason, Store, validate_agent_name,
+    Agent, AgentId, AgentKey, AgentStatus, AttachmentSupport, Capabilities, CoreError,
+    DeliveryState, DeliveryStatus, DiffSource, DriverSession, EXTERNAL_PLUGIN, Envelope, EventBus,
+    EventKind, McpServerSpec, MessageId, MessageSource, NameSource, OutputStream, PermissionPolicy,
+    Prompt, QueuedReason, SessionEvent, SessionEventKind, SessionSpec, StopReason, Store,
+    validate_agent_name,
 };
 use crossagents_plugins::PluginRegistry;
 use tokio::sync::{Mutex, Notify, mpsc};
+
+use crate::stream_rules::{self, Injection, StreamRules};
 
 const FLUSH_INTERVAL: Duration = Duration::from_millis(150);
 
@@ -68,6 +71,122 @@ struct Live {
     steer: bool,
 }
 
+/// What became of a message handed to an agent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Delivery {
+    pub message_id: MessageId,
+    /// It waits for its turn (or, for a steer that could not go in, for the next one).
+    pub queued: bool,
+    /// Why it waits, or why a steer did not go in; `None` when it started at once.
+    pub queued_reason: Option<QueuedReason>,
+    /// It went into the running turn (`agent.steered`); `queued` is then `false`.
+    pub steered: bool,
+}
+
+impl Delivery {
+    fn new(message_id: MessageId, queued: bool, queued_reason: Option<QueuedReason>) -> Self {
+        Self {
+            message_id,
+            queued,
+            queued_reason,
+            steered: false,
+        }
+    }
+}
+
+/// Why a steer produced no delivery.
+#[derive(Debug)]
+pub enum SteerFailure {
+    /// The message never reached the CLI: nothing was queued, and the sender decides
+    /// whether to send it again (docs/tasks/DELIVERY-AUDIT.md §3).
+    Refused {
+        message_id: MessageId,
+        reason: QueuedReason,
+        error: String,
+    },
+    /// Nothing was delivered for another reason (the agent is archived, it stopped, ...).
+    Error(CoreError),
+}
+
+impl From<CoreError> for SteerFailure {
+    fn from(err: CoreError) -> Self {
+        Self::Error(err)
+    }
+}
+
+/// One fixed client id's first send: `Pending` while it is being delivered, `Done` after.
+enum ClientEntry {
+    Pending(Arc<Notify>),
+    Done(Delivery),
+}
+
+/// How many finished deliveries one agent keeps by client id. A hub runs for weeks, so the
+/// ids it will never see again are dropped oldest first instead of piling up; a send still
+/// in flight (`Pending`) is never dropped (docs/tasks/DELIVERY-AUDIT.md §4).
+const CLIENT_HISTORY: usize = 256;
+
+/// Deliveries by fixed client id, per agent, bounded to [`CLIENT_HISTORY`] each.
+#[derive(Default)]
+struct ClientLog {
+    agents: HashMap<AgentId, ClientEntries>,
+}
+
+#[derive(Default)]
+struct ClientEntries {
+    /// The latest delivery by client id.
+    entries: HashMap<MessageId, ClientEntry>,
+    /// The `Done` ids in the order they were kept, oldest first: what overflows drops.
+    order: VecDeque<MessageId>,
+}
+
+impl ClientLog {
+    fn get(&self, agent: AgentId, client: MessageId) -> Option<&ClientEntry> {
+        self.agents.get(&agent)?.entries.get(&client)
+    }
+
+    /// Remembers a send that is being delivered, until it settles.
+    fn pending(&mut self, agent: AgentId, client: MessageId, wait: Arc<Notify>) {
+        self.agents
+            .entry(agent)
+            .or_default()
+            .entries
+            .insert(client, ClientEntry::Pending(wait));
+    }
+
+    /// Keeps the delivery for repeats (dropping this agent's oldest kept one once they pass
+    /// [`CLIENT_HISTORY`]), or frees the id when nothing was delivered.
+    fn settle(&mut self, agent: AgentId, client: MessageId, delivery: Option<Delivery>) {
+        let Some(delivery) = delivery else {
+            if let Some(entries) = self.agents.get_mut(&agent) {
+                entries.entries.remove(&client);
+            }
+            return;
+        };
+        let entries = self.agents.entry(agent).or_default();
+        entries.entries.insert(client, ClientEntry::Done(delivery));
+        entries.order.push_back(client);
+        while entries.order.len() > CLIENT_HISTORY {
+            if let Some(oldest) = entries.order.pop_front() {
+                entries.entries.remove(&oldest);
+            }
+        }
+    }
+
+    /// Forgets everything kept for an agent that stopped or was archived: a repeat to a
+    /// session that is gone is a new turn, not the old delivery.
+    fn forget(&mut self, agent: AgentId) {
+        self.agents.remove(&agent);
+    }
+}
+
+/// What a send with a client id found.
+enum ClientClaim {
+    /// This id was already delivered: answer with that delivery.
+    Repeat(Delivery),
+    /// The first send on this id: deliver, then [`Runtime::settle_client`] it.
+    First(Option<(MessageId, Arc<Notify>)>),
+}
+
 impl Drop for Live {
     fn drop(&mut self) {
         // Ends the session's turn loop once nobody can deliver to it any more.
@@ -89,6 +208,11 @@ struct Inbox {
     busy: AtomicBool,
     closed: AtomicBool,
     notify: Notify,
+    /// Held by a sender from the moment it works out whether its message waits until the
+    /// moment it is in line. Without it two sends can both be told they are next and then
+    /// enter the queue in a different order than they were told
+    /// (docs/tasks/DELIVERY-AUDIT.md §7, item 8).
+    admit: tokio::sync::Mutex<()>,
 }
 
 impl Inbox {
@@ -101,6 +225,41 @@ impl Inbox {
         }
         drop(waiting);
         self.notify.notify_one();
+    }
+
+    /// Whether a message admitted now waits, and why. Taken under the admission lock (see
+    /// [`Self::admit`]), with the push, so a concurrent sender cannot slip in between.
+    fn queue_state(&self) -> (bool, Option<QueuedReason>) {
+        // Same lock order as `next` and `is_idle`: waiting, then the turn flags.
+        let waiting = self.waiting.lock().unwrap();
+        let busy = self.busy.load(Ordering::SeqCst);
+        if waiting.is_empty() && !busy {
+            return (false, None);
+        }
+        let running = *self.running.lock().unwrap();
+        let person = self.from_person.lock().unwrap();
+        // A person's message that is not the running one is waiting ahead of this send.
+        let ahead = person.iter().any(|id| Some(*id) != running);
+        let reason = if ahead {
+            QueuedReason::OwnerQueueAhead
+        } else {
+            QueuedReason::TurnRunning
+        };
+        (true, Some(reason))
+    }
+
+    /// Moves a waiting message to the front, keeping its id and its place as a person's
+    /// message; `Some(queued)` when it was waiting, `None` when it already started or is
+    /// unknown. `queued`: a turn must stop before it runs.
+    fn promote(&self, id: MessageId) -> Option<bool> {
+        let mut waiting = self.waiting.lock().unwrap();
+        let index = waiting.iter().position(|(m, _)| *m == id)?;
+        let message = waiting.remove(index).expect("found just above");
+        let queued = self.busy.load(Ordering::SeqCst);
+        waiting.push_front(message);
+        drop(waiting);
+        self.notify.notify_one();
+        Some(queued)
     }
 
     /// Replaces a waiting message's text; `false` if it is not waiting any more.
@@ -173,6 +332,24 @@ impl Inbox {
         waiting.is_empty() && !self.busy.load(Ordering::SeqCst)
     }
 
+    /// What a client should see: the same facts `is_idle` and `busy_with` read, in one
+    /// answer (docs/tasks/DELIVERY-AUDIT.md §8 P1-4).
+    fn delivery(&self) -> DeliveryStatus {
+        // Same lock order as `next` and `is_idle`: waiting, then the turn flags.
+        let waiting = self.waiting.lock().unwrap();
+        let queued = waiting.len();
+        let state = if self.busy.load(Ordering::SeqCst) {
+            DeliveryState::Turn
+        } else if queued > 0 {
+            // A message is in line but its turn has not begun: the session is starting or
+            // the previous turn just ended.
+            DeliveryState::Starting
+        } else {
+            DeliveryState::Idle
+        };
+        DeliveryStatus { state, queued }
+    }
+
     /// A turn runs: a message can be steered into it.
     fn is_running(&self) -> bool {
         self.busy.load(Ordering::SeqCst)
@@ -216,6 +393,9 @@ pub struct Runtime {
     archiving: Mutex<HashSet<AgentId>>,
     /// Answers to teammates that were only written, to forward (crate::replies).
     replies: std::sync::Mutex<crate::replies::ReplyTracker>,
+    /// Each fixed client id's first delivery, by agent: a repeat gets it instead of a new
+    /// turn (docs/tasks/DELIVERY-AUDIT.md §4).
+    clients: Mutex<ClientLog>,
     generation: AtomicU64,
 }
 
@@ -224,6 +404,8 @@ enum Control {
     TurnStarted(MessageId),
     /// The turn's outcome, and what it changed when the hub works that out itself.
     TurnFinished(MessageId, Result<StopReason, String>, Option<String>),
+    /// The session's context was compacted (`Runtime::compact`): stream rules may repeat.
+    Compacted,
     Stopped,
 }
 
@@ -271,6 +453,7 @@ impl Runtime {
             going_home: Mutex::default(),
             archiving: Mutex::default(),
             replies: std::sync::Mutex::default(),
+            clients: Mutex::default(),
             generation: AtomicU64::new(0),
         }
     }
@@ -527,6 +710,7 @@ impl Runtime {
         for message in waiting {
             live.inbox.push(message, false);
         }
+        self.announce_delivery(agent.id).await;
         Ok(())
     }
 
@@ -991,7 +1175,7 @@ impl Runtime {
         };
         self.replies.lock().unwrap().mark_forwarded(id);
         if let Err(err) = self
-            .deliver(&AgentKey::Id(forward.to), envelope, false)
+            .deliver(&AgentKey::Id(forward.to), envelope, false, None, None)
             .await
         {
             tracing::warn!(from = %forward.from, to = %forward.to, error = %err, "cannot forward an answer");
@@ -1035,6 +1219,56 @@ impl Runtime {
             .is_some_and(|live| !live.inbox.is_idle())
     }
 
+    /// What the agent's session does with messages now, from the same inbox the hub admits
+    /// them into (docs/tasks/DELIVERY-AUDIT.md §8 P1-4). An external agent's messages wait
+    /// for it to fetch them (`held`); an agent with no session is idle, or still `starting`
+    /// while its first session opens.
+    pub async fn delivery_state(&self, agent: &Agent) -> DeliveryStatus {
+        if agent.plugin == EXTERNAL_PLUGIN {
+            let queued = self
+                .external
+                .lock()
+                .await
+                .get(&agent.id)
+                .map_or(0, Vec::len);
+            let state = if queued > 0 {
+                DeliveryState::Held
+            } else {
+                DeliveryState::Idle
+            };
+            return DeliveryStatus { state, queued };
+        }
+        let inbox = self
+            .live
+            .lock()
+            .await
+            .get(&agent.id)
+            .filter(|live| !live.inbox.is_closed())
+            .map(|live| live.inbox.clone());
+        match inbox {
+            Some(inbox) => inbox.delivery(),
+            None => DeliveryStatus {
+                state: if agent.status == AgentStatus::Starting {
+                    DeliveryState::Starting
+                } else {
+                    DeliveryState::Idle
+                },
+                queued: 0,
+            },
+        }
+    }
+
+    /// Tells clients what the agent's session does with messages now, when that just
+    /// changed (docs/tasks/DELIVERY-AUDIT.md §8 P1-4). The agent is read again, so a status
+    /// changed just before this call (`stop`) is the one the state is worked out from.
+    async fn announce_delivery(&self, id: AgentId) {
+        let Ok(agent) = self.store().get_agent(&AgentKey::Id(id)).await else {
+            return;
+        };
+        let delivery = self.delivery_state(&agent).await;
+        publish(&self.bus, EventKind::AgentDeliveryChanged { id, delivery }).await;
+    }
+
     /// Makes `session` the agent's live one: its events are published, its inbox served.
     /// `adopted`: the message whose turn was running when the session was taken over.
     async fn install(
@@ -1061,6 +1295,11 @@ impl Runtime {
             attachments: session.attachment_support(),
             steer,
         });
+        // The stream rules of the agent's workspace, read as its session starts.
+        let rules = match self.store().get_agent(&AgentKey::Id(id)).await {
+            Ok(agent) => StreamRules::new(stream_rules::load(&agent.cwd)),
+            Err(_) => StreamRules::default(),
+        };
         tokio::spawn(forward_events(
             self.bus.clone(),
             id,
@@ -1068,6 +1307,7 @@ impl Runtime {
             control_rx,
             self.live.clone(),
             generation,
+            rules,
         ));
         if adopted.is_some() {
             inbox.busy.store(true, Ordering::SeqCst);
@@ -1083,15 +1323,15 @@ impl Runtime {
         inbox
     }
 
-    /// Delivers a message, starting the agent if needed. Returns the message id and whether
-    /// it was queued behind other work.
+    /// Delivers a message, starting the agent if needed.
     pub async fn send(
         &self,
         key: &AgentKey,
         text: String,
         from: MessageSource,
-    ) -> Result<(MessageId, bool), CoreError> {
-        self.deliver(key, Envelope::new(from, text), false).await
+    ) -> Result<Delivery, CoreError> {
+        self.deliver(key, Envelope::new(from, text), false, None, None)
+            .await
     }
 
     /// Delivers a prepared message (its id fixed by the sender, possibly a reply).
@@ -1099,9 +1339,22 @@ impl Runtime {
         &self,
         key: &AgentKey,
         envelope: Envelope,
-    ) -> Result<(MessageId, bool), CoreError> {
+    ) -> Result<Delivery, CoreError> {
         self.note_send(key, &envelope).await;
-        self.deliver(key, envelope, false).await
+        self.deliver(key, envelope, false, None, None).await
+    }
+
+    /// Like [`Self::send_envelope`], with the sender's own id for the message: a repeat of
+    /// that id gets the first delivery instead of another turn.
+    pub async fn send_envelope_from(
+        &self,
+        key: &AgentKey,
+        envelope: Envelope,
+        client_message_id: Option<MessageId>,
+    ) -> Result<Delivery, CoreError> {
+        self.note_send(key, &envelope).await;
+        self.deliver(key, envelope, false, client_message_id, None)
+            .await
     }
 
     /// Like [`Self::send_envelope`], ahead of everything waiting, interrupting the running
@@ -1110,20 +1363,64 @@ impl Runtime {
         &self,
         key: &AgentKey,
         envelope: Envelope,
-    ) -> Result<(MessageId, bool), CoreError> {
+    ) -> Result<Delivery, CoreError> {
         self.note_send(key, &envelope).await;
-        self.deliver(key, envelope, true).await
+        self.deliver(key, envelope, true, None, None).await
+    }
+
+    /// [`Self::send_now_envelope`], with the sender's own id: a repeat gets the first
+    /// delivery instead of being put ahead a second time.
+    pub async fn send_now_envelope_from(
+        &self,
+        key: &AgentKey,
+        envelope: Envelope,
+        client_message_id: Option<MessageId>,
+    ) -> Result<Delivery, CoreError> {
+        self.note_send(key, &envelope).await;
+        self.deliver(key, envelope, true, client_message_id, None)
+            .await
     }
 
     /// Hands a message to the agent's running turn when its driver can steer, else queues
-    /// it as [`Self::send_envelope`] would. Returns the message id, whether it was queued,
-    /// and whether it was steered (then `queued` is false).
+    /// it for the next one. A steer that cannot go in because the driver has no steer, or
+    /// because no turn runs, is queued with that reason; a write that failed is a visible
+    /// refusal and is not queued (docs/tasks/DELIVERY-AUDIT.md §3).
     pub async fn steer_envelope(
         &self,
         key: &AgentKey,
         envelope: Envelope,
-    ) -> Result<(MessageId, bool, bool), CoreError> {
+    ) -> Result<Delivery, SteerFailure> {
+        self.steer_envelope_from(key, envelope, None).await
+    }
+
+    /// [`Self::steer_envelope`], with the sender's own id for the message: a repeat of
+    /// that id gets the first delivery instead of steering again.
+    pub async fn steer_envelope_from(
+        &self,
+        key: &AgentKey,
+        envelope: Envelope,
+        client_message_id: Option<MessageId>,
+    ) -> Result<Delivery, SteerFailure> {
         self.note_send(key, &envelope).await;
+        let stored = self.store().get_agent(key).await?;
+        let claim = self.claim_client(stored.id, client_message_id).await;
+        let claimed = match claim {
+            ClientClaim::Repeat(delivery) => return Ok(delivery),
+            ClientClaim::First(claimed) => claimed,
+        };
+        let outcome = self.steer_once(key, envelope).await;
+        // A steer that went in or was queued is this client id's answer from now on; a
+        // refused one is not, so the same id can try again.
+        self.settle_client(stored.id, claimed, outcome.as_ref().ok())
+            .await;
+        outcome
+    }
+
+    async fn steer_once(
+        &self,
+        key: &AgentKey,
+        envelope: Envelope,
+    ) -> Result<Delivery, SteerFailure> {
         let message_id = envelope.id;
         let stored = self.store().get_agent(key).await?;
         let live = if stored.archived_at.is_none() && stored.plugin != EXTERNAL_PLUGIN {
@@ -1131,71 +1428,165 @@ impl Runtime {
         } else {
             None
         };
-        let live =
-            live.filter(|live| live.steer && !live.inbox.is_closed() && live.inbox.is_running());
-        if let Some(live) = live {
-            // What changed since the last message (model, effort, name) goes with the
-            // steered text, but the bubble shows what the person wrote, not the notes.
-            // The notes are only consumed if the message really goes in: a queued copy
-            // below gets them from `deliver`.
-            let (display, sent, consumed) = {
-                let notices = self.notices.lock().await;
-                match notices.get(&stored.id).filter(|notes| !notes.is_empty()) {
-                    Some(notes) => {
-                        let lines: Vec<&str> = notes.values().map(String::as_str).collect();
-                        (
-                            envelope.text.clone(),
-                            format!("{}\n\n{}", lines.join("\n"), envelope.text),
-                            notes.clone(),
-                        )
-                    }
-                    None => (
+        let live = live.filter(|live| !live.inbox.is_closed());
+        let Some(live) = live else {
+            // Archived, or an agent outside the hub: `deliver` says what happens to it.
+            return self
+                .deliver(key, envelope, false, None, None)
+                .await
+                .map_err(Into::into);
+        };
+        let running = live.inbox.is_running();
+        if !running || !live.steer {
+            // Nothing to steer into: the message is the next turn. The reason says which
+            // of the two it was.
+            let reason = if running {
+                QueuedReason::RuntimeNoSteer
+            } else {
+                QueuedReason::NoActiveTurn
+            };
+            return self
+                .deliver(key, envelope, false, None, Some(reason))
+                .await
+                .map_err(Into::into);
+        }
+        // What changed since the last message (model, effort, name) goes with the steered
+        // text, but the bubble shows what the person wrote, not the notes. The notes are
+        // only consumed if the message really goes in: a queued copy below gets them from
+        // `deliver`.
+        let (display, sent, consumed) = {
+            let notices = self.notices.lock().await;
+            match notices.get(&stored.id).filter(|notes| !notes.is_empty()) {
+                Some(notes) => {
+                    let lines: Vec<&str> = notes.values().map(String::as_str).collect();
+                    (
                         envelope.text.clone(),
-                        envelope.text.clone(),
-                        BTreeMap::new(),
-                    ),
+                        format!("{}\n\n{}", lines.join("\n"), envelope.text),
+                        notes.clone(),
+                    )
                 }
-            };
-            let prompt = Prompt {
-                text: sent,
-                attachments: envelope.attachments.clone(),
-            };
-            match live.session.steer(message_id, &prompt).await {
-                Ok(()) => {
-                    if !consumed.is_empty() {
-                        let mut notices = self.notices.lock().await;
-                        if let Some(notes) = notices.get_mut(&stored.id) {
-                            for topic in consumed.keys() {
-                                notes.remove(topic);
-                            }
-                            if notes.is_empty() {
-                                notices.remove(&stored.id);
-                            }
+                None => (
+                    envelope.text.clone(),
+                    envelope.text.clone(),
+                    BTreeMap::new(),
+                ),
+            }
+        };
+        let prompt = Prompt {
+            text: sent,
+            attachments: envelope.attachments.clone(),
+        };
+        match live.session.steer(message_id, &prompt).await {
+            Ok(()) => {
+                if !consumed.is_empty() {
+                    let mut notices = self.notices.lock().await;
+                    if let Some(notes) = notices.get_mut(&stored.id) {
+                        for topic in consumed.keys() {
+                            notes.remove(topic);
+                        }
+                        if notes.is_empty() {
+                            notices.remove(&stored.id);
                         }
                     }
-                    publish(
-                        &self.bus,
-                        EventKind::AgentSteered {
-                            id: stored.id,
-                            message_id,
-                            text: display,
-                            attachments: envelope.attachments,
-                        },
-                    )
-                    .await;
-                    return Ok((message_id, false, true));
                 }
-                // Unsupported, no turn any more, or the message never reached the CLI:
-                // it must not be lost, so it goes through the queue.
-                Err(err) => {
-                    tracing::debug!(%message_id, %err, "cannot steer; queueing the message")
+                publish(
+                    &self.bus,
+                    EventKind::AgentSteered {
+                        id: stored.id,
+                        message_id,
+                        text: display,
+                        attachments: envelope.attachments,
+                    },
+                )
+                .await;
+                Ok(Delivery {
+                    message_id,
+                    queued: false,
+                    queued_reason: None,
+                    steered: true,
+                })
+            }
+            Err(err) => {
+                match &err {
+                    // The driver cannot steer at all, or the turn ended before the write:
+                    // the message is clearly not in yet, so it goes to the next turn with
+                    // the reason said out loud.
+                    CoreError::Unsupported(_) | CoreError::Conflict(_) => {
+                        let reason = if matches!(err, CoreError::Unsupported(_)) {
+                            QueuedReason::RuntimeNoSteer
+                        } else {
+                            QueuedReason::NoActiveTurn
+                        };
+                        tracing::debug!(%message_id, %err, ?reason, "cannot steer; queueing the message");
+                        self.deliver(key, envelope, false, None, Some(reason))
+                            .await
+                            .map_err(Into::into)
+                    }
+                    // The write failed: nobody can tell whether the CLI saw it, so it is
+                    // neither steered nor queued. The sender decides whether to send it
+                    // again, and sees the failure.
+                    _ => {
+                        tracing::warn!(%message_id, %err, "cannot write a steered message");
+                        publish(
+                            &self.bus,
+                            EventKind::AgentInputRefused {
+                                id: stored.id,
+                                message_id,
+                                text: envelope.text,
+                                reason: QueuedReason::SteerWriteFailed,
+                            },
+                        )
+                        .await;
+                        Err(SteerFailure::Refused {
+                            message_id,
+                            reason: QueuedReason::SteerWriteFailed,
+                            error: err.to_string(),
+                        })
+                    }
                 }
             }
-            let (message_id, queued) = self.deliver(key, envelope, false).await?;
-            return Ok((message_id, queued, false));
         }
-        let (message_id, queued) = self.deliver(key, envelope, false).await?;
-        Ok((message_id, queued, false))
+    }
+
+    /// The delivery a repeat of `client` already got, or the first claim on that id.
+    async fn claim_client(&self, agent: AgentId, client: Option<MessageId>) -> ClientClaim {
+        let Some(client) = client else {
+            return ClientClaim::First(None);
+        };
+        loop {
+            let mut clients = self.clients.lock().await;
+            match clients.get(agent, client) {
+                Some(ClientEntry::Done(delivery)) => return ClientClaim::Repeat(delivery.clone()),
+                Some(ClientEntry::Pending(wait)) => {
+                    let wait = wait.clone();
+                    drop(clients);
+                    // The first send is still in flight: answer with what it found, not
+                    // with a second delivery.
+                    wait.notified().await;
+                }
+                None => {
+                    let wait = Arc::new(Notify::new());
+                    clients.pending(agent, client, wait.clone());
+                    return ClientClaim::First(Some((client, wait)));
+                }
+            }
+        }
+    }
+
+    /// Keeps a client id's delivery for repeats, or frees the id when nothing was delivered.
+    async fn settle_client(
+        &self,
+        agent: AgentId,
+        claimed: Option<(MessageId, Arc<Notify>)>,
+        delivery: Option<&Delivery>,
+    ) {
+        let Some((client, wait)) = claimed else {
+            return;
+        };
+        let mut clients = self.clients.lock().await;
+        clients.settle(agent, client, delivery.cloned());
+        drop(clients);
+        wait.notify_one();
     }
 
     /// Adds a line to the agent's notification digest: one waiting message that gathers
@@ -1205,7 +1596,10 @@ impl Runtime {
         let stored = self.store().get_agent(key).await?;
         if stored.plugin == EXTERNAL_PLUGIN {
             let envelope = Envelope::new(MessageSource::Notice, line.to_owned());
-            return self.deliver(key, envelope, false).await.map(|_| ());
+            return self
+                .deliver(key, envelope, false, None, None)
+                .await
+                .map(|_| ());
         }
         let agent = self.start(key).await?;
         let live = self.live.lock().await.get(&agent.id).cloned();
@@ -1241,7 +1635,7 @@ impl Runtime {
         };
         digests.insert(agent.id, digest);
         drop(digests);
-        self.deliver(&AgentKey::Id(agent.id), envelope, false)
+        self.deliver(&AgentKey::Id(agent.id), envelope, false, None, None)
             .await
             .map(|_| ())
     }
@@ -1253,16 +1647,39 @@ impl Runtime {
         key: &AgentKey,
         text: String,
         from: MessageSource,
-    ) -> Result<(MessageId, bool), CoreError> {
-        self.deliver(key, Envelope::new(from, text), true).await
+    ) -> Result<Delivery, CoreError> {
+        self.deliver(key, Envelope::new(from, text), true, None, None)
+            .await
     }
 
+    /// Delivers `envelope`; with a `client_message_id`, a repeat of the same id gets the
+    /// first delivery instead of another turn.
     async fn deliver(
         &self,
         key: &AgentKey,
         envelope: Envelope,
         first: bool,
-    ) -> Result<(MessageId, bool), CoreError> {
+        client_message_id: Option<MessageId>,
+        queued_reason: Option<QueuedReason>,
+    ) -> Result<Delivery, CoreError> {
+        let stored = self.store().get_agent(key).await?;
+        let claimed = match self.claim_client(stored.id, client_message_id).await {
+            ClientClaim::Repeat(delivery) => return Ok(delivery),
+            ClientClaim::First(claimed) => claimed,
+        };
+        let outcome = self.deliver_once(key, envelope, first, queued_reason).await;
+        self.settle_client(stored.id, claimed, outcome.as_ref().ok())
+            .await;
+        outcome
+    }
+
+    async fn deliver_once(
+        &self,
+        key: &AgentKey,
+        envelope: Envelope,
+        first: bool,
+        queued_reason: Option<QueuedReason>,
+    ) -> Result<Delivery, CoreError> {
         let Envelope {
             id: message_id,
             from,
@@ -1299,6 +1716,8 @@ impl Runtime {
                     thread,
                     reply_excerpt,
                     attachments: attachments.clone(),
+                    notices: Vec::new(),
+                    queued_reason: Some(QueuedReason::ExternalAgent),
                 },
             )
             .await;
@@ -1313,7 +1732,12 @@ impl Runtime {
                     from,
                     Prompt { text, attachments }.with_references(),
                 ));
-            return Ok((message_id, true));
+            self.announce_delivery(stored.id).await;
+            return Ok(Delivery::new(
+                message_id,
+                true,
+                Some(QueuedReason::ExternalAgent),
+            ));
         }
         let agent = self.start(key).await?;
         let live = self
@@ -1324,7 +1748,32 @@ impl Runtime {
             .cloned()
             .filter(|l| !l.inbox.is_closed())
             .ok_or_else(|| CoreError::Agent(format!("agent {} stopped", agent.name)))?;
-        let queued = !live.inbox.is_idle();
+        // Deciding whether it waits and putting it in line are one step: two concurrent
+        // sends cannot both be told they are next (docs/tasks/DELIVERY-AUDIT.md §7, item 8).
+        let admission = live.inbox.admit.lock().await;
+        let (queued, queue_reason) = live.inbox.queue_state();
+        let queued_reason = queued_reason.or(queue_reason);
+        // A person's message takes a notice digest that is still waiting with it: the agent
+        // reads the notices right after the person's words, in the same turn, instead of
+        // spending a turn of its own on them (docs/TODO.md §二十五 第 3 条).
+        let carried = match from {
+            MessageSource::Human => self.take_waiting_digest(agent.id, &live.inbox).await,
+            _ => None,
+        };
+        if let Some(digest) = &carried {
+            publish(
+                &self.bus,
+                EventKind::AgentInputWithdrawn {
+                    id: agent.id,
+                    message_id: digest.message,
+                },
+            )
+            .await;
+        }
+        let notices: Vec<String> = carried
+            .as_ref()
+            .map(|digest| digest.lines.values().cloned().collect())
+            .unwrap_or_default();
         // Published before the message can start a turn, so clients see the input first.
         publish(
             &self.bus,
@@ -1338,21 +1787,84 @@ impl Runtime {
                 thread,
                 reply_excerpt,
                 attachments: attachments.clone(),
+                notices,
+                queued_reason,
             },
         )
         .await;
         // What changed since the last message (model, effort, name) is told before it; the
         // conversation shows it as a note of its own (e.g. `agent.model_changed`).
-        let text = self.with_notices(agent.id, text).await;
+        let mut text = self.with_notices(agent.id, text).await;
+        // The notices go after the person's words, as the agent reads them.
+        if let Some(digest) = carried {
+            text = format!("{text}\n\n{}", digest.text());
+        }
         if from == MessageSource::Human {
             live.inbox.from_person.lock().unwrap().insert(message_id);
         }
         live.inbox
             .push((message_id, Prompt { text, attachments }), first);
+        drop(admission);
+        // The announcement is what clients show as "busy"/"next"; it reads the inbox, so it
+        // says `turn` with the messages behind the running turn, or `starting` for the first.
+        self.announce_delivery(agent.id).await;
         if first && queued {
             let _ = live.session.interrupt().await;
         }
-        Ok((message_id, queued))
+        Ok(Delivery::new(message_id, queued, queued_reason))
+    }
+
+    /// Moves a message that is still waiting to the front of the line and interrupts the
+    /// running turn, so it is the next thing the agent reads. It keeps its id: nothing is
+    /// withdrawn and sent again (docs/tasks/DELIVERY-AUDIT.md §2). A message that already
+    /// started, or one nobody knows, is a conflict and leaves the queue as it was.
+    pub async fn promote(
+        &self,
+        key: &AgentKey,
+        message_id: MessageId,
+    ) -> Result<Delivery, CoreError> {
+        let agent = self.store().get_agent(key).await?;
+        let live = self
+            .live
+            .lock()
+            .await
+            .get(&agent.id)
+            .cloned()
+            .filter(|l| !l.inbox.is_closed());
+        let Some(live) = live else {
+            return Err(CoreError::Conflict(
+                "the message already started, or is unknown".into(),
+            ));
+        };
+        let admission = live.inbox.admit.lock().await;
+        let Some(queued) = live.inbox.promote(message_id) else {
+            drop(admission);
+            return Err(CoreError::Conflict(
+                "the message already started, or is unknown".into(),
+            ));
+        };
+        drop(admission);
+        if queued {
+            let _ = live.session.interrupt().await;
+        }
+        let reason = queued.then_some(QueuedReason::TurnRunning);
+        Ok(Delivery::new(message_id, queued, reason))
+    }
+
+    /// Takes the agent's notification digest if it is still waiting for its turn, so a
+    /// person's message can carry it; `None` once it started or when there is none.
+    ///
+    /// The check, the withdraw and the removal happen under one `digests` lock: a concurrent
+    /// `notify` takes the same lock first, so it cannot add a line to a digest this call is
+    /// taking out (which `inbox.update` would then drop as already withdrawn). Locks go
+    /// `digests` first, then `inbox` — the order `notify` uses too (`digests` → `inbox.update`).
+    async fn take_waiting_digest(&self, id: AgentId, inbox: &Inbox) -> Option<Digest> {
+        let mut digests = self.digests.lock().await;
+        let message = digests.get(&id)?.message;
+        if !inbox.withdraw(message) {
+            return None;
+        }
+        digests.remove(&id)
     }
 
     async fn with_notices(&self, agent: AgentId, text: String) -> String {
@@ -1385,6 +1897,7 @@ impl Runtime {
             },
         )
         .await;
+        self.announce_delivery(agent.id).await;
         Ok(())
     }
 
@@ -1436,9 +1949,17 @@ impl Runtime {
         // A long history takes minutes to summarise; a caller that stops waiting (the GUI's
         // request timeout) must not cancel it halfway and leave the session mid-compaction.
         let session = live.session.clone();
-        tokio::spawn(async move { session.compact().await })
-            .await
-            .map_err(|err| CoreError::Agent(format!("compaction stopped: {err}")))?
+        let control = live.control.clone();
+        tokio::spawn(async move {
+            let result = session.compact().await;
+            if result.is_ok() {
+                // The stream rules sent before are no longer in the context.
+                let _ = control.send(Control::Compacted);
+            }
+            result
+        })
+        .await
+        .map_err(|err| CoreError::Agent(format!("compaction stopped: {err}")))?
     }
 
     /// Changes the agent's model and, when `effort` is given, its reasoning effort (empty:
@@ -1536,6 +2057,9 @@ impl Runtime {
             )
             .await;
         }
+        // What it took has started, so nothing waits on the hub any more; a message that
+        // arrived meanwhile still counts.
+        self.announce_delivery(id).await;
         messages
     }
 
@@ -1751,7 +2275,10 @@ impl Runtime {
         let agent = self.store().get_agent(key).await?;
         let lock = self.agent_lock(agent.id).await;
         let _guard = lock.lock().await;
+        // Nothing can repeat a send to a session that is gone.
+        self.clients.lock().await.forget(agent.id);
         let Some(live) = self.live.lock().await.remove(&agent.id) else {
+            // No session: what it does with messages did not change, so nothing is announced.
             set_status(&self.bus, agent.id, AgentStatus::Stopped).await;
             return Ok(());
         };
@@ -1760,6 +2287,7 @@ impl Runtime {
         live.session.shutdown().await;
         let _ = live.control.send(Control::Stopped);
         set_status(&self.bus, agent.id, AgentStatus::Stopped).await;
+        self.announce_delivery(agent.id).await;
         Ok(())
     }
 
@@ -1821,6 +2349,20 @@ fn command_of(agent: &Agent) -> Option<Vec<String>> {
 async fn publish(bus: &EventBus, kind: EventKind) {
     if let Err(err) = bus.publish(kind).await {
         tracing::error!(error = %err, "cannot publish event");
+    }
+}
+
+/// Publishes what the session's inbox says now, for a session this forwarder owns: what
+/// clients show as "busy"/"next" (docs/tasks/DELIVERY-AUDIT.md §8 P1-4).
+async fn announce_inbox(bus: &EventBus, id: AgentId, live: &LiveMap, generation: u64) {
+    let delivery = live
+        .lock()
+        .await
+        .get(&id)
+        .filter(|live| live.generation == generation)
+        .map(|live| live.inbox.delivery());
+    if let Some(delivery) = delivery {
+        publish(bus, EventKind::AgentDeliveryChanged { id, delivery }).await;
     }
 }
 
@@ -1902,6 +2444,7 @@ async fn forward_events(
     mut control: mpsc::UnboundedReceiver<Control>,
     live: LiveMap,
     generation: u64,
+    mut rules: StreamRules,
 ) {
     let mut out = Coalescer::default();
     let mut tick = tokio::time::interval(FLUSH_INTERVAL);
@@ -1910,7 +2453,7 @@ async fn forward_events(
         tokio::select! {
             event = events.recv(), if events_open => match event {
                 Some(event) => {
-                    if handle_session_event(&bus, id, event, &mut out, &live, generation).await {
+                    if handle_session_event(&bus, id, event, &mut out, &live, generation, &mut rules).await {
                         return;
                     }
                 }
@@ -1919,16 +2462,19 @@ async fn forward_events(
             ctl = control.recv() => {
                 // Everything the session emitted before this point is already queued.
                 while let Ok(event) = events.try_recv() {
-                    if handle_session_event(&bus, id, event, &mut out, &live, generation).await {
+                    if handle_session_event(&bus, id, event, &mut out, &live, generation, &mut rules).await {
                         return;
                     }
                 }
                 out.flush(&bus, id).await;
                 match ctl {
                     Some(Control::TurnStarted(message_id)) => {
+                        rules.turn_started();
                         set_status(&bus, id, AgentStatus::Running).await;
                         publish(&bus, EventKind::AgentTurnStarted { id, message_id }).await;
+                        announce_inbox(&bus, id, &live, generation).await;
                     }
+                    Some(Control::Compacted) => rules.compacted(),
                     Some(Control::TurnFinished(message_id, result, diff)) => {
                         let stop_reason = match result {
                             Ok(reason) => reason,
@@ -1970,6 +2516,7 @@ async fn forward_events(
                         if idle == Some(true) {
                             set_status(&bus, id, AgentStatus::Idle).await;
                         }
+                        announce_inbox(&bus, id, &live, generation).await;
                     }
                     Some(Control::Stopped) | None => return,
                 }
@@ -1987,11 +2534,18 @@ async fn handle_session_event(
     out: &mut Coalescer,
     live: &LiveMap,
     generation: u64,
+    rules: &mut StreamRules,
 ) -> bool {
     let SessionEvent { kind: event, .. } = event;
     match event {
         SessionEventKind::Output { stream, text } => {
+            let injections = rules.on_output(&text);
             out.push(bus, id, Stream::Output(stream), text).await;
+            if !injections.is_empty() {
+                // The output that matched goes out before the rule that answers it.
+                out.flush(bus, id).await;
+                inject(bus, id, live, generation, injections).await;
+            }
             return false;
         }
         SessionEventKind::ToolOutput { tool_call_id, text } => {
@@ -2001,6 +2555,18 @@ async fn handle_session_event(
         _ => {}
     }
     out.flush(bus, id).await;
+    // What a tool call says, for the stream rules: its name and kind, then its arguments.
+    let tool_text = match &event {
+        SessionEventKind::ToolCall { title, kind, .. } => {
+            Some(format!("{} {title}", kind.as_deref().unwrap_or_default()))
+        }
+        SessionEventKind::ToolDetail { detail, .. } => Some(format!(
+            "{} {}",
+            detail.command.as_deref().unwrap_or_default(),
+            detail.arguments.as_deref().unwrap_or_default()
+        )),
+        _ => None,
+    };
     let kind = match event {
         SessionEventKind::Output { .. } | SessionEventKind::ToolOutput { .. } => unreachable!(),
         SessionEventKind::Started { session_id } => {
@@ -2114,7 +2680,116 @@ async fn handle_session_event(
         }
     };
     publish(bus, kind).await;
+    if let Some(text) = tool_text {
+        let injections = rules.on_tool(&text);
+        inject(bus, id, live, generation, injections).await;
+    }
     false
+}
+
+/// Sends stream rules into the session's running turn: steered when the driver can take
+/// them in; otherwise the turn is interrupted and the rules run next, ahead of what waits.
+/// Only the session that matched is served; a session already replaced gets nothing.
+async fn inject(
+    bus: &EventBus,
+    id: AgentId,
+    live: &LiveMap,
+    generation: u64,
+    injections: Vec<Injection>,
+) {
+    if injections.is_empty() {
+        return;
+    }
+    let Some(live) = live
+        .lock()
+        .await
+        .get(&id)
+        .filter(|l| l.generation == generation)
+        .cloned()
+    else {
+        return;
+    };
+    if live.inbox.is_closed() {
+        return;
+    }
+    let mut queued = Vec::new();
+    for injection in injections {
+        let message_id = MessageId::new();
+        if live.steer && live.inbox.is_running() {
+            let prompt = Prompt {
+                text: injection.text.clone(),
+                attachments: Vec::new(),
+            };
+            if live.session.steer(message_id, &prompt).await.is_ok() {
+                tracing::debug!(rule = %injection.rule, "stream rule steered into the turn");
+                publish(
+                    bus,
+                    EventKind::AgentSteered {
+                        id,
+                        message_id,
+                        text: injection.text,
+                        attachments: Vec::new(),
+                    },
+                )
+                .await;
+                continue;
+            }
+        }
+        queued.push(injection);
+    }
+    if queued.is_empty() {
+        return;
+    }
+    // The driver cannot take them into the turn: interrupt it, and run the rules next.
+    let text = queued
+        .iter()
+        .map(|injection| injection.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let message_id = MessageId::new();
+    if live.inbox.is_running() {
+        let _ = live.session.interrupt().await;
+    }
+    live.inbox.push(
+        (
+            message_id,
+            Prompt {
+                text: text.clone(),
+                attachments: Vec::new(),
+            },
+        ),
+        true,
+    );
+    tracing::debug!(
+        rules = queued.len(),
+        "stream rules interrupt the turn and run next"
+    );
+    publish(
+        bus,
+        EventKind::AgentInput {
+            id,
+            message_id,
+            text,
+            queued: true,
+            from: Some(MessageSource::Notice),
+            reply_to: None,
+            thread: None,
+            reply_excerpt: None,
+            attachments: Vec::new(),
+            notices: Vec::new(),
+            queued_reason: Some(QueuedReason::TurnRunning),
+        },
+    )
+    .await;
+    // What waits changed: say the new state with it.
+    publish(
+        bus,
+        EventKind::AgentDeliveryChanged {
+            id,
+            delivery: live.inbox.delivery(),
+        },
+    )
+    .await;
 }
 
 /// A notification digest waiting for its turn.
@@ -2240,4 +2915,51 @@ fn tail(text: String, limit: usize) -> String {
 {}",
         &text[start..]
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn delivery(id: MessageId) -> Delivery {
+        Delivery::new(id, false, None)
+    }
+
+    /// Past the cap the oldest kept delivery goes, the newest stays, and a repeat of an id
+    /// still inside the window is still answered with its delivery.
+    #[test]
+    fn client_history_drops_the_oldest_and_keeps_repeats() {
+        let mut log = ClientLog::default();
+        let agent = AgentId::new();
+        let ids: Vec<MessageId> = (0..CLIENT_HISTORY + 8).map(|_| MessageId::new()).collect();
+        for id in &ids {
+            log.settle(agent, *id, Some(delivery(*id)));
+        }
+        assert!(log.get(agent, ids[0]).is_none(), "the oldest went");
+        assert!(log.get(agent, ids[7]).is_none(), "up to the excess went");
+        assert!(log.get(agent, ids[8]).is_some(), "the window starts here");
+        assert!(
+            matches!(log.get(agent, ids[CLIENT_HISTORY + 7]), Some(ClientEntry::Done(d)) if d.message_id == ids[CLIENT_HISTORY + 7]),
+            "the newest is kept"
+        );
+        // A pending send is not dropped, even while finished ones overflow.
+        let pending = MessageId::new();
+        log.pending(agent, pending, Arc::new(Notify::new()));
+        for _ in 0..8 {
+            let id = MessageId::new();
+            log.settle(agent, id, Some(delivery(id)));
+        }
+        assert!(matches!(
+            log.get(agent, pending),
+            Some(ClientEntry::Pending(_))
+        ));
+        // Another agent's history is untouched.
+        let other = AgentId::new();
+        log.settle(other, ids[0], Some(delivery(ids[0])));
+        assert!(log.get(other, ids[0]).is_some());
+        // Forgetting an agent clears just its records.
+        log.forget(agent);
+        assert!(log.get(agent, pending).is_none());
+        assert!(log.get(other, ids[0]).is_some());
+    }
 }

@@ -32,6 +32,8 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
     level: "write",
   },
   { method: "POST", path: /^\/v1\/agents\/[^/]+\/messages$/, level: "write" },
+  // Moves a waiting message to the front and interrupts the turn: the same message, same id.
+  { method: "POST", path: /^\/v1\/agents\/[^/]+\/messages\/[^/]+\/send-now$/, level: "write" },
   { method: "DELETE", path: /^\/v1\/agents\/[^/]+\/messages\/[^/]+$/, level: "write" },
   { method: "GET", path: /^\/v1\/agents\/[^/]+\/execution$/, level: "read" },
   { method: "POST", path: /^\/v1\/agents\/[^/]+\/execution\/interrupt$/, level: "write" },

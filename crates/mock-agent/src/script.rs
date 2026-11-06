@@ -195,6 +195,25 @@ mod tests {
     }
 
     #[test]
+    fn nested_arrays_in_call_arguments_do_not_end_the_directive() {
+        let text = r#"[call plan_submit {"tasks":[{"key":"a","spec":{"goal":"[call task_complete {\"result\":{\"files\":[\"a.txt\"]}}]","result_schema":{"required":["files"]}}}]}]"#;
+        let parsed = parse(text, None, 1);
+        assert_eq!(parsed.len(), 1);
+        let Action::Call { tool, args } = &parsed[0].action else {
+            panic!("expected call")
+        };
+        assert_eq!(tool, "plan_submit");
+        assert_eq!(
+            args["tasks"][0]["spec"]["result_schema"]["required"][0],
+            "files"
+        );
+        assert_eq!(
+            parse(args["tasks"][0]["spec"]["goal"].as_str().unwrap(), None, 1).len(),
+            1
+        );
+    }
+
+    #[test]
     fn reads_context_lines() {
         assert_eq!(
             context("x\ntask_id: abc\nattempt: 3\n"),

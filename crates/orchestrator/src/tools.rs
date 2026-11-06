@@ -88,7 +88,8 @@ fn spec_schema() -> Value {
             },
             "interfaces": strings,
             "acceptance": { "type": "array", "items": { "type": "string" }, "description": "Optional shell commands the hub runs when the worker reports done." },
-            "references": strings
+            "references": strings,
+            "result_schema": { "type": "object", "description": "JSON Schema for the required structured result." }
         },
         "required": ["goal"]
     })
@@ -453,7 +454,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "plan_submit",
-        description: "Submit the plan for your current run: the full list of tasks for workers. Each task goes to a new execution session of its assignee by default (fresh: true); write fresh: false to have that session itself, with its conversation, do it. Depending on the run's policy the person approves it first, or it starts at once.",
+        description: "Submit the plan for your current run: the full list of tasks for workers. A task spec may include result_schema, a JSON Schema the worker must satisfy in task_complete.result. Each task goes to a new execution session of its assignee by default (fresh: true); write fresh: false to have that session itself, with its conversation, do it. Depending on the run's policy the person approves it first, or it starts at once.",
         groups: PLANNER,
         schema: || {
             json!({
@@ -467,7 +468,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_create",
-        description: "Add tasks to your running run (same fields as plan_submit's tasks). They start once their dependencies are merged. Keys already in the run are left as they are. If the run lets workers delegate, a worker can split parts off its own task this way: they branch from it and merge back into it, and the worker accepts them. Like plan_submit, each task goes to a new execution session unless it says fresh: false; tasks that could not start are listed in not_started with the reason.",
+        description: "Add tasks to your running run (same fields as plan_submit's tasks); spec.result_schema optionally defines a JSON Schema for the worker's result. They start once their dependencies are merged. Keys already in the run are left as they are. If the run lets workers delegate, a worker can split parts off its own task this way: they branch from it and merge back into it, and the worker accepts them. Like plan_submit, each task goes to a new execution session unless it says fresh: false; tasks that could not start are listed in not_started with the reason.",
         groups: RUN,
         schema: || {
             object(
@@ -491,7 +492,11 @@ const TOOLS: &[ToolDef] = &[
         name: "task_get",
         description: "One task in full: spec, report (worker summary, checks, diff stat, failure, question, review), branch, worktree, run branch.",
         groups: RUN,
-        schema: || task_schema(json!({})),
+        schema: || {
+            task_schema(
+                json!({ "path": { "type": "string", "description": "JSON Pointer into report.result" } }),
+            )
+        },
     },
     ToolDef {
         name: "task_update",
@@ -720,6 +725,7 @@ const TOOLS: &[ToolDef] = &[
             let mut schema = task_id_schema(
                 json!({ "summary": { "type": "string", "description": "What you changed." } }),
             );
+            schema["properties"]["result"] = json!({ "description": "Structured JSON result; required when the task has a result_schema." });
             // Optional, unlike the fields `task_id_schema` lists as required.
             schema["properties"]["used"] = json!({
                 "type": "array",
@@ -743,7 +749,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "review_submit",
-        description: "Give your verdict on the change you are reviewing; it goes to whoever asked for the review. Answer the numbered checklist too when your brief has one: a fail proposes a replacement to the person.",
+        description: "Give your verdict on the change you are reviewing; it goes to whoever asked for the review. Grade each finding P0-P3 with a confidence and give a merge verdict: P0 blocks the merge and must be fixed, P1 should be fixed before it, P2 can follow, P3 is a suggestion. Answer the numbered checklist too when your brief has one: a fail proposes a replacement to the person.",
         groups: REVIEWER,
         schema: || {
             let mut schema = task_id_schema(json!({
@@ -751,6 +757,27 @@ const TOOLS: &[ToolDef] = &[
                 "notes": { "type": "string", "description": "For a rejection: exactly what to fix." }
             }));
             // Optional, unlike the fields `task_id_schema` lists as required.
+            schema["properties"]["findings"] = json!({
+                "type": "array",
+                "description": "Problems found, most severe first when you list them. P0 blocks the merge and must be fixed; P1 should be fixed before it; P2 can follow; P3 is a suggestion.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "severity": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+                        "confidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "How sure you are: a number from 0 (a guess) to 1 (certain), not high/medium/low." },
+                        "file": { "type": "string", "description": "The file it is in, relative to the repository root." },
+                        "line": { "type": "integer", "minimum": 1, "description": "The line on the new side of the diff." },
+                        "title": { "type": "string", "description": "One line: what is wrong." },
+                        "detail": { "type": "string", "description": "Why it matters, or how to fix it." }
+                    },
+                    "required": ["severity", "confidence", "title"]
+                }
+            });
+            schema["properties"]["verdict"] = json!({
+                "type": "string",
+                "enum": ["merge", "merge_after_fixes", "do_not_merge"],
+                "description": "Whether the change can merge. It must agree with approve (true is merge, false is do_not_merge) and with the findings (a P0 cannot merge). Omit it and approve decides."
+            });
             schema["properties"]["checklist"] = json!({
                 "type": "array",
                 "description": "One verdict per numbered item of the reviewer checklist.",
@@ -1048,8 +1075,10 @@ impl Orchestrator {
                     used: Vec<String>,
                 }
                 let task = self.task_ref(caller, &input).await?;
+                let result = input.get("result").cloned();
                 let a: A = args(input)?;
-                self.complete(caller, task, a.summary).await?;
+                self.complete_with_result(caller, task, a.summary, result)
+                    .await?;
                 // Tags that named no entry of this project or the person come back, so the
                 // worker can name them again properly. The report is already in: a store that
                 // cannot record them must not make task_complete fail and be retried, so they
@@ -1094,11 +1123,38 @@ impl Orchestrator {
                     #[serde(default)]
                     notes: String,
                     #[serde(default)]
+                    findings: Vec<crossagents_core::model::ReviewFinding>,
+                    #[serde(default)]
+                    verdict: Option<crossagents_core::model::ReviewVerdict>,
+                    #[serde(default)]
                     checklist: Vec<crate::expertise::review::ChecklistItem>,
                 }
                 let id = self.task_ref(caller, &input).await?;
                 let a: A = args(input)?;
-                self.review(caller, id, a.approve, a.notes).await?;
+                // Refuse a call whose approve and verdict disagree before anything is
+                // recorded (docs/TODO.md §二十五 第 6 条).
+                let verdict = crate::review::effective_verdict(a.approve, a.verdict, &a.findings)?;
+                let findings = crate::review::sorted_findings(&a.findings);
+                // The notes the issuer reads: the reviewer's words, then the verdict and
+                // the findings, P0 first with the blocking ones (P0/P1) on top.
+                let notes = crate::review::review_notes(
+                    &a.notes,
+                    &findings,
+                    a.verdict.or((!findings.is_empty()).then_some(verdict)),
+                );
+                // Record the structured result while the task is still Reviewing: nobody
+                // can accept it then, so this write cannot race an accept. `review` below
+                // owns the status and reviewer checks and refuses a caller that may not
+                // review; only touch the report when those checks would pass.
+                let mut stored = self.store.get_task(id).await?;
+                if stored.status == crossagents_core::TaskStatus::Reviewing
+                    && stored.reviewer == Some(caller.id)
+                {
+                    stored.report.findings = findings;
+                    stored.report.verdict = Some(verdict);
+                    self.store.update_task(&stored).await?;
+                }
+                self.review(caller, id, a.approve, notes).await?;
                 // A failed item proposes a replacement to the person (EXPERTISE §6.3). The
                 // review is already in, so a store that cannot keep candidates must not make
                 // this call fail and be retried.

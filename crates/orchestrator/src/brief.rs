@@ -231,6 +231,12 @@ pub fn task(task: &Task) -> String {
         task.id,
         spec.goal.trim()
     );
+    if let Some(schema) = &spec.result_schema {
+        let _ = writeln!(
+            out,
+            "Result schema (task_complete requires result matching this JSON Schema):\n{schema}\n"
+        );
+    }
     list(&mut out, "Files you may change", &spec.scope.allow);
     list(&mut out, "Files you must not change", &spec.scope.deny);
     list(&mut out, "Interfaces", &spec.interfaces);

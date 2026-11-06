@@ -330,16 +330,9 @@ B3 远程开发：
   - 压缩上下文后顾问状态重置；顾问自己的意见不再回喂给它。
 
   我们有插话和中断，缺的是逐轮看转录的入口和这套投递规则。现有的 `review_request` 只能按任务审一次。先出设计：顾问是普通会话还是专门角色、额度怎么算、run 里和 run 外各怎么用
-- [ ] **2. 人的消息怎么送达：对照 Cutex 的不变式查一遍**（Cutex [050-owner-message-delivery.md](https://github.com/senxiu-official/cutex-desktop/blob/9fbae59caa37c09eaa89d127a233f83d49601203/docs/design/050-owner-message-delivery.md) §2）。他们的病和我们修过的插话、排队问题几乎一样。逐条对照：
-  - 「忙」只有一个来源，界面各处都读它，不各自推算；
-  - 每条消息在界面上只占一个固定位置，状态在原地变，不在聊天和队列之间搬；
-  - 每个原因码都有专门映射并有对照测试，不认识的如实显示，不归成「被拒绝」；
-  - 不自动换一种方式重发，超时就显示失败、可重试，重试不重复；
-  - 人自己发起的中断不弹提示。
-
-  先只读核对，列出我们违反的几条，再定改哪些
-- [ ] **3. 排队的提示随人的消息一起送**（Cutex [057-notices-ride-with-owner-message.md](https://github.com/senxiu-official/cutex-desktop/blob/9fbae59caa37c09eaa89d127a233f83d49601203/docs/design/057-notices-ride-with-owner-message.md)）：我们的通知汇总是单独一条消息（`crates/hub/src/runtime.rs` 的 `notify`）。人发消息时前面如果排着汇总，agent 要多跑一轮。改成：汇总还没开始时，并进人的这条消息，人的话在前、汇总在后，界面上挂在人的气泡下面而不是混进正文；人发出之后才到的通知按现有规则走。改动小，还省额度
-- [ ] **4. hub 层的流式规则**（oh-my-pi [ttsr-injection-lifecycle.md](https://github.com/can1357/oh-my-pi/blob/b7221d994869ed36a81b44e60827786f572498ed/docs/ttsr-injection-lifecycle.md)）：规则平时不进上下文，agent 的输出或工具调用命中正则时，hub 用插话把这条规则送进去（不支持插话的驱动就中断后重发）。比把所有规则塞进系统提示省上下文。要定：规则写在哪（项目文件还是扩展）、同一条规则多久内只注入一次、压缩上下文后还算不算已注入
-- [ ] **5. 任务交结构化结果**（oh-my-pi 的 subagent：结果按 schema 校验，父 agent 按路径取字段）：`task_create` 可以带一个结果 schema，`task_complete` 按它校验并存成 JSON，主导用 `task_get` 按路径取。现在只交一段文字总结，主导得自己读
-- [ ] **6. 评审给明确结论**（oh-my-pi 的 `/review`）：`review_submit` 的每个问题按 P0–P3 分级并标置信度，最后给一个能不能合的结论；GUI 按级别排，先看挡合并的
-- [ ] **7. 合并的活动流**（oh-my-pi [agent-hub.md](https://github.com/can1357/oh-my-pi/blob/b7221d994869ed36a81b44e60827786f572498ed/docs/agent-hub.md) 的 Activity）：所有 agent 的回复、工具调用、消息排成一条时间线，可按错误、回复、工具筛选，范围可以是全部、某个 agent 或它的下属；点一条跳到那个会话的对应位置。我们的右侧栏现在按会话分开看
+  - 2026-11-06 设计稿已写好：[tasks/ADVISOR.md](tasks/ADVISOR.md)。等人看过再决定实现范围：稿子自己的最小可用版，还是主导建议的缩小版（状态放内存、预算只按次数、只做工具和卡片）。§8 有 5 个问题要人定
+- [ ] **2 的尾巴**（第 2 条本身已完成，见 [DONE.md](DONE.md) 同名一节）：
+  - 重新拉取转录后，排队中那条的 `queued_reason` 和「已撤回」不在快照里（hub 没存这两个字段），重载页面后只显示「排队中」，或者那一行消失；只有事件路径是完整的
+  - Codex 驱动把 120 秒没应答的插话当成失败，回滚后排队；如果插话其实已经送到，模型会读到两次（`crates/drivers/src/codex_native/mod.rs` 约 :433）。性质是「不确定送没送到」，该映射成 outcome_unknown，而不是改成排队
+  - Electron 的超时、断线映射没在打包环境里实测过
+- [ ] **4 的尾巴**：驱动自己压缩上下文时没有事件，流式规则的去重状态不会重置；`inject` 在事件泵里同步等待，ACP 驱动的 interrupt 最多会让输出转发停 5 秒；扩展那一侧的 `RuleSource` 没接（详见 DONE.md 第 4 条）

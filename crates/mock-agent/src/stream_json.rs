@@ -33,6 +33,10 @@
 //! `--mock-sessions DIR` keeps each session in `DIR/<id>.json` with the directory it was
 //! started in, as CLIs that keep sessions per project do: `--resume` fails anywhere else,
 //! and what `[remember]` kept comes back with the session.
+//!
+//! `--stdin-stuck` stops reading stdin after the first message and closes it, as a CLI whose
+//! input pipe is gone does: later writes (a steer) fail. For testing that a failed steer is
+//! shown and nothing is queued.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -72,6 +76,9 @@ struct Mock {
     replay: bool,
     /// User messages queued behind the running turn, by uuid (an interrupt reports them).
     queued: Mutex<Vec<String>>,
+    /// `--stdin-stuck`: stop reading stdin after the first message and close it, so later
+    /// writes fail.
+    stdin_stuck: bool,
 }
 
 impl Mock {
@@ -340,6 +347,25 @@ fn flag(args: &[String], flag: &str) -> Option<String> {
         .cloned()
 }
 
+/// Closes this process's stdin, so later writes to it fail. Only for `--stdin-stuck`.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn close_stdin() {
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+    let fd = std::io::stdin().as_raw_fd();
+    // SAFETY: fd 0 belongs to this process and is closed once; nothing reads it after.
+    drop(unsafe { std::fs::File::from_raw_fd(fd) });
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn close_stdin() {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    let handle = std::io::stdin().as_raw_handle();
+    // SAFETY: the handle is stdin's and is closed once; nothing reads it after.
+    drop(unsafe { std::fs::File::from_raw_handle(handle) });
+}
+
 pub async fn run(args: Vec<String>) {
     let resumed = flag(&args, "--resume").is_some() && flag(&args, "--fork-session").is_none();
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -418,6 +444,7 @@ pub async fn run(args: Vec<String>) {
         steers: Mutex::default(),
         replay: args.iter().any(|a| a == "--replay-user-messages"),
         queued: Mutex::default(),
+        stdin_stuck: args.iter().any(|a| a == "--stdin-stuck"),
         kept,
     });
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
@@ -431,6 +458,7 @@ pub async fn run(args: Vec<String>) {
                 tokio::spawn(async move { mock.control(&message).await });
             }
             Some("user") => {
+                let stuck = mock.stdin_stuck;
                 let mock = mock.clone();
                 tokio::spawn(async move {
                     let queued = mock.running.load(Ordering::SeqCst);
@@ -447,6 +475,12 @@ pub async fn run(args: Vec<String>) {
                     }
                     mock.run_turn(message, queued).await;
                 });
+                if stuck {
+                    // No read is pending here, so the close does not wait on one: later
+                    // writes to this pipe fail. The turn keeps running above.
+                    close_stdin();
+                    std::future::pending::<()>().await;
+                }
             }
             _ => {}
         }

@@ -1170,6 +1170,9 @@ export function TaskDetail({ runId, taskId }: { runId: string; taskId: string })
               <p className="muted small">还没有提交。</p>
             )}
           </Section>
+          {task.report.result !== undefined && (
+            <details><summary>?????</summary><pre>{JSON.stringify(task.report.result, null, 2)}</pre></details>
+          )}
           <TaskChanges task={task} agents={agents.data ?? []} title={(children) => <Section title="改动">{children}</Section>} />
           {task.worktree && !detail.data!.run.in_place && (
             <Section title="审查">

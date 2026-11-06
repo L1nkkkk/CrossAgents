@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { Capabilities } from "@bindings/Capabilities";
+import type { DeliveryStatus } from "@bindings/DeliveryStatus";
 import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
 import { api, errorText } from "../api";
@@ -11,6 +12,7 @@ import { useHubData } from "../hub";
 import { supportNote } from "../lib/attachments";
 // `draft` is this file's word for the text being typed, so the module keeps the plural.
 import * as drafts from "../lib/draft";
+import { queueHeading } from "../lib/delivery";
 import { t } from "../lib/i18n";
 import { canSteer, composerAction, composerHint, composerPlaceholder } from "../lib/steer";
 import { mentionsFor, useMention } from "../mention";
@@ -21,16 +23,16 @@ import type { TranscriptTurn } from "../session";
 import { useSlash, type SlashMenuGroup } from "../slash";
 import { PlanTasks, usePlanApproval } from "./Run";
 import { isKickoff } from "../lib/messageText";
-import { fromPerson } from "./SessionMessage";
 
 const QUEUE_OPEN = "crossagents.queueOpen";
 
 /**
- * "接下来": messages waiting for their turn, on the composer's top edge. Your own can be sent
- * now (interrupting the current turn), edited (taken back into the composer) or removed;
- * orchestration messages are shown but left alone.
+ * "接下来": messages from the orchestrator waiting for their turn, on the composer's top edge.
+ * A person's own message never moves here — its row stays in the conversation, which says
+ * 排队中 · 原因 on the bubble itself (docs/tasks/DELIVERY-AUDIT.md §2, §8 P0-1). These are shown
+ * as they are; the hub owns when they go out.
  */
-export function QueuePanel({ agent, queued, onEdit }: { agent: Agent; queued: TranscriptTurn[]; onEdit: (text: string) => void }) {
+export function QueuePanel({ agent, queued, delivery }: { agent: Agent; queued: TranscriptTurn[]; delivery: DeliveryStatus }) {
   const [open, setOpen] = useState(() => {
     try {
       return localStorage.getItem(QUEUE_OPEN) !== "0";
@@ -38,7 +40,6 @@ export function QueuePanel({ agent, queued, onEdit }: { agent: Agent; queued: Tr
       return true;
     }
   });
-  const [error, setError] = useState<string>();
   if (!queued.length) return null;
 
   const toggle = () => {
@@ -49,19 +50,6 @@ export function QueuePanel({ agent, queued, onEdit }: { agent: Agent; queued: Tr
       // Remembered for this page only.
     }
   };
-  const act = async (action: () => Promise<unknown>) => {
-    setError(undefined);
-    try {
-      await action();
-    } catch (err) {
-      setError(errorText(err));
-    }
-  };
-  const withdraw = (turn: TranscriptTurn) => api.withdrawMessage(agent.id, turn.message_id);
-  // A queued message's files, back in the shape the send API takes: "send now" re-sends it
-  // as a whole, text and files, so an image-only message does not go out empty.
-  const uploads = (turn: TranscriptTurn) =>
-    Promise.all((turn.attachments ?? []).map(async (f) => ({ name: f.name, mime: f.mime, data: (await api.attachment(agent.id, f.id)).data })));
 
   return (
     <div className="queue">
@@ -70,55 +58,18 @@ export function QueuePanel({ agent, queued, onEdit }: { agent: Agent; queued: Tr
           {open ? "▾" : "▸"}
         </span>
         接下来 · {queued.length}
-        <span className="muted small">本轮结束后依次发给 {displayName(agent)}</span>
+        <span className="muted small">{queueHeading(delivery.state, displayName(agent))}</span>
       </button>
       {open &&
-        queued.map((turn) => {
-          const mine = fromPerson(turn);
-          return (
-            <div key={turn.message_id} className="queue-row">
-              <span className="queue-kind" title={mine ? "你发的" : "编排"}>
-                {mine ? "你" : "编排"}
-              </span>
-              {!!turn.attachments?.length && <MiniFiles agent={agent.id} files={turn.attachments} />}
-              {turn.input && <span className="queue-text">{!mine && isKickoff(turn.input) ? "开始新一轮" : turn.input.split("\n")[0]}</span>}
-              {mine && (
-                <span className="queue-actions">
-                  <button
-                    className="link"
-                    title="打断当前这一轮，先发这条"
-                    onClick={() =>
-                      act(async () => {
-                        const attachments = await uploads(turn);
-                        await withdraw(turn);
-                        await api.sendMessage(agent.id, { text: turn.input, now: true, ...(attachments.length ? { attachments } : {}) });
-                      })
-                    }
-                  >
-                    立即发送
-                  </button>
-                  {!turn.attachments?.length && (
-                    <button
-                      className="link"
-                      onClick={() =>
-                        act(async () => {
-                          await withdraw(turn);
-                          onEdit(turn.input);
-                        })
-                      }
-                    >
-                      编辑
-                    </button>
-                  )}
-                  <button className="link" onClick={() => act(() => withdraw(turn))}>
-                    删除
-                  </button>
-                </span>
-              )}
-            </div>
-          );
-        })}
-      {error && <ErrorBox error={error} />}
+        queued.map((turn) => (
+          <div key={turn.message_id} className="queue-row">
+            <span className="queue-kind" title="编排">
+              编排
+            </span>
+            {!!turn.attachments?.length && <MiniFiles agent={agent.id} files={turn.attachments} />}
+            {turn.input && <span className="queue-text">{isKickoff(turn.input) ? "开始新一轮" : turn.input.split("\n")[0]}</span>}
+          </div>
+        ))}
     </div>
   );
 }
@@ -127,6 +78,7 @@ export function Composer({
   agent,
   capabilities,
   driver,
+  delivery,
   draft,
   setDraft,
   plans,
@@ -136,6 +88,8 @@ export function Composer({
   agent: Agent;
   capabilities: Capabilities | null;
   driver: string | null;
+  /** The hub's delivery state: the one word on whether a message would wait (P1-4). */
+  delivery: DeliveryStatus;
   draft: string;
   setDraft: (text: string) => void;
   plans: RunDetail[];
@@ -179,7 +133,8 @@ export function Composer({
     },
   ];
   const slash = useSlash(ref, setDraft, groups);
-  const running = agent.status === "running";
+  const running = delivery.state === "turn";
+  const waiting = delivery.state !== "idle";
   const canInterrupt = running && capabilities?.interrupt !== false;
   const steer = canSteer(capabilities);
   const plan = plans.find((d) => !deferred.includes(d.run.id));
@@ -234,11 +189,11 @@ export function Composer({
     setKeepNote(undefined);
     try {
       const attachments = held.map(({ name, mime, data }) => ({ name, mime, data }));
-      await sendMessage(agent.id, text, { now: mode === "now", steer: mode === "steer", takeBack: true, attachments });
-    } catch (err) {
-      setDraft(text);
-      files.restore(held);
-      setError(errorText(err));
+      // A failure stays on this message's own row with a retry (P0-1, P2-6): the row keeps the
+      // text and files, so nothing is put back in the composer and nothing is lost.
+      await sendMessage(agent.id, text, { now: mode === "now", steer: mode === "steer", attachments });
+    } catch {
+      // Said on the row (outbox.ts), in the person's words.
     } finally {
       setBusy(false);
     }
@@ -261,7 +216,7 @@ export function Composer({
       }
       return;
     }
-    const action = composerAction({ key: e.key, ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey, running, steer });
+    const action = composerAction({ key: e.key, ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey, busy: waiting, steer });
     if (!action) return;
     e.preventDefault();
     // A driver that cannot steer answers Ctrl+Enter with "queue" (lib/steer.ts).
@@ -305,7 +260,7 @@ export function Composer({
             mention.sync();
           }}
           onKeyDown={(e) => slash.onKeyDown(e) || mention.onKeyDown(e) || onKey(e)}
-          placeholder={composerPlaceholder({ name: displayName(agent), running, steer })}
+          placeholder={composerPlaceholder({ name: displayName(agent), state: delivery.state, steer })}
         />
         <div className="bar">
           {agent.plugin === "external" ? (
@@ -332,7 +287,7 @@ export function Composer({
       </div>
       <div className="composer-hint">
         {note && <span>{note} · </span>}
-        {compact.busy ? "压缩中…" : composerHint({ running, steer, interrupt: canInterrupt })}
+        {compact.busy ? "压缩中…" : composerHint({ state: delivery.state, steer, interrupt: canInterrupt })}
       </div>
     </div>
   );
