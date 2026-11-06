@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use crossagents_core::{
     AgentCommand, AttachmentSupport, Capabilities, CliStatus, CoreError, Driver, DriverKind,
-    DriverSession, PermissionHandler, PermissionPolicy, Prompt, SessionEvent, SessionEventKind,
-    SessionSpec, StopReason, TurnOutcome,
+    DriverSession, MessageId, PermissionHandler, PermissionPolicy, Prompt, SessionEvent,
+    SessionEventKind, SessionSpec, StopReason, TurnOutcome,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -39,6 +39,7 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// For interrupting and reading the quota after a turn.
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
+const WRITER_CLOSE: Duration = Duration::from_secs(1);
 /// For a resumed CodeBuddy session to replay its history (read from disk, so quick).
 const REPLAY_TIMEOUT: Duration = Duration::from_secs(15);
 /// `get_usage` asks claude.ai; once a minute is plenty.
@@ -136,6 +137,11 @@ impl Driver for ClaudeNativeDriver {
         Capabilities {
             streaming: true,
             interrupt: true,
+            // Claude Code reads a message written while a turn runs at its next tool
+            // boundary: measured with claude 2.1.317, a steer written during a 12 s tool
+            // was read right after the tool result and changed the turn's answer. CodeBuddy
+            // only reads between turns, so its flavor stays off.
+            steer: self.flavor == Flavor::Claude,
             mcp: true,
             multi_session: false,
             resume: true,
@@ -227,7 +233,9 @@ fn owner_of(flavor: Flavor, session_id: &str) -> String {
 /// What the reader task and the session share.
 struct Shared {
     session_id: String,
-    stdin: tokio::sync::Mutex<Option<BoxWrite>>,
+    writer: mpsc::Sender<WriteCommand>,
+    writer_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    writer_gate: Mutex<()>,
     pending: Mutex<HashMap<String, oneshot::Sender<Result<Value, String>>>>,
     turn: Mutex<Turn>,
     translator: Mutex<Translator>,
@@ -249,6 +257,31 @@ struct Shared {
     /// `initialize`: old messages and a `result` closing them, which would otherwise end
     /// the first real turn. Taken (and sent) at that `result`.
     replay: Mutex<Option<oneshot::Sender<()>>>,
+    /// Steers whose own turn may still report a `result` after the hub turn they belonged
+    /// to ended. Such a result ends that steer's turn, never the next one (`user_message_uuid`
+    /// names it).
+    stale_steers: Mutex<Vec<MessageId>>,
+}
+
+#[derive(Debug)]
+enum WriteCommand {
+    Frame(Vec<u8>, oneshot::Sender<Result<(), String>>),
+    Close,
+}
+
+struct PendingRequest<'a> {
+    shared: &'a Shared,
+    id: &'a str,
+}
+
+impl Drop for PendingRequest<'_> {
+    fn drop(&mut self) {
+        self.shared
+            .pending
+            .lock()
+            .expect("pending lock")
+            .remove(self.id);
+    }
 }
 
 #[derive(Default)]
@@ -258,13 +291,57 @@ struct Turn {
     waiter: Option<oneshot::Sender<StopReason>>,
     interrupted: bool,
     last_assistant: Option<String>,
+    /// Messages put into this turn with `steer` that the model has not read yet.
+    steers: Vec<PendingSteer>,
+    /// Every message steered into this turn, read or not: a `result` names the message
+    /// whose turn it ends with `user_message_uuid`.
+    steered: Vec<MessageId>,
+    /// The prompt's own result arrived.
+    prompt_done: bool,
+    /// The CLI opened a turn of its own for steered messages (a `system/init` while they
+    /// waited): its result ends this turn, not the next one.
+    separate_steer_turn: bool,
+    /// Steers whose own turn reported its `result`.
+    steer_results: Vec<MessageId>,
+    /// The prompt's result, kept until that separate turn has reported.
+    held_stop: Option<StopReason>,
+    /// The interrupt left the unread steers queued (`still_queued`): they will still be
+    /// read, so the turn waits for them like a late message.
+    keep_queued: bool,
+    /// Interrupt requests whose answers can preserve this turn's unread steers.
+    interrupt_requests: Vec<String>,
+}
+
+/// A message written into the running turn, waiting for the model to read it.
+struct PendingSteer {
+    id: MessageId,
+    /// Its opening words, for a warning when it never gets read.
+    snippet: String,
+}
+
+fn interrupt_kept_queued(answer: &Result<Value, String>) -> bool {
+    answer.as_ref().is_ok_and(|answer| {
+        answer
+            .get("still_queued")
+            .and_then(Value::as_array)
+            .is_some_and(|queued| !queued.is_empty())
+    })
 }
 
 impl Shared {
-    fn new(session_id: String, stdin: BoxWrite, spec: &SessionSpec, flavor: Flavor) -> Self {
-        Self {
+    fn new(
+        session_id: String,
+        stdin: BoxWrite,
+        spec: &SessionSpec,
+        flavor: Flavor,
+        process: &Arc<ProcessHandle>,
+    ) -> Arc<Self> {
+        let (writer, queue) = mpsc::channel(32);
+        let shared = Arc::new(Self {
             session_id,
-            stdin: tokio::sync::Mutex::new(Some(stdin)),
+            writer,
+            writer_task: Mutex::new(None),
+            writer_gate: Mutex::new(()),
             pending: Mutex::default(),
             turn: Mutex::default(),
             translator: Mutex::default(),
@@ -278,7 +355,58 @@ impl Shared {
             program: flavor.program(),
             flavor,
             replay: Mutex::default(),
-        }
+            stale_steers: Mutex::default(),
+        });
+        shared.start_writer(
+            stdin,
+            queue,
+            Some(Arc::downgrade(process)),
+            crate::host::STDIN_STALL,
+        );
+        shared
+    }
+
+    fn start_writer(
+        self: &Arc<Self>,
+        mut stdin: BoxWrite,
+        mut queue: mpsc::Receiver<WriteCommand>,
+        process: Option<std::sync::Weak<ProcessHandle>>,
+        stall: Duration,
+    ) {
+        let shared = Arc::downgrade(self);
+        let task = tokio::spawn(async move {
+            while let Some(command) = queue.recv().await {
+                let WriteCommand::Frame(line, ack) = command else {
+                    break;
+                };
+                let result = crate::host::write_progress(&mut *stdin, &line, stall).await;
+                match result {
+                    Ok(()) => {
+                        let _ = ack.send(Ok(()));
+                    }
+                    Err(failure) => {
+                        let error = failure.to_string();
+                        // Drop the pipe before notifying anyone: no later frame may use it.
+                        drop(stdin);
+                        if let Some(shared) = shared.upgrade() {
+                            shared.ended();
+                            shared.emit(
+                                SessionEventKind::Warning {
+                                    message: format!("{} stdin failed: {error}", shared.program),
+                                },
+                                None,
+                            );
+                        }
+                        if let Some(process) = process.and_then(|p| p.upgrade()) {
+                            process.start_kill();
+                        }
+                        let _ = ack.send(Err(error));
+                        return;
+                    }
+                }
+            }
+        });
+        *self.writer_task.lock().expect("writer task lock") = Some(task);
     }
 
     fn emit(&self, kind: SessionEventKind, raw: Option<&Value>) {
@@ -289,28 +417,80 @@ impl Shared {
     }
 
     async fn write(&self, message: &Value) -> Result<(), CoreError> {
-        let mut stdin = self.stdin.lock().await;
-        let stdin = stdin
-            .as_mut()
-            .ok_or_else(|| CoreError::Agent(format!("{} is not running", self.program)))?;
+        let permit = self.reserve_write().await?;
+        let done = {
+            let _gate = self.writer_gate.lock().expect("writer gate");
+            self.check_writable()?;
+            self.enqueue(permit, message)
+        };
+        self.wait_written(done).await
+    }
+
+    fn check_writable(&self) -> Result<(), CoreError> {
+        if self.exited.load(Ordering::SeqCst) || self.closing.load(Ordering::SeqCst) {
+            Err(CoreError::Agent(format!("{} is not running", self.program)))
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn reserve_write(&self) -> Result<mpsc::Permit<'_, WriteCommand>, CoreError> {
+        self.check_writable()?;
+        self.writer
+            .reserve()
+            .await
+            .map_err(|_| CoreError::Agent(format!("{} writer stopped", self.program)))
+    }
+
+    fn enqueue(
+        &self,
+        permit: mpsc::Permit<'_, WriteCommand>,
+        message: &Value,
+    ) -> oneshot::Receiver<Result<(), String>> {
         let mut line = message.to_string();
         line.push('\n');
-        let result = async {
-            stdin.write_all(line.as_bytes()).await?;
-            stdin.flush().await
+        let (ack, done) = oneshot::channel();
+        permit.send(WriteCommand::Frame(line.into_bytes(), ack));
+        done
+    }
+
+    async fn wait_written(
+        &self,
+        done: oneshot::Receiver<Result<(), String>>,
+    ) -> Result<(), CoreError> {
+        match done.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(CoreError::Agent(format!(
+                "cannot write to {}: {error}",
+                self.program
+            ))),
+            Err(_) => Err(CoreError::Agent(format!(
+                "cannot write to {}: writer stopped",
+                self.program
+            ))),
         }
-        .await;
-        result.map_err(|e| CoreError::Agent(format!("cannot write to claude: {e}")))
     }
 
     async fn control(&self, request: Value, timeout: Duration) -> Result<Value, CoreError> {
+        self.control_with_id(request, timeout, new_id()).await
+    }
+
+    async fn control_with_id(
+        &self,
+        request: Value,
+        timeout: Duration,
+        id: String,
+    ) -> Result<Value, CoreError> {
         let subtype = request["subtype"].as_str().unwrap_or("request").to_owned();
-        let id = new_id();
         let (tx, rx) = oneshot::channel();
         self.pending
             .lock()
             .expect("pending lock")
             .insert(id.clone(), tx);
+        let _pending = PendingRequest {
+            shared: self,
+            id: &id,
+        };
         if let Err(err) = self.write(&wire::control_request(&id, request)).await {
             self.pending.lock().expect("pending lock").remove(&id);
             return Err(err);
@@ -329,12 +509,79 @@ impl Shared {
         }
     }
 
+    /// Says these steers were not read, and remembers them: the CLI may still run them,
+    /// and their results must not end a later turn.
+    fn warn_unread(&self, unread: Vec<PendingSteer>) {
+        if unread.is_empty() {
+            return;
+        }
+        let mut stale = self.stale_steers.lock().expect("stale lock");
+        for steer in &unread {
+            self.emit(
+                SessionEventKind::Warning {
+                    message: format!("这条插话没有被读取：「{}」", steer.snippet),
+                },
+                None,
+            );
+            if !stale.contains(&steer.id) {
+                stale.push(steer.id);
+            }
+        }
+        if stale.len() > 16 {
+            let extra = stale.len() - 16;
+            stale.drain(..extra);
+        }
+    }
+
+    /// Ends the running turn. A message still unread was not read: say so, and do not
+    /// claim otherwise. Its own turn may still report later (an interrupted turn keeps its
+    /// queued messages), so its id is remembered as stale.
+    fn finish_turn(&self, turn: &mut Turn, stop: StopReason) {
+        let stop = turn.held_stop.take().unwrap_or(stop);
+        let unread: Vec<PendingSteer> = std::mem::take(&mut turn.steers);
+        self.warn_unread(unread);
+        let mut stale = self.stale_steers.lock().expect("stale lock");
+        if turn.separate_steer_turn {
+            for id in &turn.steered {
+                if !turn.steer_results.contains(id) && !stale.contains(id) {
+                    stale.push(*id);
+                }
+            }
+        }
+        if stale.len() > 16 {
+            let extra = stale.len() - 16;
+            stale.drain(..extra);
+        }
+        drop(stale);
+        if let (Some(id), Some(last)) = (turn.id.take(), turn.last_assistant.take()) {
+            self.turn_ends
+                .lock()
+                .expect("turn_ends lock")
+                .insert(id, last);
+        }
+        if let Some(waiter) = turn.waiter.take() {
+            let _ = waiter.send(stop);
+        }
+        *turn = Turn::default();
+    }
+
     fn handle(self: &Arc<Self>, message: Value) {
         // Before the replay filter: a resumed CodeBuddy session's init is still the CLI's.
         if let Some(commands) = wire::commands(&message) {
             *self.commands.lock().expect("commands lock") = Some(commands);
         }
         let kind = message.get("type").and_then(Value::as_str);
+        // The CLI opens a turn of its own for a message written too late (`system/init`
+        // while it waits): that turn's result belongs to this one, not to the next. A
+        // steer already read in this turn is not one of those: a later init (compaction,
+        // say) must not make the turn wait for a result that will never come.
+        if kind == Some("system") && message.get("subtype").and_then(Value::as_str) == Some("init")
+        {
+            let mut turn = self.turn.lock().expect("turn lock");
+            if !turn.steers.is_empty() {
+                turn.separate_steer_turn = true;
+            }
+        }
         if !matches!(kind, Some("control_response" | "control_request")) {
             let mut replay = self.replay.lock().expect("replay lock");
             if replay.is_some() {
@@ -349,10 +596,21 @@ impl Shared {
         }
         match kind {
             Some("control_response") => {
-                if let Some((id, answer)) = wire::control_answer(&message)
-                    && let Some(tx) = self.pending.lock().expect("pending lock").remove(&id)
-                {
-                    let _ = tx.send(answer);
+                if let Some((id, answer)) = wire::control_answer(&message) {
+                    let tx = self.pending.lock().expect("pending lock").remove(&id);
+                    let mut turn = self.turn.lock().expect("turn lock");
+                    if let Some(index) = turn
+                        .interrupt_requests
+                        .iter()
+                        .position(|request| request == &id)
+                    {
+                        turn.interrupt_requests.remove(index);
+                        turn.keep_queued |= interrupt_kept_queued(&answer);
+                    }
+                    drop(turn);
+                    if let Some(tx) = tx {
+                        let _ = tx.send(answer);
+                    }
                 }
             }
             Some("control_request") => {
@@ -360,6 +618,30 @@ impl Shared {
                 tokio::spawn(async move { this.answer(message).await });
             }
             Some("result") => {
+                // Claude names the message in `user_message_uuid` (2.1.317).
+                // CodeBuddy 2.179.2 does not supply that field.
+                let ended: Option<MessageId> = message
+                    .get("user_message_uuid")
+                    .and_then(Value::as_str)
+                    .and_then(|uuid| uuid.parse().ok());
+                // A failed prompt only waits on positive evidence of a separate,
+                // already-read steer (or an interrupt that kept its queue).
+                let failed = message.get("is_error").and_then(Value::as_bool) == Some(true)
+                    || message.get("subtype").and_then(Value::as_str) != Some("success");
+                // A steer's own turn may report after the hub turn it belonged to ended.
+                // Absorb its result: it must never end the next prompt's turn.
+                if let Some(id) = ended {
+                    let mut stale = self.stale_steers.lock().expect("stale lock");
+                    if stale.contains(&id) {
+                        stale.retain(|stale| *stale != id);
+                        drop(stale);
+                        self.emit(
+                            SessionEventKind::SteerRead { message_id: id },
+                            Some(&message),
+                        );
+                        return;
+                    }
+                }
                 let mut turn = self.turn.lock().expect("turn lock");
                 let (stop, events) = self
                     .translator
@@ -369,16 +651,47 @@ impl Shared {
                 for kind in events {
                     self.emit(kind, Some(&message));
                 }
-                if let (Some(id), Some(last)) = (turn.id.take(), turn.last_assistant.take()) {
-                    self.turn_ends
-                        .lock()
-                        .expect("turn_ends lock")
-                        .insert(id, last);
+                if ended.is_some_and(|id| turn.steered.contains(&id)) {
+                    // The follow-up turn for a late message: it read it, and ends here.
+                    let id = ended.expect("checked");
+                    if turn.steers.iter().any(|steer| steer.id == id) {
+                        turn.steers.retain(|steer| steer.id != id);
+                        self.emit(
+                            SessionEventKind::SteerRead { message_id: id },
+                            Some(&message),
+                        );
+                    }
+                    turn.steer_results.push(id);
+                    if !turn.prompt_done {
+                        // It came before the prompt's own result: wait for that.
+                        return;
+                    }
+                    // More late messages wait for their turn to read them, unless this one
+                    // failed: then nothing more will run for them.
+                    if !failed && !turn.steers.is_empty() {
+                        return;
+                    }
+                } else {
+                    // The prompt's result. A steer still unread, or a separate turn that
+                    // has not reported, keeps this turn open so no stray result ends the
+                    // next one. An interrupted turn is kept open because its queued
+                    // messages are still read (`still_queued`, verified with claude
+                    // 2.1.317); a failure without an interrupt ends now.
+                    turn.prompt_done = true;
+                    turn.held_stop.get_or_insert(stop);
+                    let unread = !turn.steers.is_empty();
+                    let separate = turn.separate_steer_turn && turn.steer_results.is_empty();
+                    let survives = turn.interrupted && turn.keep_queued;
+                    let read_separate = turn.separate_steer_turn
+                        && turn.steered.iter().any(|id| {
+                            !turn.steers.iter().any(|steer| steer.id == *id)
+                                && !turn.steer_results.contains(id)
+                        });
+                    if ((survives || !failed) && (unread || separate)) || read_separate {
+                        return;
+                    }
                 }
-                if let Some(waiter) = turn.waiter.take() {
-                    let _ = waiter.send(stop);
-                }
-                *turn = Turn::default();
+                self.finish_turn(&mut turn, stop);
             }
             // CodeBuddy reports a turn it cannot run at all (a session it cannot find, say)
             // as a bare `error` message and then waits: no `result` follows, so this ends
@@ -401,9 +714,47 @@ impl Shared {
                     );
                     let _ = waiter.send(StopReason::Error);
                 }
+                let unread: Vec<PendingSteer> = std::mem::take(&mut turn.steers);
                 *turn = Turn::default();
+                drop(turn);
+                self.warn_unread(unread);
             }
             Some(kind) => {
+                // The CLI echoes a user message with `isReplay` and the uuid we gave it
+                // when it reads it into the running turn (`--replay-user-messages`). That,
+                // and only that, says the model has seen a steer: the next assistant output
+                // may still belong to the turn before it (verified with claude 2.1.317).
+                if message.get("isReplay").and_then(Value::as_bool) == Some(true)
+                    && let Some(id) = message
+                        .get("uuid")
+                        .and_then(Value::as_str)
+                        .and_then(|uuid| uuid.parse::<MessageId>().ok())
+                {
+                    let read = {
+                        let mut turn = self.turn.lock().expect("turn lock");
+                        match turn.steers.iter().position(|steer| steer.id == id) {
+                            Some(index) => {
+                                turn.steers.remove(index);
+                                true
+                            }
+                            // Warned about when an earlier turn ended, still queued: its
+                            // turn has started now.
+                            None => {
+                                drop(turn);
+                                let mut stale = self.stale_steers.lock().expect("stale lock");
+                                let found = stale.contains(&id);
+                                stale.retain(|stale| *stale != id);
+                                found
+                            }
+                        }
+                    };
+                    if read {
+                        self.emit(
+                            SessionEventKind::SteerRead { message_id: id },
+                            Some(&message),
+                        );
+                    }
+                }
                 if kind == "assistant"
                     && message.get("parent_tool_use_id").is_none_or(Value::is_null)
                     && let Some(uuid) = message.get("uuid").and_then(Value::as_str)
@@ -458,7 +809,22 @@ impl Shared {
     fn ended(&self) -> bool {
         self.exited.store(true, Ordering::SeqCst);
         self.pending.lock().expect("pending lock").clear();
-        *self.turn.lock().expect("turn lock") = Turn::default();
+        let unread = {
+            let mut turn = self.turn.lock().expect("turn lock");
+            let unread: Vec<PendingSteer> = std::mem::take(&mut turn.steers);
+            *turn = Turn::default();
+            unread
+        };
+        // The process is gone: these were never read. Say so rather than mark them read.
+        for steer in unread {
+            self.emit(
+                SessionEventKind::Warning {
+                    message: format!("这条插话没有被读取：「{}」", steer.snippet),
+                },
+                None,
+            );
+        }
+        self.stale_steers.lock().expect("stale lock").clear();
         !self.closing.load(Ordering::SeqCst)
     }
 }
@@ -492,7 +858,7 @@ async fn read(shared: Arc<Shared>, stdout: BoxRead, tail: StderrTail, exit: Exit
 /// A Claude Code session in its own `claude -p` process.
 pub struct ClaudeSession {
     shared: Arc<Shared>,
-    process: ProcessHandle,
+    process: Arc<ProcessHandle>,
     command: Vec<String>,
     flavor: Flavor,
     last_limits: Mutex<Option<Instant>>,
@@ -549,7 +915,8 @@ impl ClaudeSession {
             stderr: tail,
             process,
         } = launched;
-        let shared = Arc::new(Shared::new(session_id, stdin, &spec, flavor));
+        let process = Arc::new(process);
+        let shared = Shared::new(session_id, stdin, &spec, flavor, &process);
         let adopted = turn_running.then(|| {
             let (tx, rx) = oneshot::channel();
             shared.turn.lock().expect("turn lock").waiter = Some(tx);
@@ -623,7 +990,8 @@ impl ClaudeSession {
             stderr: tail,
             process,
         } = launched;
-        let shared = Arc::new(Shared::new(session_id.clone(), stdin, &spec, flavor));
+        let process = Arc::new(process);
+        let shared = Shared::new(session_id.clone(), stdin, &spec, flavor, &process);
         let replayed =
             (flavor == Flavor::Codebuddy && matches!(start, Start::Resume(_))).then(|| {
                 let (tx, rx) = oneshot::channel();
@@ -680,9 +1048,40 @@ impl ClaudeSession {
     }
 
     async fn close(&self) {
-        self.shared.closing.store(true, Ordering::SeqCst);
-        // Closing stdin lets Claude Code finish writing its transcript.
-        self.shared.stdin.lock().await.take();
+        {
+            let _gate = self.shared.writer_gate.lock().expect("writer gate");
+            self.shared.closing.store(true, Ordering::SeqCst);
+        }
+        // Let queued frames drain briefly, then drop the pipe even if the CLI is stuck.
+        let task = self
+            .shared
+            .writer_task
+            .lock()
+            .expect("writer task lock")
+            .take();
+        if let Some(mut task) = task {
+            let drained = tokio::time::timeout(WRITER_CLOSE, async {
+                let _ = self.shared.writer.send(WriteCommand::Close).await;
+                let _ = (&mut task).await;
+            })
+            .await
+            .is_ok();
+            if !drained {
+                task.abort();
+                let _ = task.await;
+                self.shared.ended();
+                self.process.start_kill();
+                self.shared.emit(
+                    SessionEventKind::Warning {
+                        message: format!(
+                            "{} stdin did not drain during close",
+                            self.shared.program
+                        ),
+                    },
+                    None,
+                );
+            }
+        }
         if self.process.exit_within(CLEANUP_TIMEOUT).await.is_none() {
             self.process.start_kill();
             let _ = self.process.exit_within(CLEANUP_TIMEOUT).await;
@@ -727,7 +1126,12 @@ impl DriverSession for ClaudeSession {
         self.check_open()?;
         let uuid = new_id();
         let (tx, rx) = oneshot::channel();
-        {
+        let message =
+            wire::user_message(&self.shared.session_id, &uuid, wire::user_content(prompt));
+        let permit = self.shared.reserve_write().await?;
+        let done = {
+            let _gate = self.shared.writer_gate.lock().expect("writer gate");
+            self.shared.check_writable()?;
             let mut turn = self.shared.turn.lock().expect("turn lock");
             if turn.waiter.is_some() {
                 return Err(CoreError::Conflict("a turn is already running".into()));
@@ -737,19 +1141,15 @@ impl DriverSession for ClaudeSession {
                 waiter: Some(tx),
                 ..Turn::default()
             };
-        }
-        self.shared.emit(
-            SessionEventKind::TurnStarted {
-                turn_id: Some(uuid.clone()),
-            },
-            None,
-        );
-        let message =
-            wire::user_message(&self.shared.session_id, &uuid, wire::user_content(prompt));
-        if let Err(err) = self.shared.write(&message).await {
-            *self.shared.turn.lock().expect("turn lock") = Turn::default();
-            return Err(err);
-        }
+            self.shared.emit(
+                SessionEventKind::TurnStarted {
+                    turn_id: Some(uuid.clone()),
+                },
+                None,
+            );
+            self.shared.enqueue(permit, &message)
+        };
+        self.shared.wait_written(done).await?;
         let stop_reason = rx.await.map_err(|_| {
             CoreError::Agent(
                 "the turn ended without a result (session closed or claude exited)".into(),
@@ -763,22 +1163,64 @@ impl DriverSession for ClaudeSession {
         })
     }
 
+    /// Writes the message into the running turn's stdin, naming it with the hub's message
+    /// id. No new turn, and no waiter: the running `prompt_with` still awaits its result.
+    async fn steer(&self, message_id: MessageId, prompt: &Prompt) -> Result<(), CoreError> {
+        self.check_open()?;
+        let snippet: String = prompt
+            .text
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(40)
+            .collect();
+        let message = wire::user_message(
+            &self.shared.session_id,
+            &message_id.to_string(),
+            wire::user_content(prompt),
+        );
+        let permit = self.shared.reserve_write().await?;
+        let done = {
+            let _gate = self.shared.writer_gate.lock().expect("writer gate");
+            self.shared.check_writable()?;
+            let mut turn = self.shared.turn.lock().expect("turn lock");
+            if turn.waiter.is_none() {
+                return Err(CoreError::Conflict("no turn is running".into()));
+            }
+            turn.steers.push(PendingSteer {
+                id: message_id,
+                snippet,
+            });
+            turn.steered.push(message_id);
+            self.shared.enqueue(permit, &message)
+        };
+        self.shared.wait_written(done).await
+    }
+
     async fn interrupt(&self) -> Result<(), CoreError> {
+        let id = new_id();
         {
             let mut turn = self.shared.turn.lock().expect("turn lock");
             if turn.waiter.is_none() {
                 return Ok(());
             }
             turn.interrupted = true;
+            // A second interruption abandons a separate steer whose result is still
+            // outstanding. The first prompt's stop reason remains authoritative.
+            if turn.prompt_done {
+                self.shared.finish_turn(&mut turn, StopReason::Cancelled);
+            }
+            if !turn.steers.is_empty() {
+                turn.interrupt_requests.push(id.clone());
+            }
         }
-        match self
+        let _ = self
             .shared
-            .control(json!({ "subtype": "interrupt" }), CLEANUP_TIMEOUT)
-            .await
-        {
-            // The turn may have ended meanwhile, or the process is gone.
-            Ok(_) | Err(_) => Ok(()),
-        }
+            .control_with_id(json!({ "subtype": "interrupt" }), CLEANUP_TIMEOUT, id)
+            .await;
+        // The turn may have ended meanwhile, or the process is gone.
+        Ok(())
     }
 
     async fn suspend(&self) -> Result<(), CoreError> {
@@ -989,5 +1431,764 @@ pub async fn probe_account(
         Ok(Ok((Err(e), _) | (_, Err(e)))) => Err(CoreError::Agent(e)),
         Ok(Err(e)) => Err(CoreError::Agent(e.to_string())),
         Err(_) => Err(CoreError::Agent("claude did not answer".into())),
+    }
+}
+
+#[cfg(test)]
+mod interrupt_tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+
+    /// A stdin that refuses every write, as a closed pipe does.
+    struct BrokenStdin;
+
+    impl tokio::io::AsyncWrite for BrokenStdin {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "stdin closed",
+            )))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    struct TestKiller(tokio::sync::watch::Sender<Option<crate::launch::ExitInfo>>);
+    impl crate::launch::Killer for TestKiller {
+        fn kill(&self) {
+            let _ = self
+                .0
+                .send(Some(crate::launch::ExitInfo::from_code(None, true)));
+        }
+    }
+
+    fn test_process() -> Arc<ProcessHandle> {
+        let (tx, rx) = tokio::sync::watch::channel(None);
+        Arc::new(ProcessHandle::new(None, None, rx, Arc::new(TestKiller(tx))))
+    }
+
+    fn test_session(shared: Arc<Shared>, process: Arc<ProcessHandle>) -> ClaudeSession {
+        ClaudeSession {
+            shared,
+            process,
+            command: vec![],
+            flavor: Flavor::Claude,
+            last_limits: Mutex::new(None),
+            adopted: Mutex::new(None),
+        }
+    }
+
+    fn setup(
+        steer: Option<MessageId>,
+    ) -> (
+        Arc<Shared>,
+        oneshot::Receiver<StopReason>,
+        mpsc::UnboundedReceiver<SessionEvent>,
+    ) {
+        let (_cli, stdin) = tokio::io::duplex(4096);
+        setup_io(steer, Box::new(stdin), None)
+    }
+
+    fn setup_io(
+        steer: Option<MessageId>,
+        stdin: BoxWrite,
+        process: Option<std::sync::Weak<ProcessHandle>>,
+    ) -> (
+        Arc<Shared>,
+        oneshot::Receiver<StopReason>,
+        mpsc::UnboundedReceiver<SessionEvent>,
+    ) {
+        let (events, rx) = mpsc::unbounded_channel();
+        let (writer, queue) = mpsc::channel(32);
+        let shared = Arc::new(Shared {
+            session_id: "test".into(),
+            writer,
+            writer_task: Mutex::new(None),
+            writer_gate: Mutex::new(()),
+            pending: Mutex::default(),
+            turn: Mutex::default(),
+            translator: Mutex::default(),
+            commands: Mutex::default(),
+            turn_ends: Mutex::default(),
+            events,
+            permission: PermissionPolicy::Bypass,
+            permissions: None,
+            exited: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
+            program: "claude",
+            flavor: Flavor::Claude,
+            replay: Mutex::default(),
+            stale_steers: Mutex::default(),
+        });
+        shared.start_writer(stdin, queue, process, Duration::from_secs(3));
+        let (tx, ended) = oneshot::channel();
+        let mut turn = shared.turn.lock().unwrap();
+        turn.id = Some("turn".into());
+        turn.waiter = Some(tx);
+        turn.interrupted = true;
+        if let Some(id) = steer {
+            turn.steers.push(PendingSteer {
+                id,
+                snippet: "steer".into(),
+            });
+            turn.steered.push(id);
+        }
+        drop(turn);
+        (shared, ended, rx)
+    }
+
+    fn result(id: &str) -> Value {
+        json!({"type":"result", "subtype":"error_during_execution", "is_error":true, "user_message_uuid":id})
+    }
+    fn warnings(events: &mut mpsc::UnboundedReceiver<SessionEvent>) -> usize {
+        let mut n = 0;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event.kind, SessionEventKind::Warning { .. }) {
+                n += 1;
+            }
+        }
+        n
+    }
+    fn register(shared: &Shared) {
+        let (tx, _rx) = oneshot::channel();
+        shared
+            .turn
+            .lock()
+            .unwrap()
+            .interrupt_requests
+            .push("req".into());
+        shared.pending.lock().unwrap().insert("req".into(), tx);
+    }
+    async fn batch(shared: &Arc<Shared>, messages: &[Value]) {
+        let text = messages
+            .iter()
+            .map(|v| format!("{v}\n"))
+            .collect::<String>();
+        let mut lines = tokio::io::BufReader::new(text.as_bytes()).lines();
+        while let Some(line) = lines.next_line().await.unwrap() {
+            shared.handle(serde_json::from_str(&line).unwrap());
+        }
+    }
+
+    #[tokio::test]
+    async fn adjacent_response_and_result_keep_the_steer() {
+        let steer = MessageId::new();
+        let (shared, mut ended, mut events) = setup(Some(steer));
+        register(&shared);
+        batch(
+            &shared,
+            &[
+                wire::control_success("req", json!({"still_queued":[steer.to_string()]})),
+                result("turn"),
+            ],
+        )
+        .await;
+        assert!(ended.try_recv().is_err());
+        assert_eq!(warnings(&mut events), 0);
+        shared.handle(json!({"type":"user", "uuid":steer.to_string(), "isReplay":true}));
+        shared.handle(result(&steer.to_string()));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_interrupt_waiter_still_records_queued_answer() {
+        let steer = MessageId::new();
+        let (shared, mut ended, _) = setup(Some(steer));
+        register(&shared);
+        shared.pending.lock().unwrap().remove("req");
+        shared.handle(wire::control_success(
+            "req",
+            json!({"still_queued":[steer.to_string()]}),
+        ));
+        shared.handle(result("turn"));
+        assert!(ended.try_recv().is_err());
+        shared.handle(result(&steer.to_string()));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn empty_or_missing_queue_warns_and_plain_interrupt_ends() {
+        for answer in [json!({"still_queued":[]}), json!({})] {
+            let (shared, ended, mut events) = setup(Some(MessageId::new()));
+            register(&shared);
+            batch(
+                &shared,
+                &[wire::control_success("req", answer), result("turn")],
+            )
+            .await;
+            assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+            assert_eq!(warnings(&mut events), 1);
+        }
+        let (shared, ended, mut events) = setup(None);
+        shared.handle(result("turn"));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 0);
+    }
+
+    #[tokio::test]
+    async fn control_failure_and_result_do_not_hold_the_turn() {
+        let (shared, ended, mut events) = setup(Some(MessageId::new()));
+        register(&shared);
+        batch(
+            &shared,
+            &[wire::control_error("req", "failed"), result("turn")],
+        )
+        .await;
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 1);
+    }
+
+    #[tokio::test]
+    async fn overlapping_interrupts_keep_the_first_queued_answer() {
+        let steer = MessageId::new();
+        let (shared, mut ended, mut events) = setup(Some(steer));
+        register(&shared);
+        let (tx, _rx) = oneshot::channel();
+        shared
+            .turn
+            .lock()
+            .unwrap()
+            .interrupt_requests
+            .push("req2".into());
+        shared.pending.lock().unwrap().insert("req2".into(), tx);
+        batch(
+            &shared,
+            &[
+                wire::control_success("req", json!({"still_queued":[steer.to_string()]})),
+                wire::control_success("req2", json!({"still_queued":[]})),
+                result("turn"),
+            ],
+        )
+        .await;
+        assert!(ended.try_recv().is_err());
+        assert_eq!(warnings(&mut events), 0);
+        shared.handle(result(&steer.to_string()));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn first_interrupt_response_then_result_precedes_second_response() {
+        let steer = MessageId::new();
+        let (shared, mut ended, mut events) = setup(Some(steer));
+        register(&shared);
+        let (tx, _rx) = oneshot::channel();
+        shared
+            .turn
+            .lock()
+            .unwrap()
+            .interrupt_requests
+            .push("req2".into());
+        shared.pending.lock().unwrap().insert("req2".into(), tx);
+
+        batch(
+            &shared,
+            &[
+                wire::control_success("req", json!({"still_queued":[steer.to_string()]})),
+                result("turn"),
+            ],
+        )
+        .await;
+        assert!(ended.try_recv().is_err());
+        assert_eq!(warnings(&mut events), 0);
+        shared.handle(wire::control_success("req2", json!({"still_queued":[]})));
+        assert!(shared.turn.lock().unwrap().keep_queued);
+        shared.handle(result(&steer.to_string()));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 0);
+    }
+
+    #[tokio::test]
+    async fn previous_turn_interrupt_response_does_not_affect_next_turn() {
+        let (shared, ended, mut events) = setup(Some(MessageId::new()));
+        register(&shared);
+        shared.handle(result("turn"));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 1);
+
+        let next_steer = MessageId::new();
+        let (tx, mut next) = oneshot::channel();
+        {
+            let mut turn = shared.turn.lock().unwrap();
+            assert!(turn.interrupt_requests.is_empty());
+            turn.id = Some("next".into());
+            turn.waiter = Some(tx);
+            turn.interrupted = true;
+            turn.steers.push(PendingSteer {
+                id: next_steer,
+                snippet: "next steer".into(),
+            });
+            turn.steered.push(next_steer);
+        }
+        shared.handle(wire::control_success(
+            "req",
+            json!({"still_queued":["old"]}),
+        ));
+        assert!(!shared.turn.lock().unwrap().keep_queued);
+        assert!(next.try_recv().is_err());
+        shared.handle(result("next"));
+        assert_eq!(next.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 1);
+    }
+
+    #[tokio::test]
+    async fn result_before_response_ends_and_warns() {
+        let (shared, ended, mut events) = setup(Some(MessageId::new()));
+        register(&shared);
+        batch(
+            &shared,
+            &[
+                result("turn"),
+                wire::control_success("req", json!({"still_queued":["steer"]})),
+            ],
+        )
+        .await;
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 1);
+    }
+
+    #[tokio::test]
+    async fn read_separate_steer_waits_for_its_result_after_failed_prompt() {
+        let steer = MessageId::new();
+        let (shared, mut ended, _) = setup(Some(steer));
+        shared.handle(json!({"type":"system", "subtype":"init"}));
+        shared.handle(json!({"type":"user", "uuid":steer.to_string(), "isReplay":true}));
+        register(&shared);
+        // The steer was already read, so the response can have an empty queue.
+        shared.handle(wire::control_success("req", json!({"still_queued":[]})));
+        shared.handle(result("turn"));
+        assert!(ended.try_recv().is_err());
+        shared.handle(result(&steer.to_string()));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn separate_steer_keeps_prompt_error_as_stop_reason() {
+        let steer = MessageId::new();
+        let (shared, mut ended, _) = setup(Some(steer));
+        shared.turn.lock().unwrap().interrupted = false;
+        shared.handle(json!({"type":"system", "subtype":"init"}));
+        shared.handle(json!({"type":"user", "uuid":steer.to_string(), "isReplay":true}));
+        shared.handle(result("turn"));
+        assert!(ended.try_recv().is_err());
+        shared.handle(json!({"type":"result", "subtype":"success", "is_error":false, "user_message_uuid":steer.to_string()}));
+        assert_eq!(ended.await.unwrap(), StopReason::Error);
+    }
+
+    #[tokio::test]
+    async fn unrelated_replay_uuid_does_not_prove_steer_was_read() {
+        let (shared, ended, mut events) = setup(Some(MessageId::new()));
+        shared.handle(json!({"type":"system", "subtype":"init"}));
+        shared.handle(json!({"type":"user", "uuid":MessageId::new().to_string(), "isReplay":true}));
+        shared.handle(result("turn"));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 1);
+    }
+
+    #[tokio::test]
+    async fn codebuddy_failure_without_correlatable_echo_ends_immediately() {
+        let (shared, ended, mut events) = setup(Some(MessageId::new()));
+        shared.handle(json!({"type":"system", "subtype":"init"}));
+        shared.handle(json!({"type":"result", "subtype":"error_during_execution", "is_error":true, "uuid":MessageId::new().to_string()}));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        assert_eq!(warnings(&mut events), 1);
+    }
+
+    #[tokio::test]
+    async fn read_merged_steer_does_not_hold_failed_prompt() {
+        let steer = MessageId::new();
+        let (shared, ended, _) = setup(Some(steer));
+        shared.handle(json!({"type":"user", "uuid":steer.to_string(), "isReplay":true}));
+        shared.handle(result("turn"));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn exit_releases_waiting_separate_steer() {
+        let steer = MessageId::new();
+        let (shared, mut ended, _) = setup(Some(steer));
+        shared.handle(json!({"type":"system", "subtype":"init"}));
+        shared.handle(json!({"type":"user", "uuid":steer.to_string(), "isReplay":true}));
+        shared.handle(result("turn"));
+        assert!(ended.try_recv().is_err());
+        shared.ended();
+        assert!(ended.await.is_err());
+    }
+
+    #[tokio::test]
+    async fn second_interrupt_releases_waiting_separate_steer() {
+        let steer = MessageId::new();
+        let (shared, mut ended, _) = setup(Some(steer));
+        shared.handle(json!({"type":"system", "subtype":"init"}));
+        shared.handle(json!({"type":"user", "uuid":steer.to_string(), "isReplay":true}));
+        shared.handle(result("turn"));
+        assert!(ended.try_recv().is_err());
+        let session = Arc::new(test_session(shared, test_process()));
+        let interrupt = tokio::spawn(async move { session.interrupt().await });
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), ended)
+                .await
+                .unwrap()
+                .unwrap(),
+            StopReason::Cancelled
+        );
+        interrupt.abort();
+    }
+
+    #[tokio::test]
+    async fn blocked_pipe_breaks_session_and_releases_prompt_and_permission() {
+        let (_reader, writer) = tokio::io::duplex(8);
+        let process = test_process();
+        let (shared, _, mut events) =
+            setup_io(None, Box::new(writer), Some(Arc::downgrade(&process)));
+        *shared.turn.lock().unwrap() = Turn::default();
+        let session = Arc::new(test_session(shared.clone(), process.clone()));
+        let prompt_session = session.clone();
+        let prompt = tokio::spawn(async move { prompt_session.prompt(&"x".repeat(8192)).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let answer_shared = shared.clone();
+        let answer = tokio::spawn(async move {
+            answer_shared.answer(json!({"type":"control_request", "request_id":"permission", "request":{"subtype":"can_use_tool", "tool_name":"Bash", "input":{}}})).await;
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), prompt)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        tokio::time::timeout(Duration::from_secs(1), answer)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(shared.exited.load(Ordering::SeqCst));
+        assert!(process.exit_info().is_some());
+        assert!(warnings(&mut events) >= 1);
+        tokio::time::timeout(Duration::from_secs(2), session.close())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_write_releases_a_held_turn() {
+        let (_reader, writer) = tokio::io::duplex(8);
+        let process = test_process();
+        let steer = MessageId::new();
+        let (shared, mut ended, _) = setup_io(
+            Some(steer),
+            Box::new(writer),
+            Some(Arc::downgrade(&process)),
+        );
+        shared.handle(json!({"type":"system", "subtype":"init"}));
+        shared.handle(json!({"type":"user", "uuid":steer.to_string(), "isReplay":true}));
+        shared.handle(result("turn"));
+        assert!(ended.try_recv().is_err());
+        assert!(
+            shared
+                .write(&json!({"payload":"x".repeat(8192)}))
+                .await
+                .is_err()
+        );
+        assert!(ended.await.is_err());
+        assert!(process.exit_info().is_some());
+    }
+
+    #[tokio::test]
+    async fn close_aborts_a_stalled_writer_without_waiting_for_stall() {
+        let (_reader, writer) = tokio::io::duplex(8);
+        let process = test_process();
+        let (shared, ended, _) = setup_io(None, Box::new(writer), Some(Arc::downgrade(&process)));
+        let session = test_session(shared.clone(), process.clone());
+        let writing =
+            tokio::spawn(async move { shared.write(&json!({"text":"x".repeat(8192)})).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::timeout(CLEANUP_TIMEOUT + Duration::from_secs(2), session.close())
+            .await
+            .unwrap();
+        assert!(writing.await.unwrap().is_err());
+        assert!(ended.await.is_err());
+        assert!(process.exit_info().is_some());
+    }
+
+    #[tokio::test]
+    async fn cancelling_control_does_not_leave_a_partial_json_line() {
+        let (mut reader, writer) = tokio::io::duplex(8);
+        let (shared, _, _) = setup_io(None, Box::new(writer), None);
+        let first = shared.clone();
+        let control = tokio::spawn(async move {
+            first
+                .control(
+                    json!({"subtype":"test", "payload":"x".repeat(1024)}),
+                    REQUEST_TIMEOUT,
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        control.abort();
+        let _ = control.await;
+        assert!(shared.pending.lock().unwrap().is_empty());
+        let second = shared.clone();
+        let write = tokio::spawn(async move { second.write(&json!({"type":"second"})).await });
+        let mut bytes = Vec::new();
+        while bytes.iter().filter(|&&byte| byte == b'\n').count() < 2 {
+            let mut chunk = [0; 8];
+            let n = tokio::time::timeout(Duration::from_secs(2), reader.read(&mut chunk))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(n > 0);
+            bytes.extend_from_slice(&chunk[..n]);
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        write.await.unwrap().unwrap();
+        let lines: Vec<_> = bytes
+            .split(|&b| b == b'\n')
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        let first: Value = serde_json::from_slice(lines[0]).unwrap();
+        let second: Value = serde_json::from_slice(lines[1]).unwrap();
+        assert_eq!(first["request"]["payload"].as_str().unwrap().len(), 1024);
+        assert_eq!(second["type"], "second");
+    }
+
+    #[tokio::test]
+    async fn cancelled_accepted_prompt_and_steer_keep_their_ids() {
+        let (reader, writer) = tokio::io::duplex(8);
+        let (shared, _, _) = setup_io(None, Box::new(writer), None);
+        *shared.turn.lock().unwrap() = Turn::default();
+        let session = Arc::new(test_session(shared.clone(), test_process()));
+        let running = {
+            let session = session.clone();
+            tokio::spawn(async move { session.prompt(&"x".repeat(256)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        running.abort();
+        let _ = running.await;
+        let prompt_id = shared
+            .turn
+            .lock()
+            .unwrap()
+            .id
+            .clone()
+            .expect("accepted prompt remains registered");
+        let steer_id = MessageId::new();
+        let steer = {
+            let session = session.clone();
+            tokio::spawn(async move {
+                session
+                    .steer(steer_id, &Prompt::text("y".repeat(256)))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        steer.abort();
+        let _ = steer.await;
+        assert!(shared.turn.lock().unwrap().steered.contains(&steer_id));
+        let mut lines = BufReader::new(reader).lines();
+        let first: Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        let second: Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(first["uuid"], prompt_id);
+        assert_eq!(second["uuid"], steer_id.to_string());
+        shared.handle(result(&prompt_id));
+        assert!(shared.turn.lock().unwrap().waiter.is_none());
+    }
+
+    #[tokio::test]
+    async fn accepted_prompt_is_not_rolled_back_after_five_seconds_of_progress() {
+        let (mut reader, writer) = tokio::io::duplex(8);
+        let (shared, _, _) = setup_io(None, Box::new(writer), None);
+        *shared.turn.lock().unwrap() = Turn::default();
+        let session = Arc::new(test_session(shared.clone(), test_process()));
+        let prompt = {
+            let session = session.clone();
+            tokio::spawn(async move { session.prompt(&"x".repeat(2400)).await })
+        };
+        let drain = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            loop {
+                let mut chunk = [0; 8];
+                let n = reader.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&chunk[..n]);
+                if bytes.ends_with(b"\n") {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            serde_json::from_slice::<Value>(&bytes).unwrap()
+        });
+        tokio::time::sleep(Duration::from_millis(5200)).await;
+        assert!(!prompt.is_finished());
+        let id = shared
+            .turn
+            .lock()
+            .unwrap()
+            .id
+            .clone()
+            .expect("accepted prompt retained");
+        assert!(!shared.exited.load(Ordering::SeqCst));
+        let frame = drain.await.unwrap();
+        assert_eq!(frame["uuid"], id);
+        prompt.abort();
+    }
+
+    #[tokio::test]
+    async fn saturated_queue_waits_for_permission_and_cancel_before_acceptance_is_safe() {
+        let (reader, writer) = tokio::io::duplex(8);
+        let (shared, _, _) = setup_io(None, Box::new(writer), None);
+        *shared.turn.lock().unwrap() = Turn::default();
+        let (ack, _) = oneshot::channel();
+        shared
+            .writer
+            .send(WriteCommand::Frame(
+                b"{\"first\":\"12345678901234567890\"}\n".to_vec(),
+                ack,
+            ))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        for _ in 0..32 {
+            let (ack, _) = oneshot::channel();
+            shared
+                .writer
+                .try_send(WriteCommand::Frame(b"{}\n".to_vec(), ack))
+                .unwrap();
+        }
+        let session = Arc::new(test_session(shared.clone(), test_process()));
+        let prompt = {
+            let session = session.clone();
+            tokio::spawn(async move { session.prompt("not accepted").await })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(shared.turn.lock().unwrap().id.is_none());
+        prompt.abort();
+        let _ = prompt.await;
+        let steer_id = MessageId::new();
+        let (turn_tx, _turn_rx) = oneshot::channel();
+        shared.turn.lock().unwrap().waiter = Some(turn_tx);
+        let steer = {
+            let session = session.clone();
+            tokio::spawn(
+                async move { session.steer(steer_id, &Prompt::text("not accepted")).await },
+            )
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        steer.abort();
+        let _ = steer.await;
+        assert!(!shared.turn.lock().unwrap().steered.contains(&steer_id));
+        let answer = {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                shared.answer(json!({"type":"control_request", "request_id":"permission", "request":{"subtype":"can_use_tool", "tool_name":"Bash", "input":{}}})).await;
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!answer.is_finished());
+        let mut lines = BufReader::new(reader).lines();
+        for _ in 0..33 {
+            lines.next_line().await.unwrap().unwrap();
+        }
+        let response: Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(response["response"]["request_id"], "permission");
+        answer.await.unwrap();
+        assert!(!shared.exited.load(Ordering::SeqCst));
+    }
+
+    /// A steer whose write fails must leave no claim behind: the hub queues the same
+    /// message after `session.steer` returns an error (`runtime.rs` `steer_envelope`), so
+    /// a claim still on the turn would let two paths own one id.
+    #[tokio::test]
+    async fn failed_steer_write_leaves_no_claim_on_the_turn() {
+        let process = test_process();
+        let (shared, ended, mut events) =
+            setup_io(None, Box::new(BrokenStdin), Some(Arc::downgrade(&process)));
+        let session = test_session(shared.clone(), process.clone());
+        let id = MessageId::new();
+
+        assert!(session.steer(id, &Prompt::text("插话")).await.is_err());
+        {
+            let turn = shared.turn.lock().unwrap();
+            assert!(
+                !turn.steers.iter().any(|steer| steer.id == id),
+                "a failed write must not stay claimed as an unread steer"
+            );
+            assert!(!turn.steered.contains(&id));
+            assert!(
+                turn.waiter.is_none(),
+                "the failed session must not keep a turn"
+            );
+        }
+        // The queue copy the hub delivers afterwards must be the only owner: even a late
+        // echo of the id (the bytes did reach the CLI) is not this session's to report.
+        shared.handle(json!({"type":"user", "uuid": id.to_string(), "isReplay":true}));
+        let mut reads = 0;
+        let mut unread_warnings = 0;
+        let mut stdin_warnings = 0;
+        while let Ok(event) = events.try_recv() {
+            match event.kind {
+                SessionEventKind::SteerRead { message_id } if message_id == id => reads += 1,
+                SessionEventKind::Warning { message } if message.contains("没有被读取") => {
+                    unread_warnings += 1
+                }
+                SessionEventKind::Warning { .. } => stdin_warnings += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(
+            reads, 0,
+            "a message the failed session never read must not be steer_read"
+        );
+        assert_eq!(
+            unread_warnings, 1,
+            "the person is told the steer was not read, once"
+        );
+        assert_eq!(stdin_warnings, 1, "the broken pipe is reported once");
+        assert!(ended.await.is_err());
+        assert!(shared.exited.load(Ordering::SeqCst));
+        assert!(process.exit_info().is_some());
+        // The dead session cannot take the same id again: only the queue carries it now.
+        let other = MessageId::new();
+        assert!(session.steer(other, &Prompt::text("again")).await.is_err());
+        assert!(!shared.turn.lock().unwrap().steered.contains(&other));
+    }
+
+    #[tokio::test]
+    async fn review_plain_failed_interrupt_must_not_end_next_turn() {
+        let (shared, mut ended, _) = setup(None);
+        let (tx, _rx) = oneshot::channel();
+        shared.pending.lock().unwrap().insert("req".into(), tx);
+        shared.handle(wire::control_error("req", "failed"));
+        assert!(ended.try_recv().is_err());
+        shared.handle(result("turn"));
+        assert_eq!(ended.await.unwrap(), StopReason::Cancelled);
+        let (tx, mut next) = oneshot::channel();
+        {
+            let mut turn = shared.turn.lock().unwrap();
+            turn.id = Some("next".into());
+            turn.waiter = Some(tx);
+        }
+        assert!(next.try_recv().is_err());
+        shared.handle(result("next"));
+        assert_eq!(next.await.unwrap(), StopReason::Error);
     }
 }

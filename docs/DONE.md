@@ -260,6 +260,7 @@ B 删除 run：
 
 - [x] `cargo fmt --all -- --check` 在**没人改动过的文件**上失败：本地 rustfmt 升到 1.10.0-stable（2026-10-13）后换行取舍变了，仓库上次全量格式化用的是更旧的版本，九个文件有漂移。这让每条任务的格式检查都挂在与它无关的文件上，噪声盖掉真问题，还逼得我 force 接受了一条本来合格的任务。已用 rustfmt 1.10 统一重排（纯机械，不改行为）
 - [x] `cargo clippy --workspace --all-targets -- -D warnings` 在干净分支上也通不过：仓库一直有五处告警。这是我给 works-table 写验收命令时没核实造成的——**给 worker 设了一道过不去的关**，它照实报告被挡住，我才发现。修掉四处（多余的 `.into_iter()`、嵌套 `if` 合 let-chain、三元组起名 `Reply`、多余的 `mut`），`EventKind` 的 `large_enum_variant` 加带理由的 `#[allow]`（真修法是装箱，见 [TODO.md](TODO.md) 同名一节）。教训：**写验收命令前要先在基线上自己跑一遍**
+- [x] `cargo test --workspace` 的偶发失败 `settling_the_checkpoint_at_idle_does_not_swallow_a_stuck_report`（2026-10-30 记，2026-10-31 查到名字，2026-11-05 修，`d798e28`、`6984fb5`）：不是当时猜的「和并发负载抢时间」，而是测试的 `quiet()` 不持 run 锁改写时间戳，后台 pass 可能把旧副本写回，抹掉伪造的静默期。改为在同一把 run 锁内改写，并显式等回合结束事件落库。同日另修了 `delete_run` 和 `steer_failure` 两条不稳定测试
 
 ## 十九、Lead 执行模式与工作区保留
 
@@ -280,3 +281,70 @@ B 删除 run：
 - [x] **0.1.17 发出去的安装包里没有 hub**（同日修，`614af13` + 0.1.18 重发）：`build.extraResources` 从 `../../target/release/crossagents.exe` 把 hub 打进安装包，而那次 `cargo build --release` 跑在设了 `CARGO_TARGET_DIR` 的 shell 里（run 的构建目录），产物落到别处，源文件根本不存在；**electron-builder 不因缺少 `extraResources` 而失败**，照样打包。后果：更新到 0.1.17 的 GUI 没有新 hub 可装进 `<home>/bin/<版本>/`，只能继续用旧 hub（界面显示「界面 v0.1.17 · hub v0.1.16」）；全新安装则完全没有 hub。修法：`apps/gui/scripts/check-version.mjs` 除了比对两处版本号，还要求那个二进制存在、且 `--version` 报的就是本版本，失败时说明该怎么办与 `CARGO_TARGET_DIR` 这个坑。0.1.17 的安装包、blockmap 与 `latest.yml` 已从发布仓库删除并写明原因，保留其正常的独立 hub 二进制
   - 发布流程里同时暴露的两处，都是**发完之后逐项核验**才发现的（命令本身全是退出 0）：electron-builder 的并发上传**建了两个同 tag 的 release**，安装包进了一个、手动补传的 hub 进了另一个，合并后删掉重复的那个，并重新标 Latest（Latest 随被删的那个一起没了）；手动 `gh release upload` 时文件名里的空格被换成点（`CrossAgents.Setup.0.1.18.exe`），而 `latest.yml` 指向连字符的名字，自动更新会 404，用 `PATCH .../releases/assets/<id>` 改名而不必重传 119MB
   - 教训：**打包和发布都要先在干净的工作树里做**（主检出常有未提交改动，会被编进二进制），而且那棵树里要显式清掉 `CARGO_TARGET_DIR`；**发完要逐项核对资产名、大小与 `latest.yml` 的一致性**，退出码为 0 不等于发对了
+
+## 二十四、10-31 之后的工作
+
+> 2026-11-06 按提交记录和设计稿补记，当时没走 TODO。这里只记做过什么，没有逐条复测；细节看对应设计稿和提交。没做完的尾巴见 [TODO.md](TODO.md) 同名一节。
+
+- [x] 会话优先（10-31）：聊天发起的 run 用独立主导，普通聊天不再带 run 的工具和说明（[SESSION-FIRST.md](SESSION-FIRST.md)）
+- [x] 减少额度消耗阶段 1、2（[USAGE-TRIM.md](USAGE-TRIM.md)）
+- [x] 发版脚本 `scripts/release.mjs`，产物核对改成硬失败（10-31）；依赖恰好同版本时不再卡住（11-06）
+- [x] 平等 Agent 与项目侧栏 A–D（11-01）：任何会话都能审核和接任务，侧栏变平，加「需要你」分区和项目总览（[AGENT-WORKSPACE.md](AGENT-WORKSPACE.md)）
+- [x] 专长档案（11-02）：hub 接口、工具、reviewer 检查清单、GUI 页，11-04 接真实 hub 实测（[tasks/EXPERTISE.md](tasks/EXPERTISE.md)）
+- [x] Cursor 接入：`cursor-native` 驱动（11-02）、账号与交互登录（11-03）、模式分离和逐任务推理强度（11-04）、非 bypass 会话不卡在目录信任提示（11-05）（[research/cursor-cli.md](research/cursor-cli.md)）
+- [x] GUI 工具区（11-03、11-04）：浏览器式标签可拖到对话下方，文件面板可渲染 Markdown，内置终端（窗口关了终端还在），「后台任务」看板
+- [x] 工作区独立记录 run 实现历史，删除 run 后仍可查（11-03）；每个 run 都属于工作组（11-03）；run 结束删构建目录、合并后删 checkout、启动时清残留（11-04）
+- [x] 运行中心跳改为 token 速度（11-04）
+- [x] 插话（11-05）：驱动、hub、转录和前端，加真实 Claude 冒烟（[research/codebuddy-steer.md](research/codebuddy-steer.md)）
+- [x] 扩展 E1–E4（11-05）：目录与批准、一次性工具、页面接口、管理页、创造工具、事件响应、常驻进程（[EXTENSIONS.md](EXTENSIONS.md)）；内置功能迁移评估和事件流面板试点（[EXTENSIONS-MIGRATION.md](EXTENSIONS-MIGRATION.md)）
+- [x] 识别内容审查拦截并提示换会话或压缩（11-05）；工具卡片相对路径和按 kind 的标题（11-05）
+- [x] 队友之间的回复不再丢（11-06）。起因：Rune 把文件浏览的报告写在自己的会话里，没调用 `agent_send`；后来补发时又写成了 `"Pia"`（另一个 agent），而不是 `"Pia 4"`，消息被静默投给了别人。现在：
+  - 只用文字回答队友消息的那一轮，hub 把它最后一段话以作者的名义转给发件人（`crates/hub/src/replies.rs`）。转发出去的消息再被文字回答时不会转回去，不会来回弹。两边有一方在做 run 的任务时不转发。
+  - 消息头带上 id（`Message from X (id …):`）；`agent_send` 只给 `reply_to` 不给 `to` 时，回给原发件人。
+  - `to` 写的名字恰好是正在和你说话的队友去掉数字后缀（比如该写 `Pia 4` 写成了 `Pia`），而你和它从没互发过消息时，拒绝发送，并说明该怎么写。
+  - 测试在 `crates/mock-agent/tests/collab.rs`（3 条）和 `replies.rs` 的单元测试（7 条）
+- [x] 驱动与 hub 修复（11-05、11-06）：Claude 驱动写入不留半帧、失败 result 不提前结束；`run_next` 在 lead 回合内不再报 busy；Codex primary 额度误判；复制失败、回复看不到图、`run_next` 重复显示人的原话
+
+## 二十五、借鉴 oh-my-pi 与 Cutex 0.2.1
+
+> 2026-11-06 run `7cfd5794`。各条的来源和依据见 [TODO.md](TODO.md) 同名一节；没做完的条目留在那里。
+
+- [x] **2. 人的消息怎么送达：对照 Cutex 050 §2**：先只读核对，写成 [tasks/DELIVERY-AUDIT.md](tasks/DELIVERY-AUDIT.md)：「一条消息一个位置」「原因码」「重试不重复」三条违反，「忙」只有一个来源这条部分符合，「人自己发起的中断不弹提示」符合。人选了 8 条全做：
+  - hub（`crates/hub/src/runtime.rs`、`api.rs`、`crates/core/src/event.rs`、`api-types`）：
+    - 原因码 `QueuedReason` 进响应、`agent.input` 和错误体。插话写失败不再静默改成排队，返回 502 并发 `agent.input_refused`。
+    - `client_message_id` 去重：每个 agent 保留最近 256 条，停止时清掉。
+    - `POST …/messages/{id}/send-now`：同一个 id 原地提升。
+    - 「判定排队」和「入队」放进同一段临界区。
+    - 转录快照加 `delivery { state, queued }`，状态变化时发 `agent.delivery_changed`。
+  - GUI：
+    - 人的消息只占一行，状态原地变，撤回后留「已撤回」一行；「接下来」只列编排消息。
+    - `lib/delivery.ts` 把每个原因码映射成一句中文。
+    - 重试复用 client id；超时显示「不确定发没发出去」。
+    - 输入框、「接下来」和侧栏读同一份「忙」。
+    - 「立即发送」走 send-now。
+    - 失败文案经 `errors.ts` 映射。
+  - P3-8 先确认：Claude 驱动插话写失败时，`ended()` 已经清空整个 Turn，不会读到两次。怀疑不成立，没改逻辑，只加测试锁住。
+  - 测试：`crates/mock-agent/tests/delivery.rs`（8 条）、`delivery_state.rs`（4 条），`runtime.rs` 的去重上限单测，`api-types` 的原因码穷举测试，`claude_native` 的 `failed_steer_write_leaves_no_claim_on_the_turn`；GUI 有 `lib/delivery.test.ts`、`lib/activity.test.ts`，`errors.test.ts`、`steer.test.ts` 补了用例。mock 场景 `delivery`，截图 `docs/screens/delivery-queued.png`（深色、宽屏；mock 里两条排队消息的原因码是反着配的，只是演示数据）。
+  - 没验证 / 没做完：见 TODO.md 同名一节的「2 的尾巴」。
+- [x] **3. 排队的提示随人的消息一起送**（Cutex 057）：人发消息时，如果这个 agent 还排着一条没开始的通知汇总，hub 就把汇总撤回（发 `agent.input_withdrawn`），并进人的这条消息。agent 读到的是人的话在前、汇总在后，不用为汇总单独多跑一轮。`agent.input` 和转录的每一轮都多了 `notices` 字段，`text` 仍是人的原话；GUI 把提示折叠挂在人的气泡下面（「随这条消息送达 N 条提示」），重新加载转录后还在。汇总已经开始，或者人发出之后才到的通知，照原来的规则走。撤回和合并在 `digests` 锁里一次做完，加锁顺序和 `notify` 一致（评审时发现过一个丢行的竞态，已修）。
+  - 代码：`crates/hub/src/runtime.rs` `take_waiting_digest`、`crates/core/src/event.rs`、`crates/hub/src/transcript.rs`、`crates/api-types`、`apps/gui/src/views/SessionMessage.tsx`、`lib/notices.ts`。
+  - 测试：`crates/mock-agent/tests/notices_ride.rs`，2 个用例覆盖 3 种情形（合并且只多跑一轮；汇总已开始时不合并；合并之后再来的通知另起一条汇总）；`apps/gui/src/lib/notices.test.ts`。
+  - 没验证：气泡下的提示没在真窗口里看过，只测了数据处理，过了类型检查；合并之后、那一轮开始之前 hub 如果重启，恢复时只按 `text` 重新排队，带着的汇总会丢（这是原有的恢复路径，没改）；外部 agent 不合并。
+- [x] **4. hub 层的流式规则**（oh-my-pi ttsr）：人定的是「先做项目文件，扩展留接口」。规则写在仓库根的 `.crossagents/rules/*.md`，frontmatter 写 `id`、`match`（正则，可以写多条）和 `on: output|tool|both`，正文是要送进去的规则（格式见 [tasks/STREAM-RULES.md](tasks/STREAM-RULES.md)）。规则平时不进上下文；agent 的输出（4 KB 滑动窗口，跨分片也能命中）或工具调用（名字和参数）命中时，驱动支持插话就插进当前这一轮；不支持就中断这一轮，把规则排在最前面先跑。同一条规则在同一个会话里 20 轮之内只送一次，hub 发起的 compact 成功后重置。坏文件、坏正则只记 warn 并跳过。`RuleSource` trait 留给以后接扩展。
+  - 代码：`crates/hub/src/stream_rules.rs`（新）；`runtime.rs` 的 `install`、`forward_events`、`inject`、`Control::Compacted`。
+  - 测试：`cargo test -p crossagents-hub stream_rules`（13 条单元测试）；`crates/mock-agent/tests/stream_rules.rs`（4 条：插话路径、20 轮去重、compact 后再送、不支持插话时中断再跑）。
+  - 没做 / 没验证：只用 mock agent 跑过，没在真实 Claude/Codex 上看过插话；驱动自己压缩上下文时没有事件，去重状态不会重置；中断路径不重发被中断那一轮的提示，只跑规则（agent 的会话上下文还在，能接着做）；如果被中断的是人的消息那一轮，人会看到这一轮被中断；插话事件没有 `from` 字段，只能靠正文开头的规则 id 认出是规则；只匹配工具名和参数，不匹配工具的输出；扩展那一侧没接。`inject` 在事件泵里同步等待 steer/interrupt 返回，ACP 驱动的 interrupt 最多等 5 秒，这段时间输出转发会停住。
+- [x] **5. 任务交结构化结果**（oh-my-pi 的 subagent）：任务的 spec（`plan_submit` 和 `task_create` 里的）可以带 `result_schema`（JSON Schema）。`task_complete` 新增 `result` 参数：任务有 schema 时 `result` 必填，并按 schema 校验（`jsonschema` 0.33，锁文件里本来就有）；不通过就报出哪条路径不符，任务状态不变，worker 可以改了再交；通过就存进 `TaskReport.result`。`task_get` 新增 `path` 参数（JSON Pointer），只返回那一处的值，路径不存在时报错。worker 的简报里会写出 schema。GUI 的任务详情把 result 折叠显示成 JSON。
+  - 代码：`crates/core/src/model.rs`、`crates/orchestrator/src/tasks.rs` 的 `complete_with_result` 和 `task_get`、`tools.rs`、`brief.rs`、`apps/gui/src/views/Run.tsx`。
+  - 测试：`crates/mock-agent/tests/task_result.rs`（2 条）：缺 result 和不合 schema 的 result 被拒且状态不变，合规的存下，按 path 取值，不存在的 path 报错，没有 schema 的老调用照旧；`script.rs` 补了嵌套数组解析的单测。
+  - 调试时发现：mock 场景里，run 的自动标题会截进半截 `[call …` 脚本，mock 驱动把它当成指令解析，于是卡住。测试改成显式给标题；mock 的这个毛病本身没改。
+  - 没验证：没有 schema 时交 `result` 的情况没单独测；GUI 的折叠 JSON 没截图看过。
+- [x] **6. 评审给明确结论**（oh-my-pi 的 `/review`）：`review_submit` 新增两个可选参数：`findings`（每条按 P0–P3 分级，带 0..1 的置信度，可以写 file、line、title、detail）和 `verdict`（`merge` / `merge_after_fixes` / `do_not_merge`）。approve 和 verdict 对不上，或者有 P0 却说能合，都会被拒，并给出修正建议；没给 verdict 时按 approve 推出来。两项存进 `TaskReport.findings` / `verdict`，发给主导的评审消息里，问题按 P0→P3 排序，挡合并的排在最前。评审的简报写明了各级的含义。只给 approve 的老调用照旧。GUI 的任务评审先显示结论，问题按级别排序，P0/P1 置顶并醒目标出，带置信度和 file:line。`TaskReport` 因为有了 f64，去掉了 `Eq`。
+  - 代码：`crates/core/src/model.rs`、`crates/orchestrator/src/review.rs`（`effective_verdict`、`sorted_findings`、`review_notes`）、`tools.rs`、`protocol.rs`、`apps/gui/src/lib/reviewFindings.ts`、`review.tsx`。
+  - 测试：`crates/mock-agent/tests/review_verdict.rs`（2 条：findings 存下并排序、矛盾的提交被拒后能改交、老调用照旧）；`apps/gui/src/lib/reviewFindings.test.ts`（7 条）。
+  - 没验证：GUI 没打开看过，只过了类型检查和纯函数测试。评审时 findings 写进任务没走 run 锁（`tools.rs` 的 `review_submit`，先读任务再写回）；同一时刻如果有别的写入，可能被覆盖。评审时任务通常没别人在写，所以暂时没改。任务返工后，上一轮的 findings 会一直显示到下一次评审覆盖为止。
+- [x] **7. 合并的活动流**（oh-my-pi agent-hub.md 的 Activity）：工具列新增「活动」标签，可放进右侧或底部 dock。所有 agent 的回复、工具调用、错误、消息（agent 之间的、人的、向人提问和人的回答）排成一条时间线，最新的在上面。类型可多选筛选（错误 / 回复 / 工具 / 消息）；范围可以是全部、某个 agent，也可以是它连同下属（按 `spawned_by_agent` 递归推算，防环）。点一条就打开那个会话，并滚到对应的那一轮；找不到那一轮时，在面板里说明。
+  - 代码：`apps/gui/src/lib/activityFeed.ts`（纯函数）、`ActivityFeed.tsx`、`activityfeed.css`，在 `panes.ts` 登记标签。
+  - 测试：`apps/gui/src/lib/activityFeed.test.ts`（10 条），覆盖事件折叠、流式合并、工具失败更新、轮次关联、下属推算、范围和类型筛选。
+  - 截图：mock 场景 `activity`，宽、窄、浅色、深色各一张，见 `docs/screens/activity-*.png`。窄屏加深色、点工具行跳到 Rex 的会话，这两项主导另外截图看过。顺手修了场景的一个毛病：转录里预先放了同一批消息，导致同一条消息显示两次、React 报重复 key。
+  - 没验证：只在 mock 里看过，没接真实 hub 的事件流；只能看到页面加载之后的事件，界面上写明了这一点；键盘操作只确认了用的是原生 button/select 并带 aria 标签，没逐项用 Tab 走一遍。

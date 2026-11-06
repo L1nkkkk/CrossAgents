@@ -27,6 +27,16 @@ use wire::{ChatArgs, Line, Turn};
 
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 
+fn validate_platform_permission(
+    windows: bool,
+    permission: PermissionPolicy,
+) -> Result<(), CoreError> {
+    if windows && permission != PermissionPolicy::Bypass {
+        return Err(CoreError::Agent("Cursor sandbox is supported only on macOS and Linux. To use Cursor on Windows, enable bypass for this agent: it runs without a sandbox or per-action confirmation, and commands run as your user.".into()));
+    }
+    Ok(())
+}
+
 pub struct CursorNativeDriver {
     name: String,
     cli: Cli,
@@ -94,6 +104,7 @@ impl Driver for CursorNativeDriver {
     }
 
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError> {
+        validate_platform_permission(cfg!(windows), spec.permission)?;
         let command = self.command(&spec)?;
         let (program, extra) = command
             .split_first()
@@ -186,6 +197,7 @@ impl Driver for CursorNativeDriver {
         session_id: &str,
         spec: SessionSpec,
     ) -> Result<Box<dyn DriverSession>, CoreError> {
+        validate_platform_permission(cfg!(windows), spec.permission)?;
         let command = self.command(&spec)?;
         Ok(Box::new(CursorSession::new(
             session_id.into(),
@@ -216,7 +228,7 @@ impl CursorSession {
         let files = SessionFiles::new(&spec.mcp_servers)?;
         if spec.permission != PermissionPolicy::Bypass && spec.permissions.is_some() {
             let _ = spec.events.send(SessionEventKind::Warning {
-                message: "Cursor CLI does not support per-action permission callbacks; --sandbox=enabled limits it instead (--force is used only for bypass sessions).".into(),
+                message: "Cursor CLI does not support per-action permission callbacks; on macOS and Linux, --sandbox=enabled limits it instead (--force is used only for bypass sessions). Cursor sandbox is unavailable on Windows.".into(),
             }.into());
         }
         let _ = spec.events.send(
@@ -491,6 +503,22 @@ mod tests {
     use serde_json::Value;
     use std::collections::BTreeMap;
 
+    #[test]
+    fn platform_permission_validation() {
+        for permission in [PermissionPolicy::Guard, PermissionPolicy::Deny] {
+            let error = validate_platform_permission(true, permission)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("only on macOS and Linux"));
+            assert!(error.contains("enable bypass"));
+            assert!(error.contains("without a sandbox or per-action confirmation"));
+            assert!(error.contains("commands run as your user"));
+            assert!(validate_platform_permission(false, permission).is_ok());
+        }
+        assert!(validate_platform_permission(true, PermissionPolicy::Bypass).is_ok());
+        assert!(validate_platform_permission(false, PermissionPolicy::Bypass).is_ok());
+    }
+
     fn spec(cwd: &Path) -> (SessionSpec, mpsc::UnboundedReceiver<SessionEvent>) {
         let (events, rx) = mpsc::unbounded_channel();
         (
@@ -754,12 +782,20 @@ sleep 60
             bypass: false,
             plugin: None,
         });
-        assert!(!args.iter().any(|a| a == "--force"
-            || a.starts_with("--model")
-            || a.starts_with("--plugin-dir")
-            || a == "--approve-mcps"
-            || a.starts_with("--files")));
-        assert!(args.contains(&"--sandbox=enabled".into()));
+        assert_eq!(
+            args,
+            [
+                "-p",
+                "--output-format=stream-json",
+                "--stream-partial-output",
+                "--resume=chat",
+                "--trust",
+                "--sandbox=enabled",
+                "--workspace=w",
+                "--",
+                "hi"
+            ]
+        );
     }
 
     #[tokio::test]

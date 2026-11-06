@@ -206,6 +206,34 @@ async fn a_problem_from_a_cancelled_run_is_sorted_elsewhere_and_found_later() {
     );
     assert!(out.contains("\"total\": 2"), "{out}");
 
+    // Merging evidence alone leaves the report standing; a new resolution answers it.
+    for (key, change, status) in [
+        ("issue/lead/1c9d", json!({}), "review"),
+        (
+            "issue/lead/2d0e",
+            json!({ "resolution": "先查 python 是不是占位程序", "outcome": "resolved" }),
+            "active",
+        ),
+    ] {
+        let note = json!({ "key": key, "text": "问题：python 又报 9009" });
+        turn(&t, "quinn", quinn.id, &call("note_write", note)).await;
+        let mut merge = json!({ "issues": [key], "lesson": lesson_id(&once) });
+        merge
+            .as_object_mut()
+            .unwrap()
+            .extend(change.as_object().unwrap().clone());
+        let out = turn(&t, "quinn", quinn.id, &call("lesson_merge", merge)).await;
+        assert!(out.contains("\"merged\""), "{out}");
+        let out = turn(
+            &t,
+            "rex",
+            rex.id,
+            &call("lesson_get", json!({ "id": lesson_id(&once) })),
+        )
+        .await;
+        assert!(out.contains(&format!("\"status\": \"{status}\"")), "{out}");
+    }
+
     // Another project: the run is not its to read, and the record is not there.
     let olga = t
         .add_agent_in("olga", Some("opus"), "worker", other.path())

@@ -3,9 +3,10 @@
 // - Two conversations side by side: the routed session on the left, one more beside it.
 //   Ctrl/⌘-click or middle-click an agent in the sidebar to open it beside.
 // - Tabs in two docks (lib/docks.ts), one on the right and one under the conversations: 改动
-//   (per-turn diffs), 文件 (browsing the workspace), 任务 (the task's details) and 提交图 (the
-//   run's branches on a run page, else the conversation's checkout) and 后台 (the agents' reminders,
-//   watches and the tasks being verified). Which dock holds what is
+//   (per-turn diffs), 文件 (browsing the workspace), 任务 (the task's details), 活动 (every agent's
+//   replies, tools and messages on one timeline), 提交图 (the run's branches on a run page, else
+//   the conversation's checkout) and 后台 (the agents' reminders, watches and the tasks being
+//   verified). Which dock holds what is
 //   the same everywhere; what a tab shows follows the focused conversation: the routed one, or
 //   the one beside it once it was clicked last. Something opened on purpose (a turn's "查看变更",
 //   a task card's turn) is `target` until the focus moves to another conversation. Terminals
@@ -15,16 +16,20 @@
 // it, and a saved layout that still names it loses just that tab.
 
 import { useSyncExternalStore } from "react";
-import { closeTab, dockOf, moveTab, restoreDocks, showTab, type DockId, type Docks } from "./lib/docks";
+import { closeTab, dockOf, moveTab, restoreDocks, showTab, type DockId, type Docks } from "./lib/docks.ts";
+import { extensionOfTab, filterDockTabs, isExtTab, type ExtTab } from "./extensions/tabs.ts";
 
-export type PaneKind = "changes" | "files" | "task" | "events" | "graph" | "background";
+export type PaneKind = "changes" | "files" | "task" | "activity" | "events" | "graph" | "background";
 /** A terminal's tab, by its id in the hub. */
 export type TermTab = `term:${string}`;
-export type TabId = PaneKind | TermTab;
+/** A tab an extension registered (docs/EXTENSIONS.md §5): `ext:<name>/<id>`. */
+export type { ExtTab };
+export { isExtTab };
+export type TabId = PaneKind | TermTab | ExtTab;
 export const isTermTab = (tab: TabId): tab is TermTab => tab.startsWith("term:");
 export const termTab = (id: string): TermTab => `term:${id}`;
 export type DockTarget = DockId;
-const LABELS: Record<PaneKind, string> = { changes: "改动", files: "文件", task: "任务", events: "事件流", graph: "提交图", background: "后台" };
+const LABELS: Record<PaneKind, string> = { changes: "改动", files: "文件", task: "任务", activity: "活动", events: "事件流", graph: "提交图", background: "后台" };
 /** Raw hub events: shown by the dev server and `preview:mock`, not by a packaged build. */
 export const DEBUG_PANES = __BUILD__.dev || __MOCK__;
 /** What the tool column's menu offers, in order. */
@@ -43,9 +48,17 @@ const clamp = (r: number) => Math.min(0.75, Math.max(0.25, r));
 const isKind = (k: unknown): k is PaneKind => typeof k === "string" && k in LABELS;
 /** Whether this build offers `kind` (事件流 only where debugging is on). */
 export const offered = (k: PaneKind) => PANE_KINDS.some((p) => p.kind === k);
-const isTab = (k: unknown): k is TabId => (typeof k === "string" && k.startsWith("term:")) || (isKind(k) && offered(k));
+/** Whether a saved layout may name `k`: a built-in pane, a terminal, or an extension tab. */
+export const isTab = (k: unknown): k is TabId => (typeof k === "string" && k.startsWith("term:")) || isExtTab(k) || (isKind(k) && offered(k));
+/** Whether this build offers `kind` in its menu. */
+export const isPaneKind = isKind;
+/** What an extension tab is called, until (or unless) its extension registers it again. */
+const extLabels = new Map<ExtTab, string>();
 /** What a tab is called. */
-export const paneLabel = (k: PaneKind) => LABELS[k];
+export const paneLabel = (k: PaneKind | ExtTab) => {
+  if (isExtTab(k)) return extLabels.get(k) ?? k.slice(k.indexOf("/") + 1);
+  return LABELS[k as PaneKind];
+};
 /** The tabs a first start has, all on the right. */
 const FRESH: TabId[] = PANE_KINDS.map((p) => p.kind).filter((k) => k !== "events");
 const listeners = new Set<() => void>();
@@ -89,6 +102,78 @@ function set(next: Panes) {
 }
 
 const setDocks = (docks: Docks<TabId>) => set({ ...state, docks });
+
+/** Names the tabs the extensions registered now; tabs they no longer register fall back to their id. */
+export function setExtTabLabels(entries: readonly { tab: ExtTab; label: string }[]) {
+  const current = new Set(entries.map((entry) => entry.tab));
+  let dirty = false;
+  for (const { tab, label } of entries) {
+    if (extLabels.get(tab) === label) continue;
+    extLabels.set(tab, label);
+    dirty = true;
+  }
+  for (const tab of extLabels.keys()) {
+    if (current.has(tab)) continue;
+    extLabels.delete(tab);
+    dirty = true;
+  }
+  if (dirty) changed();
+}
+
+/**
+ * Drops extension tabs whose extension is not enabled now. Called only once the extension list
+ * has arrived: before that, a saved `ext:` tab is kept rather than mistaken for a stale one.
+ */
+export function syncExtensionTabs(enabled: ReadonlySet<string>) {
+  const keep = (tab: TabId) => !isExtTab(tab) || enabled.has(extensionOfTab(tab));
+  const right = filterDockTabs(state.docks.right, keep);
+  const bottom = filterDockTabs(state.docks.bottom, keep);
+  if (right === state.docks.right && bottom === state.docks.bottom) return;
+  setDocks({ right, bottom });
+}
+
+/** Extension tabs the host already put in a dock; kept in localStorage so closing one sticks. */
+const OFFERED_KEY = "crossagents.extTabs";
+function readOffered(): Set<ExtTab> {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(OFFERED_KEY) ?? "[]");
+    return new Set(Array.isArray(saved) ? saved.filter(isExtTab) : []);
+  } catch {
+    return new Set();
+  }
+}
+const offeredExtTabs = readOffered();
+function saveOffered() {
+  try {
+    localStorage.setItem(OFFERED_KEY, JSON.stringify([...offeredExtTabs]));
+  } catch {
+    // This page still remembers them.
+  }
+}
+
+/** Every registered extension tab with no dock now, for a dock's + menu (tabs.tsx `AddTab`). */
+export const closedExtTabs = (): { tab: ExtTab; label: string }[] =>
+  [...extLabels].filter(([tab]) => !dockOf(state.docks, tab)).map(([tab, label]) => ({ tab, label }));
+
+/**
+ * Puts a tab an extension just registered in the right dock without taking the front
+ * (`placeTab(…, false)`): the dock's active tab stays. Only the first time: once offered, the
+ * tab is remembered in localStorage, so one the person closed is not reopened by the host.
+ */
+export function offerExtTab(tab: ExtTab) {
+  if (offeredExtTabs.has(tab)) return;
+  offeredExtTabs.add(tab);
+  saveOffered();
+  if (dockOf(state.docks, tab)) return;
+  placeTab(tab, "right", false);
+}
+
+/** Opens a tab picked from a dock's + menu; it comes to the front there. */
+export function openExtTab(tab: ExtTab, dock: DockId) {
+  offeredExtTabs.add(tab);
+  saveOffered();
+  setDocks(moveTab(state.docks, tab, dock));
+}
 
 /** Opens `name` beside the routed session; without one, just goes to it. */
 export function openBeside(name: string) {
@@ -178,6 +263,10 @@ export function pickTab(dock: DockId, tab: TabId) {
 export const dropTab = (tab: TabId, dock: DockId, index?: number) => setDocks(moveTab(state.docks, tab, dock, index));
 
 export function shutTab(tab: TabId) {
+  if (isExtTab(tab)) {
+    offeredExtTabs.add(tab);
+    saveOffered();
+  }
   if (floatTab === tab) floatTab = null;
   setDocks(closeTab(state.docks, tab));
 }

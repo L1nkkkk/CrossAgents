@@ -448,14 +448,21 @@ impl Orchestrator {
                         "that lesson belongs to another project".into(),
                     ));
                 }
+                let mut revised = false;
                 if let Some(resolution) = a.resolution {
                     let resolution = checked("resolution", &resolution, FIELD_MAX)?;
                     if !resolution.is_empty() {
                         lesson.resolution = resolution;
+                        revised = true;
                     }
                 }
                 if let Some(outcome) = a.outcome {
                     lesson.outcome = outcome;
+                    revised = true;
+                }
+                // A new resolution or outcome answers the report that put it up for review.
+                if revised && lesson.status == LessonStatus::Review {
+                    lesson.status = LessonStatus::Active;
                 }
                 lesson.evidence.push(evidence(
                     a.outcome.unwrap_or(lesson.outcome),

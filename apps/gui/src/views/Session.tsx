@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { Capabilities } from "@bindings/Capabilities";
 import type { Run } from "@bindings/Run";
@@ -6,31 +6,30 @@ import type { RunDetail } from "@bindings/RunDetail";
 import type { Handoff } from "@bindings/Handoff";
 import type { ModelSwitch } from "@bindings/ModelSwitch";
 import type { TranscriptUsage } from "@bindings/TranscriptUsage";
-import { view } from "../activity";
+import { useDelivery, view } from "../activity";
 import { api, errorText } from "../api";
-import { HeldFiles, TurnFiles, useHeld } from "../attach";
+import { TurnFiles } from "../attach";
 import { HandoffLine } from "../handoff";
-import { dismiss as dismissMessage, retry as retryMessage, sendMessage, useOutbox, type Outgoing } from "../outbox";
+import { dismiss as dismissMessage, retry as retryMessage, useOutbox, type Outgoing } from "../outbox";
 import { ACTIVE_RUN, useRunTree, useRunsLedBy } from "../App";
-import { Avatar, ErrorBox, FileScopeProvider, Icon, Mark, OneLine, Prose, StatusChip, Vendor, agentTitle, agentTone, beyondFirstLine, displayName, firstLine, firstSentence, roleShape, time, useAgents, useFileScope, vendorName } from "../components";
+import { AgentImageContext, Avatar, ErrorBox, FileScopeProvider, Icon, loadAgentImage, Mark, type ImageLoad, OneLine, StatusChip, Vendor, agentTitle, agentTone, beyondFirstLine, displayName, firstLine, firstSentence, roleShape, time, useAgents, useFileScope, vendorName } from "../components";
 import { Image as ImageIcon } from "lucide-react";
 import { extractToolImagePaths, extractToolImages } from "../lib/toolimages";
 import { ToolImages } from "../toolimages";
 import { ChangeStat, DiffView } from "../diffview";
 import { parseDiff, tailLines, type DiffFile } from "../lib/diff";
 import { errorHint } from "../lib/errors";
+import { isModerationError } from "../lib/moderation";
 import { fields, plainText, toolChanges, toolError, toolFailed, toolShowsStat } from "../lib/toolcall";
-import { supportNote } from "../lib/attachments";
-// `draft` is this file's word for the text being typed, so the module keeps the plural.
-import * as drafts from "../lib/draft";
-import { t } from "../lib/i18n";
 import { effortLabel, prettyModel } from "../lib/models";
 import { clock, range } from "../lib/time";
-import { ModelEffortPicks } from "../modelPick";
 import { InfoRail, RAIL_ROOM, SIDE_ROOM, useRail } from "../rail";
 import { ScrollThumb } from "../scrollthumb";
 import { TurnMap, type MapEntry } from "../turnmap";
 import { focusSession, isTermTab, openTool, toggleTools, useLayout } from "../panes";
+import { useToolCards } from "../extensions/defaults";
+import { cardFor } from "../extensions/toolcards";
+import { ToolCardView } from "../extensions/ui";
 import { shownTab } from "../lib/docks";
 import { terminalsAvailable, toggleTerminal, useTabShows } from "../terminal";
 import { useWidths } from "../lib/widths";
@@ -39,7 +38,8 @@ import { taskState } from "../lib/taskState";
 import { QUIET_AFTER, actionOf, duration, failed, liveActivity, liveKey, liveNow, quietSeconds, stepLine, summarize, workGroups, type ActionTool, type Step } from "../lib/workGroups";
 import { TurnLive, type LiveTurn } from "../liveTurn";
 import { PeerMessage, StateWord, useArmed } from "../parts";
-import { useSession, type TranscriptItem, type TranscriptTurn } from "../session";
+import { useSession, turnExtras, type TranscriptItem, type TranscriptTurn } from "../session";
+import { reasonText } from "../lib/delivery";
 import { dismissNotice, useNotices } from "../notices";
 import { QuestionCards, pending, useQuestions } from "../questions";
 import { executorOf } from "../lib/projectView";
@@ -48,15 +48,36 @@ import { workDecisions, type WorkDecision } from "../lib/workNotes";
 import { NeedsYouStrip, RunStrip } from "../strips";
 import { useHubData } from "../hub";
 import { ContextUsageButton, useCompact } from "../contextusage";
-import { mentionsFor, useMention } from "../mention";
-import { useSlash, type SlashMenuGroup } from "../slash";
 import { homeOf, isChat, wsKey } from "../workspace";
 import { ProfileEditor } from "./Agents";
-import { PlanTasks, usePlanApproval } from "./Run";
+import { Composer, QueuePanel } from "./SessionComposer";
+import { AgentText, Bubble, fromPerson } from "./SessionMessage";
+import { SteerItem, TurnEnded } from "./SessionSteer";
+import { SessionModeration } from "./SessionModeration";
 
-/** A person's message, or one recorded before senders were. */
-const fromPerson = (turn: TranscriptTurn) => !turn.from || turn.from.kind === "human";
 const started = (turn: TranscriptTurn) => !!turn.started_at || !!turn.completed_at;
+
+/**
+ * Whether a turn is drawn in the conversation. A person's own message keeps its row from
+ * submit to end, queued or running or withdrawn, so it never moves to 接下来 and back
+ * (docs/tasks/DELIVERY-AUDIT.md §2, §8 P0-1).
+ */
+const inConversation = (turn: TranscriptTurn) => started(turn) || fromPerson(turn) || !!turnExtras(turn).withdrawn;
+
+/** What 接下来 lists: orchestration messages, waiting; the person's own stay in the chat. */
+const inNextUp = (turn: TranscriptTurn) => !started(turn) && !fromPerson(turn) && !turnExtras(turn).withdrawn;
+
+/**
+ * The latest started turn, when it failed because the gateway's content moderation refused the
+ * context: its error item says so, or the agent's own error does while it is in error. A later
+ * turn that went through means the reminder has done its job and is gone.
+ */
+function moderationTurn(turns: TranscriptTurn[], status: Agent["status"], error?: string): TranscriptTurn | undefined {
+  const last = turns.filter((turn) => !!turn.started_at).at(-1);
+  if (!last) return undefined;
+  const fromItems = last.items.some((item) => item.type === "error" && isModerationError(item.message));
+  return fromItems || (status === "error" && isModerationError(error)) ? last : undefined;
+}
 
 /** Which of a session's active tasks it is on now: running, then review / verification, then the rest. */
 function rankTask(status: RunDetail["tasks"][number]["status"]): number {
@@ -220,7 +241,8 @@ export function SessionView({
   // absent; fetching every run's detail for every session and event would be too expensive.
   const associated = [...new Map([...runs, ...(ledRuns.data ?? [])].map((d) => [d.run.id, d])).values()];
   const tasks = associated.flatMap((d) => d.tasks.filter((t) => t.assignee === agent.id || t.reviewer === agent.id).map((t) => ({ run: d.run, task: t })));
-  const queued = turns.filter((t) => !started(t));
+  const queued = turns.filter(inNextUp);
+  const poisoned = moderationTurn(turns, agent.status, transcript.error);
   const led = ledRuns.data ?? [];
   const recruits = everyone.filter((a) => (a.config as Record<string, unknown> | null)?.spawned_by_agent === agent.id && !a.archived_at);
   // The turn running now, and (when it works a task for a run) that task's counts: both are in
@@ -250,7 +272,7 @@ export function SessionView({
         <WorkContext name={name} agent={agent} tasks={tasks} led={led} agents={everyone} execution={execution.data?.execution} />
         <ExecutionBar agent={agent} execution={execution.data?.execution} reload={execution.reload} />
         <NoticeBar agent={agent} />
-        <Conversation agent={agent} turns={turns.filter(started)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} works={workDecisions(questions.data?.items ?? [], agent.id)} agents={everyone} tree={runs} top={top}>
+        <Conversation agent={agent} turns={turns.filter(inConversation)} switches={transcript.switches ?? []} handoffs={handoffsOf(ledRuns.data ?? [])} works={workDecisions(questions.data?.items ?? [], agent.id)} agents={everyone} tree={runs} top={top}>
           {outgoing.map((m) => (
             <Sending key={m.key} message={m} agent={agent} />
           ))}
@@ -283,13 +305,14 @@ export function SessionView({
           {!onClose && <div ref={questionArea}><QuestionCards agents={everyone} />{questionId && !questions.loading && (!questions.data || !pending(questions.data.items).some((item) => item.id === questionId && item.from === agent.id)) && <p role="alert" className="question-missing">找不到这条待办：它可能已处理、已过期或不属于此会话。{questions.error && ` ${questions.error}`}</p>}</div>}
           {!onClose && <NeedsYouStrip agents={everyone} tree={runs} />}
           <RunStrip runs={liveRuns} agents={everyone} />
-          <QueuePanel agent={agent} queued={queued} onEdit={setDraft} />
-          {agent.status === "error" && transcript.error && (
+          <QueuePanel agent={agent} queued={queued} delivery={transcript.delivery} />
+          {agent.status === "error" && transcript.error && !isModerationError(transcript.error) && (
             <div className="error-bar" role="alert" title={transcript.error}>
               <strong>{errorHint(transcript.error, transcript.exit)}</strong>
               <span className="mono small">{transcript.error}</span>
             </div>
           )}
+          {poisoned && !agent.archived_at && <SessionModeration agent={agent} turn={poisoned} />}
           {agent.archived_at ? (
             <div className="archived-bar">
               <Icon name="archive" size={14} />
@@ -297,7 +320,7 @@ export function SessionView({
               <button onClick={() => void api.archiveAgent(agent.id, false)}>恢复对话</button>
             </div>
           ) : (
-            <Composer agent={agent} capabilities={capabilities} driver={transcript.driver} draft={draft} setDraft={setDraft} plans={pendingPlans} onPlanDone={reload} mates={mates} />
+            <Composer agent={agent} capabilities={capabilities} driver={transcript.driver} delivery={transcript.delivery} draft={draft} setDraft={setDraft} plans={pendingPlans} onPlanDone={reload} mates={mates} />
           )}
         </div>
       </section>
@@ -661,15 +684,23 @@ function AgentName({ agent }: { agent: Agent }) {
 
 /** A message sent from here, while the hub wakes the agent up and takes it (or why it did not). */
 function Sending({ message, agent }: { message: Outgoing; agent: Agent }) {
-  const waking = agent.status === "stopped" || agent.status === "starting" || agent.status === "error";
+  // The row's state changes in place (P0-1). "Waking" is about the process; whether the message
+  // waits, and why, is the hub's own delivery state (P1-4) — an external agent is never woken.
+  const delivery = useDelivery(agent.id);
+  const state =
+    message.steered ? "已插入本轮，等模型读取"
+    : message.queued ? `排队中 · ${reasonText(message.queued)}`
+    : delivery?.state === "held" ? `等 ${displayName(agent)} 自己来取`
+    : delivery?.state === "starting" || agent.status === "stopped" || agent.status === "starting" || agent.status === "error" ? `正在唤起 ${displayName(agent)}…`
+    : "发送中…";
   return (
     <div className="turn sending">
       {(message.text || !message.attachments?.length) && <div className="bubble">{message.text}</div>}
       {!!message.attachments?.length && <div className="turn-note small muted">附件：{message.attachments.map((a) => a.name).join("、")}</div>}
       {message.error ? (
-        <div className="turn-note danger row" style={{ gap: 8 }} title={message.error}>
-          <span>没发出去：{message.error}</span>
-          <button className="ghost small" onClick={() => retryMessage(message.key)}>
+        <div className="turn-note danger row" style={{ alignSelf: "flex-end", gap: 8 }} title={message.errorRaw ?? message.error}>
+          <span>{message.outcomeUnknown ? message.error : `没发出去：${message.error}`}</span>
+          <button className="ghost small" title="用同一条消息重试，hub 不会重复发送" onClick={() => retryMessage(message.key)}>
             重试
           </button>
           <button className="ghost small" onClick={() => dismissMessage(message.key)}>
@@ -683,9 +714,36 @@ function Sending({ message, agent }: { message: Outgoing; agent: Agent }) {
             <i />
             <i />
           </span>
-          <span className="muted small">{waking ? `正在唤起 ${displayName(agent)}…` : "发送中…"}</span>
+          <span className="muted small">{state}</span>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * A person's message that has not started: it waits, and this row says why — no other panel
+ * holds a copy of it (P0-1). "立即发送" promotes this very message (same id) instead of
+ * withdrawing it and sending another (P1-5); a failure leaves it waiting.
+ */
+function WaitingTurn({ turn, agent }: { turn: TranscriptTurn; agent: Agent }) {
+  const [error, setError] = useState<string>();
+  const extras = turnExtras(turn);
+  if (extras.withdrawn) return <div className="turn-note" style={{ alignSelf: "flex-end" }}>— 已撤回，没有发给 {displayName(agent)}</div>;
+  const act = (action: () => Promise<unknown>) => {
+    setError(undefined);
+    action().catch((err) => setError(errorText(err)));
+  };
+  return (
+    <div className="turn-note row" style={{ alignSelf: "flex-end", gap: 8 }}>
+      <span>排队中{extras.queued_reason ? ` · ${reasonText(extras.queued_reason)}` : ""}</span>
+      <button className="ghost small" title="打断当前这一轮，先发这条（还是同一条消息）" onClick={() => act(() => api.sendMessageNow(agent.id, turn.message_id))}>
+        立即发送
+      </button>
+      <button className="ghost small" onClick={() => act(() => api.withdrawMessage(agent.id, turn.message_id))}>
+        撤回
+      </button>
+      {error && <span className="danger small" title={error}>{error}</span>}
     </div>
   );
 }
@@ -837,50 +895,21 @@ function SwitchNote({ change }: { change: ModelSwitch }) {
   );
 }
 
-/** Inputs longer than this start folded. */
-const FOLD_INPUT = 600;
-
-// Keep in sync with the kickoff separator in crates/orchestrator/src/brief.rs.
-const KICKOFF_SEPARATOR = "\n\n---\nrun: ";
-
-function Bubble({ turn, tree }: { turn: TranscriptTurn; tree: RunDetail[] }) {
-  const [open, setOpen] = useState(false);
-  const request = tree.find(({ run }) => turn.input.startsWith(run.request.trim() + KICKOFF_SEPARATOR))?.run.request.trim();
-  const visible = request === undefined || open ? turn.input : request;
-  const long = request === undefined && turn.input.length > FOLD_INPUT;
-  return (
-    <div className="bubble" title={time(turn.sent_at)}>
-      {long && !open ? visible.slice(0, FOLD_INPUT).trimEnd() + "…" : visible}
-      {request !== undefined && (
-        <div>
-          <button className="tools-more" style={{ padding: 0, marginTop: 4 }} aria-expanded={open} onClick={() => setOpen(!open)}>
-            {open ? "收起 run 上下文 ▾" : "已附上 run 上下文（成员、校验、会话）▸"}
-          </button>
-        </div>
-      )}
-      {long && (
-        <div>
-          <button className="tools-more" style={{ padding: 0, marginTop: 4 }} onClick={() => setOpen(!open)}>
-            {open ? "收起" : `展开全部（${turn.input.length} 字）`}
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agent; agents: Agent[]; tree: RunDetail[] }) {
   const running = !!turn.started_at && !turn.completed_at;
   // Which step the conversation shows live, as Steps reports it: the live line leaves that step's
   // command and output out, so the same lines are not written twice (see ShownLive).
   const [shownLive, setShownLive] = useState<string | null>(null);
-  const blocks = workGroups(turn.items);
+  const cards = useToolCards();
+  // A tool an extension draws itself is a block of its own, never folded into a step summary.
+  const blocks = workGroups(turn.items, (item) => !!cardFor(item, cards));
   return (
     <div className="turn" data-turn={turn.message_id}>
       {fromPerson(turn) ? (
         <>
           {(turn.input || !turn.attachments?.length) && <Bubble turn={turn} tree={tree} />}
           <TurnFiles agent={agent.id} files={turn.attachments ?? []} />
+          {!turn.started_at && <WaitingTurn turn={turn} agent={agent} />}
         </>
       ) : (
         <PeerMessage turn={turn} agents={agents} tree={tree} />
@@ -892,6 +921,7 @@ function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agen
           <span className="what">{agentTitle(agent)}</span>
         </div>
       )}
+      <TurnEnded.Provider value={!!turn.completed_at}>
       <ShownLive.Provider value={{ id: shownLive, set: setShownLive }}>
         {blocks.map((block, i) =>
           block.kind === "steps" ? (
@@ -902,6 +932,7 @@ function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agen
         )}
         {running && <LiveLine since={turn.started_at!} items={turn.items} />}
       </ShownLive.Provider>
+      </TurnEnded.Provider>
       {turn.completed_at && <TurnFoot turn={turn} />}
       {turn.completed_at && turn.diff && <TurnChanges turn={turn} agent={agent} />}
     </div>
@@ -909,12 +940,27 @@ function Turn({ turn, agent, agents, tree }: { turn: TranscriptTurn; agent: Agen
 }
 
 function Item({ item }: { item: TranscriptItem }) {
+  const cards = useToolCards();
+  const card = cardFor(item, cards);
+  if (card && item.type === "tool_call") return <ToolCardView card={card} call={item} />;
   const action = actionOf(item);
   if (action && item.type === "tool_call") return <ActionCard action={action} call={item} />;
   switch (item.type) {
     case "output":
-      return <Prose text={item.text} />;
+      return <AgentText text={item.text} />;
     case "error":
+      // The gateway refused the whole context, not this request: retrying re-sends the same
+      // history and burns the same tokens, so the line says that instead of "报错".
+      if (isModerationError(item.message))
+        return (
+          <OneLine tone="warn" icon={<Icon name="info" size={13} />} title="上下文已被污染" summary={firstLine(item.message)}>
+            <div className="moderation-why-text">
+              <p>网关的内容审查拦下了这一轮：它扫的是整段上下文，不只是你最后那句话。触发的内容还在历史里，原样重试只会再烧一次 token。</p>
+              <p>可以新开一个会话，或先把历史压缩成摘要再继续；仍然要发也可以，只是很可能再被拒一次。</p>
+              <pre className="moderation-raw">{item.message}</pre>
+            </div>
+          </OneLine>
+        );
       // One line; the whole message opens under it (a stack trace can be long).
       return (
         <OneLine tone="danger" icon={<Icon name="close" size={13} />} title="报错" summary={firstLine(item.message)}>
@@ -928,7 +974,7 @@ function Item({ item }: { item: TranscriptItem }) {
         </OneLine>
       );
     default:
-      return null;
+      return <SteerItem item={item} />;
   }
 }
 
@@ -1097,7 +1143,6 @@ const OPEN_LINES = 400;
 
 /** The session's working directory, for shortening paths in tool lines. */
 const CwdContext = createContext<string | undefined>(undefined);
-const AgentImageContext = createContext<string | undefined>(undefined);
 
 /** One tool call; a click opens what it did (output, exit code, diffs, arguments). */
 function ToolStep({ step }: { step: ToolCall }) {
@@ -1111,7 +1156,7 @@ function ToolStep({ step }: { step: ToolCall }) {
   // A failed edit carries the diff the model meant to make: showing +N −M would claim a change
   // that never happened (docs/TODO.md §九).
   const changes = toolChanges(step).flatMap((c) => parseDiff(c.diff, c.path));
-  const hasImages = !!d?.result && extractToolImages(d.result).images.length > 0;
+  const hasImages = (!!d?.result && extractToolImages(d.result).images.length > 0) || (!!d?.arguments && extractToolImagePaths(d.arguments).length > 0);
   if (bad) {
     // One line, like a result card: ✕, the call, and why it failed; the detail opens below.
     const reason = firstLine(hasImages ? extractToolImages(toolError(step) ?? "").text : toolError(step));
@@ -1162,7 +1207,7 @@ function ToolDetailView({ step, changes }: { step: ToolCall; changes: DiffFile[]
     if (!agent) return;
     let active = true;
     setLoaded({});
-    for (const path of paths) void loadToolImage(agent, path).then((value) => {
+    for (const path of paths) void loadAgentImage(agent, path).then((value) => {
       if (active) setLoaded((old) => ({ ...old, [path]: value }));
     });
     return () => { active = false; };
@@ -1386,401 +1431,3 @@ function TurnChanges({ turn, agent }: { turn: TranscriptTurn; agent: Agent }) {
   );
 }
 
-const QUEUE_OPEN = "crossagents.queueOpen";
-
-/**
- * "接下来": messages waiting for their turn, on the composer's top edge. Your own can be sent
- * now (interrupting the current turn), edited (taken back into the composer) or removed;
- * orchestration messages are shown but left alone.
- */
-function QueuePanel({ agent, queued, onEdit }: { agent: Agent; queued: TranscriptTurn[]; onEdit: (text: string) => void }) {
-  const [open, setOpen] = useState(() => {
-    try {
-      return localStorage.getItem(QUEUE_OPEN) !== "0";
-    } catch {
-      return true;
-    }
-  });
-  const [error, setError] = useState<string>();
-  if (!queued.length) return null;
-
-  const toggle = () => {
-    setOpen(!open);
-    try {
-      localStorage.setItem(QUEUE_OPEN, open ? "0" : "1");
-    } catch {
-      // Remembered for this page only.
-    }
-  };
-  const act = async (action: () => Promise<unknown>) => {
-    setError(undefined);
-    try {
-      await action();
-    } catch (err) {
-      setError(errorText(err));
-    }
-  };
-  const withdraw = (turn: TranscriptTurn) => api.withdrawMessage(agent.id, turn.message_id);
-
-  return (
-    <div className="queue">
-      <button className="queue-head" onClick={toggle} aria-expanded={open}>
-        <span className="disclosure" aria-hidden="true">
-          {open ? "▾" : "▸"}
-        </span>
-        接下来 · {queued.length}
-        <span className="muted small">本轮结束后依次发给 {displayName(agent)}</span>
-      </button>
-      {open &&
-        queued.map((turn) => {
-          const mine = fromPerson(turn);
-          return (
-            <div key={turn.message_id} className="queue-row">
-              <span className="queue-kind" title={mine ? "你发的" : "编排"}>
-                {mine ? "你" : "编排"}
-              </span>
-              <span className="queue-text">{turn.input.split("\n")[0]}</span>
-              {mine && (
-                <span className="queue-actions">
-                  <button
-                    className="link"
-                    title="打断当前这一轮，先发这条"
-                    onClick={() =>
-                      act(async () => {
-                        await withdraw(turn);
-                        await api.sendMessage(agent.id, { text: turn.input, now: true });
-                      })
-                    }
-                  >
-                    立即发送
-                  </button>
-                  <button
-                    className="link"
-                    onClick={() =>
-                      act(async () => {
-                        await withdraw(turn);
-                        onEdit(turn.input);
-                      })
-                    }
-                  >
-                    编辑
-                  </button>
-                  <button className="link" onClick={() => act(() => withdraw(turn))}>
-                    删除
-                  </button>
-                </span>
-              )}
-            </div>
-          );
-        })}
-      {error && <ErrorBox error={error} />}
-    </div>
-  );
-}
-
-function Composer({
-  agent,
-  capabilities,
-  driver,
-  draft,
-  setDraft,
-  plans,
-  onPlanDone,
-  mates,
-}: {
-  agent: Agent;
-  capabilities: Capabilities | null;
-  driver: string | null;
-  draft: string;
-  setDraft: (text: string) => void;
-  plans: RunDetail[];
-  onPlanDone: () => void;
-  /** Agents @ offers, besides the models. */
-  mates: Agent[];
-}) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-  const [deferred, setDeferred] = useState<string[]>([]);
-  const [keepNote, setKeepNote] = useState<string>();
-  const ref = useRef<HTMLTextAreaElement>(null);
-  const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
-  const mention = useMention(ref, setDraft, mentionsFor(mates, (plugins.data ?? []).filter((p) => p.models.length > 0)));
-  const compact = useCompact(agent);
-  const agentCommands = useHubData(() => api.agentCommands(agent.id), [agent.id],
-    (e) => (e.type === "agent.status_changed" && e.data.id === agent.id) || (e.type === "agent.updated" && e.data.agent.id === agent.id));
-  const groups: SlashMenuGroup[] = [
-    {
-      key: "crossagents",
-      label: "CrossAgents 指令",
-      commands: [
-        {
-          key: "compact",
-          group: "crossagents",
-          name: "compact",
-          title: "压缩上下文",
-          sub: "把历史压成摘要，腾出上下文",
-          blocked: compact.blocked,
-          run: () => void compact.compact(),
-        },
-      ],
-    },
-    {
-      key: "agent",
-      label: "agent 自带",
-      note: agentCommands.error ? `获取失败：${agentCommands.error}` : agentCommands.data && !agentCommands.data.known ? (agentCommands.data.note ?? "这个驱动不报告自带指令") : undefined,
-      commands: agentCommands.error || !agentCommands.data?.known ? [] : agentCommands.data.commands
-        .filter((c) => c.name.toLowerCase() !== "compact")
-        .map((c) => ({ key: `agent/${c.name}`, group: "agent", name: c.name, title: c.description ?? "", kind: c.kind })),
-    },
-  ];
-  const slash = useSlash(ref, setDraft, groups);
-  const running = agent.status === "running";
-  const canInterrupt = running && capabilities?.interrupt !== false;
-  const plan = plans.find((d) => !deferred.includes(d.run.id));
-  const support = capabilities?.attachments ?? null;
-  const files = useHeld(setError, support, driver);
-  const note = supportNote(support, driver);
-
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
-  }, [draft, plan]);
-
-  useEffect(() => {
-    if (!plan) ref.current?.focus();
-  }, [agent.id, plan]);
-
-  // Leaving the conversation unmounts the composer, so what was typed and attached is kept
-  // under this agent's own key and comes back when you return (lib/draft.ts). Restored once
-  // per conversation: a later render must not overwrite what is being typed now.
-  const restored = useRef<string | undefined>(undefined);
-  useEffect(() => {
-    if (restored.current === agent.id) return;
-    restored.current = agent.id;
-    const kept = drafts.read({ kind: "session", agent: agent.id });
-    if (!kept) return;
-    setDraft(kept.text);
-    if (kept.held.length) files.restore(kept.held);
-  }, [agent.id]);
-
-  useEffect(() => {
-    if (restored.current !== agent.id) return;
-    const timer = setTimeout(() => {
-      const out = drafts.write({ kind: "session", agent: agent.id }, { text: draft, title: "", held: files.held });
-      setKeepNote(!out.kept && files.held.length ? t("draft.notKept") : out.dropped ? t("draft.filesTooBig", { n: out.dropped }) : undefined);
-    }, 400);
-    return () => clearTimeout(timer);
-  }, [draft, files.held, agent.id]);
-
-  async function send(now = false) {
-    const text = draft.trim();
-    const held = files.held;
-    if ((!text && !held.length) || busy) return;
-    setBusy(true);
-    setError(undefined);
-    // Shown at once (outbox.ts); a failure puts the text and files back here.
-    setDraft("");
-    files.clear();
-    drafts.forget({ kind: "session", agent: agent.id });
-    setKeepNote(undefined);
-    try {
-      const attachments = held.map(({ name, mime, data }) => ({ name, mime, data }));
-      await sendMessage(agent.id, text, { now, takeBack: true, attachments });
-    } catch (err) {
-      setDraft(text);
-      files.restore(held);
-      setError(errorText(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function interrupt() {
-    try {
-      await api.cancelAgent(agent.id);
-    } catch (err) {
-      setError(errorText(err));
-    }
-  }
-
-  function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.nativeEvent.isComposing) return;
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      // Ctrl+Shift+Enter: stop the current turn and send this instead.
-      void send(e.ctrlKey && running);
-    } else if (e.key === "Escape" && canInterrupt) {
-      e.preventDefault();
-      void interrupt();
-    }
-  }
-
-  if (plan) {
-    return <PlanDock key={plan.run.id} run={plan.run} onDone={onPlanDone} onReply={() => setDeferred([...deferred, plan.run.id])} />;
-  }
-
-  return (
-    <div className="composer-wrap">
-      {error && <ErrorBox error={error} />}
-      {compact.error && <ErrorBox error={compact.error} />}
-      {plans.length > 0 && (
-        <button className="dock-recall" onClick={() => setDeferred([])}>
-          <span className="disclosure" aria-hidden="true">
-            ▴
-          </span>
-          Plan 待审批 · {plans[0].run.plan.length} 个任务 · 展开审批
-        </button>
-      )}
-      <div className="composer" onDrop={files.onDrop} onDragOver={files.onDragOver}>
-        {slash.menu}
-        {mention.menu}
-        <HeldFiles files={files.held} onRemove={files.remove} />
-        {keepNote && <div className="small dim">{keepNote}</div>}
-        <textarea
-          {...slash.textarea}
-          onPaste={files.onPaste}
-          ref={ref}
-          rows={1}
-          value={draft}
-          onChange={(e) => {
-            setDraft(e.target.value);
-            slash.sync();
-            mention.sync();
-          }}
-          onClick={() => {
-            slash.sync();
-            mention.sync();
-          }}
-          onKeyDown={(e) => slash.onKeyDown(e) || mention.onKeyDown(e) || onKey(e)}
-          placeholder={running ? `${displayName(agent)} 正在工作，新消息会排在本轮之后` : `给 ${displayName(agent)} 发消息，@ 点名协作者或模型，/ 看指令`}
-        />
-        <div className="bar">
-          {agent.plugin === "external" ? (
-            <span className="chip">
-              <Vendor plugin={agent.plugin} model={agent.model} />
-            </span>
-          ) : (
-            <ModelEffortPicks agent={agent} />
-          )}
-          {capabilities?.resume && <span className="chip" title="会话可挂起后恢复">resumable</span>}
-          <div className="spacer" />
-          {agent.plugin !== "external" && files.picker}
-          {/* One button: stop while it works and nothing is typed, else send (which queues). */}
-          {canInterrupt && !draft.trim() && !files.held.length ? (
-            <button className="primary send" onClick={interrupt} title="中断本轮（Esc）" aria-label="中断本轮">
-              <Icon name="stop" size={14} />
-            </button>
-          ) : (
-            <button className="primary send" disabled={busy || (!draft.trim() && !files.held.length)} onClick={() => send()} aria-label="发送">
-              <Icon name="send" size={16} />
-            </button>
-          )}
-        </div>
-      </div>
-      <div className="composer-hint">
-        {note && <span>{note} · </span>}
-        {compact.busy ? "压缩中…" : running ? "Enter 排队 · Ctrl+Shift+Enter 打断并发送 · Esc 中断" : "Enter 发送 · Shift+Enter 换行 · agent 离线时会自动启动"}
-      </div>
-    </div>
-  );
-}
-
-/**
- * A plan waiting for approval, docked where the composer is (the draft is kept). Keys: 1
- * approve, 2 reject with a reason, 3 or Esc reply to the planner first.
- */
-function PlanDock({ run, onDone, onReply }: { run: Run; onDone: () => void; onReply: () => void }) {
-  const [rejecting, setRejecting] = useState(false);
-  const [reason, setReason] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-  const ref = useRef<HTMLDivElement>(null);
-  const choices = usePlanApproval(run, busy);
-
-  useEffect(() => ref.current?.focus(), []);
-
-  async function act(action: () => Promise<unknown>) {
-    setBusy(true);
-    setError(undefined);
-    try {
-      await action();
-      onDone();
-    } catch (err) {
-      setError(errorText(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-  const approve = () => choices.ready && act(choices.approve);
-
-  function onKey(e: KeyboardEvent<HTMLDivElement>) {
-    if (rejecting || busy || e.target !== e.currentTarget) return;
-    if (e.key === "1") approve();
-    else if (e.key === "2") setRejecting(true);
-    else if (e.key === "3" || e.key === "Escape") onReply();
-    else return;
-    e.preventDefault();
-  }
-
-  return (
-    <div className="composer-wrap">
-      <div className="plan-dock" tabIndex={-1} ref={ref} onKeyDown={onKey} role="dialog" aria-label="Plan 待审批">
-        <header>
-          <StateWord state={{ glyph: "○", word: "Plan 待审批", tone: "warn", bucket: "needs_you", live: false }} />
-          <span className="muted small">{run.plan.length} 个任务</span>
-          <span className="spacer" />
-          <a className="small" href={`#/runs/${run.id}`}>
-            {run.title}
-          </a>
-        </header>
-        <div className="plan-dock-body">
-          <PlanTasks run={run} pick={choices.pick} />
-          {run.note && <div className="small muted plan-dock-note">上次驳回：{run.note}</div>}
-          {choices.settings}
-        </div>
-        <footer>
-          {rejecting ? (
-            <>
-              <textarea rows={2} autoFocus placeholder="驳回理由（必填），会转给 Planner" value={reason} onChange={(e) => setReason(e.target.value)} />
-              <button className="danger" disabled={busy || !reason.trim()} onClick={() => act(() => api.rejectRun(run.id, { reason: reason.trim() }))}>
-                驳回
-              </button>
-              <button className="ghost" onClick={() => setRejecting(false)}>
-                取消
-              </button>
-            </>
-          ) : (
-            <>
-              <button className="primary" disabled={busy || !choices.ready} onClick={approve}>
-                <kbd>1</kbd> Approve · 开工
-              </button>
-              <button disabled={busy} onClick={() => setRejecting(true)}>
-                <kbd>2</kbd> 驳回并说明
-              </button>
-              <button className="ghost" onClick={onReply}>
-                <kbd>3</kbd> 先回复 Planner
-              </button>
-            </>
-          )}
-        </footer>
-        {error && <ErrorBox error={error} />}
-      </div>
-    </div>
-  );
-}
-
-
-
-type ImageLoad = { src?: string; error?: string };
-const toolImageCache = new Map<string, Promise<ImageLoad>>();
-function loadToolImage(agent: string, path: string): Promise<ImageLoad> {
-  const key = JSON.stringify([agent, path]);
-  let pending = toolImageCache.get(key);
-  if (!pending) {
-    pending = api.agentImage(agent, path).then((image) => ({ src: `data:${image.mime};base64,${image.data}` }), (err: unknown) => ({ error: errorText(err) }));
-    toolImageCache.set(key, pending);
-  }
-  return pending;
-}

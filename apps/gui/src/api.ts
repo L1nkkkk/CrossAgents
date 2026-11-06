@@ -39,6 +39,15 @@ import type { HubInfo } from "@bindings/HubInfo";
 import type { ListAgentsResponse } from "@bindings/ListAgentsResponse";
 import type { ListPluginsResponse } from "@bindings/ListPluginsResponse";
 import type { PluginInfo } from "@bindings/PluginInfo";
+import type { ExtensionsResponse } from "@bindings/ExtensionsResponse";
+import type { ExtensionInfo } from "@bindings/ExtensionInfo";
+import type { ExtensionCallAccepted } from "@bindings/ExtensionCallAccepted";
+import type { ExtensionCallRequest } from "@bindings/ExtensionCallRequest";
+import type { ExtensionCallResponse } from "@bindings/ExtensionCallResponse";
+import type { ExtensionDiffResponse } from "@bindings/ExtensionDiffResponse";
+import type { ExtensionLogsResponse } from "@bindings/ExtensionLogsResponse";
+import type { EnableExtensionRequest } from "@bindings/EnableExtensionRequest";
+import type { SetExtensionAutoTrustRequest } from "@bindings/SetExtensionAutoTrustRequest";
 import type { ListRunsResponse } from "@bindings/ListRunsResponse";
 import type { ListHistoryResponse } from "@bindings/ListHistoryResponse";
 import type { ListProjectsResponse } from "@bindings/ListProjectsResponse";
@@ -51,6 +60,7 @@ import type { RunDetail } from "@bindings/RunDetail";
 import type { RunTrace } from "@bindings/RunTrace";
 import type { SendMessageRequest } from "@bindings/SendMessageRequest";
 import type { SendMessageResponse } from "@bindings/SendMessageResponse";
+import type { QueuedReason } from "@bindings/QueuedReason";
 import type { Transcript } from "@bindings/Transcript";
 import type { TurnDiffResponse } from "@bindings/TurnDiffResponse";
 import type { UpdateRunPolicyRequest } from "@bindings/UpdateRunPolicyRequest";
@@ -65,6 +75,8 @@ import type { UsageSeriesRange } from "@bindings/UsageSeriesRange";
 import type { UsageSeriesResponse } from "@bindings/UsageSeriesResponse";
 import type { FileTreeResponse } from "@bindings/FileTreeResponse";
 import type { FileContentResponse } from "@bindings/FileContentResponse";
+import type { FileStatusResponse } from "@bindings/FileStatusResponse";
+import type { FileSearchResponse } from "@bindings/FileSearchResponse";
 import type { CreateTerminalRequest } from "@bindings/CreateTerminalRequest";
 import type { ListTerminalsResponse } from "@bindings/ListTerminalsResponse";
 import type { TerminalInfo } from "@bindings/TerminalInfo";
@@ -108,31 +120,58 @@ export function scopeKey(scope: FileScope): string {
 export const getBridge = () => (typeof window !== "undefined" ? window.crossagents : undefined);
 
 export class ApiError extends Error {
-  /** HTTP status; 0 when the hub could not be reached. */
+  /** HTTP status; 0 when the hub could not be reached, or the request's fate is unknown. */
   status: number;
   code: string;
+  /** Why a message was refused, when the error is about delivering one. */
+  reason?: QueuedReason;
   /** The files in the way, when the conflict is about a directory's changes (deleting a run
    * whose checkout has uncommitted work). */
   files: string[];
-  constructor(status: number, code: string, message: string, files: string[] = []) {
+  constructor(status: number, code: string, message: string, files: string[] = [], reason?: QueuedReason) {
     super(message);
     this.status = status;
     this.code = code;
     this.files = files;
+    this.reason = reason;
   }
 }
 
 type Method = "GET" | "POST" | "DELETE";
 
+/** A transport failure the main process answered with: `status` 0 and an API error body. */
+const TRANSPORT_STATUS = 0;
+
+function errorFromBody(status: number, body: string): ApiError {
+  let parsed: ApiErrorJson | undefined;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    // Not an API error body.
+  }
+  return new ApiError(
+    status,
+    parsed?.error.code ?? (status === TRANSPORT_STATUS ? "unreachable" : "http"),
+    parsed?.error.message ?? (body || `HTTP ${status}`),
+    parsed?.error.files ?? [],
+    parsed?.error.reason,
+  );
+}
+
 async function send(method: Method, path: string, body?: unknown): Promise<{ status: number; body: string }> {
   const json = body === undefined ? null : JSON.stringify(body);
   const bridge = getBridge();
   if (bridge) {
+    let reply: { status: number; body: string };
     try {
-      return await bridge.request(method, path, json);
+      reply = await bridge.request(method, path, json);
     } catch (err) {
       throw new ApiError(0, "unreachable", err instanceof Error ? err.message : String(err));
     }
+    // The main process reports a request that got no hub answer this way: it knows whether the
+    // request may already have arrived (electron/main.cts).
+    if (reply.status === TRANSPORT_STATUS) throw errorFromBody(reply.status, reply.body);
+    return reply;
   }
   let response: Response;
   try {
@@ -157,25 +196,21 @@ export function refuseRequests(reason: string | undefined) {
 async function request<T>(method: Method, path: string, body?: unknown, opts: { text?: boolean } = {}): Promise<T> {
   if (refusal && path !== "/v1/info") throw new ApiError(0, "version_mismatch", refusal);
   const response = await send(method, path, body);
-  if (response.status >= 400) {
-    let parsed: ApiErrorJson | undefined;
-    try {
-      parsed = JSON.parse(response.body);
-    } catch {
-      // Not an API error body.
-    }
-    throw new ApiError(
-      response.status,
-      parsed?.error.code ?? "http",
-      parsed?.error.message ?? (response.body || `HTTP ${response.status}`),
-      parsed?.error.files ?? [],
-    );
-  }
+  if (response.status >= 400) throw errorFromBody(response.status, response.body);
   if (opts.text) return response.body as T;
   return (response.body ? JSON.parse(response.body) : undefined) as T;
 }
 
 const enc = encodeURIComponent;
+
+/**
+ * Any allowed hub route, for an extension's `ca.hub.request` (docs/EXTENSIONS.md §5). The
+ * bridge's ALLOWED table (electron/allowed.cts) still decides what a page may reach, and the
+ * hub still checks the token's level.
+ */
+export function hubRequest<T = unknown>(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<T> {
+  return request<T>(method, path, body);
+}
 
 function expertiseQuery(owner_kind: OwnerKind, owner_id: string): string {
   return `owner_kind=${owner_kind}&owner_id=${enc(owner_id)}`;
@@ -227,6 +262,31 @@ function filesResolve(scope: FileScope, paths: string[]): Promise<ResolvePathsRe
   }
 }
 
+/** The working copy's uncommitted changes; `git: false` outside a repository. */
+function filesStatus(scope: FileScope): Promise<FileStatusResponse> {
+  switch (scope.kind) {
+    case "agent":
+      return request<FileStatusResponse>("GET", `/v1/agents/${enc(scope.agent)}/files/status`);
+    case "run":
+      return request<FileStatusResponse>("GET", `/v1/runs/${enc(scope.run)}/files/status`);
+    case "task":
+      return request<FileStatusResponse>("GET", `/v1/runs/${enc(scope.run)}/tasks/${enc(scope.task)}/files/status`);
+  }
+}
+
+/** Files across the whole workspace whose path contains `q` (at most 200). */
+function filesSearch(scope: FileScope, q: string, all = false): Promise<FileSearchResponse> {
+  const query = `q=${enc(q)}${all ? "&all=true" : ""}`;
+  switch (scope.kind) {
+    case "agent":
+      return request<FileSearchResponse>("GET", `/v1/agents/${enc(scope.agent)}/files/search?${query}`);
+    case "run":
+      return request<FileSearchResponse>("GET", `/v1/runs/${enc(scope.run)}/files/search?${query}`);
+    case "task":
+      return request<FileSearchResponse>("GET", `/v1/runs/${enc(scope.run)}/tasks/${enc(scope.task)}/files/search?${query}`);
+  }
+}
+
 export const api = {
   info: () => request<HubInfo>("GET", "/v1/info"),
 
@@ -247,6 +307,10 @@ export const api = {
     request<SendMessageResponse>("POST", `/v1/agents/${enc(key)}/messages`, req),
   withdrawMessage: (key: string, messageId: string) =>
     request<void>("DELETE", `/v1/agents/${enc(key)}/messages/${enc(messageId)}`),
+  /** Moves a waiting message to the front and interrupts the running turn: same id, no new
+   * message (docs/tasks/DELIVERY-AUDIT.md §2, §8 P1-5). */
+  sendMessageNow: (key: string, messageId: string) =>
+    request<SendMessageResponse>("POST", `/v1/agents/${enc(key)}/messages/${enc(messageId)}/send-now`),
   cancelAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/cancel`),
   compactAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/compact`),
   /** The slash commands and skills the agent's own CLI brings; `known` is false until it
@@ -288,6 +352,27 @@ export const api = {
   installPlugin: (name: string) => request<CliInstallAccepted>("POST", `/v1/plugins/${enc(name)}/install`),
   /** The same for its upgrade command. */
   upgradePlugin: (name: string) => request<CliInstallAccepted>("POST", `/v1/plugins/${enc(name)}/upgrade`),
+
+  /** Every extension the hub knows, enabled or not; `current` is the snapshot it runs. */
+  listExtensions: () => request<ExtensionsResponse>("GET", "/v1/extensions"),
+  /** Approves one exact snapshot (`admin`); a stale fingerprint is refused by the hub. */
+  enableExtension: (name: string, fingerprint: string) =>
+    request<ExtensionInfo>("POST", `/v1/extensions/${enc(name)}/enable`, { fingerprint } satisfies EnableExtensionRequest),
+  disableExtension: (name: string) => request<ExtensionInfo>("POST", `/v1/extensions/${enc(name)}/disable`),
+  /** Turns this one extension's auto-trust on or off (`admin`, person only). */
+  setExtensionAutoTrust: (name: string, auto_trust: boolean) =>
+    request<ExtensionInfo>("POST", `/v1/extensions/${enc(name)}/auto-trust`, { auto_trust } satisfies SetExtensionAutoTrustRequest),
+  /** The snapshot waiting for approval against the running one; 404 when nothing is pending. */
+  extensionDiff: (name: string) => request<ExtensionDiffResponse>("GET", `/v1/extensions/${enc(name)}/pending/diff`),
+  /** The current log's last 64 KiB (the extension's tool calls and stderr); empty before the first call. */
+  extensionLogs: (name: string) => request<ExtensionLogsResponse>("GET", `/v1/extensions/${enc(name)}/logs`),
+  /** Starts a call; 202 comes back at once (it may run for ten minutes), the result later. */
+  extensionCall: (name: string, tool: string, req: ExtensionCallRequest) =>
+    request<ExtensionCallAccepted>("POST", `/v1/extensions/${enc(name)}/tools/${enc(tool)}`, req),
+  /** A call's state and result; the hub keeps it for ten minutes after it ends. */
+  extensionCallResult: (id: string) => request<ExtensionCallResponse>("GET", `/v1/extensions/calls/${enc(id)}`),
+  /** Asks the hub to stop a running call; answers with `status: cancelled`. */
+  cancelExtensionCall: (id: string) => request<ExtensionCallResponse>("DELETE", `/v1/extensions/calls/${enc(id)}`),
 
   listRuns: () => request<ListRunsResponse>("GET", "/v1/runs"),
   /** What runs left in a workspace, including the ones since deleted; every workspace's
@@ -391,6 +476,10 @@ export const api = {
   /** A file's text (up to 1 MiB), or `binary` without it. */
   filesContent,
   filesResolve,
+  /** Uncommitted changes in the scope's working copy, for the tree's M marks and dots. */
+  filesStatus,
+  /** Filename search across the whole workspace, not only the loaded folders. */
+  filesSearch,
   /** An image a tool call named by path (a `ViewImage` tool's `image_path`, say), base64:
    * show it as `data:${mime};base64,${data}`, as an attachment is shown. The hub serves only
    * png, jpg, jpeg, gif, webp, bmp and svg, at most 10 MB, inside the agent's working

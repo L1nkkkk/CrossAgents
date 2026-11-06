@@ -1,0 +1,7 @@
+name = "debug"
+api = 1
+description = "当前会话的原始事件流"
+access = "read"
+
+[gui]
+entry = "gui/index.js"

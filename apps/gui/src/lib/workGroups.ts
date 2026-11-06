@@ -28,17 +28,40 @@ export type Block =
 export const ACTION_TOOLS = ["agent_spawn", "agent_retire", "agent_set_model", "task_accept", "task_drop", "run_land", "run_finish", "plan_submit"] as const;
 export type ActionTool = (typeof ACTION_TOOLS)[number];
 
+/** How the hub's tools reach a transcript: dotted by us, prefixed by an MCP client. */
+const MCP_PREFIX = "mcp__crossagents__";
+const DOT_PREFIX = "crossagents.";
+
 /** "crossagents.agent_spawn" or "mcp__crossagents__agent_spawn" → "agent_spawn"; other tools → undefined. */
 export function actionOf(item: TranscriptItem): ActionTool | undefined {
-  if (item.type !== "tool_call" || !/crossagents/i.test(item.title)) return undefined;
-  const name = item.title.split(/\.|__/).pop() ?? "";
-  return (ACTION_TOOLS as readonly string[]).includes(name) ? (name as ActionTool) : undefined;
+  if (item.type !== "tool_call") return undefined;
+  const name = builtinToolName(item.title);
+  return name && (ACTION_TOOLS as readonly string[]).includes(name) ? (name as ActionTool) : undefined;
+}
+
+/**
+ * The built-in hub tool a title names. Undefined for another vendor's tool, and for every
+ * extension tool: `mcp__crossagents__standup__run_land` is `standup__run_land`, whose last
+ * segment happens to be an action name but is not one of the hub's.
+ */
+export function builtinToolName(title: string): string | undefined {
+  const name = title.startsWith(MCP_PREFIX)
+    ? title.slice(MCP_PREFIX.length)
+    : title.startsWith(DOT_PREFIX)
+      ? title.slice(DOT_PREFIX.length)
+      : undefined;
+  if (!name || name.includes("__")) return undefined;
+  return name;
 }
 
 export const isStep = (item: TranscriptItem): item is Step =>
   (item.type === "tool_call" && !actionOf(item)) || item.type === "permission" || (item.type === "output" && item.stream === "thought");
 
-export function workGroups(items: TranscriptItem[]): Block[] {
+/**
+ * Groups a turn's items. `isOwnItem` marks a tool call an extension draws with its own card:
+ * it closes the run before it and stands alone, like an action card.
+ */
+export function workGroups(items: TranscriptItem[], isOwnItem: (item: TranscriptItem) => boolean = () => false): Block[] {
   const blocks: Block[] = [];
   let run: Step[] = [];
   const flush = (closed: boolean) => {
@@ -46,7 +69,10 @@ export function workGroups(items: TranscriptItem[]): Block[] {
     run = [];
   };
   for (const item of items) {
-    if (isStep(item)) {
+    if (isOwnItem(item)) {
+      flush(true);
+      blocks.push({ kind: "item", item });
+    } else if (isStep(item)) {
       run.push(item);
     } else {
       flush(true);
@@ -111,7 +137,7 @@ export function liveActivity(items: TranscriptItem[]): string {
   const last = items[items.length - 1];
   if (!last) return "思考中";
   if (last.type === "output") return last.stream === "thought" ? "推理中" : "回复中";
-  if (last.type === "error" || last.type === "warning" || last.type === "permission") return "工作中";
+  if (last.type === "error" || last.type === "warning" || last.type === "permission" || last.type === "steer") return "工作中";
   if (last.status === "completed" || last.status === "failed") return "工作中";
   switch (category(last)) {
     case "command":
@@ -217,18 +243,25 @@ export function liveNow(items: TranscriptItem[], cwd?: string, maxLines = 3): Li
   return lines.length ? { title, output: { lines, hidden: tail.hidden } } : { title };
 }
 
-/** `text` with the working directory left out of the paths in it: `C:\w\src\a.rs` → `src\a.rs`,
- * and the directory itself as `.`. */
+/** `text` with the working directory left out of the paths in it: `C:\w\src\a.rs` → `src/a.rs`,
+ * and the directory itself as `.`. Only the path's own separators become `/`: a command's
+ * backslashes (outside the matched path) are left as they are. */
 export function relativeTo(text: string, cwd?: string): string {
   const dir = cwd?.replace(/[\\/]+$/, "");
   if (!dir) return text;
-  // Either slash, any case on Windows paths; then a separator, or the end of the path.
+  // Either slash, any case on Windows paths; then a separator, or the end of the path. What
+  // follows the separator is the rest of the path, up to a space, a quote or the end.
   const pattern = dir
     .split(/[\\/]/)
     .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
     .join("[\\\\/]");
   const flags = /^[a-z]:/i.test(dir) ? "gi" : "g";
-  return text.replace(new RegExp(`${pattern}(?:[\\\\/]|(?=["'\\s]|$))`, flags), (m) => (/[\\/]$/.test(m) ? "" : "."));
+  // A shell separator ends it too, so a second path in the same word is shortened as well.
+  const path = "(?:[\\\\/]([^\\s\"',;|&<>]*)|(?=[\"',;|&<>\\s]|$))";
+  return text.replace(new RegExp(`${pattern}${path}`, flags), (_m, rest?: string) => {
+    const tail = (rest ?? "").replace(/[\\/]+$/, "");
+    return tail ? tail.replace(/\\/g, "/") : ".";
+  });
 }
 
 /** A tool step as one short line: `$ cmd`, `✎ file`, else its title; paths inside `cwd` are shortened. */

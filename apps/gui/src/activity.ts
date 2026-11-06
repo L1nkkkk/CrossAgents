@@ -15,8 +15,10 @@
 
 import { useSyncExternalStore } from "react";
 import type { AgentExit } from "@bindings/AgentExit";
+import type { DeliveryStatus } from "@bindings/DeliveryStatus";
 import type { TranscriptItem } from "@bindings/TranscriptItem";
 import { onHubEvent } from "./hub";
+import { turnNeedsAttention } from "./lib/delivery";
 import { stepLine } from "./lib/workGroups";
 import { addSample, type RateSample } from "./lib/tokenRate";
 
@@ -51,6 +53,11 @@ const rates = new Map<string, RateSample[]>();
 const errors = new Map<string, string>();
 /** How its process ended, while that is its latest error (`agent.exited`). */
 const exits = new Map<string, AgentExit & { message: string }>();
+/**
+ * What each session does with messages now, as the hub says it (`agent.delivery_changed` and
+ * each transcript): the only source of "忙" outside the conversation itself (P1-4).
+ */
+const deliveries = new Map<string, DeliveryStatus>();
 const fromHuman = new Set<string>(); // message ids of messages a person sent
 let unread: Record<string, Unread> = load();
 let viewing: string[] = [];
@@ -75,6 +82,36 @@ function save() {
 function changed() {
   listeners.forEach((l) => l());
 }
+
+/** Keeps the hub's delivery state for `id`; the transcript and `agent.delivery_changed` both call it. */
+export function noteDelivery(id: string, delivery: DeliveryStatus) {
+  const had = deliveries.get(id);
+  if (had && had.state === delivery.state && had.queued === delivery.queued) return;
+  deliveries.set(id, delivery);
+  changed();
+}
+
+/** A session's delivery state, or undefined before the hub has said anything about it. */
+export function deliveryOf(id: string): DeliveryStatus | undefined {
+  return deliveries.get(id);
+}
+
+/** The hub's delivery state for a session, live (docs/tasks/DELIVERY-AUDIT.md §8 P1-4). */
+export function useDelivery(id: string): DeliveryStatus | undefined {
+  return useSyncExternalStore(
+    (l) => {
+      listeners.add(l);
+      return () => listeners.delete(l);
+    },
+    () => deliveries.get(id),
+  );
+}
+
+/**
+ * Whether a finished turn needs the person: it failed, or the hub lost it. A cancel was the
+ * person's own doing and stays quiet (docs/tasks/DELIVERY-AUDIT.md §5, §8 P2-7). The decision
+ * is in lib/delivery.ts, pure and tested.
+ */
 
 function firstLine(text: string): string {
   const line = text.trim().split("\n").find((l) => l.trim()) ?? "";
@@ -109,13 +146,15 @@ function patchCall(id: string, ts: number, toolCallId: string, change: (call: Ca
 }
 
 /** Starts following the event stream; idempotent. */
-export function startActivity() {
-  if (started) return;
+export function startActivity() {  if (started) return;
   started = true;
   onHubEvent((e) => {
     switch (e.type) {
       case "agent.input":
         if (!e.data.from || e.data.from.kind === "human") fromHuman.add(e.data.message_id);
+        return;
+      case "agent.delivery_changed":
+        noteDelivery(e.data.id, e.data.delivery);
         return;
       case "agent.tool_call":
         activity.set(e.data.id, stepLine({ type: "tool_call", ...e.data }));
@@ -187,10 +226,10 @@ export function startActivity() {
         if (p && !p.over) pulses.set(id, { ...p, over: true });
         rates.delete(id);
         const mine = fromHuman.delete(message_id);
-        // An interrupted turn needs someone to decide whether to run it again.
-        const bad = stop_reason === "error" || stop_reason === "interrupted";
-        if (viewing.includes(id) || (!mine && !bad)) return changed();
-        unread = { ...unread, [id]: { kind: bad ? "error" : "done", at: e.ts } };
+        // An interrupted (or failed) turn needs someone to decide whether to run it again. A
+        // turn the person cancelled does not: they asked for it (§5).
+        if (viewing.includes(id) || (!mine && !turnNeedsAttention(stop_reason))) return changed();
+        unread = { ...unread, [id]: { kind: turnNeedsAttention(stop_reason) ? "error" : "done", at: e.ts } };
         save();
         return changed();
       }
@@ -207,6 +246,7 @@ export function startActivity() {
         activity.delete(e.data.id);
         pulses.delete(e.data.id);
         rates.delete(e.data.id);
+        deliveries.delete(e.data.id);
         if (unread[e.data.id]) markSeen(e.data.id);
         return;
     }

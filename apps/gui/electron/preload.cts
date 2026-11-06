@@ -15,6 +15,11 @@ function subscribe(channel: string, listener: (value: string) => void): () => vo
 }
 
 const bridge: CrossAgentsBridge = {
+  extensions: {
+    safeMode: () => ipcRenderer.invoke("extensions:safe-mode"),
+    loading: () => ipcRenderer.invoke("extensions:loading"),
+    ready: () => ipcRenderer.invoke("extensions:ready"),
+  },
   async request(method, path, body) {
     const reply: Reply = await ipcRenderer.invoke("hub:request", method, path, body);
     if (!reply.ok) throw new Error(reply.error);

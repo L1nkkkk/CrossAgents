@@ -1,9 +1,13 @@
 // A small workspace for the file viewer in `preview:mock`: a few sources in several languages,
 // a binary file, a file too big to show whole, and ignored directories listed only with `all`.
-// MockBridge answers `files/tree`, `files/content` and `files/resolve` from it.
+// MockBridge answers `files/tree`, `files/content`, `files/status`, `files/search` and
+// `files/resolve` from it.
 
 import type { FileContentResponse } from "@bindings/FileContentResponse";
 import type { FileEntry } from "@bindings/FileEntry";
+import type { FileSearchResponse } from "@bindings/FileSearchResponse";
+import type { FileStatusEntry } from "@bindings/FileStatusEntry";
+import type { FileStatusResponse } from "@bindings/FileStatusResponse";
 import type { FileTreeResponse } from "@bindings/FileTreeResponse";
 import type { ResolvedPath } from "@bindings/ResolvedPath";
 
@@ -89,6 +93,37 @@ notes --json | jq .title
 更多见 [设计文档](DESIGN.md)。
 `;
 
+const RELEASE_MD = `# 0.3.1 发布说明
+
+这次发布把同步做稳了，也补上了几个一直缺的小选项。
+
+## 本次改动
+
+### 新的同步命令
+
+\`notes sync\` 会把本地笔记推到远端，并在冲突时先写一份副本。
+
+- 默认只同步当前目录；
+- \`--all\` 同步全部笔记；
+- 失败时保留 \`*.conflict.md\`。
+
+### 这是一个很长很长的小节标题，用来确认大纲里的文字不会把面板撑开
+
+长标题在短横线旁只占一行，放不下就省略。
+
+### 更快的启动
+
+索引改成按需读取，第一次打开大目录不再卡住。
+
+## 升级
+
+直接覆盖旧的二进制即可，配置文件不需要改。
+
+## 已知问题
+
+Windows 上仍有一个关于长路径的已知问题，预计下个版本修复。
+`;
+
 const CARGO_TOML = `[package]
 name = "notes"
 version = "0.3.1"
@@ -154,6 +189,7 @@ const FILES: Record<string, MockFile> = {
   "apps/web/src/index.ts": { text: INDEX_TS },
   "docs/cli.md": { text: CLI_MD },
   "docs/DESIGN.md": { text: "# 设计\n\n笔记就是目录里的 `.md` 文件，没有数据库。\n" },
+  "docs/RELEASE.md": { text: RELEASE_MD },
   "scripts/build.py": { text: BUILD_PY },
   "assets/logo.png": { binary: 18_342 },
   "logs/sync.log": { big: BIG },
@@ -220,4 +256,27 @@ export function mockResolve(paths: string[]): ResolvedPath[] {
     if (isDir(p)) return { input, path: p, abs_path: `${FILES_ROOT}/${p}`, kind: "dir" };
     return { input };
   });
+}
+
+/** The preview workspace's uncommitted changes, so the tree shows marks and folder dots. */
+const CHANGES: FileStatusEntry[] = [
+  { path: "crates/cli/src/main.rs", change: "modified" },
+  { path: "apps/web/src/index.ts", change: "modified" },
+  { path: "docs/cli.md", change: "modified" },
+  { path: "docs/RELEASE.md", change: "added" },
+];
+
+export function mockStatus(): FileStatusResponse {
+  return { root: FILES_ROOT, git: true, entries: CHANGES };
+}
+
+/** The same name search as the hub's: every file in the workspace, below `all` too. */
+export function mockSearch(query: string, all: boolean): FileSearchResponse {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return { root: FILES_ROOT, paths: [], truncated: false };
+  const paths = Object.keys(FILES)
+    .filter((path) => !IGNORED.test(path) || all)
+    .filter((path) => path.toLowerCase().includes(needle))
+    .sort();
+  return { root: FILES_ROOT, paths: paths.slice(0, 200), truncated: paths.length > 200 };
 }

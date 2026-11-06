@@ -1,0 +1,33 @@
+/* A message inserted into the running turn (views/SessionSteer.tsx): dashed and pale while the
+   model has not read it, an ordinary bubble of yours after. Kept apart from styles.css, which
+   this task does not touch. */
+
+.steer-inserted {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+/* A .bubble, but inserted rather than spoken: dashed edge, no fill, quieter text. */
+.bubble.steer-waiting {
+  border: 1px dashed var(--border-strong);
+  background: transparent;
+  color: var(--text-2);
+}
+
+.steer-note {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* The turn ended and the model never read it: not waiting any more. */
+.steer-note.steer-lost {
+  color: var(--warn-text);
+}
+
+/* Files under a steer bubble, on the same edge as it. */
+.steer-files {
+  justify-content: flex-end;
+  margin-top: 6px;
+}

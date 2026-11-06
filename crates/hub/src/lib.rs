@@ -11,6 +11,7 @@ pub mod avatars;
 pub mod budget;
 pub mod collab;
 pub mod event_log;
+pub mod extensions;
 pub mod guard;
 pub mod identity;
 pub mod image;
@@ -20,6 +21,7 @@ pub mod notices;
 pub mod paths;
 pub mod prices;
 pub mod refresh;
+pub mod replies;
 pub mod resume;
 pub mod routing;
 pub mod rules;
@@ -27,6 +29,7 @@ pub mod runtime;
 pub mod shadow;
 pub mod shims;
 pub mod snapshot;
+pub mod stream_rules;
 pub mod terminal;
 pub mod trace;
 pub mod transcript;
@@ -67,6 +70,14 @@ pub struct RunningHub {
     pub bus: Arc<EventBus>,
     pub runtime: Arc<Runtime>,
     pub orchestrator: Arc<Orchestrator>,
+    /// Extension discovery and approval.
+    pub extensions: Arc<extensions::Registry>,
+    /// Runs extension tools.
+    pub extension_runner: Arc<extensions::Runner>,
+    /// Event hooks (`[[on]]`) running beside the hub.
+    pub extension_hooks: Arc<extensions::Hooks>,
+    /// The agents' session tokens (`/v1/me`).
+    pub agent_tokens: Arc<AgentTokens>,
     shutdown: CancellationToken,
     task: JoinHandle<Result<()>>,
 }
@@ -161,6 +172,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     }
     let runtime = Arc::new(Runtime::new(bus.clone(), plugins).with_setup(setup.clone()));
     runtime.watch_moves();
+    runtime.watch_replies();
     // Each CLI is asked its version in the background, in parallel: `GET /v1/plugins`
     // reports it once it answers and never waits for a subprocess (docs/DESIGN.md §9.3).
     // Asking again later (an install, `POST /v1/plugins/refresh`) goes through `Refresher`,
@@ -212,6 +224,15 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     }
     .save(&paths);
 
+    // Extensions come before the orchestrator starts sessions, so a new session's
+    // instructions already carry the enabled extensions' prompts.
+    let extensions = Arc::new(extensions::Registry::load_with_bus(
+        paths.home.clone(),
+        Some(bus.clone()),
+    )?);
+    let extension_runner =
+        extensions::Runner::new(extensions.clone(), Some(bus.clone()), paths.home.clone());
+    extension_runner.set_url(format!("http://{addr}"));
     let orchestrator = Orchestrator::new(
         store.clone() as Arc<dyn Store>,
         bus.clone(),
@@ -237,6 +258,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
             build_cache_limit: config.build_cache_limit,
         },
     );
+    orchestrator.set_extensions(extension_runner.clone());
     let _ = setup.orchestrator.set(orchestrator.clone());
     orchestrator.watch();
     orchestrator.prune_build_cache();
@@ -317,7 +339,22 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     .start(shutdown.clone());
     let terminals = terminal::Terminals::new(config.terminal_shell.clone(), config.terminal_idle);
     terminals.start_reclaiming(shutdown.clone());
+    let extension_poll = extensions.start(shutdown.clone());
+    // Event hooks and resident services run beside the hub and end with it
+    // (docs/EXTENSIONS.md §3). A service starts here, for what the enabled snapshots declare.
+    let extension_hooks = extensions::Hooks::new(
+        extension_runner.clone(),
+        extensions.clone(),
+        Some(bus.clone()),
+    );
+    let extension_services =
+        extensions::Services::new(extension_runner.clone(), extensions.clone());
+    let hooks_task = extension_hooks.start(shutdown.clone());
+    let services_task = extension_services.start(shutdown.clone());
+    let agent_tokens = tokens.clone();
     let state = Arc::new(api::AppState {
+        extensions: extensions.clone(),
+        runner: extension_runner.clone(),
         bus: bus.clone(),
         runtime: runtime.clone(),
         orchestrator: orchestrator.clone(),
@@ -347,6 +384,17 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         let bus = bus.clone();
         let runtime = runtime.clone();
         let stop_agents = stop_agents.clone();
+        let stopping_runner = extension_runner.clone();
+        let stopping_hooks = extension_hooks.clone();
+        // Tool calls end the moment the hub is told to stop, not after the HTTP server has
+        // drained: a request waiting for a tool's result would hold the drain up.
+        tokio::spawn({
+            let (shutdown, runner) = (shutdown.clone(), extension_runner.clone());
+            async move {
+                shutdown.cancelled().await;
+                runner.shutdown().await;
+            }
+        });
         async move {
             let served = axum::serve(listener, api::router(state))
                 .with_graceful_shutdown(shutdown.clone().cancelled_owned())
@@ -354,6 +402,15 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
             // Make sure SSE streams end even if serve failed.
             shutdown.cancel();
             let _ = account_start.await;
+            let _ = extension_poll.await;
+            // Hooks and services end before the runner closes its door, so their processes
+            // are gone with the hub and none of them is restarted.
+            let _ = hooks_task.await;
+            // The listener has cancelled the hooks' token; wait for their trees to be gone.
+            stopping_hooks.shutdown().await;
+            let _ = services_task.await;
+            // Running tool calls end with the hub; their results are lost (docs/EXTENSIONS.md §3).
+            stopping_runner.shutdown().await;
             terminals.stop_all();
             if stop_agents.load(Ordering::SeqCst) {
                 runtime.stop_all().await;
@@ -381,6 +438,10 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
         bus,
         runtime,
         orchestrator,
+        extensions,
+        extension_runner,
+        extension_hooks,
+        agent_tokens,
         shutdown,
         task,
     })

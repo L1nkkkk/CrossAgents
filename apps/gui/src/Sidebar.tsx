@@ -3,7 +3,7 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyn
 import type { Agent } from "@bindings/Agent";
 import type { HubInfo } from "@bindings/HubInfo";
 import type { RunDetail } from "@bindings/RunDetail";
-import { lastError, useActivity, useUnread } from "./activity";
+import { deliveryOf, lastError, useActivity, useDelivery, useUnread } from "./activity";
 import { api, errorText } from "./api";
 import type { DevHub } from "./bridge";
 import { buildTag, compareBuilds } from "./lib/build";
@@ -21,6 +21,7 @@ import { useQuestions } from "./questions";
 import { startNew } from "./menubar";
 import { level, tightest, windowLabel } from "./lib/quota";
 import { openBeside } from "./panes";
+import { useExtensions } from "./extensions/defaults";
 import { useQuota } from "./views/Quota";
 import { CHATS, selectWorkspace, useWorkspaces, wsHref } from "./workspace";
 
@@ -110,6 +111,8 @@ export function Sidebar({ route }: { route: string[] }) {
     runs,
     now: Date.now(),
   });
+  // Pages an extension registered (`ca.pages`): each is one row here, and only while it loaded.
+  const extensionPages = [...useExtensions().pages.values()];
   const groups = sidebarGroups(everyone, runs, list, pinned, [...order]);
   const shown = searchGroups(groups, query);
   const archived = everyone.filter((a) => a.archived_at);
@@ -158,8 +161,33 @@ export function Sidebar({ route }: { route: string[] }) {
               <Icon name="brain" size={16} />
               <span>{t("nav.expertise")}</span>
             </a>
+            <a className={"nav-extensions " + (route[0] === "extensions" || route[0] === "ext" ? "active" : "")} href="#/extensions">
+              <Icon name="panel" size={16} />
+              <span>扩展</span>
+            </a>
           </div>
           <div className="scroll">
+            {extensionPages.length > 0 && (
+              <section className="group ext-nav-pages">
+                <div className="group-head static">
+                  <span className="group-name">扩展页面</span>
+                </div>
+                {extensionPages.map((page) => {
+                  const active = route[0] === "ext" && route[1] === page.extension && route[2] === page.id;
+                  return (
+                    <div key={`${page.extension}/${page.id}`} className={"nav-row " + (active ? "active" : "")}>
+                      <a className="row-link" href={`#/ext/${encodeURIComponent(page.extension)}/${encodeURIComponent(page.id)}`} title={`${page.label} · 扩展 ${page.extension}`}>
+                        <span className="row-lead">
+                          <Icon name="panel" size={14} />
+                        </span>
+                        <span className="row-label">{page.label}</span>
+                      </a>
+                      <span className="row-tag">{page.extension}</span>
+                    </div>
+                  );
+                })}
+              </section>
+            )}
             <NeedsYou items={todos} agents={everyone} />
             {done > 0 && <p className="sidebar-unread">{t("sidebar.doneUnread", { n: done })}</p>}
             {!query.trim() && (pinnedMembers.length > 0 || pinnedRuns.length > 0) && (
@@ -317,7 +345,12 @@ function Group({
   const confirmed = useContext(Confirmed);
   const waits = (m: SidebarMember) => m.agent.status === "error" || needs.some((item) => item.agent === m.agent.id);
   const waiting = group.members.filter(waits);
-  const busy = group.members.filter((m) => m.agent.status === "running");
+  const busy = group.members.filter((m) => {
+    // "忙" is the hub's delivery state (P1-4); before it has said anything about this session,
+    // its process status is the only hint there is.
+    const state = deliveryOf(m.agent.id)?.state;
+    return state ? state !== "idle" : m.agent.status === "running";
+  });
   // Folded, the faces say who is inside: whoever wants attention first.
   const faces = [...waiting, ...busy, ...group.members].filter((m, i, all) => all.indexOf(m) === i).slice(0, 3);
   return (
@@ -431,7 +464,9 @@ function SessionRow({ member, active }: { member: SidebarMember; active: boolean
   const needs = waitingOn.length;
   const confirmed = useContext(Confirmed);
   const uncertain = connection !== "connected" || !confirmed || !agent.status;
-  const running = !uncertain && agent.status === "running";
+  // The hub's delivery state is the one word for "busy" (P1-4); `status` is the process's.
+  const delivery = useDelivery(agent.id);
+  const running = !uncertain && (delivery ? delivery.state === "turn" : agent.status === "running");
   const error = !uncertain && agent.status === "error";
   const status = uncertain
     ? t(connection === "connecting" ? "sidebar.connecting" : "sidebar.unknownStatus")
@@ -439,11 +474,15 @@ function SessionRow({ member, active }: { member: SidebarMember; active: boolean
       ? t("sidebar.needsAction", { n: needs })
       : error
         ? t("state.error")
-        : running
-          ? t("sidebar.working")
-          : agent.status === "stopped"
-            ? t("sidebar.stopped")
-            : t("sidebar.idle");
+        : delivery?.state === "starting"
+          ? "启动中"
+          : delivery?.state === "held"
+            ? "等它来取"
+            : running
+              ? t("sidebar.working")
+              : agent.status === "stopped"
+                ? t("sidebar.stopped")
+                : t("sidebar.idle");
   const turn = useRowLive(agent);
   const summary = summaryText(member.summary) || summaryText(agent.topic);
   const fresh = unread?.kind === "done";

@@ -6,8 +6,9 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use crossagents_api_types::{
-    Agent, ChangesResponse, CommitGraph, FileContentResponse, FileKind, FileTreeResponse,
-    GraphRefKind, ImageContent, ListAgentsResponse, ListPluginsResponse, ResolvePathsResponse, Run,
+    Agent, ChangesResponse, CommitGraph, FileContentResponse, FileKind, FileSearchResponse,
+    FileStatusResponse, FileTreeResponse, GraphRefKind, ImageContent, ListAgentsResponse,
+    ListPluginsResponse, ResolvePathsResponse, Run,
 };
 use crossagents_hub::{HubConfig, Paths, RunningHub};
 use futures::StreamExt;
@@ -767,6 +768,41 @@ async fn files_are_read_inside_a_workspace() {
     assert_eq!(paths, [Some("src/main.rs"), Some("bin.dat"), None, None]);
     assert_eq!(resolved.entries[1].kind, Some(FileKind::File));
     assert_eq!(resolved.entries[3].input, "nope.txt");
+
+    // No git repository: no status to show, and no error either.
+    let status: FileStatusResponse = t
+        .get("/v1/agents/reader/files/status")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(!status.git);
+    assert!(status.entries.is_empty());
+
+    // Name search reaches every folder, not only what a client loaded.
+    let found: FileSearchResponse = t
+        .get("/v1/agents/reader/files/search?q=MAIN")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(found.paths, ["src/main.rs"]);
+    assert!(!found.truncated);
+    assert_eq!(
+        t.get("/v1/agents/reader/files/search?q=")
+            .send()
+            .await
+            .unwrap()
+            .json::<FileSearchResponse>()
+            .await
+            .unwrap()
+            .paths,
+        Vec::<String>::new()
+    );
 
     // Out of the workspace is refused; missing is not found; a bad ref is the caller's.
     let escape = t
@@ -1584,7 +1620,11 @@ async fn the_background_board_lists_reminders_and_watches_and_cancels_a_reminder
         .json()
         .await
         .unwrap();
-    let ids: Vec<_> = board.reminders.iter().map(|r| r.reminder.id.as_str()).collect();
+    let ids: Vec<_> = board
+        .reminders
+        .iter()
+        .map(|r| r.reminder.id.as_str())
+        .collect();
     assert_eq!(ids, ["r-soon", "r-late"], "soonest first");
     assert!(board.reminders.iter().all(|r| r.owner_name == "Luna"));
     assert_eq!(board.watches.len(), 2);

@@ -52,7 +52,7 @@
 | 初始化 | `initialize` + 通知 `initialized` | `clientInfo{name,title,version}`、`capabilities{experimentalApi,requestAttestation}` | ✓ |
 | 新建线程 | `thread/start` | `model`、`cwd`、`approvalPolicy`、`sandbox`、`config`（任意 config.toml 键）、`baseInstructions`、`developerInstructions`、`ephemeral` | ✓ |
 | 发消息（开始一轮） | `turn/start` | `threadId`、`input: UserInput[]`、`model`、`effort`、`summary`、`cwd`、`approvalPolicy`、`sandboxPolicy`、`outputSchema` | ✓ |
-| 轮中插话 | `turn/steer` | `threadId`、`input`、`expectedTurnId` | 未单独测；对忙线程发 `turn/start` 的效果见 §6 |
+| 轮中插话 | `turn/steer` | `threadId`、`input`、`expectedTurnId` | ✓ 0.166.0-alpha.5.1：返回 `{turnId}`（仍是同一个轮次）；正在跑的轮次下一次模型调用读到新输入并把回答改成新内容。轮次结束后再发报 `{"code":-32600,"message":"no active turn to steer"}`，`expectedTurnId` 不对时同样被拒 |
 | 中断 | `turn/interrupt` | `threadId`、`turnId` | ✓ |
 | 恢复线程 | `thread/resume` | `threadId`（或 `path` / `history`）、同 `thread/start` 的覆盖项、`excludeTurns` | ✓ |
 | 分叉 | `thread/fork` | `threadId`、`lastTurnId`（含该轮）、覆盖项、`ephemeral` | ✓ |
@@ -145,7 +145,7 @@
    驱动应在 Profile 有模型时总是显式传；没有时沿用 Codex 默认，并把 `warning` 通知转成警告事件。M5 新建的独立账号目录没有这个问题。
 2. **分叉不继承设置**（见 §4），恢复也一样：每次 `thread/start` / `resume` / `fork` 都要传全套覆盖项。
 3. **MCP 工具在 `never` 下被拒**，必须给 crossagents 的服务器加 `default_tools_approval_mode = "approve"`。
-4. **忙线程上的 `turn/start` 不排队，而是插话。** 对正在跑的线程再发 `turn/start`，返回的是**同一个**进行中的轮次 id，新输入并入当前轮（实测长输出被改成回答 `OK`）。hub 仍须自己按会话排队，一次一轮。
+4. **忙线程上的 `turn/start` 不排队，而是插话。** 对正在跑的线程再发 `turn/start`，返回的是**同一个**进行中的轮次 id，新输入并入当前轮（实测长输出被改成回答 `OK`）。hub 仍须自己按会话排队，一次一轮；要主动插话用 `turn/steer`（带 `expectedTurnId`），它在轮次结束后会明确报错，便于 hub 降级排队。
 5. **`thread/unsubscribe` 不卸载线程**，只是本连接不再收它的事件；线程还在 `thread/loaded/list` 里，归档后才变成 `notLoaded`。真正释放靠进程退出（或空闲后服务端自行卸载，未确认）。
 6. **Windows：不要通过 `codex.cmd` 启动**，杀掉 `cmd.exe` 不会带走 `node` 和 `codex.exe`。直接起 `vendor/…/codex.exe`。
 7. **回退会生成新的 rollout 文件**，两个文件的 `session_meta.id` 相同。M5 按 rollout 文件统计用量时可能把同一线程算两次（待 M5 侧去重）。

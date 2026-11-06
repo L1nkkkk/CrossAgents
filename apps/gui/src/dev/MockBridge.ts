@@ -12,6 +12,10 @@ import type { BackgroundResponse } from "@bindings/BackgroundResponse";
 import type { CommitGraph } from "@bindings/CommitGraph";
 import type { Agent } from "@bindings/Agent";
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
+import type { ExtensionDiffResponse } from "@bindings/ExtensionDiffResponse";
+import type { ExtensionInfo } from "@bindings/ExtensionInfo";
+import type { ExtensionLogsResponse } from "@bindings/ExtensionLogsResponse";
+import type { ExtensionVersion } from "@bindings/ExtensionVersion";
 import type { HumanItem } from "@bindings/HumanItem";
 import type { LandMode } from "@bindings/LandMode";
 import type { Note } from "@bindings/Note";
@@ -22,6 +26,7 @@ import type { RunDetail } from "@bindings/RunDetail";
 import type { RunHistory } from "@bindings/RunHistory";
 import type { RunTrace } from "@bindings/RunTrace";
 import type { SendMessageRequest } from "@bindings/SendMessageRequest";
+import type { QueuedReason } from "@bindings/QueuedReason";
 import type { SessionCandidate } from "@bindings/SessionCandidate";
 import type { StartChatRequest } from "@bindings/StartChatRequest";
 import type { TaskReviewRequest } from "@bindings/TaskReviewRequest";
@@ -47,7 +52,7 @@ import {
 import { effortOf } from "../lib/models";
 import { applyEvent } from "../session";
 import { capabilitiesOf, contextParts, driverOf, transcript, uid } from "./fixtures";
-import { mockContent, mockResolve, mockTree } from "./files.mock";
+import { mockContent, mockResolve, mockSearch, mockStatus, mockTree } from "./files.mock";
 
 /** Names the mock hub makes up, like the real one (see crates/core/src/names.rs). */
 const MOCK_NAMES = ["Nova", "Iris", "Atlas", "Orion", "Vega", "Lyra", "Mira", "Sage"];
@@ -103,6 +108,14 @@ export type MockState = {
   codeLost?: Record<string, { branch: string; base: string; landed?: { mode: LandMode; reference: string } }>;
   /** Expertise profiles (docs EXPERTISE.md): entries of every owner, candidates, usages. */
   expertise?: ExpertiseMock;
+  /** Extensions (`GET /v1/extensions`); absent: none. */
+  extensions?: ExtensionInfo[];
+  /** What each waiting version changes, by extension name (`GET …/pending/diff`). */
+  extensionDiffs?: Record<string, ExtensionDiffResponse>;
+  /** What each extension's last call left in its log (`GET …/logs`). */
+  extensionLogs?: Record<string, ExtensionLogsResponse>;
+  /** What the shell would answer about safe mode; absent: not in safe mode. */
+  safeMode?: { enabled: boolean; reason: string | null };
 };
 
 export type ExpertiseMock = { entries: ExpertiseEntry[]; candidates: Candidate[]; usages: UsageRecord[] };
@@ -155,8 +168,8 @@ const LATENCY = 40;
 const STARTUP = 2_500;
 const json = (status: number, body?: unknown): HubResponse => ({ status, body: body === undefined ? "" : JSON.stringify(body) });
 const notFound = (what: string) => json(404, { error: { code: "not_found", message: `${what} not found` } });
-/** `{scope}/files/{tree|content|resolve}`; every scope answers from the same mock workspace. */
-const FILES_ROUTE = /^\/v1\/(?:agents\/[^/]+|runs\/[^/]+(?:\/tasks\/[^/]+)?)\/files\/(tree|content|resolve)$/;
+/** `{scope}/files/{tree|content|status|search|resolve}`; every scope answers from the same mock workspace. */
+const FILES_ROUTE = /^\/v1\/(?:agents\/[^/]+|runs\/[^/]+(?:\/tasks\/[^/]+)?)\/files\/(tree|content|status|search|resolve)$/;
 
 /** Text as a frame's base64. */
 const encode = (text: string) => btoa(String.fromCharCode(...new TextEncoder().encode(text)));
@@ -219,6 +232,13 @@ export class MockBridge implements CrossAgentsBridge {
         this.updateListeners.delete(listener);
       };
     },
+  };
+
+  /** The shell's extension IPC (electron/preload.cts); safe mode is the scenario's word. */
+  extensions = {
+    safeMode: async () => this.state.safeMode ?? { enabled: false, reason: null },
+    loading: async () => {},
+    ready: async () => {},
   };
 
   startEvents() {
@@ -366,6 +386,76 @@ export class MockBridge implements CrossAgentsBridge {
     }
   }
 
+  // ---- Extensions: the list, approval, auto-trust and the log ---------------------------
+
+  /** Like the registry (crates/hub/src/extensions/registry.rs): a switch changes what runs. */
+  private switchTo(info: ExtensionInfo, version: ExtensionVersion) {
+    info.previous_fingerprint = info.current?.fingerprint;
+    info.current = version;
+    info.pending = undefined;
+    info.enabled = true;
+  }
+
+  /** Undefined: not an extension route. */
+  private extensionRoute(method: string, p: string, body: unknown): HubResponse | undefined {
+    const list = this.state.extensions ?? [];
+    if (p === "/v1/extensions") return method === "GET" ? json(200, { extensions: list }) : undefined;
+    const found = (name: string) => list.find((x) => x.name === name);
+    let m = /^\/v1\/extensions\/([^/]+)\/(logs|enable|disable|auto-trust)$/.exec(p);
+    if (m) {
+      const name = decodeURIComponent(m[1]);
+      const action = m[2];
+      const info = found(name);
+      if (!info) return notFound(`extension ${name}`);
+      if (action === "logs") return method === "GET" ? json(200, this.state.extensionLogs?.[name] ?? { name, content: "", truncated: false }) : undefined;
+      if (method !== "POST") return undefined;
+      if (action === "disable") {
+        info.enabled = false;
+        this.emit({ type: "extension.changed", data: { name } });
+        return json(200, info);
+      }
+      if (action === "auto-trust") {
+        const value = !!(body as { auto_trust?: boolean } | null)?.auto_trust;
+        info.auto_trust = value;
+        // Turning it on accepts what is waiting, and that also enables the extension.
+        if (value && info.pending) this.switchTo(info, info.pending.version);
+        this.emit({ type: "extension.changed", data: { name } });
+        return json(200, info);
+      }
+      const fingerprint = (body as { fingerprint?: string } | null)?.fingerprint ?? "";
+      if (info.current?.fingerprint === fingerprint) {
+        info.enabled = true;
+      } else if (info.pending?.version.fingerprint === fingerprint) {
+        this.switchTo(info, info.pending.version);
+      } else {
+        return json(409, { error: { code: "conflict", message: "fingerprint does not match the pending snapshot; refresh before approving" } });
+      }
+      this.emit({ type: "extension.changed", data: { name } });
+      return json(200, info);
+    }
+    m = /^\/v1\/extensions\/([^/]+)\/pending\/diff$/.exec(p);
+    if (m && method === "GET") {
+      const name = decodeURIComponent(m[1]);
+      const info = found(name);
+      if (!info) return notFound(`extension ${name}`);
+      if (!info.pending) return json(404, { error: { code: "not_found", message: `extension ${name} has nothing pending` } });
+      return json(
+        200,
+        this.state.extensionDiffs?.[name] ?? {
+          name,
+          fingerprint: info.pending.version.fingerprint,
+          against: info.current?.fingerprint,
+          diff: "",
+          truncated: false,
+          files: [],
+          access: info.pending.version.access,
+          access_changed: info.pending.version.access !== info.current?.access,
+        },
+      );
+    }
+    return undefined;
+  }
+
   // ---- Events ---------------------------------------------------------------------------
 
   private status(s: string) {
@@ -472,6 +562,8 @@ export class MockBridge implements CrossAgentsBridge {
 
     const terminal = this.terminalRoute(method, p, body);
     if (terminal) return terminal;
+    const extension = this.extensionRoute(method, p, body);
+    if (extension) return extension;
     if (p === "/v1/avatars" && method === "GET") return json(200, { avatars: [...this.avatars.keys()] });
     if (p === "/v1/avatars" && method === "POST") {
       const added: string[] = [];
@@ -533,7 +625,7 @@ export class MockBridge implements CrossAgentsBridge {
         const a = this.agent(m[1]);
         const t = a && s.transcripts.get(a.id);
         if (!a) return notFound(`agent ${decodeURIComponent(m[1])}`);
-        const base: Transcript = t ?? { agent: a, driver: null, capabilities: null, turns: [], usage: null, switches: [], last_seq: 0 };
+        const base: Transcript = t ?? { agent: a, driver: null, capabilities: null, delivery: { state: a.plugin === "external" ? "held" : "idle", queued: 0 }, turns: [], usage: null, switches: [], last_seq: 0 };
         return json(200, { ...base, agent: a, last_seq: this.seq });
       }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/turns\/([^/]+)\/diff$/))) {
@@ -640,6 +732,8 @@ export class MockBridge implements CrossAgentsBridge {
       if (p === "/v1/plugins") return json(200, { plugins: s.plugins });
       if (p === "/v1/session-candidates") return json(200, { sessions: s.sessions ?? [] });
       if ((m = p.match(FILES_ROUTE)) && m[1] !== "resolve") {
+        if (m[1] === "status") return json(200, mockStatus());
+        if (m[1] === "search") return json(200, mockSearch(url.searchParams.get("q") ?? "", url.searchParams.get("all") === "true"));
         const at = url.searchParams.get("path") ?? "";
         if (m[1] === "tree") {
           const tree = mockTree(at, url.searchParams.get("all") === "true");
@@ -798,7 +892,20 @@ export class MockBridge implements CrossAgentsBridge {
         }
         return this.send(a.id, { text: req.text });
       }
-      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/messages$/))) return this.send(m[1], body as SendMessageRequest);
+      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/messages\/([^/]+)\/send-now$/))) {
+        const a = this.agent(m[1]);
+        const mid = decodeURIComponent(m[2]);
+        const t = a && s.transcripts.get(a.id);
+        const waiting = t?.turns.find((x) => x.message_id === mid && !x.started_at && !x.completed_at);
+        if (!a || !waiting) return json(409, { error: { code: "conflict", message: "already started or gone", reason: "already_started" } });
+        // Promoted in place: the same id starts a turn, nothing is withdrawn or re-sent.
+        this.emit({ type: "agent.status_changed", data: { id: a.id, from: a.status, to: "running" } });
+        this.emit({ type: "agent.turn_started", data: { id: a.id, message_id: mid } });
+        this.emit({ type: "agent.delivery_changed", data: { id: a.id, delivery: { state: "turn", queued: (t?.turns.filter((x) => !x.started_at).length ?? 1) - 1 } } });
+        this.timers.push(setTimeout(() => this.emit({ type: "agent.turn_completed", data: { id: a.id, message_id: mid, stop_reason: "end_turn" } }), 900));
+        return json(202, { message_id: mid, queued: false, steered: false });
+      }
+      if (method === "POST" && (m = p.match(/^\/v1\/agents\/([^/]+)\/messages$/))) return this.send(m[1], body as SendMessageRequest);
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/cancel$/))) return this.cancel(m[1]);
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/compact$/))) return this.compact(m[1]);
       if ((m = p.match(/^\/v1\/runs\/([^/]+)\/(approve|reject|cancel)$/))) {
@@ -904,10 +1011,13 @@ export class MockBridge implements CrossAgentsBridge {
     return json(204);
   }
 
-  /** A message: queued behind a running turn, else answered by a short made-up turn. */
+  /** A message: steered into a running turn, else queued behind one, else answered by a short made-up turn. */
   private send(key: string, req: SendMessageRequest): HubResponse {
     const a = this.agent(key);
     if (!a) return notFound("agent");
+    // A scenario's way to show a failed send (docs/screens/delivery-*.png): the same shape the
+    // hub uses for a refusal, so the row shows the mapped sentence and keeps the raw text.
+    if (req.text.startsWith("[fail]")) return json(500, { error: { code: "internal", message: "mock: the write into the CLI failed", reason: "steer_write_failed" } });
     const message_id = uid();
     const busy = a.status === "running";
     // Like the hub: files are kept apart and the message carries what they are.
@@ -916,10 +1026,25 @@ export class MockBridge implements CrossAgentsBridge {
       this.state.files.set(id, { mime: f.mime, data: f.data });
       return { id, name: f.name, mime: f.mime, size: Math.floor((f.data.length * 3) / 4), path: `C:/Users/me/.crossagents/attachments/${a.id}/${id}` };
     });
-    this.emit({ type: "agent.input", data: { id: a.id, message_id, text: req.text, queued: busy, from: { kind: "human" }, ...(attachments.length ? { attachments } : {}) } });
+    // Like the hub: a steer needs a turn to go into and a driver that takes one; otherwise it
+    // queues, and the answer says why it waits rather than failing (DELIVERY-AUDIT §3).
+    const external = a.plugin === "external";
+    if (req.steer && busy && capabilitiesOf(a.plugin).steer) {
+      this.emit({ type: "agent.steered", data: { id: a.id, message_id, text: req.text, ...(attachments.length ? { attachments } : {}) } });
+      // The model reads it at its next tool boundary; the mock has it read a moment later, so a
+      // preview shows both the dashed bubble and the ordinary one it becomes.
+      this.timers.push(setTimeout(() => this.emit({ type: "agent.steer_read", data: { id: a.id, message_id } }), 1_500));
+      return json(202, { message_id, queued: false, steered: true });
+    }
+    const reason: QueuedReason | undefined = external ? "external_agent" : req.steer && busy ? "runtime_no_steer" : busy ? "turn_running" : undefined;
+    this.emit({ type: "agent.input", data: { id: a.id, message_id, text: req.text, queued: busy || external, from: { kind: "human" }, ...(reason ? { queued_reason: reason } : {}), ...(attachments.length ? { attachments } : {}) } });
+    this.emit({
+      type: "agent.delivery_changed",
+      data: { id: a.id, delivery: external ? { state: "held", queued: 1 } : busy ? { state: "turn", queued: 1 } : { state: "starting", queued: 1 } },
+    });
     this.freshSession(a);
     if (!busy) this.answer(a, message_id, req.text);
-    return json(202, { message_id, queued: busy });
+    return json(202, { message_id, queued: busy || external, steered: false, ...(reason ? { queued_reason: reason } : {}) });
   }
 
   /** Like the hub's `archive` (and `lead_returned` for a copied lead): what restoring could not bring back is said. */
@@ -997,6 +1122,7 @@ export class MockBridge implements CrossAgentsBridge {
     this.sequence([
       { type: "agent.status_changed", data: { id, from: a.status, to: "running" } },
       { type: "agent.turn_started", data: { id, message_id } },
+      { type: "agent.delivery_changed", data: { id, delivery: { state: "turn", queued: 0 } } },
       { type: "agent.output", data: { id, stream: "thought", text: "先看一下要改哪里。" } },
       { type: "agent.tool_call", data: { id, tool_call_id: call, title: "Read notes/mock.md", kind: "read", status: "in_progress" } },
       { type: "agent.tool_call_updated", data: { id, tool_call_id: call, title: null, status: "completed" } },
@@ -1004,6 +1130,7 @@ export class MockBridge implements CrossAgentsBridge {
       { type: "agent.output", data: { id, stream: "text", text: reply.slice(18) } },
       { type: "agent.turn_diff", data: { id, diff, message_id, source: "hub" } },
       { type: "agent.turn_completed", data: { id, message_id, stop_reason: "end_turn" } },
+      { type: "agent.delivery_changed", data: { id, delivery: { state: "idle", queued: 0 } } },
       { type: "agent.status_changed", data: { id, from: "running", to: "idle" } },
     ]);
   }

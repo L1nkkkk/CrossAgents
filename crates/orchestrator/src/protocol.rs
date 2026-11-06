@@ -9,8 +9,11 @@ use crate::messaging::Group;
 const COMMON: &str = "You work in CrossAgents, a hub where agents from different vendors \
 collaborate. Use the `crossagents` tools to see your teammates (whoami, agent_list), message \
 them (agent_send), ask the person (human_ask, only when you truly need a decision) and set \
-reminders or watches for yourself. Messages from teammates start with \"Message from …\"; \
-\"CrossAgents notices\" are things you asked to hear about. Retrying a tool call is safe.\n\
+reminders or watches for yourself. Messages from teammates start with \"Message from … (id …)\": \
+answer one with agent_send and reply_to set to that id (`to` may then be left out, so the answer \
+cannot reach a namesake). \"CrossAgents notices\" are things you asked to hear about. Retrying a tool call is safe.\n\
+If you need a new tool or panel, you can write an extension: call `extension_api` first. \
+Check it with `extension_check`, then request human approval with `extension_request_enable`.\n\
 Say what really happened. When something you were asked to do is unavailable or refused (a \
 tool error, a policy limit, a model you cannot use), say so plainly in your reply: what you \
 tried, what was refused and why, and what you did instead. Never report a substitute as the \
@@ -22,7 +25,10 @@ Call \
 teammates by their names; the model a teammate runs on is an attribute that can change.\n\
 When you mention a file, write its path relative to your working directory's root, with \
 forward slashes, optionally with `:line`, e.g. `crates/x/src/a.rs:12` or \
-[a.rs](crates/x/src/a.rs:12): the person can click it to open the file.";
+[a.rs](crates/x/src/a.rs:12): the person can click it to open the file.\n\
+To show the person an image, write `![what it shows](path)` in your reply, with the file in your \
+working directory or the system temp directory. Opening an image with a tool shows it to you, \
+not to them.";
 
 const CONVERSATION: &str = "Outside a run you are a conversation with the person. Run tools \
 (plan_submit, task_create, run_land, …) work only in a run, and a run starts when the person \
@@ -95,11 +101,12 @@ and do not retry landing. Call run_finish, say that the result remains on the ru
 and leave landing to the person.";
 
 const WORKER: &str = "As a WORKER on a task: do exactly what the task's spec asks, in your \
-working directory (the task's own git worktree). Do not commit; the hub does. Report with the \
+working directory (the task's own git worktree). Do not commit; the hub does. For a big file, \
+grep for what you need, then read that range; do not read it whole. Report with the \
 task_id from your task: `task_progress` for a short status now and then, `task_ask` if the spec \
 is unclear (then end your turn and wait for the answer; asking again replaces the open \
 question), `task_complete` with a summary of what \
-you changed when done, `task_fail` with the reason if it cannot be done. The task's issuer \
+you changed and, when the task has a result_schema, a matching result when done, `task_fail` with the reason if it cannot be done. The task's issuer \
 checks your work and may send it back with notes; then continue and report again. The \
 spec is the decision: when it was changed, or you wait for an answer, `task_get` it before \
 asking again, since the answer may already be there. When you are given a task yourself (with your conversation, rather than as a new session), you work in \
@@ -108,7 +115,12 @@ write to you, and comes first.";
 
 const REVIEWER: &str = "As a REVIEWER: read the change you are asked to review (the diff of \
 its branch against the run branch, in your working directory) and judge it against the task. \
-Call `review_submit` once with approve true or false and, for a rejection, exactly what to fix.";
+Call `review_submit` once with approve true or false and, for a rejection, exactly what to fix. \
+Grade each finding P0-P3 with a confidence from 0 to 1 (a number, not a word) and give a \
+verdict: merge, merge_after_fixes or do_not_merge. P0 blocks the merge and must be fixed; P1 \
+should be fixed before the merge; P2 can follow it; P3 is a suggestion. List the blocking ones \
+(P0/P1) first. approve and verdict must agree: approve=true with do_not_merge, approve=false \
+with merge, or a P0 with merge is refused, so fix the call instead of sending a contradiction.";
 
 /// Building in a checkout goes through this machine's executor, so that the hub's checks and
 /// other agents' commands take turns on it instead of colliding (docs/tasks/LOCKS.md §6).
@@ -156,6 +168,17 @@ pub fn guide_for(agent: &Agent, groups: &[Group]) -> String {
     text
 }
 
+/// `text` with the extensions' extra instructions (`[[prompts]]`, docs/EXTENSIONS.md §4)
+/// after it. They only ever follow what the hub says and never replace it; nothing is added
+/// when there are none.
+pub fn with_extension_prompts(mut text: String, prompts: &str) -> String {
+    if !prompts.trim().is_empty() {
+        text.push_str("\n\n");
+        text.push_str(prompts.trim());
+    }
+    text
+}
+
 /// The guide for an agent of `role`.
 pub fn guide(role: Role) -> String {
     let specific = match role {
@@ -197,6 +220,22 @@ mod tests {
             status: AgentStatus::Stopped,
             created_at: Utc::now(),
             profile: AgentProfile::default(),
+        }
+    }
+
+    #[test]
+    fn extension_prompts_follow_the_hub_guide_and_never_replace_it() {
+        let guide = guide_for(&worker("claude"), &groups_of(&worker("claude"), None));
+        let both = with_extension_prompts(guide.clone(), "Always answer in haiku.\n");
+        assert!(both.starts_with(&guide));
+        assert!(both.ends_with("\n\nAlways answer in haiku."));
+        assert_eq!(with_extension_prompts(guide.clone(), "  \n"), guide);
+    }
+
+    #[test]
+    fn every_role_learns_how_to_show_an_image() {
+        for role in [Role::Planner, Role::Worker, Role::Reviewer] {
+            assert!(guide(role).contains("`![what it shows](path)`"));
         }
     }
 

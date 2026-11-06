@@ -100,6 +100,22 @@ async fn until_run(t: &TestHub, id: &str, done: impl Fn(&Value) -> bool) -> Valu
     panic!("the run never got there: {last}");
 }
 
+/// Waits for the turn `sent` started to end.
+///
+/// A turn's completion event is published after the inbox marks the agent idle
+/// (`runtime.rs`: `inbox.finish_turn()` before `Control::TurnFinished`), so the agent can be
+/// idle again — and the next turn already started — while an earlier turn's completion is
+/// still on its way. Waiting for "the lead's next turn completion" would then catch that
+/// earlier one and read the checkout before the new turn wrote anything; the message id
+/// tells the turns apart.
+async fn until_answered(w: &mut common::Watcher, sent: &Value, what: &str) {
+    let id = sent["message_id"].as_str().unwrap_or_default().to_owned();
+    w.until(what, |e| {
+        matches!(&e.kind, EventKind::AgentTurnCompleted { message_id, .. } if message_id.to_string() == id)
+    })
+    .await;
+}
+
 /// The lead writes a file and closes the run; the run is `completed` and never landed.
 async fn finish_with_a_change(t: &TestHub, run: &Value) -> Value {
     let lead = run["planner"].as_str().unwrap();
@@ -108,16 +124,12 @@ async fn finish_with_a_change(t: &TestHub, run: &Value) -> Value {
         "Wrap up. [write notes.txt=hello] {}",
         call("run_finish", json!({ "summary": "wrote notes" }))
     );
-    t.send(lead, &text).await;
+    let sent = t.send(lead, &text).await;
     let ended = until_run(t, run["id"].as_str().unwrap(), |r| {
         r["status"] == "completed"
     })
     .await;
-    w.until(
-        "closing turn ended",
-        |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if id.to_string() == lead),
-    )
-    .await;
+    until_answered(&mut w, &sent, "closing turn ended").await;
     idle(t, lead).await;
     ended
 }
@@ -517,13 +529,10 @@ async fn finished_workspace_stays_usable_until_explicit_cleanup() {
             .is_empty()
     );
     let mut w = t.watch().await;
-    t.send(lead, "Continue here. [write after.txt=still here]")
+    let sent = t
+        .send(lead, "Continue here. [write after.txt=still here]")
         .await;
-    w.until(
-        "retained lead answered",
-        |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if id.to_string() == lead),
-    )
-    .await;
+    until_answered(&mut w, &sent, "retained lead answered").await;
     assert!(checkout.join("after.txt").exists());
     idle(&t, lead).await;
     // Unsaved work is refused; force is explicit, just as for delete_run.

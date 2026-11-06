@@ -300,6 +300,43 @@ export function contextUsageScene(): { state: MockState; script: Step[]; route: 
   };
 }
 
+/**
+ * The gateway's content moderation refused the whole context: the turn produced no token, the
+ * agent is in error, and the last started turn carries the error item. The transcript line says
+ * 上下文已被污染, and the reminder sits over the composer with 新开会话 / 压缩上下文 / 仍要发送.
+ */
+export function moderationSession(): { state: MockState; script: Step[]; route: string } {
+  const nova = agent({
+    name: "nova",
+    plugin: "claude",
+    model: "claude-opus-5.5",
+    role: "worker",
+    status: "error",
+    cwd: NOTES_REPO,
+    topic: "为啥这一轮要做这么久",
+    profile: { display_name: "Nova", title: "文档", color: "violet" },
+  });
+  const state: MockState = { ...emptyState(), agents: [nova], plugins: plugins(), quota: quota() };
+  const failure = "content_filter: The request was rejected as a result of our safety system.";
+  const first = turn({
+    input: "先看 README 和 CLI 的参数解析，再决定怎么补文档。",
+    minutesAgo: 58,
+    took: 3,
+    items: [think("先看 README 现在的结构。"), tool(`Read ${NOTES_REPO}/README.md`, "read"), say("看完了：README 只有安装说明，CLI 的参数在 `crates/cli/src/main.rs`。")],
+  });
+  const refused = turn({
+    input: "为啥要做这么久？",
+    minutesAgo: 2,
+    took: 0.5,
+    items: [{ type: "error", message: failure }],
+  });
+  refused.turn.stop_reason = "error";
+  const t = transcript(nova, [first, refused], 88_000);
+  t.error = failure;
+  state.transcripts.set(nova.id, t);
+  return { state, script: [], route: `#/s/${nova.name}` };
+}
+
 /** The same chat with `/` typed into the composer, so the command menu is open; a running agent
  * shows /compact as unavailable and says why. */
 export function slashScene(kind: "idle" | "running" | "unknown"): { state: MockState; script: Step[]; route: string } {

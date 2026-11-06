@@ -47,7 +47,7 @@ import type { Agent } from "@bindings/Agent";
 import type { AgentStatus } from "@bindings/AgentStatus";
 import type { RunStatus } from "@bindings/RunStatus";
 import type { TaskStatus } from "@bindings/TaskStatus";
-import { api } from "./api";
+import { api, errorText } from "./api";
 import { useHubData } from "./hub";
 import { parseBlocks, parseInline, softBreaks, type Block, type Inline } from "./lib/markdown";
 import { codeFileTarget, docLinkPath } from "./lib/filelinks";
@@ -175,8 +175,9 @@ export const sessionHref = (agent: Agent | string) => `#/s/${encodeURIComponent(
  * split paragraphs. Deliberately small; no HTML is ever interpreted. `doc`: a Markdown file
  * rather than a reply, so it keeps its heading levels and its lines wrap freely.
  */
-export function Prose({ text, doc = false }: { text: string; doc?: boolean }) {
-  return <div className={doc ? "prose prose-doc" : "prose"}>{renderBlocks(parseBlocks(text), doc)}</div>;
+export function Prose({ text, doc = false, headingIds }: { text: string; doc?: boolean; headingIds?: string[] }) {
+  const headings = { n: 0 };
+  return <div className={doc ? "prose prose-doc" : "prose"}>{renderBlocks(parseBlocks(text), doc, headingIds, headings)}</div>;
 }
 
 /**
@@ -318,7 +319,7 @@ function InlineCode({ text }: { text: string }) {
 const REPLY_HEADINGS = ["h3", "h3", "h4", "h5", "h6", "h6"] as const;
 const DOC_HEADINGS = ["h1", "h2", "h3", "h4", "h5", "h6"] as const;
 
-function renderBlocks(blocks: Block[], doc = false): ReactNode[] {
+function renderBlocks(blocks: Block[], doc = false, headingIds?: string[], headings?: { n: number }): ReactNode[] {
   const flowing = (text: string) => renderInline(parseInline(doc ? softBreaks(text) : text));
   return blocks.map((b, i) => {
     switch (b.t) {
@@ -326,7 +327,12 @@ function renderBlocks(blocks: Block[], doc = false): ReactNode[] {
         return <p key={i}>{flowing(b.text)}</p>;
       case "h": {
         const H = (doc ? DOC_HEADINGS : REPLY_HEADINGS)[b.level - 1];
-        return <H key={i}>{renderInline(parseInline(b.text))}</H>;
+        const heading = headingIds ? headings!.n++ : undefined;
+        return (
+          <H key={i} id={heading === undefined ? undefined : headingIds![heading]} data-heading={heading}>
+            {renderInline(parseInline(b.text))}
+          </H>
+        );
       }
       case "code":
         return <pre key={i}>{b.text}</pre>;
@@ -334,7 +340,7 @@ function renderBlocks(blocks: Block[], doc = false): ReactNode[] {
         const items = b.items.map((item, j) => (
           <li key={j}>
             {flowing(item.text)}
-            {item.children.length > 0 && renderBlocks(item.children, doc)}
+            {item.children.length > 0 && renderBlocks(item.children, doc, headingIds, headings)}
           </li>
         ));
         return b.ordered ? (
@@ -346,7 +352,7 @@ function renderBlocks(blocks: Block[], doc = false): ReactNode[] {
         );
       }
       case "quote":
-        return <blockquote key={i}>{renderBlocks(b.blocks, doc)}</blockquote>;
+        return <blockquote key={i}>{renderBlocks(b.blocks, doc, headingIds, headings)}</blockquote>;
       case "hr":
         return <hr key={i} />;
       case "table":
@@ -405,10 +411,74 @@ function renderInline(spans: Inline[]): ReactNode[] {
             {renderInline(s.children)}
           </a>
         );
+      case "image":
+        return <ProseImage key={i} alt={s.alt} src={s.src} path={s.path} />;
       case "br":
         return <br key={i} />;
     }
   });
+}
+
+/** The agent whose conversation is on screen: local images are asked of the hub on its behalf. */
+export const AgentImageContext = createContext<string | undefined>(undefined);
+
+export type ImageLoad = { src?: string; error?: string };
+const agentImages = new Map<string, Promise<ImageLoad>>();
+
+/** An image an agent named by path, as a `data:` URL. A failure is not kept: the file may come later. */
+export function loadAgentImage(agent: string, path: string): Promise<ImageLoad> {
+  const key = JSON.stringify([agent, path]);
+  let pending = agentImages.get(key);
+  if (!pending) {
+    pending = api.agentImage(agent, path).then(
+      (image) => ({ src: `data:${image.mime};base64,${image.data}` }),
+      (err: unknown) => {
+        agentImages.delete(key);
+        return { error: errorText(err) };
+      },
+    );
+    agentImages.set(key, pending);
+  }
+  return pending;
+}
+
+/** A thumbnail that opens full size. */
+export function ImageThumb({ src, alt, title }: { src: string; alt: string; title?: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button className="thumb" onClick={() => setOpen(true)} title={title ?? alt}>
+        <img src={src} alt={alt} />
+      </button>
+      {open && (
+        <div className="lightbox" onClick={() => setOpen(false)} role="dialog" aria-label={alt}>
+          <img src={src} alt={alt} />
+        </div>
+      )}
+    </>
+  );
+}
+
+/** `![alt](path)` in a reply. Outside a conversation there is no agent to ask: the path stays a link. */
+function ProseImage({ alt, src, path }: { alt: string; src?: string; path?: string }) {
+  const agent = useContext(AgentImageContext);
+  const [loaded, setLoaded] = useState<ImageLoad>();
+  useEffect(() => {
+    if (!agent || !path) return;
+    let live = true;
+    setLoaded(undefined);
+    void loadAgentImage(agent, path).then((value) => {
+      if (live) setLoaded(value);
+    });
+    return () => {
+      live = false;
+    };
+  }, [agent, path]);
+  const shown = src ?? loaded?.src;
+  if (shown) return <ImageThumb src={shown} alt={alt} title={alt || path} />;
+  if (path && !agent) return <FileLink path={path}>{alt || path}</FileLink>;
+  if (loaded?.error) return <span className="tool-image-error">{path}：{loaded.error}</span>;
+  return <span className="tool-image-loading">{path}：加载中…</span>;
 }
 
 /** `git diff --stat` with the +/- bars coloured. */
@@ -672,22 +742,67 @@ function LeadFlag({ size }: { size: number }) {
   );
 }
 
-/** A shell command with a copy button. */
-export function CopyCommand({ command }: { command: string }) {
-  const [copied, setCopied] = useState(false);
+/**
+ * Copies `text` and says what happened: "已复制" when the clipboard took it, "复制失败" when it
+ * refused (no permission, no secure context) — a failed copy never reads as a success. `children`
+ * replaces the icon in front of the word, for a control that shows what it copies.
+ */
+export function CopyButton({
+  text,
+  label = "复制原文",
+  title = "复制 markdown 原文",
+  className,
+  children,
+}: {
+  text: string;
+  /** The word before anything is copied; the state words replace it. */
+  label?: string;
+  title?: string;
+  className?: string;
+  children?: ReactNode;
+}) {
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
   const copy = async () => {
+    clearTimeout(timer.current);
     try {
-      await navigator.clipboard.writeText(command);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
+      await navigator.clipboard.writeText(text);
+      setState("copied");
+      timer.current = setTimeout(() => setState("idle"), 1500);
     } catch {
-      // Clipboard may be unavailable; the command is visible to copy by hand.
+      // The words stay up longer: a failure has to be readable, and the text is still on screen.
+      setState("failed");
+      timer.current = setTimeout(() => setState("idle"), 4000);
     }
   };
+  const words = state === "copied" ? "已复制" : state === "failed" ? "复制失败" : label;
   return (
-    <button className="copy" onClick={copy} title="复制命令">
-      <span className="mono">{command}</span>
-      <span className="copy-state">{copied ? "已复制" : "复制"}</span>
+    <button
+      type="button"
+      className={[className, state === "idle" ? "" : state].filter(Boolean).join(" ")}
+      onClick={copy}
+      title={
+        state === "copied"
+          ? "已复制到剪贴板"
+          : state === "failed"
+            ? `${title}失败：剪贴板不可用，请选中文字手动复制`
+            : title
+      }
+    >
+      {children ?? (state === "copied" ? <Check size={12} aria-hidden="true" /> : state === "failed" ? <X size={12} aria-hidden="true" /> : <Copy size={12} aria-hidden="true" />)}
+      <span className="copy-state" role="status" aria-live="polite">
+        {words}
+      </span>
     </button>
+  );
+}
+
+/** A shell command with a copy button. */
+export function CopyCommand({ command }: { command: string }) {
+  return (
+    <CopyButton className="copy" text={command} label="复制" title="复制命令">
+      <span className="mono">{command}</span>
+    </CopyButton>
   );
 }

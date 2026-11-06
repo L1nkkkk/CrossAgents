@@ -3,14 +3,31 @@
 // event stream reconnects, so a gap heals itself.
 
 import { useEffect, useRef, useState } from "react";
+import type { QueuedReason } from "@bindings/QueuedReason";
 import type { Transcript } from "@bindings/Transcript";
 import type { TranscriptItem } from "@bindings/TranscriptItem";
 import type { TranscriptTurn } from "@bindings/TranscriptTurn";
+import { noteDelivery } from "./activity";
 import { api, errorText } from "./api";
 import { onHubEvent, useConnectionStatus, type HubEvent } from "./hub";
 import { turnStat } from "./lib/diff";
 
 export type { Transcript, TranscriptItem, TranscriptTurn };
+
+/**
+ * A turn as this client keeps it: the hub's fields, plus what only the live events say. The
+ * transcript endpoint does not carry these; a message's own row keeps them from submit to end
+ * (docs/tasks/DELIVERY-AUDIT.md §2, §8 P0-1).
+ */
+export type TurnExtras = {
+  /** Why the message waits, while it has not started. */
+  queued_reason?: QueuedReason;
+  /** Taken back before it started: the row stays, marked. */
+  withdrawn?: boolean;
+};
+
+/** The extras of a turn (`TranscriptTurn` from a binding that has no fields for them). */
+export const turnExtras = (turn: TranscriptTurn): TurnExtras => turn as TranscriptTurn & TurnExtras;
 
 export type SessionState = { transcript?: Transcript; error?: string; reload: () => void };
 
@@ -63,6 +80,12 @@ export function useSession(key: string): SessionState {
     if (status === "connected" && current.current) reload();
   }, [status]);
 
+  // The one delivery state every "busy" in the app reads (docs/tasks/DELIVERY-AUDIT.md §1, §8
+  // P1-4): the hub answers it from the inbox that admits messages.
+  useEffect(() => {
+    if (transcript) noteDelivery(transcript.agent.id, transcript.delivery);
+  }, [transcript]);
+
   return { transcript, error, reload };
 }
 
@@ -85,9 +108,14 @@ export function applyEvent(t: Transcript, event: HubEvent): Transcript {
     case "agent.status_changed":
       if (event.data.id !== id) return t;
       return { ...t, agent: { ...t.agent, status: event.data.to }, last_seq: seq };
+    case "agent.delivery_changed":
+      // What the session does with messages now, from the hub's own inbox (P1-4). activity.ts
+      // keeps it for the sidebar; the transcript carries it for this pane.
+      if (event.data.id !== id) return t;
+      return { ...t, delivery: event.data.delivery, last_seq: seq };
     case "agent.input": {
       if (event.data.id !== id) return t;
-      const turn: TranscriptTurn = {
+      const turn: TranscriptTurn & TurnExtras = {
         message_id: event.data.message_id,
         input: event.data.text,
         from: event.data.from ?? null,
@@ -100,6 +128,8 @@ export function applyEvent(t: Transcript, event: HubEvent): Transcript {
         stop_reason: null,
         items: [],
         ...(event.data.attachments?.length ? { attachments: event.data.attachments } : {}),
+        ...(event.data.notices?.length ? { notices: event.data.notices } : {}),
+        ...(event.data.queued_reason ? { queued_reason: event.data.queued_reason } : {}),
       };
       return { ...t, turns: [...turns, turn], last_seq: seq };
     }
@@ -111,7 +141,29 @@ export function applyEvent(t: Transcript, event: HubEvent): Transcript {
     case "agent.input_withdrawn": {
       if (event.data.id !== id) return t;
       const mid = event.data.message_id;
-      return { ...t, turns: turns.filter((x) => x.message_id !== mid || !!x.started_at), last_seq: seq };
+      // Not deleted: the row stays and says 已撤回, so a message never vanishes from where it was
+      // sent (docs/tasks/DELIVERY-AUDIT.md §2, §8 P0-1). One that already started cannot be
+      // withdrawn (the hub refuses), but if it is, it stays a started turn.
+      return {
+        ...t,
+        turns: turns.map((x) => (x.message_id === mid && !x.started_at ? ({ ...x, withdrawn: true } as TranscriptTurn & TurnExtras) : x)),
+        last_seq: seq,
+      };
+    }
+    case "agent.steered": {
+      // Handed to the turn running now: it reads this at its next tool boundary. Shown inside
+      // that turn, dashed until `agent.steer_read` says the model has it.
+      if (event.data.id !== id) return t;
+      const { message_id, text, attachments } = event.data;
+      const item: TranscriptItem = { type: "steer", message_id, text, read: false, ...(attachments?.length ? { attachments } : {}) };
+      return withActive(t, seq, (items) => [...items, item]);
+    }
+    case "agent.steer_read": {
+      if (event.data.id !== id) return t;
+      const mid = event.data.message_id;
+      const read = (items: TranscriptItem[]): TranscriptItem[] =>
+        items.map((x) => (x.type === "steer" && x.message_id === mid && !x.read ? { ...x, read: true } : x));
+      return { ...t, turns: turns.map((x) => ({ ...x, items: read(x.items) })), last_seq: seq };
     }
     case "agent.turn_started": {
       if (event.data.id !== id) return t;

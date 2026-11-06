@@ -243,7 +243,9 @@ async fn post_message(
             &SendMessageRequest {
                 text: text.into(),
                 now: None,
+                steer: None,
                 attachments: (!attachments.is_empty()).then_some(attachments),
+                client_message_id: None,
             },
         )
         .await

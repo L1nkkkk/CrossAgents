@@ -33,6 +33,66 @@ pub enum DiffSource {
     Hub,
 }
 
+/// Why a message waits for its turn instead of starting one, or why a steer attempt
+/// delivered nothing (docs/tasks/DELIVERY-AUDIT.md §3). Clients show a sentence per code
+/// and the raw code for one they do not know, so variants are only ever added, never
+/// renamed or removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedReason {
+    /// A turn runs; the message waits behind it.
+    TurnRunning,
+    /// A person's message is already waiting ahead of this one.
+    OwnerQueueAhead,
+    /// The agent runs outside the hub; it takes its messages when it asks for them.
+    ExternalAgent,
+    /// A steer was asked for, but the driver cannot take one.
+    RuntimeNoSteer,
+    /// A steer was asked for, but no turn runs (it just ended).
+    NoActiveTurn,
+    /// A steer was asked for, but writing it into the CLI failed: nothing was delivered
+    /// and nothing is queued; the sender decides whether to send it again.
+    SteerWriteFailed,
+    /// The conversation is archived.
+    Archived,
+    /// The message already started; it cannot be taken back or moved.
+    AlreadyStarted,
+    /// The agent or its driver refused the files sent with it.
+    AttachmentRefused,
+    /// Nothing was sent: no text and no files.
+    Empty,
+}
+
+/// What a session is doing with messages right now (docs/tasks/DELIVERY-AUDIT.md §8 P1-4).
+/// The hub answers this from the inbox that admits messages, so clients do not work "busy"
+/// out of process status, started turns or a queue count of their own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryState {
+    /// Nothing runs and nothing waits: a message would start a turn at once.
+    #[default]
+    Idle,
+    /// A message waits for its turn to begin: the session is being started, or the last
+    /// turn just ended and the next one has not been taken yet.
+    Starting,
+    /// A turn runs; `DeliveryStatus::queued` says how many messages wait behind it.
+    Turn,
+    /// The agent runs outside the hub: it takes its messages when it asks for them.
+    Held,
+}
+
+/// A session's delivery state and how many messages have not started.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct DeliveryStatus {
+    pub state: DeliveryState,
+    /// Messages that have not started: those waiting behind the running turn, or, in
+    /// `starting`, those waiting for their turn to begin.
+    pub queued: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Event {
@@ -73,6 +133,14 @@ pub enum EventKind {
         from: AgentStatus,
         to: AgentStatus,
     },
+    /// What the agent's session does with messages now: the same [`DeliveryStatus`] the
+    /// transcript carries, so clients need not work it out from other events
+    /// (docs/tasks/DELIVERY-AUDIT.md §8 P1-4).
+    #[serde(rename = "agent.delivery_changed")]
+    AgentDeliveryChanged {
+        id: AgentId,
+        delivery: DeliveryStatus,
+    },
     /// A message for the agent was accepted; `queued` if it waits for the current turn.
     #[serde(rename = "agent.input")]
     AgentInput {
@@ -100,6 +168,25 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         #[cfg_attr(feature = "ts", ts(as = "Option<Vec<crate::Attachment>>", optional))]
         attachments: Vec<crate::Attachment>,
+        /// Notices that rode along with it (docs/TODO.md §二十五 第 3 条): they are in what
+        /// the agent reads, after the person's words, but not in `text`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[cfg_attr(feature = "ts", ts(as = "Option<Vec<String>>", optional))]
+        notices: Vec<String>,
+        /// Why it waits, when `queued`; absent when it starts a turn at once.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        queued_reason: Option<QueuedReason>,
+    },
+    /// A message was not delivered: a steer asked for could not be written into the CLI.
+    /// Nothing waits for it and nothing started; the sender decides whether to send it
+    /// again (docs/tasks/DELIVERY-AUDIT.md §3).
+    #[serde(rename = "agent.input_refused")]
+    AgentInputRefused {
+        id: AgentId,
+        message_id: MessageId,
+        text: String,
+        reason: QueuedReason,
     },
     /// A waiting message got new text (the hub's notification digest gathers news while
     /// the agent is busy).
@@ -122,6 +209,19 @@ pub enum EventKind {
     /// A queued message was taken back before its turn started.
     #[serde(rename = "agent.input_withdrawn")]
     AgentInputWithdrawn { id: AgentId, message_id: MessageId },
+    /// A message went into the running turn instead of waiting for it to end.
+    #[serde(rename = "agent.steered")]
+    AgentSteered {
+        id: AgentId,
+        message_id: MessageId,
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[cfg_attr(feature = "ts", ts(as = "Option<Vec<crate::Attachment>>", optional))]
+        attachments: Vec<crate::Attachment>,
+    },
+    /// The model has read a message from [`Self::AgentSteered`].
+    #[serde(rename = "agent.steer_read")]
+    AgentSteerRead { id: AgentId, message_id: MessageId },
     #[serde(rename = "agent.turn_started")]
     AgentTurnStarted { id: AgentId, message_id: MessageId },
     /// Coalesced output text.
@@ -430,6 +530,35 @@ pub enum EventKind {
     /// install or an upgrade and the lookup that followed it.
     #[serde(rename = "plugin.changed")]
     PluginChanged { name: String },
+    /// An extension changed in a way clients should re-read (`GET /v1/extensions`): its
+    /// source directory was found changed by the hub's poll, a snapshot is waiting for
+    /// approval, a version was enabled or disabled, or auto-trust was switched
+    /// (docs/EXTENSIONS.md §5, §6). The state itself is not carried: the client reads it, as
+    /// it does after `plugin.changed`.
+    #[serde(rename = "extension.changed")]
+    ExtensionChanged { name: String },
+    /// An extension tool call ended. The result is not carried: it is fetched from
+    /// `GET /v1/extensions/calls/{call_id}`, which keeps it for ten minutes
+    /// (docs/EXTENSIONS.md §3).
+    #[serde(rename = "extension.call.finished")]
+    ExtensionCallFinished {
+        /// The id the 202 answered with.
+        call_id: String,
+        extension: String,
+        /// The bare tool name, as the description file names it.
+        tool: String,
+        /// The snapshot it ran on, which a version switch under it does not change.
+        fingerprint: String,
+        /// `ok`, `failed`, `cancelled` or `timed_out`
+        /// (`crossagents_api_types::ExtensionCallStatus`).
+        status: String,
+        #[cfg_attr(feature = "ts", ts(type = "number"))]
+        duration_ms: u64,
+        /// Why it failed, for a status other than `ok`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        error: Option<String>,
+    },
 }
 
 /// A message on its way to an agent. The id is fixed before delivery, so a sender can
@@ -504,8 +633,12 @@ impl EventKind {
             Self::AgentUpdated { .. } => "agent.updated",
             Self::AgentRemoved { .. } => "agent.removed",
             Self::AgentStatusChanged { .. } => "agent.status_changed",
+            Self::AgentDeliveryChanged { .. } => "agent.delivery_changed",
             Self::AgentInput { .. } => "agent.input",
+            Self::AgentInputRefused { .. } => "agent.input_refused",
             Self::AgentInputWithdrawn { .. } => "agent.input_withdrawn",
+            Self::AgentSteered { .. } => "agent.steered",
+            Self::AgentSteerRead { .. } => "agent.steer_read",
             Self::AgentInputUpdated { .. } => "agent.input_updated",
             Self::AgentModelChanged { .. } => "agent.model_changed",
             Self::ReminderFired { .. } => "reminder.fired",
@@ -556,6 +689,8 @@ impl EventKind {
             Self::CliInstallOutput { .. } => "cli.install.output",
             Self::CliInstallFinished { .. } => "cli.install.finished",
             Self::PluginChanged { .. } => "plugin.changed",
+            Self::ExtensionChanged { .. } => "extension.changed",
+            Self::ExtensionCallFinished { .. } => "extension.call.finished",
         }
     }
 
@@ -607,7 +742,11 @@ impl EventKind {
             | Self::CliInstallStarted { .. }
             | Self::CliInstallOutput { .. }
             | Self::CliInstallFinished { .. }
-            | Self::PluginChanged { .. } => None,
+            | Self::PluginChanged { .. }
+            | Self::ExtensionChanged { .. }
+            // The caller is in the call record, not here: an extension's panel calls its
+            // tools as the person, with no agent to attribute them to.
+            | Self::ExtensionCallFinished { .. } => None,
             Self::AgentSessionStarted { id, .. } => Some(*id),
             Self::ReminderFired { owner, .. } | Self::WatchTriggered { owner, .. } => Some(*owner),
             Self::NoteWritten { author, .. } => Some(*author),
@@ -619,8 +758,12 @@ impl EventKind {
             Self::AgentCreated { agent } | Self::AgentUpdated { agent } => Some(agent.id),
             Self::AgentRemoved { id, .. }
             | Self::AgentStatusChanged { id, .. }
+            | Self::AgentDeliveryChanged { id, .. }
             | Self::AgentInput { id, .. }
+            | Self::AgentInputRefused { id, .. }
             | Self::AgentInputWithdrawn { id, .. }
+            | Self::AgentSteered { id, .. }
+            | Self::AgentSteerRead { id, .. }
             | Self::AgentInputUpdated { id, .. }
             | Self::AgentModelChanged { id, .. }
             | Self::AgentTurnStarted { id, .. }
@@ -679,10 +822,48 @@ mod tests {
                 version: "0".into(),
             },
             EventKind::HubStopping,
+            EventKind::ExtensionChanged {
+                name: "standup".into(),
+            },
+            EventKind::ExtensionCallFinished {
+                call_id: "c1".into(),
+                extension: "standup".into(),
+                tool: "report".into(),
+                fingerprint: "f1".into(),
+                status: "ok".into(),
+                duration_ms: 12,
+                error: None,
+            },
         ];
         for kind in kinds {
             let value = serde_json::to_value(&kind).unwrap();
             assert_eq!(value["type"], kind.type_name());
         }
+    }
+
+    /// Extension events are about an extension, not an agent or a run (docs/EXTENSIONS.md §5).
+    #[test]
+    fn extension_events_belong_to_no_run_or_agent() {
+        let changed = EventKind::ExtensionChanged {
+            name: "standup".into(),
+        };
+        assert_eq!(changed.type_name(), "extension.changed");
+        assert_eq!(changed.run_id(), None);
+        assert_eq!(changed.agent_id(), None);
+
+        let finished = EventKind::ExtensionCallFinished {
+            call_id: "c1".into(),
+            extension: "standup".into(),
+            tool: "report".into(),
+            fingerprint: "f1".into(),
+            status: "timed_out".into(),
+            duration_ms: 60_000,
+            error: Some("timed out after 60s".into()),
+        };
+        let value = serde_json::to_value(&finished).unwrap();
+        assert_eq!(value["type"], "extension.call.finished");
+        assert_eq!(value["data"]["call_id"], "c1");
+        assert_eq!(value["data"]["status"], "timed_out");
+        assert_eq!(finished.agent_id(), None);
     }
 }

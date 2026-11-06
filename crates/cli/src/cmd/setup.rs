@@ -225,7 +225,9 @@ pub async fn run(ctx: &Context, args: SetupArgs) -> Result<()> {
                 &SendMessageRequest {
                     text: "Reply with exactly: READY. Do not run any tools.".into(),
                     now: None,
+                    steer: None,
                     attachments: None,
+                    client_message_id: None,
                 },
             )
             .await?;

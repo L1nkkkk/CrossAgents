@@ -1,0 +1,201 @@
+/* 活动 (ActivityFeed.tsx): filters, then one row per event. Rows wrap instead of scrolling
+   sideways, so the pane works in the narrow right dock and at the bottom. */
+
+.activity-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.af-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.af-type {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.af-type:hover {
+  color: var(--text);
+  border-color: var(--text-2);
+}
+
+.af-type.on {
+  border-color: transparent;
+  background: var(--accent-bg);
+  color: var(--accent-text);
+}
+
+.af-type.af-error.on {
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+.af-type:focus-visible,
+.af-row:focus-visible,
+.af-subs input:focus-visible,
+.af-field select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.af-scope {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  min-width: 0;
+  font-size: 12.5px;
+}
+
+.af-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 12em;
+  min-width: 0;
+}
+
+.af-label {
+  flex: none;
+  color: var(--text-2);
+}
+
+.af-field select {
+  min-width: 0;
+  max-width: 100%;
+  padding: 3px 6px;
+  font-size: 12.5px;
+}
+
+.af-subs {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.af-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.af-notice {
+  margin: 0;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--warn-bg);
+  color: var(--warn-text);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.af-empty {
+  margin: 0;
+  padding: 20px 6px;
+  text-align: center;
+  line-height: 1.6;
+}
+
+.af-empty button {
+  margin-left: 4px;
+}
+
+.af-list {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.af-list li {
+  min-width: 0;
+}
+
+.af-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 1px 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 2px;
+  border: none;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.af-row:hover {
+  background: var(--surface-sunk);
+}
+
+.af-time {
+  flex: none;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.af-agent {
+  flex: none;
+  max-width: 8em;
+  overflow: hidden;
+  color: var(--text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.af-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--muted);
+}
+
+.af-row.af-error .af-icon,
+.af-row.af-failed .af-icon {
+  color: var(--danger);
+}
+
+.af-row.af-reply .af-icon {
+  color: var(--accent);
+}
+
+.af-row.af-failed .af-sum {
+  color: var(--danger-text);
+}
+
+.af-sum {
+  flex: 1 1 10em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

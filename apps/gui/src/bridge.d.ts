@@ -16,6 +16,14 @@ export type UpdateState =
   | { state: "error"; current: string; message: string; checked_at: string };
 
 export interface CrossAgentsBridge {
+  /** Main-process recovery state and durable extension startup reporting (Electron only). */
+  extensions?: {
+    safeMode(): Promise<{ enabled: boolean; reason: string | null }>;
+    /** Await before importing/activating any extension, so a crash is remembered. */
+    loading(): Promise<void>;
+    /** Report once startup extension loading has settled, including handled failures. */
+    ready(): Promise<void>;
+  };
   /** Forwards one API request to the hub. Rejects when the hub cannot be reached. */
   request(method: string, path: string, body: string | null): Promise<HubResponse>;
   /** (Re)starts relaying `GET /v1/events`: live events, resuming by id after a drop. */

@@ -28,6 +28,7 @@ pub mod method {
     pub const THREAD_LOADED_LIST: &str = "thread/loaded/list";
     pub const THREAD_COMPACT: &str = "thread/compact/start";
     pub const TURN_START: &str = "turn/start";
+    pub const TURN_STEER: &str = "turn/steer";
     pub const TURN_INTERRUPT: &str = "turn/interrupt";
 
     pub const TURN_STARTED: &str = "turn/started";
@@ -171,6 +172,20 @@ pub fn turn_start(
         params.insert("effort".into(), effort.into());
     }
     Value::Object(params)
+}
+
+/// `turn/steer`: more input for the running turn. `expectedTurnId` makes Codex refuse it
+/// when the turn it was meant for has ended (the hub then queues the message).
+pub fn turn_steer(
+    thread_id: &str,
+    prompt: &crossagents_core::Prompt,
+    expected_turn_id: &str,
+) -> Value {
+    json!({
+        "threadId": thread_id,
+        "input": user_input(prompt),
+        "expectedTurnId": expected_turn_id,
+    })
 }
 
 /// `turn/start` input items (docs/tasks/DOGFOOD.md §3): the text, images by path
@@ -1100,5 +1115,14 @@ mod attachment_tests {
                 .unwrap()
                 .starts_with("[attached file: b.pdf")
         );
+    }
+
+    #[test]
+    fn turn_steer_names_the_turn_it_belongs_to() {
+        let prompt = crossagents_core::Prompt::text("go on");
+        let params = turn_steer("thread", &prompt, "turn-1");
+        assert_eq!(params["threadId"], "thread");
+        assert_eq!(params["expectedTurnId"], "turn-1");
+        assert_eq!(params["input"][0]["text"], "go on");
     }
 }

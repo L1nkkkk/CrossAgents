@@ -115,7 +115,9 @@ enum To {
 
 #[derive(Deserialize)]
 struct SendArgs {
-    to: To,
+    /// Left out with `reply_to`: the reply goes to whoever sent that message.
+    #[serde(default)]
+    to: Option<To>,
     text: String,
     #[serde(default)]
     reply_to: Option<String>,
@@ -358,17 +360,25 @@ impl Orchestrator {
         }
         drop(state);
 
+        let reply_to = a.reply_to.as_deref().map(parse_message_id).transpose()?;
         let names = match a.to {
-            To::One(name) if name == "@team" => self.team_names(caller).await?,
-            To::One(name) => vec![name],
-            To::Many(names) => names,
+            Some(To::One(name)) if name == "@team" => self.team_names(caller).await?,
+            Some(To::One(name)) => vec![name],
+            Some(To::Many(names)) => names,
+            None => match reply_to {
+                Some(parent) => vec![self.sender_of(caller, parent).await?.id.to_string()],
+                None => {
+                    return Err(CoreError::Conflict(
+                        "say who it is for: `to`, or `reply_to` with the id of the message you answer".into(),
+                    ));
+                }
+            },
         };
         if names.is_empty() {
             return Err(CoreError::Conflict(
                 "no recipients (@team is empty outside a run)".into(),
             ));
         }
-        let reply_to = a.reply_to.as_deref().map(parse_message_id).transpose()?;
         // A reply to the message that carried a task question answers it.
         if let Some(parent) = reply_to {
             self.reply_closes_question(caller, parent).await;
@@ -381,9 +391,13 @@ impl Orchestrator {
         let from = MessageSource::Agent {
             agent_id: caller.id,
         };
-        let header = match &task {
-            Some(task) => format!("Message from {} about #{}:", caller.name, task.key),
-            None => format!("Message from {}:", caller.name),
+        // The id is in the header so the recipient can answer with `reply_to` alone.
+        let header = |id: MessageId| match &task {
+            Some(task) => format!(
+                "Message from {} about #{} (id {id}):",
+                caller.name, task.key
+            ),
+            None => format!("Message from {} (id {id}):", caller.name),
         };
         let mut sent = Vec::new();
         let mut repeated = true;
@@ -392,6 +406,7 @@ impl Orchestrator {
             if target.id == caller.id {
                 return Err(CoreError::Conflict("you cannot message yourself".into()));
             }
+            self.not_a_namesake(caller, &name, &target).await?;
             let mut state = self.messaging.lock().await;
             let dedup = (caller.id, target.id, a.text.clone());
             if let Some((_, id)) = state.recent.get(&dedup) {
@@ -399,14 +414,14 @@ impl Orchestrator {
                 continue;
             }
             repeated = false;
+            let id = MessageId::new();
             let envelope = Envelope {
-                id: MessageId::new(),
+                id,
                 from,
-                text: format!("{header}\n{}", a.text),
+                text: format!("{}\n{}", header(id), a.text),
                 reply_to,
                 attachments: Vec::new(),
             };
-            let id = envelope.id;
             state.recent.insert(dedup, (Instant::now(), id));
             state
                 .sent
@@ -430,6 +445,67 @@ impl Orchestrator {
                 .insert((caller.id, key), (Instant::now(), result.clone()));
         }
         Ok(result)
+    }
+
+    /// Who sent `parent` to the caller, for a reply that leaves out `to`.
+    async fn sender_of(&self, caller: &Agent, parent: MessageId) -> Result<Agent, CoreError> {
+        let mut state = self.messaging.lock().await;
+        state.prune();
+        let sender = match state.sent.get(&parent) {
+            Some((_, from, to)) if *to == caller.id => *from,
+            _ => {
+                return Err(CoreError::Conflict(format!(
+                    "message {parent} is not one a teammate sent you in the last hour: give `to` as well"
+                )));
+            }
+        };
+        drop(state);
+        self.store().get_agent(&AgentKey::Id(sender)).await
+    }
+
+    /// Refuses a name that only looks like the teammate who is talking to the caller: `Pia`
+    /// when `Pia 4` sent the message and the caller never exchanged one with `Pia` itself.
+    /// The message would reach another agent, silently.
+    async fn not_a_namesake(
+        &self,
+        caller: &Agent,
+        name: &str,
+        target: &Agent,
+    ) -> Result<(), CoreError> {
+        if name.trim() == target.id.to_string() {
+            return Ok(());
+        }
+        let mut state = self.messaging.lock().await;
+        state.prune();
+        let mut talked_with = false;
+        let mut senders = Vec::new();
+        for (_, from, to) in state.sent.values() {
+            if (*from == caller.id && *to == target.id) || (*from == target.id && *to == caller.id)
+            {
+                talked_with = true;
+            } else if *to == caller.id && !senders.contains(from) {
+                senders.push(*from);
+            }
+        }
+        drop(state);
+        if talked_with {
+            return Ok(());
+        }
+        let prefix = format!("{} ", target.name);
+        for sender in senders {
+            let Ok(sender) = self.store().get_agent(&AgentKey::Id(sender)).await else {
+                continue;
+            };
+            if sender.name.starts_with(&prefix) {
+                return Err(CoreError::Conflict(format!(
+                    "\"{name}\" is not {sender}, who messaged you: {target} is another agent. To answer {sender}, send to \"{sender}\" (or give reply_to alone); to reach {target}, address it by id {id}.",
+                    sender = sender.name,
+                    target = target.name,
+                    id = target.id,
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Everyone in the caller's run but the caller, by name.

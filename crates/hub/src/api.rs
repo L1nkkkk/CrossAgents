@@ -21,21 +21,22 @@ use chrono::{DateTime, Utc};
 use crossagents_api_types::{
     API_VERSION, AccountQuota, AccountUsageGroup, AccountUsageResponse, AgentCommandsResponse,
     AgentExecution, AgentExecutionResponse, AgentSettingsRequest, AnswerRequest, ApiError,
-    ApproveRunRequest, ArchiveAgentRequest, AttachmentContent, AttachmentUpload, BackgroundReminder,
-    BackgroundResponse, BackgroundWatch, ChangesResponse,
-    CliInfo, CliInstallAccepted, CommitGraph, ConnectInfo, CreateAccountRequest,
-    CreateAgentRequest, CreateRunRequest, CreateWorkRequest, CreateWorkRunRequest,
-    DeleteRunResponse, DiffSide, ErrorCode, FileContentResponse, FileEntry, FileKind,
-    FileTreeResponse, FinishRequest, GraphCommit, GraphRef, GraphRefKind, HealthResponse, HubInfo,
-    ImageContent, InitRepoRequest, LandRequest, ListAccountsResponse, ListAgentsResponse,
-    ListAvatarsResponse, ListHistoryResponse, ListNotesResponse, ListPluginsResponse,
-    ListQuestionsResponse, ListRunsResponse, ListToolsResponse, ListWorksResponse, LoginStarted,
-    PluginInfo, QuotaResponse, RejectRunRequest, RenameAgentRequest, ResolvePathsRequest,
-    ResolvePathsResponse, ResolvedPath, RunDetail, RunTrace, SendMessageRequest,
-    SendMessageResponse, SetModelRequest, SetPluginModelsRequest, SetTopicRequest,
-    TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse, UpdateRunPolicyRequest,
-    UploadAvatarsRequest, UploadAvatarsResponse, UsageGroup, UsageResponse, UsageSeriesGroup,
-    UsageSeriesRange, UsageSeriesResponse, VerifyingTask, WorkDetail,
+    ApproveRunRequest, ArchiveAgentRequest, AttachmentContent, AttachmentUpload,
+    BackgroundReminder, BackgroundResponse, BackgroundWatch, ChangesResponse, CliInfo,
+    CliInstallAccepted, CommitGraph, ConnectInfo, CreateAccountRequest, CreateAgentRequest,
+    CreateRunRequest, CreateWorkRequest, CreateWorkRunRequest, DeleteRunResponse, DiffSide,
+    ErrorCode, FileContentResponse, FileEntry, FileGitChange, FileKind, FileSearchResponse,
+    FileStatusEntry, FileStatusResponse, FileTreeResponse, FinishRequest, GraphCommit, GraphRef,
+    GraphRefKind, HealthResponse, HubInfo, ImageContent, InitRepoRequest, LandRequest,
+    ListAccountsResponse, ListAgentsResponse, ListAvatarsResponse, ListHistoryResponse,
+    ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
+    ListToolsResponse, ListWorksResponse, LoginStarted, PluginInfo, QueuedReason, QuotaResponse,
+    RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse, ResolvedPath,
+    RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
+    SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript,
+    TurnDiffResponse, UpdateRunPolicyRequest, UploadAvatarsRequest, UploadAvatarsResponse,
+    UsageGroup, UsageResponse, UsageSeriesGroup, UsageSeriesRange, UsageSeriesResponse,
+    VerifyingTask, WorkDetail,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, Attachment,
@@ -44,11 +45,12 @@ use crossagents_core::{
 };
 use crossagents_orchestrator::{
     Approval, DeleteRun, FileError, FilesScope, GitWorkspaces, NewRun, Orchestrator,
+    files as workspace_files,
 };
 
 use crate::accounts::Accounts;
 use crate::collab::AgentTokens;
-use crate::runtime::Runtime;
+use crate::runtime::{Delivery, Runtime, SteerFailure};
 use futures::Stream;
 use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc};
@@ -69,6 +71,9 @@ const MESSAGE_BODY_LIMIT: usize =
     crossagents_api_types::MAX_ATTACHMENTS_TOTAL / 3 * 4 + 1024 * 1024;
 
 pub struct AppState {
+    pub extensions: Arc<crate::extensions::Registry>,
+    /// Runs extension tools and holds the tokens issued to them.
+    pub runner: Arc<crate::extensions::Runner>,
     pub bus: Arc<EventBus>,
     pub runtime: Arc<Runtime>,
     pub orchestrator: Arc<Orchestrator>,
@@ -123,6 +128,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/agents/{key}/messages/{message_id}",
             delete(withdraw_message),
         )
+        .route(
+            "/v1/agents/{key}/messages/{message_id}/send-now",
+            post(send_now_message),
+        )
         .route("/v1/agents/{key}/transcript", get(transcript))
         .route("/v1/agents/{key}/turns/{message_id}/diff", get(turn_diff))
         .route("/v1/agents/{key}/profile", post(update_profile))
@@ -148,6 +157,23 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/notes", get(list_notes))
         .route("/v1/background", get(background))
         .route("/v1/background/reminders/{id}", delete(cancel_reminder))
+        .route("/v1/extensions", get(list_extensions))
+        .route("/v1/extensions/{name}/logs", get(extension_logs))
+        .route("/v1/extensions/{name}/enable", post(enable_extension))
+        .route("/v1/extensions/{name}/disable", post(disable_extension))
+        .route(
+            "/v1/extensions/{name}/auto-trust",
+            post(auto_trust_extension),
+        )
+        .route("/v1/extensions/{name}/pending/diff", get(extension_diff))
+        .route(
+            "/v1/extensions/{name}/tools/{tool}",
+            post(call_extension_tool),
+        )
+        .route(
+            "/v1/extensions/calls/{id}",
+            get(get_extension_call).delete(cancel_extension_call),
+        )
         .route("/v1/plugins", get(list_plugins))
         .route("/v1/plugins/refresh", post(refresh_plugins))
         .route("/v1/plugins/{name}/models", post(set_plugin_models))
@@ -187,10 +213,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{key}/tasks/{task}/review", post(review_task))
         .route("/v1/agents/{key}/files/tree", get(agent_files_tree))
         .route("/v1/agents/{key}/files/content", get(agent_files_content))
+        .route("/v1/agents/{key}/files/status", get(agent_files_status))
+        .route("/v1/agents/{key}/files/search", get(agent_files_search))
         .route("/v1/agents/{key}/files/image", get(agent_files_image))
         .route("/v1/agents/{key}/files/resolve", post(agent_files_resolve))
         .route("/v1/runs/{key}/files/tree", get(run_files_tree))
         .route("/v1/runs/{key}/files/content", get(run_files_content))
+        .route("/v1/runs/{key}/files/status", get(run_files_status))
+        .route("/v1/runs/{key}/files/search", get(run_files_search))
         .route("/v1/runs/{key}/files/resolve", post(run_files_resolve))
         .route(
             "/v1/runs/{key}/tasks/{task}/files/tree",
@@ -199,6 +229,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/runs/{key}/tasks/{task}/files/content",
             get(task_files_content),
+        )
+        .route(
+            "/v1/runs/{key}/tasks/{task}/files/status",
+            get(task_files_status),
+        )
+        .route(
+            "/v1/runs/{key}/tasks/{task}/files/search",
+            get(task_files_search),
         )
         .route(
             "/v1/runs/{key}/tasks/{task}/files/resolve",
@@ -246,6 +284,11 @@ impl AppError {
 
     fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, ErrorCode::BadRequest, message)
+    }
+
+    /// The same error, saying why a message was refused (docs/tasks/DELIVERY-AUDIT.md §3).
+    fn with_reason(self, reason: QueuedReason) -> Self {
+        Self(self.0, self.1.with_reason(reason))
     }
 }
 
@@ -304,7 +347,7 @@ pub(crate) type ApiResult<T> = Result<T, AppError>;
 async fn require_token(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let presented = headers
@@ -329,8 +372,16 @@ async fn require_token(
         .get::<MatchedPath>()
         .map(|p| p.as_str().to_owned())
         .unwrap_or_else(|| request.uri().path().to_owned());
-    match crate::access::refusal(grant, request.method(), &pattern) {
-        None => next.run(request).await,
+    // An extension's token is logged by name, so what it did can be traced to it.
+    if let crate::access::Grant::Extension { name, level } = &grant {
+        tracing::info!(extension = %name, ?level, method = %request.method(), route = %pattern, "extension request");
+    }
+    match crate::access::refusal(&grant, request.method(), &pattern) {
+        None => {
+            // Handlers that act as the caller read who it is from here, never from the body.
+            request.extensions_mut().insert(grant);
+            next.run(request).await
+        }
         Some(why) => {
             AppError::new(StatusCode::FORBIDDEN, ErrorCode::Forbidden, why).into_response()
         }
@@ -338,7 +389,7 @@ async fn require_token(
 }
 
 /// What a presented token may do: the hub's token everything, the read-only token read,
-/// an agent's session token nothing here.
+/// an agent's session token nothing here, an extension's token what its call was issued for.
 async fn grant_of(state: &AppState, token: &str) -> Option<crate::access::Grant> {
     use crate::access::{Grant, Level};
     if constant_time_eq(token.as_bytes(), state.token.as_bytes()) {
@@ -348,7 +399,10 @@ async fn grant_of(state: &AppState, token: &str) -> Option<crate::access::Grant>
     } else if state.tokens.agent(token).await.is_some() {
         Some(Grant::Agent)
     } else {
-        None
+        state
+            .runner
+            .token(token)
+            .map(|(name, level)| Grant::Extension { name, level })
     }
 }
 
@@ -465,18 +519,24 @@ async fn start_chat(
 ) -> ApiResult<(StatusCode, Json<SendMessageResponse>)> {
     let uploads = req.attachments.unwrap_or_default();
     if req.text.trim().is_empty() && uploads.is_empty() {
-        return Err(AppError::bad_request("text must not be empty"));
+        return Err(
+            AppError::bad_request("text must not be empty").with_reason(QueuedReason::Empty)
+        );
     }
     let key = AgentKey::parse(&key);
     let agent = state.store().get_agent(&key).await?;
     state.orchestrator.chat_available(&agent).await?;
     if agent.archived_at.is_some() {
         if !req.restore {
-            return Err(CoreError::Conflict(format!(
-                "{} is archived: restore it first with restore: true",
-                agent.name
-            ))
-            .into());
+            return Err(AppError::new(
+                StatusCode::CONFLICT,
+                ErrorCode::Conflict,
+                format!(
+                    "{} is archived: restore it first with restore: true",
+                    agent.name
+                ),
+            )
+            .with_reason(QueuedReason::Archived));
         }
         state.runtime.archive(&key, false).await?;
     }
@@ -486,7 +546,7 @@ async fn start_chat(
         attachments,
         ..Envelope::new(MessageSource::Human, text.clone())
     };
-    let (message_id, queued) = state.runtime.send_envelope(&key, envelope).await?;
+    let delivery = state.runtime.send_envelope(&key, envelope).await?;
     // Files alone leave the topic as it was.
     if !text.trim().is_empty() {
         let topic = text
@@ -498,10 +558,7 @@ async fn start_chat(
             .collect();
         state.runtime.set_topic(&key, Some(topic)).await?;
     }
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(SendMessageResponse { message_id, queued }),
-    ))
+    Ok((StatusCode::ACCEPTED, Json(message_response(delivery))))
 }
 
 async fn create_agent(
@@ -723,10 +780,14 @@ async fn transcript(
     let error = in_error.then_some(fold.last_error).flatten();
     let exit = in_error.then_some(fold.last_exit).flatten();
     let capabilities = state.runtime.capabilities(&agent).await;
+    // What the session does with messages, from the hub's inbox: one answer for "busy" and
+    // "next" (docs/tasks/DELIVERY-AUDIT.md §8 P1-4).
+    let delivery = state.runtime.delivery_state(&agent).await;
     Ok(Json(Transcript {
         agent,
         driver: resolved.as_ref().map(|r| r.driver.kind()),
         capabilities,
+        delivery,
         turns: fold.turns,
         usage: fold.usage,
         switches: fold.switches,
@@ -1025,7 +1086,9 @@ async fn background(State(state): State<Arc<AppState>>) -> ApiResult<Json<Backgr
             BackgroundReminder {
                 owner_name: name_of(&reminder.owner),
                 task_key: task.map(|t| t.key.clone()),
-                run_id: task.map(|t| t.run_id).or_else(|| run_of_agent(&reminder.owner)),
+                run_id: task
+                    .map(|t| t.run_id)
+                    .or_else(|| run_of_agent(&reminder.owner)),
                 reminder,
             }
         })
@@ -1059,7 +1122,10 @@ async fn background(State(state): State<Arc<AppState>>) -> ApiResult<Json<Backgr
         .map(|t| VerifyingTask {
             task_id: t.id,
             run_id: t.run_id,
-            run_title: runs.get(&t.run_id).map(|r| r.title.clone()).unwrap_or_default(),
+            run_title: runs
+                .get(&t.run_id)
+                .map(|r| r.title.clone())
+                .unwrap_or_default(),
             key: t.key.clone(),
             title: t.title.clone(),
             assignee: t.assignee,
@@ -1142,23 +1208,106 @@ async fn send_message(
 ) -> ApiResult<(StatusCode, Json<SendMessageResponse>)> {
     let uploads = req.attachments.unwrap_or_default();
     if req.text.trim().is_empty() && uploads.is_empty() {
-        return Err(AppError::bad_request("text must not be empty"));
+        return Err(
+            AppError::bad_request("text must not be empty").with_reason(QueuedReason::Empty)
+        );
     }
     let key = AgentKey::parse(&key);
+    // Archived and refused files are said with their reason, before the message is made.
+    let stored = state.store().get_agent(&key).await?;
+    if stored.archived_at.is_some() {
+        return Err(AppError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::Conflict,
+            format!(
+                "{} is archived; its conversation has to be restored before it gets messages",
+                stored.name
+            ),
+        )
+        .with_reason(QueuedReason::Archived));
+    }
     let attachments = store_uploads(&state, &key, uploads).await?;
     let envelope = Envelope {
         attachments,
         ..Envelope::new(MessageSource::Human, req.text)
     };
-    let (message_id, queued) = if req.now == Some(true) {
-        state.runtime.send_now_envelope(&key, envelope).await?
+    let client_message_id = req.client_message_id;
+    let delivery = if req.now == Some(true) {
+        state
+            .runtime
+            .send_now_envelope_from(&key, envelope, client_message_id)
+            .await
+            .map_err(AppError::from)?
+    } else if req.steer == Some(true) {
+        match state
+            .runtime
+            .steer_envelope_from(&key, envelope, client_message_id)
+            .await
+        {
+            Ok(delivery) => delivery,
+            Err(SteerFailure::Refused {
+                reason, error: why, ..
+            }) => {
+                return Err(
+                    AppError::new(StatusCode::BAD_GATEWAY, ErrorCode::AgentError, why)
+                        .with_reason(reason),
+                );
+            }
+            Err(SteerFailure::Error(err)) => return Err(err.into()),
+        }
     } else {
-        state.runtime.send_envelope(&key, envelope).await?
+        state
+            .runtime
+            .send_envelope_from(&key, envelope, client_message_id)
+            .await
+            .map_err(AppError::from)?
     };
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(SendMessageResponse { message_id, queued }),
-    ))
+    Ok((StatusCode::ACCEPTED, Json(message_response(delivery))))
+}
+
+/// The reply for a delivered message, saying why it waits when it does.
+fn message_response(delivery: Delivery) -> SendMessageResponse {
+    SendMessageResponse {
+        message_id: delivery.message_id,
+        queued: delivery.queued,
+        steered: delivery.steered,
+        queued_reason: delivery.queued_reason,
+    }
+}
+
+/// `POST /v1/agents/{key}/messages/{id}/send-now`: moves a waiting message to the front of
+/// the line and interrupts the running turn, keeping its id
+/// (docs/tasks/DELIVERY-AUDIT.md §2). A message that already started, or one nobody knows,
+/// is a conflict and leaves the queue as it was.
+async fn send_now_message(
+    State(state): State<Arc<AppState>>,
+    Path((key, message_id)): Path<(String, String)>,
+) -> ApiResult<(StatusCode, Json<SendMessageResponse>)> {
+    let message_id: MessageId = message_id
+        .parse()
+        .map_err(|_| AppError::bad_request("invalid message id"))?;
+    let key = AgentKey::parse(&key);
+    let stored = state.store().get_agent(&key).await?;
+    if stored.archived_at.is_some() {
+        return Err(AppError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::Conflict,
+            format!("{} is archived", stored.name),
+        )
+        .with_reason(QueuedReason::Archived));
+    }
+    let delivery = state
+        .runtime
+        .promote(&key, message_id)
+        .await
+        .map_err(|err| match err {
+            CoreError::Conflict(why) => {
+                AppError::new(StatusCode::CONFLICT, ErrorCode::Conflict, why)
+                    .with_reason(QueuedReason::AlreadyStarted)
+            }
+            other => other.into(),
+        })?;
+    Ok((StatusCode::ACCEPTED, Json(message_response(delivery))))
 }
 
 /// Checks `uploads` against what the agent takes and stores them for it; nothing to do
@@ -1185,10 +1334,12 @@ async fn store_uploads(
         .driver(&agent.plugin, agent.driver.as_deref())
         .map(|resolved| resolved.driver.kind().as_str())
         .unwrap_or("unknown");
-    crate::attachments::check_support(&uploads, support, &agent.name, driver)
-        .map_err(|refused| AppError::bad_request(refused.0))?;
-    crate::attachments::store(&state.home, agent.id, uploads)
-        .map_err(|refused| AppError::bad_request(refused.0))
+    crate::attachments::check_support(&uploads, support, &agent.name, driver).map_err(
+        |refused| AppError::bad_request(refused.0).with_reason(QueuedReason::AttachmentRefused),
+    )?;
+    crate::attachments::store(&state.home, agent.id, uploads).map_err(|refused| {
+        AppError::bad_request(refused.0).with_reason(QueuedReason::AttachmentRefused)
+    })
 }
 
 /// One file sent to the agent, for clients to show.
@@ -2076,6 +2227,24 @@ fn file_kind(kind: crossagents_orchestrator::files::Kind) -> FileKind {
     }
 }
 
+/// What `GET {scope}/files/search` takes: the name to find, and whether to search what
+/// .gitignore hides too.
+#[derive(Debug, Default, Deserialize)]
+struct FileSearchQuery {
+    #[serde(default)]
+    q: String,
+    #[serde(default)]
+    all: bool,
+}
+
+fn file_change(change: workspace_files::Change) -> FileGitChange {
+    match change {
+        workspace_files::Change::Added => FileGitChange::Added,
+        workspace_files::Change::Modified => FileGitChange::Modified,
+        workspace_files::Change::Deleted => FileGitChange::Deleted,
+    }
+}
+
 async fn agent_files_tree(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
@@ -2161,6 +2330,59 @@ async fn task_files_content(
     files_content(&state, FilesScope::Task { run, task }, q).await
 }
 
+async fn agent_files_status(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<FileStatusResponse>> {
+    let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    files_status(&state, FilesScope::Agent(&agent)).await
+}
+
+async fn run_files_status(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<FileStatusResponse>> {
+    let run = resolve_run(&state, &key).await?;
+    files_status(&state, FilesScope::Run(run)).await
+}
+
+async fn task_files_status(
+    State(state): State<Arc<AppState>>,
+    Path((key, task)): Path<(String, String)>,
+) -> ApiResult<Json<FileStatusResponse>> {
+    let run = resolve_run(&state, &key).await?;
+    let task = resolve_task(&state, run, &task).await?;
+    files_status(&state, FilesScope::Task { run, task }).await
+}
+
+async fn agent_files_search(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Query(q): Query<FileSearchQuery>,
+) -> ApiResult<Json<FileSearchResponse>> {
+    let agent = state.store().get_agent(&AgentKey::parse(&key)).await?;
+    files_search(&state, FilesScope::Agent(&agent), q).await
+}
+
+async fn run_files_search(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+    Query(q): Query<FileSearchQuery>,
+) -> ApiResult<Json<FileSearchResponse>> {
+    let run = resolve_run(&state, &key).await?;
+    files_search(&state, FilesScope::Run(run), q).await
+}
+
+async fn task_files_search(
+    State(state): State<Arc<AppState>>,
+    Path((key, task)): Path<(String, String)>,
+    Query(q): Query<FileSearchQuery>,
+) -> ApiResult<Json<FileSearchResponse>> {
+    let run = resolve_run(&state, &key).await?;
+    let task = resolve_task(&state, run, &task).await?;
+    files_search(&state, FilesScope::Task { run, task }, q).await
+}
+
 async fn agent_files_resolve(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
@@ -2214,6 +2436,39 @@ async fn files_tree(
                 ignored: entry.ignored,
             })
             .collect(),
+    }))
+}
+
+async fn files_status(
+    state: &AppState,
+    scope: FilesScope<'_>,
+) -> ApiResult<Json<FileStatusResponse>> {
+    let (root, changes) = state.orchestrator.files_status(scope).await?;
+    let git = changes.is_some();
+    Ok(Json(FileStatusResponse {
+        root: root.display().to_string(),
+        git,
+        entries: changes
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| FileStatusEntry {
+                path: entry.path,
+                change: file_change(entry.change),
+            })
+            .collect(),
+    }))
+}
+
+async fn files_search(
+    state: &AppState,
+    scope: FilesScope<'_>,
+    q: FileSearchQuery,
+) -> ApiResult<Json<FileSearchResponse>> {
+    let (root, found) = state.orchestrator.files_search(scope, &q.q, q.all).await?;
+    Ok(Json(FileSearchResponse {
+        root: root.display().to_string(),
+        paths: found.paths,
+        truncated: found.truncated,
     }))
 }
 
@@ -2702,4 +2957,128 @@ async fn replay(state: &AppState, last: &mut u64, tx: &mpsc::Sender<Event>) -> b
             }
         }
     }
+}
+
+async fn list_extensions(
+    State(s): State<Arc<AppState>>,
+) -> Json<crossagents_api_types::ExtensionsResponse> {
+    Json(crossagents_api_types::ExtensionsResponse {
+        extensions: s.extensions.list(),
+    })
+}
+async fn extension_logs(
+    State(s): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<crossagents_api_types::ExtensionLogsResponse>> {
+    Ok(Json(s.runner.logs(&name)?))
+}
+async fn enable_extension(
+    State(s): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(req): Json<crossagents_api_types::EnableExtensionRequest>,
+) -> ApiResult<Json<crossagents_api_types::ExtensionInfo>> {
+    let r = s.extensions.clone();
+    Ok(Json(
+        tokio::task::spawn_blocking(move || r.enable(&name, &req.fingerprint))
+            .await
+            .map_err(|e| CoreError::Storage(e.to_string()))??,
+    ))
+}
+async fn disable_extension(
+    State(s): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<crossagents_api_types::ExtensionInfo>> {
+    Ok(Json(s.extensions.disable(&name)?))
+}
+async fn auto_trust_extension(
+    State(s): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(req): Json<crossagents_api_types::SetExtensionAutoTrustRequest>,
+) -> ApiResult<Json<crossagents_api_types::ExtensionInfo>> {
+    let r = s.extensions.clone();
+    Ok(Json(
+        tokio::task::spawn_blocking(move || r.set_auto_trust(&name, req.auto_trust))
+            .await
+            .map_err(|e| CoreError::Storage(e.to_string()))??,
+    ))
+}
+async fn extension_diff(
+    State(s): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<crossagents_api_types::ExtensionDiffResponse>> {
+    let r = s.extensions.clone();
+    Ok(Json(
+        tokio::task::spawn_blocking(move || r.pending_diff(&name))
+            .await
+            .map_err(|e| CoreError::Storage(e.to_string()))??,
+    ))
+}
+
+fn call_error(e: crate::extensions::CallError) -> AppError {
+    use crate::extensions::CallError as E;
+    let (status, code) = match &e {
+        E::Unknown(_) => (StatusCode::NOT_FOUND, ErrorCode::NotFound),
+        E::NotEnabled(_) => (StatusCode::CONFLICT, ErrorCode::Conflict),
+        E::Forbidden(_) => (StatusCode::FORBIDDEN, ErrorCode::Forbidden),
+        E::InvalidInput(_) => (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
+        E::Busy(_) => (StatusCode::TOO_MANY_REQUESTS, ErrorCode::Conflict),
+        E::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal),
+    };
+    AppError::new(status, code, e.to_string())
+}
+
+/// A person's GUI calls an extension tool. It answers at once with 202; the result is
+/// fetched from `GET /v1/extensions/calls/{id}` (docs/EXTENSIONS.md §3).
+///
+/// The caller is a human, and only a person's credential is one: the policy point refuses an
+/// extension's token on this route, and this checks again, because the one thing this route
+/// must never do is let an extension call a `human` tool as a person.
+async fn call_extension_tool(
+    State(s): State<Arc<AppState>>,
+    Extension(grant): Extension<crate::access::Grant>,
+    Path((name, tool)): Path<(String, String)>,
+    body: Option<Json<crossagents_api_types::ExtensionCallRequest>>,
+) -> ApiResult<(
+    StatusCode,
+    Json<crossagents_api_types::ExtensionCallAccepted>,
+)> {
+    if !matches!(grant, crate::access::Grant::Level(_)) {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            ErrorCode::Forbidden,
+            "only a person's credential calls an extension tool as a person",
+        ));
+    }
+    let input = body.map(|Json(r)| r.input).unwrap_or_default();
+    let accepted = s
+        .runner
+        .start(crate::extensions::Caller::Human, &name, &tool, input)
+        .map_err(call_error)?;
+    Ok((StatusCode::ACCEPTED, Json(accepted)))
+}
+
+fn no_such_call(id: &str) -> AppError {
+    AppError::new(
+        StatusCode::NOT_FOUND,
+        ErrorCode::NotFound,
+        format!("no extension call {id}: it never existed, or it ended more than ten minutes ago"),
+    )
+}
+
+async fn get_extension_call(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crossagents_api_types::ExtensionCallResponse>> {
+    s.runner.get(&id).map(Json).ok_or_else(|| no_such_call(&id))
+}
+
+async fn cancel_extension_call(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crossagents_api_types::ExtensionCallResponse>> {
+    s.runner
+        .cancel(&id)
+        .await
+        .map(Json)
+        .ok_or_else(|| no_such_call(&id))
 }

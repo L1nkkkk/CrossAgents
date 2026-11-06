@@ -61,3 +61,101 @@ Agent SDK 不是另一套接口。它（`sdk.mjs` / `core.mjs`）做的就是启
 3. `plugins`：`claude` 的默认驱动从 `acp-generic` 改为 `claude-native`；账号 provider `claude`（读 `get_usage`，按 `CLAUDE_CONFIG_DIR` 区分账号；本机 `~/.claude` 已登录时自动登记）。
 4. 代理配置（hub 层，Codex 和 Claude 共用）。
 5. 分叉与回退的 API 和界面（N2 剩下的一项）可以在这之后一起做。
+
+## 5. 轮中插话（steer）实测
+
+> 2026-11-05 · Claude Code **2.1.317**（本机 bundled CLI：`C:\Users\Link\AppData\Local\Claude-Data\claude_pzs8sxrjxfjjc\claude-code\2.1.317\a33aa5518497\claude.exe`）· 模型 `haiku` · `HTTPS_PROXY=http://127.0.0.1:7890`
+>
+> 探针：`python -I <scratchpad>\claude_steer_probe.py <claude路径> during|boundary|late`；另用同结构的 Node 探针复跑了全部场景，以及一个 interrupt 场景。下面的秒数是相对进程启动的时间，事件做了字段裁剪。
+
+启动参数（与 `claude_native` 驱动一致）：
+
+```
+claude -p --input-format stream-json --output-format stream-json --verbose \
+  --replay-user-messages --permission-prompt-tool stdio --include-partial-messages \
+  --strict-mcp-config --setting-sources project,local --model haiku --session-id <uuid>
+```
+
+stdin 每条消息（`uuid` 由我们指定）：
+
+```json
+{"type":"user","uuid":"<我们的>","session_id":"<session>","parent_tool_use_id":null,
+ "message":{"role":"user","content":"…"}}
+```
+
+### 5.1 `during`：工具执行中写入
+
+第一轮让模型调用 Bash 运行 `sleep 12; echo LONGDONE`；工具执行中写入「立刻停止剩余步骤，只回复一行：STEERED-OK」。
+
+```
+ 0.01 >>> 写第一条 prompt
+ 4.85 <<< assistant tool_use:Bash                 ← 工具开始
+ 7.86 >>> 写 steer（工具还在跑）
+17.63 <<< user tool_result LONGDONE
+17.64 <<< user isReplay=true uuid=804eed79…      ← 正是我们写的 uuid
+19.75 <<< assistant text STEERED-OK
+19.76 <<< result success result=STEERED-OK user_message_uuid=90f33ec1…（第一条 prompt）
+```
+
+**工具边界读到**，本轮最终答案被改写，**只有一个 result**。
+
+### 5.2 `boundary`：第一个工具结果回来时写入
+
+```
+ 4.92 >>> 写 steer（第一个 tool_result 那一刻）
+ 6.25 <<< assistant tool_use:Bash                 ← 还会继续发工具
+ 9.35 <<< user isReplay=true uuid=<steer>
+ 9.xx <<< assistant text STEERED-OK
+     <<< result success user_message_uuid=<第一条 prompt>   ← 一个 result
+```
+
+写入后还会有一个工具调用，**回显要等下一次模型请求**，不是「写下就生效」。因此读到检测不能用「下一条 assistant 输出」——那条输出可能属于上一请求。
+
+### 5.3 `late`：最后一次模型调用之后写入
+
+```
+11.44 <<< assistant text 最终答案                  ← 本轮答案已出
+11.44 >>> 写 steer
+11.46 <<< result success user_message_uuid=<第一条 prompt>   ← 本轮结束，答案未变
+11.49 <<< system/init                              ← 新一轮
+12.57 <<< user isReplay=true uuid=<steer>
+12.58 <<< assistant text STEERED-OK user_message_uuid=<steer>
+12.59 <<< result success user_message_uuid=<steer> result_index=1
+```
+
+**共 2 个 result**：旧的归第一条 prompt，新的归 steer。下一轮的 `system/init`/回显可能先于或晚于上一轮 `result`（本机这次是晚于；CodeBuddy 上是早于），所以 hub 不能只用「waiter 为空」判断结果归属。`result.user_message_uuid` 是可靠的归属字段。
+
+### 5.4 `interrupt`：有未读插话时中断
+
+```
+ 6.80 >>> 写 steer（工具还在跑）
+ 7.80 >>> control_request{subtype:"interrupt"}
+ 7.83 <<< control_response {subtype:"success", response:{still_queued:["4dcd732e…"]}}
+ 7.85 <<< result error_during_execution is_error=true user_message_uuid=<第一条 prompt>
+       >>> 写一条新 prompt
+19.89 <<< user isReplay=true uuid=4dcd732e…        ← 未读的 steer 仍被消费
+19.92 <<< result success user_message_uuid=4dcd732e…
+```
+
+`interrupt` 的应答带 `still_queued`：**stdin 里未读的消息不会丢**，本轮结束后仍会被下一条运行读到。驱动因此不能在中断时直接把它标成已读或结束本轮：要像 `late` 一样等它被读、收到它自己的 result；否则那条 result 会变成孤儿，可能结束下一轮。若进程已经退出、`still_queued` 为空或没有这个字段，则无法保证会读，发一条 Warning 说明「这条插话没有被读取」。
+
+### 5.5 对 `claude_native` 的含义
+
+- `--replay-user-messages` 的回显（`isReplay: true`）**保留我们写的 uuid**，是唯一精确的「模型已读到」信号；CodeBuddy 不保留。
+- `result.user_message_uuid` 标出这条 result 结束的是哪条用户消息；一条用户消息一个 result。
+- 工具执行中写入：下一模型请求读到，改本轮答案；最后一次模型调用之后写入：另起一轮，属于同一次插话，驱动要把那一轮折进同一个 hub 轮次。
+- 中断不丢未读消息（`still_queued`）；读到前不能谎报已读。
+
+2026-11-05 补测 CodeBuddy 2.179.2（默认驱动参数、代理 `127.0.0.1:7890`）：流式输出开始后写入插话并立即发送 interrupt，控制应答表示已中断但没有 `still_queued`；随后看到一个 `success` result、一个新 `system/init`、再一个 `success` result。两条 result 都没有 `user_message_uuid`，也没有看到插话的 `isReplay` 回显。另用不存在的模型触发失败：第一条 `init` 后写入插话，第二条 `init` 先于 `error_during_execution` result，result 没有 `user_message_uuid`；观察 60 秒未见插话回显或第二个 result。这些事件不足以满足「已按原 uuid 回显的独立插话」的保持条件。上面的 result 归属结论针对 Claude Code。
+
+### 5.6 stdin 背压与停滞
+
+2026-11-05，Windows 本机、同一代理：让 Claude Code 2.1.317（haiku）和 CodeBuddy 2.179.2 调用 PowerShell `Start-Sleep -Seconds 15`，观察到 tool_use 后，向各自 stdin 以 4096 字节分块写入约 1 MiB 的 JSON 插话。Claude 写完用时 0.06 秒、相邻进展的最大间隔 0.05 秒；CodeBuddy 写完用时 0.01 秒、最大间隔小于 0.01 秒。这仅是这两版 CLI、这次运行的测量，不能保证所有版本和环境的延迟。驱动和 runtime host 采用 20 秒无字节进展期限，覆盖实测 15 秒工具执行并留有余量；每次写入进展都重置期限，整帧总耗时可以更长。停滞时关闭管道并杀进程，避免半帧之后继续使用流。
+
+新 hub 接管升级前已运行的旧 runtime host 时，仍使用旧 host 的写入实现：其真实 stdin 卡住时可能无法处理 Kill/CloseStdin，也不会按新期限报告退出。协议没有版本协商，hub 无法远程给旧进程补上此保证；需要结束旧 host 并用新版本重新启动会话。新建 host 才有上述进展式停滞保护。
+
+同日进一步测量：两种 CLI 均确认调用 `Start-Sleep -Seconds 60` 后，等待 1 秒，再以 4096 字节为块发送 4,194,505 字节的 JSON 插话。Claude 2.1.317 写完用时 0.047 秒、最大块间隔 0.001 秒；CodeBuddy 2.179.2 用时 0.049 秒、最大块间隔不足 0.001 秒。测得的是进程 stdin 的读取进展，并不代表插话已被模型处理；在工具运行期间完成写入后结束了探针进程。这些测量支持上述无进展期限，但不能证明所有版本或所有负载的最大背压时间。
+
+20 秒是启发式判定：制定时依据仅有 15 秒工具和约 1 MiB 的测量，之后另补了上述 60 秒工具/4 MiB 实测；两次均未覆盖 CLI 同步阻塞、history 回放和挂起恢复。活进程在这些情形下超过 20 秒未读取时可能被误杀，当前轮次也会丢失。Windows 挂起期间墙钟与单调时钟可能一起前进，无法仅凭两者差值可靠区分挂起与进程真的无进展，因此目前没有假装排除挂起恢复；host 杀进程前会用可重放 stderr 帧记录原因、无进展时间和已写/待写字节。
+
+host 的输入预算为 64 MiB、最多 4096 帧，超过任一预算即记录诊断并终止会话；帧数上限约束大量极小帧的分配开销。队列和正在写的帧按完整字节数计费，直到整帧写入并 flush 后才释放，因此比仅按未写字节计算更保守。hub HTTP 单条消息含最多 20 MiB 原始附件，base64 加消息体的请求限制约 27.7 MiB；64 MiB 容纳该入口的最大请求及其 JSON 封装。直接调用驱动的内部调用者没有统一的单条消息大小上限，因此超出预算的内部帧也会被拒绝并终止会话，而不是假称可无限接收。

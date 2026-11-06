@@ -105,6 +105,12 @@ pub fn summary(kind: &EventKind) -> String {
         EventKind::AgentStatusChanged { id, from, to } => {
             format!("{} {} -> {}", short(id), enum_name(from), enum_name(to))
         }
+        EventKind::AgentDeliveryChanged { id, delivery } => format!(
+            "{} {} ({} waiting)",
+            short(id),
+            enum_name(&delivery.state),
+            delivery.queued
+        ),
         EventKind::AgentInput {
             id, text, queued, ..
         } => format!(
@@ -115,6 +121,20 @@ pub fn summary(kind: &EventKind) -> String {
         ),
         EventKind::AgentInputWithdrawn { id, message_id } => {
             format!("{} withdrew {}", short(id), short(message_id))
+        }
+        EventKind::AgentSteered { id, text, .. } => {
+            format!("{} steered {}", short(id), one_line(text))
+        }
+        EventKind::AgentInputRefused {
+            id, text, reason, ..
+        } => format!(
+            "{} refused ({}) {}",
+            short(id),
+            enum_name(reason),
+            one_line(text)
+        ),
+        EventKind::AgentSteerRead { id, message_id } => {
+            format!("{} read {}", short(id), short(message_id))
         }
         EventKind::AgentInputUpdated { id, text, .. } => {
             format!("{} digest {}", short(id), one_line(text))
@@ -411,6 +431,21 @@ pub fn summary(kind: &EventKind) -> String {
             text
         }
         EventKind::PluginChanged { name } => format!("{name} re-read"),
+        EventKind::ExtensionChanged { name } => format!("{name} re-read"),
+        EventKind::ExtensionCallFinished {
+            extension,
+            tool,
+            status,
+            duration_ms,
+            error,
+            ..
+        } => {
+            let mut text = format!("{extension}__{tool} {status} ({duration_ms}ms)");
+            if let Some(error) = error {
+                text.push_str(&format!(": {}", one_line(error)));
+            }
+            text
+        }
     }
 }
 

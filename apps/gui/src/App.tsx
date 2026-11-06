@@ -21,6 +21,9 @@ import { SettingsView } from "./views/Settings";
 import { UsageView } from "./views/Usage";
 import { ExpertiseView } from "./views/Expertise";
 import { WorkspaceView } from "./views/Workspace";
+import { ExtensionDetail } from "./extensions/page/Detail";
+import { ExtensionsView } from "./extensions/page/Extensions";
+import { ExtensionPageView } from "./extensions/page/Host";
 
 /** `#/runs/<id>` → `["runs", "<id>"]`. */
 function useRoute(): string[] {
@@ -240,6 +243,13 @@ export function App() {
       break;
     case "settings":
       main = <SettingsView page={a} />;
+      break;
+    // 扩展: the list, one extension's approval screen, and pages an extension registered.
+    case "extensions":
+      main = a ? <ExtensionDetail name={a} /> : <ExtensionsView />;
+      break;
+    case "ext":
+      main = a && b ? <ExtensionPageView extension={a} id={b} /> : <ExtensionsView />;
       break;
     default:
       main = <HomeView />;

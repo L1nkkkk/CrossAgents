@@ -15,6 +15,23 @@ use serde_json::{Value, json};
 
 use crate::engine::{NewRun, Orchestrator, first_line};
 
+/// Owns a scheduled registration until its background task is dropped, including on
+/// panic or cancellation before the task is first polled.
+struct ScheduledRoundGuard {
+    orchestrator: std::sync::Arc<Orchestrator>,
+    key: (WorkId, crossagents_core::RunId),
+}
+
+impl Drop for ScheduledRoundGuard {
+    fn drop(&mut self) {
+        self.orchestrator
+            .scheduled_rounds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.key);
+    }
+}
+
 /// The card's answers: the first starts the Work.
 const START: &str = "开始";
 const DECLINE: &str = "不用";
@@ -33,7 +50,22 @@ fn brief_of(item: &HumanItem) -> String {
 }
 
 impl Orchestrator {
-    pub(crate) async fn run_next(&self, caller: &Agent, input: Value) -> Result<Value, CoreError> {
+    fn round_wait_limit(&self) -> std::time::Duration {
+        #[cfg(test)]
+        {
+            *self.round_wait_limit.lock().unwrap()
+        }
+        #[cfg(not(test))]
+        {
+            std::time::Duration::from_secs(120)
+        }
+    }
+
+    pub(crate) async fn run_next(
+        self: &std::sync::Arc<Self>,
+        caller: &Agent,
+        input: Value,
+    ) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
         struct A {
             title: String,
@@ -41,6 +73,12 @@ impl Orchestrator {
             from: Option<String>,
         }
         let a: A = crate::tools::args(input)?;
+        if a.from.as_deref().is_some_and(|from| from != "base") {
+            return Err(CoreError::Conflict("from only accepts base".into()));
+        }
+        if a.request.trim().is_empty() {
+            return Err(CoreError::Conflict("the request is empty".into()));
+        }
         let mut run = self
             .run_of(caller.id)
             .await?
@@ -55,8 +93,125 @@ impl Orchestrator {
         // Every run belongs to a work group. One without (from before groups existed) gets
         // the group that carries it on, so the next round reuses its checkout and branch.
         let work = self.work_of_run(&mut run).await?.id;
+        let checkout = self.integration_path(&run);
+        if !run.in_place
+            && (caller.cwd != checkout || !checkout.exists())
+            && self.host.can_move(caller).await
+        {
+            let key = (work, run.id);
+            let scheduled = json!({ "work_id": work, "source_run_id": run.id, "status": "scheduled", "message": "The next round will start after this turn ends and the lead is idle. This schedule is not persistent: if the hub restarts, call run_next again after it restarts." });
+            if !self.scheduled_rounds.lock().unwrap().insert(key) {
+                return Ok(scheduled);
+            }
+            let registration = ScheduledRoundGuard {
+                orchestrator: self.clone(),
+                key,
+            };
+            let mut events = self.bus.subscribe();
+            let this = self.clone();
+            let lead = caller.id;
+            let wait_limit = self.round_wait_limit();
+            tokio::spawn(async move {
+                let _registration = registration;
+                let mut deadline = tokio::time::Instant::now() + wait_limit;
+                // Observe this turn's completion before considering an idle snapshot.
+                let ended = tokio::time::timeout_at(deadline, async {
+                    loop {
+                        match events.recv().await {
+                            Ok(event) if matches!(event.kind, EventKind::AgentTurnCompleted { id, .. } if id == lead) => break,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            _ => {}
+                        }
+                    }
+                }).await.is_ok();
+                let mut attempted = false;
+                let result = if ended {
+                    loop {
+                        if tokio::time::Instant::now() >= deadline {
+                            break Err(CoreError::Busy(
+                                "timed out waiting for the lead to become idle".into(),
+                            ));
+                        }
+                        let busy = match tokio::time::timeout_at(deadline, this.host.is_busy(lead))
+                            .await
+                        {
+                            Ok(busy) => busy,
+                            Err(_) => {
+                                break Err(CoreError::Busy(
+                                    "timed out checking whether the lead is idle".into(),
+                                ));
+                            }
+                        };
+                        if !busy {
+                            attempted = true;
+                            let create_started = tokio::time::Instant::now();
+                            // Only the idle wait is bounded. Creation follows the same path and
+                            // bounds as the GUI; dropping it could leave a claim or checkout.
+                            let create = this.create_work_round_checked(
+                                work,
+                                a.request.clone(),
+                                Some(a.title.clone()),
+                                a.from.as_deref(),
+                                Some((key.1, lead)),
+                            );
+                            tokio::pin!(create);
+                            let result = tokio::select! {
+                                result = &mut create => result,
+                                _ = tokio::time::sleep(wait_limit) => {
+                                    let observer = this.clone();
+                                    let observer = tokio::spawn(async move {
+                                        observer.notice(lead, &format!("run_next-start:{work}"), &format!("The next round is still starting in the creation stage; it has not been cancelled. Check work {work} and its checkout, or ask a person to investigate.")).await;
+                                    });
+                                    let result = create.await;
+                                    observer.abort();
+                                    let _ = observer.await;
+                                    result
+                                }
+                            };
+                            match result {
+                                Err(CoreError::Busy(_)) => {
+                                    attempted = false;
+                                    deadline += create_started.elapsed();
+                                }
+                                result => break result.map(|_| ()),
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                } else {
+                    Err(CoreError::Busy(
+                        "timed out waiting for the lead's turn to end".into(),
+                    ))
+                };
+                if let Err(err) = result {
+                    let state = if !attempted
+                        || err
+                            .to_string()
+                            .contains("source round or work lead changed")
+                        || err.to_string().contains("lead's access changed")
+                    {
+                        "The scheduled request was cancelled before a round was created."
+                    } else {
+                        "The scheduled request is no longer running because creation failed; check whether a round was created before retrying."
+                    };
+                    this.notice(
+                        lead,
+                        &format!("run_next:{work}"),
+                        &format!("Scheduled next round: {state} Reason: {err}. Check work {work}; if no round exists, resolve the cause and wait for the lead to be idle before calling run_next again. Inspect and resolve any checkout conflict first."),
+                    )
+                    .await;
+                }
+            });
+            return Ok(scheduled);
+        }
         let next = self
-            .create_work_round(work, a.request, Some(a.title), a.from.as_deref())
+            .create_work_round_checked(
+                work,
+                a.request,
+                Some(a.title),
+                a.from.as_deref(),
+                Some((run.id, caller.id)),
+            )
             .await?;
         Ok(json!({ "run_id": next.id, "work_id": work, "status": next.status }))
     }
@@ -116,6 +271,18 @@ impl Orchestrator {
         title: Option<String>,
         from: Option<&str>,
     ) -> Result<Run, CoreError> {
+        self.create_work_round_checked(id, request, title, from, None)
+            .await
+    }
+
+    async fn create_work_round_checked(
+        &self,
+        id: WorkId,
+        request: String,
+        title: Option<String>,
+        from: Option<&str>,
+        source: Option<(crossagents_core::RunId, AgentId)>,
+    ) -> Result<Run, CoreError> {
         if from.is_some_and(|from| from != "base") {
             return Err(CoreError::Conflict("from only accepts base".into()));
         }
@@ -139,7 +306,7 @@ impl Orchestrator {
                 team: Vec::new(),
                 policy: RunPolicy::default(),
             });
-        self.create_run_for_work_from(
+        self.create_run_for_work_from_checked(
             NewRun {
                 origin_chat_id: None,
                 request,
@@ -154,6 +321,7 @@ impl Orchestrator {
             false,
             Some(id),
             from == Some("base"),
+            source,
         )
         .await
     }

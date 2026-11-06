@@ -2,15 +2,17 @@
 // an event script to replay, and the page to open.
 
 import { emptyHub } from "../views/Home.mock";
+import { extensionScene } from "./extensions.mock";
 import { approvalRun, deleteRun, graphRun, handoffRun, inPlaceRun, landingRun, longResultsRun, oauthRun, pausedRun, rerouteRun, reuseRun, reviewRun, syncRun, traceRun } from "../views/Run.mock";
 import type { BackgroundResponse } from "@bindings/BackgroundResponse";
-import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, failedEditSession, liveRun, liveSession, liveTaskSession, longNameScene, slashScene, soloSession, toolImagePathsSession, toolImagesSession } from "../views/Session.mock";
+import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, failedEditSession, liveRun, liveSession, liveTaskSession, longNameScene, moderationSession, slashScene, soloSession, toolImagePathsSession, toolImagesSession } from "../views/Session.mock";
 import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
 import { usageScene } from "../views/Usage.mock";
 import { expertiseScene } from "../views/Expertise.mock";
-import { agent, ago, capabilitiesOf, NOTES_REPO, planned, REPO, say, team, think, turn } from "./fixtures";
+import { agent, ago, capabilitiesOf, NOTES_REPO, planned, REPO, say, team, think, transcript, turn } from "./fixtures";
 import { openFile } from "../FileViewer";
-import { openTool } from "../panes";
+import { openTool, placeTab } from "../panes";
+import { setBottomHeight, setToolsWidth } from "../lib/widths";
 import { newTerminal } from "../terminal";
 import type { AccountQuota } from "@bindings/AccountQuota";
 import type { PluginInfo } from "@bindings/PluginInfo";
@@ -27,6 +29,33 @@ export type Scenario = {
 };
 
 export const SCENARIOS: Scenario[] = [
+  { key: "delivery", label: "消息送达状态", hint: "自己发的消息一行到底：排队原因、已撤回、失败可重试", build: () => {
+    // A session with one turn running and messages waiting. The person's messages stay in the
+    // chat with their state on the bubble (P0-1); only the orchestrator's waits list 接下来.
+    const scene = soloSession();
+    const nova = scene.state.agents[0];
+    const t = scene.state.transcripts.get(nova.id)!;
+    const waiting = t.turns.filter((x) => !x.started_at && !x.completed_at);
+    Object.assign(waiting[0], { queued_reason: "owner_queue_ahead" });
+    Object.assign(waiting[1], { queued_reason: "turn_running" });
+    // One the person took back: the row stays, marked (P0-1).
+    const back = turn({ input: "这条算了，撤回吧。", minutesAgo: 0.15, queued: true, items: [] });
+    Object.assign(back.turn, { withdrawn: true });
+    // An orchestration message waiting: this is what 接下来 lists.
+    const orch = turn({ input: "再核对一遍文档里的命令。", from: { kind: "orchestrator", run_id: "run-delivery-preview" }, minutesAgo: 0.05, queued: true, items: [] });
+    Object.assign(orch.turn, { queued_reason: "turn_running" });
+    t.turns = [...t.turns, back.turn, orch.turn];
+    t.delivery = { state: "turn", queued: 4 };
+    // Type a message the mock refuses: its row says 失败 and offers 重试 (P2-6).
+    const type = (text: string) => {
+      const el = document.querySelector<HTMLTextAreaElement>(".composer textarea");
+      if (!el) throw new Error("composer missing");
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(el, text);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    };
+    return { state: scene.state, route: scene.route, script: [{ at: 900, act: () => type("[fail] 这条发不出去：看文案和重试") }] };
+  } },
   { key: "plan-long-search", label: "长计划中的模型搜索", hint: "浮层防裁切、筛选与清空后恢复高度", build: () => {
     const scene = SCENARIOS.find((s) => s.key === "plan-long")!.build();
     const search = (value: string) => {
@@ -240,7 +269,7 @@ export const SCENARIOS: Scenario[] = [
       ...scene,
       route: `#/runs/${r.id}`,
       script: [
-        { at: 700, act: () => document.querySelector('.who-pick[data-task="i"]')?.scrollIntoView({ block: "end" }) },
+        { at: 700, act: () => document.querySelector('.who-pick[data-task="i"]')?.scrollIntoView({ block: "center" }) },
         { at: 1000, act: () => document.querySelector<HTMLButtonElement>('.who-pick[data-task="i"] .chip-pick')?.click() },
       ],
     };
@@ -260,6 +289,7 @@ export const SCENARIOS: Scenario[] = [
   { key: "graph", label: "提交图", hint: "run 页的工具列「提交图」：main、run 分支和 #a #b #c 三个任务分支，合并提交是空心点；选中了 #b 的合并，下面是它的 diff，点文件名打开文件", build: () => graphRun() },
   { key: "graph-session", label: "会话的提交图", hint: "Rex 在 #c 的会话页：顶栏「提交图」在右侧工具列打开，HEAD 和本地分支，选中了最新的提交", build: () => graphRun("session") },
   { key: "background", label: "后台看板", hint: "run 页工具列的「后台」：这个 run 的提醒（倒计时、备注、关联任务，可取消）、关注和验收中的 #c 排在前面；Nova 在别处的提醒和关注折叠在下面；约 8 秒后 Rex 的一条提醒到期，从看板上消失", build: () => backgroundScene() },
+  { key: "activity", label: "活动流", hint: "工具列的「活动」：所有 agent 的回复、工具和消息排成一条时间线；类型和范围（某个 agent 及它的下属）可筛，点一条打开对应会话并定位到那一轮", build: () => activityScene() },
   { key: "inplace", label: "无 git 的 run", hint: "文件夹没有 git：run 直接改文件、一次一个任务，可一键初始化 git", build: () => inPlaceRun() },
   { key: "workcard", label: "会话提议 Work", hint: "Nova 在单聊里用 work_start 提议到独立分支上做：卡片可展开交给 Work 的说明，开始 / 不用", build: () => workProposal() },
   { key: "long-results", label: "长结果折叠", hint: "Ada 第一次落地被拒、理由里是整段 cargo test 日志：卡片只留一行（✕ · 落地 run · 对象和理由第一句），点图标或整行看完整理由和调用参数；run 页的总结同样只留一行", build: () => longResultsRun() },
@@ -268,8 +298,14 @@ export const SCENARIOS: Scenario[] = [
   { key: "delete-unlanded", label: "删除未落地的 run", hint: "未落地：分支默认不勾，写明「未落地的改动会丢失」", build: () => deleteRun("unlanded") },
   { key: "delete-dirty", label: "删除时工作区有改动", hint: "点「删除」后 hub 返回 409 并列出没提交的文件，可以「仍然删除」", build: () => deleteRun("dirty") },
   { key: "files", label: "文件链接与查看器", hint: "回复里的路径（确认存在的才成链接）可点开只读查看器：左侧懒加载目录树，右侧行号、高亮、跳到第 12 行", build: () => filesScene() },
+  { key: "files-markdown", label: "文件查看器（Markdown）", hint: "中间弹窗里的 Markdown 也有同一套大纲：短横线、悬停标题列表、当前章节", build: () => filesMarkdownScene() },
   { key: "terminal", label: "内置终端", hint: "对话下方的终端标签：回显输入；标签可拖到右侧，Ctrl+` 收起和打开，输入 exit 看退出后的样子", build: () => ({ ...filesScene(), script: [{ at: 600, act: () => void newTerminal() }] }) },
   { key: "files-pane", label: "文件面板", hint: "工具列的「文件」：目录树，点开 docs/cli.md 是渲染后的 Markdown，可切回源码；文档里的相对链接在面板里打开", build: () => filesPaneScene() },
+  { key: "files-pane-narrow", label: "文件面板（窄）", hint: "窄面板退回树和文件轮流显示；标签、面包屑和大纲都不溢出", build: () => filesPaneNarrow() },
+  { key: "files-pane-wide", label: "文件面板（宽）", hint: "宽面板：左侧内容和标签、面包屑、大纲，右侧整棵文件树和过滤框；docs 与 crates 有改动标记", build: () => filesPaneWide() },
+  { key: "files-pane-bottom", label: "文件面板（底部 dock）", hint: "文件面板拖到对话下方的底部 dock，宽度足够时仍左右并排", build: () => filesPaneBottom() },
+  { key: "files-pane-search", label: "文件面板搜索", hint: "在过滤框输入 main，搜到未展开的 crates/cli/src/main.rs", build: () => filesPaneSearch() },
+  { key: "files-pane-outline", label: "文件面板大纲", hint: "聚焦大纲的一条短横线，弹出完整标题列表，当前章节高亮", build: () => filesPaneOutline() },
   { key: "solo", label: "单聊", hint: "Claude 会话：折叠的工具步骤、一轮进行中、两条排队", build: () => soloSession() },
   { key: "ctx-menu", label: "上下文菜单（20%）", hint: "点顶栏（或右侧栏「上下文」）的用量：明细和「压缩上下文」，不必等到 50%", build: () => contextUsageScene() },
   { key: "slash-menu", label: "输入框 / 指令", hint: "Agent 空闲时打 /：CrossAgents 的指令在上，↑↓ 选，Enter 执行，Esc 关闭", build: () => slashScene("idle") },
@@ -286,6 +322,7 @@ export const SCENARIOS: Scenario[] = [
   { key: "settings-src", label: "Claude 设置源", hint: "设置 → 智能体：点 Nova 编辑，「读取 Claude 设置」三档预设（缺省 / 全部 / 都不读）；点 Vega（CodeBuddy）编辑，标签说明它不读 CLAUDE.md", build: settingSources },
   { key: "recruit", label: "对话招队友", hint: "对话里招人：一次因为用模型名当名字被拒绝（一行写明对象和理由第一句，点 ✕ 看完整理由），一次招到 Iris，挂在对话下面", build: () => chatWithRecruit() },
   { key: "crash", label: "进程崩溃", hint: "单聊里 Claude CLI 崩溃退出：错误条和「需要你」写明怎么退出的", build: () => crashedSession() },
+  { key: "moderation", label: "上下文被内容审查拦下", hint: "网关拒绝整段上下文：错误行写「上下文已被污染」，输入框上方给「新开会话」「压缩上下文」「仍要发送」", build: () => moderationSession() },
   { key: "context-lost", label: "上下文没延续（手动）", hint: "Pia 已归档、带 context_lost：自己点「恢复对话」，再发一条消息；顶部提示条要手动关", build: () => contextLost() },
   { key: "context-lost-restored", label: "恢复后：上下文带不回来", hint: "自动恢复 Pia：顶部提示「对话记录恢复了，但……下一条消息会开新会话」", build: () => contextLost([]) },
   { key: "context-lost-new", label: "发消息：这是新会话", hint: "恢复后发一条消息：再提示「这是新会话，没有带上之前的上下文」，标记随之清掉", build: () => contextLost(["接着把回调页的错误处理补上"]) },
@@ -318,6 +355,92 @@ export const SCENARIOS: Scenario[] = [
     return { state: workspaceState(), script: [], route: `#/w/${encodeURIComponent(wsKey(REPO))}` };
   } },
   { key: "agent-workspace-narrow", label: "窄窗口与长标题", hint: "Atlas 的长话题和 #b 的长中文标题：226px 侧栏下名字、状态和摘要仍可辨认，截断不挤坏布局；窄窗口请用截图调整宽度", build: () => ({ state: workspaceState(), script: [], route: "#/s/Atlas" }) },
+  { key: "extensions", label: "扩展：状态一栏", hint: "standup 有更新待人批准、changelog 从未启用、notes 停用了但可回到已批准的版本（还有一版等着）、big-export 的源目录超了 50 MB；下面是让 agent 做一个插件", build: () => {
+    const state: MockState = { ...emptyHub(), ...extensionScene() };
+    // Stopped, with a newer version waiting: 启用 re-enables the approved snapshot, 查看并启用 is
+    // still the way to the waiting one.
+    const notes = state.extensions?.find((x) => x.name === "notes");
+    if (notes?.current) {
+      notes.enabled = false;
+      notes.pending = {
+        version: { ...notes.current, fingerprint: "aa11bb22".repeat(8), description: "把对话里的决定记到 run 的笔记上，并带一份摘要", taken_at: "2026-11-05T10:05:00Z" },
+        requested_at: "2026-11-05T10:05:03Z",
+      };
+    }
+    return { state, script: [], route: "#/extensions" };
+  } },
+  { key: "extensions-approve", label: "扩展：批准界面", hint: "待批准的一版：工具、说明、面板、access 变化和与正在运行版本的差异，按钮提交的是卡片上印出的指纹", build: () => ({ state: { ...emptyHub(), ...extensionScene() }, script: [], route: "#/extensions/standup" }) },
+  { key: "extensions-diff", label: "扩展：差异与批准按钮", hint: "滚到待批准的一版下半：逐条文件改动、unified diff，以及写着「批准并启用」的那一行", build: () => ({
+    state: { ...emptyHub(), ...extensionScene() },
+    script: [{ at: 900, act: () => document.querySelector('[data-approval="ready"] .ext-approve-actions')?.scrollIntoView({ block: "center" }) }],
+    route: "#/extensions/standup",
+  }) },
+  { key: "extensions-approved", label: "扩展：批准之后", hint: "脚本点「批准并启用」：changelog 从「待批准」变成「已启用」，跑的就是刚才那一版（它没有面板，所以预览里不会去导入一个不存在的入口）", build: () => {
+    const state: MockState = { ...emptyHub(), ...extensionScene() };
+    const expected = state.extensions?.find((x) => x.name === "changelog")?.pending?.version.fingerprint;
+    return {
+      state,
+      route: "#/extensions/changelog",
+      script: [
+        { at: 800, act: () => document.querySelector<HTMLButtonElement>('[data-action="approve"]')?.click() },
+        {
+          at: 1500,
+          act: (s) => {
+            const changelog = s.extensions?.find((x) => x.name === "changelog");
+            if (!changelog?.enabled) throw new Error("changelog was not enabled after approving");
+            if (changelog.pending) throw new Error("the pending record is still there after approving");
+            if (changelog.current?.fingerprint !== expected) throw new Error("changelog still runs the old snapshot");
+            console.info("extension approval verified: the shown fingerprint was approved");
+          },
+        },
+      ],
+    };
+  } },
+  { key: "extensions-stale", label: "扩展：待批准的一版被顶掉", hint: "看批准界面时源目录又变了：卡片改口说这一版已经不在待批准里、不再给按钮，只给「看新的一版」", build: () => ({
+    state: { ...emptyHub(), ...extensionScene() },
+    route: "#/extensions/standup",
+    script: [
+      {
+        at: 900,
+        act: (s, bridge) => {
+          const standup = s.extensions?.find((x) => x.name === "standup");
+          if (!standup?.pending) throw new Error("standup has nothing pending to replace");
+          const version = { ...standup.pending.version, fingerprint: "c0ffee12".repeat(8), taken_at: new Date().toISOString() };
+          standup.pending = { ...standup.pending, version, requested_at: new Date().toISOString() };
+          bridge.emit({ type: "extension.changed", data: { name: "standup" } });
+        },
+      },
+      {
+        at: 1500,
+        act: () => {
+          if (!document.querySelector('[data-approval="stale"]')) throw new Error("the approval card did not go stale");
+          if (document.querySelector('[data-action="approve"]')) throw new Error("the stale card still offers the approve button");
+          console.info("stale approval verified: no button for a version that moved");
+        },
+      },
+    ],
+  }) },
+  { key: "extensions-make-plugin", label: "扩展：让 agent 做一个插件", hint: "点「写进新对话」：开一个新对话，请求已经填进草稿（带 extension_api / extension_check / extension_request_enable），没有自动发送", build: () => ({
+    state: { ...emptyHub(), ...extensionScene() },
+    route: "#/extensions",
+    script: [
+      { at: 900, act: () => document.querySelector<HTMLButtonElement>('[data-action="make-plugin"]')?.click() },
+      {
+        at: 1800,
+        act: () => {
+          const text = document.querySelector<HTMLTextAreaElement>(".home-composer textarea")?.value ?? "";
+          if (!text.includes("extension_api")) throw new Error("the request was not left in the draft");
+          if (window.location.hash !== "#/") throw new Error(`the new conversation did not open: ${window.location.hash}`);
+          console.info("plugin request verified: a draft, not a sent message");
+        },
+      },
+    ],
+  }) },
+  { key: "extensions-safe", label: "扩展：安全模式", hint: "横幅写明为什么没加载扩展、怎么退出；列表里照样标出谁已启用、谁在等批准", build: () => ({
+    state: { ...emptyHub(), ...extensionScene(), safeMode: { enabled: true, reason: "上次启动在加载扩展时未能就绪，已自动进入安全模式并跳过所有扩展。" } },
+    script: [],
+    route: "#/extensions",
+  }) },
 ];
 
 export const DEFAULT_SCENARIO = "running";
@@ -371,6 +494,16 @@ function filesScene() {
   };
 }
 
+/** The same reply, but the viewer opens a Markdown document, so its outline is on show. */
+function filesMarkdownScene() {
+  const scene = filesScene();
+  const nova = scene.state.agents[0];
+  return {
+    ...scene,
+    script: [{ at: 600, act: () => openFile({ scope: { kind: "agent", agent: nova.id }, path: "docs/RELEASE.md" }) }] as Step[],
+  };
+}
+
 /** The OAuth run with the 后台 pane open: reminders, watches and #c under verification; Rex's reminder fires after ~8s. */
 function backgroundScene() {
   const scene = oauthRun("running");
@@ -419,11 +552,193 @@ function backgroundScene() {
   };
 }
 
+/** The 活动 pane: Ada leads, Rex and Mia were recruited by Ada, Kai by Rex; errors, tools and messages interleave. */
+function activityScene() {
+  const lead = agent({ name: "ada", plugin: "claude", model: "claude-opus-4-1", role: "planner", profile: { display_name: "Ada", title: "架构师", color: "indigo" } });
+  const rex = agent({ name: "rex", plugin: "codex", model: "gpt-5-codex", role: "worker", recruitedBy: lead.id, profile: { display_name: "Rex", title: "Coder", color: "sky" } });
+  const mia = agent({ name: "mia", plugin: "claude", model: "claude-sonnet-4-5", role: "worker", recruitedBy: lead.id, profile: { display_name: "Mia", title: "设计师", color: "rose" } });
+  const kai = agent({ name: "kai", plugin: "claude", model: "claude-sonnet-4-5", role: "worker", recruitedBy: rex.id, profile: { display_name: "Kai", title: "测试", color: "teal" } });
+  const state: MockState = { ...emptyHub(), agents: [lead, rex, mia, kai], quota: quota() };
+
+  const t1 = turn({
+    input: "把活动的接口补上，顺便看看 Rex 那边的进度。",
+    minutesAgo: 8,
+    took: 3,
+    items: [say("我先看右侧栏的结构，再让 Rex 补筛选。")],
+  });
+  const t2 = turn({
+    input: "先把类型筛选和范围筛选补上，错误单独标出来。",
+    from: { kind: "agent", agent_id: lead.id },
+    minutesAgo: 5,
+    running: true,
+    items: [say("筛选做成纯函数，先写测试。")],
+  });
+  const t3 = turn({
+    input: "Rex 卡在测试上了，去帮它看一下。",
+    minutesAgo: 2,
+    running: true,
+    items: [say("我去看构建日志。")],
+  });
+  const t4 = turn({
+    input: "文档先不用动，等我这边接口定下来。",
+    from: { kind: "agent", agent_id: lead.id },
+    minutesAgo: 1,
+    running: true,
+    items: [say("收到，我先等。")],
+  });
+  // The turns arrive as events below (the feed only sees what came after the page loaded), so
+  // the transcripts start empty instead of holding the same messages twice.
+  state.transcripts.set(lead.id, transcript(lead, [], 24_000));
+  state.transcripts.set(rex.id, transcript(rex, [], 18_000));
+  state.transcripts.set(kai.id, transcript(kai, [], 12_000));
+  state.transcripts.set(mia.id, transcript(mia, [], 9_000));
+
+  const m1 = t1.turn.message_id;
+  const m2 = t2.turn.message_id;
+  const m3 = t3.turn.message_id;
+  const m4 = t4.turn.message_id;
+
+  return {
+    state,
+    route: `#/s/${lead.name}`,
+    script: [
+      { at: 300, act: () => openTool("activity") },
+      { at: 500, event: { type: "agent.input", data: { id: lead.id, message_id: m1, text: "把活动的接口补上，顺便看看 Rex 那边的进度。", queued: false, from: { kind: "human" } } } },
+      { at: 540, event: { type: "agent.turn_started", data: { id: lead.id, message_id: m1 } } },
+      { at: 600, event: { type: "agent.output", data: { id: lead.id, stream: "thought", text: "先看 ToolColumn 和 panes。" } } },
+      { at: 640, event: { type: "agent.output", data: { id: lead.id, stream: "text", text: "我先看右侧栏的结构，" } } },
+      { at: 680, event: { type: "agent.output", data: { id: lead.id, stream: "text", text: "再让 Rex 补筛选。" } } },
+      { at: 720, event: { type: "agent.tool_call", data: { id: lead.id, tool_call_id: "a-read", title: "Read apps/gui/src/ToolColumn.tsx", kind: "read", status: "in_progress" } } },
+      { at: 760, event: { type: "agent.tool_call_updated", data: { id: lead.id, tool_call_id: "a-read", title: null, status: "completed" } } },
+      { at: 800, event: { type: "agent.input", data: { id: rex.id, message_id: m2, text: "先把类型筛选和范围筛选补上，错误单独标出来。", queued: false, from: { kind: "agent", agent_id: lead.id } } } },
+      { at: 840, event: { type: "agent.turn_started", data: { id: rex.id, message_id: m2 } } },
+      { at: 880, event: { type: "agent.output", data: { id: rex.id, stream: "text", text: "筛选做成纯函数，先写测试。" } } },
+      { at: 920, event: { type: "agent.tool_call", data: { id: rex.id, tool_call_id: "r-edit", title: "Edit apps/gui/src/lib/activityFeed.ts", kind: "edit", status: "completed" } } },
+      { at: 960, event: { type: "agent.tool_call", data: { id: rex.id, tool_call_id: "r-test", title: "Run npm --prefix apps/gui test", kind: "execute", status: "in_progress" } } },
+      { at: 1000, event: { type: "agent.tool_call_updated", data: { id: rex.id, tool_call_id: "r-test", title: null, status: "failed" } } },
+      { at: 1040, event: { type: "agent.error", data: { id: rex.id, message: "活动测试失败：expected 2 entries, got 3" } } },
+      { at: 1080, event: { type: "agent.input", data: { id: kai.id, message_id: m3, text: "Rex 卡在测试上了，去帮它看一下。", queued: false, from: { kind: "human" } } } },
+      { at: 1120, event: { type: "agent.turn_started", data: { id: kai.id, message_id: m3 } } },
+      { at: 1160, event: { type: "agent.output", data: { id: kai.id, stream: "text", text: "我去看构建日志。" } } },
+      { at: 1200, event: { type: "agent.input", data: { id: mia.id, message_id: m4, text: "文档先不用动，等我这边接口定下来。", queued: false, from: { kind: "agent", agent_id: lead.id } } } },
+      { at: 1240, event: { type: "agent.turn_started", data: { id: mia.id, message_id: m4 } } },
+      { at: 1280, event: { type: "agent.output", data: { id: mia.id, stream: "text", text: "收到，我先等。" } } },
+      {
+        at: 1320,
+        event: {
+          type: "human.asked",
+          data: {
+            item: {
+              id: "q-activity",
+              kind: "question",
+              from: lead.id,
+              run_id: null,
+              task_id: null,
+              text: "活动流要不要默认只看错误？",
+              detail: null,
+              options: ["要", "不要"],
+              default: null,
+              timeout_at: null,
+              status: "open",
+              answer: null,
+              answered_at: null,
+              action: null,
+              created_at: ago(0),
+            },
+          },
+        },
+      },
+      { at: 1360, event: { type: "agent.error", data: { id: lead.id, message: "hub 断开了 3 秒（已自动重连）" } } },
+    ] as Step[],
+  };
+}
+
 /** The same conversation with the 文件 pane open in the tool column. */
 function filesPaneScene() {
   const scene = filesScene();
   const nova = scene.state.agents[0];
   return { ...scene, script: [{ at: 600, act: () => openTool("files", { agent: nova.name }) }] };
+}
+
+/** Click a tree node by its label; scenarios use it to reach files the way a person would. */
+function clickNode(name: string) {
+  const node = [...document.querySelectorAll<HTMLButtonElement>(".fv-node")].find((button) => button.querySelector(".name")?.textContent === name);
+  if (!node) throw new Error(`file tree node ${name} is missing`);
+  node.click();
+}
+
+/** Type into the pane's whole-workspace filter. */
+function searchFiles(value: string) {
+  const input = document.querySelector<HTMLInputElement>(".fp-filter input");
+  if (!input) throw new Error("file filter is missing");
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+/** The same pane in the default narrow right dock, with a Markdown file open. */
+function filesPaneNarrow() {
+  const scene = filesScene();
+  const nova = scene.state.agents[0];
+  return {
+    ...scene,
+    script: [
+      { at: 350, act: () => setToolsWidth(420, true) },
+      { at: 550, act: () => openTool("files", { agent: nova.name }) },
+      { at: 850, act: () => clickNode("docs") },
+      { at: 1150, act: () => clickNode("cli.md") },
+    ] as Step[],
+  };
+}
+
+/** The file pane opened wide enough for content and tree side by side, on two Markdown tabs. */
+function filesPaneWide() {
+  const scene = filesScene();
+  const nova = scene.state.agents[0];
+  return {
+    ...scene,
+    script: [
+      { at: 350, act: () => setToolsWidth(860, true) },
+      { at: 550, act: () => openTool("files", { agent: nova.name }) },
+      { at: 850, act: () => clickNode("docs") },
+      { at: 1150, act: () => clickNode("cli.md") },
+      { at: 1450, act: () => clickNode("RELEASE.md") },
+    ] as Step[],
+  };
+}
+
+/** The same pane in the bottom dock, where width is plentiful but height is not. */
+function filesPaneBottom() {
+  const scene = filesScene();
+  const nova = scene.state.agents[0];
+  return {
+    ...scene,
+    script: [
+      { at: 300, act: () => setBottomHeight(430) },
+      { at: 500, act: () => placeTab("files", "bottom") },
+      { at: 700, act: () => openTool("files", { agent: nova.name }) },
+      { at: 1000, act: () => clickNode("docs") },
+      { at: 1300, act: () => clickNode("cli.md") },
+      { at: 1600, act: () => clickNode("RELEASE.md") },
+    ] as Step[],
+  };
+}
+
+/** A wide pane with the filter searching the whole workspace, not just opened folders. */
+function filesPaneSearch() {
+  const scene = filesPaneWide();
+  return { ...scene, script: [...scene.script, { at: 1750, act: () => searchFiles("main") }] as Step[] };
+}
+
+/** The outline rail focused (a keyboard user's hover): the full heading list opens. */
+function filesPaneOutline() {
+  const scene = filesPaneWide();
+  return {
+    ...scene,
+    script: [
+      ...scene.script,
+      { at: 1750, act: () => document.querySelector<HTMLElement>(".md-ol-line:nth-child(3)")?.focus() },
+    ] as Step[],
+  };
 }
 
 /** The solo chat, where Nova proposes doing the rest on a branch of its own. */

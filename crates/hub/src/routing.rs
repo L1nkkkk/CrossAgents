@@ -28,7 +28,7 @@ pub async fn route(
     }
     let current = accounts.account_for(&template).await;
     let health = match &current {
-        Some(id) => accounts.health(id).await,
+        Some(id) => accounts.health(id, template.model.as_deref()).await,
         None => Health::Unknown,
     };
     if health.usable() {
@@ -47,7 +47,10 @@ pub async fn route(
         if account.provider != template.plugin || Some(&account.id) == current.as_ref() {
             continue;
         }
-        match accounts.health(&account.id).await {
+        match accounts
+            .health(&account.id, template.model.as_deref())
+            .await
+        {
             Health::Ok => {
                 return Ok(Route::Account {
                     reason: format!("runs on account {} instead: {why}", account.id),
@@ -76,7 +79,7 @@ pub async fn route(
             continue;
         }
         let ok = match &mate_account {
-            Some(id) => accounts.health(id).await == Health::Ok,
+            Some(id) => accounts.health(id, mate.model.as_deref()).await == Health::Ok,
             // A plugin whose accounts the hub does not manage has no quota to run out of.
             None => !accounts.manages(&mate.plugin),
         };

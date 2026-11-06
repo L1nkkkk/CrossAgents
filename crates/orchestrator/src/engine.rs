@@ -157,6 +157,13 @@ pub struct Orchestrator {
     locks: Mutex<HashMap<RunId, Arc<Mutex<()>>>>,
     /// Cards being answered or dismissed, by id ([`Self::lock_card`]).
     cards: CardLocks,
+    /// Scheduled run_next requests, keyed by the work and the terminal source run.
+    pub(crate) scheduled_rounds:
+        std::sync::Mutex<std::collections::HashSet<(crossagents_core::WorkId, RunId)>>,
+    #[cfg(test)]
+    pub(crate) round_wait_limit: std::sync::Mutex<std::time::Duration>,
+    #[cfg(test)]
+    relay_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     pub(crate) messaging: Mutex<crate::messaging::MessagingState>,
     /// Approvals waiting for the person, by question id (docs/tasks/DOGFOOD.md §7).
     pub(crate) approvals: std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
@@ -175,6 +182,8 @@ pub struct Orchestrator {
     /// What an agent's current turn failed with, until the turn ends: the stalled notice
     /// says why, or its issuer only nudges it into the same failure.
     turn_errors: std::sync::Mutex<HashMap<AgentId, String>>,
+    /// Runs extension tools (docs/EXTENSIONS.md §3); set once by the hub, after both exist.
+    pub(crate) extensions: std::sync::OnceLock<Arc<dyn crate::host::ExtensionHost>>,
 }
 
 /// What a run says about a lead copied for it (docs/tasks/S1.md §3.2).
@@ -212,9 +221,7 @@ pub(crate) async fn targets_in_use(
         {
             if let Some(path) = &task.worktree {
                 let tree = tree_name(path);
-                keep.entry(short(run.id))
-                    .or_default()
-                    .insert(tree.clone());
+                keep.entry(short(run.id)).or_default().insert(tree.clone());
                 // A later round's checkouts live under the first round's directory.
                 if let Some(dir) = path
                     .parent()
@@ -247,6 +254,11 @@ impl Orchestrator {
             config,
             locks: Mutex::default(),
             cards: CardLocks::default(),
+            scheduled_rounds: std::sync::Mutex::default(),
+            #[cfg(test)]
+            round_wait_limit: std::sync::Mutex::new(std::time::Duration::from_secs(120)),
+            #[cfg(test)]
+            relay_tasks: std::sync::Mutex::new(Vec::new()),
             messaging: Mutex::default(),
             approvals: std::sync::Mutex::default(),
             contexts: std::sync::Mutex::default(),
@@ -255,7 +267,14 @@ impl Orchestrator {
             land_cleanup: std::sync::Mutex::default(),
             running: std::sync::Mutex::default(),
             turn_errors: std::sync::Mutex::default(),
+            extensions: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Lets agents call the tools of enabled extensions. Takes effect once; a second call
+    /// is ignored.
+    pub fn set_extensions(&self, host: Arc<dyn crate::host::ExtensionHost>) {
+        let _ = self.extensions.set(host);
     }
 
     pub fn store(&self) -> &Arc<dyn Store> {
@@ -400,12 +419,25 @@ impl Orchestrator {
         };
         let id = envelope.id;
         let host = self.host.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             if let Err(err) = host.send_envelope(to, envelope, false).await {
                 tracing::warn!(agent = %to, error = %err, "cannot deliver message");
             }
         });
+        #[cfg(test)]
+        self.relay_tasks.lock().unwrap().push(handle);
+        #[cfg(not(test))]
+        drop(handle);
         id
+    }
+
+    /// Tests await every relay started before their producer's completion barrier.
+    #[cfg(test)]
+    pub(crate) async fn drain_relays(&self) {
+        let tasks = std::mem::take(&mut *self.relay_tasks.lock().unwrap());
+        for task in tasks {
+            task.await.expect("relay task panicked");
+        }
     }
 
     /// Sends in the background: starting an agent can take minutes.
@@ -512,13 +544,53 @@ impl Orchestrator {
         work_id: Option<crossagents_core::WorkId>,
         from_base: bool,
     ) -> Result<Run, CoreError> {
+        self.create_run_for_work_from_checked(new, fresh, restore, work_id, from_base, None)
+            .await
+    }
+
+    pub(crate) async fn create_run_for_work_from_checked(
+        &self,
+        new: NewRun,
+        fresh: Option<bool>,
+        restore: bool,
+        work_id: Option<crossagents_core::WorkId>,
+        from_base: bool,
+        source: Option<(RunId, AgentId)>,
+    ) -> Result<Run, CoreError> {
         let _work_guard = if let Some(id) = work_id {
             Some(self.lock_card(&format!("work:{id}")).await)
         } else {
             None
         };
         if let Some(id) = work_id {
-            self.store.get_work(id).await?;
+            let work = self.store.get_work(id).await?;
+            if let Some((source_id, lead)) = source {
+                let runs = self.store.list_runs().await?;
+                let latest = runs.iter().find(|run| run.work_id == Some(id));
+                if work.lead != lead
+                    || new.planner != lead
+                    || !latest.is_some_and(|run| {
+                        run.id == source_id && run.planner == lead && run.status.is_terminal()
+                    })
+                {
+                    return Err(CoreError::Conflict(
+                        "the source round or work lead changed while the next round was scheduled"
+                            .into(),
+                    ));
+                }
+                let agent = self.store.get_agent(&AgentKey::Id(lead)).await?;
+                if agent.archived_at.is_some()
+                    || !self
+                        .tools_for(&agent)
+                        .await
+                        .iter()
+                        .any(|tool| tool.name == "run_next")
+                {
+                    return Err(CoreError::Conflict(
+                        "the lead's access changed while the next round was scheduled".into(),
+                    ));
+                }
+            }
             if let Some(open) = self
                 .store
                 .list_runs()
@@ -710,10 +782,20 @@ impl Orchestrator {
         sessions.push_str(&brief::previous_rounds(&rounds));
         let checkout = self.integration_path(&run);
         let env = crate::workspace::worktree_run_env(&self.config.worktrees, &checkout);
+        // A round the lead started itself is not a message from the person: what they said is
+        // already in the conversation.
+        let kickoff_from = if source.is_some() {
+            MessageSource::Orchestrator {
+                run_id: run.id,
+                task_id: None,
+            }
+        } else {
+            MessageSource::Human
+        };
         let kickoff = Envelope {
             attachments: new.attachments,
             ..Envelope::new(
-                MessageSource::Human,
+                kickoff_from,
                 brief::kickoff(
                     &run,
                     &team,
@@ -1828,7 +1910,9 @@ The person changed: {}",
             let mut gone = Vec::new();
             for key in keys {
                 let keep = in_use.get(&key).cloned().unwrap_or_default();
-                gone.extend(crate::workspace::remove_run_targets_except(&root, &key, &keep));
+                gone.extend(crate::workspace::remove_run_targets_except(
+                    &root, &key, &keep,
+                ));
             }
             gone
         })

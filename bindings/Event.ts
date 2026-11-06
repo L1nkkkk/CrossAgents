@@ -7,6 +7,7 @@ import type { Attachment } from "./Attachment";
 import type { CheckResult } from "./CheckResult";
 import type { ContextPart } from "./ContextPart";
 import type { ContinuationState } from "./ContinuationState";
+import type { DeliveryStatus } from "./DeliveryStatus";
 import type { DiffSource } from "./DiffSource";
 import type { ExitCause } from "./ExitCause";
 import type { Handoff } from "./Handoff";
@@ -17,6 +18,7 @@ import type { MessageSource } from "./MessageSource";
 import type { NoteScope } from "./NoteScope";
 import type { OutputStream } from "./OutputStream";
 import type { PermissionDecision } from "./PermissionDecision";
+import type { QueuedReason } from "./QueuedReason";
 import type { RateLimits } from "./RateLimits";
 import type { Run } from "./Run";
 import type { RunId } from "./RunId";
@@ -33,7 +35,7 @@ export type Event = {
 /**
  * Assigned by the store; strictly increasing. Used as the SSE event id.
  */
-seq: number, id: string, ts: string, schema: number, } & ({ "type": "hub.started", "data": { version: string, } } | { "type": "hub.stopping" } | { "type": "agent.created", "data": { agent: Agent, } } | { "type": "agent.updated", "data": { agent: Agent, } } | { "type": "agent.removed", "data": { id: AgentId, name: string, } } | { "type": "agent.status_changed", "data": { id: AgentId, from: AgentStatus, to: AgentStatus, } } | { "type": "agent.input", "data": { id: AgentId, message_id: MessageId, text: string, queued: boolean, 
+seq: number, id: string, ts: string, schema: number, } & ({ "type": "hub.started", "data": { version: string, } } | { "type": "hub.stopping" } | { "type": "agent.created", "data": { agent: Agent, } } | { "type": "agent.updated", "data": { agent: Agent, } } | { "type": "agent.removed", "data": { id: AgentId, name: string, } } | { "type": "agent.status_changed", "data": { id: AgentId, from: AgentStatus, to: AgentStatus, } } | { "type": "agent.delivery_changed", "data": { id: AgentId, delivery: DeliveryStatus, } } | { "type": "agent.input", "data": { id: AgentId, message_id: MessageId, text: string, queued: boolean, 
 /**
  * Who sent it; absent in events written before the field existed (a person).
  */
@@ -53,7 +55,16 @@ reply_excerpt?: string,
 /**
  * Files sent with it (docs/tasks/DOGFOOD.md §3).
  */
-attachments?: Array<Attachment>, } } | { "type": "agent.input_updated", "data": { id: AgentId, message_id: MessageId, text: string, } } | { "type": "agent.model_changed", "data": { id: AgentId, model: string | null, effort: string | null, from_model: string | null, from_effort: string | null, } } | { "type": "agent.input_withdrawn", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.turn_started", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.output", "data": { id: AgentId, stream: OutputStream, text: string, } } | { "type": "agent.tool_call", "data": { id: AgentId, tool_call_id: string, title: string, kind: string | null, status: ToolStatus, } } | { "type": "agent.tool_call_updated", "data": { id: AgentId, tool_call_id: string, title: string | null, status: ToolStatus | null, } } | { "type": "agent.tool_output", "data": { id: AgentId, tool_call_id: string, text: string, } } | { "type": "agent.tool_detail", "data": { id: AgentId, tool_call_id: string, detail: ToolDetail, } } | { "type": "agent.turn_diff", "data": { id: AgentId, diff: string, 
+attachments?: Array<Attachment>, 
+/**
+ * Notices that rode along with it (docs/TODO.md §二十五 第 3 条): they are in what
+ * the agent reads, after the person's words, but not in `text`.
+ */
+notices?: Array<string>, 
+/**
+ * Why it waits, when `queued`; absent when it starts a turn at once.
+ */
+queued_reason?: QueuedReason, } } | { "type": "agent.input_refused", "data": { id: AgentId, message_id: MessageId, text: string, reason: QueuedReason, } } | { "type": "agent.input_updated", "data": { id: AgentId, message_id: MessageId, text: string, } } | { "type": "agent.model_changed", "data": { id: AgentId, model: string | null, effort: string | null, from_model: string | null, from_effort: string | null, } } | { "type": "agent.input_withdrawn", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.steered", "data": { id: AgentId, message_id: MessageId, text: string, attachments?: Array<Attachment>, } } | { "type": "agent.steer_read", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.turn_started", "data": { id: AgentId, message_id: MessageId, } } | { "type": "agent.output", "data": { id: AgentId, stream: OutputStream, text: string, } } | { "type": "agent.tool_call", "data": { id: AgentId, tool_call_id: string, title: string, kind: string | null, status: ToolStatus, } } | { "type": "agent.tool_call_updated", "data": { id: AgentId, tool_call_id: string, title: string | null, status: ToolStatus | null, } } | { "type": "agent.tool_output", "data": { id: AgentId, tool_call_id: string, text: string, } } | { "type": "agent.tool_detail", "data": { id: AgentId, tool_call_id: string, detail: ToolDetail, } } | { "type": "agent.turn_diff", "data": { id: AgentId, diff: string, 
 /**
  * The turn it belongs to; absent in events written before the field existed (the
  * running turn, else the last one that started).
@@ -78,4 +89,25 @@ described_by?: string, } } | { "type": "cli.install.output", "data": { plugin: s
 /**
  * Lines past the cap that were dropped.
  */
-dropped: number, } } | { "type": "plugin.changed", "data": { name: string, } });
+dropped: number, } } | { "type": "plugin.changed", "data": { name: string, } } | { "type": "extension.changed", "data": { name: string, } } | { "type": "extension.call.finished", "data": { 
+/**
+ * The id the 202 answered with.
+ */
+call_id: string, extension: string, 
+/**
+ * The bare tool name, as the description file names it.
+ */
+tool: string, 
+/**
+ * The snapshot it ran on, which a version switch under it does not change.
+ */
+fingerprint: string, 
+/**
+ * `ok`, `failed`, `cancelled` or `timed_out`
+ * (`crossagents_api_types::ExtensionCallStatus`).
+ */
+status: string, duration_ms: number, 
+/**
+ * Why it failed, for a status other than `ok`.
+ */
+error?: string, } });

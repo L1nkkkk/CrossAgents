@@ -88,7 +88,8 @@ fn spec_schema() -> Value {
             },
             "interfaces": strings,
             "acceptance": { "type": "array", "items": { "type": "string" }, "description": "Optional shell commands the hub runs when the worker reports done." },
-            "references": strings
+            "references": strings,
+            "result_schema": { "type": "object", "description": "JSON Schema for the required structured result." }
         },
         "required": ["goal"]
     })
@@ -115,7 +116,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "agent_send",
-        description: "Send a message. `to` is a name, a list of names, or \"@team\" (everyone in your run). It arrives as a new turn, or after the recipient's current turn (`now: true` interrupts it instead). Use `reply_to` with a message id to answer a message; `task` names the task it is about. Returns the message ids. Retrying the same call is safe: identical messages within a minute, or the same idempotency_key, are sent once.",
+        description: "Send a message. `to` is a name, a list of names, or \"@team\" (everyone in your run). It arrives as a new turn, or after the recipient's current turn (`now: true` interrupts it instead). To answer a message, give `reply_to` with the id from its header (`Message from … (id …):`); `to` may then be left out, and the reply goes to whoever sent it. `task` names the task it is about. Returns the message ids. Retrying the same call is safe: identical messages within a minute, or the same idempotency_key, are sent once.",
         groups: ALL,
         schema: || {
             object(
@@ -127,7 +128,7 @@ const TOOLS: &[ToolDef] = &[
                     "now": { "type": "boolean" },
                     "idempotency_key": { "type": "string" }
                 }),
-                &["to", "text"],
+                &["text"],
             )
         },
     },
@@ -438,7 +439,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "run_next",
-        description: "Start the next round in your work group after your run ended. Write the person's request verbatim. Starts immediately, using this group's plan policy. Set from to base to leave the previous round's unlanded changes behind.",
+        description: "Start the next round in your work group after your run ended. Write the person's request verbatim. Uses this group's plan policy. If moving your session must wait for this turn to end, returns status scheduled instead of a run id; the hub waits up to 120 seconds for you to be idle and notifies you if it fails. Creation then uses the GUI path and its existing bounds; after 120 seconds in creation a notice reports that it is still starting and has not been cancelled. A schedule is not persistent: a hub restart loses it, so call run_next again after restart. Set from to base to leave the previous round's unlanded changes behind.",
         groups: RECRUITERS,
         schema: || {
             object(
@@ -453,7 +454,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "plan_submit",
-        description: "Submit the plan for your current run: the full list of tasks for workers. Each task goes to a new execution session of its assignee by default (fresh: true); write fresh: false to have that session itself, with its conversation, do it. Depending on the run's policy the person approves it first, or it starts at once.",
+        description: "Submit the plan for your current run: the full list of tasks for workers. A task spec may include result_schema, a JSON Schema the worker must satisfy in task_complete.result. Each task goes to a new execution session of its assignee by default (fresh: true); write fresh: false to have that session itself, with its conversation, do it. Depending on the run's policy the person approves it first, or it starts at once.",
         groups: PLANNER,
         schema: || {
             json!({
@@ -467,7 +468,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_create",
-        description: "Add tasks to your running run (same fields as plan_submit's tasks). They start once their dependencies are merged. Keys already in the run are left as they are. If the run lets workers delegate, a worker can split parts off its own task this way: they branch from it and merge back into it, and the worker accepts them. Like plan_submit, each task goes to a new execution session unless it says fresh: false; tasks that could not start are listed in not_started with the reason.",
+        description: "Add tasks to your running run (same fields as plan_submit's tasks); spec.result_schema optionally defines a JSON Schema for the worker's result. They start once their dependencies are merged. Keys already in the run are left as they are. If the run lets workers delegate, a worker can split parts off its own task this way: they branch from it and merge back into it, and the worker accepts them. Like plan_submit, each task goes to a new execution session unless it says fresh: false; tasks that could not start are listed in not_started with the reason.",
         groups: RUN,
         schema: || {
             object(
@@ -491,7 +492,11 @@ const TOOLS: &[ToolDef] = &[
         name: "task_get",
         description: "One task in full: spec, report (worker summary, checks, diff stat, failure, question, review), branch, worktree, run branch.",
         groups: RUN,
-        schema: || task_schema(json!({})),
+        schema: || {
+            task_schema(
+                json!({ "path": { "type": "string", "description": "JSON Pointer into report.result" } }),
+            )
+        },
     },
     ToolDef {
         name: "task_update",
@@ -720,6 +725,7 @@ const TOOLS: &[ToolDef] = &[
             let mut schema = task_id_schema(
                 json!({ "summary": { "type": "string", "description": "What you changed." } }),
             );
+            schema["properties"]["result"] = json!({ "description": "Structured JSON result; required when the task has a result_schema." });
             // Optional, unlike the fields `task_id_schema` lists as required.
             schema["properties"]["used"] = json!({
                 "type": "array",
@@ -743,7 +749,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "review_submit",
-        description: "Give your verdict on the change you are reviewing; it goes to whoever asked for the review. Answer the numbered checklist too when your brief has one: a fail proposes a replacement to the person.",
+        description: "Give your verdict on the change you are reviewing; it goes to whoever asked for the review. Grade each finding P0-P3 with a confidence and give a merge verdict: P0 blocks the merge and must be fixed, P1 should be fixed before it, P2 can follow, P3 is a suggestion. Answer the numbered checklist too when your brief has one: a fail proposes a replacement to the person.",
         groups: REVIEWER,
         schema: || {
             let mut schema = task_id_schema(json!({
@@ -751,6 +757,27 @@ const TOOLS: &[ToolDef] = &[
                 "notes": { "type": "string", "description": "For a rejection: exactly what to fix." }
             }));
             // Optional, unlike the fields `task_id_schema` lists as required.
+            schema["properties"]["findings"] = json!({
+                "type": "array",
+                "description": "Problems found, most severe first when you list them. P0 blocks the merge and must be fixed; P1 should be fixed before it; P2 can follow; P3 is a suggestion.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "severity": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+                        "confidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "How sure you are: a number from 0 (a guess) to 1 (certain), not high/medium/low." },
+                        "file": { "type": "string", "description": "The file it is in, relative to the repository root." },
+                        "line": { "type": "integer", "minimum": 1, "description": "The line on the new side of the diff." },
+                        "title": { "type": "string", "description": "One line: what is wrong." },
+                        "detail": { "type": "string", "description": "Why it matters, or how to fix it." }
+                    },
+                    "required": ["severity", "confidence", "title"]
+                }
+            });
+            schema["properties"]["verdict"] = json!({
+                "type": "string",
+                "enum": ["merge", "merge_after_fixes", "do_not_merge"],
+                "description": "Whether the change can merge. It must agree with approve (true is merge, false is do_not_merge) and with the findings (a P0 cannot merge). Omit it and approve decides."
+            });
             schema["properties"]["checklist"] = json!({
                 "type": "array",
                 "description": "One verdict per numbered item of the reviewer checklist.",
@@ -767,6 +794,50 @@ const TOOLS: &[ToolDef] = &[
             schema
         },
     },
+    ToolDef {
+        name: "extension_api",
+        description: "Get the extension API, event types, groups, GUI slots, runnable example, stdin self-test and measured CLI MCP timeouts. Start here when creating a tool or panel.",
+        groups: ALL,
+        schema: || object(json!({}), &[]),
+    },
+    ToolDef {
+        name: "extension_check",
+        description: "Statically check an extension manifest, schemas and entry files. Never executes extension code or enables it.",
+        groups: ALL,
+        schema: || object(json!({ "name": { "type": "string" } }), &["name"]),
+    },
+    ToolDef {
+        name: "extension_request_enable",
+        description: "Ask the hub to snapshot an extension and create a pending human approval record. Does not approve, enable or change auto-trust.",
+        groups: ALL,
+        schema: || object(json!({ "name": { "type": "string" } }), &["name"]),
+    },
+    ToolDef {
+        name: "extension_logs",
+        description: "Read the extension log tail (last 64 KiB), including stderr and call status.",
+        groups: ALL,
+        schema: || object(json!({ "name": { "type": "string" } }), &["name"]),
+    },
+    ToolDef {
+        name: "extension_tools",
+        description: "List the tools of enabled extensions that you may call right now, with their input schemas. A session that started before an extension was enabled does not see its tools in the tool list; this lists them, and `extension_call` runs one.",
+        groups: ALL,
+        schema: || object(json!({}), &[]),
+    },
+    ToolDef {
+        name: "extension_call",
+        description: "Call a tool of an enabled extension by its full name (`<extension>__<tool>`, see `extension_tools`). Same as calling the tool directly; use this when the tool is not in your tool list.",
+        groups: ALL,
+        schema: || {
+            object(
+                json!({
+                    "tool": { "type": "string", "description": "Full tool name, e.g. standup__report." },
+                    "input": { "type": "object", "description": "The tool's input, as its schema in `extension_tools` says." }
+                }),
+                &["tool"],
+            )
+        },
+    },
 ];
 
 pub(crate) fn args<T: DeserializeOwned>(value: Value) -> Result<T, CoreError> {
@@ -778,7 +849,7 @@ impl Orchestrator {
     /// The tools `agent` may call, by its permission groups.
     pub async fn tools_for(&self, agent: &Agent) -> Vec<ToolInfo> {
         let groups = self.groups(agent).await;
-        TOOLS
+        let mut tools: Vec<ToolInfo> = TOOLS
             .iter()
             .filter(|t| t.groups.iter().any(|g| groups.contains(g)))
             .map(|t| ToolInfo {
@@ -786,7 +857,80 @@ impl Orchestrator {
                 description: t.description.to_owned(),
                 input_schema: (t.schema)(),
             })
+            .collect();
+        // The enabled extensions' tools, by the groups each declares (docs/EXTENSIONS.md §3).
+        tools.extend(
+            self.extension_tools_for(&groups)
+                .into_iter()
+                .map(|t| ToolInfo {
+                    name: t.name,
+                    description: t.description,
+                    input_schema: t.input_schema,
+                }),
+        );
+        tools
+    }
+
+    /// The enabled extensions' tools whose groups include one of `groups`. The list is only
+    /// what is shown; the host checks again when the tool is called.
+    pub(crate) fn extension_tools_for(
+        &self,
+        groups: &[Group],
+    ) -> Vec<crate::host::ExtensionToolSpec> {
+        let Some(host) = self.extensions.get() else {
+            return Vec::new();
+        };
+        host.tools()
+            .into_iter()
+            .filter(|t| {
+                t.groups
+                    .iter()
+                    .any(|g| groups.iter().any(|have| have.name() == g))
+            })
             .collect()
+    }
+
+    /// Calls an extension tool as `caller`: who they are and their groups are read here, at
+    /// call time, not taken from the request.
+    async fn call_extension(
+        &self,
+        caller: &Agent,
+        name: &str,
+        input: Value,
+    ) -> Result<Value, CoreError> {
+        let host = self.extensions.get().ok_or_else(|| CoreError::NotFound {
+            kind: "tool",
+            id: name.to_owned(),
+        })?;
+        let groups = self.groups(caller).await;
+        let claim = match self.store.claim_of(caller.id).await {
+            Ok(claim) => claim,
+            Err(err) => {
+                tracing::warn!(agent = %caller.id, error = %err, "cannot read the agent's claim");
+                None
+            }
+        };
+        host.call(
+            crate::host::ExtensionCaller {
+                agent: caller.clone(),
+                groups: groups.iter().map(|g| g.name().to_owned()).collect(),
+                run: claim.as_ref().map(|c| c.run_id),
+                task: claim.and_then(|c| c.task_id).map(|t| t.to_string()),
+            },
+            name,
+            input,
+        )
+        .await
+    }
+
+    /// The extra instructions enabled extensions declare for `groups`, joined; empty when
+    /// there are none. The caller appends them after everything the hub says.
+    pub fn extension_prompts(&self, groups: &[Group]) -> String {
+        let Some(host) = self.extensions.get() else {
+            return String::new();
+        };
+        let names: Vec<&str> = groups.iter().map(|g| g.name()).collect();
+        host.prompts(&names).join("\n\n")
     }
 
     pub async fn call_tool(
@@ -795,6 +939,10 @@ impl Orchestrator {
         name: &str,
         input: Value,
     ) -> Result<Value, CoreError> {
+        // `<extension>__<tool>`: no built-in name contains `__`.
+        if name.contains("__") {
+            return self.call_extension(caller, name, input).await;
+        }
         let tool = TOOLS
             .iter()
             .find(|t| t.name == name)
@@ -927,8 +1075,10 @@ impl Orchestrator {
                     used: Vec<String>,
                 }
                 let task = self.task_ref(caller, &input).await?;
+                let result = input.get("result").cloned();
                 let a: A = args(input)?;
-                self.complete(caller, task, a.summary).await?;
+                self.complete_with_result(caller, task, a.summary, result)
+                    .await?;
                 // Tags that named no entry of this project or the person come back, so the
                 // worker can name them again properly. The report is already in: a store that
                 // cannot record them must not make task_complete fail and be retried, so they
@@ -973,11 +1123,38 @@ impl Orchestrator {
                     #[serde(default)]
                     notes: String,
                     #[serde(default)]
+                    findings: Vec<crossagents_core::model::ReviewFinding>,
+                    #[serde(default)]
+                    verdict: Option<crossagents_core::model::ReviewVerdict>,
+                    #[serde(default)]
                     checklist: Vec<crate::expertise::review::ChecklistItem>,
                 }
                 let id = self.task_ref(caller, &input).await?;
                 let a: A = args(input)?;
-                self.review(caller, id, a.approve, a.notes).await?;
+                // Refuse a call whose approve and verdict disagree before anything is
+                // recorded (docs/TODO.md §二十五 第 6 条).
+                let verdict = crate::review::effective_verdict(a.approve, a.verdict, &a.findings)?;
+                let findings = crate::review::sorted_findings(&a.findings);
+                // The notes the issuer reads: the reviewer's words, then the verdict and
+                // the findings, P0 first with the blocking ones (P0/P1) on top.
+                let notes = crate::review::review_notes(
+                    &a.notes,
+                    &findings,
+                    a.verdict.or((!findings.is_empty()).then_some(verdict)),
+                );
+                // Record the structured result while the task is still Reviewing: nobody
+                // can accept it then, so this write cannot race an accept. `review` below
+                // owns the status and reviewer checks and refuses a caller that may not
+                // review; only touch the report when those checks would pass.
+                let mut stored = self.store.get_task(id).await?;
+                if stored.status == crossagents_core::TaskStatus::Reviewing
+                    && stored.reviewer == Some(caller.id)
+                {
+                    stored.report.findings = findings;
+                    stored.report.verdict = Some(verdict);
+                    self.store.update_task(&stored).await?;
+                }
+                self.review(caller, id, a.approve, notes).await?;
                 // A failed item proposes a replacement to the person (EXPERTISE §6.3). The
                 // review is already in, so a store that cannot keep candidates must not make
                 // this call fail and be retried.
@@ -999,6 +1176,39 @@ impl Orchestrator {
                     "candidates": candidates,
                     "next": "End your turn."
                 }))
+            }
+            "extension_api" | "extension_check" | "extension_request_enable" | "extension_logs" => {
+                self.call_extension(caller, name, input).await
+            }
+            "extension_tools" => {
+                let tools: Vec<Value> = self
+                    .extension_tools_for(&groups)
+                    .into_iter()
+                    .map(|t| {
+                        json!({
+                            "name": t.name,
+                            "description": t.description,
+                            "input_schema": t.input_schema,
+                        })
+                    })
+                    .collect();
+                Ok(json!({ "tools": tools }))
+            }
+            "extension_call" => {
+                #[derive(Deserialize)]
+                struct A {
+                    tool: String,
+                    #[serde(default)]
+                    input: Value,
+                }
+                let a: A = args(input)?;
+                if !a.tool.contains("__") {
+                    return Err(CoreError::InvalidName(format!(
+                        "{:?} is not an extension tool: the name is <extension>__<tool> (see extension_tools)",
+                        a.tool
+                    )));
+                }
+                self.call_extension(caller, &a.tool, a.input).await
             }
             _ => unreachable!("every tool in TOOLS is handled"),
         }

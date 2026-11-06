@@ -101,6 +101,22 @@ test("the files and graph endpoints pass for every scope", () => {
   assert.ok(allowed("GET", "/v1/agents/Rex/commits/abc123/diff"));
 });
 
+test("the extension endpoints the page uses pass, and nothing wider", () => {
+  assert.ok(allowed("GET", "/v1/extensions"));
+  assert.ok(allowed("GET", "/v1/extensions/standup/logs"));
+  assert.ok(allowed("GET", "/v1/extensions/standup/pending/diff"));
+  assert.ok(allowed("POST", "/v1/extensions/standup/enable"));
+  assert.ok(allowed("POST", "/v1/extensions/standup/disable"));
+  assert.ok(allowed("POST", "/v1/extensions/standup/auto-trust"));
+  assert.ok(allowed("POST", "/v1/extensions/standup/tools/report"));
+  assert.ok(allowed("GET", "/v1/extensions/calls/abc"));
+  // Logging is read-only, and no route under /v1/extensions takes anything else.
+  assert.ok(!allowed("POST", "/v1/extensions/standup/logs"));
+  assert.ok(!allowed("DELETE", "/v1/extensions/standup/logs"));
+  assert.ok(!allowed("GET", "/v1/extensions/standup/logs/old"));
+  assert.ok(!allowed("GET", "/v1/extensions/standup/enable"));
+});
+
 test("what the GUI never calls stays refused", () => {
   assert.ok(!allowed("POST", "/v1/shutdown"));
   assert.ok(!allowed("GET", "/v1/me"));

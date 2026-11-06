@@ -65,6 +65,20 @@ test("paths inside the working directory are shortened", () => {
   assert.equal(stepLine(tool("edit", "completed", "Write /w/a/n.txt") as never, "/w/a"), "✎ n.txt");
 });
 
+test("the shortened path uses /, and only inside the path", () => {
+  const cwd = "C:\\Users\\x\\repo";
+  // The bug from run-cleanup: the rest of the path kept Windows separators.
+  assert.equal(relativeTo("Read C:\\Users\\x\\repo\\crates\\orchestrator\\src", cwd), "Read crates/orchestrator/src");
+  assert.equal(stepLine(tool("read", "completed", "C:\\Users\\x\\repo\\crates\\orchestrator\\src\\main.rs") as never, cwd), "crates/orchestrator/src/main.rs");
+  // A command's own backslashes are not path separators to rewrite.
+  assert.equal(relativeTo("cd C:\\Users\\x\\repo && echo a\\b", cwd), "cd . && echo a\\b");
+  assert.equal(relativeTo("echo C:\\Users\\x\\note.txt", cwd), "echo C:\\Users\\x\\note.txt");
+  // Paths joined in one word are each shortened.
+  assert.equal(relativeTo("C:\\Users\\x\\repo\\a\\b,C:\\Users\\x\\repo\\c;C:\\Users\\x\\repo", cwd), "a/b,c;.");
+  // A trailing separator is dropped, so the file name reads as itself.
+  assert.equal(relativeTo("Read C:\\Users\\x\\repo\\sub\\", cwd), "Read sub");
+});
+
 test("calls that change the team or the code are cards, not folded steps", () => {
   const spawn = tool("mcp", "completed", "crossagents.agent_spawn");
   const claudeSpawn = tool("mcp", "completed", "mcp__crossagents__agent_spawn");
@@ -73,6 +87,28 @@ test("calls that change the team or the code are cards, not folded steps", () =>
   assert.equal(actionOf(tool("mcp", "completed", "crossagents.agent_list")), undefined);
   assert.equal(actionOf(tool("mcp", "completed", "agent_spawn")), undefined, "only the hub tool");
   const blocks = workGroups([tool("read"), spawn, tool("read")]);
+  assert.deepEqual(
+    blocks.map((b) => b.kind),
+    ["steps", "item", "steps"],
+  );
+});
+
+test("an extension tool is never mistaken for a built-in action", () => {
+  // `standup__run_land` ends in an action name but belongs to the extension, not the hub.
+  for (const title of [
+    "mcp__crossagents__standup__run_land",
+    "crossagents.standup__run_land",
+    "mcp__crossagents__standup__agent_spawn",
+    "crossagents.standup__task_accept",
+  ]) {
+    assert.equal(actionOf(tool("mcp", "completed", title)), undefined, title);
+  }
+  assert.equal(actionOf(tool("mcp", "completed", "mcp__crossagents__extension_call")), undefined);
+});
+
+test("a tool call an extension draws itself is a card, not a folded step", () => {
+  const own = tool("mcp", "completed", "mcp__crossagents__standup__report");
+  const blocks = workGroups([tool("read"), own, tool("read")], (item) => item === own);
   assert.deepEqual(
     blocks.map((b) => b.kind),
     ["steps", "item", "steps"],

@@ -6,6 +6,8 @@
 >
 > 状态：`[ ]` 未开始 · `[~]` 进行中 · `[>]` 推迟到后续阶段。
 > 已完成（`[x]`）和已决定不做（`[-]`）的条目挪到 [DONE.md](DONE.md)，章节编号相同；做完一条就剪过去。
+>
+> 最后对照代码核对：2026-11-06（0.2.1）。10-31 之后没走这份清单就做完的事，补记在 DONE.md §二十四。
 
 ## 一、进程监督（优先）
 
@@ -30,7 +32,7 @@
 
 版本不一致：
 
-- [ ] `version` 不等但 `api` 相同 → 允许连接，在侧栏版本号旁标不一致，并隐藏该版本没有的功能入口
+- [~] `version` 不等但 `api` 相同 → 允许连接，在侧栏版本号旁标不一致（已做，`apps/gui/src/Sidebar.tsx` 的 `build.differs`），并隐藏该版本没有的功能入口（未做）
 - [ ] 验收：旧 hub + 新 GUI、新 hub + 旧 GUI 各跑一次，提示可见、界面不崩、能重置连接
 
 ## 三、常驻守护（等第一步稳定后再做）
@@ -51,7 +53,7 @@
 
 已完成 1 条，见 [DONE.md](DONE.md) 同名一节。
 
-- [ ] hooks 默认关闭，需显式开启（参考 cutex 的 "Allow commands" 开关）
+- [~] hooks 默认关闭，需显式开启（参考 cutex 的 "Allow commands" 开关）：默认的 `setting_sources` 已不读用户自己的设置，所以用户级 hooks 默认不生效（`crates/drivers/src/claude_native/wire.rs`）；单独的开关和项目级 hooks 的处理未做
 - [ ] 运行时版本钉住：每个 agent 记录所用的 Claude Code 版本，升级后单独 repin，而不是全局切换
 - [ ] 每次升级 Claude Code 后跑 `claude_native` 冒烟测试（DESIGN.md §测试）
 
@@ -157,16 +159,16 @@ B3 远程开发：
 - [~] A1 run 共享 `node_modules`，GUI 的 `tsc --noEmit` 与 `node --test` 进 `crossagents.toml` checks（2026-10-30 检查已进：`paths = ["apps/gui", "crossagents.toml"]` 依次跑 `npm --prefix apps/gui ci`、`run typecheck`、`test`，冷 worktree 里每次自己装依赖；共享 `node_modules` / 依赖缓存未做）
 - [ ] A2 mock 里无对话的 agent 也按插件给出能力
 - [ ] A3 worker 克隆合并 / 取消后归档，run 追溯保留它最后几轮
-- [ ] B1 压缩合并用 `run_finish` 的 `message`
+- [~] B1 压缩合并用 `run_finish` 的 `message`：`run_land` 已能传 `message` 作落地提交说明；`run_finish` 的 `message` 仍只用于提交主导自己的改动，没有传到落地（不传时默认 `crossagents: <run 标题>`）
 - [ ] B2 落地提交加 `Co-authored-by` 或可选人的 git 身份
 - [ ] B3 run 页只显示本 run 的通知
 - [ ] B4 开场说明带本机可用工具链
-- [ ] B5 hooks 默认关闭（同 §四）
+- [~] B5 hooks 默认关闭（同 §五）
 - [ ] B6 附件路径不能越出工作目录（同 §七；计划由人批）
 - [ ] C1 run 复盘：从 trace 产出「现象 / 影响 / 方向」表到 `docs/tasks/RETRO-<run>.md`
 - [ ] C2 主导从复盘里挑一条开新 run 去修（计划仍要人批）
 - [ ] C3 改 hub 的任务在 `hub sandbox` 里跑冒烟再收尾
-- [ ] L1–L3 项目排障记录（L1 完成 2026-10-28）：run 中用 `issue/` 笔记随手记问题与绕法，收尾逐条整理进项目 lessons（按稳定的 project_id 跨节点共享、跨项目隔离），按需搜、失败时附相关条目，不当规则注入（任务书 [tasks/LESSONS.md](tasks/LESSONS.md)）
+- [~] L1–L3 项目排障记录（L1 完成 2026-10-28；L2、L3 未开工：没有 `related_lessons`，也没有 GUI 页）：run 中用 `issue/` 笔记随手记问题与绕法，收尾逐条整理进项目 lessons（按稳定的 project_id 跨节点共享、跨项目隔离），按需搜、失败时附相关条目，不当规则注入（任务书 [tasks/LESSONS.md](tasks/LESSONS.md)）
 
 ## 十二、run 的收尾：再开 Work 与删除
 
@@ -185,7 +187,7 @@ B3 远程开发：
 
 第二批（P0，agent 间通信里空着的那块）：
 
-- [ ] 唤醒规则（Multica）：agent 挂「等某事」的规则后结束本轮，条件满足再起一轮并说明被什么唤醒；自己的消息不唤醒自己、排队去重、同一规则无人参与连环触发 3 次或 1 小时超过 12 次自动暂停、等待默认最多 7 天；任务结束时规则全关（multica §2.1）
+- [~] 唤醒规则（Multica）：agent 挂「等某事」的规则后结束本轮，条件满足再起一轮并说明被什么唤醒；自己的消息不唤醒自己、排队去重、同一规则无人参与连环触发 3 次或 1 小时超过 12 次自动暂停、等待默认最多 7 天；任务结束时规则全关（multica §2.1）。已有 `watch`（任务或队友的事件，最多 20 条）和 `remind_set`；上述防连环触发、过期和收尾规则还没逐条对照
 - [ ] 分阶段唤醒（Multica）：子任务带 stage，一批全部结束就唤醒 lead 放行下一批，全部结束再唤醒一次做汇总；内置规则，不用手建（multica §2.2）
 - [ ] Planner 唤醒表（Multica）：成员发进展但没 @ 人才唤醒 Planner，@ 了别人不唤醒，Planner 自己的消息不唤醒；派活协议和花名册作为固定段落追加在 Planner 指令后（multica §2.3，对应 DESIGN §4.5、§6）
 
@@ -294,9 +296,43 @@ B3 远程开发：
 
 - [ ] **`EventKind` 的 `large_enum_variant` 用 `#[allow]` 压住了，真修法是装箱**：变体装的是整条记录，`RunCreated { run: Run }` 约 592 字节，其余多为几十字节。装箱会牵动每一处构造与匹配，所以暂时加了带理由的 `#[allow]`，换来 `clippy --workspace -- -D warnings` 能对其余一切设闸。
 - [ ] **ts-rs 解析不了 `deserialize_with`**：`cargo test` 每次都打 `failed to parse serde attribute | deserialize_with =`。目前用显式 `#[ts(type = ...)]` 绕开（`ContinuationUpdate` 的三态字段），但下次有人加 `deserialize_with` 而忘了标类型，bindings 会静默生成错的类型。
-- [ ] **`cargo test --workspace` 在冷构建那一轮偶发失败过一次，没查到是哪条**（2026-10-30 记）：落 main 前的第一轮全量测试退出 101、有一条 `test result` 带非零失败，我当时只统计了数量没留下名字，之后连跑三轮全绿、零失败。与下面两条「与并发负载抢锁」的既有偶发是同一类条件（刚合并、整机在编译），但没有证据指向具体哪条。下次撞上要**先把输出存盘再分析**。2026-10-31 run `6d85f696` 撞上一次并留下了名字：`crates/mock-agent/tests/continuation.rs` 的 `settling_the_checkpoint_at_idle_does_not_swallow_a_stuck_report`（19 项里只它一条失败，当时同一台机器上另一个任务在全量编译；单独重跑该测试与同文件 19 项全绿）。它等的是「空闲时结算检查点」的时序，和下面两条一样属于与并发负载抢时间的一类，应当标成串行或独占资源。
 - [ ] **`crates/core/tests/lock_kill_race.rs` 与并发负载抢锁，偶发失败**：和别的 crate 的测试一起跑时失败过一次，单独跑与重跑组合命令都 4/4。它测的就是抢锁，跟整个 workspace 的测试并行本就不可靠；应当标成串行或独占资源。
 
-- [ ] **`switch_round` 直接 shell 调 `git checkout -b`，绕过 `WorkspaceProvider` trait**（2026-10-31 run `bb28e32e` 记）：`crates/orchestrator/src/engine.rs` 里同组续轮切分支那一处不走 `WorkspaceProvider`，而是自己起一个 git 进程。是分层瑕疵不是 bug——行为正确，测试也过——但它绕开了唯一该知道工作区怎么操作的那一层：换别的 provider（非 git、或远端检出）时这一处会静默失效，而且它拿不到 trait 那边的分支名占用检查（见 §二十二 上面那条 `-2`/`-3` 另起名字的规矩）。真修法是给 trait 加一个开分支的方法，让这一处调它。
+- [ ] **`switch_round` 直接 shell 调 `git checkout -b`，绕过 `WorkspaceProvider` trait**（2026-10-31 run `bb28e32e` 记）：`crates/orchestrator/src/engine.rs` 里同组续轮切分支那一处不走 `WorkspaceProvider`，而是自己起一个 git 进程。是分层瑕疵不是 bug——行为正确，测试也过——但它绕开了唯一该知道工作区怎么操作的那一层：换别的 provider（非 git、或远端检出）时这一处会静默失效，而且它拿不到 trait 那边的分支名占用检查（见 DONE.md §二十一 `-2`/`-3` 另起名字的规矩）。真修法是给 trait 加一个开分支的方法，让这一处调它。
 - [ ] **`lead_self` 里 `continuing` 跳过 `serving_person` 检查，把 §十六 第一条那个 409 换了个位置**（2026-10-31 run `bb28e32e` 记）：`run_next` 必须跳过这个检查——主导正是在应答人的时候调它，不跳过就永远 409。但 `continuing` 这个口子同时也放过了 HTTP `POST /v1/works/{id}/runs` 那条路，于是「人正在和主导说话时不能给它派活」这道保护在 API 侧也没了，等于 §十六 第一条那个问题从工具侧搬到了 API 侧。真修法是把「这是续轮」和「免除 serving_person」分开表达，只让工具那条路免除。
 - [ ] **`AgentActivity::push` 开头的 `retain` 会让「超过 2 小时没有任何中间事件的工具调用」把计数归零**（2026-10-31 run `bb28e32e` 记，审阅时 Leo 发现）：`crates/orchestrator/src/running.rs` 的 `push` 在 match 之前先清过期条目。某个工具调用连续两小时没发出任何中间事件（没有 `AgentToolDetail` / `AgentToolOutput` / `AgentTurnCompleted`），等它终于发事件时条目已被清，match 里 `get_mut` 拿不到，下一个事件便用 `TurnActivity::new` 重建，`started` 归零、`files_touched` 清零——主导会看到「本轮刚开始、改过 0 个文件」。和同文件 `RunningCommands` 的 `STALE_AFTER_HOURS` 是同一种取舍，方向安全（宁可少报不多报），所以没在本轮改。真修法是让过期判断只影响 `of()` 的读，清理走单独一条按 `AgentTurnStarted` 触发的路，而不是每个事件都先清。
+
+## 二十三、发布
+
+全部完成，见 [DONE.md](DONE.md) 同名一节。
+
+## 二十四、10-31 之后的工作留下的尾巴
+
+> 2026-11-06 核对时从设计稿和提交记录里摘出来的，做完的部分见 [DONE.md](DONE.md) 同名一节。
+
+- [ ] **MCP 连接关闭（`-32099`）根因未查明**：`mcp-diag` 只让子进程退出的原因（stderr、退出状态）变得可见，没有定位问题。下次撞上先看这些输出
+- [ ] **要人定：内置事件流面板删不删**：试点 `extensions/debug/` 已完成，内置面板暂时保留（[EXTENSIONS-MIGRATION.md](EXTENSIONS-MIGRATION.md)）
+- [ ] `role` 字段的兼容迁移（[AGENT-WORKSPACE.md](AGENT-WORKSPACE.md) §6）
+- [ ] AGENT-WORKSPACE 验收补测：场景 6（断线重连）、场景 9（自动审批策略）只有纯函数测试，没实际跑过；键盘焦点只做了代码审查（同文档 §8）
+- [>] 减少额度消耗阶段 3：暂缓（[USAGE-TRIM.md](USAGE-TRIM.md)）
+
+## 二十五、借鉴 oh-my-pi 与 Cutex 0.2.1
+
+> 2026-11-06 读源码和设计稿整理，人选了这 7 条。只读过，没运行。依据固定到核对时的提交：
+> oh-my-pi [`b7221d9`](https://github.com/can1357/oh-my-pi/tree/b7221d994869ed36a81b44e60827786f572498ed)（单 agent 编码 harness，从 Pi fork 而来；它在工具层的亮点，如按内容哈希编辑、LSP、调试器、进程内 bash，我们驱动现成 CLI 用不上，不列）；
+> Cutex desktop 0.2.1 [`9fbae59`](https://github.com/senxiu-official/cutex-desktop/tree/9fbae59caa37c09eaa89d127a233f83d49601203)（上次核对是 0.2.0 `6216e67`）。
+> 建议顺序：3 → 2 → 1（1 先单独开 Work 出设计），其余随后。
+
+- [ ] **1. 跨厂商顾问**（oh-my-pi [advisor-watchdog.md](https://github.com/can1357/oh-my-pi/blob/b7221d994869ed36a81b44e60827786f572498ed/docs/advisor-watchdog.md)）：给一个 agent 配一个别家模型当顾问，每轮读新增的转录，用 `advise` 工具插回意见。三级：`nit` 攒到回合边界、`concern` 可打断、`blocker` 一定唤醒。要照着学的规矩：
+  - 去重，以及过滤没内容的话（lgtm、done 一类）；每轮最多 4 条非 blocker；
+  - 打断之后冷却 3 轮；
+  - 人主动按停时不自动续跑，意见留成卡片，下次人发消息时一起带上；
+  - 压缩上下文后顾问状态重置；顾问自己的意见不再回喂给它。
+
+  我们有插话和中断，缺的是逐轮看转录的入口和这套投递规则。现有的 `review_request` 只能按任务审一次。先出设计：顾问是普通会话还是专门角色、额度怎么算、run 里和 run 外各怎么用
+  - 2026-11-06 设计稿已写好：[tasks/ADVISOR.md](tasks/ADVISOR.md)。等人看过再决定实现范围：稿子自己的最小可用版，还是主导建议的缩小版（状态放内存、预算只按次数、只做工具和卡片）。§8 有 5 个问题要人定
+- [ ] **2 的尾巴**（第 2 条本身已完成，见 [DONE.md](DONE.md) 同名一节）：
+  - 重新拉取转录后，排队中那条的 `queued_reason` 和「已撤回」不在快照里（hub 没存这两个字段），重载页面后只显示「排队中」，或者那一行消失；只有事件路径是完整的
+  - Codex 驱动把 120 秒没应答的插话当成失败，回滚后排队；如果插话其实已经送到，模型会读到两次（`crates/drivers/src/codex_native/mod.rs` 约 :433）。性质是「不确定送没送到」，该映射成 outcome_unknown，而不是改成排队
+  - Electron 的超时、断线映射没在打包环境里实测过
+- [ ] **4 的尾巴**：驱动自己压缩上下文时没有事件，流式规则的去重状态不会重置；`inject` 在事件泵里同步等待，ACP 驱动的 interrupt 最多会让输出转发停 5 秒；扩展那一侧的 `RuleSource` 没接（详见 DONE.md 第 4 条）
