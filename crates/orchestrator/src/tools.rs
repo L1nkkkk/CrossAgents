@@ -713,12 +713,13 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "run_retro",
-        description: "Write the retro of a finished run (yours unless `run` names another of your project): read its trace and its `issue/` notes, and write docs/tasks/RETRO-<run>.md in the repository — a 现象 / 影响 / 方向 table in the shape of docs/tasks/DOGFOOD.md §9. It writes that document only, never code. The run must have ended.",
+        description: "Write the retro of a finished run (yours unless `run` names another of your project): read its trace and its `issue/` notes, and write docs/tasks/RETRO-<run>.md in your own checkout — a 现象 / 影响 / 方向 table in the shape of docs/tasks/DOGFOOD.md §9. It writes that document only, never code, and does not commit. The run must have ended; an existing document is kept unless force.",
         groups: PLANNER,
         schema: || {
             object(
                 json!({
-                    "run": { "type": "string", "description": "Run id, or the start or end of one; default: your own." }
+                    "run": { "type": "string", "description": "Run id, or the start or end of one; default: your own." },
+                    "force": { "type": "boolean", "description": "Write again over a retro that is already there." }
                 }),
                 &[],
             )

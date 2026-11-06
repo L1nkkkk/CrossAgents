@@ -55,13 +55,48 @@ pub fn short_id(run: RunId) -> String {
     hex[hex.len().saturating_sub(8)..].to_owned()
 }
 
-/// Writes `doc` under `<repo>/docs/tasks/`, making the directory when the checkout has no
-/// documents yet, and gives back the file's path.
-pub fn write(repo: &Path, run: RunId, doc: &RetroDoc) -> Result<PathBuf, CoreError> {
-    let dir = repo.join("docs").join("tasks");
+/// Writes `doc` under `<checkout>/docs/tasks/`, making the directory when the checkout has no
+/// documents yet, and gives back the file's path. The path is canonicalized and must stay
+/// inside `checkout`. An existing retro is kept unless `force`: a second look at a run should
+/// not silently replace a document the person may have written on.
+pub fn write(
+    checkout: &Path,
+    run: RunId,
+    doc: &RetroDoc,
+    force: bool,
+) -> Result<PathBuf, CoreError> {
+    let root = dunce::canonicalize(checkout)
+        .map_err(|e| CoreError::Storage(format!("cannot read {}: {e}", checkout.display())))?;
+    let dir = root.join("docs").join("tasks");
     std::fs::create_dir_all(&dir)
         .map_err(|e| CoreError::Storage(format!("cannot make {}: {e}", dir.display())))?;
+    let dir = dunce::canonicalize(&dir)
+        .map_err(|e| CoreError::Storage(format!("cannot read {}: {e}", dir.display())))?;
+    if !dir.starts_with(&root) {
+        return Err(CoreError::Conflict(format!(
+            "{} resolves outside {}: not writing the retro there",
+            dir.display(),
+            root.display()
+        )));
+    }
     let path = dir.join(file_name(run));
+    if path.exists() {
+        let real = dunce::canonicalize(&path)
+            .map_err(|e| CoreError::Storage(format!("cannot read {}: {e}", path.display())))?;
+        if !real.starts_with(&root) {
+            return Err(CoreError::Conflict(format!(
+                "{} resolves outside {}: not writing the retro there",
+                path.display(),
+                root.display()
+            )));
+        }
+        if !force {
+            return Err(CoreError::Conflict(format!(
+                "{} already exists; read it, or call again with force",
+                path.display()
+            )));
+        }
+    }
     std::fs::write(&path, &doc.markdown)
         .map_err(|e| CoreError::Storage(format!("cannot write {}: {e}", path.display())))?;
     Ok(path)
@@ -700,10 +735,10 @@ fn run_rows(run: &Run, fold: &Fold, rows: &mut Vec<Row>) {
         let note = run
             .note
             .as_deref()
-            .map(|n| format!("：{}", one_line(n, CELL_MAX)))
+            .map(|n| format!("（{}）", one_line(n, CELL_MAX)))
             .unwrap_or_default();
         rows.push(Row::new(
-            format!("run 以失败收尾{note}"),
+            format!("run：以失败收尾{note}"),
             "看状态会以为没做成；主导接手做完的也不一定算进产出",
             "收尾时把「谁接了哪一块」写清楚，或让 run 状态跟着实际产出走",
         ));
@@ -713,7 +748,7 @@ fn run_rows(run: &Run, fold: &Fold, rows: &mut Vec<Row>) {
         let failed_count = run.checks.iter().filter(|c| !c.passed).count();
         rows.push(Row::new(
             format!(
-                "项目验收 {failed_count}/{total} 没过：`{}`（exit {}）",
+                "run：项目验收 {failed_count}/{total} 没过：`{}`（exit {}）",
                 failed.command,
                 exit(failed.exit_code)
             ),
@@ -727,7 +762,7 @@ fn run_rows(run: &Run, fold: &Fold, rows: &mut Vec<Row>) {
         && fold.landed.is_none()
     {
         rows.push(Row::new(
-            "run 结束了但没有落地",
+            "run：结束了但没有落地",
             "改动只在 run 分支上，别人看不到",
             "收尾前调 run_land；要人落地就在收尾通知里写清楚",
         ));
@@ -770,19 +805,24 @@ fn coverage(run: &Run, tasks: &[Task], fold: &Fold, issues: &[Note]) -> Vec<Stri
 // The tool and the text helpers
 
 impl Orchestrator {
-    /// `run_retro`: writes a finished run's retro as a document (a lead's tool).
+    /// `run_retro`: writes a finished run's retro into the caller's own checkout (a lead's
+    /// tool; its run's checkout, not the person's base one).
     pub(crate) async fn run_retro(&self, caller: &Agent, input: Value) -> Result<Value, CoreError> {
         #[derive(Deserialize)]
         struct A {
             #[serde(default)]
             run: Option<String>,
+            /// Write again over a retro that is already there.
+            #[serde(default)]
+            force: bool,
         }
         let a: A = args(input)?;
         let run = self.retro_run(caller, a.run).await?;
         let doc = document(&*self.store, &run).await?;
-        let path = write(&run.repo, run.id, &doc)?;
+        let path = write(&caller.cwd, run.id, &doc, a.force)?;
         Ok(json!({
             "path": path.display().to_string(),
+            "checkout": caller.cwd.display().to_string(),
             "run": run.id,
             "findings": doc.findings,
             "issues": doc.issues,

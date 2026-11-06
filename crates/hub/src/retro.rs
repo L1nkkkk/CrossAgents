@@ -233,7 +233,7 @@ mod tests {
         assert!(md.contains("#api 的验收 1/1 次没过"));
         assert!(md.contains("#api 换了 1 次手：rex → w-a1b2c3d4-api"));
         assert!(md.contains("#api 的上下文压缩了 1 次"));
-        assert!(md.contains("run 结束了但没有落地"));
+        assert!(md.contains("run：结束了但没有落地"));
         assert!(md.contains("[issue/1] CodeBuddy worker 的写权限被拒"));
         assert!(md.contains("- 事件：11 条（按 run 折叠）"));
         assert!(md.contains("- 重新生成：`crossagents run retro"));
@@ -255,7 +255,7 @@ mod tests {
             findings: 0,
             issues: 0,
         };
-        let path = write(dir.path(), run.id, &doc).unwrap();
+        let path = write(dir.path(), run.id, &doc, false).unwrap();
         assert_eq!(
             path,
             dir.path()
@@ -264,5 +264,32 @@ mod tests {
                 .join(file_name(run.id))
         );
         assert_eq!(std::fs::read_to_string(path).unwrap(), "# 一句话\n");
+    }
+
+    /// A second look at the same run does not silently replace the document: only `force`
+    /// writes over it.
+    #[test]
+    fn an_existing_retro_is_kept_unless_forced() {
+        let dir = tempfile::tempdir().unwrap();
+        let (run, ..) = fixture();
+        let first = RetroDoc {
+            markdown: "# first\n".into(),
+            findings: 0,
+            issues: 0,
+        };
+        let path = write(dir.path(), run.id, &first, false).unwrap();
+        let second = RetroDoc {
+            markdown: "# second\n".into(),
+            findings: 0,
+            issues: 0,
+        };
+        let refused = write(dir.path(), run.id, &second, false).unwrap_err();
+        assert!(
+            matches!(&refused, crossagents_core::CoreError::Conflict(message) if message.contains("already exists")),
+            "{refused}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# first\n");
+        write(dir.path(), run.id, &second, true).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# second\n");
     }
 }
