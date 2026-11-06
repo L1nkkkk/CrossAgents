@@ -3,13 +3,16 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyn
 import type { Agent } from "@bindings/Agent";
 import type { HubInfo } from "@bindings/HubInfo";
 import type { RunDetail } from "@bindings/RunDetail";
+import type { WorkDetail } from "@bindings/WorkDetail";
 import { deliveryOf, lastError, useActivity, useDelivery, useUnread } from "./activity";
 import { api, errorText } from "./api";
 import type { DevHub } from "./bridge";
 import { buildTag, compareBuilds } from "./lib/build";
 import { useUpdateState } from "./lib/updates";
 import { Avatar, BrandMark, Icon, ModelMark, ago, displayName, isAgent, sessionHref } from "./components";
-import { useConnectionStatus } from "./hub";
+import { useConnectionStatus, useHubData } from "./hub";
+import { RunModeMark, RunModeTag, modeWords } from "./runmode";
+import { runState } from "./lib/taskState";
 import { RowElapsed, usePulseSeeds, useRowLive } from "./liveTurn";
 import { t } from "./lib/i18n";
 import { sessionWork } from "./lib/projectView";
@@ -96,6 +99,85 @@ function useArchiveNote() {
 }
 const sessionKey = (a: Agent) => "s:" + a.id;
 const labelOf = (a: Agent) => displayName(a);
+/** How many work groups the sidebar lists before the list gets too long to scan. */
+const SIDEBAR_WORKS = 8;
+
+/**
+ * The work groups (docs/tasks/G1.md §3.5): one row each, however many rounds they have had.
+ * Each row needs its rounds — the current one's state, and the list behind the fold — so the
+ * recent groups are read whole. A hub that predates them answers 404, and the section is absent.
+ */
+function useWorks() {
+  return useHubData(
+    async () => {
+      const { works } = await api.listWorks();
+      const recent = works
+        .slice()
+        .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
+        .slice(0, SIDEBAR_WORKS);
+      const details = await Promise.all(recent.map((w) => api.getWork(w.id).catch(() => null)));
+      return details.filter((d): d is WorkDetail => d !== null);
+    },
+    [],
+    (e) => e.type.startsWith("work.") || e.type.startsWith("run."),
+  );
+}
+
+/** One work group: its title, the current round's state and mode; its rounds fold out below. */
+function WorkRow({ detail, active, selected }: { detail: WorkDetail; active: boolean; selected?: string }) {
+  const [open, setOpen] = useState(false);
+  const { work } = detail;
+  const rounds = detail.runs.slice().sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const current = rounds[rounds.length - 1];
+  const state = current ? runState(current.status) : undefined;
+  const dot: Dot = !state ? undefined : state.bucket === "active" ? "live" : state.bucket === "needs_you" ? "warn" : state.tone === "danger" ? "danger" : undefined;
+  const href = `#/work/${encodeURIComponent(work.id)}`;
+  return (
+    <div className="work-row-wrap">
+      <div className={`nav-row work-row ${active ? "active" : ""}`}>
+        <button
+          className="icon-btn work-fold"
+          aria-expanded={open}
+          aria-label={t(open ? "sidebar.collapseRounds" : "sidebar.expandRounds", { name: work.title })}
+          onClick={() => setOpen(!open)}
+        >
+          <Icon name={open ? "chevron" : "chevronRight"} size={12} />
+        </button>
+        <a className="row-link" href={href} title={t("sidebar.workTitle", { title: work.title, n: rounds.length })} aria-current={active ? "page" : undefined}>
+          <span className="row-main">
+            <span className="row-label">{work.title}</span>
+          </span>
+          {current && <RunModeTag run={current} compact className="row-mode" />}
+        </a>
+        {dot && <span className={`row-dot ${dot}`} aria-hidden="true" />}
+      </div>
+      {open && (
+        <ul className="work-round-list">
+          {rounds.map((round, i) => {
+            const state = runState(round.status);
+            return (
+              <li key={round.id}>
+                <a
+                  className={`work-round-link ${selected === round.id ? "active" : ""}`}
+                  href={`${href}/${encodeURIComponent(round.id)}`}
+                  title={round.title}
+                  aria-current={selected === round.id ? "true" : undefined}
+                >
+                  <span className="work-round-line">
+                    <span className="work-round-n">{t("sidebar.roundN", { n: i + 1 })}</span>
+                    <span className={`work-round-state ${state.tone}`}>{state.word}</span>
+                  </span>
+                  <span className="work-round-title">{round.title}</span>
+                </a>
+              </li>
+            );
+          })}
+          {!rounds.length && <li className="muted small work-round-empty">{t("sidebar.noRounds")}</li>}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 export function Sidebar({ route }: { route: string[] }) {
   const { list, tree, agents, loaded } = useWorkspaces();
@@ -108,6 +190,7 @@ export function Sidebar({ route }: { route: string[] }) {
   usePulseSeeds(everyone);
   const archiving = useArchiveNote();
   const runs = tree.data ?? [];
+  const works = useWorks();
   const todos = todoItems({
     items: questions.data?.items ?? [],
     runs,
@@ -198,6 +281,21 @@ export function Sidebar({ route }: { route: string[] }) {
             )}
             <NeedsYou items={[...todos, ...unsortedIssues, ...unboundProjects]} agents={everyone} />
             {done > 0 && <p className="sidebar-unread">{t("sidebar.doneUnread", { n: done })}</p>}
+            {!query.trim() && works.data && works.data.length > 0 && (
+              <section className="group works-group">
+                <div className="group-head static">
+                  <span className="group-name">{t("sidebar.works")}</span>
+                </div>
+                {works.data.map((detail) => (
+                  <WorkRow
+                    key={detail.work.id}
+                    detail={detail}
+                    active={route[0] === "work" && route[1] === detail.work.id}
+                    selected={route[0] === "work" && route[1] === detail.work.id ? route[2] : undefined}
+                  />
+                ))}
+              </section>
+            )}
             {!query.trim() && (pinnedMembers.length > 0 || pinnedRuns.length > 0) && (
               <section className="group">
                 <div className="group-head static">
@@ -508,6 +606,8 @@ function SessionRow({ member, active }: { member: SidebarMember; active: boolean
   const runs = useContext(Runs);
   const work = useMemo(() => sessionWork(agent.id, runs), [agent.id, runs]);
   const plan = work.lead?.tasks ?? [];
+  // Where the run it leads works: one small glyph, since the name has to stay readable here.
+  const mode = work.lead ? modeWords(work.lead.run) : undefined;
   // A turn that just ended lights its row once: finishing is worth noticing, not worth keeping.
   const wasRunning = useRef(running);
   const [justDone, setJustDone] = useState(false);
@@ -536,7 +636,19 @@ function SessionRow({ member, active }: { member: SidebarMember; active: boolean
       compact={compact}
       flash={justDone}
       peek={peek}
-      title={displayName(agent) + " · " + status + (fresh || failed ? " · " + t("sidebar.unread") : "") + (agent.model ? " · " + agent.model : "") + "\n" + (summary || t("sidebar.noActivity")) + "\n" + t("sidebar.besideHint")}
+      title={
+        displayName(agent) +
+        " · " +
+        status +
+        (fresh || failed ? " · " + t("sidebar.unread") : "") +
+        (agent.model ? " · " + agent.model : "") +
+        (mode ? " · " + mode.label : "") +
+        "\n" +
+        (summary || t("sidebar.noActivity")) +
+        (mode ? "\n" + mode.title : "") +
+        "\n" +
+        t("sidebar.besideHint")
+      }
       dot={undefined}
       pinKey={sessionKey(agent)}
       beside={agent.id}
@@ -553,6 +665,7 @@ function SessionRow({ member, active }: { member: SidebarMember; active: boolean
         <span className="member-top">
           <span className={"member-name " + (flagged ? "strong" : "")}>{displayName(agent)}</span>
           <ModelMark plugin={agent.plugin} model={agent.model} />
+          {work.lead && <RunModeMark run={work.lead.run} className="row-mode" />}
           {compact ? <span className="member-inline" data-crawl="">{summary}</span> : <span className="member-gap" />}
           {plan.length > 0 && !running && !(!uncertain && needs > 0) && <span className="member-count">{plan.filter((task) => task.status === "merged").length}/{plan.length}</span>}
           {quiet && !plan.length && member.lastAt && <span className="member-time" title={ago(member.lastAt)}>{shortSince(member.lastAt, Date.now())}</span>}

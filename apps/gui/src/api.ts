@@ -55,6 +55,8 @@ import type { ExtensionLogsResponse } from "@bindings/ExtensionLogsResponse";
 import type { EnableExtensionRequest } from "@bindings/EnableExtensionRequest";
 import type { SetExtensionAutoTrustRequest } from "@bindings/SetExtensionAutoTrustRequest";
 import type { ListRunsResponse } from "@bindings/ListRunsResponse";
+import type { ListWorksResponse } from "@bindings/ListWorksResponse";
+import type { WorkDetail } from "@bindings/WorkDetail";
 import type { ListHistoryResponse } from "@bindings/ListHistoryResponse";
 import type { ListProjectsResponse } from "@bindings/ListProjectsResponse";
 import type { ListSessionCandidatesResponse } from "@bindings/ListSessionCandidatesResponse";
@@ -388,6 +390,10 @@ export const api = {
   cancelExtensionCall: (id: string) => request<ExtensionCallResponse>("DELETE", `/v1/extensions/calls/${enc(id)}`),
 
   listRuns: () => request<ListRunsResponse>("GET", "/v1/runs"),
+  /** The work groups: a persistent conversation whose rounds are runs (docs/tasks/G1.md §3.1). */
+  listWorks: () => request<ListWorksResponse>("GET", "/v1/works"),
+  /** One work group with its rounds, and what ended rounds left behind (deleted ones too). */
+  getWork: (id: string) => request<WorkDetail>("GET", `/v1/works/${enc(id)}`),
   /** What runs left in a workspace, including the ones since deleted; every workspace's
    * without `repo`. Read-only: a deleted run's record never goes away. */
   history: (repo?: string) => request<ListHistoryResponse>("GET", `/v1/history${repo ? `?repo=${enc(repo)}` : ""}`),

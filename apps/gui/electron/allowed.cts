@@ -67,6 +67,9 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   // `?plugin=` rides along; `route()` drops it before matching.
   { method: "POST", path: /^\/v1\/plugins\/refresh$/, level: "admin" },
   { method: "GET", path: /^\/v1\/runs$/, level: "read" },
+  // Work groups and their rounds (docs/tasks/G1.md): the page reads them, and nothing writes here.
+  { method: "GET", path: /^\/v1\/works$/, level: "read" },
+  { method: "GET", path: /^\/v1\/works\/[^/]+$/, level: "read" },
   // What ended runs left in a workspace, deleted rounds too; `?repo=` rides along.
   { method: "GET", path: /^\/v1\/history$/, level: "read" },
   // Projects and their checkouts: the id a project's expertise profile is keyed by.
