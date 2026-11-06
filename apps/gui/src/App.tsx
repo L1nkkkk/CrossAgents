@@ -21,6 +21,7 @@ import { SettingsView } from "./views/Settings";
 import { UsageView } from "./views/Usage";
 import { ExpertiseView } from "./views/Expertise";
 import { WorkspaceView } from "./views/Workspace";
+import { GitView } from "./views/Git";
 import { ExtensionDetail } from "./extensions/page/Detail";
 import { ExtensionsView } from "./extensions/page/Extensions";
 import { ExtensionPageView } from "./extensions/page/Host";
@@ -250,6 +251,9 @@ export function App() {
       break;
     case "ext":
       main = a && b ? <ExtensionPageView extension={a} id={b} /> : <ExtensionsView />;
+      break;
+    case "git":
+      main = <GitView path={a} />;
       break;
     default:
       main = <HomeView />;

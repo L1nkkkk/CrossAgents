@@ -259,6 +259,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/git/branches", get(git_branches))
         .route("/v1/git/status", get(git_status))
         .route("/v1/git/commits/{sha}", get(git_commit))
+        .route("/v1/git/commits/{sha}/diff", get(git_commit_diff))
         .route("/v1/git/graph", get(git_graph))
         .route("/v1/repos/init", post(init_repo))
         .route("/v1/events", get(events))
@@ -2393,6 +2394,19 @@ async fn git_commit(
         subject: commit.subject,
         message: commit.message,
     }))
+}
+
+/// What one commit of a project changed, against its first parent.
+async fn git_commit_diff(
+    State(state): State<Arc<AppState>>,
+    Path(sha): Path<String>,
+    Query(q): Query<GitQuery>,
+) -> ApiResult<Json<ChangesResponse>> {
+    let sha = commit_sha(&sha)?;
+    let root = state.orchestrator.git_root(q.path()).await?;
+    Ok(changes_response(
+        crossagents_orchestrator::graph::commit_diff(&root, sha).await?,
+    ))
 }
 
 /// The whole repository's graph (`git log --all`).

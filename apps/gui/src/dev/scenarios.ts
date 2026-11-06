@@ -499,6 +499,11 @@ export const SCENARIOS: Scenario[] = [
     script: [],
     route: "#/extensions",
   }) },
+  { key: "git", label: "Git 页", hint: "一个项目的分支（本地/远程）、带泳道的提交图（HEAD、分支、tag）、选中提交的详情和 diff，顶部是未提交改动数", build: () => ({
+    state: { ...emptyHub(), agents: [agent({ name: "Ada", plugin: "claude", role: "worker", cwd: REPO })] },
+    script: [],
+    route: "#/git",
+  }) },
 ];
 
 export const DEFAULT_SCENARIO = "running";
