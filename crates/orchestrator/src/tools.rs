@@ -89,7 +89,8 @@ fn spec_schema() -> Value {
             "interfaces": strings,
             "acceptance": { "type": "array", "items": { "type": "string" }, "description": "Optional shell commands the hub runs when the worker reports done." },
             "references": strings,
-            "result_schema": { "type": "object", "description": "JSON Schema for the required structured result." }
+            "result_schema": { "type": "object", "description": "JSON Schema for the required structured result." },
+            "stage": { "type": "integer", "description": "Optional stage: tasks of a later stage start only once every task of an earlier stage has ended, and you are woken when each stage's batch ends. Omit for no staging." }
         },
         "required": ["goal"]
     })

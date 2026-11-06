@@ -1251,3 +1251,79 @@ async fn a_task_starts_beside_a_branch_a_dropped_attempt_left() {
             .success()
     );
 }
+
+/// Tasks in `spec.stage` are a batch: no task of the next stage starts before the batch has
+/// ended, and the lead is woken with the batch's results when it does
+/// (docs/research/multica.md §2.2).
+#[tokio::test]
+async fn a_stage_wakes_the_lead_and_holds_the_next_one_back() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+
+    // a is stage 1; b is stage 2 though it depends on nothing. Their scopes do not overlap,
+    // so only the stage holds b back.
+    let mut a = task(
+        "a",
+        goal("[write a.txt=alpha]", &format!("a done {}", accept("a"))),
+        &[],
+    );
+    let mut b = task("b", goal("[write b.txt=beta]", "b done".into()), &[]);
+    for (task, key, stage) in [(&mut a, "a", 1), (&mut b, "b", 2)] {
+        task["spec"]["stage"] = json!(stage);
+        task["spec"]["scope"] = json!({ "allow": [format!("{key}.txt")] });
+    }
+    let plan = json!([a, b]);
+    let id = start_run(&t, request(plan), json!({ "auto_approve": true })).await;
+    // The end of the stage releases the next one; nothing else makes b start.
+    w.until("b started", task_is("b", TaskStatus::Running))
+        .await;
+
+    // b started only after stage 1 had ended.
+    let (mut ended_a, mut started_b) = (None, None);
+    for (i, e) in w.seen.iter().enumerate() {
+        if let EventKind::TaskStatusChanged { key, to, .. } = &e.kind {
+            match (key.as_str(), to) {
+                ("a", TaskStatus::Merged) => ended_a = Some(i),
+                ("b", TaskStatus::Running) => started_b = Some(i),
+                _ => {}
+            }
+        }
+    }
+    let ended_a = ended_a.expect("a merged");
+    let started_b = started_b.expect("b started");
+    assert!(started_b > ended_a, "b started before stage 1 ended");
+
+    // The lead heard the batch and that the next stage may go.
+    let boss: Value = t.get("/v1/agents/boss").await.json().await.unwrap();
+    let boss_id = boss["id"].as_str().unwrap().to_owned();
+    let texts: Vec<&str> = w
+        .seen
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EventKind::AgentInput { id, text, .. } | EventKind::AgentInputUpdated { id, text, .. }
+                if id.to_string() == boss_id =>
+            {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    let stage = texts
+        .iter()
+        .find(|text| text.contains("Stage 1 of run"))
+        .unwrap_or_else(|| panic!("no stage 1 notice: {texts:?}"));
+    assert!(stage.contains("- #a merged"), "{stage}");
+    assert!(stage.contains("Stage 2 may start now"), "{stage}");
+
+    let detail = detail(&t, &id).await;
+    let status = |key: &str| detail["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["key"] == key)
+        .unwrap()["status"]
+        .clone();
+    assert_eq!(status("a"), "merged");
+    assert_eq!(status("b"), "running");
+}

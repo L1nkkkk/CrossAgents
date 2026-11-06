@@ -13,4 +13,11 @@ acceptance: Array<string>, references: Array<string>,
 /**
  * JSON Schema for the worker's structured result.
  */
-result_schema?: JsonValue | null, };
+result_schema?: JsonValue | null, 
+/**
+ * The stage the task belongs to, if any (docs/research/multica.md §2.2): tasks of a
+ * later stage start only once every task of an earlier stage has ended, and the lead is
+ * woken when each stage's batch ends. `None` is no staging, as in plans written before
+ * stages existed.
+ */
+stage?: number, };
