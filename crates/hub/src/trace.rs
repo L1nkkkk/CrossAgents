@@ -5,9 +5,15 @@
 use std::collections::HashMap;
 
 use crossagents_api_types::{
-    CheckTrace, CommandTrace, DispatchTrace, LaneTrace, RunTrace, Spent, TaskTrace, TurnTrace,
+    CheckTrace, CommandTrace, DispatchTrace, LaneMark, LaneMarkKind, LaneTrace, RunTrace, Spent,
+    StatusTrace, TaskTrace, TurnTrace,
 };
-use crossagents_core::{AgentId, AgentStatus, Event, EventKind, RunId, StopReason, TaskId};
+use crossagents_core::{
+    AgentId, AgentStatus, Event, EventKind, HumanItem, HumanItemKind, RunId, StopReason, TaskId,
+};
+
+/// A context below this many tokens is too small for a drop to mean a compaction.
+const COMPACT_FROM: u64 = 20_000;
 
 /// Characters of a failed command's output kept.
 const TAIL: usize = 600;
@@ -23,6 +29,8 @@ enum Lane {
 struct Session {
     tokens: u64,
     usd: f64,
+    /// Context tokens in use at the last report, to spot a compaction.
+    used: u64,
 }
 
 /// Folds events into the trace of `run`.
@@ -98,9 +106,16 @@ impl Tracer {
                 key,
                 to,
                 assignee,
-                ..
+                from,
             } if *run_id == self.run => {
-                self.task_mut(*id, key).status = Some(*to);
+                let task = self.task_mut(*id, key);
+                task.status = Some(*to);
+                task.statuses.push(StatusTrace {
+                    at: event.ts,
+                    from: *from,
+                    to: *to,
+                    agent: *assignee,
+                });
                 if let Some(agent) = assignee {
                     self.join(*agent, Lane::Task(*id));
                 }
@@ -169,8 +184,38 @@ impl Tracer {
                     output_tail: None,
                 });
             }
+            EventKind::RunLanded { id, landing } if *id == self.run => {
+                self.trace.landed = Some(landing.clone());
+            }
+            EventKind::HumanAsked { item } | EventKind::HumanAnswered { item }
+                if item.run_id == Some(self.run) && item.kind == HumanItemKind::Question =>
+            {
+                let asked = matches!(event.kind, EventKind::HumanAsked { .. });
+                let (kind, text) = if asked {
+                    (LaneMarkKind::Asked, Some(item.text.clone()))
+                } else {
+                    (LaneMarkKind::Answered, item.answer.clone())
+                };
+                let lane = self.human_lane(item);
+                self.lane_mut(lane).marks.push(LaneMark {
+                    at: event.ts,
+                    agent: item.from,
+                    kind,
+                    text,
+                });
+            }
             _ => self.push_agent(event),
         }
+    }
+
+    /// Where a question to the person goes: its task's lane, else its asker's, else the lead's.
+    fn human_lane(&self, item: &HumanItem) -> Lane {
+        if let Some(id) = item.task_id
+            && self.tasks.contains_key(&id)
+        {
+            return Lane::Task(id);
+        }
+        self.lanes.get(&item.from).copied().unwrap_or(Lane::Lead)
     }
 
     fn push_agent(&mut self, event: &Event) {
@@ -263,10 +308,44 @@ impl Tracer {
             } => {
                 self.sessions.remove(&agent);
             }
+            EventKind::AgentModelChanged {
+                model,
+                effort,
+                from_model,
+                from_effort,
+                ..
+            } => {
+                let name = |m: &Option<String>, e: &Option<String>| {
+                    let m = m.as_deref().unwrap_or("默认");
+                    match e {
+                        Some(e) => format!("{m} ({e})"),
+                        None => m.to_owned(),
+                    }
+                };
+                let text = format!(
+                    "{} → {}",
+                    name(from_model, from_effort),
+                    name(model, effort)
+                );
+                self.lane_mut(lane).marks.push(LaneMark {
+                    at: event.ts,
+                    agent,
+                    kind: LaneMarkKind::ModelChanged,
+                    text: Some(text),
+                });
+            }
             EventKind::AgentUsage {
-                cost_usd, tokens, ..
+                used,
+                cost_usd,
+                tokens,
+                ..
             } => {
                 let session = self.sessions.entry(agent).or_default();
+                // No event says a context was compacted: a sharp drop of what is in use within
+                // one session is one.
+                let before = session.used;
+                session.used = *used;
+                let compacted = before >= COMPACT_FROM && *used > 0 && *used * 10 <= before * 6;
                 let now_tokens = tokens.as_ref().map_or(session.tokens, |t| t.total);
                 let now_usd = cost_usd.unwrap_or(session.usd);
                 let add = Spent {
@@ -280,6 +359,14 @@ impl Tracer {
                 spent.cost_usd += add.cost_usd;
                 self.trace.spent.tokens += add.tokens;
                 self.trace.spent.cost_usd += add.cost_usd;
+                if compacted {
+                    self.lane_mut(lane).marks.push(LaneMark {
+                        at: event.ts,
+                        agent,
+                        kind: LaneMarkKind::Compacted,
+                        text: Some(format!("{}k → {}k", before / 1000, used / 1000)),
+                    });
+                }
             }
             _ => {}
         }
@@ -581,5 +668,113 @@ mod tests {
         assert_eq!(ranked, ["codex-b", "codex-a"]);
         assert!(dispatch.candidates[0].reason.contains("resets first"));
         assert!(dispatch.candidates[1].reason.contains("last resort"));
+    }
+
+    /// The swimlane's nodes: each status change, a model switch, a compaction (a sharp drop
+    /// of the context in use), a question to the person and its answer, and the landing.
+    #[test]
+    fn keeps_the_swimlane_nodes() {
+        let (run, task, worker) = (RunId::new(), TaskId::new(), AgentId::new());
+        let mut s = Script {
+            events: Vec::new(),
+            at: Utc::now(),
+        };
+        s.push(EventKind::TaskStatusChanged {
+            run_id: run,
+            id: task,
+            key: "a".into(),
+            from: TaskStatus::Pending,
+            to: TaskStatus::Running,
+            assignee: Some(worker),
+        });
+        let usage = |used: u64| EventKind::AgentUsage {
+            id: worker,
+            used,
+            size: 200_000,
+            cost_usd: None,
+            tokens: None,
+        };
+        s.push(usage(150_000));
+        s.push(usage(170_000));
+        s.push(usage(40_000));
+        s.push(usage(45_000));
+        s.push(EventKind::AgentModelChanged {
+            id: worker,
+            model: Some("opus".into()),
+            effort: Some("high".into()),
+            from_model: Some("sonnet".into()),
+            from_effort: None,
+        });
+        let item = |status, answer: Option<&str>| HumanItem {
+            id: "q1".into(),
+            kind: HumanItemKind::Question,
+            from: worker,
+            run_id: Some(run),
+            task_id: Some(task),
+            text: "用哪个库？".into(),
+            detail: None,
+            options: Vec::new(),
+            default: None,
+            timeout_at: None,
+            status,
+            answer: answer.map(Into::into),
+            answered_at: None,
+            action: None,
+            created_at: Utc::now(),
+        };
+        s.push(EventKind::HumanAsked {
+            item: item(crossagents_core::HumanItemStatus::Open, None),
+        });
+        s.push(EventKind::HumanAnswered {
+            item: item(crossagents_core::HumanItemStatus::Answered, Some("serde")),
+        });
+        s.push(EventKind::TaskStatusChanged {
+            run_id: run,
+            id: task,
+            key: "a".into(),
+            from: TaskStatus::Running,
+            to: TaskStatus::Verifying,
+            assignee: Some(worker),
+        });
+        s.push(EventKind::RunLanded {
+            id: run,
+            landing: crossagents_core::Landing {
+                mode: crossagents_core::LandMode::Squash,
+                by: "person".into(),
+                reference: "abc123".into(),
+                at: Utc::now(),
+            },
+        });
+
+        let mut tracer = Tracer::new(run);
+        for e in &s.events {
+            tracer.push(e);
+        }
+        let trace = tracer.finish();
+        let a = &trace.tasks[0];
+        let steps: Vec<_> = a.statuses.iter().map(|st| (st.from, st.to)).collect();
+        assert_eq!(
+            steps,
+            [
+                (TaskStatus::Pending, TaskStatus::Running),
+                (TaskStatus::Running, TaskStatus::Verifying)
+            ]
+        );
+        let marks: Vec<_> = a
+            .lane
+            .marks
+            .iter()
+            .map(|m| (m.kind, m.text.clone().unwrap_or_default()))
+            .collect();
+        assert_eq!(
+            marks,
+            [
+                (LaneMarkKind::Compacted, "170k → 40k".to_owned()),
+                (LaneMarkKind::ModelChanged, "sonnet → opus (high)".to_owned()),
+                (LaneMarkKind::Asked, "用哪个库？".to_owned()),
+                (LaneMarkKind::Answered, "serde".to_owned()),
+            ]
+        );
+        assert_eq!(trace.landed.map(|l| l.reference).as_deref(), Some("abc123"));
     }
 }

@@ -9,6 +9,8 @@
 //! # native_command = [...]           # launch command, overriding everything below
 //! # models = ["gemini-3-pro"]        # or the [models] section
 //! # efforts = ["low", "high"]        # reasoning effort levels
+//! # min_version = "2.0.0"            # older CLIs are not registered
+//! # verified = ["2.1"]               # upstream series the driver was checked against
 //!
 //! [models]
 //! fallback = ["gemini-3-pro", "gemini-3-flash"]
@@ -64,6 +66,12 @@ struct Manifest {
     /// Effort levels, when they are given beside `models` rather than in its section.
     #[serde(default)]
     efforts: Vec<String>,
+    /// The oldest CLI this agent runs on (docs/research/multica.md §2.9).
+    #[serde(default)]
+    min_version: Option<String>,
+    /// Upstream version series the driver was checked against (docs/DESIGN.md §9.4).
+    #[serde(default)]
+    verified: Vec<String>,
     #[serde(default)]
     locate: Locator,
     #[serde(default)]
@@ -185,6 +193,8 @@ fn parse_in(
             driver: manifest.driver,
             native_command,
             efforts,
+            min_version: manifest.min_version,
+            verified: manifest.verified,
             locate: manifest.locate,
             install: manifest.install,
             move_cwd: None,
@@ -262,6 +272,27 @@ mod tests {
         assert!(Path::new(&config.native_command[0]).is_absolute());
         assert_eq!(config.efforts, ["low", "high"]);
         assert!(warnings[0].contains("command is empty"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_description_can_name_the_versions_it_runs() {
+        let (_, config) = parse(
+            "name = \"demo\"\ncommand = [\"demo\"]\nmin_version = \"2.0.0\"\nverified = [\"2.1\", \"2.2\"]\n",
+            "test",
+        )
+        .unwrap();
+        assert_eq!(config.min_version.as_deref(), Some("2.0.0"));
+        assert_eq!(config.verified, ["2.1", "2.2"]);
+        assert!(config.too_old(Some("1.9.9")));
+        assert!(!config.too_old(Some("2.0.0")));
+        // An unasked version, or a description without a floor, is never too old.
+        assert!(!config.too_old(None));
+        let (_, bare) = parse("name = \"bare\"\ncommand = [\"bare\"]\n", "test").unwrap();
+        assert!(bare.min_version.is_none() && bare.verified.is_empty());
+        assert!(!bare.too_old(Some("0.0.1")));
+        assert!(!bare.unverified(Some("0.0.1")));
+        assert!(!config.unverified(Some("2.1.317")));
+        assert!(config.unverified(Some("2.3.0")));
     }
 
     #[test]
