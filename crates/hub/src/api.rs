@@ -32,7 +32,7 @@ use crossagents_api_types::{
     ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
     ListToolsResponse, ListWorksResponse, LoginStarted, PluginInfo, QueuedReason, QuotaResponse,
     RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse, ResolvedPath,
-    RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
+    RunCostResponse, RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
     SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript,
     TurnDiffResponse, UpdateRunPolicyRequest, UploadAvatarsRequest, UploadAvatarsResponse,
     UsageGroup, UsageResponse, UsageSeriesGroup, UsageSeriesRange, UsageSeriesResponse,
@@ -214,6 +214,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{key}/cleanup", post(cleanup_run))
         .route("/v1/runs/{key}/diff", get(run_diff))
         .route("/v1/runs/{key}/trace", get(run_trace))
+        .route("/v1/runs/{key}/cost", get(run_cost))
         .route("/v1/runs/{key}/tasks/{task}/diff", get(task_diff))
         .route("/v1/runs/{key}/tasks/{task}/review", post(review_task))
         .route("/v1/agents/{key}/files/tree", get(agent_files_tree))
@@ -2024,6 +2025,18 @@ async fn run_trace(
         entry.failure = task.report.failure.clone();
     }
     Ok(Json(trace))
+}
+
+/// What the run spent, split by agent and model — its cost bar
+/// (docs/research/multica.md §十三).
+async fn run_cost(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<RunCostResponse>> {
+    let id = resolve_run(&state, &key).await?;
+    Ok(Json(
+        crate::run_cost::compute(state.store().as_ref(), id).await?,
+    ))
 }
 
 /// A task of `run` by id or key (`auth` or `#auth`).

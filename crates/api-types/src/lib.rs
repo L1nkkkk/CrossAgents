@@ -2225,6 +2225,42 @@ pub struct UsageSeriesResponse {
     pub notes: Vec<String>,
 }
 
+/// One agent's spend on one model within a run: a segment of the run's cost bar
+/// (docs/research/multica.md §十三).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RunCostSlice {
+    pub agent: AgentId,
+    /// The agent's name as it reported, so the segment still reads after a rename.
+    pub name: String,
+    /// The model it ran on; `default` when it never said.
+    pub model: String,
+    #[ts(type = "number")]
+    pub cached_input: u64,
+    #[ts(type = "number")]
+    pub new_input: u64,
+    #[ts(type = "number")]
+    pub output: u64,
+    /// What the agent reported for this stretch; `null` when it reported tokens but no cost.
+    pub cost_usd: Option<f64>,
+}
+
+/// `GET /v1/runs/{key}/cost`: what a run spent, split by agent and model — the run's cost
+/// bar. An agent that switched models has one slice per model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RunCostResponse {
+    pub run_id: RunId,
+    /// Biggest spender first; one agent's slices next to each other, its largest first.
+    pub slices: Vec<RunCostSlice>,
+    #[ts(type = "number")]
+    pub tokens: u64,
+    /// Sum of the costs the agents reported; `null` when none did.
+    pub cost_usd: Option<f64>,
+    /// In plain words: how the figures are counted, and what is missing.
+    pub notes: Vec<String>,
+}
+
 /// A login was started; the human finishes it in the browser.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]

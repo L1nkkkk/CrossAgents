@@ -62,6 +62,7 @@ import { InlineNeeds } from "../inlineask";
 import { RelayBanner } from "../relay";
 import { useQuestions } from "../questions";
 import { RunTraceView } from "../trace";
+import { RunCostBar } from "../costbar";
 import { RailCard } from "../rail";
 import { t, type Key } from "../lib/i18n";
 import { wsKey } from "../workspace";
@@ -394,6 +395,9 @@ function RunRail({
       <RailCard id="run-policy" title="策略与预算">
         <PolicyChip run={run} />
         <ContinuationMeta key={run.id} run={run} agents={agents} onDone={onPolicyChange} />
+      </RailCard>
+      <RailCard id="run-cost" title="费用">
+        <RunCostBar runId={run.id} />
       </RailCard>
       {tasks.some((t) => t.handoffs.length > 0) && (
         <RailCard id="run-participants" title="参与者" defaultOpen={false}>
