@@ -266,6 +266,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/shutdown", post(shutdown))
         .merge(crate::api_expertise::router())
         .merge(crate::api_projects::router())
+        .merge(crate::lessons::router())
         .merge(crate::api_terminal::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
     // Routes for agents, authenticated with their per-session token.
@@ -1688,7 +1689,7 @@ fn why_not_upgradable(status: &crossagents_core::CliStatus) -> String {
 
 /// A run by full id, or by a unique prefix or suffix of it (the suffix appears in branch
 /// names).
-async fn resolve_run(state: &AppState, key: &str) -> ApiResult<RunId> {
+pub(crate) async fn resolve_run(state: &AppState, key: &str) -> ApiResult<RunId> {
     if let Ok(id) = key.parse::<RunId>() {
         return Ok(id);
     }

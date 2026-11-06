@@ -70,6 +70,7 @@ import { RailCard } from "../rail";
 import { t, type Key } from "../lib/i18n";
 import { wsKey } from "../workspace";
 import { openTool } from "../panes";
+import { RelatedLessons, RunIssues } from "../lessons/RunIssues";
 import { useQuota } from "./Quota";
 import { SessionView, useSideSlot } from "./Session";
 
@@ -412,6 +413,7 @@ function RunRail({
         </RailCard>
       )}
       <RunNotes runId={run.id} />
+      <RunIssues runId={run.id} lead={run.planner} />
       {tasks.length > 0 && (
         <RailCard id="run-trace" title="追溯" defaultOpen={false}>
           <RunTraceView runId={run.id} />
@@ -1170,6 +1172,11 @@ export function TaskDetail({ runId, taskId }: { runId: string; taskId: string })
             </Section>
           )}
           {task.report.failure && <Section title="失败原因">{<div className="item-error">{task.report.failure}</div>}</Section>}
+          {!!task.report.related_lessons?.length && (
+            <Section title="可能相关的排障记录">
+              <RelatedLessons list={task.report.related_lessons} />
+            </Section>
+          )}
           {task.report.question && (
             <Section title="Worker 的问题">
               <div className="msg-card">

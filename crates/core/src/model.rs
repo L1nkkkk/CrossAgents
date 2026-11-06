@@ -656,6 +656,10 @@ pub struct TaskReport {
     /// Why the issuer accepted it without a verification; also that it did.
     #[serde(default)]
     pub forced: Option<String>,
+    /// Troubleshooting records whose words the failed checks' output contains: possibly
+    /// related, not confirmed to apply (docs/tasks/LESSONS.md §4.5).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_lessons: Vec<crate::lesson::RelatedLesson>,
 }
 
 /// How one run (attempt) of a task ended. A run ends when the worker's turn does; the task

@@ -637,6 +637,7 @@ impl Orchestrator {
             task.report.diff_stat = None;
             task.report.verified_sha = None;
             task.report.unchecked = false;
+            task.report.related_lessons.clear();
         } else if !matches!(task.status, TaskStatus::Running | TaskStatus::Stalled) {
             return Err(CoreError::Conflict(format!(
                 "#{} is {:?}; only a task being worked on can be completed",
@@ -735,6 +736,7 @@ impl Orchestrator {
         } else {
             self.verifier.check(&dir, &task.spec.acceptance).await
         };
+        let related = self.related_to_checks(&run.repo, &checks).await;
         let _guard = self.lock(run.id).await;
         let mut task = self.store.get_task(id).await?;
         if !Self::still_verifying(&task, token) {
@@ -746,6 +748,7 @@ impl Orchestrator {
         task.report.verified_sha = sha;
         task.report.unchecked = unchecked;
         task.report.verification = None;
+        task.report.related_lessons = related;
         self.transition(&mut task, TaskStatus::Passed).await?;
         if !checks.is_empty() {
             self.publish(EventKind::TaskChecked {
@@ -758,13 +761,33 @@ impl Orchestrator {
             .await;
         }
         let summary = task.report.summary.clone().unwrap_or_default();
+        let related = crate::lessons::related_text(&task.report.related_lessons)
+            .map(|t| format!("\n{t}"))
+            .unwrap_or_default();
         self.relay(
             task.issuer_or(run.planner),
             worker,
-            format!("{}\n\n{}", summary.trim(), brief::facts(&task)),
+            format!("{}\n\n{}{related}", summary.trim(), brief::facts(&task)),
             None,
         );
         Ok(())
+    }
+
+    /// Lessons related to the output of the checks that failed; none when all passed.
+    async fn related_to_checks(
+        &self,
+        repo: &std::path::Path,
+        checks: &[crossagents_core::CheckResult],
+    ) -> Vec<crossagents_core::RelatedLesson> {
+        let output: Vec<&str> = checks
+            .iter()
+            .filter(|c| !c.passed)
+            .map(|c| c.output.as_str())
+            .collect();
+        if output.is_empty() {
+            return Vec::new();
+        }
+        self.related_lessons(repo, &output.join("\n")).await
     }
 
     /// A verification that failed on the way: the task is `Passed` at once, with the error as
@@ -850,6 +873,7 @@ impl Orchestrator {
         task.report.interrupted = false;
         task.report.forced = None;
         task.report.checks.clear();
+        task.report.related_lessons.clear();
         let token = uuid::Uuid::new_v4().to_string();
         task.report.verification = Some(token.clone());
         self.transition(&mut task, TaskStatus::Verifying).await?;

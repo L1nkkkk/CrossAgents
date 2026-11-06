@@ -20,6 +20,7 @@ import { SessionView } from "./views/Session";
 import { SettingsView } from "./views/Settings";
 import { UsageView } from "./views/Usage";
 import { ExpertiseView } from "./views/Expertise";
+import { LessonsView } from "./views/Lessons/Lessons";
 import { WorkspaceView } from "./views/Workspace";
 import { GitView } from "./views/Git";
 import { ExtensionDetail } from "./extensions/page/Detail";
@@ -241,6 +242,9 @@ export function App() {
       break;
     case "expertise":
       main = <ExpertiseView />;
+      break;
+    case "lessons":
+      main = <LessonsView />;
       break;
     case "settings":
       main = <SettingsView page={a} />;

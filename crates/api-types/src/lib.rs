@@ -2540,6 +2540,77 @@ pub struct ListProjectsResponse {
 }
 
 // ---------------------------------------------------------------------------------------
+// Troubleshooting records (docs/tasks/LESSONS.md L2)
+
+pub use crossagents_core::{
+    Evidence, IssueRef, Lesson, LessonOutcome, LessonStatus, RelatedLesson, Triage, TriageRecord,
+};
+
+/// `GET /v1/projects/{id}/lessons`: newest first, narrowed by `q` and `status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListLessonsResponse {
+    pub lessons: Vec<Lesson>,
+}
+
+/// `PATCH /v1/lessons/{id}`: the fields given replace the stored ones; the rest is kept.
+/// Evidence and sources are never set this way.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UpdateLessonRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub symptom: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub keywords: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub conditions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub resolution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub outcome: Option<LessonOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub status: Option<LessonStatus>,
+    /// With `status: "superseded"`: the lesson that replaces it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub superseded_by: Option<String>,
+}
+
+/// A problem recorded in a run (a run note under `issue/`) and, once sorted, what became
+/// of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RunIssue {
+    pub key: String,
+    pub author: AgentId,
+    pub text: String,
+    pub updated_at: DateTime<Utc>,
+    /// Absent while nobody has sorted it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub triage: Option<TriageRecord>,
+}
+
+/// `GET /v1/runs/{key}/issues`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListRunIssuesResponse {
+    pub run_id: RunId,
+    pub issues: Vec<RunIssue>,
+    /// How many of `issues` nobody has sorted yet.
+    pub unsorted: u32,
+}
+
+// ---------------------------------------------------------------------------------------
 // Expertise profiles (docs/tasks/EXPERTISE.md)
 
 pub use crossagents_core::{

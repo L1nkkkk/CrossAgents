@@ -1104,8 +1104,14 @@ impl Orchestrator {
                 }
                 let task = self.task_ref(caller, &input).await?;
                 let a: A = args(input)?;
+                let related = self.related_lessons(&caller.cwd, &a.reason).await;
                 self.give_up(caller, task, a.reason).await?;
-                Ok(json!({ "status": "stalled", "next": "End your turn." }))
+                let mut out = json!({ "status": "stalled", "next": "End your turn." });
+                if !related.is_empty() {
+                    out["related_lessons"] = json!(related);
+                    out["related_note"] = json!(crate::lessons::RELATED_NOTE);
+                }
+                Ok(out)
             }
             "task_ask" => {
                 #[derive(Deserialize)]
