@@ -652,13 +652,13 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "agent_spawn",
-        description: "Recruit a teammate: a new agent you can then give work. As a run's lead, for the run (default plugin and model: the run's default worker's); in a conversation outside any run, for this conversation (default: your own plugin and model; it works in your folder and is archived with the conversation). Give a model (as agent_list or the person names it: haiku, sonnet, gpt-6-luna) to choose what it runs on; the plugin follows from the model, whichever vendor it is; name is what it is called (a person's name, not a model's; leave it out to get one). Optional: role (worker or reviewer), title, persona. The policy caps how many you may recruit and which models; when it refuses, the error says why: tell the person, do not substitute another agent and report it as done.",
+        description: "Recruit a teammate: a new agent you can then give work. As a run's lead, for the run (default plugin and model: the run's default worker's); in a conversation outside any run, for this conversation (default: your own plugin and model; it works in your folder and is archived with the conversation). Give a model (as agent_list or the person names it: haiku, sonnet, gpt-6-luna) to choose what it runs on; the plugin follows from the model, whichever vendor it is; name is what it is called (a person's name, not a model's; leave it out to get one). Optional: role (a label for the record: planner, worker or reviewer; it does not decide what the recruit may do), title, persona. The policy caps how many you may recruit and which models; when it refuses, the error says why: tell the person, do not substitute another agent and report it as done.",
         groups: RECRUITERS,
         schema: || {
             object(
                 json!({
                     "name": { "type": "string" },
-                    "role": { "type": "string", "enum": ["worker", "reviewer"] },
+                    "role": { "type": "string", "enum": ["planner", "worker", "reviewer"] },
                     "plugin": { "type": "string" },
                     "model": { "type": "string" },
                     "display_name": { "type": "string" },

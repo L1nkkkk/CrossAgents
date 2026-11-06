@@ -48,22 +48,28 @@ impl Group {
 /// gets a role's group only while a run holds it in that role, except a planner or reviewer
 /// chat, which keeps its own (a run may take it in place, without a new session that would
 /// list the tools again). A plain chat, a worker, carries no run tools (docs/SESSION-FIRST.md
-/// §7).
+/// §7). An execution session gets its groups from the claim alone: its `role` is how it was
+/// made, never what it may do.
 pub fn groups_of(agent: &Agent, held: Option<ClaimRole>) -> Vec<Group> {
     let mut groups = vec![Group::Everyone];
     // Whether it is in a run right now is checked when it recruits. A planner the person
     // talks to in a chat leads no run there: it is a conversation too.
     let conversation = agent.recruiter().is_none() && agent.config.get("spawned_by_run").is_none();
-    let role = match (conversation, held) {
-        (true, Some(ClaimRole::Lead)) => Some(Group::Lead),
-        (true, Some(ClaimRole::Worker)) => Some(Group::Assignee),
-        (true, Some(ClaimRole::Reviewer)) => Some(Group::Reviewer),
-        (true, None) if agent.role == Role::Worker => None,
-        _ => Some(match agent.role {
-            Role::Planner => Group::Lead,
-            Role::Worker => Group::Assignee,
-            Role::Reviewer => Group::Reviewer,
-        }),
+    // A run's claim is what gives run tools, whatever the agent was made as.
+    let role = match held {
+        Some(ClaimRole::Lead) => Some(Group::Lead),
+        Some(ClaimRole::Worker) => Some(Group::Assignee),
+        Some(ClaimRole::Reviewer) => Some(Group::Reviewer),
+        // A conversation starts in the group its creation role names — a planner chat is
+        // where a run usually begins — but a run's claim is what gives it run duties.
+        None if conversation => match agent.role {
+            Role::Planner => Some(Group::Lead),
+            Role::Worker => None,
+            Role::Reviewer => Some(Group::Reviewer),
+        },
+        // An execution session's role is how it was made, not what it may do: outside a claim
+        // it holds no run tools, so a planner-role recruit cannot lead by accident.
+        None => None,
     };
     groups.extend(role);
     if conversation {
