@@ -610,6 +610,24 @@ pub struct CliInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub described_by: Option<String>,
+    /// The oldest CLI the description accepts; absent when it names none
+    /// (docs/research/multica.md §2.9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub min_version: Option<String>,
+    /// The CLI found here is older than `min_version`: its agent is not registered, so no
+    /// models are offered and the row says the version is too low.
+    #[serde(default)]
+    pub below_minimum: bool,
+    /// The upstream version series the driver was checked against (`"2.1"`); absent when
+    /// the description names none (docs/DESIGN.md §9.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub verified: Option<Vec<String>>,
+    /// The CLI's version is outside those series: it still runs, the row says it is
+    /// unverified. False when no series is named or the version is unknown.
+    #[serde(default)]
+    pub unverified: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]

@@ -11,6 +11,10 @@
 
 name = "codebuddy"
 driver = "codebuddy-native"
+# The upstream series the driver was checked against (docs/DESIGN.md §9.4); outside them the
+# CLI still runs, marked unverified. No `min_version`: the standalone CLI has always spoken
+# the protocol, and a floor would refuse a build nobody checked.
+verified = ["2.173"]
 
 [models]
 # The ids `codebuddy --model` accepts; any id the installed CLI knows can be used.

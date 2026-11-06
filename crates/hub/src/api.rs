@@ -587,6 +587,29 @@ async fn create_agent(
             state.runtime.plugins().names().join(", ")
         )));
     }
+    // A CLI older than the description's minimum does not register an agent
+    // (docs/research/multica.md §2.9). A CLI that has not answered its version yet is
+    // started as before: unknown is not too old.
+    if req.plugin != crossagents_core::EXTERNAL_PLUGIN
+        && let Some(driver) = state.runtime.plugins().get(&req.plugin)
+        && let Some(status) = driver.cli_status().await
+    {
+        let version = status
+            .located
+            .as_ref()
+            .and_then(|located| located.version.clone());
+        if let Some(config) = state.runtime.plugins().config(&req.plugin)
+            && config.too_old(version.as_deref())
+        {
+            return Err(AppError::bad_request(format!(
+                "the {} CLI on this machine is too old (version {}, needs {} or newer): \
+                 upgrade it on the Agents page",
+                req.plugin,
+                version.as_deref().unwrap_or("unknown"),
+                config.min_version.as_deref().unwrap_or(""),
+            )));
+        }
+    }
     if let Some(driver) = &req.driver {
         driver.parse::<DriverKind>()?;
     }
@@ -1425,13 +1448,6 @@ async fn list_plugins(State(state): State<Arc<AppState>>) -> Json<ListPluginsRes
 async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> PluginInfo {
     let registry = state.runtime.plugins();
     let name = d.name();
-    let all = crate::models::available(registry, &state.accounts, name).await;
-    // A CLI this machine does not have runs nothing: offer none of its models.
-    let models = if d.installed() {
-        state.models.filter(name, all.clone())
-    } else {
-        Vec::new()
-    };
     // What this plugin's install or upgrade is doing now, if one is running (in memory only:
     // after a restart nothing is, so this is `None`).
     let installing = state
@@ -1439,7 +1455,26 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
         .installing(name)
         .await
         .map(|action| action.as_str().to_owned());
-    let cli = d.cli_status().await.map(|status| CliInfo {
+    let status = d.cli_status().await;
+    let found = status
+        .as_ref()
+        .and_then(|status| status.located.as_ref())
+        .and_then(|located| located.version.clone());
+    let config = registry.config(name);
+    // A CLI older than the description's minimum is not registered: no models are offered
+    // for it, and the row says why (docs/research/multica.md §2.9).
+    let below_minimum = config.is_some_and(|config| config.too_old(found.as_deref()));
+    let all = match below_minimum {
+        true => Vec::new(),
+        false => crate::models::available(registry, &state.accounts, name).await,
+    };
+    // A CLI this machine does not have runs nothing: offer none of its models.
+    let models = if d.installed() && !below_minimum {
+        state.models.filter(name, all.clone())
+    } else {
+        Vec::new()
+    };
+    let cli = status.map(|status| CliInfo {
         installed: status.located.is_some(),
         probing: status.probing,
         path: status
@@ -1450,10 +1485,7 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
             .located
             .as_ref()
             .map(|located| located.source.as_str().to_owned()),
-        version: status
-            .located
-            .as_ref()
-            .and_then(|located| located.version.clone()),
+        version: found.clone(),
         install_hint: status.install_hint,
         docs: status.docs,
         installed_via: status.installed_via,
@@ -1462,6 +1494,12 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
         can_upgrade: status.can_upgrade,
         installing,
         described_by: status.described_by,
+        min_version: config.and_then(|config| config.min_version.clone()),
+        below_minimum,
+        verified: config
+            .map(|config| config.verified.clone())
+            .filter(|series| !series.is_empty()),
+        unverified: config.is_some_and(|config| config.unverified(found.as_deref())),
     });
     PluginInfo {
         name: name.to_owned(),
