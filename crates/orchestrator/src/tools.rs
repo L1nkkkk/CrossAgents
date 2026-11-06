@@ -90,7 +90,9 @@ fn spec_schema() -> Value {
             "acceptance": { "type": "array", "items": { "type": "string" }, "description": "Optional shell commands the hub runs when the worker reports done." },
             "references": strings,
             "result_schema": { "type": "object", "description": "JSON Schema for the required structured result." },
-            "stage": { "type": "integer", "description": "Optional stage: tasks of a later stage start only once every task of an earlier stage has ended, and you are woken when each stage's batch ends. Omit for no staging." }
+            "stage": { "type": "integer", "description": "Optional stage: tasks of a later stage start only once every task of an earlier stage has ended, and you are woken when each stage's batch ends. Omit for no staging." },
+            "next": { "type": "string", "description": "Optional: where the work goes when this task is accepted — a task key of this run (released then), or a teammate's name (the hub opens the next step for them). Omit for no routing." },
+            "on_reject": { "type": "string", "description": "Optional: where work goes back when it is sent back (task_rework, or a review that fails) — a task key (its worker takes it again) or a teammate's name. Omit to leave it with its own worker." }
         },
         "required": ["goal"]
     })
@@ -491,7 +493,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_get",
-        description: "One task in full: spec, report (worker summary, checks, diff stat, failure, question, review), branch, worktree, run branch.",
+        description: "One task in full: spec, report (worker summary, checks, diff stat, failure, question, review), branch, worktree, run branch, and handoff (where its work goes next and back, with the brief the receiver would get).",
         groups: RUN,
         schema: || {
             task_schema(
@@ -605,7 +607,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_accept",
-        description: "Merge a task you issued into the run branch. Only a verified task is accepted plainly: every check passed, and nothing changed after they ran; only the verified commit is merged (nothing the worker wrote afterwards). Refused while the task is still being verified (force does not bypass that). Accepting without a verification - checks that failed or never ran, a task with no checks, a verification the hub restarted out of, a stalled task, or work done after the checks - takes force: true and a non-empty reason, which is recorded. On a conflict nothing changes and you get the conflicting files and hunks. message is the commit message, written the way the project's rules ask (default: \"<key>: <title>\").",
+        description: "Merge a task you issued into the run branch. Only a verified task is accepted plainly: every check passed, and nothing changed after they ran; only the verified commit is merged (nothing the worker wrote afterwards). Refused while the task is still being verified (force does not bypass that). Accepting without a verification - checks that failed or never ran, a task with no checks, a verification the hub restarted out of, a stalled task, or work done after the checks - takes force: true and a non-empty reason, which is recorded. On a conflict nothing changes and you get the conflicting files and hunks. message is the commit message, written the way the project's rules ask (default: \"<key>: <title>\"). With spec.next set on the task, accepting also releases the next step it names (next_step says which).",
         groups: RUN,
         schema: || {
             task_schema(json!({
@@ -626,6 +628,12 @@ const TOOLS: &[ToolDef] = &[
         description: "Send a task you issued back to its worker with notes on what to fix.",
         groups: RUN,
         schema: || task_schema(json!({ "notes": { "type": "string" } })),
+    },
+    ToolDef {
+        name: "handoff_preview",
+        description: "Preview the workflow handoff a task's spec sets, before it moves: where its work goes when you accept it (spec.next — a step's key, which is released, or a teammate's name, for whom the hub opens the next step), where it goes back when it is sent back (spec.on_reject, by task_rework or a review that fails), who receives it, and the brief that receiver will get. Read-only: nothing moves, nothing is sent, nothing changes.",
+        groups: PLANNER,
+        schema: || task_schema(json!({})),
     },
     ToolDef {
         name: "task_drop",
@@ -1071,6 +1079,7 @@ impl Orchestrator {
             "task_accept" => self.task_accept(caller, input).await,
             "task_verify" => self.task_verify(caller, input).await,
             "task_rework" => self.task_rework(caller, input).await,
+            "handoff_preview" => self.handoff_preview_tool(caller, input).await,
             "task_drop" => self.task_drop(caller, input).await,
             "branch_sync" => self.branch_sync(caller, input).await,
             "task_progress" => self.task_progress(caller, input).await,

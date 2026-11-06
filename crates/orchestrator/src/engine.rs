@@ -188,6 +188,10 @@ pub struct Orchestrator {
     /// that ended meanwhile is reported once more, never lost.
     pub(crate) stage_wakeups:
         std::sync::Mutex<HashMap<RunId, std::collections::HashSet<u32>>>,
+    /// How often one task's work has gone back to the same step or teammate, by (task, where
+    /// it went) (`crate::handoff`, docs/research/multica.md §2.12): a bounce that would go
+    /// on for ever stops at [`crate::handoff::MAX_BOUNCES`]. In memory, like stage wakes.
+    pub(crate) bounces: std::sync::Mutex<HashMap<(TaskId, String), u32>>,
     /// What an agent's current turn failed with, until the turn ends: the stalled notice
     /// says why, or its issuer only nudges it into the same failure.
     turn_errors: std::sync::Mutex<HashMap<AgentId, String>>,
@@ -276,6 +280,7 @@ impl Orchestrator {
             land_cleanup: std::sync::Mutex::default(),
             running: std::sync::Mutex::default(),
             stage_wakeups: std::sync::Mutex::default(),
+            bounces: std::sync::Mutex::default(),
             turn_errors: std::sync::Mutex::default(),
             extensions: std::sync::OnceLock::new(),
         })
@@ -1291,6 +1296,11 @@ impl Orchestrator {
         }
         plan::validate(&tasks)
             .map_err(|problems| CoreError::Conflict(format!("the plan is invalid:\n{problems}")))?;
+        // A handoff that names nothing, or a step the stage gate could never release, is
+        // refused here, before anything of it takes effect (multica §2.12).
+        self.check_routes(&tasks)
+            .await
+            .map_err(|problems| CoreError::Conflict(format!("the plan is invalid:\n{problems}")))?;
         self.resolve_assignments(&run, &tasks).await?;
         let keys = tasks.iter().map(|t| t.key.clone()).collect();
         run.plan = tasks;
@@ -1444,6 +1454,9 @@ impl Orchestrator {
             };
             self.store.insert_task(&task).await?;
         }
+        // `spec.next` says which step follows which (multica §2.12): the step it names waits
+        // for the task that names it, so the plan writes the workflow once.
+        self.link_next(run).await?;
         self.set_run_status(run, RunStatus::Running, None).await?;
         let mut text = format!(
             "The plan of run {} was approved: {} task(s) start as their dependencies allow.
