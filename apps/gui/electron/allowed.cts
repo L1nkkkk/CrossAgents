@@ -91,6 +91,8 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "POST", path: /^\/v1\/questions\/[^/]+\/(answer|dismiss)$/, level: "write" },
   { method: "GET", path: /^\/v1\/quota$/, level: "read" },
   { method: "POST", path: /^\/v1\/accounts$/, level: "admin" },
+  { method: "GET", path: /^\/v1\/accounts\/import$/, level: "read" },
+  { method: "POST", path: /^\/v1\/accounts\/import$/, level: "admin" },
   { method: "DELETE", path: /^\/v1\/accounts\/[^/]+$/, level: "admin" },
   { method: "GET", path: /^\/v1\/accounts\/[^/]+\/usage$/, level: "read" },
   { method: "POST", path: /^\/v1\/accounts\/[^/]+\/login$/, level: "admin" },

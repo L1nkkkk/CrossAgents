@@ -182,6 +182,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/usage", get(usage))
         .route("/v1/usage/series", get(usage_series))
         .route("/v1/accounts", get(list_accounts).post(create_account))
+        .route(
+            "/v1/accounts/import",
+            get(crate::account_import::import_candidates)
+                .post(crate::account_import::import_account),
+        )
         .route("/v1/quota", get(quota))
         .route("/v1/questions", get(list_questions))
         .route("/v1/questions/{id}/answer", post(answer_question))
