@@ -19,6 +19,10 @@ checks = [
     { command = "npm --prefix apps/gui ci", paths = ["apps/gui", "crossagents.toml"] },
     { command = "npm --prefix apps/gui run typecheck", paths = ["apps/gui", "crossagents.toml"] },
     { command = "npm --prefix apps/gui test", paths = ["apps/gui", "crossagents.toml"] },
+    # A build of the hub, actually run: throwaway home, a mock agent, a message and its events,
+    # then `sandbox stop` (docs/tasks/SELF.md §C3). `cargo test` above compiles the hub; this is
+    # what says the build can start one and carry a turn.
+    { command = "cargo build -q -p crossagents-mock-agent && cargo run -q -p crossagents-cli --bin crossagents -- hub sandbox smoke", paths = ["crates/hub", "crates/orchestrator", "crossagents.toml"] },
 ]
 # A first build of the workspace takes a while; later runs reuse the repository's shared one.
 timeout_secs = 1800

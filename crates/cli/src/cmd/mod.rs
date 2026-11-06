@@ -10,6 +10,7 @@ pub mod run;
 pub mod session;
 pub mod setup;
 pub mod shim;
+pub mod smoke;
 pub mod usage;
 
 use anyhow::Result;
