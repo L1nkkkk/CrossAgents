@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crossagents_orchestrator::files::{FileError, resolve_in_root};
+use crossagents_orchestrator::files::FileError;
 
 /// The most an image may be; larger files are refused with what they are.
 pub const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
@@ -117,19 +117,14 @@ fn looks_like_svg(bytes: &[u8]) -> bool {
 /// temp directory: the canonical path, so `..` and symlinks are resolved before the prefix
 /// is judged. A relative path is taken from `root` first, then from the temp directory.
 pub fn locate(root: &Path, input: &str) -> Result<PathBuf, FileError> {
-    let cwd_error = match resolve_in_root(root, input) {
-        Ok((abs, _)) => return Ok(abs),
-        Err(err) => err,
-    };
-    if let Ok((abs, _)) = resolve_in_root(&std::env::temp_dir(), input) {
-        return Ok(abs);
-    }
-    Err(match cwd_error {
-        FileError::Outside(what) => FileError::Outside(format!(
+    let temp = std::env::temp_dir();
+    match crate::paths::confine_any(&[root, &temp], input) {
+        Ok(found) => Ok(found.abs),
+        Err(FileError::Outside(what)) => Err(FileError::Outside(format!(
             "{what} (an image must be in the agent's working directory or the system temp directory)"
-        )),
-        other => other,
-    })
+        ))),
+        Err(other) => Err(other),
+    }
 }
 
 /// The format and bytes of the image at `abs`, which `input` named: refused unless the
