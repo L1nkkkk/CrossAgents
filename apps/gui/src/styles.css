@@ -943,7 +943,7 @@ button.need { padding: 2px 10px; line-height: 18px; color: var(--text-2); }
 
 /* A plan waiting for approval, docked where the composer is. */
 .plan-dock { max-width: 780px; margin: 0 auto; border: 1px solid color-mix(in srgb, var(--warn) 50%, var(--border)); border-radius: var(--radius-xl); background: var(--surface); outline: none; }
-.plan-dock:focus-visible { outline: 3px solid var(--warn-bg); }
+.plan-dock:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 .plan-dock > header { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
 .plan-dock > header .state { font-size: 13px; font-weight: 600; }
 .plan-dock-body { max-height: 42vh; overflow: auto; }

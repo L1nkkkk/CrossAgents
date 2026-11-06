@@ -422,6 +422,43 @@ export const SCENARIOS: Scenario[] = [
     return { state: workspaceState(), script: [], route: `#/w/${encodeURIComponent(wsKey(REPO))}` };
   } },
   { key: "agent-workspace-narrow", label: "窄窗口与长标题", hint: "Atlas 的长话题和 #b 的长中文标题：226px 侧栏下名字、状态和摘要仍可辨认，截断不挤坏布局；窄窗口请用截图调整宽度", build: () => ({ state: workspaceState(), script: [], route: "#/s/Atlas" }) },
+  { key: "agent-workspace-auto", label: "自动审批：不出现待批卡片", hint: "三个 run 都在 awaiting_approval：登录页改版是我审批（进「需要你」），另两个是半托管与 auto_approve 的旧记录，都不该开审批卡片；Atlas 的会话里还该有一个完成未读（与待办分开计数）", build: () => {
+    const state = workspaceState();
+    const manual = state.runs.find((d) => d.run.status === "awaiting_approval");
+    const atlas = state.agents.find((a) => a.name.toLowerCase() === "atlas");
+    const iris = state.agents.find((a) => a.name.toLowerCase() === "iris");
+    if (!manual || !atlas || !iris) throw new Error("agent-workspace-auto needs an awaiting run, Atlas and Iris");
+    // The control plan stays in its lead's conversation; Atlas's session then holds only the
+    // auto-approved records, so a card there can only be a phantom one.
+    manual.run.origin_chat_id = null;
+    // Two records the hub would not leave waiting: the plan policy is auto, or the legacy
+    // auto_approve flag is set. They are planned by Atlas so its session has no manual plan to
+    // show: any card there is the phantom one this scenario is about.
+    const variant = (title: string, patch: (run: NonNullable<typeof manual>["run"]) => void) => {
+      const copy = structuredClone(manual);
+      copy.run.id = uid();
+      copy.run.planner = atlas.id;
+      copy.run.title = title;
+      copy.run.branch = `crossagents/${title}`;
+      copy.tasks = [];
+      patch(copy.run);
+      return copy;
+    };
+    const autoPolicy = variant("发布说明：半托管", (run) => {
+      run.config.policy = { ...run.config.policy, plan_approval: "auto", land: "manual", human_ask: "timeout" };
+    });
+    const autoApprove = variant("发布说明：auto_approve", (run) => {
+      run.config.auto_approve = true;
+    });
+    state.runs = [...state.runs, autoPolicy, autoApprove];
+    // A turn the person asked for ends in a conversation they are not in: an unread mark, not a todo.
+    const asked = uid();
+    const script: Step[] = [
+      { at: 650, event: { type: "agent.input", data: { id: iris.id, message_id: asked, text: "CSV 导出的编码问题查到了吗？", queued: true, from: { kind: "human" } } } },
+      { at: 900, event: { type: "agent.turn_completed", data: { id: iris.id, message_id: asked, stop_reason: "end_turn" } } },
+    ];
+    return { state, script, route: `#/s/${atlas.id}` };
+  } },
   { key: "extensions", label: "扩展：状态一栏", hint: "standup 有更新待人批准、changelog 从未启用、notes 停用了但可回到已批准的版本（还有一版等着）、big-export 的源目录超了 50 MB；下面是让 agent 做一个插件", build: () => {
     const state: MockState = { ...emptyHub(), ...extensionScene() };
     // Stopped, with a newer version waiting: 启用 re-enables the approved snapshot, 查看并启用 is
