@@ -30,6 +30,8 @@ pub enum Group {
     /// A conversation of its own (not a run's lead, not anyone's recruit): may recruit
     /// teammates for itself, within its policy.
     Conversation,
+    /// A finished run's lead can start its next round without holding a claim.
+    ContinueRun,
 }
 
 impl Group {
@@ -40,6 +42,7 @@ impl Group {
             Self::Assignee => "assignee",
             Self::Reviewer => "reviewer",
             Self::Conversation => "conversation",
+            Self::ContinueRun => "continue_run",
         }
     }
 }
@@ -48,8 +51,8 @@ impl Group {
 /// gets a role's group only while a run holds it in that role, except a planner or reviewer
 /// chat, which keeps its own (a run may take it in place, without a new session that would
 /// list the tools again). A plain chat, a worker, carries no run tools (docs/SESSION-FIRST.md
-/// §7). An execution session gets its groups from the claim alone: its `role` is how it was
-/// made, never what it may do.
+/// §7). This function derives execution-session groups from the claim, not the creation role.
+/// `Orchestrator::groups` also grants a finished lead the separate continuation permission.
 pub fn groups_of(agent: &Agent, held: Option<ClaimRole>) -> Vec<Group> {
     let mut groups = vec![Group::Everyone];
     // Whether it is in a run right now is checked when it recruits. A planner the person
@@ -85,10 +88,22 @@ impl Orchestrator {
             Ok(claim) => claim.map(|c| c.role),
             Err(err) => {
                 tracing::warn!(agent = %agent.id, error = %err, "cannot read the agent's claim");
-                None
+                return groups_of(agent, None);
             }
         };
-        groups_of(agent, held)
+        let mut groups = groups_of(agent, held);
+        if held.is_none() {
+            match self.run_of(agent.id).await {
+                Ok(Some((run, _))) if run.planner == agent.id && run.status.is_terminal() => {
+                    groups.push(Group::ContinueRun);
+                }
+                Err(err) => {
+                    tracing::warn!(agent = %agent.id, error = %err, "cannot read the agent's run");
+                }
+                _ => {}
+            }
+        }
+        groups
     }
 }
 

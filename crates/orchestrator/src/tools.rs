@@ -19,6 +19,7 @@ const PLANNER: &[Group] = &[Group::Lead];
 const WORKER: &[Group] = &[Group::Assignee];
 const REVIEWER: &[Group] = &[Group::Reviewer];
 const RECRUITERS: &[Group] = &[Group::Lead, Group::Conversation];
+const NEXT_ROUND: &[Group] = &[Group::Lead, Group::Conversation, Group::ContinueRun];
 const CONVERSATION: &[Group] = &[Group::Conversation];
 
 struct ToolDef {
@@ -444,7 +445,7 @@ const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "run_next",
         description: "Start the next round in your work group after your run ended. Write the person's request verbatim. Uses this group's plan policy. If moving your session must wait for this turn to end, returns status scheduled instead of a run id; the hub waits up to 120 seconds for you to be idle and notifies you if it fails. Creation then uses the GUI path and its existing bounds; after 120 seconds in creation a notice reports that it is still starting and has not been cancelled. A schedule is not persistent: a hub restart loses it, so call run_next again after restart. Set from to base to leave the previous round's unlanded changes behind.",
-        groups: RECRUITERS,
+        groups: NEXT_ROUND,
         schema: || {
             object(
                 json!({
@@ -1272,6 +1273,10 @@ mod tests {
         let reviewer = names(Group::Reviewer);
         assert!(reviewer.contains(&"review_submit") && reviewer.contains(&"whoami"));
         assert!(!reviewer.contains(&"task_complete"));
+        let continuation = names(Group::ContinueRun);
+        assert!(continuation.contains(&"run_next"));
+        assert!(!continuation.contains(&"plan_submit"));
+        assert!(!continuation.contains(&"agent_spawn"));
         for tool in TOOLS {
             let schema = (tool.schema)();
             assert_eq!(schema["type"], "object", "{}", tool.name);
