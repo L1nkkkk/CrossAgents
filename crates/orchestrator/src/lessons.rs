@@ -3,12 +3,14 @@
 //! of that project searches when it runs into trouble. Reference, never rules: nothing here
 //! goes into an agent's instructions beyond one line saying the records exist.
 
+use std::future::Future;
 use std::path::Path;
+use std::time::Duration;
 
 use chrono::Utc;
 use crossagents_core::{
     Agent, AgentId, CoreError, EventKind, Evidence, ISSUE_PREFIX, IssueRef, Lesson,
-    LessonOutcome, LessonStatus, NoteScope, Project, RelatedLesson, Run, RunId, Triage,
+    LessonOutcome, LessonStatus, NoteScope, Project, RelatedLesson, Run, RunId, Task, Triage,
     TriageStep,
 };
 use serde::Deserialize;
@@ -34,6 +36,8 @@ const EXCERPT_MAX: usize = 300;
 pub const RELATED_MAX: usize = 3;
 const STRONG_MAX: usize = 8;
 const WEAK_MAX: usize = 8;
+/// Longest a failure waits for its related lessons; past it, it goes without them.
+const RELATED_TIMEOUT: Duration = Duration::from_secs(2);
 /// What `related_lessons` means, said wherever it is attached (LESSONS §4.5 ②).
 pub const RELATED_NOTE: &str = "related_lessons are possibly related only: words of this error were found in them, which does not confirm their resolution applies here. Read one with lesson_get and check its conditions before going by it.";
 
@@ -209,6 +213,28 @@ pub fn match_lessons(lessons: &[Lesson], strong: &[String], weak: &[String]) -> 
     }
     found.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
     found.into_iter().take(RELATED_MAX).map(|f| f.3).collect()
+}
+
+/// Waits at most `limit` for a lookup of related lessons. A lookup that fails or is too slow
+/// gives none and a warning: the failure it is for is reported as it would be without it.
+pub async fn bounded_related(
+    lookup: impl Future<Output = Result<Vec<RelatedLesson>, CoreError>>,
+    limit: Duration,
+) -> Vec<RelatedLesson> {
+    match tokio::time::timeout(limit, lookup).await {
+        Ok(Ok(found)) => found,
+        Ok(Err(err)) => {
+            tracing::warn!(error = %err, "cannot look up related lessons; the failure goes without them");
+            Vec::new()
+        }
+        Err(_) => {
+            tracing::warn!(
+                limit_ms = limit.as_millis() as u64,
+                "looking up related lessons took too long; the failure goes without them"
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// A paragraph naming related lessons, to add to a failure's text; nothing when none.
@@ -438,23 +464,36 @@ pub fn export_markdown(project: &str, lessons: &[Lesson]) -> String {
 impl Orchestrator {
     /// Lessons of `dir`'s project that may bear on a failure whose output is `output`
     /// (LESSONS §4.5 ②): see [`match_lessons`]. Empty when the project is unknown, the
-    /// output holds no strong word, or anything goes wrong: this never fails the failure.
+    /// output holds no strong word, or the lookup fails or takes longer than
+    /// [`RELATED_TIMEOUT`] (then with a warning): this never fails or holds up the failure.
     pub async fn related_lessons(&self, dir: &Path, output: &str) -> Vec<RelatedLesson> {
+        bounded_related(self.find_related(dir, output), RELATED_TIMEOUT).await
+    }
+
+    async fn find_related(&self, dir: &Path, output: &str) -> Result<Vec<RelatedLesson>, CoreError> {
         let (strong, weak) = error_terms(output);
         if strong.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let Ok(Some(project)) = self.known_project(dir).await else {
-            return Vec::new();
+        let Some(project) = self.known_project(dir).await? else {
+            return Ok(Vec::new());
         };
-        let Ok(found) = self
+        // Superseded records are left out of the search, and again by `match_lessons`.
+        let found = self
             .store
             .search_lessons(&project.id, &strong, false, SEARCH_LIMIT * 2)
-            .await
-        else {
-            return Vec::new();
-        };
-        match_lessons(&found, &strong, &weak)
+            .await?;
+        Ok(match_lessons(&found, &strong, &weak))
+    }
+
+    /// Puts the lessons related to a failure on the task's report, next to its `failure`
+    /// (replacing earlier ones), and gives the lines to add to the message that reports it:
+    /// empty when there are none. A hint for whoever reads it; nothing is run or reported.
+    pub(crate) async fn attach_related(&self, dir: &Path, task: &mut Task, output: &str) -> String {
+        task.report.related_lessons = self.related_lessons(dir, output).await;
+        related_text(&task.report.related_lessons)
+            .map(|t| format!("\n{t}"))
+            .unwrap_or_default()
     }
 
     /// Says a problem was recorded: a run note under `issue/` was written (LESSONS §4.1).
@@ -994,6 +1033,22 @@ mod tests {
         let ids: Vec<&str> = related.iter().map(|r| r.id.as_str()).collect();
         assert_eq!(ids, ["l4", "l0", "l2"]);
         assert_eq!(related[0].matched, ["ENOENT", "EACCES"]);
+    }
+
+    #[tokio::test]
+    async fn a_lookup_that_fails_or_hangs_gives_no_records() {
+        let failed = bounded_related(
+            async { Err(CoreError::Conflict("index is locked".into())) },
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(failed.is_empty());
+        let slow = bounded_related(
+            std::future::pending::<Result<Vec<RelatedLesson>, CoreError>>(),
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(slow.is_empty());
     }
 
     #[test]

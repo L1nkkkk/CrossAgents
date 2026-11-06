@@ -328,8 +328,10 @@ impl Orchestrator {
     ) {
         let issuer = task.issuer_or(run.planner);
         // The task's failure says why it stopped, not just that a turn ended.
+        let mut related = String::new();
         if let Some(error) = &error {
             task.report.failure = Some(error.clone());
+            related = self.attach_related(&run.repo, task, error).await;
         }
         if task.status == TaskStatus::Running {
             if let Err(err) = self.transition(task, TaskStatus::Stalled).await {
@@ -358,7 +360,7 @@ impl Orchestrator {
                 brief::task_ref(task)
             ),
         };
-        self.notice(issuer, &format!("task:{}", task.id), &line)
+        self.notice(issuer, &format!("task:{}", task.id), &format!("{line}{related}"))
             .await;
     }
 
@@ -462,11 +464,14 @@ impl Orchestrator {
                 // The new session could not start: it is the issuer's now, told why.
                 let why = format!("a new session could not take it over: {err}");
                 task.report.failure = Some(why.clone());
+                let related = self
+                    .attach_related(&run.repo, task, &format!("{error}\n{why}"))
+                    .await;
                 self.force_stalled(run, task).await;
                 self.notice(
                     issuer,
                     &format!("task:{}", task.id),
-                    &format!("Task {} is stalled: {why}", brief::task_ref(task)),
+                    &format!("Task {} is stalled: {why}{related}", brief::task_ref(task)),
                 )
                 .await;
             }
@@ -1071,6 +1076,65 @@ mod tests {
             notices
                 .iter()
                 .any(|n| n.contains("not retried automatically")),
+            "{notices:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_turn_carries_the_records_its_error_names() {
+        use crossagents_core::{
+            IssueRef, Lesson, LessonOutcome, LessonStatus, Project, ProjectPath, TriageStep,
+        };
+        let f = live().await;
+        let project = Project {
+            id: "p".into(),
+            name: "repo".into(),
+            remotes: Vec::new(),
+            paths: vec![ProjectPath {
+                node: crate::projects::LOCAL_NODE.into(),
+                path: f.run.repo.clone(),
+            }],
+            unconfirmed_remote: None,
+            created_at: chrono::Utc::now(),
+        };
+        f.store.put_project(&project).await.unwrap();
+        let lesson = Lesson {
+            id: "l1".into(),
+            project_id: "p".into(),
+            title: "the api key is read from the wrong profile".into(),
+            symptom: "agent_error: invalid api key (code 40101)".into(),
+            keywords: vec!["40101".into()],
+            conditions: String::new(),
+            resolution: "log in again".into(),
+            outcome: LessonOutcome::Resolved,
+            status: LessonStatus::Active,
+            superseded_by: None,
+            evidence: Vec::new(),
+            sources: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let issue = IssueRef {
+            run_id: f.run.id,
+            key: "issue/a/1".into(),
+        };
+        f.store
+            .triage(&[issue], TriageStep::Create(lesson), f.lead.id)
+            .await
+            .unwrap();
+        let mut task = f.dispatched("a").await;
+        let task = f
+            .end_turn(&mut task, Some("agent_error: invalid api key (code 40101)"))
+            .await;
+        // Classified and handled as before; the record only rides along.
+        assert_eq!(task.status, TaskStatus::Stalled);
+        assert_eq!(task.runs[0].outcome, TaskRunOutcome::AgentError);
+        assert_eq!(task.report.related_lessons.len(), 1);
+        assert_eq!(task.report.related_lessons[0].id, "l1");
+        assert_eq!(task.report.related_lessons[0].matched[0], "40101");
+        let notices = f.host.notices.lock().await;
+        assert!(
+            notices.iter().any(|n| n.contains("possibly related") && n.contains("l1")),
             "{notices:?}"
         );
     }

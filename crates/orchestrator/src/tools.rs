@@ -1104,8 +1104,7 @@ impl Orchestrator {
                 }
                 let task = self.task_ref(caller, &input).await?;
                 let a: A = args(input)?;
-                let related = self.related_lessons(&caller.cwd, &a.reason).await;
-                self.give_up(caller, task, a.reason).await?;
+                let related = self.give_up(caller, task, a.reason).await?;
                 let mut out = json!({ "status": "stalled", "next": "End your turn." });
                 if !related.is_empty() {
                     out["related_lessons"] = json!(related);

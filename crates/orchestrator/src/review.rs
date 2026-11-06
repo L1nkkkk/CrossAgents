@@ -241,6 +241,7 @@ impl Orchestrator {
             );
             task.attempts += 1;
             task.report.failure = None;
+            task.report.related_lessons.clear();
             let said: Vec<&str> = note
                 .as_deref()
                 .into_iter()
