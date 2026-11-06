@@ -12,6 +12,31 @@ use crate::engine::Orchestrator;
 /// How long an approval waits when the run sets no answer timeout.
 const DEFAULT_WAIT_MINUTES: f64 = 30.0;
 
+/// Checks the permission Cursor will receive before a session is handed work.
+pub fn unusable_for(agent: &Agent, policy: Option<&RunPolicy>) -> Option<String> {
+    unusable_on_platform(agent, policy, cfg!(windows))
+}
+
+fn unusable_on_platform(
+    agent: &Agent,
+    policy: Option<&RunPolicy>,
+    windows: bool,
+) -> Option<String> {
+    let permission = agent
+        .config
+        .get("permission")
+        .and_then(|p| serde_json::from_value::<PermissionPolicy>(p.clone()).ok())
+        .unwrap_or_else(|| match policy.map(|p| p.approvals) {
+            Some(ApprovalPolicy::Guard) => PermissionPolicy::Guard,
+            _ => PermissionPolicy::Bypass,
+        });
+    if windows && agent.plugin == "cursor" && permission != PermissionPolicy::Bypass {
+        Some("Cursor cannot use this permission on Windows: set this agent's permission to bypass, or set the run's approvals to off (全托管).".into())
+    } else {
+        None
+    }
+}
+
 pub const ALLOW: &str = "允许";
 pub const DENY: &str = "拒绝";
 
@@ -194,6 +219,37 @@ impl Orchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_windows_permissions_follow_run_policy() {
+        let mut agent = Agent {
+            id: crossagents_core::AgentId::new(),
+            name: "Cursor".into(),
+            name_source: Default::default(),
+            plugin: "cursor".into(),
+            driver: None,
+            model: None,
+            role: crossagents_core::Role::Worker,
+            home: Default::default(),
+            cwd: Default::default(),
+            config: serde_json::json!({}),
+            status: crossagents_core::AgentStatus::Idle,
+            created_at: Utc::now(),
+            profile: Default::default(),
+            topic: None,
+            archived_at: None,
+        };
+        let mut policy = RunPolicy::default();
+        let reason = unusable_on_platform(&agent, Some(&policy), true).unwrap();
+        assert!(reason.contains("bypass") && reason.contains("off"));
+        assert!(unusable_on_platform(&agent, None, true).is_none());
+        assert!(unusable_on_platform(&agent, Some(&policy), false).is_none());
+        policy.approvals = ApprovalPolicy::Off;
+        assert!(unusable_on_platform(&agent, Some(&policy), true).is_none());
+        policy.approvals = ApprovalPolicy::Guard;
+        agent.config = serde_json::json!({"permission": "bypass"});
+        assert!(unusable_on_platform(&agent, Some(&policy), true).is_none());
+    }
 
     #[test]
     fn dangerous_actions_are_told_apart_from_work() {

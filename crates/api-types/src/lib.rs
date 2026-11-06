@@ -125,10 +125,51 @@ pub struct UploadAvatarsResponse {
     pub assigned: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, TS)]
 #[ts(export)]
 pub struct ListAgentsResponse {
+    #[ts(type = "Array<import('./Agent').Agent & { unusable?: string }>")]
     pub agents: Vec<Agent>,
+    #[ts(skip)]
+    pub unusable: Vec<Option<String>>,
+}
+
+impl<'de> Deserialize<'de> for ListAgentsResponse {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Entry {
+            #[serde(flatten)]
+            agent: Agent,
+            #[serde(default)]
+            unusable: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct Response {
+            agents: Vec<Entry>,
+        }
+        let entries = Response::deserialize(deserializer)?.agents;
+        let (agents, unusable) = entries.into_iter().map(|e| (e.agent, e.unusable)).unzip();
+        Ok(Self { agents, unusable })
+    }
+}
+
+impl Serialize for ListAgentsResponse {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::Error as _;
+        let mut agents = Vec::with_capacity(self.agents.len());
+        for (i, agent) in self.agents.iter().enumerate() {
+            let mut value = serde_json::to_value(agent).map_err(S::Error::custom)?;
+            if let Some(Some(reason)) = self.unusable.get(i) {
+                value["unusable"] = serde_json::Value::String(reason.clone());
+            }
+            agents.push(value);
+        }
+        #[derive(Serialize)]
+        struct Response {
+            agents: Vec<serde_json::Value>,
+        }
+        Response { agents }.serialize(serializer)
+    }
 }
 
 /// `POST /v1/agents/{key}/name`: a person renames the agent.
@@ -1166,6 +1207,9 @@ pub struct CreateRunRequest {
 #[ts(export)]
 pub struct SessionCandidate {
     pub agent: Agent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub unusable: Option<String>,
     pub state: String,
     pub busy_with: Option<String>,
     pub last_execution: Option<String>,
@@ -2954,6 +2998,36 @@ impl ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_roster_preserves_optional_unusable_reason() {
+        let agent = Agent {
+            id: crossagents_core::AgentId::new(),
+            name: "Cursor".into(),
+            name_source: Default::default(),
+            plugin: "cursor".into(),
+            driver: None,
+            model: None,
+            role: Role::Worker,
+            home: Default::default(),
+            cwd: Default::default(),
+            config: serde_json::json!({}),
+            status: crossagents_core::AgentStatus::Idle,
+            created_at: chrono::Utc::now(),
+            profile: Default::default(),
+            topic: None,
+            archived_at: None,
+        };
+        let response = ListAgentsResponse {
+            agents: vec![agent.clone(), agent],
+            unusable: vec![Some("unavailable".into()), None],
+        };
+        let value = serde_json::to_value(&response).unwrap();
+        assert_eq!(value["agents"][0]["unusable"], "unavailable");
+        assert!(value["agents"][1].get("unusable").is_none());
+        let restored: ListAgentsResponse = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, response);
+    }
 
     /// Core types are not `#[ts(export)]` themselves; export them (and everything they
     /// reference) from here so all bindings come from one place.
