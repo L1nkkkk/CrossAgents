@@ -1110,12 +1110,13 @@ async fn archiving_the_lead_clears_its_checkout_and_restoring_brings_it_back() {
         .await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
 
-    // The retained copy stays after finish. Explicit archival removes its checkout.
+    // Landing automatically archives the copied lead and removes its checkout.
     let lead = agent(&t, landed["planner"].as_str().unwrap()).await;
     let lead_id = lead["id"].as_str().unwrap().to_owned();
     let dir = std::path::PathBuf::from(lead["cwd"].as_str().unwrap());
     let branch = landed["branch"].as_str().unwrap().to_owned();
-    archive_and_wait(&t, &lead_id, &dir).await;
+    until_gone(&dir).await;
+    assert!(!agent(&t, &lead_id).await["archived_at"].is_null());
     // Whether the branch went with the checkout is `lead_left`'s call, and it races the
     // landing: a landed run's branch goes, one read before the landing may stay. Drop it
     // here so the restore is the same either way: built from the base.

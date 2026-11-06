@@ -146,7 +146,7 @@ pub fn guide_for(agent: &Agent, groups: &[Group]) -> String {
         Group::Lead => Some(Role::Planner),
         Group::Assignee => Some(Role::Worker),
         Group::Reviewer => Some(Role::Reviewer),
-        Group::Everyone | Group::Conversation => None,
+        Group::Everyone | Group::Conversation | Group::ContinueRun => None,
     });
     let mut text = match role {
         Some(role) => guide(role),
