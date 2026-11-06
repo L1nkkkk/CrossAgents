@@ -62,14 +62,19 @@ impl Orchestrator {
         }
         let tasks = self.store.list_tasks(run.id).await?;
         if !self.has_changes(run, &tasks).await? {
-            return Ok(());
+            // Nothing to check, so nothing for a result to be about: an older result must not
+            // stand for what is here now (docs/tasks/LEAD.md §7).
+            return self.bound_checks_to(run.id, None).await;
         }
+        // What the checks are about, taken before they run: for a lead in the person's
+        // directory that is the content, since there is no commit to bind them to.
+        let snapshot = self.checks_snapshot_of(run).await;
         let checks = project::run_checks(&dir)
             .map_err(|e| CoreError::Conflict(format!("{e}; fix it, then call {tool} again")))?;
         // Not checked is said as such, never left to read as passed.
         if checks.checks.is_empty() {
             return self
-                .record_checks(run.id, ChecksState::NotConfigured, Vec::new())
+                .record_checks(run.id, ChecksState::NotConfigured, Vec::new(), snapshot)
                 .await;
         }
         // What the run changes against its base, so that a check scoped to other paths is
@@ -86,14 +91,19 @@ impl Orchestrator {
         if commands.is_empty() {
             let declared = u32::try_from(checks.checks.len()).unwrap_or(u32::MAX);
             return self
-                .record_checks(run.id, ChecksState::NotApplicable { declared }, Vec::new())
+                .record_checks(
+                    run.id,
+                    ChecksState::NotApplicable { declared },
+                    Vec::new(),
+                    snapshot,
+                )
                 .await;
         }
         let results = self
             .verifier
             .check_within(&dir, &commands, checks.timeout)
             .await;
-        self.record_checks(run.id, ChecksState::Ran, results.clone())
+        self.record_checks(run.id, ChecksState::Ran, results.clone(), snapshot)
             .await?;
         if all_passed(&results) {
             return Ok(());
@@ -147,19 +157,76 @@ impl Orchestrator {
         )))
     }
 
-    /// Keeps on the run how its checks went.
+    /// Keeps on the run how its checks went, and what content they were about (`snapshot`,
+    /// for a lead in the person's own directory).
     async fn record_checks(
         &self,
         id: RunId,
         state: ChecksState,
         results: Vec<CheckResult>,
+        snapshot: Option<String>,
     ) -> Result<(), CoreError> {
         let _guard = self.lock(id).await;
         let mut stored = self.store.get_run(id).await?;
         stored.checks = results;
         stored.checks_state = Some(state);
+        stored.checks_snapshot = snapshot;
         stored.updated_at = Utc::now();
         self.store.update_run(&stored).await
+    }
+
+    /// Unbinds the checks on record: nothing they found is about what is there now.
+    async fn bound_checks_to(&self, id: RunId, snapshot: Option<String>) -> Result<(), CoreError> {
+        let _guard = self.lock(id).await;
+        let mut stored = self.store.get_run(id).await?;
+        if stored.checks_snapshot == snapshot {
+            return Ok(());
+        }
+        stored.checks_snapshot = snapshot;
+        stored.updated_at = Utc::now();
+        self.store.update_run(&stored).await
+    }
+
+    /// What a run's checks are about: the content of the person's directory for a lead that
+    /// works there, since no commit stands for it. `None` when a commit does (a checkout of
+    /// the run's own), when the directory is not versioned (nothing binds a result), or when
+    /// the content cannot be read (said, not turned into a pass).
+    async fn checks_snapshot_of(&self, run: &Run) -> Option<String> {
+        if !(run.leads_in_place() && run.versioned()) {
+            return None;
+        }
+        let dir = self.integration_path(run);
+        match crate::inplace::snapshot(&dir).await {
+            Ok(snapshot) => Some(snapshot),
+            Err(err) => {
+                tracing::warn!(run = %run.id, error = %err, "cannot fingerprint the directory the checks ran on");
+                None
+            }
+        }
+    }
+
+    /// Refuses to close a run whose lead works in the person's directory when the content
+    /// moved since its checks ran: the result on record is about other content, so it counts
+    /// neither as passed nor as failed — the checks run again (docs/tasks/LEAD.md §7).
+    async fn require_checks_current(&self, run: &Run) -> Result<(), CoreError> {
+        if !(run.leads_in_place() && run.versioned()) || run.checks_state != Some(ChecksState::Ran)
+        {
+            return Ok(());
+        }
+        let Some(recorded) = run.checks_snapshot.as_deref() else {
+            return Ok(());
+        };
+        let dir = self.integration_path(run);
+        let now = crate::inplace::snapshot(&dir).await?;
+        if now == recorded {
+            return Ok(());
+        }
+        Err(CoreError::Conflict(format!(
+            "the content of {} changed after the checks ran, so their result is about other \
+             content and counts neither way. Run them again (run_finish does) and then close the \
+             run",
+            dir.display()
+        )))
     }
 
     pub(crate) async fn run_land_tool(
@@ -310,6 +377,26 @@ impl Orchestrator {
         if let Some(landing) = &run.landed {
             return Ok(Some(LandOutcome::Landed(landing.clone())));
         }
+        // A lead in the person's directory has no branch of the hub's: its changes are
+        // already where the person works, and there is nothing to merge anywhere
+        // (docs/tasks/LEAD.md §9).
+        if run.leads_in_place() && run.versioned() {
+            return Err(CoreError::Conflict(
+                "this run's lead works in your own directory and the hub keeps no branch for \
+                 it: the changes are already there, so there is nothing to land. Close the run \
+                 with run_finish"
+                    .into(),
+            ));
+        }
+        // Another run whose lead works in this directory holds it: a merge into it would
+        // write under that lead (docs/tasks/LEAD.md §7).
+        if let Some(holder) = self.dir_holder(&run.repo).await?
+            && holder.id != id
+        {
+            return Err(CoreError::Conflict(crate::dirlock::busy(
+                &holder, &run.repo,
+            )));
+        }
         // A solo lead stays in Planning until it finishes; it can land its own work first.
         // A failed run may still carry work worth keeping. Empty branches are refused below.
         if !matches!(
@@ -430,9 +517,20 @@ impl Orchestrator {
             ));
         }
         run.base_branch = baseline;
+        // Read again here, right before the merge: a run may have taken the directory since
+        // the checks above (docs/tasks/LEAD.md §7). Landing refuses rather than merge there.
+        let holder = self.dir_holder(&run.repo).await?;
+        let holder = holder.filter(|h| h.id != id);
         let reference = self
             .ws_for(&run)
-            .land(&run.repo, &run.base_branch, &run.branch, mode, &message)
+            .land_held(
+                &run.repo,
+                &run.base_branch,
+                &run.branch,
+                mode,
+                &message,
+                holder.as_ref(),
+            )
             .await?;
         let landing = Landing {
             mode,
@@ -742,6 +840,9 @@ impl Orchestrator {
             .await?;
         let tasks = self.store.list_tasks(id).await?;
         let changed = self.has_changes(&run, &tasks).await?;
+        // Closing is the person's usual way out, and it does not run the checks itself: a
+        // result about other content cannot close the run (docs/tasks/LEAD.md §7).
+        self.require_checks_current(&run).await?;
         self.finish_run(&mut run, &tasks, changed).await?;
 
         // The closing note for the person: the lead's words, then what the hub knows.
@@ -756,7 +857,7 @@ impl Orchestrator {
             text.push_str(&format!("{merged}/{} 个任务已合并，", tasks.len()));
         }
         match &run.landed {
-            _ if run.in_place && changed => {
+            _ if run.leads_in_place() && changed => {
                 text.push_str(&format!("改动已直接写在 {}", run.repo.display()))
             }
             Some(l) => text.push_str(&format!("已落地到 {}（{}）", run.base_branch, l.reference)),

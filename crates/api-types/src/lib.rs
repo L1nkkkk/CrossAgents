@@ -11,9 +11,9 @@ pub use crossagents_core::{
     Account, AccountStatus, Agent, AgentCommand, AgentCommandKind, AgentId, AgentProfile,
     AgentStatus, Capabilities, CheckResult, ClaimRole, ContinuationPolicy, DataSource,
     DeliveryState, DeliveryStatus, DiffSource, DriverKind, Event, EventKind, Handoff, HandoffKind,
-    HistoryTask, MessageId, MessageSource, ModelInfo, OutputStream, PlannedTask, QueuedReason,
-    Role, Run, RunHistory, RunId, RunPolicy, RunStatus, StopReason, Task, TaskId, TaskStatus,
-    TokenTotals, ToolInfo, ToolStatus,
+    HistoryTask, LeadPlace, MessageId, MessageSource, ModelInfo, OutputStream, PlannedTask,
+    QueuedReason, Role, Run, RunHistory, RunId, RunPolicy, RunStatus, StopReason, Task, TaskId,
+    TaskStatus, TokenTotals, ToolInfo, ToolStatus,
 };
 
 /// Handoff cards and how a task's chain of them reads.
@@ -1095,6 +1095,12 @@ pub struct CreateRunRequest {
     #[serde(default)]
     #[ts(optional)]
     pub policy: Option<crossagents_core::RunPolicy>,
+    /// Where the lead works (docs/tasks/LEAD.md §2): in the person's own directory
+    /// (`in_place`), or in a checkout the hub makes (the default). A directory outside
+    /// version control gets one in place whatever this says.
+    #[serde(default)]
+    #[ts(optional)]
+    pub lead_place: Option<crossagents_core::LeadPlace>,
     /// Files that come with the request (screenshots, specs), handed to the lead with its
     /// kickoff; the same limits as [`SendMessageRequest::attachments`].
     #[serde(default)]

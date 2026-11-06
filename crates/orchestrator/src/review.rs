@@ -180,13 +180,20 @@ impl Orchestrator {
         Ok(Changes::new(base, head, diff))
     }
 
-    /// What landing the run would bring into its base branch.
+    /// What landing the run would bring into its base branch — and, for a lead working in the
+    /// person's own directory, what differs there now, since the run has no branch of its own
+    /// (docs/tasks/LEAD.md §9).
     pub async fn run_changes(&self, run: RunId) -> Result<Changes, CoreError> {
         let run = self.store.get_run(run).await?;
-        let diff = self
-            .ws_for(&run)
-            .branch_diff(&run.repo, &run.base_branch, &run.branch)
-            .await?;
+        let diff = if run.leads_in_place() && run.versioned() {
+            self.ws_for(&run)
+                .diff(&run.repo, &run.base_branch, &[])
+                .await?
+        } else {
+            self.ws_for(&run)
+                .branch_diff(&run.repo, &run.base_branch, &run.branch)
+                .await?
+        };
         Ok(Changes::new(
             run.base_branch.clone(),
             run.branch.clone(),
