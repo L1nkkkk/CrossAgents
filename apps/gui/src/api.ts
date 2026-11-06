@@ -19,6 +19,8 @@ import type { Agent } from "@bindings/Agent";
 import type { AgentSettingsRequest } from "@bindings/AgentSettingsRequest";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
 import type { CreateAccountRequest } from "@bindings/CreateAccountRequest";
+import type { ImportAccountRequest } from "@bindings/ImportAccountRequest";
+import type { ImportAccountsResponse } from "@bindings/ImportAccountsResponse";
 import type { HumanItem } from "@bindings/HumanItem";
 import type { InitRepoRequest } from "@bindings/InitRepoRequest";
 import type { LandMode } from "@bindings/LandMode";
@@ -466,6 +468,8 @@ export const api = {
 
   quota: () => request<QuotaResponse>("GET", "/v1/quota"),
   createAccount: (req: CreateAccountRequest) => request<Account>("POST", "/v1/accounts", req),
+  importCandidates: () => request<ImportAccountsResponse>("GET", "/v1/accounts/import"),
+  importAccount: (req: ImportAccountRequest) => request<Account>("POST", "/v1/accounts/import", req),
   deleteAccount: (id: string) => request<void>("DELETE", `/v1/accounts/${enc(id)}`),
   accountUsage: (id: string, by: AccountUsageGroup) =>
     request<AccountUsageResponse>("GET", `/v1/accounts/${enc(id)}/usage?by=${by}`),

@@ -1981,6 +1981,38 @@ pub struct ListAccountsResponse {
     pub accounts: Vec<crossagents_core::Account>,
 }
 
+/// A login already on this machine that can be copied into an account of its own
+/// (docs/research/magpie-lancer.md §2.11). Importing reads the file and never changes it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportableAccount {
+    pub provider: String,
+    /// The file the login is read from, as the person would look for it.
+    pub source: String,
+    /// What refreshing the copied token does to the tool the login came from.
+    pub warning: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportAccountsResponse {
+    /// The logins found; empty when the machine has none.
+    pub candidates: Vec<ImportableAccount>,
+}
+
+/// Copies a login already on this machine into a new account's own home. `confirm` must be
+/// true: the person has been told that refreshing the copied token may sign the original
+/// tool out.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ImportAccountRequest {
+    pub provider: String,
+    pub id: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    pub confirm: bool,
+}
+
 /// One account with its live status and models. `GET /v1/quota` lists every account.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]

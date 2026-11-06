@@ -1,6 +1,7 @@
 //! The CrossAgents hub: owns all state and serves the local API.
 
 pub mod access;
+pub mod account_import;
 pub mod accounts;
 pub mod api;
 pub mod api_expertise;

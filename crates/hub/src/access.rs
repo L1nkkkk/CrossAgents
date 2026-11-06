@@ -58,6 +58,7 @@ pub fn required(method: &Method, pattern: &str) -> Level {
         (method.as_str(), pattern),
         ("POST", "/v1/shutdown")
             | ("POST", "/v1/accounts")
+            | ("POST", "/v1/accounts/import")
             | ("DELETE", "/v1/accounts/{id}")
             | ("POST", "/v1/accounts/{id}/login")
             // They run a program on this machine (docs/DESIGN.md §9.3).
@@ -159,6 +160,9 @@ mod tests {
             required(&Method::POST, "/v1/accounts/{id}/login"),
             Level::Admin
         );
+        // Importing copies a login token into a new account: it touches credentials.
+        assert_eq!(required(&Method::POST, "/v1/accounts/import"), Level::Admin);
+        assert_eq!(required(&Method::GET, "/v1/accounts/import"), Level::Read);
         assert_eq!(required(&Method::DELETE, "/v1/accounts/{id}"), Level::Admin);
         assert_eq!(
             required(&Method::POST, "/v1/plugins/{name}/install"),
@@ -321,6 +325,7 @@ mod tests {
             (Method::POST, "/v1/extensions/{name}/auto-trust"),
             (Method::POST, "/v1/shutdown"),
             (Method::POST, "/v1/accounts"),
+            (Method::POST, "/v1/accounts/import"),
             (Method::GET, "/v1/terminals"),
         ] {
             let why = refusal(&write, &method, pattern).expect(pattern);

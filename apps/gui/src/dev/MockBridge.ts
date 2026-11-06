@@ -5,6 +5,8 @@
 // look (sending, withdrawing, approving) are acted out; the rest answer 204.
 
 import { usageSeriesMock } from "../views/Usage.mock";
+import { importCandidates } from "../views/AccountImport.mock";
+import type { Account } from "@bindings/Account";
 import type { AgentCommandsResponse } from "@bindings/AgentCommandsResponse";
 import type { AgentExecution } from "@bindings/AgentExecution";
 import type { AccountUsageResponse } from "@bindings/AccountUsageResponse";
@@ -17,6 +19,7 @@ import type { ExtensionInfo } from "@bindings/ExtensionInfo";
 import type { ExtensionLogsResponse } from "@bindings/ExtensionLogsResponse";
 import type { ExtensionVersion } from "@bindings/ExtensionVersion";
 import type { HumanItem } from "@bindings/HumanItem";
+import type { ImportAccountRequest } from "@bindings/ImportAccountRequest";
 import type { LandMode } from "@bindings/LandMode";
 import type { Note } from "@bindings/Note";
 import type { PluginInfo } from "@bindings/PluginInfo";
@@ -699,6 +702,7 @@ export class MockBridge implements CrossAgentsBridge {
       if (p === "/v1/notes") return json(200, { notes: s.notes });
       if (p === "/v1/background") return json(200, s.background ?? { reminders: [], watches: [], verifying: [] });
       if (p === "/v1/quota") return json(200, s.quota);
+      if (p === "/v1/accounts/import") return json(200, { candidates: importCandidates() });
       if (p === "/v1/usage/series") return json(200, usageSeriesMock(url.searchParams.get("range") ?? "7d", url.searchParams.get("group") ?? "total", url.searchParams.get("source") ?? "all", s.usageSeriesVariant ?? "normal"));
       if (p === "/v1/expertise" || p === "/v1/expertise/card" || p === "/v1/expertise/maintenance" || p === "/v1/expertise/export") {
         const x = s.expertise ?? { entries: [], candidates: [], usages: [] };
@@ -960,6 +964,49 @@ export class MockBridge implements CrossAgentsBridge {
       }
       if (p === "/v1/repos/init") return json(200, body);
       if (p === "/v1/plugins/refresh") return this.refreshClis();
+      if (p === "/v1/accounts/import") {
+        const req = body as ImportAccountRequest;
+        if (!req.confirm)
+          return json(400, { error: { code: "bad_request", message: "导入前需要确认：刷新令牌会让原来的工具登出" } });
+        const candidate = importCandidates().find((c) => c.provider === req.provider);
+        if (!candidate) return notFound(`${req.provider} 的本机登录`);
+        const id = req.id.trim();
+        if (s.quota.accounts.some((a) => a.account.id === id))
+          return json(409, { error: { code: "conflict", message: `account ${id} already exists` } });
+        const account: Account = {
+          codebuddy_site: null,
+          id,
+          provider: req.provider,
+          label: req.label || id,
+          home: `C:/Users/me/.crossagents/accounts/${id}`,
+          created_at: new Date().toISOString(),
+        };
+        s.quota.accounts = [
+          ...s.quota.accounts,
+          {
+            account,
+            status: {
+              logged_in: true,
+              auth_mode: req.provider === "codex" ? "chatgpt" : "oauth",
+              email: null,
+              plan: null,
+              subscription_until: null,
+              rate_limits: [],
+              limit_reached: false,
+              credits: null,
+              limits: [],
+              reset_credits: [],
+              source: "live",
+              as_of: new Date().toISOString(),
+              note: `从 ${candidate.source} 复制`,
+            },
+            models: [],
+            agents: [],
+          },
+        ];
+        this.emit({ type: "account.created", data: { account } });
+        return json(201, account);
+      }
       if ((m = p.match(/^\/v1\/plugins\/([^/]+)\/(install|upgrade)$/)))
         return this.installCli(decodeURIComponent(m[1]), m[2] as "install" | "upgrade");
       if ((m = p.match(/^\/v1\/plugins\/([^/]+)\/models$/))) {
