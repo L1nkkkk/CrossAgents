@@ -13,7 +13,7 @@ use crossagents_core::{
     MessageId, MessageSource, Role, RunId,
 };
 use crossagents_orchestrator::workspace::worktree_env;
-use crossagents_orchestrator::{AgentHost, Route};
+use crossagents_orchestrator::{AgentHost, RouteDecision, RouteMode};
 use tokio::sync::RwLock;
 
 use crate::runtime::{Runtime, SessionExtras, SessionSetup};
@@ -347,10 +347,16 @@ impl AgentHost for HubHost {
         Ok(agent)
     }
 
-    async fn route(&self, template: AgentId, team: &[AgentId], limited: Option<AgentId>) -> Route {
-        crate::routing::route(self, template, team, limited)
+    async fn route(
+        &self,
+        template: AgentId,
+        team: &[AgentId],
+        limited: Option<AgentId>,
+        mode: RouteMode,
+    ) -> RouteDecision {
+        crate::routing::route(self, template, team, limited, mode)
             .await
-            .unwrap_or(Route::Same)
+            .unwrap_or_default()
     }
 
     async fn spawn_agent(&self, agent: Agent) -> Result<Agent, CoreError> {

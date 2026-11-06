@@ -1507,6 +1507,18 @@ pub struct Spent {
     pub cost_usd: f64,
 }
 
+/// One dispatch of a task's worker: the accounts weighed for it, best first, and the one it
+/// got (magpie-lancer §2.8).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DispatchTrace {
+    pub at: DateTime<Utc>,
+    /// The account the worker runs on; `None` when routing knew no account.
+    pub account: Option<String>,
+    /// The same vendor's accounts, best first, each with why it ranks there.
+    pub candidates: Vec<crossagents_core::AccountCandidate>,
+}
+
 /// One task's story.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -1521,6 +1533,9 @@ pub struct TaskTrace {
     pub checks: Vec<CheckTrace>,
     /// Each time quota moved it (`task.rerouted`).
     pub rerouted: Vec<String>,
+    /// Each dispatch of a worker for it (`task.routed`), with the accounts weighed and why.
+    #[serde(default)]
+    pub dispatches: Vec<DispatchTrace>,
     /// Each time it changed hands (`task.handed_off`), oldest first.
     #[serde(default)]
     pub handoffs: Vec<Handoff>,
