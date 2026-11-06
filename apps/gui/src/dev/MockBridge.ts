@@ -52,6 +52,7 @@ import {
   type Candidate,
   type ConflictDecision,
   type ExpertiseEntry,
+  type ProjectInfo,
   type UsageRecord,
 } from "../lib/expertise";
 import { exportLessons, lessonMatches, type Lesson, type RunIssue } from "../lessons/lessons";
@@ -118,7 +119,14 @@ export type MockState = {
   /** Expertise profiles (docs EXPERTISE.md): entries of every owner, candidates, usages. */
   expertise?: ExpertiseMock;
   /** Troubleshooting records (docs/tasks/LESSONS.md) and the problems each run recorded. */
-  lessons?: { lessons: Lesson[]; issues: Record<string, RunIssue[]> };
+  lessons?: {
+    lessons: Lesson[];
+    issues: Record<string, RunIssue[]>;
+    /** Records whose files changed after their last check, by id (LESSONS §4.4). */
+    changed?: Record<string, string[]>;
+    /** Projects the records do not imply: a checkout whose identity waits for a person. */
+    projects?: ProjectInfo[];
+  };
   /** Extensions (`GET /v1/extensions`); absent: none. */
   extensions?: ExtensionInfo[];
   /** What each waiting version changes, by extension name (`GET …/pending/diff`). */
@@ -565,6 +573,27 @@ export class MockBridge implements CrossAgentsBridge {
     return this.state.agents.find((a) => a.id === k || a.name.toLowerCase() === k.toLowerCase());
   }
 
+  /** The projects the preview knows: one per project its records or expertise belong to (the
+   * workspace path is the id, where the hub has a Project.id), the ones a scene names, and
+   * whatever a bind or merge changed here. */
+  private projectCache?: ProjectInfo[];
+  private projects(): ProjectInfo[] {
+    if (this.projectCache) return this.projectCache;
+    const s = this.state;
+    const byId = new Map<string, ProjectInfo>();
+    for (const p of s.lessons?.projects ?? []) {
+      byId.set(p.id, { ...p, remotes: [...p.remotes], paths: p.paths.map((at) => ({ ...at })) });
+    }
+    const ids = new Set((s.expertise?.entries ?? []).filter((e) => e.owner_kind === "project").map((e) => e.owner_id));
+    for (const l of s.lessons?.lessons ?? []) ids.add(l.project_id);
+    for (const id of ids) {
+      if (byId.has(id)) continue;
+      byId.set(id, { id, name: id.split("/").pop() || id, remotes: [], paths: [{ node: "local", path: id }] });
+    }
+    this.projectCache = [...byId.values()];
+    return this.projectCache;
+  }
+
   private route(method: string, path: string, body: unknown): HubResponse {
     const s = this.state;
     const url = new URL(path, "http://mock");
@@ -704,14 +733,61 @@ export class MockBridge implements CrossAgentsBridge {
         const repo = url.searchParams.get("repo");
         return json(200, { history: historyOf(s).filter((h) => !repo || h.repo === repo) });
       }
-      // The mock's projects are the owners its project entries already have: the preview uses
-      // the workspace path as the id, where the hub has a Project.id.
-      if (p === "/v1/projects") {
-        const ids = new Set((s.expertise?.entries ?? []).filter((e) => e.owner_kind === "project").map((e) => e.owner_id));
-        for (const l of s.lessons?.lessons ?? []) ids.add(l.project_id);
-        return json(200, {
-          projects: [...ids].map((id) => ({ id, name: id.split("/").pop() || id, remotes: [], paths: [{ node: "local", path: id }] })),
-        });
+      // The mock's projects are the owners its project entries and records already have, plus
+      // the ones a scene names (a checkout whose remote nobody confirmed yet). A bind or a
+      // merge changes the preview's copy.
+      const writes = (method as string) === "POST";
+      if ((m = p.match(/^\/v1\/projects\/([^/]+)\/bind$/)) && writes) {
+        const project = this.projects().find((x) => x.id === decodeURIComponent(m![1]));
+        if (!project) return notFound("project");
+        const req = (body ?? {}) as { remote?: string; path?: string; split?: boolean };
+        const remote = req.remote?.trim();
+        const path = req.path?.trim();
+        if (!remote && !path) return json(400, { error: "name a remote or a path" });
+        if (path && req.split) {
+          // The directory is another repository: it leaves with the remote that was waiting.
+          const peeled: ProjectInfo = {
+            id: `p-${path}`,
+            name: path.split(/[\\/]/).pop() || path,
+            remotes: project.unconfirmed_remote ? [project.unconfirmed_remote] : [],
+            paths: [{ node: "local", path }],
+          };
+          project.paths = project.paths.filter((at) => at.path !== path);
+          project.unconfirmed_remote = undefined;
+          this.projects().push(peeled);
+          return json(200, peeled);
+        }
+        if (remote) {
+          if (!project.remotes.includes(remote)) project.remotes.push(remote);
+          if (project.unconfirmed_remote === remote) project.unconfirmed_remote = undefined;
+        }
+        if (path) {
+          // A checkout is bound to one project: take it from wherever else it was.
+          for (const other of this.projects()) {
+            if (other.id !== project.id) other.paths = other.paths.filter((at) => at.path !== path);
+          }
+          if (!project.paths.some((at) => at.path === path)) project.paths.push({ node: "local", path });
+          project.unconfirmed_remote = undefined;
+        }
+        return json(200, project);
+      }
+      if (p === "/v1/projects/merge" && writes) {
+        const req = (body ?? {}) as { from: string; into: string };
+        const list = this.projects();
+        const source = list.find((x) => x.id === req.from);
+        const target = list.find((x) => x.id === req.into);
+        if (!source) return notFound("project");
+        if (!target) return notFound("project");
+        if (source.id === target.id) return json(400, { error: "a project cannot be merged into itself" });
+        for (const l of s.lessons?.lessons ?? []) if (l.project_id === source.id) l.project_id = target.id;
+        for (const at of source.paths) if (!target.paths.some((t) => t.path === at.path)) target.paths.push(at);
+        for (const r of source.remotes) if (!target.remotes.includes(r)) target.remotes.push(r);
+        source.paths = [];
+        source.remotes = [];
+        return json(200, target);
+      }
+      if (p === "/v1/projects" && method === "GET") {
+        return json(200, { projects: this.projects() });
       }
       if ((m = p.match(/^\/v1\/projects\/([^/]+)\/lessons(\/export)?$/))) {
         const project = decodeURIComponent(m[1]);
@@ -719,7 +795,9 @@ export class MockBridge implements CrossAgentsBridge {
         const list = (s.lessons?.lessons ?? []).filter(
           (l) => l.project_id === project && (!status || l.status === status) && lessonMatches(l, url.searchParams.get("q") ?? ""),
         );
-        return m[2] ? { status: 200, body: exportLessons(list) } : json(200, { lessons: list });
+        if (m[2]) return { status: 200, body: exportLessons(list) };
+        const changed = Object.fromEntries(Object.entries(s.lessons?.changed ?? {}).filter(([id]) => list.some((l) => l.id === id)));
+        return json(200, { lessons: list, changed });
       }
       if ((m = p.match(/^\/v1\/lessons\/([^/]+)$/))) {
         const id = decodeURIComponent(m[1]);

@@ -15,10 +15,13 @@ use crossagents_api_types::{
     UpdateLessonRequest,
 };
 use crossagents_core::{CoreError, EventKind, ISSUE_PREFIX, NoteScope};
-use crossagents_orchestrator::lessons::{export_markdown, search_terms};
+use crossagents_orchestrator::lessons::{export_markdown, files_changed, search_terms};
+use crossagents_orchestrator::projects::LOCAL_NODE;
 use serde::Deserialize;
 
 use crate::api::{ApiResult, AppError, AppState, resolve_run};
+
+mod projects;
 
 /// Most lessons a search returns.
 const SEARCH_LIMIT: usize = 50;
@@ -29,6 +32,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/v1/projects/{id}/lessons/export", get(export))
         .route("/v1/lessons/{id}", get(get_lesson).patch(update_lesson))
         .route("/v1/runs/{key}/issues", get(run_issues))
+        .merge(projects::router())
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -58,7 +62,20 @@ async fn list_lessons(
     if let Some(status) = query.status {
         lessons.retain(|l| l.status == status);
     }
-    Ok(Json(ListLessonsResponse { lessons }))
+    // Review clues (LESSONS §4.4): a record whose files moved on after its last check. Read
+    // from the project's own checkout; a project with no checkout on this node has none.
+    let dir = store
+        .list_projects()
+        .await?
+        .into_iter()
+        .find(|p| p.id == id)
+        .and_then(|p| p.paths.into_iter().find(|at| at.node == LOCAL_NODE))
+        .map(|at| at.path);
+    let changed = match dir {
+        Some(dir) => files_changed(&lessons, &dir).await,
+        None => Default::default(),
+    };
+    Ok(Json(ListLessonsResponse { lessons, changed }))
 }
 
 async fn get_lesson(

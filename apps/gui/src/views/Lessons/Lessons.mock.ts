@@ -32,6 +32,7 @@ function lesson(runId: string, i: Init, daysOld: number, tries: Array<[Lesson["o
     })),
     created_at: ago(daysOld * DAY),
     updated_at: ago((tries.at(-1)?.[2] ?? daysOld) * DAY),
+    files: [],
     ...i,
   };
 }
@@ -62,6 +63,7 @@ function lessons(runId: string): Lesson[] {
         conditions: "Windows，GUI 开发服务器或编辑器占用文件",
         resolution: "关掉 vite 开发服务器后重试；仍不行就重启编辑器。",
         outcome: "workaround",
+        files: ["apps/gui/package-lock.json"],
       },
       20,
       [["workaround", "写下记录时", 20], ["unresolved", "关了 vite 还是失败", 2]],
@@ -93,6 +95,7 @@ function lessons(runId: string): Lesson[] {
         resolution: "连接打开后执行 `PRAGMA busy_timeout = 5000`；测试仍各自用临时目录。",
         outcome: "unresolved",
         status: "review",
+        files: ["crates/store-sqlite/src/lib.rs"],
       },
       8,
       [["resolved", "写下记录时", 8], ["unresolved", "CI 上还是偶发", 1]],
@@ -140,7 +143,25 @@ export function lessonsScene(): { state: MockState; script: Step[]; runId: strin
     agents: [ada, rex, mia, sam],
     quota: quota(),
     runs: [{ run: r, tasks: [failed, done] }],
-    lessons: { lessons: list, issues: { [r.id]: issues } },
+    lessons: {
+      lessons: list,
+      issues: { [r.id]: issues },
+      // Review clues: the files moved on after the record's last check (LESSONS §4.4).
+      changed: {
+        [list[1].id]: ["apps/gui/package-lock.json"],
+        [list[3].id]: ["crates/store-sqlite/src/lib.rs"],
+      },
+      // A checkout whose directory now points at another remote: the person decides.
+      projects: [
+        {
+          id: `${PROJECT}-elsewhere`,
+          name: "CrossAgents（另一个目录）",
+          remotes: ["github.com/L1nkkkk/CrossAgents"],
+          paths: [{ node: "local", path: `${REPO}-fork` }],
+          unconfirmed_remote: "github.com/someone/CrossAgents",
+        },
+      ],
+    },
   };
   selectWorkspace(PROJECT);
   const key = `issue/${failed.id}/d4`;

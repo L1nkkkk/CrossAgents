@@ -278,6 +278,7 @@ const TOOLS: &[ToolDef] = &[
                     "symptom": { "type": "string" },
                     "keywords": { "type": "array", "items": { "type": "string" } },
                     "conditions": { "type": "string", "description": "Where it applies: system, tool versions, node, files." },
+                    "files": { "type": "array", "items": { "type": "string" }, "description": "The files the problem is about, repository-relative (crates/hub/src/api.rs). Later searches mark the record when one of them changed after its last check; a clue only, nothing is invalidated." },
                     "resolution": { "type": "string" },
                     "outcome": outcome_schema()
                 }),
@@ -722,7 +723,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "run_retro",
-        description: "Write the retro of a finished run (yours unless `run` names another of your project): read its trace and its `issue/` notes, and write docs/tasks/RETRO-<run>.md in your own checkout — a 现象 / 影响 / 方向 table in the shape of docs/tasks/DOGFOOD.md §9. It writes that document only, never code, and does not commit. The run must have ended; an existing document is kept unless force.",
+        description: "Write the retro of a finished run (yours unless `run` names another of your project): read its trace and its `issue/` notes, and write docs/tasks/RETRO-<run>.md in your own checkout — a 现象 / 影响 / 方向 table in the shape of docs/tasks/DOGFOOD.md §9, plus the project's troubleshooting records this run's problems became or look like and the ones nobody sorted yet. It writes that document only, never code, and does not commit. The run must have ended; an existing document is kept unless force.",
         groups: PLANNER,
         schema: || {
             object(

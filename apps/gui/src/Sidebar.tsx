@@ -18,6 +18,7 @@ import { SessionPeek, TaskSegments, type PeekFacts } from "./SessionPeek";
 import { capped, sidebarGroups, searchGroups, groupClosed, shortSince, summaryText, type SidebarGroup, type SidebarMember } from "./lib/sidebarTree";
 import { todoItems, visibleTodos, type TodoItem } from "./lib/todos";
 import { useUnsortedIssues } from "./lessons/unsorted";
+import { useUnboundProjects } from "./lessons/projects";
 import { useQuestions } from "./questions";
 import { startNew } from "./menubar";
 import { level, tightest, windowLabel } from "./lib/quota";
@@ -113,6 +114,7 @@ export function Sidebar({ route }: { route: string[] }) {
     now: Date.now(),
   });
   const unsortedIssues = useUnsortedIssues(runs);
+  const unboundProjects = useUnboundProjects(runs);
   // Pages an extension registered (`ca.pages`): each is one row here, and only while it loaded.
   const extensionPages = [...useExtensions().pages.values()];
   const groups = sidebarGroups(everyone, runs, list, pinned, [...order]);
@@ -194,7 +196,7 @@ export function Sidebar({ route }: { route: string[] }) {
                 })}
               </section>
             )}
-            <NeedsYou items={[...todos, ...unsortedIssues]} agents={everyone} />
+            <NeedsYou items={[...todos, ...unsortedIssues, ...unboundProjects]} agents={everyone} />
             {done > 0 && <p className="sidebar-unread">{t("sidebar.doneUnread", { n: done })}</p>}
             {!query.trim() && (pinnedMembers.length > 0 || pinnedRuns.length > 0) && (
               <section className="group">

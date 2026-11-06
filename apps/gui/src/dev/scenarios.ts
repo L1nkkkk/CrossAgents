@@ -404,6 +404,7 @@ export const SCENARIOS: Scenario[] = [
   { key: "lessons-run", label: "运行里的问题", hint: "run 页：记下的问题及其整理结果、未整理的「交给…整理」，失败任务附「可能相关」的排障记录；脚本：又记下一条问题", build: () => { const { state, script, runId } = lessonsScene(); return { state, script, route: `#/runs/${runId}` }; } },
   { key: "lessons-task", label: "失败任务的相关记录", hint: "失败任务详情：附「可能相关」的排障记录与命中的词", build: () => { const { state, runId, failedTask } = lessonsScene(); return { state, script: [], route: `#/runs/${runId}/tasks/${failedTask}` }; } },
   { key: "lessons-open", label: "排障记录：展开", hint: "展开待复核的一条：现象、条件、处理、每次试用的结果与来源", build: () => { const { state } = lessonsScene(); return { state, route: "#/lessons", script: [{ at: 800, act: () => document.querySelectorAll<HTMLElement>(".lesson-head")[3]?.click() }] }; } },
+  { key: "lessons-projects", label: "项目绑定与合并", hint: "排障记录页底部：项目列表、身份待确认的一条、按 remote 或目录绑定、把两个项目合并", build: () => { const { state } = lessonsScene(); return { state, route: "#/lessons", script: [{ at: 600, act: () => document.querySelector(".project-panel")?.scrollIntoView({ block: "center" }) }] }; } },
   { key: "cli-install-ok", label: "安装 CLI 成功", hint: "设置 → 智能体：CodeBuddy 没装，点「安装」先看确认框里的命令和来源；执行后输出滚动，装完提示去登录账号", build: () => cliScene("ok") },
   { key: "cli-install-fail", label: "安装 CLI 失败", hint: "安装命令以非 0 退出：滚动的输出和写明退出码的原因", build: () => cliScene("fail") },
   { key: "cli-install-missing", label: "装完但找不到", hint: "命令成功，但这台机器上找不到装好的程序：原因里列出找过的位置", build: () => cliScene("missing") },

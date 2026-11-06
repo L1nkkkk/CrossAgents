@@ -308,6 +308,7 @@ mod tests {
                 node: "local".into(),
                 path: path.into(),
             }],
+            unconfirmed_remote: None,
         }
     }
 

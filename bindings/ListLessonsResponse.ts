@@ -4,4 +4,9 @@ import type { Lesson } from "./Lesson";
 /**
  * `GET /v1/projects/{id}/lessons`: newest first, narrowed by `q` and `status`.
  */
-export type ListLessonsResponse = { lessons: Array<Lesson>, };
+export type ListLessonsResponse = { lessons: Array<Lesson>, 
+/**
+ * Review clues (LESSONS §4.4): by lesson id, the record's files changed after its last
+ * check. A clue, not a verdict — the record may still hold.
+ */
+changed: { [key in string]: Array<string> }, };

@@ -3,6 +3,7 @@
 //! of that project searches when it runs into trouble. Reference, never rules: nothing here
 //! goes into an agent's instructions beyond one line saying the records exist.
 
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
@@ -10,14 +11,14 @@ use std::time::Duration;
 use chrono::Utc;
 use crossagents_core::{
     Agent, AgentId, CoreError, EventKind, Evidence, ISSUE_PREFIX, IssueRef, Lesson,
-    LessonOutcome, LessonStatus, NoteScope, Project, RelatedLesson, Run, RunId, Task, Triage,
-    TriageStep,
+    LessonOutcome, LessonStatus, NoteScope, Project, ProjectPath, RelatedLesson, Run, RunId, Store,
+    Task, Triage, TriageStep,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::engine::Orchestrator;
-use crate::projects::{LOCAL_NODE, main_repo, resolve};
+use crate::projects::{LOCAL_NODE, main_repo, normalize_remote, resolve};
 use crate::tools::args;
 
 /// Longest title, and longest of the other text fields, in bytes.
@@ -326,6 +327,99 @@ fn excerpt(text: &str) -> (String, bool) {
     }
 }
 
+// ---------------------------------------------------------------------------------------
+// Review clues: a record's files changed after its last check (LESSONS §4.4)
+
+/// Most files a lesson keeps as its own.
+const FILES_MAX: usize = 20;
+/// Most different commits one listing asks git about (one call each).
+const COMMITS_MAX: usize = 16;
+
+/// `path` as compared across git's output and a record: `/` separators, no leading `./`,
+/// lower case (the checkouts the hub knows are case-insensitive on Windows, and a clue that
+/// is wrong costs a second look, not an error).
+pub fn path_key(path: &str) -> String {
+    let mut key = path.trim().replace('\\', "/");
+    while let Some(rest) = key.strip_prefix("./") {
+        key = rest.to_owned();
+    }
+    key.to_lowercase()
+}
+
+/// The record's files that `changed` (paths as git reports them) names, in the record's
+/// order.
+pub fn changed_among(files: &[String], changed: &[String]) -> Vec<String> {
+    let changed: std::collections::HashSet<String> =
+        changed.iter().map(|c| path_key(c)).collect();
+    files
+        .iter()
+        .filter(|f| changed.contains(&path_key(f)))
+        .cloned()
+        .collect()
+}
+
+/// The commit a record was last checked at: the newest evidence that names one. That is the
+/// point its files are compared with, so a later check at a newer commit makes the clue
+/// quieter rather than noisier.
+pub fn last_commit(l: &Lesson) -> Option<&str> {
+    l.evidence
+        .iter()
+        .rev()
+        .find_map(|e| e.commit.as_deref().filter(|c| !c.trim().is_empty()))
+}
+
+/// Files changed in `dir`'s repository since `commit`: committed or not, since a worker's
+/// checkout with uncommitted work still tells a later reader the files moved on. Empty when
+/// git cannot say (not a repository, unknown commit, git missing): a clue that cannot be read
+/// is left out rather than guessed.
+pub async fn changed_since(dir: &Path, commit: &str) -> Vec<String> {
+    use crossagents_core::process::NoWindow;
+    let root = main_repo(dir).unwrap_or_else(|| dir.to_path_buf());
+    let output = tokio::process::Command::new("git")
+        .no_window()
+        .args(["-c", "core.quotePath=false", "diff", "--name-only", commit])
+        .current_dir(&root)
+        .output()
+        .await;
+    match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// For each record that names files and a commit: those changed since that commit, by
+/// lesson id. Records that name neither, or whose files all still look the same, are left
+/// out. At most [`COMMITS_MAX`] different commits are asked about.
+pub async fn files_changed(lessons: &[Lesson], dir: &Path) -> BTreeMap<String, Vec<String>> {
+    let mut by_commit: HashMap<String, Vec<String>> = HashMap::new();
+    let mut out = BTreeMap::new();
+    for l in lessons {
+        if l.files.is_empty() {
+            continue;
+        }
+        let Some(commit) = last_commit(l) else {
+            continue;
+        };
+        if !by_commit.contains_key(commit) {
+            if by_commit.len() >= COMMITS_MAX {
+                continue;
+            }
+            let changed = changed_since(dir, commit).await;
+            by_commit.insert(commit.to_owned(), changed);
+        }
+        let hit = changed_among(&l.files, &by_commit[commit]);
+        if !hit.is_empty() {
+            out.insert(l.id.clone(), hit);
+        }
+    }
+    out
+}
+
 /// One search hit: enough to tell whether it is worth reading in full (USAGE-TRIM §4.2).
 fn search_hit(l: &Lesson) -> Value {
     let (conditions, a) = excerpt(&l.conditions);
@@ -459,6 +553,178 @@ pub fn export_markdown(project: &str, lessons: &[Lesson]) -> String {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------------------
+// Projects: binding a remote or a checkout, merging two (LESSONS §4.2)
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    if cfg!(windows) {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    } else {
+        a == b
+    }
+}
+
+fn project_of(projects: &[Project], id: &str) -> Result<Project, CoreError> {
+    projects
+        .iter()
+        .find(|p| p.id == id)
+        .cloned()
+        .ok_or_else(|| CoreError::NotFound {
+            kind: "project",
+            id: id.to_owned(),
+        })
+}
+
+/// Binds what a person confirms to a project (LESSONS §4.2): a `remote` becomes an alias of
+/// it — a rename or a migrated repository, never a fork of someone else's — and a `path`
+/// moves to it from whatever project held that checkout. Either says the person has settled
+/// the project's identity, so its `unconfirmed_remote` is cleared. Nothing else moves: a
+/// remote another project already owns is refused, and merging is a separate call.
+///
+/// With `split`, the path is not bound to `id` but taken out of it into a project of its own
+/// — the other half of the same decision, when the directory turns out to hold another
+/// repository (a fork the person does not want mixed with this one). The new project takes
+/// the remote that was waiting to be confirmed.
+pub async fn bind_project(
+    store: &dyn Store,
+    id: &str,
+    remote: Option<&str>,
+    path: Option<&str>,
+    split: bool,
+) -> Result<Project, CoreError> {
+    let projects = store.list_projects().await?;
+    let mut project = project_of(&projects, id)?;
+    if split {
+        let given = path.map(str::trim).filter(|p| !p.is_empty()).ok_or_else(|| {
+            CoreError::Conflict("name the checkout that is another project".into())
+        })?;
+        let at = dunce::canonicalize(given)
+            .map_err(|e| CoreError::Conflict(format!("cannot read {given}: {e}")))?;
+        let mut fresh = Project {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: at
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| at.display().to_string()),
+            remotes: Vec::new(),
+            paths: vec![ProjectPath {
+                node: LOCAL_NODE.into(),
+                path: at.clone(),
+            }],
+            unconfirmed_remote: None,
+            created_at: Utc::now(),
+        };
+        if let Some(url) = remote.map(str::trim).filter(|u| !u.is_empty()) {
+            let remote = normalize_remote(url).ok_or_else(|| {
+                CoreError::Conflict(format!("{url} is not a remote the hub can recognise"))
+            })?;
+            fresh.remotes.push(remote);
+        } else if project
+            .paths
+            .iter()
+            .any(|bound| same_path(&bound.path, &at))
+        {
+            // The remote the hub could not place is this checkout's, which is now its own.
+            fresh.remotes.extend(project.unconfirmed_remote.take());
+        }
+        // The checkout leaves whichever project held it, and becomes one of its own.
+        for other in projects.iter().filter(|p| p.id != project.id) {
+            if other.paths.iter().any(|bound| same_path(&bound.path, &at)) {
+                let mut other = other.clone();
+                other.paths.retain(|bound| !same_path(&bound.path, &at));
+                store.put_project(&other).await?;
+            }
+        }
+        project.paths.retain(|bound| !same_path(&bound.path, &at));
+        store.put_project(&project).await?;
+        store.put_project(&fresh).await?;
+        return Ok(fresh);
+    }
+    if let Some(url) = remote.map(str::trim).filter(|u| !u.is_empty()) {
+        let remote = normalize_remote(url).ok_or_else(|| {
+            CoreError::Conflict(format!(
+                "{url} is not a remote the hub can recognise; give one like git@host:owner/repo or https://host/owner/repo"
+            ))
+        })?;
+        if let Some(other) = projects
+            .iter()
+            .find(|p| p.id != project.id && p.remotes.iter().any(|r| *r == remote))
+        {
+            return Err(CoreError::Conflict(format!(
+                "{remote} already belongs to project {} ({}); merge the two projects instead",
+                other.id, other.name
+            )));
+        }
+        if !project.remotes.iter().any(|r| *r == remote) {
+            project.remotes.push(remote.clone());
+        }
+        if project.unconfirmed_remote.as_deref() == Some(remote.as_str()) {
+            project.unconfirmed_remote = None;
+        }
+    }
+    if let Some(given) = path.map(str::trim).filter(|p| !p.is_empty()) {
+        let at = dunce::canonicalize(given).map_err(|e| {
+            CoreError::Conflict(format!("cannot read {given}: {e}"))
+        })?;
+        // A checkout is bound to one project: take it from wherever else it was.
+        for other in projects.iter().filter(|p| p.id != project.id) {
+            if other.paths.iter().any(|bound| same_path(&bound.path, &at)) {
+                let mut other = other.clone();
+                other.paths.retain(|bound| !same_path(&bound.path, &at));
+                store.put_project(&other).await?;
+            }
+        }
+        if !project.paths.iter().any(|bound| same_path(&bound.path, &at)) {
+            project.paths.push(ProjectPath {
+                node: LOCAL_NODE.into(),
+                path: at,
+            });
+        }
+        project.unconfirmed_remote = None;
+    }
+    store.put_project(&project).await?;
+    Ok(project)
+}
+
+/// Merges project `from` into `into` (LESSONS §4.2): every lesson of `from` — its evidence
+/// and sources go with it — becomes `into`'s, `from`'s checkouts and remotes join `into`'s,
+/// and `from` is left with none, so no later run resolves to it. Repeating a merge that was
+/// interrupted writes the same result: the lessons have moved and the path lists are sets.
+pub async fn merge_projects(store: &dyn Store, from: &str, into: &str) -> Result<Project, CoreError> {
+    if from == into {
+        return Err(CoreError::Conflict(
+            "a project cannot be merged into itself".into(),
+        ));
+    }
+    let projects = store.list_projects().await?;
+    let mut source = project_of(&projects, from)?;
+    let mut target = project_of(&projects, into)?;
+    for mut lesson in store.list_lessons(from).await? {
+        lesson.project_id = target.id.clone();
+        store.update_lesson(&lesson).await?;
+    }
+    for at in &source.paths {
+        if !target.paths.iter().any(|bound| same_path(&bound.path, &at.path)) {
+            target.paths.push(at.clone());
+        }
+    }
+    for remote in &source.remotes {
+        if !target.remotes.contains(remote) {
+            target.remotes.push(remote.clone());
+        }
+    }
+    if target.unconfirmed_remote.is_none() {
+        target.unconfirmed_remote = source.unconfirmed_remote.take();
+    }
+    store.put_project(&target).await?;
+    // The source keeps its id (its lessons and runs still point at nothing else) but no
+    // checkout and no remote: nothing resolves to it again.
+    source.paths.clear();
+    source.remotes.clear();
+    store.put_project(&source).await?;
+    Ok(target)
 }
 
 impl Orchestrator {
@@ -658,6 +924,10 @@ impl Orchestrator {
             keywords: Vec<String>,
             #[serde(default)]
             conditions: String,
+            /// Files the record is about: the clue `lesson_search` checks against later
+            /// changes (LESSONS §4.4).
+            #[serde(default)]
+            files: Vec<String>,
             #[serde(default)]
             resolution: Option<String>,
             #[serde(default)]
@@ -741,6 +1011,13 @@ impl Orchestrator {
                     .filter(|k| !k.is_empty())
                     .collect();
                 keywords.truncate(KEYWORDS_MAX);
+                let mut files: Vec<String> = a
+                    .files
+                    .iter()
+                    .map(|f| f.trim().to_owned())
+                    .filter(|f| !f.is_empty())
+                    .collect();
+                files.truncate(FILES_MAX);
                 TriageStep::Create(Lesson {
                     id: uuid::Uuid::new_v4().to_string(),
                     project_id: project.id.clone(),
@@ -748,6 +1025,7 @@ impl Orchestrator {
                     symptom: checked("symptom", &a.symptom, FIELD_MAX)?,
                     keywords,
                     conditions: checked("conditions", &a.conditions, FIELD_MAX)?,
+                    files,
                     resolution,
                     outcome,
                     status: LessonStatus::Active,
@@ -856,9 +1134,21 @@ impl Orchestrator {
             .store
             .search_lessons(&project.id, &terms, a.include_superseded, limit)
             .await?;
-        let lessons: Vec<Value> = found.iter().map(search_hit).collect();
+        // A review clue, not a verdict: the files a record is about moved on after its last
+        // check (LESSONS §4.4). Never turns a hit down.
+        let changed = files_changed(&found, &caller.cwd).await;
+        let lessons: Vec<Value> = found
+            .iter()
+            .map(|l| {
+                let mut hit = search_hit(l);
+                if let Some(files) = changed.get(&l.id) {
+                    hit["files_changed"] = json!(files);
+                }
+                hit
+            })
+            .collect();
         Ok(
-            json!({ "lessons": lessons, "note": "A match may not apply here: check its conditions and evidence (lesson_get) before relying on it. Text ending in … is cut; lesson_get has it in full." }),
+            json!({ "lessons": lessons, "note": "A match may not apply here: check its conditions and evidence (lesson_get) before relying on it. Text ending in … is cut; lesson_get has it in full. files_changed lists the record's files that changed after its last check: read it again before going by it, but a change alone does not make it wrong." }),
         )
     }
 
@@ -881,7 +1171,12 @@ impl Orchestrator {
             .evidence_limit
             .unwrap_or(EVIDENCE_SHOWN)
             .clamp(1, EVIDENCE_PAGE_MAX);
-        Ok(lesson_view(&lesson, a.evidence_offset, limit))
+        let mut view = lesson_view(&lesson, a.evidence_offset, limit);
+        let changed = files_changed(std::slice::from_ref(&lesson), &caller.cwd).await;
+        if let Some(files) = changed.get(&lesson.id) {
+            view["files_changed"] = json!(files);
+        }
+        Ok(view)
     }
 
     /// How a lesson went when the caller used it: one more piece of evidence; one that did
@@ -960,6 +1255,8 @@ impl Orchestrator {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     fn record(id: &str, title: &str, symptom: &str, keywords: &[&str]) -> Lesson {
@@ -1080,6 +1377,7 @@ mod tests {
             symptom: "s".into(),
             keywords: vec![],
             conditions: "c".into(),
+            files: vec![],
             resolution: "r".into(),
             outcome: LessonOutcome::Resolved,
             status: LessonStatus::Active,
@@ -1194,5 +1492,199 @@ mod tests {
         let symptom = hit["symptom"].as_str().unwrap();
         assert!(symptom.ends_with('…') && symptom.len() <= EXCERPT_MAX + '…'.len_utf8());
         assert_eq!(hit["truncated"], true);
+    }
+
+    // -----------------------------------------------------------------------------------
+    // Review clues and projects
+
+    #[test]
+    fn a_record_says_which_of_its_files_moved_on_since_its_last_check() {
+        let mut lesson = lesson_with(&[LessonOutcome::Resolved, LessonOutcome::Resolved], 0);
+        lesson.files = vec![
+            "crates/hub/src/api.rs".into(),
+            "apps\\gui\\src\\api.ts".into(),
+            "crates/orchestrator/src/lessons.rs".into(),
+        ];
+        // The latest evidence names the commit the files are compared with.
+        lesson.evidence[0].commit = Some("aaa".into());
+        lesson.evidence[1].commit = Some("bbb".into());
+        assert_eq!(last_commit(&lesson), Some("bbb"));
+        // git reports `/` and the record may hold `\`; both are the same file.
+        let changed = vec![
+            "crates/hub/src/api.rs".to_owned(),
+            "apps/gui/src/api.ts".to_owned(),
+        ];
+        assert_eq!(
+            changed_among(&lesson.files, &changed),
+            vec!["crates/hub/src/api.rs".to_owned(), "apps\\gui\\src\\api.ts".to_owned()]
+        );
+        // Nothing of it changed: no clue, and so no mark.
+        assert!(changed_among(&lesson.files, &["README.md".to_owned()]).is_empty());
+        // A record without a commit, or without files, is never marked.
+        let mut blind = lesson.clone();
+        blind.evidence.iter_mut().for_each(|e| e.commit = None);
+        assert_eq!(last_commit(&blind), None);
+        let mut bare = lesson.clone();
+        bare.files.clear();
+        assert!(changed_among(&bare.files, &changed).is_empty());
+    }
+
+    #[tokio::test]
+    async fn files_changed_since_a_commit_come_from_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .expect("git runs");
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.path().join("changed.rs"), "a").unwrap();
+        std::fs::write(dir.path().join("same.rs"), "a").unwrap();
+        git(&["add", "."]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "one"]);
+        let first = git(&["rev-parse", "HEAD"]);
+        std::fs::write(dir.path().join("changed.rs"), "b").unwrap();
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "two"]);
+        // An edit that is still in the working tree counts too.
+        std::fs::write(dir.path().join("changed.rs"), "c").unwrap();
+        let changed = changed_since(dir.path(), &first).await;
+        assert_eq!(changed, vec!["changed.rs".to_owned()], "{changed:?}");
+        // A commit at the working tree's content names nothing.
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-am", "three"]);
+        let head = git(&["rev-parse", "HEAD"]);
+        assert!(changed_since(dir.path(), &head).await.is_empty());
+        // A directory without git says nothing rather than guessing.
+        let plain = tempfile::tempdir().unwrap();
+        assert!(changed_since(plain.path(), &first).await.is_empty());
+    }
+
+    fn project_at(id: &str, name: &str, path: &str, remotes: &[&str]) -> Project {
+        Project {
+            id: id.into(),
+            name: name.into(),
+            remotes: remotes.iter().map(|r| (*r).to_owned()).collect(),
+            paths: vec![ProjectPath {
+                node: LOCAL_NODE.into(),
+                path: PathBuf::from(path),
+            }],
+            unconfirmed_remote: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn merging_projects_brings_their_lessons_and_evidence_into_one() {
+        let store = crossagents_store_sqlite::SqliteStore::open_in_memory()
+            .await
+            .unwrap();
+        store
+            .put_project(&project_at("a", "repo", "/a/repo", &["github.com/o/r"]))
+            .await
+            .unwrap();
+        store
+            .put_project(&project_at("b", "repo elsewhere", "/b/repo", &[]))
+            .await
+            .unwrap();
+        let mut theirs = lesson_with(&[LessonOutcome::Resolved, LessonOutcome::Unresolved], 1);
+        theirs.id = "l-b".into();
+        theirs.project_id = "b".into();
+        let mut mine = lesson_with(&[LessonOutcome::Resolved], 2);
+        mine.id = "l-a".into();
+        mine.project_id = "a".into();
+        for (lesson, key) in [(theirs, "issue/b/1"), (mine, "issue/a/1")] {
+            store
+                .triage(
+                    &[IssueRef {
+                        run_id: RunId::new(),
+                        key: key.into(),
+                    }],
+                    TriageStep::Create(lesson),
+                    AgentId::new(),
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(merge_projects(&store, "b", "a").await.unwrap().id, "a");
+        // Both records and everything they hold are the surviving project's now.
+        let lessons = store.list_lessons("a").await.unwrap();
+        assert_eq!(lessons.len(), 2);
+        let moved = store.get_lesson("l-b").await.unwrap();
+        assert_eq!(moved.project_id, "a");
+        assert_eq!(moved.evidence.len(), 2);
+        assert_eq!(moved.sources.len(), 1);
+        assert!(store.list_lessons("b").await.unwrap().is_empty());
+        // Its checkout resolves to the surviving project; the source resolves to nothing.
+        let projects = store.list_projects().await.unwrap();
+        let (resolved, _) = resolve(&projects, Path::new("/b/repo"), None);
+        assert_eq!(resolved.id, "a");
+        let source = projects.iter().find(|p| p.id == "b").unwrap();
+        assert!(source.paths.is_empty() && source.remotes.is_empty());
+        // A repeat of an interrupted merge writes nothing new.
+        merge_projects(&store, "b", "a").await.unwrap();
+        assert_eq!(store.list_lessons("a").await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_person_binds_a_remote_or_a_checkout_to_a_project() {
+        let store = crossagents_store_sqlite::SqliteStore::open_in_memory()
+            .await
+            .unwrap();
+        store
+            .put_project(&project_at("a", "repo", "/a/repo", &["github.com/o/r"]))
+            .await
+            .unwrap();
+        let mut waiting = project_at("b", "x", "/b/x", &[]);
+        waiting.unconfirmed_remote = Some("github.com/me/x".into());
+        store.put_project(&waiting).await.unwrap();
+        // The alias is recognised however it is written, and settles the identity.
+        let bound = bind_project(&store, "b", Some("git@github.com:me/x.git"), None, false)
+            .await
+            .unwrap();
+        assert_eq!(bound.remotes, vec!["github.com/me/x".to_owned()]);
+        assert!(bound.unconfirmed_remote.is_none());
+        // A remote another project owns is that project's: merging is the other call.
+        let refused = bind_project(&store, "b", Some("https://github.com/o/r"), None, false)
+            .await
+            .unwrap_err();
+        assert!(matches!(refused, CoreError::Conflict(_)), "{refused}");
+        // A checkout belongs to one project: binding it elsewhere moves it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_owned();
+        bind_project(&store, "b", None, Some(&path), false).await.unwrap();
+        bind_project(&store, "a", None, Some(&path), false).await.unwrap();
+        let projects = store.list_projects().await.unwrap();
+        let b = projects.iter().find(|p| p.id == "b").unwrap();
+        assert!(!b.paths.iter().any(|at| at.path == dir.path()), "{:?}", b.paths);
+        let a = projects.iter().find(|p| p.id == "a").unwrap();
+        assert!(a.paths.iter().any(|at| at.path == dir.path()), "{:?}", a.paths);
+    }
+
+    #[tokio::test]
+    async fn a_checkout_that_is_another_repository_is_split_out() {
+        let store = crossagents_store_sqlite::SqliteStore::open_in_memory()
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut project = project_at("a", "repo", dir.path().to_str().unwrap(), &[]);
+        project.unconfirmed_remote = Some("github.com/someone/CrossAgents".into());
+        store.put_project(&project).await.unwrap();
+        let fresh = bind_project(&store, "a", None, Some(dir.path().to_str().unwrap()), true)
+            .await
+            .unwrap();
+        assert_ne!(fresh.id, "a");
+        // The remote that was waiting belongs to the checkout, so it goes with it.
+        assert_eq!(fresh.remotes, vec!["github.com/someone/CrossAgents".to_owned()]);
+        assert!(fresh.unconfirmed_remote.is_none());
+        let projects = store.list_projects().await.unwrap();
+        let old = projects.iter().find(|p| p.id == "a").unwrap();
+        assert!(old.paths.is_empty());
+        assert!(old.unconfirmed_remote.is_none());
+        // The directory now resolves to the project it was split into.
+        let (resolved, _) = resolve(&projects, dir.path(), None);
+        assert_eq!(resolved.id, fresh.id);
     }
 }

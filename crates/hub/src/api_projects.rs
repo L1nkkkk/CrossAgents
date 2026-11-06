@@ -34,6 +34,7 @@ async fn list_projects(
                         path: at.path.to_string_lossy().into_owned(),
                     })
                     .collect(),
+                unconfirmed_remote: project.unconfirmed_remote,
             })
             .collect(),
     }))

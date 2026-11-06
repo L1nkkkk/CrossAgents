@@ -12,13 +12,16 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crossagents_core::{
-    Agent, AgentId, AgentStatus, CoreError, Event, EventKind, ISSUE_PREFIX, Note, NoteScope, Run,
-    RunId, RunStatus, StopReason, Store, Task, TaskStatus,
+    Agent, AgentId, AgentStatus, CoreError, Event, EventKind, ISSUE_PREFIX, Lesson, LessonStatus,
+    Note, NoteScope, RelatedLesson, Run, RunId, RunStatus, StopReason, Store, Task, TaskStatus,
+    Triage, TriageRecord,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::engine::Orchestrator;
+use crate::lessons::{error_terms, match_lessons};
+use crate::projects::{main_repo, resolve};
 use crate::tools::args;
 
 /// A context below this many tokens is too small for a drop to mean a compaction.
@@ -105,6 +108,20 @@ pub fn write(
 /// The retro of a run: its events, folded by task and by lane, plus the problems its agents
 /// recorded as `issue/` notes. Every event of the run is read; other runs' are ignored.
 pub fn render(run: &Run, tasks: &[Task], events: &[Event], issues: &[Note]) -> RetroDoc {
+    render_with(run, tasks, events, issues, &[], &[])
+}
+
+/// [`render`] with the project's troubleshooting records (LESSONS L3, SELF C1): the records
+/// this run's issues were sorted into, the records its problems look like, and the issues
+/// nobody sorted yet, which are what the next round should record.
+pub fn render_with(
+    run: &Run,
+    tasks: &[Task],
+    events: &[Event],
+    issues: &[Note],
+    triage: &[TriageRecord],
+    lessons: &[Lesson],
+) -> RetroDoc {
     let mut ordered: Vec<&Event> = events.iter().collect();
     ordered.sort_by_key(|e| e.seq);
     let mut fold = Fold::new(run.id);
@@ -251,6 +268,13 @@ pub fn render(run: &Run, tasks: &[Task], events: &[Event], issues: &[Note]) -> R
     }
 
     let _ = writeln!(out);
+    let _ = writeln!(out, "## 排障记录");
+    let _ = writeln!(out);
+    for line in records_lines(&records(issues, triage, lessons)) {
+        let _ = writeln!(out, "{line}");
+    }
+
+    let _ = writeln!(out);
     let _ = writeln!(out, "## 这次没覆盖到");
     let _ = writeln!(out);
     for line in coverage(run, tasks, &fold, issues) {
@@ -280,6 +304,101 @@ pub fn render(run: &Run, tasks: &[Task], events: &[Event], issues: &[Note]) -> R
     }
 }
 
+/// What a run's problems left in the project's records, and what is still open.
+struct Records<'a> {
+    /// Records this run's issues were sorted into.
+    filed: Vec<&'a Lesson>,
+    /// Records the run's problems look like (words of them found in the record).
+    related: Vec<RelatedLesson>,
+    /// Issues nobody sorted yet.
+    unsorted: Vec<&'a Note>,
+}
+
+fn records<'a>(issues: &'a [Note], triage: &[TriageRecord], lessons: &'a [Lesson]) -> Records<'a> {
+    let filed: Vec<&Lesson> = lessons
+        .iter()
+        .filter(|l| {
+            triage.iter().any(|t| match &t.triage {
+                Triage::Lesson { lesson_id } | Triage::Merged { lesson_id } => lesson_id == &l.id,
+                Triage::Kept { .. } => false,
+            })
+        })
+        .collect();
+    let unsorted: Vec<&Note> = issues
+        .iter()
+        .filter(|n| !triage.iter().any(|t| t.issue.key == n.key))
+        .collect();
+    // The words of the run's problems, looked up in the project's records: a lead for the
+    // next reader, not a claim that a record applies (LESSONS §4.5 ②).
+    let text: String = issues
+        .iter()
+        .map(|n| n.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (strong, weak) = error_terms(&text);
+    let mut related = match_lessons(lessons, &strong, &weak);
+    related.retain(|r| !filed.iter().any(|l| l.id == r.id));
+    Records {
+        filed,
+        related,
+        unsorted,
+    }
+}
+
+fn record_status(status: LessonStatus) -> &'static str {
+    match status {
+        LessonStatus::Active => "在用",
+        LessonStatus::Review => "待复核",
+        LessonStatus::Superseded => "已被替换",
+    }
+}
+
+fn record_tag(id: &str) -> String {
+    format!("`{}`", id.chars().take(8).collect::<String>())
+}
+
+/// The section as lines: what the run's problems became, what they look like, and what
+/// nobody sorted — the next round's candidates for a record.
+fn records_lines(r: &Records) -> Vec<String> {
+    let mut lines = Vec::new();
+    for l in &r.filed {
+        lines.push(format!(
+            "- 本 run 的问题已整理成 {}「{}」（{}）",
+            record_tag(&l.id),
+            l.title,
+            record_status(l.status)
+        ));
+    }
+    for found in &r.related {
+        let matched = found.matched.join(", ");
+        lines.push(format!(
+            "- 可能相关：{}「{}」（命中：{matched}）—— 只是词对上了，读一遍再判断",
+            record_tag(&found.id),
+            found.title
+        ));
+    }
+    if !r.unsorted.is_empty() {
+        let keys = r
+            .unsorted
+            .iter()
+            .map(|n| format!("`{}`", n.key))
+            .collect::<Vec<_>>()
+            .join("、");
+        lines.push(format!(
+            "- 还没整理 {} 条问题：{keys}",
+            r.unsorted.len()
+        ));
+        lines.push(
+            "  - 用 `issue_pending` 读原文，再 `lesson_create` 新建（写 `files` 让后来人知道哪些文件变了）、`lesson_merge` 并入已有记录、`issue_keep` 只留 run。"
+                .to_owned(),
+        );
+    }
+    if lines.is_empty() {
+        lines.push("- 这次没有问题记录：没有可引用的排障记录，也没有要整理的问题。".to_owned());
+    }
+    lines
+}
+
 /// The retro of `run`, read from the store: its tasks, its `issue/` notes and every event
 /// (the fold keeps this run's). A run that has not ended has no retro: there is nothing to
 /// learn from work still in flight.
@@ -295,6 +414,10 @@ pub async fn document(store: &dyn Store, run: &Run) -> Result<RetroDoc, CoreErro
     let issues = store
         .list_notes(NoteScope::Run, Some(run.id), ISSUE_PREFIX)
         .await?;
+    // The records this run's issues became, and the project's records they can be read
+    // against; a store that cannot say leaves the section empty rather than failing the retro.
+    let triage = store.list_triage(run.id).await.unwrap_or_default();
+    let lessons = project_lessons(store, run).await;
     let mut events = Vec::new();
     let mut after = 0;
     loop {
@@ -305,7 +428,18 @@ pub async fn document(store: &dyn Store, run: &Run) -> Result<RetroDoc, CoreErro
         after = last;
         events.extend(page);
     }
-    Ok(render(run, &tasks, &events, &issues))
+    Ok(render_with(run, &tasks, &events, &issues, &triage, &lessons))
+}
+
+/// The records of the project `run` belongs to, looked up by its repository the way the
+/// tools do; none when the project is unknown or the store cannot say.
+async fn project_lessons(store: &dyn Store, run: &Run) -> Vec<Lesson> {
+    let Ok(projects) = store.list_projects().await else {
+        return Vec::new();
+    };
+    let root = main_repo(&run.repo).unwrap_or_else(|| run.repo.clone());
+    let (project, _) = resolve(&projects, &root, None);
+    store.list_lessons(&project.id).await.unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1102,5 +1236,80 @@ mod tests {
             file_name(run),
             format!("RETRO-{}.md", &hex[hex.len() - 8..])
         );
+    }
+
+    fn record(id: &str, title: &str, status: LessonStatus, symptom: &str) -> Lesson {
+        Lesson {
+            id: id.into(),
+            project_id: "p".into(),
+            title: title.into(),
+            symptom: symptom.into(),
+            keywords: vec![],
+            conditions: String::new(),
+            files: vec![],
+            resolution: "r".into(),
+            outcome: crossagents_core::LessonOutcome::Resolved,
+            status,
+            superseded_by: None,
+            evidence: vec![],
+            sources: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn triaged(run: RunId, key: &str, lesson: &str) -> TriageRecord {
+        TriageRecord {
+            issue: crossagents_core::IssueRef {
+                run_id: run,
+                key: key.into(),
+            },
+            triage: Triage::Lesson {
+                lesson_id: lesson.into(),
+            },
+            by: AgentId::new(),
+            at: Utc::now(),
+        }
+    }
+
+    /// C1: the retro is where the next round is decided, so it says what the run's problems
+    /// became in the project's records, what they look like, and what nobody sorted yet.
+    #[test]
+    fn the_retro_shows_the_records_the_run_left_and_the_ones_it_still_needs() {
+        let run = run_at(Utc::now());
+        let at = Utc::now();
+        let note = |key: &str, text: &str| Note {
+            scope: NoteScope::Run,
+            run_id: Some(run.id),
+            key: key.into(),
+            text: text.into(),
+            author: AgentId::new(),
+            updated_at: at,
+        };
+        let issues = vec![
+            note("issue/api/1", "问题：error[E0277] the trait bound is not satisfied"),
+            note("issue/api/2", "问题：npm ci 退出，ELIFECYCLE"),
+        ];
+        let lessons = vec![
+            record("l1aaaaaa", "trait bound", LessonStatus::Active, "error[E0277]"),
+            record("l2bbbbbb", "npm lifecycle", LessonStatus::Review, "ELIFECYCLE"),
+        ];
+        let doc = render_with(
+            &run,
+            &[],
+            &[],
+            &issues,
+            &[triaged(run.id, "issue/api/1", "l1aaaaaa")],
+            &lessons,
+        );
+        let md = &doc.markdown;
+        assert!(md.contains("## 排障记录"), "{md}");
+        assert!(md.contains("本 run 的问题已整理成 `l1aaaaaa`「trait bound」（在用）"));
+        assert!(md.contains("可能相关：`l2bbbbbb`「npm lifecycle」（命中：ELIFECYCLE"));
+        assert!(md.contains("还没整理 1 条问题：`issue/api/2`"));
+        assert!(md.contains("`lesson_create` 新建"));
+        // Nothing recorded: the section says so instead of going missing.
+        let empty = render_with(&run, &[], &[], &[], &[], &[]);
+        assert!(empty.markdown.contains("这次没有问题记录"));
     }
 }
