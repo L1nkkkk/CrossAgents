@@ -38,6 +38,7 @@ import type { TaskReviewRequest } from "@bindings/TaskReviewRequest";
 import type { Transcript } from "@bindings/Transcript";
 import type { UsageGroup } from "@bindings/UsageGroup";
 import type { UsageResponse } from "@bindings/UsageResponse";
+import type { Work } from "@bindings/Work";
 import type { CrossAgentsBridge, HubResponse, UpdateState } from "../bridge";
 import type { HubEvent } from "../hub";
 import { turnStat } from "../lib/diff";
@@ -69,6 +70,8 @@ export type MockState = {
   agents: Agent[];
   agentCommands?: Record<string, AgentCommandsResponse>;
   runs: RunDetail[];
+  /** The work groups (`GET /v1/works`): a continuous conversation whose rounds are runs. */
+  works?: Work[];
   /** What ended runs left in their workspaces (`GET /v1/history`), deleted rounds included;
    * the ended runs still in `runs` are answered for on request, as the hub records them. */
   history?: RunHistory[];
@@ -729,6 +732,15 @@ export class MockBridge implements CrossAgentsBridge {
         return file ? json(200, { id: m[2], mime: file.mime, size: file.data.length, data: file.data }) : notFound("attachment");
       }
       if (p === "/v1/runs") return json(200, { runs: s.runs.map((d) => d.run) });
+      if (p === "/v1/works") return json(200, { works: s.works ?? [] });
+      if ((m = p.match(/^\/v1\/works\/([^/]+)$/))) {
+        const id = decodeURIComponent(m[1]);
+        const work = (s.works ?? []).find((w) => w.id === id);
+        if (!work) return notFound("work");
+        // Its rounds, oldest first, and what ended ones left behind (deleted rounds too).
+        const runs = s.runs.filter((d) => d.run.work_id === id).map((d) => d.run).sort((a, b) => a.created_at.localeCompare(b.created_at));
+        return json(200, { work, runs, history: historyOf(s).filter((h) => h.work_id === id) });
+      }
       if (p === "/v1/history") {
         const repo = url.searchParams.get("repo");
         return json(200, { history: historyOf(s).filter((h) => !repo || h.repo === repo) });
