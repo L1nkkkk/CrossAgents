@@ -7,7 +7,7 @@
 > 状态：`[ ]` 未开始 · `[~]` 进行中 · `[>]` 推迟到后续阶段。
 > 已完成（`[x]`）和已决定不做（`[-]`）的条目挪到 [DONE.md](DONE.md)，章节编号相同；做完一条就剪过去。
 >
-> 最后对照代码核对：2026-11-06（0.2.5）。10-31 之后没走这份清单就做完的事，补记在 DONE.md §二十四。
+> 最后对照代码核对：2026-11-07（0.2.6）。10-31 之后没走这份清单就做完的事，补记在 DONE.md §二十四。
 
 ## 一、进程监督（优先）
 
@@ -22,18 +22,13 @@
 
 ## 二、hub 与 GUI 边界
 
-已完成 15 条，见 [DONE.md](DONE.md) 同名一节。
+已完成 17 条，见 [DONE.md](DONE.md) 同名一节。
 
 > 2026-10-23 复核：清单与分级已整理成 [API-AUTH.md](API-AUTH.md)，含全部接口、调用方与三级划分。
 
-权限分级：
+权限分级、版本不一致两组已全部完成，见 [DONE.md](DONE.md) 同名一节。
 
-- [~] `ErrorCode` 增 `Forbidden`（现在只有 `Unauthorized`，见 [api-types](../crates/api-types/src/lib.rs)）；越权返 403 而不是 401（已做）；GUI 据此置灰入口并说明原因（未做：GUI 总用总 token）
-
-版本不一致：
-
-- [~] `version` 不等但 `api` 相同 → 允许连接，在侧栏版本号旁标不一致（已做，`apps/gui/src/Sidebar.tsx` 的 `build.differs`），并隐藏该版本没有的功能入口（未做）
-- [ ] 验收：旧 hub + 新 GUI、新 hub + 旧 GUI 各跑一次，提示可见、界面不崩、能重置连接
+- [~] 验收：旧 hub + 新 GUI、新 hub + 旧 GUI 各跑一次，提示可见、界面不崩、能重置连接。2026-11-07 已在真实旧 hub（0.2.6 @4eade5c）+ 新 GUI 上跑过（`de5bde8`）。**还差「新 hub + 旧 GUI」这一向**，没有实测。
 
 ## 三、常驻守护（等第一步稳定后再做）
 
@@ -196,12 +191,9 @@ B3 远程开发：
 
 ## 十六、并行跑 run / task 时暴露的四个问题
 
-已完成 2 条，见 [DONE.md](DONE.md) 同名一节。
+全部完成，见 [DONE.md](DONE.md) 同名一节。
 
 > 2026-10-27，run `01a17e22`（补齐持续推进的 5 个缺口）里三个 worker 并行跑的时候实测出来的，都已核实到具体原因，均未在那个 run 里修。
-
-- [ ] **GUI 里卡片刚出现就点「开始」会撞上同一个 409**（2026-10-30 记，未修）：上面那条测试竞态按测试侧修掉了（等提议者那一轮真的结束），但产品侧的问题是另一笔——Work 卡片在提议者还在应答时就出现在界面上，人这时点「开始」会拿到 `409 busy: … is answering a person's message`。要么卡片在那一轮结束前显示为「还不能开始」，要么答卡片时自动等它结束。
-- [ ] **持续推进「唤醒投递失败」那条 Notice 没有集成测试**：实现和代码审查都做了（首次失败发一条、投递成功清标记、再失败再发一条），但真实 hub 下让 `host.notify` 稳定失败做不到——store 只有 INSERT 没有改插件的接口，删 agent 又会先被 `continuation_step` 的 `get_agent` 挡住。要覆盖得加一个可注入失败的 Host 测试替身。
 
 ## 十七、本地资源锁与通用执行器
 
@@ -217,10 +209,7 @@ B3 远程开发：
 > 2026-10-29，设计见 [tasks/G1.md](tasks/G1.md)。起因：一轮做完想接着干，只能让主导再开一个 Work、跳到新页面，历史被切成几段。
 > 与 §十九 有冲突，以 [tasks/LEAD.md](tasks/LEAD.md) §9 为准：一轮结束不再把主导 `send_home`、不删集成工作区，同组下一轮在同一个集成 worktree 里切新分支；原地模式没有 run 分支，不适用 G1 §3.3 的分支表。G1-2 与 §十九 P1 一起做。
 
-已完成 3 条（G1-1、G1-2、G1-3），见 [DONE.md](DONE.md) 同名一节。
-
-- [ ] G1-4：GUI `#/work/<id>`、对话里的轮次分隔、右侧「各轮」窗格、侧栏一组一行
-- [ ] G1-5：CLI `work ls/show`
+全部完成（G1-1 至 G1-5），见 [DONE.md](DONE.md) 同名一节。
 
 ## 十九、Lead 执行模式与工作区保留
 
@@ -230,8 +219,6 @@ B3 远程开发：
 已完成 3 条（P1、P2、P3），见 [DONE.md](DONE.md) 同名一节。
 
 - [ ] **要人定：LEAD §10 第 3 条——完成后保留 / 清理是工作组级设置还是每轮可改**（2026-10-30 记）。§9 的表里说该做成工作组的设置，但 §10 第 3 条把它列为待定、只写了「倾向工作组级」。P1 按**无条件保留 + 显式清理入口**做，不加任何策略字段：那个字段会被序列化进 `works.data` 成为兼容负担，而现在没有任何地方能改它（没 GUI、没 CLI 子命令），永远等于默认值。定下来之后加一个 `#[serde(default)]` 字段是向后兼容的，不会因为现在不做而变难
-- [ ] **P3 的尾巴**（2026-11-06 run `a40444a0` 记）：GUI 还没有「应用到原目录」按钮，目前只能走 `run_apply` 工具或 REST；LEAD §6 要求应用后在原目录复跑检查，现在报告里只记 `checked_in_dir`（检查跑在哪），没有真的在人的目录里复跑
-- [ ] **P2 的尾巴**：lead-in-place 对应的 GUI（G1-4 那一组）没跟上，原地 run 在界面上和 worktree run 看不出区别
 
 ## 二十、发起时选会话（已做）与它暴露的缺口
 
@@ -246,13 +233,7 @@ B3 远程开发：
 
 > 同一个 run 里顺手修掉的三件，记下缘由免得再犯。
 
-- [ ] **`EventKind` 的 `large_enum_variant` 用 `#[allow]` 压住了，真修法是装箱**：变体装的是整条记录，`RunCreated { run: Run }` 约 592 字节，其余多为几十字节。装箱会牵动每一处构造与匹配，所以暂时加了带理由的 `#[allow]`，换来 `clippy --workspace -- -D warnings` 能对其余一切设闸。
-- [ ] **ts-rs 解析不了 `deserialize_with`**：`cargo test` 每次都打 `failed to parse serde attribute | deserialize_with =`。目前用显式 `#[ts(type = ...)]` 绕开（`ContinuationUpdate` 的三态字段），但下次有人加 `deserialize_with` 而忘了标类型，bindings 会静默生成错的类型。
-- [ ] **`crates/core/tests/lock_kill_race.rs` 与并发负载抢锁，偶发失败**：和别的 crate 的测试一起跑时失败过一次，单独跑与重跑组合命令都 4/4。它测的就是抢锁，跟整个 workspace 的测试并行本就不可靠；应当标成串行或独占资源。
-
-- [ ] **`switch_round` 直接 shell 调 `git checkout -b`，绕过 `WorkspaceProvider` trait**（2026-10-31 run `bb28e32e` 记）：`crates/orchestrator/src/engine.rs` 里同组续轮切分支那一处不走 `WorkspaceProvider`，而是自己起一个 git 进程。是分层瑕疵不是 bug——行为正确，测试也过——但它绕开了唯一该知道工作区怎么操作的那一层：换别的 provider（非 git、或远端检出）时这一处会静默失效，而且它拿不到 trait 那边的分支名占用检查（见 DONE.md §二十一 `-2`/`-3` 另起名字的规矩）。真修法是给 trait 加一个开分支的方法，让这一处调它。
-- [ ] **`lead_self` 里 `continuing` 跳过 `serving_person` 检查，把 §十六 第一条那个 409 换了个位置**（2026-10-31 run `bb28e32e` 记）：`run_next` 必须跳过这个检查——主导正是在应答人的时候调它，不跳过就永远 409。但 `continuing` 这个口子同时也放过了 HTTP `POST /v1/works/{id}/runs` 那条路，于是「人正在和主导说话时不能给它派活」这道保护在 API 侧也没了，等于 §十六 第一条那个问题从工具侧搬到了 API 侧。真修法是把「这是续轮」和「免除 serving_person」分开表达，只让工具那条路免除。
-- [ ] **`AgentActivity::push` 开头的 `retain` 会让「超过 2 小时没有任何中间事件的工具调用」把计数归零**（2026-10-31 run `bb28e32e` 记，审阅时 Leo 发现）：`crates/orchestrator/src/running.rs` 的 `push` 在 match 之前先清过期条目。某个工具调用连续两小时没发出任何中间事件（没有 `AgentToolDetail` / `AgentToolOutput` / `AgentTurnCompleted`），等它终于发事件时条目已被清，match 里 `get_mut` 拿不到，下一个事件便用 `TurnActivity::new` 重建，`started` 归零、`files_touched` 清零——主导会看到「本轮刚开始、改过 0 个文件」。和同文件 `RunningCommands` 的 `STALE_AFTER_HOURS` 是同一种取舍，方向安全（宁可少报不多报），所以没在本轮改。真修法是让过期判断只影响 `of()` 的读，清理走单独一条按 `AgentTurnStarted` 触发的路，而不是每个事件都先清。
+全部完成，见 [DONE.md](DONE.md) 同名一节。
 
 ## 二十三、发布
 
@@ -264,14 +245,11 @@ B3 远程开发：
 
 - [ ] **MCP 连接关闭（`-32099`）根因未查明**：`mcp-diag` 只让子进程退出的原因（stderr、退出状态）变得可见，没有定位问题。下次撞上先看这些输出
 - [ ] **要人定：内置事件流面板删不删**：试点 `extensions/debug/` 已完成，内置面板暂时保留（[EXTENSIONS-MIGRATION.md](EXTENSIONS-MIGRATION.md)）
-- [ ] `role` 字段的兼容迁移（[AGENT-WORKSPACE.md](AGENT-WORKSPACE.md) §6）
-- [ ] AGENT-WORKSPACE 验收补测：场景 6（断线重连）、场景 9（自动审批策略）只有纯函数测试，没实际跑过；键盘焦点只做了代码审查（同文档 §8）
 - [>] 减少额度消耗阶段 3：暂缓（[USAGE-TRIM.md](USAGE-TRIM.md)）
-- [ ] **`crates/hub/tests/extensions_runner.rs` 的计时用例在高负载下超时**（2026-11-06 run `a40444a0` 撞了 3 次，`:187`、`:1495`、`:1713`，排障记录 `21905816`）：单独重跑都过，`--test-threads=4` 也过。等钩子结束、grace 的上限在多任务并行编译时不够，该放宽或改成等事件
-- [ ] **A3 取消任务后归档的 worker，任务的 `completed_at` 为 null**（同 run 审阅时发现）：取消路径没写结束时间，trace 和费用条按时间排序时会排错位置
-- [ ] **B5 hooks 默认关闭后，升级上来的老用户原本开着的 hooks 也被关了**：没有迁移，升级后要人自己去打开
-- [ ] **§十四 git 只读接口的错误码不一致**：同类「路径不在白名单 / 不是仓库」有的返回 409、有的返回 400，GUI `#/git` 页按两种分别处理，该统一
-- [ ] **`crossagents.toml` 的 `[run] setup` 先注释掉了**：0.2.5 的 hub 不认这个字段，`run_land` 报 `unknown field setup` 拒绝落地（run `a40444a0`）。人的 hub 升到 0.2.6 后把它打开，A1 的准备命令才在本项目生效；同时去掉 `crates/orchestrator/src/setup/mod.rs` 里 `this_repository_installs_its_gui_dependencies_in_every_worktree` 的 `#[ignore]`
+- [ ] **计划批准时能选中本机跑不了的模板（Cursor 模板在 Windows 上要 bypass）**（2026-11-07 记，run `01a1b1f2`）：Ember 4 是 Cursor 模板，Cursor CLI 的沙箱只支持 macOS / Linux，在 Windows 上得 bypass 才能跑。这一轮分给它的 5 个任务都得改派，问题要等任务派出、那一轮失败之后才暴露。PlanDock 的候选与 `agent_list` 应在批准前把它标成不可用，并写明原因（需要 bypass）。
+- [ ] **已下线的模型仍在名单里显示为可用**（2026-11-07 记，run `01a1b1f2`）：Hazel 4 模板用的模型 `deepseek-v4.1-flash-sg` 账号已不再提供（返回 400 `service info not found`，并附当前支持的模型列表），但模板仍在名单里显示为可用。hub 扫描账号或模型时、派活前都应把这类模型标为不可用，并写明原因。
+- [ ] **应用到原目录后的复跑同步阻塞，且不占目录的构建资源**（2026-11-07 记，run `01a1b1f2`）：`crates/orchestrator/src/apply/mod.rs` 的 `rerun` 在 apply 请求里同步执行检查，`cargo test --workspace` 这类要几分钟，请求和 GUI 按钮都得等；它用 `ShellVerifier::default()`，不持任何资源锁，可能与人在同一目录里跑的 cargo 构建撞车（§十七）。应改为后台执行、结果经事件报告，并占用该目录的构建资源。
+- [ ] **其余「先读后写」的 SQLite 事务还没逐个检查**（2026-11-07 记，run `01a1b1f2`）：只有 `update_lesson`、用量 outcome 更新、数据迁移三处改成了 `BEGIN IMMEDIATE`（`e0298fa`）。store 里其他先读后写的 deferred 事务没有查过，在 WAL 下同样可能立刻报 SQLITE_BUSY（不等 busy_timeout）。
 
 ## 二十五、借鉴 oh-my-pi 与 Cutex 0.2.1
 
@@ -288,8 +266,6 @@ B3 远程开发：
 
   我们有插话和中断，缺的是逐轮看转录的入口和这套投递规则。现有的 `review_request` 只能按任务审一次。先出设计：顾问是普通会话还是专门角色、额度怎么算、run 里和 run 外各怎么用
   - 2026-11-06 设计稿已写好：[tasks/ADVISOR.md](tasks/ADVISOR.md)。等人看过再决定实现范围：稿子自己的最小可用版，还是主导建议的缩小版（状态放内存、预算只按次数、只做工具和卡片）。§8 有 5 个问题要人定
-- [ ] **2 的尾巴**（第 2 条本身已完成，见 [DONE.md](DONE.md) 同名一节）：
-  - 重新拉取转录后，排队中那条的 `queued_reason` 和「已撤回」不在快照里（hub 没存这两个字段），重载页面后只显示「排队中」，或者那一行消失；只有事件路径是完整的
-  - Codex 驱动把 120 秒没应答的插话当成失败，回滚后排队；如果插话其实已经送到，模型会读到两次（`crates/drivers/src/codex_native/mod.rs` 约 :433）。性质是「不确定送没送到」，该映射成 outcome_unknown，而不是改成排队
+- [~] **2 的尾巴**（第 2 条本身已完成，见 [DONE.md](DONE.md) 同名一节）：快照里的排队原因与撤回、Codex 插话超时改为 `outcome_unknown` 已做（2026-11-07，`265434e`）。还差：
   - Electron 的超时、断线映射没在打包环境里实测过
-- [ ] **4 的尾巴**：驱动自己压缩上下文时没有事件，流式规则的去重状态不会重置；`inject` 在事件泵里同步等待，ACP 驱动的 interrupt 最多会让输出转发停 5 秒；扩展那一侧的 `RuleSource` 没接（详见 DONE.md 第 4 条）
+- [~] **4 的尾巴**（2026-11-07，`8e22440`）：驱动压缩事件、`inject` 不再阻塞事件泵、扩展的规则源已接（见 DONE.md 第 4 条）。还差：真实 Claude / Codex 的自动压缩信号与插话都没有实测，目前只有 mock 验证

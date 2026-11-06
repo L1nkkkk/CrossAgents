@@ -50,6 +50,12 @@
 - [x] `api` 不等（GUI 期望 v2、hub 还是 v1）→ 拒绝连接，提示 hub 与 GUI 版本不匹配、请一起更新，不静默降级。事件流连上后先查 `/v1/info` 的 `api`（[hub.ts](../apps/gui/src/hub.ts) `API_VERSION`，升版时要和 api-types 一起改）；不等则丢弃事件、拒绝其余请求、整页换成说明，hub 重启后自动重查。mock 场景「版本不匹配」可看效果
 - [x] 给 `API_VERSION` 定升版规则：写进 [API-AUTH.md](API-AUTH.md) §5，分「必须升版」（删字段、改语义或单位、改路径方法、新增必填、收紧校验）与「不必升版」（新增可选字段、新接口、新错误码取值）两类
 
+2026-11-07 收尾（TODO §二 的两条 [~]）：
+
+- [x] 越权返 403 的 GUI 侧：`api.ts` 统一记下 403，触发它的入口保留但置灰，并用 hub 原话说明，不弹报错；深链到不可用页面时显示原因（`de5bde8`）。
+- [x] 版本不一致时隐藏该版本没有的功能入口：`GET /v1/info` 的 `HubInfo` 加 `features`（`#[serde(default)]`，旧 hub 的响应照样能解析）；GUI `lib/features.ts` 有清单按清单，没清单按版本推断（推断表集中在一张表里；工作组与「应用到原目录」晚于 0.2.6，不推断）；侧栏底部与版本号 tooltip 说明哪些入口隐藏了、为什么，可「重新连接」（`de5bde8`）。`allowed.cts` 补登 apply / integration 两条路由，安装版里原先会被拦。
+- 验收只完成一半：真实旧 hub（0.2.6 @4eade5c）+ 新 GUI 跑过（`de5bde8`），「新 hub + 旧 GUI」还没跑，见 TODO §二。
+
 ## 三、常驻守护（等第一步稳定后再做）
 
 > §一 完成后，hub 停了 agent 照常跑，下一个 hub 接管。这一节剩下的是让 hub 本身常驻、开机自启。
@@ -150,9 +156,9 @@
 
 - [x] A1 worktree 准备命令：新 worktree 先跑项目声明的 setup 命令装依赖（`a10cfa2`）；跨 worktree 共享 `node_modules` 仍留在 TODO
 - [x] A2 mock 里无对话的 agent 也按插件给出能力；B3 run 页只显示本 run 的通知（`60083b1`）
-- [x] A3 任务结束后的 worker 克隆归档而不删除，trace 保留最后几轮（`c88e2d9`）。取消路径 `completed_at` 为 null 的尾巴记在 TODO §二十四
+- [x] A3 任务结束后的 worker 克隆归档而不删除，trace 保留最后几轮（`c88e2d9`）。取消路径 `completed_at` 为 null 的尾巴已于 2026-11-07 做完（见 §二十四）
 - [x] B2 落地提交带 `Co-authored-by`；B4 开场说明带本机工具链（`31f5ba8`）
-- [x] B5 / §五 hooks 默认关闭、显式开关（`75d4826`）。升级迁移的尾巴记在 TODO §二十四
+- [x] B5 / §五 hooks 默认关闭、显式开关（`75d4826`）。升级迁移的尾巴已于 2026-11-07 做完（见 §二十四）
 - [x] B6 / §七 附件与按路径读文件的入口不越出工作目录：`paths::confine` 词法预检加规范化检查（`73e2839`）
 - [x] C1 run 复盘：`run_retro` 工具、`crossagents run retro`、`GET /v1/runs/{key}/retro`（`0b1f0fe`）
 - [x] C3 改 hub 后 `hub sandbox smoke` 端到端冒烟，已进 `crossagents.toml` 检查（`a8d3caa`）
@@ -215,7 +221,7 @@ B 删除 run：
 ## 十四、Git 视图（只读）
 
 - [x] hub 只读接口：分支列表（含 upstream 与领先 / 落后）、status、提交详情、路径白名单，每个接口和越界拒绝都有测试（2026-11-06 run `a40444a0`，`a0cc095`）
-- [x] GUI `#/git` 页与 MockBridge git 数据（同 run，`ed784ab`）。错误码 409 / 400 不一致的尾巴记在 TODO §二十四
+- [x] GUI `#/git` 页与 MockBridge git 数据（同 run，`ed784ab`）。错误码不一致的尾巴已于 2026-11-07 统一（见 §二十四）
 
 ## 十五、会话属于工作区，run 只记录谁参与过
 
@@ -238,6 +244,11 @@ B 删除 run：
 - [x] **共享编译目录在并行 worktree 下串味**（2026-10-28 修，见 §九 ① 第二条）：`18d4f6a` 让同一仓库的所有 run 共用 `<worktrees>/targets/<仓库>-<哈希>` 作为 `CARGO_TARGET_DIR`，省下重复编译依赖的时间。但 workspace 成员的包名和版本号在各个 worktree 里完全相同，产物会互相覆盖：A 的 worktree 会拿到 B 编译出的 `crossagents-core` / `crossagents-api-types`。实测两种假错误——A 报 `unresolved import crossagents_api_types::UpdateRunPolicyRequest`（代码里明明有），B 报 `missing field stuck_minutes`；换成独立 `CARGO_TARGET_DIR` 两边都干净通过。hub 跑 task 验收时撞上这个会把好改动判成失败。现在每个 worktree 一份 `<root>/<run>/targets/<tree>`，用完随 checkout 一起回收（细则见 §九 ①）
 - [x] **`schedule()` 不被 `task_create` / `task_assign` / `task_update` 触发**（2026-10-28 修）：`crates/orchestrator/src/engine.rs` 的 `schedule_reporting` 只在计划批准、任务合并/失败这些时刻跑。所以在一个跑着的 run 里新建或改派一条任务，它会一直停在 pending、没有 assignee、也没有任何错误记录，直到别的任务事件顺带触发一次调度。实测等了十几分钟都不动，直到另一条任务合并。核实时 `task_create`（含 worker delegate 拆子任务）和 `task_assign` 的 pending 分支已经在写完后调用 `schedule_reporting`，只剩 `task_update` 没调。现在 `task_update` 也在锁内重新读 run、写完后 `schedule`，返回的任务是调度后的状态，返回结构不变；run 不在 Running 时照旧不派活。测试在 `crates/orchestrator/src/tests_scheduling.rs`：新建无依赖任务、改派 pending 任务、把依赖改成已合并的任务，三种情况都会当场派出，run 暂停时不会派出。当时 run `01a17e22` 的数据已经不在库里，没法确认那次卡住是不是只因为 `task_update`，也可能是旧代码，或者是 `max_parallel` / scope 冲突造成的正常排队
 - [x] **`work_start.rs::a_proposer_that_can_move_leads_the_work_itself` 在重负载下偶发失败**（2026-10-27 记，2026-10-30 修）：根因是测试辅助函数 `propose()` 只等到 Work 卡片出现（`HumanAsked`）就返回，而此时提议者那一轮**还在跑**；紧接着 `start()` 去答卡片，hub 按规矩回 `409 busy: lyra is answering a person's message`。修法是卡片之后再等一个 `AgentStatusChanged → Idle`（照 `rules.rs:85` 现成的写法），让答卡片变成确定的时序。没有改成「撞 409 就重试」（那是盖症状），也没有动 hub 那条「正在答人的话就忙」的规则（那条是对的）。实测连跑三遍各 8/8。注意产品侧还有一笔账：人在 GUI 里卡片刚出现时点「开始」会撞上同一个 409，已记进 [TODO.md](TODO.md) 同名一节
+
+2026-11-07 收尾（§十六 的两条）：
+
+- [x] **GUI 里卡片刚出现就点「开始」撞上同一个 409**（`8c94af8`）：从 Work 卡片开始时，限时等提议者那一轮结束，超时才返回 Busy。同一笔里 `lead_self` 的 `serving_person` 免检只留给 `run_next` 工具那条路（带 source），HTTP `POST /v1/works/{id}/runs` 在人正和主导说话时仍 409。
+- [x] **「唤醒投递失败」Notice 没有集成测试**（`242f4fb`）：新增可切换 notify 失败的 Host 包装，跑真实 SQLite store：首次失败发 Notice，连续失败不重复，投递成功清掉持久化标记，再失败再发一条。实现没有问题，未改产品代码。
 
 ## 十七、本地资源锁与通用执行器
 
@@ -267,6 +278,11 @@ B 删除 run：
 - [x] G1-1：`works` 表与迁移、`Run.work_id`、事件与 `/v1/works*` 接口；同一组同时只有一个未结束的 run。迁移 `0011_works.sql` 建 `works(id, created_at, updated_at, data JSON)`，`runs` 上按 `json_extract(data,'$.work_id')` 建**部分唯一索引**作为库一级的保证；`create_run_for_work` 另在进程内按 `work:<id>` 取现成的 `lock_card` 互斥，查到未结束的 run 就回 409 并点明是哪个 run（id 与标题）。`work_id` 在 `RunCreated` 发出**之前**就随 `Run` 落定，不是事后关联——API 层事后补既不原子、事件也发不对。`Run.work_id` 带 `#[serde(default)]`，旧库的 run 读出来就是未分组，不自动归组，原有流程一字不变。`Store` 的四个新方法都带默认实现，其他实现者不受影响。接口：`POST /v1/works`、`GET /v1/works`、`GET /v1/works/{id}`（work 与它的 run，最新在前）、`POST /v1/works/{id}/runs`（首轮默认配置，后续沿用最近一轮的）。两条集成测试走真实 hub 与真实 SQLite，其中一条真的模拟旧库——剥掉 `work_id`、删掉索引、表和迁移记录再重开——并把迁移 SQL 再执行一遍证明幂等
   - 留了个隐患并写在 `RunStatus::is_terminal()` 上：索引里的三个终态是 SQL 字面量，和 `is_terminal()` 是**两份名单**。以后加终态只改 Rust 那边，那个工作组就再也开不出新一轮，症状隐蔽（不是报错，是 409 说「还有一个开着的 run」）。而且**已应用的迁移一个字都不能改**（sqlx 校验和，哪怕只加注释），真要改索引得另起 `0012_*.sql`
 
+2026-11-07 收尾（TODO §十八 的 G1-4、G1-5）：
+
+- [x] G1-4：`#/work/<id>` 页（主导的连续对话；右侧「各轮」窗格，窄窗为抽屉，点哪一轮滚到那一轮的分隔处，已删除的轮次也列出）；对话里按 `run.created_at` 插「第 N 轮 · 标题 · 状态」分隔条；侧栏「工作组」一组一行，可展开看各轮；原地 run 与 worktree run 在 Run 页头、工作组行显示文字标签，会话行只显示小图标，说明放在 tooltip（`dc9337c`、`e6dcc48`、`1ad0b91`）。`api.ts` / `allowed.cts` 放行两条 GET，MockBridge 加三轮工作组场景。
+- [x] G1-5：`crossagents work ls`、`crossagents work show <id>`（都支持 `--json`；show 接受完整 id 或 ls 里显示的尾段，已删除的轮次标 `(deleted)`），`run ls` 多一列 WORK（`7407afa`、`0e3f918`、`1613641`）。
+
 ## 二十、发起时选会话
 
 > 2026-10-30，run `01a18a4a`。人的原话：「我发起 work/chat 的时候，可以选择新的 session 或者已有 session」。
@@ -295,6 +311,15 @@ B 删除 run：
 - [x] `cargo clippy --workspace --all-targets -- -D warnings` 在干净分支上也通不过：仓库一直有五处告警。这是我给 works-table 写验收命令时没核实造成的——**给 worker 设了一道过不去的关**，它照实报告被挡住，我才发现。修掉四处（多余的 `.into_iter()`、嵌套 `if` 合 let-chain、三元组起名 `Reply`、多余的 `mut`），`EventKind` 的 `large_enum_variant` 加带理由的 `#[allow]`（真修法是装箱，见 [TODO.md](TODO.md) 同名一节）。教训：**写验收命令前要先在基线上自己跑一遍**
 - [x] `cargo test --workspace` 的偶发失败 `settling_the_checkpoint_at_idle_does_not_swallow_a_stuck_report`（2026-10-30 记，2026-10-31 查到名字，2026-11-05 修，`d798e28`、`6984fb5`）：不是当时猜的「和并发负载抢时间」，而是测试的 `quiet()` 不持 run 锁改写时间戳，后台 pass 可能把旧副本写回，抹掉伪造的静默期。改为在同一把 run 锁内改写，并显式等回合结束事件落库。同日另修了 `delete_run` 和 `steer_failure` 两条不稳定测试
 
+2026-11-07 收尾（TODO §二十二 全部完成）：
+
+- [x] `EventKind` 的 `large_enum_variant`：`RunCreated { run }` 改为 `Box<Run>`，去掉 `#[allow]`，serde 与 bindings 不变；`cargo clippy --workspace --all-targets -- -D warnings` 清零（drivers / orchestrator / hub / cli 里阻挡的已有警告一并修掉，行为不变）（`cb2bdc4`、`5d53c53`）。
+- [x] ts-rs 的 `deserialize_with` 防呆：新增 `crates/core/tests/ts_deserialize_with.rs`，用 syn 逐字段扫描 core 与 api-types，带 `deserialize_with` 却没有 `#[ts(type …)]` 或 `#[ts(skip)]` 的字段会让测试失败并提示怎么写；`TaskReport.result` 补上显式类型（`5d53c53`）。
+- [x] `lock_kill_race.rs` 偶发失败：同一测试二进制里几个实验共用一把进程级互斥锁、依次运行，不再需要 `--test-threads=1`（`496088c`）。
+- [x] `switch_round` 绕过 `WorkspaceProvider`：改为走 `WorkspaceProvider::create_branch`，沿用已有分支名另起 `-N` 的规矩（`8c94af8`）。
+- [x] `lead_self` 的 `continuing` 免检 `serving_person`：免检改由调用方说明，只有 `run_next` 工具那条路免检，HTTP `POST /v1/works/{id}/runs` 仍 409（`8c94af8`）。
+- [x] `AgentActivity::push` 开头的 `retain` 让计数归零：过期判断只影响 `of()` 的读取，清理挪到 `AgentTurnStarted`（`8c94af8`）。
+
 ## 十九、Lead 执行模式与工作区保留
 
 > 2026-10-29 设计见 [tasks/LEAD.md](tasks/LEAD.md)，2026-10-30 run `01a18a4a` 做了 P1。
@@ -308,6 +333,11 @@ B 删除 run：
   - `run_next`（G1-2）的接点：从 `create_run_for_work` 进来，复用已保留的会话与检出、重新记录基线与任务归属；`integration_path` 与 `owns_checkout` / `checkout_unused` 就是「把按 run 的物理树映射改成共享工作区归属」的那几处
 - [x] P2 Lead 原地（2026-11-06 run `a40444a0`，#lead-in-place）：拆开 `run.in_place` 的几层含义，原地主导直接认领、不走 `lead_in`；按 checkout 加目录锁（落地同样遵守，run 完成即释放）；主导自己改动的原地验收结果绑定内容快照。worker 不进人的目录。GUI 部分留在 [TODO.md](TODO.md)
 - [x] P3 混合派工（同 run，#mixed-dispatch）：`crates/orchestrator/src/snapshot/` 用独立 index 和专用 ref 给人的目录拍快照（不推送、有大小上限、提示密钥文件），worker 从快照并行开工，在后台集成 worktree 里合并；`apply/` 三方应用回原目录，全部算完再写、有 journal 可恢复、不重复应用、保留人的暂存区，报告带 `checked_in_dir`、`own_changes`、`checks`。删除或清理 run 时只回收 `<worktrees>/<run>/integration` 和集成分支，有未完成的 journal 就保留；人的目录和快照 ref 都不碰。两次返工都是「报告与 worktree 不一致」，排障记录 `9eb5c980`
+
+2026-11-07 收尾（TODO §十九 的 P2、P3 尾巴）：
+
+- [x] **P2 的尾巴**（`1ad0b91`）：原地 run 在界面上和 worktree run 看不出区别，现在 Run 页头、工作组行有文字标签，会话行只有小图标（同 §十八 G1-4）。
+- [x] **P3 的尾巴**（`d22d656`、`5903ff9`）：GUI「应用到原目录」按钮（原地 run 的 Run 页头，应用前确认，应用后显示冲突与复跑结果；没有待应用结果时置灰并说明原因）；应用成功后（包括续上中断的应用）按 `own_changes` 匹配 `crossagents.toml` 的 checks，在人的原目录里复跑，结果写进报告的 `rerun`，失败不回滚；`run_apply` 工具与 HTTP 共用同一段说明。复跑同步阻塞、不占资源锁，另记 TODO §二十四。
 
 ## 二十三、发布
 
@@ -339,6 +369,13 @@ B 删除 run：
   - `to` 写的名字恰好是正在和你说话的队友去掉数字后缀（比如该写 `Pia 4` 写成了 `Pia`），而你和它从没互发过消息时，拒绝发送，并说明该怎么写。
   - 测试在 `crates/mock-agent/tests/collab.rs`（3 条）和 `replies.rs` 的单元测试（7 条）
 - [x] 驱动与 hub 修复（11-05、11-06）：Claude 驱动写入不留半帧、失败 result 不提前结束；`run_next` 在 lead 回合内不再报 busy；Codex primary 额度误判；复制失败、回复看不到图、`run_next` 重复显示人的原话；Cursor `create-chat` 在 stdout 是管道时不退出导致的启动超时与 powershell/node 孤儿进程（0.2.4，改为 `spawn_tree` 启动、读到第一行 id 后结束整棵进程树）
+- [x] 角色字段兼容迁移（2026-11-07，`da4ec75`、`c27881d`）：`role` 只作创建时的默认值与展示标签，`agent_spawn` 不再拒绝 planner，执行会话的工具组只由 claim 决定；存储、API、CLI 仍保留该字段。改了什么、留了什么见 [AGENT-WORKSPACE.md](AGENT-WORKSPACE.md) §6.2。
+- [x] B5 hooks 升级迁移（2026-11-07，`c27881d`）：已有的 claude agent 若从没设过 `allow_hooks`，迁移时写入 true，保留 B5 之前的行为；新建 agent 仍默认关闭。B5 之后、本次升级之前新建且没动过开关的 claude agent 与老 agent 无法区分，也会被打开（代码里已注明）。
+- [x] AGENT-WORKSPACE 验收补测（2026-11-07，`5e0ad78`、`0e24417`）：场景 6（断线重连）、场景 9（自动审批）与键盘焦点在真实 Electron 44.6 里用 CDP 补测，结果写进 AGENT-WORKSPACE.md §8.1；顺手修了四处（待批卡片与按策略自动批准的 run、`.plan-dock` 焦点描边、「还有 N 项」切换后焦点丢失、新增场景 `agent-workspace-auto`）。
+- [x] `extensions_runner` 计时用例在高负载下超时（2026-11-07，`496088c`）：`until` 的上限只是失败时的兜底，条件满足就返回；按并行编译负载放宽各处上限，每处写了理由，断言没删。
+- [x] A3 取消任务后归档的 worker，`completed_at` 为 null（2026-11-07，`acfe33a`、`8c94af8`）：会话被停止或退出时补发 `AgentTurnCompleted`，取消后归档的 worker 在 trace 里有结束时间；hub 退出时留给下一个 hub 接管的会话不补发。
+- [x] §十四 git 只读接口错误码不一致（2026-11-07，`79b9264`、`9b0b521`）：不在白名单的项目路径返回 403，不是 git 仓库返回 409，提交不存在返回 404；提交 diff 入口与其他接口共用 `git_repo` 校验；GUI `#/git` 页按错误码显示原因，`git_view` 测试覆盖五个接口的越界与非仓库。
+- [x] `crossagents.toml` 的 `[run] setup` 打开（2026-11-07，`852a844`、`98d601c`）：去掉注释，`setup/mod.rs` 的 `this_repository_installs_its_gui_dependencies_in_every_worktree` 去掉 `#[ignore]`。hub 已是 0.2.6，认得这个字段。
 
 ## 二十五、借鉴 oh-my-pi 与 Cutex 0.2.1
 
@@ -361,6 +398,7 @@ B 删除 run：
   - P3-8 先确认：Claude 驱动插话写失败时，`ended()` 已经清空整个 Turn，不会读到两次。怀疑不成立，没改逻辑，只加测试锁住。
   - 测试：`crates/mock-agent/tests/delivery.rs`（8 条）、`delivery_state.rs`（4 条），`runtime.rs` 的去重上限单测，`api-types` 的原因码穷举测试，`claude_native` 的 `failed_steer_write_leaves_no_claim_on_the_turn`；GUI 有 `lib/delivery.test.ts`、`lib/activity.test.ts`，`errors.test.ts`、`steer.test.ts` 补了用例。mock 场景 `delivery`，截图 `docs/screens/delivery-queued.png`（深色、宽屏；mock 里两条排队消息的原因码是反着配的，只是演示数据）。
   - 没验证 / 没做完：见 TODO.md 同名一节的「2 的尾巴」。
+  - 2026-11-07 尾巴里做完的两条（`265434e`）：`TranscriptTurn` 加 `queued_reason` 与 `withdrawn`，撤回未开始的消息时标 `withdrawn` 而不再从转录删行，重载页面后与事件路径一致；Codex 的 `turn/steer` 120 秒没应答改为 `CoreError::OutcomeUnknown`（API 504 + `outcome_unknown`，不排队、不重发，GUI 提示「先别重发」）。Electron 打包环境的实测还没做，见 TODO.md。
 - [x] **3. 排队的提示随人的消息一起送**（Cutex 057）：人发消息时，如果这个 agent 还排着一条没开始的通知汇总，hub 就把汇总撤回（发 `agent.input_withdrawn`），并进人的这条消息。agent 读到的是人的话在前、汇总在后，不用为汇总单独多跑一轮。`agent.input` 和转录的每一轮都多了 `notices` 字段，`text` 仍是人的原话；GUI 把提示折叠挂在人的气泡下面（「随这条消息送达 N 条提示」），重新加载转录后还在。汇总已经开始，或者人发出之后才到的通知，照原来的规则走。撤回和合并在 `digests` 锁里一次做完，加锁顺序和 `notify` 一致（评审时发现过一个丢行的竞态，已修）。
   - 代码：`crates/hub/src/runtime.rs` `take_waiting_digest`、`crates/core/src/event.rs`、`crates/hub/src/transcript.rs`、`crates/api-types`、`apps/gui/src/views/SessionMessage.tsx`、`lib/notices.ts`。
   - 测试：`crates/mock-agent/tests/notices_ride.rs`，2 个用例覆盖 3 种情形（合并且只多跑一轮；汇总已开始时不合并；合并之后再来的通知另起一条汇总）；`apps/gui/src/lib/notices.test.ts`。
@@ -369,6 +407,7 @@ B 删除 run：
   - 代码：`crates/hub/src/stream_rules.rs`（新）；`runtime.rs` 的 `install`、`forward_events`、`inject`、`Control::Compacted`。
   - 测试：`cargo test -p crossagents-hub stream_rules`（13 条单元测试）；`crates/mock-agent/tests/stream_rules.rs`（4 条：插话路径、20 轮去重、compact 后再送、不支持插话时中断再跑）。
   - 没做 / 没验证：只用 mock agent 跑过，没在真实 Claude/Codex 上看过插话；驱动自己压缩上下文时没有事件，去重状态不会重置；中断路径不重发被中断那一轮的提示，只跑规则（agent 的会话上下文还在，能接着做）；如果被中断的是人的消息那一轮，人会看到这一轮被中断；插话事件没有 `from` 字段，只能靠正文开头的规则 id 认出是规则；只匹配工具名和参数，不匹配工具的输出；扩展那一侧没接。`inject` 在事件泵里同步等待 steer/interrupt 返回，ACP 驱动的 interrupt 最多等 5 秒，这段时间输出转发会停住。
+  - 2026-11-07 尾巴里做完的（`8e22440`）：驱动自己压缩上下文时发出新的 `SessionEventKind::Compacted`（Claude 的 compact_boundary、Codex 的 contextCompaction / thread/compacted），收到后规则可以再发，回合结束清空本回合的已发记录；`inject` 改为独立任务，输出照常转发，ACP 的 interrupt 不再卡住输出；扩展 manifest 新增 `[[rules]]`，已批准的规则文件作为 `RuleSource` 与项目规则一起读（id 带扩展名前缀，64 KB 上限，坏文件只警告）。还没做：真实 Claude / Codex 的压缩信号与插话没有实测，见 TODO.md。
 - [x] **5. 任务交结构化结果**（oh-my-pi 的 subagent）：任务的 spec（`plan_submit` 和 `task_create` 里的）可以带 `result_schema`（JSON Schema）。`task_complete` 新增 `result` 参数：任务有 schema 时 `result` 必填，并按 schema 校验（`jsonschema` 0.33，锁文件里本来就有）；不通过就报出哪条路径不符，任务状态不变，worker 可以改了再交；通过就存进 `TaskReport.result`。`task_get` 新增 `path` 参数（JSON Pointer），只返回那一处的值，路径不存在时报错。worker 的简报里会写出 schema。GUI 的任务详情把 result 折叠显示成 JSON。
   - 代码：`crates/core/src/model.rs`、`crates/orchestrator/src/tasks.rs` 的 `complete_with_result` 和 `task_get`、`tools.rs`、`brief.rs`、`apps/gui/src/views/Run.tsx`。
   - 测试：`crates/mock-agent/tests/task_result.rs`（2 条）：缺 result 和不合 schema 的 result 被拒且状态不变，合规的存下，按 path 取值，不存在的 path 报错，没有 schema 的老调用照旧；`script.rs` 补了嵌套数组解析的单测。
