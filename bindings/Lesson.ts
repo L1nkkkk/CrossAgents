@@ -8,4 +8,10 @@ export type Lesson = { id: string, project_id: string, title: string, symptom: s
 /**
  * Where it applies: system, tools and versions, node, files.
  */
-conditions: string, resolution: string, outcome: LessonOutcome, status: LessonStatus, superseded_by: string | null, evidence: Array<Evidence>, sources: Array<IssueRef>, created_at: string, updated_at: string, };
+conditions: string, 
+/**
+ * Files the record is about, repository-relative when possible: a review clue only
+ * (LESSONS §4.4). When one of them changed after the latest check, a search result says
+ * so; nothing is invalidated automatically.
+ */
+files: Array<string>, resolution: string, outcome: LessonOutcome, status: LessonStatus, superseded_by: string | null, evidence: Array<Evidence>, sources: Array<IssueRef>, created_at: string, updated_at: string, };

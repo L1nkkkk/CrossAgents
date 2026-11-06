@@ -99,6 +99,11 @@ pub struct Lesson {
     pub keywords: Vec<String>,
     /// Where it applies: system, tools and versions, node, files.
     pub conditions: String,
+    /// Files the record is about, repository-relative when possible: a review clue only
+    /// (LESSONS §4.4). When one of them changed after the latest check, a search result says
+    /// so; nothing is invalidated automatically.
+    #[serde(default)]
+    pub files: Vec<String>,
     pub resolution: String,
     pub outcome: LessonOutcome,
     pub status: LessonStatus,

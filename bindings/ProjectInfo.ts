@@ -10,4 +10,10 @@ export type ProjectInfo = { id: string, name: string,
 /**
  * Normalised `host/owner/repo` remotes.
  */
-remotes: Array<string>, paths: Array<ProjectPathInfo>, };
+remotes: Array<string>, paths: Array<ProjectPathInfo>, 
+/**
+ * A remote seen at one of the project's checkouts that is not one of its own: the
+ * directory may hold another repository now, so the person decides (LESSONS §4.2).
+ * Nothing is bound automatically until then.
+ */
+unconfirmed_remote?: string, };

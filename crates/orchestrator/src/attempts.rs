@@ -1107,6 +1107,7 @@ mod tests {
             symptom: "agent_error: invalid api key (code 40101)".into(),
             keywords: vec!["40101".into()],
             conditions: String::new(),
+            files: Vec::new(),
             resolution: "log in again".into(),
             outcome: LessonOutcome::Resolved,
             status: LessonStatus::Active,

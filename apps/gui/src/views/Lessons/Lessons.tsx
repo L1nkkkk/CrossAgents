@@ -13,6 +13,7 @@ import {
   type LessonStatus,
 } from "../../lessons/lessons";
 import { useSelectedWorkspace, wsName } from "../../workspace";
+import { ProjectsPanel } from "./Projects";
 import "../../expertise.css";
 import "../../lessons/lessons.css";
 
@@ -20,7 +21,7 @@ const relevant = (e: HubEvent) => e.type === "lesson.created" || e.type === "les
 const STATUSES: (LessonStatus | "")[] = ["", "active", "review", "superseded"];
 
 /** One record: the headline row, and when open its symptom, resolution, evidence and sources. */
-function LessonRow({ l }: { l: Lesson }) {
+function LessonRow({ l, changed }: { l: Lesson; changed?: string[] }) {
   const [open, setOpen] = useState(false);
   return (
     <li className={`exp-entry lesson ${l.status === "superseded" ? "superseded" : ""}`}>
@@ -32,6 +33,11 @@ function LessonRow({ l }: { l: Lesson }) {
         <b>{l.title}</b>
         <span className={`exp-tag ${outcomeTone(l.outcome)}`}>{OUTCOME_LABEL[l.outcome]}</span>
         {l.status !== "active" && <span className={`exp-tag ${l.status === "review" ? "yellow" : ""}`}>{STATUS_LABEL[l.status]}</span>}
+        {changed && changed.length > 0 && (
+          <span className="exp-tag yellow" title={`记录时相关的文件在之后有改动：\n${changed.join("\n")}`}>
+            相关文件已改
+          </span>
+        )}
         <span className="spacer" />
         <span className="muted exp-stats" title="试过的次数（含写下那次）">
           试过 {l.evidence.length} 次 · {ago(l.updated_at)}
@@ -65,7 +71,28 @@ function LessonRow({ l }: { l: Lesson }) {
                 </dd>
               </>
             )}
+            {l.files.length > 0 && (
+              <>
+                <dt>相关文件</dt>
+                <dd>
+                  <ul className="lesson-files">
+                    {l.files.map((f) => (
+                      <li key={f}>
+                        <code>{f}</code>
+                        {changed?.includes(f) && <span className="exp-tag yellow">已改</span>}
+                      </li>
+                    ))}
+                  </ul>
+                </dd>
+              </>
+            )}
           </dl>
+          {changed && changed.length > 0 && (
+            <p className="muted lesson-clue">
+              相关文件在这条记录最后一次核对之后有改动：它可能还成立，也可能已经过时。用之前先照现在的代码试一遍，再用 lesson_report
+              回报（或在这里改字、改状态）。
+            </p>
+          )}
           <h4>试用记录</h4>
           <ul className="lesson-evidence">
             {[...l.evidence].reverse().map((e, i) => (
@@ -141,11 +168,12 @@ export function LessonsView() {
   const project = projectForWorkspace(projects.data, workspace);
   const query = q.trim();
   const lessons = useHubData(
-    () => (project ? api.lessons(project.id, query, status || undefined) : Promise.resolve([])),
+    () => (project ? api.lessons(project.id, query, status || undefined) : Promise.resolve({ lessons: [], changed: {} })),
     [project?.id, query, status],
     relevant,
   );
-  const list = lessons.data ?? [];
+  const list = lessons.data?.lessons ?? [];
+  const changed = lessons.data?.changed ?? {};
   return (
     <>
       <div className="topbar">
@@ -190,7 +218,7 @@ export function LessonsView() {
                   (list.length ? (
                     <ul className="exp-entries">
                       {list.map((l) => (
-                        <LessonRow key={l.id} l={l} />
+                        <LessonRow key={l.id} l={l} changed={changed[l.id]} />
                       ))}
                     </ul>
                   ) : (
@@ -202,6 +230,7 @@ export function LessonsView() {
               {project && <Export project={project.id} />}
             </>
           )}
+          <ProjectsPanel />
         </div>
       </div>
     </>

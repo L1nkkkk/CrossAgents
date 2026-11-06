@@ -78,6 +78,8 @@ import type { ListExpertiseResponse } from "@bindings/ListExpertiseResponse";
 import type { Lesson } from "@bindings/Lesson";
 import type { LessonStatus } from "@bindings/LessonStatus";
 import type { ListLessonsResponse } from "@bindings/ListLessonsResponse";
+import type { BindProjectRequest } from "@bindings/BindProjectRequest";
+import type { MergeProjectsRequest } from "@bindings/MergeProjectsRequest";
 import type { ListRunIssuesResponse } from "@bindings/ListRunIssuesResponse";
 import type { AcceptRequest, Candidate, CandidateStatus, ConflictDecision, ExpertiseCard, ExpertiseEntry, Maintenance, OwnerKind, ProjectInfo } from "./lib/expertise";
 import type { UsageResponse } from "@bindings/UsageResponse";
@@ -474,14 +476,20 @@ export const api = {
   expertiseExport: (owner_kind: OwnerKind, owner_id: string) =>
     request<string>("GET", `/v1/expertise/export?${expertiseQuery(owner_kind, owner_id)}`, undefined, { text: true }),
 
-  /** A project's troubleshooting records, newest first; `q` searches them, `status` narrows. */
-  lessons: async (project: string, q = "", status?: LessonStatus): Promise<Lesson[]> =>
-    (
-      await request<ListLessonsResponse>(
-        "GET",
-        `/v1/projects/${enc(project)}/lessons?q=${enc(q)}${status ? `&status=${status}` : ""}`,
-      )
-    ).lessons,
+  /** A project's troubleshooting records, newest first; `q` searches them, `status` narrows.
+   * `changed` holds the review clues: by record id, the files that moved on after its last
+   * check (docs/tasks/LESSONS.md §4.4). */
+  lessons: async (project: string, q = "", status?: LessonStatus): Promise<ListLessonsResponse> =>
+    await request<ListLessonsResponse>(
+      "GET",
+      `/v1/projects/${enc(project)}/lessons?q=${enc(q)}${status ? `&status=${status}` : ""}`,
+    ),
+  /** The person settles what a project is: a remote it has, or the checkout bound to it. */
+  bindProject: (id: string, req: BindProjectRequest) =>
+    request<ProjectInfo>("POST", `/v1/projects/${enc(id)}/bind`, req),
+  /** Two projects are one: `from`'s records, checkouts and remotes join `into`. */
+  mergeProjects: (req: MergeProjectsRequest) =>
+    request<ProjectInfo>("POST", "/v1/projects/merge", req),
   lesson: (id: string) => request<Lesson>("GET", `/v1/lessons/${enc(id)}`),
   /** The project's records as Markdown. */
   lessonsExport: (project: string) =>
