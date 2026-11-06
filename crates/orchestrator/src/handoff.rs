@@ -162,6 +162,77 @@ pub(crate) fn planned(task: &Task) -> PlannedTask {
     }
 }
 
+/// The names `spec.next` and `spec.on_reject` of `tasks` give, as written (`#b` as `b`),
+/// without repeats.
+pub(crate) fn route_names(tasks: &[PlannedTask]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for task in tasks {
+        for raw in [task.spec.next.as_deref(), task.spec.on_reject.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            let raw = raw.trim();
+            let name = raw.strip_prefix('#').map(str::trim).unwrap_or(raw);
+            if !name.is_empty() && !names.iter().any(|n| n == name) {
+                names.push(name.to_owned());
+            }
+        }
+    }
+    names
+}
+
+/// What is wrong with the routing of `tasks` (docs/research/multica.md §2.12), given the
+/// steps the plan or the run has and the sessions of the workspace that may take work back:
+/// a name that is neither, one that is the task's own key, and a `next` step in an earlier
+/// stage, which the stage gate would never release. Every problem is returned.
+pub(crate) fn route_problems(tasks: &[PlannedTask], sessions: &[String]) -> Vec<String> {
+    let stages: HashMap<&str, Option<u32>> = tasks
+        .iter()
+        .map(|t| (t.key.as_str(), t.spec.stage))
+        .collect();
+    let mut problems = Vec::new();
+    for task in tasks {
+        for (field, raw) in [
+            ("next", task.spec.next.as_deref()),
+            ("on_reject", task.spec.on_reject.as_deref()),
+        ] {
+            let Some(raw) = raw.map(str::trim).filter(|n| !n.is_empty()) else {
+                continue;
+            };
+            let name = raw.strip_prefix('#').map(str::trim).unwrap_or(raw);
+            if name == task.key {
+                problems.push(format!(
+                    "task {:?}: {field} names the task itself",
+                    task.key
+                ));
+                continue;
+            }
+            match stages.get(name) {
+                Some(step_stage) => {
+                    if field == "next"
+                        && let (Some(own), Some(step)) = (task.spec.stage, *step_stage)
+                        && step < own
+                    {
+                        problems.push(format!(
+                            "task {:?} (stage {own}): next {name:?} is in stage {step}, which starts only before stage {own}",
+                            task.key
+                        ));
+                    }
+                }
+                None => {
+                    if !sessions.iter().any(|s| s == name) {
+                        problems.push(format!(
+                            "task {:?}: {field} names no task and no session {name:?} (agent_list lists the sessions)",
+                            task.key
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    problems
+}
+
 impl Orchestrator {
     /// A first assignment: from the issuer, with the files the spec allows.
     pub(crate) async fn left_by_issuer(&self, run: &Run, task: &Task) -> Left {
@@ -311,56 +382,22 @@ impl Orchestrator {
     /// the workspace, one that names the task itself, and a `next` step in an earlier stage —
     /// which the stage gate would never release. `Err` lists every problem, so one answer
     /// fixes them all.
+    ///
+    /// `plan_submit`, `task_create` and `task_update` call it; nothing is created or changed
+    /// when it refuses.
     pub(crate) async fn check_routes(&self, tasks: &[PlannedTask]) -> Result<(), String> {
-        let stages: HashMap<&str, Option<u32>> = tasks
-            .iter()
-            .map(|t| (t.key.as_str(), t.spec.stage))
-            .collect();
-        let mut problems = Vec::new();
-        for task in tasks {
-            for (field, raw) in [
-                ("next", task.spec.next.as_deref()),
-                ("on_reject", task.spec.on_reject.as_deref()),
-            ] {
-                let Some(raw) = raw.map(str::trim).filter(|n| !n.is_empty()) else {
-                    continue;
-                };
-                let name = raw.strip_prefix('#').map(str::trim).unwrap_or(raw);
-                if name == task.key {
-                    problems.push(format!(
-                        "task {:?}: {field} names the task itself",
-                        task.key
-                    ));
-                    continue;
-                }
-                match stages.get(name) {
-                    Some(step_stage) => {
-                        if field == "next"
-                            && let (Some(own), Some(step)) = (task.spec.stage, *step_stage)
-                            && step < own
-                        {
-                            problems.push(format!(
-                                "task {:?} (stage {own}): next {name:?} is in stage {step}, which starts only before stage {own}",
-                                task.key
-                            ));
-                        }
-                    }
-                    None => {
-                        if self
-                            .store
-                            .get_agent(&AgentKey::Name(name.to_owned()))
-                            .await
-                            .is_err()
-                        {
-                            problems.push(format!(
-                                "task {:?}: {field} names no task and no session {name:?} (agent_list lists the sessions)",
-                                task.key
-                            ));
-                        }
-                    }
-                }
+        let mut sessions = Vec::new();
+        for name in route_names(tasks) {
+            if self
+                .store
+                .get_agent(&AgentKey::Name(name.clone()))
+                .await
+                .is_ok()
+            {
+                sessions.push(name);
             }
         }
+        let problems = route_problems(tasks, &sessions);
         if problems.is_empty() {
             Ok(())
         } else {
@@ -967,5 +1004,94 @@ mod tests {
         let mut tasks = tasks;
         tasks.push(task("a-next-2"));
         assert_eq!(free_key(&tasks, "a-next"), "a-next-3");
+    }
+
+    fn step(
+        key: &str,
+        stage: Option<u32>,
+        next: Option<&str>,
+        on_reject: Option<&str>,
+    ) -> PlannedTask {
+        PlannedTask {
+            key: key.into(),
+            title: key.into(),
+            spec: crossagents_core::TaskSpec {
+                goal: "g".into(),
+                stage,
+                next: next.map(str::to_owned),
+                on_reject: on_reject.map(str::to_owned),
+                ..crossagents_core::TaskSpec::default()
+            },
+            depends_on: Vec::new(),
+            assignee: None,
+            reviewer: None,
+            fresh: true,
+            restore: false,
+            reviewer_fresh: true,
+        }
+    }
+
+    #[test]
+    fn a_route_that_names_nothing_is_a_problem() {
+        let tasks = vec![step("a", None, Some("ghost"), Some("nobody"))];
+        let problems = route_problems(&tasks, &[]);
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(
+            problems[0].contains("next names no task and no session \"ghost\""),
+            "{problems:?}"
+        );
+        assert!(
+            problems[1].contains("on_reject names no task and no session \"nobody\""),
+            "{problems:?}"
+        );
+        // A session the workspace has is fine, and so is a step of the plan (`#a` too).
+        let tasks = vec![
+            step("a", None, Some("ada"), None),
+            step("b", None, None, Some("#a")),
+        ];
+        assert!(route_problems(&tasks, &["ada".to_owned()]).is_empty());
+    }
+
+    #[test]
+    fn a_route_to_the_task_itself_is_a_problem() {
+        let tasks = vec![step("a", None, Some("#a"), None)];
+        assert_eq!(
+            route_problems(&tasks, &[]),
+            ["task \"a\": next names the task itself"]
+        );
+        let tasks = vec![step("a", None, None, Some("a"))];
+        assert_eq!(
+            route_problems(&tasks, &["a".to_owned()]),
+            ["task \"a\": on_reject names the task itself"]
+        );
+    }
+
+    #[test]
+    fn a_next_step_in_an_earlier_stage_is_a_problem() {
+        let tasks = vec![
+            step("late", Some(2), Some("early"), None),
+            step("early", Some(1), None, None),
+        ];
+        let problems = route_problems(&tasks, &[]);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("next \"early\" is in stage 1"),
+            "{problems:?}"
+        );
+        // Going back to an earlier step is what on_reject is for: no problem there.
+        let tasks = vec![
+            step("late", Some(2), None, Some("early")),
+            step("early", Some(1), None, None),
+        ];
+        assert!(route_problems(&tasks, &[]).is_empty());
+    }
+
+    #[test]
+    fn names_are_given_once_each_with_or_without_the_hash() {
+        let tasks = vec![
+            step("a", None, Some("#b"), Some("ada")),
+            step("b", None, Some("ada"), Some("#b")),
+        ];
+        assert_eq!(route_names(&tasks), ["b", "ada"]);
     }
 }
