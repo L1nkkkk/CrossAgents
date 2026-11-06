@@ -53,7 +53,6 @@
 
 已完成 1 条，见 [DONE.md](DONE.md) 同名一节。
 
-- [~] hooks 默认关闭，需显式开启（参考 cutex 的 "Allow commands" 开关）：默认的 `setting_sources` 已不读用户自己的设置，所以用户级 hooks 默认不生效（`crates/drivers/src/claude_native/wire.rs`）；单独的开关和项目级 hooks 的处理未做
 - [ ] 运行时版本钉住：每个 agent 记录所用的 Claude Code 版本，升级后单独 repin，而不是全局切换
 - [ ] 每次升级 Claude Code 后跑 `claude_native` 冒烟测试（DESIGN.md §测试）
 
@@ -73,7 +72,6 @@
 - [~] `codex-native`：映射到 app-server 的图片输入（`localImage`），实测后确认字段
 - [~] 历史展示：时间线渲染图片和文件卡片（已做）；transcript 导出时包含附件引用（未做）
 - [ ] 跨 agent 转发：Worker 之间传附件时明确是复制还是引用，避免路径跨工作目录失效
-- [ ] 安全：附件路径不能让 agent 读到工作目录之外的文件，除非用户显式选择
 
 ## 八、多节点（固定中心 hub + 节点）
 
@@ -152,23 +150,13 @@ B3 远程开发：
 
 ## 十一、交给 CrossAgents 自己改自己
 
-已完成 2 条，见 [DONE.md](DONE.md) 同名一节。
+已完成 13 条，见 [DONE.md](DONE.md) 同名一节。
 
 > 2026-10-26，任务书见 [tasks/SELF.md](tasks/SELF.md)。按 A → B → C 顺序，A 做完再放开后面。
 
-- [~] A1 run 共享 `node_modules`，GUI 的 `tsc --noEmit` 与 `node --test` 进 `crossagents.toml` checks（2026-10-30 检查已进：`paths = ["apps/gui", "crossagents.toml"]` 依次跑 `npm --prefix apps/gui ci`、`run typecheck`、`test`，冷 worktree 里每次自己装依赖；共享 `node_modules` / 依赖缓存未做）
-- [ ] A2 mock 里无对话的 agent 也按插件给出能力
-- [ ] A3 worker 克隆合并 / 取消后归档，run 追溯保留它最后几轮
+- [~] A1 run 共享 `node_modules`，GUI 的 `tsc --noEmit` 与 `node --test` 进 `crossagents.toml` checks（检查已进；2026-11-06 加了 worktree 准备命令，冷 worktree 自己装依赖；跨 worktree 共享 `node_modules` / 依赖缓存仍未做）
 - [~] B1 压缩合并用 `run_finish` 的 `message`：`run_land` 已能传 `message` 作落地提交说明；`run_finish` 的 `message` 仍只用于提交主导自己的改动，没有传到落地（不传时默认 `crossagents: <run 标题>`）
-- [ ] B2 落地提交加 `Co-authored-by` 或可选人的 git 身份
-- [ ] B3 run 页只显示本 run 的通知
-- [ ] B4 开场说明带本机可用工具链
-- [~] B5 hooks 默认关闭（同 §五）
-- [ ] B6 附件路径不能越出工作目录（同 §七；计划由人批）
-- [ ] C1 run 复盘：从 trace 产出「现象 / 影响 / 方向」表到 `docs/tasks/RETRO-<run>.md`
 - [ ] C2 主导从复盘里挑一条开新 run 去修（计划仍要人批）
-- [ ] C3 改 hub 的任务在 `hub sandbox` 里跑冒烟再收尾
-- [~] L1–L3 项目排障记录（L1 完成 2026-10-28；L2、L3 未开工：没有 `related_lessons`，也没有 GUI 页）：run 中用 `issue/` 笔记随手记问题与绕法，收尾逐条整理进项目 lessons（按稳定的 project_id 跨节点共享、跨项目隔离），按需搜、失败时附相关条目，不当规则注入（任务书 [tasks/LESSONS.md](tasks/LESSONS.md)）
 
 ## 十二、run 的收尾：再开 Work 与删除
 
@@ -176,44 +164,13 @@ B3 远程开发：
 
 ## 十三、借鉴 Multica、magpie、Lancer
 
-已完成 5 条，见 [DONE.md](DONE.md) 同名一节。
+已完成 24 条，见 [DONE.md](DONE.md) 同名一节。剩下两条都随别的阶段做。
 
 > 2026-10-27 整理，依据 [Multica 调研](research/multica.md) 与 [magpie 与 Lancer 调研](research/magpie-lancer.md)（都是 2026-10-26）。
 > 顺序按两份调研 §4：先交接卡和选账号，再做 Multica 的三条唤醒规则；心跳与排队超时随 §八 B1 一起做。「不学的」见各自 §3，这里不再列。
 
-第一批（P0）：
-
-- [ ] 选账号（magpie）：`routing.rs` 默认先用最早续期的账号；新克隆的 Worker 到 90% 让号、返工中的到 98% 才换；失败的账号排到队尾不剔除；额度未知的先试一次读出余量（magpie-lancer §2.2）
-
-第二批（P0，agent 间通信里空着的那块）：
-
-- [~] 唤醒规则（Multica）：agent 挂「等某事」的规则后结束本轮，条件满足再起一轮并说明被什么唤醒；自己的消息不唤醒自己、排队去重、同一规则无人参与连环触发 3 次或 1 小时超过 12 次自动暂停、等待默认最多 7 天；任务结束时规则全关（multica §2.1）。已有 `watch`（任务或队友的事件，最多 20 条）和 `remind_set`；上述防连环触发、过期和收尾规则还没逐条对照
-- [ ] 分阶段唤醒（Multica）：子任务带 stage，一批全部结束就唤醒 lead 放行下一批，全部结束再唤醒一次做汇总；内置规则，不用手建（multica §2.2）
-- [ ] Planner 唤醒表（Multica）：成员发进展但没 @ 人才唤醒 Planner，@ 了别人不唤醒，Planner 自己的消息不唤醒；派活协议和花名册作为固定段落追加在 Planner 指令后（multica §2.3，对应 DESIGN §4.5、§6）
-
-第三批（P1）：
-
-- [ ] Run 泳道图（Lancer）：一个 Worker 一根线，节点有提交、交接、测试、重试、改派、落地、上下文压缩、模型切换、等你；带聚焦模式；依赖交接卡（magpie-lancer §2.3）
-- [ ] 接力链条（Lancer）：Run 页顶部每条任务线一行 `Rex ✓ → Ada → 你`（magpie-lancer §2.4）
-- [ ] 额度快作废时提醒 Planner 多派活（magpie）（magpie-lancer §2.5）
-- [ ] 「需要你」内嵌在事件流和泳道节点上，选项可行内点选（Lancer）（magpie-lancer §2.6）
-- [ ] 工具步骤按产出命名，产物在折叠行下给缩略图（Lancer）（magpie-lancer §2.7）
-- [ ] 运行与任务分开：一次运行结束不等于任务完成（Multica）（multica §2.4）
-- [ ] 失败分两类，只自动重试基础设施故障（离线、超时、目录准备失败、网络），`agent_error` 直接停并说明原因；会污染会话的故障在原目录开新会话（Multica）（multica §2.5）
-- [ ] 本地目录锁：同一目录同时只跑一个运行，后来的显示 `waiting_local_directory`（Multica）（multica §2.6）
 - [>] 心跳 15 秒、约 3 分钟判离线；排队超时要「心跳缺席超过宽限期」与「这条运行排了这么久」同时满足（Multica）：随 §八 B1 做（multica §2.7、§2.8）
-
-第四批（P2）：
-
-- [ ] 描述文件加 `min_version`，低于最低版本不注册，GUI 显示「版本过低」（Multica）（multica §2.9）
-- [ ] 核对注入 hub MCP 时有没有丢掉用户级 MCP 配置、有没有重复起同一服务器（Claude 的 `--strict-mcp-config`、CodeBuddy）（Multica）（multica §2.10）
-- [ ] `run trace` 给出候选账号的排序和理由（magpie）（magpie-lancer §2.8）
 - [>] 设备级日 / 周 / 月 token 与成本上限（magpie）：随 §八 A1 建 `devices` 表时加（magpie-lancer §2.9）
-- [~] CLI 版本：Agents 页已显示版本与来源（2026-10-26，4425631）；不在已验证范围时标出还没做（magpie）（magpie-lancer §2.10）
-- [ ] 从 `~/.codex/auth.json`、`~/.claude/.credentials.json` 导入账号，落到 M5 的独立目录；导入前提示刷新 ChatGPT 令牌会让原工具登出（magpie）（magpie-lancer §2.11）
-- [ ] 工作流交接：每一步设交给谁、完成后去哪、打回退到哪，交接前能预览说明（Multica）（multica §2.12）
-- [ ] 费用条：每次运行一根，按 agent、模型拆分，与额度管理一起做（Multica）（multica §2.13）
-- [ ] 自动化熔断：7 天内至少 50 次运行且失败率 90% 时自动暂停（Multica）（multica §2.14）
 
 ## 十四、Git 视图（只读）
 
@@ -222,14 +179,9 @@ B3 远程开发：
 
 > 2026-10-30 核对：提交图与单提交 diff 已按 run / 会话的范围做了（`GET /v1/runs/{key}/graph`、`/v1/agents/{key}/graph`、`…/commits/{sha}/diff`，GUI 在右侧工具列 `commitgraph.tsx`，另有只读文件浏览器），没有单独的 `#/git` 页。
 
-- [~] hub：提交图接口：run 与会话各一个、带 `limit`（已做）；`git log --all` 级别的全仓库图未做
-- [ ] hub：本地与远程分支列表，含 upstream 和领先 / 落后数量
-- [ ] hub：工作区状态，`git status --porcelain=v2`
-- [~] hub：单个提交的 diff 已做（对第一个父提交）；提交详情（作者、完整说明等）未单独给
-- [ ] hub：只能查 hub 已知的项目目录（agent 的工作目录、run 的仓库），其余路径拒绝；Rust 测试覆盖每个接口和越界拒绝
-- [ ] GUI：新增 `#/git` 页：左边本地 / 远程分支，中间带泳道的提交图（分支和 tag 标在提交上，HEAD 高亮），右边提交详情和 diff；顶部显示未提交改动的数量
-- [ ] GUI：MockBridge 补一套 git 数据，截图检查
-- [ ] 验收：`cargo test --workspace` 与 GUI 构建通过
+> 2026-11-06 run `a40444a0`（#git-api、#git-page）做完了分支列表、status、提交详情、路径白名单和 `#/git` 页（含 MockBridge 数据）。
+
+- [~] hub：`git log --all` 级别的全仓库提交图未做
 - [ ] 顺带验证：由 CrossAgents 自己开 Work 来做（主导拆任务交给便宜模型），实测 R1-A 与交接卡
 
 ## 十五、会话属于工作区，run 只记录谁参与过
@@ -275,11 +227,11 @@ B3 远程开发：
 > 2026-10-29，设计见 [tasks/LEAD.md](tasks/LEAD.md)。起因：修个小 bug 也要建 worktree，主导搬家丢上下文、再冷编译一遍；run 一结束主导被送回、检出被删，没法接着干。Lead 可选原地或 worktree，Worker 始终独立 worktree 可并行；Run 完成、会话结束、工作区清理拆成三件事。
 > 顺序：§九 剩下的小 bug → G1-1 → P1 + G1-2 → G1-3 / G1-4 / G1-5 → P2 → P3。P3 开工前先定 LEAD §10 第 1 条（原地模式要不要后台集成 worktree）。
 
-已完成 1 条（P1），见 [DONE.md](DONE.md) 同名一节。
+已完成 3 条（P1、P2、P3），见 [DONE.md](DONE.md) 同名一节。
 
 - [ ] **要人定：LEAD §10 第 3 条——完成后保留 / 清理是工作组级设置还是每轮可改**（2026-10-30 记）。§9 的表里说该做成工作组的设置，但 §10 第 3 条把它列为待定、只写了「倾向工作组级」。P1 按**无条件保留 + 显式清理入口**做，不加任何策略字段：那个字段会被序列化进 `works.data` 成为兼容负担，而现在没有任何地方能改它（没 GUI、没 CLI 子命令），永远等于默认值。定下来之后加一个 `#[serde(default)]` 字段是向后兼容的，不会因为现在不做而变难
-- [ ] P2 Lead 原地：拆开 `run.in_place` 的几层含义（Lead 模式 / 是否受版本控制 / 归属 / 保留策略）；原地主导直接认领不走 `lead_in`；按 checkout 的目录占用（落地也要遵守、Run 完成即释放）；主导自己改动的原地验收，结果绑定内容快照。不做 worker 进用户目录（LEAD §4、§7、§11）
-- [ ] P3 混合派工：独立 index + 专用 ref 的工作区快照（不推送、大小上限、密钥文件提示）；worker 从快照并行开工；结果三方应用回原目录，全部算完再写、可恢复、不重复应用、保留人的暂存区（LEAD §5、§6）
+- [ ] **P3 的尾巴**（2026-11-06 run `a40444a0` 记）：GUI 还没有「应用到原目录」按钮，目前只能走 `run_apply` 工具或 REST；LEAD §6 要求应用后在原目录复跑检查，现在报告里只记 `checked_in_dir`（检查跑在哪），没有真的在人的目录里复跑
+- [ ] **P2 的尾巴**：lead-in-place 对应的 GUI（G1-4 那一组）没跟上，原地 run 在界面上和 worktree run 看不出区别
 
 ## 二十、发起时选会话（已做）与它暴露的缺口
 
@@ -315,6 +267,10 @@ B3 远程开发：
 - [ ] `role` 字段的兼容迁移（[AGENT-WORKSPACE.md](AGENT-WORKSPACE.md) §6）
 - [ ] AGENT-WORKSPACE 验收补测：场景 6（断线重连）、场景 9（自动审批策略）只有纯函数测试，没实际跑过；键盘焦点只做了代码审查（同文档 §8）
 - [>] 减少额度消耗阶段 3：暂缓（[USAGE-TRIM.md](USAGE-TRIM.md)）
+- [ ] **`crates/hub/tests/extensions_runner.rs` 的计时用例在高负载下超时**（2026-11-06 run `a40444a0` 撞了 3 次，`:187`、`:1495`、`:1713`，排障记录 `21905816`）：单独重跑都过，`--test-threads=4` 也过。等钩子结束、grace 的上限在多任务并行编译时不够，该放宽或改成等事件
+- [ ] **A3 取消任务后归档的 worker，任务的 `completed_at` 为 null**（同 run 审阅时发现）：取消路径没写结束时间，trace 和费用条按时间排序时会排错位置
+- [ ] **B5 hooks 默认关闭后，升级上来的老用户原本开着的 hooks 也被关了**：没有迁移，升级后要人自己去打开
+- [ ] **§十四 git 只读接口的错误码不一致**：同类「路径不在白名单 / 不是仓库」有的返回 409、有的返回 400，GUI `#/git` 页按两种分别处理，该统一
 
 ## 二十五、借鉴 oh-my-pi 与 Cutex 0.2.1
 

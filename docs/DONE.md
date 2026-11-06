@@ -146,6 +146,20 @@
 - [x] T1 hub 核心不绑语言（2026-10-28）：构建目录等环境变量改由预设表（按根目录标志文件命中、可组合）加 `crossagents.toml` 的 `[run.env]` 声明，占位符 `{build}`；没配检查时明确报「未验证」；占用识别分确定 / 可能相关两级。依赖目录（node_modules、.venv）不默认共享，另行设计（任务书 [tasks/TOOLCHAIN.md](tasks/TOOLCHAIN.md)）
 - [x] 落地到人自己的 checkout 时，只在暂存区有改动、或未提交 / 未跟踪的文件与 run 要改的文件重叠时拒绝，其余改动原样保留（2026-10-26，`workspace.rs::check_checkout`；之前一律拒绝，人在主目录改着别的东西时 run 落不了地）
 
+> 2026-11-06 run `a40444a0`（发版 0.2.6）做完下面 11 条，每条一个任务、一个合入提交。
+
+- [x] A1 worktree 准备命令：新 worktree 先跑项目声明的 setup 命令装依赖（`a10cfa2`）；跨 worktree 共享 `node_modules` 仍留在 TODO
+- [x] A2 mock 里无对话的 agent 也按插件给出能力；B3 run 页只显示本 run 的通知（`60083b1`）
+- [x] A3 任务结束后的 worker 克隆归档而不删除，trace 保留最后几轮（`c88e2d9`）。取消路径 `completed_at` 为 null 的尾巴记在 TODO §二十四
+- [x] B2 落地提交带 `Co-authored-by`；B4 开场说明带本机工具链（`31f5ba8`）
+- [x] B5 / §五 hooks 默认关闭、显式开关（`75d4826`）。升级迁移的尾巴记在 TODO §二十四
+- [x] B6 / §七 附件与按路径读文件的入口不越出工作目录：`paths::confine` 词法预检加规范化检查（`73e2839`）
+- [x] C1 run 复盘：`run_retro` 工具、`crossagents run retro`、`GET /v1/runs/{key}/retro`（`0b1f0fe`）
+- [x] C3 改 hub 后 `hub sandbox smoke` 端到端冒烟，已进 `crossagents.toml` 检查（`a8d3caa`）
+- [x] L2 任务失败附可能相关的排障记录（`related_lessons`），排障记录的 REST / CLI / GUI 与导出（`168587e`）
+- [x] L3 排障记录复核标注、项目绑定与合并 GUI，复盘引用排障记录（`d34693a`）
+- [x] 顺手：hub 扩展测试的 `.ps1` 加 `-ExecutionPolicy Bypass`（`fc2b733`）；已有 agent 开会话时也拦住低于 `min_version` 的 CLI（`279a802`）
+
 ## 十二、run 的收尾：再开 Work 与删除
 
 > 2026-10-26，方案见 [tasks/R1.md](tasks/R1.md)。起因：Pia 主导的 run 已 `completed`，再开 Work 被拒；停在 `planning` 的旧 run 删不掉。A、B 都已完成。
@@ -183,6 +197,25 @@ B 删除 run：
   - 展示：`run show` 打印交接链，trace 每张卡一个节点；GUI 任务板每个任务下一条交接链、任务详情「交接」、主导对话里的编排行，点开同一张卡片；mock 场景 `handoff`，截图在 [screens/handoff](screens/handoff/)
   - 2026-10-27 审查后补：交接时把上一任的 `report.summary`、`report.failure` 随卡片带走并从任务上清掉，`progress` 改为换手原因，下一张卡不把 hub 写的原因当成 worker 的话（测试 `each_card_carries_what_its_own_worker_left`、`a_worker_that_said_nothing_hands_over_nothing_said`）；主导对话的交接行按它主导的全部 run 加载（`useRunsLedBy`），不再受侧栏 12 个 run 的限制；「已升级」看最后一张交接卡是不是 escalate（`isEscalated`），mock 不再手动置 `escalated`；上下文未知只写「未知」
   - 还没有的：`escalated` 现在没有代码会置位（H1-3 去掉了自动升级），所以只有「`task_assign` 给 escalate 队友」这一条升级路径真的会出卡
+
+2026-11-06 run `a40444a0`（发版 0.2.6）把本节剩下的一次做完（心跳与设备级上限随 §八）：
+
+- [x] 选账号（magpie）：最早 reset 优先、90% / 98% 让号、失败排队尾；额度快作废提醒主导；`run trace` 记录候选账号排序（`d957cdb`）
+- [x] 从 `~/.codex/auth.json`、`~/.claude/.credentials.json` 导入账号到独立目录，确认令牌警告、要求 Admin（`0413d85`）
+- [x] 唤醒规则补齐、Planner 唤醒表、自动化熔断（`370e464`、`3f42b11`）
+- [x] 分阶段唤醒：任务带 stage，同批结束自动唤醒主导并放行下一批（`3410f76`）
+- [x] 工作流交接：任务可设 `next` / `on_reject`，交接前可预览（`22de292`）
+- [x] 运行与任务分开、失败分两类只自动重试基础设施故障（`ecddcdd`）
+- [x] 描述文件 `min_version`、CLI 已验证版本范围标注、注入 MCP 时保留用户的 MCP 服务器（`76f6318`）
+- [x] 费用条：每次运行一根，按 agent、模型拆分（`de082af`）
+- [x] Run 泳道图：每个 worker 一条线（`e356319`）
+- [x] 接力链条、时间线内「需要你」行内点选、工具步骤按产出命名（`9277585`）
+- [x] 本地目录锁：随 §十九 P2 一起做（`0870fc5`）
+
+## 十四、Git 视图（只读）
+
+- [x] hub 只读接口：分支列表（含 upstream 与领先 / 落后）、status、提交详情、路径白名单，每个接口和越界拒绝都有测试（2026-11-06 run `a40444a0`，`a0cc095`）
+- [x] GUI `#/git` 页与 MockBridge git 数据（同 run，`ed784ab`）。错误码 409 / 400 不一致的尾巴记在 TODO §二十四
 
 ## 十五、会话属于工作区，run 只记录谁参与过
 
@@ -273,6 +306,8 @@ B 删除 run：
   - 行为上有一处人该知道的变化：`delete_run` 现在对**有未提交改动**的 run 一律拒绝（要 `force`），从前只在「未落地」时拒绝。落地之后在检出里新写的东西从前会被直接删掉，这不对——LEAD §8 要求有未保存的结果就保留现场并提示
   - 十四条现有测试的期望按新语义逐条改过（改期望、没删断言）。新增五条，其中 `session_reuse.rs::a_finished_work_can_start_another_round_and_keeps_the_previous_workspace` 真的走了 works 接口，顺带证明 `Completed` 在那个部分唯一索引的终态名单里
   - `run_next`（G1-2）的接点：从 `create_run_for_work` 进来，复用已保留的会话与检出、重新记录基线与任务归属；`integration_path` 与 `owns_checkout` / `checkout_unused` 就是「把按 run 的物理树映射改成共享工作区归属」的那几处
+- [x] P2 Lead 原地（2026-11-06 run `a40444a0`，#lead-in-place）：拆开 `run.in_place` 的几层含义，原地主导直接认领、不走 `lead_in`；按 checkout 加目录锁（落地同样遵守，run 完成即释放）；主导自己改动的原地验收结果绑定内容快照。worker 不进人的目录。GUI 部分留在 [TODO.md](TODO.md)
+- [x] P3 混合派工（同 run，#mixed-dispatch）：`crates/orchestrator/src/snapshot/` 用独立 index 和专用 ref 给人的目录拍快照（不推送、有大小上限、提示密钥文件），worker 从快照并行开工，在后台集成 worktree 里合并；`apply/` 三方应用回原目录，全部算完再写、有 journal 可恢复、不重复应用、保留人的暂存区，报告带 `checked_in_dir`、`own_changes`、`checks`。删除或清理 run 时只回收 `<worktrees>/<run>/integration` 和集成分支，有未完成的 journal 就保留；人的目录和快照 ref 都不碰。两次返工都是「报告与 worktree 不一致」，排障记录 `9eb5c980`
 
 ## 二十三、发布
 
