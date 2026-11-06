@@ -26,6 +26,11 @@
 //!
 //! The switch lives on the agent (`config.allow_hooks`) and is read at launch, like the
 //! setting sources: changing it restarts an idle session.
+//!
+//! Off is the default for new agents. Agents that existed before the switch are the
+//! exception: the store's one-off migration writes `allow_hooks: true` for the claude ones
+//! that never chose, so an upgrade does not silently stop their hooks
+//! (`crates/store-sqlite/src/lib.rs`, `HOOKS_ON`).
 
 use serde_json::Value;
 
@@ -56,7 +61,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Absent config is off, so every agent made before the switch existed stays off.
+    /// Absent config is off here. Agents from before the switch are turned on by the store's
+    /// upgrade migration; one made since is off unless it turns them on itself.
     #[test]
     fn hooks_are_off_unless_the_agent_turns_them_on() {
         assert!(!allowed(&json!({})));

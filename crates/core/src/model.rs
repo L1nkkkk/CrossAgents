@@ -47,6 +47,9 @@ pub struct Agent {
     /// `None` means the plugin's default driver.
     pub driver: Option<String>,
     pub model: Option<String>,
+    /// How the agent was made (a chat, a worker or a reviewer session). Kept for old clients
+    /// and for reading old records; nothing decides who may do what by it — the run's claims
+    /// do (docs/AGENT-WORKSPACE.md §6).
     pub role: Role,
     /// The workspace the agent belongs to (docs/DESIGN.md §4.7): where it lives between
     /// executions, and what the sidebar groups it under. Empty in records from before homes,
@@ -135,8 +138,9 @@ impl Agent {
     }
 }
 
-/// The agent's card: how it is shown, and the persona it is given. `role` still decides its
-/// tools; the profile makes it a particular colleague (a designer, a security reviewer, …).
+/// The agent's card: how it is shown, and the persona it is given. `role` is how it was made;
+/// the run's claims decide its tools, and the profile makes it a particular colleague (a
+/// designer, a security reviewer, …).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct AgentProfile {
