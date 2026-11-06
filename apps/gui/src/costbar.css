@@ -1,0 +1,111 @@
+/* The run's cost bar (costbar.tsx): one bar, one segment per agent and model, and the same
+   segments as rows under it. Segment colours are the agents' own avatar hues (av-*). */
+
+.costbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.costbar-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.costbar-head strong {
+  font-size: 18px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.costbar-track {
+  display: flex;
+  width: 100%;
+  height: 14px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--surface-sunk);
+}
+.costbar-seg {
+  height: 100%;
+  min-width: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: var(--hue, var(--accent));
+  box-shadow: inset -1px 0 0 var(--surface);
+  cursor: default;
+}
+.costbar-seg.on,
+.costbar-seg:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--text), inset -1px 0 0 var(--surface);
+}
+.costbar-readout {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 3px 8px;
+  /* Two lines' room, so the legend does not jump when a segment is hovered. */
+  min-height: 34px;
+}
+.costbar-read-name {
+  font-weight: 550;
+}
+.costbar-read-usd,
+.costbar-usd {
+  font-variant-numeric: tabular-nums;
+}
+.costbar-usd {
+  min-width: 52px;
+  text-align: right;
+}
+.costbar-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.costbar-legend li {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.costbar-legend li.on,
+.costbar-legend li:focus-visible {
+  background: var(--hover);
+  outline: none;
+}
+.costbar-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--hue, var(--accent));
+  align-self: center;
+}
+.costbar-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.costbar-model {
+  color: var(--text-2);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.costbar-tokens {
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.costbar-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}

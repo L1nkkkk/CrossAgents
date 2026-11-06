@@ -13,9 +13,9 @@ use std::sync::Arc;
 use chrono::Utc;
 use crossagents_core::{
     Agent, AgentId, AgentKey, AgentStatus, Attachment, ClaimRole, CoreError, Envelope, EventBus,
-    EventKind, HandoffKind, LeadPlace, MessageSource, PlannedTask, Role, Run, RunConfig, RunId,
-    RunMode, RunPolicy, RunStatus, StopReason, Store, Task, TaskId, TaskReport, TaskStatus,
-    WorkspaceVcs,
+    EventKind, HandoffKind, LeadPlace, MessageId, MessageSource, PlannedTask, Role, Run, RunConfig,
+    RunId, RunMode, RunPolicy, RunStatus, StopReason, Store, Task, TaskId, TaskReport,
+    TaskRunOutcome, TaskStatus, WorkspaceVcs,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -426,6 +426,19 @@ impl Orchestrator {
             ..Envelope::new(MessageSource::Agent { agent_id: from }, text)
         };
         let id = envelope.id;
+        self.send_in_background(to, envelope);
+        id
+    }
+
+    /// The message [`Self::relay`] would send, built but not sent: a caller that keeps a
+    /// record of it (a run's turn, `crate::attempts`) has its id before it goes.
+    pub(crate) fn relay_envelope(&self, from: AgentId, text: String) -> Envelope {
+        Envelope::new(MessageSource::Agent { agent_id: from }, text)
+    }
+
+    /// Sends an envelope built by [`Self::relay_envelope`], in the background: starting an
+    /// agent can take minutes.
+    pub(crate) fn send_in_background(&self, to: AgentId, envelope: Envelope) {
         let host = self.host.clone();
         let handle = tokio::spawn(async move {
             if let Err(err) = host.send_envelope(to, envelope, false).await {
@@ -436,7 +449,6 @@ impl Orchestrator {
         self.relay_tasks.lock().unwrap().push(handle);
         #[cfg(not(test))]
         drop(handle);
-        id
     }
 
     /// Tests await every relay started before their producer's completion barrier.
@@ -746,6 +758,23 @@ impl Orchestrator {
                 )
                 .await?;
         }
+        // What the project says a fresh checkout needs before anyone works in it
+        // (dependencies, docs/tasks/TOOLCHAIN.md §7). A reused checkout and a run whose lead
+        // works in the person's own directory are not fresh: nothing to prepare, and nothing
+        // of the hub's to run there (docs/tasks/LEAD.md §4).
+        let setup = if mode.lead == LeadPlace::InPlace || reused {
+            None
+        } else {
+            Some(
+                crate::setup::prepare(
+                    &self.integration_path(&run),
+                    &self.config.worktrees,
+                    &self.config.locks,
+                    self.config.shims.as_deref(),
+                )
+                .await,
+            )
+        };
         // The lead works in the run's own checkout: what it changes stays on the run branch
         // until it is landed (docs/tasks/W1.md §4.1). In place, it works where it is: the
         // agent itself, claimed as it is, no copy and no move (docs/tasks/LEAD.md §4).
@@ -824,19 +853,23 @@ impl Orchestrator {
         } else {
             MessageSource::Human
         };
+        let mut kickoff_text = brief::kickoff(
+            &run,
+            &team,
+            run.config.worker,
+            &crate::project::run_checks(&checkout),
+            env.as_ref(),
+            &sessions,
+        );
+        // A checkout the hub could not prepare says so in the kickoff, not only in a log
+        // (docs/tasks/TOOLCHAIN.md §7).
+        if let Some(note) = setup.as_ref().and_then(crate::setup::Prepared::note) {
+            kickoff_text.push_str("\n\n");
+            kickoff_text.push_str(&note);
+        }
         let kickoff = Envelope {
             attachments: new.attachments,
-            ..Envelope::new(
-                kickoff_from,
-                brief::kickoff(
-                    &run,
-                    &team,
-                    run.config.worker,
-                    &crate::project::run_checks(&checkout),
-                    env.as_ref(),
-                    &sessions,
-                ),
-            )
+            ..Envelope::new(kickoff_from, kickoff_text)
         };
         let host = self.host.clone();
         let lead = run.planner;
@@ -1390,6 +1423,7 @@ impl Orchestrator {
                 reviewer_fresh: planned.reviewer_fresh,
                 status: TaskStatus::Pending,
                 attempts: 0,
+                runs: Vec::new(),
                 escalated: false,
                 nudges: 0,
                 branch: None,
@@ -1491,6 +1525,11 @@ The person changed: {}",
             self.cleanup_worktree(&run, &task, false, released.is_empty())
                 .await;
             task.report.failure = Some("run cancelled".into());
+            crate::attempts::close_open(
+                &mut task,
+                TaskRunOutcome::Cancelled,
+                Some("the run was cancelled".into()),
+            );
             self.transition(&mut task, TaskStatus::Cancelled).await?;
         }
         if run.work_id.is_some() {
@@ -1546,13 +1585,28 @@ The person changed: {}",
             .collect();
         for mut task in ready {
             let itself = !task.worker_fresh && !task.escalated;
-            if let Err(err) = self.dispatch(run, &mut task).await {
+            let mut tries = 0u32;
+            loop {
+                let Err(err) = self.dispatch(run, &mut task).await else {
+                    break;
+                };
                 if itself && task.status == TaskStatus::Pending {
                     refused.push(self.not_started(run, &mut task, err).await?);
+                    break;
+                }
+                let why = format!("cannot start the task: {err}");
+                // Offline, a timeout, a directory that could not be prepared: the platform's,
+                // and worth another try at once (multica §2.5). Nothing was handed over yet.
+                if tries < crate::attempts::MAX_INFRA_RETRIES
+                    && task.assignee.is_none()
+                    && crate::attempts::start_is_retryable(&why)
+                {
+                    tries += 1;
+                    crate::attempts::record_start_failure(&mut task, &why, true);
                     continue;
                 }
-                self.fail_task(run, &mut task, format!("cannot start the task: {err}"))
-                    .await?;
+                crate::attempts::record_start_failure(&mut task, &why, false);
+                self.fail_task(run, &mut task, why).await?;
                 // fail_task schedules again.
                 return Ok(refused);
             }
@@ -1619,6 +1673,7 @@ The person changed: {}",
                     .into(),
             ));
         }
+        let mut setup = None;
         if task.worktree.is_none() && !run.versioned() {
             task.worktree = Some(run.repo.clone());
         } else if task.worktree.is_none() {
@@ -1644,6 +1699,17 @@ The person changed: {}",
             self.ws_for(run)
                 .create(&run.repo, &branch, &base, &path)
                 .await?;
+            // What the project says a fresh worktree needs, before anyone works in it
+            // (dependencies, docs/tasks/TOOLCHAIN.md §7).
+            setup = Some(
+                crate::setup::prepare(
+                    &path,
+                    &self.config.worktrees,
+                    &self.config.locks,
+                    self.config.shims.as_deref(),
+                )
+                .await,
+            );
             task.worktree = Some(path);
             task.branch = Some(branch);
         }
@@ -1694,6 +1760,12 @@ The person changed: {}",
         task.assignee = Some(worker.id);
         task.attempts = 1;
         task.nudges = 0;
+        // A worktree the hub could not prepare is written on the task itself, not only in a
+        // log line, and goes to the worker with the card (docs/tasks/TOOLCHAIN.md §7).
+        let setup_note = setup.as_ref().and_then(crate::setup::Prepared::note);
+        if let Some(note) = &setup_note {
+            task.progress = Some(first_line(note, 200));
+        }
         self.transition(task, TaskStatus::Running).await?;
         let (kind, reason) = if task.escalated {
             let why = rerouted.unwrap_or_else(|| "moved to the run's escalation teammate".into());
@@ -1714,10 +1786,19 @@ The person changed: {}",
         let issuer = task.issuer_or(run.planner);
         self.notify_dispatched(issuer, task, &card).await;
         let mut opening = brief::handover(task, &card);
+        if let Some(note) = setup_note {
+            opening = format!("{opening}\n\n{note}");
+        }
         if let Some(pushed) = self.expertise_brief(&worker, task).await {
             opening = format!("{opening}\n\n{pushed}");
         }
-        self.relay(worker.id, issuer, opening, None);
+        // The run this dispatch starts: the opening message is its turn, and a run that ends
+        // without a report is not the task ending (multica §2.4).
+        let envelope = self.relay_envelope(issuer, opening);
+        crate::attempts::begin(task, Some(worker.id), Some(envelope.id));
+        task.updated_at = Utc::now();
+        self.store.update_task(task).await?;
+        self.send_in_background(worker.id, envelope);
         Ok(())
     }
 
@@ -2211,11 +2292,13 @@ The person changed: {}",
                             this.turn_errors.lock().unwrap().insert(id, message);
                         }
                         EventKind::AgentTurnCompleted {
-                            id, stop_reason, ..
+                            id,
+                            message_id,
+                            stop_reason,
                         } => {
                             let error = this.turn_errors.lock().unwrap().remove(&id);
                             let error = error.filter(|_| stop_reason == StopReason::Error);
-                            this.on_idle(id, error).await
+                            this.on_idle(id, Some(message_id), error).await
                         }
                         EventKind::AgentUpdated { agent } => {
                             let this = this.clone();
@@ -2259,7 +2342,8 @@ The person changed: {}",
                             ..
                         } => {
                             let error = this.turn_errors.lock().unwrap().remove(&id);
-                            this.on_idle(id, error).await
+                            // A process that died says nothing about its turn: no id to match.
+                            this.on_idle(id, None, error).await
                         }
                         _ => {}
                     },
@@ -2288,9 +2372,10 @@ The person changed: {}",
     }
 
     /// An agent's turn ended (or it crashed) while its task still waits for its report. The
-    /// hub does not nudge: the task shows as stalled and its issuer decides, told what the
-    /// turn failed with when it did.
-    async fn on_idle(&self, agent: AgentId, error: Option<String>) {
+    /// run is recorded; a platform fault is retried where trying again may help, and one that
+    /// a retry cannot fix (`agent_error`) stops the task and says why. The task itself never
+    /// counts as done because a run ended (multica §2.4–2.5).
+    async fn on_idle(&self, agent: AgentId, turn: Option<MessageId>, error: Option<String>) {
         let Some((run, task)) = self.task_for_agent(agent).await else {
             return;
         };
@@ -2320,24 +2405,7 @@ The person changed: {}",
         if task.assignee != Some(agent) || task.status != TaskStatus::Running {
             return;
         }
-        if let Err(err) = self.transition(&mut task, TaskStatus::Stalled).await {
-            return tracing::error!(error = %err, "cannot mark a task stalled");
-        }
-        self.notice(
-            issuer,
-            &format!("task:{}", task.id),
-            &match error {
-                Some(error) => format!(
-                    "Task {} is stalled: {name}'s turn failed before it could report: {error}\nA nudge fails the same way while the cause stays: fix it, or task_assign the task to someone else.",
-                    brief::task_ref(&task)
-                ),
-                None => format!(
-                    "Task {} is stalled: {name} ended a turn without reporting.",
-                    brief::task_ref(&task)
-                ),
-            },
-        )
-        .await;
+        self.turn_ended(&run, &mut task, agent, turn, error).await;
     }
 
     /// After a hub restart sessions resume where the driver can, but nothing is running:
@@ -2387,6 +2455,11 @@ The person changed: {}",
                     continue;
                 }
                 if task.status == TaskStatus::Running {
+                    crate::attempts::close_open(
+                        &mut task,
+                        TaskRunOutcome::NoReport,
+                        Some("the hub restarted while this run was going".into()),
+                    );
                     self.transition(&mut task, TaskStatus::Stalled).await?;
                 } else {
                     // Left over from the fixed pipeline: hand it to the issuer as done.

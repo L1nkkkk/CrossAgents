@@ -5,17 +5,20 @@ import { emptyHub } from "../views/Home.mock";
 import { extensionScene } from "./extensions.mock";
 import { approvalRun, deleteRun, graphRun, handoffRun, inPlaceRun, landingRun, longResultsRun, oauthRun, pausedRun, rerouteRun, reuseRun, reviewRun, syncRun, traceRun } from "../views/Run.mock";
 import { relayScene } from "../views/RunRelay.mock";
+import { swimlaneScene } from "../views/RunSwimlane.mock";
+import { runCostScene } from "../views/RunCost.mock";
 import type { BackgroundResponse } from "@bindings/BackgroundResponse";
 import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, failedEditSession, liveRun, liveSession, liveTaskSession, longNameScene, moderationSession, slashScene, soloSession, toolImagePathsSession, toolImagesSession } from "../views/Session.mock";
 import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
 import { usageScene } from "../views/Usage.mock";
 import { expertiseScene } from "../views/Expertise.mock";
-import { agent, ago, capabilitiesOf, NOTES_REPO, planned, REPO, say, team, think, transcript, turn } from "./fixtures";
+import { agent, ago, capabilitiesOf, NOTES_REPO, planned, REPO, say, team, think, transcript, turn, uid } from "./fixtures";
 import { openFile } from "../FileViewer";
 import { openTool, placeTab } from "../panes";
 import { setBottomHeight, setToolsWidth } from "../lib/widths";
 import { newTerminal } from "../terminal";
 import type { AccountQuota } from "@bindings/AccountQuota";
+import type { HumanItem } from "@bindings/HumanItem";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import { wsKey } from "../workspace";
 import { quota } from "../views/Usage.mock";
@@ -30,6 +33,13 @@ export type Scenario = {
 };
 
 export const SCENARIOS: Scenario[] = [
+  { key: "swimlane", label: "Run 泳道图", hint: "一个 Worker 一根线：交接、提交、测试 ✓/✗、重试、改派（分叉）、合入、上下文压缩、模型切换、等你；点名字只看一根线", build: () => swimlaneScene() },
+  { key: "swimlane-landed", label: "Run 泳道图 · 已落地", hint: "三条线都合入后落地，泳道以「落地」收尾", build: () => swimlaneScene(true) },
+  { key: "swimlane-focus", label: "Run 泳道图 · 聚焦", hint: "只看 Rex 一根线，节点带时间", build: () => {
+    const scene = swimlaneScene();
+    const focus: Step = { at: 900, act: () => document.querySelector<HTMLButtonElement>('[data-card="run-swimlane"] .swim-head')?.click() };
+    return { ...scene, script: [...scene.script, focus] };
+  } },
   { key: "relay-needyou", label: "接力链 · 需要你 · 按产出命名", hint: "每条任务线一行接力链；问题在时间线里点选回答；折叠的步骤按产出命名，产物在下面", build: () => relayScene() },
   { key: "relay-needyou-steps", label: "按产出命名的步骤", hint: "折叠的步骤读作「改了 3 个文件 · 跑了测试：通过 · 出了 1 张图」，缩略图和路径就在那一行下面（这个问题已在别处答完，好让对话有地方）", build: () => {
     const scene = relayScene();
@@ -191,6 +201,19 @@ export const SCENARIOS: Scenario[] = [
     run.continuation = { owner: run.planner, phase: "exhausted", next_step: "已达到自动唤醒次数上限。请检查任务状态，或向主管发送进一步指示。", attempts: 3, next_at: null, last_attempt_at: new Date().toISOString(), delivery_error: null };
     return { ...scene, script: [], route: `#/runs/${run.id}` };
   } },
+  { key: "task-runs", label: "任务的多轮运行", hint: "任务详情：共 3 次运行，平台故障与会话失效各自动重试一次，agent_error 停下并写明原因", build: () => {
+    const scene = oauthRun("running");
+    const detail = scene.state.runs[0];
+    const task = detail.tasks[0];
+    task.runs = [
+      { index: 1, started_at: ago(40), ended_at: ago(36), outcome: "infrastructure", agent: task.assignee, message: null, note: "request timed out after 600s", retried: true },
+      { index: 2, started_at: ago(35), ended_at: ago(31), outcome: "session_lost", agent: task.assignee, message: null, note: "context length exceeded: 400000 > 200000", retried: true },
+      { index: 3, started_at: ago(30), ended_at: ago(26), outcome: "agent_error", agent: task.assignee, message: null, note: "agent_error: invalid api key", retried: false },
+    ];
+    task.status = "stalled";
+    task.report.failure = "agent_error: invalid api key";
+    return { ...scene, script: [], route: `#/runs/${detail.run.id}/tasks/${task.id}` };
+  } },
   { key: "empty", label: "空 hub", hint: "第一次打开：没有队友、没有 run", build: () => ({ state: emptyHub(), script: [], route: "#/" }) },
   { key: "session-choice", label: "发起时选会话", hint: "首页 Work 的「会话」：新会话或已有会话；占用写明哪个 run，归档可恢复，不能换目录的置灰", build: () => {
     const { ada, rex, mia, sam } = team();
@@ -282,6 +305,32 @@ export const SCENARIOS: Scenario[] = [
     };
   } },
   { key: "running", label: "run 进行中", hint: "run 页：中间栏只有对话；右侧栏按任务分组（含交接链）、run 信息、策略、笔记，追溯和参与者收起", build: () => oauthRun("running") },
+  // B3 (docs/tasks/SELF.md): the run page keeps this run's 「告诉你」 notices; the workspace has
+  // another run's too, and that one must not appear below the conversation.
+  { key: "run-notices", label: "run 页只显示本 run 的通知", hint: "工作区里还有另一个 run 的「告诉你」：这个 run 页只列本 run 的那一条", build: () => {
+    const scene = oauthRun("running");
+    const d = scene.state.runs[0];
+    const notice = (from: string, run: string | null, text: string, minutesAgo: number): HumanItem => ({
+      id: uid(), kind: "notice", from, run_id: run, task_id: null, text, detail: null, options: [], default: null,
+      timeout_at: null, status: "open", answer: null, answered_at: null, action: null, created_at: ago(minutesAgo),
+    });
+    const someoneElse = scene.state.agents.find((a) => a.id !== d.run.planner)?.id ?? d.run.planner;
+    scene.state.questions.push(
+      notice(d.run.planner, d.run.id, "这个 run 的「告诉你」：落地前我会把 run 分支上的提交按任务归好，你只要看一眼总 diff。", 3),
+      notice(someoneElse, uid(), "别的 run 的「告诉你」：这条只该出现在首页，不该出现在这个 run 页。", 2),
+    );
+    return scene;
+  } },
+  { key: "capability-no-turns", label: "没有对话的 agent 也报能力", hint: "这个 codex 队友在 mock 里没开过会话：输入框下面照样写明只收图片和文本，PDF 发不了（codex-native）", build: () => {
+    const scene = soloSession();
+    const nova = scene.state.agents[0];
+    // No transcript: the mock's fallback is what the hub answers for a session never opened.
+    const codex = { ...nova, plugin: "codex" as const, model: "gpt-5-codex", status: "idle" as const, topic: null };
+    scene.state.agents = [codex];
+    scene.state.transcripts.clear();
+    return { state: scene.state, script: [], route: `#/s/${codex.name}` };
+  } },
+  { key: "run-cost", label: "run 的费用条", hint: "右侧栏「费用」：一根横条按 agent 与模型分段，同一 agent 的模型深浅分开；悬停一段看金额和 token，下面一行一段", build: () => runCostScene() },
   { key: "paused", label: "run 已暂停", hint: "中间只有一行「已暂停」提示，展开看全文；计划、run 信息、策略都在右侧栏", build: () => pausedRun() },
   { key: "review", label: "审查任务", hint: "#c 已报告完成：整个任务的 diff 带行号，点行号写意见，可发给 worker 或打回重做", build: () => reviewRun() },
   { key: "landing", label: "落地前总 diff", hint: "所有任务都已合并、等落地：展开「查看全部改动」看 run 分支对 main 的总 diff", build: () => landingRun() },
@@ -327,6 +376,7 @@ export const SCENARIOS: Scenario[] = [
   { key: "tool-fail", label: "工具调用失败", hint: "编辑失败：失败步骤收成一行（✕ · 工具 · 失败原因第一行），点 ✕ 展开工具原话、退出码和参数；成功的编辑照旧", build: () => failedEditSession() },
   { key: "attach", label: "消息带附件", hint: "人发的消息带了截图和日志（点缩略图看大图）；输入框可粘贴截图、拖文件或点回形针，发送前能删", build: () => attachmentSession() },
   { key: "settings-src", label: "Claude 设置源", hint: "设置 → 智能体：点 Nova 编辑，「读取 Claude 设置」三档预设（缺省 / 全部 / 都不读）；点 Vega（CodeBuddy）编辑，标签说明它不读 CLAUDE.md", build: settingSources },
+  { key: "hooks", label: "hooks 默认关闭", hint: "设置 → 智能体：点 Nova 编辑，设置源下面的「允许 hooks（默认关闭）」没勾；勾上才会跑设置文件里的 hooks（仓库 .claude/settings.json 也算）", build: settingSources },
   { key: "recruit", label: "对话招队友", hint: "对话里招人：一次因为用模型名当名字被拒绝（一行写明对象和理由第一句，点 ✕ 看完整理由），一次招到 Iris，挂在对话下面", build: () => chatWithRecruit() },
   { key: "crash", label: "进程崩溃", hint: "单聊里 Claude CLI 崩溃退出：错误条和「需要你」写明怎么退出的", build: () => crashedSession() },
   { key: "moderation", label: "上下文被内容审查拦下", hint: "网关拒绝整段上下文：错误行写「上下文已被污染」，输入框上方给「新开会话」「压缩上下文」「仍要发送」", build: () => moderationSession() },
@@ -354,6 +404,7 @@ export const SCENARIOS: Scenario[] = [
   { key: "cli-install-missing", label: "装完但找不到", hint: "命令成功，但这台机器上找不到装好的程序：原因里列出找过的位置", build: () => cliScene("missing") },
   { key: "cli-upgrade", label: "升级 CLI", hint: "Codex 是 npm 装的：点「升级」，完成后版本号变化", build: () => cliScene("ok", "upgrade") },
   { key: "cli-bundled", label: "桌面版自带不可升级", hint: "Claude 来自桌面版：显示「随桌面版更新」，没有升级按钮", build: () => cliScene("ok", "install", false) },
+  { key: "cli-versions", label: "CLI 版本过低与未验证", hint: "设置 → 智能体：Codex 低于描述文件的最低版本（不注册、不提供模型），With 的版本不在验证过的范围内（仍可运行），Claude 在范围内", build: () => ({ state: emptyHub(), script: [], route: "#/agents" }) },
   { key: "agent-workspace-sidebar", label: "项目侧栏：成员与待办", hint: "项目 → 成员（Lin 已归档），独立会话，「需要你」两条（都是 Mia 的）；Rex 既是 #a 的执行者又是 #b 的评审，只出现一行", build: () => ({ state: workspaceState(), script: [], route: "#/" }) },
   { key: "agent-workspace-overview", label: "项目总览", hint: "点项目名进入总览：待审批、进行中、旧的已落地 run 各一个；Nova-c 是用 Nova 的配置新建的执行会话，#a 是 Rex 本人", build: () => ({ state: workspaceState(), script: [], route: `#/w/${encodeURIComponent(wsKey(REPO))}` }) },
   { key: "agent-workspace-edges", label: "边界 run", hint: "NOTES_REPO：失败的 run 和完成但未落地的 run（不能显示成完成）；REPO 里还有没提交 plan 的登录限流和来源已归档的多租户隔离", build: () => ({ state: workspaceState(), script: [], route: `#/w/${encodeURIComponent(wsKey(NOTES_REPO))}` }) },
@@ -447,6 +498,11 @@ export const SCENARIOS: Scenario[] = [
     state: { ...emptyHub(), ...extensionScene(), safeMode: { enabled: true, reason: "上次启动在加载扩展时未能就绪，已自动进入安全模式并跳过所有扩展。" } },
     script: [],
     route: "#/extensions",
+  }) },
+  { key: "git", label: "Git 页", hint: "一个项目的分支（本地/远程）、带泳道的提交图（HEAD、分支、tag）、选中提交的详情和 diff，顶部是未提交改动数", build: () => ({
+    state: { ...emptyHub(), agents: [agent({ name: "Ada", plugin: "claude", role: "worker", cwd: REPO })] },
+    script: [],
+    route: "#/git",
   }) },
 ];
 

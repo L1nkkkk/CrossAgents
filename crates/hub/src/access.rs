@@ -380,4 +380,23 @@ mod tests {
         );
         assert!(refusal(&Grant::Agent, &Method::GET, "/v1/agents").is_some());
     }
+
+    /// docs/TODO.md §14: the Git view only reads, so the read-only credential reaches it.
+    #[test]
+    fn the_git_view_is_read_only() {
+        for pattern in [
+            "/v1/git/branches",
+            "/v1/git/status",
+            "/v1/git/commits/{sha}",
+            "/v1/git/commits/{sha}/diff",
+            "/v1/git/graph",
+        ] {
+            assert_eq!(required(&Method::GET, pattern), Level::Read, "{pattern}");
+            assert_eq!(
+                refusal(&Grant::Level(Level::Read), &Method::GET, pattern),
+                None,
+                "{pattern}"
+            );
+        }
+    }
 }

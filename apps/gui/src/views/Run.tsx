@@ -11,6 +11,7 @@ import { navigate } from "../App";
 import { ApiError, api, errorText } from "../api";
 import { DeleteRunDialog } from "../deleteRun";
 import { HandoffChain, OutcomeChip, freshLabel, isEscalated } from "../handoff";
+import { TaskRuns } from "../attempts";
 import {
   Avatar,
   ErrorBox,
@@ -61,7 +62,10 @@ import { RunChanges, TaskReview } from "../review";
 import { InlineNeeds } from "../inlineask";
 import { RelayBanner } from "../relay";
 import { useQuestions } from "../questions";
+import { openInRun } from "../notices";
 import { RunTraceView } from "../trace";
+import { RunSwimlane } from "../swimlane";
+import { RunCostBar } from "../costbar";
 import { RailCard } from "../rail";
 import { t, type Key } from "../lib/i18n";
 import { wsKey } from "../workspace";
@@ -79,6 +83,8 @@ function concerns(runId: string, e: HubEvent): boolean {
     case "task.checked":
     case "task.rerouted":
     case "task.handed_off":
+    // A retry says so in the task's progress and adds a run to it (multica §2.5).
+    case "task.progress":
       return e.data.run_id === runId;
     default:
       return false;
@@ -142,7 +148,8 @@ export function RunView({
     return <div className="page-inner">{detail.error ? <ErrorBox error={detail.error} /> : <p className="muted">加载中…</p>}</div>;
   }
   const { run, tasks } = detail.data;
-  const asks = (questions.data?.items ?? []).filter((i) => i.status === "open" && (i.run_id === run.id || i.from === run.planner));
+  // This run's open questions and 「告诉你」 notices, and no other run's (docs/tasks/SELF.md B3).
+  const asks = openInRun(questions.data?.items ?? [], run);
   const planner = agentName(agents.data, run.planner);
   const plannerAgent = agents.data?.find((a) => a.id === run.planner);
   const allEnded = tasks.length > 0 && tasks.every((t) => ["merged", "failed", "cancelled"].includes(t.status));
@@ -388,12 +395,16 @@ function RunRail({
           </RailCard>
         )
       )}
+      {tasks.length > 0 && <RailCard id="run-swimlane" title="泳道"><RunSwimlane runId={run.id} /></RailCard>}
       <RailCard id="run-facts" title="run">
         <RunFacts run={run} agents={agents} />
       </RailCard>
       <RailCard id="run-policy" title="策略与预算">
         <PolicyChip run={run} />
         <ContinuationMeta key={run.id} run={run} agents={agents} onDone={onPolicyChange} />
+      </RailCard>
+      <RailCard id="run-cost" title="费用">
+        <RunCostBar runId={run.id} />
       </RailCard>
       {tasks.some((t) => t.handoffs.length > 0) && (
         <RailCard id="run-participants" title="参与者" defaultOpen={false}>
@@ -1149,6 +1160,9 @@ export function TaskDetail({ runId, taskId }: { runId: string; taskId: string })
             <dt>更新</dt>
             <dd title={time(task.updated_at)}>{ago(task.updated_at)}</dd>
           </dl>
+
+          {/* Run count and how each run ended (multica §2.4–2.5). */}
+          <TaskRuns task={task} />
 
           {task.handoffs.length > 0 && (
             <Section title="交接">

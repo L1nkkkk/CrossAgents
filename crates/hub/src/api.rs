@@ -26,17 +26,18 @@ use crossagents_api_types::{
     CliInstallAccepted, CommitGraph, ConnectInfo, CreateAccountRequest, CreateAgentRequest,
     CreateRunRequest, CreateWorkRequest, CreateWorkRunRequest, DeleteRunResponse, DiffSide,
     ErrorCode, FileContentResponse, FileEntry, FileGitChange, FileKind, FileSearchResponse,
-    FileStatusEntry, FileStatusResponse, FileTreeResponse, FinishRequest, GraphCommit, GraphRef,
-    GraphRefKind, HealthResponse, HubInfo, ImageContent, InitRepoRequest, LandRequest,
-    ListAccountsResponse, ListAgentsResponse, ListAvatarsResponse, ListHistoryResponse,
-    ListNotesResponse, ListPluginsResponse, ListQuestionsResponse, ListRunsResponse,
-    ListToolsResponse, ListWorksResponse, LoginStarted, PluginInfo, QueuedReason, QuotaResponse,
-    RejectRunRequest, RenameAgentRequest, ResolvePathsRequest, ResolvePathsResponse, ResolvedPath,
-    RunDetail, RunTrace, SendMessageRequest, SendMessageResponse, SetModelRequest,
-    SetPluginModelsRequest, SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript,
-    TurnDiffResponse, UpdateRunPolicyRequest, UploadAvatarsRequest, UploadAvatarsResponse,
-    UsageGroup, UsageResponse, UsageSeriesGroup, UsageSeriesRange, UsageSeriesResponse,
-    VerifyingTask, WorkDetail,
+    FileStatusEntry, FileStatusResponse, FileTreeResponse, FinishRequest, GitBranch,
+    GitBranchesResponse, GitCommitResponse, GitFileState, GitGraph, GitGraphRef, GitRefKind,
+    GitStatusEntry, GitStatusResponse, GraphCommit, GraphRef, GraphRefKind, HealthResponse,
+    HubInfo, ImageContent, InitRepoRequest, LandRequest, ListAccountsResponse, ListAgentsResponse,
+    ListAvatarsResponse, ListHistoryResponse, ListNotesResponse, ListPluginsResponse,
+    ListQuestionsResponse, ListRunsResponse, ListToolsResponse, ListWorksResponse, LoginStarted,
+    PluginInfo, QueuedReason, QuotaResponse, RejectRunRequest, RenameAgentRequest,
+    ResolvePathsRequest, ResolvePathsResponse, ResolvedPath, RunCostResponse, RunDetail, RunTrace,
+    SendMessageRequest, SendMessageResponse, SetModelRequest, SetPluginModelsRequest,
+    SetTopicRequest, TaskReviewRequest, TaskTrace, Transcript, TurnDiffResponse,
+    UpdateRunPolicyRequest, UploadAvatarsRequest, UploadAvatarsResponse, UsageGroup, UsageResponse,
+    UsageSeriesGroup, UsageSeriesRange, UsageSeriesResponse, VerifyingTask, WorkDetail,
 };
 use crossagents_core::{
     Account, AccountStatus, Agent, AgentId, AgentKey, AgentProfile, AgentStatus, Attachment,
@@ -44,8 +45,8 @@ use crossagents_core::{
     LandMode, MessageId, MessageSource, Run, RunConfig, RunId, Store, Task, TaskId,
 };
 use crossagents_orchestrator::{
-    Approval, DeleteRun, FileError, FilesScope, GitWorkspaces, NewRun, Orchestrator,
-    files as workspace_files,
+    Approval, DeleteRun, FileError, FilesScope, GitError, GitWorkspaces, NewRun, Orchestrator,
+    files as workspace_files, gitview,
 };
 
 use crate::accounts::Accounts;
@@ -214,6 +215,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{key}/cleanup", post(cleanup_run))
         .route("/v1/runs/{key}/diff", get(run_diff))
         .route("/v1/runs/{key}/trace", get(run_trace))
+        .route("/v1/runs/{key}/cost", get(run_cost))
         .route("/v1/runs/{key}/tasks/{task}/diff", get(task_diff))
         .route("/v1/runs/{key}/tasks/{task}/review", post(review_task))
         .route("/v1/agents/{key}/files/tree", get(agent_files_tree))
@@ -254,6 +256,11 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/v1/agents/{key}/commits/{sha}/diff",
             get(agent_commit_diff),
         )
+        .route("/v1/git/branches", get(git_branches))
+        .route("/v1/git/status", get(git_status))
+        .route("/v1/git/commits/{sha}", get(git_commit))
+        .route("/v1/git/commits/{sha}/diff", get(git_commit_diff))
+        .route("/v1/git/graph", get(git_graph))
         .route("/v1/repos/init", post(init_repo))
         .route("/v1/events", get(events))
         .route("/v1/shutdown", post(shutdown))
@@ -331,6 +338,22 @@ impl From<FileError> for AppError {
             FileError::BadRequest(_) => (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
             FileError::Failed(_) => {
                 tracing::error!(error = %err, "cannot read a workspace file");
+                (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal)
+            }
+        };
+        Self::new(status, code, err.to_string())
+    }
+}
+
+impl From<GitError> for AppError {
+    fn from(err: GitError) -> Self {
+        let (status, code) = match &err {
+            // A directory the hub does not know is refused, not read.
+            GitError::Outside(_) => (StatusCode::FORBIDDEN, ErrorCode::Forbidden),
+            GitError::NotFound(_) => (StatusCode::NOT_FOUND, ErrorCode::NotFound),
+            GitError::BadRequest(_) => (StatusCode::BAD_REQUEST, ErrorCode::BadRequest),
+            GitError::Failed(_) => {
+                tracing::error!(error = %err, "cannot read the git view");
                 (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Internal)
             }
         };
@@ -586,6 +609,29 @@ async fn create_agent(
             state.runtime.plugins().names().join(", ")
         )));
     }
+    // A CLI older than the description's minimum does not register an agent
+    // (docs/research/multica.md §2.9). A CLI that has not answered its version yet is
+    // started as before: unknown is not too old.
+    if req.plugin != crossagents_core::EXTERNAL_PLUGIN
+        && let Some(driver) = state.runtime.plugins().get(&req.plugin)
+        && let Some(status) = driver.cli_status().await
+    {
+        let version = status
+            .located
+            .as_ref()
+            .and_then(|located| located.version.clone());
+        if let Some(config) = state.runtime.plugins().config(&req.plugin)
+            && config.too_old(version.as_deref())
+        {
+            return Err(AppError::bad_request(format!(
+                "the {} CLI on this machine is too old (version {}, needs {} or newer): \
+                 upgrade it on the Agents page",
+                req.plugin,
+                version.as_deref().unwrap_or("unknown"),
+                config.min_version.as_deref().unwrap_or(""),
+            )));
+        }
+    }
     if let Some(driver) = &req.driver {
         driver.parse::<DriverKind>()?;
     }
@@ -678,10 +724,10 @@ async fn update_profile(
     Ok(Json(agent))
 }
 
-/// `POST /v1/agents/{key}/settings`: which of Claude Code's settings the agent loads
-/// (docs/tasks/DOGFOOD.md §6). The CLI reads them only at launch, so an idle session is
-/// stopped and resumes with them on the next message; a busy one keeps the old ones until it
-/// next starts.
+/// `POST /v1/agents/{key}/settings`: which of Claude Code's settings the agent loads, and
+/// whether their hooks may run (docs/tasks/DOGFOOD.md §6, SELF.md §B5). The CLI reads both
+/// only at launch, so an idle session is stopped and resumes with them on the next message; a
+/// busy one keeps the old ones until it next starts.
 async fn agent_settings(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
@@ -692,6 +738,15 @@ async fn agent_settings(
         agent.config = serde_json::json!({});
     }
     let before = agent.config.get("setting_sources").cloned();
+    let hooks_before = agent.config.get("allow_hooks").cloned();
+    // Off is the default, so it is stored as absence: one shape for "never chose".
+    if let Some(allow) = req.allow_hooks {
+        if allow {
+            agent.config["allow_hooks"] = true.into();
+        } else {
+            agent.config.as_object_mut().unwrap().remove("allow_hooks");
+        }
+    }
     match req.setting_sources {
         None => {
             agent
@@ -721,7 +776,10 @@ async fn agent_settings(
         .store()
         .update_agent_config(agent.id, &agent.config)
         .await?;
-    if agent.config.get("setting_sources").cloned() != before && agent.status == AgentStatus::Idle {
+    if (agent.config.get("setting_sources").cloned() != before
+        || agent.config.get("allow_hooks").cloned() != hooks_before)
+        && agent.status == AgentStatus::Idle
+    {
         state.runtime.stop(&AgentKey::Id(agent.id)).await?;
         agent.status = AgentStatus::Stopped;
     }
@@ -1424,13 +1482,6 @@ async fn list_plugins(State(state): State<Arc<AppState>>) -> Json<ListPluginsRes
 async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> PluginInfo {
     let registry = state.runtime.plugins();
     let name = d.name();
-    let all = crate::models::available(registry, &state.accounts, name).await;
-    // A CLI this machine does not have runs nothing: offer none of its models.
-    let models = if d.installed() {
-        state.models.filter(name, all.clone())
-    } else {
-        Vec::new()
-    };
     // What this plugin's install or upgrade is doing now, if one is running (in memory only:
     // after a restart nothing is, so this is `None`).
     let installing = state
@@ -1438,7 +1489,26 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
         .installing(name)
         .await
         .map(|action| action.as_str().to_owned());
-    let cli = d.cli_status().await.map(|status| CliInfo {
+    let status = d.cli_status().await;
+    let found = status
+        .as_ref()
+        .and_then(|status| status.located.as_ref())
+        .and_then(|located| located.version.clone());
+    let config = registry.config(name);
+    // A CLI older than the description's minimum is not registered: no models are offered
+    // for it, and the row says why (docs/research/multica.md §2.9).
+    let below_minimum = config.is_some_and(|config| config.too_old(found.as_deref()));
+    let all = match below_minimum {
+        true => Vec::new(),
+        false => crate::models::available(registry, &state.accounts, name).await,
+    };
+    // A CLI this machine does not have runs nothing: offer none of its models.
+    let models = if d.installed() && !below_minimum {
+        state.models.filter(name, all.clone())
+    } else {
+        Vec::new()
+    };
+    let cli = status.map(|status| CliInfo {
         installed: status.located.is_some(),
         probing: status.probing,
         path: status
@@ -1449,10 +1519,7 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
             .located
             .as_ref()
             .map(|located| located.source.as_str().to_owned()),
-        version: status
-            .located
-            .as_ref()
-            .and_then(|located| located.version.clone()),
+        version: found.clone(),
         install_hint: status.install_hint,
         docs: status.docs,
         installed_via: status.installed_via,
@@ -1461,6 +1528,12 @@ async fn plugin_info(state: &AppState, d: &dyn crossagents_core::Driver) -> Plug
         can_upgrade: status.can_upgrade,
         installing,
         described_by: status.described_by,
+        min_version: config.and_then(|config| config.min_version.clone()),
+        below_minimum,
+        verified: config
+            .map(|config| config.verified.clone())
+            .filter(|series| !series.is_empty()),
+        unverified: config.is_some_and(|config| config.unverified(found.as_deref())),
     });
     PluginInfo {
         name: name.to_owned(),
@@ -2029,6 +2102,18 @@ async fn run_trace(
     Ok(Json(trace))
 }
 
+/// What the run spent, split by agent and model — its cost bar
+/// (docs/research/multica.md §十三).
+async fn run_cost(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<RunCostResponse>> {
+    let id = resolve_run(&state, &key).await?;
+    Ok(Json(
+        crate::run_cost::compute(state.store().as_ref(), id).await?,
+    ))
+}
+
 /// A task of `run` by id or key (`auth` or `#auth`).
 async fn resolve_task(state: &AppState, run: RunId, key: &str) -> ApiResult<TaskId> {
     if let Ok(id) = key.parse::<TaskId>() {
@@ -2195,6 +2280,172 @@ async fn agent_commit_diff(
     Ok(changes_response(
         state.orchestrator.agent_commit_diff(&agent, sha).await?,
     ))
+}
+
+// ---------------------------------------------------------------------------------------
+// Git view (read-only, docs/TODO.md §14)
+
+/// What `GET /v1/git/*` takes: the project directory, and the graph's limit.
+#[derive(Debug, Default, Deserialize)]
+struct GitQuery {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+impl GitQuery {
+    fn path(&self) -> &str {
+        self.path.as_deref().unwrap_or("")
+    }
+}
+
+fn git_file_state(state: gitview::FileState) -> GitFileState {
+    use gitview::FileState;
+    match state {
+        FileState::Unchanged => GitFileState::Unchanged,
+        FileState::Modified => GitFileState::Modified,
+        FileState::Added => GitFileState::Added,
+        FileState::Deleted => GitFileState::Deleted,
+        FileState::Renamed => GitFileState::Renamed,
+        FileState::Copied => GitFileState::Copied,
+        FileState::TypeChanged => GitFileState::TypeChanged,
+        FileState::Unmerged => GitFileState::Unmerged,
+        FileState::Unknown => GitFileState::Unknown,
+    }
+}
+
+fn git_ref_kind(kind: gitview::RepoRefKind) -> GitRefKind {
+    use gitview::RepoRefKind;
+    match kind {
+        RepoRefKind::Head => GitRefKind::Head,
+        RepoRefKind::Local => GitRefKind::Local,
+        RepoRefKind::Remote => GitRefKind::Remote,
+        RepoRefKind::Tag => GitRefKind::Tag,
+    }
+}
+
+/// The local and remote-tracking branches of a project, with their upstreams.
+async fn git_branches(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<GitQuery>,
+) -> ApiResult<Json<GitBranchesResponse>> {
+    let branches = state.orchestrator.git_branches(q.path()).await?;
+    Ok(Json(GitBranchesResponse {
+        root: branches.root.display().to_string(),
+        branches: branches
+            .entries
+            .into_iter()
+            .map(|branch| GitBranch {
+                name: branch.name,
+                remote: branch.remote,
+                sha: branch.sha,
+                upstream: branch.upstream,
+                ahead: branch.ahead,
+                behind: branch.behind,
+                current: branch.current,
+            })
+            .collect(),
+        head: branches.head,
+        head_sha: branches.head_sha,
+    }))
+}
+
+/// The working copy status of a project.
+async fn git_status(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<GitQuery>,
+) -> ApiResult<Json<GitStatusResponse>> {
+    let status = state.orchestrator.git_status(q.path()).await?;
+    Ok(Json(GitStatusResponse {
+        root: status.root.display().to_string(),
+        head: status.head,
+        branch: status.branch,
+        upstream: status.upstream,
+        ahead: status.ahead,
+        behind: status.behind,
+        entries: status
+            .entries
+            .into_iter()
+            .map(|entry| GitStatusEntry {
+                path: entry.path,
+                orig_path: entry.orig_path,
+                index: git_file_state(entry.index),
+                worktree: git_file_state(entry.worktree),
+                untracked: entry.untracked,
+                conflicted: entry.conflicted,
+            })
+            .collect(),
+    }))
+}
+
+/// One commit of a project.
+async fn git_commit(
+    State(state): State<Arc<AppState>>,
+    Path(sha): Path<String>,
+    Query(q): Query<GitQuery>,
+) -> ApiResult<Json<GitCommitResponse>> {
+    let sha = commit_sha(&sha)?;
+    let commit = state.orchestrator.git_commit(q.path(), sha).await?;
+    Ok(Json(GitCommitResponse {
+        root: commit.root.display().to_string(),
+        sha: commit.sha,
+        parents: commit.parents,
+        author: commit.author,
+        author_email: commit.author_email,
+        time: commit.time,
+        subject: commit.subject,
+        message: commit.message,
+    }))
+}
+
+/// What one commit of a project changed, against its first parent.
+async fn git_commit_diff(
+    State(state): State<Arc<AppState>>,
+    Path(sha): Path<String>,
+    Query(q): Query<GitQuery>,
+) -> ApiResult<Json<ChangesResponse>> {
+    let sha = commit_sha(&sha)?;
+    let root = state.orchestrator.git_root(q.path()).await?;
+    Ok(changes_response(
+        crossagents_orchestrator::graph::commit_diff(&root, sha).await?,
+    ))
+}
+
+/// The whole repository's graph (`git log --all`).
+async fn git_graph(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<GitQuery>,
+) -> ApiResult<Json<GitGraph>> {
+    let graph = state
+        .orchestrator
+        .git_graph(q.path(), q.limit.unwrap_or(0))
+        .await?;
+    Ok(Json(GitGraph {
+        root: graph.root.display().to_string(),
+        refs: graph
+            .refs
+            .into_iter()
+            .map(|entry| GitGraphRef {
+                name: entry.name,
+                kind: git_ref_kind(entry.kind),
+                sha: entry.sha,
+            })
+            .collect(),
+        commits: graph
+            .commits
+            .into_iter()
+            .map(|commit| GraphCommit {
+                sha: commit.sha,
+                parents: commit.parents,
+                subject: commit.subject,
+                author: commit.author,
+                time: commit.time,
+                refs: commit.refs,
+            })
+            .collect(),
+        truncated: graph.truncated,
+    }))
 }
 
 // ---------------------------------------------------------------------------------------

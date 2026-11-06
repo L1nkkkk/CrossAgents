@@ -3,6 +3,7 @@
 //! in agents through [`AgentHost`].
 
 pub mod approval;
+pub mod attempts;
 pub mod brief;
 pub mod claims;
 pub mod continuation;
@@ -11,6 +12,7 @@ pub mod dirlock;
 pub mod engine;
 pub mod expertise;
 pub mod files;
+pub mod gitview;
 pub mod graph;
 pub mod handoff;
 pub mod history;
@@ -31,6 +33,7 @@ pub mod review;
 pub mod running;
 pub mod screenshot;
 mod sessions;
+pub mod setup;
 pub mod tasks;
 pub mod team;
 pub mod tools;
@@ -47,6 +50,7 @@ pub use claims::Execution;
 pub use delete::{DeleteRun, DeletedRun, DeletedRunAgents};
 pub use engine::{Approval, DEFAULT_BUILD_CACHE_LIMIT, NewRun, Orchestrator, OrchestratorConfig};
 pub use files::{FileError, FilesScope};
+pub use gitview::GitError;
 pub use graph::{Graph, RefEntry, RefKind};
 pub use host::{AgentHost, ExpiringQuota, Route, RouteDecision, RouteMode};
 pub use landing::LandOutcome;

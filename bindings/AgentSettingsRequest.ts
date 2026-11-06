@@ -3,6 +3,8 @@
 /**
  * `POST /v1/agents/{key}/settings` (docs/tasks/DOGFOOD.md §6). `setting_sources`: which
  * of Claude Code's settings it loads, comma-separated from `user`, `project`, `local`
- * (empty: none); `None` goes back to the default (`project,local`).
+ * (empty: none); `None` goes back to the default (`project,local`). `allow_hooks`: whether
+ * hooks from those files may run, default off (SELF.md §B5); `None` leaves it as it is.
+ * Both are read only at launch, so an idle session is restarted after a change.
  */
-export type AgentSettingsRequest = { setting_sources: string | null, };
+export type AgentSettingsRequest = { setting_sources: string | null, allow_hooks?: boolean, };

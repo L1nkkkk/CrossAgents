@@ -61,8 +61,8 @@ pub use lesson::{
 pub use model::{
     Agent, AgentProfile, AgentStatus, CONTEXT_LOST, CheckResult, ChecksState, ContinuationState,
     HistoryTask, LandMode, Landing, LeadPlace, NameSource, PlannedTask, Retention, Role, Run,
-    RunConfig, RunHistory, RunMode, RunStatus, Scope, Task, TaskReport, TaskSpec, Work,
-    WorkspaceOwner, WorkspaceVcs, validate_agent_name, validate_slug,
+    RunConfig, RunHistory, RunMode, RunStatus, Scope, Task, TaskReport, TaskRun, TaskRunOutcome,
+    TaskSpec, Work, WorkspaceOwner, WorkspaceVcs, validate_agent_name, validate_slug,
 };
 pub use note::{EXTERNAL_PLUGIN, Note, NoteScope};
 pub use notify::{Reminder, Watch, WatchOn, WatchTarget};

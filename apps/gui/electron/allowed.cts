@@ -78,6 +78,7 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "POST", path: /^\/v1\/runs\/[^/]+\/(approve|reject|cancel|land|finish|policy)$/, level: "write" },
   { method: "GET", path: /^\/v1\/runs\/[^/]+\/diff$/, level: "read" },
   { method: "GET", path: /^\/v1\/runs\/[^/]+\/trace$/, level: "read" },
+  { method: "GET", path: /^\/v1\/runs\/[^/]+\/cost$/, level: "read" },
   { method: "GET", path: /^\/v1\/runs\/[^/]+\/tasks\/[^/]+\/diff$/, level: "read" },
   { method: "POST", path: /^\/v1\/runs\/[^/]+\/tasks\/[^/]+\/review$/, level: "write" },
   { method: "POST", path: /^\/v1\/repos\/init$/, level: "write" },
@@ -104,6 +105,9 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   // The commit graph and one commit's diff.
   { method: "GET", path: /^\/v1\/(runs|agents)\/[^/]+\/graph$/, level: "read" },
   { method: "GET", path: /^\/v1\/(runs|agents)\/[^/]+\/commits\/[^/]+\/diff$/, level: "read" },
+  // The Git page of a project (`?path=` rides along).
+  { method: "GET", path: /^\/v1\/git\/(branches|status|graph)$/, level: "read" },
+  { method: "GET", path: /^\/v1\/git\/commits\/[^/]+(\/diff)?$/, level: "read" },
 ];
 
 /** How long the main process waits for an answer before giving up on the hub. */

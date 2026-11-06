@@ -9,6 +9,14 @@ name = "claude"
 driver = "claude-native"
 model_env = "ANTHROPIC_MODEL"
 command = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
+# Older than this, the stream-json control protocol does not exist in the shape the driver
+# speaks: the agent is not registered and the GUI says the version is too low
+# (docs/research/multica.md §2.9).
+min_version = "2.0.0"
+# The upstream series the driver was checked against (docs/DESIGN.md §9.4); a CLI outside
+# them still runs, marked unverified. Bump after the smoke tests
+# (crates/drivers/tests/claude_smoke.rs) pass on a new one.
+verified = ["2.1"]
 
 [models]
 # `claude --model` takes these names.
