@@ -77,6 +77,17 @@ fn commit(dir: &Path, files: &[&str], message: &str) {
     );
 }
 
+/// Everything about the person's index and working tree that reading a diff must leave
+/// alone: what changed, what is staged, and what git tracks.
+fn index_state(dir: &Path) -> String {
+    format!(
+        "status:\n{}\nstaged:\n{}\ntracked:\n{}\n",
+        git_out(dir, &["status", "--porcelain"]),
+        git_out(dir, &["diff", "--cached"]),
+        git_out(dir, &["ls-files"]),
+    )
+}
+
 async fn detail(t: &TestHub, id: &str) -> Value {
     t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap()
 }
@@ -520,7 +531,53 @@ async fn a_result_bound_to_other_content_does_not_close_the_run() {
     assert_eq!(stored["run"]["checks_state"]["state"], "ran", "{stored}");
 }
 
-/// docs/tasks/LEAD.md §7, multica §2.6: one in-place run per checkout. A second one is
+/// docs/tasks/LEAD.md §4: reading what the run changed in the person's directory must not
+/// write there — the staging area is theirs, and opening the run page asks for this diff.
+#[tokio::test]
+async fn the_diff_of_a_run_in_place_does_not_touch_the_index() {
+    let repo = git_repo();
+    // Three kinds at once: a staged new file, an unstaged edit and an untracked file.
+    std::fs::write(repo.path().join("staged.txt"), "staged\n").unwrap();
+    git_out(repo.path(), &["add", "staged.txt"]);
+    std::fs::write(repo.path().join("README.md"), "edited by the person\n").unwrap();
+    std::fs::write(repo.path().join("notes.txt"), "from the lead\n").unwrap();
+    let t = setup(repo.path()).await;
+    let run = start_in_place(&t, "boss", "Look around.".into()).await;
+    let id = run["id"].as_str().unwrap().to_owned();
+
+    let before = index_state(repo.path());
+    let resp = t.get(&format!("/v1/runs/{id}/diff")).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let body: Value = resp.json().await.unwrap();
+    let diff = body["diff"].as_str().unwrap_or_default().to_owned();
+    for file in ["staged.txt", "README.md", "notes.txt"] {
+        assert!(diff.contains(file), "{file} is not in the diff:\n{diff}");
+    }
+    assert!(
+        diff.contains("new file mode"),
+        "an untracked file reads as a new one:\n{diff}"
+    );
+    assert!(
+        diff.contains("+edited by the person"),
+        "the unstaged edit is in it:\n{diff}"
+    );
+    assert!(
+        diff.contains("+staged"),
+        "the staged file is in it:\n{diff}"
+    );
+    assert_eq!(
+        index_state(repo.path()),
+        before,
+        "the diff wrote in the person's index"
+    );
+
+    // Again: reading is not a one-time thing that leaves a trace behind.
+    let again = t.get(&format!("/v1/runs/{id}/diff")).await;
+    assert_eq!(again.status(), 200);
+    assert_eq!(index_state(repo.path()), before);
+}
+
+/// docs/tasks/LEAD.md §7: one in-place run per checkout. A second one is
 /// refused, in the words a client shows it by, and the directory is free once the first ends.
 #[tokio::test]
 async fn a_second_run_in_the_same_directory_waits_for_it() {
@@ -636,19 +693,18 @@ async fn a_run_in_place_gives_no_task_to_a_worker() {
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
     // The task never runs in the person's directory: it fails with the reason, and leaves
     // nothing behind there.
-    let mut failure = String::new();
     let deadline = tokio::time::Instant::now() + common::wait_limit();
-    loop {
+    let failure = loop {
         let stored = detail(&t, &id).await;
-        failure = stored["tasks"][0]["report"]["failure"]
+        let text = stored["tasks"][0]["report"]["failure"]
             .as_str()
             .unwrap_or_default()
             .to_owned();
-        if !failure.is_empty() || tokio::time::Instant::now() > deadline {
-            break;
+        if !text.is_empty() || tokio::time::Instant::now() > deadline {
+            break text;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    };
     assert!(
         failure.contains("your own directory"),
         "the task says why it cannot start: {failure:?}"

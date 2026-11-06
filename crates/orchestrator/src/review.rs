@@ -182,13 +182,12 @@ impl Orchestrator {
 
     /// What landing the run would bring into its base branch — and, for a lead working in the
     /// person's own directory, what differs there now, since the run has no branch of its own
-    /// (docs/tasks/LEAD.md §9).
+    /// (docs/tasks/LEAD.md §9). Read-only: the person's staging area is not the hub's, so the
+    /// diff never stages an intent to add (`crate::inplace::diff`).
     pub async fn run_changes(&self, run: RunId) -> Result<Changes, CoreError> {
         let run = self.store.get_run(run).await?;
         let diff = if run.leads_in_place() && run.versioned() {
-            self.ws_for(&run)
-                .diff(&run.repo, &run.base_branch, &[])
-                .await?
+            crate::inplace::diff(&run.repo, &run.base_branch).await?
         } else {
             self.ws_for(&run)
                 .branch_diff(&run.repo, &run.base_branch, &run.branch)

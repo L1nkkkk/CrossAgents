@@ -20,14 +20,16 @@ use crate::engine::Orchestrator;
 pub const WAITING: &str = "waiting_local_directory";
 
 /// A path as one key: normalized, so the same directory spelled two ways (a trailing
-/// separator, a `.` inside it, another case on Windows) is one directory.
+/// separator, a `.` inside it, another case) is one directory. Case is folded where the file
+/// system does it too — Windows, and macOS, whose APFS and HFS+ volumes are case-insensitive
+/// by default — while a case-sensitive volume keeps `Work` and `work` apart, as it should.
 pub fn key(dir: &Path) -> String {
     let path = dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let mut key = path.to_string_lossy().replace('\\', "/");
     while key.len() > 1 && key.ends_with('/') {
         key.pop();
     }
-    if cfg!(windows) {
+    if cfg!(any(windows, target_os = "macos")) {
         key = key.to_lowercase();
     }
     key
@@ -111,7 +113,7 @@ mod tests {
             plain,
             key(&PathBuf::from(format!("{}/", dir.path().display())))
         );
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         assert_eq!(
             plain,
             key(&PathBuf::from(dir.path().to_string_lossy().to_uppercase()))

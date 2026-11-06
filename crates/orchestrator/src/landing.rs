@@ -968,7 +968,29 @@ impl Orchestrator {
             let tasks = self.store.list_tasks(run.id).await?;
             let waiting = after || (run.landed.is_none() && self.has_changes(&run, &tasks).await?);
             let branch = (!waiting).then_some(run.branch.as_str());
-            self.ws_for(&run).remove(&run.repo, &dir, branch).await?;
+            // Windows lets go of a directory a moment after the process that had it ends, and
+            // the agent was archived just now: a working copy that cannot be removed yet is
+            // tried again before this is said to have failed, as `delete.rs` does for the same
+            // reason. The branch goes after it, and only once (deleting it twice would fail).
+            let mut failure = None;
+            for attempt in 0..3 {
+                if attempt > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                match self.ws_for(&run).remove(&run.repo, &dir, None).await {
+                    Ok(()) => {
+                        failure = None;
+                        break;
+                    }
+                    Err(err) => failure = Some(err),
+                }
+            }
+            if let Some(err) = failure {
+                return Err(err);
+            }
+            if let Some(branch) = branch {
+                self.ws_for(&run).delete_branch(&run.repo, branch).await?;
+            }
             self.prune_run_build(&run).await;
         }
         Ok(())
