@@ -388,6 +388,7 @@ mod tests {
             "/v1/git/branches",
             "/v1/git/status",
             "/v1/git/commits/{sha}",
+            "/v1/git/commits/{sha}/diff",
             "/v1/git/graph",
         ] {
             assert_eq!(required(&Method::GET, pattern), Level::Read, "{pattern}");

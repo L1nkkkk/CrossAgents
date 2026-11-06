@@ -57,6 +57,7 @@ import { effortOf } from "../lib/models";
 import { applyEvent } from "../session";
 import { capabilitiesOf, contextParts, driverOf, transcript, uid } from "./fixtures";
 import { mockContent, mockResolve, mockSearch, mockStatus, mockTree } from "./files.mock";
+import { mockGit } from "./git.mock";
 
 /** Names the mock hub makes up, like the real one (see crates/core/src/names.rs). */
 const MOCK_NAMES = ["Nova", "Iris", "Atlas", "Orion", "Vega", "Lyra", "Mira", "Sage"];
@@ -672,6 +673,8 @@ export class MockBridge implements CrossAgentsBridge {
         if (d.run.in_place) return json(409, { error: { code: "conflict", message: "this directory is not under version control, so there is no diff" } });
         return json(200, { base: d.run.base_branch, head: d.run.branch, diff: s.runDiffs.get(d.run.id) ?? "", truncated: false });
       }
+      const git = mockGit(p, url.searchParams, [...s.agents.map((a) => a.cwd), ...s.runs.map((d) => d.run.repo)]);
+      if (git) return json(git.status, git.body);
       if ((m = p.match(/^\/v1\/(runs|agents)\/([^/]+)\/graph$/))) {
         const id = m[1] === "runs" ? s.runs.find((x) => x.run.id === m![2])?.run.id : this.agent(m[2])?.id;
         if (!id) return notFound(m[1] === "runs" ? "run" : "agent");
