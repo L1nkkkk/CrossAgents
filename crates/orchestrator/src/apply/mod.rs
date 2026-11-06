@@ -183,6 +183,10 @@ pub async fn apply(
     let base = base.as_str();
 
     let prefix = prefix_of(dir).await?;
+    // What the directory held when the merge was about to be computed. Before a byte is
+    // written it is read once more; if it moved, nothing is written and the paths that moved
+    // are named (docs/tasks/LEAD.md §6).
+    let fingerprint = crate::inplace::snapshot(dir).await?;
     let current = current_tree(dir).await?;
     let merged = match merge_trees(dir, base, &current, result).await? {
         Merged::Tree(tree) => tree,
@@ -200,9 +204,10 @@ pub async fn apply(
     }
     // The directory was read a moment ago; if it moved since (an editor, a build), what was
     // merged is about other content: stop before writing anything.
-    let again = current_tree(dir).await?;
-    if again != current {
-        let files = changed_between(dir, &current, &again).await?;
+    let now = crate::inplace::snapshot(dir).await?;
+    if now != fingerprint {
+        let latest = current_tree(dir).await?;
+        let files = changed_between(dir, &current, &latest).await?;
         return Ok(Outcome::Conflict {
             detail: format!(
                 "{} changed while the result was being prepared; nothing was written. Apply \
@@ -1123,6 +1128,50 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(again, Outcome::AlreadyApplied { .. }), "{again:?}");
+    }
+
+    #[tokio::test]
+    async fn a_write_that_fails_halfway_leaves_a_record_and_finishes_on_the_next_call() {
+        let dir = repo();
+        let base = snapshot_commit(dir.path(), "snapshot");
+        std::fs::write(dir.path().join("a.txt"), "worker-a\n").unwrap();
+        std::fs::write(dir.path().join("c.txt"), "new\n").unwrap();
+        let result = result_commit(dir.path(), &base, "worker");
+        // Back to the person's content, with a directory where the result adds a file: the
+        // write of a.txt comes first and works, c.txt then fails.
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        std::fs::remove_file(dir.path().join("c.txt")).unwrap();
+        std::fs::create_dir(dir.path().join("c.txt")).unwrap();
+        let state_path = dir.path().join("state.json");
+        let before = personal_state(dir.path());
+
+        let failed = apply(dir.path(), &base, &result, &state_path).await;
+        assert!(failed.is_err(), "the write had to fail: {failed:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "worker-a\n",
+            "the file written before the failure stays written"
+        );
+        assert!(dir.path().join("c.txt").is_dir());
+        let journal = State::read(&state_path).unwrap();
+        assert!(
+            journal.pending.is_some() && journal.applied.is_none(),
+            "a half-written apply is on record: {journal:?}"
+        );
+
+        // Whatever caused the failure is gone: the next call finishes it, without redoing
+        // what is already there or touching the person's index.
+        std::fs::remove_dir(dir.path().join("c.txt")).unwrap();
+        let outcome = apply(dir.path(), &base, &result, &state_path)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, Outcome::Applied { .. }), "{outcome:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("c.txt")).unwrap(),
+            "new\n"
+        );
+        assert_eq!(personal_state(dir.path()), before);
+        assert!(State::read(&state_path).unwrap().applied.is_some());
     }
 
     #[tokio::test]
