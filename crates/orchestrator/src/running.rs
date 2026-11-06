@@ -46,13 +46,14 @@ impl TurnActivity {
 
 impl AgentActivity {
     pub fn push(&mut self, event: &Event) {
-        self.by_agent
-            .retain(|_, turn| event.ts - turn.last < Duration::hours(ACTIVITY_STALE_AFTER_HOURS));
         match &event.kind {
             EventKind::AgentTurnCompleted { id, .. } | EventKind::AgentExited { id, .. } => {
                 self.by_agent.remove(id);
             }
             EventKind::AgentTurnStarted { id, .. } => {
+                self.by_agent.retain(|_, turn| {
+                    event.ts - turn.last < Duration::hours(ACTIVITY_STALE_AFTER_HOURS)
+                });
                 self.by_agent.insert(*id, TurnActivity::new(event.ts));
             }
             EventKind::AgentOutput { id, stream, .. } => {
@@ -285,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn activity_expires_from_last_event_and_is_pruned_on_push() {
+    fn activity_expires_from_last_event_and_is_pruned_on_turn_start() {
         let agent = AgentId::new();
         let other = AgentId::new();
         let now = Utc::now();
@@ -316,8 +317,36 @@ mod tests {
         });
         next.ts = now + Duration::minutes(30);
         activity.push(&next);
-        assert!(!activity.by_agent.contains_key(&agent));
+        assert!(activity.by_agent.contains_key(&agent));
         assert!(activity.of(other, next.ts).is_some());
+        let mut new_turn = event(EventKind::AgentTurnStarted {
+            id: other,
+            message_id: crossagents_core::MessageId::new(),
+        });
+        new_turn.ts = next.ts;
+        activity.push(&new_turn);
+        assert!(!activity.by_agent.contains_key(&agent));
+    }
+
+    #[test]
+    fn long_silent_tool_preserves_turn_and_file_count() {
+        let agent = AgentId::new();
+        let now = Utc::now();
+        let mut activity = AgentActivity::default();
+        let mut call = event(EventKind::AgentToolCall {
+            id: agent, tool_call_id: "edit".into(), title: "edit".into(),
+            kind: Some("edit".into()), status: ToolStatus::InProgress,
+        });
+        call.ts = now - Duration::hours(3);
+        activity.push(&call);
+        let mut update = event(EventKind::AgentToolCallUpdated {
+            id: agent, tool_call_id: "edit".into(), title: None, status: Some(ToolStatus::InProgress),
+        });
+        update.ts = now;
+        activity.push(&update);
+        let state = activity.of(agent, now).unwrap();
+        assert_eq!(state["turn_elapsed_seconds"], 10800);
+        assert_eq!(state["last_activity_kind"], "edit_files");
     }
 
     #[test]
