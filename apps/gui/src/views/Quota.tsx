@@ -6,6 +6,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import type { AccountQuota } from "@bindings/AccountQuota";
 import type { AccountUsageGroup } from "@bindings/AccountUsageGroup";
 import type { LoginStarted } from "@bindings/LoginStarted";
+import type { ModelInfo } from "@bindings/ModelInfo";
 import type { RateWindow } from "@bindings/RateWindow";
 import type { ResetCredit } from "@bindings/ResetCredit";
 import type { TokenTotals } from "@bindings/TokenTotals";
@@ -14,6 +15,8 @@ import { DayColumns, RankBars, compact, dailySeries } from "../charts";
 import { ErrorBox, Field, Icon, VendorMark, ago, vendorName } from "../components";
 import { useHubData } from "../hub";
 import { creditText, level, planLabel, resetText, windowLabel, type Level } from "../lib/quota";
+import { prettyModel } from "../lib/models";
+import { cursorMode } from "../lib/reasoning";
 import { useArmed } from "../parts";
 
 /** Live figures are cached by the hub for a minute; re-read about as often. */
@@ -75,6 +78,17 @@ const seriesColor = (i: number) => `var(--series-${(i % 8) + 1})`;
 
 const shortWindow = (w: RateWindow) => windowLabel(w).replace(/限额$/, "");
 
+/** Cursor lists every mode of a model as its own ID; keep the first of each base model. */
+function byBase(models: readonly ModelInfo[]): ModelInfo[] {
+  const seen = new Set<string>();
+  return models.filter((m) => {
+    const base = cursorMode(m.id).base;
+    if (seen.has(base)) return false;
+    seen.add(base);
+    return true;
+  });
+}
+
 /**
  * One account on one line: who it is, a short meter per rate-limit window, its worst health,
  * and its actions. Clicking the line opens the details (other limits, credits, token usage).
@@ -87,6 +101,9 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
   const plan = planLabel(status.plan);
   const credits = status.credits;
   const windows = status.rate_limits;
+  // Cursor's list has one ID per mode; the chips show each base model once.
+  const cursor = account.provider === "cursor";
+  const models = cursor ? byBase(quota.models) : quota.models;
   const levels = windows.map((w) => level(w.used_percent, status.limit_reached && w.used_percent >= 100));
   const worst: Level | undefined = levels.includes("danger") ? "danger" : levels.includes("warn") ? "warn" : levels.length ? "ok" : undefined;
 
@@ -227,12 +244,12 @@ function AccountRow({ quota, color, open, onToggle, onChange }: { quota: Account
             </div>
           )}
           <TokenUsage id={account.id} />
-          {quota.models.length > 0 && (
+          {models.length > 0 && (
             <div className="models">
               可用模型：
-              {quota.models.map((m) => (
+              {models.map((m) => (
                 <span key={m.id} className="chip" title={m.description ?? undefined}>
-                  {m.name || m.id}
+                  {cursor ? prettyModel(cursorMode(m.id).base) : m.name || m.id}
                   {m.context_window ? ` · ${Math.round(m.context_window / 1000)}k` : ""}
                   {m.credit_multiplier != null && <span className="muted"> · ×{m.credit_multiplier}</span>}
                 </span>

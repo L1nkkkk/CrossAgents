@@ -24,7 +24,8 @@ import { onHubEvent, useHubData } from "../hub";
 import { useArmed } from "../parts";
 import { AvatarChoice } from "./AvatarGallery";
 import { ConnectExternal, ConnectInstructions } from "./External";
-import { vendorLabel } from "../lib/models";
+import { prettyModel, vendorLabel } from "../lib/models";
+import { cursorMode, reasoningModels } from "../lib/reasoning";
 import { installBusy, installingLabel, installingOf, installRefusedText } from "../lib/installState";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
 import type { CliInfo } from "@bindings/CliInfo";
@@ -595,7 +596,7 @@ export function ProfileEditor({ agent, onDone }: { agent: Agent; onDone: () => v
         <textarea rows={4} value={profile.persona ?? ""} onChange={(e) => set({ persona: e.target.value })} placeholder="不填也行；主导它的 agent 招人时会自己写。" />
       </Field>
 
-      <ModelField value={modelValue} models={models} onChange={setModel} />
+      <ModelField value={modelValue} models={reasoningModels(agent.plugin, models, modelValue)} plugin={agent.plugin} onChange={setModel} />
       {claudeLike && (
         <Field label={`${agent.plugin === "codebuddy" ? SOURCES_LABEL.codebuddy : SOURCES_LABEL.claude}；保存后空闲的会话会重启并续上原对话，忙时等这轮结束后下次启动`}>
           <select value={sources ?? "default"} onChange={(e) => setSources(e.target.value === "default" ? null : e.target.value)}>
@@ -668,8 +669,12 @@ function settingSourcesOf(agent: Agent): string | null {
   return typeof value === "string" ? value : null;
 }
 
-/** The plugin's models as a list; free text when it lists none or the value is not one of them. */
-function ModelField({ value, models, onChange }: { value: string; models: string[]; onChange: (m: string) => void }) {
+/**
+ * The plugin's models as a list; free text when it lists none or the value is not one of them.
+ * Cursor hides its mode in the ID, so its rows show the base model while the value stays the
+ * exact variant (`models` already holds one variant per base, the selected one when it is set).
+ */
+function ModelField({ value, models, plugin, onChange }: { value: string; models: string[]; plugin: string; onChange: (m: string) => void }) {
   const listed = !value || models.includes(value);
   return (
     <Field label="模型（背后的大脑）">
@@ -677,7 +682,7 @@ function ModelField({ value, models, onChange }: { value: string; models: string
         <select value={value} onChange={(e) => onChange(e.target.value)}>
           {models.map((m) => (
             <option key={m} value={m}>
-              {m}
+              {plugin === "cursor" ? prettyModel(cursorMode(m).base) : m}
             </option>
           ))}
           <option value="">插件默认</option>
