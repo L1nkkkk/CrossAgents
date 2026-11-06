@@ -1,5 +1,5 @@
 // Flat project/member navigation. Domain grouping and human work live in pure views.
-import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FocusEvent as ReactFocusEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type FocusEvent as ReactFocusEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { HubInfo } from "@bindings/HubInfo";
 import type { RunDetail } from "@bindings/RunDetail";
@@ -22,6 +22,7 @@ import { capped, sidebarGroups, searchGroups, groupClosed, shortSince, summaryTe
 import { todoItems, visibleTodos, type TodoItem } from "./lib/todos";
 import { useUnsortedIssues } from "./lessons/unsorted";
 import { useUnboundProjects } from "./lessons/projects";
+import { FEATURE_LABELS, hiddenByHub, missingText, useFeatureSupport, useHubFeatures } from "./lib/features";
 import { useQuestions } from "./questions";
 import { startNew } from "./menubar";
 import { level, tightest, windowLabel } from "./lib/quota";
@@ -35,6 +36,8 @@ const Needs = createContext<readonly TodoItem[]>([]);
 const Runs = createContext<readonly RunDetail[]>([]);
 /** How long a row stays lit after its turn ends. */
 const DONE_FLASH = 1800;
+/** An entry the hub refused (403): still readable, so its reason shows, but not clickable. */
+const REFUSED: CSSProperties = { opacity: 0.5, cursor: "default" };
 /** A pointer passing through the list shows no card. */
 const PEEK_DELAY = 350;
 const CRAWL_DELAY = 200;
@@ -105,11 +108,13 @@ const SIDEBAR_WORKS = 8;
 /**
  * The work groups (docs/tasks/G1.md §3.5): one row each, however many rounds they have had.
  * Each row needs its rounds — the current one's state, and the list behind the fold — so the
- * recent groups are read whole. A hub that predates them answers 404, and the section is absent.
+ * recent groups are read whole. `enabled` is false on a hub that does not have the page (an
+ * older hub, or one whose token may not read it), which this then does not even ask.
  */
-function useWorks() {
+function useWorks(enabled: boolean) {
   return useHubData(
     async () => {
+      if (!enabled) return [];
       const { works } = await api.listWorks();
       const recent = works
         .slice()
@@ -118,7 +123,7 @@ function useWorks() {
       const details = await Promise.all(recent.map((w) => api.getWork(w.id).catch(() => null)));
       return details.filter((d): d is WorkDetail => d !== null);
     },
-    [],
+    [enabled],
     (e) => e.type.startsWith("work.") || e.type.startsWith("run."),
   );
 }
@@ -185,12 +190,17 @@ export function Sidebar({ route }: { route: string[] }) {
   const pinned = usePinned();
   const order = projectOrder.use();
   const unread = useUnread();
+  // What this hub has, and what it refused (docs/TODO.md §二): entries it did not list are
+  // hidden, and one whose request came back 403 stays, greyed, with the hub's message.
+  const git = useFeatureSupport("git");
+  const lessons = useFeatureSupport("lessons");
+  const work = useFeatureSupport("work");
   const [query, setQuery] = useState("");
   const everyone = agents.data ?? [];
   usePulseSeeds(everyone);
   const archiving = useArchiveNote();
   const runs = tree.data ?? [];
-  const works = useWorks();
+  const works = useWorks(work.show && !work.disabled);
   const todos = todoItems({
     items: questions.data?.items ?? [],
     runs,
@@ -248,10 +258,32 @@ export function Sidebar({ route }: { route: string[] }) {
               <Icon name="brain" size={16} />
               <span>{t("nav.expertise")}</span>
             </a>
-            <a className={"nav-lessons " + (route[0] === "lessons" ? "active" : "")} href="#/lessons">
-              <Icon name="tasks" size={16} />
-              <span>{t("nav.lessons")}</span>
-            </a>
+            {git.show && (
+              <a
+                className={"nav-git " + (route[0] === "git" ? "active" : "")}
+                href="#/git"
+                title={git.disabled ? git.reason : "一个项目的分支、提交与未提交的改动"}
+                aria-disabled={git.disabled || undefined}
+                style={git.disabled ? REFUSED : undefined}
+                onClick={git.disabled ? (e) => e.preventDefault() : undefined}
+              >
+                <Icon name="branch" size={16} />
+                <span>Git</span>
+              </a>
+            )}
+            {lessons.show && (
+              <a
+                className={"nav-lessons " + (route[0] === "lessons" ? "active" : "")}
+                href="#/lessons"
+                title={lessons.disabled ? lessons.reason : undefined}
+                aria-disabled={lessons.disabled || undefined}
+                style={lessons.disabled ? REFUSED : undefined}
+                onClick={lessons.disabled ? (e) => e.preventDefault() : undefined}
+              >
+                <Icon name="tasks" size={16} />
+                <span>{t("nav.lessons")}</span>
+              </a>
+            )}
             <a className={"nav-extensions " + (route[0] === "extensions" || route[0] === "ext" ? "active" : "")} href="#/extensions">
               <Icon name="panel" size={16} />
               <span>扩展</span>
@@ -281,19 +313,27 @@ export function Sidebar({ route }: { route: string[] }) {
             )}
             <NeedsYou items={[...todos, ...unsortedIssues, ...unboundProjects]} agents={everyone} />
             {done > 0 && <p className="sidebar-unread">{t("sidebar.doneUnread", { n: done })}</p>}
-            {!query.trim() && works.data && works.data.length > 0 && (
+            {!query.trim() && work.show && (work.disabled || (works.data && works.data.length > 0)) && (
               <section className="group works-group">
                 <div className="group-head static">
                   <span className="group-name">{t("sidebar.works")}</span>
                 </div>
-                {works.data.map((detail) => (
-                  <WorkRow
-                    key={detail.work.id}
-                    detail={detail}
-                    active={route[0] === "work" && route[1] === detail.work.id}
-                    selected={route[0] === "work" && route[1] === detail.work.id ? route[2] : undefined}
-                  />
-                ))}
+                {work.disabled ? (
+                  <div className="nav-row" aria-disabled="true" title={work.reason} style={REFUSED}>
+                    <span className="row-link">
+                      <span className="row-label">{work.reason ?? "hub 不允许读取工作组"}</span>
+                    </span>
+                  </div>
+                ) : (
+                  works.data!.map((detail) => (
+                    <WorkRow
+                      key={detail.work.id}
+                      detail={detail}
+                      active={route[0] === "work" && route[1] === detail.work.id}
+                      selected={route[0] === "work" && route[1] === detail.work.id ? route[2] : undefined}
+                    />
+                  ))
+                )}
               </section>
             )}
             {!query.trim() && (pinnedMembers.length > 0 || pinnedRuns.length > 0) && (
@@ -361,6 +401,7 @@ export function Sidebar({ route }: { route: string[] }) {
           <div className="foot">
             <UpdateNotice />
             <DevHubNotice />
+            <OldHubNotice />
             <QuotaMini />
             <div className="foot-row">
               <Connection />
@@ -991,6 +1032,26 @@ function DevHubNotice() {
   );
 }
 
+/**
+ * A hub built before `HubInfo.features`: its entries would just be missing, so say which and
+ * how to get them. Reloading reconnects and asks `/v1/info` again, which is also how a refused
+ * entry gets another try.
+ */
+function OldHubNotice() {
+  const features = useHubFeatures();
+  const hidden = hiddenByHub(features);
+  if (features.listed !== null || !hidden.length) return null;
+  const names = hidden.map((f) => FEATURE_LABELS[f]).join("、");
+  return (
+    <div className="dev-hub" title={`旧版 hub 的 /v1/info 不带功能清单，所以这些入口没有显示：${names}。换成同一版本的新 hub 后会自己出现。`}>
+      <span>旧版 hub：{names} 已隐藏</span>
+      <button className="link" onClick={() => window.location.reload()}>
+        重新连接
+      </button>
+    </div>
+  );
+}
+
 function Connection() {
   const status = useConnectionStatus();
   const [info, setInfo] = useState<HubInfo>();
@@ -1023,6 +1084,8 @@ function Versions({ hub }: { hub: HubInfo }) {
   const page = __BUILD__;
   const cmp = compareBuilds(page, hub);
   const dev = page.dev || hub.debug;
+  const features = useHubFeatures();
+  const why = missingText(features);
   const title = [
     t("build.page", {
       tag: buildTag(page),
@@ -1032,6 +1095,7 @@ function Versions({ hub }: { hub: HubInfo }) {
       tag: buildTag(hub),
       dev: hub.debug ? t("build.dev") : "",
     }),
+    ...(why ? [why] : []),
     hub.home,
   ].join("\n");
   return (

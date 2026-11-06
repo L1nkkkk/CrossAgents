@@ -26,6 +26,7 @@ import { wsKey } from "../workspace";
 import { quota } from "../views/Usage.mock";
 import { workspaceState } from "../views/Workspace.mock";
 import type { MockState, Step } from "./MockBridge";
+import { FEATURES } from "../lib/features";
 
 export type Scenario = {
   key: string;
@@ -507,6 +508,45 @@ export const SCENARIOS: Scenario[] = [
     script: [],
     route: "#/extensions",
   }) },
+  { key: "hub-old", label: "旧 hub：功能清单缺失", hint: "旧版 hub 的 /v1/info 不带 features：Git、排障记录、工作组入口隐藏，侧栏底部写明原因，版本号 tooltip 里也有；「重新连接」重新问一次", build: () => {
+    const scene = workRounds();
+    return { ...scene, state: { ...scene.state, features: null } };
+  } },
+  { key: "hub-new", label: "新 hub：功能清单", hint: "新 hub 列出 features：Git、排障记录、工作组入口都在，工作组照常列出", build: () => {
+    const scene = workRounds();
+    return { ...scene, state: { ...scene.state, features: [...FEATURES] } };
+  } },
+  { key: "hub-old-apply", label: "旧 hub：没有「应用到原目录」", hint: "旧版 hub 的 run 页不显示「应用到原目录」，其余照旧；界面不崩", build: () => {
+    const scene = inPlaceRun();
+    // The apply control also needs a git working copy in place (LEAD.md §11): the mock's
+    // in-place run is a plain folder, so say it is a repository to put the button on screen.
+    scene.state.runs[0].run.mode = { lead: "in_place", vcs: "git", owner: "person", retain: "keep" };
+    return { ...scene, state: { ...scene.state, features: null } };
+  } },
+  { key: "hub-refused", label: "403：入口置灰", hint: "hub 用 403 拒绝（凭据级别不够）：「应用到原目录」变灰，用 hub 的话说明原因，不弹报错", build: () => {
+    const scene = inPlaceRun();
+    scene.state.runs[0].run.mode = { lead: "in_place", vcs: "git", owner: "person", retain: "keep" };
+    return {
+      ...scene,
+      state: {
+        ...scene.state,
+        features: [...FEATURES],
+        forbidden: { apply: "this credential has the read level; POST /v1/runs/…/apply needs write" },
+      },
+    };
+  } },
+  { key: "hub-refused-git", label: "403：Git 入口置灰", hint: "Git 页的请求被 403 拒绝：侧栏 Git 变灰、页面写明 hub 的原因，不弹报错", build: () => {
+    const scene = workRounds();
+    return {
+      ...scene,
+      route: "#/git",
+      state: {
+        ...scene.state,
+        features: [...FEATURES],
+        forbidden: { git: "an agent's session token reaches /v1/me only; GET /v1/git/branches needs the read level" },
+      },
+    };
+  } },
   { key: "git", label: "Git 页", hint: "一个项目的分支（本地/远程）、带泳道的提交图（HEAD、分支、tag）、选中提交的详情和 diff，顶部是未提交改动数", build: () => ({
     state: { ...emptyHub(), agents: [agent({ name: "Ada", plugin: "claude", role: "worker", cwd: REPO })] },
     script: [],
