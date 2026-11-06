@@ -525,10 +525,17 @@ async fn list_agents(
         None
     };
     let agents = state.store().list_agents().await?;
-    let unusable = agents
-        .iter()
-        .map(|agent| crossagents_orchestrator::approval::unusable_for(agent, policy.as_ref()))
-        .collect();
+    let mut unusable = Vec::new();
+    for agent in &agents {
+        unusable.push(
+            crossagents_orchestrator::approval::unusable_for(
+                state.store().as_ref(),
+                agent,
+                policy.as_ref(),
+            )
+            .await?,
+        );
+    }
     Ok(Json(ListAgentsResponse { agents, unusable }))
 }
 
@@ -594,21 +601,24 @@ async fn session_candidates(
     } else {
         None
     };
-    let sessions = candidates
-        .into_iter()
-        .map(|candidate| crossagents_api_types::SessionCandidate {
+    let mut sessions = Vec::new();
+    for candidate in candidates {
+        let unusable = crossagents_orchestrator::approval::unusable_for(
+            state.store().as_ref(),
+            &candidate.agent,
+            policy.as_ref(),
+        )
+        .await?;
+        sessions.push(crossagents_api_types::SessionCandidate {
             can_use: candidate.can_use(),
             reason: candidate.reason.map(|r| r.word().to_owned()),
-            unusable: crossagents_orchestrator::approval::unusable_for(
-                &candidate.agent,
-                policy.as_ref(),
-            ),
+            unusable,
             agent: candidate.agent,
             state: candidate.state,
             busy_with: candidate.busy_with,
             last_execution: candidate.last_execution,
-        })
-        .collect();
+        });
+    }
     Ok(Json(crossagents_api_types::ListSessionCandidatesResponse {
         sessions,
     }))

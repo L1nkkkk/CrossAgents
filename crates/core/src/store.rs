@@ -33,6 +33,36 @@ impl AgentKey {
 
 #[async_trait]
 pub trait Store: Send + Sync {
+    /// Latest failure proving this account cannot use this model.
+    async fn unavailable_model(
+        &self,
+        plugin: &str,
+        account: &str,
+        model: &str,
+    ) -> Result<Option<String>, CoreError> {
+        let _ = (plugin, account, model);
+        Ok(None)
+    }
+    async fn record_unavailable_model(
+        &self,
+        plugin: &str,
+        account: &str,
+        model: &str,
+        error: &str,
+    ) -> Result<(), CoreError> {
+        let _ = (plugin, account, model, error);
+        Err(CoreError::Unsupported("unavailable models".into()))
+    }
+    async fn clear_unavailable_model(
+        &self,
+        plugin: &str,
+        account: &str,
+        model: &str,
+    ) -> Result<(), CoreError> {
+        let _ = (plugin, account, model);
+        Err(CoreError::Unsupported("unavailable models".into()))
+    }
+
     /// Fails with [`CoreError::Conflict`] if the name is taken.
     async fn insert_agent(&self, agent: &Agent) -> Result<(), CoreError>;
     async fn get_agent(&self, key: &AgentKey) -> Result<Agent, CoreError>;

@@ -2526,6 +2526,59 @@ async fn run_turns(
     }
 }
 
+/// Error phrases that specifically indicate a model is unavailable, not a temporary failure.
+fn unavailable_model_error(error: &str) -> bool {
+    const PHRASES: &[&str] = &[
+        "service info not found",
+        "model not found",
+        "model does not exist",
+        "model is not available",
+        "model is unavailable",
+        "invalid model",
+        "unknown model",
+        "unsupported model",
+    ];
+    let lower = error.to_ascii_lowercase();
+    if lower.split(|c: char| !c.is_ascii_digit()).any(|n| n == "429") || lower.contains("rate limit") || lower.contains("too many requests")
+    {
+        return false;
+    }
+    PHRASES.iter().any(|phrase| lower.contains(phrase))
+}
+
+async fn learn_model_result(
+    bus: &EventBus,
+    agent: Option<&Agent>,
+    reason: StopReason,
+    error: Option<&str>,
+) {
+    let Some(agent) = agent else {
+        return;
+    };
+    let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) else {
+        return;
+    };
+    let account = agent
+        .config
+        .get("account")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let result = if reason == StopReason::EndTurn {
+        bus.store()
+            .clear_unavailable_model(&agent.plugin, account, model)
+            .await
+    } else if reason == StopReason::Error && error.is_some_and(unavailable_model_error) {
+        bus.store()
+            .record_unavailable_model(&agent.plugin, account, model, error.unwrap())
+            .await
+    } else {
+        return;
+    };
+    if let Err(err) = result {
+        tracing::warn!(error = %err, "cannot update model availability");
+    }
+}
+
 /// Turns session events and turn control into published events, coalescing output text.
 async fn forward_events(
     bus: Arc<EventBus>,
@@ -2540,13 +2593,17 @@ async fn forward_events(
     let mut tick = tokio::time::interval(FLUSH_INTERVAL);
     let mut events_open = true;
     let mut running = None;
+    let mut turn_agent = bus.store().get_agent(&AgentKey::Id(id)).await.ok();
+    let mut turn_error: Option<String> = None;
     loop {
         tokio::select! {
             event = events.recv(), if events_open => match event {
                 Some(event) => {
+                    if let SessionEventKind::Error { message } | SessionEventKind::Exited { message, .. } = &event.kind && unavailable_model_error(message) { turn_error = Some(message.clone()); }
                     let reason = if matches!(&event.kind, SessionEventKind::Exited { cause: Some(crossagents_core::ExitCause::Killed), .. }) { StopReason::Cancelled } else { StopReason::Error };
                     if handle_session_event(&bus, id, event, &mut out, &live, generation, &mut rules).await {
                         if let Some(message_id) = running.take() {
+                            learn_model_result(&bus, turn_agent.as_ref(), reason, turn_error.as_deref()).await;
                             publish(&bus, EventKind::AgentTurnCompleted { id, message_id, stop_reason: reason }).await;
                         }
                         return;
@@ -2557,9 +2614,11 @@ async fn forward_events(
             ctl = control.recv() => {
                 // Everything the session emitted before this point is already queued.
                 while let Ok(event) = events.try_recv() {
+                    if let SessionEventKind::Error { message } | SessionEventKind::Exited { message, .. } = &event.kind && unavailable_model_error(message) { turn_error = Some(message.clone()); }
                     let reason = if matches!(&event.kind, SessionEventKind::Exited { cause: Some(crossagents_core::ExitCause::Killed), .. }) { StopReason::Cancelled } else { StopReason::Error };
                     if handle_session_event(&bus, id, event, &mut out, &live, generation, &mut rules).await {
                         if let Some(message_id) = running.take() {
+                            learn_model_result(&bus, turn_agent.as_ref(), reason, turn_error.as_deref()).await;
                             publish(&bus, EventKind::AgentTurnCompleted { id, message_id, stop_reason: reason }).await;
                         }
                         return;
@@ -2569,6 +2628,7 @@ async fn forward_events(
                 match ctl {
                     Some(Control::TurnStarted(message_id)) => {
                         running = Some(message_id);
+                        turn_agent = bus.store().get_agent(&AgentKey::Id(id)).await.ok();
                         rules.turn_started();
                         set_status(&bus, id, AgentStatus::Running).await;
                         publish(&bus, EventKind::AgentTurnStarted { id, message_id }).await;
@@ -2583,10 +2643,13 @@ async fn forward_events(
                         let stop_reason = match result {
                             Ok(reason) => reason,
                             Err(message) => {
+                                if unavailable_model_error(&message) { turn_error = Some(message.clone()); }
                                 publish(&bus, EventKind::AgentError { id, message }).await;
                                 StopReason::Error
                             }
                         };
+                        learn_model_result(&bus, turn_agent.as_ref(), stop_reason, turn_error.as_deref()).await;
+                        turn_error = None;
                         // Read-only turns have nothing to show.
                         if let Some(diff) = diff.filter(|d| !d.is_empty()) {
                             publish(
@@ -2657,7 +2720,13 @@ async fn handle_session_event(
                 // Handing the rule in may wait on the driver (a steer is a request, and an
                 // interrupt is not always instant), so it runs beside the pump: output keeps
                 // flowing while it does (docs/TODO.md §二十五「4 的尾巴」).
-                tokio::spawn(inject(bus.clone(), id, live.clone(), generation, injections));
+                tokio::spawn(inject(
+                    bus.clone(),
+                    id,
+                    live.clone(),
+                    generation,
+                    injections,
+                ));
             }
             return false;
         }
@@ -2802,7 +2871,13 @@ async fn handle_session_event(
     if let Some(text) = tool_text {
         let injections = rules.on_tool(&text);
         if !injections.is_empty() {
-            tokio::spawn(inject(bus.clone(), id, live.clone(), generation, injections));
+            tokio::spawn(inject(
+                bus.clone(),
+                id,
+                live.clone(),
+                generation,
+                injections,
+            ));
         }
     }
     false
@@ -3045,6 +3120,56 @@ fn tail(text: String, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const INCIDENT: &str = "400 model [deepseek-v4.1-flash-sg] service info not found (01a1b1fcef287ba683c3c502e76f1bb3/29fac42c-1b53-4461-8bab-4f8b3c92723f)\nCurrently supported models for your account:\n  - hy4free\n  - hy4std\n  - hy3\n  - hy3-x\n  - deepseek-v4.1-flash\n  - glm-5.3\n  - glm-5.3-flash\n  - glm-5.2\n  - space-bunny\n  - minimax-m3.1-flash\n  - minimax-m2.7\n  - kimi-k3.1-pro\n  - kimi-k3-1\n  - kimi-k2.8-preview\n  - deepseek-v4-pro\n  - step-5-preview\n  - mimo-v2.6-pro\nPlease use --model <model_id> to specify a valid model.";
+
+    #[test]
+    fn unavailable_errors_are_distinct_from_rate_limits() {
+        for error in [
+            INCIDENT,
+            "MODEL NOT FOUND",
+            "invalid model",
+            "unknown model",
+            "unsupported model",
+        ] {
+            assert!(unavailable_model_error(error), "{error}");
+        }
+        for error in [
+            "429 rate limit: model not found",
+            "too many requests",
+            "500 internal error",
+        ] {
+            assert!(!unavailable_model_error(error), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn learned_failure_refuses_until_a_successful_turn() {
+        let store = Arc::new(
+            crossagents_store_sqlite::SqliteStore::open_in_memory()
+                .await
+                .unwrap(),
+        );
+        let bus = EventBus::new(store.clone());
+        let agent: Agent = serde_json::from_value(serde_json::json!({
+            "id": AgentId::new(), "name": "Hazel", "plugin": "codebuddy", "driver": null,
+            "model": "deepseek-v4.1-flash-sg", "role": "worker", "cwd": ".", "config": {"account": "site"},
+            "status": "idle", "created_at": chrono::Utc::now()
+        })).unwrap();
+        learn_model_result(&bus, Some(&agent), StopReason::Error, Some(INCIDENT)).await;
+        let reason = crossagents_orchestrator::approval::unusable_for(store.as_ref(), &agent, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(reason.contains("service info not found"));
+        learn_model_result(&bus, Some(&agent), StopReason::EndTurn, None).await;
+        assert!(
+            crossagents_orchestrator::approval::unusable_for(store.as_ref(), &agent, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 
     fn delivery(id: MessageId) -> Delivery {
         Delivery::new(id, false, None)

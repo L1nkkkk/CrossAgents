@@ -13,8 +13,26 @@ use crate::engine::Orchestrator;
 const DEFAULT_WAIT_MINUTES: f64 = 30.0;
 
 /// Checks the permission Cursor will receive before a session is handed work.
-pub fn unusable_for(agent: &Agent, policy: Option<&RunPolicy>) -> Option<String> {
-    unusable_on_platform(agent, policy, cfg!(windows))
+pub async fn unusable_for(
+    store: &dyn crossagents_core::Store,
+    agent: &Agent,
+    policy: Option<&RunPolicy>,
+) -> Result<Option<String>, crossagents_core::CoreError> {
+    if let Some(reason) = unusable_on_platform(agent, policy, cfg!(windows)) {
+        return Ok(Some(reason));
+    }
+    let Some(model) = agent.model.as_deref().filter(|m| !m.is_empty()) else {
+        return Ok(None);
+    };
+    let account = agent
+        .config
+        .get("account")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    Ok(store
+        .unavailable_model(&agent.plugin, account, model)
+        .await?
+        .map(|error| format!("Model {model} is unavailable for this account: {error}")))
 }
 
 fn unusable_on_platform(
