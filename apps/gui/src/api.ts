@@ -60,6 +60,7 @@ import type { RunDetail } from "@bindings/RunDetail";
 import type { RunTrace } from "@bindings/RunTrace";
 import type { SendMessageRequest } from "@bindings/SendMessageRequest";
 import type { SendMessageResponse } from "@bindings/SendMessageResponse";
+import type { QueuedReason } from "@bindings/QueuedReason";
 import type { Transcript } from "@bindings/Transcript";
 import type { TurnDiffResponse } from "@bindings/TurnDiffResponse";
 import type { UpdateRunPolicyRequest } from "@bindings/UpdateRunPolicyRequest";
@@ -119,31 +120,58 @@ export function scopeKey(scope: FileScope): string {
 export const getBridge = () => (typeof window !== "undefined" ? window.crossagents : undefined);
 
 export class ApiError extends Error {
-  /** HTTP status; 0 when the hub could not be reached. */
+  /** HTTP status; 0 when the hub could not be reached, or the request's fate is unknown. */
   status: number;
   code: string;
+  /** Why a message was refused, when the error is about delivering one. */
+  reason?: QueuedReason;
   /** The files in the way, when the conflict is about a directory's changes (deleting a run
    * whose checkout has uncommitted work). */
   files: string[];
-  constructor(status: number, code: string, message: string, files: string[] = []) {
+  constructor(status: number, code: string, message: string, files: string[] = [], reason?: QueuedReason) {
     super(message);
     this.status = status;
     this.code = code;
     this.files = files;
+    this.reason = reason;
   }
 }
 
 type Method = "GET" | "POST" | "DELETE";
 
+/** A transport failure the main process answered with: `status` 0 and an API error body. */
+const TRANSPORT_STATUS = 0;
+
+function errorFromBody(status: number, body: string): ApiError {
+  let parsed: ApiErrorJson | undefined;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    // Not an API error body.
+  }
+  return new ApiError(
+    status,
+    parsed?.error.code ?? (status === TRANSPORT_STATUS ? "unreachable" : "http"),
+    parsed?.error.message ?? (body || `HTTP ${status}`),
+    parsed?.error.files ?? [],
+    parsed?.error.reason,
+  );
+}
+
 async function send(method: Method, path: string, body?: unknown): Promise<{ status: number; body: string }> {
   const json = body === undefined ? null : JSON.stringify(body);
   const bridge = getBridge();
   if (bridge) {
+    let reply: { status: number; body: string };
     try {
-      return await bridge.request(method, path, json);
+      reply = await bridge.request(method, path, json);
     } catch (err) {
       throw new ApiError(0, "unreachable", err instanceof Error ? err.message : String(err));
     }
+    // The main process reports a request that got no hub answer this way: it knows whether the
+    // request may already have arrived (electron/main.cts).
+    if (reply.status === TRANSPORT_STATUS) throw errorFromBody(reply.status, reply.body);
+    return reply;
   }
   let response: Response;
   try {
@@ -168,20 +196,7 @@ export function refuseRequests(reason: string | undefined) {
 async function request<T>(method: Method, path: string, body?: unknown, opts: { text?: boolean } = {}): Promise<T> {
   if (refusal && path !== "/v1/info") throw new ApiError(0, "version_mismatch", refusal);
   const response = await send(method, path, body);
-  if (response.status >= 400) {
-    let parsed: ApiErrorJson | undefined;
-    try {
-      parsed = JSON.parse(response.body);
-    } catch {
-      // Not an API error body.
-    }
-    throw new ApiError(
-      response.status,
-      parsed?.error.code ?? "http",
-      parsed?.error.message ?? (response.body || `HTTP ${response.status}`),
-      parsed?.error.files ?? [],
-    );
-  }
+  if (response.status >= 400) throw errorFromBody(response.status, response.body);
   if (opts.text) return response.body as T;
   return (response.body ? JSON.parse(response.body) : undefined) as T;
 }
@@ -292,6 +307,10 @@ export const api = {
     request<SendMessageResponse>("POST", `/v1/agents/${enc(key)}/messages`, req),
   withdrawMessage: (key: string, messageId: string) =>
     request<void>("DELETE", `/v1/agents/${enc(key)}/messages/${enc(messageId)}`),
+  /** Moves a waiting message to the front and interrupts the running turn: same id, no new
+   * message (docs/tasks/DELIVERY-AUDIT.md §2, §8 P1-5). */
+  sendMessageNow: (key: string, messageId: string) =>
+    request<SendMessageResponse>("POST", `/v1/agents/${enc(key)}/messages/${enc(messageId)}/send-now`),
   cancelAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/cancel`),
   compactAgent: (key: string) => request<void>("POST", `/v1/agents/${enc(key)}/compact`),
   /** The slash commands and skills the agent's own CLI brings; `known` is false until it

@@ -29,6 +29,33 @@ export type Scenario = {
 };
 
 export const SCENARIOS: Scenario[] = [
+  { key: "delivery", label: "消息送达状态", hint: "自己发的消息一行到底：排队原因、已撤回、失败可重试", build: () => {
+    // A session with one turn running and messages waiting. The person's messages stay in the
+    // chat with their state on the bubble (P0-1); only the orchestrator's waits list 接下来.
+    const scene = soloSession();
+    const nova = scene.state.agents[0];
+    const t = scene.state.transcripts.get(nova.id)!;
+    const waiting = t.turns.filter((x) => !x.started_at && !x.completed_at);
+    Object.assign(waiting[0], { queued_reason: "owner_queue_ahead" });
+    Object.assign(waiting[1], { queued_reason: "turn_running" });
+    // One the person took back: the row stays, marked (P0-1).
+    const back = turn({ input: "这条算了，撤回吧。", minutesAgo: 0.15, queued: true, items: [] });
+    Object.assign(back.turn, { withdrawn: true });
+    // An orchestration message waiting: this is what 接下来 lists.
+    const orch = turn({ input: "再核对一遍文档里的命令。", from: { kind: "orchestrator", run_id: "run-delivery-preview" }, minutesAgo: 0.05, queued: true, items: [] });
+    Object.assign(orch.turn, { queued_reason: "turn_running" });
+    t.turns = [...t.turns, back.turn, orch.turn];
+    t.delivery = { state: "turn", queued: 4 };
+    // Type a message the mock refuses: its row says 失败 and offers 重试 (P2-6).
+    const type = (text: string) => {
+      const el = document.querySelector<HTMLTextAreaElement>(".composer textarea");
+      if (!el) throw new Error("composer missing");
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(el, text);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    };
+    return { state: scene.state, route: scene.route, script: [{ at: 900, act: () => type("[fail] 这条发不出去：看文案和重试") }] };
+  } },
   { key: "plan-long-search", label: "长计划中的模型搜索", hint: "浮层防裁切、筛选与清空后恢复高度", build: () => {
     const scene = SCENARIOS.find((s) => s.key === "plan-long")!.build();
     const search = (value: string) => {
