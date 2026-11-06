@@ -10,15 +10,27 @@
 //! sent back: a step, whose worker takes it again, or a teammate. Both are optional and a
 //! task without them changes hands exactly as it did before.
 
+use std::collections::HashMap;
+
 use chrono::Utc;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, CoreError, EventKind, Handoff, HandoffId, HandoffKind, Role, Run,
-    Task, TaskId, TaskReport, TaskStatus,
+    Agent, AgentId, AgentKey, CoreError, EventKind, Handoff, HandoffId, HandoffKind, PlannedTask,
+    Role, Run, Task, TaskId, TaskReport, TaskStatus,
 };
 use serde_json::{Value, json};
 
 use crate::brief;
 use crate::engine::{Orchestrator, worker_name};
+
+/// Where a send-back would go, worked out before it happens.
+enum Route {
+    /// To a fresh execution session of this teammate: the step's worker, or the named one.
+    Elsewhere(Box<Agent>, Target),
+    /// To the worker the task already has.
+    Own(Target),
+    /// No route is set, or the run has no such step and no such teammate.
+    None,
+}
 
 /// What the one handing the task over leaves with it.
 #[derive(Debug, Default)]
@@ -109,18 +121,45 @@ impl NextStep {
     }
 }
 
-/// `base`, or `base-2`, `base-3`… when the run already has a task with that key.
+/// `base`, or `base-2`, `base-3`… when the run already has a task with that key. Cut to the
+/// longest key a plan allows, as `plan::validate` has it.
 fn free_key(tasks: &[Task], base: &str) -> String {
+    const KEY_MAX: usize = 24;
+    let mut base = base.to_owned();
+    base.truncate(KEY_MAX);
     if !tasks.iter().any(|t| t.key == base) {
-        return base.to_owned();
+        return base;
     }
     for n in 2..1000 {
-        let candidate = format!("{base}-{n}");
+        let suffix = format!("-{n}");
+        let mut head = base.clone();
+        head.truncate(KEY_MAX - suffix.len());
+        let candidate = format!("{}{suffix}", head.trim_end_matches('-'));
         if !tasks.iter().any(|t| t.key == candidate) {
             return candidate;
         }
     }
-    base.to_owned()
+    base
+}
+
+/// How many times the same work may go back to the same step or teammate before the hub
+/// stops: a bounce that would go on for ever is left with the lead
+/// (docs/research/multica.md §2.12).
+pub const MAX_BOUNCES: u32 = 3;
+
+/// A task as a plan would have written it, for checking the routing of a whole run.
+pub(crate) fn planned(task: &Task) -> PlannedTask {
+    PlannedTask {
+        key: task.key.clone(),
+        title: task.title.clone(),
+        spec: task.spec.clone(),
+        depends_on: task.depends_on.clone(),
+        assignee: None,
+        reviewer: None,
+        fresh: true,
+        restore: false,
+        reviewer_fresh: true,
+    }
 }
 
 impl Orchestrator {
@@ -267,6 +306,135 @@ impl Orchestrator {
     // -----------------------------------------------------------------------------------
     // Workflow handoffs (docs/research/multica.md §2.12)
 
+    /// Checks the routing a plan or a task sets, before anything it says takes effect: a
+    /// `next` or `on_reject` that names no step of the run (or of the plan) and no session of
+    /// the workspace, one that names the task itself, and a `next` step in an earlier stage —
+    /// which the stage gate would never release. `Err` lists every problem, so one answer
+    /// fixes them all.
+    pub(crate) async fn check_routes(&self, tasks: &[PlannedTask]) -> Result<(), String> {
+        let stages: HashMap<&str, Option<u32>> = tasks
+            .iter()
+            .map(|t| (t.key.as_str(), t.spec.stage))
+            .collect();
+        let mut problems = Vec::new();
+        for task in tasks {
+            for (field, raw) in [
+                ("next", task.spec.next.as_deref()),
+                ("on_reject", task.spec.on_reject.as_deref()),
+            ] {
+                let Some(raw) = raw.map(str::trim).filter(|n| !n.is_empty()) else {
+                    continue;
+                };
+                let name = raw.strip_prefix('#').map(str::trim).unwrap_or(raw);
+                if name == task.key {
+                    problems.push(format!(
+                        "task {:?}: {field} names the task itself",
+                        task.key
+                    ));
+                    continue;
+                }
+                match stages.get(name) {
+                    Some(step_stage) => {
+                        if field == "next"
+                            && let (Some(own), Some(step)) = (task.spec.stage, *step_stage)
+                            && step < own
+                        {
+                            problems.push(format!(
+                                "task {:?} (stage {own}): next {name:?} is in stage {step}, which starts only before stage {own}",
+                                task.key
+                            ));
+                        }
+                    }
+                    None => {
+                        if self
+                            .store
+                            .get_agent(&AgentKey::Name(name.to_owned()))
+                            .await
+                            .is_err()
+                        {
+                            problems.push(format!(
+                                "task {:?}: {field} names no task and no session {name:?} (agent_list lists the sessions)",
+                                task.key
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(problems.join("\n"))
+        }
+    }
+
+    /// Whether the same work has gone back to `target` [`MAX_BOUNCES`] times already: then
+    /// it stops there, with the lead told why.
+    async fn bounce_stopped(&self, run: &Run, task: &Task, target: &Target) -> bool {
+        let key = (task.id, target.name().to_owned());
+        let count = self
+            .bounces
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .copied()
+            .unwrap_or(0);
+        if count < MAX_BOUNCES {
+            return false;
+        }
+        self.notice(
+            task.issuer_or(run.planner),
+            &format!("task:{}:bounce", task.id),
+            &format!(
+                "#{} has gone back to {} {count} times already; the hub stops here and it stays as it is. Change what is asked of it, or task_assign it elsewhere.",
+                task.key,
+                target.name()
+            ),
+        )
+        .await;
+        true
+    }
+
+    fn record_bounce(&self, task: &Task, target: &Target) {
+        let key = (task.id, target.name().to_owned());
+        *self
+            .bounces
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(key)
+            .or_default() += 1;
+    }
+
+    /// Where a send-back would go, worked out before anything moves.
+    async fn route_back(&self, run: &Run, task: &Task) -> Result<Route, CoreError> {
+        let Some(raw) = on_reject_of(task) else {
+            return Ok(Route::None);
+        };
+        let tasks = self.store.list_tasks(run.id).await?;
+        let Some(target) = Target::of(raw, &tasks) else {
+            return Ok(Route::None);
+        };
+        let Some(agent) = self.reject_route(&tasks, &target).await else {
+            return Ok(Route::None);
+        };
+        if task.worker_template == Some(agent.id) {
+            // It is already where it would go: its own worker takes it again.
+            return Ok(Route::Own(target));
+        }
+        Ok(Route::Elsewhere(Box::new(agent), target))
+    }
+
+    /// Whether `spec.on_reject` has taken this work back as often as it may: the hub stops
+    /// and leaves it as it is, rather than send it round again (multica §2.12).
+    pub(crate) async fn reject_stopped(&self, run: &Run, task: &Task) -> Result<bool, CoreError> {
+        match self.route_back(run, task).await? {
+            Route::None => Ok(false),
+            Route::Own(target) | Route::Elsewhere(_, target) => {
+                Ok(self.bounce_stopped(run, task, &target).await)
+            }
+        }
+    }
+
     /// Records the edge `spec.next` promises (docs/research/multica.md §2.12): a step that
     /// another task names as its next waits for that task, so a plan writes the workflow
     /// once — in `next` — and not again in `depends_on`.
@@ -358,6 +526,23 @@ impl Orchestrator {
                 // carries what this one left.
                 let step = self.opened_step(run, task, &tasks, &agent);
                 let key = step.key.clone();
+                // What the hub opens passes the checks a plan does; a step it cannot open
+                // leaves the merge as it is and tells the lead.
+                let mut check: Vec<PlannedTask> = tasks.iter().map(planned).collect();
+                check.push(planned(&step));
+                if let Err(why) = crate::plan::validate(&check) {
+                    tracing::warn!(task = %task.key, error = %why, "cannot open the next step");
+                    self.notice(
+                        task.issuer_or(run.planner),
+                        &format!("task:{}:next", task.id),
+                        &format!(
+                            "#{} was accepted, but the next step for {} cannot be opened: {why}. Add it with task_create.",
+                            task.key, agent.name
+                        ),
+                    )
+                    .await;
+                    return Ok(None);
+                }
                 self.store.insert_task(&step).await?;
                 self.publish(EventKind::TaskStatusChanged {
                     run_id: run.id,
@@ -388,24 +573,18 @@ impl Orchestrator {
         }
     }
 
-    /// Whether `spec.on_reject` would hand `task` to someone else: the step or teammate it
-    /// names is in the run, and is not the teammate the task's current worker came from.
+    /// Whether `spec.on_reject` would hand `task` to someone else: a step or teammate of the
+    /// run, not the one its worker was cloned from, and not one that has taken it back
+    /// [`MAX_BOUNCES`] times already.
     pub(crate) async fn rejects_elsewhere(
         &self,
         run: &Run,
         task: &Task,
     ) -> Result<bool, CoreError> {
-        let Some(raw) = on_reject_of(task) else {
-            return Ok(false);
-        };
-        let tasks = self.store.list_tasks(run.id).await?;
-        let Some(target) = Target::of(raw, &tasks) else {
-            return Ok(false);
-        };
-        Ok(self
-            .reject_route(&tasks, &target)
-            .await
-            .is_some_and(|agent| task.worker_template != Some(agent.id)))
+        match self.route_back(run, task).await? {
+            Route::Elsewhere(_, target) => Ok(!self.bounce_stopped(run, task, &target).await),
+            Route::Own(_) | Route::None => Ok(false),
+        }
     }
 
     /// Sends `task` back where `spec.on_reject` says, after `why` sent it back (its issuer's
@@ -413,6 +592,8 @@ impl Orchestrator {
     /// names — or of the worker of the step it names — takes it over with `notes`. `None`
     /// when nothing is set, it names something the run does not have, or it names the task's
     /// own worker: then it goes back exactly as before.
+    ///
+    /// Every send-back along a route is counted: [`MAX_BOUNCES`] of them is all one does.
     pub(crate) async fn send_back(
         &self,
         run: &Run,
@@ -420,27 +601,22 @@ impl Orchestrator {
         notes: &str,
         why: &str,
     ) -> Result<Option<String>, CoreError> {
-        if !self.rejects_elsewhere(run, task).await? {
-            return Ok(None);
+        let route = self.route_back(run, task).await?;
+        match route {
+            Route::None => return Ok(None),
+            Route::Own(target) => {
+                self.record_bounce(task, &target);
+                return Ok(None);
+            }
+            Route::Elsewhere(_, ref target) => {
+                if self.bounce_stopped(run, task, target).await {
+                    return Ok(None);
+                }
+            }
         }
-        let Some(raw) = on_reject_of(task) else {
+        let Route::Elsewhere(template, target) = route else {
             return Ok(None);
         };
-        let tasks = self.store.list_tasks(run.id).await?;
-        let Some(target) = Target::of(raw, &tasks) else {
-            return Ok(None);
-        };
-        let Some(template) = self.reject_route(&tasks, &target).await else {
-            tracing::warn!(
-                task = %task.key, on_reject = %raw,
-                "spec.on_reject names no step and no teammate of the run"
-            );
-            return Ok(None);
-        };
-        if task.worker_template == Some(template.id) {
-            // Where it came from: its own worker takes it again.
-            return Ok(None);
-        }
         let Some(cwd) = task.worktree.clone() else {
             tracing::warn!(task = %task.key, "spec.on_reject has no worktree to hand back into");
             return Ok(None);
@@ -502,6 +678,7 @@ impl Orchestrator {
         task.updated_at = Utc::now();
         self.store.update_task(task).await?;
         self.send_in_background(worker.id, envelope);
+        self.record_bounce(task, &target);
         Ok(Some(worker.name))
     }
 

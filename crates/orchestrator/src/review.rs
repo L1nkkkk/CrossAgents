@@ -290,8 +290,9 @@ impl Orchestrator {
     /// A review that says changes are needed, on a task whose spec routes it back
     /// (docs/research/multica.md §2.12): `spec.on_reject` sends it to the step or teammate
     /// it names, with the reviewer's notes as what to fix. `Some(who)` when it went there;
-    /// `None` when the spec sets no route, or names the task's own worker — then the review
-    /// stands as it did before, and the issuer decides.
+    /// `None` when the spec sets no route, names the task's own worker, or has already taken
+    /// the work back as often as it may — then the review stands as it did before, and the
+    /// issuer decides.
     pub(crate) async fn review_sent_back(
         &self,
         run: &crossagents_core::Run,
@@ -299,7 +300,8 @@ impl Orchestrator {
         notes: &str,
         reviewer: &crossagents_core::Agent,
     ) -> Result<Option<String>, CoreError> {
-        if !self.rejects_elsewhere(run, task).await? {
+        // Checked before anything changes: at the limit the work stays where it is.
+        if self.reject_stopped(run, task).await? || !self.rejects_elsewhere(run, task).await? {
             return Ok(None);
         }
         // A new round: an older verification's report must not land on it.

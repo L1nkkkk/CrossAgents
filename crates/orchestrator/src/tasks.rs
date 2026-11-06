@@ -267,6 +267,11 @@ impl Orchestrator {
         if !new.is_empty() {
             plan::validate(&check)
                 .map_err(|p| CoreError::Conflict(format!("invalid tasks:\n{p}")))?;
+            // A `next` or `on_reject` that names nothing, itself, or a step the stage gate
+            // could never release is refused before the task exists (multica §2.12).
+            self.check_routes(&check)
+                .await
+                .map_err(|p| CoreError::Conflict(format!("invalid tasks:\n{p}")))?;
         }
         let assignments = self.resolve_assignments(&run, &new).await?;
         let now = Utc::now();
@@ -350,6 +355,28 @@ impl Orchestrator {
         if task.status.is_terminal() {
             return Err(CoreError::Conflict(format!("#{} has ended", task.key)));
         }
+        // Where it sends its work, checked before the change takes effect (multica §2.12).
+        let mut check: Vec<PlannedTask> = self
+            .store
+            .list_tasks(run.id)
+            .await?
+            .iter()
+            .map(crate::handoff::planned)
+            .collect();
+        if let Some(entry) = check.iter_mut().find(|t| t.key == task.key) {
+            if let Some(title) = &a.title {
+                entry.title = title.clone();
+            }
+            if let Some(spec) = &a.spec {
+                entry.spec = spec.clone();
+            }
+            if let Some(deps) = &a.depends_on {
+                entry.depends_on = deps.clone();
+            }
+        }
+        self.check_routes(&check)
+            .await
+            .map_err(|p| CoreError::Conflict(format!("#{} was not changed: {p}", task.key)))?;
         if let Some(title) = a.title {
             task.title = title;
         }
@@ -1578,6 +1605,18 @@ impl Orchestrator {
                 task.key
             )));
         };
+        // Work that keeps going back and forth stops here, before anything changes: the tool
+        // says so and the lead has been told (multica §2.12).
+        if self.reject_stopped(&run, &task).await? {
+            return Ok(json!({
+                "task": task_json(&task),
+                "stopped": format!(
+                    "#{} has gone back as often as it may ({} times); it stays as it is. Change what is asked of it, or task_assign it elsewhere.",
+                    task.key,
+                    crate::handoff::MAX_BOUNCES
+                ),
+            }));
+        }
         if task.reviewer.take().is_some() {
             let _ = self
                 .let_go_task(run.id, task.id, Some(ClaimRole::Reviewer))

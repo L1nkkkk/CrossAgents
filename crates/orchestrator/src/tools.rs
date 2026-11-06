@@ -631,8 +631,8 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "handoff_preview",
-        description: "Preview the workflow handoff a task's spec sets, before it moves: where its work goes when you accept it (spec.next — a step's key, which is released, or a teammate's name, for whom the hub opens the next step), where it goes back when it is sent back (spec.on_reject, by task_rework or a review that fails), who receives it, and the brief that receiver will get. Nothing moves and nothing is stored.",
-        groups: RUN,
+        description: "Preview the workflow handoff a task's spec sets, before it moves: where its work goes when you accept it (spec.next — a step's key, which is released, or a teammate's name, for whom the hub opens the next step), where it goes back when it is sent back (spec.on_reject, by task_rework or a review that fails), who receives it, and the brief that receiver will get. Read-only: nothing moves, nothing is sent, nothing changes.",
+        groups: PLANNER,
         schema: || task_schema(json!({})),
     },
     ToolDef {

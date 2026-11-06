@@ -804,3 +804,165 @@ fn json_in(text: &str, marker: &str) -> Value {
         .unwrap()
         .unwrap()
 }
+
+#[tokio::test]
+async fn a_route_that_names_nothing_is_refused_before_it_takes_effect() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    // `next` names neither a step nor a session: the plan is refused, and the run waits.
+    let plan = json!([
+        { "key": "a", "title": "task a", "spec": { "goal": "Do a.", "next": "ghost" } },
+    ]);
+    let request = format!(
+        "Build it. {}",
+        call("plan_submit", json!({ "tasks": plan }))
+    );
+    let resp = t
+        .post(
+            "/v1/runs",
+            json!({ "request": request, "planner": "boss", "worker": "rex",
+                    "policy": { "plan_approval": "auto" } }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let run: Value = resp.json().await.unwrap();
+    w.until("the refusal", |e| {
+        matches!(&e.kind, EventKind::AgentOutput { text, .. }
+            if text.contains("the plan is invalid") && text.contains("next names no task and no session \"ghost\""))
+    })
+    .await;
+    let detail: Value = t
+        .get(&format!("/v1/runs/{}", run["id"].as_str().unwrap()))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail["run"]["status"], "planning", "{detail}");
+    assert_eq!(detail["tasks"], json!([]), "{detail}");
+}
+
+#[tokio::test]
+async fn a_route_to_itself_or_to_an_earlier_stage_is_refused() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    let run = start(&t, json!({ "goal": "[write a.txt=alpha]", "stage": 1 })).await;
+    let lead = run["planner"].as_str().unwrap().to_owned();
+    card(&mut w, HandoffKind::Assign).await;
+
+    // `next` naming the task itself.
+    t.send(
+        lead.as_str(),
+        &call(
+            "task_update",
+            json!({ "task": "a", "spec": { "goal": "[write a.txt=alpha]", "stage": 1, "next": "a" } }),
+        ),
+    )
+    .await;
+    w.until("the refusal", |e| {
+        matches!(&e.kind, EventKind::AgentOutput { text, .. }
+            if text.contains("#a was not changed") && text.contains("names the task itself"))
+    })
+    .await;
+
+    // `next` naming a step of an earlier stage: the stage gate would never release it.
+    t.send(
+        lead.as_str(),
+        &call(
+            "task_create",
+            json!({ "tasks": [
+                { "key": "late", "title": "late step",
+                  "spec": { "goal": "Do it later.", "stage": 2, "next": "a" } }
+            ] }),
+        ),
+    )
+    .await;
+    w.until("a step too late", |e| {
+        matches!(&e.kind, EventKind::AgentOutput { text, .. }
+            if text.contains("invalid tasks") && text.contains("is in stage"))
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn work_sent_back_and_forth_stops_at_the_limit() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    let run = start(
+        &t,
+        json!({
+            "goal": goal("[write a.txt=alpha]", "wrote a"),
+            "acceptance": [has("a.txt", "alpha")],
+            "on_reject": "ada",
+        }),
+    )
+    .await;
+    let lead = run["planner"].as_str().unwrap().to_owned();
+    card(&mut w, HandoffKind::Assign).await;
+    // The first round goes back to a fresh session of ada; the next two find it already
+    // there. That is three round trips of the same work along the same route.
+    w.until("reported", task_is(TaskStatus::Passed)).await;
+    t.send(
+        lead.as_str(),
+        &call("task_rework", json!({ "task": "a", "notes": "round 1" })),
+    )
+    .await;
+    let last = card(&mut w, HandoffKind::Reassign).await;
+    assert_eq!(last.template.as_deref(), Some("ada"));
+    for round in 2..=3 {
+        let said = format!("round {round}");
+        w.until("reported", task_is(TaskStatus::Passed)).await;
+        t.send(
+            lead.as_str(),
+            &call("task_rework", json!({ "task": "a", "notes": said })),
+        )
+        .await;
+        // It is already with a session of ada: the round reaches that same worker.
+        w.until("the round reaches it", |e| {
+            matches!(&e.kind, EventKind::AgentInput { id, text, .. }
+                if *id == last.to && text.contains(&said))
+        })
+        .await;
+    }
+
+    // The fourth stops: nothing moves, the lead is told, and the tool says why.
+    w.until("reported", task_is(TaskStatus::Passed)).await;
+    let before = w.seen.len();
+    t.send(
+        lead.as_str(),
+        &call(
+            "task_rework",
+            json!({ "task": "a", "notes": "round 4: again" }),
+        ),
+    )
+    .await;
+    w.until("the lead is told", |e| {
+        matches!(&e.kind, EventKind::AgentInput { id, text, .. }
+            if id.to_string() == lead && text.contains("has gone back to ada 3 times already"))
+    })
+    .await;
+    w.until("the tool says why", |e| {
+        matches!(&e.kind, EventKind::AgentOutput { text, .. }
+            if text.contains("called task_rework") && text.contains("\"stopped\""))
+    })
+    .await;
+    // It stayed where it was: no rework round started.
+    let after = w.seen.len();
+    assert!(
+        !w.seen[before..after]
+            .iter()
+            .any(|e| matches!(&e.kind, EventKind::TaskStatusChanged { key, to: TaskStatus::Running, .. } if key == "a")),
+        "the stopped rework changed the task"
+    );
+    let task = task_by_key(&t, &run, "a").await;
+    assert_eq!(task["status"], "passed", "{task}");
+    let reassigns = task["handoffs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|h| h["kind"] == "reassign")
+        .count();
+    assert_eq!(reassigns, 1, "{task}");
+}
