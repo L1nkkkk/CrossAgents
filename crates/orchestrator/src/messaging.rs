@@ -606,7 +606,7 @@ impl Orchestrator {
         };
         // A wait lasts at most `WAIT_MAX_DAYS` (multica §2.1): longer is cut to that, and the
         // wake says the thing waited for did not happen instead of staying silent for weeks.
-        let cap = Utc::now() + crossagents_core::automation::wait_max();
+        let cap = Utc::now() + crate::watch::wait_max();
         let wait_expired = requested > cap;
         let due_at = if wait_expired { cap } else { requested };
         let existing = self.store().list_reminders(Some(caller.id)).await?;

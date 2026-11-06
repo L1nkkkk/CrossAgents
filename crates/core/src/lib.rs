@@ -4,7 +4,6 @@
 
 pub mod account;
 pub mod attachment;
-pub mod automation;
 pub mod bus;
 pub mod claim;
 pub mod cli;
@@ -33,7 +32,6 @@ pub use account::{
     mask_email,
 };
 pub use attachment::{Attachment, AttachmentKind, AttachmentSupport, Prompt};
-pub use automation::{Health, RunRecord, Trigger};
 pub use bus::EventBus;
 pub use claim::{AgentClaim, ClaimRole};
 pub use cli::{CliSource, CliStatus, Located};
@@ -62,8 +60,9 @@ pub use lesson::{
 };
 pub use model::{
     Agent, AgentProfile, AgentStatus, CONTEXT_LOST, CheckResult, ChecksState, ContinuationState,
-    HistoryTask, LandMode, Landing, NameSource, PlannedTask, Role, Run, RunConfig, RunHistory,
-    RunStatus, Scope, Task, TaskReport, TaskSpec, Work, validate_agent_name, validate_slug,
+    Health, HistoryTask, LandMode, Landing, NameSource, PlannedTask, Role, Run, RunConfig,
+    RunHistory, RunStatus, RunRecord, Scope, Task, TaskReport, TaskSpec, Work, validate_agent_name,
+    validate_slug,
 };
 pub use note::{EXTERNAL_PLUGIN, Note, NoteScope};
 pub use notify::{Reminder, Watch, WatchOn, WatchTarget};

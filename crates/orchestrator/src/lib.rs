@@ -3,6 +3,7 @@
 //! in agents through [`AgentHost`].
 
 pub mod approval;
+pub mod breaker;
 pub mod brief;
 pub mod claims;
 pub mod continuation;
@@ -33,7 +34,7 @@ pub mod tasks;
 pub mod team;
 pub mod tools;
 pub mod verify;
-pub mod wake;
+pub mod watch;
 pub mod work;
 pub mod workspace;
 

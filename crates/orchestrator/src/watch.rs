@@ -17,10 +17,88 @@ use std::collections::HashSet;
 use chrono::{DateTime, Utc};
 use crossagents_core::{
     Agent, AgentId, Event, EventKind, HumanItem, HumanItemKind, HumanItemStatus, Run, RunId, Task,
-    TaskId, TaskStatus, Watch, WatchTarget, automation,
+    TaskId, TaskStatus, Watch, WatchTarget,
 };
 
 use crate::engine::Orchestrator;
+
+/// A waiting rule lasts at most this long before it is woken once and closed ("the thing you
+/// waited for did not happen").
+pub const WAIT_MAX_DAYS: i64 = 7;
+/// A chain that passes the same rule this many times with nobody in between pauses it.
+pub const CHAIN_LIMIT: u32 = 3;
+/// More triggers than this within an hour pause the rule as well.
+pub const TRIGGERS_PER_HOUR: usize = 12;
+
+/// [`WAIT_MAX_DAYS`] as a duration.
+pub fn wait_max() -> chrono::Duration {
+    chrono::Duration::days(WAIT_MAX_DAYS)
+}
+
+/// What a rule's trigger means now that it has been counted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Trigger {
+    /// The rule may wake its owner.
+    Wake,
+    /// The rule stopped itself with this reason, and wakes nobody.
+    Pause(String),
+}
+
+/// When a rule's wait is over: its own `expires_at`, else a week after it was set.
+pub fn expires_at(watch: &Watch) -> DateTime<Utc> {
+    watch
+        .expires_at
+        .unwrap_or_else(|| watch.created_at + wait_max())
+}
+
+/// Counts one trigger and says whether the rule may wake its owner. The chain that reaches
+/// [`CHAIN_LIMIT`], or more than [`TRIGGERS_PER_HOUR`] triggers in an hour, pauses the rule
+/// instead: nobody took part between them, so the next wake only spins.
+pub fn account_trigger(watch: &mut Watch, now: DateTime<Utc>) -> Trigger {
+    if watch.health.is_paused() {
+        let reason = watch
+            .health
+            .pause_reason
+            .clone()
+            .unwrap_or_else(|| "paused".into());
+        return Trigger::Pause(reason);
+    }
+    watch.chain += 1;
+    if watch.chain >= CHAIN_LIMIT {
+        let reason = format!(
+            "it woke its owner {} times in a row with nobody in between",
+            watch.chain
+        );
+        watch.health.pause(now, reason.clone());
+        return Trigger::Pause(reason);
+    }
+    let in_hour = crate::breaker::last_hour(&watch.health, now);
+    if in_hour >= TRIGGERS_PER_HOUR {
+        let reason = format!("it fired {in_hour} times within an hour");
+        watch.health.pause(now, reason.clone());
+        return Trigger::Pause(reason);
+    }
+    Trigger::Wake
+}
+
+/// Writes a rule back after its chain or health moved. The store keeps one row per id and has
+/// no update of its own: the record is small, so it is replaced. A rule that vanished under us
+/// (cancelled, or closed with its task) stays gone rather than coming back stale.
+pub async fn save_rule(
+    store: &dyn crossagents_core::Store,
+    watch: &Watch,
+) -> Result<(), crossagents_core::CoreError> {
+    match store.delete_watch(&watch.id).await {
+        Ok(()) => store.insert_watch(watch).await,
+        Err(crossagents_core::CoreError::NotFound { .. }) => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+/// A person took part: the chain starts over.
+pub fn human_involved(watch: &mut Watch) {
+    watch.chain = 0;
+}
 
 /// Whether a task has ended: its rules close with it.
 pub fn task_ended(status: TaskStatus) -> bool {
@@ -79,7 +157,7 @@ pub fn lead_should_be_woken(
 
 /// Whether a watch has outlived its wait: the owner is woken once and the watch closes.
 pub fn watch_expired(watch: &Watch, now: DateTime<Utc>) -> bool {
-    now >= watch.expires_at()
+    now >= expires_at(watch)
 }
 
 /// "task #a (title)" or "agent Ada (id)", for a notice about what a rule followed.
@@ -189,7 +267,7 @@ impl Orchestrator {
             let line = format!(
                 "Watch {} expired: the thing it waited for ({what}) did not happen in {} days. Ask again with watch if you still need it.",
                 watch.id,
-                automation::WAIT_MAX_DAYS
+                WAIT_MAX_DAYS
             );
             if let Err(err) = self
                 .host
@@ -211,8 +289,8 @@ impl Orchestrator {
             if watch.chain == 0 {
                 continue;
             }
-            watch.human_involved();
-            self.store().update_watch(&watch).await?;
+            human_involved(&mut watch);
+            save_rule(self.store().as_ref(), &watch).await?;
         }
         Ok(())
     }
@@ -342,6 +420,22 @@ impl Orchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossagents_core::{Health, WatchOn};
+
+    fn watch() -> Watch {
+        Watch {
+            id: "w-1".into(),
+            owner: AgentId::new(),
+            target: WatchTarget::Agent {
+                agent_id: AgentId::new(),
+            },
+            on: vec![WatchOn::Any],
+            created_at: Utc::now(),
+            expires_at: None,
+            chain: 0,
+            health: Health::default(),
+        }
+    }
 
     #[test]
     fn the_planners_wake_table() {
@@ -355,7 +449,12 @@ mod tests {
         ];
         // A member's progress note, nobody addressed: the lead evaluates it.
         assert!(lead_should_be_woken(
-            lead, worker, false, false, "halfway", &members
+            lead,
+            worker,
+            false,
+            false,
+            "halfway",
+            &members
         ));
         // The lead's own note never wakes it.
         assert!(!lead_should_be_woken(
@@ -414,48 +513,54 @@ mod tests {
     #[test]
     fn a_watch_expires_after_its_wait() {
         let now = Utc::now();
-        let mut watch = Watch {
-            id: "w-1".into(),
-            owner: AgentId::new(),
-            target: WatchTarget::Task {
-                task_id: TaskId::new(),
-            },
-            on: vec![crossagents_core::WatchOn::Any],
-            created_at: now,
-            expires_at: None,
-            chain: 0,
-            health: crossagents_core::Health::default(),
-        };
+        let mut watch = watch();
+        watch.created_at = now;
         assert!(!watch_expired(&watch, now + chrono::Duration::days(6)));
-        assert!(watch_expired(&watch, now + automation::wait_max()));
+        assert!(watch_expired(&watch, now + wait_max()));
         // A shorter wait is what the record says.
         watch.expires_at = Some(now + chrono::Duration::minutes(5));
         assert!(watch_expired(&watch, now + chrono::Duration::minutes(6)));
     }
 
     #[test]
+    fn the_third_trigger_in_a_row_pauses_the_rule() {
+        let now = Utc::now();
+        let mut rule = watch();
+        for _ in 1..CHAIN_LIMIT {
+            assert_eq!(account_trigger(&mut rule, now), Trigger::Wake);
+        }
+        let trigger = account_trigger(&mut rule, now);
+        assert!(
+            matches!(&trigger, Trigger::Pause(reason) if reason.contains("in a row")),
+            "{trigger:?}"
+        );
+        assert!(rule.health.is_paused());
+        // It stays paused, with its reason, and never wakes anyone again.
+        assert!(matches!(
+            account_trigger(&mut rule, now),
+            Trigger::Pause(_)
+        ));
+        // A person taking part clears the chain, so the rule may wake again.
+        let mut again = watch();
+        account_trigger(&mut again, now);
+        account_trigger(&mut again, now);
+        human_involved(&mut again);
+        assert_eq!(again.chain, 0);
+        assert_eq!(account_trigger(&mut again, now), Trigger::Wake);
+    }
+
+    #[test]
     fn a_burst_within_an_hour_pauses_the_rule() {
         let now = Utc::now();
-        let mut watch = Watch {
-            id: "w-1".into(),
-            owner: AgentId::new(),
-            target: WatchTarget::Agent {
-                agent_id: AgentId::new(),
-            },
-            on: vec![crossagents_core::WatchOn::Any],
-            created_at: now,
-            expires_at: None,
-            chain: 0,
-            health: crossagents_core::Health::default(),
-        };
+        let mut watch = watch();
         // Twelve runs in the hour, each with a person in between so the chain never trips.
-        for _ in 0..automation::TRIGGERS_PER_HOUR {
-            assert_eq!(watch.account_trigger(now), crossagents_core::Trigger::Wake);
-            watch.health.record(now, true);
-            watch.human_involved();
+        for _ in 0..TRIGGERS_PER_HOUR {
+            assert_eq!(account_trigger(&mut watch, now), Trigger::Wake);
+            crate::breaker::record(&mut watch.health, now, true);
+            human_involved(&mut watch);
         }
         assert!(
-            matches!(watch.account_trigger(now), crossagents_core::Trigger::Pause(reason) if reason.contains("within an hour")),
+            matches!(account_trigger(&mut watch, now), Trigger::Pause(reason) if reason.contains("within an hour")),
             "{:?}",
             watch.health
         );
@@ -464,40 +569,21 @@ mod tests {
     #[test]
     fn fifty_runs_at_ninety_percent_failures_pause_the_automation() {
         let now = Utc::now();
-        let mut health = crossagents_core::Health::default();
+        let mut health = Health::default();
         // Five good runs, then forty-five bad ones: the fiftieth run is 90% failed.
         for _ in 0..5 {
-            health.record(now, true);
+            crate::breaker::record(&mut health, now, true);
         }
         let mut tripped = None;
         for _ in 0..45 {
-            tripped = health.record(now, false);
+            tripped = crate::breaker::record(&mut health, now, false);
         }
         let reason = tripped.expect("the breaker trips on the fiftieth run");
         assert!(health.is_paused(), "{health:?}");
         assert!(reason.contains("45 of 50"), "{reason}");
-        assert_eq!(health.counts(now), (50, 45));
-    }
-
-    #[test]
-    fn a_rate_limited_rule_wakes_nobody() {
-        // The pause is the rule's own decision, taken in `Watch::account_trigger`; this checks
-        // the shape the hub relies on: a paused rule carries the reason for the person.
-        let now = Utc::now();
-        let mut watch = Watch {
-            id: "w-1".into(),
-            owner: AgentId::new(),
-            target: WatchTarget::Task {
-                task_id: TaskId::new(),
-            },
-            on: vec![crossagents_core::WatchOn::Any],
-            created_at: now,
-            expires_at: None,
-            chain: automation::CHAIN_LIMIT - 1,
-            health: crossagents_core::Health::default(),
-        };
-        let trigger = watch.account_trigger(now);
-        assert!(matches!(trigger, crossagents_core::Trigger::Pause(_)));
-        assert!(watch.health.pause_reason.is_some());
+        assert_eq!(crate::breaker::counts(&health, now), (50, 45));
+        // The record is what a restarted hub reads back.
+        assert_eq!(health.runs.len(), 50);
+        assert_eq!(health.runs.iter().filter(|run| !run.ok).count(), 45);
     }
 }

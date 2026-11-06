@@ -2,9 +2,9 @@
 //! §2.1). Both end up as a line in the owner's notification digest (`Runtime::notify`); the hub
 //! says nothing else.
 //!
-//! A watch is bounded by the rules in [`crossagents_core::automation`]: it never wakes its owner
-//! about the owner's own turn or change, a chain with nobody in between (or a burst within an
-//! hour) pauses it with a notice to the person, and its wait runs out after seven days.
+//! A watch is bounded by [`crossagents_orchestrator::watch`]: it never wakes its owner about the
+//! owner's own turn or change, a chain with nobody in between (or a burst within an hour) pauses
+//! it with a notice to the person, and its wait runs out after seven days.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,8 +12,10 @@ use std::time::Duration;
 use chrono::Utc;
 use crossagents_core::{
     AgentId, AgentKey, AgentStatus, CoreError, Event, EventBus, EventKind, MessageSource,
-    StopReason, TaskStatus, Trigger, WatchOn, WatchTarget, automation,
+    StopReason, TaskStatus, WatchOn, WatchTarget,
 };
+use crossagents_orchestrator::breaker;
+use crossagents_orchestrator::watch::{Trigger, WAIT_MAX_DAYS, account_trigger, save_rule};
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 
@@ -142,7 +144,7 @@ impl Notices {
                     "Reminder ({}): {} — the wait was cut to {} days: what you were waiting for did not happen.",
                     reminder.id,
                     reminder.note,
-                    automation::WAIT_MAX_DAYS
+                    WAIT_MAX_DAYS
                 )
             } else {
                 format!("Reminder ({}): {}", reminder.id, reminder.note)
@@ -184,14 +186,14 @@ impl Notices {
             let mut watch = watch;
             // A chain with nobody in between, or a burst within an hour, stops the rule before
             // it wakes anyone again.
-            if let Trigger::Pause(reason) = watch.account_trigger(now) {
-                store.update_watch(&watch).await?;
+            if let Trigger::Pause(reason) = account_trigger(&mut watch, now) {
+                save_rule(store.as_ref(), &watch).await?;
                 orchestrator.warn_rule_paused(&watch, &reason).await?;
                 continue;
             }
             // The count is durable before anyone is woken: a crash cannot forget that this
             // rule passed its chain again.
-            store.update_watch(&watch).await?;
+            save_rule(store.as_ref(), &watch).await?;
             self.bus
                 .publish(EventKind::WatchTriggered {
                     owner: watch.owner,
@@ -205,8 +207,8 @@ impl Notices {
                 .tell(watch.owner, &format!("watch:{}", watch.id), &line)
                 .await;
             // The breaker counts every run of the rule, delivered or not (multica §2.14).
-            let tripped = watch.health.record(now, delivered);
-            store.update_watch(&watch).await?;
+            let tripped = breaker::record(&mut watch.health, now, delivered);
+            save_rule(store.as_ref(), &watch).await?;
             if let Some(reason) = tripped {
                 orchestrator.warn_rule_paused(&watch, &reason).await?;
             }

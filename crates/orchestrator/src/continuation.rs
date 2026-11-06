@@ -477,7 +477,7 @@ impl Orchestrator {
                 .await;
             // Every wakeup is a run of this automation; the breaker counts it whichever way it
             // went (multica §2.14). A pause is written with the rest before anyone is told.
-            let tripped = state.health.record(now, delivered.is_ok());
+            let tripped = crate::breaker::record(&mut state.health, now, delivered.is_ok());
             if let Some(reason) = &tripped {
                 state.phase = "automation_paused".into();
                 state.next_step = format!(
@@ -543,7 +543,7 @@ impl Orchestrator {
         state: &ContinuationState,
         reason: &str,
     ) -> Result<(), CoreError> {
-        let (total, failed) = state.health.counts(Utc::now());
+        let (total, failed) = crate::breaker::counts(&state.health, Utc::now());
         let text = format!(
             "「{}」（run {}）的自动持续推进已自动暂停：{}（7 天内运行 {} 次，失败 {} 次，失败率 ≥90%）。多半是主导长期叫不醒或账号额度用尽；检查账号和 run 状态后，用人用 run policy 的 reset_attempts 重新放开，才会继续。",
             run.title, run.id, reason, total, failed
