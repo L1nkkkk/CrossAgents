@@ -598,9 +598,13 @@ checks = [
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let checks = run_checks(&root).unwrap();
         let cargo = ["cargo test --workspace"];
-        assert_eq!(
-            checks.commands_for(&changed(&["crates/hub/src/api.rs"])),
-            cargo
+        // A change in the crates the sandbox smoke names asks for that build too; both are
+        // cargo, and the workspace tests are always among them.
+        let rust = checks.commands_for(&changed(&["crates/hub/src/api.rs"]));
+        assert!(rust.iter().all(|c| c.starts_with("cargo ")), "{rust:?}");
+        assert!(
+            rust.contains(&"cargo test --workspace".to_owned()),
+            "{rust:?}"
         );
         assert_eq!(checks.commands_for(&changed(&["Cargo.lock"])), cargo);
         // A GUI change waits for the GUI's own checks, not cargo.
