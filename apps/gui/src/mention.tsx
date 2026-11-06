@@ -8,10 +8,11 @@ import type { Agent } from "@bindings/Agent";
 import type { PluginInfo } from "@bindings/PluginInfo";
 import { Avatar, VendorMark, agentTitle, displayName } from "./components";
 import { prettyModel, vendorLabel } from "./lib/models";
+import { cursorMode, reasoningModels } from "./lib/reasoning";
 
 export type Mention = { key: string; token: string; search: string; label: ReactNode; sub?: ReactNode; icon?: ReactNode; group: string };
 
-/** Teammates first (by name), then every model a login offers (by id). */
+/** Teammates first (by name), then every model a login offers (by id; Cursor's bases). */
 export function mentionsFor(agents: Agent[], plugins: PluginInfo[]): Mention[] {
   const mates = agents.map(
     (a): Mention => ({
@@ -26,19 +27,21 @@ export function mentionsFor(agents: Agent[], plugins: PluginInfo[]): Mention[] {
   );
   const seen = new Set<string>();
   const models = plugins.flatMap((p) =>
-    p.models
+    // Cursor hides its mode in the ID: one row per base model, the token still a real variant.
+    reasoningModels(p.name, p.models)
       .filter((m) => !seen.has(m) && !!seen.add(m))
-      .map(
-        (m): Mention => ({
+      .map((m): Mention => {
+        const base = p.name === "cursor" ? cursorMode(m).base : m;
+        return {
           key: `m/${p.name}/${m}`,
           token: m,
-          search: `${m} ${prettyModel(m)} ${vendorLabel(p.name)}`.toLowerCase(),
-          label: `${vendorLabel(p.name)} ${prettyModel(m)}`,
+          search: `${m} ${prettyModel(base)} ${vendorLabel(p.name)}`.toLowerCase(),
+          label: `${vendorLabel(p.name)} ${prettyModel(base)}`,
           sub: m,
           icon: <VendorMark plugin={p.name} size={14} />,
           group: "找一个模型来做",
-        }),
-      ),
+        };
+      }),
   );
   return [...mates, ...models];
 }
