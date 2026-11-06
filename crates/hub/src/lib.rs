@@ -26,6 +26,7 @@ pub mod replies;
 pub mod resume;
 pub mod routing;
 pub mod rules;
+pub mod run_cost;
 pub mod runtime;
 pub mod shadow;
 pub mod shims;
