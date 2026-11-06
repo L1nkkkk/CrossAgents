@@ -277,6 +277,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "setup is commented out in crossagents.toml until the hub runs 0.2.6 (docs/TODO.md §二十四)"]
     fn this_repository_installs_its_gui_dependencies_in_every_worktree() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let commands = commands(&root).unwrap();

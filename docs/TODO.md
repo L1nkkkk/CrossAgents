@@ -271,6 +271,7 @@ B3 远程开发：
 - [ ] **A3 取消任务后归档的 worker，任务的 `completed_at` 为 null**（同 run 审阅时发现）：取消路径没写结束时间，trace 和费用条按时间排序时会排错位置
 - [ ] **B5 hooks 默认关闭后，升级上来的老用户原本开着的 hooks 也被关了**：没有迁移，升级后要人自己去打开
 - [ ] **§十四 git 只读接口的错误码不一致**：同类「路径不在白名单 / 不是仓库」有的返回 409、有的返回 400，GUI `#/git` 页按两种分别处理，该统一
+- [ ] **`crossagents.toml` 的 `[run] setup` 先注释掉了**：0.2.5 的 hub 不认这个字段，`run_land` 报 `unknown field setup` 拒绝落地（run `a40444a0`）。人的 hub 升到 0.2.6 后把它打开，A1 的准备命令才在本项目生效；同时去掉 `crates/orchestrator/src/setup/mod.rs` 里 `this_repository_installs_its_gui_dependencies_in_every_worktree` 的 `#[ignore]`
 
 ## 二十五、借鉴 oh-my-pi 与 Cutex 0.2.1
 
