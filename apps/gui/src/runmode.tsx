@@ -5,6 +5,7 @@
 
 import type { Run } from "@bindings/Run";
 import type { RunMode } from "@bindings/RunMode";
+import { Icon } from "./components";
 
 /** The mode a run works in; runs recorded before the split carry only `in_place`. */
 export function modeOf(run: Pick<Run, "mode" | "in_place">): RunMode {
@@ -51,6 +52,26 @@ export function RunModeTag({ run, compact = false, className = "" }: { run: Pick
       data-mode={place}
     >
       {label}
+    </span>
+  );
+}
+
+/**
+ * The same fact where a row has no room for words: one small glyph — a folder for the person's
+ * own directory, a branch for the hub's worktree — with the whole explanation as its tooltip.
+ */
+export function RunModeMark({ run, className = "" }: { run: Pick<Run, "mode" | "in_place">; className?: string }) {
+  const { label, title } = modeWords(run);
+  const place = modeOf(run).lead;
+  return (
+    <span
+      className={`mode-mark ${place === "in_place" ? "in-place" : "worktree"} ${className}`.trim()}
+      title={title}
+      role="img"
+      aria-label={label}
+      data-mode={place}
+    >
+      <Icon name={place === "in_place" ? "folder" : "branch"} size={11} />
     </span>
   );
 }

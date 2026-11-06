@@ -11,7 +11,7 @@ import { buildTag, compareBuilds } from "./lib/build";
 import { useUpdateState } from "./lib/updates";
 import { Avatar, BrandMark, Icon, ModelMark, ago, displayName, isAgent, sessionHref } from "./components";
 import { useConnectionStatus, useHubData } from "./hub";
-import { RunModeTag } from "./runmode";
+import { RunModeMark, RunModeTag, modeWords } from "./runmode";
 import { runState } from "./lib/taskState";
 import { RowElapsed, usePulseSeeds, useRowLive } from "./liveTurn";
 import { t } from "./lib/i18n";
@@ -606,6 +606,8 @@ function SessionRow({ member, active }: { member: SidebarMember; active: boolean
   const runs = useContext(Runs);
   const work = useMemo(() => sessionWork(agent.id, runs), [agent.id, runs]);
   const plan = work.lead?.tasks ?? [];
+  // Where the run it leads works: one small glyph, since the name has to stay readable here.
+  const mode = work.lead ? modeWords(work.lead.run) : undefined;
   // A turn that just ended lights its row once: finishing is worth noticing, not worth keeping.
   const wasRunning = useRef(running);
   const [justDone, setJustDone] = useState(false);
@@ -634,7 +636,19 @@ function SessionRow({ member, active }: { member: SidebarMember; active: boolean
       compact={compact}
       flash={justDone}
       peek={peek}
-      title={displayName(agent) + " · " + status + (fresh || failed ? " · " + t("sidebar.unread") : "") + (agent.model ? " · " + agent.model : "") + "\n" + (summary || t("sidebar.noActivity")) + "\n" + t("sidebar.besideHint")}
+      title={
+        displayName(agent) +
+        " · " +
+        status +
+        (fresh || failed ? " · " + t("sidebar.unread") : "") +
+        (agent.model ? " · " + agent.model : "") +
+        (mode ? " · " + mode.label : "") +
+        "\n" +
+        (summary || t("sidebar.noActivity")) +
+        (mode ? "\n" + mode.title : "") +
+        "\n" +
+        t("sidebar.besideHint")
+      }
       dot={undefined}
       pinKey={sessionKey(agent)}
       beside={agent.id}
@@ -651,7 +665,7 @@ function SessionRow({ member, active }: { member: SidebarMember; active: boolean
         <span className="member-top">
           <span className={"member-name " + (flagged ? "strong" : "")}>{displayName(agent)}</span>
           <ModelMark plugin={agent.plugin} model={agent.model} />
-          {work.lead && <RunModeTag run={work.lead.run} compact className="row-mode" />}
+          {work.lead && <RunModeMark run={work.lead.run} className="row-mode" />}
           {compact ? <span className="member-inline" data-crawl="">{summary}</span> : <span className="member-gap" />}
           {plan.length > 0 && !running && !(!uncertain && needs > 0) && <span className="member-count">{plan.filter((task) => task.status === "merged").length}/{plan.length}</span>}
           {quiet && !plan.length && member.lastAt && <span className="member-time" title={ago(member.lastAt)}>{shortSince(member.lastAt, Date.now())}</span>}

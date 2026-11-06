@@ -275,7 +275,7 @@ export function App() {
   const below = !!tools && !floatTools && bottom.open && bottom.tabs.some(shows);
   const app = (
     <div
-      className={`app ${drawer ? (floatTools ? "drawer-float" : "with-drawer") : ""} ${sidebar.docked ? "" : "no-sidebar"}`}
+      className={`app ${drawer ? (floatTools ? "drawer-float" : "with-drawer") : ""} ${sidebar.docked ? "" : "no-sidebar"} ${widths.sidebar < 215 ? "sidebar-tight" : ""}`}
       style={{ "--sidebar-width": `${widths.sidebar}px`, "--tools-width": `${widths.tools}px`, "--bottom-height": `${widths.bottom}px` } as CSSProperties}
     >
       {sidebar.docked && <Sidebar route={route} />}

@@ -22,6 +22,25 @@
   font-size: 11px;
 }
 
+/* Where a row has no room for the word: the same fact as a glyph, with its tooltip. */
+.mode-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
+}
+.mode-mark.in-place {
+  color: var(--warn-text);
+}
+/* At the sidebar's narrowest the name must stay readable: the glyph gives way (the work group
+   row above still carries the word, and the row's tooltip keeps the explanation). */
+.app.sidebar-tight .mode-mark {
+  display: none;
+}
+
 /* ---- The page's header --------------------------------------------------------------- */
 
 .work-topbar .title {
