@@ -207,7 +207,9 @@ const LATENCY = 40;
 const STARTUP = 2_500;
 
 /** crates/orchestrator/src/approval.rs `unusable_on_platform`, word for word. */
-const CURSOR_WINDOWS = "Cursor cannot use this permission on Windows: set this agent's permission to bypass, or set the run's approvals to off (全托管).";
+const CURSOR_WINDOWS = "Cursor cannot use this permission on Windows: set this agent's permission to 自动执行 (bypass), or set the run's approvals to off (全托管).";
+/** crates/hub/src/api.rs `agent_settings`, when Cursor on Windows is set to guard. */
+const CURSOR_GUARD_REFUSED = "Cursor cannot ask before each action on Windows; set this agent's permission to 自动执行 (bypass)";
 const json = (status: number, body?: unknown): HubResponse => ({ status, body: body === undefined ? "" : JSON.stringify(body) });
 const notFound = (what: string) => json(404, { error: { code: "not_found", message: `${what} not found` } });
 /** `{scope}/files/{tree|content|status|search|resolve}`; every scope answers from the same mock workspace. */
@@ -606,6 +608,13 @@ export class MockBridge implements CrossAgentsBridge {
     return this.state.unusable?.[agent.id];
   }
 
+  /** `approval::unguarded`: a guard run lets an agent that was explicitly set to bypass act
+   * without approval. The person's own setting, not the run's, is what marks it. */
+  private unguardedFor(agent: Agent, policy?: RunDetail["run"]["config"]["policy"]): boolean {
+    const own = (agent.config as Record<string, unknown> | null)?.permission;
+    return policy?.approvals === "guard" && own === "bypass";
+  }
+
   /** Each planned task's worker that this machine cannot hand the task to, as the hub's
    * `resolve_assignments` words them; a refused approval puts each on its own row. */
   private unusablePlan(d: RunDetail, req: ApproveRunRequest | null): string[] {
@@ -718,7 +727,8 @@ export class MockBridge implements CrossAgentsBridge {
         if (run && !found) return json(409, { error: { code: "conflict", message: "no such run" } });
         const agents = s.agents.map((a) => {
           const why = this.unusableFor(a, found?.run.config.policy);
-          return why ? { ...a, unusable: why } : a;
+          const unguarded = this.unguardedFor(a, found?.run.config.policy);
+          return { ...a, unguarded, ...(why ? { unusable: why } : {}) };
         });
         return json(200, { agents });
       }
@@ -947,7 +957,8 @@ export class MockBridge implements CrossAgentsBridge {
         const policy = run || !split ? waiting[0]?.run.config.policy : undefined;
         const sessions = (s.sessions ?? []).map((candidate) => {
           const why = this.unusableFor(candidate.agent, policy);
-          return why ? { ...candidate, unusable: why } : candidate;
+          const unguarded = this.unguardedFor(candidate.agent, policy);
+          return { ...candidate, unguarded, ...(why ? { unusable: why } : {}) };
         });
         return json(200, { sessions });
       }
@@ -1029,7 +1040,14 @@ export class MockBridge implements CrossAgentsBridge {
         const a = this.agent(m[1]);
         if (!a) return notFound("agent");
         const config = { ...((a.config as Record<string, unknown>) ?? {}) };
-        const { setting_sources: sources, allow_hooks: hooks } = body as AgentSettingsRequest;
+        const { setting_sources: sources, allow_hooks: hooks, permission } = body as AgentSettingsRequest;
+        // Absent leaves the agent's own choice alone; null clears it (follow the run / default).
+        if (permission !== undefined) {
+          if (this.state.windows !== false && a.plugin === "cursor" && permission === "guard")
+            return json(400, { error: { code: "bad_request", message: CURSOR_GUARD_REFUSED } });
+          if (permission === null) delete config.permission;
+          else config.permission = permission;
+        }
         if (sources === null) delete config.setting_sources;
         else config.setting_sources = sources;
         // Off is stored as absence, as the hub does; an absent field leaves it alone.

@@ -971,6 +971,13 @@ export function usePlanApproval(run: Run, busy: boolean) {
   const autoLabel = `自动${fallback ? ` · ${displayName(fallback)}` : ""}`;
   /** Why the hub says this session cannot take work in this run, if it says so. */
   const whyOf = (a: Agent | undefined) => (a ? unusableOf(candidates.data?.find((s) => s.agent.id === a.id)) : undefined);
+  /** `SessionCandidate.unguarded`: it was set to bypass, so this guard run lets it act unchecked. */
+  const unguardedOf = (a: Agent | undefined) => !!a && !!candidates.data?.find((s) => s.agent.id === a.id)?.unguarded;
+  const unguardedMark = (
+    <span className="chip small warn" title="在这次 run 里不经确认：危险操作直接执行，不会先问你">
+      不经确认
+    </span>
+  );
 
   const pick = (task: PlannedTask) => {
     const value = pickOf(task);
@@ -993,7 +1000,12 @@ export function usePlanApproval(run: Run, busy: boolean) {
       return {
         kind: "item",
         key: `agent:${a.id}`,
-        label: <span title={why}>{displayName(a)}</span>,
+        label: (
+          <span title={why}>
+            {displayName(a)}
+            {unguardedOf(a) && <> {unguardedMark}</>}
+          </span>
+        ),
         // Greyed out and unselectable, with the reason where the model and state would be.
         sub: why ? <span title={why}>{why}</span> : teammateSub(a),
         subDir: "ltr",
@@ -1007,7 +1019,12 @@ export function usePlanApproval(run: Run, busy: boolean) {
       {
         kind: "item",
         key: "auto",
-        label: <span title={autoWhy}>{autoLabel}</span>,
+        label: (
+          <span title={autoWhy}>
+            {autoLabel}
+            {unguardedOf(fallback) && <> {unguardedMark}</>}
+          </span>
+        ),
         sub: autoWhy ? <span title={autoWhy}>{autoWhy}</span> : "默认 worker",
         subDir: "ltr",
         icon: fallback ? <Avatar agent={fallback} size={18} /> : undefined,

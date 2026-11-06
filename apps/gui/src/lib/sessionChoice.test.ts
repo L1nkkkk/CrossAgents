@@ -14,6 +14,7 @@ const candidate = (over: Partial<SessionCandidate>): SessionCandidate => ({
   last_execution: null,
   can_use: true,
   reason: null,
+  unguarded: false,
   ...over,
 });
 

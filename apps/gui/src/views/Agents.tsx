@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { AgentProfile } from "@bindings/AgentProfile";
 import { RefreshCw } from "lucide-react";
@@ -27,6 +27,7 @@ import { ConnectExternal, ConnectInstructions } from "./External";
 import { prettyModel, vendorLabel } from "../lib/models";
 import { cursorMode, reasoningModels } from "../lib/reasoning";
 import { installBusy, installingLabel, installingOf, installRefusedText } from "../lib/installState";
+import { CURSOR_GUARD_REFUSED, PERMISSION_OPTIONS, cursorCannotGuard, permissionOf, type PermissionChoice } from "../lib/permission";
 import { unusableOf } from "../lib/unusable";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
 import type { CliInfo } from "@bindings/CliInfo";
@@ -45,10 +46,20 @@ export function AgentsPage() {
     (e) => e.type.startsWith("run."),
   );
   const [editing, setEditing] = useState<"external" | Agent>();
+  // Opened from a card's 「去设置权限」: the editor scrolls to the permission choice and focuses it.
+  const [focusPermission, setFocusPermission] = useState(false);
   const [connect, setConnect] = useState<ConnectInfo>();
   const list = (agents.data ?? []).filter((a) => !a.archived_at);
   // A run that was deleted no longer exists to link to (docs/tasks/R1.md §3.2).
   const runIds = runs.data ?? new Set<string>();
+  const edit = (agent: Agent, atPermission = false) => {
+    setFocusPermission(atPermission);
+    setEditing(agent);
+  };
+  const done = () => {
+    setFocusPermission(false);
+    setEditing(undefined);
+  };
 
   return (
     <div className="team-page">
@@ -81,14 +92,15 @@ export function AgentsPage() {
         {list.map((agent) =>
           typeof editing === "object" && editing.id === agent.id ? (
             <div key={agent.id} className="team-wide">
-              <ProfileEditor agent={agent} onDone={() => setEditing(undefined)} />
+              <ProfileEditor agent={agent} focusPermission={focusPermission} onDone={done} />
             </div>
           ) : (
             <MemberCard
               key={agent.id}
               agent={agent}
               runIds={runIds}
-              onEdit={() => setEditing(agent)}
+              onEdit={() => edit(agent)}
+              onPermission={() => edit(agent, true)}
               onConnect={() => api.connectAgent(agent.id).then(setConnect)}
             />
           ),
@@ -495,12 +507,15 @@ function MemberCard({
   agent,
   runIds,
   onEdit,
+  onPermission,
   onConnect,
 }: {
   agent: Agent;
   /** The runs that still exist; a chip links to one of those only. */
   runIds: Set<string>;
   onEdit: () => void;
+  /** Opens the editor at its 权限 choice: the fix for a Cursor agent that cannot guard here. */
+  onPermission: () => void;
   onConnect: () => void;
 }) {
   const spawnedBy = (agent.config as Record<string, unknown> | null)?.spawned_by_run;
@@ -524,6 +539,18 @@ function MemberCard({
         <p className="member-unusable" title={unusable}>
           <span className="chip small danger">不可用</span>
           <span className="member-unusable-text">{unusable}</span>
+          {/* The Cursor-on-Windows reason names the fix: a link straight to this agent's 权限. */}
+          {agent.plugin === "cursor" && unusable.includes("Cursor cannot use this permission on Windows") && (
+            <button
+              type="button"
+              className="ghost small"
+              style={{ flex: "none" }}
+              onClick={onPermission}
+              title="打开这个 agent 的权限设置：改成「自动执行」它就能在这台机器上用了"
+            >
+              去设置权限
+            </button>
+          )}
         </p>
       )}
       <p className={`member-persona ${agent.profile.persona ? "" : "muted"}`}>{agent.profile.persona || "还没有设定人设。"}</p>
@@ -553,7 +580,7 @@ function MemberCard({
 }
 
 /** Edits an agent's card: name, face, persona, model. Agents are made by the start page or by a lead. */
-export function ProfileEditor({ agent, onDone }: { agent: Agent; onDone: () => void }) {
+export function ProfileEditor({ agent, onDone, focusPermission }: { agent: Agent; onDone: () => void; focusPermission?: boolean }) {
   const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
   const [profile, setProfile] = useState<AgentProfile>(agent.profile);
   const [model, setModel] = useState<string>();
@@ -568,8 +595,22 @@ export function ProfileEditor({ agent, onDone }: { agent: Agent; onDone: () => v
   const [sources, setSources] = useState<string | null>(savedSources);
   const savedHooks = allowHooksOf(agent);
   const [hooks, setHooks] = useState(savedHooks);
+  const savedPermission = permissionOf(agent);
+  const [permission, setPermission] = useState<PermissionChoice>(savedPermission);
+  // Cursor on Windows cannot ask before each action: the hub refuses guard, so it is greyed here.
+  const guardBlocked = cursorCannotGuard(agent);
+  const permissionRef = useRef<HTMLDivElement>(null);
   const set = (patch: Partial<AgentProfile>) => setProfile((p) => ({ ...p, ...patch }));
   const preview = { ...agent, name: name.trim() || agent.name, profile } as Agent;
+
+  // Arriving from a card's 「去设置权限」: the choice is the point of opening this form.
+  useEffect(() => {
+    if (!focusPermission) return;
+    const el = permissionRef.current;
+    if (!el) return;
+    el.scrollIntoView({ block: "center" });
+    el.querySelector<HTMLInputElement>("input:checked:not(:disabled)")?.focus();
+  }, [focusPermission]);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -580,7 +621,15 @@ export function ProfileEditor({ agent, onDone }: { agent: Agent; onDone: () => v
       if (name.trim() && name.trim() !== agent.name) await api.renameAgent(agent.id, name.trim());
       await api.updateProfile(agent.id, { ...profile, display_name: null });
       if ((modelValue.trim() || null) !== agent.model) await api.setModel(agent.id, modelValue.trim() || null);
-      if (claudeLike && (sources !== savedSources || hooks !== savedHooks)) await api.agentSettings(agent.id, { setting_sources: sources, allow_hooks: hooks });
+      const settingsChanged = (claudeLike && (sources !== savedSources || hooks !== savedHooks)) || permission !== savedPermission;
+      if (settingsChanged) {
+        await api.agentSettings(agent.id, {
+          // A plugin that reads no settings files keeps whatever it had; the field is required.
+          setting_sources: claudeLike ? sources : savedSources,
+          ...(claudeLike ? { allow_hooks: hooks } : {}),
+          permission,
+        });
+      }
       onDone();
     } catch (err) {
       setError(errorText(err));
@@ -649,6 +698,39 @@ export function ProfileEditor({ agent, onDone }: { agent: Agent; onDone: () => v
           允许 hooks（默认关闭）：打开后设置文件里的 hooks 会在它的会话里运行；关闭时随 --settings 一起关掉，其余设置照读
         </label>
       )}
+      {/* The agent's own answer for dangerous actions, over the run's approvals (perm-hub). */}
+      <div className="field">
+        <span>权限（危险操作怎么处理）</span>
+        <div className="permission-picks" role="radiogroup" aria-label="权限" ref={permissionRef} style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 2 }}>
+          {PERMISSION_OPTIONS.map((option) => {
+            const blocked = option.value === "guard" && guardBlocked;
+            const why = blocked ? CURSOR_GUARD_REFUSED : option.hint;
+            return (
+              <label
+                key={option.value ?? "default"}
+                className="field-check"
+                title={why}
+                aria-disabled={blocked || undefined}
+                style={{ alignItems: "flex-start", ...(blocked ? { opacity: 0.55, cursor: "not-allowed" } : null) }}
+              >
+                <input
+                  type="radio"
+                  name={`permission-${agent.id}`}
+                  checked={permission === option.value}
+                  disabled={blocked}
+                  onChange={() => setPermission(option.value)}
+                />
+                <span style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+                  <span>{option.label}</span>
+                  <span className="setting-hint" style={{ marginTop: 0 }}>
+                    {why}
+                  </span>
+                </span>
+              </label>
+            );
+          })}
+        </div>
+      </div>
       <p className="muted small" style={{ margin: 0 }}>
         @{agent.name} · {agent.role} · {agent.plugin}
         {agent.driver ? ` · ${agent.driver}` : ""} · 新的人设在它下次开会话时生效；模型从下一轮起生效。

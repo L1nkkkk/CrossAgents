@@ -233,10 +233,10 @@ export const SCENARIOS: Scenario[] = [
     mia.archived_at = ago(60 * 24 * 2);
     const state: MockState = { ...emptyHub(), agents: [ada, rex, mia, sam], quota: quota() };
     state.sessions = [
-      { agent: ada, state: "idle", busy_with: null, last_execution: 'run "多租户隔离" #a (done)', can_use: true, reason: null },
-      { agent: rex, state: "busy", busy_with: 'Rex is busy: it works on #a of run "OAuth 登录" (01a1)', last_execution: 'run "OAuth 登录" #a (in progress)', can_use: false, reason: "busy" },
-      { agent: mia, state: "archived", busy_with: null, last_execution: 'run "登录页改版" #b (done)', can_use: true, reason: "archived" },
-      { agent: sam, state: "idle", busy_with: null, last_execution: null, can_use: false, reason: "cannot_move" },
+      { agent: ada, state: "idle", busy_with: null, last_execution: 'run "多租户隔离" #a (done)', can_use: true, reason: null, unguarded: false },
+      { agent: rex, state: "busy", busy_with: 'Rex is busy: it works on #a of run "OAuth 登录" (01a1)', last_execution: 'run "OAuth 登录" #a (in progress)', can_use: false, reason: "busy", unguarded: false },
+      { agent: mia, state: "archived", busy_with: null, last_execution: 'run "登录页改版" #b (done)', can_use: true, reason: "archived", unguarded: false },
+      { agent: sam, state: "idle", busy_with: null, last_execution: null, can_use: false, reason: "cannot_move", unguarded: false },
     ];
     localStorage.setItem("crossagents.mode", JSON.stringify("run"));
     localStorage.setItem("crossagents.workspace", wsKey(REPO));
@@ -290,9 +290,9 @@ export const SCENARIOS: Scenario[] = [
     // Fixture agents are named by their display name ("Rex"); match any case.
     const byName = (n: string) => scene.state.agents.find((a) => a.name.toLowerCase() === n)!;
     scene.state.sessions = [
-      { agent: byName("rex"), state: "idle", busy_with: null, last_execution: 'run "多租户隔离" #a (done)', can_use: true, reason: null },
-      { agent: byName("mia"), state: "busy", busy_with: 'Mia is busy: it works on #b of run "登录页改版" (01a2)', last_execution: 'run "登录页改版" #b (in progress)', can_use: false, reason: "busy" },
-      { agent: byName("sam"), state: "idle", busy_with: null, last_execution: null, can_use: true, reason: null },
+      { agent: byName("rex"), state: "idle", busy_with: null, last_execution: 'run "多租户隔离" #a (done)', can_use: true, reason: null, unguarded: false },
+      { agent: byName("mia"), state: "busy", busy_with: 'Mia is busy: it works on #b of run "登录页改版" (01a2)', last_execution: 'run "登录页改版" #b (in progress)', can_use: false, reason: "busy", unguarded: false },
+      { agent: byName("sam"), state: "idle", busy_with: null, last_execution: null, can_use: true, reason: null, unguarded: false },
     ];
     return {
       ...scene,
@@ -315,7 +315,7 @@ export const SCENARIOS: Scenario[] = [
     detail.run.plan = detail.run.plan.map((t, i) => (i === 0 ? { ...t, assignee: "pia" } : t));
     state.sessions = state.agents
       .filter((a) => a.id !== lead.id)
-      .map((a) => ({ agent: a, state: "idle", busy_with: null, last_execution: null, can_use: true, reason: null }));
+      .map((a) => ({ agent: a, state: "idle", busy_with: null, last_execution: null, can_use: true, reason: null, unguarded: false }));
     // A second plan waits in the same workspace under a different policy: only naming this
     // plan tells the hub which policy its candidates would be assigned under (and this run
     // is the guard one, so without `run=` Pia would look usable and nothing here greys out).
@@ -344,6 +344,94 @@ export const SCENARIOS: Scenario[] = [
         // Then open the executor menu on the same task: the candidate is there, greyed out.
         { at: 1100, act: () => document.querySelector<HTMLButtonElement>('.who-pick[data-task="a"] .chip-pick')?.click() },
         { at: 1400, act: verify },
+      ],
+    };
+  } },
+  { key: "permission-card", label: "Cursor 的权限提醒", hint: "Agents 页：Windows 上权限不是「自动执行」的 Cursor 卡片写着 hub 的原因，旁边是直接打开它权限设置的链接", build: () => {
+    const scene = oauthRun("plan");
+    const cursor = agent({ name: "pia", plugin: "cursor", model: "claude-opus-5", role: "worker", profile: { display_name: "Pia", title: "Cursor · 前端", color: "teal" } });
+    cursor.config = { permission: "deny" };
+    scene.state.agents.push(cursor);
+    const verify = () => {
+      const link = [...document.querySelectorAll<HTMLButtonElement>(".member-unusable button")].find((b) => b.textContent?.includes("去设置权限"));
+      if (!link) throw new Error("the unusable card has no link to the permission setting");
+      console.info("the Cursor unusable card links to the permission setting");
+    };
+    return {
+      ...scene,
+      route: "#/agents",
+      script: [
+        { at: 700, act: () => document.querySelector(".member.unusable")?.scrollIntoView({ block: "center" }) },
+        { at: 1200, act: verify },
+      ],
+    };
+  } },
+  { key: "permission", label: "每个 agent 的权限", hint: "Agents 页：Pia 的权限不是自动执行，Windows 上的 Cursor 就用不了——卡片写着原因，点「去设置权限」直接打开它的权限设置；Cursor 的「危险操作要我确认」置灰并写着 hub 的理由", build: () => {
+    const scene = oauthRun("plan");
+    const state = scene.state;
+    const cursor = agent({ name: "pia", plugin: "cursor", model: "claude-opus-5", role: "worker", profile: { display_name: "Pia", title: "Cursor · 前端", color: "teal" } });
+    // Not bypass: on Windows this machine cannot give it a usable session, so the card says why
+    // and links to the choice that fixes it.
+    cursor.config = { permission: "deny" };
+    state.agents.push(cursor);
+    const verify = () => {
+      const group = document.querySelector<HTMLElement>(".permission-picks");
+      if (!group) throw new Error("the permission setting is not in the editor");
+      const radios = [...group.querySelectorAll<HTMLInputElement>('input[type="radio"]')];
+      const guard = radios.find((i) => i.closest("label")?.textContent?.includes("危险操作要我确认"));
+      if (!guard) throw new Error("the guard choice is missing");
+      if (!guard.disabled) throw new Error("Cursor can still choose guard on Windows");
+      if (!group.textContent?.includes("Cursor cannot ask before each action on Windows")) throw new Error("the greyed choice has no reason");
+      const chosen = radios.find((i) => i.checked)?.closest("label")?.textContent ?? "";
+      if (!chosen.includes("拒绝")) throw new Error("the agent's stored permission is not shown as chosen");
+      console.info("permission setting: Cursor guard greyed out with the hub's reason");
+    };
+    return {
+      ...scene,
+      route: "#/agents",
+      script: [
+        { at: 700, act: () => document.querySelector(".member.unusable")?.scrollIntoView({ block: "center" }) },
+        { at: 1000, act: () => {
+          const link = [...document.querySelectorAll<HTMLButtonElement>(".member-unusable button")].find((b) => b.textContent?.includes("去设置权限"));
+          if (!link) throw new Error("the unusable card has no link to the permission setting");
+          link.click();
+        } },
+        { at: 1500, act: verify },
+      ],
+    };
+  } },
+  { key: "plan-unguarded", label: "不经确认的候选", hint: "Plan 的执行者菜单：这次 run 要求确认，但显式设成自动执行的候选带「不经确认」，tooltip 说明它会直接干", build: () => {
+    const scene = oauthRun("plan");
+    const state = scene.state;
+    const lead = state.agents.find((a) => a.name === "Ada")!;
+    const byName = (n: string) => state.agents.find((a) => a.name.toLowerCase() === n)!;
+    const rex = byName("rex");
+    const mia = byName("mia");
+    // Explicit bypass: in this guard run these two act without asking, and the hub says so.
+    rex.config = { ...(rex.config as object), permission: "bypass" };
+    mia.config = { ...(mia.config as object), permission: "bypass" };
+    state.sessions = [
+      { agent: rex, state: "idle", busy_with: null, last_execution: 'run "多租户隔离" #a (done)', can_use: true, reason: null, unguarded: true },
+      { agent: mia, state: "idle", busy_with: null, last_execution: null, can_use: true, reason: null, unguarded: true },
+      { agent: byName("sam"), state: "idle", busy_with: null, last_execution: null, can_use: true, reason: null, unguarded: false },
+    ];
+    const verify = () => {
+      const rows = [...document.querySelectorAll<HTMLButtonElement>(".who-pick-menu .menu-item")];
+      const marked = rows.filter((r) => r.textContent?.includes("不经确认"));
+      // Rex (a teammate), Mia, and the auto row (the run's default worker is Rex).
+      if (marked.length !== 3) throw new Error(`expected 3 unguarded candidates, found ${marked.length}`);
+      for (const row of marked) {
+        const chip = row.querySelector<HTMLElement>(".menu-label .chip");
+        if (!chip?.title.includes("不经确认")) throw new Error("the unguarded mark has no tooltip");
+      }
+      console.info("unguarded candidates are marked with their tooltip");
+    };
+    return {
+      ...scene,
+      route: `#/s/${lead.id}`,
+      script: [
+        { at: 800, act: () => document.querySelector<HTMLButtonElement>('.who-pick[data-task="a"] .chip-pick')?.click() },
+        { at: 1300, act: verify },
       ],
     };
   } },
