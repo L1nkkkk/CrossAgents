@@ -225,3 +225,165 @@ async fn a_driver_that_cannot_steer_is_interrupted_and_the_rule_runs_next() {
     );
     t.hub.shutdown();
 }
+
+/// The agent compacting its own context (Claude Code's `compact_boundary`) lets a rule go
+/// again: what the rule said is no longer in the context. The turn that compacts keeps what
+/// it already sent, so the rule is not handed in twice in that turn.
+#[tokio::test]
+async fn the_agents_own_compaction_lets_the_rule_go_again() {
+    let t = TestHub::start_with(native_plugin_with(&["--steer-merge"])).await;
+    let cwd = tempfile::tempdir().unwrap();
+    write_rule(
+        cwd.path(),
+        "pause.md",
+        "---\nmatch: sleeping\n---\nRULE PINEAPPLE: finish the file first.\n",
+    );
+    let agent = t.add_native("Nova", "worker", cwd.path()).await;
+    let mut w = t.watch().await;
+
+    // Turn 1 sends the rule, then the agent compacts by itself in the same turn: the output
+    // after the notice matches again, but the rule is not handed in twice in one turn.
+    t.send(&agent.id.to_string(), "first [sleep 200] [compact]")
+        .await;
+    w.until("the first turn completed", turn_completed).await;
+    assert_eq!(
+        steers_by_turn(&w, "PINEAPPLE"),
+        [1],
+        "one send a turn, compaction or not"
+    );
+
+    // Turn 2 matches again: the compaction lets it go, well inside the twenty turns.
+    t.send(&agent.id.to_string(), "second [sleep 200]").await;
+    w.until("the second turn completed", turn_completed).await;
+    assert_eq!(
+        steers_by_turn(&w, "PINEAPPLE"),
+        [1, 2],
+        "sent again after the agent's own compaction"
+    );
+    t.hub.shutdown();
+}
+
+/// An enabled extension's rule reaches the session as a project rule would, under the
+/// extension's name; a disabled extension contributes nothing.
+#[tokio::test]
+async fn an_enabled_extensions_rule_reaches_the_session() {
+    let home = tempfile::tempdir().unwrap();
+    let fingerprint = "a".repeat(64);
+    let mut records = serde_json::Map::new();
+    for (name, enabled, marker) in [
+        ("standup", true, "RULE LEMON: poll instead of sleeping."),
+        ("quiet", false, "RULE QUIET: never sent."),
+    ] {
+        let dir = home
+            .path()
+            .join("extension-versions")
+            .join(name)
+            .join(&fingerprint);
+        std::fs::create_dir_all(dir.join("rules")).unwrap();
+        std::fs::write(
+            dir.join("extension.toml"),
+            format!(
+                "name = \"{name}\"\napi = 1\naccess = \"read\"\n\n[[rules]]\nfile = \"rules/one.md\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("rules/one.md"),
+            format!("---\nid: no-sleep\nmatch: sleeping\n---\n{marker}\n"),
+        )
+        .unwrap();
+        records.insert(
+            name.to_owned(),
+            serde_json::json!({ "enabled": enabled, "current": fingerprint }),
+        );
+    }
+    std::fs::write(
+        home.path().join("extensions.json"),
+        serde_json::Value::Object(records).to_string(),
+    )
+    .unwrap();
+    let t = TestHub::start_in(home, native_plugin_with(&["--steer-merge"])).await;
+    let cwd = tempfile::tempdir().unwrap();
+    let agent = t.add_native("Nova", "worker", cwd.path()).await;
+    let mut w = t.watch().await;
+
+    t.send(&agent.id.to_string(), "first [sleep 200]").await;
+    let steered = w.until("the rule steered", |e| steered_with(e, "LEMON")).await;
+    let EventKind::AgentSteered { text, .. } = steered.kind else {
+        unreachable!()
+    };
+    assert!(
+        text.contains("CrossAgents rule `standup/no-sleep`"),
+        "{text}"
+    );
+    w.until("the turn completed", turn_completed).await;
+    assert!(
+        !w.output().contains("QUIET"),
+        "the disabled extension's rule is absent: {}",
+        w.output()
+    );
+    t.hub.shutdown();
+}
+
+/// Handing a rule to the driver runs beside the event pump: while a slow steer is in
+/// flight, what the agent writes is still forwarded, and only then is the rule reported.
+/// With the pump waiting for the steer, the rule would be published first.
+#[tokio::test]
+async fn a_slow_steer_does_not_hold_back_the_output() {
+    let t = TestHub::start_with(|config| {
+        config.plugins.insert(
+            "codex".into(),
+            crossagents_plugins::PluginConfig {
+                driver: Some(crossagents_core::DriverKind::CodexNative),
+                native_command: vec![
+                    common::MOCK_AGENT.into(),
+                    "app-server".into(),
+                    "--slow-steer".into(),
+                    "1200".into(),
+                ],
+                ..crossagents_plugins::PluginConfig::default()
+            },
+        );
+    })
+    .await;
+    let cwd = tempfile::tempdir().unwrap();
+    write_rule(
+        cwd.path(),
+        "wait.md",
+        "---\nmatch: working\n---\nRULE PLUM: stop and check the file.\n",
+    );
+    let resp = t
+        .post(
+            "/v1/agents",
+            serde_json::json!({
+                "name": "Ada", "plugin": "codex", "model": "mock-codex",
+                "role": "worker", "cwd": cwd.path().display().to_string(),
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let agent: crossagents_api_types::Agent = resp.json().await.unwrap();
+    let mut w = t.watch().await;
+
+    t.send(&agent.id.to_string(), "first [slow]").await;
+    w.until("the rule was taken in", |e| {
+        matches!(&e.kind, EventKind::AgentSteered { text, .. } if text.contains("PLUM"))
+    })
+    .await;
+
+    let output_at = w
+        .seen
+        .iter()
+        .position(|e| matches!(&e.kind, EventKind::AgentOutput { text, .. } if text.contains("still working")))
+        .expect("the output written while the steer was pending");
+    let steered_at = w
+        .seen
+        .iter()
+        .position(|e| matches!(&e.kind, EventKind::AgentSteered { text, .. } if text.contains("PLUM")))
+        .unwrap();
+    assert!(
+        output_at < steered_at,
+        "output was forwarded before the rule was reported"
+    );
+    t.hub.shutdown();
+}

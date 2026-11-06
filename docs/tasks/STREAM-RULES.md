@@ -30,18 +30,18 @@ frontmatter 字段：
 - 会话启动时读一次规则。输出按文本块匹配，并保留本回合输出的末 4 KB，所以跨块的匹配也能命中；工具调用按它的名字与参数文本匹配。
 - 命中后，若驱动支持插话（steer），规则作为插话送进正在跑的回合，界面上是 `agent.steered` 事件。
 - 驱动不支持插话（或插话失败）时，hub 中断当前回合（`interrupt`），规则作为下一条消息排在等待队列最前面运行，界面上是消息来源为 `Notice` 的 `agent.input`。被打断的那一回合的输出不会自动重发，只有规则本身作为新一轮的输入。
-- 送进去的文本以 ``CrossAgents rule `<id>` (from the project's stream rules; …)`` 开头，所以界面上看得出是规则。
+- 送进去的文本以 ``CrossAgents rule `<id>` (a stream rule; …)`` 开头，所以界面上看得出是规则。
 
 ## 去重
 
 - 同一条规则在同一会话里，**20 个回合之内只送一次**：在回合 `t` 送过，回合 `t+1` 到 `t+19` 不再送，回合 `t+20` 起可以再送。回合按会话开始的回合计数，不按时间。
 - 同一回合内，一条规则只送一次（即使输出和工具调用都命中）。
-- 会话的上下文被压缩（`POST /v1/agents/{key}/compact` 成功）之后，所有规则重新算作没送过。
+- 会话的上下文被压缩之后，所有规则重新算作没送过。压缩有两种来源：hub 自己发起的（`POST /v1/agents/{key}/compact` 成功），和 agent 自己发起的（Claude Code 的 `compact_boundary`、Codex 的 `contextCompaction` / `thread/compacted`，驱动报成 `SessionEventKind::Compacted`）。压缩发生在回合中间时，这一回合已经送过的规则不再送（一回合一条），下一回合起可以再送。
 - 去重状态只在会话内存里：会话停了、换了新进程，就重新开始。
 
 ## 扩展（接口）
 
-`RuleSource` trait（`crates/hub/src/stream_rules.rs`）是规则来源的接口。项目文件（`ProjectRuleFiles`）是第一个实现。扩展要加来源，实现这个 trait 并把它放进 `load_from` 的来源列表即可；这一版没有接任何扩展，也没有扩展侧的实现。
+`RuleSource` trait（`crates/hub/src/stream_rules.rs`）是规则来源的接口。两个实现：项目文件（`ProjectRuleFiles`）和扩展的 `[[rules]]`（`crates/hub/src/extensions/rules.rs` 的 `ExtensionRuleFiles`，从已启用的已批准快照里读，规则 id 前缀扩展名，格式见 [EXTENSIONS.md](../EXTENSIONS.md) §4）。再加来源，实现这个 trait 并放进 `stream_rules::load` 的来源列表即可。
 
 ## 代码位置
 
@@ -51,7 +51,6 @@ frontmatter 字段：
 
 ## 没做或没验证的
 
-- 只用 mock agent 测过（stream-json 的 `--steer-merge` 路径，以及默认 ACP mock 的不能插话路径）。真实 Claude / Codex 的插话行为没实测。
-- 只看 hub 主动发起的压缩。驱动自己压缩（比如 CLI 自动压缩）时没有事件，去重状态不会重置。
+- 只用 mock agent 测过（stream-json 的 `--steer-merge` 路径，以及默认 ACP mock 的不能插话路径）。真实 Claude / Codex 的插话行为和两种自动压缩信号没实测。
 - 界面没在真实 GUI 里看过；插话事件本身没有 `from` 字段，规则靠消息正文的标题区分。
-- 扩展来源没有接。
+- 驱动自己压缩时的 Codex 侧没有区分 hub 发起的压缩（两者都会重置；重复重置无害）。

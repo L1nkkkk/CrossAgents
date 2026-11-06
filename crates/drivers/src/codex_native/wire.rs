@@ -27,6 +27,8 @@ pub mod method {
     pub const THREAD_UNSUBSCRIBE: &str = "thread/unsubscribe";
     pub const THREAD_LOADED_LIST: &str = "thread/loaded/list";
     pub const THREAD_COMPACT: &str = "thread/compact/start";
+    /// Deprecated by Codex in favour of the `contextCompaction` item; both are read.
+    pub const THREAD_COMPACTED: &str = "thread/compacted";
     pub const TURN_START: &str = "turn/start";
     pub const TURN_STEER: &str = "turn/steer";
     pub const TURN_INTERRUPT: &str = "turn/interrupt";
@@ -281,6 +283,9 @@ pub fn translate(method: &str, params: &Value) -> Vec<SessionEventKind> {
             turn_id: turn_id(),
             diff: str_at("/diff").unwrap_or_default().to_owned(),
         },
+        // Codex compacted the history itself (its context filled up). The `contextCompaction`
+        // item says the same thing; both are read, as one is being retired for the other.
+        method::THREAD_COMPACTED => SessionEventKind::Compacted,
         method::COMMAND_OUTPUT_DELTA => {
             let (Some(id), Some(text)) = (str_at("/itemId"), str_at("/delta")) else {
                 return Vec::new();
@@ -316,6 +321,9 @@ pub fn translate(method: &str, params: &Value) -> Vec<SessionEventKind> {
             let Some(item) = params.get("item") else {
                 return Vec::new();
             };
+            if item.get("type").and_then(Value::as_str) == Some("contextCompaction") {
+                return vec![SessionEventKind::Compacted];
+            }
             let Some((id, _, _)) = tool_call(item) else {
                 return Vec::new();
             };
@@ -968,6 +976,29 @@ mod tests {
             &translate(method::ERROR, &retry)[..],
             [SessionEventKind::Warning { .. }]
         ));
+    }
+
+    #[test]
+    fn a_self_compaction_says_the_context_was_compacted() {
+        // The item Codex emits now, and the notification it replaces.
+        let item = json!({ "threadId": "t", "turnId": "u", "item": { "id": "comp-1", "type": "contextCompaction" } });
+        assert!(matches!(
+            &translate(method::ITEM_COMPLETED, &item)[..],
+            [SessionEventKind::Compacted]
+        ));
+        let legacy = json!({ "threadId": "t", "turnId": "u" });
+        assert!(matches!(
+            &translate(method::THREAD_COMPACTED, &legacy)[..],
+            [SessionEventKind::Compacted]
+        ));
+        // A compaction item is not a tool call.
+        assert!(
+            translate(
+                method::ITEM_STARTED,
+                &json!({ "threadId": "t", "item": { "id": "comp-1", "type": "contextCompaction" } })
+            )
+            .is_empty()
+        );
     }
 
     #[test]

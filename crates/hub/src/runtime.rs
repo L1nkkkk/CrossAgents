@@ -374,6 +374,10 @@ pub struct Runtime {
     bus: Arc<EventBus>,
     plugins: PluginRegistry,
     setup: Option<Arc<dyn SessionSetup>>,
+    /// The CrossAgents home, for what a session reads from it as it starts (an extension's
+    /// stream rules). `None` when the runtime was built without one: then only the
+    /// project's own rules are read.
+    home: Option<PathBuf>,
     live: LiveMap,
     /// Serializes start/stop per agent without blocking other agents.
     locks: Mutex<HashMap<AgentId, Arc<Mutex<()>>>>,
@@ -446,6 +450,7 @@ impl Runtime {
             bus,
             plugins,
             setup: None,
+            home: None,
             live: LiveMap::default(),
             locks: Mutex::default(),
             digests: Mutex::default(),
@@ -461,6 +466,12 @@ impl Runtime {
 
     pub fn with_setup(mut self, setup: Arc<dyn SessionSetup>) -> Self {
         self.setup = Some(setup);
+        self
+    }
+
+    /// The home whose enabled extensions contribute stream rules to a new session.
+    pub fn with_home(mut self, home: PathBuf) -> Self {
+        self.home = Some(home);
         self
     }
 
@@ -1298,7 +1309,7 @@ impl Runtime {
         });
         // The stream rules of the agent's workspace, read as its session starts.
         let rules = match self.store().get_agent(&AgentKey::Id(id)).await {
-            Ok(agent) => StreamRules::new(stream_rules::load(&agent.cwd)),
+            Ok(agent) => StreamRules::new(stream_rules::load(&agent.cwd, self.home.as_deref())),
             Err(_) => StreamRules::default(),
         };
         tokio::spawn(forward_events(
@@ -2490,6 +2501,7 @@ async fn forward_events(
                         if running == Some(message_id) {
                             running = None;
                         }
+                        rules.turn_finished();
                         let stop_reason = match result {
                             Ok(reason) => reason,
                             Err(message) => {
@@ -2548,7 +2560,7 @@ async fn forward_events(
 
 /// Returns `true` when the session is gone and forwarding should end.
 async fn handle_session_event(
-    bus: &EventBus,
+    bus: &Arc<EventBus>,
     id: AgentId,
     event: SessionEvent,
     out: &mut Coalescer,
@@ -2564,7 +2576,10 @@ async fn handle_session_event(
             if !injections.is_empty() {
                 // The output that matched goes out before the rule that answers it.
                 out.flush(bus, id).await;
-                inject(bus, id, live, generation, injections).await;
+                // Handing the rule in may wait on the driver (a steer is a request, and an
+                // interrupt is not always instant), so it runs beside the pump: output keeps
+                // flowing while it does (docs/TODO.md §二十五「4 的尾巴」).
+                tokio::spawn(inject(bus.clone(), id, live.clone(), generation, injections));
             }
             return false;
         }
@@ -2654,6 +2669,12 @@ async fn handle_session_event(
         SessionEventKind::Warning { message } => EventKind::AgentWarning { id, message },
         SessionEventKind::Error { message } => EventKind::AgentError { id, message },
         SessionEventKind::SteerRead { message_id } => EventKind::AgentSteerRead { id, message_id },
+        // The agent compacted its own context: what the rules said is no longer in it, so
+        // they may be sent again (docs/tasks/STREAM-RULES.md).
+        SessionEventKind::Compacted => {
+            rules.compacted();
+            return false;
+        }
         // Turn boundaries come from the runtime's own control messages.
         SessionEventKind::TurnStarted { .. } | SessionEventKind::TurnCompleted { .. } => {
             return false;
@@ -2702,7 +2723,9 @@ async fn handle_session_event(
     publish(bus, kind).await;
     if let Some(text) = tool_text {
         let injections = rules.on_tool(&text);
-        inject(bus, id, live, generation, injections).await;
+        if !injections.is_empty() {
+            tokio::spawn(inject(bus.clone(), id, live.clone(), generation, injections));
+        }
     }
     false
 }
@@ -2710,10 +2733,14 @@ async fn handle_session_event(
 /// Sends stream rules into the session's running turn: steered when the driver can take
 /// them in; otherwise the turn is interrupted and the rules run next, ahead of what waits.
 /// Only the session that matched is served; a session already replaced gets nothing.
+///
+/// Runs as its own task: the driver's steer and interrupt are calls that can take seconds
+/// (an ACP interrupt may wait on the agent's process), and the event pump must not wait for
+/// them.
 async fn inject(
-    bus: &EventBus,
+    bus: Arc<EventBus>,
     id: AgentId,
-    live: &LiveMap,
+    live: LiveMap,
     generation: u64,
     injections: Vec<Injection>,
 ) {
@@ -2743,7 +2770,7 @@ async fn inject(
             if live.session.steer(message_id, &prompt).await.is_ok() {
                 tracing::debug!(rule = %injection.rule, "stream rule steered into the turn");
                 publish(
-                    bus,
+                    &bus,
                     EventKind::AgentSteered {
                         id,
                         message_id,
@@ -2785,7 +2812,7 @@ async fn inject(
         "stream rules interrupt the turn and run next"
     );
     publish(
-        bus,
+        &bus,
         EventKind::AgentInput {
             id,
             message_id,
@@ -2803,7 +2830,7 @@ async fn inject(
     .await;
     // What waits changed: say the new state with it.
     publish(
-        bus,
+        &bus,
         EventKind::AgentDeliveryChanged {
             id,
             delivery: live.inbox.delivery(),

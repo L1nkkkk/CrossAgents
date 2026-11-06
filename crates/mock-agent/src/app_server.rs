@@ -17,6 +17,9 @@
 //! - `[fail]`      fail the turn with an error
 //! - `[crash]`     exit the process
 //! - `[limit N]`   report the account's quota as N% used (at 100, the limit as reached)
+//!
+//! `--slow-steer MS` makes `turn/steer` answer after MS milliseconds, while the turn keeps
+//! writing: a driver that waits for the answer holds its caller up, as a slow CLI does.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -42,6 +45,8 @@ struct MockAppServer {
     threads: Mutex<HashMap<String, Value>>,
     active: Mutex<HashMap<String, Active>>,
     counter: AtomicU64,
+    /// `--slow-steer`: how long `turn/steer` takes to answer.
+    slow_steer: u64,
 }
 
 fn rpc_error(message: impl Into<String>) -> RpcError {
@@ -249,24 +254,32 @@ impl MockAppServer {
 
     /// `turn/steer`: more input for the running turn, which reads it at its next boundary.
     async fn turn_steer(&self, params: Value) -> Result<Value, RpcError> {
-        let thread_id = params["threadId"].as_str().unwrap_or_default();
+        let thread_id = params["threadId"].as_str().unwrap_or_default().to_owned();
         let text = params
             .pointer("/input/0/text")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
-        let active = self.active.lock().await;
-        let Some(running) = active.get(thread_id) else {
-            return Err(rpc_error("no active turn to steer"));
+        let (turn_id, steers) = {
+            let active = self.active.lock().await;
+            let Some(running) = active.get(&thread_id) else {
+                return Err(rpc_error("no active turn to steer"));
+            };
+            // Codex refuses a steer meant for a turn that has ended.
+            if let Some(expected) = params["expectedTurnId"].as_str()
+                && expected != running.turn_id
+            {
+                return Err(rpc_error(format!("turn {expected} has ended")));
+            }
+            (running.turn_id.clone(), running.steers.clone())
         };
-        // Codex refuses a steer meant for a turn that has ended.
-        if let Some(expected) = params["expectedTurnId"].as_str()
-            && expected != running.turn_id
-        {
-            return Err(rpc_error(format!("turn {expected} has ended")));
+        steers.lock().await.push(text);
+        if self.slow_steer > 0 {
+            // The caller waits for this answer; what the turn writes meanwhile still comes.
+            self.say(&thread_id, &turn_id, "still working ").await;
+            tokio::time::sleep(Duration::from_millis(self.slow_steer)).await;
         }
-        running.steers.lock().await.push(text);
-        Ok(json!({ "turnId": running.turn_id }))
+        Ok(json!({ "turnId": turn_id }))
     }
 
     async fn say(&self, thread_id: &str, turn_id: &str, text: &str) {
@@ -581,12 +594,20 @@ pub async fn run() {
     let home = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("crossagents-mock-codex"));
+    let args: Vec<String> = std::env::args().collect();
+    let slow_steer = args
+        .iter()
+        .position(|arg| arg == "--slow-steer")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|ms| ms.parse().ok())
+        .unwrap_or(0);
     let server = Arc::new(MockAppServer {
         peer: Mutex::new(None),
         home,
         threads: Mutex::default(),
         active: Mutex::default(),
         counter: AtomicU64::new(0),
+        slow_steer,
     });
     let (peer, reader) = RpcPeer::spawn(
         tokio::io::stdin(),

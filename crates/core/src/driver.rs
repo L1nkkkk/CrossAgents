@@ -507,6 +507,12 @@ pub enum SessionEventKind {
     SteerRead {
         message_id: crate::MessageId,
     },
+    /// The agent compacted its own context (Claude Code's `compact_boundary`, Codex's
+    /// `contextCompaction`): what was in the context before is no longer there. The hub
+    /// resets what it keeps per context on this (the stream rules). A compaction the hub
+    /// asked for ([`DriverSession::compact`]) resets it itself; a driver that reports that
+    /// one too only repeats a harmless reset.
+    Compacted,
     /// A non-fatal problem worth surfacing (e.g. the requested model was not found).
     Warning {
         message: String,

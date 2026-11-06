@@ -31,6 +31,11 @@ pub struct Prompt {
 pub struct Gui {
     pub entry: String,
 }
+/// `[[rules]]`: a stream rule file in the snapshot (docs/EXTENSIONS.md §4).
+#[derive(Debug, Clone, Deserialize)]
+pub struct RuleFile {
+    pub file: String,
+}
 /// `[[on]]`: one process per event, observe only (docs/EXTENSIONS.md §3).
 #[derive(Debug, Clone, Deserialize)]
 pub struct Hook {
@@ -61,6 +66,9 @@ pub struct Manifest {
     pub on: Vec<Hook>,
     pub service: Option<Service>,
     pub gui: Option<Gui>,
+    /// `[[rules]]`: stream rule files, in file order.
+    #[serde(default)]
+    pub rules: Vec<RuleFile>,
 }
 /// The event wire names the hub can emit, read from the core source at compile time so the
 /// list cannot drift. `creator.rs` builds `extension_api` from the same list.
@@ -190,6 +198,12 @@ impl Manifest {
         }
         if let Some(gui) = &m.gui {
             entry(root, &gui.entry)?;
+        }
+        // A rule that does not parse is skipped at session start (with a warning), as a
+        // broken project rule is; only a missing or unsafe path is refused here.
+        for rule in &m.rules {
+            entry(root, &rule.file)
+                .map_err(|e| anyhow::anyhow!("rule {}: {e}", rule.file))?;
         }
         Ok(m)
     }
