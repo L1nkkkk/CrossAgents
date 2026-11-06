@@ -9,10 +9,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crossagents_core::{
-    Agent, AgentId, AgentKey, AgentStatus, AttachmentSupport, Capabilities, CoreError, DiffSource,
-    DriverSession, EXTERNAL_PLUGIN, Envelope, EventBus, EventKind, McpServerSpec, MessageId,
-    MessageSource, NameSource, OutputStream, PermissionPolicy, Prompt, QueuedReason, SessionEvent,
-    SessionEventKind, SessionSpec, StopReason, Store, validate_agent_name,
+    Agent, AgentId, AgentKey, AgentStatus, AttachmentSupport, Capabilities, CoreError,
+    DeliveryState, DeliveryStatus, DiffSource, DriverSession, EXTERNAL_PLUGIN, Envelope, EventBus,
+    EventKind, McpServerSpec, MessageId, MessageSource, NameSource, OutputStream, PermissionPolicy,
+    Prompt, QueuedReason, SessionEvent, SessionEventKind, SessionSpec, StopReason, Store,
+    validate_agent_name,
 };
 use crossagents_plugins::PluginRegistry;
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -117,6 +118,65 @@ impl From<CoreError> for SteerFailure {
 enum ClientEntry {
     Pending(Arc<Notify>),
     Done(Delivery),
+}
+
+/// How many finished deliveries one agent keeps by client id. A hub runs for weeks, so the
+/// ids it will never see again are dropped oldest first instead of piling up; a send still
+/// in flight (`Pending`) is never dropped (docs/tasks/DELIVERY-AUDIT.md §4).
+const CLIENT_HISTORY: usize = 256;
+
+/// Deliveries by fixed client id, per agent, bounded to [`CLIENT_HISTORY`] each.
+#[derive(Default)]
+struct ClientLog {
+    agents: HashMap<AgentId, ClientEntries>,
+}
+
+#[derive(Default)]
+struct ClientEntries {
+    /// The latest delivery by client id.
+    entries: HashMap<MessageId, ClientEntry>,
+    /// The `Done` ids in the order they were kept, oldest first: what overflows drops.
+    order: VecDeque<MessageId>,
+}
+
+impl ClientLog {
+    fn get(&self, agent: AgentId, client: MessageId) -> Option<&ClientEntry> {
+        self.agents.get(&agent)?.entries.get(&client)
+    }
+
+    /// Remembers a send that is being delivered, until it settles.
+    fn pending(&mut self, agent: AgentId, client: MessageId, wait: Arc<Notify>) {
+        self.agents
+            .entry(agent)
+            .or_default()
+            .entries
+            .insert(client, ClientEntry::Pending(wait));
+    }
+
+    /// Keeps the delivery for repeats (dropping this agent's oldest kept one once they pass
+    /// [`CLIENT_HISTORY`]), or frees the id when nothing was delivered.
+    fn settle(&mut self, agent: AgentId, client: MessageId, delivery: Option<Delivery>) {
+        let Some(delivery) = delivery else {
+            if let Some(entries) = self.agents.get_mut(&agent) {
+                entries.entries.remove(&client);
+            }
+            return;
+        };
+        let entries = self.agents.entry(agent).or_default();
+        entries.entries.insert(client, ClientEntry::Done(delivery));
+        entries.order.push_back(client);
+        while entries.order.len() > CLIENT_HISTORY {
+            if let Some(oldest) = entries.order.pop_front() {
+                entries.entries.remove(&oldest);
+            }
+        }
+    }
+
+    /// Forgets everything kept for an agent that stopped or was archived: a repeat to a
+    /// session that is gone is a new turn, not the old delivery.
+    fn forget(&mut self, agent: AgentId) {
+        self.agents.remove(&agent);
+    }
 }
 
 /// What a send with a client id found.
@@ -272,6 +332,24 @@ impl Inbox {
         waiting.is_empty() && !self.busy.load(Ordering::SeqCst)
     }
 
+    /// What a client should see: the same facts `is_idle` and `busy_with` read, in one
+    /// answer (docs/tasks/DELIVERY-AUDIT.md §8 P1-4).
+    fn delivery(&self) -> DeliveryStatus {
+        // Same lock order as `next` and `is_idle`: waiting, then the turn flags.
+        let waiting = self.waiting.lock().unwrap();
+        let queued = waiting.len();
+        let state = if self.busy.load(Ordering::SeqCst) {
+            DeliveryState::Turn
+        } else if queued > 0 {
+            // A message is in line but its turn has not begun: the session is starting or
+            // the previous turn just ended.
+            DeliveryState::Starting
+        } else {
+            DeliveryState::Idle
+        };
+        DeliveryStatus { state, queued }
+    }
+
     /// A turn runs: a message can be steered into it.
     fn is_running(&self) -> bool {
         self.busy.load(Ordering::SeqCst)
@@ -317,7 +395,7 @@ pub struct Runtime {
     replies: std::sync::Mutex<crate::replies::ReplyTracker>,
     /// Each fixed client id's first delivery, by agent: a repeat gets it instead of a new
     /// turn (docs/tasks/DELIVERY-AUDIT.md §4).
-    clients: Mutex<HashMap<(AgentId, MessageId), ClientEntry>>,
+    clients: Mutex<ClientLog>,
     generation: AtomicU64,
 }
 
@@ -632,6 +710,7 @@ impl Runtime {
         for message in waiting {
             live.inbox.push(message, false);
         }
+        self.announce_delivery(agent.id).await;
         Ok(())
     }
 
@@ -1140,6 +1219,56 @@ impl Runtime {
             .is_some_and(|live| !live.inbox.is_idle())
     }
 
+    /// What the agent's session does with messages now, from the same inbox the hub admits
+    /// them into (docs/tasks/DELIVERY-AUDIT.md §8 P1-4). An external agent's messages wait
+    /// for it to fetch them (`held`); an agent with no session is idle, or still `starting`
+    /// while its first session opens.
+    pub async fn delivery_state(&self, agent: &Agent) -> DeliveryStatus {
+        if agent.plugin == EXTERNAL_PLUGIN {
+            let queued = self
+                .external
+                .lock()
+                .await
+                .get(&agent.id)
+                .map_or(0, Vec::len);
+            let state = if queued > 0 {
+                DeliveryState::Held
+            } else {
+                DeliveryState::Idle
+            };
+            return DeliveryStatus { state, queued };
+        }
+        let inbox = self
+            .live
+            .lock()
+            .await
+            .get(&agent.id)
+            .filter(|live| !live.inbox.is_closed())
+            .map(|live| live.inbox.clone());
+        match inbox {
+            Some(inbox) => inbox.delivery(),
+            None => DeliveryStatus {
+                state: if agent.status == AgentStatus::Starting {
+                    DeliveryState::Starting
+                } else {
+                    DeliveryState::Idle
+                },
+                queued: 0,
+            },
+        }
+    }
+
+    /// Tells clients what the agent's session does with messages now, when that just
+    /// changed (docs/tasks/DELIVERY-AUDIT.md §8 P1-4). The agent is read again, so a status
+    /// changed just before this call (`stop`) is the one the state is worked out from.
+    async fn announce_delivery(&self, id: AgentId) {
+        let Ok(agent) = self.store().get_agent(&AgentKey::Id(id)).await else {
+            return;
+        };
+        let delivery = self.delivery_state(&agent).await;
+        publish(&self.bus, EventKind::AgentDeliveryChanged { id, delivery }).await;
+    }
+
     /// Makes `session` the agent's live one: its events are published, its inbox served.
     /// `adopted`: the message whose turn was running when the session was taken over.
     async fn install(
@@ -1426,7 +1555,7 @@ impl Runtime {
         };
         loop {
             let mut clients = self.clients.lock().await;
-            match clients.get(&(agent, client)) {
+            match clients.get(agent, client) {
                 Some(ClientEntry::Done(delivery)) => return ClientClaim::Repeat(delivery.clone()),
                 Some(ClientEntry::Pending(wait)) => {
                     let wait = wait.clone();
@@ -1437,7 +1566,7 @@ impl Runtime {
                 }
                 None => {
                     let wait = Arc::new(Notify::new());
-                    clients.insert((agent, client), ClientEntry::Pending(wait.clone()));
+                    clients.pending(agent, client, wait.clone());
                     return ClientClaim::First(Some((client, wait)));
                 }
             }
@@ -1455,14 +1584,7 @@ impl Runtime {
             return;
         };
         let mut clients = self.clients.lock().await;
-        match delivery {
-            Some(delivery) => {
-                clients.insert((agent, client), ClientEntry::Done(delivery.clone()));
-            }
-            None => {
-                clients.remove(&(agent, client));
-            }
-        }
+        clients.settle(agent, client, delivery.cloned());
         drop(clients);
         wait.notify_one();
     }
@@ -1610,6 +1732,7 @@ impl Runtime {
                     from,
                     Prompt { text, attachments }.with_references(),
                 ));
+            self.announce_delivery(stored.id).await;
             return Ok(Delivery::new(
                 message_id,
                 true,
@@ -1682,6 +1805,9 @@ impl Runtime {
         live.inbox
             .push((message_id, Prompt { text, attachments }), first);
         drop(admission);
+        // The announcement is what clients show as "busy"/"next"; it reads the inbox, so it
+        // says `turn` with the messages behind the running turn, or `starting` for the first.
+        self.announce_delivery(agent.id).await;
         if first && queued {
             let _ = live.session.interrupt().await;
         }
@@ -1771,6 +1897,7 @@ impl Runtime {
             },
         )
         .await;
+        self.announce_delivery(agent.id).await;
         Ok(())
     }
 
@@ -1930,6 +2057,9 @@ impl Runtime {
             )
             .await;
         }
+        // What it took has started, so nothing waits on the hub any more; a message that
+        // arrived meanwhile still counts.
+        self.announce_delivery(id).await;
         messages
     }
 
@@ -2145,8 +2275,11 @@ impl Runtime {
         let agent = self.store().get_agent(key).await?;
         let lock = self.agent_lock(agent.id).await;
         let _guard = lock.lock().await;
+        // Nothing can repeat a send to a session that is gone.
+        self.clients.lock().await.forget(agent.id);
         let Some(live) = self.live.lock().await.remove(&agent.id) else {
             set_status(&self.bus, agent.id, AgentStatus::Stopped).await;
+            self.announce_delivery(agent.id).await;
             return Ok(());
         };
         self.withdraw_waiting(agent.id, &live).await;
@@ -2154,6 +2287,7 @@ impl Runtime {
         live.session.shutdown().await;
         let _ = live.control.send(Control::Stopped);
         set_status(&self.bus, agent.id, AgentStatus::Stopped).await;
+        self.announce_delivery(agent.id).await;
         Ok(())
     }
 
@@ -2215,6 +2349,20 @@ fn command_of(agent: &Agent) -> Option<Vec<String>> {
 async fn publish(bus: &EventBus, kind: EventKind) {
     if let Err(err) = bus.publish(kind).await {
         tracing::error!(error = %err, "cannot publish event");
+    }
+}
+
+/// Publishes what the session's inbox says now, for a session this forwarder owns: what
+/// clients show as "busy"/"next" (docs/tasks/DELIVERY-AUDIT.md §8 P1-4).
+async fn announce_inbox(bus: &EventBus, id: AgentId, live: &LiveMap, generation: u64) {
+    let delivery = live
+        .lock()
+        .await
+        .get(&id)
+        .filter(|live| live.generation == generation)
+        .map(|live| live.inbox.delivery());
+    if let Some(delivery) = delivery {
+        publish(bus, EventKind::AgentDeliveryChanged { id, delivery }).await;
     }
 }
 
@@ -2324,6 +2472,7 @@ async fn forward_events(
                         rules.turn_started();
                         set_status(&bus, id, AgentStatus::Running).await;
                         publish(&bus, EventKind::AgentTurnStarted { id, message_id }).await;
+                        announce_inbox(&bus, id, &live, generation).await;
                     }
                     Some(Control::Compacted) => rules.compacted(),
                     Some(Control::TurnFinished(message_id, result, diff)) => {
@@ -2367,6 +2516,7 @@ async fn forward_events(
                         if idle == Some(true) {
                             set_status(&bus, id, AgentStatus::Idle).await;
                         }
+                        announce_inbox(&bus, id, &live, generation).await;
                     }
                     Some(Control::Stopped) | None => return,
                 }
@@ -2631,6 +2781,15 @@ async fn inject(
         },
     )
     .await;
+    // What waits changed: say the new state with it.
+    publish(
+        bus,
+        EventKind::AgentDeliveryChanged {
+            id,
+            delivery: live.inbox.delivery(),
+        },
+    )
+    .await;
 }
 
 /// A notification digest waiting for its turn.
@@ -2756,4 +2915,51 @@ fn tail(text: String, limit: usize) -> String {
 {}",
         &text[start..]
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn delivery(id: MessageId) -> Delivery {
+        Delivery::new(id, false, None)
+    }
+
+    /// Past the cap the oldest kept delivery goes, the newest stays, and a repeat of an id
+    /// still inside the window is still answered with its delivery.
+    #[test]
+    fn client_history_drops_the_oldest_and_keeps_repeats() {
+        let mut log = ClientLog::default();
+        let agent = AgentId::new();
+        let ids: Vec<MessageId> = (0..CLIENT_HISTORY + 8).map(|_| MessageId::new()).collect();
+        for id in &ids {
+            log.settle(agent, *id, Some(delivery(*id)));
+        }
+        assert!(log.get(agent, ids[0]).is_none(), "the oldest went");
+        assert!(log.get(agent, ids[7]).is_none(), "up to the excess went");
+        assert!(log.get(agent, ids[8]).is_some(), "the window starts here");
+        assert!(
+            matches!(log.get(agent, ids[CLIENT_HISTORY + 7]), Some(ClientEntry::Done(d)) if d.message_id == ids[CLIENT_HISTORY + 7]),
+            "the newest is kept"
+        );
+        // A pending send is not dropped, even while finished ones overflow.
+        let pending = MessageId::new();
+        log.pending(agent, pending, Arc::new(Notify::new()));
+        for _ in 0..8 {
+            let id = MessageId::new();
+            log.settle(agent, id, Some(delivery(id)));
+        }
+        assert!(matches!(
+            log.get(agent, pending),
+            Some(ClientEntry::Pending(_))
+        ));
+        // Another agent's history is untouched.
+        let other = AgentId::new();
+        log.settle(other, ids[0], Some(delivery(ids[0])));
+        assert!(log.get(other, ids[0]).is_some());
+        // Forgetting an agent clears just its records.
+        log.forget(agent);
+        assert!(log.get(agent, pending).is_none());
+        assert!(log.get(other, ids[0]).is_some());
+    }
 }

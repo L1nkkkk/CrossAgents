@@ -9,10 +9,11 @@ use ts_rs::TS;
 
 pub use crossagents_core::{
     Account, AccountStatus, Agent, AgentCommand, AgentCommandKind, AgentId, AgentProfile,
-    AgentStatus, Capabilities, CheckResult, ClaimRole, ContinuationPolicy, DataSource, DiffSource,
-    DriverKind, Event, EventKind, Handoff, HandoffKind, HistoryTask, MessageId, MessageSource,
-    ModelInfo, OutputStream, PlannedTask, QueuedReason, Role, Run, RunHistory, RunId, RunPolicy,
-    RunStatus, StopReason, Task, TaskId, TaskStatus, TokenTotals, ToolInfo, ToolStatus,
+    AgentStatus, Capabilities, CheckResult, ClaimRole, ContinuationPolicy, DataSource,
+    DeliveryState, DeliveryStatus, DiffSource, DriverKind, Event, EventKind, Handoff, HandoffKind,
+    HistoryTask, MessageId, MessageSource, ModelInfo, OutputStream, PlannedTask, QueuedReason,
+    Role, Run, RunHistory, RunId, RunPolicy, RunStatus, StopReason, Task, TaskId, TaskStatus,
+    TokenTotals, ToolInfo, ToolStatus,
 };
 
 /// Handoff cards and how a task's chain of them reads.
@@ -265,6 +266,13 @@ pub struct Transcript {
     pub driver: Option<DriverKind>,
     /// What that driver can do; clients show operations by these flags.
     pub capabilities: Option<Capabilities>,
+    /// What the session is doing with messages right now, from the same inbox the hub
+    /// admits them into: `state` is `idle`, `starting`, `turn` or `held`, and `queued`
+    /// counts the messages that have not started. A client shows "busy" as
+    /// `state != idle` and "next" as `queued`, instead of working either out itself
+    /// (docs/tasks/DELIVERY-AUDIT.md §8 P1-4).
+    #[serde(default)]
+    pub delivery: DeliveryStatus,
     /// Oldest first. A message still waiting for its turn is the last turn, not started.
     pub turns: Vec<TranscriptTurn>,
     /// Latest context usage the agent reported.

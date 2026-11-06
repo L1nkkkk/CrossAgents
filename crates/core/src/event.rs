@@ -64,6 +64,35 @@ pub enum QueuedReason {
     Empty,
 }
 
+/// What a session is doing with messages right now (docs/tasks/DELIVERY-AUDIT.md §8 P1-4).
+/// The hub answers this from the inbox that admits messages, so clients do not work "busy"
+/// out of process status, started turns or a queue count of their own.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryState {
+    /// Nothing runs and nothing waits: a message would start a turn at once.
+    #[default]
+    Idle,
+    /// A message waits for its turn to begin: the session is being started, or the last
+    /// turn just ended and the next one has not been taken yet.
+    Starting,
+    /// A turn runs; `DeliveryStatus::queued` says how many messages wait behind it.
+    Turn,
+    /// The agent runs outside the hub: it takes its messages when it asks for them.
+    Held,
+}
+
+/// A session's delivery state and how many messages have not started.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct DeliveryStatus {
+    pub state: DeliveryState,
+    /// Messages that have not started: those waiting behind the running turn, or, in
+    /// `starting`, those waiting for their turn to begin.
+    pub queued: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Event {
@@ -103,6 +132,14 @@ pub enum EventKind {
         id: AgentId,
         from: AgentStatus,
         to: AgentStatus,
+    },
+    /// What the agent's session does with messages now: the same [`DeliveryStatus`] the
+    /// transcript carries, so clients need not work it out from other events
+    /// (docs/tasks/DELIVERY-AUDIT.md §8 P1-4).
+    #[serde(rename = "agent.delivery_changed")]
+    AgentDeliveryChanged {
+        id: AgentId,
+        delivery: DeliveryStatus,
     },
     /// A message for the agent was accepted; `queued` if it waits for the current turn.
     #[serde(rename = "agent.input")]
@@ -596,6 +633,7 @@ impl EventKind {
             Self::AgentUpdated { .. } => "agent.updated",
             Self::AgentRemoved { .. } => "agent.removed",
             Self::AgentStatusChanged { .. } => "agent.status_changed",
+            Self::AgentDeliveryChanged { .. } => "agent.delivery_changed",
             Self::AgentInput { .. } => "agent.input",
             Self::AgentInputRefused { .. } => "agent.input_refused",
             Self::AgentInputWithdrawn { .. } => "agent.input_withdrawn",
@@ -720,6 +758,7 @@ impl EventKind {
             Self::AgentCreated { agent } | Self::AgentUpdated { agent } => Some(agent.id),
             Self::AgentRemoved { id, .. }
             | Self::AgentStatusChanged { id, .. }
+            | Self::AgentDeliveryChanged { id, .. }
             | Self::AgentInput { id, .. }
             | Self::AgentInputRefused { id, .. }
             | Self::AgentInputWithdrawn { id, .. }
