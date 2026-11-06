@@ -58,6 +58,9 @@ import { ReasoningPicks } from "../reasoningPicks";
 import { cursorMode, reasoningModels } from "../lib/reasoning";
 import { StateWord, TaskChanges } from "../parts";
 import { RunChanges, TaskReview } from "../review";
+import { InlineNeeds } from "../inlineask";
+import { RelayBanner } from "../relay";
+import { useQuestions } from "../questions";
 import { RunTraceView } from "../trace";
 import { RailCard } from "../rail";
 import { t, type Key } from "../lib/i18n";
@@ -117,6 +120,9 @@ export function RunView({
   const detail = useRun(runId);
   const agents = useAgents();
   const [deleting, setDeleting] = useState(false);
+  // What waits on the person here, like the strip above the composer: it also stands where it
+  // happened, in the timeline (docs/research/magpie-lancer.md §2.6).
+  const questions = useQuestions();
 
   // `#/runs/<id>/delete` opens the confirmation (a link the person can be sent; also how the
   // mock previews show the dialog).
@@ -136,6 +142,7 @@ export function RunView({
     return <div className="page-inner">{detail.error ? <ErrorBox error={detail.error} /> : <p className="muted">加载中…</p>}</div>;
   }
   const { run, tasks } = detail.data;
+  const asks = (questions.data?.items ?? []).filter((i) => i.status === "open" && (i.run_id === run.id || i.from === run.planner));
   const planner = agentName(agents.data, run.planner);
   const plannerAgent = agents.data?.find((a) => a.id === run.planner);
   const allEnded = tasks.length > 0 && tasks.every((t) => ["merged", "failed", "cancelled"].includes(t.status));
@@ -171,6 +178,8 @@ export function RunView({
   // and open for the whole note; everything else about the run is in the rail.
   const top = (
     <div className="run-head">
+      <RelayBanner run={run} tasks={tasks} agents={agents.data} />
+      <InlineNeeds items={asks} agents={agents.data ?? []} />
       {run.status === "paused" && (
         <OneLine tone="warn" icon={<span aria-hidden="true">❚❚</span>} title="已暂停" summary={firstSentence(run.note ?? "等你决定")}>
           {`${run.note ?? "等你决定"}。在「问你」里选择加预算继续，或取消这个 run。`}
