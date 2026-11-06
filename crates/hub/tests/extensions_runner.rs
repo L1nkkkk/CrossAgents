@@ -181,8 +181,16 @@ impl Fixture {
     }
 }
 
-async fn until(what: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+/// Waits for `ready` for up to 60 s. The cap only bounds a failure: the loop returns as soon as
+/// `ready` is true. The hub runs its hooks and services as child processes, and under a
+/// parallel `cargo build` one can take well over 20 s to start or to be seen.
+async fn until(what: &str, ready: impl FnMut() -> bool) {
+    until_within(Duration::from_secs(60), what, ready).await;
+}
+
+/// [`until`] with its own cap, for a wait that legitimately needs longer than 60 s under load.
+async fn until_within(cap: Duration, what: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + cap;
     while !ready() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -1417,9 +1425,11 @@ async fn extensions_disabling_ends_a_running_hook_and_its_token() {
     until("the hook's heartbeat", || beat.is_file()).await;
 
     hub.extensions.disable("demo").unwrap();
-    // The same grace a tool call gets, not the hook's 60 s timeout.
+    // The same grace a tool call gets (5 s, `disable_grace`), not the hook's 60 s timeout.
+    // The ceiling is the grace plus 15 s of slack for a loaded machine: the test only has to
+    // tell "ended by the grace" from "never ended", and the 60 s timeout is far beyond both.
     tokio::time::timeout(
-        Duration::from_secs(9),
+        Duration::from_secs(20),
         until("the hook to end", || runner.live_tokens() == 0),
     )
     .await
@@ -1452,7 +1462,8 @@ async fn extensions_shutdown_during_the_disable_grace_still_stops_a_service() {
     // The 5 s grace has just begun; the hub goes away in the middle of it.
     tokio::time::sleep(Duration::from_millis(150)).await;
     shutdown.cancel();
-    tokio::time::timeout(Duration::from_secs(8), task)
+    // Still inside the 5 s grace when the hub goes away; 20 s leaves room for a loaded machine.
+    tokio::time::timeout(Duration::from_secs(20), task)
         .await
         .expect("services must stop with the hub")
         .unwrap();
@@ -1486,14 +1497,16 @@ async fn extensions_disabling_two_services_waits_out_their_graces_in_parallel() 
     let started = Instant::now();
     registry.disable("demo").unwrap();
     registry.disable("beta").unwrap();
-    // A 5 s grace each, at the same time; in series the second would end at about 10 s.
+    // A 5 s grace each, at the same time; in series the second would end at about 10 s. The
+    // bound is 9 s: parallel has 4 s of slack for a loaded machine, and serial (>= 10 s) still
+    // fails it, so the check keeps telling the two apart.
     tokio::time::timeout(
-        Duration::from_secs(6),
+        Duration::from_secs(9),
         until("both services to end", || runner.live_tokens() == 0),
     )
     .await
     .expect("the two graces must run at the same time");
-    assert!(started.elapsed() < Duration::from_secs(6));
+    assert!(started.elapsed() < Duration::from_secs(9));
     shutdown.cancel();
     let _ = task.await;
 }
@@ -1585,12 +1598,14 @@ curl -s -o /dev/null -X POST -H "Authorization: Bearer $CROSSAGENTS_TOKEN" -H 'C
     // Wait for the breaker itself, rather than assuming a fixed time for five
     // PowerShell processes and HTTP requests under parallel test load.
     let log_path = home.path().join("extension-logs/demo.log");
-    tokio::time::timeout(Duration::from_secs(45), until("the breaker to trip", || {
+    // Each hook is a PowerShell process, and six of them run in turn; with a parallel build
+    // going, one run took about 60 s to trip the breaker. 120 s is the cap for that case. It
+    // only bounds a failure, since the wait returns as soon as the line is written.
+    until_within(Duration::from_secs(120), "the breaker to trip", || {
         fs::read_to_string(&log_path)
             .is_ok_and(|log| log.contains("circuit breaker"))
-    }))
-    .await
-    .expect("the loop must reach the breaker");
+    })
+    .await;
     until("all admitted hooks to finish", || hub.extension_runner.live_tokens() == 0).await;
     let capped = lines(&starts);
     assert!(capped >= 2, "the loop never ran: {capped} starts");
@@ -1705,14 +1720,16 @@ async fn extensions_a_hook_ends_on_disable_and_a_new_event_starts_after_reenable
     // Disable and enable again at once: the old hook still ends after its grace.
     hub.extensions.disable("demo").unwrap();
     hub.extensions.enable("demo", &fp).unwrap();
+    // The old hook ends by its 5 s grace; 30 s is the ceiling for a loaded machine.
     tokio::time::timeout(
-        Duration::from_secs(20),
+        Duration::from_secs(30),
         until("the old hook to end", || runner.live_tokens() == 0),
     )
     .await
     .expect("the old hook must end");
 
-    // A new event is not charged against the old one and starts a fresh hook.
+    // A new event is not charged against the old one and starts a fresh hook. The ceiling is
+    // 20 s: starting a hook is a spawn, which a loaded machine can delay by several seconds.
     hub.bus
         .publish(EventKind::HubStarted {
             version: "test".into(),
@@ -1720,7 +1737,7 @@ async fn extensions_a_hook_ends_on_disable_and_a_new_event_starts_after_reenable
         .await
         .unwrap();
     tokio::time::timeout(
-        Duration::from_secs(9),
+        Duration::from_secs(20),
         until("a new hook to start", || runner.live_tokens() == 1),
     )
     .await

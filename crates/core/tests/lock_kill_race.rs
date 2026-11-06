@@ -68,8 +68,22 @@ fn length(path: &std::path::Path) -> u64 {
     std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
+/// The experiments race for one lock, kill processes and spin in tight loops, so two of them
+/// running at once (cargo runs the tests of this binary in parallel by default) steal CPU and
+/// lock time from each other and make the windows unreliable. Every entry point takes this
+/// guard, so they run one after another inside this binary no matter how many test threads
+/// there are. No flag has to be remembered: `cargo test` alone is enough.
+fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A panic in one experiment poisons the mutex; the next one still has to run.
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // This cap only bounds a failure: the loop returns as soon as `done` is true. Under the
+    // load of a parallel `cargo build` a helper can take well over 10 s to show up, so the
+    // cap is 60 s rather than a number that passes on an idle machine only.
+    let deadline = Instant::now() + Duration::from_secs(60);
     while !done() {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(2));
@@ -321,6 +335,7 @@ fn windows_summary(check: Predecessor, seen: &[WindowsRound]) -> String {
 
 #[cfg(windows)]
 fn run_windows(check: Predecessor, count: u32) -> String {
+    let _exclusive = exclusive();
     let seen: Vec<_> = (0..count)
         .map(|round| windows_round(round, check))
         .collect();
@@ -430,6 +445,7 @@ fn inherited_round(round: u32) -> InheritedRound {
 
 #[cfg(windows)]
 fn run_inherited_rounds(count: u32) -> String {
+    let _exclusive = exclusive();
     let seen: Vec<_> = (0..count).map(inherited_round).collect();
     let count_where =
         |what: fn(&InheritedRound) -> bool| seen.iter().filter(|round| what(round)).count();
@@ -714,6 +730,7 @@ mod unix_experiment {
     }
 
     fn run(mode: &str, predecessor_check: bool, count: u32) -> String {
+        let _exclusive = super::exclusive();
         let seen: Vec<_> = (0..count)
             .map(|round| self::round(round, mode, predecessor_check))
             .collect();
