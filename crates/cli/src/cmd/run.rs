@@ -577,6 +577,16 @@ fn print_trace(ctx: &Context, trace: &RunTrace) -> Result<()> {
         for reason in &task.rerouted {
             println!("  rerouted: {reason}");
         }
+        // Each dispatch and the accounts weighed for it, best first (magpie-lancer §2.8).
+        for dispatch in &task.dispatches {
+            println!(
+                "  account: {}",
+                dispatch.account.as_deref().unwrap_or("(its own)")
+            );
+            for candidate in &dispatch.candidates {
+                println!("    {} — {}", candidate.account, candidate.reason);
+            }
+        }
         if !task.handoffs.is_empty() {
             println!("  handoffs: {}", handoff::chain(&task.handoffs));
         }

@@ -93,6 +93,16 @@ pub struct DeliveryStatus {
     pub queued: usize,
 }
 
+/// One account weighed for a dispatch, with why it ranks where it does: the accounts are
+/// listed best first (magpie-lancer §2.8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct AccountCandidate {
+    pub account: String,
+    /// Why it is where it is in the order, in words.
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Event {
@@ -455,6 +465,20 @@ pub enum EventKind {
         to: AgentId,
         reason: String,
     },
+    /// A worker was dispatched for the task: the same-vendor accounts weighed, best first,
+    /// and the one it got. Sent for every dispatch, not only when quota moved it
+    /// (magpie-lancer §2.8).
+    #[serde(rename = "task.routed")]
+    TaskRouted {
+        run_id: RunId,
+        id: TaskId,
+        key: String,
+        /// The account the worker runs on; `None` when routing knew no account.
+        #[serde(default)]
+        account: Option<String>,
+        #[serde(default)]
+        candidates: Vec<AccountCandidate>,
+    },
     /// The task changed hands; `handoff` is the card, also stored on the task. Published
     /// before the new worker gets its first message.
     #[serde(rename = "task.handed_off")]
@@ -683,6 +707,7 @@ impl EventKind {
             Self::TaskChecked { .. } => "task.checked",
             Self::TaskProgress { .. } => "task.progress",
             Self::TaskRerouted { .. } => "task.rerouted",
+            Self::TaskRouted { .. } => "task.routed",
             Self::TaskHandedOff { .. } => "task.handed_off",
             Self::TaskCommand { .. } => "task.command",
             Self::CliInstallStarted { .. } => "cli.install.started",
@@ -710,6 +735,7 @@ impl EventKind {
             | Self::TaskChecked { run_id, .. }
             | Self::TaskProgress { run_id, .. }
             | Self::TaskRerouted { run_id, .. }
+            | Self::TaskRouted { run_id, .. }
             | Self::TaskHandedOff { run_id, .. }
             | Self::TaskCommand { run_id, .. } => Some(*run_id),
             _ => None,
@@ -729,6 +755,7 @@ impl EventKind {
             | Self::RunPlanSubmitted { .. }
             | Self::TaskChecked { .. }
             | Self::TaskProgress { .. }
+            | Self::TaskRouted { .. }
             | Self::AccountCreated { .. }
             | Self::AccountRemoved { .. }
             | Self::AccountQuotaUpdated { .. }

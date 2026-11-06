@@ -345,8 +345,13 @@ impl Accounts {
     /// known: the cached status and what agents reported since. Never waits for a provider;
     /// an account read for the first time is `Unknown` and a read starts in the background.
     pub async fn health(&self, id: &str, model: Option<&str>) -> Health {
+        self.fit(id, model).await.health
+    }
+
+    /// What routing weighs an account by, from what is already known (see [`Fit`]).
+    pub async fn fit(&self, id: &str, model: Option<&str>) -> Fit {
         let Ok(account) = self.store().get_account(id).await else {
-            return Health::Unknown;
+            return Fit::unknown();
         };
         let cached = self.statuses.lock().unwrap().get(id).cloned();
         let observed = self.observed.lock().unwrap().get(id).cloned();
@@ -389,13 +394,13 @@ impl Accounts {
             }
         }
         if cached.is_none() && observed.is_none() {
-            return Health::Unknown;
+            return Fit::unknown();
         }
         let default_model = self.default_models.lock().unwrap().get(id).cloned();
         let model = model
             .filter(|m| !matches!(*m, "" | "default" | "auto"))
             .or(default_model.as_deref());
-        judge_for_model_with_top(
+        let health = judge_for_model_with_top(
             &windows,
             &groups,
             model,
@@ -404,7 +409,43 @@ impl Accounts {
             top_group.as_deref(),
             refusal.as_deref(),
             &account.provider,
-        )
+        );
+        let now = Utc::now();
+        let running: Vec<&crossagents_core::RateWindow> = windows
+            .iter()
+            .filter(|w| w.resets_at.is_none_or(|at| at > now))
+            .collect();
+        let fullest = running
+            .iter()
+            .max_by(|a, b| a.used_percent.total_cmp(&b.used_percent));
+        let resets_at = running.iter().filter_map(|w| w.resets_at).min();
+        // A window that resets soon with most of it unused is about to be lost
+        // (magpie-lancer §2.5): the run's lead can still put work on it.
+        let expiring = expiring_of(&windows);
+        Fit {
+            health,
+            fullest: fullest.map(|w| w.used_percent),
+            fullest_window: fullest.map(|w| w.name.clone()),
+            resets_at,
+            failed: refusal.is_some(),
+            expiring,
+        }
+    }
+
+    /// Like [`Self::fit`], but an account nothing is known about is read once first, so
+    /// routing can weigh its quota instead of guessing (magpie-lancer §2.2: an account
+    /// whose quota is unknown gets one try, which also learns what it has left).
+    pub async fn weigh(&self, id: &str, model: Option<&str>) -> Fit {
+        let unknown = {
+            let statuses = self.statuses.lock().unwrap();
+            let observed = self.observed.lock().unwrap();
+            !statuses.contains_key(id) && !observed.contains_key(id)
+        };
+        if unknown {
+            // The blocking read goes in the cache, so the `fit` below starts no other.
+            let _ = self.status(id).await;
+        }
+        self.fit(id, model).await
     }
 
     /// Marks the account as out of quota now (an agent on it was refused).
@@ -1534,6 +1575,79 @@ impl Health {
 
 /// A window this full counts as about to run out.
 pub const LOW_PERCENT: f64 = 90.0;
+
+/// How much of a window must be left, when it resets within [`EXPIRING_WITHIN`], for its
+/// quota to be worth spending on more work now (magpie-lancer §2.5).
+///
+/// Half: below that, the quota left is about one turn, not enough to change what the run
+/// plans, so a notice would only add noise. The reference example is 60% left.
+pub const SPARE_PERCENT: f64 = 50.0;
+
+/// How soon before its reset a window's leftover quota counts as about to be lost.
+///
+/// Two hours: long enough for a planner to read a notice and dispatch a task, short enough
+/// that the notice is actionable. The reference example uses "2 hours".
+pub const EXPIRING_WITHIN: chrono::Duration = chrono::Duration::hours(2);
+
+/// What routing weighs an account by: its health, how full its fullest window is, when its
+/// quota is replaced, and whether an expiry is about to waste a lot of it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fit {
+    pub health: Health,
+    /// Percent used of the fullest window still running.
+    pub fullest: Option<f64>,
+    /// The name of that window, for saying why.
+    pub fullest_window: Option<String>,
+    /// When the running window that resets first is replaced (its unused quota is lost).
+    pub resets_at: Option<DateTime<Utc>>,
+    /// The vendor or an agent refused it since its last good reading: it goes last, but is
+    /// still a candidate (magpie-lancer §2.2).
+    pub failed: bool,
+    /// A window that resets soon with much of it unused.
+    pub expiring: Option<Expiring>,
+}
+
+impl Fit {
+    pub(crate) fn unknown() -> Self {
+        Self {
+            health: Health::Unknown,
+            fullest: None,
+            fullest_window: None,
+            resets_at: None,
+            failed: false,
+            expiring: None,
+        }
+    }
+}
+
+/// The running window that resets soon with the most unused quota, if any: use it or lose
+/// it (magpie-lancer §2.5).
+pub(crate) fn expiring_of(windows: &[crossagents_core::RateWindow]) -> Option<Expiring> {
+    let now = Utc::now();
+    windows
+        .iter()
+        .filter(|w| {
+            w.resets_at
+                .is_some_and(|at| at > now && at - now <= EXPIRING_WITHIN)
+                && 100.0 - w.used_percent >= SPARE_PERCENT
+        })
+        // Most left first: that is the quota worth planning for.
+        .min_by(|a, b| a.used_percent.total_cmp(&b.used_percent))
+        .map(|w| Expiring {
+            window: w.name.clone(),
+            remaining_percent: 100.0 - w.used_percent,
+            resets_at: w.resets_at.unwrap(),
+        })
+}
+
+/// A quota window that resets soon with much of it unused: use it or lose it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Expiring {
+    pub window: String,
+    /// Percent of the window still unused.
+    pub remaining_percent: f64,
+    pub resets_at: DateTime<Utc>,
+}
 
 fn judge(
     windows: &[crossagents_core::RateWindow],

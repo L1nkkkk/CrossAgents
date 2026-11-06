@@ -46,7 +46,7 @@ pub use delete::{DeleteRun, DeletedRun, DeletedRunAgents};
 pub use engine::{Approval, DEFAULT_BUILD_CACHE_LIMIT, NewRun, Orchestrator, OrchestratorConfig};
 pub use files::{FileError, FilesScope};
 pub use graph::{Graph, RefEntry, RefKind};
-pub use host::{AgentHost, Route};
+pub use host::{AgentHost, ExpiringQuota, Route, RouteDecision, RouteMode};
 pub use landing::LandOutcome;
 pub use review::{Changes, Remark};
 pub use verify::{ShellVerifier, Verifier};

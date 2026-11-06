@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use crossagents_api_types::{
-    CheckTrace, CommandTrace, LaneTrace, RunTrace, Spent, TaskTrace, TurnTrace,
+    CheckTrace, CommandTrace, DispatchTrace, LaneTrace, RunTrace, Spent, TaskTrace, TurnTrace,
 };
 use crossagents_core::{AgentId, AgentStatus, Event, EventKind, RunId, StopReason, TaskId};
 
@@ -114,6 +114,20 @@ impl Tracer {
             } if *run_id == self.run => {
                 self.task_mut(*id, key).rerouted.push(reason.clone());
                 self.join(*to, Lane::Task(*id));
+            }
+            // Every dispatch: which accounts were weighed, best first, and why (§2.8).
+            EventKind::TaskRouted {
+                run_id,
+                id,
+                key,
+                account,
+                candidates,
+            } if *run_id == self.run => {
+                self.task_mut(*id, key).dispatches.push(DispatchTrace {
+                    at: event.ts,
+                    account: account.clone(),
+                    candidates: candidates.clone(),
+                });
             }
             EventKind::TaskHandedOff { run_id, handoff } if *run_id == self.run => {
                 let (id, to) = (handoff.task_id, handoff.to);
@@ -514,5 +528,58 @@ mod tests {
             a.first_failure.as_deref(),
             Some("`cargo test -p auth` exited 101")
         );
+    }
+
+    /// Every dispatch says which accounts were weighed, best first, and why (§2.8): the
+    /// trace keeps the order so `run trace` can explain the choice after the fact.
+    #[test]
+    fn a_dispatch_keeps_the_account_order_and_why() {
+        let (run, task, worker) = (RunId::new(), TaskId::new(), AgentId::new());
+        let mut s = Script {
+            events: Vec::new(),
+            at: Utc::now(),
+        };
+        s.push(EventKind::TaskStatusChanged {
+            run_id: run,
+            id: task,
+            key: "a".into(),
+            from: TaskStatus::Pending,
+            to: TaskStatus::Running,
+            assignee: Some(worker),
+        });
+        s.push(EventKind::TaskRouted {
+            run_id: run,
+            id: task,
+            key: "a".into(),
+            account: Some("codex-b".into()),
+            candidates: vec![
+                crossagents_core::AccountCandidate {
+                    account: "codex-b".into(),
+                    reason:
+                        "its five_hour window resets first: used first so its quota is not lost"
+                            .into(),
+                },
+                crossagents_core::AccountCandidate {
+                    account: "codex-a".into(),
+                    reason: "it failed (its limit is reached): last resort, not dropped".into(),
+                },
+            ],
+        });
+
+        let mut tracer = Tracer::new(run);
+        for e in &s.events {
+            tracer.push(e);
+        }
+        let trace = tracer.finish();
+        let dispatch = &trace.tasks[0].dispatches[0];
+        assert_eq!(dispatch.account.as_deref(), Some("codex-b"));
+        let ranked: Vec<&str> = dispatch
+            .candidates
+            .iter()
+            .map(|c| c.account.as_str())
+            .collect();
+        assert_eq!(ranked, ["codex-b", "codex-a"]);
+        assert!(dispatch.candidates[0].reason.contains("resets first"));
+        assert!(dispatch.candidates[1].reason.contains("last resort"));
     }
 }

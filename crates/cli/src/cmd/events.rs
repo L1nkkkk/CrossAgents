@@ -166,6 +166,10 @@ pub fn summary(kind: &EventKind) -> String {
         ),
         EventKind::TaskProgress { key, text, .. } => format!("#{key} {}", one_line(text)),
         EventKind::TaskRerouted { key, reason, .. } => format!("#{key} {}", one_line(reason)),
+        EventKind::TaskRouted { key, account, .. } => format!(
+            "#{key} on {}",
+            account.as_deref().unwrap_or("its own account")
+        ),
         EventKind::TaskHandedOff { handoff, .. } => format!(
             "#{} {} → {}",
             handoff.task_key,

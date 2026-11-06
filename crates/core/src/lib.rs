@@ -43,8 +43,8 @@ pub use driver::{
 };
 pub use error::CoreError;
 pub use event::{
-    DeliveryState, DeliveryStatus, DiffSource, EVENT_SCHEMA_VERSION, Envelope, Event, EventKind,
-    EventSink, MessageSource, QueuedReason,
+    AccountCandidate, DeliveryState, DeliveryStatus, DiffSource, EVENT_SCHEMA_VERSION, Envelope,
+    Event, EventKind, EventSink, MessageSource, QueuedReason,
 };
 pub use expertise::{
     Candidate, CandidateOrigin, CandidateStatus, EntryKind, EntryStats, EntryStatus, Example,

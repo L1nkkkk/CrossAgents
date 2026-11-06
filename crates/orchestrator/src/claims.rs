@@ -10,7 +10,7 @@ use crossagents_core::{
 
 use crate::brief;
 use crate::engine::{Orchestrator, short};
-use crate::host::Route;
+use crate::host::{Route, RouteMode};
 
 /// Agent config key from before homes: the directory a lead lived in before a run moved it
 /// into its checkout. Read once, by [`Orchestrator::migrate_homes`], and dropped.
@@ -397,8 +397,15 @@ impl Orchestrator {
             .await?;
         let mut team: Vec<AgentId> = run.config.team.clone();
         team.push(run.config.worker);
-        if let Route::Account { reason, .. } | Route::Teammate { reason, .. } =
-            self.host.route(agent.id, &team, None).await
+        // Taking the task with its conversation keeps the prompt cache, so the rework
+        // threshold applies. Moving because another account resets sooner is not a reason
+        // to refuse: only an account that cannot take the work at all is.
+        let decision = self
+            .host
+            .route(agent.id, &team, None, RouteMode::Rework)
+            .await;
+        if !decision.current_usable
+            && let Route::Account { reason, .. } | Route::Teammate { reason, .. } = &decision.route
         {
             let _ = self.store.release_agent(agent.id, run.id).await;
             return Err(CoreError::Conflict(format!(
