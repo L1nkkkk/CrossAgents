@@ -9,8 +9,9 @@ import type { PluginInfo } from "@bindings/PluginInfo";
 import { Avatar, VendorMark, agentTitle, displayName } from "./components";
 import { prettyModel, vendorLabel } from "./lib/models";
 import { cursorMode, reasoningModels } from "./lib/reasoning";
+import { unusableOf } from "./lib/unusable";
 
-export type Mention = { key: string; token: string; search: string; label: ReactNode; sub?: ReactNode; icon?: ReactNode; group: string };
+export type Mention = { key: string; token: string; search: string; label: ReactNode; sub?: ReactNode; icon?: ReactNode; group: string; /** Why this machine cannot hand work to it: greyed out, unselectable. */ unusable?: string };
 
 /** Teammates first (by name), then every model a login offers (by id; Cursor's bases). */
 export function mentionsFor(agents: Agent[], plugins: PluginInfo[]): Mention[] {
@@ -23,6 +24,7 @@ export function mentionsFor(agents: Agent[], plugins: PluginInfo[]): Mention[] {
       sub: `${agentTitle(a)} · ${a.model ? prettyModel(a.model) : a.plugin}`,
       icon: <Avatar agent={a} size={16} />,
       group: "协作者",
+      unusable: unusableOf(a),
     }),
   );
   const seen = new Set<string>();
@@ -73,6 +75,8 @@ export function useMention(ref: RefObject<HTMLTextAreaElement | null>, setValue:
   const open = !!at && shown.length > 0;
 
   const pick = (c: Mention) => {
+    // Unusable entries stay listed so the reason can be read, but cannot be named.
+    if (c.unusable) return;
     const el = ref.current;
     if (!el || !at) return;
     const end = at.start + 1 + at.query.length;
@@ -86,11 +90,21 @@ export function useMention(ref: RefObject<HTMLTextAreaElement | null>, setValue:
     });
   };
 
+  // Arrows and Enter step over what cannot be picked, so the menu never traps on a reason.
+  const step = (from: number, delta: number) => {
+    for (let n = 1; n <= shown.length; n++) {
+      const i = (from + delta * n + shown.length * 2) % shown.length;
+      if (!shown[i].unusable) return i;
+    }
+    return from;
+  };
+  const active = !shown[cursor] || shown[cursor].unusable ? Math.max(0, shown.findIndex((c) => !c.unusable)) : cursor;
+
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): boolean => {
     if (!open || e.nativeEvent.isComposing) return false;
-    if (e.key === "ArrowDown") setCursor((c) => (c + 1) % shown.length);
-    else if (e.key === "ArrowUp") setCursor((c) => (c - 1 + shown.length) % shown.length);
-    else if ((e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) || e.key === "Tab") pick(shown[Math.min(cursor, shown.length - 1)]);
+    if (e.key === "ArrowDown") setCursor(step(active, 1));
+    else if (e.key === "ArrowUp") setCursor(step(active, -1));
+    else if ((e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.metaKey) || e.key === "Tab") pick(shown[active]);
     else if (e.key === "Escape") setAt(undefined);
     else return false;
     e.preventDefault();
@@ -106,16 +120,25 @@ export function useMention(ref: RefObject<HTMLTextAreaElement | null>, setValue:
           <button
             type="button"
             role="option"
-            aria-selected={i === cursor}
-            className={`menu-item ${i === cursor ? "cursor" : ""}`}
-            onMouseEnter={() => setCursor(i)}
+            aria-selected={i === active}
+            aria-disabled={c.unusable ? true : undefined}
+            disabled={!!c.unusable}
+            title={c.unusable}
+            className={`menu-item ${i === active ? "cursor" : ""} ${c.unusable ? "disabled" : ""}`}
+            onMouseEnter={() => !c.unusable && setCursor(i)}
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => pick(c)}
           >
             {c.icon && <span className="menu-icon">{c.icon}</span>}
             <span className="menu-text">
               <span className="menu-label">{c.label}</span>
-              {c.sub && <span className="menu-sub">{c.sub}</span>}
+              {c.unusable ? (
+                <span className="menu-sub ltr" title={c.unusable}>
+                  {c.unusable}
+                </span>
+              ) : (
+                c.sub && <span className="menu-sub">{c.sub}</span>
+              )}
             </span>
           </button>
         </div>
