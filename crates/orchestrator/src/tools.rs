@@ -722,6 +722,12 @@ const TOOLS: &[ToolDef] = &[
         },
     },
     ToolDef {
+        name: "run_apply",
+        description: "Write the workers' accepted results into the person's own directory, when your lead works there in place. Three-way against what the directory holds now: a conflict writes nothing and names the files; a clean result is written whole, never committed, and their staging area and branch are untouched. This also happens once when the run ends; calling it again is a no-op.",
+        groups: PLANNER,
+        schema: || object(json!({}), &[]),
+    },
+    ToolDef {
         name: "run_retro",
         description: "Write the retro of a finished run (yours unless `run` names another of your project): read its trace and its `issue/` notes, and write docs/tasks/RETRO-<run>.md in your own checkout — a 现象 / 影响 / 方向 table in the shape of docs/tasks/DOGFOOD.md §9, plus the project's troubleshooting records this run's problems became or look like and the ones nobody sorted yet. It writes that document only, never code, and does not commit. The run must have ended; an existing document is kept unless force.",
         groups: PLANNER,
@@ -1090,6 +1096,7 @@ impl Orchestrator {
             "agent_set_model" => self.agent_set_model(caller, input).await,
             "agent_interrupt" => self.agent_interrupt(caller, input).await,
             "run_finish" => self.run_finish_tool(caller, input).await,
+            "run_apply" => self.run_apply_tool(caller, input).await,
             "run_retro" => self.run_retro(caller, input).await,
             "task_complete" => {
                 #[derive(Deserialize)]

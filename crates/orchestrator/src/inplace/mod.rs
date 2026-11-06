@@ -15,6 +15,11 @@ use std::path::Path;
 use crossagents_core::CoreError;
 use crossagents_core::process::NoWindow;
 
+mod state;
+mod worker;
+
+pub(crate) use worker::InplaceCleanup;
+
 /// The empty side of a new file's diff: what git compares it with on this platform.
 const NOTHING: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
 

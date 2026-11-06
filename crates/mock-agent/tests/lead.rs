@@ -6,11 +6,15 @@ mod common;
 use std::path::Path;
 
 use common::{TestHub, git_repo};
-use crossagents_api_types::{EventKind, RunStatus};
+use crossagents_api_types::{EventKind, RunStatus, TaskStatus};
 use serde_json::{Value, json};
 
 fn call(tool: &str, args: Value) -> String {
     format!("[call {tool} {args}]")
+}
+
+fn task_is(key: &'static str, want: TaskStatus) -> impl Fn(&crossagents_api_types::Event) -> bool {
+    move |e| matches!(&e.kind, EventKind::TaskStatusChanged { key: k, to, .. } if k == key && *to == want)
 }
 
 fn run_status_is(id: &str, want: RunStatus) -> impl Fn(&crossagents_api_types::Event) -> bool {
@@ -671,19 +675,31 @@ async fn landing_waits_while_a_run_works_in_the_directory() {
     );
 }
 
-/// docs/tasks/LEAD.md §12 P2: no worker in the person's directory. A run whose lead works
-/// there gives no task out, and says why instead of writing beside the lead.
+/// docs/tasks/LEAD.md §10 item 4: a directory outside version control cannot be snapshotted,
+/// so a run there does no worker work at all — the lead itself does it.
 #[tokio::test]
-async fn a_run_in_place_gives_no_task_to_a_worker() {
-    let repo = git_repo();
-    let t = setup(repo.path()).await;
-    let mut w = t.watch().await;
+async fn a_run_outside_version_control_gives_no_task_to_a_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("cv.md"), "me\n").unwrap();
+    let t = TestHub::start().await;
+    t.add_agent_in("boss", Some("opus"), "planner", dir.path())
+        .await;
+    t.add_agent_in("coder", Some("haiku"), "worker", dir.path())
+        .await;
     let plan = call(
         "plan_submit",
         json!({ "tasks": [{ "key": "a", "title": "A", "spec": { "goal": "[write a.txt=a]" } }] }),
     );
-    let run = start_in_place(&t, "boss", format!("Split it. {plan}")).await;
-    let id = run["id"].as_str().unwrap().to_owned();
+    let resp = t
+        .post(
+            "/v1/runs",
+            json!({ "request": format!("Split it. {plan}"), "planner": "boss", "worker": "coder", "lead_place": "in_place" }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let id: Value = resp.json().await.unwrap();
+    let id = id["id"].as_str().unwrap().to_owned();
+    let mut w = t.watch().await;
     w.until(
         "awaiting approval",
         run_status_is(&id, RunStatus::AwaitingApproval),
@@ -691,8 +707,6 @@ async fn a_run_in_place_gives_no_task_to_a_worker() {
     .await;
     let resp = t.post(&format!("/v1/runs/{id}/approve"), json!({})).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
-    // The task never runs in the person's directory: it fails with the reason, and leaves
-    // nothing behind there.
     let deadline = tokio::time::Instant::now() + common::wait_limit();
     let failure = loop {
         let stored = detail(&t, &id).await;
@@ -706,15 +720,367 @@ async fn a_run_in_place_gives_no_task_to_a_worker() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     };
     assert!(
-        failure.contains("your own directory"),
+        failure.contains("version control"),
         "the task says why it cannot start: {failure:?}"
     );
-    assert!(!repo.path().join("a.txt").exists());
+    assert!(!dir.path().join("a.txt").exists());
     assert_eq!(
         detail(&t, &id).await["tasks"][0]["status"],
         "failed",
         "nothing merged"
     );
+}
+
+/// What dispatching may not move: the person's branch, HEAD and staging area.
+fn person_git_state(dir: &Path) -> String {
+    format!(
+        "{}\n{}\n{}\n{}",
+        git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        git_out(dir, &["rev-parse", "HEAD"]),
+        git_out(dir, &["diff", "--cached"]),
+        git_out(dir, &["ls-files", "--stage"]),
+    )
+}
+
+/// A command that takes `secs` seconds on either platform: two workers' checks overlap, so
+/// both are seen running before either is merged.
+fn pause(secs: u32) -> String {
+    if cfg!(windows) {
+        format!("ping -n {} 127.0.0.1 >nul", secs + 1)
+    } else {
+        format!("sleep {secs}")
+    }
+}
+
+/// docs/tasks/LEAD.md §12 P3: two workers run side by side off a snapshot of the person's
+/// directory — uncommitted, staged and new files included — and their results reach that
+/// directory when the run ends, without its index, branch or HEAD moving.
+#[tokio::test]
+async fn two_workers_in_an_in_place_run_start_from_a_snapshot_and_land_in_the_directory() {
+    let repo = git_repo();
+    // The person's work at dispatch time: staged, edited and untracked.
+    std::fs::write(repo.path().join("staged.txt"), "STAGED_MARKER\n").unwrap();
+    git_out(repo.path(), &["add", "staged.txt"]);
+    std::fs::write(repo.path().join("README.md"), "PERSON_EDIT_MARKER\n").unwrap();
+    std::fs::write(repo.path().join("untracked.txt"), "UNTRACKED_MARKER\n").unwrap();
+    let t = setup(repo.path()).await;
+    t.add_agent_in("coder", Some("haiku"), "worker", repo.path())
+        .await;
+    let mut w = t.watch().await;
+
+    let accept_a = call("task_accept", json!({ "task": "a" }));
+    let accept_b = call("task_accept", json!({ "task": "b" }));
+    let complete = |key: &str, accept: &str| {
+        format!(
+            "[write {key}.txt={key}] {}",
+            call(
+                "task_complete",
+                json!({ "task_id": "{task_id}", "summary": format!("wrote {key} {accept}") })
+            )
+        )
+    };
+    let checks = [
+        "git grep -q --no-index STAGED_MARKER -- staged.txt",
+        "git grep -q --no-index PERSON_EDIT_MARKER -- README.md",
+        "git grep -q --no-index UNTRACKED_MARKER -- untracked.txt",
+    ];
+    let mut acceptance: Vec<String> = checks.iter().map(|check| (*check).to_owned()).collect();
+    // A pause after the markers: a's verification is still going while b's worker starts, so
+    // the two are out at the same time and neither has to end before the other begins.
+    acceptance.push(pause(12));
+    let plan = json!([
+        {
+            "key": "a", "title": "A",
+            "spec": {
+                "goal": complete("a", &accept_a),
+                "scope": { "allow": ["a.txt"] },
+                "acceptance": acceptance
+            }
+        },
+        {
+            "key": "b", "title": "B",
+            "spec": {
+                "goal": complete("b", &accept_b),
+                "scope": { "allow": ["b.txt"] },
+                "acceptance": [
+                    "git grep -q --no-index PERSON_EDIT_MARKER -- README.md",
+                    "git --version"
+                ]
+            }
+        }
+    ]);
+    let request = format!(
+        "Build it. {}",
+        call("plan_submit", json!({ "tasks": plan }))
+    );
+    let before = person_git_state(repo.path());
+    let resp = t
+        .post(
+            "/v1/runs",
+            json!({
+                "request": request, "planner": "boss", "worker": "coder",
+                "lead_place": "in_place", "max_parallel": 2,
+                "policy": { "plan_approval": "auto" },
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let id: Value = resp.json().await.unwrap();
+    let id = id["id"].as_str().unwrap().to_owned();
+
+    // Both are running, each in a worktree of its own, and neither had to end before the
+    // other began: neither wrote in the person's directory, and the snapshot moved neither
+    // their index nor the branch.
+    w.find("a running", task_is("a", TaskStatus::Running)).await;
+    w.find("b running", task_is("b", TaskStatus::Running)).await;
+    assert!(
+        !w.seen.iter().any(|e| matches!(
+            &e.kind,
+            EventKind::TaskStatusChanged { key, to, .. } if key == "a" && *to == TaskStatus::Merged
+        )),
+        "a ended before b started: {:?}",
+        common::types(&w.seen)
+    );
+    let running = detail(&t, &id).await;
+    for task in running["tasks"].as_array().unwrap() {
+        let worktree = Path::new(task["worktree"].as_str().unwrap_or_default());
+        assert!(
+            worktree.exists(),
+            "{} has no worktree: {running}",
+            task["key"]
+        );
+        assert_ne!(worktree, repo.path());
+        assert_ne!(task["status"], "merged", "{} already merged", task["key"]);
+    }
+    assert_eq!(
+        person_git_state(repo.path()),
+        before,
+        "a snapshot or a dispatch moved the person's index, branch or HEAD"
+    );
+
+    w.find("a merged", task_is("a", TaskStatus::Merged)).await;
+    w.find("b merged", task_is("b", TaskStatus::Merged)).await;
+    // The results are in the hub's integration workspace, not yet in the directory; the run
+    // page can show what is waiting there (LEAD §6).
+    assert!(!repo.path().join("a.txt").exists());
+    assert!(!repo.path().join("b.txt").exists());
+    let resp = t.get(&format!("/v1/runs/{id}/integration")).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let waiting: Value = resp.json().await.unwrap();
+    assert_eq!(waiting["outcome"], "ok", "{waiting}");
+    let diff = waiting["diff"].as_str().unwrap_or_default();
+    assert!(diff.contains("a.txt") && diff.contains("b.txt"), "{diff}");
+    assert!(waiting["applied"].is_null(), "{waiting}");
+
+    let resp = t.post(&format!("/v1/runs/{id}/finish"), json!({})).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    w.until("run completed", run_status_is(&id, RunStatus::Completed))
+        .await;
+
+    // Applied: both files are there, with the person's own work untouched above and below.
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("a.txt")).unwrap(),
+        "a"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("b.txt")).unwrap(),
+        "b"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("README.md")).unwrap(),
+        "PERSON_EDIT_MARKER\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("staged.txt")).unwrap(),
+        "STAGED_MARKER\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("untracked.txt")).unwrap(),
+        "UNTRACKED_MARKER\n"
+    );
+    assert_eq!(
+        person_git_state(repo.path()),
+        before,
+        "the apply staged, committed or switched something"
+    );
+    let applied: Value = t
+        .get(&format!("/v1/runs/{id}/integration"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        applied["applied"], applied["integration"],
+        "the run page can see the result is now in the directory: {applied}"
+    );
+    let human = t.get("/v1/questions").await.text().await.unwrap();
+    assert!(human.contains("Worker 结果已应用到"), "{human}");
+}
+
+/// docs/tasks/LEAD.md §6: a worker result colliding with what the person changed after
+/// dispatch is not written — nothing is half-applied and nothing is committed — and the
+/// explicit apply writes it once the collision is gone.
+#[tokio::test]
+async fn a_conflicting_worker_result_is_not_written_and_applies_after_the_collision_gone() {
+    let repo = git_repo();
+    std::fs::write(repo.path().join("staged.txt"), "staged\n").unwrap();
+    git_out(repo.path(), &["add", "staged.txt"]);
+    let t = setup(repo.path()).await;
+    t.add_agent_in("coder", Some("haiku"), "worker", repo.path())
+        .await;
+    let mut w = t.watch().await;
+
+    let goal = format!(
+        "[write README.md=from worker] {}",
+        call(
+            "task_complete",
+            json!({
+                "task_id": "{task_id}",
+                "summary": format!("wrote it {}", call("task_accept", json!({ "task": "a", "force": true, "reason": "no checks configured" })))
+            })
+        )
+    );
+    let plan = json!([{ "key": "a", "title": "A", "spec": { "goal": goal } }]);
+    let request = format!(
+        "Change it. {}",
+        call("plan_submit", json!({ "tasks": plan }))
+    );
+    let resp = t
+        .post(
+            "/v1/runs",
+            json!({
+                "request": request, "planner": "boss", "worker": "coder",
+                "lead_place": "in_place", "policy": { "plan_approval": "auto" },
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let id: Value = resp.json().await.unwrap();
+    let id = id["id"].as_str().unwrap().to_owned();
+    w.find("a merged", task_is("a", TaskStatus::Merged)).await;
+
+    // The person edits the same file while the run is going: their version is theirs.
+    let head = git_out(repo.path(), &["rev-parse", "HEAD"]);
+    let before = person_git_state(repo.path());
+    std::fs::write(repo.path().join("README.md"), "PERSON_AFTER_DISPATCH\n").unwrap();
+
+    let resp = t.post(&format!("/v1/runs/{id}/finish"), json!({})).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("README.md")).unwrap(),
+        "PERSON_AFTER_DISPATCH\n",
+        "a conflict must not overwrite the person"
+    );
+    assert_eq!(
+        git_out(repo.path(), &["rev-parse", "HEAD"]),
+        head,
+        "the hub committed in the person's directory"
+    );
+    let human = t.get("/v1/questions").await.text().await.unwrap();
+    assert!(
+        human.contains("冲突") && human.contains("README.md"),
+        "{human}"
+    );
+
+    // Still a conflict; still nothing written.
+    let resp = t.post(&format!("/v1/runs/{id}/apply"), json!({})).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["outcome"], "conflict", "{body}");
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("README.md")).unwrap(),
+        "PERSON_AFTER_DISPATCH\n"
+    );
+
+    // The person puts the file back as it was: now the result applies, once.
+    std::fs::write(repo.path().join("README.md"), "test repo\n").unwrap();
+    let resp = t.post(&format!("/v1/runs/{id}/apply"), json!({})).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["outcome"], "applied", "{body}");
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("README.md")).unwrap(),
+        "from worker"
+    );
+    assert_eq!(person_git_state(repo.path()), before);
+    assert_eq!(git_out(repo.path(), &["rev-parse", "HEAD"]), head);
+
+    let resp = t.post(&format!("/v1/runs/{id}/apply"), json!({})).await;
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["outcome"], "already_applied", "{body}");
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("README.md")).unwrap(),
+        "from worker"
+    );
+}
+
+/// docs/tasks/LEAD.md §6: an apply is recorded and is not done twice — a repeated call or a
+/// hub restart leaves the directory (and the person's later edits) alone.
+#[tokio::test]
+async fn an_apply_is_not_done_twice_across_a_restart() {
+    let repo = git_repo();
+    std::fs::write(repo.path().join("staged.txt"), "staged\n").unwrap();
+    git_out(repo.path(), &["add", "staged.txt"]);
+    let t = setup(repo.path()).await;
+    t.add_agent_in("coder", Some("haiku"), "worker", repo.path())
+        .await;
+    let mut w = t.watch().await;
+    let head = git_out(repo.path(), &["rev-parse", "HEAD"]);
+
+    let goal = format!(
+        "[write notes.txt=worker] {}",
+        call(
+            "task_complete",
+            json!({
+                "task_id": "{task_id}",
+                "summary": format!("wrote it {}", call("task_accept", json!({ "task": "a", "force": true, "reason": "no checks configured" })))
+            })
+        )
+    );
+    let plan = json!([{ "key": "a", "title": "A", "spec": { "goal": goal } }]);
+    let resp = t
+        .post(
+            "/v1/runs",
+            json!({
+                "request": format!("Change it. {}", call("plan_submit", json!({ "tasks": plan }))),
+                "planner": "boss", "worker": "coder", "lead_place": "in_place",
+                "policy": { "plan_approval": "auto" },
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let id: Value = resp.json().await.unwrap();
+    let id = id["id"].as_str().unwrap().to_owned();
+    w.find("a merged", task_is("a", TaskStatus::Merged)).await;
+    let resp = t.post(&format!("/v1/runs/{id}/finish"), json!({})).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("notes.txt")).unwrap(),
+        "worker"
+    );
+
+    let resp = t.post(&format!("/v1/runs/{id}/apply"), json!({})).await;
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["outcome"], "already_applied", "{body}");
+
+    // What the person does next is theirs: no later apply or restart may undo it.
+    std::fs::write(repo.path().join("notes.txt"), "mine now\n").unwrap();
+    let home = t.restart_home().await;
+    let t = TestHub::start_in(home, |_| {}).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let resp = t.post(&format!("/v1/runs/{id}/apply"), json!({})).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["outcome"], "already_applied", "{body}");
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("notes.txt")).unwrap(),
+        "mine now\n",
+        "a restart (or a repeated apply) wrote over the person"
+    );
+    // Nothing else went: the directory is there, with what it had.
+    assert!(repo.path().join("README.md").exists());
+    assert!(repo.path().join("staged.txt").exists());
+    assert_eq!(git_out(repo.path(), &["rev-parse", "HEAD"]), head);
 }
 
 #[tokio::test]
@@ -915,4 +1281,101 @@ async fn a_command_seen_running_does_not_refuse_the_checks() {
     assert!(!output.contains("is still running"), "{output}");
     let run: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
     assert_eq!(run["run"]["checks"].as_array().unwrap().len(), 1, "{run}");
+}
+
+/// docs/tasks/LEAD.md §6: deleting an in-place run takes the hub-owned integration worktree
+/// and its branch with it — and only those: the person's directory and the dispatch snapshot
+/// stay.
+#[tokio::test]
+async fn deleting_an_in_place_run_removes_its_integration_workspace_and_branch() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    t.add_agent_in("coder", Some("haiku"), "worker", repo.path())
+        .await;
+    let mut w = t.watch().await;
+    let goal = format!(
+        "[write notes.txt=worker] {}",
+        call(
+            "task_complete",
+            json!({
+                "task_id": "{task_id}",
+                "summary": format!("done {}", call("task_accept", json!({ "task": "a", "force": true, "reason": "no checks configured" })))
+            })
+        )
+    );
+    let plan = json!([{ "key": "a", "title": "A", "spec": { "goal": goal } }]);
+    let resp = t
+        .post(
+            "/v1/runs",
+            json!({
+                "request": format!("Change it. {}", call("plan_submit", json!({ "tasks": plan }))),
+                "planner": "boss", "worker": "coder", "lead_place": "in_place",
+                "policy": { "plan_approval": "auto" },
+            }),
+        )
+        .await;
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let id: Value = resp.json().await.unwrap();
+    let id = id["id"].as_str().unwrap().to_owned();
+    w.find("a merged", task_is("a", TaskStatus::Merged)).await;
+    let resp = t.post(&format!("/v1/runs/{id}/finish"), json!({})).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    w.find("run completed", run_status_is(&id, RunStatus::Completed))
+        .await;
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("notes.txt")).unwrap(),
+        "worker"
+    );
+
+    let compact: String = id.chars().filter(|c| *c != '-').collect();
+    let short = &compact[compact.len() - 8..];
+    let integration = t
+        .paths
+        .home
+        .join("worktrees")
+        .join(short)
+        .join("integration");
+    let branch = format!("crossagents/{short}");
+    assert!(integration.is_dir(), "{}", integration.display());
+    assert!(
+        branches(repo.path()).contains(&branch),
+        "{}",
+        branches(repo.path())
+    );
+    let snapshots = git_out(
+        repo.path(),
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/crossagents/snapshots",
+        ],
+    );
+    assert!(snapshots.contains(short), "{snapshots}");
+
+    let resp = t.delete(&format!("/v1/runs/{id}")).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    assert!(!integration.exists(), "{}", integration.display());
+    assert!(
+        !branches(repo.path()).contains(&branch),
+        "{}",
+        branches(repo.path())
+    );
+    // What was not the delete's: the person's directory, the applied file, the snapshot.
+    assert!(repo.path().is_dir());
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("notes.txt")).unwrap(),
+        "worker"
+    );
+    assert_eq!(
+        git_out(
+            repo.path(),
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/crossagents/snapshots",
+            ],
+        ),
+        snapshots,
+        "the dispatch snapshot is the recovery record, not the delete's"
+    );
 }

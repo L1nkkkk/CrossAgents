@@ -478,13 +478,15 @@ async fn tools_are_scoped_by_token_and_role() {
     assert_eq!(resp.status(), 401);
 }
 
+/// docs/tasks/LEAD.md §10 item 4: a directory outside version control has nothing to
+/// snapshot, so a run whose lead works there gives no task out. The refusal is readable and
+/// leaves the directory as it was.
 #[tokio::test]
-async fn a_run_outside_git_works_in_place_one_task_at_a_time() {
+async fn a_run_outside_git_refuses_to_hand_work_to_a_worker() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("cv.md"), "me\n").unwrap();
     let t = setup(dir.path()).await;
     let mut w = t.watch().await;
-    // Independent tasks, which a repository would run side by side.
     let a = task(
         "a",
         goal("[write a.txt=alpha]", &format!("wrote a {}", accept("a"))),
@@ -492,47 +494,44 @@ async fn a_run_outside_git_works_in_place_one_task_at_a_time() {
     );
     let b = task(
         "b",
-        goal(
-            "[write b.txt=beta]",
-            &format!("wrote b {}", accept_last("b")),
-        ),
+        goal("[write b.txt=beta]", &format!("wrote b {}", accept("b"))),
         &[],
     );
     let id = start_run(&t, request(json!([a, b])), json!({ "max_parallel": 3 })).await;
     let run = detail(&t, &id).await["run"].clone();
     assert_eq!(run["in_place"], true, "{run}");
-    assert_eq!(run["config"]["max_parallel"], 1, "{run}");
+    assert_eq!(
+        run["config"]["max_parallel"], 1,
+        "one directory still means one task at a time: {run}"
+    );
     w.until(
         "awaiting approval",
         run_status_is(&id, RunStatus::AwaitingApproval),
     )
     .await;
-    t.post(&format!("/v1/runs/{id}/approve"), json!({})).await;
-    w.until("run completed", run_status_is(&id, RunStatus::Completed))
-        .await;
+    let resp = t.post(&format!("/v1/runs/{id}/approve"), json!({})).await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
 
-    // Never two tasks running at once.
-    let mut running = 0;
-    for e in &w.seen {
-        if let EventKind::TaskStatusChanged { from, to, .. } = &e.kind {
-            if *to == TaskStatus::Running && *from != TaskStatus::Running {
-                running += 1;
-            } else if *from == TaskStatus::Running && *to != TaskStatus::Running {
-                running -= 1;
-            }
-            assert!(running <= 1, "{:?}", types(&w.seen));
-        }
+    // Neither task starts: each says why, in words a person can read.
+    w.find("a failed", task_is("a", TaskStatus::Failed)).await;
+    w.find("b failed", task_is("b", TaskStatus::Failed)).await;
+    let stored = detail(&t, &id).await;
+    for task in stored["tasks"].as_array().unwrap() {
+        let failure = task["report"]["failure"].as_str().unwrap_or_default();
+        assert!(
+            failure.contains("version control") && failure.contains("no task"),
+            "{}: {failure:?}",
+            task["key"]
+        );
+        assert!(task["worktree"].is_null(), "{}: {task}", task["key"]);
     }
-    // The work is in the directory itself, which is still there with what it had.
+    // Nothing was written in the person's directory, and it is still not a repository.
+    assert!(!dir.path().join("a.txt").exists());
+    assert!(!dir.path().join("b.txt").exists());
     assert_eq!(
-        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
-        "alpha"
+        std::fs::read_to_string(dir.path().join("cv.md")).unwrap(),
+        "me\n"
     );
-    assert_eq!(
-        std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
-        "beta"
-    );
-    assert!(dir.path().join("cv.md").exists());
     assert!(!dir.path().join(".git").exists());
 }
 
@@ -1301,7 +1300,8 @@ async fn a_stage_wakes_the_lead_and_holds_the_next_one_back() {
         .seen
         .iter()
         .filter_map(|e| match &e.kind {
-            EventKind::AgentInput { id, text, .. } | EventKind::AgentInputUpdated { id, text, .. }
+            EventKind::AgentInput { id, text, .. }
+            | EventKind::AgentInputUpdated { id, text, .. }
                 if id.to_string() == boss_id =>
             {
                 Some(text.as_str())
@@ -1317,13 +1317,15 @@ async fn a_stage_wakes_the_lead_and_holds_the_next_one_back() {
     assert!(stage.contains("Stage 2 may start now"), "{stage}");
 
     let detail = detail(&t, &id).await;
-    let status = |key: &str| detail["tasks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|task| task["key"] == key)
-        .unwrap()["status"]
-        .clone();
+    let status = |key: &str| {
+        detail["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["key"] == key)
+            .unwrap()["status"]
+            .clone()
+    };
     assert_eq!(status("a"), "merged");
     assert_eq!(status("b"), "running");
 }

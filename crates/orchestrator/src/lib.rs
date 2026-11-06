@@ -2,6 +2,7 @@
 //! verification (docs/DESIGN.md §7–§9). Depends only on `crossagents-core`; the hub plugs
 //! in agents through [`AgentHost`].
 
+pub mod apply;
 pub mod approval;
 pub mod attempts;
 pub mod breaker;
@@ -38,6 +39,7 @@ pub mod running;
 pub mod screenshot;
 mod sessions;
 pub mod setup;
+pub mod snapshot;
 pub mod stage;
 pub mod tasks;
 pub mod team;

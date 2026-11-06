@@ -131,7 +131,7 @@ pub struct GitWorkspaces;
 /// Untracked files the hub never adds: caches and build output an agent's commands leave
 /// behind, which a repository without a .gitignore would otherwise take into its history.
 /// Tracked files are committed as they are.
-const NEVER_ADDED: [&str; 8] = [
+pub(crate) const NEVER_ADDED: [&str; 8] = [
     ":(exclude,glob)**/__pycache__/**",
     ":(exclude,glob)**/*.py[co]",
     ":(exclude,glob)**/.pytest_cache/**",
