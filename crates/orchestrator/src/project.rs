@@ -17,6 +17,10 @@
 //! # Programs the run worktree's PATH sends through the executor (docs/tasks/LOCKS.md §4.6);
 //! # left out, those the enabled presets carry (Rust: `cargo`); `[]`, none.
 //! shims = ["cargo"]
+//! # Run by the hub in a fresh worktree before an agent gets it, for dependencies
+//! # (docs/tasks/TOOLCHAIN.md §7). `dir` is relative to the checkout; `paths` are what the
+//! # worktree has to have for the command to be worth running (left out: every worktree).
+//! setup = [{ command = "npm ci", dir = "apps/gui", paths = ["apps/gui/package.json"] }]
 //!
 //! [run.env]
 //! # For agents and checks in the run's worktrees (docs/tasks/TOOLCHAIN.md §3), over a
@@ -112,6 +116,9 @@ struct Run {
     shims: Option<Vec<String>>,
     #[serde(default)]
     env: BTreeMap<String, EnvValue>,
+    /// Worktree setup commands (`setup.rs`, docs/tasks/TOOLCHAIN.md §7).
+    #[serde(default)]
+    setup: Vec<crate::setup::SetupDecl>,
 }
 
 /// One entry of `[resources]`: where the resource is (placeholders as in `[run.env]`), how it
@@ -308,6 +315,12 @@ pub fn run_shims(dir: &Path) -> Result<Vec<String>, String> {
     let file = read(dir)?;
     let presets = presets_for(&file, dir)?;
     Ok(shims_from(&file, &presets))
+}
+
+/// `dir`'s `[run] setup`, as written: the commands the hub runs in a fresh worktree before an
+/// agent gets it (`setup.rs`, docs/tasks/TOOLCHAIN.md §7).
+pub fn run_setup(dir: &Path) -> Result<Vec<crate::setup::SetupDecl>, String> {
+    Ok(read(dir)?.run.setup)
 }
 
 /// [`run_shims`] for a file already read: `[run] shims` if the project says, else the presets'.

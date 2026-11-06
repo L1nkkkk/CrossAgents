@@ -722,6 +722,22 @@ impl Orchestrator {
                 )
                 .await?;
         }
+        // What the project says a fresh checkout needs before anyone works in it
+        // (dependencies, docs/tasks/TOOLCHAIN.md §7). A reused checkout and an in-place run
+        // are not fresh: nothing to prepare.
+        let setup = if in_place || reused {
+            None
+        } else {
+            Some(
+                crate::setup::prepare(
+                    &self.integration_path(&run),
+                    &self.config.worktrees,
+                    &self.config.locks,
+                    self.config.shims.as_deref(),
+                )
+                .await,
+            )
+        };
         // The lead works in the run's own checkout: what it changes stays on the run branch
         // until it is landed (docs/tasks/W1.md §4.1). In place, it works where it is.
         let lead = if reused {
@@ -792,19 +808,23 @@ impl Orchestrator {
         } else {
             MessageSource::Human
         };
+        let mut kickoff_text = brief::kickoff(
+            &run,
+            &team,
+            run.config.worker,
+            &crate::project::run_checks(&checkout),
+            env.as_ref(),
+            &sessions,
+        );
+        // A checkout the hub could not prepare says so in the kickoff, not only in a log
+        // (docs/tasks/TOOLCHAIN.md §7).
+        if let Some(note) = setup.as_ref().and_then(crate::setup::Prepared::note) {
+            kickoff_text.push_str("\n\n");
+            kickoff_text.push_str(&note);
+        }
         let kickoff = Envelope {
             attachments: new.attachments,
-            ..Envelope::new(
-                kickoff_from,
-                brief::kickoff(
-                    &run,
-                    &team,
-                    run.config.worker,
-                    &crate::project::run_checks(&checkout),
-                    env.as_ref(),
-                    &sessions,
-                ),
-            )
+            ..Envelope::new(kickoff_from, kickoff_text)
         };
         let host = self.host.clone();
         let lead = run.planner;
@@ -1576,6 +1596,7 @@ The person changed: {}",
     }
 
     pub(crate) async fn dispatch(&self, run: &Run, task: &mut Task) -> Result<(), CoreError> {
+        let mut setup = None;
         if task.worktree.is_none() && run.in_place {
             task.worktree = Some(run.repo.clone());
         } else if task.worktree.is_none() {
@@ -1601,6 +1622,17 @@ The person changed: {}",
             self.ws_for(run)
                 .create(&run.repo, &branch, &base, &path)
                 .await?;
+            // What the project says a fresh worktree needs, before anyone works in it
+            // (dependencies, docs/tasks/TOOLCHAIN.md §7).
+            setup = Some(
+                crate::setup::prepare(
+                    &path,
+                    &self.config.worktrees,
+                    &self.config.locks,
+                    self.config.shims.as_deref(),
+                )
+                .await,
+            );
             task.worktree = Some(path);
             task.branch = Some(branch);
         }
@@ -1651,6 +1683,12 @@ The person changed: {}",
         task.assignee = Some(worker.id);
         task.attempts = 1;
         task.nudges = 0;
+        // A worktree the hub could not prepare is written on the task itself, not only in a
+        // log line, and goes to the worker with the card (docs/tasks/TOOLCHAIN.md §7).
+        let setup_note = setup.as_ref().and_then(crate::setup::Prepared::note);
+        if let Some(note) = &setup_note {
+            task.progress = Some(first_line(note, 200));
+        }
         self.transition(task, TaskStatus::Running).await?;
         let (kind, reason) = if task.escalated {
             let why = rerouted.unwrap_or_else(|| "moved to the run's escalation teammate".into());
@@ -1671,6 +1709,9 @@ The person changed: {}",
         let issuer = task.issuer_or(run.planner);
         self.notify_dispatched(issuer, task, &card).await;
         let mut opening = brief::handover(task, &card);
+        if let Some(note) = setup_note {
+            opening = format!("{opening}\n\n{note}");
+        }
         if let Some(pushed) = self.expertise_brief(&worker, task).await {
             opening = format!("{opening}\n\n{pushed}");
         }
