@@ -128,10 +128,12 @@ pub struct UploadAvatarsResponse {
 #[derive(Debug, Clone, PartialEq, TS)]
 #[ts(export)]
 pub struct ListAgentsResponse {
-    #[ts(type = "Array<import('./Agent').Agent & { unusable?: string }>")]
+    #[ts(type = "Array<import('./Agent').Agent & { unusable?: string, unguarded: boolean }>")]
     pub agents: Vec<Agent>,
     #[ts(skip)]
     pub unusable: Vec<Option<String>>,
+    #[ts(skip)]
+    pub unguarded: Vec<bool>,
 }
 
 impl<'de> Deserialize<'de> for ListAgentsResponse {
@@ -142,14 +144,27 @@ impl<'de> Deserialize<'de> for ListAgentsResponse {
             agent: Agent,
             #[serde(default)]
             unusable: Option<String>,
+            #[serde(default)]
+            unguarded: bool,
         }
         #[derive(Deserialize)]
         struct Response {
             agents: Vec<Entry>,
         }
         let entries = Response::deserialize(deserializer)?.agents;
-        let (agents, unusable) = entries.into_iter().map(|e| (e.agent, e.unusable)).unzip();
-        Ok(Self { agents, unusable })
+        let mut agents = Vec::new();
+        let mut unusable = Vec::new();
+        let mut unguarded = Vec::new();
+        for e in entries {
+            agents.push(e.agent);
+            unusable.push(e.unusable);
+            unguarded.push(e.unguarded);
+        }
+        Ok(Self {
+            agents,
+            unusable,
+            unguarded,
+        })
     }
 }
 
@@ -162,6 +177,7 @@ impl Serialize for ListAgentsResponse {
             if let Some(Some(reason)) = self.unusable.get(i) {
                 value["unusable"] = serde_json::Value::String(reason.clone());
             }
+            value["unguarded"] = self.unguarded.get(i).copied().unwrap_or(false).into();
             agents.push(value);
         }
         #[derive(Serialize)]
@@ -206,6 +222,17 @@ pub struct AgentSettingsRequest {
     #[serde(default)]
     #[ts(optional)]
     pub allow_hooks: Option<bool>,
+    /// Absent keeps the current override; null follows the run or default.
+    #[serde(
+        default,
+        deserialize_with = "stated",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[ts(
+        optional,
+        type = "import('./PermissionPolicy').PermissionPolicy | null"
+    )]
+    pub permission: Option<Option<crossagents_core::PermissionPolicy>>,
 }
 
 /// `POST /v1/agents/{key}/model`. `None` leaves the model to the agent's own default.
@@ -1207,6 +1234,8 @@ pub struct CreateRunRequest {
 #[ts(export)]
 pub struct SessionCandidate {
     pub agent: Agent,
+    #[serde(default)]
+    pub unguarded: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub unusable: Option<String>,
@@ -3021,6 +3050,7 @@ mod tests {
         let response = ListAgentsResponse {
             agents: vec![agent.clone(), agent],
             unusable: vec![Some("unavailable".into()), None],
+            unguarded: vec![true, false],
         };
         let value = serde_json::to_value(&response).unwrap();
         assert_eq!(value["agents"][0]["unusable"], "unavailable");
@@ -3040,6 +3070,7 @@ mod tests {
         crossagents_core::RunHistory::export_all(&cfg).unwrap();
         crossagents_core::ExpertiseEntry::export_all(&cfg).unwrap();
         crossagents_core::Candidate::export_all(&cfg).unwrap();
+        crossagents_core::PermissionPolicy::export_all(&cfg).unwrap();
     }
 
     /// The list `/v1/info` carries: a hub that predates the field omits it, and the GUI hides

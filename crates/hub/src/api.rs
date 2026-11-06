@@ -526,7 +526,12 @@ async fn list_agents(
     };
     let agents = state.store().list_agents().await?;
     let mut unusable = Vec::new();
+    let mut unguarded = Vec::new();
     for agent in &agents {
+        unguarded.push(crossagents_orchestrator::approval::unguarded(
+            agent,
+            policy.as_ref(),
+        ));
         unusable.push(
             crossagents_orchestrator::approval::unusable_for(
                 state.store().as_ref(),
@@ -536,7 +541,11 @@ async fn list_agents(
             .await?,
         );
     }
-    Ok(Json(ListAgentsResponse { agents, unusable }))
+    Ok(Json(ListAgentsResponse {
+        agents,
+        unusable,
+        unguarded,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -611,6 +620,10 @@ async fn session_candidates(
         .await?;
         sessions.push(crossagents_api_types::SessionCandidate {
             can_use: candidate.can_use(),
+            unguarded: crossagents_orchestrator::approval::unguarded(
+                &candidate.agent,
+                policy.as_ref(),
+            ),
             reason: candidate.reason.map(|r| r.word().to_owned()),
             unusable,
             agent: candidate.agent,
@@ -825,6 +838,25 @@ async fn agent_settings(
     }
     let before = agent.config.get("setting_sources").cloned();
     let hooks_before = agent.config.get("allow_hooks").cloned();
+    let permission_before = agent.config.get("permission").cloned();
+    if let Some(permission) = req.permission {
+        if cfg!(windows)
+            && agent.plugin == "cursor"
+            && permission == Some(crossagents_core::PermissionPolicy::Guard)
+        {
+            return Err(AppError::bad_request(
+                "Cursor cannot ask before each action on Windows; set this agent's permission to 自动执行 (bypass)",
+            ));
+        }
+        match permission {
+            Some(p) => {
+                agent.config["permission"] = serde_json::to_value(p).expect("permission serializes")
+            }
+            None => {
+                agent.config.as_object_mut().unwrap().remove("permission");
+            }
+        }
+    }
     // Off is the default, so it is stored as absence: one shape for "never chose".
     if let Some(allow) = req.allow_hooks {
         if allow {
@@ -863,7 +895,8 @@ async fn agent_settings(
         .update_agent_config(agent.id, &agent.config)
         .await?;
     if (agent.config.get("setting_sources").cloned() != before
-        || agent.config.get("allow_hooks").cloned() != hooks_before)
+        || agent.config.get("allow_hooks").cloned() != hooks_before
+        || agent.config.get("permission").cloned() != permission_before)
         && agent.status == AgentStatus::Idle
     {
         state.runtime.stop(&AgentKey::Id(agent.id)).await?;
@@ -3555,6 +3588,7 @@ mod candidate_policy_tests {
             updated_at: now,
         };
         hub.bus.store().insert_run(&run).await.unwrap();
+        let guard_run = run.id;
         run.id = RunId::new();
         run.config.policy.approvals = ApprovalPolicy::Off;
         hub.bus.store().insert_run(&run).await.unwrap();
@@ -3575,6 +3609,59 @@ mod candidate_policy_tests {
         let candidates = body["sessions"].as_array().unwrap();
         assert_eq!(candidates.len(), 1);
         assert!(candidates[0].get("unusable").is_none());
+        let client = reqwest::Client::new();
+        let settings = format!("http://{}/v1/agents/{}/settings", hub.addr, agent.id);
+        if cfg!(windows) {
+            let refused = client
+                .post(&settings)
+                .bearer_auth(&hub.token)
+                .json(&serde_json::json!({"permission":"guard"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), reqwest::StatusCode::BAD_REQUEST);
+            assert!(
+                refused
+                    .text()
+                    .await
+                    .unwrap()
+                    .contains("cannot ask before each action on Windows")
+            );
+        }
+        let set = client
+            .post(&settings)
+            .bearer_auth(&hub.token)
+            .json(&serde_json::json!({"permission":"bypass"}))
+            .send()
+            .await
+            .unwrap();
+        assert!(set.status().is_success());
+        let mut url =
+            reqwest::Url::parse(&format!("http://{}/v1/session-candidates", hub.addr)).unwrap();
+        url.query_pairs_mut()
+            .append_pair("repo", repo.to_str().unwrap())
+            .append_pair("run", &guard_run.to_string());
+        let body: serde_json::Value = client
+            .get(url)
+            .bearer_auth(&hub.token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["sessions"][0]["unguarded"], true);
+        assert!(body["sessions"][0].get("unusable").is_none());
+        let body: serde_json::Value = client
+            .get(format!("http://{}/v1/agents?run={guard_run}", hub.addr))
+            .bearer_auth(&hub.token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(body["agents"][0]["unguarded"], true);
         hub.shutdown();
         hub.wait().await.unwrap();
     }

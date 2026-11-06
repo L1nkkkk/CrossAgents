@@ -35,6 +35,16 @@ pub async fn unusable_for(
         .map(|error| format!("Model {model} is unavailable for this account: {error}")))
 }
 
+/// Whether an explicit bypass removes approvals from a guarded run.
+pub fn unguarded(agent: &Agent, policy: Option<&RunPolicy>) -> bool {
+    policy.is_some_and(|p| p.approvals == ApprovalPolicy::Guard)
+        && agent
+            .config
+            .get("permission")
+            .and_then(|v| serde_json::from_value::<PermissionPolicy>(v.clone()).ok())
+            == Some(PermissionPolicy::Bypass)
+}
+
 fn unusable_on_platform(
     agent: &Agent,
     policy: Option<&RunPolicy>,
@@ -49,7 +59,7 @@ fn unusable_on_platform(
             _ => PermissionPolicy::Bypass,
         });
     if windows && agent.plugin == "cursor" && permission != PermissionPolicy::Bypass {
-        Some("Cursor cannot use this permission on Windows: set this agent's permission to bypass, or set the run's approvals to off (全托管).".into())
+        Some("Cursor cannot use this permission on Windows: set this agent's permission to 自动执行 (bypass), or set the run's approvals to off (全托管).".into())
     } else {
         None
     }
@@ -135,24 +145,37 @@ pub fn danger(kind: &str, title: &str) -> Option<&'static str> {
     None
 }
 
+fn guards_with_run(agent: &Agent, guarded_run: bool) -> bool {
+    match agent
+        .config
+        .get("permission")
+        .and_then(|p| serde_json::from_value::<PermissionPolicy>(p.clone()).ok())
+    {
+        Some(policy) => policy == PermissionPolicy::Guard,
+        None => guarded_run,
+    }
+}
+
 impl Orchestrator {
     /// Whether `agent` asks before dangerous actions: as its `config.permission` says, else
     /// when it works on a task of a run whose policy guards its workers.
     pub async fn guards(&self, agent: &Agent) -> bool {
-        if let Some(policy) = agent
+        if agent
             .config
             .get("permission")
             .and_then(|p| serde_json::from_value::<PermissionPolicy>(p.clone()).ok())
+            .is_some()
         {
-            return policy == PermissionPolicy::Guard;
+            return guards_with_run(agent, false);
         }
-        match self.task_for_agent(agent.id).await {
+        let guarded_run = match self.task_for_agent(agent.id).await {
             Some((run, task)) => {
                 task.assignee == Some(agent.id)
                     && run.config.policy.approvals == ApprovalPolicy::Guard
             }
             None => false,
-        }
+        };
+        guards_with_run(agent, guarded_run)
     }
 
     /// Puts `agent`'s dangerous request to the person and waits for the answer: `true` to
@@ -259,14 +282,24 @@ mod tests {
         };
         let mut policy = RunPolicy::default();
         let reason = unusable_on_platform(&agent, Some(&policy), true).unwrap();
-        assert!(reason.contains("bypass") && reason.contains("off"));
+        assert!(reason.contains("自动执行 (bypass)") && reason.contains("off"));
+        assert!(!unguarded(&agent, Some(&policy)));
+        assert!(guards_with_run(&agent, true));
+        assert!(!guards_with_run(&agent, false));
         assert!(unusable_on_platform(&agent, None, true).is_none());
         assert!(unusable_on_platform(&agent, Some(&policy), false).is_none());
         policy.approvals = ApprovalPolicy::Off;
         assert!(unusable_on_platform(&agent, Some(&policy), true).is_none());
         policy.approvals = ApprovalPolicy::Guard;
         agent.config = serde_json::json!({"permission": "bypass"});
+        assert!(unguarded(&agent, Some(&policy)));
+        assert!(!guards_with_run(&agent, true));
         assert!(unusable_on_platform(&agent, Some(&policy), true).is_none());
+        agent.config = serde_json::json!({"permission": "guard"});
+        assert!(guards_with_run(&agent, false));
+        policy.approvals = ApprovalPolicy::Off;
+        assert!(!unguarded(&agent, Some(&policy)));
+        assert!(unusable_on_platform(&agent, Some(&policy), true).is_some());
     }
 
     #[test]
