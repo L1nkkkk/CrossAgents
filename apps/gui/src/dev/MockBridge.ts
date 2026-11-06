@@ -665,7 +665,7 @@ export class MockBridge implements CrossAgentsBridge {
         const empty = { agents: [], turns: [], commands: [], spent: { tokens: 0, cost_usd: 0 } };
         // Without a scripted trace, each task as stored and nothing more (`handoffs` is part of
         // TaskTrace; leaving it out left the swimlane with nothing to iterate).
-        const tasks = d.tasks.map((t) => ({ task_id: t.id, key: t.key, title: t.title, status: t.status, failure: t.report.failure, lane: empty, checks: [], rerouted: [], dispatches: [], handoffs: t.handoffs ?? [], first_failure: null }));
+        const tasks = d.tasks.map((t) => ({ task_id: t.id, key: t.key, title: t.title, status: t.status, failure: t.report.failure, lane: empty, checks: [], rerouted: [], handoffs: t.handoffs ?? [], first_failure: null }));
         return json(200, trace ?? { run_id: d.run.id, lead: empty, tasks, spent: { tokens: 0, cost_usd: 0 } });
       }
       if ((m = p.match(/^\/v1\/runs\/([^/]+)\/diff$/))) {
