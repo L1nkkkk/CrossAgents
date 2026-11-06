@@ -199,3 +199,43 @@ async fn accepting_a_worker_cleans_its_tree_while_the_lead_stays() {
     assert!(lead.archived_at.is_none());
     assert_eq!(detail["run"]["status"], "running");
 }
+
+#[tokio::test]
+async fn the_landing_commit_credits_the_agents_that_did_the_work() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    let id = merged_run(&t, &mut w).await;
+
+    // Who worked on the task: the card keeps the name its session went by, where the
+    // assignee is let go once the task is merged.
+    let detail: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
+    let worker = detail["tasks"][0]["handoffs"]
+        .as_array()
+        .and_then(|cards| cards.last())
+        .and_then(|card| card["to_name"].as_str())
+        .unwrap()
+        .to_owned();
+
+    let resp = t
+        .post(&format!("/v1/runs/{id}/land"), json!({ "mode": "merge" }))
+        .await;
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    // The hub's own identity says nothing about who did the work: the landing commit ends
+    // with a trailer per agent that took part (docs/tasks/SELF.md B2).
+    let message = git(repo.path(), &["log", "-1", "--pretty=%B"]);
+    assert!(
+        message.contains("Co-authored-by: boss <boss@agents.crossagents.local>"),
+        "{message}"
+    );
+    let line = message
+        .lines()
+        .find(|line| line.starts_with(&format!("Co-authored-by: {worker} <")))
+        .unwrap_or_default();
+    assert!(
+        line.ends_with("@agents.crossagents.local>"),
+        "{worker}'s trailer missing:\n{message}"
+    );
+    assert_eq!(message.matches("Co-authored-by:").count(), 2, "{message}");
+}

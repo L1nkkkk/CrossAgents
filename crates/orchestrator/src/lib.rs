@@ -5,6 +5,7 @@
 pub mod approval;
 pub mod brief;
 pub mod claims;
+pub mod coauthor;
 pub mod continuation;
 pub mod delete;
 pub mod engine;
@@ -17,6 +18,7 @@ pub mod host;
 pub mod human;
 pub mod landing;
 pub mod lessons;
+pub mod machine;
 pub mod messaging;
 pub mod notes;
 pub mod plan;
