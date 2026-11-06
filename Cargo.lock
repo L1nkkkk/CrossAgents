@@ -502,7 +502,7 @@ checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
 
 [[package]]
 name = "crossagents-api-types"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "chrono",
  "crossagents-core",
@@ -513,7 +513,7 @@ dependencies = [
 
 [[package]]
 name = "crossagents-cli"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -539,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "crossagents-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "crossagents-drivers"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "crossagents-hub"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -612,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "crossagents-mock-agent"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "assert_cmd",
  "async-trait",
@@ -633,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "crossagents-orchestrator"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -653,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "crossagents-plugins"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -671,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "crossagents-store-sqlite"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "chrono",
