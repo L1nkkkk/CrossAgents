@@ -502,9 +502,34 @@ async fn info(State(state): State<Arc<AppState>>) -> Json<HubInfo> {
     })
 }
 
-async fn list_agents(State(state): State<Arc<AppState>>) -> ApiResult<Json<ListAgentsResponse>> {
+#[derive(Deserialize)]
+struct ListAgentsQuery {
+    #[serde(default)]
+    run: Option<String>,
+}
+
+async fn list_agents(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ListAgentsQuery>,
+) -> ApiResult<Json<ListAgentsResponse>> {
+    let policy = if let Some(id) = query.run {
+        let run = state
+            .store()
+            .list_runs()
+            .await?
+            .into_iter()
+            .find(|r| r.id.to_string() == id)
+            .ok_or_else(|| crossagents_core::CoreError::Conflict("no such run".into()))?;
+        Some(run.config.policy)
+    } else {
+        None
+    };
     let agents = state.store().list_agents().await?;
-    Ok(Json(ListAgentsResponse { agents }))
+    let unusable = agents
+        .iter()
+        .map(|agent| crossagents_orchestrator::approval::unusable_for(agent, policy.as_ref()))
+        .collect();
+    Ok(Json(ListAgentsResponse { agents, unusable }))
 }
 
 #[derive(Deserialize)]
@@ -512,6 +537,9 @@ struct SessionCandidatesQuery {
     /// The workspace; absent: the standalone chats, each in its own `<home>/chats/<id>`.
     #[serde(default)]
     repo: Option<String>,
+    /// Select a run when a workspace has more than one plan awaiting approval.
+    #[serde(default)]
+    run: Option<String>,
 }
 
 async fn session_candidates(
@@ -532,11 +560,49 @@ async fn session_candidates(
                 .await?
         }
     };
+    // PlanDock currently asks by workspace. If exactly one plan there awaits approval,
+    // its policy is the context in which these candidates would be assigned.
+    let policy = if let Some(repo) = query.repo.as_deref().filter(|r| !r.is_empty()) {
+        let runs: Vec<_> = state
+            .store()
+            .list_runs()
+            .await?
+            .into_iter()
+            .filter(|r| {
+                r.repo == std::path::Path::new(repo)
+                    && r.status == crossagents_core::RunStatus::AwaitingApproval
+                    && query.run.as_ref().is_none_or(|id| r.id.to_string() == *id)
+            })
+            .collect();
+        if query.run.is_some() && runs.is_empty() {
+            return Err(crossagents_core::CoreError::Conflict(
+                "no matching plan awaiting approval in this workspace".into(),
+            )
+            .into());
+        }
+        if runs
+            .iter()
+            .skip(1)
+            .any(|r| r.config.policy.approvals != runs[0].config.policy.approvals)
+        {
+            // A workspace-only request cannot identify which plan the GUI is showing.
+            // Keep it working with chat context until it can supply the run identifier.
+            None
+        } else {
+            runs.into_iter().next().map(|r| r.config.policy)
+        }
+    } else {
+        None
+    };
     let sessions = candidates
         .into_iter()
         .map(|candidate| crossagents_api_types::SessionCandidate {
             can_use: candidate.can_use(),
             reason: candidate.reason.map(|r| r.word().to_owned()),
+            unusable: crossagents_orchestrator::approval::unusable_for(
+                &candidate.agent,
+                policy.as_ref(),
+            ),
             agent: candidate.agent,
             state: candidate.state,
             busy_with: candidate.busy_with,
@@ -3407,4 +3473,99 @@ async fn cancel_extension_call(
         .await
         .map(Json)
         .ok_or_else(|| no_such_call(&id))
+}
+#[cfg(test)]
+mod candidate_policy_tests {
+    use chrono::Utc;
+    use crossagents_core::{
+        Agent, AgentId, AgentStatus, ApprovalPolicy, Role, Run, RunConfig, RunId, RunPolicy,
+        RunStatus,
+    };
+
+    #[tokio::test]
+    async fn conflicting_plans_without_run_query_return_candidates() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = home.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let hub = crate::start(crate::HubConfig::new(crate::Paths::new(home.path()), 0))
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let agent = Agent {
+            id: AgentId::new(),
+            name: "Cursor".into(),
+            name_source: Default::default(),
+            plugin: "cursor".into(),
+            driver: None,
+            model: None,
+            role: Role::Worker,
+            home: repo.clone(),
+            cwd: repo.clone(),
+            config: serde_json::json!({}),
+            status: AgentStatus::Stopped,
+            created_at: now,
+            profile: Default::default(),
+            topic: None,
+            archived_at: None,
+        };
+        hub.bus.store().insert_agent(&agent).await.unwrap();
+        let mut run = Run {
+            origin_chat_id: None,
+            work_id: None,
+            continuation: None,
+            id: RunId::new(),
+            title: "plan".into(),
+            request: "work".into(),
+            planner: agent.id,
+            status: RunStatus::AwaitingApproval,
+            config: RunConfig {
+                worker: agent.id,
+                escalate: None,
+                reviewer: None,
+                auto_approve: false,
+                max_parallel: 1,
+                max_attempts: 1,
+                team: vec![agent.id],
+                policy: RunPolicy::default(),
+            },
+            repo: repo.clone(),
+            base_branch: "main".into(),
+            branch: "run/test".into(),
+            in_place: false,
+            mode: None,
+            note: None,
+            plan: Vec::new(),
+            lead_note: None,
+            landed: None,
+            summary: None,
+            checks: Vec::new(),
+            checks_state: None,
+            checks_snapshot: None,
+            created_at: now,
+            updated_at: now,
+        };
+        hub.bus.store().insert_run(&run).await.unwrap();
+        run.id = RunId::new();
+        run.config.policy.approvals = ApprovalPolicy::Off;
+        hub.bus.store().insert_run(&run).await.unwrap();
+
+        let mut url =
+            reqwest::Url::parse(&format!("http://{}/v1/session-candidates", hub.addr)).unwrap();
+        url.query_pairs_mut()
+            .append_pair("repo", repo.to_str().unwrap());
+        let response = reqwest::Client::new()
+            .get(url)
+            .bearer_auth(&hub.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert!(body.get("error").is_none(), "{body}");
+        let candidates = body["sessions"].as_array().unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].get("unusable").is_none());
+        hub.shutdown();
+        hub.wait().await.unwrap();
+    }
 }

@@ -428,6 +428,9 @@ impl Orchestrator {
         Self::require_issuer(&run, &task, caller)?;
         let a: A = args(input)?;
         let to = self.store.get_agent(&AgentKey::parse(&a.to)).await?;
+        if let Some(reason) = crate::approval::unusable_for(&to, Some(&run.config.policy)) {
+            return Err(CoreError::Conflict(reason));
+        }
         if !a.fresh {
             self.may_take_self(&run, &to, a.restore).await?;
         }
