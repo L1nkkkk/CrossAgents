@@ -1,7 +1,7 @@
 // Where a run's lead works (docs/tasks/LEAD.md §2, §11): in the person's own directory, or in a
-// checkout the hub made. The two look alike in a conversation, so every place a run is named —
-// the run page's header, a sidebar row — says which one it is, and the tooltip says what that
-// means for branches, landing and the person's files.
+// checkout the hub made. The two look alike in a conversation, so a run that is named says which
+// one it is: the run page's header tags both, and a sidebar work row tags only 原地 — the
+// unexpected case — keeping worktree for its tooltip, where the title has room to be read.
 
 import type { Run } from "@bindings/Run";
 import type { RunMode } from "@bindings/RunMode";

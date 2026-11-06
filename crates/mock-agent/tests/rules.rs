@@ -121,3 +121,43 @@ async fn switching_setting_sources_restarts_an_idle_session() {
         .unwrap();
     assert_ne!(agent["status"], "stopped", "{agent}");
 }
+
+#[tokio::test]
+async fn permission_settings_have_three_states_and_restart() {
+    let t = TestHub::start().await;
+    t.add_agent("ada", Some("haiku")).await;
+    let mut w = t.watch().await;
+    t.send("ada", "hello").await;
+    w.until("idle", |e| {
+        matches!(
+            e.kind,
+            EventKind::AgentStatusChanged {
+                to: AgentStatus::Idle,
+                ..
+            }
+        )
+    })
+    .await;
+    let agent: Value = t
+        .post("/v1/agents/ada/settings", json!({"permission":"bypass"}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(agent["config"]["permission"], "bypass");
+    assert_eq!(agent["status"], "stopped");
+    let agent: Value = t
+        .post("/v1/agents/ada/settings", json!({}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(agent["config"]["permission"], "bypass");
+    let agent: Value = t
+        .post("/v1/agents/ada/settings", json!({"permission":null}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(agent["config"].get("permission").is_none());
+}

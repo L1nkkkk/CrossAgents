@@ -246,8 +246,7 @@ B3 远程开发：
 - [ ] **MCP 连接关闭（`-32099`）根因未查明**：`mcp-diag` 只让子进程退出的原因（stderr、退出状态）变得可见，没有定位问题。下次撞上先看这些输出
 - [ ] **要人定：内置事件流面板删不删**：试点 `extensions/debug/` 已完成，内置面板暂时保留（[EXTENSIONS-MIGRATION.md](EXTENSIONS-MIGRATION.md)）
 - [>] 减少额度消耗阶段 3：暂缓（[USAGE-TRIM.md](USAGE-TRIM.md)）
-- [ ] **计划批准时能选中本机跑不了的模板（Cursor 模板在 Windows 上要 bypass）**（2026-11-07 记，run `01a1b1f2`）：Ember 4 是 Cursor 模板，Cursor CLI 的沙箱只支持 macOS / Linux，在 Windows 上得 bypass 才能跑。这一轮分给它的 5 个任务都得改派，问题要等任务派出、那一轮失败之后才暴露。PlanDock 的候选与 `agent_list` 应在批准前把它标成不可用，并写明原因（需要 bypass）。
-- [ ] **已下线的模型仍在名单里显示为可用**（2026-11-07 记，run `01a1b1f2`）：Hazel 4 模板用的模型 `deepseek-v4.1-flash-sg` 账号已不再提供（返回 400 `service info not found`，并附当前支持的模型列表），但模板仍在名单里显示为可用。hub 扫描账号或模型时、派活前都应把这类模型标为不可用，并写明原因。
+- [~] **已下线的模型仍在名单里显示为可用**（2026-11-07 记，run `01a1b1f2`）：已做的部分见 [DONE.md](DONE.md) 同名一节（回合失败后记下、派活前拒绝、名单标出）。还差：刷新账号的模型列表时，不会把列表里没有、但仍在用的模型标为不可用，要等某个回合因「模型不可用」失败一次，那一次照样失败；Hazel 4 模板仍指向 `deepseek-v4.1-flash-sg`，只是被标为不可用，没换模型
 - [ ] **应用到原目录后的复跑同步阻塞，且不占目录的构建资源**（2026-11-07 记，run `01a1b1f2`）：`crates/orchestrator/src/apply/mod.rs` 的 `rerun` 在 apply 请求里同步执行检查，`cargo test --workspace` 这类要几分钟，请求和 GUI 按钮都得等；它用 `ShellVerifier::default()`，不持任何资源锁，可能与人在同一目录里跑的 cargo 构建撞车（§十七）。应改为后台执行、结果经事件报告，并占用该目录的构建资源。
 - [ ] **其余「先读后写」的 SQLite 事务还没逐个检查**（2026-11-07 记，run `01a1b1f2`）：只有 `update_lesson`、用量 outcome 更新、数据迁移三处改成了 `BEGIN IMMEDIATE`（`e0298fa`）。store 里其他先读后写的 deferred 事务没有查过，在 WAL 下同样可能立刻报 SQLITE_BUSY（不等 busy_timeout）。
 

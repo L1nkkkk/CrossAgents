@@ -186,8 +186,7 @@ pub struct Orchestrator {
     /// Stages whose batch has ended and whose wakeup the lead already got, by run
     /// (`crate::stage`, docs/research/multica.md §2.2). In memory: after a restart a stage
     /// that ended meanwhile is reported once more, never lost.
-    pub(crate) stage_wakeups:
-        std::sync::Mutex<HashMap<RunId, std::collections::HashSet<u32>>>,
+    pub(crate) stage_wakeups: std::sync::Mutex<HashMap<RunId, std::collections::HashSet<u32>>>,
     /// How often one task's work has gone back to the same step or teammate, by (task, where
     /// it went) (`crate::handoff`, docs/research/multica.md §2.12): a bounce that would go
     /// on for ever stops at [`crate::handoff::MAX_BOUNCES`]. In memory, like stage wakes.
@@ -760,7 +759,8 @@ impl Orchestrator {
             .is_some_and(|old| old.works_in_checkout() && self.integration_path(old).exists());
         if reused {
             // Claim the same session before touching its checkout. No place/copy is needed.
-            self.lead_self(&run, &planner, restore, source.is_some()).await?;
+            self.lead_self(&run, &planner, restore, source.is_some())
+                .await?;
             if let Err(err) = self
                 .switch_round(&self.integration_path(&run), &run.branch, &base_branch)
                 .await
@@ -812,7 +812,8 @@ impl Orchestrator {
         } else if reused {
             Ok((planner.clone(), false))
         } else if (previous.is_some() && previous_home) || fresh == Some(false) {
-            self.lead_self(&run, &planner, restore, source.is_some()).await
+            self.lead_self(&run, &planner, restore, source.is_some())
+                .await
         } else if fresh == Some(true) {
             self.copy_lead(&planner, run.id, &self.integration_path(&run))
                 .await
@@ -841,8 +842,10 @@ impl Orchestrator {
             }
             return Err(err);
         }
-        self.publish(EventKind::RunCreated { run: Box::new(run.clone()) })
-            .await;
+        self.publish(EventKind::RunCreated {
+            run: Box::new(run.clone()),
+        })
+        .await;
         if let Some(id) = work_id {
             let mut work = self.store.get_work(id).await?;
             work.lead = run.planner;
@@ -1188,6 +1191,19 @@ impl Orchestrator {
                     &mut problems,
                 )
                 .await;
+            if let Ok(agent) = self
+                .store
+                .get_agent(&AgentKey::Id(worker.unwrap_or(run.config.worker)))
+                .await
+                && let Some(reason) = crate::approval::unusable_for(
+                    self.store.as_ref(),
+                    &agent,
+                    Some(&run.config.policy),
+                )
+                .await?
+            {
+                problems.push(format!("task {:?}: {}: {reason}", t.key, agent.name));
+            }
             resolved.push((worker, reviewer));
         }
         if problems.is_empty() {

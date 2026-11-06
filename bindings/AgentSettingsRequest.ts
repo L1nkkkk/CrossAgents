@@ -7,4 +7,8 @@
  * hooks from those files may run, default off (SELF.md §B5); `None` leaves it as it is.
  * Both are read only at launch, so an idle session is restarted after a change.
  */
-export type AgentSettingsRequest = { setting_sources: string | null, allow_hooks?: boolean, };
+export type AgentSettingsRequest = { setting_sources: string | null, allow_hooks?: boolean, 
+/**
+ * Absent keeps the current override; null follows the run or default.
+ */
+permission?: import('./PermissionPolicy').PermissionPolicy | null, };

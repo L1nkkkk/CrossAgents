@@ -58,6 +58,7 @@ import { accountOf, effortOf, prettyModel } from "../lib/models";
 import { modelPickValue, parseModelPick, reasoningWorkerRequest, workerAgentRequest, workerModelGroups, workerModelLabel, workerTarget, type ReasoningChoice } from "../lib/workerModels";
 import { ReasoningPicks } from "../reasoningPicks";
 import { cursorMode, reasoningModels } from "../lib/reasoning";
+import { refusedTasks, unusableOf } from "../lib/unusable";
 import { StateWord, TaskChanges } from "../parts";
 import { RunChanges, TaskReview } from "../review";
 import { InlineNeeds } from "../inlineask";
@@ -856,10 +857,12 @@ export function usePlanApproval(run: Run, busy: boolean) {
   const agents = useAgents();
   const plugins = useHubData(() => api.listPlugins().then((r) => r.plugins), [], () => false);
   const quota = useQuota();
-  // What each workspace session is doing and did last, so the person can pick by it.
+  // What each workspace session is doing and did last, so the person can pick by it. The run
+  // names the plan being settled: `unusable` follows its approvals policy, and a session this
+  // machine cannot hand work to is greyed out with the hub's reason (approval.rs).
   const candidates = useHubData(
-    () => api.sessionCandidates(run.repo).then((r) => r.sessions),
-    [run.repo],
+    () => api.sessionCandidates(run.repo, run.id).then((r) => r.sessions),
+    [run.repo, run.id],
     (e) => e.type.startsWith("agent.") || e.type === "run.status_changed" || e.type === "task.handed_off",
   );
   const policy = run.config.policy;
@@ -867,6 +870,8 @@ export function usePlanApproval(run: Run, busy: boolean) {
   // Per task: "" is the run's default worker, `agent:<id>` a teammate, `model:<plugin>/<model>`
   // a new worker on the model's own plugin and a login of it.
   const [picks, setPicks] = useState<Record<string, string>>({});
+  /** The hub's refusal of the approval, by task key: shown on the task's own row. */
+  const [refused, setRefused] = useState<Record<string, string>>({});
   const [reasoning, setReasoning] = useState<Record<string, ReasoningChoice>>({});
   const [maxUsd, setMaxUsd] = useState(policy.budget.max_usd?.toString() ?? "");
   const [maxMinutes, setMaxMinutes] = useState(policy.budget.max_minutes?.toString() ?? "");
@@ -928,22 +933,29 @@ export function usePlanApproval(run: Run, busy: boolean) {
   }
 
   async function approve(): Promise<RunDetail> {
+    setRefused({});
     const made = new Map<string, string>();
     const assignees: Record<string, string | null> = {};
-    for (const task of run.plan) assignees[task.key] = await workerOf(task, made);
-    const settled: RunPolicy = {
-      ...presetPolicy(preset, policy),
-      budget: {
-        max_usd: capOf(maxUsd),
-        max_minutes: capOf(maxMinutes),
-        max_tokens: maxTokens.trim() ? Math.round(Number(maxTokens) * 1000) : null,
-      },
-    };
-    return api.approveRun(run.id, {
-      policy: settled,
-      max_parallel: run.in_place ? null : capOf(maxParallel),
-      assignees,
-    });
+    try {
+      for (const task of run.plan) assignees[task.key] = await workerOf(task, made);
+      const settled: RunPolicy = {
+        ...presetPolicy(preset, policy),
+        budget: {
+          max_usd: capOf(maxUsd),
+          max_minutes: capOf(maxMinutes),
+          max_tokens: maxTokens.trim() ? Math.round(Number(maxTokens) * 1000) : null,
+        },
+      };
+      return await api.approveRun(run.id, {
+        policy: settled,
+        max_parallel: run.in_place ? null : capOf(maxParallel),
+        assignees,
+      });
+    } catch (err) {
+      // A task the hub will not assign (`task "a": Cursor: ...`): its reason goes on that row.
+      setRefused(refusedTasks(errorText(err), run.plan.map((t) => t.key)));
+      throw err;
+    }
   }
 
   /** "Glm 5.3 Flash · 空闲 · run "…" #a (done)"; only the model when the hub says nothing. */
@@ -957,6 +969,15 @@ export function usePlanApproval(run: Run, busy: boolean) {
     return parts.join(" · ");
   };
   const autoLabel = `自动${fallback ? ` · ${displayName(fallback)}` : ""}`;
+  /** Why the hub says this session cannot take work in this run, if it says so. */
+  const whyOf = (a: Agent | undefined) => (a ? unusableOf(candidates.data?.find((s) => s.agent.id === a.id)) : undefined);
+  /** `SessionCandidate.unguarded`: it was set to bypass, so this guard run lets it act unchecked. */
+  const unguardedOf = (a: Agent | undefined) => !!a && !!candidates.data?.find((s) => s.agent.id === a.id)?.unguarded;
+  const unguardedMark = (
+    <span className="chip small warn" title="在这次 run 里不经确认：危险操作直接执行，不会先问你">
+      不经确认
+    </span>
+  );
 
   const pick = (task: PlannedTask) => {
     const value = pickOf(task);
@@ -965,22 +986,54 @@ export function usePlanApproval(run: Run, busy: boolean) {
     const set = (v: string) => {
       setPicks({ ...picks, [task.key]: v });
       setReasoning((prev) => { const next = { ...prev }; delete next[task.key]; return next; });
+      // Choosing again is the fix: the hub's refusal of the old pick has nothing left to say.
+      setRefused((prev) => {
+        if (!(task.key in prev)) return prev;
+        const next = { ...prev };
+        delete next[task.key];
+        return next;
+      });
     };
+    const autoWhy = whyOf(fallback);
+    const teammateItems = teammates.map((a): MenuItem => {
+      const why = whyOf(a);
+      return {
+        kind: "item",
+        key: `agent:${a.id}`,
+        label: (
+          <span title={why}>
+            {displayName(a)}
+            {unguardedOf(a) && <> {unguardedMark}</>}
+          </span>
+        ),
+        // Greyed out and unselectable, with the reason where the model and state would be.
+        sub: why ? <span title={why}>{why}</span> : teammateSub(a),
+        subDir: "ltr",
+        icon: <Avatar agent={a} size={18} />,
+        on: value === `agent:${a.id}`,
+        disabled: !!why,
+        onPick: () => set(`agent:${a.id}`),
+      };
+    });
     const items: MenuItem[] = [
-      { kind: "item", key: "auto", label: autoLabel, sub: "默认 worker", subDir: "ltr", icon: fallback ? <Avatar agent={fallback} size={18} /> : undefined, on: value === "", onPick: () => set("") },
+      {
+        kind: "item",
+        key: "auto",
+        label: (
+          <span title={autoWhy}>
+            {autoLabel}
+            {unguardedOf(fallback) && <> {unguardedMark}</>}
+          </span>
+        ),
+        sub: autoWhy ? <span title={autoWhy}>{autoWhy}</span> : "默认 worker",
+        subDir: "ltr",
+        icon: fallback ? <Avatar agent={fallback} size={18} /> : undefined,
+        on: value === "",
+        disabled: !!autoWhy,
+        onPick: () => set(""),
+      },
       ...(teammates.length ? [{ kind: "header", key: "h-team", label: "队友" } satisfies MenuItem] : []),
-      ...teammates.map(
-        (a): MenuItem => ({
-          kind: "item",
-          key: `agent:${a.id}`,
-          label: displayName(a),
-          sub: teammateSub(a),
-          subDir: "ltr",
-          icon: <Avatar agent={a} size={18} />,
-          on: value === `agent:${a.id}`,
-          onPick: () => set(`agent:${a.id}`),
-        }),
-      ),
+      ...teammateItems,
       ...workerGroups.flatMap((group): MenuItem[] => [
         { kind: "header", key: `h-${group.key}`, label: t("plan.newWorkerFamily", { family: group.label }) },
         ...group.options.filter((o) => offered.has(modelPickValue(o.plugin, o.model))).map((option): MenuItem => {
@@ -1014,6 +1067,9 @@ export function usePlanApproval(run: Run, busy: boolean) {
       <Avatar agent={fallback} size={16} />
     ) : undefined;
     const label = chosen ? displayName(chosen) : model ? model.plugin === "cursor" ? `${prettyModel(cursorMode(model.model).base)} · Cursor` : (option ? workerModelLabel(option, workerOptions, accounts) : prettyModel(model.model)) : autoLabel;
+    const chosenWhy = whyOf(template);
+    // The hub's reason for refusing this task, read off the failed approval's message.
+    const refusal = refused[task.key];
     if (busy)
       return (
         <span className="who-pick">
@@ -1025,7 +1081,13 @@ export function usePlanApproval(run: Run, busy: boolean) {
       );
     return (
       <span className="who-pick" data-task={task.key}>
-        <ChipMenu icon={icon} label={label} title="执行者" items={items} align="right" searchable menuClassName="who-pick-menu" />
+        <ChipMenu icon={icon} label={label} title={chosenWhy ?? "执行者"} items={items} align="right" searchable menuClassName="who-pick-menu" />
+        {refusal && (
+          <span className="plan-refused" title={refusal} role="alert">
+            <span className="chip small danger">hub 拒绝</span>
+            <span className="plan-refused-text">{refusal}</span>
+          </span>
+        )}
         {task.fresh || model ? <ReasoningPicks plugin={plugin} model={setting.model} effort={setting.effort} onChange={(model, effort) => setReasoning({ ...reasoning, [task.key]: { model, effort } })} />
           : <span className="small muted" title="该任务复用原会话及其推理设置，可在原会话的输入框旁调整">沿用会话推理设置</span>}
       </span>
@@ -1039,7 +1101,7 @@ export function usePlanApproval(run: Run, busy: boolean) {
           <span className="muted small">托管</span>
           <div className="segmented">
             {PRESETS.map((p) => (
-              <button key={p.key} className={preset === p.key ? "active" : ""} title={p.hint} disabled={busy} onClick={() => setPreset(p.key)}>
+              <button key={p.key} className={preset === p.key ? "active" : ""} title={p.hint} disabled={busy} onClick={() => { setPreset(p.key); setRefused({}); }}>
                 {p.label}
               </button>
             ))}

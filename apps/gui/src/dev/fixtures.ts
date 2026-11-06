@@ -82,7 +82,7 @@ export const driverOf = (plugin: string): DriverKind =>
 
 type AgentInit = {
   name: string;
-  plugin: "claude" | "codex" | "codebuddy" | "cursor" | "mock";
+  plugin: "claude" | "codex" | "codebuddy" | "cursor" | "with" | "mock";
   model?: string;
   role: Role;
   status?: AgentStatus;

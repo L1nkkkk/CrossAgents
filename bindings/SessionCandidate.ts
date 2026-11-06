@@ -5,7 +5,7 @@ import type { Agent } from "./Agent";
  * A workspace session; availability is advisory and can change before use.
  * Only the atomic claim_agent insertion provides exclusion; chat does not claim.
  */
-export type SessionCandidate = { agent: Agent, state: string, busy_with: string | null, last_execution: string | null, 
+export type SessionCandidate = { agent: Agent, unguarded: boolean, unusable?: string, state: string, busy_with: string | null, last_execution: string | null, 
 /**
  * Whether the session can be selected; archived sessions can be selected with restore: true.
  */
