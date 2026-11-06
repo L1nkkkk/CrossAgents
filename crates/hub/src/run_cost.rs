@@ -341,7 +341,7 @@ mod tests {
             push(EventKind::AgentCreated { agent: a.clone() }).await;
         }
         push(EventKind::RunCreated {
-            run: run_of(run, planner.id, worker.id),
+            run: Box::new(run_of(run, planner.id, worker.id)),
         })
         .await;
 

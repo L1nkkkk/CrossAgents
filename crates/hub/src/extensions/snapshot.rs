@@ -137,6 +137,8 @@ fn seal(path: &Path) -> Result<()> {
     Ok(())
 }
 /// Windows refuses deletion of read-only files; clear that attribute first.
+// The readonly attribute is cleared only on Windows; Unix uses explicit permissions.
+#[cfg_attr(windows, allow(clippy::permissions_set_readonly_false))]
 pub fn remove(path: &Path) -> Result<()> {
     let meta = fs::symlink_metadata(path)?;
     #[cfg(windows)]

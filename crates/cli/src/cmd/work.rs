@@ -120,7 +120,7 @@ async fn ls(ctx: &Context, client: &Client) -> Result<()> {
                 row.rounds.to_string(),
                 row.latest
                     .as_ref()
-                    .map(|r| status_text(r))
+                    .map(status_text)
                     .unwrap_or_else(|| "-".into()),
             ]
         })

@@ -841,7 +841,7 @@ impl Orchestrator {
             }
             return Err(err);
         }
-        self.publish(EventKind::RunCreated { run: run.clone() })
+        self.publish(EventKind::RunCreated { run: Box::new(run.clone()) })
             .await;
         if let Some(id) = work_id {
             let mut work = self.store.get_work(id).await?;

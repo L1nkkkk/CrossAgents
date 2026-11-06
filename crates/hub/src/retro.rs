@@ -107,7 +107,7 @@ mod tests {
                 kind,
             });
         };
-        push(EventKind::RunCreated { run: run.clone() });
+        push(EventKind::RunCreated { run: Box::new(run.clone()) });
         push(EventKind::TaskStatusChanged {
             run_id: run.id,
             id: task.id,

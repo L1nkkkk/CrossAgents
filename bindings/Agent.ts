@@ -27,7 +27,13 @@ plugin: string,
 /**
  * `None` means the plugin's default driver.
  */
-driver: string | null, model: string | null, role: Role, 
+driver: string | null, model: string | null, 
+/**
+ * How the agent was made (a chat, a worker or a reviewer session). Kept for old clients
+ * and for reading old records; nothing decides who may do what by it — the run's claims
+ * do (docs/AGENT-WORKSPACE.md §6).
+ */
+role: Role, 
 /**
  * The workspace the agent belongs to (docs/DESIGN.md §4.7): where it lives between
  * executions, and what the sidebar groups it under. Empty in records from before homes,

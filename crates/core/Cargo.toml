@@ -53,6 +53,9 @@ path = "tests/support/exec_tree_helper.rs"
 libc = "0.2.191"
 
 [dev-dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "visit"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
