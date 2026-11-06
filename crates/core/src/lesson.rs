@@ -99,6 +99,11 @@ pub struct Lesson {
     pub keywords: Vec<String>,
     /// Where it applies: system, tools and versions, node, files.
     pub conditions: String,
+    /// Files the record is about, repository-relative when possible: a review clue only
+    /// (LESSONS §4.4). When one of them changed after the latest check, a search result says
+    /// so; nothing is invalidated automatically.
+    #[serde(default)]
+    pub files: Vec<String>,
     pub resolution: String,
     pub outcome: LessonOutcome,
     pub status: LessonStatus,
@@ -135,6 +140,21 @@ pub struct TriageRecord {
     pub triage: Triage,
     pub by: AgentId,
     pub at: DateTime<Utc>,
+}
+
+/// A lesson that may bear on a failure the hub saw (LESSONS §4.5 ②): attached as
+/// `related_lessons` to a failed run check, a `task_fail` and a task whose checks failed.
+/// A match only means *possibly related*: the words of the error were found in the record,
+/// not that its resolution was confirmed to apply here. Read it with `lesson_get` and check
+/// its conditions before going by it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct RelatedLesson {
+    pub id: String,
+    pub title: String,
+    /// The words of the error output found in the record, the strong ones (error codes,
+    /// exception names) first. At least one of them is strong.
+    pub matched: Vec<String>,
 }
 
 /// One sorting step, applied by the store in a single transaction together with marking its

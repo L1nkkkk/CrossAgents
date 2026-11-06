@@ -247,6 +247,7 @@ impl Orchestrator {
             );
             task.attempts += 1;
             task.report.failure = None;
+            task.report.related_lessons.clear();
             let said: Vec<&str> = note
                 .as_deref()
                 .into_iter()
@@ -291,6 +292,32 @@ impl Orchestrator {
             });
         }
         Ok((found, task))
+    }
+
+    /// A review that says changes are needed, on a task whose spec routes it back
+    /// (docs/research/multica.md §2.12): `spec.on_reject` sends it to the step or teammate
+    /// it names, with the reviewer's notes as what to fix. `Some(who)` when it went there;
+    /// `None` when the spec sets no route, names the task's own worker, or has already taken
+    /// the work back as often as it may — then the review stands as it did before, and the
+    /// issuer decides.
+    pub(crate) async fn review_sent_back(
+        &self,
+        run: &crossagents_core::Run,
+        task: &mut Task,
+        notes: &str,
+        reviewer: &crossagents_core::Agent,
+    ) -> Result<Option<String>, CoreError> {
+        // Checked before anything changes: at the limit the work stays where it is.
+        if self.reject_stopped(run, task).await? || !self.rejects_elsewhere(run, task).await? {
+            return Ok(None);
+        }
+        // A new round: an older verification's report must not land on it.
+        task.report.verification = None;
+        task.attempts += 1;
+        task.report.failure = None;
+        task.report.rework.push(notes.trim().to_owned());
+        let why = format!("a review by {} said changes are needed", reviewer.name);
+        self.send_back(run, task, notes, &why).await
     }
 }
 

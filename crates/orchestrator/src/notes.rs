@@ -89,6 +89,7 @@ impl Orchestrator {
                     updated_at: Utc::now(),
                 };
                 self.store.put_note(&note).await?;
+                self.issue_recorded(a.scope, run_id, &key, caller.id).await;
                 self.publish(EventKind::NoteWritten {
                     scope: a.scope,
                     run_id,

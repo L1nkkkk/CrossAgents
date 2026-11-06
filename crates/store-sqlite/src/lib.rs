@@ -2455,6 +2455,7 @@ mod tests {
             symptom: symptom.into(),
             keywords: Vec::new(),
             conditions: String::new(),
+            files: Vec::new(),
             resolution: "use node".into(),
             outcome: crossagents_core::LessonOutcome::Workaround,
             status: LessonStatus::Active,

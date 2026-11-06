@@ -154,8 +154,12 @@ impl Orchestrator {
                 hints.join(", ")
             )
         };
+        let related = self.related_lessons(&run.repo, &bad.output).await;
+        let related = crate::lessons::related_text(&related)
+            .map(|t| format!("\n{t}"))
+            .unwrap_or_default();
         Err(CoreError::Conflict(format!(
-            "the project's checks ({}) failed: {}{maybe}\nFix it in your checkout and call {tool} \
+            "the project's checks ({}) failed: {}{maybe}{related}\nFix it in your checkout and call {tool} \
              again. If a check itself is wrong, tell the person: they can still land or end the \
              run from the run page.",
             project::FILE,

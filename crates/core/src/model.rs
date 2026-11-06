@@ -646,6 +646,19 @@ pub struct TaskSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub stage: Option<u32>,
+    /// Where the work goes once this task is accepted (docs/research/multica.md §2.12): a
+    /// step of the same run (a task key, `b` or `#b`), which the hub releases; or a teammate
+    /// (a name), for whom the hub opens the next step and hands it over. `None` is no
+    /// routing: the run moves on as it did before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub next: Option<String>,
+    /// Where it goes back when it is sent back (`task_rework`, or a review that fails): a
+    /// step of the same run, whose worker takes it again, or a teammate's name. `None`
+    /// leaves it with its own worker, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub on_reject: Option<String>,
 }
 
 /// One task in a submitted plan. `key` is the planner's own short name for it.
@@ -793,6 +806,10 @@ pub struct TaskReport {
     /// Why the issuer accepted it without a verification; also that it did.
     #[serde(default)]
     pub forced: Option<String>,
+    /// Troubleshooting records whose words the failed checks' output contains: possibly
+    /// related, not confirmed to apply (docs/tasks/LESSONS.md §4.5).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_lessons: Vec<crate::lesson::RelatedLesson>,
 }
 
 /// How one run (attempt) of a task ended. A run ends when the worker's turn does; the task

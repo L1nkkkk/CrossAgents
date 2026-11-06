@@ -56,7 +56,7 @@ pub use human::{HumanAction, HumanItem, HumanItemKind, HumanItemStatus};
 pub use ids::{AgentId, HandoffId, MessageId, RunId, SessionId, TaskId, WorkId};
 pub use lesson::{
     Evidence, ISSUE_PREFIX, IssueRef, Lesson, LessonOutcome, LessonStatus, Project, ProjectPath,
-    Triage, TriageRecord, TriageStep,
+    RelatedLesson, Triage, TriageRecord, TriageStep,
 };
 pub use model::{
     Agent, AgentProfile, AgentStatus, CONTEXT_LOST, CheckResult, ChecksState, ContinuationState,

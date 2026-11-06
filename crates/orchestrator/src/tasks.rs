@@ -190,6 +190,9 @@ impl Orchestrator {
         value["run_branch"] = json!(run.branch);
         value["reviewer"] = json!(task.reviewer);
         value["runs"] = json!(task.runs);
+        // Where the workflow goes next and back, and the words it would be started with
+        // (docs/research/multica.md §2.12).
+        value["handoff"] = self.handoff_preview(&run, &task).await?;
         Ok(value)
     }
 
@@ -264,6 +267,11 @@ impl Orchestrator {
         if !new.is_empty() {
             plan::validate(&check)
                 .map_err(|p| CoreError::Conflict(format!("invalid tasks:\n{p}")))?;
+            // A `next` or `on_reject` that names nothing, itself, or a step the stage gate
+            // could never release is refused before the task exists (multica §2.12).
+            self.check_routes(&check)
+                .await
+                .map_err(|p| CoreError::Conflict(format!("invalid tasks:\n{p}")))?;
         }
         let assignments = self.resolve_assignments(&run, &new).await?;
         let now = Utc::now();
@@ -310,6 +318,8 @@ impl Orchestrator {
             .await;
             created.push(task.id);
         }
+        // A new task's `spec.next` says which step follows which (multica §2.12).
+        self.link_next(&run).await?;
         let not_started = self.schedule_reporting(&mut run).await?;
         // As scheduling left them: a task that started has its worker and is running. The
         // state before it read as "assignee ignored", and the lead assigned it a second time.
@@ -345,6 +355,28 @@ impl Orchestrator {
         if task.status.is_terminal() {
             return Err(CoreError::Conflict(format!("#{} has ended", task.key)));
         }
+        // Where it sends its work, checked before the change takes effect (multica §2.12).
+        let mut check: Vec<PlannedTask> = self
+            .store
+            .list_tasks(run.id)
+            .await?
+            .iter()
+            .map(crate::handoff::planned)
+            .collect();
+        if let Some(entry) = check.iter_mut().find(|t| t.key == task.key) {
+            if let Some(title) = &a.title {
+                entry.title = title.clone();
+            }
+            if let Some(spec) = &a.spec {
+                entry.spec = spec.clone();
+            }
+            if let Some(deps) = &a.depends_on {
+                entry.depends_on = deps.clone();
+            }
+        }
+        self.check_routes(&check)
+            .await
+            .map_err(|p| CoreError::Conflict(format!("#{} was not changed: {p}", task.key)))?;
         if let Some(title) = a.title {
             task.title = title;
         }
@@ -643,6 +675,7 @@ impl Orchestrator {
             task.report.diff_stat = None;
             task.report.verified_sha = None;
             task.report.unchecked = false;
+            task.report.related_lessons.clear();
         } else if !matches!(task.status, TaskStatus::Running | TaskStatus::Stalled) {
             return Err(CoreError::Conflict(format!(
                 "#{} is {:?}; only a task being worked on can be completed",
@@ -741,6 +774,7 @@ impl Orchestrator {
         } else {
             self.verifier.check(&dir, &task.spec.acceptance).await
         };
+        let related = self.related_to_checks(&run.repo, &checks).await;
         let _guard = self.lock(run.id).await;
         let mut task = self.store.get_task(id).await?;
         if !Self::still_verifying(&task, token) {
@@ -752,6 +786,7 @@ impl Orchestrator {
         task.report.verified_sha = sha;
         task.report.unchecked = unchecked;
         task.report.verification = None;
+        task.report.related_lessons = related;
         self.transition(&mut task, TaskStatus::Passed).await?;
         if !checks.is_empty() {
             self.publish(EventKind::TaskChecked {
@@ -764,13 +799,33 @@ impl Orchestrator {
             .await;
         }
         let summary = task.report.summary.clone().unwrap_or_default();
+        let related = crate::lessons::related_text(&task.report.related_lessons)
+            .map(|t| format!("\n{t}"))
+            .unwrap_or_default();
         self.relay(
             task.issuer_or(run.planner),
             worker,
-            format!("{}\n\n{}", summary.trim(), brief::facts(&task)),
+            format!("{}\n\n{}{related}", summary.trim(), brief::facts(&task)),
             None,
         );
         Ok(())
+    }
+
+    /// Lessons related to the output of the checks that failed; none when all passed.
+    async fn related_to_checks(
+        &self,
+        repo: &std::path::Path,
+        checks: &[crossagents_core::CheckResult],
+    ) -> Vec<crossagents_core::RelatedLesson> {
+        let output: Vec<&str> = checks
+            .iter()
+            .filter(|c| !c.passed)
+            .map(|c| c.output.as_str())
+            .collect();
+        if output.is_empty() {
+            return Vec::new();
+        }
+        self.related_lessons(repo, &output.join("\n")).await
     }
 
     /// A verification that failed on the way: the task is `Passed` at once, with the error as
@@ -856,6 +911,7 @@ impl Orchestrator {
         task.report.interrupted = false;
         task.report.forced = None;
         task.report.checks.clear();
+        task.report.related_lessons.clear();
         let token = uuid::Uuid::new_v4().to_string();
         task.report.verification = Some(token.clone());
         self.transition(&mut task, TaskStatus::Verifying).await?;
@@ -869,13 +925,16 @@ impl Orchestrator {
         }))
     }
 
-    /// The assignee cannot finish: the task stalls and its issuer reads why.
+    /// The assignee cannot finish: the task stalls and its issuer reads why, with the lessons
+    /// that may bear on it (also on its report, and returned).
     pub(crate) async fn give_up(
         &self,
         caller: &Agent,
         id: TaskId,
         reason: String,
-    ) -> Result<(), CoreError> {
+    ) -> Result<Vec<crossagents_core::RelatedLesson>, CoreError> {
+        // Looked up before the run's lock: a slow lookup holds up nobody else.
+        let related = self.related_lessons(&caller.cwd, &reason).await;
         let (run, _) = self.task_of(id).await?;
         let _guard = self.lock(run.id).await;
         let mut task = self.store.get_task(id).await?;
@@ -884,6 +943,7 @@ impl Orchestrator {
             return Err(CoreError::Conflict(format!("#{} has ended", task.key)));
         }
         task.report.failure = Some(reason.clone());
+        task.report.related_lessons = related.clone();
         crate::attempts::close(
             &mut task,
             TaskRunOutcome::GaveUp,
@@ -895,17 +955,20 @@ impl Orchestrator {
         } else {
             self.store_task(&mut task).await?;
         }
+        let hint = crate::lessons::related_text(&related)
+            .map(|t| format!("\n\n{t}"))
+            .unwrap_or_default();
         self.relay(
             task.issuer_or(run.planner),
             caller.id,
             format!(
-                "I cannot finish this: {}\n\n{}",
+                "I cannot finish this: {}\n\n{}{hint}",
                 reason.trim(),
                 brief::facts(&task)
             ),
             None,
         );
-        Ok(())
+        Ok(related)
     }
 
     pub(crate) async fn ask(
@@ -1296,6 +1359,25 @@ impl Orchestrator {
             .await;
         task.report.review = Some(notes.clone());
         self.transition(&mut task, TaskStatus::Passed).await?;
+        // A review that says changes are needed sends the task back where its spec says
+        // (docs/research/multica.md §2.12); with none, the issuer decides, as before.
+        if !approve
+            && let Some(name) = self
+                .review_sent_back(&run, &mut task, &notes, caller)
+                .await?
+        {
+            self.relay(
+                task.issuer_or(run.planner),
+                caller.id,
+                format!(
+                    "Review of {}: changes needed; it went back to {name}\n{}",
+                    brief::task_ref(&task),
+                    notes.trim()
+                ),
+                None,
+            );
+            return Ok(());
+        }
         self.relay(
             task.issuer_or(run.planner),
             caller.id,
@@ -1482,6 +1564,7 @@ impl Orchestrator {
         self.cleanup_worktree(&run, &task, true, released.is_empty())
             .await;
         task.report.failure = None;
+        task.report.related_lessons.clear();
         // Accepting a stalled task stands in for the report its worker never sent.
         if task.status == TaskStatus::Stalled {
             self.transition(&mut task, TaskStatus::Passed).await?;
@@ -1489,6 +1572,9 @@ impl Orchestrator {
         // Before the merge is announced, so whoever reads the run on that event sees it.
         self.sync_resolved(&mut run, &task).await?;
         self.transition(&mut task, TaskStatus::Merged).await?;
+        // Where the workflow goes next (multica §2.12): the step `spec.next` names is
+        // released, or opened for the teammate it names, before the schedule pass starts it.
+        let next = self.after_accept(&run, &task).await?;
         self.schedule(&mut run).await?;
         let verified_word = if unchecked.is_empty() {
             json!("verified")
@@ -1520,6 +1606,7 @@ impl Orchestrator {
             "as": verified_word,
             "merged_sha": merged_sha,
             "unverified": unchecked,
+            "next_step": next.as_ref().map(crate::handoff::NextStep::json),
         }))
     }
 
@@ -1555,6 +1642,18 @@ impl Orchestrator {
                 task.key
             )));
         };
+        // Work that keeps going back and forth stops here, before anything changes: the tool
+        // says so and the lead has been told (multica §2.12).
+        if self.reject_stopped(&run, &task).await? {
+            return Ok(json!({
+                "task": task_json(&task),
+                "stopped": format!(
+                    "#{} has gone back as often as it may ({} times); it stays as it is. Change what is asked of it, or task_assign it elsewhere.",
+                    task.key,
+                    crate::handoff::MAX_BOUNCES
+                ),
+            }));
+        }
         if task.reviewer.take().is_some() {
             let _ = self
                 .let_go_task(run.id, task.id, Some(ClaimRole::Reviewer))
@@ -1565,8 +1664,18 @@ impl Orchestrator {
         crossagents_core::Handoff::end(&mut task.handoffs, Some(worker), HandoffOutcome::Reworked);
         task.attempts += 1;
         task.report.failure = None;
+        task.report.related_lessons.clear();
         task.report.rework.push(a.notes.trim().to_owned());
         self.transition(&mut task, TaskStatus::Running).await?;
+        // Where it goes back to (multica §2.12): `spec.on_reject` names a step or a teammate
+        // whose fresh session takes it over; unset, or naming its own worker, it goes back to
+        // its worker here, exactly as before.
+        if let Some(name) = self
+            .send_back(&run, &mut task, a.notes.trim(), "sent back for rework")
+            .await?
+        {
+            return Ok(json!({ "task": task_json(&task), "sent_back_to": name }));
+        }
         // The rework is the worker's next run (multica §2.4).
         let envelope = self.relay_envelope(
             caller.id,

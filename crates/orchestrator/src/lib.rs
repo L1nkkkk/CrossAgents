@@ -33,6 +33,7 @@ pub mod project;
 pub mod projects;
 pub mod protocol;
 pub mod quota;
+pub mod retro;
 pub mod review;
 pub mod running;
 pub mod screenshot;

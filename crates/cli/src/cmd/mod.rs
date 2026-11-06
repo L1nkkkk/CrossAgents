@@ -4,8 +4,10 @@ pub mod events;
 pub mod exec;
 pub mod expertise;
 pub mod hub;
+pub mod lesson;
 pub mod mcp;
 pub mod plugin;
+pub mod retro;
 pub mod run;
 pub mod session;
 pub mod setup;
@@ -44,6 +46,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         Command::Run(args) => run::run(&ctx, args).await,
         Command::Usage(args) => usage::run(&ctx, args).await,
         Command::Expertise(cmd) => expertise::run(&ctx, cmd).await,
+        Command::Lessons(cmd) => lesson::run(&ctx, cmd).await,
         Command::Account(cmd) => account::run(&ctx, cmd).await,
         Command::Setup(args) => setup::run(&ctx, args).await,
         Command::Mcp | Command::RuntimeHost(_) | Command::Exec(_) => {

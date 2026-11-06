@@ -217,6 +217,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{key}/cleanup", post(cleanup_run))
         .route("/v1/runs/{key}/diff", get(run_diff))
         .route("/v1/runs/{key}/trace", get(run_trace))
+        .route("/v1/runs/{key}/retro", get(run_retro))
         .route("/v1/runs/{key}/cost", get(run_cost))
         .route("/v1/runs/{key}/tasks/{task}/diff", get(task_diff))
         .route("/v1/runs/{key}/tasks/{task}/review", post(review_task))
@@ -268,6 +269,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/shutdown", post(shutdown))
         .merge(crate::api_expertise::router())
         .merge(crate::api_projects::router())
+        .merge(crate::lessons::router())
         .merge(crate::api_terminal::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
     // Routes for agents, authenticated with their per-session token.
@@ -1690,7 +1692,7 @@ fn why_not_upgradable(status: &crossagents_core::CliStatus) -> String {
 
 /// A run by full id, or by a unique prefix or suffix of it (the suffix appears in branch
 /// names).
-async fn resolve_run(state: &AppState, key: &str) -> ApiResult<RunId> {
+pub(crate) async fn resolve_run(state: &AppState, key: &str) -> ApiResult<RunId> {
     if let Ok(id) = key.parse::<RunId>() {
         return Ok(id);
     }
@@ -2065,6 +2067,25 @@ async fn update_run_policy(
         tracing::error!(%error, run = %id, "cannot publish a policy change");
     }
     run_detail(&state, id).await
+}
+
+/// `GET /v1/runs/{key}/retro`: the run's retro as Markdown (docs/tasks/SELF.md C1), folded
+/// from its trace and its `issue/` notes. Only a run that ended has one. The caller writes
+/// it where it belongs: the command line in the repository of the current directory, the
+/// lead's `run_retro` in its own checkout.
+async fn run_retro(
+    State(state): State<Arc<AppState>>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let id = resolve_run(&state, &key).await?;
+    let run = state.store().get_run(id).await?;
+    let doc = crate::retro::document(&**state.store(), &run).await?;
+    Ok(Json(serde_json::json!({
+        "run": run.id,
+        "markdown": doc.markdown,
+        "findings": doc.findings,
+        "issues": doc.issues,
+    })))
 }
 
 /// What happened in a run, by task, from its events (docs/tasks/DOGFOOD.md §8).

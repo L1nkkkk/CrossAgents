@@ -88,6 +88,14 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "GET", path: /^\/v1\/expertise$/, level: "read" },
   { method: "GET", path: /^\/v1\/expertise\/(candidates|card|maintenance|export)$/, level: "read" },
   { method: "POST", path: /^\/v1\/expertise\/candidates\/[^/]+\/(accept|reject)$/, level: "write" },
+  // Troubleshooting records of a project and the problems a run recorded (read-only here).
+  { method: "GET", path: /^\/v1\/projects\/[^/]+\/lessons(\/export)?$/, level: "read" },
+  { method: "GET", path: /^\/v1\/lessons\/[^/]+$/, level: "read" },
+  { method: "GET", path: /^\/v1\/runs\/[^/]+\/issues$/, level: "read" },
+  // The person settles what a project is: a remote or checkout bound to it, or two projects
+  // merged (LESSONS §4.2). Only a person does this; no agent tool reaches it.
+  { method: "POST", path: /^\/v1\/projects\/[^/]+\/bind$/, level: "write" },
+  { method: "POST", path: /^\/v1\/projects\/merge$/, level: "write" },
   { method: "GET", path: /^\/v1\/questions$/, level: "read" },
   { method: "POST", path: /^\/v1\/questions\/[^/]+\/(answer|dismiss)$/, level: "write" },
   { method: "GET", path: /^\/v1\/quota$/, level: "read" },

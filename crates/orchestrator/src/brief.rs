@@ -320,6 +320,12 @@ pub fn task(task: &Task) -> String {
                 .join(", ")
         );
     }
+    if let Some(next) = &task.spec.next {
+        let _ = writeln!(out, "Next when accepted: {next}");
+    }
+    if let Some(back) = &task.spec.on_reject {
+        let _ = writeln!(out, "Sent back to: {back}");
+    }
     if let Some(branch) = &task.branch {
         let _ = writeln!(out, "Branch: {branch}");
     }

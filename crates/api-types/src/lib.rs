@@ -2536,6 +2536,44 @@ pub struct ProjectInfo {
     /// Normalised `host/owner/repo` remotes.
     pub remotes: Vec<String>,
     pub paths: Vec<ProjectPathInfo>,
+    /// A remote seen at one of the project's checkouts that is not one of its own: the
+    /// directory may hold another repository now, so the person decides (LESSONS §4.2).
+    /// Nothing is bound automatically until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub unconfirmed_remote: Option<String>,
+}
+
+/// `POST /v1/projects/{id}/bind`: the person says a remote or a checkout belongs to this
+/// project. A remote becomes an alias; a checkout moves to it from wherever it was bound.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct BindProjectRequest {
+    /// A remote URL, written any way git writes it (`git@host:owner/repo`,
+    /// `https://host/owner/repo.git`); normalised before storing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub remote: Option<String>,
+    /// A checkout on this node (canonicalised before storing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub path: Option<String>,
+    /// With `path`: that checkout is another project, not this one. It is taken out of this
+    /// project into a new one, which takes the remote that was waiting to be confirmed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub split: Option<bool>,
+}
+
+/// `POST /v1/projects/merge`: the person says two projects are one. `from` keeps its id but
+/// loses its checkouts, remotes and records; `into` gains them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MergeProjectsRequest {
+    /// The project whose records move.
+    pub from: String,
+    /// The project that keeps them.
+    pub into: String,
 }
 
 /// `GET /v1/projects`.
@@ -2543,6 +2581,81 @@ pub struct ProjectInfo {
 #[ts(export)]
 pub struct ListProjectsResponse {
     pub projects: Vec<ProjectInfo>,
+}
+
+// ---------------------------------------------------------------------------------------
+// Troubleshooting records (docs/tasks/LESSONS.md L2)
+
+pub use crossagents_core::{
+    Evidence, IssueRef, Lesson, LessonOutcome, LessonStatus, RelatedLesson, Triage, TriageRecord,
+};
+
+/// `GET /v1/projects/{id}/lessons`: newest first, narrowed by `q` and `status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListLessonsResponse {
+    pub lessons: Vec<Lesson>,
+    /// Review clues (LESSONS §4.4): by lesson id, the record's files changed after its last
+    /// check. A clue, not a verdict — the record may still hold.
+    #[serde(default)]
+    pub changed: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+/// `PATCH /v1/lessons/{id}`: the fields given replace the stored ones; the rest is kept.
+/// Evidence and sources are never set this way.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UpdateLessonRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub symptom: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub keywords: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub conditions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub resolution: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub outcome: Option<LessonOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub status: Option<LessonStatus>,
+    /// With `status: "superseded"`: the lesson that replaces it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub superseded_by: Option<String>,
+}
+
+/// A problem recorded in a run (a run note under `issue/`) and, once sorted, what became
+/// of it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct RunIssue {
+    pub key: String,
+    pub author: AgentId,
+    pub text: String,
+    pub updated_at: DateTime<Utc>,
+    /// Absent while nobody has sorted it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub triage: Option<TriageRecord>,
+}
+
+/// `GET /v1/runs/{key}/issues`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListRunIssuesResponse {
+    pub run_id: RunId,
+    pub issues: Vec<RunIssue>,
+    /// How many of `issues` nobody has sorted yet.
+    pub unsorted: u32,
 }
 
 // ---------------------------------------------------------------------------------------

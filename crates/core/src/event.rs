@@ -386,6 +386,25 @@ pub enum EventKind {
         author: AgentId,
         text: Option<String>,
     },
+    /// A problem was recorded: a run note under `issue/` was written (derived from
+    /// `note.written`, docs/tasks/LESSONS.md §4.6).
+    #[serde(rename = "issue.recorded")]
+    IssueRecorded {
+        run_id: RunId,
+        key: String,
+        author: AgentId,
+    },
+    /// Recorded problems were sorted: into a lesson, merged into one, or kept in the run.
+    #[serde(rename = "issue.triaged")]
+    IssueTriaged {
+        run_id: RunId,
+        records: Vec<crate::lesson::TriageRecord>,
+    },
+    #[serde(rename = "lesson.created")]
+    LessonCreated { lesson: crate::lesson::Lesson },
+    /// A lesson changed: evidence added, a new resolution or status, or a person's edit.
+    #[serde(rename = "lesson.updated")]
+    LessonUpdated { lesson: crate::lesson::Lesson },
     /// A reminder an agent set came due.
     #[serde(rename = "reminder.fired")]
     ReminderFired {
@@ -668,6 +687,10 @@ impl EventKind {
             Self::ReminderFired { .. } => "reminder.fired",
             Self::HumanAsked { .. } => "human.asked",
             Self::NoteWritten { .. } => "note.written",
+            Self::IssueRecorded { .. } => "issue.recorded",
+            Self::IssueTriaged { .. } => "issue.triaged",
+            Self::LessonCreated { .. } => "lesson.created",
+            Self::LessonUpdated { .. } => "lesson.updated",
             Self::HumanAnswered { .. } => "human.answered",
             Self::HumanDismissed { .. } => "human.dismissed",
             Self::RunBudget { .. } => "run.budget",
@@ -730,6 +753,7 @@ impl EventKind {
             | Self::RunLanded { id, .. } => Some(*id),
             Self::RunDeleted { run_id } => Some(*run_id),
             Self::NoteWritten { run_id, .. } => *run_id,
+            Self::IssueRecorded { run_id, .. } | Self::IssueTriaged { run_id, .. } => Some(*run_id),
             Self::HumanAsked { item } | Self::HumanAnswered { item } => item.run_id,
             Self::TaskStatusChanged { run_id, .. }
             | Self::TaskChecked { run_id, .. }
@@ -771,12 +795,16 @@ impl EventKind {
             | Self::CliInstallFinished { .. }
             | Self::PluginChanged { .. }
             | Self::ExtensionChanged { .. }
+            | Self::IssueTriaged { .. }
+            | Self::LessonCreated { .. }
+            | Self::LessonUpdated { .. }
             // The caller is in the call record, not here: an extension's panel calls its
             // tools as the person, with no agent to attribute them to.
             | Self::ExtensionCallFinished { .. } => None,
             Self::AgentSessionStarted { id, .. } => Some(*id),
             Self::ReminderFired { owner, .. } | Self::WatchTriggered { owner, .. } => Some(*owner),
             Self::NoteWritten { author, .. } => Some(*author),
+            Self::IssueRecorded { author, .. } => Some(*author),
             Self::HumanAsked { item } | Self::HumanAnswered { item } => Some(item.from),
             Self::TaskStatusChanged { assignee, .. } => *assignee,
             Self::TaskCommand { by, .. } => Some(*by),
