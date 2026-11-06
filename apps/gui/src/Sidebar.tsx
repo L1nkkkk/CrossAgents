@@ -2,7 +2,9 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type FocusEvent as ReactFocusEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { HubInfo } from "@bindings/HubInfo";
+import type { Run } from "@bindings/Run";
 import type { RunDetail } from "@bindings/RunDetail";
+import type { Work } from "@bindings/Work";
 import type { WorkDetail } from "@bindings/WorkDetail";
 import { deliveryOf, lastError, useActivity, useDelivery, useUnread } from "./activity";
 import { api, errorText } from "./api";
@@ -10,13 +12,14 @@ import type { DevHub } from "./bridge";
 import { buildTag, compareBuilds } from "./lib/build";
 import { useUpdateState } from "./lib/updates";
 import { Avatar, BrandMark, Icon, ModelMark, ago, displayName, isAgent, sessionHref } from "./components";
-import { useConnectionStatus, useHubData } from "./hub";
-import { RunModeMark, RunModeTag, modeWords } from "./runmode";
+import { useConnectionStatus, onHubEvent, useHubData } from "./hub";
+import { RunModeMark, RunModeTag, leadsInPlace, modeWords } from "./runmode";
 import { runState } from "./lib/taskState";
 import { RowElapsed, usePulseSeeds, useRowLive } from "./liveTurn";
 import { t } from "./lib/i18n";
 import { sessionWork } from "./lib/projectView";
 import { stepLine } from "./lib/workGroups";
+import { WorkDetails } from "./lib/workDetails";
 import { SessionPeek, TaskSegments, type PeekFacts } from "./SessionPeek";
 import { capped, sidebarGroups, searchGroups, groupClosed, shortSince, summaryText, type SidebarGroup, type SidebarMember } from "./lib/sidebarTree";
 import { todoItems, visibleTodos, type TodoItem } from "./lib/todos";
@@ -29,7 +32,7 @@ import { level, tightest, windowLabel } from "./lib/quota";
 import { openBeside } from "./panes";
 import { useExtensions } from "./extensions/defaults";
 import { useQuota } from "./views/Quota";
-import { CHATS, selectWorkspace, useWorkspaces, wsHref } from "./workspace";
+import { CHATS, selectWorkspace, useWorkspaces, wsHref, wsKey } from "./workspace";
 
 const Confirmed = createContext(true);
 const Needs = createContext<readonly TodoItem[]>([]);
@@ -102,41 +105,74 @@ function useArchiveNote() {
 }
 const sessionKey = (a: Agent) => "s:" + a.id;
 const labelOf = (a: Agent) => displayName(a);
-/** How many work groups the sidebar lists before the list gets too long to scan. */
-const SIDEBAR_WORKS = 8;
+/** How many of a project's work groups show before 「更多」 reveals the rest. */
+const WORKS_PER_PROJECT = 3;
+/** The fold of the work groups no project claims. */
+const OTHER_WORKS = "__other_works";
 
 /**
  * The work groups (docs/tasks/G1.md §3.5): one row each, however many rounds they have had.
- * Each row needs its rounds — the current one's state, and the list behind the fold — so the
- * recent groups are read whole. `enabled` is false on a hub that does not have the page (an
- * older hub, or one whose token may not read it), which this then does not even ask.
+ * This is the list only — one request — so every group can be placed under its project without
+ * reading each group's rounds. `WorkDetails` below reads those, and only for a row that opens.
+ * `enabled` is false on a hub that does not have the page (an older hub, or one whose token may
+ * not read it), which this then does not even ask.
  */
 function useWorks(enabled: boolean) {
   return useHubData(
     async () => {
       if (!enabled) return [];
       const { works } = await api.listWorks();
-      const recent = works
-        .slice()
-        .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
-        .slice(0, SIDEBAR_WORKS);
-      const details = await Promise.all(recent.map((w) => api.getWork(w.id).catch(() => null)));
-      return details.filter((d): d is WorkDetail => d !== null);
+      return works.slice().sort((a, b) => b.updated_at.localeCompare(a.updated_at));
     },
     [enabled],
     (e) => e.type.startsWith("work.") || e.type.startsWith("run."),
   );
 }
 
-/** One work group: its title, the current round's state and mode; its rounds fold out below. */
-function WorkRow({ detail, active, selected }: { detail: WorkDetail; active: boolean; selected?: string }) {
+/** Work details are shared by the sidebar: read on a row's fold, refreshed while it stays open. */
+const workDetails = new WorkDetails();
+
+function useWorkDetail(workId: string, open: boolean): WorkDetail | undefined {
+  const [detail, setDetail] = useState(() => workDetails.get(workId));
+  useEffect(() => {
+    if (!open) return;
+    // A row read before shows its rounds at once; expand asks again only if an event has made
+    // them stale. One opened for the first time asks for them now.
+    setDetail(workDetails.get(workId));
+    void workDetails.expand(workId, api.getWork);
+    const off = workDetails.subscribe(() => setDetail(workDetails.get(workId)));
+    return () => {
+      off();
+      workDetails.collapse(workId);
+    };
+  }, [workId, open]);
+  return detail;
+}
+
+/** A work group's project: the same path normalisation the sidebar already groups by. */
+const workProject = (work: Work) => wsKey(work.repo);
+
+/**
+ * One work group: its title, the latest loaded round's state and mode; its rounds fold out
+ * below. The rounds behind the fold are read on opening it, not for every row on the list.
+ */
+function WorkRow({ work, runs, active, selected }: { work: Work; runs: Run[]; active: boolean; selected?: string }) {
   const [open, setOpen] = useState(false);
-  const { work } = detail;
-  const rounds = detail.runs.slice().sort((a, b) => a.created_at.localeCompare(b.created_at));
-  const current = rounds[rounds.length - 1];
+  const detail = useWorkDetail(work.id, open);
+  // What the sidebar already has: the recent runs. A group with none of them loaded is just its
+  // title — no state, no mode.
+  const loaded = runs.slice().sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const current = loaded[loaded.length - 1];
   const state = current ? runState(current.status) : undefined;
   const dot: Dot = !state ? undefined : state.bucket === "active" ? "live" : state.bucket === "needs_you" ? "warn" : state.tone === "danger" ? "danger" : undefined;
+  // Its rounds are read when the fold opens; until they arrive the fold shows nothing, so a
+  // partial set of loaded rounds is never numbered as if it were all of them.
+  const rounds = detail ? detail.runs.slice().sort((a, b) => a.created_at.localeCompare(b.created_at)) : [];
   const href = `#/work/${encodeURIComponent(work.id)}`;
+  // Where it works is only worth a tag when it is the surprising case (原地); a worktree run is
+  // the usual one, and its word stays in the tooltip so a narrow row keeps the title readable.
+  const mode = current ? modeWords(current) : undefined;
+  const label = current ? t("sidebar.workTitle", { title: work.title, n: detail?.runs.length ?? loaded.length }) : work.title;
   return (
     <div className="work-row-wrap">
       <div className={`nav-row work-row ${active ? "active" : ""}`}>
@@ -148,11 +184,11 @@ function WorkRow({ detail, active, selected }: { detail: WorkDetail; active: boo
         >
           <Icon name={open ? "chevron" : "chevronRight"} size={12} />
         </button>
-        <a className="row-link" href={href} title={t("sidebar.workTitle", { title: work.title, n: rounds.length })} aria-current={active ? "page" : undefined}>
+        <a className="row-link" href={href} title={label + (mode ? " · " + mode.label : "")} aria-current={active ? "page" : undefined}>
           <span className="row-main">
             <span className="row-label">{work.title}</span>
           </span>
-          {current && <RunModeTag run={current} compact className="row-mode" />}
+          {current && leadsInPlace(current) && <RunModeTag run={current} compact className="row-mode" />}
         </a>
         {dot && <span className={`row-dot ${dot}`} aria-hidden="true" />}
       </div>
@@ -177,10 +213,61 @@ function WorkRow({ detail, active, selected }: { detail: WorkDetail; active: boo
               </li>
             );
           })}
-          {!rounds.length && <li className="muted small work-round-empty">{t("sidebar.noRounds")}</li>}
+          {!rounds.length && detail && <li className="muted small work-round-empty">{t("sidebar.noRounds")}</li>}
         </ul>
       )}
     </div>
+  );
+}
+
+/** A project's work groups, newest first: its three newest, and 「更多」 for the rest. */
+function WorkList({ works, runs, route }: { works: Work[]; runs: RunDetail[]; route: string[] }) {
+  const [all, setAll] = useState(false);
+  if (!works.length) return null;
+  const shown = all ? works : works.slice(0, WORKS_PER_PROJECT);
+  const hidden = works.length - WORKS_PER_PROJECT;
+  return (
+    <div className="project-works">
+      {shown.map((work) => (
+        <WorkRow
+          key={work.id}
+          work={work}
+          // What the sidebar has already loaded for this group; a row opens its own fold for the rest.
+          runs={runs.filter((d) => d.run.work_id === work.id).map((d) => d.run)}
+          active={route[0] === "work" && route[1] === work.id}
+          selected={route[0] === "work" && route[1] === work.id ? route[2] : undefined}
+        />
+      ))}
+      {/* One toggle, in place: it keeps keyboard focus where it was (see Capped). */}
+      {hidden > 0 && (
+        <button className="more" aria-expanded={all} onClick={() => setAll(!all)}>
+          {all ? t("common.less") : t("sidebar.moreWorks", { n: hidden })}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** The work groups no project claims — folded at the end, so they are never dropped. */
+function OtherWorks({ works, runs, route }: { works: Work[]; runs: RunDetail[]; route: string[] }) {
+  const collapsed = useCollapsed();
+  const closed = collapsed.has(OTHER_WORKS);
+  if (!works.length) return null;
+  return (
+    <section className="group other-works">
+      <div className="group-head">
+        <button
+          className="group-name"
+          aria-expanded={!closed}
+          aria-label={t(closed ? "sidebar.expandOther" : "sidebar.collapseOther")}
+          onClick={() => toggleCollapsed(OTHER_WORKS)}
+        >
+          <Icon name={closed ? "chevronRight" : "chevron"} size={13} />
+          {t("sidebar.other")}
+        </button>
+      </div>
+      {!closed && <WorkList works={works} runs={runs} route={route} />}
+    </section>
   );
 }
 
@@ -201,6 +288,25 @@ export function Sidebar({ route }: { route: string[] }) {
   const archiving = useArchiveNote();
   const runs = tree.data ?? [];
   const works = useWorks(work.show && !work.disabled);
+  const workList = works.data ?? [];
+  const searching = !!query.trim();
+  // A run or work event can change a round a row shows: mark what was read stale, and reread the
+  // details whose rounds are open — only those. The list itself is refreshed by `useWorks`.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const off = onHubEvent((e) => {
+      if (!e.type.startsWith("run.") && !e.type.startsWith("work.")) return;
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        workDetails.invalidate();
+        void workDetails.refresh(api.getWork);
+      }, 250);
+    });
+    return () => {
+      clearTimeout(timer);
+      off();
+    };
+  }, []);
   const todos = todoItems({
     items: questions.data?.items ?? [],
     runs,
@@ -212,6 +318,9 @@ export function Sidebar({ route }: { route: string[] }) {
   const extensionPages = [...useExtensions().pages.values()];
   const groups = sidebarGroups(everyone, runs, list, pinned, [...order]);
   const shown = searchGroups(groups, query);
+  // A work group belongs to the project its `repo` names; one no project claims goes last.
+  const projectKeys = new Set(groups.map((g) => g.key));
+  const otherWorks = workList.filter((w) => !projectKeys.has(workProject(w)));
   const archived = everyone.filter((a) => a.archived_at);
   const isSession = (a: Agent) => route[0] === "s" && isAgent(a, route[1]);
   const row = (member: SidebarMember) => <SessionRow key={member.agent.id} member={member} active={isSession(member.agent)} />;
@@ -313,30 +422,14 @@ export function Sidebar({ route }: { route: string[] }) {
             )}
             <NeedsYou items={[...todos, ...unsortedIssues, ...unboundProjects]} agents={everyone} />
             {done > 0 && <p className="sidebar-unread">{t("sidebar.doneUnread", { n: done })}</p>}
-            {!query.trim() && work.show && (work.disabled || (works.data && works.data.length > 0)) && (
-              <section className="group works-group">
-                <div className="group-head static">
-                  <span className="group-name">{t("sidebar.works")}</span>
-                </div>
-                {work.disabled ? (
-                  <div className="nav-row" aria-disabled="true" title={work.reason} style={REFUSED}>
-                    <span className="row-link">
-                      <span className="row-label">{work.reason ?? "hub 不允许读取工作组"}</span>
-                    </span>
-                  </div>
-                ) : (
-                  works.data!.map((detail) => (
-                    <WorkRow
-                      key={detail.work.id}
-                      detail={detail}
-                      active={route[0] === "work" && route[1] === detail.work.id}
-                      selected={route[0] === "work" && route[1] === detail.work.id ? route[2] : undefined}
-                    />
-                  ))
-                )}
-              </section>
+            {!searching && work.show && work.disabled && (
+              <div className="works-refused nav-row" aria-disabled="true" title={work.reason} style={REFUSED}>
+                <span className="row-link">
+                  <span className="row-label">{work.reason ?? "hub 不允许读取工作组"}</span>
+                </span>
+              </div>
             )}
-            {!query.trim() && (pinnedMembers.length > 0 || pinnedRuns.length > 0) && (
+            {!searching && (pinnedMembers.length > 0 || pinnedRuns.length > 0) && (
               <section className="group">
                 <div className="group-head static">
                   <span className="group-name">{t("sidebar.pinned")}</span>
@@ -359,7 +452,7 @@ export function Sidebar({ route }: { route: string[] }) {
               <Group
                 key={g.key}
                 group={g}
-                searching={!!query.trim()}
+                searching={searching}
                 active={route[0] === "w" && route[1] === g.key}
                 onMove={
                   g.key === CHATS
@@ -375,14 +468,16 @@ export function Sidebar({ route }: { route: string[] }) {
                 <Capped
                   items={g.members}
                   keep={(m) => isSession(m.agent) || m.agent.status === "running" || m.agent.status === "error" || !!unread[m.agent.id] || todos.some((item) => item.agent === m.agent.id)}
-                  searching={!!query.trim()}
+                  searching={searching}
                 >
                   {row}
                 </Capped>
+                {!searching && <WorkList works={workList.filter((w) => workProject(w) === g.key)} runs={runs} route={route} />}
               </Group>
             ))}
-            {archived.length > 0 && <div hidden={!!query.trim()}><Archived agents={archived} isSession={isSession} /></div>}
-            {query.trim() && !shown.length && <p className="sidebar-empty">{t("sidebar.noMatch", { query })}</p>}
+            {!searching && <OtherWorks works={otherWorks} runs={runs} route={route} />}
+            {archived.length > 0 && <div hidden={searching}><Archived agents={archived} isSession={isSession} /></div>}
+            {searching && !shown.length && <p className="sidebar-empty">{t("sidebar.noMatch", { query })}</p>}
             {!query && loaded && !groups.length && <p className="sidebar-empty">{t("sidebar.empty")}</p>}
           </div>
           {archiving.note && (

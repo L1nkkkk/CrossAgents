@@ -219,6 +219,26 @@
 
 /* ---- A work group's row in the sidebar ------------------------------------------------- */
 
+/* A project's work groups hang under its sessions, on the same guide line, so folding the
+   project folds them too and they still read as one level below its name. */
+.flat-sidebar .group:not(.needs-you-group):not(.archived-group) > .project-works {
+  position: relative;
+  margin-left: 10px;
+}
+.flat-sidebar .group:not(.needs-you-group):not(.archived-group) > .project-works::before {
+  content: "";
+  position: absolute;
+  left: -1px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+}
+/* The hub refused the work page: say so where the groups would be. */
+.sidebar .works-refused {
+  margin: 12px 0 0;
+}
+
 .work-row .work-fold {
   flex: none;
   width: 18px;
