@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf, Prefix};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use crossagents_core::McpServerSpec;
-use crossagents_orchestrator::files::{FileError, rel_of};
+use crossagents_orchestrator::files::{FileError, rel_of, resolve_in_root};
 use crossagents_orchestrator::{FilesScope, Orchestrator};
 use crossagents_plugins::PluginConfig;
 use serde::{Deserialize, Serialize};
@@ -169,31 +169,34 @@ pub fn confine(root: &Path, input: &str, source: PathSource) -> Result<Confined,
     Ok(Confined { abs, rel, source })
 }
 
-/// [`confine`] for an agent against several roots, in order: the first root the path is
-/// inside wins, and its [`Confined::rel`] is relative to that root. Each root is judged on
-/// its own, the same way (a `..` above it, another drive or share, a link that leads out of
-/// it are refused), so a path is never let through by mixing them. Refused, the error is
-/// [`FileError::Outside`] if any root found the path outside it, else the first root's.
+/// A path an agent named, checked against several roots in order: the first root the path
+/// is inside wins, and its [`Confined::rel`] is relative to that root. For each root, a
+/// share or device path is refused before the file system is asked ([`refuse_remote`], so
+/// no share is ever contacted), then [`resolve_in_root`] resolves it canonically and refuses
+/// `..` above the root, a symlink or junction that leads out and an absolute path elsewhere
+/// (and `.git`), exactly as before. Each root is judged on its own, so a path is never let
+/// through by mixing them. Refused, the error is the first root's, unchanged.
 ///
 /// The image endpoint uses it for "the working directory or the system temp directory"
 /// (agents are told to leave images for the person in the temp directory).
 pub fn confine_any(roots: &[&Path], input: &str) -> Result<Confined, FileError> {
     let mut first = None;
-    let mut outside = None;
     for root in roots {
-        match confine(root, input, PathSource::Agent) {
-            Ok(found) => return Ok(found),
-            Err(err @ FileError::Outside(_)) => {
-                outside.get_or_insert(err);
+        let judged = refuse_remote(root, input).and_then(|()| resolve_in_root(root, input));
+        match judged {
+            Ok((abs, rel)) => {
+                return Ok(Confined {
+                    abs,
+                    rel: Some(rel),
+                    source: PathSource::Agent,
+                });
             }
             Err(err) => {
                 first.get_or_insert(err);
             }
         }
     }
-    Err(outside
-        .or(first)
-        .unwrap_or_else(|| FileError::Outside(input.to_owned())))
+    Err(first.unwrap_or_else(|| FileError::Outside(input.to_owned())))
 }
 
 /// The part of [`confine`] made before the file system is asked, for an entry that resolves
@@ -804,7 +807,11 @@ env = { A = "b" }
         let abs = second.join("b.png").display().to_string();
         assert!(confine_any(&roots, &abs).is_ok());
         // `..` from either root to the parent of both is refused.
-        for input in ["../secret.txt", "../tmp/../secret.txt", "src/../../secret.txt"] {
+        for input in [
+            "../secret.txt",
+            "../tmp/../secret.txt",
+            "src/../../secret.txt",
+        ] {
             assert!(
                 matches!(confine_any(&roots, input), Err(FileError::Outside(_))),
                 "{input}"
@@ -833,13 +840,25 @@ env = { A = "b" }
                 .output()
                 .is_ok_and(|o| o.status.success());
         if made {
+            // Refused: the working directory has no `out` (its error comes first, as
+            // before), and the second root judges the link as leading out.
+            assert!(confine_any(&roots, "out/secret.txt").is_err());
             assert!(matches!(
-                confine_any(&roots, "out/secret.txt"),
+                confine_any(&[second.as_path()], "out/secret.txt"),
                 Err(FileError::Outside(_))
             ));
         } else {
             eprintln!("skipped the link case: cannot create a link or junction here");
         }
+        // `.git` stays out of reach, as through `resolve_in_root`.
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/x.png"), "x").unwrap();
+        assert!(confine_any(&roots, ".git/x.png").is_err());
+        // Missing everywhere: the first root's error, as before.
+        assert!(matches!(
+            confine_any(&roots, "nowhere.png"),
+            Err(FileError::NotFound(what)) if what.starts_with("nowhere.png in ")
+        ));
     }
 
     /// The one exception: a file the person picked may be anywhere, and says so.
