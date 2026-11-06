@@ -6,4 +6,9 @@ export type Reminder = { id: string, owner: AgentId, due_at: string, note: strin
 /**
  * Only fire if `task` has not ended by then.
  */
-only_if_open: boolean, created_at: string, };
+only_if_open: boolean, 
+/**
+ * The time asked for was beyond the week a wait may last and was cut to it: the wake says
+ * that the thing waited for did not happen.
+ */
+wait_expired: boolean, created_at: string, };

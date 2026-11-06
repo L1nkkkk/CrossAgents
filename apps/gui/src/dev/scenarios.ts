@@ -581,17 +581,18 @@ function backgroundScene() {
   const soon = (minutes: number) => new Date(Date.now() + minutes * 60_000).toISOString();
   const nova = "0190aaaa-0000-7000-8000-00000000n0va";
   const fires = "rem-rex-ci";
+  const noHealth = { runs: [], paused_at: null, pause_reason: null };
   const background: BackgroundResponse = {
     reminders: [
-      { reminder: { id: fires, owner: rex.id, due_at: new Date(Date.now() + 8_000).toISOString(), note: "看一眼 CI 有没有跑完", task: tc.id, only_if_open: true, created_at: ago(5) }, owner_name: rex.name, task_key: tc.key, run_id: runId },
-      { reminder: { id: "rem-ada-check", owner: ada.id, due_at: soon(25), note: "#b 还没交就去问 Mia 卡在哪", task: tb.id, only_if_open: true, created_at: ago(20) }, owner_name: ada.name, task_key: tb.key, run_id: runId },
-      { reminder: { id: "rem-mia-dark", owner: mia.id, due_at: soon(60 * 3 + 12), note: "深色模式的截图发给设计确认", task: null, only_if_open: false, created_at: ago(40) }, owner_name: mia.name, task_key: null, run_id: runId },
-      { reminder: { id: "rem-nova-docs", owner: nova, due_at: soon(60 * 26), note: "明早把 docs/cli.md 的 --json 例子再核对一遍", task: null, only_if_open: false, created_at: ago(90) }, owner_name: "Nova", task_key: null, run_id: null },
+      { reminder: { id: fires, owner: rex.id, due_at: new Date(Date.now() + 8_000).toISOString(), note: "看一眼 CI 有没有跑完", task: tc.id, only_if_open: true, wait_expired: false, created_at: ago(5) }, owner_name: rex.name, task_key: tc.key, run_id: runId },
+      { reminder: { id: "rem-ada-check", owner: ada.id, due_at: soon(25), note: "#b 还没交就去问 Mia 卡在哪", task: tb.id, only_if_open: true, wait_expired: false, created_at: ago(20) }, owner_name: ada.name, task_key: tb.key, run_id: runId },
+      { reminder: { id: "rem-mia-dark", owner: mia.id, due_at: soon(60 * 3 + 12), note: "深色模式的截图发给设计确认", task: null, only_if_open: false, wait_expired: false, created_at: ago(40) }, owner_name: mia.name, task_key: null, run_id: runId },
+      { reminder: { id: "rem-nova-docs", owner: nova, due_at: soon(60 * 26), note: "明早把 docs/cli.md 的 --json 例子再核对一遍", task: null, only_if_open: false, wait_expired: false, created_at: ago(90) }, owner_name: "Nova", task_key: null, run_id: null },
     ],
     watches: [
-      { watch: { id: "w-ada-c", owner: ada.id, target: { kind: "task", task_id: tc.id }, on: ["done", "failed"], created_at: ago(30) }, owner_name: ada.name, target_name: `#${tc.key}`, run_id: runId },
-      { watch: { id: "w-ada-mia", owner: ada.id, target: { kind: "agent", agent_id: mia.id }, on: ["idle", "stalled"], created_at: ago(28) }, owner_name: ada.name, target_name: mia.name, run_id: runId },
-      { watch: { id: "w-nova-iris", owner: nova, target: { kind: "agent", agent_id: "0190aaaa-0000-7000-8000-00000000iris" }, on: [], created_at: ago(70) }, owner_name: "Nova", target_name: "Iris", run_id: null },
+      { watch: { id: "w-ada-c", owner: ada.id, target: { kind: "task", task_id: tc.id }, on: ["done", "failed"], created_at: ago(30), expires_at: null, chain: 0, health: noHealth }, owner_name: ada.name, target_name: `#${tc.key}`, run_id: runId },
+      { watch: { id: "w-ada-mia", owner: ada.id, target: { kind: "agent", agent_id: mia.id }, on: ["idle", "stalled"], created_at: ago(28), expires_at: null, chain: 0, health: noHealth }, owner_name: ada.name, target_name: mia.name, run_id: runId },
+      { watch: { id: "w-nova-iris", owner: nova, target: { kind: "agent", agent_id: "0190aaaa-0000-7000-8000-00000000iris" }, on: [], created_at: ago(70), expires_at: null, chain: 0, health: noHealth }, owner_name: "Nova", target_name: "Iris", run_id: null },
     ],
     verifying: [
       { task_id: tc.id, run_id: runId, run_title: d.run.title, key: tc.key, title: tc.title, assignee: tc.assignee, assignee_name: rex.name, checks: 3, since: tc.updated_at },
