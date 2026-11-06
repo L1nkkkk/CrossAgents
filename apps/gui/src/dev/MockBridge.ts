@@ -59,6 +59,7 @@ import {
 import { exportLessons, lessonMatches, type Lesson, type RunIssue } from "../lessons/lessons";
 import { effortOf } from "../lib/models";
 import { applyEvent } from "../session";
+import { FEATURES, featureOf } from "../lib/features";
 import { capabilitiesOf, contextParts, driverOf, transcript, uid } from "./fixtures";
 import { mockContent, mockResolve, mockSearch, mockStatus, mockTree } from "./files.mock";
 import { mockGit } from "./git.mock";
@@ -108,6 +109,15 @@ export type MockState = {
   dirty?: Record<string, string[]>;
   /** The API version `/v1/info` reports; `v1` when unset. */
   api?: string;
+  /** The feature list `/v1/info` reports (docs/TODO.md §二); `null` is a hub built before it,
+   * which sends none. Unset: this hub has all `FEATURES`, as the real one does. */
+  features?: string[] | null;
+  /** The version `/v1/info` reports; `__BUILD__` ours when unset. With `features: null` this is
+   * what the GUI infers the hub's entries from (0.2.6 has git and lessons). */
+  version?: string;
+  /** Features whose requests answer 403, by feature, with the hub's message: 凭据的级别不够
+   * (docs/API-AUTH.md §3), so the entry greys instead of the page erroring. */
+  forbidden?: Partial<Record<string, string>>;
   /** What holds each session now (docs/tasks/S1.md §3.3), by agent id. */
   executions?: Record<string, AgentExecution>;
   /** The native resume command (docs/TODO.md §十五) by agent id, when a scenario fixes it; else made up from the agent like the hub would. */
@@ -604,6 +614,11 @@ export class MockBridge implements CrossAgentsBridge {
     const p = url.pathname;
     let m: RegExpMatchArray | null;
 
+    // A feature this hub refuses (docs/TODO.md §二): the same 403 `access.rs` answers with,
+    // so a scenario can show the greyed entry and the hub's own words.
+    const refused = s.forbidden?.[featureOf(p) ?? ""];
+    if (refused) return json(403, { error: { code: "forbidden", message: refused } });
+
     const integration = /^\/v1\/runs\/([^/]+)\/integration$/.exec(p);
     if (integration && method === "GET") return json(200, { outcome: "ok", snapshot: "base", integration: "worker", applied: this.appliedRuns.has(integration[1]) ? "worker" : null });
     const apply = /^\/v1\/runs\/([^/]+)\/apply$/.exec(p);
@@ -655,7 +670,10 @@ export class MockBridge implements CrossAgentsBridge {
       if (p === "/v1/info") {
         // `?hubcommit=abc1234`: a hub built from another commit than the page.
         const commit = new URLSearchParams(location.search).get("hubcommit") ?? __BUILD__.commit;
-        return json(200, { version: __BUILD__.version, commit, debug: false, api: s.api ?? "v1", pid: 0, home: "（mock 模式，无 hub）", started_at: new Date().toISOString() });
+        // `features: null` is an older hub: it answers without the list at all, and `version`
+        // is then what the GUI infers its entries from.
+        const features = s.features === null ? undefined : (s.features ?? FEATURES);
+        return json(200, { version: s.version ?? __BUILD__.version, commit, debug: false, api: s.api ?? "v1", pid: 0, home: "（mock 模式，无 hub）", started_at: new Date().toISOString(), ...(features ? { features } : {}) });
       }
       if (p === "/v1/agents") return json(200, { agents: s.agents });
       if ((m = p.match(/^\/v1\/agents\/([^/]+)$/))) return this.agent(m[1]) ? json(200, this.agent(m[1])) : notFound("agent");

@@ -84,6 +84,10 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "GET", path: /^\/v1\/runs\/[^/]+\/cost$/, level: "read" },
   { method: "GET", path: /^\/v1\/runs\/[^/]+\/tasks\/[^/]+\/diff$/, level: "read" },
   { method: "POST", path: /^\/v1\/runs\/[^/]+\/tasks\/[^/]+\/review$/, level: "write" },
+  // 应用到原目录 (LEAD §6): reading what the workers did, then writing it into the person's
+  // own directory. The run page's apply button is the only caller.
+  { method: "GET", path: /^\/v1\/runs\/[^/]+\/integration$/, level: "read" },
+  { method: "POST", path: /^\/v1\/runs\/[^/]+\/apply$/, level: "write" },
   { method: "POST", path: /^\/v1\/repos\/init$/, level: "write" },
   { method: "GET", path: /^\/v1\/usage$/, level: "read" },
   // `?range=&group=&source=` rides along; `route()` drops it before matching.

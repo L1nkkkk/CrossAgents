@@ -102,6 +102,7 @@ import type { TerminalResizeRequest } from "@bindings/TerminalResizeRequest";
 import type { TerminalTakeoverRequest } from "@bindings/TerminalTakeoverRequest";
 import type { ResolvePathsRequest } from "@bindings/ResolvePathsRequest";
 import type { ResolvePathsResponse } from "@bindings/ResolvePathsResponse";
+import { noteForbidden, noteHub } from "./lib/features";
 
 /**
  * Whose files a path is relative to: a session's working directory, a run's integration
@@ -212,7 +213,13 @@ export function refuseRequests(reason: string | undefined) {
 async function request<T>(method: Method, path: string, body?: unknown, opts: { text?: boolean } = {}): Promise<T> {
   if (refusal && path !== "/v1/info") throw new ApiError(0, "version_mismatch", refusal);
   const response = await send(method, path, body);
-  if (response.status >= 400) throw errorFromBody(response.status, response.body);
+  if (response.status >= 400) {
+    const error = errorFromBody(response.status, response.body);
+    // 403: the token's level is too low for this route (docs/API-AUTH.md §3). The entry that
+    // asked is greyed with the hub's message instead of raising it at the person.
+    if (response.status === 403) noteForbidden(path, error.message);
+    throw error;
+  }
   if (opts.text) return response.body as T;
   return (response.body ? JSON.parse(response.body) : undefined) as T;
 }
@@ -304,7 +311,14 @@ function filesSearch(scope: FileScope, q: string, all = false): Promise<FileSear
 }
 
 export const api = {
-  info: () => request<HubInfo>("GET", "/v1/info"),
+  /** Also what the hub has beyond older ones (`features`, docs/TODO.md §二): every caller of
+   * `/v1/info` is a fresh connection check, so this is where the page learns it. A hub without
+   * the list is read by version (`lib/features.ts` `WITHOUT_LIST`). */
+  info: async () => {
+    const info = await request<HubInfo>("GET", "/v1/info");
+    noteHub(info.features, info.version);
+    return info;
+  },
 
   listAgents: () => request<ListAgentsResponse>("GET", "/v1/agents"),
   listAvatars: () => request<ListAvatarsResponse>("GET", "/v1/avatars"),
