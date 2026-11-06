@@ -14,7 +14,7 @@ import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
 import { usageScene } from "../views/Usage.mock";
 import { expertiseScene } from "../views/Expertise.mock";
 import { lessonsScene } from "../views/Lessons/Lessons.mock";
-import { agent, ago, capabilitiesOf, NOTES_REPO, planned, REPO, say, team, think, transcript, turn, uid } from "./fixtures";
+import { agent, ago, capabilitiesOf, NOTES_REPO, planned, REPO, run, say, team, think, transcript, turn, uid } from "./fixtures";
 import { openFile } from "../FileViewer";
 import { openTool, placeTab } from "../panes";
 import { setBottomHeight, setSidebarWidth, setToolsWidth, SIDEBAR } from "../lib/widths";
@@ -301,6 +301,85 @@ export const SCENARIOS: Scenario[] = [
     };
   } },
   { key: "plan", label: "计划待审批", hint: "run 页：中间只有主导的对话和待审批的 Plan；右侧栏是计划、run 信息、策略与预算", build: () => oauthRun("plan") },
+  { key: "unusable-cursor", label: "Cursor 在守卫 run 里用不了", hint: "Windows 上的 Cursor 不能跑守卫会话：Plan 的候选里它置灰、点不了，副行写着 hub 的原因；指派给它的任务在审批被拒绝后，原因就写在那一行", build: () => {
+    const scene = oauthRun("plan");
+    const state = scene.state;
+    const lead = state.agents.find((a) => a.name === "Ada")!;
+    // A Cursor teammate with no permission of its own: the run's approvals decide, as on a
+    // real hub — this machine (Windows) cannot give it a guarded session.
+    const cursor = agent({ name: "pia", plugin: "cursor", model: "claude-opus-5", role: "worker", profile: { display_name: "Pia", title: "Cursor · 前端", color: "teal" } });
+    state.agents.push(cursor);
+    const detail = state.runs[0];
+    detail.run.config.team = [...detail.run.config.team, cursor.id];
+    // The same PLAN objects are shared by every scenario: replace, never edit them.
+    detail.run.plan = detail.run.plan.map((t, i) => (i === 0 ? { ...t, assignee: "pia" } : t));
+    state.sessions = state.agents
+      .filter((a) => a.id !== lead.id)
+      .map((a) => ({ agent: a, state: "idle", busy_with: null, last_execution: null, can_use: true, reason: null }));
+    // A second plan waits in the same workspace under a different policy: only naming this
+    // plan tells the hub which policy its candidates would be assigned under (and this run
+    // is the guard one, so without `run=` Pia would look usable and nothing here greys out).
+    const sam = state.agents.find((a) => a.name === "Sam")!;
+    const mia = state.agents.find((a) => a.name === "Mia")!;
+    const other = run({ title: "登录页改版", request: "登录页改版：布局和错误提示文案。", planner: sam, worker: mia, team: [mia], status: "awaiting_approval", plan: [planned("a", "登录页布局", "把表单和错误提示重新排一遍。", "mia")], minutesAgo: 18 });
+    other.config.policy.approvals = "off";
+    state.runs.push({ run: other, tasks: [] });
+    const reason = "Cursor cannot use this permission on Windows";
+    const verify = () => {
+      const item = [...document.querySelectorAll<HTMLButtonElement>(".who-pick-menu .menu-item")].find((b) => b.textContent?.includes(reason));
+      if (!item) throw new Error("the unusable candidate is not in the executor menu");
+      if (!item.disabled) throw new Error("the unusable candidate can still be picked");
+      if (!item.title?.includes(reason)) throw new Error("the unusable candidate has no tooltip");
+      const row = document.querySelector<HTMLElement>(".plan-dock .plan-refused");
+      if (!row?.textContent?.includes(reason)) throw new Error("the refused task has no reason on its row");
+      if (!row.title.includes(reason)) throw new Error("the refused task has no tooltip");
+      console.info("cursor guard run: unusable candidate and refusal verified");
+    };
+    return {
+      ...scene,
+      route: `#/s/${lead.id}`,
+      script: [
+        // Approve as it is: the hub refuses task a, and the reason lands on that row.
+        { at: 500, act: () => document.querySelector<HTMLButtonElement>(".plan-dock footer button.primary")?.click() },
+        // Then open the executor menu on the same task: the candidate is there, greyed out.
+        { at: 1100, act: () => document.querySelector<HTMLButtonElement>('.who-pick[data-task="a"] .chip-pick')?.click() },
+        { at: 1400, act: verify },
+      ],
+    };
+  } },
+  { key: "unusable-model", label: "账号不再提供的模型", hint: "模型已经不在账号的名单里：Agents 页把那张卡片置灰，行内和 tooltip 都写原因；在会话里 @ 它同样置灰、点不了（用 --route 打开会话看 @ 菜单）", build: () => {
+    const scene = soloSession();
+    const state = scene.state;
+    const hazel = agent({ name: "hazel", plugin: "with", model: "deepseek-v4.1-flash-sg", role: "worker", cwd: NOTES_REPO, profile: { display_name: "Hazel", title: "后端", color: "amber" } });
+    state.agents.push(hazel);
+    const why = "the account no longer offers deepseek-v4.1-flash-sg: the gateway answers 400 service info not found. Pick another model or another account.";
+    state.unusable = { [hazel.id]: why };
+    // `@` opens the mention menu: the same row greys out for the same reason. On the Agents
+    // page (the default route) there is no composer, so this only runs for the session shot.
+    const typeAt = () => {
+      const el = document.querySelector<HTMLTextAreaElement>(".composer textarea");
+      if (!el) return;
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(el, "@");
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    };
+    const verify = () => {
+      const card = document.querySelector<HTMLElement>(".member.unusable .member-unusable");
+      const row = document.querySelector<HTMLButtonElement>(".mention-menu .menu-item.disabled");
+      if (location.hash.startsWith("#/agents")) {
+        if (!card) throw new Error("the stale-model agent is not greyed out on the Agents page");
+        if (card.title !== why || !card.textContent?.includes(why)) throw new Error("the Agents page card has no reason");
+      } else if (document.querySelector(".composer textarea")) {
+        if (!row) throw new Error("the stale-model agent is not greyed out in the @ menu");
+        if (!row.disabled || row.title !== why) throw new Error("the @ menu row has no reason or is still pickable");
+      }
+    };
+    return { ...scene, route: "#/agents", script: [
+      // The CLI list comes first; bring the greyed card into view at any width.
+      { at: 600, act: () => document.querySelector(".member.unusable")?.scrollIntoView({ block: "center" }) },
+      { at: 900, act: typeAt },
+      { at: 1300, act: verify },
+    ] };
+  } },
   { key: "plan-long", label: "批计划：长列表里挑执行者", hint: "计划有九个任务、标题很长：最后一个任务的执行者菜单在可滚动的计划区里展开，不被裁掉，放不下时向上翻", build: () => {
     const scene = oauthRun("plan");
     const r = scene.state.runs[0].run;

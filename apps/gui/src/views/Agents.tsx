@@ -27,6 +27,7 @@ import { ConnectExternal, ConnectInstructions } from "./External";
 import { prettyModel, vendorLabel } from "../lib/models";
 import { cursorMode, reasoningModels } from "../lib/reasoning";
 import { installBusy, installingLabel, installingOf, installRefusedText } from "../lib/installState";
+import { unusableOf } from "../lib/unusable";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
 import type { CliInfo } from "@bindings/CliInfo";
 
@@ -504,18 +505,27 @@ function MemberCard({
 }) {
   const spawnedBy = (agent.config as Record<string, unknown> | null)?.spawned_by_run;
   const runId = typeof spawnedBy === "string" ? spawnedBy : undefined;
+  // This machine cannot hand it work (Cursor on Windows in a guard run, a model the account no
+  // longer offers): greyed out, with the hub's reason in words and in the tooltip.
+  const unusable = unusableOf(agent);
   return (
-    <div className="member">
+    <div className={`member ${unusable ? "unusable" : ""}`} data-unusable={unusable ? "" : undefined}>
       <div className="member-head">
         <Avatar agent={agent} size={40} status />
         <div className="member-who">
-          <a className="member-name" href={sessionHref(agent)}>
+          <a className="member-name" href={sessionHref(agent)} title={unusable}>
             {displayName(agent)}
           </a>
           <span className="member-title">{agentTitle(agent)}</span>
         </div>
         <StatusChip status={agent.status} tone={agentTone(agent.status)} />
       </div>
+      {unusable && (
+        <p className="member-unusable" title={unusable}>
+          <span className="chip small danger">不可用</span>
+          <span className="member-unusable-text">{unusable}</span>
+        </p>
+      )}
       <p className={`member-persona ${agent.profile.persona ? "" : "muted"}`}>{agent.profile.persona || "还没有设定人设。"}</p>
       <div className="member-foot">
         <span className={`chip hue av-${ROLE_HUE[agent.role] ?? "slate"}`}>{agent.role}</span>

@@ -14,6 +14,7 @@ import type { BackgroundResponse } from "@bindings/BackgroundResponse";
 import type { CommitGraph } from "@bindings/CommitGraph";
 import type { Agent } from "@bindings/Agent";
 import type { AgentSettingsRequest } from "@bindings/AgentSettingsRequest";
+import type { ApproveRunRequest } from "@bindings/ApproveRunRequest";
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
 import type { ExtensionDiffResponse } from "@bindings/ExtensionDiffResponse";
 import type { ExtensionInfo } from "@bindings/ExtensionInfo";
@@ -124,6 +125,12 @@ export type MockState = {
   resume?: Record<string, ResumeCommandResponse>;
   /** A workspace's sessions as `GET /v1/session-candidates` answers; a scenario sets what it shows. */
   sessions?: SessionCandidate[];
+  /** Whether this machine is Windows, which is how `approval.rs` decides Cursor may not run a
+   * guarded session; unset: yes, as the GUI is built for Windows. */
+  windows?: boolean;
+  /** Why the hub says a template cannot take work, by agent id (a model the account no longer
+   * offers). The Cursor-on-Windows rule is worked out from the plugin and the run's policy. */
+  unusable?: Record<string, string>;
   /**
    * Copied leads whose run branch is gone (docs/tasks/S1.md §7 第 15 条), by agent id: restoring
    * one rebuilds its checkout from the base and says the code did not come back.
@@ -198,6 +205,9 @@ export function emptyState(): MockState {
 const LATENCY = 40;
 /** How long a stopped agent takes to come up, as a real CLI does. */
 const STARTUP = 2_500;
+
+/** crates/orchestrator/src/approval.rs `unusable_on_platform`, word for word. */
+const CURSOR_WINDOWS = "Cursor cannot use this permission on Windows: set this agent's permission to bypass, or set the run's approvals to off (全托管).";
 const json = (status: number, body?: unknown): HubResponse => ({ status, body: body === undefined ? "" : JSON.stringify(body) });
 const notFound = (what: string) => json(404, { error: { code: "not_found", message: `${what} not found` } });
 /** `{scope}/files/{tree|content|status|search|resolve}`; every scope answers from the same mock workspace. */
@@ -587,6 +597,32 @@ export class MockBridge implements CrossAgentsBridge {
     return this.state.agents.find((a) => a.id === k || a.name.toLowerCase() === k.toLowerCase());
   }
 
+  /** `approval::unusable_for` as the preview acts it out: the agent's own permission, else the
+   * run's approvals, decides what a guarded session gets; Cursor cannot run that on Windows. */
+  private unusableFor(agent: Agent, policy?: RunDetail["run"]["config"]["policy"]): string | undefined {
+    const own = (agent.config as Record<string, unknown> | null)?.permission;
+    const permission = typeof own === "string" ? own : policy?.approvals === "guard" ? "guard" : "bypass";
+    if (this.state.windows !== false && agent.plugin === "cursor" && permission !== "bypass") return CURSOR_WINDOWS;
+    return this.state.unusable?.[agent.id];
+  }
+
+  /** Each planned task's worker that this machine cannot hand the task to, as the hub's
+   * `resolve_assignments` words them; a refused approval puts each on its own row. */
+  private unusablePlan(d: RunDetail, req: ApproveRunRequest | null): string[] {
+    const policy = req?.policy ?? d.run.config.policy;
+    const agents = this.state.agents;
+    const byNameOrId = (key: string | null) =>
+      key ? agents.find((a) => a.id === key || a.name.toLowerCase() === key.toLowerCase()) : undefined;
+    const out: string[] = [];
+    for (const task of d.run.plan) {
+      const picked = req?.assignees && task.key in req.assignees ? req.assignees[task.key] : task.assignee;
+      const worker = byNameOrId(picked) ?? agents.find((a) => a.id === d.run.config.worker);
+      const why = worker && this.unusableFor(worker, policy);
+      if (worker && why) out.push(`task ${JSON.stringify(task.key)}: ${worker.name}: ${why}`);
+    }
+    return out;
+  }
+
   /** The projects the preview knows: one per project its records or expertise belong to (the
    * workspace path is the id, where the hub has a Project.id), the ones a scene names, and
    * whatever a bind or merge changed here. */
@@ -675,7 +711,17 @@ export class MockBridge implements CrossAgentsBridge {
         const features = s.features === null ? undefined : (s.features ?? FEATURES);
         return json(200, { version: s.version ?? __BUILD__.version, commit, debug: false, api: s.api ?? "v1", pid: 0, home: "（mock 模式，无 hub）", started_at: new Date().toISOString(), ...(features ? { features } : {}) });
       }
-      if (p === "/v1/agents") return json(200, { agents: s.agents });
+      if (p === "/v1/agents") {
+        // `?run=`: what the plan being settled changes (list_agents).
+        const run = url.searchParams.get("run");
+        const found = run ? s.runs.find((d) => d.run.id === run) : undefined;
+        if (run && !found) return json(409, { error: { code: "conflict", message: "no such run" } });
+        const agents = s.agents.map((a) => {
+          const why = this.unusableFor(a, found?.run.config.policy);
+          return why ? { ...a, unusable: why } : a;
+        });
+        return json(200, { agents });
+      }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)$/))) return this.agent(m[1]) ? json(200, this.agent(m[1])) : notFound("agent");
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/commands$/))) {
         const a = this.agent(m[1]);
@@ -886,7 +932,25 @@ export class MockBridge implements CrossAgentsBridge {
       if ((m = p.match(/^\/v1\/accounts\/([^/]+)\/usage$/)))
         return json(200, s.accountUsage ?? { by: url.searchParams.get("by") ?? "day", rows: [], total: { sessions: 0, input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0 }, total_cache_hit_rate: 0 });
       if (p === "/v1/plugins") return json(200, { plugins: s.plugins });
-      if (p === "/v1/session-candidates") return json(200, { sessions: s.sessions ?? [] });
+      if (p === "/v1/session-candidates") {
+        // The policy the sessions would be assigned under: the run named by `?run=`, else the
+        // workspace's one plan awaiting approval (session_candidates in crates/hub/src/api.rs).
+        const repo = url.searchParams.get("repo");
+        const run = url.searchParams.get("run");
+        const waiting = repo
+          ? s.runs.filter((d) => d.run.repo === repo && d.run.status === "awaiting_approval" && (!run || d.run.id === run))
+          : [];
+        if (run && repo && !waiting.length)
+          return json(409, { error: { code: "conflict", message: "no matching plan awaiting approval in this workspace" } });
+        // With no run named, plans that disagree cannot say which policy applies.
+        const split = waiting.length > 1 && waiting.slice(1).some((d) => d.run.config.policy.approvals !== waiting[0].run.config.policy.approvals);
+        const policy = run || !split ? waiting[0]?.run.config.policy : undefined;
+        const sessions = (s.sessions ?? []).map((candidate) => {
+          const why = this.unusableFor(candidate.agent, policy);
+          return why ? { ...candidate, unusable: why } : candidate;
+        });
+        return json(200, { sessions });
+      }
       if ((m = p.match(FILES_ROUTE)) && m[1] !== "resolve") {
         if (m[1] === "status") return json(200, mockStatus());
         if (m[1] === "search") return json(200, mockSearch(url.searchParams.get("q") ?? "", url.searchParams.get("all") === "true"));
@@ -1072,6 +1136,12 @@ export class MockBridge implements CrossAgentsBridge {
       if ((m = p.match(/^\/v1\/runs\/([^/]+)\/(approve|reject|cancel)$/))) {
         const d = s.runs.find((x) => x.run.id === m![1]);
         if (!d) return notFound("run");
+        // Approving is handing work out: a worker this machine cannot run refuses it, and the
+        // GUI puts each task's reason on its own row (engine.rs `resolve_assignments`).
+        if (m[2] === "approve") {
+          const problems = this.unusablePlan(d, body as ApproveRunRequest | null);
+          if (problems.length) return json(409, { error: { code: "conflict", message: `the plan is invalid:\n${problems.join("\n")}` } });
+        }
         const to = m[2] === "approve" ? "running" : m[2] === "reject" ? "planning" : "cancelled";
         this.emit({ type: "run.status_changed", data: { id: d.run.id, from: d.run.status, to, note: m[2] === "reject" ? ((body as { reason?: string })?.reason ?? null) : null } });
         return json(200, d);

@@ -23,6 +23,7 @@ import type { TranscriptTurn } from "../session";
 import { useSlash, type SlashMenuGroup } from "../slash";
 import { PlanTasks, usePlanApproval } from "./Run";
 import { isKickoff } from "../lib/messageText";
+import { refusedTasks } from "../lib/unusable";
 
 const QUEUE_OPEN = "crossagents.queueOpen";
 
@@ -314,7 +315,10 @@ function PlanDock({ run, onDone, onReply }: { run: Run; onDone: () => void; onRe
       await action();
       onDone();
     } catch (err) {
-      setError(errorText(err));
+      // A task the hub will not hand out says why on its own row (usePlanApproval refuses);
+      // anything else is about the run as a whole.
+      const text = errorText(err);
+      if (!Object.keys(refusedTasks(text, run.plan.map((t) => t.key))).length) setError(text);
     } finally {
       setBusy(false);
     }
