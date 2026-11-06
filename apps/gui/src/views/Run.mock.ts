@@ -529,6 +529,7 @@ export function traceRun(): { state: MockState; script: Step[]; route: string } 
     lane: t.key === "d" ? failedLane : t.key === "c" ? recoveredLane : lane(t.assignee!, t.key === "a" ? 2 : 1, t.key === "a" ? 0.34 : 0.12, [cmd(t.assignee!, "cargo test -p auth", 0, 30)]),
     checks: t.report.checks.length ? [{ at: ago(27), passed: t.report.checks.every((c) => c.passed), checks: t.report.checks }] : [],
     rerouted: [],
+    dispatches: [],
     handoffs: t.handoffs,
     first_failure: t.key === "d" || t.key === "c" ? "`cargo test -p auth` exited 101" : null,
   }));
