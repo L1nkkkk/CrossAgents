@@ -376,6 +376,29 @@ B 删除 run：
 - [x] A3 取消任务后归档的 worker，`completed_at` 为 null（2026-11-07，`acfe33a`、`8c94af8`）：会话被停止或退出时补发 `AgentTurnCompleted`，取消后归档的 worker 在 trace 里有结束时间；hub 退出时留给下一个 hub 接管的会话不补发。
 - [x] §十四 git 只读接口错误码不一致（2026-11-07，`79b9264`、`9b0b521`）：不在白名单的项目路径返回 403，不是 git 仓库返回 409，提交不存在返回 404；提交 diff 入口与其他接口共用 `git_repo` 校验；GUI `#/git` 页按错误码显示原因，`git_view` 测试覆盖五个接口的越界与非仓库。
 - [x] `crossagents.toml` 的 `[run] setup` 打开（2026-11-07，`852a844`、`98d601c`）：去掉注释，`setup/mod.rs` 的 `this_repository_installs_its_gui_dependencies_in_every_worktree` 去掉 `#[ignore]`。hub 已是 0.2.6，认得这个字段。
+- [x] **计划批准时能选中本机跑不了的模板（Cursor 模板在 Windows 上要 bypass）**（2026-11-07 记，run `01a1b1f2`；2026-11-07 做完：hub `495021b`、`7e7cedb`，GUI `48a30c2`、`39b8cd8`，权限部分见下一条）
+  - 根因：run 的审批策略（`approvals`）默认是 guard（`crates/core/src/policy.rs` 的 `ApprovalPolicy` 默认值）。没单独设权限的 agent 跟随 run，于是 Cursor 被判为 guard；而 Cursor 在 Windows 上只接受 bypass。派出的任务要等开跑失败才暴露。
+  - 约定的做法：批准前就标为不可用，不悄悄降级。`approval::unusable_for` 在计划批准、`task_assign` 时检查，不可用就拒绝并写明原因，给两条出路：把这个 agent 的权限设成「自动执行」（bypass），或把 run 改成「全托管」（approvals off）。候选接口和 `agent_list` 都带 `unusable`；PlanDock 按这一轮的审批策略算原因，不可用的置灰、不能选，副行写原因。
+  - 「不经确认」：guard run 里，显式设成自动执行的队友在 PlanDock 候选上标「不经确认」（`SessionCandidate.unguarded`），tooltip 说明它这一轮做事不经确认。
+  - 代码：`crates/orchestrator/src/approval.rs`（`unusable_for`、`unusable_on_platform`、`unguarded`）、`crates/hub/src/api.rs`、`apps/gui/src/views/Run.tsx`（`unusableOf`、`unguardedMark`）、`apps/gui/src/lib/unusable.ts`。
+  - 测试：`apps/gui/src/lib/unusable.test.ts`，`approval.rs` 里的单测。
+  - 没验证：截图都是 MockBridge 场景拍的（`docs/screens/unusable/`、`docs/screens/perm/`），没在真 hub + Electron 里点过 PlanDock。
+- [x] **每个 agent 可单独设权限级别：设置与 API 都有了**（2026-11-07，hub `be34b88`、`fd2b0d6`、`bae96b5`，GUI `e4036ca`、`2d030a2`）：
+  - API：`POST /v1/agents/{key}/settings` 增加 `permission`。不传 = 不变，`null` = 清掉、回到跟随 run / 默认，传值 = 设定。改动后空闲会话重启（同 `allow_hooks`）。显式设了权限的 agent 不受 run 的审批策略影响。
+  - GUI：Agents 页 agent 编辑里的「权限」，四个选项各带一句说明（跟随 run / 默认、危险操作要我确认、自动执行、拒绝）。Windows 上的 Cursor 不能选「要我确认」，选项置灰，原因用 hub 的原话；成员卡上的「去设置权限」直接打开它的编辑并聚焦到权限。
+  - 代码：`crates/api-types/src/lib.rs`（`permission`）、`crates/hub/src/api.rs`（`agent_settings`）、`crates/orchestrator/src/approval.rs`、`apps/gui/src/lib/permission.ts`、`apps/gui/src/views/Agents.tsx`。
+  - 测试：`apps/gui/src/lib/permission.test.ts`，`crates/mock-agent/tests/rules.rs`。
+  - 没验证：同上，截图只在 mock 里拍的；Cursor 在 guard run 里确实被拒绝，是按提交说明与代码核对的，没有实跑。
+- [x] **侧栏工作组归到各自项目下**（2026-11-07，`c2c6a63`、`feab3d7`、`2a0fd6a`）：去掉顶层「工作组」一节；每个工作组按 `work.repo` 挂到对应项目下，跟项目一起折叠；一个项目最多显示 3 个，其余在「更多 N」里；对不上项目的进可折叠的「其他」。工作组行的模式标签只在原地 run 时显示，worktree 的模式放进 tooltip。列表只调一次 `listWorks`，展开某行的各轮时才 `getWork` 并缓存（`lib/workDetails.ts`，带测试）。
+  - 代码：`apps/gui/src/Sidebar.tsx`、`apps/gui/src/lib/workDetails.ts`、`apps/gui/src/work.css`。
+- [~] **已下线的模型仍在名单里显示为可用**（2026-11-07 记，run `01a1b1f2`）：做了一部分，还差的仍在 TODO §二十四。
+  - 已做（hub `22c42cd`、`8f8874e`，GUI `48a30c2`、`39b8cd8`）：回合以「模型不可用」类错误失败（`service info not found`、`model not found` 等；429 和限流不算）时，把 (插件, 账号, 模型) 记进 store（迁移 0015），hub 重启后仍在。同一组合有一轮成功，或刷新模型列表时它又出现，就清掉。
+  - `approval::unusable_for` 检查这条记录：`agent_list`、候选、`plan_submit` / `task_assign` / `task_create` 都拒绝并带上原始错误。按 (插件, 账号, 模型) 记，所以用同一模型的模板和由它派生的执行会话一起生效。
+  - GUI 的成员卡、@ 菜单和 Agents 页标出不可用项，并写明原因（`apps/gui/src/lib/unusable.ts`）。
+  - 测试：`crates/hub/src/runtime.rs` 里用那条完整报错做的分类测试，和「记录 → 拒绝 → 成功后清掉」；`crates/store-sqlite/src/lib.rs` 里的记录与清除测试（重开 store 后仍在）；`crates/hub/src/accounts.rs` 的模型刷新测试。
+  - 还差：
+    - 扫描时不标：刷新模型列表只会清除记录，不会把账号列表里没有、但仍被使用的模型标为不可用。现在要等某个回合因「模型不可用」失败一次，那一次照样失败。
+    - Hazel 4 模板仍指向 `deepseek-v4.1-flash-sg`，只是被标为不可用，没有换模型。
 
 ## 二十五、借鉴 oh-my-pi 与 Cutex 0.2.1
 
