@@ -4,6 +4,7 @@
 
 pub mod approval;
 pub mod attempts;
+pub mod breaker;
 pub mod brief;
 pub mod claims;
 pub mod coauthor;
@@ -39,6 +40,7 @@ pub mod tasks;
 pub mod team;
 pub mod tools;
 pub mod verify;
+pub mod watch;
 pub mod work;
 pub mod workspace;
 

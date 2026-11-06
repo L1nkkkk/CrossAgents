@@ -598,8 +598,16 @@ checks = [
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let checks = run_checks(&root).unwrap();
         let cargo = ["cargo test --workspace"];
+        // A change under `crates/hub` also runs the sandbox smoke that starts a hub build.
+        let hub = checks.commands_for(&changed(&["crates/hub/src/api.rs"]));
+        assert_eq!(hub.first().map(String::as_str), Some(cargo[0]), "{hub:?}");
+        assert!(
+            hub.iter().skip(1).all(|c| c.contains("hub sandbox smoke")),
+            "{hub:?}"
+        );
+        // Any other Rust change runs cargo and nothing else.
         assert_eq!(
-            checks.commands_for(&changed(&["crates/hub/src/api.rs"])),
+            checks.commands_for(&changed(&["crates/core/src/lib.rs"])),
             cargo
         );
         assert_eq!(checks.commands_for(&changed(&["Cargo.lock"])), cargo);

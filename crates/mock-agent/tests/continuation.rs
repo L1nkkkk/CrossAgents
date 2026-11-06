@@ -6,8 +6,8 @@ use std::time::Duration;
 use chrono::Utc;
 use common::{TestHub, git_repo};
 use crossagents_core::{
-    AgentId, AgentKey, AgentStatus, EventKind, HumanItem, HumanItemKind, Run, RunId, RunStatus,
-    TaskStatus,
+    AgentId, AgentKey, AgentStatus, EventKind, HumanItem, HumanItemKind, MessageSource, Run, RunId,
+    RunStatus, TaskStatus,
 };
 use serde_json::{Value, json};
 
@@ -1010,4 +1010,326 @@ async fn settling_the_checkpoint_at_idle_does_not_swallow_a_stuck_report() {
         report.stuck_watch.as_ref().unwrap().progress_at > quiet_at,
         "the report starts the next stretch: {report:?}"
     );
+}
+
+// ---------------------------------------------------------------------------------------
+// Wake rules and the Planner's wake table (docs/research/multica.md §2.1, §2.3, §2.14)
+
+/// A progress note the worker writes, as the directive that makes the mock call the tool.
+fn progress(task: &str, text: &str) -> String {
+    format!(r#"[call task_progress {{"task":"{task}","text":"{text}"}}]"#)
+}
+
+/// A run whose only task was handed to its worker and left stalled: the worker is ready for a
+/// message that makes it report something.
+async fn assigned_run(t: &TestHub, policy: Value) -> (Run, crossagents_core::Agent) {
+    let mut w = t.watch().await;
+    let run = start(t, &plan("inspect", false), policy).await;
+    w.until("the task was handed over", |e| {
+        matches!(&e.kind, EventKind::TaskStatusChanged { run_id, to, .. }
+            if *run_id == run.id && matches!(to, TaskStatus::Running))
+    })
+    .await;
+    w.until("the task stalled", |e| {
+        matches!(&e.kind, EventKind::TaskStatusChanged { run_id, to, .. }
+            if *run_id == run.id && matches!(to, TaskStatus::Stalled))
+    })
+    .await;
+    let worker = t.hub.orchestrator.store().list_tasks(run.id).await.unwrap()[0]
+        .assignee
+        .unwrap();
+    let worker = t
+        .hub
+        .orchestrator
+        .store()
+        .get_agent(&AgentKey::Id(worker))
+        .await
+        .unwrap();
+    (run, worker)
+}
+
+#[tokio::test]
+async fn a_member_s_progress_wakes_the_lead_when_it_addresses_nobody() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    let (run, worker) = assigned_run(&t, enabled()).await;
+    // The worker posts progress and addresses nobody: the lead is woken to evaluate it.
+    t.send(&worker.id.to_string(), &progress("a", "halfway there"))
+        .await;
+    let wake = w
+        .until("the lead is woken by progress", |e| {
+            matches!(&e.kind, EventKind::AgentInput { id, text, .. }
+                if *id == run.planner
+                    && text.contains(&format!("Progress from {} on #a", worker.name)))
+        })
+        .await;
+    if let EventKind::AgentInput { text, from, .. } = &wake.kind {
+        assert!(
+            text.contains("halfway there"),
+            "the note travels with it: {text}"
+        );
+        // It is the hub's digest, not a message from the worker.
+        assert_eq!(from, &Some(MessageSource::Notice), "{from:?}");
+    }
+}
+
+#[tokio::test]
+async fn progress_that_addresses_another_teammate_does_not_wake_the_lead() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    t.add_agent_in("rex", None, "worker", repo.path()).await;
+    let mut w = t.watch().await;
+    let response = t
+        .post(
+            "/v1/runs",
+            json!({
+                "planner": "boss", "worker": "coder", "team": ["coder", "rex"],
+                "request": plan("inspect", false),
+                "policy": enabled(),
+            }),
+        )
+        .await;
+    assert_eq!(response.status(), 201, "{}", response.text().await.unwrap());
+    let run: Run = response.json().await.unwrap();
+    w.until("the task stalled", |e| {
+        matches!(&e.kind, EventKind::TaskStatusChanged { run_id, to, .. }
+            if *run_id == run.id && matches!(to, TaskStatus::Stalled))
+    })
+    .await;
+    let worker = t.hub.orchestrator.store().list_tasks(run.id).await.unwrap()[0]
+        .assignee
+        .unwrap();
+    t.send(
+        &worker.to_string(),
+        &progress("a", "@rex please run the migration"),
+    )
+    .await;
+    // The note was recorded, so the worker did post it...
+    w.until("the progress note was recorded", |e| {
+        matches!(&e.kind, EventKind::TaskProgress { run_id, text, .. }
+            if *run_id == run.id && text.contains("@rex"))
+    })
+    .await;
+    // ...and the lead was not woken: the note already handed the matter to Rex.
+    let woken = w.seen.iter().any(|e| {
+        matches!(&e.kind, EventKind::AgentInput { id, text, .. }
+            if *id == run.planner && text.contains("Progress from"))
+    });
+    assert!(!woken, "the lead was woken although the note addressed Rex");
+}
+
+#[tokio::test]
+async fn progress_wakes_are_queued_once_not_once_per_note() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    let (run, worker) = assigned_run(&t, enabled()).await;
+    idle(&t, run.planner).await;
+    turn_end_recorded(&t, run.planner).await;
+    // Hold the lead busy, then let the worker post two notes in one turn.
+    t.send(&run.planner.to_string(), "[slow]").await;
+    w.until(
+        "the lead is busy",
+        |e| matches!(&e.kind, EventKind::AgentTurnStarted { id, .. } if *id == run.planner),
+    )
+    .await;
+    t.send(
+        &worker.id.to_string(),
+        &format!("{} {}", progress("a", "one"), progress("a", "two")),
+    )
+    .await;
+    w.until(
+        "both notes landed",
+        |e| matches!(&e.kind, EventKind::TaskProgress { text, .. } if text == "two"),
+    )
+    .await;
+    w.until(
+        "the digest was updated in place",
+        |e| matches!(&e.kind, EventKind::AgentInputUpdated { id, .. } if *id == run.planner),
+    )
+    .await;
+    let queued = w
+        .seen
+        .iter()
+        .filter(|e| {
+            matches!(&e.kind, EventKind::AgentInput { id, text, queued: true, .. }
+                if *id == run.planner && text.contains("Progress from"))
+        })
+        .count();
+    assert_eq!(queued, 1, "the notes piled up as separate wakes");
+    t.post(&format!("/v1/agents/{}/cancel", run.planner), json!({}))
+        .await;
+}
+
+#[tokio::test]
+async fn a_task_or_run_ending_closes_the_rules_that_follow_it() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    let (run, worker) = assigned_run(&t, enabled()).await;
+    let task = t
+        .hub
+        .orchestrator
+        .store()
+        .list_tasks(run.id)
+        .await
+        .unwrap()
+        .remove(0);
+    let store = t.hub.orchestrator.store();
+    store
+        .insert_watch(&crossagents_core::Watch {
+            id: "w-task".into(),
+            owner: run.planner,
+            target: crossagents_core::WatchTarget::Task { task_id: task.id },
+            on: vec![crossagents_core::WatchOn::Any],
+            created_at: Utc::now(),
+            expires_at: None,
+            chain: 0,
+            health: Default::default(),
+        })
+        .await
+        .unwrap();
+    store
+        .insert_watch(&crossagents_core::Watch {
+            id: "w-agent".into(),
+            owner: run.planner,
+            target: crossagents_core::WatchTarget::Agent {
+                agent_id: worker.id,
+            },
+            on: vec![crossagents_core::WatchOn::Any],
+            created_at: Utc::now(),
+            expires_at: None,
+            chain: 0,
+            health: Default::default(),
+        })
+        .await
+        .unwrap();
+    // The lead drops the stalled task: the rule that followed that task closes with it, while
+    // the one following a teammate is still about the run and stays.
+    t.send(
+        &run.planner.to_string(),
+        &call("task_drop", json!({"task": task.key})),
+    )
+    .await;
+    w.until("the task ended", |e| {
+        matches!(&e.kind, EventKind::TaskStatusChanged { run_id, to, .. }
+            if *run_id == run.id && matches!(to, TaskStatus::Cancelled))
+    })
+    .await;
+    let left = watch_ids(&t, |ids| ids == ["w-agent"]).await;
+    assert_eq!(
+        left,
+        ["w-agent"],
+        "the task's rules close with it: {left:?}"
+    );
+
+    // Ending the run closes what its members still follow.
+    t.post(&format!("/v1/runs/{}/cancel", run.id), json!({}))
+        .await;
+    w.until("the run ended", |e| {
+        matches!(&e.kind, EventKind::RunStatusChanged { id, to, .. } if *id == run.id && to.is_terminal())
+    })
+    .await;
+    assert!(
+        watch_ids(&t, |ids| ids.is_empty()).await.is_empty(),
+        "the run's rules close with it"
+    );
+}
+
+/// Waits until the store's watch ids satisfy `pred`: the matcher closes them on its own task,
+/// a moment after the event the test saw.
+async fn watch_ids(t: &TestHub, pred: impl Fn(&[String]) -> bool) -> Vec<String> {
+    tokio::time::timeout(common::wait_limit(), async {
+        loop {
+            let ids: Vec<String> = t
+                .hub
+                .orchestrator
+                .store()
+                .list_watches(None)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|watch| watch.id)
+                .collect();
+            if pred(&ids) {
+                return ids;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the rules did not close")
+}
+
+#[tokio::test]
+async fn the_automation_breaker_pauses_the_continuation_and_tells_the_person() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let run = stalled_run(&t).await;
+    idle(&t, run.planner).await;
+    phase(&t, &run, "recover").await;
+    // Forty-nine failed runs inside the week: the next one is the fiftieth, and 49 of 50 is
+    // over the line, so the delivery that succeeds is the last this automation makes.
+    let mut stored = get(&t, run.id).await;
+    let mut state = stored.continuation.clone().unwrap();
+    let now = Utc::now();
+    state.health.runs = (0..49)
+        .map(|_| crossagents_core::RunRecord { at: now, ok: false })
+        .collect();
+    state.next_at = Some(now - chrono::Duration::seconds(1));
+    stored.continuation = Some(state);
+    t.hub
+        .orchestrator
+        .store()
+        .update_run(&stored)
+        .await
+        .unwrap();
+
+    t.hub.orchestrator.continue_runs().await;
+    let paused = get(&t, run.id).await.continuation.unwrap();
+    assert!(paused.health.is_paused(), "{paused:?}");
+    assert!(
+        paused
+            .health
+            .pause_reason
+            .as_deref()
+            .unwrap_or_default()
+            .contains("of 50"),
+        "{paused:?}"
+    );
+    assert_eq!(paused.phase, "automation_paused", "{paused:?}");
+    assert_eq!(
+        wake_count(&t, &run).await,
+        1,
+        "the run that tripped it woke once"
+    );
+    let told = notices(&t, &run).await;
+    assert!(
+        told.iter().any(|item| item.text.contains("自动暂停")),
+        "the person was not told: {told:?}"
+    );
+
+    // Paused means paused: another due time wakes nobody.
+    let mut again = get(&t, run.id).await;
+    again.continuation.as_mut().unwrap().next_at = Some(Utc::now() - chrono::Duration::seconds(1));
+    t.hub.orchestrator.store().update_run(&again).await.unwrap();
+    t.hub.orchestrator.continue_runs().await;
+    assert_eq!(
+        wake_count(&t, &run).await,
+        1,
+        "a paused automation woke again"
+    );
+
+    // A person re-arming the run lifts the pause: they looked and asked for it to go on.
+    let response = t
+        .post(
+            &format!("/v1/runs/{}/policy", run.id),
+            json!({ "reset_attempts": true }),
+        )
+        .await;
+    assert_eq!(response.status(), 200, "{}", response.text().await.unwrap());
+    let rearmed = get(&t, run.id).await.continuation.unwrap();
+    assert!(!rearmed.health.is_paused(), "{rearmed:?}");
+    assert_eq!(rearmed.attempts, 0, "{rearmed:?}");
 }

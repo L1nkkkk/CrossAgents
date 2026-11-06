@@ -305,6 +305,7 @@ mod tests {
             reviewer_fresh: true,
             status: TaskStatus::Merged,
             attempts: 1,
+            runs: Vec::new(),
             escalated: false,
             nudges: 0,
             branch: None,

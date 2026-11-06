@@ -575,9 +575,14 @@ impl Orchestrator {
             run_id: run.id,
             id: task.id,
             key: task.key.clone(),
-            text: a.text,
+            text: a.text.clone(),
         })
         .await;
+        // The Planner's wake table (multica §2.3): a progress note that addresses nobody wakes
+        // the lead to evaluate it; one that addresses another teammate does not, and the lead's
+        // own note never wakes it.
+        self.wake_lead_on_progress(&run, &task, caller, &a.text)
+            .await;
         Ok(json!({ "recorded": true }))
     }
 
