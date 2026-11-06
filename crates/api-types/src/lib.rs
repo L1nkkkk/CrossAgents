@@ -1514,6 +1514,10 @@ pub struct RunTrace {
     pub lead: LaneTrace,
     pub tasks: Vec<TaskTrace>,
     pub spent: Spent,
+    /// When the run's branch reached its base (`run.landed`), for the swimlane's 落地 node.
+    #[serde(default)]
+    #[ts(optional)]
+    pub landed: Option<crossagents_core::Landing>,
 }
 
 /// Tokens and dollars the agents reported.
@@ -1553,12 +1557,53 @@ pub struct TaskTrace {
     pub rerouted: Vec<String>,
     /// Each dispatch of a worker for it (`task.routed`), with the accounts weighed and why.
     #[serde(default)]
+    #[ts(as = "Option<Vec<DispatchTrace>>", optional)]
     pub dispatches: Vec<DispatchTrace>,
     /// Each time it changed hands (`task.handed_off`), oldest first.
     #[serde(default)]
     pub handoffs: Vec<Handoff>,
     /// The earliest thing that went wrong: a failed check, a failed command, a failed turn.
     pub first_failure: Option<String>,
+    /// Each status change, oldest first (the swimlane's 提交, 重试, 合并 nodes).
+    #[serde(default)]
+    #[ts(as = "Option<Vec<StatusTrace>>", optional)]
+    pub statuses: Vec<StatusTrace>,
+}
+
+/// A task moved from one status to another (`task.status_changed`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct StatusTrace {
+    pub at: DateTime<Utc>,
+    pub from: crossagents_core::TaskStatus,
+    pub to: crossagents_core::TaskStatus,
+    /// The worker it was with.
+    pub agent: Option<AgentId>,
+}
+
+/// Something that happened to a lane's session rather than its task (magpie-lancer §2.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum LaneMarkKind {
+    /// The model or effort was switched (`agent.model_changed`).
+    ModelChanged,
+    /// The context shrank by much between two usage reports: it was compacted.
+    Compacted,
+    /// The agent asked the person (`human.asked`, a question).
+    Asked,
+    /// The person answered, or the default was taken.
+    Answered,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LaneMark {
+    pub at: DateTime<Utc>,
+    pub agent: AgentId,
+    pub kind: LaneMarkKind,
+    /// In words: `sonnet → opus`, `180k → 40k`, the question, the answer.
+    pub text: Option<String>,
 }
 
 /// The agents that worked on something, and what they did.
@@ -1569,6 +1614,10 @@ pub struct LaneTrace {
     pub turns: Vec<TurnTrace>,
     pub commands: Vec<CommandTrace>,
     pub spent: Spent,
+    /// Model switches, compactions, questions to the person and their answers, oldest first.
+    #[serde(default)]
+    #[ts(as = "Option<Vec<LaneMark>>", optional)]
+    pub marks: Vec<LaneMark>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
