@@ -198,6 +198,7 @@ const encode = (text: string) => btoa(String.fromCharCode(...new TextEncoder().e
 
 export class MockBridge implements CrossAgentsBridge {
   private seq = 1000;
+  private appliedRuns = new Set<string>();
   private avatars = new Map<string, string>();
   private events = new Set<(data: string) => void>();
   private statuses = new Set<(status: string) => void>();
@@ -603,6 +604,13 @@ export class MockBridge implements CrossAgentsBridge {
     const p = url.pathname;
     let m: RegExpMatchArray | null;
 
+    const integration = /^\/v1\/runs\/([^/]+)\/integration$/.exec(p);
+    if (integration && method === "GET") return json(200, { outcome: "ok", snapshot: "base", integration: "worker", applied: this.appliedRuns.has(integration[1]) ? "worker" : null });
+    const apply = /^\/v1\/runs\/([^/]+)\/apply$/.exec(p);
+    if (apply && method === "POST") {
+      this.appliedRuns.add(apply[1]);
+      return json(200, { outcome: "applied", files: ["src/example.ts"], own_changes: ["src/example.ts"], rerun: { results: [{ command: "npm test", passed: true, exit_code: 0, output: "检查通过" }], error: null } });
+    }
     const terminal = this.terminalRoute(method, p, body);
     if (terminal) return terminal;
     const extension = this.extensionRoute(method, p, body);

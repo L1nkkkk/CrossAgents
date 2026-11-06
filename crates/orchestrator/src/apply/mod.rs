@@ -32,6 +32,7 @@ use crossagents_core::CoreError;
 use crossagents_core::process::NoWindow;
 use serde::{Deserialize, Serialize};
 
+use crate::verify::{ShellVerifier, Verifier};
 use crate::workspace::NEVER_ADDED;
 
 /// Bytes of conflict detail a refusal reports.
@@ -51,6 +52,7 @@ pub enum Outcome {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         own_changes: Vec<String>,
         checked_in_dir: bool,
+        rerun: Option<Rerun>,
     },
     /// This very result was applied before; nothing was written.
     AlreadyApplied { result: String },
@@ -64,6 +66,33 @@ pub enum Outcome {
     Conflict { files: Vec<String>, detail: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Rerun {
+    pub results: Vec<crossagents_core::CheckResult>,
+    pub error: Option<String>,
+}
+
+async fn rerun(dir: &Path, files: &[String]) -> Option<Rerun> {
+    if files.is_empty() {
+        return None;
+    }
+    match crate::project::run_checks(dir) {
+        Err(error) => Some(Rerun {
+            results: Vec::new(),
+            error: Some(error),
+        }),
+        Ok(checks) => {
+            let commands = checks.commands_for(files);
+            let results = ShellVerifier::default()
+                .check_within(dir, &commands, checks.timeout)
+                .await;
+            Some(Rerun {
+                results,
+                error: None,
+            })
+        }
+    }
+}
 impl Outcome {
     pub fn applied(&self) -> bool {
         matches!(self, Outcome::Applied { .. } | Outcome::UpToDate { .. })
@@ -278,7 +307,9 @@ pub async fn apply(
         });
     }
     record_applied(&mut state, state_path, result, &merged, files.clone())?;
+    let rerun = rerun(dir, &own_changes).await;
     Ok(Outcome::Applied {
+        rerun,
         result: result.to_owned(),
         files,
         checked_in_dir: own_changes.is_empty(),
@@ -353,7 +384,9 @@ async fn resume(dir: &Path, state_path: &Path, state: &mut State) -> Result<Outc
         &pending.merged,
         files.clone(),
     )?;
+    let rerun = rerun(dir, &own_changes).await;
     Ok(Outcome::Applied {
+        rerun,
         result: pending.result,
         files,
         checked_in_dir: own_changes.is_empty(),
@@ -1218,6 +1251,17 @@ mod tests {
         assert!(State::read(&state_path).unwrap().applied.is_some());
     }
 
+    #[tokio::test]
+    async fn rerun_selects_only_matching_checks_and_reports_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("crossagents.toml"),
+            "[run]\nchecks = [{ command = 'exit 1', paths = ['src'] }, { command = 'exit 0', paths = ['other'] }]\n").unwrap();
+        let report = rerun(dir.path(), &["src/a.rs".into()]).await.unwrap();
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].command, "exit 1");
+        assert!(!report.results[0].passed);
+        assert!(report.error.is_none());
+    }
     #[tokio::test]
     async fn a_file_both_sides_changed_is_merged_and_marked_as_the_persons_own() {
         let dir = repo();

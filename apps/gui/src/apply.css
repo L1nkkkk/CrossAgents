@@ -1,0 +1,3 @@
+.apply-control { position: relative; }
+.apply-report { position: absolute; z-index: 20; right: 0; top: 100%; width: min(32rem, 80vw); max-height: 60vh; overflow: auto; padding: 1rem; background: var(--surface, white); color: var(--text, #222); border: 1px solid var(--border, #ccc); border-radius: 8px; box-shadow: 0 4px 20px #0002; white-space: normal; }
+.apply-report pre { white-space: pre-wrap; overflow-wrap: anywhere; }
