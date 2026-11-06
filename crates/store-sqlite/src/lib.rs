@@ -1895,8 +1895,10 @@ mod tests {
             base_branch: "main".into(),
             branch: "crossagents/x".into(),
             in_place: false,
+            mode: None,
             note: None,
             plan: vec![],
+            checks_snapshot: None,
             created_at: now,
             updated_at: now,
         };
@@ -2025,8 +2027,10 @@ mod tests {
             base_branch: "main".into(),
             branch: "crossagents/x".into(),
             in_place: false,
+            mode: None,
             note: None,
             plan: vec![],
+            checks_snapshot: None,
             created_at: now,
             updated_at: now,
         };
@@ -2433,8 +2437,10 @@ mod tests {
             base_branch: "main".into(),
             branch: "crossagents/x".into(),
             in_place: false,
+            mode: None,
             note: None,
             plan: vec![],
+            checks_snapshot: None,
             created_at: now,
             updated_at: now,
         }
@@ -2894,8 +2900,10 @@ mod tests {
             base_branch: "main".into(),
             branch: "crossagents/login".into(),
             in_place: false,
+            mode: None,
             note: None,
             plan: vec![],
+            checks_snapshot: None,
             created_at: now,
             updated_at: now,
         }

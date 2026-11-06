@@ -342,12 +342,19 @@ pub struct Run {
     pub repo: PathBuf,
     /// Branch the run started from.
     pub base_branch: String,
-    /// Integration branch that collects every merged task.
+    /// Integration branch that collects every merged task. Empty when the run works in the
+    /// person's own directory: there is no branch of the hub's there (docs/tasks/LEAD.md §9).
     pub branch: String,
     /// The directory is not under version control: tasks run one at a time in it directly,
-    /// with no branches, worktrees, diffs or merges (and nothing to roll back to).
+    /// with no branches, worktrees, diffs or merges (and nothing to roll back to). Kept for
+    /// runs recorded before the meanings were split; read [`Self::versioned`] instead.
     #[serde(default)]
     pub in_place: bool,
+    /// Where the lead works, whether the workspace is versioned, who owns it and whether it
+    /// is kept afterwards (docs/tasks/LEAD.md §11). Absent in runs recorded before the split,
+    /// which [`Self::mode`] reads out of `in_place`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<RunMode>,
     /// Why the run failed or was cancelled, or the last plan rejection.
     #[serde(default)]
     pub note: Option<String>,
@@ -372,8 +379,131 @@ pub struct Run {
     /// Whether those checks verified the run; none yet when nothing called for them.
     #[serde(default)]
     pub checks_state: Option<ChecksState>,
+    /// What those checks ran on, for a run whose lead works in the person's own directory:
+    /// a fingerprint of the directory's content at that moment (docs/tasks/LEAD.md §7). When
+    /// the content changed since, the result is about other content and does not count
+    /// either way. Absent when nothing was checked, or for a run with a checkout of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks_snapshot: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Where the lead works (docs/tasks/LEAD.md §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum LeadPlace {
+    /// In the person's own directory, with the session, branch and staging area as they are.
+    InPlace,
+    /// In the run's own checkout, which the hub made and may remove.
+    Worktree,
+}
+
+/// Whether the workspace is under version control (docs/tasks/LEAD.md §11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceVcs {
+    Git,
+    /// No repository: nothing to snapshot, branch, diff or roll back to.
+    None,
+}
+
+/// Whose directory the workspace is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceOwner {
+    /// The person's: the hub never deletes it, and never commits into it.
+    Person,
+    /// Made and kept by the hub (`<worktrees>/<run>/…`).
+    Hub,
+}
+
+/// What becomes of the workspace once the run has ended (docs/tasks/LEAD.md §8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum Retention {
+    /// Kept for the person and for the lead's session (the default, and all there is yet).
+    Keep,
+    /// Goes once the run ended and nothing is using it.
+    Cleanup,
+}
+
+/// The four layers one `in_place` flag used to carry (docs/tasks/LEAD.md §11).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct RunMode {
+    /// Where the lead works.
+    pub lead: LeadPlace,
+    /// Whether the workspace is a git repository.
+    pub vcs: WorkspaceVcs,
+    /// Whose it is.
+    pub owner: WorkspaceOwner,
+    /// What happens to it after the run.
+    pub retain: Retention,
+}
+
+impl RunMode {
+    /// A run in the person's own directory (a lead that works there), versioned or not.
+    pub fn in_place(vcs: WorkspaceVcs) -> Self {
+        Self {
+            lead: LeadPlace::InPlace,
+            vcs,
+            owner: WorkspaceOwner::Person,
+            retain: Retention::Keep,
+        }
+    }
+
+    /// A run with a checkout of its own.
+    pub fn worktree() -> Self {
+        Self {
+            lead: LeadPlace::Worktree,
+            vcs: WorkspaceVcs::Git,
+            owner: WorkspaceOwner::Hub,
+            retain: Retention::Keep,
+        }
+    }
+}
+
+impl Run {
+    /// How the run is carried out. Runs from before the split say it with `in_place` alone:
+    /// one flag meant a directory outside version control, with its lead and tasks in it.
+    pub fn mode(&self) -> RunMode {
+        self.mode.unwrap_or_else(|| {
+            if self.in_place {
+                RunMode::in_place(WorkspaceVcs::None)
+            } else {
+                RunMode::worktree()
+            }
+        })
+    }
+
+    /// The lead works in the person's own directory, not in a checkout the hub made.
+    pub fn leads_in_place(&self) -> bool {
+        self.mode().lead == LeadPlace::InPlace
+    }
+
+    /// The workspace is a git repository (its own, or the person's).
+    pub fn versioned(&self) -> bool {
+        self.mode().vcs == WorkspaceVcs::Git
+    }
+
+    /// The lead works in a checkout of the run's own: its edits are committed on a branch
+    /// and landed, and it is the hub's directory to remove.
+    pub fn works_in_checkout(&self) -> bool {
+        self.versioned() && !self.leads_in_place()
+    }
+
+    pub fn owner(&self) -> WorkspaceOwner {
+        self.mode().owner
+    }
+
+    pub fn retention(&self) -> Retention {
+        self.mode().retain
+    }
 }
 
 /// A persistent workspace containing successive runs.
@@ -904,6 +1034,42 @@ fn is_false(value: &bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_recorded_before_the_split_reads_its_layers_out_of_in_place() {
+        let now = Utc::now();
+        let old = |in_place: bool| {
+            serde_json::json!({
+                "id": RunId::new(), "title": "t", "request": "r", "planner": AgentId::new(),
+                "status": "planning",
+                "config": { "worker": AgentId::new(), "max_parallel": 1, "max_attempts": 1 },
+                "repo": "C:/work", "base_branch": if in_place { "" } else { "main" },
+                "branch": if in_place { "" } else { "crossagents/run" },
+                "in_place": in_place, "created_at": now, "updated_at": now,
+            })
+        };
+        let plain: Run = serde_json::from_value(old(false)).unwrap();
+        assert!(plain.mode.is_none() && plain.checks_snapshot.is_none());
+        assert!(!plain.leads_in_place() && plain.versioned() && plain.works_in_checkout());
+        assert_eq!(plain.owner(), WorkspaceOwner::Hub);
+        assert_eq!(plain.retention(), Retention::Keep);
+
+        let inside: Run = serde_json::from_value(old(true)).unwrap();
+        assert!(inside.leads_in_place() && !inside.versioned());
+        assert_eq!(inside.owner(), WorkspaceOwner::Person);
+        // Serialized back, the old record keeps the shape it had.
+        let json = serde_json::to_value(&inside).unwrap();
+        assert!(json.get("mode").is_none(), "{json}");
+        assert!(json.get("checks_snapshot").is_none(), "{json}");
+        assert_eq!(json["in_place"], true);
+    }
+
+    #[test]
+    fn a_versioned_workspace_whose_lead_works_in_it_is_the_persons() {
+        let mode = RunMode::in_place(WorkspaceVcs::Git);
+        assert_eq!(mode.lead, LeadPlace::InPlace);
+        assert_eq!(mode.owner, WorkspaceOwner::Person);
+    }
 
     #[test]
     fn tasks_recorded_before_handoffs_load_with_none() {

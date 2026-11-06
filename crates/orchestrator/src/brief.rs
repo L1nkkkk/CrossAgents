@@ -92,17 +92,34 @@ pub fn kickoff_with(
 ) -> String {
     let mut out = run.request.trim().to_owned();
     out.push_str(KICKOFF_SEPARATOR);
-    if run.in_place {
-        let _ = write!(
-            out,
-            "{} (run_id: {}) · {} is not under version control: tasks run one at a \
-             time directly in it, with no branches, diffs or merges, and nothing can be rolled back",
-            run.title,
-            run.id,
-            run.repo.display()
-        );
+    if run.leads_in_place() {
+        if run.versioned() {
+            // The lead's own directory, which the hub leaves alone (docs/tasks/LEAD.md §4).
+            let _ = write!(
+                out,
+                "{} (run_id: {}) · you work in {} itself, on branch {}: the hub keeps no branch \
+                 of its own for the run, and does not commit, stage or switch branches there",
+                run.title,
+                run.id,
+                run.repo.display(),
+                run.base_branch
+            );
+        } else {
+            let _ = write!(
+                out,
+                "{} (run_id: {}) · {} is not under version control: tasks run one at a \
+                 time directly in it, with no branches, diffs or merges, and nothing can be rolled back",
+                run.title,
+                run.id,
+                run.repo.display()
+            );
+        }
         if !run.config.auto_approves() {
             out.push_str(PLAN_WAITS);
+        }
+        if run.versioned() {
+            // The checks still run — in that very directory.
+            describe_checks(&mut out, checks);
         }
     } else {
         let _ = write!(
@@ -123,40 +140,7 @@ pub fn kickoff_with(
         if !run.config.auto_approves() {
             out.push_str(PLAN_WAITS);
         }
-        match checks {
-            Ok(c) if c.checks.is_empty() => {
-                let _ = write!(
-                    out,
-                    "\nchecks: none declared in {}; the hub will not verify this run",
-                    project::FILE
-                );
-            }
-            Ok(c) => {
-                let list: Vec<String> = c
-                    .checks
-                    .iter()
-                    .map(|c| match c.paths.as_slice() {
-                        [] => format!("`{}`", c.command),
-                        paths => format!("`{}` (when {} changes)", c.command, paths.join(", ")),
-                    })
-                    .collect();
-                let _ = write!(
-                    out,
-                    "\nchecks ({}): before you land or finish with changes, the hub runs {} in \
-                     your checkout; they must pass. It runs them itself, in your build \
-                     directory: run only the tests your change needs, and let any build or test \
-                     you started finish before you call run_finish or run_land",
-                    project::FILE,
-                    list.join(", ")
-                );
-            }
-            Err(e) => {
-                let _ = write!(
-                    out,
-                    "\nchecks: {e}; landing and finishing are refused until it is fixed"
-                );
-            }
-        }
+        describe_checks(&mut out, checks);
         if let Some(env) = env {
             out.push_str(&environment(env));
         }
@@ -177,6 +161,44 @@ pub fn kickoff_with(
     // The workspace's sessions, for working with one of them itself (docs/tasks/S1.md §3.6).
     out.push_str(sessions);
     out
+}
+
+/// What the project's checks are, as the lead is told before it starts.
+fn describe_checks(out: &mut String, checks: &Result<RunChecks, String>) {
+    match checks {
+        Ok(c) if c.checks.is_empty() => {
+            let _ = write!(
+                out,
+                "\nchecks: none declared in {}; the hub will not verify this run",
+                project::FILE
+            );
+        }
+        Ok(c) => {
+            let list: Vec<String> = c
+                .checks
+                .iter()
+                .map(|c| match c.paths.as_slice() {
+                    [] => format!("`{}`", c.command),
+                    paths => format!("`{}` (when {} changes)", c.command, paths.join(", ")),
+                })
+                .collect();
+            let _ = write!(
+                out,
+                "\nchecks ({}): before you land or finish with changes, the hub runs {} in \
+                 your checkout; they must pass. It runs them itself, in your build \
+                 directory: run only the tests your change needs, and let any build or test \
+                 you started finish before you call run_finish or run_land",
+                project::FILE,
+                list.join(", ")
+            );
+        }
+        Err(e) => {
+            let _ = write!(
+                out,
+                "\nchecks: {e}; landing and finishing are refused until it is fixed"
+            );
+        }
+    }
 }
 
 /// What the run's checkout sets in its agents' and checks' environment, and from where; a
@@ -556,6 +578,7 @@ mod tests {
             base_branch: "main".into(),
             branch: "run".into(),
             in_place: false,
+            mode: None,
             note: None,
             plan: vec![],
             lead_note: None,
@@ -563,6 +586,7 @@ mod tests {
             summary: None,
             checks: vec![],
             checks_state: None,
+            checks_snapshot: None,
             created_at: now,
             updated_at: now,
         };

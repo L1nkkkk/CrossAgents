@@ -1854,6 +1854,9 @@ async fn create_run(
         planner,
         repo: Some(repo),
         base_branch,
+        lead_place: req
+            .lead_place
+            .unwrap_or(crossagents_core::LeadPlace::Worktree),
         config: RunConfig {
             worker,
             escalate,

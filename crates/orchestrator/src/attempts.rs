@@ -921,6 +921,7 @@ mod tests {
             base_branch: "main".into(),
             branch: "crossagents/run".into(),
             in_place: false,
+            mode: None,
             note: None,
             plan: Vec::new(),
             lead_note: None,
@@ -928,6 +929,7 @@ mod tests {
             summary: None,
             checks: Vec::new(),
             checks_state: None,
+            checks_snapshot: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

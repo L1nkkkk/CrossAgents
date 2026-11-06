@@ -13,8 +13,9 @@ use std::sync::Arc;
 use chrono::Utc;
 use crossagents_core::{
     Agent, AgentId, AgentKey, AgentStatus, Attachment, ClaimRole, CoreError, Envelope, EventBus,
-    EventKind, HandoffKind, MessageId, MessageSource, PlannedTask, Role, Run, RunConfig, RunId,
-    RunPolicy, RunStatus, StopReason, Store, Task, TaskId, TaskReport, TaskRunOutcome, TaskStatus,
+    EventKind, HandoffKind, LeadPlace, MessageId, MessageSource, PlannedTask, Role, Run, RunConfig,
+    RunId, RunMode, RunPolicy, RunStatus, StopReason, Store, Task, TaskId, TaskReport,
+    TaskRunOutcome, TaskStatus, WorkspaceVcs,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -63,6 +64,9 @@ pub struct NewRun {
     /// The branch the run's branch starts from and lands on; `None` is the repository's
     /// current branch.
     pub base_branch: Option<String>,
+    /// Where the lead works (docs/tasks/LEAD.md §2). A directory outside version control
+    /// gets one in place whatever this says: there is no checkout to make.
+    pub lead_place: LeadPlace,
     /// Files that came with the request, already stored; they go with the lead's kickoff.
     pub attachments: Vec<Attachment>,
 }
@@ -318,7 +322,7 @@ impl Orchestrator {
         run: &Run,
         task: &Task,
     ) -> Result<(String, PathBuf), CoreError> {
-        if run.in_place {
+        if !run.versioned() {
             return Ok((String::new(), run.repo.clone()));
         }
         if let Some(parent) = task.parent {
@@ -335,7 +339,9 @@ impl Orchestrator {
     }
 
     pub(crate) fn integration_path(&self, run: &Run) -> PathBuf {
-        if run.in_place {
+        if run.leads_in_place() {
+            // There is no checkout of the hub's: the directory the lead works in is the one
+            // the run is about (the person's, or a directory outside version control).
             return run.repo.clone();
         }
         worktree_path(
@@ -357,7 +363,7 @@ impl Orchestrator {
 
     /// Walk only this group's branch chain. The last base is the actual landing target.
     pub(crate) async fn round_base(&self, run: &Run) -> Result<(String, Vec<Run>), CoreError> {
-        if run.in_place {
+        if run.leads_in_place() {
             return Ok((run.base_branch.clone(), Vec::new()));
         }
         let rounds = self.store.list_runs().await?;
@@ -396,12 +402,14 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// Where `run`'s tasks work: git worktrees, or the directory itself.
+    /// Where `run`'s tasks work: git worktrees, or the directory itself. By what the
+    /// workspace is, not where the lead works: a lead in place in a repository still needs
+    /// git to read the content its checks ran on (docs/tasks/LEAD.md §11).
     pub(crate) fn ws_for(&self, run: &Run) -> &dyn WorkspaceProvider {
-        if run.in_place {
-            &InPlaceWorkspaces
-        } else {
+        if run.versioned() {
             self.workspaces.as_ref()
+        } else {
+            &InPlaceWorkspaces
         }
     }
 
@@ -649,8 +657,21 @@ impl Orchestrator {
         let mut new = new;
         let team = self.gather_team(&new.config, &repo).await?;
         new.config.team = team.iter().map(|a| a.id).collect();
-        let in_place = !self.workspaces.versioned(&repo).await;
-        let base_branch = if let Some(old) = previous.as_ref().filter(|r| !r.in_place) {
+        // The layers one flag used to carry (docs/tasks/LEAD.md §11): a directory outside
+        // version control has its lead and its work in it; a repository follows the
+        // person's choice. `in_place` stays the flag runs were recorded with: a directory
+        // with no branch of the hub's at all.
+        let versioned = self.workspaces.versioned(&repo).await;
+        let mode = if versioned {
+            match new.lead_place {
+                LeadPlace::InPlace => RunMode::in_place(WorkspaceVcs::Git),
+                LeadPlace::Worktree => RunMode::worktree(),
+            }
+        } else {
+            RunMode::in_place(WorkspaceVcs::None)
+        };
+        let in_place = mode.vcs == WorkspaceVcs::None;
+        let base_branch = if let Some(old) = previous.as_ref().filter(|r| r.works_in_checkout()) {
             let tasks = self.store.list_tasks(old.id).await?;
             if !from_base
                 && old.landed.is_none()
@@ -661,7 +682,7 @@ impl Orchestrator {
             } else {
                 self.round_base(old).await?.0
             }
-        } else if in_place {
+        } else if !versioned {
             String::new()
         } else if let Some(base) = new.base_branch.clone() {
             base
@@ -686,7 +707,8 @@ impl Orchestrator {
             config: new.config,
             repo: repo.clone(),
             base_branch: base_branch.clone(),
-            branch: if in_place {
+            branch: if !versioned || mode.lead == LeadPlace::InPlace {
+                // In place, the person's own branch is the branch: the hub makes none.
                 String::new()
             } else if let Some(old) = &previous {
                 format!(
@@ -698,14 +720,16 @@ impl Orchestrator {
                 format!("crossagents/{}", short(id))
             },
             in_place,
+            mode: Some(mode),
             note: None,
             plan: Vec::new(),
             lead_note: previous.as_ref().and_then(|r| r.lead_note.clone()),
+            checks_snapshot: None,
             created_at: now,
             updated_at: now,
         };
         // One directory, so one task at a time.
-        run.config.max_parallel = if in_place {
+        run.config.max_parallel = if mode.lead == LeadPlace::InPlace {
             1
         } else {
             run.config.max_parallel.max(1)
@@ -713,13 +737,13 @@ impl Orchestrator {
         run.config.max_attempts = run.config.max_attempts.max(1);
         let reused = previous
             .as_ref()
-            .is_some_and(|old| !old.in_place && self.integration_path(old).exists());
+            .is_some_and(|old| old.works_in_checkout() && self.integration_path(old).exists());
         // The previous round's checkout can be gone (an explicit cleanup released it): the
         // round still starts from its branch, but the lead's session lived in a directory
         // that no longer exists, so a copy continues there instead of moving it.
         let previous_home = previous
             .as_ref()
-            .is_some_and(|old| self.integration_path(old).exists());
+            .is_some_and(|old| old.works_in_checkout() && self.integration_path(old).exists());
         if reused {
             // Claim the same session before touching its checkout. No place/copy is needed.
             self.lead_self(&run, &planner, restore).await?;
@@ -730,7 +754,7 @@ impl Orchestrator {
                 self.store.release_agent(planner.id, run.id).await?;
                 return Err(err);
             }
-        } else {
+        } else if mode.lead == LeadPlace::Worktree {
             self.ws_for(&run)
                 .create(
                     &repo,
@@ -741,9 +765,10 @@ impl Orchestrator {
                 .await?;
         }
         // What the project says a fresh checkout needs before anyone works in it
-        // (dependencies, docs/tasks/TOOLCHAIN.md §7). A reused checkout and an in-place run
-        // are not fresh: nothing to prepare.
-        let setup = if in_place || reused {
+        // (dependencies, docs/tasks/TOOLCHAIN.md §7). A reused checkout and a run whose lead
+        // works in the person's own directory are not fresh: nothing to prepare, and nothing
+        // of the hub's to run there (docs/tasks/LEAD.md §4).
+        let setup = if mode.lead == LeadPlace::InPlace || reused {
             None
         } else {
             Some(
@@ -757,18 +782,26 @@ impl Orchestrator {
             )
         };
         // The lead works in the run's own checkout: what it changes stays on the run branch
-        // until it is landed (docs/tasks/W1.md §4.1). In place, it works where it is.
-        let lead = if reused {
+        // until it is landed (docs/tasks/W1.md §4.1). In place, it works where it is: the
+        // agent itself, claimed as it is, no copy and no move (docs/tasks/LEAD.md §4).
+        let _dir_guard = if mode.lead == LeadPlace::InPlace {
+            // Read the directory's occupancy and record this run in it as one step, so that
+            // a second run for the same checkout cannot find it free meanwhile.
+            let guard = Some(self.dir_gate(&repo).await);
+            self.dir_free(&repo, None).await?;
+            guard
+        } else {
+            None
+        };
+        let lead = if mode.lead == LeadPlace::InPlace {
+            self.claim_in_place(&run, &planner).await
+        } else if reused {
             Ok((planner.clone(), false))
         } else if (previous.is_some() && previous_home) || fresh == Some(false) {
             self.lead_self(&run, &planner, restore).await
         } else if fresh == Some(true) {
             self.copy_lead(&planner, run.id, &self.integration_path(&run))
                 .await
-        } else if in_place {
-            self.claim(&planner, run.id, None, ClaimRole::Lead, false)
-                .await
-                .map(|()| (planner.clone(), false))
         } else {
             self.lead_in(&planner, run.id, &self.integration_path(&run))
                 .await
@@ -1299,7 +1332,7 @@ impl Orchestrator {
             run.config.policy = policy;
         }
         if let Some(n) = approval.max_parallel {
-            let n = if run.in_place { 1 } else { n.max(1) };
+            let n = if run.leads_in_place() { 1 } else { n.max(1) };
             if n != run.config.max_parallel {
                 changes.push(format!("at most {n} task(s) run at a time"));
             }
@@ -1638,8 +1671,19 @@ The person changed: {}",
     }
 
     pub(crate) async fn dispatch(&self, run: &Run, task: &mut Task) -> Result<(), CoreError> {
+        // No worker in the person's directory (docs/tasks/LEAD.md §12 P2): it would write
+        // where the lead is writing, with no checkout between them. A versioned workspace
+        // gets workers once their starting point is a snapshot of the directory (P3).
+        if run.leads_in_place() && run.versioned() {
+            return Err(CoreError::Conflict(
+                "this run's lead works in your own directory, so the hub gives no task out: a \
+                 worker would write there too. Do the work yourself, or start a run in a \
+                 checkout of its own"
+                    .into(),
+            ));
+        }
         let mut setup = None;
-        if task.worktree.is_none() && run.in_place {
+        if task.worktree.is_none() && !run.versioned() {
             task.worktree = Some(run.repo.clone());
         } else if task.worktree.is_none() {
             // A dropped attempt may have left its branch or checkout behind (kept while its
@@ -1975,13 +2019,13 @@ The person changed: {}",
     /// run builds under is left alone. Whatever cannot go now (Windows holding a file) is
     /// logged and retried by [`Self::sweep_worktrees`] at the next start.
     pub(crate) async fn remove_finished_targets(&self, run: &Run) {
-        if run.in_place || !run.status.is_terminal() {
+        if !run.works_in_checkout() || !run.status.is_terminal() {
             return;
         }
         let runs = self.store.list_runs().await.unwrap_or_default();
         let open: std::collections::HashSet<String> = runs
             .iter()
-            .filter(|r| !r.status.is_terminal() && !r.in_place)
+            .filter(|r| !r.status.is_terminal() && r.works_in_checkout())
             .flat_map(|r| [short(r.id), self.integration_key(r)])
             .collect();
         let mut keys = vec![short(run.id)];
@@ -2076,7 +2120,7 @@ The person changed: {}",
         }
         for run in runs
             .iter()
-            .filter(|r| r.status.is_terminal() && !r.in_place)
+            .filter(|r| r.status.is_terminal() && r.works_in_checkout())
         {
             if run.landed.is_some() {
                 self.cleanup_after_land(run.id).await;
@@ -2159,10 +2203,11 @@ The person changed: {}",
 
     /// Commits what the lead left uncommitted in the run's checkout, so that branching off
     /// the run branch, merging into it and landing it see the lead's work. `false` when there
-    /// was nothing (or no checkout).
+    /// was nothing (or no checkout) — and never in the person's own directory, which the hub
+    /// neither commits nor stages (docs/tasks/LEAD.md §4).
     pub(crate) async fn commit_lead(&self, run: &Run, message: &str) -> Result<bool, CoreError> {
         let dir = self.integration_path(run);
-        if run.in_place
+        if !run.works_in_checkout()
             || !dir.exists()
             || (run.work_id.is_some() && self.workspaces.current_branch(&dir).await? != run.branch)
         {
@@ -2171,14 +2216,25 @@ The person changed: {}",
         self.ws_for(run).commit_all(&dir, message).await
     }
 
-    /// Whether the run branch brings anything into its base: a merged task, or the lead's
-    /// own commits.
+    /// Whether the run brings anything into its base: a merged task, or the lead's own
+    /// commits — or, for a lead working in the person's directory, what differs there.
     pub(crate) async fn has_changes(&self, run: &Run, tasks: &[Task]) -> Result<bool, CoreError> {
         if tasks.iter().any(|t| t.status == TaskStatus::Merged) {
             return Ok(true);
         }
-        if run.in_place {
-            return Ok(false);
+        if run.leads_in_place() {
+            if !run.versioned() {
+                return Ok(false);
+            }
+            let dir = self.integration_path(run);
+            if !dir.exists() {
+                return Ok(false);
+            }
+            return Ok(!self
+                .ws_for(run)
+                .changed_files(&dir, &run.base_branch)
+                .await?
+                .is_empty());
         }
         let diff = self
             .ws_for(run)

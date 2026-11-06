@@ -1467,8 +1467,10 @@ async fn run_history_outlives_the_run() {
         base_branch: "main".into(),
         branch: "crossagents/login".into(),
         in_place: false,
+        mode: None,
         note: None,
         plan: Vec::new(),
+        checks_snapshot: None,
         created_at: now,
         updated_at: now,
     };

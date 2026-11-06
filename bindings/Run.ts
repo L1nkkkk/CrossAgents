@@ -7,6 +7,7 @@ import type { Landing } from "./Landing";
 import type { PlannedTask } from "./PlannedTask";
 import type { RunConfig } from "./RunConfig";
 import type { RunId } from "./RunId";
+import type { RunMode } from "./RunMode";
 import type { RunStatus } from "./RunStatus";
 import type { WorkId } from "./WorkId";
 
@@ -28,14 +29,22 @@ repo: string,
  */
 base_branch: string, 
 /**
- * Integration branch that collects every merged task.
+ * Integration branch that collects every merged task. Empty when the run works in the
+ * person's own directory: there is no branch of the hub's there (docs/tasks/LEAD.md §9).
  */
 branch: string, 
 /**
  * The directory is not under version control: tasks run one at a time in it directly,
- * with no branches, worktrees, diffs or merges (and nothing to roll back to).
+ * with no branches, worktrees, diffs or merges (and nothing to roll back to). Kept for
+ * runs recorded before the meanings were split; read [`Self::versioned`] instead.
  */
 in_place: boolean, 
+/**
+ * Where the lead works, whether the workspace is versioned, who owns it and whether it
+ * is kept afterwards (docs/tasks/LEAD.md §11). Absent in runs recorded before the split,
+ * which [`Self::mode`] reads out of `in_place`.
+ */
+mode?: RunMode | null, 
 /**
  * Why the run failed or was cancelled, or the last plan rejection.
  */
@@ -66,4 +75,11 @@ checks: Array<CheckResult>,
 /**
  * Whether those checks verified the run; none yet when nothing called for them.
  */
-checks_state: ChecksState | null, created_at: string, updated_at: string, };
+checks_state: ChecksState | null, 
+/**
+ * What those checks ran on, for a run whose lead works in the person's own directory:
+ * a fingerprint of the directory's content at that moment (docs/tasks/LEAD.md §7). When
+ * the content changed since, the result is about other content and does not count
+ * either way. Absent when nothing was checked, or for a run with a checkout of its own.
+ */
+checks_snapshot?: string | null, created_at: string, updated_at: string, };

@@ -274,6 +274,7 @@ mod tests {
             base_branch: "main".into(),
             branch: "run".into(),
             in_place: false,
+            mode: None,
             note: None,
             plan: vec![],
             lead_note: None,
@@ -281,6 +282,7 @@ mod tests {
             summary: None,
             checks: vec![],
             checks_state: None,
+            checks_snapshot: None,
             created_at: now,
             updated_at: now,
         }
