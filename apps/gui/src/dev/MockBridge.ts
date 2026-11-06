@@ -26,6 +26,7 @@ import type { RunDetail } from "@bindings/RunDetail";
 import type { RunHistory } from "@bindings/RunHistory";
 import type { RunTrace } from "@bindings/RunTrace";
 import type { SendMessageRequest } from "@bindings/SendMessageRequest";
+import type { QueuedReason } from "@bindings/QueuedReason";
 import type { SessionCandidate } from "@bindings/SessionCandidate";
 import type { StartChatRequest } from "@bindings/StartChatRequest";
 import type { TaskReviewRequest } from "@bindings/TaskReviewRequest";
@@ -624,7 +625,7 @@ export class MockBridge implements CrossAgentsBridge {
         const a = this.agent(m[1]);
         const t = a && s.transcripts.get(a.id);
         if (!a) return notFound(`agent ${decodeURIComponent(m[1])}`);
-        const base: Transcript = t ?? { agent: a, driver: null, capabilities: null, turns: [], usage: null, switches: [], last_seq: 0 };
+        const base: Transcript = t ?? { agent: a, driver: null, capabilities: null, delivery: { state: a.plugin === "external" ? "held" : "idle", queued: 0 }, turns: [], usage: null, switches: [], last_seq: 0 };
         return json(200, { ...base, agent: a, last_seq: this.seq });
       }
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/turns\/([^/]+)\/diff$/))) {
@@ -891,7 +892,20 @@ export class MockBridge implements CrossAgentsBridge {
         }
         return this.send(a.id, { text: req.text });
       }
-      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/messages$/))) return this.send(m[1], body as SendMessageRequest);
+      if ((m = p.match(/^\/v1\/agents\/([^/]+)\/messages\/([^/]+)\/send-now$/))) {
+        const a = this.agent(m[1]);
+        const mid = decodeURIComponent(m[2]);
+        const t = a && s.transcripts.get(a.id);
+        const waiting = t?.turns.find((x) => x.message_id === mid && !x.started_at && !x.completed_at);
+        if (!a || !waiting) return json(409, { error: { code: "conflict", message: "already started or gone", reason: "already_started" } });
+        // Promoted in place: the same id starts a turn, nothing is withdrawn or re-sent.
+        this.emit({ type: "agent.status_changed", data: { id: a.id, from: a.status, to: "running" } });
+        this.emit({ type: "agent.turn_started", data: { id: a.id, message_id: mid } });
+        this.emit({ type: "agent.delivery_changed", data: { id: a.id, delivery: { state: "turn", queued: (t?.turns.filter((x) => !x.started_at).length ?? 1) - 1 } } });
+        this.timers.push(setTimeout(() => this.emit({ type: "agent.turn_completed", data: { id: a.id, message_id: mid, stop_reason: "end_turn" } }), 900));
+        return json(202, { message_id: mid, queued: false, steered: false });
+      }
+      if (method === "POST" && (m = p.match(/^\/v1\/agents\/([^/]+)\/messages$/))) return this.send(m[1], body as SendMessageRequest);
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/cancel$/))) return this.cancel(m[1]);
       if ((m = p.match(/^\/v1\/agents\/([^/]+)\/compact$/))) return this.compact(m[1]);
       if ((m = p.match(/^\/v1\/runs\/([^/]+)\/(approve|reject|cancel)$/))) {
@@ -1001,6 +1015,9 @@ export class MockBridge implements CrossAgentsBridge {
   private send(key: string, req: SendMessageRequest): HubResponse {
     const a = this.agent(key);
     if (!a) return notFound("agent");
+    // A scenario's way to show a failed send (docs/screens/delivery-*.png): the same shape the
+    // hub uses for a refusal, so the row shows the mapped sentence and keeps the raw text.
+    if (req.text.startsWith("[fail]")) return json(500, { error: { code: "internal", message: "mock: the write into the CLI failed", reason: "steer_write_failed" } });
     const message_id = uid();
     const busy = a.status === "running";
     // Like the hub: files are kept apart and the message carries what they are.
@@ -1010,7 +1027,8 @@ export class MockBridge implements CrossAgentsBridge {
       return { id, name: f.name, mime: f.mime, size: Math.floor((f.data.length * 3) / 4), path: `C:/Users/me/.crossagents/attachments/${a.id}/${id}` };
     });
     // Like the hub: a steer needs a turn to go into and a driver that takes one; otherwise it
-    // queues, and the answer says `steered: false` rather than failing.
+    // queues, and the answer says why it waits rather than failing (DELIVERY-AUDIT §3).
+    const external = a.plugin === "external";
     if (req.steer && busy && capabilitiesOf(a.plugin).steer) {
       this.emit({ type: "agent.steered", data: { id: a.id, message_id, text: req.text, ...(attachments.length ? { attachments } : {}) } });
       // The model reads it at its next tool boundary; the mock has it read a moment later, so a
@@ -1018,10 +1036,15 @@ export class MockBridge implements CrossAgentsBridge {
       this.timers.push(setTimeout(() => this.emit({ type: "agent.steer_read", data: { id: a.id, message_id } }), 1_500));
       return json(202, { message_id, queued: false, steered: true });
     }
-    this.emit({ type: "agent.input", data: { id: a.id, message_id, text: req.text, queued: busy, from: { kind: "human" }, ...(attachments.length ? { attachments } : {}) } });
+    const reason: QueuedReason | undefined = external ? "external_agent" : req.steer && busy ? "runtime_no_steer" : busy ? "turn_running" : undefined;
+    this.emit({ type: "agent.input", data: { id: a.id, message_id, text: req.text, queued: busy || external, from: { kind: "human" }, ...(reason ? { queued_reason: reason } : {}), ...(attachments.length ? { attachments } : {}) } });
+    this.emit({
+      type: "agent.delivery_changed",
+      data: { id: a.id, delivery: external ? { state: "held", queued: 1 } : busy ? { state: "turn", queued: 1 } : { state: "starting", queued: 1 } },
+    });
     this.freshSession(a);
     if (!busy) this.answer(a, message_id, req.text);
-    return json(202, { message_id, queued: busy, steered: false });
+    return json(202, { message_id, queued: busy || external, steered: false, ...(reason ? { queued_reason: reason } : {}) });
   }
 
   /** Like the hub's `archive` (and `lead_returned` for a copied lead): what restoring could not bring back is said. */
@@ -1099,6 +1122,7 @@ export class MockBridge implements CrossAgentsBridge {
     this.sequence([
       { type: "agent.status_changed", data: { id, from: a.status, to: "running" } },
       { type: "agent.turn_started", data: { id, message_id } },
+      { type: "agent.delivery_changed", data: { id, delivery: { state: "turn", queued: 0 } } },
       { type: "agent.output", data: { id, stream: "thought", text: "先看一下要改哪里。" } },
       { type: "agent.tool_call", data: { id, tool_call_id: call, title: "Read notes/mock.md", kind: "read", status: "in_progress" } },
       { type: "agent.tool_call_updated", data: { id, tool_call_id: call, title: null, status: "completed" } },
@@ -1106,6 +1130,7 @@ export class MockBridge implements CrossAgentsBridge {
       { type: "agent.output", data: { id, stream: "text", text: reply.slice(18) } },
       { type: "agent.turn_diff", data: { id, diff, message_id, source: "hub" } },
       { type: "agent.turn_completed", data: { id, message_id, stop_reason: "end_turn" } },
+      { type: "agent.delivery_changed", data: { id, delivery: { state: "idle", queued: 0 } } },
       { type: "agent.status_changed", data: { id, from: "running", to: "idle" } },
     ]);
   }

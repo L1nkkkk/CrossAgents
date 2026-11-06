@@ -1,6 +1,8 @@
 // Agent errors as a person reads them: the hub's messages are for logs, these say what to do.
 
 import type { AgentExit } from "@bindings/AgentExit";
+import type { QueuedReason } from "@bindings/QueuedReason";
+import { isOutcome, outcomeText, reasonText } from "./delivery.ts";
 
 /**
  * A short Chinese hint for a known error, else its first line. `exit` is how the agent's
@@ -27,6 +29,40 @@ export function exitHint({ cause, code }: AgentExit): string {
     : cause === "exited" ? "进程自己退出了"
     : "进程退出了";
   return code != null && code !== 0 ? `${how}（退出码 ${code}）` : how;
+}
+
+/** A failed delivery, as the API client knows it: an HTTP status, a code, and the hub's words. */
+export type DeliveryFailure = {
+  /** 0 when the hub never answered. */
+  status: number;
+  code: string;
+  /** Why the hub refused it, when the error is about delivering a message. */
+  reason?: QueuedReason;
+  message: string;
+};
+
+/**
+ * A failed delivery in the person's words (docs/tasks/DELIVERY-AUDIT.md §3, §8 P2-6): the hub's
+ * reason code first, then the transport outcome, then the hub's own message run through the
+ * agent-error hints. The raw text is for the `title`, never thrown away.
+ */
+export function deliveryHint(failure: DeliveryFailure): string {
+  if (failure.reason) return reasonText(failure.reason);
+  const code = failure.code;
+  if (isOutcome(code)) return outcomeText(code);
+  if (code === "version_mismatch") return failure.message;
+  return errorHint(failure.message);
+}
+
+/** Reads a thrown API error structurally, so this module stays free of the client (api.ts). */
+export function deliveryFailure(err: unknown): DeliveryFailure {
+  const e = err as { status?: unknown; code?: unknown; reason?: unknown; message?: unknown };
+  return {
+    status: typeof e?.status === "number" ? e.status : 0,
+    code: typeof e?.code === "string" ? e.code : "unknown",
+    ...(typeof e?.reason === "string" ? { reason: e.reason as QueuedReason } : {}),
+    message: typeof e?.message === "string" ? e.message : String(err),
+  };
 }
 
 function knownHint(text: string): string | undefined {

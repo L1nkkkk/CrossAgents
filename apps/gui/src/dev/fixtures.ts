@@ -304,11 +304,15 @@ export function contextParts(used: number, size: number) {
 }
 
 export function transcript(a: Agent, turns: { turn: TranscriptTurn }[], used = 38_000): Transcript {
+  const list = turns.map((t) => t.turn);
+  const waiting = list.filter((t) => !t.started_at && !t.completed_at).length;
+  const running = list.some((t) => !!t.started_at && !t.completed_at);
   return {
     agent: a,
     driver: driverOf(a.plugin),
     capabilities: capabilitiesOf(a.plugin),
-    turns: turns.map((t) => t.turn),
+    delivery: { state: a.plugin === "external" ? "held" : running ? "turn" : waiting ? "starting" : "idle", queued: waiting },
+    turns: list,
     switches: [],
     usage: {
       used,
