@@ -47,6 +47,7 @@ mod tests {
             base_branch: "main".into(),
             branch: "crossagents/a1b2c3d4".into(),
             in_place: false,
+            mode: None,
             note: None,
             plan: Vec::new(),
             lead_note: None,
@@ -54,6 +55,7 @@ mod tests {
             summary: None,
             checks: Vec::new(),
             checks_state: None,
+            checks_snapshot: None,
             created_at: start,
             updated_at: start + Duration::minutes(12),
         };
@@ -77,6 +79,7 @@ mod tests {
             reviewer_fresh: true,
             status: TaskStatus::Failed,
             attempts: 2,
+            runs: Vec::new(),
             escalated: false,
             nudges: 0,
             branch: None,
@@ -291,5 +294,57 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# first\n");
         write(dir.path(), run.id, &second, true).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# second\n");
+    }
+
+    /// `docs` is a junction/symlink pointing out of the checkout: the retro is refused there,
+    /// so a run cannot write a file into a directory outside the repository. Skipped where
+    /// the link cannot be made (a Windows account without the privilege).
+    #[test]
+    fn docs_tasks_outside_the_checkout_is_refused() {
+        let checkout = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(outside.path().join("tasks")).unwrap();
+        if link_dir(outside.path(), &checkout.path().join("docs")).is_err() {
+            eprintln!("skipped: cannot link a directory here");
+            return;
+        }
+        let (run, ..) = fixture();
+        let doc = RetroDoc {
+            markdown: "# outside\n".into(),
+            findings: 0,
+            issues: 0,
+        };
+        let refused = write(checkout.path(), run.id, &doc, false).unwrap_err();
+        assert!(
+            matches!(&refused, crossagents_core::CoreError::Conflict(message) if message.contains("outside")),
+            "{refused}"
+        );
+        assert!(
+            !outside
+                .path()
+                .join("tasks")
+                .join(file_name(run.id))
+                .exists()
+        );
+    }
+
+    /// A directory link: a junction on Windows (no privilege needed), a symlink elsewhere.
+    #[cfg(windows)]
+    fn link_dir(original: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(original)
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other("mklink /J failed"))
+        }
+    }
+
+    #[cfg(unix)]
+    fn link_dir(original: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(original, link)
     }
 }

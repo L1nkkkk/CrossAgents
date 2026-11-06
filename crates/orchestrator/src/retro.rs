@@ -1006,6 +1006,7 @@ mod tests {
             base_branch: "main".into(),
             branch: "crossagents/a1b2c3d4".into(),
             in_place: false,
+            mode: None,
             note: None,
             plan: Vec::new(),
             lead_note: None,
@@ -1013,6 +1014,7 @@ mod tests {
             summary: None,
             checks: Vec::new(),
             checks_state: None,
+            checks_snapshot: None,
             created_at: start,
             updated_at: start + Duration::minutes(12),
         }
@@ -1039,6 +1041,7 @@ mod tests {
             reviewer_fresh: true,
             status,
             attempts: 1,
+            runs: Vec::new(),
             escalated: false,
             nudges: 0,
             branch: None,
