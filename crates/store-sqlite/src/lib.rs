@@ -382,6 +382,51 @@ fn not_found(key: &AgentKey) -> CoreError {
 
 #[async_trait]
 impl Store for SqliteStore {
+    async fn unavailable_model(
+        &self,
+        plugin: &str,
+        account: &str,
+        model: &str,
+    ) -> Result<Option<String>, CoreError> {
+        sqlx::query_scalar(
+            "SELECT error FROM unavailable_models WHERE plugin = ? AND account = ? AND model = ?",
+        )
+        .bind(plugin)
+        .bind(account)
+        .bind(model)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)
+    }
+    async fn record_unavailable_model(
+        &self,
+        plugin: &str,
+        account: &str,
+        model: &str,
+        error: &str,
+    ) -> Result<(), CoreError> {
+        sqlx::query("INSERT INTO unavailable_models (plugin, account, model, observed_at, error) VALUES (?, ?, ?, ?, ?) ON CONFLICT(plugin, account, model) DO UPDATE SET observed_at = excluded.observed_at, error = excluded.error")
+            .bind(plugin).bind(account).bind(model).bind(Utc::now().to_rfc3339()).bind(error).execute(&self.pool).await.map_err(storage)?;
+        Ok(())
+    }
+    async fn clear_unavailable_model(
+        &self,
+        plugin: &str,
+        account: &str,
+        model: &str,
+    ) -> Result<(), CoreError> {
+        sqlx::query(
+            "DELETE FROM unavailable_models WHERE plugin = ? AND account = ? AND model = ?",
+        )
+        .bind(plugin)
+        .bind(account)
+        .bind(model)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(())
+    }
+
     async fn insert_agent(&self, agent: &Agent) -> Result<(), CoreError> {
         let result = sqlx::query(
             "INSERT INTO agents (id, name, plugin, driver, model, role, cwd, config, status, created_at, profile, name_source, topic, archived_at, home)
@@ -1132,19 +1177,17 @@ impl Store for SqliteStore {
         domain: Option<&str>,
     ) -> Result<Vec<ExpertiseEntry>, CoreError> {
         let rows: Vec<String> = match domain {
-            Some(domain) => {
-                sqlx::query_scalar(
-                    "SELECT data FROM expertise_entries
+            Some(domain) => sqlx::query_scalar(
+                "SELECT data FROM expertise_entries
                      WHERE owner_kind = ?1 AND owner_id = ?2 AND domain = ?3
                      ORDER BY updated_at DESC",
-                )
-                .bind(enum_str(&owner_kind)?)
-                .bind(owner_id)
-                .bind(domain)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(storage)?
-            }
+            )
+            .bind(enum_str(&owner_kind)?)
+            .bind(owner_id)
+            .bind(domain)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage)?,
             None => sqlx::query_scalar(
                 "SELECT data FROM expertise_entries
                  WHERE owner_kind = ?1 AND owner_id = ?2 ORDER BY updated_at DESC",
@@ -1369,12 +1412,7 @@ impl Store for SqliteStore {
         )
         .bind(&usage.id)
         .bind(&usage.entry_id)
-        .bind(
-            usage
-                .task_id
-                .map(|t| t.to_string())
-                .unwrap_or_default(),
-        )
+        .bind(usage.task_id.map(|t| t.to_string()).unwrap_or_default())
         .bind(outcome)
         .bind(usage.at.to_rfc3339())
         .bind(serde_json::to_string(usage).map_err(storage)?)
@@ -1929,6 +1967,45 @@ fn scope_name(scope: NoteScope) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn unavailable_model_survives_reopening() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let store = SqliteStore::open(&path).await.unwrap();
+        store
+            .record_unavailable_model("plugin", "account", "model", "original error")
+            .await
+            .unwrap();
+        store.close().await;
+        let store = SqliteStore::open(&path).await.unwrap();
+        assert_eq!(
+            store
+                .unavailable_model("plugin", "account", "model")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("original error")
+        );
+        assert_eq!(
+            store
+                .unavailable_model("plugin", "other", "model")
+                .await
+                .unwrap(),
+            None
+        );
+        store
+            .clear_unavailable_model("plugin", "account", "model")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .unavailable_model("plugin", "account", "model")
+                .await
+                .unwrap(),
+            None
+        );
+    }
     use crossagents_core::{
         ClaimRole, Role, RunConfig, RunStatus, TaskId, TaskReport, TaskRun, TaskRunOutcome,
         TaskSpec, TaskStatus,
@@ -2899,12 +2976,7 @@ mod tests {
             let owners = owners.to_vec();
             let terms: Vec<String> = terms.iter().map(|t| t.to_string()).collect();
             let store = &store;
-            async move {
-                ids(store
-                    .expertise_search(&owners, &terms, 5)
-                    .await
-                    .unwrap())
-            }
+            async move { ids(store.expertise_search(&owners, &terms, 5).await.unwrap()) }
         };
         let both = [me, project].map(|(k, id)| (k, id.to_string()));
         // Chinese with no spaces, matched inside a longer sentence.
@@ -2912,9 +2984,11 @@ mod tests {
         // Shorter than a trigram: looked up as a substring.
         assert_eq!(search(&both, &["软链"]).await, vec!["e3"]);
         // Only the owners asked for.
-        assert!(search(&[(me.0, me.1.to_string())], &["软链"])
-            .await
-            .is_empty());
+        assert!(
+            search(&[(me.0, me.1.to_string())], &["软链"])
+                .await
+                .is_empty()
+        );
         assert_eq!(
             search(&[(me.0, me.1.to_string())], &["卡片"]).await,
             vec!["e2"]
@@ -3062,9 +3136,11 @@ mod tests {
             0
         );
         let settled = store.usage_list(None, Some(task)).await.unwrap();
-        assert!(settled
-            .iter()
-            .all(|u| u.outcome == Some(UsageOutcome::MergedFirstTry)));
+        assert!(
+            settled
+                .iter()
+                .all(|u| u.outcome == Some(UsageOutcome::MergedFirstTry))
+        );
         // The one with no task keeps no outcome until its own task ends.
         assert!(
             store

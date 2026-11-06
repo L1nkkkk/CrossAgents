@@ -299,7 +299,7 @@ impl Orchestrator {
                     "activity": self.running.lock().unwrap().activity.of(a.id, Utc::now()),
                     "plugin": a.plugin,
                     "model": a.model,
-                    "unusable": crate::approval::unusable_for(&a, run.as_ref().map(|r| &r.config.policy)),
+                    "unusable": crate::approval::unusable_for(self.store().as_ref(), &a, run.as_ref().map(|r| &r.config.policy)).await?,
                     "current_tasks": tasks.get(&a.id).cloned().unwrap_or_default(),
                     "home": a.home(),
                     "state": if held.is_some() { "busy" } else { "idle" },
@@ -316,10 +316,14 @@ impl Orchestrator {
             let mut entry = s.json();
             entry["id"] = json!(s.agent.id);
             entry["role"] = json!(s.agent.role);
-            entry["unusable"] = json!(crate::approval::unusable_for(
-                &s.agent,
-                run.as_ref().map(|r| &r.config.policy)
-            ));
+            entry["unusable"] = json!(
+                crate::approval::unusable_for(
+                    self.store().as_ref(),
+                    &s.agent,
+                    run.as_ref().map(|r| &r.config.policy)
+                )
+                .await?
+            );
             entry["note"] = json!("archived: assign with fresh: false and restore: true to use it");
             agents.push(entry);
         }

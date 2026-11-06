@@ -883,3 +883,17 @@ async fn an_escalated_task_names_its_session_with_e() {
     assert!(escalated.starts_with("e-"), "{escalated}");
     assert_eq!(escalated[1..], plain[1..], "only the prefix differs");
 }
+
+#[tokio::test]
+async fn learned_unavailable_model_refuses_assignments_until_cleared() {
+    let f = Fixture::new().await;
+    f.store.update_agent_model(f.max.id, Some("retired")).await.unwrap();
+    f.store.record_unavailable_model("mock", "", "retired", "invalid model").await.unwrap();
+    f.insert("b", TaskStatus::Pending, &[], None).await;
+    let assign = f.orchestrator.task_assign(&f.lead, json!({"task":"b", "to":"Max", "fresh":false})).await.unwrap_err();
+    assert!(assign.to_string().contains("invalid model"));
+    let create = f.orchestrator.task_create(&f.lead, json!({"tasks":[{"key":"c", "title":"c", "spec":{"goal":"c"}, "assignee":"Max", "fresh":false}]})).await.unwrap_err();
+    assert!(create.to_string().contains("invalid model"));
+    f.store.clear_unavailable_model("mock", "", "retired").await.unwrap();
+    f.orchestrator.task_assign(&f.lead, json!({"task":"b", "to":"Max", "fresh":false})).await.unwrap();
+}

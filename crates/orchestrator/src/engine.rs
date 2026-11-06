@@ -1195,8 +1195,12 @@ impl Orchestrator {
                 .store
                 .get_agent(&AgentKey::Id(worker.unwrap_or(run.config.worker)))
                 .await
-                && let Some(reason) =
-                    crate::approval::unusable_for(&agent, Some(&run.config.policy))
+                && let Some(reason) = crate::approval::unusable_for(
+                    self.store.as_ref(),
+                    &agent,
+                    Some(&run.config.policy),
+                )
+                .await?
             {
                 problems.push(format!("task {:?}: {}: {reason}", t.key, agent.name));
             }
