@@ -62,6 +62,7 @@ import { InlineNeeds } from "../inlineask";
 import { RelayBanner } from "../relay";
 import { useQuestions } from "../questions";
 import { RunTraceView } from "../trace";
+import { RunSwimlane } from "../swimlane";
 import { RailCard } from "../rail";
 import { t, type Key } from "../lib/i18n";
 import { wsKey } from "../workspace";
@@ -388,6 +389,7 @@ function RunRail({
           </RailCard>
         )
       )}
+      {tasks.length > 0 && <RailCard id="run-swimlane" title="泳道"><RunSwimlane runId={run.id} /></RailCard>}
       <RailCard id="run-facts" title="run">
         <RunFacts run={run} agents={agents} />
       </RailCard>
