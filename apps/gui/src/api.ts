@@ -1,3 +1,4 @@
+import type { ApplyRerun } from "@bindings/ApplyRerun";
 // Typed client for the hub's local API (docs/DESIGN.md §11). Inside Electron requests go
 // through the preload bridge to the main process, which adds the bearer token; in a plain
 // browser they go to the same origin (the Vite dev server forwards them, see vite.config.ts).
@@ -400,6 +401,8 @@ export const api = {
   /** The projects the hub knows, with the checkouts that identify them: a project's
    * expertise profile is keyed by its id, and the page works from a directory. */
   projects: async (): Promise<ProjectInfo[]> => (await request<ListProjectsResponse>("GET", "/v1/projects")).projects,
+  getIntegration: (key: string) => request<IntegrationStatus>("GET", `/v1/runs/${enc(key)}/integration`),
+  applyRun: (key: string) => request<ApplyReport>("POST", `/v1/runs/${enc(key)}/apply`),
   getRun: (key: string) => request<RunDetail>("GET", `/v1/runs/${enc(key)}`),
   createRun: (req: CreateRunRequest) => request<Run>("POST", "/v1/runs", req),
   approveRun: (key: string, req: ApproveRunRequest = { policy: null, max_parallel: null, assignees: null }) =>
@@ -543,3 +546,6 @@ export const api = {
 export function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+export type IntegrationStatus = { outcome: string; snapshot?: string; integration?: string; applied?: string | null; diff?: string };
+export type ApplyReport = { outcome: string; reason?: string; detail?: string; files?: string[]; own_changes?: string[]; note?: string; rerun?: ApplyRerun | null };

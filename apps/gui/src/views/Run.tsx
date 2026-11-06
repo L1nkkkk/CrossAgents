@@ -8,6 +8,7 @@ import type { PlannedTask } from "@bindings/PlannedTask";
 import type { RunPolicy } from "@bindings/RunPolicy";
 import type { UpdateRunPolicyRequest } from "@bindings/UpdateRunPolicyRequest";
 import { navigate } from "../App";
+import { ApplyButton } from "../apply";
 import { ApiError, api, errorText } from "../api";
 import { DeleteRunDialog } from "../deleteRun";
 import { HandoffChain, OutcomeChip, freshLabel, isEscalated } from "../handoff";
@@ -164,6 +165,7 @@ export function RunView({
       {/* Narrow, the header's panel button already carries the progress: one copy. */}
       <ProgressChip tasks={tasks} />
       <div className="spacer" />
+      <ApplyButton run={run} />
       <SidePanelToggle tasks={tasks} />
       {!run.in_place && (
         <button className="ghost small graph-toggle" onClick={() => openTool("graph")} title="在右侧工具列看这个 run 的分支和提交">

@@ -526,18 +526,67 @@ fn checks_word(run: &Run) -> &'static str {
     }
 }
 
+fn rerun_note(files: &[String], rerun: Option<&apply::Rerun>) -> String {
+    let prefix = format!("原目录合并了个人改动：{}。", files.join("、"));
+    match rerun {
+        None => format!("{prefix}原目录检查未执行。"),
+        Some(report) if report.error.is_some() => format!(
+            "{prefix}原目录检查未执行：{}。",
+            report.error.as_deref().unwrap_or_default()
+        ),
+        Some(report) if report.results.is_empty() => {
+            format!("{prefix}没有匹配的检查，未执行复跑。")
+        }
+        Some(report) if report.results.iter().all(|check| check.passed) => {
+            format!("{prefix}原目录复跑检查通过。")
+        }
+        Some(_) => format!("{prefix}原目录复跑检查失败；详见复跑结果。"),
+    }
+}
+
+#[cfg(test)]
+mod apply_note_tests {
+    use super::*;
+
+    #[test]
+    fn run_apply_message_reports_rerun_without_old_instruction() {
+        let files = vec!["src/a.rs".to_owned()];
+        for (passed, expected) in [(true, "通过"), (false, "失败")] {
+            let report = apply::Rerun {
+                results: vec![crossagents_core::CheckResult {
+                    command: "check".into(),
+                    exit_code: Some(if passed { 0 } else { 1 }),
+                    passed,
+                    output: String::new(),
+                }],
+                error: None,
+            };
+            let note = rerun_note(&files, Some(&report));
+            assert!(note.contains(expected), "{note}");
+            assert!(!note.contains("请在原目录再跑一次"));
+        }
+        let report = apply::Rerun {
+            results: vec![],
+            error: None,
+        };
+        assert!(rerun_note(&files, Some(&report)).contains("没有匹配的检查"));
+        let report = apply::Rerun {
+            results: vec![],
+            error: Some("bad config".into()),
+        };
+        assert!(rerun_note(&files, Some(&report)).contains("bad config"));
+    }
+}
 /// What the person should know about the checks after an apply.
 fn apply_note(run: &Run, outcome: &apply::Outcome) -> Option<String> {
     match outcome {
         apply::Outcome::Applied {
             own_changes,
             checked_in_dir,
+            rerun,
             ..
         } => Some(if !*checked_in_dir {
-            format!(
-                "项目检查是在集成工作区对集成结果跑的；这些文件你在目录里也有改动（三方合并不是纯快进），现在的内容没有被检查覆盖，请在原目录再跑一次：{}。",
-                own_changes.join("、")
-            )
+            rerun_note(own_changes, rerun.as_ref())
         } else {
             match run.checks_state {
                 Some(crossagents_core::ChecksState::Ran) => {

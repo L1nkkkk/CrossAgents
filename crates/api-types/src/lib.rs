@@ -21,6 +21,14 @@ pub use crossagents_core::handoff;
 
 pub const API_VERSION: &str = "v1";
 
+/// Checks rerun in the person's directory after applying merged files.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ApplyRerun {
+    pub results: Vec<CheckResult>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 /// `GET /v1/health`: answers without a token, so it says as little as possible. Version,
