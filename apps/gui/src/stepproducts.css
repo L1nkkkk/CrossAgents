@@ -1,0 +1,62 @@
+/* A folded run of steps: what it made, just under the line that names it. */
+
+.step-products {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 3px 0 6px 17px;
+}
+
+.sp-shots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sp-shots .thumb {
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  line-height: 0;
+  background: var(--surface-sunk);
+}
+
+.sp-shots .thumb img {
+  display: block;
+  height: 54px;
+  width: auto;
+  max-width: 160px;
+  object-fit: cover;
+}
+
+.sp-shots .thumb:hover {
+  border-color: var(--border-strong);
+}
+
+.sp-files {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.sp-file {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sp-file + .sp-file::before {
+  content: "· ";
+  color: var(--muted);
+}
+
+.sp-more {
+  color: var(--muted);
+}

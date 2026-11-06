@@ -165,7 +165,7 @@ function AskCard({ item, agent }: { item: HumanItem; agent?: Agent }) {
 }
 
 /** An approval (docs/tasks/DOGFOOD.md §7): who wants to do what and why, then the exact command. */
-function ApprovalText({ text }: { text: string }) {
+export function ApprovalText({ text }: { text: string }) {
   const [what, ...rest] = text.split("\n");
   return (
     <div className="ask-text">

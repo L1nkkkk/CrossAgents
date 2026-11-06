@@ -4,6 +4,7 @@
 import { emptyHub } from "../views/Home.mock";
 import { extensionScene } from "./extensions.mock";
 import { approvalRun, deleteRun, graphRun, handoffRun, inPlaceRun, landingRun, longResultsRun, oauthRun, pausedRun, rerouteRun, reuseRun, reviewRun, syncRun, traceRun } from "../views/Run.mock";
+import { relayScene } from "../views/RunRelay.mock";
 import type { BackgroundResponse } from "@bindings/BackgroundResponse";
 import { attachmentSession, chatWithRecruit, contextUsageScene, crashedSession, failedEditSession, liveRun, liveSession, liveTaskSession, longNameScene, moderationSession, slashScene, soloSession, toolImagePathsSession, toolImagesSession } from "../views/Session.mock";
 import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
@@ -29,6 +30,12 @@ export type Scenario = {
 };
 
 export const SCENARIOS: Scenario[] = [
+  { key: "relay-needyou", label: "接力链 · 需要你 · 按产出命名", hint: "每条任务线一行接力链；问题在时间线里点选回答；折叠的步骤按产出命名，产物在下面", build: () => relayScene() },
+  { key: "relay-needyou-steps", label: "按产出命名的步骤", hint: "折叠的步骤读作「改了 3 个文件 · 跑了测试：通过 · 出了 1 张图」，缩略图和路径就在那一行下面（这个问题已在别处答完，好让对话有地方）", build: () => {
+    const scene = relayScene();
+    // Answered elsewhere: with no open question the dock is short and the turn has room.
+    return { ...scene, state: { ...scene.state, questions: [] }, script: [] };
+  } },
   { key: "delivery", label: "消息送达状态", hint: "自己发的消息一行到底：排队原因、已撤回、失败可重试", build: () => {
     // A session with one turn running and messages waiting. The person's messages stay in the
     // chat with their state on the bubble (P0-1); only the orchestrator's waits list 接下来.

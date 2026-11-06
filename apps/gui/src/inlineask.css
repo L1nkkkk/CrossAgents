@@ -1,0 +1,107 @@
+/* 需要你 in the event stream: one bordered card per open question, options as buttons. */
+
+.inline-needs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 12px;
+}
+
+.in-head {
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+  color: var(--warn-text);
+}
+
+.ia {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--warn);
+  border-radius: var(--radius-lg);
+  background: var(--warn-bg);
+}
+
+.ia-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+}
+
+.ia-who {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.ia-who:hover {
+  text-decoration: underline;
+}
+
+.ia-what {
+  color: var(--warn-text);
+}
+
+.ia-time {
+  font-size: 11.5px;
+  color: var(--warn-text);
+  opacity: 0.85;
+}
+
+.ia-text {
+  font-size: 13px;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.ia-detail summary {
+  font-size: 11.5px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+
+.ia-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ia-opt {
+  padding: 3px 10px;
+  font-size: 12.5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+}
+
+.ia-opt:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ia-opt.default::after {
+  content: " · 默认";
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.ia-reply {
+  display: flex;
+  gap: 6px;
+}
+
+.ia-reply input {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+}
+
+.ia :is(.ask-text, .approval-command) {
+  background: none;
+}
