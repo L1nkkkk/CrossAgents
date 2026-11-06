@@ -723,10 +723,10 @@ async fn update_profile(
     Ok(Json(agent))
 }
 
-/// `POST /v1/agents/{key}/settings`: which of Claude Code's settings the agent loads
-/// (docs/tasks/DOGFOOD.md §6). The CLI reads them only at launch, so an idle session is
-/// stopped and resumes with them on the next message; a busy one keeps the old ones until it
-/// next starts.
+/// `POST /v1/agents/{key}/settings`: which of Claude Code's settings the agent loads, and
+/// whether their hooks may run (docs/tasks/DOGFOOD.md §6, SELF.md §B5). The CLI reads both
+/// only at launch, so an idle session is stopped and resumes with them on the next message; a
+/// busy one keeps the old ones until it next starts.
 async fn agent_settings(
     State(state): State<Arc<AppState>>,
     Path(key): Path<String>,
@@ -737,6 +737,15 @@ async fn agent_settings(
         agent.config = serde_json::json!({});
     }
     let before = agent.config.get("setting_sources").cloned();
+    let hooks_before = agent.config.get("allow_hooks").cloned();
+    // Off is the default, so it is stored as absence: one shape for "never chose".
+    if let Some(allow) = req.allow_hooks {
+        if allow {
+            agent.config["allow_hooks"] = true.into();
+        } else {
+            agent.config.as_object_mut().unwrap().remove("allow_hooks");
+        }
+    }
     match req.setting_sources {
         None => {
             agent
@@ -766,7 +775,10 @@ async fn agent_settings(
         .store()
         .update_agent_config(agent.id, &agent.config)
         .await?;
-    if agent.config.get("setting_sources").cloned() != before && agent.status == AgentStatus::Idle {
+    if (agent.config.get("setting_sources").cloned() != before
+        || agent.config.get("allow_hooks").cloned() != hooks_before)
+        && agent.status == AgentStatus::Idle
+    {
         state.runtime.stop(&AgentKey::Id(agent.id)).await?;
         agent.status = AgentStatus::Stopped;
     }

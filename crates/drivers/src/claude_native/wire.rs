@@ -36,6 +36,10 @@ pub struct Launch {
     /// Which settings files Claude Code reads. Not the user's own by default: their
     /// plugins, hooks and connectors are not the agent's.
     pub setting_sources: String,
+    /// Whether hooks from those settings files may run (see [`crate::hooks`]). Off by
+    /// default, and then `--settings '{"disableAllHooks":true}'` is passed: the default
+    /// sources still read the project's `.claude/settings.json`, whose hooks nobody approved.
+    pub allow_hooks: bool,
 }
 
 /// Which conversation the process continues.
@@ -164,6 +168,10 @@ pub fn args(launch: &Launch, start: &Start, flavor: Flavor) -> Vec<String> {
     .map(String::from)
     .to_vec();
     args.push(launch.setting_sources.clone());
+    // `--setting-sources project,local` keeps the user's own files out, but the project's
+    // `.claude/settings.json` is one of them and may carry hooks; `--settings` merges over
+    // every file, so this switches hooks off without touching the rest of the settings.
+    args.extend(crate::hooks::args(launch.allow_hooks));
     // Only `--mcp-config` counts, so nothing from the CLI's own settings arrives with the
     // session. Claude Code needs that; CodeBuddy reads its own `mcp.json` and loading it
     // twice would start those servers twice (docs/research/multica.md §2.10).
@@ -1277,6 +1285,7 @@ mod tests {
             env: vec![("CLAUDE_CONFIG_DIR".into(), "/nonexistent/claude".into())],
             instructions: Some("You are w1.".into()),
             setting_sources: DEFAULT_SETTING_SOURCES.into(),
+            allow_hooks: false,
         };
         let new = args(&launch, &Start::New("s1".into()), Flavor::Claude);
         let after = |flag: &str| {
@@ -1321,6 +1330,31 @@ mod tests {
             assert!(fork.windows(2).any(|w| w == pair), "{pair:?}");
         }
         assert!(fork.contains(&"--fork-session".to_owned()));
+    }
+
+    /// Hooks are off unless the agent allows them: the default launch switches them off
+    /// through `--settings`, and a launch that allows them passes no such settings.
+    #[test]
+    fn hooks_are_disabled_unless_the_launch_allows_them() {
+        for flavor in [Flavor::Claude, Flavor::Codebuddy] {
+            let off = args(&Launch::default(), &Start::New("s1".into()), flavor);
+            let i = off
+                .iter()
+                .position(|a| a == "--settings")
+                .unwrap_or_else(|| panic!("no --settings for {flavor:?}: {off:?}"));
+            let settings: Value = serde_json::from_str(&off[i + 1]).unwrap();
+            assert_eq!(settings, json!({ "disableAllHooks": true }), "{flavor:?}");
+
+            let on = args(
+                &Launch {
+                    allow_hooks: true,
+                    ..Launch::default()
+                },
+                &Start::New("s1".into()),
+                flavor,
+            );
+            assert!(!on.contains(&"--settings".to_owned()), "{flavor:?}: {on:?}");
+        }
     }
 
     #[test]
