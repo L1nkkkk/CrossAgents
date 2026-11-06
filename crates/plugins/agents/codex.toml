@@ -6,6 +6,13 @@
 name = "codex"
 driver = "codex-native"
 command = ["npx", "-y", "@agentclientprotocol/codex-acp"]
+# Older than this, `codex app-server` does not have the methods the driver calls: the agent
+# is not registered and the GUI says the version is too low (docs/research/multica.md §2.9).
+min_version = "0.100.0"
+# The upstream series the driver was checked against (docs/DESIGN.md §9.4): the protocol in
+# `crates/drivers/src/codex_native/wire.rs` on 0.158.0, `turn/steer` on 0.166.0-alpha.5.1.
+# Outside them the CLI still runs, marked unverified.
+verified = ["0.158", "0.166"]
 
 [models]
 # No list of its own: Codex reads the models it offers from its own `models_cache.json`.

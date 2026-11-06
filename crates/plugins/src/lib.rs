@@ -26,6 +26,7 @@ pub mod codebuddy_account;
 pub mod codex_account;
 pub mod cursor_account;
 pub mod manifest;
+pub mod version;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -76,6 +77,15 @@ pub struct PluginConfig {
     /// What installing it takes; shown, never run.
     #[serde(default)]
     pub install: Install,
+    /// The oldest CLI this description accepts (docs/research/multica.md §2.9). A machine
+    /// whose CLI is older does not register the agent: no models, and the GUI says the
+    /// version is too low.
+    #[serde(default)]
+    pub min_version: Option<String>,
+    /// The upstream version series the driver was checked against (`"2.1"`), lowest first
+    /// (docs/DESIGN.md §9.4). A CLI outside them still runs, and is marked unverified.
+    #[serde(default)]
+    pub verified: Vec<String>,
     /// Overrides the driver's `move_cwd`: `false` for a CLI that resumes a session only in
     /// the directory it ran in (docs/tasks/S1.md §3.1).
     #[serde(default)]
@@ -89,6 +99,30 @@ pub struct PluginConfig {
 impl PluginConfig {
     pub fn default_driver(&self) -> DriverKind {
         self.driver.unwrap_or_default()
+    }
+
+    /// Whether the CLI that reported `version` is older than `min_version`. `false` when
+    /// either is missing: a CLI that has not answered its version is not called too old.
+    pub fn too_old(&self, version: Option<&str>) -> bool {
+        let (Some(minimum), Some(version)) = (self.min_version.as_deref(), version) else {
+            return false;
+        };
+        version::is_at_least(version, minimum) == Some(false)
+    }
+
+    /// Whether the CLI that reported `version` is outside every `verified` series: it still
+    /// runs, the GUI just says the driver has not been checked against it. `false` when the
+    /// description names no series, or the version is unknown.
+    pub fn unverified(&self, version: Option<&str>) -> bool {
+        if self.verified.is_empty() {
+            return false;
+        }
+        let Some(version) = version.and_then(version::Version::parse) else {
+            return false;
+        };
+        !self.verified.iter().any(|series| {
+            version::Version::parse(series).is_some_and(|series| version.in_series(&series))
+        })
     }
 
     /// The CLI this entry launches, found once it is first asked for.
@@ -131,6 +165,12 @@ impl PluginConfig {
         }
         if over.move_cwd.is_some() {
             self.move_cwd = over.move_cwd;
+        }
+        if over.min_version.is_some() {
+            self.min_version = over.min_version.clone();
+        }
+        if !over.verified.is_empty() {
+            self.verified = over.verified.clone();
         }
         self
     }
@@ -393,6 +433,44 @@ mod tests {
              then sign in once with `codebuddy` and `/login` (or set CODEBUDDY_API_KEY). \
              The copy inside WorkBuddy cannot run outside the WorkBuddy app."
         );
+    }
+
+    #[test]
+    fn the_built_in_descriptions_say_which_versions_they_run() {
+        let claude = builtin::config("claude").unwrap();
+        assert_eq!(claude.min_version.as_deref(), Some("2.0.0"));
+        assert_eq!(claude.verified, ["2.1"]);
+        assert!(claude.too_old(Some("1.9.0")));
+        assert!(!claude.too_old(Some("2.1.317 (Claude Code)")));
+        assert!(!claude.unverified(Some("2.1.317 (Claude Code)")));
+        assert!(claude.unverified(Some("2.2.1 (Claude Code)")));
+
+        let codex = builtin::config("codex").unwrap();
+        assert_eq!(codex.min_version.as_deref(), Some("0.100.0"));
+        assert_eq!(codex.verified, ["0.158", "0.166"]);
+        assert!(codex.too_old(Some("0.99.0")));
+
+        // CodeBuddy names a verified series but no floor: no version was ever refused.
+        let codebuddy = builtin::config("codebuddy").unwrap();
+        assert!(codebuddy.min_version.is_none());
+        assert_eq!(codebuddy.verified, ["2.173"]);
+        assert!(!codebuddy.too_old(Some("1.0.0")));
+        assert!(codebuddy.unverified(Some("2.174.0")));
+
+        assert_eq!(builtin::config("with").unwrap().verified, ["0.31"]);
+    }
+
+    #[test]
+    fn config_can_replace_the_version_range() {
+        let over: PluginConfig =
+            toml::from_str("min_version = \"3.0.0\"\nverified = [\"3.0\"]").unwrap();
+        let registry =
+            PluginRegistry::with_config(&BTreeMap::from([("claude".to_owned(), over)]));
+        let claude = registry.config("claude").unwrap();
+        assert_eq!(claude.min_version.as_deref(), Some("3.0.0"));
+        assert_eq!(claude.verified, ["3.0"]);
+        // Launch commands and models are the built-in's, untouched.
+        assert_eq!(claude.models, ["opus", "sonnet", "haiku"]);
     }
 
     #[test]

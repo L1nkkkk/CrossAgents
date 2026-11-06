@@ -10,7 +10,7 @@ use crossagents_core::{
     OutputStream, PermissionDecision, PermissionRequest, RateLimits, RateWindow, SessionEventKind,
     StopReason, TokenUsage, ToolDetail, ToolStatus,
 };
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 /// Tool results longer than this are cut (the end is kept for output, the start for results).
 const RESULT_LIMIT: usize = 16 * 1024;
@@ -28,6 +28,9 @@ pub struct Launch {
     /// `--permission-mode` (e.g. `acceptEdits`), from the agent's `config.permission_mode`.
     pub permission_mode: Option<String>,
     pub mcp_servers: Vec<McpServerSpec>,
+    /// The session's environment (`CLAUDE_CONFIG_DIR` and the like), for finding the CLI's
+    /// own MCP configuration (see [`crate::mcp_config`]).
+    pub env: Vec<(String, String)>,
     /// Appended to Claude Code's system prompt.
     pub instructions: Option<String>,
     /// Which settings files Claude Code reads. Not the user's own by default: their
@@ -156,22 +159,25 @@ pub fn args(launch: &Launch, start: &Start, flavor: Flavor) -> Vec<String> {
         "stream-json",
         "--verbose",
         "--include-partial-messages",
-        "--strict-mcp-config",
         "--setting-sources",
     ]
     .map(String::from)
     .to_vec();
     args.push(launch.setting_sources.clone());
+    // Only `--mcp-config` counts, so nothing from the CLI's own settings arrives with the
+    // session. Claude Code needs that; CodeBuddy reads its own `mcp.json` and loading it
+    // twice would start those servers twice (docs/research/multica.md §2.10).
     if flavor == Flavor::Claude {
+        args.push("--strict-mcp-config".into());
         args.extend(["--permission-prompt-tool".into(), "stdio".into()]);
         // A steered message is echoed with `isReplay` and the uuid we gave it when the CLI
         // reads it (verified against claude 2.1.317): that is how the driver tells the
         // model has seen it.
         args.push("--replay-user-messages".into());
     }
-    if !launch.mcp_servers.is_empty() {
+    if let Some(config) = crate::mcp_config::config_arg(flavor, &launch.env, &launch.mcp_servers) {
         args.push("--mcp-config".into());
-        args.push(mcp_config(&launch.mcp_servers).to_string());
+        args.push(config);
     }
     if launch.bypass {
         args.push("--dangerously-skip-permissions".into());
@@ -207,24 +213,6 @@ pub fn args(launch: &Launch, start: &Start, flavor: Flavor) -> Vec<String> {
         }
     }
     args
-}
-
-fn mcp_config(servers: &[McpServerSpec]) -> Value {
-    let servers: Map<String, Value> = servers
-        .iter()
-        .map(|s| {
-            (
-                s.name.clone(),
-                json!({
-                    "type": "stdio",
-                    "command": s.command.display().to_string(),
-                    "args": s.args,
-                    "env": s.env,
-                }),
-            )
-        })
-        .collect();
-    json!({ "mcpServers": servers })
 }
 
 /// A user message; `uuid` names it for rewinding and forking.
@@ -1284,6 +1272,9 @@ mod tests {
                 args: vec!["mcp".into()],
                 env: BTreeMap::from([("TOKEN".into(), "t".into())]),
             }],
+            // A config directory with nothing in it: the test does not read the machine's
+            // own MCP configuration.
+            env: vec![("CLAUDE_CONFIG_DIR".into(), "/nonexistent/claude".into())],
             instructions: Some("You are w1.".into()),
             setting_sources: DEFAULT_SETTING_SOURCES.into(),
         };
@@ -1303,17 +1294,18 @@ mod tests {
         let mcp: Value = serde_json::from_str(&after("--mcp-config")).unwrap();
         assert_eq!(mcp["mcpServers"]["crossagents"]["env"]["TOKEN"], "t");
 
-        let resumed = args(
-            &Launch::default(),
-            &Start::Resume("s1".into()),
-            Flavor::Claude,
-        );
+        // No servers of the hub's and none in the config directory the test names.
+        let bare = Launch {
+            env: vec![("CLAUDE_CONFIG_DIR".into(), "/nonexistent/claude".into())],
+            ..Launch::default()
+        };
+        let resumed = args(&bare, &Start::Resume("s1".into()), Flavor::Claude);
         assert!(resumed.windows(2).any(|w| w == ["--resume", "s1"]));
         assert!(!resumed.contains(&"--mcp-config".to_owned()));
         assert!(!resumed.contains(&"--dangerously-skip-permissions".to_owned()));
 
         let fork = args(
-            &Launch::default(),
+            &bare,
             &Start::Fork {
                 from: "s1".into(),
                 id: "s2".into(),
@@ -1343,12 +1335,14 @@ mod tests {
             "--input-format",
             "--output-format",
             "--include-partial-messages",
-            "--strict-mcp-config",
             "--setting-sources",
             "--session-id",
         ] {
             assert!(args.contains(&flag.to_owned()), "{flag}");
         }
+        // CodeBuddy loads its own `mcp.json`; strict mode would hide it, and passing it in
+        // `--mcp-config` as well would start those servers twice.
+        assert!(!args.contains(&"--strict-mcp-config".to_owned()));
     }
 
     /// The tool call, then its result with `content`; the detail that comes of them.
