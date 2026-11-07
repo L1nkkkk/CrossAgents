@@ -1,8 +1,11 @@
 //! Cursor accounts (docs/research/cursor-cli.md). The CLI keeps one login per user of the
 //! machine: `agent status --format json` reads it and says who it is (`userInfo.email`).
-//! What the CLI does not say is the quota: Cursor bills a plan on its web pages, and the
-//! CLI has no usage command, so an account here shows its login, its email and its models,
-//! and the quota stays empty ("暂无额度数据").
+//! The quota comes from the same login: the CLI's login file (`auth.json`) carries an
+//! access token, and Cursor's private dashboard endpoint
+//! (`aiserver.v1.DashboardService/GetCurrentPeriodUsage`) answers with how much of the
+//! billing period is used. That endpoint is undocumented, so every field in its answer is
+//! optional here: a field that is missing or renamed leaves that part of the quota empty
+//! rather than failing the account page.
 //!
 //! Login is `agent login` with `NO_OPEN_BROWSER=1`: it prints the page on stdout (measured
 //! through a pipe, so the hub can read it) and then polls the Cursor API until the page is
@@ -24,10 +27,10 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use crossagents_core::{
-    Account, AccountProvider, AccountStatus, CoreError, DataSource, LoginCommand, ModelInfo,
-    SessionUsage, mask_email,
+    Account, AccountProvider, AccountStatus, CoreError, DataSource, LimitGroup, LoginCommand,
+    ModelInfo, RateWindow, SessionUsage, mask_email,
 };
 use crossagents_drivers::locate::os_name;
 use crossagents_drivers::process::{hide_console, resolve_program, system_proxy_env};
@@ -37,6 +40,13 @@ use serde_json::Value;
 const LIVE_TTL: Duration = Duration::from_secs(60);
 /// A status or model list that takes longer is treated as failed: both answer offline.
 const CLI_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Cursor's private dashboard read: the plan's usage for the current billing period. It is
+/// not part of the CLI's documented surface, so the caller treats every answer as optional.
+const USAGE_URL: &str = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage";
+const USER_AGENT: &str = concat!("CrossAgents/", env!("CARGO_PKG_VERSION"));
+/// A billing cycle longer than a year is not taken for a window length.
+const MAX_CYCLE_SECONDS: u64 = 366 * 24 * 60 * 60;
 
 const NOT_INSTALLED: &str =
     "the Cursor CLI is not installed (irm 'https://cursor.com/install?win32=true' | iex)";
@@ -142,6 +152,13 @@ impl CursorAccounts {
             return (status, Vec::new());
         };
         read_status_json(&mut status, &value);
+        if status.logged_in {
+            apply_usage_result(&mut status, self.current_period_usage(account).await);
+            // The plan is only a label here; a CLI that cannot say it leaves it empty.
+            if status.plan.is_none() {
+                status.plan = self.read_plan(account).await;
+            }
+        }
         let models = if status.logged_in {
             self.read_models(account).await
         } else {
@@ -164,6 +181,85 @@ impl CursorAccounts {
             }
             Err(_) => fallback_models(),
         }
+    }
+
+    /// The CLI's login file for this account, under the same variables that move the login
+    /// (see [`isolated_env`]); for the machine-wide login, the process's own values.
+    fn auth_file(&self, account: &Account) -> Option<PathBuf> {
+        let env: HashMap<String, String> = self.env_for(account).into_iter().collect();
+        auth_file_in(os_name(), |key| {
+            env.get(key)
+                .filter(|value| !value.is_empty())
+                .cloned()
+                .or_else(|| std::env::var(key).ok())
+        })
+    }
+
+    /// The plan's usage for the current billing period, from Cursor's dashboard endpoint.
+    /// The login file's access token goes into this request's header and nowhere else;
+    /// errors name the request, never the token.
+    async fn current_period_usage(&self, account: &Account) -> Result<Value, String> {
+        let path = self
+            .auth_file(account)
+            .ok_or("no Cursor login file (log in first)")?;
+        let text = tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => "no Cursor login file (log in first)".to_owned(),
+                _ => format!("cannot read the Cursor login file: {e}"),
+            })?;
+        let login: Value = serde_json::from_str(&text)
+            .map_err(|_| "the Cursor login file is not JSON".to_owned())?;
+        let token = access_token(&login)
+            .ok_or("the Cursor login file has no access token")?
+            .to_owned();
+        let http = reqwest::Client::builder()
+            .timeout(CLI_TIMEOUT)
+            .user_agent(USER_AGENT)
+            .build()
+            .map_err(|e| e.without_url().to_string())?;
+        let answer = tokio::time::timeout(CLI_TIMEOUT, async {
+            let response = http
+                .post(USAGE_URL)
+                .header("Content-Type", "application/json")
+                .header("Connect-Protocol-Version", "1")
+                .bearer_auth(&token)
+                .json(&serde_json::json!({}))
+                .send()
+                .await
+                .map_err(|e| e.without_url().to_string())?;
+            let code = response.status();
+            if code == reqwest::StatusCode::UNAUTHORIZED {
+                return Err("the Cursor login has expired; log in again".to_owned());
+            }
+            if !code.is_success() {
+                return Err(format!("the usage request failed: HTTP {code}"));
+            }
+            response
+                .json::<Value>()
+                .await
+                .map_err(|e| e.without_url().to_string())
+        })
+        .await
+        .map_err(|_| {
+            format!(
+                "the usage request did not answer in {} s",
+                CLI_TIMEOUT.as_secs()
+            )
+        })??;
+        Ok(answer)
+    }
+
+    /// `agent about`'s `subscriptionTier`, when the CLI knows the command. A label only:
+    /// every failure leaves the plan empty rather than failing the account.
+    async fn read_plan(&self, account: &Account) -> Option<String> {
+        let text = self
+            .output(account, &["about", "--format", "json"])
+            .await
+            .ok()?;
+        let value: Value = serde_json::from_str(&text).ok()?;
+        let tier = value.get("subscriptionTier")?.as_str()?.trim();
+        (!tier.is_empty()).then(|| tier.to_owned())
     }
 }
 
@@ -210,6 +306,134 @@ fn read_status_json(status: &mut AccountStatus, value: &Value) {
     } else {
         Some("not logged in".to_owned())
     };
+}
+
+/// The CLI's login file on `os`, with `var` answering the variables that place it:
+/// `%APPDATA%\Cursor\auth.json`, `$XDG_CONFIG_HOME/cursor/auth.json` (or
+/// `~/.config/cursor/auth.json`), and `~/.cursor/auth.json`. `var` is the isolated
+/// account's overrides when it has them, the process's own values otherwise.
+fn auth_file_in(os: &str, var: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    let (base, dir) = match os {
+        "windows" => (PathBuf::from(var("APPDATA")?), "Cursor"),
+        "macos" => (PathBuf::from(var("HOME")?), ".cursor"),
+        _ => {
+            let base = match var("XDG_CONFIG_HOME") {
+                Some(dir) => PathBuf::from(dir),
+                None => PathBuf::from(var("HOME")?).join(".config"),
+            };
+            (base, "cursor")
+        }
+    };
+    Some(base.join(dir).join("auth.json"))
+}
+
+/// The token the CLI keeps in its login file. Only the access token is read: nothing here
+/// refreshes or writes credentials.
+fn access_token(login: &Value) -> Option<&str> {
+    login
+        .get("accessToken")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+}
+
+/// A quota read's outcome: applied when the endpoint answered, a short note when it did
+/// not. Login state, identity and provenance are never touched here.
+fn apply_usage_result(status: &mut AccountStatus, usage: Result<Value, String>) {
+    match usage {
+        Ok(value) => apply_period_usage(status, &value),
+        Err(reason) => {
+            let note = format!("cannot read the quota: {reason}");
+            status.note = Some(match status.note.take() {
+                Some(existing) if !existing.is_empty() => format!("{existing}; {note}"),
+                _ => note,
+            });
+        }
+    }
+}
+
+/// The current billing period's usage: `planUsage.totalPercentUsed` is the main window,
+/// `autoPercentUsed` and `apiPercentUsed` are separate limits. Every field is optional and a
+/// missing or renamed one only leaves its part empty. Percentages are taken as reported:
+/// nothing here derives one from another, and `totalSpend` (cents) is not needed for them.
+fn apply_period_usage(status: &mut AccountStatus, value: &Value) {
+    let Some(plan) = value.get("planUsage").filter(|plan| plan.is_object()) else {
+        return;
+    };
+    let total = percent(plan.get("totalPercentUsed"));
+    let auto = percent(plan.get("autoPercentUsed"));
+    let api = percent(plan.get("apiPercentUsed"));
+    if total.is_none() && auto.is_none() && api.is_none() {
+        return;
+    }
+    // Milliseconds since the epoch, as a number or a numeric string.
+    let start = millis(value.get("billingCycleStart"));
+    let end = millis(value.get("billingCycleEnd"));
+    let window_seconds = start
+        .zip(end)
+        .and_then(|(start, end)| end.checked_sub(start))
+        .filter(|ms| *ms > 0)
+        .and_then(|ms| u64::try_from(ms / 1000).ok())
+        .filter(|seconds| *seconds > 0 && *seconds <= MAX_CYCLE_SECONDS);
+    let resets_at = end.and_then(DateTime::<Utc>::from_timestamp_millis);
+    let window = |name: &str, used: f64| RateWindow {
+        name: name.to_owned(),
+        used_percent: used.clamp(0.0, 100.0),
+        window_seconds,
+        resets_at,
+        remaining: None,
+        total: None,
+    };
+
+    let mut groups = Vec::new();
+    if let Some(total) = total {
+        let window = window("primary", total);
+        status.rate_limits = vec![window.clone()];
+        groups.push(LimitGroup {
+            id: "all".into(),
+            name: None,
+            model: None,
+            windows: vec![window],
+            reached: total >= 100.0,
+        });
+    }
+    for (id, name, used) in [("auto", "Auto", auto), ("api", "API", api)] {
+        if let Some(used) = used {
+            groups.push(LimitGroup {
+                id: id.into(),
+                name: Some(name.into()),
+                model: None,
+                windows: vec![window("primary", used)],
+                reached: used >= 100.0,
+            });
+        }
+    }
+    status.limits = groups;
+    status.limit_reached = [total, auto, api]
+        .into_iter()
+        .flatten()
+        .any(|used| used >= 100.0);
+}
+
+/// A percentage as a number or a numeric string; anything else (absent, blank, not a
+/// number) is skipped.
+fn percent(value: Option<&Value>) -> Option<f64> {
+    let used = match value? {
+        Value::String(text) => text.trim().parse::<f64>().ok()?,
+        value => value.as_f64()?,
+    };
+    (used.is_finite() && used >= 0.0).then_some(used)
+}
+
+/// An int64 as a number or a numeric string, for the epoch milliseconds the endpoint sends.
+fn millis(value: Option<&Value>) -> Option<i64> {
+    match value? {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_f64().map(|f| f as i64)),
+        Value::String(text) => text.trim().parse::<i64>().ok(),
+        _ => None,
+    }
 }
 
 /// The models in `agent models`' list:
@@ -657,5 +881,205 @@ mod tests {
         let models = provider.models(&account(home.path())).await;
         assert_eq!(models.len(), 3);
         assert_eq!(models[0].id, "auto");
+    }
+
+    /// The endpoint sends epoch milliseconds and percentages as either JSON numbers or
+    /// numeric strings, and the cycle dates are only used when they make a sane window.
+    #[test]
+    fn the_period_usage_accepts_strings_and_numbers() {
+        let value = json!({
+            "billingCycleStart": "1730419200000",
+            "billingCycleEnd": 1_733_011_200_000i64,
+            "planUsage": {
+                "totalPercentUsed": "42.5",
+                "autoPercentUsed": 10,
+                "apiPercentUsed": "7.25",
+                "totalSpend": 1234
+            }
+        });
+        let mut status = blank_status();
+        apply_period_usage(&mut status, &value);
+
+        assert_eq!(status.rate_limits.len(), 1);
+        let main = &status.rate_limits[0];
+        assert_eq!(main.name, "primary");
+        assert_eq!(main.used_percent, 42.5);
+        assert_eq!(main.window_seconds, Some(30 * 24 * 60 * 60));
+        assert_eq!(
+            main.resets_at.map(|at| at.timestamp_millis()),
+            Some(1_733_011_200_000)
+        );
+        assert!(main.remaining.is_none() && main.total.is_none());
+        assert!(!status.limit_reached);
+
+        let ids: Vec<&str> = status.limits.iter().map(|g| g.id.as_str()).collect();
+        assert_eq!(ids, ["all", "auto", "api"]);
+        assert_eq!(status.limits[1].name.as_deref(), Some("Auto"));
+        assert_eq!(status.limits[2].name.as_deref(), Some("API"));
+        assert_eq!(status.limits[1].windows[0].used_percent, 10.0);
+        assert_eq!(status.limits[2].windows[0].used_percent, 7.25);
+        assert!(status.limits.iter().all(|g| !g.reached));
+    }
+
+    /// A field that is missing, renamed, or not a number is skipped; nothing is invented and
+    /// no percentage is hard-coded.
+    #[test]
+    fn missing_and_renamed_fields_leave_that_part_empty() {
+        for value in [
+            json!({}),
+            json!({ "planUsage": {} }),
+            json!({ "plan_usage": { "totalPercentUsed": 10 } }),
+            json!({ "planUsage": "10" }),
+            json!({ "planUsage": { "total_percent_used": 10 } }),
+            json!({ "planUsage": { "totalPercentUsed": "soon", "autoPercentUsed": "  " } }),
+            json!({ "planUsage": { "totalPercentUsed": -1 } }),
+        ] {
+            let mut status = blank_status();
+            apply_period_usage(&mut status, &value);
+            assert!(status.rate_limits.is_empty(), "{value}");
+            assert!(status.limits.is_empty(), "{value}");
+            assert!(!status.limit_reached, "{value}");
+        }
+
+        // One field present is enough for its own part only.
+        let mut status = blank_status();
+        apply_period_usage(
+            &mut status,
+            &json!({ "planUsage": { "apiPercentUsed": "12" } }),
+        );
+        assert!(status.rate_limits.is_empty());
+        let ids: Vec<&str> = status.limits.iter().map(|g| g.id.as_str()).collect();
+        assert_eq!(ids, ["api"]);
+        assert_eq!(status.limits[0].windows[0].used_percent, 12.0);
+    }
+
+    #[test]
+    fn a_bad_cycle_only_costs_the_window_length() {
+        for cycle in [
+            json!({ "billingCycleStart": "yesterday", "billingCycleEnd": "1733011200000" }),
+            json!({ "billingCycleStart": "1733011200000", "billingCycleEnd": "1730419200000" }),
+            json!({ "billingCycleStart": "1730419200000" }),
+        ] {
+            let mut value = cycle;
+            value["planUsage"] = json!({ "totalPercentUsed": 5 });
+            let mut status = blank_status();
+            apply_period_usage(&mut status, &value);
+            assert_eq!(status.rate_limits[0].used_percent, 5.0);
+            assert!(status.rate_limits[0].window_seconds.is_none(), "{value}");
+        }
+    }
+
+    #[test]
+    fn any_percentage_at_a_hundred_reaches_the_limit() {
+        let mut status = blank_status();
+        apply_period_usage(
+            &mut status,
+            &json!({ "planUsage": { "totalPercentUsed": 99, "autoPercentUsed": "100" } }),
+        );
+        assert!(status.limit_reached);
+        assert!(!status.limits[0].reached);
+        assert!(status.limits[1].reached);
+
+        // Over the cap the bar is full, and the limit still counts as reached.
+        let mut over = blank_status();
+        apply_period_usage(
+            &mut over,
+            &json!({ "planUsage": { "autoPercentUsed": 140 } }),
+        );
+        assert_eq!(over.limits[0].windows[0].used_percent, 100.0);
+        assert!(over.limits[0].reached && over.limit_reached);
+    }
+
+    /// A failed read is a note, never a lost login: the account page keeps showing who is
+    /// signed in with no quota rather than failing.
+    #[test]
+    fn a_failed_quota_read_keeps_the_login_and_the_windows_empty() {
+        let mut status = blank_status();
+        read_status_json(
+            &mut status,
+            &json!({ "isAuthenticated": true, "userInfo": { "email": "zhang@gmail.com" } }),
+        );
+        let before = status.clone();
+        apply_usage_result(
+            &mut status,
+            Err("the Cursor login has expired; log in again".into()),
+        );
+        assert!(status.logged_in);
+        assert_eq!(status.auth_mode.as_deref(), Some("cursor"));
+        assert_eq!(status.email.as_deref(), Some("z***@gmail.com"));
+        assert_eq!(status.source, Some(DataSource::Live));
+        assert_eq!(status.as_of, before.as_of);
+        assert!(status.rate_limits.is_empty() && status.limits.is_empty());
+        assert!(!status.limit_reached);
+        let note = status.note.unwrap();
+        assert!(note.contains("cannot read the quota"), "{note}");
+        assert!(note.contains("expired"), "{note}");
+    }
+
+    /// The login file sits where the CLI keeps it, following the same isolated variable as
+    /// the CLI commands — never the machine's own directory.
+    #[test]
+    fn the_login_file_follows_the_isolated_variable_on_every_platform() {
+        let home = Path::new("/accounts/cursor-work");
+        let profile = home.join("profile");
+        let machine = |os: &str, key: &str| match (os, key) {
+            ("windows", "APPDATA") => Some("/home/user/AppData/Roaming".to_owned()),
+            (_, "HOME") => Some("/home/user".to_owned()),
+            ("linux", "XDG_CONFIG_HOME") => Some("/home/user/.config".to_owned()),
+            _ => None,
+        };
+        for os in ["windows", "macos", "linux"] {
+            let env: BTreeMap<String, String> = isolated_env(home, os).into_iter().collect();
+            let file = auth_file_in(os, |key| env.get(key).cloned().or_else(|| machine(os, key)))
+                .expect("a login file");
+            let expected = match os {
+                "windows" => profile
+                    .join("AppData")
+                    .join("Roaming")
+                    .join("Cursor/auth.json"),
+                "macos" => profile.join(".cursor").join("auth.json"),
+                _ => profile.join(".config").join("cursor").join("auth.json"),
+            };
+            assert_eq!(file, expected, "{os}");
+        }
+
+        // The machine's own login, with no overrides.
+        let at = |os: &str, key: &str| machine(os, key);
+        assert_eq!(
+            auth_file_in("windows", |key| at("windows", key)).unwrap(),
+            Path::new("/home/user/AppData/Roaming/Cursor/auth.json")
+        );
+        assert_eq!(
+            auth_file_in("macos", |key| at("macos", key)).unwrap(),
+            Path::new("/home/user/.cursor/auth.json")
+        );
+        assert_eq!(
+            auth_file_in("linux", |key| at("linux", key)).unwrap(),
+            Path::new("/home/user/.config/cursor/auth.json")
+        );
+    }
+
+    #[test]
+    fn only_a_non_empty_access_token_is_read() {
+        assert_eq!(access_token(&json!({ "accessToken": "x" })), Some("x"));
+        for login in [
+            json!({}),
+            json!({ "accessToken": "" }),
+            json!({ "accessToken": "  " }),
+            json!({ "refreshToken": "x" }),
+        ] {
+            assert_eq!(access_token(&login), None, "{login}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_missing_login_file_is_an_error_and_not_a_request() {
+        let home = tempfile::tempdir().unwrap();
+        let provider = CursorAccounts::new(None);
+        let err = provider
+            .current_period_usage(&account(home.path()))
+            .await
+            .unwrap_err();
+        assert!(err.contains("log in"), "{err}");
     }
 }
