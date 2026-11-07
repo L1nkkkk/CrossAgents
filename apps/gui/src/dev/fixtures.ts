@@ -6,6 +6,7 @@ import type { Agent } from "@bindings/Agent";
 import type { AgentProfile } from "@bindings/AgentProfile";
 import type { AgentStatus } from "@bindings/AgentStatus";
 import type { Capabilities } from "@bindings/Capabilities";
+import type { Device } from "@bindings/Device";
 import type { DriverKind } from "@bindings/DriverKind";
 import type { MessageSource } from "@bindings/MessageSource";
 import type { PlannedTask } from "@bindings/PlannedTask";
@@ -131,6 +132,25 @@ export function team() {
 /** A task's worker: a fresh clone of a teammate, as the orchestrator makes them. */
 export function clone(of: Agent, suffix: string, status: AgentStatus, cwd: string): Agent {
   return { ...agent({ name: `${of.name}-${suffix}`, plugin: of.plugin as AgentInit["plugin"], model: of.model ?? undefined, role: of.role, status, cwd, createdMinutesAgo: 40 }), profile: { ...of.profile } };
+}
+
+// ---- Devices ------------------------------------------------------------------------------
+
+/** The hub's issued devices (`GET /v1/devices`): a client, a node, and one already revoked. */
+export function devices(): Device[] {
+  return [
+    { id: uid(), name: "Windows 工作站", kind: "client", level: "admin", created_at: ago(60 * 24 * 12), last_seen_at: ago(2) },
+    { id: uid(), name: "build-node", kind: "node", level: "read", created_at: ago(60 * 24 * 5), last_seen_at: ago(60 * 3) },
+    {
+      id: uid(),
+      name: "旧笔记本",
+      kind: "client",
+      level: "write",
+      created_at: ago(60 * 24 * 30),
+      last_seen_at: ago(60 * 24 * 9),
+      revoked_at: ago(60 * 24 * 8),
+    },
+  ];
 }
 
 // ---- Runs and tasks -----------------------------------------------------------------------

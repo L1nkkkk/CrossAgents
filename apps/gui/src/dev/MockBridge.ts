@@ -16,6 +16,7 @@ import type { Agent } from "@bindings/Agent";
 import type { AgentSettingsRequest } from "@bindings/AgentSettingsRequest";
 import type { ApproveRunRequest } from "@bindings/ApproveRunRequest";
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
+import type { Device } from "@bindings/Device";
 import type { ExtensionDiffResponse } from "@bindings/ExtensionDiffResponse";
 import type { ExtensionInfo } from "@bindings/ExtensionInfo";
 import type { ExtensionLogsResponse } from "@bindings/ExtensionLogsResponse";
@@ -100,6 +101,10 @@ export type MockState = {
   /** Reminders, watches and verifying tasks (`GET /v1/background`); absent: none. */
   background?: BackgroundResponse;
   quota: QuotaResponse;
+  /** Devices the hub issued (`GET /v1/devices`): revoked ones stay in the list, as the hub keeps them. */
+  devices?: Device[];
+  /** Why revoking answers 403: a credential below admin (docs/API-AUTH.md §4), in access.rs's words. */
+  revokeForbidden?: string;
   usage: Partial<Record<UsageGroup, UsageResponse>>;
   usageSeriesVariant?: "normal" | "empty" | "issues" | "session";
   accountUsage?: AccountUsageResponse;
@@ -663,6 +668,10 @@ export class MockBridge implements CrossAgentsBridge {
     // so a scenario can show the greyed entry and the hub's own words.
     const refused = s.forbidden?.[featureOf(p) ?? ""];
     if (refused) return json(403, { error: { code: "forbidden", message: refused } });
+    // Revoking needs admin (docs/API-AUTH.md §4): the same 403 the hub answers, so a scenario can
+    // show the greyed button and the level it names.
+    if (method === "DELETE" && /^\/v1\/devices\/[^/]+$/.test(p) && s.revokeForbidden)
+      return json(403, { error: { code: "forbidden", message: s.revokeForbidden } });
 
     const integration = /^\/v1\/runs\/([^/]+)\/integration$/.exec(p);
     if (integration && method === "GET") return json(200, { outcome: "ok", snapshot: "base", integration: "worker", applied: this.appliedRuns.has(integration[1]) ? "worker" : null });
@@ -910,6 +919,7 @@ export class MockBridge implements CrossAgentsBridge {
       if (p === "/v1/notes") return json(200, { notes: s.notes });
       if (p === "/v1/background") return json(200, s.background ?? { reminders: [], watches: [], verifying: [] });
       if (p === "/v1/quota") return json(200, s.quota);
+      if (p === "/v1/devices") return json(200, { devices: s.devices ?? [] });
       if (p === "/v1/accounts/import") return json(200, { candidates: importCandidates() });
       if (p === "/v1/usage/series") return json(200, usageSeriesMock(url.searchParams.get("range") ?? "7d", url.searchParams.get("group") ?? "total", url.searchParams.get("source") ?? "all", s.usageSeriesVariant ?? "normal"));
       if (p === "/v1/expertise" || p === "/v1/expertise/card" || p === "/v1/expertise/maintenance" || p === "/v1/expertise/export") {
@@ -1277,6 +1287,14 @@ export class MockBridge implements CrossAgentsBridge {
         return json(204);
       }
       if ((m = p.match(/^\/v1\/runs\/([^/]+)$/))) return this.deleteRun(m[1], url);
+      if ((m = p.match(/^\/v1\/devices\/([^/]+)$/))) {
+        const id = decodeURIComponent(m[1]);
+        const device = (s.devices ?? []).find((d) => d.id === id);
+        if (!device) return notFound("device");
+        // Idempotent: revoking a revoked device answers it unchanged (crates/hub/src/api.rs).
+        if (!device.revoked_at) device.revoked_at = new Date().toISOString();
+        return json(200, device);
+      }
       if ((m = p.match(/^\/v1\/background\/reminders\/([^/]+)$/))) {
         const id = decodeURIComponent(m[1]);
         const bg = s.background;

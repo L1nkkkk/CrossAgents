@@ -25,6 +25,9 @@ test("a request belongs to the entry it came from", () => {
   assert.equal(featureOf("/v1/lessons/abc"), "lessons");
   assert.equal(featureOf("/v1/runs/abc/apply"), "apply");
   assert.equal(featureOf("/v1/runs/abc/integration"), "apply");
+  // 设备: the list and one device's revoke.
+  assert.equal(featureOf("/v1/devices"), "devices");
+  assert.equal(featureOf("/v1/devices/0193-abc"), "devices");
   // Everything else belongs to no feature and is never gated.
   assert.equal(featureOf("/v1/info"), undefined);
   assert.equal(featureOf("/v1/runs/abc"), undefined);
@@ -52,13 +55,14 @@ test("a 0.2.6 hub without a list still has the Git page and 排障记录", () =>
   assert.deepEqual(offeredOf(state), ["git", "lessons"]);
   assert.deepEqual(supportOf(state, "git"), { known: true, show: true, disabled: false });
   assert.deepEqual(supportOf(state, "lessons"), { known: true, show: true, disabled: false });
-  // 工作组 and 应用到原目录 came later and are never inferred.
+  // 工作组, 应用到原目录 and 设备 came later and are never inferred.
   assert.deepEqual(supportOf(state, "work"), { known: true, show: false, disabled: false });
   assert.deepEqual(supportOf(state, "apply"), { known: true, show: false, disabled: false });
-  assert.deepEqual(hiddenByHub(state), ["work", "apply"]);
+  assert.deepEqual(supportOf(state, "devices"), { known: true, show: false, disabled: false });
+  assert.deepEqual(hiddenByHub(state), ["work", "apply", "devices"]);
 });
 
-test("a 0.2.5 hub without a list has none of the four entries", () => {
+test("a 0.2.5 hub without a list has none of the entries", () => {
   const state: FeatureState = { known: true, version: "0.2.5", listed: null, refused: {} };
   for (const feature of FEATURES) {
     assert.deepEqual(supportOf(state, feature), { known: true, show: false, disabled: false });
@@ -89,7 +93,17 @@ test("a listed entry shows; one the hub left out stays hidden", () => {
   const state: FeatureState = { known: true, version: "0.2.6", listed: ["git", "apply"], refused: {} };
   assert.deepEqual(supportOf(state, "git"), { known: true, show: true, disabled: false });
   assert.deepEqual(supportOf(state, "work"), { known: true, show: false, disabled: false });
-  assert.deepEqual(hiddenByHub(state), ["lessons", "work"]);
+  assert.deepEqual(hiddenByHub(state), ["lessons", "work", "devices"]);
+});
+
+test("a hub that does not list 设备 has no devices page", () => {
+  // 设备 came after 0.2.6 and is never inferred from the version: without it in the list, the
+  // settings entry does not appear, whatever the version says.
+  const listed: FeatureState = { known: true, version: "0.3.0", listed: ["git", "lessons", "work", "apply"], refused: {} };
+  assert.deepEqual(supportOf(listed, "devices"), { known: true, show: false, disabled: false });
+  assert.deepEqual(hiddenByHub(listed), ["devices"]);
+  const inferred: FeatureState = { known: true, version: "0.9.0", listed: null, refused: {} };
+  assert.deepEqual(supportOf(inferred, "devices"), { known: true, show: false, disabled: false });
 });
 
 test("a 403 keeps the entry, greyed, quoting the hub", () => {
@@ -108,13 +122,13 @@ test("the version tooltip names what a hub leaves out, and says the version was 
   assert.match(missingText(recent), /按版本 0\.2\.6 推断/);
   assert.match(missingText(recent), /工作组、应用到原目录/);
   assert.doesNotMatch(missingText(recent), /Git 页/);
-  // 0.2.5: all four.
+  // 0.2.5: all five.
   const older: FeatureState = { known: true, version: "0.2.5", listed: null, refused: {} };
   assert.match(missingText(older), /按版本 0\.2\.5 推断/);
-  assert.match(missingText(older), /Git 页、排障记录、工作组、应用到原目录/);
+  assert.match(missingText(older), /Git 页、排障记录、工作组、应用到原目录、设备/);
   // A newer hub that has some of them says which, without calling itself old.
   const partial: FeatureState = { known: true, version: "0.3.0", listed: ["git"], refused: {} };
-  assert.match(missingText(partial), /排障记录、工作组、应用到原目录/);
+  assert.match(missingText(partial), /排障记录、工作组、应用到原目录、设备/);
   assert.doesNotMatch(missingText(partial), /旧版/);
   assert.equal(missingText({ known: true, version: "0.2.6", listed: [...FEATURES], refused: {} }), "");
   // Before the hub answers there is nothing to say.

@@ -117,6 +117,15 @@ test("the extension endpoints the page uses pass, and nothing wider", () => {
   assert.ok(!allowed("GET", "/v1/extensions/standup/enable"));
 });
 
+test("the device endpoints the page uses pass, and issuing stays refused", () => {
+  assert.ok(allowed("GET", "/v1/devices"));
+  assert.ok(allowed("DELETE", "/v1/devices/0193-abc"));
+  // This round the GUI never issues: adding a device is `crossagents device add` (docs/API-AUTH.md §4).
+  assert.ok(!allowed("POST", "/v1/devices"));
+  assert.ok(!allowed("DELETE", "/v1/devices"));
+  assert.ok(!allowed("PATCH", "/v1/devices/0193-abc"));
+});
+
 test("what the GUI never calls stays refused", () => {
   assert.ok(!allowed("POST", "/v1/shutdown"));
   assert.ok(!allowed("GET", "/v1/me"));

@@ -74,33 +74,47 @@
 > 取代原「远期」里的"每台机器一个 hub、GUI 同时连多个 hub"：已比较并放弃，理由见 MULTI-NODE §2。
 > 并行方式：不拆仓库，每阶段先在 `api-types` 定接口并生成 bindings，core 与 GUI 两条线各用一个 worktree 和分支，GUI 先对着 MockBridge 开发。
 
-已完成 1 条，见 [DONE.md](DONE.md) 同名一节。
+已完成 4 条，见 [DONE.md](DONE.md) 同名一节。
 
 开工前要定：
 
 - [ ] 中心放哪台：先用这台 Windows（A 阶段），B1 之后再考虑迁到云服务器当纯中心（只放个人项目，公司代码先确认合规）
-- 连通方式已定：局域网和公网都要，默认打洞（组网工具），非回环一律 TLS。见 [MULTI-NODE.md](MULTI-NODE.md) §14「连通方式」与 [DONE.md](DONE.md) 同名一节。
+- 连通方式已定：局域网和公网都要，默认打洞（组网工具）（[DONE.md](DONE.md) 同名一节，2026-11-07）。A 阶段远程 GUI 再走 SSH 隧道，hub 继续只听 `127.0.0.1`；非回环一律 TLS 留到下面的 A3（2026-11-08 定：人说按推荐来（run 84848059））。见 [MULTI-NODE.md](MULTI-NODE.md) §14「连通方式」、§10「安全」。
 - [ ] 两条线并行时完工监视器怎么提交：按分支提交，还是由人合并
 
-A1 账号与设备：
+A2 SSH 隧道：
 
-- [ ] core：`users`、`devices` 表（client / node 两类，token 只存哈希，可吊销），现有表加 `user_id`、`node_id`，老数据迁到默认用户和本机节点
-- [ ] core：`/v1/auth/login`、`crossagents user add`、设备列表与吊销接口
-- [ ] GUI：登录页、设备管理页
-- [ ] core：可信设备。新设备登录要在已有的可信设备上确认并通知；开终端、批准扩展、登录 CLI 账号、配对节点只给可信设备，并再验证一次密码（[MULTI-NODE.md](MULTI-NODE.md) §10、§12 A1）
-- [ ] core：`/v1/auth/login` 限速（[MULTI-NODE.md](MULTI-NODE.md) §10、§12 A1）
+- [ ] 前置：把设备 token 发到别的机器之前先重分级。write 级设备等于能在宿主上执行命令（Suki 2，2026-11-08）：`POST /v1/agents/{key}/settings` 能把 agent 的 permission 改成自动执行并打开 `allow_hooks`，`POST /v1/repos/init` 对请求里的路径跑 `git init` 并写第一次提交（[workspace.rs](../crates/orchestrator/src/workspace.rs) `GitWorkspaces::init`），两条都是 write（[access.rs](../crates/hub/src/access.rs) `required`），至少这两条升 admin。`POST /v1/runs` 会给主导送开场并拉起 CLI（[engine.rs](../crates/orchestrator/src/engine.rs) `create_run_for_work_from_checked`），等拉起进程的路由一并评估（待定）。见 [API-AUTH.md](API-AUTH.md) §4、[MULTI-NODE.md](MULTI-NODE.md) §10。
+- [ ] GUI：设置「连接」页填 `user@host`。经 SSH 在中心上跑 `crossagents device add <设备名> --json` 配对（`--json` 是全局参数，见 [DONE.md](DONE.md) §八），client token 存在 Electron 主进程；`ssh -N -L` 把中心的 `127.0.0.1` 转到本机，断线重连。连远程时关闭本机 hub 的启动与升级，切回本机时再检查一次（[MULTI-NODE.md](MULTI-NODE.md) §4.3「登录与配对」、§13.3 怎么判断是「本机自己的 hub」、§14「SSH 隧道」）
+- [ ] GUI 与查看器的字节一律经 hub，不再读本机磁盘：`serveExtension` 不再用 `extensionRealFile` 读本机 `<home>/extension-versions`；`shell:open-path` 不再拿本机绝对路径直接打开（[MULTI-NODE.md](MULTI-NODE.md) §12 A2、§16「扩展在多节点下」，[EXTENSIONS.md](EXTENSIONS.md) §9「查看器」）
+- [ ] 验收：Mac GUI 经 SSH 隧道连上 Windows hub，两端对话一致；隧道断开后重连，按 `Last-Event-ID` 续传
 
-A2 远程 GUI：
+A1 留下的（2026-11-08 评审）：
+
+- [ ] 设备缓存没有过期：每分钟回库重读一次，不经 `Devices::revoke` 的吊销最多陈旧一分钟，以后改级别也能生效（[devices.rs](../crates/hub/src/devices.rs) `Devices::authenticate`）
+- [ ] 签发、吊销发事件，日志记下被签发 / 吊销设备的名字和级别（[api.rs](../crates/hub/src/api.rs) `create_device`、`revoke_device`）
+- [ ] 认证把数据库读写移出全局锁（`Devices::authenticate`）
+- [ ] 吊销时结束该设备开的终端会话
+- [ ] 每个设备请求都以 info 记日志（[api.rs](../crates/hub/src/api.rs) `require_token`），远程 GUI 全走设备 token 后会太吵：只记 admin，或降到 debug
+- [ ] 小修：[access.rs](../crates/hub/src/access.rs) `refusal` 里 Extension 臂恒真的 `!grant.is_person()` 去掉；[lib.rs](../crates/store-sqlite/src/lib.rs) `touch_device` 的 RFC3339 字符串比较写明前提或改存整数，`insert_device` 按约束区分冲突消息；设备名 trim、拒控制字符（[api.rs](../crates/hub/src/api.rs) `create_device`）
+- [ ] GUI：403 按功能记，吊销被拒后「设备」入口整项置灰、点不进去，而列表 read 就能看，有 write 级远程 GUI 时要区分（[Settings.tsx](../apps/gui/src/views/Settings.tsx)、[features.ts](../apps/gui/src/lib/features.ts) `noteForbidden`）；空列表说明里的「要等 A2」到时改掉（[Devices.tsx](../apps/gui/src/views/Devices.tsx)）
+
+A3 开端口直连（以后）：
+
+> 不在 A2 的路径上。A2 走 SSH，hub 仍只听 `127.0.0.1`；这一组给不能 SSH 的客户端，以后做。见 [MULTI-NODE.md](MULTI-NODE.md) §12 A3、§10「安全」。
 
 - [ ] core：`[hub] listen` 可配置，默认仍为 `127.0.0.1`；远程访问走设备 token
-- [ ] GUI：Electron 主进程改读连接配置（本机 / 远程地址 + token），设置加「连接」页、断线提示，连不上中心时可切回本机。连远程时关闭本机 hub 的启动与升级，切回本机时再检查一次（MULTI-NODE §13.3）
-- [ ] core：非回环一律 TLS（HTTPS / WSS）。hub 自签证书；第一次连接时人比对两边短码（与 [MULTI-NODE.md](MULTI-NODE.md) §4.3「登录与配对」的节点配对码同一流程）后固定指纹。身份认指纹、不认地址：一个 hub 记多个地址（局域网、组网地址、公网地址），GUI 和节点按顺序试（同文 §10、§12 A2、§14「连通方式」）
-- [ ] GUI 与查看器的字节一律经 hub，不再读本机磁盘：`serveExtension` 不再用 `extensionRealFile` 读本机 `<home>/extension-versions`；`shell:open-path` 不再拿本机绝对路径直接打开（[MULTI-NODE.md](MULTI-NODE.md) §12 A2、§16「扩展在多节点下」，[EXTENSIONS.md](EXTENSIONS.md) §9「查看器」）
-- [ ] 验收：Mac GUI 连上 Windows hub，两端对话一致，断线后按 `Last-Event-ID` 续传
+- [ ] core：非回环一律 TLS（HTTPS / WSS）。hub 自签证书；第一次连接时人比对两边短码（与 [MULTI-NODE.md](MULTI-NODE.md) §4.3「登录与配对」留给 A3 的节点配对码同一流程）后固定指纹。身份认指纹、不认地址：一个 hub 记多个地址（局域网、组网地址、公网地址），GUI 和节点按顺序试（同文 §10、§12 A3、§14「连通方式」）
+- [ ] core：`users` 表、`/v1/auth/login`、`crossagents user add`；现有表加 `user_id`，老数据归到默认用户（[MULTI-NODE.md](MULTI-NODE.md) §9「数据模型」、§4.3「登录与配对」、§12 A3）
+- [ ] GUI：登录页（账号密码）（[MULTI-NODE.md](MULTI-NODE.md) §4.3「登录与配对」、§12 A3）
+- [ ] core：可信设备。新设备登录要在已有的可信设备上确认并通知；开终端、批准扩展、登录 CLI 账号、配对节点只给可信设备，并再验证一次密码（[MULTI-NODE.md](MULTI-NODE.md) §10、§12 A3）
+- [ ] core：`/v1/auth/login` 限速（[MULTI-NODE.md](MULTI-NODE.md) §10、§12 A3）
+- [ ] core：无效的 `cad_` token 每次都查库（[devices.rs](../crates/hub/src/devices.rs) `Devices::authenticate` 对 `cad_` 前缀未命中缓存就 `device_by_hash`），开端口前要限速（[MULTI-NODE.md](MULTI-NODE.md) §10、§12 A3）
 
 B1 node 代理：
 
-- [ ] core：`crossagents node join`、配对码、hub 与 node 的双向通道（WSS 还是 gRPC 流待定）
+- [ ] core：节点怎么连中心待定（[MULTI-NODE.md](MULTI-NODE.md) §11 第 10 条）；走 A3 开端口时才用 `crossagents node join` 与配对码。hub 与 node 的双向通道（WSS 还是 gRPC 流待定）
+- [ ] core：现有表加 `node_id`，老数据指向本机节点（[MULTI-NODE.md](MULTI-NODE.md) §9「数据模型」）
 - [ ] core：驱动拆成两半，调度留在 hub，拉起 CLI 与协议翻译挪到 node；单机模式也走内置节点，只保留一套执行路径
 - [ ] core：节点上报已装插件、登录状态、可用模型；掉线时事件写本地日志，重连补发（可复用运行时宿主的 seq 编号 + 确认 + 补发机制，见 PROCESS-SUPERVISION §2）
 - [ ] core：协作工具 MCP 走 node 转发还是直连中心（待定）
@@ -184,7 +198,7 @@ C 单干模式（依赖 A2 的连接页和字节走 hub、B1 的内置节点和�
 > 顺序按两份调研 §4：先交接卡和选账号，再做 Multica 的三条唤醒规则；心跳与排队超时随 §八 B1 一起做。「不学的」见各自 §3，这里不再列。
 
 - [>] 心跳 15 秒、约 3 分钟判离线；排队超时要「心跳缺席超过宽限期」与「这条运行排了这么久」同时满足（Multica）：随 §八 B1 做（multica §2.7、§2.8）
-- [>] 设备级日 / 周 / 月 token 与成本上限（magpie）：随 §八 A1 建 `devices` 表时加（magpie-lancer §2.9）
+- [>] 设备级日 / 周 / 月 token 与成本上限（magpie）：`devices` 表已经建了（[DONE.md](DONE.md) §八），上限仍然推后，没跟 A1 一起做（magpie-lancer §2.9）
 
 ## 十四、Git 视图（只读）
 

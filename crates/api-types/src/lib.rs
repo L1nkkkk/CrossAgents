@@ -10,14 +10,40 @@ use ts_rs::TS;
 pub use crossagents_core::{
     Account, AccountStatus, Agent, AgentCommand, AgentCommandKind, AgentId, AgentProfile,
     AgentStatus, Capabilities, CheckResult, ClaimRole, ContinuationPolicy, DataSource,
-    DeliveryState, DeliveryStatus, DiffSource, DriverKind, Event, EventKind, Handoff, HandoffKind,
-    HistoryTask, LeadPlace, MessageId, MessageSource, ModelInfo, OutputStream, PlannedTask,
-    QueuedReason, Role, Run, RunHistory, RunId, RunPolicy, RunStatus, StopReason, Task, TaskId,
-    TaskStatus, TokenTotals, ToolInfo, ToolStatus,
+    DeliveryState, DeliveryStatus, Device, DeviceKind, DeviceLevel, DiffSource, DriverKind, Event,
+    EventKind, Handoff, HandoffKind, HistoryTask, LeadPlace, MessageId, MessageSource, ModelInfo,
+    OutputStream, PlannedTask, QueuedReason, Role, Run, RunHistory, RunId, RunPolicy, RunStatus,
+    StopReason, Task, TaskId, TaskStatus, TokenTotals, ToolInfo, ToolStatus,
 };
 
 /// Handoff cards and how a task's chain of them reads.
 pub use crossagents_core::handoff;
+
+/// Issue a device credential; omitted kind and level default to client and write.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateDeviceRequest {
+    pub name: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub kind: Option<DeviceKind>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub level: Option<DeviceLevel>,
+}
+/// The plaintext token appears only in this issuance response.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct CreateDeviceResponse {
+    pub device: Device,
+    pub token: String,
+}
+/// Active and revoked device records, without credentials or hashes.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ListDevicesResponse {
+    pub devices: Vec<Device>,
+}
 
 pub const API_VERSION: &str = "v1";
 
@@ -25,7 +51,7 @@ pub const API_VERSION: &str = "v1";
 /// GUI hides what a hub does not list, and a hub built before this field sends no list at all,
 /// which the GUI reads as "an older hub" (`apps/gui/src/lib/features.ts`). Names are stable ids;
 /// adding one is not an API break (docs/API-AUTH.md §5), removing one is.
-pub const FEATURES: [&str; 4] = ["git", "lessons", "work", "apply"];
+pub const FEATURES: [&str; 5] = ["git", "lessons", "work", "apply", "devices"];
 
 /// Checks rerun in the person's directory after applying merged files.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -3065,6 +3091,7 @@ mod tests {
     fn export_core_bindings() {
         let cfg = ts_rs::Config::from_env();
         Event::export_all(&cfg).unwrap();
+        Device::export_all(&cfg).unwrap();
         crossagents_core::Task::export_all(&cfg).unwrap();
         crossagents_core::Run::export_all(&cfg).unwrap();
         crossagents_core::RunHistory::export_all(&cfg).unwrap();
@@ -3090,7 +3117,7 @@ mod tests {
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(
             json["features"],
-            serde_json::json!(["git", "lessons", "work", "apply"])
+            serde_json::json!(["git", "lessons", "work", "apply", "devices"])
         );
         // An older hub's `/v1/info`, without the field, still parses (that is the whole point).
         let old: HubInfo = serde_json::from_value(serde_json::json!({
