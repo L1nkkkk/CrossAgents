@@ -7,7 +7,7 @@
 > 状态：`[ ]` 未开始 · `[~]` 进行中 · `[>]` 推迟到后续阶段。
 > 已完成（`[x]`）和已决定不做（`[-]`）的条目挪到 [DONE.md](DONE.md)，章节编号相同；做完一条就剪过去。
 >
-> 最后对照代码核对：2026-11-07（0.2.6）。10-31 之后没走这份清单就做完的事，补记在 DONE.md §二十四。
+> 最后对照代码核对：2026-11-07（0.2.10）。10-31 之后没走这份清单就做完的事，补记在 DONE.md §二十四。
 
 ## 一、进程监督（优先）
 
@@ -18,7 +18,7 @@
 按 Cutex 的做法改为“agent 进程比 hub 活得久，新 hub 接管”，设计见 [PROCESS-SUPERVISION.md](PROCESS-SUPERVISION.md)。
 
 - [~] 真实 agent 上验证"轮次跑到一半 hub stop → hub start 后轮次继续"（2026-10-23）：codex、codebuddy 已通过（轮次跑完、上下文和进程不变，新版本 hub 也能接管旧版本留下的进程）；claude 本机未装，未验证（协议层已由 mock 自动化测试覆盖，只差真实 Claude Code）。**等环境**：本机没有 `claude` 命令，装上即可补测
-- [>] Linux / macOS 上实测宿主（用进程组代替 Job Object，目前未验证）：推迟到 B1 节点阶段，那时驱动本就要拆到节点上跑，一并测
+- [>] Linux / macOS 上实测宿主（用进程组代替 Job Object，目前未验证）：推迟到 B1 节点阶段，那时驱动本就要拆到节点上跑，一并测。macOS 上的验收见 [tasks/MACOS.md](tasks/MACOS.md) §4「节点与 hub 在 macOS 上」与 §5「建议顺序」的 Mac3
 
 ## 二、hub 与 GUI 边界
 
@@ -38,7 +38,7 @@
 
 - [~] 设计 hub 常驻模式：关闭窗口后 hub 继续运行，窗口重开时重新连接并拉取快照。安装版 GUI 起的 hub 是脱离的后台进程，关窗口后照常运行，重开时直接连上；缺的是开机自启（下一条）
 - [ ] Windows 自启方案：计划任务或服务，二选一并写明理由（权限、登录前运行、崩溃重拉的节流）；Cutex 用的是按用户的计划任务 + 内置 supervisor
-- [ ] 安装包与 exe 代码签名（未签名时 SmartScreen 首次运行会拦）
+- [ ] 安装包与 exe 代码签名（未签名时 SmartScreen 首次运行会拦）。macOS 的签名与公证见 [tasks/MACOS.md](tasks/MACOS.md) §3「打包与分发」（§二十七 Mac4）
 
 ## 四、可观测性
 
@@ -74,10 +74,12 @@
 > 取代原「远期」里的"每台机器一个 hub、GUI 同时连多个 hub"：已比较并放弃，理由见 MULTI-NODE §2。
 > 并行方式：不拆仓库，每阶段先在 `api-types` 定接口并生成 bindings，core 与 GUI 两条线各用一个 worktree 和分支，GUI 先对着 MockBridge 开发。
 
+已完成 1 条，见 [DONE.md](DONE.md) 同名一节。
+
 开工前要定：
 
 - [ ] 中心放哪台：先用这台 Windows（A 阶段），B1 之后再考虑迁到云服务器当纯中心（只放个人项目，公司代码先确认合规）
-- [ ] 连通方式：局域网 / Tailscale / 公司内网，决定第一版是否自己做 TLS
+- 连通方式已定：局域网和公网都要，默认打洞（组网工具），非回环一律 TLS。见 [MULTI-NODE.md](MULTI-NODE.md) §14「连通方式」与 [DONE.md](DONE.md) 同名一节。
 - [ ] 两条线并行时完工监视器怎么提交：按分支提交，还是由人合并
 
 A1 账号与设备：
@@ -85,11 +87,15 @@ A1 账号与设备：
 - [ ] core：`users`、`devices` 表（client / node 两类，token 只存哈希，可吊销），现有表加 `user_id`、`node_id`，老数据迁到默认用户和本机节点
 - [ ] core：`/v1/auth/login`、`crossagents user add`、设备列表与吊销接口
 - [ ] GUI：登录页、设备管理页
+- [ ] core：可信设备。新设备登录要在已有的可信设备上确认并通知；开终端、批准扩展、登录 CLI 账号、配对节点只给可信设备，并再验证一次密码（[MULTI-NODE.md](MULTI-NODE.md) §10、§12 A1）
+- [ ] core：`/v1/auth/login` 限速（[MULTI-NODE.md](MULTI-NODE.md) §10、§12 A1）
 
 A2 远程 GUI：
 
 - [ ] core：`[hub] listen` 可配置，默认仍为 `127.0.0.1`；远程访问走设备 token
 - [ ] GUI：Electron 主进程改读连接配置（本机 / 远程地址 + token），设置加「连接」页、断线提示，连不上中心时可切回本机。连远程时关闭本机 hub 的启动与升级，切回本机时再检查一次（MULTI-NODE §13.3）
+- [ ] core：非回环一律 TLS（HTTPS / WSS）。hub 自签证书；第一次连接时人比对两边短码（与 [MULTI-NODE.md](MULTI-NODE.md) §4.3「登录与配对」的节点配对码同一流程）后固定指纹。身份认指纹、不认地址：一个 hub 记多个地址（局域网、组网地址、公网地址），GUI 和节点按顺序试（同文 §10、§12 A2、§14「连通方式」）
+- [ ] GUI 与查看器的字节一律经 hub，不再读本机磁盘：`serveExtension` 不再用 `extensionRealFile` 读本机 `<home>/extension-versions`；`shell:open-path` 不再拿本机绝对路径直接打开（[MULTI-NODE.md](MULTI-NODE.md) §12 A2、§16「扩展在多节点下」，[EXTENSIONS.md](EXTENSIONS.md) §9「查看器」）
 - [ ] 验收：Mac GUI 连上 Windows hub，两端对话一致，断线后按 `Last-Event-ID` 续传
 
 B1 node 代理：
@@ -102,6 +108,11 @@ B1 node 代理：
 - [ ] core：远程节点自升级：下载并校验 sha256 → `bin/<版本>/` → 新代理接管运行时宿主 → 清理旧目录；Release 附各平台单独 exe
 - [ ] 中心 hub 的部署与升级方式（systemd / Windows 服务 / 容器），GUI 不参与
 - [ ] GUI：配对确认弹窗、节点列表与在线状态
+- [ ] core：内置终端改在拥有工作区的节点上开（现在 [terminal.rs](../crates/hub/src/terminal.rs) 的 PTY 跑在 hub 那台机器上）（[MULTI-NODE.md](MULTI-NODE.md) §7.1「职责划分」、§12 B1）
+- [ ] core：节点启动时用登录 shell 取一次环境（`$SHELL -ilc env`，带超时）。macOS 上 launchd 的 LaunchAgent 只有最小 PATH（[MULTI-NODE.md](MULTI-NODE.md) §7.1「职责划分」、[tasks/MACOS.md](tasks/MACOS.md) §4「节点与 hub 在 macOS 上」）
+- [ ] GUI：节点机器上从「管 hub」改成「管 hub 或 node」（[localHub.cts](../apps/gui/electron/localHub.cts) 的 `manageLocalHub` / `run`）。怎么判断本机 node 是不是自己的仍待定（[MULTI-NODE.md](MULTI-NODE.md) §7.1「职责划分」、§13.3 怎么判断是「本机自己的 hub」）
+- [ ] core：`runs_on = "node"` 的工具由 hub 按指纹下发已批准快照，节点校验哈希一致才执行并缓存；`CROSSAGENTS_URL` 指向节点本机的转发端点（[EXTENSIONS.md](EXTENSIONS.md) §9「代码在哪跑：`runs_on`」、[MULTI-NODE.md](MULTI-NODE.md) §16「扩展在多节点下」、§12 B1）
+- [ ] core：创造模式在远程节点上改为由节点打包扩展目录交给 hub，仍由 hub 生成快照、算指纹（[MULTI-NODE.md](MULTI-NODE.md) §16「扩展在多节点下」、[EXTENSIONS.md](EXTENSIONS.md) §7）
 
 B2 跨节点 Chat：
 
@@ -114,6 +125,14 @@ B3 远程开发：
 - [ ] core：列目录、读文件、附件索引接口
 - [ ] GUI：先选机器再选目录的远程目录浏览框，最近目录记住所在机器
 - [ ] GUI：diff 与文件查看器，截图和构建产物附件预览
+- [ ] core：读文件接口要给出二进制字节（现在 `FileContentResponse` 只有 `binary: true`、没有字节）。查看器与工作区文件走 GUI → hub → 文件所在节点，节点离线不可看（[EXTENSIONS.md](EXTENSIONS.md) §9「查看器」、[MULTI-NODE.md](MULTI-NODE.md) §16「扩展在多节点下」、§7.5「存储分布与负载」、§12 B3）。A2 那条改的两处同盘假设，文件在节点上时走这个接口
+
+C 单干模式（依赖 A2 的连接页和字节走 hub、B1 的内置节点和终端在节点上开，以及 hub 在 macOS 上的验证，见 [tasks/MACOS.md](tasks/MACOS.md) §4「节点与 hub 在 macOS 上」；[MULTI-NODE.md](MULTI-NODE.md) §12、§15「单干模式」）：
+
+- [ ] GUI：记中心和本机两个 hub。连不上中心就切到本机，界面始终标明当前连的是「本机」还是「中心」（[MULTI-NODE.md](MULTI-NODE.md) §15「单干模式」）
+- [ ] 一个 agent 只归一个 hub：中心建的 agent 在中心掉线时照常跑，事件攒在节点上等中心回来补发（[MULTI-NODE.md](MULTI-NODE.md) §7.4「掉线」）；单干时新建的 agent 归本机 hub。第一版对话分开放，「本机」「中心」各看各的。以后 Chat 可合并进中心；单干期间的 Work 先不合（同文 §15「单干模式」、§7.5「存储分布与负载」）
+- [ ] hub 要能在 macOS 上跑，和 Windows 同一份代码（[MULTI-NODE.md](MULTI-NODE.md) §15「单干模式」、[tasks/MACOS.md](tasks/MACOS.md) §4「节点与 hub 在 macOS 上」）
+- [ ] 验收：断网时 Mac 用本机 hub + 内置节点继续开 Chat，GUI 标明「本机」；中心恢复后，中心建的 agent 补发事件（[MULTI-NODE.md](MULTI-NODE.md) §12）
 
 存储与负载：
 
@@ -268,3 +287,30 @@ B3 远程开发：
 - [~] **2 的尾巴**（第 2 条本身已完成，见 [DONE.md](DONE.md) 同名一节）：快照里的排队原因与撤回、Codex 插话超时改为 `outcome_unknown` 已做（2026-11-07，`265434e`）。还差：
   - Electron 的超时、断线映射没在打包环境里实测过
 - [~] **4 的尾巴**（2026-11-07，`8e22440`）：驱动压缩事件、`inject` 不再阻塞事件泵、扩展的规则源已接（见 DONE.md 第 4 条）。还差：真实 Claude / Codex 的自动压缩信号与插话都没有实测，目前只有 mock 验证
+
+## 二十六、扩展 api 2
+
+> 来源：扩展 api 2 的设计（2026-11-07）。只有设计，W1–W4 未开工。见 [EXTENSIONS.md](EXTENSIONS.md) §9，各条验收见该节「分期」。
+> 这里的 W1–W4 是扩展 api 2 的实现阶段，和 [tasks/W1.md](tasks/W1.md) 的轻量 Work 不是一回事。
+
+- [ ] **W1** webview、`[capabilities]`、`api = 2`、批准界面。验收：three.js 页面带 WASM 正常渲染；webview 里写死循环，主界面仍能用；停用后 webview 消失（[EXTENSIONS.md](EXTENSIONS.md) §9「分期」）
+- [ ] **W2** 查看器，以及限定范围的文件访问（字节走 hub）。验收：点对话里的 `out/car.gltf` 打开 3D，相对 `.bin` 和贴图能加载；范围外的路径被拒（[EXTENSIONS.md](EXTENSIONS.md) §9「分期」）
+- [ ] **W3** 浏览器视图。验收：登录 GitHub 后重启仍是登录状态；禁止被嵌的网站能打开；菜单不被盖住（[EXTENSIONS.md](EXTENSIONS.md) §9「分期」）。macOS 上摄像头 / 麦克风要在打包时声明用途，见 [tasks/MACOS.md](tasks/MACOS.md) §3「打包与分发」
+- [ ] **W4** GUI 侧工具。验收：agent 能打开网页、读成文本、点击、截图，人看得到、能接手；没有 GUI 时明确报错（[EXTENSIONS.md](EXTENSIONS.md) §9「分期」）
+
+## 二十七、macOS
+
+> 来源：2026-11-07 讨论。只有设计，未开工。任务书见 [tasks/MACOS.md](tasks/MACOS.md)。
+> 阶段照该文 §5「建议顺序」（Mac1–Mac4；验收是建议，原话只给了顺序）。待定项照 §6「待定」。
+> Mac1–Mac4 与 `docs/tasks/` 里早期里程碑 M0–M5、以及 §二十六 的 W1–W4（扩展 api 2；[tasks/W1.md](tasks/W1.md) 是轻量 Work）不是一回事。
+
+- [ ] **Mac1 macOS CI 跑测试**。依赖：无。验收（建议）：在 macOS runner 上 `cargo test --workspace`、`npm --prefix apps/gui test`、`npm --prefix apps/gui run typecheck` 通过；跑不过的用例逐条记下。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
+- [ ] **Mac2 GUI 小修 + 不签名的 dmg 手测**。范围：该文 §2「GUI 要改的」全部五条，加 §3「打包与分发」的 dmg / zip / `icon.icns` / 通用二进制，不含签名与公证。依赖：Mac1 至少 typecheck 与 test 绿；dmg 只能在 macOS 上打。验收（建议）：输入框里 ⌘C / ⌘V / ⌘X / ⌘A / ⌘Z 都能用；⌘Q 退出、⌘M 最小化；点 Dock 图标窗口回来；菜单栏图标在浅色和深色下都看得清；dmg 装上后首次打开能启动（不签名时走「隐私与安全性」放行）。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
+- [ ] **Mac3 随 A2 / B1 做环境、终端、字节走 hub**。范围：该文 §4「节点与 hub 在 macOS 上」的 PATH（登录 shell 取环境）、内置终端加 `-l`、描述文件补 macOS 的 `[locate]` 路径、Unix 宿主与锁实验在 Mac 上实测（§一那条），以及字节走 hub。依赖：[MULTI-NODE.md](MULTI-NODE.md) §12 的 A2 与 B1；同文 §15「单干模式」定下本机 hub 加内置节点之后，PATH 在节点启动时取一次。浏览器视图要不要把摄像头 / 麦克风写进 `Info.plist` 也挂在这里（[EXTENSIONS.md](EXTENSIONS.md) §9「浏览器视图」）。验收（建议）：从 Dock 启动的 GUI 起的 hub 能找到 Homebrew 和 npm 装的 CLI；内置终端里 `brew` 可用；agent 会话里 `cargo` / `npm` 可用；宿主用进程组管住整棵树；Mac GUI 连远程 hub 时能打开扩展静态资源与工作区文件。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
+- [ ] **Mac4 签名、公证、自动更新**。范围：该文 §3「打包与分发」的签名与公证：Developer ID、hardened runtime、`bin/` 里的 hub 一起签、`electron-updater` 走通。依赖：Mac2，以及一个 Apple Developer 账号（没有账号做不了，见该文 §6「待定」）。验收（建议）：首次打开不再需要去「隐私与安全性」放行；装 N 版后发布 N+1，GUI 自动下载并在退出时安装。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
+
+待定（[tasks/MACOS.md](tasks/MACOS.md) §6「待定」）：
+
+- [ ] 手边有没有 Mac 可测。Mac2 起都需要真机或 runner
+- [ ] 有没有 Apple Developer 账号（Mac4 的硬依赖）。没有就只能停在不签名的 dmg + 手动放行，没有自动更新
+- [ ] macOS CI 的费用。私有仓库的 macOS runner 要计费；要不要只在 `main` 和发版前跑，等有账号时再定
