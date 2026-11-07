@@ -400,6 +400,107 @@ export const SCENARIOS: Scenario[] = [
       ],
     };
   } },
+  { key: "home-chat-permission", label: "新 Chat 的权限", hint: "首页新 Chat：输入框旁选「自动执行」，发送时写进新 agent 的 config.permission；这台 Windows 上的 Cursor 不能选「要我确认」", build: () => {
+    const state = emptyHub();
+    localStorage.setItem("crossagents.mode", JSON.stringify("chat"));
+    const control = () => document.querySelector<HTMLSelectElement>(".home-composer .permission-compact select");
+    const verify = () => {
+      const made = state.agents[0];
+      if (!made) throw new Error("the chat did not create an agent");
+      if ((made.config as Record<string, unknown> | null)?.permission !== "bypass") throw new Error("the chosen permission did not reach the new agent");
+      if (control()?.value !== "bypass") throw new Error("the pick does not show the choice");
+      console.info("new chat: bypass written into config.permission");
+    };
+    return {
+      state,
+      route: "#/",
+      script: [
+        { at: 400, act: () => setSelect(control(), "bypass") },
+        { at: 600, act: () => typeText(".home-composer textarea", "给登录页加一个错误提示") },
+        { at: 800, act: () => document.querySelector<HTMLButtonElement>(".home-composer .send")?.click() },
+        { at: 1900, act: verify },
+      ],
+    };
+  } },
+  { key: "home-work-permission", label: "Work 默认 Worker 的权限", hint: "首页 Work 的 ⚙：默认 Worker 旁选「拒绝」，发起前落到这个 worker 自己身上（mock 里 run 建不出来，权限设置已经写出）", build: () => {
+    const { ada, rex, mia, sam } = team();
+    const state: MockState = { ...emptyHub(), agents: [ada, rex, mia, sam], quota: quota() };
+    localStorage.setItem("crossagents.mode", JSON.stringify("run"));
+    localStorage.setItem("crossagents.workspace", wsKey(REPO));
+    localStorage.removeItem("crossagents.lead");
+    const worker = () => document.querySelectorAll<HTMLSelectElement>(".home-options select")[1];
+    const verify = () => {
+      if ((rex.config as Record<string, unknown> | null)?.permission !== "deny") throw new Error("the default worker's permission did not reach the agent");
+      console.info("work: the default worker's permission reached the agent");
+    };
+    return {
+      state,
+      route: "#/",
+      script: [
+        { at: 400, act: () => document.querySelector<HTMLButtonElement>(".options-btn")?.click() },
+        { at: 700, act: () => setSelect(worker(), "Rex") },
+        { at: 900, act: () => setSelect(document.querySelector<HTMLSelectElement>(".home-options .permission-compact select"), "deny") },
+        { at: 1100, act: () => typeText(".home-composer textarea", "把登录页的错误提示改成人话") },
+        { at: 1300, act: () => document.querySelector<HTMLButtonElement>(".home-composer .send")?.click() },
+        { at: 2300, act: verify },
+      ],
+    };
+  } },
+  { key: "plan-permission", label: "计划里给任务改权限", hint: "计划面板：每个任务的执行者旁有权限；在这条守卫 run 里给 #a 选「自动执行」，这一行立刻标出「不经确认」，批准前写进执行者自己的设置", build: () => {
+    const scene = oauthRun("plan");
+    const state = scene.state;
+    const rex = state.agents.find((a) => a.name.toLowerCase() === "rex")!;
+    const rowPick = () => document.querySelector<HTMLSelectElement>('.who-pick[data-task="a"] .permission-compact select');
+    const verifyRow = () => {
+      const row = document.querySelector<HTMLElement>('.who-pick[data-task="a"]');
+      const chip = row && [...row.querySelectorAll<HTMLElement>(".chip")].find((c) => c.textContent?.includes("不经确认"));
+      if (!chip) throw new Error("bypass does not mark the row as 不经确认");
+      if (!chip.title.includes("不经确认")) throw new Error("the mark has no tooltip");
+      console.info("plan: the row marks a bypassed assignee as 不经确认");
+    };
+    const verifyAgent = () => {
+      if ((rex.config as Record<string, unknown> | null)?.permission !== "bypass") throw new Error("the row's choice did not reach the assignee");
+      console.info("plan: the row's permission reached the assignee");
+    };
+    return {
+      ...scene,
+      route: `#/runs/${state.runs[0].run.id}`,
+      script: [
+        { at: 900, act: () => setSelect(rowPick(), "bypass") },
+        { at: 1200, act: verifyRow },
+        { at: 1500, act: () => document.querySelector<HTMLButtonElement>(".plan-dock footer button.primary")?.click() },
+        { at: 2500, act: verifyAgent },
+      ],
+    };
+  } },
+  { key: "plan-permission-guard", label: "计划里 Cursor 不能选「要我确认」", hint: "计划面板：执行者是 Windows 上的 Cursor 时，这一行的「要我确认」置灰，旁边写明原因——和 Agents 页同一条规则", build: () => {
+    const scene = oauthRun("plan");
+    const state = scene.state;
+    const pia = agent({ name: "pia", plugin: "cursor", model: "claude-opus-5", role: "worker", profile: { display_name: "Pia", title: "Cursor · 前端", color: "teal" } });
+    state.agents.push(pia);
+    const detail = state.runs[0];
+    detail.run.config.team = [...detail.run.config.team, pia.id];
+    detail.run.plan = detail.run.plan.map((t, i) => (i === 0 ? { ...t, assignee: "pia" } : t));
+    state.sessions = [
+      { agent: pia, state: "idle", busy_with: null, last_execution: null, can_use: true, reason: null, unguarded: false },
+      ...state.agents.filter((a) => a.id !== pia.id && a.id !== detail.run.planner).map((a) => ({ agent: a, state: "idle" as const, busy_with: null, last_execution: null, can_use: true, reason: null, unguarded: false })),
+    ];
+    const verify = () => {
+      const wrap = document.querySelector<HTMLElement>('.who-pick[data-task="a"] .permission-compact');
+      const select = wrap?.querySelector<HTMLSelectElement>("select");
+      if (!select) throw new Error("the Cursor row has no permission pick");
+      const guard = [...select.options].find((o) => o.textContent?.includes("要我确认"));
+      if (!guard) throw new Error("the guard choice is missing");
+      if (!guard.disabled) throw new Error("Cursor can still choose guard on Windows");
+      if (!wrap!.textContent?.includes("Windows 上的 Cursor 不能选")) throw new Error("the greyed choice has no reason beside it");
+      console.info("plan: the compact guard choice is greyed with its reason");
+    };
+    return {
+      ...scene,
+      route: `#/runs/${detail.run.id}`,
+      script: [{ at: 1200, act: verify }],
+    };
+  } },
   { key: "plan-unguarded", label: "不经确认的候选", hint: "Plan 的执行者菜单：这次 run 要求确认，但显式设成自动执行的候选带「不经确认」，tooltip 说明它会直接干", build: () => {
     const scene = oauthRun("plan");
     const state = scene.state;
@@ -1002,6 +1103,21 @@ function searchFiles(value: string) {
   if (!input) throw new Error("file filter is missing");
   Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
   input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+/** A native select changed the way a person changes it (React keeps its own state). */
+function setSelect(select: HTMLSelectElement | null, value: string) {
+  if (!select) throw new Error("select is missing");
+  Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(select, value);
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+/** Text typed into a composer (React's onChange follows an input event). */
+function typeText(selector: string, text: string) {
+  const el = document.querySelector<HTMLTextAreaElement>(selector);
+  if (!el) throw new Error(`${selector} is missing`);
+  Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(el, text);
+  el.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 /** The same pane in the default narrow right dock, with a Markdown file open. */
