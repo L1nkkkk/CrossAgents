@@ -1900,6 +1900,80 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    async fn insert_device(
+        &self,
+        d: &crossagents_core::Device,
+        hash: &str,
+    ) -> Result<(), CoreError> {
+        let result = sqlx::query(
+            "INSERT INTO devices (id,name,kind,level,token_hash,created_at) VALUES (?,?,?,?,?,?)",
+        )
+        .bind(&d.id)
+        .bind(&d.name)
+        .bind(
+            serde_json::to_value(d.kind)
+                .map_err(storage)?
+                .as_str()
+                .unwrap(),
+        )
+        .bind(
+            serde_json::to_value(d.level)
+                .map_err(storage)?
+                .as_str()
+                .unwrap(),
+        )
+        .bind(hash)
+        .bind(d.created_at.to_rfc3339())
+        .execute(&self.pool)
+        .await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Err(CoreError::Conflict(
+                format!("device {:?} already exists", d.name),
+            )),
+            Err(e) => Err(storage(e)),
+        }
+    }
+    async fn list_devices(&self) -> Result<Vec<crossagents_core::Device>, CoreError> {
+        sqlx::query("SELECT * FROM devices ORDER BY created_at, id")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage)?
+            .into_iter()
+            .map(device_row)
+            .collect()
+    }
+    async fn device_by_hash(
+        &self,
+        hash: &str,
+    ) -> Result<Option<crossagents_core::Device>, CoreError> {
+        sqlx::query("SELECT * FROM devices WHERE token_hash = ? AND revoked_at IS NULL")
+            .bind(hash)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?
+            .map(device_row)
+            .transpose()
+    }
+    async fn revoke_device(&self, id: &str) -> Result<crossagents_core::Device, CoreError> {
+        let row = sqlx::query(
+            "UPDATE devices SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ? RETURNING *",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?;
+        device_row(row.ok_or_else(|| CoreError::NotFound {
+            kind: "device",
+            id: id.into(),
+        })?)
+    }
+    async fn touch_device(&self, id: &str) -> Result<(), CoreError> {
+        let now = Utc::now();
+        sqlx::query("UPDATE devices SET last_seen_at = ? WHERE id = ? AND revoked_at IS NULL AND (last_seen_at IS NULL OR last_seen_at <= ?)").bind(now.to_rfc3339()).bind(id).bind((now - chrono::Duration::minutes(1)).to_rfc3339()).execute(&self.pool).await.map_err(storage)?;
+        Ok(())
+    }
     async fn insert_account(&self, account: &Account) -> Result<(), CoreError> {
         let result = sqlx::query(
             "INSERT INTO accounts (id, provider, created_at, data) VALUES (?, ?, ?, ?)",
@@ -1956,6 +2030,41 @@ impl Store for SqliteStore {
         }
         Ok(())
     }
+}
+
+fn device_row(row: sqlx::sqlite::SqliteRow) -> Result<crossagents_core::Device, CoreError> {
+    use sqlx::Row;
+    let parse = |key: &str| -> Result<chrono::DateTime<Utc>, CoreError> {
+        let value: String = row.try_get(key).map_err(storage)?;
+        Ok(chrono::DateTime::parse_from_rfc3339(&value)
+            .map_err(storage)?
+            .with_timezone(&Utc))
+    };
+    let optional = |key: &str| -> Result<Option<chrono::DateTime<Utc>>, CoreError> {
+        let value: Option<String> = row.try_get(key).map_err(storage)?;
+        value
+            .map(|v| {
+                chrono::DateTime::parse_from_rfc3339(&v)
+                    .map(|t| t.with_timezone(&Utc))
+                    .map_err(storage)
+            })
+            .transpose()
+    };
+    Ok(crossagents_core::Device {
+        id: row.try_get("id").map_err(storage)?,
+        name: row.try_get("name").map_err(storage)?,
+        kind: serde_json::from_value(serde_json::Value::String(
+            row.try_get("kind").map_err(storage)?,
+        ))
+        .map_err(storage)?,
+        level: serde_json::from_value(serde_json::Value::String(
+            row.try_get("level").map_err(storage)?,
+        ))
+        .map_err(storage)?,
+        created_at: parse("created_at")?,
+        last_seen_at: optional("last_seen_at")?,
+        revoked_at: optional("revoked_at")?,
+    })
 }
 
 fn scope_name(scope: NoteScope) -> &'static str {
