@@ -126,6 +126,48 @@ async fn health_is_public_and_everything_else_needs_the_token() {
 }
 
 #[tokio::test]
+async fn create_agent_cursor_permission() {
+    let t = TestHub::start().await;
+    let cwd = t._home.path().display().to_string();
+    for (name, plugin, permission) in [
+        ("cursor-guard", "cursor", "guard"),
+        ("cursor-bypass", "cursor", "bypass"),
+        ("claude-guard", "claude", "guard"),
+    ] {
+        let response = t
+            .post("/v1/agents")
+            .json(&json!({
+                "name": name, "plugin": plugin, "role": "worker", "cwd": cwd,
+                "config": { "permission": permission }
+            }))
+            .send()
+            .await
+            .unwrap();
+        if cfg!(windows) && plugin == "cursor" && permission == "guard" {
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(
+                body["error"]["message"],
+                "Cursor cannot ask before each action on Windows; set this agent's permission to 自动执行 (bypass)"
+            );
+        } else {
+            assert_eq!(response.status(), StatusCode::CREATED);
+            let agent: Agent = response.json().await.unwrap();
+            assert_eq!(agent.config["permission"], permission);
+        }
+    }
+    let agents: ListAgentsResponse = t
+        .get("/v1/agents")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(agents.agents.len(), if cfg!(windows) { 2 } else { 3 });
+}
+
+#[tokio::test]
 async fn agent_lifecycle() {
     let t = TestHub::start().await;
     let created = t.create("alice").await;
