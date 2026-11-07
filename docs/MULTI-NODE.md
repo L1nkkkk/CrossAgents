@@ -1,7 +1,7 @@
 # CrossAgents 多节点设计（草稿）
 
 > 状态：草稿，待打磨。放开 [DESIGN.md](DESIGN.md) §1.2 中「跨主机、多用户、设备配对」这条非目标。
-> 标记为「待定」的地方还没有结论，见 §11。
+> §11 第 2、3 条已定（连通方式、Mac 是 GUI + 节点），第 1 条保留待定；其余标「待定」的地方还没有结论，见 §11。
 
 ## 0. 产品形态
 
@@ -53,7 +53,7 @@ flowchart LR
 
 代价与对策：
 
-- 中心挂了全部不可用。GUI 保留本机模式作为兜底，连不上中心时切回本机 hub 单干。
+- 中心挂了全部不可用。GUI 保留本机模式作为兜底，连不上中心时切回本机 hub 单干（§15）。
 - 需要一台常开机器。涉及公司代码时放公司内网，不放外部云。
 
 ## 3. 总体结构
@@ -211,6 +211,12 @@ hub 与 node 之间是一条双向消息通道（WSS，待定），承载：
 - hub → node：`open`、`resume`、`prompt`、`interrupt`、`suspend`、`shutdown`、`set_model`、权限回答、列目录 / 读文件等辅助请求。
 - node → hub：统一会话事件（与现有 `Driver` 事件模型一致）、权限请求、能力与模型上报、心跳。
 
+B1 还有三处跟着改：
+
+- 内置终端：[terminal.rs](../crates/hub/src/terminal.rs) 的 PTY（`Terminals::create`、`default_shell`）现在跑在 hub 那台机器上，`TerminalInfo.node` 与 `CreateTerminalRequest.node` 已为跨节点预留；要改成在拥有工作区的节点上开，GUI 才能操作那台机器上的 shell。
+- 节点在 macOS 上开机自启就是 launchd 的 LaunchAgent，拿到的是最小 PATH（[MACOS.md](tasks/MACOS.md) §4）→ 节点启动时用登录 shell 取一次环境（`$SHELL -ilc env`，带超时）。
+- 节点机器上的 GUI 管的是本机 node（单干时是本机 hub + 内置节点，§15）：[localHub.cts](../apps/gui/electron/localHub.cts) 的 `manageLocalHub` / `run` 那套从「管 hub」改成「管 hub 或 node」，§13.3 相应补充。
+
 ### 7.2 协作工具的接入
 
 agent 的 MCP 现在连本机 hub（`crossagents mcp`，带会话令牌）。跨机器后有两种做法（待定）：
@@ -227,7 +233,7 @@ agent 的 MCP 现在连本机 hub（`crossagents mcp`，带会话令牌）。跨
 ### 7.4 掉线
 
 - 节点掉线：其上 agent 标为「节点离线」；CLI 进程照常跑，事件在节点本地缓存，重连后按序补发。缓存上限与过期处理待定。
-- 中心掉线：节点侧同上；GUI 显示连接断开，可切回本机模式。
+- 中心掉线：节点侧同上；GUI 显示连接断开，可切回本机模式（§15）。
 - 节点重启：hub 下发 `resume`，节点用原生会话 id 恢复。
 
 ### 7.5 存储分布与负载
@@ -310,16 +316,19 @@ agents ||--o{ events
 
 ## 10. 安全
 
-- 跨机器后 hub 不再只监听本机：`[hub] listen` 可配置，默认仍为 `127.0.0.1`，不改配置行为与现在一致。
-- 公网或不可信网络必须走 TLS（HTTPS / WSS）。走 Tailscale 或公司内网时，第一版可以只用 token（待定）。
+结论：只要不是本机回环就一律 TLS，去掉「走 Tailscale 或内网时第一版可以只用 token」这个例外。同一个安装包局域网和公网两种场景都用，一条规则不容易配错。
+
+- 跨机器后 hub 不再只监听本机：`[hub] listen` 可配置，默认仍为 `127.0.0.1`，不改配置行为与现在一致。开放 `listen` 之前 A1 必须做完；现在的总 token（[paths.rs](../crates/hub/src/paths.rs) `Paths::token`，即 `<home>/token`）永远不出本机。
+- 非回环一律 TLS（HTTPS / WSS）。hub 用自签证书：第一次连接时，人比对两边显示的短码（和 §4.3 的节点配对码同一个流程）后固定证书指纹。身份认指纹、不认地址 → 一个 hub 可以记多个地址（局域网、组网地址、公网地址），GUI 和节点按顺序试，在家和出门自动切换。怎么连得到见 §14。
 - client 与 node token 权限分离；会话令牌（`/v1/me/*`）仍只发给 agent 自己。
-- hub 会存对话里的代码片段、diff、命令输出。放在外部服务器前要确认合规，必要时只存摘要（待定）。
+- **公网上丢一个设备 token，就等于能在节点上执行命令**：直接的有开终端、批准扩展；间接的，给设成「自动执行」权限的 agent 发条消息就行。所以：新设备登录要在已有的可信设备上确认并通知；开终端、批准扩展、登录 CLI 账号、配对节点只给可信设备，并再验证一次密码；`/v1/auth/login` 限速。`/v1/health` 已收窄到只回 `status` 与 `api`（[DONE.md](DONE.md) §二「收敛免鉴权面」），放开 `listen` 后不再白送情报。
+- hub 会存对话里的代码片段、diff、命令输出。放在外部服务器前要确认合规，必要时只存摘要（待定）。把中心 hub 放到云上也照这一条（§14）。
 
 ## 11. 待定
 
-1. 中心放哪台机器：这台 Windows 常开，还是另一台 Linux。
-2. 连通方式：局域网 / Tailscale / 公司内网，决定第一版是否自己做 TLS。
-3. Mac 是只当 GUI，还是也要作为节点跑 agent（影响阶段 B 是否和 A 一起排）。
+1. 中心放哪台机器：这台 Windows 常开，还是另一台 Linux。**保留待定**；[TODO.md](TODO.md) §八 现有的提议是「先用这台 Windows」（A 阶段），B1 之后再考虑迁到云服务器当纯中心。
+2. 连通方式：**已定**——局域网和公网都要，默认打洞（组网工具），非回环一律 TLS；结论见 §14，TLS 与证书指纹见 §10。
+3. Mac 的角色：**已定**——Mac 是 GUI + 节点（§3），并且连不上中心时还要能单干（§15）；影响阶段 B 是否和 A 一起排。
 4. hub ↔ node 的通道用 WSS 还是 gRPC 流，消息格式是否直接复用 `api-types`。
 5. 协作工具 MCP 走 node 转发还是直连中心（§7.2）。
 6. 节点离线缓存的上限与过期策略。
@@ -331,13 +340,16 @@ agents ||--o{ events
 
 | 阶段 | 内容 | 完成标志 |
 |---|---|---|
-| A1 账号与设备 | `users`、`devices` 表，token 签发 / 吊销，`user add`，`/v1/auth/login` | 本机 GUI 用账号登录本机 hub，设备列表可吊销 |
-| A2 远程 GUI | `[hub] listen`，Electron 读连接配置，设置「连接」页（本机 / 远程） | Mac GUI 连上 Windows hub，两端对话一致、断线续传 |
-| B1 node 代理 | `crossagents node join`、配对码、hub ↔ node 通道，驱动执行半边挪到 node，本机 hub 也通过内置 node 执行 | Windows hub 在 Mac 节点上拉起 Codex 并回传事件 |
+| A1 账号与设备 | `users`、`devices` 表，token 签发 / 吊销，`user add`，`/v1/auth/login`；可信设备、新设备登录在已有可信设备上确认并通知、`/v1/auth/login` 限速（§10） | 本机 GUI 用账号登录本机 hub，设备列表可吊销 |
+| A2 远程 GUI | `[hub] listen`，Electron 读连接配置，设置「连接」页（本机 / 远程）；非回环一律 TLS、自签证书短码比对后固定指纹、一个 hub 记多个地址、GUI 与查看器字节一律经 hub（§10、§16） | Mac GUI 连上 Windows hub，两端对话一致、断线续传 |
+| B1 node 代理 | `crossagents node join`、配对码、hub ↔ node 通道，驱动执行半边挪到 node，本机 hub 也通过内置 node 执行；内置终端在节点上开、节点启动用登录 shell 取环境、`runs_on` / 快照下发 / 创造模式上传（§7.1、§16） | Windows hub 在 Mac 节点上拉起 Codex 并回传事件 |
 | B2 跨节点 Chat | 带节点名的模型、`@` 分组、跨节点招人、节点离线状态 | Mac 上的 Chat 招 `hy4@win` 并收到结果 |
 | B3 远程开发 | 远程选目录、GUI 看 diff 和文件、截图与产物回传 | 在 Mac 上完成一次 Windows 项目的改、编、测 |
+| C 单干模式 | GUI 记中心与本机两个 hub、连不上中心切到本机并标明当前连接、单干期间对话分开放；hub 在 macOS 上跑（§15） | 断网时 Mac 用本机 hub + 内置节点继续开 Chat，GUI 标明「本机」；中心恢复后中心建的 agent 补发事件 |
 
 A1 不依赖中心放在哪台机器上，可以先开工。B1 的关键是「本机也走 node」：单机模式就是 hub 加一个内置节点，避免维护两套执行路径。
+
+C 依赖 A2（连接页、字节走 hub）、B1（内置节点、终端在节点上开）和 hub 的 macOS 验证（[MACOS.md](tasks/MACOS.md) §4），排在这三者之后。
 
 ## 13. 升级
 
@@ -388,6 +400,8 @@ hub 在 GUI 关掉后照常运行，所以安装版 GUI 在系统托盘放一个
 
 A2 之后 GUI 可以连远程 hub：连接配置是远程时，这整套本机管理关闭，GUI 只当客户端；从远程切回本机时再按上表检查一次。
 
+B1 之后节点机器上的 GUI 管的可能是本机 node（单干时是本机 hub + 内置节点，§15）：[localHub.cts](../apps/gui/electron/localHub.cts) 的 `manageLocalHub` / `run` 那套从「管 hub」推广成「管 hub 或 node」；判断「是不是本机自己的」仍照上表，只认 `hub.json` 的 `exe` 在 `<home>/bin/` 之下。
+
 ### 13.4 hub 与 node 的版本规则
 
 与 GUI↔hub 的 `API_VERSION`（[API-AUTH.md](API-AUTH.md) §5）平行，hub↔node 通道另有一个协议版本 `NODE_PROTOCOL`（放在 `api-types`，与 `API_VERSION` 分开升）：
@@ -406,3 +420,43 @@ A2 之后 GUI 可以连远程 hub：连接配置是远程时，这整套本机�
 - 发布源：GitHub Releases，放在公开仓库 `L1nkkkk/CrossAgents-releases`。主仓库是私有的，electron-updater 读私有仓库的 Release 要把 GitHub token 打进每个安装包，等于公开了它。`npm run electron:build` 只打包；`npm run electron:release` 打包并上传（需要 `GH_TOKEN`）。
 - 远程节点和中心 hub 用的单独可执行文件（`crossagents-<os>-<arch>` 加 sha256），以后附在同一个 Release 里，节点自升级从这里取（待定）。
 - 安装包未签名：Windows SmartScreen 首次运行会提示。签名证书待定。
+
+## 14. 连通方式
+
+结论：hub 只管监听哪些地址、TLS、设备 token；从外面怎么连得到交给网络层。三种办法按需选，默认推荐打洞（组网工具）。
+
+三种办法：打洞（组网工具：Tailscale / headscale、ZeroTier、EasyTier）、公网地址（路由器端口映射、IPv6、hub 放云服务器）、服务器转发（frp 这类 TCP 转发）。
+
+| 对比项 | 打洞（组网工具） | 公网地址 | 服务器转发 |
+|---|---|---|---|
+| hub 那台要不要公网地址 | 不要 | 要（或把公网端口映射给它） | 不要，转发服务器要 |
+| 要什么服务器 | 牵线服务器一直要有；可在国内云服务器自建中继 | 不需要额外服务器，但要有可路由的地址 | 一台有公网地址的转发服务器 |
+| 是否对整个互联网开端口 | 不开 | 开（hub 或映射的端口） | 由转发服务器对外开端口 |
+| 延迟 | 直连时低；打不通退到中继时较高（国内厂商中继多在海外） | 直连，不经中继 | 经一台服务器中转 |
+| 什么情况连不上 | 两边 NAT 都严格（对称 NAT）或网络只放行 TCP 时打不通，退到中继 | hub 那台没有公网地址、端口映射做不了、IPv6 不通 | 转发服务器挂了 |
+| 信任交给谁 | 组网工具的准入（偷到设备 token 还得先进组网），再加证书指纹 | 自己持有的公网地址 + 证书指纹 | 转发服务运营方；TCP 转发时 TLS 端到端、信任仍在证书指纹，边缘解 TLS 的服务除外（见下） |
+
+打洞的原理一句话：两边先连牵线服务器交换公网地址再同时发包；牵线服务器一直要有，两边 NAT 都严格（对称 NAT）或网络只放行 TCP 时打不通，退到中继。远程控制软件（向日葵、ToDesk、RustDesk）同理。
+
+**默认推荐打洞（组网工具）**：不要公网地址、不开端口；偷到 token 还得先进组网；CrossAgents 传的主要是文字事件，走中继也够快；它只解决连得到，中心那台仍要开着。代价是国内厂商中继多在海外、打不通时延迟高，可在国内云服务器自建中继（headscale + 自建 DERP、EasyTier 自建节点、RustDesk 那种 hbbs / hbbr）；两边都有 IPv6 时更容易打通。
+
+服务器转发要用 TCP 转发，TLS 才是端到端的；Cloudflare 这类在边缘解开 TLS 的服务会失去端到端，固定指纹也用不了。
+
+hub 放云上：对话里有代码片段和 diff，公司代码先确认合规（沿用 §10）。
+
+**待评估**：把打洞做进 `crossagents` 二进制，比如 iroh 这类 Rust 库（按公钥拨号、自带打洞和中继）。GUI 安装包本来就带这个二进制，可以在本机起转发，Electron 照旧连 `127.0.0.1`；身份即公钥，和 §10「认指纹不认地址」一致；代价是要运营中继、UDP 被封的网络要能退回 TCP 中继。再往后：GUI 和节点之间大文件直接打洞传，不绕 hub，缓解 §7.5 的带宽瓶颈。
+
+## 15. 单干模式
+
+结论：连不上中心时，Mac 用本机 hub + 内置节点继续工作；GUI 记中心和本机两个 hub，连不上中心就切到本机，界面上始终标明当前连的是哪个。结构仍照 §3：GUI 哪台都能开，中心 hub 只有一处，每台跑 agent 的机器一个 node；Mac 是 GUI + 节点（§11 第 3 条已定）。要让 Mac 带出门也能单干，hub 也要能在 macOS 上跑，和 Windows 同一份代码（[MACOS.md](tasks/MACOS.md) §4）。
+
+- 一个 agent 只归一个 hub：中心建的 agent 在中心掉线时照常跑，事件攒在节点上等中心回来补发（§7.4）；单干时新建的 agent 归本机 hub。
+- 单干期间的对话第一版分开放，GUI 里「本机」「中心」各看各的。以后合并进中心：节点本来就要保留自己 agent 的追加事件日志（§7.5），中心回来后补发过去，中心把这些 agent 收编为该节点上的 agent（CLI 原生会话文件在节点上，能续）。Chat 好合；单干期间跑的 Work 牵涉任务和合并状态，先不合。
+
+## 16. 扩展在多节点下
+
+结论：扩展仍按 [EXTENSIONS.md](EXTENSIONS.md) 的快照 + 指纹 + 人工批准模型，批准只在 hub 做一次，快照靠指纹标识，所有机器认同一个指纹；多节点只改「代码在哪跑」和「字节怎么取」。和 [EXTENSIONS.md](EXTENSIONS.md) §9「代码在哪跑：`runs_on`」、§9「查看器」互相引用。
+
+- `runs_on = "node"` 的工具（见 [EXTENSIONS.md](EXTENSIONS.md) §9「代码在哪跑：`runs_on`」）：hub 按指纹把已批准的快照发给节点，节点校验哈希一致才执行并缓存；批一次处处能跑，节点上不会跑出和人看过的不一样的东西。`CROSSAGENTS_URL` 指向节点本机的转发端点（§7.2 里 MCP 走 node 转发的同一方案）。
+- 创造模式现在假设 agent 和 hub 同盘：agent 直接写 `<home>/extensions/<name>`（默认 `~/.crossagents/extensions/<name>`，[paths.rs](../crates/hub/src/paths.rs) `Paths::extensions`），由 hub 的 [registry.rs](../crates/hub/src/extensions/registry.rs) `Registry::request_enable` 经 [snapshot.rs](../crates/hub/src/extensions/snapshot.rs) `snapshot::create` 生成快照、算指纹（[EXTENSIONS.md](EXTENSIONS.md) §2、§7）。远程节点上的 agent 改为由节点打包这个目录交给 hub，仍由 hub 生成快照、算指纹。
+- GUI 部分和查看器的字节都经 hub：GUI → hub → 文件所在的节点（B3 的读文件接口）；节点离线就不可看（同 §7.5 附件的规矩）。查看器见 [EXTENSIONS.md](EXTENSIONS.md) §9「查看器」。
