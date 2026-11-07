@@ -1,6 +1,7 @@
 # 扩展（插件）设计稿
 
-> 状态：E1 到 E4 已实现并走过真实的端到端验收（§8）。目标是**随手定制**：在对话里让 agent 写一个工具、一段提示词或一个面板，
+> 状态：E1 到 E4 已实现并走过真实的端到端验收（§8）。扩展 api 2 只有设计（§9），W1–W4 未开工。
+> 目标是**随手定制**：在对话里让 agent 写一个工具、一段提示词或一个面板，
 > 不编译、不重启 hub、不发版就能用上。
 >
 > 接口形状以 [crates/api-types/src/lib.rs](../crates/api-types/src/lib.rs) 的 `Extension*` 类型、
@@ -180,6 +181,7 @@ write 级的扩展拿着自己的 token 调这条路由，hub 会把它当成人
 这条在两处挡：`access::refusal`（策略点）和路由处理函数里再检查一次。agent 的会话 token 本来就只到 `/v1/me*`。
 
 同页面运行的 GUI 扩展之间互相分不开（§5），所以 `ca.tools.call` 限定“只调自己的工具”只是约定，不是安全边界。
+隔离 webview 里这一条是真边界，见 §9「Webview」。
 
 ### 扩展的 token
 
@@ -344,7 +346,7 @@ v1 只追加，不替换：替换后 hub 再改说明，覆盖的版本就会悄
   `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; …`，
   面板会带自己的 CSS、图标和字体，所以 `script-src`、`style-src`、`img-src`、`font-src` 都要加
   `crossagents-ext:`（`font-src` 现在没单列，靠 `default-src`，要补一条）。`connect-src` 不加：扩展访问 hub
-  走 bridge，不自己发请求。开发服务器的 `devCsp`（`vite.config.ts`）同步改。
+  走 bridge，不自己发请求。开发服务器的 `devCsp`（`vite.config.ts`）同步改。隔离文档自己的 CSP 见 §9「Webview」。
 - **指纹放在路径里，不用查询参数。** `index.js?v=2` 里的 `import "./panel.js"` 解析出的 URL 没变，依赖可能还是旧的；
   路径带指纹后，相对 import、CSS 和图片都自然落到同一版本。资源用 `new URL("./x.png", import.meta.url)` 取。
 - 切换版本时：宿主先清理旧版本的注册，再 `import()` 新入口，页面不用刷新。旧模块留在内存里直到整页刷新，模块缓存无法清除，
@@ -421,7 +423,7 @@ export function activate(ca) {
 ## 6. 信任模型
 
 先说清楚**不能防什么**：扩展进程以用户身份运行，读得到 `~/.crossagents/token`；GUI 扩展和主程序同一页面，
-能调终端接口。`access` 级别只防写错，防不住恶意代码。bypass 模式的 worker 本来就能动这些文件。
+能调终端接口。和主页面不同源的 webview 见 §9。`access` 级别只防写错，防不住恶意代码。bypass 模式的 worker 本来就能动这些文件。
 也就是说，这里没有沙箱，和 dsh 的已安装插件一样（dsh 也在宿主进程里跑）。
 
 能做的是不让扩展**悄悄生效**，防误操作和提示词注入：
@@ -504,3 +506,156 @@ E1 和 E2 涉及的文件不重叠，可以并行：`/v1/extensions` 的形状�
 
 **v1 不做**：拦截核心流程的钩子（超时和失败时算通过还是拒绝，要先想清楚）、市场和安装源、npm 依赖管理、
 项目级扩展（`<repo>/.crossagents/extensions`，clone 一个仓库就带上可执行代码，信任问题要另外想）、多节点。
+其中「多节点」的后续在 §9：`runs_on = "node"`、字节走 hub，同盘假设记为 A2 / B3 的已知限制；细节在
+[MULTI-NODE.md](MULTI-NODE.md) §12 和 §16「扩展在多节点下」。
+
+## 9. 扩展 api 2
+
+**只有设计，W1–W4 未开工。** 目标是 VS Code 那种可扩展性：扩展逻辑仍在进程外（现有的工具、`[[on]]`、`[service]`，
+相当于 VS Code 的 extension host，这一层不动），丰富界面放进隔离的 webview。不推翻现有生命周期：快照、指纹、
+人工批准、扩展 token 都照旧。
+
+### 现在为什么做不到
+
+现在做不了 VS Code 那种隔离界面：主页面嵌不了别的文档，二进制接口不给字节，
+页内扩展用的是人的总 token，hub 没有「请 GUI 执行再交回结果」的通道。
+`api = 2` 的描述文件今天会被拒绝。
+
+- **主页面 CSP 嵌不了 iframe，也跑不了 WASM。** [apps/gui/index.html](../apps/gui/index.html) 现在是
+  `default-src 'self'; script-src 'self' crossagents-ext:; style-src 'self' crossagents-ext: 'unsafe-inline'; img-src 'self' crossagents-ext: data:; font-src 'self' crossagents-ext: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'`。
+  没有 `frame-src`，回落到 `default-src 'self'`，嵌不了 `crossagents-ext:` 的 iframe。`connect-src` 只有 `'self'`，
+  扩展连自己快照里的文件都 fetch 不到。没有 `'wasm-unsafe-eval'`，也没有 `blob:`，WASM 解码（three.js 的 Draco / KTX2）、
+  Worker、blob 贴图都会被拦。[apps/gui/vite.config.ts](../apps/gui/vite.config.ts) 的 `devCsp` 只给 `script-src` 加
+  `'unsafe-inline'`、给 `connect-src` 加 `ws://localhost:* ws://127.0.0.1:*`，同样没有 `frame-src`。
+- **所有 webContents 都不许开窗、不许离开应用、不许 `<webview>`。** [apps/gui/electron/main.cts](../apps/gui/electron/main.cts)
+  的 `web-contents-created`：`setWindowOpenHandler` 一律 deny（http(s) 交给系统浏览器），`will-navigate` 拦住离开应用，
+  `will-attach-webview` 拒绝。
+- **二进制文件不给字节。** [crates/api-types/src/lib.rs](../crates/api-types/src/lib.rs) 的 `FileContentResponse`：
+  二进制没有 `text`，只有 `binary: true`，响应里没有字节。
+- **页内 `ca.hub.request` 用人的凭据。** [apps/gui/src/extensions/host.ts](../apps/gui/src/extensions/host.ts) 的 `makeCa`
+  把 `hub.request` 原样转给 `options.request`。页面上接的是 [apps/gui/src/extensions/defaults.ts](../apps/gui/src/extensions/defaults.ts)
+  的 `hubRequest`，走主进程 bridge，带的是 `<home>/token` 里的总 token。GUI 扩展声明的 `access` 因此实际不生效。
+  §6 已经承认页内扩展和主程序同一页面。
+- **hub 不会请 GUI 做事再收回结果。** hub 到 GUI 的方向是事件流：客户端来订阅，hub 只往下推。扩展相关的事件是
+  `extension.changed` 和 `extension.call.finished`（[crates/core/src/event.rs](../crates/core/src/event.rs)）。
+  没有一条「请 GUI 执行一件事、把结果交回来」的通道。
+- **`api = 2` 今天会被拒绝；静默丢掉的是 `api = 1` 里的未知字段。**
+  [crates/hub/src/extensions/manifest.rs](../crates/hub/src/extensions/manifest.rs) 的 `Manifest::read` 只认 `api == 1`，
+  否则报 `unsupported extension api {}; expected 1`。旧 hub 遇到 `api = 2` 的描述文件是明确拒绝。
+  `Manifest` 和 `Tool` 都没有 `deny_unknown_fields`，所以写进 `api = 1` 描述文件的新表和新字段会被丢掉，hub 不报错。
+  因此新字段只在 `api = 2` 下有效，新 hub 同时接受 1 和 2。
+
+### Webview
+
+隔离文档就是 iframe，地址 `crossagents-ext://<name>/<指纹>/<entry>.html`。不用 `<webview>` 标签（Electron 不推荐，
+现在也被 `will-attach-webview` 拦住），不用 WebContentsView（原生叠层，和 React 布局、弹出菜单配合差）。
+
+协议已经按这个来源注册好。[apps/gui/electron/main.cts](../apps/gui/electron/main.cts) 的 `registerSchemesAsPrivileged` 把 `crossagents-ext` 标成 standard、secure、
+supportFetchAPI、corsEnabled。standard 之后来源是 `crossagents-ext://<name>`：每个扩展一个来源，与主页面、与其他扩展都不同源。
+[apps/gui/electron/extProtocol.cts](../apps/gui/electron/extProtocol.cts) 的 `extensionFile` 已经按这个形状解析 URL：
+`crossagents-ext://<name>/<指纹>/<路径>`。子 frame 不跑 preload，拿不到 `window.crossagents`。窗口现在的 `webPreferences`
+与此一致：`sandbox: true`，没有 `nodeIntegrationInSubFrames`（默认 false，preload 不进子 frame）；preload 在
+[apps/gui/electron/preload.cts](../apps/gui/electron/preload.cts)。
+
+每个文档的 CSP 由 `serveExtension`（`main.cts`）按已批准的 `[capabilities]` 生成：默认 `default-src 'none'`，只许自己的来源；
+声明 `wasm` 才加 `'wasm-unsafe-eval'`；`net` 里的来源才进 `connect-src`。主页面 CSP 只加 `frame-src crossagents-ext:`，
+`devCsp` 同步。`serveExtension` 现在回 `Access-Control-Allow-Origin: *`，收紧到主程序和同一扩展。
+
+子 frame 的导航用 `will-frame-navigate` 锁在自己的来源。`net` 再在 `session.webRequest` 拦一道，不只靠 CSP。
+
+通信靠宿主转交的 MessagePort。webview 里的 `ca` 是精简的：`tools.call`（只能调自己扩展的工具；§3 里这只是约定，
+到 webview 才是真边界）、`events.on`、`hub.request`（用 hub 给该扩展签发的 token，由 hub 按 `access` 检查）、
+`state.get` / `state.set`、主题变量、`openFile`、`platform`。
+
+隐藏时默认销毁，`retain = true` 才保留，靠 `state` 恢复。跨源 iframe 应跑在独立进程，死循环不拖垮主界面：**要实测**。
+
+### 查看器
+
+按文件类型决定怎么打开，相当于 VS Code 的 custom editor。描述文件写 `[[viewers]]`，`patterns = ["*.glb", "*.gltf", ...]`。
+
+所有文件链接都走 [apps/gui/src/FileViewer.tsx](../apps/gui/src/FileViewer.tsx) 的 `openFile`。它先查匹配的查看器，
+没有就照旧用文本查看器。现在的 `openFile` 没有查查看器，直接打开文本查看器；同文件里 `binary: true` 只显示
+「这是一个二进制文件」，并建议用默认程序打开。
+
+打开时宿主发一个句柄，webview 只能读这个文件所在目录（如 `crossagents-file://<句柄>/…`），这样 glTF 相对引用的
+`.bin` 和贴图能加载。
+
+**字节一律从 hub 的二进制接口流式取**，不走 `FileContentResponse` 那种 JSON，也不让 GUI 主进程读本机磁盘：
+GUI 和 hub、节点可能不在同一台机器。下面两处是同盘假设，记为 [MULTI-NODE.md](MULTI-NODE.md) §12 的 A2（远程 GUI）
+和 B3（远程开发）要改的已知限制；扩展在多节点下怎么拿字节，见同文 §16「扩展在多节点下」。
+
+- `serveExtension`（[apps/gui/electron/main.cts](../apps/gui/electron/main.cts)）问过 hub 的 `/v1/extensions` 之后，用
+  [apps/gui/electron/extProtocol.cts](../apps/gui/electron/extProtocol.cts) 的 `extensionRealFile` 读本机 `<home>/extension-versions`。
+- `shell:open-path`（`main.cts`）经 hub 的 `files/resolve` 拿到 `abs_path`，再 `shell.openPath` 打开本机绝对路径。
+
+### 浏览器视图
+
+`kind = "browser"` 用 WebContentsView，不用 iframe。大站多用 `X-Frame-Options` / `frame-ancestors` 禁止被嵌；
+SameSite 默认 Lax，跨站 iframe 不带登录 cookie。
+
+每个扩展一个持久分区 `persist:ext-<name>`，这个分区里不注册 `crossagents-ext:`。规则单独一套：导航受 `net` 限制，
+弹窗和 OAuth 开成新标签，摄像头、定位、通知交给人决定，下载要问，证书错误拒绝。现在默认会话的权限由
+[apps/gui/electron/permissions.cts](../apps/gui/electron/permissions.cts) 的 `permissionAllowed` 决定，只放行
+`clipboard-sanitized-write`，摄像头和麦克风在内的其余权限一律拒绝。浏览器分区不沿用这一条，改由人决定。
+摄像头和麦克风在 macOS 上还要在打包时声明用途，见 [docs/tasks/MACOS.md](tasks/MACOS.md) §3「打包与分发」。
+
+全局的 `web-contents-created` 改成只管主窗口和 webview。浏览器视图不走「不许开窗、不许离开应用、不许 `<webview>`」那三条。
+
+叠层要同步位置（停靠栏拖拽、`setZoomLevel` 缩放），菜单和弹窗出现时隐藏，或换成截图。第一版可以先做成独立窗口。
+
+控制接口由宿主经 `webContents.debugger` 实现：`navigate`、`snapshot`（可读文本加元素编号）、`click`、`type`、`scroll`、
+`screenshot`。不把原始 CDP 交给扩展。网页内容是不可信输入，是提示词注入的入口，操作按站点批准。
+
+### 代码在哪跑：`runs_on`
+
+工具级字段，`runs_on = "hub" | "node" | "gui"`。
+
+- **`hub`**：现在的行为，只用 hub 接口的工具。`[[on]]` 和 `[service]` 第一版都留在 hub。
+- **`node`**：在调用它的 agent 所在节点上跑。阶段见 [MULTI-NODE.md](MULTI-NODE.md) §12，扩展在节点上的安排见同文
+  §16「扩展在多节点下」。
+- **`gui`**：运行器不起进程，发一个事件（如 `extension.gui_call`）。GUI 经两条新路由认领、交回结果；这两条路由只认人的凭据。
+  沿用 `call_id`、超时和 `extension.call.finished`。没有 GUI 能执行就明确报错。多个 GUI 在线时交给人正在用的那个
+  （打开着这个会话、最近有操作），不是先到先得。
+
+agent 在节点上起的 `localhost:5173`，在另一台机器的 GUI 里打不开。优先用同机的 GUI，或经 node 转发端口。
+连通方式见 [MULTI-NODE.md](MULTI-NODE.md) §14「连通方式」，扩展侧见 §16。
+
+### 描述文件
+
+入口是声明式的，全部计入指纹。GUI 不执行扩展代码就知道有哪些入口，用到时才加载，批准界面也能列出来。
+
+- `[[views]]`：`kind = webview | browser`、`slot = page | tab`、`entry`、`retain`。
+- `[[viewers]]`：按 `patterns` 匹配文件。
+- `[capabilities]`：`net`、`wasm`、`files`、`browser` 等。
+
+`ExtensionVersion`（[crates/api-types/src/lib.rs](../crates/api-types/src/lib.rs)）带上 capabilities、views、viewers。
+批准差异里单独标出 capabilities 的变化，照 `ExtensionDiffResponse` 的 `access_changed`：它决定文档能连哪里、能不能跑 WASM，
+要单独给人看。
+
+`runs_on = "node"` 的工具允许按系统分别写命令。写法照 [DESIGN.md](DESIGN.md) §9.3：`[locate.paths]` 可以按
+`windows`、`macos`、`linux` 分键。仓库里 `[locate]` 已经写成这种键的，只有
+[crates/plugins/agents/codex.toml](../crates/plugins/agents/codex.toml) 的 `[locate.bundled]`（`windows` 和 `macos`）。
+[crates/plugins/agents/claude.toml](../crates/plugins/agents/claude.toml) 是另一条：`[[install.methods]]` 写
+`os = ["windows"]` 和 `os = ["macos", "linux"]`。[crates/plugins/agents/cursor.toml](../crates/plugins/agents/cursor.toml)
+只有 Windows 的安装方法（`os = ["windows"]`）。`extension_check` 对明显只属于一个系统的命令给提示。
+
+页内 `ca` 保留，定位成「小而原生」的一档：卡片、设置、小标签。要不要逐步收紧到按 `access` 检查：**待定**。
+现有 [extensions/debug/extension.toml](../extensions/debug/extension.toml) 的 `access = "read"`，收紧不会弄坏它。
+
+### 不做
+
+放宽主页面 CSP、开 `<webview>`、把 bridge（`window.crossagents`）给子 frame、把原始 CDP 交给扩展、npm 依赖管理。
+主页面 CSP 只加 `frame-src crossagents-ext:`。npm 依赖管理在 §8 的 v1 不做里已经有，api 2 也不做。
+
+### 分期
+
+写成和 §8 一样的三列表（阶段 / 内容 / 验收）。四个阶段都还没开工。
+
+| 阶段 | 内容 | 验收 |
+|---|---|---|
+| **W1**（未开工） | webview、`[capabilities]`、`api = 2`、批准界面 | three.js 页面带 WASM 正常渲染；webview 里写死循环，主界面仍能用；停用后 webview 消失 |
+| **W2**（未开工） | 查看器，以及限定范围的文件访问（字节走 hub） | 点对话里的 `out/car.gltf` 打开 3D，相对 `.bin` 和贴图能加载；范围外的路径被拒 |
+| **W3**（未开工） | 浏览器视图 | 登录 GitHub 后重启仍是登录状态；禁止被嵌的网站能打开；菜单不被盖住 |
+| **W4**（未开工） | GUI 侧工具 | agent 能打开网页、读成文本、点击、截图，人看得到、能接手；没有 GUI 时明确报错 |
+
+这里的 W1–W4 是扩展 api 2 的实现阶段，和 [docs/tasks/W1.md](tasks/W1.md) 的轻量 Work 不是一回事。
