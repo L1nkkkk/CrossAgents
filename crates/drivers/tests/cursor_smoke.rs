@@ -299,3 +299,26 @@ async fn smoke_interrupt_kills_process() {
     );
     session.shutdown().await;
 }
+
+// Both installed CLI versions emit a `usage` object on the terminal `result`
+// stream-json event; the driver turns it into an `agent.usage` event. This smoke
+// proves that `result.usage` channel end-to-end against a signed-in CLI.
+#[tokio::test]
+#[ignore = "needs an installed, signed-in Cursor CLI"]
+async fn smoke_reports_token_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    let (spec, mut rx) = spec(dir.path(), vec![]);
+    let session = driver().open(spec).await.unwrap();
+    let (_, streamed, events) = turn(&*session, &mut rx, "Reply with exactly: READY").await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            SessionEventKind::Usage {
+                tokens: Some(tokens),
+                ..
+            } if tokens.total > 0
+        )),
+        "no agent.usage with tokens.total>0: {streamed} {events:?}"
+    );
+    session.shutdown().await;
+}
