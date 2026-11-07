@@ -692,6 +692,12 @@ async fn create_agent(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateAgentRequest>,
 ) -> ApiResult<(StatusCode, Json<Agent>)> {
+    if cfg!(windows)
+        && req.plugin == "cursor"
+        && req.config.get("permission").and_then(|v| v.as_str()) == Some("guard")
+    {
+        return Err(AppError::bad_request(CURSOR_WINDOWS_GUARD_ERROR));
+    }
     let (name, name_source) = crate::identity::free_name(
         state.store().as_ref(),
         req.name.as_deref(),
@@ -823,6 +829,8 @@ async fn update_profile(
     Ok(Json(agent))
 }
 
+const CURSOR_WINDOWS_GUARD_ERROR: &str = "Cursor cannot ask before each action on Windows; set this agent's permission to 自动执行 (bypass)";
+
 /// `POST /v1/agents/{key}/settings`: which of Claude Code's settings the agent loads, and
 /// whether their hooks may run (docs/tasks/DOGFOOD.md §6, SELF.md §B5). The CLI reads both
 /// only at launch, so an idle session is stopped and resumes with them on the next message; a
@@ -844,9 +852,7 @@ async fn agent_settings(
             && agent.plugin == "cursor"
             && permission == Some(crossagents_core::PermissionPolicy::Guard)
         {
-            return Err(AppError::bad_request(
-                "Cursor cannot ask before each action on Windows; set this agent's permission to 自动执行 (bypass)",
-            ));
+            return Err(AppError::bad_request(CURSOR_WINDOWS_GUARD_ERROR));
         }
         match permission {
             Some(p) => {

@@ -57,6 +57,8 @@ import {
 import { accountOf, effortOf, prettyModel } from "../lib/models";
 import { modelPickValue, parseModelPick, reasoningWorkerRequest, workerAgentRequest, workerModelGroups, workerModelLabel, workerTarget, type ReasoningChoice } from "../lib/workerModels";
 import { ReasoningPicks } from "../reasoningPicks";
+import { PermissionPicks, applyPermission } from "../permissionPicks";
+import { configWithPermission, permissionOf, type PermissionChoice } from "../lib/permission";
 import { cursorMode, reasoningModels } from "../lib/reasoning";
 import { refusedTasks, unusableOf } from "../lib/unusable";
 import { StateWord, TaskChanges } from "../parts";
@@ -873,6 +875,9 @@ export function usePlanApproval(run: Run, busy: boolean) {
   /** The hub's refusal of the approval, by task key: shown on the task's own row. */
   const [refused, setRefused] = useState<Record<string, string>>({});
   const [reasoning, setReasoning] = useState<Record<string, ReasoningChoice>>({});
+  /** Per task: 危险操作怎么处理, as chosen here. Absent: the assignee's own setting (a new
+   * worker on a model follows the run / the default). */
+  const [perms, setPerms] = useState<Record<string, PermissionChoice>>({});
   const [maxUsd, setMaxUsd] = useState(policy.budget.max_usd?.toString() ?? "");
   const [maxMinutes, setMaxMinutes] = useState(policy.budget.max_minutes?.toString() ?? "");
   const [maxTokens, setMaxTokens] = useState(policy.budget.max_tokens != null ? String(policy.budget.max_tokens / 1000) : "");
@@ -897,9 +902,27 @@ export function usePlanApproval(run: Run, busy: boolean) {
     return agent ? `agent:${agent.id}` : "";
   };
   const pickOf = (task: PlannedTask) => picks[task.key] ?? planned(task);
+  /** The agent a pick stands for: a teammate, the run's default worker, or none for a new one. */
+  const assigneeOf = (task: PlannedTask): Agent | undefined => {
+    const pick = pickOf(task);
+    if (pick.startsWith("agent:")) return everyone.find((a) => a.id === pick.slice("agent:".length));
+    return pick ? undefined : fallback;
+  };
+  /** The permission in force for this row: the choice made here, else its assignee's own. */
+  const permOf = (task: PlannedTask): PermissionChoice => {
+    if (Object.prototype.hasOwnProperty.call(perms, task.key)) return perms[task.key];
+    return permissionOf(assigneeOf(task) ?? {});
+  };
+  /** The plugin that choice applies to: the assignee's, or the one a new worker would run on. */
+  const permPluginOf = (task: PlannedTask): string | undefined =>
+    assigneeOf(task)?.plugin ?? parseModelPick(pickOf(task))?.plugin ?? fallback?.plugin;
+  // A guard run with a worker set to bypass: it acts without asking (approval.rs `unguarded`).
+  const guardRun = presetPolicy(preset, policy).approvals === "guard";
 
-  /** The worker a pick stands for: a teammate, or a new agent on the model's own plugin. */
-  async function workerOf(task: PlannedTask, made: Map<string, string>): Promise<string | null> {
+  /** The worker a pick stands for: a teammate, or a new agent on the model's own plugin.
+   * A new agent is made with the permission chosen for the row; `created` keeps it so a later
+   * task on the same new worker can still correct the permission. */
+  async function workerOf(task: PlannedTask, made: Map<string, string>, created: Map<string, Agent>, permission: PermissionChoice): Promise<string | null> {
     const pick = pickOf(task);
     const override = task.fresh || parseModelPick(pick) ? reasoning[task.key] : undefined;
     if (override) {
@@ -907,13 +930,15 @@ export function usePlanApproval(run: Run, busy: boolean) {
       const template = pick.startsWith("agent:") ? everyone.find((a) => a.id === pick.slice(6)) : !pick ? fallback : undefined;
       const base = template ?? (parsed ? workerAgentRequest(workerTarget(parsed.plugin, parsed.model, accounts, leadRef), run.repo) : undefined);
       if (!base) throw new Error("无法确定任务执行者，请重新选择");
-      const body = reasoningWorkerRequest(base, run.repo, override);
+      const built = reasoningWorkerRequest(base, run.repo, override);
+      const body = { ...built, config: configWithPermission(built.config, permission) };
       const key = JSON.stringify([pick, body]);
       const known = made.get(key);
       if (known) return known;
-      const id = (await api.createAgent(body)).id;
-      made.set(key, id);
-      return id;
+      const agent = await api.createAgent(body);
+      created.set(agent.id, agent);
+      made.set(key, agent.id);
+      return agent.id;
     }
     if (!pick) return null;
     if (pick.startsWith("agent:")) return pick.slice("agent:".length);
@@ -927,17 +952,27 @@ export function usePlanApproval(run: Run, busy: boolean) {
     const found = everyone.find(
       (a) => a.id !== run.planner && a.plugin === target.plugin && a.model === target.model && accountOf(a) === target.account && wsKey(a.cwd) === wsKey(run.repo),
     );
-    const id = found?.id ?? (await api.createAgent(workerAgentRequest(target, run.repo))).id;
-    made.set(pick, id);
-    return id;
+    const request = workerAgentRequest(target, run.repo);
+    const agent = found ?? (await api.createAgent({ ...request, config: configWithPermission(request.config, permission) }));
+    if (!found) created.set(agent.id, agent);
+    made.set(pick, agent.id);
+    return agent.id;
   }
 
   async function approve(): Promise<RunDetail> {
     setRefused({});
     const made = new Map<string, string>();
+    const created = new Map<string, Agent>();
     const assignees: Record<string, string | null> = {};
     try {
-      for (const task of run.plan) assignees[task.key] = await workerOf(task, made);
+      for (const task of run.plan) assignees[task.key] = await workerOf(task, made, created, permOf(task));
+      // The row's choice has to reach the agent itself before the run starts; a new worker
+      // already carries it in its create body, so only a difference is written here.
+      for (const task of run.plan) {
+        const id = assignees[task.key];
+        const agent = id ? everyone.find((a) => a.id === id) ?? created.get(id) : undefined;
+        if (agent && permissionOf(agent) !== permOf(task)) await applyPermission(agent, permOf(task));
+      }
       const settled: RunPolicy = {
         ...presetPolicy(preset, policy),
         budget: {
@@ -986,6 +1021,13 @@ export function usePlanApproval(run: Run, busy: boolean) {
     const set = (v: string) => {
       setPicks({ ...picks, [task.key]: v });
       setReasoning((prev) => { const next = { ...prev }; delete next[task.key]; return next; });
+      // Another assignee means its own permission, not the one just picked for the last one.
+      setPerms((prev) => {
+        if (!Object.prototype.hasOwnProperty.call(prev, task.key)) return prev;
+        const next = { ...prev };
+        delete next[task.key];
+        return next;
+      });
       // Choosing again is the fix: the hub's refusal of the old pick has nothing left to say.
       setRefused((prev) => {
         if (!(task.key in prev)) return prev;
@@ -1082,6 +1124,16 @@ export function usePlanApproval(run: Run, busy: boolean) {
     return (
       <span className="who-pick" data-task={task.key}>
         <ChipMenu icon={icon} label={label} title={chosenWhy ?? "执行者"} items={items} align="right" searchable menuClassName="who-pick-menu" />
+        {/* 危险操作怎么处理, for this task's assignee; a guard run with bypass says so here. */}
+        <PermissionPicks
+          variant="compact"
+          label="这个任务执行者的权限"
+          value={permOf(task)}
+          onChange={(choice) => setPerms({ ...perms, [task.key]: choice })}
+          plugin={permPluginOf(task)}
+          disabled={busy}
+        />
+        {guardRun && permOf(task) === "bypass" && unguardedMark}
         {refusal && (
           <span className="plan-refused" title={refusal} role="alert">
             <span className="chip small danger">hub 拒绝</span>
