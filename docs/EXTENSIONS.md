@@ -517,7 +517,7 @@ E1 和 E2 涉及的文件不重叠，可以并行：`/v1/extensions` 的形状�
 
 ### 现在为什么做不到
 
-现在做不了 VS Code 那种隔离界面：主页面嵌不了别的文档，二进制接口不给字节，
+现在做不了 VS Code 那种隔离界面：主页面嵌不了别的文档，读文件接口不给二进制文件的字节，
 页内扩展用的是人的总 token，hub 没有「请 GUI 执行再交回结果」的通道。
 `api = 2` 的描述文件今天会被拒绝。
 
@@ -618,7 +618,7 @@ SameSite 默认 Lax，跨站 iframe 不带登录 cookie。
   （打开着这个会话、最近有操作），不是先到先得。
 
 agent 在节点上起的 `localhost:5173`，在另一台机器的 GUI 里打不开。优先用同机的 GUI，或经 node 转发端口。
-连通方式见 [MULTI-NODE.md](MULTI-NODE.md) §14「连通方式」，扩展侧见 §16。
+连通方式见 [MULTI-NODE.md](MULTI-NODE.md) §14「连通方式」，扩展侧见同文 §16「扩展在多节点下」。
 
 ### 描述文件
 
@@ -629,7 +629,7 @@ agent 在节点上起的 `localhost:5173`，在另一台机器的 GUI 里打不�
 - `[capabilities]`：`net`、`wasm`、`files`、`browser` 等。
 
 `ExtensionVersion`（[crates/api-types/src/lib.rs](../crates/api-types/src/lib.rs)）带上 capabilities、views、viewers。
-批准差异里单独标出 capabilities 的变化，照 `ExtensionDiffResponse` 的 `access_changed`：它决定文档能连哪里、能不能跑 WASM，
+批准差异里单独标出 capabilities 的变化，照 `ExtensionDiffResponse` 的 `access_changed`：capabilities 决定文档能连哪里、能不能跑 WASM，
 要单独给人看。
 
 `runs_on = "node"` 的工具允许按系统分别写命令。写法照 [DESIGN.md](DESIGN.md) §9.3：`[locate.paths]` 可以按
@@ -649,7 +649,7 @@ agent 在节点上起的 `localhost:5173`，在另一台机器的 GUI 里打不�
 
 ### 分期
 
-写成和 §8 一样的三列表（阶段 / 内容 / 验收）。四个阶段都还没开工。
+四个阶段都还没开工。
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
