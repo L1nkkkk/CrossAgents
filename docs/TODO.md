@@ -79,28 +79,36 @@
 开工前要定：
 
 - [ ] 中心放哪台：先用这台 Windows（A 阶段），B1 之后再考虑迁到云服务器当纯中心（只放个人项目，公司代码先确认合规）
-- 连通方式已定：局域网和公网都要，默认打洞（组网工具），非回环一律 TLS。见 [MULTI-NODE.md](MULTI-NODE.md) §14「连通方式」与 [DONE.md](DONE.md) 同名一节。
+- 连通方式已定：局域网和公网都要，默认打洞（组网工具）（[DONE.md](DONE.md) 同名一节，2026-11-07）。A 阶段远程 GUI 再走 SSH 隧道，hub 继续只听 `127.0.0.1`；非回环一律 TLS 留到下面的 A3（2026-11-08 定：人说按推荐来（run 84848059））。见 [MULTI-NODE.md](MULTI-NODE.md) §14「连通方式」、§10「安全」。
 - [ ] 两条线并行时完工监视器怎么提交：按分支提交，还是由人合并
 
-A1 账号与设备：
+A1 设备与 token：
 
-- [ ] core：`users`、`devices` 表（client / node 两类，token 只存哈希，可吊销），现有表加 `user_id`、`node_id`，老数据迁到默认用户和本机节点
-- [ ] core：`/v1/auth/login`、`crossagents user add`、设备列表与吊销接口
-- [ ] GUI：登录页、设备管理页
-- [ ] core：可信设备。新设备登录要在已有的可信设备上确认并通知；开终端、批准扩展、登录 CLI 账号、配对节点只给可信设备，并再验证一次密码（[MULTI-NODE.md](MULTI-NODE.md) §10、§12 A1）
-- [ ] core：`/v1/auth/login` 限速（[MULTI-NODE.md](MULTI-NODE.md) §10、§12 A1）
+- [ ] core：`devices` 表与三条接口。`GET /v1/devices`（read，列表不含 token 和哈希）；`POST /v1/devices`，body `{ name, kind?, level? }`（admin，默认 client / write，返回 `{ device, token }`，token 只显示一次）；`DELETE /v1/devices/{id}`（admin，幂等）。token 形如 `cad_` 加 64 位 hex，库里只存 SHA-256。client 按自己的 read / write / admin 走现有路由表；node 的 token 对现有路由一律 403。见 [MULTI-NODE.md](MULTI-NODE.md) §4.2「设备」、§10「安全」、§12 A1；级别见 [API-AUTH.md](API-AUTH.md) §3、[access.rs](../crates/hub/src/access.rs) 的 `Level`
+- [ ] CLI：`crossagents device add <name> [--level read|write|admin] [--kind client|node] [--json]`、`device list [--json]`、`device revoke <id 或名字>`。`add` 的默认输出写明 token 只显示这一次；`--json` 输出 `{ device, token }`，给 A2 经 SSH 配对用（[MULTI-NODE.md](MULTI-NODE.md) §4.3「登录与配对」）
+- [ ] GUI：设置里加「设备」页，列出设备并能吊销。本轮 GUI 不签发，签发走上面的 CLI（[MULTI-NODE.md](MULTI-NODE.md) §12 A1）
 
-A2 远程 GUI：
+A2 SSH 隧道：
+
+- [ ] GUI：设置「连接」页填 `user@host`。经 SSH 在中心上跑 `crossagents device add <设备名> --json` 配对，client token 存在 Electron 主进程；`ssh -N -L` 把中心的 `127.0.0.1` 转到本机，断线重连。连远程时关闭本机 hub 的启动与升级，切回本机时再检查一次（[MULTI-NODE.md](MULTI-NODE.md) §4.3「登录与配对」、§13.3 怎么判断是「本机自己的 hub」、§14「SSH 隧道」）
+- [ ] GUI 与查看器的字节一律经 hub，不再读本机磁盘：`serveExtension` 不再用 `extensionRealFile` 读本机 `<home>/extension-versions`；`shell:open-path` 不再拿本机绝对路径直接打开（[MULTI-NODE.md](MULTI-NODE.md) §12 A2、§16「扩展在多节点下」，[EXTENSIONS.md](EXTENSIONS.md) §9「查看器」）
+- [ ] 验收：Mac GUI 经 SSH 隧道连上 Windows hub，两端对话一致；隧道断开后重连，按 `Last-Event-ID` 续传
+
+A3 开端口直连（以后）：
+
+> 不在 A2 的路径上。A2 走 SSH，hub 仍只听 `127.0.0.1`；这一组给不能 SSH 的客户端，以后做。见 [MULTI-NODE.md](MULTI-NODE.md) §12 A3、§10「安全」。
 
 - [ ] core：`[hub] listen` 可配置，默认仍为 `127.0.0.1`；远程访问走设备 token
-- [ ] GUI：Electron 主进程改读连接配置（本机 / 远程地址 + token），设置加「连接」页、断线提示，连不上中心时可切回本机。连远程时关闭本机 hub 的启动与升级，切回本机时再检查一次（MULTI-NODE §13.3）
-- [ ] core：非回环一律 TLS（HTTPS / WSS）。hub 自签证书；第一次连接时人比对两边短码（与 [MULTI-NODE.md](MULTI-NODE.md) §4.3「登录与配对」的节点配对码同一流程）后固定指纹。身份认指纹、不认地址：一个 hub 记多个地址（局域网、组网地址、公网地址），GUI 和节点按顺序试（同文 §10、§12 A2、§14「连通方式」）
-- [ ] GUI 与查看器的字节一律经 hub，不再读本机磁盘：`serveExtension` 不再用 `extensionRealFile` 读本机 `<home>/extension-versions`；`shell:open-path` 不再拿本机绝对路径直接打开（[MULTI-NODE.md](MULTI-NODE.md) §12 A2、§16「扩展在多节点下」，[EXTENSIONS.md](EXTENSIONS.md) §9「查看器」）
-- [ ] 验收：Mac GUI 连上 Windows hub，两端对话一致，断线后按 `Last-Event-ID` 续传
+- [ ] core：非回环一律 TLS（HTTPS / WSS）。hub 自签证书；第一次连接时人比对两边短码（与 [MULTI-NODE.md](MULTI-NODE.md) §4.3「登录与配对」留给 A3 的节点配对码同一流程）后固定指纹。身份认指纹、不认地址：一个 hub 记多个地址（局域网、组网地址、公网地址），GUI 和节点按顺序试（同文 §10、§12 A3、§14「连通方式」）
+- [ ] core：`users` 表、`/v1/auth/login`、`crossagents user add`；现有表加 `user_id`，老数据归到默认用户（[MULTI-NODE.md](MULTI-NODE.md) §9「数据模型」、§4.3「登录与配对」、§12 A3）
+- [ ] GUI：登录页（账号密码）（[MULTI-NODE.md](MULTI-NODE.md) §4.3「登录与配对」、§12 A3）
+- [ ] core：可信设备。新设备登录要在已有的可信设备上确认并通知；开终端、批准扩展、登录 CLI 账号、配对节点只给可信设备，并再验证一次密码（[MULTI-NODE.md](MULTI-NODE.md) §10、§12 A3）
+- [ ] core：`/v1/auth/login` 限速（[MULTI-NODE.md](MULTI-NODE.md) §10、§12 A3）
 
 B1 node 代理：
 
-- [ ] core：`crossagents node join`、配对码、hub 与 node 的双向通道（WSS 还是 gRPC 流待定）
+- [ ] core：节点怎么连中心待定（[MULTI-NODE.md](MULTI-NODE.md) §11 第 10 条）；走 A3 开端口时才用 `crossagents node join` 与配对码。hub 与 node 的双向通道（WSS 还是 gRPC 流待定）
+- [ ] core：现有表加 `node_id`，老数据指向本机节点（[MULTI-NODE.md](MULTI-NODE.md) §9「数据模型」）
 - [ ] core：驱动拆成两半，调度留在 hub，拉起 CLI 与协议翻译挪到 node；单机模式也走内置节点，只保留一套执行路径
 - [ ] core：节点上报已装插件、登录状态、可用模型；掉线时事件写本地日志，重连补发（可复用运行时宿主的 seq 编号 + 确认 + 补发机制，见 PROCESS-SUPERVISION §2）
 - [ ] core：协作工具 MCP 走 node 转发还是直连中心（待定）
