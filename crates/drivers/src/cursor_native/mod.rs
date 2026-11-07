@@ -288,36 +288,50 @@ impl CursorSession {
         Ok(text)
     }
 
-    /// Consume this turn's `afterAgentResponse` payloads from the private plugin's
-    /// `hooks/usage/` dir, aggregate them, and emit one cumulative `Usage` event.
-    /// Nothing is emitted (and no numbers are fabricated) when the hooks wrote no
-    /// payloads. Files are deleted as they are read so the next turn only sees its
-    /// own.
-    async fn emit_usage(&self) {
+    /// Emit one cumulative `Usage` event for this turn. The terminal `result`
+    /// stream-json event carries a `usage` object in both installed CLI versions;
+    /// it is authoritative in headless `-p` mode, where the CLI never triggers
+    /// turn-level hooks (`afterAgentResponse` lives in the interactive submit
+    /// handler, not the headless loop).
+    ///
+    /// When `result` has no `usage`, fall back to the `afterAgentResponse` hook
+    /// payload files in the private plugin's `hooks/usage/` dir (the original
+    /// driver-internal channel), with a short bounded wait for late writes.
+    /// Files are always consumed so the next turn sees only its own. Nothing is
+    /// emitted, and no numbers are fabricated, when there is no data at all.
+    async fn emit_usage(&self, result_usage: Option<&Value>) {
         let mut delta = UsageDelta::default();
         let mut found = false;
-        let mut quiet = 0u32;
-        let start = std::time::Instant::now();
-        loop {
-            let batch = self.files.consume_usage();
-            if batch.is_empty() {
-                if found {
-                    quiet += 1;
+        if let Some(usage) = result_usage {
+            delta.add(&PayloadUsage::from_value(usage));
+            found = true;
+            // The stream is authoritative; still consume any hook files so they
+            // cannot leak into a later turn, but do not double count them.
+            let _ = self.files.consume_usage();
+        } else {
+            let mut quiet = 0u32;
+            let start = std::time::Instant::now();
+            loop {
+                let batch = self.files.consume_usage();
+                if batch.is_empty() {
+                    if found {
+                        quiet += 1;
+                    }
+                } else {
+                    for payload in &batch {
+                        delta.add(payload);
+                    }
+                    found = true;
+                    quiet = 0;
                 }
-            } else {
-                for payload in &batch {
-                    delta.add(payload);
+                if found && quiet >= USAGE_SETTLE_POLLS {
+                    break;
                 }
-                found = true;
-                quiet = 0;
+                if start.elapsed() >= USAGE_WAIT_MAX {
+                    break;
+                }
+                tokio::time::sleep(USAGE_WAIT_POLL).await;
             }
-            if found && quiet >= USAGE_SETTLE_POLLS {
-                break;
-            }
-            if start.elapsed() >= USAGE_WAIT_MAX {
-                break;
-            }
-            tokio::time::sleep(USAGE_WAIT_POLL).await;
         }
         if !found {
             return;
@@ -442,9 +456,10 @@ impl CursorSession {
             self.emit(SessionEventKind::Error { message });
             StopReason::Error
         };
-        // The hook payloads for this turn were written while the process ran. Emit
-        // one cumulative Usage event before signalling the turn is complete.
-        self.emit_usage().await;
+        // Emit one cumulative Usage event before signalling the turn is complete.
+        // Prefer the `result.usage` carried by stream-json; fall back to hook
+        // payload files if this CLI build omitted it.
+        self.emit_usage(turn.usage.as_ref()).await;
         let turn_id = turn.request_id;
         self.emit(SessionEventKind::TurnCompleted {
             turn_id: turn_id.clone(),
@@ -631,6 +646,8 @@ fn hook_script(usage_dir: &Path) -> (&'static str, String) {
 const WINDOWS_HOOK_SCRIPT: &str = r#"$ErrorActionPreference = 'SilentlyContinue'
 $dir = '__USAGE_DIR__'
 try {
+    # Cheap diagnostic: a marker proves this hook actually ran.
+    [System.IO.File]::WriteAllText((Join-Path $dir 'hook-fired.marker'), '1')
     $name = [guid]::NewGuid().ToString()
     $tmp = Join-Path $dir ($name + '.tmp')
     $in = [Console]::OpenStandardInput()
@@ -643,6 +660,8 @@ exit 0
 
 const UNIX_HOOK_SCRIPT: &str = r#"#!/bin/sh
 dir='__USAGE_DIR__'
+# Cheap diagnostic: a marker proves this hook actually ran.
+: > "$dir/hook-fired.marker" 2>/dev/null
 tmp=$(mktemp "${dir}/usage-XXXXXXXX") || exit 0
 cat > "$tmp" 2>/dev/null
 mv -f "$tmp" "${tmp}.json" 2>/dev/null
@@ -1167,6 +1186,32 @@ printf '%s\n' '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text
         )
     }
 
+    // What a real signed-in `agent -p ... --output-format stream-json` turn
+    // emits: the terminal `result` event carries a `usage` object. This is the
+    // cheap, local proof that the headless token channel works without a CLI.
+    fn ndjson_cli_with_result_usage(root: &Path, input: u64, output: u64) -> Vec<String> {
+        let assistant =
+            r#"{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text":"ok"}]}}"#;
+        let result = json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "ok",
+            "session_id": "chat",
+            "usage": {
+                "inputTokens": input,
+                "outputTokens": output,
+                "cacheReadTokens": 0,
+                "cacheWriteTokens": 0,
+                "reasoningTokens": 0
+            }
+        })
+        .to_string();
+        let windows = format!("\nWrite-Output '{assistant}'\nWrite-Output '{result}'\n");
+        let unix = format!("\nprintf '%s\\n' '{assistant}' '{result}'\n");
+        mock_cli(root, &windows, &unix)
+    }
+
     // Simulate an afterAgentResponse hook writing its stdin payload to a unique
     // file in the private usage dir (which is what the generated script does).
     fn write_payload(session: &CursorSession, name: &str, body: &str) {
@@ -1228,6 +1273,8 @@ printf '%s\n' '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text
         // The usage dir absolute path is baked into the script.
         assert!(body.contains(usage_dir.to_string_lossy().as_ref()));
         assert!(!body.contains(".cursor"));
+        // Cheap diagnostic: the hook writes a marker if it ever runs.
+        assert!(body.contains("hook-fired.marker"));
 
         drop(files);
         assert!(!dir.exists());
@@ -1364,6 +1411,53 @@ printf '%s\n' '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text
         let outcome = session.prompt("hi").await.unwrap();
         assert_eq!(outcome.stop_reason, StopReason::EndTurn);
         assert!(drain_usage(&mut rx).is_empty(), "no fabricated usage");
+        session.shutdown().await;
+    }
+
+    // Cheap local diagnostic for the channel the real headless CLI uses: a
+    // `result` event with a `usage` object must produce one cumulative Usage
+    // event per turn, with tokens.total > 0, without any hook payload files.
+    #[tokio::test]
+    async fn result_usage_emits_cumulative_usage_per_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let (spec, mut rx) = spec(root.path());
+        let session = CursorSession::new(
+            "chat".into(),
+            ndjson_cli_with_result_usage(root.path(), 100, 20),
+            spec,
+        )
+        .unwrap();
+        assert_eq!(
+            session.prompt("one").await.unwrap().stop_reason,
+            StopReason::EndTurn
+        );
+        let usages = drain_usage(&mut rx);
+        assert_eq!(usages.len(), 1, "one Usage event per turn");
+        let (used, size, cost_usd, tokens) = &usages[0];
+        assert_eq!(*used, 120);
+        assert_eq!(*size, 0);
+        assert!(cost_usd.is_none());
+        assert_eq!(
+            tokens.as_ref().unwrap(),
+            &TokenUsage {
+                input: 100,
+                cached_input: 0,
+                output: 20,
+                reasoning_output: 0,
+                total: 120,
+            }
+        );
+        assert!(tokens.as_ref().unwrap().total > 0);
+
+        // A second turn on the same session keeps the cumulative counter.
+        assert_eq!(
+            session.prompt("two").await.unwrap().stop_reason,
+            StopReason::EndTurn
+        );
+        let usages = drain_usage(&mut rx);
+        assert_eq!(usages.len(), 1);
+        assert_eq!(usages[0].0, 120);
+        assert_eq!(usages[0].3.as_ref().unwrap().total, 240);
         session.shutdown().await;
     }
 }

@@ -59,6 +59,10 @@ pub struct Turn {
     pub model: Option<String>,
     pub request_id: Option<String>,
     pub stop_reason: Option<StopReason>,
+    /// Raw `usage` object from the terminal `result` event. Present in both
+    /// installed CLI versions; headless mode never fires turn-level hooks, so
+    /// this is the authoritative per-turn token source.
+    pub usage: Option<Value>,
     tools: HashMap<String, Value>,
 }
 
@@ -106,7 +110,9 @@ impl Turn {
                             .unwrap_or_else(|| "Cursor reported an error".into()),
                     });
                 }
-                // `result` repeats all deltas. duration_ms is not token usage.
+                // `result` repeats all deltas; `duration_ms` is not token usage,
+                // but `usage` carries the turn's token counts in both versions.
+                self.usage = raw.get("usage").filter(|u| u.is_object()).cloned();
             }
             _ => {}
         }
@@ -241,6 +247,30 @@ mod tests {
             matches!(turn.line(r#"{"type":"result","is_error":true,"result":"failed"}"#), Line::Events(e) if matches!(&e[0].kind, SessionEventKind::Error { message } if message == "failed"))
         );
         assert_eq!(turn.stop_reason, Some(StopReason::Error));
+    }
+
+    #[test]
+    fn result_captures_usage_object_but_not_duration() {
+        // Both installed CLI versions embed a `usage` object in the terminal
+        // `result` event. It is the headless token source; `duration_ms` alone
+        // must not be mistaken for usage.
+        let mut with_usage = Turn::default();
+        assert_eq!(
+            with_usage.line(r#"{"type":"result","subtype":"success","duration_ms":5234,"duration_api_ms":5234,"is_error":false,"result":"ok","session_id":"chat","usage":{"inputTokens":7730,"outputTokens":22,"cacheReadTokens":3968,"cacheWriteTokens":0,"reasoningTokens":21}}"#),
+            Line::Skip
+        );
+        let usage = with_usage.usage.expect("usage captured");
+        assert_eq!(usage["inputTokens"], json!(7730));
+        assert_eq!(usage["outputTokens"], json!(22));
+        assert_eq!(usage["cacheReadTokens"], json!(3968));
+        assert_eq!(usage["cacheWriteTokens"], json!(0));
+
+        let mut without_usage = Turn::default();
+        assert_eq!(
+            without_usage.line(r#"{"type":"result","subtype":"success","duration_ms":5234,"is_error":false,"result":"ok","session_id":"chat"}"#),
+            Line::Skip
+        );
+        assert!(without_usage.usage.is_none());
     }
 
     #[test]
