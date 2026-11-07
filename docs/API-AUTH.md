@@ -28,7 +28,7 @@ hub 只监听 `127.0.0.1`（`[hub] listen` 尚未可配，A3 才放开；A2 走 
 
 ## 2. 接口清单
 
-级别按"读 / 写 / 管理"划分，用于后续拆分凭据。等级是目标，不是现状。
+级别按「读 / 写 / 管理」划分，由 [access.rs](../crates/hub/src/access.rs) 的 `required` 执行：读是 read，改状态是 write，碰凭据或 hub 的生命周期是 admin。
 
 ### 2.1 免鉴权
 
@@ -84,7 +84,7 @@ A3 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 | DELETE | `/v1/extensions/calls/{id}` | write | GUI（面板） |
 | GET | `/v1/usage` | read | GUI、CLI |
 | GET | `/v1/devices` | read | GUI、CLI |
-| POST | `/v1/devices` | admin | GUI、CLI；默认 client / write，返回 `{ device, token }`，token 只显示一次 |
+| POST | `/v1/devices` | admin | CLI；默认 client / write，返回 `{ device, token }`，token 只显示一次。本轮 GUI 不签发（[allowed.cts](../apps/gui/electron/allowed.cts)） |
 | DELETE | `/v1/devices/{id}` | admin | GUI、CLI；幂等，返回吊销后的设备 |
 | GET | `/v1/accounts` | read | GUI、CLI |
 | POST | `/v1/accounts` | admin | GUI、CLI |
@@ -194,7 +194,7 @@ A3 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 - 把 `require_token` 抽成策略点，按 read / write / admin 校验；路由表只标级别，不写鉴权逻辑。
 - `ErrorCode` 增 `Forbidden`：越权返回 403 而不是 401。401 表示"没带凭据或凭据无效"，403 表示"凭据有效但级别不够"，GUI 据此置灰入口并说明原因。
 - Electron 主进程维护"方法 + 路径"白名单，只放行 GUI 实际用到的接口（已做，`apps/gui/electron/allowed.cts`；`allowed.test.cts` 从 `src/api.ts` 抽出全部调用逐条核对，漏登记就失败）。这把收窄放在主进程，页面即使被注入了也无法调用 `/v1/shutdown`。
-- A1 增加设备 token 与 `Grant::Device`，client 按设备级别走现有策略表，node 只走节点通道（B1）。总 token、只读 token、会话 token 与扩展 token 行为不变；密码登录、users 表、可信设备确认、登录限速留待后续。
+- A1 已增加设备 token 与 `Grant::Device`（[DONE.md](DONE.md) §八），client 按设备级别走现有策略表，node 只走节点通道（B1）。总 token、只读 token、会话 token 与扩展 token 行为不变；密码登录、users 表、可信设备确认、登录限速留待 A3。write 级等于能在宿主上执行命令，A2 把设备 token 发到别的机器之前要先重分级（[TODO.md](TODO.md) §八 A2）。
 - `Grant` 增加了 `Extension { name, level }`（E1 已做，见上面「扩展 token」和 [EXTENSIONS.md](EXTENSIONS.md) §3）。
   路由表不变，只是多一种凭据能走到现有的策略点；`Grant` 因带名字不再是 `Copy`，`refusal` 接受 `&Grant`。
 

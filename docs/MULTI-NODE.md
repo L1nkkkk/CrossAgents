@@ -1,6 +1,6 @@
 # CrossAgents 多节点设计（草稿）
 
-> 状态：草稿，待打磨。放开 [DESIGN.md](DESIGN.md) §1.2 中「跨主机、多用户、设备配对」这条非目标。A 阶段远程 GUI 走 SSH 隧道（2026-11-08 定：人说按推荐来（run 84848059））。
+> 状态：草稿，待打磨。放开 [DESIGN.md](DESIGN.md) §1.2 中「跨主机、多用户、设备配对」这条非目标。A 阶段远程 GUI 走 SSH 隧道（2026-11-08 定：人说按推荐来（run 84848059））。A1 设备与 token 已完成（2026-11-08，`9f8a07d`、`eeac7b7`；设计 `944922b`）。
 > §11 第 2、3 条已定（连通方式、Mac 是 GUI + 节点），第 1 条保留待定；第 10 条（B1 节点怎么连中心）仍待定。其余标「待定」的地方还没有结论，见 §11。
 
 ## 0. 产品形态
@@ -317,7 +317,7 @@ agents ||--o{ events
 
 结论：上面这张图是目标形态。A1 只建 `devices`，没有 `users`。
 
-- A1 的 `devices`：`id`、`name`、`kind`（client | node）、`level`（read | write | admin）、`token_hash`（SHA-256）、`created_at`、`last_seen_at`、`revoked_at`。没有 `user_id`。字段名照本轮接口契约；devices-core 正在并行写迁移，最后由 todo-done 对代码。
+- A1 的 `devices` 已建，字段与 [0016_devices.sql](../crates/store-sqlite/migrations/0016_devices.sql) 一致：`id`（主键）、`name`、`kind`（`client` 或 `node`）、`level`（`read`、`write` 或 `admin`）、`token_hash`（唯一，存 SHA-256）、`created_at`、`last_seen_at`、`revoked_at`。没有 `user_id`。未吊销的名字另有唯一索引 `devices_active_name`（`revoked_at` 为空）。对照 [device.rs](../crates/core/src/device.rs) 的 `Device`：对外的记录是这些字段去掉 `token_hash`。
 - A3：加 `users` 表，并给 `devices` 和现有表加 `user_id`。老数据归到默认用户。图上 `users` 连到 `devices`，是加上 `user_id` 之后的样子。`events` 不加 `user_id`。
 - B1：给现有表加 `node_id`，老数据指向「本机节点」；建 `node_models`。`events` 不加 `node_id`。
 - 有了 `user_id` 之后，招人、可见范围（DESIGN §4.3）都只在同一 `user_id` 内生效。
@@ -326,12 +326,12 @@ agents ||--o{ events
 
 结论：A 阶段不开放 listen，hub 继续只听 `127.0.0.1`（2026-11-08 定：人说按推荐来（run 84848059））。远程 GUI 经 SSH 隧道进来（§4.3、§14「SSH 隧道」）。丢了设备 token，还要能 SSH 登录中心才能用。设备级别 read / write / admin 在签发时定，默认 write；原来写的「可信设备」对应 admin。签发和吊销是 admin：CLI 在中心本机用总 token 签发（[paths.rs](../crates/hub/src/paths.rs) `Paths::token`；[API-AUTH.md](API-AUTH.md) §1 里总 token 是 admin），经 SSH 跑 `crossagents device add` 也是在本机。级别口径见 [API-AUTH.md](API-AUTH.md) §3 与 [access.rs](../crates/hub/src/access.rs) 的 `Level`、`Grant`。
 
-下面这套留到 A3，开放 listen 时才做（§12）：非回环一律 TLS；自签证书，第一次连接比对短码后固定指纹；新设备确认、密码复核、`/v1/auth/login` 限速。A3 去掉「走 Tailscale 或内网时可以只用 token」这个例外。同一个安装包局域网和公网两种场景都用，一条规则不容易配错——这是 A3 的理由。A 阶段用不上，因为 listen 不开，流量停在 SSH 里。
+下面这套留到 A3，开放 listen 时才做（§12）：非回环一律 TLS；自签证书，第一次连接比对短码后固定指纹；新设备确认、密码复核、`/v1/auth/login` 限速、无效 `cad_` token 的查库限速（[TODO.md](TODO.md) §八 A3）。A3 去掉「走 Tailscale 或内网时可以只用 token」这个例外。同一个安装包局域网和公网两种场景都用，一条规则不容易配错——这是 A3 的理由。A 阶段用不上，因为 listen 不开，流量停在 SSH 里。
 
 - A3，开放 listen 时：`[hub] listen` 可配置，默认仍为 `127.0.0.1`，不改配置行为与现在一致。总 token 永远不出本机。开放 `listen` 之前，这一节里标了 A3 的 TLS、指纹、登录限速要先做完。
 - A3：非回环一律 TLS（HTTPS / WSS）。hub 用自签证书：第一次连接时，人比对两边显示的短码（和 §4.3 留给 A3 的节点配对码同一个流程）后固定证书指纹。身份认指纹、不认地址 → 一个 hub 可以记多个地址（局域网、组网地址、公网地址），GUI 和节点按顺序试，在家和出门自动切换。怎么连得到见 §14。
 - client 与 node 的 token 分开。client 按签发时的 read / write / admin 走现有路由表，默认 write。看对话、发消息在 [API-AUTH.md](API-AUTH.md) §3 里是 write；开终端、批准扩展、登录 CLI 账号是 admin。签发和吊销设备是新路由，也定成 admin（§12 A1）。node 的 token 到不了现有路由，等 B1 的节点通道。会话令牌（`/v1/me/*`）仍只发给 agent 自己。
-- A3：**放开 listen 之后，丢一个设备 token 就等于能在节点上执行命令**。直接的有开终端、批准扩展（[API-AUTH.md](API-AUTH.md) §3 里是 admin）；间接的，给设成「自动执行」权限的 agent 发条消息就行（发消息是 write）。A 阶段把原来的「可信设备」收成签发时的 admin 级别，不再另做一套设备标记：默认 write 的设备到不了开终端和批准扩展。新设备登录要在已有设备上确认并通知，开终端、批准扩展、登录 CLI 账号、配对节点再验证一次密码，以及 `/v1/auth/login` 限速，都留到 A3。`/v1/health` 已收窄到只回 `status` 与 `api`（[DONE.md](DONE.md) §二「收敛免鉴权面」），放开 `listen` 后不再白送情报。
+- A3：**放开 listen 之后，丢一个设备 token 就等于能在节点上执行命令**。直接的有开终端、批准扩展（[API-AUTH.md](API-AUTH.md) §3 里是 admin）；间接的，给设成「自动执行」权限的 agent 发条消息就行（发消息是 write）。A 阶段把原来的「可信设备」收成签发时的 admin 级别，不再另做一套设备标记：默认 write 的设备到不了开终端和批准扩展。但 write 仍能改 agent 权限再发消息，等于在宿主上执行命令；A2 前要先重分级（[TODO.md](TODO.md) §八 A2）。新设备登录要在已有设备上确认并通知，开终端、批准扩展、登录 CLI 账号、配对节点再验证一次密码，以及 `/v1/auth/login` 限速和无效 `cad_` token 的查库限速，都留到 A3。`/v1/health` 已收窄到只回 `status` 与 `api`（[DONE.md](DONE.md) §二「收敛免鉴权面」），放开 `listen` 后不再白送情报。
 - hub 会存对话里的代码片段、diff、命令输出。放在外部服务器前要确认合规，必要时只存摘要（待定）。把中心 hub 放到云上也照这一条（§14）。
 
 ## 11. 待定
@@ -351,15 +351,15 @@ agents ||--o{ events
 
 | 阶段 | 内容 | 完成标志 |
 |---|---|---|
-| A1 设备与 token | `devices` 表：kind 为 client 或 node，level 为 read / write / admin（默认 client / write），token 形如 `cad_` 加 64 位 hex，库里只存 SHA-256。`GET /v1/devices`（read，不含 token 和哈希）、`POST /v1/devices`（admin，body `{ name, kind?, level? }`，返回 `{ device, token }`，token 只显示一次）、`DELETE /v1/devices/{id}`（admin，幂等）。CLI：`crossagents device add`、`device list`、`device revoke`。client 按级别走现有路由表；node 的 token 到不了现有路由。不含 `users`、密码登录、可信设备确认、登录限速（那些在 A3）。级别见 [API-AUTH.md](API-AUTH.md) §3 | 能签发、列出、吊销设备 token；设置里能看到设备并吊销。验收：`cargo test -p crossagents-hub --lib access`、`cargo test -p crossagents-hub --test devices`、`cargo test -p crossagents-api-types`、`cargo test -p crossagents-cli device`、`npm --prefix apps/gui run typecheck`、`npm --prefix apps/gui test` |
+| A1 设备与 token（已完成，2026-11-08，`9f8a07d`、`eeac7b7`） | `devices` 表：kind 为 client 或 node，level 为 read / write / admin（默认 client / write），token 形如 `cad_` 加 64 位 hex，库里只存 SHA-256。`GET /v1/devices`（read，不含 token 和哈希）、`POST /v1/devices`（admin，body `{ name, kind?, level? }`，返回 `{ device, token }`，token 只显示一次）、`DELETE /v1/devices/{id}`（admin，幂等）。CLI：`crossagents device add`（`--level` 默认 write、`--kind` 默认 client）、`device list`、`device revoke`（id 或名字）；`--json` 是全局参数（[device.rs](../crates/cli/src/cmd/device.rs) `DeviceCommand`、[main.rs](../crates/cli/src/main.rs) `Cli`）。client 按级别走现有路由表；node 的 token 到不了现有路由。不含 `users`、密码登录、可信设备确认、登录限速（那些在 A3）。级别见 [API-AUTH.md](API-AUTH.md) §3 | 已完成：能签发、列出、吊销设备 token；设置里能看到设备并吊销。验收与仓库里的测试一致：`cargo test -p crossagents-hub --lib access`、`cargo test -p crossagents-hub --test devices`、`cargo test -p crossagents-api-types`、`cargo test -p crossagents-cli device`、`npm --prefix apps/gui run typecheck`、`npm --prefix apps/gui test` |
 | A2 SSH 隧道 | 设置「连接」页填 `user@host`；经 SSH 配对（§4.3）；`ssh -N -L` 与断线重连；连远程时关掉本机 hub 的管理（§13.3）；GUI 与查看器字节一律经 hub（§16） | Mac GUI 经 SSH 隧道连上 Windows hub，两端对话一致；隧道断开后重连，按 `Last-Event-ID` 续传 |
-| A3 开端口直连 | `[hub] listen`（默认仍 `127.0.0.1`）；非回环 TLS、自签证书短码比对后固定指纹、一个 hub 记多个地址；`users` 表与密码登录（`/v1/auth/login`、`crossagents user add`、登录页）；可信设备确认（新设备要在已有设备上确认，开终端、批准扩展、登录 CLI 账号、配对节点再验证一次密码）；`/v1/auth/login` 限速（§10） | 不能 SSH 的客户端用账号密码连上已开放 listen 的 hub；指纹固定后换地址仍认同一台 |
+| A3 开端口直连 | `[hub] listen`（默认仍 `127.0.0.1`）；非回环 TLS、自签证书短码比对后固定指纹、一个 hub 记多个地址；`users` 表与密码登录（`/v1/auth/login`、`crossagents user add`、登录页）；可信设备确认（新设备要在已有设备上确认，开终端、批准扩展、登录 CLI 账号、配对节点再验证一次密码）；`/v1/auth/login` 限速；无效 `cad_` token 的查库限速（§10，[TODO.md](TODO.md) §八 A3） | 不能 SSH 的客户端用账号密码连上已开放 listen 的 hub；指纹固定后换地址仍认同一台 |
 | B1 node 代理 | 节点怎么连中心待定（§11 第 10 条）；走 A3 开端口时才用 `crossagents node join` 与配对码。hub ↔ node 通道，驱动执行半边挪到 node，本机 hub 也通过内置 node 执行；内置终端在节点上开、节点启动用登录 shell 取环境、`runs_on` / 快照下发 / 创造模式上传（§7.1、§16） | Windows hub 在 Mac 节点上拉起 Codex 并回传事件 |
 | B2 跨节点 Chat | 带节点名的模型、`@` 分组、跨节点招人、节点离线状态 | Mac 上的 Chat 招 `hy4@win` 并收到结果 |
 | B3 远程开发 | 远程选目录、GUI 看 diff 和文件、截图与产物回传 | 在 Mac 上完成一次 Windows 项目的改、编、测 |
 | C 单干模式 | GUI 记中心与本机两个 hub、连不上中心切到本机并标明当前连接、单干期间对话分开放；hub 在 macOS 上跑（§15） | 断网时 Mac 用本机 hub + 内置节点继续开 Chat，GUI 标明「本机」；中心恢复后中心建的 agent 补发事件 |
 
-A1 不依赖中心放在哪台机器上，可以先开工。B1 的关键是「本机也走 node」：单机模式就是 hub 加一个内置节点，避免维护两套执行路径。
+A1 已完成，不依赖中心放在哪台机器上（2026-11-08，`9f8a07d`、`eeac7b7`）。B1 的关键是「本机也走 node」：单机模式就是 hub 加一个内置节点，避免维护两套执行路径。
 
 A3 不在 A2 的路径上。A2 走 SSH 隧道，hub 仍只听 `127.0.0.1`；A3 是给不能 SSH 的客户端开端口直连，以后做，不阻塞 A2、B、C。
 
