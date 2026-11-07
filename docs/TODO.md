@@ -107,7 +107,8 @@ A3 开端口直连（以后）：
 
 B1 node 代理：
 
-- [ ] core：`crossagents node join`、配对码、hub 与 node 的双向通道（WSS 还是 gRPC 流待定）
+- [ ] core：节点怎么连中心待定（[MULTI-NODE.md](MULTI-NODE.md) §11 第 10 条）；走 A3 开端口时才用 `crossagents node join` 与配对码。hub 与 node 的双向通道（WSS 还是 gRPC 流待定）
+- [ ] core：现有表加 `node_id`，老数据指向本机节点（[MULTI-NODE.md](MULTI-NODE.md) §9「数据模型」）
 - [ ] core：驱动拆成两半，调度留在 hub，拉起 CLI 与协议翻译挪到 node；单机模式也走内置节点，只保留一套执行路径
 - [ ] core：节点上报已装插件、登录状态、可用模型；掉线时事件写本地日志，重连补发（可复用运行时宿主的 seq 编号 + 确认 + 补发机制，见 PROCESS-SUPERVISION §2）
 - [ ] core：协作工具 MCP 走 node 转发还是直连中心（待定）

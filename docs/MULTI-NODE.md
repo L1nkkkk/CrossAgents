@@ -142,11 +142,12 @@ C2 --> CB
 
 ### 4.2 设备
 
+结论：A 阶段没有账号。一个 hub 可以有多个设备在线，每个设备各自一个 token，互不影响。设备归属哪个账号（`user_id`）随 A3（§9、§12）。
+
 - 设备分两类：
-  - `client`：GUI。可以看对话、发消息、审批、管理设备。
-  - `node`：执行端。只能领取分配给自己的 agent、回传事件、上报能力，不能读其他对话。
-- 一个账号可以同时有多个设备在线，每个设备各自一个 token，互不影响。
-- token 是随机字符串，库里只存哈希，不用 JWT。吊销即时生效：设置里删掉设备，下一次请求就被拒。
+  - `client`：GUI。能做什么按签发时的级别走：read / write / admin，默认 write（[API-AUTH.md](API-AUTH.md) §3）。签发和吊销设备是 admin。
+  - `node`：执行端。B1 的目标是只能领取分配给自己的 agent、回传事件、上报能力，不能读其他对话。B1 的节点通道做出来之前，node token 对现有路由一律 403。
+- token 形如 `cad_` 加 64 位 hex，库里只存 SHA-256，不用 JWT。吊销后下一次请求 401，已经打开的事件流和终端输出流在 5 秒内断开。在设置「设备」页吊销，或用 `crossagents device revoke`。
 
 ### 4.3 登录与配对
 
@@ -275,12 +276,13 @@ entity users {
 entity devices {
   * id
   --
-  user_id
-  kind : client | node
   name
+  kind : client | node
+  level : read | write | admin
   token_hash
-  last_seen
-  revoked
+  created_at
+  last_seen_at
+  revoked_at
 }
 entity node_models {
   * node_id
@@ -313,9 +315,12 @@ agents ||--o{ events
 @enduml
 ```
 
-- 现有表加 `user_id`、`node_id` 两列；`events` 不变。
-- 迁移：老数据归到默认用户，`node_id` 指向「本机节点」。
-- 招人、可见范围（DESIGN §4.3）都只在同一 `user_id` 内生效。
+结论：上面这张图是目标形态。A1 只建 `devices`，没有 `users`。
+
+- A1 的 `devices`：`id`、`name`、`kind`（client | node）、`level`（read | write | admin）、`token_hash`（SHA-256）、`created_at`、`last_seen_at`、`revoked_at`。没有 `user_id`。字段名照本轮接口契约；devices-core 正在并行写迁移，最后由 todo-done 对代码。
+- A3：加 `users` 表，并给 `devices` 和现有表加 `user_id`。老数据归到默认用户。图上 `users` 连到 `devices`，是加上 `user_id` 之后的样子。`events` 不加 `user_id`。
+- B1：给现有表加 `node_id`，老数据指向「本机节点」；建 `node_models`。`events` 不加 `node_id`。
+- 有了 `user_id` 之后，招人、可见范围（DESIGN §4.3）都只在同一 `user_id` 内生效。
 
 ## 10. 安全
 
@@ -349,7 +354,7 @@ agents ||--o{ events
 | A1 设备与 token | `devices` 表：kind 为 client 或 node，level 为 read / write / admin（默认 client / write），token 形如 `cad_` 加 64 位 hex，库里只存 SHA-256。`GET /v1/devices`（read，不含 token 和哈希）、`POST /v1/devices`（admin，body `{ name, kind?, level? }`，返回 `{ device, token }`，token 只显示一次）、`DELETE /v1/devices/{id}`（admin，幂等）。CLI：`crossagents device add`、`device list`、`device revoke`。client 按级别走现有路由表；node 的 token 到不了现有路由。不含 `users`、密码登录、可信设备确认、登录限速（那些在 A3）。级别见 [API-AUTH.md](API-AUTH.md) §3 | 能签发、列出、吊销设备 token；设置里能看到设备并吊销。验收：`cargo test -p crossagents-hub --lib access`、`cargo test -p crossagents-hub --test devices`、`cargo test -p crossagents-api-types`、`cargo test -p crossagents-cli device`、`npm --prefix apps/gui run typecheck`、`npm --prefix apps/gui test` |
 | A2 SSH 隧道 | 设置「连接」页填 `user@host`；经 SSH 配对（§4.3）；`ssh -N -L` 与断线重连；连远程时关掉本机 hub 的管理（§13.3）；GUI 与查看器字节一律经 hub（§16） | Mac GUI 经 SSH 隧道连上 Windows hub，两端对话一致；隧道断开后重连，按 `Last-Event-ID` 续传 |
 | A3 开端口直连 | `[hub] listen`（默认仍 `127.0.0.1`）；非回环 TLS、自签证书短码比对后固定指纹、一个 hub 记多个地址；`users` 表与密码登录（`/v1/auth/login`、`crossagents user add`、登录页）；可信设备确认（新设备要在已有设备上确认，开终端、批准扩展、登录 CLI 账号、配对节点再验证一次密码）；`/v1/auth/login` 限速（§10） | 不能 SSH 的客户端用账号密码连上已开放 listen 的 hub；指纹固定后换地址仍认同一台 |
-| B1 node 代理 | 节点怎么连中心待定（§11 第 10 条）。`crossagents node join`、配对码、hub ↔ node 通道，驱动执行半边挪到 node，本机 hub 也通过内置 node 执行；内置终端在节点上开、节点启动用登录 shell 取环境、`runs_on` / 快照下发 / 创造模式上传（§7.1、§16） | Windows hub 在 Mac 节点上拉起 Codex 并回传事件 |
+| B1 node 代理 | 节点怎么连中心待定（§11 第 10 条）；走 A3 开端口时才用 `crossagents node join` 与配对码。hub ↔ node 通道，驱动执行半边挪到 node，本机 hub 也通过内置 node 执行；内置终端在节点上开、节点启动用登录 shell 取环境、`runs_on` / 快照下发 / 创造模式上传（§7.1、§16） | Windows hub 在 Mac 节点上拉起 Codex 并回传事件 |
 | B2 跨节点 Chat | 带节点名的模型、`@` 分组、跨节点招人、节点离线状态 | Mac 上的 Chat 招 `hy4@win` 并收到结果 |
 | B3 远程开发 | 远程选目录、GUI 看 diff 和文件、截图与产物回传 | 在 Mac 上完成一次 Windows 项目的改、编、测 |
 | C 单干模式 | GUI 记中心与本机两个 hub、连不上中心切到本机并标明当前连接、单干期间对话分开放；hub 在 macOS 上跑（§15） | 断网时 Mac 用本机 hub + 内置节点继续开 Chat，GUI 标明「本机」；中心恢复后中心建的 agent 补发事件 |
