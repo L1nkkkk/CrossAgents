@@ -37,7 +37,7 @@ hub 只监听 `127.0.0.1`（`[hub] listen` 尚未可配，A3 才放开；A2 走 
 | GET | `/v1/health` | 探测 | `HealthResponse`（仅 `status`、`api`） | CLI `hub status` / `hub start` 的存活探测 |
 
 `/v1/health` 只回 `status` 和 `api`。`version`、`uptime_secs`、`pid`、`home` 已收进需鉴权的 `/v1/info`：
-A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长。
+A3 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长。
 
 ### 2.2 总 token
 

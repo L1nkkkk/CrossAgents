@@ -51,7 +51,7 @@ pub const API_VERSION: &str = "v1";
 /// GUI hides what a hub does not list, and a hub built before this field sends no list at all,
 /// which the GUI reads as "an older hub" (`apps/gui/src/lib/features.ts`). Names are stable ids;
 /// adding one is not an API break (docs/API-AUTH.md §5), removing one is.
-pub const FEATURES: [&str; 4] = ["git", "lessons", "work", "apply"];
+pub const FEATURES: [&str; 5] = ["git", "lessons", "work", "apply", "devices"];
 
 /// Checks rerun in the person's directory after applying merged files.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -3117,7 +3117,7 @@ mod tests {
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(
             json["features"],
-            serde_json::json!(["git", "lessons", "work", "apply"])
+            serde_json::json!(["git", "lessons", "work", "apply", "devices"])
         );
         // An older hub's `/v1/info`, without the field, still parses (that is the whole point).
         let old: HubInfo = serde_json::from_value(serde_json::json!({
