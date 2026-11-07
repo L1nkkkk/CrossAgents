@@ -449,6 +449,12 @@ body.col-resizing iframe, body.col-resizing webview { pointer-events: none; }
 .who-pick { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 5px; min-width: 0; }
 .reasoning-picks { display: flex; flex-wrap: wrap; gap: 5px; }
 .who-pick .chip-pick { height: 26px; max-width: 220px; font-size: 12px; }
+/* The compact 权限 pick (src/permissionPicks.tsx): a chip-sized select in a composer or on a
+   planned task, with the reason written out when Cursor cannot guard on Windows. */
+.permission-compact { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
+.permission-compact select { width: auto; max-width: 170px; height: 26px; padding: 0 6px; font-size: 12px; border-radius: var(--radius); }
+.permission-compact .setting-hint { font-size: 11.5px; }
+.permission-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .who-pick-menu.menu { min-width: 280px; max-width: min(380px, calc(100vw - 16px)); }
 /* The hub refused this task's worker (approval.rs): its reason sits on the task's own row. */
 .plan-refused { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%; font-size: 11.5px; color: var(--danger-text); }

@@ -27,7 +27,8 @@ import { ConnectExternal, ConnectInstructions } from "./External";
 import { prettyModel, vendorLabel } from "../lib/models";
 import { cursorMode, reasoningModels } from "../lib/reasoning";
 import { installBusy, installingLabel, installingOf, installRefusedText } from "../lib/installState";
-import { CURSOR_GUARD_REFUSED, PERMISSION_OPTIONS, cursorCannotGuard, permissionOf, type PermissionChoice } from "../lib/permission";
+import { permissionOf, type PermissionChoice } from "../lib/permission";
+import { PermissionPicks } from "../permissionPicks";
 import { unusableOf } from "../lib/unusable";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
 import type { CliInfo } from "@bindings/CliInfo";
@@ -597,8 +598,6 @@ export function ProfileEditor({ agent, onDone, focusPermission }: { agent: Agent
   const [hooks, setHooks] = useState(savedHooks);
   const savedPermission = permissionOf(agent);
   const [permission, setPermission] = useState<PermissionChoice>(savedPermission);
-  // Cursor on Windows cannot ask before each action: the hub refuses guard, so it is greyed here.
-  const guardBlocked = cursorCannotGuard(agent);
   const permissionRef = useRef<HTMLDivElement>(null);
   const set = (patch: Partial<AgentProfile>) => setProfile((p) => ({ ...p, ...patch }));
   const preview = { ...agent, name: name.trim() || agent.name, profile } as Agent;
@@ -701,35 +700,13 @@ export function ProfileEditor({ agent, onDone, focusPermission }: { agent: Agent
       {/* The agent's own answer for dangerous actions, over the run's approvals (perm-hub). */}
       <div className="field">
         <span>权限（危险操作怎么处理）</span>
-        <div className="permission-picks" role="radiogroup" aria-label="权限" ref={permissionRef} style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 2 }}>
-          {PERMISSION_OPTIONS.map((option) => {
-            const blocked = option.value === "guard" && guardBlocked;
-            const why = blocked ? CURSOR_GUARD_REFUSED : option.hint;
-            return (
-              <label
-                key={option.value ?? "default"}
-                className="field-check"
-                title={why}
-                aria-disabled={blocked || undefined}
-                style={{ alignItems: "flex-start", ...(blocked ? { opacity: 0.55, cursor: "not-allowed" } : null) }}
-              >
-                <input
-                  type="radio"
-                  name={`permission-${agent.id}`}
-                  checked={permission === option.value}
-                  disabled={blocked}
-                  onChange={() => setPermission(option.value)}
-                />
-                <span style={{ display: "flex", flexDirection: "column", gap: 1 }}>
-                  <span>{option.label}</span>
-                  <span className="setting-hint" style={{ marginTop: 0 }}>
-                    {why}
-                  </span>
-                </span>
-              </label>
-            );
-          })}
-        </div>
+        <PermissionPicks
+          value={permission}
+          onChange={setPermission}
+          plugin={agent.plugin}
+          groupRef={permissionRef}
+          radioName={`permission-${agent.id}`}
+        />
       </div>
       <p className="muted small" style={{ margin: 0 }}>
         @{agent.name} · {agent.role} · {agent.plugin}

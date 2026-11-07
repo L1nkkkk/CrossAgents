@@ -168,6 +168,7 @@ const zhCN = {
   "home.needWorkspace": "选一个工作区，agent 会在那里干活。",
   "home.options": "选项",
   "home.worker": "默认 Worker",
+  "home.permission": "权限",
   "home.start": "发起 run",
   "home.startHint": "发起（Enter）",
   "home.preset": "托管程度",

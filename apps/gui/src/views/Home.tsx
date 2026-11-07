@@ -15,6 +15,8 @@ import { ReasoningPicks } from "../reasoningPicks";
 import { reasoningWorkerRequest, type ReasoningChoice } from "../lib/workerModels";
 import { effortLabel, effortLevels, effortOf, prettyModel, vendorLabel, workerModelFor, accountOf } from "../lib/models";
 import { chatBody, newChatRequest, runSessionFields, sessionStateKey, usabilityOf } from "../lib/sessionChoice";
+import { configWithPermission, permissionOf, type PermissionChoice } from "../lib/permission";
+import { PermissionPicks, applyPermission } from "../permissionPicks";
 import * as draft from "../lib/draft";
 import { useQuota } from "./Quota";
 import { PRESETS, presetPolicy, type Preset } from "../lib/policy";
@@ -125,6 +127,10 @@ export function HomeView() {
   const [draftNote, setDraftNote] = useState<string>();
   const [picked, setPicked] = useState<Lead | undefined>(() => load<Lead | undefined>(LEAD_KEY, undefined, (v) => !!v && typeof v === "object"));
   const [worker, setWorker] = useState("");
+  // 危险操作怎么处理, for the chat's agent or the run's default worker. Left alone it follows
+  // whoever is chosen (a new chat or an auto-picked worker follows the run / default).
+  const [chatPerm, setChatPerm] = useState<PermissionChoice>();
+  const [workPerm, setWorkPerm] = useState<PermissionChoice>();
   const [workerReasoning, setWorkerReasoning] = useState<{ key: string; choice: ReasoningChoice }>();
   const [escalate, setEscalate] = useState("");
   const [reviewer, setReviewer] = useState("");
@@ -202,6 +208,9 @@ export function HomeView() {
     if (sessionId && sessions.data && !sessions.data.some((s) => s.agent.id === sessionId)) setSessionId(undefined);
   }, [sessions.data, sessionId]);
   const chosenSession = sessionId ? sessions.data?.find((s) => s.agent.id === sessionId) : undefined;
+  // The permission pick follows whoever carries this start: another session or worker means
+  // its own setting, until the person picks one here.
+  useEffect(() => setChatPerm(undefined), [chosenSession?.agent.id]);
   const sessionUse = chosenSession ? usabilityOf(chosenSession) : undefined;
   // A picked session decides who leads; otherwise the remembered pick when it still exists
   // here, else the first planner, else the first model.
@@ -254,6 +263,14 @@ export function HomeView() {
   const workerKey = JSON.stringify([chosenWorker?.id, workerPlugin?.name, workerModel]);
   const workerOverride = workerReasoning?.key === workerKey ? workerReasoning.choice : undefined;
   const workerSetting = workerOverride ?? { model: workerModel, effort: chosenWorker ? effortOf(chosenWorker.config) ?? "" : "" };
+  // The choice in force: the person's pick, else the chosen agent's own (a new agent follows).
+  const chatPermission: PermissionChoice = chatPerm !== undefined ? chatPerm : chosenSession ? permissionOf(chosenSession.agent) : null;
+  const workerPermission: PermissionChoice = workPerm !== undefined ? workPerm : chosenWorker ? permissionOf(chosenWorker) : null;
+  /** Another worker means its own permission, not the one picked for the last one. */
+  const chooseWorker = (name: string) => {
+    setWorker(name);
+    setWorkPerm(undefined);
+  };
 
   /** `agent` on `effort`: switched to it first when it asks for another (none means as it is). */
   async function withEffort(agent: Agent, effort: string | undefined): Promise<Agent> {
@@ -277,7 +294,7 @@ export function HomeView() {
    * To carry a conversation on, pick that session by name under 已有会话. Workers are reused:
    * one is a template each task clones, not a conversation anyone reads.
    */
-  async function agentFor(role: "planner" | "worker", choice: Choice, dir: string, effort?: string, reuse = true): Promise<Agent> {
+  async function agentFor(role: "planner" | "worker", choice: Choice, dir: string, effort?: string, reuse = true, permission?: PermissionChoice): Promise<Agent> {
     const { plugin, model, account } = choice;
     // The picked session leads this run: it cannot also be reused as the default worker.
     const found = reuse && everyone.find((a) => a.id !== chosenSession?.agent.id && a.role === role && a.plugin === plugin && a.model === model && accountOf(a) === account && wsKey(a.cwd) === wsKey(dir));
@@ -288,7 +305,7 @@ export function HomeView() {
       model,
       role,
       cwd: dir,
-      config: configFor(choice, effort),
+      config: permission === undefined ? configFor(choice, effort) : configWithPermission(configFor(choice, effort), permission),
       profile: { display_name: null, title: role === "planner" ? t("home.leadTitle") : "Worker", avatar: null, avatar_image: null, color: null, persona: null },
     });
   }
@@ -336,7 +353,9 @@ export function HomeView() {
     try {
       const typed = request.trim();
       // An existing session keeps its own model and login: just carry the conversation on.
+      // Its permission is the person's to change here too; set it before the message lands.
       if (chosenSession) {
+        if (chatPermission !== permissionOf(chosenSession.agent)) await applyPermission(chosenSession.agent, chatPermission);
         await api.chat(chosenSession.agent.id, chatBody(typed, chosenSession, uploads()));
         sent();
         navigate("s", chosenSession.agent.id);
@@ -346,7 +365,8 @@ export function HomeView() {
       const lead = leadingModel(typed);
       const choice = lead?.choice ?? chatModel;
       const text = lead?.rest || typed;
-      const agent = await api.createAgent(newChatRequest(choice, text, cwd ?? "", lead && lead.choice.plugin !== chatModel.plugin ? undefined : effort));
+      const body = newChatRequest(choice, text, cwd ?? "", lead && lead.choice.plugin !== chatModel.plugin ? undefined : effort);
+      const agent = await api.createAgent({ ...body, config: configWithPermission(body.config, chatPermission) });
       // Into the conversation at once; the message shows there while the agent starts.
       void sendMessage(agent.id, text, { attachments: uploads() }).catch(() => {});
       sent();
@@ -370,8 +390,16 @@ export function HomeView() {
       const models = plugins.data?.find((p) => p.name === planner.plugin)?.models ?? [];
       // Workers run on the lead's login, on the cheaper sibling of its model.
       const workerChoice: Choice = { plugin: planner.plugin, model: workerModelFor(models, planner.model ?? leadModel ?? models[0] ?? ""), account: accountOf(planner) };
-      const workerTemplate = chosenWorker ?? (await agentFor("worker", workerChoice, where));
-      const workerAgent = workerOverride ? await api.createAgent(reasoningWorkerRequest(workerTemplate, where, workerOverride)) : workerTemplate;
+      const workerTemplate = chosenWorker ?? (await agentFor("worker", workerChoice, where, undefined, true, workerPermission));
+      const reasoningWorker = workerOverride
+        ? reasoningWorkerRequest(workerTemplate, where, workerOverride)
+        : undefined;
+      const workerAgent = reasoningWorker
+        ? await api.createAgent({ ...reasoningWorker, config: configWithPermission(reasoningWorker.config, workerPermission) })
+        : workerTemplate;
+      // A worker that already existed keeps its own permission until changed here: set it
+      // before the run starts, so the first task already follows the choice.
+      if (workerPermission !== permissionOf(workerAgent)) await applyPermission(workerAgent, workerPermission);
       const run = await api.createRun({
         request: request.trim(),
         title: title.trim() || null,
@@ -659,6 +687,15 @@ export function HomeView() {
                 up
               />
             )}
+            {mode === "chat" && (
+              <PermissionPicks
+                variant="compact"
+                label={t("home.permission")}
+                value={chatPermission}
+                onChange={setChatPerm}
+                plugin={chosenSession?.agent.plugin ?? chatModel?.plugin}
+              />
+            )}
             <div className="spacer" />
             {files.picker}
             {mode === "run" && (
@@ -720,7 +757,18 @@ export function HomeView() {
             </div>
             <div className="row" style={{ alignItems: "flex-start" }}>
               <Field label={t("home.worker")}>
-                <AgentSelect agents={workers} value={chosenWorker?.name ?? ""} onChange={setWorker} empty={t("home.auto")} />
+                <AgentSelect agents={workers} value={chosenWorker?.name ?? ""} onChange={chooseWorker} empty={t("home.auto")} />
+                {/* What the default worker may do without asking; the lead keeps its own setting. */}
+                <div className="permission-line">
+                  <span className="small muted">{t("home.permission")}</span>
+                  <PermissionPicks
+                    variant="compact"
+                    label={t("home.permission")}
+                    value={workerPermission}
+                    onChange={setWorkPerm}
+                    plugin={chosenWorker?.plugin ?? leadPlugin}
+                  />
+                </div>
                 <div className="reasoning-picks"><ReasoningPicks plugin={workerPlugin} model={workerSetting.model} effort={workerSetting.effort} onChange={(model, effort) => setWorkerReasoning({ key: workerKey, choice: { model, effort } })} /></div>
               </Field>
               <Field label={t("home.escalate")}>
