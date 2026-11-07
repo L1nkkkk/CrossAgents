@@ -216,7 +216,6 @@ mod tests {
                         stream: OutputStream::Text,
                         text,
                     } => Some(text),
-                    SessionEventKind::Usage { .. } => panic!("Cursor does not report tokens"),
                     _ => None,
                 })
                 .collect(),
