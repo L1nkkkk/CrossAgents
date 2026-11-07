@@ -17,11 +17,13 @@ import { cursorFamilies } from "../lib/reasoning";
 import { MODES, PAPERS, resolve, setTheme, useTheme } from "../lib/theme";
 import { AgentsPage } from "./Agents";
 import { AvatarGallery } from "./AvatarGallery";
+import { DevicesPage } from "./Devices";
 
 const PAGES: { key: string; label: string; icon: IconName }[] = [
   { key: "appearance", label: "外观", icon: "settings" },
   { key: "models", label: "模型", icon: "brain" },
   { key: "agents", label: "智能体", icon: "team" },
+  { key: "devices", label: "设备", icon: "device" },
   { key: "about", label: "关于", icon: "info" },
 ];
 
@@ -44,7 +46,7 @@ export function SettingsView({ page }: { page?: string }) {
           </nav>
           <div className="settings">
             <h1 className="settings-title">{current.label}</h1>
-            {current.key === "models" ? <ModelsPage /> : current.key === "agents" ? <AgentsPage /> : current.key === "about" ? <AboutPage /> : <AppearancePage />}
+            {current.key === "models" ? <ModelsPage /> : current.key === "agents" ? <AgentsPage /> : current.key === "devices" ? <DevicesPage /> : current.key === "about" ? <AboutPage /> : <AppearancePage />}
           </div>
         </div>
       </div>

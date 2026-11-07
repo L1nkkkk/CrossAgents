@@ -27,6 +27,7 @@ import {
   Menu,
   MessageCircle,
   Minimize2,
+  Monitor,
   PanelLeft,
   Paperclip,
   PanelRight,
@@ -544,6 +545,7 @@ const ICONS = {
   rocket: Rocket,
   open: ExternalLink,
   attach: Paperclip,
+  device: Monitor,
 } satisfies Record<string, LucideIcon>;
 
 export type IconName = keyof typeof ICONS;

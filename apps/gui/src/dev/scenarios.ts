@@ -14,7 +14,7 @@ import { codeLost, contextLost, resumeScene } from "../views/Continuity.mock";
 import { usageScene } from "../views/Usage.mock";
 import { expertiseScene } from "../views/Expertise.mock";
 import { lessonsScene } from "../views/Lessons/Lessons.mock";
-import { agent, ago, capabilitiesOf, NOTES_REPO, planned, REPO, run, say, team, think, transcript, turn, uid } from "./fixtures";
+import { agent, ago, capabilitiesOf, devices, NOTES_REPO, planned, REPO, run, say, team, think, transcript, turn, uid } from "./fixtures";
 import { openFile } from "../FileViewer";
 import { openTool, placeTab } from "../panes";
 import { setBottomHeight, setSidebarWidth, setToolsWidth, SIDEBAR } from "../lib/widths";
@@ -865,6 +865,48 @@ export const SCENARIOS: Scenario[] = [
       },
     };
   } },
+  { key: "devices", label: "设置：设备", hint: "hub 签发过的设备：客户端和节点各一台，创建与最后在线按项目的时间规则；吊销过的那台淡显、排最后并写明吊销时间；点一次吊销会先变红说「再点一次吊销」", build: () => ({
+    state: { ...emptyHub(), devices: devices() },
+    script: [],
+    route: "#/settings/devices",
+  }) },
+  { key: "devices-refused", label: "设置：设备（403）", hint: "凭据不到 admin：点两次吊销被 403 拒绝后，按钮置灰，页面上写明缺「管理」级别和 hub 的原话，列表照常看得见", build: () => ({
+    state: {
+      ...emptyHub(),
+      devices: devices(),
+      revokeForbidden: "DELETE /v1/devices/{id} needs the admin level",
+    },
+    script: [
+      { at: 800, act: () => document.querySelector<HTMLButtonElement>('[data-action="revoke"]')?.click() },
+      { at: 1200, act: () => document.querySelector<HTMLButtonElement>('button[data-action="revoke"].armed')?.click() },
+    ],
+    route: "#/settings/devices",
+  }) },
+  { key: "devices-revoked", label: "设置：设备（吊销后）", hint: "点两次吊销第一台：列表刷新，它变淡、排到还在用的设备后面，并写上吊销时间", build: () => ({
+    state: { ...emptyHub(), devices: devices() },
+    script: [
+      { at: 800, act: () => document.querySelector<HTMLButtonElement>('[data-action="revoke"]')?.click() },
+      { at: 1200, act: () => document.querySelector<HTMLButtonElement>('button[data-action="revoke"].armed')?.click() },
+      {
+        at: 2200,
+        act: () => {
+          const rows = [...document.querySelectorAll<HTMLElement>(".device-row")];
+          const revoked = rows.filter((r) => r.classList.contains("revoked"));
+          if (revoked.length !== 2) throw new Error(`the revoked device did not join the list: ${revoked.length} faded rows`);
+          const workstation = rows.find((r) => r.textContent?.includes("Windows 工作站"));
+          const node = rows.find((r) => r.textContent?.includes("build-node"));
+          if (!workstation?.classList.contains("revoked")) throw new Error("the revoked device still looks active");
+          if (!node || !workstation || rows.indexOf(workstation) < rows.indexOf(node)) throw new Error("the revoked device is not after the active ones");
+        },
+      },
+    ],
+    route: "#/settings/devices",
+  }) },
+  { key: "devices-empty", label: "设置：设备（空）", hint: "还没有设备：说明在 hub 所在的机器上运行 crossagents device add <名字>，以及从别的电脑经 SSH 连过来要等 A2", build: () => ({
+    state: emptyHub(),
+    script: [],
+    route: "#/settings/devices",
+  }) },
   { key: "git", label: "Git 页", hint: "一个项目的分支（本地/远程）、带泳道的提交图（HEAD、分支、tag）、选中提交的详情和 diff，顶部是未提交改动数", build: () => ({
     state: { ...emptyHub(), agents: [agent({ name: "Ada", plugin: "claude", role: "worker", cwd: REPO })] },
     script: [],

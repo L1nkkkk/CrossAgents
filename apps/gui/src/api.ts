@@ -39,6 +39,8 @@ import type { ApiError as ApiErrorJson } from "@bindings/ApiError";
 import type { CreateAgentRequest } from "@bindings/CreateAgentRequest";
 import type { CreateRunRequest } from "@bindings/CreateRunRequest";
 import type { DeleteRunResponse } from "@bindings/DeleteRunResponse";
+import type { Device } from "@bindings/Device";
+import type { ListDevicesResponse } from "@bindings/ListDevicesResponse";
 import type { AgentExecutionResponse } from "@bindings/AgentExecutionResponse";
 import type { AgentCommandsResponse } from "@bindings/AgentCommandsResponse";
 import type { ResumeCommandResponse } from "@bindings/ResumeCommandResponse";
@@ -535,6 +537,10 @@ export const api = {
   takeoverTerminal: (id: string, req: TerminalTakeoverRequest) => request<void>("POST", `/v1/terminals/${enc(id)}/takeover`, req),
 
   quota: () => request<QuotaResponse>("GET", "/v1/quota"),
+  /** Every device the hub has issued, revoked ones included; no tokens or hashes (docs/API-AUTH.md §2.2). */
+  listDevices: () => request<ListDevicesResponse>("GET", "/v1/devices"),
+  /** Revokes a device's credential; idempotent, answers the device as it now stands (`admin`). */
+  revokeDevice: (id: string) => request<Device>("DELETE", `/v1/devices/${enc(id)}`),
   createAccount: (req: CreateAccountRequest) => request<Account>("POST", "/v1/accounts", req),
   importCandidates: () => request<ImportAccountsResponse>("GET", "/v1/accounts/import"),
   importAccount: (req: ImportAccountRequest) => request<Account>("POST", "/v1/accounts/import", req),
