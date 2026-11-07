@@ -1219,6 +1219,10 @@ body.tab-dragging, body.tab-dragging * { cursor: grabbing !important; user-selec
 .settings-nav button { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border: 0; border-radius: var(--radius); background: none; color: var(--text-2); font-size: 13.5px; text-align: left; cursor: pointer; }
 .settings-nav button:hover { background: var(--hover); color: var(--text); }
 .settings-nav button.on { background: var(--hover); color: var(--text); font-weight: 500; }
+/* A page the hub refused (403): still readable and explained by its tooltip, but not clickable. */
+.settings-nav button:disabled { opacity: 0.5; cursor: default; color: var(--muted); }
+.settings-nav button:disabled:hover { background: none; color: var(--text-2); }
+.settings-nav button.on:disabled:hover { background: var(--hover); color: var(--text); }
 .settings-layout .settings { display: flex; flex-direction: column; gap: 22px; min-width: 0; }
 .settings-title { font-size: 24px; margin: 4px 0 0; }
 .settings-lead { margin: -10px 0 0; font-size: 13px; color: var(--muted); max-width: 640px; }

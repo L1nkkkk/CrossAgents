@@ -9,13 +9,16 @@ import { ApiError, api, errorText } from "../api";
 import { ErrorBox } from "../components";
 import { useHubData } from "../hub";
 import { isRevoked, KIND_LABELS, LEVEL_LABELS, sortDevices } from "../lib/devices";
+import { useFeatureSupport } from "../lib/features";
 import { full, when } from "../lib/time";
 import { useArmed } from "../parts";
 
 export function DevicesPage() {
   const devices = useHubData(() => api.listDevices().then((r) => r.devices), [], () => false);
-  /** The hub's 403 message for revoking: the credential's level is too low. */
-  const [refused, setRefused] = useState<string>();
+  // A 403 is kept by features.ts (api.ts notes it): that reason greys the buttons, both here
+  // and on the settings entry, and says which level is missing.
+  const support = useFeatureSupport("devices");
+  const refused = support.disabled ? support.reason : undefined;
   const [error, setError] = useState<string>();
   const list = sortDevices(devices.data ?? []);
 
@@ -25,8 +28,8 @@ export function DevicesPage() {
       await api.revokeDevice(device.id);
       devices.reload();
     } catch (err) {
-      if (err instanceof ApiError && err.status === 403) setRefused(err.message);
-      else setError(errorText(err));
+      // The 403's own reason is already on screen; anything else is an error to show.
+      if (!(err instanceof ApiError && err.status === 403)) setError(errorText(err));
     }
   }
 

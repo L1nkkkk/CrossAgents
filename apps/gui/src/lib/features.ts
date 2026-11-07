@@ -12,7 +12,7 @@ import { useSyncExternalStore } from "react";
  * Entry names the hub lists. Stable ids, also spelled out in `crates/api-types/src/lib.rs`
  * (`FEATURES`); the GUI ignores names it does not know, so a newer hub can add some.
  */
-export const FEATURES = ["git", "lessons", "work", "apply"] as const;
+export const FEATURES = ["git", "lessons", "work", "apply", "devices"] as const;
 export type Feature = (typeof FEATURES)[number];
 
 /** How an entry is named to a person, in the old-hub notice and the version tooltip. */
@@ -21,6 +21,7 @@ export const FEATURE_LABELS: Record<Feature, string> = {
   lessons: "排障记录",
   work: "工作组",
   apply: "应用到原目录",
+  devices: "设备",
 };
 
 /**
@@ -29,8 +30,8 @@ export const FEATURE_LABELS: Record<Feature, string> = {
  * The list arrived after 0.2.6, so a hub without it is at most 0.2.6 — but 0.2.6 itself already
  * shipped the Git page and 排障记录 (they were released in it). Hiding those on a 0.2.6 hub would
  * take away two pages the person can still use, which is why they are inferred here: upgrading
- * only the GUI must not lose working entries. 工作组 and 应用到原目录 came after 0.2.6 and are
- * never inferred — without a list they stay hidden, whatever the version says.
+ * only the GUI must not lose working entries. 工作组、应用到原目录 和 设备 came after 0.2.6 and
+ * are never inferred — without a list they stay hidden, whatever the version says.
  *
  * Rows are "from this version on"; a version below every row has none of these entries.
  */
@@ -86,6 +87,7 @@ export function featureOf(path: string): Feature | undefined {
   if (/^\/v1\/works?(?:\/|$)/.test(p)) return "work";
   if (/^\/v1\/lessons(?:\/|$)/.test(p) || /^\/v1\/projects\/[^/]+\/lessons(?:\/|$)/.test(p)) return "lessons";
   if (/^\/v1\/runs\/[^/]+\/(?:apply|integration)$/.test(p)) return "apply";
+  if (/^\/v1\/devices(?:\/|$)/.test(p)) return "devices";
   return undefined;
 }
 

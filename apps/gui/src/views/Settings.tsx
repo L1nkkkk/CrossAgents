@@ -10,6 +10,7 @@ import { api, errorText } from "../api";
 import { navigate } from "../App";
 import { ErrorBox, FamilyMark, Icon, VendorMark, type IconName } from "../components";
 import { useConnectionStatus, useHubData } from "../hub";
+import { useFeatureSupport } from "../lib/features";
 import { buildTag } from "../lib/build";
 import { useUpdateState } from "../lib/updates";
 import { groupModels, onlyModels, prettyModel, switchModels, vendorLabel } from "../lib/models";
@@ -28,7 +29,14 @@ const PAGES: { key: string; label: string; icon: IconName }[] = [
 ];
 
 export function SettingsView({ page }: { page?: string }) {
-  const current = PAGES.find((p) => p.key === page) ?? PAGES[0];
+  // 设备 came after 0.2.6 (docs/API-AUTH.md §4), so it is never inferred from a version: a hub
+  // that does not list it hides the entry, and one that answered its request 403 keeps the
+  // entry greyed with the hub's message.
+  const devices = useFeatureSupport("devices");
+  // Kept while the hub has not answered, so opening 设置 → 设备 directly does not flash another
+  // page; hidden as soon as the hub says it has no such entry.
+  const pages = PAGES.filter((p) => p.key !== "devices" || !devices.known || devices.show);
+  const current = pages.find((p) => p.key === page) ?? pages[0];
   return (
     <>
       <div className="topbar">
@@ -37,12 +45,23 @@ export function SettingsView({ page }: { page?: string }) {
       <div className="page">
         <div className="page-inner settings-layout">
           <nav className="settings-nav" aria-label="设置分类">
-            {PAGES.map((p) => (
-              <button key={p.key} className={p.key === current.key ? "on" : ""} aria-current={p.key === current.key ? "page" : undefined} onClick={() => navigate("settings", p.key)}>
-                <Icon name={p.icon} size={15} />
-                {p.label}
-              </button>
-            ))}
+            {pages.map((p) => {
+              const off = p.key === "devices" && devices.disabled;
+              return (
+                <button
+                  key={p.key}
+                  className={p.key === current.key ? "on" : ""}
+                  aria-current={p.key === current.key ? "page" : undefined}
+                  aria-disabled={off || undefined}
+                  title={off ? devices.reason : undefined}
+                  disabled={off}
+                  onClick={() => navigate("settings", p.key)}
+                >
+                  <Icon name={p.icon} size={15} />
+                  {p.label}
+                </button>
+              );
+            })}
           </nav>
           <div className="settings">
             <h1 className="settings-title">{current.label}</h1>
