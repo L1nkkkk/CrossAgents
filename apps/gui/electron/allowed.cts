@@ -106,6 +106,10 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "GET", path: /^\/v1\/questions$/, level: "read" },
   { method: "POST", path: /^\/v1\/questions\/[^/]+\/(answer|dismiss)$/, level: "write" },
   { method: "GET", path: /^\/v1\/quota$/, level: "read" },
+  // Devices (docs/API-AUTH.md §2.2). The GUI lists them and revokes one; issuing lives in the
+  // CLI this round (`crossagents device add`), so POST /v1/devices is deliberately absent.
+  { method: "GET", path: /^\/v1\/devices$/, level: "read" },
+  { method: "DELETE", path: /^\/v1\/devices\/[^/]+$/, level: "admin" },
   { method: "POST", path: /^\/v1\/accounts$/, level: "admin" },
   { method: "GET", path: /^\/v1\/accounts\/import$/, level: "read" },
   { method: "POST", path: /^\/v1\/accounts\/import$/, level: "admin" },
