@@ -1,6 +1,6 @@
 # macOS 任务书：让项目在 Mac 上跑起来
 
-> 来源：2026-11-07 讨论（run 4c111086）· 相关设计稿：[MULTI-NODE.md](../MULTI-NODE.md) §7.1、§12、§15 · [EXTENSIONS.md](../EXTENSIONS.md) §9「浏览器视图」· 状态：只有设计，未开工 · 2026-11-07
+> 来源：2026-11-07 讨论（run 4c111086）· 相关设计稿：[MULTI-NODE.md](../MULTI-NODE.md) §7.1、§12、§15 · [EXTENSIONS.md](../EXTENSIONS.md) §9「浏览器视图」· 状态：只有设计，未开工 · 2026-11-07 · §7 对照 Cutex 提交 `40ffe16`（2026-11-08）
 
 ## 1. 现状
 
@@ -27,13 +27,17 @@
 
 **打开即执行的文件**。`main.cts` 的 `RUNS_WHEN_OPENED` 补 macOS 的 `.terminal`、`.fileloc`——这两个在 Mac 上会被系统当成可执行/定位文件打开，和 `.app` / `.command` / `.sh` 是一类。
 
+**全屏时收进托盘**。[apps/gui/electron/tray.cts](../../apps/gui/electron/tray.cts) 的 `keep` 在 `close` 里 `event.preventDefault()` 之后直接 `win.hide()`。窗口在原生全屏时这样藏，会留下黑屏的 Space，要先退出全屏再藏。Cutex 的做法见 §7：`DesktopShell.hideWindow` 在 `isFullScreen()` 时先 `setFullScreen(false)`，等到 `leave-full-screen` 再 `hide()`。**要在 Mac 上确认**。
+
 ## 3. 打包与分发
 
-**electron-builder 加 mac 目标**：`dmg`（安装）加 `zip`（自动更新用），图标 `build/icon.icns`（现在 `build/` 里只有 `icon.ico`、`icon.png`）。`extraResources` 不能再写死 `crossagents.exe`：hub 二进制按 `aarch64-apple-darwin` 和 `x86_64-apple-darwin` 各编一份，再 `lipo` 成通用版放进 `resources/bin/`。`main.cts` 已经按平台取 `crossagents`，这一半不用改。
+**electron-builder 加 mac 目标**：`dmg`（安装）加 `zip`（自动更新用），图标 `build/icon.icns`（现在 `build/` 里只有 `icon.ico`、`icon.png`）。`extraResources` 不能再写死 `crossagents.exe`：hub 二进制按 `aarch64-apple-darwin` 和 `x86_64-apple-darwin` 各编一份，再 `lipo` 成通用版放进 `resources/bin/`。`main.cts` 已经按平台取 `crossagents`，这一半不用改。按架构各出一个包、不用 `lipo`，是可选做法，待定（§7 的 Cutex 按架构各出一个 zip）。
 
 **摄像头 / 麦克风**：浏览器视图（[EXTENSIONS.md](../EXTENSIONS.md) §9「浏览器视图」）要开摄像头或麦克风时，macOS 必须在 `Info.plist` 里声明 `NSCameraUsageDescription` / `NSMicrophoneUsageDescription`，并带对应的 entitlement；不声明会出问题，具体表现要在 Mac 上确认。主窗口的权限仍由 `permissions.cts` 的 `permissionAllowed` 决定（只放行 `clipboard-sanitized-write`），这条不变。
 
 **签名与公证**：Apple Developer ID 证书、hardened runtime，`bin/` 里的 hub 二进制要一起签名、一起公证。不签名的后果，照原话：首次打开要去「系统设置 → 隐私与安全性」放行；`electron-updater` 在 macOS 上要求签名，不签就没有自动更新。
+
+上面说的「不签名」，在 Apple Silicon 上实际要做 ad-hoc 签名：没有有效签名的 arm64 程序跑不起来。内容放齐后 `codesign --force --deep --sign -`，再 `codesign --verify --deep --strict`（对照 §7）。这不是 Developer ID，也不公证，首次打开仍可能要去「隐私与安全性」放行。[apps/gui/package.json](../../apps/gui/package.json) 的 `electron-builder` 是 26.15.3。它找不到证书时会不会自动做这次 ad-hoc 签，要实测。
 
 **只能在 macOS 上做**：签名和公证都只能在 macOS 上跑，所以要么有一台 Mac，要么用 macOS 的 CI runner；私有仓库的 runner 要计费（见 §6）。这一条是 §5 里 Mac4 的硬依赖。
 
@@ -63,9 +67,9 @@
 
 **Mac2 GUI 小修 + 不签名的 dmg 手测**（建议）
 
-- 范围：§2 的全部五条，加 §3 的 dmg / zip / `icon.icns` / 通用二进制，不含签名与公证。
+- 范围：§2 的各条，加 §3 的 dmg / zip / `icon.icns` / 通用二进制，不含 Developer ID 签名与公证。Apple Silicon 上要做的 ad-hoc 签名见 §3。
 - 依赖：Mac1 至少 `typecheck` 与 `test` 绿；dmg 只能在 macOS 上打。
-- 验收（建议）：输入框里 ⌘C / ⌘V / ⌘X / ⌘A / ⌘Z 都能用；⌘Q 退出、⌘M 最小化；点 Dock 图标窗口回来（这是 §2 第三条要修的 bug，修完应能验证「藏起来 → 点图标 → 回来」）；菜单栏图标在浅色和深色下都看得清；dmg 装上后首次打开能启动（不签名时走「隐私与安全性」放行）。
+- 验收（建议）：输入框里 ⌘C / ⌘V / ⌘X / ⌘A / ⌘Z 都能用；⌘Q 退出、⌘M 最小化；点 Dock 图标窗口回来（这是 §2 第三条要修的 bug，修完应能验证「藏起来 → 点图标 → 回来」）；菜单栏图标在浅色和深色下都看得清；dmg 装上后首次打开能启动（不签名时走「隐私与安全性」放行）；打包产物 `codesign --verify --deep --strict` 通过。
 
 **Mac3 随 A2 / B1 做环境、终端、字节走 hub**（建议）
 
@@ -83,4 +87,17 @@
 
 - 手边有没有 Mac 可测。Mac2 起都需要真机或 runner。
 - 有没有 Apple Developer 账号（Mac4 的硬依赖）。没有的话只能停在「不签名的 dmg + 手动放行」，也就没有自动更新。
-- macOS CI 的费用。私有仓库的 macOS runner 要计费，Mac1 跑一次 `cargo test --workspace` 不便宜；要不要只在 `main` 和发版前跑，等有账号时再定。
+- macOS CI 的费用。仓库 L1nkkkk/CrossAgents 是私有的（2026-11-08 核实），macOS runner 要计费。Mac1 跑一次 `cargo test --workspace` 不便宜；要不要只在 `main` 和发版前跑，等有账号时再定。Cutex 的公开仓库不计费，见 §7。
+
+## 7. Cutex 的做法
+
+> 对照 Cutex desktop v0.2.2，提交 `40ffe16003e27b29d890e9fe1ba9f309dd379e7d`。2026-11-08 读了这一提交的源码和安装文档，没有运行。下面只写核过的事实。
+
+结论：Mac 版只有前端，经 SSH 连一台 Linux 或 Windows 主机。打包不用 electron-builder；内容放齐后整包 ad-hoc 签名，再跑 `codesign --verify --deep --strict`。不公证，不出 dmg，按架构各出一个 zip。
+
+- **只有前端，经 SSH 连主机。** [docs/install/AGENT-INSTALL.md](https://github.com/senxiu-official/cutex-desktop/blob/40ffe16003e27b29d890e9fe1ba9f309dd379e7d/docs/install/AGENT-INSTALL.md) 开头的平台表写 macOS 是 “the desktop only”：agent 运行时不支持 macOS，要 SSH 到自己的 Linux 或 Windows 机器（§7.4）。§7.4 让人填 `user@machine`，用已有的 SSH 密钥和 `~/.ssh/config` 做隧道并配对，不用在主机上开业务端口。配对时跑的命令是 `cutex management client-token issue`。
+- **不用 electron-builder。** [scripts/package-portable.mjs](https://github.com/senxiu-official/cutex-desktop/blob/40ffe16003e27b29d890e9fe1ba9f309dd379e7d/scripts/package-portable.mjs) 自己组包。`stampAppBundle` 把 `Electron.app` 改名为 `Cutex.app`，用 PlistBuddy 改 Info.plist，把可执行文件从 `Electron` 改名为 `Cutex`，这样 `app.isPackaged` 为真。`buildIcns` 把已有尺寸的 png 放进 iconset，再 `iconutil -c icns`（函数注释写 sips + iconutil，这一提交的函数体没有调用 sips）。内容放齐之后才签名：`codesign --force --deep --sign -`（ad-hoc；环境变量 `CUTEX_DESKTOP_CODESIGN_IDENTITY` 有值就用那张证书），然后 `codesign --verify --deep --strict`。`stampAppBundle` 的注释写明这不是 Developer ID，也不公证。
+- **按架构各出一个 zip，用 `ditto` 打包。** [.github/ci/package-desktop.sh](https://github.com/senxiu-official/cutex-desktop/blob/40ffe16003e27b29d890e9fe1ba9f309dd379e7d/.github/ci/package-desktop.sh) 对 `macos-*` 先再跑一遍 `codesign --verify --deep --strict`，再用 `ditto -c -k --sequesterRsrc --keepParent` 打 zip。脚本注释写 `zip -r` 会破坏符号链接、权限和签名。arm64 与 x64 各一个包，不做通用二进制。x64 是在 arm64 的 Mac 上换 x64 的 Electron 运行时再打包（脚本注释：应用本身只有 JavaScript）。没有 dmg 目标。
+- **CI 用 macos-15，公开仓库不计费。** [.github/workflows/build-binaries.yml](https://github.com/senxiu-official/cutex-desktop/blob/40ffe16003e27b29d890e9fe1ba9f309dd379e7d/.github/workflows/build-binaries.yml) 的 matrix 里 `macos-arm64` 和 `macos-x64` 都是 `runner: macos-15`。仓库公开（未登录就能读到这次提交）。公开仓库的 GitHub-hosted macOS runner 不计费。我们的仓库要计费，见 §6。
+- **ad-hoc 签名下，safeStorage 每次更新都重新弹钥匙串。** 同一份 `package-portable.mjs` 开头写：ad-hoc 下每个包都是新身份，钥匙串里的 “Cutex Safe Storage” 每次更新都会再问；设 `CUTEX_DESKTOP_CODESIGN_IDENTITY` 用自签的代码签名证书，可以让 Always Allow 跨更新保留。安装文档 §10 写主机 token 加密在钥匙串里，ad-hoc 包每次更新都算一个新程序。[apps/desktop/src/main/shell.ts](https://github.com/senxiu-official/cutex-desktop/blob/40ffe16003e27b29d890e9fe1ba9f309dd379e7d/apps/desktop/src/main/shell.ts) 的 `DesktopShell` 用 `safeStorage` 存更新代理的口令（`setUpdateProxy`、`updateProxyConfig`）。主机 token 的存放点不在这个文件里，以安装文档 §10 为准。
+- **原生全屏时先退出再藏。** 同一个 `DesktopShell.hideWindow`：`isFullScreen()` 为真时先 `setFullScreen(false)`，收到 `leave-full-screen` 再 `hide()`。注释写直接藏会留下黑屏的 Space。我们这边见 §2「全屏时收进托盘」。
