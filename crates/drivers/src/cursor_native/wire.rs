@@ -60,8 +60,7 @@ pub struct Turn {
     pub request_id: Option<String>,
     pub stop_reason: Option<StopReason>,
     /// Raw `usage` object from the terminal `result` event. Present in both
-    /// installed CLI versions; headless mode never fires turn-level hooks, so
-    /// this is the authoritative per-turn token source.
+    /// installed CLI versions; the per-turn token source in headless mode.
     pub usage: Option<Value>,
     tools: HashMap<String, Value>,
 }

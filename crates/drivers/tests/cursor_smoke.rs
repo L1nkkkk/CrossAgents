@@ -300,11 +300,9 @@ async fn smoke_interrupt_kills_process() {
     session.shutdown().await;
 }
 
-// The CLI does not fire turn-level hooks (`afterAgentResponse`) in headless
-// `-p` mode: that trigger lives in the interactive submit handler. Instead both
-// installed versions emit a `usage` object on the terminal `result` stream-json
-// event, which the driver turns into an `agent.usage` event. This smoke proves
-// that channel end-to-end against a signed-in CLI.
+// Both installed CLI versions emit a `usage` object on the terminal `result`
+// stream-json event; the driver turns it into an `agent.usage` event. This smoke
+// proves that `result.usage` channel end-to-end against a signed-in CLI.
 #[tokio::test]
 #[ignore = "needs an installed, signed-in Cursor CLI"]
 async fn smoke_reports_token_usage() {

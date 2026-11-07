@@ -27,12 +27,6 @@ use crate::process::resolve_program;
 use wire::{ChatArgs, Line, Turn};
 
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
-// `afterAgentResponse` hooks run out-of-process and can finish writing their payload
-// a moment after `agent -p` exits. Poll briefly so a late write is not lost, but
-// never hold a turn for long (and never invent usage when nothing was written).
-const USAGE_WAIT_MAX: Duration = Duration::from_millis(500);
-const USAGE_WAIT_POLL: Duration = Duration::from_millis(50);
-const USAGE_SETTLE_POLLS: u32 = 2;
 
 fn validate_platform_permission(
     windows: bool,
@@ -288,67 +282,32 @@ impl CursorSession {
         Ok(text)
     }
 
-    /// Emit one cumulative `Usage` event for this turn. The terminal `result`
-    /// stream-json event carries a `usage` object in both installed CLI versions;
-    /// it is authoritative in headless `-p` mode, where the CLI never triggers
-    /// turn-level hooks (`afterAgentResponse` lives in the interactive submit
-    /// handler, not the headless loop).
-    ///
-    /// When `result` has no `usage`, fall back to the `afterAgentResponse` hook
-    /// payload files in the private plugin's `hooks/usage/` dir (the original
-    /// driver-internal channel), with a short bounded wait for late writes.
-    /// Files are always consumed so the next turn sees only its own. Nothing is
-    /// emitted, and no numbers are fabricated, when there is no data at all.
-    async fn emit_usage(&self, result_usage: Option<&Value>) {
-        let mut delta = UsageDelta::default();
-        let mut found = false;
-        if let Some(usage) = result_usage {
-            delta.add(&PayloadUsage::from_value(usage));
-            found = true;
-            // The stream is authoritative; still consume any hook files so they
-            // cannot leak into a later turn, but do not double count them.
-            let _ = self.files.consume_usage();
-        } else {
-            let mut quiet = 0u32;
-            let start = std::time::Instant::now();
-            loop {
-                let batch = self.files.consume_usage();
-                if batch.is_empty() {
-                    if found {
-                        quiet += 1;
-                    }
-                } else {
-                    for payload in &batch {
-                        delta.add(payload);
-                    }
-                    found = true;
-                    quiet = 0;
-                }
-                if found && quiet >= USAGE_SETTLE_POLLS {
-                    break;
-                }
-                if start.elapsed() >= USAGE_WAIT_MAX {
-                    break;
-                }
-                tokio::time::sleep(USAGE_WAIT_POLL).await;
-            }
-        }
-        if !found {
+    /// Emit one cumulative `Usage` event from the terminal `result` event's
+    /// `usage` object (present in both installed CLI versions). When the CLI
+    /// omitted `usage`, emit nothing — no fabrication, no waiting, no polling.
+    fn emit_usage(&self, result_usage: Option<&Value>) {
+        let Some(usage) = result_usage else {
             return;
-        }
+        };
+        let parsed = ResultUsage::from_value(usage);
+        let input = parsed.input_tokens + parsed.cache_read_tokens + parsed.cache_write_tokens;
+        let output = parsed.output_tokens;
+        let used = input + output;
         // `used` is this turn's input+output; `tokens` is the session cumulative
-        // (the hub computes deltas from `tokens.total`). `cached_input` is a subset
-        // of `input`, and `total` is `input + output`.
+        // (the hub computes deltas from `tokens.total`). `cached_input` is a
+        // subset of `input`, `reasoning_output` a subset of `output`, and `total`
+        // is `input + output` — reasoning is not added to `total` again.
         let tokens = {
             let mut totals = self.tokens.lock().expect("tokens");
-            totals.input += delta.input;
-            totals.cached_input += delta.cached_input;
-            totals.output += delta.output;
-            totals.total += delta.total;
+            totals.input += input;
+            totals.cached_input += parsed.cache_read_tokens;
+            totals.output += output;
+            totals.reasoning_output += parsed.reasoning_tokens;
+            totals.total += used;
             totals.clone()
         };
         self.emit(SessionEventKind::Usage {
-            used: delta.total,
+            used,
             size: 0,
             cost_usd: None,
             tokens: Some(tokens),
@@ -456,10 +415,9 @@ impl CursorSession {
             self.emit(SessionEventKind::Error { message });
             StopReason::Error
         };
-        // Emit one cumulative Usage event before signalling the turn is complete.
-        // Prefer the `result.usage` carried by stream-json; fall back to hook
-        // payload files if this CLI build omitted it.
-        self.emit_usage(turn.usage.as_ref()).await;
+        // Emit one cumulative Usage event from `result.usage` before signalling
+        // the turn is complete.
+        self.emit_usage(turn.usage.as_ref());
         let turn_id = turn.request_id;
         self.emit(SessionEventKind::TurnCompleted {
             turn_id: turn_id.clone(),
@@ -517,91 +475,41 @@ impl DriverSession for CursorSession {
 
 struct SessionFiles {
     dir: PathBuf,
+    has_plugin: bool,
 }
 
 impl SessionFiles {
-    /// Always create a private plugin dir, even with no MCP servers: it also
-    /// carries the `afterAgentResponse` hook that reports per-turn token usage.
-    /// `--plugin-dir` + `--approve-mcps` are therefore always passed to the CLI.
     fn new(servers: &[McpServerSpec]) -> Result<Self, CoreError> {
         let files = Self {
             dir: std::env::temp_dir().join(format!("crossagents-cursor-{}", uuid::Uuid::new_v4())),
+            has_plugin: !servers.is_empty(),
         };
-        let hooks = files.dir.join("hooks");
-        std::fs::create_dir_all(files.usage_dir())
-            .map_err(|e| CoreError::Agent(format!("cannot create {}: {e}", files.dir.display())))?;
-        let manifest = json!({"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", "name":"crossagents"});
-        let mut entries = Map::new();
-        for server in servers {
-            entries.insert(
-                server.name.clone(),
-                json!({"command":server.command,"args":server.args,"env":server.env}),
-            );
-        }
-        for (name, content) in [
-            ("plugin.json", manifest),
-            ("mcp.json", json!({"mcpServers":entries})),
-        ] {
-            std::fs::write(files.dir.join(name), content.to_string())
-                .map_err(|e| CoreError::Agent(format!("cannot write Cursor {name}: {e}")))?;
-        }
-        // A command hook whose script writes each stdin JSON payload to a unique
-        // file in hooks/usage/. The usage dir's absolute path is baked into the
-        // script so it never depends on the CLI's working directory.
-        let (script_name, script_body) = hook_script(files.usage_dir().as_path());
-        let script_path = hooks.join(script_name);
-        let command = if cfg!(windows) {
-            format!(
-                "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
-                script_path.display()
-            )
-        } else {
-            format!("sh \"{}\"", script_path.display())
-        };
-        let hooks_json = json!({
-            "version": 1,
-            "hooks": {
-                "afterAgentResponse": [{"type": "command", "command": command}]
+        if files.has_plugin {
+            files.create()?;
+            let manifest = json!({"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", "name":"crossagents"});
+            let mut entries = Map::new();
+            for server in servers {
+                entries.insert(
+                    server.name.clone(),
+                    json!({"command":server.command,"args":server.args,"env":server.env}),
+                );
             }
-        });
-        std::fs::write(hooks.join("hooks.json"), hooks_json.to_string())
-            .map_err(|e| CoreError::Agent(format!("cannot write Cursor hooks.json: {e}")))?;
-        std::fs::write(&script_path, script_body)
-            .map_err(|e| CoreError::Agent(format!("cannot write Cursor {script_name}: {e}")))?;
+            for (name, content) in [
+                ("plugin.json", manifest),
+                ("mcp.json", json!({"mcpServers":entries})),
+            ] {
+                std::fs::write(files.dir.join(name), content.to_string())
+                    .map_err(|e| CoreError::Agent(format!("cannot write Cursor {name}: {e}")))?;
+            }
+        }
         Ok(files)
     }
     fn create(&self) -> Result<(), CoreError> {
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| CoreError::Agent(format!("cannot create {}: {e}", self.dir.display())))
     }
-    /// Absolute path of the private per-turn usage payload directory.
-    fn usage_dir(&self) -> PathBuf {
-        self.dir.join("hooks").join("usage")
-    }
-    /// Read, parse, and delete every usage payload file currently present. A file
-    /// is consumed whether or not it parses (tolerant: missing/renamed/non-numeric
-    /// /negative fields all become 0).
-    fn consume_usage(&self) -> Vec<PayloadUsage> {
-        let mut out = Vec::new();
-        let Ok(entries) = std::fs::read_dir(self.usage_dir()) else {
-            return out;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                continue;
-            }
-            let payload = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-                .unwrap_or(Value::Null);
-            let _ = std::fs::remove_file(&path);
-            out.push(PayloadUsage::from_value(&payload));
-        }
-        out
-    }
     fn plugin(&self) -> Option<&Path> {
-        Some(self.dir.as_path())
+        self.has_plugin.then_some(self.dir.as_path())
     }
     fn message(&self, text: &str) -> Result<String, CoreError> {
         self.create()?;
@@ -626,72 +534,34 @@ impl Drop for SessionFiles {
     }
 }
 
-/// Name and contents of the hook script that captures one `afterAgentResponse`
-/// payload from stdin into `usage_dir`. The payload is written to a temporary
-/// name and renamed to `*.json` so the reader never sees a partial file. The
-/// Cursor CLI delivers the command hook's JSON payload on stdin in every
-/// transport mode (direct stdin, a PowerShell `$input` pipe, or a heredoc).
-fn hook_script(usage_dir: &Path) -> (&'static str, String) {
-    let dir = usage_dir.to_string_lossy().replace('\'', "''");
-    if cfg!(windows) {
-        (
-            "write.ps1",
-            WINDOWS_HOOK_SCRIPT.replace("__USAGE_DIR__", &dir),
-        )
-    } else {
-        ("write.sh", UNIX_HOOK_SCRIPT.replace("__USAGE_DIR__", &dir))
-    }
-}
-
-const WINDOWS_HOOK_SCRIPT: &str = r#"$ErrorActionPreference = 'SilentlyContinue'
-$dir = '__USAGE_DIR__'
-try {
-    # Cheap diagnostic: a marker proves this hook actually ran.
-    [System.IO.File]::WriteAllText((Join-Path $dir 'hook-fired.marker'), '1')
-    $name = [guid]::NewGuid().ToString()
-    $tmp = Join-Path $dir ($name + '.tmp')
-    $in = [Console]::OpenStandardInput()
-    $out = [System.IO.File]::Create($tmp)
-    try { $in.CopyTo($out) } finally { $out.Dispose() }
-    [System.IO.File]::Move($tmp, (Join-Path $dir ($name + '.json')))
-} catch {}
-exit 0
-"#;
-
-const UNIX_HOOK_SCRIPT: &str = r#"#!/bin/sh
-dir='__USAGE_DIR__'
-# Cheap diagnostic: a marker proves this hook actually ran.
-: > "$dir/hook-fired.marker" 2>/dev/null
-tmp=$(mktemp "${dir}/usage-XXXXXXXX") || exit 0
-cat > "$tmp" 2>/dev/null
-mv -f "$tmp" "${tmp}.json" 2>/dev/null
-exit 0
-"#;
-
-/// Token counts from one `afterAgentResponse` payload. Both snake_case (what the
-/// Cursor CLI emits) and camelCase field names are accepted; missing/renamed,
-/// non-numeric, and negative values become 0.
+/// Token counts parsed from the terminal `result` event's `usage` object. The
+/// installed CLIs emit camelCase field names; snake_case spellings are accepted
+/// for compatibility. Missing/renamed, non-numeric, and negative values become 0.
 #[derive(Default)]
-struct PayloadUsage {
+struct ResultUsage {
     input_tokens: u64,
     output_tokens: u64,
     cache_read_tokens: u64,
     cache_write_tokens: u64,
+    reasoning_tokens: u64,
 }
 
-impl PayloadUsage {
+impl ResultUsage {
     fn from_value(raw: &Value) -> Self {
-        let num = |snake: &str, camel: &str| {
-            raw.get(snake)
-                .or_else(|| raw.get(camel))
+        let num = |keys: &[&str]| {
+            keys.iter()
+                .find_map(|key| raw.get(*key))
                 .and_then(parse_token)
                 .unwrap_or(0)
         };
         Self {
-            input_tokens: num("input_tokens", "inputTokens"),
-            output_tokens: num("output_tokens", "outputTokens"),
-            cache_read_tokens: num("cache_read_tokens", "cacheReadTokens"),
-            cache_write_tokens: num("cache_write_tokens", "cacheWriteTokens"),
+            input_tokens: num(&["inputTokens", "input_tokens"]),
+            output_tokens: num(&["outputTokens", "output_tokens"]),
+            cache_read_tokens: num(&["cacheReadTokens", "cache_read_tokens"]),
+            cache_write_tokens: num(&["cacheWriteTokens", "cache_write_tokens"]),
+            // Observed as `reasoningTokens`; `reasoning_output_tokens` is the
+            // snake_case name of the `TokenUsage` field it feeds.
+            reasoning_tokens: num(&["reasoningTokens", "reasoning_output_tokens"]),
         }
     }
 }
@@ -699,27 +569,6 @@ impl PayloadUsage {
 fn parse_token(value: &Value) -> Option<u64> {
     let n = value.as_f64()?;
     (n.is_finite() && n >= 0.0 && n.fract() == 0.0).then(|| n as u64)
-}
-
-/// Per-turn aggregate. `total` is this turn's input + output: it is both the
-/// `used` value and the delta added to the cumulative `TokenUsage.total`.
-#[derive(Default)]
-struct UsageDelta {
-    input: u64,
-    cached_input: u64,
-    output: u64,
-    total: u64,
-}
-
-impl UsageDelta {
-    fn add(&mut self, p: &PayloadUsage) {
-        let input = p.input_tokens + p.cache_read_tokens + p.cache_write_tokens;
-        let output = p.output_tokens;
-        self.input += input;
-        self.cached_input += p.cache_read_tokens;
-        self.output += output;
-        self.total += input + output;
-    }
 }
 
 #[cfg(test)]
@@ -1051,39 +900,16 @@ sleep 60
             mcp,
             json!({"mcpServers":{"crossagents":{"command":server.command,"args":server.args,"env":server.env}}})
         );
-        // The usage hook lives inside this private temp plugin dir, never in the
-        // user's global ~/.cursor configuration.
-        let hooks: Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.join("hooks/hooks.json")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(hooks["version"], json!(1));
-        let entries = hooks["hooks"]["afterAgentResponse"].as_array().unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0]["type"], json!("command"));
-        let command = entries[0]["command"].as_str().unwrap();
-        assert!(command.contains(dir.to_string_lossy().as_ref()));
-        assert!(!command.contains(".cursor"));
-        let script = dir
-            .join("hooks")
-            .join(if cfg!(windows) { "write.ps1" } else { "write.sh" });
-        assert!(script.exists(), "hook script was not generated");
-        assert!(dir.join("hooks/usage").is_dir());
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
         session.shutdown().await;
         assert!(!dir.exists());
     }
 
     #[test]
-    fn no_servers_still_create_a_plugin_and_long_messages_use_utf16_length() {
+    fn no_servers_make_no_directory_and_long_messages_use_utf16_length() {
         let files = SessionFiles::new(&[]).unwrap();
-        assert!(files.dir.exists());
-        assert!(files.plugin().is_some());
-        // No MCP servers: an empty mcpServers object still goes into mcp.json.
-        let mcp: Value =
-            serde_json::from_str(&std::fs::read_to_string(files.dir.join("mcp.json")).unwrap())
-                .unwrap();
-        assert_eq!(mcp, json!({"mcpServers":{}}));
+        assert!(!files.dir.exists());
+        assert!(files.plugin().is_none());
         let root = tempfile::tempdir().unwrap();
         let (mut spec, _rx) = spec(root.path());
         spec.instructions = Some("instructions".into());
@@ -1100,19 +926,20 @@ sleep 60
         assert!(long.chars().count() < crate::with_native::wire::PROMPT_ARG_LIMIT);
         let text = session.prompt_text(&Prompt::text(&long)).unwrap();
         assert!(text.contains("treat it as the message itself"));
-        let message_files: Vec<_> = std::fs::read_dir(&session.files.dir)
+        let paths: Vec<_> = std::fs::read_dir(&session.files.dir)
             .unwrap()
             .map(|e| e.unwrap().path())
-            .filter(|p| {
-                p.file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with("message-")
-            })
             .collect();
-        assert_eq!(message_files.len(), 1);
-        assert_eq!(std::fs::read_to_string(&message_files[0]).unwrap(), long);
-        assert!(session.files.plugin().is_some());
+        assert_eq!(paths.len(), 1);
+        assert!(
+            paths[0]
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("message-")
+        );
+        assert_eq!(std::fs::read_to_string(&paths[0]).unwrap(), long);
+        assert!(session.files.plugin().is_none());
         let dir = session.files.dir.clone();
         drop(session);
         assert!(!dir.exists());
@@ -1188,8 +1015,13 @@ printf '%s\n' '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text
 
     // What a real signed-in `agent -p ... --output-format stream-json` turn
     // emits: the terminal `result` event carries a `usage` object. This is the
-    // cheap, local proof that the headless token channel works without a CLI.
-    fn ndjson_cli_with_result_usage(root: &Path, input: u64, output: u64) -> Vec<String> {
+    // cheap, local proof that the token channel works without a real CLI.
+    fn ndjson_cli_with_result_usage(
+        root: &Path,
+        input: u64,
+        output: u64,
+        reasoning: u64,
+    ) -> Vec<String> {
         let assistant =
             r#"{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text":"ok"}]}}"#;
         let result = json!({
@@ -1203,19 +1035,13 @@ printf '%s\n' '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text
                 "outputTokens": output,
                 "cacheReadTokens": 0,
                 "cacheWriteTokens": 0,
-                "reasoningTokens": 0
+                "reasoningTokens": reasoning
             }
         })
         .to_string();
         let windows = format!("\nWrite-Output '{assistant}'\nWrite-Output '{result}'\n");
         let unix = format!("\nprintf '%s\\n' '{assistant}' '{result}'\n");
         mock_cli(root, &windows, &unix)
-    }
-
-    // Simulate an afterAgentResponse hook writing its stdin payload to a unique
-    // file in the private usage dir (which is what the generated script does).
-    fn write_payload(session: &CursorSession, name: &str, body: &str) {
-        std::fs::write(session.files.usage_dir().join(name), body).unwrap();
     }
 
     fn drain_usage(
@@ -1237,81 +1063,44 @@ printf '%s\n' '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text
     }
 
     #[test]
-    fn usage_hook_files_are_private_and_script_targets_the_usage_dir() {
-        let files = SessionFiles::new(&[]).unwrap();
-        let dir = files.dir.clone();
-        assert!(dir.starts_with(std::env::temp_dir()));
-        assert!(files.plugin().is_some());
-        let hooks_dir = dir.join("hooks");
-        let usage_dir = files.usage_dir();
-        assert!(usage_dir.is_dir());
-        assert_eq!(std::fs::read_dir(&usage_dir).unwrap().count(), 0);
-
-        let hooks: Value =
-            serde_json::from_str(&std::fs::read_to_string(hooks_dir.join("hooks.json")).unwrap())
-                .unwrap();
-        assert_eq!(hooks["version"], json!(1));
-        let steps = hooks["hooks"]["afterAgentResponse"].as_array().unwrap();
-        assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0]["type"], json!("command"));
-        let command = steps[0]["command"].as_str().unwrap();
-        assert!(command.contains(dir.to_string_lossy().as_ref()));
-        if cfg!(windows) {
-            assert!(command.contains("powershell.exe"));
-            assert!(command.contains("-File"));
-        } else {
-            assert!(command.starts_with("sh "));
-        }
-        // Never reference the user's global ~/.cursor configuration.
-        assert!(!command.contains(".cursor"));
-
-        let script_name = if cfg!(windows) { "write.ps1" } else { "write.sh" };
-        let script = hooks_dir.join(script_name);
-        assert!(script.exists());
-        let body = std::fs::read_to_string(&script).unwrap();
-        assert!(!body.contains("__USAGE_DIR__"), "placeholder not replaced");
-        // The usage dir absolute path is baked into the script.
-        assert!(body.contains(usage_dir.to_string_lossy().as_ref()));
-        assert!(!body.contains(".cursor"));
-        // Cheap diagnostic: the hook writes a marker if it ever runs.
-        assert!(body.contains("hook-fired.marker"));
-
-        drop(files);
-        assert!(!dir.exists());
-    }
-
-    #[test]
-    fn usage_payload_parsing_is_tolerant_and_accepts_both_spellings() {
-        let snake = PayloadUsage::from_value(&json!({
+    fn result_usage_parsing_is_tolerant_and_accepts_both_spellings() {
+        // snake_case spellings (and the snake_case reasoning field).
+        let snake = ResultUsage::from_value(&json!({
             "input_tokens": 100, "output_tokens": 20,
-            "cache_read_tokens": 30, "cache_write_tokens": 5
+            "cache_read_tokens": 30, "cache_write_tokens": 5,
+            "reasoning_output_tokens": 7
         }));
         assert_eq!(
             (
                 snake.input_tokens,
                 snake.output_tokens,
                 snake.cache_read_tokens,
-                snake.cache_write_tokens
+                snake.cache_write_tokens,
+                snake.reasoning_tokens
             ),
-            (100, 20, 30, 5)
+            (100, 20, 30, 5, 7)
         );
-        let camel = PayloadUsage::from_value(&json!({
+        // camelCase, as emitted by both installed CLI versions.
+        let camel = ResultUsage::from_value(&json!({
             "inputTokens": 7, "outputTokens": 8,
-            "cacheReadTokens": 9, "cacheWriteTokens": 10
+            "cacheReadTokens": 9, "cacheWriteTokens": 10,
+            "reasoningTokens": 11
         }));
         assert_eq!(
             (
                 camel.input_tokens,
                 camel.output_tokens,
                 camel.cache_read_tokens,
-                camel.cache_write_tokens
+                camel.cache_write_tokens,
+                camel.reasoning_tokens
             ),
-            (7, 8, 9, 10)
+            (7, 8, 9, 10, 11)
         );
         // missing / renamed / non-numeric / negative / fractional -> 0
-        let bad = PayloadUsage::from_value(&json!({
+        let bad = ResultUsage::from_value(&json!({
             "input_tokens": "nope", "output_tokens": -5,
             "cache_read_tokens": true, "cache_write_tokens": 12.5,
+            "reasoningTokens": "not a number",
             "unrelated": 999
         }));
         assert_eq!(
@@ -1319,92 +1108,26 @@ printf '%s\n' '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text
                 bad.input_tokens,
                 bad.output_tokens,
                 bad.cache_read_tokens,
-                bad.cache_write_tokens
+                bad.cache_write_tokens,
+                bad.reasoning_tokens
             ),
-            (0, 0, 0, 0)
+            (0, 0, 0, 0, 0)
         );
-        let empty = PayloadUsage::from_value(&json!({}));
+        let empty = ResultUsage::from_value(&json!({}));
         assert_eq!(
             (
                 empty.input_tokens,
                 empty.output_tokens,
                 empty.cache_read_tokens,
-                empty.cache_write_tokens
+                empty.cache_write_tokens,
+                empty.reasoning_tokens
             ),
-            (0, 0, 0, 0)
+            (0, 0, 0, 0, 0)
         );
     }
 
     #[tokio::test]
-    async fn usage_events_aggregate_per_turn_and_cumulate_across_turns() {
-        let root = tempfile::tempdir().unwrap();
-        let (spec, mut rx) = spec(root.path());
-        let session = CursorSession::new("chat".into(), ndjson_cli(root.path()), spec).unwrap();
-
-        // Turn 1: two payloads (one snake_case, one camelCase) are summed.
-        write_payload(
-            &session,
-            "a.json",
-            r#"{"input_tokens":100,"output_tokens":20,"cache_read_tokens":30,"cache_write_tokens":5}"#,
-        );
-        write_payload(
-            &session,
-            "b.json",
-            r#"{"inputTokens":10,"outputTokens":4,"cacheReadTokens":2,"cacheWriteTokens":1}"#,
-        );
-        let outcome = session.prompt("one").await.unwrap();
-        assert_eq!(outcome.stop_reason, StopReason::EndTurn);
-        let usages = drain_usage(&mut rx);
-        assert_eq!(usages.len(), 1, "one Usage event per turn");
-        let (used, size, cost_usd, tokens) = &usages[0];
-        assert_eq!(*used, 172); // (135 + 20) + (13 + 4)
-        assert_eq!(*size, 0);
-        assert!(cost_usd.is_none());
-        assert_eq!(
-            tokens.as_ref().unwrap(),
-            &TokenUsage {
-                input: 148,         // 135 + 13 (incl. cache read + write)
-                cached_input: 32,   // 30 + 2 (subset of input)
-                output: 24,         // 20 + 4
-                reasoning_output: 0,
-                total: 172,         // input + output
-            }
-        );
-        // Files were consumed so the next turn sees only its own.
-        assert_eq!(
-            std::fs::read_dir(session.files.usage_dir()).unwrap().count(),
-            0
-        );
-
-        // Turn 2: one payload; tokens are cumulative, used is only this turn's.
-        write_payload(
-            &session,
-            "c.json",
-            r#"{"input_tokens":1,"output_tokens":2}"#,
-        );
-        let outcome = session.prompt("two").await.unwrap();
-        assert_eq!(outcome.stop_reason, StopReason::EndTurn);
-        let usages = drain_usage(&mut rx);
-        assert_eq!(usages.len(), 1);
-        let (used, size, cost_usd, tokens) = &usages[0];
-        assert_eq!(*used, 3);
-        assert_eq!(*size, 0);
-        assert!(cost_usd.is_none());
-        assert_eq!(
-            tokens.as_ref().unwrap(),
-            &TokenUsage {
-                input: 149,
-                cached_input: 32,
-                output: 26,
-                reasoning_output: 0,
-                total: 175,
-            }
-        );
-        session.shutdown().await;
-    }
-
-    #[tokio::test]
-    async fn no_usage_files_emit_no_usage_event() {
+    async fn no_result_usage_emits_no_usage_event() {
         let root = tempfile::tempdir().unwrap();
         let (spec, mut rx) = spec(root.path());
         let session = CursorSession::new("chat".into(), ndjson_cli(root.path()), spec).unwrap();
@@ -1414,16 +1137,16 @@ printf '%s\n' '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text
         session.shutdown().await;
     }
 
-    // Cheap local diagnostic for the channel the real headless CLI uses: a
-    // `result` event with a `usage` object must produce one cumulative Usage
-    // event per turn, with tokens.total > 0, without any hook payload files.
+    // Two turns of `result.usage` produce one cumulative Usage event each, with
+    // tokens.total > 0 and reasoning_output accumulated as a subset of output —
+    // no extra files or configuration involved.
     #[tokio::test]
     async fn result_usage_emits_cumulative_usage_per_turn() {
         let root = tempfile::tempdir().unwrap();
         let (spec, mut rx) = spec(root.path());
         let session = CursorSession::new(
             "chat".into(),
-            ndjson_cli_with_result_usage(root.path(), 100, 20),
+            ndjson_cli_with_result_usage(root.path(), 100, 20, 7),
             spec,
         )
         .unwrap();
@@ -1434,7 +1157,7 @@ printf '%s\n' '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text
         let usages = drain_usage(&mut rx);
         assert_eq!(usages.len(), 1, "one Usage event per turn");
         let (used, size, cost_usd, tokens) = &usages[0];
-        assert_eq!(*used, 120);
+        assert_eq!(*used, 120); // input + output
         assert_eq!(*size, 0);
         assert!(cost_usd.is_none());
         assert_eq!(
@@ -1443,7 +1166,7 @@ printf '%s\n' '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text
                 input: 100,
                 cached_input: 0,
                 output: 20,
-                reasoning_output: 0,
+                reasoning_output: 7, // subset of output, not added to total
                 total: 120,
             }
         );
@@ -1457,7 +1180,10 @@ printf '%s\n' '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text
         let usages = drain_usage(&mut rx);
         assert_eq!(usages.len(), 1);
         assert_eq!(usages[0].0, 120);
-        assert_eq!(usages[0].3.as_ref().unwrap().total, 240);
+        let tokens = usages[0].3.as_ref().unwrap();
+        assert_eq!(tokens.total, 240);
+        assert_eq!(tokens.reasoning_output, 14);
+        assert_eq!(tokens.output, 40);
         session.shutdown().await;
     }
 }
