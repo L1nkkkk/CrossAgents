@@ -100,6 +100,13 @@
 - [x] `acp-generic`：读取 agent 声明的 prompt 能力，未声明图片则不允许发图（`initialize` 的 `agentCapabilities.promptCapabilities` 记在会话上，图片按 ACP image block 发送；没声明就由 hub 返回 400，不再退化成路径引用）
 - [x] 按能力降级：驱动不支持的附件类型，GUI 禁用入口并说明原因，不静默丢弃（`Capabilities.attachments`：claude-native / codebuddy-native 收图片、PDF、文本，codex-native 不收 PDF，acp-generic 启动前为 `null`、会话启动后按声明；transcript 把它给 GUI，`POST /v1/agents/{key}/messages` 遇到不收的类型返回 400 并说明原因；GUI 收窄文件选择器的 accept，粘贴/拖入不支持的类型时报出原因）
 
+## 八、多节点（固定中心 hub + 节点）
+
+> 来源：多机协同讨论（2026-10-23），设计见 [MULTI-NODE.md](MULTI-NODE.md)。
+> 未完成的条目仍在 [TODO.md](TODO.md) 同名一节。
+
+- [x] 连通方式：局域网 / Tailscale / 公司内网，决定第一版是否自己做 TLS（2026-11-07 已定：局域网和公网都要，默认打洞（组网工具），非回环一律 TLS）。结论见 [MULTI-NODE.md](MULTI-NODE.md) §14「连通方式」，TLS 与证书指纹见同文 §10。
+
 ## 九、自举（用 CrossAgents 开发 CrossAgents）
 
 > 来源：2026-10-24 自举清单，设计与取舍见 [tasks/DOGFOOD.md](tasks/DOGFOOD.md)，每项一个提交。
