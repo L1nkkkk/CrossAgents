@@ -635,7 +635,8 @@ mod tests {
         let driver = registry.get("cursor").unwrap();
         assert_eq!(driver.kind(), DriverKind::CursorNative);
         assert!(driver.capabilities().resume && driver.capabilities().mcp);
-        assert!(!driver.capabilities().permission_callback && !driver.capabilities().usage);
+        // `result.usage` gives the driver per-turn tokens; per-action permissions do not exist.
+        assert!(!driver.capabilities().permission_callback && driver.capabilities().usage);
         assert!(!driver.models().is_empty());
         let config = registry.config("cursor").unwrap();
         assert!(config.efforts.is_empty());

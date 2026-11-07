@@ -4,7 +4,7 @@
 
 ## 结论
 
-走 `agent -p --output-format stream-json --stream-partial-output`，每轮一个进程，会话靠 `--resume <chatId>` 在 Cursor 侧续上。输出是 NDJSON，一行一个事件，每行都带 `session_id`。驱动能拿到的比 Claude 侧少：没有逐次权限询问（只有 `--force`/`--yolo` 与 `--sandbox` 两档），没有 `--system-prompt`/`--user-rules`（开场说明得前置进第一条 prompt），没有 `--mcp-config`（MCP 只能从配置文件或临时 plugin 读），没有 cancel 子命令（打断只能杀进程），stream-json 也不带 token 数（只有 `duration_ms`）。因此能力表里 `permission_callback` 与 `usage` 都只能降级。
+走 `agent -p --output-format stream-json --stream-partial-output`，每轮一个进程，会话靠 `--resume <chatId>` 在 Cursor 侧续上。输出是 NDJSON，一行一个事件，每行都带 `session_id`。驱动能拿到的比 Claude 侧少：没有逐次权限询问（只有 `--force`/`--yolo` 与 `--sandbox` 两档），没有 `--system-prompt`/`--user-rules`（开场说明得前置进第一条 prompt），没有 `--mcp-config`（MCP 只能从配置文件或临时 plugin 读），没有 cancel 子命令（打断只能杀进程）。stream-json 没有逐 token 事件，但终端 `result` 带 `usage`，驱动直接上报用量。因此能力表里 `permission_callback` 只能降级，`usage` 为 true。
 
 ## 命令行
 
@@ -64,7 +64,7 @@
 - 没有 `--system-prompt` / `--user-rules`，开场说明只能拼在第一条 prompt 前面。后续轮次靠会话上下文保留，不重复拼。
 - 没有逐次权限询问。工具调用要么放行（`--force` / `--yolo`），要么在沙箱里跑（`--sandbox`），没有中间档，因此驱动的 `permission_callback` 能力只能报不支持。
 - 打断：没有 cancel 子命令，`interrupt()` 只能杀进程，按 `killed` 上报退出原因。
-- 用量：stream-json 不带 token 数，只有 `duration_ms`，`usage` 能力只能报不支持（或只给时长）。
+- 用量：stream-json 没有逐 token 事件，但终端 `result.usage` 带逐轮 token 数，驱动直接上报，`usage` 能力为 true。
 
 ## 账号接入（2026-11-03 实测）
 
@@ -117,7 +117,7 @@ Tip: use --model <id> ...
 
 ### 凭据放在哪
 
-- Windows：`%APPDATA%\Cursor\auth.json`（实测：把 `{"accessToken":"dummy","refreshToken":"dummy"}` 写进临时 `APPDATA\Cursor\auth.json` 后，`agent status` 报 `authenticated`；只写 accessToken 报 `partially-authenticated`）。
+- Windows：`%APPDATA%\Cursor\auth.json`（实测：把包含两个凭据字段的假登录文件写进临时 `APPDATA\Cursor\auth.json` 后，`agent status` 报 `authenticated`；只写 accessToken 报 `partially-authenticated`）。
 - macOS：`~/.cursor/auth.json`；Linux：`$XDG_CONFIG_HOME/cursor/auth.json`（bundle 证据：`getAuthFilePath` 按平台拼，域名是 `cursor`，Windows 上做 Title Case → `Cursor`）。
 - macOS 的登录文件是**写死的 `~/.cursor/auth.json`**，不跟 `CURSOR_DATA_DIR` 走（bundle 证据：`case "darwin": join(homedir(), ".cursor", "auth.json")`），所以 macOS 上隔离登录只能改 `HOME`。
 - `~/.cursor/cli-config.json` 只是设置（权限、沙箱、编辑器偏好），**不含 token**（实测看过本机文件）。
@@ -136,12 +136,18 @@ Tip: use --model <id> ...
 - 实测（两个临时目录，只改 `APPDATA` + `CURSOR_DATA_DIR`，`USERPROFILE`/`HOME`/`LOCALAPPDATA` 保持用户自己的）：一个放了假凭据报 `authenticated`、另一个报 `unauthenticated`，互不影响。provider 层再验一次（两个独立 home 各跑一次 `status`）：放了假凭据的那个 `logged_in=true`、另一个 `false`，`agent_env` 只有 5 个变量，没有 `USERPROFILE`/`HOME`/`LOCALAPPDATA`。
 - 没能实测：真正两个 Cursor 账号同时登录时的行为（没有账号）。从 bundle 看凭据路径只由平台目录决定，没有别的全局单例；风险在于 CLI 自己的后台进程（若有）可能仍读用户目录。
 
-### 额度与 token
+### 额度与 token（2026-11-07 实测）
 
-- 没有本地额度记录：`~/.cursor` 下没有 usage/token 文件（`ai-tracking/ai-code-tracking.db` 是 IDE 的补全统计，不含 token）；`cli-config.json`、`statsig-cache.json` 也不含。
-- `stream-json` 不带 token 数（见上文「用量」），`status` 也不报额度。
-- 因此账号页对 Cursor 只显示登录状态、打码邮箱与模型列表，额度区为空 → GUI 显示「暂无额度数据」；`AccountProvider::sessions` 返回空，额度/用量页不会有 Cursor 的 token 数字。
-- 以后要接：`~/.cursor/chats/<md5(项目路径)>/<chatId>/store.db`（SQLite）里可能有会话记录，需要另做协议解析，本版没做。
+两条通道分别提供逐轮 token 和账单周期额度：
+
+- **逐轮 token**：两版已装 CLI 的 bundle 在构造 stream-json 终端 `result` 时分别以 `...ce?{usage:ce}:{}` / `...ae?{usage:ae}:{}` 带入来自 `turnEnded` 的 usage；实测字段为 `inputTokens`、`outputTokens`、`cacheReadTokens`、`cacheWriteTokens`、`reasoningTokens`。`wire.rs` 将 `result.usage` 捕获到 `Turn.usage`；驱动兼容实测的 camelCase 和 snake_case，字段缺失、改名、非数字或负数按 0 处理。每轮有 usage 时，在完成事件前发一个 `SessionEventKind::Usage`；整个 usage 缺失则不发。`cost_usd` 为空、`size` 为 0，`used` 是本轮 input + output，其中 input 包含 cache read/write；`tokens.{input,cached_input,output,reasoning_output,total}` 是会话累计值，cached_input 是 cache read，reasoning_output 是 output 的子集，total = input + output。`capabilities().usage=true`。hub 将它转成 `agent.usage`，供 `/v1/usage` 与 `usage_get().by_agent` 使用。
+- **账单周期额度**：账户 provider 向 `https://api2.cursor.sh` 的私有 Connect-RPC `aiserver.v1.DashboardService/GetCurrentPeriodUsage` 发 Connect-JSON 请求，头为 `Content-Type: application/json`、`Connect-Protocol-Version: 1`，Bearer 凭据来自账户的 `auth.json` 的 `accessToken`。实测 `billingCycleStart`/`billingCycleEnd` 是 epoch 毫秒 int64 字符串，代码也接受数字；`planUsage` 的 `totalPercentUsed`、`autoPercentUsed`、`apiPercentUsed` 实测为数字。响应另有 `totalSpend`、`includedSpend`、`remaining`、`limit` 等字段，代码忽略它们。总百分比生成 `rate_limits` 的 primary 窗口和 `limits` 的首个 all 主组，另两个分别生成 auto、api；GUI 用 slice(1) 显示后两组。任一有效百分比达到 100 时 `limit_reached` 为 true，窗口展示百分比限制在 0–100，缺失或无效字段不编造。有效周期用于窗口时长和重置时间。套餐名只由 `agent about --format json` 的 `subscriptionTier` 获取，失败则留空。状态缓存 60 秒，请求超时 20 秒；读取失败降级为空额度并保留登录状态和提示。
+
+私有 RPC 未文档化，可能无预告变更且没有版本保证；它涉及凭据，绝不把凭据写入日志或 `state.db`，也绝不硬编码百分比。逐轮通道只覆盖 CrossAgents 发起的 CLI 会话（每轮一个 `-p` 进程），不覆盖 IDE/网页端；它只上报 token，没有美元费用。`AccountProvider::sessions()` 仍返回空，因此按厂商日志统计的 `/v1/usage/series` 仍没有 Cursor 数字。
+
+原计划的 `afterAgentResponse` hook 通道已排除：两版 bundle 加五次真实 CLI 实跑表明，两个已装版本的 headless `-p` 循环不走该 hook；触发点只在交互 TUI 提交处理器的 `3026.index.js` / `4525.index.js` 的 after-agent-hooks。门槛 `function o(e,t){return Boolean(e.userHooks?.hooks[t]?.length||e.projectHooks?.hooks[t]?.length)}` 只看 userHooks/projectHooks；`--plugin-dir` 经 `getPluginHooks` 放入独立的 pluginHooks，`--add-dir` 经 `619.index.js` 的 `q()` 放入 repoHooks，均不被门槛检查。runtimeHooks 仅是云 worker 选项；hook 配置路径只有 `~/.cursor`、`<workspace>/.cursor`、ProgramData 和 claude 系列。`sessionStart`/`sessionEnd` 会触发，但与逐轮 token 无关。
+
+`store.db` 路线也已实测排除：730 个 blob 中只有 219 个 JSON 消息，字段仅有 role/content/providerOptions（modelName/modelProviderMessageId/requestId），其余 511 个为二进制，没有 token/usage/cost；`meta.json` 只有 createdAtMs/updatedAtMs/cwd，`~/.cursor/ai-tracking/ai-code-tracking.db` 只有 requestId/conversationId/timestamp/model。解析这些最多补会话数，`TokenTotals` 仍为 0。Enterprise Admin API（如 `/teams/filtered-usage-events`）需要 Enterprise 和团队管理员 API key，不在范围内。剩余缺口是 IDE/网页端用量与美元费用。
 
 
 ## 目录信任与沙箱（2026-11-05 本机实测）

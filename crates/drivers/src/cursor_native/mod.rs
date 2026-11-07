@@ -13,9 +13,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use crossagents_core::{
     Capabilities, CliStatus, CoreError, Driver, DriverKind, DriverSession, McpServerSpec,
-    PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec, StopReason, TurnOutcome,
+    PermissionPolicy, Prompt, SessionEvent, SessionEventKind, SessionSpec, StopReason, TokenUsage,
+    TurnOutcome,
 };
-use serde_json::{Map, json};
+use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -81,6 +82,7 @@ impl Driver for CursorNativeDriver {
             mcp: true,
             resume: true,
             set_model: true,
+            usage: true,
             ..Capabilities::default()
         }
     }
@@ -215,6 +217,7 @@ pub struct CursorSession {
     files: SessionFiles,
     model: Mutex<Option<String>>,
     instructions: Mutex<Option<String>>,
+    tokens: Mutex<TokenUsage>,
     bypass: bool,
     events: mpsc::UnboundedSender<SessionEvent>,
     turn: tokio::sync::Mutex<()>,
@@ -245,6 +248,7 @@ impl CursorSession {
             files,
             model: Mutex::new(spec.agent.model.filter(|m| !m.is_empty())),
             instructions: Mutex::new(spec.instructions),
+            tokens: Mutex::new(TokenUsage::default()),
             bypass: spec.permission == PermissionPolicy::Bypass,
             events: spec.events,
             turn: tokio::sync::Mutex::new(()),
@@ -276,6 +280,38 @@ impl CursorSession {
             text = self.files.message(&text)?;
         }
         Ok(text)
+    }
+
+    /// Emit one cumulative `Usage` event from the terminal `result` event's
+    /// `usage` object (present in both installed CLI versions). When the CLI
+    /// omitted `usage`, emit nothing — no fabrication, no waiting, no polling.
+    fn emit_usage(&self, result_usage: Option<&Value>) {
+        let Some(usage) = result_usage else {
+            return;
+        };
+        let parsed = ResultUsage::from_value(usage);
+        let input = parsed.input_tokens + parsed.cache_read_tokens + parsed.cache_write_tokens;
+        let output = parsed.output_tokens;
+        let used = input + output;
+        // `used` is this turn's input+output; `tokens` is the session cumulative
+        // (the hub computes deltas from `tokens.total`). `cached_input` is a
+        // subset of `input`, `reasoning_output` a subset of `output`, and `total`
+        // is `input + output` — reasoning is not added to `total` again.
+        let tokens = {
+            let mut totals = self.tokens.lock().expect("tokens");
+            totals.input += input;
+            totals.cached_input += parsed.cache_read_tokens;
+            totals.output += output;
+            totals.reasoning_output += parsed.reasoning_tokens;
+            totals.total += used;
+            totals.clone()
+        };
+        self.emit(SessionEventKind::Usage {
+            used,
+            size: 0,
+            cost_usd: None,
+            tokens: Some(tokens),
+        });
     }
 
     async fn run(&self, prompt: &Prompt) -> Result<TurnOutcome, CoreError> {
@@ -379,6 +415,9 @@ impl CursorSession {
             self.emit(SessionEventKind::Error { message });
             StopReason::Error
         };
+        // Emit one cumulative Usage event from `result.usage` before signalling
+        // the turn is complete.
+        self.emit_usage(turn.usage.as_ref());
         let turn_id = turn.request_id;
         self.emit(SessionEventKind::TurnCompleted {
             turn_id: turn_id.clone(),
@@ -493,6 +532,43 @@ impl Drop for SessionFiles {
     fn drop(&mut self) {
         self.remove();
     }
+}
+
+/// Token counts parsed from the terminal `result` event's `usage` object. The
+/// installed CLIs emit camelCase field names; snake_case spellings are accepted
+/// for compatibility. Missing/renamed, non-numeric, and negative values become 0.
+#[derive(Default)]
+struct ResultUsage {
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_write_tokens: u64,
+    reasoning_tokens: u64,
+}
+
+impl ResultUsage {
+    fn from_value(raw: &Value) -> Self {
+        let num = |keys: &[&str]| {
+            keys.iter()
+                .find_map(|key| raw.get(*key))
+                .and_then(parse_token)
+                .unwrap_or(0)
+        };
+        Self {
+            input_tokens: num(&["inputTokens", "input_tokens"]),
+            output_tokens: num(&["outputTokens", "output_tokens"]),
+            cache_read_tokens: num(&["cacheReadTokens", "cache_read_tokens"]),
+            cache_write_tokens: num(&["cacheWriteTokens", "cache_write_tokens"]),
+            // Observed as `reasoningTokens`; `reasoning_output_tokens` is the
+            // snake_case name of the `TokenUsage` field it feeds.
+            reasoning_tokens: num(&["reasoningTokens", "reasoning_output_tokens"]),
+        }
+    }
+}
+
+fn parse_token(value: &Value) -> Option<u64> {
+    let n = value.as_f64()?;
+    (n.is_finite() && n >= 0.0 && n.fract() == 0.0).then(|| n as u64)
 }
 
 #[cfg(test)]
@@ -628,10 +704,8 @@ printf '%s\n' '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text
         assert_eq!(argv.matches("--model=next-model").count(), 1);
         let mut text = String::new();
         while let Ok(event) = rx.try_recv() {
-            match event.kind {
-                SessionEventKind::Output { text: part, .. } => text.push_str(&part),
-                SessionEventKind::Usage { .. } => panic!("no usage"),
-                _ => {}
+            if let SessionEventKind::Output { text: part, .. } = event.kind {
+                text.push_str(&part);
             }
         }
         assert_eq!(text, "hellohello");
@@ -907,6 +981,7 @@ sleep 60
                 mcp: true,
                 resume: true,
                 set_model: true,
+                usage: true,
                 ..Capabilities::default()
             }
         );
@@ -921,5 +996,194 @@ sleep 60
         assert_eq!(session.model.lock().unwrap().as_deref(), Some("new-model"));
         session.set_model(None, None).await.unwrap();
         assert_eq!(session.model.lock().unwrap().as_deref(), Some("new-model"));
+    }
+
+    // A mock CLI that just emits one assistant delta and a successful result, so
+    // run() completes normally without touching a real Cursor install.
+    fn ndjson_cli(root: &Path) -> Vec<String> {
+        mock_cli(
+            root,
+            r#"
+Write-Output '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text":"ok"}]}}'
+Write-Output '{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"chat"}'
+"#,
+            r#"
+printf '%s\n' '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text":"ok"}]}}' '{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"chat"}'
+"#,
+        )
+    }
+
+    // What a real signed-in `agent -p ... --output-format stream-json` turn
+    // emits: the terminal `result` event carries a `usage` object. This is the
+    // cheap, local proof that the token channel works without a real CLI.
+    fn ndjson_cli_with_result_usage(
+        root: &Path,
+        input: u64,
+        output: u64,
+        reasoning: u64,
+    ) -> Vec<String> {
+        let assistant =
+            r#"{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text":"ok"}]}}"#;
+        let result = json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "ok",
+            "session_id": "chat",
+            "usage": {
+                "inputTokens": input,
+                "outputTokens": output,
+                "cacheReadTokens": 0,
+                "cacheWriteTokens": 0,
+                "reasoningTokens": reasoning
+            }
+        })
+        .to_string();
+        let windows = format!("\nWrite-Output '{assistant}'\nWrite-Output '{result}'\n");
+        let unix = format!("\nprintf '%s\\n' '{assistant}' '{result}'\n");
+        mock_cli(root, &windows, &unix)
+    }
+
+    fn drain_usage(
+        rx: &mut mpsc::UnboundedReceiver<SessionEvent>,
+    ) -> Vec<(u64, u64, Option<f64>, Option<TokenUsage>)> {
+        let mut out = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let SessionEventKind::Usage {
+                used,
+                size,
+                cost_usd,
+                tokens,
+            } = event.kind
+            {
+                out.push((used, size, cost_usd, tokens));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn result_usage_parsing_is_tolerant_and_accepts_both_spellings() {
+        // snake_case spellings (and the snake_case reasoning field).
+        let snake = ResultUsage::from_value(&json!({
+            "input_tokens": 100, "output_tokens": 20,
+            "cache_read_tokens": 30, "cache_write_tokens": 5,
+            "reasoning_output_tokens": 7
+        }));
+        assert_eq!(
+            (
+                snake.input_tokens,
+                snake.output_tokens,
+                snake.cache_read_tokens,
+                snake.cache_write_tokens,
+                snake.reasoning_tokens
+            ),
+            (100, 20, 30, 5, 7)
+        );
+        // camelCase, as emitted by both installed CLI versions.
+        let camel = ResultUsage::from_value(&json!({
+            "inputTokens": 7, "outputTokens": 8,
+            "cacheReadTokens": 9, "cacheWriteTokens": 10,
+            "reasoningTokens": 11
+        }));
+        assert_eq!(
+            (
+                camel.input_tokens,
+                camel.output_tokens,
+                camel.cache_read_tokens,
+                camel.cache_write_tokens,
+                camel.reasoning_tokens
+            ),
+            (7, 8, 9, 10, 11)
+        );
+        // missing / renamed / non-numeric / negative / fractional -> 0
+        let bad = ResultUsage::from_value(&json!({
+            "input_tokens": "nope", "output_tokens": -5,
+            "cache_read_tokens": true, "cache_write_tokens": 12.5,
+            "reasoningTokens": "not a number",
+            "unrelated": 999
+        }));
+        assert_eq!(
+            (
+                bad.input_tokens,
+                bad.output_tokens,
+                bad.cache_read_tokens,
+                bad.cache_write_tokens,
+                bad.reasoning_tokens
+            ),
+            (0, 0, 0, 0, 0)
+        );
+        let empty = ResultUsage::from_value(&json!({}));
+        assert_eq!(
+            (
+                empty.input_tokens,
+                empty.output_tokens,
+                empty.cache_read_tokens,
+                empty.cache_write_tokens,
+                empty.reasoning_tokens
+            ),
+            (0, 0, 0, 0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn no_result_usage_emits_no_usage_event() {
+        let root = tempfile::tempdir().unwrap();
+        let (spec, mut rx) = spec(root.path());
+        let session = CursorSession::new("chat".into(), ndjson_cli(root.path()), spec).unwrap();
+        let outcome = session.prompt("hi").await.unwrap();
+        assert_eq!(outcome.stop_reason, StopReason::EndTurn);
+        assert!(drain_usage(&mut rx).is_empty(), "no fabricated usage");
+        session.shutdown().await;
+    }
+
+    // Two turns of `result.usage` produce one cumulative Usage event each, with
+    // tokens.total > 0 and reasoning_output accumulated as a subset of output —
+    // no extra files or configuration involved.
+    #[tokio::test]
+    async fn result_usage_emits_cumulative_usage_per_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let (spec, mut rx) = spec(root.path());
+        let session = CursorSession::new(
+            "chat".into(),
+            ndjson_cli_with_result_usage(root.path(), 100, 20, 7),
+            spec,
+        )
+        .unwrap();
+        assert_eq!(
+            session.prompt("one").await.unwrap().stop_reason,
+            StopReason::EndTurn
+        );
+        let usages = drain_usage(&mut rx);
+        assert_eq!(usages.len(), 1, "one Usage event per turn");
+        let (used, size, cost_usd, tokens) = &usages[0];
+        assert_eq!(*used, 120); // input + output
+        assert_eq!(*size, 0);
+        assert!(cost_usd.is_none());
+        assert_eq!(
+            tokens.as_ref().unwrap(),
+            &TokenUsage {
+                input: 100,
+                cached_input: 0,
+                output: 20,
+                reasoning_output: 7, // subset of output, not added to total
+                total: 120,
+            }
+        );
+        assert!(tokens.as_ref().unwrap().total > 0);
+
+        // A second turn on the same session keeps the cumulative counter.
+        assert_eq!(
+            session.prompt("two").await.unwrap().stop_reason,
+            StopReason::EndTurn
+        );
+        let usages = drain_usage(&mut rx);
+        assert_eq!(usages.len(), 1);
+        assert_eq!(usages[0].0, 120);
+        let tokens = usages[0].3.as_ref().unwrap();
+        assert_eq!(tokens.total, 240);
+        assert_eq!(tokens.reasoning_output, 14);
+        assert_eq!(tokens.output, 40);
+        session.shutdown().await;
     }
 }
