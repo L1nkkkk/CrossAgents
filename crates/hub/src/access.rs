@@ -6,22 +6,7 @@ use axum::http::Method;
 use crossagents_api_types::ExtensionAccess;
 
 /// What a credential may do; each level includes the ones before it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Level {
-    Read,
-    Write,
-    Admin,
-}
-
-impl Level {
-    pub fn word(self) -> &'static str {
-        match self {
-            Self::Read => "read",
-            Self::Write => "write",
-            Self::Admin => "admin",
-        }
-    }
-}
+pub use crossagents_core::DeviceLevel as Level;
 
 /// What a presented token turned out to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +14,12 @@ pub enum Grant {
     Level(Level),
     /// An agent's session token: it only reaches `/v1/me*`.
     Agent,
+    Device {
+        id: String,
+        name: String,
+        kind: crossagents_core::DeviceKind,
+        level: Level,
+    },
     /// The token the hub issued for one run of an extension tool (docs/EXTENSIONS.md §3). It
     /// is read or write, never admin, and it names the extension so the log can.
     Extension {
@@ -38,6 +29,16 @@ pub enum Grant {
 }
 
 impl Grant {
+    pub fn is_person(&self) -> bool {
+        matches!(
+            self,
+            Self::Level(_)
+                | Self::Device {
+                    kind: crossagents_core::DeviceKind::Client,
+                    ..
+                }
+        )
+    }
     /// The level this extension token has. Admin is not representable.
     fn extension_level(level: ExtensionAccess) -> Level {
         match level {
@@ -56,7 +57,9 @@ pub const EXTENSION_CALL_ROUTE: &str = "/v1/extensions/{name}/tools/{tool}";
 pub fn required(method: &Method, pattern: &str) -> Level {
     let admin = matches!(
         (method.as_str(), pattern),
-        ("POST", "/v1/shutdown")
+        ("POST", "/v1/devices")
+            | ("DELETE", "/v1/devices/{id}")
+            | ("POST", "/v1/shutdown")
             | ("POST", "/v1/accounts")
             | ("POST", "/v1/accounts/import")
             | ("DELETE", "/v1/accounts/{id}")
@@ -109,6 +112,10 @@ fn reads_only(pattern: &str) -> bool {
 pub fn refusal(grant: &Grant, method: &Method, pattern: &str) -> Option<String> {
     let needed = required(method, pattern);
     match grant {
+        Grant::Device {
+            kind: crossagents_core::DeviceKind::Node,
+            ..
+        } => Some("node tokens only use the node channel (B1)".into()),
         Grant::Agent => Some(format!(
             "an agent's session token reaches /v1/me only; {method} {pattern} needs the {} level",
             needed.word()
@@ -117,7 +124,7 @@ pub fn refusal(grant: &Grant, method: &Method, pattern: &str) -> Option<String> 
         // `{ kind: "human" }`, which opens the tools declared for `human`; an extension that
         // could reach it would call them as a person (docs/EXTENSIONS.md §3).
         Grant::Extension { name, .. }
-            if method == Method::POST && pattern == EXTENSION_CALL_ROUTE =>
+            if !grant.is_person() && method == Method::POST && pattern == EXTENSION_CALL_ROUTE =>
         {
             Some(format!(
                 "the token of extension {name} cannot call {method} {pattern}: that route calls a tool as a person, and an extension is not one"
@@ -133,12 +140,12 @@ pub fn refusal(grant: &Grant, method: &Method, pattern: &str) -> Option<String> 
                 )
             })
         }
-        Grant::Level(level) if *level < needed => Some(format!(
+        Grant::Level(level) | Grant::Device { level, .. } if *level < needed => Some(format!(
             "this credential has the {} level; {method} {pattern} needs {}",
             level.word(),
             needed.word()
         )),
-        Grant::Level(_) => None,
+        Grant::Level(_) | Grant::Device { .. } => None,
     }
 }
 
@@ -146,6 +153,55 @@ pub fn refusal(grant: &Grant, method: &Method, pattern: &str) -> Option<String> 
 mod tests {
     use super::*;
 
+    #[test]
+    fn devices_follow_levels_and_node_channel() {
+        use crossagents_core::{DeviceKind, DeviceLevel};
+        assert!(Grant::Level(Level::Admin).is_person());
+        assert!(Grant::Level(Level::Read).is_person());
+        assert!(!Grant::Agent.is_person());
+        assert!(
+            !Grant::Extension {
+                name: "x".into(),
+                level: ExtensionAccess::Write
+            }
+            .is_person()
+        );
+        let routes = [
+            (Method::GET, "/v1/devices", Level::Read),
+            (Method::POST, "/v1/devices", Level::Admin),
+            (Method::DELETE, "/v1/devices/{id}", Level::Admin),
+            (Method::POST, "/v1/runs", Level::Write),
+            (Method::POST, EXTENSION_CALL_ROUTE, Level::Write),
+            (Method::GET, "/v1/terminals/{id}/output", Level::Admin),
+        ];
+        for (level, expected) in [
+            (DeviceLevel::Read, Level::Read),
+            (DeviceLevel::Write, Level::Write),
+            (DeviceLevel::Admin, Level::Admin),
+        ] {
+            for kind in [DeviceKind::Client, DeviceKind::Node] {
+                let device = Grant::Device {
+                    id: "id".into(),
+                    name: "laptop".into(),
+                    kind,
+                    level,
+                };
+                assert_eq!(device.is_person(), kind == DeviceKind::Client);
+                for (method, path, needed) in &routes {
+                    assert_eq!(required(method, path), *needed);
+                    let denied = refusal(&device, method, path);
+                    assert_eq!(
+                        denied.is_none(),
+                        kind == DeviceKind::Client && expected >= *needed,
+                        "{level:?} {kind:?} {method} {path}"
+                    );
+                    if kind == DeviceKind::Node {
+                        assert!(denied.unwrap().contains("node channel (B1)"));
+                    }
+                }
+            }
+        }
+    }
     #[test]
     fn levels_follow_the_api_auth_table() {
         assert_eq!(required(&Method::GET, "/v1/agents"), Level::Read);

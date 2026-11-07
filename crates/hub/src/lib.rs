@@ -6,18 +6,19 @@ pub mod accounts;
 pub mod api;
 pub mod api_expertise;
 pub mod api_projects;
-pub mod lessons;
 pub mod api_terminal;
 pub mod attachments;
 pub mod avatars;
 pub mod budget;
 pub mod collab;
+pub mod devices;
 pub mod event_log;
 pub mod extensions;
 pub mod guard;
 pub mod identity;
 pub mod image;
 pub mod install;
+pub mod lessons;
 pub mod models;
 pub mod notices;
 pub mod paths;
@@ -371,6 +372,7 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     let services_task = extension_services.start(shutdown.clone());
     let agent_tokens = tokens.clone();
     let state = Arc::new(api::AppState {
+        devices: Default::default(),
         extensions: extensions.clone(),
         runner: extension_runner.clone(),
         bus: bus.clone(),

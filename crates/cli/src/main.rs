@@ -62,6 +62,9 @@ pub enum Command {
     /// Vendor accounts: login, plan, quota, token use.
     #[command(subcommand)]
     Account(cmd::account::AccountCommand),
+    /// Issue, list and revoke device credentials.
+    #[command(subcommand)]
+    Device(cmd::device::DeviceCommand),
     /// Guided setup of a vendor: account, login, models and agents.
     Setup(cmd::setup::SetupArgs),
     /// Run a command under the local resource locks (docs/tasks/LOCKS.md §4).

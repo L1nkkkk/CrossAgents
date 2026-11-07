@@ -6,12 +6,13 @@
 
 ## 1. 现状
 
-hub 只监听 `127.0.0.1`（`[hub] listen` 尚未可配，A2 才放开），鉴权分四层：
+hub 只监听 `127.0.0.1`（`[hub] listen` 尚未可配，A3 才放开；A2 走 SSH 隧道），鉴权分五层：
 
 | 层 | 中间件 | 凭据 | 谁用 |
 |---|---|---|---|
 | 免鉴权 | 无 | 无 | 存活探测 |
 | 总 token | `require_token` | `~/.crossagents/token` | GUI（经 Electron 主进程）、CLI |
+| 设备 token | `require_token` | `cad_` + 64 位 hex；库里只存 SHA-256 | client 按 read / write / admin；node 仅节点通道（B1） |
 | 会话 token | `require_agent_token` | `~/.crossagents/agent-tokens.json` 里每 agent 一个 | 外部 agent 经 MCP 接入 |
 | 扩展 token | `require_token` | 每次扩展工具调用现签，只在 hub 内存里，进程结束作废 | 扩展工具进程回调 hub |
 
@@ -82,6 +83,9 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 | GET | `/v1/extensions/calls/{id}` | read | GUI（面板） |
 | DELETE | `/v1/extensions/calls/{id}` | write | GUI（面板） |
 | GET | `/v1/usage` | read | GUI、CLI |
+| GET | `/v1/devices` | read | GUI、CLI |
+| POST | `/v1/devices` | admin | GUI、CLI；默认 client / write，返回 `{ device, token }`，token 只显示一次 |
+| DELETE | `/v1/devices/{id}` | admin | GUI、CLI；幂等，返回吊销后的设备 |
 | GET | `/v1/accounts` | read | GUI、CLI |
 | POST | `/v1/accounts` | admin | GUI、CLI |
 | DELETE | `/v1/accounts/{id}` | admin | GUI、CLI |
@@ -168,7 +172,7 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
   启用扩展、自动信任）。消息里写明是哪个扩展的 token。
 - 到不了 `/v1/me*`：那一组只认会话 token，扩展的 token 在那里是 401。
 - **调不了 `POST /v1/extensions/{name}/tools/{tool}`**，read 还是 write 都一样（403）。这条路由给工具的
-  `caller` 填的是 `{ "kind": "human" }`，工具声明了 `human` 才能被它调到；只有人的凭据（`Grant::Level`）才算人。
+  `caller` 填的是 `{ "kind": "human" }`，工具声明了 `human` 才能被它调到；只有人的凭据（总 token、只读 token、client 设备，即 `Grant::is_person()`）才算人。
   不拦的话，write 级的扩展拿自己的 token 调这条路由就能以人的身份调只开放给 `human` 的工具。
   `access::refusal` 里按路由拒绝，路由处理函数里再核对一次凭据类型。
 - 进程结束就作废，每次调用一个新的；hub 重启后全部失效；每个请求在日志里记下扩展名。
@@ -181,6 +185,8 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 - `POST /v1/agents/{key}/connect` 归 write 而非 admin：它签发的是该 agent 自己的会话 token，作用域被 `require_agent_token` 限住，拿不到别的 agent 和总 token。
 - `POST /v1/plugins/{name}/models` 归 write 而非 admin：只影响界面显示哪些模型，不改账号能力。
 
+设备签发与吊销属于 admin：它们新增或收回访问凭据。列表属于 read：只返回设备资料，不含 token 或哈希。未吊销的设备名唯一，1–64 个字符，重名返回 409；吊销保留记录，下一次请求 401，已打开的事件流和终端输出流在 5 秒内断开。last_seen_at 每台设备每分钟最多写一次。
+
 ## 4. 待改造
 
 按 [TODO.md](TODO.md) §二 的条目推进，顺序是清单 → 分级 → 收口。
@@ -188,7 +194,7 @@ A2 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 - 把 `require_token` 抽成策略点，按 read / write / admin 校验；路由表只标级别，不写鉴权逻辑。
 - `ErrorCode` 增 `Forbidden`：越权返回 403 而不是 401。401 表示"没带凭据或凭据无效"，403 表示"凭据有效但级别不够"，GUI 据此置灰入口并说明原因。
 - Electron 主进程维护"方法 + 路径"白名单，只放行 GUI 实际用到的接口（已做，`apps/gui/electron/allowed.cts`；`allowed.test.cts` 从 `src/api.ts` 抽出全部调用逐条核对，漏登记就失败）。这把收窄放在主进程，页面即使被注入了也无法调用 `/v1/shutdown`。
-- A1 引入 users / devices 后，策略点换成"设备或用户 → 级别"的映射，路由表和白名单都不动。
+- A1 增加设备 token 与 `Grant::Device`，client 按设备级别走现有策略表，node 只走节点通道（B1）。总 token、只读 token、会话 token 与扩展 token 行为不变；密码登录、users 表、可信设备确认、登录限速留待后续。
 - `Grant` 增加了 `Extension { name, level }`（E1 已做，见上面「扩展 token」和 [EXTENSIONS.md](EXTENSIONS.md) §3）。
   路由表不变，只是多一种凭据能走到现有的策略点；`Grant` 因带名字不再是 `Copy`，`refusal` 接受 `&Grant`。
 
@@ -217,7 +223,7 @@ NTFS 默认 ACL 已限制到本用户、SYSTEM 和 Administrators，同机其他
 - 新增错误码取值、新增枚举取值（前提是客户端忽略未知值，这点是硬性要求）
 - 放宽校验
 
-0.1.x 例外：GUI 与 hub 同一安装包发布，不存在旧 GUI 连新 hub 的情况，破坏性变更暂不升版（S1 改 `DeleteRunResponse` 即属此类）。多节点（TODO §八）开工时统一升到 `v2`，并同时做 §二 的版本不一致提示。
+0.1.x 例外：GUI 与 hub 同一安装包发布，不存在旧 GUI 连新 hub 的情况，破坏性变更暂不升版（S1 改 `DeleteRunResponse` 即属此类）。A2（远程 GUI）开工时统一升到 `v2`，并同时做 §二 的版本不一致提示。本轮 A1 只新增接口，按本节不算破坏性变更。
 
 ### GUI 侧比对
 

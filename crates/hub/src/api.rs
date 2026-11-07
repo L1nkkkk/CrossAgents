@@ -73,6 +73,7 @@ const MESSAGE_BODY_LIMIT: usize =
     crossagents_api_types::MAX_ATTACHMENTS_TOTAL / 3 * 4 + 1024 * 1024;
 
 pub struct AppState {
+    pub devices: crate::devices::Devices,
     pub extensions: Arc<crate::extensions::Registry>,
     /// Runs extension tools and holds the tokens issued to them.
     pub runner: Arc<crate::extensions::Runner>,
@@ -111,6 +112,8 @@ impl AppState {
 
 pub fn router(state: Arc<AppState>) -> Router {
     let authed = Router::new()
+        .route("/v1/devices", get(list_devices).post(create_device))
+        .route("/v1/devices/{id}", delete(revoke_device))
         .route("/v1/info", get(info))
         .route("/v1/agents", get(list_agents).post(create_agent))
         .route("/v1/session-candidates", get(session_candidates))
@@ -413,11 +416,41 @@ async fn require_token(
     if let crate::access::Grant::Extension { name, level } = &grant {
         tracing::info!(extension = %name, ?level, method = %request.method(), route = %pattern, "extension request");
     }
+    if let crate::access::Grant::Device { name, level, .. } = &grant {
+        tracing::info!(device = %name, ?level, method = %request.method(), route = %pattern, "device request");
+    }
+    let device_cancel = if let crate::access::Grant::Device { id, .. } = &grant {
+        // A revoke between authentication and this lookup must refuse this request too.
+        match state.devices.cancellation(id).await {
+            Some(cancel) => Some(cancel),
+            None => {
+                return AppError::new(
+                    StatusCode::UNAUTHORIZED,
+                    ErrorCode::Unauthorized,
+                    "device revoked",
+                )
+                .into_response();
+            }
+        }
+    } else {
+        None
+    };
+    let streaming = pattern == "/v1/events" || pattern == "/v1/terminals/{id}/output";
     match crate::access::refusal(&grant, request.method(), &pattern) {
         None => {
             // Handlers that act as the caller read who it is from here, never from the body.
             request.extensions_mut().insert(grant);
-            next.run(request).await
+            let response = next.run(request).await;
+            if streaming && let Some(cancel) = device_cancel {
+                let (parts, body) = response.into_parts();
+                let stream = futures::StreamExt::take_until(
+                    body.into_data_stream(),
+                    cancel.cancelled_owned(),
+                );
+                Response::from_parts(parts, axum::body::Body::from_stream(stream))
+            } else {
+                response
+            }
         }
         Some(why) => {
             AppError::new(StatusCode::FORBIDDEN, ErrorCode::Forbidden, why).into_response()
@@ -435,11 +468,28 @@ async fn grant_of(state: &AppState, token: &str) -> Option<crate::access::Grant>
         Some(Grant::Level(Level::Read))
     } else if state.tokens.agent(token).await.is_some() {
         Some(Grant::Agent)
+    } else if let Some((name, level)) = state.runner.token(token) {
+        Some(Grant::Extension { name, level })
+    } else if token.starts_with("cad_") {
+        match state
+            .devices
+            .authenticate(state.store().as_ref(), token)
+            .await
+        {
+            Ok(Some((d, _))) => Some(Grant::Device {
+                id: d.id,
+                name: d.name,
+                kind: d.kind,
+                level: d.level,
+            }),
+            Ok(None) => None,
+            Err(error) => {
+                tracing::error!(%error, "device authentication failed");
+                None
+            }
+        }
     } else {
-        state
-            .runner
-            .token(token)
-            .map(|(name, level)| Grant::Extension { name, level })
+        None
     }
 }
 
@@ -461,6 +511,21 @@ async fn require_agent_token(
         },
         None => None,
     };
+    // A node credential is valid, but no existing HTTP channel is its node channel.
+    if agent.is_none()
+        && let Some(token) = presented
+        && let Some(crate::access::Grant::Device {
+            kind: crossagents_core::DeviceKind::Node,
+            ..
+        }) = grant_of(&state, token).await
+    {
+        return AppError::new(
+            StatusCode::FORBIDDEN,
+            ErrorCode::Forbidden,
+            "node tokens only use the node channel (B1)",
+        )
+        .into_response();
+    }
     match agent {
         Some(agent) => {
             request.extensions_mut().insert(agent);
@@ -3483,7 +3548,7 @@ async fn call_extension_tool(
     StatusCode,
     Json<crossagents_api_types::ExtensionCallAccepted>,
 )> {
-    if !matches!(grant, crate::access::Grant::Level(_)) {
+    if !grant.is_person() {
         return Err(AppError::new(
             StatusCode::FORBIDDEN,
             ErrorCode::Forbidden,
@@ -3671,4 +3736,54 @@ mod candidate_policy_tests {
         hub.shutdown();
         hub.wait().await.unwrap();
     }
+}
+
+async fn list_devices(
+    State(state): State<Arc<AppState>>,
+) -> ApiResult<Json<crossagents_api_types::ListDevicesResponse>> {
+    Ok(Json(crossagents_api_types::ListDevicesResponse {
+        devices: state.store().list_devices().await?,
+    }))
+}
+async fn create_device(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crossagents_api_types::CreateDeviceRequest>,
+) -> ApiResult<Json<crossagents_api_types::CreateDeviceResponse>> {
+    if !(1..=64).contains(&req.name.chars().count()) {
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::BadRequest,
+            "device name must contain 1–64 characters",
+        ));
+    }
+    let device = crossagents_core::Device {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: req.name,
+        kind: req.kind.unwrap_or_default(),
+        level: req.level.unwrap_or_default(),
+        created_at: Utc::now(),
+        last_seen_at: None,
+        revoked_at: None,
+    };
+    let token = format!(
+        "cad_{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    state
+        .store()
+        .insert_device(&device, &crate::devices::hash(&token))
+        .await?;
+    Ok(Json(crossagents_api_types::CreateDeviceResponse {
+        device,
+        token,
+    }))
+}
+async fn revoke_device(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crossagents_core::Device>> {
+    Ok(Json(
+        state.devices.revoke(state.store().as_ref(), &id).await?,
+    ))
 }

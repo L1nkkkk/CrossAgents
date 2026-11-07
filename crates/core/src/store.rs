@@ -267,7 +267,31 @@ pub trait Store: Send + Sync {
     async fn list_tasks(&self, run_id: RunId) -> Result<Vec<Task>, CoreError>;
     async fn update_task(&self, task: &Task) -> Result<(), CoreError>;
 
-    /// Fails with [`CoreError::Conflict`] if the id is taken.
+    /// Stores only a credential hash; an active duplicate name is a conflict.
+    async fn insert_device(
+        &self,
+        device: &crate::Device,
+        token_hash: &str,
+    ) -> Result<(), CoreError> {
+        let _ = (device, token_hash);
+        Err(CoreError::Unsupported("devices".into()))
+    }
+    async fn list_devices(&self) -> Result<Vec<crate::Device>, CoreError> {
+        Err(CoreError::Unsupported("devices".into()))
+    }
+    async fn device_by_hash(&self, hash: &str) -> Result<Option<crate::Device>, CoreError> {
+        let _ = hash;
+        Err(CoreError::Unsupported("devices".into()))
+    }
+    async fn revoke_device(&self, id: &str) -> Result<crate::Device, CoreError> {
+        let _ = id;
+        Err(CoreError::Unsupported("devices".into()))
+    }
+    async fn touch_device(&self, id: &str) -> Result<(), CoreError> {
+        let _ = id;
+        Err(CoreError::Unsupported("devices".into()))
+    }
+
     async fn insert_account(&self, account: &Account) -> Result<(), CoreError>;
     async fn get_account(&self, id: &str) -> Result<Account, CoreError>;
     async fn list_accounts(&self) -> Result<Vec<Account>, CoreError>;
