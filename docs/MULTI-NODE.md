@@ -1,6 +1,6 @@
 # CrossAgents 多节点设计（草稿）
 
-> 状态：草稿，待打磨。放开 [DESIGN.md](DESIGN.md) §1.2 中「跨主机、多用户、设备配对」这条非目标。A 阶段远程 GUI 走 SSH 隧道（2026-11-08 定（run 84848059 计划审批））。
+> 状态：草稿，待打磨。放开 [DESIGN.md](DESIGN.md) §1.2 中「跨主机、多用户、设备配对」这条非目标。A 阶段远程 GUI 走 SSH 隧道（2026-11-08 定：人说按推荐来（run 84848059））。
 > §11 第 2、3 条已定（连通方式、Mac 是 GUI + 节点），第 1 条保留待定；第 10 条（B1 节点怎么连中心）仍待定。其余标「待定」的地方还没有结论，见 §11。
 
 ## 0. 产品形态
@@ -150,7 +150,7 @@ C2 --> CB
 
 ### 4.3 登录与配对
 
-结论：A 阶段的远程 GUI 用 SSH 隧道配对，不走账号密码（2026-11-08 定（run 84848059 计划审批））。hub 继续只听 `127.0.0.1`，GUI 只连本机转发出来的端口。账号密码登录挪到 A3（§12）。
+结论：A 阶段的远程 GUI 用 SSH 隧道配对，不走账号密码（2026-11-08 定：人说按推荐来（run 84848059））。hub 继续只听 `127.0.0.1`，GUI 只连本机转发出来的端口。账号密码登录挪到 A3（§12）。
 
 - 远程 GUI：用系统 OpenSSH，在中心上跑 `crossagents device add <设备名> --json`，拿到只显示一次的 client token，存在 Electron 主进程（渲染层拿不到，沿用 V2 的安全设定）。之后用 `ssh -N -L` 把中心的 `127.0.0.1` 端口转到本机，GUI 连本机端口。认证交给 `~/.ssh/config` 与 ssh-agent。这条命令在中心本机执行，用的是中心的总 token（[paths.rs](../crates/hub/src/paths.rs) `Paths::token`）。怎么连得到中心的 SSH，见 §14「SSH 隧道」。
 - 本机 GUI 仍用本机总 token，不经这套配对。设备的签发、列表、吊销见 §12 A1。
@@ -319,7 +319,7 @@ agents ||--o{ events
 
 ## 10. 安全
 
-结论：A 阶段不开放 listen，hub 继续只听 `127.0.0.1`（2026-11-08 定（run 84848059 计划审批））。远程 GUI 经 SSH 隧道进来（§4.3、§14「SSH 隧道」）。丢了设备 token，还要能 SSH 登录中心才能用。设备级别 read / write / admin 在签发时定，默认 write；原来写的「可信设备」对应 admin。签发和吊销是 admin：CLI 在中心本机用总 token 签发（[paths.rs](../crates/hub/src/paths.rs) `Paths::token`；[API-AUTH.md](API-AUTH.md) §1 里总 token 是 admin），经 SSH 跑 `crossagents device add` 也是在本机。级别口径见 [API-AUTH.md](API-AUTH.md) §3 与 [access.rs](../crates/hub/src/access.rs) 的 `Level`、`Grant`。
+结论：A 阶段不开放 listen，hub 继续只听 `127.0.0.1`（2026-11-08 定：人说按推荐来（run 84848059））。远程 GUI 经 SSH 隧道进来（§4.3、§14「SSH 隧道」）。丢了设备 token，还要能 SSH 登录中心才能用。设备级别 read / write / admin 在签发时定，默认 write；原来写的「可信设备」对应 admin。签发和吊销是 admin：CLI 在中心本机用总 token 签发（[paths.rs](../crates/hub/src/paths.rs) `Paths::token`；[API-AUTH.md](API-AUTH.md) §1 里总 token 是 admin），经 SSH 跑 `crossagents device add` 也是在本机。级别口径见 [API-AUTH.md](API-AUTH.md) §3 与 [access.rs](../crates/hub/src/access.rs) 的 `Level`、`Grant`。
 
 下面这套留到 A3，开放 listen 时才做（§12）：非回环一律 TLS；自签证书，第一次连接比对短码后固定指纹；新设备确认、密码复核、`/v1/auth/login` 限速。A3 去掉「走 Tailscale 或内网时可以只用 token」这个例外。同一个安装包局域网和公网两种场景都用，一条规则不容易配错——这是 A3 的理由。A 阶段用不上，因为 listen 不开，流量停在 SSH 里。
 
@@ -432,7 +432,7 @@ B1 之后节点机器上的 GUI 管的可能是本机 node（单干时是本机 
 
 ## 14. 连通方式
 
-结论：局域网和公网都要（§11 第 2 条已定）。从外面怎么连得到交给网络层，三种办法按需选，默认推荐打洞（组网工具）。A 阶段的远程 GUI 在这三种之上走 SSH 隧道（2026-11-08 定（run 84848059 计划审批））：hub 继续只听 `127.0.0.1`，管的是设备 token；TLS 与证书指纹留到 A3（§10）。
+结论：局域网和公网都要（§11 第 2 条已定）。从外面怎么连得到交给网络层，三种办法按需选，默认推荐打洞（组网工具）。A 阶段的远程 GUI 在这三种之上走 SSH 隧道（2026-11-08 定：人说按推荐来（run 84848059））：hub 继续只听 `127.0.0.1`，管的是设备 token；TLS 与证书指纹留到 A3（§10）。
 
 三种办法：打洞（组网工具：Tailscale / headscale、ZeroTier、EasyTier）、公网地址（路由器端口映射、IPv6、hub 放云服务器）、服务器转发（frp 这类 TCP 转发）。
 
