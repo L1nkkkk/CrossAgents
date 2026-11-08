@@ -261,7 +261,7 @@ export function Composer({
             mention.sync();
           }}
           onKeyDown={(e) => slash.onKeyDown(e) || mention.onKeyDown(e) || onKey(e)}
-          placeholder={composerPlaceholder({ name: displayName(agent), state: delivery.state, steer })}
+          placeholder={composerPlaceholder({ name: displayName(agent), state: delivery.state, steer, platform: shortcutPlatform })}
         />
         <div className="bar">
           {agent.plugin === "external" ? (
@@ -288,7 +288,7 @@ export function Composer({
       </div>
       <div className="composer-hint">
         {note && <span>{note} · </span>}
-        {compact.busy ? "压缩中…" : composerHint({ state: delivery.state, steer, interrupt: canInterrupt })}
+        {compact.busy ? "压缩中…" : composerHint({ state: delivery.state, steer, interrupt: canInterrupt, platform: shortcutPlatform })}
       </div>
     </div>
   );
@@ -380,3 +380,4 @@ function PlanDock({ run, onDone, onReply }: { run: Run; onDone: () => void; onRe
     </div>
   );
 }
+import { shortcutPlatform } from "../lib/shortcuts";
