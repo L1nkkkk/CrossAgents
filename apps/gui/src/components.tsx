@@ -28,6 +28,7 @@ import {
   MessageCircle,
   Minimize2,
   Monitor,
+  Network,
   PanelLeft,
   Paperclip,
   PanelRight,
@@ -546,6 +547,7 @@ const ICONS = {
   open: ExternalLink,
   attach: Paperclip,
   device: Monitor,
+  connection: Network,
 } satisfies Record<string, LucideIcon>;
 
 export type IconName = keyof typeof ICONS;

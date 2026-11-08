@@ -12,6 +12,8 @@ import {
   noteForbidden,
   noteHub,
   offeredOf,
+  operationOf,
+  operationSupport,
   supportOf,
   type FeatureState,
 } from "./features.ts";
@@ -33,6 +35,27 @@ test("a request belongs to the entry it came from", () => {
   assert.equal(featureOf("/v1/runs/abc"), undefined);
   assert.equal(featureOf("/v1/workspaces"), undefined);
   assert.equal(featureOf("/v1/agents/abc/files/tree?path="), undefined);
+});
+
+test("a 403 inside a page is kept by the operation, not by the whole entry", () => {
+  // 设备: reading the list is read; revoking is admin (#retier's access.rs).
+  assert.equal(operationOf("GET", "/v1/devices"), "devices");
+  assert.equal(operationOf("DELETE", "/v1/devices/0193-abc"), "devices.revoke");
+  // Agent settings and repos/init became admin, so their 403s grey only these controls.
+  assert.equal(operationOf("POST", "/v1/agents/Rex/settings"), "agent.settings");
+  assert.equal(operationOf("POST", "/v1/repos/init"), "repos.init");
+  assert.equal(operationOf("GET", "/v1/repos/init"), undefined);
+  assert.equal(operationOf("POST", "/v1/agents/Rex/messages"), undefined);
+
+  forgetHub();
+  noteHub([...FEATURES], "0.2.6");
+  noteForbidden("DELETE", "/v1/devices/abc", "this credential needs admin");
+  // The entry still reads its list; only the button is refused.
+  assert.deepEqual(supportOf(currentState(), "devices"), { known: true, show: true, disabled: false });
+  assert.deepEqual(operationSupport(currentState(), "devices.revoke"), { refused: true, reason: "this credential needs admin" });
+  // A page-level 403 still greys the page itself.
+  noteForbidden("GET", "/v1/devices", "this credential can only read");
+  assert.deepEqual(supportOf(currentState(), "devices"), { known: true, show: true, disabled: true, reason: "this credential can only read" });
 });
 
 test("versions compare by their numbers", () => {
@@ -146,10 +169,10 @@ test("the store follows /v1/info and 403s, and a new connection forgets refusals
   noteHub(["git", "lessons", "unknown-name"], "0.2.6");
   assert.deepEqual(currentState().listed, ["git", "lessons"]);
 
-  noteForbidden("/v1/git/status?path=x", "这个凭据只能读");
+  noteForbidden("GET", "/v1/git/status?path=x", "这个凭据只能读");
   assert.deepEqual(supportOf(currentState(), "git"), { known: true, show: true, disabled: true, reason: "这个凭据只能读" });
   // A feature the hub did not list is hidden anyway, so its refusal is not kept.
-  noteForbidden("/v1/works", "没这个权限");
+  noteForbidden("GET", "/v1/works", "没这个权限");
   assert.equal(currentState().refused.work, undefined);
 
   noteHub([...FEATURES], "0.2.6");
@@ -160,15 +183,15 @@ test("the store follows /v1/info and 403s, and a new connection forgets refusals
   assert.equal(currentState().listed, null);
   assert.deepEqual(supportOf(currentState(), "git"), { known: true, show: true, disabled: false });
   assert.deepEqual(supportOf(currentState(), "work"), { known: true, show: false, disabled: false });
-  noteForbidden("/v1/git/status?path=x", "这一项也要读权限");
+  noteForbidden("GET", "/v1/git/status?path=x", "这一项也要读权限");
   assert.equal(currentState().refused.git, "这一项也要读权限");
   // A refusal for an entry this version does not have is not kept.
-  noteForbidden("/v1/works", "谁");
+  noteForbidden("GET", "/v1/works", "谁");
   assert.equal(currentState().refused.work, undefined);
 
   // A 0.2.5 hub without a list: nothing inferred, so no refusals are kept either.
   noteHub(undefined, "0.2.5");
   assert.deepEqual(currentState().refused, {});
-  noteForbidden("/v1/git/status?path=x", "谁");
+  noteForbidden("GET", "/v1/git/status?path=x", "谁");
   assert.deepEqual(currentState().refused, {});
 });

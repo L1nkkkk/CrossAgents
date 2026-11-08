@@ -8,6 +8,7 @@ import { sendMessage } from "../outbox";
 import { navigate } from "../App";
 import { Avatar, BrandMark, ErrorBox, Field, Icon, VendorMark, agentTitle, displayName, hueOf, useAgents } from "../components";
 import { useHubData } from "../hub";
+import { useConnectionState } from "../lib/useConnection";
 import { t } from "../lib/i18n";
 import { modelDisplay } from "../lib/modelDisplay";
 import { cursorMode, reasoningModels } from "../lib/reasoning";
@@ -76,13 +77,18 @@ export function HomeView() {
   const list = all.filter((w) => w.key !== CHATS);
   const current = list.find((w) => w.key === scope);
   const [folder, setFolder] = useState<string>();
+  // A remote hub's folders are on the centre's machine: there is no system dialog for them,
+  // so the person types the path and the hub checks it when the agent is created.
+  const remote = useConnectionState()?.mode === "remote";
+  const [pathEntry, setPathEntry] = useState(false);
+  const [manualPath, setManualPath] = useState("");
   const cwd = folder ?? current?.path;
   const [mode, setModeState] = useState<Mode>(() => load<Mode>(MODE_KEY, "chat", (v) => v === "chat" || v === "run"));
   const setMode = (m: Mode) => {
     setModeState(m);
     save(MODE_KEY, m);
   };
-  // 文件 → 新建 Chat / 新建 Work while this page is open (menubar.tsx `startNew`).
+  // 文件 �? 新建 Chat / 新建 Work while this page is open (menubar.tsx `startNew`).
   useEffect(() => {
     const onMode = (e: Event) => {
       const m = (e as CustomEvent<unknown>).detail;
@@ -174,7 +180,7 @@ export function HomeView() {
     files.clear();
   };
 
-  // The delegation level carries over, 全托管 included (docs/tasks/W1.md §7).
+  // The delegation level carries over, 全托�? included (docs/tasks/W1.md §7).
   const setPreset = (p: Preset) => {
     setPresetState(p);
     save(PRESET_KEY, p);
@@ -187,7 +193,7 @@ export function HomeView() {
 
   const planners = here.filter((a) => a.role === "planner");
   const offered = (plugins.data ?? []).filter((p) => p.models.length > 0);
-  // The workspace whose sessions are offered: the picked one, or — for Work — the directory
+  // The workspace whose sessions are offered: the picked one, or �? for Work �? the directory
   // the first planner works in, since a run starts there without picking a workspace chip.
   const baseLeadAgent = picked?.kind === "agent" ? planners.find((a) => a.name === picked.name) : planners[0];
   const sessionRepo = cwd ?? (mode === "run" && picked?.kind !== "model" ? baseLeadAgent?.cwd : undefined);
@@ -289,8 +295,8 @@ export function HomeView() {
    * An agent with this role, model and login in `dir`, or a new one (the hub names it: a
    * person's name, never the model's).
    *
-   * `reuse` is false for the lead: 新会话 says a new one, so handing back an agent that
-   * already exists — with everything it has said before — is the opposite of what was asked.
+   * `reuse` is false for the lead: 新会�? says a new one, so handing back an agent that
+   * already exists �? with everything it has said before �? is the opposite of what was asked.
    * To carry a conversation on, pick that session by name under 已有会话. Workers are reused:
    * one is a template each task clones, not a conversation anyone reads.
    */
@@ -447,6 +453,17 @@ export function HomeView() {
   }
 
   const pickFolder = window.crossagents?.pickFolder;
+  /** Uses the path typed for a remote hub, as if it had come from the dialog. */
+  const useManualPath = () => {
+    const dir = manualPath.trim();
+    if (!dir) return;
+    const known = list.find((w) => w.key === wsKey(dir));
+    if (known) {
+      setFolder(undefined);
+      selectWorkspace(known.key);
+    } else setFolder(dir);
+    setPathEntry(false);
+  };
   const wsItems: MenuItem[] = [
     // A chat may live outside any project; a run always works in one.
     ...(mode === "chat"
@@ -479,25 +496,36 @@ export function HomeView() {
         },
       }),
     ),
-    ...(pickFolder
+    ...(remote
       ? [
           {
             kind: "item",
-            key: "pick",
-            label: t("home.pickFolder"),
+            key: "path",
+            label: "输入中心上的路径…",
+            sub: "这个路径在中心那台机器上；建 agent 时 hub 会校验",
             icon: <Icon name="folder" size={14} />,
-            onPick: async () => {
-              const dir = await pickFolder();
-              if (!dir) return;
-              const known = list.find((w) => w.key === wsKey(dir));
-              if (known) {
-                setFolder(undefined);
-                selectWorkspace(known.key);
-              } else setFolder(dir);
-            },
+            onPick: () => setPathEntry(true),
           } satisfies MenuItem,
         ]
-      : []),
+      : pickFolder
+        ? [
+            {
+              kind: "item",
+              key: "pick",
+              label: t("home.pickFolder"),
+              icon: <Icon name="folder" size={14} />,
+              onPick: async () => {
+                const dir = await pickFolder();
+                if (!dir) return;
+                const known = list.find((w) => w.key === wsKey(dir));
+                if (known) {
+                  setFolder(undefined);
+                  selectWorkspace(known.key);
+                } else setFolder(dir);
+              },
+            } satisfies MenuItem,
+          ]
+        : []),
   ];
 
   /**
@@ -634,10 +662,34 @@ export function HomeView() {
             placeholder={t(mode === "chat" ? "home.chatPlaceholder" : "home.placeholder")}
             autoFocus
           />
+          {pathEntry && (
+            <div className="home-path">
+              <input
+                data-field="cwd"
+                value={manualPath}
+                onChange={(e) => setManualPath(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                    e.preventDefault();
+                    useManualPath();
+                  } else if (e.key === "Escape") setPathEntry(false);
+                }}
+                placeholder="中心上的路径，例如 /home/me/project 或 C:\\work\\project"
+                aria-label="中心上的路径"
+                autoFocus
+              />
+              <button type="button" className="primary small" onClick={useManualPath} disabled={!manualPath.trim()}>
+                用这个路径
+              </button>
+              <button type="button" className="ghost small" onClick={() => setPathEntry(false)}>
+                取消
+              </button>
+            </div>
+          )}
           <div className="bar">
             <ChipMenu
               icon={wsLabel ? <span className={`ws-dot av-${hueOf(wsKey(folder ?? current!.path))}`} /> : <Icon name={mode === "chat" ? "chat" : "folder"} size={14} />}
-              label={wsLabel ?? t(mode === "chat" ? "home.noProject" : "home.chooseWorkspace")}
+              label={wsLabel ?? (remote ? "输入中心上的路径" : t(mode === "chat" ? "home.noProject" : "home.chooseWorkspace"))}
               title={folder ?? current?.path}
               items={wsItems}
               up

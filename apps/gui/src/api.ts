@@ -219,7 +219,7 @@ async function request<T>(method: Method, path: string, body?: unknown, opts: { 
     const error = errorFromBody(response.status, response.body);
     // 403: the token's level is too low for this route (docs/API-AUTH.md §3). The entry that
     // asked is greyed with the hub's message instead of raising it at the person.
-    if (response.status === 403) noteForbidden(path, error.message);
+    if (response.status === 403) noteForbidden(method, path, error.message);
     throw error;
   }
   if (opts.text) return response.body as T;

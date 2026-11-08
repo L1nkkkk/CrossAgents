@@ -54,6 +54,17 @@ export function atLeast(hubVersion: string | undefined, min: string): boolean {
   return true;
 }
 
+/**
+ * What a 403 is kept for. Most are about a whole feature, but 设备's list is read while revoking
+ * one is admin: a refusal of the revoke must not grey the entry that still lists them. The same
+ * goes for agent settings and `repos/init`, which are admin since #retier while the rest of
+ * their pages is write.
+ */
+export const OPERATIONS = ["devices.revoke", "agent.settings", "repos.init"] as const;
+export type Operation = (typeof OPERATIONS)[number];
+/** A key a 403 is filed under: a feature, or one operation inside a page. */
+export type RefusalKey = Feature | Operation;
+
 export type FeatureState = {
   /** The hub has answered `/v1/info` since the page opened. */
   known: boolean;
@@ -64,8 +75,8 @@ export type FeatureState = {
    * "an older hub" apart from "a hub with no features", so `WITHOUT_LIST` decides by version.
    */
   listed: readonly Feature[] | null;
-  /** The hub's message for a 403 from this entry, by feature. */
-  refused: Readonly<Partial<Record<Feature, string>>>;
+  /** The hub's message for a 403, by feature or operation. */
+  refused: Readonly<Partial<Record<RefusalKey, string>>>;
 };
 
 export type FeatureSupport = {
@@ -90,6 +101,21 @@ export function featureOf(path: string): Feature | undefined {
   if (/^\/v1\/devices(?:\/|$)/.test(p)) return "devices";
   return undefined;
 }
+
+/**
+ * What a refused request is about. One operation inside a page is kept apart from the page
+ * itself, so a revoke that needs admin leaves the device list readable and only greys its own
+ * button (#retier: agent settings and `repos/init` are admin too).
+ */
+export function operationOf(method: string, path: string): RefusalKey | undefined {
+  const p = path.split("?")[0];
+  if (method === "DELETE" && /^\/v1\/devices\/[^/]+$/.test(p)) return "devices.revoke";
+  if (method === "POST" && /^\/v1\/agents\/[^/]+\/settings$/.test(p)) return "agent.settings";
+  if (method === "POST" && p === "/v1/repos/init") return "repos.init";
+  return featureOf(p);
+}
+
+const isFeature = (key: RefusalKey): key is Feature => (FEATURES as readonly string[]).includes(key);
 
 /** What the hub has: its list, or — with none — what its version implies (`WITHOUT_LIST`). */
 export function offeredOf(state: FeatureState): readonly Feature[] {
@@ -149,11 +175,14 @@ export function noteHub(features: readonly string[] | undefined, hubVersion: str
   publish({ known: true, version: hubVersion, listed, refused: {} });
 }
 
-/** A request answered 403: grey its entry, keeping the hub's message as the reason. */
-export function noteForbidden(path: string, message: string) {
-  const feature = featureOf(path);
-  if (!feature || !offeredOf(state).includes(feature) || state.refused[feature] === message) return;
-  publish({ ...state, refused: { ...state.refused, [feature]: message } });
+/** A request answered 403: grey its entry (or its one operation), keeping the hub's message. */
+export function noteForbidden(method: string, path: string, message: string) {
+  const key = operationOf(method, path);
+  if (!key) return;
+  // A feature the hub does not list is hidden anyway, so its refusal changes nothing.
+  if (isFeature(key) && !offeredOf(state).includes(key)) return;
+  if (state.refused[key] === message) return;
+  publish({ ...state, refused: { ...state.refused, [key]: message } });
 }
 
 /** Forgets what the hub said, as when the page starts over. */
@@ -175,6 +204,20 @@ function subscribe(listener: () => void) {
 export function useFeatureSupport(feature: Feature): FeatureSupport {
   useSyncExternalStore(subscribe, () => revision);
   return supportOf(state, feature);
+}
+
+/** What an operation inside a page should do: greyed with the hub's reason after its 403. */
+export type OperationSupport = { refused: boolean; reason?: string };
+
+export function operationSupport(state: FeatureState, operation: Operation): OperationSupport {
+  const reason = state.refused[operation];
+  return reason ? { refused: true, reason } : { refused: false };
+}
+
+/** One request inside a page (设备 revoke, agent settings…), greyed after a 403 of its own. */
+export function useOperation(operation: Operation): OperationSupport {
+  useSyncExternalStore(subscribe, () => revision);
+  return operationSupport(state, operation);
 }
 
 /** The whole state, when a component explains several entries at once (the version tooltip). */
