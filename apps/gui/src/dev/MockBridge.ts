@@ -4,6 +4,7 @@
 // what streamed (transcripts fold with the GUI's own session.ts). Writes that matter to the
 // look (sending, withdrawing, approving) are acted out; the rest answer 204.
 
+import { API_VERSION } from "../hub";
 import { usageSeriesMock } from "../views/Usage.mock";
 import { importCandidates } from "../views/AccountImport.mock";
 import type { Account } from "@bindings/Account";
@@ -727,7 +728,7 @@ export class MockBridge implements CrossAgentsBridge {
         // `features: null` is an older hub: it answers without the list at all, and `version`
         // is then what the GUI infers its entries from.
         const features = s.features === null ? undefined : (s.features ?? FEATURES);
-        return json(200, { version: s.version ?? __BUILD__.version, commit, debug: false, api: s.api ?? "v1", pid: 0, home: "（mock 模式，无 hub）", started_at: new Date().toISOString(), ...(features ? { features } : {}) });
+        return json(200, { version: s.version ?? __BUILD__.version, commit, debug: false, api: s.api ?? API_VERSION, pid: 0, home: "（mock 模式，无 hub）", started_at: new Date().toISOString(), ...(features ? { features } : {}) });
       }
       if (p === "/v1/agents") {
         // `?run=`: what the plan being settled changes (list_agents).

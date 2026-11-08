@@ -45,7 +45,7 @@ pub struct ListDevicesResponse {
     pub devices: Vec<Device>,
 }
 
-pub const API_VERSION: &str = "v1";
+pub const API_VERSION: &str = "v2";
 
 /// Entry points this hub has that a hub from before the list did not (docs/TODO.md §二): the
 /// GUI hides what a hub does not list, and a hub built before this field sends no list at all,
@@ -3115,6 +3115,7 @@ mod tests {
             features: FEATURES.iter().map(|f| (*f).to_owned()).collect(),
         };
         let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["api"], "v2");
         assert_eq!(
             json["features"],
             serde_json::json!(["git", "lessons", "work", "apply", "devices"])

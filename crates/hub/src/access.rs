@@ -59,6 +59,10 @@ pub fn required(method: &Method, pattern: &str) -> Level {
         (method.as_str(), pattern),
         ("POST", "/v1/devices")
             | ("DELETE", "/v1/devices/{id}")
+            // Settings can restore automatic execution, enable hooks or change setting sources.
+            | ("POST", "/v1/agents/{key}/settings")
+            // Runs git init and an initial commit at any path supplied by the caller.
+            | ("POST", "/v1/repos/init")
             | ("POST", "/v1/shutdown")
             | ("POST", "/v1/accounts")
             | ("POST", "/v1/accounts/import")
@@ -124,7 +128,7 @@ pub fn refusal(grant: &Grant, method: &Method, pattern: &str) -> Option<String> 
         // `{ kind: "human" }`, which opens the tools declared for `human`; an extension that
         // could reach it would call them as a person (docs/EXTENSIONS.md §3).
         Grant::Extension { name, .. }
-            if !grant.is_person() && method == Method::POST && pattern == EXTENSION_CALL_ROUTE =>
+            if method == Method::POST && pattern == EXTENSION_CALL_ROUTE =>
         {
             Some(format!(
                 "the token of extension {name} cannot call {method} {pattern}: that route calls a tool as a person, and an extension is not one"
@@ -171,6 +175,8 @@ mod tests {
             (Method::POST, "/v1/devices", Level::Admin),
             (Method::DELETE, "/v1/devices/{id}", Level::Admin),
             (Method::POST, "/v1/runs", Level::Write),
+            (Method::POST, "/v1/agents/{key}/settings", Level::Admin),
+            (Method::POST, "/v1/repos/init", Level::Admin),
             (Method::POST, EXTENSION_CALL_ROUTE, Level::Write),
             (Method::GET, "/v1/terminals/{id}/output", Level::Admin),
         ];
@@ -212,6 +218,12 @@ mod tests {
         );
         assert_eq!(required(&Method::DELETE, "/v1/agents/{key}"), Level::Write);
         assert_eq!(required(&Method::POST, "/v1/shutdown"), Level::Admin);
+        assert_eq!(
+            required(&Method::POST, "/v1/agents/{key}/settings"),
+            Level::Admin
+        );
+        assert_eq!(required(&Method::POST, "/v1/repos/init"), Level::Admin);
+        assert_eq!(required(&Method::POST, "/v1/runs"), Level::Write);
         assert_eq!(
             required(&Method::POST, "/v1/accounts/{id}/login"),
             Level::Admin

@@ -9,7 +9,7 @@ import { api, errorText, getBridge, refuseRequests } from "./api";
 export type { HubEvent };
 
 /** The hub API this GUI speaks: `API_VERSION` in crates/api-types. */
-export const API_VERSION = "v1";
+export const API_VERSION = "v2";
 
 /** "connecting", "connected" or "offline: <reason>". */
 export type ConnectionStatus = string;
