@@ -14,7 +14,7 @@ import {
   type PairStep, type RemoteRecord, type TunnelState,
 } from "./remote.cjs";
 import { RemoteController, Unavailable } from "./remoteController.cjs";
-import { locate, type Ssh } from "./remoteTunnel.cjs";
+import { locate, pairDevice, type Ssh } from "./remoteTunnel.cjs";
 
 // ---------------------------------------------------------------------------------------
 // Checks
@@ -192,7 +192,7 @@ async function fakeHub(tokens: Set<string>, port = 0): Promise<FakeHub> {
 }
 
 function setEnv(values: Record<string, string | undefined>) {
-  for (const key of ["FAKE_SSH_FAIL", "FAKE_SSH_HUB_PORT", "FAKE_SSH_CMD_ONLY", "FAKE_SSH_TOKEN", "FAKE_SSH_PAIR_FAIL", "FAKE_SSH_LOG"]) {
+  for (const key of ["FAKE_SSH_FAIL", "FAKE_SSH_HUB_PORT", "FAKE_SSH_CMD_ONLY", "FAKE_SSH_TOKEN", "FAKE_SSH_PAIR_FAIL", "FAKE_SSH_LOG", "FAKE_SSH_EXE", "FAKE_SSH_PS_VERSION"]) {
     delete process.env[key];
   }
   for (const [key, value] of Object.entries(values)) if (value !== undefined) process.env[key] = value;
@@ -229,8 +229,37 @@ test("locating: ssh's own failure is shown as is; no hub.json means the hub does
   setEnv({});
   await assert.rejects(locate(SSH, { host: "center" }), (err: Error) => err.message.startsWith(NOT_RUNNING));
   setEnv({ FAKE_SSH_HUB_PORT: "7420", FAKE_SSH_CMD_ONLY: "1" });
-  assert.deepEqual(await locate(SSH, { host: "center" }), { port: 7420, exe: "C:\\Users\\u\\.crossagents\\bin\\0.2.10\\crossagents.exe" });
+  assert.deepEqual(await locate(SSH, { host: "center" }), { port: 7420, exe: "C:\\Users\\u\\.crossagents\\bin\\0.2.10\\crossagents.exe", locateMethod: "type" });
   setEnv({});
+});
+
+test("pairing probes PowerShell only for Windows paths found with cat", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crossagents-shell-"));
+  const log = join(dir, "ssh.log");
+  const target = { host: "center" };
+  try {
+    for (const scenario of [
+      { exe: "C:\\Program Files\\crossagents.exe", version: "7", method: "cat", probe: true, prefix: "& " },
+      { exe: "\\\\server\\share\\crossagents.exe", version: "5", method: "cat", probe: true, prefix: "& " },
+      { exe: "C:\\crossagents.exe", version: undefined, method: "cat", probe: true, prefix: "" },
+      { exe: "C:\\crossagents.exe", version: "7", method: "type", probe: false, prefix: "" },
+      { exe: "/opt/crossagents", version: "7", method: "cat", probe: false, prefix: "" },
+      { exe: "", version: "7", method: "cat", probe: false, prefix: "" },
+    ] as const) {
+      writeFileSync(log, "");
+      setEnv({ FAKE_SSH_HUB_PORT: "7420", FAKE_SSH_EXE: scenario.exe, FAKE_SSH_PS_VERSION: scenario.version, FAKE_SSH_CMD_ONLY: scenario.method === "type" ? "1" : undefined, FAKE_SSH_LOG: log });
+      const hub = await locate(SSH, target);
+      await pairDevice(SSH, target, hub, "pc-gui");
+      const calls = readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line) as string[]);
+      const commands = calls.map((args) => args[args.length - 1]);
+      assert.equal(commands.includes("$PSVersionTable.PSVersion.Major"), scenario.probe);
+      const executable = scenario.exe ? `"${scenario.exe}"` : "crossagents";
+      assert.equal(commands.at(-1), `${scenario.prefix}${executable} device add pc-gui --json`);
+    }
+  } finally {
+    setEnv({});
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("pairing, connecting, reconnecting after the hub moves, and stopping on 401", async () => {

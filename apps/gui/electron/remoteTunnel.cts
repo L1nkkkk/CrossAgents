@@ -38,11 +38,11 @@ export function runSsh(ssh: Ssh, args: string[], timeout = EXEC_TIMEOUT_MS): Pro
  * Reads the hub's `hub.json` over ssh. ssh's own failures (exit 255: host key, auth, network)
  * are reported as they are; a missing file means the hub does not run there.
  */
-export async function locate(ssh: Ssh, target: RemoteTarget): Promise<RemoteHub> {
+export async function locate(ssh: Ssh, target: RemoteTarget): Promise<RemoteHub & { locateMethod: "cat" | "type" }> {
   let last: unknown;
   for (const command of LOCATE_COMMANDS) {
     try {
-      return parseHubFile(await runSsh(ssh, execArgs(target, command)));
+      return { ...parseHubFile(await runSsh(ssh, execArgs(target, command))), locateMethod: command === LOCATE_COMMANDS[0] ? "cat" : "type" };
     } catch (err) {
       if (err instanceof SshError && (err.code === 255 || err.code === null)) throw err;
       last = err;
@@ -53,8 +53,17 @@ export async function locate(ssh: Ssh, target: RemoteTarget): Promise<RemoteHub>
 }
 
 /** Runs `device add <name> --json` on the hub's machine. */
-export async function pairDevice(ssh: Ssh, target: RemoteTarget, hub: RemoteHub, deviceName: string): Promise<Paired> {
-  return parseDeviceAdd(await runSsh(ssh, execArgs(target, pairCommand(remoteCommand(target, hub), deviceName))));
+export async function pairDevice(ssh: Ssh, target: RemoteTarget, hub: RemoteHub & { locateMethod: "cat" | "type" }, deviceName: string): Promise<Paired> {
+  let command = remoteCommand(target, hub);
+  if (hub.locateMethod === "cat" && /^"(?:[A-Za-z]:|\\\\)/.test(command)) {
+    try {
+      const version = await runSsh(ssh, execArgs(target, "$PSVersionTable.PSVersion.Major"));
+      if (/^\d+$/.test(version.trim())) command = `& ${command}`;
+    } catch {
+      // A non-PowerShell shell may reject the probe; use the normal command there.
+    }
+  }
+  return parseDeviceAdd(await runSsh(ssh, execArgs(target, pairCommand(command, deviceName))));
 }
 
 /** A port nobody listens on now. */

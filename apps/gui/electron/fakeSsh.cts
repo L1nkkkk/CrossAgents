@@ -47,10 +47,13 @@ if (args.includes("-N")) {
   const isType = command.startsWith("type ");
   if (env.FAKE_SSH_CMD_ONLY && !isType) fail("'cat' is not recognized as an internal or external command", 1);
   if (!env.FAKE_SSH_HUB_PORT) fail(isType ? "The system cannot find the file specified." : "cat: /home/u/.crossagents/hub.json: No such file or directory", 1);
-  const exe = env.FAKE_SSH_CMD_ONLY ? "C:\\Users\\u\\.crossagents\\bin\\0.2.10\\crossagents.exe" : "/home/u/.crossagents/bin/0.2.10/crossagents";
+  const exe = env.FAKE_SSH_EXE ?? (env.FAKE_SSH_CMD_ONLY ? "C:\\Users\\u\\.crossagents\\bin\\0.2.10\\crossagents.exe" : "/home/u/.crossagents/bin/0.2.10/crossagents");
   process.stdout.write(`${isType ? "\uFEFF" : ""}${JSON.stringify({ pid: 1, port: Number(env.FAKE_SSH_HUB_PORT), version: "0.2.10", started_at: "2026-11-08T00:00:00Z", exe })}\n`);
+} else if (command === "$PSVersionTable.PSVersion.Major") {
+  if (!env.FAKE_SSH_PS_VERSION) fail("not PowerShell", 1);
+  process.stdout.write(`${env.FAKE_SSH_PS_VERSION}\n`);
 } else {
-  const m = /^(?:"[^"]+"|crossagents) device add ([A-Za-z0-9._-]+) --json$/.exec(command);
+  const m = /^(?:& )?(?:"[^"]+"|crossagents) device add ([A-Za-z0-9._-]+) --json$/.exec(command);
   if (!m) fail(`sh: unexpected command: ${command}`, 127);
   if (env.FAKE_SSH_PAIR_FAIL) fail(env.FAKE_SSH_PAIR_FAIL, 1);
   process.stdout.write(`${JSON.stringify({ device: { id: "dev-1", name: m[1], kind: "client", level: "write" }, token: env.FAKE_SSH_TOKEN ?? "cad_fake" })}\n`);
