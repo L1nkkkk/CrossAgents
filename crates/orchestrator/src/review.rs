@@ -275,7 +275,8 @@ impl Orchestrator {
                 remarks.len()
             )
         };
-        self.notice(issuer, "task", &line).await;
+        self.notice(issuer, "task", &line, crossagents_core::NoticeClass::Silent)
+            .await;
         Ok(task)
     }
 

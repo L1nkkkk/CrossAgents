@@ -198,6 +198,7 @@ impl Orchestrator {
                     run.planner,
                     &format!("run:{}:setup", run.id),
                     &format!("集成工作区 {}：{note}", dir.display()),
+                    crossagents_core::NoticeClass::Silent,
                 )
                 .await;
             }

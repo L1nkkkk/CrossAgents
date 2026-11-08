@@ -183,7 +183,8 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     let runtime = Arc::new(
         Runtime::new(bus.clone(), plugins)
             .with_setup(setup.clone())
-            .with_home(paths.home.clone()),
+            .with_home(paths.home.clone())
+            .with_notice_windows(config.notice_batch_quiet, config.notice_batch_max),
     );
     runtime.watch_moves();
     runtime.watch_replies();

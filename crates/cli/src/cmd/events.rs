@@ -462,6 +462,18 @@ pub fn summary(kind: &EventKind) -> String {
             }
             text
         }
+        EventKind::NoticeRecorded {
+            id,
+            topic,
+            class,
+            line,
+            ..
+        } => format!(
+            "{} {topic} [{}] {}",
+            short(id),
+            class.as_str(),
+            one_line(line)
+        ),
     }
 }
 

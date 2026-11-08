@@ -266,12 +266,16 @@ impl Orchestrator {
             self.store().delete_watch(&watch.id).await?;
             let line = format!(
                 "Watch {} expired: the thing it waited for ({what}) did not happen in {} days. Ask again with watch if you still need it.",
-                watch.id,
-                WAIT_MAX_DAYS
+                watch.id, WAIT_MAX_DAYS
             );
             if let Err(err) = self
                 .host
-                .notify(watch.owner, &format!("watch:{}", watch.id), &line)
+                .notify(
+                    watch.owner,
+                    &format!("watch:{}", watch.id),
+                    &line,
+                    crossagents_core::NoticeClass::Decide,
+                )
                 .await
             {
                 tracing::warn!(owner = %watch.owner, error = %err, "cannot deliver an expired watch");
@@ -409,7 +413,12 @@ impl Orchestrator {
         );
         if let Err(err) = self
             .host
-            .notify(run.planner, &format!("lead-progress:{}", run.id), &line)
+            .notify(
+                run.planner,
+                &format!("lead-progress:{}", run.id),
+                &line,
+                crossagents_core::NoticeClass::Silent,
+            )
             .await
         {
             tracing::warn!(lead = %run.planner, error = %err, "cannot wake the lead about progress");
@@ -449,12 +458,7 @@ mod tests {
         ];
         // A member's progress note, nobody addressed: the lead evaluates it.
         assert!(lead_should_be_woken(
-            lead,
-            worker,
-            false,
-            false,
-            "halfway",
-            &members
+            lead, worker, false, false, "halfway", &members
         ));
         // The lead's own note never wakes it.
         assert!(!lead_should_be_woken(
@@ -536,10 +540,7 @@ mod tests {
         );
         assert!(rule.health.is_paused());
         // It stays paused, with its reason, and never wakes anyone again.
-        assert!(matches!(
-            account_trigger(&mut rule, now),
-            Trigger::Pause(_)
-        ));
+        assert!(matches!(account_trigger(&mut rule, now), Trigger::Pause(_)));
         // A person taking part clears the chain, so the rule may wake again.
         let mut again = watch();
         account_trigger(&mut again, now);

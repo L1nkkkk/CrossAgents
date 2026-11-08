@@ -303,7 +303,12 @@ impl Orchestrator {
                 let line = format!("The run has used {percent}% of its {what} budget.");
                 let _ = self
                     .host
-                    .notify(run.planner, &format!("budget:{what}"), &line)
+                    .notify(
+                        run.planner,
+                        &format!("budget:{what}"),
+                        &line,
+                        crossagents_core::NoticeClass::Batch,
+                    )
                     .await;
             }
             return Ok(());
@@ -365,6 +370,7 @@ impl Orchestrator {
                     agent,
                     "budget:resumed",
                     "The person raised the budget; carry on where you stopped.",
+                    crossagents_core::NoticeClass::Silent,
                 )
                 .await;
         }

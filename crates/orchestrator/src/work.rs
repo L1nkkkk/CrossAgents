@@ -160,7 +160,7 @@ impl Orchestrator {
                                 _ = tokio::time::sleep(wait_limit) => {
                                     let observer = this.clone();
                                     let observer = tokio::spawn(async move {
-                                        observer.notice(lead, &format!("run_next-start:{work}"), &format!("The next round is still starting in the creation stage; it has not been cancelled. Check work {work} and its checkout, or ask a person to investigate.")).await;
+                                        observer.notice(lead, &format!("run_next-start:{work}"), &format!("The next round is still starting in the creation stage; it has not been cancelled. Check work {work} and its checkout, or ask a person to investigate."), crossagents_core::NoticeClass::Decide).await;
                                     });
                                     let result = create.await;
                                     observer.abort();
@@ -198,6 +198,7 @@ impl Orchestrator {
                         lead,
                         &format!("run_next:{work}"),
                         &format!("Scheduled next round: {state} Reason: {err}. Check work {work}; if no round exists, resolve the cause and wait for the lead to be idle before calling run_next again. Inspect and resolve any checkout conflict first."),
+                        crossagents_core::NoticeClass::Silent,
                     )
                     .await;
                 }
@@ -396,7 +397,8 @@ impl Orchestrator {
         // choice explicit, and `separate` is how the caller states it.
         if !a.separate
             && let Some((run, _)) = self.run_of(caller.id).await?
-            && run.planner == caller.id && run.status.is_terminal()
+            && run.planner == caller.id
+            && run.status.is_terminal()
             && let Some(work) = run.work_id
         {
             return Err(CoreError::Conflict(format!(
@@ -504,13 +506,25 @@ impl Orchestrator {
         loop {
             let busy = tokio::time::timeout_at(deadline, self.host.is_busy(proposer))
                 .await
-                .map_err(|_| CoreError::Busy("timed out waiting for the proposer to finish answering and become idle".into()))?;
+                .map_err(|_| {
+                    CoreError::Busy(
+                        "timed out waiting for the proposer to finish answering and become idle"
+                            .into(),
+                    )
+                })?;
             if !busy {
                 break;
             }
-            tokio::time::timeout_at(deadline, tokio::time::sleep(std::time::Duration::from_millis(100)))
-                .await
-                .map_err(|_| CoreError::Busy("timed out waiting for the proposer to finish answering and become idle".into()))?;
+            tokio::time::timeout_at(
+                deadline,
+                tokio::time::sleep(std::time::Duration::from_millis(100)),
+            )
+            .await
+            .map_err(|_| {
+                CoreError::Busy(
+                    "timed out waiting for the proposer to finish answering and become idle".into(),
+                )
+            })?;
         }
         // The proposer's workspace, wherever it works now; the run starts from the current
         // branch there.

@@ -104,8 +104,15 @@ pub trait AgentHost: Send + Sync {
     async fn interrupt(&self, agent: AgentId) -> Result<(), CoreError>;
     /// Takes back a message that has not started yet.
     async fn withdraw(&self, agent: AgentId, message: MessageId) -> Result<(), CoreError>;
-    /// Adds a line to the agent's notification digest (see `Runtime::notify`).
-    async fn notify(&self, agent: AgentId, topic: &str, line: &str) -> Result<(), CoreError>;
+    /// Records a notice for the agent. `class` decides whether it wakes them now
+    /// (see `Runtime::notify`).
+    async fn notify(
+        &self,
+        agent: AgentId,
+        topic: &str,
+        line: &str,
+        class: crossagents_core::NoticeClass,
+    ) -> Result<(), CoreError>;
     /// Creates a new agent with `template`'s plugin, model and settings, working in `cwd`.
     async fn clone_agent(
         &self,

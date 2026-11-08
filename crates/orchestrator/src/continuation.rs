@@ -89,7 +89,11 @@ impl Orchestrator {
     /// milliseconds later, silently undoing the fabricated stretch; the test then sees no
     /// overdue watch for a reason nothing in the run shows.
     #[doc(hidden)]
-    pub async fn age_run_records_for_test(&self, id: RunId, ago: Duration) -> Result<(), CoreError> {
+    pub async fn age_run_records_for_test(
+        &self,
+        id: RunId,
+        ago: Duration,
+    ) -> Result<(), CoreError> {
         let _guard = self.lock(id).await;
         let mut run = self.store.get_run(id).await?;
         run.updated_at -= ago;
@@ -473,7 +477,12 @@ impl Orchestrator {
             );
             let delivered = self
                 .host
-                .notify(run.planner, &format!("continuation:{}", run.id), &line)
+                .notify(
+                    run.planner,
+                    &format!("continuation:{}", run.id),
+                    &line,
+                    crossagents_core::NoticeClass::Batch,
+                )
                 .await;
             // Every wakeup is a run of this automation; the breaker counts it whichever way it
             // went (multica §2.14). A pause is written with the rest before anyone is told.

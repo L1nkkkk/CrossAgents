@@ -564,6 +564,7 @@ impl Orchestrator {
                 record.name,
                 brief::task_ref(&task)
             ),
+            crossagents_core::NoticeClass::Decide,
         )
         .await;
         Ok(task)

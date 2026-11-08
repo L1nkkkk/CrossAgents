@@ -300,8 +300,16 @@ impl AgentHost for HubHost {
         self.runtime.withdraw(&AgentKey::Id(agent), message).await
     }
 
-    async fn notify(&self, agent: AgentId, topic: &str, line: &str) -> Result<(), CoreError> {
-        self.runtime.notify(&AgentKey::Id(agent), topic, line).await
+    async fn notify(
+        &self,
+        agent: AgentId,
+        topic: &str,
+        line: &str,
+        class: crossagents_core::NoticeClass,
+    ) -> Result<(), CoreError> {
+        self.runtime
+            .notify(&AgentKey::Id(agent), topic, line, class)
+            .await
     }
 
     async fn clone_agent(

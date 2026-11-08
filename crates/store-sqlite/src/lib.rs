@@ -11,9 +11,9 @@ use chrono::{DateTime, Utc};
 use crossagents_core::{
     Account, Agent, AgentClaim, AgentId, AgentKey, AgentProfile, AgentStatus, Candidate,
     CandidateStatus, CoreError, EVENT_SCHEMA_VERSION, Event, EventKind, ExpertiseEntry, HumanItem,
-    IssueRef, Lesson, LessonStatus, MessageId, NameSource, Note, NoteScope, OwnerKind, Project,
-    Reminder, Run, RunId, Store, Task, TaskId, Triage, TriageRecord, TriageStep, UsageOutcome,
-    UsageRecord, Watch,
+    IssueRef, Lesson, LessonStatus, MessageId, NameSource, Note, NoteScope, NoticeClass, OwnerKind,
+    PendingNotice, Project, Reminder, Run, RunId, Store, Task, TaskId, Triage, TriageRecord,
+    TriageStep, UsageOutcome, UsageRecord, Watch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -778,6 +778,92 @@ impl Store for SqliteStore {
                 kind: "reminder",
                 id: id.to_owned(),
             });
+        }
+        Ok(())
+    }
+
+    async fn upsert_pending_notice(
+        &self,
+        notice: &PendingNotice,
+    ) -> Result<PendingNotice, CoreError> {
+        sqlx::query(
+            "INSERT INTO pending_notices (agent, topic, line, class, first_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(agent, topic) DO UPDATE SET
+                line = excluded.line,
+                class = excluded.class,
+                updated_at = excluded.updated_at",
+        )
+        .bind(notice.agent.to_string())
+        .bind(&notice.topic)
+        .bind(&notice.line)
+        .bind(notice.class.as_str())
+        .bind(notice.first_at.to_rfc3339())
+        .bind(notice.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        let row: (String, String, String, String) = sqlx::query_as(
+            "SELECT line, class, first_at, updated_at FROM pending_notices
+             WHERE agent = ?1 AND topic = ?2",
+        )
+        .bind(notice.agent.to_string())
+        .bind(&notice.topic)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(PendingNotice {
+            agent: notice.agent,
+            topic: notice.topic.clone(),
+            line: row.0,
+            class: row.1.parse().map_err(storage)?,
+            first_at: time_from(&row.2)?,
+            updated_at: time_from(&row.3)?,
+        })
+    }
+
+    async fn list_pending_notices(
+        &self,
+        agent: Option<AgentId>,
+    ) -> Result<Vec<PendingNotice>, CoreError> {
+        let rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(
+            "SELECT agent, topic, line, class, first_at, updated_at FROM pending_notices
+             WHERE ?1 IS NULL OR agent = ?1
+             ORDER BY updated_at, topic",
+        )
+        .bind(agent.map(|id| id.to_string()))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        rows.into_iter()
+            .map(|(agent, topic, line, class, first_at, updated_at)| {
+                Ok(PendingNotice {
+                    agent: agent.parse().map_err(storage)?,
+                    topic,
+                    line,
+                    class: class.parse::<NoticeClass>().map_err(storage)?,
+                    first_at: time_from(&first_at)?,
+                    updated_at: time_from(&updated_at)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn delete_pending_versions(
+        &self,
+        agent: AgentId,
+        versions: &[(String, chrono::DateTime<chrono::Utc>)],
+    ) -> Result<(), CoreError> {
+        for (topic, updated_at) in versions {
+            sqlx::query(
+                "DELETE FROM pending_notices WHERE agent = ?1 AND topic = ?2 AND updated_at = ?3",
+            )
+            .bind(agent.to_string())
+            .bind(topic)
+            .bind(updated_at.to_rfc3339())
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
         }
         Ok(())
     }
@@ -1572,6 +1658,7 @@ impl Store for SqliteStore {
                 (type LIKE 'agent.%' AND type NOT IN ('agent.created', 'agent.updated') AND json_extract(data, '$.id') = ?2)
                 OR (type IN ('agent.created', 'agent.updated') AND json_extract(data, '$.agent.id') = ?2)
                 OR (type = 'task.status_changed' AND json_extract(data, '$.assignee') = ?2)
+                OR (type = 'notice.recorded' AND json_extract(data, '$.id') = ?2)
             ) ORDER BY seq LIMIT ?3",
         )
         .bind(after as i64)

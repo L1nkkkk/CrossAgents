@@ -14,7 +14,7 @@ use crate::ids::{AgentId, MessageId, RunId, TaskId};
 use crate::lesson::{IssueRef, Lesson, Project, TriageRecord, TriageStep};
 use crate::model::{Agent, AgentProfile, AgentStatus, Run, Task};
 use crate::note::{Note, NoteScope};
-use crate::notify::{Reminder, Watch};
+use crate::notify::{PendingNotice, Reminder, Watch};
 
 /// Look an agent up by id or by its unique name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +314,34 @@ pub trait Store: Send + Sync {
             id: id.to_owned(),
         })
     }
+    /// Inserts `notice`, or replaces the same agent and topic. A replacement keeps `first_at`
+    /// and refreshes the line, class and `updated_at`. Returns the row as stored.
+    async fn upsert_pending_notice(
+        &self,
+        notice: &PendingNotice,
+    ) -> Result<PendingNotice, CoreError> {
+        let _ = notice;
+        Err(CoreError::Unsupported("pending notices".into()))
+    }
+    /// `agent`'s pending notices, or everyone's, oldest update first.
+    async fn list_pending_notices(
+        &self,
+        agent: Option<AgentId>,
+    ) -> Result<Vec<PendingNotice>, CoreError> {
+        let _ = agent;
+        Ok(Vec::new())
+    }
+    /// Drops pending notices whose topic and `updated_at` still match. A newer replacement
+    /// of the same topic is left in place.
+    async fn delete_pending_versions(
+        &self,
+        agent: AgentId,
+        versions: &[(String, chrono::DateTime<chrono::Utc>)],
+    ) -> Result<(), CoreError> {
+        let _ = (agent, versions);
+        Ok(())
+    }
+
     async fn insert_watch(&self, watch: &Watch) -> Result<(), CoreError> {
         let _ = watch;
         Err(CoreError::Unsupported("watches".into()))

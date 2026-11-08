@@ -740,6 +740,7 @@ impl Orchestrator {
             run.planner,
             &format!("run:{}:sync", run.id),
             &format!("Not landed: {note}."),
+            crossagents_core::NoticeClass::Decide,
         )
         .await;
         self.schedule(run).await?;

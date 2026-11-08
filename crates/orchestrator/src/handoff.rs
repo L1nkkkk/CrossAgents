@@ -428,6 +428,7 @@ impl Orchestrator {
                 task.key,
                 target.name()
             ),
+            crossagents_core::NoticeClass::Decide,
         )
         .await;
         true
@@ -577,6 +578,7 @@ impl Orchestrator {
                             "#{} was accepted, but the next step for {} cannot be opened: {why}. Add it with task_create.",
                             task.key, agent.name
                         ),
+                        crossagents_core::NoticeClass::Decide,
                     )
                     .await;
                     return Ok(None);
@@ -599,6 +601,7 @@ impl Orchestrator {
                         "#{} was accepted; {about}. It starts as its dependencies allow.",
                         task.key
                     ),
+                    crossagents_core::NoticeClass::Silent,
                 )
                 .await;
                 Ok(Some(NextStep {
