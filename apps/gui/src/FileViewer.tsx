@@ -243,7 +243,7 @@ function FileViewer({ target }: { target: Current }) {
                 className="ghost small"
                 disabled={!loaded}
                 title="用系统默认程序打开这个文件"
-                onClick={() => path && bridge.openPath!(scopePath(scope), path).catch((e) => setFile({ error: errorText(e) }))}
+                onClick={() => path && bridge.openPath!(scopePath(scope), path).then(({ copy }) => { if (copy) window.alert("打开的是副本，改动不会写回中心"); }).catch((e) => setFile({ error: errorText(e) }))}
               >
                 <ExternalLink size={14} /> 用默认程序打开
               </button>
@@ -544,7 +544,7 @@ export function FilesPane({ scope }: { scope: FileScope }) {
         onZoom={() => b.active && openFile({ scope, path: b.active, line: b.line })}
         onReload={b.reload}
         canOpen={!!bridge?.openPath && !!loaded}
-        onOpen={(path) => bridge?.openPath?.(scopePath(scope), path).catch((e) => b.setFile({ error: errorText(e) }))}
+        onOpen={(path) => bridge?.openPath?.(scopePath(scope), path).then(({ copy }) => { if (copy) window.alert("打开的是副本，改动不会写回中心"); }).catch((e) => b.setFile({ error: errorText(e) }))}
       />
       <section className="fv-code-pane">
         <FileBody

@@ -86,7 +86,7 @@ export interface CrossAgentsBridge {
    * to its root) with the system's default program. The main process first asks the hub's
    * `files/resolve` that the path is inside the workspace; rejects with the reason when not.
    */
-  openPath?(scope: string, path: string): Promise<void>;
+  openPath?(scope: string, path: string): Promise<{ copy: boolean }>;
   /** The page's theme changed: the window frame follows it. */
   setTheme?(theme: { dark: boolean; background: string; foreground: string }): void;
   /** The GUI's update, and checking or installing it. `null`: this build does not update itself. */

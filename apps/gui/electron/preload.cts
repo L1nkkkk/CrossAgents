@@ -76,8 +76,9 @@ const bridge: CrossAgentsBridge = {
     },
   },
   async openPath(scope, path) {
-    const error: string | null = await ipcRenderer.invoke("shell:open-path", scope, path);
-    if (error) throw new Error(error);
+    const result: { copy: boolean } | { error: string } = await ipcRenderer.invoke("shell:open-path", scope, path);
+    if ("error" in result) throw new Error(result.error);
+    return result;
   },
   updates: {
     get: () => ipcRenderer.invoke("update:get"),

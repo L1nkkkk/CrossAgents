@@ -2,18 +2,19 @@
 // adds the bearer token, forwards HTTP requests and relays the SSE event stream. All
 // business logic stays in the hub. The page talks to it through electron/preload.cts.
 
-import { appendFile, mkdir, readFile } from "node:fs/promises";
-import { homedir, hostname } from "node:os";
-import { existsSync } from "node:fs";
+import { appendFile, mkdir, readFile, readdir, stat, rm, mkdtemp, writeFile } from "node:fs/promises";
+import { homedir, hostname, tmpdir } from "node:os";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, safeStorage, shell, session, protocol, net, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, safeStorage, shell, session, protocol, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
 import { allowed, REQUEST_TIMEOUT_MS, route, timeoutFor } from "./allowed.cjs";
 import { manageLocalHub, type LocalHub } from "./localHub.cjs";
 import { permissionAllowed } from "./permissions.cjs";
 import { createTray, type AppTray } from "./tray.cjs";
 import { startUpdates, type Updates } from "./updates.cjs";
-import { extensionRealFile, type ExtensionVersions } from "./extProtocol.cjs";
+import { assetPath } from "./extProtocol.cjs";
+import { copyRoot, copyPrefix, copyName, staleCopies } from "./openCopy.cjs";
 import { decideSafeMode, loadingMarker, type SafeMode } from "./safeMode.cjs";
 import { defaultDeviceName, remoteFile, sshProgram, type Crypto } from "./remote.cjs";
 import { RemoteController, Unavailable } from "./remoteController.cjs";
@@ -246,18 +247,15 @@ async function serveExtension(request: Request): Promise<Response> {
   if (request.method !== "GET" && request.method !== "HEAD") return new Response(null, { status: 405, headers: cors });
   if (safeMode.enabled) return new Response("Extensions are disabled in safe mode", { status: 403, headers: cors });
   try {
+    const path = assetPath(request.url);
     const { base, token, mode } = await currentHub();
-    const response = await fetch(`${base}/v1/extensions`, {
+    const asset = await fetch(base + path, {
       headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
-    if (mode === "remote" && response.status === 401) remote?.unauthorized();
-    if (!response.ok) throw new Error(`extensions: HTTP ${response.status}`);
-    const { extensions } = await response.json() as { extensions: ExtensionVersions[] };
-    const file = await extensionRealFile(hubHome(), request.url, extensions);
-    const asset = await net.fetch(pathToFileURL(file).href, { method: request.method });
+    if (mode === "remote" && asset.status === 401) remote?.unauthorized();
     const headers = new Headers(asset.headers);
     for (const [name, value] of Object.entries(cors)) headers.set(name, value);
-    return new Response(asset.body, { status: asset.status, headers });
+    return new Response(request.method === "HEAD" ? null : asset.body, { status: asset.status, headers });
   } catch (err) {
     logLine(`extension protocol: ${message(err)}`);
     return new Response("Extension asset unavailable", { status: 404, headers: cors });
@@ -345,6 +343,20 @@ ipcMain.handle("dialog:pick-folder", async (event) => {
   return result.canceled ? null : (result.filePaths[0] ?? null);
 });
 
+const openCopies = new Set<string>();
+async function cleanOldCopies() {
+  const root = copyRoot(tmpdir());
+  try {
+    const entries = await readdir(root, { withFileTypes: true });
+    const candidates = await Promise.all(entries.filter((e) => e.isDirectory()).map(async (e) => ({
+      name: e.name, modified: (await stat(join(root, e.name))).mtimeMs,
+    })));
+    await Promise.all(staleCopies(candidates, Date.now()).map((name) => rm(join(root, name), { recursive: true, force: true })));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") logLine(`copy cleanup: ${message(err)}`);
+  }
+}
+
 /** A scope's API prefix: a session, a run, or a task of a run. */
 const FILE_SCOPE = /^\/v1\/(agents\/[^/?#]+|runs\/[^/?#]+(\/tasks\/[^/?#]+)?)$/;
 
@@ -353,7 +365,7 @@ const FILE_SCOPE = /^\/v1\/(agents\/[^/?#]+|runs\/[^/?#]+(\/tasks\/[^/?#]+)?)$/;
  * it with its default program is refused (the in-app viewer still shows it).
  */
 const RUNS_WHEN_OPENED =
-  /\.(exe|com|bat|cmd|ps1|psm1|vbs|vbe|js|jse|wsf|wsh|msi|msp|scr|pif|cpl|hta|lnk|url|reg|jar|app|command|sh|desktop|appimage)$/i;
+  /\.(exe|com|bat|cmd|ps1|psm1|vbs|vbe|js|jse|wsf|wsh|msi|msp|scr|pif|cpl|hta|lnk|url|reg|jar|app|command|sh|desktop|appimage|terminal|fileloc)$/i;
 
 /**
  * Opens a workspace file with the system's default program; resolves to an error message or
@@ -365,9 +377,7 @@ ipcMain.handle("shell:open-path", async (event, scope: unknown, path: unknown) =
     if (!fromApp(event)) throw new Error("request from an unknown page");
     if (typeof scope !== "string" || !FILE_SCOPE.test(scope)) throw new Error(`not a file scope: ${scope}`);
     if (typeof path !== "string" || !path) throw new Error("no path to open");
-    // The file is on the hub's machine (a copy fetched through the hub comes with #bytes-gui).
-    if (isRemote()) throw new Error("远程模式下暂不能用默认程序打开");
-    const { base, token } = await currentHub();
+    const { base, token, mode } = await currentHub();
     let response: Response;
     try {
       response = await fetch(`${base}${scope}/files/resolve`, {
@@ -379,6 +389,7 @@ ipcMain.handle("shell:open-path", async (event, scope: unknown, path: unknown) =
     } catch (err) {
       throw new Error(`cannot reach the hub: ${message(err)}`);
     }
+    if (mode === "remote" && response.status === 401) remote?.unauthorized();
     const text = await response.text();
     if (response.status >= 400) {
       let reason = text || `HTTP ${response.status}`;
@@ -390,12 +401,28 @@ ipcMain.handle("shell:open-path", async (event, scope: unknown, path: unknown) =
       throw new Error(reason);
     }
     const entry = (JSON.parse(text) as { entries?: { path?: string | null; abs_path?: string | null }[] }).entries?.[0];
-    if (!entry?.path || !entry.abs_path) throw new Error("文件不存在或不在工作区内");
-    if (RUNS_WHEN_OPENED.test(entry.abs_path)) throw new Error("可执行文件或脚本不会用默认程序打开，请在查看器里阅读");
-    const failure = await shell.openPath(entry.abs_path);
-    return failure || null;
+    if (!entry?.path || (mode === "local" && !entry.abs_path)) throw new Error("文件不存在或不在工作区内");
+    if (RUNS_WHEN_OPENED.test(entry.path) || (entry.abs_path && RUNS_WHEN_OPENED.test(entry.abs_path))) throw new Error("可执行文件或脚本不会用默认程序打开，请在查看器里阅读");
+    let target = entry.abs_path!;
+    if (mode === "remote") {
+      const raw = await fetch(`${base}${scope}/files/raw?path=${encodeURIComponent(entry.path)}`, {
+        headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      if (raw.status === 401) remote?.unauthorized();
+      if (raw.status === 413) throw new Error("文件超过 64 MiB，不能下载打开");
+      if (!raw.ok) throw new Error(`下载文件失败：HTTP ${raw.status}`);
+      const root = copyRoot(tmpdir());
+      await mkdir(root, { recursive: true });
+      const dir = await mkdtemp(copyPrefix(root));
+      openCopies.add(dir);
+      target = join(dir, copyName(entry.path));
+      await writeFile(target, Buffer.from(await raw.arrayBuffer()));
+    }
+    const failure = await shell.openPath(target);
+    if (failure) throw new Error(failure);
+    return { copy: mode === "remote" };
   } catch (err) {
-    return message(err);
+    return { error: message(err) };
   }
 });
 
@@ -731,6 +758,7 @@ app.on("second-instance", showWindow);
 
 app.whenReady().then(async () => {
   if (!single) return;
+  void cleanOldCopies();
   const unfinished = extensionLoading.unfinished();
   safeMode = decideSafeMode(process.argv, unfinished);
   protocol.handle("crossagents-ext", serveExtension);
@@ -776,7 +804,10 @@ app.on("before-quit", (event) => {
   const done = () => app.quit();
   void Promise.race([remote.dispose(), new Promise((r) => setTimeout(r, 5_000))]).finally(done);
 });
-app.on("will-quit", () => remote?.killNow());
+app.on("will-quit", () => {
+  remote?.killNow();
+  for (const dir of openCopies) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+});
 
 // With a tray the window only hides; the GUI quits from the tray's menu.
 app.on("window-all-closed", () => {
