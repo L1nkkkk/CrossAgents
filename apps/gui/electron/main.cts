@@ -161,6 +161,11 @@ function createRemote(): RemoteController {
     onState: (state) => broadcast("connection:state", state),
     onPairStep: (step) => broadcast("connection:pair-step", step),
     onHubChange: hubChanged,
+    beforeRemote: async () => {
+      const previous = localHub;
+      localHub = undefined;
+      await previous?.ready();
+    },
     log: logLine,
   });
 }

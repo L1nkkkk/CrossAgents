@@ -18,7 +18,7 @@ const EXEC_TIMEOUT_MS = 30_000;
 /** ssh failed: `stderr` is what ssh (or the command) said, untouched. */
 export class SshError extends Error {
   constructor(message: string, readonly stderr: string, readonly code: number | null) {
-    super(stderr.trim() ? `${message}\n${stderr.trim()}` : message);
+    super(stderr ? `${message}\n${stderr}` : message);
   }
 }
 
@@ -48,7 +48,7 @@ export async function locate(ssh: Ssh, target: RemoteTarget): Promise<RemoteHub>
       last = err;
     }
   }
-  const detail = last instanceof SshError ? last.stderr.trim() : "";
+  const detail = last instanceof SshError ? last.stderr : "";
   throw new Error(detail ? `${NOT_RUNNING}\n${detail}` : NOT_RUNNING);
 }
 
@@ -261,7 +261,7 @@ export class Tunnel {
     });
     const exited = new Promise<string>((done) => {
       child.once("error", (err) => done(`无法运行 ssh（${ssh.program}）：${err.message}`));
-      child.once("exit", (code) => done(`ssh 退出了（退出码 ${code}）${stderr.trim() ? `\n${stderr.trim()}` : ""}`));
+      child.once("exit", (code) => done(`ssh 退出了（退出码 ${code}）${stderr ? `\n${stderr}` : ""}`));
     });
     let ended: string | undefined;
     void exited.then((why) => {
@@ -276,7 +276,7 @@ export class Tunnel {
       if (ended !== undefined) throw new Error(ended);
       if (this.closed) return;
       if (await healthy(base)) break;
-      if (Date.now() > deadline) throw new Error(`隧道建立后中心的 hub 没有应答${stderr.trim() ? `\n${stderr.trim()}` : ""}`);
+      if (Date.now() > deadline) throw new Error(`隧道建立后中心的 hub 没有应答${stderr ? `\n${stderr}` : ""}`);
       await sleep(250, wake.signal);
     }
     this.opts.onCheck?.();

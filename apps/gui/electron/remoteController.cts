@@ -25,6 +25,8 @@ export type ControllerOptions = {
    * windows reload and the event streams start again.
    */
   onHubChange(mode: "local" | "remote"): void;
+  /** Finish any in-flight local management before entering remote mode. */
+  beforeRemote?(): Promise<void>;
   log?(line: string): void;
   /** Passed to each Tunnel (tests make them short). */
   tunnel?: { upTimeoutMs?: number; watchMs?: number; delay?(attempt: number): number };
@@ -149,6 +151,7 @@ export class RemoteController {
       token: sealed,
     };
     await this.disconnect();
+    if (this.mode() === "local") await this.opts.beforeRemote?.();
     await writeRecord(this.opts.file, record);
     this.record = record;
     this.opts.log?.(`remote: paired ${record.deviceName} (${record.deviceId}) with ${describeTarget(target)}`);
@@ -164,6 +167,7 @@ export class RemoteController {
     const mode: "local" | "remote" = raw;
     if (mode === this.mode()) return this.get();
     if (mode === "remote" && !this.record) throw new Error("还没有配对远程 hub");
+    if (mode === "remote") await this.opts.beforeRemote?.();
     const record = { ...this.record!, mode };
     await writeRecord(this.opts.file, record);
     this.record = record;
