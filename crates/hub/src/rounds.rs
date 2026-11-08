@@ -1,23 +1,37 @@
-//! Agent turns as rounds: what started each turn, what it used and
-//! whether it decided something. The hub watches the event stream; when a turn ends it
-//! publishes one `agent.round` for it. Nothing here changes what an agent does.
+//! Agent turns as rounds: what started each turn, what it used and whether it decided
+//! something. The hub watches the event stream; when a turn ends it publishes one
+//! `agent.round` for it. Nothing here changes what an agent does.
+//!
+//! What a round can and cannot say:
+//! - An external agent (`take_external`) has its turn started and ended at the moment the hub
+//!   hands it its messages. The tools it calls after that count in the next round it has, so
+//!   its rounds lag by one message, and it reports no usage (`tokens` null).
+//! - The counts of a session are measured from the session's start (`agent.status_changed` to
+//!   `starting`, the same boundary `usage.rs` uses). A hub that restarted or took over an agent
+//!   has not seen that start: the agent's first turn then reports no usage, and later turns
+//!   report their growth.
+//! - Notices come from `notice.carried`, which the hub writes when it marks them carried, so a
+//!   round has their lines and classes even after a restart.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
 use crossagents_core::{
-    AgentId, Event, EventBus, EventKind, EventSink, MessageId, MessageSource, NoticeClass,
+    AgentId, AgentStatus, Event, EventBus, EventKind, EventSink, MessageId, MessageSource,
     RoundNotice, RoundSource, TokenUsage,
 };
 use tokio::sync::mpsc;
 
 /// Whether a hub tool, once it succeeds, counts as a decision: it changes a task's or a run's
-/// state, sends a message, asks a person, submits a plan, lands work, and so on. Reads do not
-/// (`task_list`, `task_get`, `workspace_read`, `workspace_diff`, `usage_get`, `note_read`,
-/// `note_list`, `lesson_search`, `lesson_get`, `agent_list`, `whoami`, `inbox_read`,
-/// `watch_list`, ...), and neither do notes, lessons, progress reports or checks that only
-/// record what they saw.
+/// state, sends a message, asks a person, submits a plan, lands work, and so on. A round in
+/// which none did is a round without a decision.
+///
+/// Only the tools listed here count. Every other tool counts for nothing, extension tools
+/// (`<ext>__<tool>`) included, so a turn that changed state only through one of those is
+/// recorded as undecided: that miss is accepted. A new hub tool that changes state is listed
+/// here when it is added. Reads, notes, lessons, progress reports and checks that only record
+/// what they saw are not listed.
 pub fn decides(tool: &str) -> bool {
     matches!(
         tool,
@@ -65,7 +79,44 @@ pub fn decides(tool: &str) -> bool {
     )
 }
 
-/// What the turn gathered so far.
+/// Reminders and watches reach an agent as notices under these topics (`notices.rs`).
+fn is_reminder_topic(topic: &str) -> bool {
+    topic.starts_with("reminder:") || topic.starts_with("watch:")
+}
+
+/// Who sent a message, for the round's sources. A notice that a reminder or watch woke is a
+/// reminder, not a plain notice.
+fn source_of(from: Option<&MessageSource>, reminder: bool) -> RoundSource {
+    match from {
+        // Events written before the field existed were a person's.
+        None | Some(MessageSource::Human) => RoundSource::Human,
+        Some(MessageSource::Agent { agent_id }) => RoundSource::Teammate {
+            agent_id: *agent_id,
+        },
+        Some(MessageSource::Orchestrator { run_id, task_id }) => RoundSource::Orchestrator {
+            run_id: *run_id,
+            task_id: *task_id,
+        },
+        Some(MessageSource::Notice) if reminder => RoundSource::Reminder,
+        Some(MessageSource::Notice) => RoundSource::Notice,
+    }
+}
+
+/// What the hub accepted for a message that waits for its turn.
+struct Waiting {
+    id: AgentId,
+    from: Option<MessageSource>,
+}
+
+/// The notices a message carries, from `notice.carried`.
+struct Carry {
+    id: AgentId,
+    /// Some of them are a reminder's or a watch's.
+    reminder: bool,
+    notices: Vec<RoundNotice>,
+}
+
+/// What a turn gathered so far.
 #[derive(Default)]
 struct Round {
     message_ids: Vec<MessageId>,
@@ -77,104 +128,139 @@ struct Round {
 }
 
 impl Round {
-    fn join(&mut self, message_id: MessageId, waiting: Option<Waiting>) {
-        if !self.message_ids.contains(&message_id) {
-            self.message_ids.push(message_id);
-        }
-        if let Some(waiting) = waiting {
-            if !self.sources.contains(&waiting.source) {
-                self.sources.push(waiting.source);
+    /// Takes a message into the round: its source the first time, and its notices. A message
+    /// already in the round only adds its notices.
+    fn join(&mut self, message: MessageId, waiting: Option<Waiting>, carry: Option<Carry>) {
+        if self.message_ids.contains(&message) {
+            if let Some(carry) = carry {
+                self.take_notices(carry.notices);
             }
-            self.notices.extend(waiting.notices);
+            return;
+        }
+        self.message_ids.push(message);
+        if let Some(waiting) = waiting {
+            let reminder = carry.as_ref().is_some_and(|c| c.reminder);
+            let source = source_of(waiting.from.as_ref(), reminder);
+            if !self.sources.contains(&source) {
+                self.sources.push(source);
+            }
+        }
+        if let Some(carry) = carry {
+            self.take_notices(carry.notices);
         }
     }
-}
 
-/// A message that waits for its turn, as the hub accepted it.
-struct Waiting {
-    source: RoundSource,
-    notices: Vec<RoundNotice>,
+    /// Adds notices, each (line, class) once.
+    fn take_notices(&mut self, notices: Vec<RoundNotice>) {
+        for notice in notices {
+            if !self.notices.contains(&notice) {
+                self.notices.push(notice);
+            }
+        }
+    }
 }
 
 #[derive(Default)]
 struct Lane {
     round: Round,
-    /// The session's cumulative counts as last reported.
-    last_tokens: Option<TokenUsage>,
-    /// Those counts when the current turn started.
-    start_tokens: Option<TokenUsage>,
+    /// The session's cumulative counts as last reported. Zero from the session's start; unknown
+    /// until the hub has seen one (after a restart or a takeover).
+    last: Option<TokenUsage>,
+    /// `last` when the current turn started.
+    start: Option<TokenUsage>,
     /// Whether the agent reported usage since the current turn started.
     usage_in_turn: bool,
 }
-
-/// Notice classes are kept per agent, up to this many lines, then the table starts over.
-const CLASS_TABLE_LIMIT: usize = 10_000;
 
 /// The per-agent state behind the rounds. Feed it events in order with [`Rounds::observe`].
 #[derive(Default)]
 pub struct Rounds {
     lanes: HashMap<AgentId, Lane>,
     waiting: HashMap<MessageId, Waiting>,
-    classes: HashMap<AgentId, HashMap<String, NoticeClass>>,
-    reminded: HashSet<AgentId>,
+    carried: HashMap<MessageId, Carry>,
+}
+
+/// The counts of a session that has just started.
+fn session_start() -> TokenUsage {
+    TokenUsage {
+        requests: Some(0),
+        ..TokenUsage::default()
+    }
 }
 
 impl Rounds {
     /// Feeds one event; returns the `agent.round` it ends, if it ends a turn.
     pub fn observe(&mut self, kind: &EventKind) -> Option<EventKind> {
         match kind {
-            EventKind::NoticeRecorded {
-                id, line, class, ..
-            } => {
-                let table = self.classes.entry(*id).or_default();
-                if table.len() >= CLASS_TABLE_LIMIT {
-                    table.clear();
-                }
-                table.insert(line.clone(), *class);
-            }
-            EventKind::ReminderFired { owner, .. } | EventKind::WatchTriggered { owner, .. } => {
-                self.reminded.insert(*owner);
-            }
             EventKind::AgentInput {
                 id,
                 message_id,
                 from,
-                notices,
                 ..
             } => {
-                let source = self.source_of(*id, from.as_ref());
-                let notices = notices
-                    .iter()
-                    .map(|line| RoundNotice {
-                        line: line.clone(),
-                        class: self
-                            .classes
-                            .get(id)
-                            .and_then(|table| table.get(line))
-                            .copied(),
-                    })
-                    .collect();
-                self.waiting
-                    .insert(*message_id, Waiting { source, notices });
+                self.waiting.insert(
+                    *message_id,
+                    Waiting {
+                        id: *id,
+                        from: from.clone(),
+                    },
+                );
+            }
+            EventKind::NoticeCarried {
+                id,
+                message_id,
+                notices,
+            } => {
+                let reminder = notices.iter().any(|n| is_reminder_topic(&n.topic));
+                let carry = Carry {
+                    id: *id,
+                    reminder,
+                    notices: notices
+                        .iter()
+                        .map(|n| RoundNotice {
+                            line: n.line.clone(),
+                            class: n.class,
+                        })
+                        .collect(),
+                };
+                // A message already in its agent's round takes these now; otherwise they wait
+                // for its turn. A later one for the same message replaces this one.
+                match self
+                    .lanes
+                    .get_mut(id)
+                    .filter(|lane| lane.round.message_ids.contains(message_id))
+                {
+                    Some(lane) => lane.round.take_notices(carry.notices),
+                    None => {
+                        self.carried.insert(*message_id, carry);
+                    }
+                }
             }
             EventKind::AgentInputWithdrawn { message_id, .. }
             | EventKind::AgentInputRefused { message_id, .. } => {
                 self.waiting.remove(message_id);
+                self.carried.remove(message_id);
             }
             EventKind::AgentTurnStarted { id, message_id } => {
-                let waiting = self.waiting.remove(message_id);
+                let (waiting, carry) = (
+                    self.waiting.remove(message_id),
+                    self.carried.remove(message_id),
+                );
                 let lane = self.lanes.entry(*id).or_default();
-                lane.start_tokens = lane.last_tokens.clone();
+                lane.start = lane.last.clone();
                 lane.usage_in_turn = false;
-                lane.round.join(*message_id, waiting);
+                lane.round.join(*message_id, waiting, carry);
             }
             EventKind::AgentSteerRead { id, message_id } => {
-                let waiting = self.waiting.remove(message_id);
+                let (waiting, carry) = (
+                    self.waiting.remove(message_id),
+                    self.carried.remove(message_id),
+                );
                 self.lanes
                     .entry(*id)
                     .or_default()
                     .round
-                    .join(*message_id, waiting);
+                    .join(*message_id, waiting, carry);
             }
             EventKind::AgentToolUsed { id, tool, ok } => {
                 let round = &mut self.lanes.entry(*id).or_default().round;
@@ -186,26 +272,36 @@ impl Rounds {
             EventKind::AgentPromptViaFile { id } => {
                 self.lanes.entry(*id).or_default().round.prompt_via_file = true;
             }
+            EventKind::AgentStatusChanged {
+                id,
+                to: AgentStatus::Starting,
+                ..
+            } => {
+                self.lanes.entry(*id).or_default().last = Some(session_start());
+            }
             EventKind::AgentUsage {
                 id,
                 tokens: Some(tokens),
                 ..
             } => {
                 let lane = self.lanes.entry(*id).or_default();
-                lane.last_tokens = Some(tokens.clone());
+                lane.last = Some(tokens.clone());
                 lane.usage_in_turn = true;
             }
             EventKind::AgentTurnCompleted { id, message_id, .. } => {
-                let waiting = self.waiting.remove(message_id);
+                let (waiting, carry) = (
+                    self.waiting.remove(message_id),
+                    self.carried.remove(message_id),
+                );
                 let lane = self.lanes.entry(*id).or_default();
-                lane.round.join(*message_id, waiting);
+                lane.round.join(*message_id, waiting, carry);
                 let tokens = if lane.usage_in_turn {
-                    growth(lane.start_tokens.as_ref(), lane.last_tokens.as_ref())
+                    growth(lane.start.as_ref(), lane.last.as_ref())
                 } else {
                     None
                 };
                 let round = std::mem::take(&mut lane.round);
-                lane.start_tokens = None;
+                lane.start = None;
                 lane.usage_in_turn = false;
                 return Some(EventKind::AgentRound {
                     id: *id,
@@ -218,36 +314,28 @@ impl Rounds {
                     prompt_via_file: round.prompt_via_file,
                 });
             }
+            EventKind::AgentRemoved { id, .. } => self.forget(*id),
+            EventKind::AgentUpdated { agent } if agent.archived_at.is_some() => {
+                self.forget(agent.id)
+            }
             _ => {}
         }
         None
     }
 
-    fn source_of(&mut self, id: AgentId, from: Option<&MessageSource>) -> RoundSource {
-        match from {
-            // Events written before the field existed were a person's.
-            None | Some(MessageSource::Human) => RoundSource::Human,
-            Some(MessageSource::Agent { agent_id }) => RoundSource::Teammate {
-                agent_id: *agent_id,
-            },
-            Some(MessageSource::Orchestrator { run_id, task_id }) => RoundSource::Orchestrator {
-                run_id: *run_id,
-                task_id: *task_id,
-            },
-            Some(MessageSource::Notice) if self.reminded.remove(&id) => RoundSource::Reminder,
-            Some(MessageSource::Notice) => RoundSource::Notice,
-        }
+    /// Drops what an agent that is gone (removed, or archived) still had in the table.
+    fn forget(&mut self, id: AgentId) {
+        self.lanes.remove(&id);
+        self.waiting.retain(|_, waiting| waiting.id != id);
+        self.carried.retain(|_, carry| carry.id != id);
     }
 }
 
-/// The model usage between two readings of a session's cumulative counts. A count that went
-/// down means a new session started in between, so the later reading is all of its growth.
-/// No start reading means the session began at zero.
+/// The model usage between two readings of a session's cumulative counts. Without a reading
+/// from before the turn there is no baseline, so the turn reports none. A count that went down
+/// means a new session started in between, so the later reading is all of its growth.
 fn growth(start: Option<&TokenUsage>, end: Option<&TokenUsage>) -> Option<TokenUsage> {
-    let end = end?;
-    let Some(start) = start else {
-        return Some(end.clone());
-    };
+    let (start, end) = (start?, end?);
     let fell = end.input < start.input
         || end.cached_input < start.cached_input
         || end.cache_write_input < start.cache_write_input
@@ -322,7 +410,7 @@ pub fn publish_rounds(bus: Weak<EventBus>, mut rx: mpsc::UnboundedReceiver<Event
 
 #[cfg(test)]
 mod tests {
-    use crossagents_core::{AgentId, MessageId, RunId};
+    use crossagents_core::{AgentId, CarriedNotice, MessageId, NoticeClass, RunId, StopReason};
 
     use super::*;
 
@@ -338,8 +426,83 @@ mod tests {
         }
     }
 
-    fn turn_round(rounds: &mut Rounds, kinds: Vec<EventKind>) -> Vec<EventKind> {
+    fn carried(
+        id: AgentId,
+        message: MessageId,
+        topic: &str,
+        line: &str,
+        class: NoticeClass,
+    ) -> EventKind {
+        EventKind::NoticeCarried {
+            id,
+            message_id: message,
+            notices: vec![CarriedNotice {
+                line: line.into(),
+                class,
+                topic: topic.into(),
+            }],
+        }
+    }
+
+    fn input(id: AgentId, message: MessageId, from: Option<MessageSource>) -> EventKind {
+        EventKind::AgentInput {
+            id,
+            message_id: message,
+            text: "go".into(),
+            queued: false,
+            from,
+            reply_to: None,
+            thread: None,
+            reply_excerpt: None,
+            attachments: vec![],
+            notices: vec![],
+            queued_reason: None,
+        }
+    }
+
+    fn started(id: AgentId, message: MessageId) -> EventKind {
+        EventKind::AgentTurnStarted {
+            id,
+            message_id: message,
+        }
+    }
+
+    fn completed(id: AgentId, message: MessageId) -> EventKind {
+        EventKind::AgentTurnCompleted {
+            id,
+            message_id: message,
+            stop_reason: StopReason::EndTurn,
+        }
+    }
+
+    fn session_started(id: AgentId) -> EventKind {
+        EventKind::AgentStatusChanged {
+            id,
+            from: AgentStatus::Idle,
+            to: AgentStatus::Starting,
+        }
+    }
+
+    fn usage_event(id: AgentId, tokens: TokenUsage) -> EventKind {
+        EventKind::AgentUsage {
+            id,
+            used: 0,
+            size: 0,
+            cost_usd: None,
+            tokens: Some(tokens),
+        }
+    }
+
+    /// Feeds `kinds` and returns the rounds they end.
+    fn run(rounds: &mut Rounds, kinds: Vec<EventKind>) -> Vec<EventKind> {
         kinds.iter().filter_map(|k| rounds.observe(k)).collect()
+    }
+
+    fn tokens_of(kind: &EventKind) -> Option<TokenUsage> {
+        match kind {
+            EventKind::AgentRound { tokens, .. } => tokens.clone(),
+            _ => panic!("a round"),
+        }
     }
 
     #[test]
@@ -359,8 +522,9 @@ mod tests {
             "inbox_read",
             "watch_list",
             "task_progress",
+            "ext__tool",
         ] {
-            assert!(!decides(read), "{read} is a read");
+            assert!(!decides(read), "{read} is not a decision");
         }
         for change in [
             "agent_send",
@@ -377,72 +541,57 @@ mod tests {
     fn a_turn_collects_its_message_notices_tools_and_usage() {
         let id = AgentId::new();
         let message = MessageId::new();
-        let run = RunId::new();
+        let run_id = RunId::new();
         let mut rounds = Rounds::default();
-        let kinds = vec![
-            EventKind::NoticeRecorded {
-                id,
-                topic: "progress".into(),
-                line: "task t1 ready".into(),
-                class: NoticeClass::Unblock,
-            },
-            EventKind::AgentUsage {
-                id,
-                used: 10,
-                size: 0,
-                cost_usd: None,
-                tokens: Some(usage(100, 20, Some(2))),
-            },
-            EventKind::AgentInput {
-                id,
-                message_id: message,
-                text: "go".into(),
-                queued: false,
-                from: Some(MessageSource::Orchestrator {
-                    run_id: run,
-                    task_id: None,
-                }),
-                reply_to: None,
-                thread: None,
-                reply_excerpt: None,
-                attachments: vec![],
-                notices: vec!["task t1 ready".into(), "not recorded".into()],
-                queued_reason: None,
-            },
-            EventKind::AgentTurnStarted {
-                id,
-                message_id: message,
-            },
-            EventKind::AgentPromptViaFile { id },
-            EventKind::AgentToolUsed {
-                id,
-                tool: "workspace_read".into(),
-                ok: true,
-            },
-            EventKind::AgentToolUsed {
-                id,
-                tool: "task_complete".into(),
-                ok: true,
-            },
-            EventKind::AgentToolUsed {
-                id,
-                tool: "task_complete".into(),
-                ok: true,
-            },
-            EventKind::AgentUsage {
-                id,
-                used: 30,
-                size: 0,
-                cost_usd: None,
-                tokens: Some(usage(160, 35, Some(5))),
-            },
-            EventKind::AgentTurnCompleted {
-                id,
-                message_id: message,
-                stop_reason: crossagents_core::StopReason::EndTurn,
-            },
-        ];
-        let ended = turn_round(&mut rounds, kinds);
+        let ended = run(
+            &mut rounds,
+            vec![
+                session_started(id),
+                usage_event(id, usage(100, 20, Some(2))),
+                carried(
+                    id,
+                    message,
+                    "progress",
+                    "task t1 ready",
+                    NoticeClass::Unblock,
+                ),
+                // The same notice twice counts once.
+                carried(
+                    id,
+                    message,
+                    "progress",
+                    "task t1 ready",
+                    NoticeClass::Unblock,
+                ),
+                input(
+                    id,
+                    message,
+                    Some(MessageSource::Orchestrator {
+                        run_id,
+                        task_id: None,
+                    }),
+                ),
+                started(id, message),
+                EventKind::AgentPromptViaFile { id },
+                EventKind::AgentToolUsed {
+                    id,
+                    tool: "workspace_read".into(),
+                    ok: true,
+                },
+                EventKind::AgentToolUsed {
+                    id,
+                    tool: "task_complete".into(),
+                    ok: true,
+                },
+                EventKind::AgentToolUsed {
+                    id,
+                    tool: "task_complete".into(),
+                    ok: true,
+                },
+                usage_event(id, usage(160, 35, Some(5))),
+                completed(id, message),
+            ],
+        );
         assert_eq!(ended.len(), 1);
         let EventKind::AgentRound {
             id: round_id,
@@ -462,24 +611,19 @@ mod tests {
         assert_eq!(
             sources,
             vec![RoundSource::Orchestrator {
-                run_id: run,
+                run_id,
                 task_id: None
             }]
         );
         assert_eq!(
             notices,
-            vec![
-                RoundNotice {
-                    line: "task t1 ready".into(),
-                    class: Some(NoticeClass::Unblock),
-                },
-                RoundNotice {
-                    line: "not recorded".into(),
-                    class: None,
-                },
-            ]
+            vec![RoundNotice {
+                line: "task t1 ready".into(),
+                class: NoticeClass::Unblock,
+            }]
         );
-        // The turn's usage is the growth between its start and its end.
+        // The reading before the turn (100 in, 20 out, 2 requests) is its baseline: the turn used
+        // what the session counted after it.
         let tokens = tokens.expect("usage was reported during the turn");
         assert_eq!(tokens.input, 60);
         assert_eq!(tokens.output, 15);
@@ -490,135 +634,164 @@ mod tests {
     }
 
     #[test]
-    fn usage_is_the_growth_of_the_turn_and_unknown_without_a_report() {
+    fn consecutive_turns_report_their_own_growth() {
         let id = AgentId::new();
+        let (first, second) = (MessageId::new(), MessageId::new());
         let mut rounds = Rounds::default();
-        let first = MessageId::new();
-        let second = MessageId::new();
-        let third = MessageId::new();
-        let mut kinds = vec![
-            EventKind::AgentUsage {
-                id,
-                used: 0,
-                size: 0,
-                cost_usd: None,
-                tokens: Some(usage(100, 10, Some(1))),
-            },
-            EventKind::AgentTurnStarted {
-                id,
-                message_id: first,
-            },
-            EventKind::AgentUsage {
-                id,
-                used: 0,
-                size: 0,
-                cost_usd: None,
-                tokens: Some(usage(250, 40, Some(3))),
-            },
-            EventKind::AgentTurnCompleted {
-                id,
-                message_id: first,
-                stop_reason: crossagents_core::StopReason::EndTurn,
-            },
-            // A turn in which the agent reports nothing.
-            EventKind::AgentTurnStarted {
-                id,
-                message_id: second,
-            },
-            EventKind::AgentTurnCompleted {
-                id,
-                message_id: second,
-                stop_reason: crossagents_core::StopReason::EndTurn,
-            },
-        ];
-        // A session that restarted (its counts fell) and reports requests the agent does
-        // not count.
-        kinds.push(EventKind::AgentTurnStarted {
-            id,
-            message_id: third,
-        });
-        kinds.push(EventKind::AgentUsage {
-            id,
-            used: 0,
-            size: 0,
-            cost_usd: None,
-            tokens: Some(usage(40, 4, None)),
-        });
-        kinds.push(EventKind::AgentTurnCompleted {
-            id,
-            message_id: third,
-            stop_reason: crossagents_core::StopReason::EndTurn,
-        });
-        let ended = turn_round(&mut rounds, kinds);
-        let tokens: Vec<Option<TokenUsage>> = ended
-            .iter()
-            .map(|k| match k {
-                EventKind::AgentRound { tokens, .. } => tokens.clone(),
-                _ => panic!("a round"),
-            })
-            .collect();
-        assert_eq!(tokens.len(), 3);
-        let first = tokens[0].as_ref().unwrap();
-        assert_eq!(
-            (first.input, first.output, first.requests),
-            (150, 30, Some(2))
+        let ended = run(
+            &mut rounds,
+            vec![
+                session_started(id),
+                started(id, first),
+                usage_event(id, usage(100, 10, Some(1))),
+                completed(id, first),
+                started(id, second),
+                usage_event(id, usage(160, 25, Some(3))),
+                completed(id, second),
+            ],
         );
-        assert!(tokens[1].is_none(), "no usage was reported");
-        let restarted = tokens[2].as_ref().unwrap();
+        let (a, b) = (tokens_of(&ended[0]).unwrap(), tokens_of(&ended[1]).unwrap());
+        assert_eq!((a.input, a.output, a.requests), (100, 10, Some(1)));
+        assert_eq!((b.input, b.output, b.requests), (60, 15, Some(2)));
+    }
+
+    #[test]
+    fn a_new_session_counts_from_zero_and_a_turn_without_usage_reports_none() {
+        let id = AgentId::new();
+        let (first, second, third) = (MessageId::new(), MessageId::new(), MessageId::new());
+        let mut rounds = Rounds::default();
+        let ended = run(
+            &mut rounds,
+            vec![
+                session_started(id),
+                started(id, first),
+                usage_event(id, usage(500, 50, Some(5))),
+                completed(id, first),
+                // A new session: its counts start again, from zero.
+                session_started(id),
+                started(id, second),
+                usage_event(id, usage(30, 3, Some(1))),
+                completed(id, second),
+                started(id, third),
+                completed(id, third),
+            ],
+        );
+        assert_eq!(ended.len(), 3);
+        let a = tokens_of(&ended[0]).unwrap();
+        assert_eq!((a.input, a.output, a.requests), (500, 50, Some(5)));
+        let b = tokens_of(&ended[1]).unwrap();
+        assert_eq!((b.input, b.output, b.requests), (30, 3, Some(1)));
+        assert!(tokens_of(&ended[2]).is_none(), "no usage was reported");
+    }
+
+    #[test]
+    fn without_a_baseline_the_first_turn_reports_none_and_the_next_grows() {
+        // A hub that took over an agent never saw its session start: its counts have no
+        // baseline, so the first turn cannot say what it used.
+        let id = AgentId::new();
+        let (first, second) = (MessageId::new(), MessageId::new());
+        let mut rounds = Rounds::default();
+        let ended = run(
+            &mut rounds,
+            vec![
+                started(id, first),
+                usage_event(id, usage(250, 40, Some(3))),
+                completed(id, first),
+                started(id, second),
+                usage_event(id, usage(300, 45, Some(4))),
+                completed(id, second),
+            ],
+        );
+        assert!(
+            tokens_of(&ended[0]).is_none(),
+            "no baseline: null, not the session's total"
+        );
+        let next = tokens_of(&ended[1]).unwrap();
+        assert_eq!((next.input, next.output, next.requests), (50, 5, Some(1)));
+    }
+
+    #[test]
+    fn a_count_that_fell_means_a_new_session_and_its_reading_is_all_growth() {
+        let id = AgentId::new();
+        let (first, second) = (MessageId::new(), MessageId::new());
+        let mut rounds = Rounds::default();
+        let ended = run(
+            &mut rounds,
+            vec![
+                session_started(id),
+                started(id, first),
+                usage_event(id, usage(250, 40, Some(3))),
+                completed(id, first),
+                // Reset without a status change the hub saw: the counts fell.
+                started(id, second),
+                usage_event(id, usage(40, 4, None)),
+                completed(id, second),
+            ],
+        );
+        let restarted = tokens_of(&ended[1]).unwrap();
         assert_eq!((restarted.input, restarted.output), (40, 4));
         assert_eq!(restarted.requests, None);
     }
 
     #[test]
-    fn a_reminder_is_its_own_source_and_a_failed_decision_does_not_count() {
+    fn a_reminder_or_watch_notice_is_a_reminder_source_and_other_notices_are_not() {
+        let id = AgentId::new();
+        let (reminded, plain, aside) = (MessageId::new(), MessageId::new(), MessageId::new());
+        let mut rounds = Rounds::default();
+        let ended = run(
+            &mut rounds,
+            vec![
+                carried(
+                    id,
+                    reminded,
+                    "reminder:r1",
+                    "Reminder (r1): check",
+                    NoticeClass::Decide,
+                ),
+                input(id, reminded, Some(MessageSource::Notice)),
+                started(id, reminded),
+                completed(id, reminded),
+                carried(id, plain, "progress", "task t1 ready", NoticeClass::Unblock),
+                input(id, plain, Some(MessageSource::Notice)),
+                started(id, plain),
+                completed(id, plain),
+                // A person's message with a watch's notice riding along is a person's round.
+                carried(id, aside, "watch:w1", "news", NoticeClass::Decide),
+                input(id, aside, Some(MessageSource::Human)),
+                started(id, aside),
+                completed(id, aside),
+            ],
+        );
+        let source = |kind: &EventKind| match kind {
+            EventKind::AgentRound { sources, .. } => sources.clone(),
+            _ => panic!("a round"),
+        };
+        assert_eq!(source(&ended[0]), vec![RoundSource::Reminder]);
+        assert_eq!(source(&ended[1]), vec![RoundSource::Notice]);
+        assert_eq!(source(&ended[2]), vec![RoundSource::Human]);
+    }
+
+    #[test]
+    fn a_failed_decision_does_not_count() {
         let id = AgentId::new();
         let message = MessageId::new();
         let mut rounds = Rounds::default();
-        let kinds = vec![
-            EventKind::ReminderFired {
-                owner: id,
-                reminder_id: "r1".into(),
-                note: "check".into(),
-            },
-            EventKind::AgentInput {
-                id,
-                message_id: message,
-                text: "check".into(),
-                queued: false,
-                from: Some(MessageSource::Notice),
-                reply_to: None,
-                thread: None,
-                reply_excerpt: None,
-                attachments: vec![],
-                notices: vec![],
-                queued_reason: None,
-            },
-            EventKind::AgentTurnStarted {
-                id,
-                message_id: message,
-            },
-            EventKind::AgentToolUsed {
-                id,
-                tool: "agent_send".into(),
-                ok: false,
-            },
-            EventKind::AgentTurnCompleted {
-                id,
-                message_id: message,
-                stop_reason: crossagents_core::StopReason::EndTurn,
-            },
-        ];
-        let ended = turn_round(&mut rounds, kinds);
-        let EventKind::AgentRound {
-            sources,
-            decided,
-            tools,
-            ..
-        } = &ended[0]
-        else {
+        let ended = run(
+            &mut rounds,
+            vec![
+                input(id, message, Some(MessageSource::Notice)),
+                started(id, message),
+                EventKind::AgentToolUsed {
+                    id,
+                    tool: "agent_send".into(),
+                    ok: false,
+                },
+                completed(id, message),
+            ],
+        );
+        let EventKind::AgentRound { decided, tools, .. } = &ended[0] else {
             panic!("a round")
         };
-        assert_eq!(sources, &vec![RoundSource::Reminder]);
         assert!(!decided, "a send that failed decided nothing");
         assert_eq!(tools, &vec!["agent_send".to_owned()]);
     }
@@ -626,48 +799,27 @@ mod tests {
     #[test]
     fn tools_before_the_turn_and_steered_messages_join_the_round() {
         let id = AgentId::new();
-        let first = MessageId::new();
-        let steered = MessageId::new();
+        let (first, steered) = (MessageId::new(), MessageId::new());
         let mut rounds = Rounds::default();
-        let kinds = vec![
-            EventKind::AgentToolUsed {
-                id,
-                tool: "task_update".into(),
-                ok: true,
-            },
-            EventKind::AgentInput {
-                id,
-                message_id: steered,
-                text: "also".into(),
-                queued: true,
-                from: Some(MessageSource::Human),
-                reply_to: None,
-                thread: None,
-                reply_excerpt: None,
-                attachments: vec![],
-                notices: vec![],
-                queued_reason: None,
-            },
-            EventKind::AgentTurnStarted {
-                id,
-                message_id: first,
-            },
-            EventKind::AgentSteerRead {
-                id,
-                message_id: steered,
-            },
-            EventKind::AgentTurnCompleted {
-                id,
-                message_id: first,
-                stop_reason: crossagents_core::StopReason::EndTurn,
-            },
-            // The next turn starts with nothing carried over.
-            EventKind::AgentTurnStarted {
-                id,
-                message_id: MessageId::new(),
-            },
-        ];
-        let ended = turn_round(&mut rounds, kinds);
+        let ended = run(
+            &mut rounds,
+            vec![
+                EventKind::AgentToolUsed {
+                    id,
+                    tool: "task_update".into(),
+                    ok: true,
+                },
+                input(id, steered, Some(MessageSource::Human)),
+                started(id, first),
+                EventKind::AgentSteerRead {
+                    id,
+                    message_id: steered,
+                },
+                completed(id, first),
+                // The next turn starts with nothing carried over.
+                started(id, MessageId::new()),
+            ],
+        );
         assert_eq!(ended.len(), 1);
         let EventKind::AgentRound {
             message_ids,
@@ -683,7 +835,45 @@ mod tests {
         assert_eq!(sources, &vec![RoundSource::Human]);
         assert!(decided, "task_update changes a task");
         assert_eq!(tools, &vec!["task_update".to_owned()]);
-        assert!(rounds.lanes[&id].round.tools.is_empty());
+    }
+
+    #[test]
+    fn a_removed_agent_leaves_nothing_behind() {
+        let id = AgentId::new();
+        let message = MessageId::new();
+        let mut rounds = Rounds::default();
+        // Its waiting message and its carried notices are dropped with it.
+        run(
+            &mut rounds,
+            vec![
+                carried(id, message, "watch:w1", "news", NoticeClass::Decide),
+                input(id, message, Some(MessageSource::Notice)),
+                EventKind::AgentToolUsed {
+                    id,
+                    tool: "agent_send".into(),
+                    ok: true,
+                },
+                EventKind::AgentRemoved {
+                    id,
+                    name: "kai".into(),
+                },
+            ],
+        );
+        assert!(rounds.lanes.is_empty());
+        assert!(rounds.waiting.is_empty());
+        assert!(rounds.carried.is_empty());
+        // A turn that starts afterwards knows nothing of the removed agent's message.
+        let ended = run(
+            &mut rounds,
+            vec![started(id, message), completed(id, message)],
+        );
+        let EventKind::AgentRound {
+            sources, notices, ..
+        } = &ended[0]
+        else {
+            panic!("a round")
+        };
+        assert!(sources.is_empty() && notices.is_empty());
     }
 
     #[test]

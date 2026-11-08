@@ -2,7 +2,6 @@
 import type { NoticeClass } from "./NoticeClass";
 
 /**
- * A notice that rode along with a round's message, and its class. The class is null when
- * the hub did not record it (an event log from before classes were recorded).
+ * A notice a round took on: its line and class, as the hub had them when the message took it.
  */
-export type RoundNotice = { line: string, class: NoticeClass | null, };
+export type RoundNotice = { line: string, class: NoticeClass, };

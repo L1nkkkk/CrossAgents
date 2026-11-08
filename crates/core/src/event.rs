@@ -307,6 +307,14 @@ pub enum EventKind {
         message_id: MessageId,
         stop_reason: StopReason,
     },
+    /// The notices a message carries from now on: written when the hub marks them carried, before
+    /// the message is delivered (round accounting reads them; `AgentInput.notices` is unchanged).
+    #[serde(rename = "notice.carried")]
+    NoticeCarried {
+        id: AgentId,
+        message_id: MessageId,
+        notices: Vec<CarriedNotice>,
+    },
     /// A hub tool the agent called, once it returned (`ok`: it succeeded). The hub's round
     /// accounting reads these; they are not shown as work.
     #[serde(rename = "agent.tool_used")]
@@ -691,13 +699,22 @@ pub enum RoundSource {
     },
 }
 
-/// A notice that rode along with a round's message, and its class. The class is null when
-/// the hub did not record it (an event log from before classes were recorded).
+/// A notice a round took on: its line and class, as the hub had them when the message took it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct RoundNotice {
     pub line: String,
-    pub class: Option<crate::NoticeClass>,
+    pub class: crate::NoticeClass,
+}
+
+/// A notice a message carries (`notice.carried`): its line, class and topic. The topic says
+/// where it came from (a reminder or a watch, or something else).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CarriedNotice {
+    pub line: String,
+    pub class: crate::NoticeClass,
+    pub topic: String,
 }
 
 /// Who sent a message to an agent.
@@ -783,6 +800,7 @@ impl EventKind {
             Self::AgentRateLimits { .. } => "agent.rate_limits",
             Self::AgentWarning { .. } => "agent.warning",
             Self::AgentTurnCompleted { .. } => "agent.turn_completed",
+            Self::NoticeCarried { .. } => "notice.carried",
             Self::AgentToolUsed { .. } => "agent.tool_used",
             Self::AgentPromptViaFile { .. } => "agent.prompt_via_file",
             Self::AgentRound { .. } => "agent.round",
@@ -912,6 +930,7 @@ impl EventKind {
             | Self::AgentRateLimits { id, .. }
             | Self::AgentWarning { id, .. }
             | Self::AgentTurnCompleted { id, .. }
+            | Self::NoticeCarried { id, .. }
             | Self::AgentToolUsed { id, .. }
             | Self::AgentPromptViaFile { id, .. }
             | Self::AgentRound { id, .. }
@@ -977,16 +996,14 @@ mod tests {
                 tool: "task_complete".into(),
                 ok: true,
             },
-            EventKind::AgentPromptViaFile {
-                id: AgentId::new(),
-            },
+            EventKind::AgentPromptViaFile { id: AgentId::new() },
             EventKind::AgentRound {
                 id: AgentId::new(),
                 message_ids: vec![],
                 sources: vec![RoundSource::Reminder],
                 notices: vec![RoundNotice {
                     line: "check".into(),
-                    class: Some(crate::NoticeClass::Decide),
+                    class: crate::NoticeClass::Decide,
                 }],
                 tokens: None,
                 tools: vec![],

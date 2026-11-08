@@ -5,6 +5,7 @@ import type { Agent } from "./Agent";
 import type { AgentId } from "./AgentId";
 import type { AgentStatus } from "./AgentStatus";
 import type { Attachment } from "./Attachment";
+import type { CarriedNotice } from "./CarriedNotice";
 import type { CheckResult } from "./CheckResult";
 import type { ContextPart } from "./ContextPart";
 import type { ContinuationState } from "./ContinuationState";
@@ -80,7 +81,7 @@ message_id?: MessageId,
 /**
  * Who worked it out; absent means the driver.
  */
-source?: DiffSource, } } | { "type": "agent.permission", "data": { id: AgentId, kind: string, title: string, decision: PermissionDecision, } } | { "type": "agent.rate_limits", "data": { id: AgentId, limits: RateLimits, } } | { "type": "agent.warning", "data": { id: AgentId, message: string, } } | { "type": "agent.turn_completed", "data": { id: AgentId, message_id: MessageId, stop_reason: StopReason, } } | { "type": "agent.tool_used", "data": { id: AgentId, tool: string, ok: boolean, } } | { "type": "agent.prompt_via_file", "data": { id: AgentId, } } | { "type": "agent.round", "data": { id: AgentId, 
+source?: DiffSource, } } | { "type": "agent.permission", "data": { id: AgentId, kind: string, title: string, decision: PermissionDecision, } } | { "type": "agent.rate_limits", "data": { id: AgentId, limits: RateLimits, } } | { "type": "agent.warning", "data": { id: AgentId, message: string, } } | { "type": "agent.turn_completed", "data": { id: AgentId, message_id: MessageId, stop_reason: StopReason, } } | { "type": "notice.carried", "data": { id: AgentId, message_id: MessageId, notices: Array<CarriedNotice>, } } | { "type": "agent.tool_used", "data": { id: AgentId, tool: string, ok: boolean, } } | { "type": "agent.prompt_via_file", "data": { id: AgentId, } } | { "type": "agent.round", "data": { id: AgentId, 
 /**
  * The message that started the turn, then any steered in during it.
  */

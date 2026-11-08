@@ -109,12 +109,12 @@ pub async fn run(ctx: &Context, args: UsageArgs) -> Result<()> {
 /// Old logs have no `agent.round`, and then there is nothing to list.
 async fn rounds(ctx: &Context, args: &UsageArgs) -> Result<()> {
     let mut stream = std::pin::pin!(ctx.client()?.events(0, false).await?);
-    let mut events = Vec::new();
+    let mut scan = RoundScan::new(args.agent.as_deref(), args.run.as_deref());
     while let Some(event) = stream.next().await {
         let event = event?;
-        events.push((event.ts, event.kind));
+        scan.feed(event.ts, event.kind);
     }
-    let report = report(&events, args.agent.as_deref(), args.run.as_deref());
+    let report = scan.finish();
     if ctx.json {
         return print_json(&report);
     }
@@ -164,7 +164,7 @@ async fn rounds(ctx: &Context, args: &UsageArgs) -> Result<()> {
         tally_line(&report.summary.undecided)
     );
     println!(
-        "read a message file (an extra request): {}",
+        "turns that read their message from a file (requests in them): {}",
         tally_line(&report.summary.read_file)
     );
     println!("(\"?\": not known; the agent did not report it)");
@@ -256,97 +256,109 @@ pub struct RoundReport {
     pub summary: RoundSummary,
 }
 
-/// The turns in `events` that the filters keep, in order, with the summary. `agent` matches a
-/// name (any case) or the start of an id; `run` the start of a run id, for turns whose
-/// messages came from that run.
-pub fn report(
-    events: &[(DateTime<Utc>, EventKind)],
-    agent: Option<&str>,
-    run: Option<&str>,
-) -> RoundReport {
-    report_with(&agent_names(events), events, agent, run)
+/// Reads the turns out of the events as they come. Only `agent.round` events and the agent
+/// names are kept, so a long log is never held in memory. `agent` matches a name (any case) or
+/// the start of an id; `run` the start of a run id, for turns whose messages came from that run.
+pub struct RoundScan {
+    names: HashMap<AgentId, String>,
+    agent: Option<String>,
+    run: Option<String>,
+    report: RoundReport,
 }
 
-/// The latest name each agent had in `events`.
-fn agent_names(events: &[(DateTime<Utc>, EventKind)]) -> HashMap<AgentId, String> {
-    let mut names = HashMap::new();
-    for (_, kind) in events {
+impl RoundScan {
+    pub fn new(agent: Option<&str>, run: Option<&str>) -> Self {
+        Self::with_names(HashMap::new(), agent, run)
+    }
+
+    /// [`RoundScan::new`] with the agents' names known up front.
+    pub fn with_names(
+        names: HashMap<AgentId, String>,
+        agent: Option<&str>,
+        run: Option<&str>,
+    ) -> Self {
+        Self {
+            names,
+            agent: agent.map(str::to_owned),
+            run: run.map(str::to_owned),
+            report: RoundReport {
+                rows: Vec::new(),
+                summary: RoundSummary::default(),
+            },
+        }
+    }
+
+    /// Takes one event of the log. Everything but agent names and rounds is dropped here.
+    pub fn feed(&mut self, at: DateTime<Utc>, kind: EventKind) {
         match kind {
             EventKind::AgentCreated { agent } | EventKind::AgentUpdated { agent } => {
-                names.insert(agent.id, agent.name.clone());
+                self.names.insert(agent.id, agent.name);
+            }
+            EventKind::AgentRound {
+                id,
+                message_ids,
+                sources,
+                notices,
+                tokens,
+                tools,
+                decided,
+                prompt_via_file,
+            } => {
+                if !self.keeps(id, &sources) {
+                    return;
+                }
+                self.report.summary.turns += 1;
+                if !decided {
+                    self.report.summary.undecided.add(tokens.as_ref());
+                }
+                if prompt_via_file {
+                    self.report.summary.read_file.add(tokens.as_ref());
+                }
+                self.report.rows.push(RoundRow {
+                    at,
+                    agent: self
+                        .names
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_else(|| id.to_string()),
+                    agent_id: id,
+                    messages: message_ids.len(),
+                    sources: sources.iter().map(source_label).collect(),
+                    notices: notices.len(),
+                    tokens,
+                    tools,
+                    decided,
+                    prompt_via_file,
+                });
             }
             _ => {}
         }
     }
-    names
-}
 
-/// [`report`] with the agents names known up front.
-pub fn report_with(
-    names: &HashMap<AgentId, String>,
-    events: &[(DateTime<Utc>, EventKind)],
-    agent: Option<&str>,
-    run: Option<&str>,
-) -> RoundReport {
-    let matches_agent = |id: AgentId| {
-        let Some(wanted) = agent else {
-            return true;
+    fn keeps(&self, id: AgentId, sources: &[RoundSource]) -> bool {
+        let agent_ok = match &self.agent {
+            None => true,
+            Some(wanted) => {
+                let name = self.names.get(&id).map(String::as_str).unwrap_or("");
+                name.eq_ignore_ascii_case(wanted) || id.to_string().starts_with(wanted.as_str())
+            }
         };
-        let name = names.get(&id).map(String::as_str).unwrap_or("");
-        name.eq_ignore_ascii_case(wanted) || id.to_string().starts_with(wanted)
-    };
-    let matches_run = |sources: &[RoundSource]| {
-        let Some(wanted) = run else {
-            return true;
+        let run_ok = match &self.run {
+            None => true,
+            Some(wanted) => sources.iter().any(|source| {
+                matches!(
+                    source,
+                    RoundSource::Orchestrator { run_id, .. }
+                        if run_id.to_string().starts_with(wanted.as_str())
+                )
+            }),
         };
-        sources.iter().any(|source| {
-            matches!(source, RoundSource::Orchestrator { run_id, .. } if run_id.to_string().starts_with(wanted))
-        })
-    };
-
-    let mut report = RoundReport {
-        rows: Vec::new(),
-        summary: RoundSummary::default(),
-    };
-    for (at, kind) in events {
-        let EventKind::AgentRound {
-            id,
-            message_ids,
-            sources,
-            notices,
-            tokens,
-            tools,
-            decided,
-            prompt_via_file,
-        } = kind
-        else {
-            continue;
-        };
-        if !matches_agent(*id) || !matches_run(sources) {
-            continue;
-        }
-        let tokens = tokens.clone();
-        report.summary.turns += 1;
-        if !decided {
-            report.summary.undecided.add(tokens.as_ref());
-        }
-        if *prompt_via_file {
-            report.summary.read_file.add(tokens.as_ref());
-        }
-        report.rows.push(RoundRow {
-            at: *at,
-            agent: names.get(id).cloned().unwrap_or_else(|| id.to_string()),
-            agent_id: *id,
-            messages: message_ids.len(),
-            sources: sources.iter().map(source_label).collect(),
-            notices: notices.len(),
-            tokens,
-            tools: tools.clone(),
-            decided: *decided,
-            prompt_via_file: *prompt_via_file,
-        });
+        agent_ok && run_ok
     }
-    report
+
+    pub fn finish(self) -> RoundReport {
+        self.report
+    }
 }
 
 fn source_label(source: &RoundSource) -> String {
@@ -361,7 +373,7 @@ fn source_label(source: &RoundSource) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crossagents_core::{MessageId, RoundNotice, RunId};
+    use crossagents_core::{MessageId, NoticeClass, RoundNotice, RunId};
 
     use super::*;
 
@@ -375,6 +387,20 @@ mod tests {
             total: input + output,
             requests,
         }
+    }
+
+    /// Runs the scan over `events`, with `names` known.
+    fn scan(
+        names: &HashMap<AgentId, String>,
+        events: &[(DateTime<Utc>, EventKind)],
+        agent: Option<&str>,
+        run: Option<&str>,
+    ) -> RoundReport {
+        let mut s = RoundScan::with_names(names.clone(), agent, run);
+        for (at, kind) in events {
+            s.feed(*at, kind.clone());
+        }
+        s.finish()
     }
 
     fn round(
@@ -392,7 +418,7 @@ mod tests {
                 sources,
                 notices: vec![RoundNotice {
                     line: "x".into(),
-                    class: None,
+                    class: NoticeClass::Decide,
                 }],
                 tokens,
                 tools: vec!["task_get".into()],
@@ -404,7 +430,7 @@ mod tests {
 
     #[test]
     fn an_old_log_without_rounds_gives_an_empty_report() {
-        let report = report(&[], None, None);
+        let report = scan(&HashMap::new(), &[], None, None);
         assert!(report.rows.is_empty());
         assert_eq!(report.summary, RoundSummary::default());
     }
@@ -437,7 +463,7 @@ mod tests {
                 false,
             ),
         ];
-        let report = report_with(&names, &events, None, None);
+        let report = scan(&names, &events, None, None);
         assert_eq!(report.rows.len(), 4);
         assert_eq!(report.rows[0].agent, "kai");
         assert_eq!(report.summary.turns, 4);
@@ -483,25 +509,17 @@ mod tests {
                 false,
             ),
         ];
+        assert_eq!(scan(&names, &events, Some("KAI"), None).rows.len(), 1);
         assert_eq!(
-            report_with(&names, &events, Some("KAI"), None).rows.len(),
-            1
-        );
-        assert_eq!(
-            report_with(&names, &events, Some(&lee.to_string()), None)
+            scan(&names, &events, Some(&lee.to_string()), None)
                 .rows
                 .len(),
             2
         );
-        let by_run = report_with(&names, &events, None, Some(&run.to_string()));
+        let by_run = scan(&names, &events, None, Some(&run.to_string()));
         assert_eq!(by_run.rows.len(), 1);
         assert_eq!(by_run.rows[0].agent, "kai");
-        assert_eq!(
-            report_with(&names, &events, Some("nobody"), None)
-                .rows
-                .len(),
-            0
-        );
+        assert_eq!(scan(&names, &events, Some("nobody"), None).rows.len(), 0);
     }
 
     #[test]

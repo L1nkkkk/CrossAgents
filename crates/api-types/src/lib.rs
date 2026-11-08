@@ -3101,6 +3101,7 @@ mod tests {
         Event::export_all(&cfg).unwrap();
         crossagents_core::RoundSource::export_all(&cfg).unwrap();
         crossagents_core::RoundNotice::export_all(&cfg).unwrap();
+        crossagents_core::CarriedNotice::export_all(&cfg).unwrap();
         Device::export_all(&cfg).unwrap();
         crossagents_core::Task::export_all(&cfg).unwrap();
         crossagents_core::Run::export_all(&cfg).unwrap();

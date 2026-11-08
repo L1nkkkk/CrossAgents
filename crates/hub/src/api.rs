@@ -3114,7 +3114,8 @@ async fn call_tool(
     let call = tokio::spawn(async move {
         let result = orchestrator.call_tool(&agent, &name, input).await;
         // What the agent did is in its round (`agent.round`, rounds.rs). Recorded in the same
-        // detached task, so a request that was dropped still counts.
+        // detached task, so a request that was dropped still counts. An external agent's calls
+        // land in its next round, since the hub starts and ends its turns at the reads (rounds.rs).
         if let Err(err) = bus
             .publish(EventKind::AgentToolUsed {
                 id,

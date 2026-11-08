@@ -482,6 +482,16 @@ pub fn summary(kind: &EventKind) -> String {
             }
             text
         }
+        EventKind::NoticeCarried {
+            id,
+            message_id,
+            notices,
+        } => format!(
+            "{} {} notice(s) for {}",
+            short(id),
+            notices.len(),
+            short(message_id)
+        ),
         EventKind::NoticeRecorded {
             id,
             topic,

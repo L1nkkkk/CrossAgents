@@ -12,7 +12,8 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use crossagents_core::{
     Agent, AgentId, AgentKey, AgentStatus, AttachmentSupport, Capabilities, CoreError,
     DeliveryState, DeliveryStatus, DiffSource, DriverSession, EXTERNAL_PLUGIN, Envelope, EventBus,
-    EventKind, McpServerSpec, MessageId, MessageSource, NameSource, NoticeClass, OutputStream,
+    CarriedNotice, EventKind, McpServerSpec, MessageId, MessageSource, NameSource, NoticeClass,
+    OutputStream,
     PendingNotice, PermissionPolicy, Prompt, QueuedReason, SessionEvent, SessionEventKind,
     SessionSpec, StopReason, Store, validate_agent_name,
 };
@@ -1914,7 +1915,7 @@ impl Runtime {
                     Prompt { text, attachments }.with_references(),
                 ));
             if let Some(carried) = &carried {
-                self.mark_carried(stored.id, message_id, &carried.versions)
+                self.mark_carried(stored.id, message_id, &carried.rows)
                     .await;
             }
             self.announce_delivery(stored.id).await;
@@ -1996,7 +1997,7 @@ impl Runtime {
         live.inbox
             .push((message_id, Prompt { text, attachments }), first);
         if let Some(carried) = &carried {
-            self.mark_carried(agent.id, message_id, &carried.versions)
+            self.mark_carried(agent.id, message_id, &carried.rows)
                 .await;
         }
         drop(admission);
@@ -2074,34 +2075,49 @@ impl Runtime {
             return None;
         }
         let (text, lines) = compose_notices(&active);
-        let versions: Vec<(String, DateTime<Utc>)> = active
-            .iter()
-            .map(|row| (row.topic.clone(), row.updated_at))
-            .collect();
         Some(Carried {
             withdrawn,
             text,
             lines,
-            versions,
+            rows: active,
         })
     }
 
-    async fn mark_carried(
-        &self,
-        id: AgentId,
-        message: MessageId,
-        versions: &[(String, DateTime<Utc>)],
-    ) {
-        if versions.is_empty() {
+    async fn mark_carried(&self, id: AgentId, message: MessageId, rows: &[PendingNotice]) {
+        if rows.is_empty() {
             return;
         }
         if let Err(err) = self
             .store()
-            .mark_notices_carried(id, versions, message)
+            .mark_notices_carried(id, &versions_of(rows), message)
             .await
         {
             tracing::warn!(%id, error = %err, "cannot mark notices carried by a message");
+            return;
         }
+        self.publish_carried(id, message, rows).await;
+    }
+
+    /// Tells the event log which notices a message carries from now on (`notice.carried`, read
+    /// by round accounting). Published once the store has marked them.
+    async fn publish_carried(&self, id: AgentId, message: MessageId, rows: &[PendingNotice]) {
+        let notices = rows
+            .iter()
+            .map(|row| CarriedNotice {
+                line: row.line.clone(),
+                class: row.class,
+                topic: row.topic.clone(),
+            })
+            .collect();
+        publish(
+            &self.bus,
+            EventKind::NoticeCarried {
+                id,
+                message_id: message,
+                notices,
+            },
+        )
+        .await;
     }
 
     /// Automatic wakes of one version that failed. After this many, it only rides along.
@@ -2256,6 +2272,7 @@ impl Runtime {
             self.store()
                 .mark_notices_carried(agent.id, &versions, message)
                 .await?;
+            self.publish_carried(agent.id, message, rows).await;
             return Ok(true);
         }
         let (text, _) = compose_notices(rows);
@@ -2278,6 +2295,7 @@ impl Runtime {
             self.store()
                 .mark_notices_carried(agent.id, &versions, message)
                 .await?;
+            self.publish_carried(agent.id, message, rows).await;
             publish(
                 &self.bus,
                 EventKind::AgentInputUpdated {
@@ -2315,6 +2333,7 @@ impl Runtime {
         self.store()
             .mark_notices_carried(agent.id, &versions, message)
             .await?;
+        self.publish_carried(agent.id, message, rows).await;
         publish(
             &self.bus,
             EventKind::AgentInputUpdated {
@@ -2346,6 +2365,7 @@ impl Runtime {
             self.notice_state.clear_digest_if(agent.id, message);
             return Err(err);
         }
+        self.publish_carried(agent.id, message, rows).await;
         let envelope = Envelope {
             id: message,
             from: MessageSource::Notice,
@@ -3499,6 +3519,13 @@ async fn inject(
     .await;
 }
 
+/// The notice versions the store keeps carried: topic and last update, per row.
+fn versions_of(rows: &[PendingNotice]) -> Vec<(String, DateTime<Utc>)> {
+    rows.iter()
+        .map(|row| (row.topic.clone(), row.updated_at))
+        .collect()
+}
+
 /// Notices carried with a person's message.
 struct Carried {
     /// A wake message that was still waiting and was taken out of the queue.
@@ -3506,9 +3533,8 @@ struct Carried {
     text: String,
     /// The lines themselves, without the class mark, for the input event.
     lines: Vec<String>,
-    /// Marked carried by the person's message once it is queued. Deleted when that turn
-    /// ends successfully.
-    versions: Vec<(String, DateTime<Utc>)>,
+    /// The rows the message carries, for the store (marked carried) and `notice.carried`.
+    rows: Vec<PendingNotice>,
 }
 
 /// The wake message queued for an agent, and which notice versions it contains.
