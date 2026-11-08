@@ -31,11 +31,15 @@ efforts = ["low", "medium", "high", "xhigh", "max"]
 env = "WITH_CLI"
 commands = ["with-cli"]
 # Where the With app installs it: `%USERPROFILE%\background_agent_cli\bin\with-cli.exe`.
-paths = ["~/background_agent_cli/bin/with-cli"]
 version = ["--version"]
 # npm puts `with-cli.cmd` on PATH, a wrapper that starts the exe with `%*`. A prompt with a
 # newline cannot go through a batch file, so the exe behind it is started directly.
 shim = "batch-exe"
+
+[locate.paths]
+windows = ["~/background_agent_cli/bin/with-cli"]
+linux = ["~/background_agent_cli/bin/with-cli"]
+macos = ["~/background_agent_cli/bin/with-cli", "/opt/homebrew/bin/with-cli", "/usr/local/bin/with-cli"]
 
 [install]
 label = "With CLI"

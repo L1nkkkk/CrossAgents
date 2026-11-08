@@ -664,12 +664,34 @@ fn default_shell() -> Vec<String> {
 
 #[cfg(not(windows))]
 fn default_shell() -> Vec<String> {
-    vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())]
+    unix_shell(std::env::consts::OS, std::env::var("SHELL").ok())
+}
+
+#[cfg(any(not(windows), test))]
+fn unix_shell(os: &str, shell: Option<String>) -> Vec<String> {
+    let mut command = vec![shell.unwrap_or_else(|| "/bin/sh".into())];
+    if os == "macos" {
+        command.push("-l".into());
+    }
+    command
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unix_shell_uses_a_login_shell_on_macos() {
+        assert_eq!(
+            unix_shell("macos", Some("/bin/zsh".into())),
+            ["/bin/zsh", "-l"]
+        );
+        assert_eq!(
+            unix_shell("linux", Some("/bin/bash".into())),
+            ["/bin/bash"]
+        );
+        assert_eq!(unix_shell("macos", None), ["/bin/sh", "-l"]);
+    }
 
     fn screen_from(frame: &TerminalFrame) -> vt100::Parser {
         let TerminalFrame::Snapshot { data, cols, rows } = frame else {

@@ -36,6 +36,9 @@ commands = ["codebuddy"]
 shim = "node-script"
 version = ["--version"]
 
+[locate.paths]
+macos = ["/opt/homebrew/bin/codebuddy", "/usr/local/bin/codebuddy"]
+
 [install]
 label = "CodeBuddy"
 hint = "npm install -g @tencent-ai/codebuddy-code"
