@@ -593,6 +593,8 @@ supportFetchAPI、corsEnabled。standard 之后来源是 `crossagents-ext://<nam
   `shell:open-path` 本机模式仍经 `files/resolve` 打开真文件；远程模式下载到临时目录，打开的是副本，
   查看器写明改动不会写回中心。
 
+扩展 token 只要有 read，就能 GET 扩展资源和上面这几条原始字节，和 `files/content` 一样（[access.rs](../crates/hub/src/access.rs) `required`：GET 是 read；`refusal` 按扩展声明的级别放行）。这符合现有分级，不是遗留。
+
 ### 浏览器视图
 
 `kind = "browser"` 用 WebContentsView，不用 iframe。大站多用 `X-Frame-Options` / `frame-ancestors` 禁止被嵌；

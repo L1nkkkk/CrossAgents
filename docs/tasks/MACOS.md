@@ -23,7 +23,7 @@
 
 **快捷键**。同一文件的 `before-input-event`：缩放那一段判断 `!input.control`，dev server 那一段（`F12`、`input.control && input.shift && i`、`input.control && r`）也只认 `control`。Mac 上要认 `input.meta`——⌘= / ⌘- / ⌘0 是缩放，⌘⌥I 是开发者工具，⌘R 是重新加载。同时 [menubar.tsx](../../apps/gui/src/menubar.tsx) 里每条 `Entry` 的 `keys` 和 `SHORTCUTS` 表按平台显示：Mac 上菜单栏不渲染，但「键盘快捷键」对话框（`⌘/` 打开，监听认 `metaKey`）经 [shortcuts.ts](../../apps/gui/src/lib/shortcuts.ts) 的 `shortcut` 把 `Ctrl` 显示成 ⌘。
 
-本轮已改代码，要实测（2026-11-08）：主进程快捷键在 `455741e`（`platform.cts` 的 `shortcut`，darwin 认 `meta`，字母键看 `input.code`）；界面显示在 `3c49369`。侧栏「在旁边打开」的静态文案仍是「Ctrl+单击」（[i18n.ts](../../apps/gui/src/lib/i18n.ts) `sidebar.besideHint`），处理代码认 `ctrlKey || metaKey`。
+本轮已改代码，要实测（2026-11-08）：主进程快捷键在 `455741e`（`platform.cts` 的 `shortcut`，darwin 认 `meta`，字母键看 `input.code`）；界面显示在 `3c49369`。「在旁边打开」的提示仍是「Ctrl+单击或中键：在旁边打开」（[i18n.ts](../../apps/gui/src/lib/i18n.ts) `sidebar.besideHint`，[Sidebar.tsx](../../apps/gui/src/Sidebar.tsx) 和 [SessionPeek.tsx](../../apps/gui/src/SessionPeek.tsx) 都用它）。处理代码认 `ctrlKey || metaKey`；Mac 上 Ctrl+单击是右键，这句应该写 ⌘，本轮没改。
 
 **点 Dock 图标**。`main.cts` 的 `app.on("activate")` 只在 `BrowserWindow.getAllWindows().length === 0` 时 `createWindow()`。但托盘把窗口藏起来而不是关掉：[tray.cts](../../apps/gui/electron/tray.cts) 的 `keep(win)` 在 `close` 里 `event.preventDefault()` 再 `win.hide()`，窗口一直在。于是 Mac 上点 Dock 图标什么都不发生，窗口回不来。改成调已经有的 `showWindow()`（现在 `second-instance` 在用）——它没有窗口时也会 `createWindow()`，两种情形都对。
 
@@ -31,7 +31,7 @@
 
 **托盘**。`main.cts` 里 `createTray(join(process.resourcesPath, "icon.ico"), …)` 写死 `.ico`；macOS 菜单栏要模板 PNG——黑色图形、透明背景，系统按深浅色反色——`nativeImage` 上设 `setTemplateImage(true)` 或文件名以 `Template` 结尾。`tray.cts` 的 `displayBalloon` 和 `balloon-click` 只在 Windows 有效，Mac 上要改用系统通知（`Notification`）。`hintOnce` 的文案「点任务栏右下角的图标可以重新打开」按平台改（Mac 是菜单栏图标）。`Tray` 的 `click` / `right-click` 在 Mac 上的语义也要一并核对（**要在 Mac 上确认**）。
 
-本轮已改代码，要实测（2026-11-08，`455741e`）：托盘图标用 [iconTemplate.png](../../apps/gui/build/iconTemplate.png) 与 [iconTemplate@2x.png](../../apps/gui/build/iconTemplate@2x.png)，darwin 上 `setTemplateImage(true)`；提示改用 `Notification`（模块级 `Set` 拿住，避免被回收后点不了）；`hintOnce` 在 Mac 上说菜单栏。打包时这两个 png 都要进 resources。单击 / 右键的语义仍要在 Mac 上确认。
+本轮已改代码，要实测（2026-11-08，`455741e`）：托盘图标用 [iconTemplate.png](../../apps/gui/build/iconTemplate.png) 与 [iconTemplate@2x.png](../../apps/gui/build/iconTemplate@2x.png)，darwin 上 `setTemplateImage(true)`；[main.cts](../../apps/gui/electron/main.cts) 从 `process.resourcesPath` 取 `trayIcon` 返回的文件名。提示改用 `Notification`（模块级 `Set` 拿住，避免被回收后点不了）；`hintOnce` 在 Mac 上说菜单栏。单击 / 右键、点通知、浅色 / 深色 / Retina 仍要在 Mac 上确认。[package.json](../../apps/gui/package.json) 的 `build.extraResources` 只复制了 `build/icon.ico`，打包时这两个 png 还没放进 resources，打出来的 Mac 包托盘会没有图标。
 
 **打开即执行的文件**。`main.cts` 的打开判断补 macOS 的 `.terminal`、`.fileloc`——这两个在 Mac 上会被系统当成可执行/定位文件打开，和 `.app` / `.command` / `.sh` 是一类。
 
@@ -43,7 +43,7 @@
 
 ## 3. 打包与分发
 
-**electron-builder 加 mac 目标**：`dmg`（安装）加 `zip`（自动更新用），图标 `build/icon.icns`（现在 `build/` 里只有 `icon.ico`、`icon.png`）。`extraResources` 不能再写死 `crossagents.exe`：hub 二进制按 `aarch64-apple-darwin` 和 `x86_64-apple-darwin` 各编一份，再 `lipo` 成通用版放进 `resources/bin/`。`main.cts` 已经按平台取 `crossagents`，这一半不用改。按架构各出一个包、不用 `lipo`，是可选做法，待定（§7 的 Cutex 按架构各出一个 zip）。
+**electron-builder 加 mac 目标**：`dmg`（安装）加 `zip`（自动更新用），图标 `build/icon.icns`（现在 `build/` 里有 `icon.ico`、`icon.png`，以及托盘用的 `iconTemplate.png`、`iconTemplate@2x.png`，还没有 `icon.icns`）。`extraResources` 不能再写死 `crossagents.exe`：hub 二进制按 `aarch64-apple-darwin` 和 `x86_64-apple-darwin` 各编一份，再 `lipo` 成通用版放进 `resources/bin/`。`main.cts` 已经按平台取 `crossagents`，这一半不用改。按架构各出一个包、不用 `lipo`，是可选做法，待定（§7 的 Cutex 按架构各出一个 zip）。
 
 **摄像头 / 麦克风**：浏览器视图（[EXTENSIONS.md](../EXTENSIONS.md) §9「浏览器视图」）要开摄像头或麦克风时，macOS 必须在 `Info.plist` 里声明 `NSCameraUsageDescription` / `NSMicrophoneUsageDescription`，并带对应的 entitlement；不声明会出问题，具体表现要在 Mac 上确认。主窗口的权限仍由 `permissions.cts` 的 `permissionAllowed` 决定（只放行 `clipboard-sanitized-write`），这条不变。
 
@@ -83,7 +83,7 @@
 
 **Mac2 GUI 小修 + 不签名的 dmg 手测**（建议）
 
-- 范围：§2 的各条（代码已改，要实测，见 §2），加 §3 的 dmg / zip / `icon.icns` / 通用二进制（未做），不含 Developer ID 签名与公证。Apple Silicon 上要做的 ad-hoc 签名见 §3。打包时把 `iconTemplate.png` 与 `iconTemplate@2x.png` 一起放进 resources。
+- 范围：§2 的各条（代码已改，要实测，见 §2），加 §3 的 dmg / zip / `icon.icns` / 通用二进制（未做），不含 Developer ID 签名与公证。Apple Silicon 上要做的 ad-hoc 签名见 §3。`build.extraResources` 现在只复制 `build/icon.ico`；打包时把 `iconTemplate.png` 与 `iconTemplate@2x.png` 一起放进 resources，否则 Mac 包的托盘没有图标。
 - 依赖：Mac1 至少 `typecheck` 与 `test` 绿；dmg 只能在 macOS 上打。
 - 验收（建议）：输入框里 ⌘C / ⌘V / ⌘X / ⌘A / ⌘Z 都能用；⌘Q 退出、⌘M 最小化；点 Dock 图标窗口回来（这是 §2 第三条要修的 bug，修完应能验证「藏起来 → 点图标 → 回来」）；菜单栏图标在浅色和深色下都看得清；dmg 装上后首次打开能启动（不签名时走「隐私与安全性」放行）；打包产物 `codesign --verify --deep --strict` 通过。
 
