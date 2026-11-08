@@ -6,7 +6,7 @@ use std::time::Duration;
 use chrono::Utc;
 use common::{TestHub, git_repo};
 use crossagents_core::{
-    AgentId, AgentKey, AgentStatus, EventKind, HumanItem, HumanItemKind, MessageSource,
+    AgentId, AgentKey, AgentStatus, EventKind, HumanItem, HumanItemKind, MessageId, MessageSource,
     NoticeClass, Run, RunId, RunStatus, TaskStatus,
 };
 use serde_json::{Value, json};
@@ -1074,23 +1074,32 @@ async fn a_member_s_progress_is_kept_and_does_not_wake_the_lead() {
     });
     assert!(!woken, "progress started a turn");
 
-    // The next message to the lead carries the note after the person's words.
-    t.send(&run.planner.to_string(), "please look").await;
-    let carried = w
-        .until("the person's message carries the progress", |e| {
-            matches!(&e.kind, EventKind::AgentInput { id, text, notices, from, .. }
-                if *id == run.planner
-                    && *from == Some(MessageSource::Human)
-                    && text.contains("please look")
-                    && notices.iter().any(|line| line.contains("halfway there")))
-        })
-        .await;
-    let EventKind::AgentInput { text, .. } = &carried.kind else {
-        unreachable!()
-    };
+    // The next wake carries it after the person's words, under "since last time".
+    let sent = t.send(&run.planner.to_string(), "please look").await;
+    let human_id: MessageId = serde_json::from_value(sent["message_id"].clone()).unwrap();
+    w.until("the person's message carries the progress", |e| {
+        matches!(&e.kind, EventKind::AgentInput { id, text, notices, from, .. }
+            if *id == run.planner
+                && *from == Some(MessageSource::Human)
+                && text.contains("please look")
+                && notices.iter().any(|line| line.contains("halfway there")))
+    })
+    .await;
+    w.until("the lead read it", |e| {
+        matches!(&e.kind, EventKind::AgentTurnCompleted { id, message_id, .. }
+            if *id == run.planner && *message_id == human_id)
+    })
+    .await;
+    let out = w.output();
+    let person = out.rfind("please look").expect("the person's words");
+    let rest = &out[person..];
+    let since = rest
+        .find("Since last time")
+        .unwrap_or_else(|| panic!("the progress was not under since last time: {rest}"));
+    let section = &rest[since..];
     assert!(
-        !text.contains("Progress from"),
-        "the note is not part of the person's words: {text}"
+        section.contains("[silent]") && section.contains("halfway there"),
+        "{section}"
     );
 }
 

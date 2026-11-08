@@ -8,8 +8,9 @@
 //! - a waiting rule lasts at most seven days, then wakes its owner once and closes;
 //! - a task or run ending closes the rules that follow it.
 //!
-//! A member's progress note is recorded for the lead and rides the next wake. It does not
-//! start one: addressing another teammate records nothing (that handoff is already made),
+//! A member's progress note is only recorded (multica §2.3 no longer wakes the lead). It
+//! rides the next wake. Something the teammate needs the lead to decide goes through an open
+//! question or a message, not through this note. Addressing another teammate records nothing,
 //! and the lead's own note records nothing. See [`Orchestrator::wake_lead_on_progress`].
 
 use std::collections::HashSet;
@@ -137,10 +138,11 @@ pub fn mentions_another_member(text: &str, lead: AgentId, members: &[(AgentId, S
         .any(|name| !name.is_empty() && text.contains(&format!("@{name}")))
 }
 
-/// Which progress notes are kept for the lead (multica §2.3, narrowed): the lead's own word
-/// is not, and neither is anything about a run or task that has already ended. A note that
-/// addresses another teammate is a handoff already made. Anything else is recorded and rides
-/// the next wake; it does not start a turn.
+/// Which progress notes are kept for the lead. Progress is only recorded. The lead's own
+/// word is not, and neither is anything about a run or task that has already ended. A note
+/// that addresses another teammate is a handoff already made. Anything else rides the next
+/// wake and does not start a turn. A decision the teammate needs goes through an open
+/// question or a message, not through this note.
 pub fn lead_should_be_woken(
     lead: AgentId,
     caller: AgentId,
@@ -369,10 +371,11 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// Records a member's progress for the lead (multica §2.3, no longer a wake). A note that
-    /// addresses nobody is kept under one topic per run, so a later note replaces the line,
-    /// and it rides the next wake. A note that addresses another teammate is a handoff already
-    /// made, and the lead's own note is not recorded. Progress does not start a turn.
+    /// Records a member's progress for the lead. Progress is only recorded: it rides the next
+    /// wake under "since last time" and does not start a turn. Something the teammate needs
+    /// the lead to decide goes through an open question or a message, not through this note.
+    /// A note that addresses another teammate is a handoff already made, and the lead's own
+    /// note is not recorded. One topic per run, so a later note replaces the line.
     pub async fn wake_lead_on_progress(&self, run: &Run, task: &Task, caller: &Agent, text: &str) {
         if run.planner == caller.id {
             // The lead's own word never wakes it.
