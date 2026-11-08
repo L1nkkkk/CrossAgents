@@ -246,10 +246,11 @@ async function serveExtension(request: Request): Promise<Response> {
   if (request.method !== "GET" && request.method !== "HEAD") return new Response(null, { status: 405, headers: cors });
   if (safeMode.enabled) return new Response("Extensions are disabled in safe mode", { status: 403, headers: cors });
   try {
-    const { base, token } = await currentHub();
+    const { base, token, mode } = await currentHub();
     const response = await fetch(`${base}/v1/extensions`, {
       headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    if (mode === "remote" && response.status === 401) remote?.unauthorized();
     if (!response.ok) throw new Error(`extensions: HTTP ${response.status}`);
     const { extensions } = await response.json() as { extensions: ExtensionVersions[] };
     const file = await extensionRealFile(hubHome(), request.url, extensions);
@@ -576,10 +577,11 @@ async function relayTerminal(contents: WebContents, id: string, reader: string, 
 
 /** Whether there is nothing more to come: the shell finished, or the hub no longer has it. */
 async function terminalStreamOnce(id: string, reader: string, emit: (data: string) => void, signal: AbortSignal): Promise<boolean> {
-  const { base, token } = await currentHub();
+  const { base, token, mode } = await currentHub();
   const headers = { authorization: `Bearer ${token}`, accept: "text/event-stream" };
   const url = `${base}/v1/terminals/${encodeURIComponent(id)}/output?connection=${encodeURIComponent(reader)}`;
   const response = await fetch(url, { headers, signal });
+  if (mode === "remote" && response.status === 401) remote?.unauthorized();
   if (response.status === 404) {
     emit(JSON.stringify({ type: "gone" }));
     return true;

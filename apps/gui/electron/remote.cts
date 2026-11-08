@@ -24,7 +24,7 @@ const NAME = /^[A-Za-z0-9._-]+$/;
 /** A bracketed IPv6 address: hex digits, colons, dots (an embedded IPv4), an optional zone. */
 const IPV6 = /^\[[0-9A-Fa-f:.]+(%[A-Za-z0-9._-]+)?\]$/;
 /** What a command path on the hub's machine may not contain: shell and cmd.exe specials. */
-const UNSAFE_COMMAND = /["$`%!&|;<>^\r\n]/;
+const UNSAFE_COMMAND = /["$`%!&|;<>^()@\0\r\n]/;
 
 export class InputError extends Error {}
 
@@ -55,16 +55,16 @@ export function checkPort(port: unknown, what = "SSH 端口"): number | undefine
 export function checkCommand(command: unknown): string | undefined {
   if (command === undefined || command === null) return undefined;
   if (typeof command !== "string") throw new InputError("命令必须是文字");
+  if (UNSAFE_COMMAND.test(command)) {
+    throw new InputError("命令只能是一个路径，不能包含双引号、$、反引号、%、!、&、|、;、<、>、^、(、)、@、NUL 或换行");
+  }
   const trimmed = command.trim();
   if (!trimmed) return undefined;
-  if (UNSAFE_COMMAND.test(trimmed)) {
-    throw new InputError("命令只能是一个路径，不能包含双引号、$、反引号、%、!、&、|、;、<、>、^ 或换行");
-  }
   return trimmed;
 }
 
 export function checkDeviceName(name: unknown): string {
-  if (typeof name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name)) {
+  if (typeof name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\s\S])/.test(name)) {
     throw new InputError("设备名要 1–64 个字母、数字、. _ -，以字母或数字开头");
   }
   return name;
@@ -196,12 +196,14 @@ export function parseDeviceAdd(text: string): Paired {
   try {
     value = JSON.parse(text.replace(/^\uFEFF/, "").trim());
   } catch {
-    throw new Error(`device add 的输出不是 JSON：${text.trim().slice(0, 200)}`);
+    throw new Error("device add 的输出不是 JSON");
   }
   const { device, token } = value ?? {};
   if (typeof token !== "string" || !/^[A-Za-z0-9_.-]{8,256}$/.test(token)) throw new Error("device add 的输出里没有 token");
-  if (typeof device?.id !== "string" || !device.id) throw new Error("device add 的输出里没有设备 id");
-  return { deviceId: device.id, deviceName: typeof device.name === "string" ? device.name : "", token };
+  if (typeof device?.id !== "string" || !/^[A-Za-z0-9._-]{1,64}(?![\s\S])/.test(device.id)) throw new Error("device add 的设备 id 无效");
+  let deviceName: string;
+  try { deviceName = checkDeviceName(device.name); } catch { throw new Error("device add 的设备名无效"); }
+  return { deviceId: device.id, deviceName, token };
 }
 
 // ---------------------------------------------------------------------------------------

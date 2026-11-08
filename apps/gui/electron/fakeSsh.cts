@@ -59,5 +59,6 @@ if (args.includes("-N")) {
   const m = /^(?:& )?(?:"[^"]+"|crossagents) device add ([A-Za-z0-9._-]+) --json$/.exec(command);
   if (!m) fail(`sh: unexpected command: ${command}`, 127);
   if (env.FAKE_SSH_PAIR_FAIL) fail(env.FAKE_SSH_PAIR_FAIL, 1);
+  if (env.FAKE_SSH_PAIR_WARNING) process.stdout.write("warning before JSON\n");
   process.stdout.write(`${JSON.stringify({ device: { id: "dev-1", name: m[1], kind: "client", level: "write" }, token: env.FAKE_SSH_TOKEN ?? "cad_fake" })}\n`);
 }

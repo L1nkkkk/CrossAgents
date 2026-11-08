@@ -39,10 +39,27 @@ test("users, ports, device names, commands", () => {
   assert.equal(checkCommand("  "), undefined);
   assert.equal(checkCommand("C:\\Program Files\\CrossAgents\\crossagents.exe"), "C:\\Program Files\\CrossAgents\\crossagents.exe");
   assert.equal(checkCommand("/opt/crossagents/bin/crossagents"), "/opt/crossagents/bin/crossagents");
-  for (const bad of ['a"b', "$HOME/x", "`x`", "%PATH%", "a!b", "a&b", "a|b", "a;b", "a<b", "a>b", "a^b", "a\nb", "a\rb"]) {
+  for (const bad of ['a"b', "$HOME/x", "`x`", "%PATH%", "a!b", "a&b", "a|b", "a;b", "a<b", "a>b", "a^b", "a\nb", "a\rb", "a(b", "a)b", "a@b", "a\0b"]) {
     assert.throws(() => checkCommand(bad), InputError, bad);
   }
   assert.deepEqual(checkTarget({ host: "center", user: "", sshPort: 2222, command: " " }), { host: "center", sshPort: 2222 });
+});
+
+test("unsafe characters in hub executable fall back to PATH", () => {
+  for (const c of ["(", ")", "@", "\0"]) assert.equal(remoteCommand({ host: "center" }, { port: 1, exe: `C:\\a${c}b.exe` }), "crossagents");
+});
+
+test("device add rejects malformed output without exposing the token", () => {
+  const token = "cad_secret_token_123";
+  const output = `warning\n${JSON.stringify({ device: { id: "dev-1", name: "pc-gui" }, token })}`;
+  assert.throws(() => parseDeviceAdd(output), (err: Error) => err.message === "device add 的输出不是 JSON" && !err.message.includes(token));
+});
+
+test("device add rejects invalid device metadata", () => {
+  const token = "cad_secret_token_123";
+  for (const device of [{ id: "dev-1", name: "bad\n" }, { id: "", name: "pc-gui" }, { id: "bad id", name: "pc-gui" }]) {
+    assert.throws(() => parseDeviceAdd(JSON.stringify({ device, token })), (err: Error) => !err.message.includes(token) && !err.message.includes(device.id || "bad\n"));
+  }
 });
 
 test("the default device name is the host name, cleaned, with -gui", () => {
@@ -210,7 +227,7 @@ async function fakeHub(tokens: Set<string>, port = 0): Promise<FakeHub> {
 }
 
 function setEnv(values: Record<string, string | undefined>) {
-  for (const key of ["FAKE_SSH_FAIL", "FAKE_SSH_HUB_PORT", "FAKE_SSH_CMD_ONLY", "FAKE_SSH_TOKEN", "FAKE_SSH_PAIR_FAIL", "FAKE_SSH_LOG", "FAKE_SSH_EXE", "FAKE_SSH_PS_VERSION", "FAKE_SSH_SHELL"]) {
+  for (const key of ["FAKE_SSH_FAIL", "FAKE_SSH_HUB_PORT", "FAKE_SSH_CMD_ONLY", "FAKE_SSH_TOKEN", "FAKE_SSH_PAIR_FAIL", "FAKE_SSH_PAIR_WARNING", "FAKE_SSH_LOG", "FAKE_SSH_EXE", "FAKE_SSH_PS_VERSION", "FAKE_SSH_SHELL"]) {
     delete process.env[key];
   }
   for (const [key, value] of Object.entries(values)) if (value !== undefined) process.env[key] = value;
@@ -381,6 +398,23 @@ test("a failed pairing carries ssh's stderr and saves nothing; no encryption, no
     // Refused before any token was issued.
     assert.throws(() => readFileSync(join(dir, "ssh.log")));
     assert.equal(await readRecord(join(dir, "remote.json")), undefined);
+  } finally {
+    setEnv({});
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pairing malformed device output never exposes or saves the token", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "crossagents-remote-"));
+  const token = "cad_secret_token_123";
+  try {
+    setEnv({ FAKE_SSH_HUB_PORT: "7420", FAKE_SSH_PAIR_WARNING: "1", FAKE_SSH_TOKEN: token });
+    const { c } = controller(dir);
+    await c.init();
+    await assert.rejects(c.pair({ host: "center" }, "pc-gui"), (err: Error) => err.message.includes("不是 JSON") && !err.message.includes(token));
+    assert.equal(c.get().remote, undefined);
+    assert.equal(await readRecord(join(dir, "remote.json")), undefined);
+    assert.throws(() => readFileSync(join(dir, "remote.json")));
   } finally {
     setEnv({});
     rmSync(dir, { recursive: true, force: true });
