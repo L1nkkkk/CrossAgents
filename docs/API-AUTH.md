@@ -58,7 +58,7 @@ A3 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 | GET | `/v1/agents/{key}/turns/{id}/diff` | read | GUI、CLI |
 | GET | `/v1/agents/{key}/attachments/{id}` | read | GUI |
 | POST | `/v1/agents/{key}/profile` | write | GUI |
-| POST | `/v1/agents/{key}/settings` | write | GUI |
+| POST | `/v1/agents/{key}/settings` | admin | GUI |
 | POST | `/v1/agents/{key}/model` | write | GUI |
 | POST | `/v1/agents/{key}/name` | write | GUI |
 | POST | `/v1/agents/{key}/topic` | write | GUI |
@@ -106,7 +106,7 @@ A3 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 | POST | `/v1/runs/{key}/reject` | write | GUI、CLI |
 | POST | `/v1/runs/{key}/cancel` | write | GUI、CLI |
 | POST | `/v1/runs/{key}/land` | write | GUI |
-| POST | `/v1/repos/init` | write | GUI |
+| POST | `/v1/repos/init` | admin | GUI |
 | POST | `/v1/runs/{key}/finish` | write | GUI |
 | GET | `/v1/runs/{key}/diff` | read | GUI |
 | GET | `/v1/runs/{key}/trace` | read | GUI、CLI |
@@ -141,9 +141,15 @@ A3 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 
 **read**：只读，不改变任何状态。可安全开放给远程设备（A2 的只读设备）。
 
-**write**：改变会话、run、界面状态，但不动凭据、不停 hub。
+**write**：改变会话、run、界面状态。agent 的 permission 默认是 bypass（自动执行）；能给 agent 发消息，或拿到 agent 会话 token 调它的工具，就能让它在中心上执行命令。因此 write 只发给你愿意给 shell 的设备，只看用 read。
 
-**admin**：能碰凭据或 hub 生命周期——`/v1/shutdown`、账号增删与登录。这些要么能中断所有人的工作，要么能写入新的 API 凭据。
+write 还能代人做决定：`POST /v1/runs/{key}/approve` 批准计划并可整份替换 run 策略（包括关闭审批、自动落地）；`POST /v1/questions/{id}/answer` 回答审批、预算或 Work 卡片；`POST /v1/runs/{key}/policy` 修改自动唤醒并可重置次数、解除自动续跑的暂停；`POST /v1/agents/{key}/connect` 给外部 agent 重新签发会话 token（旧 token 作废）。这些入口供远程 GUI 代人操作，均维持 write。
+
+2026-11-08（run 8298b08a）把 `POST /v1/agents/{key}/settings` 和 `POST /v1/repos/init` 整条升为 admin：前者能把已经设成 guard / deny 的 agent 改回自动执行、打开 `allow_hooks`、更换 `setting_sources`；后者会对请求里的任意路径执行 git init 并写第一次提交。
+
+建 agent 的 `config.permission / allow_hooks / setting_sources`、建 run 时沿用的 agent permission 与 `policy.approvals` 等策略没有按级别拦，`POST /v1/runs` 仍是 write。不做字段级检查：当前缺省就是 bypass，拦字段不增加安全，反而挡住远程 GUI 正常建 agent（Home、Run 会带用户选的 permission，workerModels 会沿用模板的 setting_sources）。以后若把默认权限改成 guard，这几处要一起升 admin（待定）。
+
+**admin**：管理凭据或 hub 生命周期（账号增删、导入与登录，设备签发与吊销，`/v1/shutdown`）；操作终端（包括读取输出）；安装、升级或刷新插件；批准扩展快照或开启自动信任；修改能放宽 agent 自动执行的设置（`POST /v1/agents/{key}/settings`）；在请求指定的任意路径建仓库（`POST /v1/repos/init`）。这些操作涉及凭据、程序执行、自动执行的边界或所有人的工作。
 
 `/v1/terminals*` 全部归 admin，读也一样：终端以这台机器的用户身份执行输入的内容，读输出能看到里面打印过的任何东西（包括 token）。agent 的会话 token 到不了这里，终端输出也不进模型。
 
@@ -194,7 +200,7 @@ A3 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 - 把 `require_token` 抽成策略点，按 read / write / admin 校验；路由表只标级别，不写鉴权逻辑。
 - `ErrorCode` 增 `Forbidden`：越权返回 403 而不是 401。401 表示"没带凭据或凭据无效"，403 表示"凭据有效但级别不够"，GUI 据此置灰入口并说明原因。
 - Electron 主进程维护"方法 + 路径"白名单，只放行 GUI 实际用到的接口（已做，`apps/gui/electron/allowed.cts`；`allowed.test.cts` 从 `src/api.ts` 抽出全部调用逐条核对，漏登记就失败）。这把收窄放在主进程，页面即使被注入了也无法调用 `/v1/shutdown`。
-- A1 已增加设备 token 与 `Grant::Device`（[DONE.md](DONE.md) §八），client 按设备级别走现有策略表，node 只走节点通道（B1）。总 token、只读 token、会话 token 与扩展 token 行为不变；密码登录、users 表、可信设备确认、登录限速留待 A3。write 级等于能在宿主上执行命令，A2 把设备 token 发到别的机器之前要先重分级（[TODO.md](TODO.md) §八 A2）。
+- A1 已增加设备 token 与 `Grant::Device`（[DONE.md](DONE.md) §八），client 按设备级别走现有策略表，node 只走节点通道（B1）。总 token、只读 token、会话 token 与扩展 token 行为不变；密码登录、users 表、可信设备确认、登录限速留待 A3。write 级等于能在宿主上执行命令；A2 前置重分级已做（2026-11-08，run 8298b08a）：settings、repos/init 升 admin，创建 run 保持 write（见 §3）。
 - `Grant` 增加了 `Extension { name, level }`（E1 已做，见上面「扩展 token」和 [EXTENSIONS.md](EXTENSIONS.md) §3）。
   路由表不变，只是多一种凭据能走到现有的策略点；`Grant` 因带名字不再是 `Copy`，`refusal` 接受 `&Grant`。
 
@@ -205,7 +211,7 @@ NTFS 默认 ACL 已限制到本用户、SYSTEM 和 Administrators，同机其他
 
 ## 5. 版本协商
 
-`API_VERSION` 定义在 [crates/api-types/src/lib.rs](../crates/api-types/src/lib.rs)，目前是 `v1`。
+`API_VERSION` 定义在 [crates/api-types/src/lib.rs](../crates/api-types/src/lib.rs)，A2 已升到 `v2`（2026-11-08，run 8298b08a），GUI 的 `apps/gui/src/hub.ts` 同步；这是 `/v1/info` 的 `api` 字段，路由前缀仍为 `/v1/`。
 
 ### 何时升版
 
@@ -223,7 +229,7 @@ NTFS 默认 ACL 已限制到本用户、SYSTEM 和 Administrators，同机其他
 - 新增错误码取值、新增枚举取值（前提是客户端忽略未知值，这点是硬性要求）
 - 放宽校验
 
-0.1.x 例外：GUI 与 hub 同一安装包发布，不存在旧 GUI 连新 hub 的情况，破坏性变更暂不升版（S1 改 `DeleteRunResponse` 即属此类）。A2（远程 GUI）开工时统一升到 `v2`，并同时做 §二 的版本不一致提示。本轮 A1 只新增接口，按本节不算破坏性变更。
+历史上的 0.1.x 例外：GUI 与 hub 同一安装包发布，破坏性变更曾暂不升版（S1 改 `DeleteRunResponse` 即属此类）；A1 只新增接口。A2（远程 GUI）现已统一升到 `v2`，此后按上面的规则升版，并按下文拒绝 API 版本不一致的连接。
 
 ### GUI 侧比对
 

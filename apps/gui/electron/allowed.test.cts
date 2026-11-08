@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { allowed, COMPACT_TIMEOUT_MS, REQUEST_TIMEOUT_MS, timeoutFor } from "./allowed.cjs";
+import { ALLOWED, allowed, COMPACT_TIMEOUT_MS, REQUEST_TIMEOUT_MS, timeoutFor } from "./allowed.cjs";
 
 /** `src/api.ts`, next to the compiled test in `dist-electron/`. */
 const API_TS = join(__dirname, "..", "src", "api.ts");
@@ -139,4 +139,13 @@ test("compacting gets minutes, everything else the usual timeout", () => {
   assert.equal(timeoutFor("POST", "/v1/agents/Ravi/compact"), COMPACT_TIMEOUT_MS);
   assert.equal(timeoutFor("POST", "/v1/agents/Ravi/messages"), REQUEST_TIMEOUT_MS);
   assert.equal(timeoutFor("GET", "/v1/agents/Ravi/compact"), REQUEST_TIMEOUT_MS);
+});
+
+test("settings and repo initialization require admin while runs remain write", () => {
+  for (const [path, level] of [["/v1/agents/Rex/settings", "admin"], ["/v1/repos/init", "admin"], ["/v1/runs", "write"], ["/v1/agents/Rex/connect", "write"]]) {
+    const entries = ALLOWED.filter((r) => r.method === "POST" && r.path.test(path));
+    assert.equal(entries.length, 1, path);
+    assert.equal(entries[0].level, level, path);
+    assert.ok(allowed("POST", path));
+  }
 });
