@@ -56,13 +56,26 @@ pub async fn run(ctx: &Context, args: UsageArgs) -> Result<()> {
                 } else {
                     "-".into()
                 },
+                r.estimated_cost_usd
+                    .map_or_else(|| "-".into(), |v| format!("${v:.4}")),
+                r.cache_write_input.to_string(),
+                r.requests.map_or_else(|| "-".into(), |v| v.to_string()),
                 r.peak_context.to_string(),
             ]
         })
         .collect();
     let header = args.by.as_query().to_uppercase();
     print_table(
-        &[&header, "AGENTS", "SESSIONS", "COST", "PEAK CONTEXT"],
+        &[
+            &header,
+            "AGENTS",
+            "SESSIONS",
+            "REPORTED",
+            "ESTIMATED",
+            "CACHE WRITE",
+            "REQUESTS",
+            "PEAK CONTEXT",
+        ],
         &rows,
     );
     println!("\ntotal reported cost: ${:.4}", usage.total_cost_usd);

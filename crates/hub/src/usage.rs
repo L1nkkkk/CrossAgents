@@ -6,7 +6,26 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crossagents_api_types::{UsageGroup, UsageResponse, UsageRow};
-use crossagents_core::{AgentId, AgentStatus, CoreError, EventKind, Role, RunId, Store};
+use crossagents_core::{
+    AgentId, AgentStatus, CoreError, EventKind, Role, RunId, Store, TokenUsage,
+};
+use std::path::Path;
+
+#[derive(serde::Deserialize)]
+struct Price {
+    input: f64,
+    cached_input: f64,
+    cache_write_input: f64,
+    output: f64,
+}
+type Prices = HashMap<String, Price>;
+
+fn prices(home: &Path) -> Prices {
+    std::fs::read_to_string(home.join("prices.toml"))
+        .ok()
+        .and_then(|s| toml::from_str(&s).ok())
+        .unwrap_or_default()
+}
 
 const PAGE: u32 = 1000;
 
@@ -21,11 +40,25 @@ struct AgentUsage {
     session_cost: Option<f64>,
     reported: bool,
     peak_context: u64,
+    tokens: TokenUsage,
+    cache_write: u64,
+    requests: Option<u64>,
+    requests_known: bool,
+    estimate: f64,
+    estimate_known: bool,
+    saw_tokens: bool,
+    session_has_tokens: bool,
+    missing_session: bool,
 }
 
 impl AgentUsage {
     fn close_session(&mut self) {
         self.closed_cost += self.session_cost.take().unwrap_or(0.0);
+        if self.sessions > 0 && !self.session_has_tokens {
+            self.missing_session = true;
+        }
+        self.session_has_tokens = false;
+        self.tokens = TokenUsage::default();
     }
 }
 
@@ -39,7 +72,12 @@ fn role_name(role: Option<Role>) -> String {
     .to_owned()
 }
 
-pub async fn compute(store: &dyn Store, by: UsageGroup) -> Result<UsageResponse, CoreError> {
+pub async fn compute(
+    store: &dyn Store,
+    by: UsageGroup,
+    home: &Path,
+) -> Result<UsageResponse, CoreError> {
+    let prices = prices(home);
     let mut agents: HashMap<AgentId, AgentUsage> = HashMap::new();
     let mut after = 0;
     loop {
@@ -54,6 +92,11 @@ pub async fn compute(store: &dyn Store, by: UsageGroup) -> Result<UsageResponse,
                     usage.role = Some(agent.role);
                     usage.model = agent.model;
                 }
+                EventKind::AgentUpdated { agent } => {
+                    let usage = agents.entry(agent.id).or_default();
+                    usage.name = agent.name;
+                    usage.model = agent.model;
+                }
                 EventKind::AgentStatusChanged {
                     id,
                     to: AgentStatus::Starting,
@@ -63,15 +106,56 @@ pub async fn compute(store: &dyn Store, by: UsageGroup) -> Result<UsageResponse,
                     usage.close_session();
                     usage.sessions += 1;
                 }
+                EventKind::AgentModelChanged { id, model, .. } => {
+                    agents.entry(id).or_default().model = model;
+                }
                 EventKind::AgentUsage {
                     id,
                     size: _,
                     used,
                     cost_usd,
+                    tokens,
                     ..
                 } => {
                     let usage = agents.entry(id).or_default();
                     usage.peak_context = usage.peak_context.max(used);
+                    if let Some(tokens) = tokens {
+                        let previous = &usage.tokens;
+                        let input = tokens.input.saturating_sub(previous.input);
+                        let cached = tokens.cached_input.saturating_sub(previous.cached_input);
+                        let write = tokens
+                            .cache_write_input
+                            .saturating_sub(previous.cache_write_input);
+                        let output = tokens.output.saturating_sub(previous.output);
+                        usage.cache_write += write;
+                        let first = !usage.saw_tokens;
+                        usage.saw_tokens = true;
+                        usage.session_has_tokens = true;
+                        let delta_requests = tokens
+                            .requests
+                            .map(|n| n.saturating_sub(previous.requests.unwrap_or(0)));
+                        if first {
+                            usage.requests_known = true;
+                            usage.estimate_known = true;
+                        }
+                        if let Some(n) = delta_requests {
+                            usage.requests = Some(usage.requests.unwrap_or(0) + n);
+                        } else {
+                            usage.requests_known = false;
+                        }
+                        if let Some(price) = usage.model.as_ref().and_then(|m| prices.get(m)) {
+                            usage.estimate += ((input.saturating_sub(cached).saturating_sub(write)
+                                as f64
+                                * price.input)
+                                + cached as f64 * price.cached_input
+                                + write as f64 * price.cache_write_input
+                                + output as f64 * price.output)
+                                / 1_000_000.0;
+                        } else {
+                            usage.estimate_known = false;
+                        }
+                        usage.tokens = tokens;
+                    }
                     if let Some(cost) = cost_usd {
                         usage.session_cost = Some(cost);
                         usage.reported = true;
@@ -121,6 +205,9 @@ pub async fn compute(store: &dyn Store, by: UsageGroup) -> Result<UsageResponse,
                     sessions: 0,
                     cost_usd: 0.0,
                     cost_reported: false,
+                    estimated_cost_usd: Some(0.0),
+                    cache_write_input: 0,
+                    requests: Some(0),
                     peak_context: 0,
                 },
                 HashSet::new(),
@@ -132,6 +219,25 @@ pub async fn compute(store: &dyn Store, by: UsageGroup) -> Result<UsageResponse,
         row.sessions += usage.sessions;
         row.cost_usd += usage.closed_cost;
         row.cost_reported |= usage.reported;
+        row.cache_write_input += usage.cache_write;
+        row.requests = row
+            .requests
+            .zip(if usage.requests_known && !usage.missing_session {
+                usage.requests
+            } else {
+                None
+            })
+            .map(|(a, b)| a + b);
+        row.estimated_cost_usd = row
+            .estimated_cost_usd
+            .zip(
+                if usage.saw_tokens && usage.estimate_known && !usage.missing_session {
+                    Some(usage.estimate)
+                } else {
+                    None
+                },
+            )
+            .map(|(a, b)| a + b);
         row.peak_context = row.peak_context.max(usage.peak_context);
         total += usage.closed_cost;
     }
@@ -202,7 +308,8 @@ mod tests {
         push(start(worker.id)).await; // a second session starts from zero
         push(cost(worker.id, 70, 0.03)).await;
 
-        let by_role = compute(&store, UsageGroup::Role).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let by_role = compute(&store, UsageGroup::Role, dir.path()).await.unwrap();
         let planner_row = by_role.rows.iter().find(|r| r.key == "planner").unwrap();
         let worker_row = by_role.rows.iter().find(|r| r.key == "worker").unwrap();
         assert!((planner_row.cost_usd - 1.25).abs() < 1e-9);
@@ -211,8 +318,63 @@ mod tests {
         assert_eq!(planner_row.peak_context, 300);
         assert!((by_role.total_cost_usd - 1.30).abs() < 1e-9);
 
-        let by_model = compute(&store, UsageGroup::Model).await.unwrap();
+        let by_model = compute(&store, UsageGroup::Model, dir.path())
+            .await
+            .unwrap();
         let keys: Vec<&str> = by_model.rows.iter().map(|r| r.key.as_str()).collect();
         assert_eq!(keys, ["haiku", "opus"]);
+    }
+
+    #[tokio::test]
+    async fn estimates_only_with_model_prices_and_counts_session_deltas() {
+        let store = SqliteStore::open_in_memory().await.unwrap();
+        let a = agent("priced", Role::Worker, "example/model");
+        store
+            .append_event(EventKind::AgentCreated { agent: a.clone() })
+            .await
+            .unwrap();
+        store
+            .append_event(EventKind::AgentStatusChanged {
+                id: a.id,
+                from: AgentStatus::Stopped,
+                to: AgentStatus::Starting,
+            })
+            .await
+            .unwrap();
+        let counts = TokenUsage {
+            input: 1_000_000,
+            cached_input: 200_000,
+            cache_write_input: 100_000,
+            output: 100_000,
+            total: 1_100_000,
+            requests: Some(2),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            store
+                .append_event(EventKind::AgentUsage {
+                    id: a.id,
+                    used: 0,
+                    size: 0,
+                    cost_usd: Some(9.0),
+                    tokens: Some(counts.clone()),
+                })
+                .await
+                .unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let unknown = compute(&store, UsageGroup::Agent, dir.path())
+            .await
+            .unwrap();
+        assert_eq!(unknown.rows[0].estimated_cost_usd, None);
+        std::fs::write(dir.path().join("prices.toml"), "[\"example/model\"]\ninput = 2.0\ncached_input = 1.0\ncache_write_input = 3.0\noutput = 4.0\n").unwrap();
+        let priced = compute(&store, UsageGroup::Agent, dir.path())
+            .await
+            .unwrap();
+        let row = &priced.rows[0];
+        assert!((row.estimated_cost_usd.unwrap() - 2.3).abs() < 1e-9);
+        assert_eq!(row.cache_write_input, 100_000);
+        assert_eq!(row.requests, Some(2));
+        assert_eq!(row.cost_usd, 9.0);
     }
 }

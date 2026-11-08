@@ -556,6 +556,9 @@ fn tail(text: &str, max: usize) -> String {
 }
 
 fn usage(raw: &Value, totals: &mut TokenUsage) -> Option<SessionEventKind> {
+    if raw.get("step_name").and_then(Value::as_str) != Some("call_llm") {
+        return None;
+    }
     let usage = raw.get("token_usage").filter(|u| u.is_object())?;
     let count = |value: Option<&Value>, key: &str| {
         value
@@ -570,6 +573,7 @@ fn usage(raw: &Value, totals: &mut TokenUsage) -> Option<SessionEventKind> {
         total => total,
     };
     totals.input += input;
+    totals.requests = Some(totals.requests.unwrap_or(0) + 1);
     totals.cached_input += count(usage.get("prompt_tokens_details"), "cached_tokens");
     totals.output += output;
     totals.reasoning_output += count(usage.get("completion_tokens_details"), "reasoning_tokens");
@@ -1014,6 +1018,8 @@ mod tests {
                     output: 14,
                     reasoning_output: 4,
                     total: 214,
+                    requests: Some(2),
+                    ..TokenUsage::default()
                 }),
             }
         );

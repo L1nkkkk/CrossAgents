@@ -851,6 +851,15 @@ impl Translator {
         let output = num(usage, "output_tokens").max(streamed);
         self.tokens.input += input;
         self.tokens.cached_input += num(usage, "cache_read_input_tokens");
+        self.tokens.cache_write_input += num(usage, "cache_creation_input_tokens");
+        self.tokens.requests = match (
+            self.tokens.requests,
+            usage.get("iterations").and_then(Value::as_array),
+        ) {
+            (Some(n), Some(iterations)) => Some(n + iterations.len() as u64),
+            (None, Some(iterations)) if self.tokens.total == 0 => Some(iterations.len() as u64),
+            _ => None,
+        };
         self.tokens.output += output;
         self.tokens.reasoning_output += usage
             .pointer("/output_tokens_details/thinking_tokens")
@@ -1835,6 +1844,8 @@ mod tests {
         };
         assert_eq!((*used, *size, *cost_usd), (55, 1_000_000, Some(0.5)));
         assert_eq!(tokens.as_ref().unwrap().cached_input, 100);
+        assert_eq!(tokens.as_ref().unwrap().cache_write_input, 10);
+        assert_eq!(tokens.as_ref().unwrap().requests, Some(1));
         assert_eq!(
             events[1],
             SessionEventKind::TurnCompleted {
@@ -1852,6 +1863,7 @@ mod tests {
         };
         assert_eq!(*cost_usd, Some(0.25));
         assert_eq!(tokens.as_ref().unwrap().input, 224);
+        assert_eq!(tokens.as_ref().unwrap().requests, Some(2));
 
         assert_eq!(
             t.turn_end(&result(0.75, "error_during_execution"), true).0,

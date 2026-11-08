@@ -1329,7 +1329,7 @@ export class MockBridge implements CrossAgentsBridge {
     const usage = t?.usage;
     if (!t || !usage) return json(204);
     const used = Math.round(usage.size * 0.08);
-    t.usage = { ...usage, used, tokens: { input: used * 2, cached_input: used, output: Math.round(used / 5), reasoning_output: Math.round(used / 10), total: used * 2 + Math.round(used / 5) }, parts: a.plugin === "claude" ? contextParts(used, usage.size) : usage.parts };
+    t.usage = { ...usage, used, tokens: { input: used * 2, cached_input: used, cache_write_input: 0, requests: null, output: Math.round(used / 5), reasoning_output: Math.round(used / 10), total: used * 2 + Math.round(used / 5) }, parts: a.plugin === "claude" ? contextParts(used, usage.size) : usage.parts };
     this.emit({ type: "agent.usage", data: { id: a.id, used, size: usage.size, cost_usd: usage.cost_usd, tokens: t.usage.tokens } });
     return json(204);
   }

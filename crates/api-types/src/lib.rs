@@ -2304,6 +2304,14 @@ pub struct UsageRow {
     pub cost_usd: f64,
     /// Whether any agent in the group reported a cost.
     pub cost_reported: bool,
+    #[serde(default)]
+    pub estimated_cost_usd: Option<f64>,
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub cache_write_input: u64,
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub requests: Option<u64>,
     /// Largest context (tokens) any session in the group reached.
     #[ts(type = "number")]
     pub peak_context: u64,

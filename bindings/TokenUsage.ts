@@ -3,12 +3,20 @@
 /**
  * Cumulative token counts of a session.
  */
-export type TokenUsage = { input: number, 
+export type TokenUsage = { input: number,
 /**
  * Part of `input` served from the prompt cache.
  */
-cached_input: number, output: number, 
+cached_input: number,
+/**
+ * Part of `input` written to the prompt cache.
+ */
+cache_write_input: number, output: number,
 /**
  * Part of `output` spent on reasoning.
  */
-reasoning_output: number, total: number, };
+reasoning_output: number, total: number,
+/**
+ * Cumulative model requests, if known.
+ */
+requests: number | null, };

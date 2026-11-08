@@ -340,6 +340,10 @@ pub struct TokenUsage {
     /// Part of `input` served from the prompt cache.
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub cached_input: u64,
+    /// Part of `input` written to the prompt cache.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
+    pub cache_write_input: u64,
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub output: u64,
     /// Part of `output` spent on reasoning.
@@ -347,6 +351,21 @@ pub struct TokenUsage {
     pub reasoning_output: u64,
     #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub total: u64,
+    /// Cumulative model requests, if known.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(type = "number | null"))]
+    pub requests: Option<u64>,
+}
+
+#[cfg(test)]
+#[test]
+fn old_token_usage_defaults_new_fields() {
+    let usage: TokenUsage = serde_json::from_str(
+        r#"{"input":10,"cached_input":2,"output":3,"reasoning_output":1,"total":13}"#,
+    )
+    .unwrap();
+    assert_eq!(usage.cache_write_input, 0);
+    assert_eq!(usage.requests, None);
 }
 
 /// What a tool call did, as far as the agent tells: the command and its result, the files

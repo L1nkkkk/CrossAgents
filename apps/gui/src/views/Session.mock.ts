@@ -137,7 +137,7 @@ export function liveSession(kind: "stream" | "quiet"): { state: MockState; scrip
   const base = state.transcripts.get(nova.id)!.usage!;
   const usage = (at: number, i: number): Step => {
     const out = 1_200 + i * 28;
-    const tokens = { input: 38_000 + i * 120, cached_input: 30_000, output: out, reasoning_output: Math.round(out / 3), total: 38_000 + i * 120 + out };
+    const tokens = { input: 38_000 + i * 120, cached_input: 30_000, cache_write_input: 0, requests: null, output: out, reasoning_output: Math.round(out / 3), total: 38_000 + i * 120 + out };
     return { at, event: { type: "agent.usage", data: { id: nova.id, used: base.used + i * 150, size: base.size, cost_usd: base.cost_usd, tokens } } };
   };
   const script: Step[] =
@@ -290,7 +290,7 @@ export function contextUsageScene(): { state: MockState; script: Step[]; route: 
   t.usage = {
     ...t.usage!,
     used,
-    tokens: { input: used * 3, cached_input: used * 2, output: Math.round(used / 4), reasoning_output: Math.round(used / 10), total: used * 3 + Math.round(used / 4) },
+    tokens: { input: used * 3, cached_input: used * 2, cache_write_input: 0, requests: null, output: Math.round(used / 4), reasoning_output: Math.round(used / 10), total: used * 3 + Math.round(used / 4) },
     parts: contextParts(used, t.usage!.size),
   };
   return {

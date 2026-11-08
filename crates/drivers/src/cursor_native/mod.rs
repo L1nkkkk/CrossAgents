@@ -301,6 +301,7 @@ impl CursorSession {
             let mut totals = self.tokens.lock().expect("tokens");
             totals.input += input;
             totals.cached_input += parsed.cache_read_tokens;
+            totals.cache_write_input += parsed.cache_write_tokens;
             totals.output += output;
             totals.reasoning_output += parsed.reasoning_tokens;
             totals.total += used;
@@ -779,7 +780,10 @@ sleep 60
             .unwrap();
         assert!(started.elapsed() < PROCESS_TIMEOUT / 2);
         assert_eq!(session.session_id(), "lingering-chat");
-        let pid = std::fs::read_to_string(&pid_file).unwrap().trim().to_owned();
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .to_owned();
         assert!(!pid.is_empty());
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while alive(&pid) {
@@ -1137,6 +1141,25 @@ printf '%s\n' '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text
         session.shutdown().await;
     }
 
+    #[test]
+    fn result_usage_counts_cache_write_without_guessing_requests() {
+        let root = tempfile::tempdir().unwrap();
+        let (spec, mut rx) = spec(root.path());
+        let session = CursorSession::new("chat".into(), ndjson_cli(root.path()), spec).unwrap();
+        session.emit_usage(Some(&serde_json::json!({"inputTokens": 10, "cacheReadTokens": 3, "cacheWriteTokens": 5, "outputTokens": 2})));
+        let usages = drain_usage(&mut rx);
+        let tokens = usages[0].3.as_ref().unwrap();
+        assert_eq!(
+            (
+                tokens.input,
+                tokens.cached_input,
+                tokens.cache_write_input,
+                tokens.requests
+            ),
+            (18, 3, 5, None)
+        );
+    }
+
     // Two turns of `result.usage` produce one cumulative Usage event each, with
     // tokens.total > 0 and reasoning_output accumulated as a subset of output —
     // no extra files or configuration involved.
@@ -1168,6 +1191,7 @@ printf '%s\n' '{"type":"assistant","timestamp_ms":1,"message":{"content":[{"text
                 output: 20,
                 reasoning_output: 7, // subset of output, not added to total
                 total: 120,
+                ..TokenUsage::default()
             }
         );
         assert!(tokens.as_ref().unwrap().total > 0);
