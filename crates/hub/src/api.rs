@@ -3781,12 +3781,15 @@ async fn create_device(
         .insert_device(&device, &crate::devices::hash(&token))
         .await?;
     tracing::info!(device = %device.name, level = ?device.level, kind = ?device.kind, "device created");
-    state
+    if let Err(error) = state
         .bus
         .publish(EventKind::DeviceCreated {
             device: device.clone(),
         })
-        .await?;
+        .await
+    {
+        tracing::error!(device = %device.name, %error, "failed to publish device created event");
+    }
     Ok(Json(crossagents_api_types::CreateDeviceResponse {
         device,
         token,
@@ -3796,17 +3799,22 @@ async fn revoke_device(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<crossagents_core::Device>> {
-    let device = state.devices.revoke(state.store().as_ref(), &id).await?;
+    let (device, newly_revoked) = state.devices.revoke(state.store().as_ref(), &id).await?;
     let terminals = state.terminals.clone();
     tokio::task::spawn_blocking(move || terminals.close_device(&id))
         .await
         .map_err(|e| CoreError::Agent(format!("terminal task failed: {e}")))?;
     tracing::info!(device = %device.name, level = ?device.level, kind = ?device.kind, "device revoked");
-    state
-        .bus
-        .publish(EventKind::DeviceRevoked {
-            device: device.clone(),
-        })
-        .await?;
+    if newly_revoked {
+        if let Err(error) = state
+            .bus
+            .publish(EventKind::DeviceRevoked {
+                device: device.clone(),
+            })
+            .await
+        {
+            tracing::error!(device = %device.name, %error, "failed to publish device revoked event");
+        }
+    }
     Ok(Json(device))
 }

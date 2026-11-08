@@ -87,7 +87,7 @@ impl Devices {
             return Ok(Some((device, cancel)));
         }
     }
-    pub async fn revoke(&self, store: &dyn Store, id: &str) -> Result<Device, CoreError> {
+    pub async fn revoke(&self, store: &dyn Store, id: &str) -> Result<(Device, bool), CoreError> {
         let mut cache = self.cache.lock().await;
         let device = store.revoke_device(id).await?;
         cache.generation += 1;

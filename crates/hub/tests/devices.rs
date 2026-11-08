@@ -142,6 +142,8 @@ async fn issue_hash_only_defaults_names_and_idempotent_revoke() {
     let revoked = t.revoke(&created.device.id).await;
     assert!(revoked.revoked_at.is_some());
     assert_eq!(t.revoke(&created.device.id).await, revoked);
+    let events = store.events_since(0, 1000).await.unwrap();
+    assert_eq!(events.iter().filter(|event| matches!(&event.kind, crossagents_core::EventKind::DeviceRevoked { device } if device.id == created.device.id)).count(), 1);
     t.add("laptop", "client", "read").await;
     assert_eq!(store.list_devices().await.unwrap().len(), 3);
     store.close().await;
