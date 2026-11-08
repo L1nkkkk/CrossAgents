@@ -275,6 +275,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::api_projects::router())
         .merge(crate::lessons::router())
         .merge(crate::api_terminal::router())
+        .merge(crate::api_bytes::router())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_token));
     // Routes for agents, authenticated with their per-session token.
     let me = Router::new()
