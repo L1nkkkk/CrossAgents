@@ -13,6 +13,8 @@ export type MockConnectionOptions = {
   dropReason?: string;
   /** The tunnel stops for good after connecting: the device was revoked. */
   revoked?: boolean;
+  /** The tunnel never comes up: it answers `offline` with this reason. `retry` keeps trying. */
+  offline?: { reason: string; retry?: boolean };
   /** How long each pairing step takes. */
   stepMs?: number;
   defaultDeviceName?: string;
@@ -54,6 +56,11 @@ export function createMockConnection(options: MockConnectionOptions = {}): MockC
     set({ ...state, tunnel: { status: "connecting" } });
     timer = setTimeout(() => {
       if (state.mode !== "remote") return;
+      if (options.offline) {
+        set({ ...state, tunnel: { status: "offline", reason: options.offline.reason, stopped: !options.offline.retry } });
+        if (options.offline.retry) timer = setTimeout(connect, 1_000);
+        return;
+      }
       set({ ...state, tunnel: { status: "connected", localPort: 50123, remotePort: 7420 } });
       if (options.revoked) {
         timer = setTimeout(() => set({ ...state, tunnel: { ...state.tunnel!, status: "offline", reason: REVOKED, stopped: true } }), stepMs);

@@ -28,6 +28,7 @@ import { prettyModel, vendorLabel } from "../lib/models";
 import { cursorMode, reasoningModels } from "../lib/reasoning";
 import { installBusy, installingLabel, installingOf, installRefusedText } from "../lib/installState";
 import { permissionOf, type PermissionChoice } from "../lib/permission";
+import { useOperation } from "../lib/features";
 import { PermissionPicks } from "../permissionPicks";
 import { unusableOf } from "../lib/unusable";
 import type { ConnectInfo } from "@bindings/ConnectInfo";
@@ -598,6 +599,10 @@ export function ProfileEditor({ agent, onDone, focusPermission }: { agent: Agent
   const [hooks, setHooks] = useState(savedHooks);
   const savedPermission = permissionOf(agent);
   const [permission, setPermission] = useState<PermissionChoice>(savedPermission);
+  // Settings (permission, hooks, setting sources) are admin since #retier; a write device's 403
+  // greys these fields with the hub's reason instead of failing on save.
+  const settings = useOperation("agent.settings");
+  const settingsDenied = settings.refused ? `改 agent 的设置需要「管理」（admin）级别，这个凭据不够。hub 说：${settings.reason}` : undefined;
   const permissionRef = useRef<HTMLDivElement>(null);
   const set = (patch: Partial<AgentProfile>) => setProfile((p) => ({ ...p, ...patch }));
   const preview = { ...agent, name: name.trim() || agent.name, profile } as Agent;
@@ -620,7 +625,7 @@ export function ProfileEditor({ agent, onDone, focusPermission }: { agent: Agent
       if (name.trim() && name.trim() !== agent.name) await api.renameAgent(agent.id, name.trim());
       await api.updateProfile(agent.id, { ...profile, display_name: null });
       if ((modelValue.trim() || null) !== agent.model) await api.setModel(agent.id, modelValue.trim() || null);
-      const settingsChanged = (claudeLike && (sources !== savedSources || hooks !== savedHooks)) || permission !== savedPermission;
+      const settingsChanged = !settingsDenied && ((claudeLike && (sources !== savedSources || hooks !== savedHooks)) || permission !== savedPermission);
       if (settingsChanged) {
         await api.agentSettings(agent.id, {
           // A plugin that reads no settings files keeps whatever it had; the field is required.
@@ -682,7 +687,7 @@ export function ProfileEditor({ agent, onDone, focusPermission }: { agent: Agent
       <ModelField value={modelValue} models={reasoningModels(agent.plugin, models, modelValue)} plugin={agent.plugin} onChange={setModel} />
       {claudeLike && (
         <Field label={`${agent.plugin === "codebuddy" ? SOURCES_LABEL.codebuddy : SOURCES_LABEL.claude}；保存后空闲的会话会重启并续上原对话，忙时等这轮结束后下次启动`}>
-          <select value={sources ?? "default"} onChange={(e) => setSources(e.target.value === "default" ? null : e.target.value)}>
+          <select value={sources ?? "default"} disabled={!!settingsDenied} title={settingsDenied} onChange={(e) => setSources(e.target.value === "default" ? null : e.target.value)}>
             {(agent.plugin === "codebuddy" ? CODEBUDDY_SOURCES : SETTING_SOURCES).map((s) => (
               <option key={s.value} value={s.value}>
                 {s.label}
@@ -692,8 +697,8 @@ export function ProfileEditor({ agent, onDone, focusPermission }: { agent: Agent
         </Field>
       )}
       {claudeLike && (
-        <label className="field-check" title="hooks 是设置文件里让 CLI 自己跑的命令，不经过 hub 的审批">
-          <input type="checkbox" checked={hooks} onChange={(e) => setHooks(e.target.checked)} />
+        <label className="field-check" title={settingsDenied ?? "hooks 是设置文件里让 CLI 自己跑的命令，不经过 hub 的审批"} style={settingsDenied ? { opacity: 0.55 } : undefined}>
+          <input type="checkbox" checked={hooks} disabled={!!settingsDenied} onChange={(e) => setHooks(e.target.checked)} />
           允许 hooks（默认关闭）：打开后设置文件里的 hooks 会在它的会话里运行；关闭时随 --settings 一起关掉，其余设置照读
         </label>
       )}

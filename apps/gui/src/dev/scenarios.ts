@@ -35,6 +35,14 @@ export type Scenario = {
   build: () => { state: MockState; script: Step[]; route: string };
 };
 
+/** Fills a React-controlled input as a person would, so its `onChange` runs. */
+function typeInto(selector: string, value: string) {
+  const input = document.querySelector<HTMLInputElement>(selector);
+  if (!input) throw new Error(`scenario: no ${selector}`);
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 export const SCENARIOS: Scenario[] = [
   { key: "work-rounds", label: "工作组：三轮", hint: "同一个对话里连着三轮：第一轮已落地，第二轮没落地，第三轮叠在它上面；右侧「各轮」切换，对话里的分隔跟着走；侧栏里工作组落在各自的项目下，一个项目只列最近三个", build: () => {
     const scene = workRounds();
@@ -671,7 +679,7 @@ export const SCENARIOS: Scenario[] = [
   { key: "resume-cmd", label: "复制原生恢复命令", hint: "Nova 的会话页点「终端恢复」：PowerShell 命令带目录、账号配置目录、代理和 --resume", build: () => resumeScene("ran") },
   { key: "resume-cmd-none", label: "恢复命令：没开过会话", hint: "Iris 从没开过会话：复制按钮置灰，写明原因", build: () => resumeScene("never") },
   { key: "resume-cmd-acp", label: "恢复命令：驱动不能恢复", hint: "ACP 队友：驱动不能恢复会话，复制按钮置灰", build: () => resumeScene("acp") },
-  { key: "mismatch", label: "版本不匹配", hint: "hub 的接口是 v2：GUI 拒绝连接并说明原因", build: () => ({ state: { ...emptyHub(), api: "v2" }, script: [], route: "#/" }) },
+  { key: "mismatch", label: "版本不匹配", hint: "hub 的接口是 v1：GUI 拒绝连接并说明原因", build: () => ({ state: { ...emptyHub(), api: "v1" }, script: [], route: "#/" }) },
   { key: "usage-30", label: "用量：30 天", hint: "切换至 30 天", build: () => ({ state: usageScene(), route: "#/usage", script: [{ at: 400, act: () => [...document.querySelectorAll("button")].find((b) => b.textContent === "30 天")?.click() }] }) },
   { key: "usage-all", label: "用量：全部", hint: "切换至全部", build: () => ({ state: usageScene(), route: "#/usage", script: [{ at: 400, act: () => [...document.querySelectorAll("button")].find((b) => b.textContent === "全部")?.click() }] }) },
   { key: "usage-hover", label: "用量：每日明细", hint: "聚焦日期", build: () => ({ state: usageScene(), route: "#/usage", script: [{ at: 1200, act: () => document.querySelector<SVGElement>(".usage-svg rect[tabindex]")?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })) }] }) },
@@ -870,18 +878,61 @@ export const SCENARIOS: Scenario[] = [
     script: [],
     route: "#/settings/devices",
   }) },
-  { key: "devices-refused", label: "设置：设备（403）", hint: "凭据不到 admin：点两次吊销被 403 拒绝后，按钮置灰，页面上写明缺「管理」级别和 hub 的原话，列表照常看得见", build: () => ({
+  { key: "devices-refused", label: "设置：设备（只读设备）", hint: "凭据不到 admin：点两次吊销被 403 拒绝后，吊销按钮置灰，页面上写明缺「管理」级别和 hub 的原话；列表照常看得见，入口也不置灰", build: () => ({
     state: {
       ...emptyHub(),
       devices: devices(),
-      revokeForbidden: "DELETE /v1/devices/{id} needs the admin level",
+      revokeForbidden: "this credential has the read level; DELETE /v1/devices/{id} needs admin",
+      connection: { paired: { host: "centre.example", user: "me" } },
     },
     script: [
-      { at: 800, act: () => document.querySelector<HTMLButtonElement>('[data-action="revoke"]')?.click() },
-      { at: 1200, act: () => document.querySelector<HTMLButtonElement>('button[data-action="revoke"].armed')?.click() },
+      { at: 1500, act: () => document.querySelector<HTMLButtonElement>('[data-action="revoke"]')?.click() },
+      { at: 1800, act: () => document.querySelector<HTMLButtonElement>('button[data-action="revoke"].armed')?.click() },
     ],
     route: "#/settings/devices",
   }) },
+  { key: "connection-local", label: "连接：本机", hint: "设置 →「连接」：现在连的是本机，可以在这里填中心的主机配对；下面写明配对拿到的是 write 设备，终端、批准扩展和改 agent 权限要 admin", build: () => {
+    const scene = workRounds();
+    return { state: { ...scene.state, connection: {} }, script: [], route: "#/settings/connection" };
+  } },
+  { key: "connection-pairing", label: "连接：配对中", hint: "填好主机点「配对并连接」：表单禁用，下面按 onPairStep 列出四步并标出正在做哪一步", build: () => {
+    const scene = workRounds();
+    return {
+      state: { ...scene.state, connection: { stepMs: 5000 } },
+      script: [
+        { at: 400, act: () => typeInto('[data-field="host"]', "centre.example") },
+        { at: 700, act: () => document.querySelector<HTMLButtonElement>('[data-action="pair"]')?.click() },
+      ],
+      route: "#/settings/connection",
+    };
+  } },
+  { key: "connection-remote", label: "连接：远程已连接", hint: "配对好以后：上面写远程 user@host、已连接和本机端口 → 中心端口；下面能切回本机、重新连接、两次点击忘记；侧栏底部写着远程 host", build: () => {
+    const scene = workRounds();
+    return {
+      state: { ...scene.state, connection: { paired: { host: "centre.example", user: "me" }, stepMs: 200 } },
+      script: [],
+      route: "#/settings/connection",
+    };
+  } },
+  { key: "connection-offline", label: "连接：远程未连接", hint: "隧道断着：标红写明原因「未连接：…」，侧栏底部的远程 host 也标红，可以重新连接或切回本机", build: () => {
+    const scene = workRounds();
+    return {
+      state: { ...scene.state, connection: { paired: { host: "centre.example", user: "me" }, stepMs: 200, offline: { reason: "ssh 退出了（退出码 255）" } } },
+      script: [],
+      route: "#/settings/connection",
+    };
+  } },
+  { key: "connection-pair-failed", label: "连接：配对失败", hint: "ssh 说主机密钥不认识：原样显示失败原因，并按原因给出下一步——先在终端里 ssh user@host 一次", build: () => {
+    const scene = workRounds();
+    return {
+      state: { ...scene.state, connection: { stepMs: 200, pairError: "ssh 失败（退出码 255）\nHost key verification failed." } },
+      script: [
+        { at: 400, act: () => typeInto('[data-field="host"]', "centre.example") },
+        { at: 700, act: () => document.querySelector<HTMLButtonElement>('[data-action="pair"]')?.click() },
+      ],
+      route: "#/settings/connection",
+    };
+  } },
   { key: "devices-revoked", label: "设置：设备（吊销后）", hint: "点两次吊销第一台：列表刷新，它变淡、排到还在用的设备后面，并写上吊销时间", build: () => ({
     state: { ...emptyHub(), devices: devices() },
     script: [

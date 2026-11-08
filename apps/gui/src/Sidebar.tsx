@@ -32,6 +32,8 @@ import { level, tightest, windowLabel } from "./lib/quota";
 import { openBeside } from "./panes";
 import { useExtensions } from "./extensions/defaults";
 import { useQuota } from "./views/Quota";
+import { markWords } from "./lib/connection";
+import { useConnectionState } from "./lib/useConnection";
 import { CHATS, selectWorkspace, useWorkspaces, wsHref, wsKey } from "./workspace";
 
 const Confirmed = createContext(true);
@@ -498,6 +500,7 @@ export function Sidebar({ route }: { route: string[] }) {
             <DevHubNotice />
             <OldHubNotice />
             <QuotaMini />
+            <WhereMark />
             <div className="foot-row">
               <Connection />
               <a className={"icon-btn " + (route[0] === "settings" ? "on" : "")} href="#/settings" title={t("nav.settings")} aria-label={t("nav.settings")}>
@@ -1090,16 +1093,19 @@ function QuotaMini() {
 /**
  * The installed GUI found a development hub (`hub start` from `target/`) where its own should
  * run: it leaves it alone, so say so, or the page and the backend quietly disagree on version.
+ * In remote mode none of this applies: the hub is elsewhere and the GUI never manages it.
  */
 function DevHubNotice() {
   const status = useConnectionStatus();
+  const connection = useConnectionState();
+  const remote = connection?.mode === "remote";
   const [dev, setDev] = useState<DevHub | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   useEffect(() => {
-    if (status === "connected") window.crossagents?.devHub?.().then(setDev, () => {});
-  }, [status]);
-  if (!dev) return null;
+    if (status === "connected" && !remote) window.crossagents?.devHub?.().then(setDev, () => {});
+  }, [status, remote]);
+  if (!dev || remote) return null;
   const switchHub = async () => {
     setBusy(true);
     setError(undefined);
@@ -1145,6 +1151,28 @@ function OldHubNotice() {
         重新连接
       </button>
     </div>
+  );
+}
+
+/**
+ * Which hub this window talks to, always in sight (docs/MULTI-NODE.md §15): 本机, or 远程 host.
+ * A remote tunnel that is not up is red, so a dropped centre is not mistaken for a quiet page;
+ * the line opens 设置 →「连接」.
+ */
+function WhereMark() {
+  const state = useConnectionState();
+  // A plain browser tab has no connection bridge, and nothing to switch to.
+  if (!window.crossagents?.connection || !state) return null;
+  const words = markWords(state);
+  // 本机 says where this window points, not how the hub is doing: the connection line below
+  // reports that, so a local mark carries no colour of its own (a green dot there contradicted
+  // the red "未连接" underneath when the hub was down).
+  const dot = words.tone === "ok" ? "ok" : words.tone === "warn" ? "warn" : words.tone === "danger" ? "danger" : "off";
+  return (
+    <a className={`conn-where ${words.tone}`} href="#/settings/connection" title={words.title}>
+      {state.mode === "remote" && <span className={`dot ${dot}`} />}
+      <span className="text">{words.text}</span>
+    </a>
   );
 }
 

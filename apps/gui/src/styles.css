@@ -2079,3 +2079,30 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
   .ext-row-actions { margin-left: 0; }
   .ext-facts { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* 设置 → 连接 (docs/MULTI-NODE.md §4.3): the pairing form and the tunnel's steps */
+.conn-form { padding: 14px 16px 16px; }
+.conn-row { display: flex; flex-wrap: wrap; gap: 10px; }
+.conn-steps { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: var(--text-2); }
+.conn-steps ol { display: flex; flex-wrap: wrap; gap: 2px 14px; margin: 0; padding: 0; list-style: none; }
+.conn-steps li::before { content: "○ "; color: var(--muted); }
+.conn-steps li.done { color: var(--muted); }
+.conn-steps li.done::before { content: "✓ "; color: var(--ok); }
+.conn-steps li.now { color: var(--text); font-weight: 500; }
+.conn-steps li.now::before { content: "→ "; color: var(--accent); }
+.settings-section > .notice { margin: 0; }
+
+/* The sidebar's one-line "本机 / 远程 host" mark, above the hub connection line */
+.conn-where { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--muted); padding: 2px 4px 0; border-radius: var(--radius); min-width: 0; text-decoration: none; }
+.conn-where:hover { background: var(--hover); color: var(--text); }
+.conn-where .text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conn-where.ok { color: var(--text-2); }
+.conn-where.warn { color: var(--warn-text); }
+.conn-where.danger { color: var(--danger-text); }
+.conn-where.danger .dot { background: var(--danger); }
+.conn-where.warn .dot { background: var(--warn); }
+.conn-where.ok .dot { background: var(--ok); }
+
+/* The start page's path field for a remote hub: no system dialog reaches the centre's disk */
+.home-path { display: flex; align-items: center; gap: 8px; padding: 0 2px 8px; }
+.home-path input { flex: 1; min-width: 0; }
