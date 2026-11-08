@@ -147,9 +147,9 @@ write 还能代人做决定：`POST /v1/runs/{key}/approve` 批准计划并可�
 
 2026-11-08（run 8298b08a）把 `POST /v1/agents/{key}/settings` 和 `POST /v1/repos/init` 整条升为 admin：前者能把已经设成 guard / deny 的 agent 改回自动执行、打开 `allow_hooks`、更换 `setting_sources`；后者会对请求里的任意路径执行 git init 并写第一次提交。
 
-建 agent 的 `config.permission / allow_hooks / setting_sources`、建 run 时沿用的 agent permission 与 `policy.approvals` 等策略没有按级别拦，`POST /v1/runs` 仍是 write。不做字段级检查：当前缺省就是 bypass，拦字段不增加安全，反而挡住远程 GUI 正常建 agent（Home、Run 会带用户选的 permission，workerModels 会沿用模板的 setting_sources）。共用决定见 run 笔记 `plan/a2-decisions` §1。以后若把默认权限改成 guard，这几处要一起升 admin（待定）。
+建 agent 的 `config.permission / allow_hooks / setting_sources`、建 run 时沿用的 agent permission 与 `policy.approvals` 等策略没有按级别拦，`POST /v1/runs` 仍是 write。不做字段级检查：当前缺省就是 bypass，拦字段不增加安全，反而挡住远程 GUI 正常建 agent（Home、Run 会带用户选的 permission，workerModels 会沿用模板的 setting_sources）。以后若把默认权限改成 guard，这几处要一起升 admin（待定）。
 
-**admin**：能碰凭据或 hub 生命周期——`/v1/shutdown`、账号增删与登录。这些要么能中断所有人的工作，要么能写入新的 API 凭据。
+**admin**：管理凭据或 hub 生命周期（账号增删、导入与登录，设备签发与吊销，`/v1/shutdown`）；操作终端（包括读取输出）；安装、升级或刷新插件；批准扩展快照或开启自动信任；修改能放宽 agent 自动执行的设置（`POST /v1/agents/{key}/settings`）；在请求指定的任意路径建仓库（`POST /v1/repos/init`）。这些操作涉及凭据、程序执行、自动执行的边界或所有人的工作。
 
 `/v1/terminals*` 全部归 admin，读也一样：终端以这台机器的用户身份执行输入的内容，读输出能看到里面打印过的任何东西（包括 token）。agent 的会话 token 到不了这里，终端输出也不进模型。
 
