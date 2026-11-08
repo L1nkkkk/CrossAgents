@@ -417,7 +417,7 @@ impl Orchestrator {
                 run.planner,
                 &format!("lead-progress:{}", run.id),
                 &line,
-                crossagents_core::NoticeClass::Silent,
+                crossagents_core::NoticeClass::Decide,
             )
             .await
         {

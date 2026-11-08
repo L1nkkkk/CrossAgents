@@ -601,7 +601,7 @@ impl Orchestrator {
                         "#{} was accepted; {about}. It starts as its dependencies allow.",
                         task.key
                     ),
-                    crossagents_core::NoticeClass::Silent,
+                    crossagents_core::NoticeClass::Decide,
                 )
                 .await;
                 Ok(Some(NextStep {

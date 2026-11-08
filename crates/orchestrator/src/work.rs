@@ -198,7 +198,7 @@ impl Orchestrator {
                         lead,
                         &format!("run_next:{work}"),
                         &format!("Scheduled next round: {state} Reason: {err}. Check work {work}; if no round exists, resolve the cause and wait for the lead to be idle before calling run_next again. Inspect and resolve any checkout conflict first."),
-                        crossagents_core::NoticeClass::Silent,
+                        crossagents_core::NoticeClass::Decide,
                     )
                     .await;
                 }

@@ -481,7 +481,7 @@ impl Orchestrator {
                     run.planner,
                     &format!("continuation:{}", run.id),
                     &line,
-                    crossagents_core::NoticeClass::Batch,
+                    crossagents_core::NoticeClass::Decide,
                 )
                 .await;
             // Every wakeup is a run of this automation; the breaker counts it whichever way it

@@ -135,7 +135,7 @@ impl Orchestrator {
                 run.planner,
                 &format!("run:{}:stage:{stage}", run.id),
                 &notice(run, tasks, *stage),
-                crossagents_core::NoticeClass::Batch,
+                crossagents_core::NoticeClass::Decide,
             )
             .await;
         }
