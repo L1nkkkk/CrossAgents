@@ -100,7 +100,7 @@ function ConnectionForm({ bridge, state }: { bridge: NonNullable<CrossAgentsBrid
             <div>
               <div className="setting-label">{words.label}</div>
               <div className="setting-hint">
-                {words.mode === "local" ? "本机的 hub：它就在这台电脑上，退出 GUI 也照常运行。" : `配对的设备：${paired?.deviceName}${paired ? ` · 配对于 ${when(paired.pairedAt)}` : ""}`}
+                {words.mode === "local" ? (state.bundledHub ? "本机的 hub：它就在这台电脑上，退出 GUI 也照常运行。" : "这个安装包不带 hub，只能连接另一台电脑上的 hub") : `配对的设备：${paired?.deviceName}${paired ? ` · 配对于 ${when(paired.pairedAt)}` : ""}`}
               </div>
               {words.detail && <div className="setting-hint">{words.detail}</div>}
             </div>
@@ -192,9 +192,9 @@ function ConnectionForm({ bridge, state }: { bridge: NonNullable<CrossAgentsBrid
             <div className="setting-line">
               <div>
                 <div className="setting-label">切回本机</div>
-                <div className="setting-hint">换回这台电脑上的 hub。切换会整页重新加载。</div>
+                <div className="setting-hint">{state.bundledHub ? "换回这台电脑上的 hub。切换会整页重新加载。" : "这个安装包不带 hub，只能连接另一台电脑上的 hub"}</div>
               </div>
-              <button disabled={busy || state.mode === "local"} onClick={() => void act(() => bridge.use("local"))}>
+              <button disabled={busy || state.mode === "local" || !state.bundledHub} onClick={() => void act(() => bridge.use("local"))}>
                 切回本机
               </button>
             </div>

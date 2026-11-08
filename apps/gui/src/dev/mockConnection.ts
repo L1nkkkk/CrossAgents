@@ -4,6 +4,7 @@
 import type { ConnectionState, CrossAgentsBridge, PairStep, RemoteTarget } from "../bridge";
 
 export type MockConnectionOptions = {
+  bundledHub?: boolean;
   /** Start in remote mode, paired with this target. */
   paired?: RemoteTarget;
   /** Pairing fails with this reason (as ssh's stderr would read). */
@@ -30,7 +31,7 @@ export function createMockConnection(options: MockConnectionOptions = {}): MockC
   const stateListeners = new Set<(state: ConnectionState) => void>();
   const stepListeners = new Set<(step: PairStep) => void>();
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let state: ConnectionState = { mode: "local", bundledHub: true, defaultDeviceName: options.defaultDeviceName ?? "mock-pc-gui" };
+  let state: ConnectionState = { mode: "local", bundledHub: options.bundledHub ?? true, defaultDeviceName: options.defaultDeviceName ?? "mock-pc-gui" };
   if (options.paired) {
     state = {
       ...state,
@@ -116,7 +117,7 @@ export function createMockConnection(options: MockConnectionOptions = {}): MockC
     },
     async forget() {
       disconnect();
-      set({ mode: "local", bundledHub: true, defaultDeviceName: state.defaultDeviceName });
+      set({ mode: "local", bundledHub: state.bundledHub, defaultDeviceName: state.defaultDeviceName });
       return copy();
     },
     onState(listener) {

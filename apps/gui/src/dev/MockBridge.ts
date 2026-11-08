@@ -305,7 +305,7 @@ export class MockBridge implements CrossAgentsBridge {
     this.started = true;
     this.status("connecting");
     setTimeout(() => {
-      this.status("connected");
+      this.status(this.state.connection?.bundledHub === false ? "offline: 这个安装包不带 hub：在 设置 →「连接」 里连另一台电脑上的 hub" : "connected");
       for (const step of this.script) this.timers.push(setTimeout(() => this.play(step), step.at));
     }, 120);
   }

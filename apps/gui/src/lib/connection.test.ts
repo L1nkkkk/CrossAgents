@@ -5,6 +5,16 @@ import { connectionWords, markWords, PAIR_STEPS, pairFailure, stepWords, targetW
 
 const target = { host: "centre.example", user: "me" };
 
+test("a local package without a hub shows a warning in both places", () => {
+  const state: ConnectionState = { mode: "local", bundledHub: false, defaultDeviceName: "pc-gui" };
+  assert.deepEqual(connectionWords(state), { mode: "local", label: "本机", status: "不带 hub", tone: "danger" });
+  assert.deepEqual(markWords(state), {
+    text: "本机 · 不带 hub",
+    tone: "danger",
+    title: "这个安装包不带 hub：在 设置 →「连接」 里连另一台电脑上的 hub",
+  });
+});
+
 test("a target reads as user@host, with a non-default port for display", () => {
   assert.equal(targetWords({ host: "centre" }), "centre");
   assert.equal(targetWords({ host: "centre", user: "me" }), "me@centre");
