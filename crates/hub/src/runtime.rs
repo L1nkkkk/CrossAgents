@@ -1771,8 +1771,8 @@ impl Runtime {
             let Ok(agent) = self.store().get_agent(&AgentKey::Id(id)).await else {
                 continue;
             };
-            // Archived agents are not delivered to. Their rows stay until the agent is
-            // deleted, or a later session takes them over.
+            // Archived agents are not delivered to. The rows stay on this agent id, so a
+            // later session of the same agent still has them.
             if agent.archived_at.is_some() {
                 continue;
             }
@@ -4497,50 +4497,5 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-    }
-
-    #[tokio::test]
-    async fn transfer_pending_notices_moves_them_to_the_new_agent() {
-        let (store, runtime, agent) = harness("old-lead").await;
-        let next = external("new-lead");
-        store.insert_agent(&next).await.unwrap();
-        runtime
-            .notify(
-                &AgentKey::Id(agent.id),
-                "need",
-                "still open",
-                NoticeClass::Decide,
-            )
-            .await
-            .unwrap();
-        store
-            .transfer_pending_notices(agent.id, next.id)
-            .await
-            .unwrap();
-        assert!(
-            store
-                .list_pending_notices(Some(agent.id))
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        let rows = store.list_pending_notices(Some(next.id)).await.unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].line, "still open");
-        assert!(rows[0].carried_by.is_none());
-        assert_eq!(rows[0].wake_tries, 0);
-        runtime.poll_notice_wakes().await.unwrap();
-        let woke_the_new_lead = store.events_since(0, 30).await.unwrap().iter().any(|event| {
-            matches!(
-                &event.kind,
-                EventKind::AgentInput {
-                    id,
-                    from: Some(MessageSource::Notice),
-                    text,
-                    ..
-                } if *id == next.id && text.contains("still open")
-            )
-        });
-        assert!(woke_the_new_lead, "the new agent was not woken");
     }
 }

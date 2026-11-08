@@ -959,39 +959,6 @@ impl Store for SqliteStore {
         Ok(())
     }
 
-    async fn transfer_pending_notices(
-        &self,
-        from: AgentId,
-        to: AgentId,
-    ) -> Result<(), CoreError> {
-        if from == to {
-            return Ok(());
-        }
-        sqlx::query(
-            "INSERT INTO pending_notices
-                (agent, topic, line, class, first_at, updated_at, carried_by, wake_tries)
-             SELECT ?1, topic, line, class, first_at, updated_at, NULL, 0
-             FROM pending_notices WHERE agent = ?2
-             ON CONFLICT(agent, topic) DO UPDATE SET
-                line = excluded.line,
-                class = excluded.class,
-                updated_at = excluded.updated_at,
-                carried_by = NULL,
-                wake_tries = 0",
-        )
-        .bind(to.to_string())
-        .bind(from.to_string())
-        .execute(&self.pool)
-        .await
-        .map_err(storage)?;
-        sqlx::query("DELETE FROM pending_notices WHERE agent = ?1")
-            .bind(from.to_string())
-            .execute(&self.pool)
-            .await
-            .map_err(storage)?;
-        Ok(())
-    }
-
     async fn insert_watch(&self, watch: &Watch) -> Result<(), CoreError> {
         sqlx::query("INSERT INTO watches (id, owner, data) VALUES (?, ?, ?)")
             .bind(&watch.id)

@@ -367,17 +367,6 @@ pub trait Store: Send + Sync {
         let _ = keep;
         Ok(())
     }
-    /// Moves one agent's pending notices to another. The destination hears them as new
-    /// (the carry and the failed-wake count are cleared). Same topic on the destination
-    /// is replaced, keeping the destination's `first_at`.
-    async fn transfer_pending_notices(
-        &self,
-        from: AgentId,
-        to: AgentId,
-    ) -> Result<(), CoreError> {
-        let _ = (from, to);
-        Ok(())
-    }
 
     async fn insert_watch(&self, watch: &Watch) -> Result<(), CoreError> {
         let _ = watch;
