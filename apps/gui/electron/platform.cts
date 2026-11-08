@@ -1,5 +1,6 @@
 import type { MenuItemConstructorOptions } from "electron";
 
+/** The native application menu on macOS, or no menu elsewhere. */
 export function applicationMenu(platform: NodeJS.Platform): MenuItemConstructorOptions[] | null {
   if (platform !== "darwin") return null;
   return [
@@ -9,7 +10,8 @@ export function applicationMenu(platform: NodeJS.Platform): MenuItemConstructorO
   ];
 }
 
-type Input = { type: string; key: string; control: boolean; meta: boolean; alt: boolean; shift: boolean };
+type Input = { type: string; key: string; code: string; control: boolean; meta: boolean; alt: boolean; shift: boolean };
+/** Map a key event to a main-process command for the given platform. */
 export function shortcut(platform: NodeJS.Platform, input: Input, development: boolean): "zoomIn" | "zoomOut" | "zoomReset" | "devtools" | "reload" | undefined {
   if (input.type !== "keyDown") return;
   const mod = platform === "darwin" ? input.meta : input.control;
@@ -18,12 +20,14 @@ export function shortcut(platform: NodeJS.Platform, input: Input, development: b
     if (zoom[input.key]) return zoom[input.key];
   }
   if (!development) return;
-  const key = input.key.toLowerCase();
-  if (input.key === "F12" || (mod && (platform === "darwin" ? input.alt : input.shift) && key === "i")) return "devtools";
-  if (mod && !input.shift && key === "r") return "reload";
+  const key = platform === "darwin" ? input.code : input.key.toLowerCase();
+  if (input.key === "F12" || (mod && (platform === "darwin" ? input.alt : input.shift) && key === (platform === "darwin" ? "KeyI" : "i"))) return "devtools";
+  if (mod && !input.shift && key === (platform === "darwin" ? "KeyR" : "r")) return "reload";
 }
 
+/** The tray resource filename for the platform. */
 export function trayIcon(platform: NodeJS.Platform): string { return platform === "darwin" ? "iconTemplate.png" : "icon.ico"; }
+/** Text explaining where the window went when it was hidden. */
 export function trayHint(platform: NodeJS.Platform, remote: boolean): { title: string; content: string } {
   const location = platform === "darwin" ? "菜单栏" : "任务栏右下角";
   return {

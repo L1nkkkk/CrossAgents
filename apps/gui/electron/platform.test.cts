@@ -14,15 +14,15 @@ test("macOS gets native menus and a template tray icon", () => {
 });
 
 test("shortcuts use the platform modifier and development gate", () => {
-  const base = { type: "keyDown", key: "=", control: false, meta: true, alt: false, shift: false };
+  const base = { type: "keyDown", key: "=", code: "Equal", control: false, meta: true, alt: false, shift: false };
   assert.equal(shortcut("darwin", base, false), "zoomIn");
   assert.equal(shortcut("darwin", { ...base, key: "-" }, false), "zoomOut");
   assert.equal(shortcut("darwin", { ...base, key: "0" }, false), "zoomReset");
   assert.equal(shortcut("win32", base, false), undefined);
   assert.equal(shortcut("win32", { ...base, meta: false, control: true }, false), "zoomIn");
-  assert.equal(shortcut("darwin", { ...base, key: "i", alt: true }, true), "devtools");
-  assert.equal(shortcut("darwin", { ...base, key: "i", alt: true }, false), undefined);
-  assert.equal(shortcut("darwin", { ...base, key: "r" }, true), "reload");
+  assert.equal(shortcut("darwin", { ...base, key: "ˆ", code: "KeyI", alt: true }, true), "devtools");
+  assert.equal(shortcut("darwin", { ...base, key: "i", code: "KeyI", alt: true }, false), undefined);
+  assert.equal(shortcut("darwin", { ...base, key: "r", code: "KeyR" }, true), "reload");
   assert.equal(shortcut("win32", { ...base, key: "i", control: true, meta: false, shift: true }, true), "devtools");
   assert.equal(shortcut("win32", { ...base, key: "F12", meta: false }, true), "devtools");
 });

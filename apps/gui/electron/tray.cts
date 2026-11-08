@@ -13,6 +13,7 @@ import type { Updates } from "./updates.cjs";
 
 /** Set once the GUI is really quitting, so closing the window no longer just hides it. */
 let quitting = false;
+const notifications = new Set<Notification>();
 app.on("before-quit", () => {
   quitting = true;
 });
@@ -39,7 +40,9 @@ export function createTray(
   const notify = ({ title, content }: { title: string; content: string }) => {
     if (process.platform !== "darwin") { tray.displayBalloon({ title, content }); return; }
     const notification = new Notification({ title, body: content });
-    notification.on("click", show);
+    notifications.add(notification);
+    notification.on("click", () => { notifications.delete(notification); show(); });
+    notification.on("close", () => { notifications.delete(notification); });
     notification.show();
   };
   tray.setToolTip("CrossAgents");
