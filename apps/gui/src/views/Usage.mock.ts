@@ -126,28 +126,28 @@ export function usage(): Partial<Record<UsageGroup, UsageResponse>> {
       by: "role",
       total_cost_usd: 6.8124,
       rows: [
-        { key: "planner", agents: 1, sessions: 4, cost_usd: 3.1022, cost_reported: true, peak_context: 92_000 },
-        { key: "worker", agents: 6, sessions: 11, cost_usd: 2.9811, cost_reported: true, peak_context: 61_000 },
-        { key: "reviewer", agents: 1, sessions: 2, cost_usd: 0.7291, cost_reported: true, peak_context: 28_000 },
+        { key: "planner", agents: 1, sessions: 4, cost_usd: 3.1022, cost_reported: true, estimated_cost_usd: null, cache_write_input: 0, requests: null, peak_context: 92_000 },
+        { key: "worker", agents: 6, sessions: 11, cost_usd: 2.9811, cost_reported: true, estimated_cost_usd: null, cache_write_input: 0, requests: null, peak_context: 61_000 },
+        { key: "reviewer", agents: 1, sessions: 2, cost_usd: 0.7291, cost_reported: true, estimated_cost_usd: null, cache_write_input: 0, requests: null, peak_context: 28_000 },
       ],
     },
     model: {
       by: "model",
       total_cost_usd: 6.8124,
       rows: [
-        { key: "claude-opus-4-1", agents: 2, sessions: 6, cost_usd: 3.8313, cost_reported: true, peak_context: 92_000 },
-        { key: "claude-sonnet-4-5", agents: 2, sessions: 4, cost_usd: 2.9811, cost_reported: true, peak_context: 44_000 },
-        { key: "gpt-5-codex", agents: 4, sessions: 7, cost_usd: 0, cost_reported: false, peak_context: 61_000 },
+        { key: "claude-opus-4-1", agents: 2, sessions: 6, cost_usd: 3.8313, cost_reported: true, estimated_cost_usd: null, cache_write_input: 0, requests: null, peak_context: 92_000 },
+        { key: "claude-sonnet-4-5", agents: 2, sessions: 4, cost_usd: 2.9811, cost_reported: true, estimated_cost_usd: null, cache_write_input: 0, requests: null, peak_context: 44_000 },
+        { key: "gpt-5-codex", agents: 4, sessions: 7, cost_usd: 0, cost_reported: false, estimated_cost_usd: null, cache_write_input: 0, requests: null, peak_context: 61_000 },
       ],
     },
-    run: { by: "run", total_cost_usd: 6.8124, rows: [{ key: "OAuth 登录", agents: 7, sessions: 15, cost_usd: 6.8124, cost_reported: true, peak_context: 92_000 }] },
+    run: { by: "run", total_cost_usd: 6.8124, rows: [{ key: "OAuth 登录", agents: 7, sessions: 15, cost_usd: 6.8124, cost_reported: true, estimated_cost_usd: null, cache_write_input: 0, requests: null, peak_context: 92_000 }] },
     agent: {
       by: "agent",
       total_cost_usd: 6.8124,
       rows: [
-        { key: "ada", agents: 1, sessions: 4, cost_usd: 3.1022, cost_reported: true, peak_context: 92_000 },
-        { key: "mia-b", agents: 1, sessions: 2, cost_usd: 1.4211, cost_reported: true, peak_context: 44_000 },
-        { key: "rex-a", agents: 1, sessions: 3, cost_usd: 0, cost_reported: false, peak_context: 61_000 },
+        { key: "ada", agents: 1, sessions: 4, cost_usd: 3.1022, cost_reported: true, estimated_cost_usd: null, cache_write_input: 0, requests: null, peak_context: 92_000 },
+        { key: "mia-b", agents: 1, sessions: 2, cost_usd: 1.4211, cost_reported: true, estimated_cost_usd: null, cache_write_input: 0, requests: null, peak_context: 44_000 },
+        { key: "rex-a", agents: 1, sessions: 3, cost_usd: 0, cost_reported: false, estimated_cost_usd: null, cache_write_input: 0, requests: null, peak_context: 61_000 },
       ],
     },
   };

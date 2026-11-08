@@ -3267,7 +3267,7 @@ async fn usage(
     Query(query): Query<UsageQuery>,
 ) -> ApiResult<Json<UsageResponse>> {
     Ok(Json(
-        crate::usage::compute(state.store().as_ref(), query.by).await?,
+        crate::usage::compute(state.store().as_ref(), query.by, &state.home).await?,
     ))
 }
 

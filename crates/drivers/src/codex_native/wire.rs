@@ -356,9 +356,11 @@ pub fn translate(method: &str, params: &Value) -> Vec<SessionEventKind> {
                 tokens: Some(TokenUsage {
                     input: num(total, "inputTokens"),
                     cached_input: num(total, "cachedInputTokens"),
+                    cache_write_input: num(total, "cacheWriteInputTokens"),
                     output: num(total, "outputTokens"),
                     reasoning_output: num(total, "reasoningOutputTokens"),
                     total: num(total, "totalTokens"),
+                    requests: None,
                 }),
             }
         }
@@ -835,7 +837,7 @@ mod tests {
             }]
         );
         let usage = json!({ "threadId": "t", "turnId": "u", "tokenUsage": {
-            "total": { "totalTokens": 45269, "inputTokens": 45203, "cachedInputTokens": 29696, "cacheWriteInputTokens": 0, "outputTokens": 66, "reasoningOutputTokens": 0 },
+            "total": { "totalTokens": 45269, "inputTokens": 45203, "cachedInputTokens": 29696, "cacheWriteInputTokens": 19, "outputTokens": 66, "reasoningOutputTokens": 0 },
             "last": { "totalTokens": 15167, "inputTokens": 15161, "cachedInputTokens": 14848, "cacheWriteInputTokens": 0, "outputTokens": 6, "reasoningOutputTokens": 0 },
             "modelContextWindow": 258400 } });
         let [
@@ -848,6 +850,7 @@ mod tests {
         };
         assert_eq!((*used, *size), (15167, 258400));
         assert_eq!(tokens.as_ref().unwrap().cached_input, 29696);
+        assert_eq!(tokens.as_ref().unwrap().cache_write_input, 19);
     }
 
     #[test]

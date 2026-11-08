@@ -275,9 +275,11 @@ impl Driver for CodexNativeDriver {
         let thread_id = wire::thread_id_of(&response)
             .unwrap_or(session_id)
             .to_owned();
-        Ok(Box::new(CodexSession::attach(
+        let session = CodexSession::attach(
             server, thread_id, &spec, settings, &response,
-        )))
+        );
+        *session.sink.requests.lock().expect("requests lock") = None;
+        Ok(Box::new(session))
     }
 
     async fn adopt(
@@ -587,6 +589,7 @@ struct ThreadSink {
     permission: PermissionPolicy,
     permissions: Option<Arc<dyn PermissionHandler>>,
     turn: Mutex<TurnState>,
+    requests: Mutex<Option<u64>>,
 }
 
 #[derive(Default)]
@@ -602,7 +605,23 @@ struct TurnState {
 }
 
 impl ThreadSink {
-    fn emit(&self, kind: SessionEventKind, raw: Option<&Value>) {
+    fn emit(&self, mut kind: SessionEventKind, raw: Option<&Value>) {
+        if let SessionEventKind::Usage {
+            tokens: Some(tokens),
+            ..
+        } = &mut kind
+        {
+            if raw
+                .and_then(|v| v.pointer("/tokenUsage/last"))
+                .is_some_and(Value::is_object)
+            {
+                let mut requests = self.requests.lock().expect("requests lock");
+                if let Some(count) = requests.as_mut() {
+                    *count += 1;
+                }
+                tokens.requests = *requests;
+            }
+        }
         let event = SessionEvent {
             kind,
             raw: raw.cloned(),
@@ -788,6 +807,7 @@ impl CodexSession {
         let (tx, rx) = oneshot::channel();
         let waiter = turn_running.then_some(tx);
         let session = Self::new(server, thread_id, spec, settings, waiter);
+        *session.sink.requests.lock().expect("requests lock") = None;
         if turn_running {
             *session.adopted.lock().expect("adopted lock") = Some(rx);
         }
@@ -805,6 +825,7 @@ impl CodexSession {
             events: spec.events.clone(),
             permission: spec.permission,
             permissions: spec.permissions.clone(),
+            requests: Mutex::new(Some(0)),
             turn: Mutex::new(TurnState {
                 waiter,
                 ..TurnState::default()
@@ -1035,13 +1056,15 @@ impl DriverSession for CodexSession {
         let thread_id = wire::thread_id_of(&response)
             .ok_or_else(|| CoreError::Agent("thread/fork returned no thread id".into()))?
             .to_owned();
-        Ok(Box::new(CodexSession::attach(
+        let session = CodexSession::attach(
             self.server.clone(),
             thread_id,
             &spec,
             settings,
             &response,
-        )))
+        );
+        *session.sink.requests.lock().expect("requests lock") = None;
+        Ok(Box::new(session))
     }
 
     async fn rollback(&self, before_turn: &str, revert_files: bool) -> Result<(), CoreError> {
@@ -1173,6 +1196,32 @@ pub fn cached_models(home: &Path) -> Vec<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn counts_token_usage_notifications_with_last_request() {
+        let (events, mut rx) = mpsc::unbounded_channel();
+        let sink = ThreadSink {
+            events,
+            permission: PermissionPolicy::default(),
+            permissions: None,
+            turn: Mutex::new(TurnState::default()),
+            requests: Mutex::new(Some(0)),
+        };
+        let raw = serde_json::json!({"tokenUsage": {"last": {"inputTokens": 1}, "total": {"inputTokens": 2, "cacheWriteInputTokens": 1}}});
+        for expected in 1..=2 {
+            let event = wire::translate(method::TOKEN_USAGE, &raw).pop().unwrap();
+            sink.emit(event, Some(&raw));
+            let SessionEventKind::Usage {
+                tokens: Some(tokens),
+                ..
+            } = rx.try_recv().unwrap().kind
+            else {
+                panic!()
+            };
+            assert_eq!(tokens.requests, Some(expected));
+            assert_eq!(tokens.cache_write_input, 1);
+        }
+    }
+
     /// A `turn/steer` that times out says the outcome is unknown, not that it failed: the
     /// message must not be sent again (it may already be in), unlike a refusal from Codex.
     #[tokio::test]
@@ -1205,6 +1254,7 @@ mod tests {
             events,
             permission: PermissionPolicy::default(),
             permissions: None,
+            requests: Mutex::new(Some(0)),
             turn: Mutex::new(TurnState {
                 steers: vec![message_id],
                 ..TurnState::default()
