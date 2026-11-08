@@ -153,7 +153,7 @@ C2 --> CB
 
 结论：A 阶段的远程 GUI 用 SSH 隧道配对，不走账号密码（2026-11-08 定：人说按推荐来（run 84848059））。hub 继续只听 `127.0.0.1`，GUI 只连本机转发出来的端口。账号密码登录挪到 A3（§12）。
 
-- 远程 GUI：用系统 OpenSSH，在中心上跑 `crossagents device add <设备名> --json`，拿到只显示一次的 client token，存在 Electron 主进程（渲染层拿不到，沿用 V2 的安全设定）。之后用 `ssh -N -L` 把中心的 `127.0.0.1` 端口转到本机，GUI 连本机端口。认证交给 `~/.ssh/config` 与 ssh-agent。这条命令在中心本机执行，用的是中心的总 token（[paths.rs](../crates/hub/src/paths.rs) `Paths::token`）。怎么连得到中心的 SSH，见 §14「SSH 隧道」。
+- 远程 GUI（2026-11-08 已实现，`f6a956a`、`fec959c`；验收要实测，见 §14「怎么实测」）：用系统 OpenSSH。Windows 优先 `%SystemRoot%\System32\OpenSSH\ssh.exe`，没有再找 PATH 上的 `ssh`；其他系统用 PATH 上的 `ssh`。每次都带 `-o BatchMode=yes -o ConnectTimeout=10`，不改用户的 `StrictHostKeyChecking`，所以要口令或主机密钥还不认识就失败，stderr 原样给「连接」页（对话框以后做，[TODO.md](TODO.md) §八）。配对前先在中心上读 `~/.crossagents/hub.json`：先 `cat`，失败再 `type "%USERPROFILE%\.crossagents\hub.json"`，从里面拿端口和 hub 自己的 exe。中心上要跑的命令按这个顺序：用户在「高级」里填的 > hub.json 的 `exe`（不合规就不用）> PATH 上的 `crossagents`。然后跑 `<命令> device add <设备名> --json`。这条命令在中心本机执行，用的是中心的总 token（[paths.rs](../crates/hub/src/paths.rs) `Paths::token`）。token 只在 Electron 主进程：`safeStorage` 加密后和目标、设备名、设备 id、配对时间、本机端口、当前模式一起写在 `<userData>/remote.json`；加密不可用，或 Linux 上后端是 `basic_text`，就拒绝保存。渲染层拿不到 token。之后 `ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 127.0.0.1:<本机端口>:127.0.0.1:<中心端口>`（另带上面的 BatchMode 与 ConnectTimeout），GUI 只连本机端口。本机端口第一次选空闲端口并记住，之后沿用。断了按 1、2、5、10、30 秒退避重连，每次重连前重读 hub.json；hub 对设备 token 回 401 就停止重连，要求重新配对。认证交给 `~/.ssh/config` 与 ssh-agent。怎么连得到中心的 SSH，见 §14「SSH 隧道」。远程模式下不管理任何 hub，见 §13.3。选文件夹改成输入中心上的路径（[Home.tsx](../apps/gui/src/views/Home.tsx)）。
 - 本机 GUI 仍用本机总 token，不经这套配对。设备的签发、列表、吊销见 §12 A1。
 - 节点（B1）怎么连中心：待定（§11 第 10 条）。一条是经 SSH 隧道，Mac 可以复用上面这条 GUI 隧道；另一条是等 A3 开端口之后，在节点上运行 `crossagents node join <hub 地址>`，终端显示配对码，在已登录的 GUI 里确认，节点拿到 node token，之后开机自动连接。A 阶段不选。
 - 账号密码登录属于 A3：`crossagents user add` 建账号，`/v1/auth/login` 换 token，不做注册页和找回密码。以后要接 GitHub、企业微信扫码，只换登录这一层。
@@ -331,7 +331,7 @@ agents ||--o{ events
 - A3，开放 listen 时：`[hub] listen` 可配置，默认仍为 `127.0.0.1`，不改配置行为与现在一致。总 token 永远不出本机。开放 `listen` 之前，这一节里标了 A3 的 TLS、指纹、登录限速要先做完。
 - A3：非回环一律 TLS（HTTPS / WSS）。hub 用自签证书：第一次连接时，人比对两边显示的短码（和 §4.3 留给 A3 的节点配对码同一个流程）后固定证书指纹。身份认指纹、不认地址 → 一个 hub 可以记多个地址（局域网、组网地址、公网地址），GUI 和节点按顺序试，在家和出门自动切换。怎么连得到见 §14。
 - client 与 node 的 token 分开。client 按签发时的 read / write / admin 走现有路由表，默认 write。看对话、发消息在 [API-AUTH.md](API-AUTH.md) §3 里是 write；开终端、批准扩展、登录 CLI 账号是 admin。签发和吊销设备是新路由，也定成 admin（§12 A1）。node 的 token 到不了现有路由，等 B1 的节点通道。会话令牌（`/v1/me/*`）仍只发给 agent 自己。
-- A3：**放开 listen 之后，丢一个设备 token 就等于能在节点上执行命令**。直接的有开终端、批准扩展（[API-AUTH.md](API-AUTH.md) §3 里是 admin）；间接的，给设成「自动执行」权限的 agent 发条消息就行（发消息是 write）。A 阶段把原来的「可信设备」收成签发时的 admin 级别，不再另做一套设备标记：默认 write 的设备到不了开终端和批准扩展。但 write 仍能改 agent 权限再发消息，等于在宿主上执行命令；A2 前要先重分级（[TODO.md](TODO.md) §八 A2）。新设备登录要在已有设备上确认并通知，开终端、批准扩展、登录 CLI 账号、配对节点再验证一次密码，以及 `/v1/auth/login` 限速和无效 `cad_` token 的查库限速，都留到 A3。`/v1/health` 已收窄到只回 `status` 与 `api`（[DONE.md](DONE.md) §二「收敛免鉴权面」），放开 `listen` 后不再白送情报。
+- A3：**放开 listen 之后，丢一个设备 token 就等于能在节点上执行命令**。直接的有开终端、批准扩展（[API-AUTH.md](API-AUTH.md) §3 里是 admin）；间接的，给设成「自动执行」权限的 agent 发条消息就行（发消息是 write）。A 阶段把原来的「可信设备」收成签发时的 admin 级别，不再另做一套设备标记：默认 write 的设备到不了开终端和批准扩展。重分级已做（2026-11-08，`2005166`）：`POST /v1/agents/{key}/settings` 与 `POST /v1/repos/init` 升为 admin，write 不能再把已经设成 guard / deny 的 agent 改回自动执行，也不能在任意路径建仓库。write 的实情与 [API-AUTH.md](API-AUTH.md) §3 一致：agent 的 permission 默认仍是 bypass，能给 agent 发消息或拿到它的会话 token，就能让它在中心上执行命令，所以 write 只发给愿意给 shell 的设备，只看用 read。建 agent、建 run、批准计划时带的 permission 与 approvals 没有按字段拦。默认权限是否改成 guard、设备级别是否再细分，待定（[TODO.md](TODO.md) §八）。新设备登录要在已有设备上确认并通知，开终端、批准扩展、登录 CLI 账号、配对节点再验证一次密码，以及 `/v1/auth/login` 限速和无效 `cad_` token 的查库限速，都留到 A3。`/v1/health` 已收窄到只回 `status` 与 `api`（[DONE.md](DONE.md) §二「收敛免鉴权面」），放开 `listen` 后不再白送情报。
 - hub 会存对话里的代码片段、diff、命令输出。放在外部服务器前要确认合规，必要时只存摘要（待定）。把中心 hub 放到云上也照这一条（§14）。
 
 ## 11. 待定
@@ -352,7 +352,7 @@ agents ||--o{ events
 | 阶段 | 内容 | 完成标志 |
 |---|---|---|
 | A1 设备与 token（已完成，2026-11-08，`9f8a07d`、`eeac7b7`） | `devices` 表：kind 为 client 或 node，level 为 read / write / admin（默认 client / write），token 形如 `cad_` 加 64 位 hex，库里只存 SHA-256。`GET /v1/devices`（read，不含 token 和哈希）、`POST /v1/devices`（admin，body `{ name, kind?, level? }`，返回 `{ device, token }`，token 只显示一次）、`DELETE /v1/devices/{id}`（admin，幂等）。CLI：`crossagents device add`（`--level` 默认 write、`--kind` 默认 client）、`device list`、`device revoke`（id 或名字）；`--json` 是全局参数（[device.rs](../crates/cli/src/cmd/device.rs) `DeviceCommand`、[main.rs](../crates/cli/src/main.rs) `Cli`）。client 按级别走现有路由表；node 的 token 到不了现有路由。不含 `users`、密码登录、可信设备确认、登录限速（那些在 A3）。级别见 [API-AUTH.md](API-AUTH.md) §3 | 已完成：能签发、列出、吊销设备 token；设置里能看到设备并吊销。验收与仓库里的测试一致：`cargo test -p crossagents-hub --lib access`、`cargo test -p crossagents-hub --test devices`、`cargo test -p crossagents-api-types`、`cargo test -p crossagents-cli device`、`npm --prefix apps/gui run typecheck`、`npm --prefix apps/gui test` |
-| A2 SSH 隧道 | 设置「连接」页填 `user@host`；经 SSH 配对（§4.3）；`ssh -N -L` 与断线重连；连远程时关掉本机 hub 的管理（§13.3）；GUI 与查看器字节一律经 hub（§16） | Mac GUI 经 SSH 隧道连上 Windows hub，两端对话一致；隧道断开后重连，按 `Last-Event-ID` 续传 |
+| A2 SSH 隧道（代码已完成，2026-11-08，`2005166`、`f6a956a`、`fec959c`、`718e7d4`、`aeb3e8d`；验收要实测） | 设置「连接」页配对（§4.3）；`ssh -N -L`，本机端口沿用，断线按 1/2/5/10/30 秒重连，401 停止；远程模式不管理任何 hub（§13.3）；扩展资源与工作区原始字节经 hub，远程用默认程序打开的是副本（§16）。settings 与 repos/init 已升 admin | 要实测：Mac GUI 经 SSH 隧道连上 Windows hub，两端对话一致；隧道断开后重连，按 `Last-Event-ID` 续传（§14「怎么实测」） |
 | A3 开端口直连 | `[hub] listen`（默认仍 `127.0.0.1`）；非回环 TLS、自签证书短码比对后固定指纹、一个 hub 记多个地址；`users` 表与密码登录（`/v1/auth/login`、`crossagents user add`、登录页）；可信设备确认（新设备要在已有设备上确认，开终端、批准扩展、登录 CLI 账号、配对节点再验证一次密码）；`/v1/auth/login` 限速；无效 `cad_` token 的查库限速（§10，[TODO.md](TODO.md) §八 A3） | 不能 SSH 的客户端用账号密码连上已开放 listen 的 hub；指纹固定后换地址仍认同一台 |
 | B1 node 代理 | 节点怎么连中心待定（§11 第 10 条）；走 A3 开端口时才用 `crossagents node join` 与配对码。hub ↔ node 通道，驱动执行半边挪到 node，本机 hub 也通过内置 node 执行；内置终端在节点上开、节点启动用登录 shell 取环境、`runs_on` / 快照下发 / 创造模式上传（§7.1、§16） | Windows hub 在 Mac 节点上拉起 Codex 并回传事件 |
 | B2 跨节点 Chat | 带节点名的模型、`@` 分组、跨节点招人、节点离线状态 | Mac 上的 Chat 招 `hy4@win` 并收到结果 |
@@ -412,7 +412,7 @@ hub 在 GUI 关掉后照常运行，所以安装版 GUI 在系统托盘放一个
 - 「退出界面（后台继续运行）」只关 GUI，和以前关窗口一样；
 - 「停止后台并退出」确认后执行 `hub stop --agents`，hub 和所有 agent 一起停，然后 GUI 退出。停的过程中 GUI 不会再把 hub 拉起来。下次打开 GUI 时后台照 13.3 的表重新启动。
 
-A2 之后 GUI 可以连远程 hub：连接配置是远程时，这整套本机管理关闭，GUI 只当客户端；从远程切回本机时再按上表检查一次。
+远程模式（2026-11-08，`f6a956a`）下 GUI 不管理任何 hub：本机的不启动、不升级、不按上表复查（`manageForMode` 把本机管理放下），远程的也从不启动、升级或停止。托盘第一行改成「远程：<目标>（已连接 / 未连接）」，没有「停止后台并退出」。开发版 hub、换回自带 hub 的入口不显示；`hub:dev` 回 null，`hub:use-shipped` 与选文件夹回「远程模式下不可用」。切换模式后窗口整页重新加载。从远程切回本机时再按上表检查一次。
 
 B1 之后节点机器上的 GUI 管的可能是本机 node（单干时是本机 hub + 内置节点，§15）：[localHub.cts](../apps/gui/electron/localHub.cts) 的 `manageLocalHub` / `run` 那套从「管 hub」推广成「管 hub 或 node」。怎么判断本机 node 是不是自己的：待定。
 
@@ -454,7 +454,7 @@ B1 之后节点机器上的 GUI 管的可能是本机 node（单干时是本机 
 
 **默认推荐打洞（组网工具）**：不要公网地址、不开端口；偷到 token 还得先进组网；CrossAgents 传的主要是文字事件，走中继也够快；它只解决连得到，中心那台仍要开着。代价是国内厂商中继多在海外、打不通时延迟高，可在国内云服务器自建中继（headscale + 自建 DERP、EasyTier 自建节点、RustDesk 那种 hbbs / hbbr）；两边都有 IPv6 时更容易打通。
 
-**SSH 隧道**：它不是第四种「连得到」的办法，而是跑在局域网、组网工具或端口映射之上的传输层。A 阶段的远程 GUI 走这一层（§4.3）。hub 继续只听 `127.0.0.1`。GUI 用系统 OpenSSH：认证交给 `~/.ssh/config` 与 ssh-agent；配对时在中心上跑 `crossagents device add <设备名> --json`，token 只显示一次，存在 Electron 主进程；平时 `ssh -N -L` 把中心的回环端口转到本机，GUI 只连本机端口。
+**SSH 隧道**：它不是第四种「连得到」的办法，而是跑在局域网、组网工具或端口映射之上的传输层。A 阶段的远程 GUI 走这一层（§4.3，2026-11-08 已实现）。hub 继续只听 `127.0.0.1`。GUI 用系统 OpenSSH：认证交给 `~/.ssh/config` 与 ssh-agent；配对时在中心上跑 `crossagents device add <设备名> --json`，命令和端口怎么找见 §4.3。token 只显示一次，`safeStorage` 加密后存在 Electron 的 `<userData>/remote.json`，渲染层拿不到。平时 `ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 127.0.0.1:<本机端口>:127.0.0.1:<中心端口>`，本机端口记住沿用；断了按 1、2、5、10、30 秒退避重连，401 停止。GUI 只连本机端口。事件流按 `Last-Event-ID` 续传。
 
 省掉的是开放 listen 才要的那一套：TLS、证书指纹、密码登录、`/v1/auth/login` 限速。这些留在 A3（§10、§12）。
 
@@ -464,6 +464,13 @@ B1 之后节点机器上的 GUI 管的可能是本机 node（单干时是本机 
 - SSH 会话里要能找到 `crossagents`。Windows 上 OpenSSH 用账户的 PATH，在 `cmd.exe` 里跑配对命令；改完 PATH 要重启 sshd，新会话才看得到。
 - 隧道会断，要断线重连。本地转发端口保持不变，GUI 记下的本机端口才能续上。
 - 不能 SSH 的客户端要等 A3。业务端口仍然不开：走组网时 SSH 只在组网里；走公网地址或端口映射时，对客户端开的是 SSH 自己的端口，不是 hub 的端口。
+
+**怎么实测**（A2 的验收，代码已写，还没在 Mac 上跑过；见 [TODO.md](TODO.md) §八）：
+
+1. 在 Windows 中心上以管理员打开 OpenSSH Server。管理员账户的公钥放 `C:\ProgramData\ssh\administrators_authorized_keys`，这个文件只能由 Administrators 和 SYSTEM 写。普通用户的公钥放该用户自己的 `authorized_keys`。
+2. 中心上的 hub 要在跑。另开一个 SSH 会话，确认能读到 `~/.crossagents/hub.json`（先 `cat ~/.crossagents/hub.json`，Windows 的 cmd 用 `type "%USERPROFILE%\.crossagents\hub.json"`），里面有 `port`，并且这个会话里能跑 `crossagents`（例如 `crossagents device list`）。改过 PATH 要重启 sshd，新会话才看得到。
+3. 另一台机器用桌面版 GUI，打开设置 →「连接」，填 `user@host`（需要时填用户名、SSH 端口），点「配对并连接」。配对成功后侧栏标出远程主机；在两端各发一条消息，对话内容一致。
+4. 断开这台机器的网络，或停掉隧道的 ssh。连接页应变成未连接，并按 1、2、5、10、30 秒重连。网络恢复后，断线期间的事件按 `Last-Event-ID` 续上，不把更早的历史再放一遍。在中心把这台设备吊销后再连，应停止重连，并要求重新配对。
 
 参照 Cutex desktop v0.2.2（提交 `40ffe16`）。[apps/desktop/src/main/ssh.ts](https://github.com/senxiu-official/cutex-desktop/blob/40ffe16003e27b29d890e9fe1ba9f309dd379e7d/apps/desktop/src/main/ssh.ts) 的 `SshTunnel` 用 `ssh -N -L`，断线后用 `tunnelReduce` 退避重连，本地端口尽量沿用；`resolveSshBinary` 在 Windows 上优先系统自带的 `System32\OpenSSH\ssh.exe`（Git 自带的 ssh 不认 Windows 的 ssh-agent）。Windows 主机怎么开，见 [docs/install/AGENT-INSTALL.md](https://github.com/senxiu-official/cutex-desktop/blob/40ffe16003e27b29d890e9fe1ba9f309dd379e7d/docs/install/AGENT-INSTALL.md) §7.4：管理员权限打开 OpenSSH Server，管理员账户认 `C:\ProgramData\ssh\administrators_authorized_keys`，配对命令要在 SSH 会话的 PATH 里。
 
@@ -486,4 +493,5 @@ hub 放云上：对话里有代码片段和 diff，公司代码先确认合规�
 
 - `runs_on = "node"` 的工具（见 [EXTENSIONS.md](EXTENSIONS.md) §9「代码在哪跑：`runs_on`」）：hub 按指纹把已批准的快照发给节点，节点校验哈希一致才执行并缓存；批一次处处能跑，节点上不会跑出和人看过的不一样的东西。`CROSSAGENTS_URL` 指向节点本机的转发端点（§7.2 里 MCP 走 node 转发的同一方案）。
 - 创造模式现在假设 agent 和 hub 同盘：agent 直接写 `<home>/extensions/<name>`（默认 `~/.crossagents/extensions/<name>`，[paths.rs](../crates/hub/src/paths.rs) `Paths::extensions`），由 hub 的 [registry.rs](../crates/hub/src/extensions/registry.rs) `Registry::request_enable` 经 [snapshot.rs](../crates/hub/src/extensions/snapshot.rs) `snapshot::create` 生成快照、算指纹（[EXTENSIONS.md](EXTENSIONS.md) §2、§7）。远程节点上的 agent 改为由节点打包这个目录交给 hub，仍由 hub 生成快照、算指纹。
-- GUI 部分和查看器的字节都经 hub：GUI → hub → 文件所在的节点（B3 的读文件接口）；节点离线就不可看（同 §7.5 附件的规矩）。查看器见 [EXTENSIONS.md](EXTENSIONS.md) §9「查看器」。
+- GUI 的字节经 hub（2026-11-08，`718e7d4`、`aeb3e8d`）。扩展静态资源：`GET /v1/extensions/{name}/assets/{fingerprint}/{*path}`（read）。指纹必须是该扩展当前或上一版；路径拒绝绝对路径、`..`、反斜杠等；文件在中心的 `<home>/extension-versions/<name>/<fingerprint>/` 下，realpath 仍须在快照内。超过快照上限 50 MiB（[snapshot.rs](../crates/hub/src/extensions/snapshot.rs) `MAX_BYTES`）回 413。两种模式的 `serveExtension` 都向这条路由要字节，不再读 GUI 本机的 `extension-versions`。
+- 工作区文件的原始字节：`GET /v1/agents/{key}/files/raw`、`/v1/runs/{key}/files/raw`、`/v1/runs/{key}/tasks/{task}/files/raw`（read），`?path=` 与同作用域的 `files/content` 相同。响应是 `application/octet-stream`，上限 64 MiB（[api_bytes.rs](../crates/hub/src/api_bytes.rs) `MAX_RAW_FILE_BYTES`），超出 413。用默认程序打开时：本机模式经 `files/resolve` 打开工作区里的真文件；远程模式把字节下载到本机临时目录，打开的是副本，查看器写明「打开的是副本，改动不会写回中心」（[FileViewer.tsx](../apps/gui/src/FileViewer.tsx)）。文件在别的节点上、节点离线就不可看，仍是 B3（同 §7.5）。自定义查看器见 [EXTENSIONS.md](EXTENSIONS.md) §9「查看器」。

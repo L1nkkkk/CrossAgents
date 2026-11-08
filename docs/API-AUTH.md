@@ -19,9 +19,11 @@ hub 只监听 `127.0.0.1`（`[hub] listen` 尚未可配，A3 才放开；A2 走 
 要点：
 
 - 总 token 是两段 uuid v4（64 位 hex），首次启动生成，比较用常数时间（`constant_time_eq`）。
-- 令牌文件与 `hub.json`（端口）都在 `~/.crossagents/`。GUI 的令牌只在 Electron 主进程按需读取
-  （[main.cts](../apps/gui/electron/main.cts)），页面通过 IPC 转发，拿不到令牌本身。
-- hub 重启会换新 token，GUI 每次调用重读，所以无需重启 GUI。
+- 令牌文件与 `hub.json`（端口）都在 `~/.crossagents/`。本机模式的 GUI 令牌只在 Electron 主进程按需读取
+  （[main.cts](../apps/gui/electron/main.cts) `currentHub`），页面通过 IPC 转发，拿不到令牌本身。
+  远程模式用的是设备 token：`safeStorage` 加密后存在 Electron `<userData>/remote.json`，渲染层同样拿不到
+  （[MULTI-NODE.md](MULTI-NODE.md) §4.3）。
+- hub 重启会换新的总 token，本机 GUI 每次调用重读，所以无需重启 GUI。设备 token 不随 hub 重启轮换；吊销后下一次请求 401。
 - 会话 token 落盘（`agent-tokens.json`）是为了 hub 重启接管后，已接管的 agent 仍能调工具；加入时签发新 token，旧的立即失效。
 
 2026-10-24 起有了梯度（[tasks/DOGFOOD.md](tasks/DOGFOOD.md) §7）：`require_token` 先认凭据——总 token 为 admin、`<home>/token-read` 为 read、会话 token 只到 `/v1/me*`——再由 `crates/hub/src/access.rs` 的策略点按下表的级别放行，级别不够返回 403 `forbidden` 并写明缺哪一级。
@@ -57,6 +59,9 @@ A3 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 | GET | `/v1/agents/{key}/transcript` | read | GUI、CLI |
 | GET | `/v1/agents/{key}/turns/{id}/diff` | read | GUI、CLI |
 | GET | `/v1/agents/{key}/attachments/{id}` | read | GUI |
+| GET | `/v1/agents/{key}/files/raw` | read | GUI；`?path=` 与 `files/content` 相同，原始字节，上限 64 MiB，超出 413 |
+| GET | `/v1/runs/{key}/files/raw` | read | GUI；同上 |
+| GET | `/v1/runs/{key}/tasks/{task}/files/raw` | read | GUI；同上 |
 | POST | `/v1/agents/{key}/profile` | write | GUI |
 | POST | `/v1/agents/{key}/settings` | admin | GUI |
 | POST | `/v1/agents/{key}/model` | write | GUI |
@@ -75,6 +80,7 @@ A3 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 | POST | `/v1/plugins/refresh` | admin | GUI |
 | GET | `/v1/extensions` | read | GUI |
 | GET | `/v1/extensions/{name}/logs` | read | GUI；与 `extension_logs` 相同的日志尾部 |
+| GET | `/v1/extensions/{name}/assets/{fingerprint}/{*path}` | read | GUI `serveExtension`；指纹须为当前或上一版，超快照上限 50 MiB 回 413 |
 | POST | `/v1/extensions/{name}/enable` | admin | GUI |
 | POST | `/v1/extensions/{name}/disable` | write | GUI |
 | POST | `/v1/extensions/{name}/auto-trust` | admin | GUI |
@@ -103,6 +109,7 @@ A3 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 | GET | `/v1/runs/{key}` | read | GUI、CLI |
 | DELETE | `/v1/runs/{key}?branches=&force=` | write | GUI、CLI |
 | POST | `/v1/runs/{key}/approve` | write | GUI、CLI |
+| POST | `/v1/runs/{key}/policy` | write | GUI；只改 continuation，可重置次数并解除自动续跑的暂停 |
 | POST | `/v1/runs/{key}/reject` | write | GUI、CLI |
 | POST | `/v1/runs/{key}/cancel` | write | GUI、CLI |
 | POST | `/v1/runs/{key}/land` | write | GUI |
@@ -134,8 +141,8 @@ A3 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 扩展的接口（`/v1/extensions*`）也在它到不了的范围内：agent 调扩展工具走 `/v1/me/tools/{name}`
 或内置的 `extension_call`，由 hub 代为执行，拿不到启用和自动信任这两个开关。
 
-> `/v1/extensions*` 这九条是 [EXTENSIONS.md](EXTENSIONS.md) §3 定下的约定，级别写在 `access.rs`，路由在
-> `api.rs`，都有测试。
+> `/v1/extensions*` 里启用、停用、自动信任、列表、差异、日志、调用这九条是 [EXTENSIONS.md](EXTENSIONS.md) §3 定下的约定，级别写在 `access.rs`，路由在
+> `api.rs`，都有测试。`GET …/assets/…` 是 A2 另加的 read，不在这九条里；会话 token 同样到不了。
 
 ## 3. 分级口径
 

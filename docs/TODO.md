@@ -7,7 +7,7 @@
 > 状态：`[ ]` 未开始 · `[~]` 进行中 · `[>]` 推迟到后续阶段。
 > 已完成（`[x]`）和已决定不做（`[-]`）的条目挪到 [DONE.md](DONE.md)，章节编号相同；做完一条就剪过去。
 >
-> 最后对照代码核对：2026-11-07（0.2.10）。10-31 之后没走这份清单就做完的事，补记在 DONE.md §二十四。
+> 最后对照代码核对：2026-11-08（0.2.10，run 8298b08a）。10-31 之后没走这份清单就做完的事，补记在 DONE.md §二十四。
 
 ## 一、进程监督（优先）
 
@@ -74,7 +74,7 @@
 > 取代原「远期」里的"每台机器一个 hub、GUI 同时连多个 hub"：已比较并放弃，理由见 MULTI-NODE §2。
 > 并行方式：不拆仓库，每阶段先在 `api-types` 定接口并生成 bindings，core 与 GUI 两条线各用一个 worktree 和分支，GUI 先对着 MockBridge 开发。
 
-已完成 4 条，见 [DONE.md](DONE.md) 同名一节。
+已完成 13 条，见 [DONE.md](DONE.md) 同名一节。
 
 开工前要定：
 
@@ -82,22 +82,30 @@
 - 连通方式已定：局域网和公网都要，默认打洞（组网工具）（[DONE.md](DONE.md) 同名一节，2026-11-07）。A 阶段远程 GUI 再走 SSH 隧道，hub 继续只听 `127.0.0.1`；非回环一律 TLS 留到下面的 A3（2026-11-08 定：人说按推荐来（run 84848059））。见 [MULTI-NODE.md](MULTI-NODE.md) §14「连通方式」、§10「安全」。
 - [ ] 两条线并行时完工监视器怎么提交：按分支提交，还是由人合并
 
-A2 SSH 隧道：
+A2 SSH 隧道（代码已完成，见 [DONE.md](DONE.md) 同名一节）：
 
-- [ ] 前置：把设备 token 发到别的机器之前先重分级。write 级设备等于能在宿主上执行命令（Suki 2，2026-11-08）：`POST /v1/agents/{key}/settings` 能把 agent 的 permission 改成自动执行并打开 `allow_hooks`，`POST /v1/repos/init` 对请求里的路径跑 `git init` 并写第一次提交（[workspace.rs](../crates/orchestrator/src/workspace.rs) `GitWorkspaces::init`），两条都是 write（[access.rs](../crates/hub/src/access.rs) `required`），至少这两条升 admin。`POST /v1/runs` 会给主导送开场并拉起 CLI（[engine.rs](../crates/orchestrator/src/engine.rs) `create_run_for_work_from_checked`），等拉起进程的路由一并评估（待定）。见 [API-AUTH.md](API-AUTH.md) §4、[MULTI-NODE.md](MULTI-NODE.md) §10。
-- [ ] GUI：设置「连接」页填 `user@host`。经 SSH 在中心上跑 `crossagents device add <设备名> --json` 配对（`--json` 是全局参数，见 [DONE.md](DONE.md) §八），client token 存在 Electron 主进程；`ssh -N -L` 把中心的 `127.0.0.1` 转到本机，断线重连。连远程时关闭本机 hub 的启动与升级，切回本机时再检查一次（[MULTI-NODE.md](MULTI-NODE.md) §4.3「登录与配对」、§13.3 怎么判断是「本机自己的 hub」、§14「SSH 隧道」）
-- [ ] GUI 与查看器的字节一律经 hub，不再读本机磁盘：`serveExtension` 不再用 `extensionRealFile` 读本机 `<home>/extension-versions`；`shell:open-path` 不再拿本机绝对路径直接打开（[MULTI-NODE.md](MULTI-NODE.md) §12 A2、§16「扩展在多节点下」，[EXTENSIONS.md](EXTENSIONS.md) §9「查看器」）
-- [ ] 验收：Mac GUI 经 SSH 隧道连上 Windows hub，两端对话一致；隧道断开后重连，按 `Last-Event-ID` 续传
+- [ ] 验收（要实测）：Mac GUI 经 SSH 隧道连上 Windows hub，两端对话一致；隧道断开后重连，按 `Last-Event-ID` 续传。步骤见 [MULTI-NODE.md](MULTI-NODE.md) §14「怎么实测」
 
-A1 留下的（2026-11-08 评审）：
+A2 留下的（2026-11-08，run 8298b08a）：
 
-- [ ] 设备缓存没有过期：每分钟回库重读一次，不经 `Devices::revoke` 的吊销最多陈旧一分钟，以后改级别也能生效（[devices.rs](../crates/hub/src/devices.rs) `Devices::authenticate`）
-- [ ] 签发、吊销发事件，日志记下被签发 / 吊销设备的名字和级别（[api.rs](../crates/hub/src/api.rs) `create_device`、`revoke_device`）
-- [ ] 认证把数据库读写移出全局锁（`Devices::authenticate`）
-- [ ] 吊销时结束该设备开的终端会话
-- [ ] 每个设备请求都以 info 记日志（[api.rs](../crates/hub/src/api.rs) `require_token`），远程 GUI 全走设备 token 后会太吵：只记 admin，或降到 debug
-- [ ] 小修：[access.rs](../crates/hub/src/access.rs) `refusal` 里 Extension 臂恒真的 `!grant.is_person()` 去掉；[lib.rs](../crates/store-sqlite/src/lib.rs) `touch_device` 的 RFC3339 字符串比较写明前提或改存整数，`insert_device` 按约束区分冲突消息；设备名 trim、拒控制字符（[api.rs](../crates/hub/src/api.rs) `create_device`）
-- [ ] GUI：403 按功能记，吊销被拒后「设备」入口整项置灰、点不进去，而列表 read 就能看，有 write 级远程 GUI 时要区分（[Settings.tsx](../apps/gui/src/views/Settings.tsx)、[features.ts](../apps/gui/src/lib/features.ts) `noteForbidden`）；空列表说明里的「要等 A2」到时改掉（[Devices.tsx](../apps/gui/src/views/Devices.tsx)）
+- [ ] SSH 口令 / 未知主机密钥转到 GUI 对话框。现在每次 ssh 都带 `BatchMode=yes`，不改用户的 `StrictHostKeyChecking`：要口令，或主机密钥还不认识，就失败，页面原样显示 ssh 的 stderr，并提示先在终端里 `ssh` 一次（[remote.cts](../apps/gui/electron/remote.cts) `COMMON`，[connection.ts](../apps/gui/src/lib/connection.ts) `pairFailure`）。对照 Cutex 的 `sshAskpass.ts`，以后改成在对话框里填口令、确认指纹。
+- [ ] **要人定：agent 默认 bypass，write 设备等于能在中心上执行命令。** 重分级已做（settings、repos/init 升 admin，见 [DONE.md](DONE.md) §八）。还要人决定两件事：默认权限是否从 bypass 改成 guard；设备级别是否细分（例如只看加批准、不能驱动 agent）。现在不做字段级检查：缺省就是 bypass，拦住 `config.permission` 挡不住远程 GUI 正常建 agent。若默认改成 guard，下面这些入口要一起评估，该升 admin 的一起升。write 只发给愿意给 shell 的设备；只看用 read。口径见 [API-AUTH.md](API-AUTH.md) §3。
+
+  能放宽自动执行、授予身份或代替人决策（现在仍是 write）：
+
+  - `POST /v1/agents`：`config.permission`、`allow_hooks`、`setting_sources`，以及 cwd / driver。不填 permission 时默认就是 bypass。
+  - `POST /v1/agents/{key}/connect`：签发该 agent 的会话 token，旧的作废。拿到会话 token 就能让它在中心上执行命令。
+  - `POST /v1/runs`：可关审批（`policy.approvals`）、自动批准计划或落地、扩大招人 / 委派 / 预算。整条保持 write。
+  - `POST /v1/runs/{key}/approve`：可整份替换 run 策略（包括把 approvals 改成 off）并批准计划。
+  - `POST /v1/runs/{key}/policy`：可扩大自动唤醒；`reset_attempts` 能解除自动暂停。
+  - `POST /v1/questions/{id}/answer`：审批题直接批准危险动作；预算题可加限额并恢复；Work 题可接受提议并开 run。
+
+  不改长期 permission，但足以让已经是 bypass 的 agent 执行：给它发消息、开聊、插话、启动（`messages`、`chat`、`send-now`、`start`）；改人设或模型（`profile`、`model`）、压缩（`compact`）；`POST /v1/works/{id}/runs` 继续一轮；评审打回（`review` 的 `rework`）；代人落地（`land`）；把结果写回人的目录（`apply`）；`POST /v1/extensions/{name}/tools/{tool}` 以人的身份调已信任的工具。
+
+- [ ] 评审里提出、这轮没做的：
+  - 设备缓存的并发测试没有钉住「吊销把 generation 加一之后再重读」那条分支（[devices.rs](../crates/hub/tests/devices.rs)）。吊销之后不把已经读到的旧设备填回缓存，这条主路径有测试。
+  - 中心默认 shell 是 PowerShell 5.1 时，用 `cat` 读 UTF-8 的 `hub.json`，`exe` 路径里的非 ASCII（例如中文用户名）可能变成乱码，配对失败关闭。可以在「连接」页的高级里手填命令。读取方式这次没改。
+  - 侧栏「在旁边打开」的静态文案仍是「Ctrl+单击」（[i18n.ts](../apps/gui/src/lib/i18n.ts) `sidebar.besideHint`）。处理代码认 `ctrlKey || metaKey`，Mac 上的菜单和快捷键对话框已按平台显示 ⌘；这一句没改。
 
 A3 开端口直连（以后）：
 
@@ -139,7 +147,7 @@ B3 远程开发：
 - [ ] core：列目录、读文件、附件索引接口
 - [ ] GUI：先选机器再选目录的远程目录浏览框，最近目录记住所在机器
 - [ ] GUI：diff 与文件查看器，截图和构建产物附件预览
-- [ ] core：读文件接口要给出二进制字节（现在 `FileContentResponse` 只有 `binary: true`、没有字节）。查看器与工作区文件走 GUI → hub → 文件所在节点，节点离线不可看（[EXTENSIONS.md](EXTENSIONS.md) §9「查看器」、[MULTI-NODE.md](MULTI-NODE.md) §16「扩展在多节点下」、§7.5「存储分布与负载」、§12 B3）。A2 那条改的两处同盘假设，文件在节点上时走这个接口
+- [ ] core：读文件接口要给出二进制字节（现在 `FileContentResponse` 只有 `binary: true`、没有字节；A2 另加了原始字节路由，见 [DONE.md](DONE.md) §八，文件在中心磁盘上）。查看器与工作区文件走 GUI → hub → 文件所在节点，节点离线不可看（[EXTENSIONS.md](EXTENSIONS.md) §9「查看器」、[MULTI-NODE.md](MULTI-NODE.md) §16「扩展在多节点下」、§7.5「存储分布与负载」、§12 B3）。文件在节点上时走这个接口
 
 C 单干模式（依赖 A2 的连接页和字节走 hub、B1 的内置节点和终端在节点上开，以及 hub 在 macOS 上的验证，见 [tasks/MACOS.md](tasks/MACOS.md) §4「节点与 hub 在 macOS 上」；[MULTI-NODE.md](MULTI-NODE.md) §12、§15「单干模式」）：
 
@@ -308,19 +316,20 @@ C 单干模式（依赖 A2 的连接页和字节走 hub、B1 的内置节点和�
 > 这里的 W1–W4 是扩展 api 2 的实现阶段，和 [tasks/W1.md](tasks/W1.md) 的轻量 Work 不是一回事。
 
 - [ ] **W1** webview、`[capabilities]`、`api = 2`、批准界面。验收：three.js 页面带 WASM 正常渲染；webview 里写死循环，主界面仍能用；停用后 webview 消失（[EXTENSIONS.md](EXTENSIONS.md) §9「分期」）
-- [ ] **W2** 查看器，以及限定范围的文件访问（字节走 hub）。验收：点对话里的 `out/car.gltf` 打开 3D，相对 `.bin` 和贴图能加载；范围外的路径被拒（[EXTENSIONS.md](EXTENSIONS.md) §9「分期」）
+- [ ] **W2** 查看器，以及限定范围的文件访问。hub 的原始字节路由已有（[DONE.md](DONE.md) §八，[EXTENSIONS.md](EXTENSIONS.md) §9「查看器」）；页内查看器和目录句柄还没做。验收：点对话里的 `out/car.gltf` 打开 3D，相对 `.bin` 和贴图能加载；范围外的路径被拒（[EXTENSIONS.md](EXTENSIONS.md) §9「分期」）
 - [ ] **W3** 浏览器视图。验收：登录 GitHub 后重启仍是登录状态；禁止被嵌的网站能打开；菜单不被盖住（[EXTENSIONS.md](EXTENSIONS.md) §9「分期」）。macOS 上摄像头 / 麦克风要在打包时声明用途，见 [tasks/MACOS.md](tasks/MACOS.md) §3「打包与分发」
 - [ ] **W4** GUI 侧工具。验收：agent 能打开网页、读成文本、点击、截图，人看得到、能接手；没有 GUI 时明确报错（[EXTENSIONS.md](EXTENSIONS.md) §9「分期」）
 
 ## 二十七、macOS
 
-> 来源：2026-11-07 讨论。只有设计，未开工。任务书见 [tasks/MACOS.md](tasks/MACOS.md)。
+> 来源：2026-11-07 讨论。任务书见 [tasks/MACOS.md](tasks/MACOS.md)。
+> 2026-11-08（run 8298b08a）：Mac2 的 GUI 代码、Mac3 的终端 `-l` 与 `[locate.paths]` 已改，都要在 Mac 上实测。打包、签名、CI、登录 shell 取 PATH 还没做。
 > 阶段照该文 §5「建议顺序」（Mac1–Mac4；验收是建议，原话只给了顺序）。待定项照 §6「待定」。
 > Mac1–Mac4 与 `docs/tasks/` 里早期里程碑 M0–M5、以及 §二十六 的 W1–W4（扩展 api 2；[tasks/W1.md](tasks/W1.md) 是轻量 Work）不是一回事。
 
 - [ ] **Mac1 macOS CI 跑测试**。依赖：无。验收（建议）：在 macOS runner 上 `cargo test --workspace`、`npm --prefix apps/gui test`、`npm --prefix apps/gui run typecheck` 通过；跑不过的用例逐条记下。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
-- [ ] **Mac2 GUI 小修 + 不签名的 dmg 手测**。范围：该文 §2「GUI 要改的」全部五条，加 §3「打包与分发」的 dmg / zip / `icon.icns` / 通用二进制，不含签名与公证。依赖：Mac1 至少 typecheck 与 test 绿；dmg 只能在 macOS 上打。验收（建议）：输入框里 ⌘C / ⌘V / ⌘X / ⌘A / ⌘Z 都能用；⌘Q 退出、⌘M 最小化；点 Dock 图标窗口回来；菜单栏图标在浅色和深色下都看得清；dmg 装上后首次打开能启动（不签名时走「隐私与安全性」放行）。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
-- [ ] **Mac3 随 A2 / B1 做环境、终端、字节走 hub**。范围：该文 §4「节点与 hub 在 macOS 上」的 PATH（登录 shell 取环境）、内置终端加 `-l`、描述文件补 macOS 的 `[locate]` 路径、Unix 宿主与锁实验在 Mac 上实测（§一那条），以及字节走 hub。依赖：[MULTI-NODE.md](MULTI-NODE.md) §12 的 A2 与 B1；同文 §15「单干模式」定下本机 hub 加内置节点之后，PATH 在节点启动时取一次。浏览器视图要不要把摄像头 / 麦克风写进 `Info.plist` 也挂在这里（[EXTENSIONS.md](EXTENSIONS.md) §9「浏览器视图」）。验收（建议）：从 Dock 启动的 GUI 起的 hub 能找到 Homebrew 和 npm 装的 CLI；内置终端里 `brew` 可用；agent 会话里 `cargo` / `npm` 可用；宿主用进程组管住整棵树；Mac GUI 连远程 hub 时能打开扩展静态资源与工作区文件。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
+- [~] **Mac2 GUI 小修 + 不签名的 dmg 手测**。§2 的代码已改（2026-11-08，`455741e` 菜单、Dock、托盘、全屏收起、主进程快捷键；`3c49369` 界面上按平台显示 ⌘ 或 Ctrl；`aeb3e8d` 把 `.terminal`、`.fileloc` 算进打开即执行），要在 Mac 上实测。打包和签名仍待做：dmg / zip / `icon.icns` / 通用二进制，以及 Developer ID 与公证。打包时把 [iconTemplate.png](../apps/gui/build/iconTemplate.png) 和 [iconTemplate@2x.png](../apps/gui/build/iconTemplate@2x.png) 一起复制到 resources。依赖：Mac1 至少 typecheck 与 test 绿；dmg 只能在 macOS 上打。验收（建议）：输入框里 ⌘C / ⌘V / ⌘X / ⌘A / ⌘Z 都能用；⌘Q 退出、⌘M 最小化；点 Dock 图标窗口回来；菜单栏图标在浅色和深色下都看得清；dmg 装上后首次打开能启动（不签名时走「隐私与安全性」放行）。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
+- [~] **Mac3 随 A2 / B1 做环境、终端、字节走 hub**。本轮代码已改、要实测的两条：内置终端在 macOS 上加 `-l`（`c5355fd`，[terminal.rs](../crates/hub/src/terminal.rs) `unix_shell`）；描述文件 `[locate.paths].macos` 补了 `/opt/homebrew/bin` 与 `/usr/local/bin`（同一提交；claude、codex、cursor、codebuddy、with）。还没做：用登录 shell 取 PATH（仍随 B1）、Unix 宿主与锁在 Mac 上实测（§一那条）。字节走 hub 的接口已做（[DONE.md](DONE.md) §八），Mac GUI 连上远程 hub 之后要实测能打开扩展资源和副本。依赖：[MULTI-NODE.md](MULTI-NODE.md) §12 的 A2（代码已完成，验收见上面「要实测」）与 B1；同文 §15「单干模式」定下本机 hub 加内置节点之后，PATH 在节点启动时取一次。浏览器视图要不要把摄像头 / 麦克风写进 `Info.plist` 也挂在这里（[EXTENSIONS.md](EXTENSIONS.md) §9「浏览器视图」）。验收（建议）：从 Dock 启动的 GUI 起的 hub 能找到 Homebrew 和 npm 装的 CLI；内置终端里 `brew` 可用；agent 会话里 `cargo` / `npm` 可用；宿主用进程组管住整棵树；Mac GUI 连远程 hub 时能打开扩展静态资源与工作区文件。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
 - [ ] **Mac4 签名、公证、自动更新**。范围：该文 §3「打包与分发」的签名与公证：Developer ID、hardened runtime、`bin/` 里的 hub 一起签、`electron-updater` 走通。依赖：Mac2，以及一个 Apple Developer 账号（没有账号做不了，见该文 §6「待定」）。验收（建议）：首次打开不再需要去「隐私与安全性」放行；装 N 版后发布 N+1，GUI 自动下载并在退出时安装。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
 
 待定（[tasks/MACOS.md](tasks/MACOS.md) §6「待定」）：
