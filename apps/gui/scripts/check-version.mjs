@@ -13,7 +13,9 @@ if (gui !== hub) {
   process.exit(1);
 }
 
-// The same path `build.extraResources` copies from. A release once went out without a hub at
+if (process.argv.includes("--without-hub")) process.exit(0);
+
+// The same path `build.win.extraResources` copies from. A release once went out without a hub at
 // all: `cargo build --release` had written somewhere else (CARGO_TARGET_DIR was set in the
 // shell), the source was simply missing, and electron-builder packaged the rest without
 // complaining. The installer then had no hub to put in `<home>/bin/<version>/`, so an updated
@@ -22,7 +24,7 @@ if (gui !== hub) {
 const exe = fileURLToPath(new URL(`../../../target/release/crossagents${process.platform === "win32" ? ".exe" : ""}`, import.meta.url));
 if (!existsSync(exe)) {
   console.error(`the hub binary is missing: ${exe}
-build.extraResources copies it into the installer, and electron-builder does not fail when it is absent.
+build.win.extraResources copies it into the installer, and electron-builder does not fail when it is absent.
 Build it into the repository's own target directory first:
   cargo build --release -p crossagents-cli
 If CARGO_TARGET_DIR is set in this shell it goes elsewhere; unset it for that command.`);

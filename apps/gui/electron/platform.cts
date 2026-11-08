@@ -1,4 +1,5 @@
 import type { MenuItemConstructorOptions } from "electron";
+import { join } from "node:path";
 
 /** The native application menu on macOS, or no menu elsewhere. */
 export function applicationMenu(platform: NodeJS.Platform): MenuItemConstructorOptions[] | null {
@@ -27,6 +28,12 @@ export function shortcut(platform: NodeJS.Platform, input: Input, development: b
 
 /** The tray resource filename for the platform. */
 export function trayIcon(platform: NodeJS.Platform): string { return platform === "darwin" ? "iconTemplate.png" : "icon.ico"; }
+/** Development connects to an independently run hub; packaged builds need the shipped executable. */
+export function bundledHub(packaged: boolean, platform: NodeJS.Platform, resources: string, exists: (path: string) => boolean): boolean {
+  return !packaged || exists(join(resources, "bin", platform === "win32" ? "crossagents.exe" : "crossagents"));
+}
+/** Ad-hoc signed macOS builds cannot use electron-updater. */
+export function automaticUpdates(platform: NodeJS.Platform): boolean { return platform !== "darwin"; }
 /** Text explaining where the window went when it was hidden. */
 export function trayHint(platform: NodeJS.Platform, remote: boolean): { title: string; content: string } {
   const location = platform === "darwin" ? "菜单栏" : "任务栏右下角";

@@ -922,6 +922,10 @@ export const SCENARIOS: Scenario[] = [
       route: "#/settings/connection",
     };
   } },
+  { key: "connection-no-hub", label: "连接：安装包不带 hub", hint: "本机模式没有 hub，提示连接另一台电脑上的 hub", build: () => {
+    const scene = workRounds();
+    return { state: { ...scene.state, connection: { bundledHub: false } }, script: [], route: "#/settings/connection" };
+  } },
   { key: "connection-pair-failed", label: "连接：配对失败", hint: "ssh 说主机密钥不认识：原样显示失败原因，并按原因给出下一步——先在终端里 ssh user@host 一次", build: () => {
     const scene = workRounds();
     return {
@@ -953,7 +957,7 @@ export const SCENARIOS: Scenario[] = [
     ],
     route: "#/settings/devices",
   }) },
-  { key: "devices-empty", label: "设置：设备（空）", hint: "还没有设备：说明在 hub 所在的机器上运行 crossagents device add <名字>，以及从别的电脑经 SSH 连过来要等 A2", build: () => ({
+  { key: "devices-empty", label: "设置：设备（空）", hint: "还没有设备：说明在 hub 所在的机器上运行 crossagents device add <名字>，别的电脑在「设置 → 连接」里经 SSH 配对", build: () => ({
     state: emptyHub(),
     script: [],
     route: "#/settings/devices",

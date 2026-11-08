@@ -18,6 +18,8 @@ export type ControllerOptions = {
   ssh: Ssh;
   /** The default device name (`<host name>-gui`, cleaned). */
   defaultDeviceName: string;
+  /** Packaged: executable exists; development: true to retain local connections. */
+  bundledHub: () => boolean;
   onState(state: ConnectionState): void;
   onPairStep(step: PairStep): void;
   /**
@@ -54,7 +56,7 @@ export class RemoteController {
   }
 
   get(): ConnectionState {
-    return publicState(this.record, this.tunnelState, this.opts.defaultDeviceName);
+    return { ...publicState(this.record, this.tunnelState, this.opts.defaultDeviceName), bundledHub: this.opts.bundledHub() };
   }
 
   /** The tray's line: target and whether it is connected; undefined in local mode. */

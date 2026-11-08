@@ -5,6 +5,16 @@ import { connectionWords, markWords, PAIR_STEPS, pairFailure, stepWords, targetW
 
 const target = { host: "centre.example", user: "me" };
 
+test("a local package without a hub shows a warning in both places", () => {
+  const state: ConnectionState = { mode: "local", bundledHub: false, defaultDeviceName: "pc-gui" };
+  assert.deepEqual(connectionWords(state), { mode: "local", label: "本机", status: "不带 hub", tone: "danger" });
+  assert.deepEqual(markWords(state), {
+    text: "本机 · 不带 hub",
+    tone: "danger",
+    title: "这个安装包不带 hub：在 设置 →「连接」 里连另一台电脑上的 hub",
+  });
+});
+
 test("a target reads as user@host, with a non-default port for display", () => {
   assert.equal(targetWords({ host: "centre" }), "centre");
   assert.equal(targetWords({ host: "centre", user: "me" }), "me@centre");
@@ -33,11 +43,12 @@ test("the tunnel says 连接中 / 已连接 / 未连接 with ports or the reason
 
 test("local mode is 本机; remote mode carries the target and the tunnel's state", () => {
   assert.deepEqual(connectionWords(undefined), { mode: "local", label: "本机", status: "本机的 hub", tone: "ok" });
-  const local: ConnectionState = { mode: "local", defaultDeviceName: "pc-gui" };
+  const local: ConnectionState = { mode: "local", bundledHub: true, defaultDeviceName: "pc-gui" };
   assert.equal(connectionWords(local).label, "本机");
 
   const remote: ConnectionState = {
     mode: "remote",
+    bundledHub: true,
     remote: { target, deviceName: "mac-gui", deviceId: "d1", pairedAt: "2026-11-08T10:00:00Z" },
     tunnel: { status: "connected", localPort: 50123, remotePort: 7420 },
     defaultDeviceName: "pc-gui",
@@ -59,6 +70,7 @@ test("the sidebar mark is red whenever the remote tunnel is not up", () => {
   });
   const base: ConnectionState = {
     mode: "remote",
+    bundledHub: true,
     remote: { target, deviceName: "mac-gui", deviceId: "d1", pairedAt: "2026-11-08T10:00:00Z" },
     defaultDeviceName: "pc-gui",
   };

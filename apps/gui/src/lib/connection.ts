@@ -62,6 +62,7 @@ export function tunnelWords(tunnel: TunnelState | undefined): StatusWords {
 export type ConnectionWords = { mode: "local" | "remote"; label: string; status: string; detail?: string; tone: Tone };
 
 export function connectionWords(state: ConnectionState | undefined): ConnectionWords {
+  if (state?.mode === "local" && state.bundledHub === false) return { mode: "local", label: "本机", status: "不带 hub", tone: "danger" };
   if (!state || state.mode === "local") return { mode: "local", label: "本机", status: "本机的 hub", tone: "ok" };
   const tunnel = tunnelWords(state.tunnel);
   return {
@@ -78,6 +79,7 @@ export function connectionWords(state: ConnectionState | undefined): ConnectionW
 export function markWords(state: ConnectionState | undefined): { text: string; tone: Tone; title: string } {
   const words = connectionWords(state);
   if (words.mode === "local") {
+    if (state?.bundledHub === false) return { text: "本机 · 不带 hub", tone: "danger", title: "这个安装包不带 hub：在 设置 →「连接」 里连另一台电脑上的 hub" };
     return { text: "本机", tone: "ok", title: "这个窗口连的是本机的 hub；在设置 →「连接」里可以连到远处的中心" };
   }
   const text = words.status === "已连接" ? words.label : `${words.label} · ${words.status}`;

@@ -250,6 +250,7 @@ function controller(dir: string, crypto = fakeCrypto()) {
     crypto,
     ssh: SSH,
     defaultDeviceName: "pc-gui",
+    bundledHub: () => true,
     onState: (s) => states.push(s),
     onPairStep: (s) => steps.push(s),
     onHubChange: (m) => changes.push(m),
