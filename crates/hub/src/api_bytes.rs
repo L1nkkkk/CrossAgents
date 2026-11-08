@@ -64,29 +64,50 @@ async fn asset(
     }
     let versions = state.home.join("extension-versions");
     let root = versions.join(name).join(fingerprint);
-    let result = (|| {
-        let versions = dunce::canonicalize(versions).ok()?;
-        let root = dunce::canonicalize(root).ok()?;
-        let file = dunce::canonicalize(root.join(&path)).ok()?;
+    let content_type = mime(&path);
+    let result = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, StatusCode> {
+        let missing = |_| StatusCode::NOT_FOUND;
+        let versions = dunce::canonicalize(versions).map_err(missing)?;
+        let root = dunce::canonicalize(root).map_err(missing)?;
+        let file = dunce::canonicalize(root.join(&path)).map_err(missing)?;
         if root == versions
             || !root.starts_with(&versions)
             || file == root
             || !file.starts_with(&root)
         {
-            return None;
+            return Err(StatusCode::NOT_FOUND);
         }
-        std::fs::read(file).ok()
-    })();
+        let limit = crate::extensions::snapshot::MAX_BYTES;
+        let meta = std::fs::metadata(&file).map_err(missing)?;
+        if !meta.is_file() {
+            return Err(StatusCode::NOT_FOUND);
+        }
+        if meta.len() > limit {
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        let input = std::fs::File::open(file).map_err(missing)?;
+        let mut bytes = Vec::new();
+        input
+            .take(limit + 1)
+            .read_to_end(&mut bytes)
+            .map_err(missing)?;
+        if bytes.len() as u64 > limit {
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        Ok(bytes)
+    })
+    .await
+    .unwrap_or(Err(StatusCode::NOT_FOUND));
     match result {
-        Some(bytes) => (
+        Ok(bytes) => (
             [
-                (header::CONTENT_TYPE, mime(&path)),
+                (header::CONTENT_TYPE, content_type),
                 (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             ],
             bytes,
         )
             .into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
+        Err(status) => status.into_response(),
     }
 }
 fn mime(path: &str) -> &'static str {
@@ -164,10 +185,39 @@ async fn resolve_task(state: &AppState, run: RunId, key: &str) -> Result<TaskId,
         })
 }
 async fn raw(state: &AppState, scope: FilesScope<'_>, q: RawQuery) -> Result<Response, AppError> {
-    let path = q.path.as_deref().unwrap_or("");
-    crate::paths::refuse_remote_in(&state.orchestrator, scope, path).await?;
-    let root = state.orchestrator.files_root(scope).await?;
-    let (abs, rel) = resolve_in_root(&root, path)?;
+    // Scope resolution canonicalizes the workspace too; run it and the file read on
+    // the blocking pool while keeping the existing asynchronous store operations.
+    let owned_agent = match scope {
+        FilesScope::Agent(agent) => Some(agent.clone()),
+        _ => None,
+    };
+    let scope_ids = match scope {
+        FilesScope::Agent(_) => None,
+        FilesScope::Run(run) => Some((run, None)),
+        FilesScope::Task { run, task } => Some((run, Some(task))),
+    };
+    let orchestrator = state.orchestrator.clone();
+    let path = q.path.unwrap_or_default();
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let scope = match (owned_agent.as_ref(), scope_ids) {
+            (Some(agent), _) => FilesScope::Agent(agent),
+            (_, Some((run, Some(task)))) => FilesScope::Task { run, task },
+            (_, Some((run, None))) => FilesScope::Run(run),
+            _ => unreachable!(),
+        };
+        handle.block_on(async {
+            crate::paths::refuse_remote_in(&orchestrator, scope, &path).await?;
+            let root = orchestrator.files_root(scope).await?;
+            read_raw(&root, &path)
+        })
+    })
+    .await
+    .map_err(|e| AppError::from(FileError::Failed(format!("file read task failed: {e}"))))?
+}
+
+fn read_raw(root: &FsPath, path: &str) -> Result<Response, AppError> {
+    let (abs, rel) = resolve_in_root(root, path)?;
     let meta = std::fs::metadata(&abs).map_err(|_| FileError::NotFound(rel.clone()))?;
     if !meta.is_file() {
         return Err(FileError::BadRequest(format!("{rel} is not a regular file")).into());
