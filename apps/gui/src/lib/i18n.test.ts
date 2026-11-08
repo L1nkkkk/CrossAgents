@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { dictionaries, hasKey, missingKeys, setLocale, t } from "./i18n.ts";
+import { besideHint, dictionaries, hasKey, missingKeys, setLocale, t } from "./i18n.ts";
+
+test("beside hint uses Command on Mac", () => {
+  assert.equal(besideHint("mac"), "⌘+单击或中键：在旁边打开");
+});
+
+test("beside hint preserves Windows wording", () => {
+  assert.equal(besideHint("other"), "Ctrl+单击或中键：在旁边打开");
+});
 
 /** Files that take their strings from the dictionary. */
 const MIGRATED = ["../Sidebar.tsx", "../views/Home.tsx", "../strips.tsx", "../views/Run.tsx", "./continuation.ts"];

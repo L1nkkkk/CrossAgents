@@ -3,6 +3,12 @@
 // the continuation parts of Run.tsx are moved over, the rest follow. Terms stay as they are in
 // every locale: run, Planner, Worker, Reviewer, hub. i18n.test.ts checks that no key is missing.
 
+import { shortcutPlatform, type ShortcutPlatform } from "./shortcuts.ts";
+
+export function besideHint(platform: ShortcutPlatform): string {
+  return `${platform === "mac" ? "⌘" : "Ctrl"}+单击或中键：在旁边打开`;
+}
+
 const zhCN = {
   "sidebar.standalone": "独立会话",
   "sidebar.needsYou": "需要你 · {n}",
@@ -71,7 +77,7 @@ const zhCN = {
   "sidebar.hideTeam": "收起队友",
   "sidebar.noMatch": "没有匹配「{query}」的成员。",
   "sidebar.empty": "还没有会话。点「新建」开始。",
-  "sidebar.besideHint": "Ctrl+单击或中键：在旁边打开",
+  "sidebar.besideHint": besideHint(shortcutPlatform),
   "sidebar.openBeside": "在旁边打开",
   "sidebar.merged": "{merged}/{total} 已合并",
 
