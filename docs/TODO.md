@@ -74,7 +74,7 @@
 > 取代原「远期」里的"每台机器一个 hub、GUI 同时连多个 hub"：已比较并放弃，理由见 MULTI-NODE §2。
 > 并行方式：不拆仓库，每阶段先在 `api-types` 定接口并生成 bindings，core 与 GUI 两条线各用一个 worktree 和分支，GUI 先对着 MockBridge 开发。
 
-已完成 13 条，见 [DONE.md](DONE.md) 同名一节。
+已完成 15 条，见 [DONE.md](DONE.md) 同名一节。
 
 开工前要定：
 
@@ -105,8 +105,6 @@ A2 留下的（2026-11-08，run 8298b08a）：
 - [ ] 评审里提出、这轮没做的：
   - 设备缓存的并发测试（[devices.rs](../crates/hub/tests/devices.rs) `concurrent_first_authentication_and_revoke_never_repopulate_the_cache`）没有专门覆盖这种情况：`Devices::authenticate` 读完库，发现 `generation` 变了，再重读一次（[devices.rs](../crates/hub/src/devices.rs) `authenticate` 里 `cache.generation != generation` 就 `continue`）。要测到，得把 `Store` 包一层来卡住时机。吊销之后不把已经读到的旧设备填回缓存，这条主路径有测试。
   - 中心默认 shell 是 PowerShell 5.1 时，用 `cat` 读 UTF-8 的 `hub.json`，`exe` 路径里的非 ASCII（例如中文用户名）可能变成乱码，配对失败关闭。可以在「连接」页的高级里手填命令。读取方式这次没改，要在真机上确认这个失败和绕过办法。
-  - 「在旁边打开」的提示没改。`sidebar.besideHint` 固定写着「Ctrl+单击或中键：在旁边打开」（[i18n.ts](../apps/gui/src/lib/i18n.ts)），[Sidebar.tsx](../apps/gui/src/Sidebar.tsx) 和 [SessionPeek.tsx](../apps/gui/src/SessionPeek.tsx) 都用它。代码里 ⌘ 单击也能触发（`Sidebar.tsx` 的 `e.ctrlKey || e.metaKey`），但 Mac 上 Ctrl+单击是右键，提示应该写 ⌘。菜单和快捷键对话框已按平台显示 ⌘。
-  - 开发预览场景 [scenarios.ts](../apps/gui/src/dev/scenarios.ts) 的 `devices-empty`，hint 还写着「从别的电脑经 SSH 连过来要等 A2」。页面上的 [Devices.tsx](../apps/gui/src/views/Devices.tsx) 已改，这句只影响开发预览。
 
 A3 开端口直连（以后）：
 
@@ -324,17 +322,20 @@ C 单干模式（依赖 A2 的连接页和字节走 hub、B1 的内置节点和�
 ## 二十七、macOS
 
 > 来源：2026-11-07 讨论。任务书见 [tasks/MACOS.md](tasks/MACOS.md)。
-> 2026-11-08（run 8298b08a）：Mac2 的 GUI 代码、Mac3 的终端 `-l` 与 `[locate.paths]` 已改，都要在 Mac 上实测。打包、签名、CI、登录 shell 取 PATH 还没做。
-> 阶段照该文 §5「建议顺序」（Mac1–Mac4；验收是建议，原话只给了顺序）。待定项照 §6「待定」。
+> 2026-11-08（run 8298b08a）：Mac2 的 GUI 代码、Mac3 的终端 `-l` 与 `[locate.paths]` 已改，都要在 Mac 上实测。
+> 2026-11-08（run e28910b3）：不带 hub 的 ad-hoc 包配置已做（`c529e55`、`8e90dac`、`6e4392a`），要在 Mac 上实测。Developer ID、公证、自动更新暂不做（人有 Mac、没有 Apple Developer 账号）。CI、登录 shell 取 PATH 还没做。
+> 阶段照该文 §5「建议顺序」（Mac1–Mac4；验收是建议，原话只给了顺序）。待定项照 §6「待定」。在 Mac 上打包与安装见该文 §8。
 > Mac1–Mac4 与 `docs/tasks/` 里早期里程碑 M0–M5、以及 §二十六 的 W1–W4（扩展 api 2；[tasks/W1.md](tasks/W1.md) 是轻量 Work）不是一回事。
 
+已完成 3 条，见 [DONE.md](DONE.md) 同名一节。
+
 - [ ] **Mac1 macOS CI 跑测试**。依赖：无。验收（建议）：在 macOS runner 上 `cargo test --workspace`、`npm --prefix apps/gui test`、`npm --prefix apps/gui run typecheck` 通过；跑不过的用例逐条记下。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
-- [~] **Mac2 GUI 小修 + 不签名的 dmg 手测**。§2 的代码已改（2026-11-08，`455741e` 菜单、Dock、托盘、全屏收起、主进程快捷键；`3c49369` 界面上按平台显示 ⌘ 或 Ctrl；`aeb3e8d` 把 `.terminal`、`.fileloc` 算进打开即执行），要在 Mac 上实测：系统菜单；⌘ 快捷键和各处提示，包括用 ⌘/ 打开「键盘快捷键」对话框；点 Dock 图标恢复窗口；点通知；模板图标在浅色、深色和 Retina 下的显示；全屏时先退出全屏再藏进托盘；托盘点击；远程副本带上 quarantine 属性。「在旁边打开」的提示仍写 Ctrl+单击，见 §八，本轮没改。打包和签名仍待做：dmg / zip / `icon.icns` / 通用二进制，以及 Developer ID 与公证。Mac 上托盘图标从 `process.resourcesPath` 取 `iconTemplate.png`（[main.cts](../apps/gui/electron/main.cts) 调 [platform.cts](../apps/gui/electron/platform.cts) `trayIcon`），但 [package.json](../apps/gui/package.json) 的 `build.extraResources` 只复制了 `build/icon.ico`。打包时要把 [iconTemplate.png](../apps/gui/build/iconTemplate.png) 和 [iconTemplate@2x.png](../apps/gui/build/iconTemplate@2x.png) 一起复制到 resources，否则打出来的 Mac 包托盘没有图标。依赖：Mac1 至少 typecheck 与 test 绿；dmg 只能在 macOS 上打。验收（建议）：输入框里 ⌘C / ⌘V / ⌘X / ⌘A / ⌘Z 都能用；⌘Q 退出、⌘M 最小化；点 Dock 图标窗口回来；菜单栏图标在浅色、深色和 Retina 下都看得清；dmg 装上后首次打开能启动（不签名时走「隐私与安全性」放行）。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
-- [~] **Mac3 随 A2 / B1 做环境、终端、字节走 hub**。本轮代码已改、要实测的两条：内置终端在 macOS 上加 `-l`（`c5355fd`，[terminal.rs](../crates/hub/src/terminal.rs) `unix_shell`）；描述文件 `[locate.paths].macos` 补了 `/opt/homebrew/bin` 与 `/usr/local/bin`（同一提交；claude、codex、cursor、codebuddy、with）。还没做：用登录 shell 取 PATH（仍随 B1）、Unix 宿主与锁在 Mac 上实测（§一那条）。字节走 hub 的接口已做（[DONE.md](DONE.md) §八），Mac GUI 连上远程 hub 之后要实测能打开扩展资源和副本。依赖：[MULTI-NODE.md](MULTI-NODE.md) §12 的 A2（代码已完成，验收见上面「要实测」）与 B1；同文 §15「单干模式」定下本机 hub 加内置节点之后，PATH 在节点启动时取一次。浏览器视图要不要把摄像头 / 麦克风写进 `Info.plist` 也挂在这里（[EXTENSIONS.md](EXTENSIONS.md) §9「浏览器视图」）。验收（建议）：从 Dock 启动的 GUI 起的 hub 能找到 Homebrew 和 npm 装的 CLI；内置终端里 `brew` 可用；agent 会话里 `cargo` / `npm` 可用；宿主用进程组管住整棵树；Mac GUI 连远程 hub 时能打开扩展静态资源与工作区文件。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
-- [ ] **Mac4 签名、公证、自动更新**。范围：该文 §3「打包与分发」的签名与公证：Developer ID、hardened runtime、`bin/` 里的 hub 一起签、`electron-updater` 走通。依赖：Mac2，以及一个 Apple Developer 账号（没有账号做不了，见该文 §6「待定」）。验收（建议）：首次打开不再需要去「隐私与安全性」放行；装 N 版后发布 N+1，GUI 自动下载并在退出时安装。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
+- [~] **Mac2 GUI 小修 + 不带 hub 的 ad-hoc 包手测**。§2 的代码已改（2026-11-08，`455741e` 菜单、Dock、托盘、全屏收起、主进程快捷键；`3c49369` 界面上按平台显示 ⌘ 或 Ctrl；`aeb3e8d` 把 `.terminal`、`.fileloc` 算进打开即执行；`6e4392a`「在旁边打开」在 Mac 上写「⌘+单击或中键：在旁边打开」），要在 Mac 上实测：系统菜单；⌘ 快捷键和各处提示，包括用 ⌘/ 打开「键盘快捷键」对话框；点 Dock 图标恢复窗口；点通知；模板图标在浅色、深色和 Retina 下的显示；全屏时先退出全屏再藏进托盘；托盘点击；远程副本带上 quarantine 属性。不带 hub 的 ad-hoc 包配置已做，要实测（2026-11-08，`c529e55` 打包、`8e90dac` 主进程、`6e4392a` 连接页）：dmg 与 zip，各 arm64、x64，`identity` 为 `-`，包里没有 hub，托盘 png 在 `mac.extraResources`。这台 Windows 打不出 mac 包。步骤见 [tasks/MACOS.md](tasks/MACOS.md) §8「在 Mac 上打包与安装（不带 hub、ad-hoc 签名）」。Developer ID、公证和自动更新是 Mac4，暂不做。依赖：Mac1 至少 typecheck 与 test 绿；dmg 只能在 macOS 上打。验收（建议）：输入框里 ⌘C / ⌘V / ⌘X / ⌘A / ⌘Z 都能用；⌘Q 退出、⌘M 最小化；点 Dock 图标窗口回来；菜单栏图标在浅色、深色和 Retina 下都看得清；按 [tasks/MACOS.md](tasks/MACOS.md) §8 装上后首次打开能启动，`codesign --verify --deep --strict` 通过，并按 [MULTI-NODE.md](MULTI-NODE.md) §14「怎么实测」连上 Windows hub。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
+- [~] **Mac3 随 A2 / B1 做环境、终端、字节走 hub**。run 8298b08a 已改、要实测的两条：内置终端在 macOS 上加 `-l`（`c5355fd`，[terminal.rs](../crates/hub/src/terminal.rs) `unix_shell`）；描述文件 `[locate.paths].macos` 补了 `/opt/homebrew/bin` 与 `/usr/local/bin`（同一提交；claude、codex、cursor、codebuddy、with）。还没做：用登录 shell 取 PATH（仍随 B1）、Unix 宿主与锁在 Mac 上实测（§一那条）。字节走 hub 的接口已做（[DONE.md](DONE.md) §八），Mac GUI 连上远程 hub 之后要实测能打开扩展资源和副本。依赖：[MULTI-NODE.md](MULTI-NODE.md) §12 的 A2（代码已完成，验收见上面「要实测」）与 B1；同文 §15「单干模式」定下本机 hub 加内置节点之后，PATH 在节点启动时取一次。浏览器视图要不要把摄像头 / 麦克风写进 `Info.plist` 也挂在这里（[EXTENSIONS.md](EXTENSIONS.md) §9「浏览器视图」）。验收（建议）：从 Dock 启动的 GUI 起的 hub 能找到 Homebrew 和 npm 装的 CLI；内置终端里 `brew` 可用；agent 会话里 `cargo` / `npm` 可用；宿主用进程组管住整棵树；Mac GUI 连远程 hub 时能打开扩展静态资源与工作区文件。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
+- [>] **Mac4 签名、公证、自动更新**。2026-11-08：人有 Mac、没有 Apple Developer 账号，暂不做。范围仍是该文 §3「打包与分发」的 Developer ID、hardened runtime、公证，以及 `electron-updater` 走通。本轮的包不带 hub，没有要一起签的 hub 二进制。依赖：Mac2 的包能在 Mac 上装起来，以及一个 Apple Developer 账号（没有账号做不了，见该文 §6「待定」）。验收（建议）：首次打开不再需要去「隐私与安全性」放行；装 N 版后发布 N+1，GUI 自动下载并在退出时安装。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
 
 待定（[tasks/MACOS.md](tasks/MACOS.md) §6「待定」）：
 
-- [ ] 手边有没有 Mac 可测。Mac2 起都需要真机或 runner
-- [ ] 有没有 Apple Developer 账号（Mac4 的硬依赖）。没有就只能停在不签名的 dmg + 手动放行，没有自动更新
+- 手边有 Mac（2026-11-08 定）。Mac2 起的打包和界面要在这台 Mac 上实测。这台是 Windows，mac 包在这里打不出来
+- [>] 有没有 Apple Developer 账号（Mac4 的硬依赖）。2026-11-08：没有，Mac4 暂不做。现在停在 ad-hoc 签名的包，不自动更新。见 [tasks/MACOS.md](tasks/MACOS.md) §8
 - [ ] macOS CI 的费用。私有仓库的 macOS runner 要计费；要不要只在 `main` 和发版前跑，等有账号时再定

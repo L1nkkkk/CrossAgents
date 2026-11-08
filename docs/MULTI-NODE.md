@@ -469,7 +469,7 @@ B1 之后节点机器上的 GUI 管的可能是本机 node（单干时是本机 
 
 1. 在 Windows 中心上以管理员打开 OpenSSH Server。管理员账户的公钥放 `C:\ProgramData\ssh\administrators_authorized_keys`，这个文件只能由 Administrators 和 SYSTEM 写。普通用户的公钥放该用户自己的 `authorized_keys`。
 2. 中心上的 hub 要在跑。另开一个 SSH 会话，确认能读到 `~/.crossagents/hub.json`（先 `cat ~/.crossagents/hub.json`，Windows 的 cmd 用 `type "%USERPROFILE%\.crossagents\hub.json"`），里面有 `port`，并且这个会话里能跑 `crossagents`（例如 `crossagents device list`）。改过 PATH 要重启 sshd，新会话才看得到。
-3. 另一台机器用桌面版 GUI，打开设置 →「连接」，填 `user@host`（需要时填用户名、SSH 端口），点「配对并连接」。配对成功后侧栏标出远程主机；在两端各发一条消息，对话内容一致。
+3. 另一台机器用桌面版 GUI，打开设置 →「连接」，填 `user@host`（需要时填用户名、SSH 端口），点「配对并连接」。配对成功后侧栏标出远程主机；在两端各发一条消息，对话内容一致。Mac 上用本轮的包（不带 hub、ad-hoc 签名），打包与安装见 [tasks/MACOS.md](tasks/MACOS.md) §8「在 Mac 上打包与安装（不带 hub、ad-hoc 签名）」。
 4. 断开这台机器的网络，或停掉隧道的 ssh。连接页应变成未连接，并按 1、2、5、10、30 秒重连。网络恢复后，断线期间的事件按 `Last-Event-ID` 续上，不把更早的历史再放一遍。在中心把这台设备吊销后再连，应停止重连，并要求重新配对。
 
 参照 Cutex desktop v0.2.2（提交 `40ffe16`）。[apps/desktop/src/main/ssh.ts](https://github.com/senxiu-official/cutex-desktop/blob/40ffe16003e27b29d890e9fe1ba9f309dd379e7d/apps/desktop/src/main/ssh.ts) 的 `SshTunnel` 用 `ssh -N -L`，断线后用 `tunnelReduce` 退避重连，本地端口尽量沿用；`resolveSshBinary` 在 Windows 上优先系统自带的 `System32\OpenSSH\ssh.exe`（Git 自带的 ssh 不认 Windows 的 ssh-agent）。Windows 主机怎么开，见 [docs/install/AGENT-INSTALL.md](https://github.com/senxiu-official/cutex-desktop/blob/40ffe16003e27b29d890e9fe1ba9f309dd379e7d/docs/install/AGENT-INSTALL.md) §7.4：管理员权限打开 OpenSSH Server，管理员账户认 `C:\ProgramData\ssh\administrators_authorized_keys`，配对命令要在 SSH 会话的 PATH 里。
@@ -482,7 +482,7 @@ hub 放云上：对话里有代码片段和 diff，公司代码先确认合规�
 
 ## 15. 单干模式
 
-结论：连不上中心时，Mac 用本机 hub + 内置节点继续工作；GUI 记中心和本机两个 hub，连不上中心就切到本机，界面上始终标明当前连的是哪个。结构仍照 §3：GUI 哪台都能开，中心 hub 只有一处，每台跑 agent 的机器一个 node；Mac 是 GUI + 节点（§11 第 3 条已定）。要让 Mac 带出门也能单干，hub 也要能在 macOS 上跑，和 Windows 同一份代码（[MACOS.md](tasks/MACOS.md) §4）。
+结论：连不上中心时，Mac 用本机 hub + 内置节点继续工作；GUI 记中心和本机两个 hub，连不上中心就切到本机，界面上始终标明当前连的是哪个。结构仍照 §3：GUI 哪台都能开，中心 hub 只有一处，每台跑 agent 的机器一个 node；Mac 是 GUI + 节点（§11 第 3 条已定）。要让 Mac 带出门也能单干，hub 也要能在 macOS 上跑，和 Windows 同一份代码（[MACOS.md](tasks/MACOS.md) §4）。2026-11-08 的 Mac 安装包不带 hub，也不连本机另外运行的 hub（[MACOS.md](tasks/MACOS.md) §8），单干还做不到。
 
 - 一个 agent 只归一个 hub：中心建的 agent 在中心掉线时照常跑，事件攒在节点上等中心回来补发（§7.4）；单干时新建的 agent 归本机 hub。
 - 单干期间的对话第一版分开放，GUI 里「本机」「中心」各看各的。以后合并进中心：节点本来就要保留自己 agent 的追加事件日志（§7.5），中心回来后补发过去，中心把这些 agent 收编为该节点上的 agent（CLI 原生会话文件在节点上，能续）。Chat 好合；单干期间跑的 Work 牵涉任务和合并状态，先不合。

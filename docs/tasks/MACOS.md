@@ -1,12 +1,12 @@
 # macOS 任务书：让项目在 Mac 上跑起来
 
-> 来源：2026-11-07 讨论（run 4c111086）· 相关设计稿：[MULTI-NODE.md](../MULTI-NODE.md) §7.1、§12、§15 · [EXTENSIONS.md](../EXTENSIONS.md) §9「浏览器视图」· 状态：Mac2 的 GUI 代码、Mac3 的终端 `-l` 与 `[locate.paths]` 已改（2026-11-08，run 8298b08a），都要在 Mac 上实测；打包、签名、CI、登录 shell 取 PATH 未做 · §7 对照 Cutex 提交 `40ffe16`（2026-11-08）
+> 来源：2026-11-07 讨论（run 4c111086）· 相关设计稿：[MULTI-NODE.md](../MULTI-NODE.md) §7.1、§12、§15 · [EXTENSIONS.md](../EXTENSIONS.md) §9「浏览器视图」· 状态：Mac2 的 GUI 代码、Mac3 的终端 `-l` 与 `[locate.paths]` 已改（2026-11-08，run 8298b08a）；不带 hub 的 ad-hoc 包配置已做（2026-11-08，run e28910b3，`c529e55`、`8e90dac`、`6e4392a`）。这些都要在 Mac 上实测。Developer ID、公证、自动更新暂不做（人有 Mac、没有 Apple Developer 账号）。CI、登录 shell 取 PATH 未做 · §7 对照 Cutex 提交 `40ffe16`（2026-11-08）· 在 Mac 上打包与安装见 §8
 
 ## 1. 现状
 
 项目从没在 macOS 上跑过。三件事都缺：装得起来、界面上的 Mac 习惯、跑得对。
 
-- **打包只有 Windows**。[apps/gui/package.json](../../apps/gui/package.json) 的 `electron:build` / `electron:release` 写死 `--win`，`build` 里只有 `win`（target `nsis`），`extraResources` 写死 `crossagents.exe` 和 `icon.ico`。[U1.md](U1.md) §4 也记了「打包只做了 Windows」。所以 Mac 上现在没有任何安装包，连不签名的 dmg 都没有。
+- **打包**：Windows 仍是 [apps/gui/package.json](../../apps/gui/package.json) 的 `electron:build` / `electron:release`（`--win`，target `nsis`）。hub 的 `crossagents.exe` 和 `icon.ico` 在 `win.extraResources`（2026-11-08，`c529e55`，从顶层 `extraResources` 挪过去）。同一提交配了 Mac 的 ad-hoc、不带 hub 的 dmg / zip，还没在 Mac 上打出来，步骤见 §8。[U1.md](U1.md) §4 记的「打包只做了 Windows」是这之前的状态。
 - **没有 CI**：仓库没有 `.github/`，macOS 上的代码一次都没被编译、测试过。这是最便宜、也最先该补的一环——它不依赖有没有 Mac 机器。
 - **Unix 代码是真实现，但没跑过**：宿主在非 Windows 上用进程组代替 Job Object，`ps` 查占用、Unix 版测试脚本都写了（[PROCESS-SUPERVISION.md](../PROCESS-SUPERVISION.md) §7）。[TODO.md](../TODO.md) §一「Linux / macOS 上实测宿主」推迟到 B1，[LOCKS.md](LOCKS.md) §5 的 Unix 实验（`flock` 继承、`setsid` 脱离、进程组前任检查）**一次都没跑过**，现在只能按弱保证措辞。
 - **已经为 macOS 准备好的**（对照代码核过）：`main.cts` 的 `titleBarStyle: "hiddenInset"` 与 `trafficLightPosition`；`styles.css` 的 `.titlebar.mac`（`padding-left: 80px`，`src/titlebar.tsx` 按 `navigator.userAgent` 加这个类）；`window-all-closed` 区分 `darwin`；[openCopy.cts](../../apps/gui/electron/openCopy.cts) 的 `runsWhenOpened` 已含 `.app` / `.command` / `.sh`；部分快捷键已认 `metaKey`（[App.tsx](../../apps/gui/src/App.tsx) 的 `mod`、[SessionComposer.tsx](../../apps/gui/src/views/SessionComposer.tsx) 的 `composerAction`、[Sidebar.tsx](../../apps/gui/src/Sidebar.tsx) 的旁开）；`main.cts` 起 hub 时已按平台选 `crossagents` / `crossagents.exe`。[titlebar.tsx](../../apps/gui/src/titlebar.tsx) 始终挂载 `<MenuBar />`；Mac 上 [menubar.tsx](../../apps/gui/src/menubar.tsx) 的 `MenuBar` 不渲染菜单栏（`if (isMac) return …`），只留 ⌘/ 的监听和「键盘快捷键」对话框。
@@ -23,7 +23,7 @@
 
 **快捷键**。同一文件的 `before-input-event`：缩放那一段判断 `!input.control`，dev server 那一段（`F12`、`input.control && input.shift && i`、`input.control && r`）也只认 `control`。Mac 上要认 `input.meta`——⌘= / ⌘- / ⌘0 是缩放，⌘⌥I 是开发者工具，⌘R 是重新加载。同时 [menubar.tsx](../../apps/gui/src/menubar.tsx) 里每条 `Entry` 的 `keys` 和 `SHORTCUTS` 表按平台显示：Mac 上菜单栏不渲染，但「键盘快捷键」对话框（`⌘/` 打开，监听认 `metaKey`）经 [shortcuts.ts](../../apps/gui/src/lib/shortcuts.ts) 的 `shortcut` 把 `Ctrl` 显示成 ⌘。
 
-本轮已改代码，要实测（2026-11-08）：主进程快捷键在 `455741e`（`platform.cts` 的 `shortcut`，darwin 认 `meta`，字母键看 `input.code`）；界面显示在 `3c49369`。「在旁边打开」的提示仍是「Ctrl+单击或中键：在旁边打开」（[i18n.ts](../../apps/gui/src/lib/i18n.ts) `sidebar.besideHint`，[Sidebar.tsx](../../apps/gui/src/Sidebar.tsx) 和 [SessionPeek.tsx](../../apps/gui/src/SessionPeek.tsx) 都用它）。处理代码认 `ctrlKey || metaKey`；Mac 上 Ctrl+单击是右键，这句应该写 ⌘，本轮没改。
+本轮已改代码，要实测（2026-11-08）：主进程快捷键在 `455741e`（`platform.cts` 的 `shortcut`，darwin 认 `meta`，字母键看 `input.code`）；界面显示在 `3c49369`。「在旁边打开」在 `6e4392a` 按平台写：[i18n.ts](../../apps/gui/src/lib/i18n.ts) 的 `besideHint`，Mac 上是「⌘+单击或中键：在旁边打开」，其它平台仍是「Ctrl+单击或中键：在旁边打开」。[Sidebar.tsx](../../apps/gui/src/Sidebar.tsx) 和 [SessionPeek.tsx](../../apps/gui/src/SessionPeek.tsx) 都用 `sidebar.besideHint`。处理代码认 `ctrlKey || metaKey`；Mac 上 Ctrl+单击是右键，提示写的是 ⌘。这句在 Mac 上是否照显示、⌘ 单击是否在旁边打开，要实测。
 
 **点 Dock 图标**。`main.cts` 的 `app.on("activate")` 只在 `BrowserWindow.getAllWindows().length === 0` 时 `createWindow()`。但托盘把窗口藏起来而不是关掉：[tray.cts](../../apps/gui/electron/tray.cts) 的 `keep(win)` 在 `close` 里 `event.preventDefault()` 再 `win.hide()`，窗口一直在。于是 Mac 上点 Dock 图标什么都不发生，窗口回不来。改成调已经有的 `showWindow()`（现在 `second-instance` 在用）——它没有窗口时也会 `createWindow()`，两种情形都对。
 
@@ -31,7 +31,7 @@
 
 **托盘**。`main.cts` 里 `createTray(join(process.resourcesPath, "icon.ico"), …)` 写死 `.ico`；macOS 菜单栏要模板 PNG——黑色图形、透明背景，系统按深浅色反色——`nativeImage` 上设 `setTemplateImage(true)` 或文件名以 `Template` 结尾。`tray.cts` 的 `displayBalloon` 和 `balloon-click` 只在 Windows 有效，Mac 上要改用系统通知（`Notification`）。`hintOnce` 的文案「点任务栏右下角的图标可以重新打开」按平台改（Mac 是菜单栏图标）。`Tray` 的 `click` / `right-click` 在 Mac 上的语义也要一并核对（**要在 Mac 上确认**）。
 
-本轮已改代码，要实测（2026-11-08，`455741e`）：托盘图标用 [iconTemplate.png](../../apps/gui/build/iconTemplate.png) 与 [iconTemplate@2x.png](../../apps/gui/build/iconTemplate@2x.png)，darwin 上 `setTemplateImage(true)`；[main.cts](../../apps/gui/electron/main.cts) 从 `process.resourcesPath` 取 `trayIcon` 返回的文件名。提示改用 `Notification`（模块级 `Set` 拿住，避免被回收后点不了）；`hintOnce` 在 Mac 上说菜单栏。单击 / 右键、点通知、浅色 / 深色 / Retina 仍要在 Mac 上确认。[package.json](../../apps/gui/package.json) 的 `build.extraResources` 只复制了 `build/icon.ico`，打包时这两个 png 还没放进 resources，打出来的 Mac 包托盘会没有图标。
+本轮已改代码，要实测（2026-11-08，`455741e`）：托盘图标用 [iconTemplate.png](../../apps/gui/build/iconTemplate.png) 与 [iconTemplate@2x.png](../../apps/gui/build/iconTemplate@2x.png)，darwin 上 `setTemplateImage(true)`；[main.cts](../../apps/gui/electron/main.cts) 从 `process.resourcesPath` 取 `trayIcon` 返回的文件名。提示改用 `Notification`（模块级 `Set` 拿住，避免被回收后点不了）；`hintOnce` 在 Mac 上说菜单栏。单击 / 右键、点通知、浅色 / 深色 / Retina 仍要在 Mac 上确认。打包这一条本轮做了配置、还要实测（2026-11-08，`c529e55`）：顶层 `build.extraResources` 已去掉，Windows 的 hub 与 `icon.ico` 在 `win.extraResources`，`mac.extraResources` 复制 [iconTemplate.png](../../apps/gui/build/iconTemplate.png) 与 [iconTemplate@2x.png](../../apps/gui/build/iconTemplate@2x.png)。打出来的 Mac 包托盘有没有图标，要在 Mac 上确认。步骤见 §8。
 
 **打开即执行的文件**。`main.cts` 的打开判断补 macOS 的 `.terminal`、`.fileloc`——这两个在 Mac 上会被系统当成可执行/定位文件打开，和 `.app` / `.command` / `.sh` 是一类。
 
@@ -43,15 +43,15 @@
 
 ## 3. 打包与分发
 
-**electron-builder 加 mac 目标**：`dmg`（安装）加 `zip`（自动更新用），图标 `build/icon.icns`（现在 `build/` 里有 `icon.ico`、`icon.png`，以及托盘用的 `iconTemplate.png`、`iconTemplate@2x.png`，还没有 `icon.icns`）。`extraResources` 不能再写死 `crossagents.exe`：hub 二进制按 `aarch64-apple-darwin` 和 `x86_64-apple-darwin` 各编一份，再 `lipo` 成通用版放进 `resources/bin/`。`main.cts` 已经按平台取 `crossagents`，这一半不用改。按架构各出一个包、不用 `lipo`，是可选做法，待定（§7 的 Cutex 按架构各出一个 zip）。
+**electron-builder 的 mac 目标**（2026-11-08 已配置，`c529e55`；在 Mac 上打出包并装上，要实测，步骤见 §8）：`dmg` 与 `zip`，各 `arm64`、`x64`，不做通用二进制。图标用已有的 `build/icon.png`，仓库里不另放 `icon.icns`（electron-builder 在 Mac 上从这张 png 转）。包里不带 hub，所以没有按 `aarch64-apple-darwin` / `x86_64-apple-darwin` 编的 hub，也不做 `lipo`。顶层不再有 `extraResources`：`crossagents.exe` 与 `icon.ico` 只在 `win.extraResources`；`mac.extraResources` 只放托盘的 `iconTemplate.png` 与 `iconTemplate@2x.png`。`electron:build` / `electron:release` 仍是 `--win`。`zip` 留给以后的自动更新；本轮 Mac 上不自动更新，见下面和 §8。
 
 **摄像头 / 麦克风**：浏览器视图（[EXTENSIONS.md](../EXTENSIONS.md) §9「浏览器视图」）要开摄像头或麦克风时，macOS 必须在 `Info.plist` 里声明 `NSCameraUsageDescription` / `NSMicrophoneUsageDescription`，并带对应的 entitlement；不声明会出问题，具体表现要在 Mac 上确认。主窗口的权限仍由 `permissions.cts` 的 `permissionAllowed` 决定（只放行 `clipboard-sanitized-write`），这条不变。
 
-**签名与公证**：Apple Developer ID 证书、hardened runtime，`bin/` 里的 hub 二进制要一起签名、一起公证。不签名的后果，照原话：首次打开要去「系统设置 → 隐私与安全性」放行；`electron-updater` 在 macOS 上要求签名，不签就没有自动更新。
+**签名与公证**：Developer ID、hardened runtime、公证是 Mac4。2026-11-08：人有 Mac、没有 Apple Developer 账号，暂不做。本轮的包不带 hub，没有要一起签的 hub 二进制。
 
-上面说的「不签名」，在 Apple Silicon 上实际要做 ad-hoc 签名：没有有效签名的 arm64 程序跑不起来。内容放齐后 `codesign --force --deep --sign -`，再 `codesign --verify --deep --strict`（对照 §7）。这不是 Developer ID，也不公证，首次打开仍可能要去「隐私与安全性」放行。[apps/gui/package.json](../../apps/gui/package.json) 的 `electron-builder` 是 26.15.3。它找不到证书时会不会自动做这次 ad-hoc 签，要实测。
+本轮做的是 ad-hoc 签名：[apps/gui/package.json](../../apps/gui/package.json) 的 `build.mac.identity` 为 `"-"`，`hardenedRuntime` 为 false，`notarize` 为 false（`c529e55`）。`identity` 用 `"-"`，不用 `null`：`null` 会跳过签名，Apple Silicon 上打不开。这不是 Developer ID，也不公证。electron-builder 是 26.15.3。打出来的 `CrossAgents.app` 上 `codesign -dv --verbose=2` 应看到 `Signature=adhoc`，`codesign --verify --deep --strict` 应通过。这两条要在 Mac 上实测，见 §8。从别处拷来的包，首次打开仍可能要去「系统设置 → 隐私与安全性」放行。
 
-**只能在 macOS 上做**：签名和公证都只能在 macOS 上跑，所以要么有一台 Mac，要么用 macOS 的 CI runner；私有仓库的 runner 要计费（见 §6）。这一条是 §5 里 Mac4 的硬依赖。
+**只能在 macOS 上做**：签名和公证都只能在 macOS 上跑，所以要么有一台 Mac，要么用 macOS 的 CI runner；私有仓库的 runner 要计费（见 §6）。Developer ID 与公证是 §5 里 Mac4 的硬依赖，暂不做。本轮的 ad-hoc 包同样只能在 macOS 上打，这台 Windows 打不出来，步骤见 §8。
 
 ## 4. 节点与 hub 在 macOS 上
 
@@ -81,11 +81,11 @@
 - 依赖：无，排在最前。它不需要 Mac 机器，也不需要签名。
 - 验收（建议）：三个命令在 macOS 上通过；跑不过的用例逐条记下来——预期会有一批 Unix 专有代码第一次被编译。
 
-**Mac2 GUI 小修 + 不签名的 dmg 手测**（建议）
+**Mac2 GUI 小修 + 不带 hub 的 ad-hoc 包手测**（建议）
 
-- 范围：§2 的各条（代码已改，要实测，见 §2），加 §3 的 dmg / zip / `icon.icns` / 通用二进制（未做），不含 Developer ID 签名与公证。Apple Silicon 上要做的 ad-hoc 签名见 §3。`build.extraResources` 现在只复制 `build/icon.ico`；打包时把 `iconTemplate.png` 与 `iconTemplate@2x.png` 一起放进 resources，否则 Mac 包的托盘没有图标。
-- 依赖：Mac1 至少 `typecheck` 与 `test` 绿；dmg 只能在 macOS 上打。
-- 验收（建议）：输入框里 ⌘C / ⌘V / ⌘X / ⌘A / ⌘Z 都能用；⌘Q 退出、⌘M 最小化；点 Dock 图标窗口回来（这是 §2 第三条要修的 bug，修完应能验证「藏起来 → 点图标 → 回来」）；菜单栏图标在浅色和深色下都看得清；dmg 装上后首次打开能启动（不签名时走「隐私与安全性」放行）；打包产物 `codesign --verify --deep --strict` 通过。
+- 范围：§2 的各条（代码已改，要实测，见 §2）。不带 hub 的 ad-hoc 包配置已做，要实测（2026-11-08，`c529e55` 打包、`8e90dac` 主进程、`6e4392a` 连接页）：dmg / zip，各 arm64 与 x64，图标用 `icon.png`，托盘 png 在 `mac.extraResources`，见 §8。不含 Developer ID 与公证（Mac4，暂不做）。
+- 依赖：Mac1 至少 `typecheck` 与 `test` 绿；dmg 只能在 macOS 上打。这台是 Windows，打不出 mac 包。
+- 验收（建议）：输入框里 ⌘C / ⌘V / ⌘X / ⌘A / ⌘Z 都能用；⌘Q 退出、⌘M 最小化；点 Dock 图标窗口回来（这是 §2 第三条要修的 bug，修完应能验证「藏起来 → 点图标 → 回来」）；菜单栏图标在浅色和深色下都看得清；按 §8 装上后首次打开能启动，`codesign --verify --deep --strict` 通过，再按 [MULTI-NODE.md](../MULTI-NODE.md) §14「怎么实测」连 Windows hub。
 
 **Mac3 随 A2 / B1 做环境、终端、字节走 hub**（建议）
 
@@ -95,14 +95,15 @@
 
 **Mac4 签名、公证、自动更新**（建议）
 
-- 范围：§3 的签名与公证一半：Developer ID、hardened runtime、`bin/` 里的 hub 一起签、`electron-updater` 走通。
-- 依赖：Mac2（能打出 dmg）与一个 Apple Developer 账号；没有账号这一步做不了（见 §6）。
+- 2026-11-08：人有 Mac、没有 Apple Developer 账号，暂不做。
+- 范围：§3 的 Developer ID、hardened runtime、公证，以及 `electron-updater` 走通。本轮的包不带 hub，没有要一起签的 hub 二进制。
+- 依赖：Mac2 的包能在 Mac 上装起来，以及一个 Apple Developer 账号；没有账号这一步做不了（见 §6）。
 - 验收（建议）：首次打开不再需要去「隐私与安全性」放行；装 N 版后发布 N+1，GUI 自动下载并在退出时安装。
 
 ## 6. 待定
 
-- 手边有没有 Mac 可测。Mac2 起都需要真机或 runner。
-- 有没有 Apple Developer 账号（Mac4 的硬依赖）。没有的话只能停在「不签名的 dmg + 手动放行」，也就没有自动更新。
+- 手边有 Mac（2026-11-08 定）。Mac2 起的打包和界面要在这台 Mac 上实测。这台开发机是 Windows，mac 包在这里打不出来，agent 也不能在那台 Mac 上跑命令。
+- 没有 Apple Developer 账号（2026-11-08 定，Mac4 的硬依赖）。Mac4 暂不做。现在停在 ad-hoc 签名、不公证、不自动更新，见 §8。
 - macOS CI 的费用。仓库 L1nkkkk/CrossAgents 是私有的（2026-11-08 核实），macOS runner 要计费。Mac1 跑一次 `cargo test --workspace` 不便宜；要不要只在 `main` 和发版前跑，等有账号时再定。Cutex 的公开仓库不计费，见 §7。
 
 ## 7. Cutex 的做法
@@ -117,3 +118,40 @@
 - **CI 用 macos-15，公开仓库不计费。** [.github/workflows/build-binaries.yml](https://github.com/senxiu-official/cutex-desktop/blob/40ffe16003e27b29d890e9fe1ba9f309dd379e7d/.github/workflows/build-binaries.yml) 的 matrix 里 `macos-arm64` 和 `macos-x64` 都是 `runner: macos-15`。仓库公开（未登录就能读到这次提交）。公开仓库的 GitHub-hosted macOS runner 不计费。我们的仓库要计费，见 §6。
 - **ad-hoc 签名下，safeStorage 每次更新都重新弹钥匙串。** 同一份 `package-portable.mjs` 开头写：ad-hoc 下每个包都是新身份，钥匙串里的 “Cutex Safe Storage” 每次更新都会再问；设 `CUTEX_DESKTOP_CODESIGN_IDENTITY` 用自签的代码签名证书，可以让 Always Allow 跨更新保留。安装文档 §10 写主机 token 加密在钥匙串里，ad-hoc 包每次更新都算一个新程序。[apps/desktop/src/main/shell.ts](https://github.com/senxiu-official/cutex-desktop/blob/40ffe16003e27b29d890e9fe1ba9f309dd379e7d/apps/desktop/src/main/shell.ts) 的 `DesktopShell` 用 `safeStorage` 存更新代理的口令（`setUpdateProxy`、`updateProxyConfig`）。主机 token 的存放点不在这个文件里，以安装文档 §10 为准。
 - **原生全屏时先退出再藏。** 同一个 `DesktopShell.hideWindow`：`isFullScreen()` 为真时先 `setFullScreen(false)`，收到 `leave-full-screen` 再 `hide()`。注释写直接藏会留下黑屏的 Space。我们这边见 §2「全屏时收进托盘」。
+
+## 8. 在 Mac 上打包与安装（不带 hub、ad-hoc 签名）
+
+2026-11-08（run e28910b3）配好了，还没在 Mac 上打出来、装上去。这台是 Windows，electron-builder 只在 macOS 上打 mac 包。下面每条标了「要实测」的，都是还没在那台 Mac 上跑过的。Windows 的安装包仍走 `electron:build` / `electron:release`，这一节不改它。
+
+**前提。** macOS 上安装 Node 与 git。这台机器没有核对 Mac 上要哪一个版本，要实测。不需要 Rust，也不需要先 `cargo build`：`electron:build:mac` 跑 [check-version.mjs](../../apps/gui/scripts/check-version.mjs) `--without-hub`，不检查 hub 二进制。
+
+**步骤。**
+
+1. `git clone https://github.com/L1nkkkk/CrossAgents.git`，进入仓库。
+2. `npm --prefix apps/gui ci`
+3. `npm --prefix apps/gui run electron:build:mac`
+
+这条脚本是 `node scripts/check-version.mjs --without-hub`，然后 `npm run build`、`npm run electron:compile`、`electron-builder --mac --publish never`。产物在 `apps/gui/release/`。配置里 dmg 和 zip 各打 arm64 与 x64，文件名是 `CrossAgents-<版本>-<arch>.dmg` 和同名的 `.zip`（[package.json](../../apps/gui/package.json) `build.mac.artifactName`）。装的时候按这台 Mac 的芯片选 arm64 或 x64。另一架构能不能在这台机器上打出来，要实测。
+
+**核对签名。** 对打出来的或装好的 `CrossAgents.app`：
+
+- `codesign -dv --verbose=2` 应看到 `Signature=adhoc`
+- `codesign --verify --deep --strict` 应通过
+
+`build.mac.identity` 是 `"-"`（ad-hoc），`hardenedRuntime` 是 false，`notarize` 是 false。要实测。
+
+**首次打开。** 在这台 Mac 上自己打的包没有隔离标记，一般不会被拦（要实测）。从别处拷来的（浏览器下载、AirDrop、聊天软件）会被拦。这时走 系统设置 → 隐私与安全性 →「仍要打开」，或 `xattr -dr com.apple.quarantine /Applications/CrossAgents.app`。
+
+**不带 hub。** 包里没有 hub，也不连这台 Mac 上另外运行的 hub，只能连另一台电脑上的 hub。说的是打出来的安装包。`npm --prefix apps/gui run electron:dev` 不走这条，仍连本机正在跑的 hub。
+
+打开后侧栏的离线原因是「未连接：」接上 [main.cts](../../apps/gui/electron/main.cts) 的 `NO_BUNDLED_HUB` 原文：「这个安装包不带 hub：在 设置 →「连接」 里连另一台电脑上的 hub」。侧栏标明现在连哪的那一行是「本机 · 不带 hub」，悬停也是这句话（[connection.ts](../../apps/gui/src/lib/connection.ts) `markWords`）。
+
+设置 →「连接」（[Connection.tsx](../../apps/gui/src/views/Connection.tsx)）：本机且包里没有 hub 时，「现在连的是」下面写「这个安装包不带 hub，只能连接另一台电脑上的 hub」，状态芯片是「不带 hub」。已经配对过一台中心时，「切回本机」用同一句说明，按钮不能点（`bundledHub` 为 false）。这些文案按代码写的，打开后的样子要在 Mac 上确认。
+
+**更新。** Mac 版不能自动更新：没有 Apple 签名，Squirrel.Mac 不接受 ad-hoc 签名的包，发布页上也没有 Mac 包。要更新就在 Mac 上拉新代码、重新打包，再替换「应用程序」里的 CrossAgents。
+
+设置里的更新卡片显示 [updates.cts](../../apps/gui/electron/updates.cts) `startUpdates` 的原文：「Mac 版没有 Apple 签名，不能自动更新：要更新就重新打包，再替换「应用程序」里的 CrossAgents。」这一状态下没有「检查更新」按钮，也不写「每 4 小时自动检查一次」。托盘菜单里没有检查更新那一项（[tray.cts](../../apps/gui/electron/tray.cts)，`manual` 时不放入）。卡片和托盘要在 Mac 上确认。
+
+**钥匙串。** 连接用的 token 由 Electron `safeStorage` 加密，密钥存在钥匙串里，密文写在 `<userData>/remote.json`（[remote.cts](../../apps/gui/electron/remote.cts) `sealToken` / `openToken`）。重新打包后签名会变，打开时钥匙串可能再问一次，选「始终允许」（要实测）。拒绝的话保存的配对读不出来：`openToken` 解不开就返回空，[remoteController.cts](../../apps/gui/electron/remoteController.cts) `connect` 把隧道标成离线，原因是 `REPAIR`（「请重新配对」），并且不再自动重连。连接页上就是「未连接」，说明是「请重新配对；不会再自动重连」（要实测）。
+
+**接着连 Windows 上的 hub。** 按 [MULTI-NODE.md](../MULTI-NODE.md) §14「怎么实测」。Mac 上用的就是这一节打出来的包。
