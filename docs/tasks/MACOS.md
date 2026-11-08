@@ -133,10 +133,12 @@
 
 这条脚本是 `node scripts/check-version.mjs --without-hub`，然后 `npm run build`、`npm run electron:compile`、`electron-builder --mac --publish never`。产物在 `apps/gui/release/`。配置里 dmg 和 zip 各打 arm64 与 x64，文件名是 `CrossAgents-<版本>-<arch>.dmg` 和同名的 `.zip`（[package.json](../../apps/gui/package.json) `build.mac.artifactName`）。装的时候按这台 Mac 的芯片选 arm64 或 x64。另一架构能不能在这台机器上打出来，要实测。
 
-**核对签名。** 对打出来的或装好的 `CrossAgents.app`：
+**核对签名。** 装好以后：
 
-- `codesign -dv --verbose=2` 应看到 `Signature=adhoc`
-- `codesign --verify --deep --strict` 应通过
+- `codesign -dv --verbose=2 /Applications/CrossAgents.app` 应看到 `Signature=adhoc`
+- `codesign --verify --deep --strict /Applications/CrossAgents.app` 应通过
+
+还没装时，electron-builder 解出的 app 在 `apps/gui/release/mac-arm64/CrossAgents.app`（arm64）与 `apps/gui/release/mac/CrossAgents.app`（x64）。目录名是 electron-builder 的默认（app-builder-lib/out/platformPackager.js `computeAppOutDir`：mac 加架构后缀，默认架构 x64 不加），要实测。
 
 `build.mac.identity` 是 `"-"`（ad-hoc），`hardenedRuntime` 是 false，`notarize` 是 false。要实测。
 
