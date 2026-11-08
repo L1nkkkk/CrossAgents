@@ -87,7 +87,7 @@ export function createTray(
       },
       { type: "separator" },
       { label: "打开 CrossAgents", click: show, enabled: !stopping },
-      update(),
+      ...(updates.state().state === "manual" ? [] : [update()]),
       { label: "以安全模式重启", click: restartSafeMode, enabled: !stopping },
       { type: "separator" },
       ...(far

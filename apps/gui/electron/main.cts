@@ -20,7 +20,7 @@ import { copyRoot, copyPrefix, copyName, staleCopies, runsWhenOpened, safeCopyRo
 import { decideSafeMode, loadingMarker, type SafeMode } from "./safeMode.cjs";
 import { defaultDeviceName, remoteFile, sshProgram, type Crypto } from "./remote.cjs";
 import { RemoteController, Unavailable } from "./remoteController.cjs";
-import { applicationMenu, shortcut, trayIcon } from "./platform.cjs";
+import { applicationMenu, bundledHub, shortcut, trayIcon } from "./platform.cjs";
 
 // Must run before app.ready. CORS remains enabled for module imports from file://.
 protocol.registerSchemesAsPrivileged([{ scheme: "crossagents-ext", privileges: {
@@ -102,6 +102,8 @@ let updates: Updates | undefined;
 let remote: RemoteController | undefined;
 
 const isRemote = () => remote?.mode() === "remote";
+const hasBundledHub = () => bundledHub(app.isPackaged, process.platform, process.resourcesPath, existsSync);
+const NO_BUNDLED_HUB = "这个安装包不带 hub：在 设置 →「连接」 里连另一台电脑上的 hub";
 
 /**
  * The hub to talk to now: this machine's (`hub.json` and `token`, read on every call) or, in
@@ -110,6 +112,7 @@ const isRemote = () => remote?.mode() === "remote";
  */
 async function currentHub(): Promise<{ base: string; token: string; mode: "local" | "remote" }> {
   if (remote && isRemote()) return { ...remote.hub(), mode: "remote" };
+  if (!hasBundledHub()) throw new Error(NO_BUNDLED_HUB);
   await localHub?.ready();
   return { ...(await localConnection()), mode: "local" };
 }
@@ -136,6 +139,7 @@ function manageForMode(mode: "local" | "remote") {
     return;
   }
   if (localHub) return;
+  if (!hasBundledHub()) return;
   const exe = process.platform === "win32" ? "crossagents.exe" : "crossagents";
   localHub = manageLocalHub(join(process.resourcesPath, "bin", exe), hubHome(), logLine);
 }
@@ -162,6 +166,7 @@ function createRemote(): RemoteController {
     crypto: safeCrypto,
     ssh: { program: sshProgram(process.platform, process.env, existsSync), prefix: [] },
     defaultDeviceName: defaultDeviceName(hostname()),
+    bundledHub: hasBundledHub,
     onState: (state) => broadcast("connection:state", state),
     onPairStep: (step) => broadcast("connection:pair-step", step),
     onHubChange: hubChanged,
@@ -545,7 +550,7 @@ async function relayEvents(contents: WebContents, signal: AbortSignal) {
     if (!isRemote()) {
       // The local hub went away (or never came up): start it again; say why if it cannot be.
       localHub?.recheck();
-      reason = localHub?.problem() ?? reason;
+      reason = hasBundledHub() ? (localHub?.problem() ?? reason) : NO_BUNDLED_HUB;
     }
     emit("hub:status", `offline: ${reason}`);
     await new Promise((r) => setTimeout(r, RECONNECT_MS));

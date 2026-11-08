@@ -6,6 +6,7 @@
 import { app, BrowserWindow } from "electron";
 import { autoUpdater } from "electron-updater";
 import type { UpdateState } from "../src/bridge";
+import { automaticUpdates } from "./platform.cjs";
 
 /** Long enough not to bother GitHub, short enough that a release reaches a GUI left open. */
 const CHECK_EVERY_MS = 4 * 60 * 60 * 1000;
@@ -21,6 +22,10 @@ export type Updates = {
 };
 
 export function startUpdates(log: (line: string) => void): Updates {
+  if (!automaticUpdates(process.platform)) {
+    const manual: UpdateState = { state: "manual", current: app.getVersion(), reason: "这个版本没有签名，不能自动更新：到发布页下载新版本替换。" };
+    return { state: () => manual, check: async () => manual, install() {}, onChange() {} };
+  }
   const listeners: ((state: UpdateState) => void)[] = [];
   let state: UpdateState = { state: "idle", current: app.getVersion() };
   const set = (next: UpdateState) => {

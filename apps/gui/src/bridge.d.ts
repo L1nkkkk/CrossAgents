@@ -8,6 +8,7 @@ export type DevHub = { exe: string; running: string; shipped: string };
 
 /** Where the GUI's own update stands (electron/updates.cts). Times are ISO strings. */
 export type UpdateState =
+  | { state: "manual"; current: string; reason: string }
   | { state: "idle"; current: string }
   | { state: "checking"; current: string }
   | { state: "latest"; current: string; checked_at: string }
@@ -25,6 +26,8 @@ export type TunnelState = { status: "connecting" | "connected" | "offline"; loca
 /** Local mode (this machine's hub) or remote mode (a paired hub elsewhere). Never carries the token. */
 export type ConnectionState = {
   mode: "local" | "remote";
+  /** Packaged: the hub executable is present; development: true. */
+  bundledHub: boolean;
   remote?: { target: RemoteTarget; deviceName: string; deviceId: string; pairedAt: string };
   tunnel?: TunnelState;
   defaultDeviceName: string;

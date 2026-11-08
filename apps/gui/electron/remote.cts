@@ -11,6 +11,7 @@ export type RemoteTarget = { host: string; user?: string; sshPort?: number; comm
 export type TunnelState = { status: "connecting" | "connected" | "offline"; localPort?: number; remotePort?: number; reason?: string; stopped?: boolean };
 export type ConnectionState = {
   mode: "local" | "remote";
+  bundledHub: boolean;
   remote?: { target: RemoteTarget; deviceName: string; deviceId: string; pairedAt: string };
   tunnel?: TunnelState;
   defaultDeviceName: string;
@@ -341,8 +342,8 @@ export function openToken(crypto: Crypto, sealed: string): string | undefined {
 export const REPAIR = "请重新配对";
 
 /** The page's view: never the token. */
-export function publicState(record: RemoteRecord | undefined, tunnel: TunnelState | undefined, deviceName: string): ConnectionState {
-  const state: ConnectionState = { mode: record?.mode ?? "local", defaultDeviceName: deviceName };
+export function publicState(record: RemoteRecord | undefined, tunnel: TunnelState | undefined, deviceName: string): Omit<ConnectionState, "bundledHub"> {
+  const state: Omit<ConnectionState, "bundledHub"> = { mode: record?.mode ?? "local", defaultDeviceName: deviceName };
   if (record) {
     state.remote = { target: { ...record.target }, deviceName: record.deviceName, deviceId: record.deviceId, pairedAt: record.pairedAt };
     if (record.mode === "remote" && tunnel) state.tunnel = { ...tunnel };
