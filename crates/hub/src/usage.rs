@@ -70,12 +70,13 @@ impl AgentUsage {
         }
     }
 
-    fn close_session(&mut self) {
+    fn close_session(&mut self, ended: bool) {
         self.closed_cost += self.session_cost.take().unwrap_or(0.0);
         if self.sessions > 0 && !self.session_has_tokens {
             self.missing_session = true;
         }
-        if self.sessions > 0 && self.session_has_tokens && self.session_requests.is_none() {
+        if ended && self.sessions > 0 && self.session_has_tokens && self.session_requests.is_none()
+        {
             self.requests_lost = true;
             self.requests_known = false;
         }
@@ -126,7 +127,7 @@ pub async fn compute(
                     ..
                 } => {
                     let usage = agents.entry(id).or_default();
-                    usage.close_session();
+                    usage.close_session(true);
                     usage.sessions += 1;
                 }
                 EventKind::AgentModelChanged { id, model, .. } => {
@@ -194,7 +195,7 @@ pub async fn compute(
     let mut rows: BTreeMap<String, (UsageRow, HashSet<AgentId>)> = BTreeMap::new();
     let mut total = 0.0;
     for (id, mut usage) in agents {
-        usage.close_session();
+        usage.close_session(false);
         if usage.sessions == 0 && !usage.reported {
             continue; // never ran
         }
@@ -341,6 +342,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_request_count_does_not_erase_previous_session() {
+        let store = SqliteStore::open_in_memory().await.unwrap();
+        let a = agent("streaming", Role::Worker, "model");
+        store
+            .append_event(EventKind::AgentCreated { agent: a.clone() })
+            .await
+            .unwrap();
+        let start = || EventKind::AgentStatusChanged {
+            id: a.id,
+            from: AgentStatus::Stopped,
+            to: AgentStatus::Starting,
+        };
+        let snapshot = |requests| EventKind::AgentUsage {
+            id: a.id,
+            used: 0,
+            size: 0,
+            cost_usd: None,
+            tokens: Some(TokenUsage {
+                output: 1,
+                requests,
+                ..Default::default()
+            }),
+        };
+        store.append_event(start()).await.unwrap();
+        store.append_event(snapshot(Some(3))).await.unwrap();
+        store.append_event(start()).await.unwrap();
+        store.append_event(snapshot(None)).await.unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let open = compute(&store, UsageGroup::Agent, home.path())
+            .await
+            .unwrap();
+        assert_eq!(open.rows[0].requests, Some(3));
+        store.append_event(start()).await.unwrap();
+        let ended = compute(&store, UsageGroup::Agent, home.path())
+            .await
+            .unwrap();
+        assert_eq!(ended.rows[0].requests, None);
+        store.append_event(snapshot(Some(1))).await.unwrap();
+        let next = compute(&store, UsageGroup::Agent, home.path())
+            .await
+            .unwrap();
+        assert_eq!(next.rows[0].requests, None);
+    }
+
+    #[tokio::test]
     async fn lost_request_count_stays_unknown_without_double_counting() {
         assert_eq!(
             requests_for_snapshots(&[Some(1), None, Some(2)]).await,
@@ -362,13 +408,13 @@ mod tests {
             ..Default::default()
         };
         usage.record_requests(Some(3));
-        usage.close_session();
+        usage.close_session(true);
         assert!(usage.requests_known);
         usage.sessions += 1;
         usage.session_has_tokens = true;
         usage.record_requests(None);
         usage.record_requests(Some(1));
-        usage.close_session();
+        usage.close_session(false);
         assert_eq!(usage.requests, Some(4));
         assert!(usage.requests_known);
     }
