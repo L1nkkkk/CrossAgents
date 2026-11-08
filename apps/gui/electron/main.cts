@@ -102,7 +102,8 @@ let updates: Updates | undefined;
 let remote: RemoteController | undefined;
 
 const isRemote = () => remote?.mode() === "remote";
-const hasBundledHub = () => bundledHub(app.isPackaged, process.platform, process.resourcesPath, existsSync);
+let bundledHubPresent: boolean | undefined;
+const hasBundledHub = () => bundledHubPresent ??= bundledHub(app.isPackaged, process.platform, process.resourcesPath, existsSync);
 const NO_BUNDLED_HUB = "这个安装包不带 hub：在 设置 →「连接」 里连另一台电脑上的 hub";
 
 /**
@@ -112,6 +113,7 @@ const NO_BUNDLED_HUB = "这个安装包不带 hub：在 设置 →「连接」 �
  */
 async function currentHub(): Promise<{ base: string; token: string; mode: "local" | "remote" }> {
   if (remote && isRemote()) return { ...remote.hub(), mode: "remote" };
+  // A package without a bundled hub does not connect to an independently running local hub either.
   if (!hasBundledHub()) throw new Error(NO_BUNDLED_HUB);
   await localHub?.ready();
   return { ...(await localConnection()), mode: "local" };

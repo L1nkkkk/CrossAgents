@@ -23,7 +23,7 @@ export type Updates = {
 
 export function startUpdates(log: (line: string) => void): Updates {
   if (!automaticUpdates(process.platform)) {
-    const manual: UpdateState = { state: "manual", current: app.getVersion(), reason: "这个版本没有签名，不能自动更新：到发布页下载新版本替换。" };
+    const manual: UpdateState = { state: "manual", current: app.getVersion(), reason: "Mac 版没有 Apple 签名，不能自动更新：要更新就重新打包，再替换「应用程序」里的 CrossAgents。" };
     return { state: () => manual, check: async () => manual, install() {}, onChange() {} };
   }
   const listeners: ((state: UpdateState) => void)[] = [];
