@@ -218,6 +218,14 @@ fn enum_from<T: DeserializeOwned>(s: &str) -> Result<T, CoreError> {
     serde_json::from_value(serde_json::Value::String(s.to_owned())).map_err(storage)
 }
 
+fn carried_by_from(value: Option<String>) -> Option<MessageId> {
+    value.and_then(|text| text.parse().ok())
+}
+
+fn wake_tries_from(value: i64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
 fn time_from(s: &str) -> Result<DateTime<Utc>, CoreError> {
     DateTime::parse_from_rfc3339(s)
         .map(|t| t.with_timezone(&Utc))
@@ -493,6 +501,11 @@ impl Store for SqliteStore {
             return Err(not_found(&AgentKey::Id(id)));
         }
         sqlx::query("DELETE FROM agent_claims WHERE agent_id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        sqlx::query("DELETE FROM pending_notices WHERE agent = ?")
             .bind(id.to_string())
             .execute(&self.pool)
             .await
@@ -792,7 +805,9 @@ impl Store for SqliteStore {
              ON CONFLICT(agent, topic) DO UPDATE SET
                 line = excluded.line,
                 class = excluded.class,
-                updated_at = excluded.updated_at",
+                updated_at = excluded.updated_at,
+                carried_by = NULL,
+                wake_tries = 0",
         )
         .bind(notice.agent.to_string())
         .bind(&notice.topic)
@@ -803,8 +818,8 @@ impl Store for SqliteStore {
         .execute(&self.pool)
         .await
         .map_err(storage)?;
-        let row: (String, String, String, String) = sqlx::query_as(
-            "SELECT line, class, first_at, updated_at FROM pending_notices
+        let row: (String, String, String, String, Option<String>, i64) = sqlx::query_as(
+            "SELECT line, class, first_at, updated_at, carried_by, wake_tries FROM pending_notices
              WHERE agent = ?1 AND topic = ?2",
         )
         .bind(notice.agent.to_string())
@@ -819,6 +834,8 @@ impl Store for SqliteStore {
             class: row.1.parse().map_err(storage)?,
             first_at: time_from(&row.2)?,
             updated_at: time_from(&row.3)?,
+            carried_by: carried_by_from(row.4),
+            wake_tries: wake_tries_from(row.5),
         })
     }
 
@@ -826,26 +843,32 @@ impl Store for SqliteStore {
         &self,
         agent: Option<AgentId>,
     ) -> Result<Vec<PendingNotice>, CoreError> {
-        let rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(
-            "SELECT agent, topic, line, class, first_at, updated_at FROM pending_notices
-             WHERE ?1 IS NULL OR agent = ?1
-             ORDER BY updated_at, topic",
-        )
-        .bind(agent.map(|id| id.to_string()))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(storage)?;
+        let rows: Vec<(String, String, String, String, String, String, Option<String>, i64)> =
+            sqlx::query_as(
+                "SELECT agent, topic, line, class, first_at, updated_at, carried_by, wake_tries
+                 FROM pending_notices
+                 WHERE ?1 IS NULL OR agent = ?1
+                 ORDER BY updated_at, topic",
+            )
+            .bind(agent.map(|id| id.to_string()))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage)?;
         rows.into_iter()
-            .map(|(agent, topic, line, class, first_at, updated_at)| {
-                Ok(PendingNotice {
-                    agent: agent.parse().map_err(storage)?,
-                    topic,
-                    line,
-                    class: class.parse::<NoticeClass>().map_err(storage)?,
-                    first_at: time_from(&first_at)?,
-                    updated_at: time_from(&updated_at)?,
-                })
-            })
+            .map(
+                |(agent, topic, line, class, first_at, updated_at, carried_by, wake_tries)| {
+                    Ok(PendingNotice {
+                        agent: agent.parse().map_err(storage)?,
+                        topic,
+                        line,
+                        class: class.parse::<NoticeClass>().map_err(storage)?,
+                        first_at: time_from(&first_at)?,
+                        updated_at: time_from(&updated_at)?,
+                        carried_by: carried_by_from(carried_by),
+                        wake_tries: wake_tries_from(wake_tries),
+                    })
+                },
+            )
             .collect()
     }
 
@@ -865,6 +888,107 @@ impl Store for SqliteStore {
             .await
             .map_err(storage)?;
         }
+        Ok(())
+    }
+
+    async fn mark_notices_carried(
+        &self,
+        agent: AgentId,
+        versions: &[(String, chrono::DateTime<chrono::Utc>)],
+        message: MessageId,
+    ) -> Result<(), CoreError> {
+        for (topic, _) in versions {
+            sqlx::query(
+                "UPDATE pending_notices SET carried_by = ?1
+                 WHERE agent = ?2 AND topic = ?3",
+            )
+            .bind(message.to_string())
+            .bind(agent.to_string())
+            .bind(topic)
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        }
+        Ok(())
+    }
+
+    async fn settle_carried_notices(
+        &self,
+        message: MessageId,
+        success: bool,
+    ) -> Result<(), CoreError> {
+        let message = message.to_string();
+        let sql = if success {
+            "DELETE FROM pending_notices WHERE carried_by = ?1"
+        } else {
+            "UPDATE pending_notices
+             SET wake_tries = wake_tries + 1, carried_by = NULL
+             WHERE carried_by = ?1"
+        };
+        sqlx::query(sql)
+            .bind(message)
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        Ok(())
+    }
+
+    async fn release_stranded_notices(&self, keep: &[MessageId]) -> Result<(), CoreError> {
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT agent, topic, carried_by FROM pending_notices WHERE carried_by IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        for (agent, topic, carried) in rows {
+            let Ok(message) = carried.parse::<MessageId>() else {
+                continue;
+            };
+            if keep.contains(&message) {
+                continue;
+            }
+            sqlx::query(
+                "UPDATE pending_notices SET carried_by = NULL WHERE agent = ?1 AND topic = ?2",
+            )
+            .bind(agent)
+            .bind(topic)
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+        }
+        Ok(())
+    }
+
+    async fn transfer_pending_notices(
+        &self,
+        from: AgentId,
+        to: AgentId,
+    ) -> Result<(), CoreError> {
+        if from == to {
+            return Ok(());
+        }
+        sqlx::query(
+            "INSERT INTO pending_notices
+                (agent, topic, line, class, first_at, updated_at, carried_by, wake_tries)
+             SELECT ?1, topic, line, class, first_at, updated_at, NULL, 0
+             FROM pending_notices WHERE agent = ?2
+             ON CONFLICT(agent, topic) DO UPDATE SET
+                line = excluded.line,
+                class = excluded.class,
+                updated_at = excluded.updated_at,
+                carried_by = NULL,
+                wake_tries = 0",
+        )
+        .bind(to.to_string())
+        .bind(from.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        sqlx::query("DELETE FROM pending_notices WHERE agent = ?1")
+            .bind(from.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
         Ok(())
     }
 

@@ -10,7 +10,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{AgentId, TaskId};
+use crate::ids::{AgentId, MessageId, TaskId};
 use crate::model::Health;
 
 /// How a notice should reach its agent (run note `brief/common`).
@@ -94,6 +94,13 @@ pub struct PendingNotice {
     pub class: NoticeClass,
     pub first_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Message that currently carries this version. Empty when the row is free to ride a wake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carried_by: Option<MessageId>,
+    /// Automatic wakes of this version that failed or were interrupted. At 2 it stops
+    /// starting a turn and only rides the next one.
+    #[serde(default)]
+    pub wake_tries: u32,
 }
 
 /// At most this many reminders, and as many watches, per agent.

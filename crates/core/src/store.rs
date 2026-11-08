@@ -341,6 +341,43 @@ pub trait Store: Send + Sync {
         let _ = (agent, versions);
         Ok(())
     }
+    /// The message `message` is now carrying these versions. A newer replacement is left alone.
+    async fn mark_notices_carried(
+        &self,
+        agent: AgentId,
+        versions: &[(String, chrono::DateTime<chrono::Utc>)],
+        message: MessageId,
+    ) -> Result<(), CoreError> {
+        let _ = (agent, versions, message);
+        Ok(())
+    }
+    /// The turn that carried `message` ended. Success deletes those rows. Failure clears
+    /// the carry and counts one failed automatic wake.
+    async fn settle_carried_notices(
+        &self,
+        message: MessageId,
+        success: bool,
+    ) -> Result<(), CoreError> {
+        let _ = (message, success);
+        Ok(())
+    }
+    /// Clears the carry on notices whose message is not a turn this hub took over.
+    /// That is not a failed wake: the next poll builds one wake from the rows.
+    async fn release_stranded_notices(&self, keep: &[MessageId]) -> Result<(), CoreError> {
+        let _ = keep;
+        Ok(())
+    }
+    /// Moves one agent's pending notices to another. The destination hears them as new
+    /// (the carry and the failed-wake count are cleared). Same topic on the destination
+    /// is replaced, keeping the destination's `first_at`.
+    async fn transfer_pending_notices(
+        &self,
+        from: AgentId,
+        to: AgentId,
+    ) -> Result<(), CoreError> {
+        let _ = (from, to);
+        Ok(())
+    }
 
     async fn insert_watch(&self, watch: &Watch) -> Result<(), CoreError> {
         let _ = watch;
