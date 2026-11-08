@@ -7,13 +7,13 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { Icon } from "./components";
 import { useMedia } from "./lib/media";
+import { isMac, shortcut, shortcutPlatform } from "./lib/shortcuts";
 import { MenuBar } from "./menubar";
 
 /** Only the desktop app has a window to draw a title bar for. */
 export const inDesktop =
   typeof navigator !== "undefined" &&
   (/Electron/i.test(navigator.userAgent) || (__MOCK__ && new URLSearchParams(location.search).has("titlebar")));
-const isMac = typeof navigator !== "undefined" && /Macintosh|Mac OS X/i.test(navigator.userAgent);
 
 // ---- The sidebar: docked unless hidden (remembered per browser). In a small window it has no
 // column: it floats over the page while the pointer is on its button or on it (like Claude's
@@ -129,11 +129,11 @@ export function Titlebar({ title }: { title?: string }) {
         <button className="tb-btn" onClick={() => history.forward()} disabled={!forward} title="前进（Alt+→）" aria-label="前进">
           <Icon name="forward" size={16} />
         </button>
-        <button className={`tb-btn ${sidebarHidden ? "" : "on"}`} onClick={toggleSidebar} onMouseEnter={hoverSidebar} onMouseLeave={unhoverSidebar} title={`${sidebarHidden ? "显示" : "隐藏"}侧栏（Ctrl+B）`} aria-label="切换侧栏" aria-pressed={!sidebarHidden}>
+        <button className={`tb-btn ${sidebarHidden ? "" : "on"}`} onClick={toggleSidebar} onMouseEnter={hoverSidebar} onMouseLeave={unhoverSidebar} title={`${sidebarHidden ? "显示" : "隐藏"}侧栏（${shortcut(shortcutPlatform, "Ctrl+B")}）`} aria-label="切换侧栏" aria-pressed={!sidebarHidden}>
           <Icon name="sidebar" size={16} />
         </button>
       </div>
-      {!isMac && <MenuBar />}
+      <MenuBar />
       {title && <div className="titlebar-title">{title}</div>}
     </header>
   );

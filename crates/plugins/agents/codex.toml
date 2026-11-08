@@ -25,6 +25,10 @@ commands = ["codex"]
 shim = "codex-vendor"
 version = ["--version"]
 
+[locate.paths]
+# https://docs.brew.sh/FAQ#why-should-i-install-homebrew-in-the-default-location
+macos = ["/opt/homebrew/bin/codex", "/usr/local/bin/codex"]
+
 # The Codex desktop app keeps its own copy; used when `PATH` has no `codex`.
 [locate.bundled]
 windows = ["%LOCALAPPDATA%/OpenAI/Codex/bin/*/codex.exe"]

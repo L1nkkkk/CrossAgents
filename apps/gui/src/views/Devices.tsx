@@ -1,7 +1,8 @@
 // 设置 → 设备 (docs/API-AUTH.md §2.2, §4): the credentials the hub has issued, and revoking
-// one. Revoked devices stay in the list, faded and last, with when they were revoked. A
-// credential too weak to revoke greys the button and says which level is missing (the hub's
-// own 403 message); it never hides the page or the entry.
+// one. Revoked devices stay in the list, faded and last, with when they were revoked. Reading
+// the list is read; revoking is admin, so a credential too weak to revoke greys only the
+// button and says which level is missing (the hub's own 403 message). The page and its entry
+// stay as they are: the list is still worth seeing.
 
 import { useState } from "react";
 import type { Device } from "@bindings/Device";
@@ -9,20 +10,26 @@ import { ApiError, api, errorText } from "../api";
 import { ErrorBox } from "../components";
 import { useHubData } from "../hub";
 import { isRevoked, KIND_LABELS, LEVEL_LABELS, sortDevices } from "../lib/devices";
-import { useFeatureSupport } from "../lib/features";
+import { useOperation } from "../lib/features";
 import { full, when } from "../lib/time";
 import { useArmed } from "../parts";
 
 export function DevicesPage() {
-  const devices = useHubData(() => api.listDevices().then((r) => r.devices), [], () => false);
-  // A 403 is kept by features.ts (api.ts notes it): that reason greys the buttons, both here
-  // and on the settings entry, and says which level is missing.
-  const support = useFeatureSupport("devices");
-  const refused = support.disabled ? support.reason : undefined;
+  // `device.created` / `device.revoked` arrive for what another window (or the CLI) did, so the
+  // list follows them without a reload.
+  const devices = useHubData(
+    () => api.listDevices().then((r) => r.devices),
+    [],
+    (e) => e.type === "device.created" || e.type === "device.revoked",
+  );
+  // A 403 is kept by features.ts per operation (api.ts notes it): revoking needs admin, while
+  // the list above only needs read. So this greys the buttons, never the entry.
+  const revoke = useOperation("devices.revoke");
+  const refused = revoke.refused ? revoke.reason : undefined;
   const [error, setError] = useState<string>();
   const list = sortDevices(devices.data ?? []);
 
-  async function revoke(device: Device) {
+  async function revokeDevice(device: Device) {
     setError(undefined);
     try {
       await api.revokeDevice(device.id);
@@ -41,7 +48,7 @@ export function DevicesPage() {
       <ErrorBox error={devices.error ?? error} />
       {refused && (
         <div className="notice">
-          吊销设备需要「管理」（admin）级别，这个凭据不够，按钮已置灰。hub 说：{refused}
+          吊销设备需要「管理」（admin）级别，这个凭据不够，按钮已置灰；列表照常能看。hub 说：{refused}
         </div>
       )}
       {devices.data === undefined ? null : !list.length ? (
@@ -50,7 +57,7 @@ export function DevicesPage() {
             <div>
               <div className="setting-label">还没有设备</div>
               <div className="setting-hint">
-                在 hub 所在的机器上运行 <code>crossagents device add &lt;名字&gt;</code>；从别的电脑经 SSH 连过来要等 A2。
+                在 hub 所在的机器上运行 <code>crossagents device add &lt;名字&gt;</code>；从别的电脑连过来，在设置 →「连接」页配对，配对时会替你运行这条命令。
               </div>
             </div>
           </div>
@@ -58,7 +65,7 @@ export function DevicesPage() {
       ) : (
         <div className="setting-card">
           {list.map((device) => (
-            <DeviceRow key={device.id} device={device} refused={refused} onRevoke={revoke} />
+            <DeviceRow key={device.id} device={device} refused={refused} onRevoke={revokeDevice} />
           ))}
         </div>
       )}

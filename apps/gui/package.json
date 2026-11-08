@@ -47,6 +47,7 @@
       "dist/**",
       "dist-electron/**",
       "!dist-electron/*.test.cjs",
+      "!dist-electron/fakeSsh.cjs",
       "package.json"
     ],
     "win": {

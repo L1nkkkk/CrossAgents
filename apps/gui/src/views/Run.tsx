@@ -58,6 +58,7 @@ import { accountOf, effortOf, prettyModel } from "../lib/models";
 import { modelPickValue, parseModelPick, reasoningWorkerRequest, workerAgentRequest, workerModelGroups, workerModelLabel, workerTarget, type ReasoningChoice } from "../lib/workerModels";
 import { ReasoningPicks } from "../reasoningPicks";
 import { PermissionPicks, applyPermission } from "../permissionPicks";
+import { useOperation } from "../lib/features";
 import { configWithPermission, permissionOf, type PermissionChoice } from "../lib/permission";
 import { cursorMode, reasoningModels } from "../lib/reasoning";
 import { refusedTasks, unusableOf } from "../lib/unusable";
@@ -713,7 +714,11 @@ function RunNotes({ runId }: { runId: string }) {
 function InPlaceNote({ run }: { run: Run }) {
   const [state, setState] = useState<"idle" | "busy" | "done">("idle");
   const [error, setError] = useState<string>();
-  async function init() {
+  // `git init` at a caller-supplied path is admin since #retier (access.rs): a write device's
+  // 403 greys the button and says which level is missing.
+  const init = useOperation("repos.init");
+  const denied = init.refused ? `初始化 git 需要「管理」（admin）级别，这个凭据不够。hub 说：${init.reason}` : undefined;
+  async function start() {
     setState("busy");
     setError(undefined);
     try {
@@ -732,10 +737,16 @@ function InPlaceNote({ run }: { run: Run }) {
       {state === "done" ? (
         <span>已初始化 git，之后的 Work 会用独立工作树</span>
       ) : (
-        <button className="ghost small" disabled={state === "busy"} onClick={init} title={`在 ${run.repo} 里 git init，并把现有文件提交为第一个版本`}>
+        <button
+          className="ghost small"
+          disabled={state === "busy" || !!denied}
+          onClick={start}
+          title={denied ?? `在 ${run.repo} 里 git init，并把现有文件提交为第一个版本`}
+        >
           初始化 git
         </button>
       )}
+      {denied && <span className="chip warn" title={denied}>要 admin 级别</span>}
       {error && <span className="chip danger" title={error}>初始化失败</span>}
     </span>
   );

@@ -4,6 +4,7 @@
 // what streamed (transcripts fold with the GUI's own session.ts). Writes that matter to the
 // look (sending, withdrawing, approving) are acted out; the rest answer 204.
 
+import { API_VERSION } from "../hub";
 import { usageSeriesMock } from "../views/Usage.mock";
 import { importCandidates } from "../views/AccountImport.mock";
 import type { Account } from "@bindings/Account";
@@ -61,10 +62,11 @@ import {
 import { exportLessons, lessonMatches, type Lesson, type RunIssue } from "../lessons/lessons";
 import { effortOf } from "../lib/models";
 import { applyEvent } from "../session";
-import { FEATURES, featureOf } from "../lib/features";
+import { FEATURES, operationOf } from "../lib/features";
 import { capabilitiesOf, contextParts, driverOf, transcript, uid } from "./fixtures";
 import { mockContent, mockResolve, mockSearch, mockStatus, mockTree } from "./files.mock";
 import { mockGit } from "./git.mock";
+import { createMockConnection, type MockConnection, type MockConnectionOptions } from "./mockConnection";
 
 /** Names the mock hub makes up, like the real one (see crates/core/src/names.rs). */
 const MOCK_NAMES = ["Nova", "Iris", "Atlas", "Orion", "Vega", "Lyra", "Mira", "Sage"];
@@ -113,7 +115,8 @@ export type MockState = {
   install?: "ok" | "fail" | "missing";
   /** Uncommitted files in a run's checkout, by run id: deleting it asks for force. */
   dirty?: Record<string, string[]>;
-  /** The API version `/v1/info` reports; `v1` when unset. */
+  /** The API version `/v1/info` reports; this GUI's `API_VERSION` when unset, so a scenario
+   * that leaves it alone connects, and one that names another version shows the refusal. */
   api?: string;
   /** The feature list `/v1/info` reports (docs/TODO.md §二); `null` is a hub built before it,
    * which sends none. Unset: this hub has all `FEATURES`, as the real one does. */
@@ -160,6 +163,8 @@ export type MockState = {
   extensionLogs?: Record<string, ExtensionLogsResponse>;
   /** What the shell would answer about safe mode; absent: not in safe mode. */
   safeMode?: { enabled: boolean; reason: string | null };
+  /** The remote connection (`bridge.connection`): absent is 本机, as a desktop never paired. */
+  connection?: MockConnectionOptions;
 };
 
 export type ExpertiseMock = { entries: ExpertiseEntry[]; candidates: Candidate[]; usages: UsageRecord[] };
@@ -231,11 +236,15 @@ export class MockBridge implements CrossAgentsBridge {
   private statuses = new Set<(status: string) => void>();
   private timers: ReturnType<typeof setTimeout>[] = [];
   private started = false;
+  /** The mock desktop's `bridge.connection`; a scenario's `connection` decides what it says. */
+  readonly connection: MockConnection;
 
   constructor(
     readonly state: MockState,
     private script: Step[] = [],
-  ) {}
+  ) {
+    this.connection = createMockConnection(state.connection ?? {});
+  }
 
   // ---- CrossAgentsBridge ----------------------------------------------------------------
 
@@ -324,12 +333,16 @@ export class MockBridge implements CrossAgentsBridge {
   }
 
   async pickFolder() {
+    // As the real bridge: a remote hub's folders are on its machine, where no dialog reaches.
+    const state = await this.connection.get();
+    if (state.mode === "remote") throw new Error("远程模式下文件夹在中心那台机器上，请填中心上的路径");
     return "C:/work/new-project";
   }
 
   async openPath(scope: string, path: string) {
     // No desktop to open it on in a browser.
     console.info("mock openPath", scope, path);
+    return { copy: false };
   }
 
   setTheme() {
@@ -664,9 +677,9 @@ export class MockBridge implements CrossAgentsBridge {
     const p = url.pathname;
     let m: RegExpMatchArray | null;
 
-    // A feature this hub refuses (docs/TODO.md §二): the same 403 `access.rs` answers with,
-    // so a scenario can show the greyed entry and the hub's own words.
-    const refused = s.forbidden?.[featureOf(p) ?? ""];
+    // A feature or one operation this hub refuses (docs/TODO.md §二, #retier): the same 403
+    // `access.rs` answers with, so a scenario can show the greyed entry and the hub's own words.
+    const refused = s.forbidden?.[operationOf(method, p) ?? ""];
     if (refused) return json(403, { error: { code: "forbidden", message: refused } });
     // Revoking needs admin (docs/API-AUTH.md §4): the same 403 the hub answers, so a scenario can
     // show the greyed button and the level it names.
@@ -727,7 +740,7 @@ export class MockBridge implements CrossAgentsBridge {
         // `features: null` is an older hub: it answers without the list at all, and `version`
         // is then what the GUI infers its entries from.
         const features = s.features === null ? undefined : (s.features ?? FEATURES);
-        return json(200, { version: s.version ?? __BUILD__.version, commit, debug: false, api: s.api ?? "v1", pid: 0, home: "（mock 模式，无 hub）", started_at: new Date().toISOString(), ...(features ? { features } : {}) });
+        return json(200, { version: s.version ?? __BUILD__.version, commit, debug: false, api: s.api ?? API_VERSION, pid: 0, home: "（mock 模式，无 hub）", started_at: new Date().toISOString(), ...(features ? { features } : {}) });
       }
       if (p === "/v1/agents") {
         // `?run=`: what the plan being settled changes (list_agents).

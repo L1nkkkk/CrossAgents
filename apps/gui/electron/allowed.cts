@@ -28,9 +28,10 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   { method: "DELETE", path: /^\/v1\/agents\/[^/]+$/, level: "write" },
   {
     method: "POST",
-    path: /^\/v1\/agents\/[^/]+\/(start|stop|cancel|compact|model|name|topic|archive|profile|settings|connect)$/,
+    path: /^\/v1\/agents\/[^/]+\/(start|stop|cancel|compact|model|name|topic|archive|profile|connect)$/,
     level: "write",
   },
+  { method: "POST", path: /^\/v1\/agents\/[^/]+\/settings$/, level: "admin" },
   { method: "POST", path: /^\/v1\/agents\/[^/]+\/messages$/, level: "write" },
   // Moves a waiting message to the front and interrupts the turn: the same message, same id.
   { method: "POST", path: /^\/v1\/agents\/[^/]+\/messages\/[^/]+\/send-now$/, level: "write" },
@@ -88,7 +89,7 @@ export const ALLOWED: readonly { method: string; path: RegExp; level: Level }[] 
   // own directory. The run page's apply button is the only caller.
   { method: "GET", path: /^\/v1\/runs\/[^/]+\/integration$/, level: "read" },
   { method: "POST", path: /^\/v1\/runs\/[^/]+\/apply$/, level: "write" },
-  { method: "POST", path: /^\/v1\/repos\/init$/, level: "write" },
+  { method: "POST", path: /^\/v1\/repos\/init$/, level: "admin" },
   { method: "GET", path: /^\/v1\/usage$/, level: "read" },
   // `?range=&group=&source=` rides along; `route()` drops it before matching.
   { method: "GET", path: /^\/v1\/usage\/series$/, level: "read" },

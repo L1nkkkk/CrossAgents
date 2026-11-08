@@ -90,6 +90,7 @@ struct Input {
 
 pub struct Terminal {
     id: String,
+    device_id: Option<String>,
     project: Option<String>,
     cwd: PathBuf,
     shell: String,
@@ -307,7 +308,11 @@ impl Terminals {
     }
 
     /// Starts a shell. Blocking: this may search the `PATH` and start a process.
-    pub fn create(&self, req: &CreateTerminalRequest) -> Result<TerminalInfo, CoreError> {
+    pub fn create(
+        &self,
+        req: &CreateTerminalRequest,
+        owner: Option<(String, CancellationToken)>,
+    ) -> Result<TerminalInfo, CoreError> {
         // Reserved for cross-node terminals (docs/MULTI-NODE.md): this hub is the only node yet.
         if req.node.is_some() {
             return Err(CoreError::Unsupported(
@@ -329,11 +334,20 @@ impl Terminals {
             )));
         }
         let command = self.shell.clone().unwrap_or_else(default_shell);
-        let terminal = spawn(&command, cwd, req).map_err(|err| {
-            CoreError::Agent(format!("cannot start {}: {err:#}", command.join(" ")))
-        })?;
+        let terminal = spawn(&command, cwd, req, owner.as_ref().map(|(id, _)| id.clone()))
+            .map_err(|err| {
+                CoreError::Agent(format!("cannot start {}: {err:#}", command.join(" ")))
+            })?;
         let info = terminal.info();
-        lock(&self.map).insert(terminal.id.clone(), terminal);
+        let mut map = lock(&self.map);
+        if owner
+            .as_ref()
+            .is_some_and(|(_, cancel)| cancel.is_cancelled())
+        {
+            terminal.kill();
+            return Err(CoreError::Conflict("device revoked".into()));
+        }
+        map.insert(terminal.id.clone(), terminal);
         Ok(info)
     }
 
@@ -456,6 +470,20 @@ impl Terminals {
         Ok(())
     }
 
+    pub fn close_device(&self, id: &str) {
+        let mut map = lock(&self.map);
+        let ids: Vec<_> = map
+            .iter()
+            .filter(|(_, t)| t.device_id.as_deref() == Some(id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let terminals: Vec<_> = ids.iter().filter_map(|id| map.remove(id)).collect();
+        drop(map);
+        for terminal in terminals {
+            terminal.kill();
+        }
+    }
+
     /// The hub is stopping: terminals do not outlive it.
     pub fn stop_all(&self) {
         let all: Vec<_> = lock(&self.map).drain().map(|(_, t)| t).collect();
@@ -487,6 +515,7 @@ fn spawn(
     command: &[String],
     cwd: &Path,
     req: &CreateTerminalRequest,
+    device_id: Option<String>,
 ) -> anyhow::Result<Arc<Terminal>> {
     let (program, args) = command
         .split_first()
@@ -522,6 +551,7 @@ fn spawn(
     );
     let (tx, _) = broadcast::channel(OUTPUT_BACKLOG);
     let terminal = Arc::new(Terminal {
+        device_id,
         id: uuid::Uuid::new_v4().to_string(),
         project: req.project.clone(),
         cwd: cwd.to_path_buf(),
@@ -664,12 +694,31 @@ fn default_shell() -> Vec<String> {
 
 #[cfg(not(windows))]
 fn default_shell() -> Vec<String> {
-    vec![std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())]
+    unix_shell(std::env::consts::OS, std::env::var("SHELL").ok())
+}
+
+#[cfg(any(not(windows), test))]
+fn unix_shell(os: &str, shell: Option<String>) -> Vec<String> {
+    let mut command = vec![shell.unwrap_or_else(|| "/bin/sh".into())];
+    if os == "macos" {
+        command.push("-l".into());
+    }
+    command
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unix_shell_uses_a_login_shell_on_macos() {
+        assert_eq!(
+            unix_shell("macos", Some("/bin/zsh".into())),
+            ["/bin/zsh", "-l"]
+        );
+        assert_eq!(unix_shell("linux", Some("/bin/bash".into())), ["/bin/bash"]);
+        assert_eq!(unix_shell("macos", None), ["/bin/sh", "-l"]);
+    }
 
     fn screen_from(frame: &TerminalFrame) -> vt100::Parser {
         let TerminalFrame::Snapshot { data, cols, rows } = frame else {

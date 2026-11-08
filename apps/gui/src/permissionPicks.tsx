@@ -2,6 +2,7 @@ import type { RefObject } from "react";
 import type { Agent } from "@bindings/Agent";
 import type { PermissionPolicy } from "@bindings/PermissionPolicy";
 import { api } from "./api";
+import { useOperation } from "./lib/features";
 import { CURSOR_GUARD_REFUSED, PERMISSION_OPTIONS, cursorCannotGuard, permissionHint, type PermissionChoice } from "./lib/permission";
 
 /** `config.setting_sources`, kept as it is when only the permission changes. */
@@ -45,57 +46,73 @@ export function PermissionPicks({
   radioName?: string;
 }) {
   const blocked = !!plugin && cursorCannotGuard({ plugin });
+  // Since #retier the setting is admin (access.rs): a write device's 403 greys the picker and
+  // says which level is missing, instead of failing when the form is saved.
+  const settings = useOperation("agent.settings");
+  const denied = settings.refused ? `改 agent 的设置需要「管理」（admin）级别，这个凭据不够。hub 说：${settings.reason}` : undefined;
+  const off = disabled || !!denied;
   if (variant === "compact") {
     return (
       <span className="permission-compact">
         <select
           aria-label={label}
-          title={blocked ? CURSOR_GUARD_REFUSED : permissionHint(value)}
+          title={denied ?? (blocked ? CURSOR_GUARD_REFUSED : permissionHint(value))}
           value={value ?? ""}
-          disabled={disabled}
+          disabled={off}
           onChange={(e) => onChange(e.target.value === "" ? null : (e.target.value as PermissionPolicy))}
         >
           {PERMISSION_OPTIONS.map((option) => {
-            const off = option.value === "guard" && blocked;
+            const cursorOff = option.value === "guard" && blocked;
             return (
               <option
                 key={option.value ?? "default"}
                 value={option.value ?? ""}
-                disabled={off}
-                title={off ? CURSOR_GUARD_REFUSED : option.hint}
+                disabled={cursorOff}
+                title={cursorOff ? CURSOR_GUARD_REFUSED : option.hint}
               >
-                {off ? `${option.short}（Cursor 不能选）` : option.short}
+                {cursorOff ? `${option.short}（Cursor 不能选）` : option.short}
               </option>
             );
           })}
         </select>
         {/* The reason is visible, not only in the tooltip: a greyed choice alone looks broken. */}
-        {blocked && (
-          <span className="setting-hint" title={CURSOR_GUARD_REFUSED}>
-            Windows 上的 Cursor 不能选「要我确认」
+        {denied ? (
+          <span className="setting-hint" title={denied}>
+            要 admin 级别，这里改不了
           </span>
+        ) : (
+          blocked && (
+            <span className="setting-hint" title={CURSOR_GUARD_REFUSED}>
+              Windows 上的 Cursor 不能选「要我确认」
+            </span>
+          )
         )}
       </span>
     );
   }
   return (
     <div className="permission-picks" role="radiogroup" aria-label={label} ref={groupRef} style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 2 }}>
+      {denied && (
+        <div className="setting-hint" title={denied} style={{ marginTop: 0 }}>
+          {denied}
+        </div>
+      )}
       {PERMISSION_OPTIONS.map((option) => {
-        const off = option.value === "guard" && blocked;
-        const why = off ? CURSOR_GUARD_REFUSED : option.hint;
+        const cursorOff = option.value === "guard" && blocked;
+        const why = cursorOff ? CURSOR_GUARD_REFUSED : option.hint;
         return (
           <label
             key={option.value ?? "default"}
             className="field-check"
             title={why}
-            aria-disabled={off || undefined}
-            style={{ alignItems: "flex-start", ...(off ? { opacity: 0.55, cursor: "not-allowed" } : null) }}
+            aria-disabled={cursorOff || off || undefined}
+            style={{ alignItems: "flex-start", ...(cursorOff || off ? { opacity: 0.55, cursor: "not-allowed" } : null) }}
           >
             <input
               type="radio"
               name={radioName}
               checked={value === option.value}
-              disabled={off || disabled}
+              disabled={cursorOff || off}
               onChange={() => onChange(option.value)}
             />
             <span style={{ display: "flex", flexDirection: "column", gap: 1 }}>

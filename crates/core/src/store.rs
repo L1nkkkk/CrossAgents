@@ -283,7 +283,8 @@ pub trait Store: Send + Sync {
         let _ = hash;
         Err(CoreError::Unsupported("devices".into()))
     }
-    async fn revoke_device(&self, id: &str) -> Result<crate::Device, CoreError> {
+    /// Returns the device and whether this call newly revoked it.
+    async fn revoke_device(&self, id: &str) -> Result<(crate::Device, bool), CoreError> {
         let _ = id;
         Err(CoreError::Unsupported("devices".into()))
     }

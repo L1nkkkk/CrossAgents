@@ -10,6 +10,7 @@ import type { CrossAgentsBridge } from "./bridge";
 import { Icon } from "./components";
 import { buildTag } from "./lib/build";
 import { useMedia } from "./lib/media";
+import { isMac, shortcut, shortcutPlatform } from "./lib/shortcuts";
 import { MODES, setTheme, useTheme } from "./lib/theme";
 import { toggleRail, useRail } from "./rail";
 import { COMPACT, toggleSidebar, useSidebarHidden } from "./titlebar";
@@ -72,14 +73,14 @@ export function MenuBar() {
         "-",
         { label: "设置", keys: "Ctrl+,", run: () => (window.location.hash = "/settings") },
         "-",
-        { label: "退出", keys: "Alt+F4", run: () => command("quit") },
+        { label: "退出", keys: isMac ? "Ctrl+Q" : "Alt+F4", run: () => command("quit") },
       ],
     },
     {
       title: "编辑",
       entries: [
         { label: "撤销", keys: "Ctrl+Z", run: edit("undo") },
-        { label: "重做", keys: "Ctrl+Y", run: edit("redo") },
+        { label: "重做", keys: isMac ? "Ctrl+Shift+Z" : "Ctrl+Y", run: edit("redo") },
         "-",
         { label: "剪切", keys: "Ctrl+X", run: edit("cut") },
         { label: "复制", keys: "Ctrl+C", run: edit("copy") },
@@ -100,9 +101,9 @@ export function MenuBar() {
         { label: "放大", keys: "Ctrl+=", run: () => command("zoomIn") },
         { label: "缩小", keys: "Ctrl+-", run: () => command("zoomOut") },
         { label: "实际大小", keys: "Ctrl+0", run: () => command("zoomReset") },
-        { label: "全屏", keys: "F11", run: () => command("fullscreen") },
+        { label: "全屏", keys: isMac ? undefined : "F11", run: () => command("fullscreen") },
         ...(dev
-          ? (["-", { label: "重新加载", keys: "Ctrl+R", run: () => command("reload") }, { label: "开发者工具", keys: "F12", run: () => command("devtools") }] as Entry[])
+          ? (["-", { label: "重新加载", keys: "Ctrl+R", run: () => command("reload") }, { label: "开发者工具", keys: isMac ? "Ctrl+Alt+I" : "F12", run: () => command("devtools") }] as Entry[])
           : []),
       ],
     },
@@ -135,6 +136,8 @@ export function MenuBar() {
   const shown = compact
     ? [{ title: "菜单", entries: menus.flatMap((m, i): Entry[] => [...(i ? ["-" as const] : []), { heading: m.title }, ...m.entries]) }]
     : menus;
+
+  if (isMac) return dialog ? <Dialog kind={dialog} onClose={() => setDialog(undefined)} /> : null;
 
   return (
     <div className="menubar" ref={ref} role="menubar">
@@ -178,7 +181,7 @@ export function MenuBar() {
                     <span className="menu-text">
                       <span className="menu-label">{entry.label}</span>
                     </span>
-                    {entry.keys && <kbd className="menu-keys">{entry.keys}</kbd>}
+                    {entry.keys && <kbd className="menu-keys">{shortcut(shortcutPlatform, entry.keys)}</kbd>}
                   </button>
                 ),
               )}
@@ -232,10 +235,10 @@ function Dialog({ kind, onClose }: { kind: "keys" | "about"; onClose: () => void
         <h2>键盘快捷键</h2>
         <table className="keys-table">
           <tbody>
-            {SHORTCUTS.map(([keys, what]) => (
+            {SHORTCUTS.filter(([keys]) => !isMac || keys !== "F11").map(([keys, what]) => (
               <tr key={keys}>
                 <td>
-                  <kbd>{keys}</kbd>
+                  <kbd>{shortcut(shortcutPlatform, keys)}</kbd>
                 </td>
                 <td>{what}</td>
               </tr>

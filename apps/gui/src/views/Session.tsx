@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { shortcut, shortcutPlatform } from "../lib/shortcuts";
 import type { Agent } from "@bindings/Agent";
 import type { Capabilities } from "@bindings/Capabilities";
 import type { Run } from "@bindings/Run";
@@ -1326,7 +1327,7 @@ function ToolsToggle() {
     <>
       {/* Only what is folded. Open, a dock's own header has the button that folds it away: one place, like Codex. */}
       {terminalsAvailable() && !bottomShows && (
-        <button className="ghost icon" onClick={() => toggleTerminal(below && isTermTab(below) ? below : null, bottomShows)} title="终端（Ctrl+`）" aria-label="终端">
+        <button className="ghost icon" onClick={() => toggleTerminal(below && isTermTab(below) ? below : null, bottomShows)} title={`终端（${shortcut(shortcutPlatform, "Ctrl+`", true)}）`} aria-label="终端">
           <Icon name="terminal" size={16} />
         </button>
       )}

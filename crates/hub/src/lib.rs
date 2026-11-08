@@ -4,6 +4,7 @@ pub mod access;
 pub mod account_import;
 pub mod accounts;
 pub mod api;
+pub mod api_bytes;
 pub mod api_expertise;
 pub mod api_projects;
 pub mod api_terminal;

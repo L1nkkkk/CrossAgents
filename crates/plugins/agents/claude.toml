@@ -26,13 +26,18 @@ efforts = ["low", "medium", "high", "xhigh", "max"]
 [locate]
 # `native_command` in `config.toml` wins over all of this.
 commands = ["claude"]
-# The native installer puts it beside the user's own programs: `~/.local/bin/claude`,
-# which is `%USERPROFILE%\.local\bin\claude.exe` on Windows.
-# https://support.claude.com/en/articles/14554922 (1.2: the binary's location per system)
-paths = ["~/.local/bin/claude"]
 # The Claude desktop app keeps a copy per build; the newest one is used.
 bundled = ["%LOCALAPPDATA%/Claude-Data/*/claude-code/*/*/claude.exe"]
 version = ["--version"]
+
+[locate.paths]
+# The native installer puts it beside the user's own programs: `~/.local/bin/claude`,
+# which is `%USERPROFILE%\.local\bin\claude.exe` on Windows.
+# https://support.claude.com/en/articles/14554922 (1.2: the binary's location per system)
+windows = ["~/.local/bin/claude"]
+linux = ["~/.local/bin/claude"]
+# https://docs.brew.sh/FAQ#why-should-i-install-homebrew-in-the-default-location
+macos = ["~/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
 
 [install]
 label = "Claude Code"

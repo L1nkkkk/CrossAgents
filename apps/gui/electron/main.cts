@@ -2,18 +2,25 @@
 // adds the bearer token, forwards HTTP requests and relays the SSE event stream. All
 // business logic stays in the hub. The page talks to it through electron/preload.cts.
 
-import { appendFile, mkdir, readFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { appendFile, mkdir, readFile, readdir, stat, lstat, rm, mkdtemp, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { homedir, hostname, tmpdir } from "node:os";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell, session, protocol, net, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, safeStorage, shell, session, protocol, type IpcMainEvent, type IpcMainInvokeEvent, type WebContents } from "electron";
 import { allowed, REQUEST_TIMEOUT_MS, route, timeoutFor } from "./allowed.cjs";
 import { manageLocalHub, type LocalHub } from "./localHub.cjs";
 import { permissionAllowed } from "./permissions.cjs";
 import { createTray, type AppTray } from "./tray.cjs";
 import { startUpdates, type Updates } from "./updates.cjs";
-import { extensionRealFile, type ExtensionVersions } from "./extProtocol.cjs";
+import { assetPath } from "./extProtocol.cjs";
+import { copyRoot, copyPrefix, copyName, staleCopies, runsWhenOpened, safeCopyRoot, zoneIdentifier, quarantineArgs } from "./openCopy.cjs";
 import { decideSafeMode, loadingMarker, type SafeMode } from "./safeMode.cjs";
+import { defaultDeviceName, remoteFile, sshProgram, type Crypto } from "./remote.cjs";
+import { RemoteController, Unavailable } from "./remoteController.cjs";
+import { applicationMenu, shortcut, trayIcon } from "./platform.cjs";
 
 // Must run before app.ready. CORS remains enabled for module imports from file://.
 protocol.registerSchemesAsPrivileged([{ scheme: "crossagents-ext", privileges: {
@@ -49,7 +56,7 @@ function hubHome(): string {
  * Base URL and token of the running hub. Read on every call, so a restarted hub (new
  * port or token) is picked up without restarting the GUI.
  */
-async function connection(): Promise<{ base: string; token: string }> {
+async function localConnection(): Promise<{ base: string; token: string }> {
   const home = hubHome();
   const hubFile = join(home, "hub.json");
   let text: string;
@@ -87,6 +94,105 @@ let localHub: LocalHub | undefined;
 let tray: AppTray | undefined;
 /** The GUI's own updates; packaged only. */
 let updates: Updates | undefined;
+
+/**
+ * Local or remote mode (docs/MULTI-NODE.md §4.3, electron/remoteController.cts). Set up when the
+ * app is ready; until then the GUI is in local mode, as it always was.
+ */
+let remote: RemoteController | undefined;
+
+const isRemote = () => remote?.mode() === "remote";
+
+/**
+ * The hub to talk to now: this machine's (`hub.json` and `token`, read on every call) or, in
+ * remote mode, the tunnel's local end with the device token. Rejects with `Unavailable` when
+ * the tunnel is not up: nothing waits for it.
+ */
+async function currentHub(): Promise<{ base: string; token: string; mode: "local" | "remote" }> {
+  if (remote && isRemote()) return { ...remote.hub(), mode: "remote" };
+  await localHub?.ready();
+  return { ...(await localConnection()), mode: "local" };
+}
+
+/** Electron's safeStorage, refused where it would store in the clear (Linux `basic_text`). */
+const safeCrypto: Crypto = {
+  unavailable() {
+    if (!safeStorage.isEncryptionAvailable()) return "系统不提供加密存储";
+    if (process.platform === "linux" && safeStorage.getSelectedStorageBackend() === "basic_text") {
+      return "系统没有可用的钥匙串（basic_text），token 只能明文保存";
+    }
+    return undefined;
+  },
+  encrypt: (text) => safeStorage.encryptString(text),
+  decrypt: (data) => safeStorage.decryptString(data),
+};
+
+/** Packaged only: starts managing the local hub (and checks it once, §13.3), or stops managing it. */
+function manageForMode(mode: "local" | "remote") {
+  if (!app.isPackaged) return;
+  if (mode === "remote") {
+    // Nothing local is started, upgraded or rechecked in remote mode.
+    localHub = undefined;
+    return;
+  }
+  if (localHub) return;
+  const exe = process.platform === "win32" ? "crossagents.exe" : "crossagents";
+  localHub = manageLocalHub(join(process.resourcesPath, "bin", exe), hubHome(), logLine);
+}
+
+/** The hub changed: event and terminal relays end, and every window reloads into the new mode. */
+function hubChanged(mode: "local" | "remote") {
+  logLine(`connection: now ${mode}`);
+  manageForMode(mode);
+  for (const controller of relays.values()) controller.abort();
+  for (const mine of terminalRelays.values()) for (const controller of mine.values()) controller.abort();
+  // After the IPC reply that caused it has reached the page.
+  setTimeout(() => {
+    for (const win of BrowserWindow.getAllWindows()) if (!win.isDestroyed()) win.webContents.reload();
+  }, 300);
+}
+
+function broadcast(channel: string, value: unknown) {
+  for (const win of BrowserWindow.getAllWindows()) if (!win.isDestroyed()) win.webContents.send(channel, value);
+}
+
+function createRemote(): RemoteController {
+  return new RemoteController({
+    file: remoteFile(app.getPath("userData")),
+    crypto: safeCrypto,
+    ssh: { program: sshProgram(process.platform, process.env, existsSync), prefix: [] },
+    defaultDeviceName: defaultDeviceName(hostname()),
+    onState: (state) => broadcast("connection:state", state),
+    onPairStep: (step) => broadcast("connection:pair-step", step),
+    onHubChange: hubChanged,
+    beforeRemote: async () => {
+      const previous = localHub;
+      localHub = undefined;
+      await previous?.ready();
+    },
+    log: logLine,
+  });
+}
+
+/** `connection:*` answers `{ ok, state }` or `{ ok: false, error }` (electron/preload.cts). */
+function connectionHandler(channel: string, call: (r: RemoteController, ...args: unknown[]) => Promise<unknown> | unknown) {
+  ipcMain.handle(channel, async (event, ...args: unknown[]) => {
+    try {
+      if (!fromApp(event)) throw new Error("request from an unknown page");
+      if (!remote) throw new Error("the GUI is still starting");
+      return { ok: true, state: await call(remote, ...args) };
+    } catch (err) {
+      return { ok: false, error: message(err) };
+    }
+  });
+}
+connectionHandler("connection:get", (r) => r.get());
+connectionHandler("connection:pair", (r, target, deviceName) => r.pair(target, deviceName));
+connectionHandler("connection:use", (r, mode) => r.use(mode));
+connectionHandler("connection:reconnect", (r) => r.reconnect());
+connectionHandler("connection:forget", (r) => r.forget());
+
+const REMOTE_UNAVAILABLE = "远程模式下不可用";
 
 function message(err: unknown): string {
   if (err instanceof Error) {
@@ -144,18 +250,15 @@ async function serveExtension(request: Request): Promise<Response> {
   if (request.method !== "GET" && request.method !== "HEAD") return new Response(null, { status: 405, headers: cors });
   if (safeMode.enabled) return new Response("Extensions are disabled in safe mode", { status: 403, headers: cors });
   try {
-    await localHub?.ready();
-    const { base, token } = await connection();
-    const response = await fetch(`${base}/v1/extensions`, {
+    const path = assetPath(request.url);
+    const { base, token, mode } = await currentHub();
+    const asset = await fetch(base + path, {
       headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
-    if (!response.ok) throw new Error(`extensions: HTTP ${response.status}`);
-    const { extensions } = await response.json() as { extensions: ExtensionVersions[] };
-    const file = await extensionRealFile(hubHome(), request.url, extensions);
-    const asset = await net.fetch(pathToFileURL(file).href, { method: request.method });
+    if (mode === "remote" && asset.status === 401) remote?.unauthorized();
     const headers = new Headers(asset.headers);
     for (const [name, value] of Object.entries(cors)) headers.set(name, value);
-    return new Response(asset.body, { status: asset.status, headers });
+    return new Response(request.method === "HEAD" ? null : asset.body, { status: asset.status, headers });
   } catch (err) {
     logLine(`extension protocol: ${message(err)}`);
     return new Response("Extension asset unavailable", { status: 404, headers: cors });
@@ -173,8 +276,15 @@ ipcMain.handle("hub:request", async (event, method: unknown, path: unknown, body
       );
     }
     if (body !== null && typeof body !== "string") throw new Error("body must be a string");
-    await localHub?.ready();
-    const { base, token } = await connection();
+    let hub: Awaited<ReturnType<typeof currentHub>>;
+    try {
+      hub = await currentHub();
+    } catch (err) {
+      // The tunnel is down: say so now rather than queue the request.
+      if (!(err instanceof Unavailable)) throw err;
+      return { ok: true, response: { status: 503, body: JSON.stringify({ error: { code: "unavailable", message: err.message } }) } };
+    }
+    const { base, token } = hub;
     const headers: Record<string, string> = { authorization: `Bearer ${token}` };
     if (body !== null) headers["content-type"] = "application/json";
     let response: Response;
@@ -188,6 +298,8 @@ ipcMain.handle("hub:request", async (event, method: unknown, path: unknown, body
     } catch (err) {
       return transportFailure(err);
     }
+    // The device was revoked: stop reconnecting and ask for a new pairing.
+    if (hub.mode === "remote" && response.status === 401) remote?.unauthorized();
     return { ok: true, response: { status: response.status, body: await response.text() } };
   } catch (err) {
     return { ok: false, error: message(err) };
@@ -196,7 +308,7 @@ ipcMain.handle("hub:request", async (event, method: unknown, path: unknown, body
 
 /** The development hub this GUI is talking to instead of its own, or null. */
 ipcMain.handle("hub:dev", async (event) => {
-  if (!fromApp(event)) return null;
+  if (!fromApp(event) || isRemote()) return null;
   await localHub?.ready();
   return localHub?.devHub() ?? null;
 });
@@ -210,7 +322,9 @@ ipcMain.on("update:install", (event) => {
 
 /** Swaps the development hub for the shipped one; resolves to an error message or null. */
 ipcMain.handle("hub:use-shipped", async (event) => {
-  if (!fromApp(event) || !localHub) return "no local hub to manage";
+  if (!fromApp(event)) return "no local hub to manage";
+  if (isRemote()) return REMOTE_UNAVAILABLE;
+  if (!localHub) return "no local hub to manage";
   try {
     await localHub.useShipped();
     return null;
@@ -219,24 +333,56 @@ ipcMain.handle("hub:use-shipped", async (event) => {
   }
 });
 
-/** A folder chosen in the system dialog, or null when cancelled. */
+/**
+ * A folder chosen in the system dialog, or null when cancelled. In remote mode the folder would
+ * be on this machine, not the hub's: `{ error }` (electron/preload.cts throws it).
+ */
 ipcMain.handle("dialog:pick-folder", async (event) => {
   if (!fromApp(event)) return null;
+  if (isRemote()) return { error: REMOTE_UNAVAILABLE };
   const win = BrowserWindow.fromWebContents(event.sender);
   const options = { properties: ["openDirectory" as const] };
   const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
   return result.canceled ? null : (result.filePaths[0] ?? null);
 });
 
+const openCopies = new Set<string>();
+const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+const execFileAsync = promisify(execFile);
+
+async function checkCopyRoot(root: string) {
+  if (process.platform === "win32") return;
+  const info = await lstat(root);
+  if (!safeCopyRoot({ directory: info.isDirectory(), symlink: info.isSymbolicLink(), uid: info.uid }, process.getuid!())) {
+    throw new Error("临时副本目录不安全：必须是当前用户拥有的真实目录");
+  }
+}
+
+async function markDownloaded(file: string) {
+  try {
+    if (process.platform === "win32") await writeFile(`${file}:Zone.Identifier`, zoneIdentifier());
+    else if (process.platform === "darwin") await execFileAsync("xattr", quarantineArgs(file, Date.now() / 1000));
+  } catch (err) {
+    logLine(`copy origin marking: ${message(err)}`);
+  }
+}
+
+async function cleanOldCopies() {
+  const root = copyRoot(tmpdir());
+  try {
+    await checkCopyRoot(root);
+    const entries = await readdir(root, { withFileTypes: true });
+    const candidates = await Promise.all(entries.filter((e) => e.isDirectory()).map(async (e) => ({
+      name: e.name, modified: (await stat(join(root, e.name))).mtimeMs,
+    })));
+    await Promise.all(staleCopies(candidates, Date.now()).map((name) => rm(join(root, name), { recursive: true, force: true })));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") logLine(`copy cleanup: ${message(err)}`);
+  }
+}
+
 /** A scope's API prefix: a session, a run, or a task of a run. */
 const FILE_SCOPE = /^\/v1\/(agents\/[^/?#]+|runs\/[^/?#]+(\/tasks\/[^/?#]+)?)$/;
-
-/**
- * Files the system would run rather than show: an agent can write one and link it, so opening
- * it with its default program is refused (the in-app viewer still shows it).
- */
-const RUNS_WHEN_OPENED =
-  /\.(exe|com|bat|cmd|ps1|psm1|vbs|vbe|js|jse|wsf|wsh|msi|msp|scr|pif|cpl|hta|lnk|url|reg|jar|app|command|sh|desktop|appimage)$/i;
 
 /**
  * Opens a workspace file with the system's default program; resolves to an error message or
@@ -248,8 +394,7 @@ ipcMain.handle("shell:open-path", async (event, scope: unknown, path: unknown) =
     if (!fromApp(event)) throw new Error("request from an unknown page");
     if (typeof scope !== "string" || !FILE_SCOPE.test(scope)) throw new Error(`not a file scope: ${scope}`);
     if (typeof path !== "string" || !path) throw new Error("no path to open");
-    await localHub?.ready();
-    const { base, token } = await connection();
+    const { base, token, mode } = await currentHub();
     let response: Response;
     try {
       response = await fetch(`${base}${scope}/files/resolve`, {
@@ -261,6 +406,7 @@ ipcMain.handle("shell:open-path", async (event, scope: unknown, path: unknown) =
     } catch (err) {
       throw new Error(`cannot reach the hub: ${message(err)}`);
     }
+    if (mode === "remote" && response.status === 401) remote?.unauthorized();
     const text = await response.text();
     if (response.status >= 400) {
       let reason = text || `HTTP ${response.status}`;
@@ -272,12 +418,39 @@ ipcMain.handle("shell:open-path", async (event, scope: unknown, path: unknown) =
       throw new Error(reason);
     }
     const entry = (JSON.parse(text) as { entries?: { path?: string | null; abs_path?: string | null }[] }).entries?.[0];
-    if (!entry?.path || !entry.abs_path) throw new Error("文件不存在或不在工作区内");
-    if (RUNS_WHEN_OPENED.test(entry.abs_path)) throw new Error("可执行文件或脚本不会用默认程序打开，请在查看器里阅读");
-    const failure = await shell.openPath(entry.abs_path);
-    return failure || null;
+    if (!entry?.path || (mode === "local" && !entry.abs_path)) throw new Error("文件不存在或不在工作区内");
+    const name = copyName(entry.path);
+    if (mode === "local" ? runsWhenOpened(entry.abs_path!) : (runsWhenOpened(entry.path) || runsWhenOpened(name))) throw new Error("可执行文件或脚本不会用默认程序打开，请在查看器里阅读");
+    let target = entry.abs_path!;
+    if (mode === "remote") {
+      const signal = AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS);
+      let bytes: ArrayBuffer;
+      try {
+        const raw = await fetch(`${base}${scope}/files/raw?path=${encodeURIComponent(entry.path)}`, {
+          headers: { authorization: `Bearer ${token}` }, signal,
+        });
+        if (raw.status === 401) remote?.unauthorized();
+        if (raw.status === 413) throw new Error("文件超过 64 MiB，不能下载打开");
+        if (!raw.ok) throw new Error(`下载文件失败：HTTP ${raw.status}`);
+        bytes = await raw.arrayBuffer();
+      } catch (err) {
+        if (signal.aborted) throw new Error("下载超时");
+        throw err;
+      }
+      const root = copyRoot(tmpdir());
+      await mkdir(root, { recursive: true, mode: 0o700 });
+      await checkCopyRoot(root);
+      const dir = await mkdtemp(copyPrefix(root));
+      openCopies.add(dir);
+      target = join(dir, name);
+      await writeFile(target, Buffer.from(bytes));
+      await markDownloaded(target);
+    }
+    const failure = await shell.openPath(target);
+    if (failure) throw new Error(failure);
+    return { copy: mode === "remote" };
   } catch (err) {
-    return message(err);
+    return { error: message(err) };
   }
 });
 
@@ -291,7 +464,6 @@ const isMac = process.platform === "darwin";
 /** What the page's menu (src/menubar.tsx) may ask the window to do. */
 const COMMANDS = ["zoomIn", "zoomOut", "zoomReset", "reload", "devtools", "fullscreen", "quit"] as const;
 type Command = (typeof COMMANDS)[number];
-const ZOOM_KEYS: Record<string, Command> = { "=": "zoomIn", "+": "zoomIn", "-": "zoomOut", "0": "zoomReset" };
 
 function runCommand(win: BrowserWindow, command: Command) {
   const contents = win.webContents;
@@ -362,7 +534,6 @@ async function relayEvents(contents: WebContents, signal: AbortSignal) {
   const last: { id?: string } = {};
   while (!signal.aborted) {
     emit("hub:status", "connecting");
-    await localHub?.ready();
     let reason: string;
     try {
       await streamOnce(emit, last, signal);
@@ -371,9 +542,11 @@ async function relayEvents(contents: WebContents, signal: AbortSignal) {
       reason = message(err);
     }
     if (signal.aborted) return;
-    // The local hub went away (or never came up): start it again; say why if it cannot be.
-    localHub?.recheck();
-    reason = localHub?.problem() ?? reason;
+    if (!isRemote()) {
+      // The local hub went away (or never came up): start it again; say why if it cannot be.
+      localHub?.recheck();
+      reason = localHub?.problem() ?? reason;
+    }
     emit("hub:status", `offline: ${reason}`);
     await new Promise((r) => setTimeout(r, RECONNECT_MS));
   }
@@ -381,12 +554,13 @@ async function relayEvents(contents: WebContents, signal: AbortSignal) {
 
 /** Reads one SSE connection, resuming after `last.id` with `Last-Event-ID`. */
 async function streamOnce(emit: (channel: string, value: string) => void, last: { id?: string }, signal: AbortSignal) {
-  const { base, token } = await connection();
+  const { base, token, mode } = await currentHub();
   const headers: Record<string, string> = { authorization: `Bearer ${token}`, accept: "text/event-stream" };
   if (last.id !== undefined) headers["last-event-id"] = last.id;
   // First connection: live events only (views load state over REST); reconnects resume.
   const query = last.id === undefined ? "?live=true" : "";
   const response = await fetch(`${base}/v1/events${query}`, { headers, signal });
+  if (mode === "remote" && response.status === 401) remote?.unauthorized();
   if (!response.ok || !response.body) throw new Error(`hub answered ${response.status}`);
   emit("hub:status", "connected");
 
@@ -443,7 +617,6 @@ async function relayTerminal(contents: WebContents, id: string, reader: string, 
     if (!signal.aborted && !contents.isDestroyed()) contents.send("terminal:frame", id, data);
   };
   while (!signal.aborted) {
-    await localHub?.ready();
     try {
       if (await terminalStreamOnce(id, reader, emit, signal)) return;
     } catch {
@@ -451,17 +624,18 @@ async function relayTerminal(contents: WebContents, id: string, reader: string, 
     }
     if (signal.aborted) return;
     emit(JSON.stringify({ type: "reconnecting" }));
-    localHub?.recheck();
+    if (!isRemote()) localHub?.recheck();
     await new Promise((r) => setTimeout(r, RECONNECT_MS));
   }
 }
 
 /** Whether there is nothing more to come: the shell finished, or the hub no longer has it. */
 async function terminalStreamOnce(id: string, reader: string, emit: (data: string) => void, signal: AbortSignal): Promise<boolean> {
-  const { base, token } = await connection();
+  const { base, token, mode } = await currentHub();
   const headers = { authorization: `Bearer ${token}`, accept: "text/event-stream" };
   const url = `${base}/v1/terminals/${encodeURIComponent(id)}/output?connection=${encodeURIComponent(reader)}`;
   const response = await fetch(url, { headers, signal });
+  if (mode === "remote" && response.status === 401) remote?.unauthorized();
   if (response.status === 404) {
     emit(JSON.stringify({ type: "gone" }));
     return true;
@@ -547,28 +721,15 @@ async function createWindow() {
       .finally(() => { askingRecovery = false; });
   });
   tray?.keep(win);
-  // No native menu, so the shortcuts it carried are wired here: zoom always (the page's own
-  // menu, src/menubar.tsx, lists them); reload and dev tools only in development.
+  // Zoom is always available; reload and dev tools are only wired here in development.
   win.webContents.on("before-input-event", (event, input) => {
-    if (input.type !== "keyDown" || !input.control || input.alt) return;
-    const command = ZOOM_KEYS[input.key];
+    const command = shortcut(process.platform, input, !!devServerUrl);
     if (command) {
       runCommand(win, command);
       event.preventDefault();
     }
   });
   if (devServerUrl) {
-    win.webContents.on("before-input-event", (event, input) => {
-      if (input.type !== "keyDown") return;
-      const key = input.key.toLowerCase();
-      if (input.key === "F12" || (input.control && input.shift && key === "i")) {
-        win.webContents.toggleDevTools();
-        event.preventDefault();
-      } else if (input.control && !input.shift && key === "r") {
-        win.webContents.reload();
-        event.preventDefault();
-      }
-    });
     // The dev server may still be starting.
     for (;;) {
       try {
@@ -609,30 +770,56 @@ function showWindow() {
 }
 app.on("second-instance", showWindow);
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   if (!single) return;
+  void cleanOldCopies();
   const unfinished = extensionLoading.unfinished();
   safeMode = decideSafeMode(process.argv, unfinished);
   protocol.handle("crossagents-ext", serveExtension);
   if (unfinished && safeMode.enabled) {
     void dialog.showMessageBox({ type: "warning", title: "CrossAgents 安全模式", message: safeMode.reason!, buttons: ["确定"] });
   }
+  // Which mode the GUI is in decides whether the local hub is managed at all.
+  const controller = createRemote();
+  await controller.init().catch((err: unknown) => logLine(`connection: cannot read the saved pairing: ${message(err)}`));
+  remote = controller;
   if (app.isPackaged) {
-    const exe = process.platform === "win32" ? "crossagents.exe" : "crossagents";
-    localHub = manageLocalHub(join(process.resourcesPath, "bin", exe), hubHome(), logLine);
+    manageForMode(controller.mode());
     // Downloads a newer release in the background and installs it when the GUI quits; the
     // next launch then upgrades the local hub (package.json `build.publish`).
     updates = startUpdates(logLine);
-    tray = createTray(join(process.resourcesPath, "icon.ico"), localHub, showWindow, logLine, updates, restartSafeMode);
+    tray = createTray(
+      join(process.resourcesPath, trayIcon(process.platform)),
+      () => localHub,
+      () => controller.remoteSummary(),
+      showWindow,
+      logLine,
+      updates,
+      restartSafeMode,
+    );
   }
   session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => callback(permissionAllowed(permission)));
   session.defaultSession.setPermissionCheckHandler((_contents, permission) => permissionAllowed(permission));
-  // No File / Edit / View / Window bar: everything lives in the page. Copy and paste still work.
-  Menu.setApplicationMenu(null);
+  // macOS needs its native application menu; other platforms use the page menu.
+  const template = applicationMenu(process.platform);
+  Menu.setApplicationMenu(template ? Menu.buildFromTemplate(template) : null);
   void createWindow();
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) void createWindow();
-  });
+  app.on("activate", showWindow);
+});
+
+// The ssh of the tunnel ends with the GUI: closed properly, then killed if quitting runs ahead.
+let tunnelClosed = false;
+app.on("before-quit", (event) => {
+  // Local mode has no tunnel: quitting goes exactly as before.
+  if (tunnelClosed || !remote || remote.mode() !== "remote") return;
+  event.preventDefault();
+  tunnelClosed = true;
+  const done = () => app.quit();
+  void Promise.race([remote.dispose(), new Promise((r) => setTimeout(r, 5_000))]).finally(done);
+});
+app.on("will-quit", () => {
+  remote?.killNow();
+  for (const dir of openCopies) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
 });
 
 // With a tray the window only hides; the GUI quits from the tray's menu.

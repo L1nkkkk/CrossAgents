@@ -416,9 +416,34 @@ mod tests {
         );
         assert_eq!(codebuddy.driver, Some(DriverKind::CodebuddyNative));
         assert!(codebuddy.native_command.is_empty());
-        // The copy inside WorkBuddy is never looked for: nowhere to point at.
-        assert!(codebuddy.locate.paths.is_empty());
+        // The copy inside WorkBuddy is never looked for.
         assert!(codebuddy.locate.bundled.is_empty());
+    }
+
+    #[test]
+    fn builtin_macos_paths_are_platform_specific() {
+        for (name, commands) in [
+            ("codex", &["codex"][..]),
+            ("claude", &["claude"][..]),
+            ("codebuddy", &["codebuddy"][..]),
+            ("cursor", &["agent", "cursor-agent"][..]),
+            ("with", &["with-cli"][..]),
+        ] {
+            let locator = builtin::locator(name).unwrap();
+            let macos = locator.paths.get_for("macos").unwrap();
+            for command in commands {
+                for prefix in ["/opt/homebrew/bin", "/usr/local/bin"] {
+                    assert!(macos.contains(&format!("{prefix}/{command}")), "{name}");
+                }
+            }
+            for path in locator.paths.get_for("windows").into_iter().flatten() {
+                assert!(!path.starts_with("/opt/homebrew/") && !path.starts_with("/usr/local/"));
+            }
+            #[cfg(windows)]
+            for path in locator.searched(&crossagents_drivers::locate::Machine::default()) {
+                assert!(!path.contains("/opt/homebrew/") && !path.contains("/usr/local/"));
+            }
+        }
     }
 
     /// What a session gets from a CodeBuddy that is not installed: the description's install

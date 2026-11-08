@@ -517,8 +517,8 @@ E1 和 E2 涉及的文件不重叠，可以并行：`/v1/extensions` 的形状�
 
 ### 现在为什么做不到
 
-现在做不了 VS Code 那种隔离界面：主页面嵌不了别的文档，读文件接口不给二进制文件的字节，
-页内扩展用的是人的总 token，hub 没有「请 GUI 执行再交回结果」的通道。
+现在做不了 VS Code 那种隔离界面：主页面嵌不了别的文档，`FileContentResponse` 仍不带二进制字节
+（A2 另有原始字节路由，见下面「查看器」），页内扩展用的是人的总 token，hub 没有「请 GUI 执行再交回结果」的通道。
 `api = 2` 的描述文件今天会被拒绝。
 
 - **主页面 CSP 嵌不了 iframe，也跑不了 WASM。** [apps/gui/index.html](../apps/gui/index.html) 现在是
@@ -530,8 +530,9 @@ E1 和 E2 涉及的文件不重叠，可以并行：`/v1/extensions` 的形状�
 - **所有 webContents 都不许开窗、不许离开应用、不许 `<webview>`。** [apps/gui/electron/main.cts](../apps/gui/electron/main.cts)
   的 `web-contents-created`：`setWindowOpenHandler` 一律 deny（http(s) 交给系统浏览器），`will-navigate` 拦住离开应用，
   `will-attach-webview` 拒绝。
-- **二进制文件不给字节。** [crates/api-types/src/lib.rs](../crates/api-types/src/lib.rs) 的 `FileContentResponse`：
-  二进制没有 `text`，只有 `binary: true`，响应里没有字节。
+- **`FileContentResponse` 仍不给字节。** [crates/api-types/src/lib.rs](../crates/api-types/src/lib.rs) 的 `FileContentResponse`：
+  二进制没有 `text`，只有 `binary: true`。A2 另加了原始字节路由（[MULTI-NODE.md](MULTI-NODE.md) §16），
+  给「用默认程序打开」用；页内查看器还没接这条路由。
 - **页内 `ca.hub.request` 用人的凭据。** [apps/gui/src/extensions/host.ts](../apps/gui/src/extensions/host.ts) 的 `makeCa`
   把 `hub.request` 原样转给 `options.request`。页面上接的是 [apps/gui/src/extensions/defaults.ts](../apps/gui/src/extensions/defaults.ts)
   的 `hubRequest`，走主进程 bridge，带的是 `<home>/token` 里的总 token。GUI 扩展声明的 `access` 因此实际不生效。
@@ -580,13 +581,19 @@ supportFetchAPI、corsEnabled。standard 之后来源是 `crossagents-ext://<nam
 打开时宿主发一个句柄，webview 只能读这个文件所在目录（如 `crossagents-file://<句柄>/…`），这样 glTF 相对引用的
 `.bin` 和贴图能加载。
 
-**字节一律从 hub 的二进制接口流式取**，不走 `FileContentResponse` 那种 JSON，也不让 GUI 主进程读本机磁盘：
-GUI 和 hub、节点可能不在同一台机器。下面两处是同盘假设，记为 [MULTI-NODE.md](MULTI-NODE.md) §12 的 A2（远程 GUI）
-和 B3（远程开发）要改的已知限制；扩展在多节点下怎么拿字节，见同文 §16「扩展在多节点下」。
+**字节从 hub 取**，不走 `FileContentResponse` 那种 JSON。A2 已做中心磁盘上的两路（2026-11-08，`718e7d4`、`aeb3e8d`；
+[MULTI-NODE.md](MULTI-NODE.md) §16）。文件在节点上仍是 B3。
 
-- `serveExtension`（[apps/gui/electron/main.cts](../apps/gui/electron/main.cts)）问过 hub 的 `/v1/extensions` 之后，用
-  [apps/gui/electron/extProtocol.cts](../apps/gui/electron/extProtocol.cts) 的 `extensionRealFile` 读本机 `<home>/extension-versions`。
-- `shell:open-path`（`main.cts`）经 hub 的 `files/resolve` 拿到 `abs_path`，再 `shell.openPath` 打开本机绝对路径。
+- 扩展静态资源：`GET /v1/extensions/{name}/assets/{fingerprint}/{*path}`（read）。`serveExtension`
+  （[main.cts](../apps/gui/electron/main.cts)）用 [extProtocol.cts](../apps/gui/electron/extProtocol.cts) 的 `assetPath`
+  只校验 URL，再向 hub 要字节。本机和远程都走这条。不再读 GUI 本机的 `<home>/extension-versions`。
+  快照上限 50 MiB，超出 413。
+- 工作区原始字节：`GET /v1/agents/{key}/files/raw`、`/v1/runs/{key}/files/raw`、`/v1/runs/{key}/tasks/{task}/files/raw`
+  （read），`?path=` 与 `files/content` 相同，上限 64 MiB（[api_bytes.rs](../crates/hub/src/api_bytes.rs) `MAX_RAW_FILE_BYTES`），超出 413。
+  `shell:open-path` 本机模式仍经 `files/resolve` 打开真文件；远程模式下载到临时目录，打开的是副本，
+  查看器写明改动不会写回中心。
+
+扩展 token 只要有 read，就能 GET 扩展资源和上面这几条原始字节，和 `files/content` 一样（[access.rs](../crates/hub/src/access.rs) `required`：GET 是 read；`refusal` 按扩展声明的级别放行）。这符合现有分级，不是遗留。
 
 ### 浏览器视图
 
@@ -654,7 +661,7 @@ agent 在节点上起的 `localhost:5173`，在另一台机器的 GUI 里打不�
 | 阶段 | 内容 | 验收 |
 |---|---|---|
 | **W1**（未开工） | webview、`[capabilities]`、`api = 2`、批准界面 | three.js 页面带 WASM 正常渲染；webview 里写死循环，主界面仍能用；停用后 webview 消失 |
-| **W2**（未开工） | 查看器，以及限定范围的文件访问（字节走 hub） | 点对话里的 `out/car.gltf` 打开 3D，相对 `.bin` 和贴图能加载；范围外的路径被拒 |
+| **W2**（未开工；hub 的原始字节路由已有，见上面「查看器」） | 查看器，以及限定范围的文件访问（页内句柄；字节走 hub） | 点对话里的 `out/car.gltf` 打开 3D，相对 `.bin` 和贴图能加载；范围外的路径被拒 |
 | **W3**（未开工） | 浏览器视图 | 登录 GitHub 后重启仍是登录状态；禁止被嵌的网站能打开；菜单不被盖住 |
 | **W4**（未开工） | GUI 侧工具 | agent 能打开网页、读成文本、点击、截图，人看得到、能接手；没有 GUI 时明确报错 |
 

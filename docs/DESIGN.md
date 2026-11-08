@@ -471,7 +471,7 @@ efforts = ["low", "medium", "high"]
 
 **成功看重新查找的结果，不只看退出码**：退出码为 0 但 hub 找不到程序也算失败，原因写「命令成功了，但 hub 找不到装好的程序」并列出找过的位置（环境变量、`PATH` 上的名字、`paths` 的每一项、`bundled`）。GUI 只在能升级时给按钮：路径认得出是某个安装方式装的（`npm` 在 `node_modules` 下，原生安装在别处），用该方式的 `upgrade`，没写就重跑 `run`；`bundled` 显示「随桌面版更新」；`config` / `env` 显示「由你的配置指定」，都不碰。`CliInfo` 因此多了 `installed_via`、`install_command`、`upgrade_command`、`can_upgrade`、`described_by`（新增可选字段，不升 `API_VERSION`）。
 
-**hub 的 PATH 是旧的**：hub 常驻，新装的 CLI 所在目录可能不在它启动时的 `PATH` 里。Windows 上查找时除进程自己的 `PATH`，还读注册表里当前的用户 `PATH`（`HKCU\Environment`）和系统 `PATH`（`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`），展开 `%VAR%` 后合并去重。只影响查找，不改 hub 自己的环境；会话用找到的绝对路径启动，子进程不需要新的 `PATH`。macOS / Linux 这一轮不读注册表，`[locate].paths` 已覆盖常见位置。注册表读取可注入，单测不碰真实环境。
+**hub 的 PATH 是旧的**：hub 常驻，新装的 CLI 所在目录可能不在它启动时的 `PATH` 里。Windows 上查找时除进程自己的 `PATH`，还读注册表里当前的用户 `PATH`（`HKCU\Environment`）和系统 `PATH`（`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment`），展开 `%VAR%` 后合并去重。只影响查找，不改 hub 自己的环境；会话用找到的绝对路径启动，子进程不需要新的 `PATH`。macOS 的 `[locate.paths]` 包含 Homebrew 默认前缀下的命令路径及已知的原生安装位置；Linux 仅查描述文件列出的路径，自定义位置仍需配置。登录 shell 环境的获取留待 B1。注册表读取可注入，单测不碰真实环境。
 
 ### 9.4 跟上游
 
