@@ -6,8 +6,8 @@ use std::time::Duration;
 use chrono::Utc;
 use common::{TestHub, git_repo};
 use crossagents_core::{
-    AgentId, AgentKey, AgentStatus, EventKind, HumanItem, HumanItemKind, MessageSource, Run, RunId,
-    RunStatus, TaskStatus,
+    AgentId, AgentKey, AgentStatus, EventKind, HumanItem, HumanItemKind, MessageSource,
+    NoticeClass, Run, RunId, RunStatus, TaskStatus,
 };
 use serde_json::{Value, json};
 
@@ -1013,7 +1013,8 @@ async fn settling_the_checkpoint_at_idle_does_not_swallow_a_stuck_report() {
 }
 
 // ---------------------------------------------------------------------------------------
-// Wake rules and the Planner's wake table (docs/research/multica.md §2.1, §2.3, §2.14)
+// Wake rules (docs/research/multica.md §2.1, §2.14). A member's progress is recorded for the
+// lead and rides the next wake; it does not start one (§2.3 no longer wakes on progress).
 
 /// A progress note the worker writes, as the directive that makes the mock call the tool.
 fn progress(task: &str, text: &str) -> String {
@@ -1049,29 +1050,48 @@ async fn assigned_run(t: &TestHub, policy: Value) -> (Run, crossagents_core::Age
 }
 
 #[tokio::test]
-async fn a_member_s_progress_wakes_the_lead_when_it_addresses_nobody() {
+async fn a_member_s_progress_is_kept_and_does_not_wake_the_lead() {
     let repo = git_repo();
     let t = setup(repo.path()).await;
     let mut w = t.watch().await;
     let (run, worker) = assigned_run(&t, enabled()).await;
-    // The worker posts progress and addresses nobody: the lead is woken to evaluate it.
+    // The worker posts progress and addresses nobody. It is recorded, and the lead is not
+    // woken to read it.
     t.send(&worker.id.to_string(), &progress("a", "halfway there"))
         .await;
-    let wake = w
-        .until("the lead is woken by progress", |e| {
-            matches!(&e.kind, EventKind::AgentInput { id, text, .. }
+    w.until("the progress was recorded", |e| {
+        matches!(&e.kind, EventKind::NoticeRecorded { id, line, class, .. }
+            if *id == run.planner
+                && *class == NoticeClass::Silent
+                && line.contains("halfway there"))
+    })
+    .await;
+    let woken = w.seen.iter().any(|e| {
+        matches!(&e.kind, EventKind::AgentInput { id, from, text, .. }
+            if *id == run.planner
+                && *from == Some(MessageSource::Notice)
+                && text.contains("Progress from"))
+    });
+    assert!(!woken, "progress started a turn");
+
+    // The next message to the lead carries the note after the person's words.
+    t.send(&run.planner.to_string(), "please look").await;
+    let carried = w
+        .until("the person's message carries the progress", |e| {
+            matches!(&e.kind, EventKind::AgentInput { id, text, notices, from, .. }
                 if *id == run.planner
-                    && text.contains(&format!("Progress from {} on #a", worker.name)))
+                    && *from == Some(MessageSource::Human)
+                    && text.contains("please look")
+                    && notices.iter().any(|line| line.contains("halfway there")))
         })
         .await;
-    if let EventKind::AgentInput { text, from, .. } = &wake.kind {
-        assert!(
-            text.contains("halfway there"),
-            "the note travels with it: {text}"
-        );
-        // It is the hub's digest, not a message from the worker.
-        assert_eq!(from, &Some(MessageSource::Notice), "{from:?}");
-    }
+    let EventKind::AgentInput { text, .. } = &carried.kind else {
+        unreachable!()
+    };
+    assert!(
+        !text.contains("Progress from"),
+        "the note is not part of the person's words: {text}"
+    );
 }
 
 #[tokio::test]
@@ -1120,46 +1140,49 @@ async fn progress_that_addresses_another_teammate_does_not_wake_the_lead() {
 }
 
 #[tokio::test]
-async fn progress_wakes_are_queued_once_not_once_per_note() {
+async fn progress_notes_replace_one_line_and_do_not_wake_the_lead() {
     let repo = git_repo();
     let t = setup(repo.path()).await;
     let mut w = t.watch().await;
     let (run, worker) = assigned_run(&t, enabled()).await;
     idle(&t, run.planner).await;
     turn_end_recorded(&t, run.planner).await;
-    // Hold the lead busy, then let the worker post two notes in one turn.
-    t.send(&run.planner.to_string(), "[slow]").await;
-    w.until(
-        "the lead is busy",
-        |e| matches!(&e.kind, EventKind::AgentTurnStarted { id, .. } if *id == run.planner),
-    )
-    .await;
+    // Two notes in one turn. They share a topic, so the later line replaces the earlier,
+    // and neither starts a turn even while the lead is idle.
     t.send(
         &worker.id.to_string(),
         &format!("{} {}", progress("a", "one"), progress("a", "two")),
     )
     .await;
-    w.until(
-        "both notes landed",
-        |e| matches!(&e.kind, EventKind::TaskProgress { text, .. } if text == "two"),
-    )
+    w.until("the later note was recorded", |e| {
+        matches!(&e.kind, EventKind::NoticeRecorded { id, line, class, .. }
+            if *id == run.planner && *class == NoticeClass::Silent && line.contains("two"))
+    })
     .await;
-    w.until(
-        "the digest was updated in place",
-        |e| matches!(&e.kind, EventKind::AgentInputUpdated { id, .. } if *id == run.planner),
-    )
-    .await;
-    let queued = w
-        .seen
+    let woken = w.seen.iter().any(|e| {
+        matches!(&e.kind, EventKind::AgentInput { id, from, text, .. }
+            if *id == run.planner
+                && *from == Some(MessageSource::Notice)
+                && text.contains("Progress from"))
+    });
+    assert!(!woken, "progress started a turn");
+    let pending = t
+        .hub
+        .orchestrator
+        .store()
+        .list_pending_notices(Some(run.planner))
+        .await
+        .unwrap();
+    let progress = pending
         .iter()
-        .filter(|e| {
-            matches!(&e.kind, EventKind::AgentInput { id, text, queued: true, .. }
-                if *id == run.planner && text.contains("Progress from"))
-        })
-        .count();
-    assert_eq!(queued, 1, "the notes piled up as separate wakes");
-    t.post(&format!("/v1/agents/{}/cancel", run.planner), json!({}))
-        .await;
+        .find(|row| row.topic.starts_with("lead-progress:"))
+        .expect("the progress line is waiting");
+    assert!(progress.line.contains("two"), "{}", progress.line);
+    assert!(
+        !progress.line.contains(": one"),
+        "the earlier line was kept: {}",
+        progress.line
+    );
 }
 
 #[tokio::test]
