@@ -13,9 +13,9 @@ use std::sync::Arc;
 use chrono::Utc;
 use crossagents_core::{
     Agent, AgentId, AgentKey, AgentStatus, Attachment, ClaimRole, CoreError, Envelope, EventBus,
-    EventKind, HandoffKind, LeadPlace, MessageId, MessageSource, PlannedTask, Role, Run, RunConfig,
-    RunId, RunMode, RunPolicy, RunStatus, StopReason, Store, Task, TaskId, TaskReport,
-    TaskRunOutcome, TaskStatus, WorkspaceVcs,
+    EventKind, HandoffKind, LeadPlace, MessageId, MessageSource, NoticeClass, PlannedTask, Role,
+    Run, RunConfig, RunId, RunMode, RunPolicy, RunStatus, StopReason, Store, Task, TaskId,
+    TaskReport, TaskRunOutcome, TaskStatus, WorkspaceVcs,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -1503,8 +1503,13 @@ The person changed: {}",
                 changes.join("; ")
             ));
         }
-        self.notice(run.planner, &format!("run:{}", run.id), &text)
-            .await;
+        self.notice(
+            run.planner,
+            &format!("run:{}", run.id),
+            &text,
+            NoticeClass::Decide,
+        )
+        .await;
         self.schedule(run).await
     }
 
@@ -1679,6 +1684,7 @@ The person changed: {}",
                     run.id,
                     self.task_base_branch(run)
                 ),
+                NoticeClass::RunDone,
             )
             .await;
         }
@@ -1708,6 +1714,7 @@ The person changed: {}",
                 "Task {} did not start: {why}. It stays pending and is tried again when the run next moves on; or task_assign it (a new execution session by default, or someone else).",
                 brief::task_ref(task)
             ),
+            NoticeClass::Silent,
         )
         .await;
         Ok(format!("#{}: {why}", task.key))
@@ -1876,8 +1883,13 @@ The person changed: {}",
             Some(reason) => format!("{line}（{reason}）"),
             None => line,
         };
-        self.notice(to, &format!("task:{}:dispatch", task.id), &line)
-            .await;
+        self.notice(
+            to,
+            &format!("task:{}:dispatch", task.id),
+            &line,
+            NoticeClass::Silent,
+        )
+        .await;
     }
 
     /// An execution session cloned from a teammate is nobody's recruit: the clone copies the
@@ -2312,14 +2324,15 @@ The person changed: {}",
             task.issuer_or(run.planner),
             &format!("task:{}", task.id),
             &format!("Task {} failed: {reason}", brief::task_ref(task)),
+            NoticeClass::Decide,
         )
         .await;
         Box::pin(self.schedule(run)).await
     }
 
-    /// A line in an agent's notification digest.
-    pub(crate) async fn notice(&self, agent: AgentId, topic: &str, line: &str) {
-        if let Err(err) = self.host.notify(agent, topic, line).await {
+    /// A line in an agent's notification digest. `class` decides whether it wakes them.
+    pub(crate) async fn notice(&self, agent: AgentId, topic: &str, line: &str, class: NoticeClass) {
+        if let Err(err) = self.host.notify(agent, topic, line, class).await {
             tracing::warn!(%agent, error = %err, "cannot deliver a notice");
         }
     }
@@ -2451,6 +2464,7 @@ The person changed: {}",
                     "{name} ended its turn without a verdict on {} (still reviewing).",
                     brief::task_ref(&task)
                 ),
+                NoticeClass::Decide,
             )
             .await;
             return;
@@ -2497,6 +2511,7 @@ The person changed: {}",
                             "The hub restarted while task {} was being verified, so nothing verified it. Look at it, then accept it with force and a reason, verify it again (task_verify), rework it or drop it.",
                             brief::task_ref(&task)
                         ),
+                        NoticeClass::Decide,
                     )
                     .await;
                     continue;
@@ -2532,6 +2547,7 @@ The person changed: {}",
                         "The hub restarted; task {} is stalled until you decide.",
                         brief::task_ref(&task)
                     ),
+                    NoticeClass::Decide,
                 )
                 .await;
             }

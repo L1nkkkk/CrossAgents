@@ -68,7 +68,7 @@ pub use model::{
     validate_slug,
 };
 pub use note::{EXTERNAL_PLUGIN, Note, NoteScope};
-pub use notify::{Reminder, Watch, WatchOn, WatchTarget};
+pub use notify::{NoticeClass, PendingNotice, Reminder, Watch, WatchOn, WatchTarget};
 pub use policy::{
     ApprovalPolicy, AskPolicy, Budget, ContinuationPolicy, LandPolicy, PlanApproval, RunPolicy,
 };

@@ -8,12 +8,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use crossagents_core::{
     Agent, AgentId, AgentKey, AgentStatus, AttachmentSupport, Capabilities, CoreError,
     DeliveryState, DeliveryStatus, DiffSource, DriverSession, EXTERNAL_PLUGIN, Envelope, EventBus,
-    EventKind, McpServerSpec, MessageId, MessageSource, NameSource, OutputStream, PermissionPolicy,
-    Prompt, QueuedReason, SessionEvent, SessionEventKind, SessionSpec, StopReason, Store,
-    validate_agent_name,
+    EventKind, McpServerSpec, MessageId, MessageSource, NameSource, NoticeClass, OutputStream,
+    PendingNotice, PermissionPolicy, Prompt, QueuedReason, SessionEvent, SessionEventKind,
+    SessionSpec, StopReason, Store, validate_agent_name,
 };
 use crossagents_plugins::PluginRegistry;
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -321,21 +322,6 @@ impl Inbox {
         true
     }
 
-    /// The next message, marking a turn as running; `None` once closed.
-    async fn next(&self) -> Option<(MessageId, Prompt)> {
-        loop {
-            if self.closed.load(Ordering::SeqCst) {
-                return None;
-            }
-            if let Some(message) = self.waiting.lock().unwrap().pop_front() {
-                self.busy.store(true, Ordering::SeqCst);
-                *self.running.lock().unwrap() = Some(message.0);
-                return Some(message);
-            }
-            self.notify.notified().await;
-        }
-    }
-
     fn finish_turn(&self) {
         if let Some(id) = self.running.lock().unwrap().take() {
             self.from_person.lock().unwrap().remove(&id);
@@ -391,6 +377,25 @@ impl Inbox {
         self.busy.load(Ordering::SeqCst)
     }
 
+    fn is_waiting(&self, id: MessageId) -> bool {
+        self.waiting.lock().unwrap().iter().any(|(m, _)| *m == id)
+    }
+
+    /// Pops the next message and marks a turn running. `None` when closed or nothing is waiting.
+    fn pop_turn(&self) -> Option<(MessageId, Prompt)> {
+        if self.closed.load(Ordering::SeqCst) {
+            return None;
+        }
+        let message = self.waiting.lock().unwrap().pop_front()?;
+        self.busy.store(true, Ordering::SeqCst);
+        *self.running.lock().unwrap() = Some(message.0);
+        Some(message)
+    }
+
+    async fn wait_for_message(&self) {
+        self.notify.notified().await;
+    }
+
     fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
     }
@@ -417,9 +422,8 @@ pub struct Runtime {
     live: LiveMap,
     /// Serializes start/stop per agent without blocking other agents.
     locks: Mutex<HashMap<AgentId, Arc<Mutex<()>>>>,
-    /// Each agent's notification digest still waiting for its turn: the message and its
-    /// lines by topic (a newer line on a topic replaces the older one).
-    digests: Mutex<HashMap<AgentId, Digest>>,
+    /// Pending notices: what is recorded, what is queued as a wake, and what a turn is reading.
+    notice_state: Arc<NoticeState>,
     /// Messages for agents outside the hub, until they read them (`inbox_read`).
     external: Mutex<HashMap<AgentId, Vec<Waiting>>>,
     /// What changed about the agent that it has not been told yet (its model or effort, its
@@ -489,7 +493,7 @@ impl Runtime {
             home: None,
             live: LiveMap::default(),
             locks: Mutex::default(),
-            digests: Mutex::default(),
+            notice_state: Arc::new(NoticeState::new()),
             notices: Mutex::default(),
             external: Mutex::default(),
             going_home: Mutex::default(),
@@ -508,6 +512,18 @@ impl Runtime {
     /// The home whose enabled extensions contribute stream rules to a new session.
     pub fn with_home(mut self, home: PathBuf) -> Self {
         self.home = Some(home);
+        self
+    }
+
+    /// How long a batch of notices waits: `quiet` after the latest, and at most `max` after
+    /// the earliest. Defaults are 60s and 180s. Zero wakes on the next check.
+    pub fn with_notice_windows(self, quiet: Duration, max: Duration) -> Self {
+        self.notice_state
+            .quiet_ms
+            .store(quiet.as_millis() as u64, Ordering::Relaxed);
+        self.notice_state
+            .max_ms
+            .store(max.as_millis() as u64, Ordering::Relaxed);
         self
     }
 
@@ -538,6 +554,12 @@ impl Runtime {
             Some(since) => self.unfinished(since).await?,
             None => HashMap::new(),
         };
+        // A wake that never started is rebuilt from the table. A turn this hub takes over
+        // keeps its notices, so poll does not open a second one.
+        let keep: Vec<MessageId> = unfinished.values().filter_map(|work| work.running).collect();
+        if let Err(err) = self.store().release_stranded_notices(&keep).await {
+            tracing::warn!(error = %err, "cannot release notices the previous hub left");
+        }
         let mut recovery = Recovery::default();
         for agent in self.store().list_agents().await? {
             let running = unfinished.get(&agent.id).and_then(|u| u.running);
@@ -580,6 +602,9 @@ impl Runtime {
                     },
                 )
                 .await;
+                if let Err(err) = self.store().settle_carried_notices(message_id, false).await {
+                    tracing::warn!(%message_id, error = %err, "cannot release notices from an interrupted turn");
+                }
                 recovery.interrupted.push(agent.id);
             }
         }
@@ -625,12 +650,19 @@ impl Runtime {
                         message_id,
                         text,
                         attachments,
+                        from,
                         ..
-                    } => out
-                        .entry(id)
-                        .or_default()
-                        .waiting
-                        .push((message_id, Prompt { text, attachments })),
+                    } => {
+                        // A notice wake is rebuilt from the pending table, which survives
+                        // restart. Requeueing the message as well would deliver it twice.
+                        if from == Some(MessageSource::Notice) {
+                            continue;
+                        }
+                        out.entry(id)
+                            .or_default()
+                            .waiting
+                            .push((message_id, Prompt { text, attachments }));
+                    }
                     EventKind::AgentInputUpdated {
                         id,
                         message_id,
@@ -1366,6 +1398,8 @@ impl Runtime {
             control_tx,
             diff_dir,
             adopted,
+            self.notice_state.clone(),
+            self.store().clone(),
         ));
         self.live.lock().await.insert(id, live);
         inbox
@@ -1673,55 +1707,85 @@ impl Runtime {
         wait.notify_one();
     }
 
-    /// Adds a line to the agent's notification digest: one waiting message that gathers
-    /// news while the agent is busy, so notices never pile up as separate turns. A line on
-    /// a `topic` already in the digest replaces it. Starts the agent if needed.
-    pub async fn notify(&self, key: &AgentKey, topic: &str, line: &str) -> Result<(), CoreError> {
+    /// Records a notice, then wakes only when its class says to.
+    ///
+    /// Silent notices wait for the next wake. Batch notices wake together once the quiet
+    /// interval after the latest has passed, or the maximum wait after the earliest,
+    /// whichever comes first. Unblock, Decide and RunDone wake at once. A wake is one
+    /// message: actions first, then silent changes, each line marked with its class. The
+    /// same topic replaces the previous line and keeps `first_at`. Rows are deleted only
+    /// when the turn that carried them ends successfully. An archived agent keeps the row
+    /// and is not delivered to.
+    pub async fn notify(
+        &self,
+        key: &AgentKey,
+        topic: &str,
+        line: &str,
+        class: NoticeClass,
+    ) -> Result<(), CoreError> {
         let stored = self.store().get_agent(key).await?;
-        if stored.plugin == EXTERNAL_PLUGIN {
-            let envelope = Envelope::new(MessageSource::Notice, line.to_owned());
-            return self
-                .deliver(key, envelope, false, None, None)
-                .await
-                .map(|_| ());
+        let _gate = self.notice_state.gate.lock().await;
+        let now = Utc::now();
+        self.store()
+            .upsert_pending_notice(&PendingNotice {
+                agent: stored.id,
+                topic: topic.to_owned(),
+                line: line.to_owned(),
+                class,
+                first_at: now,
+                updated_at: now,
+                carried_by: None,
+                wake_tries: 0,
+            })
+            .await?;
+        publish(
+            &self.bus,
+            EventKind::NoticeRecorded {
+                id: stored.id,
+                topic: topic.to_owned(),
+                line: line.to_owned(),
+                class,
+            },
+        )
+        .await;
+        let rows = self.store().list_pending_notices(Some(stored.id)).await?;
+        if stored.archived_at.is_some() {
+            return Ok(());
         }
-        let agent = self.start(key).await?;
-        let live = self.live.lock().await.get(&agent.id).cloned();
-        let mut digests = self.digests.lock().await;
-        if let (Some(live), Some(digest)) = (&live, digests.get_mut(&agent.id)) {
-            digest.lines.insert(topic.to_owned(), line.to_owned());
-            let text = digest.text();
-            if live.inbox.update(digest.message, &text) {
-                publish(
-                    &self.bus,
-                    EventKind::AgentInputUpdated {
-                        id: agent.id,
-                        message_id: digest.message,
-                        text,
-                    },
-                )
-                .await;
-                return Ok(());
+        if self.has_waiting_digest(stored.id).await || self.should_wake(stored.id, &rows) {
+            self.sync_digest(&stored, &rows).await?;
+        }
+        Ok(())
+    }
+
+    /// Wakes agents whose pending batch window has elapsed, or who still have an immediate
+    /// notice. Called on the reminder tick and after a restart.
+    pub async fn poll_notice_wakes(&self) -> Result<(), CoreError> {
+        let _gate = self.notice_state.gate.lock().await;
+        let rows = self.store().list_pending_notices(None).await?;
+        let mut by_agent: HashMap<AgentId, Vec<PendingNotice>> = HashMap::new();
+        for row in rows {
+            by_agent.entry(row.agent).or_default().push(row);
+        }
+        for (id, rows) in by_agent {
+            let Ok(agent) = self.store().get_agent(&AgentKey::Id(id)).await else {
+                continue;
+            };
+            // Archived agents are not delivered to. The rows stay on this agent id, so a
+            // later session of the same agent still has them.
+            if agent.archived_at.is_some() {
+                continue;
+            }
+            let stale = self.notice_state.digest_message(id).is_some()
+                && !self.has_waiting_digest(id).await;
+            if !stale && !self.should_wake(id, &rows) {
+                continue;
+            }
+            if let Err(err) = self.sync_digest(&agent, &rows).await {
+                tracing::warn!(agent = %agent.name, error = %err, "cannot deliver notices");
             }
         }
-        // No digest waiting (none yet, or the last one already started): begin a new one.
-        let mut digest = Digest {
-            message: MessageId::new(),
-            lines: BTreeMap::new(),
-        };
-        digest.lines.insert(topic.to_owned(), line.to_owned());
-        let envelope = Envelope {
-            id: digest.message,
-            from: MessageSource::Notice,
-            text: digest.text(),
-            reply_to: None,
-            attachments: Vec::new(),
-        };
-        digests.insert(agent.id, digest);
-        drop(digests);
-        self.deliver(&AgentKey::Id(agent.id), envelope, false, None, None)
-            .await
-            .map(|_| ())
+        Ok(())
     }
 
     /// Delivers a message ahead of everything waiting and interrupts the running turn, so it
@@ -1794,6 +1858,30 @@ impl Runtime {
             )));
         }
         if stored.plugin == EXTERNAL_PLUGIN {
+            let _human_gate = if from == MessageSource::Human {
+                Some(self.notice_state.gate.lock().await)
+            } else {
+                None
+            };
+            let carried = if _human_gate.is_some() {
+                self.absorb_pending_locked(stored.id, None).await
+            } else {
+                None
+            };
+            if let Some(message_id) = carried.as_ref().and_then(|c| c.withdrawn) {
+                publish(
+                    &self.bus,
+                    EventKind::AgentInputWithdrawn {
+                        id: stored.id,
+                        message_id,
+                    },
+                )
+                .await;
+            }
+            let notices = carried
+                .as_ref()
+                .map(|c| c.lines.clone())
+                .unwrap_or_default();
             publish(
                 &self.bus,
                 EventKind::AgentInput {
@@ -1806,12 +1894,15 @@ impl Runtime {
                     thread,
                     reply_excerpt,
                     attachments: attachments.clone(),
-                    notices: Vec::new(),
+                    notices,
                     queued_reason: Some(QueuedReason::ExternalAgent),
                 },
             )
             .await;
-            let text = self.with_notices(stored.id, text).await;
+            let mut text = self.with_notices(stored.id, text).await;
+            if let Some(carried) = &carried {
+                text = format!("{text}\n\n{}", carried.text);
+            }
             self.external
                 .lock()
                 .await
@@ -1822,6 +1913,10 @@ impl Runtime {
                     from,
                     Prompt { text, attachments }.with_references(),
                 ));
+            if let Some(carried) = &carried {
+                self.mark_carried(stored.id, message_id, &carried.versions)
+                    .await;
+            }
             self.announce_delivery(stored.id).await;
             return Ok(Delivery::new(
                 message_id,
@@ -1838,31 +1933,37 @@ impl Runtime {
             .cloned()
             .filter(|l| !l.inbox.is_closed())
             .ok_or_else(|| CoreError::Agent(format!("agent {} stopped", agent.name)))?;
+        // Gate before the admission lock: recording a notice takes the gate and then this
+        // lock, and the other order deadlocks. A person's message carries pending notices.
+        let _human_gate = if from == MessageSource::Human {
+            Some(self.notice_state.gate.lock().await)
+        } else {
+            None
+        };
         // Deciding whether it waits and putting it in line are one step: two concurrent
         // sends cannot both be told they are next (docs/tasks/DELIVERY-AUDIT.md §7, item 8).
         let admission = live.inbox.admit.lock().await;
+        let carried = if _human_gate.is_some() {
+            self.absorb_pending_locked(agent.id, Some(&live.inbox))
+                .await
+        } else {
+            None
+        };
         let (queued, queue_reason) = live.inbox.queue_state();
         let queued_reason = queued_reason.or(queue_reason);
-        // A person's message takes a notice digest that is still waiting with it: the agent
-        // reads the notices right after the person's words, in the same turn, instead of
-        // spending a turn of its own on them (docs/TODO.md §二十五 第 3 条).
-        let carried = match from {
-            MessageSource::Human => self.take_waiting_digest(agent.id, &live.inbox).await,
-            _ => None,
-        };
-        if let Some(digest) = &carried {
+        if let Some(message_id) = carried.as_ref().and_then(|c| c.withdrawn) {
             publish(
                 &self.bus,
                 EventKind::AgentInputWithdrawn {
                     id: agent.id,
-                    message_id: digest.message,
+                    message_id,
                 },
             )
             .await;
         }
         let notices: Vec<String> = carried
             .as_ref()
-            .map(|digest| digest.lines.values().cloned().collect())
+            .map(|c| c.lines.clone())
             .unwrap_or_default();
         // Published before the message can start a turn, so clients see the input first.
         publish(
@@ -1886,14 +1987,18 @@ impl Runtime {
         // conversation shows it as a note of its own (e.g. `agent.model_changed`).
         let mut text = self.with_notices(agent.id, text).await;
         // The notices go after the person's words, as the agent reads them.
-        if let Some(digest) = carried {
-            text = format!("{text}\n\n{}", digest.text());
+        if let Some(carried) = &carried {
+            text = format!("{text}\n\n{}", carried.text);
         }
         if from == MessageSource::Human {
             live.inbox.from_person.lock().unwrap().insert(message_id);
         }
         live.inbox
             .push((message_id, Prompt { text, attachments }), first);
+        if let Some(carried) = &carried {
+            self.mark_carried(agent.id, message_id, &carried.versions)
+                .await;
+        }
         drop(admission);
         // The announcement is what clients show as "busy"/"next"; it reads the inbox, so it
         // says `turn` with the messages behind the running turn, or `starting` for the first.
@@ -1941,20 +2046,361 @@ impl Runtime {
         Ok(Delivery::new(message_id, queued, reason))
     }
 
-    /// Takes the agent's notification digest if it is still waiting for its turn, so a
-    /// person's message can carry it; `None` once it started or when there is none.
-    ///
-    /// The check, the withdraw and the removal happen under one `digests` lock: a concurrent
-    /// `notify` takes the same lock first, so it cannot add a line to a digest this call is
-    /// taking out (which `inbox.update` would then drop as already withdrawn). Locks go
-    /// `digests` first, then `inbox` — the order `notify` uses too (`digests` → `inbox.update`).
-    async fn take_waiting_digest(&self, id: AgentId, inbox: &Inbox) -> Option<Digest> {
-        let mut digests = self.digests.lock().await;
-        let message = digests.get(&id)?.message;
-        if !inbox.withdraw(message) {
+    /// Pending notices a person's message should carry. Caller holds [`NoticeState::gate`].
+    /// Versions already being read in a turn stay there. `None` when there is nothing new.
+    async fn absorb_pending_locked(&self, id: AgentId, inbox: Option<&Inbox>) -> Option<Carried> {
+        let rows = self
+            .store()
+            .list_pending_notices(Some(id))
+            .await
+            .unwrap_or_default();
+        let inflight = self.notice_state.inflight_versions(id);
+        let withdrawn = self.withdraw_waiting_digest(id, inbox).await;
+        // A version already being read stays with that turn. A waiting wake was just
+        // withdrawn, so its rows move onto this message.
+        let active: Vec<PendingNotice> = rows
+            .into_iter()
+            .filter(|row| {
+                if version_inflight(row, &inflight) {
+                    return false;
+                }
+                match row.carried_by {
+                    Some(by) => Some(by) == withdrawn,
+                    None => true,
+                }
+            })
+            .collect();
+        if active.is_empty() {
             return None;
         }
-        digests.remove(&id)
+        let (text, lines) = compose_notices(&active);
+        let versions: Vec<(String, DateTime<Utc>)> = active
+            .iter()
+            .map(|row| (row.topic.clone(), row.updated_at))
+            .collect();
+        Some(Carried {
+            withdrawn,
+            text,
+            lines,
+            versions,
+        })
+    }
+
+    async fn mark_carried(
+        &self,
+        id: AgentId,
+        message: MessageId,
+        versions: &[(String, DateTime<Utc>)],
+    ) {
+        if versions.is_empty() {
+            return;
+        }
+        if let Err(err) = self
+            .store()
+            .mark_notices_carried(id, versions, message)
+            .await
+        {
+            tracing::warn!(%id, error = %err, "cannot mark notices carried by a message");
+        }
+    }
+
+    /// Automatic wakes of one version that failed. After this many, it only rides along.
+    const fn notice_auto_limit() -> u32 {
+        2
+    }
+
+    fn can_start_wake(&self, id: AgentId, row: &PendingNotice) -> bool {
+        let inflight = self.notice_state.inflight_versions(id);
+        row.carried_by.is_none()
+            && row.wake_tries < Self::notice_auto_limit()
+            && !version_inflight(row, &inflight)
+    }
+
+    fn free_rows(&self, id: AgentId, rows: &[PendingNotice]) -> Vec<PendingNotice> {
+        let inflight = self.notice_state.inflight_versions(id);
+        rows.iter()
+            .filter(|row| row.carried_by.is_none() && !version_inflight(row, &inflight))
+            .cloned()
+            .collect()
+    }
+
+    fn should_wake(&self, id: AgentId, rows: &[PendingNotice]) -> bool {
+        let mut immediate = false;
+        let mut first: Option<DateTime<Utc>> = None;
+        let mut last: Option<DateTime<Utc>> = None;
+        for row in rows.iter().filter(|row| self.can_start_wake(id, row)) {
+            if row.class.wakes_immediately() {
+                immediate = true;
+            }
+            if row.class == NoticeClass::Batch {
+                first = Some(first.map_or(row.first_at, |at| at.min(row.first_at)));
+                last = Some(last.map_or(row.updated_at, |at| at.max(row.updated_at)));
+            }
+        }
+        if immediate {
+            return true;
+        }
+        match (first, last) {
+            (Some(first), Some(last)) => {
+                Utc::now()
+                    >= batch_deadline(
+                        first,
+                        last,
+                        self.notice_state.quiet(),
+                        self.notice_state.max_wait(),
+                    )
+            }
+            _ => false,
+        }
+    }
+
+    async fn has_waiting_digest(&self, id: AgentId) -> bool {
+        let Some(message) = self.notice_state.digest_message(id) else {
+            return false;
+        };
+        if let Some(live) = self.live.lock().await.get(&id)
+            && live.inbox.is_waiting(message)
+        {
+            return true;
+        }
+        self.external_has(id, message).await
+    }
+
+    /// Rows a waiting wake should show: ones it already carries, plus ones nobody has.
+    fn rows_for_digest(
+        &self,
+        id: AgentId,
+        rows: &[PendingNotice],
+        message: MessageId,
+    ) -> Vec<PendingNotice> {
+        let inflight = self.notice_state.inflight_versions(id);
+        rows.iter()
+            .filter(|row| {
+                if version_inflight(row, &inflight) {
+                    return false;
+                }
+                match row.carried_by {
+                    Some(by) => by == message,
+                    None => true,
+                }
+            })
+            .cloned()
+            .collect()
+    }
+
+    async fn message_is_waiting(&self, agent: &Agent, message: MessageId) -> bool {
+        if agent.plugin == EXTERNAL_PLUGIN {
+            return self.external_has(agent.id, message).await;
+        }
+        self.live
+            .lock()
+            .await
+            .get(&agent.id)
+            .is_some_and(|live| live.inbox.is_waiting(message))
+    }
+
+    /// The wake left the queue without being read. Its rows stay, and this counts as one
+    /// failed automatic wake so a dead session cannot be woken every second.
+    async fn release_withdrawn(&self, agent: &Agent, message: MessageId) {
+        self.notice_state.clear_digest_if(agent.id, message);
+        if let Err(err) = self.store().settle_carried_notices(message, false).await {
+            tracing::warn!(agent = %agent.name, error = %err, "cannot release notices from a withdrawn wake");
+        }
+    }
+
+    /// Writes the pending notices into the waiting wake, or queues a new one when it is time.
+    /// Caller holds [`NoticeState::gate`].
+    async fn sync_digest(&self, agent: &Agent, rows: &[PendingNotice]) -> Result<(), CoreError> {
+        let mut rows = rows.to_vec();
+        if let Some(message) = self.notice_state.digest_message(agent.id) {
+            let active = self.rows_for_digest(agent.id, &rows, message);
+            if active.is_empty() {
+                let held = self.notice_state.is_inflight(message)
+                    || self.message_is_waiting(agent, message).await;
+                if held {
+                    return Ok(());
+                }
+                self.release_withdrawn(agent, message).await;
+            } else if self.update_waiting(agent, message, &active).await? {
+                return Ok(());
+            }
+            rows = self.store().list_pending_notices(Some(agent.id)).await?;
+        }
+        let active = self.free_rows(agent.id, &rows);
+        if active.is_empty() || !self.should_wake(agent.id, &active) {
+            return Ok(());
+        }
+        self.queue_wake(agent, &active).await
+    }
+
+    async fn update_waiting(
+        &self,
+        agent: &Agent,
+        message: MessageId,
+        rows: &[PendingNotice],
+    ) -> Result<bool, CoreError> {
+        if !self.message_is_waiting(agent, message).await {
+            // The turn already has this message. New rows stay free so the caller can
+            // queue them on their own; this one is not a withdrawn wake.
+            if self.notice_state.is_inflight(message) {
+                return Ok(false);
+            }
+            self.release_withdrawn(agent, message).await;
+            return Ok(false);
+        }
+        let versions: Vec<(String, DateTime<Utc>)> = rows
+            .iter()
+            .map(|row| (row.topic.clone(), row.updated_at))
+            .collect();
+        if self.notice_state.digest_versions(agent.id) == versions {
+            self.store()
+                .mark_notices_carried(agent.id, &versions, message)
+                .await?;
+            return Ok(true);
+        }
+        let (text, _) = compose_notices(rows);
+        if agent.plugin == EXTERNAL_PLUGIN {
+            let mut queues = self.external.lock().await;
+            let Some(queue) = queues.get_mut(&agent.id) else {
+                drop(queues);
+                self.release_withdrawn(agent, message).await;
+                return Ok(false);
+            };
+            let Some((_, _, body)) = queue.iter_mut().find(|(id, _, _)| *id == message) else {
+                drop(queues);
+                self.release_withdrawn(agent, message).await;
+                return Ok(false);
+            };
+            *body = text.clone();
+            self.notice_state
+                .set_digest(agent.id, message, versions.clone());
+            drop(queues);
+            self.store()
+                .mark_notices_carried(agent.id, &versions, message)
+                .await?;
+            publish(
+                &self.bus,
+                EventKind::AgentInputUpdated {
+                    id: agent.id,
+                    message_id: message,
+                    text,
+                },
+            )
+            .await;
+            return Ok(true);
+        }
+        let live = self.live.lock().await.get(&agent.id).cloned();
+        let Some(live) = live else {
+            self.release_withdrawn(agent, message).await;
+            return Ok(false);
+        };
+        let updated = {
+            let _turn = self.notice_state.turn.lock().unwrap();
+            if !live.inbox.is_waiting(message) {
+                false
+            } else {
+                live.inbox.update(message, &text);
+                self.notice_state
+                    .set_digest(agent.id, message, versions.clone());
+                true
+            }
+        };
+        if !updated {
+            if self.notice_state.is_inflight(message) {
+                return Ok(false);
+            }
+            self.release_withdrawn(agent, message).await;
+            return Ok(false);
+        }
+        self.store()
+            .mark_notices_carried(agent.id, &versions, message)
+            .await?;
+        publish(
+            &self.bus,
+            EventKind::AgentInputUpdated {
+                id: agent.id,
+                message_id: message,
+                text,
+            },
+        )
+        .await;
+        Ok(true)
+    }
+
+    async fn queue_wake(&self, agent: &Agent, rows: &[PendingNotice]) -> Result<(), CoreError> {
+        let (text, _) = compose_notices(rows);
+        let versions: Vec<(String, DateTime<Utc>)> = rows
+            .iter()
+            .map(|row| (row.topic.clone(), row.updated_at))
+            .collect();
+        let message = MessageId::new();
+        // Record the digest before the message can be popped, so the turn marks these
+        // versions in flight instead of waking them again.
+        self.notice_state
+            .set_digest(agent.id, message, versions.clone());
+        if let Err(err) = self
+            .store()
+            .mark_notices_carried(agent.id, &versions, message)
+            .await
+        {
+            self.notice_state.clear_digest_if(agent.id, message);
+            return Err(err);
+        }
+        let envelope = Envelope {
+            id: message,
+            from: MessageSource::Notice,
+            text,
+            reply_to: None,
+            attachments: Vec::new(),
+        };
+        if let Err(err) = self
+            .deliver(&AgentKey::Id(agent.id), envelope, false, None, None)
+            .await
+        {
+            if let Err(release) = self.store().settle_carried_notices(message, false).await {
+                tracing::warn!(agent = %agent.name, error = %release, "cannot release notices after a failed wake");
+            }
+            self.notice_state.clear_digest_if(agent.id, message);
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    async fn withdraw_waiting_digest(
+        &self,
+        id: AgentId,
+        inbox: Option<&Inbox>,
+    ) -> Option<MessageId> {
+        let Some(message) = self.notice_state.digest_message(id) else {
+            return None;
+        };
+        if let Some(inbox) = inbox {
+            let _turn = self.notice_state.turn.lock().unwrap();
+            if inbox.is_waiting(message) && inbox.withdraw(message) {
+                self.notice_state.clear_digest_if(id, message);
+                return Some(message);
+            }
+            return None;
+        }
+        let mut queues = self.external.lock().await;
+        let Some(queue) = queues.get_mut(&id) else {
+            return None;
+        };
+        let Some(index) = queue.iter().position(|(m, _, _)| *m == message) else {
+            return None;
+        };
+        queue.remove(index);
+        drop(queues);
+        self.notice_state.clear_digest_if(id, message);
+        Some(message)
+    }
+
+    async fn external_has(&self, id: AgentId, message: MessageId) -> bool {
+        self.external
+            .lock()
+            .await
+            .get(&id)
+            .is_some_and(|queue| queue.iter().any(|(m, _, _)| *m == message))
     }
 
     async fn with_notices(&self, agent: AgentId, text: String) -> String {
@@ -1979,6 +2425,10 @@ impl Runtime {
                 "the message is not waiting: it already started, or is unknown".into(),
             ));
         }
+        if let Err(err) = self.store().settle_carried_notices(message_id, false).await {
+            tracing::warn!(%message_id, error = %err, "cannot release notices a withdrawn message carried");
+        }
+        self.notice_state.clear_digest_if(agent.id, message_id);
         publish(
             &self.bus,
             EventKind::AgentInputWithdrawn {
@@ -2125,9 +2575,18 @@ impl Runtime {
     }
 
     /// Hands an agent outside the hub its waiting messages; each counts as read (a turn
-    /// that started and ended).
+    /// that started and ended). A notice wake included here is consumed, so a restart
+    /// does not deliver it again.
     pub async fn take_external(&self, id: AgentId) -> Vec<Waiting> {
+        let _gate = self.notice_state.gate.lock().await;
         let messages = self.external.lock().await.remove(&id).unwrap_or_default();
+        for (message_id, _, _) in &messages {
+            self.notice_state.clear_digest_if(id, *message_id);
+            if let Err(err) = self.store().settle_carried_notices(*message_id, true).await {
+                tracing::warn!(%id, error = %err, "cannot drop notices an external agent took");
+            }
+        }
+        drop(_gate);
         for (message_id, _, _) in &messages {
             publish(
                 &self.bus,
@@ -2479,6 +2938,8 @@ async fn run_turns(
     control: mpsc::UnboundedSender<Control>,
     diff_dir: Option<PathBuf>,
     adopted: Option<MessageId>,
+    notices: Arc<NoticeState>,
+    store: Arc<dyn Store>,
 ) {
     // The turn a previous hub started goes on in the process taken over; it ends first.
     if let Some(message_id) = adopted {
@@ -2488,6 +2949,10 @@ async fn run_turns(
                 .map_err(|e| e.to_string()),
             None => Ok(StopReason::Interrupted),
         };
+        let ended = matches!(&result, Ok(StopReason::EndTurn));
+        notices
+            .settle(store.as_ref(), message_id, ended)
+            .await;
         inbox.finish_turn();
         if control
             .send(Control::TurnFinished(message_id, result, None))
@@ -2496,7 +2961,7 @@ async fn run_turns(
             return;
         }
     }
-    while let Some((message_id, prompt)) = inbox.next().await {
+    while let Some((message_id, prompt)) = next_turn(&inbox, &notices).await {
         // Before the turn is announced: an interrupt that follows the announcement must find
         // the prompt already running.
         let base = match &diff_dir {
@@ -2516,12 +2981,44 @@ async fn run_turns(
             },
             _ => None,
         };
+        // Deleted only when the turn ends on its own. A failure or interrupt keeps the
+        // rows and counts one failed automatic wake.
+        let ended = matches!(&result, Ok(StopReason::EndTurn));
+        notices.settle(store.as_ref(), message_id, ended).await;
         inbox.finish_turn();
         if control
             .send(Control::TurnFinished(message_id, result, diff))
             .is_err()
         {
             return;
+        }
+    }
+}
+
+/// The next inbox message, marking its notice versions in flight in the same critical
+/// section as the pop so a flush cannot queue them a second time.
+async fn next_turn(inbox: &Inbox, notices: &NoticeState) -> Option<(MessageId, Prompt)> {
+    loop {
+        enum Step {
+            Closed,
+            Wait,
+            Ready((MessageId, Prompt)),
+        }
+        let step = {
+            let _turn = notices.turn.lock().unwrap();
+            if let Some(message) = inbox.pop_turn() {
+                notices.mark_inflight(message.0);
+                Step::Ready(message)
+            } else if inbox.is_closed() {
+                Step::Closed
+            } else {
+                Step::Wait
+            }
+        };
+        match step {
+            Step::Closed => return None,
+            Step::Ready(message) => return Some(message),
+            Step::Wait => inbox.wait_for_message().await,
         }
     }
 }
@@ -2539,7 +3036,11 @@ fn unavailable_model_error(error: &str) -> bool {
         "unsupported model",
     ];
     let lower = error.to_ascii_lowercase();
-    if lower.split(|c: char| !c.is_ascii_digit()).any(|n| n == "429") || lower.contains("rate limit") || lower.contains("too many requests")
+    if lower
+        .split(|c: char| !c.is_ascii_digit())
+        .any(|n| n == "429")
+        || lower.contains("rate limit")
+        || lower.contains("too many requests")
     {
         return false;
     }
@@ -2849,6 +3350,11 @@ async fn handle_session_event(
                     .map(|(m, _)| m)
                     .collect();
                 for message_id in waiting {
+                    // A person's message carries notices without being the digest. The
+                    // process is gone, so the turn will not finish and release them.
+                    if let Err(err) = bus.store().settle_carried_notices(message_id, false).await {
+                        tracing::warn!(%message_id, error = %err, "cannot release notices a waiting message carried");
+                    }
                     publish(bus, EventKind::AgentInputWithdrawn { id, message_id }).await;
                 }
             }
@@ -2992,22 +3498,203 @@ async fn inject(
     .await;
 }
 
-/// A notification digest waiting for its turn.
-struct Digest {
-    message: MessageId,
-    lines: BTreeMap<String, String>,
+/// Notices carried with a person's message.
+struct Carried {
+    /// A wake message that was still waiting and was taken out of the queue.
+    withdrawn: Option<MessageId>,
+    text: String,
+    /// The lines themselves, without the class mark, for the input event.
+    lines: Vec<String>,
+    /// Marked carried by the person's message once it is queued. Deleted when that turn
+    /// ends successfully.
+    versions: Vec<(String, DateTime<Utc>)>,
 }
 
-impl Digest {
-    fn text(&self) -> String {
-        let mut text = String::from("CrossAgents notices (things you asked to hear about):\n");
-        for line in self.lines.values() {
-            text.push_str("- ");
-            text.push_str(line);
-            text.push('\n');
+/// The wake message queued for an agent, and which notice versions it contains.
+struct Digest {
+    message: MessageId,
+    versions: Vec<(String, DateTime<Utc>)>,
+}
+
+/// Quiet interval and maximum wait for batch notices. Defaults are 60s and 180s;
+/// `[hub] notice_batch_quiet_secs` and `notice_batch_max_secs` override them.
+struct NoticeState {
+    gate: Mutex<()>,
+    /// Held across popping a turn and updating a wake that is still waiting.
+    turn: std::sync::Mutex<()>,
+    digests: std::sync::Mutex<HashMap<AgentId, Digest>>,
+    inflight: std::sync::Mutex<HashMap<MessageId, (AgentId, Vec<(String, DateTime<Utc>)>)>>,
+    quiet_ms: AtomicU64,
+    max_ms: AtomicU64,
+}
+
+impl NoticeState {
+    fn new() -> Self {
+        Self {
+            gate: Mutex::new(()),
+            turn: std::sync::Mutex::new(()),
+            digests: std::sync::Mutex::new(HashMap::new()),
+            inflight: std::sync::Mutex::new(HashMap::new()),
+            quiet_ms: AtomicU64::new(60_000),
+            max_ms: AtomicU64::new(180_000),
         }
-        text
     }
+
+    fn quiet(&self) -> Duration {
+        Duration::from_millis(self.quiet_ms.load(Ordering::Relaxed))
+    }
+
+    fn max_wait(&self) -> Duration {
+        Duration::from_millis(self.max_ms.load(Ordering::Relaxed))
+    }
+
+    fn digest_message(&self, agent: AgentId) -> Option<MessageId> {
+        self.digests.lock().unwrap().get(&agent).map(|d| d.message)
+    }
+
+    fn digest_versions(&self, agent: AgentId) -> Vec<(String, DateTime<Utc>)> {
+        self.digests
+            .lock()
+            .unwrap()
+            .get(&agent)
+            .map(|d| d.versions.clone())
+            .unwrap_or_default()
+    }
+
+    fn set_digest(
+        &self,
+        agent: AgentId,
+        message: MessageId,
+        versions: Vec<(String, DateTime<Utc>)>,
+    ) {
+        self.digests
+            .lock()
+            .unwrap()
+            .insert(agent, Digest { message, versions });
+    }
+
+    fn clear_digest_if(&self, agent: AgentId, message: MessageId) {
+        let mut digests = self.digests.lock().unwrap();
+        if digests.get(&agent).is_some_and(|d| d.message == message) {
+            digests.remove(&agent);
+        }
+    }
+
+    fn inflight_versions(&self, agent: AgentId) -> Vec<(String, DateTime<Utc>)> {
+        self.inflight
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|(id, _)| *id == agent)
+            .flat_map(|(_, versions)| versions.clone())
+            .collect()
+    }
+
+    fn is_inflight(&self, message: MessageId) -> bool {
+        self.inflight.lock().unwrap().contains_key(&message)
+    }
+
+    /// The wake `message` has started. Its versions are excluded from the next wake until
+    /// [`Self::settle`] drops or releases them.
+    fn mark_inflight(&self, message: MessageId) {
+        let found = self
+            .digests
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, digest)| digest.message == message)
+            .map(|(agent, digest)| (*agent, digest.versions.clone()));
+        if let Some((agent, versions)) = found {
+            self.inflight
+                .lock()
+                .unwrap()
+                .insert(message, (agent, versions));
+        }
+    }
+
+    /// `success`: the turn ended with [`StopReason::EndTurn`], so the versions it carried
+    /// are deleted. Otherwise they stay, the carry is cleared, and one failed automatic
+    /// wake is counted.
+    async fn settle(&self, store: &dyn Store, message: MessageId, success: bool) {
+        let _gate = self.gate.lock().await;
+        let removed = self.inflight.lock().unwrap().remove(&message);
+        if let Some((agent, _)) = removed {
+            self.clear_digest_if(agent, message);
+        } else {
+            let agent = self
+                .digests
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(_, digest)| digest.message == message)
+                .map(|(agent, _)| *agent);
+            if let Some(agent) = agent {
+                self.clear_digest_if(agent, message);
+            }
+        }
+        if let Err(err) = store.settle_carried_notices(message, success).await {
+            tracing::warn!(error = %err, "cannot settle notices a turn finished");
+        }
+    }
+}
+
+fn version_inflight(row: &PendingNotice, inflight: &[(String, DateTime<Utc>)]) -> bool {
+    inflight
+        .iter()
+        .any(|(topic, at)| topic == &row.topic && *at == row.updated_at)
+}
+
+fn batch_deadline(
+    first_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    quiet: Duration,
+    max_wait: Duration,
+) -> DateTime<Utc> {
+    let quiet_at = updated_at + ChronoDuration::from_std(quiet).unwrap_or(ChronoDuration::MAX);
+    let max_at = first_at + ChronoDuration::from_std(max_wait).unwrap_or(ChronoDuration::MAX);
+    quiet_at.min(max_at)
+}
+
+/// Actions first (unblock, decide, run done, batch), then silent changes. Each line is
+/// marked with its class.
+fn compose_notices(rows: &[PendingNotice]) -> (String, Vec<String>) {
+    let mut action: Vec<&PendingNotice> = rows.iter().filter(|row| row.class.is_action()).collect();
+    let mut silent: Vec<&PendingNotice> =
+        rows.iter().filter(|row| !row.class.is_action()).collect();
+    let by_time = |a: &&PendingNotice, b: &&PendingNotice| {
+        a.updated_at.cmp(&b.updated_at).then(a.topic.cmp(&b.topic))
+    };
+    action.sort_by(|a, b| {
+        a.class
+            .action_rank()
+            .cmp(&b.class.action_rank())
+            .then(by_time(a, b))
+    });
+    silent.sort_by(by_time);
+    let mut text = String::from("CrossAgents notices (things you asked to hear about):\n");
+    let mut lines = Vec::new();
+    if !action.is_empty() {
+        text.push_str("To handle:\n");
+        for row in action {
+            push_notice_line(&mut text, &mut lines, row);
+        }
+    }
+    if !silent.is_empty() {
+        text.push_str("Since last time:\n");
+        for row in silent {
+            push_notice_line(&mut text, &mut lines, row);
+        }
+    }
+    (text, lines)
+}
+
+fn push_notice_line(text: &mut String, lines: &mut Vec<String>, row: &PendingNotice) {
+    text.push_str("- [");
+    text.push_str(row.class.as_str());
+    text.push_str("] ");
+    text.push_str(&row.line);
+    text.push('\n');
+    lines.push(row.line.clone());
 }
 
 /// The first line of what was said (skipping the `Message from …:` header `agent_send`
@@ -3230,5 +3917,902 @@ mod tests {
         let retried = MessageId::new();
         log.settle(agent, retried, Settled::Nothing);
         assert!(log.get(agent, retried).is_none());
+    }
+
+    fn sample(class: NoticeClass, topic: &str, line: &str, secs: i64) -> PendingNotice {
+        let at = Utc::now() + ChronoDuration::seconds(secs);
+        PendingNotice {
+            agent: AgentId::new(),
+            topic: topic.into(),
+            line: line.into(),
+            class,
+            first_at: at,
+            updated_at: at,
+            carried_by: None,
+            wake_tries: 0,
+        }
+    }
+
+    #[test]
+    fn a_wake_lists_actions_before_silent_changes() {
+        let rows = vec![
+            sample(NoticeClass::Silent, "s", "quiet", 1),
+            sample(NoticeClass::Batch, "b", "batched", 2),
+            sample(NoticeClass::RunDone, "r", "done", 3),
+            sample(NoticeClass::Decide, "d", "choose", 4),
+            sample(NoticeClass::Unblock, "u", "unblock", 5),
+        ];
+        let (text, lines) = compose_notices(&rows);
+        let handle = text.find("To handle").unwrap();
+        let since = text.find("Since last time").unwrap();
+        assert!(handle < since, "{text}");
+        assert!(text.find("[unblock]").unwrap() < text.find("[decide]").unwrap());
+        assert!(text.find("[decide]").unwrap() < text.find("[run_done]").unwrap());
+        assert!(text.find("[run_done]").unwrap() < text.find("[batch]").unwrap());
+        assert!(text.find("[batch]").unwrap() < text.find("[silent]").unwrap());
+        assert_eq!(
+            lines,
+            vec![
+                "unblock".to_owned(),
+                "choose".to_owned(),
+                "done".to_owned(),
+                "batched".to_owned(),
+                "quiet".to_owned(),
+            ]
+        );
+    }
+
+    fn external(name: &str) -> Agent {
+        Agent {
+            id: AgentId::new(),
+            name: name.into(),
+            name_source: NameSource::Chosen,
+            plugin: EXTERNAL_PLUGIN.into(),
+            driver: None,
+            model: None,
+            role: crossagents_core::Role::Worker,
+            home: PathBuf::from("."),
+            cwd: PathBuf::from("."),
+            config: serde_json::json!({}),
+            status: AgentStatus::Stopped,
+            created_at: Utc::now(),
+            profile: Default::default(),
+            topic: None,
+            archived_at: None,
+        }
+    }
+
+    async fn harness(name: &str) -> (Arc<crossagents_store_sqlite::SqliteStore>, Runtime, Agent) {
+        let store = Arc::new(
+            crossagents_store_sqlite::SqliteStore::open_in_memory()
+                .await
+                .unwrap(),
+        );
+        let runtime = Runtime::new(
+            Arc::new(EventBus::new(store.clone())),
+            PluginRegistry::default(),
+        );
+        let agent = external(name);
+        store.insert_agent(&agent).await.unwrap();
+        (store, runtime, agent)
+    }
+
+    fn notice_texts(events: &[crossagents_core::Event]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::AgentInput {
+                    from: Some(MessageSource::Notice),
+                    text,
+                    ..
+                } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The text of the latest notice wake, including a revision of a message still waiting.
+    fn latest_wake(events: &[crossagents_core::Event]) -> Option<String> {
+        let mut current: Option<(MessageId, String)> = None;
+        for event in events {
+            match &event.kind {
+                EventKind::AgentInput {
+                    from: Some(MessageSource::Notice),
+                    message_id,
+                    text,
+                    ..
+                } => current = Some((*message_id, text.clone())),
+                EventKind::AgentInputUpdated {
+                    message_id, text, ..
+                } if current.as_ref().is_some_and(|(id, _)| id == message_id) => {
+                    current = Some((*message_id, text.clone()));
+                }
+                _ => {}
+            }
+        }
+        current.map(|(_, text)| text)
+    }
+
+    async fn stamp(
+        store: &crossagents_store_sqlite::SqliteStore,
+        agent: AgentId,
+        topic: &str,
+        first_ago: i64,
+        updated_ago: i64,
+    ) {
+        let now = Utc::now();
+        crossagents_store_sqlite::sqlx::query(
+            "UPDATE pending_notices SET first_at = ?1, updated_at = ?2 WHERE agent = ?3 AND topic = ?4",
+        )
+        .bind((now - ChronoDuration::seconds(first_ago)).to_rfc3339())
+        .bind((now - ChronoDuration::seconds(updated_ago)).to_rfc3339())
+        .bind(agent.to_string())
+        .bind(topic)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn silent_is_kept_and_unblock_or_decide_wakes_at_once() {
+        let (store, runtime, agent) = harness("ada").await;
+        let key = AgentKey::Id(agent.id);
+        runtime
+            .notify(&key, "progress", "worker moved", NoticeClass::Silent)
+            .await
+            .unwrap();
+        let events = store.events_since(0, 50).await.unwrap();
+        assert!(notice_texts(&events).is_empty(), "silent started a turn");
+        assert!(events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::NoticeRecorded { class: NoticeClass::Silent, line, .. } if line == "worker moved"
+        )));
+        assert_eq!(
+            store
+                .list_pending_notices(Some(agent.id))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        runtime
+            .notify(&key, "need", "choose a route", NoticeClass::Decide)
+            .await
+            .unwrap();
+        let events = store.events_since(0, 50).await.unwrap();
+        let wakes = notice_texts(&events);
+        assert_eq!(wakes.len(), 1, "{wakes:?}");
+        let wake = &wakes[0];
+        let handle = wake.find("To handle").unwrap();
+        let since = wake.find("Since last time").unwrap();
+        assert!(handle < since, "{wake}");
+        assert!(wake.contains("[decide] choose a route"), "{wake}");
+        assert!(wake.contains("[silent] worker moved"), "{wake}");
+
+        let (store, runtime, agent) = harness("bea").await;
+        runtime
+            .notify(
+                &AgentKey::Id(agent.id),
+                "down",
+                "accepting opens the next task",
+                NoticeClass::Unblock,
+            )
+            .await
+            .unwrap();
+        runtime
+            .notify(
+                &AgentKey::Id(agent.id),
+                "end",
+                "the run ended",
+                NoticeClass::RunDone,
+            )
+            .await
+            .unwrap();
+        let events = store.events_since(0, 50).await.unwrap();
+        assert_eq!(notice_texts(&events).len(), 1, "a second wake was queued");
+        let wake = latest_wake(&events).unwrap();
+        assert!(wake.contains("[unblock]"), "{wake}");
+        assert!(wake.contains("[run_done]"), "{wake}");
+        assert!(wake.find("[unblock]").unwrap() < wake.find("[run_done]").unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_persons_message_carries_pending_notices() {
+        let (store, runtime, agent) = harness("cara").await;
+        let key = AgentKey::Id(agent.id);
+        runtime
+            .notify(&key, "progress", "still going", NoticeClass::Silent)
+            .await
+            .unwrap();
+        runtime
+            .send(&key, "please stop".into(), MessageSource::Human)
+            .await
+            .unwrap();
+        let events = store.events_since(0, 50).await.unwrap();
+        assert!(
+            notice_texts(&events).is_empty(),
+            "the silent notice woke on its own"
+        );
+        let human = events.iter().find_map(|event| match &event.kind {
+            EventKind::AgentInput {
+                from: Some(MessageSource::Human),
+                text,
+                notices,
+                ..
+            } => Some((text.clone(), notices.clone())),
+            _ => None,
+        });
+        let (text, notices) = human.expect("the person's message");
+        assert_eq!(text, "please stop");
+        assert!(
+            notices.iter().any(|line| line.contains("still going")),
+            "{notices:?}"
+        );
+        assert_eq!(
+            store
+                .list_pending_notices(Some(agent.id))
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "a person's message deleted the notice before the turn ended"
+        );
+        let taken = runtime.take_external(agent.id).await;
+        assert_eq!(taken.len(), 1);
+        assert!(taken[0].2.contains("please stop"));
+        assert!(
+            taken[0].2.contains("[silent] still going"),
+            "{}",
+            taken[0].2
+        );
+        assert!(
+            store
+                .list_pending_notices(Some(agent.id))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_merges_until_quiet_or_the_max_wait() {
+        let (store, runtime, agent) = harness("dora").await;
+        let key = AgentKey::Id(agent.id);
+        runtime
+            .notify(&key, "a", "first batch", NoticeClass::Batch)
+            .await
+            .unwrap();
+        runtime
+            .notify(&key, "b", "second batch", NoticeClass::Batch)
+            .await
+            .unwrap();
+        runtime
+            .notify(&key, "s", "aside", NoticeClass::Silent)
+            .await
+            .unwrap();
+        runtime.poll_notice_wakes().await.unwrap();
+        assert!(
+            notice_texts(&store.events_since(0, 50).await.unwrap()).is_empty(),
+            "a fresh batch woke immediately"
+        );
+
+        // Latest activity is recent, so the quiet interval has not elapsed, but the batch
+        // started long enough ago that the maximum wait has.
+        stamp(&store, agent.id, "a", 200, 10).await;
+        stamp(&store, agent.id, "b", 190, 10).await;
+        runtime.poll_notice_wakes().await.unwrap();
+        let wakes = notice_texts(&store.events_since(0, 50).await.unwrap());
+        assert_eq!(wakes.len(), 1, "{wakes:?}");
+        assert!(wakes[0].contains("[batch] first batch"), "{}", wakes[0]);
+        assert!(wakes[0].contains("[batch] second batch"), "{}", wakes[0]);
+        assert!(wakes[0].contains("[silent] aside"), "{}", wakes[0]);
+        assert!(wakes[0].find("To handle").unwrap() < wakes[0].find("Since last time").unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_batch_waits_out_the_quiet_interval() {
+        let (store, runtime, agent) = harness("eden").await;
+        let key = AgentKey::Id(agent.id);
+        runtime
+            .notify(&key, "a", "only batch", NoticeClass::Batch)
+            .await
+            .unwrap();
+        // Old enough that quiet would have elapsed, then a fresh update pushes it out,
+        // while the original first_at is still inside the maximum wait.
+        stamp(&store, agent.id, "a", 100, 10).await;
+        runtime.poll_notice_wakes().await.unwrap();
+        assert!(notice_texts(&store.events_since(0, 20).await.unwrap()).is_empty());
+        stamp(&store, agent.id, "a", 100, 70).await;
+        runtime.poll_notice_wakes().await.unwrap();
+        let wakes = notice_texts(&store.events_since(0, 20).await.unwrap());
+        assert_eq!(wakes.len(), 1, "{wakes:?}");
+        assert!(wakes[0].contains("only batch"));
+    }
+
+    #[tokio::test]
+    async fn pending_notices_survive_a_restart() {
+        let (store, runtime, agent) = harness("fay").await;
+        let key = AgentKey::Id(agent.id);
+        runtime
+            .notify(&key, "s", "kept", NoticeClass::Silent)
+            .await
+            .unwrap();
+        runtime
+            .notify(&key, "b", "held", NoticeClass::Batch)
+            .await
+            .unwrap();
+        drop(runtime);
+        assert_eq!(
+            store
+                .list_pending_notices(Some(agent.id))
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        stamp(&store, agent.id, "b", 80, 70).await;
+        let runtime = Runtime::new(
+            Arc::new(EventBus::new(store.clone())),
+            PluginRegistry::default(),
+        );
+        runtime.poll_notice_wakes().await.unwrap();
+        let wakes = notice_texts(&store.events_since(0, 50).await.unwrap());
+        assert_eq!(wakes.len(), 1, "{wakes:?}");
+        assert!(wakes[0].contains("[batch] held"), "{}", wakes[0]);
+        assert!(wakes[0].contains("[silent] kept"), "{}", wakes[0]);
+    }
+
+    #[tokio::test]
+    async fn the_same_topic_replaces_the_line_and_keeps_first_at() {
+        let (store, runtime, agent) = harness("gia").await;
+        let key = AgentKey::Id(agent.id);
+        runtime
+            .notify(&key, "task", "older", NoticeClass::Batch)
+            .await
+            .unwrap();
+        let first = store.list_pending_notices(Some(agent.id)).await.unwrap()[0].first_at;
+        runtime
+            .notify(&key, "task", "newer", NoticeClass::Silent)
+            .await
+            .unwrap();
+        let rows = store.list_pending_notices(Some(agent.id)).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].line, "newer");
+        assert_eq!(rows[0].class, NoticeClass::Silent);
+        assert_eq!(rows[0].first_at, first);
+        runtime.poll_notice_wakes().await.unwrap();
+        assert!(
+            notice_texts(&store.events_since(0, 20).await.unwrap()).is_empty(),
+            "replacing a batch with silent woke"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_agents_failed_delivery_does_not_block_another() {
+        let (store, runtime, broken) = harness("broken").await;
+        crossagents_store_sqlite::sqlx::query("UPDATE agents SET plugin = 'missing' WHERE id = ?1")
+            .bind(broken.id.to_string())
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let other = external("other");
+        store.insert_agent(&other).await.unwrap();
+        let now = Utc::now();
+        for (agent, line) in [(broken.id, "broken notice"), (other.id, "other notice")] {
+            store
+                .upsert_pending_notice(&PendingNotice {
+                    agent,
+                    topic: "need".into(),
+                    line: line.into(),
+                    class: NoticeClass::Decide,
+                    first_at: now,
+                    updated_at: now,
+                    carried_by: None,
+                    wake_tries: 0,
+                })
+                .await
+                .unwrap();
+        }
+        runtime.poll_notice_wakes().await.unwrap();
+        let wakes = notice_texts(&store.events_since(0, 50).await.unwrap());
+        assert_eq!(wakes.len(), 1, "{wakes:?}");
+        assert!(wakes[0].contains("other notice"), "{}", wakes[0]);
+        assert!(!wakes.iter().any(|wake| wake.contains("broken notice")));
+        let broken_rows = store.list_pending_notices(Some(broken.id)).await.unwrap();
+        assert_eq!(broken_rows.len(), 1);
+        assert_eq!(broken_rows[0].wake_tries, 1);
+        assert!(broken_rows[0].carried_by.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_archived_agent_is_not_delivered_and_keeps_the_row() {
+        let (store, runtime, agent) = harness("lea").await;
+        crossagents_store_sqlite::sqlx::query(
+            "UPDATE agents SET archived_at = ?1 WHERE id = ?2",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(agent.id.to_string())
+        .execute(store.pool())
+        .await
+        .unwrap();
+        runtime
+            .notify(
+                &AgentKey::Id(agent.id),
+                "need",
+                "kept",
+                NoticeClass::Decide,
+            )
+            .await
+            .unwrap();
+        runtime.poll_notice_wakes().await.unwrap();
+        assert!(
+            notice_texts(&store.events_since(0, 20).await.unwrap()).is_empty(),
+            "an archived agent was woken"
+        );
+        let rows = store.list_pending_notices(Some(agent.id)).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].line, "kept");
+        assert!(rows[0].carried_by.is_none());
+        assert_eq!(rows[0].wake_tries, 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_or_interrupted_wake_is_retried_once() {
+        let (store, runtime, agent) = harness("ida").await;
+        let key = AgentKey::Id(agent.id);
+        runtime
+            .notify(&key, "need", "choose", NoticeClass::Decide)
+            .await
+            .unwrap();
+        let first = runtime.notice_state.digest_message(agent.id).unwrap();
+        {
+            let mut queues = runtime.external.lock().await;
+            queues
+                .get_mut(&agent.id)
+                .unwrap()
+                .retain(|(id, _, _)| *id != first);
+        }
+        runtime
+            .notice_state
+            .settle(store.as_ref(), first, false)
+            .await;
+        let rows = store.list_pending_notices(Some(agent.id)).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].wake_tries, 1);
+        assert!(rows[0].carried_by.is_none());
+        runtime.poll_notice_wakes().await.unwrap();
+        assert_eq!(
+            notice_texts(&store.events_since(0, 20).await.unwrap()).len(),
+            2
+        );
+        let second = runtime.notice_state.digest_message(agent.id).unwrap();
+        {
+            let mut queues = runtime.external.lock().await;
+            queues
+                .get_mut(&agent.id)
+                .unwrap()
+                .retain(|(id, _, _)| *id != second);
+        }
+        runtime
+            .notice_state
+            .settle(store.as_ref(), second, false)
+            .await;
+        runtime.poll_notice_wakes().await.unwrap();
+        assert_eq!(
+            notice_texts(&store.events_since(0, 20).await.unwrap()).len(),
+            2,
+            "a third automatic wake was queued"
+        );
+        let rows = store.list_pending_notices(Some(agent.id)).await.unwrap();
+        assert_eq!(rows[0].wake_tries, 2);
+        runtime
+            .notify(&key, "other", "fresh", NoticeClass::Decide)
+            .await
+            .unwrap();
+        let wake = latest_wake(&store.events_since(0, 30).await.unwrap()).unwrap();
+        assert!(wake.contains("[decide] choose"), "{wake}");
+        assert!(wake.contains("[decide] fresh"), "{wake}");
+    }
+
+    #[tokio::test]
+    async fn a_withdrawn_wake_is_queued_again() {
+        let (store, runtime, agent) = harness("jules").await;
+        runtime
+            .notify(
+                &AgentKey::Id(agent.id),
+                "need",
+                "still here",
+                NoticeClass::Decide,
+            )
+            .await
+            .unwrap();
+        let first = runtime.notice_state.digest_message(agent.id).unwrap();
+        {
+            let mut queues = runtime.external.lock().await;
+            queues.get_mut(&agent.id).unwrap().clear();
+        }
+        runtime.poll_notice_wakes().await.unwrap();
+        let second = runtime.notice_state.digest_message(agent.id).unwrap();
+        assert_ne!(first, second);
+        let wakes = notice_texts(&store.events_since(0, 20).await.unwrap());
+        assert_eq!(wakes.len(), 2, "{wakes:?}");
+        assert!(wakes[1].contains("still here"), "{}", wakes[1]);
+        let rows = store.list_pending_notices(Some(agent.id)).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].carried_by, Some(second));
+        assert_eq!(rows[0].wake_tries, 1);
+    }
+
+    #[tokio::test]
+    async fn notices_are_deleted_only_when_the_turn_is_handed_off() {
+        let (store, runtime, agent) = harness("kea").await;
+        let key = AgentKey::Id(agent.id);
+        runtime
+            .notify(&key, "need", "first", NoticeClass::Decide)
+            .await
+            .unwrap();
+        let queued = store.list_pending_notices(Some(agent.id)).await.unwrap();
+        assert_eq!(queued.len(), 1);
+        assert!(queued[0].carried_by.is_some());
+        runtime.take_external(agent.id).await;
+        assert!(
+            store
+                .list_pending_notices(Some(agent.id))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        runtime
+            .notify(&key, "need", "old", NoticeClass::Decide)
+            .await
+            .unwrap();
+        let kept = store.list_pending_notices(Some(agent.id)).await.unwrap()[0].clone();
+        store
+            .upsert_pending_notice(&PendingNotice {
+                line: "replaced".into(),
+                updated_at: Utc::now(),
+                carried_by: None,
+                wake_tries: 0,
+                ..kept
+            })
+            .await
+            .unwrap();
+        runtime.take_external(agent.id).await;
+        let rows = store.list_pending_notices(Some(agent.id)).await.unwrap();
+        assert_eq!(rows.len(), 1, "the replacement was deleted with the old wake");
+        assert_eq!(rows[0].line, "replaced");
+        assert!(rows[0].carried_by.is_none());
+    }
+
+    #[tokio::test]
+    async fn deleting_an_agent_drops_its_pending_notices() {
+        let (store, runtime, agent) = harness("moe").await;
+        runtime
+            .notify(
+                &AgentKey::Id(agent.id),
+                "progress",
+                "kept until delete",
+                NoticeClass::Silent,
+            )
+            .await
+            .unwrap();
+        store.delete_agent(agent.id).await.unwrap();
+        assert!(
+            store
+                .list_pending_notices(Some(agent.id))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A session whose first prompt does not return until `hold` is notified.
+    struct HoldSession {
+        entered: std::sync::atomic::AtomicBool,
+        hold: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl DriverSession for HoldSession {
+        fn session_id(&self) -> &str {
+            "held"
+        }
+
+        async fn prompt(&self, _text: &str) -> Result<crossagents_core::TurnOutcome, CoreError> {
+            self.entered.store(true, Ordering::SeqCst);
+            self.hold.notified().await;
+            Ok(crossagents_core::TurnOutcome {
+                stop_reason: StopReason::EndTurn,
+                turn_id: None,
+            })
+        }
+
+        async fn interrupt(&self) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn shutdown(&self) {}
+    }
+
+    /// An in-hub agent whose turn is blocked, so a later message stays waiting.
+    async fn busy_agent(
+        store: &crossagents_store_sqlite::SqliteStore,
+        runtime: &Runtime,
+        agent: &Agent,
+    ) -> (mpsc::UnboundedSender<SessionEvent>, Arc<HoldSession>) {
+        crossagents_store_sqlite::sqlx::query("UPDATE agents SET plugin = 'local' WHERE id = ?1")
+            .bind(agent.id.to_string())
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let session = Arc::new(HoldSession {
+            entered: std::sync::atomic::AtomicBool::new(false),
+            hold: tokio::sync::Notify::new(),
+        });
+        let generation = runtime.generation.fetch_add(1, Ordering::Relaxed);
+        let inbox = runtime
+            .install(
+                agent.id,
+                session.clone(),
+                Channels {
+                    events: events_rx,
+                    control_tx,
+                    control_rx,
+                    generation,
+                },
+                None,
+                None,
+                false,
+            )
+            .await;
+        inbox.push(
+            (
+                MessageId::new(),
+                Prompt {
+                    text: "busy".into(),
+                    attachments: Vec::new(),
+                },
+            ),
+            false,
+        );
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !session.entered.load(Ordering::SeqCst) {
+            if tokio::time::Instant::now() > deadline {
+                panic!("the turn did not start");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        (events_tx, session)
+    }
+
+    async fn person_carries_a_notice(
+        store: &crossagents_store_sqlite::SqliteStore,
+        runtime: &Runtime,
+        agent: &Agent,
+    ) -> MessageId {
+        let now = Utc::now();
+        store
+            .upsert_pending_notice(&PendingNotice {
+                agent: agent.id,
+                topic: "need".into(),
+                line: "choose".into(),
+                class: NoticeClass::Decide,
+                first_at: now,
+                updated_at: now,
+                carried_by: None,
+                wake_tries: 0,
+            })
+            .await
+            .unwrap();
+        let delivery = runtime
+            .send(
+                &AgentKey::Id(agent.id),
+                "please look".into(),
+                MessageSource::Human,
+            )
+            .await
+            .unwrap();
+        assert!(delivery.queued, "the person's message started at once");
+        let rows = store.list_pending_notices(Some(agent.id)).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].carried_by, Some(delivery.message_id));
+        delivery.message_id
+    }
+
+    fn carried_is_free(rows: &[PendingNotice]) {
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].line, "choose");
+        assert!(rows[0].carried_by.is_none());
+        assert_eq!(rows[0].wake_tries, 1);
+    }
+
+    #[tokio::test]
+    async fn withdrawing_a_persons_message_releases_the_notices_it_carried() {
+        let (store, runtime, agent) = harness("niel").await;
+        let (_events, _session) = busy_agent(&store, &runtime, &agent).await;
+        let message = person_carries_a_notice(&store, &runtime, &agent).await;
+        runtime
+            .withdraw(&AgentKey::Id(agent.id), message)
+            .await
+            .unwrap();
+        let rows = store.list_pending_notices(Some(agent.id)).await.unwrap();
+        carried_is_free(&rows);
+        runtime.poll_notice_wakes().await.unwrap();
+        let wakes = notice_texts(&store.events_since(0, 20).await.unwrap());
+        assert_eq!(wakes.len(), 1, "{wakes:?}");
+        assert!(wakes[0].contains("[decide] choose"), "{}", wakes[0]);
+    }
+
+    #[tokio::test]
+    async fn a_session_exit_releases_notices_a_waiting_message_carried() {
+        let (store, runtime, agent) = harness("orin").await;
+        let (events, _session) = busy_agent(&store, &runtime, &agent).await;
+        let message = person_carries_a_notice(&store, &runtime, &agent).await;
+        events
+            .send(
+                SessionEventKind::Exited {
+                    message: "gone".into(),
+                    cause: None,
+                    code: None,
+                }
+                .into(),
+            )
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let withdrawn = store.events_since(0, 40).await.unwrap().iter().any(|event| {
+                matches!(
+                    &event.kind,
+                    EventKind::AgentInputWithdrawn { message_id, .. } if *message_id == message
+                )
+            });
+            if withdrawn {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("the exit did not take the waiting message back");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let rows = store.list_pending_notices(Some(agent.id)).await.unwrap();
+        carried_is_free(&rows);
+        // The process is gone. A new session is what the next start would open, so the
+        // poll can hand the wake over.
+        let (_events, _again) = busy_agent(&store, &runtime, &agent).await;
+        runtime.poll_notice_wakes().await.unwrap();
+        let wakes = notice_texts(&store.events_since(0, 40).await.unwrap());
+        assert_eq!(wakes.len(), 1, "{wakes:?}");
+        assert!(wakes[0].contains("[decide] choose"), "{}", wakes[0]);
+    }
+
+    #[tokio::test]
+    async fn a_restart_retries_an_interrupted_turn_once_and_rebuilds_an_unstarted_wake() {
+        let (store, runtime, queued) = harness("queued").await;
+        runtime
+            .notify(
+                &AgentKey::Id(queued.id),
+                "need",
+                "once",
+                NoticeClass::Decide,
+            )
+            .await
+            .unwrap();
+        let interrupted = external("interrupted");
+        store.insert_agent(&interrupted).await.unwrap();
+        let now = Utc::now();
+        let stored = store
+            .upsert_pending_notice(&PendingNotice {
+                agent: interrupted.id,
+                topic: "hand".into(),
+                line: "in hand".into(),
+                class: NoticeClass::Decide,
+                first_at: now,
+                updated_at: now,
+                carried_by: None,
+                wake_tries: 0,
+            })
+            .await
+            .unwrap();
+        let message = MessageId::new();
+        store
+            .mark_notices_carried(
+                interrupted.id,
+                &[("hand".into(), stored.updated_at)],
+                message,
+            )
+            .await
+            .unwrap();
+        publish(
+            &runtime.bus,
+            EventKind::AgentTurnStarted {
+                id: interrupted.id,
+                message_id: message,
+            },
+        )
+        .await;
+        drop(runtime);
+        let runtime = Arc::new(Runtime::new(
+            Arc::new(EventBus::new(store.clone())),
+            PluginRegistry::default(),
+        ));
+        runtime.recover(Some(0)).await.unwrap();
+        let queued_rows = store.list_pending_notices(Some(queued.id)).await.unwrap();
+        assert_eq!(queued_rows.len(), 1);
+        assert!(queued_rows[0].carried_by.is_none());
+        assert_eq!(queued_rows[0].wake_tries, 0);
+        let interrupted_rows = store
+            .list_pending_notices(Some(interrupted.id))
+            .await
+            .unwrap();
+        assert_eq!(interrupted_rows.len(), 1);
+        assert_eq!(interrupted_rows[0].line, "in hand");
+        assert!(interrupted_rows[0].carried_by.is_none());
+        assert_eq!(interrupted_rows[0].wake_tries, 1);
+        runtime.poll_notice_wakes().await.unwrap();
+        runtime.poll_notice_wakes().await.unwrap();
+        let wakes = notice_texts(&store.events_since(0, 40).await.unwrap());
+        let once = wakes.iter().filter(|wake| wake.contains("once")).count();
+        let handed = wakes.iter().filter(|wake| wake.contains("in hand")).count();
+        assert_eq!(once, 2, "{wakes:?}");
+        assert_eq!(handed, 1, "{wakes:?}");
+    }
+
+    #[tokio::test]
+    async fn release_stranded_keeps_a_turn_this_hub_takes_over() {
+        let (store, _runtime, agent) = harness("keep").await;
+        let now = Utc::now();
+        let kept = store
+            .upsert_pending_notice(&PendingNotice {
+                agent: agent.id,
+                topic: "kept".into(),
+                line: "still running".into(),
+                class: NoticeClass::Decide,
+                first_at: now,
+                updated_at: now,
+                carried_by: None,
+                wake_tries: 0,
+            })
+            .await
+            .unwrap();
+        let dropped = store
+            .upsert_pending_notice(&PendingNotice {
+                agent: agent.id,
+                topic: "dropped".into(),
+                line: "left behind".into(),
+                class: NoticeClass::Decide,
+                first_at: now,
+                updated_at: now,
+                carried_by: None,
+                wake_tries: 0,
+            })
+            .await
+            .unwrap();
+        let running = MessageId::new();
+        store
+            .mark_notices_carried(agent.id, &[("kept".into(), kept.updated_at)], running)
+            .await
+            .unwrap();
+        store
+            .mark_notices_carried(
+                agent.id,
+                &[("dropped".into(), dropped.updated_at)],
+                MessageId::new(),
+            )
+            .await
+            .unwrap();
+        store.release_stranded_notices(&[running]).await.unwrap();
+        let rows = store.list_pending_notices(Some(agent.id)).await.unwrap();
+        let kept_row = rows.iter().find(|row| row.topic == "kept").unwrap();
+        let dropped_row = rows.iter().find(|row| row.topic == "dropped").unwrap();
+        assert_eq!(kept_row.line, "still running");
+        assert_eq!(kept_row.carried_by, Some(running));
+        assert_eq!(kept_row.wake_tries, 0);
+        assert_eq!(dropped_row.line, "left behind");
+        assert!(dropped_row.carried_by.is_none());
+        assert_eq!(dropped_row.wake_tries, 0);
     }
 }

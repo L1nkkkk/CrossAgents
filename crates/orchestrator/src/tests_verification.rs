@@ -91,7 +91,13 @@ impl AgentHost for FakeHost {
     async fn withdraw(&self, _: AgentId, _: MessageId) -> Result<(), CoreError> {
         Ok(())
     }
-    async fn notify(&self, _: AgentId, topic: &str, line: &str) -> Result<(), CoreError> {
+    async fn notify(
+        &self,
+        _: AgentId,
+        topic: &str,
+        line: &str,
+        _: crossagents_core::NoticeClass,
+    ) -> Result<(), CoreError> {
         self.notices.lock().await.push(format!("{topic}: {line}"));
         Ok(())
     }

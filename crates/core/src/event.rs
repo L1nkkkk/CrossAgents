@@ -421,6 +421,15 @@ pub enum EventKind {
         watch_id: String,
         line: String,
     },
+    /// A notice was recorded for an agent, with the class that decides whether it wakes
+    /// them now. Replay and round accounting read this; delivery is a separate message.
+    #[serde(rename = "notice.recorded")]
+    NoticeRecorded {
+        id: AgentId,
+        topic: String,
+        line: String,
+        class: crate::NoticeClass,
+    },
     #[serde(rename = "account.created")]
     AccountCreated { account: Account },
     #[serde(rename = "account.removed")]
@@ -702,6 +711,7 @@ impl EventKind {
             Self::RunLanded { .. } => "run.landed",
             Self::RunDeleted { .. } => "run.deleted",
             Self::WatchTriggered { .. } => "watch.triggered",
+            Self::NoticeRecorded { .. } => "notice.recorded",
             Self::AgentTurnStarted { .. } => "agent.turn_started",
             Self::AgentOutput { .. } => "agent.output",
             Self::AgentToolCall { .. } => "agent.tool_call",
@@ -809,6 +819,7 @@ impl EventKind {
             | Self::ExtensionCallFinished { .. } => None,
             Self::AgentSessionStarted { id, .. } => Some(*id),
             Self::ReminderFired { owner, .. } | Self::WatchTriggered { owner, .. } => Some(*owner),
+            Self::NoticeRecorded { id, .. } => Some(*id),
             Self::NoteWritten { author, .. } => Some(*author),
             Self::IssueRecorded { author, .. } => Some(*author),
             Self::HumanAsked { item } | Self::HumanAnswered { item } => Some(item.from),

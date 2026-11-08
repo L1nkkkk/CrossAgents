@@ -8,9 +8,10 @@
 //! - a waiting rule lasts at most seven days, then wakes its owner once and closes;
 //! - a task or run ending closes the rules that follow it.
 //!
-//! The Planner's wake table (a member posting progress with nobody addressed wakes the lead,
-//! addressing another teammate does not, the lead's own note never does) is
-//! [`Orchestrator::wake_lead_on_progress`].
+//! A member's progress note is only recorded (multica §2.3 no longer wakes the lead). It
+//! rides the next wake. Something the teammate needs the lead to decide goes through an open
+//! question or a message, not through this note. Addressing another teammate records nothing,
+//! and the lead's own note records nothing. See [`Orchestrator::wake_lead_on_progress`].
 
 use std::collections::HashSet;
 
@@ -137,10 +138,11 @@ pub fn mentions_another_member(text: &str, lead: AgentId, members: &[(AgentId, S
         .any(|name| !name.is_empty() && text.contains(&format!("@{name}")))
 }
 
-/// The Planner's wake table as a decision (multica §2.3): the lead's own word never wakes it,
-/// and neither does anything about a run or task that has already ended. A note that addresses
-/// another teammate is a handoff already made, so the lead is not woken as well; anything else
-/// is progress it should evaluate.
+/// Which progress notes are kept for the lead. Progress is only recorded. The lead's own
+/// word is not, and neither is anything about a run or task that has already ended. A note
+/// that addresses another teammate is a handoff already made. Anything else rides the next
+/// wake and does not start a turn. A decision the teammate needs goes through an open
+/// question or a message, not through this note.
 pub fn lead_should_be_woken(
     lead: AgentId,
     caller: AgentId,
@@ -266,12 +268,16 @@ impl Orchestrator {
             self.store().delete_watch(&watch.id).await?;
             let line = format!(
                 "Watch {} expired: the thing it waited for ({what}) did not happen in {} days. Ask again with watch if you still need it.",
-                watch.id,
-                WAIT_MAX_DAYS
+                watch.id, WAIT_MAX_DAYS
             );
             if let Err(err) = self
                 .host
-                .notify(watch.owner, &format!("watch:{}", watch.id), &line)
+                .notify(
+                    watch.owner,
+                    &format!("watch:{}", watch.id),
+                    &line,
+                    crossagents_core::NoticeClass::Decide,
+                )
                 .await
             {
                 tracing::warn!(owner = %watch.owner, error = %err, "cannot deliver an expired watch");
@@ -365,10 +371,11 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// The Planner's wake table (multica §2.3): a member's progress note that addresses nobody
-    /// wakes the lead to evaluate it; one that addresses another teammate is a handoff already
-    /// made, and the lead's own note never wakes it. The line goes into the lead's digest under
-    /// one topic per run, so a burst of notes is one queued wake, not one turn each.
+    /// Records a member's progress for the lead. Progress is only recorded: it rides the next
+    /// wake under "since last time" and does not start a turn. Something the teammate needs
+    /// the lead to decide goes through an open question or a message, not through this note.
+    /// A note that addresses another teammate is a handoff already made, and the lead's own
+    /// note is not recorded. One topic per run, so a later note replaces the line.
     pub async fn wake_lead_on_progress(&self, run: &Run, task: &Task, caller: &Agent, text: &str) {
         if run.planner == caller.id {
             // The lead's own word never wakes it.
@@ -409,10 +416,15 @@ impl Orchestrator {
         );
         if let Err(err) = self
             .host
-            .notify(run.planner, &format!("lead-progress:{}", run.id), &line)
+            .notify(
+                run.planner,
+                &format!("lead-progress:{}", run.id),
+                &line,
+                crossagents_core::NoticeClass::Silent,
+            )
             .await
         {
-            tracing::warn!(lead = %run.planner, error = %err, "cannot wake the lead about progress");
+            tracing::warn!(lead = %run.planner, error = %err, "cannot record the lead's progress notice");
         }
     }
 }
@@ -447,14 +459,9 @@ mod tests {
             (worker, "Ada".to_owned()),
             (rex, "Rex".to_owned()),
         ];
-        // A member's progress note, nobody addressed: the lead evaluates it.
+        // A member's progress note, nobody addressed: kept for the lead, not a turn of its own.
         assert!(lead_should_be_woken(
-            lead,
-            worker,
-            false,
-            false,
-            "halfway",
-            &members
+            lead, worker, false, false, "halfway", &members
         ));
         // The lead's own note never wakes it.
         assert!(!lead_should_be_woken(
@@ -536,10 +543,7 @@ mod tests {
         );
         assert!(rule.health.is_paused());
         // It stays paused, with its reason, and never wakes anyone again.
-        assert!(matches!(
-            account_trigger(&mut rule, now),
-            Trigger::Pause(_)
-        ));
+        assert!(matches!(account_trigger(&mut rule, now), Trigger::Pause(_)));
         // A person taking part clears the chain, so the rule may wake again.
         let mut again = watch();
         account_trigger(&mut again, now);

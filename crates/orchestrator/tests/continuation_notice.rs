@@ -34,7 +34,13 @@ impl AgentHost for IdleHost {
     async fn withdraw(&self, _: AgentId, _: MessageId) -> Result<(), CoreError> {
         Ok(())
     }
-    async fn notify(&self, _: AgentId, _: &str, _: &str) -> Result<(), CoreError> {
+    async fn notify(
+        &self,
+        _: AgentId,
+        _: &str,
+        _: &str,
+        _: crossagents_core::NoticeClass,
+    ) -> Result<(), CoreError> {
         Ok(())
     }
     async fn clone_agent(
@@ -93,11 +99,17 @@ impl AgentHost for FailingNotify {
     async fn withdraw(&self, a: AgentId, m: MessageId) -> Result<(), CoreError> {
         self.inner.withdraw(a, m).await
     }
-    async fn notify(&self, a: AgentId, topic: &str, line: &str) -> Result<(), CoreError> {
+    async fn notify(
+        &self,
+        a: AgentId,
+        topic: &str,
+        line: &str,
+        class: crossagents_core::NoticeClass,
+    ) -> Result<(), CoreError> {
         if self.fail.load(Ordering::SeqCst) {
             Err(CoreError::Unsupported("injected notify failure".into()))
         } else {
-            self.inner.notify(a, topic, line).await
+            self.inner.notify(a, topic, line, class).await
         }
     }
     async fn clone_agent(
