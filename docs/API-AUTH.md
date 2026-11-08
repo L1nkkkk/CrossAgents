@@ -143,6 +143,8 @@ A3 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 
 **write**：改变会话、run、界面状态。agent 的 permission 默认是 bypass（自动执行）；能给 agent 发消息，或拿到 agent 会话 token 调它的工具，就能让它在中心上执行命令。因此 write 只发给你愿意给 shell 的设备，只看用 read。
 
+write 还能代人做决定：`POST /v1/runs/{key}/approve` 批准计划并可整份替换 run 策略（包括关闭审批、自动落地）；`POST /v1/questions/{id}/answer` 回答审批、预算或 Work 卡片；`POST /v1/runs/{key}/policy` 修改自动唤醒并可重置次数、解除自动续跑的暂停；`POST /v1/agents/{key}/connect` 给外部 agent 重新签发会话 token（旧 token 作废）。这些入口供远程 GUI 代人操作，均维持 write。
+
 2026-11-08（run 8298b08a）把 `POST /v1/agents/{key}/settings` 和 `POST /v1/repos/init` 整条升为 admin：前者能把已经设成 guard / deny 的 agent 改回自动执行、打开 `allow_hooks`、更换 `setting_sources`；后者会对请求里的任意路径执行 git init 并写第一次提交。
 
 建 agent 的 `config.permission / allow_hooks / setting_sources`、建 run 时沿用的 agent permission 与 `policy.approvals` 等策略没有按级别拦，`POST /v1/runs` 仍是 write。不做字段级检查：当前缺省就是 bypass，拦字段不增加安全，反而挡住远程 GUI 正常建 agent（Home、Run 会带用户选的 permission，workerModels 会沿用模板的 setting_sources）。共用决定见 run 笔记 `plan/a2-decisions` §1。以后若把默认权限改成 guard，这几处要一起升 admin（待定）。
