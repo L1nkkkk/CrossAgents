@@ -30,15 +30,16 @@ efforts = ["low", "medium", "high", "xhigh", "max"]
 [locate]
 env = "WITH_CLI"
 commands = ["with-cli"]
-# Where the With app installs it: `%USERPROFILE%\background_agent_cli\bin\with-cli.exe`.
 version = ["--version"]
 # npm puts `with-cli.cmd` on PATH, a wrapper that starts the exe with `%*`. A prompt with a
 # newline cannot go through a batch file, so the exe behind it is started directly.
 shim = "batch-exe"
 
 [locate.paths]
+# Where the With app installs it: `%USERPROFILE%\background_agent_cli\bin\with-cli.exe`.
 windows = ["~/background_agent_cli/bin/with-cli"]
 linux = ["~/background_agent_cli/bin/with-cli"]
+# https://docs.brew.sh/FAQ#why-should-i-install-homebrew-in-the-default-location
 macos = ["~/background_agent_cli/bin/with-cli", "/opt/homebrew/bin/with-cli", "/usr/local/bin/with-cli"]
 
 [install]

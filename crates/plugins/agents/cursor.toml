@@ -15,6 +15,7 @@ version = ["--version"]
 [locate.paths]
 windows = ["~/.local/bin/agent", "~/.local/bin/cursor-agent"]
 linux = ["~/.local/bin/agent", "~/.local/bin/cursor-agent"]
+# https://docs.brew.sh/FAQ#why-should-i-install-homebrew-in-the-default-location
 macos = ["~/.local/bin/agent", "~/.local/bin/cursor-agent", "/opt/homebrew/bin/agent", "/usr/local/bin/agent", "/opt/homebrew/bin/cursor-agent", "/usr/local/bin/cursor-agent"]
 
 [install]

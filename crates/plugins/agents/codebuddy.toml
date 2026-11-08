@@ -37,6 +37,7 @@ shim = "node-script"
 version = ["--version"]
 
 [locate.paths]
+# https://docs.brew.sh/FAQ#why-should-i-install-homebrew-in-the-default-location
 macos = ["/opt/homebrew/bin/codebuddy", "/usr/local/bin/codebuddy"]
 
 [install]
