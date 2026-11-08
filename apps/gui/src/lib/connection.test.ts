@@ -33,11 +33,12 @@ test("the tunnel says 连接中 / 已连接 / 未连接 with ports or the reason
 
 test("local mode is 本机; remote mode carries the target and the tunnel's state", () => {
   assert.deepEqual(connectionWords(undefined), { mode: "local", label: "本机", status: "本机的 hub", tone: "ok" });
-  const local: ConnectionState = { mode: "local", defaultDeviceName: "pc-gui" };
+  const local: ConnectionState = { mode: "local", bundledHub: true, defaultDeviceName: "pc-gui" };
   assert.equal(connectionWords(local).label, "本机");
 
   const remote: ConnectionState = {
     mode: "remote",
+    bundledHub: true,
     remote: { target, deviceName: "mac-gui", deviceId: "d1", pairedAt: "2026-11-08T10:00:00Z" },
     tunnel: { status: "connected", localPort: 50123, remotePort: 7420 },
     defaultDeviceName: "pc-gui",
@@ -59,6 +60,7 @@ test("the sidebar mark is red whenever the remote tunnel is not up", () => {
   });
   const base: ConnectionState = {
     mode: "remote",
+    bundledHub: true,
     remote: { target, deviceName: "mac-gui", deviceId: "d1", pairedAt: "2026-11-08T10:00:00Z" },
     defaultDeviceName: "pc-gui",
   };

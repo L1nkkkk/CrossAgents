@@ -165,6 +165,9 @@ function UpdateCard() {
   let action: { label: string; run: () => void } | undefined;
   const check = { label: "检查更新", run: () => void bridge?.check().then(setState, () => {}) };
   switch (state?.state) {
+    case "manual":
+      text = state.reason;
+      break;
     case undefined:
       text = "开发版和浏览器里打开的页面不会自动更新。";
       break;
@@ -197,7 +200,7 @@ function UpdateCard() {
         <div>
           <div className="setting-label">更新</div>
           <div className="setting-hint">{text}</div>
-          {state && <div className="setting-hint">每 4 小时自动检查一次；托盘菜单里也可以检查。</div>}
+          {state && state.state !== "manual" && <div className="setting-hint">每 4 小时自动检查一次；托盘菜单里也可以检查。</div>}
         </div>
         {action && (
           <button className={state?.state === "ready" ? "primary small" : "ghost small"} onClick={action.run}>

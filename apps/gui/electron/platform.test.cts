@@ -1,6 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applicationMenu, shortcut, trayHint, trayIcon } from "./platform.cjs";
+import { applicationMenu, automaticUpdates, bundledHub, shortcut, trayHint, trayIcon } from "./platform.cjs";
+import { join } from "node:path";
+
+for (const platform of ["win32", "darwin", "linux"] as const) {
+  test(`${platform}: packaged hub presence and automatic updates`, () => {
+    const executable = join("resources", "bin", platform === "win32" ? "crossagents.exe" : "crossagents");
+    assert.equal(bundledHub(true, platform, "resources", (path) => path === executable), true);
+    assert.equal(bundledHub(true, platform, "resources", () => false), false);
+    assert.equal(bundledHub(false, platform, "resources", () => false), true);
+    assert.equal(automaticUpdates(platform), platform !== "darwin");
+  });
+}
 
 test("macOS gets native menus and a template tray icon", () => {
   const menu = applicationMenu("darwin")!;
