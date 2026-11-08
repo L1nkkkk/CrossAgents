@@ -602,9 +602,9 @@ impl Runtime {
                     },
                 )
                 .await;
-                if let Err(err) = self.store().settle_carried_notices(message_id, false).await {
-                    tracing::warn!(%message_id, error = %err, "cannot release notices from an interrupted turn");
-                }
+                // Leave carried_by on this message. Poll must not open a second wake for
+                // rows a turn was already reading; the next start sees the interrupted
+                // turn as finished and releases them without counting a failed wake.
                 recovery.interrupted.push(agent.id);
             }
         }
@@ -2425,6 +2425,10 @@ impl Runtime {
                 "the message is not waiting: it already started, or is unknown".into(),
             ));
         }
+        if let Err(err) = self.store().settle_carried_notices(message_id, false).await {
+            tracing::warn!(%message_id, error = %err, "cannot release notices a withdrawn message carried");
+        }
+        self.notice_state.clear_digest_if(agent.id, message_id);
         publish(
             &self.bus,
             EventKind::AgentInputWithdrawn {
@@ -3346,6 +3350,11 @@ async fn handle_session_event(
                     .map(|(m, _)| m)
                     .collect();
                 for message_id in waiting {
+                    // A person's message carries notices without being the digest. The
+                    // process is gone, so the turn will not finish and release them.
+                    if let Err(err) = bus.store().settle_carried_notices(message_id, false).await {
+                        tracing::warn!(%message_id, error = %err, "cannot release notices a waiting message carried");
+                    }
                     publish(bus, EventKind::AgentInputWithdrawn { id, message_id }).await;
                 }
             }
@@ -4497,5 +4506,253 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// A session whose first prompt does not return until `hold` is notified.
+    struct HoldSession {
+        entered: std::sync::atomic::AtomicBool,
+        hold: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl DriverSession for HoldSession {
+        fn session_id(&self) -> &str {
+            "held"
+        }
+
+        async fn prompt(&self, _text: &str) -> Result<crossagents_core::TurnOutcome, CoreError> {
+            self.entered.store(true, Ordering::SeqCst);
+            self.hold.notified().await;
+            Ok(crossagents_core::TurnOutcome {
+                stop_reason: StopReason::EndTurn,
+                turn_id: None,
+            })
+        }
+
+        async fn interrupt(&self) -> Result<(), CoreError> {
+            Ok(())
+        }
+
+        async fn shutdown(&self) {}
+    }
+
+    /// An in-hub agent whose turn is blocked, so a later message stays waiting.
+    async fn busy_agent(
+        store: &crossagents_store_sqlite::SqliteStore,
+        runtime: &Runtime,
+        agent: &Agent,
+    ) -> (mpsc::UnboundedSender<SessionEvent>, Arc<HoldSession>) {
+        crossagents_store_sqlite::sqlx::query("UPDATE agents SET plugin = 'local' WHERE id = ?1")
+            .bind(agent.id.to_string())
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let session = Arc::new(HoldSession {
+            entered: std::sync::atomic::AtomicBool::new(false),
+            hold: tokio::sync::Notify::new(),
+        });
+        let generation = runtime.generation.fetch_add(1, Ordering::Relaxed);
+        let inbox = runtime
+            .install(
+                agent.id,
+                session.clone(),
+                Channels {
+                    events: events_rx,
+                    control_tx,
+                    control_rx,
+                    generation,
+                },
+                None,
+                None,
+                false,
+            )
+            .await;
+        inbox.push(
+            (
+                MessageId::new(),
+                Prompt {
+                    text: "busy".into(),
+                    attachments: Vec::new(),
+                },
+            ),
+            false,
+        );
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !session.entered.load(Ordering::SeqCst) {
+            if tokio::time::Instant::now() > deadline {
+                panic!("the turn did not start");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        (events_tx, session)
+    }
+
+    async fn person_carries_a_notice(
+        store: &crossagents_store_sqlite::SqliteStore,
+        runtime: &Runtime,
+        agent: &Agent,
+    ) -> MessageId {
+        let now = Utc::now();
+        store
+            .upsert_pending_notice(&PendingNotice {
+                agent: agent.id,
+                topic: "need".into(),
+                line: "choose".into(),
+                class: NoticeClass::Decide,
+                first_at: now,
+                updated_at: now,
+                carried_by: None,
+                wake_tries: 0,
+            })
+            .await
+            .unwrap();
+        let delivery = runtime
+            .send(
+                &AgentKey::Id(agent.id),
+                "please look".into(),
+                MessageSource::Human,
+            )
+            .await
+            .unwrap();
+        assert!(delivery.queued, "the person's message started at once");
+        let rows = store.list_pending_notices(Some(agent.id)).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].carried_by, Some(delivery.message_id));
+        delivery.message_id
+    }
+
+    fn carried_is_free(rows: &[PendingNotice]) {
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].line, "choose");
+        assert!(rows[0].carried_by.is_none());
+        assert_eq!(rows[0].wake_tries, 1);
+    }
+
+    #[tokio::test]
+    async fn withdrawing_a_persons_message_releases_the_notices_it_carried() {
+        let (store, runtime, agent) = harness("niel").await;
+        let (_events, _session) = busy_agent(&store, &runtime, &agent).await;
+        let message = person_carries_a_notice(&store, &runtime, &agent).await;
+        runtime
+            .withdraw(&AgentKey::Id(agent.id), message)
+            .await
+            .unwrap();
+        let rows = store.list_pending_notices(Some(agent.id)).await.unwrap();
+        carried_is_free(&rows);
+        runtime.poll_notice_wakes().await.unwrap();
+        let wakes = notice_texts(&store.events_since(0, 20).await.unwrap());
+        assert_eq!(wakes.len(), 1, "{wakes:?}");
+        assert!(wakes[0].contains("[decide] choose"), "{}", wakes[0]);
+    }
+
+    #[tokio::test]
+    async fn a_session_exit_releases_notices_a_waiting_message_carried() {
+        let (store, runtime, agent) = harness("orin").await;
+        let (events, _session) = busy_agent(&store, &runtime, &agent).await;
+        let message = person_carries_a_notice(&store, &runtime, &agent).await;
+        events
+            .send(
+                SessionEventKind::Exited {
+                    message: "gone".into(),
+                    cause: None,
+                    code: None,
+                }
+                .into(),
+            )
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let withdrawn = store.events_since(0, 40).await.unwrap().iter().any(|event| {
+                matches!(
+                    &event.kind,
+                    EventKind::AgentInputWithdrawn { message_id, .. } if *message_id == message
+                )
+            });
+            if withdrawn {
+                break;
+            }
+            if tokio::time::Instant::now() > deadline {
+                panic!("the exit did not take the waiting message back");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let rows = store.list_pending_notices(Some(agent.id)).await.unwrap();
+        carried_is_free(&rows);
+        // The process is gone. A new session is what the next start would open, so the
+        // poll can hand the wake over.
+        let (_events, _again) = busy_agent(&store, &runtime, &agent).await;
+        runtime.poll_notice_wakes().await.unwrap();
+        let wakes = notice_texts(&store.events_since(0, 40).await.unwrap());
+        assert_eq!(wakes.len(), 1, "{wakes:?}");
+        assert!(wakes[0].contains("[decide] choose"), "{}", wakes[0]);
+    }
+
+    #[tokio::test]
+    async fn a_restart_releases_a_wake_that_never_started_and_keeps_a_running_one() {
+        let (store, runtime, queued) = harness("queued").await;
+        runtime
+            .notify(
+                &AgentKey::Id(queued.id),
+                "need",
+                "once",
+                NoticeClass::Decide,
+            )
+            .await
+            .unwrap();
+        let running = external("running");
+        store.insert_agent(&running).await.unwrap();
+        let now = Utc::now();
+        let stored = store
+            .upsert_pending_notice(&PendingNotice {
+                agent: running.id,
+                topic: "hand".into(),
+                line: "in hand".into(),
+                class: NoticeClass::Decide,
+                first_at: now,
+                updated_at: now,
+                carried_by: None,
+                wake_tries: 0,
+            })
+            .await
+            .unwrap();
+        let message = MessageId::new();
+        store
+            .mark_notices_carried(
+                running.id,
+                &[("hand".into(), stored.updated_at)],
+                message,
+            )
+            .await
+            .unwrap();
+        publish(
+            &runtime.bus,
+            EventKind::AgentTurnStarted {
+                id: running.id,
+                message_id: message,
+            },
+        )
+        .await;
+        drop(runtime);
+        let runtime = Arc::new(Runtime::new(
+            Arc::new(EventBus::new(store.clone())),
+            PluginRegistry::default(),
+        ));
+        runtime.recover(Some(0)).await.unwrap();
+        let queued_rows = store.list_pending_notices(Some(queued.id)).await.unwrap();
+        assert_eq!(queued_rows.len(), 1);
+        assert!(queued_rows[0].carried_by.is_none());
+        assert_eq!(queued_rows[0].wake_tries, 0);
+        let running_rows = store.list_pending_notices(Some(running.id)).await.unwrap();
+        assert_eq!(running_rows[0].carried_by, Some(message));
+        assert_eq!(running_rows[0].wake_tries, 0);
+        runtime.poll_notice_wakes().await.unwrap();
+        runtime.poll_notice_wakes().await.unwrap();
+        let wakes = notice_texts(&store.events_since(0, 40).await.unwrap());
+        assert_eq!(wakes.len(), 2, "{wakes:?}");
+        assert!(wakes.iter().all(|wake| !wake.contains("in hand")), "{wakes:?}");
+        let again = store.list_pending_notices(Some(running.id)).await.unwrap();
+        assert_eq!(again[0].carried_by, Some(message));
     }
 }
