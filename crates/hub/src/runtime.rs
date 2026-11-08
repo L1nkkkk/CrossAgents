@@ -602,9 +602,9 @@ impl Runtime {
                     },
                 )
                 .await;
-                // Leave carried_by on this message. Poll must not open a second wake for
-                // rows a turn was already reading; the next start sees the interrupted
-                // turn as finished and releases them without counting a failed wake.
+                if let Err(err) = self.store().settle_carried_notices(message_id, false).await {
+                    tracing::warn!(%message_id, error = %err, "cannot release notices from an interrupted turn");
+                }
                 recovery.interrupted.push(agent.id);
             }
         }
@@ -4690,7 +4690,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_restart_releases_a_wake_that_never_started_and_keeps_a_running_one() {
+    async fn a_restart_retries_an_interrupted_turn_once_and_rebuilds_an_unstarted_wake() {
         let (store, runtime, queued) = harness("queued").await;
         runtime
             .notify(
@@ -4701,12 +4701,12 @@ mod tests {
             )
             .await
             .unwrap();
-        let running = external("running");
-        store.insert_agent(&running).await.unwrap();
+        let interrupted = external("interrupted");
+        store.insert_agent(&interrupted).await.unwrap();
         let now = Utc::now();
         let stored = store
             .upsert_pending_notice(&PendingNotice {
-                agent: running.id,
+                agent: interrupted.id,
                 topic: "hand".into(),
                 line: "in hand".into(),
                 class: NoticeClass::Decide,
@@ -4720,7 +4720,7 @@ mod tests {
         let message = MessageId::new();
         store
             .mark_notices_carried(
-                running.id,
+                interrupted.id,
                 &[("hand".into(), stored.updated_at)],
                 message,
             )
@@ -4729,7 +4729,7 @@ mod tests {
         publish(
             &runtime.bus,
             EventKind::AgentTurnStarted {
-                id: running.id,
+                id: interrupted.id,
                 message_id: message,
             },
         )
@@ -4744,15 +4744,75 @@ mod tests {
         assert_eq!(queued_rows.len(), 1);
         assert!(queued_rows[0].carried_by.is_none());
         assert_eq!(queued_rows[0].wake_tries, 0);
-        let running_rows = store.list_pending_notices(Some(running.id)).await.unwrap();
-        assert_eq!(running_rows[0].carried_by, Some(message));
-        assert_eq!(running_rows[0].wake_tries, 0);
+        let interrupted_rows = store
+            .list_pending_notices(Some(interrupted.id))
+            .await
+            .unwrap();
+        assert_eq!(interrupted_rows.len(), 1);
+        assert_eq!(interrupted_rows[0].line, "in hand");
+        assert!(interrupted_rows[0].carried_by.is_none());
+        assert_eq!(interrupted_rows[0].wake_tries, 1);
         runtime.poll_notice_wakes().await.unwrap();
         runtime.poll_notice_wakes().await.unwrap();
         let wakes = notice_texts(&store.events_since(0, 40).await.unwrap());
-        assert_eq!(wakes.len(), 2, "{wakes:?}");
-        assert!(wakes.iter().all(|wake| !wake.contains("in hand")), "{wakes:?}");
-        let again = store.list_pending_notices(Some(running.id)).await.unwrap();
-        assert_eq!(again[0].carried_by, Some(message));
+        let once = wakes.iter().filter(|wake| wake.contains("once")).count();
+        let handed = wakes.iter().filter(|wake| wake.contains("in hand")).count();
+        assert_eq!(once, 2, "{wakes:?}");
+        assert_eq!(handed, 1, "{wakes:?}");
+    }
+
+    #[tokio::test]
+    async fn release_stranded_keeps_a_turn_this_hub_takes_over() {
+        let (store, _runtime, agent) = harness("keep").await;
+        let now = Utc::now();
+        let kept = store
+            .upsert_pending_notice(&PendingNotice {
+                agent: agent.id,
+                topic: "kept".into(),
+                line: "still running".into(),
+                class: NoticeClass::Decide,
+                first_at: now,
+                updated_at: now,
+                carried_by: None,
+                wake_tries: 0,
+            })
+            .await
+            .unwrap();
+        let dropped = store
+            .upsert_pending_notice(&PendingNotice {
+                agent: agent.id,
+                topic: "dropped".into(),
+                line: "left behind".into(),
+                class: NoticeClass::Decide,
+                first_at: now,
+                updated_at: now,
+                carried_by: None,
+                wake_tries: 0,
+            })
+            .await
+            .unwrap();
+        let running = MessageId::new();
+        store
+            .mark_notices_carried(agent.id, &[("kept".into(), kept.updated_at)], running)
+            .await
+            .unwrap();
+        store
+            .mark_notices_carried(
+                agent.id,
+                &[("dropped".into(), dropped.updated_at)],
+                MessageId::new(),
+            )
+            .await
+            .unwrap();
+        store.release_stranded_notices(&[running]).await.unwrap();
+        let rows = store.list_pending_notices(Some(agent.id)).await.unwrap();
+        let kept_row = rows.iter().find(|row| row.topic == "kept").unwrap();
+        let dropped_row = rows.iter().find(|row| row.topic == "dropped").unwrap();
+        assert_eq!(kept_row.line, "still running");
+        assert_eq!(kept_row.carried_by, Some(running));
+        assert_eq!(kept_row.wake_tries, 0);
+        assert_eq!(dropped_row.line, "left behind");
+        assert!(dropped_row.carried_by.is_none());
+        assert_eq!(dropped_row.wake_tries, 0);
     }
 }
