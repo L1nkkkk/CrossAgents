@@ -185,35 +185,12 @@ async fn resolve_task(state: &AppState, run: RunId, key: &str) -> Result<TaskId,
         })
 }
 async fn raw(state: &AppState, scope: FilesScope<'_>, q: RawQuery) -> Result<Response, AppError> {
-    // Scope resolution canonicalizes the workspace too; run it and the file read on
-    // the blocking pool while keeping the existing asynchronous store operations.
-    let owned_agent = match scope {
-        FilesScope::Agent(agent) => Some(agent.clone()),
-        _ => None,
-    };
-    let scope_ids = match scope {
-        FilesScope::Agent(_) => None,
-        FilesScope::Run(run) => Some((run, None)),
-        FilesScope::Task { run, task } => Some((run, Some(task))),
-    };
-    let orchestrator = state.orchestrator.clone();
     let path = q.path.unwrap_or_default();
-    let handle = tokio::runtime::Handle::current();
-    tokio::task::spawn_blocking(move || {
-        let scope = match (owned_agent.as_ref(), scope_ids) {
-            (Some(agent), _) => FilesScope::Agent(agent),
-            (_, Some((run, Some(task)))) => FilesScope::Task { run, task },
-            (_, Some((run, None))) => FilesScope::Run(run),
-            _ => unreachable!(),
-        };
-        handle.block_on(async {
-            crate::paths::refuse_remote_in(&orchestrator, scope, &path).await?;
-            let root = orchestrator.files_root(scope).await?;
-            read_raw(&root, &path)
-        })
-    })
-    .await
-    .map_err(|e| AppError::from(FileError::Failed(format!("file read task failed: {e}"))))?
+    crate::paths::refuse_remote_in(&state.orchestrator, scope, &path).await?;
+    let root = state.orchestrator.files_root(scope).await?;
+    tokio::task::spawn_blocking(move || read_raw(&root, &path))
+        .await
+        .map_err(|e| AppError::from(FileError::Failed(format!("file read task failed: {e}"))))?
 }
 
 fn read_raw(root: &FsPath, path: &str) -> Result<Response, AppError> {

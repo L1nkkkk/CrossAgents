@@ -1929,7 +1929,13 @@ impl Store for SqliteStore {
         match result {
             Ok(_) => Ok(()),
             Err(sqlx::Error::Database(e)) if e.is_unique_violation() => Err(CoreError::Conflict(
-                format!("device {:?} already exists", d.name),
+                if e.message().contains("devices.token_hash") {
+                    "device token hash already exists".into()
+                } else if e.message().contains("devices.name") {
+                    format!("device name {:?} already exists", d.name)
+                } else {
+                    format!("device id {:?} already exists", d.id)
+                },
             )),
             Err(e) => Err(storage(e)),
         }
@@ -1971,7 +1977,7 @@ impl Store for SqliteStore {
     }
     async fn touch_device(&self, id: &str) -> Result<(), CoreError> {
         let now = Utc::now();
-        sqlx::query("UPDATE devices SET last_seen_at = ? WHERE id = ? AND revoked_at IS NULL AND (last_seen_at IS NULL OR last_seen_at <= ?)").bind(now.to_rfc3339()).bind(id).bind((now - chrono::Duration::minutes(1)).to_rfc3339()).execute(&self.pool).await.map_err(storage)?;
+        sqlx::query("UPDATE devices SET last_seen_at = ? WHERE id = ? AND revoked_at IS NULL AND (last_seen_at IS NULL OR julianday(last_seen_at) <= julianday(?))").bind(now.to_rfc3339()).bind(id).bind((now - chrono::Duration::minutes(1)).to_rfc3339()).execute(&self.pool).await.map_err(storage)?;
         Ok(())
     }
     async fn insert_account(&self, account: &Account) -> Result<(), CoreError> {
