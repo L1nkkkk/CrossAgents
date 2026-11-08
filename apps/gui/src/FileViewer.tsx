@@ -179,10 +179,24 @@ function useFileBrowser(scope: FileScope, target: Target | null, initial?: { ope
 
 const loadedOf = (file: FileState) => (file && file !== "loading" && !("error" in file) ? file : null);
 
+/** Show the copy notice briefly without interrupting the viewer. */
+function useCopyNotice() {
+  const [visible, setVisible] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const show = (copy: boolean) => {
+    clearTimeout(timer.current);
+    setVisible(copy);
+    if (copy) timer.current = setTimeout(() => setVisible(false), 5000);
+  };
+  return { visible, show };
+}
+
 function FileViewer({ target }: { target: Current }) {
   const { scope } = target;
   const { showAll, setShowAll, dirs, open, root, path, line, setLine, file, setFile, toggle, pick } = useFileBrowser(scope, target);
   const [copied, setCopied] = useState(false);
+  const notice = useCopyNotice();
   const bridge = getBridge();
 
   useEffect(() => {
@@ -243,7 +257,7 @@ function FileViewer({ target }: { target: Current }) {
                 className="ghost small"
                 disabled={!loaded}
                 title="用系统默认程序打开这个文件"
-                onClick={() => path && bridge.openPath!(scopePath(scope), path).catch((e) => setFile({ error: errorText(e) }))}
+                onClick={() => path && bridge.openPath!(scopePath(scope), path).then(({ copy }) => notice.show(copy)).catch((e) => setFile({ error: errorText(e) }))}
               >
                 <ExternalLink size={14} /> 用默认程序打开
               </button>
@@ -253,6 +267,7 @@ function FileViewer({ target }: { target: Current }) {
             </button>
           </div>
         </header>
+        {notice.visible && <div className="fv-banner" role="status">打开的是副本，改动不会写回中心</div>}
         <div className="fv-body">
           <nav className="fv-tree">
             <div className="fv-tree-head">
@@ -470,6 +485,7 @@ export function FilesPane({ scope }: { scope: FileScope }) {
   const box = useRef<HTMLDivElement>(null);
   const [source, setSource] = useState<Record<string, boolean>>({});
   const [outline, setOutline] = useState(true);
+  const notice = useCopyNotice();
   const bridge = getBridge();
   const marks = useMemo(() => changeIndex(b.status), [b.status]);
   const loaded = loadedOf(b.file);
@@ -544,8 +560,9 @@ export function FilesPane({ scope }: { scope: FileScope }) {
         onZoom={() => b.active && openFile({ scope, path: b.active, line: b.line })}
         onReload={b.reload}
         canOpen={!!bridge?.openPath && !!loaded}
-        onOpen={(path) => bridge?.openPath?.(scopePath(scope), path).catch((e) => b.setFile({ error: errorText(e) }))}
+        onOpen={(path) => bridge?.openPath?.(scopePath(scope), path).then(({ copy }) => notice.show(copy)).catch((e) => b.setFile({ error: errorText(e) }))}
       />
+      {notice.visible && <div className="fv-banner" role="status">打开的是副本，改动不会写回中心</div>}
       <section className="fv-code-pane">
         <FileBody
           scope={scope}

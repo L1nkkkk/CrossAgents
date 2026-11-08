@@ -1,47 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { extensionFile, extensionRealFile } from "./extProtocol.cjs";
-
-const versions = [{ name: "example", current: { fingerprint: "abc123" }, previous_fingerprint: "def456" }];
-const url = (path: string, fingerprint = "abc123") => `crossagents-ext://example/${fingerprint}/${path}`;
-
-test("maps current and previous snapshots, never pending or arbitrary versions", () => {
-  for (const fingerprint of ["abc123", "def456"]) {
-    assert.equal(extensionFile("home", url("gui/a%20b.js?v=1", fingerprint), versions).file,
-      resolve("home", "extension-versions", "example", fingerprint, "gui", "a b.js"));
-  }
-  assert.throws(() => extensionFile("home", url("gui/index.js", "pending"), versions));
-  assert.throws(() => extensionFile("home", url("gui/index.js"), []));
+import { assetPath } from "./extProtocol.cjs";
+const url = (path: string) => `crossagents-ext://example/abc123/${path}`;
+test("builds hub asset URL without query or fragment", () => {
+  assert.equal(assetPath(url("gui/a%20b.js?v=1#x")), "/v1/extensions/example/assets/abc123/gui/a%20b.js");
+  assert.equal(assetPath(url("%E4%B8%AD.js")), "/v1/extensions/example/assets/abc123/%E4%B8%AD.js");
 });
-
-test("refuses traversal before URL normalization, encoded traversal and absolute paths", () => {
-  for (const path of ["../secret", "gui/../../secret", "%2e%2e/secret", "gui/%2E%2E/secret",
-    "%2e%2e%2fsecret", "%2e%2e%5csecret", "/etc/passwd", "%2fetc/passwd", "C:/secret",
-    "C:secret", "C%3a%5csecret", "\\\\server\\share", "gui\\..\\secret", "gui/a.js:stream", "%00", "%zz"]) {
-    assert.throws(() => extensionFile("home", url(path), versions), path);
-  }
-  for (const value of ["file:///secret", "crossagents-ext://../abc123/file", "crossagents-ext://example/%2e%2e/file",
-    "crossagents-ext://example:90/abc123/file", "crossagents-ext://user@example/abc123/file"]) {
-    assert.throws(() => extensionFile("home", value, versions), value);
-  }
-});
-
-test("real path check refuses a junction escaping the snapshot", async () => {
-  const home = await mkdtemp(join(tmpdir(), "ca-ext-protocol-"));
-  try {
-    const root = join(home, "extension-versions", "example", "abc123");
-    const outside = join(home, "outside");
-    await mkdir(root, { recursive: true });
-    await mkdir(outside);
-    await writeFile(join(outside, "secret.js"), "secret");
-    await writeFile(join(root, "index.js"), "export default 1");
-    await symlink(outside, join(root, "escape"), process.platform === "win32" ? "junction" : "dir");
-    assert.equal(await extensionRealFile(home, url("index.js"), versions), await realpath(join(root, "index.js")));
-    await assert.rejects(extensionRealFile(home, url("escape/secret.js"), versions), /escapes snapshot/);
-  } finally {
-    await rm(home, { recursive: true, force: true });
-  }
+test("refuses invalid URLs and traversal before normalization", () => {
+  for (const path of ["../secret", "gui/../../secret", "%2e%2e/secret", "gui/%2E%2E/secret", "%2e%2e%2fsecret", "%2e%2e%5csecret", "/etc/passwd", "%2fetc/passwd", "C:/secret", "C:secret", "C%3a%5csecret", "\\\\server\\share", "gui\\..\\secret", "gui/a.js:stream", "%00", "%zz", "a//b", ". /../x"]) assert.throws(() => assetPath(url(path)), path);
+  for (const value of ["file:///secret", "crossagents-ext://../abc/file", "crossagents-ext://example/%2e%2e/file", "crossagents-ext://example:90/abc/file", "crossagents-ext://user@example/abc/file"]) assert.throws(() => assetPath(value), value);
 });

@@ -331,6 +331,7 @@ export class MockBridge implements CrossAgentsBridge {
   async openPath(scope: string, path: string) {
     // No desktop to open it on in a browser.
     console.info("mock openPath", scope, path);
+    return { copy: false };
   }
 
   setTheme() {
