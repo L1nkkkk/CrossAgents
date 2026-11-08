@@ -1,6 +1,12 @@
 //! `cursor-native`: one `agent -p` process per turn, with Cursor persisting the chat id.
 //! Session MCP configuration lives only in an ephemeral Agent Plugin, never in the repo
 //! or the user's Cursor configuration. Opening instructions are prepended once.
+//!
+//! On Windows `agent` is `agent.cmd`, and that runs `cursor-agent.ps1` to choose
+//! `node.exe` and `index.js`. A newline cannot be an argument of the batch file, so
+//! when that pair is found the turn starts them directly and the prompt stays an
+//! argument. A prompt past the command-line limit still goes in a file, and so does
+//! a newline when the pair cannot be found. The CLI does not read the prompt from stdin.
 
 pub mod wire;
 
@@ -23,7 +29,6 @@ use tokio::sync::mpsc;
 
 use crate::launch::{LaunchSpec, Launched, ProcessHandle};
 use crate::locate::Cli;
-use crate::process::resolve_program;
 use wire::{ChatArgs, Line, Turn};
 
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
@@ -108,13 +113,11 @@ impl Driver for CursorNativeDriver {
     async fn open(&self, spec: SessionSpec) -> Result<Box<dyn DriverSession>, CoreError> {
         validate_platform_permission(cfg!(windows), spec.permission)?;
         let command = self.command(&spec)?;
-        let (program, extra) = command
-            .split_first()
+        let (program, args) = crate::argv::launch_command(&command, vec!["create-chat".into()])
             .ok_or_else(|| CoreError::Agent("empty Cursor launch command".into()))?;
-        let mut create = Command::new(resolve_program(program));
+        let mut create = Command::new(program);
         create
-            .args(extra)
-            .arg("create-chat")
+            .args(&args)
             .current_dir(&spec.agent.cwd)
             .envs(spec.env.iter().cloned())
             .stdin(Stdio::null())
@@ -271,12 +274,7 @@ impl CursorSession {
             text.push_str("\n\n");
             text.push_str(&attachment.reference());
         }
-        let through_batch = self.command.first().is_some_and(|program| {
-            let lower = program.to_ascii_lowercase();
-            lower.ends_with(".cmd") || lower.ends_with(".bat")
-        }) && text.contains(['\r', '\n']);
-        if through_batch || text.encode_utf16().count() > crate::with_native::wire::PROMPT_ARG_LIMIT
-        {
+        if crate::argv::prompt_via_file(self.command.first().map(String::as_str), &text) {
             text = self.files.message(&text)?;
         }
         Ok(text)
@@ -331,15 +329,11 @@ impl CursorSession {
             bypass: self.bypass,
             plugin: self.files.plugin(),
         });
-        let (program, extra) = self
-            .command
-            .split_first()
+        let (program, all_args) = crate::argv::launch_command(&self.command, args)
             .ok_or_else(|| CoreError::Agent("empty Cursor launch command".into()))?;
-        let mut all_args = extra.to_vec();
-        all_args.extend(args);
         self.emit(SessionEventKind::TurnStarted { turn_id: None });
         let launched = crate::launch::launch(LaunchSpec {
-            program: resolve_program(program),
+            program,
             args: all_args,
             cwd: self.cwd.clone(),
             env: self.env.clone(),
@@ -487,7 +481,20 @@ impl SessionFiles {
         };
         if files.has_plugin {
             files.create()?;
-            let manifest = json!({"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", "name":"crossagents"});
+            // Measured 2026-11-09 on CLI 2026.11.05-86047df: a `--plugin-dir` server
+            // is named `plugin-${displayName}-${mcpServers key}`. The directory was
+            // `ns-dirleaf`, the manifest name `ns-manifest`, displayName `ns-display`,
+            // and the server key `ns-server`; the tool server was
+            // `plugin-ns-display-ns-server`. The parent path was not used. Without
+            // displayName the directory name is used instead, which is why a fresh
+            // `crossagents-cursor-<uuid>` directory changed the namespace every
+            // session. displayName stays fixed. The directory stays per session,
+            // because `mcp.json` is this session's and must not be shared.
+            let manifest = json!({
+                "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+                "name": "crossagents",
+                "displayName": "crossagents"
+            });
             let mut entries = Map::new();
             for server in servers {
                 entries.insert(
@@ -895,7 +902,11 @@ sleep 60
                 .unwrap();
         assert_eq!(
             manifest,
-            json!({"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", "name":"crossagents"})
+            json!({
+                "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+                "name": "crossagents",
+                "displayName": "crossagents"
+            })
         );
         let mcp: Value =
             serde_json::from_str(&std::fs::read_to_string(dir.join("mcp.json")).unwrap()).unwrap();
@@ -947,6 +958,65 @@ sleep 60
         let dir = session.files.dir.clone();
         drop(session);
         assert!(!dir.exists());
+    }
+
+    /// A fake Cursor install: `agent.cmd` plus the `versions\<date>\` layout
+    /// `cursor-agent.ps1` selects. The files are empty; nothing is executed.
+    fn cursor_install(root: &Path, version: &str) -> PathBuf {
+        let cmd = root.join("agent.cmd");
+        std::fs::write(&cmd, b"@echo off\r\n").unwrap();
+        let dir = root.join("versions").join(version);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("node.exe"), b"").unwrap();
+        std::fs::write(dir.join("index.js"), b"").unwrap();
+        cmd
+    }
+
+    #[test]
+    fn a_resolved_shim_keeps_a_newline_and_a_long_prompt_still_goes_in_a_file() {
+        let root = tempfile::tempdir().unwrap();
+        let cmd = cursor_install(root.path(), "2026.11.05-86047df");
+        let (spec, _rx) = spec(root.path());
+        let session =
+            CursorSession::new("chat".into(), vec![cmd.display().to_string()], spec).unwrap();
+        assert_eq!(
+            session.prompt_text(&Prompt::text("one\ntwo")).unwrap(),
+            "one\ntwo"
+        );
+        assert!(
+            std::fs::read_dir(&session.files.dir).is_err(),
+            "a newline must not be written out to a file"
+        );
+        let long = "😀".repeat(12_001);
+        let text = session.prompt_text(&Prompt::text(&long)).unwrap();
+        assert!(text.contains("treat it as the message itself"));
+        let written = std::fs::read_dir(&session.files.dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(written.len(), 1);
+        assert_eq!(std::fs::read_to_string(&written[0]).unwrap(), long);
+    }
+
+    #[test]
+    fn an_unresolved_batch_file_still_puts_a_newline_in_a_file() {
+        let root = tempfile::tempdir().unwrap();
+        let cmd = root.path().join("agent.cmd");
+        std::fs::write(&cmd, b"@echo off\r\n").unwrap();
+        let (spec, _rx) = spec(root.path());
+        let session =
+            CursorSession::new("chat".into(), vec![cmd.display().to_string()], spec).unwrap();
+        let text = session.prompt_text(&Prompt::text("one\r\ntwo")).unwrap();
+        assert!(text.contains("treat it as the message itself"));
+        let written = std::fs::read_dir(&session.files.dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(written.path()).unwrap(),
+            "one\r\ntwo"
+        );
     }
 
     #[tokio::test]
