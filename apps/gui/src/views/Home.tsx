@@ -88,7 +88,7 @@ export function HomeView() {
     setModeState(m);
     save(MODE_KEY, m);
   };
-  // 文件 �? 新建 Chat / 新建 Work while this page is open (menubar.tsx `startNew`).
+  // 文件 → 新建 Chat / 新建 Work while this page is open (menubar.tsx `startNew`).
   useEffect(() => {
     const onMode = (e: Event) => {
       const m = (e as CustomEvent<unknown>).detail;
@@ -180,7 +180,7 @@ export function HomeView() {
     files.clear();
   };
 
-  // The delegation level carries over, 全托�? included (docs/tasks/W1.md §7).
+  // The delegation level carries over, 全托管 included (docs/tasks/W1.md §7).
   const setPreset = (p: Preset) => {
     setPresetState(p);
     save(PRESET_KEY, p);
@@ -193,7 +193,7 @@ export function HomeView() {
 
   const planners = here.filter((a) => a.role === "planner");
   const offered = (plugins.data ?? []).filter((p) => p.models.length > 0);
-  // The workspace whose sessions are offered: the picked one, or �? for Work �? the directory
+  // The workspace whose sessions are offered: the picked one, or — for Work — the directory
   // the first planner works in, since a run starts there without picking a workspace chip.
   const baseLeadAgent = picked?.kind === "agent" ? planners.find((a) => a.name === picked.name) : planners[0];
   const sessionRepo = cwd ?? (mode === "run" && picked?.kind !== "model" ? baseLeadAgent?.cwd : undefined);
@@ -295,8 +295,8 @@ export function HomeView() {
    * An agent with this role, model and login in `dir`, or a new one (the hub names it: a
    * person's name, never the model's).
    *
-   * `reuse` is false for the lead: 新会�? says a new one, so handing back an agent that
-   * already exists �? with everything it has said before �? is the opposite of what was asked.
+   * `reuse` is false for the lead: 新会话 says a new one, so handing back an agent that
+   * already exists — with everything it has said before — is the opposite of what was asked.
    * To carry a conversation on, pick that session by name under 已有会话. Workers are reused:
    * one is a template each task clones, not a conversation anyone reads.
    */

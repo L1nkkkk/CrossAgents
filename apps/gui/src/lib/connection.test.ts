@@ -5,7 +5,7 @@ import { connectionWords, markWords, PAIR_STEPS, pairFailure, stepWords, targetW
 
 const target = { host: "centre.example", user: "me" };
 
-test("a target reads as ssh writes it, with a non-default port", () => {
+test("a target reads as user@host, with a non-default port for display", () => {
   assert.equal(targetWords({ host: "centre" }), "centre");
   assert.equal(targetWords({ host: "centre", user: "me" }), "me@centre");
   assert.equal(targetWords({ host: "centre", user: "me", sshPort: 22 }), "me@centre");
@@ -96,10 +96,26 @@ test("a host key or a password is settled in a terminal first", () => {
   assert.match(pairFailure("Permission denied (publickey).").next, /ssh user@host/);
 });
 
+test("a non-default port is ssh -p, never host:port", () => {
+  const on2222 = { host: "centre.example", user: "me", sshPort: 2222 };
+  // The label may read `:2222`, but a command ssh would accept must use -p.
+  for (const reason of [
+    "Host key verification failed.",
+    "Permission denied (publickey,password).",
+    "ssh: connect to host centre.example port 2222: Connection refused",
+  ]) {
+    const failure = pairFailure(reason, on2222);
+    assert.match(failure.next, /ssh -p 2222 me@centre\.example/);
+    assert.doesNotMatch(failure.next, /ssh me@centre\.example:2222/);
+  }
+});
+
 test("a missing crossagents points at PATH or the advanced path", () => {
   for (const reason of [
     "bash: line 1: crossagents: command not found",
     "'crossagents' is not recognized as an internal or external command",
+    "The term 'crossagents' is not recognized as the name of a cmdlet, function, script file, or operable program.",
+    "fish: Unknown command: crossagents",
     "sh: crossagents: not found",
   ]) {
     const failure = pairFailure(reason, target);

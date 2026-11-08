@@ -1164,10 +1164,13 @@ function WhereMark() {
   // A plain browser tab has no connection bridge, and nothing to switch to.
   if (!window.crossagents?.connection || !state) return null;
   const words = markWords(state);
-  const dot = words.tone === "ok" ? "ok" : words.tone === "warn" ? "warn" : "danger";
+  // 本机 says where this window points, not how the hub is doing: the connection line below
+  // reports that, so a local mark carries no colour of its own (a green dot there contradicted
+  // the red "未连接" underneath when the hub was down).
+  const dot = words.tone === "ok" ? "ok" : words.tone === "warn" ? "warn" : words.tone === "danger" ? "danger" : "off";
   return (
     <a className={`conn-where ${words.tone}`} href="#/settings/connection" title={words.title}>
-      <span className={`dot ${dot}`} />
+      {state.mode === "remote" && <span className={`dot ${dot}`} />}
       <span className="text">{words.text}</span>
     </a>
   );

@@ -26,10 +26,15 @@ export function stepWords(step: PairStep | undefined): string {
   return `第 ${i + 1} 步，共 ${PAIR_STEPS.length} 步：${PAIR_STEPS[i].label}`;
 }
 
-/** `user@host`, with `:port` when the SSH port is not the default one; as ssh writes it. */
+/** `user@host` as ssh takes it, without the port (ssh wants `-p` for that, not `host:port`). */
+function destination(target: RemoteTarget): string {
+  return `${target.user ? `${target.user}@` : ""}${target.host}`;
+}
+
+/** A display label for a target: `user@host`, with `:port` when it is not the default one. */
 export function targetWords(target: RemoteTarget): string {
   const port = target.sshPort && target.sshPort !== 22 ? `:${target.sshPort}` : "";
-  return `${target.user ? `${target.user}@` : ""}${target.host}${port}`;
+  return `${destination(target)}${port}`;
 }
 
 /** The tunnel's word, its reason or ports, and the colour the page gives it. */
@@ -85,7 +90,9 @@ export function markWords(state: ConnectionState | undefined): { text: string; t
 export type PairFailureKind = "host-key" | "auth" | "no-command" | "hub-down" | "ssh-missing" | "network" | "timeout" | "other";
 export type PairFailure = { kind: PairFailureKind; title: string; next: string };
 
-const sshOnce = (target?: RemoteTarget) => (target ? `ssh ${targetWords(target)}` : "ssh user@host");
+/** The command a person runs once in a terminal: ssh's own `-p` for a non-default port. */
+const sshOnce = (target?: RemoteTarget) =>
+  target ? `ssh ${target.sshPort && target.sshPort !== 22 ? `-p ${target.sshPort} ` : ""}${destination(target)}` : "ssh user@host";
 
 /**
  * Sorts ssh's own words into the one thing to try next (docs/MULTI-NODE.md §14): accept the
@@ -102,7 +109,7 @@ export function pairFailure(reason: string, target?: RemoteTarget): PairFailure 
       next: "先在中心启动 hub（crossagents hub start），再回来重试。",
     };
   }
-  if (/command not found|not recognized as an internal or external command|crossagents: (?:command )?not found|找不到 crossagents|no such file or directory: crossagents/.test(text)) {
+  if (/command not found|not recognized as an internal or external command|not recognized as the name of a cmdlet|unknown command: crossagents|crossagents: (?:command )?not found|找不到 crossagents|no such file or directory: crossagents/.test(text)) {
     return {
       kind: "no-command",
       title: "中心上找不到 crossagents",
