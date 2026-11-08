@@ -20,6 +20,7 @@ import { copyRoot, copyPrefix, copyName, staleCopies, runsWhenOpened, safeCopyRo
 import { decideSafeMode, loadingMarker, type SafeMode } from "./safeMode.cjs";
 import { defaultDeviceName, remoteFile, sshProgram, type Crypto } from "./remote.cjs";
 import { RemoteController, Unavailable } from "./remoteController.cjs";
+import { applicationMenu, shortcut, trayIcon } from "./platform.cjs";
 
 // Must run before app.ready. CORS remains enabled for module imports from file://.
 protocol.registerSchemesAsPrivileged([{ scheme: "crossagents-ext", privileges: {
@@ -463,7 +464,6 @@ const isMac = process.platform === "darwin";
 /** What the page's menu (src/menubar.tsx) may ask the window to do. */
 const COMMANDS = ["zoomIn", "zoomOut", "zoomReset", "reload", "devtools", "fullscreen", "quit"] as const;
 type Command = (typeof COMMANDS)[number];
-const ZOOM_KEYS: Record<string, Command> = { "=": "zoomIn", "+": "zoomIn", "-": "zoomOut", "0": "zoomReset" };
 
 function runCommand(win: BrowserWindow, command: Command) {
   const contents = win.webContents;
@@ -721,28 +721,15 @@ async function createWindow() {
       .finally(() => { askingRecovery = false; });
   });
   tray?.keep(win);
-  // No native menu, so the shortcuts it carried are wired here: zoom always (the page's own
-  // menu, src/menubar.tsx, lists them); reload and dev tools only in development.
+  // Zoom is always available; reload and dev tools are only wired here in development.
   win.webContents.on("before-input-event", (event, input) => {
-    if (input.type !== "keyDown" || !input.control || input.alt) return;
-    const command = ZOOM_KEYS[input.key];
+    const command = shortcut(process.platform, input, !!devServerUrl);
     if (command) {
       runCommand(win, command);
       event.preventDefault();
     }
   });
   if (devServerUrl) {
-    win.webContents.on("before-input-event", (event, input) => {
-      if (input.type !== "keyDown") return;
-      const key = input.key.toLowerCase();
-      if (input.key === "F12" || (input.control && input.shift && key === "i")) {
-        win.webContents.toggleDevTools();
-        event.preventDefault();
-      } else if (input.control && !input.shift && key === "r") {
-        win.webContents.reload();
-        event.preventDefault();
-      }
-    });
     // The dev server may still be starting.
     for (;;) {
       try {
@@ -802,7 +789,7 @@ app.whenReady().then(async () => {
     // next launch then upgrades the local hub (package.json `build.publish`).
     updates = startUpdates(logLine);
     tray = createTray(
-      join(process.resourcesPath, "icon.ico"),
+      join(process.resourcesPath, trayIcon(process.platform)),
       () => localHub,
       () => controller.remoteSummary(),
       showWindow,
@@ -813,12 +800,11 @@ app.whenReady().then(async () => {
   }
   session.defaultSession.setPermissionRequestHandler((_contents, permission, callback) => callback(permissionAllowed(permission)));
   session.defaultSession.setPermissionCheckHandler((_contents, permission) => permissionAllowed(permission));
-  // No File / Edit / View / Window bar: everything lives in the page. Copy and paste still work.
-  Menu.setApplicationMenu(null);
+  // macOS needs its native application menu; other platforms use the page menu.
+  const template = applicationMenu(process.platform);
+  Menu.setApplicationMenu(template ? Menu.buildFromTemplate(template) : null);
   void createWindow();
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) void createWindow();
-  });
+  app.on("activate", showWindow);
 });
 
 // The ssh of the tunnel ends with the GUI: closed properly, then killed if quitting runs ahead.
