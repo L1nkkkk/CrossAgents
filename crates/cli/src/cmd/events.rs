@@ -296,6 +296,26 @@ pub fn summary(kind: &EventKind) -> String {
         EventKind::AgentTurnCompleted {
             id, stop_reason, ..
         } => format!("{} {}", short(id), enum_name(stop_reason)),
+        EventKind::AgentToolUsed { id, tool, ok } => {
+            format!("{} {tool} {}", short(id), if *ok { "ok" } else { "failed" })
+        }
+        EventKind::AgentPromptViaFile { id } => format!("{} prompt in a file", short(id)),
+        EventKind::AgentRound {
+            id,
+            message_ids,
+            decided,
+            tokens,
+            ..
+        } => format!(
+            "{} {} message(s), {}, {}",
+            short(id),
+            message_ids.len(),
+            if *decided { "decided" } else { "no decision" },
+            tokens.as_ref().map_or_else(
+                || "usage unknown".to_owned(),
+                |t| format!("{} in / {} out", t.input, t.output)
+            )
+        ),
         EventKind::AgentUsage { id, used, size, .. } => {
             format!("{} context {used}/{size}", short(id))
         }

@@ -276,6 +276,7 @@ impl CursorSession {
         }
         if crate::argv::prompt_via_file(self.command.first().map(String::as_str), &text) {
             text = self.files.message(&text)?;
+            self.emit(SessionEventKind::PromptViaFile);
         }
         Ok(text)
     }

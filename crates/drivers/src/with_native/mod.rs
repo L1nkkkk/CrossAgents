@@ -369,6 +369,7 @@ impl WithSession {
                 .join(format!("message-{}.md", uuid::Uuid::new_v4()));
             std::fs::write(&path, &text)
                 .map_err(|e| CoreError::Agent(format!("cannot write {}: {e}", path.display())))?;
+            self.emit(SessionEventKind::PromptViaFile);
             text = format!(
                 "The message cannot go on the command line, so it is in the attached file {}. \
                  Read all of it and treat it as the message itself.",

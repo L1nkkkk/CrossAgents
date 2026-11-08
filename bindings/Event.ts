@@ -24,6 +24,8 @@ import type { OutputStream } from "./OutputStream";
 import type { PermissionDecision } from "./PermissionDecision";
 import type { QueuedReason } from "./QueuedReason";
 import type { RateLimits } from "./RateLimits";
+import type { RoundNotice } from "./RoundNotice";
+import type { RoundSource } from "./RoundSource";
 import type { Run } from "./Run";
 import type { RunId } from "./RunId";
 import type { RunStatus } from "./RunStatus";
@@ -78,7 +80,29 @@ message_id?: MessageId,
 /**
  * Who worked it out; absent means the driver.
  */
-source?: DiffSource, } } | { "type": "agent.permission", "data": { id: AgentId, kind: string, title: string, decision: PermissionDecision, } } | { "type": "agent.rate_limits", "data": { id: AgentId, limits: RateLimits, } } | { "type": "agent.warning", "data": { id: AgentId, message: string, } } | { "type": "agent.turn_completed", "data": { id: AgentId, message_id: MessageId, stop_reason: StopReason, } } | { "type": "agent.usage", "data": { id: AgentId, used: number, size: number, cost_usd: number | null, 
+source?: DiffSource, } } | { "type": "agent.permission", "data": { id: AgentId, kind: string, title: string, decision: PermissionDecision, } } | { "type": "agent.rate_limits", "data": { id: AgentId, limits: RateLimits, } } | { "type": "agent.warning", "data": { id: AgentId, message: string, } } | { "type": "agent.turn_completed", "data": { id: AgentId, message_id: MessageId, stop_reason: StopReason, } } | { "type": "agent.tool_used", "data": { id: AgentId, tool: string, ok: boolean, } } | { "type": "agent.prompt_via_file", "data": { id: AgentId, } } | { "type": "agent.round", "data": { id: AgentId, 
+/**
+ * The message that started the turn, then any steered in during it.
+ */
+message_ids: Array<MessageId>, sources: Array<RoundSource>, notices: Array<RoundNotice>, 
+/**
+ * The turn's model usage: the growth of the session's cumulative counts. Null when
+ * the agent reported no usage during it. A request count the agent did not report
+ * is null inside.
+ */
+tokens: TokenUsage | null, 
+/**
+ * The hub tools called, by name, each once.
+ */
+tools: Array<string>, 
+/**
+ * A tool that changes state (see `hub::rounds::decides`) succeeded.
+ */
+decided: boolean, 
+/**
+ * The prompt was handed over as a file this turn.
+ */
+prompt_via_file: boolean, } } | { "type": "agent.usage", "data": { id: AgentId, used: number, size: number, cost_usd: number | null, 
 /**
  * Cumulative token counts, when the agent reports them.
  */

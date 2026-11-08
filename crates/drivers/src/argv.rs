@@ -27,6 +27,13 @@ pub fn resolve_cursor_node(program: &Path) -> Option<(PathBuf, PathBuf)> {
         return None;
     }
     let root = program.parent()?;
+    // The script first runs `versions\promote-staged.cmd`, which moves a downloaded `*.new`
+    // version into place. Starting `node.exe` directly would skip that, and the CLI would stay
+    // on the old version. While one is staged the launch goes through the script; the next
+    // launch, with nothing staged, starts node directly again.
+    if has_staged_version(&root.join("versions")) {
+        return None;
+    }
     // The script runs `node.exe` beside itself and never looks in `versions\`
     // when that file is present, even if `index.js` is missing.
     let beside = root.join("node.exe");
@@ -60,6 +67,20 @@ pub fn resolve_cursor_node(program: &Path) -> Option<(PathBuf, PathBuf)> {
     let node = dir.join("node.exe");
     let script = dir.join("index.js");
     (node.is_file() && script.is_file()).then_some((node, script))
+}
+
+/// Whether a downloaded version waits in `versions` for the script to promote it.
+fn has_staged_version(versions: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(versions) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry.file_type().is_ok_and(|kind| kind.is_dir())
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with(".new"))
+    })
 }
 
 /// `Parse-VersionString` plus the directory filter in `cursor-agent.ps1`:
@@ -158,7 +179,7 @@ pub fn launch_command(
 /// with a newline in its arguments, and `cmd.exe` would mangle the rest.
 /// Resolved to `node.exe`, the newline stays in the argument.
 pub fn prompt_via_file(program: Option<&str>, text: &str) -> bool {
-    if text.encode_utf16().count() > PROMPT_ARG_LIMIT {
+    if command_line_units(text) > PROMPT_ARG_LIMIT {
         return true;
     }
     if !text.contains(['\r', '\n']) {
@@ -174,6 +195,22 @@ pub fn prompt_via_file(program: Option<&str>, text: &str) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
+}
+
+/// The prompt's size on a Windows command line, in UTF-16 units. Quoting escapes it: a `"`
+/// becomes `\"`, and every `\` before one is doubled. Both are counted as two units, which
+/// over-counts a backslash that is not followed by a quote: the limit then holds for any
+/// quoting.
+fn command_line_units(text: &str) -> usize {
+    text.encode_utf16()
+        .map(|unit| {
+            if unit == u16::from(b'"') || unit == u16::from(b'\\') {
+                2
+            } else {
+                1
+            }
+        })
+        .sum()
 }
 
 #[cfg(test)]
@@ -306,5 +343,55 @@ mod tests {
         assert!(!prompt_via_file(Some(&broken), "plain"));
         assert!(!prompt_via_file(Some("with-cli.exe"), "one\ntwo"));
         assert!(launch_command(&[], vec![]).is_none());
+    }
+
+    #[test]
+    fn a_staged_version_goes_through_the_script_until_it_is_promoted() {
+        let root = tempfile::tempdir().unwrap();
+        let cmd = root.path().join("agent.cmd");
+        touch(&cmd);
+        version(root.path(), "2026.11.05-86047df", true);
+        assert!(resolve_cursor_node(&cmd).is_some());
+
+        // A downloaded version waits in `versions`: the script promotes it before it
+        // picks one, so node must not be started directly this time.
+        let staged = root.path().join("versions").join("2026.11.06-bbbbbbb.new");
+        std::fs::create_dir_all(&staged).unwrap();
+        assert!(resolve_cursor_node(&cmd).is_none());
+        let (program, args) =
+            launch_command(&[cmd.display().to_string()], vec!["create-chat".into()]).unwrap();
+        assert_eq!(program, cmd);
+        assert_eq!(args, ["create-chat"]);
+
+        // Promoted (the script renamed it): node is started directly again, and the
+        // new version is the one it picks.
+        let promoted = root.path().join("versions").join("2026.11.06-bbbbbbb");
+        std::fs::rename(&staged, &promoted).unwrap();
+        touch(&promoted.join("node.exe"));
+        touch(&promoted.join("index.js"));
+        let (node, script) = resolve_cursor_node(&cmd).unwrap();
+        assert_eq!(node, promoted.join("node.exe"));
+        assert_eq!(script, promoted.join("index.js"));
+    }
+
+    #[test]
+    fn a_staged_file_is_not_a_version_to_promote() {
+        let root = tempfile::tempdir().unwrap();
+        let cmd = root.path().join("agent.cmd");
+        touch(&cmd);
+        version(root.path(), "2026.11.05-86047df", true);
+        touch(&root.path().join("versions").join("2026.11.06-bbbbbbb.new"));
+        assert!(resolve_cursor_node(&cmd).is_some());
+    }
+
+    #[test]
+    fn quotes_count_twice_because_quoting_escapes_them() {
+        // 13,000 quotes are 13,000 UTF-16 units, but 26,000 on the command line.
+        let quotes = "\"".repeat(13_000);
+        assert!(quotes.encode_utf16().count() < PROMPT_ARG_LIMIT);
+        assert!(prompt_via_file(Some("with-cli.exe"), &quotes));
+        assert!(!prompt_via_file(Some("with-cli.exe"), &"\"".repeat(12_000)));
+        assert!(prompt_via_file(None, &"\\".repeat(12_001)));
+        assert!(!prompt_via_file(None, &"a".repeat(PROMPT_ARG_LIMIT)));
     }
 }

@@ -3317,6 +3317,7 @@ async fn handle_session_event(
         SessionEventKind::Warning { message } => EventKind::AgentWarning { id, message },
         SessionEventKind::Error { message } => EventKind::AgentError { id, message },
         SessionEventKind::SteerRead { message_id } => EventKind::AgentSteerRead { id, message_id },
+        SessionEventKind::PromptViaFile => EventKind::AgentPromptViaFile { id },
         // The agent compacted its own context: what the rules said is no longer in it, so
         // they may be sent again (docs/tasks/STREAM-RULES.md).
         SessionEventKind::Compacted => {
