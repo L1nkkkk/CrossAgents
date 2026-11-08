@@ -117,7 +117,7 @@ export function createMockConnection(options: MockConnectionOptions = {}): MockC
     },
     async forget() {
       disconnect();
-      set({ mode: "local", bundledHub: true, defaultDeviceName: state.defaultDeviceName });
+      set({ mode: "local", bundledHub: state.bundledHub, defaultDeviceName: state.defaultDeviceName });
       return copy();
     },
     onState(listener) {
