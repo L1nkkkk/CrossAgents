@@ -6,7 +6,8 @@
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { app, BrowserWindow, dialog, Menu, nativeImage, Tray, type MenuItemConstructorOptions } from "electron";
+import { app, BrowserWindow, dialog, Menu, nativeImage, Notification, Tray, type MenuItemConstructorOptions } from "electron";
+import { trayHint } from "./platform.cjs";
 import type { LocalHub } from "./localHub.cjs";
 import type { Updates } from "./updates.cjs";
 
@@ -32,7 +33,15 @@ export function createTray(
   /** In remote mode, the target and whether the tunnel is up (electron/remoteController.cts). */
   remote: () => { target: string; connected: boolean } | undefined,
   show: () => void, log: (line: string) => void, updates: Updates, restartSafeMode: () => void): AppTray {
-  const tray = new Tray(nativeImage.createFromPath(icon));
+  const image = nativeImage.createFromPath(icon);
+  if (process.platform === "darwin") image.setTemplateImage(true);
+  const tray = new Tray(image);
+  const notify = ({ title, content }: { title: string; content: string }) => {
+    if (process.platform !== "darwin") { tray.displayBalloon({ title, content }); return; }
+    const notification = new Notification({ title, body: content });
+    notification.on("click", show);
+    notification.show();
+  };
   tray.setToolTip("CrossAgents");
   let stopping = false;
   let announced: string | undefined;
@@ -42,7 +51,7 @@ export function createTray(
     // Said once per version: the window may be hidden in the tray for days.
     if (announced === state.version) return;
     announced = state.version;
-    tray.displayBalloon({
+    notify({
       title: `CrossAgents ${state.version} 已下载`,
       content: "退出时会自动安装；也可以在侧栏底部或托盘菜单里「重启更新」。后台的 hub 和 agent 不会中断。",
     });
@@ -127,20 +136,21 @@ export function createTray(
       win.on("close", (event) => {
         if (quitting) return;
         event.preventDefault();
-        win.hide();
-        void hintOnce(tray, remote() !== undefined);
+        if (process.platform === "darwin" && win.isFullScreen()) {
+          win.once("leave-full-screen", () => { if (!win.isDestroyed()) win.hide(); });
+          win.setFullScreen(false);
+        } else win.hide();
+        void hintOnce(notify, remote() !== undefined);
       });
     },
   };
 }
 
 /** The first time the window goes to the tray, says where it went (once per user). */
-async function hintOnce(tray: Tray, remoteMode: boolean) {
+async function hintOnce(notify: (message: { title: string; content: string }) => void, remoteMode: boolean) {
   const marker = join(app.getPath("userData"), "tray-hinted");
   if (existsSync(marker)) return;
-  tray.displayBalloon(remoteMode
-    ? { title: "CrossAgents 仍在运行", content: "点任务栏右下角的图标可以重新打开；右键图标可以退出。" }
-    : { title: "CrossAgents 仍在后台运行", content: "点任务栏右下角的图标可以重新打开；右键图标可以停止后台。" });
+  notify(trayHint(process.platform, remoteMode));
   await mkdir(app.getPath("userData"), { recursive: true }).catch(() => {});
   await writeFile(marker, "").catch(() => {});
 }
