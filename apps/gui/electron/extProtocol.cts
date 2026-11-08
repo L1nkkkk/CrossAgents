@@ -1,4 +1,4 @@
-﻿// Validate before URL normalization, then build a hub asset path.
+// Validate before URL normalization, then build a hub asset path.
 import { isAbsolute, win32 } from "node:path";
 
 export function assetPath(url: string): string {

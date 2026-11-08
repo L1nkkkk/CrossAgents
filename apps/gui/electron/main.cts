@@ -2,7 +2,9 @@
 // adds the bearer token, forwards HTTP requests and relays the SSE event stream. All
 // business logic stays in the hub. The page talks to it through electron/preload.cts.
 
-import { appendFile, mkdir, readFile, readdir, stat, rm, mkdtemp, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, stat, lstat, rm, mkdtemp, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { homedir, hostname, tmpdir } from "node:os";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -14,7 +16,7 @@ import { permissionAllowed } from "./permissions.cjs";
 import { createTray, type AppTray } from "./tray.cjs";
 import { startUpdates, type Updates } from "./updates.cjs";
 import { assetPath } from "./extProtocol.cjs";
-import { copyRoot, copyPrefix, copyName, staleCopies } from "./openCopy.cjs";
+import { copyRoot, copyPrefix, copyName, staleCopies, runsWhenOpened, safeCopyRoot, zoneIdentifier, quarantineArgs } from "./openCopy.cjs";
 import { decideSafeMode, loadingMarker, type SafeMode } from "./safeMode.cjs";
 import { defaultDeviceName, remoteFile, sshProgram, type Crypto } from "./remote.cjs";
 import { RemoteController, Unavailable } from "./remoteController.cjs";
@@ -344,9 +346,30 @@ ipcMain.handle("dialog:pick-folder", async (event) => {
 });
 
 const openCopies = new Set<string>();
+const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+const execFileAsync = promisify(execFile);
+
+async function checkCopyRoot(root: string) {
+  if (process.platform === "win32") return;
+  const info = await lstat(root);
+  if (!safeCopyRoot({ directory: info.isDirectory(), symlink: info.isSymbolicLink(), uid: info.uid }, process.getuid!())) {
+    throw new Error("临时副本目录不安全：必须是当前用户拥有的真实目录");
+  }
+}
+
+async function markDownloaded(file: string) {
+  try {
+    if (process.platform === "win32") await writeFile(`${file}:Zone.Identifier`, zoneIdentifier());
+    else if (process.platform === "darwin") await execFileAsync("xattr", quarantineArgs(file, Date.now() / 1000));
+  } catch (err) {
+    logLine(`copy origin marking: ${message(err)}`);
+  }
+}
+
 async function cleanOldCopies() {
   const root = copyRoot(tmpdir());
   try {
+    await checkCopyRoot(root);
     const entries = await readdir(root, { withFileTypes: true });
     const candidates = await Promise.all(entries.filter((e) => e.isDirectory()).map(async (e) => ({
       name: e.name, modified: (await stat(join(root, e.name))).mtimeMs,
@@ -359,13 +382,6 @@ async function cleanOldCopies() {
 
 /** A scope's API prefix: a session, a run, or a task of a run. */
 const FILE_SCOPE = /^\/v1\/(agents\/[^/?#]+|runs\/[^/?#]+(\/tasks\/[^/?#]+)?)$/;
-
-/**
- * Files the system would run rather than show: an agent can write one and link it, so opening
- * it with its default program is refused (the in-app viewer still shows it).
- */
-const RUNS_WHEN_OPENED =
-  /\.(exe|com|bat|cmd|ps1|psm1|vbs|vbe|js|jse|wsf|wsh|msi|msp|scr|pif|cpl|hta|lnk|url|reg|jar|app|command|sh|desktop|appimage|terminal|fileloc)$/i;
 
 /**
  * Opens a workspace file with the system's default program; resolves to an error message or
@@ -402,21 +418,32 @@ ipcMain.handle("shell:open-path", async (event, scope: unknown, path: unknown) =
     }
     const entry = (JSON.parse(text) as { entries?: { path?: string | null; abs_path?: string | null }[] }).entries?.[0];
     if (!entry?.path || (mode === "local" && !entry.abs_path)) throw new Error("文件不存在或不在工作区内");
-    if (RUNS_WHEN_OPENED.test(entry.path) || (entry.abs_path && RUNS_WHEN_OPENED.test(entry.abs_path))) throw new Error("可执行文件或脚本不会用默认程序打开，请在查看器里阅读");
+    const name = copyName(entry.path);
+    if (mode === "local" ? runsWhenOpened(entry.abs_path!) : (runsWhenOpened(entry.path) || runsWhenOpened(name))) throw new Error("可执行文件或脚本不会用默认程序打开，请在查看器里阅读");
     let target = entry.abs_path!;
     if (mode === "remote") {
-      const raw = await fetch(`${base}${scope}/files/raw?path=${encodeURIComponent(entry.path)}`, {
-        headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-      if (raw.status === 401) remote?.unauthorized();
-      if (raw.status === 413) throw new Error("文件超过 64 MiB，不能下载打开");
-      if (!raw.ok) throw new Error(`下载文件失败：HTTP ${raw.status}`);
+      const signal = AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS);
+      let bytes: ArrayBuffer;
+      try {
+        const raw = await fetch(`${base}${scope}/files/raw?path=${encodeURIComponent(entry.path)}`, {
+          headers: { authorization: `Bearer ${token}` }, signal,
+        });
+        if (raw.status === 401) remote?.unauthorized();
+        if (raw.status === 413) throw new Error("文件超过 64 MiB，不能下载打开");
+        if (!raw.ok) throw new Error(`下载文件失败：HTTP ${raw.status}`);
+        bytes = await raw.arrayBuffer();
+      } catch (err) {
+        if (signal.aborted) throw new Error("下载超时");
+        throw err;
+      }
       const root = copyRoot(tmpdir());
-      await mkdir(root, { recursive: true });
+      await mkdir(root, { recursive: true, mode: 0o700 });
+      await checkCopyRoot(root);
       const dir = await mkdtemp(copyPrefix(root));
       openCopies.add(dir);
-      target = join(dir, copyName(entry.path));
-      await writeFile(target, Buffer.from(await raw.arrayBuffer()));
+      target = join(dir, name);
+      await writeFile(target, Buffer.from(bytes));
+      await markDownloaded(target);
     }
     const failure = await shell.openPath(target);
     if (failure) throw new Error(failure);
