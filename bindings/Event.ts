@@ -9,6 +9,7 @@ import type { CheckResult } from "./CheckResult";
 import type { ContextPart } from "./ContextPart";
 import type { ContinuationState } from "./ContinuationState";
 import type { DeliveryStatus } from "./DeliveryStatus";
+import type { Device } from "./Device";
 import type { DiffSource } from "./DiffSource";
 import type { ExitCause } from "./ExitCause";
 import type { Handoff } from "./Handoff";
@@ -38,7 +39,7 @@ export type Event = {
 /**
  * Assigned by the store; strictly increasing. Used as the SSE event id.
  */
-seq: number, id: string, ts: string, schema: number, } & ({ "type": "hub.started", "data": { version: string, } } | { "type": "hub.stopping" } | { "type": "agent.created", "data": { agent: Agent, } } | { "type": "agent.updated", "data": { agent: Agent, } } | { "type": "agent.removed", "data": { id: AgentId, name: string, } } | { "type": "agent.status_changed", "data": { id: AgentId, from: AgentStatus, to: AgentStatus, } } | { "type": "agent.delivery_changed", "data": { id: AgentId, delivery: DeliveryStatus, } } | { "type": "agent.input", "data": { id: AgentId, message_id: MessageId, text: string, queued: boolean, 
+seq: number, id: string, ts: string, schema: number, } & ({ "type": "device.created", "data": { device: Device, } } | { "type": "device.revoked", "data": { device: Device, } } | { "type": "hub.started", "data": { version: string, } } | { "type": "hub.stopping" } | { "type": "agent.created", "data": { agent: Agent, } } | { "type": "agent.updated", "data": { agent: Agent, } } | { "type": "agent.removed", "data": { id: AgentId, name: string, } } | { "type": "agent.status_changed", "data": { id: AgentId, from: AgentStatus, to: AgentStatus, } } | { "type": "agent.delivery_changed", "data": { id: AgentId, delivery: DeliveryStatus, } } | { "type": "agent.input", "data": { id: AgentId, message_id: MessageId, text: string, queued: boolean, 
 /**
  * Who sent it; absent in events written before the field existed (a person).
  */

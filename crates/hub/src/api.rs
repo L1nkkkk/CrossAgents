@@ -418,7 +418,11 @@ async fn require_token(
         tracing::info!(extension = %name, ?level, method = %request.method(), route = %pattern, "extension request");
     }
     if let crate::access::Grant::Device { name, level, .. } = &grant {
-        tracing::info!(device = %name, ?level, method = %request.method(), route = %pattern, "device request");
+        if crate::access::required(request.method(), &pattern) == crate::access::Level::Admin {
+            tracing::info!(device = %name, ?level, method = %request.method(), route = %pattern, "device request");
+        } else {
+            tracing::debug!(device = %name, ?level, method = %request.method(), route = %pattern, "device request");
+        }
     }
     let device_cancel = if let crate::access::Grant::Device { id, .. } = &grant {
         // A revoke between authentication and this lookup must refuse this request too.
@@ -3750,7 +3754,8 @@ async fn create_device(
     State(state): State<Arc<AppState>>,
     Json(req): Json<crossagents_api_types::CreateDeviceRequest>,
 ) -> ApiResult<Json<crossagents_api_types::CreateDeviceResponse>> {
-    if !(1..=64).contains(&req.name.chars().count()) {
+    let name = req.name.trim();
+    if !(1..=64).contains(&name.chars().count()) || name.chars().any(char::is_control) {
         return Err(AppError::new(
             StatusCode::BAD_REQUEST,
             ErrorCode::BadRequest,
@@ -3759,7 +3764,7 @@ async fn create_device(
     }
     let device = crossagents_core::Device {
         id: uuid::Uuid::new_v4().to_string(),
-        name: req.name,
+        name: name.to_owned(),
         kind: req.kind.unwrap_or_default(),
         level: req.level.unwrap_or_default(),
         created_at: Utc::now(),
@@ -3775,6 +3780,16 @@ async fn create_device(
         .store()
         .insert_device(&device, &crate::devices::hash(&token))
         .await?;
+    tracing::info!(device = %device.name, level = ?device.level, kind = ?device.kind, "device created");
+    if let Err(error) = state
+        .bus
+        .publish(EventKind::DeviceCreated {
+            device: device.clone(),
+        })
+        .await
+    {
+        tracing::error!(device = %device.name, %error, "failed to publish device created event");
+    }
     Ok(Json(crossagents_api_types::CreateDeviceResponse {
         device,
         token,
@@ -3784,7 +3799,22 @@ async fn revoke_device(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<crossagents_core::Device>> {
-    Ok(Json(
-        state.devices.revoke(state.store().as_ref(), &id).await?,
-    ))
+    let (device, newly_revoked) = state.devices.revoke(state.store().as_ref(), &id).await?;
+    let terminals = state.terminals.clone();
+    tokio::task::spawn_blocking(move || terminals.close_device(&id))
+        .await
+        .map_err(|e| CoreError::Agent(format!("terminal task failed: {e}")))?;
+    tracing::info!(device = %device.name, level = ?device.level, kind = ?device.kind, "device revoked");
+    if newly_revoked {
+        if let Err(error) = state
+            .bus
+            .publish(EventKind::DeviceRevoked {
+                device: device.clone(),
+            })
+            .await
+        {
+            tracing::error!(device = %device.name, %error, "failed to publish device revoked event");
+        }
+    }
+    Ok(Json(device))
 }

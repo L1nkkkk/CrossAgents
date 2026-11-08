@@ -124,6 +124,10 @@ pub struct Event {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "type", content = "data")]
 pub enum EventKind {
+    #[serde(rename = "device.created")]
+    DeviceCreated { device: crate::Device },
+    #[serde(rename = "device.revoked")]
+    DeviceRevoked { device: crate::Device },
     #[serde(rename = "hub.started")]
     HubStarted { version: String },
     #[serde(rename = "hub.stopping")]
@@ -668,6 +672,8 @@ impl EventKind {
     /// The wire name, identical to the serialized `type` field.
     pub fn type_name(&self) -> &'static str {
         match self {
+            Self::DeviceCreated { .. } => "device.created",
+            Self::DeviceRevoked { .. } => "device.revoked",
             Self::HubStarted { .. } => "hub.started",
             Self::HubStopping => "hub.stopping",
             Self::AgentCreated { .. } => "agent.created",
@@ -767,7 +773,9 @@ impl EventKind {
     /// The agent this event is about, if any.
     pub fn agent_id(&self) -> Option<AgentId> {
         match self {
-            Self::HubStarted { .. }
+            Self::DeviceCreated { .. }
+            | Self::DeviceRevoked { .. }
+            | Self::HubStarted { .. }
             | Self::HubStopping
             | Self::WorkCreated { .. }
             | Self::WorkUpdated { .. }

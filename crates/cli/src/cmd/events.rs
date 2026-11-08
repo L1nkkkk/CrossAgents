@@ -87,6 +87,9 @@ fn format_event(event: &Event) -> String {
 /// One line describing the event, without its type.
 pub fn summary(kind: &EventKind) -> String {
     match kind {
+        EventKind::DeviceCreated { device } | EventKind::DeviceRevoked { device } => {
+            device.name.clone()
+        }
         EventKind::HubStarted { version } => format!("version {version}"),
         EventKind::HubStopping => String::new(),
         EventKind::AgentCreated { agent } => format!(
@@ -206,7 +209,11 @@ pub fn summary(kind: &EventKind) -> String {
         EventKind::IssueRecorded { key, author, .. } => format!("{key} by {}", short(author)),
         EventKind::IssueTriaged { records, .. } => format!("{} issue(s) sorted", records.len()),
         EventKind::LessonCreated { lesson } | EventKind::LessonUpdated { lesson } => {
-            format!("{} {}", lesson.id.get(..8).unwrap_or(&lesson.id), one_line(&lesson.title))
+            format!(
+                "{} {}",
+                lesson.id.get(..8).unwrap_or(&lesson.id),
+                one_line(&lesson.title)
+            )
         }
         EventKind::ReminderFired { owner, note, .. } => {
             format!("{} {}", short(owner), one_line(note))

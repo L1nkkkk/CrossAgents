@@ -52,10 +52,21 @@ async fn list_terminals(State(state): State<Arc<AppState>>) -> Json<ListTerminal
 
 async fn create_terminal(
     State(state): State<Arc<AppState>>,
+    axum::Extension(grant): axum::Extension<crate::access::Grant>,
     Json(req): Json<CreateTerminalRequest>,
 ) -> ApiResult<(StatusCode, Json<TerminalInfo>)> {
+    let owner = if let crate::access::Grant::Device { id, .. } = grant {
+        let cancel = state
+            .devices
+            .cancellation(&id)
+            .await
+            .ok_or_else(|| CoreError::Conflict("device revoked".into()))?;
+        Some((id, cancel))
+    } else {
+        None
+    };
     let terminals = state.terminals.clone();
-    let info = blocking(move || terminals.create(&req)).await?;
+    let info = blocking(move || terminals.create(&req, owner)).await?;
     Ok((StatusCode::CREATED, Json(info)))
 }
 
