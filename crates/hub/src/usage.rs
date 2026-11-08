@@ -44,6 +44,8 @@ struct AgentUsage {
     cache_write: u64,
     requests: Option<u64>,
     requests_known: bool,
+    requests_lost: bool,
+    session_requests: Option<u64>,
     estimate: f64,
     estimate_known: bool,
     saw_tokens: bool,
@@ -52,12 +54,33 @@ struct AgentUsage {
 }
 
 impl AgentUsage {
+    fn record_requests(&mut self, requests: Option<u64>) {
+        match requests {
+            Some(count) => {
+                let delta = count.saturating_sub(self.session_requests.unwrap_or(0));
+                self.requests = Some(self.requests.unwrap_or(0) + delta);
+                self.session_requests = Some(count);
+                self.requests_known = !self.requests_lost;
+            }
+            None if self.session_requests.is_some() => {
+                self.requests_lost = true;
+                self.requests_known = false;
+            }
+            None => {}
+        }
+    }
+
     fn close_session(&mut self) {
         self.closed_cost += self.session_cost.take().unwrap_or(0.0);
         if self.sessions > 0 && !self.session_has_tokens {
             self.missing_session = true;
         }
+        if self.sessions > 0 && self.session_has_tokens && self.session_requests.is_none() {
+            self.requests_lost = true;
+            self.requests_known = false;
+        }
         self.session_has_tokens = false;
+        self.session_requests = None;
         self.tokens = TokenUsage::default();
     }
 }
@@ -131,18 +154,10 @@ pub async fn compute(
                         let first = !usage.saw_tokens;
                         usage.saw_tokens = true;
                         usage.session_has_tokens = true;
-                        let delta_requests = tokens
-                            .requests
-                            .map(|n| n.saturating_sub(previous.requests.unwrap_or(0)));
                         if first {
-                            usage.requests_known = true;
                             usage.estimate_known = true;
                         }
-                        if let Some(n) = delta_requests {
-                            usage.requests = Some(usage.requests.unwrap_or(0) + n);
-                        } else {
-                            usage.requests_known = false;
-                        }
+                        usage.record_requests(tokens.requests);
                         if let Some(price) = usage.model.as_ref().and_then(|m| prices.get(m)) {
                             usage.estimate += ((input.saturating_sub(cached).saturating_sub(write)
                                 as f64
@@ -274,6 +289,88 @@ mod tests {
             created_at: Utc::now(),
             profile: Default::default(),
         }
+    }
+
+    async fn requests_for_snapshots(snapshots: &[Option<u64>]) -> Option<u64> {
+        let store = SqliteStore::open_in_memory().await.unwrap();
+        let a = agent("streaming", Role::Worker, "model");
+        store
+            .append_event(EventKind::AgentCreated { agent: a.clone() })
+            .await
+            .unwrap();
+        store
+            .append_event(EventKind::AgentStatusChanged {
+                id: a.id,
+                from: AgentStatus::Stopped,
+                to: AgentStatus::Starting,
+            })
+            .await
+            .unwrap();
+        for (i, requests) in snapshots.iter().enumerate() {
+            store
+                .append_event(EventKind::AgentUsage {
+                    id: a.id,
+                    used: 0,
+                    size: 0,
+                    cost_usd: None,
+                    tokens: Some(TokenUsage {
+                        output: i as u64 + 1,
+                        requests: *requests,
+                        ..Default::default()
+                    }),
+                })
+                .await
+                .unwrap();
+        }
+        let home = tempfile::tempdir().unwrap();
+        compute(&store, UsageGroup::Agent, home.path())
+            .await
+            .unwrap()
+            .rows[0]
+            .requests
+    }
+
+    #[tokio::test]
+    async fn streaming_before_first_request_count_is_not_unknown() {
+        assert_eq!(requests_for_snapshots(&[None, Some(1)]).await, Some(1));
+    }
+
+    #[tokio::test]
+    async fn no_request_count_stays_unknown() {
+        assert_eq!(requests_for_snapshots(&[None, None]).await, None);
+    }
+
+    #[tokio::test]
+    async fn lost_request_count_stays_unknown_without_double_counting() {
+        assert_eq!(
+            requests_for_snapshots(&[Some(1), None, Some(2)]).await,
+            None
+        );
+        let mut usage = AgentUsage::default();
+        for count in [Some(1), None, Some(2)] {
+            usage.record_requests(count);
+        }
+        assert_eq!(usage.requests, Some(2));
+        assert!(!usage.requests_known);
+    }
+
+    #[test]
+    fn request_baseline_resets_at_session_boundary() {
+        let mut usage = AgentUsage {
+            sessions: 1,
+            session_has_tokens: true,
+            ..Default::default()
+        };
+        usage.record_requests(Some(3));
+        usage.close_session();
+        assert!(usage.requests_known);
+        usage.sessions += 1;
+        usage.session_has_tokens = true;
+        usage.record_requests(None);
+        usage.record_requests(Some(1));
+        usage.close_session();
+        assert_eq!(usage.requests, Some(4));
+        assert!(usage.requests_known);
     }
 
     #[tokio::test]
