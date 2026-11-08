@@ -106,6 +106,7 @@ A2 留下的（2026-11-08，run 8298b08a）：
   - 设备缓存的并发测试（[devices.rs](../crates/hub/tests/devices.rs) `concurrent_first_authentication_and_revoke_never_repopulate_the_cache`）没有专门覆盖这种情况：`Devices::authenticate` 读完库，发现 `generation` 变了，再重读一次（[devices.rs](../crates/hub/src/devices.rs) `authenticate` 里 `cache.generation != generation` 就 `continue`）。要测到，得把 `Store` 包一层来卡住时机。吊销之后不把已经读到的旧设备填回缓存，这条主路径有测试。
   - 中心默认 shell 是 PowerShell 5.1 时，用 `cat` 读 UTF-8 的 `hub.json`，`exe` 路径里的非 ASCII（例如中文用户名）可能变成乱码，配对失败关闭。可以在「连接」页的高级里手填命令。读取方式这次没改，要在真机上确认这个失败和绕过办法。
   - 「在旁边打开」的提示没改。`sidebar.besideHint` 固定写着「Ctrl+单击或中键：在旁边打开」（[i18n.ts](../apps/gui/src/lib/i18n.ts)），[Sidebar.tsx](../apps/gui/src/Sidebar.tsx) 和 [SessionPeek.tsx](../apps/gui/src/SessionPeek.tsx) 都用它。代码里 ⌘ 单击也能触发（`Sidebar.tsx` 的 `e.ctrlKey || e.metaKey`），但 Mac 上 Ctrl+单击是右键，提示应该写 ⌘。菜单和快捷键对话框已按平台显示 ⌘。
+  - 开发预览场景 [scenarios.ts](../apps/gui/src/dev/scenarios.ts) 的 `devices-empty`，hint 还写着「从别的电脑经 SSH 连过来要等 A2」。页面上的 [Devices.tsx](../apps/gui/src/views/Devices.tsx) 已改，这句只影响开发预览。
 
 A3 开端口直连（以后）：
 

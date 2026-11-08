@@ -141,7 +141,7 @@ A3 放开 `listen` 后，健康检查不能再白送版本指纹和运行时长�
 扩展的接口（`/v1/extensions*`）也在它到不了的范围内：agent 调扩展工具走 `/v1/me/tools/{name}`
 或内置的 `extension_call`，由 hub 代为执行，拿不到启用和自动信任这两个开关。
 
-> `/v1/extensions*` 里启用、停用、自动信任、列表、差异、日志、调用这九条是 [EXTENSIONS.md](EXTENSIONS.md) §3 定下的约定，级别写在 `access.rs`，路由在
+> `/v1/extensions*` 里启用、停用、自动信任、列表、差异、日志，以及发起、查询、取消调用这九条是 [EXTENSIONS.md](EXTENSIONS.md) §3 定下的约定，级别写在 `access.rs`，路由在
 > `api.rs`，都有测试。`GET …/assets/…` 是 A2 另加的 read，不在这九条里；会话 token 同样到不了。
 
 ## 3. 分级口径
