@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { shortcutPlatform } from "../lib/shortcuts";
 import type { Agent } from "@bindings/Agent";
 import type { Capabilities } from "@bindings/Capabilities";
 import type { DeliveryStatus } from "@bindings/DeliveryStatus";
@@ -380,4 +381,3 @@ function PlanDock({ run, onDone, onReply }: { run: Run; onDone: () => void; onRe
     </div>
   );
 }
-import { shortcutPlatform } from "../lib/shortcuts";

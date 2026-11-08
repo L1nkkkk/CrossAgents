@@ -137,9 +137,11 @@ export function MenuBar() {
     ? [{ title: "菜单", entries: menus.flatMap((m, i): Entry[] => [...(i ? ["-" as const] : []), { heading: m.title }, ...m.entries]) }]
     : menus;
 
+  if (isMac) return dialog ? <Dialog kind={dialog} onClose={() => setDialog(undefined)} /> : null;
+
   return (
     <div className="menubar" ref={ref} role="menubar">
-      {!isMac && shown.map((menu, i) => (
+      {shown.map((menu, i) => (
         <div key={menu.title} className="menubar-item">
           <button
             className={`menubar-title ${compact ? "folded" : ""} ${open === i ? "open" : ""}`}
