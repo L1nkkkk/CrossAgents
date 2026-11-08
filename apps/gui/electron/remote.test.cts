@@ -10,11 +10,11 @@ import { test } from "node:test";
 import {
   backoff, checkCommand, checkDeviceName, checkHost, checkPort, checkTarget, checkUser, defaultDeviceName, execArgs,
   InputError, NOT_RUNNING, openToken, pairCommand, parseDeviceAdd, parseHubFile, publicState, readRecord, remoteCommand,
-  REPAIR, REVOKED, sealToken, sshProgram, tunnelArgs, tunnelReduce, writeRecord, type ConnectionState, type Crypto,
+  REPAIR, REVOKED, sealToken, shellCommand, sshProgram, tunnelArgs, tunnelReduce, writeRecord, type ConnectionState, type Crypto,
   type PairStep, type RemoteRecord, type TunnelState,
 } from "./remote.cjs";
 import { RemoteController, Unavailable } from "./remoteController.cjs";
-import { locate, pairDevice, type Ssh } from "./remoteTunnel.cjs";
+import { locate, pairDevice, runSsh, type Ssh } from "./remoteTunnel.cjs";
 
 // ---------------------------------------------------------------------------------------
 // Checks
@@ -86,6 +86,24 @@ test("the command: the person's > hub.json's exe > crossagents, paths double-quo
   assert.equal(remoteCommand({ host: "h" }, { port: 1 }), "crossagents");
   assert.equal(pairCommand('"/opt/ca"', "laptop-gui"), '"/opt/ca" device add laptop-gui --json');
   assert.throws(() => pairCommand("crossagents", "x; rm -rf ~"), InputError);
+});
+
+test("shell command decision probes only eligible paths and adds PowerShell's call operator", () => {
+  const windows = '"C:\\Program Files\\crossagents.exe"';
+  assert.deepEqual(shellCommand("cat", windows, undefined), { command: windows, probe: true });
+  assert.equal(shellCommand("cat", windows, " 5\r\n").command, `& ${windows}`);
+  for (const result of [null, "", "5.1", "not PowerShell"]) assert.equal(shellCommand("cat", windows, result).command, windows);
+  assert.equal(shellCommand("cat", '"C:/crossagents.exe"', "5").command, '& "C:/crossagents.exe"');
+  assert.equal(shellCommand("cat", '"\\\\server\\share\\ca.exe"', "5").command, '& "\\\\server\\share\\ca.exe"');
+  for (const [method, command] of [["type", windows], ["cat", '"/opt/ca"'], ["cat", "crossagents"], ["cat", '"C:relative"']] as const) {
+    assert.deepEqual(shellCommand(method, command, undefined), { command, probe: false });
+  }
+});
+
+test("installer excludes test files and the fake ssh", () => {
+  const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8")) as { build: { files: string[] } };
+  assert.ok(pkg.build.files.includes("!dist-electron/*.test.cjs"));
+  assert.ok(pkg.build.files.includes("!dist-electron/fakeSsh.cjs"));
 });
 
 test("hub.json and device add output are read strictly", () => {
@@ -192,7 +210,7 @@ async function fakeHub(tokens: Set<string>, port = 0): Promise<FakeHub> {
 }
 
 function setEnv(values: Record<string, string | undefined>) {
-  for (const key of ["FAKE_SSH_FAIL", "FAKE_SSH_HUB_PORT", "FAKE_SSH_CMD_ONLY", "FAKE_SSH_TOKEN", "FAKE_SSH_PAIR_FAIL", "FAKE_SSH_LOG", "FAKE_SSH_EXE", "FAKE_SSH_PS_VERSION"]) {
+  for (const key of ["FAKE_SSH_FAIL", "FAKE_SSH_HUB_PORT", "FAKE_SSH_CMD_ONLY", "FAKE_SSH_TOKEN", "FAKE_SSH_PAIR_FAIL", "FAKE_SSH_LOG", "FAKE_SSH_EXE", "FAKE_SSH_PS_VERSION", "FAKE_SSH_SHELL"]) {
     delete process.env[key];
   }
   for (const [key, value] of Object.entries(values)) if (value !== undefined) process.env[key] = value;
@@ -231,6 +249,22 @@ test("locating: ssh's own failure is shown as is; no hub.json means the hub does
   setEnv({ FAKE_SSH_HUB_PORT: "7420", FAKE_SSH_CMD_ONLY: "1" });
   assert.deepEqual(await locate(SSH, { host: "center" }), { port: 7420, exe: "C:\\Users\\u\\.crossagents\\bin\\0.2.10\\crossagents.exe", locateMethod: "type" });
   setEnv({});
+});
+
+test("strict PowerShell and cmd simulations both pair", async () => {
+  try {
+    for (const shell of ["powershell", "cmd"]) {
+      setEnv({ FAKE_SSH_HUB_PORT: "7420", FAKE_SSH_SHELL: shell });
+      const hub = await locate(SSH, { host: "center" });
+      assert.equal(hub.locateMethod, shell === "cmd" ? "type" : "cat");
+      if (shell === "powershell") {
+        await assert.rejects(runSsh(SSH, execArgs({ host: "center" }, '"C:\\crossagents.exe" device add pc-gui --json')), /syntax error/);
+      }
+      assert.equal((await pairDevice(SSH, { host: "center" }, hub, "pc-gui")).deviceName, "pc-gui");
+    }
+  } finally {
+    setEnv({});
+  }
 });
 
 test("pairing probes PowerShell only for Windows paths found with cat", async () => {

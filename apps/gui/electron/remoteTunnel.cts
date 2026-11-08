@@ -6,7 +6,7 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import {
   backoff, execArgs, LOCATE_COMMANDS, NOT_RUNNING, pairCommand, parseDeviceAdd, parseHubFile, remoteCommand,
-  tunnelArgs, tunnelReduce, type Paired, type RemoteHub, type RemoteTarget, type TunnelEvent, type TunnelState,
+  shellCommand, tunnelArgs, tunnelReduce, type Paired, type RemoteHub, type RemoteTarget, type TunnelEvent, type TunnelState,
 } from "./remote.cjs";
 
 /** The ssh to run: `program` with `prefix` before ssh's own arguments (a script in tests). */
@@ -54,16 +54,17 @@ export async function locate(ssh: Ssh, target: RemoteTarget): Promise<RemoteHub 
 
 /** Runs `device add <name> --json` on the hub's machine. */
 export async function pairDevice(ssh: Ssh, target: RemoteTarget, hub: RemoteHub & { locateMethod: "cat" | "type" }, deviceName: string): Promise<Paired> {
-  let command = remoteCommand(target, hub);
-  if (hub.locateMethod === "cat" && /^"(?:[A-Za-z]:|\\\\)/.test(command)) {
+  const command = remoteCommand(target, hub);
+  let probe: string | null | undefined;
+  if (shellCommand(hub.locateMethod, command, undefined).probe) {
     try {
-      const version = await runSsh(ssh, execArgs(target, "$PSVersionTable.PSVersion.Major"));
-      if (/^\d+$/.test(version.trim())) command = `& ${command}`;
+      probe = await runSsh(ssh, execArgs(target, "$PSVersionTable.PSVersion.Major"));
     } catch {
       // A non-PowerShell shell may reject the probe; use the normal command there.
+      probe = null;
     }
   }
-  return parseDeviceAdd(await runSsh(ssh, execArgs(target, pairCommand(command, deviceName))));
+  return parseDeviceAdd(await runSsh(ssh, execArgs(target, pairCommand(shellCommand(hub.locateMethod, command, probe).command, deviceName))));
 }
 
 /** A port nobody listens on now. */

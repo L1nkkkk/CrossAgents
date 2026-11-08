@@ -4,6 +4,7 @@
 //   FAKE_SSH_FAIL      ssh itself fails (exit 255) with this on stderr
 //   FAKE_SSH_HUB_PORT  the port in the hub's hub.json; unset: no hub.json there
 //   FAKE_SSH_CMD_ONLY  only cmd.exe's `type` finds hub.json (a Windows hub)
+//   FAKE_SSH_SHELL     strict powershell or cmd simulation
 //   FAKE_SSH_TOKEN     the token `device add` hands out
 //   FAKE_SSH_PAIR_FAIL `device add` fails with this on stderr
 //   FAKE_SSH_LOG       a file each call's arguments are appended to (one JSON line)
@@ -45,14 +46,16 @@ if (args.includes("-N")) {
   server.listen(Number(m[1]), "127.0.0.1");
 } else if (command === "cat ~/.crossagents/hub.json" || command.startsWith("type ")) {
   const isType = command.startsWith("type ");
-  if (env.FAKE_SSH_CMD_ONLY && !isType) fail("'cat' is not recognized as an internal or external command", 1);
+  if ((env.FAKE_SSH_CMD_ONLY || env.FAKE_SSH_SHELL === "cmd") && !isType) fail("'cat' is not recognized as an internal or external command", 1);
   if (!env.FAKE_SSH_HUB_PORT) fail(isType ? "The system cannot find the file specified." : "cat: /home/u/.crossagents/hub.json: No such file or directory", 1);
-  const exe = env.FAKE_SSH_EXE ?? (env.FAKE_SSH_CMD_ONLY ? "C:\\Users\\u\\.crossagents\\bin\\0.2.10\\crossagents.exe" : "/home/u/.crossagents/bin/0.2.10/crossagents");
+  const exe = env.FAKE_SSH_EXE ?? (env.FAKE_SSH_CMD_ONLY || env.FAKE_SSH_SHELL ? "C:\\Users\\u\\.crossagents\\bin\\0.2.10\\crossagents.exe" : "/home/u/.crossagents/bin/0.2.10/crossagents");
   process.stdout.write(`${isType ? "\uFEFF" : ""}${JSON.stringify({ pid: 1, port: Number(env.FAKE_SSH_HUB_PORT), version: "0.2.10", started_at: "2026-11-08T00:00:00Z", exe })}\n`);
 } else if (command === "$PSVersionTable.PSVersion.Major") {
-  if (!env.FAKE_SSH_PS_VERSION) fail("not PowerShell", 1);
-  process.stdout.write(`${env.FAKE_SSH_PS_VERSION}\n`);
+  if (!env.FAKE_SSH_PS_VERSION && env.FAKE_SSH_SHELL !== "powershell") fail("not PowerShell", 1);
+  process.stdout.write(`${env.FAKE_SSH_PS_VERSION ?? "5"}\n`);
 } else {
+  if (env.FAKE_SSH_SHELL === "powershell" && !command.startsWith('& "')) fail("PowerShell syntax error", 1);
+  if (env.FAKE_SSH_SHELL === "cmd" && command.startsWith("& ")) fail("cmd syntax error", 1);
   const m = /^(?:& )?(?:"[^"]+"|crossagents) device add ([A-Za-z0-9._-]+) --json$/.exec(command);
   if (!m) fail(`sh: unexpected command: ${command}`, 127);
   if (env.FAKE_SSH_PAIR_FAIL) fail(env.FAKE_SSH_PAIR_FAIL, 1);

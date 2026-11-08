@@ -176,6 +176,14 @@ export function remoteCommand(target: RemoteTarget, hub: RemoteHub | undefined):
   return "crossagents";
 }
 
+/** Decide whether to probe, then apply PowerShell's call operator to a Windows path. */
+export function shellCommand(method: "cat" | "type", command: string, probe: string | null | undefined): { command: string; probe: boolean } {
+  const eligible = method === "cat" && /^"(?:[A-Za-z]:[\\/]|\\\\)/.test(command);
+  if (!eligible) return { command, probe: false };
+  if (probe === undefined) return { command, probe: true };
+  return { command: probe !== null && /^\d+$/.test(probe.trim()) ? `& ${command}` : command, probe: false };
+}
+
 export function pairCommand(command: string, deviceName: string): string {
   return `${command} device add ${checkDeviceName(deviceName)} --json`;
 }
