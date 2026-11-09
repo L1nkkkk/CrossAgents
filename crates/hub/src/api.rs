@@ -3109,7 +3109,25 @@ async fn call_tool(
     // Detached: a tool may end the caller's own session (e.g. a reviewer's verdict removes
     // the reviewer), which drops this request. The state change must still finish.
     let orchestrator = state.orchestrator.clone();
-    let call = tokio::spawn(async move { orchestrator.call_tool(&agent, &name, input).await });
+    let bus = state.bus.clone();
+    let (id, tool) = (agent.id, name.clone());
+    let call = tokio::spawn(async move {
+        let result = orchestrator.call_tool(&agent, &name, input).await;
+        // What the agent did is in its round (`agent.round`, rounds.rs). Recorded in the same
+        // detached task, so a request that was dropped still counts. An external agent's calls
+        // land in its next round, since the hub starts and ends its turns at the reads (rounds.rs).
+        if let Err(err) = bus
+            .publish(EventKind::AgentToolUsed {
+                id,
+                tool,
+                ok: result.is_ok(),
+            })
+            .await
+        {
+            tracing::warn!(error = %err, "cannot record a tool call");
+        }
+        result
+    });
     let result = call
         .await
         .map_err(|e| AppError::from(CoreError::Agent(format!("tool call panicked: {e}"))))?;

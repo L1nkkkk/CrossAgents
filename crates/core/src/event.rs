@@ -227,6 +227,10 @@ pub enum EventKind {
         id: AgentId,
         message_id: MessageId,
         text: String,
+        /// Who sent it; absent in events written before the field existed (a person).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        from: Option<MessageSource>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         #[cfg_attr(feature = "ts", ts(as = "Option<Vec<crate::Attachment>>", optional))]
         attachments: Vec<crate::Attachment>,
@@ -306,6 +310,42 @@ pub enum EventKind {
         id: AgentId,
         message_id: MessageId,
         stop_reason: StopReason,
+    },
+    /// The notices a message carries from now on: written when the hub marks them carried, before
+    /// the message is delivered (round accounting reads them; `AgentInput.notices` is unchanged).
+    #[serde(rename = "notice.carried")]
+    NoticeCarried {
+        id: AgentId,
+        message_id: MessageId,
+        notices: Vec<CarriedNotice>,
+    },
+    /// A hub tool the agent called, once it returned (`ok`: it succeeded). The hub's round
+    /// accounting reads these; they are not shown as work.
+    #[serde(rename = "agent.tool_used")]
+    AgentToolUsed { id: AgentId, tool: String, ok: bool },
+    /// A prompt went to the agent as a file it reads, because it could not go on the command
+    /// line (`argv::prompt_via_file`).
+    #[serde(rename = "agent.prompt_via_file")]
+    AgentPromptViaFile { id: AgentId },
+    /// One agent turn, written when it ends: what started it and what joined it, what the
+    /// turn used and whether it decided something.
+    #[serde(rename = "agent.round")]
+    AgentRound {
+        id: AgentId,
+        /// The message that started the turn, then any steered in during it.
+        message_ids: Vec<MessageId>,
+        sources: Vec<RoundSource>,
+        notices: Vec<RoundNotice>,
+        /// The turn's model usage: the growth of the session's cumulative counts. Null when
+        /// the agent reported no usage during it. A request count the agent did not report
+        /// is null inside.
+        tokens: Option<TokenUsage>,
+        /// The hub tools called, by name, each once.
+        tools: Vec<String>,
+        /// A tool that changes state (see `hub::rounds::decides`) succeeded.
+        decided: bool,
+        /// The prompt was handed over as a file this turn.
+        prompt_via_file: bool,
     },
     #[serde(rename = "agent.usage")]
     AgentUsage {
@@ -640,6 +680,47 @@ impl Envelope {
     }
 }
 
+/// Who sent a message that started or joined a round (see [`EventKind::AgentRound`]).
+/// Unlike [`MessageSource`], a notice that a reminder woke is its own kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RoundSource {
+    /// A person.
+    Human,
+    /// The hub's digest of things the agent asked to hear about.
+    Notice,
+    /// A reminder or watch the agent set fired.
+    Reminder,
+    /// Another agent (`agent_send`).
+    Teammate { agent_id: AgentId },
+    /// The orchestrator, about a run and possibly one of its tasks.
+    Orchestrator {
+        run_id: RunId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        task_id: Option<TaskId>,
+    },
+}
+
+/// A notice a round took on: its line and class, as the hub had them when the message took it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct RoundNotice {
+    pub line: String,
+    pub class: crate::NoticeClass,
+}
+
+/// A notice a message carries (`notice.carried`): its line, class and topic. The topic says
+/// where it came from (a reminder or a watch, or something else).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct CarriedNotice {
+    pub line: String,
+    pub class: crate::NoticeClass,
+    pub topic: String,
+}
+
 /// Who sent a message to an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
@@ -723,6 +804,10 @@ impl EventKind {
             Self::AgentRateLimits { .. } => "agent.rate_limits",
             Self::AgentWarning { .. } => "agent.warning",
             Self::AgentTurnCompleted { .. } => "agent.turn_completed",
+            Self::NoticeCarried { .. } => "notice.carried",
+            Self::AgentToolUsed { .. } => "agent.tool_used",
+            Self::AgentPromptViaFile { .. } => "agent.prompt_via_file",
+            Self::AgentRound { .. } => "agent.round",
             Self::AgentUsage { .. } => "agent.usage",
             Self::AgentContext { .. } => "agent.context",
             Self::AgentError { .. } => "agent.error",
@@ -849,6 +934,10 @@ impl EventKind {
             | Self::AgentRateLimits { id, .. }
             | Self::AgentWarning { id, .. }
             | Self::AgentTurnCompleted { id, .. }
+            | Self::NoticeCarried { id, .. }
+            | Self::AgentToolUsed { id, .. }
+            | Self::AgentPromptViaFile { id, .. }
+            | Self::AgentRound { id, .. }
             | Self::AgentUsage { id, .. }
             | Self::AgentContext { id, .. }
             | Self::AgentExited { id, .. }
@@ -905,6 +994,25 @@ mod tests {
                 status: "ok".into(),
                 duration_ms: 12,
                 error: None,
+            },
+            EventKind::AgentToolUsed {
+                id: AgentId::new(),
+                tool: "task_complete".into(),
+                ok: true,
+            },
+            EventKind::AgentPromptViaFile { id: AgentId::new() },
+            EventKind::AgentRound {
+                id: AgentId::new(),
+                message_ids: vec![],
+                sources: vec![RoundSource::Reminder],
+                notices: vec![RoundNotice {
+                    line: "check".into(),
+                    class: crate::NoticeClass::Decide,
+                }],
+                tokens: None,
+                tools: vec![],
+                decided: false,
+                prompt_via_file: false,
             },
         ];
         for kind in kinds {

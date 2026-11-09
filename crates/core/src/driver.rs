@@ -533,6 +533,10 @@ pub enum SessionEventKind {
     /// asked for ([`DriverSession::compact`]) resets it itself; a driver that reports that
     /// one too only repeats a harmless reset.
     Compacted,
+    /// The prompt of a turn was written to a file for the agent to read, because it could not
+    /// go on the command line (`argv::prompt_via_file`). Sent once per such turn, before the
+    /// CLI starts.
+    PromptViaFile,
     /// A non-fatal problem worth surfacing (e.g. the requested model was not found).
     Warning {
         message: String,

@@ -28,6 +28,7 @@ pub mod refresh;
 pub mod replies;
 pub mod resume;
 pub mod retro;
+pub mod rounds;
 pub mod routing;
 pub mod rules;
 pub mod run_cost;
@@ -132,7 +133,11 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     if config.event_log {
         bus = bus.with_sink(event_log::EventLog::spawn(paths.logs()) as Arc<dyn EventSink>);
     }
+    // Each turn's round (`agent.round`) is written from the events themselves (rounds.rs).
+    let (round_sink, rounds) = rounds::RoundSink::new();
+    bus = bus.with_sink(round_sink as Arc<dyn EventSink>);
     let bus = Arc::new(bus);
+    rounds::publish_rounds(Arc::downgrade(&bus), rounds);
     // Where this hub's events begin; the previous hub's are before.
     let start_seq = store.latest_event_seq().await?;
     let hosted = config.runtime_host.is_some();

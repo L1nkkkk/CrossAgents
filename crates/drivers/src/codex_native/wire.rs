@@ -252,6 +252,21 @@ pub fn turn_started_id(params: &Value) -> Option<&str> {
     params.pointer("/turn/id")?.as_str()
 }
 
+/// The counts of one `TokenUsage` object of `thread/tokenUsage/updated` (`total` or `last`).
+/// `total` is the whole thread's history, not one session's: see `ThreadSink::emit`.
+pub fn token_counts(usage: &Value) -> TokenUsage {
+    let num = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+    TokenUsage {
+        input: num("inputTokens"),
+        cached_input: num("cachedInputTokens"),
+        cache_write_input: num("cacheWriteInputTokens"),
+        output: num("outputTokens"),
+        reasoning_output: num("reasoningOutputTokens"),
+        total: num("totalTokens"),
+        requests: None,
+    }
+}
+
 /// Translates one notification into hub events (none for the ones the hub ignores).
 pub fn translate(method: &str, params: &Value) -> Vec<SessionEventKind> {
     let str_at = |pointer: &str| params.pointer(pointer).and_then(Value::as_str);
@@ -353,15 +368,7 @@ pub fn translate(method: &str, params: &Value) -> Vec<SessionEventKind> {
                     .and_then(Value::as_u64)
                     .unwrap_or(0),
                 cost_usd: None,
-                tokens: Some(TokenUsage {
-                    input: num(total, "inputTokens"),
-                    cached_input: num(total, "cachedInputTokens"),
-                    cache_write_input: num(total, "cacheWriteInputTokens"),
-                    output: num(total, "outputTokens"),
-                    reasoning_output: num(total, "reasoningOutputTokens"),
-                    total: num(total, "totalTokens"),
-                    requests: None,
-                }),
+                tokens: Some(token_counts(total)),
             }
         }
         method::RATE_LIMITS => SessionEventKind::RateLimits {
