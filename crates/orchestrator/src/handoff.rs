@@ -147,6 +147,16 @@ fn free_key(tasks: &[Task], base: &str) -> String {
 /// (docs/research/multica.md §2.12).
 pub const MAX_BOUNCES: u32 = 3;
 
+/// Where a review's change request goes (`Orchestrator::review_return`).
+pub(crate) enum ReviewReturn {
+    /// Back to the task's own worker, in its own execution session.
+    Own,
+    /// To the teammate or step `spec.on_reject` names, as it always has.
+    Elsewhere,
+    /// That teammate or step has had the work back [`MAX_BOUNCES`] times: the lead decides.
+    Stopped(String),
+}
+
 /// A task as a plan would have written it, for checking the routing of a whole run.
 pub(crate) fn planned(task: &Task) -> PlannedTask {
     PlannedTask {
@@ -470,6 +480,34 @@ impl Orchestrator {
             Route::None => Ok(false),
             Route::Own(target) | Route::Elsewhere(_, target) => {
                 Ok(self.bounce_stopped(run, task, &target).await)
+            }
+        }
+    }
+
+    /// Where a review that asks for changes sends the task (`review.rs`): to its own worker
+    /// (no route, or one that names it), to another teammate or step the route names, or
+    /// nowhere because that route has taken the work back as often as it may.
+    pub(crate) async fn review_return(
+        &self,
+        run: &Run,
+        task: &Task,
+    ) -> Result<ReviewReturn, CoreError> {
+        match self.route_back(run, task).await? {
+            Route::None | Route::Own(_) => Ok(ReviewReturn::Own),
+            Route::Elsewhere(_, target) => {
+                let key = (task.id, target.name().to_owned());
+                let count = self
+                    .bounces
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(0);
+                if count >= MAX_BOUNCES {
+                    Ok(ReviewReturn::Stopped(target.name().to_owned()))
+                } else {
+                    Ok(ReviewReturn::Elsewhere)
+                }
             }
         }
     }

@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use common::{TestHub, git_repo, types};
 use crossagents_api_types::{Event, EventKind, RunStatus, TaskStatus};
+use crossagents_core::NoticeClass;
 use serde_json::{Value, json};
 
 fn call(tool: &str, args: Value) -> String {
@@ -142,10 +143,7 @@ async fn nothing_is_merged_while_the_checks_run_and_only_the_verified_commit_mer
 
     let a = planned(
         "a",
-        goal(
-            "[write a.txt=alpha]",
-            &format!("wrote a {}", call("task_accept", json!({ "task": "a" }))),
-        ),
+        goal("[write a.txt=alpha]", "wrote a"),
         Some(vec![wait_for(&go)]),
     );
     let id = start_run(&t, request(json!([a])), json!({})).await;
@@ -205,6 +203,15 @@ async fn nothing_is_merged_while_the_checks_run_and_only_the_verified_commit_mer
     // Let the check through. The task becomes passed with its checks, and only then does the
     // issuer hear the worker's summary - whose accept merges the commit the checks saw.
     std::fs::write(&go, "go").unwrap();
+    // The lead is not handed the report: it accepts once the task waits for it.
+    common::lead_accepts_when_waiting(
+        &t,
+        &mut w,
+        "boss",
+        "a",
+        &call("task_accept", json!({ "task": "a" })),
+    )
+    .await;
     w.until("merged", task_is("a", TaskStatus::Merged)).await;
     let d = detail(&t, &id).await;
     let task = task_in(&d, "a");
@@ -223,54 +230,118 @@ async fn nothing_is_merged_while_the_checks_run_and_only_the_verified_commit_mer
     );
 }
 
+/// The line the lead hears about a task: its class, when a notice says `what`.
+fn notice_class(seen: &[Event], what: &str) -> Option<NoticeClass> {
+    seen.iter().find_map(|e| match &e.kind {
+        EventKind::NoticeRecorded { line, class, .. } if line.contains(what) => Some(*class),
+        _ => None,
+    })
+}
+
+fn notice_says(what: &'static str) -> impl Fn(&Event) -> bool {
+    move |e| matches!(&e.kind, EventKind::NoticeRecorded { line, .. } if line.contains(what))
+}
+
+/// A task whose checks look for `gamma`, with `goal` for its worker and `max_returns` if given.
+fn checked(goal: String, max_returns: Option<u32>) -> Value {
+    let mut spec = json!({ "goal": goal, "acceptance": ["git grep -q gamma -- a.txt"] });
+    if let Some(n) = max_returns {
+        spec["max_returns"] = json!(n);
+    }
+    json!({ "key": "a", "title": "task a", "spec": spec })
+}
+
 #[tokio::test]
-async fn a_failed_check_needs_force_and_a_reason() {
+async fn a_failed_check_goes_back_to_its_worker_and_the_lead_hears_one_line() {
     let repo = git_repo();
     let t = setup(repo.path()).await;
     let mut w = t.watch().await;
-    let a = planned(
-        "a",
-        // Writes "alpha" while the check looks for "gamma": the check fails.
-        goal(
-            "[write a.txt=alpha]",
-            &format!("wrote a {}", call("task_accept", json!({ "task": "a" }))),
-        ),
-        Some(vec!["git grep -q gamma -- a.txt".into()]),
+    // Round 1 writes alpha, which the check refuses. The worker is sent back with the check's
+    // output and writes gamma as its second attempt, which passes.
+    let goal = format!(
+        "[write@1#mock-haiku a.txt=alpha] [write@2#mock-haiku a.txt=gamma] {}",
+        call(
+            "task_complete",
+            json!({ "task_id": "{task_id}", "summary": "wrote a" })
+        )
+        .replacen("[call ", "[call@#mock-haiku ", 1)
     );
-    let id = start_run(&t, request(json!([a])), json!({})).await;
+    let id = start_run(&t, request(json!([checked(goal, None)])), json!({})).await;
     w.until(
         "awaiting approval",
         run_status_is(&id, RunStatus::AwaitingApproval),
     )
     .await;
     approve(&t, &id).await;
-    w.until(
-        "passed with a failed check",
-        task_is("a", TaskStatus::Passed),
-    )
-    .await;
-    w.until(
-        "the issuer's plain accept",
-        said_in("its checks did not pass"),
-    )
-    .await;
-    assert_eq!(detail(&t, &id).await["tasks"][0]["status"], "passed");
 
-    // Forced, with a reason, it goes through and the reason stays on the record.
-    t.send(
+    // One quiet line to the lead, and the worker has what the check said.
+    w.until("the lead's line", notice_says("did not pass its checks"))
+        .await;
+    assert_eq!(
+        notice_class(&w.seen, "did not pass its checks"),
+        Some(NoticeClass::Silent),
+        "a return is quiet for the lead"
+    );
+    // It came before the lead's line, which the wait for that line has already read.
+    w.find("the worker is sent back", |e| {
+        matches!(&e.kind, EventKind::AgentInput { text, .. }
+            if text.contains("The checks did not pass") && text.contains("git grep -q gamma -- a.txt"))
+    })
+    .await;
+
+    // The second report passes its checks, and the lead accepts it plainly.
+    common::lead_accepts_when_waiting(
+        &t,
+        &mut w,
         "boss",
-        &call(
-            "task_accept",
-            json!({ "task": "a", "force": true, "reason": "the flaky check is unrelated" }),
-        ),
+        "a",
+        &call("task_accept", json!({ "task": "a" })),
     )
     .await;
     w.until("merged", task_is("a", TaskStatus::Merged)).await;
     let d = detail(&t, &id).await;
-    assert_eq!(
-        task_in(&d, "a")["report"]["forced"],
-        "the flaky check is unrelated"
+    let task = task_in(&d, "a");
+    assert_eq!(task["attempts"], 2, "{task}");
+    assert_eq!(task["report"]["review_returns"], 1, "{task}");
+    assert_eq!(task["report"]["forced"], Value::Null, "{task}");
+}
+
+#[tokio::test]
+async fn a_check_that_keeps_failing_stops_at_the_limit_and_the_lead_decides() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+    // Both attempts write alpha. With one return allowed, the second failure is the lead's.
+    let goal = format!(
+        "[write a.txt=alpha] {}",
+        call(
+            "task_complete",
+            json!({ "task_id": "{task_id}", "summary": "wrote a" })
+        )
     );
+    let id = start_run(&t, request(json!([checked(goal, Some(1))])), json!({})).await;
+    w.until(
+        "awaiting approval",
+        run_status_is(&id, RunStatus::AwaitingApproval),
+    )
+    .await;
+    approve(&t, &id).await;
+
+    w.until(
+        "the lead decides",
+        notice_says("gone back to its worker 1 times already"),
+    )
+    .await;
+    assert_eq!(
+        notice_class(&w.seen, "gone back to its worker 1 times already"),
+        Some(NoticeClass::Decide),
+        "the limit is the lead's to decide"
+    );
+    let d = detail(&t, &id).await;
+    let task = task_in(&d, "a");
+    assert_eq!(task["status"], "passed", "it waits with the lead: {task}");
+    assert_eq!(task["attempts"], 2, "one return happened: {task}");
+    assert_eq!(task["report"]["review_returns"], 1, "{task}");
 }
 
 #[tokio::test]
@@ -278,14 +349,7 @@ async fn a_task_with_no_checks_needs_force_and_a_reason() {
     let repo = git_repo();
     let t = setup(repo.path()).await;
     let mut w = t.watch().await;
-    let b = planned(
-        "b",
-        goal(
-            "[write b.txt=beta]",
-            &format!("wrote b {}", call("task_accept", json!({ "task": "b" }))),
-        ),
-        None,
-    );
+    let b = planned("b", goal("[write b.txt=beta]", "wrote b"), None);
     let id = start_run(&t, request(json!([b])), json!({})).await;
     w.until(
         "awaiting approval",
@@ -294,6 +358,15 @@ async fn a_task_with_no_checks_needs_force_and_a_reason() {
     .await;
     approve(&t, &id).await;
     w.until("passed", task_is("b", TaskStatus::Passed)).await;
+    // The lead is asked to accept it; a plain accept is refused for having no checks.
+    common::lead_accepts_when_waiting(
+        &t,
+        &mut w,
+        "boss",
+        "b",
+        &call("task_accept", json!({ "task": "b" })),
+    )
+    .await;
     w.until("the issuer's plain accept", said_in("it has no checks"))
         .await;
     let d = detail(&t, &id).await;

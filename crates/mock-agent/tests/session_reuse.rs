@@ -230,13 +230,14 @@ fn accept(key: &str) -> String {
     )
 }
 
-/// A worker's goal: `markers`, then report done with a summary carrying the lead's next step.
-fn goal(markers: &str, then: &str) -> String {
+/// A worker's goal: `markers`, then report done. The lead is not handed the report: it accepts
+/// and finishes once the task waits for it (`accept_and_finish`, sent by the test).
+fn goal(markers: &str) -> String {
     format!(
         "{markers} {}",
         call(
             "task_complete",
-            json!({ "task_id": "{task_id}", "summary": format!("done {then}") })
+            json!({ "task_id": "{task_id}", "summary": "done" })
         )
     )
 }
@@ -334,7 +335,7 @@ async fn fresh_false_gives_a_task_to_the_session_run_a_used() {
 
     let a_task = task(
         "a",
-        goal("[session] [write a.txt=1]", &accept_and_finish("a")),
+        goal("[session] [write a.txt=1]"),
         Some("Rex"),
         Some(false),
     );
@@ -346,6 +347,7 @@ async fn fresh_false_gives_a_task_to_the_session_run_a_used() {
         true,
     )
     .await;
+    common::lead_accepts_when_waiting(&t, &mut w, "Pia", "a", &accept_and_finish("a")).await;
     run_ends(&mut w, &a).await;
     back_home(&mut w, rex.id, repo.path()).await;
     // Pia leads run B too: once run A has let go of her.
@@ -355,7 +357,7 @@ async fn fresh_false_gives_a_task_to_the_session_run_a_used() {
 
     let b_task = task(
         "b",
-        goal("[session] [cwd] [write b.txt=2]", &accept_and_finish("b")),
+        goal("[session] [cwd] [write b.txt=2]"),
         Some("Rex"),
         Some(false),
     );
@@ -367,6 +369,7 @@ async fn fresh_false_gives_a_task_to_the_session_run_a_used() {
         true,
     )
     .await;
+    common::lead_accepts_when_waiting(&t, &mut w, "Pia", "b", &accept_and_finish("b")).await;
     run_ends(&mut w, &b).await;
     // The lead was told who works in the workspace, and what each did last (S1 §3.6).
     let kickoff = w
@@ -431,12 +434,7 @@ async fn a_new_execution_session_is_archived_and_can_be_used_again_once_restored
     let mut w = t.watch().await;
 
     // No fresh: a new execution session of Rex does it.
-    let a_task = task(
-        "a",
-        goal("[session] [write a.txt=1]", &accept_and_finish("a")),
-        None,
-        None,
-    );
+    let a_task = task("a", goal("[session] [write a.txt=1]"), None, None);
     let a = run_with(
         &t,
         "Pia",
@@ -445,6 +443,7 @@ async fn a_new_execution_session_is_archived_and_can_be_used_again_once_restored
         true,
     )
     .await;
+    common::lead_accepts_when_waiting(&t, &mut w, "Pia", "a", &accept_and_finish("a")).await;
     run_ends(&mut w, &a).await;
     retained_lead(&t, &mut w, pia.id, repo.path()).await;
     let tasks = tasks_of(&t, &a).await;
@@ -487,7 +486,7 @@ async fn a_new_execution_session_is_archived_and_can_be_used_again_once_restored
     let name = exec["name"].as_str().unwrap();
     let mut b_task = task(
         "b",
-        goal("[session] [write b.txt=2]", &accept_and_finish("b")),
+        goal("[session] [write b.txt=2]"),
         Some(name),
         Some(false),
     );
@@ -500,6 +499,7 @@ async fn a_new_execution_session_is_archived_and_can_be_used_again_once_restored
         true,
     )
     .await;
+    common::lead_accepts_when_waiting(&t, &mut w, "Pia", "b", &accept_and_finish("b")).await;
     run_ends(&mut w, &b).await;
     let tasks = tasks_of(&t, &b).await;
     assert_eq!(tasks[0]["handoffs"][0]["to"], json!(exec_id), "{tasks:?}");
@@ -528,12 +528,7 @@ async fn an_execution_session_restored_after_its_run_is_deleted_carries_on() {
     let pia = t.add_native("Pia", "planner", repo.path()).await;
     t.add_native("Rex", "worker", repo.path()).await;
     let mut w = t.watch().await;
-    let a_task = task(
-        "a",
-        goal("[session] [write a.txt=1]", &accept_and_finish("a")),
-        None,
-        None,
-    );
+    let a_task = task("a", goal("[session] [write a.txt=1]"), None, None);
     let a = run_with(
         &t,
         "Pia",
@@ -542,6 +537,7 @@ async fn an_execution_session_restored_after_its_run_is_deleted_carries_on() {
         true,
     )
     .await;
+    common::lead_accepts_when_waiting(&t, &mut w, "Pia", "a", &accept_and_finish("a")).await;
     run_ends(&mut w, &a).await;
     retained_lead(&t, &mut w, pia.id, repo.path()).await;
     let tasks = tasks_of(&t, &a).await;

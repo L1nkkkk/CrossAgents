@@ -770,12 +770,12 @@ async fn two_workers_in_an_in_place_run_start_from_a_snapshot_and_land_in_the_di
 
     let accept_a = call("task_accept", json!({ "task": "a" }));
     let accept_b = call("task_accept", json!({ "task": "b" }));
-    let complete = |key: &str, accept: &str| {
+    let complete = |key: &str| {
         format!(
             "[write {key}.txt={key}] {}",
             call(
                 "task_complete",
-                json!({ "task_id": "{task_id}", "summary": format!("wrote {key} {accept}") })
+                json!({ "task_id": "{task_id}", "summary": format!("wrote {key}") })
             )
         )
     };
@@ -792,7 +792,7 @@ async fn two_workers_in_an_in_place_run_start_from_a_snapshot_and_land_in_the_di
         {
             "key": "a", "title": "A",
             "spec": {
-                "goal": complete("a", &accept_a),
+                "goal": complete("a"),
                 "scope": { "allow": ["a.txt"] },
                 "acceptance": acceptance
             }
@@ -800,7 +800,7 @@ async fn two_workers_in_an_in_place_run_start_from_a_snapshot_and_land_in_the_di
         {
             "key": "b", "title": "B",
             "spec": {
-                "goal": complete("b", &accept_b),
+                "goal": complete("b"),
                 "scope": { "allow": ["b.txt"] },
                 "acceptance": [
                     "git grep -q --no-index PERSON_EDIT_MARKER -- README.md",
@@ -827,6 +827,10 @@ async fn two_workers_in_an_in_place_run_start_from_a_snapshot_and_land_in_the_di
     assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
     let id: Value = resp.json().await.unwrap();
     let id = id["id"].as_str().unwrap().to_owned();
+
+    // The lead is not handed the reports: it accepts each once it waits for it.
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "a", &accept_a).await;
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "b", &accept_b).await;
 
     // Both are running, each in a worktree of its own, and neither had to end before the
     // other began: neither wrote in the person's directory, and the snapshot moved neither
@@ -936,7 +940,7 @@ async fn a_conflicting_worker_result_is_not_written_and_applies_after_the_collis
             "task_complete",
             json!({
                 "task_id": "{task_id}",
-                "summary": format!("wrote it {}", call("task_accept", json!({ "task": "a", "force": true, "reason": "no checks configured" })))
+                "summary": "wrote it"
             })
         )
     );
@@ -957,6 +961,18 @@ async fn a_conflicting_worker_result_is_not_written_and_applies_after_the_collis
     assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
     let id: Value = resp.json().await.unwrap();
     let id = id["id"].as_str().unwrap().to_owned();
+    // The lead is not handed the report: it accepts once the task waits for it.
+    common::lead_accepts_when_waiting(
+        &t,
+        &mut w,
+        "boss",
+        "a",
+        &call(
+            "task_accept",
+            json!({ "task": "a", "force": true, "reason": "no checks configured" }),
+        ),
+    )
+    .await;
     w.find("a merged", task_is("a", TaskStatus::Merged)).await;
 
     // The person edits the same file while the run is going: their version is theirs.
@@ -1033,7 +1049,7 @@ async fn an_apply_is_not_done_twice_across_a_restart() {
             "task_complete",
             json!({
                 "task_id": "{task_id}",
-                "summary": format!("wrote it {}", call("task_accept", json!({ "task": "a", "force": true, "reason": "no checks configured" })))
+                "summary": "wrote it"
             })
         )
     );
@@ -1051,6 +1067,18 @@ async fn an_apply_is_not_done_twice_across_a_restart() {
     assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
     let id: Value = resp.json().await.unwrap();
     let id = id["id"].as_str().unwrap().to_owned();
+    // The lead is not handed the report: it accepts once the task waits for it.
+    common::lead_accepts_when_waiting(
+        &t,
+        &mut w,
+        "boss",
+        "a",
+        &call(
+            "task_accept",
+            json!({ "task": "a", "force": true, "reason": "no checks configured" }),
+        ),
+    )
+    .await;
     w.find("a merged", task_is("a", TaskStatus::Merged)).await;
     let resp = t.post(&format!("/v1/runs/{id}/finish"), json!({})).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
@@ -1300,7 +1328,7 @@ async fn deleting_an_in_place_run_removes_its_integration_workspace_and_branch()
             "task_complete",
             json!({
                 "task_id": "{task_id}",
-                "summary": format!("done {}", call("task_accept", json!({ "task": "a", "force": true, "reason": "no checks configured" })))
+                "summary": "done"
             })
         )
     );
@@ -1318,6 +1346,18 @@ async fn deleting_an_in_place_run_removes_its_integration_workspace_and_branch()
     assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
     let id: Value = resp.json().await.unwrap();
     let id = id["id"].as_str().unwrap().to_owned();
+    // The lead is not handed the report: it accepts once the task waits for it.
+    common::lead_accepts_when_waiting(
+        &t,
+        &mut w,
+        "boss",
+        "a",
+        &call(
+            "task_accept",
+            json!({ "task": "a", "force": true, "reason": "no checks configured" }),
+        ),
+    )
+    .await;
     w.find("a merged", task_is("a", TaskStatus::Merged)).await;
     let resp = t.post(&format!("/v1/runs/{id}/finish"), json!({})).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());

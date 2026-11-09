@@ -11,9 +11,10 @@ pub use crossagents_core::{
     Account, AccountStatus, Agent, AgentCommand, AgentCommandKind, AgentId, AgentProfile,
     AgentStatus, Capabilities, CheckResult, ClaimRole, ContinuationPolicy, DataSource,
     DeliveryState, DeliveryStatus, Device, DeviceKind, DeviceLevel, DiffSource, DriverKind, Event,
-    EventKind, Handoff, HandoffKind, HistoryTask, LeadPlace, MessageId, MessageSource, ModelInfo,
-    OutputStream, PlannedTask, QueuedReason, Role, Run, RunHistory, RunId, RunPolicy, RunStatus,
-    StopReason, Task, TaskId, TaskStatus, TokenTotals, ToolInfo, ToolStatus,
+    EventKind, FindingAnswer, FindingStatus, Handoff, HandoffKind, HistoryTask, LeadPlace,
+    MessageId, MessageSource, ModelInfo, OutputStream, PlannedTask, QueuedReason, Role, Run,
+    RunHistory, RunId, RunPolicy, RunStatus, StopReason, Task, TaskId, TaskStatus, TokenTotals,
+    ToolInfo, ToolStatus,
 };
 
 /// Handoff cards and how a task's chain of them reads.

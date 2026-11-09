@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, Weak};
 use std::time::Duration;
 
-use crossagents_api_types::{Agent, Event};
+use crossagents_api_types::{Agent, Event, EventKind};
 use crossagents_hub::{HubConfig, Paths, RunningHub};
 use crossagents_plugins::PluginConfig;
 use futures::StreamExt;
@@ -371,6 +371,7 @@ impl TestHub {
         Watcher {
             rx,
             seen: Vec::new(),
+            claimed: Default::default(),
         }
     }
 }
@@ -378,6 +379,8 @@ impl TestHub {
 pub struct Watcher {
     rx: mpsc::UnboundedReceiver<Event>,
     pub seen: Vec<Event>,
+    /// Indexes of `seen` that a helper already acted on (see [`lead_accepts_when_waiting`]).
+    pub claimed: std::collections::HashSet<usize>,
 }
 
 impl Watcher {
@@ -428,4 +431,37 @@ impl Watcher {
 
 pub fn types(events: &[Event]) -> Vec<&'static str> {
     events.iter().map(|e| e.kind.type_name()).collect()
+}
+
+/// Tells the lead `text` once task `key` waits for its acceptance. The lead does not get the
+/// worker's report any more: its notice says the task waits, and the lead acts on that. A test
+/// that had the lead accept or finish from the report sends the same calls here instead.
+///
+/// A notice read earlier, while another wait went on, counts too: each notice is acted on once.
+pub async fn lead_accepts_when_waiting(
+    t: &TestHub,
+    w: &mut Watcher,
+    lead: &str,
+    key: &str,
+    text: &str,
+) {
+    let said = format!("#{key} waits for your acceptance");
+    let is_it = |e: &Event| matches!(&e.kind, EventKind::NoticeRecorded { line, .. } if line.contains(&said));
+    let read = w
+        .seen
+        .iter()
+        .enumerate()
+        .find(|(i, e)| !w.claimed.contains(i) && is_it(e))
+        .map(|(i, _)| i);
+    match read {
+        Some(i) => {
+            w.claimed.insert(i);
+        }
+        None => {
+            w.until(&said, is_it).await;
+            let last = w.seen.len() - 1;
+            w.claimed.insert(last);
+        }
+    }
+    t.send(lead, text).await;
 }

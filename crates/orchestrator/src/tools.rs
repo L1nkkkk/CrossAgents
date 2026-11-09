@@ -93,7 +93,8 @@ fn spec_schema() -> Value {
             "result_schema": { "type": "object", "description": "JSON Schema for the required structured result." },
             "stage": { "type": "integer", "description": "Optional stage: tasks of a later stage start only once every task of an earlier stage has ended, and you are woken when each stage's batch ends. Omit for no staging." },
             "next": { "type": "string", "description": "Optional: where the work goes when this task is accepted — a task key of this run (released then), or a teammate's name (the hub opens the next step for them). Omit for no routing." },
-            "on_reject": { "type": "string", "description": "Optional: where work goes back when it is sent back (task_rework, or a review that fails) — a task key (its worker takes it again) or a teammate's name. Omit to leave it with its own worker." }
+            "on_reject": { "type": "string", "description": "Optional: where work goes back when it is sent back (task_rework, or a review that fails) — a task key (its worker takes it again) or a teammate's name. Omit to leave it with its own worker." },
+            "max_returns": { "type": "integer", "minimum": 0, "description": "Optional: how many times a review may send this task back to its worker before the lead decides. Default 3." }
         },
         "required": ["goal"]
     })
@@ -609,14 +610,22 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_accept",
-        description: "Merge a task you issued into the run branch. Only a verified task is accepted plainly: every check passed, and nothing changed after they ran; only the verified commit is merged (nothing the worker wrote afterwards). Refused while the task is still being verified (force does not bypass that). Accepting without a verification - checks that failed or never ran, a task with no checks, a verification the hub restarted out of, a stalled task, or work done after the checks - takes force: true and a non-empty reason, which is recorded. On a conflict nothing changes and you get the conflicting files and hunks. message is the commit message, written the way the project's rules ask (default: \"<key>: <title>\"). With spec.next set on the task, accepting also releases the next step it names (next_step says which).",
+        description: "Merge a task you issued into the run branch. Only a verified task is accepted plainly: every check passed, and nothing changed after they ran; only the verified commit is merged (nothing the worker wrote afterwards). Refused while the task is still being verified (force does not bypass that). Accepting without a verification - checks that failed or never ran, a task with no checks, a verification the hub restarted out of, a stalled task, or work done after the checks - takes force: true and a non-empty reason, which is recorded. On a conflict nothing changes and you get the conflicting files and hunks. message is the commit message, written the way the project's rules ask (default: \"<key>: <title>\"). With spec.next set on the task, accepting also releases the next step it names (next_step says which). Give `tasks` (a list of task keys or ids) to accept several at once: each is handled on its own and each result comes back in `results`.",
         groups: RUN,
         schema: || {
-            task_schema(json!({
+            let mut schema = task_schema(json!({
                 "message": { "type": "string" },
                 "force": { "type": "boolean", "description": "Accept although nothing verified it; needs reason, and is recorded" },
                 "reason": { "type": "string", "description": "Why you accept it unverified (required with force)" }
-            }))
+            }));
+            // Either one task or several: `task` is not required when `tasks` is given.
+            schema["properties"]["tasks"] = json!({
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Several tasks to accept, one result each. Use instead of task."
+            });
+            schema["required"] = json!([]);
+            schema
         },
     },
     ToolDef {
@@ -763,6 +772,20 @@ const TOOLS: &[ToolDef] = &[
                 "items": { "type": "string" },
                 "description": "The expertise entries you went by: their ids, or the short tag a brief showed (the id's first 8 characters, e.g. 01a19b48). A tag that names no entry, or several, is skipped and comes back in unrecognized_used."
             });
+            // When the last review sent the task back: where you stand on each of its findings.
+            schema["properties"]["answers"] = json!({
+                "type": "array",
+                "description": "Answer each finding of the last review by its id (F1, F2…): fixed, not_fixed, or disputed (you think it is wrong; the lead decides). Give a note for each.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "The finding's id, e.g. F2." },
+                        "status": { "type": "string", "enum": ["fixed", "not_fixed", "disputed"] },
+                        "note": { "type": "string", "description": "What you did, or why it is not fixed or disputed." }
+                    },
+                    "required": ["id", "status"]
+                }
+            });
             schema
         },
     },
@@ -788,18 +811,26 @@ const TOOLS: &[ToolDef] = &[
                 "notes": { "type": "string", "description": "For a rejection: exactly what to fix." }
             }));
             // Optional, unlike the fields `task_id_schema` lists as required.
+            schema["properties"]["reviewed_sha"] = json!({
+                "type": "string",
+                "description": "The commit your brief names (reviewed_sha). A verdict on another commit is refused: the task changed since."
+            });
             schema["properties"]["findings"] = json!({
                 "type": "array",
-                "description": "Problems found, most severe first when you list them. P0 blocks the merge and must be fixed; P1 should be fixed before it; P2 can follow; P3 is a suggestion.",
+                "description": "Problems found, most severe first when you list them. P0 blocks the merge and must be fixed; P1 should be fixed before it; P2 can follow; P3 is a suggestion. The hub numbers each one (F1, F2…); a finding that still stands from the last round keeps its id.",
                 "items": {
                     "type": "object",
                     "properties": {
+                        "id": { "type": "string", "description": "Only for a finding of the last review that still stands: its id, e.g. F2." },
                         "severity": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
                         "confidence": { "type": "number", "minimum": 0, "maximum": 1, "description": "How sure you are: a number from 0 (a guess) to 1 (certain), not high/medium/low." },
                         "file": { "type": "string", "description": "The file it is in, relative to the repository root." },
                         "line": { "type": "integer", "minimum": 1, "description": "The line on the new side of the diff." },
                         "title": { "type": "string", "description": "One line: what is wrong." },
-                        "detail": { "type": "string", "description": "Why it matters, or how to fix it." }
+                        "detail": { "type": "string", "description": "Why it matters, or how to fix it." },
+                        "blocking": { "type": "boolean", "description": "Must be fixed (or disputed) before the task is accepted. Default: true for P0 and P1, false otherwise." },
+                        "basis": { "type": "string", "description": "What it rests on: the code, the spec, or the check it comes from." },
+                        "verify": { "type": "string", "description": "How to verify that it is fixed." }
                     },
                     "required": ["severity", "confidence", "title"]
                 }
@@ -1084,7 +1115,7 @@ impl Orchestrator {
             "checks_run" => self.checks_run(caller, input).await,
             "gui_screenshot" => self.gui_screenshot(caller, input).await,
             "review_request" => self.review_request(caller, input).await,
-            "task_accept" => self.task_accept(caller, input).await,
+            "task_accept" => self.task_accept_all(caller, input).await,
             "task_verify" => self.task_verify(caller, input).await,
             "task_rework" => self.task_rework(caller, input).await,
             "handoff_preview" => self.handoff_preview_tool(caller, input).await,
@@ -1107,11 +1138,14 @@ impl Orchestrator {
                     /// The expertise entries the worker went by (EXPERTISE §4.5).
                     #[serde(default)]
                     used: Vec<String>,
+                    /// Where the worker stands on each finding of the last review.
+                    #[serde(default)]
+                    answers: Vec<crossagents_core::FindingAnswer>,
                 }
                 let task = self.task_ref(caller, &input).await?;
                 let result = input.get("result").cloned();
                 let a: A = args(input)?;
-                self.complete_with_result(caller, task, a.summary, result)
+                self.complete_with_result(caller, task, a.summary, result, a.answers)
                     .await?;
                 // Tags that named no entry of this project or the person come back, so the
                 // worker can name them again properly. The report is already in: a store that
@@ -1162,38 +1196,31 @@ impl Orchestrator {
                     #[serde(default)]
                     notes: String,
                     #[serde(default)]
-                    findings: Vec<crossagents_core::model::ReviewFinding>,
+                    findings: Vec<crate::review::FindingInput>,
                     #[serde(default)]
                     verdict: Option<crossagents_core::model::ReviewVerdict>,
+                    #[serde(default)]
+                    reviewed_sha: Option<String>,
                     #[serde(default)]
                     checklist: Vec<crate::expertise::review::ChecklistItem>,
                 }
                 let id = self.task_ref(caller, &input).await?;
                 let a: A = args(input)?;
-                // Refuse a call whose approve and verdict disagree before anything is
-                // recorded (docs/TODO.md §二十五 第 6 条).
-                let verdict = crate::review::effective_verdict(a.approve, a.verdict, &a.findings)?;
-                let findings = crate::review::sorted_findings(&a.findings);
-                // The notes the issuer reads: the reviewer's words, then the verdict and
-                // the findings, P0 first with the blocking ones (P0/P1) on top.
-                let notes = crate::review::review_notes(
-                    &a.notes,
-                    &findings,
-                    a.verdict.or((!findings.is_empty()).then_some(verdict)),
-                );
-                // Record the structured result while the task is still Reviewing: nobody
-                // can accept it then, so this write cannot race an accept. `review` below
-                // owns the status and reviewer checks and refuses a caller that may not
-                // review; only touch the report when those checks would pass.
-                let mut stored = self.store.get_task(id).await?;
-                if stored.status == crossagents_core::TaskStatus::Reviewing
-                    && stored.reviewer == Some(caller.id)
-                {
-                    stored.report.findings = findings;
-                    stored.report.verdict = Some(verdict);
-                    self.store.update_task(&stored).await?;
-                }
-                self.review(caller, id, a.approve, notes).await?;
+                // The hub checks the verdict, binds it to the round it is for, numbers the
+                // findings and records everything under the run's lock; a refused call changes
+                // nothing (review.rs).
+                self.review(
+                    caller,
+                    id,
+                    crate::review::Submission {
+                        approve: a.approve,
+                        notes: a.notes,
+                        findings: a.findings.into_iter().map(|f| f.into_finding()).collect(),
+                        verdict: a.verdict,
+                        reviewed_sha: a.reviewed_sha,
+                    },
+                )
+                .await?;
                 // A failed item proposes a replacement to the person (EXPERTISE §6.3). The
                 // review is already in, so a store that cannot keep candidates must not make
                 // this call fail and be retried.

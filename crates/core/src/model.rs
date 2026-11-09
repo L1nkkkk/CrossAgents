@@ -663,6 +663,20 @@ pub struct TaskSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub on_reject: Option<String>,
+    /// How many times a review may send the task back to its worker before the lead decides
+    /// (docs/research/multica.md §2.12). `None` is the default of 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub max_returns: Option<u32>,
+}
+
+impl TaskSpec {
+    /// The most times a review sends the task back before the lead decides.
+    pub const DEFAULT_MAX_RETURNS: u32 = 3;
+
+    pub fn max_returns(&self) -> u32 {
+        self.max_returns.unwrap_or(Self::DEFAULT_MAX_RETURNS)
+    }
 }
 
 /// One task in a submitted plan. `key` is the planner's own short name for it.
@@ -739,6 +753,10 @@ pub enum ReviewVerdict {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct ReviewFinding {
+    /// `F1`, `F2`…: numbered by the hub per task, and kept across review rounds, so a finding
+    /// and the worker's answer to it name the same thing.
+    #[serde(default)]
+    pub id: String,
     pub severity: ReviewSeverity,
     /// `0` (a guess) to `1` (certain).
     pub confidence: f64,
@@ -749,6 +767,38 @@ pub struct ReviewFinding {
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Must be resolved (fixed, or answered as disputed) before the task is accepted. P0 and
+    /// P1 are blocking unless the reviewer says otherwise.
+    #[serde(default)]
+    pub blocking: bool,
+    /// What the finding rests on: the code, the spec or the check it comes from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<String>,
+    /// How to verify that it is fixed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<String>,
+}
+
+/// Where a worker stands on one finding of the last review (`task_complete.answers`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[serde(rename_all = "snake_case")]
+pub enum FindingStatus {
+    Fixed,
+    NotFixed,
+    /// The worker thinks the finding is wrong: the lead decides.
+    Disputed,
+}
+
+/// The worker's answer to one numbered finding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct FindingAnswer {
+    /// The finding's id, `F1`…
+    pub id: String,
+    pub status: FindingStatus,
+    #[serde(default)]
+    pub note: String,
 }
 
 /// What is known about a task's outcome so far.
@@ -818,6 +868,28 @@ pub struct TaskReport {
     /// related, not confirmed to apply (docs/tasks/LESSONS.md §4.5).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub related_lessons: Vec<crate::lesson::RelatedLesson>,
+    /// The commit the open review reads: the verified commit it was opened on. A verdict for
+    /// another commit, or a second one for the same round, is refused (docs/TODO.md §九 ①).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub reviewed_sha: Option<String>,
+    /// Review rounds opened on this task so far (1 for the first review).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub review_attempt: u32,
+    /// Reviews that sent the task back to its worker, so far (checked against
+    /// `TaskSpec::max_returns`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub review_returns: u32,
+    /// The last number the hub gave a finding of this task: the next one is that plus one.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub finding_seq: u32,
+    /// The worker's answers to the findings of the last review, as its last report gave them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answers: Vec<FindingAnswer>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// How one run (attempt) of a task ended. A run ends when the worker's turn does; the task

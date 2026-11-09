@@ -4,8 +4,26 @@ import type { ReviewSeverity } from "./ReviewSeverity";
 /**
  * One problem a reviewer found.
  */
-export type ReviewFinding = { severity: ReviewSeverity, 
+export type ReviewFinding = { 
+/**
+ * `F1`, `F2`…: numbered by the hub per task, and kept across review rounds, so a finding
+ * and the worker's answer to it name the same thing.
+ */
+id: string, severity: ReviewSeverity, 
 /**
  * `0` (a guess) to `1` (certain).
  */
-confidence: number, file?: string | null, line?: number | null, title: string, detail?: string | null, };
+confidence: number, file?: string | null, line?: number | null, title: string, detail?: string | null, 
+/**
+ * Must be resolved (fixed, or answered as disputed) before the task is accepted. P0 and
+ * P1 are blocking unless the reviewer says otherwise.
+ */
+blocking: boolean, 
+/**
+ * What the finding rests on: the code, the spec or the check it comes from.
+ */
+basis?: string | null, 
+/**
+ * How to verify that it is fixed.
+ */
+verify?: string | null, };

@@ -11,6 +11,7 @@ use std::path::Path;
 
 use common::{TestHub, git_repo, types};
 use crossagents_api_types::{EventKind, RunStatus, TaskStatus};
+use crossagents_core::NoticeClass;
 use serde_json::{Value, json};
 
 fn call(tool: &str, args: Value) -> String {
@@ -117,20 +118,9 @@ async fn the_planner_accepts_what_workers_report() {
     let t = setup(repo.path()).await;
     let mut w = t.watch().await;
 
-    let mut a = task(
-        "a",
-        goal("[write a.txt=alpha]", &format!("wrote a {}", accept("a"))),
-        &[],
-    );
+    let mut a = task("a", goal("[write a.txt=alpha]", "wrote a"), &[]);
     a["spec"]["acceptance"] = json!([has("a.txt", "alpha")]);
-    let b = task(
-        "b",
-        goal(
-            "[write b.txt=beta]",
-            &format!("wrote b {}", accept_last("b")),
-        ),
-        &["a"],
-    );
+    let b = task("b", goal("[write b.txt=beta]", "wrote b"), &["a"]);
     let id = start_run(&t, request(json!([a, b])), json!({})).await;
     w.until(
         "awaiting approval",
@@ -139,6 +129,9 @@ async fn the_planner_accepts_what_workers_report() {
     .await;
     let resp = t.post(&format!("/v1/runs/{id}/approve"), json!({})).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    // The lead is not handed the reports: it accepts each once it waits for it.
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "a", &accept("a")).await;
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "b", &accept_last("b")).await;
     w.until("run completed", run_status_is(&id, RunStatus::Completed))
         .await;
 
@@ -166,27 +159,21 @@ async fn the_planner_accepts_what_workers_report() {
         "the person's checkout is untouched"
     );
 
-    // The worker's own words reached the planner, from the worker.
-    let planner: Value = t
-        .get("/v1/agents/boss/transcript")
-        .await
-        .json()
-        .await
-        .unwrap();
-    let report = planner["turns"]
-        .as_array()
-        .unwrap()
+    // The planner is not handed the worker's report: it was told that a waited for it, with
+    // its checks' result (the notice is what it reads).
+    let said = w
+        .seen
         .iter()
-        .find(|turn| turn["input"].as_str().unwrap().starts_with("wrote a"))
-        .expect("a's report");
-    assert_eq!(report["from"]["kind"], "agent");
-    assert!(
-        report["input"]
-            .as_str()
-            .unwrap()
-            .contains("checks: 1/1 passed"),
-        "{report}"
-    );
+        .find_map(|e| match &e.kind {
+            EventKind::NoticeRecorded { line, .. }
+                if line.contains("#a waits for your acceptance") =>
+            {
+                Some(line.clone())
+            }
+            _ => None,
+        })
+        .expect("a's acceptance notice");
+    assert!(said.contains("checks passed"), "{said}");
 
     // The tasks' execution sessions are archived, not deleted (docs/tasks/S1.md §3.4): only
     // the two teammates are left in the lists, and each task's worker can still be read.
@@ -221,12 +208,12 @@ async fn rework_sends_the_task_back_with_notes() {
         "[write@1 b.txt=wrong] [write@2 b.txt=beta] {} {}",
         call(
             "task_complete",
-            json!({ "task_id": "{task_id}", "summary": format!("v1 {rework}") })
+            json!({ "task_id": "{task_id}", "summary": "v1" })
         )
         .replacen("[call ", "[call@1 ", 1),
         call(
             "task_complete",
-            json!({ "task_id": "{task_id}", "summary": format!("v2 {}", accept_last("b")) })
+            json!({ "task_id": "{task_id}", "summary": "v2" })
         )
         .replacen("[call ", "[call@2 ", 1),
     );
@@ -236,6 +223,9 @@ async fn rework_sends_the_task_back_with_notes() {
         json!({ "policy": { "plan_approval": "auto" } }),
     )
     .await;
+    // The lead is not handed the reports: it sends the rework once the first waits, then accepts.
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "b", &rework).await;
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "b", &accept_last("b")).await;
     w.until("run completed", run_status_is(&id, RunStatus::Completed))
         .await;
     let detail = detail(&t, &id).await;
@@ -310,7 +300,7 @@ async fn questions_go_to_the_issuer_and_answers_come_back() {
     // The planner's answer carries the worker's next steps; the question carries the answer.
     let complete = call(
         "task_complete",
-        json!({ "task_id": "{task_id}", "summary": format!("blue {}", accept_last("h")) }),
+        json!({ "task_id": "{task_id}", "summary": "blue" }),
     );
     let answer = call(
         "task_answer",
@@ -326,6 +316,7 @@ async fn questions_go_to_the_issuer_and_answers_come_back() {
         json!({ "auto_approve": true }),
     )
     .await;
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "h", &accept_last("h")).await;
     w.until("run completed", run_status_is(&id, RunStatus::Completed))
         .await;
     assert!(w.seen.iter().any(task_is("h", TaskStatus::WaitingAnswer)));
@@ -353,14 +344,14 @@ async fn a_reviewer_judges_and_the_issuer_decides() {
     );
     let verdict = call(
         "review_submit",
-        json!({ "task_id": "{task_id}", "approve": true, "notes": format!("lgtm {}", accept_last("g")) }),
+        json!({ "task_id": "{task_id}", "approve": true, "notes": "lgtm" }),
     )
     .replacen("[call ", "[call#mock-opus ", 1);
     let worker = format!(
         "[write#mock-haiku g.txt=v1] {} {verdict}",
         call(
             "task_complete",
-            json!({ "task_id": "{task_id}", "summary": format!("wrote g {request_review}") })
+            json!({ "task_id": "{task_id}", "summary": "wrote g" })
         )
         .replacen("[call ", "[call#mock-haiku ", 1),
     );
@@ -370,6 +361,10 @@ async fn a_reviewer_judges_and_the_issuer_decides() {
         json!({ "auto_approve": true }),
     )
     .await;
+    // The lead is not handed the report: it asks for the review once the task waits, then
+    // accepts the reviewed task.
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "g", &request_review).await;
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "g", &accept_last("g")).await;
     w.until("run completed", run_status_is(&id, RunStatus::Completed))
         .await;
     assert!(w.seen.iter().any(task_is("g", TaskStatus::Reviewing)));
@@ -392,19 +387,14 @@ async fn a_conflict_is_reported_and_nothing_merges() {
 
     // Both tasks rewrite README although their scopes say otherwise, so they run side by
     // side and the second accept conflicts.
-    let mut x = task(
-        "x",
-        goal("[write README=one]", &format!("x {}", accept("x"))),
-        &[],
-    );
+    let mut x = task("x", goal("[write README=one]", "x"), &[]);
     x["spec"]["scope"] = json!({ "allow": ["x/**"] });
-    let mut y = task(
-        "y",
-        goal("[write README=two]", &format!("y {}", accept("y"))),
-        &[],
-    );
+    let mut y = task("y", goal("[write README=two]", "y"), &[]);
     y["spec"]["scope"] = json!({ "allow": ["y/**"] });
     let id = start_run(&t, request(json!([x, y])), json!({ "auto_approve": true })).await;
+    // The lead is not handed the reports: it tries both accepts once each waits.
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "x", &accept("x")).await;
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "y", &accept("y")).await;
     let boss: Value = t.get("/v1/agents/boss").await.json().await.unwrap();
     let boss_id = boss["id"].as_str().unwrap().to_owned();
     // Wait until the planner has tried both accepts.
@@ -570,9 +560,9 @@ async fn planner_assigns_tasks_by_specialty() {
     assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
     let mut w = t.watch().await;
 
-    let mut a = task("a", goal("[write a.txt=alpha]", &accept("a")), &[]);
+    let mut a = task("a", goal("[write a.txt=alpha]", "a done"), &[]);
     a["assignee"] = json!("sec");
-    let b = task("b", goal("[write b.txt=beta]", &accept_last("b")), &[]);
+    let b = task("b", goal("[write b.txt=beta]", "b done"), &[]);
     let id = start_run(&t, request(json!([a, b])), json!({})).await;
     w.until(
         "awaiting approval",
@@ -606,6 +596,9 @@ async fn planner_assigns_tasks_by_specialty() {
 
     let resp = t.post(&format!("/v1/runs/{id}/approve"), json!({})).await;
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    // The lead is not handed the reports: it accepts each once it waits for it.
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "a", &accept("a")).await;
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "b", &accept_last("b")).await;
     w.until("run completed", run_status_is(&id, RunStatus::Completed))
         .await;
 
@@ -645,14 +638,14 @@ async fn chat_sessions_can_take_tasks_and_review() {
     let request_review = call("review_request", json!({ "task": "g", "reviewer": "leo" }));
     let verdict = call(
         "review_submit",
-        json!({ "task_id": "{task_id}", "approve": true, "notes": format!("lgtm {}", accept_last("g")) }),
+        json!({ "task_id": "{task_id}", "approve": true, "notes": "lgtm" }),
     )
     .replacen("[call ", "[call#mock-opus ", 1);
     let worker = format!(
         "[write#mock-haiku g.txt=v1] {} {verdict}",
         call(
             "task_complete",
-            json!({ "task_id": "{task_id}", "summary": format!("wrote g {request_review}") })
+            json!({ "task_id": "{task_id}", "summary": "wrote g" })
         )
         .replacen("[call ", "[call#mock-haiku ", 1),
     );
@@ -664,6 +657,9 @@ async fn chat_sessions_can_take_tasks_and_review() {
         json!({ "auto_approve": true, "team": ["coder", "pal", "leo"] }),
     )
     .await;
+    // The lead is not handed the report: it asks for the review once the task waits.
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "g", &request_review).await;
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "g", &accept_last("g")).await;
     w.until("run completed", run_status_is(&id, RunStatus::Completed))
         .await;
     assert!(w.seen.iter().any(task_is("g", TaskStatus::Reviewing)));
@@ -732,7 +728,7 @@ async fn the_lead_adds_tasks_while_the_run_runs() {
             "[write extra.txt=more] {}",
             call(
                 "task_complete",
-                json!({ "task": "extra", "summary": accept_last("extra") })
+                json!({ "task": "extra", "summary": "extra done" })
             )
         ),
         &["a"],
@@ -742,12 +738,12 @@ async fn the_lead_adds_tasks_while_the_run_runs() {
         call("task_create", json!({ "tasks": [extra] })),
         accept("a")
     );
-    let a = task(
-        "a",
-        goal("[write a.txt=alpha]", &format!("a done {follow_up}")),
-        &[],
-    );
+    let a = task("a", goal("[write a.txt=alpha]", "a done"), &[]);
     let id = start_run(&t, request(json!([a])), json!({ "auto_approve": true })).await;
+    // The lead is not handed the reports: when a waits, it adds the follow-up and accepts a;
+    // when the follow-up waits, it accepts that.
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "a", &follow_up).await;
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "extra", &accept_last("extra")).await;
     w.until("extra merged", task_is("extra", TaskStatus::Merged))
         .await;
     w.find("run completed", run_status_is(&id, RunStatus::Completed))
@@ -779,17 +775,14 @@ async fn a_hands_off_run_lands_on_main_and_reports_to_the_person() {
         ),
         call("run_finish", json!({ "summary": "Added z.txt." }))
     );
-    let z = task(
-        "z",
-        goal("[write z.txt=zed]", &format!("z done {close}")),
-        &[],
-    );
+    let z = task("z", goal("[write z.txt=zed]", "z done"), &[]);
     let id = start_run(
         &t,
         request(json!([z])),
         json!({ "policy": { "plan_approval": "auto", "land": "auto", "human_ask": "timeout" } }),
     )
     .await;
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "z", &close).await;
     w.until("run completed", run_status_is(&id, RunStatus::Completed))
         .await;
     assert!(
@@ -941,17 +934,14 @@ async fn land_with(config: &str, before_land: impl FnOnce(&Path)) -> (tempfile::
     let t = setup(repo.path()).await;
     let mut w = t.watch().await;
 
-    let z = task(
-        "z",
-        goal("[write z.txt=zed]", &format!("z done {}", accept("z"))),
-        &[],
-    );
+    let z = task("z", goal("[write z.txt=zed]", "z done"), &[]);
     let id = start_run(
         &t,
         request(json!([z])),
         json!({ "policy": { "plan_approval": "auto", "land": "auto", "human_ask": "timeout" } }),
     )
     .await;
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "z", &accept("z")).await;
     w.until("z merged", task_is("z", TaskStatus::Merged)).await;
     before_land(repo.path());
     let boss: Value = t.get("/v1/agents/boss").await.json().await.unwrap();
@@ -1028,12 +1018,9 @@ async fn a_manual_run_leaves_landing_to_the_person() {
     let mut w = t.watch().await;
 
     let close = format!("{} {}", accept("m"), call("run_land", json!({})));
-    let m = task(
-        "m",
-        goal("[write m.txt=em]", &format!("m done {close}")),
-        &[],
-    );
+    let m = task("m", goal("[write m.txt=em]", "m done"), &[]);
     let id = start_run(&t, request(json!([m])), json!({ "auto_approve": true })).await;
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "m", &close).await;
     w.until("m merged", task_is("m", TaskStatus::Merged)).await;
     let boss: Value = t.get("/v1/agents/boss").await.json().await.unwrap();
     let boss_id = boss["id"].as_str().unwrap().to_owned();
@@ -1146,7 +1133,7 @@ async fn asking_again_replaces_the_open_question() {
     // and the answer to it gets the task done.
     let complete = call(
         "task_complete",
-        json!({ "task_id": "{task_id}", "summary": format!("green {}", accept_last("q")) }),
+        json!({ "task_id": "{task_id}", "summary": "green" }),
     );
     let answer = call(
         "task_answer",
@@ -1169,6 +1156,7 @@ async fn asking_again_replaces_the_open_question() {
         json!({ "auto_approve": true }),
     )
     .await;
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "q", &accept_last("q")).await;
     w.until("run completed", run_status_is(&id, RunStatus::Completed))
         .await;
     let detail = detail(&t, &id).await;
@@ -1202,11 +1190,7 @@ async fn a_task_starts_beside_a_branch_a_dropped_attempt_left() {
 
     // `a` never reports, so `r` waits; meanwhile a branch is left where `r`'s would go, as a
     // dropped attempt whose checkout was kept leaves it. `r` must start beside it, not fail.
-    let r = task(
-        "r",
-        goal("[write r.txt=ok]", &format!("r done {}", accept_last("r"))),
-        &["a"],
-    );
+    let r = task("r", goal("[write r.txt=ok]", "r done"), &["a"]);
     let plan = json!([task("a", "[write a.txt=alpha]".into(), &[]), r]);
     let id = start_run(&t, request(plan), json!({ "auto_approve": true })).await;
     w.until("a stalled", task_is("a", TaskStatus::Stalled))
@@ -1224,6 +1208,8 @@ async fn a_task_starts_beside_a_branch_a_dropped_attempt_left() {
     assert!(out.status.success(), "{out:?}");
 
     t.send("boss", &accept("a")).await;
+    // r reports once a is in; the lead accepts it when it waits.
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "r", &accept_last("r")).await;
     w.until("run completed", run_status_is(&id, RunStatus::Completed))
         .await;
     let detail = detail(&t, &id).await;
@@ -1262,11 +1248,7 @@ async fn a_stage_wakes_the_lead_and_holds_the_next_one_back() {
 
     // a is stage 1; b is stage 2 though it depends on nothing. Their scopes do not overlap,
     // so only the stage holds b back.
-    let mut a = task(
-        "a",
-        goal("[write a.txt=alpha]", &format!("a done {}", accept("a"))),
-        &[],
-    );
+    let mut a = task("a", goal("[write a.txt=alpha]", "a done"), &[]);
     let mut b = task("b", goal("[write b.txt=beta]", "b done".into()), &[]);
     for (task, key, stage) in [(&mut a, "a", 1), (&mut b, "b", 2)] {
         task["spec"]["stage"] = json!(stage);
@@ -1274,7 +1256,9 @@ async fn a_stage_wakes_the_lead_and_holds_the_next_one_back() {
     }
     let plan = json!([a, b]);
     let id = start_run(&t, request(plan), json!({ "auto_approve": true })).await;
-    // The end of the stage releases the next one; nothing else makes b start.
+    // The lead is not handed the report: it accepts a once it waits. The end of the stage then
+    // releases the next one; nothing else makes b start.
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "a", &accept("a")).await;
     w.until("b started", task_is("b", TaskStatus::Running))
         .await;
 
@@ -1328,4 +1312,97 @@ async fn a_stage_wakes_the_lead_and_holds_the_next_one_back() {
     };
     assert_eq!(status("a"), "merged");
     assert_eq!(status("b"), "running");
+}
+
+/// The notice that task `key` waits for its acceptance.
+fn waiting_for(key: &'static str) -> impl Fn(&crossagents_api_types::Event) -> bool {
+    let said = format!("#{key} waits for your acceptance");
+    move |e| matches!(&e.kind, EventKind::NoticeRecorded { line, .. } if line.contains(&said))
+}
+
+#[tokio::test]
+async fn several_waiting_tasks_are_accepted_in_one_call_each_with_its_own_result() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+
+    // Their scopes do not overlap, so they run side by side.
+    let mut a = task("a", goal("[write a.txt=alpha]", "a done"), &[]);
+    a["spec"]["scope"] = json!({ "allow": ["a.txt"] });
+    let mut c = task("c", goal("[write c.txt=gamma]", "c done"), &[]);
+    c["spec"]["scope"] = json!({ "allow": ["c.txt"] });
+    let id = start_run(
+        &t,
+        request(json!([a, c])),
+        json!({ "auto_approve": true, "max_parallel": 2 }),
+    )
+    .await;
+    w.find("a waits", waiting_for("a")).await;
+    w.find("c waits", waiting_for("c")).await;
+
+    // One call for both, and one for a key that names nothing: each comes back on its own.
+    t.send(
+        "boss",
+        &call(
+            "task_accept",
+            json!({ "tasks": ["a", "c", "nope"], "force": true, "reason": "no checks configured" }),
+        ),
+    )
+    .await;
+    // The merges come before the answer is printed, so each is looked for among what was read.
+    w.find(
+        "the results come back",
+        |e| matches!(&e.kind, EventKind::AgentOutput { text, .. } if text.contains("\"results\"")),
+    )
+    .await;
+    w.find("a merged", task_is("a", TaskStatus::Merged)).await;
+    w.find("c merged", task_is("c", TaskStatus::Merged)).await;
+    let answer = w.output();
+    assert!(answer.contains("\"refused\""), "{answer}");
+    assert!(answer.contains("nope"), "{answer}");
+
+    let detail = detail(&t, &id).await;
+    for key in ["a", "c"] {
+        let task = detail["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["key"] == key)
+            .unwrap();
+        assert_eq!(task["status"], "merged", "{task}");
+    }
+}
+
+#[tokio::test]
+async fn a_task_whose_acceptance_releases_downstream_work_is_an_unblock() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+
+    let a = task("a", goal("[write a.txt=alpha]", "a done"), &[]);
+    let b = task("b", goal("[write b.txt=beta]", "b done"), &["a"]);
+    let id = start_run(&t, request(json!([a, b])), json!({ "auto_approve": true })).await;
+    w.until("a waits", waiting_for("a")).await;
+
+    // Accepting a releases b, so the lead is woken at once for it, not after a quiet minute.
+    let line = w
+        .seen
+        .iter()
+        .find_map(|e| match &e.kind {
+            EventKind::NoticeRecorded { line, class, .. }
+                if line.contains("#a waits for your acceptance") =>
+            {
+                assert_eq!(*class, NoticeClass::Unblock, "{line}");
+                Some(line.clone())
+            }
+            _ => None,
+        })
+        .expect("a's notice");
+    assert!(line.contains("unlocks #b"), "{line}");
+
+    t.send("boss", &accept("a")).await;
+    w.until("b waits", waiting_for("b")).await;
+    t.send("boss", &accept_last("b")).await;
+    w.until("run completed", run_status_is(&id, RunStatus::Completed))
+        .await;
 }
