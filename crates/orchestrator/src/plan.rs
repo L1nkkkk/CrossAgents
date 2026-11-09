@@ -156,6 +156,17 @@ pub fn scopes_overlap(a: &Scope, b: &Scope) -> bool {
     })
 }
 
+/// Keys of planned tasks whose `scope.allow` is empty. The scheduler reads an empty allow as
+/// "may touch any file" ([`scopes_overlap`]), so such a task never runs beside another one:
+/// a plan that wants parallelism lists the files each task will change.
+pub fn empty_scope_keys(tasks: &[PlannedTask]) -> Vec<&str> {
+    tasks
+        .iter()
+        .filter(|t| t.spec.scope.allow.is_empty())
+        .map(|t| t.key.as_str())
+        .collect()
+}
+
 /// Tasks that can start now: pending, every dependency merged, every earlier stage ended (see
 /// [`crate::stage`]), no scope overlap with work in progress or with each other, and within the
 /// parallelism limit.
@@ -326,6 +337,19 @@ mod tests {
         assert!(scopes_overlap(&s(&["src/**"]), &s(&["src/auth/mod.rs"])));
         assert!(!scopes_overlap(&s(&["src/auth/**"]), &s(&["docs/**"])));
         assert!(!scopes_overlap(&s(&["./web/*.ts"]), &s(&["server/*.rs"])));
+    }
+
+    #[test]
+    fn empty_scopes_are_listed_for_the_planner() {
+        let mut scoped = planned("b", &[]);
+        scoped.spec.scope = Scope {
+            allow: vec!["src/b/**".into()],
+            deny: vec![],
+        };
+        let tasks = [planned("a", &[]), scoped, planned("c", &[])];
+        assert_eq!(empty_scope_keys(&tasks), ["a", "c"]);
+        // An empty allow still overlaps everything, which is why the planner is warned.
+        assert!(scopes_overlap(&tasks[0].spec.scope, &tasks[1].spec.scope));
     }
 
     #[test]

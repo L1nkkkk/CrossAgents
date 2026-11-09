@@ -7,7 +7,7 @@
 > 状态：`[ ]` 未开始 · `[~]` 进行中 · `[>]` 推迟到后续阶段。
 > 已完成（`[x]`）和已决定不做（`[-]`）的条目挪到 [DONE.md](DONE.md)，章节编号相同；做完一条就剪过去。
 >
-> 最后对照代码核对：2026-11-08（0.2.10，run 8298b08a）。10-31 之后没走这份清单就做完的事，补记在 DONE.md §二十四。
+> 最后对照代码核对：2026-11-09（0.2.12，run a916057f：#turn-end、#verify-flow、#budget-idle、#docs）。10-31 之后没走这份清单就做完的事，补记在 DONE.md §二十四。
 
 ## 一、进程监督（优先）
 
@@ -330,7 +330,7 @@ C 单干模式（依赖 A2 的连接页和字节走 hub、B1 的内置节点和�
 已完成 3 条，见 [DONE.md](DONE.md) 同名一节。
 
 - [ ] **Mac1 macOS CI 跑测试**。依赖：无。验收（建议）：在 macOS runner 上 `cargo test --workspace`、`npm --prefix apps/gui test`、`npm --prefix apps/gui run typecheck` 通过；跑不过的用例逐条记下。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
-- [~] **Mac2 GUI 小修 + 不带 hub 的 ad-hoc 包手测**。§2 的代码已改（2026-11-08，`455741e` 菜单、Dock、托盘、全屏收起、主进程快捷键；`3c49369` 界面上按平台显示 ⌘ 或 Ctrl；`aeb3e8d` 把 `.terminal`、`.fileloc` 算进打开即执行；`6e4392a`「在旁边打开」在 Mac 上写「⌘+单击或中键：在旁边打开」），要在 Mac 上实测：系统菜单；⌘ 快捷键和各处提示，包括用 ⌘/ 打开「键盘快捷键」对话框；点 Dock 图标恢复窗口；点通知；模板图标在浅色、深色和 Retina 下的显示；全屏时先退出全屏再藏进托盘；托盘点击；远程副本带上 quarantine 属性。不带 hub 的 ad-hoc 包配置已做，要实测（2026-11-08，`c529e55` 打包、`8e90dac` 主进程、`6e4392a` 连接页）：dmg 与 zip，各 arm64、x64，`identity` 为 `"-"`，包里没有 hub，托盘 png 在 `mac.extraResources`。这台 Windows 打不出 mac 包。步骤见 [tasks/MACOS.md](tasks/MACOS.md) §8「在 Mac 上打包与安装（不带 hub、ad-hoc 签名）」。Developer ID、公证和自动更新是 Mac4，暂不做。依赖：Mac1 至少 typecheck 与 test 绿；dmg 只能在 macOS 上打。验收（建议）：输入框里 ⌘C / ⌘V / ⌘X / ⌘A / ⌘Z 都能用；⌘Q 退出、⌘M 最小化；点 Dock 图标窗口回来；菜单栏图标在浅色、深色和 Retina 下都看得清；按 [tasks/MACOS.md](tasks/MACOS.md) §8 装上后首次打开能启动，`codesign --verify --deep --strict` 通过，并按 [MULTI-NODE.md](MULTI-NODE.md) §14「怎么实测」连上 Windows hub。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
+- [~] **Mac2 GUI 小修 + 不带 hub 的 ad-hoc 包手测**。§2 的代码已改（2026-11-08，`455741e` 菜单、Dock、托盘、全屏收起、主进程快捷键；`3c49369` 界面上按平台显示 ⌘ 或 Ctrl；`aeb3e8d` 把 `.terminal`、`.fileloc` 算进打开即执行；`6e4392a`「在旁边打开」在 Mac 上写「⌘+单击或中键：在旁边打开」），要在 Mac 上实测：系统菜单；⌘ 快捷键和各处提示，包括用 ⌘/ 打开「键盘快捷键」对话框；点 Dock 图标恢复窗口；点通知；模板图标在浅色、深色和 Retina 下的显示；全屏时先退出全屏再藏进托盘；托盘点击；远程副本带上 quarantine 属性。不带 hub 的 ad-hoc 包配置已做，要实测（2026-11-08，`c529e55` 打包、`8e90dac` 主进程、`6e4392a` 连接页）：dmg 与 zip，各 arm64、x64，`identity` 为 `"-"`，包里没有 hub，托盘 png 在 `mac.extraResources`。这台 Windows 打不出 mac 包。步骤见 [tasks/MACOS.md](tasks/MACOS.md) §8「在 Mac 上打包与安装（不带 hub、ad-hoc 签名）」，给人看的安装说明见 [INSTALL-MAC.md](INSTALL-MAC.md)（`8f3b0ea`：打包、安装、连 Windows 上的 hub、更新与卸载）。Developer ID、公证和自动更新是 Mac4，暂不做。依赖：Mac1 至少 typecheck 与 test 绿；dmg 只能在 macOS 上打。验收（建议）：输入框里 ⌘C / ⌘V / ⌘X / ⌘A / ⌘Z 都能用；⌘Q 退出、⌘M 最小化；点 Dock 图标窗口回来；菜单栏图标在浅色、深色和 Retina 下都看得清；按 [tasks/MACOS.md](tasks/MACOS.md) §8（或 [INSTALL-MAC.md](INSTALL-MAC.md)）装上后首次打开能启动，`codesign --verify --deep --strict` 通过，并按 [MULTI-NODE.md](MULTI-NODE.md) §14「怎么实测」连上 Windows hub。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
 - [~] **Mac3 随 A2 / B1 做环境、终端、字节走 hub**。run 8298b08a 已改、要实测的两条：内置终端在 macOS 上加 `-l`（`c5355fd`，[terminal.rs](../crates/hub/src/terminal.rs) `unix_shell`）；描述文件 `[locate.paths].macos` 补了 `/opt/homebrew/bin` 与 `/usr/local/bin`（同一提交；claude、codex、cursor、codebuddy、with）。还没做：用登录 shell 取 PATH（仍随 B1）、Unix 宿主与锁在 Mac 上实测（§一那条）。字节走 hub 的接口已做（[DONE.md](DONE.md) §八），Mac GUI 连上远程 hub 之后要实测能打开扩展资源和副本。依赖：[MULTI-NODE.md](MULTI-NODE.md) §12 的 A2（代码已完成，验收见上面「要实测」）与 B1；同文 §15「单干模式」定下本机 hub 加内置节点之后，PATH 在节点启动时取一次。浏览器视图要不要把摄像头 / 麦克风写进 `Info.plist` 也挂在这里（[EXTENSIONS.md](EXTENSIONS.md) §9「浏览器视图」）。验收（建议）：从 Dock 启动的 GUI 起的 hub 能找到 Homebrew 和 npm 装的 CLI；内置终端里 `brew` 可用；agent 会话里 `cargo` / `npm` 可用；宿主用进程组管住整棵树；Mac GUI 连远程 hub 时能打开扩展静态资源与工作区文件。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
 - [>] **Mac4 签名、公证、自动更新**。2026-11-08：人有 Mac、没有 Apple Developer 账号，暂不做。范围仍是该文 §3「打包与分发」的 Developer ID、hardened runtime、公证，以及 `electron-updater` 走通。本轮的包不带 hub，没有要一起签的 hub 二进制。依赖：Mac2 的包能在 Mac 上装起来，以及一个 Apple Developer 账号（没有账号做不了，见该文 §6「待定」）。验收（建议）：首次打开不再需要去「隐私与安全性」放行；装 N 版后发布 N+1，GUI 自动下载并在退出时安装。见 [tasks/MACOS.md](tasks/MACOS.md) §5「建议顺序」
 
@@ -343,7 +343,7 @@ C 单干模式（依赖 A2 的连接页和字节走 hub、B1 的内置节点和�
 ## 二十八、省协调成本（统计与通知分类、评审闭环、消息直传与会话交接）
 
 > 来源：2026-11-09 run `c917a9ab`（标题「省协调成本：统计与通知分类、评审闭环、消息直传与会话交接」）。设计、实测结果与逐条说明见 [tasks/COORDINATION.md](tasks/COORDINATION.md)；**完成清单见 [DONE.md](DONE.md) 同名一节**（9 个任务全部合并，已从本清单剪过去）。
-> **本轮的新功能要等本轮落地、hub 升级后才生效**；这一轮自己是在 hub 0.2.11 上跑的，仍按 0.2.11 的流程走（每条通知立刻叫醒、lead 手动开评审、手动接受）。人当时在 Mac 上测远程 GUI，连的就是这台机器上正在跑的 0.2.11，本轮没有停、重启或升级它。
+> **已随 0.2.12 生效**：2026-11-09 发版（`cdfe86b`），本机 hub 已在跑 0.2.12。历史：那一轮自己是在 hub 0.2.11 上跑的，仍按 0.2.11 的流程走（每条通知立刻叫醒、lead 手动开评审、手动接受）。人当时在 Mac 上测远程 GUI，连的就是这台机器上正在跑的 0.2.11，那一轮没有停、重启或升级它。
 > 标记：**【实测】** 还要在真实 agent / 真机上量；**【下一轮】** 实现或改动留到后续；**【待评估 / 待定】** 判定或做法未定；**【已知】** 已知行为，本轮不改。状态沿用 `[ ]` 未开始 · `[~]` 进行中 · `[>]` 推迟。
 > 下面是 `lead/leftovers`（2026-11-09 03:03 更新版）的**全部**条目，逐条落到这里和设计稿 §11「遗留」；已修、不再是遗留的两条在各自小节里写明一句。
 
@@ -373,7 +373,7 @@ C 单干模式（依赖 A2 的连接页和字节走 hub、B1 的内置节点和�
 - [ ] 【实测】hub 重启后恢复 `Reviewing` / `Passed` 的任务只有单元测试（`crates/orchestrator/src/tests_verification.rs`），没有 mock 重启测试
 - [ ] 【实测】原 worker 会话已不在、退回时换新会话的路径没有 mock 测试
 - 已修、不再是遗留（#task-budget `2201c36`）：`review_submit` 的 `reviewed_sha` 原来要求完整相等、拒绝信息却给 8 位短提交号；现在去空白、不分大小写、至少 7 位前缀算同一个提交，拒绝信息给完整提交号。设计稿 §4 写了一句
-- 【生效条件，非遗留，但须记住】新评审闭环要等本轮落地、hub 升级后才生效；这一轮自己按 0.2.11 的流程走（lead 手动开评审、手动接受）
+- 【生效情况，非遗留】新评审闭环已随 0.2.12 生效（本机 hub 已在跑 0.2.12）；run `c917a9ab` 那一轮自己是按 0.2.11 的流程走的（lead 手动开评审、手动接受）
 
 ### 28.5 每轮新会话（#lead-session，已合并 `f95fe4b`）
 
@@ -385,8 +385,6 @@ C 单干模式（依赖 A2 的连接页和字节走 hub、B1 的内置节点和�
 ### 28.6 任务预算（#task-budget，已合并 `2201c36`）
 
 - [~] 【已知】预算都没配时整套检查跳过、**默认不起作用**；下面几条只在配了预算时会碰上
-- [ ] 【下一轮】`max_idle_minutes` 只认任务状态、进度、检查、命令和用量事件（`crates/hub/src/task_cost.rs:126-234`），不认 agent 在回合里的工具调用和输出；用量到回合结束才报，一个 25 分钟的长回合会被算成无进展、可能误报超限并停掉自动退回。要把被派 agent 的回合活动也算作进展
-- [ ] 【下一轮】故障自动重试（`crates/orchestrator/src/attempts.rs` 的 `retry_same` / `retry_new_session`）不看 `report.budget_over`，超限任务出错仍按 `max_attempts` 自动重试；`attempts.rs` 不在本轮范围
 - [ ] 【实测】hub 的预算检查（`crates/hub/src/budget.rs` 的 `check_tasks`，按 tick 跑）没有端到端测试，只测了纯函数和编排器发的通知；`crates/mock-agent/tests/task_budget.rs` 没写；`crossagents usage --by task` 没在真实数据上跑过、没有输出样例
 - [ ] 【待评估】任务账本不落表，hub 启动时重放 `events` 表重建（`Store` trait 在 `crates/core/src/store.rs`，不在本轮范围）；重启不丢，但事件越多启动越慢；`usage` 表仍然没人写
 - [~] 【已知】范围外的改动：`crates/cli/src/cmd/events.rs` 给三个新事件（`task.budget`、`task.reviewer`、`task.check_timed`）加了 match 分支；`bindings/TaskReport.ts` 重新生成；`TaskSpec` 和 `PlannedTask` 去掉了 `Eq`（`TaskBudget` 含 `f64`）
@@ -405,16 +403,9 @@ C 单干模式（依赖 A2 的连接页和字节走 hub、B1 的内置节点和�
 ### 28.9 hub 平台
 
 - [ ] 【待定，问过人】任务验收每条命令的超时写死 600 秒（`crates/orchestrator/src/verify.rs:57`），`crossagents.toml` 的 `timeout_secs` 只管落地前的检查；这一轮靠把验收拆成多条命令绕过。是否做成可配：待定
-- [ ] 【下一轮】`task_verify` 只能整组重跑验收，不能只重跑挂掉的那一条；一条偶发失败就要再等整组（约 20 分钟）
-- [ ] 【下一轮】空的 `scope.allow` 被当成「可能改任何文件」（`crates/orchestrator/src/plan.rs:147-150`），计划里不写范围就全部串行；协议文本或 `plan_submit` 应提醒 lead 写范围
 - [ ] 【下一轮】验收通过后 worker 又交一次会让检查重跑（#notices 发生了两次，每次约 12 分钟）
-- [ ] 【下一轮】验收有一条没过时任务状态仍显示 `passed`（只表示验收跑完了），靠 `task_accept` 拒绝来拦；任务列表里看不出没过
+- [~] 【下一轮 / 剩一半】验收没过时任务状态仍叫 `passed`（只表示验收跑完了）。run a916057f 的 #verify-flow（`b2bb2d4`）已让 `task_list` / `task_get` 带 `checks_ok`、GUI 在 `passed` 旁标「验收未过」，见 [DONE.md](DONE.md) §二十八。还差：状态本身不区分（没有单独的「验收未过」状态），只看 `status` 的调用方（CLI、外部脚本、通知文字）仍看不出；要不要拆状态待定
 - [ ] 【待评估】`usage_get` 显示 Cursor 账号 `limit_reached=true`，但月度窗口只用了 22%，且 #phase-model 在 Cursor 账号上跑了 **9 个真实回合都没碰到限额错误**：这个判定很可能不对，依据待评估。因此 #rounds、#review-loop、#lead-session、#task-budget、#phase-model 都被改派给 Cleo 2（Claude Haiku）
 - [~] 【已知】任务的 mock-agent 测试不在验收里时（如 #rounds），改了共用类型的编译问题要等下一个跑 mock 的任务才暴露；主导靠人工查构造处兜底
 - [~] 【已知】两个任务各自在分支上验收、先后合并后的组合没有人自动验证：#review-loop 与 #lead-session 合并后，主导在 run 分支 `5b1a6d1` 上手动跑了 `crossagents-orchestrator` 和两边相关的 8 个 mock 测试文件，全过
-- [ ] 【下一轮】Claude Haiku 的会话多次以 `end_turn` 收尾却没交结果：#lead-session 的 worker 没汇报、任务 stalled；#replay 的评审把意见写在回复里、没提交结论；#task-budget 的 worker 在后台跑整组测试、**等 Monitor 通知时结束了回合**（回合结束后这种通知叫不醒它）。hub 只发一条「没汇报 / 没结论」通知要 lead 介入；可考虑：回合以 `end_turn` 结束而任务还在 running / reviewing 时 hub 自动提醒一次「用工具交结果」、评审把回复文字附在通知里、worker 协议文字写明「不要等后台任务的通知」。经验库 `dc8dc64a`
-- [ ] 【下一轮】lead 用 `agent_send` 的 `now:true` 打断 worker、插一条消息时，被取消的回合仍按「没汇报就结束」处理：任务标 `stalled`、叫醒 lead，其实那条消息已经在排队、新回合马上就开（#docs 这次：回合取消到标 stalled 隔 6 毫秒，0.2 秒后新回合开始）。worker 一报进度或交付就恢复（`crates/orchestrator/src/tasks.rs:607`、`:707`），只是白叫醒 lead 一次。改法：回合以 `cancelled` 结束、而这个 agent 还有排队消息时，不标 stalled、不发通知（`crates/orchestrator/src/attempts.rs:283-286` 的 `turn_ended`）
-
-### 28.10 其他
-
-- [ ] 【下一轮】`scripts/release.mjs:42` 的注释过时：`build.extraResources` 应为 `build.win.extraResources`
+- [ ] 【下一轮】end_turn 没交结果的剩余部分（主体已由 run a916057f 的 #turn-end `c7875f7` 做完，见 [DONE.md](DONE.md) §二十八）：评审空手结束时，通知 lead 的那条还没附上评审的回复文字（#replay 那次意见写在回复里，lead 仍要自己去翻）；评审「已提醒过」记在内存（`Orchestrator.review_reminders`），hub 重启后同一轮评审会再提醒一次。经验库 `dc8dc64a`

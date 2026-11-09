@@ -40,12 +40,51 @@ fn clip(mut text: String, limit: usize) -> String {
     text
 }
 
+/// Whether the report's checks all passed: `None` before any ran (nothing to say about it).
+/// `Passed` only says the report is ready, so this is how a failed verification shows.
+fn checks_ok(report: &TaskReport) -> Option<bool> {
+    if report.checks.is_empty() {
+        None
+    } else {
+        Some(report.checks.iter().all(|c| c.passed))
+    }
+}
+
+/// A verification that reruns only some of the checks (`task_verify` with `only_failed`): the
+/// commands that failed or timed out last time, and every result from that round (the passing
+/// ones stand; a failure the rerun cannot reach keeps its old result).
+struct Recheck {
+    commands: Vec<String>,
+    previous: Vec<crossagents_core::CheckResult>,
+}
+
+/// The full check list after a rerun of only some commands: each command in `acceptance` takes
+/// the new result when it was rerun, else the one it had last time. A command the rerun never
+/// reached (an earlier check failed and the group stops there) keeps its old failure.
+fn merge_recheck(
+    acceptance: &[String],
+    previous: &[crossagents_core::CheckResult],
+    rerun: &[crossagents_core::CheckResult],
+) -> Vec<crossagents_core::CheckResult> {
+    acceptance
+        .iter()
+        .filter_map(|command| {
+            rerun
+                .iter()
+                .find(|c| &c.command == command)
+                .or_else(|| previous.iter().find(|c| &c.command == command))
+                .cloned()
+        })
+        .collect()
+}
+
 fn task_json(task: &Task) -> Value {
     json!({
         "task_id": task.id,
         "key": task.key,
         "title": task.title,
         "status": task.status,
+        "checks_ok": checks_ok(&task.report),
         "issuer": task.issuer,
         "assignee": task.assignee,
         "depends_on": task.depends_on,
@@ -730,7 +769,7 @@ impl Orchestrator {
         .await;
         let this = self.clone();
         let worker = caller.id;
-        tokio::spawn(async move { this.report_done(id, worker, token).await });
+        tokio::spawn(async move { this.report_done(id, worker, token, None).await });
         Ok(())
     }
 
@@ -777,8 +816,14 @@ impl Orchestrator {
     /// into its report as the failure and the report goes to its issuer as an unverified one.
     /// A verification that never lands would leave the task stuck, refused to accept, rework
     /// or drop at once (docs/TODO.md §九 ①).
-    async fn report_done(self: &Arc<Self>, id: TaskId, worker: AgentId, token: String) {
-        if let Err(err) = self.verify_and_record(id, worker, &token).await {
+    async fn report_done(
+        self: &Arc<Self>,
+        id: TaskId,
+        worker: AgentId,
+        token: String,
+        recheck: Option<Recheck>,
+    ) {
+        if let Err(err) = self.verify_and_record(id, worker, &token, recheck).await {
             self.record_verification_error(id, worker, &token, err)
                 .await;
         }
@@ -790,6 +835,7 @@ impl Orchestrator {
         id: TaskId,
         worker: AgentId,
         token: &str,
+        recheck: Option<Recheck>,
     ) -> Result<(), CoreError> {
         let task = self.store.get_task(id).await?;
         let run = self.store.get_run(task.run_id).await?;
@@ -806,13 +852,21 @@ impl Orchestrator {
         let diff_stat = self.ws_for(&run).diff_stat(&dir, &base).await.ok();
         let unchecked = task.spec.acceptance.is_empty();
         let started = std::time::Instant::now();
-        let checks = if unchecked {
+        let commands = match &recheck {
+            Some(recheck) => recheck.commands.clone(),
+            None => task.spec.acceptance.clone(),
+        };
+        let rerun = if unchecked {
             Vec::new()
         } else {
-            self.verifier.check(&dir, &task.spec.acceptance).await
+            self.verifier.check(&dir, &commands).await
+        };
+        let checks = match &recheck {
+            Some(recheck) => merge_recheck(&task.spec.acceptance, &recheck.previous, &rerun),
+            None => rerun.clone(),
         };
         let check_ms = started.elapsed().as_millis() as u64;
-        let related = self.related_to_checks(&run.repo, &checks).await;
+        let related = self.related_to_checks(&run.repo, &rerun).await;
         let _guard = self.lock(run.id).await;
         let mut task = self.store.get_task(id).await?;
         if !Self::still_verifying(&task, token) {
@@ -923,12 +977,19 @@ impl Orchestrator {
 
     /// Runs a task's checks again, or for the first time after the hub restarted before they
     /// finished (`interrupted`): a fresh verification id, so an older report cannot land on
-    /// it. Its issuer only; the result arrives as a message.
+    /// it. With `only_failed`, only the commands that failed or timed out last time run again;
+    /// the results that passed are kept. Its issuer only; the result arrives as a message.
     pub(crate) async fn task_verify(
         self: &Arc<Self>,
         caller: &Agent,
         input: Value,
     ) -> Result<Value, CoreError> {
+        #[derive(Deserialize)]
+        struct A {
+            #[serde(default)]
+            only_failed: bool,
+        }
+        let a: A = args(input.clone())?;
         let (run, task) = self.task_arg(caller, &input).await?;
         Self::require_issuer(&run, &task, caller)?;
         let _guard = self.lock(run.id).await;
@@ -946,6 +1007,27 @@ impl Orchestrator {
             )));
         }
         Self::worktree(&task)?;
+        let recheck = if a.only_failed {
+            let failed: Vec<String> = task
+                .report
+                .checks
+                .iter()
+                .filter(|c| !c.passed)
+                .map(|c| c.command.clone())
+                .collect();
+            if failed.is_empty() {
+                return Err(CoreError::Conflict(format!(
+                    "#{} has no failed checks to rerun (none failed, or none ran); call task_verify without only_failed to run them all",
+                    task.key
+                )));
+            }
+            Some(Recheck {
+                commands: failed,
+                previous: task.report.checks.clone(),
+            })
+        } else {
+            None
+        };
         task.report.interrupted = false;
         task.report.forced = None;
         task.report.checks.clear();
@@ -956,10 +1038,15 @@ impl Orchestrator {
         let this = self.clone();
         let worker = task.assignee.unwrap_or(run.planner);
         let id = task.id;
-        tokio::spawn(async move { this.report_done(id, worker, token).await });
+        tokio::spawn(async move { this.report_done(id, worker, token, recheck).await });
+        let next = if a.only_failed {
+            "End your turn; the failed checks run again (the ones that passed are kept) and the result arrives as a message."
+        } else {
+            "End your turn; the checks' result arrives as a message."
+        };
         Ok(json!({
             "status": "verifying",
-            "next": "End your turn; the checks' result arrives as a message.",
+            "next": next,
         }))
     }
 
@@ -1918,7 +2005,42 @@ fn inside(root: &Path, rel: &str) -> Result<PathBuf, CoreError> {
 
 #[cfg(test)]
 mod tests {
+    use crossagents_core::CheckResult;
+
     use super::*;
+
+    fn check(command: &str, passed: bool) -> CheckResult {
+        CheckResult {
+            command: command.into(),
+            exit_code: Some(if passed { 0 } else { 1 }),
+            passed,
+            output: String::new(),
+        }
+    }
+
+    #[test]
+    fn checks_ok_tells_a_failed_verification_from_none() {
+        let mut report = TaskReport::default();
+        // Nothing ran: nothing to claim either way.
+        assert_eq!(checks_ok(&report), None);
+        report.checks = vec![check("a", true), check("b", true)];
+        assert_eq!(checks_ok(&report), Some(true));
+        report.checks[1].passed = false;
+        assert_eq!(checks_ok(&report), Some(false));
+    }
+
+    #[test]
+    fn a_recheck_keeps_the_results_it_did_not_run() {
+        let acceptance: Vec<String> = ["a", "b", "c"].iter().map(|s| (*s).to_owned()).collect();
+        let previous = vec![check("a", true), check("b", false), check("c", false)];
+        // b was rerun and passed; the rerun stopped before reaching c.
+        let rerun = vec![check("b", true)];
+        let merged = merge_recheck(&acceptance, &previous, &rerun);
+        assert_eq!(
+            merged.iter().map(|c| (c.command.as_str(), c.passed)).collect::<Vec<_>>(),
+            [("a", true), ("b", true), ("c", false)]
+        );
+    }
 
     #[test]
     fn paths_stay_inside() {

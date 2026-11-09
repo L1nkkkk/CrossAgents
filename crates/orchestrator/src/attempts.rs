@@ -179,6 +179,30 @@ pub fn retries_so_far(task: &Task) -> u32 {
         .count() as u32
 }
 
+/// The note on a run whose turn was cut short while a message waited for the agent (an
+/// `agent_send` with `now: true`): the next turn carries on in a new run.
+pub const SUPERSEDED: &str =
+    "its turn ended while a message waited for the worker; the next turn carries on";
+
+/// The note on an open run whose worker was already reminded to report: its next turn that
+/// ends without a report stalls the task.
+pub const REMINDED: &str = "the worker was reminded to report once";
+
+/// Whether the open run's worker was already reminded to report.
+fn reminded(task: &Task) -> bool {
+    task.runs
+        .last()
+        .is_some_and(|run| run.note.as_deref() == Some(REMINDED))
+}
+
+/// The reminder a worker gets when a turn ends without a report.
+fn reminder_text(task: &Task) -> String {
+    format!(
+        "Your turn on {} ended without a report, and the task is still yours. Report with the tools now: task_progress for where it stands, task_complete when it is done (with a summary), task_ask if you are stuck, or task_fail if it cannot be done. Do not wait for a background command or a Monitor notification: a notification cannot wake a turn that has ended. Run what you need in the foreground, within this turn. If this turn also ends without a report, the task stalls.",
+        brief::task_ref(task)
+    )
+}
+
 /// Whether `agent`'s turn `turn` is this task's open run: the guard that keeps a duplicate
 /// event, or another run's turn, from being taken for this one.
 fn open_run(task: &Task, agent: AgentId, turn: Option<&MessageId>) -> bool {
@@ -265,6 +289,7 @@ impl Orchestrator {
         agent: AgentId,
         turn: Option<MessageId>,
         error: Option<String>,
+        cancelled: bool,
     ) {
         let issuer = task.issuer_or(run.planner);
         let name = self
@@ -281,13 +306,53 @@ impl Orchestrator {
             return;
         }
         let Some(error) = error else {
+            // A turn cut short by a message sent with `now: true` ends cancelled with that
+            // message waiting: its next turn carries on. This run closes and the next one
+            // takes that turn; nothing stalls and nobody is told. A cancel with nothing
+            // waiting stalls as before.
+            if cancelled {
+                if !self.host.has_queued(agent).await {
+                    close(
+                        task,
+                        TaskRunOutcome::NoReport,
+                        Some("its turn was cancelled".into()),
+                        false,
+                    );
+                    self.stall(run, task, &name, None, None).await;
+                    return;
+                }
+                close(
+                    task,
+                    TaskRunOutcome::NoReport,
+                    Some(SUPERSEDED.into()),
+                    false,
+                );
+                begin(task, Some(agent), None);
+                self.save_run(task).await;
+                return;
+            }
+            // The first turn of a run that ends empty-handed gets a reminder; the second
+            // stalls (docs/TODO.md §28.9).
+            if !reminded(task) {
+                self.remind(task, agent, issuer).await;
+                return;
+            }
             close(task, TaskRunOutcome::NoReport, None, false);
             self.stall(run, task, &name, None, None).await;
             return;
         };
         let fault = classify(&error);
         let retries = retries_so_far(task);
-        let action = action_for(fault, retries);
+        let mut action = action_for(fault, retries);
+        // A task over its budget is not tried again by itself: its issuer decides.
+        let over_budget = task
+            .report
+            .budget_over
+            .clone()
+            .filter(|_| action != Action::Stop);
+        if over_budget.is_some() {
+            action = Action::Stop;
+        }
         close(
             task,
             fault.outcome(),
@@ -297,11 +362,12 @@ impl Orchestrator {
         let run_no = task.runs.len() as u32;
         match action {
             Action::Stop => {
-                let why = match fault.allowance() {
-                    Some(cap) => {
+                let why = match (over_budget, fault.allowance()) {
+                    (Some(over), _) => format!("its budget is used up: {over}"),
+                    (None, Some(cap)) => {
                         format!("it was retried {cap} time(s) already; its allowance is used up")
                     }
-                    None => "a retry would fail the same way".into(),
+                    (None, None) => "a retry would fail the same way".into(),
                 };
                 self.stall(run, task, &name, Some(error), Some(why)).await;
             }
@@ -314,6 +380,30 @@ impl Orchestrator {
                     .await;
             }
         }
+    }
+
+    /// The open run's turn ended without a report for the first time: the worker is told to
+    /// report with the tools. The run stays open and takes the reminder's turn.
+    async fn remind(&self, task: &mut Task, agent: AgentId, issuer: AgentId) {
+        let envelope = self.relay_envelope(issuer, reminder_text(task));
+        if let Some(open) = task.runs.last_mut() {
+            open.message = Some(envelope.id);
+            open.note = Some(REMINDED.into());
+        }
+        if !self.save_run(task).await {
+            return;
+        }
+        self.send_in_background(agent, envelope);
+    }
+
+    /// Records the task's runs as they are now; `false` when that failed.
+    async fn save_run(&self, task: &mut Task) -> bool {
+        task.updated_at = Utc::now();
+        if let Err(err) = self.store.update_task(task).await {
+            tracing::error!(task = %task.key, error = %err, "cannot record a run");
+            return false;
+        }
+        true
     }
 
     /// The run stops here: the task is `Stalled` and its issuer reads why (the rule before
@@ -726,10 +816,15 @@ mod tests {
         store: Arc<dyn Store>,
         sent: tokio::sync::Mutex<Vec<(AgentId, String)>>,
         notices: tokio::sync::Mutex<Vec<String>>,
+        /// Whether a message waits for the agent (`has_queued`).
+        queued: std::sync::atomic::AtomicBool,
     }
 
     #[async_trait]
     impl AgentHost for FakeHost {
+        async fn has_queued(&self, _: AgentId) -> bool {
+            self.queued.load(std::sync::atomic::Ordering::SeqCst)
+        }
         async fn send(&self, _: AgentId, _: MessageSource, _: String) -> Result<(), CoreError> {
             Ok(())
         }
@@ -901,6 +996,7 @@ mod tests {
             store: store.clone(),
             sent: tokio::sync::Mutex::new(Vec::new()),
             notices: tokio::sync::Mutex::new(Vec::new()),
+            queued: std::sync::atomic::AtomicBool::new(false),
         });
         let orchestrator = Orchestrator::new(
             store.clone(),
@@ -1003,10 +1099,27 @@ mod tests {
 
         /// The turn of the run that is open now ends with `error`.
         async fn end_turn(&self, task: &mut Task, error: Option<&str>) -> Task {
+            self.finish_turn(task, error, false).await
+        }
+
+        /// The turn of the run that is open now is cancelled (`agent_send` with `now: true`,
+        /// or a stop).
+        async fn cancel_turn(&self, task: &mut Task) -> Task {
+            self.finish_turn(task, None, true).await
+        }
+
+        async fn finish_turn(&self, task: &mut Task, error: Option<&str>, cancelled: bool) -> Task {
             let turn = task.runs.last().and_then(|run| run.message);
             let agent = task.assignee.unwrap();
             self.orchestrator
-                .turn_ended(&self.run, task, agent, turn, error.map(str::to_owned))
+                .turn_ended(
+                    &self.run,
+                    task,
+                    agent,
+                    turn,
+                    error.map(str::to_owned),
+                    cancelled,
+                )
                 .await;
             self.orchestrator.drain_relays().await;
             self.store.get_task(task.id).await.unwrap()
@@ -1191,6 +1304,7 @@ mod tests {
                 agent,
                 turn,
                 Some("request timed out".into()),
+                false,
             )
             .await;
         f.orchestrator.drain_relays().await;
@@ -1203,6 +1317,7 @@ mod tests {
                 agent,
                 turn,
                 Some("request timed out".into()),
+                false,
             )
             .await;
         f.orchestrator.drain_relays().await;
@@ -1235,10 +1350,221 @@ mod tests {
     async fn a_turn_that_ends_without_a_report_does_not_end_the_task() {
         let f = live().await;
         let mut task = f.dispatched("a").await;
+        // The first empty-handed turn is reminded, the second stalls.
+        let mut task = f.end_turn(&mut task, None).await;
         let task = f.end_turn(&mut task, None).await;
         assert_eq!(task.status, TaskStatus::Stalled);
         assert_eq!(task.runs.len(), 1);
         assert_eq!(task.runs[0].outcome, TaskRunOutcome::NoReport);
         let _ = f.lead.id;
+    }
+
+    #[tokio::test]
+    async fn the_first_turn_without_a_report_is_reminded_once() {
+        let f = live().await;
+        let mut task = f.dispatched("a").await;
+        let first_turn = task.runs[0].message;
+        let before = f.host.notices.lock().await.len();
+        let mut task = f.end_turn(&mut task, None).await;
+        assert_eq!(task.status, TaskStatus::Running, "reminded, not stalled");
+        assert_eq!(task.runs.len(), 1, "the same run");
+        assert_eq!(task.runs[0].outcome, TaskRunOutcome::Running);
+        assert_eq!(task.runs[0].note.as_deref(), Some(REMINDED));
+        assert_ne!(
+            task.runs[0].message, first_turn,
+            "it takes the reminder's turn"
+        );
+        {
+            let sent = f.host.sent.lock().await;
+            assert_eq!(sent.len(), 2);
+            assert_eq!(Some(sent[1].0), task.assignee);
+            assert!(
+                sent[1].1.contains("task_complete")
+                    && sent[1].1.contains("task_progress")
+                    && sent[1].1.contains("cannot wake a turn"),
+                "{}",
+                sent[1].1
+            );
+            assert_eq!(
+                f.host.notices.lock().await.len(),
+                before,
+                "the lead is not told"
+            );
+        }
+        // The reminder's turn also ends empty-handed: now it stalls, and no second reminder.
+        let task = f.end_turn(&mut task, None).await;
+        assert_eq!(task.status, TaskStatus::Stalled);
+        assert_eq!(task.runs[0].outcome, TaskRunOutcome::NoReport);
+        assert_eq!(f.host.sent.lock().await.len(), 2);
+        let notices = f.host.notices.lock().await;
+        assert!(
+            notices
+                .iter()
+                .any(|n| n.contains("ended a turn without reporting")),
+            "{notices:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_cut_short_by_a_waiting_message_does_not_stall() {
+        let f = live().await;
+        let mut task = f.dispatched("a").await;
+        // `agent_send now: true`: the turn ends cancelled (no error) with the message queued.
+        f.host
+            .queued
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let before = f.host.notices.lock().await.len();
+        let mut task = f.cancel_turn(&mut task).await;
+        assert_eq!(task.status, TaskStatus::Running);
+        assert_eq!(task.runs.len(), 2);
+        assert_eq!(task.runs[0].outcome, TaskRunOutcome::NoReport);
+        assert_eq!(task.runs[0].note.as_deref(), Some(SUPERSEDED));
+        assert!(!task.runs[0].retried);
+        assert_eq!(task.runs[1].outcome, TaskRunOutcome::Running);
+        assert_eq!(task.runs[1].agent, task.assignee);
+        assert!(task.runs[1].message.is_none(), "it takes the next turn");
+        assert_eq!(
+            f.host.notices.lock().await.len(),
+            before,
+            "the lead is not told"
+        );
+        assert_eq!(f.host.sent.lock().await.len(), 1, "nothing is sent");
+        // The next turn is the new run's: with nothing waiting, it is reminded as usual.
+        f.host
+            .queued
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let task = f.end_turn(&mut task, None).await;
+        assert_eq!(task.status, TaskStatus::Running);
+        assert_eq!(task.runs[1].note.as_deref(), Some(REMINDED));
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_ends_by_itself_is_reminded_even_with_a_message_waiting() {
+        let f = live().await;
+        let mut task = f.dispatched("a").await;
+        // Not cancelled: a waiting message does not make it an interruption.
+        f.host
+            .queued
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut task = f.end_turn(&mut task, None).await;
+        assert_eq!(task.status, TaskStatus::Running);
+        assert_eq!(task.runs.len(), 1, "the run is not closed");
+        assert_eq!(task.runs[0].note.as_deref(), Some(REMINDED));
+        // And the second empty end stalls, waiting message or not.
+        let task = f.end_turn(&mut task, None).await;
+        assert_eq!(task.status, TaskStatus::Stalled);
+        assert_eq!(task.runs[0].outcome, TaskRunOutcome::NoReport);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_turn_with_nothing_waiting_stalls_as_before() {
+        let f = live().await;
+        let mut task = f.dispatched("a").await;
+        let task = f.cancel_turn(&mut task).await;
+        assert_eq!(task.status, TaskStatus::Stalled, "no reminder for a cancel");
+        assert_eq!(task.runs.len(), 1);
+        assert_eq!(task.runs[0].outcome, TaskRunOutcome::NoReport);
+        assert_eq!(f.host.sent.lock().await.len(), 1, "nothing is sent");
+        let notices = f.host.notices.lock().await;
+        assert!(
+            notices
+                .iter()
+                .any(|n| n.contains("ended a turn without reporting")),
+            "{notices:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reviewer_without_a_verdict_is_reminded_once() {
+        let f = live().await;
+        let mut task = f.dispatched("a").await;
+        let reviewer = f.lead.id;
+        task.reviewer = Some(reviewer);
+        task.report.review_attempt = 1;
+        let issuer = f.run.planner;
+        // The first empty turn: reminded, the lead does not hear of it.
+        assert!(
+            f.orchestrator
+                .review_turn_ended(&task, reviewer, issuer, false)
+                .await
+        );
+        f.orchestrator.drain_relays().await;
+        {
+            let sent = f.host.sent.lock().await;
+            let last = sent.last().unwrap();
+            assert_eq!(last.0, reviewer);
+            assert!(
+                last.1.contains("review_submit") && last.1.contains("cannot wake a turn"),
+                "{}",
+                last.1
+            );
+        }
+        // The second: the lead is told (no second reminder).
+        let sent = f.host.sent.lock().await.len();
+        assert!(
+            !f.orchestrator
+                .review_turn_ended(&task, reviewer, issuer, false)
+                .await
+        );
+        f.orchestrator.drain_relays().await;
+        assert_eq!(f.host.sent.lock().await.len(), sent);
+        // A new review round gets its own reminder.
+        task.report.review_attempt = 2;
+        assert!(
+            f.orchestrator
+                .review_turn_ended(&task, reviewer, issuer, false)
+                .await
+        );
+        // A cancelled turn: quiet only when a message waits for the reviewer.
+        assert!(
+            !f.orchestrator
+                .review_turn_ended(&task, reviewer, issuer, true)
+                .await
+        );
+        f.host
+            .queued
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            f.orchestrator
+                .review_turn_ended(&task, reviewer, issuer, true)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_over_its_budget_is_not_retried() {
+        let f = live().await;
+        let mut task = f.dispatched("a").await;
+        task.report.budget_over = Some("120000 tokens of 100000".into());
+        f.store.update_task(&task).await.unwrap();
+        let task = f.end_turn(&mut task, Some("request timed out")).await;
+        assert_eq!(task.status, TaskStatus::Stalled, "a stop, not a retry");
+        assert_eq!(task.runs.len(), 1);
+        assert_eq!(task.runs[0].outcome, TaskRunOutcome::Infrastructure);
+        assert!(!task.runs[0].retried);
+        assert_eq!(f.host.sent.lock().await.len(), 1, "nothing was resent");
+        let notices = f.host.notices.lock().await;
+        assert!(
+            notices
+                .iter()
+                .any(|n| n.contains("its budget is used up: 120000 tokens of 100000")),
+            "{notices:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_task_over_its_budget_is_not_given_a_new_session() {
+        let f = live().await;
+        let mut task = f.dispatched("a").await;
+        let worker = task.assignee;
+        task.report.budget_over = Some("over".into());
+        f.store.update_task(&task).await.unwrap();
+        let task = f
+            .end_turn(&mut task, Some("context length exceeded: 400000 > 200000"))
+            .await;
+        assert_eq!(task.status, TaskStatus::Stalled);
+        assert_eq!(task.assignee, worker, "the session was not replaced");
+        assert_eq!(task.runs[0].outcome, TaskRunOutcome::SessionLost);
+        assert!(!task.runs[0].retried);
     }
 }

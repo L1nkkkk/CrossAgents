@@ -1261,6 +1261,7 @@ export function TaskDetail({ runId, taskId }: { runId: string; taskId: string })
           <div className="row" style={{ gap: 8 }}>
             <code>#{task.key}</code>
             <StatusChip status={task.status} tone={taskTone(task.status)} />
+            {task.status === "passed" && task.report.checks.some((c) => !c.passed) && <span className="chip danger">验收未过</span>}
             <span className="spacer" />
             <a className="small" href={`#/runs/${detail.data!.run.id}/tasks/${task.id}`}>
               {detail.data!.run.title}

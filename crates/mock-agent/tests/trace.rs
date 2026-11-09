@@ -82,6 +82,23 @@ async fn a_worker_gets_stuck(t: &TestHub, w: &mut Watcher) -> Stuck {
         |e| matches!(&e.kind, EventKind::AgentTurnCompleted { id, .. } if *id == worker),
     )
     .await;
+    // A turn that ends without a report gets one reminder from the hub (docs/TODO.md §28.9);
+    // the mock ends that turn empty-handed too, and only then does the task stall.
+    w.until("the reminder's turn stalls the task", |e| {
+        matches!(&e.kind,
+            EventKind::TaskStatusChanged { key, to: TaskStatus::Stalled, .. } if key == "a")
+    })
+    .await;
+    let transcript: Value = t
+        .get(&format!("/v1/agents/{worker}/transcript"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        transcript.to_string().contains("ended without a report"),
+        "the worker was not reminded before it stalled: {transcript}"
+    );
     t.send(&worker.to_string(), "[fail] where I got stuck")
         .await;
     w.until("the failed turn", |e| {

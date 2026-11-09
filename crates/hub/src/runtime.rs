@@ -1383,6 +1383,21 @@ impl Runtime {
         }
     }
 
+    /// Whether a message is in line for the agent, asked as one of its turns ends: one
+    /// waiting in its inbox (or carried to a session not open yet), or one whose turn has
+    /// begun already. The inbox lets the ended turn go before that end is published, so a
+    /// running turn here is the next one, started from the line; the turn that ended never
+    /// counts.
+    pub async fn has_queued(&self, id: AgentId) -> bool {
+        let live = self.live.lock().await.get(&id).map(|live| {
+            live.inbox.has_waiting() || live.inbox.running.lock().unwrap().is_some()
+        });
+        match live {
+            Some(queued) => queued,
+            None => self.carried_waiting(id).await,
+        }
+    }
+
     /// What the agent's session does with messages now, from the same inbox the hub admits
     /// them into (docs/tasks/DELIVERY-AUDIT.md §8 P1-4). An external agent's messages wait
     /// for it to fetch them (`held`); an agent with no session is idle, or still `starting`

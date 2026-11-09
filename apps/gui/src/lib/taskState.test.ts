@@ -50,7 +50,7 @@ test("passed says what was actually checked, never 'done' for unchecked", () => 
   assert.equal(passed(report({ checks: [check(true)] })).tone, "ok");
   // Failed checks are not a pass, and are not quiet either.
   const failed = passed(report({ checks: [check(false)] }));
-  assert.equal(failed.word, "检查未过");
+  assert.equal(failed.word, "验收未过");
   assert.equal(failed.tone, "danger");
   // No checks at all: the report is ready, nothing verified it.
   assert.equal(passed(report({ unchecked: true })).word, "未验 · 待接收");

@@ -9,6 +9,11 @@
 //! Agents report cumulative figures per session. A session that starts again (`starting`)
 //! counts from zero, as in [`crate::usage`]. Dollars are the agents' own reports (`cost_usd`)
 //! and the price table's estimate; the two are kept apart, and neither is a hard cap.
+//!
+//! "Idle" counts from the last sign of progress on a task. An agent's own activity counts as
+//! progress too, so a long turn that keeps calling tools or writing output is not idle: the
+//! assignee's activity while the task is being worked on, and the reviewer's while it is under
+//! review. The usage of a turn only arrives when the turn ends, so it cannot serve as the signal.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -79,12 +84,24 @@ pub struct Breach {
     pub max: f64,
 }
 
+/// Who holds a task right now, as the events last said.
+#[derive(Default)]
+struct Hands {
+    assignee: Option<AgentId>,
+    reviewer: Option<AgentId>,
+}
+
 /// The per-task ledger, replayed from events.
 #[derive(Default)]
 pub struct TaskLedger {
     prices: Prices,
     agents: HashMap<AgentId, AgentState>,
     tasks: BTreeMap<TaskId, TaskSpend>,
+    /// The current assignee and reviewer of each task.
+    hands: HashMap<TaskId, Hands>,
+    /// The tasks each agent is the current assignee or reviewer of, to find whose activity
+    /// counts for a task. Kept in step with `hands`.
+    on_task: HashMap<AgentId, BTreeSet<TaskId>>,
 }
 
 impl TaskLedger {
@@ -98,6 +115,76 @@ impl TaskLedger {
 
     fn task(&mut self, id: TaskId) -> &mut TaskSpend {
         self.tasks.entry(id).or_default()
+    }
+
+    /// Makes `agent` the task's assignee (`None`: nobody holds it now).
+    fn set_assignee(&mut self, task: TaskId, agent: Option<AgentId>) {
+        let old = std::mem::replace(&mut self.hands.entry(task).or_default().assignee, agent);
+        if old == agent {
+            return;
+        }
+        if let Some(old) = old {
+            self.unlink(old, task);
+        }
+        if let Some(agent) = agent {
+            self.on_task.entry(agent).or_default().insert(task);
+        }
+    }
+
+    /// Makes `agent` the task's reviewer for the review it is in.
+    fn set_reviewer(&mut self, task: TaskId, agent: AgentId) {
+        let old = std::mem::replace(&mut self.hands.entry(task).or_default().reviewer, Some(agent));
+        if old == Some(agent) {
+            return;
+        }
+        if let Some(old) = old {
+            self.unlink(old, task);
+        }
+        self.on_task.entry(agent).or_default().insert(task);
+    }
+
+    /// Takes `task` off `agent`'s list, unless the agent still holds a hand on it.
+    fn unlink(&mut self, agent: AgentId, task: TaskId) {
+        let held = self
+            .hands
+            .get(&task)
+            .is_some_and(|h| h.assignee == Some(agent) || h.reviewer == Some(agent));
+        if held {
+            return;
+        }
+        if let Some(tasks) = self.on_task.get_mut(&agent) {
+            tasks.remove(&task);
+            let empty = tasks.is_empty();
+            if empty {
+                self.on_task.remove(&agent);
+            }
+        }
+    }
+
+    /// An agent's turn, output or tool call: its clock-only sign of life. It moves the last
+    /// progress of each task it is working on now (assignee while the task is being worked on,
+    /// reviewer while it is under review). This runs for every output chunk, so it does nothing
+    /// but that.
+    fn activity(&mut self, agent: AgentId, at: DateTime<Utc>) {
+        let Some(tasks) = self.on_task.get(&agent) else {
+            return;
+        };
+        for task in tasks {
+            let (Some(hands), Some(spend)) = (self.hands.get(task), self.tasks.get_mut(task))
+            else {
+                continue;
+            };
+            let working = match spend.status {
+                Some(TaskStatus::Running | TaskStatus::Retrying | TaskStatus::Verifying) => {
+                    hands.assignee == Some(agent)
+                }
+                Some(TaskStatus::Reviewing) => hands.reviewer == Some(agent),
+                _ => false,
+            };
+            if working {
+                spend.last_progress = Some(at);
+            }
+        }
     }
 
     pub fn apply(&mut self, event: &Event) {
@@ -146,6 +233,7 @@ impl TaskLedger {
                     task.agents.insert(*agent);
                     self.agents.entry(*agent).or_default().task = Some(*id);
                 }
+                self.set_assignee(*id, *assignee);
             }
             EventKind::TaskReviewer {
                 run_id,
@@ -159,7 +247,15 @@ impl TaskLedger {
                 task.agents.insert(*reviewer);
                 task.last_progress = Some(at);
                 self.agents.entry(*reviewer).or_default().task = Some(*id);
+                self.set_reviewer(*id, *reviewer);
             }
+            EventKind::AgentTurnStarted { id, .. }
+            | EventKind::AgentOutput { id, .. }
+            | EventKind::AgentToolCall { id, .. }
+            | EventKind::AgentToolCallUpdated { id, .. }
+            | EventKind::AgentToolOutput { id, .. }
+            | EventKind::AgentToolDetail { id, .. }
+            | EventKind::AgentToolUsed { id, .. } => self.activity(*id, at),
             EventKind::TaskProgress { id, .. } => {
                 self.task(*id).last_progress = Some(at);
             }
@@ -381,7 +477,10 @@ impl TaskLedger {
 #[cfg(test)]
 mod tests {
     use chrono::{Duration, TimeZone};
-    use crossagents_core::{Agent, AgentStatus, EVENT_SCHEMA_VERSION, Role, TaskStatus};
+    use crossagents_core::{
+        Agent, AgentStatus, EVENT_SCHEMA_VERSION, MessageId, Role, TaskStatus, ToolStatus,
+    };
+    use crossagents_store_sqlite::SqliteStore;
 
     use super::*;
 
@@ -597,6 +696,157 @@ mod tests {
             ..TaskBudget::default()
         };
         assert!(ledger.breaches(task, &loose, at(5)).is_empty());
+    }
+
+    fn turn_started(id: AgentId) -> EventKind {
+        EventKind::AgentTurnStarted {
+            id,
+            message_id: MessageId::new(),
+        }
+    }
+
+    fn tool_call(id: AgentId) -> EventKind {
+        EventKind::AgentToolCall {
+            id,
+            tool_call_id: "call".into(),
+            title: "read file".into(),
+            kind: None,
+            status: ToolStatus::InProgress,
+        }
+    }
+
+    fn status(run: RunId, task: TaskId, to: TaskStatus, assignee: Option<AgentId>) -> EventKind {
+        EventKind::TaskStatusChanged {
+            run_id: run,
+            id: task,
+            key: "a".into(),
+            from: TaskStatus::Running,
+            to,
+            assignee,
+        }
+    }
+
+    fn reviewer(run: RunId, task: TaskId, reviewer: AgentId) -> EventKind {
+        EventKind::TaskReviewer {
+            run_id: run,
+            id: task,
+            key: "a".into(),
+            reviewer,
+        }
+    }
+
+    fn idle_cap(minutes: u64) -> TaskBudget {
+        TaskBudget {
+            max_idle_minutes: Some(minutes),
+            ..TaskBudget::default()
+        }
+    }
+
+    fn ledger_of(log: &Log) -> TaskLedger {
+        let mut ledger = TaskLedger::new(prices());
+        for event in &log.events {
+            ledger.apply(event);
+        }
+        ledger
+    }
+
+    #[test]
+    fn a_long_turn_with_tool_calls_is_not_idle() {
+        let (run, task) = (RunId::new(), TaskId::new());
+        let worker = agent("priced");
+        let mut log = Log::new();
+        log.push(0, EventKind::AgentCreated { agent: worker.clone() });
+        log.push(1, assign(run, task, worker.id));
+        log.push(2, turn_started(worker.id));
+        // A 25-minute turn: a tool call every few minutes, its usage only when it ends.
+        for minute in [7, 12, 17, 22, 27] {
+            log.push(minute, tool_call(worker.id));
+        }
+        let ledger = ledger_of(&log);
+        // At 30 the last call was 3 minutes ago: the turn is moving, nothing is over.
+        assert!(ledger.breaches(task, &idle_cap(20), at(30)).is_empty());
+        // At 48 the calls have stopped for 21 minutes: now it is idle.
+        let breaches = ledger.breaches(task, &idle_cap(20), at(48));
+        assert_eq!(breaches.iter().map(|b| b.what).collect::<Vec<_>>(), ["idle"]);
+
+        // The same turn without its tool calls is over the cap already at 30.
+        let mut silent = Log::new();
+        silent.push(0, EventKind::AgentCreated { agent: worker.clone() });
+        silent.push(1, assign(run, task, worker.id));
+        silent.push(2, turn_started(worker.id));
+        let breaches = ledger_of(&silent).breaches(task, &idle_cap(20), at(30));
+        assert_eq!(breaches.iter().map(|b| b.what).collect::<Vec<_>>(), ["idle"]);
+    }
+
+    #[test]
+    fn a_task_with_no_events_is_idle_exactly_at_its_cap() {
+        let (run, task) = (RunId::new(), TaskId::new());
+        let worker = agent("priced");
+        let mut log = Log::new();
+        log.push(0, EventKind::AgentCreated { agent: worker.clone() });
+        log.push(1, assign(run, task, worker.id));
+        let ledger = ledger_of(&log);
+        assert!(ledger.breaches(task, &idle_cap(20), at(20)).is_empty(), "19 minutes idle");
+        let breaches = ledger.breaches(task, &idle_cap(20), at(21));
+        assert_eq!(breaches.len(), 1);
+        assert_eq!(breaches[0].what, "idle");
+        assert_eq!(breaches[0].used, 20.0);
+    }
+
+    #[test]
+    fn the_reviewer_counts_only_while_the_task_is_under_review() {
+        let (run, task) = (RunId::new(), TaskId::new());
+        let (worker, judge, stranger) = (agent("priced"), agent("priced"), agent("priced"));
+        let mut log = Log::new();
+        for a in [&worker, &judge, &stranger] {
+            log.push(0, EventKind::AgentCreated { agent: a.clone() });
+        }
+        log.push(1, assign(run, task, worker.id));
+        log.push(5, status(run, task, TaskStatus::Reviewing, Some(worker.id)));
+        log.push(5, reviewer(run, task, judge.id));
+        log.push(20, tool_call(judge.id));
+        // An agent that is on no part of the task does not count, even while it works.
+        log.push(30, tool_call(stranger.id));
+        let ledger = ledger_of(&log);
+        // 39: 19 minutes since the reviewer's call at 20 (the reviewer's start at 5 is 34).
+        assert!(ledger.breaches(task, &idle_cap(20), at(39)).is_empty());
+        // 45: 25 minutes since the reviewer's last call; the stranger's call at 30 did not count.
+        assert_eq!(ledger.breaches(task, &idle_cap(20), at(45))[0].what, "idle");
+
+        // Back to work after the review: the reviewer's calls no longer keep the task moving.
+        log.push(50, status(run, task, TaskStatus::Running, Some(worker.id)));
+        log.push(55, tool_call(judge.id));
+        let breaches = ledger_of(&log).breaches(task, &idle_cap(20), at(75));
+        assert_eq!(breaches[0].what, "idle");
+        assert_eq!(breaches[0].used, 25.0);
+    }
+
+    #[tokio::test]
+    async fn the_replayed_ledger_matches_the_live_one() {
+        let store = SqliteStore::open_in_memory().await.unwrap();
+        let (run, task) = (RunId::new(), TaskId::new());
+        let (worker, judge) = (agent("priced"), agent("priced"));
+        let kinds = [
+            EventKind::AgentCreated { agent: worker.clone() },
+            EventKind::AgentCreated { agent: judge.clone() },
+            assign(run, task, worker.id),
+            turn_started(worker.id),
+            tool_call(worker.id),
+            usage(worker.id, Some(0.1), Some(counts(300, Some(2)))),
+            status(run, task, TaskStatus::Reviewing, Some(worker.id)),
+            reviewer(run, task, judge.id),
+            tool_call(judge.id),
+        ];
+        let mut live = TaskLedger::new(prices());
+        for kind in kinds {
+            let event = store.append_event(kind).await.unwrap();
+            live.apply(&event);
+        }
+        let replayed = TaskLedger::replay(&store, prices()).await.unwrap();
+        let now = Utc::now();
+        assert_eq!(live.spend(task), replayed.spend(task));
+        assert_eq!(live.idle_minutes(task, now), replayed.idle_minutes(task, now));
+        assert!(live.idle_minutes(task, now).is_some(), "the task is under review");
     }
 
     #[test]

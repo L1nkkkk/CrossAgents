@@ -128,7 +128,10 @@ When a review sent your task back, its findings come numbered (F1, F2…): answe
 `task_complete`'s `answers` (status fixed, not_fixed or disputed, and a note; disputed means you \
 think the finding is wrong, and the lead decides). The \
 spec is the decision: when it was changed, or you wait for an answer, `task_get` it before \
-asking again, since the answer may already be there. When you are given a task yourself (with your conversation, rather than as a new session), you work in \
+asking again, since the answer may already be there. Do not end your turn to wait for a \
+background command or a Monitor notification: a notification cannot wake a turn that has \
+ended, so the task is left without a report. To wait, run the command in the foreground, \
+within your turn. When you are given a task yourself (with your conversation, rather than as a new session), you work in \
 the task's worktree until it ends and then go back to your own directory; a person may still \
 write to you, and comes first.";
 
@@ -288,6 +291,17 @@ mod tests {
         }
         // A reviewer reads; nothing it runs needs the build directory.
         assert!(!guide(Role::Reviewer).contains("crossagents exec"));
+    }
+
+    #[test]
+    fn workers_are_told_not_to_end_a_turn_to_wait_for_a_notification() {
+        let text = guide(Role::Worker);
+        assert!(
+            text.contains("Do not end your turn to wait for a background command")
+                && text.contains("cannot wake a turn that has ended")
+                && text.contains("in the foreground"),
+            "{text}"
+        );
     }
 
     #[test]

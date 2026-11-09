@@ -246,6 +246,8 @@ impl WorkspaceProvider for FakeWorkspaces {
 struct FixedChecks {
     answers: Vec<bool>,
     rounds: Mutex<u32>,
+    /// The command groups each round ran, in order.
+    seen: Mutex<Vec<Vec<String>>>,
 }
 
 #[async_trait]
@@ -255,6 +257,7 @@ impl Verifier for FixedChecks {
             let mut rounds = self.rounds.lock().await;
             *rounds += 1;
         }
+        self.seen.lock().await.push(commands.to_vec());
         commands
             .iter()
             .enumerate()
@@ -305,6 +308,7 @@ impl Fixture {
         let checks = Arc::new(FixedChecks {
             answers: checks,
             rounds: Mutex::new(0),
+            seen: Mutex::new(Vec::new()),
         });
         let orchestrator = Orchestrator::new(
             store.clone(),
@@ -585,6 +589,80 @@ async fn a_second_verification_that_fails_also_leaves_verifying() {
     assert!(f.host.delivered_to(f.lead.id).await.is_empty());
     let told = f.host.notices.lock().await.join("\n");
     assert!(told.contains("task_verify"), "{told}");
+}
+
+// ---------------------------------------------------------------------------------------
+// only_failed: rerun the checks that failed, keep the ones that passed
+
+#[tokio::test]
+async fn only_failed_reruns_the_failed_checks_and_keeps_the_passing_ones() {
+    // A report that waits with one failed check (as when the checks' round could not send it
+    // back, or a record from before the auto-rework). The rerun gets a passing answer.
+    let f = Fixture::with_checks(&["check-a", "check-b"], vec![true]).await;
+    let mut task = f.task().await;
+    task.status = TaskStatus::Passed;
+    task.report.summary = Some("wrote a".into());
+    task.report.checks = vec![
+        crossagents_core::CheckResult {
+            command: "check-a".into(),
+            exit_code: Some(0),
+            passed: true,
+            output: String::new(),
+        },
+        crossagents_core::CheckResult {
+            command: "check-b".into(),
+            exit_code: Some(1),
+            passed: false,
+            output: "boom".into(),
+        },
+    ];
+    f.store.update_task(&task).await.unwrap();
+
+    let asked = f
+        .orchestrator
+        .task_verify(&f.lead, json!({ "task": "a", "only_failed": true }))
+        .await
+        .unwrap();
+    assert_eq!(asked["status"], "verifying", "{asked}");
+    let task = f.settled().await;
+
+    // Only the failed command ran again; the passing result stands in the full list.
+    let seen = f.checks.seen.lock().await.clone();
+    assert_eq!(seen, vec![vec!["check-b".to_owned()]], "{seen:?}");
+    assert_eq!(
+        task.report
+            .checks
+            .iter()
+            .map(|c| (c.command.as_str(), c.passed))
+            .collect::<Vec<_>>(),
+        [("check-a", true), ("check-b", true)],
+        "{task:?}"
+    );
+}
+
+#[tokio::test]
+async fn only_failed_with_nothing_failed_is_refused() {
+    let f = Fixture::with_checks(&["check-a"], vec![true]).await;
+    let mut task = f.task().await;
+    task.status = TaskStatus::Passed;
+    task.report.checks = vec![crossagents_core::CheckResult {
+        command: "check-a".into(),
+        exit_code: Some(0),
+        passed: true,
+        output: String::new(),
+    }];
+    f.store.update_task(&task).await.unwrap();
+
+    let refused = f
+        .orchestrator
+        .task_verify(&f.lead, json!({ "task": "a", "only_failed": true }))
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("no failed checks"), "{refused}");
+    // Nothing changed: the report still waits as it was, and its checks still stand.
+    let task = f.task().await;
+    assert_eq!(task.status, TaskStatus::Passed, "{task:?}");
+    assert_eq!(task.report.checks.len(), 1, "{task:?}");
 }
 
 // ---------------------------------------------------------------------------------------

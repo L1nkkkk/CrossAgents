@@ -546,6 +546,10 @@ impl AgentHost for HubHost {
         self.runtime.is_busy(agent).await
     }
 
+    async fn has_queued(&self, agent: AgentId) -> bool {
+        self.runtime.has_queued(agent).await
+    }
+
     async fn serving_person(&self, agent: AgentId) -> bool {
         self.runtime.serving_person(agent).await
     }

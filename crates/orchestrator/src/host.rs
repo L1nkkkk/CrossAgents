@@ -196,6 +196,12 @@ pub trait AgentHost: Send + Sync {
         let _ = agent;
         true
     }
+    /// Whether a message waits for the agent, asked just after its turn ended (a turn cut
+    /// short by `agent_send` with `now: true` has one). Unknown hosts say no.
+    async fn has_queued(&self, agent: AgentId) -> bool {
+        let _ = agent;
+        false
+    }
     /// Whether a person waits on the agent: its turn answers their message, or one waits.
     async fn serving_person(&self, agent: AgentId) -> bool {
         let _ = agent;

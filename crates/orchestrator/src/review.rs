@@ -1214,6 +1214,40 @@ fn remarks_text(task: &Task, remarks: &[Remark], note: Option<&str>, rework: boo
     out
 }
 
+/// What a reviewer is told when its turn ends without a verdict.
+fn verdict_reminder(task: &Task) -> String {
+    format!(
+        "Your turn reviewing {} ended without a verdict, and the review is still yours. Give it with the tool now: call review_submit once (approve, verdict, findings and reviewed_sha). Do not wait for a background command or a Monitor notification: a notification cannot wake a turn that has ended. Run what you need in the foreground, within this turn. If this turn also ends without a verdict, the task's lead is told.",
+        brief::task_ref(task)
+    )
+}
+
+impl Orchestrator {
+    /// A reviewer's turn ended while the task is still `Reviewing`. `true` when the hub
+    /// handled it without the lead: a turn cut short by a message that waits for the reviewer
+    /// (its next turn carries on), or the first empty turn of this review, which is reminded
+    /// to give its verdict with the tool. `false` when the lead should hear of it (a second
+    /// empty turn, or a cancelled one with nothing waiting).
+    pub(crate) async fn review_turn_ended(
+        &self,
+        task: &Task,
+        reviewer: AgentId,
+        issuer: AgentId,
+        cancelled: bool,
+    ) -> bool {
+        if cancelled {
+            return self.host.has_queued(reviewer).await;
+        }
+        let key = (task.id, reviewer, task.report.review_attempt);
+        if !self.review_reminders.lock().unwrap().insert(key) {
+            return false;
+        }
+        let envelope = self.relay_envelope(issuer, verdict_reminder(task));
+        self.send_in_background(reviewer, envelope);
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

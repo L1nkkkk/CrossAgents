@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use crate::engine::Orchestrator;
 use crate::lessons::outcome_schema;
 use crate::messaging::Group;
+use crate::plan;
 
 const ALL: &[Group] = &[Group::Everyone];
 /// Anyone a run holds: tasks, their worktrees and checks exist only in a run.
@@ -460,7 +461,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "plan_submit",
-        description: "Submit the plan for your current run: the full list of tasks for workers. A task spec may include result_schema, a JSON Schema the worker must satisfy in task_complete.result. Each task goes to a new execution session of its assignee by default (fresh: true); write fresh: false to have that session itself, with its conversation, do it. Depending on the run's policy the person approves it first, or it starts at once.",
+        description: "Submit the plan for your current run: the full list of tasks for workers. A task spec may include result_schema, a JSON Schema the worker must satisfy in task_complete.result. Each task goes to a new execution session of its assignee by default (fresh: true); write fresh: false to have that session itself, with its conversation, do it. Depending on the run's policy the person approves it first, or it starts at once. Write spec.scope.allow (the files each task will touch) for tasks that should run in parallel: a task with an empty allow may touch anything, so it runs one after another with every other task.",
         groups: PLANNER,
         schema: || {
             json!({
@@ -485,7 +486,7 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_list",
-        description: "Tasks of your run: key, title, status, issuer, assignee, progress, open question. Filter with status, or mine (tasks you issued or work on).",
+        description: "Tasks of your run: key, title, status, checks_ok (false means the checks did not pass; null: none ran), issuer, assignee, progress, open question. Filter with status, or mine (tasks you issued or work on).",
         groups: RUN,
         schema: || {
             object(
@@ -630,9 +631,13 @@ const TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "task_verify",
-        description: "Run a task's acceptance checks again on its current worktree, or for the first time after the hub restarted before they finished; the result comes back to you as a message. For a task whose report is ready (passed).",
+        description: "Run a task's acceptance checks again on its current worktree, or for the first time after the hub restarted before they finished; the result comes back to you as a message. For a task whose report is ready (passed). With only_failed: true only the commands that failed or timed out last time run again, and the passing results are kept; it is refused when nothing failed.",
         groups: RUN,
-        schema: || task_schema(json!({})),
+        schema: || {
+            task_schema(json!({
+                "only_failed": { "type": "boolean", "description": "Rerun only the checks that failed last time (their passing results are kept). Default false: the whole group." }
+            }))
+        },
     },
     ToolDef {
         name: "task_rework",
@@ -1082,9 +1087,16 @@ impl Orchestrator {
                 } else {
                     "The plan started at once (the run's policy). End your turn now."
                 };
-                Ok(
-                    json!({ "run_id": run.id, "status": run.status, "tasks": run.plan.len(), "next": next }),
-                )
+                let mut out = json!({ "run_id": run.id, "status": run.status, "tasks": run.plan.len(), "next": next });
+                let empty = plan::empty_scope_keys(&run.plan);
+                if !empty.is_empty() {
+                    let keys = empty.iter().map(|k| format!("#{k}")).collect::<Vec<_>>().join(", ");
+                    let verb = if empty.len() == 1 { "has" } else { "have" };
+                    out["scope_warning"] = json!(format!(
+                        "{keys} {verb} an empty spec.scope.allow: the scheduler treats that as \"may touch any file\", so each of them runs one after another with every other task. To let them run in parallel, list the files each will change in spec.scope.allow, with no overlap between tasks."
+                    ));
+                }
+                Ok(out)
             }
             "task_create" => self.task_create(caller, input).await,
             "task_list" => self.task_list(caller, input).await,

@@ -195,6 +195,10 @@ pub struct Orchestrator {
     /// What an agent's current turn failed with, until the turn ends: the stalled notice
     /// says why, or its issuer only nudges it into the same failure.
     turn_errors: std::sync::Mutex<HashMap<AgentId, String>>,
+    /// Reviews whose reviewer was already reminded to give its verdict with the tools: the
+    /// task, the reviewer and the review attempt. Their next empty turn goes to the lead.
+    pub(crate) review_reminders:
+        std::sync::Mutex<std::collections::HashSet<(TaskId, AgentId, u32)>>,
     /// Runs extension tools (docs/EXTENSIONS.md §3); set once by the hub, after both exist.
     pub(crate) extensions: std::sync::OnceLock<Arc<dyn crate::host::ExtensionHost>>,
 }
@@ -282,6 +286,7 @@ impl Orchestrator {
             stage_wakeups: std::sync::Mutex::default(),
             bounces: std::sync::Mutex::default(),
             turn_errors: std::sync::Mutex::default(),
+            review_reminders: std::sync::Mutex::default(),
             extensions: std::sync::OnceLock::new(),
         })
     }
@@ -2419,7 +2424,8 @@ The person changed: {}",
                         } => {
                             let error = this.turn_errors.lock().unwrap().remove(&id);
                             let error = error.filter(|_| stop_reason == StopReason::Error);
-                            this.on_idle(id, Some(message_id), error).await
+                            let cancelled = stop_reason == StopReason::Cancelled;
+                            this.on_idle(id, Some(message_id), error, cancelled).await
                         }
                         EventKind::AgentUpdated { agent } => {
                             let this = this.clone();
@@ -2464,7 +2470,7 @@ The person changed: {}",
                         } => {
                             let error = this.turn_errors.lock().unwrap().remove(&id);
                             // A process that died says nothing about its turn: no id to match.
-                            this.on_idle(id, None, error).await
+                            this.on_idle(id, None, error, false).await
                         }
                         _ => {}
                     },
@@ -2496,7 +2502,13 @@ The person changed: {}",
     /// run is recorded; a platform fault is retried where trying again may help, and one that
     /// a retry cannot fix (`agent_error`) stops the task and says why. The task itself never
     /// counts as done because a run ended (multica §2.4–2.5).
-    async fn on_idle(&self, agent: AgentId, turn: Option<MessageId>, error: Option<String>) {
+    async fn on_idle(
+        &self,
+        agent: AgentId,
+        turn: Option<MessageId>,
+        error: Option<String>,
+        cancelled: bool,
+    ) {
         let Some((run, task)) = self.task_for_agent(agent).await else {
             return;
         };
@@ -2512,6 +2524,12 @@ The person changed: {}",
             .map(|a| a.name)
             .unwrap_or_else(|_| agent.to_string());
         if task.reviewer == Some(agent) && task.status == TaskStatus::Reviewing {
+            if self
+                .review_turn_ended(&task, agent, issuer, cancelled)
+                .await
+            {
+                return;
+            }
             self.notice(
                 issuer,
                 &format!("task:{}", task.id),
@@ -2527,7 +2545,8 @@ The person changed: {}",
         if task.assignee != Some(agent) || task.status != TaskStatus::Running {
             return;
         }
-        self.turn_ended(&run, &mut task, agent, turn, error).await;
+        self.turn_ended(&run, &mut task, agent, turn, error, cancelled)
+            .await;
     }
 
     /// After a hub restart sessions resume where the driver can, but nothing is running:

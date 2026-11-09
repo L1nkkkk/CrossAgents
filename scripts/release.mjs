@@ -40,7 +40,7 @@ function die(message) {
 }
 
 // `cargo build --release` has to write into the repository's own target/, because that is
-// where build.extraResources copies the hub from. A release once went out with no hub at all
+// where build.win.extraResources copies the hub from. A release once went out with no hub at all
 // because CARGO_TARGET_DIR was set in the shell: electron-builder packaged the rest without
 // complaining, the installer had nothing to put in `<home>/bin/<version>/`, and an updated GUI
 // kept talking to the old hub. check-version.mjs catches it now, but do not rely on that.

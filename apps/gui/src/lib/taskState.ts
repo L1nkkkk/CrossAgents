@@ -34,7 +34,7 @@ function reportedState(report: Task["report"] | undefined): State {
   const checks = report?.checks ?? [];
   if (!checks.length) return s("○", "待检查", "ok", "waiting");
   if (checks.every((c) => c.passed)) return s("○", "检查通过", "ok", "waiting");
-  return s("○", "检查未过", "danger", "waiting");
+  return s("○", "验收未过", "danger", "waiting");
 }
 
 /** `siblings` (the run's tasks) lets a pending task say which dependencies it still waits for. */
