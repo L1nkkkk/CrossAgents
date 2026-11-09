@@ -314,8 +314,8 @@ test("消息立刻叫醒，并带上待带的通知；正在回合里就等回�
 });
 
 test("忙时到达的多条消息各自一次唤醒，不互相合并", () => {
-  // 两条消息都在回合 0–200 秒里到，顺延到 200 秒，但仍是两次唤醒；
-  // 第一条带走待带的通知，第二条只带自己。
+  // 两条消息都在回合 0–200 秒里到，顺延到 200 秒，但仍是两次唤醒。
+  // 只有人的消息带走待带的通知：队友那条先到（顺序按到达），通知留给人那条。
   const sim = simulate(
     [
       { ms: at(10), class: "silent" },
@@ -327,9 +327,63 @@ test("忙时到达的多条消息各自一次唤醒，不互相合并", () => {
   assert.equal(sim.wakes.length, 2);
   assert.deepEqual(sim.wakes.map((w) => w.class), ["teammate", "human"]);
   assert.deepEqual(sim.wakes.map((w) => w.at), [at(200), at(200)]);
-  assert.equal(sim.wakes[0].notices, 1);
-  assert.equal(sim.wakes[1].notices, 0);
+  assert.equal(sim.wakes[0].notices, 0); // 队友消息不带
+  assert.equal(sim.wakes[1].notices, 1); // 人的消息带走
   assert.equal(sim.silentRode, 1);
+});
+
+test("忙时：Decide + 队友消息是两次唤醒；换成人的消息是一次", () => {
+  const busy = [{ start: at(0), end: at(200) }];
+
+  let sim = simulate(
+    [
+      { ms: at(10), class: "decide" },
+      { ms: at(20), class: "teammate", kind: "message" },
+    ],
+    busy,
+  );
+  assert.equal(sim.wakes.length, 2);
+  assert.deepEqual(sim.wakes.map((w) => w.class), ["teammate", "decide"]);
+  assert.equal(sim.wakes[0].notices, 0);
+  assert.equal(sim.wakes[1].notices, 1);
+
+  sim = simulate(
+    [
+      { ms: at(10), class: "decide" },
+      { ms: at(20), class: "human", kind: "message" },
+    ],
+    busy,
+  );
+  assert.equal(sim.wakes.length, 1);
+  assert.equal(sim.wakes[0].class, "human");
+  assert.equal(sim.wakes[0].notices, 1);
+});
+
+test("Batch 后面跟一条队友消息：窗口不重置，Batch 仍照常单独叫醒", () => {
+  let sim = simulate(
+    [
+      { ms: at(0), class: "batch" },
+      { ms: at(30), class: "teammate", kind: "message" },
+    ],
+    [],
+  );
+  assert.equal(sim.wakes.length, 2);
+  assert.deepEqual(sim.wakes.map((w) => w.class), ["teammate", "batch"]);
+  assert.equal(sim.wakes[0].at, at(30));
+  assert.equal(sim.wakes[1].at, at(60)); // 最后一条 batch 之后 60 秒
+  assert.equal(sim.wakes[1].notices, 1);
+
+  // 换成人的消息：同一时刻把 Batch 一起带走，只剩一次唤醒。
+  sim = simulate(
+    [
+      { ms: at(0), class: "batch" },
+      { ms: at(30), class: "human", kind: "message" },
+    ],
+    [],
+  );
+  assert.equal(sim.wakes.length, 1);
+  assert.equal(sim.wakes[0].class, "human");
+  assert.equal(sim.wakes[0].notices, 1);
 });
 
 // ---------------------------------------------------------------------------

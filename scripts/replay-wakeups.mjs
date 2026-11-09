@@ -78,7 +78,8 @@
 //     它们当新流程的「等接受」通知；这是最大的一个假设，输出里单列。
 //   - 消息不合并：每条消息各自是一次唤醒（旧日志 165 个回合对应 165 个 message_id）；
 //     忙时到达就顺延到前一个回合结束，但两条消息不会因为同时顺延而并成一次。
-//     待带的通知可以跟着消息走。
+//     待带的通知只跟人的消息走（runtime.rs:1940-1952 只在 from == Human 时吸收）；
+//     队友和协调器的消息各自叫醒、不动 pending，Batch 窗口也不重置。
 //   - 「没做决定」有两个口径：事件口径（状态变化等效果，见下）和工具口径
 //     （agent.tool_call + agent.tool_detail 里的 toolName，对照 crates/hub/src/rounds.rs
 //     的 decides()）。有工具记录时以工具为准，没有才用事件；工具记录不全（只有 hub 工具
@@ -699,14 +700,20 @@ export function simulate(arrivals, turns, opts = {}) {
     silentRode += classes.filter((c) => c === "silent").length;
   };
 
-  // 一条消息：一次唤醒，待带的通知跟着它走。
+  // 一条消息：一次唤醒。只有人的消息会吸收待带的通知并重置 Batch 窗口
+  //（runtime.rs:1940-1952 只在 from == Human 时这么做）；队友和协调器的消息不带，
+  // 待带通知留在 pending，Decide/Unblock/RunDone 照样各自叫醒。
   const deliverMessage = (at) => {
     const idx = queued.findIndex((q) => q.due === at);
     const msg = queued.splice(idx, 1)[0].a;
-    pushWake(at, msg.class, pending);
-    pending = [];
-    first = null;
-    last = null;
+    if (msg.class === "human") {
+      pushWake(at, msg.class, pending);
+      pending = [];
+      first = null;
+      last = null;
+    } else {
+      pushWake(at, msg.class, []);
+    }
   };
 
   const deliverNotices = (at) => {
@@ -731,7 +738,7 @@ export function simulate(arrivals, turns, opts = {}) {
     const noticeTie = noticeDelayed ? wakeAt < nextArrival : wakeAt <= nextArrival;
     const messageTie = messageAt <= wakeAt && messageAt <= nextArrival;
     if ((Number.isFinite(noticeAt) && noticeTie) || (Number.isFinite(messageAt) && messageTie)) {
-      // 同一时刻先送消息：它会把待带的通知一起带走。
+      // 同一时刻先送消息：人的消息会带走待带通知，队友/协调器的只算自己一次。
       if (messageAt <= wakeAt) deliverMessage(messageAt);
       else deliverNotices(noticeAt);
       continue;
@@ -1040,7 +1047,12 @@ export function formatReport({ agent, files, window, rounds, meta, arrivalInfo }
     "4. 新叫醒不占时间：只避开日志里实际存在的回合，新规则产生的回合自身多长没有模拟；" +
       "叫醒消息发出后、回合开始前到达的通知不会并进去。",
   );
-  lines.push("5. 消息不合并：每条消息各自一次唤醒（忙时顺延到前一个回合结束），待带的通知跟着消息走。");
+  lines.push(
+    "5. 消息不合并：每条消息各自一次唤醒（忙时顺延到前一个回合结束）。待带的通知只跟人的消息走：" +
+      "已合并的代码只在 from == MessageSource::Human 时吸收待带通知并撤掉排队中的叫醒消息" +
+      "（crates/hub/src/runtime.rs:1940-1952），brief/common 也只写「人的消息…带上所有待带的通知」；" +
+      "队友和协调器的消息不带，通知留在 pending，Batch 窗口也不重置（「参考」里的交付报告也不带）。",
+  );
   lines.push(
     `6. 通知到达时间按摘要文本首次出现推断；被撤回的摘要 ${meta.stats.withdrawn ?? 0} 条里的行没有计入。`,
   );
