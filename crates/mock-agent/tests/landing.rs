@@ -42,7 +42,7 @@ async fn merged_run(t: &TestHub, w: &mut common::Watcher) -> String {
         "[write a.txt=from the run] {}",
         call(
             "task_complete",
-            json!({ "task_id": "{task_id}", "summary": format!("done {}", call("task_accept", json!({ "task": "a", "force": true, "reason": "no checks configured" }))) })
+            json!({ "task_id": "{task_id}", "summary": "done" })
         )
     );
     let plan = json!([{ "key": "a", "title": "task a", "spec": { "goal": goal } }]);
@@ -58,6 +58,18 @@ async fn merged_run(t: &TestHub, w: &mut common::Watcher) -> String {
         .await;
     assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
     let run: Value = resp.json().await.unwrap();
+    // The lead is not handed the report: it accepts once the task waits for it.
+    common::lead_accepts_when_waiting(
+        t,
+        w,
+        "boss",
+        "a",
+        &call(
+            "task_accept",
+            json!({ "task": "a", "force": true, "reason": "no checks configured" }),
+        ),
+    )
+    .await;
     w.until("a merged", task_is("a", TaskStatus::Merged)).await;
     run["id"].as_str().unwrap().to_owned()
 }
@@ -149,7 +161,7 @@ async fn a_conflict_with_main_becomes_a_task_and_lands_after_it() {
     git(worktree, &["commit", "-q", "-m", "resolve"]);
     let report = call(
         "task_complete",
-        json!({ "task_id": sync["id"], "summary": format!("resolved {}", call("task_accept", json!({ "task": "sync-main", "force": true, "reason": "no checks configured" }))) }),
+        json!({ "task_id": sync["id"], "summary": "resolved" }),
     );
     let worker = sync["assignee"].as_str().unwrap();
     let resp = t
@@ -159,6 +171,17 @@ async fn a_conflict_with_main_becomes_a_task_and_lands_after_it() {
         )
         .await;
     assert_eq!(resp.status(), 202);
+    common::lead_accepts_when_waiting(
+        &t,
+        &mut w,
+        "boss",
+        "sync-main",
+        &call(
+            "task_accept",
+            json!({ "task": "sync-main", "force": true, "reason": "no checks configured" }),
+        ),
+    )
+    .await;
     w.until("sync merged", task_is("sync-main", TaskStatus::Merged))
         .await;
     // Resolved: the run no longer says it waits for #sync-main.

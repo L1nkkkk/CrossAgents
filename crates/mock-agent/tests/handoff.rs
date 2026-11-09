@@ -600,10 +600,7 @@ fn two_steps(next: &str) -> Value {
             "key": "a",
             "title": "task a",
             "spec": {
-                "goal": goal(
-                    "[write a.txt=alpha]",
-                    &format!("wrote a {}", call("task_accept", json!({ "task": "a" })))
-                ),
+                "goal": goal("[write a.txt=alpha]", "wrote a"),
                 "acceptance": [has("a.txt", "alpha")],
                 "scope": { "allow": ["a.txt"] },
                 "next": next,
@@ -636,6 +633,15 @@ async fn next_releases_the_step_it_names_once_the_task_is_accepted() {
     assert_eq!(b_before["status"], "pending", "{b_before}");
     assert_eq!(b_before["depends_on"], json!(["a"]), "{b_before}");
 
+    // The lead is not handed the report: it accepts a once it waits for it.
+    common::lead_accepts_when_waiting(
+        &t,
+        &mut w,
+        "boss",
+        "a",
+        &call("task_accept", json!({ "task": "a" })),
+    )
+    .await;
     w.until("a merged", reached("a", TaskStatus::Merged)).await;
     let merged = w.seen.len() - 1;
     let to_b = w
@@ -664,6 +670,14 @@ async fn next_naming_a_teammate_opens_the_step_for_them() {
     let run = start_plan(&t, two_steps("ada")).await;
     w.until("a reported", reached("a", TaskStatus::Passed))
         .await;
+    common::lead_accepts_when_waiting(
+        &t,
+        &mut w,
+        "boss",
+        "a",
+        &call("task_accept", json!({ "task": "a" })),
+    )
+    .await;
     w.until("a merged", reached("a", TaskStatus::Merged)).await;
 
     // The step was not in the plan: the hub opened it and a new session of ada takes it.

@@ -472,10 +472,12 @@ async fn all_tasks_ended_prompts_integration_verification_without_auto_finish_or
         "[write a.txt=done] {}",
         call(
             "task_complete",
-            json!({"task_id":"{task_id}", "summary":summary})
+            json!({"task_id":"{task_id}", "summary":"wrote a"})
         )
     );
     let run = start(&t, &plan(&goal, false), enabled()).await;
+    // The lead is not handed the worker's report: it accepts once the task waits for it.
+    common::lead_accepts_when_waiting(&t, &mut w, &run.planner.to_string(), "a", &summary).await;
     w.until("merged", |e| {
         matches!(
             &e.kind,

@@ -33,4 +33,9 @@ next?: string,
  * step of the same run, whose worker takes it again, or a teammate's name. `None`
  * leaves it with its own worker, as before.
  */
-on_reject?: string, };
+on_reject?: string, 
+/**
+ * How many times a review may send the task back to its worker before the lead decides
+ * (docs/research/multica.md §2.12). `None` is the default of 3.
+ */
+max_returns?: number, };

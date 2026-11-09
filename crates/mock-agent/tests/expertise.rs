@@ -148,12 +148,13 @@ async fn a_worker_searches_names_an_entry_and_a_first_try_accept_counts_it() {
             "task_complete",
             json!({
                 "task_id": "{task_id}",
-                "summary": format!("wrote a.txt {}", accept("a")),
+                "summary": "wrote a.txt",
                 "used": [MINE_TAG, "deadbeef"],
             })
         ),
     );
     let mut w = one_task(&t, goal).await;
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "a", &accept("a")).await;
     w.until("a merged", task_is("a", TaskStatus::Merged)).await;
     let output = w.output();
     assert!(output.contains("先写会失败的测试"), "{output}");
@@ -218,7 +219,7 @@ async fn a_task_sent_back_once_counts_as_reworked() {
             "task_complete",
             json!({
                 "task_id": "{task_id}",
-                "summary": format!("wrote beta {}", accept("a")),
+                "summary": "wrote beta",
                 "used": [MINE_TAG],
             })
         )
@@ -229,15 +230,19 @@ async fn a_task_sent_back_once_counts_as_reworked() {
             "task_complete",
             json!({
                 "task_id": "{task_id}",
-                "summary": format!(
-                    "wrote alpha {}",
-                    call("task_rework", json!({ "task": "a", "notes": format!("say beta instead {again}") }))
-                ),
+                "summary": "wrote alpha",
                 "used": [MINE_TAG],
             })
         )
     );
     let mut w = one_task(&t, goal).await;
+    // The lead is not handed the report: it sends the worker back, then accepts the second one.
+    let rework = call(
+        "task_rework",
+        json!({ "task": "a", "notes": format!("say beta instead {again}") }),
+    );
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "a", &rework).await;
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "a", &accept("a")).await;
     w.until("a merged", task_is("a", TaskStatus::Merged)).await;
 
     let store = reopened(t).await;
@@ -265,15 +270,17 @@ async fn a_dropped_task_counts_as_dropped_without_evidence() {
             "task_complete",
             json!({
                 "task_id": "{task_id}",
-                "summary": format!(
-                    "wrote alpha {}",
-                    call("task_drop", json!({ "task": "a", "reason": "not what was wanted" }))
-                ),
+                "summary": "wrote alpha",
                 "used": [MINE_TAG],
             })
         )
     );
     let mut w = one_task(&t, goal).await;
+    let drop = call(
+        "task_drop",
+        json!({ "task": "a", "reason": "not what was wanted" }),
+    );
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "a", &drop).await;
     w.until("a cancelled", task_is("a", TaskStatus::Cancelled))
         .await;
 
@@ -347,6 +354,22 @@ async fn a_reviewers_failed_item_proposes_a_candidate_under_the_entries_owner() 
     assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
     w.until("a reported", task_is("a", TaskStatus::Passed))
         .await;
+    // The lead accepts a and closes this run, so that its next run is the one that follows.
+    common::lead_accepts_when_waiting(
+        &t,
+        &mut w,
+        "boss",
+        "a",
+        &format!(
+            "{} {}",
+            call(
+                "task_accept",
+                json!({ "task": "a", "force": true, "reason": "no checks configured" })
+            ),
+            call("run_finish", json!({ "summary": "bound" }))
+        ),
+    )
+    .await;
 
     let store = SqliteStore::open(&Paths::new(t.home.path()).db())
         .await
@@ -371,7 +394,7 @@ async fn a_reviewers_failed_item_proposes_a_candidate_under_the_entries_owner() 
         call(
             "review_submit",
             json!({
-                "task_id": "{task_id}",
+                "task_id": "{task_id}", "reviewed_sha": "{reviewed_sha}",
                 "approve": false,
                 "notes": notes,
                 "checklist": [
@@ -384,7 +407,8 @@ async fn a_reviewers_failed_item_proposes_a_candidate_under_the_entries_owner() 
         )
         .replacen("[call ", "[call#mock-opus ", 1)
     };
-    // The first review's notes carry the second request: the planner reads them as its turn.
+    // The lead asks for each review once the task waits for it; a change request goes back to the
+    // worker by itself, and the next report waits for the lead again.
     let again = call(
         "review_request",
         json!({
@@ -398,14 +422,14 @@ async fn a_reviewers_failed_item_proposes_a_candidate_under_the_entries_owner() 
         json!({
             "task": "g",
             "reviewer": "critic",
-            "focus": submit(PROJECT_TAG, "又抽了第三个调用点", &again),
+            "focus": submit(PROJECT_TAG, "又抽了第三个调用点", ""),
         }),
     );
     let goal = format!(
         "[write#mock-haiku g.txt=v1] {}",
         call(
             "task_complete",
-            json!({ "task_id": "{task_id}", "summary": format!("wrote g {first}") })
+            json!({ "task_id": "{task_id}", "summary": "wrote g" })
         )
         .replacen("[call ", "[call#mock-haiku ", 1)
     );
@@ -420,12 +444,17 @@ async fn a_reviewers_failed_item_proposes_a_candidate_under_the_entries_owner() 
             json!({ "request": req, "planner": "boss", "worker": "coder", "policy": { "plan_approval": "auto" } }),
         )
         .await;
-    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
-
+    let status = resp.status();
+    let g_run: Value = resp.json().await.unwrap();
+    assert_eq!(status, 201, "{g_run}");
+    // The run's lead is a copy of boss (boss is still in the first run): the calls go to it.
+    let run_lead = g_run["planner"].as_str().unwrap().to_owned();
+    common::lead_accepts_when_waiting(&t, &mut w, &run_lead, "g", &first).await;
     w.until("g in review", task_is("g", TaskStatus::Reviewing))
         .await;
     w.until("g reviewed", task_is("g", TaskStatus::Passed))
         .await;
+    common::lead_accepts_when_waiting(&t, &mut w, &run_lead, "g", &again).await;
     w.until("g in review again", task_is("g", TaskStatus::Reviewing))
         .await;
     w.until("g reviewed again", task_is("g", TaskStatus::Passed))
@@ -452,10 +481,14 @@ async fn a_reviewers_failed_item_proposes_a_candidate_under_the_entries_owner() 
         let store = SqliteStore::open(&Paths::new(t.home.path()).db())
             .await
             .unwrap();
-        let candidates = store
+        // The bind run's own first-try example is not what this test is about: only the reviews'.
+        let candidates: Vec<_> = store
             .candidate_list(None, Some(CandidateStatus::Pending))
             .await
-            .unwrap();
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.origin == CandidateOrigin::Review)
+            .collect();
         if candidates.len() == 2 || tokio::time::Instant::now() > deadline {
             break (store, candidates);
         }

@@ -61,6 +61,10 @@ async fn start_run(t: &TestHub, tasks: Value, policy: Value) -> String {
         .to_owned()
 }
 
+fn task_is(key: &'static str, want: TaskStatus) -> impl Fn(&crossagents_api_types::Event) -> bool {
+    move |e| matches!(&e.kind, EventKind::TaskStatusChanged { key: k, to, .. } if k == key && *to == want)
+}
+
 fn completed(id: &str) -> impl Fn(&crossagents_api_types::Event) -> bool {
     let id = id.to_owned();
     move |e| {
@@ -101,14 +105,21 @@ async fn the_lead_recruits_within_the_cap_and_assigns_by_name() {
         call("agent_spawn", json!({ "name": "helper2" })),
         accept("a")
     );
-    let a = task(
-        "a",
-        goal("a", "[write a.txt=ay]", &format!("a done {lead_steps}")),
-    );
+    let a = task("a", goal("a", "[write a.txt=ay]", "a done"));
     let id = start_run(
         &t,
         json!([a]),
         json!({ "plan_approval": "auto", "max_agents": 1 }),
+    )
+    .await;
+    // The lead is not handed the report: its steps go to it once a waits, and b's once b waits.
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "a", &lead_steps).await;
+    common::lead_accepts_when_waiting(
+        &t,
+        &mut w,
+        "boss",
+        "b",
+        &format!("{} {}", accept("b"), finish()),
     )
     .await;
     w.until("run completed", completed(&id)).await;
@@ -134,19 +145,16 @@ async fn a_worker_splits_its_task_and_accepts_the_part() {
     let t = setup(repo.path()).await;
     let mut w = t.watch().await;
 
-    // p's worker hands part.txt to a subtask; when the part is reported, p's worker accepts
-    // it (into p's branch) and reports p, whose summary has the lead accept and finish.
+    // p's worker hands part.txt to a subtask. When the part is reported, its issuer (p's worker)
+    // is told so: it accepts the part (into p's branch) and reports p. The lead then accepts p
+    // and finishes the run. Nobody is handed a report: each is told that its task waits.
     let p_report = call(
         "task_complete",
-        json!({ "task": "p", "summary": format!("p with part {} {}", accept("p"), finish()) }),
+        json!({ "task": "p", "summary": "p with part" }),
     );
     let part = task(
         "part",
-        goal(
-            "part",
-            "[write part.txt=piece]",
-            &format!("{} {p_report}", accept("part")),
-        ),
+        goal("part", "[write part.txt=piece]", "part is written"),
     );
     let p = task(
         "p",
@@ -159,6 +167,34 @@ async fn a_worker_splits_its_task_and_accepts_the_part() {
         &t,
         json!([p]),
         json!({ "plan_approval": "auto", "delegate": true }),
+    )
+    .await;
+    w.until("the part is reported", task_is("part", TaskStatus::Passed))
+        .await;
+    let detail: Value = t.get(&format!("/v1/runs/{id}")).await.json().await.unwrap();
+    let issuer = detail["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["key"] == "part")
+        .unwrap()["issuer"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    common::lead_accepts_when_waiting(
+        &t,
+        &mut w,
+        &issuer,
+        "part",
+        &format!("{} {p_report}", accept("part")),
+    )
+    .await;
+    common::lead_accepts_when_waiting(
+        &t,
+        &mut w,
+        "boss",
+        "p",
+        &format!("{} {}", accept("p"), finish()),
     )
     .await;
     w.until("run completed", completed(&id)).await;
@@ -216,8 +252,9 @@ async fn the_lead_moves_a_teammate_to_a_stronger_model() {
         accept("a"),
         finish()
     );
-    let a = task("a", goal("a", "[write a.txt=ay]", &lead));
+    let a = task("a", goal("a", "[write a.txt=ay]", "a done"));
     let id = start_run(&t, json!([a]), json!({ "plan_approval": "auto" })).await;
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "a", &lead).await;
     w.until("run completed", completed(&id)).await;
     let coder: Value = t.get("/v1/agents/coder").await.json().await.unwrap();
     assert_eq!(coder["model"], "mock-opus");
@@ -261,8 +298,9 @@ async fn the_lead_cannot_put_a_teammate_on_a_model_nobody_runs() {
         accept("a"),
         finish()
     );
-    let a = task("a", goal("a", "[write a.txt=ay]", &lead));
+    let a = task("a", goal("a", "[write a.txt=ay]", "a done"));
     let id = start_run(&t, json!([a]), json!({ "plan_approval": "auto" })).await;
+    common::lead_accepts_when_waiting(&t, &mut w, "boss", "a", &lead).await;
     w.until("run completed", completed(&id)).await;
     // The lead's turn prints what its calls answered once it ends, after run_finish.
     w.until("the lead's calls answered", |e| {
