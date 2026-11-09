@@ -1187,7 +1187,10 @@ async fn a_verdict_that_names_no_commit_is_refused_and_changes_nothing() {
         )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("say which commit you reviewed"), "{err}");
+    assert!(
+        err.to_string().contains("say which commit you reviewed"),
+        "{err}"
+    );
     let after = f.task().await;
     assert_eq!(after.status, TaskStatus::Reviewing);
     assert_eq!(after.reviewer, Some(reviewer.id));
@@ -1249,7 +1252,8 @@ async fn a_reviewed_task_is_accepted_plainly_only_on_the_commit_its_review_appro
         .await
         .unwrap_err();
     assert!(
-        err.to_string().contains("its review did not approve this commit"),
+        err.to_string()
+            .contains("its review did not approve this commit"),
         "{err}"
     );
 
@@ -1291,7 +1295,9 @@ async fn a_task_that_waited_to_be_accepted_gets_its_notice_again_after_a_restart
 
     let notices = accept_notices(&f).await;
     assert!(
-        notices.last().is_some_and(|n| n.contains("#a waits for your acceptance")),
+        notices
+            .last()
+            .is_some_and(|n| n.contains("#a waits for your acceptance")),
         "{notices:?}"
     );
 }
@@ -1320,7 +1326,12 @@ async fn re_reporting_a_waiting_task_settles_its_acceptance_notice() {
     f.orchestrator
         .ready_to_accept(&f.run, &task, f.lead.id)
         .await;
-    assert!(accept_notices(&f).await.last().is_some_and(|n| n.contains("waits for your acceptance")));
+    assert!(
+        accept_notices(&f)
+            .await
+            .last()
+            .is_some_and(|n| n.contains("waits for your acceptance"))
+    );
 
     f.orchestrator
         .complete(&f.worker, f.task.id, "wrote again".into())
@@ -1330,9 +1341,14 @@ async fn re_reporting_a_waiting_task_settles_its_acceptance_notice() {
 
     // The old notice was settled by the new report, and the check's own result came after it.
     let notices = accept_notices(&f).await;
-    let settled = notices.iter().position(|n| n.contains("reported again")).expect("settled");
+    let settled = notices
+        .iter()
+        .position(|n| n.contains("reported again"))
+        .expect("settled");
     assert!(
-        notices[settled + 1..].iter().all(|n| !n.contains("#a waits") || n.contains("wrote again")),
+        notices[settled + 1..]
+            .iter()
+            .all(|n| !n.contains("#a waits") || n.contains("wrote again")),
         "{notices:?}"
     );
 }
@@ -1367,7 +1383,9 @@ async fn sending_a_waiting_task_back_by_hand_settles_its_acceptance_notice() {
 
     let notices = accept_notices(&f).await;
     assert!(
-        notices.last().is_some_and(|n| n.contains("sent back to its worker by the person")),
+        notices
+            .last()
+            .is_some_and(|n| n.contains("sent back to its worker by the person")),
         "{notices:?}"
     );
 }

@@ -1487,7 +1487,8 @@ impl Orchestrator {
         // commit it verified. A verdict on another commit, or one that is not a merge, takes force
         // and a reason. A task never reviewed is accepted as it always was.
         if task.report.review_attempt > 0 {
-            let approved = task.report.verdict == Some(crossagents_core::model::ReviewVerdict::Merge)
+            let approved = task.report.verdict
+                == Some(crossagents_core::model::ReviewVerdict::Merge)
                 && task.report.reviewed_sha.is_some()
                 && task.report.reviewed_sha == task.report.verified_sha;
             if !approved {

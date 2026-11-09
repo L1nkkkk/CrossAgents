@@ -298,7 +298,11 @@ async fn a_verdict_that_names_no_commit_is_refused_and_the_next_one_lands() {
     })
     .await;
     let still = detail(&t, &id).await;
-    assert_eq!(still["tasks"][0]["status"], "reviewing", "{}", still["tasks"][0]);
+    assert_eq!(
+        still["tasks"][0]["status"], "reviewing",
+        "{}",
+        still["tasks"][0]
+    );
 
     let reviewed = mid["tasks"][0]["report"]["reviewed_sha"].clone();
     t.send(
