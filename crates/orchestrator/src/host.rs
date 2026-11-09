@@ -211,6 +211,14 @@ pub trait AgentHost: Send + Sync {
         let _ = agent;
         false
     }
+    /// Ends the agent's session so that its next message opens a new one, the way a new round
+    /// starts (the lead keeps its id, name and conversation in the transcript). Busy only while
+    /// a turn runs: messages waiting for the agent move to the new session. `Ok(false)` when the
+    /// host keeps the session (an agent that runs outside it).
+    async fn renew_session(&self, agent: AgentId) -> Result<bool, CoreError> {
+        let _ = agent;
+        Ok(false)
+    }
 }
 
 /// One tool of an enabled extension, as the orchestrator lists it for an agent

@@ -405,12 +405,25 @@ impl Inbox {
         self.closed.store(true, Ordering::SeqCst);
         self.notify.notify_one();
     }
+
+    /// Takes over what `other` holds waiting, behind what this queue already holds.
+    fn take_from(&self, other: &Inbox) {
+        let moved: Vec<(MessageId, Prompt)> = other.waiting.lock().unwrap().drain(..).collect();
+        let people: Vec<MessageId> = other.from_person.lock().unwrap().drain().collect();
+        self.waiting.lock().unwrap().extend(moved);
+        self.from_person.lock().unwrap().extend(people);
+        self.notify.notify_one();
+    }
 }
 
 /// A message waiting for an agent outside the hub: id, sender, text.
 pub type Waiting = (MessageId, MessageSource, String);
 
 type LiveMap = Arc<Mutex<HashMap<AgentId, Arc<Live>>>>;
+
+/// The agent config key that says its next session starts fresh ([`Runtime::renew`]). Unlike
+/// [`crossagents_core::CONTEXT_LOST`] it is not a warning: starting a round is not a loss.
+const NEW_SESSION: &str = "new_session";
 
 pub struct Runtime {
     bus: Arc<EventBus>,
@@ -436,6 +449,9 @@ pub struct Runtime {
     /// Agents to archive once their turn ends ([`Self::archive_after_turn`] while they were
     /// busy).
     archiving: Mutex<HashSet<AgentId>>,
+    /// The queues of agents whose session was renewed ([`Runtime::renew`]): their waiting
+    /// messages go on into the next session, which takes them over in [`Runtime::install`].
+    carried: Mutex<HashMap<AgentId, Arc<Inbox>>>,
     /// Answers to teammates that were only written, to forward (crate::replies).
     replies: std::sync::Mutex<crate::replies::ReplyTracker>,
     /// Each fixed client id's first delivery, by agent: a repeat gets it instead of a new
@@ -499,6 +515,7 @@ impl Runtime {
             external: Mutex::default(),
             going_home: Mutex::default(),
             archiving: Mutex::default(),
+            carried: Mutex::default(),
             replies: std::sync::Mutex::default(),
             clients: Mutex::default(),
             generation: AtomicU64::new(0),
@@ -966,7 +983,10 @@ impl Runtime {
         // Carry on the agent's last conversation when the driver can, unless it is known
         // not to carry on from where the agent is now.
         let lost = agent.context_lost().map(str::to_owned);
-        let previous = if resolved.driver.capabilities().resume && lost.is_none() {
+        // A renewed session (a new round's lead) starts fresh without a warning: it is the
+        // normal way a round starts, and the handoff in its kickoff carries the facts.
+        let renewed = agent.config.get(NEW_SESSION).is_some();
+        let previous = if resolved.driver.capabilities().resume && lost.is_none() && !renewed {
             self.store()
                 .last_session_id(agent.id)
                 .await
@@ -1019,6 +1039,9 @@ impl Runtime {
         };
 
         // Only now that the new session is up: a start that failed says it again next time.
+        if renewed {
+            self.forget_mark(agent.id, NEW_SESSION).await;
+        }
         if let Some(why) = lost {
             self.forget_lost_context(agent.id).await;
             publish(
@@ -1367,7 +1390,15 @@ impl Runtime {
             control_rx,
             generation,
         } = channels;
-        let inbox = Arc::new(Inbox::default());
+        // A renewed session takes over the queue its predecessor closed, with what waits in it.
+        let carried = self.carried.lock().await.remove(&id);
+        let inbox = match carried {
+            Some(inbox) => {
+                inbox.closed.store(false, Ordering::SeqCst);
+                inbox
+            }
+            None => Arc::new(Inbox::default()),
+        };
         let live = Arc::new(Live {
             generation,
             session: session.clone(),
@@ -2827,18 +2858,23 @@ impl Runtime {
 
     /// Drops the [`crossagents_core::CONTEXT_LOST`] mark once a new session has opened.
     async fn forget_lost_context(&self, agent: AgentId) {
+        self.forget_mark(agent, crossagents_core::CONTEXT_LOST).await;
+    }
+
+    /// Drops one of the agent's session marks (`key` in its config) once a session has opened.
+    async fn forget_mark(&self, agent: AgentId, key: &str) {
         let Ok(mut record) = self.store().get_agent(&AgentKey::Id(agent)).await else {
             return;
         };
         if let Some(config) = record.config.as_object_mut() {
-            config.remove(crossagents_core::CONTEXT_LOST);
+            config.remove(key);
         }
         if let Err(err) = self
             .store()
             .update_agent_config(agent, &record.config)
             .await
         {
-            tracing::warn!(%agent, error = %err, "cannot clear the lost-context mark");
+            tracing::warn!(%agent, key, error = %err, "cannot clear a session mark");
         }
     }
 
@@ -2861,6 +2897,68 @@ impl Runtime {
         set_status(&self.bus, agent.id, AgentStatus::Stopped).await;
         self.announce_delivery(agent.id).await;
         Ok(())
+    }
+
+    /// Ends the agent's session so that its next message opens a new one: how a new round's
+    /// lead starts. The conversation stays in the transcript and the event log, under the old
+    /// session id. Busy only while a turn runs: messages waiting in the queue are not left
+    /// behind, the queue moves to the new session ([`Self::carried`]), ahead of what is sent
+    /// after this call. `false` for an agent that runs outside the hub.
+    pub async fn renew(&self, key: &AgentKey) -> Result<bool, CoreError> {
+        let agent = self.store().get_agent(key).await?;
+        if agent.plugin == EXTERNAL_PLUGIN {
+            return Ok(false);
+        }
+        let lock = self.agent_lock(agent.id).await;
+        let _guard = lock.lock().await;
+        let live = {
+            let mut lives = self.live.lock().await;
+            if lives
+                .get(&agent.id)
+                .is_some_and(|live| live.inbox.busy.load(Ordering::SeqCst))
+            {
+                return Err(CoreError::Busy(format!(
+                    "{} is in the middle of a turn",
+                    agent.name
+                )));
+            }
+            lives.remove(&agent.id)
+        };
+        // Written first: whatever opens the session next starts it fresh.
+        self.mark_new_session(agent.id).await?;
+        self.clients.lock().await.forget(agent.id);
+        if let Some(live) = live {
+            // Closed, so the old turn loop returns; what waits stays in the queue, which the
+            // new session takes over (install). Nothing is withdrawn: nothing is lost.
+            live.inbox.close();
+            let mut carried = self.carried.lock().await;
+            match carried.get(&agent.id) {
+                Some(queue) => queue.take_from(&live.inbox),
+                None => {
+                    carried.insert(agent.id, live.inbox.clone());
+                }
+            }
+            drop(carried);
+            let _ = live.session.interrupt().await;
+            live.session.shutdown().await;
+            let _ = live.control.send(Control::Stopped);
+        }
+        set_status(&self.bus, agent.id, AgentStatus::Stopped).await;
+        self.announce_delivery(agent.id).await;
+        Ok(true)
+    }
+
+    /// Records that the agent's next session starts fresh ([`NEW_SESSION`]); the open drops
+    /// the mark once it has started.
+    async fn mark_new_session(&self, id: AgentId) -> Result<(), CoreError> {
+        let mut record = self.store().get_agent(&AgentKey::Id(id)).await?;
+        if !record.config.is_object() {
+            record.config = serde_json::json!({});
+        }
+        if let Some(config) = record.config.as_object_mut() {
+            config.insert(NEW_SESSION.into(), serde_json::json!(true));
+        }
+        self.store().update_agent_config(id, &record.config).await
     }
 
     /// Stops every session; used when the hub shuts down.

@@ -50,7 +50,7 @@ fn brief_of(item: &HumanItem) -> String {
 }
 
 impl Orchestrator {
-    fn round_wait_limit(&self) -> std::time::Duration {
+    pub(crate) fn round_wait_limit(&self) -> std::time::Duration {
         #[cfg(test)]
         {
             *self.round_wait_limit.lock().unwrap()

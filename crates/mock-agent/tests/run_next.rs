@@ -2,7 +2,7 @@
 mod common;
 
 use common::{TestHub, git_repo};
-use crossagents_api_types::{EventKind, RunStatus};
+use crossagents_api_types::{AgentId, EventKind, RunStatus};
 use serde_json::{Value, json};
 
 fn call(tool: &str, args: Value) -> String {
@@ -25,6 +25,94 @@ async fn kickoff_from(t: &TestHub, lead: &str, run: &Value) -> Value {
         .find(|turn| turn["input"].as_str().unwrap().contains(&marker))
         .unwrap_or_else(|| panic!("no kickoff of {run} in {transcript}"))["from"]
         .clone()
+}
+
+/// The text of a run's kickoff in the lead's transcript.
+async fn kickoff_text(t: &TestHub, lead: &str, run: &Value) -> String {
+    let transcript: Value = t
+        .get(&format!("/v1/agents/{lead}/transcript"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let marker = format!("(run_id: {})", run["id"].as_str().unwrap());
+    transcript["turns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|turn| turn["input"].as_str().unwrap().contains(&marker))
+        .unwrap_or_else(|| panic!("no kickoff of {run} in {transcript}"))["input"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Every session the agent has started, oldest first, from the event log.
+async fn sessions_started(t: &TestHub, agent: AgentId) -> Vec<String> {
+    t.hub
+        .bus
+        .store()
+        .agent_events(agent, 0, 10_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::AgentSessionStarted { session_id, .. } => Some(session_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What the mock printed from `session` on: it says itself with `session=<id> (new)`, and
+/// everything after that line belongs to it (or to what came later).
+fn output_from_session(w: &common::Watcher, session: &str) -> String {
+    let output = w.output();
+    let marker = format!("session={session} (new) ");
+    output
+        .split(&marker)
+        .nth(1)
+        .unwrap_or_else(|| panic!("no new session {session} in {output}"))
+        .to_owned()
+}
+
+/// The new session recalls nothing: what it knows of the old conversation is the handoff in
+/// its kickoff, not the session's memory.
+fn assert_session_recalls_nothing(w: &common::Watcher, session: &str) {
+    let tail = output_from_session(w, session);
+    assert!(tail.starts_with("recall= "), "{tail}");
+}
+
+/// The warnings the agent's event log holds, as text.
+async fn warnings_of(t: &TestHub, agent: AgentId) -> Vec<String> {
+    t.hub
+        .bus
+        .store()
+        .agent_events(agent, 0, 10_000)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::AgentWarning { message, .. } => Some(message),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Writes the team note `constraints`, which every later round is under.
+async fn put_constraints(t: &TestHub, author: AgentId, text: &str) {
+    t.hub
+        .bus
+        .store()
+        .put_note(&crossagents_core::Note {
+            scope: crossagents_core::NoteScope::Team,
+            run_id: None,
+            key: "constraints".into(),
+            text: text.into(),
+            author,
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
 }
 
 async fn setup(t: &TestHub, repo: &std::path::Path) -> String {
@@ -601,6 +689,7 @@ async fn native_lead_run_next_after_landing() {
     assert_eq!(t.agent("Pia").await.cwd, repo.path());
     let before = t.agent("Pia").await;
     let session = t.hub.bus.store().last_session_id(before.id).await.unwrap();
+    put_constraints(&t, before.id, "- Keep the public API.\n  Tests first.").await;
     t.send(
         "Pia",
         &{
@@ -637,28 +726,163 @@ async fn native_lead_run_next_after_landing() {
         "{}",
         w.output()
     );
-    assert_eq!(
-        t.hub.bus.store().last_session_id(before.id).await.unwrap(),
-        session
-    );
-    assert!(w.output().contains("(resumed)"), "{}", w.output());
+    // The round is the same agent, in a new session; the old one stays in the event log.
+    let renewed = t
+        .hub
+        .bus
+        .store()
+        .last_session_id(before.id)
+        .await
+        .unwrap()
+        .expect("the round's session");
+    assert_ne!(session.as_deref(), Some(renewed.as_str()));
     assert!(
-        w.output().contains("recall=distinctive-amber-fox"),
+        sessions_started(&t, before.id)
+            .await
+            .contains(session.as_ref().expect("the first session")),
+        "the old session stays in the event log"
+    );
+    // The new session's own output: nothing it recalls. (The old session's turn that issued
+    // run_next still recalls, so only what follows the new session's marker counts.)
+    assert_session_recalls_nothing(&w, &renewed);
+    // The scheduled round's kickoff went to the new session, and starting it is not a warning.
+    assert!(
+        output_from_session(&w, &renewed).contains("run: second (run_id"),
         "{}",
         w.output()
     );
+    assert!(
+        warnings_of(&t, before.id)
+            .await
+            .iter()
+            .all(|m| !m.contains("没有带上之前的上下文")),
+        "a round's new session is not a lost context"
+    );
+    let kickoff = kickoff_text(&t, "Pia", &second).await;
+    for part in [
+        "1. Goal (this round's request, as written):\n[session] [cwd] [recall]",
+        "2. Constraints in force (team note `constraints`, verbatim):\n- Keep the public API.\n  Tests first.",
+        "3. Previous round result: \"A round\" (run ",
+        "4. Open items:",
+    ] {
+        assert!(kickoff.contains(part), "{kickoff}");
+    }
+    assert!(kickoff.contains("Added first.txt"), "{kickoff}");
     assert!(
         w.output().contains(&format!("cwd={}", checkout.display())),
         "{}",
         w.output()
     );
     let lead = t.agent(second["planner"].as_str().unwrap()).await;
+    assert_eq!(lead.id, before.id);
     assert_eq!(lead.cwd, checkout);
     assert!(checkout.exists(), "the round made itself a new checkout");
     assert!(checkout.join("first.txt").exists());
     assert!(checkout.join("second.txt").exists());
     land(&t, &second).await;
     assert!(repo.path().join("second.txt").exists());
+}
+
+/// A round in the lead's own checkout (nothing moved): the lead is not moved, so the round is
+/// the direct path, and its kickoff still opens a new session with the handoff.
+#[tokio::test]
+async fn native_round_in_the_same_checkout_opens_a_new_session() {
+    let repo = git_repo();
+    let sessions = tempfile::tempdir().unwrap();
+    let session_dir = sessions.path().to_str().unwrap().to_owned();
+    let t = TestHub::start_with(common::native_plugin_with(&[
+        "--mock-mobile-sessions",
+        &session_dir,
+    ]))
+    .await;
+    t.add_native("Pia", "planner", repo.path()).await;
+    let response = t
+        .post("/v1/works", json!({"title":"rounds", "lead":"Pia"}))
+        .await;
+    assert_eq!(response.status(), 201);
+    let work = response.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut w = t.watch().await;
+    let first = round(
+        &t,
+        &work,
+        format!("[remember distinctive-amber-fox] {}", change("first.txt")),
+        None,
+    )
+    .await;
+    completed(&mut w, &first).await;
+    let lead = t.agent("Pia").await;
+    let checkout = lead.cwd.clone();
+    let old = t
+        .hub
+        .bus
+        .store()
+        .last_session_id(lead.id)
+        .await
+        .unwrap()
+        .expect("the first round's session");
+    // Not landed: the checkout stays with the lead.
+    put_constraints(&t, lead.id, "- Keep the public API.").await;
+    t.send(
+        "Pia",
+        &call(
+            "run_next",
+            json!({"title":"second", "request":format!("[session] [recall] {}", change("second.txt"))}),
+        ),
+    )
+    .await;
+    let event = w
+        .until(
+            "next round",
+            |e| matches!(&e.kind, EventKind::RunCreated { run } if run.title == "second"),
+        )
+        .await;
+    let EventKind::RunCreated { run } = event.kind else {
+        unreachable!()
+    };
+    let second = serde_json::to_value(run).unwrap();
+    completed(&mut w, &second).await;
+    let after = t.agent("Pia").await;
+    assert_eq!(after.id, lead.id, "the same agent");
+    assert_eq!(after.cwd, checkout);
+    assert_eq!(second["base_branch"], first["branch"]);
+    let new = t
+        .hub
+        .bus
+        .store()
+        .last_session_id(lead.id)
+        .await
+        .unwrap()
+        .expect("the second round's session");
+    assert_ne!(new, old);
+    assert!(
+        sessions_started(&t, lead.id).await.contains(&old),
+        "the old session stays in the event log"
+    );
+    assert_session_recalls_nothing(&w, &new);
+    assert!(
+        warnings_of(&t, lead.id)
+            .await
+            .iter()
+            .all(|m| !m.contains("没有带上之前的上下文")),
+        "a round's new session is not a lost context"
+    );
+    let kickoff = kickoff_text(&t, "Pia", &second).await;
+    for part in [
+        "1. Goal (this round's request, as written):\n[session] [recall]",
+        "2. Constraints in force (team note `constraints`, verbatim):\n- Keep the public API.",
+        "3. Previous round result: \"A round\" (run ",
+        "Added first.txt",
+        "changes not landed",
+        "4. Open items:",
+        "note_write",
+    ] {
+        assert!(kickoff.contains(part), "{kickoff}");
+    }
+    assert!(checkout.join("first.txt").exists());
+    assert!(checkout.join("second.txt").exists());
 }
 
 #[tokio::test]
