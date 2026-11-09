@@ -164,6 +164,7 @@ impl Orchestrator {
         let mut report = self.host.usage_report(run.as_ref().map(|r| r.id)).await?;
         if let Some(run) = run {
             report["budget"] = json!(run.config.policy.budget);
+            report["task_budget"] = json!(run.config.policy.task_budget);
             report["minutes_elapsed"] = json!((Utc::now() - run.created_at).num_minutes());
         }
         Ok(report)

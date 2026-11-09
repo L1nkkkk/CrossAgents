@@ -5,7 +5,7 @@
 use chrono::Utc;
 use crossagents_core::{
     Agent, AgentId, AskPolicy, CoreError, Envelope, EventKind, HumanAction, HumanItem,
-    HumanItemKind, HumanItemStatus, MessageSource, Run, RunId, RunPolicy, RunStatus,
+    HumanItemKind, HumanItemStatus, MessageSource, Run, RunId, RunPolicy, RunStatus, TaskId,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -344,6 +344,89 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// The hub measured task `task_id` over one cap of its budget (`what`: usd, tokens,
+    /// requests, minutes or idle), in that cap's unit. The lead decides: the task is not sent
+    /// back or continued on its own once over. Usage arrives when a turn ends, so the cap may
+    /// have been passed a turn earlier; the notice says so.
+    pub async fn task_budget_reached(
+        &self,
+        run_id: RunId,
+        task_id: TaskId,
+        what: &str,
+        used: f64,
+        max: f64,
+    ) -> Result<(), CoreError> {
+        let _guard = self.lock(run_id).await;
+        let run = self.store().get_run(run_id).await?;
+        let task = self.store().get_task(task_id).await?;
+        if run.status != RunStatus::Running || task.status.is_terminal() {
+            return Ok(());
+        }
+        self.publish(EventKind::TaskBudget {
+            run_id,
+            id: task_id,
+            key: task.key.clone(),
+            what: what.to_owned(),
+            used,
+            max,
+        })
+        .await;
+        // The first cap it went over is kept: from then the hub never sends the task back alone.
+        let mut task = task;
+        if task.report.budget_over.is_none() {
+            task.report.budget_over = Some(format!(
+                "{}已用 {}，上限 {}",
+                budget_label(what),
+                budget_amount(what, used),
+                budget_amount(what, max),
+            ));
+            self.store().update_task(&task).await?;
+        }
+        let line = format!(
+            "#{} 超过任务预算：{}已用 {}，上限 {}（用量在回合结束时上报，实际可能已超出）。这个任务不会再自动退回或续跑。请决定：task_rework 让它继续，task_accept 通过，或 task_cancel 取消。",
+            task.key,
+            budget_label(what),
+            budget_amount(what, used),
+            budget_amount(what, max),
+        );
+        let _ = self
+            .host
+            .notify(
+                run.planner,
+                &format!("task:{task_id}:budget:{what}"),
+                &line,
+                crossagents_core::NoticeClass::Decide,
+            )
+            .await;
+        Ok(())
+    }
+
+    /// A cap of task `task_id` that the hub cannot measure (an unpriced model, no request
+    /// counts): the lead hears once why it does not apply.
+    pub async fn task_budget_note(
+        &self,
+        run_id: RunId,
+        task_id: TaskId,
+        text: &str,
+    ) -> Result<(), CoreError> {
+        let _guard = self.lock(run_id).await;
+        let run = self.store().get_run(run_id).await?;
+        let task = self.store().get_task(task_id).await?;
+        if run.status != RunStatus::Running || task.status.is_terminal() {
+            return Ok(());
+        }
+        let _ = self
+            .host
+            .notify(
+                run.planner,
+                &format!("task:{task_id}:budget-note"),
+                &format!("#{}: {text}", task.key),
+                crossagents_core::NoticeClass::Silent,
+            )
+            .await;
+        Ok(())
+    }
+
     async fn budget_decided(&self, item: &HumanItem, answer: &str) -> Result<(), CoreError> {
         let Some(run_id) = item.run_id else {
             return Ok(());
@@ -387,5 +470,27 @@ impl Orchestrator {
             agents.extend([task.assignee, task.reviewer].into_iter().flatten());
         }
         Ok(agents)
+    }
+}
+
+/// What a task cap is called in a notice (`what` as the hub names it).
+pub(crate) fn budget_label(what: &str) -> &'static str {
+    match what {
+        "usd" => "估算金额",
+        "tokens" => "token 数",
+        "requests" => "请求次数",
+        "minutes" => "总耗时",
+        "idle" => "无进展时间",
+        "rework" => "返工次数",
+        _ => "预算",
+    }
+}
+
+/// A task cap's figure in its own unit: dollars, minutes, or a count.
+pub(crate) fn budget_amount(what: &str, value: f64) -> String {
+    match what {
+        "usd" => format!("${value:.2}"),
+        "minutes" | "idle" => format!("{value:.1} 分钟"),
+        _ => format!("{value:.0}"),
     }
 }

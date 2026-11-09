@@ -9,7 +9,7 @@ use crossagents_core::model::{
 };
 use crossagents_core::{
     Agent, AgentId, AgentKey, ClaimRole, CoreError, Handoff, HandoffOutcome, MessageSource,
-    NoticeClass, Role, Run, RunId, Task, TaskId, TaskStatus,
+    NoticeClass, Role, Run, RunId, Task, TaskBudget, TaskId, TaskStatus,
 };
 use serde::Deserialize;
 
@@ -377,8 +377,17 @@ fn not_open(task: &Task) -> String {
     format!("you are not reviewing #{}", task.key)
 }
 
-fn short(sha: &str) -> String {
-    sha.trim().chars().take(8).collect()
+/// Whether a reviewer's `given` names the round's commit `current`. Spaces around it and case
+/// do not count; a prefix of at least seven characters does, since it can only be the commit
+/// the brief names (a reviewer copies the short form people write). Shorter, or another
+/// commit's prefix, is a different commit.
+fn same_commit(given: &str, current: &str) -> bool {
+    let given = given.trim().to_ascii_lowercase();
+    let current = current.trim().to_ascii_lowercase();
+    if given.is_empty() || current.is_empty() {
+        return false;
+    }
+    given == current || (given.len() >= 7 && current.starts_with(&given))
 }
 
 impl Orchestrator {
@@ -562,6 +571,16 @@ impl Orchestrator {
         decide: &str,
     ) -> Result<(), CoreError> {
         let issuer = task.issuer_or(run.planner);
+        let stop = task.report.budget_over.clone().map(|over| format!("its budget is used up: {over}")).or_else(|| rework_stop(run, task));
+        if let Some(why) = stop {
+            self.decide(
+                issuer,
+                task,
+                format!("{decide}, and {why}. Decide: task_rework it, task_assign it, or task_accept it with a reason."),
+            )
+            .await;
+            return Ok(());
+        }
         match self.review_return(run, task).await? {
             ReviewReturn::Elsewhere => {
                 // `spec.on_reject` names another teammate: it takes the work, as it always has. The
@@ -976,18 +995,18 @@ impl Orchestrator {
         else {
             return Err(CoreError::Conflict(format!(
                 "say which commit you reviewed: pass reviewed_sha, the one your brief names ({}). A verdict without it cannot be bound to review round {} of #{}; nothing changed.",
-                short(&current),
+                current,
                 task.report.review_attempt,
                 task.key
             )));
         };
-        if sha != current {
+        if !same_commit(sha, &current) {
             return Err(CoreError::Conflict(format!(
                 "your review is of commit {}, but review round {} of #{} is of {}: the task changed since, so this review is stale and nothing changed. Review the commit the brief names.",
-                short(sha),
+                sha,
                 task.report.review_attempt,
                 task.key,
-                short(&current)
+                current
             )));
         }
         let mut findings = submission.findings;
@@ -1273,4 +1292,23 @@ mod tests {
                 .blocking
         );
     }
+}
+
+/// The caps a task is held to: its own `spec.budget`, field by field, else the run's `task_budget`.
+pub(crate) fn task_caps(run: &Run, task: &Task) -> TaskBudget {
+    task.spec
+        .budget
+        .clone()
+        .unwrap_or_default()
+        .with_default(&run.config.policy.task_budget.clone().unwrap_or_default())
+}
+
+/// Why the hub must not send `task` back for rework on its own: its budget allows no more
+/// rounds (`max_rework`). The lead decides then, as it does past the review limit.
+pub(crate) fn rework_stop(run: &Run, task: &Task) -> Option<String> {
+    let max = task_caps(run, task).max_rework?;
+    let done = task.report.rework.len() as u32;
+    (done >= max).then(|| {
+        format!("it has been sent back for rework {done} times, and its budget allows {max} (max_rework)")
+    })
 }

@@ -1227,6 +1227,47 @@ async fn a_late_verdict_for_an_earlier_commit_is_refused_in_the_next_round() {
 }
 
 #[tokio::test]
+async fn a_verdict_on_the_short_form_of_the_round_commit_lands_and_other_commits_do_not() {
+    use crate::review::Submission;
+    let f = Fixture::new(&[]).await;
+    let reviewer = agent("critic", Role::Reviewer, f._home.path());
+    let commit = "3f9a1c2b7d4e8f05a6b7c8d9e0f1a2b3c4d5e6f7";
+    in_review(&f, &reviewer, 1, commit).await;
+    let submit = |sha: &str| Submission {
+        approve: true,
+        notes: "lgtm".into(),
+        findings: Vec::new(),
+        verdict: None,
+        reviewed_sha: Some(sha.into()),
+    };
+
+    // Another commit, one that only shares a few leading characters, and a short prefix that
+    // is too short to name a commit: each is refused, and nothing moves.
+    for other in ["3f9a1c2c", "aaaaaaaa", "3f9a1c"] {
+        let err = f
+            .orchestrator
+            .review(&reviewer, f.task.id, submit(other))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("stale"), "{other}: {err}");
+        assert!(err.to_string().contains(commit), "full commit in the refusal: {err}");
+        let after = f.task().await;
+        assert_eq!(after.status, TaskStatus::Reviewing, "{other}");
+        assert!(after.report.review.is_none(), "{other}: {after:?}");
+    }
+
+    // The eight-character form the brief's short log shows, in any case and with spaces,
+    // is the same commit: the verdict lands.
+    f.orchestrator
+        .review(&reviewer, f.task.id, submit("  3F9A1C2B "))
+        .await
+        .unwrap();
+    let after = f.task().await;
+    assert_eq!(after.status, TaskStatus::Passed, "{after:?}");
+    assert_eq!(after.report.review.as_deref(), Some("lgtm"));
+}
+
+#[tokio::test]
 async fn a_reviewed_task_is_accepted_plainly_only_on_the_commit_its_review_approved() {
     let f = Fixture::with_checks(&["cargo test"], vec![true]).await;
     let mut task = f.task().await;
@@ -1388,4 +1429,192 @@ async fn sending_a_waiting_task_back_by_hand_settles_its_acceptance_notice() {
             .is_some_and(|n| n.contains("sent back to its worker by the person")),
         "{notices:?}"
     );
+}
+
+// ---------------------------------------------------------------------------------------
+// 10. Task budgets: a passed cap tells the lead once, with its figures; a task that ended
+//     gets no notice; a worker past its max_rework is not sent back on the hub's own
+
+#[tokio::test]
+async fn a_passed_task_cap_tells_the_lead_once_with_its_figures() {
+    let f = Fixture::new(&[]).await;
+    f.orchestrator
+        .task_budget_reached(f.run.id, f.task.id, "tokens", 1200.0, 1000.0)
+        .await
+        .unwrap();
+    let told = f.host.notices.lock().await.clone();
+    let line = told
+        .iter()
+        .find(|n| n.starts_with(&format!("task:{}:budget:tokens", f.task.id)))
+        .unwrap_or_else(|| panic!("no budget notice in {told:?}"));
+    assert!(line.contains("1200") && line.contains("1000"), "{line}");
+    assert!(line.contains("可能已超出"), "the usage may lag a turn: {line}");
+    assert!(line.contains("#a"), "{line}");
+
+    // A cap the hub cannot measure is said once, as a quiet note.
+    f.orchestrator
+        .task_budget_note(
+            f.run.id,
+            f.task.id,
+            "max_usd 没有生效：unlisted 没有价格。",
+        )
+        .await
+        .unwrap();
+    let told = f.host.notices.lock().await.clone();
+    assert!(
+        told.iter().any(|n| n.contains("max_usd 没有生效")),
+        "{told:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_task_that_has_ended_gets_no_budget_notice() {
+    let f = Fixture::new(&[]).await;
+    let mut task = f.task().await;
+    task.status = TaskStatus::Merged;
+    f.store.update_task(&task).await.unwrap();
+    f.orchestrator
+        .task_budget_reached(f.run.id, f.task.id, "minutes", 61.0, 60.0)
+        .await
+        .unwrap();
+    let told = f.host.notices.lock().await.clone();
+    assert!(
+        !told.iter().any(|n| n.contains("budget")),
+        "an ended task is not held to its caps: {told:?}"
+    );
+}
+
+/// Sets the run's default task budget (`RunPolicy::task_budget`).
+async fn set_task_budget(f: &Fixture, budget: crossagents_core::TaskBudget) {
+    let mut run = f.run().await;
+    run.config.policy.task_budget = Some(budget);
+    f.store.update_run(&run).await.unwrap();
+}
+
+/// Sends the task back the way a reviewer asking for a change does, with one blocking finding.
+async fn ask_for_a_change(f: &Fixture, reviewer: &Agent, commit: &str) -> Result<(), CoreError> {
+    use crate::review::Submission;
+    let finding = crate::review::FindingInput {
+        id: None,
+        severity: crossagents_core::model::ReviewSeverity::P1,
+        confidence: 0.9,
+        file: None,
+        line: None,
+        title: "fix it".into(),
+        detail: None,
+        blocking: None,
+        basis: None,
+        verify: None,
+    };
+    f.orchestrator
+        .review(
+            reviewer,
+            f.task.id,
+            Submission {
+                approve: false,
+                notes: "changes please".into(),
+                findings: vec![finding.into_finding()],
+                verdict: None,
+                reviewed_sha: Some(commit.into()),
+            },
+        )
+        .await
+}
+
+#[tokio::test]
+async fn past_its_max_rework_a_task_goes_to_the_lead_and_not_back_to_the_worker() {
+    let f = Fixture::new(&[]).await;
+    let reviewer = agent("critic", Role::Reviewer, f._home.path());
+    set_task_budget(
+        &f,
+        crossagents_core::TaskBudget {
+            max_rework: Some(0),
+            ..Default::default()
+        },
+    )
+    .await;
+    in_review(&f, &reviewer, 1, "c0ffee1").await;
+
+    ask_for_a_change(&f, &reviewer, "c0ffee1").await.unwrap();
+
+    let after = f.task().await;
+    assert_eq!(after.status, TaskStatus::Passed, "{after:?}");
+    assert!(after.report.rework.is_empty(), "nothing was sent back: {after:?}");
+    assert!(
+        f.host.delivered_to(f.worker.id).await.is_empty(),
+        "the worker got no return"
+    );
+    let told = f.host.notices.lock().await.clone();
+    assert!(
+        told.iter().any(|n| n.contains("max_rework")),
+        "the lead is told why: {told:?}"
+    );
+}
+
+#[tokio::test]
+async fn without_a_max_rework_a_change_request_goes_back_as_before() {
+    let f = Fixture::new(&[]).await;
+    let reviewer = agent("critic", Role::Reviewer, f._home.path());
+    in_review(&f, &reviewer, 1, "c0ffee1").await;
+
+    ask_for_a_change(&f, &reviewer, "c0ffee1").await.unwrap();
+
+    let after = f.task().await;
+    assert!(!after.report.rework.is_empty(), "{after:?}");
+    assert!(
+        !f.host.delivered_to(f.worker.id).await.is_empty(),
+        "the worker gets the change request"
+    );
+}
+
+#[tokio::test]
+async fn a_task_over_one_of_its_caps_is_not_sent_back_on_its_own() {
+    let f = Fixture::new(&[]).await;
+    let reviewer = agent("critic", Role::Reviewer, f._home.path());
+    in_review(&f, &reviewer, 1, "c0ffee1").await;
+    f.orchestrator
+        .task_budget_reached(f.run.id, f.task.id, "tokens", 1200.0, 1000.0)
+        .await
+        .unwrap();
+    assert!(f.task().await.report.budget_over.is_some());
+
+    ask_for_a_change(&f, &reviewer, "c0ffee1").await.unwrap();
+
+    let after = f.task().await;
+    assert_eq!(after.status, TaskStatus::Passed, "{after:?}");
+    assert!(after.report.rework.is_empty(), "{after:?}");
+    assert!(f.host.delivered_to(f.worker.id).await.is_empty());
+    let told = f.host.notices.lock().await.clone();
+    assert!(
+        told.iter().any(|n| n.contains("budget is used up")),
+        "the lead decides, and is told why: {told:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_tasks_own_budget_wins_over_the_runs_default() {
+    let f = Fixture::new(&[]).await;
+    let reviewer = agent("critic", Role::Reviewer, f._home.path());
+    // The run allows no rework at all; this task's own plan allows two.
+    set_task_budget(
+        &f,
+        crossagents_core::TaskBudget {
+            max_rework: Some(0),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut task = f.task().await;
+    task.spec.budget = Some(crossagents_core::TaskBudget {
+        max_rework: Some(2),
+        ..Default::default()
+    });
+    f.store.update_task(&task).await.unwrap();
+    in_review(&f, &reviewer, 1, "c0ffee1").await;
+
+    ask_for_a_change(&f, &reviewer, "c0ffee1").await.unwrap();
+
+    let after = f.task().await;
+    assert!(!after.report.rework.is_empty(), "{after:?}");
+    assert!(!f.host.delivered_to(f.worker.id).await.is_empty());
 }

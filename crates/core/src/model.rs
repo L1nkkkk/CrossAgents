@@ -627,7 +627,7 @@ pub struct Scope {
 }
 
 /// The contract a worker is held to. See docs/DESIGN.md §7.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TaskSpec {
     pub goal: String,
@@ -668,6 +668,10 @@ pub struct TaskSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub max_returns: Option<u32>,
+    /// The task's own caps (`TaskBudget`); each field overrides the run's `task_budget`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub budget: Option<crate::policy::TaskBudget>,
 }
 
 impl TaskSpec {
@@ -680,7 +684,7 @@ impl TaskSpec {
 }
 
 /// One task in a submitted plan. `key` is the planner's own short name for it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct PlannedTask {
     pub key: String,
@@ -886,6 +890,10 @@ pub struct TaskReport {
     /// The worker's answers to the findings of the last review, as its last report gave them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub answers: Vec<FindingAnswer>,
+    /// The first cap of the task's budget it went over, in words (`task.budget`). While it is set,
+    /// the hub does not send the task back, or continue it, on its own: the lead decides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_over: Option<String>,
 }
 
 fn is_zero(n: &u32) -> bool {

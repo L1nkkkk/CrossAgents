@@ -37,6 +37,7 @@ pub mod shadow;
 pub mod shims;
 pub mod snapshot;
 pub mod stream_rules;
+pub mod task_cost;
 pub mod terminal;
 pub mod trace;
 pub mod transcript;
@@ -296,9 +297,10 @@ pub async fn start(config: HubConfig) -> Result<RunningHub> {
     // Settle what runs spent while no hub was there (agents' replayed usage included) before
     // anything is dispatched: an over-budget run pauses first (docs/tasks/DOGFOOD.md §5).
     let budgets = Arc::new(
-        budget::Budgets::load(
+        budget::Budgets::load_with_prices(
             store.as_ref() as &dyn crossagents_core::Store,
             orchestrator.clone(),
+            crate::usage::price_table(&paths.home),
         )
         .await?,
     );

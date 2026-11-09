@@ -410,6 +410,35 @@ pub enum EventKind {
         what: String,
         percent: u32,
     },
+    /// A task passed one cap of its budget (`what`: usd, tokens, requests, rework, minutes or
+    /// idle), in that cap's unit. Usage is reported when a turn ends, so the cap may have been
+    /// passed a turn earlier.
+    #[serde(rename = "task.budget")]
+    TaskBudget {
+        run_id: RunId,
+        id: TaskId,
+        key: String,
+        what: String,
+        used: f64,
+        max: f64,
+    },
+    /// The reviewer a review round of the task went to. Its usage counts for the task from then.
+    #[serde(rename = "task.reviewer")]
+    TaskReviewer {
+        run_id: RunId,
+        id: TaskId,
+        key: String,
+        reviewer: AgentId,
+    },
+    /// How long the task's acceptance checks took in all (`task.checked` carries the results).
+    #[serde(rename = "task.check_timed")]
+    TaskCheckTimed {
+        run_id: RunId,
+        id: TaskId,
+        key: String,
+        #[cfg_attr(feature = "ts", ts(type = "number"))]
+        duration_ms: u64,
+    },
     /// The worktrees' build output is over its soft budget after reclaiming what nothing uses
     /// (docs/TODO.md §九 ②). A warning, not an action: what is in use is never deleted for it.
     #[serde(rename = "hub.build_cache")]
@@ -788,6 +817,9 @@ impl EventKind {
             Self::HumanAnswered { .. } => "human.answered",
             Self::HumanDismissed { .. } => "human.dismissed",
             Self::RunBudget { .. } => "run.budget",
+            Self::TaskBudget { .. } => "task.budget",
+            Self::TaskReviewer { .. } => "task.reviewer",
+            Self::TaskCheckTimed { .. } => "task.check_timed",
             Self::BuildCache { .. } => "hub.build_cache",
             Self::RunLanded { .. } => "run.landed",
             Self::RunDeleted { .. } => "run.deleted",
@@ -881,6 +913,8 @@ impl EventKind {
             | Self::TaskChecked { .. }
             | Self::TaskProgress { .. }
             | Self::TaskRouted { .. }
+            | Self::TaskBudget { .. }
+            | Self::TaskCheckTimed { .. }
             | Self::AccountCreated { .. }
             | Self::AccountRemoved { .. }
             | Self::AccountQuotaUpdated { .. }
@@ -903,6 +937,7 @@ impl EventKind {
             // tools as the person, with no agent to attribute them to.
             | Self::ExtensionCallFinished { .. } => None,
             Self::AgentSessionStarted { id, .. } => Some(*id),
+            Self::TaskReviewer { reviewer, .. } => Some(*reviewer),
             Self::ReminderFired { owner, .. } | Self::WatchTriggered { owner, .. } => Some(*owner),
             Self::NoticeRecorded { id, .. } => Some(*id),
             Self::NoteWritten { author, .. } => Some(*author),

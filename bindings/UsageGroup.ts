@@ -3,4 +3,4 @@
 /**
  * How `GET /v1/usage` groups agents.
  */
-export type UsageGroup = "role" | "model" | "run" | "agent";
+export type UsageGroup = "role" | "model" | "run" | "agent" | "task";
