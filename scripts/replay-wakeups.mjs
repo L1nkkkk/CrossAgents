@@ -29,10 +29,10 @@
 //   A. 消息（不是通知摘要）：
 //      - from.kind = human            → human，人的消息照旧立刻处理。
 //      - from.kind = orchestrator     → orchestrator，run 请求（人的原话转来），立刻。
-//      - from.kind = agent 且正文带 "\n---\ntask #<key> (<id>) · branch …" 的交付尾
-//        注                       → batch，「通过检查和评审、等 lead 接受」。
+//      - from.kind = agent 且正文带交付尾注（一条 --- 之后是 task #<key> (<id>) · branch）
+//                                   → 等接受：默认 batch；敏感性测试里改按 unblock。
 //      - from.kind = agent 且正文以 "Review of #<key> …: approved" 开头
-//                                   → batch，评审通过、等接受。
+//                                   → 等接受：同上。
 //      - "Review of #<key> …: changes needed"
 //                                   → silent，自动返工中，lead 不用动。
 //      - 其它 from.kind = agent      → teammate，Agent 之间的 agent_send 消息，照旧立刻。
@@ -44,40 +44,61 @@
 //                                                   → decide，失败或要决定。
 //      - "Reminder (…)"                             → decide，主人自己设的提醒。
 //      - "The plan of run … was approved"           → decide。
-//      - "Task #… is now passed."                   → batch，等 accept。
+//      - "Task #… is now passed."                   → 等接受：默认 batch；敏感性测试里改按 unblock。
+//      - "Task #… is now waiting_answer."           → decide，等 lead 回答。
 //      - "Task #… is now merged."                   → silent，已接受，只是进展。
 //      - "Progress from …"                          → silent，进度。
 //      - "#… 已派给 …"                              → silent，已派出。
 //      - "#… (id): given to … instead: …"            → silent，改派。
 //      - "Task #… is now <其它状态>."                → silent，状态变化。
-//      - quota 提示（"…% of its … left … dispatch more work"）
-//                                                   → batch（新代码 quota.rs 用 Batch）。
+//      - quota 的三类（crates/orchestrator/src/quota.rs）：
+//          · 过期提示 "…% of its … left … dispatch more work"：Batch（65 行附近）
+//          · 改派 "…: given to … instead: …"：Silent（92 行附近；本脚本按改派行归类）
+//          · "its worker hit its quota (…), and no other account or teammate has quota
+//            left."：Decide（130 行附近）
 //      - watch.triggered 里逐字相同、但上面都认不出来的行
 //                                                   → decide，主人自己设的 watch。
 //      - 认不出来的行                                → decide（保守：不把没认出来的通知省掉），
 //        并在输出里单独计数。
 //
 //   旧日志里 lead 自己 watch 了每个任务，watch 行就是「Task #x is now passed / merged」这类
-//   任务状态行，和新规则要发的任务状态通知是同一件事，所以按内容归类（passed → batch，
+//   任务状态行，和新规则要发的任务状态通知是同一件事，所以按内容归类（passed → 等接受，
 //   merged → silent），不按 watch 一律算 decide——否则「等接受」永远合并不了，估算会失真。
-//   watch 只在内容认不出来时兜底按 decide。
+//   watch 只在内容认不出来时兜底按 decide。输出里的「参考」把交付报告按现在的消息算
+//   （立刻叫醒，见 crates/hub/src/notices.rs:224），用来看「报告还是消息」时会是多少。
 //
 // 推断的边界（输出里也会写）：
-//   - Batch 还是 Unblock，要看「接受后会不会解锁下游任务」，旧日志没有依赖图（run.plan_submitted
-//     只列任务 key），所以旧日志里「等接受」一律按 batch；Unblock 只在使用带分类的新事件时出现。
-//     这会让估算偏保守（把本该立刻叫醒的也算进可合并的）。
-//   - 旧日志没有 agent.tool_used，所以「没做决定」也是推断：回合时间内出现下列能归到该
-//     agent 名下的效果，才算做了决定——接受（status→merged）、返工（passed→running）、
-//     取消（→cancelled）、task_assign（task.handed_off 的 from 是它）、提交计划
+//   - 等接受（passed / 评审通过 / 交付报告）到底是 Batch 还是 Unblock，要看「接受后会不会
+//     解锁下游任务」。旧日志没有依赖图（run.plan_submitted 只列任务 key；agent.tool_detail
+//     里的 depends_on 只覆盖 8 个任务、3 个有依赖，重建不全），所以两种口径各算一次：
+//       乐观：全部按 batch（能合并，叫醒更少、节省更多）
+//       保守：全部按 unblock（立刻叫醒）
+//     全按 batch 会高估节省，不是偏保守。
+//   - 交付报告和评审通过的旧形态是 worker 的消息（现在的代码里会立刻叫醒），本脚本默认把
+//     它们当新流程的「等接受」通知；这是最大的一个假设，输出里单列。
+//   - 消息不合并：每条消息各自是一次唤醒（旧日志 165 个回合对应 165 个 message_id）；
+//     忙时到达就顺延到前一个回合结束，但两条消息不会因为同时顺延而并成一次。
+//     待带的通知可以跟着消息走。
+//   - 「没做决定」有两个口径：事件口径（状态变化等效果，见下）和工具口径
+//     （agent.tool_call + agent.tool_detail 里的 toolName，对照 crates/hub/src/rounds.rs
+//     的 decides()）。有工具记录时以工具为准，没有才用事件；工具记录不全（只有 hub 工具
+//     带名字，grep/glob 等驱动工具不算），输出给区间。
+//     事件口径的决定信号：接受（status→merged）、返工（passed→running，可能是 hub 自动
+//     返工）、取消（→cancelled）、task_assign（task.handed_off 的 from 是它）、提交计划
 //     （run.plan_submitted / run.status_changed→awaiting_approval）、开 run
 //     （run.created 的 planner 是它）、落地（run.landed 的 by 是它）、写笔记 / 记问题
 //     （note.written / issue.recorded 的 author 是它）、问人（human.asked 的 from 是它）、
 //     给队友发消息（其它 agent 的 agent.input 的 from.agent_id 是它）。只读工具、进展汇报、
-//     检查（checks_run / workspace_run）不算决定；推送、模型切换等没有 actor 的效果不算。
+//     检查不算决定；推送、模型切换等没有 actor 的效果不算。
 //   - 回合时间按 turn_started→turn_completed；用量增量按 agent.usage 的会话累计值做差，
 //     遇到数字变小当作新会话。没有用量上报的回合 token 记为未知。
 //   - 新规则模拟不模拟「新回合本身要跑多久」，只避开日志里实际存在的回合：通知到达时
 //     agent 正在回合里，就叫醒顺延到那个回合结束（真实 hub 也会等回合结束再发下一轮）。
+//     所以同一条叫醒消息发出后、回合开始前（旧日志里 0.1–1 秒）到达的通知，本脚本不会并进去。
+//   - Batch 边界：最后一条之后正好第 60 秒到达的通知，先叫醒、它算下一批（脚本里
+//     wakeAt <= nextArrival 时先发唤醒）。第一条起第 180 秒同理。
+//   - 被撤回的摘要（agent.input_withdrawn）里的行不进到达；它们通常会重新出现在后面的
+//     消息里，输出里单独计数说明。
 //
 // 所有数字都是估算，不是精确值。
 
@@ -90,6 +111,27 @@ const MAX_MS = 180_000;
 const CLASS_RANK = { unblock: 0, decide: 1, run_done: 2, batch: 3, silent: 4, other: 5 };
 const IMMEDIATE = new Set(["unblock", "decide", "run_done"]);
 const MESSAGE_CLASSES = new Set(["human", "teammate", "orchestrator"]);
+
+// crates/hub/src/rounds.rs 的 decides()：这一轮调用过其中任一工具就算做了决定
+//（旧日志没有成败标记，不看成功与否）。
+const DECIDES = new Set([
+  "agent_send", "message_withdraw", "human_ask", "human_notify", "task_ask", "task_answer",
+  "note_write", "lesson_create", "lesson_merge", "lesson_report", "branch_sync",
+  "remind_set", "remind_cancel", "watch", "watch_cancel",
+  "work_start", "run_next", "plan_submit", "run_land", "run_finish", "run_apply", "run_retro",
+  "task_create", "task_update", "task_assign", "task_cancel", "task_complete", "task_fail",
+  "task_accept", "task_verify", "task_rework", "task_drop", "review_request", "review_submit",
+  "agent_spawn", "agent_retire", "agent_set_model", "agent_interrupt", "issue_keep",
+  "expertise_triage", "extension_request_enable",
+]);
+// 只读的 hub 工具：出现它们说明这一轮的工具记录是齐的，但没做决定。
+const READ_TOOLS = new Set([
+  "task_get", "task_list", "note_read", "note_list", "lesson_get", "lesson_search",
+  "checks_run", "usage_get", "issue_pending", "workspace_read", "workspace_diff",
+  "inbox_read", "agent_list", "agent_get", "whoami", "expertise_search", "expertise_get",
+  "remind_list", "watch_list",
+]);
+const HUB_TOOLS = new Set([...DECIDES, ...READ_TOOLS]);
 const ALL_CLASSES = ["unblock", "decide", "run_done", "batch", "silent", "human", "teammate", "orchestrator", "other"];
 
 const KEEP_TYPES = new Set([
@@ -103,6 +145,8 @@ const KEEP_TYPES = new Set([
   "agent.round",
   "agent.created",
   "agent.updated",
+  "agent.tool_call",
+  "agent.tool_detail",
   "agent.tool_used",
   "agent.prompt_via_file",
   "agent.status_changed",
@@ -356,6 +400,7 @@ export function reconstructRounds(events, agentId, window = {}) {
   closeOpen(null);
 
   rounds.sort((a, b) => a.start - b.start);
+  const calls = toolCallRecords(events, agentId);
   // 文字和来源先算好，分类在 replay 里补（旧日志的 watch 行要等事件都读完才认识）。
   for (const r of rounds) {
     r.digest = parseDigest(r.text);
@@ -368,8 +413,47 @@ export function reconstructRounds(events, agentId, window = {}) {
       r.items = [];
       r.source = sourceOfMessage(r.from, r.digest.isDigest);
     }
+    attachTools(r, calls);
   }
   return { rounds, stats, sawUsage };
+}
+
+/// 这一轮调过哪些 hub 工具。名字在 agent.tool_detail 的 arguments.toolName 里；
+/// agent.tool_call 只用来判断「这一轮确实有工具调用记录」（包括 grep/glob 这类读工具）。
+function toolCallRecords(events, agentId) {
+  const calls = [];
+  const drive = [];
+  for (const e of events) {
+    if (e.data?.id !== agentId) continue;
+    if (e.type === "agent.tool_call") {
+      drive.push(e.ms);
+      if (typeof e.data.title === "string" && HUB_TOOLS.has(e.data.title)) {
+        calls.push({ ms: e.ms, name: e.data.title });
+      }
+      continue;
+    }
+    if (e.type === "agent.tool_detail") {
+      let args = null;
+      try {
+        args = JSON.parse(e.data.detail?.arguments ?? "{}");
+      } catch {
+        args = null;
+      }
+      const name = typeof args?.toolName === "string" ? args.toolName : null;
+      if (name && HUB_TOOLS.has(name)) calls.push({ ms: e.ms, name });
+    }
+  }
+  return { calls, drive: drive.sort((a, b) => a - b) };
+}
+
+function attachTools(round, calls) {
+  const end = round.end ?? round.start;
+  const inside = (ms) => ms >= round.start && ms <= end;
+  const names = [...new Set(calls.calls.filter((c) => inside(c.ms)).map((c) => c.name))];
+  const has = names.length > 0 || calls.drive.some(inside);
+  round.toolNames = names;
+  round.hasToolCall = has;
+  round.decidedTool = has ? names.some((n) => DECIDES.has(n)) : null;
 }
 
 function sourceFromRound(sources) {
@@ -424,14 +508,16 @@ const RE = {
   overLimit: /\bbounc|返工超限|超出返工|超过返工/,
   planApproved: /^The plan of run .* was approved/,
   passed: /^Task #\S+ is now passed\./,
+  waitingAnswer: /^Task #\S+ is now waiting_answer\./,
   merged: /^Task #\S+ is now merged\./,
-  settledStatus: /^Task #\S+ is now (running|retrying|verifying|reviewing|waiting_answer|stalled|failed|cancelled)\./,
+  settledStatus: /^Task #\S+ is now (running|retrying|verifying|reviewing|stalled|failed|cancelled)\./,
   reviewApproved: /^Review of #\S+.*: approved/,
   reviewChanges: /^Review of #\S+.*: changes needed/,
   progress: /^Progress from /,
   dispatched: /^#\S+ 已派给 /,
   rerouted: /^#\S+ \([0-9a-f-]{36}\): given to .* instead/,
   quota: /has \d+% of its .* left|resets? in .*: dispatch more work|dispatch more work (there|while)/,
+  quotaOut: /hit its quota .*no other account or teammate has quota left/,
   reminder: /^Reminder \(/,
 };
 
@@ -449,6 +535,8 @@ export function classifyNoticeLine(line, ctx = {}) {
   if (RE.nextFailed.test(s)) return { class: "decide", why: "next step failed" };
   if (RE.overLimit.test(s)) return { class: "decide", why: "rework over limit" };
   if (RE.planApproved.test(s)) return { class: "decide", why: "plan approved" };
+  if (RE.quotaOut.test(s)) return { class: "decide", why: "quota exhausted" };
+  if (RE.waitingAnswer.test(s)) return { class: "decide", why: "waiting for the lead" };
   if (RE.passed.test(s)) return { class: "batch", why: "passed, awaiting acceptance" };
   if (RE.reviewApproved.test(s)) return { class: "batch", why: "review approved" };
   if (RE.reviewChanges.test(s)) return { class: "silent", why: "auto rework" };
@@ -567,7 +655,9 @@ function occupiedEnd(ms, turns) {
   return at;
 }
 
-/// arrivals: [{ms, class, line?}]，turns: [{start, end}]（实际回合，用来避免在回合中间叫醒）。
+/// arrivals: [{ms, class, kind?, ...}]。kind = "message" 的一条消息各自算一次唤醒
+/// （忙时就顺延到前一个回合结束，但两条消息不会并成一次）；其余按通知的类合并。
+/// turns: [{start, end}] 是日志里实际存在的回合。
 export function simulate(arrivals, turns, opts = {}) {
   const quiet = opts.quietMs ?? QUIET_MS;
   const maxWait = opts.maxMs ?? MAX_MS;
@@ -576,46 +666,53 @@ export function simulate(arrivals, turns, opts = {}) {
     .filter((t) => Number.isFinite(t.start) && Number.isFinite(t.end) && t.end > t.start)
     .sort((a, b) => a.start - b.start);
 
-  let pending = [];
-  let first = null;
-  let last = null;
+  let pending = []; // 待带的通知
+  let first = null; // 最早一条 batch
+  let last = null; // 最后一条 batch
+  let queued = []; // 还没送出的消息：{a, due}
   const wakes = [];
   let silentRode = 0;
-  let silentLeft = 0;
   let i = 0;
 
-  const dueAt = () => {
+  const noticeDue = () => {
     let due = Infinity;
-    for (const p of pending) {
-      if (IMMEDIATE.has(p.class) || MESSAGE_CLASSES.has(p.class)) due = Math.min(due, p.ms);
-    }
+    for (const p of pending) if (IMMEDIATE.has(p.class)) due = Math.min(due, p.ms);
     if (first != null) due = Math.min(due, Math.min(first + maxWait, last + quiet));
     return due;
   };
 
-  const deliver = (at) => {
-    if (!pending.length) return;
-    const messages = pending.filter((p) => MESSAGE_CLASSES.has(p.class));
-    const classes = pending.map((p) => p.class);
-    let cls;
-    if (messages.length) {
-      // 消息最先到就按消息记（它本来就会叫醒）；否则取通知里最急的一类。
-      cls = messages.some((m) => m.class === "human")
-        ? "human"
-        : messages.some((m) => m.class === "orchestrator")
-          ? "orchestrator"
-          : "teammate";
-    } else {
-      cls = maxClass(classes.filter((c) => IMMEDIATE.has(c) || c === "batch"));
-    }
+  const enqueue = (a) => {
+    const at = a.wakeMs ?? a.ms;
+    queued.push({ a, due: Math.max(at, occupiedEnd(at, busy)) });
+    queued.sort((x, y) => x.due - y.due);
+  };
+
+  const pushWake = (at, cls, notices) => {
+    const classes = notices.map((n) => n.class);
     wakes.push({
       at,
       class: cls,
-      notices: pending.filter((p) => !MESSAGE_CLASSES.has(p.class)).length,
+      notices: notices.length,
       silent: classes.filter((c) => c === "silent").length,
       classes: [...new Set(classes)].sort((a, b) => (CLASS_RANK[a] ?? 9) - (CLASS_RANK[b] ?? 9)),
     });
     silentRode += classes.filter((c) => c === "silent").length;
+  };
+
+  // 一条消息：一次唤醒，待带的通知跟着它走。
+  const deliverMessage = (at) => {
+    const idx = queued.findIndex((q) => q.due === at);
+    const msg = queued.splice(idx, 1)[0].a;
+    pushWake(at, msg.class, pending);
+    pending = [];
+    first = null;
+    last = null;
+  };
+
+  const deliverNotices = (at) => {
+    const classes = pending.map((p) => p.class);
+    const cls = maxClass(classes.filter((c) => IMMEDIATE.has(c) || c === "batch"));
+    pushWake(at, cls, pending);
     pending = [];
     first = null;
     last = null;
@@ -623,26 +720,38 @@ export function simulate(arrivals, turns, opts = {}) {
 
   while (true) {
     const nextArrival = i < list.length ? list[i].ms : Infinity;
-    const due = dueAt();
-    if (due === Infinity) {
-      if (i >= list.length) break;
+    const due = noticeDue();
+    const noticeAt = due === Infinity ? Infinity : occupiedEnd(due, busy);
+    const messageAt = queued.length ? queued[0].due : Infinity;
+    const wakeAt = Math.min(noticeAt, messageAt);
+
+    // 通知的正点 deadline 上到达的算下一批；被回合并延后的唤醒，顺延那一刻到的通知并进来
+    //（它和唤醒一起到，真实 hub 也来不及分成两次）。
+    const noticeDelayed = Number.isFinite(noticeAt) && noticeAt > due;
+    const noticeTie = noticeDelayed ? wakeAt < nextArrival : wakeAt <= nextArrival;
+    const messageTie = messageAt <= wakeAt && messageAt <= nextArrival;
+    if ((Number.isFinite(noticeAt) && noticeTie) || (Number.isFinite(messageAt) && messageTie)) {
+      // 同一时刻先送消息：它会把待带的通知一起带走。
+      if (messageAt <= wakeAt) deliverMessage(messageAt);
+      else deliverNotices(noticeAt);
+      continue;
+    }
+    if (nextArrival === Infinity) break;
+
+    const a = list[i++];
+    if (a.kind === "message") {
+      enqueue(a);
     } else {
-      const wakeAt = occupiedEnd(due, busy);
-      if (wakeAt <= nextArrival || i >= list.length) {
-        deliver(wakeAt);
-        continue;
+      pending.push(a);
+      if (a.class === "batch") {
+        if (first == null) first = a.ms;
+        last = a.ms;
       }
     }
-    const a = list[i++];
-    pending.push(a);
-    if (a.class === "batch") {
-      if (first == null) first = a.ms;
-      last = a.ms;
-    }
   }
-  silentLeft = pending.filter((p) => p.class === "silent").length;
 
-  return { wakes, silentRode, silentLeft, leftover: pending.length };
+  const silentLeft = pending.filter((p) => p.class === "silent").length;
+  return { wakes, silentRode, silentLeft, leftover: pending.length, queuedLeft: queued.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -858,54 +967,127 @@ export function formatReport({ agent, files, window, rounds, meta, arrivalInfo }
   );
   lines.push("");
 
-  // 新规则模拟
-  const arrivalClasses = arrivalInfo.arrivals.map((a) => a.class);
-  const { wakes, silentRode, silentLeft } = arrivalInfo.sim;
+  // 新规则模拟：三种口径
+  const sim = arrivalInfo.sims.batch;
+  const simUnblock = arrivalInfo.sims.unblock;
+  const simReports = arrivalInfo.sims.reports;
   const countBy = (list) => {
     const m = new Map();
     for (const w of list) m.set(w.class, (m.get(w.class) ?? 0) + 1);
     return m;
   };
-  const wakeCount = countBy(wakes);
-  const dropped = rounds.length - wakes.length;
-  const pct = rounds.length ? ((dropped / rounds.length) * 100).toFixed(0) : "0";
-  lines.push("== 新规则下（估算） ==");
-  lines.push(
-    `唤醒: ${wakes.length} 次（实际 ${rounds.length} 次，少 ${dropped} 次，${dropped >= 0 ? "-" : "+"}${Math.abs(Number(pct))}%）`,
-  );
-  lines.push(
-    `  消息（照旧立刻）: 人 ${wakeCount.get("human") ?? 0} · 队友 ${wakeCount.get("teammate") ?? 0} · 协调器 ${wakeCount.get("orchestrator") ?? 0}`,
-  );
-  lines.push(
-    `  立刻叫醒的通知: decide ${wakeCount.get("decide") ?? 0} · unblock ${wakeCount.get("unblock") ?? 0} · run_done ${wakeCount.get("run_done") ?? 0} · other ${wakeCount.get("other") ?? 0}`,
-  );
+  const wakeCount = countBy(sim.wakes);
+  const pctOf = (n) => (rounds.length ? Math.abs((n / rounds.length) * 100).toFixed(0) : "0");
+  const saving = (n) => {
+    const d = rounds.length - n;
+    if (d === 0) return `${n} 次（与实际持平）`;
+    return `${n} 次（${d > 0 ? "少" : "多"} ${Math.abs(d)} 次，${d > 0 ? "-" : "+"}${pctOf(d)}%）`;
+  };
+  const arrivalClasses = arrivalInfo.arrivals.map((a) => a.class);
   const batchNotices = arrivalClasses.filter((c) => c === "batch").length;
   const silentNotices = arrivalClasses.filter((c) => c === "silent").length;
+  const saved = rounds.length - sim.wakes.length;
+  const savedParts = [];
+  const savedNote = { silent: "（不再单独叫醒）", batch: "（合并）", decide: "（并入已有唤醒）" };
+  for (const c of ALL_CLASSES) {
+    const a = by.get(c)?.rounds.length ?? 0;
+    const e = wakeCount.get(c) ?? 0;
+    const d = a - e;
+    if (d) savedParts.push(`${c} ${d}${d > 0 ? (savedNote[c] ?? "") : ""}`);
+  }
+
+  lines.push("== 新规则下（估算，区间） ==");
+  lines.push(`实际 ${rounds.length} 次唤醒 · ${fmt(total.sum.input)} 输入。`);
+  lines.push(`  乐观（「等接受」→ batch）: ${saving(sim.wakes.length)}`);
+  lines.push(`  保守（「等接受」→ unblock）: ${saving(simUnblock.wakes.length)}`);
+  lines.push(`  参考（交付报告仍按现在的消息，立刻叫醒）: ${saving(simReports.wakes.length)}`);
   lines.push(
-    `  batch: ${batchNotices} 条通知，由 batch 触发的唤醒 ${wakeCount.get("batch") ?? 0} 次` +
-      (silentNotices ? ` · silent: ${silentNotices} 条没有单独叫醒（${silentRode} 条跟着唤醒走）` : ""),
+    `  乐观分解: 人 ${wakeCount.get("human") ?? 0} · 队友 ${wakeCount.get("teammate") ?? 0} · 协调器 ${wakeCount.get("orchestrator") ?? 0}` +
+      ` · decide ${wakeCount.get("decide") ?? 0} · unblock ${wakeCount.get("unblock") ?? 0}` +
+      ` · run_done ${wakeCount.get("run_done") ?? 0} · batch ${wakeCount.get("batch") ?? 0}` +
+      ` · other ${wakeCount.get("other") ?? 0}`,
   );
+  lines.push(
+    `  batch: ${batchNotices} 条通知 → ${wakeCount.get("batch") ?? 0} 次唤醒` +
+      ` · silent: ${silentNotices} 条没有单独叫醒（${sim.silentRode} 条跟着唤醒走）`,
+  );
+  if (sim.silentLeft) lines.push(`  窗口结束时还剩 ${sim.silentLeft} 条 silent 没送出去`);
   const unknownNotices = arrivalInfo.arrivals.filter((a) => a.unknownWhy).length;
   if (unknownNotices) {
     lines.push(`  认不出来的通知: ${unknownNotices} 条，按 decide 处理（保守）`);
   }
-  if (silentLeft) lines.push(`  窗口结束时还剩 ${silentLeft} 条 silent 没送出去`);
+  lines.push(`  节省构成（乐观，按分类差）: ${savedParts.join(" + ")} = ${saved} 次`);
   if (!inferred) lines.push("  （分类来自事件；唤醒次数仍是按新规则模拟的估算）");
   lines.push("");
 
-  // 没做决定
-  const undecided = rounds.filter((r) => r.decided === false);
-  const undecidedKnown = undecided.filter((r) => tokensOf(r));
-  const undecidedTokens = undecidedKnown.reduce((a, r) => a + r.tokens.input, 0);
-  const undecidedUnknown = undecided.length - undecidedKnown.length;
-  const allTokens = rounds.filter((r) => tokensOf(r)).reduce((a, r) => a + r.tokens.input, 0);
-  const share = allTokens ? ((undecidedTokens / allTokens) * 100).toFixed(0) : "0";
-  lines.push("== 没做决定的回合（推断） ==");
+  // 正式的假设：搬进输出，不只写在注释里
+  lines.push("== 假设（改动其中任何一条，数字就会变） ==");
   lines.push(
-    `合计: ${undecided.length} / ${rounds.length} 回合（${rounds.length ? ((undecided.length / rounds.length) * 100).toFixed(0) : 0}%）` +
-      ` · 输入 ${fmt(undecidedTokens)}（占 ${share}%）` +
-      (undecidedUnknown ? ` · 其中 ${undecidedUnknown} 个没有用量` : ""),
+    "1. 交付报告 / 评审通过算「等接受」：旧日志里它们是 worker 的消息，现在的代码会立刻叫醒" +
+      "（crates/hub/src/notices.rs:224 的 watch 行也是 Decide）；本估算按新流程（#review-loop，" +
+      "检查和评审都过了、hub 发「等接受」）当 batch。按现状算见上「参考」。",
   );
+  lines.push(
+    "2. watch 的 passed/merged 行按内容归类（passed → 等接受，merged → silent），不按 watch 一律 decide；" +
+      "否则「等接受」永远合并不了。",
+  );
+  lines.push(
+    "3. 依赖图只能部分重建：run.plan_submitted 只有任务 key；agent.tool_detail 的 task_get/task_list 结果里有" +
+      " depends_on，但只覆盖少数任务（评审数到 8 个任务、3 个有依赖），重建不全。所以给区间（batch 乐观 / unblock 保守），" +
+      "不用部分依赖算中间数。",
+  );
+  lines.push(
+    "4. 新叫醒不占时间：只避开日志里实际存在的回合，新规则产生的回合自身多长没有模拟；" +
+      "叫醒消息发出后、回合开始前到达的通知不会并进去。",
+  );
+  lines.push("5. 消息不合并：每条消息各自一次唤醒（忙时顺延到前一个回合结束），待带的通知跟着消息走。");
+  lines.push(
+    `6. 通知到达时间按摘要文本首次出现推断；被撤回的摘要 ${meta.stats.withdrawn ?? 0} 条里的行没有计入。`,
+  );
+  lines.push(
+    "7. Batch 边界：最后一条之后正好第 60 秒（或第一条起第 180 秒）到达的通知，先叫醒，它算下一批。",
+  );
+  lines.push("");
+
+  // 没做决定：事件口径和工具口径两个数都给
+  const undecided = rounds.filter((r) => r.decided === false); // 合并口径
+  const undecidedEvent = rounds.filter((r) => r.decidedEvent === false);
+  const toolKnown = rounds.filter((r) => r.decidedTool !== null && r.decidedTool !== undefined);
+  const undecidedTool = toolKnown.filter((r) => r.decidedTool === false);
+  const tokensOfSet = (set) => set.filter((r) => tokensOf(r)).reduce((a, r) => a + r.tokens.input, 0);
+  const allTokens = rounds.filter((r) => tokensOf(r)).reduce((a, r) => a + r.tokens.input, 0);
+  const shareOf = (n) => (allTokens ? ((n / allTokens) * 100).toFixed(0) : "0");
+  const rate = (n, d) => (d ? ((n / d) * 100).toFixed(0) : "0");
+
+  lines.push("== 没做决定的回合（区间，推断） ==");
+  if (rounds.some((r) => r.roundEvent)) {
+    lines.push(
+      `直接（agent.round 的 decided）: ${undecided.length} / ${rounds.length} 回合` +
+        `（${rate(undecided.length, rounds.length)}%）· 输入 ${fmt(tokensOfSet(undecided))}（${shareOf(tokensOfSet(undecided))}%）`,
+    );
+  } else {
+    lines.push(
+      `事件口径（状态变化等效果）: ${undecidedEvent.length} / ${rounds.length} 回合（${rate(undecidedEvent.length, rounds.length)}%）` +
+        ` · 输入 ${fmt(tokensOfSet(undecidedEvent))}（${shareOf(tokensOfSet(undecidedEvent))}%）`,
+    );
+    if (toolKnown.length) {
+      lines.push(
+        `工具口径（有工具记录的 ${toolKnown.length} 个）: ${undecidedTool.length} / ${toolKnown.length} 回合（${rate(undecidedTool.length, toolKnown.length)}%）` +
+          ` · 输入 ${fmt(tokensOfSet(undecidedTool))}（${shareOf(tokensOfSet(undecidedTool))}%）`,
+      );
+    } else {
+      lines.push("工具口径: 没有工具记录（日志里没有 agent.tool_call / tool_detail 里的工具名），只能用事件口径。");
+    }
+    lines.push(
+      `合并（有工具记录按工具、没有按事件）: ${undecided.length} / ${rounds.length} 回合（${rate(undecided.length, rounds.length)}%）` +
+        ` · 输入 ${fmt(tokensOfSet(undecided))}（${shareOf(tokensOfSet(undecided))}%）` +
+        (rounds.length - toolKnown.length ? ` · ${rounds.length - toolKnown.length} 个没有工具记录` : ""),
+    );
+    lines.push(
+      "（工具记录不全：只有 hub 工具带名字，grep/glob 等驱动工具不算决定；没有工具记录的回合用事件兜底。" +
+        "事件里 passed→running 多半是 hub 自动返工，merged/cancelled 没有 actor，时间重叠就算到 lead 头上，所以事件口径偏低。）",
+    );
+  }
   const list = arrivalInfo.all ? undecided : undecided.slice(0, 30);
   if (list.length) {
     lines.push(`${pad("时间", 14)}${pad("唤醒分类", 12)}${pad("输入", 9)}${pad("未命中", 9)}首行`);
@@ -922,12 +1104,8 @@ export function formatReport({ agent, files, window, rounds, meta, arrivalInfo }
   }
   lines.push("");
   lines.push(
-    inferred
-      ? "说明: 以上全是「估算」；旧日志没有 agent.round / 通知分类事件，分类和「没做决定」都是从" +
-          "通知原文和消息来源推断的。Batch/Unblock 的区分需要依赖图（旧日志没有），" +
-          "旧日志里「等接受」一律按 batch，可能把该立刻叫醒的也算进可合并的。"
-      : "说明: 以上全是「估算」；分类和「没做决定」来自事件，唤醒次数是按新规则模拟的。" +
-          (arrivalInfo?.noticeRecorded ? "" : "Unblock 需要依赖图，这里只按事件给的分类。"),
+    "说明: 以上全是「估算」。下界 = 「等接受」全按 batch（乐观，叫醒更少、节省更多），" +
+      "上界 = 全按 unblock（保守）；旧日志没有完整依赖图，给不出中间数。",
   );
   return lines.join("\n");
 }
@@ -944,9 +1122,16 @@ export function toJSON({ agent, files, window, rounds, meta, arrivalInfo }) {
       unknownTokens: row.unknown,
     };
   }
-  const wakeCount = {};
-  for (const w of arrivalInfo.sim.wakes) wakeCount[w.class] = (wakeCount[w.class] ?? 0) + 1;
+  const countBy = (list) => {
+    const m = {};
+    for (const w of list) m[w.class] = (m[w.class] ?? 0) + 1;
+    return m;
+  };
   const undecided = rounds.filter((r) => r.decided === false);
+  const undecidedEvent = rounds.filter((r) => r.decidedEvent === false);
+  const toolKnown = rounds.filter((r) => r.decidedTool !== null && r.decidedTool !== undefined);
+  const undecidedTool = toolKnown.filter((r) => r.decidedTool === false);
+  const tokensOfSet = (set) => set.reduce((a, r) => a + (r.tokens?.input ?? 0), 0);
   return {
     agent,
     files,
@@ -954,15 +1139,20 @@ export function toJSON({ agent, files, window, rounds, meta, arrivalInfo }) {
     rounds: rounds.length,
     actual: { total: { input: total.sum.input, cached: total.sum.cached, output: total.sum.output }, byClass: actual },
     estimated: {
-      wakes: arrivalInfo.sim.wakes.length,
-      byTrigger: wakeCount,
+      wakes: arrivalInfo.sims.batch.wakes.length,
+      optimistic: arrivalInfo.sims.batch.wakes.length,
+      conservative: arrivalInfo.sims.unblock.wakes.length,
+      reportsAsMessages: arrivalInfo.sims.reports.wakes.length,
+      byTrigger: countBy(arrivalInfo.sims.batch.wakes),
       batchNotices: arrivalInfo.arrivals.filter((a) => a.class === "batch").length,
       silentNotices: arrivalInfo.arrivals.filter((a) => a.class === "silent").length,
       noticeTimes: arrivalInfo.noticeRecorded ? "notice.recorded" : "inferred from digests",
     },
     undecided: {
       count: undecided.length,
-      input: undecided.reduce((a, r) => a + (r.tokens?.input ?? 0), 0),
+      input: tokensOfSet(undecided),
+      event: { count: undecidedEvent.length, input: tokensOfSet(undecidedEvent) },
+      tool: { count: undecidedTool.length, of: toolKnown.length, input: tokensOfSet(undecidedTool) },
       rounds: undecided.map((r) => ({
         at: iso(r.start),
         class: r.class,
@@ -978,6 +1168,8 @@ export function toJSON({ agent, files, window, rounds, meta, arrivalInfo }) {
 // 组装
 
 /// 把回合变成模拟用的到达事件：通知按行、消息按条。窗口外的到达不要。
+/// 每条带 kind（message / notice）、origin（report / review / message / notice）、
+/// acceptance（等接受）、watch（watch.triggered 出现过的行），供三种口径变换。
 export function arrivalsFor(events, rounds, agentId, window = {}) {
   const from = window.from ?? -Infinity;
   const to = window.to ?? Infinity;
@@ -992,7 +1184,16 @@ export function arrivalsFor(events, rounds, agentId, window = {}) {
     for (const e of recorded) {
       if (!keep(e.ms)) continue;
       const c = e.data.class && CLASS_RANK[e.data.class] != null ? e.data.class : "other";
-      arrivals.push({ ms: e.ms, class: c, line: e.data.line, why: "notice.recorded" });
+      const topic = e.data.topic ?? "";
+      arrivals.push({
+        ms: e.ms,
+        class: c,
+        kind: "notice",
+        line: e.data.line,
+        why: "notice.recorded",
+        acceptance: c === "batch" && !topic.startsWith("quota:"),
+        watch: topic.startsWith("watch:") || topic.startsWith("reminder:"),
+      });
     }
     for (const e of events) {
       if (e.type !== "agent.input" || e.data.id !== agentId) continue;
@@ -1000,7 +1201,16 @@ export function arrivalsFor(events, rounds, agentId, window = {}) {
       if (e.data.from?.kind === "notice") continue; // notice.recorded 已经算过
       if (parseDigest(e.data.text).isDigest) continue;
       const c = classifyMessage(e.data.text, e.data.from);
-      arrivals.push({ ms: e.ms, class: c.class, why: c.why });
+      const report = c.why === "report, awaiting acceptance";
+      const review = /^Review of #/.test(String(e.data.text ?? "").trim());
+      arrivals.push({
+        ms: e.ms,
+        class: c.class,
+        kind: report || review ? "notice" : "message",
+        origin: report ? "report" : review ? "review" : "message",
+        acceptance: report || (review && c.class === "batch"),
+        why: c.why,
+      });
     }
     return { arrivals, watchLines, noticeRecorded: true };
   }
@@ -1009,7 +1219,17 @@ export function arrivalsFor(events, rounds, agentId, window = {}) {
   for (const r of rounds) {
     if (r.roundEvent) {
       for (const n of r.items) {
-        if (keep(r.start)) arrivals.push({ ms: r.start, class: n.class, line: n.line, why: "agent.round" });
+        if (!keep(r.start)) continue;
+        const watch = watchLines.has(n.line.replace(/s+/g, " ").trim());
+        arrivals.push({
+          ms: r.start,
+          class: n.class,
+          kind: "notice",
+          line: n.line,
+          why: "agent.round",
+          acceptance: n.class === "batch" && n.why !== "quota tip",
+          watch,
+        });
       }
       continue;
     }
@@ -1020,17 +1240,47 @@ export function arrivalsFor(events, rounds, agentId, window = {}) {
         arrivals.push({
           ms: borne.get(item.line) ?? r.inputMs ?? r.start,
           class: item.class,
+          kind: "notice",
           line: item.line,
           why: item.why,
           unknownWhy: item.why === "unknown",
+          acceptance: item.class === "batch" && item.why !== "quota tip",
+          watch: watchLines.has(item.line.replace(/s+/g, " ").trim()),
         });
       }
       continue;
     }
     const c = classifyMessage(r.text, r.from);
-    arrivals.push({ ms: r.inputMs ?? r.start, class: c.class, why: c.why });
+    const report = c.why === "report, awaiting acceptance";
+    const review = /^Review of #/.test(String(r.text ?? "").trim());
+    arrivals.push({
+      // 消息本身的到达是 input 的时刻；唤醒（回合开始）晚 0.1–1 秒，这期间到的通知
+      // 会跟着这条消息走，和真实 hub 一样。
+      ms: r.inputMs ?? r.start,
+      wakeMs: r.start,
+      class: c.class,
+      kind: report || review ? "notice" : "message",
+      origin: report ? "report" : review ? "review" : "message",
+      acceptance: report || (review && c.class === "batch"),
+      why: c.why,
+    });
   }
   return { arrivals: arrivals.filter((a) => keep(a.ms)), watchLines, noticeRecorded: false, unknownWhy };
+}
+
+/// 三种口径：
+///   batch   乐观——「等接受」全按 batch（默认）
+///   unblock 保守——「等接受」全按 unblock（立刻叫醒）
+///   reports 参考——交付报告仍按现在的消息（立刻叫醒），其余同乐观
+export function scenarioArrivals(arrivals, mode) {
+  if (mode === "batch") return arrivals;
+  return arrivals.map((a) => {
+    if (mode === "unblock" && a.acceptance) return { ...a, class: "unblock" };
+    if (mode === "reports" && a.origin === "report") {
+      return { ...a, kind: "message", class: "teammate" };
+    }
+    return a;
+  });
 }
 
 export async function replay({ files, agentSpec, from, to, all = false }) {
@@ -1048,22 +1298,27 @@ export async function replay({ files, agentSpec, from, to, all = false }) {
   for (const r of rounds) {
     if (r.roundEvent) continue; // agent.round 自己说了算
     const why = whyForRound(r, signals);
-    r.decided = why.length > 0;
+    r.decidedEvent = why.length > 0;
     r.decidedWhy = why;
+    // 有工具记录就以工具为准，没有才用事件推断。
+    r.decided = r.decidedTool ?? r.decidedEvent;
   }
+  for (const r of rounds) r.decidedEvent ??= r.decided;
 
   const arrivalInfo = arrivalsFor(events, rounds, agent.id, window);
-  const sim = simulate(
-    arrivalInfo.arrivals,
-    rounds.map((r) => ({ start: r.start, end: r.end ?? r.start })),
-  );
+  const turns = rounds.map((r) => ({ start: r.start, end: r.end ?? r.start }));
+  const sims = {
+    batch: simulate(scenarioArrivals(arrivalInfo.arrivals, "batch"), turns),
+    unblock: simulate(scenarioArrivals(arrivalInfo.arrivals, "unblock"), turns),
+    reports: simulate(scenarioArrivals(arrivalInfo.arrivals, "reports"), turns),
+  };
   return {
     agent,
     files,
     window,
     rounds,
     meta: { lines, bad, stats },
-    arrivalInfo: { ...arrivalInfo, sim, all },
+    arrivalInfo: { ...arrivalInfo, sims, all },
   };
 }
 

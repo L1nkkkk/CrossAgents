@@ -11,6 +11,8 @@ import {
   classifyNoticeLine,
   grow,
   parseDigest,
+  replay,
+  scenarioArrivals,
   simulate,
 } from "./replay-wakeups.mjs";
 
@@ -180,6 +182,7 @@ test("通知行按新分类归类", () => {
     ["#rounds (01a10000-0000-7000-8000-000000000002): given to Cleo 2 instead: account cursor", "silent"],
     ["Progress from w-x on #a (t): 正在读文件", "silent"],
     ["Task #a is now passed.", "batch"],
+    ["Task #a is now waiting_answer.", "decide"],
     ["Task #a is now merged.", "silent"],
     ["Review of #a (01a10000-0000-7000-8000-0000000000aa): approved\n可以合并。", "batch"],
     ["Review of #a (01a10000-0000-7000-8000-0000000000aa): changes needed", "silent"],
@@ -290,11 +293,12 @@ test("消息立刻叫醒，并带上待带的通知；正在回合里就等回�
   let sim = simulate([
     { ms: at(0), class: "silent" },
     { ms: at(5), class: "batch" },
-    { ms: at(10), class: "human" },
+    { ms: at(10), class: "human", kind: "message" },
   ], []);
   assert.equal(sim.wakes.length, 1);
   assert.equal(sim.wakes[0].class, "human");
   assert.equal(sim.wakes[0].at, at(10));
+  assert.equal(sim.wakes[0].notices, 2);
 
   // 回合 0–200 秒：10 秒到的决定和 100 秒到的通知都并进回合结束后的那一次唤醒。
   sim = simulate(
@@ -307,6 +311,25 @@ test("消息立刻叫醒，并带上待带的通知；正在回合里就等回�
   assert.equal(sim.wakes.length, 1);
   assert.equal(sim.wakes[0].at, at(200));
   assert.equal(sim.wakes[0].notices, 2);
+});
+
+test("忙时到达的多条消息各自一次唤醒，不互相合并", () => {
+  // 两条消息都在回合 0–200 秒里到，顺延到 200 秒，但仍是两次唤醒；
+  // 第一条带走待带的通知，第二条只带自己。
+  const sim = simulate(
+    [
+      { ms: at(10), class: "silent" },
+      { ms: at(20), class: "teammate", kind: "message" },
+      { ms: at(30), class: "human", kind: "message" },
+    ],
+    [{ start: at(0), end: at(200) }],
+  );
+  assert.equal(sim.wakes.length, 2);
+  assert.deepEqual(sim.wakes.map((w) => w.class), ["teammate", "human"]);
+  assert.deepEqual(sim.wakes.map((w) => w.at), [at(200), at(200)]);
+  assert.equal(sim.wakes[0].notices, 1);
+  assert.equal(sim.wakes[1].notices, 0);
+  assert.equal(sim.silentRode, 1);
 });
 
 // ---------------------------------------------------------------------------
@@ -355,19 +378,20 @@ test("样例日志：重建回合、归类、合并和输出", () => {
   assert.match(out, /归类: 推断/);
   assert.match(out, /估算/);
 
-  // 实际 6 次唤醒；新规则 3 次（人、decide、run_done），两条 batch 合并进 decide。
+  // 实际 6 次唤醒；乐观 3 次（人、decide、run_done），两条 batch 合并进 decide。
   assert.match(out, /回合: 6/);
-  assert.match(out, /唤醒: 3 次（实际 6 次，少 3 次/);
-  assert.match(out, /人 1/);
-  assert.match(out, /decide 1/);
-  assert.match(out, /run_done 1/);
+  assert.match(out, /乐观（「等接受」→ batch）: 3 次（少 3 次，-50%）/);
+  assert.match(out, /保守（「等接受」→ unblock）: 6 次（与实际持平）/);
+  assert.match(out, /乐观分解: 人 1 .* decide 1 .* run_done 1/);
   assert.match(out, /silent: 2 条没有单独叫醒/);
+  assert.match(out, /节省构成（乐观，按分类差）: batch 2（合并） \+ silent 1（不再单独叫醒） = 3 次/);
 
   // 输入 token 按分类：增量 1000 / 1000 / 1000 / 1000 / 1000 / 1000。
   assert.match(out, /合计\s+6\s+100%\s+6K/);
 
-  // 没做决定的回合：m2、m3、m4、m5、m6 五个（m1 写了笔记）。
-  assert.match(out, /合计: 5 \/ 6 回合/);
+  // 没做决定的回合：没有工具记录，事件口径 5 / 6（m1 写了笔记）。
+  assert.match(out, /事件口径（状态变化等效果）: 5 \/ 6 回合/);
+  assert.match(out, /工具口径: 没有工具记录/);
 
   // 时间戳来自 input_updated：第二条 passed 在 25 秒，batch 的静默期从它算起。
   assert.match(out, /Task #a is now passed/);
@@ -473,12 +497,123 @@ test("有新事件时直接用分类和 decided", () => {
   assert.match(out, /归类: 直接/);
   assert.match(out, /通知时间: notice\.recorded/);
   // batch 在 1 秒、silent 在 2 秒、run_done 在 60 秒：run_done 的 60 秒早于 batch 的 61 秒，
-  // 一次唤醒把它们都带上。
-  assert.match(out, /唤醒: 1 次（实际 2 次，少 1 次/);
-  assert.match(out, /合计: 1 \/ 2 回合/); // 第二个回合 agent.round 说 decided=false
+  // 一次唤醒把它们都带上；保守口径里等接受立刻叫醒，所以是 2 次。
+  assert.match(out, /乐观（「等接受」→ batch）: 1 次（少 1 次，-50%）/);
+  assert.match(out, /保守（「等接受」→ unblock）: 2 次（与实际持平）/);
+  assert.match(out, /直接（agent.round 的 decided）: 1 \/ 2 回合/); // 第二个回合 decided=false
 
   const data = runJSON(["--agent", LEAD, file]);
   assert.equal(data.inferred, false);
   assert.equal(data.undecided.count, 1);
   assert.equal(data.estimated.wakes, 1);
+  assert.equal(data.estimated.optimistic, 1);
+  assert.equal(data.estimated.conservative, 2);
+  assert.equal(data.undecided.tool.of, 0);
+});
+
+// ---------------------------------------------------------------------------
+// 区间、工具口径、撤回头
+
+test("等接受全按 batch 与全按 unblock 是两个界", () => {
+  const arrivals = [
+    { ms: at(0), class: "batch", kind: "notice", acceptance: true },
+    { ms: at(30), class: "batch", kind: "notice", acceptance: true },
+    { ms: at(40), class: "silent", kind: "notice" },
+  ];
+  const opt = simulate(scenarioArrivals(arrivals, "batch"), []);
+  const con = simulate(scenarioArrivals(arrivals, "unblock"), []);
+  assert.equal(opt.wakes.length, 1); // 两条 batch 合并成 1 次
+  assert.equal(con.wakes.length, 2); // 立刻叫醒，各一次
+  assert.equal(con.wakes[0].class, "unblock");
+  assert.ok(opt.wakes.length <= con.wakes.length);
+
+  // 参考：交付报告仍是消息（各自一次），评审通过和 watch 行照乐观口径。
+  const reports = scenarioArrivals([
+    { ms: at(0), class: "batch", kind: "notice", acceptance: true, origin: "report" },
+    { ms: at(0), class: "batch", kind: "notice", acceptance: true, origin: "review" },
+  ], "reports");
+  assert.equal(reports[0].kind, "message");
+  assert.equal(reports[1].kind, "notice");
+});
+
+/// 一轮里有自己的工具记录时，以工具名为准（review_request 算决定；hub 自动返工不算）。
+test("工具口径：review_request 算决定，自动返工不算 lead 的决定", () => {
+  const events = [
+    ev("agent.created", 0, { agent: { id: LEAD, name: "Lead One", role: "planner", model: "test" } }),
+    // 回合 1：只有 review_request，事件上没有任何效果也行。
+    ev("agent.input", 1, { id: LEAD, message_id: "m1", text: "go", queued: false, from: { kind: "human" } }),
+    ev("agent.turn_started", 1.1, { id: LEAD, message_id: "m1" }),
+    ev("agent.tool_call", 2, { id: LEAD, tool_call_id: "t1", title: "toolCall", kind: "other", status: "completed" }),
+    ev("agent.tool_detail", 2.1, {
+      id: LEAD,
+      tool_call_id: "t1",
+      detail: { changes: [], arguments: JSON.stringify({ toolName: "review_request" }) },
+    }),
+    ev("agent.usage", 3, { id: LEAD, used: 0, size: 0, cost_usd: null, tokens: { input: 100, cached_input: 0, output: 1, reasoning_output: 0, total: 101 } }),
+    ev("agent.turn_completed", 3.1, { id: LEAD, message_id: "m1", stop_reason: "end_turn" }),
+    // 回合 2：只有 grep；期间 hub 把任务从 passed 打回 running（自动返工），事件口径会误算成 lead 的决定。
+    ev("agent.input", 10, { id: LEAD, message_id: "m2", text: "look", queued: false, from: { kind: "human" } }),
+    ev("agent.turn_started", 10.1, { id: LEAD, message_id: "m2" }),
+    ev("agent.tool_call", 11, { id: LEAD, tool_call_id: "t2", title: "grepToolCall", kind: "other", status: "completed" }),
+    ev("task.status_changed", 12, {
+      run_id: "r1",
+      id: "task-a",
+      key: "a",
+      from: "passed",
+      to: "running",
+      assignee: "w",
+    }),
+    ev("agent.usage", 13, { id: LEAD, used: 0, size: 0, cost_usd: null, tokens: { input: 200, cached_input: 0, output: 2, reasoning_output: 0, total: 202 } }),
+    ev("agent.turn_completed", 13.1, { id: LEAD, message_id: "m2", stop_reason: "end_turn" }),
+    // 回合 3：没有工具记录，靠事件兜底（写了笔记）。
+    ev("agent.input", 20, { id: LEAD, message_id: "m3", text: "write", queued: false, from: { kind: "human" } }),
+    ev("agent.turn_started", 20.1, { id: LEAD, message_id: "m3" }),
+    ev("note.written", 21, { scope: "run", key: "plan/x", author: LEAD, text: "记一笔" }),
+    ev("agent.usage", 22, { id: LEAD, used: 0, size: 0, cost_usd: null, tokens: { input: 300, cached_input: 0, output: 3, reasoning_output: 0, total: 303 } }),
+    ev("agent.turn_completed", 22.1, { id: LEAD, message_id: "m3", stop_reason: "end_turn" }),
+  ];
+  const file = writeLog("events-2026-11-09.jsonl", events);
+  const data = runJSON(["--agent", LEAD, file]);
+  assert.equal(data.rounds, 3);
+  // 回合 1 工具说做了决定，事件口径看不出来（所以事件口径会把它算成没做决定）。
+  assert.equal(data.undecided.event.count, 1);
+  // 回合 2 工具说没做（自动返工不算），回合 1 做了：2 个有工具记录，1 个没做决定。
+  assert.equal(data.undecided.tool.of, 2);
+  assert.equal(data.undecided.tool.count, 1);
+  // 合并口径：回合 1 决定、回合 2 没决定、回合 3 事件兜底决定。
+  assert.equal(data.undecided.count, 1);
+  assert.equal(data.undecided.rounds[0].class, "human"); // 回合 2 是被事件误判的那个
+});
+
+test("摘要行被替换后不重复计数，新行按更新时刻算", () => {
+  const events = [
+    ev("agent.created", 0, { agent: { id: LEAD, name: "Lead One", role: "planner", model: "test" } }),
+    ev("agent.input", 10, {
+      id: LEAD,
+      message_id: "m1",
+      text: DIGEST + "- Task #a is now passed.\n- Task #b is now passed.",
+      queued: false,
+      from: { kind: "notice" },
+    }),
+    // 更新把 #a 的行换掉，加上 #c；#b 保持原样。
+    ev("agent.input_updated", 40, {
+      id: LEAD,
+      message_id: "m1",
+      text: DIGEST + "- Task #b is now passed.\n- Task #c is now passed.",
+    }),
+    ev("agent.turn_started", 41, { id: LEAD, message_id: "m1" }),
+    ev("agent.usage", 42, { id: LEAD, used: 0, size: 0, cost_usd: null, tokens: { input: 100, cached_input: 0, output: 1, reasoning_output: 0, total: 101 } }),
+    ev("agent.turn_completed", 43, { id: LEAD, message_id: "m1", stop_reason: "end_turn" }),
+  ];
+  const file = writeLog("events-2026-11-09.jsonl", events);
+  return replay({ files: [file], agentSpec: LEAD }).then((r) => {
+    const lines = r.arrivalInfo.arrivals.map((a) => a.line);
+    assert.ok(!lines.includes("Task #a is now passed."), "#a 的行已被替换，不该出现");
+    assert.equal(lines.filter((l) => l === "Task #b is now passed.").length, 1);
+    assert.equal(lines.filter((l) => l === "Task #c is now passed.").length, 1);
+    const b = r.arrivalInfo.arrivals.find((a) => a.line === "Task #b is now passed.");
+    const c = r.arrivalInfo.arrivals.find((a) => a.line === "Task #c is now passed.");
+    assert.equal(b.ms, T0 + 10_000); // 原来就有的行保留下次
+    assert.equal(c.ms, T0 + 40_000); // 新行按 input_updated 的时刻
+  });
 });
