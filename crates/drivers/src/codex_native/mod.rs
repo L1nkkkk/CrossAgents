@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use crossagents_core::{
     AttachmentSupport, Capabilities, CliStatus, CoreError, Driver, DriverKind, DriverSession,
     MessageId, PermissionDecision, PermissionHandler, PermissionPolicy, Prompt, SessionEvent,
-    SessionEventKind, SessionSpec, TurnOutcome,
+    SessionEventKind, SessionSpec, TokenUsage, TurnOutcome,
 };
 use serde_json::{Value, json};
 use tokio::sync::{Notify, mpsc, oneshot};
@@ -275,9 +275,7 @@ impl Driver for CodexNativeDriver {
         let thread_id = wire::thread_id_of(&response)
             .unwrap_or(session_id)
             .to_owned();
-        let session = CodexSession::attach(
-            server, thread_id, &spec, settings, &response,
-        );
+        let session = CodexSession::attach(server, thread_id, &spec, settings, &response);
         *session.sink.requests.lock().expect("requests lock") = None;
         Ok(Box::new(session))
     }
@@ -590,6 +588,10 @@ struct ThreadSink {
     permissions: Option<Arc<dyn PermissionHandler>>,
     turn: Mutex<TurnState>,
     requests: Mutex<Option<u64>>,
+    /// The thread's `total` just before this session's first model call: what the thread had
+    /// used before the session began (a resumed thread has a history). Taken from the first
+    /// notification; later usage is reported as `total` minus this.
+    usage_base: Mutex<Option<TokenUsage>>,
 }
 
 #[derive(Default)]
@@ -604,23 +606,49 @@ struct TurnState {
     steers: Vec<MessageId>,
 }
 
+/// `total` less `base`, field by field; a count that would fall below zero is zero.
+fn since(total: &TokenUsage, base: &TokenUsage) -> TokenUsage {
+    TokenUsage {
+        input: total.input.saturating_sub(base.input),
+        cached_input: total.cached_input.saturating_sub(base.cached_input),
+        cache_write_input: total
+            .cache_write_input
+            .saturating_sub(base.cache_write_input),
+        output: total.output.saturating_sub(base.output),
+        reasoning_output: total.reasoning_output.saturating_sub(base.reasoning_output),
+        total: total.total.saturating_sub(base.total),
+        requests: None,
+    }
+}
+
 impl ThreadSink {
     fn emit(&self, mut kind: SessionEventKind, raw: Option<&Value>) {
         if let SessionEventKind::Usage {
             tokens: Some(tokens),
             ..
         } = &mut kind
+            && let Some(usage) = raw.and_then(|v| v.get("tokenUsage"))
+            && usage.get("last").is_some_and(Value::is_object)
         {
-            if raw
-                .and_then(|v| v.pointer("/tokenUsage/last"))
-                .is_some_and(Value::is_object)
-            {
-                let mut requests = self.requests.lock().expect("requests lock");
-                if let Some(count) = requests.as_mut() {
-                    *count += 1;
-                }
-                tokens.requests = *requests;
+            // `total` is the thread's history and `last` the latest model call. The session
+            // reports its own counts from zero, as the other drivers do: the baseline is the
+            // thread's total before the first call this session saw (total - last), so a
+            // resumed thread's history is not counted in the first turn. A new thread's
+            // baseline is zero.
+            let total = wire::token_counts(usage.get("total").unwrap_or(&Value::Null));
+            let last = wire::token_counts(usage.get("last").unwrap_or(&Value::Null));
+            let base = self
+                .usage_base
+                .lock()
+                .expect("usage base lock")
+                .get_or_insert_with(|| since(&total, &last))
+                .clone();
+            *tokens = since(&total, &base);
+            let mut requests = self.requests.lock().expect("requests lock");
+            if let Some(count) = requests.as_mut() {
+                *count += 1;
             }
+            tokens.requests = *requests;
         }
         let event = SessionEvent {
             kind,
@@ -826,6 +854,7 @@ impl CodexSession {
             permission: spec.permission,
             permissions: spec.permissions.clone(),
             requests: Mutex::new(Some(0)),
+            usage_base: Mutex::new(None),
             turn: Mutex::new(TurnState {
                 waiter,
                 ..TurnState::default()
@@ -1056,13 +1085,8 @@ impl DriverSession for CodexSession {
         let thread_id = wire::thread_id_of(&response)
             .ok_or_else(|| CoreError::Agent("thread/fork returned no thread id".into()))?
             .to_owned();
-        let session = CodexSession::attach(
-            self.server.clone(),
-            thread_id,
-            &spec,
-            settings,
-            &response,
-        );
+        let session =
+            CodexSession::attach(self.server.clone(), thread_id, &spec, settings, &response);
         *session.sink.requests.lock().expect("requests lock") = None;
         Ok(Box::new(session))
     }
@@ -1196,29 +1220,101 @@ pub fn cached_models(home: &Path) -> Vec<String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn counts_token_usage_notifications_with_last_request() {
-        let (events, mut rx) = mpsc::unbounded_channel();
+    fn sink() -> (ThreadSink, mpsc::UnboundedReceiver<SessionEvent>) {
+        let (events, rx) = mpsc::unbounded_channel();
         let sink = ThreadSink {
             events,
             permission: PermissionPolicy::default(),
             permissions: None,
             turn: Mutex::new(TurnState::default()),
             requests: Mutex::new(Some(0)),
+            usage_base: Mutex::new(None),
         };
-        let raw = serde_json::json!({"tokenUsage": {"last": {"inputTokens": 1}, "total": {"inputTokens": 2, "cacheWriteInputTokens": 1}}});
-        for expected in 1..=2 {
-            let event = wire::translate(method::TOKEN_USAGE, &raw).pop().unwrap();
-            sink.emit(event, Some(&raw));
-            let SessionEventKind::Usage {
-                tokens: Some(tokens),
-                ..
-            } = rx.try_recv().unwrap().kind
-            else {
-                panic!()
-            };
-            assert_eq!(tokens.requests, Some(expected));
-            assert_eq!(tokens.cache_write_input, 1);
+        (sink, rx)
+    }
+
+    /// One `thread/tokenUsage/updated` notification, as Codex sends it: `[input, cached, output,
+    /// total]` for the thread's `total` and for the latest model call's `last`.
+    fn usage_note(total: [u64; 4], last: [u64; 4]) -> Value {
+        let counts = |c: [u64; 4]| {
+            serde_json::json!({
+                "inputTokens": c[0],
+                "cachedInputTokens": c[1],
+                "outputTokens": c[2],
+                "totalTokens": c[3],
+            })
+        };
+        serde_json::json!({"tokenUsage": {"total": counts(total), "last": counts(last)}})
+    }
+
+    /// What the session reports for one notification, and the event's own `requests`.
+    fn report(
+        sink: &ThreadSink,
+        rx: &mut mpsc::UnboundedReceiver<SessionEvent>,
+        raw: &Value,
+    ) -> TokenUsage {
+        let event = wire::translate(method::TOKEN_USAGE, raw).pop().unwrap();
+        sink.emit(event, Some(raw));
+        let SessionEventKind::Usage {
+            tokens: Some(tokens),
+            ..
+        } = rx.try_recv().unwrap().kind
+        else {
+            panic!("a usage event")
+        };
+        tokens
+    }
+
+    fn counts_of(t: &TokenUsage) -> [u64; 4] {
+        [t.input, t.cached_input, t.output, t.total]
+    }
+
+    #[test]
+    fn a_resumed_thread_reports_the_session_from_zero() {
+        // The thread already used 15,000 tokens before this session; its latest call used 120.
+        let (sink, mut rx) = sink();
+        let first = usage_note([10_000, 8_000, 5_000, 15_000], [100, 80, 20, 120]);
+        let t = report(&sink, &mut rx, &first);
+        assert_eq!(
+            counts_of(&t),
+            [100, 80, 20, 120],
+            "the first call, not the history"
+        );
+        assert_eq!(t.requests, Some(1));
+        // The next call adds its own counts: the sum of the two calls.
+        let second = usage_note([10_050, 8_040, 5_010, 15_060], [50, 40, 10, 60]);
+        let t = report(&sink, &mut rx, &second);
+        assert_eq!(counts_of(&t), [150, 120, 30, 180]);
+        assert_eq!(t.requests, Some(2));
+    }
+
+    #[test]
+    fn a_new_thread_counts_from_its_first_call_as_before() {
+        // A new thread's total is its calls so far: the baseline is zero.
+        let (sink, mut rx) = sink();
+        let t = report(
+            &sink,
+            &mut rx,
+            &usage_note([100, 80, 20, 120], [100, 80, 20, 120]),
+        );
+        assert_eq!(counts_of(&t), [100, 80, 20, 120]);
+        assert_eq!(t.requests, Some(1));
+        let t = report(
+            &sink,
+            &mut rx,
+            &usage_note([150, 120, 30, 180], [50, 40, 10, 60]),
+        );
+        assert_eq!(counts_of(&t), [150, 120, 30, 180]);
+        assert_eq!(t.requests, Some(2));
+    }
+
+    #[test]
+    fn requests_count_each_notification_once() {
+        let (sink, mut rx) = sink();
+        let raw = usage_note([10, 0, 5, 15], [10, 0, 5, 15]);
+        for expected in 1..=3 {
+            let t = report(&sink, &mut rx, &raw);
+            assert_eq!(t.requests, Some(expected));
         }
     }
 
@@ -1255,6 +1351,7 @@ mod tests {
             permission: PermissionPolicy::default(),
             permissions: None,
             requests: Mutex::new(Some(0)),
+            usage_base: Mutex::new(None),
             turn: Mutex::new(TurnState {
                 steers: vec![message_id],
                 ..TurnState::default()

@@ -227,6 +227,10 @@ pub enum EventKind {
         id: AgentId,
         message_id: MessageId,
         text: String,
+        /// Who sent it; absent in events written before the field existed (a person).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "ts", ts(optional))]
+        from: Option<MessageSource>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         #[cfg_attr(feature = "ts", ts(as = "Option<Vec<crate::Attachment>>", optional))]
         attachments: Vec<crate::Attachment>,

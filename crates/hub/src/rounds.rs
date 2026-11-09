@@ -10,10 +10,15 @@
 //!   `starting`, the same boundary `usage.rs` uses). A hub that restarted or took over an agent
 //!   has not seen that start: the agent's first turn then reports no usage, and later turns
 //!   report their growth.
-//! - Notices come from `notice.carried`, which the hub writes when it marks them carried, so a
-//!   round has their lines and classes even after a restart.
+//! - Notices come from `notice.carried`, written when the hub marks them carried. A round takes
+//!   a notice only if that event reaches it while its message is still in the round or waiting
+//!   for its turn; one that arrives after the turn has ended is dropped.
+//! - A hub restart loses what it had in memory. A message queued before the restart and run
+//!   after it has no source and no notices in its round, and a turn the hub ends during
+//!   recovery (the `TurnCompleted` it writes for the interrupted turn) is recorded as a round
+//!   with no source either. Those rounds say less than the others; nothing else changes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
 
 use async_trait::async_trait;
@@ -23,15 +28,24 @@ use crossagents_core::{
 };
 use tokio::sync::mpsc;
 
-/// Whether a hub tool, once it succeeds, counts as a decision: it changes a task's or a run's
-/// state, sends a message, asks a person, submits a plan, lands work, and so on. A round in
-/// which none did is a round without a decision.
+/// Carried notices kept for messages not yet in a turn. Past this the table is emptied: a
+/// fallback against a leak, since a normal wake takes its entry within moments.
+const CARRIED_LIMIT: usize = 10_000;
+
+/// Messages whose turn has ended, remembered so a `notice.carried` that arrives late is
+/// dropped instead of kept for ever.
+const ENDED_LIMIT: usize = 4_096;
+
+/// Whether a hub tool, once it succeeds, counts as a decision: it changes a task's, a run's or
+/// the shared notes' state, sends a message, asks a person, submits a plan, lands work, and so
+/// on. A round in which none did is a round without a decision.
 ///
 /// Only the tools listed here count. Every other tool counts for nothing, extension tools
 /// (`<ext>__<tool>`) included, so a turn that changed state only through one of those is
 /// recorded as undecided: that miss is accepted. A new hub tool that changes state is listed
-/// here when it is added. Reads, notes, lessons, progress reports and checks that only record
-/// what they saw are not listed.
+/// here when it is added. Reads (`task_list`, `workspace_read`, ...), progress reports
+/// (`task_progress`), and checks (`checks_run`, `workspace_run`) that only record what they saw
+/// do not count.
 pub fn decides(tool: &str) -> bool {
     matches!(
         tool,
@@ -42,6 +56,12 @@ pub fn decides(tool: &str) -> bool {
             | "human_notify"
             | "task_ask"
             | "task_answer"
+            // Shared notes and lessons, and branch sync.
+            | "note_write"
+            | "lesson_create"
+            | "lesson_merge"
+            | "lesson_report"
+            | "branch_sync"
             // Reminders and watches the agent sets for itself.
             | "remind_set"
             | "remind_cancel"
@@ -178,6 +198,9 @@ pub struct Rounds {
     lanes: HashMap<AgentId, Lane>,
     waiting: HashMap<MessageId, Waiting>,
     carried: HashMap<MessageId, Carry>,
+    /// Messages whose turn has ended, oldest first.
+    ended: VecDeque<MessageId>,
+    ended_set: HashSet<MessageId>,
 }
 
 /// The counts of a session that has just started.
@@ -224,17 +247,37 @@ impl Rounds {
                         .collect(),
                 };
                 // A message already in its agent's round takes these now; otherwise they wait
-                // for its turn. A later one for the same message replaces this one.
+                // for its turn. A later one for the same message replaces this one. One that
+                // comes after its turn has ended is dropped: nothing would take it.
                 match self
                     .lanes
                     .get_mut(id)
                     .filter(|lane| lane.round.message_ids.contains(message_id))
                 {
                     Some(lane) => lane.round.take_notices(carry.notices),
+                    None if self.ended_set.contains(message_id) => {}
                     None => {
+                        if self.carried.len() >= CARRIED_LIMIT {
+                            self.carried.clear();
+                        }
                         self.carried.insert(*message_id, carry);
                     }
                 }
+            }
+            EventKind::AgentSteered {
+                id,
+                message_id,
+                from,
+                ..
+            } => {
+                // A steered message takes its source from here, as an input does.
+                self.waiting.insert(
+                    *message_id,
+                    Waiting {
+                        id: *id,
+                        from: from.clone(),
+                    },
+                );
             }
             EventKind::AgentInputWithdrawn { message_id, .. }
             | EventKind::AgentInputRefused { message_id, .. } => {
@@ -303,6 +346,7 @@ impl Rounds {
                 let round = std::mem::take(&mut lane.round);
                 lane.start = None;
                 lane.usage_in_turn = false;
+                self.end_messages(&round.message_ids);
                 return Some(EventKind::AgentRound {
                     id: *id,
                     message_ids: round.message_ids,
@@ -321,6 +365,20 @@ impl Rounds {
             _ => {}
         }
         None
+    }
+
+    /// Remembers that these messages' turn has ended.
+    fn end_messages(&mut self, messages: &[MessageId]) {
+        for message in messages {
+            if self.ended_set.insert(*message) {
+                self.ended.push_back(*message);
+            }
+        }
+        while self.ended.len() > ENDED_LIMIT {
+            if let Some(old) = self.ended.pop_front() {
+                self.ended_set.remove(&old);
+            }
+        }
     }
 
     /// Drops what an agent that is gone (removed, or archived) still had in the table.
@@ -523,6 +581,8 @@ mod tests {
             "watch_list",
             "task_progress",
             "ext__tool",
+            "workspace_run",
+            "checks_run",
         ] {
             assert!(!decides(read), "{read} is not a decision");
         }
@@ -532,6 +592,11 @@ mod tests {
             "plan_submit",
             "run_land",
             "task_complete",
+            "note_write",
+            "lesson_create",
+            "lesson_merge",
+            "lesson_report",
+            "branch_sync",
         ] {
             assert!(decides(change), "{change} decides");
         }
@@ -796,11 +861,23 @@ mod tests {
         assert_eq!(tools, &vec!["agent_send".to_owned()]);
     }
 
+    fn steer(id: AgentId, message: MessageId, from: Option<MessageSource>) -> EventKind {
+        EventKind::AgentSteered {
+            id,
+            message_id: message,
+            text: "also".into(),
+            from,
+            attachments: vec![],
+        }
+    }
+
     #[test]
     fn tools_before_the_turn_and_steered_messages_join_the_round() {
         let id = AgentId::new();
         let (first, steered) = (MessageId::new(), MessageId::new());
+        let teammate = AgentId::new();
         let mut rounds = Rounds::default();
+        // A steered message comes with its own event only: no input is written for it.
         let ended = run(
             &mut rounds,
             vec![
@@ -809,8 +886,12 @@ mod tests {
                     tool: "task_update".into(),
                     ok: true,
                 },
-                input(id, steered, Some(MessageSource::Human)),
                 started(id, first),
+                steer(
+                    id,
+                    steered,
+                    Some(MessageSource::Agent { agent_id: teammate }),
+                ),
                 EventKind::AgentSteerRead {
                     id,
                     message_id: steered,
@@ -832,9 +913,91 @@ mod tests {
             panic!("a round")
         };
         assert_eq!(message_ids, &vec![first, steered]);
-        assert_eq!(sources, &vec![RoundSource::Human]);
+        assert_eq!(
+            sources,
+            &vec![RoundSource::Teammate { agent_id: teammate }],
+            "the steered message's source is recorded"
+        );
         assert!(decided, "task_update changes a task");
         assert_eq!(tools, &vec!["task_update".to_owned()]);
+    }
+
+    #[test]
+    fn a_steer_from_before_the_field_existed_is_a_persons() {
+        let id = AgentId::new();
+        let (first, steered) = (MessageId::new(), MessageId::new());
+        let mut rounds = Rounds::default();
+        let ended = run(
+            &mut rounds,
+            vec![
+                started(id, first),
+                steer(id, steered, None),
+                EventKind::AgentSteerRead {
+                    id,
+                    message_id: steered,
+                },
+                completed(id, first),
+            ],
+        );
+        let EventKind::AgentRound { sources, .. } = &ended[0] else {
+            panic!("a round")
+        };
+        assert_eq!(sources, &vec![RoundSource::Human]);
+    }
+
+    #[test]
+    fn a_notice_carried_during_its_turn_is_in_the_round() {
+        // The hub may write `notice.carried` after the turn has started (a person's message is
+        // queued before its notices are marked): the round still takes them.
+        let id = AgentId::new();
+        let message = MessageId::new();
+        let mut rounds = Rounds::default();
+        let ended = run(
+            &mut rounds,
+            vec![
+                input(id, message, Some(MessageSource::Human)),
+                started(id, message),
+                carried(id, message, "watch:w1", "news", NoticeClass::Decide),
+                completed(id, message),
+            ],
+        );
+        let EventKind::AgentRound { notices, .. } = &ended[0] else {
+            panic!("a round")
+        };
+        assert_eq!(
+            notices,
+            &vec![RoundNotice {
+                line: "news".into(),
+                class: NoticeClass::Decide,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_notice_carried_after_its_turn_ended_stays_out_of_the_table() {
+        let id = AgentId::new();
+        let message = MessageId::new();
+        let mut rounds = Rounds::default();
+        let ended = run(
+            &mut rounds,
+            vec![
+                input(id, message, Some(MessageSource::Human)),
+                started(id, message),
+                completed(id, message),
+                // Too late for its round: dropped, not kept for a message that will not start.
+                carried(id, message, "progress", "late", NoticeClass::Batch),
+            ],
+        );
+        assert_eq!(ended.len(), 1);
+        assert!(rounds.carried.is_empty(), "the late notice was not kept");
+        assert!(rounds.ended_set.contains(&message));
+        // Nothing of it reaches a later round either.
+        let later = MessageId::new();
+        let next = run(&mut rounds, vec![started(id, later), completed(id, later)]);
+        let EventKind::AgentRound { notices, .. } = &next[0] else {
+            panic!("a round")
+        };
+        assert!(notices.is_empty());
     }
 
     #[test]

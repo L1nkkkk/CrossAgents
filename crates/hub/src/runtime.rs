@@ -1589,6 +1589,7 @@ impl Runtime {
                         id: stored.id,
                         message_id,
                         text: display,
+                        from: Some(envelope.from.clone()),
                         attachments: envelope.attachments,
                     },
                 )
@@ -2365,7 +2366,6 @@ impl Runtime {
             self.notice_state.clear_digest_if(agent.id, message);
             return Err(err);
         }
-        self.publish_carried(agent.id, message, rows).await;
         let envelope = Envelope {
             id: message,
             from: MessageSource::Notice,
@@ -2383,6 +2383,9 @@ impl Runtime {
             self.notice_state.clear_digest_if(agent.id, message);
             return Err(err);
         }
+        // Published after the delivery, so a wake that failed to deliver leaves no record for
+        // round accounting (its notices were released above).
+        self.publish_carried(agent.id, message, rows).await;
         Ok(())
     }
 
@@ -3455,6 +3458,8 @@ async fn inject(
                         id,
                         message_id,
                         text: injection.text,
+                        // A stream rule is the hub's own text; it is counted as a notice.
+                        from: Some(MessageSource::Notice),
                         attachments: Vec::new(),
                     },
                 )

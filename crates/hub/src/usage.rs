@@ -2,6 +2,11 @@
 //!
 //! ACP reports a session's cumulative cost; the cost of a session is the last value it
 //! reported, and a new session starts when the agent goes to `starting`.
+//!
+//! Token counts are a driver session's own, cumulative from zero: every driver reports them that
+//! way. Codex's notifications carry its thread's whole history (a resumed thread has one), so its
+//! driver rebases them to the session's first call (`codex_native::ThreadSink::emit`). The
+//! session's tokens are the deltas between its readings here, which add up to its last reading.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
