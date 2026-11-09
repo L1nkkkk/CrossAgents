@@ -103,4 +103,9 @@ finding_seq?: number,
 /**
  * The worker's answers to the findings of the last review, as its last report gave them.
  */
-answers?: Array<FindingAnswer>, };
+answers?: Array<FindingAnswer>, 
+/**
+ * The first cap of the task's budget it went over, in words (`task.budget`). While it is set,
+ * the hub does not send the task back, or continue it, on its own: the lead decides.
+ */
+budget_over?: string | null, };

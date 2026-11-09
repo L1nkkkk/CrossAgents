@@ -805,11 +805,13 @@ impl Orchestrator {
         let (base, _) = self.base_of(&run, &task).await?;
         let diff_stat = self.ws_for(&run).diff_stat(&dir, &base).await.ok();
         let unchecked = task.spec.acceptance.is_empty();
+        let started = std::time::Instant::now();
         let checks = if unchecked {
             Vec::new()
         } else {
             self.verifier.check(&dir, &task.spec.acceptance).await
         };
+        let check_ms = started.elapsed().as_millis() as u64;
         let related = self.related_to_checks(&run.repo, &checks).await;
         let _guard = self.lock(run.id).await;
         let mut task = self.store.get_task(id).await?;
@@ -825,6 +827,13 @@ impl Orchestrator {
         task.report.related_lessons = related;
         self.transition(&mut task, TaskStatus::Passed).await?;
         if !checks.is_empty() {
+            self.publish(EventKind::TaskCheckTimed {
+                run_id: run.id,
+                id,
+                key: task.key.clone(),
+                duration_ms: check_ms,
+            })
+            .await;
             self.publish(EventKind::TaskChecked {
                 run_id: run.id,
                 id,
@@ -1255,12 +1264,21 @@ impl Orchestrator {
             )));
         }
         let dir = Self::worktree(&task)?;
+        let started = std::time::Instant::now();
         let checks = self.verifier.check(&dir, &task.spec.acceptance).await;
+        let check_ms = started.elapsed().as_millis() as u64;
         let passed = all_passed(&checks);
         let _guard = self.lock(run.id).await;
         let mut task = self.store.get_task(task.id).await?;
         task.report.checks = checks.clone();
         self.store_task(&mut task).await?;
+        self.publish(EventKind::TaskCheckTimed {
+            run_id: run.id,
+            id: task.id,
+            key: task.key.clone(),
+            duration_ms: check_ms,
+        })
+        .await;
         self.publish(EventKind::TaskChecked {
             run_id: run.id,
             id: task.id,
@@ -1369,6 +1387,13 @@ impl Orchestrator {
             self.store.get_agent(&AgentKey::Id(template)).await?
         };
         task.reviewer = Some(reviewer.id);
+        self.publish(EventKind::TaskReviewer {
+            run_id: run.id,
+            id: task.id,
+            key: task.key.clone(),
+            reviewer: reviewer.id,
+        })
+        .await;
         task.report.reviewed_sha = task.report.verified_sha.clone();
         task.report.review_attempt += 1;
         task.report.review = None;

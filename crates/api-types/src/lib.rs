@@ -2292,6 +2292,8 @@ pub enum UsageGroup {
     Model,
     Run,
     Agent,
+    /// One row per task (its key; `run_id` says which run it is in).
+    Task,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -2316,6 +2318,42 @@ pub struct UsageRow {
     /// Largest context (tokens) any session in the group reached.
     #[ts(type = "number")]
     pub peak_context: u64,
+    /// For `by task`: the run the task is in.
+    #[serde(default)]
+    #[ts(optional)]
+    pub run_id: Option<String>,
+    /// Raw tokens the agents reported (`tokens.total`), and their kinds: input that missed the
+    /// prompt cache, input served from it, and output (cache writes are `cache_write_input`).
+    #[serde(default)]
+    #[ts(type = "number", optional)]
+    pub tokens: Option<u64>,
+    #[serde(default)]
+    #[ts(type = "number", optional)]
+    pub new_input: Option<u64>,
+    #[serde(default)]
+    #[ts(type = "number", optional)]
+    pub cached_input: Option<u64>,
+    #[serde(default)]
+    #[ts(type = "number", optional)]
+    pub output: Option<u64>,
+    /// Times the task was sent back for rework.
+    #[serde(default)]
+    #[ts(type = "number | null", optional)]
+    pub rework: Option<u32>,
+    /// Minutes from the task's first start to its end, or to now while it runs.
+    #[serde(default)]
+    #[ts(type = "number | null", optional)]
+    pub minutes: Option<f64>,
+    /// Seconds its acceptance checks and commands took.
+    #[serde(default)]
+    #[ts(type = "number | null", optional)]
+    pub check_seconds: Option<f64>,
+    /// For `by run`: the run's tasks, with their own figures.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<UsageRow>,
+    /// Caps that do not apply, and why (an unpriced model, no request counts).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -3110,6 +3148,7 @@ mod tests {
         crossagents_core::ExpertiseEntry::export_all(&cfg).unwrap();
         crossagents_core::Candidate::export_all(&cfg).unwrap();
         crossagents_core::PermissionPolicy::export_all(&cfg).unwrap();
+        crossagents_core::TaskBudget::export_all(&cfg).unwrap();
     }
 
     /// The list `/v1/info` carries: a hub that predates the field omits it, and the GUI hides

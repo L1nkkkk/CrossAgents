@@ -11,21 +11,25 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crossagents_api_types::{UsageGroup, UsageResponse, UsageRow};
+use chrono::{DateTime, Utc};
 use crossagents_core::{
-    AgentId, AgentStatus, CoreError, EventKind, Role, RunId, Store, TokenUsage,
+    AgentId, AgentStatus, CoreError, EventKind, Role, RunId, Store, TaskId, TokenUsage,
 };
 use std::path::Path;
 
-#[derive(serde::Deserialize)]
-struct Price {
-    input: f64,
-    cached_input: f64,
-    cache_write_input: f64,
-    output: f64,
-}
-type Prices = HashMap<String, Price>;
+use crate::task_cost::{TaskLedger, TaskSpend};
 
-fn prices(home: &Path) -> Prices {
+#[derive(serde::Deserialize)]
+pub struct Price {
+    pub input: f64,
+    pub cached_input: f64,
+    pub cache_write_input: f64,
+    pub output: f64,
+}
+pub type Prices = HashMap<String, Price>;
+
+/// The price table in the hub home (`prices.toml`), by model id; empty without one.
+pub(crate) fn price_table(home: &Path) -> Prices {
     std::fs::read_to_string(home.join("prices.toml"))
         .ok()
         .and_then(|s| toml::from_str(&s).ok())
@@ -106,7 +110,7 @@ pub async fn compute(
     by: UsageGroup,
     home: &Path,
 ) -> Result<UsageResponse, CoreError> {
-    let prices = prices(home);
+    let prices = price_table(home);
     let mut agents: HashMap<AgentId, AgentUsage> = HashMap::new();
     let mut after = 0;
     loop {
@@ -210,6 +214,8 @@ pub async fn compute(
             UsageGroup::Run => usage
                 .run
                 .map_or_else(|| "(no run)".into(), |r| r.to_string()),
+            // `by task` takes its rows from the task ledger below; the agent rows are not used.
+            UsageGroup::Task => id.to_string(),
             UsageGroup::Agent => {
                 if usage.name.is_empty() {
                     id.to_string()
@@ -230,6 +236,16 @@ pub async fn compute(
                     cache_write_input: 0,
                     requests: Some(0),
                     peak_context: 0,
+                    run_id: None,
+                    tokens: None,
+                    new_input: None,
+                    cached_input: None,
+                    output: None,
+                    rework: None,
+                    minutes: None,
+                    check_seconds: None,
+                    tasks: Vec::new(),
+                    notes: Vec::new(),
                 },
                 HashSet::new(),
             )
@@ -262,11 +278,80 @@ pub async fn compute(
         row.peak_context = row.peak_context.max(usage.peak_context);
         total += usage.closed_cost;
     }
+    let mut rows: Vec<UsageRow> = rows.into_values().map(|(row, _)| row).collect();
+    // The task ledger: the run rows list their tasks, and `by task` is one row per task.
+    let ledger = TaskLedger::replay(store, price_table(home)).await?;
+    let now = Utc::now();
+    let mut task_rows = Vec::new();
+    let mut by_run: HashMap<String, Vec<UsageRow>> = HashMap::new();
+    for (id, spend) in ledger.tasks() {
+        let row = task_row(store, &ledger, id, spend, now).await;
+        if let Some(run) = spend.run {
+            by_run.entry(run.to_string()).or_default().push(row.clone());
+        }
+        task_rows.push(row);
+    }
+    match by {
+        UsageGroup::Run => {
+            for row in &mut rows {
+                if let Some(tasks) = by_run.remove(&row.key) {
+                    row.tasks = tasks;
+                }
+            }
+        }
+        UsageGroup::Task => rows = task_rows,
+        _ => {}
+    }
     Ok(UsageResponse {
         by,
-        rows: rows.into_values().map(|(row, _)| row).collect(),
+        rows,
         total_cost_usd: total,
     })
+}
+
+/// One task's row: its figures from the ledger, and its rework count from the task.
+async fn task_row(
+    store: &dyn Store,
+    ledger: &TaskLedger,
+    id: TaskId,
+    spend: &TaskSpend,
+    now: DateTime<Utc>,
+) -> UsageRow {
+    let rework = store.get_task(id).await.ok().map(|t| t.report.rework.len() as u32);
+    let requests_known = spend.requests_seen && !spend.requests_missing;
+    let mut notes = Vec::new();
+    if !spend.unpriced.is_empty() {
+        let models: Vec<&str> = spend.unpriced.iter().map(String::as_str).collect();
+        notes.push(format!(
+            "没有价格的模型，金额不计入估算：{}",
+            models.join("、")
+        ));
+    }
+    if spend.saw_usage && !requests_known {
+        notes.push("agent 没有报告请求次数，请求数不计。".to_owned());
+    }
+    UsageRow {
+        key: spend.key.clone(),
+        agents: spend.agents.len() as u32,
+        sessions: 0,
+        cost_usd: spend.reported_usd,
+        cost_reported: spend.cost_reported,
+        estimated_cost_usd: (spend.saw_usage && spend.unpriced.is_empty())
+            .then_some(spend.estimated_usd),
+        cache_write_input: spend.cache_write_input,
+        requests: requests_known.then_some(spend.requests),
+        peak_context: 0,
+        run_id: spend.run.map(|run| run.to_string()),
+        tokens: Some(spend.tokens),
+        new_input: Some(spend.input),
+        cached_input: Some(spend.cached_input),
+        output: Some(spend.output),
+        rework,
+        minutes: ledger.minutes(id, now),
+        check_seconds: Some(spend.check_ms as f64 / 1000.0),
+        tasks: Vec::new(),
+        notes,
+    }
 }
 
 #[cfg(test)]
