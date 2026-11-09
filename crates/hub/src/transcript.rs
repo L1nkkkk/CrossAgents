@@ -596,12 +596,14 @@ mod tests {
                 id,
                 message_id: s1,
                 text: "read me".into(),
+                from: None,
                 attachments: Vec::new(),
             },
             EventKind::AgentSteered {
                 id,
                 message_id: s2,
                 text: "still waiting".into(),
+                from: None,
                 attachments: Vec::new(),
             },
             EventKind::AgentOutput {
@@ -617,6 +619,7 @@ mod tests {
                 id,
                 message_id: s3,
                 text: "read before it landed".into(),
+                from: None,
                 attachments: Vec::new(),
             },
         ];
