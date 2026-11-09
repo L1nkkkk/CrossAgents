@@ -413,6 +413,7 @@ C 单干模式（依赖 A2 的连接页和字节走 hub、B1 的内置节点和�
 - [~] 【已知】任务的 mock-agent 测试不在验收里时（如 #rounds），改了共用类型的编译问题要等下一个跑 mock 的任务才暴露；主导靠人工查构造处兜底
 - [~] 【已知】两个任务各自在分支上验收、先后合并后的组合没有人自动验证：#review-loop 与 #lead-session 合并后，主导在 run 分支 `5b1a6d1` 上手动跑了 `crossagents-orchestrator` 和两边相关的 8 个 mock 测试文件，全过
 - [ ] 【下一轮】Claude Haiku 的会话多次以 `end_turn` 收尾却没交结果：#lead-session 的 worker 没汇报、任务 stalled；#replay 的评审把意见写在回复里、没提交结论；#task-budget 的 worker 在后台跑整组测试、**等 Monitor 通知时结束了回合**（回合结束后这种通知叫不醒它）。hub 只发一条「没汇报 / 没结论」通知要 lead 介入；可考虑：回合以 `end_turn` 结束而任务还在 running / reviewing 时 hub 自动提醒一次「用工具交结果」、评审把回复文字附在通知里、worker 协议文字写明「不要等后台任务的通知」。经验库 `dc8dc64a`
+- [ ] 【下一轮】lead 用 `agent_send` 的 `now:true` 打断 worker、插一条消息时，被取消的回合仍按「没汇报就结束」处理：任务标 `stalled`、叫醒 lead，其实那条消息已经在排队、新回合马上就开（#docs 这次：回合取消到标 stalled 隔 6 毫秒，0.2 秒后新回合开始）。worker 一报进度或交付就恢复（`crates/orchestrator/src/tasks.rs:607`、`:707`），只是白叫醒 lead 一次。改法：回合以 `cancelled` 结束、而这个 agent 还有排队消息时，不标 stalled、不发通知（`crates/orchestrator/src/attempts.rs:283-286` 的 `turn_ended`）
 
 ### 28.10 其他
 
