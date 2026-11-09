@@ -21,7 +21,7 @@ import { sessionWork } from "./lib/projectView";
 import { stepLine } from "./lib/workGroups";
 import { WorkDetails } from "./lib/workDetails";
 import { SessionPeek, TaskSegments, type PeekFacts } from "./SessionPeek";
-import { capped, sidebarGroups, searchGroups, groupClosed, shortSince, summaryText, type SidebarGroup, type SidebarMember } from "./lib/sidebarTree";
+import { CENTRE_MACHINE, machineFoldKey, machineGroups, type SidebarMachine, capped, sidebarGroups, searchGroups, groupClosed, shortSince, summaryText, type SidebarGroup, type SidebarMember } from "./lib/sidebarTree";
 import { todoItems, visibleTodos, type TodoItem } from "./lib/todos";
 import { useUnsortedIssues } from "./lessons/unsorted";
 import { useUnboundProjects } from "./lessons/projects";
@@ -34,6 +34,7 @@ import { useExtensions } from "./extensions/defaults";
 import { useQuota } from "./views/Quota";
 import { markWords } from "./lib/connection";
 import { useConnectionState } from "./lib/useConnection";
+import { OsIcon } from "./osIcon";
 import { CHATS, selectWorkspace, useWorkspaces, wsHref, wsKey } from "./workspace";
 
 const Confirmed = createContext(true);
@@ -450,7 +451,9 @@ export function Sidebar({ route }: { route: string[] }) {
                 ))}
               </section>
             )}
-            {shown.map((g) => (
+            {machineGroups(shown).map((machine) => (
+              <Machine key={machine.key} machine={machine} searching={searching}>
+            {machine.groups.map((g) => (
               <Group
                 key={g.key}
                 group={g}
@@ -477,7 +480,9 @@ export function Sidebar({ route }: { route: string[] }) {
                 {!searching && <WorkList works={workList.filter((w) => workProject(w) === g.key)} runs={runs} route={route} />}
               </Group>
             ))}
-            {!searching && <OtherWorks works={otherWorks} runs={runs} route={route} />}
+            {!searching && machine.key === CENTRE_MACHINE && <OtherWorks works={otherWorks} runs={runs} route={route} />}
+              </Machine>
+            ))}
             {archived.length > 0 && <div hidden={searching}><Archived agents={archived} isSession={isSession} /></div>}
             {searching && !shown.length && <p className="sidebar-empty">{t("sidebar.noMatch", { query })}</p>}
             {!query && loaded && !groups.length && <p className="sidebar-empty">{t("sidebar.empty")}</p>}
@@ -500,7 +505,6 @@ export function Sidebar({ route }: { route: string[] }) {
             <DevHubNotice />
             <OldHubNotice />
             <QuotaMini />
-            <WhereMark />
             <div className="foot-row">
               <Connection />
               <a className={"icon-btn " + (route[0] === "settings" ? "on" : "")} href="#/settings" title={t("nav.settings")} aria-label={t("nav.settings")}>
@@ -1155,24 +1159,49 @@ function OldHubNotice() {
 }
 
 /**
- * Which hub this window talks to, always in sight (docs/MULTI-NODE.md §15): 本机, or 远程 host.
- * A remote tunnel that is not up is red, so a dropped centre is not mistaken for a quiet page;
- * the line opens 设置 →「连接」.
+ * A machine and the workspaces on it. Today the only machine is the centre, where the hub runs
+ * (docs/MULTI-NODE.md §15): its row carries what the old connection mark did — 本机, or 远程 host,
+ * and whether the tunnel is up — so a dropped centre is not mistaken for a quiet page. Folding
+ * is remembered with the groups; searching shows the matches regardless. The row opens 设置 →「连接」.
  */
-function WhereMark() {
+function Machine({ machine, searching, children }: { machine: SidebarMachine; searching: boolean; children: ReactNode }) {
   const state = useConnectionState();
-  // A plain browser tab has no connection bridge, and nothing to switch to.
-  if (!window.crossagents?.connection || !state) return null;
-  const words = markWords(state);
-  // 本机 says where this window points, not how the hub is doing: the connection line below
-  // reports that, so a local mark carries no colour of its own (a green dot there contradicted
-  // the red "未连接" underneath when the hub was down).
-  const dot = words.tone === "ok" ? "ok" : words.tone === "warn" ? "warn" : words.tone === "danger" ? "danger" : "off";
+  const status = useConnectionStatus();
+  const [info, setInfo] = useState<HubInfo>();
+  useEffect(() => {
+    if (status === "connected") api.info().then(setInfo, () => {});
+  }, [status, state?.mode]);
+  const collapsed = useCollapsed();
+  const foldKey = machineFoldKey(machine.key);
+  const closed = groupClosed(collapsed, foldKey, searching);
+  // A plain browser tab has no connection bridge: the mark then follows the hub connection alone.
+  const words = state ? markWords(state) : undefined;
+  const tone = words?.tone ?? (status === "connected" ? "ok" : status === "connecting" ? "warn" : "danger");
+  const host = info?.machine?.hostname;
+  const remote = state?.mode === "remote";
+  const name = host || (remote ? words?.text : undefined) || "本机";
+  const title = [host, words?.title ?? (status === "connected" ? "已连接" : "未连接")].filter(Boolean).join(" · ");
   return (
-    <a className={`conn-where ${words.tone}`} href="#/settings/connection" title={words.title}>
-      {state.mode === "remote" && <span className={`dot ${dot}`} />}
-      <span className="text">{words.text}</span>
-    </a>
+    <section className="group machine">
+      <div className="group-head machine-head">
+        <button
+          className="icon-btn"
+          aria-label={`${closed ? "展开" : "折叠"}机器 ${name}`}
+          aria-expanded={!closed}
+          disabled={searching}
+          onClick={() => toggleCollapsed(foldKey)}
+        >
+          <Icon name={closed ? "chevronRight" : "chevron"} size={13} />
+        </button>
+        <a className={`machine-name conn-where ${tone}`} href="#/settings/connection" title={title}>
+          <OsIcon os={info?.machine?.os} size={14} />
+          <span className="text">{name}</span>
+          {remote && words && host && <span className="machine-via">{words.text}</span>}
+          <span className={`dot ${tone === "muted" ? "off" : tone}`} />
+        </a>
+      </div>
+      {!closed && <div className="machine-body">{children}</div>}
+    </section>
   );
 }
 

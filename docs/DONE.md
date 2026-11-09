@@ -505,3 +505,13 @@ B 删除 run：
 - [x] **28.9 `now:true` 打断不再误标 stalled**（#turn-end，`c7875f7`）。回合以取消结束、而这个 agent 还有排队消息时，只关掉这次 run，任务保持 Running，不标 stalled、不叫醒 lead；判断靠新加的 `AgentHost::has_queued`（默认 false，hub 在 [runtime.rs](../crates/hub/src/runtime.rs) / [collab.rs](../crates/hub/src/collab.rs) 实现为看 inbox）。取消时没有排队消息的仍照旧 stalled。测试 `a_turn_cut_short_by_a_waiting_message_does_not_stall`、`a_cancelled_turn_with_nothing_waiting_stalls_as_before`。
 - [x] **28.9 `end_turn` 没交结果先提醒一次**（#turn-end，`c7875f7`；经验库 `dc8dc64a`）。worker 回合正常结束却没交结果时，同一个 run 先由 hub 发一条提醒（用 task_progress / task_complete / task_ask / task_fail 汇报，不要等后台命令或 Monitor 通知），记在 run 的备注里；提醒后的回合再空手结束才 stalled、通知 lead。评审在 Reviewing 时空手结束同样先提醒一次用 `review_submit` 交结论（[review.rs](../crates/orchestrator/src/review.rs) `review_turn_ended`，按任务、评审人、评审轮次记），第二次才通知 lead。worker 协议文字（[protocol.rs](../crates/orchestrator/src/protocol.rs)）写明不要结束回合去等后台命令或 Monitor 通知。测试 `the_first_turn_without_a_report_is_reminded_once`、`a_reviewer_without_a_verdict_is_reminded_once` 等。没做的两点（通知 lead 时附评审回复文字；评审提醒记录只在内存）留在 TODO §28.9。
 - [x] **28.10 `scripts/release.mjs` 的注释**（#docs）。第 42 行 `build.extraResources` 改为 `build.win.extraResources`（[apps/gui/package.json](../apps/gui/package.json) 里 win 与 mac 各有一份 `extraResources`，hub 只在 win 那份）。
+
+## 二十九、Tailscale、设备系统标记与侧栏两级（2026-11-10）
+
+> 来源：run `44148f21`。代码在 run 分支合并：`81660c3`、`4691f1b`（Electron 读 Tailscale，远程请求带系统）、`bd5c921`、`b3c0f76`（设备记系统）、`63efd8e`、`4c07846`（GUI）。文档 #docs 只改说明。未完成的留在 [TODO.md](TODO.md) §八「Tailscale 与设备系统」。
+
+- [x] Electron 读本机 Tailscale 状态：`tailscale status --json`，先找 PATH，再找 Windows `C:\Program Files\Tailscale\tailscale.exe` 与 macOS `/Applications/Tailscale.app/Contents/MacOS/Tailscale`；列出状态、本机与同账号的机器（系统、在线、最后在线）；5 秒超时。远程模式的请求带 `x-crossagents-client-os`（[tailscale.cts](../apps/gui/electron/tailscale.cts)）。
+- [x] 设备记录系统类型：`x-crossagents-client-os` 上报（`windows` / `macos` / `linux` / `other`），值变了才写库；迁移 `0018_device_os.sql` 加 `devices.os`，不回填；`/v1/info` 带中心机器的系统和主机名（[device.rs](../crates/core/src/device.rs)、[devices.rs](../crates/hub/src/devices.rs)）。
+- [x] GUI：系统图标（[osIcon.tsx](../apps/gui/src/osIcon.tsx)）；设备页标出中心机器、系统、在线与「这个窗口」；设置 →「连接」列出 Tailscale 机器，「用这个地址」一键填主机，没装 / 没登录 / 没运行给出原因（[Connection.tsx](../apps/gui/src/views/Connection.tsx)、[tailscale.ts](../apps/gui/src/lib/tailscale.ts)）。
+- [x] 侧栏两级：工作区之上多一级「机器」，目前只有中心（本机或远程主机名、连接状态，可折叠）；折叠状态记住，搜索时仍显示匹配项（[Sidebar.tsx](../apps/gui/src/Sidebar.tsx)、[sidebarTree.ts](../apps/gui/src/lib/sidebarTree.ts)）。
+- [x] 文档：[INSTALL-MAC.md](INSTALL-MAC.md) §4.4「用 Tailscale」；[MULTI-NODE.md](MULTI-NODE.md) §14 补一句已接系统 Tailscale、不内置 tsnet。

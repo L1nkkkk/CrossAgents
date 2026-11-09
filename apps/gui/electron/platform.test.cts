@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applicationMenu, automaticUpdates, bundledHub, shortcut, trayHint, trayIcon } from "./platform.cjs";
+import { applicationMenu, automaticUpdates, bundledHub, clientHeaders, clientOs, shortcut, trayHint, trayIcon } from "./platform.cjs";
 import { join } from "node:path";
 
 for (const platform of ["win32", "darwin", "linux"] as const) {
@@ -36,4 +36,13 @@ test("shortcuts use the platform modifier and development gate", () => {
   assert.equal(shortcut("darwin", { ...base, key: "r", code: "KeyR" }, true), "reload");
   assert.equal(shortcut("win32", { ...base, key: "i", control: true, meta: false, shift: true }, true), "devtools");
   assert.equal(shortcut("win32", { ...base, key: "F12", meta: false }, true), "devtools");
+});
+
+test("the client's system for the hub header: windows, macos, linux, other", () => {
+  assert.equal(clientOs("win32"), "windows");
+  assert.equal(clientOs("darwin"), "macos");
+  assert.equal(clientOs("linux"), "linux");
+  assert.equal(clientOs("freebsd"), "other");
+  assert.deepEqual(clientHeaders("remote", "win32"), { "x-crossagents-client-os": "windows" });
+  assert.deepEqual(clientHeaders("local", "win32"), {});
 });

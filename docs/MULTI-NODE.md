@@ -454,6 +454,8 @@ B1 之后节点机器上的 GUI 管的可能是本机 node（单干时是本机 
 
 **默认推荐打洞（组网工具）**：不要公网地址、不开端口；偷到 token 还得先进组网；CrossAgents 传的主要是文字事件，走中继也够快；它只解决连得到，中心那台仍要开着。代价是国内厂商中继多在海外、打不通时延迟高，可在国内云服务器自建中继（headscale + 自建 DERP、EasyTier 自建节点、RustDesk 那种 hbbs / hbbr）；两边都有 IPv6 时更容易打通。
 
+已接系统 Tailscale（2026-11-10，人选了先接这条）：GUI 读本机已装的 Tailscale（`tailscale status --json`），在设置 →「连接」列出同一账号下的机器，点「用这个地址」填主机，连接仍走上面的 SSH 隧道。不内置 tsnet：装系统 Tailscale 是前提，内置留待 A3（§12）。
+
 **SSH 隧道**：它不是第四种「连得到」的办法，而是跑在局域网、组网工具或端口映射之上的传输层。A 阶段的远程 GUI 走这一层（§4.3，2026-11-08 已实现）。hub 继续只听 `127.0.0.1`。GUI 用系统 OpenSSH：认证交给 `~/.ssh/config` 与 ssh-agent；配对时在中心上跑 `crossagents device add <设备名> --json`，命令和端口怎么找见 §4.3。token 只显示一次，`safeStorage` 加密后存在 Electron 的 `<userData>/remote.json`，渲染层拿不到。平时 `ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 127.0.0.1:<本机端口>:127.0.0.1:<中心端口>`，本机端口记住沿用；断了按 1、2、5、10、30 秒退避重连，401 停止。GUI 只连本机端口。事件流按 `Last-Event-ID` 续传。
 
 省掉的是开放 listen 才要的那一套：TLS、证书指纹、密码登录、`/v1/auth/login` 限速。这些留在 A3（§10、§12）。

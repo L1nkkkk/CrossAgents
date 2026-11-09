@@ -843,17 +843,25 @@ impl Store for SqliteStore {
         &self,
         agent: Option<AgentId>,
     ) -> Result<Vec<PendingNotice>, CoreError> {
-        let rows: Vec<(String, String, String, String, String, String, Option<String>, i64)> =
-            sqlx::query_as(
-                "SELECT agent, topic, line, class, first_at, updated_at, carried_by, wake_tries
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            i64,
+        )> = sqlx::query_as(
+            "SELECT agent, topic, line, class, first_at, updated_at, carried_by, wake_tries
                  FROM pending_notices
                  WHERE ?1 IS NULL OR agent = ?1
                  ORDER BY updated_at, topic",
-            )
-            .bind(agent.map(|id| id.to_string()))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(storage)?;
+        )
+        .bind(agent.map(|id| id.to_string()))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
         rows.into_iter()
             .map(
                 |(agent, topic, line, class, first_at, updated_at, carried_by, wake_tries)| {
@@ -2084,7 +2092,7 @@ impl Store for SqliteStore {
         hash: &str,
     ) -> Result<(), CoreError> {
         let result = sqlx::query(
-            "INSERT INTO devices (id,name,kind,level,token_hash,created_at) VALUES (?,?,?,?,?,?)",
+            "INSERT INTO devices (id,name,kind,level,token_hash,created_at,os) VALUES (?,?,?,?,?,?,?)",
         )
         .bind(&d.id)
         .bind(&d.name)
@@ -2102,6 +2110,7 @@ impl Store for SqliteStore {
         )
         .bind(hash)
         .bind(d.created_at.to_rfc3339())
+        .bind(d.os.map(|os| os.word()))
         .execute(&self.pool)
         .await;
         match result {
@@ -2165,6 +2174,20 @@ impl Store for SqliteStore {
     async fn touch_device(&self, id: &str) -> Result<(), CoreError> {
         let now = Utc::now();
         sqlx::query("UPDATE devices SET last_seen_at = ? WHERE id = ? AND revoked_at IS NULL AND (last_seen_at IS NULL OR julianday(last_seen_at) <= julianday(?))").bind(now.to_rfc3339()).bind(id).bind((now - chrono::Duration::minutes(1)).to_rfc3339()).execute(&self.pool).await.map_err(storage)?;
+        Ok(())
+    }
+    async fn set_device_os(
+        &self,
+        id: &str,
+        os: crossagents_core::DeviceOs,
+    ) -> Result<(), CoreError> {
+        sqlx::query("UPDATE devices SET os = ? WHERE id = ? AND revoked_at IS NULL AND (os IS NULL OR os <> ?)")
+            .bind(os.word())
+            .bind(id)
+            .bind(os.word())
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
         Ok(())
     }
     async fn insert_account(&self, account: &Account) -> Result<(), CoreError> {
@@ -2257,6 +2280,10 @@ fn device_row(row: sqlx::sqlite::SqliteRow) -> Result<crossagents_core::Device, 
         created_at: parse("created_at")?,
         last_seen_at: optional("last_seen_at")?,
         revoked_at: optional("revoked_at")?,
+        os: row
+            .try_get::<Option<String>, _>("os")
+            .map_err(storage)?
+            .and_then(|v| crossagents_core::DeviceOs::parse_reported(&v)),
     })
 }
 

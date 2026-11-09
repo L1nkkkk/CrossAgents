@@ -396,7 +396,7 @@ async fn require_token(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     let grant = match presented {
-        Some(token) => grant_of(&state, token).await,
+        Some(token) => grant_of(&state, token, &headers).await,
         None => None,
     };
     let Some(grant) = grant else {
@@ -465,7 +465,12 @@ async fn require_token(
 
 /// What a presented token may do: the hub's token everything, the read-only token read,
 /// an agent's session token nothing here, an extension's token what its call was issued for.
-async fn grant_of(state: &AppState, token: &str) -> Option<crate::access::Grant> {
+/// A device token's request may report the device's system (`x-crossagents-client-os`).
+async fn grant_of(
+    state: &AppState,
+    token: &str,
+    headers: &HeaderMap,
+) -> Option<crate::access::Grant> {
     use crate::access::{Grant, Level};
     if constant_time_eq(token.as_bytes(), state.token.as_bytes()) {
         Some(Grant::Level(Level::Admin))
@@ -478,7 +483,7 @@ async fn grant_of(state: &AppState, token: &str) -> Option<crate::access::Grant>
     } else if token.starts_with("cad_") {
         match state
             .devices
-            .authenticate(state.store().as_ref(), token)
+            .authenticate_reporting(state.store().as_ref(), token, reported_os(headers))
             .await
         {
             Ok(Some((d, _))) => Some(Grant::Device {
@@ -496,6 +501,14 @@ async fn grant_of(state: &AppState, token: &str) -> Option<crate::access::Grant>
     } else {
         None
     }
+}
+
+/// The system a client reported in `x-crossagents-client-os`; empty or missing is none.
+fn reported_os(headers: &HeaderMap) -> Option<crossagents_core::DeviceOs> {
+    headers
+        .get(crossagents_core::DeviceOs::HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(crossagents_core::DeviceOs::parse_reported)
 }
 
 /// Resolves the agent behind a per-session token and passes it on as an extension.
@@ -522,7 +535,7 @@ async fn require_agent_token(
         && let Some(crate::access::Grant::Device {
             kind: crossagents_core::DeviceKind::Node,
             ..
-        }) = grant_of(&state, token).await
+        }) = grant_of(&state, token, &headers).await
     {
         return AppError::new(
             StatusCode::FORBIDDEN,
@@ -569,7 +582,33 @@ async fn info(State(state): State<Arc<AppState>>) -> Json<HubInfo> {
         home: state.home.display().to_string(),
         started_at: state.started_at,
         features: FEATURES.iter().map(|f| (*f).to_owned()).collect(),
+        machine: Some(crossagents_api_types::HubMachine {
+            os: crossagents_core::DeviceOs::current(),
+            hostname: hostname(),
+        }),
     })
+}
+
+/// This machine's host name, or an empty string when it cannot be read.
+fn hostname() -> String {
+    let from_env = std::env::var(if cfg!(windows) {
+        "COMPUTERNAME"
+    } else {
+        "HOSTNAME"
+    })
+    .ok()
+    .map(|v| v.trim().to_owned())
+    .filter(|v| !v.is_empty());
+    from_env
+        .or_else(|| {
+            std::process::Command::new("hostname")
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+                .filter(|v| !v.is_empty())
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Deserialize)]
@@ -3788,6 +3827,7 @@ async fn create_device(
         created_at: Utc::now(),
         last_seen_at: None,
         revoked_at: None,
+        os: req.os,
     };
     let token = format!(
         "cad_{}{}",

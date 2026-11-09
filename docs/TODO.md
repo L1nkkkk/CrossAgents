@@ -106,6 +106,13 @@ A2 留下的（2026-11-08，run 8298b08a）：
   - 设备缓存的并发测试（[devices.rs](../crates/hub/tests/devices.rs) `concurrent_first_authentication_and_revoke_never_repopulate_the_cache`）没有专门覆盖这种情况：`Devices::authenticate` 读完库，发现 `generation` 变了，再重读一次（[devices.rs](../crates/hub/src/devices.rs) `authenticate` 里 `cache.generation != generation` 就 `continue`）。要测到，得把 `Store` 包一层来卡住时机。吊销之后不把已经读到的旧设备填回缓存，这条主路径有测试。
   - 中心默认 shell 是 PowerShell 5.1 时，用 `cat` 读 UTF-8 的 `hub.json`，`exe` 路径里的非 ASCII（例如中文用户名）可能变成乱码，配对失败关闭。可以在「连接」页的高级里手填命令。读取方式这次没改，要在真机上确认这个失败和绕过办法。
 
+Tailscale 与设备系统（2026-11-10，run 44148f21）：
+
+- [ ] 真内置 tsnet：人选了先接系统 Tailscale（2026-11-10），GUI 现在只读本机已装的 Tailscale。不装系统 Tailscale 也能连，要把 tsnet（或 iroh 这类库，见 [MULTI-NODE.md](MULTI-NODE.md) §14「待评估」）做进 `crossagents` 二进制，留到 A3 之后再定（[MULTI-NODE.md](MULTI-NODE.md) §14、§12 A3）。
+- [ ] Tailscale 列表真机实测：设置 →「连接」的 Tailscale 一节还没在 Mac 与 Windows 真机上跑过。要测：没装、没登录、没在运行三种提示；同账号多台机器的排序与在线标记；「用这个地址」填进主机后配对能否成功；Linux 服务器作中心时同理（[INSTALL-MAC.md](INSTALL-MAC.md) §4.4）。
+- [ ] 老设备 os 要等下次连上才补：迁移 `0018_device_os.sql` 只加 `devices.os` 列，不回填历史数据。一台设备的系统要等它下次带 `x-crossagents-client-os` 请求、且值与库里不同时才写入（[devices.rs](../crates/hub/src/devices.rs)）；在那之前库里它的 `os` 是空的。
+- [ ] 设备「在线」可能误判离线：设备页的在线由 [isOnline](../apps/gui/src/lib/devices.ts)（`last_seen_at` 在 5 分钟内，`ONLINE_WITHIN_MS`）决定；而 `last_seen_at` 只在设备带 token 的请求时才写，且每分钟最多写一次（[store-sqlite lib.rs](../crates/store-sqlite/src/lib.rs) 第 2176 行左右的 `UPDATE devices SET last_seen_at`）。GUI 只开着 SSE 长连接、没有别的请求时，设备可能被显示成离线。待定做法二选一：SSE 连着时定期刷新 `last_seen`；或者由 hub 记下当前开着事件流的设备，在线判定看它，不再只看 `last_seen_at`。
+
 A3 开端口直连（以后）：
 
 > 不在 A2 的路径上。A2 走 SSH，hub 仍只听 `127.0.0.1`；这一组给不能 SSH 的客户端，以后做。见 [MULTI-NODE.md](MULTI-NODE.md) §12 A3、§10「安全」。

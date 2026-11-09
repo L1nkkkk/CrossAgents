@@ -4,12 +4,15 @@
 // button and says which level is missing (the hub's own 403 message). The page and its entry
 // stay as they are: the list is still worth seeing.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import type { HubInfo } from "@bindings/HubInfo";
 import type { Device } from "@bindings/Device";
 import { ApiError, api, errorText } from "../api";
 import { ErrorBox } from "../components";
 import { useHubData } from "../hub";
-import { isRevoked, KIND_LABELS, LEVEL_LABELS, sortDevices } from "../lib/devices";
+import { isOnline, isRevoked, isThisWindow, KIND_LABELS, LEVEL_LABELS, OS_UNKNOWN_HINT, sortDevices } from "../lib/devices";
+import { OsIcon, osName } from "../osIcon";
+import { useConnectionState } from "../lib/useConnection";
 import { useOperation } from "../lib/features";
 import { full, when } from "../lib/time";
 import { useArmed } from "../parts";
@@ -28,6 +31,12 @@ export function DevicesPage() {
   const refused = revoke.refused ? revoke.reason : undefined;
   const [error, setError] = useState<string>();
   const list = sortDevices(devices.data ?? []);
+  const [hub, setHub] = useState<HubInfo>();
+  useEffect(() => {
+    api.info().then(setHub, () => {});
+  }, []);
+  const thisDevice = useConnectionState()?.remote?.deviceId;
+  const now = Date.now();
 
   async function revokeDevice(device: Device) {
     setError(undefined);
@@ -45,6 +54,18 @@ export function DevicesPage() {
       <p className="settings-lead">
         这些是 hub 签发过的凭据。客户端按设备的级别访问 API，节点只走节点通道；吊销后它的下一次请求会被拒绝，记录留在这里。
       </p>
+      <div className="setting-card">
+        <div className="setting-line device-row hub-row" data-role="hub">
+          <div className="device-name">
+            <div className="setting-label">
+              <OsIcon os={hub?.machine?.os} size={16} />
+              {hub?.machine?.hostname || "中心"}
+              <span className="chip small ok">中心 · hub 在这里</span>
+            </div>
+            {!hub?.machine && <div className="setting-hint">{hub ? "这台 hub 还不报告所在机器" : "正在读取…"}</div>}
+          </div>
+        </div>
+      </div>
       <ErrorBox error={devices.error ?? error} />
       {refused && (
         <div className="notice">
@@ -65,7 +86,7 @@ export function DevicesPage() {
       ) : (
         <div className="setting-card">
           {list.map((device) => (
-            <DeviceRow key={device.id} device={device} refused={refused} onRevoke={revokeDevice} />
+            <DeviceRow key={device.id} device={device} refused={refused} onRevoke={revokeDevice} now={now} thisWindow={isThisWindow(device, thisDevice)} />
           ))}
         </div>
       )}
@@ -74,19 +95,30 @@ export function DevicesPage() {
 }
 
 /** One device: what it is, what it may do, when it was made and last seen; revoked ones faint. */
-function DeviceRow({ device, refused, onRevoke }: { device: Device; refused?: string; onRevoke: (device: Device) => void }) {
+function DeviceRow({ device, refused, onRevoke, now, thisWindow }: { device: Device; refused?: string; onRevoke: (device: Device) => void; now: number; thisWindow: boolean }) {
   const remove = useArmed();
   const revoked = isRevoked(device);
   return (
     <div className={`setting-line device-row ${revoked ? "revoked" : ""}`}>
       <div className="device-name">
         <div className="setting-label">
+          <span title={device.os ? osName(device.os) : OS_UNKNOWN_HINT}>
+            <OsIcon os={device.os} size={15} />
+          </span>
           {device.name}
+          {thisWindow && <span className="chip small accent">这个窗口</span>}
           <span className="chip small">{KIND_LABELS[device.kind]}</span>
           <span className="chip small">{LEVEL_LABELS[device.level]}</span>
           {revoked && <span className="chip small danger">已吊销</span>}
         </div>
+        {!device.os && <div className="setting-hint">{OS_UNKNOWN_HINT}</div>}
         <div className="device-times">
+          {!revoked && (
+            <span className="setting-hint presence" data-online={isOnline(device, now)}>
+              <span className={`dot ${isOnline(device, now) ? "ok" : ""}`} />
+              {isOnline(device, now) ? "在线" : device.last_seen_at ? `离线 · ${when(device.last_seen_at)}` : "离线 · 从未连接"}
+            </span>
+          )}
           <span className="setting-hint" title={`创建于 ${full(device.created_at)}`}>
             创建 {when(device.created_at)}
           </span>

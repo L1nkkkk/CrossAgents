@@ -22,3 +22,19 @@ export const isRevoked = (device: Device): boolean => !!device.revoked_at;
 export function sortDevices(devices: readonly Device[]): Device[] {
   return [...devices.filter((d) => !isRevoked(d)), ...devices.filter(isRevoked)];
 }
+
+/** A device seen within this long counts as online. */
+export const ONLINE_WITHIN_MS = 5 * 60_000;
+
+/** Online: the hub saw it (any authenticated request) in the last five minutes. */
+export function isOnline(device: Pick<Device, "last_seen_at" | "revoked_at">, now: number = Date.now()): boolean {
+  if (device.revoked_at || !device.last_seen_at) return false;
+  const seen = Date.parse(device.last_seen_at);
+  return Number.isFinite(seen) && now - seen <= ONLINE_WITHIN_MS;
+}
+
+/** The hint under a device with no recorded system. */
+export const OS_UNKNOWN_HINT = "系统未知，下次连上会补";
+
+/** Whether `device` is the one this window connected as (remote mode only). */
+export const isThisWindow = (device: Pick<Device, "id">, remoteDeviceId?: string): boolean => !!remoteDeviceId && device.id === remoteDeviceId;

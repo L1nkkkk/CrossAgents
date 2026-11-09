@@ -20,7 +20,8 @@ import { copyRoot, copyPrefix, copyName, staleCopies, runsWhenOpened, safeCopyRo
 import { decideSafeMode, loadingMarker, type SafeMode } from "./safeMode.cjs";
 import { defaultDeviceName, remoteFile, sshProgram, type Crypto } from "./remote.cjs";
 import { RemoteController, Unavailable } from "./remoteController.cjs";
-import { applicationMenu, bundledHub, shortcut, trayIcon } from "./platform.cjs";
+import { applicationMenu, bundledHub, clientHeaders, shortcut, trayIcon } from "./platform.cjs";
+import { tailscaleStatus } from "./tailscale.cjs";
 
 // Must run before app.ready. CORS remains enabled for module imports from file://.
 protocol.registerSchemesAsPrivileged([{ scheme: "crossagents-ext", privileges: {
@@ -251,6 +252,11 @@ ipcMain.handle("extensions:ready", (event) => {
   extensionLoading.ready();
 });
 
+ipcMain.handle("tailscale:status", (event) => {
+  if (!fromApp(event)) throw new Error("request from an unknown page");
+  return tailscaleStatus();
+});
+
 async function serveExtension(request: Request): Promise<Response> {
   const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS" };
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
@@ -260,7 +266,7 @@ async function serveExtension(request: Request): Promise<Response> {
     const path = assetPath(request.url);
     const { base, token, mode } = await currentHub();
     const asset = await fetch(base + path, {
-      headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      headers: { authorization: `Bearer ${token}`, ...clientHeaders(mode, process.platform) }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (mode === "remote" && asset.status === 401) remote?.unauthorized();
     const headers = new Headers(asset.headers);
@@ -292,7 +298,7 @@ ipcMain.handle("hub:request", async (event, method: unknown, path: unknown, body
       return { ok: true, response: { status: 503, body: JSON.stringify({ error: { code: "unavailable", message: err.message } }) } };
     }
     const { base, token } = hub;
-    const headers: Record<string, string> = { authorization: `Bearer ${token}` };
+    const headers: Record<string, string> = { authorization: `Bearer ${token}`, ...clientHeaders(hub.mode, process.platform) };
     if (body !== null) headers["content-type"] = "application/json";
     let response: Response;
     try {
@@ -406,7 +412,7 @@ ipcMain.handle("shell:open-path", async (event, scope: unknown, path: unknown) =
     try {
       response = await fetch(`${base}${scope}/files/resolve`, {
         method: "POST",
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json", ...clientHeaders(mode, process.platform) },
         body: JSON.stringify({ paths: [path] }),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
@@ -434,7 +440,7 @@ ipcMain.handle("shell:open-path", async (event, scope: unknown, path: unknown) =
       let bytes: ArrayBuffer;
       try {
         const raw = await fetch(`${base}${scope}/files/raw?path=${encodeURIComponent(entry.path)}`, {
-          headers: { authorization: `Bearer ${token}` }, signal,
+          headers: { authorization: `Bearer ${token}`, ...clientHeaders(mode, process.platform) }, signal,
         });
         if (raw.status === 401) remote?.unauthorized();
         if (raw.status === 413) throw new Error("文件超过 64 MiB，不能下载打开");
@@ -562,7 +568,7 @@ async function relayEvents(contents: WebContents, signal: AbortSignal) {
 /** Reads one SSE connection, resuming after `last.id` with `Last-Event-ID`. */
 async function streamOnce(emit: (channel: string, value: string) => void, last: { id?: string }, signal: AbortSignal) {
   const { base, token, mode } = await currentHub();
-  const headers: Record<string, string> = { authorization: `Bearer ${token}`, accept: "text/event-stream" };
+  const headers: Record<string, string> = { authorization: `Bearer ${token}`, accept: "text/event-stream", ...clientHeaders(mode, process.platform) };
   if (last.id !== undefined) headers["last-event-id"] = last.id;
   // First connection: live events only (views load state over REST); reconnects resume.
   const query = last.id === undefined ? "?live=true" : "";
@@ -639,7 +645,7 @@ async function relayTerminal(contents: WebContents, id: string, reader: string, 
 /** Whether there is nothing more to come: the shell finished, or the hub no longer has it. */
 async function terminalStreamOnce(id: string, reader: string, emit: (data: string) => void, signal: AbortSignal): Promise<boolean> {
   const { base, token, mode } = await currentHub();
-  const headers = { authorization: `Bearer ${token}`, accept: "text/event-stream" };
+  const headers = { authorization: `Bearer ${token}`, accept: "text/event-stream", ...clientHeaders(mode, process.platform) };
   const url = `${base}/v1/terminals/${encodeURIComponent(id)}/output?connection=${encodeURIComponent(reader)}`;
   const response = await fetch(url, { headers, signal });
   if (mode === "remote" && response.status === 401) remote?.unauthorized();

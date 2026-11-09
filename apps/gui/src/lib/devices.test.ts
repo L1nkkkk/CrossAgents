@@ -40,3 +40,22 @@ test("kind and level read in the page's words", () => {
   assert.equal(LEVEL_LABELS.write, "读写");
   assert.equal(LEVEL_LABELS.admin, "管理");
 });
+
+import { isOnline, isThisWindow, ONLINE_WITHIN_MS } from "./devices.ts";
+
+test("online means seen within five minutes; revoked or never seen is not", () => {
+  const now = Date.parse("2026-10-22T14:30:00Z");
+  const seen = (ms: number) => new Date(now - ms).toISOString();
+  assert.equal(isOnline({ last_seen_at: seen(60_000) }, now), true);
+  assert.equal(isOnline({ last_seen_at: seen(ONLINE_WITHIN_MS) }, now), true);
+  assert.equal(isOnline({ last_seen_at: seen(ONLINE_WITHIN_MS + 1000) }, now), false);
+  assert.equal(isOnline({}, now), false);
+  assert.equal(isOnline({ last_seen_at: seen(1000), revoked_at: seen(500) }, now), false);
+  assert.equal(isOnline({ last_seen_at: "nonsense" }, now), false);
+});
+
+test("this window is the remote device id, only when remote", () => {
+  assert.equal(isThisWindow({ id: "a" }, "a"), true);
+  assert.equal(isThisWindow({ id: "a" }, "b"), false);
+  assert.equal(isThisWindow({ id: "a" }, undefined), false);
+});

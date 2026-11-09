@@ -1,5 +1,5 @@
 //! Cached device authentication. Database reads run outside the cache lock.
-use crossagents_core::{CoreError, Device, Store};
+use crossagents_core::{CoreError, Device, DeviceOs, Store};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
@@ -38,6 +38,40 @@ impl Devices {
     }
 
     pub async fn authenticate(
+        &self,
+        store: &dyn Store,
+        token: &str,
+    ) -> Result<Option<(Device, CancellationToken)>, CoreError> {
+        self.authenticate_reporting(store, token, None).await
+    }
+
+    /// Authenticates, then records the system the request reported when it differs from the
+    /// one on file. The cached device follows the write, so an unchanged report never writes.
+    pub async fn authenticate_reporting(
+        &self,
+        store: &dyn Store,
+        token: &str,
+        os: Option<DeviceOs>,
+    ) -> Result<Option<(Device, CancellationToken)>, CoreError> {
+        let Some((mut device, cancel)) = self.lookup(store, token).await? else {
+            return Ok(None);
+        };
+        let Some(os) = os.filter(|os| device.os != Some(*os)) else {
+            return Ok(Some((device, cancel)));
+        };
+        store.set_device_os(&device.id, os).await?;
+        device.os = Some(os);
+        let mut cache = self.cache.lock().await;
+        // A revoke in between removed the entry; then there is nothing to follow.
+        if let Some(entry) = cache.entries.get_mut(&hash(token))
+            && entry.device.id == device.id
+        {
+            entry.device.os = Some(os);
+        }
+        Ok(Some((device, cancel)))
+    }
+
+    async fn lookup(
         &self,
         store: &dyn Store,
         token: &str,

@@ -292,6 +292,11 @@ pub trait Store: Send + Sync {
         let _ = id;
         Err(CoreError::Unsupported("devices".into()))
     }
+    /// Records the system an active device reported. Writes only when it changed.
+    async fn set_device_os(&self, id: &str, os: crate::DeviceOs) -> Result<(), CoreError> {
+        let _ = (id, os);
+        Err(CoreError::Unsupported("devices".into()))
+    }
 
     async fn insert_account(&self, account: &Account) -> Result<(), CoreError>;
     async fn get_account(&self, id: &str) -> Result<Account, CoreError>;

@@ -35,6 +35,29 @@ export type ConnectionState = {
 /** Pairing goes: find the hub there, `device add`, start the tunnel, check the token. */
 export type PairStep = "locate" | "pair" | "tunnel" | "check";
 
+/** A machine on this person's Tailscale network, as `tailscale status --json` shows it (electron/tailscale.cts). */
+export type TailscaleOs = "windows" | "macos" | "linux" | "ios" | "android" | "other";
+export type TailscalePeer = {
+  hostName: string;
+  /** The MagicDNS name, without the trailing dot. */
+  dnsName?: string;
+  ips: string[];
+  os: TailscaleOs;
+  online: boolean;
+  /** ISO time; absent while the peer is online (Tailscale reports the zero time then). */
+  lastSeen?: string;
+};
+/**
+ * This machine's Tailscale. `missing`: no `tailscale` command found (PATH, or the app's usual place);
+ * `stopped`: the command could not report a state (`error` says why); `needs-login`; `running`.
+ */
+export type TailscaleStatus = {
+  state: "missing" | "stopped" | "needs-login" | "running";
+  error?: string;
+  self?: TailscalePeer;
+  peers: TailscalePeer[];
+};
+
 export interface CrossAgentsBridge {
   /**
    * Which hub the GUI talks to (electron/remoteController.cts). Switching mode, pairing anew or
@@ -101,6 +124,8 @@ export interface CrossAgentsBridge {
   };
   /** A window command from the page's menu (electron/main.cts `COMMANDS`). */
   command?(name: "zoomIn" | "zoomOut" | "zoomReset" | "reload" | "devtools" | "fullscreen" | "quit"): void;
+  /** This machine's Tailscale state and peers (electron/tailscale.cts). Electron only. */
+  tailscale?: { status(): Promise<TailscaleStatus> };
 }
 
 declare global {

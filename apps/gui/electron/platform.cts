@@ -32,6 +32,20 @@ export function trayIcon(platform: NodeJS.Platform): string { return platform ==
 export function bundledHub(packaged: boolean, platform: NodeJS.Platform, resources: string, exists: (path: string) => boolean): boolean {
   return !packaged || exists(join(resources, "bin", platform === "win32" ? "crossagents.exe" : "crossagents"));
 }
+/** The header that tells the hub which system this GUI runs on (remote mode only). */
+export const CLIENT_OS_HEADER = "x-crossagents-client-os";
+export type ClientOs = "windows" | "macos" | "linux" | "other";
+/** This machine's system as the hub is told it. */
+export function clientOs(platform: NodeJS.Platform): ClientOs {
+  if (platform === "win32") return "windows";
+  if (platform === "darwin") return "macos";
+  if (platform === "linux") return "linux";
+  return "other";
+}
+/** The headers for a request to the hub: the client's system in remote mode, nothing in local mode. */
+export function clientHeaders(mode: "local" | "remote", platform: NodeJS.Platform): Record<string, string> {
+  return mode === "remote" ? { [CLIENT_OS_HEADER]: clientOs(platform) } : {};
+}
 /** Ad-hoc signed macOS builds cannot use electron-updater. */
 export function automaticUpdates(platform: NodeJS.Platform): boolean { return platform !== "darwin"; }
 /** Text explaining where the window went when it was hidden. */

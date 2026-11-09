@@ -7,6 +7,7 @@ import type { AgentProfile } from "@bindings/AgentProfile";
 import type { AgentStatus } from "@bindings/AgentStatus";
 import type { Capabilities } from "@bindings/Capabilities";
 import type { Device } from "@bindings/Device";
+import type { TailscaleStatus } from "../bridge";
 import type { DriverKind } from "@bindings/DriverKind";
 import type { MessageSource } from "@bindings/MessageSource";
 import type { PlannedTask } from "@bindings/PlannedTask";
@@ -139,8 +140,8 @@ export function clone(of: Agent, suffix: string, status: AgentStatus, cwd: strin
 /** The hub's issued devices (`GET /v1/devices`): a client, a node, and one already revoked. */
 export function devices(): Device[] {
   return [
-    { id: uid(), name: "Windows 工作站", kind: "client", level: "admin", created_at: ago(60 * 24 * 12), last_seen_at: ago(2) },
-    { id: uid(), name: "build-node", kind: "node", level: "read", created_at: ago(60 * 24 * 5), last_seen_at: ago(60 * 3) },
+    { id: "dev-mock", name: "Windows 工作站", kind: "client", level: "admin", created_at: ago(60 * 24 * 12), last_seen_at: ago(2), os: "windows" },
+    { id: uid(), name: "build-node", kind: "node", level: "read", created_at: ago(60 * 24 * 5), last_seen_at: ago(60 * 3), os: "linux" },
     {
       id: uid(),
       name: "旧笔记本",
@@ -151,6 +152,23 @@ export function devices(): Device[] {
       revoked_at: ago(60 * 24 * 8),
     },
   ];
+}
+
+/** The mock hub's own machine (`/v1/info` machine). */
+export const HUB_MACHINE = { os: "macos", hostname: "link-mac-mini" } as const;
+
+/** A Tailscale network for the mock desktop (`bridge.tailscale`): online first, two offline, one without a MagicDNS name. */
+export function tailscaleSample(): TailscaleStatus {
+  return {
+    state: "running",
+    self: { hostName: "link-laptop", dnsName: "link-laptop.tail1234.ts.net", ips: ["100.101.102.1"], os: "windows", online: true },
+    peers: [
+      { hostName: "pixel", ips: ["100.101.102.4"], os: "android", online: false, lastSeen: ago(60 * 5) },
+      { hostName: "link-mac-mini", dnsName: "link-mac-mini.tail1234.ts.net", ips: ["100.101.102.2", "fd7a::2"], os: "macos", online: true },
+      { hostName: "build-box", dnsName: "build-box.tail1234.ts.net", ips: ["100.101.102.3"], os: "linux", online: true },
+      { hostName: "ipad", dnsName: "ipad.tail1234.ts.net", ips: ["100.101.102.5"], os: "ios", online: false, lastSeen: ago(60 * 24 * 3) },
+    ],
+  };
 }
 
 // ---- Runs and tasks -----------------------------------------------------------------------

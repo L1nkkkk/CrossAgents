@@ -10,11 +10,11 @@ use ts_rs::TS;
 pub use crossagents_core::{
     Account, AccountStatus, Agent, AgentCommand, AgentCommandKind, AgentId, AgentProfile,
     AgentStatus, Capabilities, CheckResult, ClaimRole, ContinuationPolicy, DataSource,
-    DeliveryState, DeliveryStatus, Device, DeviceKind, DeviceLevel, DiffSource, DriverKind, Event,
-    EventKind, FindingAnswer, FindingStatus, Handoff, HandoffKind, HistoryTask, LeadPlace,
-    MessageId, MessageSource, ModelInfo, OutputStream, PlannedTask, QueuedReason, Role, Run,
-    RunHistory, RunId, RunPolicy, RunStatus, StopReason, Task, TaskId, TaskStatus, TokenTotals,
-    ToolInfo, ToolStatus,
+    DeliveryState, DeliveryStatus, Device, DeviceKind, DeviceLevel, DeviceOs, DiffSource,
+    DriverKind, Event, EventKind, FindingAnswer, FindingStatus, Handoff, HandoffKind, HistoryTask,
+    LeadPlace, MessageId, MessageSource, ModelInfo, OutputStream, PlannedTask, QueuedReason, Role,
+    Run, RunHistory, RunId, RunPolicy, RunStatus, StopReason, Task, TaskId, TaskStatus,
+    TokenTotals, ToolInfo, ToolStatus,
 };
 
 /// Handoff cards and how a task's chain of them reads.
@@ -31,6 +31,11 @@ pub struct CreateDeviceRequest {
     #[serde(default)]
     #[ts(optional)]
     pub level: Option<DeviceLevel>,
+    /// The device's system, when the issuer knows it; the device's own requests report it
+    /// later through `x-crossagents-client-os` either way.
+    #[serde(default)]
+    #[ts(optional)]
+    pub os: Option<DeviceOs>,
 }
 /// The plaintext token appears only in this issuance response.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -92,6 +97,19 @@ pub struct HubInfo {
     /// treats it as an older hub and hides those entries (the sidebar's version tooltip says so).
     #[serde(default)]
     pub features: Vec<String>,
+    /// The machine the hub runs on. Missing from a hub built before the field.
+    #[serde(default)]
+    #[ts(optional)]
+    pub machine: Option<HubMachine>,
+}
+
+/// The hub's own machine, as `/v1/info` reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct HubMachine {
+    pub os: DeviceOs,
+    /// The machine's host name; empty when it could not be read.
+    pub hostname: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -3164,9 +3182,17 @@ mod tests {
             home: "/tmp".into(),
             started_at: Utc::now(),
             features: FEATURES.iter().map(|f| (*f).to_owned()).collect(),
+            machine: Some(HubMachine {
+                os: DeviceOs::Macos,
+                hostname: "mini".into(),
+            }),
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["api"], "v2");
+        assert_eq!(
+            json["machine"],
+            serde_json::json!({"os": "macos", "hostname": "mini"})
+        );
         assert_eq!(
             json["features"],
             serde_json::json!(["git", "lessons", "work", "apply", "devices"])

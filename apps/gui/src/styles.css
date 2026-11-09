@@ -2106,3 +2106,17 @@ button.oneline-main:hover:not(:disabled) { background: var(--hover); }
 /* The start page's path field for a remote hub: no system dialog reaches the centre's disk */
 .home-path { display: flex; align-items: center; gap: 8px; padding: 0 2px 8px; }
 .home-path input { flex: 1; min-width: 0; }
+
+/* Machines: the sidebar's outer level (the centre today), and the os mark beside names. */
+.machine-head { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.machine-name { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 500; color: var(--text-2); padding: 3px 6px; }
+.machine-name .dot { margin-left: auto; }
+.machine-name .machine-via { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex-shrink: 1; }
+.machine-name .text { flex: 0 1 auto; }
+.machine-body { min-width: 0; padding-left: 10px; box-sizing: border-box; }
+.os-icon { color: var(--muted); vertical-align: -2px; }
+.os-line { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.presence { display: inline-flex; align-items: center; gap: 5px; }
+.hub-row { background: var(--hover); }
+.ts-peer { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ts-peer .ts-addr { min-width: 0; overflow-wrap: anywhere; }

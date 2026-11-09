@@ -8,6 +8,7 @@ import {
   backoff, execArgs, LOCATE_COMMANDS, NOT_RUNNING, pairCommand, parseDeviceAdd, parseHubFile, remoteCommand,
   shellCommand, tunnelArgs, tunnelReduce, type Paired, type RemoteHub, type RemoteTarget, type TunnelEvent, type TunnelState,
 } from "./remote.cjs";
+import { clientHeaders } from "./platform.cjs";
 
 /** The ssh to run: `program` with `prefix` before ssh's own arguments (a script in tests). */
 export type Ssh = { program: string; prefix: string[] };
@@ -290,7 +291,7 @@ export class Tunnel {
       await sleep(250, wake.signal);
     }
     this.opts.onCheck?.();
-    const info = await fetch(`${base}/v1/info`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000) })
+    const info = await fetch(`${base}/v1/info`, { headers: { authorization: `Bearer ${token}`, ...clientHeaders("remote", process.platform) }, signal: AbortSignal.timeout(10_000) })
       .catch((err: unknown) => { throw new Error(`检查 token 失败：${err instanceof Error ? err.message : String(err)}`); });
     if (info.status === 401) {
       this.unauthorized();
@@ -313,7 +314,7 @@ export class Tunnel {
 
 async function healthy(base: string): Promise<boolean> {
   try {
-    const response = await fetch(`${base}/v1/health`, { signal: AbortSignal.timeout(3_000) });
+    const response = await fetch(`${base}/v1/health`, { headers: clientHeaders("remote", process.platform), signal: AbortSignal.timeout(3_000) });
     await response.body?.cancel();
     return response.ok;
   } catch {

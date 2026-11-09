@@ -94,3 +94,26 @@ export function summaryText(value: string | null | undefined): string {
   const text = value?.trim() ?? "";
   return /^(?:[A-Za-z]:[\\/]|\/|\\\\|(?:主导|worker|reviewer|planner)$)/i.test(text) ? "" : text;
 }
+
+/** The one machine there is today: the centre, where every workspace lives. */
+export const CENTRE_MACHINE = "centre";
+
+/** A machine and the workspace groups on it. Nodes (B1) will add machines here. */
+export type SidebarMachine = {
+  key: string;
+  groups: SidebarGroup[];
+};
+
+/** Groups workspace groups by machine (`machineKey` says which; the centre for now). Machines
+ * with no group are kept for the centre, so its row is there before the first workspace. */
+export function machineGroups(groups: readonly SidebarGroup[], machineKey: (g: SidebarGroup) => string = () => CENTRE_MACHINE): SidebarMachine[] {
+  const by = new Map<string, SidebarGroup[]>([[CENTRE_MACHINE, []]]);
+  for (const g of groups) {
+    const key = machineKey(g);
+    by.set(key, [...(by.get(key) ?? []), g]);
+  }
+  return [...by].map(([key, list]) => ({ key, groups: list }));
+}
+
+/** The fold key of a machine row; shares the groups' remembered set, so it cannot clash with a path. */
+export const machineFoldKey = (machine: string) => `machine:${machine}`;

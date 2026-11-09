@@ -10,6 +10,9 @@ import { PAIR_STEPS, connectionWords, pairFailure, stepIndex, stepWords, targetW
 import { useConnectionState } from "../lib/useConnection";
 import { useArmed } from "../parts";
 import { when } from "../lib/time";
+import type { TailscaleStatus } from "../bridge";
+import { OsIcon } from "../osIcon";
+import { peerAddress, sortPeers, tailscaleNote } from "../lib/tailscale";
 
 export function ConnectionPage() {
   const bridge = window.crossagents?.connection;
@@ -91,6 +94,7 @@ function ConnectionForm({ bridge, state }: { bridge: NonNullable<CrossAgentsBrid
   const index = stepIndex(step);
   return (
     <>
+      <TailscaleSection onUse={setHost} disabled={busy} />
       <section className="settings-section">
         <div className="settings-head">
           <h2>现在连的是</h2>
@@ -238,5 +242,78 @@ function ConnectionForm({ bridge, state }: { bridge: NonNullable<CrossAgentsBrid
         </section>
       )}
     </>
+  );
+}
+
+const TS_TITLES = { missing: "没装 Tailscale", "needs-login": "Tailscale 需要登录", stopped: "Tailscale 没在运行", running: "" } as const;
+
+/** The machines on this person's Tailscale network, and a way to fill one in as the host. */
+function TailscaleSection({ onUse, disabled }: { onUse: (address: string) => void; disabled: boolean }) {
+  const bridge = window.crossagents?.tailscale;
+  const [status, setStatus] = useState<TailscaleStatus>();
+  const [error, setError] = useState<string>();
+  const [loading, setLoading] = useState(false);
+  const refresh = () => {
+    if (!bridge) return;
+    setLoading(true);
+    setError(undefined);
+    bridge
+      .status()
+      .then(setStatus, (e) => setError(errorText(e)))
+      .finally(() => setLoading(false));
+  };
+  useEffect(refresh, [bridge]);
+  if (!bridge) return null;
+  const note = status ? tailscaleNote(status) : undefined;
+  return (
+    <section className="settings-section" data-section="tailscale">
+      <div className="settings-head">
+        <h2>Tailscale</h2>
+        <button type="button" className="ghost small" data-action="tailscale-refresh" disabled={loading} onClick={refresh}>
+          {loading ? "读取中…" : "刷新"}
+        </button>
+      </div>
+      <p className="settings-lead">同一个 Tailscale 账号下的机器可以直接互相访问：选一台，把它的地址填进下面的主机栏。</p>
+      <ErrorBox error={error} />
+      <div className="setting-card">
+        {!status ? (
+          <div className="setting-line">
+            <div className="setting-hint">{error ? "读不到 Tailscale 状态。" : "正在读取 Tailscale…"}</div>
+          </div>
+        ) : note ? (
+          <div className="setting-line">
+            <div>
+              <div className="setting-label">{TS_TITLES[status.state]}</div>
+              <div className="setting-hint">{note}</div>
+            </div>
+          </div>
+        ) : !status.peers.length ? (
+          <div className="setting-line">
+            <div className="setting-hint">这个账号下没有别的机器。在另一台机器上装 Tailscale 并登录同一个账号。</div>
+          </div>
+        ) : (
+          sortPeers(status.peers).map((peer) => {
+            const address = peerAddress(peer);
+            const away = peer.online ? "" : peer.lastSeen ? `离线 · ${when(peer.lastSeen)}` : "离线";
+            return (
+              <div key={peer.dnsName ?? peer.hostName} className="setting-line ts-peer" style={peer.online ? undefined : { opacity: 0.75 }}>
+                <div className="device-name">
+                  <div className="setting-label os-line">
+                    <OsIcon os={peer.os} size={15} />
+                    {peer.hostName}
+                    <span className={`dot ${peer.online ? "ok" : ""}`} title={peer.online ? "在线" : away} />
+                    {away && <span className="setting-hint">{away}</span>}
+                  </div>
+                  <div className="setting-hint mono ts-addr">{[peer.dnsName, peer.ips.find((ip) => ip.startsWith("100."))].filter(Boolean).join(" · ") || "没有地址"}</div>
+                </div>
+                <button type="button" data-action="use-address" disabled={disabled || !address} title={address ? `主机栏填 ${address}` : "这台机器没有可用的地址"} onClick={() => address && onUse(address)}>
+                  用这个地址
+                </button>
+              </div>
+            );
+          })
+        )}
+      </div>
+    </section>
   );
 }

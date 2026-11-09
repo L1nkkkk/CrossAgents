@@ -1,6 +1,6 @@
 //! Device credentials against a real hub, SQLite and HTTP streams.
 use crossagents_api_types::{
-    CreateDeviceResponse, Device, DeviceKind, DeviceLevel, ListDevicesResponse,
+    CreateDeviceResponse, Device, DeviceKind, DeviceLevel, DeviceOs, ListDevicesResponse,
 };
 use crossagents_core::Store;
 use crossagents_hub::{HubConfig, Paths, RunningHub};
@@ -319,6 +319,107 @@ async fn last_seen_is_written_at_most_once_per_minute_and_again_after_a_minute()
     let cache = crossagents_hub::devices::Devices::default();
     cache.authenticate(&store, &d.token).await.unwrap().unwrap();
     assert!(store.list_devices().await.unwrap()[0].last_seen_at.unwrap() > first);
+    store.close().await;
+    t.finish().await;
+}
+#[tokio::test]
+async fn client_os_header_is_recorded_only_when_it_changes() {
+    let t = TestHub::start().await;
+    let d = t.add("laptop", "client", "read").await;
+    assert!(d.device.os.is_none());
+    let store = SqliteStore::open(&t.paths.db()).await.unwrap();
+    let os_on_file = || async {
+        sqlx::query_scalar::<_, Option<String>>("SELECT os FROM devices WHERE id = ?")
+            .bind(&d.device.id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+    };
+    let info = |os: Option<&str>| {
+        let mut req = t.request(Method::GET, "/v1/info", &d.token);
+        if let Some(os) = os {
+            req = req.header("x-crossagents-client-os", os);
+        }
+        async move { assert!(req.send().await.unwrap().status().is_success()) }
+    };
+    // Missing or empty: nothing recorded.
+    info(None).await;
+    info(Some("")).await;
+    assert_eq!(os_on_file().await, None);
+    info(Some("macos")).await;
+    assert_eq!(os_on_file().await.as_deref(), Some("macos"));
+    let listed: ListDevicesResponse = t
+        .request(Method::GET, "/v1/devices", &t.hub.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed.devices[0].os, Some(DeviceOs::Macos));
+    // A request without the header leaves it as it was.
+    info(None).await;
+    assert_eq!(os_on_file().await.as_deref(), Some("macos"));
+    // The same report does not write: change the row behind the hub's back, report again.
+    sqlx::query("UPDATE devices SET os = 'linux' WHERE id = ?")
+        .bind(&d.device.id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    info(Some("macos")).await;
+    assert_eq!(os_on_file().await.as_deref(), Some("linux"));
+    // A different report writes, while the device is still cached; unknown words are other.
+    info(Some("windows")).await;
+    assert_eq!(os_on_file().await.as_deref(), Some("windows"));
+    info(Some("plan9")).await;
+    assert_eq!(os_on_file().await.as_deref(), Some("other"));
+    // The cache followed the write: reporting other again does not write.
+    sqlx::query("UPDATE devices SET os = 'linux' WHERE id = ?")
+        .bind(&d.device.id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    info(Some("haiku")).await;
+    assert_eq!(os_on_file().await.as_deref(), Some("linux"));
+    store.close().await;
+    t.finish().await;
+}
+#[tokio::test]
+async fn info_reports_the_hub_machine() {
+    let t = TestHub::start().await;
+    let info: Value = t
+        .request(Method::GET, "/v1/info", &t.hub.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let expected = serde_json::to_value(crossagents_core::DeviceOs::current()).unwrap();
+    assert_eq!(info["machine"]["os"], expected);
+    assert!(info["machine"]["hostname"].is_string());
+    t.finish().await;
+}
+#[tokio::test]
+async fn issued_device_may_carry_its_os() {
+    let t = TestHub::start().await;
+    let created: CreateDeviceResponse = t
+        .request(Method::POST, "/v1/devices", &t.hub.token)
+        .json(&json!({"name": "mac", "os": "macos"}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(created.device.os, Some(DeviceOs::Macos));
+    let store = SqliteStore::open(&t.paths.db()).await.unwrap();
+    assert_eq!(
+        store.list_devices().await.unwrap()[0].os,
+        Some(DeviceOs::Macos)
+    );
     store.close().await;
     t.finish().await;
 }

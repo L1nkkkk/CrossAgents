@@ -2,7 +2,7 @@
 // `CrossAgentsBridge`; no Electron or Node API reaches the page.
 
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
-import type { ConnectionState, CrossAgentsBridge, HubResponse, PairStep, UpdateState } from "../src/bridge";
+import type { ConnectionState, CrossAgentsBridge, HubResponse, PairStep, TailscaleStatus, UpdateState } from "../src/bridge";
 
 type Reply = { ok: true; response: HubResponse } | { ok: false; error: string };
 
@@ -94,6 +94,9 @@ const bridge: CrossAgentsBridge = {
   },
   setTheme: (theme) => ipcRenderer.send("theme:changed", theme),
   command: (name) => ipcRenderer.send("window:command", name),
+  tailscale: {
+    status: (): Promise<TailscaleStatus> => ipcRenderer.invoke("tailscale:status"),
+  },
 };
 
 contextBridge.exposeInMainWorld("crossagents", bridge);

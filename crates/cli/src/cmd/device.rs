@@ -28,6 +28,7 @@ pub async fn run(ctx: &Context, cmd: DeviceCommand) -> Result<()> {
                 name,
                 kind: Some(serde_json::from_value(kind.into())?),
                 level: Some(serde_json::from_value(level.into())?),
+                os: None,
             };
             let created: CreateDeviceResponse = client.post("/v1/devices", &req).await?;
             if ctx.json {

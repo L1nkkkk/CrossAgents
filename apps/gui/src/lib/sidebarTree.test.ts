@@ -169,3 +169,20 @@ test("todos survive hidden/archived/search-filtered members, and only server ans
     3,
   );
 });
+
+import { CENTRE_MACHINE, machineFoldKey, machineGroups } from "./sidebarTree.ts";
+
+test("workspace groups sit under the centre machine, which exists even with none", () => {
+  assert.deepEqual(machineGroups([]), [{ key: CENTRE_MACHINE, groups: [] }]);
+  const gs = groups([]);
+  const machines = machineGroups(gs);
+  assert.equal(machines.length, 1);
+  assert.equal(machines[0].groups.length, gs.length);
+  assert.equal(machineFoldKey(CENTRE_MACHINE), "machine:centre");
+});
+
+test("a machineKey can place groups on other machines", () => {
+  const gs = [{ key: "/a", name: "a", members: [] }, { key: "/b", name: "b", members: [] }];
+  const machines = machineGroups(gs, (g) => (g.key === "/b" ? "node1" : CENTRE_MACHINE));
+  assert.deepEqual(machines.map((m) => [m.key, m.groups.length]), [[CENTRE_MACHINE, 1], ["node1", 1]]);
+});

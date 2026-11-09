@@ -9,7 +9,7 @@ pub mod claim;
 pub mod cli;
 pub mod device;
 pub mod driver;
-pub use device::{Device, DeviceKind, DeviceLevel};
+pub use device::{Device, DeviceKind, DeviceLevel, DeviceOs};
 pub mod error;
 pub mod event;
 pub mod exec;
@@ -45,9 +45,9 @@ pub use driver::{
 };
 pub use error::CoreError;
 pub use event::{
-    AccountCandidate, DeliveryState, DeliveryStatus, DiffSource, EVENT_SCHEMA_VERSION, Envelope,
-    CarriedNotice, Event, EventKind, EventSink, MessageSource, QueuedReason, RoundNotice,
-    RoundSource,
+    AccountCandidate, CarriedNotice, DeliveryState, DeliveryStatus, DiffSource,
+    EVENT_SCHEMA_VERSION, Envelope, Event, EventKind, EventSink, MessageSource, QueuedReason,
+    RoundNotice, RoundSource,
 };
 pub use expertise::{
     Candidate, CandidateOrigin, CandidateStatus, EntryKind, EntryStats, EntryStatus, Example,

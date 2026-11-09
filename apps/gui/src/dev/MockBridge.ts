@@ -42,7 +42,7 @@ import type { Transcript } from "@bindings/Transcript";
 import type { UsageGroup } from "@bindings/UsageGroup";
 import type { UsageResponse } from "@bindings/UsageResponse";
 import type { Work } from "@bindings/Work";
-import type { CrossAgentsBridge, HubResponse, UpdateState } from "../bridge";
+import type { CrossAgentsBridge, HubResponse, TailscaleStatus, UpdateState } from "../bridge";
 import type { HubEvent } from "../hub";
 import { turnStat } from "../lib/diff";
 import {
@@ -63,7 +63,7 @@ import { exportLessons, lessonMatches, type Lesson, type RunIssue } from "../les
 import { effortOf } from "../lib/models";
 import { applyEvent } from "../session";
 import { FEATURES, operationOf } from "../lib/features";
-import { capabilitiesOf, contextParts, driverOf, transcript, uid } from "./fixtures";
+import { capabilitiesOf, contextParts, driverOf, HUB_MACHINE, tailscaleSample, transcript, uid } from "./fixtures";
 import { mockContent, mockResolve, mockSearch, mockStatus, mockTree } from "./files.mock";
 import { mockGit } from "./git.mock";
 import { createMockConnection, type MockConnection, type MockConnectionOptions } from "./mockConnection";
@@ -165,6 +165,8 @@ export type MockState = {
   safeMode?: { enabled: boolean; reason: string | null };
   /** The remote connection (`bridge.connection`): absent is 本机, as a desktop never paired. */
   connection?: MockConnectionOptions;
+  /** What `bridge.tailscale.status()` answers; a running sample network when unset. */
+  tailscale?: TailscaleStatus;
 };
 
 export type ExpertiseMock = { entries: ExpertiseEntry[]; candidates: Candidate[]; usages: UsageRecord[] };
@@ -238,6 +240,8 @@ export class MockBridge implements CrossAgentsBridge {
   private started = false;
   /** The mock desktop's `bridge.connection`; a scenario's `connection` decides what it says. */
   readonly connection: MockConnection;
+  /** The mock desktop bridge.tailscale; a scenario tailscale decides what it says. */
+  readonly tailscale = { status: async (): Promise<TailscaleStatus> => structuredClone(this.state.tailscale ?? tailscaleSample()) };
 
   constructor(
     readonly state: MockState,
@@ -740,7 +744,7 @@ export class MockBridge implements CrossAgentsBridge {
         // `features: null` is an older hub: it answers without the list at all, and `version`
         // is then what the GUI infers its entries from.
         const features = s.features === null ? undefined : (s.features ?? FEATURES);
-        return json(200, { version: s.version ?? __BUILD__.version, commit, debug: false, api: s.api ?? API_VERSION, pid: 0, home: "（mock 模式，无 hub）", started_at: new Date().toISOString(), ...(features ? { features } : {}) });
+        return json(200, { version: s.version ?? __BUILD__.version, commit, machine: HUB_MACHINE, debug: false, api: s.api ?? API_VERSION, pid: 0, home: "（mock 模式，无 hub）", started_at: new Date().toISOString(), ...(features ? { features } : {}) });
       }
       if (p === "/v1/agents") {
         // `?run=`: what the plan being settled changes (list_agents).
