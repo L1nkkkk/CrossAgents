@@ -6,7 +6,8 @@
 use std::fmt::Write;
 
 use crossagents_core::{
-    Agent, AgentId, CheckResult, ChecksState, Handoff, HandoffKind, LandPolicy, Run, Task,
+    Agent, AgentId, CheckResult, ChecksState, Handoff, HandoffKind, LandPolicy, Run, RunStatus,
+    Task,
 };
 
 use crate::project::{self, RunChecks, RunEnv};
@@ -56,6 +57,87 @@ pub fn previous_rounds(rounds: &[Run]) -> String {
                 .unwrap_or("")
         );
     }
+    out
+}
+
+/// The team note that holds the constraints every round is under (`note_write`, scope team).
+pub const CONSTRAINTS_NOTE: &str = "constraints";
+
+/// What a new round's lead starts from, read from the hub's records (never a model's summary).
+pub struct Carryover {
+    /// The round that asked for this one.
+    pub previous: Run,
+    /// The team note [`CONSTRAINTS_NOTE`], verbatim.
+    pub constraints: Option<String>,
+    /// Problems the previous round recorded that nobody has sorted: (key, text).
+    pub issues: Vec<(String, String)>,
+    /// What the previous round left waiting for the person.
+    pub waiting: Vec<String>,
+}
+
+/// The handoff that ends a new round's kickoff: the four parts the lead needs to carry on
+/// without the old conversation. `request` is this round's request, as the person wrote it.
+pub fn handoff(request: &str, carry: &Carryover) -> String {
+    let prev = &carry.previous;
+    let mut out = String::from(
+        "\n\nHandoff from the previous round (the hub wrote it from its records, not a summary):",
+    );
+    let _ = write!(
+        out,
+        "\n\n1. Goal (this round's request, as written):\n{}",
+        request.trim()
+    );
+    out.push_str("\n\n2. Constraints in force (team note `constraints`, verbatim):\n");
+    match carry.constraints.as_deref().map(str::trim) {
+        Some(text) if !text.is_empty() => out.push_str(text),
+        _ => out.push_str("none: the team note `constraints` is not set"),
+    }
+    let landing = match &prev.landed {
+        Some(landed) => format!("landed on {} ({})", prev.base_branch, landed.reference),
+        None => format!("not landed; run branch: {}", prev.branch),
+    };
+    let _ = write!(
+        out,
+        "\n\n3. Previous round result: \"{}\" (run {}) {:?}, {landing}.\n",
+        crate::engine::first_line(&prev.title, 90),
+        prev.id,
+        prev.status,
+    );
+    match prev.summary.as_deref().map(str::trim) {
+        Some(summary) if !summary.is_empty() => out.push_str(summary),
+        _ => out.push_str("no summary was written"),
+    }
+    out.push_str("\n\n4. Open items:");
+    let before = out.len();
+    for (key, text) in &carry.issues {
+        let _ = write!(
+            out,
+            "\n- a problem recorded and not sorted yet ({key}): {}",
+            crate::engine::first_line(text, 240)
+        );
+    }
+    for text in &carry.waiting {
+        let _ = write!(
+            out,
+            "\n- waiting for the person: {}",
+            crate::engine::first_line(text, 240)
+        );
+    }
+    // A round that failed may still have left changes on its run branch: say where they are.
+    if prev.landed.is_none() && matches!(prev.status, RunStatus::Completed | RunStatus::Failed) {
+        let _ = write!(
+            out,
+            "\n- changes not landed: the previous round's run branch {} still holds them",
+            prev.branch
+        );
+    }
+    if out.len() == before {
+        out.push_str("\n- none");
+    }
+    out.push_str(
+        "\n\nA constraint that holds for later rounds too belongs in the team note `constraints` \
+         (note_write, scope team): write it there. An arrangement for this round alone does not need it.",
+    );
     out
 }
 
@@ -644,6 +726,116 @@ mod tests {
         // A run with nobody on the team still gets the protocol.
         let alone = kickoff(&run, &[], worker, &Err("test".into()), None, "");
         assert!(alone.contains("dispatch: you run the work"), "{alone}");
+    }
+
+    #[test]
+    fn a_new_round_hands_over_four_parts_from_the_records() {
+        use crossagents_core::{RunConfig, RunPolicy, RunStatus};
+        let now = Utc::now();
+        let previous = Run {
+            origin_chat_id: None,
+            work_id: None,
+            continuation: None,
+            id: RunId::new(),
+            title: "first round".into(),
+            request: "first".into(),
+            planner: AgentId::new(),
+            status: RunStatus::Completed,
+            config: RunConfig {
+                worker: AgentId::new(),
+                escalate: None,
+                reviewer: None,
+                auto_approve: false,
+                max_parallel: 1,
+                max_attempts: 1,
+                team: vec![],
+                policy: RunPolicy::default(),
+            },
+            repo: "repo".into(),
+            base_branch: "main".into(),
+            branch: "run-first".into(),
+            in_place: false,
+            mode: None,
+            note: None,
+            plan: vec![],
+            lead_note: None,
+            landed: None,
+            summary: Some("Wrote the parser.\nTests pass.".into()),
+            checks: vec![],
+            checks_state: None,
+            checks_snapshot: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let carry = Carryover {
+            previous: previous.clone(),
+            constraints: Some("- Keep the public API\n  unchanged.".into()),
+            issues: vec![("issue/1".into(), "The lexer drops tabs.".into())],
+            waiting: vec!["Which branch should land?".into()],
+        };
+        let text = handoff("  Add the printer.  ", &carry);
+        assert!(
+            text.contains("1. Goal (this round's request, as written):\nAdd the printer."),
+            "{text}"
+        );
+        // Verbatim: the note's own lines and indentation are kept.
+        assert!(
+            text.contains("2. Constraints in force (team note `constraints`, verbatim):\n- Keep the public API\n  unchanged."),
+            "{text}"
+        );
+        assert!(
+            text.contains("3. Previous round result: \"first round\" (run "),
+            "{text}"
+        );
+        assert!(
+            text.contains("Completed, not landed; run branch: run-first."),
+            "{text}"
+        );
+        assert!(text.contains("Wrote the parser.\nTests pass."), "{text}");
+        assert!(text.contains("4. Open items:"), "{text}");
+        assert!(text.contains("(issue/1): The lexer drops tabs."), "{text}");
+        assert!(
+            text.contains("waiting for the person: Which branch should land?"),
+            "{text}"
+        );
+        assert!(
+            text.contains("changes not landed: the previous round's run branch run-first"),
+            "{text}"
+        );
+        assert!(text.contains("note_write, scope team"), "{text}");
+        assert!(!text.contains("- none"), "{text}");
+
+        // Nothing carried over: each part still says so.
+        let bare = Carryover {
+            previous,
+            constraints: None,
+            issues: vec![],
+            waiting: vec![],
+        };
+        let text = handoff("next", &bare);
+        assert!(
+            text.contains("none: the team note `constraints` is not set"),
+            "{text}"
+        );
+        assert!(
+            text.contains("4. Open items:\n- changes not landed"),
+            "{text}"
+        );
+
+        // A failed round that did not land may still hold changes on its run branch.
+        let mut failed = bare.previous.clone();
+        failed.status = RunStatus::Failed;
+        let failed = Carryover {
+            previous: failed,
+            constraints: None,
+            issues: vec![],
+            waiting: vec![],
+        };
+        let text = handoff("next", &failed);
+        assert!(
+            text.contains("changes not landed: the previous round's run branch run-first"),
+            "{text}"
+        );
     }
 
     #[test]

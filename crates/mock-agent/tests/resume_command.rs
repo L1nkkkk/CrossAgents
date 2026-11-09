@@ -142,3 +142,63 @@ async fn a_driver_that_cannot_resume_says_so() {
         404
     );
 }
+
+/// A renewed session (a new round's lead) is the one that resumes: the agent is the same, the
+/// old session stays in the event log, and starting the new one is not a lost-context warning.
+#[tokio::test]
+async fn a_renewed_session_is_the_one_resumed_and_the_old_one_stays_recorded() {
+    let t = TestHub::start_with(native_plugin).await;
+    let dir = tempfile::tempdir().unwrap();
+    let rex = t.add_native("Rex", "worker", dir.path()).await;
+    let mut w = t.watch().await;
+    t.send("Rex", "hello").await;
+    turn_done(&mut w, rex.id).await;
+    let old = t
+        .hub
+        .bus
+        .store()
+        .last_session_id(rex.id)
+        .await
+        .unwrap()
+        .expect("the first session");
+
+    assert!(t.hub.runtime.renew(&AgentKey::Id(rex.id)).await.unwrap());
+    t.send("Rex", "again").await;
+    turn_done(&mut w, rex.id).await;
+    let new = t
+        .hub
+        .bus
+        .store()
+        .last_session_id(rex.id)
+        .await
+        .unwrap()
+        .expect("the renewed session");
+    assert_ne!(new, old);
+
+    let r = resume_command(&t, "Rex").await;
+    assert_eq!(r.session_id.as_deref(), Some(new.as_str()), "{r:?}");
+    let command = r.command.clone().unwrap_or_else(|| panic!("{r:?}"));
+    assert!(command.contains(&format!("--resume '{new}'")), "{command}");
+
+    let after = t.agent("Rex").await;
+    assert_eq!(after.id, rex.id);
+    assert_eq!(after.name, "Rex");
+    let events = t.hub.bus.store().agent_events(rex.id, 0, 10_000).await.unwrap();
+    let started: Vec<String> = events
+        .into_iter()
+        .filter_map(|event| match event.kind {
+            EventKind::AgentSessionStarted { session_id, .. } => Some(session_id),
+            _ => None,
+        })
+        .collect();
+    assert!(started.contains(&old), "{started:?}");
+    assert!(started.contains(&new), "{started:?}");
+    let warnings = t.hub.bus.store().agent_events(rex.id, 0, 10_000).await.unwrap();
+    assert!(
+        warnings.iter().all(|event| !matches!(
+            &event.kind,
+            EventKind::AgentWarning { message, .. } if message.contains("没有带上之前的上下文")
+        )),
+        "a renewed session is not a lost context"
+    );
+}

@@ -563,6 +563,10 @@ impl AgentHost for HubHost {
             .await
             .is_some_and(|c| c.move_cwd)
     }
+
+    async fn renew_session(&self, agent: AgentId) -> Result<bool, CoreError> {
+        self.runtime.renew(&AgentKey::Id(agent)).await
+    }
 }
 
 #[cfg(test)]
