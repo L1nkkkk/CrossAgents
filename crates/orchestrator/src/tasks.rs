@@ -721,6 +721,13 @@ impl Orchestrator {
         let token = uuid::Uuid::new_v4().to_string();
         task.report.verification = Some(token.clone());
         self.transition(&mut task, TaskStatus::Verifying).await?;
+        // A waiting task reported again: what the lead was asked to accept is being checked again.
+        self.settle_accept_notice(
+            task.issuer_or(run.planner),
+            &task,
+            &format!("#{} reported again and is being checked.", task.key),
+        )
+        .await;
         let this = self.clone();
         let worker = caller.id;
         tokio::spawn(async move { this.report_done(id, worker, token).await });
@@ -1367,36 +1374,48 @@ impl Orchestrator {
         task.report.review = None;
         task.report.verdict = None;
         self.transition(task, TaskStatus::Reviewing).await?;
+        // A task that waited to be accepted is in review now: its notice no longer says so.
+        self.settle_accept_notice(from, task, &format!("#{} is in review.", task.key))
+            .await;
+        let text = self.review_message(run, task, &reviewer, focus).await;
+        self.relay(reviewer.id, from, text, None);
+        Ok(reviewer)
+    }
+
+    /// The brief of a review round of `task` for `reviewer`: the commit it reads (`reviewed_sha`),
+    /// the round (`attempt`), the last round's findings with the worker's answers, the checklist,
+    /// and the task with its facts. Sent when the round opens, and again after a hub restart.
+    pub(crate) async fn review_message(
+        &self,
+        run: &Run,
+        task: &Task,
+        reviewer: &Agent,
+        focus: Option<&str>,
+    ) -> String {
         let focus = focus
             .map(|f| format!("{}\n\n", f.trim()))
             .unwrap_or_default();
         // The judgements the reviewer is asked to answer pass/fail/na (EXPERTISE §6.3).
         let checklist = self
-            .checklist_for(&reviewer, task)
+            .checklist_for(reviewer, task)
             .await
             .map(|text| format!("\n\n{text}"))
             .unwrap_or_default();
         let before = crate::review::previous_round(&task.report);
         let sha = task.report.reviewed_sha.clone().unwrap_or_default();
-        self.relay(
-            reviewer.id,
-            from,
-            format!(
-                "{focus}Review branch {} against {} (your working directory has it checked out).\nreviewed_sha: {sha}\nattempt: {}\n\n{}{checklist}{}\n\n{}",
-                task.branch.as_deref().unwrap_or("?"),
-                run.branch,
-                task.report.review_attempt,
-                brief::task(task),
-                if before.is_empty() {
-                    String::new()
-                } else {
-                    format!("\n\n{before}")
-                },
-                brief::facts(task)
-            ),
-            None,
-        );
-        Ok(reviewer)
+        format!(
+            "{focus}Review branch {} against {} (your working directory has it checked out).\nreviewed_sha: {sha}\nattempt: {}\n\n{}{checklist}{}\n\n{}",
+            task.branch.as_deref().unwrap_or("?"),
+            run.branch,
+            task.report.review_attempt,
+            brief::task(task),
+            if before.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n{before}")
+            },
+            brief::facts(task)
+        )
     }
 
     // -----------------------------------------------------------------------------------
@@ -1463,6 +1482,17 @@ impl Orchestrator {
         }
         if task.status == TaskStatus::Stalled {
             unchecked.push("it is stalled: its worker never reported".into());
+        }
+        // A task that was reviewed is accepted plainly only on the verdict its review gave the very
+        // commit it verified. A verdict on another commit, or one that is not a merge, takes force
+        // and a reason. A task never reviewed is accepted as it always was.
+        if task.report.review_attempt > 0 {
+            let approved = task.report.verdict == Some(crossagents_core::model::ReviewVerdict::Merge)
+                && task.report.reviewed_sha.is_some()
+                && task.report.reviewed_sha == task.report.verified_sha;
+            if !approved {
+                unchecked.push("its review did not approve this commit".into());
+            }
         }
         let verified = task
             .report

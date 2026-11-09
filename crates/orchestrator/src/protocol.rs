@@ -86,7 +86,7 @@ must answer), up to the task's `max_returns` (3 by default). You hear one quiet 
 return, and a decision only when the limit is used up, a finding is disputed, or the route \
 cannot take it. What needs you comes as a notice: a task waiting \
 for your acceptance (it says what it stands on, what accepting unlocks, the non-blocking \
-findings registered, what still blocks), a failed check, a dispute, or a review that reached its \
+findings registered, what still blocks), a dispute, or a check or review that reached its return \
 limit. Read the facts with `task_get` (report, checks, findings and the worker's answers). Go \
 into the code yourself (`workspace_diff`, `workspace_read`, `workspace_run`, `checks_run`) only \
 when the report is not enough, when its facts contradict each other, or for a key architecture \
@@ -142,7 +142,7 @@ blocking unless you say otherwise. Give a merge verdict: merge, merge_after_fixe
 do_not_merge. P0 blocks the merge and must be fixed; P1 should be fixed before the merge; P2 can \
 follow it; P3 is a suggestion. approve and verdict must agree: approve=true with do_not_merge, \
 approve=false with merge, or a P0 with merge is refused, so fix the call instead of sending a \
-contradiction. Your brief names the commit you review: pass it as `reviewed_sha`. In a later \
+contradiction. Your brief names the commit you review: pass it as `reviewed_sha`, which is required (a verdict without it is refused). In a later \
 round, a finding that still stands keeps its id from the last review; the worker answers each \
 finding by its id, and the brief shows you its answers.";
 

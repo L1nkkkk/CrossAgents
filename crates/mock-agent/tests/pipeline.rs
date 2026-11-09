@@ -344,7 +344,7 @@ async fn a_reviewer_judges_and_the_issuer_decides() {
     );
     let verdict = call(
         "review_submit",
-        json!({ "task_id": "{task_id}", "approve": true, "notes": "lgtm" }),
+        json!({ "task_id": "{task_id}", "reviewed_sha": "{reviewed_sha}", "approve": true, "notes": "lgtm" }),
     )
     .replacen("[call ", "[call#mock-opus ", 1);
     let worker = format!(
@@ -368,6 +368,13 @@ async fn a_reviewer_judges_and_the_issuer_decides() {
     w.until("run completed", run_status_is(&id, RunStatus::Completed))
         .await;
     assert!(w.seen.iter().any(task_is("g", TaskStatus::Reviewing)));
+    // Opening the review settled the notice that the task waited to be accepted.
+    assert!(
+        w.seen.iter().any(|e| matches!(&e.kind,
+            EventKind::NoticeRecorded { topic, line, .. }
+                if topic.ends_with(":accept") && line.contains("is in review"))),
+        "the acceptance notice was settled when the review opened"
+    );
     let detail = detail(&t, &id).await;
     assert_eq!(
         detail["tasks"][0]["report"]["review"]
@@ -638,7 +645,7 @@ async fn chat_sessions_can_take_tasks_and_review() {
     let request_review = call("review_request", json!({ "task": "g", "reviewer": "leo" }));
     let verdict = call(
         "review_submit",
-        json!({ "task_id": "{task_id}", "approve": true, "notes": "lgtm" }),
+        json!({ "task_id": "{task_id}", "reviewed_sha": "{reviewed_sha}", "approve": true, "notes": "lgtm" }),
     )
     .replacen("[call ", "[call#mock-opus ", 1);
     let worker = format!(
@@ -1405,4 +1412,36 @@ async fn a_task_whose_acceptance_releases_downstream_work_is_an_unblock() {
     t.send("boss", &accept_last("b")).await;
     w.until("run completed", run_status_is(&id, RunStatus::Completed))
         .await;
+}
+
+#[tokio::test]
+async fn a_task_that_leaves_another_still_waiting_says_so_in_its_notice() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+
+    // b waits for a and for c. Accepting a does not unlock b while c is still open.
+    let scoped = |key: &str, goal: String, deps: &[&str]| {
+        let mut t = task(key, goal, deps);
+        t["spec"]["scope"] = json!({ "allow": [format!("{key}.txt")] });
+        t
+    };
+    let plan = json!([
+        scoped("a", goal("[write a.txt=alpha]", "a done"), &[]),
+        scoped("c", goal("[write c.txt=gamma]", "c done"), &[]),
+        scoped("b", goal("[write b.txt=beta]", "b done"), &["a", "c"]),
+    ]);
+    let _id = start_run(
+        &t,
+        request(plan),
+        json!({ "auto_approve": true, "max_parallel": 3 }),
+    )
+    .await;
+    let waiting = w.until("a waits", waiting_for("a")).await;
+    let EventKind::NoticeRecorded { line, class, .. } = &waiting.kind else {
+        unreachable!()
+    };
+    assert!(line.contains("#b still waits for #c"), "{line}");
+    assert!(!line.contains("unlocks"), "{line}");
+    assert_eq!(*class, NoticeClass::Unblock, "{line}");
 }

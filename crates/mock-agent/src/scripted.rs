@@ -152,6 +152,15 @@ impl Scripted {
     /// the transcript. A prompt without directives that carries a `task_id:` line repeats
     /// the session's last directives (for retries).
     pub async fn run(&self, text: &str, model: &str) -> Vec<String> {
+        // A review's directives name the commit the brief gives them (`{reviewed_sha}`).
+        let filled;
+        let text = match script::reviewed_sha(text) {
+            Some(sha) => {
+                filled = text.replace("{reviewed_sha}", &sha);
+                filled.as_str()
+            }
+            None => text,
+        };
         let (task_id, attempt) = script::context(text);
         let mut directives = script::parse(text, task_id.as_deref(), attempt);
         if directives.is_empty() && task_id.is_some() {

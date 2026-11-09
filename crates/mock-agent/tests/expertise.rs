@@ -394,7 +394,7 @@ async fn a_reviewers_failed_item_proposes_a_candidate_under_the_entries_owner() 
         call(
             "review_submit",
             json!({
-                "task_id": "{task_id}",
+                "task_id": "{task_id}", "reviewed_sha": "{reviewed_sha}",
                 "approve": false,
                 "notes": notes,
                 "checklist": [

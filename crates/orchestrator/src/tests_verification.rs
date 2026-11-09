@@ -1149,3 +1149,225 @@ async fn a_repeated_review_is_refused_and_changes_nothing() {
     assert_eq!(after.report.review_returns, 0);
     assert_eq!(after.attempts, task.attempts);
 }
+
+// ---------------------------------------------------------------------------------------
+// 9. A review is bound to its commit; a reviewed task is accepted only on that approval; the
+//    acceptance notice is settled on every path that leaves it; a restart gives the work back
+
+/// A task in review round `round`, reading `commit`, with `reviewer` as its reviewer.
+async fn in_review(f: &Fixture, reviewer: &Agent, round: u32, commit: &str) {
+    let mut task = f.task().await;
+    task.status = TaskStatus::Reviewing;
+    task.reviewer = Some(reviewer.id);
+    task.report.verified_sha = Some(commit.into());
+    task.report.reviewed_sha = Some(commit.into());
+    task.report.review_attempt = round;
+    f.store.update_task(&task).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_verdict_that_names_no_commit_is_refused_and_changes_nothing() {
+    use crate::review::Submission;
+    let f = Fixture::new(&[]).await;
+    let reviewer = agent("critic", Role::Reviewer, f._home.path());
+    in_review(&f, &reviewer, 1, "abc").await;
+
+    let err = f
+        .orchestrator
+        .review(
+            &reviewer,
+            f.task.id,
+            Submission {
+                approve: true,
+                notes: "lgtm".into(),
+                findings: Vec::new(),
+                verdict: None,
+                reviewed_sha: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("say which commit you reviewed"), "{err}");
+    let after = f.task().await;
+    assert_eq!(after.status, TaskStatus::Reviewing);
+    assert_eq!(after.reviewer, Some(reviewer.id));
+    assert!(after.report.review.is_none(), "{after:?}");
+}
+
+#[tokio::test]
+async fn a_late_verdict_for_an_earlier_commit_is_refused_in_the_next_round() {
+    use crate::review::Submission;
+    let f = Fixture::new(&[]).await;
+    let reviewer = agent("critic", Role::Reviewer, f._home.path());
+    // Round 2 reads `new`; a verdict that was written for round 1's `old` must not land on it.
+    in_review(&f, &reviewer, 2, "new").await;
+
+    let err = f
+        .orchestrator
+        .review(
+            &reviewer,
+            f.task.id,
+            Submission {
+                approve: true,
+                notes: "late".into(),
+                findings: Vec::new(),
+                verdict: None,
+                reviewed_sha: Some("old".into()),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("stale"), "{err}");
+    let after = f.task().await;
+    assert_eq!(after.status, TaskStatus::Reviewing);
+    assert!(after.report.review.is_none(), "{after:?}");
+}
+
+#[tokio::test]
+async fn a_reviewed_task_is_accepted_plainly_only_on_the_commit_its_review_approved() {
+    let f = Fixture::with_checks(&["cargo test"], vec![true]).await;
+    let mut task = f.task().await;
+    task.status = TaskStatus::Passed;
+    task.report.summary = Some("wrote a".into());
+    task.report.checks = vec![crossagents_core::CheckResult {
+        command: "cargo test".into(),
+        exit_code: Some(0),
+        passed: true,
+        output: String::new(),
+    }];
+    task.report.verified_sha = Some("aaaaaaa".into());
+    task.report.review_attempt = 1;
+    task.report.verdict = Some(crossagents_core::model::ReviewVerdict::Merge);
+    // The review read another commit than the one the checks verified.
+    task.report.reviewed_sha = Some("bbbbbbb".into());
+    f.store.update_task(&task).await.unwrap();
+    *f.ws.head.lock().await = Some("aaaaaaa".into());
+
+    let err = f
+        .orchestrator
+        .task_accept(&f.lead, json!({ "task": "a" }))
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("its review did not approve this commit"),
+        "{err}"
+    );
+
+    // The review read the verified commit: a plain accept goes through.
+    task.report.reviewed_sha = Some("aaaaaaa".into());
+    f.store.update_task(&task).await.unwrap();
+    let accepted = f
+        .orchestrator
+        .task_accept(&f.lead, json!({ "task": "a" }))
+        .await
+        .unwrap();
+    assert_eq!(accepted["merged"], true, "{accepted}");
+    assert_eq!(accepted["as"], "verified", "{accepted}");
+}
+
+/// The acceptance notices of the task, in the order they were given.
+async fn accept_notices(f: &Fixture) -> Vec<String> {
+    let prefix = format!("task:{}:accept: ", f.task.id);
+    f.host
+        .notices
+        .lock()
+        .await
+        .iter()
+        .filter(|n| n.starts_with(&prefix))
+        .cloned()
+        .collect()
+}
+
+#[tokio::test]
+async fn a_task_that_waited_to_be_accepted_gets_its_notice_again_after_a_restart() {
+    let f = Fixture::new(&[]).await;
+    let mut task = f.task().await;
+    task.status = TaskStatus::Passed;
+    task.report.summary = Some("wrote a".into());
+    task.report.verified_sha = Some("aaaaaaa".into());
+    f.store.update_task(&task).await.unwrap();
+
+    f.orchestrator.resume().await.unwrap();
+
+    let notices = accept_notices(&f).await;
+    assert!(
+        notices.last().is_some_and(|n| n.contains("#a waits for your acceptance")),
+        "{notices:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_review_whose_reviewer_is_gone_after_a_restart_is_the_lead_s_decision() {
+    let f = Fixture::new(&[]).await;
+    // The reviewer's session is not in the store any more.
+    let reviewer = agent("critic", Role::Reviewer, f._home.path());
+    in_review(&f, &reviewer, 1, "abc").await;
+
+    f.orchestrator.resume().await.unwrap();
+
+    let notices = f.host.notices.lock().await.join("\n");
+    assert!(notices.contains("its reviewer is gone"), "{notices}");
+}
+
+#[tokio::test]
+async fn re_reporting_a_waiting_task_settles_its_acceptance_notice() {
+    let f = Fixture::with_checks(&[], vec![]).await;
+    let mut task = f.task().await;
+    task.status = TaskStatus::Passed;
+    task.report.summary = Some("wrote a".into());
+    task.report.verified_sha = Some("1111111".into());
+    f.store.update_task(&task).await.unwrap();
+    f.orchestrator
+        .ready_to_accept(&f.run, &task, f.lead.id)
+        .await;
+    assert!(accept_notices(&f).await.last().is_some_and(|n| n.contains("waits for your acceptance")));
+
+    f.orchestrator
+        .complete(&f.worker, f.task.id, "wrote again".into())
+        .await
+        .unwrap();
+    f.settled().await;
+
+    // The old notice was settled by the new report, and the check's own result came after it.
+    let notices = accept_notices(&f).await;
+    let settled = notices.iter().position(|n| n.contains("reported again")).expect("settled");
+    assert!(
+        notices[settled + 1..].iter().all(|n| !n.contains("#a waits") || n.contains("wrote again")),
+        "{notices:?}"
+    );
+}
+
+#[tokio::test]
+async fn sending_a_waiting_task_back_by_hand_settles_its_acceptance_notice() {
+    let f = Fixture::new(&[]).await;
+    let mut task = f.task().await;
+    task.status = TaskStatus::Passed;
+    task.report.summary = Some("wrote a".into());
+    task.report.verified_sha = Some("1111111".into());
+    f.store.update_task(&task).await.unwrap();
+    f.orchestrator
+        .ready_to_accept(&f.run, &task, f.lead.id)
+        .await;
+
+    f.orchestrator
+        .review_task(
+            f.run.id,
+            f.task.id,
+            vec![crate::review::Remark {
+                path: "a.txt".into(),
+                line: Some(1),
+                old_side: false,
+                text: "say beta".into(),
+            }],
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+
+    let notices = accept_notices(&f).await;
+    assert!(
+        notices.last().is_some_and(|n| n.contains("sent back to its worker by the person")),
+        "{notices:?}"
+    );
+}

@@ -111,7 +111,7 @@ async fn a_verified_report_is_reviewed_by_the_hub_and_the_lead_hears_one_quiet_l
             "mock-opus",
             None,
             "review_submit",
-            json!({ "task_id": "{task_id}", "approve": true, "notes": "lgtm" })
+            json!({ "task_id": "{task_id}", "reviewed_sha": "{reviewed_sha}", "approve": true, "notes": "lgtm" })
         ),
     );
     let id = start_run(&t, goal, true, json!({})).await;
@@ -180,7 +180,7 @@ async fn changes_asked_for_go_back_to_the_same_worker_and_the_lead_hears_one_lin
             Some(1),
             "review_submit",
             json!({
-                "task_id": "{task_id}",
+                "task_id": "{task_id}", "reviewed_sha": "{reviewed_sha}",
                 "approve": false,
                 "notes": "g must say v2",
                 "findings": [{ "severity": "P0", "confidence": 0.9, "title": "g says v1", "file": "g.txt", "line": 1, "verify": "g.txt holds v2" }]
@@ -190,7 +190,7 @@ async fn changes_asked_for_go_back_to_the_same_worker_and_the_lead_hears_one_lin
             "mock-opus",
             Some(2),
             "review_submit",
-            json!({ "task_id": "{task_id}", "approve": true, "notes": "lgtm now" })
+            json!({ "task_id": "{task_id}", "reviewed_sha": "{reviewed_sha}", "approve": true, "notes": "lgtm now" })
         ),
     );
     let id = start_run(&t, goal, true, json!({})).await;
@@ -295,13 +295,13 @@ async fn a_review_that_keeps_asking_stops_at_the_limit_and_the_lead_decides() {
             "mock-opus",
             Some(1),
             "review_submit",
-            json!({ "task_id": "{task_id}", "approve": false, "notes": "not yet", "findings": [{ "severity": "P1", "confidence": 0.8, "title": "still wrong" }] })
+            json!({ "task_id": "{task_id}", "reviewed_sha": "{reviewed_sha}", "approve": false, "notes": "not yet", "findings": [{ "severity": "P1", "confidence": 0.8, "title": "still wrong" }] })
         ),
         on(
             "mock-opus",
             Some(2),
             "review_submit",
-            json!({ "task_id": "{task_id}", "approve": false, "notes": "still not", "findings": [{ "severity": "P1", "confidence": 0.8, "title": "still wrong again" }] })
+            json!({ "task_id": "{task_id}", "reviewed_sha": "{reviewed_sha}", "approve": false, "notes": "still not", "findings": [{ "severity": "P1", "confidence": 0.8, "title": "still wrong again" }] })
         ),
     );
     let id = start_run(&t, goal, true, json!({ "max_returns": 1 })).await;
@@ -351,7 +351,7 @@ async fn a_worker_that_disputes_a_finding_hands_it_to_the_lead() {
             "mock-opus",
             Some(1),
             "review_submit",
-            json!({ "task_id": "{task_id}", "approve": false, "notes": "use v2", "findings": [{ "severity": "P0", "confidence": 0.9, "title": "g must say v2" }] })
+            json!({ "task_id": "{task_id}", "reviewed_sha": "{reviewed_sha}", "approve": false, "notes": "use v2", "findings": [{ "severity": "P0", "confidence": 0.9, "title": "g must say v2" }] })
         ),
     );
     let id = start_run(&t, goal, true, json!({})).await;

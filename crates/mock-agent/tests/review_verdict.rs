@@ -82,7 +82,7 @@ async fn findings_are_numbered_stored_and_reach_the_worker_most_severe_first() {
         1,
         "review_submit",
         json!({
-            "task_id": "{task_id}",
+            "task_id": "{task_id}", "reviewed_sha": "{reviewed_sha}",
             "approve": true,
             "notes": "must not be recorded",
             "verdict": "merge",
@@ -95,7 +95,7 @@ async fn findings_are_numbered_stored_and_reach_the_worker_most_severe_first() {
         1,
         "review_submit",
         json!({
-            "task_id": "{task_id}",
+            "task_id": "{task_id}", "reviewed_sha": "{reviewed_sha}",
             "approve": false,
             "notes": "not yet",
             "verdict": "do_not_merge",
@@ -111,7 +111,7 @@ async fn findings_are_numbered_stored_and_reach_the_worker_most_severe_first() {
         "mock-opus",
         2,
         "review_submit",
-        json!({ "task_id": "{task_id}", "approve": true, "notes": "lgtm" }),
+        json!({ "task_id": "{task_id}", "reviewed_sha": "{reviewed_sha}", "approve": true, "notes": "lgtm" }),
     );
     let worker_round2 = on(
         "mock-haiku",
@@ -170,7 +170,7 @@ async fn an_approve_only_submission_still_works() {
         "mock-opus",
         1,
         "review_submit",
-        json!({ "task_id": "{task_id}", "approve": true, "notes": "lgtm" }),
+        json!({ "task_id": "{task_id}", "reviewed_sha": "{reviewed_sha}", "approve": true, "notes": "lgtm" }),
     );
     let id = start_run(&t, reviewed_task(&review)).await;
     w.until("the acceptance notice", |e| {
@@ -235,7 +235,7 @@ async fn a_stale_review_is_refused_and_the_current_one_still_lands() {
         &name,
         &call(
             "review_submit",
-            json!({ "task_id": task_id, "approve": true, "notes": "lgtm" }),
+            json!({ "task_id": task_id, "reviewed_sha": mid["tasks"][0]["report"]["reviewed_sha"], "approve": true, "notes": "lgtm" }),
         ),
     )
     .await;
@@ -257,4 +257,66 @@ async fn a_stale_review_is_refused_and_the_current_one_still_lands() {
         task["report"]["review_returns"].as_u64().unwrap_or(0) == 0,
         "{task}"
     );
+}
+
+#[tokio::test]
+async fn a_verdict_that_names_no_commit_is_refused_and_the_next_one_lands() {
+    let repo = git_repo();
+    let t = setup(repo.path()).await;
+    let mut w = t.watch().await;
+
+    // The reviewer's verdicts come as messages of their own: the one that names no commit is
+    // refused with its reason, and the review stays open for the one that names it.
+    let id = start_run(&t, reviewed_task("")).await;
+    let opened = w
+        .until("the review is opened", |e| {
+            matches!(&e.kind, EventKind::NoticeRecorded { line, .. } if line.contains("review round 1 is with"))
+        })
+        .await;
+    let EventKind::NoticeRecorded { line, .. } = &opened.kind else {
+        unreachable!()
+    };
+    let name = line
+        .split("review round 1 is with ")
+        .nth(1)
+        .and_then(|rest| rest.split(" (the hub").next())
+        .expect("the reviewer is named")
+        .to_owned();
+    let mid = detail(&t, &id).await;
+    let task_id = mid["tasks"][0]["id"].as_str().unwrap().to_owned();
+
+    t.send(
+        &name,
+        &call(
+            "review_submit",
+            json!({ "task_id": task_id, "approve": true, "notes": "no commit" }),
+        ),
+    )
+    .await;
+    w.until("the refusal reached the reviewer", |e| {
+        matches!(&e.kind, EventKind::AgentOutput { text, .. } if text.contains("say which commit you reviewed"))
+    })
+    .await;
+    let still = detail(&t, &id).await;
+    assert_eq!(still["tasks"][0]["status"], "reviewing", "{}", still["tasks"][0]);
+
+    let reviewed = mid["tasks"][0]["report"]["reviewed_sha"].clone();
+    t.send(
+        &name,
+        &call(
+            "review_submit",
+            json!({ "task_id": task_id, "reviewed_sha": reviewed, "approve": true, "notes": "lgtm" }),
+        ),
+    )
+    .await;
+    w.until("the acceptance notice", |e| {
+        matches!(&e.kind, EventKind::NoticeRecorded { line, .. } if line.contains("waits for your acceptance"))
+    })
+    .await;
+
+    let detail = detail(&t, &id).await;
+    let task = &detail["tasks"][0];
+    assert_eq!(task["report"]["review"], "lgtm", "{task}");
+    assert_eq!(task["report"]["verdict"], "merge", "{task}");
+    assert_eq!(task["attempts"], 1, "nothing was sent back: {task}");
 }

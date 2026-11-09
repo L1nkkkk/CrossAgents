@@ -813,7 +813,7 @@ const TOOLS: &[ToolDef] = &[
             // Optional, unlike the fields `task_id_schema` lists as required.
             schema["properties"]["reviewed_sha"] = json!({
                 "type": "string",
-                "description": "The commit your brief names (reviewed_sha). A verdict on another commit is refused: the task changed since."
+                "description": "Required: the commit your brief names (reviewed_sha). A verdict without it, or on another commit, is refused: the task changed since, or the verdict is not bound to this round."
             });
             schema["properties"]["findings"] = json!({
                 "type": "array",

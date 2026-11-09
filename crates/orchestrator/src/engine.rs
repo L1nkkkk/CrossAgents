@@ -2487,6 +2487,12 @@ The person changed: {}",
                 continue;
             }
             for mut task in self.store.list_tasks(run.id).await? {
+                // A task waiting for its review or for acceptance is not stalled: its brief or its
+                // notice comes again (review.rs, `resume_waiting`).
+                if matches!(task.status, TaskStatus::Reviewing | TaskStatus::Passed) {
+                    self.resume_waiting(&run, &mut task).await?;
+                    continue;
+                }
                 if !matches!(
                     task.status,
                     TaskStatus::Running

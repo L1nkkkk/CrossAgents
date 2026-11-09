@@ -478,6 +478,13 @@ impl Orchestrator {
                 task.report.rework.push(said.join("\n"));
             }
             self.transition(&mut task, TaskStatus::Running).await?;
+            // A task that waited to be accepted is back with its worker: the notice says so no more.
+            self.settle_accept_notice(
+                task.issuer_or(run.planner),
+                &task,
+                &format!("#{} was sent back to its worker by the person.", task.key),
+            )
+            .await;
         }
         let text = remarks_text(&task, &remarks, note.as_deref(), rework && reopen);
         self.deliver(worker, MessageSource::Human, text);
@@ -557,7 +564,9 @@ impl Orchestrator {
         let issuer = task.issuer_or(run.planner);
         match self.review_return(run, task).await? {
             ReviewReturn::Elsewhere => {
-                // `spec.on_reject` names another teammate: it takes the work, as it always has.
+                // `spec.on_reject` names another teammate: it takes the work, as it always has. The
+                // return is counted only when it goes: a route that refuses it (its own limit,
+                // MAX_BOUNCES, or a route that names nothing) leaves the count as it was.
                 task.report.review_returns += 1;
                 let why = format!("sent back: {}", head.trim_end_matches('.'));
                 match self.review_sent_back(run, task, notes, &why).await? {
@@ -571,6 +580,7 @@ impl Orchestrator {
                         .await;
                     }
                     None => {
+                        task.report.review_returns -= 1;
                         self.decide(
                             issuer,
                             task,
@@ -607,6 +617,96 @@ impl Orchestrator {
                 self.send_back_to_worker(run, task, notes, findings, from, head)
                     .await?;
             }
+        }
+        Ok(())
+    }
+
+    /// After a hub restart (`Orchestrator::resume`), a task that was waiting for a verdict or for
+    /// acceptance is not left to wait unseen. A task in review gets its brief again, to its reviewer
+    /// when that session is still there (a verdict for the same commit lands once; a repeat is
+    /// refused); otherwise the lead decides. A task that waits to be accepted gets its notice again:
+    /// the notice's topic replaces the old one, so nothing stacks up. A task whose notice already
+    /// says what it needs (a failed check, a dispute, an open decision) is left as its notice says.
+    pub(crate) async fn resume_waiting(&self, run: &Run, task: &mut Task) -> Result<(), CoreError> {
+        let issuer = task.issuer_or(run.planner);
+        match task.status {
+            TaskStatus::Reviewing => {
+                let reviewer = match task.reviewer {
+                    Some(id) => self
+                        .store
+                        .get_agent(&AgentKey::Id(id))
+                        .await
+                        .ok()
+                        .filter(|a| a.archived_at.is_none()),
+                    None => None,
+                };
+                match reviewer {
+                    Some(reviewer) => {
+                        let text = self.review_message(run, task, &reviewer, None).await;
+                        self.relay(reviewer.id, issuer, text, None);
+                        self.notice(
+                            issuer,
+                            &format!("task:{}:review", task.id),
+                            &format!(
+                                "The hub restarted while review round {} of #{} was open: its brief went to {} again.",
+                                task.report.review_attempt, task.key, reviewer.name
+                            ),
+                            NoticeClass::Silent,
+                        )
+                        .await;
+                    }
+                    None => {
+                        self.decide(
+                            issuer,
+                            task,
+                            format!(
+                                "The hub restarted while review round {} of #{} was open, and its reviewer is gone. Decide: review_request it again, task_rework it, or accept it with force and a reason.",
+                                task.report.review_attempt, task.key
+                            ),
+                        )
+                        .await;
+                    }
+                }
+            }
+            TaskStatus::Passed => {
+                let checks_failed =
+                    !task.report.checks.is_empty() && !all_passed(&task.report.checks);
+                let disputed = task
+                    .report
+                    .answers
+                    .iter()
+                    .any(|a| a.status == FindingStatus::Disputed);
+                let reviewer_set = task.reviewer_template.or(run.config.reviewer).is_some();
+                if task.report.failure.is_some()
+                    || task.report.interrupted
+                    || checks_failed
+                    || disputed
+                {
+                    return Ok(());
+                }
+                if task.report.review_attempt == 0 {
+                    if reviewer_set {
+                        // Verified, but the hub stopped before its review was opened.
+                        self.decide(
+                            issuer,
+                            task,
+                            format!(
+                                "#{} passed its checks, but its review was never opened (the hub restarted). Decide: review_request it, or accept it with force and a reason.",
+                                task.key
+                            ),
+                        )
+                        .await;
+                    } else {
+                        self.ready_to_accept(run, task, issuer).await;
+                    }
+                } else if task.report.verdict == Some(ReviewVerdict::Merge)
+                    && task.report.reviewed_sha.is_some()
+                    && task.report.reviewed_sha == task.report.verified_sha
+                {
+                    self.ready_to_accept(run, task, issuer).await;
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -743,18 +843,36 @@ impl Orchestrator {
     /// still blocking, and what the lead must decide.
     pub(crate) async fn ready_to_accept(&self, run: &Run, task: &Task, issuer: AgentId) {
         let tasks = self.store.list_tasks(run.id).await.unwrap_or_default();
-        let unlocks: Vec<String> = tasks
-            .iter()
-            .filter(|t| {
-                t.id != task.id && !t.status.is_terminal() && t.depends_on.contains(&task.key)
-            })
-            .map(|t| format!("#{}", t.key))
-            .collect();
+        let merged = |key: &str| {
+            tasks
+                .iter()
+                .any(|t| t.key == key && t.status == TaskStatus::Merged)
+        };
+        // What accepting it releases. A task that depends on nothing else still open is unlocked by
+        // it; one that waits for another task says so, and is not unlocked.
+        let mut unlocks: Vec<String> = Vec::new();
+        let mut waits: Vec<String> = Vec::new();
+        for t in tasks.iter().filter(|t| {
+            t.id != task.id && !t.status.is_terminal() && t.depends_on.contains(&task.key)
+        }) {
+            let others: Vec<String> = t
+                .depends_on
+                .iter()
+                .filter(|d| **d != task.key && !merged(d))
+                .map(|d| format!("#{d}"))
+                .collect();
+            if others.is_empty() {
+                unlocks.push(format!("#{}", t.key));
+            } else {
+                waits.push(format!("#{} still waits for {}", t.key, others.join(", ")));
+            }
+        }
         let next = crate::handoff::next_of(task).map(str::to_owned);
-        let class = if unlocks.is_empty() && next.is_none() {
-            NoticeClass::Batch
-        } else {
+        let downstream = !unlocks.is_empty() || !waits.is_empty() || next.is_some();
+        let class = if downstream {
             NoticeClass::Unblock
+        } else {
+            NoticeClass::Batch
         };
         let mut parts: Vec<String> = Vec::new();
         parts.push(if task.spec.acceptance.is_empty() {
@@ -764,14 +882,28 @@ impl Orchestrator {
         } else {
             "checks did not all pass: accepting it takes force and a reason".into()
         });
-        parts.push(if task.report.review_attempt > 0 {
-            format!("review round {} approved it", task.report.review_attempt)
-        } else {
+        let round = task.report.review_attempt;
+        parts.push(if round == 0 {
             "no reviewer".into()
+        } else if task.report.verdict == Some(ReviewVerdict::Merge)
+            && task.report.reviewed_sha.is_some()
+            && task.report.reviewed_sha == task.report.verified_sha
+        {
+            format!("review round {round} approved it")
+        } else if task.report.verdict == Some(ReviewVerdict::Merge) {
+            format!("review round {round} approved another commit than the verified one")
+        } else {
+            let said = match task.report.verdict {
+                Some(ReviewVerdict::MergeAfterFixes) => "merge after fixes",
+                Some(ReviewVerdict::DoNotMerge) => "do not merge",
+                _ => "no verdict",
+            };
+            format!("review round {round} did not approve it ({said})")
         });
         if !unlocks.is_empty() {
             parts.push(format!("accepting it unlocks {}", unlocks.join(", ")));
         }
+        parts.extend(waits);
         if let Some(next) = next {
             parts.push(format!("spec.next takes it on to {next}"));
         }
@@ -833,22 +965,30 @@ impl Orchestrator {
         if task.status != TaskStatus::Reviewing || task.reviewer != Some(caller.id) {
             return Err(CoreError::Conflict(not_open(&task)));
         }
-        if let Some(sha) = submission
+        // Every verdict says which commit it read: the round's brief names it. Without that a
+        // verdict could land on a later round's commit, so it is refused and nothing changes.
+        let current = task.report.reviewed_sha.clone().unwrap_or_default();
+        let Some(sha) = submission
             .reviewed_sha
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-        {
-            let current = task.report.reviewed_sha.clone().unwrap_or_default();
-            if sha != current {
-                return Err(CoreError::Conflict(format!(
-                    "your review is of commit {}, but review round {} of #{} is of {}: the task changed since, so this review is stale and nothing changed. Review the commit the brief names.",
-                    short(sha),
-                    task.report.review_attempt,
-                    task.key,
-                    short(&current)
-                )));
-            }
+        else {
+            return Err(CoreError::Conflict(format!(
+                "say which commit you reviewed: pass reviewed_sha, the one your brief names ({}). A verdict without it cannot be bound to review round {} of #{}; nothing changed.",
+                short(&current),
+                task.report.review_attempt,
+                task.key
+            )));
+        };
+        if sha != current {
+            return Err(CoreError::Conflict(format!(
+                "your review is of commit {}, but review round {} of #{} is of {}: the task changed since, so this review is stale and nothing changed. Review the commit the brief names.",
+                short(sha),
+                task.report.review_attempt,
+                task.key,
+                short(&current)
+            )));
         }
         let mut findings = submission.findings;
         let previous = task.report.findings.clone();
@@ -889,10 +1029,23 @@ impl Orchestrator {
                 .join(", ")
         );
         let decide = format!("#{}'s review asks for changes", task.key);
-        self.return_work(
-            &run, &mut task, &notes, &findings, caller.id, &head, &decide,
-        )
-        .await?;
+        // The task is recorded as passed with its verdict already; a return that fails must still
+        // reach the lead, as a decision, rather than leave the task waiting unseen.
+        if let Err(err) = self
+            .return_work(
+                &run, &mut task, &notes, &findings, caller.id, &head, &decide,
+            )
+            .await
+        {
+            self.decide(
+                issuer,
+                &task,
+                format!(
+                    "{decide}, but it could not be sent back: {err}. Decide: task_rework it, task_assign it, or task_accept it with a reason."
+                ),
+            )
+            .await;
+        }
         Ok(())
     }
 
